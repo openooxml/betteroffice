@@ -6786,6 +6786,352 @@ fn concurrent_collaborative_freeze_panes_converge() {
     );
 }
 
+struct FreezePaneRace {
+    bytes: Vec<u8>,
+    source: Option<FreezePane>,
+    winner: Workbook,
+    loser: Workbook,
+    winner_pane: Option<FreezePane>,
+    winner_cell: CellRef,
+    loser_cell: CellRef,
+}
+
+impl FreezePaneRace {
+    /// Two peers freeze one sheet at once, each after an edit of its own when
+    /// `earlier` is set, and meet again.
+    fn new(source: Option<FreezePane>, ids: (u64, u64), earlier: bool) -> Self {
+        let options = CalculationOptions::default();
+        let mut model = WorkbookModel::default();
+        let mut sheet = Sheet::new("Data");
+        sheet.freeze_pane = source;
+        model.sheets.push(sheet);
+        let bytes =
+            ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap();
+        let mut left = Workbook::open_collaborative(&bytes, ids.0).unwrap();
+        let mut right = Workbook::open_collaborative(&bytes, ids.1).unwrap();
+        assert_eq!(left.model().sheets[0].freeze_pane, source);
+        let (left_cell, right_cell) = (cell("C1"), cell("D1"));
+        if earlier {
+            left.edit_cell(SheetId(0), left_cell, "1", options).unwrap();
+            right
+                .edit_cell(SheetId(0), right_cell, "2", options)
+                .unwrap();
+            exchange_updates(&mut left, &mut right);
+        }
+        let left_pane = Some(FreezePane::new(1, 0, cell("A2")));
+        let right_pane = Some(FreezePane::new(2, 0, cell("A3")));
+        for (workbook, pane) in [(&mut left, left_pane), (&mut right, right_pane)] {
+            workbook
+                .apply_ops(
+                    vec![Op::SetFreezePane {
+                        sheet: SheetId(0),
+                        pane,
+                    }],
+                    options,
+                )
+                .unwrap();
+        }
+        exchange_updates(&mut left, &mut right);
+        let merged = left.model().sheets[0].freeze_pane;
+        let race = if merged == left_pane {
+            Self {
+                bytes,
+                source,
+                winner: left,
+                loser: right,
+                winner_pane: left_pane,
+                winner_cell: left_cell,
+                loser_cell: right_cell,
+            }
+        } else {
+            Self {
+                bytes,
+                source,
+                winner: right,
+                loser: left,
+                winner_pane: right_pane,
+                winner_cell: right_cell,
+                loser_cell: left_cell,
+            }
+        };
+        assert_eq!(merged, race.winner_pane);
+        race.assert_converged(race.winner_pane);
+        race
+    }
+
+    fn sync(&mut self) {
+        exchange_updates(&mut self.winner, &mut self.loser);
+    }
+
+    fn assert_converged(&self, pane: Option<FreezePane>) {
+        let (winner, loser) = (&self.winner, &self.loser);
+        assert_eq!(winner.model().sheets[0].freeze_pane, pane);
+        assert_eq!(winner.model(), loser.model());
+        assert_eq!(
+            winner.encode_state_vector_v1(),
+            loser.encode_state_vector_v1()
+        );
+        let saved = winner.save().unwrap();
+        assert_eq!(saved, loser.save().unwrap());
+        let reopened = Workbook::open(&saved).unwrap();
+        assert_eq!(reopened.model().sheets[0].freeze_pane, pane);
+        assert_eq!(
+            reopened.model(),
+            Workbook::open(&loser.save().unwrap()).unwrap().model()
+        );
+    }
+}
+
+fn exchange_updates(left: &mut Workbook, right: &mut Workbook) {
+    let options = CalculationOptions::default();
+    let to_right = left
+        .encode_diff_v1(&right.encode_state_vector_v1())
+        .unwrap();
+    let to_left = right
+        .encode_diff_v1(&left.encode_state_vector_v1())
+        .unwrap();
+    left.apply_update_v1(&to_left, options).unwrap();
+    right.apply_update_v1(&to_right, options).unwrap();
+}
+
+fn freeze_pane_races(earlier: bool) -> impl Iterator<Item = FreezePaneRace> {
+    [None, Some(FreezePane::new(3, 1, cell("B4")))]
+        .into_iter()
+        .flat_map(move |source| {
+            [(1040, 1041), (1041, 1040)]
+                .into_iter()
+                .map(move |ids| FreezePaneRace::new(source, ids, earlier))
+        })
+}
+
+#[test]
+fn undoing_the_winning_freeze_pane_shows_the_source_pane_on_every_peer() {
+    let options = CalculationOptions::default();
+    for mut race in freeze_pane_races(true) {
+        assert!(race.winner.undo(options).unwrap().applied);
+        assert_eq!(race.winner.model().sheets[0].freeze_pane, race.source);
+        race.sync();
+        race.assert_converged(race.source);
+
+        let mut joiner = Workbook::open_collaborative(&race.bytes, 1042).unwrap();
+        joiner
+            .apply_update_v1(&race.winner.encode_state_as_update_v1(), options)
+            .unwrap();
+        assert_eq!(joiner.model(), race.winner.model());
+
+        assert!(race.winner.redo(options).unwrap().applied);
+        race.sync();
+        race.assert_converged(race.winner_pane);
+    }
+}
+
+#[test]
+fn history_below_an_undone_winning_freeze_pane_stays_restorable() {
+    let options = CalculationOptions::default();
+    for mut race in freeze_pane_races(true) {
+        let at = race.winner_cell;
+        assert!(race.winner.undo(options).unwrap().applied);
+        race.sync();
+        assert!(race.winner.model().sheets[0].cell(at).is_some());
+
+        assert!(race.winner.undo(options).unwrap().applied);
+        assert!(race.winner.model().sheets[0].cell(at).is_none());
+        race.sync();
+        race.assert_converged(race.source);
+
+        assert!(race.winner.redo(options).unwrap().applied);
+        assert!(race.winner.model().sheets[0].cell(at).is_some());
+        assert!(race.winner.redo(options).unwrap().applied);
+        race.sync();
+        race.assert_converged(race.winner_pane);
+    }
+}
+
+#[test]
+fn the_losing_freeze_pane_stays_gone_whichever_peer_undoes_first() {
+    let options = CalculationOptions::default();
+    for mut race in freeze_pane_races(false) {
+        let state = race.loser.encode_state_as_update_v1();
+        assert!(!race.loser.undo(options).unwrap().applied);
+        assert_eq!(race.loser.encode_state_as_update_v1(), state);
+        race.assert_converged(race.winner_pane);
+
+        assert!(race.winner.undo(options).unwrap().applied);
+        race.sync();
+        race.assert_converged(race.source);
+    }
+    for mut race in freeze_pane_races(false) {
+        assert!(race.winner.undo(options).unwrap().applied);
+        race.sync();
+        assert!(!race.loser.undo(options).unwrap().applied);
+        race.sync();
+        race.assert_converged(race.source);
+    }
+}
+
+#[test]
+fn the_losing_peer_undoes_past_its_lost_freeze_pane_into_its_earlier_step() {
+    let options = CalculationOptions::default();
+    for mut race in freeze_pane_races(true) {
+        assert!(race.winner.undo(options).unwrap().applied);
+        race.sync();
+
+        assert!(race.loser.undo(options).unwrap().applied);
+        assert!(race.loser.model().sheets[0].cell(race.loser_cell).is_none());
+        assert!(
+            race.loser.model().sheets[0]
+                .cell(race.winner_cell)
+                .is_some()
+        );
+        race.sync();
+        race.assert_converged(race.source);
+    }
+}
+
+#[test]
+fn a_freeze_pane_set_after_the_winning_undo_is_kept_and_undoes_to_the_source() {
+    let options = CalculationOptions::default();
+    let pane = Some(FreezePane::new(0, 2, cell("C1")));
+    for mut race in freeze_pane_races(false) {
+        assert!(race.winner.undo(options).unwrap().applied);
+        race.sync();
+
+        race.loser
+            .apply_ops(
+                vec![Op::SetFreezePane {
+                    sheet: SheetId(0),
+                    pane,
+                }],
+                options,
+            )
+            .unwrap();
+        race.sync();
+        race.assert_converged(pane);
+
+        assert!(race.loser.undo(options).unwrap().applied);
+        race.sync();
+        race.assert_converged(race.source);
+    }
+}
+
+#[test]
+fn a_peer_rejoining_after_the_winning_freeze_pane_undo_keeps_collaborating() {
+    let options = CalculationOptions::default();
+    for mut race in freeze_pane_races(true) {
+        assert!(race.winner.undo(options).unwrap().applied);
+        race.sync();
+        let state = race.winner.encode_state_as_update_v1();
+
+        let mut rejoined = Workbook::open_collaborative(&race.bytes, 1045).unwrap();
+        rejoined.apply_update_v1(&state, options).unwrap();
+        assert_eq!(rejoined.model(), race.winner.model());
+        assert_eq!(rejoined.model().sheets[0].freeze_pane, race.source);
+
+        let mut offline = Workbook::open_collaborative(&race.bytes, 1046).unwrap();
+        offline
+            .edit_cell(SheetId(0), cell("E1"), "3", options)
+            .unwrap();
+        offline.apply_update_v1(&state, options).unwrap();
+        assert_eq!(offline.model().sheets[0].freeze_pane, race.source);
+        assert!(offline.model().sheets[0].cell(cell("E1")).is_some());
+
+        rejoined
+            .edit_cell(SheetId(0), cell("F1"), "4", options)
+            .unwrap();
+        exchange_updates(&mut rejoined, &mut race.winner);
+        assert!(race.winner.model().sheets[0].cell(cell("F1")).is_some());
+
+        assert!(race.winner.redo(options).unwrap().applied);
+        exchange_updates(&mut rejoined, &mut race.winner);
+        assert_eq!(rejoined.model().sheets[0].freeze_pane, race.winner_pane);
+        assert_eq!(rejoined.model(), race.winner.model());
+    }
+}
+
+#[test]
+fn a_reversed_freeze_pane_delivery_reads_the_source_pane_until_the_replacement_lands() {
+    let options = CalculationOptions::default();
+    let source_pane = Some(FreezePane::new(3, 1, cell("B4")));
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Data");
+    sheet.freeze_pane = source_pane;
+    model.sheets.push(sheet);
+    let bytes = ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap();
+    let mut source = Workbook::open_collaborative(&bytes, 1043).unwrap();
+    let mut target = Workbook::open_collaborative(&bytes, 1044).unwrap();
+    let set_pane = |workbook: &mut Workbook, rows: u32| {
+        let pane = Some(FreezePane::new(rows, 0, CellRef::new(rows, 0)));
+        let vector = workbook.encode_state_vector_v1();
+        workbook
+            .apply_ops(
+                vec![Op::SetFreezePane {
+                    sheet: SheetId(0),
+                    pane,
+                }],
+                options,
+            )
+            .unwrap();
+        (pane, workbook.encode_diff_v1(&vector).unwrap())
+    };
+    let (current, first) = set_pane(&mut source, 1);
+    target.apply_update_v1(&first, options).unwrap();
+    assert_eq!(target.model().sheets[0].freeze_pane, current);
+
+    let (_, second) = set_pane(&mut source, 2);
+    let (last, third) = set_pane(&mut source, 5);
+    assert!(target.apply_update_v1(&third, options).unwrap().applied);
+    assert_eq!(target.model().sheets[0].freeze_pane, source_pane);
+
+    assert!(target.apply_update_v1(&second, options).unwrap().applied);
+    assert_eq!(target.model().sheets[0].freeze_pane, last);
+    assert_eq!(target.model(), source.model());
+    assert_eq!(
+        target.encode_state_vector_v1(),
+        source.encode_state_vector_v1()
+    );
+}
+
+#[test]
+fn interleaved_held_updates_carrying_a_freeze_pane_undo_all_apply_and_converge() {
+    let options = CalculationOptions::default();
+    let edit = |workbook: &mut Workbook, at: &str, input: &str| {
+        let vector = workbook.encode_state_vector_v1();
+        workbook
+            .edit_cell(SheetId(0), cell(at), input, options)
+            .unwrap();
+        workbook.encode_diff_v1(&vector).unwrap()
+    };
+    let merge = |updates: [&[u8]; 3]| {
+        YrsUpdate::merge_updates(updates.map(|update| YrsUpdate::decode_v1(update).unwrap()))
+            .encode_v1()
+    };
+    for mut race in freeze_pane_races(false) {
+        let vector = race.loser.encode_state_vector_v1();
+        assert!(race.winner.undo(options).unwrap().applied);
+        let undo = race.winner.encode_diff_v1(&vector).unwrap();
+
+        let mut first = Workbook::open_collaborative(&race.bytes, 1047).unwrap();
+        let mut second = Workbook::open_collaborative(&race.bytes, 1048).unwrap();
+        let (a1, a2) = (edit(&mut first, "E1", "1"), edit(&mut first, "E2", "2"));
+        let (b1, b2) = (edit(&mut second, "F1", "3"), edit(&mut second, "F2", "4"));
+
+        race.loser
+            .apply_update_v1(&merge([&undo, &a1, &b2]), options)
+            .unwrap();
+        race.loser
+            .apply_update_v1(&merge([&undo, &b1, &a2]), options)
+            .unwrap();
+        for at in ["E1", "E2", "F1", "F2"] {
+            assert!(race.loser.model().sheets[0].cell(cell(at)).is_some());
+        }
+
+        for update in [&a1, &a2, &b1, &b2] {
+            race.winner.apply_update_v1(update, options).unwrap();
+        }
+        race.assert_converged(race.source);
+    }
+}
+
 #[test]
 fn concurrent_freeze_and_cell_edit_do_not_overwrite_each_other() {
     let bytes = sample_xlsx();
@@ -6845,11 +7191,12 @@ fn freeze_pane_updates_recover_from_reversed_delivery_and_full_snapshot() {
     let updates = updates.lock().unwrap().clone();
     assert_eq!(updates.len(), 2);
     assert!(
-        !target
+        target
             .apply_update_v1(&updates[1], options)
             .unwrap()
             .applied
     );
+    assert_eq!(target.model().sheets[0].freeze_pane, None);
     assert!(
         target
             .apply_update_v1(&updates[0], options)

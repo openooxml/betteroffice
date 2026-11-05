@@ -1041,11 +1041,6 @@ impl SnapshotValidation {
                             }
                             FREEZE_PANE => {
                                 allowance(128, budget, &mut self.unit_bytes)?;
-                                if freeze_pane_from_any(&value).map_err(SnapshotError::new)?
-                                    != sheet.freeze_pane
-                                {
-                                    return Err(invalid());
-                                }
                             }
                             MERGES => {
                                 let values =
@@ -1194,14 +1189,21 @@ impl SnapshotValidation {
                 }
                 if self.field == required.len() + 2 {
                     allowance(128, budget, &mut self.unit_bytes)?;
-                    if self.version < FREEZE_PANE_SCHEMA_VERSION
-                        && base
+                    let stored = map
+                        .get(&txn, FREEZE_PANE)
+                        .filter(|_| self.version >= FREEZE_PANE_SCHEMA_VERSION);
+                    let pane = match stored {
+                        Some(Out::Any(value)) => {
+                            freeze_pane_from_any(&value).map_err(SnapshotError::new)?
+                        }
+                        Some(_) => return Err(invalid()),
+                        None => base
                             .freeze_panes
                             .get(base_sheet_index(&key).unwrap_or(usize::MAX))
                             .copied()
-                            .flatten()
-                            != sheet.freeze_pane
-                    {
+                            .flatten(),
+                    };
+                    if pane != sheet.freeze_pane {
                         return Err(invalid());
                     }
                     self.field += 1;
