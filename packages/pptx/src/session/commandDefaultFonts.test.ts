@@ -22,7 +22,8 @@ function provider(
   const resolve = mock(load);
   const resolveFamily = mock(() => undefined);
   const resolveScriptFallback = mock(script);
-  const resolveLastResort = mock((_family: string, _bold: boolean, _italic: boolean, _office: string) => undefined);
+  const resolveLastResort = mock((_family: string, _bold: boolean, _italic: boolean, _office?: string) =>
+    async (): Promise<ArrayBuffer> => { throw new Error('No substitute'); });
   const source = { resolve, resolveFamily, resolveScriptFallback, resolveLastResort };
   const imported = spyOn(commandFontProvider, 'load').mockResolvedValue(source);
   restorers.push(() => imported.mockRestore());
@@ -134,7 +135,7 @@ test('unavailable and rejected defaults never prepare registration', async () =>
 
 test('resolves requested traits through manager mappings and gives unknown families the PowerPoint last resort', async () => {
   const source = provider((family) => family === 'Calibri' ? async () => bytes : undefined);
-  source.resolveLastResort.mockImplementation(() => (async () => bytes) as never);
+  source.resolveLastResort.mockImplementation(() => async () => bytes);
   const register = mock(() => {});
   const fonts = createCommandDefaultFonts([], () => [{ ...regular, bold: true, italic: true },
     { ...regular, family: 'Unknown Family' }], register, () => {});
@@ -156,7 +157,7 @@ test('lighter members of bundled families load their regular face at their own w
   const resolve = mock(() => undefined);
   const resolveLightVariant = mock((family: string, _bold: boolean, _italic: boolean) =>
     family === 'Calibri Light' ? async () => bytes : undefined);
-  const resolveLastResort = mock((family: string) => family === 'BIZ UD明朝 Medium' ? async () => bytes : undefined);
+  const resolveLastResort = mock((_family: string, _bold: boolean, _italic: boolean, _office?: string) => async () => bytes);
   const imported = spyOn(commandFontProvider, 'load').mockResolvedValue({ resolve, resolveFamily: () => undefined,
     resolveScriptFallback: () => undefined, resolveLastResort, resolveLightVariant });
   restorers.push(() => imported.mockRestore());
