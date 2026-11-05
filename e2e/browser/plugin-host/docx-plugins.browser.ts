@@ -403,7 +403,7 @@ test('a drop point on page 2 resolves like a caret click and inserts there at ev
     await second.scrollIntoViewIfNeeded();
     await expect(second).toBeInViewport();
     const query = await operate(page, async (worker) => {
-      const { editor, geometry } = (window as unknown as LooseProbe).__probe;
+      const { editor } = (window as unknown as LooseProbe).__probe;
       const surface = document.querySelector('canvas[data-page-index="1"]')!;
       const canvas = surface.getBoundingClientRect();
       const session = worker ? null : editor.getEditorRef().getYrsSession();
@@ -425,7 +425,10 @@ test('a drop point on page 2 resolves like a caret click and inserts there at ev
       return {
         found,
         loc: found && (worker ? { paraId: found.hit.target.start.paraId, offset: found.hit.target.start.offset } : editor.getEditorRef().displayPositionToYrsLoc(found.hit)),
-        plugin: found && (worker ? await geometry.readPositionAtPoint(found.x, found.y) : geometry.getPositionAtPoint(found.x, found.y)),
+        plugin: found && await (async () => {
+          const current = (window as unknown as LooseProbe).__probe.geometry;
+          return worker ? current.readPositionAtPoint(found!.x, found!.y) : current.getPositionAtPoint(found!.x, found!.y);
+        })(),
         outside: worker ? await editor.readPositionAtPoint(canvas.left - 12, canvas.top + canvas.height / 2) : editor.getPositionAtPoint(canvas.left - 12, canvas.top + canvas.height / 2),
         unchanged:
           JSON.stringify(worker ? await editor.readSelectionInfo() : session!.selection()) === selection && document.activeElement === active,
