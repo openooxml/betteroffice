@@ -8,6 +8,141 @@ fn model() -> WorkbookModel {
     model
 }
 
+type HistoryPoint = (WorkbookModel, Vec<u8>, Vec<u8>, usize, usize);
+
+fn sync(left: &mut Workbook, right: &mut Workbook) {
+    let options = CalculationOptions::default();
+    let to_right = left
+        .encode_diff_v1(&right.encode_state_vector_v1())
+        .unwrap();
+    let to_left = right
+        .encode_diff_v1(&left.encode_state_vector_v1())
+        .unwrap();
+    right.apply_update_v1(&to_right, options).unwrap();
+    left.apply_update_v1(&to_left, options).unwrap();
+}
+
+fn write(book: &mut Workbook, sheet: u32, row: u32, input: &str) {
+    book.edit_cell(
+        SheetId(sheet),
+        CellRef::new(row, 1),
+        input,
+        CalculationOptions::default(),
+    )
+    .unwrap();
+}
+
+fn append(book: &mut Workbook) {
+    book.apply_ops(
+        vec![Op::AddSheet {
+            index: 1,
+            name: "Added".into(),
+        }],
+        CalculationOptions::default(),
+    )
+    .unwrap();
+}
+
+fn point(book: &mut Workbook) -> HistoryPoint {
+    let history = book.history_state();
+    (
+        book.model().clone(),
+        book.save().unwrap(),
+        book.encode_state_vector_v1(),
+        history.undo_depth,
+        history.redo_depth,
+    )
+}
+
+/// Runs `script` on two replicas, then every undo, every redo and every undo
+/// again on the left one. Returns its state after each step.
+fn history_trail(script: fn(&mut Workbook, &mut Workbook)) -> Vec<HistoryPoint> {
+    let options = CalculationOptions::default();
+    let bytes = Workbook::from_model(model()).unwrap().save().unwrap();
+    let mut left = Workbook::open_collaborative(&bytes, 1_001).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 2_002).unwrap();
+    script(&mut left, &mut right);
+    let mut trail = vec![point(&mut left)];
+    for redo in [false, true, false] {
+        loop {
+            let history = left.history_state();
+            let pending = if redo {
+                history.can_redo
+            } else {
+                history.can_undo
+            };
+            if !pending {
+                break;
+            }
+            if redo {
+                left.redo(options).unwrap();
+            } else {
+                left.undo(options).unwrap();
+            }
+            trail.push(point(&mut left));
+        }
+    }
+    trail
+}
+
+/// Overwrites of one cell before and after an appended sheet, a peer's between
+/// them.
+fn overwrites_around_an_add(left: &mut Workbook, right: &mut Workbook) {
+    write(left, 0, 0, "before the add");
+    sync(left, right);
+    write(right, 0, 0, "peer before the add");
+    write(right, 0, 1, "peer below");
+    sync(left, right);
+    append(left);
+    write(left, 0, 0, "after the add");
+    write(left, 0, 1, "over the peer");
+    sync(left, right);
+    write(right, 0, 0, "peer after the add");
+    sync(left, right);
+    write(left, 0, 0, "over the peer again");
+    write(left, 1, 0, "in the new sheet");
+    assert!(left.history_state().undo_depth >= 5);
+}
+
+/// A peer has the last word on a cell the newest step wrote, so that step
+/// cannot restore the value it replaced: the map-entry walk of `Item::redo`
+/// stops at the peer's value only because no stack holds its deletion. The
+/// steps below the add keep the full stack deep and the partial one shallow.
+fn a_peer_outranks_the_step_above_an_add(left: &mut Workbook, right: &mut Workbook) {
+    write(left, 0, 0, "replaced");
+    write(left, 0, 1, "older");
+    write(left, 0, 2, "older still");
+    write(left, 0, 3, "oldest");
+    append(left);
+    write(left, 0, 0, "mine");
+    sync(left, right);
+    write(right, 0, 0, "peer has the last word");
+    sync(left, right);
+}
+
+/// Steps above a sheet removal undo with only themselves on the manager's
+/// stack. That is safe only while yrs reads the rest of the stack as
+/// `undo_through_removal` assumes, so the same history must land on the same
+/// state, step by step, with every step on the stack.
+#[test]
+fn partial_stack_undo_matches_the_full_stack() {
+    for script in [
+        overwrites_around_an_add as fn(&mut Workbook, &mut Workbook),
+        a_peer_outranks_the_step_above_an_add,
+    ] {
+        let before = crate::authority::partial_stack_undos();
+        let partial = history_trail(script);
+        assert!(crate::authority::partial_stack_undos() > before);
+        let before = crate::authority::partial_stack_undos();
+        let full = crate::authority::with_full_stack_undo(|| history_trail(script));
+        assert_eq!(crate::authority::partial_stack_undos(), before);
+        assert_eq!(partial.len(), full.len());
+        for (index, (partial, full)) in partial.iter().zip(&full).enumerate() {
+            assert_eq!(partial, full, "history step {index}");
+        }
+    }
+}
+
 #[test]
 fn unobserved_fallback_does_not_encode_updates() {
     let mut workbook = Workbook::from_model(model()).unwrap();

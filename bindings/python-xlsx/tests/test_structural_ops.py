@@ -158,6 +158,25 @@ def test_collaborative_workbooks_refuse_structural_ops(sample_bytes):
     assert workbook.can_undo is False
 
 
+def test_collaborative_sheet_limits_raise_the_structure_error(sample_bytes):
+    left = bo.Workbook.open_collaborative(sample_bytes, client_id=7)
+    right = bo.Workbook.open_collaborative(sample_bytes, client_id=8)
+    added = left.sheet_count
+    with pytest.raises(bo.CollaborativeStructureError) as raised:
+        left.apply_ops([{"type": "addSheet", "index": 0, "name": "First"}])
+    assert str(raised.value) == "collaborative sheets can only be added at the end of the workbook"
+    left.apply_ops([{"type": "addSheet", "index": added, "name": "Notes"}])
+    right.set(0, "Z9", "peer elsewhere")
+    right.apply_update(left.diff(right.state_vector()))
+    right.set(added, "A1", "peer")
+    left.apply_update(right.diff(left.state_vector()))
+    with pytest.raises(bo.CollaborativeStructureError) as raised:
+        left.undo()
+    assert str(raised.value) == "undo would remove a sheet that holds collaborators' edits"
+    assert left.sheet_count == added + 1
+    assert left.value(added, "A1") == "peer"
+
+
 def test_new_errors_roll_up_to_xlsx_error():
     assert issubclass(bo.CollaborativeStructureError, bo.XlsxError)
     assert not issubclass(bo.CollaborativeStructureError, ValueError)

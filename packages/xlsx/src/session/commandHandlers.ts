@@ -390,10 +390,16 @@ export function classifyRefusal(error: unknown, method?: WorkbookReplayMethod): 
     return new WorkbookCommandRefusal('stale-proposal', { cells: error.cells, targets: error.targets });
   }
   if (!(error instanceof Error) || isEngineTrap(error)) return undefined;
-  if (method === 'applyOps' && error.message === 'structural operations are unavailable in collaborative mode') {
+  if (method === 'applyOps' && (
+    error.message === 'structural operations are unavailable in collaborative mode' ||
+    error.message === 'collaborative sheets can only be added at the end of the workbook'
+  )) {
     return new WorkbookCommandRefusal('unsupported');
   }
   if (error.message === 'calculation context is unavailable for collaborative workbooks') {
+    return new WorkbookCommandRefusal('unsupported');
+  }
+  if (method === 'undo' && error.message === "undo would remove a sheet that holds collaborators' edits") {
     return new WorkbookCommandRefusal('unsupported');
   }
   if (['applyOps', 'patchRangeStyle', 'setNumberFormat', 'applyFormat', 'propose', 'acceptProposal'].includes(method ?? '') &&
@@ -487,6 +493,7 @@ export interface WorkbookCommandState {
   publishedSelection?: string;
   sheetIds: string[];
   nextSheetId: number;
+  collaborative?: boolean;
   calculation: WorkbookCalculationContext | null;
   formats: Map<string, CapturedFormat>;
   historySelections: ({
@@ -550,6 +557,18 @@ export function projectEditState(handle: WorkbookHandle, state: WorkbookCommandS
   return Object.keys(changed).length > 0 ? changed : undefined;
 }
 
+/** Carries the command ids across a topology change, which a collaborative engine identifies by stable sheet keys. */
+function rebaseSheetIds(handle: WorkbookHandle, state: WorkbookCommandState, before: string[]): void {
+  const info = handle.sheetInfo();
+  if (info.sheetIds.length === before.length && info.sheetIds.every((id, index) => id === before[index])) return;
+  const commandIds = new Map(before.map((id, index) => [id, state.sheetIds[index]]));
+  state.sheetIds = info.sheetIds.map((id) => commandIds.get(id) ?? id);
+  state.sheetRevision += 1;
+  if (!state.sheetIds.includes(state.selection.sheetId)) {
+    state.selection = { sheetId: state.sheetIds[info.activeSheet], range: { kind: 'a1', a1: 'A1' } };
+  }
+}
+
 function applyIntent(handle: WorkbookHandle, state: WorkbookCommandState, command: WorkbookCommand,
   applyPipe?: (payload: PipeCommandPayload<AwarenessCursor>) => void): CommandStatus {
   validateWorkbookCommandPayload(command, state.pipeFrameBytes);
@@ -557,7 +576,9 @@ function applyIntent(handle: WorkbookHandle, state: WorkbookCommandState, comman
   if (command.kind === 'collabPipe') {
     if (!applyPipe) throw new WorkbookCommandRefusal('unsupported');
     const before = handle.version();
+    const engineSheets = handle.sheetInfo().sheetIds;
     applyPipe(command.payload);
+    rebaseSheetIds(handle, state, engineSheets);
     const limits = state.pipeFrameBytes ??= new Map();
     for (const op of command.payload.ops) {
       if (op.op === 'create') {
@@ -572,6 +593,7 @@ function applyIntent(handle: WorkbookHandle, state: WorkbookCommandState, comman
   }
   if (command.kind === 'applyUpdate') {
     const before = handle.version();
+    const engineSheets = handle.sheetInfo().sheetIds;
     let refusedUpdate = false;
     for (const update of [command.payload.update, ...command.payload.updates ?? []]) {
       const at = handle.version();
@@ -583,6 +605,7 @@ function applyIntent(handle: WorkbookHandle, state: WorkbookCommandState, comman
         break;
       }
     }
+    rebaseSheetIds(handle, state, engineSheets);
     state.formattingDirty = state.mergesDirty = state.catalogDirty = true;
     return { seq: command.seq, status: handle.version() === before ? 'noop' : 'applied',
       committed: handle.version() !== before, result: { remoteUpdate: true, proposals: handle.listProposals(),
@@ -635,6 +658,8 @@ function applyIntent(handle: WorkbookHandle, state: WorkbookCommandState, comman
   const history = handle.historyState();
   const beforeSelection = structuredClone(state.selection);
   const beforeSheetIds = [...state.sheetIds];
+  const engineSheets = state.collaborative && (op.method === 'undo' || op.method === 'redo' || op.method === 'applyOps' &&
+    op.args[0].some((value) => (value as { type: string }).type === 'addSheet')) ? handle.sheetInfo().sheetIds : undefined;
   let result: ReturnType<typeof applyWorkbookReplayOp>;
   try {
     if (op.calculation) handle.setCalculationContext(op.calculation);
@@ -660,7 +685,8 @@ function applyIntent(handle: WorkbookHandle, state: WorkbookCommandState, comman
   if (op.calculation) state.calculation = { ...op.calculation };
   const committed = handle.version() !== before;
   const afterHistory = handle.historyState();
-  if (committed && op.method === 'applyOps') {
+  if (committed && engineSheets) rebaseSheetIds(handle, state, engineSheets);
+  else if (committed && op.method === 'applyOps') {
     for (const value of op.args[0]) {
       const operation = value as { type: string; index: number; from: number; to: number };
       if (operation.type === 'addSheet') state.sheetIds.splice(operation.index, 0, `command-sheet:${state.nextSheetId++}`);
@@ -676,7 +702,7 @@ function applyIntent(handle: WorkbookHandle, state: WorkbookCommandState, comman
       const depth = op.method === 'undo' ? history.undoDepth : afterHistory.undoDepth;
       const anchor = state.historySelections[depth];
       if (anchor) {
-        state.sheetIds = [...(op.method === 'undo' ? anchor.beforeSheets : anchor.afterSheets)];
+        if (!engineSheets) state.sheetIds = [...(op.method === 'undo' ? anchor.beforeSheets : anchor.afterSheets)];
         state.selection = structuredClone(op.method === 'undo' ? anchor.before : anchor.after);
         const sheet = state.sheetIds.indexOf(state.selection.sheetId);
         if (sheet >= 0) handle.setActiveSheet(sheet);

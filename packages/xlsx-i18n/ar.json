@@ -218,7 +218,12 @@
     "cellLabel": "{address}، {value}",
     "cellLabelSelected": "{address}، {value}، تم التحديد",
     "emptyCellLabel": "{address}، فارغة",
-    "emptyCellLabelSelected": "{address}، فارغة، تم التحديد"
+    "emptyCellLabelSelected": "{address}، فارغة، تم التحديد",
+    "hasFormula": "{label}، تحتوي على صيغة",
+    "rangeSelected": "تم تحديد {start} إلى {end}، {rows, plural, zero {# صفوف} one {صف واحد} two {صفان} few {# صفوف} many {# صفًا} other {# صف}} × {columns, plural, zero {# أعمدة} one {عمود واحد} two {عمودان} few {# أعمدة} many {# عمودًا} other {# عمود}}",
+    "sheetActivated": "{name}، ورقة عمل {index} من {count}",
+    "cellInputLabel": "تحرير الخلية {address}",
+    "gridRoleDescription": "ورقة عمل"
   },
   "plugins": {
     "toolbarGroup": "المكونات الإضافية",

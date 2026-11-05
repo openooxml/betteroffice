@@ -6551,7 +6551,7 @@
   {
     "op": "applyOps",
     "result": {
-      "error": "structural operations are unavailable in collaborative mode"
+      "error": "collaborative sheets can only be added at the end of the workbook"
     }
   },
   {

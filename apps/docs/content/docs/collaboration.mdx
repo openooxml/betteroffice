@@ -86,6 +86,56 @@ shared starting state for that document. The demo generates these states with
 Call `provider.destroy()` and disconnect the transport when the editor unmounts
 or changes rooms.
 
+## XLSX limits
+
+Collaborative workbooks synchronize cell content and formulas, cell formatting,
+column widths, row heights, row and column visibility, freeze panes, merged
+cells, single hyperlinks, chart positions and sheets added at the end of the
+workbook. Each collaborator's undo and redo synchronize their effects.
+
+When two collaborators add a sheet under one name at the same time, every
+replica keeps the name on the first sheet in the shared order and shows the other
+as `Name (2)`. Undo runs newest first, so when an author undoes adding a sheet,
+their own later edits in it are already undone. The sheet is removed on every
+replica when nothing else is left in it. When it still holds anything else, such
+as a collaborator's edit or the author's own edit made without an undo step, the
+undo is refused with `undo would remove a sheet that holds collaborators' edits`
+(`Error::CollaborativeUndoRefused` in Rust; editor sessions report it as
+`unsupported`). The refusal changes nothing in the workbook, the next undo goes
+to the step before it, and the refused step cannot be redone. A collaborator who
+cleared their own edit again leaves nothing to lose, so the sheet is removed. An
+edit a collaborator makes in the sheet before the author's undo reaches them is
+lost with the sheet on every replica.
+
+These edits are unavailable while collaborating and are refused without changing
+the workbook:
+
+| Edit | Why it is refused |
+| --- | --- |
+| Inserting or deleting rows or columns | Cells and formulas are stored by address, so a concurrent edit would land on the wrong cell. |
+| Adding a sheet anywhere but the end | Sheet-scoped names and tables are stored by sheet position, which an insert would shift on one replica only. |
+| Removing a sheet | Two collaborators could remove the last sheets, and a concurrent edit could bring one back. |
+| Moving a sheet | Sheet-scoped names and tables are stored by sheet position. |
+| Renaming a sheet | A rename rewrites formulas and defined names that are not all replicated. |
+| Adding or removing conditional formats | A sheet's rules are one replicated value, so one of two concurrent changes would be lost. |
+| Setting or clearing an auto filter | A filter also writes a defined name, and defined names are not replicated. |
+| Changing defined names | Defined names are not replicated. |
+| Editing charts beyond moving them | A sheet's charts are one replicated value, so one of two concurrent changes would be lost. |
+
+In JavaScript, `applyOps` throws `structural operations are unavailable in
+collaborative mode`, or `collaborative sheets can only be added at the end of the
+workbook` for a sheet added elsewhere, and editor sessions report the command as
+refused with reason `unsupported`. Python raises `CollaborativeStructureError`.
+Rust returns `Error::CollaborativeStructureOperation` or
+`Error::CollaborativeSheetPosition`. A peer update that makes one of these
+changes, for example from a copy of the workbook edited outside the session, is
+refused with `remote update changes the frozen workbook structure`
+(`Error::CollaborativeStructureChanged`).
+
+Collaborating peers must run the same BetterOffice version line. A peer that
+predates sheet appends refuses a room that has them with
+`unsupported schema version 7`.
+
 ## Relay checkpoints and rehydration
 
 The reference relay checkpoints its retained updates automatically after 512

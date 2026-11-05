@@ -218,7 +218,12 @@
     "cellLabel": "{address}, {value}",
     "cellLabelSelected": "{address}, {value}, đã chọn",
     "emptyCellLabel": "{address}, trống",
-    "emptyCellLabelSelected": "{address}, trống, đã chọn"
+    "emptyCellLabelSelected": "{address}, trống, đã chọn",
+    "hasFormula": "{label}, có công thức",
+    "rangeSelected": "Đã chọn {start} đến {end}, {rows} hàng x {columns} cột",
+    "sheetActivated": "{name}, trang tính {index}/{count}",
+    "cellInputLabel": "Chỉnh sửa ô {address}",
+    "gridRoleDescription": "trang tính"
   },
   "plugins": {
     "toolbarGroup": "Plugin",

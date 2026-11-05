@@ -2963,6 +2963,10 @@ impl EditingDoc {
                     matches!(value, Any::Null | Any::Undefined)
                         || matches!(value, Any::String(kind) if ["left", "center", "right"].contains(&&**kind))
                 }
+                "tableLayout" => {
+                    matches!(value, Any::Null | Any::Undefined)
+                        || matches!(value, Any::String(kind) if ["fixed", "autofit"].contains(&&**kind))
+                }
                 _ => false,
             };
             if !valid {
@@ -3727,10 +3731,26 @@ mod tests {
             doc.set_table_properties(
                 &direct(),
                 &at,
-                &HashMap::from([("tableLayout".to_owned(), Any::from("fixed")),])
+                &HashMap::from([("tableLayout".to_owned(), Any::from("wide")),])
             )
             .is_err()
         );
+        assert!(
+            doc.set_table_properties(
+                &direct(),
+                &at,
+                &HashMap::from([("bidi".to_owned(), Any::from(true)),])
+            )
+            .is_err()
+        );
+        doc.set_table_properties(
+            &direct(),
+            &at,
+            &HashMap::from([("tableLayout".to_owned(), Any::from("fixed"))]),
+        )
+        .unwrap();
+        let (tbl_pr, _, _) = table_value(&doc);
+        assert_eq!(tbl_pr["tableLayout"], "fixed");
     }
 
     #[test]
