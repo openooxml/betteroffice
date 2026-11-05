@@ -1,0 +1,153 @@
+{
+  "bodyStory": "body",
+  "notes": {
+    "contents": [
+      {
+        "height": 0,
+        "id": 2,
+        "noteKind": "footnote"
+      },
+      {
+        "height": 0,
+        "id": 3,
+        "noteKind": "endnote"
+      }
+    ]
+  },
+  "options": {
+    "pageGap": 24
+  },
+  "regions": {
+    "sections": [
+      {
+        "properties": {
+          "pageHeight": 15840,
+          "pageWidth": 12240
+        }
+      },
+      {
+        "properties": {
+          "headerReferences": [
+            {
+              "rId": "rIdHeader",
+              "type": "default"
+            }
+          ],
+          "orientation": "landscape",
+          "pageHeight": 12240,
+          "pageWidth": 15840
+        }
+      },
+      {
+        "properties": {
+          "headerReferences": [
+            {
+              "rId": "rIdHeader",
+              "type": "default"
+            }
+          ],
+          "orientation": "landscape",
+          "pageHeight": 12240,
+          "pageWidth": 15840
+        }
+      }
+    ],
+    "settings": {
+      "compatibilityFlags": {
+        "adjustLineHeightInTable": false,
+        "allowSpaceOfSameStyleInTable": false,
+        "balanceSingleByteDoubleByteWidth": false,
+        "compatibilityMode": 14,
+        "doNotExpandShiftReturn": true,
+        "doNotUseHTMLParagraphAutoSpacing": false,
+        "noLeading": true,
+        "suppressSpBfAfterPgBrk": false,
+        "useWord97LineBreakRules": false
+      },
+      "defaultTabStop": 360
+    }
+  },
+  "renderEnv": {
+    "compatibilityFlags": {
+      "adjustLineHeightInTable": false,
+      "allowSpaceOfSameStyleInTable": false,
+      "balanceSingleByteDoubleByteWidth": false,
+      "compatibilityMode": 14,
+      "doNotExpandShiftReturn": true,
+      "doNotUseHTMLParagraphAutoSpacing": false,
+      "noLeading": true,
+      "suppressSpBfAfterPgBrk": false,
+      "useWord97LineBreakRules": false
+    },
+    "defaultParagraphStyleId": "Normal",
+    "defaultTabStopTwips": 360,
+    "docDefaultFontSize": 10,
+    "docDefaultLanguage": {
+      "latin": "de-DE"
+    },
+    "fontTheme": {
+      "colorScheme": {
+        "accent1": "4472C4",
+        "accent2": "ED7D31",
+        "accent3": "A5A5A5",
+        "accent4": "FFC000",
+        "accent5": "5B9BD5",
+        "accent6": "70AD47",
+        "dk1": "000000",
+        "dk2": "44546A",
+        "folHlink": "954F72",
+        "hlink": "0563C1",
+        "lt1": "FFFFFF",
+        "lt2": "E7E6E6"
+      },
+      "fontScheme": {
+        "majorFont": {
+          "cs": "",
+          "ea": "",
+          "fonts": {},
+          "latin": "Calibri Light"
+        },
+        "minorFont": {
+          "cs": "",
+          "ea": "",
+          "fonts": {},
+          "latin": "Calibri"
+        }
+      },
+      "name": "Office Theme"
+    },
+    "hyperlinkStyleFontSizes": {
+      "Link": 9
+    },
+    "numericIds": {},
+    "paragraphStyleFontSizes": {
+      "Child": 15.5,
+      "Contents2": 10,
+      "Loop1": 10,
+      "Loop2": 10,
+      "Normal": 10,
+      "Orphan": 10,
+      "Sized": 15.5,
+      "TOC3": 10
+    },
+    "showHiddenText": false,
+    "themeColors": {
+      "accent1": "4472C4",
+      "accent2": "ED7D31",
+      "accent3": "A5A5A5",
+      "accent4": "FFC000",
+      "accent5": "5B9BD5",
+      "accent6": "70AD47",
+      "dk1": "000000",
+      "dk2": "44546A",
+      "folHlink": "954F72",
+      "hlink": "0563C1",
+      "lt1": "FFFFFF",
+      "lt2": "E7E6E6"
+    },
+    "tocStyleIds": [
+      "Contents2",
+      "TOC3"
+    ]
+  }
+}
