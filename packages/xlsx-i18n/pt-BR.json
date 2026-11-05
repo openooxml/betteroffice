@@ -149,8 +149,31 @@
       "permissionDenied": "O aplicativo host não permitiu que este plugin usasse este comando.",
       "unsupportedPolicy": "Os plugins ainda não podem executar este comando. Use um lote de edições.",
       "pluginUnavailable": "O plugin não está mais ativo.",
-      "aborted": "A ação do plugin foi cancelada antes de o comando ser executado."
-    }
+      "aborted": "A ação do plugin foi cancelada antes de o comando ser executado.",
+      "clipboardUnavailable": "Este navegador não permite colar a partir de um menu. Use o atalho de teclado.",
+      "lastSheet": "Uma pasta de trabalho precisa de pelo menos uma planilha.",
+      "sheetAtEdge": "A planilha não pode ser movida mais.",
+      "sheetNameInvalid": "Nomes de planilha precisam de 1 a 31 caracteres, devem ser únicos e não podem conter : \\ / ? * [ ].",
+      "clipboardDenied": "O navegador não permitiu o acesso à área de transferência."
+    },
+    "cut": "Recortar",
+    "copy": "Copiar",
+    "paste": "Colar",
+    "pastePlainText": "Colar como texto simples",
+    "clearContents": "Limpar conteúdo",
+    "insert": "Inserir",
+    "delete": "Excluir",
+    "insertRowsAbove": "Inserir linhas acima",
+    "insertRowsBelow": "Inserir linhas abaixo",
+    "insertColumnsLeft": "Inserir colunas à esquerda",
+    "insertColumnsRight": "Inserir colunas à direita",
+    "deleteRows": "Excluir linhas",
+    "deleteColumns": "Excluir colunas",
+    "insertSheet": "Inserir planilha",
+    "deleteSheet": "Excluir planilha",
+    "renameSheet": "Renomear",
+    "moveSheetLeft": "Mover para a esquerda",
+    "moveSheetRight": "Mover para a direita"
   },
   "editor": {
     "appLabel": "Editor de planilha",
@@ -165,7 +188,11 @@
     "showDetails": "Mostrar detalhes",
     "openPrompt": "Abrir um arquivo XLSX",
     "sheetTabsLabel": "Planilhas",
-    "clearExceedsLimit": "Limpar excede o limite de células."
+    "clearExceedsLimit": "Limpar excede o limite de células.",
+    "cellMenuLabel": "Menu da célula",
+    "sheetTabMenuLabel": "Menu da guia da planilha",
+    "renameSheetLabel": "Renomear planilha",
+    "sheetNamePrefix": "Planilha"
   },
   "presence": {
     "label": "Colaboradores",

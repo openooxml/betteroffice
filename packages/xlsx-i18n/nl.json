@@ -149,8 +149,31 @@
       "permissionDenied": "De hosttoepassing heeft deze plug-in geen toestemming gegeven om deze opdracht te gebruiken.",
       "unsupportedPolicy": "Plug-ins kunnen deze opdracht nog niet uitvoeren. Gebruik in plaats daarvan een bewerkingsbatch.",
       "pluginUnavailable": "De plug-in is niet meer actief.",
-      "aborted": "De plug-inactie is geannuleerd voordat de opdracht werd uitgevoerd."
-    }
+      "aborted": "De plug-inactie is geannuleerd voordat de opdracht werd uitgevoerd.",
+      "clipboardUnavailable": "Deze browser staat plakken vanuit een menu niet toe. Gebruik de sneltoets.",
+      "lastSheet": "Een werkmap heeft ten minste één blad nodig.",
+      "sheetAtEdge": "Het blad kan niet verder worden verplaatst.",
+      "sheetNameInvalid": "Bladnamen hebben 1 tot 31 tekens nodig, moeten uniek zijn en mogen geen : \\ / ? * [ ] bevatten.",
+      "clipboardDenied": "De browser heeft geen toegang tot het klembord toegestaan."
+    },
+    "cut": "Knippen",
+    "copy": "Kopiëren",
+    "paste": "Plakken",
+    "pastePlainText": "Plakken als platte tekst",
+    "clearContents": "Inhoud wissen",
+    "insert": "Invoegen",
+    "delete": "Verwijderen",
+    "insertRowsAbove": "Rijen boven invoegen",
+    "insertRowsBelow": "Rijen onder invoegen",
+    "insertColumnsLeft": "Kolommen links invoegen",
+    "insertColumnsRight": "Kolommen rechts invoegen",
+    "deleteRows": "Rijen verwijderen",
+    "deleteColumns": "Kolommen verwijderen",
+    "insertSheet": "Blad invoegen",
+    "deleteSheet": "Blad verwijderen",
+    "renameSheet": "Naam wijzigen",
+    "moveSheetLeft": "Naar links verplaatsen",
+    "moveSheetRight": "Naar rechts verplaatsen"
   },
   "editor": {
     "appLabel": "Spreadsheeteditor",
@@ -165,7 +188,11 @@
     "showDetails": "Details weergeven",
     "openPrompt": "Een XLSX-bestand openen",
     "sheetTabsLabel": "Werkbladen",
-    "clearExceedsLimit": "Wissen overschrijdt de cellimiet."
+    "clearExceedsLimit": "Wissen overschrijdt de cellimiet.",
+    "cellMenuLabel": "Celmenu",
+    "sheetTabMenuLabel": "Menu van het bladtabblad",
+    "renameSheetLabel": "Naam van blad wijzigen",
+    "sheetNamePrefix": "Werkblad"
   },
   "presence": {
     "label": "Medewerkers",

@@ -149,8 +149,31 @@
       "permissionDenied": "L'application hôte n'a pas autorisé ce plugin à utiliser cette commande.",
       "unsupportedPolicy": "Les plugins ne peuvent pas encore exécuter cette commande. Utilisez plutôt un lot de modifications.",
       "pluginUnavailable": "Le plugin n'est plus actif.",
-      "aborted": "L'action du plugin a été annulée avant l'exécution de la commande."
-    }
+      "aborted": "L'action du plugin a été annulée avant l'exécution de la commande.",
+      "clipboardUnavailable": "Ce navigateur ne permet pas de coller depuis un menu. Utilisez le raccourci clavier.",
+      "lastSheet": "Un classeur doit contenir au moins une feuille.",
+      "sheetAtEdge": "La feuille ne peut pas être déplacée plus loin.",
+      "sheetNameInvalid": "Les noms de feuille comptent 1 à 31 caractères, doivent être uniques et ne peuvent pas contenir : \\ / ? * [ ].",
+      "clipboardDenied": "Le navigateur n’a pas autorisé l’accès au presse-papiers."
+    },
+    "cut": "Couper",
+    "copy": "Copier",
+    "paste": "Coller",
+    "pastePlainText": "Coller en texte brut",
+    "clearContents": "Effacer le contenu",
+    "insert": "Insérer",
+    "delete": "Supprimer",
+    "insertRowsAbove": "Insérer des lignes au-dessus",
+    "insertRowsBelow": "Insérer des lignes en dessous",
+    "insertColumnsLeft": "Insérer des colonnes à gauche",
+    "insertColumnsRight": "Insérer des colonnes à droite",
+    "deleteRows": "Supprimer les lignes",
+    "deleteColumns": "Supprimer les colonnes",
+    "insertSheet": "Insérer une feuille",
+    "deleteSheet": "Supprimer la feuille",
+    "renameSheet": "Renommer",
+    "moveSheetLeft": "Déplacer vers la gauche",
+    "moveSheetRight": "Déplacer vers la droite"
   },
   "editor": {
     "appLabel": "Éditeur de feuilles de calcul",
@@ -165,7 +188,11 @@
     "showDetails": "Afficher les détails",
     "openPrompt": "Ouvrir un fichier XLSX",
     "sheetTabsLabel": "Feuilles",
-    "clearExceedsLimit": "L’effacement dépasse la limite de cellules."
+    "clearExceedsLimit": "L’effacement dépasse la limite de cellules.",
+    "cellMenuLabel": "Menu de la cellule",
+    "sheetTabMenuLabel": "Menu de l’onglet de feuille",
+    "renameSheetLabel": "Renommer la feuille",
+    "sheetNamePrefix": "Feuille"
   },
   "presence": {
     "label": "Collaborateurs",
