@@ -301,6 +301,11 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
           if (event.key === 'Escape') insertion.cancel();
           shapes.onKeyDown(event);
           if (event.defaultPrevented) return;
+          if (event.target === event.currentTarget && (event.ctrlKey || event.metaKey) && !event.altKey &&
+            !event.shiftKey && event.key.toLowerCase() === 'a') {
+            event.preventDefault();
+            return;
+          }
           if (!presentation?.current || review.diff) return;
           const selected = presentation.store.getSnapshot().selection;
           if ((event.key === 'Delete' || event.key === 'Backspace') && selected?.kind === 'object') {

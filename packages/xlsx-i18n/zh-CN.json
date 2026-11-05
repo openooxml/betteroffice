@@ -218,7 +218,12 @@
     "cellLabel": "{address}, {value}",
     "cellLabelSelected": "{address}, {value}, 已选",
     "emptyCellLabel": "{address}, 空",
-    "emptyCellLabelSelected": "{address}, 空, 已选"
+    "emptyCellLabelSelected": "{address}, 空, 已选",
+    "hasFormula": "{label}，包含公式",
+    "rangeSelected": "已选择 {start} 到 {end}，{rows} 行 × {columns} 列",
+    "sheetActivated": "{name}，第 {index} 个工作表，共 {count} 个",
+    "cellInputLabel": "编辑单元格 {address}",
+    "gridRoleDescription": "工作表"
   },
   "plugins": {
     "toolbarGroup": "插件",

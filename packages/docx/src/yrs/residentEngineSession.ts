@@ -185,7 +185,7 @@ export type ResidentEngineSession = Pick<
   storyGeometry(root: string, ranges: Array<[number, number]>, selection?: [YrsLoc, YrsLoc]): {
     paragraphs: Array<{ story: string; paraId: string; index: number; from: number; to: number; leading: number; length: number;
       controls?: Array<{ offset: number; from: number; to: number }> }>;
-    tables: Array<{ story: string; tableIndex: number; from: number; to: number; at: YrsLoc;
+    tables: Array<{ story: string; tableIndex: number; from: number; to: number; at: YrsLoc; grid: number[];
       cells: Array<{ story: string; paraId: string; row: number; column: number; rowspan: number; colspan: number; from: number; to: number }> }>;
     controls: Array<{ story: string; contentStory: string; from: number; to: number }>;
     selection: [number, number] | null;

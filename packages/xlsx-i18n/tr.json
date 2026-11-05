@@ -218,7 +218,12 @@
     "cellLabel": "{address}, {value}",
     "cellLabelSelected": "{address}, {value}, seçili",
     "emptyCellLabel": "{address}, boş",
-    "emptyCellLabelSelected": "{address}, boş, seçili"
+    "emptyCellLabelSelected": "{address}, boş, seçili",
+    "hasFormula": "{label}, formül içeriyor",
+    "rangeSelected": "{start} ile {end} arası seçildi, {rows} satır x {columns} sütun",
+    "sheetActivated": "{name}, sayfa {index} / {count}",
+    "cellInputLabel": "{address} hücresini düzenle",
+    "gridRoleDescription": "çalışma sayfası"
   },
   "plugins": {
     "toolbarGroup": "Eklentiler",

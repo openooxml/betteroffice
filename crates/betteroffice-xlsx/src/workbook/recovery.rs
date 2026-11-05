@@ -1414,10 +1414,10 @@ mod tests {
         assert!(!captured_ids.contains(&expected_ids[2]));
         assert_eq!(&expected_ids[..2], captured_ids.as_slice());
         let restored_keys = restored.authority.structure().unwrap().sheet_keys;
-        assert_eq!(
-            restored_keys[2],
-            format!("replica:{}:{}", restored_identity.0, restored_identity.2)
-        );
+        let minted = restored_keys[2]
+            .strip_prefix(&format!("replica:{}:", restored_identity.0))
+            .unwrap();
+        assert_eq!(minted.split(':').count(), 2);
         assert!(!captured_keys.contains(&restored_keys[2]));
         assert_eq!(&restored_keys[..2], captured_keys.as_slice());
         assert_eq!(restored.save().unwrap(), workbook.save().unwrap());

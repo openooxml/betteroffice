@@ -81,7 +81,7 @@ impl Workbook {
         .map_err(authority_error)?;
         let model = match &self.mode {
             WorkbookMode::Collaborative { structure } => {
-                if !authority.structure.same_except_local_layout(structure) {
+                if !structure.allows_transition(&authority.structure) {
                     return Err(crate::Error::CollaborativeStructureChanged);
                 }
                 validate_collaboration_size(&authority.update)?;

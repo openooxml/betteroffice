@@ -6,6 +6,8 @@ import { commandForEvent } from '../commands/descriptors';
 import { FormulaBarContext, presentInputValue, type FormulaBarBinding } from '../components/toolbar/FormulaBar';
 import type { WorkerDraftController } from './WorkerDraftController';
 import type { PeerlessWorkbookSession } from './usePeerlessSessionWorkbook';
+import { useTranslation } from '../i18n';
+import { ActiveCellInputContext } from './PeerlessWorkerAnnouncer';
 import type { WorkerPresentationStore } from './WorkerPresentationStore';
 
 export const PeerlessWorkerInputs = memo(function PeerlessWorkerInputs({ controller, presentation, run, active,
@@ -26,7 +28,7 @@ export const PeerlessWorkerInputs = memo(function PeerlessWorkerInputs({ control
   children: ReactNode;
 }) {
   const { selection, view, painted } = useSyncExternalStore(presentation.subscribe, presentation.getSnapshot);
-  const [focusedInput, setFocusedInput] = useState<{ at: string; value: string } | null>(null);
+  const [focusedInput, setFocusedInput] = useState<{ at: string; value: string; painted: object | null } | null>(null);
   const inputRevision = painted?.coversThroughSeq ?? 0;
   const unavailable = usePeerlessReadOnly(run, readOnly);
   useEffect(() => {
@@ -41,7 +43,7 @@ export const PeerlessWorkerInputs = memo(function PeerlessWorkerInputs({ control
         navigation.current === at && controller.focusedCellIdentity === draftIdentity) {
         const value = result.cells[0]?.[0]?.input ?? '';
         controller.focusedCellInput = { identity: draftIdentity, value };
-        setFocusedInput({ at: cell, value });
+        setFocusedInput({ at: cell, value, painted });
         controller.presented(inputRevision);
       }
     }).catch((failure) => { if (!cancelled && run.current) run.fail(failure); });
@@ -75,7 +77,7 @@ export const PeerlessWorkerInputs = memo(function PeerlessWorkerInputs({ control
   const gated = selection !== null && !cellEditable(selection.anchor);
   const formula = useMemo<FormulaBarBinding>(() => ({ ...handlers, a1, value, disabled, readOnly: unavailable || selectedChart || gated,
     ...gated && { onChange: () => {} } }), [handlers, a1, value, disabled, unavailable, selectedChart, gated]);
-  return <FormulaBarContext.Provider value={formula}>{children}
+  return <FormulaBarContext.Provider value={formula}><ActiveCellInputContext.Provider value={focusedInput}>{children}</ActiveCellInputContext.Provider>
     {state.refused.map((record) => <button key={record.seq ?? record.draft.revision}
       data-testid="xlsx-refused-draft" data-sheet={record.draft.sheet} data-row={record.draft.row}
       data-col={record.draft.col} onClick={() => controller.restore(record)}>
@@ -91,6 +93,7 @@ export const PeerlessWorkerCellInput = memo(function PeerlessWorkerCellInput({ c
   disabled: boolean;
   zoom: number;
 }) {
+  const { t } = useTranslation();
   const inputRef = useCallback((input: HTMLInputElement | null) => { controller.cellInput = input; }, [controller]);
   const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
   const draft = state.cell;
@@ -134,7 +137,7 @@ export const PeerlessWorkerCellInput = memo(function PeerlessWorkerCellInput({ c
     background, color, padding: '0 3px', font: `${13 * zoom}px system-ui, sans-serif`,
     pointerEvents: 'auto', outline: 'none' };
   return <input ref={inputRef} data-testid="xlsx-cell-editor"
-    defaultValue={draft.value} disabled={disabled} style={style}
+    aria-label={t('a11y.cellInputLabel', { address: cellAddress(draft) })} defaultValue={draft.value} disabled={disabled} style={style}
     onChange={(event) => controller.change('cell', event.target.value, event.currentTarget)}
     onCompositionStart={() => controller.start('cell')}
     onCompositionEnd={(event) => controller.end(event.nativeEvent.data, event.currentTarget.value)}

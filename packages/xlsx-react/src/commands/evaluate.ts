@@ -353,11 +353,9 @@ function options<K extends XlsxCommandId>(
 }
 
 function mergeGate(
-  env: XlsxCommandEnvironment,
   selection: XlsxSelectionEnvironment,
   action: MergeAction
 ): Gate {
-  if (env.collaborative) return 'collaboration-unsupported';
   const rows = selection.bottom - selection.top + 1;
   const columns = selection.right - selection.left + 1;
   switch (action) {
@@ -470,13 +468,13 @@ function evaluateCells<K extends XlsxCommandId>(
       );
       if (bound) {
         return {
-          gate: mergeGate(env, selection, bound.value as MergeAction),
+          gate: mergeGate(selection, bound.value as MergeAction),
           value: value as XlsxCommandValues[K],
         };
       }
-      const available = MERGE_ACTIONS.some((action) => !mergeGate(env, selection, action));
+      const available = MERGE_ACTIONS.some((action) => !mergeGate(selection, action));
       return {
-        gate: available ? null : mergeGate(env, selection, 'all'),
+        gate: available ? null : mergeGate(selection, 'all'),
         value: value as XlsxCommandValues[K],
         options: list,
       };

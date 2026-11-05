@@ -2527,7 +2527,7 @@ describe('XlsxEditor commands', () => {
     expect(await editor.execute('save', null)).toEqual({ ok: true, status: 'executed' });
   });
 
-  it('disables merging while collaborating', async () => {
+  it('enables merging while collaborating', async () => {
     let api: XlsxEditorApi | undefined;
     render(
       <XlsxEditor legacySyncApi experimentalWorkerOpen={false}
@@ -2543,7 +2543,7 @@ describe('XlsxEditor commands', () => {
       api!.selectCells(0, { anchor: { row: 0, col: 0 }, focus: { row: 1, col: 1 } });
     });
     const merge = api!.commands.getState('merge', { value: 'all' });
-    expect(merge.enabled ? null : merge.disabledReason.code).toBe('collaboration-unsupported');
+    expect(merge.enabled ? null : merge.disabledReason.code).toBeNull();
   });
 
   it('allows host proposal review in a read-only editor only when opted in', async () => {
