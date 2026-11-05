@@ -666,3 +666,53 @@ fn png_uses_the_document_theme_accent() {
             .any(|pixel| close(pixel, [0x44, 0x72, 0xc4]))
     );
 }
+
+fn footnoted_docx() -> Vec<u8> {
+    let relationships = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    let main = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml""#;
+    let parts = vec![
+        (
+            "[Content_Types].xml".to_owned(),
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/></Types>"#.to_vec(),
+        ),
+        (
+            "_rels/.rels".to_owned(),
+            format!(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{relationships}/officeDocument" Target="word/document.xml"/></Relationships>"#).into_bytes(),
+        ),
+        (
+            "word/_rels/document.xml.rels".to_owned(),
+            format!(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{relationships}/footnotes" Target="footnotes.xml"/></Relationships>"#).into_bytes(),
+        ),
+        (
+            "word/document.xml".to_owned(),
+            format!(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document {main}><w:body><w:p w14:paraId="11111111"><w:r><w:t>Body</w:t></w:r><w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:footnoteReference w:id="1"/></w:r></w:p></w:body></w:document>"#).into_bytes(),
+        ),
+        (
+            "word/footnotes.xml".to_owned(),
+            format!(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:footnotes {main}><w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote><w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote><w:footnote w:id="1"><w:p w14:paraId="22222222"><w:r><w:t>Note</w:t></w:r></w:p></w:footnote></w:footnotes>"#).into_bytes(),
+        ),
+    ];
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn a_document_with_a_footnote_renders_to_png() {
+    let options = betteroffice_docx::OpenOptions::default();
+    #[cfg(feature = "fonts")]
+    let options = betteroffice_docx::OpenOptions {
+        font_source: betteroffice_docx::fonts::FontSource::Backstop,
+        ..options
+    };
+    let mut document = Document::open_with_options(&footnoted_docx(), &options).unwrap();
+    document
+        .register_font("Calibri", false, false, CARLITO)
+        .unwrap();
+    let page = document
+        .render_png(
+            betteroffice_docx::PngTarget { page: 0 },
+            &betteroffice_docx::RenderOptions::default(),
+        )
+        .unwrap();
+    let (width, height, _) = decode(&page.bytes);
+    assert!(width > 0 && height > 0);
+}

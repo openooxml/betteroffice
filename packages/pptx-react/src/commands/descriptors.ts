@@ -25,6 +25,7 @@ export const PPTX_COMMAND_DESCRIPTORS: DescriptorTable = Object.freeze({
   bold: descriptor('bold', 'toolbar.bold', true, [plain('Mod+B')]),
   italic: descriptor('italic', 'toolbar.italic', true, [plain('Mod+I')]),
   underline: descriptor('underline', 'toolbar.underline', true, [plain('Mod+U')]),
+  strikethrough: descriptor('strikethrough', 'toolbar.strikethrough', true),
   fontFamily: descriptor('fontFamily', 'toolbar.fontFamily', true),
   fontSize: descriptor('fontSize', 'toolbar.fontSize', true),
   fontSizeStep: descriptor('fontSizeStep', 'commands.fontSizeStep', true),

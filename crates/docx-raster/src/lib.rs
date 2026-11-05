@@ -4,6 +4,7 @@
 compile_error!("betteroffice-docx-raster is server-side only");
 
 mod font;
+mod shadow;
 
 pub use font::{GlyphCache, measure_text};
 
@@ -142,11 +143,14 @@ impl<'a> RenderResources<'a> {
     }
 }
 
-/// A rendered page and the image references it left undrawn.
+/// A rendered page, the image references it left undrawn, and the effects this
+/// backend cannot draw yet, by kind (`text.textOutline`, `shape.effects`, ...),
+/// which it left out while drawing the rest of their primitive.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderedPage {
     pub bytes: Vec<u8>,
     pub skipped_images: usize,
+    pub skipped_effects: BTreeMap<String, usize>,
 }
 
 /// Renders one display-list page to deterministic PNG bytes.
@@ -212,6 +216,7 @@ pub fn render_page_cached_scaled(
     Ok(RenderedPage {
         bytes: encode_png(pixmap, width, height)?,
         skipped_images: renderer.scratch.images.skipped,
+        skipped_effects: renderer.scratch.skipped,
     })
 }
 
@@ -394,6 +399,12 @@ struct Scratch<'k> {
     images: PageImages<'k>,
     masks: MaskCache,
     budget: PageBudget,
+    skipped: BTreeMap<String, usize>,
+}
+
+/// Counts an effect left out of a primitive that was otherwise drawn.
+pub(crate) fn skip_effect(skipped: &mut BTreeMap<String, usize>, kind: &str) {
+    *skipped.entry(kind.to_owned()).or_default() += 1;
 }
 
 struct Renderer<'k> {
@@ -418,6 +429,7 @@ impl<'k> Renderer<'k> {
                 images: PageImages::new(images),
                 masks: MaskCache::new(width, height),
                 budget: PageBudget::new(width, height),
+                skipped: BTreeMap::new(),
             },
         }
     }
@@ -556,6 +568,7 @@ fn paint_primitive_core<'k>(
                 mask,
                 retained_mask_bytes,
                 opacity,
+                skipped: &mut scratch.skipped,
             };
             font::paint_text(&mut context, run)
         }
@@ -571,6 +584,7 @@ fn paint_primitive_core<'k>(
                 mask,
                 retained_mask_bytes,
                 opacity,
+                skipped: &mut scratch.skipped,
             };
             font::paint_glyph_run(&mut context, run)
         }
@@ -581,9 +595,7 @@ fn paint_primitive_core<'k>(
         Primitive::Image(image) => paint_image(
             pixmap, image, resources, scratch, transform, mask, opacity, scope,
         ),
-        Primitive::Shape(shape) => {
-            paint_shape(pixmap, shape, transform, mask, opacity, &mut scratch.budget)
-        }
+        Primitive::Shape(shape) => paint_shape(pixmap, shape, transform, mask, opacity, scratch),
         Primitive::Decoration(decoration) => paint_decoration(
             pixmap,
             decoration,
@@ -727,8 +739,9 @@ fn paint_shape(
     transform: Transform,
     mask: Option<&Mask>,
     opacity: f32,
-    budget: &mut PageBudget,
+    scratch: &mut Scratch<'_>,
 ) -> Result<(), String> {
+    let budget = &mut scratch.budget;
     if shape
         .attrs
         .fill_paint
@@ -739,23 +752,118 @@ fn paint_shape(
     {
         return Ok(());
     }
-    if !shape.attrs.effects.is_empty() {
-        return Err("unsupported shape field: effects".to_string());
+    let (shadow, undrawn) = shape_shadow(&shape.attrs.effects)?;
+    for _ in 0..undrawn {
+        skip_effect(&mut scratch.skipped, "shape.effects");
     }
     budget.charge_path(shape.geometry_path.len() as u64)?;
     let path = build_shape_path(&shape.geometry_path)?;
     let visual = shape_transform(shape)?;
     let transform = transform.pre_concat(visual);
-    if let Some(paint) = shape_fill(shape, opacity)? {
-        pixmap.fill_path(&path, &paint, FillRule::Winding, transform, mask);
+    let fill = shape_fill(shape, opacity)?;
+    let stroked = shape_stroke(shape, opacity)?;
+    if let Some(dash) = stroked.as_ref().and_then(|stroked| stroked.dash.as_ref()) {
+        budget.charge_path(dash_segments(path_length(&path), dash))?;
     }
-    if let Some(stroked) = shape_stroke(shape, opacity)? {
-        if let Some(dash) = &stroked.dash {
-            budget.charge_path(dash_segments(path_length(&path), dash))?;
+    type Draw<'d> = Box<dyn Fn(&mut Pixmap, Transform, Option<&Mask>) + 'd>;
+    let mut parts: Vec<Draw<'_>> = Vec::new();
+    if let Some(paint) = &fill {
+        parts.push(Box::new(
+            |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>| {
+                target.fill_path(&path, paint, FillRule::Winding, transform, mask);
+            },
+        ));
+    }
+    if let Some(stroked) = &stroked {
+        parts.push(Box::new(
+            |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>| {
+                target.stroke_path(&path, &stroked.paint, &stroked.stroke, transform, mask);
+            },
+        ));
+    }
+    let reach =
+        stroked.as_ref().map_or(0.0, |stroked| stroked.stroke.width) * max_axis_scale(transform);
+    let bounds = path.bounds().transform(transform).and_then(|bounds| {
+        Rect::from_ltrb(
+            bounds.left() - reach,
+            bounds.top() - reach,
+            bounds.right() + reach,
+            bounds.bottom() + reach,
+        )
+    });
+    for draw in &parts {
+        if let (Some(shadow), Some(bounds)) = (shadow, bounds)
+            && let Some(mut surface) = shadow::shadow_surface(
+                (pixmap.width(), pixmap.height()),
+                bounds,
+                &shadow,
+                budget,
+                scratch.masks.bytes,
+            )?
+        {
+            draw(
+                &mut surface.pixmap,
+                surface.offset.pre_concat(transform),
+                None,
+            );
+            shadow::composite_shadow(pixmap, mask, surface, &shadow);
         }
-        pixmap.stroke_path(&path, &stroked.paint, &stroked.stroke, transform, mask);
+        draw(pixmap, transform, mask);
     }
     Ok(())
+}
+
+/// The largest factor `transform` stretches a length by along either axis.
+fn max_axis_scale(transform: Transform) -> f32 {
+    let x = (transform.sx * transform.sx + transform.ky * transform.ky).sqrt();
+    let y = (transform.kx * transform.kx + transform.sy * transform.sy).sqrt();
+    x.max(y)
+}
+
+/// The shadow the web backend draws for a shape, the first shadow, outer shadow
+/// or glow, and how many of the shape's effects it leaves undrawn.
+fn shape_shadow(effects: &[Value]) -> Result<(Option<shadow::Shadow>, usize), String> {
+    let drawn = effects.iter().position(|effect| {
+        matches!(
+            effect.get("kind").and_then(Value::as_str),
+            Some("shadow" | "outerShadow" | "glow")
+        )
+    });
+    let Some(index) = drawn else {
+        return Ok((None, effects.len()));
+    };
+    let effect = &effects[index];
+    let number = |key: &str| {
+        effect
+            .get(key)
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite())
+    };
+    let color = color_with_opacity(
+        effect
+            .get("color")
+            .and_then(Value::as_str)
+            .unwrap_or("#000000"),
+        1.0,
+    )?;
+    let blur = number("blurRadius")
+        .or_else(|| number("size"))
+        .unwrap_or(0.0)
+        .max(0.0) as f32;
+    let (dx, dy) = if effect.get("kind").and_then(Value::as_str) == Some("glow") {
+        (0.0, 0.0)
+    } else {
+        let radians = number("direction").unwrap_or(0.0).to_radians();
+        let distance = number("distance").unwrap_or(0.0);
+        (
+            (radians.cos() * distance) as f32,
+            (radians.sin() * distance) as f32,
+        )
+    };
+    Ok((
+        Some(shadow::Shadow::new(color, blur, dx, dy)),
+        effects.len() - 1,
+    ))
 }
 
 fn shape_fill(shape: &ShapePrimitive, opacity: f32) -> Result<Option<Paint<'static>>, String> {
@@ -1196,10 +1304,10 @@ fn paint_image<'k>(
     scope: ImageScope<'k>,
 ) -> Result<(), String> {
     if image.filter.is_some() {
-        return Err("unsupported image field: filter".to_string());
+        skip_effect(&mut scratch.skipped, "image.filter");
     }
     if !image.attrs.effects.is_empty() {
-        return Err("unsupported image field: effects".to_string());
+        skip_effect(&mut scratch.skipped, "image.effects");
     }
     let Some(source_bytes) = image_source(&image.rel_id, scope, resources) else {
         scratch.images.skipped += 1;
@@ -2441,7 +2549,7 @@ fn validate_visual_attrs(primitive: &Primitive, attrs: &DocAttrs) -> Result<(), 
     if !is_decoration && attrs.style.is_some() {
         return Err("decoration style is attached to a non-decoration primitive".to_string());
     }
-    if !is_text && attrs.leader_glyphs.is_some() {
+    if !is_text && !is_glyph && attrs.leader_glyphs.is_some() {
         return Err("leaderGlyphs are attached to a non-text primitive".to_string());
     }
     if !is_text && !is_glyph && attrs.modern_effects.is_some() {

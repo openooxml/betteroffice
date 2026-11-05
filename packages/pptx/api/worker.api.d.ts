@@ -898,7 +898,7 @@ export type PresentationCommandPayloads = {
     };
     formatText: PresentationCommandTextInput & {
         patch: TextStyle;
-        toggle?: 'bold' | 'italic' | 'underline';
+        toggle?: 'bold' | 'italic' | 'underline' | 'strikethrough';
         fontSizeStep?: {
             direction: 'increase' | 'decrease';
             sizes: readonly number[];
@@ -3035,6 +3035,7 @@ export interface EffectiveTextStyle {
     bold: boolean;
     italic: boolean;
     underline: string;
+    strike?: string;
     fontSizePt: number;
     color: string;
     fontFamily: string;
@@ -3044,6 +3045,7 @@ export interface SelectionTextFormatting {
     bold?: boolean;
     italic?: boolean;
     underline?: boolean;
+    strikethrough?: boolean;
     fontSize?: number;
     textColor?: string;
     fontFamily?: string;
@@ -3051,6 +3053,12 @@ export interface SelectionTextFormatting {
 export declare function selectionFormattingFromStory(story: StorySnapshot, anchor: number, focus: number, fallback: EffectiveTextStyle): SelectionTextFormatting;
 export declare function storyFormattingFromStory(story: StorySnapshot, fallback: EffectiveTextStyle): SelectionTextFormatting;
 export declare function effectiveStyleFromSelection(story: StorySnapshot, anchor: number, focus: number, fallback: EffectiveTextStyle): EffectiveTextStyle;
+export declare function typingStyle<T extends {
+    strike?: string | null;
+}>(style: T): T;
+export declare function insertionStyle<T extends {
+    strike?: string | null;
+}>(style: T): T;
 export declare function insertionStyleFromSelection(story: StorySnapshot, anchor: number, focus: number, storedMarks: TextStyle): TextStyle;
 export declare function insertionEchoRun(story: StorySnapshot, anchor: number, focus: number, storedMarks: TextStyle): {
     neighbour: 'before' | 'after';
@@ -3067,6 +3075,7 @@ export interface TextStyle {
     color?: string;
     fontFamily?: string;
     underline?: string;
+    strike?: string;
     spacingPt?: number;
     baselinePct?: number;
 }
@@ -3078,6 +3087,7 @@ export interface TextStyleSnapshot {
     color: string | null;
     fontFamily: string | null;
     underline: string | null;
+    strike?: string | null;
     spacingPt?: number | null;
     baselinePct?: number | null;
     /** `a:rPr@kern`: the smallest size, in points, the run is kerned at. */
@@ -3608,6 +3618,7 @@ export interface PositionedTextRun {
     bold: boolean;
     italic: boolean;
     underline: boolean;
+    strike?: string;
     color: string;
     letterSpacingPx?: number;
     baselineOffsetPx?: number;
@@ -4418,6 +4429,8 @@ export {};
 export { DEFAULT_EDITOR_TEXT_STYLE, effectiveStyleFromSelection, selectionFormattingFromStory, storyFormattingFromStory, } from './textFormatting';
 /** @internal */
 export type { EffectiveTextStyle, SelectionTextFormatting } from './textFormatting';
+/** @internal */
+export { presentationStoryFormatting } from './wasm/loader';
 /** @internal */
 export { browserFrameImages } from './render/browserFrameImages';
 export { decodeBrowserPresentationImage } from './render/browserImage';

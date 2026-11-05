@@ -105,6 +105,7 @@ test('default editor static chunks exclude the peerless core', async () => {
     /packages\/pptx\/src\/render\/browserImage\.ts$/,
     /packages\/pptx\/src\/render\/imageSize\.ts$/,
     /packages\/pptx\/src\/wasm\/loader\.ts$/,
+    /shared\/react-toolbar\/MenuList\.tsx$/,
   ]) {
     expect(inputs.filter((path) => module.test(path))).toEqual([]);
     expect(deferredInputs.some((path) => module.test(path))).toBe(true);

@@ -12,7 +12,12 @@
       "encodedLength": 3595531,
       "byteLength": 4533028,
       "sha256": "dff723ba59d57d136764a04b9b2d03205544f7cd785a711442d6d2d085ac5073",
-      "dict": null
+      "dict": null,
+      "slices": {
+        "format": 1,
+        "index": "NotoSansJP-Regular/slices.json",
+        "indexSha256": "9fd53a1857302a7d9b3dc2b9f3e8039b6d13c64e0a79d416ddbca8a692bc415d"
+      }
     },
     {
       "file": "NotoSansKR-Regular.otf.zst",
@@ -22,7 +27,12 @@
       "encodedLength": 3420953,
       "byteLength": 4644748,
       "sha256": "69975a0ac8472717870aefeab0a4d52739308d90856b9955313b2ad5e0148d68",
-      "dict": null
+      "dict": null,
+      "slices": {
+        "format": 1,
+        "index": "NotoSansKR-Regular/slices.json",
+        "indexSha256": "309e142311ef7c1b73b6052ba4ddb09f77a06d2ebc20243fbbed55cb872ce47d"
+      }
     },
     {
       "file": "NotoSansSC-Regular.otf.zst",
@@ -32,7 +42,12 @@
       "encodedLength": 6444964,
       "byteLength": 8331336,
       "sha256": "faa6c9df652116dde789d351359f3d7e5d2285a2b2a1f04a2d7244df706d5ea9",
-      "dict": null
+      "dict": null,
+      "slices": {
+        "format": 1,
+        "index": "NotoSansSC-Regular/slices.json",
+        "indexSha256": "73a0d2d52944be3db939ec12c1331521429d7ad2f7bff5b9342f6942fc671d90"
+      }
     },
     {
       "file": "NotoSansTC-Regular.otf.zst",
@@ -42,7 +57,12 @@
       "encodedLength": 4456580,
       "byteLength": 5683368,
       "sha256": "5bab0cb3c1cf89dde07c4a95a4054b195afbcfe784d69d75c340780712237537",
-      "dict": null
+      "dict": null,
+      "slices": {
+        "format": 1,
+        "index": "NotoSansTC-Regular/slices.json",
+        "indexSha256": "e246aab5dbca74d596959ca46a6693733b137bacc0bda47e8dd6f3d02aeeb857"
+      }
     },
     {
       "file": "NotoSerifSC-Regular.otf.zst",
@@ -52,7 +72,12 @@
       "encodedLength": 8743526,
       "byteLength": 11625800,
       "sha256": "e8f396decc1f0963a016a989c3d8852e863d1350996f573860a80767c83a1cd3",
-      "dict": null
+      "dict": null,
+      "slices": {
+        "format": 1,
+        "index": "NotoSerifSC-Regular/slices.json",
+        "indexSha256": "7e1cf89eaa36520084c6b74bb3fd6bcbe595bc674fed4d834db967abde54b675"
+      }
     }
   ]
 }

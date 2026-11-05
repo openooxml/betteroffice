@@ -266,6 +266,67 @@ function guardedContext(ctx: CanvasRenderingContext2D, current: () => boolean,
   });
 }
 
+interface RasterLayerSource {
+  primitive: RasterPrimitive;
+  parents: readonly RasterPrimitive[];
+  parentsKey: string;
+  box?: RasterTextBox;
+}
+
+function rasterLayers(primitives: readonly RasterPrimitive[], parents: readonly RasterPrimitive[] = [],
+  layers: RasterLayerSource[] = []): RasterLayerSource[] {
+  const parentsKey = JSON.stringify(parents.map((parent) => ({
+    x: parent.x, y: parent.y, w: parent.w, h: parent.h, transform: parent.transform,
+  })));
+  for (const primitive of primitives) {
+    if (primitive.kind === 'chart' || primitive.kind === 'table') rasterLayers(primitive.primitives, [...parents, primitive], layers);
+    else if (primitive.kind === 'textBox') {
+      for (const line of primitive.lines) layers.push({ primitive: { ...primitive, lines: [line] }, parents, parentsKey, box: primitive });
+    } else layers.push({ primitive, parents, parentsKey });
+  }
+  return layers;
+}
+
+/**
+ * Paints a slide into `ctx` as {@link buildRaster} composites it, each layer clipped to its tile's device pixels,
+ * without allocating tile canvases. The result is not retained, so later damage patches still need a built raster.
+ */
+export async function paintRasterDirect<L extends RasterDisplayList>(
+  ctx: CanvasRenderingContext2D, list: L, dpr: number, scale: number, media: Pick<MediaLease, 'resolve' | 'ready'>,
+  paint: (ctx: CanvasRenderingContext2D, list: L, dpr: number, scale: number, options?: RasterPaintOptions) => Promise<void>,
+  current: () => boolean,
+): Promise<void> {
+  const factor = dpr * scale;
+  await media.ready;
+  if (!current()) return;
+  ctx.save();
+  try {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    await paint(guardedContext(ctx, current), { ...list, primitives: [] }, dpr, scale);
+    for (const { primitive, parents } of rasterLayers(list.primitives)) {
+      if (!current()) return;
+      const bounds = layerBounds(primitive, parents, factor, list);
+      if (!bounds) continue;
+      const x = Math.round(bounds.x * factor); const y = Math.round(bounds.y * factor);
+      const width = Math.ceil(bounds.width * factor); const height = Math.ceil(bounds.height * factor);
+      ctx.save();
+      try {
+        const layer = guardedContext(ctx, current, () => {
+          ctx.setTransform(1, 0, 0, 1, 0, 0);
+          ctx.beginPath(); ctx.rect(x, y, width, height); ctx.clip();
+          ctx.setTransform(factor, 0, 0, factor, 0, 0);
+          for (const parent of parents) {
+            applyPrimitiveTransform(ctx, parent);
+            ctx.beginPath(); ctx.rect(parent.x, parent.y, parent.w, parent.h); ctx.clip();
+          }
+        });
+        await paint(layer, { ...list, background: undefined, primitives: [primitive] }, dpr, scale,
+          { resolveImage: media.resolve });
+      } finally { ctx.restore(); }
+    }
+  } finally { ctx.restore(); }
+}
+
 export function buildRaster<C extends SlideRasterCanvas, L extends RasterDisplayList>(
   factory: (width: number, height: number) => C, list: L, dpr: number, scale: number, media: MediaLease,
   byKey: Map<string, RasterTile<C>>, pool: RasterPool<C>, jobs: Promise<void>[], remove: () => void,
@@ -365,17 +426,6 @@ export function buildRaster<C extends SlideRasterCanvas, L extends RasterDisplay
     ordered.push({ tile, bounds, box, line: primitive.kind === 'textBox' ? primitive.lines[0] : undefined });
   }
 
-  function visit(primitives: readonly RasterPrimitive[], parents: readonly RasterPrimitive[]): void {
-    const parentsKey = JSON.stringify(parents.map((parent) => ({
-      x: parent.x, y: parent.y, w: parent.w, h: parent.h, transform: parent.transform,
-    })));
-    for (const primitive of primitives) {
-      if (primitive.kind === 'chart' || primitive.kind === 'table') visit(primitive.primitives, [...parents, primitive]);
-      else if (primitive.kind === 'textBox') {
-        for (const line of primitive.lines) add({ ...primitive, lines: [line] }, parents, parentsKey, primitive);
-      } else add(primitive, parents, parentsKey);
-    }
-  }
 
   const raster: SlideRaster<C> = {
     canvas: authoritative, factor, get damage() { return damageRect; }, get ready() { return ready && current(); },
@@ -405,7 +455,9 @@ export function buildRaster<C extends SlideRasterCanvas, L extends RasterDisplay
       } catch (error) { zero(background); zero(foreground); throw error; }
     },
   };
-  try { visit(list.primitives, []); } catch (error) { release(); throw error; }
+  try {
+    for (const layer of rasterLayers(list.primitives)) add(layer.primitive, layer.parents, layer.parentsKey, layer.box);
+  } catch (error) { release(); throw error; }
   const completion = Promise.allSettled(jobs).then(async (results) => {
     for (const result of results) if (result.status === 'rejected') throw result.reason;
     if (!current()) return;

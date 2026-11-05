@@ -2156,6 +2156,7 @@ export interface TextStyle {
     color?: string;
     fontFamily?: string;
     underline?: string;
+    strike?: string;
     spacingPt?: number;
     baselinePct?: number;
 }
@@ -2167,6 +2168,7 @@ export interface TextStyleSnapshot {
     color: string | null;
     fontFamily: string | null;
     underline: string | null;
+    strike?: string | null;
     spacingPt?: number | null;
     baselinePct?: number | null;
     /** `a:rPr@kern`: the smallest size, in points, the run is kerned at. */
@@ -2697,6 +2699,7 @@ export interface PositionedTextRun {
     bold: boolean;
     italic: boolean;
     underline: boolean;
+    strike?: string;
     color: string;
     letterSpacingPx?: number;
     baselineOffsetPx?: number;

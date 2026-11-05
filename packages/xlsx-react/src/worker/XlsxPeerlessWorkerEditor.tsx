@@ -230,6 +230,8 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const flushNudgeRef = useRef<(retained?: boolean) => void>(() => {});
   const focus = useCallback(() => scrollRef.current?.focus({ preventScroll: true }), []);
   const nameNavigation = useRef<(cell: CellAddr) => void>(() => {});
+  const sheetNavigation = useRef<(sheet: number) => void>(() => {});
+  const sheetLayout = useRef(0);
   const navigateFromNameBox = useCallback((cell: CellAddr) => nameNavigation.current(cell), []);
   const exportInput = useRef<ReturnType<typeof createPeerlessWorkerInputCoordinator> | null>(null);
   const [bridge] = useState<WorkerEditorApiBridge & XlsxAsyncExportBridge>(() => ({
@@ -394,9 +396,10 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     if (revealing.current?.generation === owner.generation && revealing.current.navigation === at) return;
     const request = { generation: owner.generation, navigation: at };
     revealing.current = request;
+    const layout = sheetLayout.current;
     void owner.session.call.cellGeometry(sheet, cell.row, cell.col).then((geometry) => {
       const scroll = scrollRef.current;
-      if (!owner.current || ownerRef.current !== owner || navigation.current !== at || !scroll) return;
+      if (!owner.current || ownerRef.current !== owner || navigation.current !== at || sheetLayout.current !== layout || !scroll) return;
       if (previousZoom !== undefined && !cellInViewport(scroll, geometry.rect, previousZoom)) return;
       const view = viewRef.current;
       const id = sheetId(sheet);
@@ -423,7 +426,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       scroll.scrollTop = target.y * scale;
       sourceRef.current?.schedule();
     }).catch((error) => {
-      if (owner.current && ownerRef.current === owner && navigation.current === at) owner.fail(error);
+      if (owner.current && ownerRef.current === owner && navigation.current === at && sheetLayout.current === layout) owner.fail(error);
     }).finally(() => { if (revealing.current === request) revealing.current = null; });
   };
   const revealedZoom = useRef(zoom);
@@ -773,7 +776,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       if (changedSheet) restoreSheetScroll(view);
       if (paint || changedSheet) sourceRef.current?.schedule();
     }).catch((error) => {
-      if (ownerRef.current === owner && owner.current && !owner.failure) owner.fail(error);
+      if (ownerRef.current === owner && owner.current && !owner.failure && revision === geometryRevision.current) owner.fail(error);
     });
   }, [setView, viewRef, sheetScrolls]);
   const selectionKey = () => {
@@ -882,13 +885,32 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       }
       commands.refresh();
     }
-    if (ack.editState?.sheets && JSON.stringify(ack.editState.sheets) !== JSON.stringify(catalogRef.current)) {
-      setCatalog(ack.editState.sheets);
-    }
     const latestSelection = Math.max(0, ...selectionCommands);
     const reconcile = !selectionNavigation.isPending(navigationContext()) && latestSelection > 0 && ack.throughSeq >= latestSelection &&
       selectionRevisions.get(latestSelection) === navigation.current &&
       !draftController.ownsFocus;
+    if (ack.editState?.sheets && JSON.stringify(ack.editState.sheets) !== JSON.stringify(catalogRef.current)) {
+      const sheets = ack.editState.sheets;
+      setCatalog(sheets);
+      const kept = sheets.find((entry) => entry.id === activeSheetId.current);
+      if (!kept || kept.index !== activeRef.current) sheetLayout.current += 1;
+      if (kept && kept.index !== activeRef.current) {
+        const previous = activeRef.current;
+        geometryRevision.current += 1;
+        if (viewRef.current?.sheet === previous) setView({ ...viewRef.current, sheet: kept.index });
+        if (revealedExtent.current?.sheet === previous) revealedExtent.current = { ...revealedExtent.current, sheet: kept.index };
+        setActive(kept.index);
+        sourceRef.current?.schedule();
+      } else if (!kept && sheets.length > 0) {
+        const acknowledged = reconcile && ack.selection ? ack.selection : undefined;
+        const fallback = (acknowledged && sheets.find((entry) => entry.id === acknowledged.sheetId)) ??
+          sheets.find((entry) => entry.index === run.session.editState.activeSheet) ??
+          sheets.find((entry) => entry.index === Math.min(activeRef.current, sheets.length - 1)) ?? sheets[0]!;
+        const restored = acknowledged?.sheetId === fallback.id ? commandSelection(acknowledged, selectionRef.current) : null;
+        placeSelection(fallback.index, restored ?? sheetSelection(fallback.index));
+        queueMicrotask(() => sheetNavigation.current(fallback.index));
+      }
+    }
     if (ack.selection && reconcile) {
       const target = ack.selection;
       const sheet = run.session.editState.sheets?.find((entry) => entry.id === target.sheetId)?.index;
@@ -1460,6 +1482,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     } }, sheet, true);
   };
   nameNavigation.current = (cell) => { navigate(activeRef.current, selectionAt(cell)); focus(); };
+  sheetNavigation.current = (sheet) => { if (sheet === activeRef.current) navigate(sheet); };
   const moveChart = (sheet: number, id: string, dx: number, dy: number, retained = false, generation = run?.generation) => {
     if (!run?.ready || !run.current || run.retiring || generation !== run.generation || run.failure ||
       !retained && !editable() || dx === 0 && dy === 0) return;

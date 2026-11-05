@@ -1,5 +1,6 @@
 //! PyO3 bindings over the `betteroffice-docx` facade.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -881,12 +882,15 @@ impl PyLayout {
 }
 
 /// One rasterized page. `skipped_images` counts the image references the
-/// backend could not resolve and left undrawn.
+/// backend could not resolve and left undrawn; `skipped_effects` counts, by
+/// kind, the effects it left out of primitives it otherwise drew.
 #[pyclass(module = "betteroffice_docx", name = "Png", frozen)]
 pub struct PyPng {
     data: Vec<u8>,
     #[pyo3(get)]
     skipped_images: usize,
+    #[pyo3(get)]
+    skipped_effects: BTreeMap<String, usize>,
 }
 
 #[pymethods]
@@ -1367,6 +1371,7 @@ impl PyDocument {
         Ok(PyPng {
             data: rendered.bytes,
             skipped_images: rendered.skipped_images,
+            skipped_effects: rendered.skipped_effects,
         })
     }
 
@@ -1384,6 +1389,7 @@ impl PyDocument {
         Ok(PyPng {
             data: rendered.bytes,
             skipped_images: rendered.skipped_images,
+            skipped_effects: rendered.skipped_effects,
         })
     }
 

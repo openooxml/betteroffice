@@ -105,7 +105,7 @@ async function openFontConnection(hold = false, fontKeys: readonly string[] = ['
     decodeSvgMedia,
     createDocxCommandConnection,
     discardCommandPresentation: () => {},
-    settings: { current: { readOnly: false, fonts: configured.fonts } }, identity: {}, retained: {}, pageIndexes: {}, prepared: {},
+    settings: { current: { readOnly: false, fonts: configured.fonts } }, identity: {}, retained: {}, pageIndexes: {}, prepared: {}, geometrySources: {},
   };
   const open = new Function(...Object.keys(dependencies), `${body}\nreturn open;`)(...Object.values(dependencies)) as
     (bytes: Uint8Array, signal: AbortSignal, getRasterScale?: () => number) => Promise<typeof connection>;

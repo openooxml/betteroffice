@@ -335,7 +335,7 @@ def test_table_refusals_preserve_state(sample_bytes):
 def test_text_style_fields_and_legacy_kwargs(sample_bytes):
     deck = bo.Presentation.open(sample_bytes)
     style = dict(bold=True, italic=False, font_size=14.0, color="#123456",
-                 font_family="Arial", underline="sng", spacing_pt=1.5,
+                 font_family="Arial", underline="sng", strike="dblStrike", spacing_pt=1.5,
                  baseline_pct=20.0, kern_pt=10.0, caps="all")
     story = _box(deck, "a😀bc", **style)
     run = story.paragraphs[0].runs[0]
@@ -440,3 +440,19 @@ def test_missing_slides_keep_rust_errors(sample_bytes, method, args):
     with pytest.raises(KeyError, match='slide "missing" was not found'):
         getattr(deck, method)(*args)
     assert deck.version() == version and not deck.is_edited
+
+
+def test_strike_round_trip_and_clear(sample_bytes):
+    deck = bo.Presentation.open(sample_bytes)
+    story = _box(deck, "strike", strike="dblStrike")
+    assert story.paragraphs[0].runs[0].strike == "dblStrike"
+    deck.insert_text(story.id, 6, "!", strike="sngStrike")
+    reopened = bo.Presentation.open(deck.save())
+    story = next(shape for shape in reopened[0].shapes if shape.name == "Parity text").stories[0]
+    assert story.paragraphs[0].runs[-1].strike == "sngStrike"
+    reopened.format_text(story.id, 0, 7, strike="noStrike")
+    cleared = bo.Presentation.open(reopened.save())
+    story = next(shape for shape in cleared[0].shapes if shape.name == "Parity text").stories[0]
+    assert all(run.strike is None for run in story.paragraphs[0].runs)
+    with pytest.raises(ValueError, match="strike"):
+        cleared.format_text(story.id, 0, 1, strike="invalid")

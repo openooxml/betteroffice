@@ -512,6 +512,19 @@ impl EditSession {
             .map_err(|error| map_error(env, error))
     }
 
+    #[napi(catch_unwind, js_name = "update_measure_font_outlines")]
+    pub fn update_measure_font_outlines(
+        &self,
+        env: Env,
+        font_id: u32,
+        bytes: Uint8Array,
+    ) -> Result<()> {
+        let _call = EngineCall::new(env);
+        self.document_unclocked(env)?
+            .update_measure_font_outlines(font_id, &bytes)
+            .map_err(|error| map_error(env, error))
+    }
+
     #[napi(catch_unwind, js_name = "decode_font")]
     pub fn decode_font(&self, env: Env, bytes: Uint8Array) -> Result<Uint8Array> {
         let _call = EngineCall::new(env);

@@ -11,7 +11,7 @@ import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { RefObject } from 'react';
 import { flushSync } from 'react-dom';
 import { pptxWorkerRenderClients } from '../../../../shared/office-session/render/pptxWorkerRender';
-import { createWorkerFramePainter } from './workerFramePainter';
+import { createWorkerFramePainter, peerlessPrerenders } from './workerFramePainter';
 import { useFontWarning } from '../fontFaces';
 import type { PptxAsyncEditorInternalProps } from '../PptxEditor';
 import type { SlideFit } from '../fitSlideScale';
@@ -71,6 +71,13 @@ export interface PeerlessPresentation {
   subscribeVisual(listener: () => void): () => void;
   require(): void;
   fit(value: SlideFit): void;
+  /** Rasters a slide ahead of its expected activation, such as a press on its thumbnail; a later request replaces it. */
+  prerenderSlide?(slideId: string): void;
+  dropPrerender?(): void;
+  /** Paints the prerendered slide on the stage at once if the deck and stage are unchanged since it was rastered. */
+  presentPrerendered?(slideId: string): boolean;
+  /** After the activation settles, shows the confirmed slide again if it is not the presented prerender. */
+  settlePrerendered?(slideId: string): void;
   installFont(face: PptxFontFace): Promise<void>;
   setReadOnly(readOnly: boolean): void;
   setChangeObserver(enabled: boolean): void;
@@ -239,6 +246,7 @@ export function usePeerlessPresentation(
 
     function paintLocal(view: PeerlessViewSnapshot, restore = false): void {
       if (!current() || !firstPainted || !visual || fit !== visual.fit || view.confirmed !== visual.view.confirmed) return;
+      if (framePainter && peerlessPrerenders.get(framePainter)?.presented()) return;
       if (restore) echoPainter?.restoreLine(view); else echoPainter?.paintEcho(view);
       paintedView = view;
       visual = { ...visual, view };
@@ -603,6 +611,20 @@ export function usePeerlessPresentation(
             suppliedFamilies.add(face.family.trim().toLowerCase());
             await installFonts([face], installedFonts, current, warnFonts, paintFonts.installed);
             require();
+          },
+          prerenderSlide(slideId) {
+            if (current() && framePainter) peerlessPrerenders.get(framePainter)?.request(slideId);
+          },
+          dropPrerender() {
+            if (framePainter) peerlessPrerenders.get(framePainter)?.drop();
+          },
+          presentPrerendered(slideId) {
+            return Boolean(current() && framePainter && peerlessPrerenders.get(framePainter)?.present(slideId, client.state.version));
+          },
+          settlePrerendered(slideId) {
+            const prerender = framePainter && peerlessPrerenders.get(framePainter);
+            if (!current() || !prerender?.presented() || getSnapshot().confirmed?.frame.slideId === slideId) return;
+            if (prerender.restore()) paintLocal(getSnapshot());
           },
           fit(token) {
             if (!current() || !getSnapshot().confirmed || fit === token) return;

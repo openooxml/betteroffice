@@ -4,7 +4,7 @@ import { version as fontsLatinVersion } from '../../fonts-latin/package.json';
 import { version as fontsIntlVersion } from '../../fonts-intl/package.json';
 import { loadFontBytes } from './bytes';
 import type { FontDecoder } from './decode';
-import { loadPackedFontBytes, readPackedFontBytes, isBaseLatinFont, isLatinFont, isCjkFont } from './packed';
+import { loadPackedFontBytes, readPackedFontBytes, isBaseLatinFont, isLatinFont, isCjkFont, sliceDecoder, sliceRefOf } from './packed';
 import type { BundledFontFace } from './manifest';
 import { fontProvider, type BundledFontSource } from './provider';
 
@@ -61,5 +61,16 @@ export function createFontProvider(
       30_000,
     );
   };
-  return fontProvider(bytes(loadPackedFontBytes), bytes(readPackedFontBytes));
+  return fontProvider(bytes(loadPackedFontBytes), bytes(readPackedFontBytes), (face) => {
+    const ref = sliceRefOf(face.file);
+    return ref && {
+      ref,
+      base: cjkBase.href,
+      url: async (file) => new URL(file, cjkBase),
+      timeoutMs: 30_000,
+      decode: sliceDecoder(decoderUrl, runtime?.decoder),
+      decoder: runtime?.decoder,
+      retain: runtime?.retain,
+    };
+  });
 }

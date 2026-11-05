@@ -2,6 +2,7 @@ import { DocxSectionError, createYrsSession, saveYrsDocx, type DocxCommentSaveBa
 import { readCommentPart, readSavedCommentIdentities, verifyCommentOutput, type CommentSource } from './comment-output';
 import { cellPosition, commentBody, commentRanges, commentRoot, commentText, continueList, deleteParagraph, deleteTableRow, hostEdit, insertParagraphsBefore, insertParagraphsWithAnchorFormat, insertSectionBreak, replaceCommentText, setSection, insertTableRow, lineText, listLevel, mergeCells, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
 import { createDocxBatchSchema, type DocxAgentBatch, type DocxAgentEdit, type DocxEditOutcome } from './docx-schema';
+import { compareDocxStructure, docxModelCounts, type DocxModelCounts } from './docx-structure';
 import { editLimit } from './edit-limits';
 import {
   DocumentToolError,
@@ -180,6 +181,7 @@ export class DocxAgentDocument {
   private commentSaveBaselineVersion?: number;
   private readonly textEditedComments = new Set<string>();
   private readonly maxEdits: number;
+  private sourceCounts?: DocxModelCounts;
 
   constructor(
     readonly session: YrsSession,
@@ -646,13 +648,14 @@ export class DocxAgentDocument {
     return this.exportBytes(proposalId);
   }
 
-  private async exportBytes(proposalId?: string, updateModifiedDate = true): Promise<Uint8Array> {
+  private async exportBytes(proposalId?: string, updateModifiedDate = true, inspect?: (draft: YrsSession) => void): Promise<Uint8Array> {
     const held = proposalId ? this.pending(proposalId) : undefined;
     const draft = await this.fork();
     try {
       if (held) this.checkPending(held);
       if (this.attached) this.projectProposals(draft, held);
       else if (held) this.apply(draft, held);
+      inspect?.(draft);
       if (!draft.materializeDocx()?.originalBuffer) throw new DocumentToolError('UNSUPPORTED', 'Export requires a session opened from DOCX bytes.');
       const version = this.epoch;
       const comments = draft.listComments();
@@ -682,11 +685,19 @@ export class DocxAgentDocument {
     } finally { draft.destroy(); }
   }
 
-  async verify(proposalId?: string) {
-    const bytes = await this.export(proposalId);
+  async verify(proposalId?: string, options: { structure?: boolean } = {}) {
+    const structure = options.structure ?? true;
+    let after: DocxModelCounts | undefined;
+    const bytes = await this.exportBytes(proposalId, true, structure ? draft => { after = docxModelCounts(draft); } : undefined);
     const reopened = await openDocx(bytes);
     try {
-      return { reopened: true, bytes: bytes.length, paragraphs: reopened.overview().paragraphs, checks: ['save', 'reopen'], unchecked: ['visual fidelity', 'semantic correctness'] };
+      const paragraphs = reopened.overview().paragraphs;
+      const source = this.session.materializeDocx()?.originalBuffer;
+      if (!structure || !source || !after) return { reopened: true, bytes: bytes.length, paragraphs, checks: ['save', 'reopen'], unchecked: ['visual fidelity', 'semantic correctness', ...(structure ? [] : ['structure'])] };
+      const original = new Uint8Array(source);
+      this.sourceCounts ??= await sourceModelCounts(original);
+      const report = await compareDocxStructure(original, bytes, this.sourceCounts, after);
+      return { reopened: true, bytes: bytes.length, paragraphs, checks: ['save', 'reopen', 'structure'], structure: report, unchecked: ['visual fidelity', 'semantic correctness'] };
     } finally { reopened.close(); }
   }
 
@@ -1567,6 +1578,14 @@ export async function openDocx(bytes: Uint8Array, options: DocumentOptions = {})
     session.seedFromDocx(bytes);
     return new DocxAgentDocument(session, options, true);
   } catch (error) { session.destroy(); throw error; }
+}
+
+async function sourceModelCounts(bytes: Uint8Array): Promise<DocxModelCounts> {
+  const session = await createYrsSession();
+  try {
+    session.seedFromDocx(bytes);
+    return docxModelCounts(session);
+  } finally { session.destroy(); }
 }
 
 export function attachDocx(session: YrsSession, options: DocumentOptions = {}): DocxAgentDocument {

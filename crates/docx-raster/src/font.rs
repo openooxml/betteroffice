@@ -1,6 +1,6 @@
 //! Shared-store text shaping and glyph rasterization.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
 use docx_layout::display_list::{
@@ -12,9 +12,10 @@ use ooxml_text::{
 };
 use tiny_skia::{FillRule, Mask, Paint, Path, PathBuilder, Pixmap, Rect, Transform};
 
+use crate::shadow::{self, Shadow, TextShadow};
 use crate::{
     FRect, PageBudget, RenderResources, color_with_opacity, mask_bytes, number_f32,
-    primitive_visual_transform,
+    primitive_visual_transform, skip_effect,
 };
 
 /// Measures one font run in pixels.
@@ -130,6 +131,7 @@ pub(crate) struct PaintContext<'a, 'b> {
     pub mask: Option<&'a Mask>,
     pub retained_mask_bytes: u64,
     pub opacity: f32,
+    pub skipped: &'a mut BTreeMap<String, usize>,
 }
 
 impl<'a, 'b> PaintContext<'a, 'b> {
@@ -144,7 +146,60 @@ impl<'a, 'b> PaintContext<'a, 'b> {
             mask: Some(mask),
             retained_mask_bytes: self.retained_mask_bytes,
             opacity: self.opacity,
+            skipped: self.skipped,
         }
+    }
+
+    /// The same resources, painting into `surface` without a clip.
+    fn on_surface<'c>(&'c mut self, surface: &'c mut Pixmap) -> PaintContext<'c, 'b> {
+        PaintContext {
+            pixmap: surface,
+            resources: self.resources,
+            cache: self.cache,
+            specs: self.specs,
+            budget: self.budget,
+            base_transform: self.base_transform,
+            mask: None,
+            retained_mask_bytes: self.retained_mask_bytes,
+            opacity: self.opacity,
+            skipped: self.skipped,
+        }
+    }
+
+    /// Paints `shadow` under what `draw` paints, by running `draw` once into a
+    /// scratch surface around `rect` (in `transform`'s space).
+    fn paint_shadow(
+        &mut self,
+        shadow: Option<Shadow>,
+        rect: FRect,
+        transform: Transform,
+        draw: impl FnOnce(&mut PaintContext<'_, 'b>, Transform) -> Result<f32, String>,
+    ) -> Result<(), String> {
+        let Some(shadow) = shadow else {
+            return Ok(());
+        };
+        let Some(bounds) = Rect::from_xywh(rect.x, rect.y, rect.w.max(1.0), rect.h.max(1.0))
+            .and_then(|rect| rect.transform(transform))
+        else {
+            return Ok(());
+        };
+        let page = (self.pixmap.width(), self.pixmap.height());
+        let clip = self
+            .mask
+            .map_or(0, |mask| mask_bytes(mask.width(), mask.height()));
+        let retained = self.retained_mask_bytes.saturating_add(clip);
+        let Some(mut surface) =
+            shadow::shadow_surface(page, bounds, &shadow, self.budget, retained)?
+        else {
+            return Ok(());
+        };
+        let offset = surface.offset;
+        draw(
+            &mut self.on_surface(&mut surface.pixmap),
+            offset.pre_concat(transform),
+        )?;
+        shadow::composite_shadow(self.pixmap, self.mask, surface, &shadow);
+        Ok(())
     }
 }
 
@@ -164,14 +219,19 @@ fn paint_text_core(
     context: &mut PaintContext<'_, '_>,
     run: &TextRunPrimitive,
 ) -> Result<(), String> {
-    validate_text_effects(run)?;
+    skip_text_effects(
+        context.skipped,
+        "text",
+        run.text_outline,
+        run.emphasis_mark.is_some(),
+        run.text_effect.is_some(),
+        run.attrs.modern_effects.is_some(),
+    );
     if run.text.is_empty() {
         return Ok(());
     }
     let parsed = context.specs.font(&run.font)?;
-    if run.small_caps || parsed.spec.small_caps {
-        return Err("unsupported text field: smallCaps".to_string());
-    }
+    let small_caps = (run.small_caps || parsed.spec.small_caps) && !run.all_caps;
     let rect = text_rect(run, parsed.spec.size)?;
     let visual = primitive_visual_transform(
         rect,
@@ -201,21 +261,185 @@ fn paint_text_core(
         .map(number_f32)
         .transpose()?
         .unwrap_or(0.0);
-    paint_resolved_text(
-        context,
-        &text,
-        number_f32(&run.x)?,
-        number_f32(&run.baseline_y)?,
-        &parsed.spec,
-        &parsed.chain_key,
-        run.rtl == Some(true),
-        run.attrs.lang.as_deref(),
-        letter_spacing,
-        word_spacing,
-        &[],
-        color,
-        transform,
-    )
+    let x = number_f32(&run.x)?;
+    let baseline = number_f32(&run.baseline_y)?;
+    let draw = |context: &mut PaintContext<'_, '_>, transform: Transform| {
+        paint_cased_text(
+            context,
+            &text,
+            x,
+            baseline,
+            &parsed.spec,
+            &parsed.chain_key,
+            run.rtl == Some(true),
+            run.attrs.lang.as_deref(),
+            letter_spacing,
+            word_spacing,
+            small_caps,
+            color,
+            transform,
+        )
+    };
+    let shadow = drawn_text_shadow(
+        context.skipped,
+        "text",
+        run.text_shadow.as_deref(),
+        parsed.spec.size,
+    );
+    context.paint_shadow(shadow, rect, transform, draw)?;
+    draw(context, transform).map(|_| ())
+}
+
+/// A run of text painted in one size: synthesized small caps or as is. An
+/// expanded segment is one lowercase character whose uppercase form is several
+/// (`ß` to `SS`), so it advances as one character.
+struct CaseSegment {
+    text: String,
+    small: bool,
+    expanded: bool,
+}
+
+/// Paints text and returns its advance. Small caps are drawn the way the web
+/// canvas synthesizes them for a face without `smcp`: a lowercase letter as its
+/// uppercase form at [`ooxml_text::BROWSER_SMALL_CAPS_ADVANCE_SCALE`] of the
+/// size, everything else as is, which is the advance layout measured.
+#[allow(clippy::too_many_arguments)]
+fn paint_cased_text(
+    context: &mut PaintContext<'_, '_>,
+    text: &str,
+    x: f32,
+    baseline: f32,
+    spec: &FontSpec,
+    key: &str,
+    rtl: bool,
+    language: Option<&str>,
+    letter_spacing: f32,
+    word_spacing: f32,
+    small_caps: bool,
+    color: tiny_skia::Color,
+    transform: Transform,
+) -> Result<f32, String> {
+    if !small_caps {
+        return paint_resolved_text(
+            context,
+            text,
+            x,
+            baseline,
+            spec,
+            key,
+            rtl,
+            language,
+            letter_spacing,
+            word_spacing,
+            &[],
+            color,
+            transform,
+        );
+    }
+    let mut segments: Vec<CaseSegment> = Vec::new();
+    for ch in text.chars() {
+        if !ch.is_lowercase() {
+            match segments.last_mut() {
+                Some(segment) if !segment.small => segment.text.push(ch),
+                _ => segments.push(CaseSegment {
+                    text: ch.to_string(),
+                    small: false,
+                    expanded: false,
+                }),
+            }
+            continue;
+        }
+        let upper = ooxml_text::uppercase_for_language(ch, language);
+        if upper.len() > 1 {
+            segments.push(CaseSegment {
+                text: upper.into_iter().collect(),
+                small: true,
+                expanded: true,
+            });
+            continue;
+        }
+        match segments.last_mut() {
+            Some(segment) if segment.small && !segment.expanded => segment.text.extend(upper),
+            _ => segments.push(CaseSegment {
+                text: upper.into_iter().collect(),
+                small: true,
+                expanded: false,
+            }),
+        }
+    }
+    if rtl {
+        segments.reverse();
+    }
+    let small_spec = FontSpec {
+        size: spec.size * ooxml_text::BROWSER_SMALL_CAPS_ADVANCE_SCALE,
+        ..spec.clone()
+    };
+    let mut pen = x;
+    let count = segments.len();
+    for (index, segment) in segments.into_iter().enumerate() {
+        let spacing = if segment.expanded {
+            0.0
+        } else {
+            letter_spacing
+        };
+        pen += paint_resolved_text(
+            context,
+            &segment.text,
+            pen,
+            baseline,
+            if segment.small { &small_spec } else { spec },
+            key,
+            rtl,
+            language,
+            spacing,
+            word_spacing,
+            &[],
+            color,
+            transform,
+        )?;
+        if index + 1 < count {
+            pen += letter_spacing;
+        }
+    }
+    Ok(pen - x)
+}
+
+/// The shadow a `textShadow` value draws, counting a value no backend draws yet.
+fn drawn_text_shadow(
+    skipped: &mut BTreeMap<String, usize>,
+    primitive: &str,
+    value: Option<&str>,
+    size: f32,
+) -> Option<Shadow> {
+    match shadow::text_shadow(value, size) {
+        TextShadow::Drawn(shadow) => Some(shadow),
+        TextShadow::Undrawn => {
+            skip_effect(skipped, &format!("{primitive}.textShadow"));
+            None
+        }
+        TextShadow::None => None,
+    }
+}
+
+/// Counts the text effects this backend leaves out; the web canvas draws them.
+fn skip_text_effects(
+    skipped: &mut BTreeMap<String, usize>,
+    primitive: &str,
+    outline: bool,
+    emphasis_mark: bool,
+    text_effect: bool,
+    modern_effects: bool,
+) {
+    for (present, field) in [
+        (outline, "textOutline"),
+        (emphasis_mark, "emphasisMark"),
+        (text_effect, "textEffect"),
+        (modern_effects, "modernEffects"),
+    ] {
+        if present {
+            skip_effect(skipped, &format!("{primitive}.{field}"));
+        }
+    }
 }
 
 pub(crate) fn paint_glyph_run(
@@ -234,7 +458,17 @@ fn paint_glyph_run_core(
     context: &mut PaintContext<'_, '_>,
     run: &GlyphRunPrimitive,
 ) -> Result<(), String> {
-    validate_glyph_effects(run)?;
+    skip_text_effects(
+        context.skipped,
+        "glyphRun",
+        run.text_outline,
+        run.emphasis_mark.is_some(),
+        run.text_effect.is_some(),
+        run.attrs.modern_effects.is_some(),
+    );
+    if run.attrs.leader_glyphs.is_some() {
+        skip_effect(context.skipped, "glyphRun.leaderGlyphs");
+    }
     context.budget.charge_glyphs(run.glyphs.len() as u64)?;
     if run.glyphs.is_empty() {
         return Ok(());
@@ -254,10 +488,20 @@ fn paint_glyph_run_core(
     paint.set_color(color);
     paint.anti_alias = true;
     let font = FontId::from_u32(run.font_id);
-    for glyph in &run.glyphs {
-        paint_placed_glyph(context, font, glyph, run.size as f32, &paint, transform)?;
-    }
-    Ok(())
+    let draw = |context: &mut PaintContext<'_, '_>, transform: Transform| {
+        for glyph in &run.glyphs {
+            paint_placed_glyph(context, font, glyph, run.size as f32, &paint, transform)?;
+        }
+        Ok(0.0)
+    };
+    let shadow = drawn_text_shadow(
+        context.skipped,
+        "glyphRun",
+        run.text_shadow.as_deref(),
+        run.size as f32,
+    );
+    context.paint_shadow(shadow, rect, transform, draw)?;
+    draw(context, transform).map(|_| ())
 }
 
 fn paint_clip_mask(
@@ -305,53 +549,6 @@ fn paint_clip_mask(
         }
     }
     Ok(Some(mask))
-}
-
-fn validate_text_effects(run: &TextRunPrimitive) -> Result<(), String> {
-    if run.text_shadow.is_some() {
-        return Err("unsupported text field: textShadow".to_string());
-    }
-    if run.text_outline {
-        return Err("unsupported text field: textOutline".to_string());
-    }
-    if run.emphasis_mark.is_some() {
-        return Err("unsupported text field: emphasisMark".to_string());
-    }
-    if run.text_effect.is_some() {
-        return Err("unsupported text field: textEffect".to_string());
-    }
-    if run.attrs.modern_effects.is_some() {
-        return Err("unsupported text field: modernEffects".to_string());
-    }
-    Ok(())
-}
-
-fn validate_glyph_effects(run: &GlyphRunPrimitive) -> Result<(), String> {
-    if run.all_caps {
-        return Err("unsupported glyphRun field: allCaps".to_string());
-    }
-    if run.small_caps {
-        return Err("unsupported glyphRun field: smallCaps".to_string());
-    }
-    if run.text_shadow.is_some() {
-        return Err("unsupported glyphRun field: textShadow".to_string());
-    }
-    if run.text_outline {
-        return Err("unsupported glyphRun field: textOutline".to_string());
-    }
-    if run.emphasis_mark.is_some() {
-        return Err("unsupported glyphRun field: emphasisMark".to_string());
-    }
-    if run.text_effect.is_some() {
-        return Err("unsupported glyphRun field: textEffect".to_string());
-    }
-    if run.attrs.modern_effects.is_some() {
-        return Err("unsupported glyphRun field: modernEffects".to_string());
-    }
-    if run.attrs.leader_glyphs.is_some() {
-        return Err("unsupported glyphRun field: leaderGlyphs".to_string());
-    }
-    Ok(())
 }
 
 /// Characters a run paints. `allCaps` uppercases first, and one character can
@@ -604,7 +801,7 @@ fn paint_resolved_text(
     features: &[ShapeFeature],
     color: tiny_skia::Color,
     transform: Transform,
-) -> Result<(), String> {
+) -> Result<f32, String> {
     let backstop;
     let chain: &[FontId] = match context.resources.font_chains.get(key) {
         Some(chain) => chain.as_slice(),
@@ -686,7 +883,7 @@ fn paint_resolved_text(
             }
         }
     }
-    Ok(())
+    Ok(pen - x)
 }
 
 /// Shaping can place more glyphs than the text had characters. The caller
@@ -895,6 +1092,80 @@ fn f64_to_f32(value: f64, field: &str) -> Result<f32, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn small_caps_advance_by_layouts_synthesized_measure() {
+        let mut fonts = FontStore::new();
+        let id = fonts
+            .register(include_bytes!("../tests/assets/Carlito-Regular.ttf").to_vec())
+            .unwrap();
+        let chains = crate::FontChains::from([("carlito|0|0".to_string(), vec![id])]);
+        let images = crate::ImageMap::new();
+        let resources = RenderResources::new(&fonts, &chains, &images);
+        let mut pixmap = Pixmap::new(200, 40).unwrap();
+        let mut cache = GlyphCache::default();
+        let mut specs = FontSpecCache::default();
+        let mut budget = PageBudget::new(200, 40);
+        let mut skipped = BTreeMap::new();
+        let mut context = PaintContext {
+            pixmap: &mut pixmap,
+            resources: &resources,
+            cache: &mut cache,
+            specs: &mut specs,
+            budget: &mut budget,
+            base_transform: Transform::identity(),
+            mask: None,
+            retained_mask_bytes: 0,
+            opacity: 1.0,
+            skipped: &mut skipped,
+        };
+        let parsed = context.specs.font("16px Carlito").unwrap();
+        let advance = paint_cased_text(
+            &mut context,
+            "Small Caps",
+            2.0,
+            30.0,
+            &parsed.spec,
+            &parsed.chain_key,
+            false,
+            None,
+            0.0,
+            0.0,
+            true,
+            tiny_skia::Color::BLACK,
+            Transform::identity(),
+        )
+        .unwrap();
+        let measure = |text: &str| measure_text(&fonts, id, text, 16.0).unwrap();
+        let scale = ooxml_text::BROWSER_SMALL_CAPS_ADVANCE_SCALE;
+        let expected =
+            measure("S") + measure("MALL") * scale + measure(" C") + measure("APS") * scale;
+        assert!(
+            (advance - expected).abs() < 0.01,
+            "{advance} against {expected}"
+        );
+        assert!(advance < measure("SMALL CAPS"));
+        let sharp = paint_cased_text(
+            &mut context,
+            "\u{df}",
+            2.0,
+            30.0,
+            &parsed.spec,
+            &parsed.chain_key,
+            false,
+            None,
+            2.0,
+            0.0,
+            true,
+            tiny_skia::Color::BLACK,
+            Transform::identity(),
+        )
+        .unwrap();
+        assert!(
+            (sharp - measure("SS") * scale).abs() < 0.01,
+            "one character, no spacing inside"
+        );
+    }
 
     #[test]
     fn parses_layout_font_shorthands() {

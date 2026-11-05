@@ -4,7 +4,7 @@ import { resolveReservations, validReservationsPayload } from './reservations';
 import * as queryModule from '../layout/render/displayListQueries';
 import type { DisplayPage } from '../layout/render/displayList';
 import { createDisplayListQueries, type DisplayListRect } from '../layout/render/displayListQueries';
-import { CANVAS_PAGE_GAP_PX } from '../layout/render/canvasPageMetrics';
+import { CANVAS_PAGE_GAP_PX, canvasPageStack } from '../layout/render/canvasPageMetrics';
 import { FRAME_DELTA_VERSION, retainedFramePageById, type RetainedFrame } from '../layout/render/frameDelta';
 import { loadRustDisplayListQueryEngine, type RustDisplayListQueryEngine } from '../layout/render/rustDisplayList';
 import type { YrsLoc, YrsStorySegment } from './index';
@@ -93,7 +93,7 @@ function splitRowWorker(direction: 'up' | 'down', queryEngine?: RustDisplayListQ
   const binding = source.slice(parseFailures < 0 ? source.indexOf('function bindResidentCommands(') : parseFailures,
     source.indexOf('function replacementCommandInit('));
   const dependencies = {
-    resolveReservations, validReservationsPayload, CANVAS_PAGE_GAP_PX,
+    resolveReservations, validReservationsPayload, CANVAS_PAGE_GAP_PX, canvasPageStack, offscreenDpr: 1, offscreenZoom: 1,
     cellSelectionHeadPosition,
     sessionFonts: null, ResidentSessionFonts, scope: {}, proposals: null, resetResidentObjectHandles() {},
     createProposalRegistry: () => ({ snapshot: () => ({ previewVersion: 0, proposals: [] }) }),

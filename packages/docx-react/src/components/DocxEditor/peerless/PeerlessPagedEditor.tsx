@@ -256,6 +256,37 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   useLayoutEffect(() => {
     const host = column.current?.querySelector<HTMLDivElement>('[data-docx-pages-host]');
     if (!host) return;
+    const view = host.ownerDocument.defaultView ?? window;
+    let applied = { x: 0, y: 0 };
+    let frame: number | null = null;
+    const align = () => {
+      frame = null;
+      const ratio = view.devicePixelRatio || 1;
+      const rect = host.getBoundingClientRect();
+      const x = (rect.left - applied.x) * ratio;
+      const y = (rect.top - applied.y) * ratio;
+      const next = { x: (Math.round(x) - x) / ratio, y: (Math.round(y) - y) / ratio };
+      if (Math.abs(next.x - applied.x) < 1e-4 && Math.abs(next.y - applied.y) < 1e-4) return;
+      applied = next;
+      host.style.translate = next.x || next.y ? `${next.x}px ${next.y}px` : '';
+    };
+    const schedule = () => { if (frame === null) frame = view.requestAnimationFrame(align); };
+    align();
+    const observer = typeof view.ResizeObserver === 'function' ? new view.ResizeObserver(schedule) : null;
+    for (const element of [column.current, column.current?.parentElement]) if (element) observer?.observe(element);
+    view.addEventListener('resize', schedule);
+    view.addEventListener('scroll', schedule, { capture: true, passive: true });
+    return () => {
+      if (frame !== null) view.cancelAnimationFrame(frame);
+      observer?.disconnect();
+      view.removeEventListener('resize', schedule);
+      view.removeEventListener('scroll', schedule, { capture: true });
+      host.style.translate = '';
+    };
+  }, [zoom, width, height]);
+  useLayoutEffect(() => {
+    const host = column.current?.querySelector<HTMLDivElement>('[data-docx-pages-host]');
+    if (!host) return;
     const owner = host.ownerDocument;
     const press = () => { presses.current += 1; cancelTouchPress(); };
     const move = (event: TouchEvent) => { if (touchSelection.current) event.preventDefault(); };
@@ -888,8 +919,10 @@ export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoF
     }
   }, []);
   const residentCanvasForPage = useCallback((page: DocxCommandPageIdentity) => canvases.current.get(page.pageId) ?? null, []);
+  const rasterScaleRef = useRef(rasterScale);
+  rasterScaleRef.current = rasterScale;
   const prepareGeometry = useCallback((frame: Parameters<UsePeerlessEditSessionOptions['prepareGeometry']>[0]) => {
-    const geometry = options.prepareGeometry(frame);
+    const geometry = options.prepareGeometry(frame, rasterScaleRef.current);
     if (geometry) {
       for (const { page } of frame.payload.stagedPresentation?.pages ?? []) {
         if (geometry.pages.some((candidate) => candidate.page.pageId === page.pageId && candidate.page.pageIndex === page.pageIndex)) {
@@ -906,6 +939,14 @@ export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoF
   useLayoutEffect(() => {
     if (session.status === 'ready') onReady?.(session.binding);
   }, [session, onReady]);
+  useLayoutEffect(() => {
+    if (session.status !== 'ready') return;
+    const { viewStore } = session.binding;
+    const geometry = viewStore.getSnapshot().geometry;
+    if (!geometry || geometry.rasterScale === rasterScale) return;
+    const rescaled = options.rescaleGeometry?.(geometry, rasterScale);
+    if (rescaled) viewStore.rescaleFrameGeometry?.(rescaled);
+  }, [session, rasterScale, options.rescaleGeometry]);
   useLayoutEffect(() => {
     if (session.status !== 'ready') return;
     let installedGeometry: PeerlessFrameGeometry | null = null;

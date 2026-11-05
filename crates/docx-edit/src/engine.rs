@@ -6591,6 +6591,7 @@ impl EngineSession {
         let default_family =
             docx_layout::measure_blocks::default_font_family(&measurement.defaults);
         let mut collector = docx_layout::measure_blocks::FontRequirementCollector::default();
+        collector.prefer_east_asian_language(render_env["docDefaultLanguage"]["eastAsia"].as_str());
         let mut stable_markers = true;
         if cache_key.is_some() {
             stable_markers &= collector.collect_preview(
