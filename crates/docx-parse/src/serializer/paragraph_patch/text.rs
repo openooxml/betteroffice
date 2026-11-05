@@ -1235,11 +1235,15 @@ mod tests {
             mark_inherit: Attrs::new(),
             result_sha256: result_sha256(&seed, &Attrs::new()),
         };
-        let mut lowered =
-            match super::super::lower::lower(source, &PatchContext::word_document(), &seed) {
-                Ok(lowered) => lowered,
-                Err(_) => panic!("lowering failed"),
-            };
+        let mut lowered = match super::super::lower::lower(
+            source,
+            &PatchContext::word_document(),
+            &seed,
+            false,
+        ) {
+            Ok(lowered) => lowered,
+            Err(_) => panic!("lowering failed"),
+        };
         for (cell, unit) in lowered.cells.iter_mut().zip(flatten(&seed)) {
             cell.unit = unit;
         }
