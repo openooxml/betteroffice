@@ -4,8 +4,9 @@ export type { PresentationImageDecodeOptions } from './render/image';
 export { ProposalPictureMediaTooLargeError, StaleProposalError } from './proposals';
 export type { Proposal, ProposalAcceptance, ProposalChange, ProposalDiffSlide, ProposalEdit, ProposalPreview, ProposalStripEntry, ProposalShapeChange, ProposalTextChange } from './proposals';
 export type { CanvasImageResolver, PaintSlideOptions, SlideCanvasLike } from './render/canvas';
-export { slideToPng } from './render/png';
-export type { SlideToPngOptions } from './render/png';
+export { PngExportError } from '../../../shared/office-session/pngExportError';
+export type { PngExportCode } from '../../../shared/office-session/pngExportError';
+export type { PptxPngOptions, PptxPngTarget } from './wasm/pngOptions';
 export { CollaborationError, CollaborationProvider } from './collaboration';
 export type {
   CollaborationUser,
