@@ -11,12 +11,12 @@ export class FileWorkspace {
   private readonly documents = new Map<string, { path: string; document: DocxAgentDocument | XlsxAgentWorkbook | PptxAgentPresentation }>();
   private nextId = 1;
 
-  private constructor(readonly root: string, private readonly renderer?: DocumentRenderer, private readonly formats?: readonly OfficeFormat[]) {}
+  private constructor(readonly root: string, private readonly renderer?: DocumentRenderer, private readonly formats?: readonly OfficeFormat[], private readonly maxEdits?: number) {}
 
-  static async create(root: string, renderer?: DocumentRenderer, formats?: readonly OfficeFormat[]) {
+  static async create(root: string, renderer?: DocumentRenderer, formats?: readonly OfficeFormat[], maxEdits?: number) {
     const canonical = await realpath(root);
     if (!(await stat(canonical)).isDirectory()) throw new DocumentToolError('INVALID_ROOT', 'Workspace root must be a directory.');
-    return new FileWorkspace(canonical, renderer, formats);
+    return new FileWorkspace(canonical, renderer, formats, maxEdits);
   }
 
   async files(directory = '.', offset = 0) {
@@ -54,7 +54,7 @@ export class FileWorkspace {
       if (length !== info.size) throw new DocumentToolError('FILE_CHANGED', 'The file changed during access. Retry with a stable workspace.');
       bytes = buffer.subarray(0, length);
     } finally { await handle.close(); }
-    const options = { name: basename(file) };
+    const options = { name: basename(file), maxEdits: this.maxEdits };
     const document = format === '.xlsx' ? await openXlsx(bytes, options) : format === '.pptx' ? await openPptx(bytes, options) : await openDocx(bytes, { ...options, renderer: this.renderer });
     const id = `doc${this.nextId++}`;
     this.documents.set(id, { path: file, document });
