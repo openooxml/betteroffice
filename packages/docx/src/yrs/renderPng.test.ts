@@ -99,6 +99,8 @@ describe('YrsSession.renderPng', () => {
       session.insertText({ story: 'body', paraId: session.paragraphs('body')[0]!.paraId, offset: 0 }, 'A great many more words at the start of this page. '.repeat(600));
       const refused = await session.renderPng({ page: 9999 }).catch((error: Error) => error.message);
       expect(Number(/for (\d+) page/.exec(String(refused))?.[1])).toBeGreaterThan(20);
+      const png = await session.renderPng({ page: 0 });
+      if (native) expect(pngSize(png)[0]).toBeGreaterThan(100);
     } finally { session.destroy(); }
   });
 

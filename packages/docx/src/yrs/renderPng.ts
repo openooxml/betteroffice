@@ -1,11 +1,11 @@
 import { buildResidentRegionLayoutRequest, computeLayout, documentRenderEnv, getLayoutKernelInputs } from '../editor/computeLayout';
-import { createRustMeasureSource, type BundledFontProvider, type ResidentFontRequirement } from '../layout/measure';
+import { createRustMeasureSource, resolveCompleteFontProvider, type BundledFontProvider, type ResidentFontRequirement } from '../layout/measure';
 import type { EmbeddedFaceInput } from '../layout/measure/fontRegistry';
 import { fontUnavailable, pngPage, pngScale, type DocxPngFontFace, type DocxPngOptions, type DocxPngTarget } from '../layout/render/png';
 import { buildRustDisplayList } from '../layout/render/rustDisplayList';
 import type { DisplayList } from '../layout/render/displayList';
 import { extractEmbeddedFontFaces } from '../utils';
-import { renderPng as renderEnginePng } from '../wasm/enginePng';
+import { engineKind, renderPng as renderEnginePng } from '../wasm/enginePng';
 import { createYrsSession, type YrsSession } from './index';
 
 const IDLE_RELEASE_MS = 30_000;
@@ -55,7 +55,8 @@ export function createPngExporter(session: YrsSession) {
       copy.bootstrapPeer(state, metadata, bytes, host, { mediaTokens: true });
       const document = copy.materializeDocx();
       if (!document) throw new Error('renderPng needs a session opened from DOCX bytes');
-      const measure = createRustMeasureSource({ engine: copy, ...(fontProvider ? { bundled: fontProvider } : {}) });
+      const bundled = fontProvider ?? (engineKind === 'native' ? await resolveCompleteFontProvider() : undefined);
+      const measure = createRustMeasureSource({ engine: copy, ...(bundled ? { bundled } : {}) });
       measure.setCompat(document.package.settings?.compatibilityFlags);
       measure.setEmbeddedFaces(await extractEmbeddedFontFaces(document), appFaces(fonts));
       const renderEnv = documentRenderEnv(document);
