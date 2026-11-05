@@ -98,6 +98,7 @@ mod resident_font;
 #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
 mod resident_geometry;
 mod sort;
+mod style_languages;
 pub use resident_font::{ResidentFontError, decode_resident_font};
 mod op;
 mod ops;
@@ -144,8 +145,8 @@ pub use canonical::{CanonicalItem, checksum, project_story, story_checksum, to_c
 pub use ctx::{EditCtx, EditOrigin, SuggestCtx};
 pub use engine::{EngineSession, EngineStats, RegionLayoutProgress};
 pub use format::{
-    ColorPatch, FontFamilyPatch, FormatPolicy, HYPERLINK, InlineFormatDelta, Patch, SimpleFormat,
-    StrikePatch, UnderlinePatch, highlight_color_name,
+    ColorPatch, FontFamilyPatch, FormatPolicy, HYPERLINK, InlineFormatDelta, LanguagePatch, Patch,
+    SimpleFormat, StrikePatch, UnderlinePatch, highlight_color_name,
 };
 pub use geometry::{
     GeometryEndpoint, GeometryParagraphOutline, GeometryPositionOutline, GeometryRange,
@@ -726,6 +727,7 @@ impl EditingDoc {
         doc.get_or_insert_map(COMMENTS);
         doc.get_or_insert_map(part_metadata::PART_METADATA);
         doc.get_or_insert_map(document_properties::DOCUMENT_PROPERTIES);
+        doc.get_or_insert_map(style_languages::STYLE_LANGUAGES);
         doc.get_or_insert_map(section_margins::SECTION_MARGINS);
         doc.get_or_insert_map(identity::PARAGRAPH_IDS);
         doc.get_or_insert_map(identity::SOURCE_PARAGRAPH_IDS);

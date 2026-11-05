@@ -460,6 +460,8 @@ function attrsToTextFormatting(attributes: Attrs): TextFormatting {
   const modern = asObject(attributes.modernTextEffects);
   if (modern?.effects) formatting.modernEffects = modern.effects as TextFormatting['modernEffects'];
 
+  if (attributes.language !== undefined) formatting.language = liveLanguage(undefined, attributes.language);
+
   const runStyle = asObject(attributes.runStyle);
   const styleId = asString(runStyle?.styleId);
   if (styleId) formatting.styleId = styleId;
@@ -472,6 +474,19 @@ type RunFormatter = (attributes: Attrs) => TextFormatting;
 
 const directFormatting: RunFormatter = (attributes) =>
   attrsToTextFormatting(formattingAttrs(attributes));
+
+function liveLanguage(source: TextFormatting['language'], live: unknown): TextFormatting['language'] {
+  const patch = asObject(live);
+  if (!patch) return source;
+  const result = { ...source };
+  for (const slot of ['latin', 'eastAsia', 'bidi'] as const) {
+    const key = slot === 'latin' && patch.latin === undefined ? 'val' : slot;
+    if (patch[key] === undefined) continue;
+    if (patch[key] === null) delete result[slot];
+    else result[slot] = asString(patch[key]);
+  }
+  return Object.values(result).some(value => value !== undefined) ? result : undefined;
+}
 
 const ON_OFF_RUN_PROPERTIES = new Set<string>([
   'bold', 'italic', 'allCaps', 'smallCaps', 'strike', 'doubleStrike',
@@ -513,7 +528,7 @@ function relativeFormatting(attributes: Attrs, inherited: TextFormatting, theme?
   const formatting = directFormatting(attributes);
   const result: Attrs = {};
   for (const key of new Set([...Object.keys(formatting), ...Object.keys(inherited)])) {
-    if (key === 'fontFamily') continue;
+    if (key === 'fontFamily' || key === 'language') continue;
     if ((key === 'boldCs' || key === 'italicCs') && typeof attributes[key] !== 'boolean') continue;
     const value = formatting[key as keyof TextFormatting];
     if (sameJson(value, inherited[key as keyof TextFormatting])) continue;
@@ -533,11 +548,13 @@ function relativeFormatting(attributes: Attrs, inherited: TextFormatting, theme?
     const value = source?.[key];
     if (value === undefined) continue;
     const live = ON_OFF_RUN_PROPERTIES.has(key) ? formatting[key] ?? false : formatting[key];
-    // Runs hold no live language, so text keeps the language of the source run it maps to.
-    if (key === 'language' || sameJson(value, live) ||
+    if ((key === 'language' && attributes.language === undefined) || sameJson(value, live) ||
       ((key === 'boldCs' || key === 'italicCs') && attributes[key] === undefined)) {
       result[key] = value;
     }
+  }
+  if (attributes.language !== undefined) {
+    result.language = liveLanguage(source?.language as TextFormatting['language'], attributes.language);
   }
   return result as TextFormatting;
 }
@@ -2326,6 +2343,13 @@ function paragraphFromStory(
       } : undefined,
     };
   }
+  if (properties.language !== undefined) {
+    const original = attrs._originalFormatting ?? {};
+    attrs._originalFormatting = { ...original, runProperties: {
+      ...original.runProperties,
+      language: liveLanguage(original.runProperties?.language, properties.language),
+    } };
+  }
   const sources = baseParagraph ? sourceRuns(baseParagraph.content)
     : Array.isArray(attrs._originalRunBoundaries) ? attrs._originalRunBoundaries as OriginalRunBoundary[]
       : attrs._originalFormatting?.runProperties ? [{
@@ -3827,7 +3851,6 @@ class SaveContext {
         mark: paragraph.formatting?.runProperties,
         matches: items.some(item => {
           const formatting = directFormatting(item.attributes);
-          // Seeded runs carry no language; a run that has one must agree with every slot the source run sets.
           const live = asObject(item.attributes.language);
           return sameJson(fontsKey(formatting.fontFamily), fontsKey(expected)) &&
             (!live || Object.entries(run.formatting?.language ?? {}).every(([slot, value]) => live[slot] === value));
@@ -3849,6 +3872,26 @@ class SaveContext {
       candidate = first;
     }
     const formatting = candidate.run;
+    if (properties.language === undefined) {
+      const inheritedLanguage = {
+        ...this.styles.resolveParagraphStyle(
+          typeof properties.pStyle === 'string' ? properties.pStyle : null,
+          undefined,
+          this.cellRuns.get(story)
+        ).runFormatting?.language,
+        ...asObject(asObject(properties.defaultTextFormatting)?.language),
+      };
+      for (const item of items) {
+        const live = asObject(item.attributes.language);
+        if (!live) continue;
+        const language = { ...live };
+        for (const slot of ['latin', 'eastAsia', 'bidi'] as const) {
+          if (formatting.language?.[slot] === undefined && typeof language[slot] === 'string' &&
+            language[slot] === inheritedLanguage?.[slot]) delete language[slot];
+        }
+        item.attributes = { ...item.attributes, language };
+      }
+    }
     const marks = asObject(original!.runProperties);
     const sourceMark = candidate.mark;
     return {

@@ -8,7 +8,7 @@ use crate::serializer::xml_writer::{XmlWriter, escape_xml, int_attr};
 use super::lower::{Node, WORD, Xml};
 use super::{Failure, apply_bytes};
 
-const RANK_R: &[&str] = &[
+pub(super) const RANK_R: &[&str] = &[
     "rStyle",
     "rFonts",
     "b",
@@ -50,7 +50,7 @@ const RANK_R: &[&str] = &[
     "oMath",
     "rPrChange",
 ];
-const RANK_P: &[&str] = &[
+pub(super) const RANK_P: &[&str] = &[
     "pStyle",
     "keepNext",
     "keepLines",
@@ -204,6 +204,9 @@ pub(super) fn run_properties(
             };
             return Err(Failure::structure(format!("{kind}: live {key} mutation")));
         }
+        if key == "language" {
+            continue;
+        }
         if !matches!(
             key,
             "bold"
@@ -264,7 +267,16 @@ pub(super) fn run_properties(
             }
         }
     }
-    write_container(source, "rPr", &changes)
+    let output = write_container(source, "rPr", &changes)?;
+    let slots = language_slots(deltas)?;
+    if slots.is_empty() {
+        return Ok(output);
+    }
+    super::language::run_language(
+        &output,
+        &BTreeMap::from([("w".to_owned(), WORD.to_owned())]),
+        &slots,
+    )
 }
 
 pub(super) fn paragraph_properties(
@@ -283,6 +295,9 @@ pub(super) fn paragraph_properties(
     let mut changes = Change::default();
     for delta in deltas {
         let key = delta.path.first().map(String::as_str).unwrap_or_default();
+        if key == "language" {
+            continue;
+        }
         if restyle && key != "pStyle" {
             let list_indent = matches!(
                 key,
@@ -345,7 +360,55 @@ pub(super) fn paragraph_properties(
             paragraph_leaf(path, after, inherit, target, &mut changes)
         })?;
     }
-    write_container(source, "pPr", &changes)
+    let output = write_container(source, "pPr", &changes)?;
+    let slots = language_slots(deltas)?;
+    if slots.is_empty() || (output.is_empty() && slots.values().all(Value::is_null)) {
+        return Ok(output);
+    }
+    let source = if output.is_empty() {
+        "<w:pPr></w:pPr>"
+    } else {
+        &output
+    };
+    super::language::path_language(
+        source,
+        &BTreeMap::from([("w".to_owned(), WORD.to_owned())]),
+        &["rPr"],
+        &slots,
+    )
+}
+
+fn language_slots(deltas: &[AttrDeltaV1]) -> Result<serde_json::Map<String, Value>, Failure> {
+    let mut slots = serde_json::Map::new();
+    for delta in deltas
+        .iter()
+        .filter(|delta| delta.path.first().is_some_and(|key| key == "language"))
+    {
+        expand(delta, &mut |path, after| {
+            let key = match path.get(1).map(String::as_str) {
+                Some("latin" | "val") => "lang",
+                Some("eastAsia") => "eastAsia",
+                Some("bidi") => "bidi",
+                _ => return Err(unsupported(path)),
+            };
+            if path.len() != 2 {
+                return Err(unsupported(path));
+            }
+            slots.insert(key.to_owned(), after.cloned().unwrap_or(Value::Null));
+            Ok(())
+        })?;
+    }
+    Ok(slots)
+}
+
+pub(super) fn language_only(patch: &crate::paragraph_patch::ParagraphPatchV1) -> bool {
+    patch.text_edits.is_empty()
+        && patch
+            .run_edits
+            .iter()
+            .flat_map(|edit| &edit.deltas)
+            .chain(&patch.para_deltas)
+            .all(|delta| delta.path.first().is_some_and(|key| key == "language"))
 }
 
 pub(super) fn expand(

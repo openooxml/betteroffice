@@ -2,6 +2,117 @@ use super::*;
 use crate::{ChangeKind, ChangeTarget, EngineSession, seed_from_docx};
 use serde_json::json;
 
+#[test]
+fn language_delta_parses_and_lowers_keep_set_clear_slots() {
+    let parse = |value: Value| parse_inline_format_delta(value.as_object().unwrap()).unwrap();
+    assert_eq!(parse(json!({})).language, Patch::Keep);
+    let delta = parse(json!({"language": {"lang": "de-DE", "eastAsia": null}}));
+    assert_eq!(
+        delta.language,
+        Patch::Set(LanguagePatch {
+            latin: Patch::Set("de-DE".to_owned()),
+            east_asia: Patch::Clear,
+            bidi: Patch::Keep,
+        })
+    );
+    let attributes = delta.to_attrs().unwrap();
+    assert_eq!(
+        serde_json::to_value(&attributes["language"]).unwrap(),
+        json!({"latin": "de-DE", "eastAsia": null})
+    );
+    assert_eq!(
+        serde_json::to_value(
+            parse(json!({"language": null}))
+                .to_attrs()
+                .unwrap()
+                .get("language")
+                .unwrap()
+        )
+        .unwrap(),
+        json!({"latin": null, "eastAsia": null, "bidi": null})
+    );
+    for value in [
+        json!({"language": "de-DE"}),
+        json!({"language": {"lang": "en_US"}}),
+        json!({"language": {"val": "de-DE"}}),
+    ] {
+        assert!(parse_inline_format_delta(value.as_object().unwrap()).is_err());
+    }
+}
+
+#[test]
+fn language_range_merges_each_runs_live_slots() {
+    let engine = engine();
+    let doc = engine.doc();
+    let ctx = EditCtx::local("", "");
+    let range = StoryRange::new("body", 0, 6);
+    let apply = |range: StoryRange, slots: Value| {
+        let delta =
+            parse_inline_format_delta(json!({"language": slots}).as_object().unwrap()).unwrap();
+        doc.format_range(&ctx, range, &delta).unwrap();
+    };
+    apply(
+        range.clone(),
+        json!({"lang": "en-US", "eastAsia": "ja-JP", "bidi": "ar-SA"}),
+    );
+    apply(
+        StoryRange::new("body", 3, 6),
+        json!({"eastAsia": "zh-Hant"}),
+    );
+    apply(range.clone(), json!({"lang": "de-DE"}));
+    let runs = attrs(&engine);
+    assert_eq!(
+        runs[0].1["language"],
+        json!({"latin": "de-DE", "eastAsia": "ja-JP", "bidi": "ar-SA"})
+    );
+    assert_eq!(
+        runs[1].1["language"],
+        json!({"latin": "de-DE", "eastAsia": "zh-Hant", "bidi": "ar-SA"})
+    );
+    apply(range, json!({"lang": null}));
+    for (_, attributes) in attrs(&engine) {
+        assert!(attributes["language"]["latin"].is_null());
+        assert_eq!(attributes["language"]["bidi"], "ar-SA");
+    }
+}
+
+#[test]
+fn paragraph_language_updates_the_mark_even_without_text() {
+    let engine = EngineSession::new(9306);
+    seed_from_docx(
+        engine.doc(),
+        &document("<w:p><w:pPr><w:rPr><w:lang w:val=\"en-US\"/></w:rPr></w:pPr></w:p>"),
+    )
+    .unwrap();
+    let id = engine.doc().paragraphs("body").unwrap()[0].para_id.clone();
+    let delta = InlineFormatDelta {
+        language: Patch::Set(LanguagePatch {
+            latin: Patch::Set("de-DE".to_owned()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    engine
+        .doc()
+        .format_text_target(
+            &crate::TextTarget::Paragraph(crate::ParagraphTarget {
+                story: "body".to_owned(),
+                para_id: id,
+            }),
+            &delta,
+        )
+        .unwrap()
+        .unwrap();
+    let segments = engine.doc().story_segments("body").unwrap();
+    let crate::SegmentContent::Pilcrow(mark) = &segments.last().unwrap().content else {
+        panic!("mark missing")
+    };
+    assert_eq!(
+        serde_json::to_value(&mark.values["language"]).unwrap(),
+        json!({"latin": "de-DE"})
+    );
+}
+
 fn document(body: &str) -> Vec<u8> {
     ooxml_opc::rezip_parts(&[
         ("[Content_Types].xml".to_owned(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec()),

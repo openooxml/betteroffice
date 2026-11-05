@@ -73,6 +73,39 @@ fn ctx() -> EditCtx {
     EditCtx::local("", "2026-10-21T00:00:00Z")
 }
 
+#[test]
+fn language_only_edits_patch_runs_and_marks_with_revisions_intact() {
+    let properties = r#"<w:rFonts w:ascii='Arial'/><w:b/><w:sz w:val="24"/><w:lang w:val="en-US" w:eastAsia="ja-JP" w:bidi="ar-SA"/><w:rPrChange w:id="7" w:author="Editor"><w:rPr><w:i/></w:rPr></w:rPrChange>"#;
+    let content = format!(
+        r#"<w:pPr><w:rPr>{properties}</w:rPr></w:pPr><w:r><w:rPr>{properties}</w:rPr><w:t>abc</w:t></w:r>"#
+    );
+    let doc = open(&content);
+    let id = doc.paragraphs("body").unwrap()[0].para_id.clone();
+    doc.format_text_target(
+        &docx_edit::TextTarget::Paragraph(ParagraphTarget {
+            story: "body".to_owned(),
+            para_id: id,
+        }),
+        &InlineFormatDelta {
+            language: Patch::Set(docx_edit::LanguagePatch {
+                latin: Patch::Set("de-DE".to_owned()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .unwrap();
+    let plan = patch(&doc);
+    assert_eq!(plan.run_edits.len(), 1);
+    assert_eq!(plan.run_edits[0].deltas[0].path, vec!["language", "latin"]);
+    assert_eq!(plan.para_deltas[0].path, vec!["language", "latin"]);
+    let (saved, warnings) = save_paragraph(&doc, &content, |_| {});
+    assert!(saved.contains(&properties.replace("en-US", "de-DE")));
+    assert!(!saved.contains("en-US"));
+    assert!(!warnings.iter().any(|warning| warning.contains("legacy=1")));
+}
+
 fn patch(doc: &EditingDoc) -> ParagraphPatchV1 {
     let plan = doc.paragraph_save_plan();
     let part = plan

@@ -5743,9 +5743,11 @@ fn paragraph_run_defaults(
         font_size: Some(chain_size.unwrap_or(10.0)),
         ..RunFormatting::default()
     };
-    let Some(Any::Map(defaults)) = values.get("defaultTextFormatting") else {
-        return result;
-    };
+    let empty = HashMap::new();
+    let defaults = values
+        .get("defaultTextFormatting")
+        .and_then(any_map)
+        .unwrap_or(&empty);
     if let Some(Any::Map(fonts)) = defaults.get("fontFamily") {
         let mut slots = RunFontSlots {
             ascii: map_string(fonts, "ascii"),
@@ -5780,6 +5782,18 @@ fn paragraph_run_defaults(
             east_asia: map_string(language, "eastAsia"),
             bidi: map_string(language, "bidi"),
         });
+    }
+    if let Some(Any::Map(language)) = values.get("language") {
+        let slots = result.language.get_or_insert_with(Default::default);
+        for (key, slot) in [
+            ("latin", &mut slots.latin),
+            ("eastAsia", &mut slots.east_asia),
+            ("bidi", &mut slots.bidi),
+        ] {
+            if language.contains_key(key) {
+                *slot = map_string(language, key);
+            }
+        }
     }
     result
 }

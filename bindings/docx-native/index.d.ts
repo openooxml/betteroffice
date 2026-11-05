@@ -197,6 +197,9 @@ export declare class EditSession {
   set_content_control_value_at(story: string, paraId: string, offset: number, valueJson: string): void
   set_content_control_value(embedId: string, valueJson: string): void
   set_content_control_value_index(story: string, index: number, json: string): void
+  style_languages_json(): string
+  set_style_language(styleId: string | undefined | null, slotsJson: string): boolean
+  patch_style_languages_xml(source: string): string
   set_document_property(key: string, json: string): boolean
   set_header_footer_aliases(json: string): void
   set_hyperlink(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number, hyperlinkJson: string, authorName?: string | undefined | null, authorDate?: string | undefined | null): void

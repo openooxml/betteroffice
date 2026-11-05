@@ -293,6 +293,12 @@ export type YrsTextColor =
   | { rgb: string; themeColor?: never }
   | { rgb?: never; themeColor: string };
 
+export interface YrsLanguagePatch {
+  lang?: string | null;
+  eastAsia?: string | null;
+  bidi?: string | null;
+}
+
 /**
  * Set-valued inline formatting for {@link YrsSession.formatRange}. Omitted
  * fields are left unchanged; `null` clears a field. Boolean `false` also
@@ -308,6 +314,7 @@ export interface YrsInlineFormatDelta {
   /** Font size in points; Rust writes both OOXML half-point size fields. */
   fontSize?: number | null;
   fontFamily?: { ascii: string; hAnsi?: string } | null;
+  language?: YrsLanguagePatch | null;
   /** Passive run properties not covered by the typed fields. `null` clears. */
   other?: Readonly<Record<string, unknown | null>>;
 }
@@ -1573,6 +1580,10 @@ export interface YrsSession extends CollaborationReplica {
    * failures are returned; malformed requests throw.
    */
   applyEdits(request: DocxEditRequest): DocxEditResult;
+  /** Sets style or document-default proofing language slots. */
+  setStyleLanguage(styleId: string | null, slots: YrsLanguagePatch): boolean;
+  styleLanguages(): Record<string, YrsLanguagePatch>;
+  patchStyleLanguagesXml(source: string): string;
   /** Resolves a text target and formats it in one call. @internal */
   formatTextTarget(target: DocxTextTarget, delta: YrsInlineFormatDelta): YrsTargetEditResult;
   /** Resolves a text target and anchors side-map comment `id` over it in one call. @internal */

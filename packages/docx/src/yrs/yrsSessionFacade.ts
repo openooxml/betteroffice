@@ -1684,6 +1684,13 @@ export function wrapSession(
       if (destroyed) throw new Error('yrs session is destroyed');
       return proposals.subscribe(listener);
     },
+    setStyleLanguage: (styleId, slots) => {
+      ensureUndo();
+      markDirty('all');
+      return mutate(() => session.set_style_language(styleId ?? undefined, JSON.stringify(slots)));
+    },
+    styleLanguages: () => JSON.parse(session.style_languages_json()),
+    patchStyleLanguagesXml: source => session.patch_style_languages_xml(source),
     formatTextTarget: (target, delta) => {
       ensureUndo(targetStory(target));
       return mutate(

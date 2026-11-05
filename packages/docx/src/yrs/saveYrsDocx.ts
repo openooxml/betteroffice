@@ -631,7 +631,14 @@ export async function writeSessionSave(
   const { buffer, plan } = result;
   if (yieldSave) await yieldSave();
   const paragraphs = savedParagraphs(output, capture.identities);
-  const bytes = new Uint8Array(buffer);
+  let bytes: Uint8Array = new Uint8Array(buffer);
+  if (Object.keys(session.styleLanguages?.() ?? {}).length) {
+    const parts = unzipContainer(bytes);
+    const source = parts['word/styles.xml'];
+    if (!source) throw new Error('Language edits require a styles part');
+    parts['word/styles.xml'] = new TextEncoder().encode(session.patchStyleLanguagesXml(new TextDecoder().decode(source)));
+    bytes = rezipContainer(parts);
+  }
   engineProgress();
   const held = session.writtenParagraphIds(bytes);
   engineProgress();

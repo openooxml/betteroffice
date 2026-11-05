@@ -1731,13 +1731,29 @@ impl EditingDoc {
             Ok(span) => span,
             Err(refusal) => return Ok(Err(refusal)),
         };
-        let Some(span) = span else {
-            return Ok(Ok(()));
+        let paragraph = match target {
+            TextTarget::Paragraph(paragraph) => Some(paragraph),
+            _ => None,
         };
-        if let Err(refusal) = self.writable(&span.story, target) {
+        let story = span
+            .as_ref()
+            .map(|span| span.story.as_str())
+            .or_else(|| paragraph.map(|paragraph| paragraph.story.as_str()));
+        if let Some(story) = story
+            && let Err(refusal) = self.writable(story, target)
+        {
             return Ok(Err(refusal));
         }
-        self.format_range(&EditCtx::local(String::new(), String::new()), span, delta)?;
+        let attrs = delta.to_attrs()?;
+        let ctx = EditCtx::local("", "");
+        if let Some(span) = span {
+            self.format_range(&ctx, span, delta)?;
+        }
+        if let Some(paragraph) = paragraph
+            && let Some(language) = attrs.get("language")
+        {
+            self.set_paragraph_language(&ctx, paragraph, language)?;
+        }
         Ok(Ok(()))
     }
 
