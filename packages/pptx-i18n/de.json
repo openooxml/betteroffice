@@ -231,8 +231,24 @@
       "permissionDenied": "Die Host-Anwendung hat diesem Plugin diesen Befehl nicht erlaubt.",
       "unsupportedPolicy": "Plugins können diesen Befehl noch nicht ausführen. Verwenden Sie stattdessen einen Bearbeitungsstapel.",
       "pluginUnavailable": "Das Plugin ist nicht mehr aktiv.",
-      "aborted": "Die Plugin-Aktion wurde abgebrochen, bevor der Befehl ausgeführt wurde."
-    }
+      "aborted": "Die Plugin-Aktion wurde abgebrochen, bevor der Befehl ausgeführt wurde.",
+      "clipboardUnavailable": "Der Zugriff auf die Zwischenablage ist nicht verfügbar oder wurde verweigert.",
+      "tableRequired": "Setzen Sie den Cursor zuerst in eine Tabellenzelle.",
+      "lastSlide": "Die letzte Folie kann nicht gelöscht werden."
+    },
+    "cut": "Ausschneiden",
+    "copy": "Kopieren",
+    "paste": "Einfügen",
+    "insert": "Einfügen",
+    "delete": "Löschen",
+    "deleteTable": "Tabelle löschen",
+    "duplicateSlide": "Folie duplizieren",
+    "insertRowsAbove": "Zeilen oberhalb einfügen",
+    "insertRowsBelow": "Zeilen unterhalb einfügen",
+    "insertColumnsLeft": "Spalten links einfügen",
+    "insertColumnsRight": "Spalten rechts einfügen",
+    "deleteRows": "Zeilen löschen",
+    "deleteColumns": "Spalten löschen"
   },
   "plugins": {
     "toolbarGroup": "Plugins",
@@ -244,5 +260,11 @@
     "label": "Mitbearbeiter",
     "moreCollaborators": "{count, plural, one {# weiterer Mitbearbeiter} other {# weitere Mitbearbeiter}}",
     "moreSelections": "+{count, plural, one {# Auswahl} other {# Auswahlen}}"
+  },
+  "contextMenu": {
+    "text": "Textmenü",
+    "shape": "Formmenü",
+    "table": "Tabellenmenü",
+    "slide": "Folienmenü"
   }
 }

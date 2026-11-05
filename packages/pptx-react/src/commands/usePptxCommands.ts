@@ -163,6 +163,9 @@ const SHAPE_COMMANDS: ReadonlySet<PptxCommandId> = new Set<PptxCommandId>([
 ]);
 
 const SLIDE_COMMANDS: ReadonlySet<PptxCommandId> = new Set<PptxCommandId>(['insertSlide', 'tool']);
+const PEERLESS_COMMANDS: ReadonlySet<PptxCommandId> = new Set<PptxCommandId>([
+  'cut', 'copy', 'paste', 'deleteObject', 'deleteSlide', 'duplicateSlide', 'tableInsert', 'tableDelete',
+]);
 
 function hexColor(value: string | null | undefined): string | null {
   if (!value) return null;
@@ -359,8 +362,8 @@ export function usePptxCommandBinding(
               },
             }
           : null,
-        hostDisabled: current.workerMode ? (id) => current.workerMode!.preparing ||
-          ['exportPng', 'slideshow', 'proposalSelect', 'proposalDiff'].includes(id) : undefined,
+        hostDisabled: (id) => PEERLESS_COMMANDS.has(id) || Boolean(current.workerMode &&
+          (current.workerMode.preparing || ['exportPng', 'slideshow', 'proposalSelect', 'proposalDiff'].includes(id))),
         translate: current.workerMode ? (key, vars) =>
           key === 'commands.reasons.hostDisabled' || key === 'commands.reasons.documentLoading'
             ? current.t(current.workerMode!.failed ? 'worker.failed' :

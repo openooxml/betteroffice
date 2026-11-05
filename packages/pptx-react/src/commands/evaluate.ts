@@ -79,6 +79,10 @@ export interface PptxCommandEnvironment {
   canRedo: boolean;
   /** The current slide, or `null` in a deck without slides. */
   slide: { id: string; layoutPartPath: string | null } | null;
+  slideCount?: number;
+  table?: { shapeId: string; row: number; column: number } | null;
+  clipboardRead?: boolean;
+  clipboardWrite?: boolean;
   layouts: readonly PptxCommandChoice<'insertSlide'>[];
   /** `'unsupported'` when the text target could not be read. */
   text: PptxTextEnvironment | 'unsupported' | null;
@@ -95,10 +99,15 @@ export interface PptxCommandEnvironment {
   } | null;
   /** A host-owned binding without a handler for `id`. */
   hostDisabled?(id: PptxCommandId): boolean;
+  /** Gates for commands the binding brings along; `undefined` leaves `id` to the built-in gate. */
+  gates?(id: PptxCommandId, args: unknown, env: PptxCommandEnvironment): PptxCommandEvaluation | undefined;
   translate: TFunction;
 }
 
 const REASON_KEYS: Record<PptxCommandFailureCode, TranslationKey> = {
+  'clipboard-unavailable': 'commands.reasons.clipboardUnavailable',
+  'table-required': 'commands.reasons.tableRequired',
+  'last-slide': 'commands.reasons.lastSlide',
   'editor-unavailable': 'commands.reasons.editorUnavailable',
   'document-loading': 'commands.reasons.documentLoading',
   'no-document': 'commands.reasons.noDocument',
@@ -150,13 +159,16 @@ export function commandReason<Code extends PptxCommandFailureCode>(
 
 type Gate = PptxCommandDisabledCode | null;
 
-interface Evaluation<K extends PptxCommandId> {
+/** @internal */
+export interface PptxCommandEvaluation<K extends PptxCommandId = PptxCommandId> {
   gate: Gate;
   reasonKey?: TranslationKey;
   active?: boolean | 'mixed';
   value?: PptxCommandValues[K];
   options?: readonly PptxCommandChoice<K>[];
 }
+
+type Evaluation<K extends PptxCommandId> = PptxCommandEvaluation<K>;
 
 export const MIN_FONT_POINTS = 1;
 export const MAX_FONT_POINTS = 400;
@@ -285,7 +297,8 @@ function validArgs<K extends PptxCommandId>(id: K, args: PptxCommandArgs[K] | un
   }
 }
 
-function documentGate(env: PptxCommandEnvironment): Gate {
+/** @internal */
+export function documentGate(env: PptxCommandEnvironment): Gate {
   switch (env.status) {
     case 'unavailable':
       return 'editor-unavailable';
@@ -298,19 +311,23 @@ function documentGate(env: PptxCommandEnvironment): Gate {
   }
 }
 
-function writeGate(env: PptxCommandEnvironment): Gate {
+/** @internal */
+export function writeGate(env: PptxCommandEnvironment): Gate {
   return documentGate(env) ?? (env.readOnly ? 'read-only' : null);
 }
 
-function slideGate(env: PptxCommandEnvironment): Gate {
+/** @internal */
+export function slideGate(env: PptxCommandEnvironment): Gate {
   return env.slide ? null : 'slide-required';
 }
 
-function reviewGate(env: PptxCommandEnvironment): Gate {
+/** @internal */
+export function reviewGate(env: PptxCommandEnvironment): Gate {
   return env.reviewing ? 'review-active' : null;
 }
 
-function textGate(env: PptxCommandEnvironment): Gate {
+/** @internal */
+export function textGate(env: PptxCommandEnvironment): Gate {
   return (
     writeGate(env) ??
     reviewGate(env) ??
@@ -628,9 +645,8 @@ export function evaluatePptxCommand<K extends PptxCommandId>(
   if (!env) {
     return { enabled: false, disabledReason: commandReason('editor-unavailable', null) };
   }
-  const evaluation: Evaluation<K> = validArgs(id, args)
-    ? evaluate(id, args, env)
-    : { gate: documentGate(env) ?? 'invalid-arguments' };
+  const evaluation: Evaluation<K> = (env.gates?.(id, args, env) as Evaluation<K> | undefined) ??
+    (validArgs(id, args) ? evaluate(id, args, env) : { gate: documentGate(env) ?? 'invalid-arguments' });
   const gate = env.hostDisabled?.(id) ? 'host-disabled' : evaluation.gate;
   const presentation: {
     active?: boolean | 'mixed';

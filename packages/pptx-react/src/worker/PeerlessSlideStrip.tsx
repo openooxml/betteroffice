@@ -2,8 +2,13 @@ import { peerlessProposalFrameSource } from './peerlessFrameSource';
 import { AsyncProposalSlideStrip } from '../components/ProposalSlideStrip';
 import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { CSSProperties } from 'react';
+import { useContextMenu } from '../../../../shared/react-toolbar/ContextMenu';
+import { pptxContextMenuEntries } from '../contextMenu/menus';
+import type { PptxCommandStore } from '../commands/types';
+import { pptxCommandController } from '../commands/createPptxCommandStore';
 import type { SlideFit } from '../fitSlideScale';
 import { useTranslation } from '../i18n';
+import { useMenuTranslation } from '../i18n/useMenuTranslation';
 import { slideActionStyles } from '../components/editorChromeStyles';
 import type { PeerlessConfirmedFrame, PeerlessViewSnapshot } from './peerlessViewStore';
 import { peerlessDeleteSlide, peerlessInsertSlide, peerlessMoveSlide } from './peerlessSlideCommands';
@@ -117,6 +122,7 @@ const Slide = memo(function Slide({ id, name, index, active, disabled, frame, ru
   const settled = useSettledPreview(frame, active, run);
   const fit = useMemo(() => settled ? previewFit(settled, run) : null, [settled, run, previewFit]);
   return <button type="button" disabled={disabled}
+    data-slide-id={id}
     aria-current={active ? 'page' : undefined} style={active ? styles.activeSlide : styles.slide}
     draggable={!run.store.getSnapshot().editState.readOnly}
     onDragStart={(event) => event.dataTransfer.setData('text/plain', id)}
@@ -161,8 +167,8 @@ function SlideActions({ run, active, disabled }: { run: PeerlessPresentation; ac
   </div>;
 }
 
-export const PeerlessSlideStrip = memo(function PeerlessSlideStrip({ run, previewFit, current, onNavigate, proposalId, previewSlideId, onPreviewSlide }: {
-  run: PeerlessPresentation; previewFit(frame: PeerlessConfirmedFrame, run: PeerlessPresentation): SlideFit | null;
+export const PeerlessSlideStrip = memo(function PeerlessSlideStrip({ run, commands, previewFit, current, onNavigate, proposalId, previewSlideId, onPreviewSlide }: {
+  run: PeerlessPresentation; commands: PptxCommandStore; previewFit(frame: PeerlessConfirmedFrame, run: PeerlessPresentation): SlideFit | null;
   current(token: SlideFit, run: PeerlessPresentation): boolean;
   onNavigate(): void;
   proposalId?: string | null;
@@ -170,7 +176,37 @@ export const PeerlessSlideStrip = memo(function PeerlessSlideStrip({ run, previe
   onPreviewSlide?(slideId: string): void;
 }) {
   const { store, client } = run;
-  const { t } = useTranslation();
+  const { t } = useMenuTranslation();
+  const strip = useRef<HTMLElement>(null);
+  const subscribeMenu = useCallback((listener: () => void) => {
+    const releases = [commands.subscribe(listener), store.subscribePresentation(listener)];
+    return () => { for (const release of releases) release(); };
+  }, [commands, store]);
+  const contextMenu = useContextMenu({
+    surface: strip,
+    subscribe: subscribeMenu,
+    keyboardPoint() {
+      const button = strip.current?.ownerDocument.activeElement;
+      const bounds = button instanceof HTMLElement && strip.current?.contains(button) ? button.getBoundingClientRect() : null;
+      return bounds ? { x: bounds.left, y: bounds.bottom } : null;
+    },
+    resolve(request) {
+      if (proposalId || !run.current || request.target instanceof Element && request.target.closest('[role="menu"]')) return null;
+      const button = request.target instanceof Element ? request.target.closest<HTMLButtonElement>('button[data-slide-id]') : null;
+      const slideId = button?.dataset.slideId;
+      if (!button || button.disabled || !slideId) return null;
+      pptxCommandController(commands)?.refresh();
+      button.focus({ preventScroll: true });
+      if (run.store.getSnapshot().confirmed?.frame.slideId !== slideId)
+        void activatePeerlessSlide(run, slideId).catch(() => {});
+      return { label: t('contextMenu.slide'), entries: () => {
+        const entries = pptxContextMenuEntries('slide', commands, t);
+        return run.store.getSnapshot().confirmed?.frame.slideId === slideId ? entries
+          : entries.map((entry) => entry.kind === 'item' ? { ...entry, disabled: true } : entry);
+      } };
+    },
+  });
+  useEffect(() => contextMenu.close(), [run, proposalId, contextMenu.close]);
   const subscribe = useCallback((listener: () => void) => {
     const offStructure = store.subscribeStructure(listener);
     const offPresentation = store.subscribePresentation(listener);
@@ -195,12 +231,12 @@ export const PeerlessSlideStrip = memo(function PeerlessSlideStrip({ run, previe
   const view = useSyncExternalStore(subscribe, snapshot, snapshot);
   const readStrip = useCallback((id: string) => client.access!('proposalSlideStrip', id), [client, view]);
   const loadProposalSlide = useCallback((slideId: string) => peerlessProposalFrameSource(run, proposalId!, slideId), [run, proposalId, view]);
-  return <div style={styles.strip}><aside style={{ overflowY: 'auto', flex: 1 }} aria-label={t('slides.panelLabel')}>
+  return <div style={styles.strip}><aside ref={strip} style={{ overflowY: 'auto', flex: 1 }} aria-label={t('slides.panelLabel')}>
     {proposalId && onPreviewSlide ? <AsyncProposalSlideStrip id={proposalId} read={readStrip}
       load={loadProposalSlide} selectedSlideId={previewSlideId ?? view.active} onSelect={onPreviewSlide} />
       : view.slides.map((slide, index) => <Slide key={slide.id} {...slide} index={index} active={slide.id === view.active}
       disabled={view.disabled} run={run} previewFit={previewFit} current={current} onNavigate={onNavigate} />)}
-  </aside><SlideActions run={run} active={view.active} disabled={view.disabled} /></div>;
+  </aside><SlideActions run={run} active={view.active} disabled={view.disabled} />{contextMenu.element}</div>;
 });
 
 function actionButton(disabled: boolean): CSSProperties {

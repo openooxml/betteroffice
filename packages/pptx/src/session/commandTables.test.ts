@@ -41,6 +41,14 @@ async function open(options: { merged?: boolean; collaboration?: boolean } = {})
     });
     let seq = 0;
     return {
+      state: () => state,
+      cell(row: number, column: number) {
+        const slide = handle!.snapshot().slides[0]!;
+        const shape = slide.shapes.find((shape) => (shape.graphic as { type?: string } | null)?.type === 'table')!;
+        const columns = (shape.graphic as { grid: unknown[] }).grid.length;
+        return { slideId: slide.id, shapeId: shape.id, storyId: shape.textStories[row * columns + column]!.id,
+          anchor: 0, focus: 0, affinity: 'downstream' as const };
+      },
       table() {
         const slide = handle!.snapshot().slides[0]!;
         const shape = slide.shapes.find((shape) => (shape.graphic as { type?: string } | null)?.type === 'table')!;
@@ -64,6 +72,33 @@ async function open(options: { merged?: boolean; collaboration?: boolean } = {})
 
 const invoke = (method: string, args: unknown[]) => ({ kind: 'invoke', payload: { ...input, method, args } });
 const refused = { status: 'refused', reason: 'invalid-payload' };
+
+test('table cell context follows the current grid after structure edits and history', async () => {
+  const session = await open();
+  try {
+    const { slide, shape } = session.table();
+    const select = async (row: number, column: number) => {
+      expect(await session.run({ kind: 'setSelection', payload: { ...input, selection: session.cell(row, column) } }))
+        .toMatchObject({ status: 'applied' });
+      expect(session.state().editState.toolbar.table).toEqual({ shapeId: shape, row, column });
+    };
+    await select(1, 2);
+    await session.run(invoke('insertTableRow', [slide, shape, 0, 'before']));
+    await select(2, 2);
+    await session.run(invoke('insertTableColumn', [slide, shape, 0, 'before']));
+    await select(2, 3);
+    await session.run({ kind: 'undo', payload: input });
+    await select(2, 2);
+    await session.run({ kind: 'redo', payload: input });
+    await select(2, 3);
+    await session.run(invoke('deleteTableRow', [slide, shape, 0]));
+    await select(1, 3);
+    await session.run(invoke('deleteTableColumn', [slide, shape, 0]));
+    await select(1, 2);
+    await session.run({ kind: 'setSelection', payload: { ...input, selection: null } });
+    expect(session.state().editState.toolbar.table).toBeNull();
+  } finally { await session.dispose(); }
+});
 
 test('table structure invokes apply, undo and redo in a solo session', async () => {
   const session = await open();

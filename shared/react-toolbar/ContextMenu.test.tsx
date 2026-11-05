@@ -216,3 +216,23 @@ test('returnFocus replaces the opener as the focus target on close', () => {
   key(document.activeElement!, { key: 'Escape' });
   expect(document.activeElement).toBe(editor);
 });
+
+test('a menu spec returnFocus sends focus back on Escape and on choosing an item', () => {
+  const editor = document.createElement('textarea');
+  document.body.append(editor);
+  const ran: string[] = [];
+  const host = mount(<Surface resolve={() => ({ label: 'Surface menu', returnFocus: () => editor.focus(),
+    entries: () => [item('Cut', () => ran.push('cut'))] })} />);
+  const surface = host.querySelector<HTMLElement>('[data-testid="surface"]')!;
+  surface.focus();
+  const click = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2 });
+  act(() => { surface.dispatchEvent(click); });
+  key(document.querySelector('[role="menu"]')!, { key: 'Escape' });
+  expect(document.querySelector('[role="menu"]')).toBeNull();
+  expect(document.activeElement).toBe(editor);
+  surface.focus();
+  key(surface, { key: 'F10', shiftKey: true });
+  key(document.activeElement!, { key: 'Enter' });
+  expect(ran).toEqual(['cut']);
+  expect(document.activeElement).toBe(editor);
+});

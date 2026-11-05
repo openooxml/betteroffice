@@ -231,8 +231,24 @@
       "permissionDenied": "Ứng dụng chủ chưa cho phép plugin này dùng lệnh này.",
       "unsupportedPolicy": "Plugin chưa thể chạy lệnh này. Hãy dùng một đợt chỉnh sửa thay thế.",
       "pluginUnavailable": "Plugin không còn hoạt động.",
-      "aborted": "Hành động của plugin đã bị hủy trước khi lệnh chạy."
-    }
+      "aborted": "Hành động của plugin đã bị hủy trước khi lệnh chạy.",
+      "clipboardUnavailable": "Không thể truy cập bảng tạm hoặc quyền truy cập đã bị từ chối.",
+      "tableRequired": "Trước tiên, hãy đặt con trỏ vào một ô trong bảng.",
+      "lastSlide": "Không thể xóa trang chiếu cuối cùng."
+    },
+    "cut": "Cắt",
+    "copy": "Sao chép",
+    "paste": "Dán",
+    "insert": "Chèn",
+    "delete": "Xóa",
+    "deleteTable": "Xóa bảng",
+    "duplicateSlide": "Nhân đôi trang chiếu",
+    "insertRowsAbove": "Chèn hàng bên trên",
+    "insertRowsBelow": "Chèn hàng bên dưới",
+    "insertColumnsLeft": "Chèn cột bên trái",
+    "insertColumnsRight": "Chèn cột bên phải",
+    "deleteRows": "Xóa hàng",
+    "deleteColumns": "Xóa cột"
   },
   "plugins": {
     "toolbarGroup": "Plugin",
@@ -244,5 +260,11 @@
     "label": "Cộng tác viên",
     "moreCollaborators": "{count, plural, other {# cộng tác viên nữa}}",
     "moreSelections": "+{count, plural, other {# lựa chọn}}"
+  },
+  "contextMenu": {
+    "text": "Menu văn bản",
+    "shape": "Menu hình dạng",
+    "table": "Menu bảng",
+    "slide": "Menu trang chiếu"
   }
 }

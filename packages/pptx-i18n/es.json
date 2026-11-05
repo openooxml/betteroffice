@@ -231,8 +231,24 @@
       "permissionDenied": "La aplicación host no ha permitido que este complemento use este comando.",
       "unsupportedPolicy": "Los complementos aún no pueden ejecutar este comando. Use en su lugar un lote de ediciones.",
       "pluginUnavailable": "El complemento ya no está activo.",
-      "aborted": "La acción del complemento se canceló antes de que se ejecutara el comando."
-    }
+      "aborted": "La acción del complemento se canceló antes de que se ejecutara el comando.",
+      "clipboardUnavailable": "El acceso al portapapeles no está disponible o se ha denegado.",
+      "tableRequired": "Coloque primero el cursor en una celda de la tabla.",
+      "lastSlide": "No se puede eliminar la última diapositiva."
+    },
+    "cut": "Cortar",
+    "copy": "Copiar",
+    "paste": "Pegar",
+    "insert": "Insertar",
+    "delete": "Eliminar",
+    "deleteTable": "Eliminar tabla",
+    "duplicateSlide": "Duplicar diapositiva",
+    "insertRowsAbove": "Insertar filas encima",
+    "insertRowsBelow": "Insertar filas debajo",
+    "insertColumnsLeft": "Insertar columnas a la izquierda",
+    "insertColumnsRight": "Insertar columnas a la derecha",
+    "deleteRows": "Eliminar filas",
+    "deleteColumns": "Eliminar columnas"
   },
   "plugins": {
     "toolbarGroup": "Complementos",
@@ -244,5 +260,11 @@
     "label": "Colaboradores",
     "moreCollaborators": "{count, plural, one {# colaborador más} many {# colaboradores más} other {# colaboradores más}}",
     "moreSelections": "+{count, plural, one {# selección} many {# selecciones} other {# selecciones}}"
+  },
+  "contextMenu": {
+    "text": "Menú de texto",
+    "shape": "Menú de forma",
+    "table": "Menú de tabla",
+    "slide": "Menú de diapositiva"
   }
 }

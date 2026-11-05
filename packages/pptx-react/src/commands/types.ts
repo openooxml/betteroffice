@@ -21,6 +21,14 @@ export type PptxZOrderMove = 'front' | 'forward' | 'backward' | 'back';
  * @experimental
  */
 export interface PptxCommandArgs {
+  cut: null;
+  copy: null;
+  paste: null;
+  deleteObject: null;
+  deleteSlide: null;
+  duplicateSlide: null;
+  tableInsert: { kind: 'row' | 'column'; position: 'before' | 'after' };
+  tableDelete: { kind: 'row' | 'column' | 'table' };
   bold: null;
   italic: null;
   underline: null;
@@ -86,6 +94,14 @@ export type PptxSelectCommandId =
  * @experimental
  */
 export interface PptxCommandValues {
+  cut: null;
+  copy: null;
+  paste: null;
+  deleteObject: null;
+  deleteSlide: null;
+  duplicateSlide: null;
+  tableInsert: null;
+  tableDelete: null;
   bold: null;
   italic: null;
   underline: null;
@@ -133,6 +149,9 @@ export interface PptxCommandValues {
  * @experimental
  */
 export type PptxCommandDisabledCode =
+  | 'clipboard-unavailable'
+  | 'table-required'
+  | 'last-slide'
   | 'editor-unavailable'
   | 'document-loading'
   | 'no-document'

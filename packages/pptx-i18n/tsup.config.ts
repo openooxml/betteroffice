@@ -4,7 +4,7 @@ import { readLocaleCodes } from './locale-files.ts';
 const localeCodes = readLocaleCodes(import.meta.dirname);
 
 export default defineConfig({
-  entry: ['src/index.ts', 'src/editor.ts', 'src/proposals.ts', ...localeCodes.map((code) => `src/${code}.ts`)],
+  entry: ['src/index.ts', 'src/editor.ts', 'src/proposals.ts', 'src/menus.ts', ...localeCodes.map((code) => `src/${code}.ts`)],
   format: ['esm'],
   dts: { resolve: true },
   splitting: false,

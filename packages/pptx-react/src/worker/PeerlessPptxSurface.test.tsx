@@ -27,6 +27,7 @@ import type { PptxAsyncEditorApi } from './createPeerlessEditorApi';
 import type { PeerlessConfirmedFrame, PeerlessViewSnapshot } from './peerlessViewStore';
 import { peerlessPainterFactories, peerlessSessionOpener, type PeerlessPresentation } from './usePeerlessPresentation';
 import { PeerlessSlideStrip } from './PeerlessSlideStrip';
+import { UNAVAILABLE_PPTX_COMMANDS } from '../commands/createPptxCommandStore';
 import { commandFrameRaster, createCommandFrameImages, createCommandFramePainter,
   retainCommandFrameRaster } from './commandFramePainter';
 import { isCommandAck, isCommandEnvelope } from '../../../../shared/office-session/commands/types';
@@ -2824,7 +2825,7 @@ describe('peerless stage fit', () => {
     const images = createCommandFrameImages();
     const run = { client, store, images, current: true, failure: undefined,
       fileGeneration: {}, session: {} } as unknown as PeerlessPresentation;
-    const strip = (value = run) => <PeerlessSlideStrip run={value}
+    const strip = (value = run) => <PeerlessSlideStrip run={value} commands={UNAVAILABLE_PPTX_COMMANDS}
       previewFit={() => ({ scale: 0.25, dpr: 2, generation: 1 })} current={() => true} onNavigate={() => {}} />;
     return { run, strip, store, dispose() { store.dispose(); images.dispose(); },
       confirm(slideId: string, slideRevision: number) {
@@ -3233,7 +3234,7 @@ describe('peerless stage fit', () => {
     const run = { client, store, images: media, current: true, failure: undefined } as unknown as PeerlessPresentation;
     let fit = { scale: 0.25, dpr: 2, generation: 1 };
     let valid = true;
-    const strip = () => <PeerlessSlideStrip run={run} previewFit={() => fit}
+    const strip = () => <PeerlessSlideStrip run={run} commands={UNAVAILABLE_PPTX_COMMANDS} previewFit={() => fit}
       current={(token) => valid && token.generation === fit.generation} onNavigate={() => {}} />;
     const view = render(strip());
     try {
@@ -3284,7 +3285,7 @@ describe('peerless stage fit', () => {
     const images = createCommandFrameImages();
     const run = { client, store, images, current: true, failure: undefined } as unknown as PeerlessPresentation;
     const previewFit = mock((_frame: PeerlessConfirmedFrame, _run: PeerlessPresentation) => ({ scale: 0.25, dpr: 2, generation: 1 }));
-    const view = render(<PeerlessSlideStrip run={run} previewFit={previewFit} current={() => true} onNavigate={() => {}} />);
+    const view = render(<PeerlessSlideStrip run={run} commands={UNAVAILABLE_PPTX_COMMANDS} previewFit={previewFit} current={() => true} onNavigate={() => {}} />);
     try {
       await flushStage();
       previewFit.mockClear();

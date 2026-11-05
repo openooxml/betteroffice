@@ -154,6 +154,8 @@ export interface ContextMenuSpec {
   entries(): readonly OverflowMenuEntry[];
   className?: string;
   testId?: string;
+  /** Where Escape and choosing an item send focus; defaults to the element focused before the menu opened. */
+  returnFocus?(): void;
 }
 
 export interface UseContextMenuOptions {
@@ -279,6 +281,7 @@ export function useContextMenu(options: UseContextMenuOptions): ContextMenuContr
       colors={options.colors}
       className={state.spec.className}
       testId={state.spec.testId}
+      returnFocus={state.spec.returnFocus}
       onClose={close}
     />
   ) : null;

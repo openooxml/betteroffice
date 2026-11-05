@@ -231,8 +231,24 @@
       "permissionDenied": "L'applicazione host non ha consentito a questo plug-in di usare questo comando.",
       "unsupportedPolicy": "I plug-in non possono ancora eseguire questo comando. Usa invece un batch di modifiche.",
       "pluginUnavailable": "Il plug-in non è più attivo.",
-      "aborted": "L'azione del plug-in è stata annullata prima dell'esecuzione del comando."
-    }
+      "aborted": "L'azione del plug-in è stata annullata prima dell'esecuzione del comando.",
+      "clipboardUnavailable": "L’accesso agli Appunti non è disponibile o è stato negato.",
+      "tableRequired": "Posizionare prima il cursore in una cella della tabella.",
+      "lastSlide": "Non è possibile eliminare l’ultima diapositiva."
+    },
+    "cut": "Taglia",
+    "copy": "Copia",
+    "paste": "Incolla",
+    "insert": "Inserisci",
+    "delete": "Elimina",
+    "deleteTable": "Elimina tabella",
+    "duplicateSlide": "Duplica diapositiva",
+    "insertRowsAbove": "Inserisci righe sopra",
+    "insertRowsBelow": "Inserisci righe sotto",
+    "insertColumnsLeft": "Inserisci colonne a sinistra",
+    "insertColumnsRight": "Inserisci colonne a destra",
+    "deleteRows": "Elimina righe",
+    "deleteColumns": "Elimina colonne"
   },
   "plugins": {
     "toolbarGroup": "Plugin",
@@ -244,5 +260,11 @@
     "label": "Collaboratori",
     "moreCollaborators": "{count, plural, one {# collaboratore in più} many {# collaboratori in più} other {# collaboratori in più}}",
     "moreSelections": "+{count, plural, one {# selezione} many {# selezioni} other {# selezioni}}"
+  },
+  "contextMenu": {
+    "text": "Menu testo",
+    "shape": "Menu forma",
+    "table": "Menu tabella",
+    "slide": "Menu diapositiva"
   }
 }

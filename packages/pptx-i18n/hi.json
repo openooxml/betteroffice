@@ -231,8 +231,24 @@
       "permissionDenied": "होस्ट एप्लिकेशन ने इस प्लगइन को यह कमांड उपयोग करने की अनुमति नहीं दी है।",
       "unsupportedPolicy": "प्लगइन अभी यह कमांड नहीं चला सकते। इसके बजाय संपादन बैच का उपयोग करें।",
       "pluginUnavailable": "प्लगइन अब सक्रिय नहीं है।",
-      "aborted": "कमांड चलने से पहले प्लगइन की कार्रवाई रद्द कर दी गई।"
-    }
+      "aborted": "कमांड चलने से पहले प्लगइन की कार्रवाई रद्द कर दी गई।",
+      "clipboardUnavailable": "क्लिपबोर्ड का ऐक्सेस उपलब्ध नहीं है या अनुमति नहीं मिली।",
+      "tableRequired": "पहले कर्सर को तालिका के किसी कक्ष में रखें।",
+      "lastSlide": "अंतिम स्लाइड हटाई नहीं जा सकती।"
+    },
+    "cut": "काटें",
+    "copy": "कॉपी करें",
+    "paste": "पेस्ट करें",
+    "insert": "डालें",
+    "delete": "हटाएं",
+    "deleteTable": "तालिका हटाएं",
+    "duplicateSlide": "स्लाइड की प्रतिलिपि बनाएँ",
+    "insertRowsAbove": "ऊपर पंक्तियाँ सम्मिलित करें",
+    "insertRowsBelow": "नीचे पंक्तियाँ सम्मिलित करें",
+    "insertColumnsLeft": "बाईं ओर स्तंभ सम्मिलित करें",
+    "insertColumnsRight": "दाईं ओर स्तंभ सम्मिलित करें",
+    "deleteRows": "पंक्तियाँ हटाएँ",
+    "deleteColumns": "स्तंभ हटाएँ"
   },
   "plugins": {
     "toolbarGroup": "प्लगइन",
@@ -244,5 +260,11 @@
     "label": "सहयोगी",
     "moreCollaborators": "{count, plural, one {# और सहयोगी} other {# और सहयोगी}}",
     "moreSelections": "+{count, plural, one {# चयन} other {# चयन}}"
+  },
+  "contextMenu": {
+    "text": "पाठ मेनू",
+    "shape": "आकृति मेनू",
+    "table": "तालिका मेनू",
+    "slide": "स्लाइड मेनू"
   }
 }

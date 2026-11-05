@@ -231,8 +231,24 @@
       "permissionDenied": "De hosttoepassing heeft deze plug-in geen toestemming gegeven om deze opdracht te gebruiken.",
       "unsupportedPolicy": "Plug-ins kunnen deze opdracht nog niet uitvoeren. Gebruik in plaats daarvan een bewerkingsbatch.",
       "pluginUnavailable": "De plug-in is niet meer actief.",
-      "aborted": "De plug-inactie is geannuleerd voordat de opdracht werd uitgevoerd."
-    }
+      "aborted": "De plug-inactie is geannuleerd voordat de opdracht werd uitgevoerd.",
+      "clipboardUnavailable": "Toegang tot het klembord is niet beschikbaar of is geweigerd.",
+      "tableRequired": "Plaats de cursor eerst in een tabelcel.",
+      "lastSlide": "De laatste dia kan niet worden verwijderd."
+    },
+    "cut": "Knippen",
+    "copy": "Kopiëren",
+    "paste": "Plakken",
+    "insert": "Invoegen",
+    "delete": "Verwijderen",
+    "deleteTable": "Tabel verwijderen",
+    "duplicateSlide": "Dia dupliceren",
+    "insertRowsAbove": "Rijen boven invoegen",
+    "insertRowsBelow": "Rijen onder invoegen",
+    "insertColumnsLeft": "Kolommen links invoegen",
+    "insertColumnsRight": "Kolommen rechts invoegen",
+    "deleteRows": "Rijen verwijderen",
+    "deleteColumns": "Kolommen verwijderen"
   },
   "plugins": {
     "toolbarGroup": "Plug-ins",
@@ -244,5 +260,11 @@
     "label": "Medewerkers",
     "moreCollaborators": "{count, plural, one {# extra medewerker} other {# extra medewerkers}}",
     "moreSelections": "+{count, plural, one {# selectie} other {# selecties}}"
+  },
+  "contextMenu": {
+    "text": "Tekstmenu",
+    "shape": "Vormmenu",
+    "table": "Tabelmenu",
+    "slide": "Diamenu"
   }
 }

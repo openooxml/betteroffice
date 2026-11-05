@@ -22,6 +22,11 @@
       "import": "./dist/proposals.mjs",
       "default": "./dist/proposals.mjs"
     },
+    "./menus": {
+      "types": "./dist/menus.d.mts",
+      "import": "./dist/menus.mjs",
+      "default": "./dist/menus.mjs"
+    },
     "./en": {
       "types": "./dist/en.d.mts",
       "import": "./dist/en.mjs",

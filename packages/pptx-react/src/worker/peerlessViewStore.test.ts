@@ -1,5 +1,7 @@
 import { expect, mock, spyOn, test } from 'bun:test';
 import { CommandOutcomeUnknown } from '@betteroffice/pptx/worker';
+import { peerlessClipboard, peerlessPaste } from './peerlessClipboard';
+import type { PeerlessPresentation } from './usePeerlessPresentation';
 import { isClientMessage } from '../../../../shared/office-session/protocol';
 import type { SessionTransport } from '../../../../shared/office-session/transport';
 import { createPresentationCommandClient, createSharedPresentationCommandClient } from '../../../pptx/src/session/commandClient';
@@ -172,6 +174,78 @@ class FakeCommandClient implements PresentationCommandClient {
     for (const listener of this.frameListeners) listener(value);
   }
 }
+
+test('clipboard write starts synchronously with the authored story text and cut waits for success', async () => {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  const itemDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'ClipboardItem');
+  const written = deferred<void>();
+  const items: Record<string, Promise<Blob>>[] = [];
+  class Item { constructor(readonly data: Record<string, Promise<Blob>>) { items.push(data); } }
+  const write = mock((_items: unknown[]) => written.promise);
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { clipboard: { write, writeText: mock(async () => {}) } } });
+  Object.defineProperty(globalThis, 'ClipboardItem', { configurable: true, value: Item });
+  const client = new FakeCommandClient('a😀c');
+  client.read = mock(async () => ({ result: { ok: true, version: client.state.version,
+    stories: [{ slideId: 'slide', shapeId: 'box', storyId: 'story', text: 'A😀C' }] } }) as unknown as PresentationCommandReadResult);
+  const store = createPeerlessViewStore(client, { paintFrame() {}, paintEcho() {}, restoreLine() {} });
+  const run = { store, client, current: true, inputEnabled: true, require() {} } as unknown as PeerlessPresentation;
+  try {
+    store.setSelection({ ...selection(1), focus: 3 });
+    const sent = deferred<void>();
+    const dispatch = client.dispatch;
+    client.dispatch = mock((intent, basis) => { sent.resolve(); return dispatch(intent, basis); });
+    const cut = peerlessClipboard(run, true);
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(client.sent).toEqual([]);
+    expect(await (await items[0]!['text/plain']!).text()).toBe('😀');
+    written.resolve();
+    await sent.promise;
+    expect(client.sent[0]).toMatchObject({ kind: 'replaceText', payload: { text: '',
+      at: { source: 'confirmed', selection: { anchor: 1, focus: 3 } }, undoGroup: 'cut' } });
+    client.ack(1, { selection: selection(1) });
+    await cut;
+  } finally {
+    store.dispose();
+    if (descriptor) Object.defineProperty(globalThis, 'navigator', descriptor);
+    else Reflect.deleteProperty(globalThis, 'navigator');
+    if (itemDescriptor) Object.defineProperty(globalThis, 'ClipboardItem', itemDescriptor);
+    else Reflect.deleteProperty(globalThis, 'ClipboardItem');
+  }
+});
+
+test('clipboard denial never cuts text and a changed target never receives a pending paste', async () => {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  const pasted = deferred<string>();
+  const denied = new DOMException('Denied', 'NotAllowedError');
+  const readText = mock(() => pasted.promise);
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: {
+    clipboard: { writeText: () => Promise.reject(denied), readText },
+  } });
+  const client = new FakeCommandClient();
+  client.read = mock(async () => ({ result: { ok: true, version: client.state.version,
+    stories: [{ slideId: 'slide', shapeId: 'box', storyId: 'story', text: 'abc' }] } }) as unknown as PresentationCommandReadResult);
+  const store = createPeerlessViewStore(client, { paintFrame() {}, paintEcho() {}, restoreLine() {} });
+  const run = { store, client, current: true, inputEnabled: true, require() {} } as unknown as PeerlessPresentation;
+  try {
+    store.setSelection({ ...selection(0), focus: 3 });
+    await expect(peerlessClipboard(run, true)).rejects.toBe(denied);
+    expect(client.sent).toEqual([]);
+    const paste = peerlessPaste(run);
+    expect(readText).toHaveBeenCalledTimes(1);
+    store.setSelection(selection(2));
+    pasted.resolve('replacement');
+    await expect(paste).rejects.toMatchObject({ code: 'target-changed' });
+    expect(client.sent).toEqual([]);
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: {} });
+    await expect(peerlessPaste(run)).rejects.toMatchObject({ name: 'NotAllowedError' });
+    await expect(peerlessClipboard(run, false, true)).rejects.toMatchObject({ name: 'NotAllowedError' });
+    expect(await peerlessClipboard(run, false)).toBeNull();
+  } finally {
+    store.dispose();
+    if (descriptor) Object.defineProperty(globalThis, 'navigator', descriptor);
+    else Reflect.deleteProperty(globalThis, 'navigator');
+  }
+});
 
 test('refused local input surfaces through onError exactly once', async () => {
   const client = new FakeCommandClient();

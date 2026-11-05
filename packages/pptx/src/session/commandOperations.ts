@@ -206,6 +206,11 @@ export function prepareCommandOperation(handle: PresentationHandle, mutation: Pr
     const index = args[1];
     return Number.isSafeInteger(index) && index >= 0 && index < snapshot.slides.length ? () => handle.moveSlide(slide.id, index) : null;
   }
+  if (method === 'duplicateSlide') {
+    const index = args[1];
+    return args.length === 2 && Number.isSafeInteger(index) && index >= 0 && index <= snapshot.slides.length
+      ? () => handle.duplicateSlide(slide.id, index) : null;
+  }
   const shape = findTopLevelShape(slide, args[1]);
   if (!shape || shape.id !== args[1]) return null;
   switch (method) {
