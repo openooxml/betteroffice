@@ -709,6 +709,10 @@ export function workbookDisplayListJson(
 export type WasmInitInput = InitInput | Promise<InitInput>;
 
 export interface WasmInitOptions {
+  /**
+   * `false` loads the smaller core without PNG export. On that core, PNG export and the
+   * standalone {@link renderXlsxMarkdown} reject; `exportMarkdown` on a workbook still works.
+   */
   png?: boolean;
 }
 

@@ -3793,6 +3793,10 @@ export interface WorkbookHandle extends CollaborationReplica {
 export declare function workbookDisplayListJson(handle: WorkbookHandle, viewport: Viewport, sheet?: number): string;
 export type WasmInitInput = InitInput | Promise<InitInput>;
 export interface WasmInitOptions {
+    /**
+     * `false` loads the smaller core without PNG export. On that core, PNG export and the
+     * standalone {@link renderXlsxMarkdown} reject; `exportMarkdown` on a workbook still works.
+     */
     png?: boolean;
 }
 /** Initialize the workbook engine. Concurrent calls share the same attempt. */
