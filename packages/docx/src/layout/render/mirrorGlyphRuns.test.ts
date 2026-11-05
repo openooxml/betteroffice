@@ -48,6 +48,17 @@ test('wrapped lines, gaps and differing runs stay apart', () => {
   expect(runs(mirror).map((run) => run.textContent)).toEqual(['one', 'two', 'far', 'de']);
 });
 
+test('runs that show more text than their document range stay apart', () => {
+  const field = (start: number, x: number): DisplayPrimitive => ({
+    kind: 'glyphRun', fontId: 1, size: 16, color: '#000000', text: '2026',
+    glyphs: [{ id: 1, x, y: 140, cluster: 0, advance: 4 * ADVANCE }],
+    blockKey: 'p1', docStart: start, docEnd: start + 1, logicalOrder: start, bidiLevel: 0,
+  }) as DisplayPrimitive;
+  const mirror = buildMirrorPage(page([field(20, 100), field(21, 100 + 4 * ADVANCE)]), options);
+  expect(runs(mirror).map((run) => [run.textContent, run.dataset.docStart, run.dataset.docEnd]))
+    .toEqual([['2026', '20', '21'], ['2026', '21', '22']]);
+});
+
 test('right-to-left clusters join in logical order', () => {
   const mirror = buildMirrorPage(page(clusters('p1', 10, 'שלום', 200, 140, undefined, true)), options);
   const [run, ...rest] = runs(mirror);

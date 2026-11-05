@@ -1066,6 +1066,11 @@ function populateParagraphBlock(
 const JOIN_IGNORED_ATTRIBUTES = new Set(['data-doc-start', 'data-doc-end', 'data-logical-order', 'style']);
 const JOIN_IGNORED_STYLES = new Set(['left', 'width']);
 
+/** One document position per UTF-16 unit, which a field result showing more text than it occupies does not have. */
+function coversItsText(run: HTMLElement, text: Text): boolean {
+  return Number(run.dataset.docEnd) - Number(run.dataset.docStart) === text.length;
+}
+
 /**
  * Appends glyph run `next` to the touching run `open` on the same line when
  * nothing else tells them apart, so a line shaped cluster by cluster reads as
@@ -1080,6 +1085,7 @@ function joinGlyphRunElement(open: HTMLElement, next: HTMLElement): boolean {
   if (openText?.nodeType !== 3 || nextText?.nodeType !== 3) return false;
   const end = open.dataset.docEnd;
   if (end === undefined || end !== next.dataset.docStart || next.dataset.docEnd === undefined) return false;
+  if (!coversItsText(open, openText as Text) || !coversItsText(next, nextText as Text)) return false;
   if (open.attributes.length !== next.attributes.length) return false;
   for (const attribute of Array.from(open.attributes)) {
     if (JOIN_IGNORED_ATTRIBUTES.has(attribute.name)) continue;
