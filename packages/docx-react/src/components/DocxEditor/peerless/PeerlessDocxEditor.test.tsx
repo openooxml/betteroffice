@@ -47,6 +47,9 @@ import { buildReportIssueUrl } from '../../reportIssue';
 import { ToolbarCommandButton } from '../../toolbar/ToolbarCommand';
 import * as toolbarView from '../DocxEditorToolbar';
 import { useEditorChrome } from '../../EditorToolbarContext';
+import { loadMenuList } from '../../../../../../shared/react-toolbar/menuListLoader';
+
+await loadMenuList();
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();

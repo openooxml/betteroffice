@@ -320,6 +320,7 @@ export function createPresentationSessionHost(
       if (output) host.emit('collaborationPipe', output.batches, output.transfer);
     }, 0);
   } });
+  options.workerRender?.slides?.(commands.renderSlide);
   let queued: Promise<void> | undefined;
   const send = (message: unknown, transfer: Transferable[] | undefined, reply?: PptxRenderReply) => {
     if (reply && !disposed) {

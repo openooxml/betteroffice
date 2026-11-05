@@ -408,7 +408,7 @@ export function useContextMenus({
           break;
         }
       }
-      // TextContextMenu calls onClose after onAction, so no need to close here.
+      // TextContextMenu closes itself before running the action.
     },
     [
       focusActiveEditor,

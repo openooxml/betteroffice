@@ -12,8 +12,14 @@ import { peerlessPainterFactories, type PeerlessPresentation } from './usePeerle
 
 const SLIDE_PREVIEW_SETTLE_MS = 400;
 
+function afterNextPaint(callback: () => void): () => void {
+  let timer: number | undefined;
+  const frame = window.requestAnimationFrame(() => { timer = window.setTimeout(callback, 0); });
+  return () => { window.cancelAnimationFrame(frame); if (timer !== undefined) window.clearTimeout(timer); };
+}
+
 function useSettledPreview(frame: PeerlessConfirmedFrame | null | undefined, active: boolean, run: PeerlessPresentation) {
-  const [preview, setPreview] = useState({ run, active, source: frame, frame });
+  const [preview, setPreview] = useState({ run, active, source: frame, frame, activating: false });
   const latest = useRef({ run, frame });
   const slideId = frame?.frame.slideId;
   useEffect(() => {
@@ -29,12 +35,20 @@ function useSettledPreview(frame: PeerlessConfirmedFrame | null | undefined, act
   if (preview.run !== run || preview.active !== active || preview.source !== frame) {
     const departing = latest.current.run === run && preview.active && !active ? latest.current.frame : null;
     const next = departing && (!frame || departing.frame.slideRevision > frame.frame.slideRevision) ? departing : frame;
-    settled = { run, active, source: frame,
-      frame: preview.run !== run || preview.active !== active || !active || !preview.frame ? next : preview.frame };
+    const activating = preview.run === run && active && !preview.active;
+    settled = { run, active, source: frame, activating,
+      frame: activating ? preview.frame : preview.run !== run || preview.active !== active || !active || !preview.frame ? next : preview.frame };
     setPreview(settled);
   }
   useEffect(() => {
-    if (!active || settled.frame === frame || !run.current || run.failure) return;
+    if (!settled.activating) return;
+    return afterNextPaint(() => {
+      setPreview((value) => value.run === run && value.active && value.source === frame && value.activating
+        ? { ...value, frame, activating: false } : value);
+    });
+  }, [settled.activating, frame, run]);
+  useEffect(() => {
+    if (!active || settled.activating || settled.frame === frame || !run.current || run.failure) return;
     let alive = true;
     const timer = window.setTimeout(() => {
       if (!alive || !run.current || run.failure || run.store.getSnapshot().confirmed !== frame) return;
@@ -112,6 +126,11 @@ const Slide = memo(function Slide({ id, name, index, active, disabled, frame, ru
       const source = event.dataTransfer.getData('text/plain');
       if (run.client.state.slides.some((slide) => slide.id === source)) void peerlessMoveSlide(run, source, index).catch(() => {});
     }}
+    onPointerDown={(event) => {
+      if (event.isPrimary !== false && event.button === 0 && !active && !disabled) run.prerenderSlide?.(id);
+    }}
+    onPointerCancel={() => run.dropPrerender?.()}
+    onPointerLeave={() => run.dropPrerender?.()}
     onKeyDown={(event) => {
       if (!event.altKey || !['ArrowUp', 'ArrowDown'].includes(event.key)) return;
       event.preventDefault();
@@ -119,7 +138,9 @@ const Slide = memo(function Slide({ id, name, index, active, disabled, frame, ru
       if (next >= 0 && next < run.client.state.slides.length) void peerlessMoveSlide(run, id, next).catch(() => {});
     }}
     onClick={() => {
-      void activatePeerlessSlide(run, id).catch(() => {});
+      const presented = !active && run.presentPrerendered?.(id) === true;
+      const activation = activatePeerlessSlide(run, id).catch(() => {});
+      if (presented) void activation.then(() => run.settlePrerendered?.(id));
       onNavigate();
     }}>
     <span style={styles.number}>{index + 1}</span>

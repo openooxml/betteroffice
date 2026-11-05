@@ -151,7 +151,7 @@ beside a tracked run retains its existing behavior.
 | `office_accept` | Apply a proposal as one undo step; DOCX can keep it as tracked changes. |
 | `office_reject` | Discard a pending proposal. |
 | `office_render` | DOCX: PNG of a current or proposed page. |
-| `office_verify` | Save and reopen in memory; reports which checks ran. |
+| `office_verify` | Save and reopen in memory; for DOCX also compare the saved package with the original (parts, element counts, fields, drawings, relationships). |
 | `office_export` | Write accepted edits or a pending proposal to a new file. |
 | `office_close` | Release an open document and its proposals. |
 | `docx_edit` | DOCX: atomic direct edits of paragraph styles, bold/italic/underline, paragraphs, table rows, cell merges, comments (add, reply, resolve or reopen) and page setup with `insert_section_break` and `set_section`; `runFormat: 'anchor'` copies the first plain run on insertion. |
@@ -188,8 +188,9 @@ beside a tracked run retains its existing behavior.
 - The MCP server opens at most 10 files of up to 64 MiB each and keeps at most 64 proposals per
   document. All state is in memory: export before closing the client.
 - MCP messages over stdin are capped at 1 MiB.
-- `verify` confirms that the saved file reopens. It does not check visual fidelity or whether the
-  edit is semantically correct; use reads and previews for that.
+- `verify` confirms that the saved file reopens. For DOCX it also compares the saved package with the
+  original and lists structure the edits do not explain. It does not check visual fidelity or whether
+  the edit is semantically correct; use reads and previews for that.
 - Previews use the BetterOffice layout engine and bundled fonts and are not pixel-identical to
   Office. Install `@betteroffice/fonts-cjk` for CJK glyphs and `@betteroffice/fonts-intl` for additional international scripts.
 

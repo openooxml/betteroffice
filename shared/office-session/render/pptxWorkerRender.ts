@@ -12,6 +12,7 @@ export type PptxRenderRequest =
   | { kind: 'view'; scale: number; dpr: number }
   | { kind: 'fonts'; faces: readonly PptxPaintFont[] }
   | { kind: 'resync' }
+  | { kind: 'prerender'; slideId: string; token: number }
   | { kind: 'dispose' };
 
 export type PptxRenderReply =
@@ -21,6 +22,9 @@ export type PptxRenderReply =
   | { kind: 'unchanged'; slideId: string; frameEpoch: number; baseEpoch: number; baseContent: number }
   | { kind: 'main-only'; slideId: string; frameEpoch: number; assetIds: string[] }
   | { kind: 'error'; frameEpoch: number; message: string }
+  | { kind: 'prerender'; slideId: string; token: number; version: string; fonts: number; factor: number; width: number;
+    height: number; bitmap: ImageBitmap }
+  | { kind: 'font-generation'; fonts: number }
   | { kind: 'unsupported' };
 
 export interface PptxWorkerRenderClient {
@@ -28,6 +32,8 @@ export interface PptxWorkerRenderClient {
   view(scale: number, dpr: number): void;
   fonts(faces: readonly PptxPaintFont[]): void;
   resync(): void;
+  /** Asks for an ahead-of-time raster of a slide at the current view; returns the token its reply carries. */
+  prerender(slideId: string): number;
   idle(): void;
   subscribe(listener: (reply: PptxRenderReply) => void): () => void;
   dispose(): void;
@@ -55,6 +61,7 @@ export function attachPptxWorkerRender(transport: SessionTransport): PptxWorkerR
   let offError = () => {};
   let offReplies = () => {};
   let sentView: { scale: number; dpr: number } | undefined;
+  let prerenders = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const clear = () => { if (timer !== undefined) clearTimeout(timer); timer = undefined; };
   const fail = () => {
@@ -81,6 +88,11 @@ export function attachPptxWorkerRender(transport: SessionTransport): PptxWorkerR
       send({ kind: 'fonts', faces: copies }, copies.flatMap((face) => typeof face.source === 'string' ? [] : [face.source]));
     },
     resync: () => send({ kind: 'resync' }),
+    prerender(slideId) {
+      const token = ++prerenders;
+      send({ kind: 'prerender', slideId, token });
+      return token;
+    },
     idle: clear,
     subscribe(listener) {
       if (!client.supported) listener({ kind: 'unsupported' });
@@ -95,11 +107,12 @@ export function attachPptxWorkerRender(transport: SessionTransport): PptxWorkerR
     },
   };
   const receive = (reply: PptxRenderReply) => {
-    clear();
+    if (reply.kind !== 'font-generation' && reply.kind !== 'prerender') clear();
     if (reply.kind === 'unsupported') { fail(); return; }
-    if (reply.kind === 'raster') ownership.retain(reply.bitmap, reply);
+    const owned = reply.kind === 'raster' || reply.kind === 'prerender' ? reply.bitmap : undefined;
+    if (owned) ownership.retain(owned, reply);
     try { if (!disposed) for (const listener of [...listeners]) listener(reply); }
-    finally { if (reply.kind === 'raster') ownership.release(reply.bitmap, reply); }
+    finally { if (owned) ownership.release(owned, reply); }
   };
   port1.onmessage = (event: MessageEvent<PptxRenderReply>) => receive(event.data);
   offReplies = transport.listen((message) => {

@@ -5,11 +5,12 @@
  * Shows Cut, Copy, Paste, and other text editing options.
  */
 
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState, useMemo } from 'react';
+import React, { useCallback, useEffect, useState, useMemo } from 'react';
 import type { ImageLayoutTarget } from '@betteroffice/docx/docx';
 import { useTranslation } from '../i18n';
 import type { TranslationKey } from '@betteroffice/docx-i18n';
-import { Z_INDEX } from '../styles/zIndex';
+import { ContextMenu } from '../../../../shared/react-toolbar/ContextMenu';
+import type { OverflowMenuEntry } from '../../../../shared/react-toolbar/MenuList';
 
 // ============================================================================
 // TYPES
@@ -80,6 +81,8 @@ export interface TextContextMenuProps {
   items?: TextContextMenuItem[];
   /** Additional className */
   className?: string;
+  /** Moves focus back to the document when the menu closes from the keyboard or an item */
+  returnFocus?: () => void;
 }
 
 /**
@@ -380,98 +383,18 @@ function getActionIcon(action: TextContextAction): React.ReactNode {
 }
 
 // ============================================================================
-// MENU ITEM COMPONENT
-// ============================================================================
-
-interface MenuItemComponentProps {
-  item: TextContextMenuItem;
-  onClick: () => void;
-  isHighlighted: boolean;
-  onMouseEnter: () => void;
-}
-
-const MenuItemComponent: React.FC<MenuItemComponentProps> = ({
-  item,
-  onClick,
-  isHighlighted,
-  onMouseEnter,
-}) => {
-  if (item.action === 'separator') {
-    return (
-      <div
-        className="docx-text-context-menu-separator"
-        style={{
-          height: '1px',
-          backgroundColor: 'var(--doc-border)',
-          margin: '4px 12px',
-        }}
-      />
-    );
-  }
-
-  return (
-    <>
-      <button
-        type="button"
-        className={`docx-text-context-menu-item ${isHighlighted ? 'docx-text-context-menu-item-highlighted' : ''} ${item.disabled ? 'docx-text-context-menu-item-disabled' : ''}`}
-        onClick={onClick}
-        onMouseEnter={onMouseEnter}
-        disabled={item.disabled}
-        role="menuitem"
-        aria-disabled={item.disabled}
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: '10px',
-          width: '100%',
-          padding: '8px 12px',
-          border: 'none',
-          background: isHighlighted && !item.disabled ? 'var(--doc-primary-light)' : 'transparent',
-          cursor: item.disabled ? 'not-allowed' : 'pointer',
-          fontSize: '13px',
-          color: item.disabled ? 'var(--doc-text-subtle)' : 'var(--doc-text)',
-          textAlign: 'left',
-          opacity: item.disabled ? 0.6 : 1,
-        }}
-      >
-        <span
-          style={{
-            display: 'flex',
-            color: item.disabled ? 'var(--doc-border)' : 'var(--doc-text-muted)',
-          }}
-        >
-          {getActionIcon(item.action)}
-        </span>
-        <span style={{ flex: 1 }}>{item.label}</span>
-        {item.shortcut && (
-          <span
-            style={{
-              fontSize: '11px',
-              color: 'var(--doc-text-subtle)',
-              fontFamily: 'monospace',
-            }}
-          >
-            {item.shortcut}
-          </span>
-        )}
-      </button>
-      {item.dividerAfter && (
-        <div
-          className="docx-text-context-menu-separator"
-          style={{
-            height: '1px',
-            backgroundColor: 'var(--doc-border)',
-            margin: '4px 12px',
-          }}
-        />
-      )}
-    </>
-  );
-};
-
-// ============================================================================
 // TEXT CONTEXT MENU COMPONENT
 // ============================================================================
+
+const MENU_COLORS = {
+  surface: 'var(--doc-surface)',
+  text: 'var(--doc-text)',
+  mutedText: 'var(--doc-text-subtle)',
+  border: 'var(--doc-border-light)',
+  hover: 'var(--doc-primary-light)',
+  shadow: 'var(--doc-shadow)',
+  focus: 'var(--doc-primary)',
+};
 
 export const TextContextMenu: React.FC<TextContextMenuProps> = ({
   isOpen,
@@ -483,12 +406,10 @@ export const TextContextMenu: React.FC<TextContextMenuProps> = ({
   onClose,
   items,
   className = '',
+  returnFocus,
 }) => {
-  const menuRef = useRef<HTMLDivElement>(null);
-  const [highlightedIndex, setHighlightedIndex] = useState(0);
   const { t } = useTranslation();
 
-  // Translate default menu items from definitions
   const translatedDefaults: TextContextMenuItem[] = useMemo(
     () =>
       DEFAULT_MENU_ITEM_DEFS.map((def) => ({
@@ -500,166 +421,43 @@ export const TextContextMenu: React.FC<TextContextMenuProps> = ({
     [t]
   );
 
-  // Build menu items with disabled states
-  const menuItems = (items || translatedDefaults).map((item) => {
-    const disabled = (() => {
-      if (item.disabled !== undefined) return item.disabled;
-      switch (item.action) {
-        case 'cut':
-        case 'copy':
-        case 'delete':
-          return !hasSelection;
-        case 'paste':
-        case 'pasteAsPlainText':
-          return !isEditable || !hasClipboardContent;
-        default:
-          return false;
-      }
-    })();
-
-    return { ...item, disabled };
+  const entries: OverflowMenuEntry[] = [];
+  (items || translatedDefaults).forEach((item, index) => {
+    if (item.action === 'separator') {
+      entries.push({ kind: 'separator', id: `separator-${index}` });
+      return;
+    }
+    const disabled =
+      item.disabled ??
+      (item.action === 'cut' || item.action === 'copy' || item.action === 'delete'
+        ? !hasSelection
+        : item.action === 'paste' || item.action === 'pasteAsPlainText'
+          ? !isEditable || !hasClipboardContent
+          : false);
+    entries.push({
+      kind: 'item',
+      id: `${item.action}-${index}`,
+      label: item.label,
+      icon: getActionIcon(item.action),
+      shortcut: item.shortcut,
+      disabled,
+      onSelect: () => onAction(item.action),
+    });
+    if (item.dividerAfter) entries.push({ kind: 'separator', id: `divider-${index}` });
   });
-
-  // Filter out separators for keyboard navigation
-  const navigableItems = menuItems.filter((item) => item.action !== 'separator');
-
-  // Handle click outside
-  useLayoutEffect(() => {
-    if (!isOpen) return;
-
-    const handleClickOutside = (e: PointerEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        onClose();
-      }
-    };
-
-    document.addEventListener('pointerdown', handleClickOutside, true);
-    return () => document.removeEventListener('pointerdown', handleClickOutside, true);
-  }, [isOpen, onClose]);
-
-  // Handle keyboard navigation
-  useEffect(() => {
-    if (!isOpen) return;
-
-    const handleKeyDown = (e: KeyboardEvent) => {
-      switch (e.key) {
-        case 'Escape':
-          e.preventDefault();
-          onClose();
-          break;
-        case 'ArrowDown':
-          e.preventDefault();
-          setHighlightedIndex((prev) => {
-            let next = (prev + 1) % navigableItems.length;
-            // Skip disabled items
-            while (navigableItems[next]?.disabled && next !== prev) {
-              next = (next + 1) % navigableItems.length;
-            }
-            return next;
-          });
-          break;
-        case 'ArrowUp':
-          e.preventDefault();
-          setHighlightedIndex((prev) => {
-            let next = (prev - 1 + navigableItems.length) % navigableItems.length;
-            // Skip disabled items
-            while (navigableItems[next]?.disabled && next !== prev) {
-              next = (next - 1 + navigableItems.length) % navigableItems.length;
-            }
-            return next;
-          });
-          break;
-        case 'Enter':
-          e.preventDefault();
-          const item = navigableItems[highlightedIndex];
-          if (item && !item.disabled) {
-            onAction(item.action);
-            onClose();
-          }
-          break;
-      }
-    };
-
-    document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, highlightedIndex, navigableItems, onAction, onClose]);
-
-  // Reset highlighted index when menu opens
-  useEffect(() => {
-    if (isOpen) {
-      setHighlightedIndex(0);
-    }
-  }, [isOpen]);
-
-  // Position menu to stay within viewport
-  const getMenuStyle = useCallback((): React.CSSProperties => {
-    const menuWidth = 220;
-    const menuHeight = menuItems.length * 36 + 16;
-
-    let x = position.x;
-    let y = position.y;
-
-    if (typeof window !== 'undefined') {
-      if (x + menuWidth > window.innerWidth) {
-        x = window.innerWidth - menuWidth - 10;
-      }
-      if (y + menuHeight > window.innerHeight) {
-        y = window.innerHeight - menuHeight - 10;
-      }
-      if (x < 10) x = 10;
-      if (y < 10) y = 10;
-    }
-
-    return {
-      position: 'fixed',
-      top: y,
-      left: x,
-      minWidth: menuWidth,
-      background: 'var(--doc-surface)',
-      border: '1px solid var(--doc-border-light)',
-      borderRadius: '8px',
-      boxShadow: '0 2px 10px var(--doc-shadow)',
-      zIndex: Z_INDEX.contextMenu,
-      padding: '4px 0',
-      overflow: 'hidden',
-    };
-  }, [position, menuItems.length]);
-
-  const handleItemClick = (item: TextContextMenuItem) => {
-    if (item.disabled) return;
-    onAction(item.action);
-    onClose();
-  };
 
   if (!isOpen) return null;
 
   return (
-    <div
-      ref={menuRef}
-      className={`docx-text-context-menu ${className}`}
-      style={getMenuStyle()}
-      role="menu"
-      aria-label={t('contextMenu.textMenuAriaLabel')}
-    >
-      {menuItems.map((item, index) => {
-        // Find the index in navigable items for highlighting
-        const navigableIndex = navigableItems.findIndex((ni) => ni === item);
-
-        return (
-          <MenuItemComponent
-            key={`${item.action}-${index}`}
-            item={item}
-            onClick={() => handleItemClick(item)}
-            isHighlighted={navigableIndex === highlightedIndex}
-            onMouseEnter={() => {
-              if (navigableIndex >= 0 && !item.disabled) {
-                setHighlightedIndex(navigableIndex);
-              }
-            }}
-          />
-        );
-      })}
-    </div>
+    <ContextMenu
+      label={t('contextMenu.textMenuAriaLabel')}
+      entries={entries}
+      point={position}
+      colors={MENU_COLORS}
+      className={`docx-text-context-menu ${className}`.trim()}
+      returnFocus={returnFocus}
+      onClose={() => onClose()}
+    />
   );
 };
 
