@@ -18,7 +18,7 @@ function clusters(blockKey: string, start: number, text: string, x: number, base
   return [...text].map((ch, index) => ({
     kind: 'glyphRun', fontId: 1, size: 16, color: '#000000', text: ch,
     glyphs: [{ id: 1, x: rtl ? x - (index + 1) * ADVANCE : x + index * ADVANCE, y: baseline, cluster: 0, advance: ADVANCE }],
-    blockKey, docStart: start + index, docEnd: start + index + 1, logicalOrder: index, bidiLevel: rtl ? 1 : 0,
+    blockKey, docStart: start + index, docEnd: start + index + 1, logicalOrder: start + index, bidiLevel: rtl ? 1 : 0,
     ...extra(index),
   }) as DisplayPrimitive);
 }

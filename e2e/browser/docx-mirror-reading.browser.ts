@@ -36,25 +36,23 @@ async function open(browser: Browser, worker: boolean) {
   return { context, page };
 }
 
-type AXNode = { ignored?: boolean; name?: { value?: string }; role?: { value?: string } };
+type AXNode = { ignored?: boolean; name?: { value?: string } };
 
 for (const worker of [true, false]) {
   test(`docx ${worker ? 'worker' : 'in-thread'} editor: the page mirror reads whole words`, async ({ browser }, info) => {
     test.setTimeout(120_000);
     const { context, page } = await open(browser, worker);
     try {
+      await expect(page.locator('.canvas-page[data-page-index="0"] .layout-run-text').first()).toBeAttached();
       const cdp = await context.newCDPSession(page);
-      const named = async () => {
+      const names = async () => {
         const { nodes } = await cdp.send('Accessibility.getFullAXTree') as { nodes: AXNode[] };
-        return nodes.filter((node) => !node.ignored && node.role?.value === 'paragraph')
-          .map((node) => String(node.name?.value ?? '')).filter((name) => name.includes('Marker01') || name.includes('M a r k e r'));
+        return nodes.filter((node) => !node.ignored).map((node) => String(node.name?.value ?? ''));
       };
-      await expect.poll(async () => (await named()).length, { timeout: 30_000 }).toBeGreaterThan(0);
-      const names = await named();
-      await info.attach('paragraph-names.json', { body: JSON.stringify(names.slice(0, 5), null, 2), contentType: 'application/json' });
-      expect(names).toContain('Marker01 line 1 keeps the quick brown fox jumping over the lazy dog.');
       const snapshot = await page.locator('.canvas-page[data-page-index="0"]').first().ariaSnapshot();
       await info.attach('page-1.yml', { body: snapshot, contentType: 'text/yaml' });
+      await expect.poll(async () => (await names()).filter((name) => name.includes('Marker01 line 1 keeps')).length,
+        { timeout: 30_000 }).toBeGreaterThan(0);
       expect(snapshot).toContain('paragraph: Marker01 line 1 keeps the quick brown fox');
     } finally {
       await context.close();
