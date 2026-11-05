@@ -33,7 +33,7 @@ export function PeerlessTextInput({ store, visual = store, viewport, onShortcut,
   const shortcutRef = useRef(onShortcut);
   shortcutRef.current = onShortcut;
   const view = useSyncExternalStore(visual.subscribePresentation, visual.getSnapshot, visual.getSnapshot);
-  const { move } = usePeerlessTextSelection(store);
+  const { move, selectAll } = usePeerlessTextSelection(store);
 
   useEffect(() => {
     const input = inputRef.current;
@@ -148,6 +148,11 @@ export function PeerlessTextInput({ store, visual = store, viewport, onShortcut,
           event.timeStamp)?.catch(() => {});
         return;
       }
+      if (modifier && !event.altKey && !event.shiftKey && key === 'a') {
+        event.preventDefault();
+        selectAll(event);
+        return;
+      }
       if (modifier) {
         const shortcut = key === 'c' ? 'copy' : key === 'x' ? 'cut' : null;
         if (shortcut) {
@@ -235,7 +240,7 @@ export function PeerlessTextInput({ store, visual = store, viewport, onShortcut,
       input.removeEventListener('focus', focus);
       input.removeEventListener('blur', blur);
     };
-  }, [store, move, inputRef]);
+  }, [store, move, selectAll, inputRef]);
 
   const scale = viewport?.scale ?? 1;
   const left = (viewport?.left ?? 0) + (view.caret?.x ?? 0) * scale;
