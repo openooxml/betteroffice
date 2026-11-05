@@ -1046,7 +1046,8 @@ function populateParagraphBlock(
     const child = renderMirrorPrimitive(p, doc, offsetY, ctx);
     if (p.kind === 'glyphRun' && open && joinGlyphRunElement(open, child)) continue;
     el.appendChild(child);
-    open = p.kind === 'glyphRun' ? child : null;
+    if (p.kind === 'glyphRun') open = child;
+    else if (p.kind !== 'decoration' && p.kind !== 'rect') open = null;
   }
   const pmarkRevision = findStructuralRevision(prims, 'pmark');
   if (pmarkRevision) applyStructuralRevisionAttrs(el, pmarkRevision);
@@ -1078,7 +1079,7 @@ function coversItsText(run: HTMLElement, text: Text): boolean {
  * own word. Returns false, touching nothing, when they differ.
  */
 function joinGlyphRunElement(open: HTMLElement, next: HTMLElement): boolean {
-  if (open.tagName !== 'SPAN' || next.tagName !== 'SPAN' || open.id || next.id) return false;
+  if (open.tagName !== next.tagName || open.id || next.id) return false;
   const openText = open.firstChild;
   const nextText = next.firstChild;
   if (open.childNodes.length !== 1 || next.childNodes.length !== 1) return false;
@@ -1086,6 +1087,13 @@ function joinGlyphRunElement(open: HTMLElement, next: HTMLElement): boolean {
   const end = open.dataset.docEnd;
   if (end === undefined || end !== next.dataset.docStart || next.dataset.docEnd === undefined) return false;
   if (!coversItsText(open, openText as Text) || !coversItsText(next, nextText as Text)) return false;
+  const openLeft = parseFloat(open.style.left);
+  const openRight = openLeft + parseFloat(open.style.width);
+  const nextLeft = parseFloat(next.style.left);
+  const nextRight = nextLeft + parseFloat(next.style.width);
+  if (![openLeft, openRight, nextLeft, nextRight].every(Number.isFinite)) return false;
+  const rtl = open.getAttribute('dir') === 'rtl';
+  if (Math.abs(rtl ? nextRight - openLeft : nextLeft - openRight) > 0.5) return false;
   if (open.attributes.length !== next.attributes.length) return false;
   for (const attribute of Array.from(open.attributes)) {
     if (JOIN_IGNORED_ATTRIBUTES.has(attribute.name)) continue;
@@ -1098,13 +1106,6 @@ function joinGlyphRunElement(open: HTMLElement, next: HTMLElement): boolean {
       return false;
     }
   }
-  const openLeft = parseFloat(open.style.left);
-  const openRight = openLeft + parseFloat(open.style.width);
-  const nextLeft = parseFloat(next.style.left);
-  const nextRight = nextLeft + parseFloat(next.style.width);
-  if (![openLeft, openRight, nextLeft, nextRight].every(Number.isFinite)) return false;
-  const rtl = open.getAttribute('dir') === 'rtl';
-  if (Math.abs(rtl ? nextRight - openLeft : nextLeft - openRight) > 0.5) return false;
   const left = Math.min(openLeft, nextLeft);
   open.style.left = `${left}px`;
   open.style.width = `${Math.max(openRight, nextRight) - left}px`;

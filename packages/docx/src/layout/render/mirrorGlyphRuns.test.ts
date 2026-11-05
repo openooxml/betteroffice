@@ -59,6 +59,32 @@ test('runs that show more text than their document range stay apart', () => {
     .toEqual([['2026', '20', '21'], ['2026', '21', '22']]);
 });
 
+test('a link shaped cluster by cluster mirrors as one link', () => {
+  const mirror = buildMirrorPage(page(clusters('p1', 10, 'Chapter 1', 96, 140, () => ({ href: '#ch1' }))), options);
+  const links = Array.from(mirror.querySelectorAll('a'));
+  expect(links.map((link) => [link.textContent, link.getAttribute('href')])).toEqual([['Chapter 1', '#ch1']]);
+});
+
+test('different links stay apart', () => {
+  const mirror = buildMirrorPage(page([
+    ...clusters('p1', 10, 'one', 96, 140, () => ({ href: '#a' })),
+    ...clusters('p1', 13, 'two', 96 + 3 * ADVANCE, 140, () => ({ href: '#b' })),
+  ]), options);
+  expect(Array.from(mirror.querySelectorAll('a'), (link) => link.textContent)).toEqual(['one', 'two']);
+});
+
+test('paint-only primitives between clusters do not split the text, an image does', () => {
+  const [a, b, c] = clusters('p1', 10, 'abc', 96, 140);
+  const deco = { kind: 'decoration', deco: 'underline', x: 96, y: 142, w: ADVANCE, h: 1, blockKey: 'p1' } as DisplayPrimitive;
+  const rect = { kind: 'rect', x: 96, y: 126, w: ADVANCE, h: 16, fill: '#ffff00', blockKey: 'p1' } as DisplayPrimitive;
+  const painted = buildMirrorPage(page([a, deco, b, rect, c]), options);
+  expect(runs(painted).map((run) => run.textContent)).toEqual(['abc']);
+  expect(painted.querySelectorAll('.layout-decoration, .layout-mirror-rect')).toHaveLength(2);
+  const image = { kind: 'image', relId: 'rId1', x: 96, y: 126, w: ADVANCE, h: 16, blockKey: 'p1' } as DisplayPrimitive;
+  const split = buildMirrorPage(page([a, b, image, c]), options);
+  expect(runs(split).map((run) => run.textContent)).toEqual(['ab', 'c']);
+});
+
 test('right-to-left clusters join in logical order', () => {
   const mirror = buildMirrorPage(page(clusters('p1', 10, 'שלום', 200, 140, undefined, true)), options);
   const [run, ...rest] = runs(mirror);
