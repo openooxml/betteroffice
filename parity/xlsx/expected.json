@@ -2218,5 +2218,4355 @@
         "type": "doughnutChart"
       }
     ]
+  },
+  {
+    "op": "editCharts",
+    "result": {
+      "applied": true,
+      "changed": [],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "charts",
+    "result": [
+      {
+        "anchorRange": "B6:F19",
+        "autoTitle": false,
+        "editable": true,
+        "error": null,
+        "id": "xl/drawings/drawing1.xml#0",
+        "index": 0,
+        "part": "xl/charts/chart1.xml",
+        "richTitle": false,
+        "series": [
+          {
+            "categoryRef": "Charts!$A$2:$A$5",
+            "index": 0,
+            "name": "Revenue",
+            "nameRef": "Charts!$B$1",
+            "valueRef": "Charts!$B$2:$B$5"
+          },
+          {
+            "categoryRef": "Charts!$A$2:$A$5",
+            "index": 1,
+            "name": "Costs",
+            "nameRef": "Charts!$C$1",
+            "valueRef": "Charts!$C$2:$C$5"
+          }
+        ],
+        "title": "Quarterly revenue",
+        "type": "barChart"
+      },
+      {
+        "anchorRange": "G6",
+        "autoTitle": false,
+        "editable": true,
+        "error": null,
+        "id": "xl/drawings/drawing1.xml#1",
+        "index": 1,
+        "part": "xl/charts/chart2.xml",
+        "richTitle": false,
+        "series": [
+          {
+            "categoryRef": "Charts!$A$2:$A$5",
+            "index": 0,
+            "name": "Sales",
+            "nameRef": null,
+            "valueRef": "Charts!$B$2:$B$5"
+          }
+        ],
+        "title": "Revenue trend",
+        "type": "lineChart"
+      },
+      {
+        "anchorRange": null,
+        "autoTitle": false,
+        "editable": true,
+        "error": null,
+        "id": "xl/drawings/drawing1.xml#2",
+        "index": 2,
+        "part": "xl/charts/chart3.xml",
+        "richTitle": false,
+        "series": [
+          {
+            "categoryRef": "Charts!$A$2:$A$5",
+            "index": 0,
+            "name": "Revenue",
+            "nameRef": "Charts!$B$1",
+            "valueRef": "Charts!$B$2:$B$5"
+          }
+        ],
+        "title": "Revenue share",
+        "type": "pieChart"
+      },
+      {
+        "anchorRange": "G21:M35",
+        "autoTitle": false,
+        "editable": true,
+        "error": null,
+        "id": "xl/drawings/drawing1.xml#3",
+        "index": 3,
+        "part": "xl/charts/chart4.xml",
+        "richTitle": false,
+        "series": [
+          {
+            "categoryRef": "Charts!$A$2:$A$5",
+            "index": 0,
+            "name": "Costs",
+            "nameRef": "Charts!$C$1",
+            "valueRef": "Charts!$C$2:$C$5"
+          }
+        ],
+        "title": "Cost share",
+        "type": "doughnutChart"
+      }
+    ]
+  },
+  {
+    "op": "save",
+    "result": {
+      "byteLength": 5733,
+      "sha256": "1128e01f5ce61c92102fd806158092f5fa42c99362f971eec19806a15f4676a4"
+    }
+  },
+  {
+    "op": "moveChart",
+    "result": {
+      "applied": true,
+      "changed": [],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "charts",
+    "result": [
+      {
+        "anchorRange": "D7:F20",
+        "autoTitle": false,
+        "editable": true,
+        "error": null,
+        "id": "xl/drawings/drawing1.xml#0",
+        "index": 0,
+        "part": "xl/charts/chart1.xml",
+        "richTitle": false,
+        "series": [
+          {
+            "categoryRef": "Charts!$A$2:$A$5",
+            "index": 0,
+            "name": "Revenue",
+            "nameRef": "Charts!$B$1",
+            "valueRef": "Charts!$B$2:$B$5"
+          },
+          {
+            "categoryRef": "Charts!$A$2:$A$5",
+            "index": 1,
+            "name": "Costs",
+            "nameRef": "Charts!$C$1",
+            "valueRef": "Charts!$C$2:$C$5"
+          }
+        ],
+        "title": "Quarterly revenue",
+        "type": "barChart"
+      },
+      {
+        "anchorRange": "G6",
+        "autoTitle": false,
+        "editable": true,
+        "error": null,
+        "id": "xl/drawings/drawing1.xml#1",
+        "index": 1,
+        "part": "xl/charts/chart2.xml",
+        "richTitle": false,
+        "series": [
+          {
+            "categoryRef": "Charts!$A$2:$A$5",
+            "index": 0,
+            "name": "Sales",
+            "nameRef": null,
+            "valueRef": "Charts!$B$2:$B$5"
+          }
+        ],
+        "title": "Revenue trend",
+        "type": "lineChart"
+      },
+      {
+        "anchorRange": null,
+        "autoTitle": false,
+        "editable": true,
+        "error": null,
+        "id": "xl/drawings/drawing1.xml#2",
+        "index": 2,
+        "part": "xl/charts/chart3.xml",
+        "richTitle": false,
+        "series": [
+          {
+            "categoryRef": "Charts!$A$2:$A$5",
+            "index": 0,
+            "name": "Revenue",
+            "nameRef": "Charts!$B$1",
+            "valueRef": "Charts!$B$2:$B$5"
+          }
+        ],
+        "title": "Revenue share",
+        "type": "pieChart"
+      },
+      {
+        "anchorRange": "G21:M35",
+        "autoTitle": false,
+        "editable": true,
+        "error": null,
+        "id": "xl/drawings/drawing1.xml#3",
+        "index": 3,
+        "part": "xl/charts/chart4.xml",
+        "richTitle": false,
+        "series": [
+          {
+            "categoryRef": "Charts!$A$2:$A$5",
+            "index": 0,
+            "name": "Costs",
+            "nameRef": "Charts!$C$1",
+            "valueRef": "Charts!$C$2:$C$5"
+          }
+        ],
+        "title": "Cost share",
+        "type": "doughnutChart"
+      }
+    ]
+  },
+  {
+    "op": "save",
+    "result": {
+      "byteLength": 5744,
+      "sha256": "66608ac92c5471054e5cb4693030fecb394d14b801825ecd1d5cbe63bec6adc0"
+    }
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "applied": true,
+      "changed": [],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "charts",
+    "result": [
+      {
+        "anchorRange": "D7:F20",
+        "autoTitle": false,
+        "editable": true,
+        "error": null,
+        "id": "xl/drawings/drawing1.xml#0",
+        "index": 0,
+        "part": "xl/charts/chart1.xml",
+        "richTitle": false,
+        "series": [
+          {
+            "categoryRef": "Charts!$A$2:$A$5",
+            "index": 0,
+            "name": "Revenue",
+            "nameRef": "Charts!$B$1",
+            "valueRef": "Charts!$B$2:$B$5"
+          },
+          {
+            "categoryRef": "Charts!$A$2:$A$5",
+            "index": 1,
+            "name": "Costs",
+            "nameRef": "Charts!$C$1",
+            "valueRef": "Charts!$C$2:$C$5"
+          }
+        ],
+        "title": "Quarterly revenue",
+        "type": "barChart"
+      },
+      {
+        "anchorRange": "H8",
+        "autoTitle": false,
+        "editable": true,
+        "error": null,
+        "id": "xl/drawings/drawing1.xml#1",
+        "index": 1,
+        "part": "xl/charts/chart2.xml",
+        "richTitle": false,
+        "series": [
+          {
+            "categoryRef": "Charts!$A$2:$A$5",
+            "index": 0,
+            "name": "Sales",
+            "nameRef": null,
+            "valueRef": "Charts!$B$2:$B$5"
+          }
+        ],
+        "title": "Revenue trend",
+        "type": "lineChart"
+      },
+      {
+        "anchorRange": null,
+        "autoTitle": false,
+        "editable": true,
+        "error": null,
+        "id": "xl/drawings/drawing1.xml#2",
+        "index": 2,
+        "part": "xl/charts/chart3.xml",
+        "richTitle": false,
+        "series": [
+          {
+            "categoryRef": "Charts!$A$2:$A$5",
+            "index": 0,
+            "name": "Revenue",
+            "nameRef": "Charts!$B$1",
+            "valueRef": "Charts!$B$2:$B$5"
+          }
+        ],
+        "title": "Revenue share",
+        "type": "pieChart"
+      },
+      {
+        "anchorRange": "G21:M35",
+        "autoTitle": false,
+        "editable": true,
+        "error": null,
+        "id": "xl/drawings/drawing1.xml#3",
+        "index": 3,
+        "part": "xl/charts/chart4.xml",
+        "richTitle": false,
+        "series": [
+          {
+            "categoryRef": "Charts!$A$2:$A$5",
+            "index": 0,
+            "name": "Costs",
+            "nameRef": "Charts!$C$1",
+            "valueRef": "Charts!$C$2:$C$5"
+          }
+        ],
+        "title": "Cost share",
+        "type": "doughnutChart"
+      }
+    ]
+  },
+  {
+    "op": "save",
+    "result": {
+      "byteLength": 5748,
+      "sha256": "8e719d4e2ddbe5dc2eef4700d01c902e45d0d5b4b5c9f455fa7e0e20defd9da8"
+    }
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "applied": true,
+      "changed": [],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "error": "restore sheet operations are internal"
+    }
+  },
+  {
+    "op": "sheetInfo",
+    "result": {
+      "activeSheet": 0,
+      "autoFilter": null,
+      "contentHeight": 100,
+      "contentWidth": 192.03516,
+      "frozenCols": 1,
+      "frozenRows": 1,
+      "initialScrollX": 0,
+      "initialScrollY": 0,
+      "sheetIds": [
+        "sheet:0",
+        "sheet:1"
+      ],
+      "sheetNames": [
+        "Charts",
+        "Notes"
+      ]
+    }
+  },
+  {
+    "op": "save",
+    "result": {
+      "byteLength": 6064,
+      "sha256": "38bc71a26f826c05c7f5fd33926632b007f49307cc21705f8e425ee1a0798e3b"
+    }
+  },
+  {
+    "op": "undo",
+    "result": {
+      "applied": true,
+      "changed": [],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "sheetInfo",
+    "result": {
+      "activeSheet": 0,
+      "autoFilter": null,
+      "contentHeight": 100,
+      "contentWidth": 192.03516,
+      "frozenCols": 1,
+      "frozenRows": 1,
+      "initialScrollX": 0,
+      "initialScrollY": 0,
+      "sheetIds": [
+        "sheet:0"
+      ],
+      "sheetNames": [
+        "Charts"
+      ]
+    }
+  },
+  {
+    "op": "charts",
+    "result": [
+      {
+        "anchorRange": "D7:F20",
+        "autoTitle": false,
+        "editable": true,
+        "error": null,
+        "id": "xl/drawings/drawing1.xml#0",
+        "index": 0,
+        "part": "xl/charts/chart1.xml",
+        "richTitle": false,
+        "series": [
+          {
+            "categoryRef": "Charts!$A$2:$A$5",
+            "index": 0,
+            "name": "Revenue",
+            "nameRef": "Charts!$B$1",
+            "valueRef": "Charts!$B$2:$B$5"
+          },
+          {
+            "categoryRef": "Charts!$A$2:$A$5",
+            "index": 1,
+            "name": "Costs",
+            "nameRef": "Charts!$C$1",
+            "valueRef": "Charts!$C$2:$C$5"
+          }
+        ],
+        "title": "Quarterly revenue",
+        "type": "barChart"
+      },
+      {
+        "anchorRange": "H8",
+        "autoTitle": false,
+        "editable": true,
+        "error": null,
+        "id": "xl/drawings/drawing1.xml#1",
+        "index": 1,
+        "part": "xl/charts/chart2.xml",
+        "richTitle": false,
+        "series": [
+          {
+            "categoryRef": "Charts!$A$2:$A$5",
+            "index": 0,
+            "name": "Sales",
+            "nameRef": null,
+            "valueRef": "Charts!$B$2:$B$5"
+          }
+        ],
+        "title": "Revenue trend",
+        "type": "lineChart"
+      },
+      {
+        "anchorRange": null,
+        "autoTitle": false,
+        "editable": true,
+        "error": null,
+        "id": "xl/drawings/drawing1.xml#2",
+        "index": 2,
+        "part": "xl/charts/chart3.xml",
+        "richTitle": false,
+        "series": [
+          {
+            "categoryRef": "Charts!$A$2:$A$5",
+            "index": 0,
+            "name": "Revenue",
+            "nameRef": "Charts!$B$1",
+            "valueRef": "Charts!$B$2:$B$5"
+          }
+        ],
+        "title": "Revenue share",
+        "type": "pieChart"
+      },
+      {
+        "anchorRange": "G21:M35",
+        "autoTitle": false,
+        "editable": true,
+        "error": null,
+        "id": "xl/drawings/drawing1.xml#3",
+        "index": 3,
+        "part": "xl/charts/chart4.xml",
+        "richTitle": false,
+        "series": [
+          {
+            "categoryRef": "Charts!$A$2:$A$5",
+            "index": 0,
+            "name": "Costs",
+            "nameRef": "Charts!$C$1",
+            "valueRef": "Charts!$C$2:$C$5"
+          }
+        ],
+        "title": "Cost share",
+        "type": "doughnutChart"
+      }
+    ]
+  },
+  {
+    "op": "save",
+    "result": {
+      "byteLength": 5748,
+      "sha256": "8e719d4e2ddbe5dc2eef4700d01c902e45d0d5b4b5c9f455fa7e0e20defd9da8"
+    }
+  },
+  {
+    "op": "redo",
+    "result": {
+      "applied": true,
+      "changed": [],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "sheetInfo",
+    "result": {
+      "activeSheet": 0,
+      "autoFilter": null,
+      "contentHeight": 100,
+      "contentWidth": 192.03516,
+      "frozenCols": 1,
+      "frozenRows": 1,
+      "initialScrollX": 0,
+      "initialScrollY": 0,
+      "sheetIds": [
+        "sheet:0",
+        "sheet:1"
+      ],
+      "sheetNames": [
+        "Charts",
+        "Notes"
+      ]
+    }
+  },
+  {
+    "op": "save",
+    "result": {
+      "byteLength": 6064,
+      "sha256": "38bc71a26f826c05c7f5fd33926632b007f49307cc21705f8e425ee1a0798e3b"
+    }
+  },
+  {
+    "op": "historyState",
+    "result": {
+      "canRedo": false,
+      "canUndo": true,
+      "redoDepth": 0,
+      "undoDepth": 4
+    }
+  },
+  {
+    "op": "editCharts",
+    "result": {
+      "error": "edits[0]: chart 9 is out of range; valid chart indices: 0, 1, 2, 3; no chart edits were applied"
+    }
+  },
+  {
+    "op": "editCharts",
+    "result": {
+      "error": "edits must contain 1 to 32 chart edits"
+    }
+  },
+  {
+    "op": "moveChart",
+    "result": {
+      "error": "chart xl/drawings/drawing1.xml#2 is pinned to the sheet and cannot be moved"
+    }
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "error": "chart frame xl/drawings/drawing1.xml#0 does not hold the chart part and anchor this op was recorded against; its drawing has changed"
+    }
+  },
+  {
+    "op": "open",
+    "result": null
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "applied": true,
+      "changed": [],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "readCells",
+    "result": {
+      "calculation": {
+        "cycleCells": [],
+        "limitedCells": [],
+        "truncated": false,
+        "unevaluatedCells": []
+      },
+      "ok": true,
+      "ranges": [
+        {
+          "cells": [
+            [
+              {
+                "a1": "A1",
+                "displayText": "Quarterly Budget Report",
+                "formula": null,
+                "value": {
+                  "kind": "text",
+                  "value": "Quarterly Budget Report"
+                }
+              },
+              {
+                "a1": "B1",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "C1",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "D1",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "E1",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "F1",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              }
+            ],
+            [
+              {
+                "a1": "A2",
+                "displayText": "Item",
+                "formula": null,
+                "value": {
+                  "kind": "text",
+                  "value": "Item"
+                }
+              },
+              {
+                "a1": "B2",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "C2",
+                "displayText": "Q1",
+                "formula": null,
+                "value": {
+                  "kind": "text",
+                  "value": "Q1"
+                }
+              },
+              {
+                "a1": "D2",
+                "displayText": "Q2",
+                "formula": null,
+                "value": {
+                  "kind": "text",
+                  "value": "Q2"
+                }
+              },
+              {
+                "a1": "E2",
+                "displayText": "Total",
+                "formula": null,
+                "value": {
+                  "kind": "text",
+                  "value": "Total"
+                }
+              },
+              {
+                "a1": "F2",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              }
+            ],
+            [
+              {
+                "a1": "A3",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "B3",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "C3",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "D3",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "E3",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "F3",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              }
+            ],
+            [
+              {
+                "a1": "A4",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "B4",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "C4",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "D4",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "E4",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "F4",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              }
+            ],
+            [
+              {
+                "a1": "A5",
+                "displayText": "Line item 1",
+                "formula": null,
+                "value": {
+                  "kind": "text",
+                  "value": "Line item 1"
+                }
+              },
+              {
+                "a1": "B5",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "C5",
+                "displayText": "100",
+                "formula": null,
+                "value": {
+                  "kind": "number",
+                  "value": 100
+                }
+              },
+              {
+                "a1": "D5",
+                "displayText": "57",
+                "formula": null,
+                "value": {
+                  "kind": "number",
+                  "value": 57
+                }
+              },
+              {
+                "a1": "E5",
+                "displayText": "157",
+                "formula": "C5+D5",
+                "value": {
+                  "kind": "number",
+                  "value": 157
+                }
+              },
+              {
+                "a1": "F5",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              }
+            ],
+            [
+              {
+                "a1": "A6",
+                "displayText": "Line item 2",
+                "formula": null,
+                "value": {
+                  "kind": "text",
+                  "value": "Line item 2"
+                }
+              },
+              {
+                "a1": "B6",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "C6",
+                "displayText": "200",
+                "formula": null,
+                "value": {
+                  "kind": "number",
+                  "value": 200
+                }
+              },
+              {
+                "a1": "D6",
+                "displayText": "107",
+                "formula": null,
+                "value": {
+                  "kind": "number",
+                  "value": 107
+                }
+              },
+              {
+                "a1": "E6",
+                "displayText": "307",
+                "formula": "C6+D6",
+                "value": {
+                  "kind": "number",
+                  "value": 307
+                }
+              },
+              {
+                "a1": "F6",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              }
+            ],
+            [
+              {
+                "a1": "A7",
+                "displayText": "Line item 3",
+                "formula": null,
+                "value": {
+                  "kind": "text",
+                  "value": "Line item 3"
+                }
+              },
+              {
+                "a1": "B7",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "C7",
+                "displayText": "300",
+                "formula": null,
+                "value": {
+                  "kind": "number",
+                  "value": 300
+                }
+              },
+              {
+                "a1": "D7",
+                "displayText": "157",
+                "formula": null,
+                "value": {
+                  "kind": "number",
+                  "value": 157
+                }
+              },
+              {
+                "a1": "E7",
+                "displayText": "457",
+                "formula": "C7+D7",
+                "value": {
+                  "kind": "number",
+                  "value": 457
+                }
+              },
+              {
+                "a1": "F7",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              }
+            ]
+          ],
+          "target": {
+            "range": {
+              "a1": "A1:F7",
+              "kind": "a1"
+            },
+            "sheetId": "sheet:0"
+          }
+        }
+      ],
+      "sheets": [
+        {
+          "editable": true,
+          "headerFooter": null,
+          "name": "Budget",
+          "sheetId": "sheet:0",
+          "visibility": "visible"
+        },
+        {
+          "editable": true,
+          "headerFooter": null,
+          "name": "Summary",
+          "sheetId": "sheet:1",
+          "visibility": "visible"
+        },
+        {
+          "editable": true,
+          "headerFooter": null,
+          "name": "Styled",
+          "sheetId": "sheet:2",
+          "visibility": "visible"
+        }
+      ],
+      "version": "<version:8>"
+    }
+  },
+  {
+    "op": "sheetInfo",
+    "result": {
+      "activeSheet": 0,
+      "autoFilter": null,
+      "contentHeight": 1300,
+      "contentWidth": 563.0625,
+      "frozenCols": 0,
+      "frozenRows": 0,
+      "initialScrollX": 0,
+      "initialScrollY": 0,
+      "sheetIds": [
+        "sheet:0",
+        "sheet:1",
+        "sheet:2"
+      ],
+      "sheetNames": [
+        "Budget",
+        "Summary",
+        "Styled"
+      ]
+    }
+  },
+  {
+    "op": "save",
+    "result": {
+      "byteLength": 10849,
+      "sha256": "9048adbf48f5d0c249cecf632d5c582cc7cc3e7a8628b87f0edb2dc75699458e"
+    }
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "applied": true,
+      "changed": [],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "readCells",
+    "result": {
+      "calculation": {
+        "cycleCells": [],
+        "limitedCells": [],
+        "truncated": false,
+        "unevaluatedCells": []
+      },
+      "ok": true,
+      "ranges": [
+        {
+          "cells": [
+            [
+              {
+                "a1": "A1",
+                "displayText": "Quarterly Budget Report",
+                "formula": null,
+                "value": {
+                  "kind": "text",
+                  "value": "Quarterly Budget Report"
+                }
+              },
+              {
+                "a1": "B1",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "C1",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "D1",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "E1",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              }
+            ],
+            [
+              {
+                "a1": "A2",
+                "displayText": "Item",
+                "formula": null,
+                "value": {
+                  "kind": "text",
+                  "value": "Item"
+                }
+              },
+              {
+                "a1": "B2",
+                "displayText": "Q1",
+                "formula": null,
+                "value": {
+                  "kind": "text",
+                  "value": "Q1"
+                }
+              },
+              {
+                "a1": "C2",
+                "displayText": "Q2",
+                "formula": null,
+                "value": {
+                  "kind": "text",
+                  "value": "Q2"
+                }
+              },
+              {
+                "a1": "D2",
+                "displayText": "Total",
+                "formula": null,
+                "value": {
+                  "kind": "text",
+                  "value": "Total"
+                }
+              },
+              {
+                "a1": "E2",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              }
+            ],
+            [
+              {
+                "a1": "A3",
+                "displayText": "Line item 1",
+                "formula": null,
+                "value": {
+                  "kind": "text",
+                  "value": "Line item 1"
+                }
+              },
+              {
+                "a1": "B3",
+                "displayText": "100",
+                "formula": null,
+                "value": {
+                  "kind": "number",
+                  "value": 100
+                }
+              },
+              {
+                "a1": "C3",
+                "displayText": "57",
+                "formula": null,
+                "value": {
+                  "kind": "number",
+                  "value": 57
+                }
+              },
+              {
+                "a1": "D3",
+                "displayText": "157",
+                "formula": "B3+C3",
+                "value": {
+                  "kind": "number",
+                  "value": 157
+                }
+              },
+              {
+                "a1": "E3",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              }
+            ],
+            [
+              {
+                "a1": "A4",
+                "displayText": "Line item 2",
+                "formula": null,
+                "value": {
+                  "kind": "text",
+                  "value": "Line item 2"
+                }
+              },
+              {
+                "a1": "B4",
+                "displayText": "200",
+                "formula": null,
+                "value": {
+                  "kind": "number",
+                  "value": 200
+                }
+              },
+              {
+                "a1": "C4",
+                "displayText": "107",
+                "formula": null,
+                "value": {
+                  "kind": "number",
+                  "value": 107
+                }
+              },
+              {
+                "a1": "D4",
+                "displayText": "307",
+                "formula": "B4+C4",
+                "value": {
+                  "kind": "number",
+                  "value": 307
+                }
+              },
+              {
+                "a1": "E4",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              }
+            ],
+            [
+              {
+                "a1": "A5",
+                "displayText": "Line item 3",
+                "formula": null,
+                "value": {
+                  "kind": "text",
+                  "value": "Line item 3"
+                }
+              },
+              {
+                "a1": "B5",
+                "displayText": "300",
+                "formula": null,
+                "value": {
+                  "kind": "number",
+                  "value": 300
+                }
+              },
+              {
+                "a1": "C5",
+                "displayText": "157",
+                "formula": null,
+                "value": {
+                  "kind": "number",
+                  "value": 157
+                }
+              },
+              {
+                "a1": "D5",
+                "displayText": "457",
+                "formula": "B5+C5",
+                "value": {
+                  "kind": "number",
+                  "value": 457
+                }
+              },
+              {
+                "a1": "E5",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              }
+            ]
+          ],
+          "target": {
+            "range": {
+              "a1": "A1:E5",
+              "kind": "a1"
+            },
+            "sheetId": "sheet:0"
+          }
+        }
+      ],
+      "sheets": [
+        {
+          "editable": true,
+          "headerFooter": null,
+          "name": "Budget",
+          "sheetId": "sheet:0",
+          "visibility": "visible"
+        },
+        {
+          "editable": true,
+          "headerFooter": null,
+          "name": "Summary",
+          "sheetId": "sheet:1",
+          "visibility": "visible"
+        },
+        {
+          "editable": true,
+          "headerFooter": null,
+          "name": "Styled",
+          "sheetId": "sheet:2",
+          "visibility": "visible"
+        }
+      ],
+      "version": "<version:9>"
+    }
+  },
+  {
+    "op": "save",
+    "result": {
+      "byteLength": 17614,
+      "sha256": "26fbc7378bbd086cbc1ec1395b4ee5f53762303683130602870a9630d5f34d85"
+    }
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "applied": true,
+      "changed": [
+        "F4"
+      ],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "readCells",
+    "result": {
+      "calculation": {
+        "cycleCells": [],
+        "limitedCells": [],
+        "truncated": false,
+        "unevaluatedCells": []
+      },
+      "ok": true,
+      "ranges": [
+        {
+          "cells": [
+            [
+              {
+                "a1": "F3",
+                "displayText": "42",
+                "formula": null,
+                "value": {
+                  "kind": "number",
+                  "value": 42
+                }
+              }
+            ],
+            [
+              {
+                "a1": "F4",
+                "displayText": "84",
+                "formula": "F3*2",
+                "value": {
+                  "kind": "number",
+                  "value": 84
+                }
+              }
+            ]
+          ],
+          "target": {
+            "range": {
+              "a1": "F3:F4",
+              "kind": "a1"
+            },
+            "sheetId": "sheet:0"
+          }
+        }
+      ],
+      "sheets": [
+        {
+          "editable": true,
+          "headerFooter": null,
+          "name": "Budget",
+          "sheetId": "sheet:0",
+          "visibility": "visible"
+        },
+        {
+          "editable": true,
+          "headerFooter": null,
+          "name": "Summary",
+          "sheetId": "sheet:1",
+          "visibility": "visible"
+        },
+        {
+          "editable": true,
+          "headerFooter": null,
+          "name": "Styled",
+          "sheetId": "sheet:2",
+          "visibility": "visible"
+        }
+      ],
+      "version": "<version:10>"
+    }
+  },
+  {
+    "op": "save",
+    "result": {
+      "byteLength": 10880,
+      "sha256": "1a786be4c29c79b1717bfd47d3d2809f51c3ca0b5ed4574f0a554f488b7252ba"
+    }
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "applied": true,
+      "changed": [],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "sheetInfo",
+    "result": {
+      "activeSheet": 0,
+      "autoFilter": null,
+      "contentHeight": 1260,
+      "contentWidth": 644.0547,
+      "frozenCols": 0,
+      "frozenRows": 0,
+      "initialScrollX": 0,
+      "initialScrollY": 0,
+      "sheetIds": [
+        "sheet:0",
+        "sheet:1",
+        "sheet:2"
+      ],
+      "sheetNames": [
+        "Budget",
+        "Summary",
+        "Styled"
+      ]
+    }
+  },
+  {
+    "op": "save",
+    "result": {
+      "byteLength": 10933,
+      "sha256": "d53b6f84336676dc5e2e4f7d3d96c2e1d6d8cc84616c6443d6219fb0d6eb2ef0"
+    }
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "applied": true,
+      "changed": [],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "sheetInfo",
+    "result": {
+      "activeSheet": 0,
+      "autoFilter": "A2:D10",
+      "contentHeight": 1260,
+      "contentWidth": 644.0547,
+      "frozenCols": 1,
+      "frozenRows": 1,
+      "initialScrollX": 0,
+      "initialScrollY": 0,
+      "sheetIds": [
+        "sheet:0",
+        "sheet:1",
+        "sheet:2"
+      ],
+      "sheetNames": [
+        "Budget",
+        "Summary",
+        "Styled"
+      ]
+    }
+  },
+  {
+    "op": "save",
+    "result": {
+      "byteLength": 11121,
+      "sha256": "a62b30efae6f4e1bfd0324fb3f052dd9c836df112ff4e64d06d9989134054bce"
+    }
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "applied": true,
+      "changed": [],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "readCells",
+    "result": {
+      "calculation": {
+        "cycleCells": [],
+        "limitedCells": [],
+        "truncated": false,
+        "unevaluatedCells": []
+      },
+      "ok": true,
+      "ranges": [
+        {
+          "cells": [
+            [
+              {
+                "a1": "A1",
+                "displayText": "Quarterly Budget Report",
+                "formula": null,
+                "value": {
+                  "kind": "text",
+                  "value": "Quarterly Budget Report"
+                }
+              },
+              {
+                "a1": "B1",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "C1",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "D1",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              }
+            ]
+          ],
+          "target": {
+            "range": {
+              "a1": "A1:D1",
+              "kind": "a1"
+            },
+            "sheetId": "sheet:0"
+          }
+        }
+      ],
+      "sheets": [
+        {
+          "editable": true,
+          "headerFooter": null,
+          "name": "Budget",
+          "sheetId": "sheet:0",
+          "visibility": "visible"
+        },
+        {
+          "editable": true,
+          "headerFooter": null,
+          "name": "Summary",
+          "sheetId": "sheet:1",
+          "visibility": "visible"
+        },
+        {
+          "editable": true,
+          "headerFooter": null,
+          "name": "Styled",
+          "sheetId": "sheet:2",
+          "visibility": "visible"
+        }
+      ],
+      "version": "<version:11>"
+    }
+  },
+  {
+    "op": "save",
+    "result": {
+      "byteLength": 11091,
+      "sha256": "22366f1d2ec97a6bdcfa9e6e129b36fba0d79e739b684928de48444b1fce86af"
+    }
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "applied": true,
+      "changed": [],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "sheetInfo",
+    "result": {
+      "activeSheet": 0,
+      "autoFilter": null,
+      "contentHeight": 1260,
+      "contentWidth": 644.0547,
+      "frozenCols": 0,
+      "frozenRows": 0,
+      "initialScrollX": 0,
+      "initialScrollY": 0,
+      "sheetIds": [
+        "sheet:0",
+        "sheet:1",
+        "sheet:2"
+      ],
+      "sheetNames": [
+        "Budget",
+        "Summary",
+        "Styled"
+      ]
+    }
+  },
+  {
+    "op": "save",
+    "result": {
+      "byteLength": 10933,
+      "sha256": "b90fe6052a859b657775e367b6a4a405cb21f1c1eb5590b604bc70fcf01ac53f"
+    }
+  },
+  {
+    "op": "moveRange",
+    "result": {
+      "applied": true,
+      "changed": [],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "readCells",
+    "result": {
+      "calculation": {
+        "cycleCells": [],
+        "limitedCells": [],
+        "truncated": false,
+        "unevaluatedCells": []
+      },
+      "ok": true,
+      "ranges": [
+        {
+          "cells": [
+            [
+              {
+                "a1": "A3",
+                "displayText": "Line item 1",
+                "formula": null,
+                "value": {
+                  "kind": "text",
+                  "value": "Line item 1"
+                }
+              },
+              {
+                "a1": "B3",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "C3",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "D3",
+                "displayText": "157",
+                "formula": "F3+G3",
+                "value": {
+                  "kind": "number",
+                  "value": 157
+                }
+              },
+              {
+                "a1": "E3",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "F3",
+                "displayText": "100",
+                "formula": null,
+                "value": {
+                  "kind": "number",
+                  "value": 100
+                }
+              },
+              {
+                "a1": "G3",
+                "displayText": "57",
+                "formula": null,
+                "value": {
+                  "kind": "number",
+                  "value": 57
+                }
+              },
+              {
+                "a1": "H3",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              }
+            ],
+            [
+              {
+                "a1": "A4",
+                "displayText": "Line item 2",
+                "formula": null,
+                "value": {
+                  "kind": "text",
+                  "value": "Line item 2"
+                }
+              },
+              {
+                "a1": "B4",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "C4",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "D4",
+                "displayText": "307",
+                "formula": "F4+G4",
+                "value": {
+                  "kind": "number",
+                  "value": 307
+                }
+              },
+              {
+                "a1": "E4",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "F4",
+                "displayText": "200",
+                "formula": null,
+                "value": {
+                  "kind": "number",
+                  "value": 200
+                }
+              },
+              {
+                "a1": "G4",
+                "displayText": "107",
+                "formula": null,
+                "value": {
+                  "kind": "number",
+                  "value": 107
+                }
+              },
+              {
+                "a1": "H4",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              }
+            ]
+          ],
+          "target": {
+            "range": {
+              "a1": "A3:H4",
+              "kind": "a1"
+            },
+            "sheetId": "sheet:0"
+          }
+        }
+      ],
+      "sheets": [
+        {
+          "editable": true,
+          "headerFooter": null,
+          "name": "Budget",
+          "sheetId": "sheet:0",
+          "visibility": "visible"
+        },
+        {
+          "editable": true,
+          "headerFooter": null,
+          "name": "Summary",
+          "sheetId": "sheet:1",
+          "visibility": "visible"
+        },
+        {
+          "editable": true,
+          "headerFooter": null,
+          "name": "Styled",
+          "sheetId": "sheet:2",
+          "visibility": "visible"
+        }
+      ],
+      "version": "<version:12>"
+    }
+  },
+  {
+    "op": "save",
+    "result": {
+      "byteLength": 10915,
+      "sha256": "6ad8a0be287638c734e3912d4dd6034fa4cb5060df60801e9f2ee297c241e5ae"
+    }
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "applied": true,
+      "changed": [],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "exportStructured",
+    "result": {
+      "content": {
+        "anchorScope": "session",
+        "calculation": {
+          "freshness": "unverified",
+          "policy": "asStored"
+        },
+        "dateSystem": "1900",
+        "definedNames": [],
+        "diagnostics": [],
+        "included": {
+          "definedNames": true,
+          "hiddenColumns": false,
+          "hiddenNames": false,
+          "hiddenRows": false,
+          "hiddenSheets": false
+        },
+        "schemaVersion": 1,
+        "sheets": [
+          {
+            "anchor": {
+              "kind": "sheet",
+              "sheet": {
+                "index": 1,
+                "name": "Summary",
+                "sheetId": "sheet:1"
+              }
+            },
+            "cells": [
+              {
+                "anchor": {
+                  "a1": "A1",
+                  "kind": "cell",
+                  "sheet": {
+                    "index": 1,
+                    "name": "Summary",
+                    "sheetId": "sheet:1"
+                  }
+                },
+                "displayText": "Summary",
+                "formula": null,
+                "formulaResult": null,
+                "id": "s1!A1",
+                "merge": null,
+                "numberFormat": "General",
+                "value": {
+                  "kind": "text",
+                  "value": "Summary"
+                }
+              },
+              {
+                "anchor": {
+                  "a1": "A2",
+                  "kind": "cell",
+                  "sheet": {
+                    "index": 1,
+                    "name": "Summary",
+                    "sheetId": "sheet:1"
+                  }
+                },
+                "displayText": "Grand total",
+                "formula": null,
+                "formulaResult": null,
+                "id": "s1!A2",
+                "merge": null,
+                "numberFormat": "General",
+                "value": {
+                  "kind": "text",
+                  "value": "Grand total"
+                }
+              },
+              {
+                "anchor": {
+                  "a1": "B2",
+                  "kind": "cell",
+                  "sheet": {
+                    "index": 1,
+                    "name": "Summary",
+                    "sheetId": "sheet:1"
+                  }
+                },
+                "displayText": "123456",
+                "formula": null,
+                "formulaResult": null,
+                "id": "s1!B2",
+                "merge": null,
+                "numberFormat": "General",
+                "value": {
+                  "kind": "number",
+                  "value": 123456
+                }
+              }
+            ],
+            "hiddenColumns": [],
+            "hiddenRows": [],
+            "hyperlinks": [
+              {
+                "anchor": {
+                  "a1": "A1",
+                  "kind": "range",
+                  "sheet": {
+                    "index": 1,
+                    "name": "Summary",
+                    "sheetId": "sheet:1"
+                  }
+                },
+                "clipped": false,
+                "display": null,
+                "externalTarget": "https://example.com/summary",
+                "id": "s1:h0",
+                "location": null,
+                "tooltip": "Summary"
+              },
+              {
+                "anchor": {
+                  "a1": "B2",
+                  "kind": "range",
+                  "sheet": {
+                    "index": 1,
+                    "name": "Summary",
+                    "sheetId": "sheet:1"
+                  }
+                },
+                "clipped": false,
+                "display": null,
+                "externalTarget": null,
+                "id": "s1:h1",
+                "location": "Budget!A1",
+                "tooltip": null
+              }
+            ],
+            "id": "s1",
+            "kind": "worksheet",
+            "merges": [],
+            "objects": [],
+            "selectedRange": "A1:B2",
+            "source": {
+              "part": "xl/worksheets/sheet2.xml",
+              "partSha256": "88feea9929a38835bdf9a6d822e7c96e33f1d8c24565e3f8ad9ebf9f3de1c164",
+              "path": []
+            },
+            "tables": [],
+            "truncated": false,
+            "usedRange": "A1:B2",
+            "visibility": "visible"
+          }
+        ],
+        "truncated": false
+      },
+      "ok": true,
+      "version": "<version:13>"
+    }
+  },
+  {
+    "op": "save",
+    "result": {
+      "byteLength": 11162,
+      "sha256": "e51be46629c8519f971b1d56466688a8452030cd90658c1bf68755605c8bc944"
+    }
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "applied": true,
+      "changed": [],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "exportStructured",
+    "result": {
+      "content": {
+        "anchorScope": "session",
+        "calculation": {
+          "freshness": "unverified",
+          "policy": "asStored"
+        },
+        "dateSystem": "1900",
+        "definedNames": [],
+        "diagnostics": [],
+        "included": {
+          "definedNames": true,
+          "hiddenColumns": false,
+          "hiddenNames": false,
+          "hiddenRows": false,
+          "hiddenSheets": false
+        },
+        "schemaVersion": 1,
+        "sheets": [
+          {
+            "anchor": {
+              "kind": "sheet",
+              "sheet": {
+                "index": 1,
+                "name": "Summary",
+                "sheetId": "sheet:1"
+              }
+            },
+            "cells": [
+              {
+                "anchor": {
+                  "a1": "A1",
+                  "kind": "cell",
+                  "sheet": {
+                    "index": 1,
+                    "name": "Summary",
+                    "sheetId": "sheet:1"
+                  }
+                },
+                "displayText": "Summary",
+                "formula": null,
+                "formulaResult": null,
+                "id": "s1!A1",
+                "merge": null,
+                "numberFormat": "General",
+                "value": {
+                  "kind": "text",
+                  "value": "Summary"
+                }
+              },
+              {
+                "anchor": {
+                  "a1": "A2",
+                  "kind": "cell",
+                  "sheet": {
+                    "index": 1,
+                    "name": "Summary",
+                    "sheetId": "sheet:1"
+                  }
+                },
+                "displayText": "Grand total",
+                "formula": null,
+                "formulaResult": null,
+                "id": "s1!A2",
+                "merge": null,
+                "numberFormat": "General",
+                "value": {
+                  "kind": "text",
+                  "value": "Grand total"
+                }
+              },
+              {
+                "anchor": {
+                  "a1": "B2",
+                  "kind": "cell",
+                  "sheet": {
+                    "index": 1,
+                    "name": "Summary",
+                    "sheetId": "sheet:1"
+                  }
+                },
+                "displayText": "123456",
+                "formula": null,
+                "formulaResult": null,
+                "id": "s1!B2",
+                "merge": null,
+                "numberFormat": "General",
+                "value": {
+                  "kind": "number",
+                  "value": 123456
+                }
+              }
+            ],
+            "hiddenColumns": [],
+            "hiddenRows": [],
+            "hyperlinks": [
+              {
+                "anchor": {
+                  "a1": "B2",
+                  "kind": "range",
+                  "sheet": {
+                    "index": 1,
+                    "name": "Summary",
+                    "sheetId": "sheet:1"
+                  }
+                },
+                "clipped": false,
+                "display": null,
+                "externalTarget": null,
+                "id": "s1:h0",
+                "location": "Budget!A1",
+                "tooltip": null
+              }
+            ],
+            "id": "s1",
+            "kind": "worksheet",
+            "merges": [],
+            "objects": [],
+            "selectedRange": "A1:B2",
+            "source": {
+              "part": "xl/worksheets/sheet2.xml",
+              "partSha256": "88feea9929a38835bdf9a6d822e7c96e33f1d8c24565e3f8ad9ebf9f3de1c164",
+              "path": []
+            },
+            "tables": [],
+            "truncated": false,
+            "usedRange": "A1:B2",
+            "visibility": "visible"
+          }
+        ],
+        "truncated": false
+      },
+      "ok": true,
+      "version": "<version:14>"
+    }
+  },
+  {
+    "op": "save",
+    "result": {
+      "byteLength": 10791,
+      "sha256": "4fef01845f8f4383c510af0f5d49c675547cc9bf03a9ecfa1de27cb73901f4c8"
+    }
+  },
+  {
+    "op": "setHyperlink",
+    "result": {
+      "applied": true,
+      "changed": [],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "exportStructured",
+    "result": {
+      "content": {
+        "anchorScope": "session",
+        "calculation": {
+          "freshness": "unverified",
+          "policy": "asStored"
+        },
+        "dateSystem": "1900",
+        "definedNames": [],
+        "diagnostics": [
+          {
+            "anchor": {
+              "kind": "sheet",
+              "sheet": {
+                "index": 0,
+                "name": "Budget",
+                "sheetId": "sheet:0"
+              }
+            },
+            "code": "hidden-content-excluded",
+            "message": "Cells in hidden rows, and links and tables wholly inside them, are excluded; set includeHiddenRows to export them.",
+            "severity": "info"
+          },
+          {
+            "anchor": {
+              "kind": "sheet",
+              "sheet": {
+                "index": 0,
+                "name": "Budget",
+                "sheetId": "sheet:0"
+              }
+            },
+            "code": "hidden-content-excluded",
+            "message": "Cells in hidden columns, and links and tables wholly inside them, are excluded; set includeHiddenColumns to export them.",
+            "severity": "info"
+          },
+          {
+            "anchor": {
+              "a1": "D3",
+              "kind": "cell",
+              "sheet": {
+                "index": 0,
+                "name": "Budget",
+                "sheetId": "sheet:0"
+              }
+            },
+            "code": "formula-cache-unverified",
+            "message": "Formula results on this sheet are the stored values; the export does not recalculate or verify them.",
+            "severity": "info"
+          }
+        ],
+        "included": {
+          "definedNames": true,
+          "hiddenColumns": false,
+          "hiddenNames": false,
+          "hiddenRows": false,
+          "hiddenSheets": false
+        },
+        "schemaVersion": 1,
+        "sheets": [
+          {
+            "anchor": {
+              "kind": "sheet",
+              "sheet": {
+                "index": 0,
+                "name": "Budget",
+                "sheetId": "sheet:0"
+              }
+            },
+            "cells": [
+              {
+                "anchor": {
+                  "a1": "A1",
+                  "kind": "cell",
+                  "sheet": {
+                    "index": 0,
+                    "name": "Budget",
+                    "sheetId": "sheet:0"
+                  }
+                },
+                "displayText": "Quarterly Budget Report",
+                "formula": null,
+                "formulaResult": null,
+                "id": "s0!A1",
+                "merge": {
+                  "origin": true,
+                  "range": "A1:C1"
+                },
+                "numberFormat": "General",
+                "value": {
+                  "kind": "text",
+                  "value": "Quarterly Budget Report"
+                }
+              },
+              {
+                "anchor": {
+                  "a1": "A2",
+                  "kind": "cell",
+                  "sheet": {
+                    "index": 0,
+                    "name": "Budget",
+                    "sheetId": "sheet:0"
+                  }
+                },
+                "displayText": "Item",
+                "formula": null,
+                "formulaResult": null,
+                "id": "s0!A2",
+                "merge": null,
+                "numberFormat": "General",
+                "value": {
+                  "kind": "text",
+                  "value": "Item"
+                }
+              },
+              {
+                "anchor": {
+                  "a1": "B2",
+                  "kind": "cell",
+                  "sheet": {
+                    "index": 0,
+                    "name": "Budget",
+                    "sheetId": "sheet:0"
+                  }
+                },
+                "displayText": "Q1",
+                "formula": null,
+                "formulaResult": null,
+                "id": "s0!B2",
+                "merge": null,
+                "numberFormat": "General",
+                "value": {
+                  "kind": "text",
+                  "value": "Q1"
+                }
+              },
+              {
+                "anchor": {
+                  "a1": "D2",
+                  "kind": "cell",
+                  "sheet": {
+                    "index": 0,
+                    "name": "Budget",
+                    "sheetId": "sheet:0"
+                  }
+                },
+                "displayText": "Total",
+                "formula": null,
+                "formulaResult": null,
+                "id": "s0!D2",
+                "merge": null,
+                "numberFormat": "General",
+                "value": {
+                  "kind": "text",
+                  "value": "Total"
+                }
+              },
+              {
+                "anchor": {
+                  "a1": "A3",
+                  "kind": "cell",
+                  "sheet": {
+                    "index": 0,
+                    "name": "Budget",
+                    "sheetId": "sheet:0"
+                  }
+                },
+                "displayText": "Line item 1",
+                "formula": null,
+                "formulaResult": null,
+                "id": "s0!A3",
+                "merge": null,
+                "numberFormat": "General",
+                "value": {
+                  "kind": "text",
+                  "value": "Line item 1"
+                }
+              },
+              {
+                "anchor": {
+                  "a1": "D3",
+                  "kind": "cell",
+                  "sheet": {
+                    "index": 0,
+                    "name": "Budget",
+                    "sheetId": "sheet:0"
+                  }
+                },
+                "displayText": "157",
+                "formula": "F3+G3",
+                "formulaResult": "unverified",
+                "id": "s0!D3",
+                "merge": null,
+                "numberFormat": "General",
+                "value": {
+                  "kind": "number",
+                  "value": 157
+                }
+              }
+            ],
+            "hiddenColumns": [
+              "C:C"
+            ],
+            "hiddenRows": [
+              "4:4"
+            ],
+            "hyperlinks": [
+              {
+                "anchor": {
+                  "a1": "B3",
+                  "kind": "range",
+                  "sheet": {
+                    "index": 0,
+                    "name": "Budget",
+                    "sheetId": "sheet:0"
+                  }
+                },
+                "clipped": false,
+                "display": null,
+                "externalTarget": "https://example.com/b3",
+                "id": "s0:h0",
+                "location": null,
+                "tooltip": "Line"
+              }
+            ],
+            "id": "s0",
+            "kind": "worksheet",
+            "merges": [
+              {
+                "anchor": {
+                  "a1": "A1:C1",
+                  "kind": "range",
+                  "sheet": {
+                    "index": 0,
+                    "name": "Budget",
+                    "sheetId": "sheet:0"
+                  }
+                },
+                "clipped": false,
+                "id": "s0:m0"
+              }
+            ],
+            "objects": [],
+            "selectedRange": "A1:D4",
+            "source": {
+              "part": "xl/worksheets/sheet1.xml",
+              "partSha256": "1b22cc5806dca9ccacb97ac2e4915bd453830795e8a441618d81c8c7ac5f6148",
+              "path": []
+            },
+            "tables": [],
+            "truncated": false,
+            "usedRange": "A1:G62",
+            "visibility": "visible"
+          }
+        ],
+        "truncated": false
+      },
+      "ok": true,
+      "version": "<version:15>"
+    }
+  },
+  {
+    "op": "save",
+    "result": {
+      "byteLength": 11177,
+      "sha256": "eb58dfcdbb28e59f22ea71008842289276ee1dee1df154632bfd8b95e3a5af48"
+    }
+  },
+  {
+    "op": "removeHyperlink",
+    "result": {
+      "applied": true,
+      "changed": [],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "exportStructured",
+    "result": {
+      "content": {
+        "anchorScope": "session",
+        "calculation": {
+          "freshness": "unverified",
+          "policy": "asStored"
+        },
+        "dateSystem": "1900",
+        "definedNames": [],
+        "diagnostics": [
+          {
+            "anchor": {
+              "kind": "sheet",
+              "sheet": {
+                "index": 0,
+                "name": "Budget",
+                "sheetId": "sheet:0"
+              }
+            },
+            "code": "hidden-content-excluded",
+            "message": "Cells in hidden rows, and links and tables wholly inside them, are excluded; set includeHiddenRows to export them.",
+            "severity": "info"
+          },
+          {
+            "anchor": {
+              "kind": "sheet",
+              "sheet": {
+                "index": 0,
+                "name": "Budget",
+                "sheetId": "sheet:0"
+              }
+            },
+            "code": "hidden-content-excluded",
+            "message": "Cells in hidden columns, and links and tables wholly inside them, are excluded; set includeHiddenColumns to export them.",
+            "severity": "info"
+          },
+          {
+            "anchor": {
+              "a1": "D3",
+              "kind": "cell",
+              "sheet": {
+                "index": 0,
+                "name": "Budget",
+                "sheetId": "sheet:0"
+              }
+            },
+            "code": "formula-cache-unverified",
+            "message": "Formula results on this sheet are the stored values; the export does not recalculate or verify them.",
+            "severity": "info"
+          }
+        ],
+        "included": {
+          "definedNames": true,
+          "hiddenColumns": false,
+          "hiddenNames": false,
+          "hiddenRows": false,
+          "hiddenSheets": false
+        },
+        "schemaVersion": 1,
+        "sheets": [
+          {
+            "anchor": {
+              "kind": "sheet",
+              "sheet": {
+                "index": 0,
+                "name": "Budget",
+                "sheetId": "sheet:0"
+              }
+            },
+            "cells": [
+              {
+                "anchor": {
+                  "a1": "A1",
+                  "kind": "cell",
+                  "sheet": {
+                    "index": 0,
+                    "name": "Budget",
+                    "sheetId": "sheet:0"
+                  }
+                },
+                "displayText": "Quarterly Budget Report",
+                "formula": null,
+                "formulaResult": null,
+                "id": "s0!A1",
+                "merge": {
+                  "origin": true,
+                  "range": "A1:C1"
+                },
+                "numberFormat": "General",
+                "value": {
+                  "kind": "text",
+                  "value": "Quarterly Budget Report"
+                }
+              },
+              {
+                "anchor": {
+                  "a1": "A2",
+                  "kind": "cell",
+                  "sheet": {
+                    "index": 0,
+                    "name": "Budget",
+                    "sheetId": "sheet:0"
+                  }
+                },
+                "displayText": "Item",
+                "formula": null,
+                "formulaResult": null,
+                "id": "s0!A2",
+                "merge": null,
+                "numberFormat": "General",
+                "value": {
+                  "kind": "text",
+                  "value": "Item"
+                }
+              },
+              {
+                "anchor": {
+                  "a1": "B2",
+                  "kind": "cell",
+                  "sheet": {
+                    "index": 0,
+                    "name": "Budget",
+                    "sheetId": "sheet:0"
+                  }
+                },
+                "displayText": "Q1",
+                "formula": null,
+                "formulaResult": null,
+                "id": "s0!B2",
+                "merge": null,
+                "numberFormat": "General",
+                "value": {
+                  "kind": "text",
+                  "value": "Q1"
+                }
+              },
+              {
+                "anchor": {
+                  "a1": "D2",
+                  "kind": "cell",
+                  "sheet": {
+                    "index": 0,
+                    "name": "Budget",
+                    "sheetId": "sheet:0"
+                  }
+                },
+                "displayText": "Total",
+                "formula": null,
+                "formulaResult": null,
+                "id": "s0!D2",
+                "merge": null,
+                "numberFormat": "General",
+                "value": {
+                  "kind": "text",
+                  "value": "Total"
+                }
+              },
+              {
+                "anchor": {
+                  "a1": "A3",
+                  "kind": "cell",
+                  "sheet": {
+                    "index": 0,
+                    "name": "Budget",
+                    "sheetId": "sheet:0"
+                  }
+                },
+                "displayText": "Line item 1",
+                "formula": null,
+                "formulaResult": null,
+                "id": "s0!A3",
+                "merge": null,
+                "numberFormat": "General",
+                "value": {
+                  "kind": "text",
+                  "value": "Line item 1"
+                }
+              },
+              {
+                "anchor": {
+                  "a1": "D3",
+                  "kind": "cell",
+                  "sheet": {
+                    "index": 0,
+                    "name": "Budget",
+                    "sheetId": "sheet:0"
+                  }
+                },
+                "displayText": "157",
+                "formula": "F3+G3",
+                "formulaResult": "unverified",
+                "id": "s0!D3",
+                "merge": null,
+                "numberFormat": "General",
+                "value": {
+                  "kind": "number",
+                  "value": 157
+                }
+              }
+            ],
+            "hiddenColumns": [
+              "C:C"
+            ],
+            "hiddenRows": [
+              "4:4"
+            ],
+            "hyperlinks": [],
+            "id": "s0",
+            "kind": "worksheet",
+            "merges": [
+              {
+                "anchor": {
+                  "a1": "A1:C1",
+                  "kind": "range",
+                  "sheet": {
+                    "index": 0,
+                    "name": "Budget",
+                    "sheetId": "sheet:0"
+                  }
+                },
+                "clipped": false,
+                "id": "s0:m0"
+              }
+            ],
+            "objects": [],
+            "selectedRange": "A1:D4",
+            "source": {
+              "part": "xl/worksheets/sheet1.xml",
+              "partSha256": "1b22cc5806dca9ccacb97ac2e4915bd453830795e8a441618d81c8c7ac5f6148",
+              "path": []
+            },
+            "tables": [],
+            "truncated": false,
+            "usedRange": "A1:G62",
+            "visibility": "visible"
+          }
+        ],
+        "truncated": false
+      },
+      "ok": true,
+      "version": "<version:16>"
+    }
+  },
+  {
+    "op": "save",
+    "result": {
+      "byteLength": 10791,
+      "sha256": "4fef01845f8f4383c510af0f5d49c675547cc9bf03a9ecfa1de27cb73901f4c8"
+    }
+  },
+  {
+    "op": "moveRange",
+    "result": {
+      "error": "range move cannot safely preserve hyperlinks"
+    }
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "applied": true,
+      "changed": [],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "conditionalFormats",
+    "result": [
+      {
+        "editable": true,
+        "format": {
+          "bold": true,
+          "fontColor": "#FF0000"
+        },
+        "formulas": [
+          "500"
+        ],
+        "id": "cf1",
+        "operator": "greaterThan",
+        "priority": 1,
+        "range": "B5:B10",
+        "type": "cellIs"
+      }
+    ]
+  },
+  {
+    "op": "save",
+    "result": {
+      "byteLength": 9672,
+      "sha256": "0a5555c48f8f74f684ed2261bccb465e06420c255dad0f73c68f67887c710e86"
+    }
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "applied": true,
+      "changed": [],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "conditionalFormats",
+    "result": []
+  },
+  {
+    "op": "save",
+    "result": {
+      "byteLength": 10791,
+      "sha256": "4fef01845f8f4383c510af0f5d49c675547cc9bf03a9ecfa1de27cb73901f4c8"
+    }
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "error": "restore sheet operations are internal"
+    }
+  },
+  {
+    "op": "conditionalFormats",
+    "result": []
+  },
+  {
+    "op": "save",
+    "result": {
+      "byteLength": 10791,
+      "sha256": "4fef01845f8f4383c510af0f5d49c675547cc9bf03a9ecfa1de27cb73901f4c8"
+    }
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "error": "restore sheet operations are internal"
+    }
+  },
+  {
+    "op": "conditionalFormats",
+    "result": []
+  },
+  {
+    "op": "save",
+    "result": {
+      "byteLength": 10791,
+      "sha256": "4fef01845f8f4383c510af0f5d49c675547cc9bf03a9ecfa1de27cb73901f4c8"
+    }
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "applied": true,
+      "changed": [],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "readCells",
+    "result": {
+      "calculation": {
+        "cycleCells": [],
+        "limitedCells": [],
+        "truncated": false,
+        "unevaluatedCells": []
+      },
+      "ok": true,
+      "ranges": [
+        {
+          "cells": [
+            [
+              {
+                "a1": "A1",
+                "displayText": "Product",
+                "formula": null,
+                "value": {
+                  "kind": "text",
+                  "value": "Product"
+                }
+              },
+              {
+                "a1": "B1",
+                "displayText": "Price",
+                "formula": null,
+                "value": {
+                  "kind": "text",
+                  "value": "Price"
+                }
+              },
+              {
+                "a1": "C1",
+                "displayText": "Date",
+                "formula": null,
+                "value": {
+                  "kind": "text",
+                  "value": "Date"
+                }
+              },
+              {
+                "a1": "D1",
+                "displayText": "Growth",
+                "formula": null,
+                "value": {
+                  "kind": "text",
+                  "value": "Growth"
+                }
+              }
+            ],
+            [
+              {
+                "a1": "A2",
+                "displayText": "Widget",
+                "formula": null,
+                "value": {
+                  "kind": "text",
+                  "value": "Widget"
+                }
+              },
+              {
+                "a1": "B2",
+                "displayText": "1250.500",
+                "formula": null,
+                "value": {
+                  "kind": "number",
+                  "value": 1250.5
+                }
+              },
+              {
+                "a1": "C2",
+                "displayText": "1/15/26",
+                "formula": null,
+                "value": {
+                  "kind": "number",
+                  "value": 46037
+                }
+              },
+              {
+                "a1": "D2",
+                "displayText": "12.50%",
+                "formula": null,
+                "value": {
+                  "kind": "number",
+                  "value": 0.125
+                }
+              }
+            ],
+            [
+              {
+                "a1": "A3",
+                "displayText": "Gadget",
+                "formula": null,
+                "value": {
+                  "kind": "text",
+                  "value": "Gadget"
+                }
+              },
+              {
+                "a1": "B3",
+                "displayText": "875.250",
+                "formula": null,
+                "value": {
+                  "kind": "number",
+                  "value": 875.25
+                }
+              },
+              {
+                "a1": "C3",
+                "displayText": "3/1/25",
+                "formula": null,
+                "value": {
+                  "kind": "number",
+                  "value": 45717
+                }
+              },
+              {
+                "a1": "D3",
+                "displayText": "8.70%",
+                "formula": null,
+                "value": {
+                  "kind": "number",
+                  "value": 0.087
+                }
+              }
+            ],
+            [
+              {
+                "a1": "A4",
+                "displayText": "Total",
+                "formula": null,
+                "value": {
+                  "kind": "text",
+                  "value": "Total"
+                }
+              },
+              {
+                "a1": "B4",
+                "displayText": "$2,125.75",
+                "formula": null,
+                "value": {
+                  "kind": "number",
+                  "value": 2125.75
+                }
+              },
+              {
+                "a1": "C4",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "D4",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              }
+            ]
+          ],
+          "target": {
+            "range": {
+              "a1": "A1:D4",
+              "kind": "a1"
+            },
+            "sheetId": "sheet:2"
+          }
+        }
+      ],
+      "sheets": [
+        {
+          "editable": true,
+          "headerFooter": null,
+          "name": "Budget",
+          "sheetId": "sheet:0",
+          "visibility": "visible"
+        },
+        {
+          "editable": true,
+          "headerFooter": null,
+          "name": "Summary",
+          "sheetId": "sheet:1",
+          "visibility": "visible"
+        },
+        {
+          "editable": true,
+          "headerFooter": null,
+          "name": "Styled",
+          "sheetId": "sheet:2",
+          "visibility": "visible"
+        }
+      ],
+      "version": "<version:17>"
+    }
+  },
+  {
+    "op": "selectionFormatting",
+    "result": {
+      "bold": true,
+      "borderColor": "#000000",
+      "borderPreset": "outer",
+      "borderStyle": "solid",
+      "fillColor": "#ffcc00",
+      "fontFamily": "Calibri",
+      "fontSize": 11,
+      "horizontalAlignment": "center",
+      "italic": false,
+      "strikethrough": false,
+      "textColor": "#000000",
+      "textWrapping": "overflow",
+      "verticalAlignment": "bottom"
+    }
+  },
+  {
+    "op": "save",
+    "result": {
+      "byteLength": 9097,
+      "sha256": "7603626c8e6ef513ae348746f51a7803437521abd36d6f0710544c6e05a8b941"
+    }
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "applied": true,
+      "changed": [],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "selectionFormatting",
+    "result": {
+      "bold": true,
+      "borderPreset": "none",
+      "fillColor": "#ddebf7",
+      "fontFamily": "Calibri",
+      "fontSize": 12,
+      "horizontalAlignment": "right",
+      "italic": false,
+      "numberFormat": "custom",
+      "numberFormatPattern": "0.0",
+      "strikethrough": false,
+      "textColor": "#1f4e79",
+      "textWrapping": "overflow",
+      "verticalAlignment": "bottom"
+    }
+  },
+  {
+    "op": "readCells",
+    "result": {
+      "calculation": {
+        "cycleCells": [],
+        "limitedCells": [],
+        "truncated": false,
+        "unevaluatedCells": []
+      },
+      "ok": true,
+      "ranges": [
+        {
+          "cells": [
+            [
+              {
+                "a1": "C2",
+                "displayText": "46037.0",
+                "formula": null,
+                "value": {
+                  "kind": "number",
+                  "value": 46037
+                }
+              }
+            ],
+            [
+              {
+                "a1": "C3",
+                "displayText": "45717.0",
+                "formula": null,
+                "value": {
+                  "kind": "number",
+                  "value": 45717
+                }
+              }
+            ]
+          ],
+          "target": {
+            "range": {
+              "a1": "C2:C3",
+              "kind": "a1"
+            },
+            "sheetId": "sheet:2"
+          }
+        }
+      ],
+      "sheets": [
+        {
+          "editable": true,
+          "headerFooter": null,
+          "name": "Budget",
+          "sheetId": "sheet:0",
+          "visibility": "visible"
+        },
+        {
+          "editable": true,
+          "headerFooter": null,
+          "name": "Summary",
+          "sheetId": "sheet:1",
+          "visibility": "visible"
+        },
+        {
+          "editable": true,
+          "headerFooter": null,
+          "name": "Styled",
+          "sheetId": "sheet:2",
+          "visibility": "visible"
+        }
+      ],
+      "version": "<version:18>"
+    }
+  },
+  {
+    "op": "save",
+    "result": {
+      "byteLength": 9140,
+      "sha256": "8722adf5f2845fcf07972de50f9e4d79ac750b82d2f6086aa95eb7ba7106c5ca"
+    }
+  },
+  {
+    "op": "captureFormat",
+    "result": {
+      "columns": 2,
+      "formats": [
+        {
+          "alignment": {
+            "h": "Center",
+            "indent": null,
+            "justify_last_line": null,
+            "reading_order": null,
+            "relative_indent": null,
+            "shrink_to_fit": false,
+            "text_rotation": null,
+            "v": null,
+            "wrap_text": false
+          },
+          "border": {
+            "bottom": null,
+            "left": null,
+            "right": null,
+            "top": null
+          },
+          "fill": {
+            "Solid": {
+              "Rgb": "#4472c4"
+            }
+          },
+          "font": {
+            "bold": true,
+            "color": {
+              "Rgb": "#ffffff"
+            },
+            "italic": false,
+            "name": "Calibri",
+            "size_pt": 11,
+            "strike": false,
+            "underline": false
+          },
+          "numberFormat": {
+            "id": 0,
+            "kind": "builtin"
+          },
+          "pivotButton": false,
+          "protection": null,
+          "quotePrefix": false,
+          "xfId": 0
+        },
+        {
+          "alignment": {
+            "h": "Center",
+            "indent": null,
+            "justify_last_line": null,
+            "reading_order": null,
+            "relative_indent": null,
+            "shrink_to_fit": false,
+            "text_rotation": null,
+            "v": null,
+            "wrap_text": false
+          },
+          "border": {
+            "bottom": null,
+            "left": null,
+            "right": null,
+            "top": null
+          },
+          "fill": {
+            "Solid": {
+              "Rgb": "#4472c4"
+            }
+          },
+          "font": {
+            "bold": true,
+            "color": {
+              "Rgb": "#ffffff"
+            },
+            "italic": false,
+            "name": "Calibri",
+            "size_pt": 11,
+            "strike": false,
+            "underline": false
+          },
+          "numberFormat": {
+            "id": 0,
+            "kind": "builtin"
+          },
+          "pivotButton": false,
+          "protection": null,
+          "quotePrefix": false,
+          "xfId": 0
+        },
+        {
+          "alignment": {
+            "h": "Center",
+            "indent": null,
+            "justify_last_line": null,
+            "reading_order": null,
+            "relative_indent": null,
+            "shrink_to_fit": false,
+            "text_rotation": null,
+            "v": null,
+            "wrap_text": false
+          },
+          "border": {
+            "bottom": {
+              "color": {
+                "Rgb": "#000000"
+              },
+              "style": "Thin"
+            },
+            "left": {
+              "color": {
+                "Rgb": "#000000"
+              },
+              "style": "Thin"
+            },
+            "right": null,
+            "top": {
+              "color": {
+                "Rgb": "#000000"
+              },
+              "style": "Thin"
+            }
+          },
+          "fill": {
+            "Solid": {
+              "Rgb": "#ffcc00"
+            }
+          },
+          "font": {
+            "bold": true,
+            "color": null,
+            "italic": false,
+            "name": "Calibri",
+            "size_pt": 11,
+            "strike": false,
+            "underline": false
+          },
+          "numberFormat": {
+            "id": 0,
+            "kind": "builtin"
+          },
+          "pivotButton": false,
+          "protection": null,
+          "quotePrefix": false,
+          "xfId": 0
+        },
+        {
+          "alignment": {
+            "h": "Center",
+            "indent": null,
+            "justify_last_line": null,
+            "reading_order": null,
+            "relative_indent": null,
+            "shrink_to_fit": false,
+            "text_rotation": null,
+            "v": null,
+            "wrap_text": false
+          },
+          "border": {
+            "bottom": {
+              "color": {
+                "Rgb": "#000000"
+              },
+              "style": "Thin"
+            },
+            "left": null,
+            "right": {
+              "color": {
+                "Rgb": "#000000"
+              },
+              "style": "Thin"
+            },
+            "top": {
+              "color": {
+                "Rgb": "#000000"
+              },
+              "style": "Thin"
+            }
+          },
+          "fill": {
+            "Solid": {
+              "Rgb": "#ffcc00"
+            }
+          },
+          "font": {
+            "bold": true,
+            "color": null,
+            "italic": false,
+            "name": "Calibri",
+            "size_pt": 11,
+            "strike": false,
+            "underline": false
+          },
+          "numberFormat": {
+            "kind": "custom",
+            "pattern": "0.000"
+          },
+          "pivotButton": false,
+          "protection": null,
+          "quotePrefix": false,
+          "xfId": 0
+        }
+      ],
+      "rows": 2,
+      "sourceFormats": [
+        {
+          "alignment": {
+            "h": "Center",
+            "shrink_to_fit": false,
+            "v": null,
+            "wrap_text": false
+          },
+          "border": {
+            "bottom": null,
+            "left": null,
+            "right": null,
+            "top": null
+          },
+          "fill": {
+            "Solid": {
+              "Rgb": "#4472c4"
+            }
+          },
+          "font": {
+            "bold": true,
+            "color": {
+              "Rgb": "#ffffff"
+            },
+            "italic": false,
+            "name": "Calibri",
+            "size_pt": 11,
+            "strike": false,
+            "underline": false
+          },
+          "numberFormat": {
+            "id": 0,
+            "kind": "builtin"
+          },
+          "source_xf": 1,
+          "xfId": 0
+        },
+        {
+          "alignment": {
+            "h": "Center",
+            "shrink_to_fit": false,
+            "v": null,
+            "wrap_text": false
+          },
+          "border": {
+            "bottom": null,
+            "left": null,
+            "right": null,
+            "top": null
+          },
+          "fill": {
+            "Solid": {
+              "Rgb": "#4472c4"
+            }
+          },
+          "font": {
+            "bold": true,
+            "color": {
+              "Rgb": "#ffffff"
+            },
+            "italic": false,
+            "name": "Calibri",
+            "size_pt": 11,
+            "strike": false,
+            "underline": false
+          },
+          "numberFormat": {
+            "id": 0,
+            "kind": "builtin"
+          },
+          "source_xf": 1,
+          "xfId": 0
+        },
+        {
+          "alignment": {
+            "h": "Center",
+            "shrink_to_fit": false,
+            "v": null,
+            "wrap_text": false
+          },
+          "border": {
+            "bottom": {
+              "color": {
+                "Rgb": "#000000"
+              },
+              "style": "Thin"
+            },
+            "left": {
+              "color": {
+                "Rgb": "#000000"
+              },
+              "style": "Thin"
+            },
+            "right": null,
+            "top": {
+              "color": {
+                "Rgb": "#000000"
+              },
+              "style": "Thin"
+            }
+          },
+          "derived_from": 0,
+          "fill": {
+            "Solid": {
+              "Rgb": "#ffcc00"
+            }
+          },
+          "font": {
+            "bold": true,
+            "color": null,
+            "italic": false,
+            "name": "Calibri",
+            "size_pt": 11,
+            "strike": false,
+            "underline": false
+          },
+          "numberFormat": {
+            "id": 0,
+            "kind": "builtin"
+          },
+          "xfId": 0
+        },
+        {
+          "alignment": {
+            "h": "Center",
+            "shrink_to_fit": false,
+            "v": null,
+            "wrap_text": false
+          },
+          "border": {
+            "bottom": {
+              "color": {
+                "Rgb": "#000000"
+              },
+              "style": "Thin"
+            },
+            "left": null,
+            "right": {
+              "color": {
+                "Rgb": "#000000"
+              },
+              "style": "Thin"
+            },
+            "top": {
+              "color": {
+                "Rgb": "#000000"
+              },
+              "style": "Thin"
+            }
+          },
+          "derived_from": 2,
+          "fill": {
+            "Solid": {
+              "Rgb": "#ffcc00"
+            }
+          },
+          "font": {
+            "bold": true,
+            "color": null,
+            "italic": false,
+            "name": "Calibri",
+            "size_pt": 11,
+            "strike": false,
+            "underline": false
+          },
+          "numberFormat": {
+            "kind": "custom",
+            "pattern": "0.000"
+          },
+          "xfId": 0
+        }
+      ],
+      "sourceStyles": [
+        1,
+        1,
+        7,
+        9
+      ]
+    }
+  },
+  {
+    "op": "applyFormat",
+    "result": {
+      "applied": true,
+      "changed": [],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "selectionFormatting",
+    "result": {
+      "bold": true,
+      "borderPreset": "none",
+      "fillColor": "#ddebf7",
+      "fontFamily": "Calibri",
+      "fontSize": 12,
+      "horizontalAlignment": "right",
+      "italic": false,
+      "numberFormat": "custom",
+      "numberFormatPattern": "0.0",
+      "strikethrough": false,
+      "textColor": "#1f4e79",
+      "textWrapping": "overflow",
+      "verticalAlignment": "bottom"
+    }
+  },
+  {
+    "op": "save",
+    "result": {
+      "byteLength": 9159,
+      "sha256": "5b39249137dd7d52531c75c0d02ec4bdc629e91bbca9d27c2da0b91af1309524"
+    }
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "applied": true,
+      "changed": [],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "listDefinedNames",
+    "result": {
+      "items": [
+        {
+          "hidden": false,
+          "name": "Rate",
+          "refersTo": "Budget!$B$3",
+          "scope": null
+        },
+        {
+          "hidden": true,
+          "name": "Local",
+          "refersTo": "Summary!$B$2",
+          "scope": 1
+        }
+      ],
+      "nextOffset": null,
+      "total": 2,
+      "version": "<version:19>"
+    }
+  },
+  {
+    "op": "save",
+    "result": {
+      "byteLength": 9215,
+      "sha256": "68bd2c35afa972dfbe8acf20acfe48f5c108a87f49bfa3f94b19c4f4db80ab49"
+    }
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "applied": true,
+      "changed": [],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "listDefinedNames",
+    "result": {
+      "items": [
+        {
+          "hidden": false,
+          "name": "Rate",
+          "refersTo": "Budget!$B$3",
+          "scope": null
+        }
+      ],
+      "nextOffset": null,
+      "total": 1,
+      "version": "<version:20>"
+    }
+  },
+  {
+    "op": "save",
+    "result": {
+      "byteLength": 9191,
+      "sha256": "9403c502efceb213321a0ea83607955fb43fc9fe5a36535b9180efedd4112959"
+    }
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "error": "restore sheet operations are internal"
+    }
+  },
+  {
+    "op": "listDefinedNames",
+    "result": {
+      "items": [
+        {
+          "hidden": false,
+          "name": "Rate",
+          "refersTo": "Budget!$B$3",
+          "scope": null
+        }
+      ],
+      "nextOffset": null,
+      "total": 1,
+      "version": "<version:20>"
+    }
+  },
+  {
+    "op": "save",
+    "result": {
+      "byteLength": 9191,
+      "sha256": "9403c502efceb213321a0ea83607955fb43fc9fe5a36535b9180efedd4112959"
+    }
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "applied": true,
+      "changed": [],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "sheetInfo",
+    "result": {
+      "activeSheet": 0,
+      "autoFilter": null,
+      "contentHeight": 1260,
+      "contentWidth": 708.0664,
+      "frozenCols": 0,
+      "frozenRows": 0,
+      "initialScrollX": 0,
+      "initialScrollY": 0,
+      "sheetIds": [
+        "sheet:0",
+        "sheet:1",
+        "sheet:2",
+        "sheet:3"
+      ],
+      "sheetNames": [
+        "Budget",
+        "Summary",
+        "Styled",
+        "Added"
+      ]
+    }
+  },
+  {
+    "op": "save",
+    "result": {
+      "byteLength": 9531,
+      "sha256": "e8ecc0b9ee896a9eddb8098cee8de916c3103a0e28a1cca3449f7498172363ca"
+    }
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "applied": true,
+      "changed": [],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "sheetInfo",
+    "result": {
+      "activeSheet": 1,
+      "autoFilter": null,
+      "contentHeight": 1260,
+      "contentWidth": 708.0664,
+      "frozenCols": 0,
+      "frozenRows": 0,
+      "initialScrollX": 0,
+      "initialScrollY": 0,
+      "sheetIds": [
+        "sheet:0",
+        "sheet:1",
+        "sheet:2",
+        "sheet:3"
+      ],
+      "sheetNames": [
+        "Renamed",
+        "Budget",
+        "Summary",
+        "Styled"
+      ]
+    }
+  },
+  {
+    "op": "readCells",
+    "result": {
+      "calculation": {
+        "cycleCells": [],
+        "limitedCells": [],
+        "truncated": false,
+        "unevaluatedCells": []
+      },
+      "ok": true,
+      "ranges": [
+        {
+          "cells": [
+            [
+              {
+                "a1": "A1",
+                "displayText": "Quarterly Budget Report",
+                "formula": null,
+                "value": {
+                  "kind": "text",
+                  "value": "Quarterly Budget Report"
+                }
+              },
+              {
+                "a1": "B1",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "C1",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "D1",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              }
+            ],
+            [
+              {
+                "a1": "A2",
+                "displayText": "Item",
+                "formula": null,
+                "value": {
+                  "kind": "text",
+                  "value": "Item"
+                }
+              },
+              {
+                "a1": "B2",
+                "displayText": "Q1",
+                "formula": null,
+                "value": {
+                  "kind": "text",
+                  "value": "Q1"
+                }
+              },
+              {
+                "a1": "C2",
+                "displayText": "Q2",
+                "formula": null,
+                "value": {
+                  "kind": "text",
+                  "value": "Q2"
+                }
+              },
+              {
+                "a1": "D2",
+                "displayText": "Total",
+                "formula": null,
+                "value": {
+                  "kind": "text",
+                  "value": "Total"
+                }
+              }
+            ],
+            [
+              {
+                "a1": "A3",
+                "displayText": "Line item 1",
+                "formula": null,
+                "value": {
+                  "kind": "text",
+                  "value": "Line item 1"
+                }
+              },
+              {
+                "a1": "B3",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "C3",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "D3",
+                "displayText": "157",
+                "formula": "F3+G3",
+                "value": {
+                  "kind": "number",
+                  "value": 157
+                }
+              }
+            ]
+          ],
+          "target": {
+            "range": {
+              "a1": "A1:D3",
+              "kind": "a1"
+            },
+            "sheetId": "sheet:1"
+          }
+        }
+      ],
+      "sheets": [
+        {
+          "editable": true,
+          "headerFooter": null,
+          "name": "Renamed",
+          "sheetId": "sheet:0",
+          "visibility": "visible"
+        },
+        {
+          "editable": true,
+          "headerFooter": null,
+          "name": "Budget",
+          "sheetId": "sheet:1",
+          "visibility": "visible"
+        },
+        {
+          "editable": true,
+          "headerFooter": null,
+          "name": "Summary",
+          "sheetId": "sheet:2",
+          "visibility": "visible"
+        },
+        {
+          "editable": true,
+          "headerFooter": null,
+          "name": "Styled",
+          "sheetId": "sheet:3",
+          "visibility": "visible"
+        }
+      ],
+      "version": "<version:21>"
+    }
+  },
+  {
+    "op": "save",
+    "result": {
+      "byteLength": 9539,
+      "sha256": "b8a9e503f1bdfb719d8874850376bdd2aed666d5a3e45a823a2fe5c102121e46"
+    }
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "applied": true,
+      "changed": [],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "sheetInfo",
+    "result": {
+      "activeSheet": 0,
+      "autoFilter": null,
+      "contentHeight": 1260,
+      "contentWidth": 708.0664,
+      "frozenCols": 0,
+      "frozenRows": 0,
+      "initialScrollX": 0,
+      "initialScrollY": 0,
+      "sheetIds": [
+        "sheet:0",
+        "sheet:1",
+        "sheet:2"
+      ],
+      "sheetNames": [
+        "Budget",
+        "Summary",
+        "Styled"
+      ]
+    }
+  },
+  {
+    "op": "save",
+    "result": {
+      "byteLength": 9191,
+      "sha256": "9403c502efceb213321a0ea83607955fb43fc9fe5a36535b9180efedd4112959"
+    }
+  },
+  {
+    "op": "undo",
+    "result": {
+      "applied": true,
+      "changed": [],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "sheetInfo",
+    "result": {
+      "activeSheet": 1,
+      "autoFilter": null,
+      "contentHeight": 1260,
+      "contentWidth": 708.0664,
+      "frozenCols": 0,
+      "frozenRows": 0,
+      "initialScrollX": 0,
+      "initialScrollY": 0,
+      "sheetIds": [
+        "sheet:0",
+        "sheet:1",
+        "sheet:2",
+        "sheet:3"
+      ],
+      "sheetNames": [
+        "Renamed",
+        "Budget",
+        "Summary",
+        "Styled"
+      ]
+    }
+  },
+  {
+    "op": "save",
+    "result": {
+      "byteLength": 9539,
+      "sha256": "b8a9e503f1bdfb719d8874850376bdd2aed666d5a3e45a823a2fe5c102121e46"
+    }
+  },
+  {
+    "op": "undo",
+    "result": {
+      "applied": true,
+      "changed": [],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "sheetInfo",
+    "result": {
+      "activeSheet": 0,
+      "autoFilter": null,
+      "contentHeight": 1260,
+      "contentWidth": 708.0664,
+      "frozenCols": 0,
+      "frozenRows": 0,
+      "initialScrollX": 0,
+      "initialScrollY": 0,
+      "sheetIds": [
+        "sheet:0",
+        "sheet:1",
+        "sheet:2",
+        "sheet:3"
+      ],
+      "sheetNames": [
+        "Budget",
+        "Summary",
+        "Styled",
+        "Added"
+      ]
+    }
+  },
+  {
+    "op": "save",
+    "result": {
+      "byteLength": 9531,
+      "sha256": "e8ecc0b9ee896a9eddb8098cee8de916c3103a0e28a1cca3449f7498172363ca"
+    }
+  },
+  {
+    "op": "redo",
+    "result": {
+      "applied": true,
+      "changed": [],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "sheetInfo",
+    "result": {
+      "activeSheet": 1,
+      "autoFilter": null,
+      "contentHeight": 1260,
+      "contentWidth": 708.0664,
+      "frozenCols": 0,
+      "frozenRows": 0,
+      "initialScrollX": 0,
+      "initialScrollY": 0,
+      "sheetIds": [
+        "sheet:0",
+        "sheet:1",
+        "sheet:2",
+        "sheet:3"
+      ],
+      "sheetNames": [
+        "Renamed",
+        "Budget",
+        "Summary",
+        "Styled"
+      ]
+    }
+  },
+  {
+    "op": "readCells",
+    "result": {
+      "calculation": {
+        "cycleCells": [],
+        "limitedCells": [],
+        "truncated": false,
+        "unevaluatedCells": []
+      },
+      "ok": true,
+      "ranges": [
+        {
+          "cells": [
+            [
+              {
+                "a1": "A1",
+                "displayText": "Quarterly Budget Report",
+                "formula": null,
+                "value": {
+                  "kind": "text",
+                  "value": "Quarterly Budget Report"
+                }
+              },
+              {
+                "a1": "B1",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "C1",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "D1",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              }
+            ],
+            [
+              {
+                "a1": "A2",
+                "displayText": "Item",
+                "formula": null,
+                "value": {
+                  "kind": "text",
+                  "value": "Item"
+                }
+              },
+              {
+                "a1": "B2",
+                "displayText": "Q1",
+                "formula": null,
+                "value": {
+                  "kind": "text",
+                  "value": "Q1"
+                }
+              },
+              {
+                "a1": "C2",
+                "displayText": "Q2",
+                "formula": null,
+                "value": {
+                  "kind": "text",
+                  "value": "Q2"
+                }
+              },
+              {
+                "a1": "D2",
+                "displayText": "Total",
+                "formula": null,
+                "value": {
+                  "kind": "text",
+                  "value": "Total"
+                }
+              }
+            ],
+            [
+              {
+                "a1": "A3",
+                "displayText": "Line item 1",
+                "formula": null,
+                "value": {
+                  "kind": "text",
+                  "value": "Line item 1"
+                }
+              },
+              {
+                "a1": "B3",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "C3",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "D3",
+                "displayText": "157",
+                "formula": "F3+G3",
+                "value": {
+                  "kind": "number",
+                  "value": 157
+                }
+              }
+            ]
+          ],
+          "target": {
+            "range": {
+              "a1": "A1:D3",
+              "kind": "a1"
+            },
+            "sheetId": "sheet:1"
+          }
+        }
+      ],
+      "sheets": [
+        {
+          "editable": true,
+          "headerFooter": null,
+          "name": "Renamed",
+          "sheetId": "sheet:0",
+          "visibility": "visible"
+        },
+        {
+          "editable": true,
+          "headerFooter": null,
+          "name": "Budget",
+          "sheetId": "sheet:1",
+          "visibility": "visible"
+        },
+        {
+          "editable": true,
+          "headerFooter": null,
+          "name": "Summary",
+          "sheetId": "sheet:2",
+          "visibility": "visible"
+        },
+        {
+          "editable": true,
+          "headerFooter": null,
+          "name": "Styled",
+          "sheetId": "sheet:3",
+          "visibility": "visible"
+        }
+      ],
+      "version": "<version:22>"
+    }
+  },
+  {
+    "op": "save",
+    "result": {
+      "byteLength": 9539,
+      "sha256": "b8a9e503f1bdfb719d8874850376bdd2aed666d5a3e45a823a2fe5c102121e46"
+    }
+  },
+  {
+    "op": "historyState",
+    "result": {
+      "canRedo": true,
+      "canUndo": true,
+      "redoDepth": 1,
+      "undoDepth": 21
+    }
+  },
+  {
+    "op": "version",
+    "result": "<version:22>"
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "error": "bad ops: unknown variant `bogus`, expected one of `setCell`, `insertRows`, `deleteRows`, `insertCols`, `deleteCols`, `setColWidth`, `setColVisibility`, `restoreColDimension`, `setRowHeight`, `setRowVisibility`, `restoreRowDimension`, `setFreezePane`, `setHyperlinks`, `setHyperlink`, `removeHyperlink`, `setAutoFilter`, `restoreAutoFilter`, `addConditionalFormat`, `removeConditionalFormat`, `setConditionalFormats`, `restoreColStyles`, `restoreRowStyles`, `setCharts`, `setChartAnchor`, `mergeCells`, `unmergeCells`, `patchRangeStyle`, `setRangeNumberFormat`, `applyRangeFormat`, `addSheet`, `removeSheet`, `moveSheet`, `renameSheet`, `setDefinedName`, `deleteDefinedName`, `setDefinedNames`, `restoreSheet` at line 1 column 33"
+    }
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "error": "bad ops: invalid type: string \"x\", expected u32 at line 1 column 58"
+    }
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "error": "bad ops: malformed address at line 1 column 56"
+    }
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "error": "sheet 9 out of range"
+    }
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "error": "row operation exceeds sheet bounds"
+    }
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "error": "sheet 7 out of range"
+    }
+  },
+  {
+    "op": "moveRange",
+    "result": {
+      "error": "bad range: malformed address"
+    }
+  },
+  {
+    "op": "moveRange",
+    "result": {
+      "error": "bad move destination: malformed address"
+    }
+  },
+  {
+    "op": "moveRange",
+    "result": {
+      "error": "sheet 9 out of range"
+    }
+  },
+  {
+    "op": "setHyperlink",
+    "result": {
+      "error": "sheet 9 out of range"
+    }
+  },
+  {
+    "op": "removeHyperlink",
+    "result": {
+      "error": "sheet 9 out of range"
+    }
+  },
+  {
+    "op": "captureFormat",
+    "result": {
+      "error": "sheet 9 out of range"
+    }
+  },
+  {
+    "op": "captureFormat",
+    "result": {
+      "error": "bad range: malformed address"
+    }
+  },
+  {
+    "op": "applyFormat",
+    "result": {
+      "error": "captured format dimensions do not match its cells"
+    }
+  },
+  {
+    "op": "version",
+    "result": "<version:22>"
+  },
+  {
+    "op": "historyState",
+    "result": {
+      "canRedo": true,
+      "canUndo": true,
+      "redoDepth": 1,
+      "undoDepth": 21
+    }
+  },
+  {
+    "op": "save",
+    "result": {
+      "byteLength": 9539,
+      "sha256": "b8a9e503f1bdfb719d8874850376bdd2aed666d5a3e45a823a2fe5c102121e46"
+    }
+  },
+  {
+    "op": "openCollaborative",
+    "result": null
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "error": "structural operations are unavailable in collaborative mode"
+    }
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "error": "structural operations are unavailable in collaborative mode"
+    }
+  },
+  {
+    "op": "editCharts",
+    "result": {
+      "error": "structural operations are unavailable in collaborative mode"
+    }
+  },
+  {
+    "op": "historyState",
+    "result": {
+      "canRedo": false,
+      "canUndo": false,
+      "redoDepth": 0,
+      "undoDepth": 0
+    }
   }
 ]
