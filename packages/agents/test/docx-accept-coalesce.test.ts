@@ -77,10 +77,57 @@ const shapes = [
   { name: 'crosses identical properties', source: run('000000E1', 'Tango uniform ') + run('000000E2', 'victor whiskey.'),
     query: 'uniform victor', replacement: 'UNIFORM VICTOR', expected: 'Tango UNIFORM VICTOR whiskey.', runs: 1 },
   { name: 'crosses different properties', source: run('000000F1', 'Xray yankee ') + run('000000F2', 'zulu alpha.', RPR_ALT),
-    query: 'yankee zulu', replacement: 'YANKEE ZULU', expected: 'Xray YANKEE ZULU alpha.', runs: 2 },
+    query: 'yankee zulu', replacement: 'YANKEE ZULU', expected: 'Xray YANKEE ZULU alpha.', runs: 3 },
   { name: 'untouched source split', source: run('00000061', 'Guard first ') + run('00000062', 'second part.'),
     query: 'first', replacement: 'FIRST', expected: 'Guard FIRST second part.', runs: 2 },
 ];
+
+for (const legacy of [false, true]) {
+  for (const properties of [
+    { name: 'language', first: '<w:lang w:val="en-US"/>', second: '<w:lang w:val="de-DE"/>' },
+    { name: 'unmodeled properties', first: '', second: '<w:noProof/>' },
+  ]) {
+    test(`accepted replacements retain ${properties.name} after clearing bold${legacy ? ' through legacy save' : ''}`, async () => {
+      const doc = await openDocx(await fixture(
+        run('00000091', 'abc ', properties.first) + run('00000092', 'def', `<w:b/>${properties.second}`)
+      ));
+      try {
+        const [hit] = doc.grep({ query: 'abc def' }).matches;
+        const source = doc.read(hit!.ref);
+        const proposal = doc.propose({ author: 'test', edits: [
+          { ...source, start: 0, oldText: 'a', newText: 'A' },
+          { ...source, start: 4, oldText: 'd', newText: 'D' },
+        ] });
+        expect(await doc.accept(proposal.id, { tracked: false })).toMatchObject({ status: 'accepted' });
+        const { paraId } = doc.session.paragraphs('body')[1]!;
+        doc.session.formatRange({
+          story: 'body', start: { paraId, offset: 4 }, end: { paraId, offset: 7 },
+        }, { bold: null });
+        if (legacy) forceLegacy(doc);
+        else {
+          const part = doc.session.paragraphSavePlan().splicedParts?.find(part => part.part === 'word/document.xml');
+          expect(part?.paragraphPatches?.some(patch => patch.ordinal === 1)).toBe(true);
+        }
+        const saved = await savedParagraph(doc);
+        const runs = saved.match(/<w:r\b[^>]*>[\s\S]*?<\/w:r>/g) ?? [];
+        expect(runs.map(textOf), saved).toEqual(legacy && properties.name === 'unmodeled properties'
+          ? ['Abc Def'] : ['Abc ', 'Def']);
+        expect(saved).not.toMatch(/<w:b(?:\s|\/|>)/);
+        if (properties.name === 'language') {
+          expect(runs[0]).toContain(properties.first);
+          expect(runs[1]).toContain(properties.second);
+          expect(runs[0]).not.toContain('de-DE');
+          expect(runs[1]).not.toContain('en-US');
+        } else if (legacy) {
+          expect(saved).not.toContain('<w:noProof');
+        } else {
+          expect(runs[1]).toContain(properties.second);
+          expect(runs[0]).not.toContain('<w:noProof');
+        }
+      } finally { doc.close(); }
+    }, 30_000);
+  }
+}
 
 for (const legacy of [false, true]) {
   for (const shape of shapes) {
@@ -99,10 +146,14 @@ for (const legacy of [false, true]) {
         }
         if (shape.name === 'crosses different properties') {
           const runs = saved.match(/<w:r\b[^>]*>[\s\S]*?<\/w:r>/g)!;
-          expect(runs.map(textOf)).toEqual(['Xray YANKEE ZULU', ' alpha.']);
+          expect(runs.map(textOf)).toEqual(['Xray YANKEE ', 'ZULU', ' alpha.']);
           expect(runs[0]).toContain('0066AA');
-          expect(runs[1]).toContain('<w:i/>');
-          expect(runs[1]).toContain('C00000');
+          expect(runs[0]).toContain('<w:bCs/>');
+          expect(runs[1]).toContain('0066AA');
+          expect(runs[1]).toContain('<w:iCs/>');
+          expect(runs[1]).not.toContain('<w:bCs');
+          expect(runs[2]).toContain('<w:i/>');
+          expect(runs[2]).toContain('C00000');
         }
         if (shape.name === 'untouched source split' && !legacy) {
           expect(saved).toContain(run('00000062', 'second part.'));

@@ -2252,7 +2252,9 @@ function sourceTextMatches(original: string, current: string): SourceTextMatch[]
   return matches;
 }
 
-function preserveSourceRunFormatting(items: InlineItem[], sources: OriginalRunBoundary[], coalesce = false): InlineItem[] {
+function preserveSourceRunFormatting(
+  items: InlineItem[], sources: OriginalRunBoundary[], coalesce = false
+): InlineItem[] {
   if (sources.length === 0) {
     return items;
   }
@@ -2298,16 +2300,9 @@ function preserveSourceRunFormatting(items: InlineItem[], sources: OriginalRunBo
     while (offset < end) {
       const span = spans.find((span) => span.start <= offset && offset < span.end);
       const next = Math.min(end, span?.end ?? end);
-      const changedEmphasis = coalesce && span?.changed && ['bold', 'italic'].some(key =>
-        span.formatting?.[key as 'bold' | 'italic'] === true && !item.attributes[key]
-      );
-      const donor = changedEmphasis ? spans.find(candidate => candidate.index === span!.previous && candidate.changed &&
-        ['bold', 'italic'].every(key => !!candidate.formatting?.[key as 'bold' | 'italic'] === !!item.attributes[key])
-      ) : undefined;
-      const sourceFormatting = donor?.formatting ?? span?.formatting;
       const source = Object.fromEntries(SOURCE_RUN_PROPERTIES
-        .filter((key) => sourceFormatting?.[key] !== undefined)
-        .map((key) => [key, sourceFormatting![key]]));
+        .filter((key) => span?.formatting?.[key] !== undefined)
+        .map((key) => [key, span!.formatting![key]]));
       const attributes = { ...item.attributes, _sourceRunFormatting: source };
       slices.push(item.kind === 'text'
         ? {

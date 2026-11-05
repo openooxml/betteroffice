@@ -28,7 +28,7 @@ const SHAPES: { runs: [string, string][]; edits: [string, string][] }[] = [
   { runs: [['Unchanged note ', ''], ['kept', B], [' exactly as it is.', '']], edits: [] },
 ];
 
-function scenario() {
+export function scenario() {
   const paragraphs: string[] = [];
   const edits: { paragraph: number; query: string; newText: string }[] = [];
   for (let index = 0; index < 561; index++) {
@@ -41,7 +41,7 @@ function scenario() {
   return { paragraphs, edits, xml: `<w:document xmlns:w="${W}" xmlns:r="${R}"><w:body>${paragraphs.join('')}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>` };
 }
 
-async function fixture(xml: string) {
+export async function fixture(xml: string) {
   const zip = new JSZip();
   zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
   zip.file('_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="doc" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`);

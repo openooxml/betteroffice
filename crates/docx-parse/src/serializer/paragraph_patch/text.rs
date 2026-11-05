@@ -191,12 +191,6 @@ pub(super) fn write(
                         } else {
                             written
                         };
-                        let written = if !restyle {
-                            replacement_properties(source, lowered, patch, cell.run, &edit.target)
-                                .map_or(written, str::to_owned)
-                        } else {
-                            written
-                        };
                         entry.insert(written)
                     }
                 };
@@ -339,12 +333,6 @@ pub(super) fn write(
                     } else {
                         properties
                     };
-                    let properties = if !restyle && donor_attrs != insert.attrs {
-                        replacement_properties(source, lowered, patch, donor.run, &insert.attrs)
-                            .map_or(properties, str::to_owned)
-                    } else {
-                        properties
-                    };
                     inserts.push(Insert {
                         node: donor.node,
                         at: edit.from,
@@ -427,58 +415,6 @@ struct Fragment {
     close: String,
 }
 
-fn replacement_properties<'a>(
-    source: &'a str,
-    lowered: &Lowered,
-    patch: &ParagraphPatchV1,
-    mut run: usize,
-    target: &Attrs,
-) -> Option<&'a str> {
-    let touched = |run: usize| {
-        let run = &lowered.runs[run];
-        patch.text_edits.iter().any(|edit| {
-            (edit.from < run.to && run.from < edit.to)
-                || (edit.from == edit.to && run.from <= edit.from && edit.from <= run.to)
-        })
-    };
-    if !touched(run) || !plain_run(source, &lowered.xml, lowered.runs[run].node) {
-        return None;
-    }
-    let current = lowered.cells.iter().find(|cell| cell.run == run)?;
-    if ["bold", "italic"]
-        .iter()
-        .all(|key| unit_attrs(&current.unit).get(*key) == target.get(*key))
-    {
-        return None;
-    }
-    while run > 0 {
-        let previous = &lowered.runs[run - 1];
-        let next = &lowered.runs[run];
-        let previous_node = &lowered.xml.nodes[previous.node];
-        let next_node = &lowered.xml.nodes[next.node];
-        if previous.scope != next.scope
-            || previous_node.parent != next_node.parent
-            || !source[previous_node.span.end..next_node.span.start]
-                .trim()
-                .is_empty()
-            || !touched(run - 1)
-            || !plain_run(source, &lowered.xml, previous.node)
-        {
-            return None;
-        }
-        run -= 1;
-        let cells: Vec<_> = lowered
-            .cells
-            .iter()
-            .filter(|cell| cell.run == run)
-            .collect();
-        if !cells.is_empty() && cells.iter().all(|cell| unit_attrs(&cell.unit) == target) {
-            return Some(run_properties(source, lowered, run));
-        }
-    }
-    None
-}
-
 fn plain_run(source: &str, xml: &Xml, at: usize) -> bool {
     let node = &xml.nodes[at];
     if !node.word("r") || node.empty || has_identifier(node) {
@@ -513,7 +449,9 @@ fn fragments(
     run: usize,
     replacement: &str,
 ) -> Option<Vec<Fragment>> {
-    if !plain_run(source, &lowered.xml, lowered.runs[run].node) {
+    if source[lowered.xml.nodes[0].open.end..].contains("xmlns")
+        || !plain_run(source, &lowered.xml, lowered.runs[run].node)
+    {
         return None;
     }
     let wrapped = format!("<w:p>{replacement}</w:p>");
@@ -533,7 +471,8 @@ fn fragments(
                 let Some((prefix, local)) = attribute.name.split_once(':') else {
                     continue;
                 };
-                if !local.starts_with("rsid")
+                if prefix != "w"
+                    || !local.starts_with("rsid")
                     || xml.root_namespaces.get(prefix).map(String::as_str) != Some(WORD)
                 {
                     continue;
@@ -1241,7 +1180,8 @@ mod tests {
     use super::super::PatchContext;
     use super::*;
     use crate::paragraph_patch::{
-        InheritanceV1, InsertedTextV1, SeedV1, result_sha256, unit_sha256,
+        AttrDeltaV1, InheritanceV1, InsertedTextV1, RunEditV1, SeedV1, SlotV1, result_sha256,
+        unit_sha256,
     };
 
     fn text(value: &str, marks: Value) -> UnitV1 {
@@ -1258,6 +1198,15 @@ mod tests {
     }
 
     fn replace(source: &str, seed: Vec<UnitV1>, edits: &[(u32, u32, &str, Value)]) -> String {
+        replace_with_run_edits(source, seed, edits, Vec::new())
+    }
+
+    fn replace_with_run_edits(
+        source: &str,
+        seed: Vec<UnitV1>,
+        edits: &[(u32, u32, &str, Value)],
+        run_edits: Vec<RunEditV1>,
+    ) -> String {
         let patch = ParagraphPatchV1 {
             ordinal: 0,
             session_key: "source:0".to_owned(),
@@ -1280,7 +1229,7 @@ mod tests {
                     donor: DonorV1::At { at: *from },
                 })
                 .collect(),
-            run_edits: Vec::new(),
+            run_edits,
             para_deltas: Vec::new(),
             para_inherit: Attrs::new(),
             mark_inherit: Attrs::new(),
@@ -1298,6 +1247,50 @@ mod tests {
             Ok(written) => written.0,
             Err(_) => panic!("writing failed"),
         }
+    }
+
+    #[test]
+    fn retains_language_after_clearing_bold() {
+        preserves_source_properties_after_clearing_bold(
+            "<w:lang w:val=\"en-US\"/>",
+            "<w:lang w:val=\"de-DE\"/>",
+        );
+    }
+
+    #[test]
+    fn retains_unmodeled_properties_after_clearing_bold() {
+        for property in ["<w:noProof/>", "<x:kept x:value=\"1\"/>"] {
+            preserves_source_properties_after_clearing_bold("", property);
+        }
+    }
+
+    fn preserves_source_properties_after_clearing_bold(first: &str, second: &str) {
+        let source = format!(
+            "<w:p xmlns:x=\"urn:example\">{}{}</w:p>",
+            run("1", "abc ", &format!("<w:rPr>{first}</w:rPr>")),
+            run("2", "def", &format!("<w:rPr><w:b/>{second}</w:rPr>"))
+        );
+        let output = replace_with_run_edits(
+            &source,
+            vec![text("abc ", json!({})), text("def", json!({"bold": true}))],
+            &[(0, 1, "A", json!({})), (4, 5, "D", json!({}))],
+            vec![RunEditV1 {
+                from: 5,
+                to: 7,
+                deltas: vec![AttrDeltaV1 {
+                    path: vec!["bold".to_owned()],
+                    before: SlotV1::Present { value: json!(true) },
+                    after: SlotV1::Missing,
+                }],
+                target: Attrs::new(),
+                inherit: Attrs::new(),
+            }],
+        );
+        assert_eq!(output.matches("<w:r ").count(), 2, "{output}");
+        assert!(output.contains("Abc "), "{output}");
+        assert!(output.contains("Def"), "{output}");
+        assert!(output.contains(&format!("<w:rPr>{first}</w:rPr>")));
+        assert!(output.contains(&format!("<w:rPr>{second}</w:rPr>")));
     }
 
     #[test]
@@ -1375,7 +1368,7 @@ mod tests {
     }
 
     #[test]
-    fn split_text_edits_keep_the_first_donors_complex_script_properties() {
+    fn split_text_edits_keep_each_runs_complex_script_properties() {
         let bold = "<w:rPr><w:b/><w:bCs/></w:rPr>";
         let italic = "<w:rPr><w:i/><w:iCs/></w:rPr>";
         let source = format!(
@@ -1394,7 +1387,8 @@ mod tests {
                 (12, 16, "ZULU", json!({"bold": true})),
             ],
         );
-        assert_eq!(output.matches("<w:r ").count(), 2);
+        assert_eq!(output.matches("<w:r ").count(), 3);
+        assert!(output.contains("<w:rPr><w:b/><w:iCs/></w:rPr>"));
         assert_eq!(output.matches(bold).count(), 1);
         assert_eq!(output.matches(italic).count(), 1);
         assert!(output.contains("Xray YANKEE"));
@@ -1499,6 +1493,46 @@ mod tests {
             );
             assert_eq!(output.matches("<w:r ").count(), 2);
             assert!(output.contains(attribute));
+        }
+    }
+
+    #[test]
+    fn runs_rebinding_a_prefix_keep_their_attributes() {
+        let rebound = |id: &str, body: &str| {
+            run(id, body, "").replace(
+                "<w:r ",
+                &format!("<w:r xmlns:x=\"urn:custom\" x:rsidR=\"{id}\" "),
+            )
+        };
+        let source = format!(
+            "<w:p xmlns:x=\"{WORD}\">{}{}</w:p>",
+            rebound("left", "alpha "),
+            rebound("right", "beta")
+        );
+        let output = replace(
+            &source,
+            vec![text("alpha beta", json!({}))],
+            &[(0, 5, "ALPHA", json!({})), (6, 10, "BETA", json!({}))],
+        );
+        assert_eq!(output.matches("<w:r ").count(), 2, "{output}");
+        assert!(output.contains("x:rsidR=\"left\""));
+        assert!(output.contains("x:rsidR=\"right\""));
+    }
+
+    #[test]
+    fn namespace_declarations_inside_a_paragraph_block_merging() {
+        for (declaration, expected) in [("", 1), (" xmlns:y=\"urn:custom\"", 2)] {
+            let source = format!(
+                "<w:p><w:hyperlink w:anchor=\"kept\"{declaration}>{}{}</w:hyperlink></w:p>",
+                run("1", "alpha ", ""),
+                run("2", "beta", "")
+            );
+            let output = replace(
+                &source,
+                vec![text("alpha beta", json!({}))],
+                &[(0, 5, "ALPHA", json!({})), (6, 10, "BETA", json!({}))],
+            );
+            assert_eq!(output.matches("<w:r ").count(), expected, "{output}");
         }
     }
 
