@@ -1625,19 +1625,28 @@ fn paint_image<'k>(
         frame.x - requested_x * frame.w / requested_w,
         frame.y - requested_y * frame.h / requested_h,
     );
-    let mut frame_mask = crop
-        .is_some()
-        .then(|| {
-            crop_mask(
-                pixmap,
-                frame,
-                image_transform,
-                mask,
-                &mut scratch.masks,
-                &mut scratch.budget,
-            )
-        })
-        .transpose()?;
+    let mut frame_mask = if is_ellipse_image(image) {
+        scratch.budget.charge_masks(
+            scratch
+                .masks
+                .bytes
+                .saturating_add(mask_bytes(pixmap.width(), pixmap.height())),
+        )?;
+        Some(Rc::new(ellipse_mask(pixmap, frame, image_transform, mask)?))
+    } else {
+        crop.is_some()
+            .then(|| {
+                crop_mask(
+                    pixmap,
+                    frame,
+                    image_transform,
+                    mask,
+                    &mut scratch.masks,
+                    &mut scratch.budget,
+                )
+            })
+            .transpose()?
+    };
     let paint = PixmapPaint {
         opacity,
         quality: FilterQuality::Bicubic,
@@ -2102,6 +2111,31 @@ fn transformed_rect_mask(
     Ok(mask)
 }
 
+fn is_ellipse_image(image: &ImagePrimitive) -> bool {
+    image.attrs.image_shape_type.as_deref() == Some("ellipse")
+}
+
+/// The ellipse inscribed in an image's frame, clipped by the outer mask if any.
+fn ellipse_mask(
+    pixmap: &Pixmap,
+    frame: FRect,
+    transform: Transform,
+    outer: Option<&Mask>,
+) -> Result<Mask, String> {
+    let mut mask = Mask::new(pixmap.width(), pixmap.height())
+        .ok_or_else(|| "invalid image ellipse mask size".to_string())?;
+    let oval = Rect::from_xywh(frame.x, frame.y, frame.w, frame.h)
+        .and_then(PathBuilder::from_oval)
+        .ok_or_else(|| "invalid image ellipse".to_string())?;
+    mask.fill_path(&oval, FillRule::Winding, true, transform);
+    if let Some(outer) = outer {
+        for (value, clip) in mask.data_mut().iter_mut().zip(outer.data()) {
+            *value = ((u16::from(*value) * u16::from(*clip) + 127) / 255) as u8;
+        }
+    }
+    Ok(mask)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn paint_image_border(
     pixmap: &mut Pixmap,
@@ -2138,7 +2172,11 @@ fn paint_image_border(
     };
     let rect = Rect::from_xywh(frame.x, frame.y, frame.w, frame.h)
         .ok_or_else(|| "invalid image border rectangle".to_string())?;
-    let path = PathBuilder::from_rect(rect);
+    let path = if is_ellipse_image(image) {
+        PathBuilder::from_oval(rect).ok_or_else(|| "invalid image border ellipse".to_string())?
+    } else {
+        PathBuilder::from_rect(rect)
+    };
     let mut paint = Paint::default();
     paint.set_color(color_with_opacity(color, opacity)?);
     paint.anti_alias = true;
