@@ -65,6 +65,37 @@ test('xlsx screen reader: an edit under the selected cell speaks its new value',
   await heard(page, 'B1, 42, has formula');
 });
 
+test('xlsx screen reader: menus open from the keyboard in each region and keep F6', async ({ page }) => {
+  await open(page);
+  const grid = page.getByTestId('xlsx-scroll');
+  await grid.focus();
+  await heard(page, 'A1, 21');
+  await grid.press('F6');
+  const tab = page.getByRole('tab', { name: 'Budget', exact: true });
+  await expect(tab).toBeFocused();
+  await tab.press('Shift+F10');
+  const tabMenu = page.getByRole('menu', { name: 'Sheet tab menu', exact: true });
+  const firstTabItem = tabMenu.getByRole('menuitem').first();
+  await expect(firstTabItem).toBeFocused();
+  await page.keyboard.press('F6');
+  await expect(firstTabItem).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(tabMenu).toHaveCount(0);
+  await expect(tab).toBeFocused();
+  await page.keyboard.press('F6');
+  await expect(page.getByTestId('xlsx-toolbar').locator(':focus')).toHaveCount(1);
+  await page.keyboard.press('F6');
+  await expect(grid).toBeFocused();
+  await grid.press('Shift+F10');
+  const cellMenu = page.getByTestId('xlsx-cell-menu');
+  await expect(cellMenu.getByRole('menuitem').first()).toBeFocused();
+  await page.keyboard.press('F6');
+  await expect(cellMenu.getByRole('menuitem').first()).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(cellMenu).toHaveCount(0);
+  await expect(grid).toBeFocused();
+});
+
 test('xlsx screen reader: rapid navigation is announced once, for the cell it stops on', async ({ page }) => {
   await open(page);
   const grid = page.getByTestId('xlsx-scroll');

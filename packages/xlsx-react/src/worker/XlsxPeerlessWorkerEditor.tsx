@@ -1920,7 +1920,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
         }}
         onKeyDown={(event) => {
           if (fromPlugin(event) || event.key !== 'F6' || event.altKey || event.ctrlKey || event.metaKey) return;
-          if (event.target instanceof Element && event.target.closest('[aria-modal="true"]')) return;
+          if (event.target instanceof Element && event.target.closest('[aria-modal="true"], [role="menu"]')) return;
           if (cycleEditorRegion(event.currentTarget, scrollRef.current, event.shiftKey)) event.preventDefault();
         }}
         style={{ position: 'relative', display: 'flex', flexDirection: 'column', width: '100%', height: '100%',

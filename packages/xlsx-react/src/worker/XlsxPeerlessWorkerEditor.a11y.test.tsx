@@ -234,4 +234,18 @@ describe('peerless grid screen reader support', () => {
     expect(document.activeElement).toBe(field);
     dialog.remove();
   });
+
+  it('leaves F6 to an open menu', async () => {
+    const { view } = await mount();
+    const menu = document.createElement('div');
+    menu.setAttribute('role', 'menu');
+    const item = document.createElement('button');
+    item.setAttribute('role', 'menuitem');
+    menu.append(item);
+    view.getByTestId('xlsx-toolbar').append(menu);
+    await act(async () => { item.focus(); });
+    fireEvent.keyDown(item, { key: 'F6' });
+    expect(document.activeElement).toBe(item);
+    menu.remove();
+  });
 });
