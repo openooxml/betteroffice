@@ -807,6 +807,7 @@ test.each([1, 2])('native pptx PNG preserves positioned letter spacing at scale 
 
 for (const [decoration, properties] of [
   ['underline', 'u="sng"'],
+  ['strike', 'strike="sngStrike"'],
 ] as const) {
   test.each([1, 2])(`native pptx PNG paints display list ${decoration} at scale %s`, async (scale) => {
     const decorated = await pptxTextRaster('Liberation Sans', properties);
@@ -815,7 +816,9 @@ for (const [decoration, properties] of [
       const { run, line } = decorated;
       expect(run.glyphs).toEqual(plain.run.glyphs);
       expect(plain.run.underline).toBe(false);
-      expect(run.underline).toBe(true);
+      expect(plain.run.strike ?? 'noStrike').toBe('noStrike');
+      if (decoration === 'underline') expect(run.underline).toBe(true);
+      else expect(run.strike).toBe('sngStrike');
       const first = run.glyphs[0];
       const last = run.glyphs[run.glyphs.length - 1];
       expect(Math.abs(run.x - first.x)).toBeLessThan(0.02);
@@ -823,7 +826,7 @@ for (const [decoration, properties] of [
       const baseline = line.baseline - (run.baselineOffsetPx ?? 0);
       const rule = {
         x: run.x,
-        y: baseline + run.fontSizePx * 0.08,
+        y: baseline + run.fontSizePx * (decoration === 'underline' ? 0.08 : -0.3),
         w: run.width,
         h: Math.max(1, run.fontSizePx * 0.05),
       };
