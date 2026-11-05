@@ -933,6 +933,7 @@ pub(crate) fn replay(
             .source_index()
             .map(|index| index.group_picture_sources())
             .unwrap_or_else(|| env.group_pictures.clone()),
+        shape_styles: super::shapes::ShapeStyles::new(doc.source_metadata()),
         ..env.clone()
     };
     let env = &with_sources;

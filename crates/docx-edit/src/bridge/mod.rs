@@ -65,6 +65,7 @@ pub mod reservations;
 pub use group_pictures::GroupPictureSources;
 pub(crate) mod run_size_provenance;
 mod shapes;
+pub use shapes::ShapeStyles;
 
 pub use reservations::{Reservation, ReservationKind, ReservationSide, Reservations};
 
@@ -144,6 +145,9 @@ pub struct RenderEnv {
     pub reservations: Reservations,
     #[serde(skip)]
     pub group_pictures: GroupPictureSources,
+    /// Package style context for display-only shape text.
+    #[serde(skip)]
+    pub shape_styles: ShapeStyles,
 }
 
 pub(crate) fn package_font_theme(
@@ -481,6 +485,7 @@ fn yrs_doc_to_mapped_layout_blocks_inner(
             .source_index()
             .map(|index| index.group_picture_sources())
             .unwrap_or_else(|| env.group_pictures.clone()),
+        shape_styles: shapes::ShapeStyles::new(doc.source_metadata()),
         ..env.clone()
     };
     let env = &with_sources;

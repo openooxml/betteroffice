@@ -406,6 +406,43 @@ pub(crate) fn style_resolved_keys() -> impl Iterator<Item = &'static str> {
 }
 
 impl SourceMetadata {
+    pub(crate) fn render_paragraph(&self, paragraph: &Value) -> (JsonObject, Option<Arc<Value>>) {
+        (
+            paragraph_attrs(paragraph, &self.styles, &[], &[], None),
+            paragraph_style_formatting(paragraph, &self.styles, None),
+        )
+    }
+
+    pub(crate) fn render_shape_run_attrs(
+        &self,
+        run: &Value,
+        paragraph_formatting: Option<&Value>,
+    ) -> JsonObject {
+        let direct = field(Some(run), "formatting");
+        let character = self.styles.run_style_own(string(field(direct, "styleId")));
+        let merged = self.styles.run_formatting(paragraph_formatting, direct);
+        let mut attrs = marks_to_attrs(&run_marks_from_formatting(
+            run,
+            paragraph_formatting,
+            &self.styles,
+            merged.as_ref(),
+        ));
+        if let Some(language) = field(merged.as_ref(), "language").and_then(Value::as_object) {
+            let own_language: serde_json::Map<String, Value> = language
+                .iter()
+                .filter(|(slot, _)| {
+                    field(field(direct, "language"), slot).is_some()
+                        || field(field(character, "language"), slot).is_some()
+                })
+                .map(|(slot, value)| (slot.clone(), value.clone()))
+                .collect();
+            if !own_language.is_empty() {
+                attrs.insert("language".to_owned(), Value::Object(own_language));
+            }
+        }
+        attrs
+    }
+
     pub(crate) fn plain_patch_style_supported(
         &self,
         story: &str,
@@ -2309,11 +2346,20 @@ fn embed_unit(kind: &str, payload: JsonObject, marks: &[Mark], pm_size: u32) -> 
 }
 
 fn run_marks(run: &Value, style_formatting: Option<&Value>, styles: &StyleResolver) -> Vec<Mark> {
+    let merged = styles.run_formatting(style_formatting, field(Some(run), "formatting"));
+    run_marks_from_formatting(run, style_formatting, styles, merged.as_ref())
+}
+
+fn run_marks_from_formatting(
+    run: &Value,
+    style_formatting: Option<&Value>,
+    styles: &StyleResolver,
+    merged: Option<&Value>,
+) -> Vec<Mark> {
     let formatting = field(Some(run), "formatting");
     let style_id = string(field(formatting, "styleId"));
     let run_style = styles.run_style_own(style_id);
-    let merged = styles.run_formatting(style_formatting, formatting);
-    let mut marks = formatting_to_marks(merged.as_ref());
+    let mut marks = formatting_to_marks(merged);
     let hyperlink_style = style_id.is_some_and(is_hyperlink_style_name)
         || style_id
             .and_then(|id| styles.style(id))

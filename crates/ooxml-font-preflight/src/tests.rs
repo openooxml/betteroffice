@@ -461,19 +461,152 @@ fn marker_faces_inherit_paragraph_bold_and_italic() {
 }
 
 #[test]
-fn text_boxes_use_direct_fonts_and_the_shape_default() {
+fn text_boxes_use_paragraph_styles_and_direct_fonts() {
     let result = scan(
-        r#"<w:style w:type="paragraph" w:styleId="BoxStyle"><w:rPr><w:rFonts w:ascii="Unused" w:hAnsi="Unused"/><w:b/></w:rPr></w:style>"#,
+        r#"<w:style w:type="paragraph" w:styleId="BoxStyle"><w:rPr><w:rFonts w:ascii="Box" w:hAnsi="Box"/><w:b/></w:rPr></w:style>"#,
         r#"<w:p><w:r><w:pict><v:shape xmlns:v="urn:synthetic"><v:textbox><w:txbxContent><w:p><w:pPr><w:pStyle w:val="BoxStyle"/></w:pPr><w:r><w:rPr><w:b/></w:rPr><w:t>Box</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p>"#,
     );
     assert_eq!(
         keys(&result),
         [
             ("Base", false, false),
-            ("Calibri", false, false),
-            ("Calibri", true, false)
+            ("Box", false, false),
+            ("Box", true, false)
         ]
     );
+}
+
+#[test]
+fn text_box_style_cascade_matches_body_except_own_languages_including_headers() {
+    let styles = styles(
+        r#"<w:style w:type="paragraph" w:styleId="Parent"><w:rPr><w:rFonts w:ascii="Paragraph" w:hAnsi="Paragraph" w:eastAsia="Paragraph CJK"/><w:b/><w:lang w:eastAsia="ja-JP"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Child"><w:basedOn w:val="Parent"/><w:rPr><w:i/></w:rPr></w:style><w:style w:type="character" w:styleId="AccentBase"><w:rPr><w:rFonts w:ascii="Character" w:hAnsi="Character" w:eastAsia="Character CJK"/><w:lang w:eastAsia="zh-TW"/></w:rPr></w:style><w:style w:type="character" w:styleId="Accent"><w:basedOn w:val="AccentBase"/><w:rPr><w:b/></w:rPr></w:style>"#,
+    )
+    .replacen(
+        "</w:rPr>",
+        r#"<w:lang w:eastAsia="ko-KR"/></w:rPr>"#,
+        1,
+    );
+    let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="header" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/></Relationships>"#;
+    for (paragraph_properties, run_properties, family, bold, italic, body_script, box_script) in [
+        (
+            r#"<w:pStyle w:val="Child"/>"#,
+            "",
+            "Paragraph CJK",
+            true,
+            true,
+            "cjk-jp",
+            "cjk-jp",
+        ),
+        (
+            r#"<w:pStyle w:val="Child"/>"#,
+            r#"<w:rStyle w:val="Accent"/>"#,
+            "Character CJK",
+            false,
+            true,
+            "cjk-jp",
+            "cjk-tc",
+        ),
+        (
+            r#"<w:pStyle w:val="Child"/>"#,
+            r#"<w:rStyle w:val="Accent"/><w:rFonts w:ascii="Direct" w:hAnsi="Direct" w:eastAsia="Direct CJK"/><w:b/><w:i w:val="0"/><w:lang w:eastAsia="zh-CN"/>"#,
+            "Direct CJK",
+            true,
+            false,
+            "cjk-jp",
+            "cjk-sc",
+        ),
+        ("", "", "Base", false, false, "cjk-kr", "cjk-kr"),
+        (
+            r#"<w:pStyle w:val="Child"/><w:rPr><w:lang w:eastAsia="zh-TW"/></w:rPr>"#,
+            r#"<w:lang w:eastAsia="ko-KR"/>"#,
+            "Paragraph CJK",
+            true,
+            true,
+            "cjk-tc",
+            "cjk-kr",
+        ),
+        (
+            r#"<w:pStyle w:val="Child"/><w:rPr><w:lang w:eastAsia="zh-TW"/></w:rPr>"#,
+            "",
+            "Paragraph CJK",
+            true,
+            true,
+            "cjk-tc",
+            "cjk-tc",
+        ),
+        (
+            r#"<w:pStyle w:val="Missing"/>"#,
+            r#"<w:rStyle w:val="MissingRun"/>"#,
+            "Base",
+            false,
+            false,
+            "cjk-kr",
+            "cjk-kr",
+        ),
+    ] {
+        let paragraph = format!(
+            r#"<w:p><w:pPr>{paragraph_properties}</w:pPr><w:r><w:rPr>{run_properties}</w:rPr><w:t>漢字</w:t></w:r></w:p>"#
+        );
+        let body = document(&format!("<w:p/>{paragraph}"));
+        let expected = docx_font_preflight(&zip(
+            &[
+                ("word/document.xml", body.as_bytes()),
+                ("word/styles.xml", styles.as_bytes()),
+            ],
+            false,
+        ))
+        .unwrap();
+        assert!(expected.faces.iter().any(|face| {
+            face.family == family
+                && face.bold == bold
+                && face.italic == italic
+                && face.scripts == [body_script]
+        }));
+        let mut expected_box_faces = expected.faces.clone();
+        for face in &mut expected_box_faces {
+            for script in &mut face.scripts {
+                if script.as_str() == body_script {
+                    *script = box_script.to_owned();
+                }
+            }
+        }
+        for vml in [false, true] {
+            let boxed = if vml {
+                format!(
+                    r#"<w:p><w:r><w:pict><v:shape xmlns:v="urn:schemas-microsoft-com:vml"><v:textbox><w:txbxContent>{paragraph}</w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p>"#
+                )
+            } else {
+                format!(
+                    r#"<w:p><w:r><w:drawing><wps:wsp xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:txbx><w:txbxContent>{paragraph}</w:txbxContent></wps:txbx></wps:wsp></w:drawing></w:r></w:p>"#
+                )
+            };
+            for in_header in [false, true] {
+                let body = document(if in_header {
+                    r#"<w:p/><w:sectPr><w:headerReference w:type="default" r:id="header"/></w:sectPr>"#
+                } else {
+                    &boxed
+                });
+                let header = format!(
+                    r#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">{boxed}</w:hdr>"#
+                );
+                let mut parts = vec![
+                    ("word/document.xml", body.as_bytes()),
+                    ("word/styles.xml", styles.as_bytes()),
+                ];
+                if in_header {
+                    parts.extend([
+                        ("word/_rels/document.xml.rels", rels.as_bytes()),
+                        ("word/header1.xml", header.as_bytes()),
+                    ]);
+                }
+                let result = docx_font_preflight(&zip(&parts, false)).unwrap();
+                assert_eq!(
+                    result.faces, expected_box_faces,
+                    "{paragraph}, vml={vml}, header={in_header}"
+                );
+            }
+        }
+    }
 }
 
 #[test]

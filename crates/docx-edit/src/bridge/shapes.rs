@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::f64::consts::PI;
+use std::sync::Arc;
 
 use docx_layout::types::{
     AxisPosition, BlockId, BoxEdges, FieldRun, ImageRunPosition, LineBreakRun, ParagraphAttrs,
@@ -14,6 +15,69 @@ use crate::fmath;
 const EMU_PER_INCH: f64 = 914_400.0;
 const PIXELS_PER_INCH: f64 = 96.0;
 const MAX_SHAPE_BODY_DEPTH: usize = 8;
+
+/// Retained package styles for shape text lowering.
+#[derive(Clone, Default)]
+pub struct ShapeStyles(Option<Arc<crate::seed::SourceMetadata>>);
+
+impl ShapeStyles {
+    pub(super) fn new(source: Option<Arc<crate::seed::SourceMetadata>>) -> Self {
+        Self(source)
+    }
+}
+
+impl std::fmt::Debug for ShapeStyles {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("ShapeStyles")
+            .field(&self.0.is_some())
+            .finish()
+    }
+}
+
+impl PartialEq for ShapeStyles {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+}
+
+struct ShapeRunStyles<'a> {
+    env: &'a RenderEnv,
+    paragraph: Option<Arc<Value>>,
+    defaults: RunFormatting,
+}
+
+impl ShapeRunStyles<'_> {
+    fn formatting(&self, run: &Value) -> RunFormatting {
+        let mut formatting = if let Some(source) = &self.env.shape_styles.0 {
+            let attributes =
+                crate::seed::payload(source.render_shape_run_attrs(run, self.paragraph.as_deref()))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(key, value)| (key.into(), value))
+                    .collect();
+            let mut formatting = super::lower_run_formatting(Some(&attributes), self.env);
+            if let Some(color) =
+                resolve_shape_color(field(run, "formatting").and_then(|value| value.get("color")))
+            {
+                formatting.color = Some(color);
+            }
+            formatting
+        } else {
+            shape_run_formatting_with_shading(field(run, "formatting"), self.env)
+        };
+        super::apply_run_defaults(&mut formatting, &self.defaults);
+        formatting
+    }
+
+    fn field_formatting(&self, formatting: Option<&Value>) -> RunFormatting {
+        self.formatting(&json!({"formatting": formatting}))
+    }
+}
 
 pub(super) fn lower_shape_json(
     shape: &Value,
@@ -486,35 +550,64 @@ fn shape_paragraph(
     nested_sequences: &mut Vec<String>,
     env: &RenderEnv,
 ) -> ParagraphBlock {
-    let formatting = object(paragraph, "formatting");
-    let alignment = formatting
-        .and_then(|value| string_in(value, "alignment"))
-        .and_then(|value| match value.as_str() {
-            "both" => Some("justify".to_owned()),
-            "left" | "center" | "right" => Some(value),
-            _ => None,
-        });
-    let values: std::collections::BTreeMap<String, yrs::Any> = formatting
-        .into_iter()
-        .flatten()
-        .filter_map(|(key, value)| {
-            Some((
-                key.clone(),
-                crate::seed::any_from_value(value.clone()).ok()?,
-            ))
-        })
-        .collect();
-    let mut attrs = ParagraphAttrs {
-        alignment,
-        ..ParagraphAttrs::default()
+    let (values, paragraph_formatting) = if let Some(source) = &env.shape_styles.0 {
+        let (properties, formatting) = source.render_paragraph(paragraph);
+        let values: std::collections::BTreeMap<String, yrs::Any> = crate::seed::payload(properties)
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        (values, formatting)
+    } else {
+        let values = object(paragraph, "formatting")
+            .into_iter()
+            .flatten()
+            .filter_map(|(key, value)| {
+                Some((
+                    key.clone(),
+                    crate::seed::any_from_value(value.clone()).ok()?,
+                ))
+            })
+            .collect();
+        (values, None)
     };
-    super::lower_paragraph_spacing(&values, &mut attrs, env, false);
-    super::lower_paragraph_indent(&values, &mut attrs);
-    attrs.shading = shape_shading(field(paragraph, "formatting"), env);
+    let attrs = if env.shape_styles.0.is_some() {
+        super::lower_paragraph_attrs(
+            &values,
+            None,
+            env,
+            &mut crate::list_marker::ListState::default(),
+            false,
+        )
+    } else {
+        let alignment =
+            super::value_string(values.get("alignment")).and_then(|value| match value.as_str() {
+                "both" => Some("justify".to_owned()),
+                "left" | "center" | "right" => Some(value),
+                _ => None,
+            });
+        let mut attrs = ParagraphAttrs {
+            alignment,
+            ..ParagraphAttrs::default()
+        };
+        super::lower_paragraph_spacing(&values, &mut attrs, env, false);
+        super::lower_paragraph_indent(&values, &mut attrs);
+        attrs.shading = shape_shading(field(paragraph, "formatting"), env);
+        attrs
+    };
+    let defaults = if env.shape_styles.0.is_some() {
+        super::paragraph_run_defaults(&values, super::paragraph_chain_size(env, &values), env)
+    } else {
+        RunFormatting::default()
+    };
+    let styles = ShapeRunStyles {
+        env,
+        paragraph: paragraph_formatting,
+        defaults,
+    };
     let mut runs: Vec<Run> = array(paragraph, "content")
         .into_iter()
         .flatten()
-        .flat_map(|content| shape_content_runs(content, 0, nested_sequences, env))
+        .flat_map(|content| shape_content_runs(content, 0, nested_sequences, &styles))
         .collect();
     for (index, run) in runs.iter_mut().enumerate() {
         if let Run::Image(image) = run
@@ -563,35 +656,27 @@ fn shape_content_runs(
     content: &Value,
     depth: usize,
     nested_sequences: &mut Vec<String>,
-    env: &RenderEnv,
+    styles: &ShapeRunStyles<'_>,
 ) -> Vec<Run> {
     if depth >= MAX_SHAPE_BODY_DEPTH {
         skip_deep_content(content, nested_sequences);
         return Vec::new();
     }
     match string(content, "type").as_deref() {
-        Some("run") => {
-            if !env.show_hidden_text
-                && shape_run_formatting(field(content, "formatting")).hidden == Some(true)
-            {
-                Vec::new()
-            } else {
-                shape_document_runs(content, env)
-            }
-        }
+        Some("run") => shape_document_runs(content, styles),
         Some("hyperlink") => {
             nested_sequences.extend(crate::seed::hyperlink_sequence_names(content));
             array(content, "structuredChildren")
                 .or_else(|| array(content, "children"))
                 .into_iter()
                 .flatten()
-                .flat_map(|child| shape_content_runs(child, depth + 1, nested_sequences, env))
+                .flat_map(|child| shape_content_runs(child, depth + 1, nested_sequences, styles))
                 .collect()
         }
         Some("inlineSdt") => array(content, "content")
             .into_iter()
             .flatten()
-            .flat_map(|child| shape_content_runs(child, depth + 1, nested_sequences, env))
+            .flat_map(|child| shape_content_runs(child, depth + 1, nested_sequences, styles))
             .collect(),
         Some("complexField") => match projected_result(content, depth) {
             Some(result) => {
@@ -612,15 +697,15 @@ fn shape_content_runs(
                         {
                             let mut child = child.clone();
                             child["formatting"] = formatting.clone();
-                            shape_content_runs(&child, depth + 1, nested_sequences, env)
+                            shape_content_runs(&child, depth + 1, nested_sequences, styles)
                         }
-                        _ => shape_content_runs(child, depth + 1, nested_sequences, env),
+                        _ => shape_content_runs(child, depth + 1, nested_sequences, styles),
                     })
                     .collect()
             }
-            None => vec![shape_field_run(content, env)],
+            None => vec![shape_field_run(content, styles)],
         },
-        Some("simpleField") => vec![shape_field_run(content, env)],
+        Some("simpleField") => vec![shape_field_run(content, styles)],
         _ => Vec::new(),
     }
 }
@@ -671,7 +756,7 @@ fn projected_result(field_value: &Value, depth: usize) -> Option<&Vec<Value>> {
 
 /// A field in shape text, lowered like one in body text: PAGE and NUMPAGES
 /// resolve per page, and any other field shows its cached result.
-fn shape_field_run(field_value: &Value, env: &RenderEnv) -> Run {
+fn shape_field_run(field_value: &Value, styles: &ShapeRunStyles<'_>) -> Run {
     let results = if string(field_value, "type").as_deref() == Some("simpleField") {
         array(field_value, "content")
     } else {
@@ -696,8 +781,8 @@ fn shape_field_run(field_value: &Value, env: &RenderEnv) -> Run {
                 if text.is_empty() {
                     continue;
                 }
-                if !env.show_hidden_text
-                    && shape_run_formatting(run_formatting).hidden == Some(true)
+                if !styles.env.show_hidden_text
+                    && styles.field_formatting(run_formatting).hidden == Some(true)
                 {
                     hidden_result = true;
                     continue;
@@ -723,10 +808,7 @@ fn shape_field_run(field_value: &Value, env: &RenderEnv) -> Run {
         "PAGE" | "NUMPAGES" | "DATE" | "TIME" => raw_type.clone(),
         _ => "OTHER".to_owned(),
     };
-    let mut fmt = shape_run_formatting_with_shading(
-        formatting.or_else(|| field(field_value, "formatting")),
-        env,
-    );
+    let mut fmt = styles.field_formatting(formatting.or_else(|| field(field_value, "formatting")));
     let mut nested_sequences = crate::seed::nested_sequence_names(field_value);
     if hidden_result {
         nested_sequences.extend(
@@ -751,8 +833,12 @@ fn shape_field_run(field_value: &Value, env: &RenderEnv) -> Run {
     })
 }
 
-fn shape_document_runs(run: &Value, env: &RenderEnv) -> Vec<Run> {
-    let formatting = shape_run_formatting_with_shading(field(run, "formatting"), env);
+fn shape_document_runs(run: &Value, styles: &ShapeRunStyles<'_>) -> Vec<Run> {
+    let env = styles.env;
+    let formatting = styles.formatting(run);
+    if !env.show_hidden_text && formatting.hidden == Some(true) {
+        return Vec::new();
+    }
     array(run, "content")
         .into_iter()
         .flatten()
@@ -818,7 +904,13 @@ fn shape_shading(formatting: Option<&Value>, env: &RenderEnv) -> Option<String> 
 
 fn shape_run_formatting_with_shading(source: Option<&Value>, env: &RenderEnv) -> RunFormatting {
     let mut formatting = shape_run_formatting(source);
-    inherit_default_language(&mut formatting, env);
+    super::apply_run_defaults(
+        &mut formatting,
+        &RunFormatting {
+            language: env.doc_default_language.clone(),
+            ..RunFormatting::default()
+        },
+    );
     if let Some(slots) = formatting.font_slots.as_mut() {
         super::resolve_font_slots(slots, env);
         formatting.font_family = slots
@@ -831,26 +923,6 @@ fn shape_run_formatting_with_shading(source: Option<&Value>, env: &RenderEnv) ->
     }
     formatting.highlight = shape_shading(source, env);
     formatting
-}
-
-/// Fills the language slots a shape run leaves unset from the document
-/// defaults. A shape's text is stored as its own parse, outside the style
-/// resolution body runs go through, so without this a text box loses the
-/// language its document declares.
-fn inherit_default_language(formatting: &mut RunFormatting, env: &RenderEnv) {
-    let Some(defaults) = &env.doc_default_language else {
-        return;
-    };
-    let language = formatting.language.get_or_insert_with(Default::default);
-    if language.latin.is_none() {
-        language.latin = defaults.latin.clone();
-    }
-    if language.east_asia.is_none() {
-        language.east_asia = defaults.east_asia.clone();
-    }
-    if language.bidi.is_none() {
-        language.bidi = defaults.bidi.clone();
-    }
 }
 
 fn shape_run_formatting(source: Option<&Value>) -> RunFormatting {
@@ -1395,6 +1467,10 @@ mod textbox_charts_tests;
 mod textbox_language_tests;
 
 #[cfg(test)]
+#[path = "textbox_style_tests.rs"]
+mod textbox_style_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1595,9 +1671,15 @@ mod tests {
         let link = json!({"type": "hyperlink", "anchor": "top", "children": [text]});
         let page = json!({"type": "simpleField", "fieldType": "PAGE",
             "instruction": "PAGE", "content": [text]});
-        let text_runs = shape_document_runs(&text, &RenderEnv::default());
+        let env = RenderEnv::default();
+        let styles = ShapeRunStyles {
+            env: &env,
+            paragraph: None,
+            defaults: RunFormatting::default(),
+        };
+        let text_runs = shape_document_runs(&text, &styles);
         let mut text_and_page = text_runs.clone();
-        text_and_page.push(shape_field_run(&page, &RenderEnv::default()));
+        text_and_page.push(shape_field_run(&page, &styles));
         for (result, expected) in [
             (json!([link]), text_runs),
             (json!([link, page]), text_and_page),

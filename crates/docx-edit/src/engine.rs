@@ -27168,6 +27168,103 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
     }
 
     #[test]
+    fn raw_docx_font_preflight_covers_styled_text_boxes_in_body_and_headers() {
+        let styles = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Default Box" w:hAnsi="Default Box" w:eastAsia="Default CJK"/><w:lang w:eastAsia="ko-KR"/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type="paragraph" w:styleId="Parent"><w:rPr><w:rFonts w:ascii="Paragraph Box" w:hAnsi="Paragraph Box" w:eastAsia="Paragraph CJK"/><w:b/><w:lang w:eastAsia="ja-JP"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Child"><w:basedOn w:val="Parent"/><w:rPr><w:i/></w:rPr></w:style><w:style w:type="character" w:styleId="AccentBase"><w:rPr><w:rFonts w:ascii="Character Box" w:hAnsi="Character Box" w:eastAsia="Character CJK"/><w:lang w:eastAsia="zh-TW"/></w:rPr></w:style><w:style w:type="character" w:styleId="Accent"><w:basedOn w:val="AccentBase"/><w:rPr><w:b/></w:rPr></w:style></w:styles>"#;
+        let content = r#"<w:p><w:pPr><w:pStyle w:val="Child"/></w:pPr><w:r><w:t>漢字</w:t></w:r></w:p><w:p><w:pPr><w:pStyle w:val="Child"/></w:pPr><w:r><w:rPr><w:rStyle w:val="Accent"/></w:rPr><w:t>漢字</w:t></w:r></w:p><w:p><w:pPr><w:pStyle w:val="Child"/></w:pPr><w:r><w:rPr><w:rStyle w:val="Accent"/><w:rFonts w:ascii="Direct Box" w:hAnsi="Direct Box" w:eastAsia="Direct CJK"/><w:b/><w:i w:val="0"/><w:lang w:eastAsia="zh-CN"/></w:rPr><w:t>漢字</w:t></w:r></w:p><w:p><w:r><w:t>漢字</w:t></w:r></w:p>"#;
+        for vml in [false, true] {
+            let boxed = if vml {
+                format!(
+                    r#"<w:p><w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml"><v:shape id="Box" style="position:absolute;width:216pt;height:108pt" filled="f" stroked="f"><v:textbox><w:txbxContent>{content}</w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p>"#
+                )
+            } else {
+                format!(
+                    r#"<w:p><w:r><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="margin"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="2743200" cy="1371600"/><wp:wrapNone/><wp:docPr id="1" name="Box"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2743200" cy="1371600"/></a:xfrm><a:prstGeom prst="rect"/></wps:spPr><wps:txbx><w:txbxContent>{content}</w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r></w:p>"#
+                )
+            };
+            for in_header in [false, true] {
+                let bytes = if in_header {
+                    crate::seed::fixture::Package::new(
+                        r#"<w:p/><w:sectPr><w:headerReference w:type="default" r:id="header"/></w:sectPr>"#,
+                    )
+                    .styles(styles)
+                    .part(
+                        "header1.xml",
+                        "header",
+                        "header",
+                        "header",
+                        &format!("<w:hdr {}>{boxed}</w:hdr>", crate::seed::fixture::NS),
+                    )
+                    .bytes()
+                } else {
+                    crate::seed::fixture::Package::new(&boxed)
+                        .styles(styles)
+                        .bytes()
+                };
+                let preflight = ooxml_font_preflight::docx_font_preflight(&bytes).unwrap();
+                let parsed = docx_parse::parse_docx_s9_wire(&bytes, Default::default())
+                    .unwrap()
+                    .document
+                    .package;
+                let request = crate::layout_request::region_layout_request(
+                    &serde_json::to_value(parsed).unwrap(),
+                    24.0,
+                );
+                let engine = EngineSession::new(1703);
+                crate::seed::seed_from_docx(engine.doc(), &bytes).unwrap();
+                let requirements: Vec<serde_json::Value> = serde_json::from_str(
+                    &engine
+                        .layout_font_requirements_json(&request.to_string())
+                        .unwrap(),
+                )
+                .unwrap();
+                for (family, bold, italic, script) in [
+                    ("Paragraph CJK", true, true, "cjk-jp"),
+                    ("Character CJK", false, true, "cjk-tc"),
+                    ("Direct CJK", true, false, "cjk-sc"),
+                    ("Default CJK", false, false, "cjk-kr"),
+                ] {
+                    assert!(
+                        requirements.iter().any(|face| {
+                            face["family"] == family
+                                && face["bold"] == bold
+                                && face["italic"] == italic
+                                && face["scripts"] == serde_json::json!([script])
+                        }),
+                        "{family}, vml={vml}, header={in_header}: {requirements:?}"
+                    );
+                }
+                for requirement in requirements {
+                    let face = preflight
+                        .faces
+                        .iter()
+                        .find(|face| {
+                            face.family
+                                .eq_ignore_ascii_case(requirement["family"].as_str().unwrap())
+                                && face.bold == requirement["bold"].as_bool().unwrap()
+                                && face.italic == requirement["italic"].as_bool().unwrap()
+                        })
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "missing {requirement}, vml={vml}, header={in_header}: {:?}",
+                                preflight.faces
+                            )
+                        });
+                    let scripts: Vec<_> = requirement["scripts"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|script| script.as_str().unwrap())
+                        .collect();
+                    assert_eq!(
+                        face.scripts, scripts,
+                        "{requirement}, vml={vml}, header={in_header}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn raw_docx_font_preflight_matches_engine_cjk_faces_by_language() {
         let normal = |language: &str| {
             format!(
@@ -27230,11 +27327,15 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 ),
                 Some(&["cjk-jp"]),
             ),
-            (normal("ja-JP"), paragraph("", korean, "漢字"), None),
+            (
+                normal("ja-JP"),
+                paragraph("", korean, "漢字"),
+                Some(&["cjk-jp"]),
+            ),
             (
                 normal("ja-JP"),
                 paragraph("", r#"<w:rStyle w:val="Traditional"/>"#, "繁體"),
-                None,
+                Some(&["cjk-jp"]),
             ),
         ];
         for (styles, body, expected) in cases {
