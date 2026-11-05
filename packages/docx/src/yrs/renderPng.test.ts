@@ -76,18 +76,19 @@ describe('YrsSession.renderPng', () => {
     } finally { session.destroy(); }
   });
 
-  test('draws what the session holds now, not its source', async () => {
-    const calls = stubBrowser();
+  test('lays out what the session holds now, not its source', async () => {
+    stubBrowser();
     const session = await opened();
+    const pages = async () => {
+      const refused = await session.renderPng({ page: 9999 }).catch((error: Error) => error.message);
+      return Number(/for (\d+) page/.exec(String(refused))?.[1]);
+    };
     try {
-      const first = await session.renderPng({ page: 0 });
-      const before = calls.fills;
-      const state = spyOn(session, 'encodeState');
-      session.insertText({ story: 'body', paraId: session.paragraphs('body')[0]!.paraId, offset: 0 }, 'A great many more words at the start of this page ');
-      const edited = await session.renderPng({ page: 0 });
-      expect(state).toHaveBeenCalledTimes(1);
-      if (native) expect(edited).not.toEqual(first);
-      else expect(calls.fills - before).toBeGreaterThan(before);
+      const before = await pages();
+      expect(before).toBeGreaterThan(0);
+      session.insertText({ story: 'body', paraId: session.paragraphs('body')[0]!.paraId, offset: 0 }, 'A great many more words at the start of this page. '.repeat(600));
+      expect(await pages()).toBeGreaterThan(before + 2);
+      await session.renderPng({ page: before + 1 });
     } finally { session.destroy(); }
   });
 
