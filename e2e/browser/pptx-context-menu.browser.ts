@@ -41,9 +41,11 @@ async function selectText(page: Page) {
 }
 
 async function openText(page: Page, table = false) {
-  await input(page).press('Shift+F10');
   const result = menu(page, table ? 'Table menu' : 'Text menu');
-  await expect(result).toBeVisible();
+  await expect(async () => {
+    await input(page).press('Shift+F10');
+    await expect(result).toBeVisible({ timeout: 1_000 });
+  }).toPass();
   return result;
 }
 
