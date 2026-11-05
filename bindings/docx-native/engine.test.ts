@@ -1030,6 +1030,10 @@ test('native and wasm track and resolve character formatting with the same optio
   }
 });
 
+function pagePng(session: import('./index.js').EditSession, list: string, page: number, scale: number): Uint8Array {
+  return session.renderPngTarget(list, `{"page":${page}}`, `{"scale":${scale}}`);
+}
+
 function pngDisplayList(
   session: import('./index.js').EditSession,
   families = ['Calibri'],
@@ -1067,8 +1071,8 @@ test('native docx rasterizes the compiled page at two scales', () => {
   try {
     session.open_docx(fixture, true);
     const list = pngDisplayList(session);
-    const first = session.render_page_png(list, 0, 1);
-    const second = session.render_page_png(list, 0, 2);
+    const first = pagePng(session, list, 0, 1);
+    const second = pagePng(session, list, 0, 2);
     for (const png of [first, second]) {
       expectPlainBytes(png);
       expect([...png.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
@@ -1091,35 +1095,52 @@ test('native docx PNG refuses invalid input, missing fonts and oversized surface
     session.open_docx(fixture, true);
     const list = pngDisplayList(session);
     for (const call of [
-      () => session.render_page_png(list, 9999, 1),
-      () => session.render_page_png(list, 0, 0),
-      () => session.render_page_png(list, 0, NaN),
-      () => session.render_page_png(list, 0, -1),
-      () => session.render_page_png(list, 0, Infinity),
-      () => session.render_page_png('{', 0, 1),
-      () => session.render_page_png('{}', 0, 1),
-      () => session.render_page_png(JSON.stringify({ pages: [{ pageIndex: 0, width: 0, height: 10, primitives: [] }] }), 0, 1),
+      () => pagePng(session, list, 9999, 1),
+      () => pagePng(session, list, 0, 0),
+      () => pagePng(session, list, 0, NaN),
+      () => pagePng(session, list, 0, -1),
+      () => pagePng(session, list, 0, Infinity),
+      () => pagePng(session, '{', 0, 1),
+      () => pagePng(session, '{}', 0, 1),
+      () => pagePng(session, JSON.stringify({ pages: [{ pageIndex: 0, width: 0, height: 10, primitives: [] }] }), 0, 1),
     ]) {
       const error = caughtValue(call);
       expect(error).toBeInstanceOf(Error);
       expect((error as Error).message).toStartWith('png-invalid:');
       expect(error).not.toHaveProperty('code');
     }
+    for (const call of [
+      () => session.renderPngTarget(list, '{"page":0}', '{"scale":null}'),
+      () => session.renderPngTarget(list, '{"page":0}', '{"scale":"2"}'),
+      () => session.renderPngTarget(list, '{"page":0}', '{"maxWidth":10}'),
+      () => session.renderPngTarget(list, '{"page":0,"extra":1}', '{}'),
+      () => session.renderPngTarget(list, '{"slide":0}', '{}'),
+      () => session.renderPngTarget(list, '{"page":-1}', '{}'),
+      () => session.renderPngTarget(list, '{"page":0.5}', '{}'),
+      () => session.renderPngTarget(list, '{}', '{}'),
+      () => session.renderPngTarget(list, '{"page":0}', '['),
+    ]) {
+      const error = caughtValue(call);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toStartWith('png-invalid:');
+      expect(error).not.toHaveProperty('code');
+    }
+    expect(session.renderPngTarget(list, '{"page":0}', '{}')).toEqual(pagePng(session, list, 0, 1));
     for (const scale of [1e9, Number.MAX_VALUE]) {
-      expect(() => session.render_page_png(list, 0, scale)).toThrow('png-too-large:');
+      expect(() => pagePng(session, list, 0, scale)).toThrow('png-too-large:');
     }
     const area = JSON.stringify({ pages: [{ pageIndex: 0, width: 5000, height: 5000, primitives: [] }] });
-    expect(() => session.render_page_png(area, 0, 1)).toThrow('png-too-large:');
+    expect(() => pagePng(session, area, 0, 1)).toThrow('png-too-large:');
     const stale = JSON.parse(list);
     const glyph = stale.pages[0].primitives.find((primitive: { kind: string }) => primitive.kind === 'glyphRun');
     expect(glyph).toBeDefined();
     glyph.fontId = 0x7ffffffe;
-    expect(() => session.render_page_png(JSON.stringify(stale), 0, 1)).toThrow('png-font-unavailable:');
+    expect(() => pagePng(session, JSON.stringify(stale), 0, 1)).toThrow('png-font-unavailable:');
     const other = new raw.EditSession(404);
     try {
       other.open_docx(fixture, true);
-      expect(() => other.render_page_png(list, 0, 1)).toThrow('png-font-unavailable:');
-      expect(session.render_page_png(list, 0, 1).length).toBeGreaterThan(8);
+      expect(() => pagePng(other, list, 0, 1)).toThrow('png-font-unavailable:');
+      expect(pagePng(session, list, 0, 1).length).toBeGreaterThan(8);
     } finally {
       other.free();
     }
@@ -1141,7 +1162,7 @@ test('native docx PNG paints theme accent text red', () => {
   const session = new raw.EditSession(403);
   try {
     session.open_docx(themed, true);
-    const pixels = pngPixels(session.render_page_png(pngDisplayList(session), 0, 1));
+    const pixels = pngPixels(pagePng(session, pngDisplayList(session), 0, 1));
     let red = false;
     for (let index = 0; index < pixels.length; index += 4) {
       if (pixels[index] > 200 && pixels[index + 1] < 50 && pixels[index + 2] < 50 && pixels[index + 3] === 255) red = true;
@@ -1163,8 +1184,8 @@ test('native docx PNG uses display list font chains for text primitives', () => 
       font: '24px Calibri', color: '#000000',
     }] }];
     const list = JSON.stringify({ pages, fontChains: { 'calibri|0|0': [font] } });
-    expect(pngPixels(session.render_page_png(list, 0, 1)).some((value, index) => index % 4 < 3 && value < 200)).toBe(true);
-    expect(() => session.render_page_png(JSON.stringify({ pages }), 0, 1)).toThrow('png-font-unavailable:');
+    expect(pngPixels(pagePng(session, list, 0, 1)).some((value, index) => index % 4 < 3 && value < 200)).toBe(true);
+    expect(() => pagePng(session, JSON.stringify({ pages }), 0, 1)).toThrow('png-font-unavailable:');
   } finally {
     session.free();
   }
@@ -1191,7 +1212,7 @@ test('native docx PNG resolves media tokens in every page region and skips missi
       noteAreas: [{ primitives: [image(70)] }, { kind: 'endnote', primitives: [image(90)] }],
     }] });
     for (const scale of [1, 2]) {
-      const png = session.render_page_png(list, 0, scale);
+      const png = pagePng(session, list, 0, scale);
       const width = Buffer.from(png).readUInt32BE(16);
       const pixels = pngPixels(png);
       const pixel = (x: number) => {
@@ -1237,8 +1258,8 @@ test.each([1, 2])('native docx PNG preserves the layout fallback face at scale %
     expect(fallback.run.fontId).toBe(direct.run.fontId);
     expect(fallback.run.glyphs).toEqual(direct.run.glyphs);
     expect(fallback.run.size).toBe(direct.run.size);
-    const actual = fallback.session.render_page_png(fallback.json, 0, scale);
-    const expected = direct.session.render_page_png(direct.json, 0, scale);
+    const actual = pagePng(fallback.session, fallback.json, 0, scale);
+    const expected = pagePng(direct.session, direct.json, 0, scale);
     expect(pngPixels(actual)).toEqual(pngPixels(expected));
     expect(pngPixels(actual).some((value, index) => index % 4 < 3 && value < 200)).toBe(true);
   } finally {
@@ -1256,8 +1277,8 @@ test.each([1, 2])('native docx PNG preserves positioned letter spacing at scale 
       return { x: glyph.x, advance: glyph.advance! };
     });
     expectPngTracking(
-      spaced.session.render_page_png(spaced.json, 0, scale),
-      plain.session.render_page_png(plain.json, 0, scale),
+      pagePng(spaced.session, spaced.json, 0, scale),
+      pagePng(plain.session, plain.json, 0, scale),
       glyphs(spaced.run), glyphs(plain.run), 200 / 15, scale,
     );
   } finally {
@@ -1285,8 +1306,8 @@ for (const [decoration, properties] of [
       expect(Math.abs(rule.x - first.x)).toBeLessThan(0.02);
       expect(Math.abs(rule.w - (last.x + last.advance! - first.x))).toBeLessThan(0.02);
       expectPngRule(
-        decorated.session.render_page_png(decorated.json, 0, scale),
-        plain.session.render_page_png(plain.json, 0, scale),
+        pagePng(decorated.session, decorated.json, 0, scale),
+        pagePng(plain.session, plain.json, 0, scale),
         rule, scale,
       );
     } finally {

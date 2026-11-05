@@ -59,6 +59,39 @@ fn throw_message(env: &Env, message: String) -> Error {
     }
 }
 
+/// `{ page }` and `{ scale }` as the JS handle sends them; other keys are refused.
+fn png_request(target_json: &str, options_json: &str) -> std::result::Result<(usize, f64), String> {
+    let object = |json: &str, keys: &[&str]| {
+        let value: serde_json::Value = serde_json::from_str(json).ok()?;
+        let object = value.as_object()?.clone();
+        object
+            .keys()
+            .all(|key| keys.contains(&key.as_str()))
+            .then_some(object)
+    };
+    let page = object(target_json, &["page"])
+        .and_then(|target| target.get("page")?.as_u64())
+        .and_then(|page| usize::try_from(page).ok())
+        .ok_or("png-invalid: target must be { page } with a page index")?;
+    let options = object(options_json, &["scale"])
+        .ok_or("png-invalid: options may only hold a numeric scale")?;
+    let scale = match options.get("scale") {
+        None => 1.0,
+        Some(scale) => scale
+            .as_f64()
+            .ok_or("png-invalid: scale must be finite and positive")?,
+    };
+    if !scale.is_finite() || scale <= 0.0 {
+        return Err("png-invalid: scale must be finite and positive".to_owned());
+    }
+    if !(scale as f32).is_finite() {
+        return Err(format!(
+            "png-too-large: scale {scale} is past any page size"
+        ));
+    }
+    Ok((page, scale))
+}
+
 fn throw_error(env: &Env, message: &str) -> Error {
     let result = (|| -> Result<()> {
         let mut exception = env.create_error(Error::from_reason(message))?;
@@ -752,26 +785,22 @@ impl EditSession {
             .map_err(|error| map_error(env, error))
     }
 
-    #[napi(catch_unwind, js_name = "render_page_png")]
-    pub fn render_page_png(
+    #[napi(catch_unwind, js_name = "renderPngTarget")]
+    pub fn render_png_target(
         &self,
         env: Env,
         display_list_json: String,
-        page: u32,
-        scale: f64,
+        target_json: String,
+        options_json: String,
     ) -> Result<Uint8Array> {
         let _call = EngineCall::new(env);
         let document = self.document(env)?;
         #[cfg(feature = "test-hooks")]
         if self.panic_png.replace(false) {
-            panic!("render_page_png");
+            panic!("renderPngTarget");
         }
-        if !scale.is_finite() || scale <= 0.0 {
-            return Err(throw_error(
-                &env,
-                "png-invalid: scale must be finite and positive",
-            ));
-        }
+        let (page, scale) = png_request(&target_json, &options_json)
+            .map_err(|message| throw_error(&env, &message))?;
         let value: serde_json::Value = serde_json::from_str(&display_list_json)
             .map_err(|error| throw_error(&env, &format!("png-invalid: {error}")))?;
         let chains: std::collections::HashMap<String, Vec<u32>> = match value.get("fontChains") {
@@ -783,7 +812,7 @@ impl EditSession {
             .map_err(|error| throw_error(&env, &format!("png-invalid: {error}")))?;
         let display_page = list
             .pages
-            .get(page as usize)
+            .get(page)
             .filter(|page| !page.unbuilt)
             .ok_or_else(|| throw_error(&env, "png-invalid: page is unavailable"))?;
         let dimension = |number: &serde_json::Number| -> Result<u32> {
@@ -852,7 +881,7 @@ impl EditSession {
                 let resources = docx_raster::RenderResources::new(fonts, &chains, &images);
                 docx_raster::render_page_cached_scaled(
                     &list,
-                    page as usize,
+                    page,
                     &resources,
                     &mut docx_raster::GlyphCache::default(),
                     &mut docx_raster::ImageCache::default(),
