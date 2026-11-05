@@ -14,7 +14,7 @@ interface Held {
   version: string;
   fonts: ReadonlyArray<DocxPngFontFace> | undefined;
   fontProvider: BundledFontProvider | undefined;
-  laidOut: Promise<{ copy: YrsSession; displayList: DisplayList }>;
+  laidOut: Promise<{ copy: YrsSession; displayList: DisplayList; fontChains: Record<string, number[]> }>;
   users: number;
   stale: boolean;
 }
@@ -66,7 +66,7 @@ export function createPngExporter(session: YrsSession) {
       if (!measurement) throw fontUnavailable('The fonts this document lays out with could not be loaded. Install @betteroffice/fonts, or pass them in `fonts`.');
       const { layout } = computeLayout({ document, pageGap: 0, session: copy, renderEnv, measurement });
       const displayList = await buildRustDisplayList({ ...getLayoutKernelInputs(layout)!, layout, fontChains: measurement.fontChains }, copy);
-      return { copy, displayList };
+      return { copy, displayList, fontChains: measurement.fontChains ?? {} };
     } catch (error) { copy.destroy(); throw error; }
   }
 
@@ -96,12 +96,12 @@ export function createPngExporter(session: YrsSession) {
       if (idle !== undefined) clearTimeout(idle);
       idle = undefined;
       try {
-        const { copy, displayList } = await entry.laidOut;
+        const { copy, displayList, fontChains } = await entry.laidOut;
         assertAlive();
         const page = displayList.pages[index];
         if (!page) throw new RangeError(`page index ${index} out of range for ${displayList.pages.length} page(s)`);
         const bytes = await renderEnginePng({
-          displayList, page, session: copy,
+          displayList, fontChains, page, session: copy,
           outlineGlyph: (fontId, glyphId) => copy.outlineGlyphJson(fontId, glyphId),
           media: (token) => copy.mediaSource(token),
         }, options);

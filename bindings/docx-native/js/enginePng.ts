@@ -21,7 +21,7 @@ export async function renderPng(engine: DocxPngEngine, options: Pick<DocxPngOpti
   let bytes: Uint8Array;
   try {
     bytes = (engine.session as NativeSession).renderPngTarget(
-      JSON.stringify({ ...engine.displayList, pages: [engine.page] }), '{"page":0}', JSON.stringify({ scale }));
+      JSON.stringify({ ...engine.displayList, fontChains: engine.fontChains, pages: [engine.page] }), '{"page":0}', JSON.stringify({ scale }));
   } catch (error) {
     const message = error instanceof Error ? error.message : '';
     if (message.startsWith('png-font-unavailable: ')) throw fontUnavailable(message.slice(22));

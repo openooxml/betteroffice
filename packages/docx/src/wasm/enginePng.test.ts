@@ -8,7 +8,7 @@ const glyphs = { kind: 'glyphRun', x: 0, y: 0, fontId: 1, size: 12, color: '#000
 const svg = new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg"/>');
 
 const engine = (drawn: DisplayPage, overrides: Partial<DocxPngEngine> = {}): DocxPngEngine => ({
-  displayList: { pages: [drawn] } as DisplayList, page: drawn, session: null,
+  displayList: { pages: [drawn] } as DisplayList, fontChains: {}, page: drawn, session: null,
   outlineGlyph: () => JSON.stringify({ commands: [] }),
   media: () => ({ bytes: svg, mimeType: 'image/svg+xml' }),
   ...overrides,

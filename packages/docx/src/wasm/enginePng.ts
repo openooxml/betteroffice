@@ -7,6 +7,8 @@ import type { DisplayList, DisplayPage } from '../layout/render/displayList';
 /** What an engine needs to draw one page, from the session that laid it out. */
 export interface DocxPngEngine {
   displayList: DisplayList;
+  /** The font ids layout measured each family with, for engines that rasterize the list themselves. */
+  fontChains: Record<string, number[]>;
   page: DisplayPage;
   outlineGlyph(fontId: number, glyphId: number): string;
   media(token: string): { bytes: Uint8Array; mimeType: string } | null;
