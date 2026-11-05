@@ -5628,6 +5628,7 @@ fn materialize_sheet<T: ReadTxn>(
     sheet.row_styles = fallbacks.row_styles.clone();
     materialize_style_defaults(&mut sheet, sheet_map, txn)?;
     sheet.freeze_pane = match (version, sheet_map.get(txn, FREEZE_PANE)) {
+        (CHARTS_SCHEMA_VERSION.., None) => fallbacks.freeze_pane,
         (FREEZE_PANE_SCHEMA_VERSION.., Some(Out::Any(value))) => freeze_pane_from_any(&value)?,
         (FREEZE_PANE_SCHEMA_VERSION.., _) => {
             return Err("sheet is missing freeze pane".to_string());
@@ -5803,7 +5804,6 @@ fn sheet_schema_keys(version: i64) -> &'static [&'static str] {
     const V6: &[&str] = &[
         COL_WIDTHS,
         CONTENTS,
-        FREEZE_PANE,
         HYPERLINKS,
         MERGES,
         NAME,
@@ -5818,14 +5818,16 @@ fn sheet_schema_keys(version: i64) -> &'static [&'static str] {
     }
 }
 
-/// Chart state is the one sheet key two replicas can assign at once, because
-/// repinning a chart is an ordinary edit. Undoing the assignment that won
-/// deletes the key outright, so it reads as absent and falls back to what the
-/// source package holds rather than failing the whole workbook.
+/// Chart state and the freeze pane are the sheet keys two replicas can assign
+/// at once, because repinning a chart and freezing panes are ordinary edits.
+/// Undoing the assignment that won deletes the key outright, so it reads as
+/// absent and falls back to what the source package holds rather than failing
+/// the whole workbook.
 fn sheet_schema_optional_keys(version: i64) -> &'static [&'static str] {
     const NONE: &[&str] = &[];
     const V6: &[&str] = &[
         CHARTS,
+        FREEZE_PANE,
         ROW_STYLES,
         COL_STYLES,
         CONDITIONAL_FORMATS,
@@ -7534,6 +7536,7 @@ fn materialize_sheet_oracle<T: ReadTxn>(
     sheet.row_styles = fallbacks.row_styles.clone();
     materialize_style_defaults(&mut sheet, sheet_map, txn)?;
     sheet.freeze_pane = match (version, sheet_map.get(txn, FREEZE_PANE)) {
+        (CHARTS_SCHEMA_VERSION.., None) => fallbacks.freeze_pane,
         (FREEZE_PANE_SCHEMA_VERSION.., Some(Out::Any(value))) => freeze_pane_from_any(&value)?,
         (FREEZE_PANE_SCHEMA_VERSION.., _) => {
             return Err("sheet is missing freeze pane".to_string());
@@ -9699,6 +9702,83 @@ mod tests {
         };
         assert!(gated(CHARTS_SCHEMA_VERSION));
         assert!(!gated(CHARTS_SCHEMA_VERSION - 1));
+    }
+
+    #[test]
+    fn an_absent_freeze_pane_reads_as_the_source_pane() {
+        const { assert!(FREEZE_PANE_SCHEMA_VERSION < CHARTS_SCHEMA_VERSION) };
+
+        for pane in [
+            None,
+            Some(FreezePane::new(2, 1, CellRef::parse_a1("B3").unwrap())),
+        ] {
+            let mut sheet = Sheet::new("Data");
+            sheet.freeze_pane = pane;
+            let mut model = WorkbookModel::default();
+            model.sheets.push(sheet);
+            let authority = WorkbookAuthority::from_model_with_client_id(&model, 141).unwrap();
+            let (stored, _) = authority.strict_materialize().unwrap();
+            {
+                let mut txn = authority.doc.transact_mut_with("test:freeze-pane-gate");
+                let sheets = txn.get_map(SHEETS).unwrap();
+                let sheet = sheets
+                    .get(&txn, "sheet:0")
+                    .and_then(|value| value.cast::<MapRef>().ok())
+                    .unwrap();
+                sheet.remove(&mut txn, FREEZE_PANE);
+            }
+
+            let (projected, _) = authority
+                .strict_materialize()
+                .expect("an absent freeze pane must read as absent, not as a broken workbook");
+            assert_eq!(projected, stored);
+            assert_eq!(projected.sheets[0].freeze_pane, pane);
+            let (oracle, _) = authority.materialize_internal_oracle(true).unwrap();
+            assert_eq!(oracle, stored);
+            assert_eq!(
+                fingerprint_model_with_schema(&projected, SCHEMA_VERSION, true, true).unwrap(),
+                fingerprint_model_with_schema(&stored, SCHEMA_VERSION, true, true).unwrap(),
+            );
+
+            snapshot_validation::validate_for_test(&authority, projected.clone()).unwrap();
+            let mut elsewhere = projected;
+            elsewhere.sheets[0].freeze_pane =
+                Some(FreezePane::new(9, 0, CellRef::parse_a1("A10").unwrap()));
+            assert!(snapshot_validation::validate_for_test(&authority, elsewhere).is_err());
+        }
+    }
+
+    #[test]
+    fn a_stored_freeze_pane_must_match_the_snapshot_model() {
+        let mut model = WorkbookModel::default();
+        model.sheets.push(Sheet::new("Data"));
+        let authority = WorkbookAuthority::from_model_with_client_id(&model, 142).unwrap();
+        let stored = Some(FreezePane::new(2, 1, CellRef::parse_a1("B3").unwrap()));
+        {
+            let mut txn = authority.doc.transact_mut_with("test:freeze-pane-gate");
+            let sheets = txn.get_map(SHEETS).unwrap();
+            let sheet = sheets
+                .get(&txn, "sheet:0")
+                .and_then(|value| value.cast::<MapRef>().ok())
+                .unwrap();
+            sheet.try_update(&mut txn, FREEZE_PANE, freeze_pane_to_any(stored));
+        }
+        let (projected, _) = authority.strict_materialize().unwrap();
+        assert_eq!(projected.sheets[0].freeze_pane, stored);
+        snapshot_validation::validate_for_test(&authority, projected).unwrap();
+        assert!(snapshot_validation::validate_for_test(&authority, model).is_err());
+    }
+
+    #[test]
+    fn the_freeze_pane_is_required_before_the_chart_schema_only() {
+        for version in FREEZE_PANE_SCHEMA_VERSION..CHARTS_SCHEMA_VERSION {
+            assert!(sheet_schema_keys(version).contains(&FREEZE_PANE));
+            assert!(!sheet_schema_optional_keys(version).contains(&FREEZE_PANE));
+        }
+        for version in CHARTS_SCHEMA_VERSION..=SCHEMA_VERSION {
+            assert!(!sheet_schema_keys(version).contains(&FREEZE_PANE));
+            assert!(sheet_schema_optional_keys(version).contains(&FREEZE_PANE));
+        }
     }
 
     fn schema_six_replica(model: &WorkbookModel, base: &WorkbookBase) -> Doc {
