@@ -3002,9 +3002,12 @@ mod tests {
             left.encode_state_as_update(),
             right.encode_state_as_update()
         );
-        assert_eq!(
-            left.encode_diff(&right.encode_state_vector()).unwrap(),
-            [0, 0]
+        let unchanged = left.encode_diff(&right.encode_state_vector()).unwrap();
+        assert!(
+            right
+                .apply_update_json(&unchanged, None)
+                .unwrap()
+                .contains(r#""applied":false"#)
         );
 
         left.edit_cell_json(r#"{"sheet":0,"row":0,"col":0,"input":"left"}"#, None)

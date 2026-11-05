@@ -131,11 +131,12 @@ describe('xlsx command gating', () => {
       );
     }
     for (const value of ['all', 'horizontal', 'vertical', 'unmerge'] as const) {
-      const state = evaluate('merge', { value }, { collaborative: true, selection: range(0, 0, 3, 3, 1) });
-      expect(code(state)).toBe('collaboration-unsupported');
+      const selection = range(0, 0, 3, 3, 1);
+      const state = evaluate('merge', { value }, { collaborative: true, selection });
+      expect(code(state)).toBe(code(evaluate('merge', { value }, { selection })));
     }
     expect(code(evaluate('merge', undefined, { collaborative: true }))).toBe(
-      'collaboration-unsupported'
+      code(evaluate('merge', undefined, {}))
     );
   });
 

@@ -155,7 +155,9 @@ fn map_error(error: CoreError) -> PyErr {
         CoreError::StaleProposal(cells) => stale_proposal_error(message, cells, &[]),
         CoreError::ProposalNotFound(_) => PyKeyError::new_err(message),
         CoreError::NotCollaborative => NotCollaborativeError::new_err(message),
-        CoreError::CollaborativeStructureOperation => CollaborativeStructureError::new_err(message),
+        CoreError::CollaborativeStructureOperation
+        | CoreError::CollaborativeSheetPosition
+        | CoreError::CollaborativeUndoRefused => CollaborativeStructureError::new_err(message),
         CoreError::Operation(_)
         | CoreError::InvalidOperation(_)
         | CoreError::ChartFrameShifted { .. } => operation_error(message),
