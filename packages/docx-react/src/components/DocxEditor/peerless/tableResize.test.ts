@@ -4,13 +4,13 @@ import type { PeerlessFrameGeometry } from './viewStore';
 
 type Cell = { story: string; row: number; column: number; colspan?: number; rects: { pageIndex: number; x: number; y: number; width: number; height: number }[] };
 
-function geometry(cells: Cell[], overrides: { version?: string; columns?: number; table?: string } = {}): PeerlessFrameGeometry {
+function geometry(cells: Cell[], overrides: { version?: string; columns?: number; table?: string; handles?: string } = {}): PeerlessFrameGeometry {
   return {
     documentVersion: 'v1', frameEpoch: 3, layoutRevision: 7,
     objects: {
       version: overrides.version ?? 'v1', frameEpoch: 3, layoutRevision: 7, selection: [], unbuiltPages: [],
       objects: cells.map((cell, index) => ({
-        kind: 'cell' as const, handle: `cell-${index}`, story: cell.story,
+        kind: 'cell' as const, handle: `${overrides.handles ?? 'cell'}-${index}`, story: cell.story,
         rects: cell.rects.map((rect) => ({ pageId: `p${rect.pageIndex}`, ...rect })),
         cell: { table: overrides.table ?? 'body#0', row: cell.row, column: cell.column, rowspan: 1, colspan: cell.colspan ?? 1, columns: overrides.columns ?? 3 },
       })),
@@ -66,5 +66,14 @@ test('a drag becomes one clamped twips delta against the latest geometry', () =>
   expect(tableResizeIntent(before, first!, 0.01)).toBeNull();
   const later = { ...geometry(grid(0, 140), { version: 'v2' }), documentVersion: 'v2' };
   expect(tableResizeIntent(later, first!, 60)?.payload).toMatchObject({ expectVersion: 'v2', handle: 'cell-0' });
-  expect(tableResizeIntent(geometry(grid(0, 100), { table: 'body#1' }), first!, 60)).toBeNull();
+});
+
+test('a drag follows its own table and never one that took its index', () => {
+  const before = geometry(grid(0, 100), { table: 'body#1' });
+  const [first] = tableResizeHandles(before, new Set([0]));
+  expect(tableResizeIntent(geometry(grid(0, 100), { table: 'body#0' }), first!, 60)?.payload).toMatchObject({ handle: 'cell-0', columnEdge: 1 });
+  expect(tableResizeIntent(geometry(grid(0, 100), { table: 'body#1', handles: 'other' }), first!, 60)).toBeNull();
+  expect(tableResizeIntent(geometry(grid(0, 100), { table: 'body#1', columns: 4 }), first!, 60)).toBeNull();
+  expect(tableResizeIntent(geometry(grid(0, 100).map((cell) => ({ ...cell, column: cell.column + 1 })), { table: 'body#1' }), first!, 60)).toBeNull();
+  expect(tableResizeIntent(null, first!, 60)).toBeNull();
 });

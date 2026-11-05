@@ -20,12 +20,21 @@ export interface TableResizeHandle {
   minDelta: number;
   /** Widest drag in px, or Infinity for the right edge. */
   maxDelta: number;
-  /** Any cell of the table: the worker resolves the table from it. */
+  /** A cell of the table: the worker resolves the table from it, and its handle outlives other tables moving. */
   cell: string;
+  /** Grid column of `cell` and columns of its table when the handle was built. */
+  cellColumn: number;
+  columns: number;
 }
 
 function isBodyStory(story: string): boolean {
   return story === 'body' || story.startsWith('body:');
+}
+
+function presentedObjects(geometry: PeerlessFrameGeometry | null | undefined) {
+  const objects = geometry?.objects;
+  return geometry && objects && objects.version === geometry.documentVersion &&
+    objects.frameEpoch === geometry.frameEpoch && objects.layoutRevision === geometry.layoutRevision ? objects : null;
 }
 
 /**
@@ -34,10 +43,9 @@ function isBodyStory(story: string): boolean {
  * belongs to another frame or document version than the pages shown.
  */
 export function tableResizeHandles(geometry: PeerlessFrameGeometry | null | undefined, pageIndices: ReadonlySet<number>): TableResizeHandle[] {
-  const objects = geometry?.objects;
-  if (!geometry || !objects || objects.version !== geometry.documentVersion ||
-    objects.frameEpoch !== geometry.frameEpoch || objects.layoutRevision !== geometry.layoutRevision) return [];
-  const fragments = new Map<string, { table: string; pageIndex: number; columns: number; cell: string;
+  const objects = presentedObjects(geometry);
+  if (!objects) return [];
+  const fragments = new Map<string, { table: string; pageIndex: number; columns: number; cell: string; cellColumn: number;
     edges: Map<number, number[]>; top: number; bottom: number }>();
   for (const object of objects.objects) {
     const placement = object.cell;
@@ -48,7 +56,7 @@ export function tableResizeHandles(geometry: PeerlessFrameGeometry | null | unde
       let fragment = fragments.get(key);
       if (!fragment) {
         fragment = { table: placement.table, pageIndex: rect.pageIndex, columns: placement.columns, cell: object.handle,
-          edges: new Map(), top: rect.y, bottom: rect.y + rect.height };
+          cellColumn: placement.column, edges: new Map(), top: rect.y, bottom: rect.y + rect.height };
         fragments.set(key, fragment);
       }
       fragment.top = Math.min(fragment.top, rect.y);
@@ -78,6 +86,7 @@ export function tableResizeHandles(geometry: PeerlessFrameGeometry | null | unde
       handles.push({
         id: `${fragment.table}@${fragment.pageIndex}:${edge}`, kind, table: fragment.table, pageIndex: fragment.pageIndex,
         columnEdge: edge, x, top: fragment.top, bottom: fragment.bottom, cell: fragment.cell,
+        cellColumn: fragment.cellColumn, columns: fragment.columns,
         minDelta: Math.min(0, MIN_COLUMN_PX - (x - previous)),
         maxDelta: next === undefined ? Infinity : Math.max(0, next - x - MIN_COLUMN_PX),
       });
@@ -86,12 +95,16 @@ export function tableResizeHandles(geometry: PeerlessFrameGeometry | null | unde
   return handles;
 }
 
-/** @internal The worker command for dragging `handle` by `deltaPx` layout px, or null for no change. */
+/**
+ * @internal The worker command for dragging `handle` by `deltaPx` layout px, or null for no change.
+ * Null too once the table the drag began on is gone or its columns changed: a table's index is
+ * not its identity, so another table moving into that index must not take the drag.
+ */
 export function tableResizeIntent(geometry: PeerlessFrameGeometry | null | undefined, handle: TableResizeHandle, deltaPx: number): PeerlessPropertyIntent | null {
-  const current = tableResizeHandles(geometry, new Set([handle.pageIndex]))
-    .find((candidate) => candidate.table === handle.table && candidate.columnEdge === handle.columnEdge);
+  const objects = presentedObjects(geometry);
+  const placement = objects?.objects.find((object) => object.handle === handle.cell)?.cell;
   const deltaTwips = Math.round(Math.min(Math.max(deltaPx, handle.minDelta), handle.maxDelta) * TWIPS_PER_PX);
-  if (!current || !geometry?.objects || deltaTwips === 0) return null;
-  return { kind: 'resizeObject', payload: { handle: current.cell, expectVersion: geometry.objects.version,
+  if (!objects || !placement || placement.column !== handle.cellColumn || placement.columns !== handle.columns || deltaTwips === 0) return null;
+  return { kind: 'resizeObject', payload: { handle: handle.cell, expectVersion: objects.version,
     columnEdge: handle.columnEdge, deltaTwips } };
 }
