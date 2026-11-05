@@ -89,7 +89,7 @@ jobs:
 
       - name: Test binding
         if: ${{ !matrix.platform.cross }}
-        run: bun test bindings/${{ inputs.binding }}-native/index.test.ts
+        run: bun test bindings/${{ inputs.binding }}-native/index.test.ts ${{ inputs.binding != 'xlsx' && format('bindings/{0}-native/png.test.ts', inputs.binding) || '' }}
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
