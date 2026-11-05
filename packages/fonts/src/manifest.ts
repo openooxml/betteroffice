@@ -760,6 +760,8 @@ function heavyVariantOf(family: string, italic: boolean): BundledFontFace | unde
   return resolveMetricCompatFace(words.slice(0, -1).join(' '), true, italic);
 }
 
+const EMULATED_SYMBOL_FAMILIES = new Set(['wingdings', 'wingdings 2', 'wingdings 3', 'webdings']);
+
 /** The Office application whose font substitution a last-resort pick follows. */
 export type LastResortOffice = 'powerpoint' | 'word';
 
@@ -828,6 +830,9 @@ function resolveBaseFace(
   if (light) bold = false;
   const heavy = heavyVariantOf(family, italic);
   if (heavy && (!excludeSelawik || heavy.family !== 'Selawik')) return heavy;
+  if (EMULATED_SYMBOL_FAMILIES.has(family.trim().toLowerCase())) {
+    return resolveMetricCompatFace('Arial', bold, italic)!;
+  }
   if (looksMono(family)) {
     return resolveMetricCompatFace('Courier New', bold, italic)!;
   }

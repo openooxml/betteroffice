@@ -219,7 +219,8 @@ const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[
 export function wrapSession(
   session: EditSession,
   clientId: number,
-  opened?: { source: Uint8Array; host: YrsDocxHost }
+  opened?: { source: Uint8Array; host: YrsDocxHost },
+  loadPngExporter?: () => Promise<typeof import('./renderPng')>
 ): YrsSession {
   const hub = editSessionUpdateEvents(session);
   session = hub.session;
@@ -237,6 +238,7 @@ export function wrapSession(
   }> = [];
   let observing = false;
   let destroyed = false;
+  let pngExporter: ReturnType<typeof import('./renderPng').createPngExporter> | undefined;
   let nextListenerId = 0;
   let wasmCallDepth = 0;
   let flushingUpdates = false;
@@ -1732,9 +1734,24 @@ export function wrapSession(
         )
       ) as YrsSelectionText,
 
+    renderPngTarget: (displayListJson, targetJson, optionsJson) =>
+      (session as unknown as { renderPngTarget(list: string, target: string, options: string): Uint8Array })
+        .renderPngTarget(displayListJson, targetJson, optionsJson),
+    renderPng: async (target, options) => {
+      if (destroyed) throw new Error('YrsSession is destroyed');
+      if (!pngExporter) {
+        if (!loadPngExporter) throw new Error('renderPng needs a session from createYrsSession');
+        const { createPngExporter } = await loadPngExporter();
+        if (destroyed) throw new Error('YrsSession is destroyed');
+        pngExporter ??= createPngExporter(facade);
+      }
+      return pngExporter.render(target, options);
+    },
+
     destroy: () => {
       if (destroyed) return;
       destroyed = true;
+      pngExporter?.dispose();
       invalidateReadCaches();
       residentFonts.length = 0;
       forgetMaterializedSource(session);

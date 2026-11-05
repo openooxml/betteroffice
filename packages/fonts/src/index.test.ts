@@ -124,6 +124,14 @@ describe('resolution', () => {
     }
   });
 
+  test('emulated symbol families take the face that covers their marker stand-ins', () => {
+    for (const family of ['Wingdings', 'wingdings 2', 'Wingdings 3', ' Webdings ']) {
+      for (const office of ['powerpoint', 'word'] as const) {
+        expect(resolveLastResortFace(family, false, false, office).file).toBe('LiberationSans-Regular.ttf.zst');
+      }
+    }
+  });
+
   test('Google Sans retains the Carlito fallback', () => {
     expect(resolveMetricCompatFamily('Google Sans')).toBeUndefined();
     expect(resolveLastResortFace('Google Sans', false, false).file).toBe('Carlito-Regular.ttf.zst');

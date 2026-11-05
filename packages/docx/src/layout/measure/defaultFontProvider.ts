@@ -195,6 +195,17 @@ export function resolveDefaultFontProvider(
   return pending;
 }
 
+/**
+ * The configured provider, else every bundled face including the last-resort
+ * ones, for engines with no browser fonts to fall back on.
+ */
+export async function resolveCompleteFontProvider(
+  runtime: { decoder?: FontDecoder } = engineRuntime
+): Promise<BundledFontProvider | undefined> {
+  if (hasConfiguredFontSource()) return resolveDefaultFontProvider(runtime);
+  return (await import('@betteroffice/fonts')).createFontProvider(undefined, runtime);
+}
+
 /** @internal State the lazily loaded backstop provider resolves against. */
 export function baseLatinFontState(): {
   baseUrl: string | URL | undefined;

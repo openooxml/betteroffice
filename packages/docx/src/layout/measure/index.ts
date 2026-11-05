@@ -23,6 +23,7 @@ export {
   configureDefaultFonts,
   hasConfiguredFontSource,
   resolveDefaultFontProvider,
+  resolveCompleteFontProvider,
   type BundledFontModule,
   type DefaultFontOptions,
 } from './defaultFontProvider';

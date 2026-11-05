@@ -23,6 +23,7 @@ export const NATIVE_ENGINES = {
     { engine: 'packages/docx/src/wasm/engineQuery.ts', native: 'bindings/docx-native/js/engineQuery.ts' },
     { engine: 'packages/docx/src/wasm/engineOpc.ts', native: 'bindings/docx-native/js/engineOpc.ts' },
     { engine: 'packages/docx/src/wasm/enginePreflight.ts', native: 'bindings/docx-native/js/enginePreflight.ts' },
+    { engine: 'packages/docx/src/wasm/enginePng.ts', native: 'bindings/docx-native/js/enginePng.ts' },
   ],
 } as const;
 

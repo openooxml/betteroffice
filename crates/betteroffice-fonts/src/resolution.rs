@@ -231,6 +231,9 @@ fn resolve_base_face(
     if let Some(face) = variant(family, italic, true).filter(allowed) {
         return face;
     }
+    if catalog().emulated_symbol_families.contains(&key(family)) {
+        return resolve_metric_compat_face("Arial", bold, italic).expect("bundled Arial face");
+    }
     let families = &catalog().last_resort_families[office.key()];
     if looks_mono(family) {
         return family_face(&families.mono, bold, italic).expect("bundled monospace face");

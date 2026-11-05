@@ -22,11 +22,12 @@ function provider(
   const resolve = mock(load);
   const resolveFamily = mock(() => undefined);
   const resolveScriptFallback = mock(script);
-  const source = { resolve, resolveFamily, resolveScriptFallback,
-    resolveLastResort: () => { throw new Error('Unrelated substitution'); } };
+  const resolveLastResort = mock((_family: string, _bold: boolean, _italic: boolean, _office?: string) =>
+    async (): Promise<ArrayBuffer> => { throw new Error('No substitute'); });
+  const source = { resolve, resolveFamily, resolveScriptFallback, resolveLastResort };
   const imported = spyOn(commandFontProvider, 'load').mockResolvedValue(source);
   restorers.push(() => imported.mockRestore());
-  return { imported, resolve, resolveFamily, resolveScriptFallback };
+  return { imported, resolve, resolveFamily, resolveScriptFallback, resolveLastResort };
 }
 
 afterEach(() => { for (const restore of restorers.splice(0).reverse()) restore(); });
@@ -132,8 +133,9 @@ test('unavailable and rejected defaults never prepare registration', async () =>
   } finally { fonts.dispose(); }
 });
 
-test('resolves requested traits through manager mappings and skips unknown families', async () => {
+test('resolves requested traits through manager mappings and gives unknown families the PowerPoint last resort', async () => {
   const source = provider((family) => family === 'Calibri' ? async () => bytes : undefined);
+  source.resolveLastResort.mockImplementation(() => async () => bytes);
   const register = mock(() => {});
   const fonts = createCommandDefaultFonts([], () => [{ ...regular, bold: true, italic: true },
     { ...regular, family: 'Unknown Family' }], register, () => {});
@@ -141,19 +143,21 @@ test('resolves requested traits through manager mappings and skips unknown famil
     const faces = await fonts.load();
     expect(source.resolve.mock.calls).toEqual([['Calibri', true, true], ['Unknown Family', false, false]]);
     expect(source.resolveFamily).toHaveBeenCalledWith('Unknown Family', false, false);
-    expect(faces).toHaveLength(1);
+    expect(source.resolveLastResort.mock.calls).toEqual([['Unknown Family', false, false, 'powerpoint']]);
+    expect(faces).toHaveLength(2);
     expect(faces[0]).toMatchObject({ family: 'Calibri', bold: true, italic: true });
+    expect(faces[1]).toMatchObject({ family: 'Unknown Family', bold: false, italic: false });
     expect(faces[0].ownWeight).toBeUndefined();
     expect(faces.every((face) => !('bytes' in face))).toBe(true);
     expect(bytes.byteLength).toBe(3);
   } finally { fonts.dispose(); }
 });
 
-test('lighter members of bundled families load their regular face at their own weight; other unknown names stay unregistered', async () => {
+test('lighter members of bundled families load their regular face at their own weight; other unknown names take the last resort', async () => {
   const resolve = mock(() => undefined);
   const resolveLightVariant = mock((family: string, _bold: boolean, _italic: boolean) =>
     family === 'Calibri Light' ? async () => bytes : undefined);
-  const resolveLastResort = mock(() => { throw new Error('Unrelated substitution'); });
+  const resolveLastResort = mock((_family: string, _bold: boolean, _italic: boolean, _office?: string) => async () => bytes);
   const imported = spyOn(commandFontProvider, 'load').mockResolvedValue({ resolve, resolveFamily: () => undefined,
     resolveScriptFallback: () => undefined, resolveLastResort, resolveLightVariant });
   restorers.push(() => imported.mockRestore());
@@ -163,9 +167,9 @@ test('lighter members of bundled families load their regular face at their own w
   try {
     const faces = await fonts.load();
     expect(resolveLightVariant.mock.calls).toEqual([['Calibri Light', true, false], ['BIZ UD明朝 Medium', false, false]]);
-    expect(resolveLastResort).not.toHaveBeenCalled();
-    expect(faces.map((face) => [face.family, face.bold, face.ownWeight])).toEqual([['Calibri Light', true, true]]);
-    expect(register).toHaveBeenCalledTimes(1);
+    expect(resolveLastResort.mock.calls).toEqual([['BIZ UD明朝 Medium', false, false, 'powerpoint']]);
+    expect(faces.map((face) => [face.family, face.bold, face.ownWeight])).toEqual([['Calibri Light', true, true], ['BIZ UD明朝 Medium', false, undefined]]);
+    expect(register).toHaveBeenCalledTimes(2);
   } finally { fonts.dispose(); }
 });
 
