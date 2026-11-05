@@ -79,7 +79,6 @@ const CHECKS: Record<string, () => boolean> = Object.fromEntries(FORMATS.flatMap
 
 const PENDING = [
   'docx js',
-  'docx native renderPng',
   'vsdx native renderPng',
 ];
 

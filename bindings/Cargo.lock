@@ -151,8 +151,11 @@ name = "betteroffice-docx-native"
 version = "0.5.1"
 dependencies = [
  "betteroffice-docx-engine",
+ "betteroffice-docx-layout",
+ "betteroffice-docx-raster",
  "betteroffice-fonts",
  "betteroffice-ooxml-font-preflight",
+ "betteroffice-ooxml-text",
  "getrandom 0.3.4",
  "mimalloc",
  "napi",
