@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { tableHandleAt, tableResizeHandles, tableResizeIntent } from './tableResize';
+import { tableHandleAt, tableResizeHandles, tableResizeIntent, tableRowHandleAt, tableRowResizeHandles, tableRowResizeIntent } from './tableResize';
 import type { PeerlessFrameGeometry } from './viewStore';
 
 type Cell = { story: string; row: number; column: number; colspan?: number; rects: { pageIndex: number; x: number; y: number; width: number; height: number }[] };
@@ -98,4 +98,35 @@ test('a point finds the nearest border within the tolerance, on its own page and
   expect(tableHandleAt(handles, 0, 304, 99, 3)).toBeNull();
   expect(tableHandleAt(handles, 0, 304, 141, 3)).toBeNull();
   expect(tableHandleAt(handles, 1, 304, 110, 3)).toBeNull();
+});
+
+test('row borders sit under each row, bound to a cell of that row, on body tables only', () => {
+  const handles = tableRowResizeHandles(geometry([...grid(0, 100), ...grid(1, 120)]), new Set([0]));
+  expect(handles.map(({ row, y, left, right, paintedHeight, cell }) => ({ row, y, left, right, paintedHeight, cell }))).toEqual([
+    { row: 0, y: 120, left: 96, right: 720, paintedHeight: 20, cell: 'cell-0' },
+    { row: 1, y: 140, left: 96, right: 720, paintedHeight: 20, cell: 'cell-3' },
+  ]);
+  const header = grid(0, 20).map((cell) => ({ ...cell, story: cell.story.replace('body', 'hf:rId1') }));
+  expect(tableRowResizeHandles(geometry(header), new Set([0]))).toEqual([]);
+  expect(tableRowResizeHandles(geometry(grid(0, 100), { version: 'v0' }), new Set([0]))).toEqual([]);
+});
+
+test('a row drag sends the painted height and a clamped delta, and follows its own cell', () => {
+  const before = geometry(grid(0, 100));
+  const [row] = tableRowResizeHandles(before, new Set([0]));
+  expect(tableRowResizeIntent(before, row!, 30)).toEqual({ kind: 'resizeObject',
+    payload: { handle: 'cell-0', expectVersion: 'v1', paintedRowTwips: 300, rowDeltaTwips: 450 } });
+  expect(tableRowResizeIntent(before, row!, -500)?.payload).toMatchObject({ rowDeltaTwips: -19 * 15 });
+  expect(tableRowResizeIntent(before, row!, 0.01)).toBeNull();
+  expect(tableRowResizeIntent(geometry(grid(0, 100), { handles: 'other' }), row!, 30)).toBeNull();
+  expect(tableRowResizeIntent(null, row!, 30)).toBeNull();
+});
+
+test('a table without painted borders has no row borders, and a point finds the row border near it', () => {
+  expect(tableRowResizeHandles(geometry(grid(0, 100), { gridTwips: [3120, 3120, 3120] }), new Set([0]))).toEqual([]);
+  const handles = tableRowResizeHandles(geometry([...grid(0, 100), ...grid(1, 120)]), new Set([0]));
+  expect(tableRowHandleAt(handles, 0, 200, 122, 3)?.row).toBe(0);
+  expect(tableRowHandleAt(handles, 0, 200, 124, 3)).toBeNull();
+  expect(tableRowHandleAt(handles, 0, 90, 120, 3)).toBeNull();
+  expect(tableRowHandleAt(handles, 1, 200, 120, 3)).toBeNull();
 });

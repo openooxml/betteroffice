@@ -185,6 +185,21 @@ impl EditSessionCore {
         serde_json::to_string(&receipt).map_err(EngineError::message)
     }
 
+    pub fn set_row_height(
+        &self,
+        at_json: &str,
+        height_twips: f64,
+        rule: &str,
+    ) -> EngineResult<String> {
+        let at: CellLoc = serde_json::from_str(at_json).map_err(EngineError::message)?;
+        let receipt = self
+            .engine
+            .doc()
+            .set_row_height(&EditCtx::local("", ""), &at, height_twips, rule)
+            .map_err(EngineError::message)?;
+        serde_json::to_string(&receipt).map_err(EngineError::message)
+    }
+
     pub fn set_table_width(&self, table_json: &str, width_twips: f64) -> EngineResult<String> {
         let table: TableLocator = serde_json::from_str(table_json).map_err(EngineError::message)?;
         let receipt = self

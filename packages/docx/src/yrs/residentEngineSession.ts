@@ -108,6 +108,7 @@ export type ResidentEngineSession = Pick<
   | 'setHyperlink'
   | 'setImageGeometryAt'
   | 'setColumnWidth'
+  | 'setRowHeight'
   | 'insertText'
   | 'insertLineBreak'
   | 'replaceRange'
@@ -817,6 +818,8 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
       session.set_image_geometry_at(at.story, at.paraId, at.offset, JSON.stringify(geometry))),
     setColumnWidth: (at, width) => applyCommandMutation(at.story, () =>
       JSON.parse(session.set_column_width(JSON.stringify(at), width))),
+    setRowHeight: (at, height, rule) => applyCommandMutation(at.story, () =>
+      JSON.parse(session.set_row_height(JSON.stringify(at), height, rule))),
     beginUndoCapture: ensureUndo,
     setUndoInputTime: (span) => {
       if (span) session.set_undo_input_time(span[0], span[1]);

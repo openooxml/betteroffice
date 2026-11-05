@@ -1,9 +1,11 @@
+import { tableRowEdges, type TableCellBox, type TableRowEdge } from '../internals/tableRowEdges';
 import type { PeerlessPropertyIntent } from './inputEvents';
 import type { PeerlessFrameGeometry } from './viewStore';
 
 /** Twips per layout pixel. */
 const TWIPS_PER_PX = 15;
 const MIN_COLUMN_PX = 20;
+const MIN_ROW_PX = 1;
 
 /** @internal A draggable border of one table fragment on one page, in page-local layout px. */
 export interface TableResizeHandle {
@@ -128,4 +130,48 @@ export function tableResizeIntent(geometry: PeerlessFrameGeometry | null | undef
   if (!objects || !placement || placement.column !== handle.cellColumn || placement.columns !== handle.columns || deltaTwips === 0) return null;
   return { kind: 'resizeObject', payload: { handle: handle.cell, expectVersion: objects.version,
     columnEdge: handle.columnEdge, deltaTwips } };
+}
+
+/** @internal A draggable row bottom border of one table, in page-local layout px. */
+export interface TableRowHandle extends TableRowEdge<string> {
+  id: string;
+  minDelta: number;
+}
+
+/** Row bottom borders of the body tables ending on `pageIndices`, bound to a cell of each row. */
+export function tableRowResizeHandles(geometry: PeerlessFrameGeometry | null | undefined, pageIndices: ReadonlySet<number>): TableRowHandle[] {
+  const objects = presentedObjects(geometry);
+  if (!objects) return [];
+  const tables = new Map<string, { row: number; rowspan: number; boxes: TableCellBox[]; cell: string }[]>();
+  for (const object of objects.objects) {
+    const placement = object.cell;
+    if (object.kind !== 'cell' || !placement?.exact || !isBodyStory(object.story)) continue;
+    const cells = tables.get(placement.table) ?? [];
+    cells.push({ row: placement.row, rowspan: placement.rowspan, boxes: object.rects, cell: object.handle });
+    tables.set(placement.table, cells);
+  }
+  return [...tables].flatMap(([table, cells]) => tableRowEdges(cells, pageIndices).map((edge) => ({
+    ...edge, id: `${table}@${edge.pageIndex}:row${edge.row}`, minDelta: Math.min(0, MIN_ROW_PX - edge.paintedHeight),
+  })));
+}
+
+/** @internal The row border nearest page-local `x`, `y` on `pageIndex`, within `tolerance` px. */
+export function tableRowHandleAt(handles: readonly TableRowHandle[], pageIndex: number, x: number, y: number, tolerance: number): TableRowHandle | null {
+  let nearest: TableRowHandle | null = null;
+  for (const handle of handles) {
+    if (handle.pageIndex !== pageIndex || x < handle.left || x > handle.right) continue;
+    const distance = Math.abs(y - handle.y);
+    if (distance <= tolerance && (!nearest || distance < Math.abs(y - nearest.y))) nearest = handle;
+  }
+  return nearest;
+}
+
+/** @internal The worker command for dragging `handle` by `deltaPx` layout px, or null once its cell is gone or merged. */
+export function tableRowResizeIntent(geometry: PeerlessFrameGeometry | null | undefined, handle: TableRowHandle, deltaPx: number): PeerlessPropertyIntent | null {
+  const objects = presentedObjects(geometry);
+  const placement = objects?.objects.find((object) => object.handle === handle.cell)?.cell;
+  const rowDeltaTwips = Math.round(Math.max(deltaPx, handle.minDelta) * TWIPS_PER_PX);
+  if (!objects || placement?.rowspan !== 1 || rowDeltaTwips === 0) return null;
+  return { kind: 'resizeObject', payload: { handle: handle.cell, expectVersion: objects.version,
+    paintedRowTwips: Math.round(handle.paintedHeight * TWIPS_PER_PX), rowDeltaTwips } };
 }

@@ -7,13 +7,15 @@ type Arm = (typeof ARMS)[number];
 const COLUMN = 3120;
 const COLUMN_HANDLE = '.layout-table-resize-handle';
 const RIGHT_HANDLE = '.layout-table-edge-handle-right';
+const ROW_HANDLE = '.layout-table-row-resize-handle';
 
 function documentXml(borders: boolean): string {
-  const border = (side: string) => borders ? `<w:${side} w:val="single" w:sz="4" w:space="0" w:color="000000"/>` : `<w:${side} w:val="nil"/>`;
+  const border = (side: string) => `<w:${side} w:val="single" w:sz="4" w:space="0" w:color="000000"/>`;
+  const tableBorders = borders ? `<w:tblBorders>${['top', 'left', 'bottom', 'right', 'insideH', 'insideV'].map(border).join('')}</w:tblBorders>` : '';
   const cell = (text: string) => `<w:tc><w:tcPr><w:tcW w:w="${COLUMN}" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:tc>`;
   const rows = [0, 1, 2].map((row) => `<w:tr>${[0, 1, 2].map((column) => cell(`R${row}C${column}`)).join('')}</w:tr>`).join('');
   return '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>' +
-    `<w:p><w:r><w:t>Before</w:t></w:r></w:p><w:tbl><w:tblPr><w:tblW w:w="${COLUMN * 3}" w:type="dxa"/><w:tblBorders>${['top', 'left', 'bottom', 'right', 'insideH', 'insideV'].map(border).join('')}</w:tblBorders></w:tblPr>` +
+    `<w:p><w:r><w:t>Before</w:t></w:r></w:p><w:tbl><w:tblPr><w:tblW w:w="${COLUMN * 3}" w:type="dxa"/>${tableBorders}</w:tblPr>` +
     `<w:tblGrid>${`<w:gridCol w:w="${COLUMN}"/>`.repeat(3)}</w:tblGrid>${rows}</w:tbl><w:p><w:r><w:t>After</w:t></w:r></w:p>` +
     '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:bottom="1440" w:left="1440" w:right="1440"/></w:sectPr></w:body></w:document>';
 }
@@ -39,6 +41,8 @@ interface SavedTable {
   layout: string | null;
   width: number | null;
   texts: string[][];
+  rowHeights: (number | null)[];
+  rowRules: (string | null)[];
 }
 
 async function savedTable(page: Page, info: TestInfo, name: string): Promise<SavedTable> {
@@ -60,7 +64,10 @@ async function savedTable(page: Page, info: TestInfo, name: string): Promise<Sav
     const properties = children(table, 'tblPr')[0]!;
     const width = attr(children(properties, 'tblW')[0], 'w');
     const texts = rows.map((row) => children(row, 'tc').map((cell) => cell.textContent ?? ''));
-    return { grid, cellWidths, texts, layout: attr(children(properties, 'tblLayout')[0], 'type'), width: width === null ? null : Number(width) };
+    const heights = rows.map((row) => row.getElementsByTagNameNS('*', 'trHeight')[0]);
+    const rowHeights = heights.map((height) => height ? Number(attr(height, 'val')) : null);
+    const rowRules = heights.map((height) => attr(height, 'hRule'));
+    return { grid, cellWidths, texts, rowHeights, rowRules, layout: attr(children(properties, 'tblLayout')[0], 'type'), width: width === null ? null : Number(width) };
   }, xml);
 }
 
@@ -69,6 +76,10 @@ async function centers(page: Page, selector: string) {
     const box = element.getBoundingClientRect();
     return { x: box.x + box.width / 2, y: box.y + box.height / 2, top: box.y };
   }).sort((a, b) => a.x - b.x || a.y - b.y));
+}
+
+async function rowCenters(page: Page) {
+  return (await centers(page, ROW_HANDLE)).sort((a, b) => a.y - b.y);
 }
 
 async function pageBox(page: Page) {
@@ -101,6 +112,7 @@ for (const arm of ARMS) {
       await open(page, arm);
       await expect(page.locator(COLUMN_HANDLE)).toHaveCount(2);
       await expect(page.locator(RIGHT_HANDLE)).toHaveCount(1);
+      await expect(page.locator(ROW_HANDLE)).toHaveCount(3);
       const cursorAt = async ({ x, y }: { x: number; y: number }) => {
         await page.mouse.move(x, y);
         return page.evaluate(({ x, y }) => getComputedStyle(document.elementFromPoint(x, y)!).cursor, { x, y });
@@ -112,6 +124,7 @@ for (const arm of ARMS) {
       near(right!.x - columns[1]!.x, COLUMN / 15, 2);
       await expect.poll(() => cursorAt(columns[0]!)).toBe('col-resize');
       await expect.poll(() => cursorAt(right!)).toBe('col-resize');
+      await expect.poll(async () => cursorAt((await rowCenters(page))[0]!)).toBe('row-resize');
       await expect.poll(() => cursorAt({ x: columns[0]!.x + 40, y: columns[0]!.y })).toBe('text');
     });
 
@@ -123,6 +136,7 @@ for (const arm of ARMS) {
       near(columns[1]!.x - columns[0]!.x, COLUMN / 15, 2);
       near(right!.x - columns[1]!.x, COLUMN / 15, 2);
       near(columns[0]!.x - (await pageBox(page)).x, 96 + COLUMN / 15, 8);
+      await expect(page.locator(ROW_HANDLE)).toHaveCount(0);
     });
 
     test('dragging a column border saves both column widths and undoes in one step', async ({ page }, info) => {
@@ -161,6 +175,17 @@ for (const arm of ARMS) {
         expect(saved.layout).toBeNull();
       });
 
+      test('a plain click on a row border reaches the page and places the caret', async ({ page }, info) => {
+        await open(page, arm);
+        await expect(page.locator(ROW_HANDLE)).toHaveCount(3);
+        const [border] = await rowCenters(page);
+        const box = await pageBox(page);
+        await page.locator('.canvas-page canvas, .paged-editor__page canvas').first().click({ position: { x: border!.x - box.x, y: border!.y - box.y } });
+        await page.keyboard.type('Q');
+        await expect.poll(async () => (await savedTable(page, info, 'row-click')).texts.flat().filter((text) => text.includes('Q')).length).toBe(1);
+        expect((await savedTable(page, info, 'row-click-height')).rowHeights).toEqual([null, null, null]);
+      });
+
       test('a press that moves less than the slop stays a click', async ({ page }, info) => {
         await open(page, arm);
         await expect(page.locator(COLUMN_HANDLE)).toHaveCount(2);
@@ -181,6 +206,36 @@ for (const arm of ARMS) {
       for (const row of saved.cellWidths) expect(row).toEqual([COLUMN, COLUMN, COLUMN - 900]);
       expect(saved.layout).toBe('fixed');
       if (arm.name === 'worker') expect(saved.width).toBe(COLUMN * 3 - 900);
+    });
+
+    test('dragging a row border saves an at-least height, repeats and undoes in one step', async ({ page }, info) => {
+      const input = await open(page, arm);
+      await expect(page.locator(ROW_HANDLE)).toHaveCount(3);
+      const before = await rowCenters(page);
+      const rowHeight = before[1]!.y - before[0]!.y;
+      await drag(page, before[0]!, 0, 30);
+      await expect.poll(async () => (await rowCenters(page))[1]?.y ?? 0).toBeGreaterThan(before[1]!.y + 25);
+      const after = await rowCenters(page);
+      near(after[0]!.y - before[0]!.y, 30, 2);
+      near(after[1]!.y - before[1]!.y, 30, 2);
+
+      const saved = await savedTable(page, info, 'row');
+      near(saved.rowHeights[0]!, Math.round((rowHeight + 30) * 15), 30);
+      expect(saved.rowRules[0]).toBe('atLeast');
+      expect(saved.rowHeights.slice(1)).toEqual([null, null]);
+      expect(saved.grid).toEqual([COLUMN, COLUMN, COLUMN]);
+
+      await drag(page, after[0]!, 0, 20);
+      await expect.poll(async () => (await rowCenters(page))[1]?.y ?? 0).toBeGreaterThan(after[1]!.y + 15);
+      near((await rowCenters(page))[0]!.y - after[0]!.y, 20, 2);
+
+      await input.focus();
+      await input.press('ControlOrMeta+z');
+      await expect.poll(async () => (await rowCenters(page))[0]?.y ?? 0).toBeLessThan(after[0]!.y + 2);
+      near((await savedTable(page, info, 'row-undo-1')).rowHeights[0]!, saved.rowHeights[0]!, 0);
+      await input.press('ControlOrMeta+z');
+      await expect.poll(async () => (await rowCenters(page))[0]?.y ?? 0).toBeLessThan(before[0]!.y + 2);
+      expect((await savedTable(page, info, 'row-undo-2')).rowHeights).toEqual([null, null, null]);
     });
 
     test('handles follow the borders and drags keep twips under zoom', async ({ page }, info) => {
@@ -207,9 +262,13 @@ for (const arm of ARMS) {
         await expect.poll(async () => (await ratio()).x).toBeCloseTo(base.x, 2);
         near((await ratio()).y, base.y, 0.005);
         const [first] = await centers(page, COLUMN_HANDLE);
-        await drag(page, first!, 20 * scale, 0);
+        await drag(page, { x: first!.x, y: first!.top + 4 }, 20 * scale, 0);
         expected = [expected[0]! + 300, expected[1]! - 300, COLUMN];
         await expect.poll(async () => (await savedTable(page, info, `zoom-${parseFloat(value)}`)).grid).toEqual(expected);
+        const [row] = await rowCenters(page);
+        const [, next] = await rowCenters(page);
+        await drag(page, row!, 0, 10 * scale);
+        await expect.poll(async () => (await rowCenters(page))[1]?.y ?? 0).toBeGreaterThan(next!.y + 8 * scale);
       }
     });
   });

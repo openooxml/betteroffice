@@ -333,7 +333,9 @@ export interface DocxCommandPayloads {
   resizeObject: { handle: string; expectVersion: string } &
     ({ widthEmu: number; heightEmu: number; hOffsetEmu?: number; vOffsetEmu?: number } | { widthTwips: number } |
       /** Moves the right edge of grid column `columnEdge - 1` by `deltaTwips`; the next column, if any, gives up the same width. */
-      { columnEdge: number; deltaTwips: number });
+      { columnEdge: number; deltaTwips: number } |
+      /** Drags the bottom border of the row holding the cell `handle` names, from `paintedRowTwips` or the row's stored height if taller. */
+      { paintedRowTwips: number; rowDeltaTwips: number });
   moveObject: { handle: string; hOffsetEmu: number; vOffsetEmu: number; expectVersion: string };
   /** Moves the inline picture `handle` names to the text position under `drop`, as one undo step. */
   moveEmbed: { handle: string; expectVersion: string; drop: DocxSelectionPointIntent; suggesting?: YrsAuthor };

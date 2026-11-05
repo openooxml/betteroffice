@@ -168,6 +168,8 @@ import { readAt } from './internals/viewerReads';
 
 export { DEFAULT_PAGE_WIDTH };
 
+const MIN_TABLE_ROW_TWIPS = 15;
+
 function yrsDeltaForTextFormatting(formatting: TextFormatting | undefined): YrsInlineFormatDelta {
   if (!formatting) return {};
   const delta: YrsInlineFormatDelta = {};
@@ -1399,6 +1401,19 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             ) {
               return false;
             }
+          } else if (command.type === 'tableRowHeight') {
+            const table = positionProjection.tableAtStart(command.pmStart);
+            if (!table || command.deltaTwips === 0) return false;
+            const rows = session.tablePayload(table.story, table.tableIndex)?.rows as
+              | Array<{ trPr?: { height?: unknown } }>
+              | undefined;
+            const stored = rows?.[command.row]?.trPr?.height;
+            const base = Math.max(command.paintedTwips, typeof stored === 'number' ? stored : 0);
+            session.setRowHeight(
+              { story: table.story, tableIndex: table.tableIndex, row: command.row, column: 0 },
+              Math.max(MIN_TABLE_ROW_TWIPS, base + command.deltaTwips),
+              'atLeast'
+            );
           } else if (command.type === 'tableColumnWidths') {
             if (command.widths.length === 0) return false;
             const table = positionProjection.tableAtStart(command.pmStart);

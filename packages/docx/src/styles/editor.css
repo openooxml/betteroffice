@@ -751,6 +751,7 @@
 }
 
 .layout-table-row-resize-handle:hover,
+.layout-table-row-resize-handle.hovered,
 .layout-table-row-resize-handle.dragging,
 .layout-table-edge-handle-bottom:hover,
 .layout-table-edge-handle-bottom.dragging {
@@ -772,6 +773,10 @@
 /* Worker handles take no pointer events, so a press on a border still reaches the page. */
 [data-docx-pages-host][data-table-resize='col'] .canvas-page {
   cursor: col-resize !important;
+}
+
+[data-docx-pages-host][data-table-resize='row'] .canvas-page {
+  cursor: row-resize !important;
 }
 
 /* ============================================================================

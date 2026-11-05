@@ -112,6 +112,7 @@ const boolean = (value: unknown) => typeof value === 'boolean';
 const number = (value: unknown) => typeof value === 'number' && Number.isFinite(value);
 const positive = (value: unknown) => number(value) && (value as number) > 0 && Number.isFinite((value as number) * 2);
 const MIN_COLUMN_TWIPS = 300;
+const MIN_ROW_TWIPS = 15;
 const oneOf = (...values: string[]) => (value: unknown) => typeof value === 'string' && values.includes(value);
 
 function validDelta(value: unknown): value is YrsInlineFormatDelta {
@@ -241,7 +242,7 @@ const DOCX_COMMAND_POLICIES = {
   deleteTableRow: { keys: [] }, deleteTableColumn: { keys: [] }, deleteTable: { keys: [] },
   mergeTableCells: { keys: [] }, splitTableCell: { keys: ['rows', 'columns'] }, setTableCellShading: { keys: ['color'] },
   setTableBorders: { keys: ['borders'] }, setTableProperties: { keys: ['op', 'patch', 'expectVersion'] },
-  resizeObject: { keys: ['handle', 'widthEmu', 'heightEmu', 'widthTwips', 'columnEdge', 'deltaTwips', 'hOffsetEmu', 'vOffsetEmu', 'expectVersion'], exact: true },
+  resizeObject: { keys: ['handle', 'widthEmu', 'heightEmu', 'widthTwips', 'columnEdge', 'deltaTwips', 'paintedRowTwips', 'rowDeltaTwips', 'hOffsetEmu', 'vOffsetEmu', 'expectVersion'], exact: true },
   moveObject: { keys: ['handle', 'hOffsetEmu', 'vOffsetEmu', 'expectVersion'], exact: true },
   moveEmbed: { keys: ['handle', 'expectVersion', 'drop', 'suggesting'], exact: true },
   undo: { keys: [], exact: true }, redo: { keys: [], exact: true },
@@ -316,7 +317,10 @@ function validCommandIntent(
       break;
     case 'resizeObject': case 'moveObject':
       if (!string(payload.handle) || !string(payload.expectVersion) || (command.kind === 'resizeObject'
-        ? payload.columnEdge !== undefined || payload.deltaTwips !== undefined
+        ? payload.paintedRowTwips !== undefined || payload.rowDeltaTwips !== undefined
+          ? !Number.isSafeInteger(payload.paintedRowTwips) || Number(payload.paintedRowTwips) < 0 || !Number.isSafeInteger(payload.rowDeltaTwips) ||
+            payload.columnEdge !== undefined || payload.deltaTwips !== undefined || payload.widthTwips !== undefined || payload.widthEmu !== undefined || payload.heightEmu !== undefined || payload.hOffsetEmu !== undefined || payload.vOffsetEmu !== undefined
+          : payload.columnEdge !== undefined || payload.deltaTwips !== undefined
           ? !Number.isSafeInteger(payload.columnEdge) || Number(payload.columnEdge) < 1 || !Number.isSafeInteger(payload.deltaTwips) ||
             payload.widthTwips !== undefined || payload.widthEmu !== undefined || payload.heightEmu !== undefined || payload.hOffsetEmu !== undefined || payload.vOffsetEmu !== undefined
           : payload.widthTwips !== undefined
@@ -674,7 +678,7 @@ export function preflightDocxCommand(
     if (command.payload.expectVersion !== engine.proposalEngine.version()) return refuse('stale-version');
     const target = resolveResidentObject(engine, command.payload.handle);
     if (!target) return refuse('stale-object');
-    const cellResize = command.kind === 'resizeObject' && ('widthTwips' in command.payload || 'columnEdge' in command.payload);
+    const cellResize = command.kind === 'resizeObject' && ('widthTwips' in command.payload || 'columnEdge' in command.payload || 'rowDeltaTwips' in command.payload);
     if (target.kind === 'cell' && cellResize) {
       if (!target.cell) return refuse('stale-object');
     } else if (target.kind !== 'image' || cellResize) return refuse('unsupported-object');
@@ -1040,6 +1044,18 @@ function applyPreparedDocxCommand(
       if (!at.cell) return { ...result('noop'), status: 'refused', reason: 'stale-object' };
       engine.addUndoBoundary();
       engine.setColumnWidth(at.cell, command.payload.widthTwips);
+      engine.addUndoBoundary();
+      return result(engine.proposalEngine.version() === version ? 'noop' : 'applied');
+    }
+    if (command.kind === 'resizeObject' && 'rowDeltaTwips' in command.payload) {
+      if (!at.cell) return { ...result('noop'), status: 'refused', reason: 'stale-object' };
+      const payload = engine.tablePayload(at.cell.story, at.cell.tableIndex) as { rows?: Array<{ trPr?: { height?: unknown } }> } | null;
+      const stored = payload?.rows?.[at.cell.row]?.trPr?.height;
+      const base = Math.max(command.payload.paintedRowTwips, positive(stored) ? stored as number : 0);
+      const height = Math.max(MIN_ROW_TWIPS, base + command.payload.rowDeltaTwips);
+      if (command.payload.rowDeltaTwips === 0 || height === stored) return result('noop');
+      engine.addUndoBoundary();
+      engine.setRowHeight(at.cell, height, 'atLeast');
       engine.addUndoBoundary();
       return result(engine.proposalEngine.version() === version ? 'noop' : 'applied');
     }
