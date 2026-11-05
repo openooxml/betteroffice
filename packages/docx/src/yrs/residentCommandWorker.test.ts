@@ -2268,8 +2268,7 @@ test('worker column edge drags move one border in one undo step and clamp at the
   const { client, engine, initial } = await openWorker({ bodyXml: THREE_COLUMNS });
   try {
     const cells = initial.frame.payload.geometry!.objects.filter(object => object.kind === 'cell');
-    expect(cells.map(cell => cell.cell)).toEqual([0, 1, 2].map(column =>
-      ({ table: 'body#0', row: 0, column, rowspan: 1, colspan: 1, columns: 3 })));
+    cells.forEach((cell, column) => expect(cell.cell).toMatchObject({ table: 'body#0', row: 0, column, rowspan: 1, colspan: 1, columns: 3 }));
     const version = (response: { frame?: { payload: { documentVersion?: string } } | null }) => response.frame!.payload.documentVersion!;
     const drag = (seq: number, base: number, expectVersion: string, columnEdge: number, deltaTwips: number) =>
       client.edit(intent(seq, base, 'resizeObject', { handle: cells[0]!.handle, expectVersion, columnEdge, deltaTwips }));

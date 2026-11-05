@@ -49,14 +49,21 @@ export interface ResidentCellPlacement {
   colspan: number;
   /** Grid columns of the whole table. */
   columns: number;
+  /** Whether the cell's boxes come from painted borders rather than an estimate from its content. */
+  exact: boolean;
+  /** Estimated boxes only: the table's grid, in twips, to place column edges from. */
+  gridTwips?: readonly number[];
 }
 
 export function residentCellPlacement(
   table: { story: string; tableIndex: number; cells: ReadonlyArray<{ column: number; colspan: number }> },
-  cell: { row: number; column: number; rowspan: number; colspan: number }
+  cell: { row: number; column: number; rowspan: number; colspan: number },
+  exact: boolean,
+  gridTwips: readonly number[]
 ): ResidentCellPlacement {
   return { table: `${table.story}#${table.tableIndex}`, row: cell.row, column: cell.column, rowspan: cell.rowspan,
-    colspan: cell.colspan, columns: Math.max(0, ...table.cells.map(entry => entry.column + entry.colspan)) };
+    colspan: cell.colspan, columns: Math.max(0, ...table.cells.map(entry => entry.column + entry.colspan)),
+    exact, ...(exact ? {} : { gridTwips }) };
 }
 
 export function isFloatingImagePayload(payload: Record<string, unknown>): boolean {
@@ -322,8 +329,10 @@ export async function readResidentFrameGeometry(
     const tableRegions: DisplayListTableRegion[] = prefix === 'hf'
       ? [{ kind: 'header', rId: id }, { kind: 'footer', rId: id }] : [{ kind: 'body' }];
     const cellGeometry = new Map<string, ResidentObjectRect[]>();
+    const estimated = new Set<string>();
     for (const region of tableRegions) for (const box of deriveDisplayListSelectedCellRects(list, cells, tableKeyOf, region)) {
       const key = `${box.tableKey}:${box.row}:${box.col}`;
+      if (!box.exact) estimated.add(key);
       const bounds = cellGeometry.get(key) ?? [];
       bounds.push({ pageId: frame.pages[box.pageIndex]!.pageId.toString(), pageIndex: box.pageIndex,
         x: box.x, y: box.y, width: box.w, height: box.h });
@@ -333,7 +342,7 @@ export async function readResidentFrameGeometry(
       const boxes = cellGeometry.get(`${table.from}:${cell.row}:${cell.column}`) ?? [];
       if (boxes.length) objects.push({ kind: 'cell', story: cell.story,
         handle: issue(engine, 'cell', { story: cell.story, paraId: cell.paraId, offset: 0 }, table.at), rects: boxes,
-        cell: residentCellPlacement(table, cell) });
+        cell: residentCellPlacement(table, cell, !estimated.has(`${table.from}:${cell.row}:${cell.column}`), table.grid) });
     }
     const imageStarts: number[] = [];
     if (root === 'body' || prefix === 'hf') for (const page of frame.displayList.pages) {

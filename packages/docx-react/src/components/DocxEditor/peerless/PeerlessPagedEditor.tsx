@@ -19,7 +19,7 @@ import { geometryMatchesDocument, type PeerlessFrameGeometry, type PeerlessProvi
 import { clientPointToPage } from './pagePoint';
 import { beginPictureDrag, floatingPictureAt, inlinePictureAt, movePictureDrag, pictureAt, pictureDropIntent, pictureInSelection, type PictureDrag } from './pictureDrag';
 import { beginPictureResize, movePictureResize, pictureResizeIntent, type PictureResize, type PictureResizeHandle } from './pictureResize';
-import { tableResizeHandles, tableResizeIntent, type TableResizeHandle } from './tableResize';
+import { tableHandleAt, tableResizeHandles, tableResizeIntent, type TableResizeHandle } from './tableResize';
 import type { PeerlessPropertyIntent } from './inputEvents';
 import { CanvasPageMirror } from '../CanvasPageMirror';
 import { createPageChromeHold, type PageChromeHold } from '../usePageChrome';
@@ -38,6 +38,7 @@ const HIT_TEST_LARGE_PAGE_IDLE_MS = 12;
 const TOUCH_TAP_SLOP_PX = 8;
 const TOUCH_LONG_PRESS_MS = 500;
 const TABLE_HANDLE_PX = 6;
+const TABLE_DRAG_SLOP_PX = 3;
 const tableHandleClass = { col: 'layout-table-resize-handle', right: 'layout-table-edge-handle-right' } as const;
 const pictureHandles = [
   { handle: 'nw', x: 0, y: 0, cursor: 'nw-resize' },
@@ -576,37 +577,38 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   const tableHandles = useMemo(() => canResizeTables
     ? tableResizeHandles(geometry, new Set(visiblePages.map(({ page }) => page.pageIndex))) : [],
   [canResizeTables, geometry, visiblePages]);
-  const tableDrag = useRef<{ pointerId: number; handle: TableResizeHandle; startX: number; scale: number } | null>(null);
+  const tableDrag = useRef<{ pointerId: number; handle: TableResizeHandle; startX: number; scale: number; moved: boolean } | null>(null);
   const [tableDragPreview, setTableDragPreview] = useState<{ id: string; delta: number } | null>(null);
+  const [tableHover, setTableHover] = useState<string | null>(null);
   const tableDragDelta = (active: NonNullable<typeof tableDrag.current>, clientX: number) =>
     Math.min(Math.max((clientX - active.startX) / active.scale, active.handle.minDelta), active.handle.maxDelta);
   const endTableDrag = () => {
     tableDrag.current = null;
     setTableDragPreview(null);
   };
-  const startTableDrag = (event: PointerEvent<HTMLDivElement>, handle: TableResizeHandle) => {
-    event.stopPropagation();
-    event.preventDefault();
-    if (event.button !== 0 || event.isPrimary === false || tableDrag.current || !tables?.canResize()) return;
-    const pageHost = event.currentTarget.closest<HTMLDivElement>('[data-docx-pages-host]');
-    const scale = pageHost ? pageHost.getBoundingClientRect().width / width : 0;
-    if (!Number.isFinite(scale) || scale <= 0) return;
-    tableDrag.current = { pointerId: event.pointerId, handle, startX: event.clientX, scale };
-    setTableDragPreview({ id: handle.id, delta: 0 });
-    event.currentTarget.setPointerCapture(event.pointerId);
-    input.current?.focus({ preventScroll: true });
+  const tableBorderAt = (event: PointerEvent<HTMLDivElement>) => {
+    if (event.pointerType === 'touch' || tableHandles.length === 0) return null;
+    const point = clientPointToPage(event.clientX, event.clientY, event.currentTarget.getBoundingClientRect(), zoom, pages);
+    return point && tableHandleAt(tableHandles, point.page.page.pageIndex, point.x, point.y, TABLE_HANDLE_PX / 2 / zoom);
   };
-  const moveTableDrag = (event: PointerEvent<HTMLDivElement>) => {
-    const active = tableDrag.current;
-    if (active?.pointerId !== event.pointerId) return;
-    event.stopPropagation();
+  const armTableDrag = (event: PointerEvent<HTMLDivElement>) => {
+    if (event.shiftKey || event.altKey || event.ctrlKey || event.metaKey || tableDrag.current || !tables?.canResize()) return false;
+    const handle = tableBorderAt(event);
+    const scale = event.currentTarget.getBoundingClientRect().width / width;
+    if (!handle || !Number.isFinite(scale) || scale <= 0) return false;
+    // The press places the caret as any press does, so a click on a border stays a click; only moving turns it into a resize.
+    if (!onPoint(event, false)) return true;
+    tableDrag.current = { pointerId: event.pointerId, handle, startX: event.clientX, scale, moved: false };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    return true;
+  };
+  const moveTableDrag = (active: NonNullable<typeof tableDrag.current>, event: PointerEvent<HTMLDivElement>) => {
+    if (!active.moved && Math.abs(event.clientX - active.startX) < TABLE_DRAG_SLOP_PX) return;
+    active.moved = true;
     setTableDragPreview({ id: active.handle.id, delta: tableDragDelta(active, event.clientX) });
   };
-  const finishTableDrag = (event: PointerEvent<HTMLDivElement>) => {
-    const active = tableDrag.current;
-    if (active?.pointerId !== event.pointerId) return;
-    event.stopPropagation();
-    const intent = tableResizeIntent(binding.viewStore.getSnapshot().geometry, active.handle, tableDragDelta(active, event.clientX));
+  const finishTableDrag = (active: NonNullable<typeof tableDrag.current>, event: PointerEvent<HTMLDivElement>) => {
+    const intent = active.moved ? tableResizeIntent(binding.viewStore.getSnapshot().geometry, active.handle, tableDragDelta(active, event.clientX)) : null;
     endTableDrag();
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
     if (intent && tables?.canResize()) tables.resize(intent);
@@ -723,6 +725,11 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     }
   }, [binding]);
   const releasePointer = (event: PointerEvent<HTMLDivElement>) => {
+    if (tableDrag.current?.pointerId === event.pointerId) {
+      endTableDrag();
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+      return;
+    }
     if (resize.current?.pointerId === event.pointerId) endResize();
     if (touchPointer.current?.pointerId === event.pointerId) cancelTouchPress();
     if (picture.current?.pointerId === event.pointerId) endPicture();
@@ -741,7 +748,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
       <PeerlessInput admission={binding.admission} viewStore={binding.viewStore} textareaRef={input} autoFocus={autoFocus}
         onCompositionChange={onCompositionChange} onRecoverableText={onRecoverableText} onClipboard={onClipboard} onPasteFragment={onPasteFragment}
         caretHostRef={column} zoom={zoom} onNavigateCell={onNavigateCell} />
-      <div data-docx-pages-host style={{ position: 'relative', width, height, transform: `scale(${zoom})`, transformOrigin: 'top left', touchAction: 'pan-x pan-y' }}
+      <div data-docx-pages-host data-table-resize={tableHover || tableDragPreview ? 'col' : undefined} style={{ position: 'relative', width, height, transform: `scale(${zoom})`, transformOrigin: 'top left', touchAction: 'pan-x pan-y' }}
         onMouseDown={(event) => {
           if (event.button === 0 && !(event.target as HTMLElement).closest('button, input, select, [data-docx-escape-layer]')) event.preventDefault();
         }}
@@ -755,6 +762,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
             }
             return;
           }
+          if (armTableDrag(event)) return;
           if (event.pointerType === 'touch') {
             touchPointer.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
             const host = event.currentTarget;
@@ -773,6 +781,15 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
           dragPointer.current = event.pointerId;
         }}
         onPointerMove={(event) => {
+          const dragging = tableDrag.current;
+          if (dragging?.pointerId === event.pointerId) {
+            if (event.buttons === 1) moveTableDrag(dragging, event);
+            return;
+          }
+          if (event.buttons === 0) {
+            const hovered = tableBorderAt(event)?.id ?? null;
+            if (hovered !== tableHover) setTableHover(hovered);
+          }
           const resizing = resize.current;
           if (resizing?.pointerId === event.pointerId) {
             if (event.buttons !== 1) return;
@@ -803,6 +820,11 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
           if (dragPointer.current === event.pointerId && (event.buttons === 1 || touchSelection.current)) extendDrag(event);
         }}
         onPointerUp={(event) => {
+          const dragging = tableDrag.current;
+          if (dragging?.pointerId === event.pointerId) {
+            finishTableDrag(dragging, event);
+            return;
+          }
           const resizing = resize.current;
           if (resizing?.pointerId === event.pointerId) {
             const gesture = resizePicture(resizing, event.clientX, event.clientY, event.shiftKey);
@@ -826,6 +848,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
           }
           releasePointer(event);
         }}
+        onPointerLeave={() => setTableHover(null)}
         onPointerCancel={releasePointer}
         onLostPointerCapture={(event) => {
           if (event.target === event.currentTarget) releasePointer(event);
@@ -862,14 +885,11 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
           if (!page) return null;
           const dragging = tableDragPreview?.id === handle.id;
           const thickness = TABLE_HANDLE_PX / zoom;
-          return <div key={handle.id} className={`${tableHandleClass[handle.kind]}${dragging ? ' dragging' : ''}`} aria-hidden
+          return <div key={handle.id} className={`${tableHandleClass[handle.kind]}${dragging ? ' dragging' : tableHover === handle.id ? ' hovered' : ''}`} aria-hidden
             data-handle-type={handle.kind} data-column-edge={handle.columnEdge}
-            onPointerDown={(event) => startTableDrag(event, handle)} onPointerMove={moveTableDrag}
-            onPointerUp={finishTableDrag} onPointerCancel={(event) => { if (tableDrag.current?.pointerId === event.pointerId) endTableDrag(); }}
-            onLostPointerCapture={(event) => { if (tableDrag.current?.pointerId === event.pointerId) endTableDrag(); }}
             style={{ position: 'absolute', left: page.bounds.x + handle.x + (dragging ? tableDragPreview?.delta ?? 0 : 0) - thickness / 2,
               top: page.bounds.y + handle.top, width: thickness, height: Math.max(0, handle.bottom - handle.top),
-              cursor: 'col-resize', pointerEvents: 'auto', touchAction: 'none', zIndex: 14 }} />;
+              pointerEvents: 'none', zIndex: 14 }} />;
         })}
       </div>
     </div>

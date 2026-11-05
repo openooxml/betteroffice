@@ -8,8 +8,8 @@ const COLUMN = 3120;
 const COLUMN_HANDLE = '.layout-table-resize-handle';
 const RIGHT_HANDLE = '.layout-table-edge-handle-right';
 
-function documentXml(): string {
-  const border = (side: string) => `<w:${side} w:val="single" w:sz="4" w:space="0" w:color="000000"/>`;
+function documentXml(borders: boolean): string {
+  const border = (side: string) => borders ? `<w:${side} w:val="single" w:sz="4" w:space="0" w:color="000000"/>` : `<w:${side} w:val="nil"/>`;
   const cell = (text: string) => `<w:tc><w:tcPr><w:tcW w:w="${COLUMN}" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:tc>`;
   const rows = [0, 1, 2].map((row) => `<w:tr>${[0, 1, 2].map((column) => cell(`R${row}C${column}`)).join('')}</w:tr>`).join('');
   return '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>' +
@@ -18,11 +18,11 @@ function documentXml(): string {
     '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:bottom="1440" w:left="1440" w:right="1440"/></w:sectPr></w:body></w:document>';
 }
 
-async function open(page: Page, arm: Arm): Promise<Locator> {
+async function open(page: Page, arm: Arm, borders = true): Promise<Locator> {
   const zip = new JSZip();
   zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
   zip.file('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDoc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
-  zip.file('word/document.xml', documentXml());
+  zip.file('word/document.xml', documentXml(borders));
   await page.goto('/?format=docx' + arm.query);
   await page.locator('input[type=file]').last().setInputFiles({ name: 'table-resize.docx',
     mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', buffer: await zip.generateAsync({ type: 'nodebuffer' }) });
@@ -38,6 +38,7 @@ interface SavedTable {
   cellWidths: number[][];
   layout: string | null;
   width: number | null;
+  texts: string[][];
 }
 
 async function savedTable(page: Page, info: TestInfo, name: string): Promise<SavedTable> {
@@ -58,7 +59,8 @@ async function savedTable(page: Page, info: TestInfo, name: string): Promise<Sav
       Number(attr(cell.getElementsByTagNameNS('*', 'tcW')[0], 'w'))));
     const properties = children(table, 'tblPr')[0]!;
     const width = attr(children(properties, 'tblW')[0], 'w');
-    return { grid, cellWidths, layout: attr(children(properties, 'tblLayout')[0], 'type'), width: width === null ? null : Number(width) };
+    const texts = rows.map((row) => children(row, 'tc').map((cell) => cell.textContent ?? ''));
+    return { grid, cellWidths, texts, layout: attr(children(properties, 'tblLayout')[0], 'type'), width: width === null ? null : Number(width) };
   }, xml);
 }
 
@@ -99,16 +101,28 @@ for (const arm of ARMS) {
       await open(page, arm);
       await expect(page.locator(COLUMN_HANDLE)).toHaveCount(2);
       await expect(page.locator(RIGHT_HANDLE)).toHaveCount(1);
-      const cursor = (selector: string) => page.locator(selector).first().evaluate((element) => getComputedStyle(element).cursor);
-      expect(await cursor(COLUMN_HANDLE)).toBe('col-resize');
-      expect(await cursor(RIGHT_HANDLE)).toBe('col-resize');
+      const cursorAt = async ({ x, y }: { x: number; y: number }) => {
+        await page.mouse.move(x, y);
+        return page.evaluate(({ x, y }) => getComputedStyle(document.elementFromPoint(x, y)!).cursor, { x, y });
+      };
 
       const columns = await centers(page, COLUMN_HANDLE);
       const [right] = await centers(page, RIGHT_HANDLE);
       near(columns[1]!.x - columns[0]!.x, COLUMN / 15, 2);
       near(right!.x - columns[1]!.x, COLUMN / 15, 2);
-      const hit = await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.className ?? '', columns[0]!);
-      expect(hit).toContain('layout-table-resize-handle');
+      await expect.poll(() => cursorAt(columns[0]!)).toBe('col-resize');
+      await expect.poll(() => cursorAt(right!)).toBe('col-resize');
+      await expect.poll(() => cursorAt({ x: columns[0]!.x + 40, y: columns[0]!.y })).toBe('text');
+    });
+
+    test('a table without borders keeps its handles on the grid, off its text', async ({ page }) => {
+      await open(page, arm, false);
+      await expect(page.locator(COLUMN_HANDLE)).toHaveCount(2);
+      const columns = await centers(page, COLUMN_HANDLE);
+      const [right] = await centers(page, RIGHT_HANDLE);
+      near(columns[1]!.x - columns[0]!.x, COLUMN / 15, 2);
+      near(right!.x - columns[1]!.x, COLUMN / 15, 2);
+      near(columns[0]!.x - (await pageBox(page)).x, 96 + COLUMN / 15, 8);
     });
 
     test('dragging a column border saves both column widths and undoes in one step', async ({ page }, info) => {
@@ -132,6 +146,29 @@ for (const arm of ARMS) {
       await expect.poll(async () => (await centers(page, COLUMN_HANDLE))[0]?.x ?? 0).toBeLessThan(before[0]!.x + 2);
       expect((await savedTable(page, info, 'column-undo')).grid).toEqual([COLUMN, COLUMN, COLUMN]);
     });
+
+    if (arm.name === 'worker') {
+      test('a plain click on a column border reaches the page and places the caret', async ({ page }, info) => {
+        await open(page, arm);
+        await expect(page.locator(COLUMN_HANDLE)).toHaveCount(2);
+        const [border] = await centers(page, COLUMN_HANDLE);
+        const box = await pageBox(page);
+        await page.locator('.canvas-page canvas, .paged-editor__page canvas').first().click({ position: { x: border!.x - box.x, y: border!.y - box.y } });
+        await page.keyboard.type('Q');
+        await expect.poll(async () => (await savedTable(page, info, 'click')).texts.flat().filter((text) => text.includes('Q')).length).toBe(1);
+        const saved = await savedTable(page, info, 'click-grid');
+        expect(saved.grid).toEqual([COLUMN, COLUMN, COLUMN]);
+        expect(saved.layout).toBeNull();
+      });
+
+      test('a press that moves less than the slop stays a click', async ({ page }, info) => {
+        await open(page, arm);
+        await expect(page.locator(COLUMN_HANDLE)).toHaveCount(2);
+        const [border] = await centers(page, COLUMN_HANDLE);
+        await drag(page, border!, 2, 0);
+        expect((await savedTable(page, info, 'slop')).grid).toEqual([COLUMN, COLUMN, COLUMN]);
+      });
+    }
 
     test('dragging the right edge resizes the last column', async ({ page }, info) => {
       await open(page, arm);

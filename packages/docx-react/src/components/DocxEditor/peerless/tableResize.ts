@@ -46,7 +46,7 @@ export function tableResizeHandles(geometry: PeerlessFrameGeometry | null | unde
   const objects = presentedObjects(geometry);
   if (!objects) return [];
   const fragments = new Map<string, { table: string; pageIndex: number; columns: number; cell: string; cellColumn: number;
-    edges: Map<number, number[]>; top: number; bottom: number }>();
+    gridTwips?: readonly number[]; edges: Map<number, number[]>; top: number; bottom: number }>();
   for (const object of objects.objects) {
     const placement = object.cell;
     if (object.kind !== 'cell' || !placement || !isBodyStory(object.story)) continue;
@@ -59,6 +59,7 @@ export function tableResizeHandles(geometry: PeerlessFrameGeometry | null | unde
           cellColumn: placement.column, edges: new Map(), top: rect.y, bottom: rect.y + rect.height };
         fragments.set(key, fragment);
       }
+      fragment.gridTwips ??= placement.gridTwips;
       fragment.top = Math.min(fragment.top, rect.y);
       fragment.bottom = Math.max(fragment.bottom, rect.y + rect.height);
       for (const [edge, x] of [[placement.column, rect.x], [placement.column + placement.colspan, rect.x + rect.width]] as const) {
@@ -70,6 +71,15 @@ export function tableResizeHandles(geometry: PeerlessFrameGeometry | null | unde
   }
   const handles: TableResizeHandle[] = [];
   for (const fragment of fragments.values()) {
+    const origin = fragment.edges.get(0);
+    if (fragment.gridTwips?.length === fragment.columns && origin) {
+      let x = Math.min(...origin);
+      fragment.edges = new Map([[0, [x]]]);
+      fragment.gridTwips.forEach((width, column) => {
+        x += width / TWIPS_PER_PX;
+        fragment.edges.set(column + 1, [x]);
+      });
+    }
     const at = (edge: number) => {
       const seen = fragment.edges.get(edge);
       return seen ? seen.reduce((sum, x) => sum + x, 0) / seen.length : undefined;
@@ -93,6 +103,17 @@ export function tableResizeHandles(geometry: PeerlessFrameGeometry | null | unde
     }
   }
   return handles;
+}
+
+/** @internal The handle whose border is nearest page-local `x`, `y` on `pageIndex`, within `tolerance` px. */
+export function tableHandleAt(handles: readonly TableResizeHandle[], pageIndex: number, x: number, y: number, tolerance: number): TableResizeHandle | null {
+  let nearest: TableResizeHandle | null = null;
+  for (const handle of handles) {
+    if (handle.pageIndex !== pageIndex || y < handle.top || y > handle.bottom) continue;
+    const distance = Math.abs(x - handle.x);
+    if (distance <= tolerance && (!nearest || distance < Math.abs(x - nearest.x))) nearest = handle;
+  }
+  return nearest;
 }
 
 /**
