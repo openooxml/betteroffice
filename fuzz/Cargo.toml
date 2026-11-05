@@ -64,3 +64,6 @@ bench = false
 
 [workspace]
 members = ["."]
+
+[patch.crates-io]
+yrs = { git = "https://github.com/openooxml/y-crdt.git", rev = "e785c00611ebce79ece115defa25295982cac165" }
