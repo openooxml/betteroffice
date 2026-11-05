@@ -244,6 +244,10 @@ fn run(direct: &Value, attrs: &Attrs, symbol: bool) -> Result<(), Failure> {
         ("fontSize", "fontSize", "size"),
         ("fontSizeCs", "fontSize", "sizeCs"),
         ("styleId", "runStyle", "styleId"),
+        ("spacing", "characterSpacing", "spacing"),
+        ("position", "characterSpacing", "position"),
+        ("scale", "characterSpacing", "scale"),
+        ("kerning", "characterSpacing", "kerning"),
     ] {
         if let Some(value) = direct.get(source) {
             check(key, value, attrs.get(key).and_then(|v| v.get(field)))?;

@@ -12,6 +12,7 @@ export declare const __napiBindingTarget: 'native' | 'wasm32-wasi' | 'wasm32-was
 export declare class EditSession {
   free(): void
   register_measure_font(bytes: Uint8Array): number
+  update_measure_font_outlines(fontId: number, bytes: Uint8Array): void
   decode_font(bytes: Uint8Array): Uint8Array
   take_base_latin_miss(): boolean
   register_substitute_measure_font(base: number, requestedFamily: string): number

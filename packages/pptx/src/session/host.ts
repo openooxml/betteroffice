@@ -1,7 +1,7 @@
 import { metafileImageBytes } from '../render/browserImage';
 import { createSessionHost, type SessionHost } from '../../../../shared/office-session/host';
 import { createCommandFontInstallation } from './commandFontInstallation';
-import { isHostMessage, transferable, type TransferResult } from '../../../../shared/office-session/protocol';
+import { deferReply, isHostMessage, transferable, type TransferResult } from '../../../../shared/office-session/protocol';
 import type { SessionTransport } from '../../../../shared/office-session/transport';
 import type { MethodHandlers } from '../../../../shared/office-session/types';
 import { compileSessionWasm } from '../../../../shared/office-session/wasm';
@@ -225,6 +225,14 @@ export function createPresentationSessionHost(
         bytes.byteLength === bytes.buffer.byteLength ? bytes.buffer : new Uint8Array(bytes).buffer;
       return transferable(buffer, [buffer]);
     },
+    renderPng(_, target, options = {}) {
+      if (editor) throw new PptxPeerHydrationError('stage', 'Editor exports go through the command session');
+      return deferReply(presentation().renderPng(target, options).then((bytes) => {
+        const buffer = bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0 &&
+          bytes.byteLength === bytes.buffer.byteLength ? bytes.buffer : new Uint8Array(bytes).buffer;
+        return transferable(buffer, [buffer]);
+      }));
+    },
     dispose() {
       presentation();
       dispose();
@@ -320,6 +328,7 @@ export function createPresentationSessionHost(
       if (output) host.emit('collaborationPipe', output.batches, output.transfer);
     }, 0);
   } });
+  options.workerRender?.slides?.(commands.renderSlide);
   let queued: Promise<void> | undefined;
   const send = (message: unknown, transfer: Transferable[] | undefined, reply?: PptxRenderReply) => {
     if (reply && !disposed) {

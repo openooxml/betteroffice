@@ -3,6 +3,7 @@ import type { PipeCommandPayload, PipeOutputBatch } from '../../../../shared/col
 import type { PptxPresenceCursor, PptxPresencePeer } from '../collaboration/types';
 import type { SessionFailure } from '../../../../shared/office-session/types';
 import type { PresentationHandle } from '../wasm/loader';
+import type { PptxPngOptions, PptxPngTarget } from '../wasm/pngOptions';
 import type { PptxEditRequest, PptxEditResult, PptxReadRequest, PptxReadResult, PptxStoryTarget } from '../edits';
 import type { DeckSnapshot, ParagraphAlignment, ShapeRect, ShapeDraft, PresetShapeDraft, ShapeReceipt, TextStyle, TextStyleSnapshot } from '../types';
 import type {
@@ -109,7 +110,7 @@ export type PresentationCommandPayloads = {
   activateSlide: Partial<PresentationCommandInput> & { slideId: string };
   insertText: PresentationCommandTextInput & { text: string; style?: TextStyle };
   replaceText: PresentationCommandTextInput & { text: string; style?: TextStyle };
-  formatText: PresentationCommandTextInput & { patch: TextStyle; toggle?: 'bold' | 'italic' | 'underline';
+  formatText: PresentationCommandTextInput & { patch: TextStyle; toggle?: 'bold' | 'italic' | 'underline' | 'strikethrough';
     fontSizeStep?: { direction: 'increase' | 'decrease'; sizes: readonly number[] } };
   setParagraphAlignment: PresentationCommandTextInput & { alignment: ParagraphAlignment | null };
   deleteBackward: PresentationCommandTextInput & { unit: 'codePoint'; count?: number };
@@ -307,6 +308,8 @@ export type PresentationCommandMethods = FontDecoderMethods & {
   thumbnailFrame(request: PresentationCommandThumbnailRequest): PresentationCommandThumbnailResult;
   flushCommandEditor(fence: PresentationCommandFence): PresentationCommandAck;
   saveCommandEditor(fence: PresentationCommandFence): PresentationCommandSaveResult;
+  /** Draws a slide as PNG bytes in the worker, after the fenced commands. */
+  renderCommandPng(fence: PresentationCommandFence, target: PptxPngTarget, options: Omit<PptxPngOptions, 'signal'>): ArrayBuffer;
   accessCommandEditor(fence: PresentationCommandFence, method: PresentationCommandAccessMethod, args: unknown[]): PresentationCommandAccessResult;
   checkpointCommandEditor(fence: PresentationCommandFence, options?: { rebase?: boolean }): PresentationCommandSaveResult;
   prepareCommandPicture(fence: PresentationCommandFence, bytes: ArrayBuffer): ArrayBuffer;
@@ -323,6 +326,8 @@ export interface PresentationCommandClient {
   dispatch(intent: PresentationCommandIntent, basis?: PresentationCommandBasis): Promise<PresentationCommandAck>;
   flush(seq?: number): Promise<PresentationCommandAck>;
   save(): Promise<Uint8Array>;
+  /** Draws a slide as PNG bytes in the worker, after the commands sent so far. */
+  renderPng?(target: PptxPngTarget, options?: PptxPngOptions): Promise<Uint8Array>;
   access?<K extends PresentationCommandAccessMethod>(method: K, ...args: Parameters<PresentationCommandAccessMethods[K]>): Promise<ReturnType<PresentationCommandAccessMethods[K]>>;
   takeRecoveryUpdate?(): ArrayBuffer | undefined;
   checkpoint?(options?: { rebase?: boolean }): Promise<PresentationCommandSaveResult>;
@@ -345,6 +350,7 @@ export const PRESENTATION_COMMAND_METHODS = {
   thumbnailFrame: true,
   flushCommandEditor: true,
   saveCommandEditor: true,
+  renderCommandPng: true,
   readEditor: true,
   prepareCommandPicture: true,
   accessCommandEditor: true,

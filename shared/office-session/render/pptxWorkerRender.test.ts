@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from 'bun:test';
+import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test';
 import { attachPptxWorkerRender, pptxRasterOwnership, type PptxRenderReply, type PptxRenderRequest } from './pptxWorkerRender';
 import type { SessionTransport } from '../transport';
 
@@ -132,3 +132,29 @@ test('an unchanged view is posted once', () => {
   expect(h.port.sent.filter((message) => message.kind === 'view')).toEqual([
     { kind: 'view', scale: 1, dpr: 2 }, { kind: 'view', scale: 1, dpr: 1 }]);
 });
+
+test('prerender replies and font notices leave the unresponsive-worker watchdog armed', () => {
+  const timers: (() => void)[] = [];
+  let cleared = 0;
+  const set = spyOn(globalThis, 'setTimeout').mockImplementation(((callback: () => void) => {
+    timers.push(callback); return timers.length;
+  }) as unknown as typeof setTimeout);
+  const clear = spyOn(globalThis, 'clearTimeout').mockImplementation((() => { cleared += 1; }) as typeof clearTimeout);
+  try {
+    const h = host();
+    const replies: PptxRenderReply[] = [];
+    h.client!.subscribe((reply) => { replies.push(reply); });
+    h.client!.view(1, 2);
+    expect(timers).toHaveLength(1);
+    const bitmap = { closed: 0, close() { this.closed += 1; } };
+    h.port.onmessage?.({ data: { kind: 'prerender', slideId: 'slide', token: 9, version: '1', fonts: 0, factor: 2,
+      width: 2, height: 2, bitmap: bitmap as unknown as ImageBitmap } });
+    h.port.onmessage?.({ data: { kind: 'font-generation', fonts: 1 } });
+    expect(cleared).toBe(0);
+    expect(bitmap.closed).toBe(1);
+    timers[0]!();
+    expect(h.client!.supported).toBe(false);
+    expect(replies.at(-1)).toEqual({ kind: 'unsupported' });
+  } finally { set.mockRestore(); clear.mockRestore(); }
+});
+

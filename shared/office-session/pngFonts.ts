@@ -13,6 +13,8 @@ export interface PngRunFont {
   family: string;
   bold: boolean;
   italic: boolean;
+  /** The engine's id for the face layout measured with, where the engine reports one. */
+  id?: number;
 }
 
 export interface InstalledPngFaces {
@@ -41,7 +43,7 @@ export interface InstallPngFacesOptions {
 
 const counters = new Map<string, number>();
 
-export const pngFontKey = (font: PngRunFont): string => JSON.stringify([font.family, font.bold, font.italic]);
+export const pngFontKey = (font: PngRunFont): string => JSON.stringify([font.family, font.bold, font.italic, font.id ?? null]);
 
 export function pngFontSet(): FontFaceSet | undefined {
   return typeof document !== 'undefined' ? document.fonts : (globalThis as { fonts?: FontFaceSet }).fonts;

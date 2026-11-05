@@ -18,6 +18,11 @@
       "types": "./dist/cdn.d.ts",
       "import": "./dist/cdn.js",
       "default": "./dist/cdn.js"
+    },
+    "./progressive": {
+      "types": "./dist/progressive.d.ts",
+      "import": "./dist/progressive.js",
+      "default": "./dist/progressive.js"
     }
   },
   "files": [

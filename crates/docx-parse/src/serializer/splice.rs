@@ -11,7 +11,7 @@ use crate::paragraph_identity::{
 
 use super::context::RecordedParagraphs;
 use super::paragraph_ids::{S13SpliceAnchor, S13SplicedPart};
-use super::paragraph_patch::PatchContext;
+use super::paragraph_patch::NamespaceScopes;
 use super::s13::element_span;
 
 const W_NAMESPACE: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
@@ -1533,10 +1533,11 @@ fn splice_story_part_inner(
         .map(|ordinal| changed_comment_ranges(&source[spans[ordinal].clone()], &written[ordinal]))
         .collect::<Option<Vec<_>>>()?;
     let mut prefixes = BTreeSet::new();
+    let scopes = (!patched.is_empty()).then(|| NamespaceScopes::new(source));
     for ordinal in &replaced {
         let mut required = required_prefixes(&written[ordinal])?;
-        if patched.contains_key(ordinal) {
-            let scope = PatchContext::at(&part.part, source, spans[ordinal].start);
+        if let Some(scopes) = scopes.as_ref().filter(|_| patched.contains_key(ordinal)) {
+            let scope = scopes.context(&part.part, spans[ordinal].start);
             required.retain(|prefix| !scope.namespaces.contains_key(*prefix));
         }
         prefixes.extend(required);
@@ -1857,11 +1858,16 @@ fn insertion_offsets(
         .collect()
 }
 
-fn replacement_xml(source: &str, at: usize, serialized: &str, xml: &str) -> Option<String> {
+fn replacement_xml(
+    scopes: &NamespaceScopes,
+    at: usize,
+    serialized: &str,
+    xml: &str,
+) -> Option<String> {
     if xml.is_empty() {
         return Some(String::new());
     }
-    let scope = PatchContext::at("", source, at);
+    let scope = scopes.context("", at);
     let target = root_tag(serialized)?;
     let wanted = bindings(serialized, &target);
     let mut required = required_prefixes(xml)?;
@@ -1920,9 +1926,10 @@ pub(crate) fn replace_story_part(
         &removed,
         &part.table_patches,
     )?;
+    let scopes = NamespaceScopes::new(&source);
     let mut edits = Vec::new();
     for (span, rank, xml) in rows.edits {
-        let xml = replacement_xml(&source, span.start, serialized, xml)?;
+        let xml = replacement_xml(&scopes, span.start, serialized, xml)?;
         edits.push((span, rank, xml));
     }
     for (&ordinal, xml) in &recorded.written {
@@ -1938,7 +1945,7 @@ pub(crate) fn replace_story_part(
                     .cloned()
                     .or_else(|| paragraph_occurrences(xml)?.first()?.para_id.clone());
                 if let Some(id) = id {
-                    let scope = PatchContext::at(&part.part, &source, range.start);
+                    let scope = scopes.context(&part.part, range.start);
                     crate::paragraph_identity::patch_paragraph_id_in_scope(
                         patched,
                         &id,
@@ -1948,7 +1955,7 @@ pub(crate) fn replace_story_part(
                     patched.clone()
                 }
             } else {
-                replacement_xml(&source, range.start, serialized, xml)?
+                replacement_xml(&scopes, range.start, serialized, xml)?
             };
             edits.push((range, 2, xml));
         }
@@ -1963,7 +1970,7 @@ pub(crate) fn replace_story_part(
             continue;
         }
         let range = span(anchor.ordinal())?;
-        let xml = replacement_xml(&source, range.start, serialized, xml)?;
+        let xml = replacement_xml(&scopes, range.start, serialized, xml)?;
         let at = match anchor {
             S13SpliceAnchor::After(_) => range.end,
             S13SpliceAnchor::Before(_) => range.start,

@@ -129,6 +129,8 @@ pub struct RenderEnv {
     /// The docDefaults font size in pt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub doc_default_font_size: Option<f64>,
+    /// The docDefaults run language, which runs that name none inherit.
+    pub doc_default_language: Option<RunLanguageSlots>,
     /// Lower the `data:` image sources seeding wrote as the `media:{n}`
     /// tokens of their parts, which the host then resolves.
     #[serde(skip_serializing_if = "std::ops::Not::not")]

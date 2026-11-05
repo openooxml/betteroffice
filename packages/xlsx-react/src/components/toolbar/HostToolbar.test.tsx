@@ -41,6 +41,9 @@ import type { XlsxCommandResult, XlsxCommandStore } from '../../commands/types';
 import { createAsyncEditorApi } from '../../worker/createAsyncEditorApi';
 import type { WorkerEditorApiBridge } from '../../worker/createWorkerEditorApi';
 import { PeerlessWorkbookSession } from '../../worker/usePeerlessSessionWorkbook';
+import { loadMenuList } from '../../../../../shared/react-toolbar/menuListLoader';
+
+await loadMenuList();
 
 const { act, cleanup, fireEvent, render, within } = await import('@testing-library/react');
 

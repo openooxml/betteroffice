@@ -578,6 +578,7 @@ export function wrapSession(
       residentFontsRevision += 1;
       return id;
     },
+    updateFontOutlines: (fontId, bytes) => session.update_measure_font_outlines(fontId, bytes),
     registerSubstituteFont: (base, family) => {
       const id = session.register_substitute_measure_font(base, family);
       residentFonts.push({ substituteOf: base, family });

@@ -78,7 +78,8 @@ pub use caps::{
 };
 pub use echo::{EchoGlyphSet, echo_glyph_set};
 pub use font_store::{
-    FontError, FontId, FontMetrics, FontStore, RequestedLineMetrics, covered_character,
+    FontError, FontId, FontMetrics, FontStore, OutlineUpdateError, RequestedLineMetrics,
+    covered_character,
 };
 pub use line_break::{
     BreakOpportunity, break_allowed_between, break_opportunities, presentation_break_opportunities,

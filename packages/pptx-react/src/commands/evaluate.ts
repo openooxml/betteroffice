@@ -29,6 +29,7 @@ export interface PptxTextEnvironment {
   bold: boolean | 'mixed';
   italic: boolean | 'mixed';
   underline: boolean | 'mixed';
+  strikethrough?: boolean | 'mixed';
   /** `null` when mixed. */
   fontFamily: string | null;
   /** Points; `null` when mixed. */
@@ -390,9 +391,10 @@ function evaluate<K extends PptxCommandId>(
     case 'bold':
     case 'italic':
     case 'underline':
+    case 'strikethrough':
       return {
         gate: textGate(env),
-        active: current?.[id as 'bold' | 'italic' | 'underline'] ?? false,
+        active: current?.[id as 'bold' | 'italic' | 'underline' | 'strikethrough'] ?? false,
       };
     case 'fontFamily': {
       const families = env.fontFamilies;

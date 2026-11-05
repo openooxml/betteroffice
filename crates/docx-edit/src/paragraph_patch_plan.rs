@@ -11,6 +11,7 @@ use yrs::Any;
 
 use crate::{SegmentContent, StorySegment};
 
+#[derive(Clone, Copy)]
 pub(crate) struct PatchContext<'a> {
     pub ordinal: u32,
     pub session_key: &'a str,
@@ -218,6 +219,25 @@ fn push_text(units: &mut Vec<UnitV1>, text: &str, attrs: &Attrs) {
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum RunRules {
+    Full,
+    Basic,
+}
+
+impl RunRules {
+    fn run_key(self) -> fn(&[String]) -> bool {
+        match self {
+            Self::Full => run_key,
+            Self::Basic => basic_run_key,
+        }
+    }
+}
+
+fn basic_run_key(path: &[String]) -> bool {
+    path.first().is_none_or(|key| key != "characterSpacing") && run_key(path)
+}
+
 fn run_key(path: &[String]) -> bool {
     let Some(key) = path.first().map(String::as_str) else {
         return false;
@@ -231,6 +251,7 @@ fn run_key(path: &[String]) -> bool {
         "highlight" => Some(&["color"]),
         "fontSize" => Some(&["size", "sizeCs"]),
         "language" => Some(&["latin", "val", "eastAsia", "bidi"]),
+        "characterSpacing" => Some(&["spacing", "position", "scale", "kerning"]),
         "fontFamily" => Some(&[
             "ascii",
             "hAnsi",
@@ -1151,6 +1172,7 @@ fn validate_theme_fonts(
     before: &Attrs,
     changes: &[AttrDeltaV1],
     context: &PatchContext<'_>,
+    rules: RunRules,
 ) -> Result<(), LegacyParagraphV1> {
     let themes = [
         "asciiTheme",
@@ -1164,10 +1186,18 @@ fn validate_theme_fonts(
             .iter()
             .any(|key| fonts.get(*key).is_some_and(|value| !value.is_null()))
     });
+    let removes_all = |delta: &AttrDeltaV1| {
+        delta.path.len() == 1
+            && match &delta.after {
+                SlotV1::Missing => true,
+                SlotV1::Present { value } => value.is_null(),
+            }
+    };
     if themed
-        && let Some(delta) = changes
-            .iter()
-            .find(|delta| delta.path.first().is_some_and(|key| key == "fontFamily"))
+        && let Some(delta) = changes.iter().find(|delta| {
+            delta.path.first().is_some_and(|key| key == "fontFamily")
+                && !(rules == RunRules::Full && removes_all(delta))
+        })
     {
         let slot = delta.path.get(1).map_or("fontFamily", String::as_str);
         return Err(context.legacy(
@@ -1338,6 +1368,19 @@ pub(crate) fn diff_paragraph_v1(
     seeded: &[StorySegment],
     live: &[StorySegment],
     context: PatchContext<'_>,
+) -> Result<ParagraphPatchV1, LegacyParagraphV1> {
+    plan_paragraph(seeded, live, context, RunRules::Full).map_err(|legacy| {
+        plan_paragraph(seeded, live, context, RunRules::Basic)
+            .err()
+            .unwrap_or(legacy)
+    })
+}
+
+fn plan_paragraph(
+    seeded: &[StorySegment],
+    live: &[StorySegment],
+    context: PatchContext<'_>,
+    rules: RunRules,
 ) -> Result<ParagraphPatchV1, LegacyParagraphV1> {
     let before = snapshot(seeded)
         .map_err(|detail| context.legacy(PatchErrorCode::UnsupportedKey, detail))?;
@@ -1570,8 +1613,8 @@ pub(crate) fn diff_paragraph_v1(
                         return Err(context.restyle("inserted run inheritance"));
                     }
                     let changes = deltas(donor_attrs, &token.attrs);
-                    validate_theme_fonts(donor_attrs, &changes, &context)?;
-                    validate_deltas(&changes, run_key, &context)?;
+                    validate_theme_fonts(donor_attrs, &changes, &context, rules)?;
+                    validate_deltas(&changes, rules.run_key(), &context)?;
                     if token.attrs.get("hyperlink") != donor_attrs.get("hyperlink") {
                         let code = PatchErrorCode::UnsupportedStructure;
                         return Err(context.legacy(code, "hyperlink: mutation"));
@@ -1635,8 +1678,8 @@ pub(crate) fn diff_paragraph_v1(
                     }
                 }
                 run_changes = deltas(&old[i].attrs, &new[j].attrs);
-                validate_theme_fonts(&old[i].attrs, &run_changes, &context)?;
-                validate_deltas(&run_changes, run_key, &context)?;
+                validate_theme_fonts(&old[i].attrs, &run_changes, &context, rules)?;
+                validate_deltas(&run_changes, rules.run_key(), &context)?;
                 if !verify_changes(&old[i].attrs, &run_changes, &new[j].attrs) {
                     return Err(context.legacy(
                         PatchErrorCode::UnsupportedKey,
@@ -1994,6 +2037,31 @@ mod tests {
             { "id": 1, "name": "mark", "kind": "start", "offset": start },
             { "id": 1, "kind": "end", "offset": end }
         ] })
+    }
+
+    #[test]
+    fn a_run_clear_beside_a_marker_change_keeps_the_reason_of_the_run_clear() {
+        let fonts = json!({ "ascii": "Calibri", "asciiTheme": "minorHAnsi" });
+        let spacing = json!({ "spacing": 20 });
+        let markers = [(1, "1".to_owned(), false)];
+        for (key, value, detail) in [
+            ("fontFamily", fonts, "ambiguous: theme font"),
+            ("characterSpacing", spacing, "key:characterSpacing"),
+        ] {
+            let mut before = paragraph("abc", json!({}));
+            before[0]
+                .attributes
+                .insert(key.to_owned(), crate::seed::any_from_value(value).unwrap());
+            let after = paragraph("abc", json!({}));
+            let patch = diff_paragraph_v1(&before, &after, context()).unwrap();
+            assert_eq!(patch.run_edits.len(), 1);
+            let marked = PatchContext {
+                seeded_markers: &markers,
+                ..context()
+            };
+            let legacy = diff_paragraph_v1(&before, &after, marked).unwrap_err();
+            assert!(legacy.detail.starts_with(detail), "{}", legacy.detail);
+        }
     }
 
     #[test]

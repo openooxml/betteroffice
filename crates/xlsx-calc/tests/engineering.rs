@@ -754,6 +754,18 @@ fn bessel_j_and_k_match_the_true_value_of_microsofts_examples() {
     near("BESSELK(1.5,1)", 0.277_387_804, 4e-9);
 }
 
+/// excel caches BESSELJ(1000000,1) as -7.259683568823092E-4, 9.4e-11
+/// relative from the true -7.2596835681376304E-4 (50 digit hankel
+/// expansion); this is a known excel inaccuracy, so the true value is pinned.
+#[test]
+fn besselj_at_a_million_keeps_the_true_value_not_excels() {
+    exact("BESSELJ(1000000,1)", -7.259_683_568_137_631e-4);
+    close("BESSELJ(1000000,1)", -7.259_683_568_137_63e-4, 1e-15);
+    let excel = -7.259_683_568_823_092e-4;
+    let got = value("BESSELJ(1000000,1)");
+    assert!(((got - excel) / excel).abs() > 9e-11, "{got:e}");
+}
+
 #[test]
 fn besselj_matches_mpmath() {
     // mpmath 30 digits

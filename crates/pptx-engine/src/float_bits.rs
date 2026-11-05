@@ -257,6 +257,7 @@ impl FloatBitsWalk for pptx_edit::TextStyle {
             color,
             font_family,
             underline,
+            strike,
             spacing_pt,
             baseline_pct,
             kern_pt,
@@ -268,6 +269,7 @@ impl FloatBitsWalk for pptx_edit::TextStyle {
         color.float_bits(out);
         font_family.float_bits(out);
         underline.float_bits(out);
+        strike.float_bits(out);
         spacing_pt.float_bits(out);
         baseline_pct.float_bits(out);
         kern_pt.float_bits(out);
@@ -590,6 +592,7 @@ impl FloatBitsWalk for pptx_parse::RunProperties {
             bold,
             italic,
             underline,
+            strike,
             caps,
             font_family,
             color,
@@ -604,6 +607,7 @@ impl FloatBitsWalk for pptx_parse::RunProperties {
         bold.float_bits(out);
         italic.float_bits(out);
         underline.float_bits(out);
+        strike.float_bits(out);
         caps.float_bits(out);
         font_family.float_bits(out);
         color.float_bits(out);

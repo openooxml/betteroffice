@@ -108,7 +108,7 @@ test('ignores unknown manifest and face fields, including slices, while loading 
     })),
   };
   const parsed = readPackManifest(extended);
-  expect(parsed).toBe(extended);
+  expect(parsed as unknown).toBe(extended);
   expect(new Uint8Array(await loadPackedFontBytes(face, resolveUrl, undefined, undefined, parsed)))
     .toEqual(bold);
   expect(extended.faces[0].slices.skeleton.file).toBe('unused.zst');

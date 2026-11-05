@@ -74,4 +74,23 @@ for (const [arm, label] of [['', 'worker'], ['&peerless=0', 'non-worker']] as co
     await page.waitForTimeout(300);
     await expect(menu).toBeVisible();
   });
+
+  test(`docx text context menu opens at the pointer and is keyboard navigable (${label})`, async ({ page }, info) => {
+    const surface = await open(page, arm);
+    const input = page.locator('[data-testid=yrs-input], .paged-editor__input').first();
+    await expect(input).toBeFocused();
+    const box = (await surface.boundingBox())!;
+    const menu = await openMenu(page, surface);
+    const placed = (await menu.boundingBox())!;
+    expect(Math.abs(placed.x - (box.x + 140))).toBeLessThan(2);
+    expect(Math.abs(placed.y - (box.y + 100))).toBeLessThan(2);
+    await expect(menu).toBeFocused();
+    await info.attach('text-menu-aria', { body: await menu.ariaSnapshot(), contentType: 'text/plain' });
+    await expect(menu.getByRole('menuitem', { name: /^Copy/ })).toBeVisible();
+    await page.keyboard.press('ArrowDown');
+    await expect(menu.getByRole('menuitem').first()).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(menu).toBeHidden();
+    await expect(input).toBeFocused();
+  });
 }

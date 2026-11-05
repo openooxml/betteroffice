@@ -13,6 +13,7 @@
       "@betteroffice/pptx": ["../../packages/pptx/src/index.ts"],
       "@betteroffice/pptx/*": ["../../packages/pptx/src/*"],
       "@betteroffice/fonts": ["../../packages/fonts/src/index.ts"],
+      "@betteroffice/fonts/progressive": ["../../packages/fonts/src/progressive-entry.ts"],
       "@betteroffice/fonts-cjk": ["../../packages/fonts-cjk/src/index.ts"],
       "@betteroffice/fonts-intl": ["../../packages/fonts-intl/src/index.ts"],
       "@betteroffice/fonts-latin": ["../../packages/fonts-latin/src/index.ts"],

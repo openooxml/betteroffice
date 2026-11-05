@@ -340,9 +340,24 @@ pub struct FontRequirementCollector {
     named: BTreeMap<String, FontRequirement>,
     implicit: BTreeMap<String, FontRequirement>,
     used: HashSet<String>,
+    preferred_cjk: Option<&'static str>,
 }
 
 impl FontRequirementCollector {
+    /// Puts the CJK script of the document's default East Asian language
+    /// (`w:docDefaults` `w:lang/@w:eastAsia`) first among the CJK scripts a
+    /// family gathers across paragraphs, so a stray paragraph of another CJK
+    /// script does not give the document's own Han text its glyph forms. A
+    /// document that names no CJK language prefers Simplified, the bucket Han
+    /// without a language falls to.
+    pub fn prefer_east_asian_language(&mut self, language: Option<&str>) {
+        self.preferred_cjk = Some(
+            language
+                .and_then(ooxml_text::han_script_for_language)
+                .unwrap_or("cjk-sc"),
+        );
+    }
+
     /// Adds the fonts `blocks` need, as [`collect_font_requirements`] does.
     pub fn collect<'a>(
         &mut self,
@@ -451,8 +466,14 @@ impl FontRequirementCollector {
     /// The requirements measurement can reach, keyed as
     /// [`collect_font_requirements`] keys them.
     pub fn finish(self) -> BTreeMap<String, FontRequirement> {
+        let preferred = self.preferred_cjk;
         let mut requirements = BTreeMap::new();
         self.merge_into(&mut requirements);
+        if let Some(preferred) = preferred {
+            for requirement in requirements.values_mut() {
+                prefer_script(&mut requirement.scripts, preferred);
+            }
+        }
         requirements
     }
 
@@ -474,6 +495,7 @@ impl FontRequirementCollector {
             mut named,
             implicit,
             used,
+            preferred_cjk: _,
         } = self;
         for (key, requirement) in implicit {
             if let Some(named) = named.get_mut(&key) {
@@ -844,6 +866,21 @@ fn collect_paragraph_font_requirements(
             attrs.list_marker_italic.unwrap_or(false),
             characters,
         );
+    }
+}
+
+/// Moves `preferred` ahead of the other CJK scripts in `scripts`, keeping every
+/// other script where it was.
+fn prefer_script(scripts: &mut Vec<String>, preferred: &str) {
+    let Some(at) = scripts.iter().position(|script| script == preferred) else {
+        return;
+    };
+    let Some(first_cjk) = scripts.iter().position(|script| script.starts_with("cjk-")) else {
+        return;
+    };
+    if first_cjk < at {
+        let script = scripts.remove(at);
+        scripts.insert(first_cjk, script);
     }
 }
 
@@ -7920,6 +7957,52 @@ mod tests {
             .collect();
 
         assert!(keys.contains(&"calibri|1|0".to_owned()), "{keys:?}");
+    }
+
+    #[test]
+    fn a_family_gathering_several_cjk_scripts_puts_the_documents_own_first() {
+        let paragraph = |id: &str, text: &str, language: &str| -> LayoutBlock {
+            serde_json::from_value(json!({"kind": "paragraph", "id": id, "runs": [{
+                "kind": "text", "text": text, "fontFamily": "MS Mincho",
+                "language": {"eastAsia": language}
+            }]}))
+            .unwrap()
+        };
+        let japanese = paragraph("jp", "漢字", "ja-JP");
+        let chinese = paragraph("zh", "汉字", "zh-CN");
+        for (document, expected) in [
+            (Some("ja-JP"), ["cjk-jp", "cjk-sc"]),
+            (Some("zh-CN"), ["cjk-sc", "cjk-jp"]),
+            (Some("zh-Hans"), ["cjk-sc", "cjk-jp"]),
+            (Some("en-US"), ["cjk-sc", "cjk-jp"]),
+            (None, ["cjk-sc", "cjk-jp"]),
+        ] {
+            for order in [[&japanese, &chinese], [&chinese, &japanese]] {
+                let mut collector = FontRequirementCollector::default();
+                collector.prefer_east_asian_language(document);
+                collector.collect(order, "Calibri");
+                assert_eq!(
+                    collector.finish()["ms mincho|0|0"].scripts,
+                    expected,
+                    "{document:?}"
+                );
+            }
+        }
+        let traditional = paragraph("tc", "漢字", "zh-TW");
+        let korean = paragraph("kr", "漢字", "ko-KR");
+        for (document, expected) in [
+            ("zh-HK", ["cjk-tc", "cjk-jp", "cjk-kr"]),
+            ("ko-KR", ["cjk-kr", "cjk-jp", "cjk-tc"]),
+        ] {
+            let mut collector = FontRequirementCollector::default();
+            collector.prefer_east_asian_language(Some(document));
+            collector.collect([&japanese, &korean, &traditional], "Calibri");
+            assert_eq!(
+                collector.finish()["ms mincho|0|0"].scripts,
+                expected,
+                "{document}"
+            );
+        }
     }
 
     #[test]

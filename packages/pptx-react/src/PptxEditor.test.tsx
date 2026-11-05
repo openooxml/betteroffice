@@ -9,9 +9,11 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from 'bun
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { useState } from 'react';
+import JSZip from 'jszip';
 import type { ComponentProps } from 'react';
 import { initWasm } from '@betteroffice/pptx';
 import * as pptx from '@betteroffice/pptx';
+import { presentationStoryFormatting } from '@betteroffice/pptx/worker';
 import type {
   DeckSnapshot,
   PptxEditRequest,
@@ -838,6 +840,15 @@ describe('PptxEditor PNG export', () => {
         globalThis.OffscreenCanvas = ExportCanvas as unknown as typeof OffscreenCanvas;
         globalThis.createImageBitmap = (() =>
           Promise.resolve({} as ImageBitmap)) as typeof createImageBitmap;
+        const originalFontFace = globalThis.FontFace;
+        const fontsDescriptor = Object.getOwnPropertyDescriptor(document, 'fonts');
+        const held: { family: string }[] = [];
+        globalThis.FontFace = class { family: string; constructor(family: string) { this.family = family; } load() { return Promise.resolve(this); } } as unknown as typeof FontFace;
+        Object.defineProperty(document, 'fonts', { configurable: true, value: {
+          add(face: { family: string }) { held.push(face); },
+          delete(face: { family: string }) { held.splice(held.indexOf(face), 1); return true; },
+          load(font: string) { return Promise.resolve(held.filter((face) => font.includes(`"${face.family}"`))); },
+        } });
         try {
           const opened: PptxEditorApi[] = [];
           const view = render(
@@ -890,6 +901,9 @@ describe('PptxEditor PNG export', () => {
           revokeUrl.mockRestore();
           globalThis.OffscreenCanvas = originalCanvas;
           globalThis.createImageBitmap = originalBitmap;
+          globalThis.FontFace = originalFontFace;
+          if (fontsDescriptor) Object.defineProperty(document, 'fonts', fontsDescriptor);
+          else Reflect.deleteProperty(document, 'fonts');
         }
       },
       60_000
@@ -1846,6 +1860,50 @@ describe('PptxEditor commands', () => {
       images.restore();
     }
   }, 30_000);
+
+  for (const target of ['caret', 'range'] as const) {
+    for (const strike of ['sngStrike', 'dblStrike']) {
+      it(`clears inherited ${strike} through in-thread ${target} commands`, async () => {
+        const zip = await JSZip.loadAsync(fixture);
+        const path = 'ppt/slides/slide1.xml';
+        const xml = await zip.file(path)!.async('string');
+        zip.file(path, xml.replace(/<a:lstStyle\s*\/>/g,
+          `<a:lstStyle><a:lvl1pPr><a:defRPr strike="${strike}"/></a:lvl1pPr></a:lstStyle>`));
+        const { view, api, shape, story } = await open({ file: await zip.generateAsync({ type: 'uint8array' }) });
+        const slide = api.handle.snapshot().slides[0];
+        const format = spyOn(api.handle, 'formatText');
+        try {
+          expect(api.handle.story(story.id).paragraphs[0].runs[0].style.strike).toBeUndefined();
+          expect(presentationStoryFormatting(api.handle, {
+            slideId: slide.id, shapeId: shape.id, storyId: story.id,
+          }).paragraphs[0].runs[0].style.strike).toBe(strike);
+          await act(async () => {
+            api.selectText({ slide: 1, shapeId: shape.id, storyId: story.id,
+              start: 0, end: target === 'caret' ? 0 : 1 });
+          });
+          await waitFor(() => expect(api.commands.getState('strikethrough').active).toBe(true));
+          await act(async () => {
+            expect(await api.commands.execute('strikethrough', null)).toEqual({ ok: true, status: 'executed' });
+          });
+          if (target === 'caret') {
+            await act(async () => {
+              fireEvent.keyDown(view.getByRole('application'), { key: 'X' });
+              await api.flushPendingInput();
+            });
+          }
+          if (target !== 'caret') expect(format.mock.calls.some((call) => call[3].strike === 'noStrike')).toBe(true);
+          const saved = pptx.openPresentation(api.save(), { fonts: faces() });
+          try {
+            const resolved = presentationStoryFormatting(saved, {
+              slideId: slide.id, shapeId: shape.id, storyId: story.id,
+            });
+            expect(resolved.paragraphs[0].runs[0].style.strike).toBe('noStrike');
+            if (target === 'caret') expect(resolved.paragraphs[0].runs[0].text).toContain('X');
+          } finally { saved.dispose(); }
+        } finally { format.mockRestore(); }
+      }, 60_000);
+    }
+  }
 
   it('formats through api.commands and the platform-aware shortcuts', async () => {
     const { view, api, shape, story } = await open();

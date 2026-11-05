@@ -117,6 +117,52 @@ impl Renderer {
             .0)
     }
 
+    /// `layout_slide_json` for an export: hit testing keeps the slide it had.
+    pub fn export_slide_json(
+        &mut self,
+        session: &pptx_edit::DeckSession,
+        slide_index: u32,
+    ) -> Result<String, EngineError> {
+        let last_slide = self.last_slide.clone();
+        let result = self.layout_slide_json(session, slide_index);
+        self.last_slide = last_slide;
+        result
+    }
+
+    /// Rasterizes one slide with the faces layout measured with and the deck's
+    /// media, leaving hit testing on the slide it had.
+    #[cfg(feature = "raster")]
+    pub fn render_png(
+        &mut self,
+        session: &pptx_edit::DeckSession,
+        slide_index: u32,
+        options: &pptx_raster::RenderOptions,
+    ) -> Result<pptx_raster::RenderedSlide, EngineError> {
+        let last_slide = self.last_slide.clone();
+        let laid_out = slide_scope(session, slide_index).and_then(|scope| {
+            let version = Rc::new(session.version());
+            self.sync_package(session);
+            self.cache_slide(session, &scope, &version)?;
+            Ok(scope.slide.id)
+        });
+        self.last_slide = last_slide;
+        let id = laid_out?;
+        let display_list = &self.rendered[&id].rendered.display_list;
+        let mut assets = Vec::new();
+        collect_assets(&display_list.primitives, &mut assets);
+        let media: Vec<(String, Vec<u8>)> = assets
+            .into_iter()
+            .filter_map(|asset| session.media_bytes(&asset).ok().map(|bytes| (asset, bytes)))
+            .collect();
+        let images: pptx_raster::AssetMap<'_> = media
+            .iter()
+            .map(|(asset, bytes)| (asset.as_str(), bytes.as_slice()))
+            .collect();
+        let resources = pptx_raster::RenderResources::new(self.renderer.fonts(), &images)
+            .with_label_font(self.renderer.fallback_font());
+        pptx_raster::render_slide(display_list, &resources, options).map_err(engine_error)
+    }
+
     /// Enables browser metrics for uncovered characters. Off by default.
     pub fn set_browser_coverage_fallback(&mut self, enabled: bool) {
         if self.renderer.set_browser_coverage_fallback(enabled) {
@@ -480,13 +526,15 @@ impl Renderer {
         let cached = self.rendered.get_mut(id).unwrap();
         cached.used = self.clock;
         cached.validated_at = (Rc::clone(version), self.font_epoch);
-        self.last_slide = Some(id.clone());
+        let previous = self.last_slide.replace(id.clone());
         while self.rendered.len() > LAYOUT_CACHE_CAPACITY {
             let oldest = self
                 .rendered
                 .iter()
                 .filter(|(candidate, _)| {
-                    Some(*candidate) != self.active_slide.as_ref() && *candidate != id
+                    Some(*candidate) != self.active_slide.as_ref()
+                        && Some(*candidate) != previous.as_ref()
+                        && *candidate != id
                 })
                 .min_by_key(|(_, cached)| cached.used)
                 .map(|(id, _)| id.clone())
@@ -520,6 +568,23 @@ impl Renderer {
                 serialize_ms: serialized - laid_out,
             },
         ))
+    }
+}
+
+#[cfg(feature = "raster")]
+fn collect_assets(primitives: &[pptx_render::Primitive], assets: &mut Vec<String>) {
+    for primitive in primitives {
+        match primitive {
+            pptx_render::Primitive::Image {
+                asset_id: Some(asset),
+                ..
+            } if !assets.contains(asset) => assets.push(asset.clone()),
+            pptx_render::Primitive::Chart { primitives, .. }
+            | pptx_render::Primitive::Table { primitives, .. } => {
+                collect_assets(primitives, assets)
+            }
+            _ => {}
+        }
     }
 }
 
@@ -608,6 +673,85 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[cfg(feature = "raster")]
+    #[test]
+    fn native_png_renders_the_export_slide_and_keeps_the_hit_test_slide() {
+        let document = pptx_edit::DeckSession::open(DECK, 915).unwrap();
+        let mut renderer = Renderer::new();
+        renderer.register_font("Test", false, false, FONT).unwrap();
+        renderer.layout_slide_json(&document, 0).unwrap();
+        let shown = renderer.last_slide.clone();
+        let options = pptx_raster::RenderOptions {
+            scale: 2.0,
+            ..Default::default()
+        };
+        let rendered = renderer.render_png(&document, 1, &options).unwrap();
+        assert_eq!(renderer.last_slide, shown);
+        assert_eq!(&rendered.bytes[..8], b"\x89PNG\r\n\x1a\n");
+        let list: serde_json::Value =
+            serde_json::from_str(&renderer.export_slide_json(&document, 1).unwrap()).unwrap();
+        let width = u32::from_be_bytes(rendered.bytes[16..20].try_into().unwrap());
+        assert_eq!(
+            width,
+            (list["width"].as_f64().unwrap() as f32 * 2.0).ceil() as u32
+        );
+    }
+
+    #[test]
+    fn export_layout_keeps_the_hit_test_slide() {
+        let document = pptx_edit::DeckSession::open(DECK, 914).unwrap();
+        let mut renderer = Renderer::new();
+        renderer.register_font("Test", false, false, FONT).unwrap();
+        assert!(document.slide_ids().unwrap().len() > 1);
+        renderer.layout_slide_json(&document, 0).unwrap();
+        let shown = renderer.last_slide.clone();
+        let exported = renderer.export_slide_json(&document, 1).unwrap();
+        assert_eq!(renderer.last_slide, shown);
+        assert_eq!(exported, renderer.layout_slide_json(&document, 1).unwrap());
+        assert_ne!(renderer.last_slide, shown);
+    }
+
+    #[test]
+    fn exports_keep_the_hit_test_slide_laid_out() {
+        let document = pptx_edit::DeckSession::open(DECK, 916).unwrap();
+        let context = EditCtx::local("test");
+        let mut renderer = Renderer::new();
+        renderer.register_font("Test", false, false, FONT).unwrap();
+        while document.slide_ids().unwrap().len() <= LAYOUT_CACHE_CAPACITY + 1 {
+            let count = document.slide_ids().unwrap().len() as u32;
+            document.insert_slide(&context, count, None).unwrap();
+        }
+        let shown = serde_json::from_str::<serde_json::Value>(
+            &renderer.layout_slide_json(&document, 0).unwrap(),
+        )
+        .unwrap();
+        let hit = renderer
+            .hit_test_json(
+                shown["width"].as_f64().unwrap() as f32 / 2.0,
+                shown["height"].as_f64().unwrap() as f32 / 2.0,
+            )
+            .unwrap();
+        let count = document.slide_ids().unwrap().len() as u32;
+        for slide in 1..count {
+            renderer.export_slide_json(&document, slide).unwrap();
+        }
+        assert!(renderer.rendered.len() <= LAYOUT_CACHE_CAPACITY);
+        assert!(
+            renderer
+                .rendered
+                .contains_key(renderer.last_slide.as_ref().unwrap())
+        );
+        assert_eq!(
+            renderer
+                .hit_test_json(
+                    shown["width"].as_f64().unwrap() as f32 / 2.0,
+                    shown["height"].as_f64().unwrap() as f32 / 2.0
+                )
+                .unwrap(),
+            hit
+        );
     }
 
     #[test]

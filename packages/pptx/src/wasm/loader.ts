@@ -15,6 +15,10 @@ import { wasmAssetUrl } from './asset';
 import { copyDecodedFace, fontBytes, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
 import { metafileImageBytes } from '../render/browserImage';
 import { MAX_TIFF_BYTES, isTiff } from '../../../../shared/media';
+import { renderPng as renderEnginePng } from './enginePng';
+import { exportPictureBytes } from '../render/png';
+import type { PptxPngOptions, PptxPngTarget } from './pngOptions';
+export type { PptxPngOptions, PptxPngTarget } from './pngOptions';
 import { frameAssetIds } from '../session/frame';
 import { presentationContexts } from './presentationContext';
 
@@ -133,6 +137,13 @@ export type PresentationCommandReadResult = Extract<PptxReadResult, { ok: false 
 );
 
 export interface PresentationHandle extends CollaborationReplica {
+  /**
+   * Draws a slide as PNG bytes with the editor's painter on a canvas, with the
+   * faces layout measured with. Rejects with `PngExportError` rather than
+   * paint a substitute font, and where no canvas exists names
+   * `@betteroffice/pptx-native`.
+   */
+  renderPng(target: PptxPngTarget, options?: PptxPngOptions): Promise<Uint8Array>;
   isProposalsAvailable(): boolean;
   propose(agentId: string, note: string | null, edits: readonly ProposalEdit[]): Proposal;
   listProposals(): Proposal[];
@@ -368,7 +379,7 @@ export type PresentationPeerHandle = Pick<PresentationHandle,
   'clientId' | 'snapshot' | 'story' | 'anchorCaret' | 'resolveCaretAnchor' | 'version' |
   'readContent' | 'findText' | 'exportStructured' | 'exportMarkdown' | 'validateEdits' |
   'searchText' | 'isProposalsAvailable' | 'listProposals' | 'previewProposal' |
-  'layoutProposalSlide' | 'layoutProposalDiffSlide' | 'layoutProposalDiffSlideById' | 'proposalSlideStrip' | 'layoutSlide' | 'hitTest' |
+  'layoutProposalSlide' | 'layoutProposalDiffSlide' | 'layoutProposalDiffSlideById' | 'proposalSlideStrip' | 'layoutSlide' | 'renderPng' | 'hitTest' |
   'mediaBytes' | 'metafileSvg' | 'save' | 'canUndo' | 'canRedo' | 'undoCaptureMode' | 'onUpdate' | 'dispose'
 >;
 
@@ -616,10 +627,15 @@ function openPresentationInternal(
     try { doc.free(); } catch {}
     throw peer ? peerError(error) : error;
   }
+  const exportFaces = new Map<number, PptxFontFace & { id: number }>();
+  const keepFace = (id: number, face: PptxFontFace) => {
+    exportFaces.set(id, { id, family: face.family, bold: face.bold ?? false, italic: face.italic ?? false, bytes: face.bytes.slice() });
+    return id;
+  };
   if (!peer) {
     try {
-      for (const face of options.fonts ?? []) registerFont(renderer, face);
-      for (const face of options.fallbackFonts ?? []) registerFont(renderer, face, true);
+      for (const face of options.fonts ?? []) keepFace(registerFont(renderer, face), face);
+      for (const face of options.fallbackFonts ?? []) keepFace(registerFont(renderer, face, true), face);
     } catch (error) {
       try { renderer.free(); } catch {}
       try { doc.free(); } catch {}
@@ -874,10 +890,46 @@ function openPresentationInternal(
       );
     },
     registerFont(face: PptxFontFace): number {
-      return wasmCall(() => registerFont(renderer, face));
+      return keepFace(wasmCall(() => registerFont(renderer, face)), face);
     },
     registerFallbackFont(face: PptxFontFace): number {
-      return wasmCall(() => registerFont(renderer, face, true));
+      return keepFace(wasmCall(() => registerFont(renderer, face, true)), face);
+    },
+    renderPng(target: PptxPngTarget, options: PptxPngOptions = {}): Promise<Uint8Array> {
+      let slide: number;
+      try {
+        assertAlive();
+        if (typeof target !== 'object' || target === null || Object.keys(target).length !== 1 || !('slide' in target)) {
+          throw new TypeError('target must be { slide } with a slide index or ID');
+        }
+        const slides = jsonWasmCall<DeckSnapshot>(() => doc.snapshotJson()).slides;
+        const key = target.slide;
+        if (typeof key === 'string') {
+          slide = slides.findIndex((candidate) => candidate.id === key);
+          if (slide < 0) throw new RangeError(`no slide with ID ${JSON.stringify(key)}`);
+        } else if (typeof key === 'number' && Number.isInteger(key)) {
+          if (key < 0 || key >= slides.length) throw new RangeError(`slide index ${key} out of range for ${slides.length} slide(s)`);
+          slide = key;
+        } else throw new TypeError('slide must be an ID (string) or an index (number)');
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return renderEnginePng({
+        doc, renderer,
+        displayList: (index) => jsonWasmCall<SlideDisplayList>(() => renderer.exportSlideJson(doc, index)),
+        media: (assetId) => {
+          assertAlive();
+          let source: Uint8Array;
+          try {
+            source = wasmCall(() => doc.mediaBytes(assetId));
+            if (isTiff(source) && source.byteLength <= MAX_TIFF_BYTES) source = decodeTiffImage(source);
+          } catch { return undefined; }
+          return exportPictureBytes(source, () => {
+            try { return wasmCall(() => doc.metafileSvg(assetId)); } catch { return undefined; }
+          });
+        },
+        fonts: () => [...exportFaces.values()],
+      }, { slide }, options).then((bytes) => { assertAlive(); return bytes; });
     },
     layoutSlide(slideIndex: number): SlideDisplayList {
       return jsonWasmCall(() => renderer.layoutSlideJson(doc, slideIndex));
@@ -1290,7 +1342,7 @@ function openPresentationInternal(
           }
           manifest = JSON.stringify(entries);
           wasmCall(() => {
-            for (const face of faces) registerFont(renderer, face, face.fallback);
+            for (const face of faces) keepFace(registerFont(renderer, face, face.fallback), face);
             if (peer.kind === 'peer') doc.registerPeerFontsJson(manifest);
           });
           faces.length = 0;

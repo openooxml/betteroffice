@@ -1,3 +1,4 @@
+import type { ProgressiveFontSpec } from '../../yrs/residentProgressiveFonts';
 import type { CompatibilityFlags } from '../../docx/settingsParser';
 import type { FontDecoder } from '../../../../../shared/office-session/fontDecoder';
 import { baseLatinAlias, baseLatinCandidate, charactersFromBits, symbolFamily, type FontCoverage } from './fontCoverage';
@@ -82,6 +83,8 @@ export interface RustMeasureSource {
     requirements: ResidentFontRequirement[],
   ): (next: ResidentFontRequirement[]) => boolean;
   clear(): void;
+  /** The script-fallback slots registered from a sliced face's skeleton and core, with their files. */
+  progressiveFonts?(): Promise<ProgressiveFontSpec[]>;
 }
 
 let enginePromise: Promise<RustTextEngine> | null = null;
@@ -103,6 +106,8 @@ export function createRustMeasureSource(options: {
   engine: RustTextEngine;
   bundled?: BundledFontProvider;
   runtime?: { decoder?: FontDecoder };
+  /** Register sliced script-fallback faces from their skeleton and core. */
+  progressive?: boolean;
 }): RustMeasureSource {
   const engine = options.engine;
   const hosted = hostedFontFamilies(options.bundled);
@@ -124,11 +129,28 @@ export function createRustMeasureSource(options: {
       const provider = excludeHostedFontFamilies(await resolveDefaultFontProvider(options.runtime), hosted);
       if (current === generation) implicit = isImplicitFontProvider(provider);
       return provider;
-    }) },
+    }), progressive: options.progressive
+      ? async (slices) => import('@betteroffice/fonts/progressive').then(async ({ openSlicedFace, sliceSourceOf }) => {
+        const face = await openSlicedFace(slices as Parameters<typeof openSlicedFace>[0]);
+        if (!sliceSourceOf(face)) throw new Error('A sliced face opened without file URLs cannot load its outlines in the worker');
+        return face;
+      })
+      : undefined },
   );
   let compat: CompatibilityFlags | undefined;
 
   return {
+    async progressiveFonts() {
+      const specs: ProgressiveFontSpec[] = [];
+      if (registry.progressiveFaces().size === 0) return specs;
+      const { sliceSourceOf } = await import('@betteroffice/fonts/progressive');
+      for (const [slot, face] of registry.progressiveFaces()) {
+        const source = await sliceSourceOf(face as Parameters<typeof sliceSourceOf>[0]);
+        if (source) specs.push({ slot, source });
+      }
+      return specs;
+    },
+
     setEmbeddedFaces(faces, appFaces): void {
       appFamilies = new Set((appFaces ?? []).map(face => face.family.trim().toLowerCase()));
       registry.setEmbeddedFaces(faces, appFaces);
