@@ -155,7 +155,7 @@ const DEFAULT_TOOLS = [
   'xlsx_list_conditional_formats', 'xlsx_read_conditional_format_formula', 'xlsx_preview', 'xlsx_find_replace',
   'xlsx_write_range', 'xlsx_edit_grid', 'xlsx_edit_sheets', 'xlsx_edit_defined_names', 'xlsx_format', 'xlsx_sort',
   'xlsx_set_auto_filter', 'xlsx_edit_charts', 'xlsx_edit_conditional_formats',
-  'office_files', 'office_open', 'office_outline', 'office_grep', 'office_read', 'office_cells', 'office_render',
+  'office_files', 'office_open', 'office_outline', 'office_grep', 'office_read', 'docx_read_runs', 'office_cells', 'office_render',
   'office_verify', 'office_close', 'office_propose', 'office_propose_cells', 'office_review', 'office_accept',
   'office_reject', 'docx_edit', 'office_export',
   'pptx_outline', 'pptx_read_slide', 'pptx_preview', 'pptx_edit',
