@@ -201,6 +201,26 @@ test('Ctrl or Cmd+A moves to the story start, then extends to its end', async ()
   }
 });
 
+test('Ctrl+A follows a pending click out of an object selection without reporting a refusal', async () => {
+  const { client, store } = setup('abc', true);
+  const view = render(<PeerlessTextInput store={store} />);
+  const input = textarea(view.container);
+  await act(async () => {
+    void store.dispatch({ kind: 'selectAtPoint', payload: {
+      frame: client.state.frame, x: 30, y: 50, extend: false, inputTime: 1, undoGroup: 'pointer',
+    } }).catch(() => {});
+    fireEvent.keyDown(input, { key: 'a', ctrlKey: true });
+  });
+  expect(selectionMoves(client)).toMatchObject([
+    { payload: { motion: 'storyStart', extend: false, at: { source: 'afterSeq', seq: 1 } } },
+    { payload: { motion: 'storyEnd', extend: true, at: { source: 'afterSeq', seq: 2 } } },
+  ]);
+  await act(async () => {
+    client.ack(2, { outcomes: [{ seq: 2, status: 'refused', reason: 'bad-target', committed: false }] });
+  });
+  expect(view.queryByRole('alert')).toBeNull();
+});
+
 test('Ctrl+A leaves object selections, composition and other chords alone', async () => {
   const object = setup('abc', true);
   const objectView = render(<PeerlessTextInput store={object.store} />);
