@@ -6621,5 +6621,173 @@
       "redoDepth": 0,
       "undoDepth": 2
     }
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "applied": true,
+      "changed": [],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "conditionalFormats",
+    "result": [
+      {
+        "editable": true,
+        "format": {
+          "bold": true
+        },
+        "formulas": [
+          "1"
+        ],
+        "id": "cf:7:1:0",
+        "operator": "greaterThan",
+        "priority": 1,
+        "range": "A1:A3",
+        "type": "cellIs"
+      }
+    ]
+  },
+  {
+    "op": "removeNewestConditionalFormat",
+    "result": {
+      "applied": true,
+      "changed": [],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "conditionalFormats",
+    "result": []
+  },
+  {
+    "op": "undo",
+    "result": {
+      "applied": true,
+      "changed": [],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "conditionalFormats",
+    "result": [
+      {
+        "editable": true,
+        "format": {
+          "bold": true
+        },
+        "formulas": [
+          "1"
+        ],
+        "id": "cf:7:1:0",
+        "operator": "greaterThan",
+        "priority": 1,
+        "range": "A1:A3",
+        "type": "cellIs"
+      }
+    ]
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "applied": true,
+      "changed": [],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "sheetInfo",
+    "result": {
+      "activeSheet": 0,
+      "autoFilter": "A1:C5",
+      "contentHeight": 1260,
+      "contentWidth": 499.05078,
+      "frozenCols": 0,
+      "frozenRows": 0,
+      "initialScrollX": 0,
+      "initialScrollY": 0,
+      "sheetIds": [
+        "sheet:0",
+        "sheet:1",
+        "sheet:2"
+      ],
+      "sheetNames": [
+        "Budget",
+        "Summary",
+        "Styled"
+      ]
+    }
+  },
+  {
+    "op": "listDefinedNames",
+    "result": {
+      "items": [
+        {
+          "hidden": true,
+          "name": "_xlnm._FilterDatabase",
+          "refersTo": "'Budget'!$A$1:$C$5",
+          "scope": 0
+        }
+      ],
+      "nextOffset": null,
+      "total": 1,
+      "version": "<version:25>"
+    }
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "applied": true,
+      "changed": [],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "sheetInfo",
+    "result": {
+      "activeSheet": 0,
+      "autoFilter": null,
+      "contentHeight": 1260,
+      "contentWidth": 499.05078,
+      "frozenCols": 0,
+      "frozenRows": 0,
+      "initialScrollX": 0,
+      "initialScrollY": 0,
+      "sheetIds": [
+        "sheet:0",
+        "sheet:1",
+        "sheet:2"
+      ],
+      "sheetNames": [
+        "Budget",
+        "Summary",
+        "Styled"
+      ]
+    }
+  },
+  {
+    "op": "listDefinedNames",
+    "result": {
+      "items": [],
+      "nextOffset": null,
+      "total": 0,
+      "version": "<version:26>"
+    }
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "error": "structural operations are unavailable in collaborative mode"
+    }
+  },
+  {
+    "op": "historyState",
+    "result": {
+      "canRedo": false,
+      "canUndo": true,
+      "redoDepth": 0,
+      "undoDepth": 5
+    }
   }
 ]

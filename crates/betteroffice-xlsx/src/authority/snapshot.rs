@@ -2026,6 +2026,7 @@ impl AuthoritySnapshotEncoder {
             next_sheet_id: _,
             undo_stack: _,
             redo_stack: _,
+            collaborative: _,
         } = a;
         let mut preflight = BaseCursor::default();
         while let Some(record) = preflight.next(base) {
@@ -2118,6 +2119,7 @@ impl WorkbookAuthority {
             next_sheet_id,
             undo_stack: _,
             redo_stack: _,
+            collaborative: _,
         } = self;
         (
             doc.client_id().get(),

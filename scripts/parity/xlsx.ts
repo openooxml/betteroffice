@@ -75,6 +75,12 @@ export const xlsx: Format = {
         validateEdits: (args) => workbook.validateEdits(args as unknown as XlsxEditRequest),
         applyEdits: (args) => workbook.applyEdits(args as unknown as XlsxEditRequest),
         applyOps: (args) => mutationResult(workbook.applyOps(args.ops as unknown[])),
+        removeNewestConditionalFormat: (args) => {
+          const sheet = Number(args.sheet);
+          const rules = workbook.conditionalFormats(sheet);
+          const { id } = rules.reduce((newest, rule) => rule.priority > newest.priority ? rule : newest);
+          return mutationResult(workbook.applyOps([{ type: 'removeConditionalFormat', sheet, id }]));
+        },
         moveRange: (args) => mutationResult(
           workbook.moveRange(Number(args.sheet), String(args.source), String(args.destination))
         ),

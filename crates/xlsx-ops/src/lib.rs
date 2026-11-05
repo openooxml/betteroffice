@@ -13,7 +13,8 @@ mod undo;
 #[doc(hidden)]
 pub use apply::InPlaceBatch;
 pub use apply::{
-    InvertedOp, OpError, apply, apply_in_place, apply_ops, remap_ref, validate_defined_name,
+    InvertedOp, OpError, apply, apply_in_place, apply_ops, filter_database_formula, remap_ref,
+    validate_auto_filter_range, validate_conditional_format, validate_defined_name,
     validate_defined_name_formula,
 };
 pub use conditional_formats::{

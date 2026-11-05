@@ -156,8 +156,8 @@ writes back.
 Standalone and collaborative workbooks support cell content, formatting, row
 heights, column widths, edit batches, structured export and proposals.
 Collaborative replicas exchange Yrs updates and track local user edits for undo,
-and can merge cells, freeze panes, edit defined names and add sheets at the end
-of the workbook.
+and can merge cells, freeze panes, edit defined names, add and remove conditional
+formats, set and clear auto filters, and add sheets at the end of the workbook.
 Standalone workbooks additionally support the other structural edits and remap
 chart references and anchors.
 
