@@ -177,6 +177,21 @@ def test_collaborative_sheet_limits_raise_the_structure_error(sample_bytes):
     assert left.value(added, "A1") == "peer"
 
 
+def test_collaborative_defined_names_replicate(sample_bytes):
+    left = bo.Workbook.open_collaborative(sample_bytes, client_id=7)
+    right = bo.Workbook.open_collaborative(sample_bytes, client_id=8)
+    left.apply_ops([{"type": "setDefinedName", "name": "Shared", "refers_to": "1"}])
+    right.apply_update(left.diff(right.state_vector()))
+    listed = right.list_defined_names({"scope": None})
+    assert "Shared" in [item["name"] for item in listed["items"]]
+    assert "overLimit" not in listed
+    right.apply_ops([{"type": "deleteDefinedName", "name": "Shared"}])
+    left.apply_update(right.diff(left.state_vector()))
+    assert "Shared" not in [item["name"] for item in left.list_defined_names({"scope": None})["items"]]
+    with pytest.raises(bo.CollaborativeStructureError):
+        left.apply_ops([{"type": "setDefinedNames", "defined_names": []}])
+
+
 def test_new_errors_roll_up_to_xlsx_error():
     assert issubclass(bo.CollaborativeStructureError, bo.XlsxError)
     assert not issubclass(bo.CollaborativeStructureError, ValueError)

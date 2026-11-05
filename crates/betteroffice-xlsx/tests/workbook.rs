@@ -11163,7 +11163,7 @@ fn defined_name_edits_recalculate_dependents_and_undo_redo() {
 }
 
 #[test]
-fn defined_name_edits_refuse_ambiguous_source_and_collaboration() {
+fn defined_name_edits_refuse_an_ambiguous_source() {
     let source = reference_operator_names_fixture(
         r#"<definedName name="Rate">1</definedName><definedName name="RATE">2</definedName>"#,
     );
@@ -11177,18 +11177,27 @@ fn defined_name_edits_refuse_ambiguous_source_and_collaboration() {
         .is_err()
     );
     assert_eq!(book.save().unwrap(), before);
-    for op in [
-        set_name("Other", "3", None, None),
-        Op::DeleteDefinedName {
-            name: "Rate".into(),
-            scope: None,
-        },
+    for (op, reason) in [
+        (
+            set_name("Other", "3", None, None),
+            "ambiguous defined name source layout",
+        ),
+        (
+            Op::DeleteDefinedName {
+                name: "Rate".into(),
+                scope: None,
+            },
+            "ambiguous defined name in this scope",
+        ),
     ] {
         let mut book = Workbook::open_collaborative(&source, 101).unwrap();
-        assert!(matches!(
-            book.apply_ops(vec![op], CalculationOptions::default()),
-            Err(Error::CollaborativeStructureOperation)
-        ));
+        let state = book.encode_state_as_update_v1();
+        let failure = book
+            .apply_ops(vec![op], CalculationOptions::default())
+            .unwrap_err()
+            .to_string();
+        assert!(failure.contains(reason), "{failure}");
+        assert_eq!(book.encode_state_as_update_v1(), state);
     }
 }
 

@@ -6561,12 +6561,65 @@
     }
   },
   {
+    "op": "applyOps",
+    "result": {
+      "applied": true,
+      "changed": [],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "listDefinedNames",
+    "result": {
+      "items": [
+        {
+          "hidden": false,
+          "name": "Shared",
+          "refersTo": "1",
+          "scope": null
+        }
+      ],
+      "nextOffset": null,
+      "total": 1,
+      "version": "<version:23>"
+    }
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "applied": true,
+      "changed": [],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "listDefinedNames",
+    "result": {
+      "items": [],
+      "nextOffset": null,
+      "total": 0,
+      "version": "<version:24>"
+    }
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "error": "structural operations are unavailable in collaborative mode"
+    }
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "error": "structural operations are unavailable in collaborative mode"
+    }
+  },
+  {
     "op": "historyState",
     "result": {
       "canRedo": false,
-      "canUndo": false,
+      "canUndo": true,
       "redoDepth": 0,
-      "undoDepth": 0
+      "undoDepth": 2
     }
   }
 ]

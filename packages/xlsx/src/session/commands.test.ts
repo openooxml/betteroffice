@@ -881,6 +881,27 @@ describe('workbook commands', () => {
     } finally { await session.dispose(); }
   });
 
+  test('queued numeric name scope refuses after concurrent sheet deletion', async () => {
+    const session = await createTestWorkbookSession(bytes, batchRequests);
+    try {
+      const remove = command(session, 1, 'applyOps', { args: [[{ type: 'removeSheet', index: 1 }]] });
+      const scoped = command(session, 2, 'applyOps', {
+        args: [[{ type: 'setDefinedName', name: 'Scoped', refers_to: '1', scope: 0 }]],
+      }, 1);
+      const deleted = command(session, 3, 'applyOps', {
+        args: [[{ type: 'deleteDefinedName', name: 'Scoped', scope: 0 }]],
+      }, 1);
+      const global = command(session, 4, 'applyOps', {
+        args: [[{ type: 'setDefinedName', name: 'Global', refers_to: '1', scope: null }]],
+      }, 1);
+      const statuses = await Promise.all([remove, scoped, deleted, global].map((item) => session.submit(item)));
+      expect(statuses[0]).toMatchObject({ status: 'applied', committed: true });
+      expect(statuses[1]).toMatchObject({ status: 'refused', reason: 'stale-target', committed: false });
+      expect(statuses[2]).toMatchObject({ status: 'refused', reason: 'stale-target', committed: false });
+      expect(statuses[3]).toMatchObject({ status: 'applied', committed: true });
+    } finally { await session.dispose(); }
+  });
+
   test('queued numeric moveSheet refuses after concurrent sheet deletion', async () => {
     const session = await createTestWorkbookSession(bytes, batchRequests);
     try {
