@@ -116,6 +116,8 @@ export declare class PptxRenderer {
   registerFallbackFont(family: string, bold: boolean, italic: boolean, bytes: Uint8Array): number
   saveBytes(document: PptxDocument): Uint8Array
   layoutSlideJson(document: PptxDocument, slideIndex: number): string
+  exportSlideJson(document: PptxDocument, slideIndex: number): string
+  renderPngTarget(document: PptxDocument, targetJson: string, optionsJson: string): Uint8Array
   layoutSlideProfiledJson(document: PptxDocument, slideIndex: number): string
   hitTestJson(x: number, y: number): string
   setActiveSlide(document: PptxDocument, id: string, key: string): boolean

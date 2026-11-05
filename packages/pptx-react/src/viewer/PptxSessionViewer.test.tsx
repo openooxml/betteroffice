@@ -53,6 +53,7 @@ function session(count = 4) {
     applyEdits: mock(async (): Promise<pptx.PptxEditResult> => { throw new Error('Unexpected mutation'); }),
     slides: async () => slides, slideSize: async () => ({ width: 960, height: 540 }),
     save: async () => new Uint8Array([8, 9]).buffer,
+    renderPng: mock(async () => new Uint8Array([137, 80, 78, 71])),
   };
   const viewer: PresentationSession = {
     state: { format: 'pptx', stage: 'ready', version: 0, dirty: false, slides, size: { width: 960, height: 540 } },

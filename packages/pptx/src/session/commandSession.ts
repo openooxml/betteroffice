@@ -167,6 +167,7 @@ export function createPptxWorkerSession(
       flush: (seq) => perform(() => opened.flush(seq)),
       read: (request) => perform(() => opened.read(request)),
       save: () => perform(() => opened.save()),
+      renderPng: (target, options) => perform(() => opened.renderPng!(target, options)),
       access: (method, ...args) => perform(() => opened.access!(method, ...args)),
       takeRecoveryUpdate: () => opened.takeRecoveryUpdate?.(),
       checkpoint: (options) => perform(() => opened.checkpoint!(options)),

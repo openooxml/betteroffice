@@ -564,6 +564,13 @@ export interface PaintSlideOptions {
     maxShadowPixels?: number;
     textChanges?: readonly ProposalTextChange[];
     shapeChanges?: readonly ProposalShapeChange[];
+    /** The family a run paints with in place of its own, e.g. an export's private face. */
+    fontFamily?: (font: {
+        family: string;
+        bold: boolean;
+        italic: boolean;
+        id: number;
+    }) => string | undefined;
 }
 export interface SlideCanvasLike {
     width: number;
@@ -584,6 +591,7 @@ export declare function paintSlide(ctx: CanvasRenderingContext2D, list: SlideDis
 export declare function applyImageEffects(data: Uint8ClampedArray, effects: ImageEffect[]): void;
 
 // ---- session/client.d.ts ----
+import type { PptxPngOptions, PptxPngTarget } from '../wasm/pngOptions';
 import { type SessionTransport } from '../../../../shared/office-session/transport';
 import type { Promisified, SessionFailure } from '../../../../shared/office-session/types';
 import type { OpenPresentationOptions } from '../wasm/loader';
@@ -603,12 +611,14 @@ export interface OpenPresentationSessionOptions extends OpenPresentationOptions 
  */
 export interface PresentationSession {
     readonly state: PresentationSessionState;
-    readonly call: Promisified<Omit<PresentationSessionMethods, 'open' | 'dispose' | 'frame'>> & {
+    readonly call: Promisified<Omit<PresentationSessionMethods, 'open' | 'dispose' | 'frame' | 'renderPng'>> & {
         /**
          * @experimental A newer frame call replaces a queued one, which rejects with an error
          * named SessionSuperseded.
          */
         frame(slideIndex: number): Promise<PresentationFrame>;
+        /** Draws a slide as PNG bytes in the session's engine. */
+        renderPng(target: PptxPngTarget, options?: PptxPngOptions): Promise<Uint8Array>;
     };
     save(): Promise<Uint8Array>;
     on<K extends keyof PresentationSessionEvents>(name: K, listener: (payload: PresentationSessionEvents[K]) => void): () => void;
@@ -754,6 +764,7 @@ import type { PipeCommandPayload, PipeOutputBatch } from '../../../../shared/col
 import type { PptxPresenceCursor, PptxPresencePeer } from '../collaboration/types';
 import type { SessionFailure } from '../../../../shared/office-session/types';
 import type { PresentationHandle } from '../wasm/loader';
+import type { PptxPngOptions, PptxPngTarget } from '../wasm/pngOptions';
 import type { PptxEditRequest, PptxEditResult, PptxReadRequest, PptxReadResult, PptxStoryTarget } from '../edits';
 import type { DeckSnapshot, ParagraphAlignment, ShapeRect, ShapeDraft, PresetShapeDraft, ShapeReceipt, TextStyle, TextStyleSnapshot } from '../types';
 import type { PresentationSessionOpenOptions, PresentationSlideSummary, PresentationWireFrame } from './methods';
@@ -1148,6 +1159,8 @@ export type PresentationCommandMethods = FontDecoderMethods & {
     thumbnailFrame(request: PresentationCommandThumbnailRequest): PresentationCommandThumbnailResult;
     flushCommandEditor(fence: PresentationCommandFence): PresentationCommandAck;
     saveCommandEditor(fence: PresentationCommandFence): PresentationCommandSaveResult;
+    /** Draws a slide as PNG bytes in the worker, after the fenced commands. */
+    renderCommandPng(fence: PresentationCommandFence, target: PptxPngTarget, options: Omit<PptxPngOptions, 'signal'>): ArrayBuffer;
     accessCommandEditor(fence: PresentationCommandFence, method: PresentationCommandAccessMethod, args: unknown[]): PresentationCommandAccessResult;
     checkpointCommandEditor(fence: PresentationCommandFence, options?: {
         rebase?: boolean;
@@ -1164,6 +1177,8 @@ export interface PresentationCommandClient {
     dispatch(intent: PresentationCommandIntent, basis?: PresentationCommandBasis): Promise<PresentationCommandAck>;
     flush(seq?: number): Promise<PresentationCommandAck>;
     save(): Promise<Uint8Array>;
+    /** Draws a slide as PNG bytes in the worker, after the commands sent so far. */
+    renderPng?(target: PptxPngTarget, options?: PptxPngOptions): Promise<Uint8Array>;
     access?<K extends PresentationCommandAccessMethod>(method: K, ...args: Parameters<PresentationCommandAccessMethods[K]>): Promise<ReturnType<PresentationCommandAccessMethods[K]>>;
     takeRecoveryUpdate?(): ArrayBuffer | undefined;
     checkpoint?(options?: {
@@ -1187,6 +1202,7 @@ export declare const PRESENTATION_COMMAND_METHODS: {
     thumbnailFrame: true;
     flushCommandEditor: true;
     saveCommandEditor: true;
+    renderCommandPng: true;
     readEditor: true;
     prepareCommandPicture: true;
     accessCommandEditor: true;
@@ -1357,6 +1373,9 @@ import type { MethodPolicies, SessionState } from '../../../../shared/office-ses
 import type { PptxEditRequest, PptxEditResult, PptxFindRequest, PptxFindResult, PptxReadRequest, PptxReadResult, PptxValidationResult } from '../edits';
 import type { SlideDisplayList } from '../types';
 import type { OpenPresentationOptions } from '../wasm/loader';
+import type { PptxPngOptions, PptxPngTarget } from '../wasm/pngOptions';
+/** PNG options a session call carries; an abort signal stays on the caller's side. */
+export type PresentationPngOptions = Omit<PptxPngOptions, 'signal'>;
 /** @experimental */
 export interface PresentationFrame {
     displayList: SlideDisplayList;
@@ -1443,6 +1462,8 @@ export type PresentationSessionMethods = {
         height: number;
     };
     save(): ArrayBuffer;
+    /** Draws a slide as PNG bytes in the session's engine, with the faces it measured with. */
+    renderPng(target: PptxPngTarget, options?: PresentationPngOptions): ArrayBuffer;
     dispose(): void;
 };
 /** Exhaustive RPC names used by the session client. */
@@ -1457,6 +1478,7 @@ export declare const PRESENTATION_SESSION_METHODS: {
     slides: true;
     slideSize: true;
     save: true;
+    renderPng: true;
     dispose: true;
 };
 /** Non-reorderable policies preserve call order across all lanes. */
@@ -3878,6 +3900,10 @@ export class PptxDocument {
 export class PptxRenderer {
     free(): void;
     [Symbol.dispose](): void;
+    /**
+     * `layoutSlideJson` for an export: hit testing keeps the slide it had.
+     */
+    exportSlideJson(document: PptxDocument, slide_index: number): string;
     hitTestJson(x: number, y: number): string;
     hitTestSlideJson(document: PptxDocument, id: string, x: number, y: number): string;
     layoutProposalDiffSlideByIdJson(document: PptxDocument, id: string, slide_id: string): string;
@@ -4057,6 +4083,7 @@ export interface InitOutput {
     readonly pptxdocument_validateEditsJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_validateProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_version: () => [number, number];
+    readonly pptxrenderer_exportSlideJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxrenderer_hitTestJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxrenderer_hitTestSlideJson: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly pptxrenderer_layoutProposalDiffSlideByIdJson: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
@@ -4102,6 +4129,8 @@ export default function __wbg_init (module_or_path?: { module_or_path: InitInput
 // ---- wasm/loader.d.ts ----
 import type { InitInput } from './generated/pptx_wasm.js';
 import { type FontDecoder } from '../../../../shared/office-session/fontDecoder';
+import type { PptxPngOptions, PptxPngTarget } from './pngOptions';
+export type { PptxPngOptions, PptxPngTarget } from './pngOptions';
 export declare const decodeFontFace: FontDecoder;
 import type { PptxExportOptions, PptxExportResult, PptxMarkdownContent, PptxMarkdownOptions, PptxStructuredContent } from '../structuredExport';
 import type { Proposal, ProposalAcceptance, ProposalDiffSlide, ProposalEdit, ProposalPreview, ProposalStripEntry } from '../proposals';
@@ -4159,6 +4188,13 @@ export type PresentationCommandReadResult = Extract<PptxReadResult, {
     }[];
 });
 export interface PresentationHandle extends CollaborationReplica {
+    /**
+     * Draws a slide as PNG bytes with the editor's painter on a canvas, with the
+     * faces layout measured with. Rejects with `PngExportError` rather than
+     * paint a substitute font, and where no canvas exists names
+     * `@betteroffice/pptx-native`.
+     */
+    renderPng(target: PptxPngTarget, options?: PptxPngOptions): Promise<Uint8Array>;
     isProposalsAvailable(): boolean;
     propose(agentId: string, note: string | null, edits: readonly ProposalEdit[]): Proposal;
     listProposals(): Proposal[];
@@ -4363,7 +4399,7 @@ export interface PresentationReplayReply {
     outcome: PresentationReplayOutcome;
 }
 /** @internal */
-export type PresentationPeerHandle = Pick<PresentationHandle, 'clientId' | 'snapshot' | 'story' | 'anchorCaret' | 'resolveCaretAnchor' | 'version' | 'readContent' | 'findText' | 'exportStructured' | 'exportMarkdown' | 'validateEdits' | 'searchText' | 'isProposalsAvailable' | 'listProposals' | 'previewProposal' | 'layoutProposalSlide' | 'layoutProposalDiffSlide' | 'layoutProposalDiffSlideById' | 'proposalSlideStrip' | 'layoutSlide' | 'hitTest' | 'mediaBytes' | 'metafileSvg' | 'save' | 'canUndo' | 'canRedo' | 'undoCaptureMode' | 'onUpdate' | 'dispose'>;
+export type PresentationPeerHandle = Pick<PresentationHandle, 'clientId' | 'snapshot' | 'story' | 'anchorCaret' | 'resolveCaretAnchor' | 'version' | 'readContent' | 'findText' | 'exportStructured' | 'exportMarkdown' | 'validateEdits' | 'searchText' | 'isProposalsAvailable' | 'listProposals' | 'previewProposal' | 'layoutProposalSlide' | 'layoutProposalDiffSlide' | 'layoutProposalDiffSlideById' | 'proposalSlideStrip' | 'layoutSlide' | 'renderPng' | 'hitTest' | 'mediaBytes' | 'metafileSvg' | 'save' | 'canUndo' | 'canRedo' | 'undoCaptureMode' | 'onUpdate' | 'dispose'>;
 /** @internal */
 export declare function openPresentationReplayBaseline(bytes: Uint8Array, options?: OpenPresentationOptions): PresentationPeerHandle;
 /** @internal */
@@ -4422,7 +4458,28 @@ export declare function exportPptxMarkdown(bytes: Uint8Array, options?: PptxExpo
 export declare function renderPptxMarkdown(content: PptxStructuredContent, options?: PptxMarkdownOptions): Promise<PptxMarkdownContent>;
 export declare function decodeTiffImage(bytes: Uint8Array): Uint8Array;
 export declare function openPresentation(bytes: Uint8Array, options?: OpenPresentationOptions): PresentationHandle;
-export {};
+
+// ---- wasm/pngOptions.d.ts ----
+import type { PptxFontFace } from '../types';
+/** What `renderPng` draws: a slide by zero-based index or by its ID. */
+export type PptxPngTarget = {
+    slide: number | string;
+};
+export interface PptxPngOptions {
+    /** Device pixels per slide pixel. Defaults to 1. */
+    scale?: number;
+    /** `'slide'` (default) paints white under the slide, as the editor shows it; `'transparent'` nothing; or a `#rrggbb` color. */
+    background?: 'slide' | 'transparent' | `#${string}`;
+    /** Scratch pixels every shadow on the slide may blur between them. */
+    maxShadowPixels?: number;
+    signal?: AbortSignal;
+    /**
+     * Faces to paint with besides those the presentation registered, matched by
+     * family and style. One that fails to load rejects with `PngExportError`
+     * `font-unavailable`.
+     */
+    fonts?: ReadonlyArray<PptxFontFace>;
+}
 
 // ---- worker.d.ts ----
 /** @internal */

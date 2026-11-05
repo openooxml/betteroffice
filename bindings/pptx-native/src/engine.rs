@@ -135,6 +135,69 @@ fn throw_error(env: &Env, message: &str) -> Error {
     }
 }
 
+/// `{ slide }` and `{ scale, background, maxShadowPixels }` as the JS handle sends them.
+fn png_request(
+    target_json: &str,
+    options_json: &str,
+) -> std::result::Result<(u32, pptx_engine::PngOptions), String> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Target {
+        slide: u32,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields, rename_all = "camelCase")]
+    struct Options {
+        scale: Option<f64>,
+        background: Option<String>,
+        max_shadow_pixels: Option<u64>,
+    }
+    let target: Target = serde_json::from_str(target_json)
+        .map_err(|_| "png-invalid: target must be { slide } with a slide index".to_owned())?;
+    let options: Options = serde_json::from_str(options_json)
+        .map_err(|error| format!("png-invalid: bad options: {error}"))?;
+    let mut png = pptx_engine::PngOptions::default();
+    if let Some(scale) = options.scale {
+        if !scale.is_finite() || scale <= 0.0 {
+            return Err("png-invalid: scale must be finite and positive".to_owned());
+        }
+        png.scale = scale as f32;
+        if !png.scale.is_finite() {
+            return Err(format!(
+                "png-too-large: scale {scale} is past any slide size"
+            ));
+        }
+    }
+    if let Some(budget) = options.max_shadow_pixels {
+        png.max_shadow_pixels = budget;
+    }
+    png.background = match options.background.as_deref() {
+        None | Some("slide") => pptx_engine::PngBackground::Slide,
+        Some("transparent") => pptx_engine::PngBackground::Transparent,
+        Some(color) if color.starts_with('#') => {
+            pptx_engine::PngBackground::Color(color.to_owned())
+        }
+        Some(other) => {
+            return Err(format!(
+                "png-invalid: background must be \"slide\", \"transparent\", or a #rrggbb color, not {other:?}"
+            ));
+        }
+    };
+    Ok((target.slide, png))
+}
+
+/// Prefixes a render failure with what kind it is, as the other native PNG methods do.
+fn png_error(message: &str) -> String {
+    let kind = if message.contains("no font has been registered") {
+        "png-font-unavailable"
+    } else if message.contains("px limit") {
+        "png-too-large"
+    } else {
+        "png-invalid"
+    };
+    format!("{kind}: {message}")
+}
+
 fn map_error(env: Env, error: EngineError) -> Error {
     let result = (|| -> Result<()> {
         let (name, code) = match error.kind {
@@ -168,6 +231,8 @@ pub struct PptxDocument {
 pub struct PptxRenderer {
     inner: Option<Renderer>,
     failure: Failure,
+    #[cfg(feature = "test-hooks")]
+    panic_next_png: Cell<bool>,
 }
 
 impl PptxDocument {
@@ -207,7 +272,18 @@ impl Default for PptxRenderer {
         Self {
             inner: Some(Renderer::new()),
             failure: RefCell::new(None),
+            #[cfg(feature = "test-hooks")]
+            panic_next_png: Cell::new(false),
         }
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+#[napi]
+impl PptxRenderer {
+    #[napi(catch_unwind, js_name = "panicNextPngForTest")]
+    pub fn panic_next_png_for_test(&self) {
+        self.panic_next_png.set(true);
     }
 }
 
@@ -1097,6 +1173,51 @@ impl PptxRenderer {
         renderer
             .layout_slide_json(document.session(), slide_index)
             .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(catch_unwind)]
+    pub fn export_slide_json(
+        &mut self,
+        env: Env,
+        document: &PptxDocument,
+        slide_index: u32,
+    ) -> Result<String> {
+        let _call = EngineCall::new(env);
+        let renderer = self.renderer_mut(env)?;
+        let _document_call = EngineCall::new(env);
+        let document = document.document(env)?;
+        renderer
+            .export_slide_json(document.session(), slide_index)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(catch_unwind)]
+    pub fn render_png_target(
+        &mut self,
+        env: Env,
+        document: &PptxDocument,
+        target_json: String,
+        options_json: String,
+    ) -> Result<Uint8Array> {
+        let _call = EngineCall::new(env);
+        let (slide, options) = png_request(&target_json, &options_json)
+            .map_err(|message| throw_error(&env, &message))?;
+        #[cfg(feature = "test-hooks")]
+        let panic_next = self.panic_next_png.replace(false);
+        let renderer = self.renderer_mut(env)?;
+        let _document_call = EngineCall::new(env);
+        let document = document.document(env)?;
+        #[cfg(feature = "test-hooks")]
+        if panic_next {
+            panic!("panicNextPngForTest");
+        }
+        renderer
+            .render_png(document.session(), slide, &options)
+            .map_err(|error| match error.kind {
+                ErrorKind::Message => throw_error(&env, &png_error(&error.message)),
+                _ => map_error(env, error),
+            })
+            .and_then(|rendered| byte_result(env, rendered.bytes))
     }
 
     #[napi(catch_unwind)]
