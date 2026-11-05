@@ -1,4 +1,5 @@
 import { PngExportError } from '../../../../../shared/office-session/pngExportError';
+import type { BundledFontProvider } from '../measure';
 import type { DisplayPage } from './displayList';
 
 /** The rasterizer's largest PNG side and area, in pixels. */
@@ -19,6 +20,8 @@ export interface DocxPngOptions {
   scale?: number;
   signal?: AbortSignal;
   fonts?: ReadonlyArray<DocxPngFontFace>;
+  /** The provider the editor showing this document measures with, where it has one. */
+  fontProvider?: BundledFontProvider;
 }
 
 /** Whether this runtime can paint and encode a PNG on a canvas: one with a 2d context, not only a document. */

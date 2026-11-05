@@ -92,6 +92,16 @@ describe('YrsSession.renderPng', () => {
     } finally { session.destroy(); }
   });
 
+  test('wraps text in a family with no bundled face of its own, as the editor does', async () => {
+    stubBrowser();
+    const session = await opened();
+    try {
+      session.insertText({ story: 'body', paraId: session.paragraphs('body')[0]!.paraId, offset: 0 }, 'A great many more words at the start of this page. '.repeat(600));
+      const refused = await session.renderPng({ page: 9999 }).catch((error: Error) => error.message);
+      expect(Number(/for (\d+) page/.exec(String(refused))?.[1])).toBeGreaterThan(20);
+    } finally { session.destroy(); }
+  });
+
   test('refuses what the native renderer refuses, with the same messages', async () => {
     stubBrowser();
     const session = await opened();

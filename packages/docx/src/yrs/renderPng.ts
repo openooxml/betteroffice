@@ -1,5 +1,5 @@
 import { buildResidentRegionLayoutRequest, computeLayout, documentRenderEnv, getLayoutKernelInputs } from '../editor/computeLayout';
-import { createRustMeasureSource, resolveDefaultFontProvider, type ResidentFontRequirement } from '../layout/measure';
+import { createRustMeasureSource, type BundledFontProvider, type ResidentFontRequirement } from '../layout/measure';
 import type { EmbeddedFaceInput } from '../layout/measure/fontRegistry';
 import { fontUnavailable, pngPage, pngScale, type DocxPngFontFace, type DocxPngOptions, type DocxPngTarget } from '../layout/render/png';
 import { buildRustDisplayList } from '../layout/render/rustDisplayList';
@@ -13,6 +13,7 @@ const IDLE_RELEASE_MS = 30_000;
 interface Held {
   version: string;
   fonts: ReadonlyArray<DocxPngFontFace> | undefined;
+  fontProvider: BundledFontProvider | undefined;
   laidOut: Promise<{ copy: YrsSession; displayList: DisplayList }>;
   users: number;
   stale: boolean;
@@ -46,7 +47,7 @@ export function createPngExporter(session: YrsSession) {
     held = undefined;
   };
 
-  async function layOut(state: Uint8Array, metadata: Uint8Array, source: ArrayBuffer, fonts: Held['fonts']): Promise<Held['laidOut'] extends Promise<infer T> ? T : never> {
+  async function layOut(state: Uint8Array, metadata: Uint8Array, source: ArrayBuffer, fonts: Held['fonts'], fontProvider: Held['fontProvider']): Promise<Held['laidOut'] extends Promise<infer T> ? T : never> {
     const copy = await createYrsSession();
     try {
       const bytes = new Uint8Array(source);
@@ -54,7 +55,7 @@ export function createPngExporter(session: YrsSession) {
       copy.bootstrapPeer(state, metadata, bytes, host, { mediaTokens: true });
       const document = copy.materializeDocx();
       if (!document) throw new Error('renderPng needs a session opened from DOCX bytes');
-      const measure = createRustMeasureSource({ engine: copy, bundled: await resolveDefaultFontProvider() });
+      const measure = createRustMeasureSource({ engine: copy, ...(fontProvider ? { bundled: fontProvider } : {}) });
       measure.setCompat(document.package.settings?.compatibilityFlags);
       measure.setEmbeddedFaces(await extractEmbeddedFontFaces(document), appFaces(fonts));
       const renderEnv = documentRenderEnv(document);
@@ -69,15 +70,15 @@ export function createPngExporter(session: YrsSession) {
     } catch (error) { copy.destroy(); throw error; }
   }
 
-  function current(fonts: Held['fonts']): Held {
+  function current(fonts: Held['fonts'], fontProvider: Held['fontProvider']): Held {
     const version = session.version();
-    if (held && held.version === version && held.fonts === fonts) return held;
+    if (held && held.version === version && held.fonts === fonts && held.fontProvider === fontProvider) return held;
     release();
     const source = session.materializeDocx()?.originalBuffer;
     if (!source) throw new Error('renderPng needs a session opened from DOCX bytes');
     const entry: Held = {
-      version, fonts, users: 0, stale: false,
-      laidOut: layOut(session.encodeState(), session.encodePeerMetadata(), source, fonts),
+      version, fonts, fontProvider, users: 0, stale: false,
+      laidOut: layOut(session.encodeState(), session.encodePeerMetadata(), source, fonts, fontProvider),
     };
     entry.laidOut.catch(() => { if (held === entry) held = undefined; });
     held = entry;
@@ -90,7 +91,7 @@ export function createPngExporter(session: YrsSession) {
       const index = pngPage(target);
       pngScale(options.scale);
       options.signal?.throwIfAborted();
-      const entry = current(options.fonts);
+      const entry = current(options.fonts, options.fontProvider);
       entry.users++;
       if (idle !== undefined) clearTimeout(idle);
       idle = undefined;
