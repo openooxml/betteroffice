@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, test } from 'bun:test';
+import { afterEach, beforeAll, describe, expect, test, spyOn } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { initWasm, openPresentation } from '../index';
@@ -160,4 +160,48 @@ describe('PresentationHandle.renderPng', () => {
       }
     } finally { handle.dispose(); }
   });
+});
+
+test.skipIf(!native)('native export paints slide text from the font packs with no fonts passed', async () => {
+  const handle = openPresentation(fixture, { clientId: 7199 });
+  try {
+    const before = handle.layoutSlide(0);
+    const png = await handle.renderPng({ slide: 0 });
+    expect(isPng(png)).toBe(true);
+    expect(handle.layoutSlide(0)).toEqual(before);
+    expect(await handle.renderPng({ slide: 0 })).toEqual(png);
+  } finally { handle.dispose(); }
+});
+
+test.skipIf(!native)('native export keeps a registered fallback face a fallback', async () => {
+  const handle = openPresentation(fixture, { clientId: 7198, fallbackFonts: [{ family: 'Liberation Sans', bytes: font }] });
+  try {
+    expect(isPng(await handle.renderPng({ slide: 0 }))).toBe(true);
+    handle.registerFont({ family: 'Liberation Sans', bytes: font });
+    expect(isPng(await handle.renderPng({ slide: 0 }, { fonts: [{ family: 'Liberation Sans', bold: true, bytes: font }] }))).toBe(true);
+  } finally { handle.dispose(); }
+});
+
+test.skipIf(!native)('native export keeps the face layout measured when options.fonts names it again', async () => {
+  const other = new Uint8Array(await Bun.file(new URL('../../../fonts/assets/ComicRelief-Regular.ttf', import.meta.url)).arrayBuffer());
+  const handle = openPresentation(fixture, { clientId: 7197, fonts: [{ family: 'Liberation Sans', bytes: font }] });
+  try {
+    const slide = handle.snapshot().slides[0]!;
+    handle.addTextBox(slide.id, { name: 'Measured', rect: { x: 100000, y: 100000, width: 3000000, height: 800000 }, text: 'Measured face', style: { fontFamily: 'Liberation Sans', fontSizePt: 18 } });
+    handle.addTextBox(slide.id, { name: 'Measured bold', rect: { x: 100000, y: 1000000, width: 3000000, height: 800000 }, text: 'Measured bold', style: { fontFamily: 'Liberation Sans', fontSizePt: 18, bold: true } });
+    const plain = await handle.renderPng({ slide: 0 });
+    expect(await handle.renderPng({ slide: 0 }, { fonts: [{ family: 'Liberation Sans', bytes: other }, { family: 'Liberation Sans', bold: true, bytes: other }] })).toEqual(plain);
+  } finally { handle.dispose(); }
+});
+
+test.skipIf(!native)('disposing a presentation frees its export renderer', async () => {
+  const binding = require('../../../../bindings/pptx-native/index.js') as { PptxRenderer: { prototype: { free(): void } } };
+  const free = spyOn(binding.PptxRenderer.prototype, 'free');
+  try {
+    const handle = openPresentation(fixture, { clientId: 7196 });
+    await handle.renderPng({ slide: 0 });
+    free.mockClear();
+    handle.dispose();
+    expect(free).toHaveBeenCalledTimes(2);
+  } finally { free.mockRestore(); }
 });

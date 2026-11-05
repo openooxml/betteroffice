@@ -9,7 +9,7 @@ export interface PptxPngEngine {
   /** A picture's display bytes, after TIFF and metafile conversion, or undefined. */
   media(assetId: string): Uint8Array | undefined;
   /** The faces layout measured with, by the engine's id for each. */
-  fonts(): Array<PptxFontFace & { id: number }>;
+  fonts(): Array<PptxFontFace & { id: number; fallback?: boolean }>;
   /** The engine document and renderer, for engines that render PNG themselves. */
   doc: unknown;
   renderer: unknown;
@@ -25,6 +25,9 @@ export interface PptxEnginePngOptions {
 
 /** Which engine this module draws with; the native package swaps in its own. */
 export const engineKind: 'wasm' | 'native' = 'wasm';
+
+/** Frees what an export kept for `document`; the canvas engine keeps nothing. */
+export function releasePng(_document: object): void {}
 
 function decodesOnlyWithDocument(bytes: Uint8Array): boolean {
   try { return needsElementDecode(browserPresentationImageBlob(bytes)); } catch { return false; }
