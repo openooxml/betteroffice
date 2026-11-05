@@ -93,6 +93,11 @@
     "canvasLabel": "第 {current} 张幻灯片，共 {total} 张",
     "canvasLabelWithSelection": "第 {current} 张幻灯片，共 {total} 张; 已选对象 {name}"
   },
+  "a11y": {
+    "slideWithTitle": "第 {current} 张幻灯片，共 {total} 张：{title}",
+    "objectSelected": "已选择 {name}",
+    "editingText": "正在编辑 {name}"
+  },
   "editor": {
     "appLabel": "演示文稿幻灯片编辑器",
     "opening": "正在打开演示文稿…",

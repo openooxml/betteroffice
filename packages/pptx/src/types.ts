@@ -632,12 +632,28 @@ export type SlidePrimitive =
   | ChartPrimitive
   | TablePrimitive;
 
+/** What `p:cNvPr` says about a shape for assistive technology. */
+export interface ShapeAltText {
+  title?: string;
+  description?: string;
+  /** The shape, or a group around it, is marked decorative. */
+  decorative?: boolean;
+  /** The nearest enclosing group with alternative text, by its key in `altText`. */
+  group?: string;
+  /** Where the shape starts in `primitives` when what paints it carries no shape id. */
+  primitive?: number;
+}
+
 export interface SlideDisplayList {
   contractVersion: number;
   width: number;
   height: number;
   background?: Paint;
   primitives: SlidePrimitive[];
+  /** Alternative text by shape id, for the shapes that have some. */
+  altText?: Record<string, ShapeAltText>;
+  /** The shape holding the slide's title placeholder. */
+  titleShape?: string;
 }
 
 export type HitTestResult =

@@ -93,6 +93,11 @@
     "canvasLabel": "Slajd {current} z {total}",
     "canvasLabelWithSelection": "Slajd {current} z {total}; zaznaczony obiekt {name}"
   },
+  "a11y": {
+    "slideWithTitle": "Slajd {current} z {total}: {title}",
+    "objectSelected": "Zaznaczono: {name}",
+    "editingText": "Edytowanie: {name}"
+  },
   "editor": {
     "appLabel": "Edytor slajdów prezentacji",
     "opening": "Otwieranie prezentacji…",

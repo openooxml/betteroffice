@@ -93,6 +93,11 @@
     "canvasLabel": "Trang chiếu {current} / {total}",
     "canvasLabelWithSelection": "Trang chiếu {current} / {total}; đối tượng đã chọn {name}"
   },
+  "a11y": {
+    "slideWithTitle": "Trang chiếu {current} / {total}: {title}",
+    "objectSelected": "Đã chọn {name}",
+    "editingText": "Đang chỉnh sửa {name}"
+  },
   "editor": {
     "appLabel": "Trình chỉnh sửa trang chiếu",
     "opening": "Đang mở bản trình bày…",

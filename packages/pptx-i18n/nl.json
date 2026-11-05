@@ -93,6 +93,11 @@
     "canvasLabel": "Dia {current} van {total}",
     "canvasLabelWithSelection": "Dia {current} van {total}; geselecteerd object {name}"
   },
+  "a11y": {
+    "slideWithTitle": "Dia {current} van {total}: {title}",
+    "objectSelected": "{name} geselecteerd",
+    "editingText": "{name} bewerken"
+  },
   "editor": {
     "appLabel": "Editor voor presentatiedia's",
     "opening": "Presentatie wordt geopend…",

@@ -93,6 +93,11 @@
     "canvasLabel": "Folie {current} von {total}",
     "canvasLabelWithSelection": "Folie {current} von {total}; ausgewähltes Objekt {name}"
   },
+  "a11y": {
+    "slideWithTitle": "Folie {current} von {total}: {title}",
+    "objectSelected": "{name} ausgewählt",
+    "editingText": "{name} wird bearbeitet"
+  },
   "editor": {
     "appLabel": "Folieneditor für Präsentationen",
     "opening": "Präsentation wird geöffnet…",

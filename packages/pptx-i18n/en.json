@@ -93,6 +93,11 @@
     "canvasLabel": "Slide {current} of {total}",
     "canvasLabelWithSelection": "Slide {current} of {total}; selected object {name}"
   },
+  "a11y": {
+    "slideWithTitle": "Slide {current} of {total}: {title}",
+    "objectSelected": "{name} selected",
+    "editingText": "Editing {name}"
+  },
   "editor": {
     "appLabel": "Presentation slide editor",
     "opening": "Opening presentation…",

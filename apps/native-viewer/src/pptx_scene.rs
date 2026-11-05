@@ -1540,6 +1540,8 @@ mod tests {
                 shadow: None,
                 transform,
             }],
+            alt_text: Default::default(),
+            title_shape: None,
         };
         let fonts = PptxFonts {
             vello: HashMap::new(),
@@ -1647,6 +1649,8 @@ mod tests {
                 shadow: None,
                 transform: Transform::default(),
             }],
+            alt_text: Default::default(),
+            title_shape: None,
         };
         let fonts = PptxFonts {
             vello: HashMap::new(),

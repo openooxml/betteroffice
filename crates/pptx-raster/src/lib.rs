@@ -1692,6 +1692,8 @@ mod tests {
             height,
             background: None,
             primitives: Vec::new(),
+            alt_text: Default::default(),
+            title_shape: None,
         }
     }
 

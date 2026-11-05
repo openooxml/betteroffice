@@ -44,8 +44,9 @@ use crate::chart::{ChartFrame, ChartText, chart_primitive};
 use crate::fmath;
 use crate::{
     CONTRACT_VERSION, CaretStop, GradientStop, GradientType, ImageCrop, ImageEffect, ImageTile,
-    Paint, PositionedGlyph, PositionedTextLine, PositionedTextRun, Primitive, Shadow, Stroke,
-    StrokeEnd, SurfaceDisplayList, TextAlign, TextAnchor, TextParagraph, TextRun, Transform,
+    Paint, PositionedGlyph, PositionedTextLine, PositionedTextRun, Primitive, Shadow, ShapeAltText,
+    Stroke, StrokeEnd, SurfaceDisplayList, TextAlign, TextAnchor, TextParagraph, TextRun,
+    Transform,
 };
 use ooxml_metafile::{MetafileDrawing, decode as decode_metafile, is_metafile};
 
@@ -767,6 +768,9 @@ impl SlideRenderer {
             parsed_slide,
             shape_filter,
             primitives: Vec::new(),
+            alt_text: BTreeMap::new(),
+            alt_scope: AltScope::default(),
+            title_shape: None,
             hit_regions: Vec::new(),
             autofit: HashMap::new(),
             substitutions: SubstitutionLog::default(),
@@ -836,6 +840,8 @@ impl SlideRenderer {
                 height,
                 background,
                 primitives: builder.primitives,
+                alt_text: builder.alt_text,
+                title_shape: builder.title_shape,
             },
             font_substitutions: builder.substitutions.entries,
             hit_regions: builder.hit_regions,
@@ -1212,6 +1218,13 @@ fn inherited_shapes<'a>(
                 .map(move |(index, shape)| (shape, format!("layout:{}:{index}", layout.part_path)))
         });
     master_shapes.chain(layout_shapes)
+}
+
+/// The alternative text a group passes down to the shapes inside it.
+#[derive(Clone, Default)]
+struct AltScope {
+    group: Option<String>,
+    decorative: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1834,6 +1847,9 @@ struct LayoutBuilder<'a> {
     parsed_slide: Option<&'a Slide>,
     shape_filter: Option<&'a HashSet<String>>,
     primitives: Vec<Primitive>,
+    alt_text: BTreeMap<String, ShapeAltText>,
+    alt_scope: AltScope,
+    title_shape: Option<String>,
     hit_regions: Vec<HitRegion>,
     autofit: HashMap<String, TextAutofit>,
     substitutions: SubstitutionLog,
@@ -1929,6 +1945,43 @@ impl<'a> LayoutBuilder<'a> {
         Ok(())
     }
 
+    /// Records a shape's alternative text and returns the scope its children
+    /// inherit if it is a group.
+    fn note_alt_text(
+        &mut self,
+        id: &str,
+        title: Option<&str>,
+        description: Option<&str>,
+        decorative: bool,
+    ) -> AltScope {
+        let text = |value: Option<&str>| {
+            value
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        };
+        let entry = ShapeAltText {
+            title: text(title),
+            description: text(description),
+            decorative: decorative || self.alt_scope.decorative,
+            group: self.alt_scope.group.clone(),
+            primitive: None,
+        };
+        let described = entry.title.is_some() || entry.description.is_some();
+        let scope = AltScope {
+            group: if described {
+                Some(id.to_owned())
+            } else {
+                entry.group.clone()
+            },
+            decorative: entry.decorative,
+        };
+        if entry != ShapeAltText::default() {
+            self.alt_text.insert(id.to_owned(), entry);
+        }
+        scope
+    }
+
     fn render_snapshot_shape(
         &mut self,
         shape: &ShapeSnapshot,
@@ -1944,8 +1997,42 @@ impl<'a> LayoutBuilder<'a> {
         if shape.hidden {
             return Ok(());
         }
+        let nodes = self.text_scope().snapshot_nodes(shape);
+        // A session stored before shapes carried alternative text still has its source.
+        let source = nodes[0].map(node_base);
+        let alt_scope = self.note_alt_text(
+            &shape.id,
+            shape
+                .title
+                .as_deref()
+                .or(source.and_then(|base| base.title.as_deref())),
+            shape
+                .description
+                .as_deref()
+                .or(source.and_then(|base| base.description.as_deref())),
+            shape.decorative || source.is_some_and(|base| base.decorative),
+        );
+        let title = shape
+            .placeholder
+            .as_ref()
+            .and_then(|placeholder| placeholder.placeholder_type.as_deref())
+            .is_some_and(|kind| matches!(kind, "title" | "ctrTitle"));
+        if title && self.title_shape.is_none() {
+            self.title_shape = Some(shape.id.clone());
+        }
+        let outer = std::mem::replace(&mut self.alt_scope, alt_scope);
+        let rendered = self.render_visible_snapshot_shape(shape, space, nodes);
+        self.alt_scope = outer;
+        rendered
+    }
+
+    fn render_visible_snapshot_shape(
+        &mut self,
+        shape: &ShapeSnapshot,
+        space: Space,
+        [original, layout_node, master_node]: [Option<&'a ShapeNode>; 3],
+    ) -> Result<(), RenderError> {
         let text_scope = self.text_scope();
-        let [original, layout_node, master_node] = text_scope.snapshot_nodes(shape);
         let resolved = resolved_transform_value(shape, original, layout_node, master_node);
         let rect = space.map_transform(&resolved);
         if shape.kind == ShapeKind::Group {
@@ -2160,6 +2247,28 @@ impl<'a> LayoutBuilder<'a> {
         if node_base(shape).hidden {
             return Ok(());
         }
+        let alt_scope = {
+            let base = node_base(shape);
+            self.note_alt_text(
+                stable_id,
+                base.title.as_deref(),
+                base.description.as_deref(),
+                base.decorative,
+            )
+        };
+        let outer = std::mem::replace(&mut self.alt_scope, alt_scope);
+        let rendered = self.render_visible_parsed_shape(shape, stable_id, space, fit_text);
+        self.alt_scope = outer;
+        rendered
+    }
+
+    fn render_visible_parsed_shape(
+        &mut self,
+        shape: &ShapeNode,
+        stable_id: &str,
+        space: Space,
+        fit_text: bool,
+    ) -> Result<(), RenderError> {
         if let ShapeNode::Group(group) = shape {
             let rect = space.map_transform(&group.base.transform);
             let child_space = space.for_group(rect, &group.base.transform);
@@ -2352,6 +2461,7 @@ impl<'a> LayoutBuilder<'a> {
         shadow: Option<Shadow>,
     ) {
         let separate_outline = mask.outline_path.is_some();
+        let first = self.primitives.len();
         let metafile = !mask.empty
             && effects.is_empty()
             && self.push_metafile(
@@ -2363,6 +2473,12 @@ impl<'a> LayoutBuilder<'a> {
                 crop,
                 &mask,
             );
+        if self.primitives.len() > first {
+            self.alt_text
+                .entry(shape_id.to_owned())
+                .or_default()
+                .primitive = u32::try_from(first).ok();
+        }
         if !mask.empty && !metafile {
             let (crop, destination) = crop
                 .map(image_crop)
@@ -10453,6 +10569,8 @@ mod tests {
                 height: 400.0,
                 background: None,
                 primitives: Vec::new(),
+                alt_text: BTreeMap::new(),
+                title_shape: None,
             },
             font_substitutions: Vec::new(),
             autofit: HashMap::new(),
@@ -10505,6 +10623,8 @@ mod tests {
                 height: 400.0,
                 background: None,
                 primitives: Vec::new(),
+                alt_text: BTreeMap::new(),
+                title_shape: None,
             },
             font_substitutions: Vec::new(),
             autofit: HashMap::new(),
@@ -10597,6 +10717,8 @@ mod tests {
                 height: 400.0,
                 background: None,
                 primitives: Vec::new(),
+                alt_text: BTreeMap::new(),
+                title_shape: None,
             },
             font_substitutions: Vec::new(),
             autofit: HashMap::new(),
@@ -14103,7 +14225,7 @@ mod tests {
         include_drawing_rel: bool,
     ) -> Vec<u8> {
         let mut parts = ooxml_opc::unzip_parts(FIXTURE).unwrap();
-        let frame = r#"<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="901" name="SmartArt Diagram"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x="914400" y="914400"/><a:ext cx="3657600" cy="1828800"/></p:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/diagram"><dgm:relIds xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" r:dm="rIdData1" r:lo="rIdLayout1" r:qs="" r:cs=""/></a:graphicData></a:graphic></p:graphicFrame>"#;
+        let frame = r#"<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="901" name="SmartArt Diagram" descr="Reporting lines"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x="914400" y="914400"/><a:ext cx="3657600" cy="1828800"/></p:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/diagram"><dgm:relIds xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" r:dm="rIdData1" r:lo="rIdLayout1" r:qs="" r:cs=""/></a:graphicData></a:graphic></p:graphicFrame>"#;
         let mut rels = String::from(
             r#"<Relationship Id="rIdData1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramData" Target="../diagrams/data1.xml"/>"#,
         );
@@ -14147,6 +14269,38 @@ mod tests {
             r#"<dgm:dataModel xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><dgm:ptLst><dgm:pt modelId="p1"><dgm:t><a:p><a:r><a:t>{text}</a:t></a:r></a:p></dgm:t></dgm:pt></dgm:ptLst></dgm:dataModel>"#
         );
         smartart_test_deck(Some(data.as_bytes()), None, false)
+    }
+
+    #[test]
+    fn smartart_shapes_stay_under_their_frames_alternative_text() {
+        let deck = synthesized_smartart_deck("Reporting");
+        let session = DeckSession::open(&deck, 8_035).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let frame = snapshot.slides[0]
+            .shapes
+            .iter()
+            .find(|shape| shape.name == "SmartArt Diagram")
+            .unwrap();
+        let alt_text = renderer()
+            .layout_slide(session.package(), &snapshot, 0)
+            .unwrap()
+            .display_list
+            .alt_text;
+        assert_eq!(
+            alt_text[&frame.id].description.as_deref(),
+            Some("Reporting lines")
+        );
+        let prefix = format!("{}:", frame.id);
+        let members: Vec<_> = alt_text
+            .iter()
+            .filter(|(id, _)| id.starts_with(&prefix))
+            .collect();
+        assert!(!members.is_empty());
+        assert!(
+            members
+                .iter()
+                .all(|(_, entry)| entry.group.as_deref() == Some(frame.id.as_str()))
+        );
     }
 
     #[test]

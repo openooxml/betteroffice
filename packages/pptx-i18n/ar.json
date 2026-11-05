@@ -93,6 +93,11 @@
     "canvasLabel": "الشريحة {current} من {total}",
     "canvasLabelWithSelection": "الشريحة {current} من {total}؛ الكائن المحدد {name}"
   },
+  "a11y": {
+    "slideWithTitle": "الشريحة {current} من {total}: {title}",
+    "objectSelected": "تم تحديد {name}",
+    "editingText": "جارٍ تحرير {name}"
+  },
   "editor": {
     "appLabel": "محرر شرائح العرض التقديمي",
     "opening": "جارٍ فتح العرض التقديمي…",
