@@ -97,7 +97,10 @@ interface WorkerProposalProbe {
     readSelectionInfo(): Promise<{ selectedText: string; paragraphText: string } | null>;
     save(): Promise<ArrayBuffer | null>;
     getSearchState(): { total: number; current: number } | null;
-    commands: { execute(id: string, args: unknown): Promise<{ ok: boolean; failure?: { code: string } }> };
+    commands: {
+      execute(id: string, args: unknown): Promise<{ ok: boolean; failure?: { code: string } }>;
+      getState(id: string): { enabled: boolean };
+    };
   } | null;
   session: { selection(): ViewState['selection'] } | null;
   status(): {
