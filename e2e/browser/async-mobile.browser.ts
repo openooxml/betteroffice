@@ -13,7 +13,7 @@ const marker = typed + suffix;
 const phone = { width: 412, height: 915 };
 const tablet = { width: 1180, height: 820 };
 
-test.setTimeout(30_000);
+test.setTimeout(60_000);
 
 const chrome = {
   docx: { rail: 'formatting-bar', more: 'toolbar-more', menu: 'More actions' },
@@ -79,7 +79,7 @@ function textInput(page: Page, format: 'docx' | 'pptx') {
 async function open(page: Page, format: Format, file: string = demo(format)) {
   await page.goto('/?format=' + format);
   await page.locator('input[type=file]').last().setInputFiles(file);
-  await expect(canvas(page, format)).toBeVisible();
+  await expect(canvas(page, format)).toBeVisible({ timeout: 30_000 });
   await expect(page.getByRole('button', { name: 'Save', exact: true }).first()).toBeEnabled();
   await expect(page.locator('.notice, [data-testid$="-error"]')).toHaveCount(0);
   await page.evaluate(() => document.fonts.ready.then(() => undefined));

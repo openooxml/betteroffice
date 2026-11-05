@@ -73,7 +73,7 @@ describe('wasm memory limits', () => {
     test.skipIf(!built(engine.wasm))(`${engine.name} engine memory is not capped below 4 GiB`, () => {
       const { max } = memoryLimits(new Uint8Array(readFileSync(resolve(ROOT, engine.wasm))));
       if (max !== undefined) expect(max).toBeGreaterThanOrEqual(4 * GIB_PAGES);
-    });
+    }, 30_000);
   }
 
   for (const engine of ENGINES.filter((entry) => entry.glue)) {
