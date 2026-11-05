@@ -730,6 +730,52 @@ fn a_picture_fill_it_cannot_resolve_keeps_the_solid_fill_and_counts_it() {
     assert_eq!(rendered.skipped_images, 1);
 }
 
+fn ellipse_image_scene(extra: Value) -> DisplayList {
+    let mut image = json!({"kind":"image","relId":"rIdPicture","x":4,"y":4,"w":40,"h":40,"shapeType":"ellipse"});
+    for (key, value) in extra.as_object().expect("object") {
+        image[key] = value.clone();
+    }
+    list(48.0, 48.0, vec![image])
+}
+
+#[test]
+fn an_ellipse_image_paints_inside_its_ellipse() {
+    let (fonts, chains, mut images) = empty_resources();
+    let source = solid_png(2, 2);
+    images.insert("rIdPicture".to_string(), source.clone());
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let png = render_png(&ellipse_image_scene(json!({})), 0, &resources).unwrap();
+    assert_eq!(pixel(&png, 24, 24), pixel(&source, 0, 0));
+    assert_eq!(pixel(&png, 24, 7), pixel(&source, 0, 0));
+    assert_eq!(pixel(&png, 6, 6), [255, 255, 255, 255]);
+    assert_eq!(pixel(&png, 41, 41), [255, 255, 255, 255]);
+}
+
+#[test]
+fn an_ellipse_image_keeps_its_crop_inside_the_ellipse() {
+    let (fonts, chains, mut images) = empty_resources();
+    let source = solid_png(4, 4);
+    images.insert("rIdPicture".to_string(), source.clone());
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let scene =
+        ellipse_image_scene(json!({"crop":{"left":0.25,"top":0.25,"right":0.25,"bottom":0.25}}));
+    let png = render_png(&scene, 0, &resources).unwrap();
+    assert_eq!(pixel(&png, 24, 24), pixel(&source, 0, 0));
+    assert_eq!(pixel(&png, 6, 6), [255, 255, 255, 255]);
+}
+
+#[test]
+fn an_ellipse_image_border_follows_the_ellipse() {
+    let (fonts, chains, mut images) = empty_resources();
+    images.insert("rIdPicture".to_string(), solid_png(2, 2));
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let scene = ellipse_image_scene(json!({"border":{"width":2,"color":"#ff0000"}}));
+    let png = render_png(&scene, 0, &resources).unwrap();
+    assert_eq!(pixel(&png, 24, 4), [255, 0, 0, 255]);
+    assert_eq!(pixel(&png, 4, 4), [255, 255, 255, 255]);
+    assert_eq!(pixel(&png, 44, 44), [255, 255, 255, 255]);
+}
+
 #[test]
 fn invalid_page_and_page_selector_are_errors() {
     let (fonts, chains, images) = empty_resources();
