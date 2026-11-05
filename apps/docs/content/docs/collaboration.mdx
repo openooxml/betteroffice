@@ -90,8 +90,8 @@ or changes rooms.
 
 Collaborative workbooks synchronize cell content and formulas, cell formatting,
 column widths, row heights, row and column visibility, freeze panes, merged
-cells, single hyperlinks, chart positions and sheets added at the end of the
-workbook. Each collaborator's undo and redo synchronize their effects.
+cells, single hyperlinks, chart positions, defined names and sheets added at the
+end of the workbook. Each collaborator's undo and redo synchronize their effects.
 
 When two collaborators add a sheet under one name at the same time, every
 replica keeps the name on the first sheet in the shared order and shows the other
@@ -107,19 +107,43 @@ cleared their own edit again leaves nothing to lose, so the sheet is removed. An
 edit a collaborator makes in the sheet before the author's undo reaches them is
 lost with the sheet on every replica.
 
+A defined name is one value per scope, like a cell. When two collaborators write
+one name at the same time, `Rate` and `RATE` included, every replica keeps one of
+the two writes, casing and formula together. Undoing the write that won removes
+it: the name goes back to the source's value, or goes away if the source has no
+such name, and the other write does not come back. Undoing the write that lost
+changes nothing and goes on to the step before it, as an undo does when a
+collaborator has since changed the name. A name set while a collaborator deletes
+it stays. A formula using a deleted name reads `#NAME?` on every replica. A name
+scoped to an added sheet counts as content of that sheet, so a collaborator's name
+refuses the undo described above, and the author's own goes with the sheet. A
+collaborator's name that reaches the replicas after the undo stays stored and
+hidden, and returns if the add is redone.
+
+Each replica refuses to grow a name table past 32 MiB. That cap bounds the memory
+this engine holds for one table, so a hostile file cannot make it keep an unbounded
+one. Two collaborators can still pass it together. Nothing is lost: every replica
+accepts the combined table, deleting always works, and the workbook keeps saving.
+While it is over, adding to the table or lengthening a formula is refused with
+`defined name table exceeded cap`, and `listDefinedNames` reports `overLimit`.
+
+A workbook over the cap saves, but it won't reopen in BetterOffice: the reader
+refuses the file with that same error. The file itself is valid and opens in Excel.
+To keep a workbook reopenable here, delete names until `overLimit` clears before
+saving.
+
 These edits are unavailable while collaborating and are refused without changing
 the workbook:
 
 | Edit | Why it is refused |
 | --- | --- |
 | Inserting or deleting rows or columns | Cells and formulas are stored by address, so a concurrent edit would land on the wrong cell. |
-| Adding a sheet anywhere but the end | Sheet-scoped names and tables are stored by sheet position, which an insert would shift on one replica only. |
+| Adding a sheet anywhere but the end | Tables are stored by sheet position, which an insert would shift on one replica only. |
 | Removing a sheet | Two collaborators could remove the last sheets, and a concurrent edit could bring one back. |
-| Moving a sheet | Sheet-scoped names and tables are stored by sheet position. |
-| Renaming a sheet | A rename rewrites formulas and defined names that are not all replicated. |
+| Moving a sheet | Tables are stored by sheet position. |
+| Renaming a sheet | A rename rewrites every formula and defined name that mentions the sheet, which a concurrent edit would miss. |
 | Adding or removing conditional formats | A sheet's rules are one replicated value, so one of two concurrent changes would be lost. |
-| Setting or clearing an auto filter | A filter also writes a defined name, and defined names are not replicated. |
-| Changing defined names | Defined names are not replicated. |
+| Setting or clearing an auto filter, or editing its `_xlnm._FilterDatabase` name | A filter and its hidden name have to change together, and filters are not replicated. |
 | Editing charts beyond moving them | A sheet's charts are one replicated value, so one of two concurrent changes would be lost. |
 
 In JavaScript, `applyOps` throws `structural operations are unavailable in
@@ -134,7 +158,8 @@ refused with `remote update changes the frozen workbook structure`
 
 Collaborating peers must run the same BetterOffice version line. A peer that
 predates sheet appends refuses a room that has them with
-`unsupported schema version 7`.
+`unsupported schema version 7`, and one that predates replicated names refuses a
+room with a name edit with `collaborative document roots do not match the schema`.
 
 ## Relay checkpoints and rehydration
 

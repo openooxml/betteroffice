@@ -429,6 +429,41 @@ describe('wasm collaboration', () => {
     }
   });
 
+  it('replicates defined names and their undo', () => {
+    const left = collaborative(6021);
+    const right = collaborative(6022);
+    const names = (replica: WorkbookHandle) => replica.listDefinedNames({ scope: null }).items;
+    const sync = (from: WorkbookHandle, to: WorkbookHandle) =>
+      to.applyUpdate(from.encodeStateAsUpdate(to.encodeStateVector()));
+    try {
+      const baseline = left.encodeStateVector();
+      expect(left.applyOps([{ type: 'setDefinedName', name: 'Margin', refers_to: '1' }]).applied).toBe(true);
+      expect(right.applyOps([{ type: 'setDefinedName', name: 'MARGIN', refers_to: '2' }]).applied).toBe(true);
+      const leftUpdate = left.encodeStateAsUpdate(baseline);
+      const rightUpdate = right.encodeStateAsUpdate(baseline);
+      expect(left.applyUpdate(rightUpdate).applied).toBe(true);
+      expect(right.applyUpdate(leftUpdate).applied).toBe(true);
+      expect(names(left)).toEqual(names(right));
+      expect(names(left).filter((name) => name.name.toLowerCase() === 'margin')).toHaveLength(1);
+      expect(left.listDefinedNames().overLimit).toBeUndefined();
+
+      expect(right.applyOps([{ type: 'deleteDefinedName', name: 'Margin' }]).applied).toBe(true);
+      expect(sync(right, left).applied).toBe(true);
+      expect(names(left).some((name) => name.name.toLowerCase() === 'margin')).toBe(false);
+      expect(right.undo().applied).toBe(true);
+      expect(sync(right, left).applied).toBe(true);
+      expect(names(left)).toEqual(names(right));
+      expect(names(left).filter((name) => name.name.toLowerCase() === 'margin')).toHaveLength(1);
+
+      expect(() => left.applyOps([{ type: 'setDefinedNames', defined_names: [] }])).toThrow(
+        'structural operations are unavailable in collaborative mode'
+      );
+    } finally {
+      left.dispose();
+      right.dispose();
+    }
+  });
+
   it('converges sheets appended under one name and refuses one added earlier', () => {
     const left = collaborative(6011);
     const right = collaborative(6012);

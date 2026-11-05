@@ -188,6 +188,13 @@ export interface XlsxDefinedNamesResult {
     items: XlsxDefinedName[];
     total: number;
     nextOffset: number | null;
+    /**
+     * Present while the whole table is over the engine's size limit, which
+     * collaborators can reach together. Adding to it is refused, deleting always
+     * works, and it still saves, but BetterOffice reopens such a file only once
+     * the table is back under the limit.
+     */
+    overLimit?: true;
 }
 
 // ---- display-list/types.d.ts ----

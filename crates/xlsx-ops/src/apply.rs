@@ -888,7 +888,8 @@ fn defined_name_index(
     Ok(index)
 }
 
-fn validate_defined_name(
+#[doc(hidden)]
+pub fn validate_defined_name(
     wb: &Workbook,
     name: &str,
     scope: Option<SheetId>,
@@ -936,7 +937,8 @@ fn validate_defined_name(
     Ok(())
 }
 
-fn validate_defined_name_formula(source: &str) -> Result<(), OpError> {
+#[doc(hidden)]
+pub fn validate_defined_name_formula(source: &str) -> Result<(), OpError> {
     if source.is_empty() || source.starts_with('=')
         || source.len() > xlsx_calc::lexer::MAX_FORMULA_BYTES
         || !source.chars().all(|c| matches!(c, '\u{9}' | '\u{a}' | '\u{d}' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}'))

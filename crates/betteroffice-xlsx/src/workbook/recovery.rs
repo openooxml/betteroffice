@@ -474,7 +474,7 @@ impl RecoveryCalculation {
                 sheet.set_array_formula(*at, *range);
             }
         }
-        validate_model(&model)?;
+        validate_model_sheets(&model)?;
         Ok(model)
     }
 }
