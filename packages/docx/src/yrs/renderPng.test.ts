@@ -86,7 +86,7 @@ describe('YrsSession.renderPng', () => {
     try {
       const before = await pages();
       expect(before).toBeGreaterThan(0);
-      session.insertText({ story: 'body', paraId: session.paragraphs('body')[0]!.paraId, offset: 0 }, 'A great many more words at the start of this page. '.repeat(600));
+      session.insertText({ story: 'body', paraId: session.paragraphs('body')[5]!.paraId, offset: 0 }, 'A great many more words at the start of this page. '.repeat(600));
       expect(await pages()).toBeGreaterThan(before + 2);
       await session.renderPng({ page: before + 1 });
     } finally { session.destroy(); }
