@@ -7,7 +7,7 @@ use crate::paragraph_patch::{
 };
 use crate::serializer::xml_writer::escape_xml;
 
-use super::lower::{Cell, Lowered, Node};
+use super::lower::{Cell, Lowered, Node, WORD, Xml};
 use super::{
     Failure, apply_bytes, apply_deltas, attr_deltas, flatten, insert_into_root, properties,
     unit_attrs,
@@ -191,6 +191,12 @@ pub(super) fn write(
                         } else {
                             written
                         };
+                        let written = if !restyle {
+                            replacement_properties(source, lowered, patch, cell.run, &edit.target)
+                                .map_or(written, str::to_owned)
+                        } else {
+                            written
+                        };
                         entry.insert(written)
                     }
                 };
@@ -203,6 +209,7 @@ pub(super) fn write(
     }
     let mut inserts = Vec::new();
     let mut changed_runs = BTreeSet::new();
+    let mut text_runs = BTreeSet::new();
     let mut ranges = Vec::new();
     let mut replay: BTreeMap<u32, Vec<UnitV1>> = BTreeMap::new();
     let mut empty_insert = None;
@@ -273,6 +280,10 @@ pub(super) fn write(
         if donor.is_some_and(|cell| cell.retained) {
             return Err(Failure::structure("field: insertion uses retained content"));
         }
+        text_runs.extend(covered.iter().map(|(_, cell)| cell.run));
+        if let Some(donor) = donor {
+            text_runs.insert(donor.run);
+        }
         let units = edit
             .insert
             .iter()
@@ -325,6 +336,12 @@ pub(super) fn write(
                             &insert.inherit,
                             &insert.attrs,
                         )?
+                    } else {
+                        properties
+                    };
+                    let properties = if !restyle && donor_attrs != insert.attrs {
+                        replacement_properties(source, lowered, patch, donor.run, &insert.attrs)
+                            .map_or(properties, str::to_owned)
                     } else {
                         properties
                     };
@@ -389,19 +406,254 @@ pub(super) fn write(
         formatting: &formatting,
         symbols: &symbols,
     };
-    let mut edits = Vec::new();
+    let mut writes = Vec::new();
     for run in changed_runs {
         let replacement = write_run(source, lowered, run, &cells, &inserts)?;
-        edits.push((
-            lowered.xml.nodes[lowered.runs[run].node].span.clone(),
-            replacement,
-        ));
+        writes.push((run, replacement));
     }
-    let mut output = apply_bytes(source, edits)?;
+    let mut output = apply_bytes(source, coalesce_edits(source, lowered, &writes, &text_runs))?;
     if let Some(edit) = empty_insert {
         output = write_empty(source, lowered, edit)?;
     }
     Ok((output, result_units))
+}
+
+struct Fragment {
+    opener: String,
+    key: String,
+    leading: String,
+    properties: String,
+    content: String,
+    close: String,
+}
+
+fn replacement_properties<'a>(
+    source: &'a str,
+    lowered: &Lowered,
+    patch: &ParagraphPatchV1,
+    mut run: usize,
+    target: &Attrs,
+) -> Option<&'a str> {
+    let touched = |run: usize| {
+        let run = &lowered.runs[run];
+        patch.text_edits.iter().any(|edit| {
+            (edit.from < run.to && run.from < edit.to)
+                || (edit.from == edit.to && run.from <= edit.from && edit.from <= run.to)
+        })
+    };
+    if !touched(run) || !plain_run(source, &lowered.xml, lowered.runs[run].node) {
+        return None;
+    }
+    let current = lowered.cells.iter().find(|cell| cell.run == run)?;
+    if ["bold", "italic"]
+        .iter()
+        .all(|key| unit_attrs(&current.unit).get(*key) == target.get(*key))
+    {
+        return None;
+    }
+    while run > 0 {
+        let previous = &lowered.runs[run - 1];
+        let next = &lowered.runs[run];
+        let previous_node = &lowered.xml.nodes[previous.node];
+        let next_node = &lowered.xml.nodes[next.node];
+        if previous.scope != next.scope
+            || previous_node.parent != next_node.parent
+            || !source[previous_node.span.end..next_node.span.start]
+                .trim()
+                .is_empty()
+            || !touched(run - 1)
+            || !plain_run(source, &lowered.xml, previous.node)
+        {
+            return None;
+        }
+        run -= 1;
+        let cells: Vec<_> = lowered
+            .cells
+            .iter()
+            .filter(|cell| cell.run == run)
+            .collect();
+        if !cells.is_empty() && cells.iter().all(|cell| unit_attrs(&cell.unit) == target) {
+            return Some(run_properties(source, lowered, run));
+        }
+    }
+    None
+}
+
+fn plain_run(source: &str, xml: &Xml, at: usize) -> bool {
+    let node = &xml.nodes[at];
+    if !node.word("r") || node.empty || has_identifier(node) {
+        return false;
+    }
+    let mut cursor = node.open.end;
+    for (index, &at) in node.children.iter().enumerate() {
+        let child = &xml.nodes[at];
+        if !source[cursor..child.span.start].trim().is_empty()
+            || !(child.word("t") || (index == 0 && child.word("rPr")))
+            || xml.nodes[at..]
+                .iter()
+                .take_while(|descendant| descendant.span.start < child.span.end)
+                .any(has_identifier)
+        {
+            return false;
+        }
+        if child.word("t")
+            && (!child.children.is_empty()
+                || (!child.empty && source[child.open.end..child.close.start].contains('<')))
+        {
+            return false;
+        }
+        cursor = child.span.end;
+    }
+    source[cursor..node.close.start].trim().is_empty()
+}
+
+fn fragments(
+    source: &str,
+    lowered: &Lowered,
+    run: usize,
+    replacement: &str,
+) -> Option<Vec<Fragment>> {
+    if !plain_run(source, &lowered.xml, lowered.runs[run].node) {
+        return None;
+    }
+    let wrapped = format!("<w:p>{replacement}</w:p>");
+    let xml = Xml::parse(&wrapped, &lowered.xml.root_namespaces).ok()?;
+    xml.nodes[0]
+        .children
+        .iter()
+        .map(|&at| {
+            if !plain_run(&wrapped, &xml, at) {
+                return None;
+            }
+            let node = &xml.nodes[at];
+            let opener = &wrapped[node.open.clone()];
+            let mut key = String::new();
+            let mut cursor = node.open.start;
+            for attribute in &node.attributes {
+                let Some((prefix, local)) = attribute.name.split_once(':') else {
+                    continue;
+                };
+                if !local.starts_with("rsid")
+                    || xml.root_namespaces.get(prefix).map(String::as_str) != Some(WORD)
+                {
+                    continue;
+                }
+                key.push_str(&wrapped[cursor..attribute.token.start]);
+                cursor = attribute.token.end;
+            }
+            key.push_str(&wrapped[cursor..node.open.end]);
+            let properties = xml.child(at, "rPr").ok()?;
+            let (leading, properties, content) = if let Some(at) = properties {
+                let span = &xml.nodes[at].span;
+                (
+                    &wrapped[node.open.end..span.start],
+                    &wrapped[span.clone()],
+                    &wrapped[span.end..node.close.start],
+                )
+            } else {
+                ("", "", &wrapped[node.open.end..node.close.start])
+            };
+            Some(Fragment {
+                opener: opener.to_owned(),
+                key,
+                leading: leading.to_owned(),
+                properties: properties.to_owned(),
+                content: content.to_owned(),
+                close: wrapped[node.close.clone()].to_owned(),
+            })
+        })
+        .collect()
+}
+
+fn flush_fragment(output: &mut String, fragment: Fragment) {
+    output.push_str(&fragment.opener);
+    output.push_str(&fragment.leading);
+    output.push_str(&fragment.properties);
+    output.push_str(&fragment.content);
+    output.push_str(&fragment.close);
+}
+
+fn coalesce_edits(
+    source: &str,
+    lowered: &Lowered,
+    writes: &[(usize, String)],
+    text_runs: &BTreeSet<usize>,
+) -> Vec<(std::ops::Range<usize>, String)> {
+    let mut edits = Vec::new();
+    let mut start = 0;
+    while start < writes.len() {
+        let (first_run, replacement) = &writes[start];
+        let first_node = &lowered.xml.nodes[lowered.runs[*first_run].node];
+        let parsed = text_runs
+            .contains(first_run)
+            .then(|| fragments(source, lowered, *first_run, replacement))
+            .flatten();
+        let Some(parsed) = parsed else {
+            edits.push((first_node.span.clone(), replacement.clone()));
+            start += 1;
+            continue;
+        };
+        let mut groups = vec![("", parsed)];
+        let mut end = start;
+        while let Some((run, replacement)) = writes.get(end + 1) {
+            let previous = &lowered.runs[writes[end].0];
+            let next = &lowered.runs[*run];
+            let previous_node = &lowered.xml.nodes[previous.node];
+            let next_node = &lowered.xml.nodes[next.node];
+            if *run != writes[end].0 + 1
+                || previous.scope != next.scope
+                || previous_node.parent != next_node.parent
+                || !text_runs.contains(run)
+            {
+                break;
+            }
+            let gap = &source[previous_node.span.end..next_node.span.start];
+            if !gap.trim().is_empty() {
+                break;
+            }
+            let Some(parsed) = fragments(source, lowered, *run, replacement) else {
+                break;
+            };
+            groups.push((gap, parsed));
+            end += 1;
+        }
+        let mut output = String::new();
+        let mut pending: Option<Fragment> = None;
+        for (mut gap, parsed) in groups {
+            if parsed.is_empty() {
+                if let Some(previous) = pending.as_mut() {
+                    previous.content.push_str(gap);
+                } else {
+                    output.push_str(gap);
+                }
+                continue;
+            }
+            for candidate in parsed {
+                if let Some(previous) = pending.as_mut()
+                    && previous.key == candidate.key
+                    && previous.properties == candidate.properties
+                {
+                    previous.content.push_str(gap);
+                    previous.content.push_str(&candidate.leading);
+                    previous.content.push_str(&candidate.content);
+                } else {
+                    if let Some(previous) = pending.take() {
+                        flush_fragment(&mut output, previous);
+                    }
+                    output.push_str(gap);
+                    pending = Some(candidate);
+                }
+                gap = "";
+            }
+        }
+        if let Some(previous) = pending {
+            flush_fragment(&mut output, previous);
+        }
+        let last_node = &lowered.xml.nodes[lowered.runs[writes[end].0].node];
+        edits.push((first_node.span.start..last_node.span.end, output));
+        start = end + 1;
+    }
+    edits
 }
 
 fn choose_donor<'a>(
@@ -982,4 +1234,284 @@ fn direct_mark_attrs(source: &str) -> Result<Attrs, Failure> {
         );
     }
     Ok(attrs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::PatchContext;
+    use super::*;
+    use crate::paragraph_patch::{
+        InheritanceV1, InsertedTextV1, SeedV1, result_sha256, unit_sha256,
+    };
+
+    fn text(value: &str, marks: Value) -> UnitV1 {
+        UnitV1::Text {
+            text: value.to_owned(),
+            attrs: serde_json::from_value(marks).unwrap(),
+        }
+    }
+
+    fn run(id: &str, body: &str, properties: &str) -> String {
+        format!(
+            "<w:r w:rsidR=\"{id}\" w:rsidRPr=\"{id}\">{properties}<w:t xml:space=\"preserve\">{body}</w:t></w:r>"
+        )
+    }
+
+    fn replace(source: &str, seed: Vec<UnitV1>, edits: &[(u32, u32, &str, Value)]) -> String {
+        let patch = ParagraphPatchV1 {
+            ordinal: 0,
+            session_key: "source:0".to_owned(),
+            seed: SeedV1 {
+                unit_sha256: unit_sha256(&seed),
+                units: seed.clone(),
+                properties: Attrs::new(),
+                inherit: InheritanceV1::default(),
+            },
+            text_edits: edits
+                .iter()
+                .map(|(from, to, value, marks)| TextEditV1 {
+                    from: *from,
+                    to: *to,
+                    insert: vec![InsertedTextV1 {
+                        text: (*value).to_owned(),
+                        attrs: serde_json::from_value(marks.clone()).unwrap(),
+                        inherit: Attrs::new(),
+                    }],
+                    donor: DonorV1::At { at: *from },
+                })
+                .collect(),
+            run_edits: Vec::new(),
+            para_deltas: Vec::new(),
+            para_inherit: Attrs::new(),
+            mark_inherit: Attrs::new(),
+            result_sha256: result_sha256(&seed, &Attrs::new()),
+        };
+        let mut lowered =
+            match super::super::lower::lower(source, &PatchContext::word_document(), &seed) {
+                Ok(lowered) => lowered,
+                Err(_) => panic!("lowering failed"),
+            };
+        for (cell, unit) in lowered.cells.iter_mut().zip(flatten(&seed)) {
+            cell.unit = unit;
+        }
+        match write(source, &lowered, &patch) {
+            Ok(written) => written.0,
+            Err(_) => panic!("writing failed"),
+        }
+    }
+
+    #[test]
+    fn coalesces_changed_runs_and_preserves_first_properties_and_rsids() {
+        let properties = "<w:rPr><w:b/><w:lang w:val=\"de-DE\"/></w:rPr>";
+        let source = format!(
+            "<w:p>{} \n{}</w:p>",
+            run("00000001", "Tango uniform ", properties),
+            run("00000002", "victor whiskey.", properties)
+        );
+        let output = replace(
+            &source,
+            vec![text("Tango uniform victor whiskey.", json!({"bold": true}))],
+            &[(6, 20, "UNIFORM VICTOR", json!({"bold": true}))],
+        );
+        assert_eq!(output.matches("<w:r ").count(), 1);
+        assert!(output.contains("w:rsidR=\"00000001\""));
+        assert!(!output.contains("00000002"));
+        assert!(output.contains(properties));
+        assert!(output.contains("Tango UNIFORM VICTOR"));
+        assert!(output.contains(" whiskey."));
+    }
+
+    #[test]
+    fn coalesces_runs_changed_by_separate_text_edits() {
+        let source = format!(
+            "<w:p>{}{}</w:p>",
+            run("1", "alpha ", ""),
+            run("2", "beta", "")
+        );
+        let output = replace(
+            &source,
+            vec![text("alpha beta", json!({}))],
+            &[(0, 5, "ALPHA", json!({})), (6, 10, "BETA", json!({}))],
+        );
+        assert_eq!(output.matches("<w:r ").count(), 1);
+        assert!(output.contains("ALPHA "));
+        assert!(output.contains("BETA"));
+    }
+
+    #[test]
+    fn retains_untouched_source_splits() {
+        let second = run("2", "second part.", "<w:rPr><w:b/></w:rPr>");
+        let source = format!(
+            "<w:p>{}{second}</w:p>",
+            run("1", "Guard first ", "<w:rPr><w:b/></w:rPr>")
+        );
+        let output = replace(
+            &source,
+            vec![text("Guard first second part.", json!({"bold": true}))],
+            &[(6, 11, "FIRST", json!({"bold": true}))],
+        );
+        assert_eq!(output, source.replace("first", "FIRST"));
+        assert!(output.contains(&second));
+    }
+
+    #[test]
+    fn retains_different_properties_without_splitting_the_donor() {
+        let source = format!(
+            "<w:p>{}{}</w:p>",
+            run("1", "Xray yankee ", "<w:rPr><w:b/></w:rPr>"),
+            run("2", "zulu alpha.", "<w:rPr><w:i/></w:rPr>")
+        );
+        let output = replace(
+            &source,
+            vec![
+                text("Xray yankee ", json!({"bold": true})),
+                text("zulu alpha.", json!({"italic": true})),
+            ],
+            &[(5, 16, "YANKEE ZULU", json!({"bold": true}))],
+        );
+        assert_eq!(output.matches("<w:r ").count(), 2);
+        assert!(output.contains("Xray YANKEE ZULU"));
+        assert!(output.contains("<w:rPr><w:i/></w:rPr>"));
+    }
+
+    #[test]
+    fn split_text_edits_keep_the_first_donors_complex_script_properties() {
+        let bold = "<w:rPr><w:b/><w:bCs/></w:rPr>";
+        let italic = "<w:rPr><w:i/><w:iCs/></w:rPr>";
+        let source = format!(
+            "<w:p>{}{}</w:p>",
+            run("1", "Xray yankee ", bold),
+            run("2", "zulu alpha.", italic)
+        );
+        let output = replace(
+            &source,
+            vec![
+                text("Xray yankee ", json!({"bold": true})),
+                text("zulu alpha.", json!({"italic": true})),
+            ],
+            &[
+                (5, 11, "YANKEE", json!({"bold": true})),
+                (12, 16, "ZULU", json!({"bold": true})),
+            ],
+        );
+        assert_eq!(output.matches("<w:r ").count(), 2);
+        assert_eq!(output.matches(bold).count(), 1);
+        assert_eq!(output.matches(italic).count(), 1);
+        assert!(output.contains("Xray YANKEE"));
+        assert!(output.contains("ZULU"));
+    }
+
+    #[test]
+    fn retains_proof_error_boundaries() {
+        let marker = "<w:proofErr w:type=\"spellStart\"/>";
+        let source = format!(
+            "<w:p>{}{marker}{}</w:p>",
+            run("1", "alpha ", ""),
+            run("2", "beta", "")
+        );
+        let output = replace(
+            &source,
+            vec![text("alpha beta", json!({}))],
+            &[(0, 5, "ALPHA", json!({})), (6, 10, "BETA", json!({}))],
+        );
+        assert_eq!(output.matches("<w:r ").count(), 2);
+        assert!(output.contains(marker));
+    }
+
+    #[test]
+    fn retains_wrapper_boundaries_and_non_text_run_children() {
+        for (before, middle, after) in [
+            ("<w:hyperlink w:anchor=\"kept\">", "</w:hyperlink>", ""),
+            ("<w:smartTag>", "</w:smartTag><w:smartTag>", "</w:smartTag>"),
+            ("", "<w:r><w:tab/></w:r>", ""),
+        ] {
+            let source = format!(
+                "<w:p>{before}{}{middle}{}{after}</w:p>",
+                run("1", "alpha ", ""),
+                run("2", "beta", "")
+            );
+            let offset = if middle.contains("w:tab") { 7 } else { 6 };
+            let seed = if offset == 7 {
+                "alpha \tbeta"
+            } else {
+                "alpha beta"
+            };
+            let output = replace(
+                &source,
+                vec![text(seed, json!({}))],
+                &[
+                    (0, 5, "ALPHA", json!({})),
+                    (offset, offset + 4, "BETA", json!({})),
+                ],
+            );
+            assert_eq!(output.matches("<w:r ").count(), 2);
+            assert!(output.contains(middle));
+        }
+    }
+
+    #[test]
+    fn compares_property_bytes_and_preserves_unknown_properties() {
+        let properties = "<w:rPr><w:b/><w:lang w:val=\"de-DE\"/><x:kept x:value=\"1\"/></w:rPr>";
+        for second_properties in [
+            properties.to_owned(),
+            properties.replace("<w:b/>", "<w:b />"),
+        ] {
+            let source = format!(
+                "<w:p xmlns:x=\"urn:example\">{}{}</w:p>",
+                run("1", "alpha ", properties),
+                run("2", "beta", &second_properties)
+            );
+            let output = replace(
+                &source,
+                vec![text("alpha beta", json!({"bold": true}))],
+                &[
+                    (0, 5, "ALPHA", json!({"bold": true})),
+                    (6, 10, "BETA", json!({"bold": true})),
+                ],
+            );
+            let expected = if second_properties == properties {
+                1
+            } else {
+                2
+            };
+            assert_eq!(output.matches("<w:r ").count(), expected);
+            assert!(output.contains(properties));
+            assert!(output.contains("<x:kept x:value=\"1\"/>"));
+        }
+    }
+
+    #[test]
+    fn retains_non_rsid_attributes_and_text_identifiers() {
+        for attribute in [
+            "w:foo=\"second\"",
+            "xml:id=\"second\"",
+            "x:rsidR=\"second\"",
+        ] {
+            let second = run("2", "beta", "").replace("<w:r ", &format!("<w:r {attribute} "));
+            let source = format!(
+                "<w:p xmlns:x=\"urn:example\">{}{second}</w:p>",
+                run("1", "alpha ", "")
+            );
+            let output = replace(
+                &source,
+                vec![text("alpha beta", json!({}))],
+                &[(0, 5, "ALPHA", json!({})), (6, 10, "BETA", json!({}))],
+            );
+            assert_eq!(output.matches("<w:r ").count(), 2);
+            assert!(output.contains(attribute));
+        }
+    }
+
+    #[test]
+    fn retains_plain_text_bytes_and_multiple_text_elements() {
+        let source = "<w:p><w:r w:rsidR=\"1\"><w:rPr /><w:t xml:space=\"preserve\">a &amp; </w:t><w:t xml:id=\"kept\">beta</w:t></w:r><w:r w:rsidR=\"2\"><w:rPr /><w:t>gamma</w:t></w:r></w:p>";
+        let output = replace(
+            source,
+            vec![text("a & betagamma", json!({}))],
+            &[(4, 8, "BETA", json!({})), (8, 13, "GAMMA", json!({}))],
+        );
+        assert_eq!(output.matches("<w:r ").count(), 2);
+        assert!(output.contains("a &amp; "));
+        assert!(output.contains("xml:id=\"kept\""));
+    }
 }

@@ -6,6 +6,7 @@ import { sectionPropertiesEqual } from './sections';
 import { resolveThemeFont } from '../utils/fontResolver';
 import { mergeFontFamily } from '../utils/fontFamilyMerge';
 import { engineProgressTick } from '../utils/engineProgress';
+import { serializeRun } from '../docx/serializer';
 import { headerFooterAliasOf, markHeaderFooterAlias } from '../docx/headerFooterAliasProjection';
 import { markRevisionInfo } from '../docx/sessionRevisionIds';
 import { headerFooterStory, sessionSourcePackage } from './sessionInternals';
@@ -113,6 +114,7 @@ interface TextItem {
   kind: 'text';
   text: string;
   attributes: Attrs;
+  sourceRun?: { index: number; previous: number; changed: boolean };
 }
 
 interface EmbedItem {
@@ -1463,12 +1465,15 @@ function buildParagraphContent(
   const content: ParagraphContent[] = [];
   let currentRun: Run | null = null;
   let currentFormattingKey: string | null = null;
+  let currentSource: TextItem['sourceRun'];
+  const formattingKeys = new Map<string, string>();
   let currentHyperlink: Hyperlink | null = null;
 
   const flushRun = (): void => {
     if (currentRun) content.push(currentRun);
     currentRun = null;
     currentFormattingKey = null;
+    currentSource = undefined;
   };
   const flushHyperlink = (): void => {
     if (currentHyperlink) content.push(currentHyperlink);
@@ -1530,14 +1535,32 @@ function buildParagraphContent(
 
     flushHyperlink();
     if (item.kind === 'text') {
-      const key = stableStringifyWithout(item.attributes, NON_FORMATTING_ATTRS);
       const nextRun = createTextRun(item.text, item.attributes, format);
-      if (currentRun && currentFormattingKey === key) appendTextRun(currentRun, nextRun);
-      else {
+      let key = stableStringifyWithout(item.attributes, NON_FORMATTING_ATTRS);
+      if (item.sourceRun?.changed) {
+        const formatting = stableStringify([nextRun.formatting, nextRun.propertyChanges]);
+        let written = formattingKeys.get(formatting);
+        if (written === undefined) {
+          written = serializeRun({ ...nextRun, content: [] });
+          formattingKeys.set(formatting, written);
+        }
+        key = written;
+      }
+      const source = item.sourceRun;
+      const sameSource = source?.index === currentSource?.index;
+      const changedNeighbours = source && currentSource && source.changed && currentSource.changed &&
+        source.previous === currentSource.index;
+      const plain = nextRun.content.every(child => child.type === 'text') &&
+        currentRun?.content.every(child => child.type === 'text');
+      const compatible = source ? plain && (sameSource || changedNeighbours) : !currentSource;
+      if (currentRun && currentFormattingKey === key && compatible) {
+        appendTextRun(currentRun, nextRun);
+      } else {
         flushRun();
         currentRun = nextRun;
         currentFormattingKey = key;
       }
+      currentSource = source;
       continue;
     }
 
@@ -2229,7 +2252,7 @@ function sourceTextMatches(original: string, current: string): SourceTextMatch[]
   return matches;
 }
 
-function preserveSourceRunFormatting(items: InlineItem[], sources: OriginalRunBoundary[]): InlineItem[] {
+function preserveSourceRunFormatting(items: InlineItem[], sources: OriginalRunBoundary[], coalesce = false): InlineItem[] {
   if (sources.length === 0) {
     return items;
   }
@@ -2250,10 +2273,23 @@ function preserveSourceRunFormatting(items: InlineItem[], sources: OriginalRunBo
     return offset === sourceEnd ? liveEnd : current.length;
   };
   let sourceOffset = 0;
-  const spans = sources.map((source, index) => {
+  const mappedSources = sources.map((source, index) => {
     const start = mapped(sourceOffset);
     sourceOffset += source.text.length;
-    return { start, end: index + 1 === sources.length ? current.length : mapped(sourceOffset), formatting: source.formatting };
+    const end = index + 1 === sources.length ? current.length : mapped(sourceOffset);
+    return {
+      start, end, index, formatting: source.formatting,
+      changed: current.slice(start, end) !== source.text,
+    };
+  });
+  const spans = mappedSources.map((span, index) => {
+    let previous = index - 1;
+    while (previous >= 0) {
+      const skipped = mappedSources[previous]!;
+      if (skipped.end > skipped.start || !skipped.changed) break;
+      previous--;
+    }
+    return { ...span, previous };
   }).filter((span) => span.end > span.start);
   let offset = 0;
   return items.flatMap((item): InlineItem[] => {
@@ -2262,12 +2298,24 @@ function preserveSourceRunFormatting(items: InlineItem[], sources: OriginalRunBo
     while (offset < end) {
       const span = spans.find((span) => span.start <= offset && offset < span.end);
       const next = Math.min(end, span?.end ?? end);
+      const changedEmphasis = coalesce && span?.changed && ['bold', 'italic'].some(key =>
+        span.formatting?.[key as 'bold' | 'italic'] === true && !item.attributes[key]
+      );
+      const donor = changedEmphasis ? spans.find(candidate => candidate.index === span!.previous && candidate.changed &&
+        ['bold', 'italic'].every(key => !!candidate.formatting?.[key as 'bold' | 'italic'] === !!item.attributes[key])
+      ) : undefined;
+      const sourceFormatting = donor?.formatting ?? span?.formatting;
       const source = Object.fromEntries(SOURCE_RUN_PROPERTIES
-        .filter((key) => span?.formatting?.[key] !== undefined)
-        .map((key) => [key, span!.formatting![key]]));
+        .filter((key) => sourceFormatting?.[key] !== undefined)
+        .map((key) => [key, sourceFormatting![key]]));
       const attributes = { ...item.attributes, _sourceRunFormatting: source };
       slices.push(item.kind === 'text'
-        ? { ...item, text: item.text.slice(item.text.length - (end - offset), item.text.length - (end - next)), attributes }
+        ? {
+          ...item, text: item.text.slice(item.text.length - (end - offset), item.text.length - (end - next)), attributes,
+          ...(coalesce && span ? { sourceRun: {
+            index: span.index, previous: span.previous, changed: span.changed,
+          } } : {}),
+        }
         : { ...item, attributes });
       offset = next;
     }
@@ -2335,7 +2383,12 @@ function paragraphFromStory(
           language: attrs._originalFormatting.runProperties.language,
         },
       }] : [];
-  let content = buildParagraphContent(preserveSourceRunFormatting(items, sources), recovery, format, revisionIds);
+  const coalesce = !!baseParagraph && baseParagraph.content.every(child =>
+    child.type === 'run' && child.content.every(entry => entry.type === 'text') && !child.propertyChanges?.length
+  ) && items.every(item => item.kind === 'text' &&
+    !item.attributes.hyperlink && !item.attributes.ins && !item.attributes.del && !item.attributes.rPrChange
+  ) && sources.map(source => source.text).join('') !== items.map(item => item.kind === 'text' ? item.text : '').join('');
+  let content = buildParagraphContent(preserveSourceRunFormatting(items, sources, coalesce), recovery, format, revisionIds);
   content = restoreOriginalRuns(
     content,
     items,

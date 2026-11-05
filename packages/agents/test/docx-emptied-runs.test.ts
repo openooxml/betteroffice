@@ -21,7 +21,8 @@ for (const [name, source, expected] of [
   ['italic run after prefix', value('Prefix ') + '<w:r><w:rPr><w:i/></w:rPr><w:t>[</w:t></w:r>' + middle + run(']'),
     value('Prefix ') + '<w:r><w:rPr><w:i/></w:rPr><w:t>MRID</w:t></w:r>' +
     '<w:r><w:rPr><w:i/></w:rPr><w:t xml:space="preserve"> 12345678</w:t></w:r>'],
-  ['partial final run', run('[') + middle + value('] suffix'), replaced + value(' suffix')],
+  ['partial final run', run('[') + middle + value('] suffix'),
+    run('MRID') + '<w:r><w:rPr/><w:t xml:space="preserve"> 12345678</w:t><w:t xml:space="preserve"> suffix</w:t></w:r>'],
   ['source empty run', empty + run('[') + middle + run(']'), empty + replaced],
   ['tab beside deleted text', run('[') + middle + tab, replaced + tab.replace('>]<', '><')],
 ] as const) {
