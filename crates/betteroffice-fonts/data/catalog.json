@@ -1705,6 +1705,12 @@
       }
     }
   },
+  "emulatedSymbolFamilies": [
+    "wingdings",
+    "wingdings 2",
+    "wingdings 3",
+    "webdings"
+  ],
   "scriptFallbackOrder": {
     "hebrew": [
       "NotoSansHebrew-Regular.ttf.zst",

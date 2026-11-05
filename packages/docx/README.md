@@ -54,6 +54,16 @@ edits, and exports. Release a direct session with `session.destroy()` when finis
 
 Node.js >= 20.16 / 22.3 runs worker sessions on `worker_threads`, keeping the process alive until the session is disposed. Outside browsers the DOCX worker opens, reads and saves documents; for headless editing use the in-thread edit session (`openDocx` / `EditSession`), which is fully supported, because the worker editor session paints frames and needs `OffscreenCanvas`.
 
+## Page PNGs
+
+`session.renderPng({ page }, options?)` on a `YrsSession` from `@betteroffice/docx/yrs` draws a page as PNG bytes with the editor's layout and painter. `page` is 0-based. It lays out a private replica of the session, so an open editor is undisturbed, and reuses that layout until the document changes.
+
+```ts
+const png = await session.renderPng({ page: 0 }, { scale: 2 });
+```
+
+Pass `fontProvider` with the provider your editor measures with so the two match. Without a canvas it rejects with `PngExportError` (`canvas-unavailable`); `@betteroffice/docx-native` renders the same call natively. A worker cannot decode SVG or metafile pictures, so a page with them rejects there rather than lose them.
+
 ## Undo grouping
 
 A story is one text flow: the body, a header or footer, a footnote, or a comment.

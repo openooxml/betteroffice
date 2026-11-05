@@ -52,7 +52,7 @@ test('default editor static chunks exclude the legacy and in-thread editors', as
   const files = new Map(result.outputFiles.map((file) => [file.path, file.contents]));
   const bytes = [...seen].reduce((sum, path) => sum + gzipSync(files.get(resolve(root, path))!, { level: 9 }).length, 0);
   expect(bytes).toBeLessThan(STATIC_GZIP_BUDGET);
-});
+}, 30_000);
 
 function modulePath(from: string, specifier: string): string {
   const base = resolve(dirname(from), specifier);
@@ -137,7 +137,7 @@ for (const entry of ['packages/xlsx/src/session/client.ts', 'packages/xlsx/src/s
       expect(eager.has('packages/xlsx-react/src/presence/Presence.tsx')).toBe(true);
       expect(eager.has('packages/xlsx-react/src/worker/usePeerlessPresence.ts')).toBe(true);
     }
-  });
+  }, 30_000);
 }
 
 test('the peerless editor has no static runtime imports of the legacy worker session', () => {

@@ -91,7 +91,7 @@ export function createCommandDefaultFonts(
         } else {
           const named = source.resolve(face.family, bold, italic) ?? source.resolveFamily(face.family, bold, italic);
           light = named ? undefined : source.resolveLightVariant?.(face.family, bold, italic);
-          load = named ?? light;
+          load = named ?? light ?? source.resolveLastResort(face.family, bold, italic, 'powerpoint');
         }
         if (!load) return undefined;
         const bytes = await load();
