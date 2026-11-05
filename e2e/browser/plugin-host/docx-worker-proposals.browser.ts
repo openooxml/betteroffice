@@ -775,6 +775,8 @@ test('default: review commands step through, wrap and accept tracked changes in 
   });
   const change = (pageNumber: number) =>
     ({ selectedText: ' Existing insertion.', paragraphText: `Page ${pageNumber} paragraph 12: Original text. Existing insertion.` });
+  await expect.poll(() => page.evaluate(() =>
+    (window as unknown as ProbeWindow).__workerProposalProbe.editor!.commands.getState('reviewNext').enabled)).toBe(true);
   for (const [id, pageNumber] of [['reviewNext', 5], ['reviewNext', 6], ['reviewNext', 5], ['reviewPrevious', 6]] as const) {
     expect(await execute(id)).toMatchObject({ ok: true, status: 'executed' });
     await expect.poll(selection).toEqual(change(pageNumber));
