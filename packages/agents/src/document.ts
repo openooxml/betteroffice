@@ -1,8 +1,9 @@
 import { DocxSectionError, createYrsSession, saveYrsDocx, type DocxCommentSaveBaseline, type DocxCommentSaveIdentity, type DocxParagraphTarget, type DocxProposalInput, type DocxProposalRecord, type DocxProposalSnapshot, type DocxProposalResult, type DocxProposalStateRequest, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
 import { readCommentPart, readSavedCommentIdentities, verifyCommentOutput, type CommentSource } from './comment-output';
 import { cellPosition, commentBody, commentRanges, commentRoot, commentText, continueList, deleteParagraph, deleteTableRow, formatParagraph, hostEdit, insertParagraphsBefore, insertParagraphsWithAnchorFormat, insertSectionBreak, replaceCommentText, setSection, insertTableRow, lineText, listLevel, mergeCells, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
-import { docxBatchSchema, type DocxAgentBatch, type DocxAgentEdit, type DocxEditOutcome } from './docx-schema';
+import { createDocxBatchSchema, type DocxAgentBatch, type DocxAgentEdit, type DocxEditOutcome } from './docx-schema';
 import { compareDocxStructure, docxModelCounts, type DocxModelCounts } from './docx-structure';
+import { editLimit } from './edit-limits';
 import {
   DocumentToolError,
   TrackedRevisionConflictError,
@@ -10,6 +11,7 @@ import {
   ProposalDecidedInEditorError,
   unknownMatchError,
   type DocumentOptions,
+  type DocxRunPage,
   type ExactTextEdit,
   type GrepMatch,
   type GrepOptions,
@@ -136,6 +138,10 @@ function visibleFormatting(attributes: Record<string, unknown>): Record<string, 
   return formatting;
 }
 
+function fixedRunKind(run: TextRun): string | undefined {
+  return run.kind ?? (run.protected || run.formatting.hyperlink ? 'protected' : undefined);
+}
+
 function literal(query: string, caseSensitive: boolean): RegExp {
   return new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), caseSensitive ? 'gu' : 'giu');
 }
@@ -153,6 +159,7 @@ export class DocxAgentDocument {
   private readonly editorDecisionRevisions = new Map<string, number>();
   private paragraphs: Paragraph[] = [];
   private readonly identities = new Map<string, Paragraph>();
+  private readonly runRevisions = new Map<string, { fingerprint: string; revision: number }>();
   private readonly proposals = new Map<string, HeldProposal>();
   private readonly matches = new Map<string, Omit<ExactTextEdit, 'newText'>>();
   private readonly cursors = new Map<string, { epoch: number; signature: string; paragraph: number; offset: number }>();
@@ -173,6 +180,7 @@ export class DocxAgentDocument {
   private commentSaveBaseline?: DocxCommentSaveBaseline;
   private commentSaveBaselineVersion?: number;
   private readonly textEditedComments = new Set<string>();
+  private readonly maxEdits: number;
   private sourceCounts?: DocxModelCounts;
 
   constructor(
@@ -180,6 +188,7 @@ export class DocxAgentDocument {
     private readonly options: DocumentOptions = {},
     private readonly ownsSession = false,
   ) {
+    this.maxEdits = editLimit(options.maxEdits);
     this.name = options.name ?? 'document.docx';
     this.unsubscribe = session.onUpdate(() => { this.epoch++; });
     this.unsubscribeProposals = this.attached ? session.onProposalChange(snapshot => this.observeProposals(snapshot)) : () => {};
@@ -331,18 +340,61 @@ export class DocxAgentDocument {
     };
   }
 
-  /** Applies 1–32 direct edits on a fork, then commits them as one undo step; any failure applies none. */
+  readRuns(options: { story?: string; offset?: number; limit?: number; maxChars?: number } = {}): DocxRunPage {
+    this.index();
+    this.checkStory(options.story);
+    const offset = integer(options.offset ?? 0, 0, Number.MAX_SAFE_INTEGER, 'offset');
+    const limit = integer(options.limit ?? 50, 1, 200, 'limit');
+    const maxChars = integer(options.maxChars ?? 32000, 1, Number.MAX_SAFE_INTEGER, 'maxChars');
+    const entries = this.paragraphs.filter(p => !options.story || p.story === options.story);
+    const paragraphs: DocxRunPage['paragraphs'] = [];
+    const formats: DocxRunPage['formats'] = {};
+    const keys = new Map<string, string>();
+    let size = 0;
+    for (const p of entries.slice(offset, offset + limit)) {
+      if (paragraphs.length && size + p.text.length > maxChars) break;
+      const runs = p.runs.map((run, index) => {
+        const id = `${p.ref}.${index + 1}`;
+        const kind = fixedRunKind(run);
+        if (kind) return { id, kind };
+        const text = p.text.slice(run.start, run.end);
+        if (!Object.keys(run.formatting).length) return { id, text };
+        const signature = JSON.stringify(Object.entries(run.formatting).sort(([a], [b]) => a.localeCompare(b)));
+        let f = keys.get(signature);
+        if (!f) {
+          f = `f${keys.size + 1}`;
+          keys.set(signature, f);
+          formats[f] = structuredClone(run.formatting);
+        }
+        return { id, text, f };
+      });
+      paragraphs.push({ ref: p.ref, revision: this.runRevision(p), text: p.text, runs });
+      size += p.text.length;
+    }
+    const next = offset + paragraphs.length;
+    return { version: this.epoch, paragraphs, formats, nextOffset: next < entries.length ? next : null, total: entries.length };
+  }
+
   async edit(input: DocxAgentBatch) {
     this.index();
     if (Array.isArray(input?.edits) && input.edits.some(edit => edit?.op === 'delete_comment')
       && input.edits.some(edit => ['add_comment', 'reply_comment', 'resolve_comment', 'replace_comment_text'].includes(edit?.op))) {
       throw new DocumentToolError('INVALID_ARGUMENT', 'delete_comment cannot be combined with other comment operations in one batch; run it in its own docx_edit call.');
     }
-    const parsed = docxBatchSchema.safeParse(input);
-    if (!parsed.success) throw new DocumentToolError('INVALID_ARGUMENT', 'Use the docx_edit schema: version and 1–32 edits.', { issues: parsed.error.issues.map(issue => ({ path: issue.path, message: issue.message })) });
+    const parsed = createDocxBatchSchema(this.maxEdits).safeParse(input);
+    if (!parsed.success) throw new DocumentToolError('INVALID_ARGUMENT', `Use the docx_edit schema: version and 1-${this.maxEdits} edits.`, { issues: parsed.error.issues.map(issue => ({ path: issue.path, message: issue.message })) });
     const { version, edits } = parsed.data;
     if (version !== this.epoch) throw new DocumentToolError('STALE_VERSION', 'The document changed. Read office_outline or office_grep again and copy its version.');
-    if (JSON.stringify(edits).length > 64_000) throw new DocumentToolError('EDIT_LIMIT', 'A batch holds at most 64000 characters of input. Split it.');
+    const maxChars = Math.max(64_000, 1000 * this.maxEdits);
+    if (JSON.stringify(edits).length > maxChars) throw new DocumentToolError('EDIT_LIMIT', `A batch holds at most ${maxChars} characters of input. Split it.`);
+    const paragraphs = new Set<string>();
+    for (const edit of edits) if (edit.op === 'set_runs') {
+      if (paragraphs.has(edit.paragraph)) throw new DocumentToolError('INVALID_ARGUMENT', 'Use one set_runs operation per paragraph in a batch.');
+      paragraphs.add(edit.paragraph);
+    }
+    for (const edit of edits) if ('match' in edit && edit.match !== undefined && paragraphs.has(this.matches.get(edit.match)?.ref ?? '')) {
+      throw new DocumentToolError('INVALID_ARGUMENT', 'set_runs moves text offsets, so a match in the same paragraph needs its own batch. Run grep again after set_runs.');
+    }
     const outcomes = await this.commit(version, edits);
     this.index();
     return {
@@ -356,8 +408,8 @@ export class DocxAgentDocument {
 
   private prepareChanges(input: { author: string; note?: string; edits: TextEdit[] }): HeldProposal {
     this.index();
-    if (!input.author || input.author.length > 200 || (input.note?.length ?? 0) > 2000 || !Array.isArray(input.edits) || input.edits.length < 1 || input.edits.length > 32) {
-      throw new DocumentToolError('INVALID_ARGUMENT', 'Supply an author (1–200 characters), note (up to 2000), and 1–32 edits.');
+    if (!input.author || input.author.length > 200 || (input.note?.length ?? 0) > 2000 || !Array.isArray(input.edits) || input.edits.length < 1 || input.edits.length > this.maxEdits) {
+      throw new DocumentToolError('INVALID_ARGUMENT', `Supply an author (1-200 characters), note (up to 2000), and 1-${this.maxEdits} edits.`);
     }
     if (this.proposals.size >= 64) {
       const closed = [...this.proposals].find(([, held]) => held.value.status !== 'pending');
@@ -660,6 +712,7 @@ export class DocxAgentDocument {
     this.cursors.clear();
     this.matches.clear();
     this.identities.clear();
+    this.runRevisions.clear();
     this.paragraphs = [];
     if (this.ownsSession) this.session.destroy();
   }
@@ -724,9 +777,13 @@ export class DocxAgentDocument {
           paragraphs.push(p);
           text = ''; runs = []; segments = [];
         } else {
-          const value = segment.kind === 'text' ? segment.text : '\ufffc';
-          runs.push({ start: text.length, end: text.length + value.length, formatting: visibleFormatting(segment.attributes), protected: segment.kind === 'embed' || !!segment.attributes.ins || !!segment.attributes.del });
-          text += value;
+          const values = segment.kind === 'text' ? segment.text.split(/([\t\r\n\v\f])/u).filter(Boolean) : ['\ufffc'];
+          for (const value of values) {
+            const kind = segment.kind === 'embed' ? segment.embedKind : value === '\t' ? 'tab' : /^[\r\n\v\f]$/u.test(value) ? 'break' : undefined;
+            runs.push({ start: text.length, end: text.length + value.length, formatting: visibleFormatting(segment.attributes), protected: segment.kind === 'embed' || !!segment.attributes.ins || !!segment.attributes.del,
+              ...(kind && { kind }) });
+            text += value;
+          }
         }
       }
     }
@@ -796,6 +853,14 @@ export class DocxAgentDocument {
       }
       return draft;
     } catch (error) { draft.destroy(); throw error; }
+  }
+
+  private runRevision(p: Paragraph) {
+    const key = JSON.stringify([p.story, p.paraId]);
+    const held = this.runRevisions.get(key);
+    if (!held) { this.runRevisions.set(key, { fingerprint: p.fingerprint, revision: p.revision }); return p.revision; }
+    if (held.fingerprint !== p.fingerprint) { held.fingerprint = p.fingerprint; held.revision++; }
+    return held.revision;
   }
 
   private captureReferences() {
@@ -1292,6 +1357,27 @@ export class DocxAgentDocument {
   }
 
   private async plan(edit: DocxAgentEdit): Promise<EditStep> {
+    if (edit.op === 'set_runs') {
+      const p = this.get(edit.paragraph);
+      if (this.runRevision(p) !== edit.revision) throw new DocumentToolError('STALE_TARGET', 'The paragraph changed. Read its runs again.', { refs: [p.ref] });
+      if (new Set(edit.runs.map(run => run.run)).size !== edit.runs.length) throw new DocumentToolError('INVALID_ARGUMENT', 'Run IDs must be unique within set_runs.');
+      const ids = new Map(p.runs.map((run, index) => [`${p.ref}.${index + 1}`, run]));
+      const replacements = edit.runs.map(({ run: id, text }) => {
+        const run = ids.get(id);
+        if (!run) throw new DocumentToolError('UNKNOWN_REF', 'Unknown run ID. Copy IDs from docx_read_runs for this paragraph.', { run: id });
+        if (fixedRunKind(run)) throw new DocumentToolError('PROTECTED_RUN', 'Fixed tokens cannot be changed.', { run: id });
+        lineText(text);
+        return { start: this.acceptedOffset(p.story, p.paraId, run.start), end: this.acceptedOffset(p.story, p.paraId, run.end), oldText: p.text.slice(run.start, run.end), text };
+      }).sort((a, b) => b.start - a.start);
+      return draft => {
+        requireParagraph(draft, p);
+        for (const run of replacements) {
+          if (run.oldText === run.text) continue;
+          hostEdit(draft, { op: 'replaceText', target: { kind: 'range', story: p.story, start: { paraId: p.paraId, offset: run.start }, end: { paraId: p.paraId, offset: run.end }, view: 'accepted' }, text: run.text, expect: { text: run.oldText } });
+        }
+        return { result: { ref: p.ref } };
+      };
+    }
     if (edit.op === 'delete_comment') {
       await this.checkCommentPart(true);
       return draft => {
