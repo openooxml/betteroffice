@@ -1278,6 +1278,18 @@ fn adjust_values(snapshot: &DeckSnapshot) -> Vec<BTreeMap<String, f64>> {
 const DEFAULTS_SLIDE: &str = "ppt/slides/slide1.xml";
 const STORY_COUNTS: [usize; 3] = [40, 160, 640];
 const DELETIONS_PER_STORY: u32 = 6;
+const TIMED_RUNS: usize = 3;
+
+fn fastest<T>(mut run: impl FnMut() -> T) -> (T, std::time::Duration) {
+    let mut best = std::time::Duration::MAX;
+    let mut value = None;
+    for _ in 0..TIMED_RUNS {
+        let started = std::time::Instant::now();
+        value = Some(run());
+        best = best.min(started.elapsed());
+    }
+    (value.unwrap(), best)
+}
 const FRAGMENTED_PARAGRAPHS: usize = 40;
 const FRAGMENTED_RUNS: usize = 4;
 const FRAGMENTED_REPEATS: usize = 12;
@@ -1689,9 +1701,7 @@ fn a_fragmented_story_recovers_in_about_the_time_a_fresh_open_takes() {
     let end = start + slide[start..].find("</a:p>").unwrap() + "</a:p>".len();
     let source = defaults_variant(&[(DEFAULTS_SLIDE, &slide[start..end], &paragraphs)]);
     let stored = legacy_seed(&source, 43500);
-    let started = std::time::Instant::now();
-    let fresh = DeckSession::open(&source, 43501).unwrap();
-    let open_time = started.elapsed();
+    let (fresh, open_time) = fastest(|| DeckSession::open(&source, 43501).unwrap());
     let migrated = DeckSession::open_from_update(&stored, 43502).unwrap();
     let story = defaults_story(&migrated, "Direct all caps");
     let context = EditCtx::local("fixture");
@@ -1725,9 +1735,8 @@ fn a_fragmented_story_recovers_in_about_the_time_a_fresh_open_takes() {
         }
     }
     let update = migrated.encode_state_as_update_v1();
-    let started = std::time::Instant::now();
-    let attached = DeckSession::open_from_update_with_source(&update, &source, 43503).unwrap();
-    let attach_time = started.elapsed();
+    let (attached, attach_time) =
+        fastest(|| DeckSession::open_from_update_with_source(&update, &source, 43503).unwrap());
     eprintln!("TIMING attach {attach_time:?} open {open_time:?}");
     assert_eq!(
         attached.story(&story).unwrap(),
@@ -1865,9 +1874,9 @@ fn migrating_and_attaching_grows_linearly_with_the_number_of_stories() {
         let update = doc
             .transact()
             .encode_state_as_update_v1(&StateVector::default());
-        let started = std::time::Instant::now();
-        let attached = DeckSession::open_from_update_with_source(&update, &source, 44502).unwrap();
-        timings.push(started.elapsed());
+        let (attached, attach_time) =
+            fastest(|| DeckSession::open_from_update_with_source(&update, &source, 44502).unwrap());
+        timings.push(attach_time);
         for story in &stories {
             assert_eq!(attached.story(story).unwrap(), fresh.story(story).unwrap());
         }
