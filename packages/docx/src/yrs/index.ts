@@ -633,6 +633,8 @@ export interface YrsRenderEnv {
   hyperlinkStyleFontSizes?: Record<string, number>;
   /** The docDefaults font size in pt. */
   docDefaultFontSize?: number;
+  /** The docDefaults run language, which runs that name none inherit. */
+  docDefaultLanguage?: { latin?: string; eastAsia?: string; bidi?: string };
   /** Theme color name → hex (`accent1` → `4472C4`), for theme-color resolution. */
   themeColors?: Record<string, string>;
   fontTheme?: Theme;

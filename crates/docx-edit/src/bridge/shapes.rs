@@ -818,6 +818,7 @@ fn shape_shading(formatting: Option<&Value>, env: &RenderEnv) -> Option<String> 
 
 fn shape_run_formatting_with_shading(source: Option<&Value>, env: &RenderEnv) -> RunFormatting {
     let mut formatting = shape_run_formatting(source);
+    inherit_default_language(&mut formatting, env);
     if let Some(slots) = formatting.font_slots.as_mut() {
         super::resolve_font_slots(slots, env);
         formatting.font_family = slots
@@ -830,6 +831,26 @@ fn shape_run_formatting_with_shading(source: Option<&Value>, env: &RenderEnv) ->
     }
     formatting.highlight = shape_shading(source, env);
     formatting
+}
+
+/// Fills the language slots a shape run leaves unset from the document
+/// defaults. A shape's text is stored as its own parse, outside the style
+/// resolution body runs go through, so without this a text box loses the
+/// language its document declares.
+fn inherit_default_language(formatting: &mut RunFormatting, env: &RenderEnv) {
+    let Some(defaults) = &env.doc_default_language else {
+        return;
+    };
+    let language = formatting.language.get_or_insert_with(Default::default);
+    if language.latin.is_none() {
+        language.latin = defaults.latin.clone();
+    }
+    if language.east_asia.is_none() {
+        language.east_asia = defaults.east_asia.clone();
+    }
+    if language.bidi.is_none() {
+        language.bidi = defaults.bidi.clone();
+    }
 }
 
 fn shape_run_formatting(source: Option<&Value>) -> RunFormatting {
@@ -1370,8 +1391,39 @@ mod textbox_pictures_tests;
 mod textbox_charts_tests;
 
 #[cfg(test)]
+#[path = "textbox_language_tests.rs"]
+mod textbox_language_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_shape_run_keeps_its_own_language_and_fills_the_slots_it_leaves_unset() {
+        let env = RenderEnv {
+            doc_default_language: Some(docx_layout::types::RunLanguageSlots {
+                latin: Some("en-US".to_owned()),
+                east_asia: Some("ja-JP".to_owned()),
+                bidi: None,
+            }),
+            ..RenderEnv::default()
+        };
+        let language = |source: Value| {
+            let formatting = shape_run_formatting_with_shading(Some(&source), &env);
+            let language = formatting.language.unwrap();
+            (language.latin, language.east_asia)
+        };
+        let owned = |tag: &str| Some(tag.to_owned());
+        assert_eq!(
+            language(json!({"language": {"latin": "fr-FR", "eastAsia": "zh-TW"}})),
+            (owned("fr-FR"), owned("zh-TW"))
+        );
+        assert_eq!(
+            language(json!({"language": {"latin": "fr-FR"}})),
+            (owned("fr-FR"), owned("ja-JP"))
+        );
+        assert_eq!(language(json!({})), (owned("en-US"), owned("ja-JP")));
+    }
 
     #[test]
     fn shape_colors_resolve_ordered_drawingml_transforms() {
