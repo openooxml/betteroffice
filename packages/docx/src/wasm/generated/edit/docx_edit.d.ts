@@ -1212,6 +1212,12 @@ export class EditSession {
      * replica of a preview is: its layouts render NUMPAGES empty.
      */
     set_partial_document(partial: boolean): void;
+    /**
+     * Sets the height, in twips, and the `w:hRule` of the row holding the cell
+     * `at_json` ([`CellLoc`]) names. Always a plain local edit. Errors unless
+     * `height_twips` is finite and positive and `rule` is `atLeast` or `exact`.
+     */
+    set_row_height(at_json: string, height_twips: number, rule: string): string;
     set_section_margins(section: string, json: string): boolean;
     /**
      * Stores this peer's anchor and head as sticky positions, replacing any
@@ -1978,6 +1984,7 @@ export interface InitOutput {
     readonly editsession_set_paragraph_attrs: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number];
     readonly editsession_set_part_metadata: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly editsession_set_partial_document: (a: number, b: number) => void;
+    readonly editsession_set_row_height: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly editsession_set_section_margins: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly editsession_set_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
     readonly editsession_set_style_language: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];

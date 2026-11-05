@@ -18,6 +18,8 @@ export interface ResidentObjectRect {
   y: number;
   width: number;
   height: number;
+  /** Table cells only: this box is a header row's copy on a continuation page. */
+  repeatedHeader?: boolean;
 }
 
 export interface ResidentObjectGeometry {
@@ -169,7 +171,7 @@ export async function readResidentFrameGeometry(
         if (!box.exact) estimated.add(key);
         const bounds = cellGeometry.get(key) ?? [];
         bounds.push({ pageId: frame.pages[box.pageIndex]!.pageId.toString(), pageIndex: box.pageIndex,
-          x: box.x, y: box.y, width: box.w, height: box.h });
+          x: box.x, y: box.y, width: box.w, height: box.h, ...(box.repeatedHeader ? { repeatedHeader: true } : {}) });
         cellGeometry.set(key, bounds);
       }
       for (const table of tables) for (const cell of table.cells) {
@@ -178,7 +180,7 @@ export async function readResidentFrameGeometry(
         const boxes = cellGeometry.get(`${table.start}:${cell.row}:${cell.column}`) ?? [];
         if (at && tableAt && boxes.length) objects.push({ kind: 'cell', story: cell.story,
           handle: issue(engine, 'cell', { story: cell.story, paraId: at.paraId, offset: 0 }, tableAt), rects: boxes,
-          cell: residentCellPlacement(table, cell, !estimated.has(`${table.start}:${cell.row}:${cell.column}`), table.widthsTwips) });
+          cell: residentCellPlacement(table, cell, !estimated.has(`${table.start}:${cell.row}:${cell.column}`)) });
       }
       for (const story of stories) {
         const spans = engine.geometryReader.paragraphSpans(story);

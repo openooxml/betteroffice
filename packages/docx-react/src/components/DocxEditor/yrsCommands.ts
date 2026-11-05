@@ -78,6 +78,7 @@ export type YrsEditorCommand =
       pmStart: number;
       widths: ReadonlyArray<{ column: number; widthTwips: number }>;
     }
+  | { type: 'tableRowHeight'; pmStart: number; row: number; paintedTwips: number; deltaTwips: number }
   | { type: 'tableSelect'; target: 'table' | 'row' | 'column' };
 
 export interface YrsTableTarget {

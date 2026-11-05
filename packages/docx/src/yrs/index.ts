@@ -1359,6 +1359,8 @@ export interface YrsSession extends CollaborationReplica {
   /** Sets one authored grid-column width in twips. */
   setColumnWidth(at: YrsCellLoc, widthTwips: number): YrsTableReceipt;
   /** Sets the table-wide preferred width in twips. */
+  /** Sets the height and `w:hRule` of the row holding `at`. */
+  setRowHeight(at: YrsCellLoc, heightTwips: number, rule: 'atLeast' | 'exact'): YrsTableReceipt;
   setTableWidth(table: YrsTableLoc, widthTwips: number): YrsTableReceipt;
   setTableProperties(table: YrsTableLoc, patch: YrsTablePropertiesPatch): YrsTableReceipt;
   /** Inserts paragraph-break-free text. Suggesting mode mints a revision. */

@@ -19,7 +19,7 @@ import { geometryMatchesDocument, type PeerlessFrameGeometry, type PeerlessProvi
 import { clientPointToPage } from './pagePoint';
 import { beginPictureDrag, floatingPictureAt, inlinePictureAt, movePictureDrag, pictureAt, pictureDropIntent, pictureInSelection, type PictureDrag } from './pictureDrag';
 import { beginPictureResize, movePictureResize, pictureResizeIntent, type PictureResize, type PictureResizeHandle } from './pictureResize';
-import { tableHandleAt, tableResizeHandles, tableResizeIntent, type TableResizeHandle } from './tableResize';
+import { tableHandleAt, tableResizeHandles, tableResizeIntent, tableRowHandleAt, tableRowResizeHandles, tableRowResizeIntent, type TableResizeHandle, type TableRowHandle } from './tableResize';
 import type { PeerlessPropertyIntent } from './inputEvents';
 import { CanvasPageMirror } from '../CanvasPageMirror';
 import { createPageChromeHold, type PageChromeHold } from '../usePageChrome';
@@ -50,6 +50,7 @@ const pictureHandles = [
   { handle: 'sw', x: 0, y: 1, cursor: 'sw-resize' },
   { handle: 'w', x: 0, y: 0.5, cursor: 'ew-resize' },
 ] as const;
+type TableBorderDrag = { id: string; axis: 'x' | 'y'; min: number; max: number; intent(delta: number): PeerlessPropertyIntent | null };
 const pageLayouts = new WeakMap<readonly PageGeometry[], { width: number; height: number }>();
 
 function pageLayout(pages: readonly PageGeometry[]) {
@@ -574,41 +575,55 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     input.current?.focus({ preventScroll: true });
   };
   const canResizeTables = tables?.canResize() ?? false;
-  const tableHandles = useMemo(() => canResizeTables
-    ? tableResizeHandles(geometry, new Set(visiblePages.map(({ page }) => page.pageIndex))) : [],
-  [canResizeTables, geometry, visiblePages]);
-  const tableDrag = useRef<{ pointerId: number; handle: TableResizeHandle; startX: number; scale: number; moved: boolean } | null>(null);
-  const [tableDragPreview, setTableDragPreview] = useState<{ id: string; delta: number } | null>(null);
-  const [tableHover, setTableHover] = useState<string | null>(null);
-  const tableDragDelta = (active: NonNullable<typeof tableDrag.current>, clientX: number) =>
-    Math.min(Math.max((clientX - active.startX) / active.scale, active.handle.minDelta), active.handle.maxDelta);
+  const tablePageIndices = useMemo(() => new Set(visiblePages.map(({ page }) => page.pageIndex)), [visiblePages]);
+  const tableHandles = useMemo(() => canResizeTables ? tableResizeHandles(geometry, tablePageIndices) : [],
+    [canResizeTables, geometry, tablePageIndices]);
+  const tableRowHandles = useMemo(() => canResizeTables ? tableRowResizeHandles(geometry, tablePageIndices) : [],
+    [canResizeTables, geometry, tablePageIndices]);
+  const tableDrag = useRef<(TableBorderDrag & { pointerId: number; start: number; scale: number; moved: boolean }) | null>(null);
+  const [tableDragPreview, setTableDragPreview] = useState<{ id: string; axis: 'x' | 'y'; delta: number } | null>(null);
+  const [tableHover, setTableHover] = useState<{ id: string; axis: 'x' | 'y' } | null>(null);
+  const tableAxis = (tableDragPreview ?? tableHover)?.axis;
+  const tableDragOffset = (active: NonNullable<typeof tableDrag.current>, event: PointerEvent<HTMLDivElement>) =>
+    (active.axis === 'x' ? event.clientX : event.clientY) - active.start;
+  const tableDragDelta = (active: NonNullable<typeof tableDrag.current>, event: PointerEvent<HTMLDivElement>) =>
+    Math.min(Math.max(tableDragOffset(active, event) / active.scale, active.min), active.max);
   const endTableDrag = () => {
     tableDrag.current = null;
     setTableDragPreview(null);
   };
-  const tableBorderAt = (event: PointerEvent<HTMLDivElement>) => {
-    if (event.pointerType === 'touch' || tableHandles.length === 0) return null;
+  const columnDrag = (handle: TableResizeHandle): TableBorderDrag => ({ id: handle.id, axis: 'x', min: handle.minDelta, max: handle.maxDelta,
+    intent: (delta) => tableResizeIntent(binding.viewStore.getSnapshot().geometry, handle, delta) });
+  const rowDrag = (handle: TableRowHandle): TableBorderDrag => ({ id: handle.id, axis: 'y', min: handle.minDelta, max: Infinity,
+    intent: (delta) => tableRowResizeIntent(binding.viewStore.getSnapshot().geometry, handle, delta) });
+  const tableBorderAt = (event: PointerEvent<HTMLDivElement>): TableBorderDrag | null => {
+    if (event.pointerType === 'touch' || (tableHandles.length === 0 && tableRowHandles.length === 0)) return null;
     const point = clientPointToPage(event.clientX, event.clientY, event.currentTarget.getBoundingClientRect(), zoom, pages);
-    return point && tableHandleAt(tableHandles, point.page.page.pageIndex, point.x, point.y, TABLE_HANDLE_PX / 2 / zoom);
+    if (!point) return null;
+    const tolerance = TABLE_HANDLE_PX / 2 / zoom;
+    const column = tableHandleAt(tableHandles, point.page.page.pageIndex, point.x, point.y, tolerance);
+    const row = tableRowHandleAt(tableRowHandles, point.page.page.pageIndex, point.x, point.y, tolerance);
+    if (column && (!row || Math.abs(point.x - column.x) <= Math.abs(point.y - row.y))) return columnDrag(column);
+    return row ? rowDrag(row) : null;
   };
   const armTableDrag = (event: PointerEvent<HTMLDivElement>) => {
     if (event.shiftKey || event.altKey || event.ctrlKey || event.metaKey || tableDrag.current || !tables?.canResize()) return false;
-    const handle = tableBorderAt(event);
+    const border = tableBorderAt(event);
     const scale = event.currentTarget.getBoundingClientRect().width / width;
-    if (!handle || !Number.isFinite(scale) || scale <= 0) return false;
+    if (!border || !Number.isFinite(scale) || scale <= 0) return false;
     // The press places the caret as any press does, so a click on a border stays a click; only moving turns it into a resize.
     if (!onPoint(event, false)) return true;
-    tableDrag.current = { pointerId: event.pointerId, handle, startX: event.clientX, scale, moved: false };
+    tableDrag.current = { ...border, pointerId: event.pointerId, start: border.axis === 'x' ? event.clientX : event.clientY, scale, moved: false };
     event.currentTarget.setPointerCapture(event.pointerId);
     return true;
   };
   const moveTableDrag = (active: NonNullable<typeof tableDrag.current>, event: PointerEvent<HTMLDivElement>) => {
-    if (!active.moved && Math.abs(event.clientX - active.startX) < TABLE_DRAG_SLOP_PX) return;
+    if (!active.moved && Math.abs(tableDragOffset(active, event)) < TABLE_DRAG_SLOP_PX) return;
     active.moved = true;
-    setTableDragPreview({ id: active.handle.id, delta: tableDragDelta(active, event.clientX) });
+    setTableDragPreview({ id: active.id, axis: active.axis, delta: tableDragDelta(active, event) });
   };
   const finishTableDrag = (active: NonNullable<typeof tableDrag.current>, event: PointerEvent<HTMLDivElement>) => {
-    const intent = active.moved ? tableResizeIntent(binding.viewStore.getSnapshot().geometry, active.handle, tableDragDelta(active, event.clientX)) : null;
+    const intent = active.moved ? active.intent(tableDragDelta(active, event)) : null;
     endTableDrag();
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
     if (intent && tables?.canResize()) tables.resize(intent);
@@ -748,7 +763,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
       <PeerlessInput admission={binding.admission} viewStore={binding.viewStore} textareaRef={input} autoFocus={autoFocus}
         onCompositionChange={onCompositionChange} onRecoverableText={onRecoverableText} onClipboard={onClipboard} onPasteFragment={onPasteFragment}
         caretHostRef={column} zoom={zoom} onNavigateCell={onNavigateCell} />
-      <div data-docx-pages-host data-table-resize={tableHover || tableDragPreview ? 'col' : undefined} style={{ position: 'relative', width, height, transform: `scale(${zoom})`, transformOrigin: 'top left', touchAction: 'pan-x pan-y' }}
+      <div data-docx-pages-host data-table-resize={tableAxis && (tableAxis === 'x' ? 'col' : 'row')} style={{ position: 'relative', width, height, transform: `scale(${zoom})`, transformOrigin: 'top left', touchAction: 'pan-x pan-y' }}
         onMouseDown={(event) => {
           if (event.button === 0 && !(event.target as HTMLElement).closest('button, input, select, [data-docx-escape-layer]')) event.preventDefault();
         }}
@@ -787,8 +802,8 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
             return;
           }
           if (event.buttons === 0) {
-            const hovered = tableBorderAt(event)?.id ?? null;
-            if (hovered !== tableHover) setTableHover(hovered);
+            const border = tableBorderAt(event);
+            if (border?.id !== tableHover?.id) setTableHover(border && { id: border.id, axis: border.axis });
           }
           const resizing = resize.current;
           if (resizing?.pointerId === event.pointerId) {
@@ -885,10 +900,21 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
           if (!page) return null;
           const dragging = tableDragPreview?.id === handle.id;
           const thickness = TABLE_HANDLE_PX / zoom;
-          return <div key={handle.id} className={`${tableHandleClass[handle.kind]}${dragging ? ' dragging' : tableHover === handle.id ? ' hovered' : ''}`} aria-hidden
+          return <div key={handle.id} className={`${tableHandleClass[handle.kind]}${dragging ? ' dragging' : tableHover?.id === handle.id ? ' hovered' : ''}`} aria-hidden
             data-handle-type={handle.kind} data-column-edge={handle.columnEdge}
             style={{ position: 'absolute', left: page.bounds.x + handle.x + (dragging ? tableDragPreview?.delta ?? 0 : 0) - thickness / 2,
               top: page.bounds.y + handle.top, width: thickness, height: Math.max(0, handle.bottom - handle.top),
+              pointerEvents: 'none', zIndex: 14 }} />;
+        })}
+        {tableRowHandles.map((handle) => {
+          const page = pages.find(({ page }) => page.pageIndex === handle.pageIndex);
+          if (!page) return null;
+          const dragging = tableDragPreview?.id === handle.id;
+          const thickness = TABLE_HANDLE_PX / zoom;
+          return <div key={handle.id} className={`layout-table-row-resize-handle${dragging ? ' dragging' : tableHover?.id === handle.id ? ' hovered' : ''}`} aria-hidden
+            data-handle-type="row" data-row-index={handle.row}
+            style={{ position: 'absolute', left: page.bounds.x + handle.left, width: Math.max(0, handle.right - handle.left),
+              top: page.bounds.y + handle.y + (dragging ? tableDragPreview?.delta ?? 0 : 0) - thickness / 2, height: thickness,
               pointerEvents: 'none', zIndex: 14 }} />;
         })}
       </div>
@@ -917,7 +943,7 @@ export interface PeerlessPagedEditorProps {
   pageMirror?: 'full' | 'text';
   /** Picture selection, floating drags and resizing. */
   pictures?: PeerlessPictureMoves;
-  /** Table column border and right edge dragging. */
+  /** Table column border, right edge and row border dragging. */
   tables?: PeerlessTableResize;
 }
 

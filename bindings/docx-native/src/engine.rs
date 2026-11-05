@@ -2684,6 +2684,20 @@ impl EditSession {
             .map_err(|error| map_error(env, error))
     }
 
+    #[napi(catch_unwind, js_name = "set_row_height")]
+    pub fn set_row_height(
+        &self,
+        env: Env,
+        at_json: String,
+        height_twips: f64,
+        rule: String,
+    ) -> Result<String> {
+        let _call = EngineCall::new(env);
+        self.document(env)?
+            .set_row_height(&at_json, height_twips, &rule)
+            .map_err(|error| map_error(env, error))
+    }
+
     #[napi(catch_unwind, js_name = "set_comment_ranges")]
     pub fn set_comment_ranges(
         &self,

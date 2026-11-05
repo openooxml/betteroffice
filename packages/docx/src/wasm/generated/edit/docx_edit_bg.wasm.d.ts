@@ -212,6 +212,7 @@ export const editsession_set_paragraph_attr: (a: number, b: number, c: number, d
 export const editsession_set_paragraph_attrs: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number];
 export const editsession_set_part_metadata: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
 export const editsession_set_partial_document: (a: number, b: number) => void;
+export const editsession_set_row_height: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const editsession_set_section_margins: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
 export const editsession_set_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
 export const editsession_set_style_language: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];

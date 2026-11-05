@@ -76,7 +76,6 @@ pub(crate) struct ResidentTable {
     pub from: u64,
     pub to: u64,
     pub at: ResidentLoc,
-    pub grid: Vec<f64>,
     pub cells: Vec<ResidentCell>,
 }
 
@@ -303,13 +302,6 @@ impl ResidentGeometryIndex {
                                 para_id: paragraph.para_id.clone(),
                                 offset: leading,
                             },
-                            grid: array(payload.get("grid"))
-                                .iter()
-                                .filter_map(|width| match width {
-                                    Any::Number(width) => Some(*width),
-                                    _ => None,
-                                })
-                                .collect(),
                             cells,
                         });
                         records.push((start, end, Item::Table(id), Vec::new()));
@@ -601,7 +593,6 @@ impl ResidentGeometryIndex {
                     from: self.position(source.from),
                     to: self.position(source.to),
                     at: table.at.clone(),
-                    grid: table.grid.clone(),
                     cells,
                 }
             })

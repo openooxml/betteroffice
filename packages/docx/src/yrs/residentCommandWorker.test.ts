@@ -2334,6 +2334,60 @@ test('worker column edge drags converge with a concurrent edit in a cell of the 
   }
 }, TIMEOUT);
 
+test('worker row border drags set an at-least height in one undo step and never start below the stored height', async () => {
+  const { client, engine, initial } = await openWorker({ bodyXml: THREE_COLUMNS });
+  try {
+    const cell = initial.frame.payload.geometry!.objects.find(object => object.kind === 'cell')!;
+    const trPr = () => (engine.tablePayload('body', 0) as { rows: { trPr: Record<string, unknown> }[] }).rows[0]!.trPr;
+    const drag = (seq: number, paintedRowTwips: number, rowDeltaTwips: number) => client.edit(intent(seq, seq - 1, 'resizeObject', {
+      handle: cell.handle, expectVersion: engine.proposalEngine.version(), paintedRowTwips, rowDeltaTwips,
+    }));
+    expect((await drag(1, 300, 450)).outcomes[0]?.status).toBe('applied');
+    expect(trPr()).toMatchObject({ height: 750, heightRule: 'atLeast' });
+    expect((await drag(2, 100, 150)).outcomes[0]?.status).toBe('applied');
+    expect(trPr()).toMatchObject({ height: 900, heightRule: 'atLeast' });
+    expect((await drag(3, 900, 0)).outcomes[0]?.status).toBe('noop');
+    expect((await client.edit(intent(4, 3, 'undo', {}))).outcomes[0]?.status).toBe('applied');
+    expect(trPr()).toMatchObject({ height: 750 });
+    expect((await client.edit(intent(5, 4, 'undo', {}))).outcomes[0]?.status).toBe('applied');
+    expect(trPr().height ?? null).toBeNull();
+    expect(trPr().heightRule ?? null).toBeNull();
+    expect((await drag(6, 300, -5000)).outcomes[0]?.status).toBe('applied');
+    expect(trPr()).toMatchObject({ height: 15, heightRule: 'atLeast' });
+    const current = engine.proposalEngine.version();
+    for (const [index, payload] of [{ paintedRowTwips: 300 }, { rowDeltaTwips: 100 }, { paintedRowTwips: -1, rowDeltaTwips: 100 },
+      { paintedRowTwips: 300, rowDeltaTwips: 1.5 }, { paintedRowTwips: 300, rowDeltaTwips: 100, columnEdge: 1, deltaTwips: 100 },
+      { paintedRowTwips: 300, rowDeltaTwips: 100, widthTwips: 2000 }].entries()) {
+      expect((await client.edit(intent(7 + index, 6, 'resizeObject', { handle: cell.handle, expectVersion: current, ...payload } as never))).outcomes[0])
+        .toMatchObject({ status: 'refused', reason: 'invalid-payload' });
+    }
+    expect(trPr()).toMatchObject({ height: 15 });
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker row border drags follow their cell when a peer inserts a row above', async () => {
+  const { client, engine, initial } = await openWorker({ bodyXml: THREE_COLUMNS });
+  const remote = await createResidentEngineSession(undefined, 8302);
+  try {
+    remote.loadState(engine.encodeState());
+    const cell = initial.frame.payload.geometry!.objects.find(object => object.kind === 'cell')!;
+    const vector = engine.encodeStateVector();
+    remote.insertRow({ story: 'body', tableIndex: 0, row: 0, column: 0 }, 'above');
+    engine.applyUpdate(remote.encodeStateAsUpdate(vector));
+    const resized = await client.edit(intent(1, 0, 'resizeObject', {
+      handle: cell.handle, expectVersion: engine.proposalEngine.version(), paintedRowTwips: 300, rowDeltaTwips: 450,
+    }));
+    expect(resized.outcomes[0]?.status).toBe('applied');
+    const rows = (engine.tablePayload('body', 0) as { rows: { trPr: Record<string, unknown> }[] }).rows;
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.trPr.height ?? null).toBeNull();
+    expect(rows[1]!.trPr).toMatchObject({ height: 750, heightRule: 'atLeast' });
+  } finally {
+    remote.destroy();
+    client.destroy();
+  }
+}, TIMEOUT);
+
 for (const kind of ['insertPageBreak', 'insertSectionBreak'] as const) {
   test(`worker safety refuses ${kind} in a cell before mutation and keeps commands usable`, async () => {
     const { client, engine, point } = await openWorker({ bodyXml: '<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="1440"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/>', prepare(engine) {

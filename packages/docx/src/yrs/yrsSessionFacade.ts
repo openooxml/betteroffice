@@ -1135,6 +1135,15 @@ export function wrapSession(
           )
       );
     },
+    setRowHeight: (at, heightTwips, rule) => {
+      ensureUndo(at.story);
+      return mutate(
+        () =>
+          markReceiptStories(
+            JSON.parse(session.set_row_height(JSON.stringify(at), heightTwips, rule)) as YrsTableReceipt
+          )
+      );
+    },
     setTableWidth: (table, widthTwips) => {
       ensureUndo(table.story);
       return mutate(

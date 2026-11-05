@@ -108,6 +108,7 @@ export type ResidentEngineSession = Pick<
   | 'setHyperlink'
   | 'setImageGeometryAt'
   | 'setColumnWidth'
+  | 'setRowHeight'
   | 'insertText'
   | 'insertLineBreak'
   | 'replaceRange'
@@ -185,7 +186,7 @@ export type ResidentEngineSession = Pick<
   storyGeometry(root: string, ranges: Array<[number, number]>, selection?: [YrsLoc, YrsLoc]): {
     paragraphs: Array<{ story: string; paraId: string; index: number; from: number; to: number; leading: number; length: number;
       controls?: Array<{ offset: number; from: number; to: number }> }>;
-    tables: Array<{ story: string; tableIndex: number; from: number; to: number; at: YrsLoc; grid: number[];
+    tables: Array<{ story: string; tableIndex: number; from: number; to: number; at: YrsLoc;
       cells: Array<{ story: string; paraId: string; row: number; column: number; rowspan: number; colspan: number; from: number; to: number }> }>;
     controls: Array<{ story: string; contentStory: string; from: number; to: number }>;
     selection: [number, number] | null;
@@ -817,6 +818,8 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
       session.set_image_geometry_at(at.story, at.paraId, at.offset, JSON.stringify(geometry))),
     setColumnWidth: (at, width) => applyCommandMutation(at.story, () =>
       JSON.parse(session.set_column_width(JSON.stringify(at), width))),
+    setRowHeight: (at, height, rule) => applyCommandMutation(at.story, () =>
+      JSON.parse(session.set_row_height(JSON.stringify(at), height, rule))),
     beginUndoCapture: ensureUndo,
     setUndoInputTime: (span) => {
       if (span) session.set_undo_input_time(span[0], span[1]);

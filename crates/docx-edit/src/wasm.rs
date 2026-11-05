@@ -1524,6 +1524,20 @@ impl EditSession {
             .map_err(JsValue::from)
     }
 
+    /// Sets the height, in twips, and the `w:hRule` of the row holding the cell
+    /// `at_json` ([`CellLoc`]) names. Always a plain local edit. Errors unless
+    /// `height_twips` is finite and positive and `rule` is `atLeast` or `exact`.
+    pub fn set_row_height(
+        &self,
+        at_json: &str,
+        height_twips: f64,
+        rule: &str,
+    ) -> Result<String, JsValue> {
+        self.core
+            .set_row_height(at_json, height_twips, rule)
+            .map_err(JsValue::from)
+    }
+
     /// Sets the preferred width, in twips, of the table `table_json`
     /// ([`TableLocator`]) names. Always a plain local edit. Errors unless
     /// `width_twips` is finite and positive.

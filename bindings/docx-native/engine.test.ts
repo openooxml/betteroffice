@@ -99,6 +99,27 @@ describe('docx native engine parity', () => {
     }
   });
 
+  test('set_row_height matches wasm and refuses the same input', () => {
+    const expected = new wasm.EditSession(13);
+    const actual = new native.EditSession(13);
+    try {
+      for (const session of [expected, actual]) {
+        session.seed_from_docx(fixture, 'opening');
+        session.insert_table('body', paragraphId(session), 0, 2, 2);
+      }
+      const at = JSON.stringify({ story: 'body', tableIndex: 0, row: 1, column: 0 });
+      expect(JSON.parse(actual.set_row_height(at, 720, 'atLeast'))).toEqual(JSON.parse(expected.set_row_height(at, 720, 'atLeast')));
+      const payload = JSON.parse(actual.table_payload('body', 0)!);
+      expect(payload).toEqual(JSON.parse(expected.table_payload('body', 0)!));
+      expect(payload.rows[1].trPr).toMatchObject({ height: 720, heightRule: 'atLeast' });
+      expectThrownParity(() => expected.set_row_height(at, 0, 'atLeast'), () => actual.set_row_height(at, 0, 'atLeast'));
+      expectThrownParity(() => expected.set_row_height(at, 720, 'auto'), () => actual.set_row_height(at, 720, 'auto'));
+    } finally {
+      expected.free();
+      actual.free();
+    }
+  });
+
   test('native insert_text supports undo and redo', () => {
     const expected = new wasm.EditSession(11);
     const session = new native.EditSession(11);

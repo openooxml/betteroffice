@@ -194,6 +194,7 @@ export declare class EditSession {
   set_cell_shading(rangeJson: string, color?: string | undefined | null): string
   set_cell_text_format(rangeJson: string, patchJson: string): string
   set_column_width(atJson: string, widthTwips: number): string
+  set_row_height(atJson: string, heightTwips: number, rule: string): string
   set_comment_ranges(commentId: string, rangesJson: string): void
   set_content_control_value_at(story: string, paraId: string, offset: number, valueJson: string): void
   set_content_control_value(embedId: string, valueJson: string): void

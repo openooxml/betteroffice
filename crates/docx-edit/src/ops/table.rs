@@ -2914,6 +2914,39 @@ impl EditingDoc {
         receipt(locator, Some(&data), Vec::new(), Vec::new(), Vec::new())
     }
 
+    /// Sets one row's height in twips and its `w:hRule`, `atLeast` or `exact`.
+    pub fn set_row_height(
+        &self,
+        ctx: &EditCtx,
+        at: &CellLoc,
+        height_twips: f64,
+        rule: &str,
+    ) -> OpResult<TableReceipt> {
+        if !height_twips.is_finite() || height_twips <= 0.0 {
+            return Err(OpError::InvalidFormatValue(
+                "row height must be a positive finite twip value".to_owned(),
+            ));
+        }
+        if !["atLeast", "exact"].contains(&rule) {
+            return Err(OpError::InvalidFormatValue(format!(
+                "invalid row height rule {rule}"
+            )));
+        }
+        let locator = at.table();
+        let mut txn = self.transact_for(ctx);
+        let (_, table, _) = table_at(&txn, &locator)?;
+        let mut data = read_table(&table, &txn)?;
+        let row = data
+            .rows
+            .get_mut(at.row as usize)
+            .ok_or_else(|| invalid(format!("row {} is outside the table", at.row)))?;
+        row.tr_pr
+            .insert("height".to_owned(), Any::Number(height_twips));
+        row.tr_pr.insert("heightRule".to_owned(), Any::from(rule));
+        write_table(&mut txn, &table, &data);
+        receipt(locator, Some(&data), Vec::new(), Vec::new(), Vec::new())
+    }
+
     /// Sets the table-wide preferred width in twips (`tblPr.widthType = dxa`).
     pub fn set_table_width(
         &self,
@@ -3751,6 +3784,41 @@ mod tests {
         .unwrap();
         let (tbl_pr, _, _) = table_value(&doc);
         assert_eq!(tbl_pr["tableLayout"], "fixed");
+    }
+
+    #[test]
+    fn set_row_height_sets_one_row_and_refuses_bad_input() {
+        let doc = seed_table();
+        doc.set_row_height(&direct(), &cell(0, 0), 720.0, "atLeast")
+            .unwrap();
+        let (_, _, rows) = table_value(&doc);
+        assert_eq!(rows[0]["trPr"]["height"].as_f64(), Some(720.0));
+        assert_eq!(rows[0]["trPr"]["heightRule"], "atLeast");
+        assert_eq!(rows[1]["trPr"]["height"].as_f64(), Some(360.0));
+        assert!(rows[1]["trPr"].get("heightRule").is_none());
+        doc.set_row_height(&direct(), &cell(0, 1), 400.0, "exact")
+            .unwrap();
+        let (_, _, rows) = table_value(&doc);
+        assert_eq!(rows[0]["trPr"]["height"].as_f64(), Some(400.0));
+        assert_eq!(rows[0]["trPr"]["heightRule"], "exact");
+        for (height, rule) in [
+            (0.0, "atLeast"),
+            (-1.0, "atLeast"),
+            (f64::NAN, "atLeast"),
+            (f64::INFINITY, "atLeast"),
+            (720.0, "auto"),
+        ] {
+            assert!(
+                doc.set_row_height(&direct(), &cell(0, 0), height, rule)
+                    .is_err()
+            );
+        }
+        assert!(
+            doc.set_row_height(&direct(), &cell(99, 0), 720.0, "atLeast")
+                .is_err()
+        );
+        let (_, _, rows) = table_value(&doc);
+        assert_eq!(rows[0]["trPr"]["height"].as_f64(), Some(400.0));
     }
 
     #[test]
