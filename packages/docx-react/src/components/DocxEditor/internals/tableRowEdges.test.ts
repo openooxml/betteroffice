@@ -29,3 +29,13 @@ test('a merged cell gives no edge of its own but widens the table', () => {
   ], pages).map(({ row, left, cell }) => [row, left, cell])).toEqual([[0, 96, 'a'], [1, 96, 'b']]);
   expect(tableRowEdges([{ row: 0, rowspan: 2, boxes: [box(0, 96, 100, 40)], cell: 'merged' }], pages)).toEqual([]);
 });
+
+test('a repeated header row counts once, on the page it really sits on, even for a cell with no content', () => {
+  const copy = (pageIndex: number, repeatedHeader: boolean, y: number) => ({ ...box(pageIndex, 96, y, 24), ...(repeatedHeader ? { repeatedHeader } : {}) });
+  const cells = [
+    { row: 0, rowspan: 1, boxes: [copy(0, false, 100), copy(1, true, 96), copy(2, true, 96)], cell: 'a' },
+    { row: 0, rowspan: 1, boxes: [box(0, 196, 100, 24), box(1, 196, 96, 24), box(2, 196, 96, 24)], cell: 'empty' },
+  ];
+  expect(tableRowEdges(cells, new Set([0, 1, 2]))).toEqual([{ row: 0, pageIndex: 0, left: 96, right: 296, y: 124, paintedHeight: 24, cell: 'a' }]);
+  expect(tableRowEdges(cells, new Set([1, 2]))).toEqual([]);
+});

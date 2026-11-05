@@ -5,6 +5,8 @@ export interface TableCellBox {
   y: number;
   width: number;
   height: number;
+  /** A header row's copy on a continuation page. */
+  repeatedHeader?: boolean;
 }
 
 /** The bottom border of one table row, in page-local layout px. */
@@ -22,8 +24,9 @@ export interface TableRowEdge<Cell> {
 
 /**
  * Bottom borders of one table's rows that end on `pageIndices`. A row split
- * across pages ends on its last box, and a row only vertically merged cells
- * reach has no cell of its own to resize by, so it has no edge.
+ * across pages ends on its last box, a repeated header row counts only where
+ * it really sits, and a row only vertically merged cells reach has no cell of
+ * its own to resize by, so it has no edge.
  */
 export function tableRowEdges<Cell>(
   cells: ReadonlyArray<{ row: number; rowspan: number; boxes: readonly TableCellBox[]; cell: Cell }>,
@@ -31,6 +34,8 @@ export function tableRowEdges<Cell>(
 ): TableRowEdge<Cell>[] {
   const extents = new Map<number, { left: number; right: number }>();
   const rows = new Map<number, { pageIndex: number; y: number; paintedHeight: number; cell: Cell }>();
+  const repeated = new Set(cells.flatMap(({ row, boxes }) =>
+    boxes.filter((box) => box.repeatedHeader).map((box) => `${row}:${box.pageIndex}`)));
   for (const { row, rowspan, boxes, cell } of cells) {
     for (const box of boxes) {
       const extent = extents.get(box.pageIndex);
@@ -39,10 +44,11 @@ export function tableRowEdges<Cell>(
         right: Math.max(extent?.right ?? box.x + box.width, box.x + box.width),
       });
     }
-    if (rowspan !== 1 || boxes.length === 0) continue;
-    const last = boxes.reduce((latest, box) =>
+    const own = boxes.filter((box) => !repeated.has(`${row}:${box.pageIndex}`));
+    if (rowspan !== 1 || own.length === 0) continue;
+    const last = own.reduce((latest, box) =>
       box.pageIndex > latest.pageIndex || (box.pageIndex === latest.pageIndex && box.y > latest.y) ? box : latest);
-    const paintedHeight = boxes.reduce((sum, box) => sum + box.height, 0);
+    const paintedHeight = own.reduce((sum, box) => sum + box.height, 0);
     const y = last.y + last.height;
     const seen = rows.get(row);
     if (!seen || last.pageIndex > seen.pageIndex || (last.pageIndex === seen.pageIndex && y > seen.y)) {

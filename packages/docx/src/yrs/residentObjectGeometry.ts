@@ -16,6 +16,8 @@ export interface ResidentObjectRect {
   y: number;
   width: number;
   height: number;
+  /** Table cells only: this box is a header row's copy on a continuation page. */
+  repeatedHeader?: boolean;
 }
 
 export interface ResidentObjectGeometry {
@@ -335,7 +337,7 @@ export async function readResidentFrameGeometry(
       if (!box.exact) estimated.add(key);
       const bounds = cellGeometry.get(key) ?? [];
       bounds.push({ pageId: frame.pages[box.pageIndex]!.pageId.toString(), pageIndex: box.pageIndex,
-        x: box.x, y: box.y, width: box.w, height: box.h });
+        x: box.x, y: box.y, width: box.w, height: box.h, ...(box.repeatedHeader ? { repeatedHeader: true } : {}) });
       cellGeometry.set(key, bounds);
     }
     for (const table of tables) for (const cell of table.cells) {

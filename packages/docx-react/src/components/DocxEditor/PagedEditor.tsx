@@ -1409,11 +1409,14 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
               | undefined;
             const stored = rows?.[command.row]?.trPr?.height;
             const base = Math.max(command.paintedTwips, typeof stored === 'number' ? stored : 0);
+            session.beginUndoCapture();
+            session.addUndoBoundary();
             session.setRowHeight(
               { story: table.story, tableIndex: table.tableIndex, row: command.row, column: 0 },
               Math.max(MIN_TABLE_ROW_TWIPS, base + command.deltaTwips),
               'atLeast'
             );
+            session.addUndoBoundary();
           } else if (command.type === 'tableColumnWidths') {
             if (command.widths.length === 0) return false;
             const table = positionProjection.tableAtStart(command.pmStart);

@@ -9,22 +9,23 @@ const COLUMN_HANDLE = '.layout-table-resize-handle';
 const RIGHT_HANDLE = '.layout-table-edge-handle-right';
 const ROW_HANDLE = '.layout-table-row-resize-handle';
 
-function documentXml(borders: boolean): string {
+function documentXml(borders: boolean, rowCount: number): string {
   const border = (side: string) => `<w:${side} w:val="single" w:sz="4" w:space="0" w:color="000000"/>`;
   const tableBorders = borders ? `<w:tblBorders>${['top', 'left', 'bottom', 'right', 'insideH', 'insideV'].map(border).join('')}</w:tblBorders>` : '';
   const cell = (text: string) => `<w:tc><w:tcPr><w:tcW w:w="${COLUMN}" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:tc>`;
-  const rows = [0, 1, 2].map((row) => `<w:tr>${[0, 1, 2].map((column) => cell(`R${row}C${column}`)).join('')}</w:tr>`).join('');
+  const header = rowCount > 3 ? '<w:trPr><w:tblHeader/></w:trPr>' : '';
+  const rows = Array.from({ length: rowCount }, (_, row) => `<w:tr>${row === 0 ? header : ''}${[0, 1, 2].map((column) => cell(`R${row}C${column}`)).join('')}</w:tr>`).join('');
   return '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>' +
     `<w:p><w:r><w:t>Before</w:t></w:r></w:p><w:tbl><w:tblPr><w:tblW w:w="${COLUMN * 3}" w:type="dxa"/>${tableBorders}</w:tblPr>` +
     `<w:tblGrid>${`<w:gridCol w:w="${COLUMN}"/>`.repeat(3)}</w:tblGrid>${rows}</w:tbl><w:p><w:r><w:t>After</w:t></w:r></w:p>` +
     '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:bottom="1440" w:left="1440" w:right="1440"/></w:sectPr></w:body></w:document>';
 }
 
-async function open(page: Page, arm: Arm, borders = true): Promise<Locator> {
+async function open(page: Page, arm: Arm, borders = true, rowCount = 3): Promise<Locator> {
   const zip = new JSZip();
   zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
   zip.file('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDoc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
-  zip.file('word/document.xml', documentXml(borders));
+  zip.file('word/document.xml', documentXml(borders, rowCount));
   await page.goto('/?format=docx' + arm.query);
   await page.locator('input[type=file]').last().setInputFiles({ name: 'table-resize.docx',
     mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', buffer: await zip.generateAsync({ type: 'nodebuffer' }) });
@@ -41,6 +42,7 @@ interface SavedTable {
   layout: string | null;
   width: number | null;
   texts: string[][];
+  bodyText: string;
   rowHeights: (number | null)[];
   rowRules: (string | null)[];
 }
@@ -67,7 +69,8 @@ async function savedTable(page: Page, info: TestInfo, name: string): Promise<Sav
     const heights = rows.map((row) => row.getElementsByTagNameNS('*', 'trHeight')[0]);
     const rowHeights = heights.map((height) => height ? Number(attr(height, 'val')) : null);
     const rowRules = heights.map((height) => attr(height, 'hRule'));
-    return { grid, cellWidths, texts, rowHeights, rowRules, layout: attr(children(properties, 'tblLayout')[0], 'type'), width: width === null ? null : Number(width) };
+    const bodyText = document.getElementsByTagNameNS('*', 'body')[0]!.textContent ?? '';
+    return { grid, cellWidths, texts, bodyText, rowHeights, rowRules, layout: attr(children(properties, 'tblLayout')[0], 'type'), width: width === null ? null : Number(width) };
   }, xml);
 }
 
@@ -236,6 +239,29 @@ for (const arm of ARMS) {
       await input.press('ControlOrMeta+z');
       await expect.poll(async () => (await rowCenters(page))[0]?.y ?? 0).toBeLessThan(before[0]!.y + 2);
       expect((await savedTable(page, info, 'row-undo-2')).rowHeights).toEqual([null, null, null]);
+    });
+
+    test('typing straight after a row drag undoes on its own', async ({ page }, info) => {
+      const input = await open(page, arm);
+      await expect(page.locator(ROW_HANDLE)).toHaveCount(3);
+      const before = await rowCenters(page);
+      await drag(page, before[0]!, 0, 30);
+      await input.focus();
+      await page.keyboard.type('Z');
+      await expect.poll(async () => (await savedTable(page, info, 'row-type')).bodyText).toContain('Z');
+      await input.press('ControlOrMeta+z');
+      await expect.poll(async () => (await savedTable(page, info, 'row-type-undo')).bodyText).not.toContain('Z');
+      expect((await savedTable(page, info, 'row-type-kept')).rowHeights[0]).not.toBeNull();
+    });
+
+    test('a repeated header row saves from its own height, not its copies', async ({ page }, info) => {
+      await open(page, arm, true, 120);
+      await expect.poll(async () => (await rowCenters(page)).length).toBeGreaterThan(3);
+      const [first, second] = await rowCenters(page);
+      const rowHeight = second!.y - first!.y;
+      await drag(page, first!, 0, 12);
+      await expect.poll(async () => (await savedTable(page, info, 'header')).rowHeights[0]).not.toBeNull();
+      near((await savedTable(page, info, 'header-height')).rowHeights[0]!, Math.round((rowHeight + 12) * 15), 30);
     });
 
     test('handles follow the borders and drags keep twips under zoom', async ({ page }, info) => {

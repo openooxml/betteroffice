@@ -225,7 +225,7 @@ export function CanvasTableResizeOverlay({
       const key = `${box.tableKey}:${box.row}:${box.col}`;
       if (!box.exact) continue;
       const boxes = cellBoxes.get(key) ?? [];
-      boxes.push({ pageIndex: box.pageIndex, x: box.x, y: box.y, width: box.w, height: box.h });
+      boxes.push({ pageIndex: box.pageIndex, x: box.x, y: box.y, width: box.w, height: box.h, repeatedHeader: box.repeatedHeader });
       cellBoxes.set(key, boxes);
     }
     const pageIndices = new Set(windowPages.map((page) => page.pageIndex));
