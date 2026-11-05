@@ -4,7 +4,7 @@ import type { PeerlessFrameGeometry } from './viewStore';
 
 type Cell = { story: string; row: number; column: number; colspan?: number; rects: { pageIndex: number; x: number; y: number; width: number; height: number }[] };
 
-function geometry(cells: Cell[], overrides: { version?: string; columns?: number; table?: string; handles?: string; gridTwips?: number[] } = {}): PeerlessFrameGeometry {
+function geometry(cells: Cell[], overrides: { version?: string; columns?: number; table?: string; handles?: string; exact?: boolean } = {}): PeerlessFrameGeometry {
   return {
     documentVersion: 'v1', frameEpoch: 3, layoutRevision: 7,
     objects: {
@@ -13,7 +13,7 @@ function geometry(cells: Cell[], overrides: { version?: string; columns?: number
         kind: 'cell' as const, handle: `${overrides.handles ?? 'cell'}-${index}`, story: cell.story,
         rects: cell.rects.map((rect) => ({ pageId: `p${rect.pageIndex}`, ...rect })),
         cell: { table: overrides.table ?? 'body#0', row: cell.row, column: cell.column, rowspan: 1, colspan: cell.colspan ?? 1, columns: overrides.columns ?? 3,
-          exact: !overrides.gridTwips, ...(overrides.gridTwips ? { gridTwips: overrides.gridTwips } : {}) },
+          exact: overrides.exact ?? true },
       })),
     },
   } as unknown as PeerlessFrameGeometry;
@@ -79,15 +79,9 @@ test('a drag follows its own table and never one that took its index', () => {
   expect(tableResizeIntent(null, first!, 60)).toBeNull();
 });
 
-test('a table without painted borders places its edges from the grid, not from its text', () => {
-  const cells: Cell[] = [0, 1, 2].map((column) => ({ story: `body:t0:r0c${column}`, row: 0, column,
-    rects: [{ pageIndex: 0, x: 96 + column * 208, y: 100, width: 12, height: 20 }] }));
-  const handles = tableResizeHandles(geometry(cells, { gridTwips: [3120, 1560, 3120] }), new Set([0]));
-  expect(handles.map(({ columnEdge, x, minDelta, maxDelta }) => ({ columnEdge, x, minDelta, maxDelta }))).toEqual([
-    { columnEdge: 1, x: 304, minDelta: -188, maxDelta: 84 },
-    { columnEdge: 2, x: 408, minDelta: -84, maxDelta: 188 },
-    { columnEdge: 3, x: 616, minDelta: -188, maxDelta: Infinity },
-  ]);
+test('estimated cell boxes get no handles, since their edges are not the real ones', () => {
+  expect(tableResizeHandles(geometry(grid(0, 100), { exact: false }), new Set([0]))).toEqual([]);
+  expect(tableRowResizeHandles(geometry(grid(0, 100), { exact: false }), new Set([0]))).toEqual([]);
 });
 
 test('a point finds the nearest border within the tolerance, on its own page and span', () => {
@@ -122,8 +116,7 @@ test('a row drag sends the painted height and a clamped delta, and follows its o
   expect(tableRowResizeIntent(null, row!, 30)).toBeNull();
 });
 
-test('a table without painted borders has no row borders, and a point finds the row border near it', () => {
-  expect(tableRowResizeHandles(geometry(grid(0, 100), { gridTwips: [3120, 3120, 3120] }), new Set([0]))).toEqual([]);
+test('a point finds the row border near it', () => {
   const handles = tableRowResizeHandles(geometry([...grid(0, 100), ...grid(1, 120)]), new Set([0]));
   expect(tableRowHandleAt(handles, 0, 200, 122, 3)?.row).toBe(0);
   expect(tableRowHandleAt(handles, 0, 200, 124, 3)).toBeNull();

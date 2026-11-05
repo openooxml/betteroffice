@@ -180,7 +180,7 @@ export async function readResidentFrameGeometry(
         const boxes = cellGeometry.get(`${table.start}:${cell.row}:${cell.column}`) ?? [];
         if (at && tableAt && boxes.length) objects.push({ kind: 'cell', story: cell.story,
           handle: issue(engine, 'cell', { story: cell.story, paraId: at.paraId, offset: 0 }, tableAt), rects: boxes,
-          cell: residentCellPlacement(table, cell, !estimated.has(`${table.start}:${cell.row}:${cell.column}`), table.widthsTwips) });
+          cell: residentCellPlacement(table, cell, !estimated.has(`${table.start}:${cell.row}:${cell.column}`)) });
       }
       for (const story of stories) {
         const spans = engine.geometryReader.paragraphSpans(story);

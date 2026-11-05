@@ -131,15 +131,25 @@ for (const arm of ARMS) {
       await expect.poll(() => cursorAt({ x: columns[0]!.x + 40, y: columns[0]!.y })).toBe('text');
     });
 
-    test('a table without borders keeps its handles on the grid, off its text', async ({ page }) => {
+    test('a table without borders gets handles on its real cell edges', async ({ page }, info) => {
       await open(page, arm, false);
       await expect(page.locator(COLUMN_HANDLE)).toHaveCount(2);
+      await expect(page.locator(ROW_HANDLE)).toHaveCount(3);
       const columns = await centers(page, COLUMN_HANDLE);
       const [right] = await centers(page, RIGHT_HANDLE);
       near(columns[1]!.x - columns[0]!.x, COLUMN / 15, 2);
       near(right!.x - columns[1]!.x, COLUMN / 15, 2);
-      near(columns[0]!.x - (await pageBox(page)).x, 96 + COLUMN / 15, 8);
-      await expect(page.locator(ROW_HANDLE)).toHaveCount(0);
+      near(columns[0]!.x - (await pageBox(page)).x, 96 + COLUMN / 15, 2);
+
+      const before = await rowCenters(page);
+      await drag(page, before[0]!, 0, 30);
+      await expect.poll(async () => (await rowCenters(page))[1]?.y ?? 0).toBeGreaterThan(before[1]!.y + 25);
+      const after = await rowCenters(page);
+      near(after[0]!.y - before[0]!.y, 30, 2);
+      await drag(page, after[0]!, 0, 20);
+      await expect.poll(async () => (await rowCenters(page))[1]?.y ?? 0).toBeGreaterThan(after[1]!.y + 15);
+      near((await rowCenters(page))[0]!.y - after[0]!.y, 20, 2);
+      expect((await savedTable(page, info, 'borderless-row')).rowRules[0]).toBe('atLeast');
     });
 
     test('dragging a column border saves both column widths and undoes in one step', async ({ page }, info) => {
