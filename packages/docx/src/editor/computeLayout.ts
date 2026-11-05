@@ -197,6 +197,20 @@ function defaultParagraphStyleEnv(
   return {};
 }
 
+/** What a fresh editor renders a document with, before its view options. */
+export function documentRenderEnv(document: Document | null | undefined, colorScheme?: object): YrsRenderEnv {
+  const themeColors: Record<string, string> = {};
+  for (const [name, value] of Object.entries(colorScheme ?? document?.package.theme?.colorScheme ?? {})) {
+    if (typeof value === 'string') themeColors[name] = value;
+  }
+  return {
+    themeColors,
+    defaultTabStopTwips: document?.package.settings?.defaultTabStop ?? null,
+    numericIds: {},
+    mediaTokens: true,
+  };
+}
+
 export function getLayoutKernelInputs(layout: Layout):
   | {
       measured: MeasuredBlock[];

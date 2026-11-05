@@ -46,6 +46,7 @@ import {
 } from './overlays/CanvasParagraphFlashOverlay';
 
 // Layout engine
+import { documentRenderEnv } from '@betteroffice/docx/editor';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import {
   computeAnchorPositionsFromYrs,
@@ -647,16 +648,9 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
 
     const proposalPreview = useRevisionPreview(yrsCore.session);
     const yrsRenderEnv = useMemo<YrsRenderEnv>(() => {
-      const themeColors: Record<string, string> = {};
-      for (const [name, value] of Object.entries(_theme?.colorScheme ?? {})) {
-        if (typeof value === 'string') themeColors[name] = value;
-      }
       return {
-        themeColors,
-        defaultTabStopTwips: document?.package.settings?.defaultTabStop ?? null,
-        numericIds: {},
+        ...documentRenderEnv(document, _theme?.colorScheme ?? {}),
         showHiddenText,
-        mediaTokens: true,
         ...(proposalPreview.revisionPreview
           ? { revisionPreview: proposalPreview.revisionPreview }
           : {}),

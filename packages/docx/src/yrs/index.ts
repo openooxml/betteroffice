@@ -82,6 +82,9 @@ import type {
 } from './pagedExport';
 import { preparedDigests, randomClientId, wrapSession } from './yrsSessionFacade';
 export { decodeDocxHostJson } from './yrsSessionFacade';
+import type { DocxPngOptions, DocxPngTarget } from '../layout/render/png';
+export { PngExportError, type PngExportCode } from '../../../../shared/office-session/pngExportError';
+export type { DocxPngFontFace, DocxPngOptions, DocxPngTarget } from '../layout/render/png';
 
 /** @internal */
 export type {
@@ -1690,6 +1693,15 @@ export interface YrsSession extends CollaborationReplica {
     query: DocxContentControlQuery,
     options?: DocxContentControlsOptions
   ): DocxContentControlsResult;
+
+  /**
+   * Draws a page as PNG bytes with the editor's layout and painter, on a replica
+   * of this session's state. Rejects with `PngExportError` rather than paint a
+   * substitute font; where no canvas exists names `@betteroffice/docx-native`.
+   */
+  renderPng(target: DocxPngTarget, options?: DocxPngOptions): Promise<Uint8Array>;
+  /** The native engine's rasterizer; the wasm engine has none. @internal */
+  renderPngTarget?(displayListJson: string, targetJson: string, optionsJson: string): Uint8Array;
 
   /** Drops the observer and frees the wasm-side replica. Idempotent. */
   destroy(): void;

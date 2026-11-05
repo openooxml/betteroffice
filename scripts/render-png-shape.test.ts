@@ -78,7 +78,6 @@ const CHECKS: Record<string, () => boolean> = Object.fromEntries(FORMATS.flatMap
 ]));
 
 const PENDING = [
-  'docx js',
   'vsdx native renderPng',
 ];
 
