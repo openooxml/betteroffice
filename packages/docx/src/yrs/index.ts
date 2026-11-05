@@ -1725,7 +1725,7 @@ export async function createYrsSession(options?: CreateYrsSessionOptions): Promi
   const clientId = requireUnreservedClientId(options?.clientId ?? randomClientId());
   const wasm = await import('./wasm/index');
   await wasm.preloadEditWasm();
-  return wrapSession(wasm.createEditSession(clientId), clientId);
+  return wrapSession(wasm.createEditSession(clientId), clientId, undefined, () => import('./renderPng'));
 }
 export type { DocxEngineWorkerSourceOpened } from './residentSourceWorkerClient';
 export { decodeFontFace } from '../wasm/fontDecoder';

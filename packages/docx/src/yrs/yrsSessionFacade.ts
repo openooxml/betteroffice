@@ -219,7 +219,8 @@ const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[
 export function wrapSession(
   session: EditSession,
   clientId: number,
-  opened?: { source: Uint8Array; host: YrsDocxHost }
+  opened?: { source: Uint8Array; host: YrsDocxHost },
+  loadPngExporter?: () => Promise<typeof import('./renderPng')>
 ): YrsSession {
   const hub = editSessionUpdateEvents(session);
   session = hub.session;
@@ -1730,7 +1731,8 @@ export function wrapSession(
     renderPng: async (target, options) => {
       if (destroyed) throw new Error('YrsSession is destroyed');
       if (!pngExporter) {
-        const { createPngExporter } = await import('./renderPng');
+        if (!loadPngExporter) throw new Error('renderPng needs a session from createYrsSession');
+        const { createPngExporter } = await loadPngExporter();
         if (destroyed) throw new Error('YrsSession is destroyed');
         pngExporter ??= createPngExporter(facade);
       }
