@@ -72,6 +72,14 @@ function mulberry32(seed: number): () => number {
   };
 }
 
+function pathSeed(path: string): number {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < path.length; index += 1) {
+    hash = Math.imul(hash ^ path.charCodeAt(index), 0x01000193);
+  }
+  return (SEED ^ hash) >>> 0;
+}
+
 function* fixtures(): Generator<Fixture> {
   for (const [index, flavour] of FLAVOURS.entries()) {
     const seed = (SEED + index) >>> 0;
@@ -94,7 +102,6 @@ function* fixtures(): Generator<Fixture> {
     seed: SEED + 7,
     corpus: false,
   };
-  let index = 0;
   for (const corpus of CORPORA) {
     const directory = resolve(import.meta.dir, '../../../../', corpus);
     const names = readdirSync(directory, { recursive: true, encoding: 'utf8' })
@@ -104,7 +111,7 @@ function* fixtures(): Generator<Fixture> {
       yield {
         name: `${corpus}/${name}`,
         bytes: new Uint8Array(readFileSync(resolve(directory, name))),
-        seed: (SEED + 100 + index++) >>> 0,
+        seed: pathSeed(`${corpus}/${name}`),
         corpus: true,
       };
     }
@@ -417,7 +424,11 @@ for (const fixture of FIXTURES) {
           const merge = step === 8 && mergeTargets.length > 0;
           const targets = merge ? mergeTargets : paragraphs;
           const paragraph = targets[pick(targets.length)]!;
-          const localOffset = merge ? 0 : pick(paragraph.length + 1);
+          const storyLength = (paragraph.controls ?? []).reduce(
+            (length, [, displayUnits]) => length - displayUnits + 1,
+            paragraph.length
+          );
+          const localOffset = merge ? 0 : pick(storyLength + 1);
           const offset = paragraph.leading + localOffset;
           const head = { story: 'body', paraId: paragraph.paraId, offset };
           const enter = step === 3;
