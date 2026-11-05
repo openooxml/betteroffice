@@ -1,6 +1,6 @@
 import { DocxSectionError, createYrsSession, saveYrsDocx, type DocxCommentSaveBaseline, type DocxCommentSaveIdentity, type DocxParagraphTarget, type DocxProposalInput, type DocxProposalRecord, type DocxProposalSnapshot, type DocxProposalResult, type DocxProposalStateRequest, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
 import { readCommentPart, readSavedCommentIdentities, verifyCommentOutput, type CommentSource } from './comment-output';
-import { cellPosition, commentBody, commentRanges, commentRoot, commentText, continueList, deleteParagraph, deleteTableRow, hostEdit, insertParagraphsBefore, insertParagraphsWithAnchorFormat, insertSectionBreak, replaceCommentText, setSection, insertTableRow, lineText, listLevel, mergeCells, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
+import { cellPosition, commentBody, commentRanges, commentRoot, commentText, continueList, deleteParagraph, deleteTableRow, formatParagraph, hostEdit, insertParagraphsBefore, insertParagraphsWithAnchorFormat, insertSectionBreak, replaceCommentText, setSection, insertTableRow, lineText, listLevel, mergeCells, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
 import { docxBatchSchema, type DocxAgentBatch, type DocxAgentEdit, type DocxEditOutcome } from './docx-schema';
 import {
   DocumentToolError,
@@ -1344,9 +1344,25 @@ export class DocxAgentDocument {
         return { result: { comment: commentId, parentId: root.id, done: false } };
       };
     }
-    if (edit.op === 'format_text' || edit.op === 'add_comment') {
-      const held = this.matches.get(edit.match);
-      if (!held) throw unknownMatchError(edit.match, 'm1', /^m\d+$/u, 'Match expired or belongs to another document. Run grep again and copy its match ID.');
+    if (edit.op === 'set_language' && edit.match === undefined) {
+      const slots = { lang: edit.lang, eastAsia: edit.eastAsia, bidi: edit.bidi };
+      if (edit.style !== undefined || edit.defaults) {
+        const styleId = edit.style !== undefined ? resolveStyle(this.languageStyles(), edit.style) : null;
+        return draft => {
+          draft.setStyleLanguage(styleId, slots);
+          return { result: styleId === null ? {} : { style: styleId } };
+        };
+      }
+      const p = this.get(edit.paragraph!);
+      return draft => {
+        requireParagraph(draft, p);
+        formatParagraph(draft, p, { language: slots });
+        return { result: { ref: p.ref } };
+      };
+    }
+    if (edit.op === 'format_text' || edit.op === 'add_comment' || edit.op === 'set_language') {
+      const held = this.matches.get(edit.match!);
+      if (!held) throw unknownMatchError(edit.match!, 'm1', /^m\d+$/u, 'Match expired or belongs to another document. Run grep again and copy its match ID.');
       const p = this.get(held.ref);
       if (p.revision !== held.revision) throw new DocumentToolError('STALE_TARGET', 'The matched paragraph changed. Grep again and use a fresh match ID.', { refs: [p.ref] });
       const start = held.start ?? 0;
@@ -1365,7 +1381,9 @@ export class DocxAgentDocument {
           return { result: { ref: p.ref, start, end, comment: draft.addComment([range], edit.author, date, body).commentId } };
         };
       }
-      const delta = { bold: edit.bold, italic: edit.italic, underline: edit.underline };
+      const delta = edit.op === 'set_language'
+        ? { language: { lang: edit.lang, eastAsia: edit.eastAsia, bidi: edit.bidi } }
+        : { bold: edit.bold, italic: edit.italic, underline: edit.underline };
       if (Object.values(delta).every(value => value === undefined)) throw new DocumentToolError('INVALID_ARGUMENT', 'format_text needs bold, italic or underline.');
       return draft => {
         requireParagraph(draft, p);
@@ -1466,6 +1484,12 @@ export class DocxAgentDocument {
       this.commentPackageBaseline = { version, deletion, bytes: deletion ? this.exportBytes(undefined, false) : this.export() };
     }
     return this.commentPackageBaseline.bytes;
+  }
+
+  private languageStyles(): ParagraphStyle[] {
+    return (this.session.materializeDocx()?.package.styles?.styles ?? [])
+      .filter(style => style.type === 'paragraph' || style.type === 'character')
+      .map(style => ({ id: style.styleId, name: style.name, isDefault: !!style.default }));
   }
 
   private styles(): ParagraphStyle[] {

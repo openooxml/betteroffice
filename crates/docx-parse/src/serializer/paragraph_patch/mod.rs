@@ -1,9 +1,12 @@
 mod drawing;
+pub mod language;
 mod lower;
 mod properties;
 mod text;
 mod verify;
 
+#[cfg(test)]
+mod language_tests;
 #[cfg(test)]
 mod tests;
 
@@ -138,7 +141,12 @@ fn patch_inner(
     patch: &ParagraphPatchV1,
     context: &PatchContext,
 ) -> Result<String, Failure> {
-    let mut lowered = lower::lower(source, context, &patch.seed.units)?;
+    let mut lowered = lower::lower(
+        source,
+        context,
+        &patch.seed.units,
+        properties::language_only(patch),
+    )?;
     drawing::bind(source, &lowered, &patch.seed.units)?;
     drawing::validate_edits(source, &lowered, patch)?;
     let source_units: Vec<_> = lowered.cells.iter().map(|cell| cell.unit.clone()).collect();
@@ -188,7 +196,7 @@ fn patch_inner(
             "result digest differs from plan",
         ));
     }
-    let verified = lower::lower(&output, context, &units)?;
+    let verified = lower::lower(&output, context, &units, properties::language_only(patch))?;
     drawing::bind(&output, &verified, &units)?;
     verify::markers(
         &output,

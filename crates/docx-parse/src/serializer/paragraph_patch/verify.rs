@@ -189,6 +189,8 @@ pub(super) fn seed(
         }
         if let Some(direct) = &runs[cell.run] {
             run(direct, attrs, node.word("sym"))?;
+        } else {
+            language(None, attrs.get("language"))?;
         }
         if node.word("sym")
             && let Some(font) = node.attr(source, "w:font")
@@ -209,7 +211,23 @@ pub(super) fn seed(
     Ok(())
 }
 
+fn language(direct: Option<&Value>, live: Option<&Value>) -> Result<(), Failure> {
+    if let Some(live) = live.and_then(Value::as_object) {
+        for (key, expected) in live {
+            let key = if key == "val" { "latin" } else { key.as_str() };
+            let value = direct
+                .and_then(|value| value.get(key))
+                .filter(|value| !value.is_null());
+            if value != (!expected.is_null()).then_some(expected) {
+                return Err(mismatch("language"));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn run(direct: &Value, attrs: &Attrs, symbol: bool) -> Result<(), Failure> {
+    language(direct.get("language"), attrs.get("language"))?;
     for key in ["bold", "italic", "allCaps", "smallCaps", "hidden"] {
         if let Some(value) = direct.get(key) {
             flag(key, value, attrs)?;
@@ -357,8 +375,17 @@ fn paragraph(direct: &Value, attrs: &Attrs) -> Result<(), Failure> {
             attrs.get("pStyle").or_else(|| attrs.get("styleId")),
         )?;
     }
+    language(
+        direct
+            .get("runProperties")
+            .and_then(|value| value.get("language")),
+        attrs.get("language"),
+    )?;
     if let Some(run) = direct.get("runProperties").and_then(Value::as_object) {
         for (key, value) in run {
+            if key == "language" && attrs.contains_key("language") {
+                continue;
+            }
             if key == "color" && value.get("auto") == Some(&Value::Bool(true)) {
                 continue;
             }

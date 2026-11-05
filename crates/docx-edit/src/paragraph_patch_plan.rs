@@ -230,6 +230,7 @@ fn run_key(path: &[String]) -> bool {
         "textColor" => Some(&["rgb", "themeColor", "themeTint", "themeShade"]),
         "highlight" => Some(&["color"]),
         "fontSize" => Some(&["size", "sizeCs"]),
+        "language" => Some(&["latin", "val", "eastAsia", "bidi"]),
         "fontFamily" => Some(&[
             "ascii",
             "hAnsi",
@@ -282,6 +283,11 @@ fn para_key(path: &[String]) -> bool {
         | "widowControl"
         | "pageBreakBefore"
         | "contextualSpacing" => path.len() == 1,
+        "language" => {
+            path.len() == 1
+                || (path.len() == 2
+                    && matches!(path[1].as_str(), "latin" | "val" | "eastAsia" | "bidi"))
+        }
         _ => false,
     }
 }
@@ -963,7 +969,11 @@ fn unsupported(snapshot: &Snapshot) -> Option<String> {
     {
         return Some("tc: paragraph revision".to_owned());
     }
-    if snapshot
+    None
+}
+
+fn has_run_revisions(snapshot: &Snapshot) -> bool {
+    snapshot
         .carriers
         .get("_originalRunBoundaries")
         .and_then(Value::as_array)
@@ -974,10 +984,6 @@ fn unsupported(snapshot: &Snapshot) -> Option<String> {
                     .is_some_and(|changes| !changes.is_empty())
             })
         })
-    {
-        return Some("tc: run property revision".to_owned());
-    }
-    None
 }
 
 fn validate_deltas(
@@ -1112,7 +1118,8 @@ fn validate_paragraph_clears(
             SlotV1::Missing => true,
             SlotV1::Present { value } => value.is_null(),
         };
-        (para_key(&delta.path) && reset).then_some(delta.path[0].as_str())
+        (para_key(&delta.path) && delta.path[0] != "language" && reset)
+            .then_some(delta.path[0].as_str())
     });
     let source = before
         .carriers
@@ -1460,14 +1467,6 @@ pub(crate) fn diff_paragraph_v1(
     if let Some(detail) = unsupported(&before).or_else(|| unsupported(&after)) {
         return Err(context.legacy(PatchErrorCode::UnsupportedStructure, detail));
     }
-    if context.metadata.is_some_and(|metadata| {
-        metadata.patch_has_run_revisions(context.story, context.session_key)
-    }) {
-        return Err(context.legacy(
-            PatchErrorCode::UnsupportedStructure,
-            "tc: run property revision",
-        ));
-    }
     validate_indent_kinds(&before, &after, &context, patchable_restyle)?;
     validate_paragraph_clears(&before, &after, &para_deltas, &context, patchable_restyle)?;
     validate_carriers(
@@ -1677,6 +1676,24 @@ pub(crate) fn diff_paragraph_v1(
         return Err(context.legacy(
             PatchErrorCode::AmbiguousAlignment,
             "ambiguous: content replay differs",
+        ));
+    }
+    let language_only = text_edits.is_empty()
+        && run_edits
+            .iter()
+            .flat_map(|edit| &edit.deltas)
+            .chain(&para_deltas)
+            .all(|delta| delta.path.first().is_some_and(|key| key == "language"));
+    if !language_only
+        && (has_run_revisions(&before)
+            || has_run_revisions(&after)
+            || context.metadata.is_some_and(|metadata| {
+                metadata.patch_has_run_revisions(context.story, context.session_key)
+            }))
+    {
+        return Err(context.legacy(
+            PatchErrorCode::UnsupportedStructure,
+            "tc: run property revision",
         ));
     }
     validate_markers(&before, &after, &text_edits, &context)?;

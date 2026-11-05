@@ -2525,6 +2525,33 @@ impl EditSession {
             .map_err(|error| map_error(env, error))
     }
 
+    #[napi(catch_unwind, js_name = "style_languages_json")]
+    pub fn style_languages_json(&self, env: Env) -> Result<String> {
+        let _call = EngineCall::new(env);
+        Ok(self.document(env)?.style_languages_json())
+    }
+
+    #[napi(catch_unwind, js_name = "set_style_language")]
+    pub fn set_style_language(
+        &self,
+        env: Env,
+        style_id: Option<String>,
+        slots_json: String,
+    ) -> Result<bool> {
+        let _call = EngineCall::new(env);
+        self.document(env)?
+            .set_style_language(style_id.as_deref(), &slots_json)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(catch_unwind, js_name = "patch_style_languages_xml")]
+    pub fn patch_style_languages_xml(&self, env: Env, source: String) -> Result<String> {
+        let _call = EngineCall::new(env);
+        self.document(env)?
+            .patch_style_languages_xml(&source)
+            .map_err(|error| map_error(env, error))
+    }
+
     #[napi(catch_unwind, js_name = "set_document_property")]
     pub fn set_document_property(&self, env: Env, key: String, json: String) -> Result<bool> {
         let _call = EngineCall::new(env);

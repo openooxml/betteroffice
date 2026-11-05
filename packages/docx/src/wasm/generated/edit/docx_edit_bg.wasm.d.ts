@@ -149,6 +149,7 @@ export const editsession_paragraph_spans: (a: number, b: number, c: number) => [
 export const editsession_paragraph_unit: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
 export const editsession_paragraphs: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_part_metadata_json: (a: number) => [number, number];
+export const editsession_patch_style_languages_xml: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_persist_paragraph_ids: (a: number) => [number, number, number, number];
 export const editsession_prime_save_seed_states: (a: number, b: number, c: number) => number;
 export const editsession_prime_save_seed_states_slice: (a: number, b: number, c: number, d: number) => number;
@@ -213,6 +214,7 @@ export const editsession_set_part_metadata: (a: number, b: number, c: number, d:
 export const editsession_set_partial_document: (a: number, b: number) => void;
 export const editsession_set_section_margins: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
 export const editsession_set_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
+export const editsession_set_style_language: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
 export const editsession_set_table_properties: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_set_table_width: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const editsession_set_undo_capture_mode: (a: number, b: number, c: number) => [number, number];
@@ -231,6 +233,7 @@ export const editsession_story_paragraph_ids: (a: number, b: number, c: number) 
 export const editsession_story_segment_unit_digests: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_story_segment_units: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_story_segments: (a: number, b: number, c: number) => [number, number, number, number];
+export const editsession_style_languages_json: (a: number) => [number, number];
 export const editsession_table_payload: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const editsession_take_base_latin_miss: (a: number) => number;
 export const editsession_toggle_mark: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number];
