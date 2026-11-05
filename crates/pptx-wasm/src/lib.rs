@@ -107,6 +107,18 @@ impl PptxRenderer {
             .map_err(js_error)
     }
 
+    /// `layoutSlideJson` for an export: hit testing keeps the slide it had.
+    #[wasm_bindgen(js_name = exportSlideJson)]
+    pub fn export_slide_json(
+        &mut self,
+        document: &PptxDocument,
+        slide_index: u32,
+    ) -> Result<String, JsValue> {
+        self.inner
+            .export_slide_json(document.session(), slide_index)
+            .map_err(js_error)
+    }
+
     /// Enables browser metrics for uncovered characters. Off by default.
     #[wasm_bindgen(js_name = setBrowserCoverageFallback)]
     pub fn set_browser_coverage_fallback(&mut self, enabled: bool) {

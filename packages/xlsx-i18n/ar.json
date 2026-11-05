@@ -149,8 +149,31 @@
       "permissionDenied": "لم يسمح التطبيق المضيف لهذا المكون الإضافي باستخدام هذا الأمر.",
       "unsupportedPolicy": "لا تستطيع المكونات الإضافية تشغيل هذا الأمر بعد. استخدم دفعة تحرير بدلًا من ذلك.",
       "pluginUnavailable": "لم يعد المكون الإضافي نشطًا.",
-      "aborted": "تم إلغاء إجراء المكون الإضافي قبل تشغيل الأمر."
-    }
+      "aborted": "تم إلغاء إجراء المكون الإضافي قبل تشغيل الأمر.",
+      "clipboardUnavailable": "لا يسمح هذا المتصفح باللصق من قائمة. استخدم اختصار لوحة المفاتيح.",
+      "lastSheet": "يحتاج المصنف إلى ورقة واحدة على الأقل.",
+      "sheetAtEdge": "لا يمكن نقل الورقة أبعد من ذلك.",
+      "sheetNameInvalid": "يجب أن يتكون اسم الورقة من 1 إلى 31 حرفًا وأن يكون فريدًا ولا يحتوي على : \\ / ? * [ ].",
+      "clipboardDenied": "لم يسمح المتصفح بالوصول إلى الحافظة."
+    },
+    "cut": "قص",
+    "copy": "نسخ",
+    "paste": "لصق",
+    "pastePlainText": "لصق كنص عادي",
+    "clearContents": "مسح المحتويات",
+    "insert": "إدراج",
+    "delete": "حذف",
+    "insertRowsAbove": "إدراج صفوف أعلاه",
+    "insertRowsBelow": "إدراج صفوف أسفله",
+    "insertColumnsLeft": "إدراج أعمدة إلى اليسار",
+    "insertColumnsRight": "إدراج أعمدة إلى اليمين",
+    "deleteRows": "حذف الصفوف",
+    "deleteColumns": "حذف الأعمدة",
+    "insertSheet": "إدراج ورقة",
+    "deleteSheet": "حذف الورقة",
+    "renameSheet": "إعادة تسمية",
+    "moveSheetLeft": "نقل إلى اليسار",
+    "moveSheetRight": "نقل إلى اليمين"
   },
   "editor": {
     "appLabel": "محرر جدول البيانات",
@@ -165,7 +188,11 @@
     "showDetails": "إظهار التفاصيل",
     "openPrompt": "فتح ملف XLSX",
     "sheetTabsLabel": "الأوراق",
-    "clearExceedsLimit": "المسح يتجاوز حد الخلايا"
+    "clearExceedsLimit": "المسح يتجاوز حد الخلايا",
+    "cellMenuLabel": "قائمة الخلية",
+    "sheetTabMenuLabel": "قائمة علامة تبويب الورقة",
+    "renameSheetLabel": "إعادة تسمية الورقة",
+    "sheetNamePrefix": "ورقة عمل"
   },
   "presence": {
     "label": "المتعاونون",

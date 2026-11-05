@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react';
 import type { ReactNode, RefObject } from 'react';
 import { DEFAULT_MENU_COLORS } from './menuColors';
-import { loadedMenuList, loadMenuList, preloadMenuList } from './menuListLoader';
+import { guardPendingMenu, loadedMenuList, loadMenuList, preloadMenuList } from './menuListLoader';
 import type { OverflowMenuColors, OverflowMenuEntry } from './MenuList';
 
 /** How a context menu was asked for. */
@@ -67,13 +67,13 @@ export function ContextMenu({
   );
 
   useEffect(() => {
-    if (loadedMenuList()) return;
+    if (MenuList) return;
     let alive = true;
     loadMenuList().then(() => { if (alive) listArrived((count) => count + 1); }, () => {
       if (alive) finish('escape', true);
     });
     return () => { alive = false; };
-  }, [finish]);
+  }, [finish, MenuList]);
 
   const registerMenu = useCallback((element: HTMLElement) => {
     menus.current.add(element);
@@ -91,19 +91,14 @@ export function ContextMenu({
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape' && !inside(event.target)) finish('escape', false);
     };
-    const onPendingKeyDown = (event: KeyboardEvent) => {
-      if (loadedMenuList()) return;
-      if (event.key === 'Escape') finish('escape', false);
-      else if (event.key === 'Tab') finish('tab', false);
-    };
     const onResize = () => finish('resize', inside(document.activeElement));
     document.addEventListener('pointerdown', onPointerDown, true);
-    document.addEventListener('keydown', onPendingKeyDown, true);
+    const releaseGuard = guardPendingMenu((key) => finish(key === 'Tab' ? 'tab' : 'escape', false));
     document.addEventListener('keydown', onKeyDown);
     window.addEventListener('resize', onResize);
     return () => {
       document.removeEventListener('pointerdown', onPointerDown, true);
-      document.removeEventListener('keydown', onPendingKeyDown, true);
+      releaseGuard();
       document.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('resize', onResize);
     };

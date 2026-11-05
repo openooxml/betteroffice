@@ -6,6 +6,11 @@ const { PptxDocument, PptxRenderer } = createRequire(import.meta.url)('./index.j
 const fixture = readFileSync(new URL('../../crates/ooxml-opc/tests/fixtures/betteroffice-demo.pptx', import.meta.url));
 const failedObject = 'This engine object failed in an earlier call and can only be freed';
 
+/** Raw `renderPngTarget` with the scale written as-is, so NaN and Infinity reach the binding as bad JSON. */
+function slidePng(renderer: { renderPngTarget(document: unknown, target: string, options: string): Uint8Array }, document: unknown, slide: number, scale: number) {
+  return renderer.renderPngTarget(document, `{"slide":${slide}}`, `{"scale":${scale}}`);
+}
+
 function thrown(call: () => unknown): unknown {
   try {
     call();
@@ -36,6 +41,30 @@ test.skipIf(process.env.BETTEROFFICE_NATIVE_TEST_HOOKS !== '1')('a panic fails t
       renderer.free();
     }
   } finally {
+    expect(() => document.free()).not.toThrow();
+  }
+});
+
+test.skipIf(process.env.BETTEROFFICE_NATIVE_TEST_HOOKS !== '1')('a panic inside renderPngTarget poisons the raw pptx renderer and document', () => {
+  const document = PptxDocument.openCollaborative(fixture, 2);
+  const renderer = new PptxRenderer();
+  const hooks = renderer as unknown as { panicNextPngForTest(): void };
+  try {
+    hooks.panicNextPngForTest();
+    const panic = thrown(() => slidePng(renderer, document, 0, 1));
+    expect(panic).toBeInstanceOf(Error);
+    expect(panic).toHaveProperty('code', 'GenericFailure');
+    for (const call of [
+      () => renderer.hitTestJson(0, 0),
+      () => document.snapshotJson(),
+      () => slidePng(renderer, document, 0, 1),
+    ]) {
+      const failure = thrown(call);
+      expect((failure as Error).message).toBe(failedObject);
+      expect(failure).not.toHaveProperty('code');
+    }
+  } finally {
+    expect(() => renderer.free()).not.toThrow();
     expect(() => document.free()).not.toThrow();
   }
 });

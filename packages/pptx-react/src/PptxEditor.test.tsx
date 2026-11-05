@@ -840,6 +840,15 @@ describe('PptxEditor PNG export', () => {
         globalThis.OffscreenCanvas = ExportCanvas as unknown as typeof OffscreenCanvas;
         globalThis.createImageBitmap = (() =>
           Promise.resolve({} as ImageBitmap)) as typeof createImageBitmap;
+        const originalFontFace = globalThis.FontFace;
+        const fontsDescriptor = Object.getOwnPropertyDescriptor(document, 'fonts');
+        const held: { family: string }[] = [];
+        globalThis.FontFace = class { family: string; constructor(family: string) { this.family = family; } load() { return Promise.resolve(this); } } as unknown as typeof FontFace;
+        Object.defineProperty(document, 'fonts', { configurable: true, value: {
+          add(face: { family: string }) { held.push(face); },
+          delete(face: { family: string }) { held.splice(held.indexOf(face), 1); return true; },
+          load(font: string) { return Promise.resolve(held.filter((face) => font.includes(`"${face.family}"`))); },
+        } });
         try {
           const opened: PptxEditorApi[] = [];
           const view = render(
@@ -892,6 +901,9 @@ describe('PptxEditor PNG export', () => {
           revokeUrl.mockRestore();
           globalThis.OffscreenCanvas = originalCanvas;
           globalThis.createImageBitmap = originalBitmap;
+          globalThis.FontFace = originalFontFace;
+          if (fontsDescriptor) Object.defineProperty(document, 'fonts', fontsDescriptor);
+          else Reflect.deleteProperty(document, 'fonts');
         }
       },
       60_000

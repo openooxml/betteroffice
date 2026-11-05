@@ -404,6 +404,7 @@ dependencies = [
  "betteroffice-opc",
  "betteroffice-pptx-edit",
  "betteroffice-pptx-parse",
+ "betteroffice-pptx-raster",
  "betteroffice-pptx-render",
  "serde",
  "serde_json",

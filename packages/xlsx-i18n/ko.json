@@ -149,8 +149,31 @@
       "permissionDenied": "호스트 애플리케이션이 이 추가 기능의 명령 사용을 허용하지 않았습니다.",
       "unsupportedPolicy": "추가 기능은 아직 이 명령을 실행할 수 없습니다. 대신 편집 배치를 사용하세요.",
       "pluginUnavailable": "추가 기능이 더 이상 활성화되어 있지 않습니다.",
-      "aborted": "명령이 실행되기 전에 추가 기능 작업이 취소되었습니다."
-    }
+      "aborted": "명령이 실행되기 전에 추가 기능 작업이 취소되었습니다.",
+      "clipboardUnavailable": "이 브라우저에서는 메뉴에서 붙여넣을 수 없습니다. 바로 가기 키를 사용하세요.",
+      "lastSheet": "통합 문서에는 시트가 하나 이상 있어야 합니다.",
+      "sheetAtEdge": "시트를 더 이상 이동할 수 없습니다.",
+      "sheetNameInvalid": "시트 이름은 1~31자이고 고유해야 하며 : \\ / ? * [ ]를 포함할 수 없습니다.",
+      "clipboardDenied": "브라우저에서 클립보드 액세스를 허용하지 않았습니다."
+    },
+    "cut": "잘라내기",
+    "copy": "복사",
+    "paste": "붙여넣기",
+    "pastePlainText": "일반 텍스트로 붙여넣기",
+    "clearContents": "내용 지우기",
+    "insert": "삽입",
+    "delete": "삭제",
+    "insertRowsAbove": "위에 행 삽입",
+    "insertRowsBelow": "아래에 행 삽입",
+    "insertColumnsLeft": "왼쪽에 열 삽입",
+    "insertColumnsRight": "오른쪽에 열 삽입",
+    "deleteRows": "행 삭제",
+    "deleteColumns": "열 삭제",
+    "insertSheet": "시트 삽입",
+    "deleteSheet": "시트 삭제",
+    "renameSheet": "이름 바꾸기",
+    "moveSheetLeft": "왼쪽으로 이동",
+    "moveSheetRight": "오른쪽으로 이동"
   },
   "editor": {
     "appLabel": "스프레드시트 편집기",
@@ -165,7 +188,11 @@
     "showDetails": "자세히 보기",
     "openPrompt": "XLSX 파일 열기",
     "sheetTabsLabel": "시트",
-    "clearExceedsLimit": "지우기가 셀 제한을 초과합니다"
+    "clearExceedsLimit": "지우기가 셀 제한을 초과합니다",
+    "cellMenuLabel": "셀 메뉴",
+    "sheetTabMenuLabel": "시트 탭 메뉴",
+    "renameSheetLabel": "시트 이름 바꾸기",
+    "sheetNamePrefix": "시트"
   },
   "presence": {
     "label": "공동 작업자",

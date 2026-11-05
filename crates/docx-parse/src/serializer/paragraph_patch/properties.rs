@@ -145,6 +145,12 @@ pub(super) fn restyle_run_deltas(
                 .get("fontFamily")
                 .and_then(|font| font.get(&path[1]))
                 .is_some_and(|value| !value.is_null()),
+            Some("characterSpacing") => match path.get(1).map(String::as_str) {
+                Some(field @ ("spacing" | "position" | "scale" | "kerning")) => has(field),
+                _ => ["spacing", "position", "scale", "kerning"]
+                    .iter()
+                    .any(|field| has(field)),
+            },
             Some("textColor") => has("color"),
             Some("strike" | "doubleStrike") => has("strike") || has("doubleStrike"),
             Some("superscript" | "subscript") => has("vertAlign"),
@@ -211,6 +217,7 @@ pub(super) fn run_properties(
                 | "highlight"
                 | "fontSize"
                 | "fontFamily"
+                | "characterSpacing"
                 | "superscript"
                 | "subscript"
                 | "allCaps"
@@ -536,7 +543,12 @@ fn run_leaf(
         }
         return flag(changes, child, value, inherit.get(key));
     }
-    if value.is_none() && matches!(key, "fontFamily" | "fontSize" | "textColor") {
+    if value.is_none()
+        && matches!(
+            key,
+            "fontFamily" | "fontSize" | "textColor" | "characterSpacing"
+        )
+    {
         let mut inherited = inherit.get(key);
         for field in &path[1..] {
             inherited = inherited.and_then(|value| value.get(field));
@@ -572,6 +584,16 @@ fn run_leaf(
             let child = match path[1].as_str() {
                 "size" => "sz",
                 "sizeCs" => "szCs",
+                _ => return Err(unsupported(path)),
+            };
+            set(changes, child, "w:val", number(value)?);
+        }
+        "characterSpacing" if path.len() == 2 => {
+            let child = match path[1].as_str() {
+                "spacing" => "spacing",
+                "position" => "position",
+                "scale" => "w",
+                "kerning" => "kern",
                 _ => return Err(unsupported(path)),
             };
             set(changes, child, "w:val", number(value)?);
@@ -874,11 +896,22 @@ fn write_child(
             }
             return apply_bytes(source, vec![(node.span.clone(), String::new())]);
         }
+        if child == "rFonts"
+            && !change.attributes.is_empty()
+            && change.attributes.values().all(Option::is_none)
+            && node.children.is_empty()
+            && node.attributes.iter().all(|attribute| {
+                attribute.name == "w:hint"
+                    || change.attributes.contains_key(attribute.name.as_str())
+            })
+        {
+            return apply_bytes(source, vec![(node.span.clone(), String::new())]);
+        }
         if change.attributes.get("w:val") == Some(&None)
-            && matches!(
+            && (matches!(
                 child,
                 "sz" | "szCs" | "jc" | "outlineLvl" | "vertAlign" | "highlight" | "color" | "shd"
-            )
+            ) || (parent == "rPr" && matches!(child, "spacing" | "w" | "kern" | "position")))
         {
             if node.attributes.iter().any(|attribute| {
                 attribute.name != "w:val"
@@ -1252,6 +1285,9 @@ fn qualified(child: &str) -> Result<&'static str, Failure> {
         "color" => "w:color",
         "sz" => "w:sz",
         "szCs" => "w:szCs",
+        "w" => "w:w",
+        "kern" => "w:kern",
+        "position" => "w:position",
         "u" => "w:u",
         "highlight" => "w:highlight",
         "shd" => "w:shd",
@@ -1277,6 +1313,36 @@ fn qualified(child: &str) -> Result<&'static str, Failure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restyling_keeps_a_character_spacing_change_the_source_sets_directly() {
+        let attrs = |spacing: i64| -> Attrs {
+            serde_json::from_value(
+                serde_json::json!({ "characterSpacing": { "spacing": spacing } }),
+            )
+            .unwrap()
+        };
+        let delta = AttrDeltaV1 {
+            path: vec!["characterSpacing".to_owned(), "spacing".to_owned()],
+            before: SlotV1::Present {
+                value: serde_json::json!(20),
+            },
+            after: SlotV1::Present {
+                value: serde_json::json!(40),
+            },
+        };
+        let kept = restyle_run_deltas(
+            r#"<w:rPr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:spacing w:val="20"/></w:rPr>"#,
+            &[delta],
+            &attrs(20),
+            &attrs(20),
+            &attrs(40),
+        )
+        .ok()
+        .expect("restyled deltas");
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].path, ["characterSpacing", "spacing"]);
+    }
 
     #[test]
     fn unknown_property_elements_return_an_unsupported_error() {

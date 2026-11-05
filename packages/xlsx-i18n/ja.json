@@ -149,8 +149,31 @@
       "permissionDenied": "ホスト アプリケーションがこのプラグインによるこのコマンドの使用を許可していません。",
       "unsupportedPolicy": "プラグインはまだこのコマンドを実行できません。代わりに編集バッチを使用してください。",
       "pluginUnavailable": "プラグインは現在アクティブではありません。",
-      "aborted": "コマンドが実行される前にプラグインの操作がキャンセルされました。"
-    }
+      "aborted": "コマンドが実行される前にプラグインの操作がキャンセルされました。",
+      "clipboardUnavailable": "このブラウザーではメニューから貼り付けできません。キーボード ショートカットを使用してください。",
+      "lastSheet": "ブックには少なくとも 1 つのシートが必要です。",
+      "sheetAtEdge": "シートをこれ以上移動できません。",
+      "sheetNameInvalid": "シート名は 1～31 文字で一意である必要があり、: \\ / ? * [ ] は使用できません。",
+      "clipboardDenied": "ブラウザーでクリップボードへのアクセスが許可されませんでした。"
+    },
+    "cut": "切り取り",
+    "copy": "コピー",
+    "paste": "貼り付け",
+    "pastePlainText": "書式なしテキストとして貼り付け",
+    "clearContents": "数式と値のクリア",
+    "insert": "挿入",
+    "delete": "削除",
+    "insertRowsAbove": "上に行を挿入",
+    "insertRowsBelow": "下に行を挿入",
+    "insertColumnsLeft": "左に列を挿入",
+    "insertColumnsRight": "右に列を挿入",
+    "deleteRows": "行の削除",
+    "deleteColumns": "列の削除",
+    "insertSheet": "シートの挿入",
+    "deleteSheet": "シートの削除",
+    "renameSheet": "名前の変更",
+    "moveSheetLeft": "左へ移動",
+    "moveSheetRight": "右へ移動"
   },
   "editor": {
     "appLabel": "スプレッドシート エディター",
@@ -165,7 +188,11 @@
     "showDetails": "詳細を表示",
     "openPrompt": "XLSX ファイルを開く",
     "sheetTabsLabel": "シート",
-    "clearExceedsLimit": "クリアがセルの上限を超えています"
+    "clearExceedsLimit": "クリアがセルの上限を超えています",
+    "cellMenuLabel": "セル メニュー",
+    "sheetTabMenuLabel": "シート見出しメニュー",
+    "renameSheetLabel": "シート名の変更",
+    "sheetNamePrefix": "シート"
   },
   "presence": {
     "label": "共同編集者",

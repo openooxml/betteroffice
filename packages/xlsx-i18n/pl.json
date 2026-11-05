@@ -149,8 +149,31 @@
       "permissionDenied": "Aplikacja hosta nie zezwoliła tej wtyczce na użycie tego polecenia.",
       "unsupportedPolicy": "Wtyczki nie mogą jeszcze uruchamiać tego polecenia. Użyj zamiast tego pakietu edycji.",
       "pluginUnavailable": "Wtyczka nie jest już aktywna.",
-      "aborted": "Działanie wtyczki zostało anulowane przed wykonaniem polecenia."
-    }
+      "aborted": "Działanie wtyczki zostało anulowane przed wykonaniem polecenia.",
+      "clipboardUnavailable": "Ta przeglądarka nie pozwala wklejać z menu. Użyj skrótu klawiaturowego.",
+      "lastSheet": "Skoroszyt musi mieć co najmniej jeden arkusz.",
+      "sheetAtEdge": "Arkusza nie można przenieść dalej.",
+      "sheetNameInvalid": "Nazwy arkuszy muszą mieć od 1 do 31 znaków, być unikatowe i nie mogą zawierać : \\ / ? * [ ].",
+      "clipboardDenied": "Przeglądarka nie zezwoliła na dostęp do schowka."
+    },
+    "cut": "Wytnij",
+    "copy": "Kopiuj",
+    "paste": "Wklej",
+    "pastePlainText": "Wklej jako zwykły tekst",
+    "clearContents": "Wyczyść zawartość",
+    "insert": "Wstaw",
+    "delete": "Usuń",
+    "insertRowsAbove": "Wstaw wiersze powyżej",
+    "insertRowsBelow": "Wstaw wiersze poniżej",
+    "insertColumnsLeft": "Wstaw kolumny z lewej",
+    "insertColumnsRight": "Wstaw kolumny z prawej",
+    "deleteRows": "Usuń wiersze",
+    "deleteColumns": "Usuń kolumny",
+    "insertSheet": "Wstaw arkusz",
+    "deleteSheet": "Usuń arkusz",
+    "renameSheet": "Zmień nazwę",
+    "moveSheetLeft": "Przenieś w lewo",
+    "moveSheetRight": "Przenieś w prawo"
   },
   "editor": {
     "appLabel": "Edytor arkuszy kalkulacyjnych",
@@ -165,7 +188,11 @@
     "showDetails": "Pokaż szczegóły",
     "openPrompt": "Otwórz plik XLSX",
     "sheetTabsLabel": "Arkusze",
-    "clearExceedsLimit": "Czyszczenie przekracza limit komórek."
+    "clearExceedsLimit": "Czyszczenie przekracza limit komórek.",
+    "cellMenuLabel": "Menu komórki",
+    "sheetTabMenuLabel": "Menu karty arkusza",
+    "renameSheetLabel": "Zmień nazwę arkusza",
+    "sheetNamePrefix": "Arkusz"
   },
   "presence": {
     "label": "Współpracownicy",

@@ -158,6 +158,10 @@ export class PptxDocument {
 export class PptxRenderer {
     free(): void;
     [Symbol.dispose](): void;
+    /**
+     * `layoutSlideJson` for an export: hit testing keeps the slide it had.
+     */
+    exportSlideJson(document: PptxDocument, slide_index: number): string;
     hitTestJson(x: number, y: number): string;
     hitTestSlideJson(document: PptxDocument, id: string, x: number, y: number): string;
     layoutProposalDiffSlideByIdJson(document: PptxDocument, id: string, slide_id: string): string;
@@ -337,6 +341,7 @@ export interface InitOutput {
     readonly pptxdocument_validateEditsJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_validateProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_version: () => [number, number];
+    readonly pptxrenderer_exportSlideJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxrenderer_hitTestJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxrenderer_hitTestSlideJson: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly pptxrenderer_layoutProposalDiffSlideByIdJson: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];

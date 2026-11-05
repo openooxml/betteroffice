@@ -149,8 +149,31 @@
       "permissionDenied": "L'applicazione host non ha consentito a questo plug-in di usare questo comando.",
       "unsupportedPolicy": "I plug-in non possono ancora eseguire questo comando. Usa invece un batch di modifiche.",
       "pluginUnavailable": "Il plug-in non è più attivo.",
-      "aborted": "L'azione del plug-in è stata annullata prima dell'esecuzione del comando."
-    }
+      "aborted": "L'azione del plug-in è stata annullata prima dell'esecuzione del comando.",
+      "clipboardUnavailable": "Questo browser non consente di incollare da un menu. Usa la scelta rapida da tastiera.",
+      "lastSheet": "Una cartella di lavoro richiede almeno un foglio.",
+      "sheetAtEdge": "Il foglio non può essere spostato oltre.",
+      "sheetNameInvalid": "I nomi dei fogli richiedono da 1 a 31 caratteri, devono essere univoci e non possono contenere : \\ / ? * [ ].",
+      "clipboardDenied": "Il browser non ha consentito l’accesso agli appunti."
+    },
+    "cut": "Taglia",
+    "copy": "Copia",
+    "paste": "Incolla",
+    "pastePlainText": "Incolla come testo normale",
+    "clearContents": "Cancella contenuto",
+    "insert": "Inserisci",
+    "delete": "Elimina",
+    "insertRowsAbove": "Inserisci righe sopra",
+    "insertRowsBelow": "Inserisci righe sotto",
+    "insertColumnsLeft": "Inserisci colonne a sinistra",
+    "insertColumnsRight": "Inserisci colonne a destra",
+    "deleteRows": "Elimina righe",
+    "deleteColumns": "Elimina colonne",
+    "insertSheet": "Inserisci foglio",
+    "deleteSheet": "Elimina foglio",
+    "renameSheet": "Rinomina",
+    "moveSheetLeft": "Sposta a sinistra",
+    "moveSheetRight": "Sposta a destra"
   },
   "editor": {
     "appLabel": "Editor di fogli di calcolo",
@@ -165,7 +188,11 @@
     "showDetails": "Mostra dettagli",
     "openPrompt": "Apri un file XLSX",
     "sheetTabsLabel": "Fogli",
-    "clearExceedsLimit": "La cancellazione supera il limite di celle."
+    "clearExceedsLimit": "La cancellazione supera il limite di celle.",
+    "cellMenuLabel": "Menu cella",
+    "sheetTabMenuLabel": "Menu della scheda del foglio",
+    "renameSheetLabel": "Rinomina foglio",
+    "sheetNamePrefix": "Foglio"
   },
   "presence": {
     "label": "Collaboratori",

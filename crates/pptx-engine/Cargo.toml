@@ -12,12 +12,14 @@ name = "pptx_engine"
 [features]
 default = ["metafile-svg"]
 metafile-svg = ["pptx-edit/metafile-svg"]
+raster = ["dep:pptx-raster"]
 
 [dependencies]
 ooxml-drawingml = { workspace = true, features = ["tiff"] }
 pptx-edit = { workspace = true, features = ["engine"] }
 pptx-parse.workspace = true
 pptx-render.workspace = true
+pptx-raster = { workspace = true, optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 yrs = "0.27.3"

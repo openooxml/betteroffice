@@ -133,7 +133,10 @@ export class WorkerDraftController {
       operations: [], cancelled: false, sealed: false, completed: null, settle,
       input: { ready, target: draft, draft: () => loading!.completed },
     } : null;
-    const reading = loading ? holdWorkerCellInputRead(this.coordinator, () => this.options.prefill(draft.sheet, draft),
+    const reading = loading ? holdWorkerCellInputRead(this.coordinator, () => {
+      const sheet = draft.target ? this.options.resolveSheet(draft.target.sheetId) : draft.sheet;
+      return sheet === undefined ? Promise.resolve('') : this.options.prefill(sheet, draft);
+    },
       (value) => { loading.value = value; this.completePrefill(loading); }, loading.input.ready, () => loading.cancelled,
       (error) => this.refusePrefill(loading, error)) : null;
     this.loading = loading;

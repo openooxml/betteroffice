@@ -149,8 +149,31 @@
       "permissionDenied": "主機應用程式尚未允許此外掛程式使用此命令。",
       "unsupportedPolicy": "外掛程式尚無法執行此命令。請改用編輯批次。",
       "pluginUnavailable": "外掛程式已不再作用中。",
-      "aborted": "外掛程式動作在命令執行前已取消。"
-    }
+      "aborted": "外掛程式動作在命令執行前已取消。",
+      "clipboardUnavailable": "此瀏覽器不允許從功能表貼上。請使用鍵盤快速鍵。",
+      "lastSheet": "活頁簿至少需要一個工作表。",
+      "sheetAtEdge": "無法再移動此工作表。",
+      "sheetNameInvalid": "工作表名稱需為 1 到 31 個字元、不能重複，且不能包含 : \\ / ? * [ ]。",
+      "clipboardDenied": "瀏覽器不允許存取剪貼簿。"
+    },
+    "cut": "剪下",
+    "copy": "複製",
+    "paste": "貼上",
+    "pastePlainText": "以純文字貼上",
+    "clearContents": "清除內容",
+    "insert": "插入",
+    "delete": "刪除",
+    "insertRowsAbove": "在上方插入列",
+    "insertRowsBelow": "在下方插入列",
+    "insertColumnsLeft": "在左側插入欄",
+    "insertColumnsRight": "在右側插入欄",
+    "deleteRows": "刪除列",
+    "deleteColumns": "刪除欄",
+    "insertSheet": "插入工作表",
+    "deleteSheet": "刪除工作表",
+    "renameSheet": "重新命名",
+    "moveSheetLeft": "向左移",
+    "moveSheetRight": "向右移"
   },
   "editor": {
     "appLabel": "試算表編輯器",
@@ -165,7 +188,11 @@
     "showDetails": "顯示詳細資料",
     "openPrompt": "開啟 XLSX 檔案",
     "sheetTabsLabel": "工作表",
-    "clearExceedsLimit": "清除超過儲存格限制"
+    "clearExceedsLimit": "清除超過儲存格限制",
+    "cellMenuLabel": "儲存格功能表",
+    "sheetTabMenuLabel": "工作表索引標籤功能表",
+    "renameSheetLabel": "重新命名工作表",
+    "sheetNamePrefix": "工作表"
   },
   "presence": {
     "label": "共同作業者",

@@ -59,6 +59,10 @@
     "defaultParagraphStyleId": "Normal",
     "defaultTabStopTwips": 720,
     "docDefaultFontSize": 12,
+    "docDefaultLanguage": {
+      "eastAsia": "ja-JP",
+      "latin": "en-US"
+    },
     "fontTheme": {
       "colorScheme": {
         "accent1": "FF0000",

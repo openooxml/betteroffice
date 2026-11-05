@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { dateSchema } from './tool-input';
+import { editLimit } from './edit-limits';
 
 const ref = z.string().min(1).max(128);
 const text = z.string().max(16000);
@@ -14,6 +15,7 @@ const sectionProperties = {
 const mark = z.boolean().optional().describe('true sets, false clears, omitted keeps.');
 
 export const docxEditSchema = z.discriminatedUnion('op', [
+  z.object({ op: z.literal('set_runs'), paragraph: ref, revision: z.number().int().nonnegative(), runs: z.array(z.object({ run: ref, text }).strict()).min(1) }).strict(),
   z.object({ op: z.literal('insert_section_break'), before: ref.optional(), after: ref.optional(), kind: z.enum(['nextPage', 'continuous', 'evenPage', 'oddPage']) }).strict(),
   z.object({ op: z.literal('set_section'), section: z.number().int().positive(), ...sectionProperties }).strict(),
   z.object({ op: z.literal('set_paragraph_style'), paragraph: ref, style }).strict(),
@@ -42,8 +44,9 @@ export const docxEditSchema = z.discriminatedUnion('op', [
   if (edit.op === 'insert_paragraphs' && Number(edit.before !== undefined) + Number(edit.after !== undefined) !== 1) context.addIssue({ code: 'custom', message: 'Supply exactly one before or after paragraph ref.' });
   if (edit.op === 'set_section' && edit.orientation === undefined && edit.pageWidth === undefined && edit.pageHeight === undefined && !Object.keys(edit.margins ?? {}).length) context.addIssue({ code: 'custom', message: 'Supply at least one section property.' });
 });
-export const docxVersionSchema = z.number().int().nonnegative().describe('version from office_outline or office_grep; refresh after each edit.');
-export const docxBatchSchema = z.object({ version: docxVersionSchema, edits: z.array(docxEditSchema).min(1).max(32) }).strict();
+export const docxVersionSchema = z.number().int().nonnegative().describe('version from office_outline, office_grep or docx_read_runs; refresh after each edit.');
+export const createDocxBatchSchema = (maxEdits = 32) => z.object({ version: docxVersionSchema, edits: z.array(docxEditSchema).min(1).max(editLimit(maxEdits)) }).strict();
+export const docxBatchSchema = createDocxBatchSchema();
 export type DocxAgentEdit = z.infer<typeof docxEditSchema>;
 export type DocxAgentBatch = z.infer<typeof docxBatchSchema>;
 

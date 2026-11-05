@@ -334,10 +334,8 @@ impl Document {
 
     #[cfg(feature = "fonts")]
     pub fn layout(&self, mut input: LayoutInput) -> Result<LayoutResult> {
-        let requirements = docx_layout::measure_blocks::collect_font_requirements(
-            input.measured.iter().map(|measured| &measured.block),
-            "Calibri",
-        );
+        let requirements =
+            self.font_requirements(input.measured.iter().map(|measured| &measured.block));
         let mut fonts = self.fonts.lock().unwrap_or_else(PoisonError::into_inner);
         fonts.resolve(&self.font_manager, &requirements)?;
         if fonts.chains.is_empty() {
@@ -398,6 +396,34 @@ impl Document {
             layout,
             display_list,
         })
+    }
+
+    /// The fonts `blocks` need, with the document's own CJK script first as the
+    /// editing engine orders them for the browser and `render_png`.
+    #[cfg(feature = "fonts")]
+    fn font_requirements<'a>(
+        &self,
+        blocks: impl IntoIterator<Item = &'a docx_layout::types::LayoutBlock>,
+    ) -> Vec<docx_layout::measure_blocks::FontRequirement> {
+        let mut collector = docx_layout::measure_blocks::FontRequirementCollector::default();
+        collector.prefer_east_asian_language(self.default_east_asian_language());
+        collector.collect(blocks, "Calibri");
+        collector.finish().into_values().collect()
+    }
+
+    #[cfg(feature = "fonts")]
+    fn default_east_asian_language(&self) -> Option<&str> {
+        self.model
+            .styles
+            .as_ref()?
+            .doc_defaults
+            .as_ref()?
+            .r_pr
+            .as_ref()?
+            .language
+            .as_ref()?
+            .east_asia
+            .as_deref()
     }
 
     #[cfg(not(feature = "fonts"))]
@@ -736,5 +762,53 @@ fn has_floating_zones(
             has_floating_zones(&LayoutBlock::Paragraph(paragraph.clone()), width, config)
         }),
         _ => false,
+    }
+}
+
+#[cfg(all(test, feature = "fonts"))]
+mod font_requirement_tests {
+    use super::Document;
+    use docx_layout::types::LayoutBlock;
+    use serde_json::json;
+
+    fn document(language: &str) -> Document {
+        let styles = format!(
+            r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:lang w:val="en-US" w:eastAsia="{language}"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>"#
+        );
+        let parts = [
+            ("[Content_Types].xml", r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>"#.to_owned()),
+            ("_rels/.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="doc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_owned()),
+            ("word/_rels/document.xml.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#.to_owned()),
+            ("word/styles.xml", styles),
+            ("word/document.xml", r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>x</w:t></w:r></w:p></w:body></w:document>"#.to_owned()),
+        ];
+        let parts: Vec<_> = parts
+            .into_iter()
+            .map(|(name, value)| (name.to_owned(), value.into_bytes()))
+            .collect();
+        Document::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn layout_puts_the_documents_own_cjk_script_first() {
+        let paragraph = |id: &str, language: &str| -> LayoutBlock {
+            serde_json::from_value(json!({"kind": "paragraph", "id": id, "runs": [{
+                "kind": "text", "text": "骨", "fontFamily": "Calibri",
+                "language": {"eastAsia": language}
+            }]}))
+            .unwrap()
+        };
+        let blocks = [paragraph("zh", "zh-CN"), paragraph("ja", "ja-JP")];
+        for (language, expected) in [
+            ("ja-JP", ["cjk-jp", "cjk-sc"]),
+            ("zh-CN", ["cjk-sc", "cjk-jp"]),
+        ] {
+            let requirements = document(language).font_requirements(&blocks);
+            let calibri = requirements
+                .iter()
+                .find(|requirement| requirement.key == "calibri|0|0")
+                .unwrap();
+            assert_eq!(calibri.scripts, expected, "{language}");
+        }
     }
 }

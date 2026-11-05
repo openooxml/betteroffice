@@ -1,6 +1,7 @@
 import {
   createSessionClient, requestWasmCompile, type SessionClient,
 } from '../../../../shared/office-session/client';
+import type { PptxPngOptions, PptxPngTarget } from '../wasm/pngOptions';
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
 import { createSessionWorker } from './sessionWorker';
 import type { Promisified, SessionFailure } from '../../../../shared/office-session/types';
@@ -42,12 +43,14 @@ export interface OpenPresentationSessionOptions extends OpenPresentationOptions 
  */
 export interface PresentationSession {
   readonly state: PresentationSessionState;
-  readonly call: Promisified<Omit<PresentationSessionMethods, 'open' | 'dispose' | 'frame'>> & {
+  readonly call: Promisified<Omit<PresentationSessionMethods, 'open' | 'dispose' | 'frame' | 'renderPng'>> & {
     /**
      * @experimental A newer frame call replaces a queued one, which rejects with an error
      * named SessionSuperseded.
      */
     frame(slideIndex: number): Promise<PresentationFrame>;
+    /** Draws a slide as PNG bytes in the session's engine. */
+    renderPng(target: PptxPngTarget, options?: PptxPngOptions): Promise<Uint8Array>;
   };
   save(): Promise<Uint8Array>;
   on<K extends keyof PresentationSessionEvents>(
@@ -206,13 +209,20 @@ export async function createPresentationSession(
 
   const media = new Map<string, Uint8Array>();
   const {
-    version, readContent, findText, validateEdits, applyEdits, frame, slides, slideSize, save,
+    version, readContent, findText, validateEdits, applyEdits, frame, slides, slideSize, save, renderPng,
   } = client.call;
   return {
     get state() { return state; },
     call: {
       version, readContent, findText, validateEdits, applyEdits, slides, slideSize, save,
       frame: async (slideIndex) => decodeFrame(await frame(slideIndex), media),
+      renderPng: async (target, options = {}) => {
+        const { signal, ...wire } = options;
+        signal?.throwIfAborted();
+        const bytes = new Uint8Array(await renderPng(structuredClone(target), structuredClone(wire)));
+        signal?.throwIfAborted();
+        return bytes;
+      },
     },
     save: async () => new Uint8Array(await save()),
     on: (name, listener) => client.on(name, listener),

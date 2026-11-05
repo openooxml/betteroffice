@@ -7,7 +7,23 @@ import { commandFrameCanvasVersion, hardReferences, invalidateCommandFrameCanvas
 import { slideRasterCache, type RasterEntry } from '../../../../shared/office-session/render/pptxSlideRaster';
 import type { PeerlessConfirmedFrame, PeerlessPaintCheckpoint, PeerlessViewSnapshot } from './peerlessViewStore';
 
-type ContentReply = Exclude<PptxRenderReply, { kind: 'unsupported' }>;
+type ContentReply = Exclude<PptxRenderReply, { kind: 'unsupported' | 'prerender' | 'font-generation' }>;
+type PrerenderReply = Extract<PptxRenderReply, { kind: 'prerender' }>;
+
+/** An ahead-of-time raster of one slide, painted on the stage only while it still shows the deck and the stage geometry. */
+export interface PeerlessPrerender {
+  request(slideId: string): void;
+  drop(): void;
+  /** Draws the stashed raster of `slideId` if it was painted at `version` and fits the stage; it is used at most once. */
+  present(slideId: string, version: string): boolean;
+  /** Whether a presented prerender is on the stage and no frame has replaced it yet. */
+  presented(): boolean;
+  /** Shows the displayed frame again if a presented prerender is still on the stage. */
+  restore(): boolean;
+}
+
+/** The prerender of each worker frame painter. */
+export const peerlessPrerenders = new WeakMap<object, PeerlessPrerender>();
 const contentOf = (reply: ContentReply) =>
   reply.kind === 'raster' ? reply.content : reply.kind === 'unchanged' ? reply.baseContent : undefined;
 /** Whether `reply` shows older pixels than `kept`; at equal content a raster outranks an `unchanged`. */
@@ -49,7 +65,15 @@ export function createWorkerFramePainter(
   let paintId = 0;
   let fallback: ReturnType<typeof createCommandFramePainter> | undefined;
   let arrival = 0;
-  let early: { reply: Exclude<PptxRenderReply, { kind: 'unsupported' }>; holder: object } | undefined;
+  let early: { reply: ContentReply; holder: object } | undefined;
+  let requested = 0;
+  let fontGeneration = 0;
+  let prestaged = false;
+  let stash: { reply: PrerenderReply; holder: object } | undefined;
+  const dropStash = () => {
+    if (stash) pptxRasterOwnership.release(stash.reply.bitmap, stash.holder);
+    stash = undefined;
+  };
   let seenEpoch = -Infinity;
   let warm = !options.mainFirstFrame;
   let viewed = warm;
@@ -119,6 +143,7 @@ export function createWorkerFramePainter(
       current: (frame) => current(frame) && !!pending?.fallback && (!frame || pending.frame === frame),
       onCommit(frame, view) {
         if (!pending || pending.frame !== frame || !valid(pending)) return;
+        prestaged = false;
         const held = retainCommandFrameRaster(frame, factor);
         try {
           visibleBacking = undefined;
@@ -165,7 +190,21 @@ export function createWorkerFramePainter(
   }
 
   async function receive(reply: PptxRenderReply) {
-    if (reply.kind === 'unsupported') { mainOnly = true; if (pending) main(pending); return; }
+    if (reply.kind === 'font-generation') {
+      fontGeneration = Math.max(fontGeneration, reply.fonts);
+      if (stash && stash.reply.fonts !== fontGeneration) dropStash();
+      return;
+    }
+    if (reply.kind === 'prerender') {
+      if (disposed || reply.token !== requested || reply.fonts < fontGeneration) return;
+      fontGeneration = reply.fonts;
+      dropStash();
+      const holder = {};
+      pptxRasterOwnership.retain(reply.bitmap, holder);
+      stash = { reply, holder };
+      return;
+    }
+    if (reply.kind === 'unsupported') { mainOnly = true; dropStash(); if (pending) main(pending); return; }
     const job = pending;
     if (!disposed && reply.frameEpoch > seenEpoch && (!job || reply.frameEpoch > job.frame.frame.epoch)) {
       if (early && (early.reply.frameEpoch > reply.frameEpoch ||
@@ -254,6 +293,7 @@ export function createWorkerFramePainter(
           version: commandFrameCanvasVersion(canvas) };
         const previous = displayed; displayed = candidate; displayedFrame = job.frame;
         job.painted = true;
+        prestaged = false;
         try { options.onCommit?.(job.frame, job.view); } finally { previous?.release(); }
         if (fallback) {
           const retired = fallback; fallback = undefined; retired.dispose();
@@ -350,12 +390,60 @@ export function createWorkerFramePainter(
     },
     dispose() {
       if (disposed) return;
-      disposed = true; cancel(); off(); dropEarly();
+      disposed = true; cancel(); off(); dropEarly(); dropStash();
       for (const finish of checkpoints) finish();
       fallback?.dispose(); displayed?.release(); displayed = undefined;
       if (!owned.has(backing)) zero(backing);
       if (!options.images) images.dispose();
     },
   };
+  peerlessPrerenders.set(painter, {
+    request(slideId) {
+      if (disposed || mainOnly || !client.supported) return;
+      dropStash();
+      requested = client.prerender(slideId);
+    },
+    drop() { requested = 0; dropStash(); },
+    present(slideId, version) {
+      const held = stash;
+      requested = 0; stash = undefined;
+      if (!held) return false;
+      try {
+        const { reply } = held;
+        if (disposed || mainOnly || !warm || pending?.fallback || reply.slideId !== slideId || reply.version !== version ||
+          reply.fonts !== fontGeneration || reply.factor !== factor || reply.width !== canvas.width ||
+          reply.height !== canvas.height) return false;
+        const visible = canvas.getContext('2d');
+        if (!visible) return false;
+        visible.save();
+        try {
+          visible.setTransform(1, 0, 0, 1, 0, 0);
+          visible.clearRect(0, 0, canvas.width, canvas.height);
+          visible.drawImage(reply.bitmap, 0, 0);
+        } finally { visible.restore(); }
+        invalidateCommandFrameCanvas(canvas);
+        visibleBacking = undefined;
+        prestaged = true;
+        return true;
+      } finally { pptxRasterOwnership.release(held.reply.bitmap, held.holder); }
+    },
+    presented: () => prestaged && !disposed,
+    restore() {
+      if (!prestaged || disposed) return false;
+      prestaged = false;
+      if (!backingFrame || backing.width !== canvas.width || backing.height !== canvas.height) { client.resync(); return true; }
+      const visible = canvas.getContext('2d');
+      if (!visible) return false;
+      visible.save();
+      try {
+        visible.setTransform(1, 0, 0, 1, 0, 0);
+        visible.clearRect(0, 0, canvas.width, canvas.height);
+        visible.drawImage(backing, 0, 0);
+      } finally { visible.restore(); }
+      invalidateCommandFrameCanvas(canvas);
+      visibleBacking = undefined;
+      return true;
+    },
+  });
   return painter;
 }

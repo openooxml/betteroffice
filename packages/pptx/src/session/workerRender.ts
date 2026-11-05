@@ -5,7 +5,7 @@ import { readFontTraits } from '../../../../shared/fontTraits';
 import type { DefaultFontFace } from '../../../../shared/pptxDefaultFonts';
 import type { SlideDisplayList } from '../types';
 import { browserPresentationImageBlob, decodeBrowserImageBlob, needsElementDecode } from '../render/browserImage';
-import { buildRaster, createSlideRasterImages, slideRasterCache, zero, type RasterEntry } from '../../../../shared/office-session/render/pptxSlideRaster';
+import { buildRaster, createSlideRasterImages, paintRasterDirect, slideRasterCache, zero, type RasterEntry } from '../../../../shared/office-session/render/pptxSlideRaster';
 import { paintSlide, sizeCanvasForSlide } from '../render/canvas';
 import { createBrowserFrameImages } from '../render/browserFrameImages';
 import { frameAssetIds } from './frame';
@@ -17,6 +17,16 @@ export interface WorkerSlideFrame {
   mediaBytes(assetId: string): Uint8Array;
 }
 
+/** A slide laid out for an ahead-of-time raster, tagged with the document version it shows. */
+export interface WorkerSlideRender {
+  slideId: string;
+  version: string;
+  displayList: SlideDisplayList;
+  mediaBytes(assetId: string): Uint8Array;
+}
+
+type WorkerSlideSource = (slideId: string) => WorkerSlideRender | undefined;
+
 interface WorkerSlideMedia {
   assetId: string;
   bytes: ArrayBuffer;
@@ -24,7 +34,7 @@ interface WorkerSlideMedia {
   error?: { cause: unknown };
 }
 
-export function createPptxWorkerRenderer(port: MessagePort) {
+export function createPptxWorkerRenderer(port: MessagePort, slides: () => WorkerSlideSource | undefined = () => undefined) {
   const fontSet = (globalThis as typeof globalThis & { fonts?: FontFaceSet }).fonts;
   const installed: FontFace[] = [];
   const mediaCache = new Map<string, WorkerSlideMedia>();
@@ -81,6 +91,60 @@ export function createPptxWorkerRenderer(port: MessagePort) {
   } catch {}
   if (!supported) post({ kind: 'unsupported' });
 
+  function frameMedia(frame: Pick<WorkerSlideFrame, 'displayList' | 'mediaBytes'>, strict = false): WorkerSlideMedia[] {
+    return [...frameAssetIds(frame.displayList)].flatMap((assetId) => {
+      if (!mediaCache.has(assetId)) {
+        let view: Uint8Array;
+        try { view = frame.mediaBytes(assetId); } catch (error) { if (strict) throw error; return []; }
+        const asset: WorkerSlideMedia = { assetId, bytes: new ArrayBuffer(1), mainOnly: false };
+        try {
+          const blob = browserPresentationImageBlob(view);
+          asset.mainOnly = needsElementDecode(blob);
+          if (!asset.mainOnly) mediaBlobs.set(asset.bytes, blob);
+        } catch (cause) { asset.error = { cause }; }
+        mediaCache.set(assetId, asset);
+      }
+      const asset = mediaCache.get(assetId);
+      if (asset?.error) throw asset.error.cause;
+      return asset ? [asset] : [];
+    });
+  }
+
+  let prerenderToken = 0;
+  async function prerender(slideId: string, token: number) {
+    prerenderToken = token;
+    const viewport = view, fonts = generation;
+    if (disposed || !viewport) return;
+    const live = () => !disposed && prerenderToken === token && generation === fonts && view === viewport;
+    let canvas: OffscreenCanvas | undefined;
+    let lease: ReturnType<typeof images.pin> | undefined;
+    try {
+      await fontWork;
+      if (!live() || fontError) return;
+      const slide = slides()?.(slideId);
+      if (!slide) return;
+      const media = frameMedia(slide, true);
+      if (media.some((asset) => asset.mainOnly)) return;
+      const factor = viewport.scale * viewport.dpr;
+      const width = Math.ceil(slide.displayList.width * factor);
+      const height = Math.ceil(slide.displayList.height * factor);
+      lease = images.pin({ displayList: slide.displayList, frame: { media } });
+      canvas = new OffscreenCanvas(width, height);
+      const ctx = canvas.getContext('2d') as CanvasRenderingContext2D | null;
+      if (!ctx) return;
+      await paintRasterDirect(ctx, slide.displayList, viewport.dpr, viewport.scale, lease, paintSlide, live);
+      if (!live()) return;
+      const bitmap = typeof canvas.transferToImageBitmap === 'function' ? canvas.transferToImageBitmap()
+        : await createImageBitmap(canvas);
+      if (!live()) { bitmap.close(); return; }
+      try { port.postMessage({ kind: 'prerender', slideId, token, version: slide.version, fonts, factor, width, height, bitmap }, [bitmap]); }
+      catch { bitmap.close(); }
+    } catch {} finally {
+      lease?.release();
+      if (canvas) zero(canvas);
+    }
+  }
+
   function schedule() {
     if (disposed || !supported || running || timer !== undefined || !latest || !view || awaitingReply) return;
     timer = setTimeout(() => { timer = undefined; void paint(); }, 0);
@@ -108,22 +172,7 @@ export function createPptxWorkerRenderer(port: MessagePort) {
         await new Promise((resolve) => setTimeout(resolve, 0));
         if (!valid()) return;
       }
-      const media = [...frameAssetIds(frame.displayList)].flatMap((assetId) => {
-        if (!mediaCache.has(assetId)) {
-          let view: Uint8Array;
-          try { view = frame.mediaBytes(assetId); } catch { return []; }
-          const asset: WorkerSlideMedia = { assetId, bytes: new ArrayBuffer(1), mainOnly: false };
-          try {
-            const blob = browserPresentationImageBlob(view);
-            asset.mainOnly = needsElementDecode(blob);
-            if (!asset.mainOnly) mediaBlobs.set(asset.bytes, blob);
-          } catch (cause) { asset.error = { cause }; }
-          mediaCache.set(assetId, asset);
-        }
-        const asset = mediaCache.get(assetId);
-        if (asset?.error) throw asset.error.cause;
-        return asset ? [asset] : [];
-      });
+      const media = frameMedia(frame);
       const mainOnly = media.filter((asset) => asset.mainOnly).map(({ assetId }) => assetId);
       if (mainOnly.length) {
         full = true;
@@ -189,7 +238,12 @@ export function createPptxWorkerRenderer(port: MessagePort) {
       cache.pool.canvases.length = 0;
       revision += 1; schedule();
     });
-    revision += 1; schedule();
+    revision += 1; schedule(); announceFonts();
+  }
+
+  function announceFonts() {
+    if (disposed) return;
+    try { port.postMessage({ kind: 'font-generation', fonts: generation }); } catch {}
   }
 
   function resetMedia() {
@@ -222,6 +276,7 @@ export function createPptxWorkerRenderer(port: MessagePort) {
     if (message.kind === 'dispose') { dispose(); return; }
     if (disposed || !supported) return;
     if (message.kind === 'fonts') { fonts(message.faces); return; }
+    if (message.kind === 'prerender') { void prerender(message.slideId, message.token); return; }
     if (message.kind === 'view') {
       if (!(Number.isFinite(message.scale) && Number.isFinite(message.dpr) && message.scale > 0 && message.dpr > 0)) return;
       if (view?.scale === message.scale && view.dpr === message.dpr) return;
@@ -274,10 +329,11 @@ function renderPortMessage(message: unknown): message is { kind: typeof PPTX_REN
 
 export function listenPptxWorkerRender(transport: SessionTransport) {
   let renderer: ReturnType<typeof createPptxWorkerRenderer> | undefined;
+  let source: WorkerSlideSource | undefined;
   const off = transport.listen((message) => {
     if (!renderPortMessage(message)) return;
     renderer?.dispose();
-    renderer = createPptxWorkerRenderer(message.port);
+    renderer = createPptxWorkerRenderer(message.port, () => source);
   });
   return {
     transport: { ...transport, listen: (listener) => transport.listen((message) => {
@@ -290,6 +346,7 @@ export function listenPptxWorkerRender(transport: SessionTransport) {
     paintNow: () => renderer?.paintNow() ?? Promise.resolve(undefined),
     resetMedia: () => renderer?.resetMedia(),
     defaultFonts: (faces: readonly DefaultFontFace[]) => renderer?.defaultFonts(faces),
-    dispose() { off(); renderer?.dispose(); renderer = undefined; },
+    slides(value: WorkerSlideSource) { source = value; },
+    dispose() { off(); renderer?.dispose(); renderer = undefined; source = undefined; },
   };
 }
