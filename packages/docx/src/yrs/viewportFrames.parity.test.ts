@@ -417,7 +417,11 @@ for (const fixture of FIXTURES) {
           const merge = step === 8 && mergeTargets.length > 0;
           const targets = merge ? mergeTargets : paragraphs;
           const paragraph = targets[pick(targets.length)]!;
-          const localOffset = merge ? 0 : pick(paragraph.length + 1);
+          const storyLength = (paragraph.controls ?? []).reduce(
+            (length, [, displayUnits]) => length - displayUnits + 1,
+            paragraph.length
+          );
+          const localOffset = merge ? 0 : pick(storyLength + 1);
           const offset = paragraph.leading + localOffset;
           const head = { story: 'body', paraId: paragraph.paraId, offset };
           const enter = step === 3;
