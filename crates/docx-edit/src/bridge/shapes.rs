@@ -67,7 +67,11 @@ impl ShapeRunStyles<'_> {
                 formatting.color = Some(color);
             }
             let direct = field(run, "formatting");
-            if direct.and_then(|value| value.get("shading")).is_some() {
+            let highlighted = direct
+                .and_then(|value| value.get("highlight"))
+                .and_then(Value::as_str)
+                .is_some_and(|value| value != "none");
+            if !highlighted && direct.and_then(|value| value.get("shading")).is_some() {
                 formatting.highlight = shape_shading(direct, self.env);
             }
             formatting
