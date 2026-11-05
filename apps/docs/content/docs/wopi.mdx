@@ -52,6 +52,8 @@ Build the image from the repo root (the build context is the repo root):
 docker build -f apps/wopi/Dockerfile -t betteroffice-wopi .
 ```
 
+The published container image is `ghcr.io/<repository-owner>/betteroffice-wopi`, tagged with the `@betteroffice/wopi` package version (for example `0.1.0`) and `latest`. Images are published only from releases, never from pull requests or ordinary pushes to main, and only when the repository variable `WOPI_IMAGE_PUBLISH` is set to `true`.
+
 Run it behind a TLS reverse proxy. `WOPI_PUBLIC_URL` is the public HTTPS
 origin browsers and the host use to reach the app:
 
