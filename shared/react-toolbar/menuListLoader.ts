@@ -35,6 +35,24 @@ export function preloadMenuList(): () => void {
   return () => clearTimeout(id);
 }
 
+/**
+ * While an open menu waits for its list, keeps keys from reaching the page behind it: Escape and Tab call `dismiss`
+ * (Tab still moves focus), every other key is stopped. Does nothing once the list has loaded.
+ */
+export function guardPendingMenu(dismiss: (key: 'Escape' | 'Tab') => void): () => void {
+  const onKeyDown = (event: KeyboardEvent) => {
+    if (loaded) return;
+    if (event.key === 'Escape' || event.key === 'Tab') {
+      dismiss(event.key);
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+  };
+  document.addEventListener('keydown', onKeyDown, true);
+  return () => document.removeEventListener('keydown', onKeyDown, true);
+}
+
 export function resetMenuList(): void {
   loaded = undefined;
   loading = undefined;
