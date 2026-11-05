@@ -218,7 +218,12 @@
     "cellLabel": "{address}, {value}",
     "cellLabelSelected": "{address}, {value}, चयनित",
     "emptyCellLabel": "{address}, खाली",
-    "emptyCellLabelSelected": "{address}, खाली, चयनित"
+    "emptyCellLabelSelected": "{address}, खाली, चयनित",
+    "hasFormula": "{label}, सूत्र है",
+    "rangeSelected": "{start} से {end} चयनित, {rows, plural, one {# पंक्ति} other {# पंक्तियाँ}} × {columns, plural, one {# स्तंभ} other {# स्तंभ}}",
+    "sheetActivated": "{name}, शीट {count} में से {index}",
+    "cellInputLabel": "सेल {address} संपादित करें",
+    "gridRoleDescription": "वर्कशीट"
   },
   "plugins": {
     "toolbarGroup": "प्लगइन",

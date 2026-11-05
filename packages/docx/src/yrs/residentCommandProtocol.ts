@@ -331,7 +331,9 @@ export interface DocxCommandPayloads {
   insertPageBreak: DocxSelectionIntent;
   insertSectionBreak: DocxSelectionIntent & { type: 'nextPage' | 'continuous' | 'oddPage' | 'evenPage' };
   resizeObject: { handle: string; expectVersion: string } &
-    ({ widthEmu: number; heightEmu: number; hOffsetEmu?: number; vOffsetEmu?: number } | { widthTwips: number });
+    ({ widthEmu: number; heightEmu: number; hOffsetEmu?: number; vOffsetEmu?: number } | { widthTwips: number } |
+      /** Moves the right edge of grid column `columnEdge - 1` by `deltaTwips`; the next column, if any, gives up the same width. */
+      { columnEdge: number; deltaTwips: number });
   moveObject: { handle: string; hOffsetEmu: number; vOffsetEmu: number; expectVersion: string };
   /** Moves the inline picture `handle` names to the text position under `drop`, as one undo step. */
   moveEmbed: { handle: string; expectVersion: string; drop: DocxSelectionPointIntent; suggesting?: YrsAuthor };

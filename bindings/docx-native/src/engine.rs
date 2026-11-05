@@ -163,14 +163,33 @@ fn collect_png_images(
     scope: docx_raster::ImageScope<'_>,
     images: &mut docx_raster::ImageMap,
 ) {
+    let mut collect = |reference: &str| {
+        let key = docx_raster::scoped_image_key(scope, reference);
+        if let std::collections::hash_map::Entry::Vacant(entry) = images.entry(key)
+            && let Some(bytes) = document.media_bytes(reference)
+        {
+            entry.insert(bytes);
+        }
+    };
     for primitive in primitives {
-        if let docx_layout::display_list::Primitive::Image(image) = primitive {
-            let key = docx_raster::scoped_image_key(scope, &image.rel_id);
-            if let std::collections::hash_map::Entry::Vacant(entry) = images.entry(key)
-                && let Some(bytes) = document.media_bytes(&image.rel_id)
-            {
-                entry.insert(bytes);
+        match primitive {
+            docx_layout::display_list::Primitive::Image(image) => collect(&image.rel_id),
+            docx_layout::display_list::Primitive::Shape(shape) => {
+                if let Some(reference) = shape
+                    .attrs
+                    .fill_paint
+                    .as_ref()
+                    .and_then(|paint| {
+                        paint
+                            .get("pictureSrc")
+                            .or_else(|| paint.get("pictureRelId"))
+                    })
+                    .and_then(serde_json::Value::as_str)
+                {
+                    collect(reference);
+                }
             }
+            _ => {}
         }
     }
 }

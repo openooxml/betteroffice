@@ -5,5 +5,7 @@
   "content-controls": "packages/docx/src/yrs/__fixtures__/content-controls/template.docx",
   "linked-header": "packages/docx-react/src/components/DocxEditor/hooks/__fixtures__/probe-linked-header.docx",
   "structured-export": "crates/docx-edit/tests/fixtures/structured-export/principal.docx",
-  "page-fragments": "crates/docx-edit/tests/fixtures/page-fragments/pages.docx"
+  "page-fragments": "crates/docx-edit/tests/fixtures/page-fragments/pages.docx",
+  "request-edges": "crates/docx-edit/tests/fixtures/layout-request/request-edges.docx",
+  "no-default-style": "crates/docx-edit/tests/fixtures/footnote-anchor.docx"
 }

@@ -844,7 +844,7 @@
     },
     {
       "op": "applyOps",
-      "args": { "ops": [{ "type": "addSheet", "index": 3, "name": "Added" }] },
+      "args": { "ops": [{ "type": "addSheet", "index": 0, "name": "Added" }] },
       "expectError": true
     },
     {

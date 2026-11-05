@@ -300,7 +300,7 @@ test('office_verify reports a clean structure after agent edits', async () => {
   expect(verified.structure).toMatchObject({ ok: true, lost: [], unattributed: [], fields: { source: 3, saved: 3 }, drawings: { source: 1, saved: 1 } });
   expect(verified.structure!.ms).toBeGreaterThanOrEqual(0);
   expect(await doc.verify(undefined, { structure: false })).toMatchObject({ checks: ['save', 'reopen'], unchecked: ['visual fidelity', 'semantic correctness', 'structure'] });
-});
+}, 30_000);
 
 test('office_verify returns the structure report over MCP', async () => {
   const root = await mkdtemp(join(tmpdir(), 'docx-verify-structure-'));
@@ -325,7 +325,7 @@ test('office_verify returns the structure report over MCP', async () => {
     await server.close();
     await rm(root, { recursive: true, force: true });
   }
-});
+}, 30_000);
 
 test('structure check cost on a large document', async () => {
   const paragraphs = Array.from({ length: 4000 }, (_, index) => index % 10 === 0

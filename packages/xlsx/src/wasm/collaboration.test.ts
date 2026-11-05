@@ -106,7 +106,7 @@ describe('wasm collaboration', () => {
       const baseline = left.encodeStateVector();
       expect([...right.encodeStateVector()]).toEqual([...baseline]);
       expect([...left.encodeStateAsUpdate()]).toEqual([...right.encodeStateAsUpdate()]);
-      expect([...left.encodeStateAsUpdate(right.encodeStateVector())]).toEqual([0, 0]);
+      expect(right.applyUpdate(left.encodeStateAsUpdate(right.encodeStateVector())).applied).toBe(false);
 
       left.editCell(0, 19, 0, 'left');
       right.editCell(0, 19, 1, 'right');
@@ -426,6 +426,43 @@ describe('wasm collaboration', () => {
     } finally {
       target.dispose();
       structuralSource.dispose();
+    }
+  });
+
+  it('converges sheets appended under one name and refuses one added earlier', () => {
+    const left = collaborative(6011);
+    const right = collaborative(6012);
+    try {
+      const end = left.sheetInfo().sheetNames.length;
+      const before = left.encodeStateAsUpdate();
+      expect(() => left.applyOps([{ type: 'addSheet', index: 0, name: 'Early' }])).toThrow(
+        'collaborative sheets can only be added at the end of the workbook'
+      );
+      expect([...left.encodeStateAsUpdate()]).toEqual([...before]);
+
+      const baseline = left.encodeStateVector();
+      expect(left.applyOps([{ type: 'addSheet', index: end, name: 'Notes' }]).applied).toBe(true);
+      expect(right.applyOps([{ type: 'addSheet', index: end, name: 'Notes' }]).applied).toBe(true);
+      const leftUpdate = left.encodeStateAsUpdate(baseline);
+      const rightUpdate = right.encodeStateAsUpdate(baseline);
+      expect(left.applyUpdate(rightUpdate).applied).toBe(true);
+      expect(right.applyUpdate(leftUpdate).applied).toBe(true);
+      expect(left.sheetInfo().sheetNames.slice(end)).toEqual(['Notes', 'Notes (2)']);
+      expect(right.sheetInfo().sheetNames).toEqual(left.sheetInfo().sheetNames);
+      expect(right.sheetInfo().sheetIds).toEqual(left.sheetInfo().sheetIds);
+
+      expect(left.undo().applied).toBe(true);
+      expect(right.applyUpdate(left.encodeStateAsUpdate(right.encodeStateVector())).applied).toBe(true);
+      expect(right.sheetInfo().sheetNames.slice(end)).toEqual(['Notes']);
+      expect(right.sheetInfo().sheetNames).toEqual(left.sheetInfo().sheetNames);
+
+      expect(left.redo().applied).toBe(true);
+      expect(right.applyUpdate(left.encodeStateAsUpdate(right.encodeStateVector())).applied).toBe(true);
+      expect(right.sheetInfo().sheetNames.slice(end)).toEqual(['Notes', 'Notes (2)']);
+      expect(right.sheetInfo().sheetIds).toEqual(left.sheetInfo().sheetIds);
+    } finally {
+      left.dispose();
+      right.dispose();
     }
   });
 

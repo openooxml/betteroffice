@@ -51,6 +51,19 @@ export function usePeerlessTextSelection(store: PeerlessViewStore | null, {
     return true;
   }, [store]);
 
+  const selectAll = useCallback((event: KeyboardEvent): boolean => {
+    if (!store) return false;
+    const pending = peerlessInputReference(store, true)?.source === 'afterSeq';
+    if (!pending && store.getSnapshot().selection?.kind === 'object') return false;
+    for (const [motion, extend] of [['storyStart', false], ['storyEnd', true]] as const) {
+      const at = peerlessInputReference(store, true);
+      if (!at) return false;
+      void store.dispatch({ kind: 'moveSelection', payload: { at, motion, extend,
+        inputTime: event.timeStamp, undoGroup: 'selection' } }, { reportRefusal: false }).catch(() => {});
+    }
+    return true;
+  }, [store]);
+
   const select = useCallback(function select(event: PointerEvent<HTMLElement>, drag: boolean, final = false): boolean {
     if (!store || !presentation?.selectionEnabled || !canvas?.current || store.getSnapshot().composition) return false;
     const confirmed = presentation.getVisualSnapshot()?.view.confirmed;
@@ -163,6 +176,6 @@ export function usePeerlessTextSelection(store: PeerlessViewStore | null, {
     current.element.releasePointerCapture?.(event.pointerId);
     recent.current = null;
   }, [store]);
-  return { move, onPointerDown, onPointerMove, onPointerUp, onPointerCancel,
+  return { move, selectAll, onPointerDown, onPointerMove, onPointerUp, onPointerCancel,
     onLostPointerCapture: onPointerCancel };
 }

@@ -164,7 +164,7 @@ fn historical_state_encodings_match_eager_acceptance() {
             ("pre-#1312", 6, reading.legacy().unwrap(), false),
             (
                 "current",
-                SCHEMA_VERSION,
+                FINGERPRINT_SCHEMA_VERSION,
                 reading.with_defaults(defaults),
                 defaults,
             ),
@@ -196,7 +196,7 @@ fn historical_state_encodings_match_eager_acceptance() {
                 domain,
             )
             .unwrap();
-            if version == SCHEMA_VERSION {
+            if version == FINGERPRINT_SCHEMA_VERSION {
                 let accepted = if era == "current" {
                     WorkbookBase::current_fingerprints_oracle(&case.model, None).unwrap()
                 } else {
@@ -205,7 +205,7 @@ fn historical_state_encodings_match_eager_acceptance() {
                 assert!(accepted.contains(&fingerprint), "{}: {era}", case.label);
             }
             assert!(expected.base.accepts_fingerprint(version, &fingerprint));
-            for schema in (MIN_SUPPORTED_SCHEMA_VERSION - 1)..=(SCHEMA_VERSION + 1) {
+            for schema in (MIN_SUPPORTED_SCHEMA_VERSION - 1)..=(FINGERPRINT_SCHEMA_VERSION + 1) {
                 assert_eq!(
                     actual.base.accepts_fingerprint(schema, &fingerprint),
                     expected.base.accepts_fingerprint(schema, &fingerprint),
@@ -288,7 +288,7 @@ fn historical_state_encodings_match_eager_acceptance() {
             )
             .unwrap();
             for mut fingerprints in [adopted_fingerprints, restored.base.fingerprints.clone()] {
-                fingerprints.retain(|version, _| *version <= SCHEMA_VERSION);
+                fingerprints.retain(|version, _| *version <= FINGERPRINT_SCHEMA_VERSION);
                 append_fingerprint(
                     &mut fingerprints,
                     version,
@@ -323,7 +323,7 @@ fn construction_paths_materialize_before_mutation_and_iteration() {
         .into_iter()
         .collect::<BTreeMap<_, _>>();
     let mut duplicated = expected.clone();
-    let accepted = duplicated.get_mut(&SCHEMA_VERSION).unwrap();
+    let accepted = duplicated.get_mut(&FINGERPRINT_SCHEMA_VERSION).unwrap();
     accepted.push(accepted[0].clone());
     let bytes = fingerprint_bytes(&duplicated);
     let mut reader = crate::snapshot::wire::Reader::new(&bytes);
@@ -376,8 +376,16 @@ fn construction_paths_materialize_before_mutation_and_iteration() {
         );
         let mut appended = actual.clone();
         let mut expected_appended = expected.clone();
-        append_fingerprint(&mut appended, SCHEMA_VERSION, case.label.clone());
-        append_fingerprint(&mut expected_appended, SCHEMA_VERSION, case.label.clone());
+        append_fingerprint(
+            &mut appended,
+            FINGERPRINT_SCHEMA_VERSION,
+            case.label.clone(),
+        );
+        append_fingerprint(
+            &mut expected_appended,
+            FINGERPRINT_SCHEMA_VERSION,
+            case.label.clone(),
+        );
         assert_eq!(
             appended.materialized_bytes(),
             Some(appended.retained_bytes()),
@@ -388,9 +396,12 @@ fn construction_paths_materialize_before_mutation_and_iteration() {
             expected_appended,
             "{label}",
         );
-        let removed = expected.get(&SCHEMA_VERSION).cloned().unwrap_or_default();
-        actual.retain(|version, _| *version < SCHEMA_VERSION);
-        expected.retain(|version, _| *version < SCHEMA_VERSION);
+        let removed = expected
+            .get(&FINGERPRINT_SCHEMA_VERSION)
+            .cloned()
+            .unwrap_or_default();
+        actual.retain(|version, _| *version < FINGERPRINT_SCHEMA_VERSION);
+        expected.retain(|version, _| *version < FINGERPRINT_SCHEMA_VERSION);
         assert_eq!(
             actual.materialized_bytes(),
             Some(actual.retained_bytes()),
@@ -399,12 +410,16 @@ fn construction_paths_materialize_before_mutation_and_iteration() {
         assert!(
             removed
                 .iter()
-                .all(|value| !actual.accepts(SCHEMA_VERSION, value)),
+                .all(|value| !actual.accepts(FINGERPRINT_SCHEMA_VERSION, value)),
             "{label}",
         );
         for _ in 0..2 {
-            append_fingerprint(&mut actual, SCHEMA_VERSION, case.label.clone());
-            append_fingerprint(&mut expected, SCHEMA_VERSION, case.label.clone());
+            append_fingerprint(&mut actual, FINGERPRINT_SCHEMA_VERSION, case.label.clone());
+            append_fingerprint(
+                &mut expected,
+                FINGERPRINT_SCHEMA_VERSION,
+                case.label.clone(),
+            );
         }
         actual.merge(Fingerprints::default());
         assert_eq!(
@@ -437,7 +452,9 @@ fn accepted_fingerprint_matrix_matches_released_and_current_states() {
             .unwrap();
             for accepted in expected.fingerprints.values() {
                 for fingerprint in accepted {
-                    for version in (MIN_SUPPORTED_SCHEMA_VERSION - 1)..=(SCHEMA_VERSION + 1) {
+                    for version in
+                        (MIN_SUPPORTED_SCHEMA_VERSION - 1)..=(FINGERPRINT_SCHEMA_VERSION + 1)
+                    {
                         assert_eq!(
                             actual.accepts_fingerprint(version, fingerprint),
                             expected.accepts_fingerprint(version, fingerprint),
@@ -450,7 +467,7 @@ fn accepted_fingerprint_matrix_matches_released_and_current_states() {
             let mut changed = case.model.clone();
             changed.sheets[0].name.push('!');
             let rejected = fingerprint_model_current_oracle(&changed).unwrap().0;
-            for version in MIN_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION {
+            for version in MIN_SUPPORTED_SCHEMA_VERSION..=FINGERPRINT_SCHEMA_VERSION {
                 assert!(!expected.accepts_fingerprint(version, &rejected));
                 assert!(!actual.accepts_fingerprint(version, &rejected));
                 assert!(!actual.accepts_fingerprint(version, "invalid"));
@@ -584,7 +601,7 @@ fn opening_hashes_only_the_canonical_key_and_memoizes_validation() {
     assert!(
         authority
             .base
-            .accepts_fingerprint(SCHEMA_VERSION, &authority.base.fingerprint)
+            .accepts_fingerprint(FINGERPRINT_SCHEMA_VERSION, &authority.base.fingerprint)
     );
     assert_eq!(
         authority.seed_clients(&authority.doc.transact().state_vector()),
@@ -650,7 +667,7 @@ fn merging_accepted_sets_defers_hashing_and_preserves_order() {
     .unwrap();
     open_timing::begin();
     actual.merge(next.fingerprints);
-    assert!(actual.accepts(SCHEMA_VERSION, &next.fingerprint));
+    assert!(actual.accepts(FINGERPRINT_SCHEMA_VERSION, &next.fingerprint));
     assert!(
         !open_timing::finish()
             .counts
@@ -679,16 +696,18 @@ fn bounded_stream_matches_eager_acceptance_and_persisted_bytes() {
                 assert_eq!(actual.materialized_bytes(), Some(actual.retained_bytes()));
                 for accepted in expected.fingerprints.values() {
                     for value in accepted {
-                        for version in (MIN_SUPPORTED_SCHEMA_VERSION - 1)..=(SCHEMA_VERSION + 1) {
+                        for version in
+                            (MIN_SUPPORTED_SCHEMA_VERSION - 1)..=(FINGERPRINT_SCHEMA_VERSION + 1)
+                        {
                             assert_eq!(
-                                actual.accepts(version, value),
+                                actual.accepts(version.min(FINGERPRINT_SCHEMA_VERSION), value),
                                 expected.accepts_fingerprint(version, value)
                             );
                         }
                         assert!(actual.contains_client(fingerprint_client_id(value).unwrap()));
                     }
                 }
-                assert!(!actual.accepts(SCHEMA_VERSION, "invalid"));
+                assert!(!actual.accepts(FINGERPRINT_SCHEMA_VERSION, "invalid"));
                 assert_eq!(
                     fingerprint_bytes(&actual),
                     fingerprint_bytes(&expected.fingerprints)

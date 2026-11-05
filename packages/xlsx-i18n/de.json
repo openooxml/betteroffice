@@ -218,7 +218,12 @@
     "cellLabel": "{address}, {value}",
     "cellLabelSelected": "{address}, {value}, ausgewählt",
     "emptyCellLabel": "{address}, leer",
-    "emptyCellLabelSelected": "{address}, leer, ausgewählt"
+    "emptyCellLabelSelected": "{address}, leer, ausgewählt",
+    "hasFormula": "{label}, enthält Formel",
+    "rangeSelected": "{start} bis {end} ausgewählt, {rows, plural, one {# Zeile} other {# Zeilen}} mal {columns, plural, one {# Spalte} other {# Spalten}}",
+    "sheetActivated": "{name}, Arbeitsblatt {index} von {count}",
+    "cellInputLabel": "Zelle {address} bearbeiten",
+    "gridRoleDescription": "Arbeitsblatt"
   },
   "plugins": {
     "toolbarGroup": "Plugins",

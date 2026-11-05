@@ -111,6 +111,7 @@ const nullable = (validate: (value: unknown) => boolean) => (value: unknown) => 
 const boolean = (value: unknown) => typeof value === 'boolean';
 const number = (value: unknown) => typeof value === 'number' && Number.isFinite(value);
 const positive = (value: unknown) => number(value) && (value as number) > 0 && Number.isFinite((value as number) * 2);
+const MIN_COLUMN_TWIPS = 300;
 const oneOf = (...values: string[]) => (value: unknown) => typeof value === 'string' && values.includes(value);
 
 function validDelta(value: unknown): value is YrsInlineFormatDelta {
@@ -240,7 +241,7 @@ const DOCX_COMMAND_POLICIES = {
   deleteTableRow: { keys: [] }, deleteTableColumn: { keys: [] }, deleteTable: { keys: [] },
   mergeTableCells: { keys: [] }, splitTableCell: { keys: ['rows', 'columns'] }, setTableCellShading: { keys: ['color'] },
   setTableBorders: { keys: ['borders'] }, setTableProperties: { keys: ['op', 'patch', 'expectVersion'] },
-  resizeObject: { keys: ['handle', 'widthEmu', 'heightEmu', 'widthTwips', 'hOffsetEmu', 'vOffsetEmu', 'expectVersion'], exact: true },
+  resizeObject: { keys: ['handle', 'widthEmu', 'heightEmu', 'widthTwips', 'columnEdge', 'deltaTwips', 'hOffsetEmu', 'vOffsetEmu', 'expectVersion'], exact: true },
   moveObject: { keys: ['handle', 'hOffsetEmu', 'vOffsetEmu', 'expectVersion'], exact: true },
   moveEmbed: { keys: ['handle', 'expectVersion', 'drop', 'suggesting'], exact: true },
   undo: { keys: [], exact: true }, redo: { keys: [], exact: true },
@@ -315,7 +316,10 @@ function validCommandIntent(
       break;
     case 'resizeObject': case 'moveObject':
       if (!string(payload.handle) || !string(payload.expectVersion) || (command.kind === 'resizeObject'
-        ? payload.widthTwips !== undefined
+        ? payload.columnEdge !== undefined || payload.deltaTwips !== undefined
+          ? !Number.isSafeInteger(payload.columnEdge) || Number(payload.columnEdge) < 1 || !Number.isSafeInteger(payload.deltaTwips) ||
+            payload.widthTwips !== undefined || payload.widthEmu !== undefined || payload.heightEmu !== undefined || payload.hOffsetEmu !== undefined || payload.vOffsetEmu !== undefined
+          : payload.widthTwips !== undefined
           ? !positive(payload.widthTwips) || payload.widthEmu !== undefined || payload.heightEmu !== undefined || payload.hOffsetEmu !== undefined || payload.vOffsetEmu !== undefined
           : !positive(payload.widthEmu) || !positive(payload.heightEmu) ||
             ((payload.hOffsetEmu !== undefined || payload.vOffsetEmu !== undefined) && (!number(payload.hOffsetEmu) || !number(payload.vOffsetEmu)))
@@ -670,9 +674,10 @@ export function preflightDocxCommand(
     if (command.payload.expectVersion !== engine.proposalEngine.version()) return refuse('stale-version');
     const target = resolveResidentObject(engine, command.payload.handle);
     if (!target) return refuse('stale-object');
-    if (target.kind === 'cell' && command.kind === 'resizeObject' && 'widthTwips' in command.payload) {
+    const cellResize = command.kind === 'resizeObject' && ('widthTwips' in command.payload || 'columnEdge' in command.payload);
+    if (target.kind === 'cell' && cellResize) {
       if (!target.cell) return refuse('stale-object');
-    } else if (target.kind !== 'image' || (command.kind === 'resizeObject' && 'widthTwips' in command.payload)) return refuse('unsupported-object');
+    } else if (target.kind !== 'image' || cellResize) return refuse('unsupported-object');
     return { status: 'ready', prepared: { command: structuredClone(command), selection: state.selection, range: null } };
   }
   if (command.kind === 'undo' || command.kind === 'redo') {
@@ -1035,6 +1040,27 @@ function applyPreparedDocxCommand(
       if (!at.cell) return { ...result('noop'), status: 'refused', reason: 'stale-object' };
       engine.addUndoBoundary();
       engine.setColumnWidth(at.cell, command.payload.widthTwips);
+      engine.addUndoBoundary();
+      return result(engine.proposalEngine.version() === version ? 'noop' : 'applied');
+    }
+    if (command.kind === 'resizeObject' && 'columnEdge' in command.payload) {
+      if (!at.cell) return { ...result('noop'), status: 'refused', reason: 'stale-object' };
+      const payload = engine.tablePayload(at.cell.story, at.cell.tableIndex) as { grid?: unknown } | null;
+      const grid = Array.isArray(payload?.grid) ? payload.grid : [];
+      const edge = command.payload.columnEdge;
+      if (edge > grid.length || !grid.every(positive)) return { ...result('noop'), status: 'refused', reason: 'unsupported-object' };
+      const left = grid[edge - 1] as number;
+      const right = grid[edge] as number | undefined;
+      const delta = Math.round(Math.min(Math.max(command.payload.deltaTwips, Math.min(0, MIN_COLUMN_TWIPS - left)),
+        right === undefined ? Infinity : Math.max(0, right - MIN_COLUMN_TWIPS)));
+      if (delta === 0) return result('noop');
+      engine.addUndoBoundary();
+      engine.setColumnWidth({ ...at.cell, column: edge - 1 }, left + delta);
+      if (right !== undefined) engine.setColumnWidth({ ...at.cell, column: edge }, right - delta);
+      const table = { story: at.cell.story, tableIndex: at.cell.tableIndex };
+      const total = (grid as number[]).reduce((sum, width) => sum + width, 0) + delta;
+      engine.setTableProperties(table, right === undefined
+        ? { tableLayout: 'fixed', width: Math.round(total), widthType: 'dxa' } : { tableLayout: 'fixed' });
       engine.addUndoBoundary();
       return result(engine.proposalEngine.version() === version ? 'noop' : 'applied');
     }

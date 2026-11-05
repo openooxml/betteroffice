@@ -473,6 +473,7 @@ export function createWorkbookSessionHost(
         }
         commands = createWorkbookCommandState(commandIdentity, { epoch: 1, version: opened.version() },
           { sheetId: info.sheetIds[info.activeSheet], range: { kind: 'a1', a1: 'A1' } }, info.sheetIds, calculation ?? null);
+        commands.collaborative = collaborative && !retainPeerHydration;
         installCommandHost();
         if (retainPeerHydration) host.emit('peerOpened', { version: opened.version(), initialCalculation });
         const projection = { ...commands };

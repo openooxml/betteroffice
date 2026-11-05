@@ -311,6 +311,56 @@ test('collaborative worker replicas sync cell merges and undo', async () => {
   }
 });
 
+test('a sheet appended on one replica joins the other catalog and its undo refuses a peer edit', async () => {
+  const left = await createTestWorkbookSession(bytes, undefined, { collaborative: true, clientId: 701 });
+  const right = await createTestWorkbookSession(bytes, undefined, { collaborative: true, clientId: 702 });
+  const wire = transports();
+  const providers = [
+    new CollaborationProvider(left.replica!, wire.pair[0]),
+    new CollaborationProvider(right.replica!, wire.pair[1]),
+  ];
+  const catalog = (session: WorkbookSession) => (session.editState.sheets ?? []).map((sheet) => sheet.name);
+  const submit = (session: WorkbookSession, ops: unknown[]) =>
+    session.editSession!.submit('applyOps', { payload: { args: [ops] } }).ack;
+  try {
+    const synced = Promise.all(providers.map(whenSynced));
+    for (const provider of providers) provider.connect();
+    await synced;
+    await quiet(() => wire.frames[0].length + wire.frames[1].length + left.throughSeq + right.throughSeq);
+    const names = (await left.call.sheets()).map((sheet) => sheet.name);
+    const end = names.length;
+
+    let merged = whenAcknowledged(right);
+    expect(await submit(left, [{ type: 'addSheet', index: end, name: 'Appended' }])).toMatchObject({ status: 'applied' });
+    await merged;
+    expect(catalog(left)).toEqual([...names, 'Appended']);
+    expect(catalog(right)).toEqual([...names, 'Appended']);
+
+    const appended = right.editState.sheets![end].id;
+    merged = whenAcknowledged(left);
+    expect(await submit(right, [{ type: 'setCell', sheet: end, at: { row: 0, col: 0 },
+      cell: { value: { kind: 'text', value: 'from the peer' }, formula: null, style: null } }])).toMatchObject({ status: 'applied' });
+    await merged;
+    expect((await left.call.cellInputs(end, 'A1')).cells[0][0].input).toBe('from the peer');
+    expect(appended).toBeString();
+
+    expect(await submit(right, [{ type: 'addSheet', index: 0, name: 'Early' }]))
+      .toMatchObject({ status: 'refused', reason: 'unsupported' });
+    expect(catalog(right)).toEqual([...names, 'Appended']);
+
+    const refused = left.editSession!.submit('undo', { payload: { args: [] } });
+    expect(await refused.ack).toMatchObject({ status: 'refused', reason: 'unsupported', committed: false });
+    expect(catalog(left)).toEqual([...names, 'Appended']);
+    expect((await right.call.cellInputs(end, 'A1')).cells[0][0].input).toBe('from the peer');
+    expect(left.failure).toBeUndefined();
+    expect(right.failure).toBeUndefined();
+  } finally {
+    for (const provider of providers) provider.destroy();
+    await left.dispose();
+    await right.dispose();
+  }
+});
+
 test('hyperlink edit limits have the same refusal on the main thread and worker', async () => {
   const main = openWorkbook(bytes, { collaborative: true, clientId: 501 });
   const worker = await createTestWorkbookSession(bytes, undefined, { collaborative: true, clientId: 502 });

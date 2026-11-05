@@ -195,6 +195,42 @@ impl Clone for PreservedSheetState {
 }
 
 impl PreservedSheetState {
+    /// Reorders the per-sheet state from the sheets `before` named to the ones
+    /// `after` names, so a sheet keeps its own wherever it now sits. A sheet
+    /// that only `after` holds was added in this session.
+    fn rekey(&mut self, before: &[String], after: &[String]) {
+        if before == after {
+            return;
+        }
+        let source = after
+            .iter()
+            .map(|key| before.iter().position(|known| known == key))
+            .collect::<Vec<_>>();
+        let take = |sheet: &Option<usize>| sheet.and_then(|index| self.origins.get(index).copied());
+        self.origins = source.iter().map(|sheet| take(sheet).flatten()).collect();
+        let cells = &self.shared_string_cells;
+        self.shared_string_cells = Arc::new(
+            source
+                .iter()
+                .map(|sheet| {
+                    sheet
+                        .and_then(|index| cells.get(index).cloned())
+                        .unwrap_or_default()
+                })
+                .collect(),
+        );
+        self.axes = source
+            .iter()
+            .map(|sheet| sheet.and_then(|index| self.axes.get(index).cloned().flatten()))
+            .collect();
+        self.created = source
+            .iter()
+            .map(|sheet| {
+                sheet.is_none_or(|index| self.created.get(index).copied().unwrap_or(false))
+            })
+            .collect();
+    }
+
     /// Sheets a restored state added carry no package identity.
     fn resize(&mut self, sheets: usize) {
         self.origins.resize(sheets, None);
@@ -966,7 +1002,7 @@ impl Workbook {
             return Err(Error::CollaborativeStructureChanged);
         }
         let staged = self.stage_remote_updates(&[update], None)?;
-        if !staged.structure.same_except_local_layout(&structure) {
+        if !structure.allows_transition(&staged.structure) {
             return Err(Error::CollaborativeStructureChanged);
         }
         if staged.pending {
@@ -1017,7 +1053,7 @@ impl Workbook {
         };
         let structure = candidate.structure().map_err(authority_error)?;
         if !structure.describes_same_workbook(&frozen)
-            && !structure.snapshot_same_except_local_layout(&frozen)
+            && !frozen.allows_snapshot_transition(&structure)
         {
             return Err(Error::CollaborativeStructureChanged);
         }
@@ -1032,8 +1068,9 @@ impl Workbook {
         let mut calculation = calculation_result(&recalc);
         calculation.changed = changed_cells_between(&self.model, &model);
         self.authority = candidate;
-        self.preserved.resize(model.sheets.len());
+        self.preserved.resize(frozen.sheet_keys.len());
         self.install_model(model)?;
+        self.rebase_sheet_positions(&frozen.sheet_keys, &structure.sheet_keys);
         self.invalidate_sheet_info();
         self.graph = Some(graph);
         self.last_calculation = calculation;
@@ -1129,7 +1166,7 @@ impl Workbook {
                 Some(baseline.get_or_insert_with(|| self.authority.encode_state_as_update_v1())),
             );
             match staged {
-                Ok(staged) if !staged.structure.same_except_local_layout(structure) => {
+                Ok(staged) if !structure.allows_transition(&staged.structure) => {
                     self.pending_remote_updates.remove(index);
                 }
                 Ok(staged) if staged.pending => {
@@ -1188,6 +1225,7 @@ impl Workbook {
             return Ok(MutationResult::default());
         }
 
+        let previous_keys = self.sheet_keys();
         let new_structure = staged.structure;
         let commit_update = staged.commit_update;
         let mut model = staged.model;
@@ -1201,6 +1239,7 @@ impl Workbook {
             .apply_staged_update_v1(&commit_update)
             .map_err(authority_error)?;
         self.install_model(model)?;
+        self.rebase_sheet_positions(&previous_keys, &new_structure.sheet_keys);
         self.mode = WorkbookMode::Collaborative {
             structure: Box::new(new_structure),
         };
@@ -2026,12 +2065,8 @@ impl Workbook {
         if ops.is_empty() {
             return Ok(MutationResult::default());
         }
-        if self.is_collaborative()
-            && ops
-                .iter()
-                .any(|op| is_structural_op(op) && !is_collaborative_local_layout_op(op))
-        {
-            return Err(Error::CollaborativeStructureOperation);
+        if self.is_collaborative() {
+            refuse_collaborative_structure(&ops, self.model.sheets.len())?;
         }
         let mut preview = self.model.clone();
         let mut origins = self.preserved.origins.clone();
@@ -2317,6 +2352,7 @@ impl Workbook {
         };
         let outcome = match stepped {
             Ok(history) => self.apply_collaborative_history(history, options),
+            Err(AuthorityError::UndoRefused) => return Err(Error::CollaborativeUndoRefused),
             Err(error) => Err(authority_error(error)),
         };
         match outcome {
@@ -2342,21 +2378,21 @@ impl Workbook {
             WorkbookMode::Collaborative { structure } => structure,
             WorkbookMode::Standalone => return Err(Error::NotCollaborative),
         };
-        if !history.structure.same_except_local_layout(structure) {
+        if !structure.allows_transition(&history.structure) {
             return Err(Error::CollaborativeStructureChanged);
         }
         let new_structure = history.structure;
-        let active_sheet = self.active_sheet;
+        let previous_keys = structure.sheet_keys.clone();
         let before = self.model.clone();
         let mut restored = history.model;
         retain_array_formulas(&self.model, &mut restored);
         self.install_model(restored)?;
+        self.rebase_sheet_positions(&previous_keys, &new_structure.sheet_keys);
         self.mode = WorkbookMode::Collaborative {
             structure: Box::new(new_structure),
         };
         self.invalidate_sheet_info();
         self.edited_since_open = true;
-        self.restore_active_sheet(Some(active_sheet));
         self.preserved.forget_shared_strings();
         self.preserved.forget_axes();
         let result = self.rebuild_and_recalculate(options);
@@ -3167,7 +3203,7 @@ impl Workbook {
             .authority
             .stage_local_ops_v1(ops, origin, &self.model.styles)
             .map_err(authority_error)?;
-        if !staged.structure.same_except_local_layout(structure) {
+        if !structure.allows_transition(&staged.structure) {
             return Err(Error::CollaborativeStructureChanged);
         }
         validate_collaboration_size(&staged.update)?;
@@ -3525,6 +3561,32 @@ impl Workbook {
         }
     }
 
+    /// A sheet leaving or joining the appended tail shifts the ones after it,
+    /// so whatever this replica holds by position follows the sheet it meant.
+    fn rebase_sheet_positions(&mut self, before: &[String], after: &[String]) {
+        if before == after {
+            return;
+        }
+        self.preserved.rekey(before, after);
+        let moved = |sheet: u32| {
+            let key = before.get(sheet as usize)?;
+            after.iter().position(|known| known == key)
+        };
+        let active = moved(self.active_sheet.0).map(|index| SheetId(index as u32));
+        self.restore_active_sheet(active);
+        let mut proposals = self.proposals.list().to_vec();
+        for edit in proposals
+            .iter_mut()
+            .flat_map(|proposal| &mut proposal.edits)
+        {
+            match moved(edit.sheet) {
+                Some(index) => edit.sheet = index as u32,
+                None => edit.stale = Some(true),
+            }
+        }
+        self.adopt_rebased_proposals(Some(proposals));
+    }
+
     fn restore_active_sheet(&mut self, previous: Option<SheetId>) {
         let last = self.model.sheets.len().saturating_sub(1) as u32;
         self.active_sheet = SheetId(previous.unwrap_or(self.active_sheet).0.min(last));
@@ -3675,6 +3737,7 @@ fn ranges_intersect(left: CellRange, right: CellRange) -> bool {
 
 fn authority_error(error: AuthorityError) -> Error {
     match error {
+        AuthorityError::UndoRefused => Error::CollaborativeUndoRefused,
         AuthorityError::ClientIdConflict(client_id) => Error::ClientIdConflict(client_id),
         AuthorityError::InvalidStateVector(error) => Error::InvalidStateVector(error),
         AuthorityError::InvalidUpdate(error) => Error::InvalidUpdate(error),
@@ -3873,6 +3936,22 @@ fn changed_cells_between(before: &WorkbookModel, after: &WorkbookModel) -> Vec<C
         }
     }
     changed
+}
+
+/// What a collaborative batch may not do. `sheets` is the sheet count the batch
+/// starts from, so a batch can append more than one sheet.
+fn refuse_collaborative_structure(ops: &[Op], mut sheets: usize) -> Result<()> {
+    for op in ops {
+        match op {
+            Op::AddSheet { index, .. } if *index == sheets => sheets += 1,
+            Op::AddSheet { .. } => return Err(Error::CollaborativeSheetPosition),
+            op if is_structural_op(op) && !is_collaborative_local_layout_op(op) => {
+                return Err(Error::CollaborativeStructureOperation);
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn validate_model(model: &WorkbookModel) -> Result<()> {
