@@ -594,7 +594,7 @@ impl Branch {
     pub(crate) fn is_parent_of(&self, mut ptr: Option<ItemPtr>) -> bool {
         while let Some(i) = ptr.as_deref() {
             if let Some(parent) = i.parent.as_branch() {
-                if parent.deref() == self {
+                if std::ptr::eq(parent.deref(), self) {
                     return true;
                 }
                 ptr = parent.item;
