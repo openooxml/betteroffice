@@ -66,6 +66,10 @@ impl ShapeRunStyles<'_> {
             {
                 formatting.color = Some(color);
             }
+            let direct = field(run, "formatting");
+            if direct.and_then(|value| value.get("shading")).is_some() {
+                formatting.highlight = shape_shading(direct, self.env);
+            }
             formatting
         } else {
             shape_run_formatting_with_shading(field(run, "formatting"), self.env)
@@ -550,7 +554,7 @@ fn shape_paragraph(
     nested_sequences: &mut Vec<String>,
     env: &RenderEnv,
 ) -> ParagraphBlock {
-    let (values, paragraph_formatting) = if let Some(source) = &env.shape_styles.0 {
+    let (mut values, paragraph_formatting) = if let Some(source) = &env.shape_styles.0 {
         let (properties, formatting) = source.render_paragraph(paragraph);
         let values: std::collections::BTreeMap<String, yrs::Any> = crate::seed::payload(properties)
             .unwrap_or_default()
@@ -570,6 +574,7 @@ fn shape_paragraph(
             .collect();
         (values, None)
     };
+    values.remove("numPr");
     let alignment =
         super::value_string(values.get("alignment")).and_then(|value| match value.as_str() {
             "both" => Some("justify".to_owned()),

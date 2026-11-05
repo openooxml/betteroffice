@@ -83,6 +83,19 @@ fn text_formatting(paragraph: &ParagraphBlock, text: &str) -> RunFormatting {
         .unwrap()
 }
 
+fn lower_text_box_paragraphs(bytes: &[u8], env: &RenderEnv) -> Vec<ParagraphBlock> {
+    let doc = EditingDoc::new(75306);
+    seed_from_docx(&doc, bytes).unwrap();
+    yrs_doc_to_layout_blocks(&doc, "body", env)
+        .unwrap()
+        .into_iter()
+        .flat_map(|block| match block {
+            LayoutBlock::Shape(shape) => shape.inner_text.unwrap_or_default(),
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
 fn effective(formatting: &RunFormatting) -> Value {
     json!({
         "font": formatting.font_family,
@@ -404,4 +417,127 @@ fn text_box_paragraphs_leave_borders_out_of_the_paragraph_only_renderer() {
         })
         .unwrap();
     assert!(boxed.attrs.as_ref().unwrap().borders.is_none());
+}
+
+#[test]
+fn text_box_direct_run_shading_keeps_theme_fills_tints_and_shades() {
+    let styles = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:rPr><w:shd w:val="clear" w:fill="102030"/></w:rPr></w:style><w:style w:type="character" w:styleId="Shade"><w:rPr><w:shd w:val="clear" w:fill="223344"/></w:rPr></w:style></w:styles>"#;
+    let env = RenderEnv {
+        theme_colors: [("accent1".to_owned(), "204060".to_owned())].into(),
+        ..RenderEnv::default()
+    };
+    for (properties, expected) in [
+        ("", Some("#102030")),
+        (r#"<w:rStyle w:val="Shade"/>"#, Some("#223344")),
+        (
+            r#"<w:shd w:val="clear" w:fill="auto" w:themeFill="accent1"/>"#,
+            Some("#204060"),
+        ),
+        (
+            r#"<w:shd w:val="clear" w:fill="AABBCC" w:themeFill="accent1" w:themeFillTint="80"/>"#,
+            Some("#8F9FAF"),
+        ),
+        (
+            r#"<w:shd w:val="clear" w:fill="AABBCC" w:themeFill="accent1" w:themeFillShade="80"/>"#,
+            Some("#102030"),
+        ),
+        (
+            r#"<w:shd w:val="clear" w:fill="204060" w:themeFillTint="80"/>"#,
+            Some("#8F9FAF"),
+        ),
+        (
+            r#"<w:shd w:val="clear" w:fill="204060" w:themeFillShade="80"/>"#,
+            Some("#102030"),
+        ),
+        (r#"<w:shd w:val="clear" w:fill="auto"/>"#, None),
+    ] {
+        let content =
+            format!(r#"<w:p><w:r><w:rPr>{properties}</w:rPr><w:t>Boxed</w:t></w:r></w:p>"#);
+        let bytes = fixture::Package::new(&drawing(&content))
+            .styles(styles)
+            .bytes();
+        let paragraphs = lower_text_box_paragraphs(&bytes, &env);
+        assert_eq!(paragraphs.len(), 1);
+        assert_eq!(
+            text_formatting(&paragraphs[0], "Boxed")
+                .highlight
+                .as_deref(),
+            expected,
+            "{properties}"
+        );
+    }
+}
+
+#[test]
+fn text_box_run_font_hints_select_east_asia_for_non_ascii_latin() {
+    let styles = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:rPr><w:rFonts w:ascii="Latin" w:hAnsi="Latin" w:eastAsia="Hint CJK"/></w:rPr></w:style><w:style w:type="character" w:styleId="Hint"><w:rPr><w:rFonts w:hint="eastAsia"/></w:rPr></w:style></w:styles>"#;
+    for (properties, hint) in [
+        (r#"<w:rFonts w:hint="eastAsia"/>"#, "eastAsia"),
+        (r#"<w:rStyle w:val="Hint"/>"#, "eastAsia"),
+        (
+            r#"<w:rStyle w:val="Hint"/><w:rFonts w:hint="default"/>"#,
+            "default",
+        ),
+    ] {
+        let content = format!(r#"<w:p><w:r><w:rPr>{properties}</w:rPr><w:t>é</w:t></w:r></w:p>"#);
+        let bytes = fixture::Package::new(&drawing(&content))
+            .styles(styles)
+            .bytes();
+        let paragraphs = lower_text_box_paragraphs(&bytes, &RenderEnv::default());
+        assert_eq!(paragraphs.len(), 1);
+        let formatting = text_formatting(&paragraphs[0], "é");
+        assert_eq!(
+            formatting.font_slots.as_ref().unwrap().hint.as_deref(),
+            Some(hint)
+        );
+        let blocks = paragraphs
+            .into_iter()
+            .map(LayoutBlock::Paragraph)
+            .collect::<Vec<_>>();
+        let requirements =
+            docx_layout::measure_blocks::collect_font_requirements(&blocks, "Calibri");
+        assert_eq!(
+            requirements.iter().any(|face| {
+                face.family == "Hint CJK" && face.characters.iter().any(|ch| ch == 'é')
+            }),
+            hint == "eastAsia",
+            "{properties}"
+        );
+    }
+}
+
+#[test]
+fn text_box_style_numbering_does_not_synthesize_indent() {
+    let styles = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:styleId="List"><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr></w:style><w:style w:type="paragraph" w:styleId="IndentedList"><w:basedOn w:val="List"/><w:pPr><w:ind w:left="480" w:firstLine="120"/></w:pPr></w:style></w:styles>"#;
+    for (style, direct, expected_left, expected_first_line) in [
+        ("List", "", None, None),
+        (
+            "List",
+            r#"<w:ind w:left="480" w:firstLine="120"/>"#,
+            Some(32.0),
+            Some(8.0),
+        ),
+        ("List", r#"<w:ind w:firstLine="120"/>"#, None, Some(8.0)),
+        ("IndentedList", "", Some(32.0), Some(8.0)),
+    ] {
+        let content = format!(
+            r#"<w:p><w:pPr><w:pStyle w:val="{style}"/>{direct}</w:pPr><w:r><w:t>Boxed</w:t></w:r></w:p>"#
+        );
+        let bytes = fixture::Package::new(&drawing(&content))
+            .styles(styles)
+            .bytes();
+        let paragraphs = lower_text_box_paragraphs(&bytes, &RenderEnv::default());
+        assert_eq!(paragraphs.len(), 1);
+        let attrs = paragraphs[0].attrs.as_ref().unwrap();
+        assert!(attrs.num_pr.is_none());
+        assert!(attrs.list_marker.is_none());
+        if expected_left.is_some() || expected_first_line.is_some() {
+            let indent = attrs.indent.as_ref().unwrap();
+            assert_eq!(indent.left, expected_left);
+            assert_eq!(indent.first_line, expected_first_line);
+            assert!(indent.hanging.is_none());
+        } else {
+            assert!(attrs.indent.is_none());
+        }
+    }
 }

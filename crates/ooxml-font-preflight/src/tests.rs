@@ -180,10 +180,71 @@ fn theme_references_and_explicit_overrides() {
         keys(&result),
         [
             ("Body", false, false),
-            ("Explicit", false, false),
             ("Heading", false, false),
             ("Major CJK", false, false),
             ("Major CS", false, false)
+        ]
+    );
+}
+
+#[test]
+fn theme_style_slots_override_cached_faces_in_body_and_text_boxes() {
+    let style = r#"<w:style w:type="paragraph" w:styleId="Box"><w:rPr><w:rFonts w:ascii="Cached ASCII" w:asciiTheme="majorAscii" w:hAnsi="Cached HAnsi" w:hAnsiTheme="minorHAnsi" w:eastAsia="Cached CJK" w:eastAsiaTheme="majorEastAsia" w:cs="Cached CS" w:cstheme="majorBidi"/><w:lang w:eastAsia="ja-JP"/></w:rPr></w:style>"#;
+    let paragraph =
+        r#"<w:p><w:pPr><w:pStyle w:val="Box"/></w:pPr><w:r><w:t>漢字 العربية</w:t></w:r></w:p>"#;
+    let rels = THEME_RELS.replace("./theme/custom.xml", "theme/theme1.xml");
+    for shape in [false, true] {
+        let body = if shape {
+            format!("<w:p><w:r><w:txbxContent>{paragraph}</w:txbxContent></w:r></w:p>")
+        } else {
+            paragraph.to_owned()
+        };
+        let result = docx_font_preflight(&fixture(
+            style,
+            &body,
+            &[
+                ("word/_rels/document.xml.rels", &rels),
+                ("word/theme/theme1.xml", THEME),
+            ],
+            false,
+        ))
+        .unwrap();
+        assert!(result.complete);
+        for family in ["Heading", "Body", "Major CJK", "Major CS"] {
+            assert!(
+                result.faces.iter().any(|face| face.family == family),
+                "{family}, shape={shape}: {:?}",
+                result.faces
+            );
+        }
+        assert!(
+            !result
+                .faces
+                .iter()
+                .any(|face| face.family.starts_with("Cached"))
+        );
+    }
+}
+
+#[test]
+fn empty_theme_slots_keep_cached_faces() {
+    let rels = THEME_RELS.replace("./theme/custom.xml", "theme/theme1.xml");
+    let result = docx_font_preflight(&fixture(
+        "",
+        r#"<w:p><w:r><w:rPr><w:rFonts w:eastAsia="Cached CJK" w:eastAsiaTheme="minorEastAsia" w:cs="Cached CS" w:cstheme="minorBidi"/></w:rPr><w:t>漢字 العربية</w:t></w:r></w:p>"#,
+        &[
+            ("word/_rels/document.xml.rels", &rels),
+            ("word/theme/theme1.xml", THEME),
+        ],
+        false,
+    ))
+    .unwrap();
+    assert_eq!(
+        keys(&result),
+        [
+            ("Base", false, false),
+            ("Cached CJK", false, false),
+            ("Cached CS", false, false)
         ]
     );
 }

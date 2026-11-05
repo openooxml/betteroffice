@@ -427,6 +427,11 @@ impl SourceMetadata {
             &self.styles,
             merged.as_ref(),
         ));
+        if let Some(hint) = field(field(merged.as_ref(), "fontFamily"), "hint")
+            && let Some(fonts) = attrs.get_mut("fontFamily").and_then(Value::as_object_mut)
+        {
+            fonts.insert("hint".to_owned(), hint.clone());
+        }
         if let Some(language) = field(merged.as_ref(), "language").and_then(Value::as_object) {
             let own_language: serde_json::Map<String, Value> = language
                 .iter()

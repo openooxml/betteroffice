@@ -27169,8 +27169,9 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
 
     #[test]
     fn raw_docx_font_preflight_covers_styled_text_boxes_in_body_and_headers() {
-        let styles = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Default Box" w:hAnsi="Default Box" w:eastAsia="Default CJK"/><w:lang w:eastAsia="ko-KR"/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type="paragraph" w:styleId="Parent"><w:rPr><w:rFonts w:ascii="Paragraph Box" w:hAnsi="Paragraph Box" w:eastAsia="Paragraph CJK"/><w:b/><w:lang w:eastAsia="ja-JP"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Child"><w:basedOn w:val="Parent"/><w:rPr><w:i/></w:rPr></w:style><w:style w:type="character" w:styleId="AccentBase"><w:rPr><w:rFonts w:ascii="Character Box" w:hAnsi="Character Box" w:eastAsia="Character CJK"/><w:lang w:eastAsia="zh-TW"/></w:rPr></w:style><w:style w:type="character" w:styleId="Accent"><w:basedOn w:val="AccentBase"/><w:rPr><w:b/></w:rPr></w:style></w:styles>"#;
-        let content = r#"<w:p><w:pPr><w:pStyle w:val="Child"/></w:pPr><w:r><w:t>漢字</w:t></w:r></w:p><w:p><w:pPr><w:pStyle w:val="Child"/></w:pPr><w:r><w:rPr><w:rStyle w:val="Accent"/></w:rPr><w:t>漢字</w:t></w:r></w:p><w:p><w:pPr><w:pStyle w:val="Child"/></w:pPr><w:r><w:rPr><w:rStyle w:val="Accent"/><w:rFonts w:ascii="Direct Box" w:hAnsi="Direct Box" w:eastAsia="Direct CJK"/><w:b/><w:i w:val="0"/><w:lang w:eastAsia="zh-CN"/></w:rPr><w:t>漢字</w:t></w:r></w:p><w:p><w:r><w:t>漢字</w:t></w:r></w:p>"#;
+        let styles = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Default Box" w:hAnsi="Default Box" w:eastAsia="Default CJK"/><w:lang w:eastAsia="ko-KR"/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type="paragraph" w:styleId="Parent"><w:rPr><w:rFonts w:ascii="Paragraph Box" w:hAnsi="Paragraph Box" w:eastAsia="Paragraph CJK"/><w:b/><w:lang w:eastAsia="ja-JP"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Child"><w:basedOn w:val="Parent"/><w:rPr><w:i/></w:rPr></w:style><w:style w:type="character" w:styleId="AccentBase"><w:rPr><w:rFonts w:ascii="Character Box" w:hAnsi="Character Box" w:eastAsia="Character CJK"/><w:lang w:eastAsia="zh-TW"/></w:rPr></w:style><w:style w:type="character" w:styleId="Accent"><w:basedOn w:val="AccentBase"/><w:rPr><w:b/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="ThemeBox"><w:rPr><w:rFonts w:ascii="Cached Box" w:asciiTheme="minorAscii" w:hAnsi="Cached Box" w:hAnsiTheme="minorHAnsi" w:eastAsia="Cached CJK" w:eastAsiaTheme="minorEastAsia"/><w:lang w:eastAsia="ja-JP"/></w:rPr></w:style></w:styles>"#;
+        let content = r#"<w:p><w:pPr><w:pStyle w:val="Child"/></w:pPr><w:r><w:t>漢字</w:t></w:r></w:p><w:p><w:pPr><w:pStyle w:val="Child"/></w:pPr><w:r><w:rPr><w:rStyle w:val="Accent"/></w:rPr><w:t>漢字</w:t></w:r></w:p><w:p><w:pPr><w:pStyle w:val="Child"/></w:pPr><w:r><w:rPr><w:rStyle w:val="Accent"/><w:rFonts w:ascii="Direct Box" w:hAnsi="Direct Box" w:eastAsia="Direct CJK"/><w:b/><w:i w:val="0"/><w:lang w:eastAsia="zh-CN"/></w:rPr><w:t>漢字</w:t></w:r></w:p><w:p><w:r><w:t>漢字</w:t></w:r></w:p><w:p><w:pPr><w:pStyle w:val="ThemeBox"/></w:pPr><w:r><w:t>漢字</w:t></w:r></w:p>"#;
+        let theme = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:fontScheme><a:majorFont><a:latin typeface="Heading"/><a:ea typeface="Major CJK"/><a:cs typeface=""/></a:majorFont><a:minorFont><a:latin typeface="Theme Box"/><a:ea typeface="Theme CJK"/><a:cs typeface=""/></a:minorFont></a:fontScheme></a:themeElements></a:theme>"#;
         for vml in [false, true] {
             let boxed = if vml {
                 format!(
@@ -27194,12 +27195,11 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                         "header",
                         &format!("<w:hdr {}>{boxed}</w:hdr>", crate::seed::fixture::NS),
                     )
-                    .bytes()
                 } else {
-                    crate::seed::fixture::Package::new(&boxed)
-                        .styles(styles)
-                        .bytes()
-                };
+                    crate::seed::fixture::Package::new(&boxed).styles(styles)
+                }
+                .part("theme/theme1.xml", "theme", "theme", "theme", theme)
+                .bytes();
                 let preflight = ooxml_font_preflight::docx_font_preflight(&bytes).unwrap();
                 let parsed = docx_parse::parse_docx_s9_wire(&bytes, Default::default())
                     .unwrap()
@@ -27222,6 +27222,8 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                     ("Character CJK", false, true, "cjk-tc"),
                     ("Direct CJK", true, false, "cjk-sc"),
                     ("Default CJK", false, false, "cjk-kr"),
+                    ("Theme CJK", false, false, "cjk-jp"),
+                    ("Theme Box", false, false, "cjk-jp"),
                 ] {
                     assert!(
                         requirements.iter().any(|face| {
