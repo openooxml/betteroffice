@@ -30,6 +30,8 @@ test('a page exports through the canvas with the session edits, and leaves the s
     } catch { response.writeHead(404).end(); }
   }).listen(0, '127.0.0.1');
   await new Promise((ready) => server.once('listening', ready));
+  const warnings: string[] = [];
+  page.on('console', (message) => { if (message.type() === 'warning') warnings.push(message.text()); });
   try {
     await page.goto(`http://127.0.0.1:${(server.address() as AddressInfo).port}/`);
     const result = await page.evaluate(async () => {
@@ -64,6 +66,7 @@ test('a page exports through the canvas with the session edits, and leaves the s
       } finally { session.destroy(); }
     });
     expect(result.one.ink, 'the page paints').toBeGreaterThan(1000);
+    expect(warnings.filter((text) => text.includes('synthetic text metrics')), 'every run has real metrics').toEqual([]);
     expect(result.one.corner, 'white behind the page').toEqual([255, 255, 255, 255]);
     expect(result.again).toEqual(result.one);
     expect(Math.abs(result.double.width - 2 * result.one.width)).toBeLessThanOrEqual(1);

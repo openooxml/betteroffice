@@ -108,6 +108,8 @@ export function createRustMeasureSource(options: {
   runtime?: { decoder?: FontDecoder };
   /** Register sliced script-fallback faces from their skeleton and core. */
   progressive?: boolean;
+  /** With the default provider, give families it doesn't carry the last-resort face. */
+  standIns?: boolean;
 }): RustMeasureSource {
   const engine = options.engine;
   const hosted = hostedFontFamilies(options.bundled);
@@ -126,7 +128,7 @@ export function createRustMeasureSource(options: {
     },
     { baseLatin: () => import('./baseLatinFaces').then(tier => tier.resolveBaseLatinProvider(baseLatinFontState(), options.runtime)), bundled: (hosted ? undefined : options.bundled) ?? (async () => {
       const current = generation;
-      const provider = excludeHostedFontFamilies(await resolveDefaultFontProvider(options.runtime), hosted);
+      const provider = excludeHostedFontFamilies(await resolveDefaultFontProvider(options.runtime, options.standIns), hosted);
       if (current === generation) implicit = isImplicitFontProvider(provider);
       return provider;
     }), progressive: options.progressive

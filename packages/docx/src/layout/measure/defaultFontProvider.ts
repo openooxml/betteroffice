@@ -39,12 +39,14 @@ export function excludeHostedFontFamilies(
 
 function implicitFontProvider(
   manager: typeof import('@betteroffice/fonts'),
-  runtime: { decoder?: FontDecoder }
+  runtime: { decoder?: FontDecoder },
+  standIns: boolean
 ): BundledFontProvider {
   const provider = manager.createFontProvider(undefined, runtime);
   const providesFamily = (family: string) =>
     manager.resolveMetricCompatFamily(family) !== undefined ||
     manager.resolveBundledFamilyFace(family, false, false) !== undefined;
+  const fallsBack = (family: string) => standIns || providesFamily(family);
   const checked = (
     loader: BundledFontLoader | undefined,
     face: import('@betteroffice/fonts').BundledFontFace | undefined
@@ -96,13 +98,13 @@ function implicitFontProvider(
     resolveScriptFallback: (script, bold, italic) => checked(
       provider.resolveScriptFallback(script, bold, italic), manager.resolveScriptFallbackFace(script, bold, italic)
     ),
-    resolveGlyphFallback: (family, bold, italic, office) => providesFamily(family) ? checkedFamilyFallback(
+    resolveGlyphFallback: (family, bold, italic, office) => fallsBack(family) ? checkedFamilyFallback(
       checked(
         provider.resolveGlyphFallback?.(family, bold, italic, office),
         manager.resolveGlyphFallbackFace(family, bold, italic, office)
       ), family, bold, italic
     ) : undefined,
-    resolveLastResort: (family, bold, italic, office) => providesFamily(family) ? checkedFamilyFallback(
+    resolveLastResort: (family, bold, italic, office) => fallsBack(family) ? checkedFamilyFallback(
       checked(
         provider.resolveLastResort(family, bold, italic, office),
         manager.resolveLastResortFace(family, bold, italic, office)
@@ -131,6 +133,7 @@ export interface DefaultFontOptions {
 let options: DefaultFontOptions = {};
 const engineRuntime = { decoder: decodeFontFace };
 let resolved = new WeakMap<object, Promise<BundledFontProvider | undefined>>();
+let resolvedWithStandIns = new WeakMap<object, Promise<BundledFontProvider | undefined>>();
 let baseLatinResolved = new WeakMap<object, Promise<BundledFontProvider>>();
 
 function configuredBaseUrl(baseUrl: string | URL | undefined): URL | undefined {
@@ -160,14 +163,15 @@ export function hasConfiguredFontSource(): boolean {
 export function configureDefaultFonts(next: DefaultFontOptions): void {
   options = { ...next, baseUrl: configuredBaseUrl(next.baseUrl) };
   resolved = new WeakMap();
+  resolvedWithStandIns = new WeakMap();
   baseLatinResolved = new WeakMap();
 }
 
-async function load(runtime: { decoder?: FontDecoder }): Promise<BundledFontProvider | undefined> {
+async function load(runtime: { decoder?: FontDecoder }, standIns: boolean): Promise<BundledFontProvider | undefined> {
   const { baseUrl, fonts, load: loader } = options;
   try {
     if (fonts === undefined && loader === undefined && baseUrl === undefined) {
-      return implicitFontProvider(await import('@betteroffice/fonts'), runtime);
+      return implicitFontProvider(await import('@betteroffice/fonts'), runtime, standIns);
     }
     const module = fonts ?? (
       (loader ? await loader() : await import('@betteroffice/fonts')) as BundledFontModule
@@ -181,15 +185,17 @@ async function load(runtime: { decoder?: FontDecoder }): Promise<BundledFontProv
 
 /** Resolve the default provider, or `undefined` after a retryable failure. @public */
 export function resolveDefaultFontProvider(
-  runtime: { decoder?: FontDecoder } = engineRuntime
+  runtime: { decoder?: FontDecoder } = engineRuntime,
+  standIns = false
 ): Promise<BundledFontProvider | undefined> {
-  let pending = resolved.get(runtime);
+  const cache = standIns ? resolvedWithStandIns : resolved;
+  let pending = cache.get(runtime);
   if (pending === undefined) {
-    const promise = load(runtime);
+    const promise = load(runtime, standIns);
     promise.then((provider) => {
-      if (provider === undefined && resolved.get(runtime) === promise) resolved.delete(runtime);
+      if (provider === undefined && cache.get(runtime) === promise) cache.delete(runtime);
     });
-    resolved.set(runtime, promise);
+    cache.set(runtime, promise);
     pending = promise;
   }
   return pending;
@@ -202,7 +208,7 @@ export function resolveDefaultFontProvider(
 export async function resolveCompleteFontProvider(
   runtime: { decoder?: FontDecoder } = engineRuntime
 ): Promise<BundledFontProvider | undefined> {
-  if (hasConfiguredFontSource()) return resolveDefaultFontProvider(runtime);
+  if (hasConfiguredFontSource() || options.baseUrl !== undefined) return resolveDefaultFontProvider(runtime);
   return (await import('@betteroffice/fonts')).createFontProvider(undefined, runtime);
 }
 
