@@ -828,5 +828,15 @@ pub fn export_xlsx_markdown_json(
 
 #[wasm_bindgen(js_name = renderXlsxMarkdownJson)]
 pub fn render_xlsx_markdown_json(content: &str, options: &str) -> Result<String, JsValue> {
-    xlsx_engine::render_xlsx_markdown_json(content, options).map_err(map_engine_error)
+    #[cfg(feature = "structured-render")]
+    {
+        xlsx_engine::render_xlsx_markdown_json(content, options).map_err(map_engine_error)
+    }
+    #[cfg(not(feature = "structured-render"))]
+    {
+        let _ = (content, options);
+        Err(JsValue::from_str(
+            "rendering structured content not in this build",
+        ))
+    }
 }
