@@ -441,7 +441,7 @@ describe('native package release wiring', () => {
         step.with.name === '${{ inputs.binding }}-native.${{ matrix.platform.target }}'
     );
     const testing = steps.find((step: any) => step.name === 'Test binding');
-    expect(testing.run).toBe('bun test bindings/${{ inputs.binding }}-native/index.test.ts');
+    expect(testing.run).toBe("bun test bindings/${{ inputs.binding }}-native/index.test.ts ${{ inputs.binding != 'xlsx' && format('bindings/{0}-native/png.test.ts', inputs.binding) || '' }}");
     const entries = steps.find((step: any) => step.name === 'Build the JS entries');
     const fontPackages = steps.find((step: any) => step.name === 'Build the font packages');
     expect(fontPackages.run).toContain('(cd packages/fonts && bunx tsup)');
@@ -504,7 +504,7 @@ describe('native package release wiring', () => {
     expect(wasm.run).toContain('bun run --filter @betteroffice/docx build:wasm');
     const parity = job.steps.find((step: any) => step.name === 'Check native and wasm parity');
     expect(parity.run).toBe(
-      'bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts bindings/pptx-native/engine.test.ts bindings/docx-native/parity.test.ts bindings/docx-native/engine.test.ts'
+      'bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts bindings/pptx-native/engine.test.ts bindings/docx-native/parity.test.ts bindings/docx-native/engine.test.ts bindings/docx-native/png.test.ts bindings/pptx-native/png.test.ts'
     );
     expect(job.steps.indexOf(wasm)).toBeLessThan(job.steps.indexOf(build));
     expect(job.steps.indexOf(build)).toBeLessThan(job.steps.indexOf(parity));
