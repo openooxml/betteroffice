@@ -520,6 +520,9 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Check the bundled Latin faces stay out of the native bindings
+        run: node scripts/native-feature-guard.mjs
+
       - name: Build wasm for parity
         run: |
           bun run --filter @betteroffice/xlsx build:wasm
