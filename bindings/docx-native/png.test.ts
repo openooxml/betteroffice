@@ -204,7 +204,11 @@ test('native docx PNG resolves media tokens in every page region and skips missi
     const image = (x: number, relId = 'media:0') => ({ kind: 'image', relId, x, y: 10, w: 10, h: 10 });
     const list = JSON.stringify({ pages: [{
       pageIndex: 0, width: 160, height: 60,
-      primitives: [image(10), image(110, 'media:999'), image(130, `data:image/png;base64,${blue}`)],
+      primitives: [image(10), image(110, 'media:999'), image(130, `data:image/png;base64,${blue}`), {
+        kind: 'shape', x: 145, y: 10, w: 10, h: 10,
+        geometryPath: [{ type: 'move', x: 145, y: 10 }, { type: 'line', x: 155, y: 10 }, { type: 'line', x: 155, y: 20 }, { type: 'line', x: 145, y: 20 }, { type: 'close' }],
+        fillPaint: { kind: 'picture', pictureSrc: 'media:0', pictureFillMode: 'stretch' },
+      }],
       header: { rId: 'header1', kind: 'header', y: 0, height: 30, primitives: [image(30)] },
       footer: { rId: 'footer1', kind: 'footer', y: 30, height: 30, primitives: [image(50)] },
       noteAreas: [{ primitives: [image(70)] }, { kind: 'endnote', primitives: [image(90)] }],
@@ -217,7 +221,7 @@ test('native docx PNG resolves media tokens in every page region and skips missi
         const offset = (15 * scale * width + x * scale) * 4;
         return [...pixels.subarray(offset, offset + 4)];
       };
-      for (const x of [15, 35, 55, 75, 95, 135]) expect(pixel(x)).toEqual([0, 0, 255, 255]);
+      for (const x of [15, 35, 55, 75, 95, 135, 150]) expect(pixel(x)).toEqual([0, 0, 255, 255]);
       expect(pixel(115)).toEqual([255, 255, 255, 255]);
     }
   } finally {

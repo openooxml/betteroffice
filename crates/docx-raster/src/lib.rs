@@ -595,7 +595,9 @@ fn paint_primitive_core<'k>(
         Primitive::Image(image) => paint_image(
             pixmap, image, resources, scratch, transform, mask, opacity, scope,
         ),
-        Primitive::Shape(shape) => paint_shape(pixmap, shape, transform, mask, opacity, scratch),
+        Primitive::Shape(shape) => paint_shape(
+            pixmap, shape, resources, scratch, transform, mask, opacity, scope,
+        ),
         Primitive::Decoration(decoration) => paint_decoration(
             pixmap,
             decoration,
@@ -733,25 +735,22 @@ fn paint_decoration(
     Ok(())
 }
 
-fn paint_shape(
+#[allow(clippy::too_many_arguments)]
+fn paint_shape<'k>(
     pixmap: &mut Pixmap,
-    shape: &ShapePrimitive,
+    shape: &'k ShapePrimitive,
+    resources: &RenderResources<'_>,
+    scratch: &mut Scratch<'k>,
     transform: Transform,
     mask: Option<&Mask>,
     opacity: f32,
-    scratch: &mut Scratch<'_>,
+    scope: ImageScope<'k>,
 ) -> Result<(), String> {
-    let budget = &mut scratch.budget;
-    if shape
-        .attrs
-        .fill_paint
-        .as_ref()
-        .and_then(|paint| paint.get("kind"))
-        .and_then(Value::as_str)
-        == Some("picture")
-    {
+    if shape.geometry_path.is_empty() && has_picture_fill(shape) {
         return Ok(());
     }
+    let picture = picture_fill_source(shape, resources, scratch, scope);
+    let budget = &mut scratch.budget;
     let (shadow, undrawn) = shape_shadow(&shape.attrs.effects)?;
     for _ in 0..undrawn {
         skip_effect(&mut scratch.skipped, "shape.effects");
@@ -760,13 +759,38 @@ fn paint_shape(
     let path = build_shape_path(&shape.geometry_path)?;
     let visual = shape_transform(shape)?;
     let transform = transform.pre_concat(visual);
-    let fill = shape_fill(shape, opacity)?;
+    let fill = if picture.is_some() {
+        None
+    } else {
+        shape_fill(shape, opacity)?
+    };
+    let picture_draws = picture
+        .as_ref()
+        .map(|source| picture_fill_draws(shape, source))
+        .transpose()?;
+    if let Some(draws) = &picture_draws {
+        budget.charge_path(draws.draws.len() as u64)?;
+        budget.charge_masks(
+            scratch
+                .masks
+                .bytes
+                .saturating_add(mask_bytes(pixmap.width(), pixmap.height())),
+        )?;
+    }
     let stroked = shape_stroke(shape, opacity)?;
     if let Some(dash) = stroked.as_ref().and_then(|stroked| stroked.dash.as_ref()) {
         budget.charge_path(dash_segments(path_length(&path), dash))?;
     }
     type Draw<'d> = Box<dyn Fn(&mut Pixmap, Transform, Option<&Mask>) + 'd>;
     let mut parts: Vec<Draw<'_>> = Vec::new();
+    if let (Some(source), Some(draws)) = (&picture, &picture_draws) {
+        let path = &path;
+        parts.push(Box::new(
+            move |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>| {
+                paint_picture_fill(target, path, source, draws, opacity, transform, mask);
+            },
+        ));
+    }
     if let Some(paint) = &fill {
         parts.push(Box::new(
             |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>| {
@@ -811,6 +835,246 @@ fn paint_shape(
         draw(pixmap, transform, mask);
     }
     Ok(())
+}
+
+/// The most tiles a picture fill repeats before it stretches instead, as the
+/// web backend does.
+const MAX_PICTURE_FILL_TILES: f32 = 4096.0;
+
+fn has_picture_fill(shape: &ShapePrimitive) -> bool {
+    shape
+        .attrs
+        .fill_paint
+        .as_ref()
+        .and_then(|paint| paint.get("kind"))
+        .and_then(Value::as_str)
+        == Some("picture")
+}
+
+/// A picture fill's decoded source. `None` leaves the shape to its solid fill,
+/// as the web backend does for a picture it cannot resolve.
+fn picture_fill_source<'k>(
+    shape: &'k ShapePrimitive,
+    resources: &RenderResources<'_>,
+    scratch: &mut Scratch<'k>,
+    scope: ImageScope<'k>,
+) -> Option<Arc<Pixmap>> {
+    if !has_picture_fill(shape) {
+        return None;
+    }
+    let paint = shape.attrs.fill_paint.as_ref()?;
+    let reference = paint
+        .get("pictureSrc")
+        .or_else(|| paint.get("pictureRelId"))
+        .and_then(Value::as_str);
+    let Some(source) = reference.and_then(|rel_id| image_source(rel_id, scope, resources)) else {
+        scratch.images.skipped += 1;
+        return None;
+    };
+    scratch.images.resolve(source)
+}
+
+/// What a picture fill draws: each source placement, the rectangle a stretched
+/// picture stays inside, and its opacity.
+struct PictureFillDraws {
+    draws: Vec<Transform>,
+    frame: Option<FRect>,
+    opacity: f32,
+}
+
+fn fill_number(paint: &Value, object: &str, key: &str) -> f32 {
+    paint
+        .get(object)
+        .and_then(|value| value.get(key))
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+        .unwrap_or(0.0) as f32
+}
+
+fn picture_fill_draws(shape: &ShapePrimitive, source: &Pixmap) -> Result<PictureFillDraws, String> {
+    let paint = shape
+        .attrs
+        .fill_paint
+        .as_ref()
+        .ok_or_else(|| "picture fill without a paint".to_string())?;
+    let box_x = number_f32(&shape.x)?;
+    let box_y = number_f32(&shape.y)?;
+    let box_w = number_f32(&shape.w)?;
+    let box_h = number_f32(&shape.h)?;
+    let picture_opacity = paint
+        .get("pictureOpacity")
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+        .map_or(1.0, |value| value.clamp(0.0, 1.0) as f32);
+    let tiled = paint.get("pictureFillMode").and_then(Value::as_str) == Some("tile");
+    if tiled && let Some(draws) = picture_tiles(paint, source, box_x, box_y, box_w, box_h) {
+        return Ok(PictureFillDraws {
+            draws,
+            frame: None,
+            opacity: picture_opacity,
+        });
+    }
+    let stretch = |key: &str| fill_number(paint, "pictureStretchRect", key).clamp(-10.0, 10.0);
+    let (left, top) = (stretch("left"), stretch("top"));
+    let (right, bottom) = (stretch("right"), stretch("bottom"));
+    let frame = FRect {
+        x: box_x + left * box_w,
+        y: box_y + top * box_h,
+        w: box_w * (1.0 - left - right),
+        h: box_h * (1.0 - top - bottom),
+    };
+    let crop = |key: &str| fill_number(paint, "pictureSrcRect", key);
+    let (source_width, source_height) = (source.width() as f32, source.height() as f32);
+    let requested_w = source_width * (1.0 - crop("left") - crop("right"));
+    let requested_h = source_height * (1.0 - crop("top") - crop("bottom"));
+    if frame.w <= 0.0 || frame.h <= 0.0 || requested_w <= 0.0 || requested_h <= 0.0 {
+        return Ok(PictureFillDraws {
+            draws: Vec::new(),
+            frame: None,
+            opacity: picture_opacity,
+        });
+    }
+    let (scale_x, scale_y) = (frame.w / requested_w, frame.h / requested_h);
+    Ok(PictureFillDraws {
+        draws: vec![Transform::from_row(
+            scale_x,
+            0.0,
+            0.0,
+            scale_y,
+            frame.x - crop("left") * source_width * scale_x,
+            frame.y - crop("top") * source_height * scale_y,
+        )],
+        frame: Some(frame),
+        opacity: picture_opacity,
+    })
+}
+
+/// The tile grid `a:tile` lays over a shape box, or `None` when it is empty or
+/// past the cap, which stretches instead.
+fn picture_tiles(
+    paint: &Value,
+    source: &Pixmap,
+    box_x: f32,
+    box_y: f32,
+    box_w: f32,
+    box_h: f32,
+) -> Option<Vec<Transform>> {
+    let (source_width, source_height) = (source.width() as f32, source.height() as f32);
+    if box_w <= 0.0 || box_h <= 0.0 {
+        return None;
+    }
+    let tile = |key: &str, default: f32| {
+        paint
+            .get("pictureTile")
+            .and_then(|value| value.get(key))
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite())
+            .map_or(default, |value| value as f32)
+    };
+    let tile_w = (source_width * tile("scaleX", 1.0).clamp(0.01, 100.0)).max(1.0);
+    let tile_h = (source_height * tile("scaleY", 1.0).clamp(0.01, 100.0)).max(1.0);
+    if ((box_w / tile_w).ceil() + 1.0) * ((box_h / tile_h).ceil() + 1.0) > MAX_PICTURE_FILL_TILES {
+        return None;
+    }
+    let text = |key: &str| {
+        paint
+            .get("pictureTile")
+            .and_then(|value| value.get(key))
+            .and_then(Value::as_str)
+    };
+    let alignment = text("alignment").unwrap_or("tl");
+    let mut anchor_x = match alignment {
+        "t" | "ctr" | "b" => box_x + (box_w - tile_w) / 2.0,
+        "tr" | "r" | "br" => box_x + box_w - tile_w,
+        _ => box_x,
+    };
+    let mut anchor_y = match alignment {
+        "l" | "ctr" | "r" => box_y + (box_h - tile_h) / 2.0,
+        "bl" | "b" | "br" => box_y + box_h - tile_h,
+        _ => box_y,
+    };
+    anchor_x += tile("offsetX", 0.0).clamp(-100_000.0, 100_000.0);
+    anchor_y += tile("offsetY", 0.0).clamp(-100_000.0, 100_000.0);
+    let start_col = -((anchor_x - box_x) / tile_w).ceil() as i64;
+    let start_row = -((anchor_y - box_y) / tile_h).ceil() as i64;
+    let flip = text("flip").unwrap_or("none");
+    let flip_x = matches!(flip, "x" | "xy");
+    let flip_y = matches!(flip, "y" | "xy");
+    let (scale_x, scale_y) = (tile_w / source_width, tile_h / source_height);
+    let mut draws = Vec::new();
+    let mut row = start_row;
+    loop {
+        let y = anchor_y + row as f32 * tile_h;
+        if y >= box_y + box_h {
+            break;
+        }
+        let mut col = start_col;
+        loop {
+            let x = anchor_x + col as f32 * tile_w;
+            if x >= box_x + box_w {
+                break;
+            }
+            let mirror_x = flip_x && col.rem_euclid(2) == 1;
+            let mirror_y = flip_y && row.rem_euclid(2) == 1;
+            draws.push(Transform::from_row(
+                if mirror_x { -scale_x } else { scale_x },
+                0.0,
+                0.0,
+                if mirror_y { -scale_y } else { scale_y },
+                if mirror_x { x + tile_w } else { x },
+                if mirror_y { y + tile_h } else { y },
+            ));
+            col += 1;
+        }
+        row += 1;
+    }
+    Some(draws)
+}
+
+/// Draws a picture fill clipped to its shape, and to the outer mask if any.
+fn paint_picture_fill(
+    target: &mut Pixmap,
+    path: &Path,
+    source: &Pixmap,
+    fill: &PictureFillDraws,
+    opacity: f32,
+    transform: Transform,
+    outer: Option<&Mask>,
+) {
+    let Some(mut clip) = Mask::new(target.width(), target.height()) else {
+        return;
+    };
+    clip.fill_path(path, FillRule::Winding, true, transform);
+    if let Some(frame) = fill.frame
+        && let Some(rect) = Rect::from_xywh(frame.x, frame.y, frame.w, frame.h)
+    {
+        clip.intersect_path(
+            &PathBuilder::from_rect(rect),
+            FillRule::Winding,
+            true,
+            transform,
+        );
+    }
+    if let Some(outer) = outer {
+        for (value, limit) in clip.data_mut().iter_mut().zip(outer.data()) {
+            *value = ((u16::from(*value) * u16::from(*limit)) / 255) as u8;
+        }
+    }
+    let paint = PixmapPaint {
+        opacity: opacity * fill.opacity,
+        quality: FilterQuality::Bicubic,
+        ..PixmapPaint::default()
+    };
+    for placement in &fill.draws {
+        target.draw_pixmap(
+            0,
+            0,
+            source.as_ref(),
+            &paint,
+            transform.pre_concat(*placement),
+            Some(&clip),
+        );
+    }
 }
 
 /// The largest factor `transform` stretches a length by along either axis.
@@ -956,7 +1220,11 @@ fn shape_fill(shape: &ShapePrimitive, opacity: f32) -> Result<Option<Paint<'stat
         }
         "gradient" => gradient_paint(shape, object, opacity).map(Some),
         "pattern" => Err("unsupported shape fillPaint kind: pattern".to_string()),
-        "picture" => Err("unsupported shape fillPaint kind: picture".to_string()),
+        "picture" => shape
+            .fill
+            .as_deref()
+            .map(|color| solid_paint(color, opacity))
+            .transpose(),
         other => Err(format!("unsupported shape fillPaint kind: {other}")),
     }
 }

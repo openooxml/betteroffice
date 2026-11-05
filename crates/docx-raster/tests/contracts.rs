@@ -554,6 +554,182 @@ fn unsupported_shape_paint_is_refused() {
     );
 }
 
+fn picture_shape(paint: serde_json::Value, fill: Option<&str>) -> serde_json::Value {
+    let mut shape = json!({
+        "kind":"shape",
+        "x":4,
+        "y":4,
+        "w":20,
+        "h":20,
+        "geometryPath":[
+            {"type":"move","x":4,"y":4},
+            {"type":"line","x":24,"y":4},
+            {"type":"line","x":24,"y":24},
+            {"type":"line","x":4,"y":24},
+            {"type":"close"}
+        ],
+        "fillPaint":paint,
+        "stroke":{"color":"#00ff00","width":2}
+    });
+    if let Some(fill) = fill {
+        shape["fill"] = json!(fill);
+    }
+    shape
+}
+
+fn picture_resources(images: &mut ImageMap) -> Vec<u8> {
+    let png = solid_png(2, 2);
+    images.insert("rIdPicture".to_string(), png.clone());
+    png
+}
+
+#[test]
+fn a_picture_fill_paints_its_picture_inside_the_shape_and_keeps_the_outline() {
+    let (fonts, chains, mut images) = empty_resources();
+    let source = picture_resources(&mut images);
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let scene = list(
+        30.0,
+        30.0,
+        vec![picture_shape(
+            json!({"kind":"picture","pictureRelId":"rIdPicture","pictureFillMode":"stretch"}),
+            None,
+        )],
+    );
+    let png = render_png(&scene, 0, &resources).unwrap();
+    assert_eq!(pixel(&png, 14, 14), pixel(&source, 0, 0));
+    assert_eq!(pixel(&png, 28, 28), [255, 255, 255, 255]);
+    assert_eq!(pixel(&png, 4, 14)[1], 255);
+    assert_ne!(pixel(&png, 4, 14), [255, 255, 255, 255]);
+}
+
+#[test]
+fn a_stretch_rectangle_keeps_a_picture_fill_inside_it() {
+    let (fonts, chains, mut images) = empty_resources();
+    let source = picture_resources(&mut images);
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let scene = list(
+        30.0,
+        30.0,
+        vec![picture_shape(
+            json!({"kind":"picture","pictureRelId":"rIdPicture","pictureFillMode":"stretch",
+                "pictureStretchRect":{"left":0.5,"top":0,"right":0,"bottom":0}}),
+            None,
+        )],
+    );
+    let png = render_png(&scene, 0, &resources).unwrap();
+    assert_eq!(pixel(&png, 20, 14), pixel(&source, 0, 0));
+    assert_eq!(pixel(&png, 9, 14), [255, 255, 255, 255]);
+}
+
+/// Four 8px quadrants, so a tile shows which way up and round it was drawn.
+fn quadrant_png() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut bytes, 16, 16);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("png header");
+        let mut pixels = Vec::new();
+        for y in 0..16 {
+            for x in 0..16 {
+                pixels.extend_from_slice(&QUADRANTS[usize::from(y >= 8)][usize::from(x >= 8)]);
+            }
+        }
+        writer.write_image_data(&pixels).expect("png pixels");
+    }
+    bytes
+}
+
+const QUADRANTS: [[[u8; 4]; 2]; 2] = [
+    [[255, 0, 0, 255], [0, 0, 255, 255]],
+    [[0, 255, 0, 255], [255, 255, 0, 255]],
+];
+
+fn tiled_scene(size: u32, tile: serde_json::Value) -> DisplayList {
+    let end = size + 4;
+    list(
+        f64::from(end + 8),
+        f64::from(end + 8),
+        vec![json!({
+            "kind":"shape",
+            "x":4,
+            "y":4,
+            "w":size,
+            "h":size,
+            "geometryPath":[
+                {"type":"move","x":4,"y":4},
+                {"type":"line","x":end,"y":4},
+                {"type":"line","x":end,"y":end},
+                {"type":"line","x":4,"y":end},
+                {"type":"close"}
+            ],
+            "fillPaint":{"kind":"picture","pictureRelId":"rIdPicture","pictureFillMode":"tile","pictureTile":tile}
+        })],
+    )
+}
+
+#[test]
+fn a_tiled_picture_fill_repeats_and_mirrors_alternate_tiles() {
+    let (fonts, chains, mut images) = empty_resources();
+    images.insert("rIdPicture".to_string(), quadrant_png());
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let columns = [(8, 0), (16, 1), (24, 0), (32, 1), (40, 0), (48, 1)];
+    let mirrored = [(8, 0), (16, 1), (24, 1), (32, 0), (40, 0), (48, 1)];
+    for (flip, across, down) in [
+        ("none", columns, columns),
+        ("x", mirrored, columns),
+        ("y", columns, mirrored),
+        ("xy", mirrored, mirrored),
+    ] {
+        let scene = tiled_scene(
+            48,
+            json!({"scaleX":1,"scaleY":1,"alignment":"tl","flip":flip}),
+        );
+        let png = render_png(&scene, 0, &resources).unwrap();
+        for (y, row) in down {
+            for (x, column) in across {
+                assert_eq!(
+                    pixel(&png, x, y),
+                    QUADRANTS[row][column],
+                    "{flip} at {x},{y}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_tile_grid_past_the_cap_stretches_the_picture_once() {
+    let (fonts, chains, mut images) = empty_resources();
+    images.insert("rIdPicture".to_string(), quadrant_png());
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let scene = tiled_scene(
+        100,
+        json!({"scaleX":0.01,"scaleY":0.01,"alignment":"tl","flip":"none"}),
+    );
+    let png = render_png(&scene, 0, &resources).unwrap();
+    assert_eq!(pixel(&png, 20, 20), QUADRANTS[0][0]);
+    assert_eq!(pixel(&png, 90, 90), QUADRANTS[1][1]);
+}
+
+#[test]
+fn a_picture_fill_it_cannot_resolve_keeps_the_solid_fill_and_counts_it() {
+    let (fonts, chains, images) = empty_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let scene = list(
+        30.0,
+        30.0,
+        vec![picture_shape(
+            json!({"kind":"picture","pictureRelId":"rIdMissing"}),
+            Some("#0000ff"),
+        )],
+    );
+    let rendered = render_page(&scene, 0, &resources).unwrap();
+    assert_eq!(pixel(&rendered.bytes, 14, 14), [0, 0, 255, 255]);
+    assert_eq!(rendered.skipped_images, 1);
+}
+
 #[test]
 fn invalid_page_and_page_selector_are_errors() {
     let (fonts, chains, images) = empty_resources();
