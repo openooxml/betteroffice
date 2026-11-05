@@ -202,6 +202,32 @@ test('unknown styles and stale versions refuse the whole batch', async () => {
   await expect(doc.edit({ version, edits: [{ op: 'set_language', paragraph: first(doc).ref, lang: 'de-DE' }] })).rejects.toMatchObject({ code: 'STALE_VERSION' });
 });
 
+test('missing styles refuses defaults atomically and keeps export and paragraph edits working', async () => {
+  const zip = await JSZip.loadAsync(await fixture());
+  zip.remove('word/styles.xml');
+  zip.file('word/_rels/document.xml.rels', (await zip.file('word/_rels/document.xml.rels')!.async('string')).replace(/<Relationship\b[^>]*Type="[^"]*\/styles"[^>]*\/>/, ''));
+  zip.file('[Content_Types].xml', (await zip.file('[Content_Types].xml')!.async('string')).replace(/<Override\b[^>]*PartName="\/word\/styles.xml"[^>]*\/>/, ''));
+  const doc = await open(await zip.generateAsync({ type: 'uint8array' }));
+  const before = await JSZip.loadAsync(await doc.export());
+  const original = await before.file('word/document.xml')!.async('string');
+  const version = doc.list().version;
+  await expect(doc.edit({ version, edits: [
+    { op: 'set_language', paragraph: first(doc).ref, lang: 'de-DE' },
+    { op: 'set_language', defaults: true, lang: 'de-DE' },
+  ] })).rejects.toMatchObject({ code: 'UNSUPPORTED', message: expect.stringContaining('word/styles.xml') });
+  expect(doc.list().version).toBe(version);
+  expect(doc.session.styleLanguages()).toEqual({});
+  await expect(doc.edit({ version, edits: [{ op: 'set_language', style: 'Normal', lang: 'de-DE' }] })).rejects.toMatchObject({ code: 'UNKNOWN_STYLE' });
+  const refused = await JSZip.loadAsync(await doc.export());
+  expect(refused.file('word/styles.xml')).toBeNull();
+  expect(await refused.file('word/document.xml')!.async('string')).toBe(original);
+
+  await doc.edit({ version, edits: [{ op: 'set_language', paragraph: first(doc).ref, lang: 'de-DE' }] });
+  const after = await JSZip.loadAsync(await doc.export());
+  expect(after.file('word/styles.xml')).toBeNull();
+  expect(await after.file('word/document.xml')!.async('string')).toBe(original.replace(original.match(/<w:p\b[\s\S]*?<\/w:p>/)![0], value => value.replaceAll('w:val="en-US"', 'w:val="de-DE"')));
+});
+
 test('a later removed target rolls back text and style language edits', async () => {
   const doc = await open();
   const before = await parts(await doc.export());

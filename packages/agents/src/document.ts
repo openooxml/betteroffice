@@ -1444,6 +1444,9 @@ export class DocxAgentDocument {
     if (edit.op === 'set_language' && edit.match === undefined) {
       const slots = { lang: edit.lang, eastAsia: edit.eastAsia, bidi: edit.bidi };
       if (edit.style !== undefined || edit.defaults) {
+        if (edit.defaults && !this.session.materializeDocx()?.package.styles) {
+          throw new DocumentToolError('UNSUPPORTED', 'The styles part word/styles.xml is missing; document-default language cannot be changed.');
+        }
         const styleId = edit.style !== undefined ? resolveStyle(this.languageStyles(), edit.style) : null;
         return draft => {
           draft.setStyleLanguage(styleId, slots);
