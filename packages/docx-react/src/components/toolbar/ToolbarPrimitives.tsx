@@ -16,6 +16,8 @@ export interface ToolbarButtonProps {
   title?: string;
   /** Keyboard shortcut shown in the tooltip and overflow menu, such as `Ctrl+B`. */
   shortcut?: string;
+  /** The shortcut in `aria-keyshortcuts` form, such as `Control+B`. */
+  ariaShortcut?: string;
   onClick?: () => void;
   onPointerEnter?: () => void;
   onFocus?: () => void;
@@ -57,6 +59,7 @@ export function ToolbarButton({
   description,
   title,
   shortcut,
+  ariaShortcut,
   onClick,
   onPointerEnter,
   onFocus,
@@ -78,6 +81,7 @@ export function ToolbarButton({
             id: descriptionId,
             label,
             shortcut,
+            ariaShortcut,
             checked: active,
             disabled,
             description: described,
@@ -92,6 +96,7 @@ export function ToolbarButton({
       variant="ghost"
       size="icon-sm"
       type="button"
+      aria-keyshortcuts={ariaShortcut}
       className={cn(
         // Hover + active states live in editor.css (.oox-toolbar-toggle); see
         // that rule for why they're not Tailwind utilities here.

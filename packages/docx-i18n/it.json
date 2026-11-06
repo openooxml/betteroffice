@@ -488,7 +488,9 @@
         "pageUp": "PagSu",
         "pageDown": "PagGiù",
         "ctrl": "Ctrl",
-        "del": "Canc"
+        "del": "Canc",
+        "shift": "Maiusc",
+        "alt": "Alt"
       }
     },
     "objectGeometry": {

@@ -14,7 +14,8 @@ import {
   docxCommandController,
   type DocxPendingCommand,
 } from '../../commands/createDocxCommandStore';
-import { commandShortcut, isPluginCommandId } from '../../commands/descriptors';
+import { isPluginCommandId } from '../../commands/descriptors';
+import { storeAriaShortcut, storeShortcutLabel } from '../../commands/shortcuts';
 import {
   useDocxChrome,
   useDocxCommand,
@@ -196,7 +197,8 @@ function commandItem<K extends DocxCommandId>(
     id: key,
     label: t(store.getDescriptor(id).labelKey),
     icon: icon ? <MaterialSymbol name={icon} size={16} /> : undefined,
-    shortcut: commandShortcut(id, args) ?? undefined,
+    shortcut: storeShortcutLabel(store, id, t, args) ?? undefined,
+    ariaShortcut: storeAriaShortcut(store, id, args) ?? undefined,
     checked: state.active,
     disabled: !state.enabled,
     description: reasonOf(state),
@@ -735,6 +737,7 @@ export function ToolbarCommandButton<K extends DocxCommandId | DocxPluginCommand
       title={name}
       ariaLabel={name}
       shortcut={command.shortcut ?? undefined}
+      ariaShortcut={command.ariaShortcut ?? undefined}
       className={cn(!icon && !children && 'w-auto px-2 text-sm', className)}
       onClick={() => void command.execute()}
       onPointerEnter={id === 'save' ? prepareSave : undefined}

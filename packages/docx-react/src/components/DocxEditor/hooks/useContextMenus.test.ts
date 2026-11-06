@@ -1,3 +1,4 @@
+import { createDocxCommandController } from '../../../commands/createDocxCommandStore';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, describe, expect, test } from 'bun:test';
 import type { PagedEditorRef } from '../PagedEditor';
@@ -12,6 +13,7 @@ function options(
   onAddComment: (range: { from: number; to: number; yPos: number | null }) => void = () => {}
 ) {
   return {
+    commands: createDocxCommandController().store,
     pagedEditorRef: {
       current: {
         getYrsSession: () => null,

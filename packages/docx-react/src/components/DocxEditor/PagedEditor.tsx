@@ -14,6 +14,7 @@
  * 4. Selection changes → compute rects → update overlay
  */
 
+import type { DocxClipboardFragment } from '@betteroffice/docx/yrs';
 import React, { useEffect, useRef, useState, useCallback, useMemo, forwardRef, memo } from 'react';
 import type { CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
@@ -423,6 +424,10 @@ export interface PagedEditorRef {
   deleteSelection(): void;
   /** Select the full active Yrs story. */
   selectAll(): void;
+  /** Paste rich content where the selection allows it, else `plain`, through the Yrs input path. */
+  pasteContent(plain: string, fragment: DocxClipboardFragment | null): void;
+  /** Write the selection to the clipboard through the input's copy path. */
+  copySelection(cut: boolean): boolean;
   /** A viewer session's selected text, read from the document worker; null elsewhere. */
   readSelectedText(): Promise<string> | null;
   /** Get the current display-position selection. */

@@ -488,7 +488,9 @@
         "pageUp": "Bild auf",
         "pageDown": "Bild ab",
         "ctrl": "Strg",
-        "del": "Entf"
+        "del": "Entf",
+        "shift": "Umschalt",
+        "alt": "Alt"
       }
     },
     "objectGeometry": {
