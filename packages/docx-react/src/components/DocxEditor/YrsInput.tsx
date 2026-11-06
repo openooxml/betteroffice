@@ -1291,6 +1291,14 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     });
   }, [enqueueInputOperation, ensureSelection, holdOperation, inputPositionMap, readOnly, session, setSelection, story]);
 
+  const hasTextRange = useCallback((): boolean => {
+    const current = ensureSelection();
+    const map = current ? inputPositionMap(current.anchor.story) : null;
+    if (!current || !map) return false;
+    const range = toRange(current, map);
+    return range.start.paraId !== range.end.paraId || range.start.offset !== range.end.offset;
+  }, [ensureSelection, inputPositionMap]);
+
   const deleteSelection = useCallback(
     (queued = false, cut?: CutCopy): void => {
       if (holdOperation({ kind: 'delete-selection', cut })) return;
@@ -1734,6 +1742,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     [insertText]
   );
 
+  const copyWrittenRef = useRef(false);
   const handleCopy = useCallback(
     (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
       if (takeClipboardGesture(event.currentTarget) === 'ignore') {
@@ -1743,8 +1752,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       const slice = session ? yrsClipboardSlice(session) : null;
       const text = primedCopyRef.current ?? slice?.text ?? (session ? yrsSelectionPlainText(session) : '');
       primedCopyRef.current = null;
-      if (!text) return;
+      if (!text && !slice?.fragment) return;
       event.preventDefault();
+      copyWrittenRef.current = true;
       event.clipboardData.setData('text/plain', text);
       if (slice?.fragment) {
         event.clipboardData.setData('text/html', clipboardFragmentHtml(slice.fragment));
@@ -2044,6 +2054,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       deleteSelection,
       pasteContent,
       copySelection(cut) {
+        if (cut && !hasTextRange()) return false;
         const copied = copyAfterReplica(cut);
         if (copied) {
           if (cut) deleteSelection(true, copied);
@@ -2051,9 +2062,11 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         }
         textareaRef.current?.focus();
         primeCopy();
-        const done = document.execCommand('copy');
-        if (done && cut) deleteSelection();
-        return done;
+        copyWrittenRef.current = false;
+        document.execCommand('copy');
+        if (!copyWrittenRef.current) return false;
+        if (cut) deleteSelection();
+        return true;
       },
       selectAll() {
         advanceInteractionEpoch();
@@ -2074,6 +2087,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       isCurrentInput,
       queueSelection,
       deleteSelection,
+      hasTextRange,
       pasteContent,
       primeCopy,
       runAfterPendingInput,

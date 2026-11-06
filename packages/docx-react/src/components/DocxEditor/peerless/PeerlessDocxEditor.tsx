@@ -302,7 +302,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const rulers = useWorkerRulerControls(controller, reportRecoverableError, props.showRuler === true);
   const legacyRef = useRef<PagedEditorRef | null>(null);
   useKeyboardShortcuts({ commands: controller.commands, pagedEditorRef: legacyRef, containerRef: container,
-    disableFindReplaceShortcuts: props.disableFindReplaceShortcuts ?? false, shortcuts: props.shortcuts, onShortcutIssue: props.onShortcutIssue });
+    disableFindReplaceShortcuts: props.disableFindReplaceShortcuts ?? false, shortcuts: props.shortcuts, onShortcutIssue: props.onShortcutIssue, onError: reportRecoverableError });
   const [overlayLayer, setOverlayLayer] = useState<HTMLDivElement | null>(null);
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const [geometryRevision, redrawGeometry] = useState(0);

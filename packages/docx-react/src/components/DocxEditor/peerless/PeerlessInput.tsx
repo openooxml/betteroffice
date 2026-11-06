@@ -124,11 +124,13 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
         else hold!.seq = outcome.seq;
       }, release);
     };
+    let releasedKey = false;
     const keydown = (event: KeyboardEvent) => {
+      releasedKey = false;
       const exit = escapeArmed && event.key === 'Tab';
       if (event.key !== 'Shift') clearEscape();
       if (event.defaultPrevented || state.composing || event.isComposing || event.keyCode === 229) return;
-      if (isKeyReleasedFromInput(event)) { active = null; return; }
+      if (isKeyReleasedFromInput(event)) { active = null; releasedKey = true; return; }
       if (event.key === 'Escape') { escapeArmed = true; active = null; return; }
       if (exit || (event.key === 'Tab' && isReadOnly())) { active = null; return; }
       state = { ...state, trailingCompositionText: null };
@@ -194,6 +196,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
     const beforeinput = (event: InputEvent) => {
       clearEscape();
       const inputType = event.inputType ?? '';
+      if (releasedKey && inputType.startsWith('history')) { event.preventDefault(); return; }
       if (!active || active.phase !== 'start' || !compatible(inputType)) {
         active = { id: ++nextEventId, phase: 'start', inputType, keyboard: false };
       }

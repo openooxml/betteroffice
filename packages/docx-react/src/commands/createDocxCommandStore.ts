@@ -165,6 +165,11 @@ export interface DocxCommandController {
     event: ChordEvent,
     mac: boolean
   ): { id: DocxCommandId; args: unknown; chord: string } | null;
+  /** The chord a keystroke presses, with who holds it now and who holds it by default. */
+  pressedChord(
+    event: ChordEvent,
+    mac: boolean
+  ): { chord: string; owner: string | undefined; fallback: string | undefined } | null;
   /** The shortcut id that holds a canonical chord. */
   shortcutOwner(chord: string): string | undefined;
   /** Chords the host set for a contributed command; undefined keeps the plugin's own. */
@@ -246,6 +251,17 @@ function platformDescriptor(id: DocxCommandId): DocxCommandDescriptor {
     platformDescriptors.set(key, filtered);
   }
   return filtered;
+}
+
+const defaultTables = new Map<boolean, ResolvedShortcuts>();
+
+function defaultShortcuts(mac: boolean): ResolvedShortcuts {
+  let table = defaultTables.get(mac);
+  if (!table) {
+    table = resolveDocxShortcuts(undefined, { mac });
+    defaultTables.set(mac, table);
+  }
+  return table;
 }
 
 export function createDocxCommandController(): DocxCommandController {
@@ -611,6 +627,16 @@ export function createDocxCommandController(): DocxCommandController {
       for (const [chord, id] of shortcutTable().owners) {
         if (isPluginCommandId(id) || !matchesChord(chord, event, mac)) continue;
         return { ...shortcutTarget(id), chord };
+      }
+      return null;
+    },
+    pressedChord(event, mac) {
+      const { owners } = shortcutTable();
+      const fallbacks = defaultShortcuts(mac).owners;
+      for (const chord of new Set([...owners.keys(), ...fallbacks.keys()])) {
+        if (matchesChord(chord, event, mac)) {
+          return { chord, owner: owners.get(chord), fallback: fallbacks.get(chord) };
+        }
       }
       return null;
     },

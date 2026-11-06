@@ -6,10 +6,11 @@ type Probe = {
   hostKeys: { key: string; prevented: boolean }[];
   swallow: string | null;
   pluginRuns: number;
+  errors: string[];
   load(bytes: number[], shortcuts: unknown): void;
   saved(): Promise<number[]>;
 };
-const PAGE = 'canvas[data-page-index="0"]';
+const PAGE = 'canvas[data-page-index="0"] >> nth=0';
 const W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
 
 async function docx(): Promise<number[]> {
@@ -20,9 +21,9 @@ async function docx(): Promise<number[]> {
   return [...await zip.generateAsync({ type: 'uint8array' })];
 }
 
-async function open(page: Page, mode: string, shortcuts: unknown) {
+async function open(page: Page, mode: string, shortcuts: unknown, query = '') {
   await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
-  await page.goto(`/docx-shortcuts.html?mode=${mode}`);
+  await page.goto(`/docx-shortcuts.html?mode=${mode}${query}`);
   const bytes = await docx();
   await page.evaluate(([data, map]) => (window as unknown as { __shortcuts: Probe }).__shortcuts.load(data as number[], map), [bytes, shortcuts] as const);
   await expect(page.locator(PAGE)).toBeVisible({ timeout: 120_000 });
@@ -118,14 +119,14 @@ for (const mode of ['worker', 'legacy']) {
     });
 
     test('remapped select all, copy, cut and paste keep working', async ({ page }) => {
-      const input = await open(page, mode, { selectAll: 'Mod+Alt+A', copy: 'Mod+Alt+C', cut: 'Mod+Alt+X', paste: 'Mod+Alt+P' });
+      const input = await open(page, mode, { selectAll: 'Mod+Alt+L', copy: 'Mod+Alt+A', cut: 'Mod+Alt+X', paste: 'Mod+Alt+P' });
+      await input.press('Control+Alt+L');
       await input.press('Control+Alt+A');
-      await input.press('Control+Alt+C');
       await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('Base text');
       await input.press('ControlOrMeta+End');
       await input.press('Control+Alt+P');
       await expect.poll(() => documentXml(page)).toContain('Base textBase text');
-      await input.press('Control+Alt+A');
+      await input.press('Control+Alt+L');
       await input.press('Control+Alt+X');
       await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('Base textBase text');
       await expect.poll(() => documentXml(page)).not.toContain('Base text');
@@ -150,6 +151,51 @@ for (const mode of ['worker', 'legacy']) {
       const moved = await open(page, mode, { 'plugin:acme.keys/run': 'Mod+Alt+R' });
       await moved.press('Control+Alt+R');
       await expect.poll(runs).toBe(1);
+    });
+
+    test('a chord the input also handles runs the command it was given', async ({ page }) => {
+      const input = await open(page, mode, { pasteAsPlainText: 'Mod+Z' });
+      await clipboard(page);
+      await input.press('q');
+      await input.press('Control+Z');
+      await expect.poll(() => documentXml(page)).toContain('RICH');
+      expect(await documentXml(page)).toContain('q');
+    });
+
+    test('a native chord held by an unavailable plugin does nothing', async ({ page }) => {
+      const input = await open(page, mode, { 'plugin:absent.keys/run': 'Mod+X' });
+      await page.evaluate(() => navigator.clipboard.writeText('KEEP'));
+      await input.press('Control+A');
+      await input.press('Control+X');
+      await page.waitForTimeout(300);
+      expect(await documentXml(page)).toContain('Base text');
+      expect(await page.evaluate(() => navigator.clipboard.readText())).toBe('KEEP');
+    });
+
+    test('a second editor on the page keeps a released chord released', async ({ page }) => {
+      const input = await open(page, mode, { paste: null }, '&two=1');
+      await clipboard(page);
+      await input.press('Control+V');
+      expect(await documentXml(page)).not.toContain('RICH');
+    });
+
+    test('a remapped paste whose target moved is refused and reported', async ({ page }) => {
+      const input = await open(page, mode, { paste: 'Mod+Alt+P' });
+      await clipboard(page);
+      await page.evaluate(() => {
+        const { clipboard } = navigator;
+        const later = <T,>(value: Promise<T>) => new Promise<T>((resolve) => setTimeout(() => resolve(value), 600));
+        const read = clipboard.read.bind(clipboard);
+        const readText = clipboard.readText.bind(clipboard);
+        clipboard.read = () => later(read());
+        clipboard.readText = () => later(readText());
+      });
+      await input.press('Control+Alt+P');
+      await input.press('q');
+      await expect.poll(() => page.evaluate(() => (window as unknown as { __shortcuts: Probe }).__shortcuts.errors.length)).toBe(1);
+      const xml = await documentXml(page);
+      expect(xml).toContain('q');
+      expect(xml).not.toContain('RICH');
     });
 
     test('a host chord over a default reports the displaced command', async ({ page }) => {

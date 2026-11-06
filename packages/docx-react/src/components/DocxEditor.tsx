@@ -1820,6 +1820,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
     tableSelection,
     shortcuts,
     onShortcutIssue,
+    onError,
   });
 
   // Handle table insert from toolbar

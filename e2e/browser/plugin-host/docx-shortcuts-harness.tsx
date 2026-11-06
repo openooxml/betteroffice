@@ -7,6 +7,7 @@ import '../../../packages/docx-react/src/styles/editor.css';
 
 setGoogleFontsEnabled(false);
 const worker = new URLSearchParams(location.search).get('mode') !== 'legacy';
+const second = new URLSearchParams(location.search).has('two');
 const route: Partial<DocxEditorProps> = worker ? {} : { legacySyncApi: true, experimentalWorkerOpen: false } as never;
 let open: (buffer: ArrayBuffer, shortcuts: DocxShortcuts) => void = () => {};
 const probe = {
@@ -15,6 +16,7 @@ const probe = {
   hostKeys: [] as { key: string; prevented: boolean }[],
   swallow: null as string | null,
   pluginRuns: 0,
+  errors: [] as string[],
   load(bytes: number[], shortcuts: DocxShortcuts) { open(Uint8Array.from(bytes).buffer, shortcuts); },
   async saved() { return [...new Uint8Array((await this.editor!.save())!)]; },
 };
@@ -39,8 +41,11 @@ const measurementFontProvider = { resolve: () => async () => (await fetch(fontUr
 function Harness() {
   const [state, setState] = useState<{ buffer: ArrayBuffer; shortcuts: DocxShortcuts } | null>(null);
   open = (buffer, shortcuts) => setState({ buffer, shortcuts });
-  return state && <DocxEditor {...route} ref={(editor) => { probe.editor = editor; }} documentBuffer={state.buffer}
-    fonts={fonts} measurementFontProvider={measurementFontProvider} shortcuts={state.shortcuts} plugins={plugins}
-    onShortcutIssue={(issue) => probe.issues.push(issue)} />;
+  return state && <>
+    <div style={{ height: second ? '50%' : '100%' }}><DocxEditor {...route} ref={(editor) => { probe.editor = editor; }} documentBuffer={state.buffer}
+      fonts={fonts} measurementFontProvider={measurementFontProvider} shortcuts={state.shortcuts} plugins={plugins}
+      onShortcutIssue={(issue) => probe.issues.push(issue)} onError={(error) => probe.errors.push(error.message)} /></div>
+    {second && <div style={{ height: '50%' }}><DocxEditor {...route} documentBuffer={state.buffer.slice(0)} fonts={fonts} measurementFontProvider={measurementFontProvider} /></div>}
+  </>;
 }
 createRoot(document.getElementById('root')!).render(<Harness />);

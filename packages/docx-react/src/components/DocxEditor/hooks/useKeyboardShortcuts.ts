@@ -17,17 +17,6 @@ const FIELD_COMMANDS: ReadonlySet<DocxCommandId> = new Set(['save', 'open', 'fin
 const REPEATABLE: ReadonlySet<DocxCommandId> = new Set(['undo', 'redo']);
 const FIND_REPLACE: ReadonlySet<DocxCommandId> = new Set(['find', 'replace']);
 
-/** Chords the text input or the browser acts on by themselves, with the action they mean. */
-const INPUT_CHORDS: ReadonlyMap<string, string> = new Map([
-  ['Mod+a', 'selectAll'],
-  ['Mod+c', 'copy'],
-  ['Mod+x', 'cut'],
-  ['Mod+v', 'paste'],
-  ['Mod+Shift+v', 'pasteAsPlainText'],
-  ['Mod+b', 'bold'],
-  ['Mod+i', 'italic'],
-  ['Mod+u', 'underline'],
-]);
 const CLIPBOARD_ACTIONS: ReadonlySet<string> = new Set([
   'copy',
   'cut',
@@ -36,10 +25,17 @@ const CLIPBOARD_ACTIONS: ReadonlySet<string> = new Set([
 ]);
 const PLAIN_PASTE_CHORDS: ReadonlySet<string> = new Set(['Mod+v', 'Mod+Shift+v']);
 
+const NATIVE_CHORDS: ReadonlyMap<string, DocxCommandId> = new Map<string, DocxCommandId>([
+  ['Mod+a', 'selectAll'],
+  ['Mod+c', 'copy'],
+  ['Mod+x', 'cut'],
+  ['Mod+v', 'paste'],
+]);
+
 /** Whether `id` on `chord` is the browser's own gesture, which needs no permission. */
 function isNativeGesture(id: DocxCommandId, chord: string): boolean {
   if (id === 'pasteAsPlainText') return PLAIN_PASTE_CHORDS.has(chord);
-  return INPUT_CHORDS.get(chord) === id && (CLIPBOARD_ACTIONS.has(id) || id === 'selectAll');
+  return NATIVE_CHORDS.get(chord) === id;
 }
 
 function isEditorInput(target: EventTarget | null): target is Element {
@@ -73,6 +69,7 @@ export function useKeyboardShortcuts({
   tableSelection,
   shortcuts,
   onShortcutIssue,
+  onError,
 }: {
   commands: DocxCommandController;
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
@@ -81,7 +78,10 @@ export function useKeyboardShortcuts({
   tableSelection?: ReturnType<typeof useTableSelection>;
   shortcuts?: DocxShortcuts;
   onShortcutIssue?: (issue: ShortcutIssue) => void;
+  onError?: (error: Error, info: { recoverable: true }) => void;
 }) {
+  const errorRef = useRef(onError);
+  errorRef.current = onError;
   const optionsRef = useRef({ disableFindReplaceShortcuts, tableSelection, shortcuts });
   optionsRef.current = { disableFindReplaceShortcuts, tableSelection, shortcuts };
   const issueRef = useRef(onShortcutIssue);
@@ -105,21 +105,24 @@ export function useKeyboardShortcuts({
       commands.ownsChrome(target);
 
     const handleInputChord = (event: KeyboardEvent) => {
-      if (!isEditorInput(event.target)) return;
+      if (!isEditorInput(event.target) || !owns(event.target)) return;
       disarmClipboardGesture(event.target);
       if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
-      if (!owns(event.target)) return;
+      if (!event.ctrlKey && !event.metaKey && !event.altKey && !/^F\d/.test(event.key)) return;
       const mac = isMacPlatform();
-      for (const [chord, action] of INPUT_CHORDS) {
-        if (!matchesChord(chord, event, mac) && !matchesChord(chord, event, !mac)) continue;
-        const owner = commands.shortcutOwner(chord);
-        if (owner !== action) releaseKeyFromInput(event);
-        if (owner === 'pasteAsPlainText' && PLAIN_PASTE_CHORDS.has(chord)) {
-          armClipboardGesture(event.target, 'plain');
-        } else if (owner === undefined && CLIPBOARD_ACTIONS.has(action)) {
-          armClipboardGesture(event.target, 'ignore');
-        }
+      const pressed = commands.pressedChord(event, mac) ?? commands.pressedChord(event, !mac);
+      if (!pressed) {
+        const contributed = commands.pluginShortcuts();
+        if (contributed.some(({ chord }) => matchesChord(chord, event, mac))) releaseKeyFromInput(event);
         return;
+      }
+      const { chord, owner, fallback } = pressed;
+      if (owner !== fallback) releaseKeyFromInput(event);
+      if (fallback === undefined || !CLIPBOARD_ACTIONS.has(fallback)) return;
+      if (owner === 'pasteAsPlainText' && PLAIN_PASTE_CHORDS.has(chord)) {
+        armClipboardGesture(event.target, 'plain');
+      } else if (owner !== fallback) {
+        armClipboardGesture(event.target, 'ignore');
       }
     };
 
@@ -144,6 +147,7 @@ export function useKeyboardShortcuts({
           .find(({ chord }) => matchesChord(chord, event, mac));
         if (!contributed || isForeignTextField(event.target)) return;
         event.preventDefault();
+        if (isEditorInput(event.target)) disarmClipboardGesture(event.target);
         if (!event.repeat) void commands.store.execute(contributed.id, null);
         return;
       }
@@ -154,8 +158,13 @@ export function useKeyboardShortcuts({
       const state = commands.store.getState(id, args as never);
       if (!state.enabled && state.disabledReason.code === 'host-disabled') return;
       event.preventDefault();
+      if (isEditorInput(event.target)) disarmClipboardGesture(event.target);
       if (event.repeat && !REPEATABLE.has(id)) return;
-      void commands.store.execute(id, args as never);
+      void commands.store.execute(id, args as never).then((result) => {
+        if (!result.ok && (CLIPBOARD_ACTIONS.has(id) || id === 'selectAll')) {
+          errorRef.current?.(new Error(result.failure.message), { recoverable: true });
+        }
+      });
     };
 
     document.addEventListener('keydown', handleInputChord, true);
