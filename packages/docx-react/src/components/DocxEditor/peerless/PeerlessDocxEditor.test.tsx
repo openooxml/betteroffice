@@ -2784,7 +2784,7 @@ test('context paste refuses a target changed while clipboard permission is pendi
   const read = spyOn(navigator.clipboard, 'readText').mockImplementation(() => new Promise<string>((resolve) => { finish = resolve; }));
   restorers.push(() => read.mockRestore());
   fireEvent.contextMenu(view.getByTestId('docx-worker-paged-editor'));
-  fireEvent.click(view.getByRole('menuitem', { name: /^Paste/ }));
+  fireEvent.click(view.getByRole('menuitem', { name: /^Paste$/ }));
   await waitFor(() => expect(read).toHaveBeenCalled());
   snapshot.version += 1;
   await act(async () => finish('clipboard text'));

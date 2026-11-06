@@ -8,6 +8,7 @@ type Probe = {
   load(bytes: number[], shortcuts: unknown): void;
   saved(): Promise<number[]>;
 };
+const PAGE = 'canvas[data-page-index="0"]';
 const W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
 
 async function docx(): Promise<number[]> {
@@ -23,8 +24,8 @@ async function open(page: Page, mode: string, shortcuts: unknown) {
   await page.goto(`/docx-shortcuts.html?mode=${mode}`);
   const bytes = await docx();
   await page.evaluate(([data, map]) => (window as unknown as { __shortcuts: Probe }).__shortcuts.load(data as number[], map), [bytes, shortcuts] as const);
-  await expect(page.locator('.paged-editor__page canvas').first()).toBeVisible({ timeout: 120_000 });
-  const input = page.locator('.paged-editor__input, .paged-editor__yrs-input').first();
+  await expect(page.locator(PAGE)).toBeVisible({ timeout: 120_000 });
+  const input = page.locator('.paged-editor__input, [data-testid=yrs-input]').first();
   await input.focus();
   await input.press('ControlOrMeta+End');
   return input;
@@ -33,7 +34,7 @@ async function open(page: Page, mode: string, shortcuts: unknown) {
 async function clipboard(page: Page) {
   await page.evaluate(() => navigator.clipboard.write([new ClipboardItem({
     'text/plain': new Blob(['RICH'], { type: 'text/plain' }),
-    'text/html': new Blob(['<p><b>RICH</b></p>'], { type: 'text/html' }),
+    'text/html': new Blob(['<table><tr><td>RICH</td></tr></table>'], { type: 'text/html' }),
   })]));
 }
 
@@ -44,7 +45,7 @@ async function documentXml(page: Page): Promise<string> {
   return zip.file('word/document.xml')!.async('string');
 }
 
-const boldRich = /<w:r\b(?:(?!<\/w:r>).)*<w:b\b(?:(?!<\/w:r>).)*RICH/s;
+const richTable = /<w:tbl\b/;
 
 for (const mode of ['worker', 'legacy']) {
   test.describe(`docx host shortcuts, ${mode}`, () => {
@@ -58,7 +59,7 @@ for (const mode of ['worker', 'legacy']) {
       await input.press('Control+Alt+V');
       const xml = await documentXml(page);
       expect(xml).toContain('RICH');
-      expect(xml).not.toMatch(boldRich);
+      expect(xml).not.toMatch(richTable);
     });
 
     test('the default plain paste drops formatting', async ({ page }) => {
@@ -67,7 +68,7 @@ for (const mode of ['worker', 'legacy']) {
       await input.press('Control+Shift+V');
       const xml = await documentXml(page);
       expect(xml).toContain('RICH');
-      expect(xml).not.toMatch(boldRich);
+      expect(xml).not.toMatch(richTable);
     });
 
     test('a chord the host swallowed leaves the next paste rich', async ({ page }) => {
@@ -78,7 +79,7 @@ for (const mode of ['worker', 'legacy']) {
       expect(await documentXml(page)).not.toContain('RICH');
       await page.evaluate(() => { (window as unknown as { __shortcuts: Probe }).__shortcuts.swallow = null; });
       await input.press('Control+V');
-      expect(await documentXml(page)).toMatch(boldRich);
+      expect(await documentXml(page)).toMatch(richTable);
     });
 
     test('a released paste chord leaves the context menu working', async ({ page }) => {
@@ -86,7 +87,7 @@ for (const mode of ['worker', 'legacy']) {
       await clipboard(page);
       await input.press('Control+V');
       expect(await documentXml(page)).not.toContain('RICH');
-      await page.locator('.paged-editor__page').first().click({ button: 'right', position: { x: 200, y: 200 } });
+      await page.locator(PAGE).click({ button: 'right', position: { x: 200, y: 200 } });
       const paste = page.getByRole('menuitem', { name: /^Paste(?! as)/ });
       await expect(paste).not.toContainText('Ctrl');
       await paste.click();
@@ -95,7 +96,7 @@ for (const mode of ['worker', 'legacy']) {
 
     test('menus show the remapped chord and aria form', async ({ page }) => {
       await open(page, mode, { pasteAsPlainText: 'Mod+Alt+V', selectAll: null });
-      await page.locator('.paged-editor__page').first().click({ button: 'right', position: { x: 200, y: 200 } });
+      await page.locator(PAGE).click({ button: 'right', position: { x: 200, y: 200 } });
       const plain = page.getByRole('menuitem', { name: /plain text/i });
       await expect(plain).toContainText('Ctrl+Alt+V');
       await expect(plain).toHaveAttribute('aria-keyshortcuts', 'Control+Alt+V');
