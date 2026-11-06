@@ -39,6 +39,7 @@ use yrs::{
 };
 
 use crate::bridge::run_size_provenance::ParagraphSizes;
+use crate::format::KeptReason;
 use crate::{
     EditCtx, EditResult, EditingDoc, KIND_KEY, PARA_ID, ParagraphId, STORIES, StoryId, map_string,
     pilcrows, story_ref,
@@ -291,6 +292,13 @@ pub struct ParagraphSavePlan {
     pub patched_parts: Vec<(String, Vec<(u32, String)>)>,
     pub spliced_parts: Vec<SplicedPart>,
     pub section_spliced_parts: Vec<SplicedPart>,
+    /// Parts no paragraph of which can be spliced, because the parser does not read them as
+    /// written, whose changes are all run formatting: each is written from the model, or kept as
+    /// its source when that would drop structure.
+    pub whole_parts: Vec<SplicedPart>,
+    /// `(part path, ordinals)`: the paragraphs an edit changed or removed in a part with no splice
+    /// plan, which a whole write of it may rightly change.
+    pub touched_parts: Vec<(String, Vec<u32>)>,
 }
 
 /// A story part whose stories hold the paragraphs seeded from it that they still hold in the
@@ -312,6 +320,9 @@ pub struct SplicedPart {
     pub paragraph_patches: Vec<ParagraphPatchV1>,
     pub legacy_paragraphs: Vec<LegacyParagraphV1>,
     pub table_patches: Vec<S13TablePatch>,
+    /// The ordinals among `changed` whose text, embeds and paragraph properties are as seeded,
+    /// only their run formatting changed.
+    pub format_only: Vec<u32>,
 }
 
 impl Eq for SplicedPart {}
@@ -576,6 +587,12 @@ impl SourceIndex {
             docx_parse::serializer::element_span(&xml[start..], &[])
                 .is_none_or(|span| loses(&xml[start..][span]))
         })
+    }
+
+    fn part_xml(&self, part: &SourcePart) -> Option<String> {
+        let package = ooxml_opc::RetainedPackage::from_bytes(self.bytes()).ok()?;
+        let position = package.parts().position(|(path, _)| path == part.path())?;
+        String::from_utf8(package.read(position).ok()?).ok()
     }
 
     fn paragraph_xml(&self, part: &SourcePart, ordinal: u32) -> Option<String> {
@@ -3891,6 +3908,8 @@ impl EditingDoc {
             patched_parts: Vec::new(),
             spliced_parts: Vec::new(),
             section_spliced_parts: Vec::new(),
+            whole_parts: Vec::new(),
+            touched_parts: Vec::new(),
         };
         let metadata = self.source_metadata();
         let seeded = if let Some(ready) = ready {
@@ -3911,6 +3930,9 @@ impl EditingDoc {
                 continue;
             }
             if let Some(mut spliced) = spliced_part(&source, index, seeded, &live, &by_key) {
+                let same_stories = part_stories(seeded, part)
+                    .keys()
+                    .eq(part_stories(&live, part).keys());
                 if part.as_written {
                     for &ordinal in &spliced.changed {
                         let key = &part.backed[&ordinal][0];
@@ -3930,6 +3952,9 @@ impl EditingDoc {
                             seeded_markers: &was.markers,
                             live_markers: &now.markers,
                         };
+                        if same_stories && formatting_alone(was, now) {
+                            spliced.format_only.push(ordinal);
+                        }
                         match crate::paragraph_patch_plan::diff_paragraph_v1(
                             was.segments.as_deref().expect("seeded segments retained"),
                             now.segments.as_deref().expect("changed segments retained"),
@@ -3950,7 +3975,13 @@ impl EditingDoc {
                         .filter(|patch| !patch.run_edits.is_empty())
                         .map(|patch| patch.ordinal)
                         .collect();
-                    if !ends_with_inline_tail(seeded, part)
+                    let formatting_alone = !spliced.changed.is_empty()
+                        && spliced.format_only.len() == spliced.changed.len()
+                        && spliced.inserted.is_empty()
+                        && spliced.removed.is_empty()
+                        && spliced.table_patches.is_empty();
+                    if formatting_alone
+                        || !ends_with_inline_tail(seeded, part)
                         || (!source.rewrite_loses_source_runs(
                             part,
                             &rewritten,
@@ -3963,11 +3994,54 @@ impl EditingDoc {
                     {
                         plan.spliced_parts.push(spliced);
                     }
-                } else if part.kind == SourceStoryKind::Body {
-                    plan.section_spliced_parts.push(spliced);
+                } else {
+                    let formatted: Vec<u32> = spliced
+                        .changed
+                        .iter()
+                        .copied()
+                        .filter(|ordinal| !spliced.section_only.contains(ordinal))
+                        .collect();
+                    let formatting = formatted.iter().all(|ordinal| {
+                        let key = &part.backed[ordinal][0];
+                        let (_, was) = seeded_units[key.as_str()];
+                        let (_, now) = live_units[key.as_str()];
+                        formatting_alone(was, now)
+                    });
+                    if formatting && same_stories {
+                        spliced.format_only = formatted;
+                    }
+                    if formatting
+                        && same_stories
+                        && !spliced.changed.is_empty()
+                        && spliced.inserted.is_empty()
+                        && spliced.removed.is_empty()
+                        && spliced.table_patches.is_empty()
+                    {
+                        plan.whole_parts.push(spliced.clone());
+                    }
+                    if part.kind == SourceStoryKind::Body {
+                        plan.section_spliced_parts.push(spliced);
+                    }
                 }
             }
             if stories_of(seeded, part) != stories_of(&live, part) {
+                let touched: Vec<u32> = part
+                    .backed
+                    .iter()
+                    .filter(|(_, keys)| {
+                        keys.iter().any(|key| {
+                            seeded_units.get(key.as_str()).is_some_and(|(story, was)| {
+                                live_units.get(key.as_str()).is_none_or(|(now_story, now)| {
+                                    story != now_story
+                                        || was.blocks != now.blocks
+                                        || (was.digest != now.digest && !formatting_alone(was, now))
+                                })
+                            })
+                        })
+                    })
+                    .map(|(ordinal, _)| *ordinal)
+                    .collect();
+                plan.touched_parts.push((part.path().to_owned(), touched));
                 continue;
             }
             let mut patches = Vec::new();
@@ -4587,6 +4661,7 @@ fn spliced_part(
         paragraph_patches: Vec::new(),
         legacy_paragraphs: Vec::new(),
         table_patches: rows.tables,
+        format_only: Vec::new(),
     })
 }
 
@@ -4695,6 +4770,102 @@ fn reformatting_loses_fields(xml: &str) -> bool {
 /// such a paragraph would be rewritten from the model (a legacy paragraph) is written whole, as
 /// a part that cannot splice is.
 fn rewriting_loses_source_runs(xml: &str) -> bool {
+    source_rewrite_loss(xml, false).is_some()
+}
+
+/// The source paragraphs of a package, each part read once.
+pub(crate) struct SourceParagraphs {
+    index: Arc<SourceIndex>,
+    parts: HashMap<usize, Option<(String, Vec<std::ops::Range<usize>>)>>,
+}
+
+impl SourceParagraphs {
+    pub(crate) fn new(index: Arc<SourceIndex>) -> Self {
+        Self {
+            index,
+            parts: HashMap::new(),
+        }
+    }
+
+    /// Why saving the paragraph seeded as `key` rewritten from the model would lose content of
+    /// its source (see [`rewriting_loses_source_runs`]; a content control inside it counts too).
+    /// `None` for a paragraph with no source, or one that rewrites whole.
+    pub(crate) fn rewrite_loss(&mut self, key: &str) -> Option<KeptReason> {
+        let ((part, ordinal), _) = self.index.view_of(key)?;
+        let index = &self.index;
+        let source = &index.parts[part];
+        let Some((xml, cell_controls)) = self.parts.entry(part).or_insert_with(|| {
+            let xml = index.part_xml(source)?;
+            let controls = cell_control_spans(&xml)?;
+            Some((xml, controls))
+        }) else {
+            return Some(KeptReason::Unreadable);
+        };
+        let Some(start) = source
+            .occurrence(ordinal)
+            .map(|occurrence| occurrence.tag.start)
+        else {
+            return Some(KeptReason::Unreadable);
+        };
+        if cell_controls.iter().any(|span| span.contains(&start)) {
+            return Some(KeptReason::ContentControl);
+        }
+        let paragraph = xml
+            .get(start..)
+            .and_then(|rest| Some(&rest[docx_parse::serializer::element_span(rest, &[])?]));
+        match paragraph {
+            Some(paragraph) => source_rewrite_loss(paragraph, true),
+            None => Some(KeptReason::Unreadable),
+        }
+    }
+}
+
+/// The spans of `xml` taken by content controls that wrap a table cell (a `w:sdt` whose parent is
+/// a `w:tr`): rewriting a row drops such a wrapper, so the paragraphs inside one are kept.
+/// `None` on markup it cannot follow.
+fn cell_control_spans(xml: &str) -> Option<Vec<std::ops::Range<usize>>> {
+    let mut spans = Vec::new();
+    let mut open: Vec<(&str, usize)> = Vec::new();
+    let mut at = 0;
+    while let Some(found) = xml[at..].find('<') {
+        let start = at + found;
+        let rest = &xml[start..];
+        if let Some((_, close)) = [
+            ("<!--", "-->"),
+            ("<![CDATA[", "]]>"),
+            ("<?", "?>"),
+            ("<!", ">"),
+        ]
+        .into_iter()
+        .find(|(open, _)| rest.starts_with(open))
+        {
+            at = start + rest.find(close)? + close.len();
+            continue;
+        }
+        let end = start + rest.find('>')?;
+        let tag = &xml[start + 1..end];
+        at = end + 1;
+        let name = tag
+            .trim_start_matches('/')
+            .split(|c: char| c.is_whitespace() || c == '/')
+            .next()
+            .unwrap_or_default();
+        if tag.starts_with('/') {
+            let (opened, from) = open.pop()?;
+            if opened != name {
+                return None;
+            }
+            if name == "w:sdt" && open.last().is_some_and(|(parent, _)| *parent == "w:tr") {
+                spans.push(from..at);
+            }
+        } else if !tag.ends_with('/') {
+            open.push((name, start));
+        }
+    }
+    open.is_empty().then_some(spans)
+}
+
+fn source_rewrite_loss(xml: &str, content_controls: bool) -> Option<KeptReason> {
     let mut hyperlinks = 0usize;
     let mut fields = 0usize;
     let mut rest = xml;
@@ -4703,14 +4874,14 @@ fn rewriting_loses_source_runs(xml: &str) -> bool {
         for (open, close) in [("<!--", "-->"), ("<![CDATA[", "]]>"), ("<?", "?>")] {
             if rest.starts_with(open) {
                 let Some(end) = rest.find(close) else {
-                    return true;
+                    return Some(KeptReason::Unreadable);
                 };
                 rest = &rest[end + close.len()..];
                 continue 'scan;
             }
         }
         let Some(end) = rest.find('>') else {
-            return true;
+            return Some(KeptReason::Unreadable);
         };
         let tag = &rest[1..end];
         rest = &rest[end + 1..];
@@ -4723,8 +4894,11 @@ fn rewriting_loses_source_runs(xml: &str) -> bool {
             .unwrap_or_default();
         let local = name.rsplit_once(':').map_or(name, |(_, local)| local);
         match local {
-            "AlternateContent" => return true,
-            "br" if tag.contains("\"page\"") || tag.contains("\"column\"") => return true,
+            "AlternateContent" => return Some(KeptReason::AlternateContent),
+            "br" if tag.contains("\"page\"") || tag.contains("\"column\"") => {
+                return Some(KeptReason::Break);
+            }
+            "sdt" if content_controls => return Some(KeptReason::ContentControl),
             "hyperlink" if !empty => {
                 if closing {
                     hyperlinks = hyperlinks.saturating_sub(1);
@@ -4733,16 +4907,16 @@ fn rewriting_loses_source_runs(xml: &str) -> bool {
                 }
             }
             "bookmarkStart" | "bookmarkEnd" | "permStart" | "permEnd" if hyperlinks > 0 => {
-                return true;
+                return Some(KeptReason::HyperlinkMarker);
             }
             "fldChar" if !closing => {
                 if hyperlinks > 0 {
-                    return true;
+                    return Some(KeptReason::Field);
                 }
                 if tag.contains("\"begin\"") {
                     fields += 1;
                     if fields > 1 {
-                        return true;
+                        return Some(KeptReason::Field);
                     }
                 } else if tag.contains("\"end\"") {
                     fields = fields.saturating_sub(1);
@@ -4751,7 +4925,7 @@ fn rewriting_loses_source_runs(xml: &str) -> bool {
             _ => {}
         }
     }
-    false
+    None
 }
 
 /// `units` without, and then with, the segments after the last pilcrow.
@@ -4761,6 +4935,44 @@ fn ends_with_inline_tail(seeded: &HashMap<String, Arc<StoryState>>, part: &Sourc
     part_stories(seeded, part)
         .values()
         .any(|state| split_tail(&state.units).1.is_some_and(|tail| tail.inline))
+}
+
+/// Whether a paragraph's change is of run formatting alone: its markers, content, paragraph
+/// properties and every other run attribute are as they were.
+fn formatting_alone(was: &UnitState, now: &UnitState) -> bool {
+    let (Some(seeded), Some(live)) = (was.segments.as_deref(), now.segments.as_deref()) else {
+        return false;
+    };
+    was.markers == now.markers
+        && segments_without_formatting(seeded) == segments_without_formatting(live)
+}
+
+/// A paragraph's segments without their run attributes, adjacent text joined, as text that
+/// changes formatting only splits or merges where the attributes differ.
+fn segments_without_formatting(
+    segments: &[crate::StorySegment],
+) -> Vec<(crate::SegmentContent, BTreeMap<String, yrs::Any>)> {
+    let mut contents: Vec<(crate::SegmentContent, BTreeMap<String, yrs::Any>)> = Vec::new();
+    for segment in segments {
+        let attributes: BTreeMap<String, yrs::Any> = segment
+            .attributes
+            .iter()
+            .filter(|(key, value)| {
+                !crate::format::FORMATTING_ATTRS.contains(&key.as_str())
+                    && **value != yrs::Any::Null
+            })
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        if let crate::SegmentContent::Text(text) = &segment.content
+            && let Some((crate::SegmentContent::Text(joined), last)) = contents.last_mut()
+            && *last == attributes
+        {
+            joined.push_str(text);
+        } else {
+            contents.push((segment.content.clone(), attributes));
+        }
+    }
+    contents
 }
 
 fn split_tail(units: &[UnitState]) -> (&[UnitState], Option<&UnitState>) {

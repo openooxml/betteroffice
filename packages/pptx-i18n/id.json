@@ -93,6 +93,11 @@
     "canvasLabel": "Slide {current} dari {total}",
     "canvasLabelWithSelection": "Slide {current} dari {total}; objek terpilih {name}"
   },
+  "a11y": {
+    "slideWithTitle": "Slide {current} dari {total}: {title}",
+    "objectSelected": "{name} dipilih",
+    "editingText": "Mengedit {name}"
+  },
   "editor": {
     "appLabel": "Editor slide presentasi",
     "opening": "Membuka presentasi…",

@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
@@ -1369,10 +1370,24 @@ pub(crate) fn diff_paragraph_v1(
     live: &[StorySegment],
     context: PatchContext<'_>,
 ) -> Result<ParagraphPatchV1, LegacyParagraphV1> {
-    plan_paragraph(seeded, live, context, RunRules::Full).map_err(|legacy| {
-        plan_paragraph(seeded, live, context, RunRules::Basic)
+    let widened = Cell::new(false);
+    plan_paragraph(seeded, live, context, RunRules::Full, &widened).map_err(|legacy| {
+        if !widened.get() {
+            return legacy;
+        }
+        plan_paragraph(seeded, live, context, RunRules::Basic, &widened)
             .err()
             .unwrap_or(legacy)
+    })
+}
+
+/// Whether `changes` reach a key the full rules accept beyond the basic ones.
+fn widens(changes: &[AttrDeltaV1]) -> bool {
+    changes.iter().any(|delta| {
+        delta
+            .path
+            .first()
+            .is_some_and(|key| key == "fontFamily" || key == "characterSpacing")
     })
 }
 
@@ -1381,6 +1396,7 @@ fn plan_paragraph(
     live: &[StorySegment],
     context: PatchContext<'_>,
     rules: RunRules,
+    widened: &Cell<bool>,
 ) -> Result<ParagraphPatchV1, LegacyParagraphV1> {
     let before = snapshot(seeded)
         .map_err(|detail| context.legacy(PatchErrorCode::UnsupportedKey, detail))?;
@@ -1613,6 +1629,7 @@ fn plan_paragraph(
                         return Err(context.restyle("inserted run inheritance"));
                     }
                     let changes = deltas(donor_attrs, &token.attrs);
+                    widened.set(widened.get() || widens(&changes));
                     validate_theme_fonts(donor_attrs, &changes, &context, rules)?;
                     validate_deltas(&changes, rules.run_key(), &context)?;
                     if token.attrs.get("hyperlink") != donor_attrs.get("hyperlink") {
@@ -1678,6 +1695,7 @@ fn plan_paragraph(
                     }
                 }
                 run_changes = deltas(&old[i].attrs, &new[j].attrs);
+                widened.set(widened.get() || widens(&run_changes));
                 validate_theme_fonts(&old[i].attrs, &run_changes, &context, rules)?;
                 validate_deltas(&run_changes, rules.run_key(), &context)?;
                 if !verify_changes(&old[i].attrs, &run_changes, &new[j].attrs) {

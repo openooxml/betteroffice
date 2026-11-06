@@ -93,6 +93,11 @@
     "canvasLabel": "Слайд {current} из {total}",
     "canvasLabelWithSelection": "Слайд {current} из {total}; выбран объект {name}"
   },
+  "a11y": {
+    "slideWithTitle": "Слайд {current} из {total}: {title}",
+    "objectSelected": "Выбрано: {name}",
+    "editingText": "Редактирование: {name}"
+  },
   "editor": {
     "appLabel": "Редактор слайдов презентации",
     "opening": "Открытие презентации…",

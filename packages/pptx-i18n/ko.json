@@ -93,6 +93,11 @@
     "canvasLabel": "{total}개 중 {current}번째 슬라이드",
     "canvasLabelWithSelection": "{total}개 중 {current}번째 슬라이드, 선택한 개체 {name}"
   },
+  "a11y": {
+    "slideWithTitle": "{total}개 중 {current}번째 슬라이드: {title}",
+    "objectSelected": "{name} 선택됨",
+    "editingText": "{name} 편집 중"
+  },
   "editor": {
     "appLabel": "프레젠테이션 슬라이드 편집기",
     "opening": "프레젠테이션을 여는 중…",

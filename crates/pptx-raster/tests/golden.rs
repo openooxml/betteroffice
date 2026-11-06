@@ -109,6 +109,8 @@ fn slide(primitives: Vec<Primitive>) -> SurfaceDisplayList {
             color: "#fdfdfd".into(),
         }),
         primitives,
+        alt_text: Default::default(),
+        title_shape: None,
     }
 }
 

@@ -472,6 +472,145 @@ fn layout<'s>(
 
 /// The elements a rewritten paragraph may sit in: story roots and table cells, not content
 /// controls or other wrappers.
+/// The reason a splice records for a changed paragraph it writes as its source bytes.
+pub(crate) const KEPT_UNCHANGED: &str = "kept:structure";
+
+/// The elements whose count a paragraph whose run formatting alone changed must keep.
+const STRUCTURE: [&str; 29] = [
+    "w:hyperlink",
+    "w:smartTag",
+    "w:customXml",
+    "w:sdt",
+    "w:fldSimple",
+    "w:fldChar",
+    "w:instrText",
+    "w:br",
+    "w:tab",
+    "w:ruby",
+    "w:pict",
+    "w:object",
+    "w:drawing",
+    "mc:AlternateContent",
+    "mc:Fallback",
+    "w:txbxContent",
+    "w:p",
+    "w:tbl",
+    "w:bookmarkStart",
+    "w:bookmarkEnd",
+    "w:commentRangeStart",
+    "w:commentRangeEnd",
+    "w:commentReference",
+    "w:footnoteReference",
+    "w:endnoteReference",
+    "w:ins",
+    "w:del",
+    "w:moveFrom",
+    "w:moveTo",
+];
+
+/// The [`STRUCTURE`] elements `written` holds fewer of than `source`.
+pub(crate) fn dropped_structure(source: &str, written: &str) -> Vec<&'static str> {
+    let counts = |xml: &str| {
+        let mut counts = [0u32; STRUCTURE.len()];
+        for tag in tags(xml).unwrap_or_default() {
+            if !tag.end
+                && let Some(index) = STRUCTURE.iter().position(|name| *name == tag.name)
+            {
+                counts[index] += 1;
+            }
+        }
+        counts
+    };
+    let (before, after) = (counts(source), counts(written));
+    STRUCTURE
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| after[*index] < before[*index])
+        .map(|(_, name)| *name)
+        .collect()
+}
+
+/// The elements outside paragraphs that `written` holds fewer of than `source`: table, cell and
+/// section properties and the like, which a paragraph's own save never touches.
+pub(crate) fn dropped_outside_paragraphs(source: &str, written: &str) -> Vec<String> {
+    let counts = |xml: &'_ str| {
+        let mut counts: BTreeMap<String, u32> = BTreeMap::new();
+        let mut depth = 0usize;
+        for tag in tags(xml).unwrap_or_default() {
+            if tag.name == "w:p" {
+                if tag.end {
+                    depth = depth.saturating_sub(1);
+                } else if !tag.empty {
+                    depth += 1;
+                }
+            } else if depth == 0 && !tag.end {
+                *counts.entry(tag.name.to_owned()).or_default() += 1;
+            }
+        }
+        counts
+    };
+    let after = counts(written);
+    counts(source)
+        .into_iter()
+        .filter(|(name, count)| after.get(name).copied().unwrap_or_default() < *count)
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// The reason recorded for a paragraph kept as its source, its ordinal and what writing it would
+/// have dropped.
+fn kept_reason(ordinal: u32, dropped: &[&str]) -> String {
+    format!("{KEPT_UNCHANGED}:{ordinal}:{}", dropped.join(","))
+}
+
+/// The ordinal and dropped elements in a reason from [`kept_reason`].
+pub(crate) fn parse_kept_reason(reason: &str) -> Option<(u32, Vec<String>)> {
+    let (ordinal, dropped) = reason
+        .strip_prefix(KEPT_UNCHANGED)?
+        .strip_prefix(':')?
+        .split_once(':')?;
+    Some((
+        ordinal.parse().ok()?,
+        dropped.split(',').map(str::to_owned).collect(),
+    ))
+}
+
+/// The start of the text of a paragraph.
+pub(crate) fn paragraph_text(xml: &str, limit: usize) -> Option<String> {
+    let mut text = String::new();
+    let mut open = None;
+    for tag in tags(xml)? {
+        if tag.name != "w:t" {
+            continue;
+        }
+        if tag.end {
+            if let Some(start) = open.take() {
+                text.push_str(&unescaped(xml, start..tag.range.start)?);
+            }
+        } else if !tag.empty {
+            open = Some(tag.range.end);
+        }
+        if text.chars().count() >= limit {
+            break;
+        }
+    }
+    Some(text.chars().take(limit).collect())
+}
+
+/// Whether every change to `part` is of run formatting alone, so that no save of it has to give
+/// up a source paragraph's structure to record what the user did.
+pub(crate) fn format_only_part(part: &S13SplicedPart) -> bool {
+    let format_only: BTreeSet<u32> = part.format_only.iter().copied().collect();
+    !part.changed.is_empty()
+        && part.inserted.is_empty()
+        && part.removed.is_empty()
+        && part.table_patches.is_empty()
+        && part
+            .changed
+            .iter()
+            .all(|ordinal| format_only.contains(ordinal))
+}
+
 /// The content of a block-level content control: a paragraph in it is replaced in place, its
 /// control's properties and its sibling paragraphs kept, as one directly in a story is.
 const BLOCK_CONTROL_CONTENT: &str = "w:sdtContent";
@@ -1376,13 +1515,14 @@ fn splice_story_part_inner(
     }) {
         return None;
     }
+    let planned: BTreeSet<u32> = part.changed.iter().copied().collect();
     let mut patched_recording;
     let recorded = if patched.is_empty() {
         recorded
     } else {
         patched_recording = recorded.clone();
         for (&ordinal, xml) in patched {
-            if !part.changed.contains(&ordinal) {
+            if !planned.contains(&ordinal) {
                 return None;
             }
             let projected = recorded.written.get(&ordinal)?;
@@ -1470,6 +1610,21 @@ fn splice_story_part_inner(
             replaced.insert(ordinal);
         }
     }
+    let format_only: BTreeSet<u32> = part.format_only.iter().copied().collect();
+    let formatting_alone = format_only_part(part);
+    replaced.retain(|ordinal| {
+        let edited = format_only.contains(ordinal);
+        if !edited && (!formatting_alone || changed.contains(ordinal)) {
+            return true;
+        }
+        let dropped = dropped_structure(&source[spans[ordinal].clone()], &written[ordinal]);
+        if !dropped.is_empty() && edited {
+            options
+                .replace_reasons
+                .push(kept_reason(*ordinal, &dropped));
+        }
+        dropped.is_empty()
+    });
     let anchors: BTreeSet<u32> = inserted
         .iter()
         .map(|(anchor, _)| anchor.ordinal())
@@ -1891,7 +2046,11 @@ pub(crate) fn replace_story_part(
     part: &S13SplicedPart,
     assignments: &BTreeMap<u32, String>,
     patched: &BTreeMap<u32, String>,
+    reasons: &mut Vec<String>,
 ) -> Option<String> {
+    let format_only: BTreeSet<u32> = part.format_only.iter().copied().collect();
+    let changed: BTreeSet<u32> = part.changed.iter().copied().collect();
+    let formatting_alone = format_only_part(part);
     if recorded.conflict
         || recorded.written.len() != part.paragraphs.len()
         || part
@@ -1903,7 +2062,7 @@ pub(crate) fn replace_story_part(
     }
     let source_assignments = assignments
         .iter()
-        .filter(|(ordinal, _)| !part.changed.contains(ordinal) || !patched.contains_key(*ordinal))
+        .filter(|(ordinal, _)| !changed.contains(*ordinal) || !patched.contains_key(*ordinal))
         .map(|(&ordinal, id)| (ordinal, id.clone()))
         .collect();
     let source = patch_paragraph_ids(source, &source_assignments, true)?;
@@ -1938,7 +2097,7 @@ pub(crate) fn replace_story_part(
         }
         let range = span(ordinal)?;
         let paragraph = &source[range.clone()];
-        if part.changed.contains(&ordinal) || !marks(paragraph)?.admit(&marks(xml)?) {
+        if changed.contains(&ordinal) || !marks(paragraph)?.admit(&marks(xml)?) {
             let xml = if let Some(patched) = patched.get(&ordinal) {
                 let id = assignments
                     .get(&ordinal)
@@ -1957,6 +2116,16 @@ pub(crate) fn replace_story_part(
             } else {
                 replacement_xml(&scopes, range.start, serialized, xml)?
             };
+            let edited = format_only.contains(&ordinal);
+            if edited || (formatting_alone && !changed.contains(&ordinal)) {
+                let dropped = dropped_structure(paragraph, &xml);
+                if !dropped.is_empty() {
+                    if edited {
+                        reasons.push(kept_reason(ordinal, &dropped));
+                    }
+                    continue;
+                }
+            }
             edits.push((range, 2, xml));
         }
     }
@@ -2003,6 +2172,7 @@ pub(crate) fn splice_source_direct(
     part: &S13SplicedPart,
     assignments: &BTreeMap<u32, String>,
     patched: &BTreeMap<u32, String>,
+    replace_reasons: &mut Vec<String>,
 ) -> Option<String> {
     if recorded.conflict
         || !part.table_patches.is_empty()
@@ -2150,9 +2320,17 @@ pub(crate) fn splice_source_direct(
     };
     let occurrences = paragraph_occurrences(&source)?;
     let span = |ordinal: u32| paragraph_span(&source, occurrences.get(ordinal as usize)?);
+    let format_only: BTreeSet<u32> = part.format_only.iter().copied().collect();
     let mut edits: Vec<(Range<usize>, u8, String)> = Vec::new();
     for &ordinal in &changed {
         let xml = &patched[&ordinal];
+        if format_only.contains(&ordinal) {
+            let dropped = dropped_structure(&source[span(ordinal)?], xml);
+            if !dropped.is_empty() {
+                replace_reasons.push(kept_reason(ordinal, &dropped));
+                continue;
+            }
+        }
         let projected = &recorded.written[&ordinal];
         let id = assignments.get(&ordinal).cloned().or_else(|| {
             paragraph_occurrences(projected).and_then(|all| all.first()?.para_id.clone())
@@ -2288,6 +2466,7 @@ mod tests {
         let serialized =
             format!("{SERIALIZED_ROOT}<w:body>{before}{body}{after}</w:body></w:document>");
         let part = S13SplicedPart {
+            format_only: Vec::new(),
             part: "word/document.xml".to_owned(),
             sha256: String::new(),
             paragraphs: written.iter().filter_map(|(ordinal, _)| *ordinal).collect(),
@@ -2369,6 +2548,7 @@ mod tests {
             "{SERIALIZED_ROOT}<w:body>{heading}{inserted}{written_start}{written_end}</w:body></w:document>"
         );
         let part = S13SplicedPart {
+            format_only: Vec::new(),
             part: "word/document.xml".to_owned(),
             sha256: String::new(),
             paragraphs: vec![0, 1, 2],
@@ -2386,7 +2566,8 @@ mod tests {
                 &recorded,
                 &part,
                 &BTreeMap::new(),
-                &BTreeMap::new()
+                &BTreeMap::new(),
+                &mut Vec::new()
             ),
             Some(body(&format!("{heading}{inserted}{start}{end}")))
         );
@@ -2436,6 +2617,7 @@ mod tests {
             }
         }
         let part = S13SplicedPart {
+            format_only: Vec::new(),
             part: "word/document.xml".to_owned(),
             sha256: String::new(),
             paragraphs: written.iter().map(|(ordinal, _)| *ordinal).collect(),
@@ -2453,6 +2635,7 @@ mod tests {
             &part,
             &BTreeMap::new(),
             &BTreeMap::new(),
+            &mut Vec::new(),
         )
     }
 
@@ -2473,6 +2656,7 @@ mod tests {
             ..RecordedParagraphs::default()
         };
         let part = S13SplicedPart {
+            format_only: Vec::new(),
             part: "word/document.xml".to_owned(),
             sha256: String::new(),
             paragraphs: vec![0],
@@ -2492,6 +2676,7 @@ mod tests {
                 &part,
                 &BTreeMap::new(),
                 &BTreeMap::new(),
+                &mut Vec::new(),
             )
             .is_none()
         );
@@ -2507,6 +2692,7 @@ mod tests {
                 &part,
                 &BTreeMap::new(),
                 &BTreeMap::new(),
+                &mut Vec::new(),
             ),
             Some(source.replace(host, &format!("{host}{}", recorded.inserted[0])))
         );
@@ -2568,6 +2754,7 @@ mod tests {
                 &part,
                 &BTreeMap::new(),
                 &BTreeMap::from([(0, link.to_owned())]),
+                &mut Vec::new(),
             )
             .is_none()
         );
@@ -2585,6 +2772,7 @@ mod tests {
             ..RecordedParagraphs::default()
         };
         let part = S13SplicedPart {
+            format_only: Vec::new(),
             part: "word/document.xml".to_owned(),
             sha256: String::new(),
             paragraphs: vec![0],
@@ -2603,6 +2791,7 @@ mod tests {
                 &part,
                 &BTreeMap::new(),
                 &BTreeMap::from([(0, patched.clone())]),
+                &mut Vec::new(),
             ),
             Some(source.replace(host, &patched))
         );
@@ -2615,6 +2804,7 @@ mod tests {
                 &part,
                 &BTreeMap::new(),
                 &BTreeMap::from([(0, patched)]),
+                &mut Vec::new(),
             )
             .is_none()
         );
@@ -2638,6 +2828,7 @@ mod tests {
                 &part,
                 &BTreeMap::new(),
                 &BTreeMap::from([(0, patched.to_owned())]),
+                &mut Vec::new(),
             )
             .is_none()
         );
@@ -2794,6 +2985,7 @@ mod tests {
                 &part,
                 &BTreeMap::new(),
                 &patches,
+                &mut Vec::new(),
             )
             .is_none()
         );
@@ -2872,6 +3064,7 @@ mod tests {
             &part,
             &BTreeMap::from([(0, "00000001".to_owned())]),
             &BTreeMap::from([(0, patched)]),
+            &mut Vec::new(),
         )
         .unwrap();
         assert!(saved.contains("<w14:token w14:val=\"retained\"/>"));
@@ -3011,6 +3204,7 @@ mod tests {
             ..RecordedParagraphs::default()
         };
         let part = S13SplicedPart {
+            format_only: Vec::new(),
             part: "word/document.xml".to_owned(),
             sha256: String::new(),
             paragraphs: vec![0, 2],
@@ -3055,6 +3249,7 @@ mod tests {
                 ..RecordedParagraphs::default()
             };
             let part = S13SplicedPart {
+                format_only: Vec::new(),
                 part: "word/document.xml".to_owned(),
                 sha256: String::new(),
                 paragraphs: vec![0, 1],
@@ -3137,6 +3332,7 @@ mod tests {
                 ..RecordedParagraphs::default()
             };
             let part = S13SplicedPart {
+                format_only: Vec::new(),
                 part: format!("word/{kind}s.xml"),
                 sha256: String::new(),
                 paragraphs: vec![0],
@@ -3155,10 +3351,50 @@ mod tests {
                     &part,
                     &BTreeMap::new(),
                     &BTreeMap::from([(0, patched.to_owned())]),
+                    &mut Vec::new(),
                 )
                 .is_none()
             );
         }
+    }
+
+    #[test]
+    fn a_direct_splice_keeps_a_formatting_change_whose_patch_would_drop_structure() {
+        let kept =
+            "<w:p><w:hyperlink w:anchor=\"target\"><w:r><w:t>Old</w:t></w:r></w:hyperlink></w:p>";
+        let source = body(kept);
+        let written = "<w:p><w:r><w:t>Old</w:t></w:r></w:p>".to_owned();
+        let serialized = body(&written);
+        let recorded = RecordedParagraphs {
+            written: HashMap::from([(0, written.clone())]),
+            order: vec![Some(0)],
+            ..RecordedParagraphs::default()
+        };
+        let part = S13SplicedPart {
+            format_only: vec![0],
+            part: "word/document.xml".to_owned(),
+            sha256: String::new(),
+            paragraphs: vec![0],
+            changed: vec![0],
+            inserted: Vec::new(),
+            removed: Vec::new(),
+            paragraph_patches: Vec::new(),
+            legacy_paragraphs: Vec::new(),
+            table_patches: Vec::new(),
+        };
+        let mut reasons = Vec::new();
+        let saved = splice_source_direct(
+            &source,
+            &serialized,
+            &recorded,
+            &part,
+            &BTreeMap::new(),
+            &BTreeMap::from([(0, written)]),
+            &mut reasons,
+        )
+        .expect("the source is kept");
+        assert_eq!(saved, source);
+        assert_eq!(reasons, [kept_reason(0, &["w:hyperlink"])]);
     }
 
     fn body(paragraphs: &str) -> String {

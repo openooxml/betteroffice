@@ -93,6 +93,11 @@
     "canvasLabel": "{total} 枚中 {current} 枚目のスライド",
     "canvasLabelWithSelection": "{total} 枚中 {current} 枚目のスライド、選択中のオブジェクト {name}"
   },
+  "a11y": {
+    "slideWithTitle": "{total} 枚中 {current} 枚目のスライド：{title}",
+    "objectSelected": "{name} を選択しました",
+    "editingText": "{name} を編集中"
+  },
   "editor": {
     "appLabel": "プレゼンテーション スライド エディター",
     "opening": "プレゼンテーションを開いています…",

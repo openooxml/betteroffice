@@ -93,6 +93,11 @@
     "canvasLabel": "{total} slayttan {current}. slayt",
     "canvasLabelWithSelection": "{total} slayttan {current}. slayt; seçili nesne {name}"
   },
+  "a11y": {
+    "slideWithTitle": "{total} slayttan {current}. slayt: {title}",
+    "objectSelected": "{name} seçildi",
+    "editingText": "{name} düzenleniyor"
+  },
   "editor": {
     "appLabel": "Sunu slayt düzenleyicisi",
     "opening": "Sunu açılıyor…",

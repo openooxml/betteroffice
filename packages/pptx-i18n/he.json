@@ -93,6 +93,11 @@
     "canvasLabel": "שקופית {current} מתוך {total}",
     "canvasLabelWithSelection": "שקופית {current} מתוך {total}; אובייקט נבחר {name}"
   },
+  "a11y": {
+    "slideWithTitle": "שקופית {current} מתוך {total}: {title}",
+    "objectSelected": "{name} נבחר",
+    "editingText": "עריכת {name}"
+  },
   "editor": {
     "appLabel": "עורך שקופיות למצגת",
     "opening": "פותח מצגת…",

@@ -4,7 +4,7 @@
 //! and re-emit unchanged markup, so every byte outside an explicitly changed
 //! paragraph remains authored exactly as it appeared in the source package.
 
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
@@ -35,8 +35,8 @@ use super::context::SerializerContext;
 use super::numbering::serialize_numbering_xml;
 use super::paragraph::serialize_paragraph;
 use super::paragraph_ids::{
-    COMMENTS_PART, S13ParagraphIds, S13SplicedPart, apply_assignments, comment_companions,
-    model_paragraph_ids, patch_comment_parts, patch_part,
+    COMMENTS_PART, S13ParagraphIds, S13SplicedPart, S13TouchedPart, S13WholePart,
+    apply_assignments, comment_companions, model_paragraph_ids, patch_comment_parts, patch_part,
 };
 use super::parts::{
     serialize_comments_extended_part, serialize_comments_extensible_part,
@@ -312,6 +312,7 @@ fn write_docx_s13_parts_with_warnings(
         return Ok((bytes, context.take_warnings()));
     }
     let relationships: IndexMap<_, _> = request.relationship_entries.iter().cloned().collect();
+    let reports_dropped = request.paragraph_ids.is_some();
     let paragraph_ids = request.paragraph_ids.take().unwrap_or_default();
     paragraph_ids.validate()?;
     if let Some(sections) = &paragraph_ids.section_edits {
@@ -368,10 +369,30 @@ fn write_docx_s13_parts_with_warnings(
         .filter(|part| part.part != COMMENTS_PART && !patched.contains_key(part.part.as_str()))
         .map(|part| (package.resolve_path(&part.part).to_owned(), part))
         .collect();
+    let whole: HashMap<String, &S13WholePart> = paragraph_ids
+        .whole_parts
+        .iter()
+        .filter(|part| part.part != COMMENTS_PART && !patched.contains_key(part.part.as_str()))
+        .map(|part| (package.resolve_path(&part.part).to_owned(), part))
+        .collect();
+    let touched: HashMap<String, &S13TouchedPart> = paragraph_ids
+        .touched_parts
+        .iter()
+        .map(|part| (package.resolve_path(&part.part).to_owned(), part))
+        .collect();
+    let kept_as_source: HashSet<String> = patched_parts.keys().cloned().collect();
     let stories = StoryParts {
         spliced: &spliced,
+        kept_as_source: &kept_as_source,
+        whole: &whole,
+        touched: &touched,
         assignments: &assignments,
         strict: paragraph_ids.section_edits.is_some(),
+        boundaries_stay: paragraph_ids
+            .section_edits
+            .as_ref()
+            .is_none_or(|sections| sections.edits.iter().all(|edit| edit.paragraph.is_none())),
+        reports_dropped,
         processed: RefCell::new(HashSet::new()),
     };
 
@@ -1193,8 +1214,15 @@ fn validate_selective_header_footer_parts(
 /// The story parts a save may splice into their source XML, and the paragraph IDs it assigns.
 struct StoryParts<'r> {
     spliced: &'r HashMap<String, &'r S13SplicedPart>,
+    /// Parts that replace whatever is serialized for them with their source bytes.
+    kept_as_source: &'r HashSet<String>,
+    whole: &'r HashMap<String, &'r S13WholePart>,
+    touched: &'r HashMap<String, &'r S13TouchedPart>,
     assignments: &'r HashMap<String, BTreeMap<u32, String>>,
     strict: bool,
+    /// No section edit of this save moves a paragraph's section boundary.
+    boundaries_stay: bool,
+    reports_dropped: bool,
     processed: RefCell<HashSet<String>>,
 }
 
@@ -1234,10 +1262,12 @@ fn patched_paragraphs(
     let error = |ordinal, code, detail: &str| {
         paragraph_patch_save_error(&part.part, Some(ordinal), code, detail)
     };
+    let changed: HashSet<u32> = part.changed.iter().copied().collect();
+    let paragraphs: HashSet<u32> = part.paragraphs.iter().copied().collect();
     let mut seen = HashSet::new();
     for legacy in &part.legacy_paragraphs {
         if !seen.insert(legacy.ordinal)
-            || !part.changed.contains(&legacy.ordinal)
+            || !changed.contains(&legacy.ordinal)
             || !legacy.code.is_unsupported()
         {
             return Err(error(
@@ -1262,8 +1292,8 @@ fn patched_paragraphs(
     };
     for patch in &part.paragraph_patches {
         if !seen.insert(patch.ordinal)
-            || !part.changed.contains(&patch.ordinal)
-            || !part.paragraphs.contains(&patch.ordinal)
+            || !changed.contains(&patch.ordinal)
+            || !paragraphs.contains(&patch.ordinal)
         {
             return Err(error(
                 patch.ordinal,
@@ -1352,6 +1382,8 @@ fn count_replace(
 struct StoryWrite {
     xml: String,
     spliced: bool,
+    /// Whether the part was written from the model, every paragraph re-serialized.
+    whole: bool,
 }
 
 impl StoryParts<'_> {
@@ -1375,7 +1407,38 @@ impl StoryParts<'_> {
             if self.strict && path == package.document_path {
                 return Err(save_error("section save requires a safe paragraph splice"));
             }
-            return serialize(context);
+            let xml = serialize(context)?;
+            if let Some(whole) = self.whole.get(path)
+                && let Some(source) = package
+                    .original_bytes(path)
+                    .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                && format!("{:x}", Sha256::digest(source.as_bytes()))
+                    == whole.sha256.to_ascii_lowercase()
+                && let dropped = dropped_names(source, &xml)
+                && !dropped.is_empty()
+            {
+                let kept = KeptSource::new(source);
+                let assignments = self.assignments.get(path);
+                for &ordinal in &whole.changed {
+                    record_kept(
+                        context,
+                        &kept,
+                        &whole.part,
+                        assignments,
+                        ordinal,
+                        "part",
+                        dropped.clone(),
+                    );
+                }
+                return Ok(source.to_owned());
+            }
+            let touched: Vec<u32> = self
+                .touched
+                .get(path)
+                .map(|part| part.touched.clone())
+                .unwrap_or_default();
+            self.report_dropped(package, path, &xml, &touched, context);
+            return Ok(xml);
         };
         self.processed.borrow_mut().insert(path.to_owned());
         let source = package
@@ -1385,19 +1448,172 @@ impl StoryParts<'_> {
         let assignments = self.assignments.get(path).unwrap_or(&empty);
         let strict = self.strict && path == package.document_path;
         if part.table_patches.is_empty() {
-            return Self::splice(source, part, assignments, strict, context, serialize)
-                .map(|written| written.xml);
+            let keeps = !strict || self.boundaries_stay;
+            let written =
+                Self::splice(source, part, assignments, strict, keeps, context, serialize)?;
+            if written.whole {
+                let touched = self.edited(path, part);
+                self.report_dropped(package, path, &written.xml, &touched, context);
+            }
+            return Ok(written.xml);
         }
         let mut staged = context.clone();
-        match Self::splice(source, part, assignments, strict, &mut staged, &serialize) {
+        let keeps = !strict || self.boundaries_stay;
+        match Self::splice(
+            source,
+            part,
+            assignments,
+            strict,
+            keeps,
+            &mut staged,
+            &serialize,
+        ) {
             Ok(written) if written.spliced => {
                 *context = staged;
                 Ok(written.xml)
             }
             Err(error) if strict => Err(error),
             Ok(_) if strict => Err(save_error("unsafe section paragraph splice")),
-            _ => serialize(context),
+            _ => {
+                let xml = serialize(context)?;
+                let touched = self.edited(path, part);
+                self.report_dropped(package, path, &xml, &touched, context);
+                Ok(xml)
+            }
         }
+    }
+
+    /// The ordinals of the paragraphs `part` removed or changed beyond their run formatting, and
+    /// those the planner found touched, as beside a table edit.
+    fn edited(&self, path: &str, part: &S13SplicedPart) -> Vec<u32> {
+        let mut touched = edited(part);
+        if let Some(planned) = self.touched.get(path) {
+            touched.extend(&planned.touched);
+        }
+        touched
+    }
+
+    /// Reports the structure a session save's whole write of `path` holds less of than its source,
+    /// outside the `touched` paragraphs of the edits, whose structure is theirs to change.
+    fn report_dropped(
+        &self,
+        package: &Package,
+        path: &str,
+        xml: &str,
+        touched: &[u32],
+        context: &mut SerializerContext,
+    ) {
+        let source = package
+            .original_bytes(path)
+            .and_then(|bytes| std::str::from_utf8(bytes).ok());
+        let Some(source) =
+            source.filter(|_| self.reports_dropped && !self.kept_as_source.contains(path))
+        else {
+            return;
+        };
+        if dropped_names(source, xml).is_empty() {
+            return;
+        }
+        let occurrences =
+            crate::paragraph_identity::paragraph_occurrences(source).unwrap_or_default();
+        let assigned = self.assignments.get(path);
+        let id_of = |occurrence: &crate::paragraph_identity::ParagraphOccurrence| {
+            assigned
+                .and_then(|ids| ids.get(&occurrence.ordinal))
+                .or(occurrence.para_id.as_ref())
+                .cloned()
+        };
+        let source_ids: HashSet<String> = occurrences.iter().filter_map(&id_of).collect();
+        let identified = source_ids.len() == occurrences.len();
+        let mut written = HashMap::new();
+        let mut unidentified: Vec<(String, std::ops::Range<usize>)> = Vec::new();
+        for occurrence in crate::paragraph_identity::paragraph_occurrences(xml).unwrap_or_default()
+        {
+            let Some(span) = super::splice::paragraph_span(xml, &occurrence) else {
+                continue;
+            };
+            match occurrence.para_id {
+                Some(id) if source_ids.contains(&id) => {
+                    written.insert(id, span);
+                }
+                _ if identified => {
+                    let text =
+                        super::splice::paragraph_text(&xml[span.clone()], 80).unwrap_or_default();
+                    unidentified.push((text, span));
+                }
+                _ => {}
+            }
+        }
+        let touched_set: HashSet<u32> = touched.iter().copied().collect();
+        let mut inside_source = Vec::new();
+        let mut inside_written = Vec::new();
+        let mut paragraphs = Vec::new();
+        for occurrence in &occurrences {
+            let Some(was) = super::splice::paragraph_span(source, occurrence) else {
+                continue;
+            };
+            let para_id = id_of(occurrence);
+            let text = super::splice::paragraph_text(&source[was.clone()], 80).unwrap_or_default();
+            let reassigned = para_id
+                .as_ref()
+                .filter(|id| {
+                    !text.is_empty()
+                        && !written.contains_key(*id)
+                        && !touched_set.contains(&occurrence.ordinal)
+                })
+                .and_then(|_| unidentified.iter().position(|(same, _)| *same == text))
+                .map(|at| unidentified.swap_remove(at).1);
+            let now = para_id
+                .as_ref()
+                .and_then(|id| written.get(id).cloned())
+                .or(reassigned);
+            let now = now.as_ref();
+            if touched_set.contains(&occurrence.ordinal) {
+                inside_written.extend(now.cloned());
+                inside_source.push(was);
+                continue;
+            }
+            if now.is_none() && !identified {
+                continue;
+            }
+            let lost = super::splice::dropped_structure(
+                &source[was.clone()],
+                now.map_or("", |now| &xml[now.clone()]),
+            );
+            if now.is_none() && text.is_empty() && lost == ["w:p"] {
+                inside_source.push(was);
+                continue;
+            }
+            if lost.is_empty() || paragraphs.len() == 200 {
+                continue;
+            }
+            paragraphs.push(super::context::DroppedParagraph {
+                ordinal: occurrence.ordinal,
+                para_id: para_id.unwrap_or_default(),
+                text,
+                dropped: lost.into_iter().map(str::to_owned).collect(),
+            });
+        }
+        inside_written.extend(unidentified.into_iter().map(|(_, span)| span));
+        let mut dropped: Vec<String> = super::splice::dropped_structure(
+            &without_spans(source, inside_source),
+            &without_spans(xml, inside_written),
+        )
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        if touched.is_empty() {
+            dropped.extend(super::splice::dropped_outside_paragraphs(source, xml));
+            dropped.dedup();
+        }
+        if dropped.is_empty() {
+            return;
+        }
+        context.add_structure_dropped(super::context::DroppedStructure {
+            part: path.to_owned(),
+            dropped,
+            paragraphs,
+        });
     }
 
     fn splice(
@@ -1405,6 +1621,7 @@ impl StoryParts<'_> {
         part: &S13SplicedPart,
         assignments: &BTreeMap<u32, String>,
         strict: bool,
+        keeps: bool,
         context: &mut SerializerContext,
         serialize: impl FnOnce(&mut SerializerContext) -> Result<String, ParseError>,
     ) -> Result<StoryWrite, ParseError> {
@@ -1437,6 +1654,7 @@ impl StoryParts<'_> {
             return Ok(StoryWrite {
                 xml: serialized,
                 spliced: false,
+                whole: true,
             });
         };
         super::permissions::keep(source, part, &mut written, &mut serialized);
@@ -1444,6 +1662,8 @@ impl StoryParts<'_> {
             return Err(save_error("section splice conflict"));
         }
         let empty = BTreeMap::new();
+        let original = part;
+        let formatting_alone = keeps && super::splice::format_only_part(original);
         let mut model_part;
         let (part, patches) = if model_only {
             model_part = part.clone();
@@ -1477,6 +1697,7 @@ impl StoryParts<'_> {
                 &mut reasons,
             )
             .or_else(|| {
+                reasons.clear();
                 super::splice::splice_source_direct(
                     source,
                     &serialized,
@@ -1484,41 +1705,107 @@ impl StoryParts<'_> {
                     part,
                     assignments,
                     patches,
+                    &mut reasons,
                 )
             })
         };
+        let part = original;
+        let kept = KeptSource::new(source);
         if let Some(spliced) = spliced {
             for reason in reasons {
-                count_replace(context, &part.part, 0, &reason)?;
+                if let Some((ordinal, dropped)) = super::splice::parse_kept_reason(&reason) {
+                    record_kept(
+                        context,
+                        &kept,
+                        &part.part,
+                        Some(assignments),
+                        ordinal,
+                        "paragraph",
+                        dropped,
+                    );
+                } else {
+                    count_replace(context, &part.part, 0, &reason)?;
+                }
             }
             return Ok(StoryWrite {
                 xml: spliced,
                 spliced: true,
+                whole: false,
             });
         }
-        if strict {
+        if strict && !formatting_alone {
             return Err(save_error("unsafe section paragraph splice"));
         }
         if !part.table_patches.is_empty() {
             return Ok(StoryWrite {
                 xml: serialized,
                 spliced: false,
+                whole: true,
             });
         }
-        if (!part.paragraph_patches.is_empty() || !part.legacy_paragraphs.is_empty())
-            && let Some(replaced) = super::splice::replace_story_part(
-                source,
-                &serialized,
-                &written,
-                part,
-                assignments,
-                &patched,
-            )
-        {
+        reasons.clear();
+        let replaced = ((!part.paragraph_patches.is_empty() || !part.legacy_paragraphs.is_empty())
+            && (!model_only || formatting_alone))
+            .then(|| {
+                super::splice::replace_story_part(
+                    source,
+                    &serialized,
+                    &written,
+                    part,
+                    assignments,
+                    &patched,
+                    &mut reasons,
+                )
+            })
+            .flatten()
+            .and_then(|xml| {
+                if strict {
+                    super::section_patch::restore_sections(source, &serialized, &xml, &written)
+                } else {
+                    Some(xml)
+                }
+            });
+        if let Some(replaced) = replaced {
+            for reason in &reasons {
+                if let Some((ordinal, dropped)) = super::splice::parse_kept_reason(reason) {
+                    record_kept(
+                        context,
+                        &kept,
+                        &part.part,
+                        Some(assignments),
+                        ordinal,
+                        "paragraph",
+                        dropped,
+                    );
+                }
+            }
             return Ok(StoryWrite {
                 xml: replaced,
                 spliced: false,
+                whole: false,
             });
+        }
+        let dropped = dropped_names(source, &serialized);
+        if formatting_alone && !dropped.is_empty() {
+            for &ordinal in &part.changed {
+                record_kept(
+                    context,
+                    &kept,
+                    &part.part,
+                    Some(assignments),
+                    ordinal,
+                    "part",
+                    dropped.clone(),
+                );
+            }
+            return Ok(StoryWrite {
+                xml: source.to_owned(),
+                spliced: false,
+                whole: false,
+            });
+        }
+        if strict {
+            return Err(save_error("unsafe section paragraph splice"));
         }
         for &ordinal in patched.keys() {
             count_replace(
@@ -1531,8 +1818,99 @@ impl StoryParts<'_> {
         Ok(StoryWrite {
             xml: serialized,
             spliced: false,
+            whole: true,
         })
     }
+}
+
+/// The ordinals of the paragraphs `part` removed or changed beyond their run formatting.
+fn edited(part: &S13SplicedPart) -> Vec<u32> {
+    let format_only: HashSet<u32> = part.format_only.iter().copied().collect();
+    part.changed
+        .iter()
+        .filter(|ordinal| !format_only.contains(*ordinal))
+        .chain(&part.removed)
+        .copied()
+        .collect()
+}
+
+/// `xml` without `spans`, of which one may hold another.
+fn without_spans(xml: &str, mut spans: Vec<std::ops::Range<usize>>) -> String {
+    spans.sort_by_key(|span| span.start);
+    let mut kept = String::with_capacity(xml.len());
+    let mut at = 0;
+    for span in spans {
+        if span.start >= at {
+            kept.push_str(&xml[at..span.start]);
+        }
+        at = at.max(span.end);
+    }
+    kept.push_str(&xml[at..]);
+    kept
+}
+
+/// The names of the elements a whole write of a part changing only formatting would lose.
+fn dropped_names(source: &str, written: &str) -> Vec<String> {
+    let mut dropped: Vec<String> = super::splice::dropped_structure(source, written)
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    for name in super::splice::dropped_outside_paragraphs(source, written) {
+        if !dropped.contains(&name) {
+            dropped.push(name);
+        }
+    }
+    dropped
+}
+
+/// A part's source XML, its paragraphs read once for the kept paragraphs a save describes.
+struct KeptSource<'x> {
+    xml: &'x str,
+    occurrences: OnceCell<Vec<crate::paragraph_identity::ParagraphOccurrence>>,
+}
+
+impl<'x> KeptSource<'x> {
+    fn new(xml: &'x str) -> Self {
+        Self {
+            xml,
+            occurrences: OnceCell::new(),
+        }
+    }
+}
+
+/// Counts a paragraph of `part` kept as its source and, for the first few, what it was and why.
+fn record_kept(
+    context: &mut SerializerContext,
+    source: &KeptSource<'_>,
+    part: &str,
+    assignments: Option<&BTreeMap<u32, String>>,
+    ordinal: u32,
+    scope: &'static str,
+    dropped: Vec<String>,
+) {
+    context.count_kept_unchanged(part);
+    if !context.wants_kept_paragraph() {
+        return;
+    }
+    let KeptSource { xml, occurrences } = source;
+    let occurrence = occurrences
+        .get_or_init(|| crate::paragraph_identity::paragraph_occurrences(xml).unwrap_or_default())
+        .get(ordinal as usize);
+    let text = occurrence
+        .and_then(|occurrence| super::splice::paragraph_span(xml, occurrence))
+        .and_then(|span| super::splice::paragraph_text(&xml[span], 80))
+        .unwrap_or_default();
+    context.add_kept_paragraph(super::context::KeptParagraph {
+        part: part.to_owned(),
+        ordinal,
+        para_id: assignments
+            .and_then(|assignments| assignments.get(&ordinal))
+            .cloned()
+            .or_else(|| occurrence.and_then(|occurrence| occurrence.para_id.clone())),
+        text,
+        scope,
+        dropped,
+    });
 }
 
 fn serialize_header_footer_parts(

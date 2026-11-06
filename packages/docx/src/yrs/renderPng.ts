@@ -56,7 +56,7 @@ export function createPngExporter(session: YrsSession) {
       const document = copy.materializeDocx();
       if (!document) throw new Error('renderPng needs a session opened from DOCX bytes');
       const bundled = fontProvider ?? (engineKind === 'native' ? await resolveCompleteFontProvider() : undefined);
-      const measure = createRustMeasureSource({ engine: copy, ...(bundled ? { bundled } : {}) });
+      const measure = createRustMeasureSource({ engine: copy, ...(bundled ? { bundled } : { standIns: true }) });
       measure.setCompat(document.package.settings?.compatibilityFlags);
       measure.setEmbeddedFaces(await extractEmbeddedFontFaces(document), appFaces(fonts));
       const renderEnv = documentRenderEnv(document);

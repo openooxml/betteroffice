@@ -93,6 +93,11 @@
     "canvasLabel": "Diapositiva {current} di {total}",
     "canvasLabelWithSelection": "Diapositiva {current} di {total}; oggetto selezionato {name}"
   },
+  "a11y": {
+    "slideWithTitle": "Diapositiva {current} di {total}: {title}",
+    "objectSelected": "{name} selezionato",
+    "editingText": "Modifica di {name}"
+  },
   "editor": {
     "appLabel": "Editor di diapositive di presentazione",
     "opening": "Apertura della presentazione…",

@@ -146,8 +146,9 @@ pub use canonical::{CanonicalItem, checksum, project_story, story_checksum, to_c
 pub use ctx::{EditCtx, EditOrigin, SuggestCtx};
 pub use engine::{EngineSession, EngineStats, RegionLayoutProgress};
 pub use format::{
-    ColorPatch, FontFamilyPatch, FormatPolicy, HYPERLINK, InlineFormatDelta, LanguagePatch, Patch,
-    SimpleFormat, StrikePatch, UnderlinePatch, highlight_color_name,
+    ColorPatch, FontFamilyPatch, FormatPolicy, HYPERLINK, InlineFormatDelta, KeptReason,
+    KeptUnchanged, LanguagePatch, Patch, SimpleFormat, StrikePatch, UnderlinePatch,
+    highlight_color_name,
 };
 pub use geometry::{
     GeometryEndpoint, GeometryParagraphOutline, GeometryPositionOutline, GeometryRange,

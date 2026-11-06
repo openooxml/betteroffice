@@ -202,6 +202,8 @@ export {
   captureSessionSave,
   saveYrsDocx,
   writeSessionSave,
+  type DocxDroppedStructure,
+  type DocxKeptParagraph,
   type DocxSavedDocument,
   type DocxCommentSaveIdentity,
   type DocxCommentSaveBaseline,
@@ -218,6 +220,8 @@ export {
   hostSaveMetadata,
   mergeDocxHostMetadata,
   proposalProjectionStories,
+  editorSaveKeptUnchanged,
+  editorSaveStructureDropped,
   saveEditorDocument,
   serialWorkerSaves,
   type EditorSaveRecord,
@@ -695,6 +699,24 @@ export interface YrsCommentInfo {
  */
 export type YrsChangeTarget = { revisionId: string } | YrsStoryRange;
 
+/**
+ * Why formatting through a table or a block content control kept a paragraph unchanged: saving it
+ * rewritten would drop content of its source, such as a text box, a page break or a nested field.
+ */
+export type YrsKeptReason =
+  | 'alternateContent'
+  | 'break'
+  | 'contentControl'
+  | 'field'
+  | 'hyperlinkMarker'
+  | 'unreadable';
+
+/** Receipt of {@link YrsSession.toggleMark}, {@link YrsSession.formatRange} and {@link YrsSession.clearFormatting}. */
+export interface YrsFormatReceipt {
+  /** The table-cell and content-control paragraphs left unchanged, counted by reason; empty when none were. */
+  keptUnchanged: Partial<Record<YrsKeptReason, number>>;
+}
+
 /** Receipt of {@link YrsSession.acceptChange} / {@link YrsSession.rejectChange}. */
 export interface YrsResolveReceipt {
   /** The revision ids resolved by the op (resolution order, deduplicated). */
@@ -993,7 +1015,7 @@ export interface YrsTablePropertiesPatch {
 export type YrsUndoCaptureMode = 'auto' | 'manual';
 
 /** Outcome of a target-resolving helper edit. @internal */
-export type YrsTargetEditResult = { ok: true; version: string } | DocxEditRefusal;
+export type YrsTargetEditResult = { ok: true; version: string; keptUnchanged?: Partial<Record<YrsKeptReason, number>> } | DocxEditRefusal;
 
 /** Accepted-view texts around a selection; U+FFFC stands for each inline atom. @internal */
 export interface YrsSelectionText {
@@ -1388,13 +1410,13 @@ export interface YrsSession extends CollaborationReplica {
    * carries it, otherwise adds it. Adding superscript clears subscript and
    * vice versa.
    */
-  toggleMark(range: YrsStoryRange, mark: YrsRunMark, suggesting?: YrsAuthor): void;
+  toggleMark(range: YrsStoryRange, mark: YrsRunMark, suggesting?: YrsAuthor): YrsFormatReceipt;
   /** Applies set-valued direct formatting; omitted fields are kept and `null` fields clear. */
-  formatRange(range: YrsStoryRange, delta: YrsInlineFormatDelta, suggesting?: YrsAuthor): void;
+  formatRange(range: YrsStoryRange, delta: YrsInlineFormatDelta, suggesting?: YrsAuthor): YrsFormatReceipt;
   /** Sets or clears the protected hyperlink attribute over a non-empty range. */
   setHyperlink(range: YrsStoryRange, hyperlink: YrsHyperlinkAttrs | null, suggesting?: YrsAuthor): void;
   /** Clears direct formatting while retaining hyperlinks and tracked-change stamps. */
-  clearFormatting(range: YrsStoryRange, suggesting?: YrsAuthor): void;
+  clearFormatting(range: YrsStoryRange, suggesting?: YrsAuthor): YrsFormatReceipt;
   /** Applies a paragraph style id to every paragraph intersecting the range. */
   applyParagraphStyle(range: YrsStoryRange, styleId: string, suggesting?: YrsAuthor): void;
   /** Applies tri-state paragraph properties to every paragraph intersecting the range. */

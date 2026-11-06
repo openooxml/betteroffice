@@ -13,6 +13,7 @@ import { slideActionStyles } from '../components/editorChromeStyles';
 import type { PeerlessConfirmedFrame, PeerlessViewSnapshot } from './peerlessViewStore';
 import { peerlessDeleteSlide, peerlessInsertSlide, peerlessMoveSlide } from './peerlessSlideCommands';
 import { activatePeerlessSlide } from './peerlessNavigation';
+import { slideTitle } from './slideMirror';
 import { peerlessPainterFactories, type PeerlessPresentation } from './usePeerlessPresentation';
 
 const SLIDE_PREVIEW_SETTLE_MS = 400;
@@ -111,8 +112,8 @@ const Preview = memo(function Preview({ frame, run, fit, previewFit, current }: 
   return <canvas ref={canvas} style={{ width: 128, display: 'block' }} aria-hidden="true" />;
 });
 
-const Slide = memo(function Slide({ id, name, index, active, disabled, frame, run, previewFit, current, onNavigate }: {
-  id: string; name: string | null; index: number; active: boolean; disabled: boolean;
+const Slide = memo(function Slide({ id, name, index, total, active, disabled, frame, run, previewFit, current, onNavigate }: {
+  id: string; name: string | null; index: number; total: number; active: boolean; disabled: boolean;
   frame: PeerlessConfirmedFrame | null | undefined; run: PeerlessPresentation;
   previewFit(frame: PeerlessConfirmedFrame, run: PeerlessPresentation): SlideFit | null;
   current(token: SlideFit, run: PeerlessPresentation): boolean;
@@ -121,8 +122,11 @@ const Slide = memo(function Slide({ id, name, index, active, disabled, frame, ru
   const { t } = useTranslation();
   const settled = useSettledPreview(frame, active, run);
   const fit = useMemo(() => settled ? previewFit(settled, run) : null, [settled, run, previewFit]);
+  const counter = { current: index + 1, total };
+  const title = frame ? slideTitle(frame.displayList) : name;
   return <button type="button" disabled={disabled}
     data-slide-id={id}
+    aria-label={title ? t('a11y.slideWithTitle', { ...counter, title }) : t('slides.canvasLabel', counter)}
     aria-current={active ? 'page' : undefined} style={active ? styles.activeSlide : styles.slide}
     draggable={!run.store.getSnapshot().editState.readOnly}
     onDragStart={(event) => event.dataTransfer.setData('text/plain', id)}
@@ -234,7 +238,7 @@ export const PeerlessSlideStrip = memo(function PeerlessSlideStrip({ run, comman
   return <div style={styles.strip}><aside ref={strip} style={{ overflowY: 'auto', flex: 1 }} aria-label={t('slides.panelLabel')}>
     {proposalId && onPreviewSlide ? <AsyncProposalSlideStrip id={proposalId} read={readStrip}
       load={loadProposalSlide} selectedSlideId={previewSlideId ?? view.active} onSelect={onPreviewSlide} />
-      : view.slides.map((slide, index) => <Slide key={slide.id} {...slide} index={index} active={slide.id === view.active}
+      : view.slides.map((slide, index) => <Slide key={slide.id} {...slide} index={index} total={view.slides.length} active={slide.id === view.active}
       disabled={view.disabled} run={run} previewFit={previewFit} current={current} onNavigate={onNavigate} />)}
   </aside><SlideActions run={run} active={view.active} disabled={view.disabled} />{contextMenu.element}</div>;
 });

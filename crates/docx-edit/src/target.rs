@@ -1726,7 +1726,7 @@ impl EditingDoc {
         &self,
         target: &TextTarget,
         delta: &InlineFormatDelta,
-    ) -> OpResult<Result<(), EditRefusal>> {
+    ) -> OpResult<Result<crate::KeptUnchanged, EditRefusal>> {
         let span = match self.resolve_text_span(target) {
             Ok(span) => span,
             Err(refusal) => return Ok(Err(refusal)),
@@ -1746,15 +1746,16 @@ impl EditingDoc {
         }
         let attrs = delta.to_attrs()?;
         let ctx = EditCtx::local("", "");
-        if let Some(span) = span {
-            self.format_range(&ctx, span, delta)?;
-        }
+        let kept = match span {
+            Some(span) => self.format_range_keeping(&ctx, span, delta)?.1,
+            None => crate::KeptUnchanged::new(),
+        };
         if let Some(paragraph) = paragraph
             && let Some(language) = attrs.get("language")
         {
             self.set_paragraph_language(&ctx, paragraph, language)?;
         }
-        Ok(Ok(()))
+        Ok(Ok(kept))
     }
 
     /// Resolves `target` and anchors side-map comment `id` over it in one call.

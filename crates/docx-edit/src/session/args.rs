@@ -236,7 +236,7 @@ pub(crate) fn apply_mark(
     ctx: &EditCtx,
     range: StoryRange,
     mark_json: &str,
-) -> EngineResult<()> {
+) -> EngineResult<crate::KeptUnchanged> {
     let value: Value = serde_json::from_str(mark_json).map_err(EngineError::message)?;
     let kind = value
         .get("type")
@@ -252,9 +252,10 @@ pub(crate) fn apply_mark(
         _ => None,
     };
     if let Some(format) = simple {
-        doc.toggle_format(ctx, range, format)
-            .map_err(EngineError::from)?;
-        return Ok(());
+        return doc
+            .toggle_format_keeping(ctx, range, format)
+            .map(|(_, kept)| kept)
+            .map_err(EngineError::from);
     }
     let delta = match kind {
         "fontFamily" => {
@@ -289,9 +290,9 @@ pub(crate) fn apply_mark(
         }
         other => return Err(EngineError::message(format!("unknown mark type {other:?}"))),
     };
-    doc.format_range(ctx, range, &delta)
-        .map_err(EngineError::from)?;
-    Ok(())
+    doc.format_range_keeping(ctx, range, &delta)
+        .map(|(_, kept)| kept)
+        .map_err(EngineError::from)
 }
 
 /// Decodes a tri-state inline-formatting delta. An omitted key is

@@ -276,6 +276,8 @@ fn compile(slide: ComposedSlide) -> Result<SurfaceDisplayList, String> {
             })
         }),
         primitives,
+        alt_text: BTreeMap::new(),
+        title_shape: None,
     })
 }
 
