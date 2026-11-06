@@ -192,11 +192,11 @@ describe('contributed commands', () => {
     };
     expect(matchesChord('Mod+=', plus as KeyboardEvent, false)).toBe(true);
     expect(matchesChord('Mod++', plus as KeyboardEvent, false)).toBe(true);
-    const builtIn = defaultShortcutTable().owners;
-    expect(builtIn.has('Mod++') || builtIn.has('Mod+=')).toBe(false);
-    expect(builtIn.has('Mod+b')).toBe(true);
-    expect(builtIn.has('Mod+Shift+z')).toBe(true);
-    expect(builtIn.has(normalizeChord('Mod+Shift+M')!)).toBe(false);
+    const defaults = defaultShortcutTable().owners;
+    expect(defaults.has('Mod++') || defaults.has('Mod+=')).toBe(false);
+    expect(defaults.has('Mod+b')).toBe(true);
+    expect(defaults.has('Mod+Shift+z')).toBe(true);
+    expect(defaults.has(normalizeChord('Mod+Shift+M')!)).toBe(false);
     const ids: unknown[] = ['plugin:acme/mark', 'plugin:acme/', 'plugin:/x', 'bold'];
     expect(ids.map(isPluginCommandId)).toEqual([true, false, false, false]);
     const builtIn: PptxCommandId = 'bold';
