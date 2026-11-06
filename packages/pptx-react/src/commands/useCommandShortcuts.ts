@@ -24,11 +24,24 @@ const NATIVE_CHORDS: ReadonlyMap<string, string> = new Map([
   ['Mod+Shift+v', 'pasteAsPlainText'],
 ]);
 
-/** Modifier variants the text input reads as a clipboard command, with that command's default chord. */
-const LETTER_CLIPBOARD: Readonly<Record<string, { id: string; chord: string }>> = {
-  c: { id: 'copy', chord: 'Mod+c' },
-  x: { id: 'cut', chord: 'Mod+x' },
-};
+/**
+ * The command the text input and stage read a Ctrl or Cmd letter as, whatever other modifiers are
+ * held, with the default chord that command must still hold for the input to act on it.
+ */
+function inputAlias(event: KeyboardEvent): { id: string; chord: string } | null {
+  if (!event.ctrlKey && !event.metaKey) return null;
+  switch (event.key.toLowerCase()) {
+    case 'z': return event.shiftKey ? { id: 'redo', chord: 'Mod+Shift+z' } : { id: 'undo', chord: 'Mod+z' };
+    case 'y': return { id: 'redo', chord: 'Mod+y' };
+    case 'b': return { id: 'bold', chord: 'Mod+b' };
+    case 'i': return { id: 'italic', chord: 'Mod+i' };
+    case 'u': return { id: 'underline', chord: 'Mod+u' };
+    case 's': return { id: 'save', chord: 'Mod+s' };
+    case 'c': return { id: 'copy', chord: 'Mod+c' };
+    case 'x': return { id: 'cut', chord: 'Mod+x' };
+    default: return null;
+  }
+}
 
 function isTextField(target: EventTarget | null): boolean {
   const element = target instanceof Element ? target : null;
@@ -108,10 +121,10 @@ export function useCommandShortcuts({
       if (!event.ctrlKey && !event.metaKey && !event.altKey && !/^F\d/.test(event.key)) return;
       const pressed = commands.pressedChord(event);
       if (!pressed) {
-        const letter = LETTER_CLIPBOARD[event.key.toLowerCase()];
-        if (letter && (event.ctrlKey || event.metaKey) && commands.shortcutOwner(letter.chord) !== letter.id) {
+        const alias = inputAlias(event);
+        if (alias && commands.shortcutOwner(alias.chord) !== alias.id) {
           releaseKeyFromInput(event);
-          if (isInput(target)) armClipboardGesture(target, 'ignore');
+          if (isInput(target) && CLIPBOARD_IDS.has(alias.id)) armClipboardGesture(target, 'ignore');
           return;
         }
         const contributed = commands.pluginShortcuts()
