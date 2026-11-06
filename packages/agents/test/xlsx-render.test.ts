@@ -106,6 +106,12 @@ test('XLSX canvas previews in one process keep each workbook\'s faces apart', as
   const shared = await renderXlsxRange(book('Shared Face') as never, 0, 'A1', viewport, 1, provider(sans));
   expect(Buffer.from(other).equals(Buffer.from(alone))).toBe(false);
   expect(Buffer.from(shared).equals(Buffer.from(alone))).toBe(true);
+  const [overlappedOther, overlappedShared] = await Promise.all([
+    renderXlsxRange(book('Shared Face') as never, 0, 'A1', viewport, 1, provider(hebrew)),
+    renderXlsxRange(book('Shared Face') as never, 0, 'A1', viewport, 1, provider(sans)),
+  ]);
+  expect(Buffer.from(overlappedOther).equals(Buffer.from(other))).toBe(true);
+  expect(Buffer.from(overlappedShared).equals(Buffer.from(alone))).toBe(true);
   expect(GlobalFonts.families.some(({ family }) => family.startsWith('BetterOffice Preview'))).toBe(false);
 });
 
