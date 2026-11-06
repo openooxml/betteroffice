@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { cliEnv } from './cli-env';
 import { fixture } from './fixture';
 
 test('stdio closes when unterminated input exceeds 1 MiB', async () => {
@@ -28,7 +29,7 @@ test('stdio closes when unterminated input exceeds 1 MiB', async () => {
 test('stdio MCP initialize reports the package version', async () => {
   const root = await mkdtemp(join(tmpdir(), 'betteroffice-mcp-version-'));
   const client = new Client({ name: 'test', version: '1' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve(import.meta.dir, '../src/cli.ts'), '--root', root], stderr: 'pipe' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve(import.meta.dir, '../src/cli.ts'), '--root', root], stderr: 'pipe', env: cliEnv() });
   try {
     await client.connect(transport);
     const { version } = JSON.parse(await readFile(resolve(import.meta.dir, '../package.json'), 'utf8'));
@@ -44,7 +45,7 @@ test('stdio MCP supports discovery through verified export and confines file acc
   const root = await mkdtemp(join(tmpdir(), 'betteroffice-mcp-'));
   const outside = await mkdtemp(join(tmpdir(), 'betteroffice-outside-'));
   const client = new Client({ name: 'test', version: '1' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve(import.meta.dir, '../src/cli.ts'), '--root', root], stderr: 'pipe' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve(import.meta.dir, '../src/cli.ts'), '--root', root], stderr: 'pipe', env: cliEnv() });
   let stderr = '';
   transport.stderr?.on('data', chunk => { stderr += String(chunk); });
   try {
@@ -106,7 +107,7 @@ test('stdio MCP edits XLSX and PPTX prototypes with discoverable tools and same-
   const { openXlsx, openPptx } = await import('../src');
   const root = await mkdtemp(join(tmpdir(), 'betteroffice-formats-mcp-'));
   const client = new Client({ name: 'formats-test', version: '1' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve(import.meta.dir, '../src/cli.ts'), '--root', root], stderr: 'pipe' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve(import.meta.dir, '../src/cli.ts'), '--root', root], stderr: 'pipe', env: cliEnv() });
   let stderr = '';
   transport.stderr?.on('data', chunk => { stderr += String(chunk); });
   try {
@@ -163,8 +164,7 @@ const DEFAULT_TOOLS = [
 
 async function connectFiltered(root: string, extra: string[], env?: Record<string, string>) {
   const client = new Client({ name: 'filter-test', version: '1' });
-  const merged = env ? Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)) : undefined;
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve(import.meta.dir, '../src/cli.ts'), '--root', root, ...extra], stderr: 'pipe', ...(env ? { env: { ...merged, ...env } } : {}) });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve(import.meta.dir, '../src/cli.ts'), '--root', root, ...extra], stderr: 'pipe', env: { ...cliEnv(), ...env } });
   await client.connect(transport);
   return client;
 }
@@ -288,7 +288,7 @@ test('unknown tool names and bad formats exit 1 with a stderr message', async ()
 test('read-only stdio exposes inspection tools and refuses writes', async () => {
   const root = await mkdtemp(join(tmpdir(), 'betteroffice-mcp-readonly-'));
   const client = new Client({ name: 'test', version: '1' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve(import.meta.dir, '../src/cli.ts'), '--root', root, '--read-only'], stderr: 'pipe' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve(import.meta.dir, '../src/cli.ts'), '--root', root, '--read-only'], stderr: 'pipe', env: cliEnv() });
   try {
     await writeFile(join(root, 'report.docx'), await fixture());
     await client.connect(transport);
