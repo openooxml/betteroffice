@@ -245,6 +245,7 @@ function paragraphSegments(draft: YrsSession, target: DocxParagraphTarget) {
 export function formatParagraph(draft: YrsSession, target: DocxParagraphTarget, delta: Parameters<YrsSession['formatTextTarget']>[1]) {
   const result = draft.formatTextTarget({ kind: 'paragraph', story: target.story, paraId: target.paraId }, delta);
   if (!result.ok) throw new DocumentToolError(result.failure.code.toUpperCase().replaceAll('-', '_'), result.failure.message);
+  return result.keptUnchanged ?? {};
 }
 
 function inlineLength(child: ParagraphContent): number {

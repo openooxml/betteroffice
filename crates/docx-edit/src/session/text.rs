@@ -8,6 +8,18 @@ use super::args::{
 use super::{EditSessionCore, EngineError, EngineResult};
 use crate::{FormatPolicy, MergeDirection, ParaAttrDelta, ParaSelector, Position, StoryRange};
 
+/// `{reason: count}` for the paragraphs a formatting edit kept unchanged.
+pub(super) fn kept_counts(kept: &crate::KeptUnchanged) -> serde_json::Map<String, Value> {
+    kept.iter()
+        .map(|(reason, count)| (reason.as_str().to_owned(), json!(count)))
+        .collect()
+}
+
+/// `{"keptUnchanged": {reason: count}}` for the paragraphs a formatting edit kept unchanged.
+fn kept_json(kept: &crate::KeptUnchanged) -> String {
+    json!({ "keptUnchanged": kept_counts(kept) }).to_string()
+}
+
 impl EditSessionCore {
     pub fn insert_text(
         &self,
@@ -243,7 +255,7 @@ impl EditSessionCore {
         mark_json: &str,
         author_name: Option<String>,
         author_date: Option<String>,
-    ) -> EngineResult<()> {
+    ) -> EngineResult<String> {
         let ctx = edit_ctx(author_name, author_date)?;
         let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
@@ -253,6 +265,7 @@ impl EditSessionCore {
             StoryRange::new(story, start, end),
             mark_json,
         )
+        .map(|kept| kept_json(&kept))
     }
 
     pub fn format_range(
@@ -265,15 +278,15 @@ impl EditSessionCore {
         delta_json: &str,
         author_name: Option<String>,
         author_date: Option<String>,
-    ) -> EngineResult<()> {
+    ) -> EngineResult<String> {
         let ctx = edit_ctx(author_name, author_date)?;
         let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
         let delta = parse_inline_format_delta(delta_json)?;
         self.engine
             .doc()
-            .format_range(&ctx, StoryRange::new(story, start, end), &delta)
-            .map(|_| ())
+            .format_range_keeping(&ctx, StoryRange::new(story, start, end), &delta)
+            .map(|(_, kept)| kept_json(&kept))
             .map_err(EngineError::from)
     }
 
@@ -317,14 +330,14 @@ impl EditSessionCore {
         end_offset: u32,
         author_name: Option<String>,
         author_date: Option<String>,
-    ) -> EngineResult<()> {
+    ) -> EngineResult<String> {
         let ctx = edit_ctx(author_name, author_date)?;
         let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
         self.engine
             .doc()
-            .clear_formatting(&ctx, StoryRange::new(story, start, end))
-            .map(|_| ())
+            .clear_formatting_keeping(&ctx, StoryRange::new(story, start, end))
+            .map(|(_, kept)| kept_json(&kept))
             .map_err(EngineError::from)
     }
 

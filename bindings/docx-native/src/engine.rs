@@ -1406,7 +1406,7 @@ impl EditSession {
         end_offset: u32,
         author_name: Option<String>,
         author_date: Option<String>,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?
             .clear_formatting(
@@ -1767,7 +1767,7 @@ impl EditSession {
         delta_json: String,
         author_name: Option<String>,
         author_date: Option<String>,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?
             .format_range(
@@ -3164,7 +3164,7 @@ impl EditSession {
         mark_json: String,
         author_name: Option<String>,
         author_date: Option<String>,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?
             .toggle_mark(

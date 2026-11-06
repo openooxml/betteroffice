@@ -35,6 +35,31 @@ export interface DocxSavedParagraph {
   persisted: DocxPersistedParagraphAnchor;
 }
 
+const KEPT_UNCHANGED = 'DOCX_KEPT_UNCHANGED structure ';
+const KEPT_PARAGRAPHS = 'DOCX_KEPT_PARAGRAPHS ';
+const STRUCTURE_DROPPED = 'DOCX_STRUCTURE_DROPPED ';
+
+/** A story part written whole with fewer structural elements than its source, see {@link DocxSavedDocument.structureDropped}. */
+export interface DocxDroppedStructure {
+  part: string;
+  dropped: string[];
+  /** Surviving paragraphs with a Word paragraph ID that hold less, up to 200 per part. */
+  paragraphs: Array<{ ordinal: number; paraId: string; text: string; dropped: string[] }>;
+}
+
+/** A paragraph a save wrote as its source bytes, see {@link DocxSavedDocument.keptUnchanged}. */
+export interface DocxKeptParagraph {
+  part: string;
+  ordinal: number;
+  paraId?: string;
+  /** The start of the paragraph's text. */
+  text: string;
+  /** `part` when no safe paragraph splice applied and the whole part kept its source bytes. */
+  scope: 'paragraph' | 'part';
+  /** The source elements writing it would have dropped. */
+  dropped: string[];
+}
+
 export interface DocxSavedDocument {
   bytes: Uint8Array;
   /**
@@ -51,6 +76,19 @@ export interface DocxSavedDocument {
    * live session.
    */
   conflicts: DocxSavedParagraph[];
+  /**
+   * Paragraphs written as their source bytes although their run formatting changed, because
+   * writing them from the session would have dropped structure the source holds (a hyperlink,
+   * smart tag, field, drawing alternate). The session still shows their new formatting; the
+   * saved file keeps the old. Absent when there are none.
+   */
+  keptUnchanged?: { structure: number; paragraphs: DocxKeptParagraph[] };
+  /**
+   * Story parts this save had to write whole, which hold fewer structural elements than their
+   * source, such as after an edit to a table's rows that no paragraph splice can record. The edits
+   * may account for them, as a deleted row does; absent when no part lost any.
+   */
+  structureDropped?: DocxDroppedStructure[];
 }
 
 /** @internal */
@@ -569,6 +607,7 @@ export async function writeSessionSave(
   const write = async (sectionEdits: RustParagraphIds['sectionEdits']) => {
     const modelBody = (part: string) => sectionPlan !== undefined && !sectionEdits && part === bodyPart;
     const spliced = splicesFor(sectionEdits).filter(({ part }) => !modelBody(part));
+    const whole = (capture.plan.wholeParts ?? []).filter(({ part }) => splices(part) && !rewritten(part) && !(part === bodyPart && (modelBody(part) || sectionEdits)));
     const plan: RustParagraphIds = {
       ...(options.commentBaseline ? {
         removedCommentIds: [...new Set([
@@ -578,11 +617,13 @@ export async function writeSessionSave(
       } : {}),
       ...(sectionEdits ? { sectionEdits } : {}),
       assignments: capture.plan.assignments,
+      ...(whole.length ? { wholeParts: whole.map(({ part, sha256, changed }) => ({ part, sha256, changed })) } : {}),
+      ...(capture.plan.touchedParts?.length ? { touchedParts: capture.plan.touchedParts } : {}),
       patchedParts: capture.plan.patchedParts.filter(({ part }) => patches(part) && !rewritten(part) && (sectionPlan === undefined || part !== bodyPart)),
       ...(spliced.length === 0
         ? {}
         : {
-            splicedParts: spliced.map(({ part, sha256, paragraphs, changed, sectionOnly, inserted, removed, paragraphPatches, legacyParagraphs, tablePatches }) => {
+            splicedParts: spliced.map(({ part, sha256, paragraphs, changed, sectionOnly, inserted, removed, paragraphPatches, legacyParagraphs, tablePatches, formatOnly }) => {
               const kept = <T>(entries: T[], ordinal: (entry: T) => number) =>
                 sectionEdits && part === bodyPart ? entries.filter(entry => !sectionOnly?.includes(ordinal(entry))) : entries;
               return {
@@ -595,6 +636,7 @@ export async function writeSessionSave(
                 ...(paragraphPatches === undefined ? {} : { paragraphPatches: kept(paragraphPatches, patch => patch.ordinal) }),
                 ...(legacyParagraphs === undefined ? {} : { legacyParagraphs: kept(legacyParagraphs, legacy => legacy.ordinal) }),
                 ...(tablePatches === undefined ? {} : { tablePatches }),
+                ...(formatOnly?.length ? { formatOnly: kept(formatOnly, ordinal => ordinal) } : {}),
               };
             }),
           }),
@@ -605,14 +647,26 @@ export async function writeSessionSave(
     const { buffer, warnings } = await writeDocumentWithRust(
       withSourceOrdinals(output, spliced), source, options, undefined, undefined, plan, skipMutations, yieldSave
     );
+    let structure = 0;
+    const keptParagraphs: DocxKeptParagraph[] = [];
+    const structureDropped: DocxDroppedStructure[] = [];
     for (const warning of warnings) {
-      if (warning.startsWith('DOCX_MINIMAL_PATCH replace counts')) {
+      if (warning.startsWith(KEPT_UNCHANGED)) {
+        for (const count of Object.values(JSON.parse(warning.slice(KEPT_UNCHANGED.length)) as Record<string, number>)) structure += count;
+      } else if (warning.startsWith(STRUCTURE_DROPPED)) {
+        structureDropped.push(...JSON.parse(warning.slice(STRUCTURE_DROPPED.length)) as DocxDroppedStructure[]);
+      } else if (warning.startsWith(KEPT_PARAGRAPHS)) {
+        for (const paragraph of JSON.parse(warning.slice(KEPT_PARAGRAPHS.length)) as DocxKeptParagraph[]) {
+          const key = [...spliced, ...whole].find(({ part }) => part === paragraph.part)?.paragraphs.find(([ordinal]) => ordinal === paragraph.ordinal)?.[1];
+          keptParagraphs.push({ ...paragraph, ...(key ? { paraId: key } : {}) });
+        }
+      } else if (warning.startsWith('DOCX_MINIMAL_PATCH replace counts')) {
         console.debug(warning);
       } else if (warning.startsWith('SmartArt ') || warning.startsWith('Drawing run ')) {
         console.warn(warning);
       }
     }
-    return { buffer, plan };
+    return { buffer, plan, structure, keptParagraphs, structureDropped };
   };
   let sectionEdits = sectionPlan?.plan;
   if (sectionEdits && !sectionEdits.onlySections && !splicesFor(sectionEdits).some(({ part }) => part === bodyPart)) {
@@ -628,7 +682,7 @@ export async function writeSessionSave(
     if (sectionPlan?.strict) throw refuse('Cannot safely locate section boundaries after this structural edit');
     result = await write(undefined);
   }
-  const { buffer, plan } = result;
+  const { buffer, plan, structure, keptParagraphs, structureDropped } = result;
   if (yieldSave) await yieldSave();
   const paragraphs = savedParagraphs(output, capture.identities);
   let bytes: Uint8Array = new Uint8Array(buffer);
@@ -666,6 +720,8 @@ export async function writeSessionSave(
     bytes,
     paragraphs: written.filter((paragraph) => !isStale(paragraph)),
     conflicts: written.filter(isStale),
+    ...(structure > 0 ? { keptUnchanged: { structure, paragraphs: keptParagraphs } } : {}),
+    ...(structureDropped.length > 0 ? { structureDropped } : {}),
   };
 }
 
@@ -703,6 +759,7 @@ export async function saveYrsDocx(
       assignments: capture.plan.assignments.filter(entry => entry.part !== COMMENTS_PART),
       patchedParts: capture.plan.patchedParts.filter(entry => entry.part !== COMMENTS_PART),
       splicedParts: capture.plan.splicedParts?.filter(entry => entry.part !== COMMENTS_PART),
+      wholeParts: capture.plan.wholeParts?.filter(entry => entry.part !== COMMENTS_PART),
     } };
     if (options.commentDeletion) {
       capture.plan = {

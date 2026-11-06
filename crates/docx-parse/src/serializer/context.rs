@@ -8,6 +8,44 @@ use crate::xml::ParseError;
 
 use super::s10::SerializerDeterminism;
 
+/// The most kept paragraphs one save describes; its count covers them all.
+const KEPT_PARAGRAPH_LIMIT: usize = 200;
+
+/// A paragraph a save wrote as its source bytes because writing it would have dropped structure.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct KeptParagraph {
+    pub part: String,
+    pub ordinal: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub para_id: Option<String>,
+    pub text: String,
+    /// `"paragraph"`, or `"part"` when no safe splice applied and the whole part was kept.
+    pub scope: &'static str,
+    pub dropped: Vec<String>,
+}
+
+/// A surviving paragraph of a part written whole that holds fewer structural elements than its
+/// source.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DroppedParagraph {
+    pub ordinal: u32,
+    pub para_id: String,
+    pub text: String,
+    pub dropped: Vec<String>,
+}
+
+/// A story part written whole with fewer structural elements than its source. The edits may
+/// account for them, as a deleted table row does.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DroppedStructure {
+    pub part: String,
+    pub dropped: Vec<String>,
+    pub paragraphs: Vec<DroppedParagraph>,
+}
+
 /// Per-serialization state. Generated identities are taken only from the
 /// injected seed; serializers never consult ambient randomness or a clock.
 #[derive(Clone, Debug)]
@@ -19,6 +57,9 @@ pub struct SerializerContext {
     group_drawings: HashMap<String, String>,
     warnings: Vec<String>,
     paragraph_replace_counts: BTreeMap<String, u32>,
+    kept_unchanged: BTreeMap<String, u32>,
+    kept_paragraphs: Vec<KeptParagraph>,
+    structure_dropped: Vec<DroppedStructure>,
     paragraph_ids: BTreeSet<u32>,
     pub(crate) deletion: bool,
     pub(crate) in_control: bool,
@@ -65,6 +106,9 @@ impl SerializerContext {
             group_drawings: HashMap::new(),
             warnings: Vec::new(),
             paragraph_replace_counts: BTreeMap::new(),
+            kept_unchanged: BTreeMap::new(),
+            kept_paragraphs: Vec::new(),
+            structure_dropped: Vec::new(),
             paragraph_ids: BTreeSet::new(),
             deletion: false,
             in_control: false,
@@ -130,8 +174,50 @@ impl SerializerContext {
             .or_default() += 1;
     }
 
+    /// Counts a paragraph of `part` written as its source bytes because its rewritten XML would
+    /// drop structure, though its run formatting changed.
+    pub(crate) fn count_kept_unchanged(&mut self, part: &str) {
+        *self.kept_unchanged.entry(part.to_owned()).or_default() += 1;
+    }
+
+    /// Whether another kept paragraph's details fit in the save's report.
+    pub(crate) fn wants_kept_paragraph(&self) -> bool {
+        self.kept_paragraphs.len() < KEPT_PARAGRAPH_LIMIT
+    }
+
+    /// Reports a story part written whole with fewer structural elements than its source.
+    pub(crate) fn add_structure_dropped(&mut self, dropped: DroppedStructure) {
+        self.structure_dropped.push(dropped);
+    }
+
+    /// Adds a kept paragraph's details to the save's report.
+    pub(crate) fn add_kept_paragraph(&mut self, paragraph: KeptParagraph) {
+        self.kept_paragraphs.push(paragraph);
+    }
+
     /// Drains the diagnostics recorded so far.
     pub fn take_warnings(&mut self) -> Vec<String> {
+        if !self.kept_unchanged.is_empty() {
+            let counts = std::mem::take(&mut self.kept_unchanged);
+            self.warn(format!(
+                "DOCX_KEPT_UNCHANGED structure {}",
+                serde_json::to_string(&counts).expect("string keys and integer counts")
+            ));
+        }
+        if !self.structure_dropped.is_empty() {
+            let dropped = std::mem::take(&mut self.structure_dropped);
+            self.warn(format!(
+                "DOCX_STRUCTURE_DROPPED {}",
+                serde_json::to_string(&dropped).expect("strings and integers")
+            ));
+        }
+        if !self.kept_paragraphs.is_empty() {
+            let paragraphs = std::mem::take(&mut self.kept_paragraphs);
+            self.warn(format!(
+                "DOCX_KEPT_PARAGRAPHS {}",
+                serde_json::to_string(&paragraphs).expect("strings and integers")
+            ));
+        }
         if !self.paragraph_replace_counts.is_empty() {
             let counts = std::mem::take(&mut self.paragraph_replace_counts);
             self.warn(format!(

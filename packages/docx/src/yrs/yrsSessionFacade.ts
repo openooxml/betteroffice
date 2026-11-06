@@ -9,6 +9,7 @@ import type {
   YrsCommentReceipt,
   YrsDocxHost,
   YrsEngineApplyProfile,
+  YrsFormatReceipt,
   YrsLoc,
   YrsOpeningOptions,
   YrsParagraph,
@@ -1247,7 +1248,8 @@ export function wrapSession(
     },
     toggleMark: (range, mark, suggesting) => {
       ensureUndo(range.story);
-      mutate(() =>
+      const since = facade.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
+      const receipt = mutate(() =>
         session.toggle_mark(
           range.story,
           range.start.paraId,
@@ -1259,10 +1261,13 @@ export function wrapSession(
           suggesting?.date
         )
       );
+      markDirty(facade.storiesChangedSince(since).stories);
+      return JSON.parse(receipt) as YrsFormatReceipt;
     },
     formatRange: (range, delta, suggesting) => {
       ensureUndo(range.story);
-      mutate(() =>
+      const since = facade.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
+      const receipt = mutate(() =>
         session.format_range(
           range.story,
           range.start.paraId,
@@ -1274,6 +1279,8 @@ export function wrapSession(
           suggesting?.date
         )
       );
+      markDirty(facade.storiesChangedSince(since).stories);
+      return JSON.parse(receipt) as YrsFormatReceipt;
     },
     setHyperlink: (range, hyperlink, suggesting) => {
       ensureUndo(range.story);
@@ -1292,7 +1299,8 @@ export function wrapSession(
     },
     clearFormatting: (range, suggesting) => {
       ensureUndo(range.story);
-      mutate(() =>
+      const since = facade.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
+      const receipt = mutate(() =>
         session.clear_formatting(
           range.story,
           range.start.paraId,
@@ -1303,6 +1311,8 @@ export function wrapSession(
           suggesting?.date
         )
       );
+      markDirty(facade.storiesChangedSince(since).stories);
+      return JSON.parse(receipt) as YrsFormatReceipt;
     },
     applyParagraphStyle: (range, styleId, suggesting) => {
       ensureUndo(range.story);

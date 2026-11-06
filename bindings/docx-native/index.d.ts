@@ -79,7 +79,7 @@ export declare class EditSession {
   cell_selection(): string
   clear_cell_selection(): string | undefined
   clear_content_control_value(embedId: string): void
-  clear_formatting(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number, authorName?: string | undefined | null, authorDate?: string | undefined | null): void
+  clear_formatting(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number, authorName?: string | undefined | null, authorDate?: string | undefined | null): string
   clear_undo_input_time(): void
   clear_update_event_observation(): void
   client_id(): number
@@ -111,7 +111,7 @@ export declare class EditSession {
   find_content_controls_json(query: string, options: string): string
   find_text_json(request: string): string
   finish_compared_docx_json(bytes: Uint8Array): string
-  format_range(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number, deltaJson: string, authorName?: string | undefined | null, authorDate?: string | undefined | null): void
+  format_range(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number, deltaJson: string, authorName?: string | undefined | null, authorDate?: string | undefined | null): string
   format_text_target_json(targetJson: string, deltaJson: string): string
   geometry_position_outline_json(root: string): string
   has_pending_update(): boolean
@@ -237,7 +237,7 @@ export declare class EditSession {
   story_segment_units(story: string, units: Uint32Array): string
   story_segments(story: string): string
   table_payload(story: string, tableIndex: number): string | undefined
-  toggle_mark(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number, markJson: string, authorName?: string | undefined | null, authorDate?: string | undefined | null): void
+  toggle_mark(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number, markJson: string, authorName?: string | undefined | null, authorDate?: string | undefined | null): string
   track_undo(): void
   undo_capture_mode(): string
   undo(): boolean

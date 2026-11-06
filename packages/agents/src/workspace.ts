@@ -85,7 +85,9 @@ export class FileWorkspace {
         path: relative(this.root, file), cause: error instanceof Error ? error.message : String(error),
       });
     } finally { await handle.close(); }
-    return { path: relative(this.root, file), bytes: bytes.length, ...(proposal ? { proposal, accepted: false } : {}) };
+    const kept = 'exportKeptUnchanged' in document ? document.exportKeptUnchanged() : undefined;
+    const dropped = 'exportStructureDropped' in document ? document.exportStructureDropped() : undefined;
+    return { path: relative(this.root, file), bytes: bytes.length, ...(proposal ? { proposal, accepted: false } : {}), ...(kept ? { keptUnchanged: kept } : {}), ...(dropped ? { structureDropped: dropped } : {}) };
   }
 
   close(id: string) {

@@ -617,7 +617,7 @@ fn collect_table_stories(
     }
 }
 
-fn collect_row_stories(rows: &Any, stories: &mut HashSet<String>) {
+pub(crate) fn collect_row_stories(rows: &Any, stories: &mut HashSet<String>) {
     let Any::Array(rows) = rows else {
         return;
     };
