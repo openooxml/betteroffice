@@ -4720,6 +4720,7 @@ impl ShapeFontChain {
                 .resolve_with_family(&self.ids, ch, bold, italic, family)
                 .filter(|&id| {
                     !self.coverage_only
+                        || (self.symbols_shape && ooxml_text::measure::symbol_character(ch))
                         || ooxml_text::covered_character(store, id, ch)
                             .ok()
                             .flatten()
@@ -4747,6 +4748,7 @@ impl ShapeFontChain {
                 .resolve_with_style(&self.ids, ch, bold, italic)
                 .filter(|&id| {
                     !self.coverage_only
+                        || (self.symbols_shape && ooxml_text::measure::symbol_character(ch))
                         || ooxml_text::covered_character(store, id, ch)
                             .ok()
                             .flatten()
@@ -14417,7 +14419,11 @@ mod tests {
             store: &store,
             chains: HashMap::from([(
                 "calibri|1|0".to_owned(),
-                ShapeFontChain::new(vec![ooxml_text::FontId::base_latin(true, false)], false, false),
+                ShapeFontChain::new(
+                    vec![ooxml_text::FontId::base_latin(true, false)],
+                    false,
+                    false,
+                ),
             )]),
             coverage_only: false,
         };
