@@ -1,10 +1,13 @@
-import { expect, test } from 'bun:test';
+import { beforeAll, expect, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import JSZip from 'jszip';
-import { openWorkbook } from '@betteroffice/xlsx';
+import { initWasm, openWorkbook } from '@betteroffice/xlsx';
 import { attachXlsx, openXlsx } from '../src/xlsx';
 import { implicitFontWorkbook, xlsxFixture } from './format-fixtures';
+import { initialize } from '../src/prototype';
+
+beforeAll(() => initialize('xlsx', initWasm));
 
 test('XLSX header formatting preserves the implicit workbook font and reports it accurately', async () => {
   const source = await implicitFontWorkbook();

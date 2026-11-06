@@ -10,6 +10,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { openDocx } from '../src';
 import { createOfficeMcpServer } from '../src/mcp';
 import { commentFixture, editFixture, tableCell, tableFixture } from './fixture';
+import { unexpectedStderr } from './cli-env';
 
 test('stdio docx_edit applies a style, format and table-row batch that survives export', async () => {
   const root = await mkdtemp(join(tmpdir(), 'docx-edit-mcp-'));
@@ -61,7 +62,7 @@ test('stdio docx_edit applies a style, format and table-row batch that survives 
       expect(items.filter(item => item.table).map(item => item.text).sort()).toEqual(['1.0M', '1.4M', 'Q1', 'Q2', 'Quarter', 'Revenue']);
       expect(items.find(item => item.text === 'Q2')?.table).toMatchObject({ row: 3, rows: 3 });
     } finally { reopened.close(); }
-    expect(stderr).toBe('');
+    expect(unexpectedStderr(stderr)).toBe('');
   } finally {
     await client.close();
     await rm(root, { recursive: true, force: true });

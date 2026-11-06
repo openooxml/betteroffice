@@ -1,7 +1,9 @@
 import { expect, spyOn, test } from 'bun:test';
-import { createCanvas, loadImage } from '@napi-rs/canvas';
-import { paintDisplayList } from '@betteroffice/xlsx';
+import { createCanvas, GlobalFonts, loadImage } from '@napi-rs/canvas';
+import { createFontProvider, resolveLastResortFace } from '@betteroffice/fonts';
+import { decodeFontFace, paintDisplayList } from '@betteroffice/xlsx';
 import { openXlsx } from '../src/xlsx';
+import { rangeExtent, renderXlsxRange } from '../src/xlsx-render';
 import { xlsxFixture } from './format-fixtures';
 
 test('XLSX previews paint a non-active sheet range at the requested size', async () => {
@@ -66,3 +68,92 @@ test('XLSX previews use the engine PNG where it can draw', async () => {
     expect([preview.width, preview.height]).toEqual([12, 7]);
   } finally { render.mockRestore(); book.close(); }
 });
+
+test('XLSX canvas previews draw unbundled families with the Word last-resort face', async () => {
+  const family = 'Humnst777 BT';
+  expect(resolveLastResortFace(family, false, false, 'word').family).toBe('Liberation Sans');
+  const provider = createFontProvider(undefined, { decoder: decodeFontFace });
+  const word = Buffer.from(await provider.resolveLastResort(family, false, false, 'word')());
+  expect(word.equals(Buffer.from(await provider.resolveLastResort(family, false, false)()))).toBe(false);
+  const book = (name: string) => ({
+    sheetInfo: () => ({ activeSheet: 0 }),
+    setActiveSheet: () => {},
+    displayList: () => ({ width: 60, height: 20, commands: [{ op: 'text', x: 2, y: 14, text: 'Quarterly', fontFamily: name, fontSize: 11, color: '#000000' }] }),
+    renderPngFonts: () => [],
+  });
+  const viewport = { x: 0, y: 0, width: 60, height: 20 };
+  const forced = (bytes: Buffer) => ({ ...provider, resolve: () => async () => new Uint8Array(bytes).buffer });
+  const drawn = Buffer.from(await renderXlsxRange(book(family) as never, 0, 'A1', viewport, 1, provider));
+  const asWord = Buffer.from(await renderXlsxRange(book('Word Reference') as never, 0, 'A1', viewport, 1, forced(word)));
+  const asPowerPoint = Buffer.from(await renderXlsxRange(book('PowerPoint Reference') as never, 0, 'A1', viewport, 1, forced(Buffer.from(await provider.resolveLastResort(family, false, false)()))));
+  expect(drawn.equals(asWord)).toBe(true);
+  expect(drawn.equals(asPowerPoint)).toBe(false);
+});
+
+test('XLSX canvas previews in one process keep each workbook\'s faces apart', async () => {
+  const base = createFontProvider(undefined, { decoder: decodeFontFace });
+  const hebrew = await base.resolveFamily('Noto Sans Hebrew', false, false)!();
+  const sans = await base.resolve('Arial', false, false)!();
+  const provider = (bytes: ArrayBuffer) => ({ ...base, resolve: () => async () => bytes });
+  const book = (family: string) => ({
+    sheetInfo: () => ({ activeSheet: 0 }),
+    setActiveSheet: () => {},
+    displayList: () => ({ width: 120, height: 24, commands: [{ op: 'text', x: 4, y: 18, text: 'Quarterly', fontFamily: family, fontSize: 12, color: '#000000' }] }),
+    renderPngFonts: () => [],
+  });
+  const viewport = { x: 0, y: 0, width: 120, height: 24 };
+  const alone = await renderXlsxRange(book('Unshared Face') as never, 0, 'A1', viewport, 1, provider(sans));
+  const other = await renderXlsxRange(book('Shared Face') as never, 0, 'A1', viewport, 1, provider(hebrew));
+  const shared = await renderXlsxRange(book('Shared Face') as never, 0, 'A1', viewport, 1, provider(sans));
+  expect(Buffer.from(other).equals(Buffer.from(alone))).toBe(false);
+  expect(Buffer.from(shared).equals(Buffer.from(alone))).toBe(true);
+  const [overlappedOther, overlappedShared] = await Promise.all([
+    renderXlsxRange(book('Shared Face') as never, 0, 'A1', viewport, 1, provider(hebrew)),
+    renderXlsxRange(book('Shared Face') as never, 0, 'A1', viewport, 1, provider(sans)),
+  ]);
+  expect(Buffer.from(overlappedOther).equals(Buffer.from(other))).toBe(true);
+  expect(Buffer.from(overlappedShared).equals(Buffer.from(alone))).toBe(true);
+  GlobalFonts.register(Buffer.from(hebrew), 'Host Face');
+  const delayed = (bytes: ArrayBuffer, slow: ArrayBuffer) => ({ ...base, resolve: (family: string) => family === 'Slow Face' ? async () => { await Bun.sleep(30); return slow; } : async () => bytes });
+  const twoFaces = { ...book('Shared Face'), displayList: () => ({ width: 120, height: 48, commands: [
+    { op: 'text', x: 4, y: 18, text: 'Quarterly', fontFamily: 'Shared Face', fontSize: 12, color: '#000000' },
+    { op: 'text', x: 4, y: 42, text: 'Quarterly', fontFamily: 'Slow Face', fontSize: 12, color: '#000000' },
+  ] }) };
+  const tall = { x: 0, y: 0, width: 120, height: 48 };
+  const twoAlone = await renderXlsxRange(twoFaces as never, 0, 'A1', tall, 1, delayed(sans, hebrew));
+  const families = GlobalFonts.families.length;
+  const [, twoOverlapped] = await Promise.all([
+    renderXlsxRange(book('Shared Face') as never, 0, 'A1', viewport, 1, provider(sans)),
+    renderXlsxRange(twoFaces as never, 0, 'A1', tall, 1, delayed(sans, hebrew)),
+  ]);
+  expect(Buffer.from(twoOverlapped).equals(Buffer.from(twoAlone))).toBe(true);
+  expect(GlobalFonts.families.length).toBe(families);
+  expect(GlobalFonts.has('Host Face')).toBe(true);
+});
+
+test('XLSX canvas preview sizes match the engine\'s 32-bit range extent', () => {
+  const first = { x: 0, y: Math.fround(1.1) };
+  const last = { x: Math.fround(10.3), y: Math.fround(799.9), w: Math.fround(20.7), h: Math.fround(1.2) };
+  const extent = rangeExtent(first, last, 1);
+  const f = Math.fround;
+  expect(extent.pixelHeight).toBe(Math.ceil(f(f(f(last.y + last.h) - f(first.y)) * f(1))));
+  expect(extent.pixelWidth).toBe(Math.ceil(f(f(last.x + last.w) - first.x)));
+  expect(rangeExtent({ x: 0, y: 0 }, { x: 0, y: 0, w: 100, h: 50 }, 1.5)).toEqual({ width: 100, height: 50, pixelWidth: 150, pixelHeight: 75 });
+});
+
+test('XLSX canvas previews of many workbooks with distinct families keep the face registry bounded', async () => {
+  const provider = createFontProvider(undefined, { decoder: decodeFontFace });
+  const viewport = { x: 0, y: 0, width: 40, height: 16 };
+  const render = (name: string, bold: boolean) => renderXlsxRange({
+    sheetInfo: () => ({ activeSheet: 0 }),
+    setActiveSheet: () => {},
+    displayList: () => ({ width: 40, height: 16, commands: [{ op: 'text', x: 2, y: 12, text: 'Q', fontFamily: name, bold, fontSize: 10, color: '#000000' }] }),
+    renderPngFonts: () => [],
+  } as never, 0, 'A1', viewport, 1, provider);
+  for (let i = 0; i < 20; i++) await render(`Warmup Family ${i}`, i % 2 === 1);
+  const families = GlobalFonts.families.length;
+  const rss = process.memoryUsage().rss;
+  for (let i = 0; i < 1000; i++) await render(`Workbook Family ${i}`, i % 2 === 1);
+  expect(GlobalFonts.families.length).toBe(families);
+  expect(process.memoryUsage().rss - rss).toBeLessThan(64 * 1024 * 1024);
+}, 120_000);

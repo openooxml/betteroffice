@@ -1,14 +1,23 @@
 import { afterEach, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { createCanvas, loadImage } from '@napi-rs/canvas';
-import { configureDefaultFonts } from '@betteroffice/docx/layout';
+import { engines } from '#agents-engines';
 import type { DisplayList } from '@betteroffice/docx/layout/render';
 import JSZip from 'jszip';
-import { openDocx } from '../src';
+import { openDocx, type DocumentRenderer } from '../src';
 import { renderDocxPage } from '../src/render';
 import { fixture } from './fixture';
 
+const configureDefaultFonts = async (options: Parameters<typeof import('@betteroffice/docx/layout').configureDefaultFonts>[0]) => (await engines.load('docx')).module.layout.configureDefaultFonts(options);
+
 afterEach(() => configureDefaultFonts({}));
+
+const canvasRenderer: DocumentRenderer = async (session, page) => {
+  const render = spyOn(session, 'renderPng').mockRejectedValue(Object.assign(new Error('canvas unavailable'), { code: 'canvas-unavailable' }));
+  try { return await renderDocxPage(session, page); }
+  finally { render.mockRestore(); }
+};
+
 
 async function imageFixture(data: Uint8Array, extension: string, mimeType: string) {
   const zip = await JSZip.loadAsync(await fixture());
@@ -34,16 +43,16 @@ for (const embedded of [false, true]) {
     }
     const resolve = mock(() => async () => fallback);
     const module = { createFontProvider: () => ({ resolve }) };
-    configureDefaultFonts(embedded ? { load: async () => module } : { fonts: module });
-    const doc = await openDocx(await zip.generateAsync({ type: 'uint8array' }), { renderer: renderDocxPage });
+    await configureDefaultFonts(embedded ? { load: async () => module } : { fonts: module });
+    const doc = await openDocx(await zip.generateAsync({ type: 'uint8array' }), { renderer: canvasRenderer });
     const register = spyOn(doc.session, 'registerFont');
     try {
-      const rendered = await renderDocxPage(doc.session, 1);
+      const rendered = await canvasRenderer(doc.session, 1);
       expect([...rendered.png.slice(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
       expect(resolve).toHaveBeenCalledWith('Calibri', false, false);
       expect(register.mock.calls[0]?.[0]).toEqual(new Uint8Array(embedded ? face : fallback));
       expect(register.mock.calls.some(([bytes]) => bytes.byteLength === fallback.byteLength)).toBe(true);
-    } finally { register.mockRestore(); doc.close(); configureDefaultFonts({}); }
+    } finally { register.mockRestore(); doc.close(); await configureDefaultFonts({}); }
   });
 }
 
@@ -63,10 +72,10 @@ test('renders actual before/after pages without changing the live document', asy
 });
 
 test('headless default preview keeps Latin native beside an uncovered emoji', async () => {
-  const doc = await openDocx(await fixture(), { renderer: renderDocxPage });
+  const doc = await openDocx(await fixture(), { renderer: canvasRenderer });
   const build = spyOn(doc.session, 'buildDisplayListJson');
   try {
-    const rendered = await renderDocxPage(doc.session, 1);
+    const rendered = await canvasRenderer(doc.session, 1);
     const input = JSON.parse(build.mock.calls[0]![0]) as { fontChains: Record<string, number[]> };
     expect(input.fontChains['@betteroffice/fonts/coverage']).toBeUndefined();
     const display = JSON.parse(build.mock.results[0]!.value as string) as DisplayList;
@@ -89,10 +98,10 @@ test('headless default preview wraps an unbundled Aptos body beside a Calibri he
     <w:p><w:r><w:rPr><w:rFonts w:ascii="Aptos" w:hAnsi="Aptos"/></w:rPr><w:t xml:space="preserve">${body}</w:t></w:r></w:p>
     <w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>
   </w:body></w:document>`);
-  const doc = await openDocx(await zip.generateAsync({ type: 'uint8array' }), { renderer: renderDocxPage });
+  const doc = await openDocx(await zip.generateAsync({ type: 'uint8array' }), { renderer: canvasRenderer });
   const build = spyOn(doc.session, 'buildDisplayListJson');
   try {
-    await renderDocxPage(doc.session, 1);
+    await canvasRenderer(doc.session, 1);
     const input = JSON.parse(build.mock.calls[0]![0]) as { fontChains: Record<string, number[]> };
     expect(input.fontChains['calibri|1|0']?.length).toBeGreaterThan(0);
     expect(input.fontChains['aptos|0|0']?.length).toBeGreaterThan(0);
@@ -112,7 +121,7 @@ test('renders embedded image pixels in live and proposed previews', async () => 
   const context = image.getContext('2d');
   context.fillStyle = '#ff0000';
   context.fillRect(0, 0, 32, 32);
-  const doc = await openDocx(await imageFixture(await image.encode('png'), 'png', 'image/png'), { renderer: renderDocxPage });
+  const doc = await openDocx(await imageFixture(await image.encode('png'), 'png', 'image/png'), { renderer: canvasRenderer });
   try {
     const [hit] = doc.grep({ query: 'Executive summary' }).matches;
     const proposal = doc.propose({ author: 'test', edits: [{ match: hit.match, newText: 'Annual report' }] });
@@ -139,9 +148,58 @@ test('skips oversized rasters and SVG before native image decoding', async () =>
     [png, 'png', 'image/png', 'An embedded image exceeds the preview image limits.'],
     [svg, 'svg', 'image/svg+xml', 'An embedded image uses an unsupported encoding; previews support raster images only.'],
   ] as const) {
-    const doc = await openDocx(await imageFixture(bytes, extension, type), { renderer: renderDocxPage });
+    const doc = await openDocx(await imageFixture(bytes, extension, type), { renderer: canvasRenderer });
     try {
       expect((await doc.render(1)).warnings).toContain(warning);
     } finally { doc.close(); }
   }
+});
+
+test('DOCX previews use the engine PNG where it can draw', async () => {
+  const zip = await JSZip.loadAsync(await fixture());
+  zip.file('word/document.xml', (await zip.file('word/document.xml')!.async('string')).replace('<w:br w:type="page"/>', ''));
+  const doc = await openDocx(await zip.generateAsync({ type: 'uint8array' }));
+  const png = new Uint8Array(await createCanvas(12, 7).encode('png'));
+  const render = spyOn(doc.session, 'renderPng').mockResolvedValue(png);
+  const build = spyOn(doc.session, 'buildDisplayListJson');
+  try {
+    const preview = await renderDocxPage(doc.session, 1);
+    expect(render).toHaveBeenCalledTimes(1);
+    expect(render).toHaveBeenCalledWith({ page: 0 });
+    expect(preview.png).toBe(png);
+    expect(preview).toMatchObject({ page: 1, pageCount: 1, width: 12, height: 7 });
+    expect(build).not.toHaveBeenCalled();
+  } finally { build.mockRestore(); render.mockRestore(); doc.close(); }
+});
+
+test('DOCX previews fall back to canvas when the engine cannot draw', async () => {
+  const doc = await openDocx(await fixture());
+  const render = spyOn(doc.session, 'renderPng').mockRejectedValue(Object.assign(new Error('canvas unavailable'), { code: 'canvas-unavailable' }));
+  const build = spyOn(doc.session, 'buildDisplayListJson');
+  try {
+    const preview = await renderDocxPage(doc.session, 1);
+    expect(render).toHaveBeenCalledTimes(1);
+    expect(render).toHaveBeenCalledWith({ page: 0 });
+    expect(build).toHaveBeenCalled();
+    expect([...preview.png.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+    expect(preview.pageCount).toBeGreaterThan(0);
+  } finally { build.mockRestore(); render.mockRestore(); doc.close(); }
+});
+
+test('DOCX previews map engine errors without using canvas', async () => {
+  const doc = await openDocx(await fixture());
+  const render = spyOn(doc.session, 'renderPng');
+  const build = spyOn(doc.session, 'buildDisplayListJson');
+  try {
+    for (const [code, mapped] of [['canvas-too-large', 'PAGE_TOO_LARGE'], ['font-unavailable', 'FONT_UNAVAILABLE']] as const) {
+      render.mockRejectedValue(Object.assign(new Error('engine refused'), { code }));
+      await expect(renderDocxPage(doc.session, 1)).rejects.toMatchObject({ name: 'DocumentToolError', code: mapped, message: 'engine refused' });
+    }
+    render.mockRejectedValue(new RangeError('page index 99 out of range for 3 page(s)'));
+    await expect(renderDocxPage(doc.session, 100)).rejects.toMatchObject({ code: 'PAGE_OUT_OF_RANGE', details: { pageCount: 3 } });
+    const error = new Error('engine failed');
+    render.mockRejectedValue(error);
+    await expect(renderDocxPage(doc.session, 1)).rejects.toBe(error);
+    expect(build).not.toHaveBeenCalled();
+  } finally { build.mockRestore(); render.mockRestore(); doc.close(); }
 });

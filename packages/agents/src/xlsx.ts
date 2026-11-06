@@ -1,7 +1,6 @@
 import { editCharts, listCharts, readChartText, type XlsxChartEdit, type XlsxChartTextRead } from './xlsx-charts';
-import {
-  initWasm, openWorkbook, StaleProposalError, type WorkbookHandle, type XlsxCellRead, type XlsxEditStep,
-} from '@betteroffice/xlsx';
+import type { WorkbookHandle, XlsxCellRead, XlsxEditStep } from '@betteroffice/xlsx';
+import { engines } from '#agents-engines';
 import type { WorkbookEditPeer } from '@betteroffice/xlsx/worker';
 import { DocumentToolError, type GrepOptions, type TextEdit } from './types';
 import { setAutoFilter, applyXlsxFormatting, editConditionalFormats, editXlsxDefinedNames, listXlsxDefinedNames, editXlsxGrid, editXlsxSheets, findXlsx, listConditionalFormats, readConditionalFormatFormula, outlineXlsx, previewXlsx, sortXlsx, writeXlsx, type XlsxProtectionOptions, type XlsxConditionalFormatEdit, type XlsxDefinedNameEdit, type XlsxFormatEdit, type XlsxGridEdit, type XlsxSheetEdit, type XlsxWriteEdit } from './xlsx-operations';
@@ -111,8 +110,9 @@ export class XlsxAgentWorkbook extends PrototypeDocument<CellChange, XlsxEditSte
   previewRange(options: { sheet: string; range: string; scale?: number }) { return previewXlsx(this, options); }
 
   static async open(bytes: Uint8Array, options: PrototypeOptions = {}) {
-    await initialize('xlsx', initWasm, options.wasm);
-    return new XlsxAgentWorkbook(openWorkbook(bytes), options.name);
+    const engine = await engines.load('xlsx');
+    await initialize('xlsx', engine.module.initWasm, options.wasm, engine.native);
+    return new XlsxAgentWorkbook(engine.module.openWorkbook(bytes), options.name);
   }
 
   overview() {
@@ -226,7 +226,7 @@ export class XlsxAgentWorkbook extends PrototypeDocument<CellChange, XlsxEditSte
       const calculation = this.handle.calculationStatus();
       return { applied: result.applied, version: this.currentVersion(), changedSheets: result.applied ? new Set(steps.map(step => step.target.sheetId)).size : 0, calculation: { changedCells: result.changed?.length ?? 0, cycleCells: 0, limitedCells: calculation.limitedCells.length, truncated: calculation.budgetExhausted ?? false } };
     } catch (error) {
-      if (error instanceof StaleProposalError) throw new DocumentToolError('STALE_TARGET', 'Target cells changed. Read fresh cells and create a new proposal.', { cells: error.cells, targets: error.targets });
+      if ((this.ownsHandle && error instanceof engines.get('xlsx').module.StaleProposalError) || (!this.ownsHandle && error instanceof Error && error.name === 'StaleProposalError' && 'cells' in error && 'targets' in error)) throw new DocumentToolError('STALE_TARGET', 'Target cells changed. Read fresh cells and create a new proposal.', { cells: (error as { cells: unknown }).cells, targets: (error as { targets: unknown }).targets });
       if ((error instanceof Error ? error.message : String(error)).startsWith('Stale proposal:')) throw new DocumentToolError('STALE_TARGET', 'Target cells changed. Read fresh cells and create a new proposal.');
       throw error;
     }
@@ -241,13 +241,19 @@ export class XlsxAgentWorkbook extends PrototypeDocument<CellChange, XlsxEditSte
     const result = unwrap(this.handle.applyEdits({ expectVersion: version, steps, source: 'agent' }));
     return { applied: result.applied, version: result.version, changedSheets: result.changedSheets.length, calculation: { changedCells: result.calculation.changed.length, cycleCells: result.calculation.cycleCells.length, limitedCells: result.calculation.limitedCells.length, truncated: result.calculation.truncated } };
   }
-  protected save(steps?: XlsxEditStep[]) {
+  protected async save(steps?: XlsxEditStep[]) {
     if (!steps) return this.handle.save();
-    const draft = openWorkbook(this.handle.save());
+    const engine = await engines.load('xlsx');
+    await initialize('xlsx', engine.module.initWasm, undefined, engine.native);
+    const draft = engine.module.openWorkbook(this.handle.save());
     try { unwrap(draft.applyEdits({ expectVersion: draft.version(), steps, source: 'agent' })); return draft.save(); }
     finally { draft.dispose(); }
   }
-  protected reopen(bytes: Uint8Array) { const reopened = openWorkbook(bytes); reopened.dispose(); }
+  protected async reopen(bytes: Uint8Array) {
+    const engine = await engines.load('xlsx');
+    await initialize('xlsx', engine.module.initWasm, undefined, engine.native);
+    const reopened = engine.module.openWorkbook(bytes); reopened.dispose();
+  }
   protected dispose() { this.cells.clear(); this.refs.clear(); if (this.ownsHandle) this.handle.dispose(); }
 
   private resolveNative(nativeId: string) { return this.catalog().find(sheet => sheet.nativeId === nativeId)!.sheetId; }

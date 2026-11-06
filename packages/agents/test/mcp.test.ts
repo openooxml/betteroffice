@@ -7,6 +7,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { cliEnv } from './cli-env';
 import { fixture } from './fixture';
+import { unexpectedStderr } from './cli-env';
 
 test('stdio closes when unterminated input exceeds 1 MiB', async () => {
   const root = await mkdtemp(join(tmpdir(), 'betteroffice-mcp-limit-'));
@@ -94,7 +95,7 @@ test('stdio MCP supports discovery through verified export and confines file acc
     await call('office_accept', { document, proposal });
     expect((await call('office_read', { document, ref: hit.ref })).text).toContain('€5.1 million');
     await call('office_close', { document });
-    expect(stderr).toBe('');
+    expect(unexpectedStderr(stderr)).toBe('');
   } finally {
     await client.close();
     await rm(root, { recursive: true, force: true });
@@ -144,7 +145,7 @@ test('stdio MCP edits XLSX and PPTX prototypes with discoverable tools and same-
     try { expect(slides.grep({ query: '€5.1 million' }).matches).toHaveLength(1); }
     finally { slides.close(); }
     expect((await client.callTool({ name: 'office_render', arguments: { document: deck.document } })).isError).toBe(true);
-    expect(stderr).toBe('');
+    expect(unexpectedStderr(stderr)).toBe('');
   } finally {
     await client.close();
     await rm(root, { recursive: true, force: true });

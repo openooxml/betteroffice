@@ -1,4 +1,5 @@
-import { expect, test } from 'bun:test';
+import { beforeAll, expect, test } from 'bun:test';
+import { initWasm } from '@betteroffice/pptx';
 import JSZip from 'jszip';
 import { createCanvas } from '@napi-rs/canvas';
 import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
@@ -9,6 +10,9 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createOfficeMcpServer } from '../src/mcp';
 import { openPptx } from '../src/pptx';
 import { presentationFixture, layoutFixture } from './pptx-fixture';
+import { initialize } from '../src/prototype';
+
+beforeAll(() => initialize('pptx', initWasm));
 
 async function connect(readOnly = false) {
   const root = await mkdtemp(join(tmpdir(), 'pptx-mcp-'));
