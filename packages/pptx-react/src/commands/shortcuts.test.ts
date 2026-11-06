@@ -3,6 +3,7 @@ import { en } from '@betteroffice/pptx-i18n';
 import { createPptxCommandController } from './createPptxCommandStore';
 import { resolvePptxShortcuts } from './shortcuts';
 import { storeAriaShortcut, storeShortcutLabel } from './shortcutLabels';
+import { hostPluginChords, releasedChord, shortcutOwner, subscribeShortcuts } from './shortcutTable';
 import { applyShortcuts, pickChord, pressedChord, shortcutAt } from './useCommandShortcuts';
 
 function key(init: Partial<KeyboardEvent>): KeyboardEvent {
@@ -78,8 +79,8 @@ describe('command controller', () => {
     expect(pressedChord(controller, key({ key: 'z', ctrlKey: true }), false)).toEqual({
       chord: 'Mod+z', owner: 'undo', fallback: 'undo',
     });
-    expect(controller.releasedChord('Mod+v')).toBe(true);
-    expect(controller.releasedChord('Mod+z')).toBe(false);
+    expect(releasedChord(controller, 'Mod+v')).toBe(true);
+    expect(releasedChord(controller, 'Mod+z')).toBe(false);
   });
 
   test('a chord naming the typed character wins over a key-position match', () => {
@@ -92,14 +93,14 @@ describe('command controller', () => {
     const controller = createPptxCommandController();
     const before = controller.shortcutRevision();
     let notified = 0;
-    controller.subscribeShortcuts(() => { notified += 1; });
+    subscribeShortcuts(controller, () => { notified += 1; });
     applyShortcuts(controller, { 'plugin:acme/run': 'Mod+Alt+R', italic: null }, { mac: false });
     expect(controller.shortcutRevision()).toBeGreaterThan(before);
     expect(notified).toBe(1);
-    expect(controller.hostPluginChords('plugin:acme/run')).toEqual(['Mod+Alt+r']);
-    expect(controller.hostPluginChords('plugin:acme/other')).toBeUndefined();
+    expect(hostPluginChords(controller, 'plugin:acme/run')).toEqual(['Mod+Alt+r']);
+    expect(hostPluginChords(controller, 'plugin:acme/other')).toBeUndefined();
     expect(shortcutAt(controller, key({ key: 'r', ctrlKey: true, altKey: true }), false)).toBeNull();
-    expect(controller.shortcutOwner('Mod+i')).toBeUndefined();
+    expect(shortcutOwner(controller, 'Mod+i')).toBeUndefined();
   });
 
   test('labels and aria names show the effective chord', () => {

@@ -10,6 +10,7 @@ import type { PptxCommandController } from './createPptxCommandStore';
 import { isMacPlatform, isPluginCommandId, normalizeChord } from './descriptors';
 import { matchesChord } from '../../../../shared/keyboard/match';
 import { pluginEventStore } from './pluginEvents';
+import { defaultShortcutTable, shortcutOwner, shortcutTable } from './shortcutTable';
 import { CLIPBOARD_IDS, inputKeepsChord, resolvePptxShortcuts, type PptxShortcuts } from './shortcuts';
 import type { PptxCommandId } from './types';
 
@@ -79,7 +80,7 @@ export function shortcutAt(
   event: ChordEvent,
   mac = isMacPlatform()
 ): { id: PptxCommandId; chord: string } | null {
-  const { owners } = commands.shortcutTable();
+  const { owners } = shortcutTable(commands);
   const chord = pickChord(owners.keys(), event, mac);
   const id = chord === null ? undefined : owners.get(chord);
   return chord === null || id === undefined || isPluginCommandId(id) ? null : { id: id as PptxCommandId, chord };
@@ -91,8 +92,8 @@ export function pressedChord(
   event: ChordEvent,
   mac = isMacPlatform()
 ): { chord: string; owner: string | undefined; fallback: string | undefined } | null {
-  const { owners } = commands.shortcutTable();
-  const fallbacks = commands.defaultShortcutTable().owners;
+  const { owners } = shortcutTable(commands);
+  const fallbacks = defaultShortcutTable().owners;
   const chord = pickChord(new Set([...owners.keys(), ...fallbacks.keys()]), event, mac);
   return chord === null ? null : { chord, owner: owners.get(chord), fallback: fallbacks.get(chord) };
 }
@@ -176,7 +177,7 @@ export function useCommandShortcuts({
       const pressed = pressedChord(commands, event);
       if (!pressed) {
         const alias = inputAlias(event);
-        if (alias && commands.shortcutOwner(alias.chord) !== alias.id) {
+        if (alias && shortcutOwner(commands, alias.chord) !== alias.id) {
           releaseKeyFromInput(event);
           if (isInput(target) && CLIPBOARD_IDS.has(alias.id)) armClipboardGesture(target, 'ignore');
           return;

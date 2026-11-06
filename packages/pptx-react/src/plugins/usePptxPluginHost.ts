@@ -10,6 +10,7 @@ import {
 import type { PresentationHandle, SlideDisplayList } from '@betteroffice/pptx';
 import type { TFunction } from '@betteroffice/pptx-i18n';
 import type { PptxCommandController } from '../commands/createPptxCommandStore';
+import { subscribeShortcuts } from '../commands/shortcutTable';
 import type { PptxPointPosition } from '../PptxEditor';
 import type { PptxPluginEditorAccess } from './createPluginClients';
 import {
@@ -97,7 +98,7 @@ export function usePptxPluginHost(options: UsePptxPluginHostOptions): PptxPlugin
   useEffect(() => {
     host.syncCommands();
     const unsubscribe = host.subscribe(() => host.syncCommands());
-    const unsubscribeShortcuts = options.commands.subscribeShortcuts(() => host.syncCommands());
+    const unsubscribeShortcuts = subscribeShortcuts(options.commands, () => host.syncCommands());
     return () => {
       unsubscribe();
       unsubscribeShortcuts();

@@ -108,22 +108,11 @@ export function formatChord(
     .join('+');
 }
 
-const ARIA_KEYS: Readonly<Record<string, string>> = {
-  space: 'Space',
-  enter: 'Enter',
-  tab: 'Tab',
-  escape: 'Escape',
-  backspace: 'Backspace',
-  delete: 'Delete',
-  home: 'Home',
-  end: 'End',
-  pageup: 'PageUp',
-  pagedown: 'PageDown',
-  arrowup: 'ArrowUp',
-  arrowdown: 'ArrowDown',
-  arrowleft: 'ArrowLeft',
-  arrowright: 'ArrowRight',
-};
+const ARIA_KEYS: Readonly<Record<string, string>> = Object.fromEntries(
+  'Space Enter Tab Escape Backspace Delete Home End PageUp PageDown ArrowUp ArrowDown ArrowLeft ArrowRight'
+    .split(' ')
+    .map((name) => [name.toLowerCase(), name])
+);
 
 /** A chord in the unlocalized form `aria-keyshortcuts` takes, such as `Control+Shift+V`. */
 export function ariaChord(chord: string, mac = isMacPlatform()): string {

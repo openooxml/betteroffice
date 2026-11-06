@@ -2,7 +2,6 @@ import type { Translations } from '@betteroffice/pptx-i18n';
 import {
   isPluginCommandId,
   isPptxCommandId,
-  normalizeChord,
   PPTX_COMMAND_DESCRIPTORS,
 } from './descriptors';
 import type { ResolvedShortcuts } from '../../../../shared/keyboard/resolve';
@@ -146,22 +145,12 @@ export interface PptxCommandController {
   pluginToolbar(): readonly PptxPluginCommandId[];
   /** Keyboard bindings of the contributed commands. */
   pluginShortcuts(): readonly { id: PptxPluginCommandId; chord: string }[];
-  /** Replaces the effective shortcuts; undefined restores the defaults. */
+  /** Replaces the host's resolved shortcuts; undefined restores the defaults. */
   setShortcuts(table: ResolvedShortcuts | undefined): void;
-  /** The effective shortcuts: canonical chords by id and the id holding each chord. */
-  shortcutTable(): ResolvedShortcuts;
-  /** The default shortcuts. */
-  defaultShortcutTable(): ResolvedShortcuts;
-  /** The shortcut id that holds a canonical chord. */
-  shortcutOwner(chord: string): string | undefined;
-  /** Whether the host moved or disabled the default holder of a canonical chord. */
-  releasedChord(chord: string): boolean;
-  /** Chords the host set for a contributed command; undefined keeps the plugin's own. */
-  hostPluginChords(id: PptxPluginCommandId): readonly string[] | undefined;
-  /** Changes whenever the shortcut map does. */
+  /** The host's resolved shortcuts, or undefined while the defaults apply. */
+  hostShortcuts(): ResolvedShortcuts | undefined;
+  /** Changes whenever the shortcut map does; the store notifies its subscribers too. */
   shortcutRevision(): number;
-  /** Notified after the shortcut map changes. */
-  subscribeShortcuts(listener: () => void): () => void;
   /**
    * A store acting for `scope`: its answer is checked inside each operation, and mutating
    * built-in commands refuse with `unsupported-policy`.
@@ -223,23 +212,6 @@ function knownCommand(id: unknown): id is AnyCommandId {
 }
 
 /** Creates the command store of one editor mount. */
-let defaultTable: ResolvedShortcuts | null = null;
-
-/** The descriptors' own chords, canonical; they name `Mod`, so one table serves every platform. */
-function defaultShortcuts(): ResolvedShortcuts {
-  if (defaultTable) return defaultTable;
-  const chords = new Map<string, readonly string[]>();
-  const owners = new Map<string, string>();
-  for (const descriptor of Object.values(PPTX_COMMAND_DESCRIPTORS)) {
-    const held = descriptor.shortcuts.map(({ chord }) => normalizeChord(chord)!);
-    if (held.length === 0) continue;
-    chords.set(descriptor.id, Object.freeze(held));
-    for (const chord of held) owners.set(chord, descriptor.id);
-  }
-  defaultTable = { chords, owners, issues: Object.freeze([]) };
-  return defaultTable;
-}
-
 export function createPptxCommandController(): PptxCommandController {
   let binding: PptxCommandBinding | null = null;
   let pluginCommands = new Map<PptxPluginCommandId, PptxPluginCommandBinding>();
@@ -255,9 +227,7 @@ export function createPptxCommandController(): PptxCommandController {
   let round = 0;
   let hostTable: ResolvedShortcuts | undefined;
   let revision = 0;
-  const shortcutListeners = new Set<() => void>();
   const effectiveDescriptors = new Map<PptxCommandId, PptxCommandDescriptor>();
-  const shortcutTable = (): ResolvedShortcuts => hostTable ?? defaultShortcuts();
   const effectiveDescriptor = (id: PptxCommandId): PptxCommandDescriptor => {
     if (!hostTable) return PPTX_COMMAND_DESCRIPTORS[id];
     const table = hostTable;
@@ -602,23 +572,9 @@ export function createPptxCommandController(): PptxCommandController {
       revision += 1;
       effectiveDescriptors.clear();
       notify();
-      for (const listener of [...shortcutListeners]) listener();
     },
-    shortcutTable,
-    defaultShortcutTable: defaultShortcuts,
-    shortcutOwner: (chord) => shortcutTable().owners.get(chord),
-    releasedChord(chord) {
-      const fallback = defaultShortcuts().owners.get(chord);
-      return fallback !== undefined && shortcutTable().owners.get(chord) !== fallback;
-    },
-    hostPluginChords: (id) => hostTable?.chords.get(id),
+    hostShortcuts: () => hostTable,
     shortcutRevision: () => revision,
-    subscribeShortcuts(listener) {
-      shortcutListeners.add(listener);
-      return () => {
-        shortcutListeners.delete(listener);
-      };
-    },
     scoped(scope) {
       let scoped = scopedStores.get(scope);
       if (!scoped) {

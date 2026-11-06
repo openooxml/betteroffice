@@ -15,6 +15,7 @@ import {
 } from '../commands/createPptxCommandStore';
 import { EDITING_CHORDS, isPluginCommandId, normalizeChord } from '../commands/descriptors';
 import { inputKeepsChord } from '../commands/shortcutKeys';
+import { hostPluginChords, releasedChord, shortcutOwner } from '../commands/shortcutTable';
 import { commandReason } from '../commands/evaluate';
 import type {
   PptxCommandStore,
@@ -418,16 +419,16 @@ export function createPptxPluginHost(access: PptxPluginHostAccess | PptxPluginVi
         for (const command of definition.commands ?? []) {
           const id: PptxPluginCommandId = `plugin:${entry.pluginId}/${command.id}`;
           const shortcuts: { chord: string; args: null }[] = [];
-          const hostChords = commands.hostPluginChords(id);
+          const hostChords = hostPluginChords(commands, id);
           for (const chord of hostChords ?? []) {
             claimed.set(chord, id);
             shortcuts.push({ chord, args: null });
           }
           for (const chord of hostChords ? [] : (command.shortcuts ?? [])) {
             const canonical = normalizeChord(chord)!;
-            const held = commands.shortcutOwner(canonical);
+            const held = shortcutOwner(commands, canonical);
             const editing = inputKeepsChord(canonical) ||
-              (EDITING_CHORDS.has(canonical) && !commands.releasedChord(canonical));
+              (EDITING_CHORDS.has(canonical) && !releasedChord(commands, canonical));
             const owner =
               held !== undefined && isPluginCommandId(held)
                 ? held

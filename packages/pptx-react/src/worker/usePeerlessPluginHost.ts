@@ -4,6 +4,7 @@ import type { DeckSnapshot, ShapeSnapshot } from '@betteroffice/pptx';
 import { indexGeometry, transformedRect } from '@betteroffice/pptx/worker';
 import { findShape } from '../interactions';
 import { pptxCommandController } from '../commands/createPptxCommandStore';
+import { subscribeShortcuts } from '../commands/shortcutTable';
 import type { PptxCommandStore } from '../commands/types';
 import { createPptxPluginHost } from '../plugins/createPptxPluginHost';
 import type { PptxEditorPluginProps, PptxPluginGeometry, PptxPluginSelection } from '../plugins/types';
@@ -51,7 +52,7 @@ export function usePeerlessPluginHost(run: PeerlessPresentation | null, commands
   useLayoutEffect(() => {
     host.syncCommands();
     const unsubscribe = host.subscribe(() => host.syncCommands());
-    const unsubscribeShortcuts = controller?.subscribeShortcuts(() => host.syncCommands());
+    const unsubscribeShortcuts = controller && subscribeShortcuts(controller, () => host.syncCommands());
     return () => {
       unsubscribe();
       unsubscribeShortcuts?.();
