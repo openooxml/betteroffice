@@ -727,6 +727,7 @@
     "failedToParse": "Dokument konnte nicht verarbeitet werden",
     "linkRemoved": "Link entfernt",
     "linkCopied": "Link in Zwischenablage kopiert",
+    "pasteFailed": "Das Einfügen konnte nicht abgeschlossen werden. Es wurde nichts geändert.",
     "failedToSave": "Dokument konnte nicht gespeichert werden",
     "documentInput": "Dokumenteingabe",
     "documentPreview": "Dokumentvorschau",

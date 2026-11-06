@@ -51,7 +51,7 @@ import { workerRevisionCallbacks, workerRevisionRequest } from './workerRevision
 import { PluginDock } from '../../../plugins/PluginPanels';
 import { useIsDark } from '../hooks/useIsDark';
 import { copyWorkerSelection, createClipboardPrefetch, writeClipboardCapture, type ClipboardCapture, isPasteFragmentAllowed } from './clipboard';
-import { admitInputIntents } from './inputAdmission';
+import { submitPasteFragment } from './inputAdmission';
 import type { DocxClipboardFragment, DocxReservationsPayload } from '@betteroffice/docx/yrs';
 import { useWorkerFileIO } from './useWorkerFileIO';
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
@@ -1029,15 +1029,15 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       if (copied) { if (cut) props.onCut?.(); else props.onCopy?.(); }
     } catch (error) { reportRecoverableError(error instanceof Error ? error : new Error(String(error))); }
   }, [controller, props.onCopy, props.onCut, reportRecoverableError]);
+  const notifyPasteRefused = useCallback(() => { toast(t('editor.pasteFailed')); }, [t]);
   const onPasteFragment = useCallback((fragment: DocxClipboardFragment, inputTime: number): boolean => {
     const current = active.current;
     if (!current) return false;
     if (!isPasteFragmentAllowed(controller.commands.store, fragment)) return false;
-    admitInputIntents(current.binding.admission, [{ kind: 'pasteFragment', payload: { fragment } }],
-      { inputTime, source: 'paste', fence: true });
+    submitPasteFragment(current.binding.admission, fragment, { inputTime, source: 'paste', fence: true }, notifyPasteRefused);
     props.onPaste?.();
     return true;
-  }, [controller, props.onPaste]);
+  }, [controller, notifyPasteRefused, props.onPaste]);
   const selectionAnchor = useCallback(() => {
     const frame = controller.getSnapshot().view?.geometry;
     const rect = frame?.selectionRects[0];
@@ -1068,7 +1068,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const contextMenu = useWorkerContextMenu({ binding: () => active.current?.binding ?? null,
     environment: controller.environment, commands: controller.commands.store, clipboard: onClipboard,
     submit: controller.submit, onWrapImage: (handle, wrap) => propertyDialogs.applyImageWrap(wrap, handle),
-    onPaste: props.onPaste, onError: reportRecoverableError, beginAddComment: workerComments.beginAddComment, focusEditor: focus });
+    onPaste: props.onPaste, onPasteRefused: notifyPasteRefused, onError: reportRecoverableError, beginAddComment: workerComments.beginAddComment, focusEditor: focus });
   inputCommand.current = contextMenu.input;
   useLayoutEffect(() => {
     active.current?.clipboard?.dispose();

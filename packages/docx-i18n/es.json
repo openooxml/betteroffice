@@ -727,6 +727,7 @@
     "failedToParse": "No se pudo analizar el documento",
     "linkRemoved": "Vínculo quitado",
     "linkCopied": "Vínculo copiado en el portapapeles",
+    "pasteFailed": "No se pudo completar el pegado. No se ha cambiado nada.",
     "failedToSave": "No se pudo guardar el documento",
     "documentInput": "Entrada del documento",
     "documentPreview": "Vista previa del documento",

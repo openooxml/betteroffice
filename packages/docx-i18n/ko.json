@@ -727,6 +727,7 @@
     "failedToParse": "문서를 분석하지 못했습니다",
     "linkRemoved": "링크가 제거되었습니다",
     "linkCopied": "링크가 클립보드에 복사되었습니다",
+    "pasteFailed": "붙여넣기를 완료할 수 없습니다. 변경된 내용이 없습니다.",
     "failedToSave": "문서를 저장하지 못했습니다",
     "documentInput": "문서 입력",
     "documentPreview": "문서 미리 보기",
