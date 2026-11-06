@@ -350,6 +350,40 @@ describe('pptx native engine parity', () => {
     expect(run(native)).toEqual(run(wasm));
   });
 
+  test('paragraph language spans match native and wasm with utf16 offsets across coalesced runs', async () => {
+    const zip = new JSZip();
+    const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+    const ns = `xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="${rel}"`;
+    zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/></Types>');
+    zip.file('_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/officeDocument" Target="ppt/presentation.xml"/></Relationships>`);
+    zip.file('ppt/presentation.xml', `<p:presentation ${ns}><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst><p:sldSz cx="9144000" cy="6858000"/></p:presentation>`);
+    zip.file('ppt/_rels/presentation.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/slide" Target="slides/slide1.xml"/></Relationships>`);
+    const runs = [['A😀 ', 'en-US'], ['hello ', 'en-US'], ['salut', 'fr-FR']]
+      .map(([text, lang]) => `<a:r><a:rPr lang="${lang}"/><a:t>${text}</a:t></a:r>`).join('');
+    zip.file('ppt/slides/slide1.xml', `<p:sld ${ns}><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="2" name="Languages"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="8000000" cy="1200000"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p>${runs}</a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>`);
+    const input = await zip.generateAsync({ type: 'uint8array' });
+    const font = new Uint8Array(readFileSync(new URL('../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url)));
+    const run = (engine: Engine) => {
+      const doc = engine.PptxDocument.openCollaborative(input.slice(), 7);
+      const renderer = new engine.PptxRenderer();
+      try {
+        renderer.registerFont('Arial', false, false, font);
+        const list = JSON.parse(renderer.layoutSlideJson(doc, 0)) as SlideDisplayList;
+        const paragraphs = list.primitives.flatMap((primitive) => primitive.kind === 'textBox' ? primitive.paragraphs : []);
+        expect(paragraphs).toHaveLength(1);
+        expect(paragraphs[0]!.runs.map((run) => run.text).join('')).toBe('A😀 hello salut');
+        expect(paragraphs[0]!.languages).toEqual([
+          { start: 0, end: 10, lang: 'en-US' }, { start: 10, end: 15, lang: 'fr-FR' },
+        ]);
+        return paragraphs.map((paragraph) => paragraph.languages);
+      } finally {
+        renderer.free();
+        doc.free();
+      }
+    };
+    expect(run(native)).toEqual(run(wasm));
+  });
+
   test('native versions differ between sessions opened from the same bytes and client id', () => {
     const first = native.PptxDocument.openCollaborative(bytes(), 7);
     const second = native.PptxDocument.openCollaborative(bytes(), 7);

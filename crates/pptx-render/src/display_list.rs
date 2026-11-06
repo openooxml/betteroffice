@@ -467,6 +467,17 @@ pub struct TextParagraph {
     pub align: Option<TextAlign>,
     pub level: u32,
     pub runs: Vec<TextRun>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub languages: Vec<TextLanguage>,
+}
+
+/// UTF-16 offsets into the paragraph's concatenated run text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextLanguage {
+    pub start: u32,
+    pub end: u32,
+    pub lang: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -751,6 +751,7 @@ mod tests {
                 h: text.font.size_px as f32,
                 anchor: crate::TextAnchor::Top,
                 paragraphs: vec![crate::TextParagraph {
+                    languages: Vec::new(),
                     align: None,
                     level: 0,
                     runs: vec![crate::TextRun {
