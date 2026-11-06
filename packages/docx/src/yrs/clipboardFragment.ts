@@ -235,7 +235,8 @@ function validTooltip(value: unknown): value is string {
   return typeof value === 'string' && value !== '' && value.length <= MAX_TOOLTIP_LENGTH && wellFormed(value);
 }
 const IMAGE_DATA_URL = /^data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/]+={0,2}$/iu;
-const IMAGE_IDENTITY_KEYS = new Set(['rId', '_kind', 'id', 'embedId', 'docPrId', 'docPr', 'drawingId']);
+const IMAGE_IDENTITY_KEYS = new Set(['rId', '_kind', 'id', 'embedId', 'docPrId', 'docPr', 'drawingId',
+  'paraId', 'ooxmlParaId', 'sourceParaId', 'paraOrigin', 'content', 'value', 'sdtType', 'propertiesJson']);
 
 function independentImage(payload: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(payload).filter(([key]) => !IMAGE_IDENTITY_KEYS.has(key)));

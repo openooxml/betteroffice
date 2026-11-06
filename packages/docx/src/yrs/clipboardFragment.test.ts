@@ -929,6 +929,20 @@ describe('validClipboardFragment runs', () => {
     expect(validClipboardFragment({ paragraphs: [{ text: 'tab\there' }] })).toBe(true);
   });
 
+  test('a pasted picture loses keys the engine reserves before anything is deleted', () => {
+    const calls: string[] = [];
+    const images: unknown[] = [];
+    const engine = { ...fakeEngine(calls), insertImage: (at: YrsLoc, image: unknown) => {
+      images.push(image);
+      return { revisionId: null, range: { story: at.story, start: at, end: { paraId: at.paraId, offset: at.offset + 1 } } };
+    } } as unknown as ClipboardPasteEngine;
+    const image = { src: 'data:image/png;base64,AA==', alt: 'a', paraId: 'p0', ooxmlParaId: 'x', sourceParaId: 'y', paraOrigin: 'z',
+      content: [{ kind: 'sdt' }], value: 'v', sdtType: 'text', propertiesJson: '{}' };
+    applyClipboardFragment(engine, { story: 'body', start: { paraId: 'p', offset: 0 }, end: { paraId: 'p', offset: 1 } },
+      { paragraphs: [{ text: '', inlines: [{ image }] }] });
+    expect(images).toEqual([{ src: 'data:image/png;base64,AA==', alt: 'a' }]);
+  });
+
   test('refuses more runs than the budget', () => {
     const runs = Array.from({ length: 100_001 }, () => ({ text: 'a' }));
     expect(validClipboardFragment({ paragraphs: [{ text: 'a'.repeat(runs.length), runs }] })).toBe(false);

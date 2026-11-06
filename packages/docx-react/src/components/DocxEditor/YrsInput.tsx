@@ -1847,9 +1847,13 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         if (copied) deleteSelection(true, copied);
         return;
       }
+      if (session?.cellSelection() || !hasTextRange()) {
+        event.preventDefault();
+        return;
+      }
       if (writeCutEvent(event)) deleteSelection();
     },
-    [copyAfterReplica, deleteSelection, holdInput, readOnly, replicaReadyRef, writeCutEvent]
+    [copyAfterReplica, deleteSelection, hasTextRange, holdInput, readOnly, replicaReadyRef, session, writeCutEvent]
   );
 
   const hasHeldInput = useCallback(
