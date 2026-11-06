@@ -6,7 +6,7 @@ type Probe = {
   hostKeys: { key: string; prevented: boolean }[];
   saves: number;
   pluginRuns: number;
-  load(bytes: number[], shortcuts: unknown): void;
+  load(bytes: number[], shortcuts: unknown): Promise<void>;
   state(id: 'bold' | 'italic'): boolean | 'mixed' | null | undefined;
   texts(): Promise<string[]>;
 };

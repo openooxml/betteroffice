@@ -12,16 +12,19 @@ import fontUrl from '../../../crates/ooxml-text/tests/fonts/LiberationSans-Regul
 
 const legacy = new URLSearchParams(location.search).get('mode') === 'legacy';
 const route = legacy ? { legacySyncApi: true, experimentalWorkerOpen: false } : {};
-const fonts = [{ family: 'Liberation Sans', src: fontUrl }];
 
-let open: (state: { file: Uint8Array; shortcuts: PptxShortcuts }) => void = () => {};
+type Fonts = { family: string; bytes: Uint8Array }[];
+let open: (state: { file: Uint8Array; fonts: Fonts; shortcuts: PptxShortcuts }) => void = () => {};
 const probe = {
   editor: null as PptxEditorApi | PptxAsyncEditorApi | null,
   issues: [] as ShortcutIssue[],
   hostKeys: [] as { key: string; prevented: boolean }[],
   saves: 0,
   pluginRuns: 0,
-  load(bytes: number[], shortcuts: PptxShortcuts) { open({ file: Uint8Array.from(bytes), shortcuts }); },
+  async load(bytes: number[], shortcuts: PptxShortcuts) {
+    const fonts = [{ family: 'Liberation Sans', bytes: new Uint8Array(await (await fetch(fontUrl)).arrayBuffer()) }];
+    open({ file: Uint8Array.from(bytes), fonts, shortcuts });
+  },
   state(id: 'bold' | 'italic') { return probe.editor?.commands.getState(id).active ?? null; },
   async texts() {
     const read = await probe.editor!.readContent();
@@ -44,10 +47,10 @@ const plugin = definePptxPlugin({
 const plugins = [plugin] as never;
 
 function Harness() {
-  const [state, setState] = useState<{ file: Uint8Array; shortcuts: PptxShortcuts } | null>(null);
+  const [state, setState] = useState<{ file: Uint8Array; fonts: Fonts; shortcuts: PptxShortcuts } | null>(null);
   open = setState;
   if (!state) return null;
-  return <PptxEditor {...(route as object)} file={state.file} fonts={fonts} plugins={plugins}
+  return <PptxEditor {...(route as object)} file={state.file} fonts={state.fonts} plugins={plugins}
     shortcuts={state.shortcuts} onShortcutIssue={(issue) => probe.issues.push(issue)}
     onSave={() => { probe.saves += 1; }} onReady={(api: PptxEditorApi | PptxAsyncEditorApi) => { probe.editor = api; }} />;
 }
