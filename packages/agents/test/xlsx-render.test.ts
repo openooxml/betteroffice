@@ -140,3 +140,20 @@ test('XLSX canvas preview sizes match the engine\'s 32-bit range extent', () => 
   expect(extent.pixelWidth).toBe(Math.ceil(f(f(last.x + last.w) - first.x)));
   expect(rangeExtent({ x: 0, y: 0 }, { x: 0, y: 0, w: 100, h: 50 }, 1.5)).toEqual({ width: 100, height: 50, pixelWidth: 150, pixelHeight: 75 });
 });
+
+test('XLSX canvas previews of many workbooks with distinct families keep the face registry bounded', async () => {
+  const provider = createFontProvider(undefined, { decoder: decodeFontFace });
+  const viewport = { x: 0, y: 0, width: 40, height: 16 };
+  const render = (name: string, bold: boolean) => renderXlsxRange({
+    sheetInfo: () => ({ activeSheet: 0 }),
+    setActiveSheet: () => {},
+    displayList: () => ({ width: 40, height: 16, commands: [{ op: 'text', x: 2, y: 12, text: 'Q', fontFamily: name, bold, fontSize: 10, color: '#000000' }] }),
+    renderPngFonts: () => [],
+  } as never, 0, 'A1', viewport, 1, provider);
+  for (let i = 0; i < 20; i++) await render(`Warmup Family ${i}`, i % 2 === 1);
+  const families = GlobalFonts.families.length;
+  const rss = process.memoryUsage().rss;
+  for (let i = 0; i < 1000; i++) await render(`Workbook Family ${i}`, i % 2 === 1);
+  expect(GlobalFonts.families.length).toBe(families);
+  expect(process.memoryUsage().rss - rss).toBeLessThan(64 * 1024 * 1024);
+}, 120_000);
