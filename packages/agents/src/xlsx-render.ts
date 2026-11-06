@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { engines, loadCanvas } from '#agents-engines';
 import { createFontProvider, type BundledFontSource } from '@betteroffice/fonts';
 import type { DisplayList, Viewport, WorkbookHandle } from '@betteroffice/xlsx';
@@ -30,38 +31,42 @@ export async function renderXlsxRange(
     const font = { family: familyOf(cmd), bold: cmd.bold === true, italic: cmd.italic === true };
     requests.set(JSON.stringify(font), font);
   }
-  const render = ++renders;
   const aliases = new Map<string, string>();
-  const keys: NonNullable<ReturnType<typeof GlobalFonts.register>>[] = [];
-  try {
-    for (const font of requests.values()) {
-      let bytes: ArrayBuffer | undefined;
-      try { bytes = await provider.resolve(font.family, font.bold, font.italic)?.(); } catch {}
-      bytes ??= await provider.resolveLastResort(font.family, font.bold, font.italic, 'word')();
-      let alias = aliases.get(font.family);
-      if (!alias) aliases.set(font.family, alias = `BetterOffice Preview ${render} ${aliases.size}`);
-      const key = GlobalFonts.register(Buffer.from(bytes), alias);
-      if (key) keys.push(key);
-    }
-    const painted = { ...list, commands: list.commands.map(cmd => {
-      if (cmd.op !== 'text') return cmd;
-      const alias = aliases.get(familyOf(cmd));
-      if (!alias) return cmd;
-      return { ...cmd, fontFamily: cmd.chart ? [`"${alias}"`, ...(cmd.fontFamily?.split(',').slice(1) ?? [])].join(',') : alias };
-    }) };
-    const canvas = createCanvas(Math.ceil(Math.fround(Math.fround(viewport.width) * Math.fround(scale))), Math.ceil(Math.fround(Math.fround(viewport.height) * Math.fround(scale))));
-    const ctx = canvas.getContext('2d');
-    module.paintDisplayList(ctx as unknown as CanvasRenderingContext2D, painted, scale);
-    ctx.globalCompositeOperation = 'destination-over';
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    return new Uint8Array(await canvas.encode('png'));
-  } finally {
-    for (const key of keys) GlobalFonts.remove(key);
+  for (const [key, font] of requests) {
+    let bytes: ArrayBuffer | undefined;
+    try { bytes = await provider.resolve(font.family, font.bold, font.italic)?.(); } catch {}
+    bytes ??= await provider.resolveLastResort(font.family, font.bold, font.italic, 'word')();
+    const alias = previewFace(GlobalFonts, bytes);
+    if (alias) aliases.set(key, alias);
   }
+  const painted = { ...list, commands: list.commands.map(cmd => {
+    if (cmd.op !== 'text') return cmd;
+    const alias = aliases.get(JSON.stringify({ family: familyOf(cmd), bold: cmd.bold === true, italic: cmd.italic === true }));
+    if (!alias) return cmd;
+    return { ...cmd, fontFamily: cmd.chart ? [`"${alias}"`, ...(cmd.fontFamily?.split(',').slice(1) ?? [])].join(',') : alias };
+  }) };
+  const canvas = createCanvas(Math.ceil(Math.fround(Math.fround(viewport.width) * Math.fround(scale))), Math.ceil(Math.fround(Math.fround(viewport.height) * Math.fround(scale))));
+  const ctx = canvas.getContext('2d');
+  module.paintDisplayList(ctx as unknown as CanvasRenderingContext2D, painted, scale);
+  ctx.globalCompositeOperation = 'destination-over';
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  return new Uint8Array(await canvas.encode('png'));
 }
 
-let renders = 0;
+const previewFaces = new Map<string, string>();
+
+/** The family a face's bytes are registered under: one alias per distinct face file, registered once per process and never removed, so concurrent renders and the host's own fonts never affect each other. */
+function previewFace(fonts: { register(font: Buffer, alias?: string): unknown }, bytes: ArrayBuffer): string | undefined {
+  const hash = createHash('sha256').update(new Uint8Array(bytes)).digest('hex').slice(0, 24);
+  let alias = previewFaces.get(hash);
+  if (alias) return alias;
+  alias = `BetterOffice Preview ${hash}`;
+  if (!fonts.register(Buffer.from(bytes), alias)) return undefined;
+  previewFaces.set(hash, alias);
+  return alias;
+}
+
 
 /** The size the engine gives a range: its edges and the scaled extent in 32-bit floats, as the native and wasm engines compute them. */
 export function rangeExtent(first: { x: number; y: number }, last: { x: number; y: number; w: number; h: number }, scale: number) {
