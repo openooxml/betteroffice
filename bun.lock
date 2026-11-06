@@ -289,21 +289,30 @@
       },
       "dependencies": {
         "@betteroffice/docx": "workspace:^",
+        "@betteroffice/docx-native": "workspace:^",
         "@betteroffice/fonts": "workspace:^",
         "@betteroffice/pptx": "workspace:^",
+        "@betteroffice/pptx-native": "workspace:^",
         "@betteroffice/xlsx": "workspace:^",
+        "@betteroffice/xlsx-native": "workspace:^",
         "@modelcontextprotocol/sdk": "~1.32.0",
-        "@napi-rs/canvas": "^0.1.80",
         "image-size": "^2.0.2",
         "jszip": "3.10.1",
         "zod": "^4.6.6",
       },
       "devDependencies": {
+        "@napi-rs/canvas": "^0.1.80",
         "@types/bun": "^1.3.14",
         "@types/node": "^26.0.0",
         "tsup": "^8.5.1",
         "typescript": "^6.0.3",
       },
+      "peerDependencies": {
+        "@napi-rs/canvas": "^0.1.80",
+      },
+      "optionalPeers": [
+        "@napi-rs/canvas",
+      ],
     },
     "packages/docx": {
       "name": "@betteroffice/docx",

@@ -1,21 +1,37 @@
-import { createCanvas, GlobalFonts, loadImage } from '@napi-rs/canvas';
+import { engines, loadCanvas } from '#agents-engines';
+import JSZip from 'jszip';
 import { imageSize } from 'image-size';
-import { inflateRawSync } from 'node:zlib';
 import { createFontProvider, resolveGlyphFallbackFace, type BundledFontSource } from '@betteroffice/fonts';
-import { decodeFontFace, paintSlide, type PresentationHandle, type CanvasImageResolver, type PptxFontFace, type ShapeSnapshot, type SlideSnapshot } from '@betteroffice/pptx';
+import type { PresentationHandle, CanvasImageResolver, PptxFontFace, ShapeSnapshot, SlideSnapshot } from '@betteroffice/pptx';
 import { DocumentToolError, type RenderedPage } from './types';
 
 export async function renderPptxSlide(
   handle: PresentationHandle,
   page: number,
   scale = 1,
-  provider = createFontProvider(undefined, { decoder: decodeFontFace }),
+  provider?: BundledFontSource,
   theme?: PptxThemeFonts,
 ): Promise<RenderedPage> {
   const snapshot = handle.snapshot();
   const slide = snapshot.slides[page - 1];
   if (!slide) throw new DocumentToolError('SLIDE_OUT_OF_RANGE', `Choose a slide index from 1 to ${snapshot.slides.length}.`);
   if (!Number.isFinite(scale) || scale < 0.25 || scale > 3) throw new DocumentToolError('INVALID_ARGUMENT', 'scale must be from 0.25 to 3.');
+  try {
+    const png = await handle.renderPng({ slide: slide.id }, { scale });
+    const view = new DataView(png.buffer, png.byteOffset, png.byteLength);
+    return { png, page, pageCount: snapshot.slides.length, width: view.getUint32(16), height: view.getUint32(20), warnings: ['Preview uses the presentation engine and bundled substitute fonts.'] };
+  } catch (error) {
+    if ((error as { code?: unknown } | null)?.code !== 'canvas-unavailable') throw error;
+  }
+  return renderPptxSlideCanvas(handle, page, scale, provider, theme);
+}
+
+async function renderPptxSlideCanvas(handle: PresentationHandle, page: number, scale: number, provider?: BundledFontSource, theme?: PptxThemeFonts): Promise<RenderedPage> {
+  const { createCanvas, GlobalFonts, loadImage } = await loadCanvas();
+  const { module } = await engines.load('pptx');
+  provider ??= createFontProvider(undefined, { decoder: module.decodeFontFace });
+  const snapshot = handle.snapshot();
+  const slide = snapshot.slides[page - 1]!;
   const warnings = new Set<string>(['Preview uses the presentation engine and bundled substitute fonts.']);
   const faces = pptxFontFaces([slide], theme);
   if (faces.length > 64) throw new DocumentToolError('FONT_LIMIT', 'Slide uses more than 64 font styles. Reduce font variety before previewing.');
@@ -53,7 +69,7 @@ export async function renderPptxSlide(
     cache.set(asset, result);
     return result;
   };
-  await paintSlide(canvas.getContext('2d') as unknown as CanvasRenderingContext2D, list, 1, scale, { resolveImage, maxShadowPixels: 0 });
+  await module.paintSlide(canvas.getContext('2d') as unknown as CanvasRenderingContext2D, list, 1, scale, { resolveImage, maxShadowPixels: 0 });
   return { png: new Uint8Array(await canvas.encode('png')), page, pageCount: snapshot.slides.length, width, height, warnings: [...warnings, 'Shadow effects are omitted in server previews.'] };
 }
 
@@ -62,33 +78,17 @@ export interface PptxFontStyle { family: string; bold: boolean; italic: boolean 
 /** The Latin faces of a deck's theme fonts, for runs that name no face of their own. */
 export interface PptxThemeFonts { major: string[]; minor: string[] }
 
-/**
- * Reads every theme part's major and minor Latin typefaces straight from the
- * package's central directory, inflating only the theme parts.
- */
-export function pptxThemeFonts(bytes: Uint8Array): PptxThemeFonts {
+/** Reads the theme's Latin faces. */
+export async function pptxThemeFonts(bytes: Uint8Array): Promise<PptxThemeFonts> {
   const fonts = { major: new Set<string>(), minor: new Set<string>() };
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  let end = -1;
-  for (let at = bytes.length - 22; at >= Math.max(0, bytes.length - 65_557); at--) {
-    if (view.getUint32(at, true) === 0x06054b50) { end = at; break; }
-  }
-  if (end < 0) return { major: [], minor: [] };
-  const text = new TextDecoder();
-  let entry = view.getUint32(end + 16, true);
-  for (let index = view.getUint16(end + 10, true); index > 0 && entry + 46 <= bytes.length; index--) {
-    if (view.getUint32(entry, true) !== 0x02014b50) break;
-    const method = view.getUint16(entry + 10, true);
-    const size = view.getUint32(entry + 20, true);
-    const nameLength = view.getUint16(entry + 28, true);
-    const local = view.getUint32(entry + 42, true);
-    const name = text.decode(bytes.subarray(entry + 46, entry + 46 + nameLength));
-    entry += 46 + nameLength + view.getUint16(entry + 30, true) + view.getUint16(entry + 32, true);
-    if (!/^ppt\/theme\/[^/]+\.xml$/.test(name) || local + 30 > bytes.length || (method !== 0 && method !== 8)) continue;
-    const start = local + 30 + view.getUint16(local + 26, true) + view.getUint16(local + 28, true);
-    const data = bytes.subarray(start, start + size);
+  let zip: JSZip;
+  try { zip = await JSZip.loadAsync(bytes); } catch { return { major: [], minor: [] }; }
+  for (const file of Object.values(zip.files)) {
+    if (file.dir || !/^ppt\/theme\/[^/]+\.xml$/.test(file.name)) continue;
+    const size = (file as unknown as { _data?: { uncompressedSize?: number } })._data?.uncompressedSize;
+    if (size !== undefined && size > 16 * 1024 * 1024) continue;
     let xml: string;
-    try { xml = text.decode(method === 8 ? inflateRawSync(data, { maxOutputLength: 16 * 1024 * 1024 }) : data); } catch { continue; }
+    try { xml = await file.async('string'); } catch { continue; }
     xml = xml.replace(/<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>|<\?[\s\S]*?\?>/g, '');
     const stack: { local: string; kind?: 'major' | 'minor' }[] = [];
     const found = { major: false, minor: false };

@@ -1,6 +1,6 @@
-import { createCanvas, GlobalFonts } from '@napi-rs/canvas';
+import { engines, loadCanvas } from '#agents-engines';
 import { createFontProvider, type BundledFontSource } from '@betteroffice/fonts';
-import { decodeFontFace, paintDisplayList, type DisplayList, type Viewport, type WorkbookHandle } from '@betteroffice/xlsx';
+import type { DisplayList, Viewport, WorkbookHandle } from '@betteroffice/xlsx';
 
 export async function renderXlsxRange(
   handle: WorkbookHandle,
@@ -8,8 +8,11 @@ export async function renderXlsxRange(
   range: string,
   viewport: Viewport,
   scale: number,
-  provider: BundledFontSource = createFontProvider(undefined, { decoder: decodeFontFace }),
+  provider?: BundledFontSource,
 ): Promise<Uint8Array> {
+  const { createCanvas, GlobalFonts } = await loadCanvas();
+  const { module } = await engines.load('xlsx');
+  provider ??= createFontProvider(undefined, { decoder: module.decodeFontFace });
   const active = handle.sheetInfo().activeSheet;
   let list: DisplayList;
   let fonts: ReturnType<WorkbookHandle['renderPngFonts']>;
@@ -35,7 +38,7 @@ export async function renderXlsxRange(
   }
   const canvas = createCanvas(Math.ceil(viewport.width * scale), Math.ceil(viewport.height * scale));
   const ctx = canvas.getContext('2d');
-  paintDisplayList(ctx as unknown as CanvasRenderingContext2D, list, scale);
+  module.paintDisplayList(ctx as unknown as CanvasRenderingContext2D, list, scale);
   ctx.globalCompositeOperation = 'destination-over';
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, canvas.width, canvas.height);

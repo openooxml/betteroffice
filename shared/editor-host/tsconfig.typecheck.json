@@ -2,6 +2,7 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "paths": {
+      "#agents-engines": ["../../packages/agents/src/engines.node.ts"],
       "#session-worker": ["../../packages/docx/src/yrs/sessionWorker.node.ts"],
       "@betteroffice/docx-react": ["../../packages/docx-react/src/index.ts"],
       "@betteroffice/xlsx-react": ["../../packages/xlsx-react/src/index.ts"],
