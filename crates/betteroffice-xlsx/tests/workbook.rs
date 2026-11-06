@@ -2994,56 +2994,289 @@ fn shared_chart_formula(workbook: &Workbook, sheet: SheetId) -> String {
         .clone()
 }
 
-/// Inserting a row on one of two sheets that share a chart part moves only that
-/// sheet's references, so the part can no longer carry both. The save is
-/// refused rather than rewriting the chart the other sheet shows.
+/// Inserting a row on one of two sheets that share a chart part would move only
+/// that sheet's references, so the part could no longer carry both. The edit
+/// is refused before it applies rather than accepted and left for the save to
+/// refuse; edits that leave the shared references alone still go through.
 #[test]
-fn refuses_to_save_a_shared_chart_part_a_structural_edit_split() {
+fn refuses_a_structural_edit_splitting_a_shared_chart_part_before_it_applies() {
     let mut workbook = Workbook::open(&shared_chart_fixture()).unwrap();
     assert_eq!(shared_chart_formula(&workbook, SheetId(0)), "$A$1:$A$2");
     assert_eq!(shared_chart_formula(&workbook, SheetId(1)), "$A$1:$A$2");
     let untouched = workbook.save().unwrap();
+    let version = workbook.version();
 
+    for op in [
+        Op::InsertRows {
+            sheet: SheetId(0),
+            at: 0,
+            count: 1,
+        },
+        Op::InsertRows {
+            sheet: SheetId(1),
+            at: 0,
+            count: 2,
+        },
+        Op::InsertCols {
+            sheet: SheetId(0),
+            at: 0,
+            count: 1,
+        },
+    ] {
+        let error = workbook
+            .apply_ops(vec![op.clone()], CalculationOptions::default())
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "xl/charts/chart1.xml references cells this edit would move, and it cannot be rewritten",
+            "{op:?}"
+        );
+        assert_eq!(workbook.version(), version, "{op:?}");
+        assert!(!workbook.can_undo(), "{op:?}");
+        assert_eq!(shared_chart_formula(&workbook, SheetId(0)), "$A$1:$A$2");
+        assert_eq!(shared_chart_formula(&workbook, SheetId(1)), "$A$1:$A$2");
+        assert_eq!(workbook.save().unwrap(), untouched, "{op:?}");
+    }
+
+    workbook
+        .edit_cell(SheetId(0), cell("A1"), "5", CalculationOptions::default())
+        .unwrap();
     workbook
         .apply_ops(
             vec![Op::InsertRows {
                 sheet: SheetId(0),
-                at: 0,
+                at: 30,
                 count: 1,
             }],
             CalculationOptions::default(),
         )
         .unwrap();
-    assert_eq!(shared_chart_formula(&workbook, SheetId(0)), "$A$2:$A$3");
-    assert_eq!(shared_chart_formula(&workbook, SheetId(1)), "$A$1:$A$2");
-
-    let error = workbook.save().unwrap_err();
-    assert!(
-        matches!(&error, Error::Spreadsheet(xlsx_parse::ParseError::UnsupportedEdit(message))
-            if message.contains("xl/charts/chart1.xml")
-                && message.contains("sheet First")
-                && message.contains("sheet Second")),
-        "{error:?}"
-    );
-
-    workbook.undo(CalculationOptions::default()).unwrap();
-    assert_eq!(shared_chart_formula(&workbook, SheetId(1)), "$A$1:$A$2");
-    let restored = package_map(&workbook.save().unwrap());
+    workbook
+        .apply_ops(
+            vec![
+                Op::AddSheet {
+                    index: 2,
+                    name: "Plain".into(),
+                },
+                Op::InsertRows {
+                    sheet: SheetId(2),
+                    at: 0,
+                    count: 1,
+                },
+            ],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let saved = workbook.save().unwrap();
     let before = package_map(&untouched);
-    for path in [
-        "xl/charts/chart1.xml",
-        "xl/drawings/drawing1.xml",
-        "xl/drawings/drawing2.xml",
-    ] {
-        assert_eq!(
-            restored.get(path),
-            before.get(path),
-            "undoing the split lets {path} save unchanged again"
-        );
-    }
-    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    let after = package_map(&saved);
+    assert_eq!(
+        after.get("xl/charts/chart1.xml"),
+        before.get("xl/charts/chart1.xml")
+    );
+    let reopened = Workbook::open(&saved).unwrap();
     assert_eq!(shared_chart_formula(&reopened, SheetId(0)), "$A$1:$A$2");
     assert_eq!(shared_chart_formula(&reopened, SheetId(1)), "$A$1:$A$2");
+    assert_eq!(
+        reopened.model().sheets[0].cell(cell("A1")).unwrap().value,
+        CellValue::Number { value: 5.0 }
+    );
+}
+
+fn shared_chart_xml(saved: &[u8]) -> String {
+    String::from_utf8(package_map(saved)["xl/charts/chart1.xml"].clone()).unwrap()
+}
+
+fn insert_above_both_shared_ranges() -> Vec<Op> {
+    (0..2)
+        .map(|sheet| Op::InsertRows {
+            sheet: SheetId(sheet),
+            at: 0,
+            count: 1,
+        })
+        .collect()
+}
+
+/// Two sheets moving a shared part's unqualified references the same way
+/// write the same references, but each rebuilds the cache from its own cells.
+/// A value edit on one of them then makes the rebuilt caches differ. The part
+/// takes the first sheet's, so the save cannot fail on what the cells read.
+#[test]
+fn a_value_edit_under_a_shared_chart_part_moved_on_both_sheets_saves() {
+    let mut workbook = Workbook::open(&shared_chart_fixture()).unwrap();
+    workbook
+        .apply_ops(
+            insert_above_both_shared_ranges(),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    workbook
+        .edit_cell(SheetId(0), cell("A2"), "5", CalculationOptions::default())
+        .unwrap();
+
+    let saved = workbook.save().unwrap();
+    let chart = shared_chart_xml(&saved);
+    assert!(
+        chart.contains("<c:f>$A$2:$A$3</c:f>") && chart.contains("<c:v>5</c:v>"),
+        "{chart}"
+    );
+    let reopened = Workbook::open(&saved).unwrap();
+    assert_eq!(shared_chart_formula(&reopened, SheetId(0)), "$A$2:$A$3");
+    assert_eq!(shared_chart_formula(&reopened, SheetId(1)), "$A$2:$A$3");
+}
+
+/// The batch moves both references the same way and changes an input whose
+/// formula lands under the shared range only once the batch recalculates. What
+/// decides the edit reads no cell value, so the recalculated value cannot turn
+/// an accepted batch into a failing save.
+#[test]
+fn a_recalculated_value_under_a_moved_shared_chart_part_saves() {
+    let mut workbook = Workbook::open(&shared_chart_fixture()).unwrap();
+    for (sheet, address, input) in [
+        (0, "B1", "1"),
+        (0, "A1", "=B1"),
+        (0, "A2", "2"),
+        (1, "A1", "1"),
+        (1, "A2", "2"),
+    ] {
+        workbook
+            .edit_cell(
+                SheetId(sheet),
+                cell(address),
+                input,
+                CalculationOptions::default(),
+            )
+            .unwrap();
+    }
+    workbook.save().unwrap();
+    let mut ops = insert_above_both_shared_ranges();
+    ops.push(Op::SetCell {
+        sheet: SheetId(0),
+        at: cell("B2"),
+        cell: CellState {
+            value: CellValue::Number { value: 9.0 },
+            ..CellState::default()
+        },
+    });
+    workbook
+        .apply_ops(ops, CalculationOptions::default())
+        .unwrap();
+    assert_eq!(
+        workbook.model().sheets[0].cell(cell("A2")).unwrap().value,
+        CellValue::Number { value: 9.0 }
+    );
+
+    let saved = workbook.save().unwrap();
+    let chart = shared_chart_xml(&saved);
+    assert!(
+        chart.contains("<c:f>$A$2:$A$3</c:f>") && chart.contains("<c:v>9</c:v>"),
+        "{chart}"
+    );
+    Workbook::open(&saved).unwrap();
+}
+
+/// Seeded value edits on both sheets of a shared chart part, before and after
+/// the part's references move on both: every save succeeds and reopens.
+#[test]
+fn value_edits_on_a_shared_chart_part_never_fail_the_save() {
+    let mut state: u64 = 0x5eed_c4a7;
+    let mut next = |bound: u64| {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (state >> 33) % bound
+    };
+    let mut workbook = Workbook::open(&shared_chart_fixture()).unwrap();
+    for step in 0..120 {
+        if step == 40 {
+            workbook
+                .apply_ops(
+                    insert_above_both_shared_ranges(),
+                    CalculationOptions::default(),
+                )
+                .unwrap();
+        }
+        let sheet = SheetId(next(2) as u32);
+        let at = CellRef::new(next(5) as u32, next(2) as u32);
+        let input = match next(5) {
+            0 => String::new(),
+            1 => "text".to_owned(),
+            2 => "=1/0".to_owned(),
+            3 => format!("={}*2", next(100)),
+            _ => format!("{}", next(1000)),
+        };
+        workbook
+            .edit_cell(sheet, at, &input, CalculationOptions::default())
+            .unwrap();
+        if step % 8 == 7 {
+            let saved = workbook
+                .save()
+                .unwrap_or_else(|error| panic!("step {step}: {error}"));
+            Workbook::open(&saved).unwrap();
+        }
+    }
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(shared_chart_formula(&reopened, SheetId(0)), "$A$2:$A$3");
+    assert_eq!(shared_chart_formula(&reopened, SheetId(1)), "$A$2:$A$3");
+}
+
+/// [`shared_chart_fixture`] with a string category cache, the kind whose
+/// points carry cell text, beside its numeric values.
+fn shared_string_chart_fixture() -> Vec<u8> {
+    let mut parts = ooxml_opc::unzip_parts(&shared_chart_fixture()).unwrap();
+    set_test_part(
+        &mut parts,
+        "xl/charts/chart1.xml",
+        br#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:barChart><c:ser><c:idx val="0"/><c:cat><c:strRef><c:f>$A$1:$A$2</c:f><c:strCache><c:ptCount val="2"/><c:pt idx="0"><c:v>a</c:v></c:pt></c:strCache></c:strRef></c:cat><c:val><c:numRef><c:f>$B$1:$B$2</c:f><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#.to_vec(),
+    );
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+/// A control character in a cell under a shared part's reshaped string cache
+/// cannot fail the save: only the first sheet's cache is rebuilt and written,
+/// and a cache point carries a character xml cannot as `_xHHHH_`.
+#[test]
+fn a_control_character_under_a_reshaped_shared_chart_part_saves() {
+    for (sheet, written) in [(1, false), (0, true)] {
+        let mut workbook = Workbook::open(&shared_string_chart_fixture()).unwrap();
+        workbook
+            .apply_ops(
+                (0..2)
+                    .map(|sheet| Op::InsertRows {
+                        sheet: SheetId(sheet),
+                        at: 1,
+                        count: 1,
+                    })
+                    .collect(),
+                CalculationOptions::default(),
+            )
+            .unwrap();
+        workbook
+            .edit_cell(
+                SheetId(sheet),
+                cell("A1"),
+                "=CHAR(1)",
+                CalculationOptions::default(),
+            )
+            .unwrap();
+
+        let saved = workbook
+            .save()
+            .unwrap_or_else(|error| panic!("CHAR(1) on sheet {sheet}: {error}"));
+        let chart = shared_chart_xml(&saved);
+        assert!(chart.contains("<c:f>$A$1:$A$3</c:f>"), "{chart}");
+        assert_eq!(
+            chart.contains("<c:v>_x0001_</c:v>"),
+            written,
+            "CHAR(1) on sheet {sheet}: {chart}"
+        );
+        assert!(!chart.contains('\u{1}'), "{chart}");
+        let reopened = Workbook::open(&saved).unwrap();
+        assert_eq!(
+            reopened.model().sheets[1].charts[0].refs[0].formula,
+            "$A$1:$A$3"
+        );
+    }
 }
 
 #[test]

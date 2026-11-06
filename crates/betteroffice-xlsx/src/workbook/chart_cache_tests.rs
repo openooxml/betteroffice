@@ -99,35 +99,174 @@ fn shifting_a_multi_level_chart_cache_keeps_it_verbatim_and_moves_its_reference(
     );
 }
 
-#[test]
-fn inserting_inside_a_multi_level_chart_cache_refuses_naming_chart_and_series() {
-    for op in [
-        Op::InsertRows {
-            sheet: SheetId(0),
-            at: 5,
-            count: 1,
-        },
-        Op::InsertCols {
-            sheet: SheetId(0),
-            at: 1,
-            count: 1,
-        },
-    ] {
-        let mut workbook = charted_workbook_with_chart(&multi_level_chart());
-        apply(&mut workbook, op);
+const REFUSAL: &str =
+    "xl/charts/chart1.xml references cells this edit would move, and it cannot be rewritten";
 
-        let error = workbook.save().unwrap_err().to_string();
-        assert!(
-            error.contains(CHART_PART)
-                && error.contains("series 1")
-                && error.contains("multi-level"),
-            "{error}"
-        );
+const MODELLED_CHART: &str = r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:barChart><c:ser><c:idx val="0"/><c:val><c:numRef><c:f>Sheet1!$B$5:$B$7</c:f><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="3"/><c:pt idx="0"><c:v>10</c:v></c:pt><c:pt idx="1"><c:v>20</c:v></c:pt><c:pt idx="2"><c:v>30</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#;
+
+/// a chart whose only obstacle to a rebuilt cache is its multi-level category
+/// cache: the values beside it are fully modelled.
+fn modelled_multi_level_chart() -> String {
+    MODELLED_CHART.replace(
+        r#"<c:idx val="0"/>"#,
+        r#"<c:idx val="0"/><c:cat><c:multiLvlStrRef><c:f>Sheet1!$A$5:$B$7</c:f><c:multiLvlStrCache><c:ptCount val="3"/><c:lvl><c:pt idx="0"><c:v>10</c:v></c:pt><c:pt idx="1"><c:v>20</c:v></c:pt><c:pt idx="2"><c:v>30</c:v></c:pt></c:lvl><c:lvl><c:pt idx="0"><c:v>North</c:v></c:pt><c:pt idx="2"><c:v>South</c:v></c:pt></c:lvl></c:multiLvlStrCache></c:multiLvlStrRef></c:cat>"#,
+    )
+}
+
+fn assert_refused_up_front(workbook: &mut Workbook, op: Op, label: &str) {
+    let saved = workbook.save().unwrap();
+    let version = workbook.version();
+    let error = workbook.apply_ops(vec![op], options()).unwrap_err();
+    assert_eq!(error.to_string(), REFUSAL, "{label}");
+    assert_eq!(workbook.version(), version, "{label}");
+    assert!(!workbook.can_undo(), "{label}");
+    assert_eq!(workbook.save().unwrap(), saved, "{label}");
+}
+
+#[test]
+fn reshaping_a_multi_level_chart_cache_is_refused_before_it_applies() {
+    for (label, op) in [
+        (
+            "rows inserted inside",
+            Op::InsertRows {
+                sheet: SheetId(0),
+                at: 5,
+                count: 1,
+            },
+        ),
+        (
+            "rows deleted inside",
+            Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 5,
+                count: 1,
+            },
+        ),
+        (
+            "columns inserted inside",
+            Op::InsertCols {
+                sheet: SheetId(0),
+                at: 1,
+                count: 1,
+            },
+        ),
+        (
+            "columns deleted inside",
+            Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 1,
+                count: 1,
+            },
+        ),
+    ] {
+        let mut workbook = charted_workbook_with_chart(&modelled_multi_level_chart());
+        assert_refused_up_front(&mut workbook, op, label);
     }
 }
 
 #[test]
-fn changing_either_column_under_a_moved_multi_level_chart_cache_refuses() {
+fn reshaping_a_batch_around_a_multi_level_chart_cache_is_refused_whole() {
+    let mut workbook = charted_workbook_with_chart(&modelled_multi_level_chart());
+    let saved = workbook.save().unwrap();
+    let error = workbook
+        .apply_ops(
+            vec![
+                Op::InsertRows {
+                    sheet: SheetId(0),
+                    at: 1,
+                    count: 1,
+                },
+                Op::InsertRows {
+                    sheet: SheetId(0),
+                    at: 7,
+                    count: 1,
+                },
+            ],
+            options(),
+        )
+        .unwrap_err();
+    assert_eq!(error.to_string(), REFUSAL);
+    assert_eq!(workbook.save().unwrap(), saved);
+}
+
+#[test]
+fn edits_beside_a_multi_level_chart_cache_still_apply_and_save() {
+    let chart = modelled_multi_level_chart();
+    for (label, op, from, to) in [
+        (
+            "rows inserted below",
+            Op::InsertRows {
+                sheet: SheetId(0),
+                at: 7,
+                count: 2,
+            },
+            None,
+            None,
+        ),
+        (
+            "rows deleted below",
+            Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 8,
+                count: 1,
+            },
+            None,
+            None,
+        ),
+        (
+            "columns inserted after",
+            Op::InsertCols {
+                sheet: SheetId(0),
+                at: 2,
+                count: 1,
+            },
+            None,
+            None,
+        ),
+        (
+            "rows deleted above",
+            Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 1,
+                count: 2,
+            },
+            Some(["Sheet1!$A$5:$B$7", "Sheet1!$B$5:$B$7"]),
+            Some(["Sheet1!$A$3:$B$5", "Sheet1!$B$3:$B$5"]),
+        ),
+        (
+            "columns inserted before",
+            Op::InsertCols {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            },
+            Some(["Sheet1!$A$5:$B$7", "Sheet1!$B$5:$B$7"]),
+            Some(["Sheet1!$B$5:$C$7", "Sheet1!$C$5:$C$7"]),
+        ),
+    ] {
+        let mut workbook = charted_workbook_with_chart(&chart);
+        apply(&mut workbook, op);
+        let saved = saved_chart(&workbook);
+        let cache = &chart[chart.find("<c:multiLvlStrCache>").unwrap()
+            ..chart.find("</c:multiLvlStrCache>").unwrap()];
+        assert!(saved.contains(cache), "{label}: {saved}");
+        match (from, to) {
+            (Some(from), Some(to)) => {
+                for (from, to) in from.into_iter().zip(to) {
+                    assert!(
+                        !saved.contains(&format!("<c:f>{from}</c:f>"))
+                            && saved.contains(&format!("<c:f>{to}</c:f>")),
+                        "{label}: {saved}"
+                    );
+                }
+            }
+            _ => assert_eq!(saved, chart, "{label}"),
+        }
+    }
+}
+
+#[test]
+fn changing_either_column_under_a_moved_multi_level_chart_cache_keeps_it_and_saves() {
     for address in ["A7", "B7"] {
         for change_format in [false, true] {
             let mut workbook = charted_workbook_with_chart(&multi_level_chart());
@@ -154,13 +293,16 @@ fn changing_either_column_under_a_moved_multi_level_chart_cache_refuses() {
                     .unwrap();
             }
 
-            let error = workbook.save().unwrap_err().to_string();
-            assert!(
-                error.contains(CHART_PART)
-                    && error.contains("series 1")
-                    && error.contains("multi-level"),
-                "{address}, change_format={change_format}: {error}"
+            let chart = multi_level_chart();
+            let saved = saved_chart(&workbook);
+            assert_eq!(
+                saved,
+                chart
+                    .replace("Sheet1!$A$5:$B$7", "Sheet1!$A$6:$B$8")
+                    .replace("Sheet1!$B$5:$B$7", "Sheet1!$B$6:$B$8"),
+                "{address}, change_format={change_format}"
             );
+            Workbook::open(&workbook.save().unwrap()).unwrap();
         }
     }
 }
@@ -240,8 +382,8 @@ fn shifting_cells_under_unmodelled_chart_caches_moves_references_and_keeps_cache
 }
 
 #[test]
-fn changing_cells_under_an_unmodelled_chart_cache_refuses_naming_chart_and_series() {
-    for (label, op, series) in [
+fn reshaping_an_unmodelled_chart_cache_is_refused_before_it_applies() {
+    for (label, op) in [
         (
             "rows inserted inside",
             Op::InsertRows {
@@ -249,7 +391,6 @@ fn changing_cells_under_an_unmodelled_chart_cache_refuses_naming_chart_and_serie
                 at: 5,
                 count: 1,
             },
-            "series 1",
         ),
         (
             "rows deleted inside",
@@ -258,7 +399,6 @@ fn changing_cells_under_an_unmodelled_chart_cache_refuses_naming_chart_and_serie
                 at: 5,
                 count: 1,
             },
-            "series 1",
         ),
         (
             "rows deleted inside on another sheet",
@@ -267,20 +407,29 @@ fn changing_cells_under_an_unmodelled_chart_cache_refuses_naming_chart_and_serie
                 at: 2,
                 count: 1,
             },
-            "series 2",
         ),
     ] {
         let mut workbook = charted_workbook();
-        apply(&mut workbook, op);
-
-        let error = workbook.save().unwrap_err().to_string();
-        assert!(
-            error.contains(CHART_PART)
-                && error.contains(series)
-                && error.contains("does not model"),
-            "{label}: {error}"
-        );
+        assert_refused_up_front(&mut workbook, op, label);
     }
+}
+
+#[test]
+fn reshaping_a_modelled_chart_cache_regenerates_it() {
+    let mut workbook = charted_workbook_with_chart(MODELLED_CHART);
+    apply(
+        &mut workbook,
+        Op::InsertRows {
+            sheet: SheetId(0),
+            at: 5,
+            count: 1,
+        },
+    );
+    let saved = saved_chart(&workbook);
+    assert!(
+        saved.contains("<c:f>Sheet1!$B$5:$B$8</c:f>") && saved.contains(r#"<c:ptCount val="4"/>"#),
+        "{saved}"
+    );
 }
 
 #[test]
@@ -326,4 +475,92 @@ fn edited_chart_previews_read_cleared_cells_the_way_saves_write_them() {
         .edit_cell(SheetId(1), r("C3"), "", options())
         .unwrap();
     agree(&workbook, &[]);
+}
+
+#[test]
+fn a_control_character_under_a_reshaped_chart_cache_saves_as_an_escape() {
+    let chart = MODELLED_CHART.replace(
+        r#"<c:idx val="0"/>"#,
+        r#"<c:idx val="0"/><c:cat><c:strRef><c:f>Sheet1!$A$5:$A$7</c:f><c:strCache><c:ptCount val="3"/><c:pt idx="0"><c:v>North</c:v></c:pt><c:pt idx="1"><c:v>North</c:v></c:pt><c:pt idx="2"><c:v>South</c:v></c:pt></c:strCache></c:strRef></c:cat>"#,
+    );
+    let mut workbook = charted_workbook_with_chart(&chart);
+    apply(
+        &mut workbook,
+        Op::InsertRows {
+            sheet: SheetId(0),
+            at: 5,
+            count: 1,
+        },
+    );
+    workbook
+        .edit_cell(SheetId(0), r("A5"), "=CHAR(1)", options())
+        .unwrap();
+
+    let saved = saved_chart(&workbook);
+    assert!(
+        saved.contains("<c:f>Sheet1!$A$5:$A$8</c:f>")
+            && saved.contains(r#"<c:pt idx="0"><c:v>_x0001_</c:v></c:pt>"#)
+            && !saved.contains('\u{1}'),
+        "{saved}"
+    );
+    Workbook::open(&workbook.save().unwrap()).unwrap();
+}
+
+#[test]
+fn only_batches_that_change_charts_run_the_chart_check() {
+    let mut workbook = charted_workbook_with_chart(MODELLED_CHART);
+    let before = super::charts::chart_check_count();
+    workbook
+        .edit_cell(SheetId(0), r("A1"), "9", options())
+        .unwrap();
+    apply(
+        &mut workbook,
+        Op::AddSheet {
+            index: 2,
+            name: "Plain".into(),
+        },
+    );
+    apply(
+        &mut workbook,
+        Op::InsertRows {
+            sheet: SheetId(2),
+            at: 0,
+            count: 1,
+        },
+    );
+    assert_eq!(super::charts::chart_check_count(), before);
+    apply(
+        &mut workbook,
+        Op::InsertRows {
+            sheet: SheetId(0),
+            at: 1,
+            count: 1,
+        },
+    );
+    assert_eq!(super::charts::chart_check_count(), before + 1);
+}
+
+#[test]
+fn finding_changed_chart_parts_is_linear_in_the_charts() {
+    let template = charted_workbook().model.sheets[0].charts[0].clone();
+    let mut before = xlsx_model::Workbook::default();
+    let mut sheet = xlsx_model::Sheet::new("Many");
+    sheet.charts = (0..60_000)
+        .map(|index| xlsx_model::SheetChart {
+            part: format!("xl/charts/chart{index}.xml"),
+            anchor_index: index,
+            ..template.clone()
+        })
+        .collect();
+    before.sheets.push(sheet);
+    let mut after = before.clone();
+    after.sheets.push(xlsx_model::Sheet::new("Added"));
+    assert!(super::charts::changed_chart_parts(&before, &after).is_empty());
+    after.sheets[0].charts[59_999].refs[0].formula = "Sheet1!$B$6:$B$8".into();
+    assert_eq!(
+        super::charts::changed_chart_parts(&before, &after)
+            .into_iter()
+            .collect::<Vec<_>>(),
+        vec!["xl/charts/chart59999.xml"]
+    );
 }
