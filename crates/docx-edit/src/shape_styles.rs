@@ -90,7 +90,8 @@ pub(crate) fn seed(document: &EditingDoc, styles: Option<&StyleResolver>) {
     let json = styles
         .map(serde_json::to_string)
         .transpose()
-        .expect("shape style resolver JSON");
+        .expect("shape style resolver JSON")
+        .filter(|json| json.len() <= MAX_RESOLVER_BYTES);
     let mut txn = document.yrs_doc().transact_mut();
     let root = txn.get_map(SHAPE_STYLES).unwrap();
     let previous = root.get(&txn, RESOLVER);
@@ -293,6 +294,20 @@ mod tests {
             &replacement
         ));
         assert!(Arc::ptr_eq(&first, &doc.shape_style_resolver().unwrap()));
+    }
+
+    #[test]
+    fn tables_over_the_read_budget_are_never_written() {
+        let doc = EditingDoc::new(75386);
+        seed(&doc, Some(&StyleResolver::default()));
+        assert!(has_entry(&doc));
+        let big = StyleResolver::new(Some(&serde_json::json!({"styles": [
+            {"type": "paragraph", "styleId": "x".repeat(MAX_RESOLVER_BYTES)}
+        ]})));
+        seed(&doc, Some(&big));
+        assert!(!has_entry(&doc));
+        seed(&doc, Some(&big));
+        assert!(!has_entry(&doc));
     }
 
     #[test]

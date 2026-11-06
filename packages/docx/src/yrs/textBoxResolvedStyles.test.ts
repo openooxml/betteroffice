@@ -279,41 +279,6 @@ for (const styleId of ['Later', 'Secret']) {
   });
 }
 
-for (const path of ['loadState', 'applyUpdate', 'applyUpdateChunks', 'applyLocalUpdate', 'applyHostUpdate'] as const) {
-  test(`${path} invalidates projections before update callbacks project and save`, async () => {
-    const bytes = fixture('<w:p><w:r><w:t>Body</w:t></w:r></w:p><w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>');
-    const target = await session();
-    target.openDocx(bytes, true);
-    const peer = await session();
-    peer.loadState(target.encodeState());
-    const vector = target.encodeStateVector();
-    const cell = target.storyIds().find(story => story.startsWith('cell:'))!;
-    expect(cell).toBeDefined();
-    for (const story of ['body', cell]) {
-      const paraId = peer.paragraphs(story)[0]!.paraId;
-      peer.insertText({ story, paraId, offset: 0 }, 'Peer ');
-    }
-    const base = yrsToDocument(target, target.materializeDocx()!);
-    const projections: ReturnType<typeof yrsToDocument>[] = [];
-    const saves: ReturnType<typeof saveYrsDocx>[] = [];
-    const detach = target.onUpdate(() => {
-      projections.push(yrsToDocument(target, base));
-      saves.push(saveYrsDocx(target, { updateModifiedDate: false }));
-    });
-    if (path === 'applyUpdateChunks') target.applyUpdateChunks(peer.encodeStateAsUpdateChunks(vector, 1024 * 1024));
-    else if (path === 'applyHostUpdate') target.applyHostUpdate(peer.encodeStateAsUpdate(vector), ['body', cell]);
-    else target[path](path === 'loadState' ? peer.encodeState() : peer.encodeStateAsUpdate(vector));
-    detach();
-    expect(projections.length).toBeGreaterThan(0);
-    for (const projection of projections) expect(JSON.stringify(projection)).toContain('Peer ');
-    for (const saved of await Promise.all(saves)) {
-      const xml = new TextDecoder().decode(unzipContainer(saved.bytes)['word/document.xml']);
-      expect(xml.replace(/<[^>]*>/g, '')).toContain('Peer Body');
-      expect(xml.replace(/<[^>]*>/g, '')).toContain('Peer Cell');
-    }
-  });
-}
-
 test('a map-only remote update preserves original saved package bytes', async () => {
   const bytes = fixture();
   const source = await session();

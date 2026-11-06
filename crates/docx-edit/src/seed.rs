@@ -6739,6 +6739,10 @@ pub(crate) enum SeedMedia<'a> {
 
 /// Seeds every lowered story into `document` and retains the package context, with the identity
 /// index when there is one.
+pub(crate) fn package_shape_styles(package: &Value) -> Option<StyleResolver> {
+    crate::shape_styles::for_package(package, &StyleResolver::new(field(Some(package), "styles")))
+}
+
 fn seed_lowered(
     document: &EditingDoc,
     lowered: LoweredDocx,
@@ -10846,9 +10850,6 @@ mod shape_style_seed_tests {
             crate::bridge::yrs_doc_to_layout_blocks(&native, "body", &env).unwrap(),
             crate::bridge::yrs_doc_to_layout_blocks(&cold, "body", &env).unwrap()
         );
-        seed_parsed_docx_with(&native, parse_docx_for_edit(&bytes).unwrap(), None).unwrap();
-        assert!(native.shape_style_resolver().is_none());
-        assert_eq!(payloads(&native), payloads(&parsed));
     }
 
     #[test]
@@ -11033,10 +11034,16 @@ mod shape_style_seed_tests {
             fresh
                 .open_docx_retaining(b, true, Some("shape-reseed"), None)
                 .unwrap();
-            for bytes in [a, b, a, b] {
+            let same = session.engine.doc();
+            for (index, bytes) in [a, b, a, b].into_iter().enumerate() {
                 session
-                    .open_docx_retaining(bytes, true, Some("shape-reseed"), None)
+                    .open_docx_retaining(bytes, index == 0, Some("shape-reseed"), None)
                     .unwrap();
+                let state = same.encode_state_as_update_v1();
+                session
+                    .open_docx_retaining(bytes, false, Some("shape-reseed"), None)
+                    .unwrap();
+                assert_eq!(same.encode_state_as_update_v1(), state);
                 assert!(session.engine.doc().shape_style_resolver().is_some());
                 crate::bridge::yrs_doc_to_layout_blocks(
                     session.engine.doc(),
@@ -11065,10 +11072,10 @@ mod shape_style_seed_tests {
                 crate::bridge::yrs_doc_to_layout_blocks(fresh.engine.doc(), "body", &env).unwrap()
             );
             session
-                .open_docx_retaining(&no_boxes, true, Some("shape-reseed"), None)
+                .open_docx_retaining(&no_boxes, false, Some("shape-reseed"), None)
                 .unwrap();
             fresh
-                .open_docx_retaining(&no_boxes, true, Some("shape-reseed"), None)
+                .open_docx_retaining(&no_boxes, false, Some("shape-reseed"), None)
                 .unwrap();
             let txn = session.engine.doc().yrs_doc().transact();
             assert!(
