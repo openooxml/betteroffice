@@ -1,6 +1,8 @@
 //! Shared tiny-skia raster helpers.
 
 mod glyph;
+#[cfg(feature = "svg")]
+pub mod svg;
 
 pub use glyph::{CachedGlyph, GlyphCache, fill_glyph};
 

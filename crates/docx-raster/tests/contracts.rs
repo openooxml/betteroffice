@@ -1671,3 +1671,53 @@ fn scale_validates_surface_limits_before_painting() {
         );
     }
 }
+
+fn vector_picture_scene() -> DisplayList {
+    list(
+        48.0,
+        48.0,
+        vec![json!({"kind":"image","relId":"rIdVector","x":4,"y":4,"w":40,"h":40})],
+    )
+}
+
+#[test]
+fn an_svg_picture_paints() {
+    let (fonts, chains, mut images) = empty_resources();
+    images.insert(
+        "rIdVector".to_string(),
+        br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="10" height="10" fill="#ff0000"/></svg>"##.to_vec(),
+    );
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let rendered = render_page(&vector_picture_scene(), 0, &resources).unwrap();
+    assert_eq!(rendered.skipped_images, 0);
+    assert_eq!(pixel(&rendered.bytes, 24, 24), [255, 0, 0, 255]);
+    assert_eq!(pixel(&rendered.bytes, 2, 2), [255, 255, 255, 255]);
+}
+
+#[test]
+fn emf_and_wmf_pictures_paint() {
+    for metafile in [
+        &include_bytes!("../../ooxml-metafile/tests/fixtures/shapes.emf")[..],
+        &include_bytes!("../../ooxml-metafile/tests/fixtures/shapes.wmf")[..],
+    ] {
+        let (fonts, chains, mut images) = empty_resources();
+        images.insert("rIdVector".to_string(), metafile.to_vec());
+        let resources = RenderResources::new(&fonts, &chains, &images);
+        let rendered = render_page(&vector_picture_scene(), 0, &resources).unwrap();
+        assert_eq!(rendered.skipped_images, 0);
+        let painted = (4..44)
+            .flat_map(|y| (4..44).map(move |x| (x, y)))
+            .filter(|&(x, y)| pixel(&rendered.bytes, x, y) != [255, 255, 255, 255])
+            .count();
+        assert!(painted > 40, "{painted} painted pixels");
+    }
+}
+
+#[test]
+fn a_picture_this_backend_cannot_decode_is_counted_as_skipped() {
+    let (fonts, chains, mut images) = empty_resources();
+    images.insert("rIdVector".to_string(), b"not a picture".to_vec());
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let rendered = render_page(&vector_picture_scene(), 0, &resources).unwrap();
+    assert_eq!(rendered.skipped_images, 1);
+}

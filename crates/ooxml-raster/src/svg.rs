@@ -17,10 +17,12 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use resvg::usvg;
 use tiny_skia::{IntSize, Pixmap, PremultipliedColorU8, Transform};
 
-use crate::MAX_IMAGE_PIXELS;
+pub use resvg::usvg;
+
+/// Largest raster one picture may decode to.
+pub const MAX_IMAGE_PIXELS: u64 = 33_554_432;
 
 /// Peak memory one SVG decode may use beyond its output raster and group
 /// layers, which the caller charges to the slide's image budget.
@@ -263,23 +265,17 @@ pub fn looks_like_svg(bytes: &[u8]) -> bool {
 
 /// Parses under the sandbox: no DTD, no external reference, an allowlisted and
 /// bounded document, and a render priced before it runs.
-#[cfg(any(test, feature = "fuzzing"))]
 pub fn parse(bytes: &[u8]) -> Result<SvgImage, SvgRefusal> {
     parse_within(bytes, MAX_IMAGE_PIXELS)
 }
 
 /// [`parse`], supersampling only as far as `pixels` of raster and layers.
-#[cfg(any(test, feature = "fuzzing"))]
-pub(crate) fn parse_within(bytes: &[u8], pixels: u64) -> Result<SvgImage, SvgRefusal> {
+pub fn parse_within(bytes: &[u8], pixels: u64) -> Result<SvgImage, SvgRefusal> {
     parse_within_work(bytes, pixels, MAX_SVG_RENDER_WORK)
 }
 
 /// [`parse_within`], rendering within `work` of the caller's budget too.
-pub(crate) fn parse_within_work(
-    bytes: &[u8],
-    pixels: u64,
-    work: u64,
-) -> Result<SvgImage, SvgRefusal> {
+pub fn parse_within_work(bytes: &[u8], pixels: u64, work: u64) -> Result<SvgImage, SvgRefusal> {
     if bytes.len() > MAX_SVG_BYTES {
         return Err(SvgRefusal::DocumentTooLarge);
     }
@@ -324,7 +320,7 @@ pub(crate) fn parse_within_work(
     })
 }
 
-pub(crate) fn metafile_fontdb(fonts: &ooxml_text::FontStore) -> Arc<usvg::fontdb::Database> {
+pub fn metafile_fontdb(fonts: &ooxml_text::FontStore) -> Arc<usvg::fontdb::Database> {
     let mut fontdb = usvg::fontdb::Database::new();
     for index in 0..fonts.font_count() {
         if let Ok(bytes) = fonts.font_bytes(ooxml_text::FontId::from_u32(index as u32)) {
@@ -334,13 +330,12 @@ pub(crate) fn metafile_fontdb(fonts: &ooxml_text::FontStore) -> Arc<usvg::fontdb
     Arc::new(fontdb)
 }
 
-pub(crate) fn has_text_element(bytes: &[u8]) -> bool {
+pub fn has_text_element(bytes: &[u8]) -> bool {
     bytes.windows(5).any(|window| window == b"<text")
 }
 
 /// Accepts only output of the bounded metafile player.
-#[cfg(test)]
-pub(crate) fn parse_metafile(
+pub fn parse_metafile(
     bytes: &[u8],
     budget: u64,
     fontdb: Option<Arc<usvg::fontdb::Database>>,
@@ -351,7 +346,7 @@ pub(crate) fn parse_metafile(
 /// [`parse_metafile`], rendering within `work_left` of the caller's budget.
 /// Priced node by node; past the budget at its own size it renders at half
 /// or a quarter of it, and past that it is refused.
-pub(crate) fn parse_metafile_within(
+pub fn parse_metafile_within(
     bytes: &[u8],
     budget: u64,
     work_left: u64,
@@ -446,7 +441,7 @@ pub(crate) fn parse_metafile_within(
 
 impl SvgImage {
     /// The render work this image was priced at, for the slide's budget.
-    pub(crate) fn work(&self) -> u64 {
+    pub fn work(&self) -> u64 {
         self.work
     }
 
@@ -553,8 +548,64 @@ fn raster(tree: &usvg::Tree, budget: u64, work: u64) -> Result<(IntSize, u64, u6
     Err(SvgRefusal::RenderTooCostly)
 }
 
+/// SVG documents the bound tests in this crate and the raster backends share.
+#[doc(hidden)]
+pub mod fixtures {
+    pub fn document(body: &str) -> String {
+        format!(r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96">{body}</svg>"##)
+    }
+
+    pub fn marker_chain(vertices: usize, levels: usize) -> String {
+        let mut d = String::from("M0 0");
+        for index in 1..vertices {
+            d.push_str(&format!(" L{} {}", index % 10, index / 10));
+        }
+        let mut defs = String::from(
+            r##"<marker id="m0" markerWidth="1" markerHeight="1" overflow="visible"><rect width="1" height="1" fill="#f00"/></marker>"##,
+        );
+        for level in 1..=levels {
+            defs.push_str(&format!(
+                r##"<marker id="m{level}" markerWidth="1" markerHeight="1" overflow="visible" markerUnits="userSpaceOnUse"><path d="{d}" fill="none" stroke="#000" marker-mid="url(#m{})"/></marker>"##,
+                level - 1
+            ));
+        }
+        document(&format!(
+            r##"<defs>{defs}</defs><path d="{d}" fill="none" stroke="#000" marker-mid="url(#m{levels})"/>"##
+        ))
+    }
+
+    pub fn use_fan_out(levels: usize, uses: usize) -> String {
+        let mut defs = String::from(r##"<rect id="l0" width="1" height="1" fill="#f00"/>"##);
+        for level in 1..=levels {
+            let copies = format!(r##"<use href="#l{}"/>"##, level - 1).repeat(uses);
+            defs.push_str(&format!(r##"<g id="l{level}">{copies}</g>"##));
+        }
+        document(&format!(r##"<defs>{defs}</defs><use href="#l{levels}"/>"##))
+    }
+
+    pub fn use_chain(hops: usize) -> String {
+        let mut defs = String::from(r##"<g id="g0"><rect width="9" height="9" fill="#f00"/></g>"##);
+        for hop in 1..=hops {
+            defs.push_str(&format!(
+                r##"<g id="g{hop}"><use href="#g{}"/></g>"##,
+                hop - 1
+            ));
+        }
+        document(&format!(r##"<defs>{defs}</defs><use href="#g{hops}"/>"##))
+    }
+
+    pub fn opacity_nest(depth: usize) -> String {
+        document(&format!(
+            r##"{}<rect width="96" height="96" fill="#0000ff"/>{}"##,
+            r#"<g opacity="0.99">"#.repeat(depth),
+            "</g>".repeat(depth)
+        ))
+    }
+}
+
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
+    use super::fixtures::*;
     use super::*;
 
     fn canvas(body: &str) -> String {
@@ -766,10 +817,6 @@ pub(crate) mod tests {
         parse(bytes).err()
     }
 
-    pub(crate) fn document(body: &str) -> String {
-        format!(r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96">{body}</svg>"##)
-    }
-
     #[test]
     fn a_bounded_document_rasterizes_above_its_intrinsic_size() {
         let source = document(r##"<rect width="96" height="96" fill="#00ff00"/>"##);
@@ -936,25 +983,6 @@ pub(crate) mod tests {
         assert!(!looks_like_svg(b""));
     }
 
-    pub(crate) fn marker_chain(vertices: usize, levels: usize) -> String {
-        let mut d = String::from("M0 0");
-        for index in 1..vertices {
-            d.push_str(&format!(" L{} {}", index % 10, index / 10));
-        }
-        let mut defs = String::from(
-            r##"<marker id="m0" markerWidth="1" markerHeight="1" overflow="visible"><rect width="1" height="1" fill="#f00"/></marker>"##,
-        );
-        for level in 1..=levels {
-            defs.push_str(&format!(
-                r##"<marker id="m{level}" markerWidth="1" markerHeight="1" overflow="visible" markerUnits="userSpaceOnUse"><path d="{d}" fill="none" stroke="#000" marker-mid="url(#m{})"/></marker>"##,
-                level - 1
-            ));
-        }
-        document(&format!(
-            r##"<defs>{defs}</defs><path d="{d}" fill="none" stroke="#000" marker-mid="url(#m{levels})"/>"##
-        ))
-    }
-
     #[test]
     fn a_marker_chain_is_refused_before_usvg_multiplies_it() {
         assert_eq!(
@@ -1017,15 +1045,6 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) fn use_fan_out(levels: usize, uses: usize) -> String {
-        let mut defs = String::from(r##"<rect id="l0" width="1" height="1" fill="#f00"/>"##);
-        for level in 1..=levels {
-            let copies = format!(r##"<use href="#l{}"/>"##, level - 1).repeat(uses);
-            defs.push_str(&format!(r##"<g id="l{level}">{copies}</g>"##));
-        }
-        document(&format!(r##"<defs>{defs}</defs><use href="#l{levels}"/>"##))
-    }
-
     #[test]
     fn an_exponential_use_fan_out_is_refused_before_it_expands() {
         assert_eq!(
@@ -1033,17 +1052,6 @@ pub(crate) mod tests {
             Some(SvgRefusal::ExpansionTooLarge)
         );
         assert!(parse(use_fan_out(2, 10).as_bytes()).is_ok());
-    }
-
-    pub(crate) fn use_chain(hops: usize) -> String {
-        let mut defs = String::from(r##"<g id="g0"><rect width="9" height="9" fill="#f00"/></g>"##);
-        for hop in 1..=hops {
-            defs.push_str(&format!(
-                r##"<g id="g{hop}"><use href="#g{}"/></g>"##,
-                hop - 1
-            ));
-        }
-        document(&format!(r##"<defs>{defs}</defs><use href="#g{hops}"/>"##))
     }
 
     #[test]
@@ -2119,14 +2127,6 @@ pub(crate) mod tests {
             "the sanitised text outgrows its bound after every reference is checked"
         );
         assert!(started.elapsed() < std::time::Duration::from_secs(30));
-    }
-
-    pub(crate) fn opacity_nest(depth: usize) -> String {
-        document(&format!(
-            r##"{}<rect width="96" height="96" fill="#0000ff"/>{}"##,
-            r#"<g opacity="0.99">"#.repeat(depth),
-            "</g>".repeat(depth)
-        ))
     }
 
     #[test]

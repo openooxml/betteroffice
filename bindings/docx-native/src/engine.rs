@@ -166,7 +166,7 @@ fn collect_png_images(
     let mut collect = |reference: &str| {
         let key = docx_raster::scoped_image_key(scope, reference);
         if let std::collections::hash_map::Entry::Vacant(entry) = images.entry(key)
-            && let Some(bytes) = document.media_bytes(reference)
+            && let Some(bytes) = document.media_raster_bytes(reference)
         {
             entry.insert(bytes);
         }
@@ -920,7 +920,18 @@ impl EditSession {
                 };
                 throw_error(&env, &format!("{prefix} {error}"))
             })
-            .and_then(|page| byte_result(env, page.bytes))
+            .and_then(|page| {
+                if page.skipped_images > 0 {
+                    return Err(throw_error(
+                        &env,
+                        &format!(
+                            "png-picture-unavailable: {} picture(s) on this page could not be drawn",
+                            page.skipped_images
+                        ),
+                    ));
+                }
+                byte_result(env, page.bytes)
+            })
     }
 
     #[napi(catch_unwind, js_name = "build_display_list_frame")]

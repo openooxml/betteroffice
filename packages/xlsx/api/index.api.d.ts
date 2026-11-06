@@ -2933,7 +2933,7 @@ export * from './host';
 export * from './scheduler';
 
 // ---- shared/office-session/pngExportError.d.ts ----
-export type PngExportCode = 'canvas-unavailable' | 'canvas-too-large' | 'font-unavailable';
+export type PngExportCode = 'canvas-unavailable' | 'canvas-too-large' | 'font-unavailable' | 'picture-unavailable';
 export declare class PngExportError extends Error {
     readonly code: PngExportCode;
     constructor(code: PngExportCode, message: string);

@@ -199,6 +199,7 @@ version = "0.5.1"
 dependencies = [
  "base64 0.22.1",
  "betteroffice-docx-layout",
+ "betteroffice-metafile",
  "betteroffice-ooxml-raster",
  "betteroffice-ooxml-text",
  "image",
@@ -259,7 +260,11 @@ version = "0.5.1"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-ooxml-text",
+ "image",
  "png",
+ "resvg",
+ "simplecss",
+ "svgtypes",
  "tiny-skia",
 ]
 
@@ -378,9 +383,6 @@ dependencies = [
  "betteroffice-pptx-edit",
  "betteroffice-pptx-render",
  "image",
- "resvg",
- "simplecss",
- "svgtypes",
  "tiny-skia",
 ]
 
