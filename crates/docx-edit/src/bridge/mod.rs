@@ -2463,10 +2463,14 @@ fn lower_table<T: ReadTxn>(
     let layout_mode = map_string(tbl_pr, "tableLayout")
         .filter(|value| matches!(value.as_str(), "fixed" | "autofit"));
     let table_margin = |side: &str| {
-        table_margins
-            .and_then(|margins| map_number(margins, side))
-            .map(twips_to_pixels)
-            .filter(|value| value.is_finite() && *value > 0.0)
+        Some(
+            table_margins
+                .and_then(|margins| map_number(margins, side))
+                .filter(|value| value.is_finite() && *value >= 0.0)
+                .unwrap_or_else(|| word_default_cell_margin(side)),
+        )
+        .map(twips_to_pixels)
+        .filter(|value| *value > 0.0)
     };
 
     Ok((
@@ -3619,13 +3623,22 @@ fn lower_cell_padding(
                     .map(twips_to_pixels)
                     .filter(|value| *value >= 0.0)
             })
-            .unwrap_or(0.0)
+            .unwrap_or_else(|| twips_to_pixels(word_default_cell_margin(key)))
     };
     BoxEdges {
         top: side("top"),
         right: side("right"),
         bottom: side("bottom"),
         left: side("left"),
+    }
+}
+
+/// Word's built-in cell margin in twips for a side no `w:tcMar`, `w:tblCellMar`
+/// or table style sets: 108 left and right, none above or below.
+fn word_default_cell_margin(side: &str) -> f64 {
+    match side {
+        "left" | "right" => 108.0,
+        _ => 0.0,
     }
 }
 
@@ -6906,6 +6919,25 @@ mod tests {
         let padding = lower_cell_padding(&cell, Some(&table));
         assert_eq!(padding.left, 0.0);
         assert!((padding.right - 7.2).abs() < 1e-10);
+    }
+
+    #[test]
+    fn cell_padding_falls_back_to_word_default_margins() {
+        let empty = std::collections::HashMap::new();
+        let padding = lower_cell_padding(&empty, None);
+        assert!((padding.left - 7.2).abs() < 1e-10);
+        assert!((padding.right - 7.2).abs() < 1e-10);
+        assert_eq!(padding.top, 0.0);
+        assert_eq!(padding.bottom, 0.0);
+        let table = std::collections::HashMap::from([
+            ("left".to_owned(), Any::Number(0.0)),
+            ("top".to_owned(), Any::Number(60.0)),
+        ]);
+        let padding = lower_cell_padding(&empty, Some(&table));
+        assert_eq!(padding.left, 0.0);
+        assert!((padding.right - 7.2).abs() < 1e-10);
+        assert!((padding.top - 4.0).abs() < 1e-10);
+        assert_eq!(padding.bottom, 0.0);
     }
 
     #[test]
