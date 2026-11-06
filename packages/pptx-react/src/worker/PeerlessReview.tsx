@@ -63,6 +63,7 @@ function Diff({ run, id, slideId, onPreview, onError, onTarget }: { run: Peerles
         sizeCanvasForSlide(buffer, diff.frame, 1, scale);
         const images = proposalImages(diff, source.resolveImage, decodeImageError);
         try {
+          await run.ensureWholeFonts?.();
           await paintSlide(context, diff.frame, 1, scale, { resolveImage: images.resolveImage, textChanges: diff.textChanges, shapeChanges: proposalPaintChanges(diff) });
         } finally { images.release(); }
         if (!cancelled && canvas.current && run.current) {
@@ -93,7 +94,10 @@ export function PeerlessReview({ run, diffHost, state, proposals, commands, onEr
   const selected = useRef(state.selectedId);
   selected.current = state.diff ? state.selectedId : null;
   const onPreview = useCallback((proposal: Proposal | null) => setReviewed(proposal), [run]);
-  const frameSource = useCallback((index: number) => peerlessFrameSource(run, index), [run]);
+  const frameSource = useCallback(async (index: number) => {
+    await run.ensureWholeFonts?.();
+    return peerlessFrameSource(run, index);
+  }, [run]);
   const subscribeRevision = useCallback((listener: () => void) => {
     const offStructure = run.store.subscribeStructure(listener);
     const offPresentation = run.store.subscribePresentation(listener);

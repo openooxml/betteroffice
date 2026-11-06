@@ -727,6 +727,7 @@
     "failedToParse": "Nie udało się przetworzyć dokumentu",
     "linkRemoved": "Usunięto łącze",
     "linkCopied": "Skopiowano łącze do schowka",
+    "pasteFailed": "Nie udało się ukończyć wklejania. Nic nie zostało zmienione.",
     "failedToSave": "Nie udało się zapisać dokumentu",
     "documentInput": "Dane wejściowe dokumentu",
     "documentPreview": "Podgląd dokumentu",

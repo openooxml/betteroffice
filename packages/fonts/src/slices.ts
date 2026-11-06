@@ -137,3 +137,52 @@ function checksum(bytes: Uint8Array, start: number, end: number): number {
   }
   return sum;
 }
+
+const MARK_CLUSTER = /\P{M}\p{M}+/gu;
+const MOST_MARKS = 8;
+const RIGHT_TO_LEFT = /[\u0590-\u08ff\u200f\u202b\u202e\u2067\ufb1d-\ufdff\ufe70-\ufeff\u{10800}-\u{10fff}\u{1e800}-\u{1efff}]/u;
+const MIRRORED = /\p{Bidi_Mirrored}/u;
+let mirroredCharacters: string | undefined;
+
+/** Every character right-to-left text can be drawn with in place of another. */
+function mirrored(): string {
+  if (mirroredCharacters === undefined) {
+    mirroredCharacters = '';
+    for (let codepoint = 0x20; codepoint < 0x20000; codepoint += 1) {
+      const character = String.fromCodePoint(codepoint);
+      if (MIRRORED.test(character)) mirroredCharacters += character;
+    }
+  }
+  return mirroredCharacters;
+}
+
+/** Every character a shaper can compose from `text`, including a base that takes only some of its marks. */
+function compositions(text: string): string {
+  let composed = text.normalize('NFC');
+  for (const cluster of text.normalize('NFD').match(MARK_CLUSTER) ?? []) {
+    const [base, ...marks] = [...cluster];
+    for (let picked = 1; picked < 1 << Math.min(marks.length, MOST_MARKS); picked += 1) {
+      composed += `${base}${marks.filter((_, index) => picked & 1 << index).join('')}`.normalize('NFC');
+    }
+  }
+  return composed;
+}
+
+/**
+ * The chunks shaping `text` can draw from. GSUB results sit in the chunks of their characters, but a shaper also
+ * composes canonical sequences, decomposes characters the face lacks and mirrors right-to-left text, which reach
+ * other chunks.
+ */
+export function textChunks(text: string, chunkOfCodepoint: (codepoint: number) => number | undefined): number[] {
+  const chunks: number[] = [];
+  const flipped = RIGHT_TO_LEFT.test(text) && MIRRORED.test(text) ? mirrored() : '';
+  for (const character of `${text}${compositions(text)}${flipped}`) {
+    const chunk = chunkOfCodepoint(character.codePointAt(0)!);
+    if (chunk !== undefined) { chunks.push(chunk); continue; }
+    for (const part of character.normalize('NFD')) {
+      const inner = chunkOfCodepoint(part.codePointAt(0)!);
+      if (inner !== undefined) chunks.push(inner);
+    }
+  }
+  return chunks;
+}

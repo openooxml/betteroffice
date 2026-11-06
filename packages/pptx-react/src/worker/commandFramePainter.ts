@@ -1,5 +1,6 @@
 import { frameAssetIds, browserFrameImages } from '@betteroffice/pptx/worker';
 import { paintSlide, sizeCanvasForSlide } from '@betteroffice/pptx';
+import type { PaintFontCoverage } from '@betteroffice/pptx';
 import type { SlideDisplayList } from '@betteroffice/pptx';
 import type { PresentationCommandFrame } from '@betteroffice/pptx/worker';
 import { buildRaster, createSlideRasterImages, slideRasterCache, zero, type MediaLease } from '../../../../shared/office-session/render/pptxSlideRaster';
@@ -28,6 +29,7 @@ export interface CommandFramePainterOptions {
   } | undefined;
   onCommit?(frame: PeerlessConfirmedFrame, view: PeerlessViewSnapshot): void;
   onAdopt?(frame: PeerlessConfirmedFrame): void;
+  fontCoverage?: PaintFontCoverage;
 }
 
 export function createCommandFramePainter(
@@ -130,7 +132,8 @@ export function createCommandFramePainter(
             if (byFactor!.get(factor) !== entry) return;
             byFactor!.delete(factor);
             if (!byFactor!.size) rasters.delete(frame);
-          }, { paintSlide, sizeCanvasForSlide });
+          }, { sizeCanvasForSlide, paintSlide: (context, list: SlideDisplayList, ratio, zoom, paint) =>
+            paintSlide(context, list, ratio, zoom, { ...paint, fontCoverage: options.fontCoverage }) });
           byFactor.set(factor, entry);
         } catch (error) {
           activeMedia?.release(); activeMedia = undefined;

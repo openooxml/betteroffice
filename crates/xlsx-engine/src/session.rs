@@ -262,6 +262,7 @@ struct ProposalList {
 struct ListedProposal {
     #[serde(flatten)]
     proposal: Proposal,
+    stale_targets: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     force_blocked: Option<bool>,
 }
@@ -1157,7 +1158,7 @@ impl Session {
                 self.calculation_options(now_serial),
             )
             .map_err(|error| error.to_string())?;
-        serde_json::to_string(&proposal).map_err(|error| error.to_string())
+        serde_json::to_string(&self.listed_proposal(proposal)).map_err(|error| error.to_string())
     }
 
     pub fn list_proposals_json(&self) -> Result<String, String> {
@@ -1167,30 +1168,30 @@ impl Session {
                 .proposals()
                 .iter()
                 .cloned()
-                .map(|mut proposal| {
-                    let force_blocked = proposal
-                        .edits
-                        .iter()
-                        .any(|edit| edit.stale == Some(true))
-                        .then_some(true);
-                    for edit in &mut proposal.edits {
-                        let sheet = self.workbook.model().sheet(SheetId(edit.sheet));
-                        let state = sheet
-                            .and_then(|sheet| sheet.cell(CellRef::new(edit.row, edit.col)))
-                            .map(betteroffice_xlsx::CellState::from)
-                            .unwrap_or_default();
-                        if edit.stale == Some(true) || sheet.is_none() || state != edit.old_state {
-                            edit.stale = Some(true);
-                        }
-                    }
-                    ListedProposal {
-                        proposal,
-                        force_blocked,
-                    }
-                })
+                .map(|proposal| self.listed_proposal(proposal))
                 .collect(),
         })
         .map_err(|error| error.to_string())
+    }
+
+    fn listed_proposal(&self, mut proposal: Proposal) -> ListedProposal {
+        let force_blocked = proposal
+            .edits
+            .iter()
+            .any(|edit| edit.stale == Some(true))
+            .then_some(true);
+        let mut stale_targets = Vec::new();
+        for edit in &mut proposal.edits {
+            if self.workbook.proposal_edit_is_stale(edit) {
+                edit.stale = Some(true);
+                stale_targets.push(CellRef::new(edit.row, edit.col).to_a1());
+            }
+        }
+        ListedProposal {
+            proposal,
+            stale_targets,
+            force_blocked,
+        }
     }
 
     pub fn accept_proposal_json(
@@ -2757,11 +2758,20 @@ mod tests {
             .unwrap();
         assert!(proposal.contains(r#""id":"p1""#));
         assert!(proposal.contains(r#""cells":["#));
+        assert_eq!(json(&proposal)["staleTargets"], serde_json::json!([]));
+        assert_eq!(
+            json(&session.list_proposals_json().unwrap())["proposals"][0],
+            json(&proposal)
+        );
         session
             .edit_cell_json(r#"{"sheet":0,"row":0,"col":0,"input":"moved"}"#, None)
             .unwrap();
         let listed = json(&session.list_proposals_json().unwrap());
         assert_eq!(listed["proposals"][0]["cells"][0]["stale"], true);
+        assert_eq!(
+            listed["proposals"][0]["staleTargets"],
+            serde_json::json!(["A1"])
+        );
         assert!(listed["proposals"][0].get("forceBlocked").is_none());
         let error: serde_json::Value = serde_json::from_str(
             &session
@@ -2813,6 +2823,10 @@ mod tests {
             let listed = json(&session.list_proposals_json().unwrap());
             assert_eq!(listed["proposals"][0]["forceBlocked"], true);
             assert_eq!(listed["proposals"][0]["cells"][0]["stale"], true);
+            assert_eq!(
+                listed["proposals"][0]["staleTargets"],
+                serde_json::json!([listed["proposals"][0]["cells"][0]["a1"]])
+            );
             assert!(
                 session
                     .accept_proposal_json(r#"{"id":"p1","force":true}"#, None)
@@ -2822,6 +2836,10 @@ mod tests {
             let listed = json(&session.list_proposals_json().unwrap());
             assert!(listed["proposals"][0].get("forceBlocked").is_none());
             assert!(listed["proposals"][0]["cells"][0].get("stale").is_none());
+            assert_eq!(
+                listed["proposals"][0]["staleTargets"],
+                serde_json::json!([])
+            );
         }
     }
 

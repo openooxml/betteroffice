@@ -66,6 +66,89 @@ test('language edits share native and wasm state, paragraph patches and styles X
   expect(document).toContain('<w:lang w:val="de-DE" w:bidi="ar-SA"/>');
 });
 
+test('proposal rounds, decisions and withdrawals match through the package API', async () => {
+  const zip = await JSZip.loadAsync(await documentFixture());
+  const paragraphs = ['alpha beta alpha', 'Second paragraph', 'Third text']
+    .map((text, index) => `<w:p w14:paraId="0000000${index + 1}"><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p>`)
+    .join('');
+  zip.file('word/document.xml', `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>${paragraphs}<w:sectPr/></w:body></w:document>`);
+  const bytes = await zip.generateAsync({ type: 'uint8array' });
+  const suggest = { author: 'Parity', date: '2026-01-01T00:00:00Z' };
+  const exercise = async (api: typeof wasmYrs) => {
+    const session = await api.createYrsSession({ clientId: 75 });
+    try {
+      session.seedFromDocx(bytes);
+      const { sessionId } = session.paragraphIdentities();
+      const [first, second, third] = session.paragraphs('body').map(({ paraId }) => ({ kind: 'session' as const, sessionId, story: 'body' as const, paraId }));
+      const steps: unknown[] = [];
+      const step = <T,>(result: T) => { steps.push(result); return result; };
+      const version = session.version();
+      expect(step(session.proposeChanges({
+        expectVersion: version,
+        proposals: [
+          { id: 'replace', paragraph: first!, suggest, op: 'replaceText', search: 'alpha', replaceWith: 'gamma', occurrence: 'all' },
+          { id: 'insert', paragraph: second!, suggest, op: 'insertText', at: 'end', text: ' added' },
+          { id: 'delete', paragraph: third!, suggest, op: 'replaceText', search: 'Third ', replaceWith: '' },
+        ],
+      })).ok).toBe(true);
+      const current = session.getProposals();
+      step(current);
+      const refusal = (result: wasmYrs.DocxProposalResult) => {
+        step(result);
+        return result.ok ? 'ok' : result.failure.code;
+      };
+      expect(refusal(session.proposeChanges({
+        expectVersion: 'stale',
+        proposals: [{ id: 'late', paragraph: third!, suggest, op: 'insertText', at: 'start', text: 'late ' }],
+      }))).toBe('stale-version');
+      expect(refusal(session.proposeChanges({
+        expectVersion: current.version,
+        proposals: [{ id: 'absent', paragraph: first!, suggest, op: 'replaceText', search: 'absent', replaceWith: 'x' }],
+      }))).not.toBe('ok');
+      expect(refusal(session.proposeChanges({
+        expectVersion: current.version,
+        proposals: [{ id: 'insert', paragraph: first!, suggest, op: 'insertText', at: 'start', text: 'other ' }],
+      }))).toBe('proposal-id-conflict');
+      expect(refusal(session.setProposalStates({
+        expectVersion: current.version,
+        expectPreviewVersion: current.previewVersion + 1,
+        changes: [{ id: 'replace', state: 'accepted' }],
+      }))).toBe('stale-preview');
+      expect(refusal(session.setProposalStates({
+        expectVersion: current.version,
+        expectPreviewVersion: current.previewVersion,
+        changes: [{ id: 'unknown', state: 'accepted' }],
+      }))).toBe('unknown-proposal');
+      expect(step(session.setProposalStates({
+        expectVersion: current.version,
+        expectPreviewVersion: current.previewVersion,
+        changes: [{ id: 'replace', state: 'accepted' }, { id: 'delete', state: 'rejected' }],
+      })).ok).toBe(true);
+      const decided = session.getProposals();
+      step(decided);
+      expect(step(session.withdrawProposals({
+        expectVersion: decided.version,
+        expectPreviewVersion: decided.previewVersion,
+        ids: ['replace', 'delete'],
+      })).ok).toBe(true);
+      step(session.getProposals());
+      const texts = session.paragraphs('body').map(({ text }) => text);
+      const saved = await api.saveYrsDocx(session, { updateModifiedDate: false });
+      const nonce = version.slice(0, version.lastIndexOf('-') + 1);
+      expect(nonce.length).toBeGreaterThan(1);
+      const normalized = JSON.stringify(steps).replaceAll(sessionId, 'session').replaceAll(nonce, 'nonce-');
+      return { steps: JSON.parse(normalized), texts, bytes: saved.bytes };
+    } finally { session.destroy(); }
+  };
+  const actual = await exercise(nativeYrs);
+  const expected = await exercise(wasmYrs);
+  expect(actual.texts[0]).toBe('gamma beta gamma');
+  expect(actual.texts[2]).toBe('Third text');
+  expect(actual.steps).toEqual(expected.steps);
+  expect(actual.texts).toEqual(expected.texts);
+  await expectSavedPartsEqual(actual.bytes, expected.bytes);
+});
+
 test('structured exports and content controls match through the package API', async () => {
   for (const fixture of [
     '../../crates/docx-edit/tests/fixtures/structured-export/principal.docx',

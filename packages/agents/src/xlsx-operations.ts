@@ -1,7 +1,8 @@
-import { isPngExportAvailable, type RangeStylePatch, type XlsxCellValue, type XlsxEditStep, type XlsxDefinedNameOp, type ConditionalFormatInfo } from '@betteroffice/xlsx';
+import type { RangeStylePatch, XlsxCellValue, XlsxEditStep, XlsxDefinedNameOp, ConditionalFormatInfo } from '@betteroffice/xlsx';
 import { DocumentToolError } from './types';
 import { integer, plainText, textWindow, unwrap } from './prototype';
 import { address, corners, type XlsxAgentWorkbook } from './xlsx';
+import { rangeExtent, renderXlsxRange } from './xlsx-render';
 
 export interface XlsxProtectionOptions { protectedSheets?: 'refuse' | 'allow' }
 
@@ -521,15 +522,18 @@ export async function previewXlsx(book: XlsxAgentWorkbook, options: { sheet: str
   sized(options.range, 10000);
   const scale = options.scale ?? 1;
   if (!Number.isFinite(scale) || scale < 0.25 || scale > 3) throw new DocumentToolError('INVALID_SCALE', 'Use scale from 0.25 to 3.');
-  if (!isPngExportAvailable()) throw new DocumentToolError('PNG_UNAVAILABLE', 'Build the XLSX Wasm engine with its raster feature to enable PNG previews.');
   const bounds = corners(options.range);
   const first = book.handle.cellRect(sheet.index, bounds.start.row, bounds.start.col);
   const last = book.handle.cellRect(sheet.index, bounds.end.row, bounds.end.col);
-  const width = Math.ceil((last.x + last.w - first.x) * scale);
-  const height = Math.ceil((last.y + last.h - first.y) * scale);
-  if (width <= 0 || height <= 0 || width * height > 16000000) throw new DocumentToolError('PREVIEW_LIMIT', 'Preview exceeds 16 megapixels. Select a smaller range or lower scale.');
+  const extent = rangeExtent(first, last, scale);
+  const width = extent.pixelWidth;
+  const height = extent.pixelHeight;
+  if (![width, height].every(n => Number.isSafeInteger(n) && n > 0) || width * height > 16000000) throw new DocumentToolError('PREVIEW_LIMIT', 'Preview exceeds 16 megapixels. Select a smaller range or lower scale.');
   const version = book.handle.version();
-  const png = await book.handle.renderPng({ sheet: sheet.index, range: options.range }, { scale });
+  const png = await book.handle.renderPng({ sheet: sheet.index, range: options.range }, { scale }).catch((error: unknown) => {
+    if ((error as { code?: unknown } | null)?.code !== 'canvas-unavailable') throw error;
+    return renderXlsxRange(book.handle, sheet.index, options.range, { x: first.x, y: first.y, width: extent.width, height: extent.height }, scale);
+  });
   const view = new DataView(png.buffer, png.byteOffset, png.byteLength);
   return { png, version, sheet: sheet.sheetId, range: options.range, width: view.getUint32(16), height: view.getUint32(20), warnings: [] as string[] };
 }

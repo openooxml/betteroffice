@@ -13,6 +13,7 @@
     "noUnusedParameters": true,
     "types": ["bun", "node"],
     "paths": {
+      "#agents-engines": ["./src/engines.node.ts"],
       "#session-worker": ["../docx/src/yrs/sessionWorker.node.ts"],
       "@betteroffice/docx/yrs": ["../docx/src/yrs/index.ts"],
       "@betteroffice/docx/editor": ["../docx/src/editor/index.ts"],

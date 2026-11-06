@@ -83,15 +83,19 @@ call `doc.accept(id, { tracked: true, date: '2026-09-27T12:00:00Z' })`.
 | `attachXlsx(handle, options?)` | Wraps a live `WorkbookHandle`. |
 | `openPptx(bytes, { name?, wasm? })` | Opens a PPTX presentation: outline, slide reads, text proposals, atomic `edit` batches and `preview`. |
 | `attachPptx(handle, options?)` | Wraps a live `PresentationHandle`. |
-| `renderDocxPage` (from `@betteroffice/agents/render`) | Node canvas renderer for DOCX page previews. |
-| `renderPptxSlide` | Node canvas renderer for PPTX slide previews. |
+| `renderDocxPage` (from `@betteroffice/agents/render`) | Engine PNG renderer for DOCX page previews. |
+| `renderPptxSlide` | Engine PNG renderer for PPTX slide previews. |
 | `createOfficeMcpServer({ root, renderer?, readOnly?, formats?, tools?, maxEdits? })` (from `@betteroffice/agents/mcp`) | The MCP server, for hosts that connect their own transport; `maxEdits` defaults to 32, range 1-500. |
 
 DOCX and PPTX documents stage text edits with `grep`, `read` and `propose`; workbooks use
 `readCells` and `proposeCells` instead. All adapters share `review`, `accept`, `reject`, `verify`,
-`export` and `close`. `openXlsx` and `openPptx` load the bundled WebAssembly in Node; in a
-browser, pass the module bytes as `wasm`. DOCX previews in a browser need a custom
-`DocumentRenderer` instead of the Node canvas renderer.
+`export` and `close`. Node, Bun and Deno use native engines and their PNG exports,
+with automatic WebAssembly fallback. Prebuilts cover macOS arm64/x64, Linux gnu and
+musl arm64/x64, and Windows arm64/x64. `@napi-rs/canvas` is only needed for previews
+on platforms without a native prebuilt. Deno needs `--allow-ffi`; without it agents
+warns and uses WebAssembly. Native engines have no 4 GiB WebAssembly memory cap.
+Browsers keep WebAssembly; pass module bytes as `wasm` for XLSX and PPTX.
+Font defaults for DOCX previews on those runtimes are configured on `@betteroffice/docx-native/layout`.
 
 ## Attached mode
 

@@ -13,7 +13,6 @@ const ARTIFACTS: Array<[name: string, dir: string, target: string | undefined, a
   ['pptx lean', 'crates/pptx-wasm', WASM, ['--no-default-features']],
   ['xlsx', 'crates/xlsx-wasm', WASM, []],
   ['xlsx lean', 'crates/xlsx-wasm', WASM, ['--no-default-features']],
-  ['xlsx raster', 'crates/xlsx-raster-wasm', WASM, []],
   ['vsdx', 'crates/vsdx-wasm', WASM, []],
   ['docx native', 'bindings/docx-native', undefined, []],
   ['pptx native', 'bindings/pptx-native', undefined, []],

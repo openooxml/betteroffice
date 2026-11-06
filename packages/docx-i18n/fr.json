@@ -727,6 +727,7 @@
     "failedToParse": "Impossible d'analyser le document",
     "linkRemoved": "Lien supprimé",
     "linkCopied": "Lien copié dans le presse-papiers",
+    "pasteFailed": "Le collage n’a pas pu être effectué. Rien n’a été modifié.",
     "failedToSave": "Échec de l'enregistrement du document",
     "documentInput": "Saisie dans le document",
     "documentPreview": "Aperçu du document",

@@ -1,3 +1,4 @@
+import { wasmBytes } from '#agents-engines';
 import { DocumentToolError, type GrepOptions, type RenderedPage } from './types';
 import { editLimit } from './edit-limits';
 
@@ -48,14 +49,8 @@ export function plainText(value: string) {
   }
 }
 
-export async function initialize(format: 'xlsx' | 'pptx', init: (input?: Uint8Array) => Promise<void>, wasm?: Uint8Array) {
-  if (!wasm && typeof process !== 'undefined' && process.versions?.node) {
-    const { readFile } = await import('node:fs/promises');
-    const entry = format === 'xlsx' ? import.meta.resolve('@betteroffice/xlsx') : import.meta.resolve('@betteroffice/pptx');
-    const directory = entry.endsWith('/src/index.ts') ? './wasm/generated' : './generated';
-    wasm = await readFile(new URL(`${directory}/${format}_wasm_bg.wasm`, entry));
-  }
-  await init(wasm);
+export async function initialize(format: 'xlsx' | 'pptx', init: (input?: Uint8Array) => Promise<void>, wasm?: Uint8Array, native = false) {
+  await init(native ? undefined : wasm ?? await wasmBytes(format));
 }
 
 export abstract class PrototypeDocument<Change, Step> {
@@ -72,7 +67,7 @@ export abstract class PrototypeDocument<Change, Step> {
   protected abstract validate(steps: Step[], version: string): void;
   protected abstract apply(steps: Step[], version: string): unknown;
   protected abstract save(steps?: Step[]): Uint8Array | Promise<Uint8Array>;
-  protected abstract reopen(bytes: Uint8Array): void;
+  protected abstract reopen(bytes: Uint8Array): void | Promise<void>;
   protected abstract dispose(): void;
 
   protected createProposal(_value: AgentProposal<Change>, _steps: Step[]): string | undefined { return undefined; }
@@ -148,7 +143,7 @@ export abstract class PrototypeDocument<Change, Step> {
 
   async verify(id?: string, _options?: { structure?: boolean }) {
     const bytes = await this.export(id);
-    this.reopen(bytes);
+    await this.reopen(bytes);
     return { reopened: true, bytes: bytes.length, checks: ['save', 'reopen'], unchecked: ['visual fidelity', 'semantic correctness', ...(this.format === 'xlsx' ? ['formula correctness'] : [])] };
   }
 

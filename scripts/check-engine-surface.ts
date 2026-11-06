@@ -31,7 +31,7 @@ export const FORMATS: Record<string, FormatConfig> = {
     wasm: "packages/xlsx/src/wasm/generated/xlsx_wasm.d.ts",
     native: "bindings/xlsx-native/index.d.ts",
     classes: ["XlsxDocument", "XlsxSnapshotBuilder"],
-    pending: ["XlsxDocument.renderPng", "XlsxDocument.renderRangePng"],
+    pending: [],
   },
   docx: {
     wasm: "packages/docx/src/wasm/generated/edit/docx_edit.d.ts",
@@ -68,6 +68,12 @@ export const FORMATS: Record<string, FormatConfig> = {
     native: "bindings/pptx-native/index.d.ts",
     classes: ["PptxDocument", "PptxRenderer"],
     pending: [],
+  },
+  "pptx-metafile": {
+    wasm: "packages/pptx/src/wasm/generated/metafile_svg_wasm.d.ts",
+    native: "bindings/pptx-native/index.d.ts",
+    classes: ["MetafileConverter"],
+    pending: ["MetafileConverter"],
   },
 };
 

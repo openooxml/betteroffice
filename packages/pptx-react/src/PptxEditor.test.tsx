@@ -813,13 +813,13 @@ describe('PptxEditor PNG export', () => {
         });
         const createUrl = spyOn(URL, 'createObjectURL').mockReturnValue('blob:slide-png');
         const revokeUrl = spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
-        let finishEncoding: ((blob: Blob) => void) | undefined;
-        let failEncoding: ((error: Error) => void) | undefined;
-        const encoded = new Promise<Blob>((resolve, reject) => {
-          finishEncoding = resolve;
-          failEncoding = reject;
+        let finishRender: (() => void) | undefined;
+        let failRender: ((error: Error) => void) | undefined;
+        const released = new Promise<void>((resolve, reject) => {
+          finishRender = resolve;
+          failRender = reject;
         });
-        let encoding = false;
+        const rendered: Uint8Array[] = [];
         class ExportCanvas {
           getContext() {
             return new Proxy({} as Record<string, unknown>, {
@@ -833,8 +833,7 @@ describe('PptxEditor PNG export', () => {
             });
           }
           convertToBlob() {
-            encoding = true;
-            return encoded;
+            return Promise.resolve(new Blob(['png'], { type: 'image/png' }));
           }
         }
         globalThis.OffscreenCanvas = ExportCanvas as unknown as typeof OffscreenCanvas;
@@ -862,8 +861,17 @@ describe('PptxEditor PNG export', () => {
             />
           );
           await waitFor(() => expect(opened.length).toBe(1), { timeout: 15_000 });
+          const handle = opened[0].handle;
+          const renderPng = handle.renderPng.bind(handle);
+          spyOn(handle, 'renderPng').mockImplementation(async (target, options) => {
+            const bytes = await renderPng(target, options);
+            rendered.push(bytes);
+            await released;
+            return bytes;
+          });
           const exported = opened[0].commands.execute('exportPng', null);
-          await waitFor(() => expect(encoding).toBe(true));
+          await waitFor(() => expect(rendered).toHaveLength(1));
+          expect(rendered[0].byteLength).toBeGreaterThan(0);
           if (scenario === 'unmount') view.unmount();
           if (scenario === 'replace' || scenario === 'stale-error') {
             view.rerender(
@@ -881,11 +889,11 @@ describe('PptxEditor PNG export', () => {
           const encodingError = new Error('PNG encoding failed');
           await act(async () => {
             if (scenario === 'stale-error' || scenario === 'error') {
-              failEncoding!(encodingError);
+              failRender!(encodingError);
             } else {
-              finishEncoding!(new Blob(['png'], { type: 'image/png' }));
+              finishRender!();
             }
-            await encoded.catch(() => {});
+            await released.catch(() => {});
           });
           expect(downloads).toEqual(scenario === 'download' ? ['report-slide-1.png'] : []);
           expect(errors).toEqual(scenario === 'error' ? [encodingError] : []);

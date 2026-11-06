@@ -1,13 +1,16 @@
-import { expect, test } from 'bun:test';
+import { beforeAll, expect, test } from 'bun:test';
 import { createCanvas, loadImage } from '@napi-rs/canvas';
 import JSZip from 'jszip';
 import { createFontProvider } from '@betteroffice/fonts';
-import { openPresentation } from '@betteroffice/pptx';
+import { initWasm, openPresentation } from '@betteroffice/pptx';
 import { attachPptx, openPptx } from '../src/pptx';
 import type { PptxAgentPresentation } from '../src/pptx';
 import type { PptxAgentEdit } from '../src/pptx-schema';
 import { pptxFixture } from './format-fixtures';
 import { presentationFixture, layoutFixture, savedSlideIds, slideIdsFixture } from './pptx-fixture';
+import { initialize } from '../src/prototype';
+
+beforeAll(() => initialize('pptx', initWasm));
 
 const apply = (deck: PptxAgentPresentation, edits: PptxAgentEdit[]) => deck.edit({ version: deck.overview().version, edits });
 

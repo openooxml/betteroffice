@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>PPTX sliced fonts: manual check</title>
+    <link rel="icon" href="data:," />
+    <style>
+      html, body { margin: 0; height: 100%; font: 14px system-ui, sans-serif; }
+      body { display: grid; grid-template-rows: auto 1fr; }
+      #check { padding: 8px 16px; border-bottom: 1px solid #ccc; }
+      #check ol { margin: 4px 0; padding-left: 20px; }
+      #sliced-fonts-root, [data-editor] { height: 100%; min-height: 0; }
+    </style>
+  </head>
+  <body>
+    <section id="check">
+      <strong>Sliced CJK faces, manual check.</strong>
+      Expected font loading: <code id="verdict"></code> · option <code id="option"></code>
+      · <a id="toggle"></a> · <label>Open a deck <input id="file" type="file" accept=".pptx" /></label>
+      <ol>
+        <li>The expected line names what the session should do: with the option on, Chromium and Firefox expect <code>sliced</code>, Safari and iOS <code>whole faces</code>; with it off, every browser expects <code>whole faces</code>. It is not a measurement; step 2 is.</li>
+        <li>Network panel (include worker requests), filter <code>Noto</code>, reload: where <code>sliced</code> is expected there must be requests into a <code>Noto…-Regular/</code> folder and no whole <code>.otf.zst</code> for those faces; where <code>whole faces</code> is expected (Safari, and option off), only whole <code>.otf.zst</code> files and no folder requests. A sliced browser that fetches whole files instead has fallen back: report it.</li>
+        <li>Every slide shows its Japanese, Chinese and Korean lines in a CJK face: no empty boxes, no blank gaps, bold line bold.</li>
+        <li>Type CJK text with the input method into a slide: it shows while composing and stays after commit.</li>
+        <li>Present the deck and export a PNG of a slide: the same text, no blanks.</li>
+        <li>Repeat 2 to 5 with the option off: the same files and the same pixels.</li>
+      </ol>
+    </section>
+    <div id="sliced-fonts-root"></div>
+    <script type="module" src="./pptx-sliced-fonts-harness.tsx"></script>
+  </body>
+</html>

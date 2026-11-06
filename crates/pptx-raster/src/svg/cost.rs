@@ -12,6 +12,28 @@ use super::{
 
 /// Work units, each about one painted pixel, per drawn path before any pixel.
 const PATH_WORK: u64 = 128;
+/// Per pixel of a group layer `resvg` allocates, fills and composites: about
+/// 22 ns measured on a full-canvas opacity group.
+const LAYER_WORK: f64 = 6.0;
+/// Per pixel of a clip mask on top of its layer: about 40 ns a clipped layer.
+const CLIP_WORK: f64 = 5.0;
+/// Per pixel a gradient shades: about 18 ns.
+const GRADIENT_WORK: f64 = 5.0;
+/// Per pixel a pattern tile is spread over: about 20 ns.
+const PATTERN_WORK: f64 = 6.0;
+/// Per pixel an image is drawn over, axis-aligned: about 25 ns.
+const IMAGE_WORK: f64 = 7.0;
+/// The same, rotated or skewed, which samples every pixel: about 95 ns.
+const IMAGE_TURNED_WORK: f64 = 26.0;
+/// Per anti-aliasing sub-row each edge crosses: a zigzag of 2,000 edges
+/// across a full-height clip takes about 200 ms.
+const CROSSING_WORK: f64 = 8.0;
+/// Clip masks nested inside clip masks, each priced as its own layer; past
+/// this depth the document is refused.
+const MAX_CLIP_DEPTH: usize = 8;
+/// Per pixel of a bitmap's source, which `resvg` decodes every time it draws
+/// the image, inside a pattern tile once per fill: about 12 ns.
+const IMAGE_DECODE_WORK: f64 = 4.0;
 /// Per device pixel of outline length the rasteriser walks for a fill.
 const FILL_EDGE_WORK: f64 = 4.0;
 /// The same for a hairline, which is drawn a line at a time.
@@ -126,16 +148,22 @@ impl Tally {
             Paint::RadialGradient(gradient) => gradient.stops().len(),
             Paint::Pattern(_) => return Err(SvgRefusal::UnsupportedElement),
         };
-        let painted = pixels * (1.0 + stops as f64 / 8.0);
-        self.painted += painted;
-        self.work += painted;
+        let shade = if stops == 0 {
+            1.0
+        } else {
+            GRADIENT_WORK + stops as f64 / 8.0
+        };
+        self.painted += pixels * (1.0 + stops as f64 / 8.0);
+        self.work += pixels * shade;
         Ok(())
     }
 
     /// Prices filling `data`, placed by `place`, into `surface`.
     fn fill(&mut self, data: &tiny_skia::Path, place: Transform, surface: Area, extra: f64) {
         let (steps, edges) = sorting(data, place, surface);
-        self.work += FILL_EDGE_WORK * length(closed(data), place) + SORT_WORK * steps;
+        self.work += FILL_EDGE_WORK * length(closed(data), place)
+            + SORT_WORK * steps
+            + CROSSING_WORK * 4.0 * rise(closed(data), place);
         self.transient = self.transient.max(extra + edges * EDGE_BYTES);
     }
 
@@ -160,6 +188,7 @@ pub(super) fn measure(
     tree: &usvg::Tree,
     size: IntSize,
     mut strokes: Option<&mut f64>,
+    metafile: bool,
 ) -> Result<Cost, SvgRefusal> {
     let (width, height) = (f64::from(size.width()), f64::from(size.height()));
     let scale = Transform::from_scale(
@@ -173,6 +202,8 @@ pub(super) fn measure(
         bottom: height,
     };
     let output = u64::from(size.width()) * u64::from(size.height());
+    let downscaled = f64::from(size.width()) < f64::from(tree.size().width().ceil())
+        || f64::from(size.height()) < f64::from(tree.size().height().ceil());
     let mut tally = Tally::default();
     let mut stack = vec![Frame {
         group: tree.root(),
@@ -204,17 +235,15 @@ pub(super) fn measure(
                         }
                         let pixels = layer.pixels();
                         let masks = u64::from(group.clip_path().is_some());
-                        tally.work += pixels * (1 + 2 * masks) as f64;
+                        tally.work += pixels * (LAYER_WORK + CLIP_WORK * masks as f64);
                         tally.painted += layer.meet(frame.surface).pixels();
                         inner.live = frame
                             .live
                             .saturating_add((pixels as u64).saturating_mul(1 + masks));
                         tally.peak = tally.peak.max(inner.live);
                         if let Some(clip) = group.clip_path() {
-                            let place = scale
-                                .pre_concat(group.abs_transform())
-                                .pre_concat(clip.transform());
-                            measure_clip(clip, place, layer, &mut tally)?;
+                            let base = scale.pre_concat(group.abs_transform());
+                            measure_clip(clip, base, layer, &mut tally, 1)?;
                         }
                         inner.surface = layer;
                     }
@@ -229,7 +258,12 @@ pub(super) fn measure(
                     if let Some(fill) = path.fill() {
                         let area = Area::of(path.abs_bounding_box(), scale)
                             .map_or(frame.surface, |area| area.meet(frame.surface));
-                        tally.paint(area.pixels(), fill.paint())?;
+                        match fill.paint() {
+                            Paint::Pattern(pattern) if metafile => measure_pattern(
+                                pattern, place, area, frame.live, downscaled, &mut tally,
+                            )?,
+                            paint => tally.paint(area.pixels(), paint)?,
+                        }
                         if area.pixels() > 0.0 {
                             tally.fill(path.data(), place, frame.surface, 0.0);
                         }
@@ -237,10 +271,42 @@ pub(super) fn measure(
                     if let Some(stroke) = path.stroke() {
                         let area = Area::of(path.abs_stroke_bounding_box(), scale)
                             .map_or(frame.surface, |area| area.meet(frame.surface));
-                        tally.paint(area.pixels(), stroke.paint())?;
+                        match stroke.paint() {
+                            Paint::Pattern(pattern) if metafile => measure_pattern(
+                                pattern, place, area, frame.live, downscaled, &mut tally,
+                            )?,
+                            paint => tally.paint(area.pixels(), paint)?,
+                        }
                         let budget = strokes.as_deref_mut();
                         measure_stroke(path, stroke, place, frame.surface, &mut tally, budget)?;
                     }
+                }
+                Node::Image(image) if metafile => {
+                    if image.is_visible() {
+                        let area = Area::of(image.abs_bounding_box(), scale)
+                            .map_or(frame.surface, |area| area.meet(frame.surface));
+                        let transform = image.abs_transform();
+                        let turned = transform.kx != 0.0 || transform.ky != 0.0;
+                        let per_pixel = if turned {
+                            IMAGE_TURNED_WORK
+                        } else {
+                            IMAGE_WORK
+                        };
+                        tally.work += PATH_WORK as f64
+                            + area.pixels() * per_pixel
+                            + decoded_pixels(image) * IMAGE_DECODE_WORK;
+                        tally.painted += area.pixels();
+                    }
+                }
+                Node::Text(text) if metafile => {
+                    let group = text.flattened();
+                    if group.should_isolate()
+                        || group.mask().is_some()
+                        || !group.filters().is_empty()
+                    {
+                        return Err(SvgRefusal::UnsupportedElement);
+                    }
+                    stack.push(Frame { group, ..frame });
                 }
                 Node::Image(_) | Node::Text(_) => return Err(SvgRefusal::UnsupportedElement),
             }
@@ -266,6 +332,71 @@ pub(super) fn measure(
             u64::MAX
         },
     })
+}
+
+/// Prices a metafile's pattern paint as `resvg` renders it: a tile pixmap at
+/// the paint's scale, unclipped, with every node of the tile drawn over all of
+/// it, then the tile spread across `area`, its bitmaps decoded again for each
+/// fill. A tile that a reduced scale rounds away refuses that scale, since
+/// `resvg` would skip the fill. A tile holding a pattern, text, mask or filter
+/// of its own is refused.
+fn measure_pattern(
+    pattern: &usvg::Pattern,
+    place: Transform,
+    area: Area,
+    live: u64,
+    downscaled: bool,
+    tally: &mut Tally,
+) -> Result<(), SvgRefusal> {
+    let (sx, sy) = place.pre_concat(pattern.transform()).get_scale();
+    let rect = pattern.rect();
+    let width = f64::from((rect.width() * sx).round());
+    let height = f64::from((rect.height() * sy).round());
+    let side = f64::from(MAX_SVG_RASTER_DIM);
+    if !width.is_finite() || !height.is_finite() || width > side || height > side {
+        tally.exceed();
+        return Ok(());
+    }
+    if downscaled && (width < 1.0 || height < 1.0) {
+        tally.exceed();
+        return Ok(());
+    }
+    let tile = width.max(0.0) * height.max(0.0);
+    let mut nodes = 0_u64;
+    let mut decode = 0.0;
+    let mut groups = vec![pattern.root()];
+    while let Some(group) = groups.pop() {
+        for node in group.children() {
+            tally.node()?;
+            nodes += 1;
+            match node {
+                Node::Group(inner) => {
+                    if inner.mask().is_some() || !inner.filters().is_empty() {
+                        return Err(SvgRefusal::UnsupportedElement);
+                    }
+                    groups.push(inner);
+                }
+                Node::Path(path) => {
+                    let patterned = |paint: &Paint| matches!(paint, Paint::Pattern(_));
+                    if path.fill().is_some_and(|fill| patterned(fill.paint()))
+                        || path
+                            .stroke()
+                            .is_some_and(|stroke| patterned(stroke.paint()))
+                    {
+                        return Err(SvgRefusal::UnsupportedElement);
+                    }
+                }
+                Node::Image(image) => decode += decoded_pixels(image),
+                Node::Text(_) => return Err(SvgRefusal::UnsupportedElement),
+            }
+        }
+    }
+    tally.work += tile * (1 + nodes) as f64 * LAYER_WORK
+        + area.pixels() * PATTERN_WORK
+        + decode * IMAGE_DECODE_WORK;
+    tally.painted += area.pixels();
+    tally.peak = tally.peak.max(live.saturating_add(tile as u64));
+    Ok(())
 }
 
 /// Prices a stroke, on the surface or off it: `resvg` dashes and outlines a
@@ -383,21 +514,30 @@ fn layer(bounds: Option<Area>, parent: Area, width: f64, height: f64) -> Option<
 /// another raster per level.
 fn measure_clip(
     clip: &usvg::ClipPath,
-    place: Transform,
+    base: Transform,
     layer: Area,
     tally: &mut Tally,
+    depth: usize,
 ) -> Result<(), SvgRefusal> {
-    if clip.clip_path().is_some() {
+    if depth > MAX_CLIP_DEPTH {
         return Err(SvgRefusal::TooManyLayers);
     }
+    let nested = |inner: &usvg::ClipPath, base: Transform, tally: &mut Tally| {
+        tally.work += layer.pixels() * (LAYER_WORK + CLIP_WORK);
+        measure_clip(inner, base, layer, tally, depth + 1)
+    };
+    if let Some(inner) = clip.clip_path() {
+        nested(inner, base, tally)?;
+    }
+    let place = base.pre_concat(clip.transform());
     let mut stack = vec![clip.root()];
     while let Some(group) = stack.pop() {
         for node in group.children() {
             tally.node()?;
             match node {
                 Node::Group(group) => {
-                    if group.clip_path().is_some() {
-                        return Err(SvgRefusal::TooManyLayers);
+                    if let Some(inner) = group.clip_path() {
+                        nested(inner, place.pre_concat(group.abs_transform()), tally)?;
                     }
                     stack.push(group);
                 }
@@ -476,6 +616,54 @@ fn closed(data: &tiny_skia::Path) -> impl Iterator<Item = PathSegment> + '_ {
 
 /// The control-polygon length of `segments` under `transform`, which a curve
 /// never exceeds.
+/// Pixels a bitmap decodes to, read from its header.
+fn decoded_pixels(image: &usvg::Image) -> f64 {
+    let data = match image.kind() {
+        usvg::ImageKind::JPEG(data)
+        | usvg::ImageKind::PNG(data)
+        | usvg::ImageKind::GIF(data)
+        | usvg::ImageKind::WEBP(data) => data,
+        usvg::ImageKind::SVG(_) => return 0.0,
+    };
+    image::ImageReader::new(std::io::Cursor::new(data.as_slice()))
+        .with_guessed_format()
+        .ok()
+        .and_then(|reader| reader.into_dimensions().ok())
+        .map_or(0.0, |(width, height)| f64::from(width) * f64::from(height))
+}
+
+/// How far a path's outline runs up and down in device pixels: the rows its
+/// edges cross, each one a coverage step on every sub-row.
+fn rise(segments: impl Iterator<Item = PathSegment>, transform: Transform) -> f64 {
+    let map =
+        |point: Point| f64::from(transform.ky * point.x + transform.sy * point.y + transform.ty);
+    let (mut start, mut current) = (0.0, 0.0);
+    let mut total = 0.0;
+    for segment in segments {
+        let points: &[Point] = match &segment {
+            PathSegment::MoveTo(point) => {
+                start = map(*point);
+                current = start;
+                continue;
+            }
+            PathSegment::LineTo(point) => std::slice::from_ref(point),
+            PathSegment::QuadTo(control, point) => &[*control, *point],
+            PathSegment::CubicTo(first, second, point) => &[*first, *second, *point],
+            PathSegment::Close => {
+                total += (start - current).abs();
+                current = start;
+                continue;
+            }
+        };
+        for point in points {
+            let next = map(*point);
+            total += (next - current).abs();
+            current = next;
+        }
+    }
+    total
+}
+
 fn length(segments: impl Iterator<Item = PathSegment>, transform: Transform) -> f64 {
     let map = |point: Point| {
         (

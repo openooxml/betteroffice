@@ -1,4 +1,5 @@
-import { DocxSectionError, createYrsSession, saveYrsDocx, type DocxDroppedStructure, type DocxKeptParagraph, type DocxCommentSaveBaseline, type DocxCommentSaveIdentity, type DocxParagraphTarget, type DocxProposalInput, type DocxProposalRecord, type DocxProposalSnapshot, type DocxProposalResult, type DocxProposalStateRequest, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
+import { engines } from '#agents-engines';
+import type { DocxDroppedStructure, DocxKeptParagraph, DocxCommentSaveBaseline, DocxCommentSaveIdentity, DocxParagraphTarget, DocxProposalInput, DocxProposalRecord, DocxProposalSnapshot, DocxProposalResult, DocxProposalStateRequest, YrsSession, YrsStorySegment } from '@betteroffice/docx/yrs';
 import { readCommentPart, readSavedCommentIdentities, verifyCommentOutput, type CommentSource } from './comment-output';
 import { cellPosition, commentBody, commentRanges, commentRoot, commentText, continueList, deleteParagraph, deleteTableRow, formatParagraph, hostEdit, insertParagraphsBefore, insertParagraphsWithAnchorFormat, insertSectionBreak, replaceCommentText, setSection, insertTableRow, lineText, listLevel, mergeCells, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
 import { createDocxBatchSchema, type DocxAgentBatch, type DocxAgentEdit, type DocxEditOutcome } from './docx-schema';
@@ -675,7 +676,7 @@ export class DocxAgentDocument {
       const comments = draft.listComments();
       const baseline = this.commentSaveBaseline && JSON.stringify(comments) === JSON.stringify(this.commentSaveBaseline.comments)
         ? this.commentSaveBaseline : undefined;
-      const saved = await saveYrsDocx(draft, { updateModifiedDate,
+      const saved = await engines.get('docx').module.yrs.saveYrsDocx(draft, { updateModifiedDate,
         commentIdentities: this.deletedComments.size ? this.commentSaveIdentities : undefined,
         commentBaseline: baseline,
         commentDeletion: !!baseline && !held && this.commentSaveBaselineVersion === version,
@@ -710,7 +711,7 @@ export class DocxAgentDocument {
       }
       return bytes;
     } catch (error) {
-      if (error instanceof DocxSectionError) throw new DocumentToolError('UNSUPPORTED', error.message);
+      if (error instanceof engines.get('docx').module.yrs.DocxSectionError) throw new DocumentToolError('UNSUPPORTED', error.message);
       throw error;
     } finally { draft.destroy(); }
   }
@@ -872,7 +873,8 @@ export class DocxAgentDocument {
 
   private async fork(clientId?: number): Promise<YrsSession> {
     this.index();
-    const draft = await createYrsSession({ clientId });
+    const { module } = await engines.load('docx');
+    const draft = await module.yrs.createYrsSession({ clientId });
     try {
       const source = this.session.materializeDocx()?.originalBuffer;
       const state = this.session.encodeState();
@@ -1342,17 +1344,17 @@ export class DocxAgentDocument {
                 const kept = await this.fork(draft.clientId);
                 try {
                   for (const [index, step] of steps.entries()) if (edits[index].op !== 'delete_comment') step(kept);
-                  baseline = (await saveYrsDocx(kept, { updateModifiedDate: false, commentIdentities: identities,
+                  baseline = (await engines.get('docx').module.yrs.saveYrsDocx(kept, { updateModifiedDate: false, commentIdentities: identities,
                     commentBaseline: { bytes: baseline, comments: previous },
                   })).bytes;
                 } finally { kept.destroy(); }
               }
-              saved = (await saveYrsDocx(draft, { updateModifiedDate: false, commentIdentities: identities,
+              saved = (await engines.get('docx').module.yrs.saveYrsDocx(draft, { updateModifiedDate: false, commentIdentities: identities,
                 commentBaseline: { bytes: baseline, comments: previous }, commentDeletion: true,
               })).bytes;
               commentBaseline = { bytes: saved, comments };
             } else {
-              saved = (await saveYrsDocx(draft, identities ? { commentIdentities: identities } : undefined)).bytes;
+              saved = (await engines.get('docx').module.yrs.saveYrsDocx(draft, identities ? { commentIdentities: identities } : undefined)).bytes;
               resetCommentBaseline = true;
             }
             await verifyCommentOutput(source, saved, comments.filter(comment => !seeded.has(comment.id)).length,
@@ -1632,7 +1634,8 @@ export class DocxAgentDocument {
 }
 
 export async function openDocx(bytes: Uint8Array, options: DocumentOptions = {}): Promise<DocxAgentDocument> {
-  const session = await createYrsSession();
+  const { module } = await engines.load('docx');
+  const session = await module.yrs.createYrsSession();
   try {
     session.seedFromDocx(bytes);
     return new DocxAgentDocument(session, options, true);
@@ -1640,7 +1643,8 @@ export async function openDocx(bytes: Uint8Array, options: DocumentOptions = {})
 }
 
 async function sourceModelCounts(bytes: Uint8Array): Promise<DocxModelCounts> {
-  const session = await createYrsSession();
+  const { module } = await engines.load('docx');
+  const session = await module.yrs.createYrsSession();
   try {
     session.seedFromDocx(bytes);
     return docxModelCounts(session);
