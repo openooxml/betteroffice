@@ -19,10 +19,7 @@ fn range_png_options(args: &str) -> Result<RenderOptions, String> {
     }
 
     let args: Args = serde_json::from_str(args).map_err(|error| format!("bad args: {error}"))?;
-    let range = args
-        .range
-        .map(|range| CellRange::parse_a1(&range).map_err(|error| format!("bad range: {error}")))
-        .transpose()?;
+    let range = args.range.map(|range| parse_range(&range)).transpose()?;
     Ok(RenderOptions {
         range,
         scale: args.scale.unwrap_or(1.0),
@@ -1018,8 +1015,7 @@ impl Session {
     pub fn range_cells_json(&self, args: &str) -> Result<String, String> {
         let args: RangeArgs =
             serde_json::from_str(args).map_err(|error| format!("bad range args: {error}"))?;
-        let range =
-            CellRange::parse_a1(&args.range).map_err(|error| format!("bad range: {error}"))?;
+        let range = parse_range(&args.range)?;
         let cells = self
             .workbook
             .range_cells_json(SheetId(args.sheet), range)
@@ -1401,12 +1397,24 @@ fn calculation_options(now_serial: Option<f64>) -> CalculationOptions {
     CalculationOptions { now_serial }
 }
 
+/// An A1 range in either case, as Excel reads one: `a1:b2` is `A1:B2`.
 fn parse_range(range: &str) -> Result<CellRange, String> {
-    CellRange::parse_a1(range).map_err(|error| format!("bad range: {error}"))
+    CellRange::parse_a1(&range.to_ascii_uppercase()).map_err(|error| format!("bad range: {error}"))
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ranges_parse_in_either_case() {
+        assert_eq!(super::parse_range("a1:b2"), super::parse_range("A1:B2"));
+        assert_eq!(super::parse_range("c3"), super::parse_range("C3"));
+        assert!(
+            super::parse_range("not a range")
+                .unwrap_err()
+                .starts_with("bad range: ")
+        );
+    }
+
     use super::*;
     use xlsx_model::{Cell, CellValue, Sheet, Workbook as WorkbookModel};
 

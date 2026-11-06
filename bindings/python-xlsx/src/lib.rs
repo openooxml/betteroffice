@@ -193,9 +193,10 @@ fn wire_args<T: DeserializeOwned>(json: &str, what: &str) -> PyResult<T> {
         .map_err(|error| PyValueError::new_err(format!("bad {what}: {error}")))
 }
 
-/// An A1 range as the TypeScript handle parses one: case as given, `bad range: ...` on failure.
+/// An A1 range as the TypeScript handle parses one: either case, `bad range: ...` on failure.
 fn wire_range(range: &str) -> PyResult<CellRange> {
-    CellRange::parse_a1(range).map_err(|error| RangeError::new_err(format!("bad range: {error}")))
+    CellRange::parse_a1(&range.to_ascii_uppercase())
+        .map_err(|error| RangeError::new_err(format!("bad range: {error}")))
 }
 
 #[derive(Deserialize)]
