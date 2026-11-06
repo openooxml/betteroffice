@@ -280,7 +280,7 @@ function resolveReplayOp(handle: WorkbookHandle, state: WorkbookCommandState, co
         else if (operation.type === 'moveSheet') operation.from = resolved.sheet;
         else if ('sheet' in operation) operation.sheet = resolved.sheet;
         else throw new WorkbookCommandRefusal('invalid-command');
-      } else if ('sheet' in operation || 'index' in operation || operation.type === 'moveSheet' || operation.type === 'setDefinedNames' || operation.type === 'restoreSheet') {
+      } else if ('sheet' in operation || 'index' in operation || typeof operation.scope === 'number' || operation.type === 'moveSheet' || operation.type === 'setDefinedNames' || operation.type === 'restoreSheet') {
         numericSheet();
         if (sheets.length !== state.sheetIds.length || sheets.some((id, index) => id !== state.sheetIds[index])) {
           throw new WorkbookCommandRefusal('stale-target');

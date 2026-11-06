@@ -32,6 +32,7 @@ use yrs::{
 
 #[cfg(test)]
 mod cascade_composition_tests;
+mod defined_names;
 #[cfg(test)]
 mod fingerprint_composition_tests;
 #[cfg(test)]
@@ -42,6 +43,8 @@ mod merges;
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod snapshot;
 pub(crate) mod snapshot_validation;
+pub(crate) use defined_names::FILTER_DATABASE_NAME;
+use defined_names::{NameOverlay, dormant_names, scoped_name_keys, sync_defined_names};
 use fingerprints::Fingerprints;
 pub(crate) use hyperlinks::validate_hyperlink_edit_baseline;
 use hyperlinks::{
@@ -55,6 +58,9 @@ use merges::{
 
 const META: &str = "xlsx";
 const CELL_FORMATS: &str = "xlsx:cell-formats";
+/// Edits over the source's name table. Optional: a document nobody edited a name
+/// in has no such root, and an older replica refuses one that does.
+const DEFINED_NAMES: &str = "xlsx:defined-names";
 const SHEET_ORDER: &str = "xlsx:sheet-order";
 const SHEETS: &str = "xlsx:sheets";
 const MIN_SUPPORTED_SCHEMA_VERSION: i64 = 3;
@@ -815,6 +821,7 @@ pub(crate) enum SnapshotAdoption {
 
 pub(crate) struct StagedUpdate {
     pub(crate) commit_update: Vec<u8>,
+    pub(crate) dormant_names: Vec<DefinedName>,
     pub(crate) effective: bool,
     pub(crate) model: WorkbookModel,
     pub(crate) pending: bool,
@@ -1284,6 +1291,22 @@ impl WorkbookAuthority {
         self.doc.client_id().get()
     }
 
+    /// The name table every replica opened, which a collaborative edit leaves
+    /// alone.
+    pub(crate) fn source_defined_names(&self) -> &[DefinedName] {
+        &self.base.defined_names
+    }
+
+    /// The names stored under a scope none of `keys` is. Each carries a sheet index
+    /// past the table's, one apiece: nothing shows them, and any of them shows with
+    /// no further check once its sheet arrives.
+    pub(crate) fn dormant_defined_names(
+        &self,
+        keys: &[String],
+    ) -> Result<Vec<DefinedName>, AuthorityError> {
+        dormant_names(&self.doc.transact(), keys).map_err(AuthorityError::InvalidState)
+    }
+
     pub(crate) fn inherit_xf_xml_markers(&mut self, source: &Stylesheet) {
         if !self.base.styles.has_xf_xml_markers() {
             Arc::make_mut(&mut self.base)
@@ -1523,7 +1546,7 @@ impl WorkbookAuthority {
                 ))
             })?;
         }
-        if self.base.defined_names != model.defined_names {
+        if !collaborative && self.base.defined_names != model.defined_names {
             Arc::make_mut(&mut self.base).defined_names = model.defined_names.clone();
         }
         if self.base.tables != model.tables {
@@ -2133,7 +2156,7 @@ impl WorkbookAuthority {
     /// nor the metadata a whole workbook carries.
     fn is_whole_document(&self) -> bool {
         let txn = self.doc.transact();
-        if require_root_keys(&txn, &[CELL_FORMATS, META, SHEET_ORDER, SHEETS]).is_err() {
+        if require_root_keys(&txn).is_err() {
             return false;
         }
         txn.get_map(META).is_some_and(|meta| {
@@ -2218,8 +2241,10 @@ impl WorkbookAuthority {
                     effective
                 };
                 if effective {
+                    let dormant_names = staged.dormant_defined_names(&structure.sheet_keys)?;
                     return Ok(StagedUpdate {
                         commit_update: integrated.clone(),
+                        dormant_names,
                         effective: true,
                         model,
                         pending: true,
@@ -2238,6 +2263,7 @@ impl WorkbookAuthority {
             };
             return Ok(StagedUpdate {
                 commit_update: Update::EMPTY_V1.to_vec(),
+                dormant_names: Vec::new(),
                 effective: false,
                 model: current_model,
                 pending: true,
@@ -2256,8 +2282,10 @@ impl WorkbookAuthority {
                 .map_err(AuthorityError::InvalidState)?;
             model != current_model || structure != current_structure
         };
+        let dormant_names = staged.dormant_defined_names(&structure.sheet_keys)?;
         Ok(StagedUpdate {
             commit_update: integrated.clone(),
+            dormant_names,
             effective,
             model,
             pending,
@@ -2683,9 +2711,10 @@ impl WorkbookAuthority {
     /// Whether the sheets under `keys` hold a live struct `step` did not
     /// insert. Deleting a sheet's map deletes everything live beneath it, so
     /// doing that to a copy of the document lists those structs without
-    /// touching this one. A sheet setting that holds what an empty sheet holds
-    /// carries nothing to lose, and undoing a later change to it writes the
-    /// step's own value back as a new struct, so those settings are left out.
+    /// touching this one. A name scoped to one of the sheets lives outside its
+    /// map and goes the same way. A sheet setting that holds what an empty sheet
+    /// holds carries nothing to lose, and undoing a later change to it writes
+    /// the step's own value back as a new struct, so those settings are left out.
     fn holds_content_beyond(&self, step: &StackItem<()>, keys: &[&str]) -> Result<bool, String> {
         let probe = Doc::new();
         let state = decode_local_update_v1(&self.encode_state_as_update_v1())?;
@@ -2717,6 +2746,11 @@ impl WorkbookAuthority {
         let mut txn = probe.transact_mut_with(UNTRACKED_ORIGIN);
         for key in keys {
             sheets.remove(&mut txn, key);
+        }
+        if let Some(names) = txn.get_map(DEFINED_NAMES) {
+            for key in scoped_name_keys(&names, &txn, keys) {
+                names.remove(&mut txn, &key);
+            }
         }
         let held = txn.delete_set().diff(step.insertions());
         Ok(held.iter().any(|(_, ranges)| !ranges.is_empty()))
@@ -2883,7 +2917,7 @@ impl WorkbookAuthority {
         FULL_MATERIALIZATIONS.set(FULL_MATERIALIZATIONS.get() + 1);
         let txn = self.doc.transact();
         if strict {
-            require_root_keys(&txn, &[CELL_FORMATS, META, SHEET_ORDER, SHEETS])?;
+            require_root_keys(&txn)?;
         }
         let meta = txn
             .get_map(META)
@@ -3010,6 +3044,7 @@ impl WorkbookAuthority {
             .map(|sheet| sheet.name.clone())
             .collect();
         project_unique_sheet_names(&mut model.sheets);
+        NameOverlay::read(&txn)?.apply(&mut model.defined_names, &keys)?;
         let active = keys.iter().cloned().collect::<BTreeSet<_>>();
         let all_keys = sheets
             .keys(&txn)
@@ -3117,8 +3152,9 @@ impl WorkbookAuthority {
         // merge and hyperlink edits into the baselines peers build on.
         let full_sync = ops.iter().any(requires_full_semantic_sync)
             || (!collaborative
-                && ((ops.iter().any(|op| matches!(op, Op::AddSheet { .. }))
-                    && ops.iter().any(|op| matches!(op, Op::SetCell { .. })))
+                && (ops.iter().any(|op| matches!(op, Op::SetChartAnchor { .. }))
+                    || (ops.iter().any(|op| matches!(op, Op::AddSheet { .. }))
+                        && ops.iter().any(|op| matches!(op, Op::SetCell { .. })))
                     || (ops
                         .iter()
                         .any(|op| matches!(op, Op::AddSheet { .. } | Op::RemoveSheet { .. }))
@@ -3135,7 +3171,13 @@ impl WorkbookAuthority {
             ops.iter()
                 .filter(|op| {
                     is_structural_op(op)
-                        && !(collaborative && matches!(op, Op::AddSheet { .. }))
+                        && !(collaborative
+                            && matches!(
+                                op,
+                                Op::AddSheet { .. }
+                                    | Op::SetDefinedName { .. }
+                                    | Op::DeleteDefinedName { .. }
+                            ))
                         && (!is_collaborative_local_layout_op(op)
                             || (!collaborative
                                 && matches!(
@@ -3157,6 +3199,7 @@ impl WorkbookAuthority {
         let mut merges = HashSet::new();
         let mut hyperlinks = HashSet::new();
         let mut conditional_formats = HashSet::new();
+        let mut chart_anchors = BTreeSet::new();
         if !full_sync {
             let targets = targeted_sheet_keys(&current_keys, &keys, ops)?;
             for (op, target) in ops.iter().zip(targets) {
@@ -3203,6 +3246,9 @@ impl WorkbookAuthority {
                     ) => {
                         conditional_formats.insert(key);
                     }
+                    (Op::SetChartAnchor { frame, .. }, Some(key)) => {
+                        chart_anchors.insert((key, frame.clone()));
+                    }
                     (
                         Op::PatchRangeStyle { range, .. }
                         | Op::SetRangeNumberFormat { range, .. }
@@ -3221,6 +3267,13 @@ impl WorkbookAuthority {
                 }
             }
         }
+        let names_before = if collaborative {
+            let mut names = self.base.defined_names.clone();
+            NameOverlay::read(&self.doc.transact())?.apply(&mut names, &current_keys)?;
+            Some(names).filter(|names| *names != model.defined_names)
+        } else {
+            None
+        };
         let current_key_set = current_keys
             .iter()
             .map(String::as_str)
@@ -3240,7 +3293,9 @@ impl WorkbookAuthority {
             && freeze_panes.is_empty()
             && merges.is_empty()
             && hyperlinks.is_empty()
+            && chart_anchors.is_empty()
             && conditional_formats.is_empty()
+            && names_before.is_none()
         {
             self.apply_history(history);
             return Ok(());
@@ -3280,6 +3335,14 @@ impl WorkbookAuthority {
         }
         if topology_changed {
             patch_sheet_order(&order, &mut txn, &current_keys, &keys)?;
+        }
+        if let Some(before) = &names_before {
+            sync_defined_names(
+                &mut txn,
+                &self.base.defined_names,
+                (before, &current_keys),
+                (&model.defined_names, &keys),
+            )?;
         }
         if full_sync {
             for (key, sheet) in keys.iter().zip(&model.sheets) {
@@ -3410,6 +3473,15 @@ impl WorkbookAuthority {
                 let json = serde_json::to_string(&sheet_model.auto_filter)
                     .map_err(|error| format!("cannot encode sheet auto filter: {error}"))?;
                 sheet_map.try_update(&mut txn, AUTO_FILTER, json);
+            }
+            for (key, frame) in chart_anchors {
+                let (sheet_map, sheet_model) =
+                    sheet_parts_by_key(&sheets, &txn, &keys, model, &key)?;
+                let fallback = base_sheet_index(&key)
+                    .and_then(|base| self.base.charts.get(base))
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                sync_chart_anchor(&sheet_map, &mut txn, sheet_model, &frame, fallback)?;
             }
         }
         drop(txn);
@@ -3863,6 +3935,7 @@ fn build_undo_manager(
     let mut txn = doc.transact_mut_with(HYDRATE_ORIGIN);
     txn.get_or_insert_map(SHEETS);
     txn.get_or_insert_array(SHEET_ORDER);
+    let names = txn.get_or_insert_map(DEFINED_NAMES);
     drop(txn);
     let options = UndoOptions {
         capture_timeout_millis: UNDO_CAPTURE_TIMEOUT_MS,
@@ -3875,6 +3948,7 @@ fn build_undo_manager(
     let mut undo = UndoManager::with_options(options);
     undo.expand_scope(doc, &sheets);
     undo.expand_scope(doc, &order);
+    undo.expand_scope(doc, &names);
     Ok(undo)
 }
 
@@ -4678,7 +4752,6 @@ fn requires_full_semantic_sync(op: &Op) -> bool {
             | Op::RestoreColStyles { .. }
             | Op::RestoreRowStyles { .. }
             | Op::SetCharts { .. }
-            | Op::SetChartAnchor { .. }
             | Op::RemoveSheet { .. }
             | Op::MoveSheet { .. }
             | Op::RenameSheet { .. }
@@ -5003,6 +5076,32 @@ fn sync_map(map: &MapRef, txn: &mut TransactionMut<'_>, desired: BTreeMap<String
     for (key, value) in desired {
         map.try_update(txn, key, value);
     }
+}
+
+/// Repins one frame in a sheet's stored chart state. The model's other anchors
+/// can be projections of another sheet's, so only this frame takes its value.
+fn sync_chart_anchor(
+    sheet_map: &MapRef,
+    txn: &mut TransactionMut<'_>,
+    sheet: &Sheet,
+    frame: &str,
+    fallback: &[SheetChart],
+) -> Result<(), String> {
+    let mut stored = match sheet_map.get(txn, CHARTS) {
+        Some(Out::Any(Any::String(json))) => decode_charts(&json)?,
+        Some(_) => return Err("sheet charts are not a string".to_string()),
+        None => fallback.to_vec(),
+    };
+    let moved = sheet.charts.iter().find(|chart| chart.frame_id() == frame);
+    let held = stored.iter_mut().find(|chart| chart.frame_id() == frame);
+    let (Some(moved), Some(held)) = (moved, held) else {
+        return Err(format!("sheet does not store chart {frame}"));
+    };
+    held.anchor = moved.anchor;
+    let charts = serde_json::to_string(&stored)
+        .map_err(|error| format!("cannot encode sheet charts: {error}"))?;
+    sheet_map.try_update(txn, CHARTS, charts);
+    Ok(())
 }
 
 fn sync_authored_cell(
@@ -5569,6 +5668,7 @@ fn materialize_sheet<T: ReadTxn>(
     sheet.row_styles = fallbacks.row_styles.clone();
     materialize_style_defaults(&mut sheet, sheet_map, txn)?;
     sheet.freeze_pane = match (version, sheet_map.get(txn, FREEZE_PANE)) {
+        (CHARTS_SCHEMA_VERSION.., None) => fallbacks.freeze_pane,
         (FREEZE_PANE_SCHEMA_VERSION.., Some(Out::Any(value))) => freeze_pane_from_any(&value)?,
         (FREEZE_PANE_SCHEMA_VERSION.., _) => {
             return Err("sheet is missing freeze pane".to_string());
@@ -5744,7 +5844,6 @@ fn sheet_schema_keys(version: i64) -> &'static [&'static str] {
     const V6: &[&str] = &[
         COL_WIDTHS,
         CONTENTS,
-        FREEZE_PANE,
         HYPERLINKS,
         MERGES,
         NAME,
@@ -5759,14 +5858,16 @@ fn sheet_schema_keys(version: i64) -> &'static [&'static str] {
     }
 }
 
-/// Chart state is the one sheet key two replicas can assign at once, because
-/// repinning a chart is an ordinary edit. Undoing the assignment that won
-/// deletes the key outright, so it reads as absent and falls back to what the
-/// source package holds rather than failing the whole workbook.
+/// Chart state and the freeze pane are the sheet keys two replicas can assign
+/// at once, because repinning a chart and freezing panes are ordinary edits.
+/// Undoing the assignment that won deletes the key outright, so it reads as
+/// absent and falls back to what the source package holds rather than failing
+/// the whole workbook.
 fn sheet_schema_optional_keys(version: i64) -> &'static [&'static str] {
     const NONE: &[&str] = &[];
     const V6: &[&str] = &[
         CHARTS,
+        FREEZE_PANE,
         ROW_STYLES,
         COL_STYLES,
         CONDITIONAL_FORMATS,
@@ -5779,14 +5880,16 @@ fn sheet_schema_optional_keys(version: i64) -> &'static [&'static str] {
     }
 }
 
-fn require_root_keys<T: ReadTxn>(txn: &T, expected: &[&str]) -> Result<(), String> {
-    let actual = txn
+/// A root exists only once it has items, so the optional one may be absent.
+fn require_root_keys<T: ReadTxn>(txn: &T) -> Result<(), String> {
+    let mut actual = txn
         .root_refs()
         .map(|(key, _)| key.to_string())
         .collect::<BTreeSet<_>>();
-    let expected = expected
-        .iter()
-        .map(|key| (*key).to_string())
+    actual.remove(DEFINED_NAMES);
+    let expected = [CELL_FORMATS, META, SHEET_ORDER, SHEETS]
+        .into_iter()
+        .map(str::to_string)
         .collect::<BTreeSet<_>>();
     if actual == expected {
         Ok(())
@@ -7194,7 +7297,7 @@ impl WorkbookAuthority {
     ) -> Result<(WorkbookModel, WorkbookStructure), String> {
         let txn = self.doc.transact();
         if strict {
-            require_root_keys(&txn, &[CELL_FORMATS, META, SHEET_ORDER, SHEETS])?;
+            require_root_keys(&txn)?;
         }
         let meta = txn
             .get_map(META)
@@ -7320,6 +7423,7 @@ impl WorkbookAuthority {
             .map(|sheet| sheet.name.clone())
             .collect();
         project_unique_sheet_names(&mut model.sheets);
+        NameOverlay::read(&txn)?.apply(&mut model.defined_names, &keys)?;
         let active = keys.iter().cloned().collect::<BTreeSet<_>>();
         let all_keys = sheets
             .keys(&txn)
@@ -7472,6 +7576,7 @@ fn materialize_sheet_oracle<T: ReadTxn>(
     sheet.row_styles = fallbacks.row_styles.clone();
     materialize_style_defaults(&mut sheet, sheet_map, txn)?;
     sheet.freeze_pane = match (version, sheet_map.get(txn, FREEZE_PANE)) {
+        (CHARTS_SCHEMA_VERSION.., None) => fallbacks.freeze_pane,
         (FREEZE_PANE_SCHEMA_VERSION.., Some(Out::Any(value))) => freeze_pane_from_any(&value)?,
         (FREEZE_PANE_SCHEMA_VERSION.., _) => {
             return Err("sheet is missing freeze pane".to_string());
@@ -9637,6 +9742,83 @@ mod tests {
         };
         assert!(gated(CHARTS_SCHEMA_VERSION));
         assert!(!gated(CHARTS_SCHEMA_VERSION - 1));
+    }
+
+    #[test]
+    fn an_absent_freeze_pane_reads_as_the_source_pane() {
+        const { assert!(FREEZE_PANE_SCHEMA_VERSION < CHARTS_SCHEMA_VERSION) };
+
+        for pane in [
+            None,
+            Some(FreezePane::new(2, 1, CellRef::parse_a1("B3").unwrap())),
+        ] {
+            let mut sheet = Sheet::new("Data");
+            sheet.freeze_pane = pane;
+            let mut model = WorkbookModel::default();
+            model.sheets.push(sheet);
+            let authority = WorkbookAuthority::from_model_with_client_id(&model, 141).unwrap();
+            let (stored, _) = authority.strict_materialize().unwrap();
+            {
+                let mut txn = authority.doc.transact_mut_with("test:freeze-pane-gate");
+                let sheets = txn.get_map(SHEETS).unwrap();
+                let sheet = sheets
+                    .get(&txn, "sheet:0")
+                    .and_then(|value| value.cast::<MapRef>().ok())
+                    .unwrap();
+                sheet.remove(&mut txn, FREEZE_PANE);
+            }
+
+            let (projected, _) = authority
+                .strict_materialize()
+                .expect("an absent freeze pane must read as absent, not as a broken workbook");
+            assert_eq!(projected, stored);
+            assert_eq!(projected.sheets[0].freeze_pane, pane);
+            let (oracle, _) = authority.materialize_internal_oracle(true).unwrap();
+            assert_eq!(oracle, stored);
+            assert_eq!(
+                fingerprint_model_with_schema(&projected, SCHEMA_VERSION, true, true).unwrap(),
+                fingerprint_model_with_schema(&stored, SCHEMA_VERSION, true, true).unwrap(),
+            );
+
+            snapshot_validation::validate_for_test(&authority, projected.clone()).unwrap();
+            let mut elsewhere = projected;
+            elsewhere.sheets[0].freeze_pane =
+                Some(FreezePane::new(9, 0, CellRef::parse_a1("A10").unwrap()));
+            assert!(snapshot_validation::validate_for_test(&authority, elsewhere).is_err());
+        }
+    }
+
+    #[test]
+    fn a_stored_freeze_pane_must_match_the_snapshot_model() {
+        let mut model = WorkbookModel::default();
+        model.sheets.push(Sheet::new("Data"));
+        let authority = WorkbookAuthority::from_model_with_client_id(&model, 142).unwrap();
+        let stored = Some(FreezePane::new(2, 1, CellRef::parse_a1("B3").unwrap()));
+        {
+            let mut txn = authority.doc.transact_mut_with("test:freeze-pane-gate");
+            let sheets = txn.get_map(SHEETS).unwrap();
+            let sheet = sheets
+                .get(&txn, "sheet:0")
+                .and_then(|value| value.cast::<MapRef>().ok())
+                .unwrap();
+            sheet.try_update(&mut txn, FREEZE_PANE, freeze_pane_to_any(stored));
+        }
+        let (projected, _) = authority.strict_materialize().unwrap();
+        assert_eq!(projected.sheets[0].freeze_pane, stored);
+        snapshot_validation::validate_for_test(&authority, projected).unwrap();
+        assert!(snapshot_validation::validate_for_test(&authority, model).is_err());
+    }
+
+    #[test]
+    fn the_freeze_pane_is_required_before_the_chart_schema_only() {
+        for version in FREEZE_PANE_SCHEMA_VERSION..CHARTS_SCHEMA_VERSION {
+            assert!(sheet_schema_keys(version).contains(&FREEZE_PANE));
+            assert!(!sheet_schema_optional_keys(version).contains(&FREEZE_PANE));
+        }
+        for version in CHARTS_SCHEMA_VERSION..=SCHEMA_VERSION {
+            assert!(!sheet_schema_keys(version).contains(&FREEZE_PANE));
+            assert!(sheet_schema_optional_keys(version).contains(&FREEZE_PANE));
+        }
     }
 
     fn schema_six_replica(model: &WorkbookModel, base: &WorkbookBase) -> Doc {
@@ -11875,6 +12057,88 @@ mod tests {
             "one undo must consume exactly the one entry, not drain a longer stack"
         );
         let _ = merged;
+    }
+
+    /// One drawing anchor held by two sheets reads as the first sheet's value,
+    /// so a model carries projections of what later sheets store. Moving another
+    /// frame must keep the stored value, or the projection turns into a write.
+    #[test]
+    fn collaborative_chart_move_keeps_a_projected_anchor_out_of_the_store() {
+        let mut shared = sliding_chart("Report");
+        let mut second = shared.charts[0].clone();
+        second.anchor_index = 1;
+        shared.charts.push(second);
+        let mut model = WorkbookModel::default();
+        model.sheets.push(shared.clone());
+        shared.name = "Mirror".to_owned();
+        model.sheets.push(shared);
+        let mut authority = WorkbookAuthority::from_model_with_client_id(&model, 71).unwrap();
+        let frozen = authority.structure().unwrap();
+
+        let stored_charts = |authority: &WorkbookAuthority, key: &str| {
+            let txn = authority.doc.transact();
+            let sheet = txn
+                .get_map(SHEETS)
+                .unwrap()
+                .get(&txn, key)
+                .and_then(|value| value.cast::<MapRef>().ok())
+                .unwrap();
+            match sheet.get(&txn, CHARTS) {
+                Some(Out::Any(Any::String(json))) => decode_charts(&json).unwrap(),
+                other => panic!("sheet {key} has no chart state: {other:?}"),
+            }
+        };
+
+        let mut hidden = stored_charts(&authority, "sheet:1");
+        hidden[0].anchor = slid_anchor(3);
+        let peer = Doc::with_client_id(72);
+        hydrate_doc(&peer, &authority.encode_state_as_update_v1()).unwrap();
+        let before = peer.transact().state_vector();
+        {
+            let mut txn = peer.transact_mut_with("test:peer-charts");
+            let sheets = txn.get_map(SHEETS).unwrap();
+            let sheet = sheets
+                .get(&txn, "sheet:1")
+                .and_then(|value| value.cast::<MapRef>().ok())
+                .unwrap();
+            sheet.try_update(&mut txn, CHARTS, serde_json::to_string(&hidden).unwrap());
+        }
+        let update = peer.transact().encode_diff_v1(&before);
+        let staged = authority.stage_updates_v1(&[&update], None).unwrap();
+        assert_eq!(staged.structure, frozen);
+        authority
+            .apply_staged_update_v1(&staged.commit_update)
+            .unwrap();
+        let projected = authority.materialize().unwrap();
+        assert_eq!(
+            projected.sheets[1].charts[0].anchor, projected.sheets[0].charts[0].anchor,
+            "the first sheet decides what a shared frame shows"
+        );
+        assert_ne!(projected.sheets[1].charts[0].anchor, slid_anchor(3));
+
+        let frame = projected.sheets[0].charts[1].frame_id();
+        let from = projected.sheets[0].charts[1].anchor;
+        let ops = [SheetId(0), SheetId(1)].map(|sheet| Op::SetChartAnchor {
+            sheet,
+            frame: frame.clone(),
+            part: "xl/charts/chart1.xml".to_owned(),
+            from,
+            to: slid_anchor(5),
+        });
+        let local = authority
+            .stage_local_ops_v1(&ops, SyncOrigin::User, &Stylesheet::default())
+            .unwrap();
+        authority
+            .apply_local_update_v1(&local.update, SyncOrigin::User)
+            .unwrap();
+
+        let stored = stored_charts(&authority, "sheet:1");
+        assert_eq!(stored[0].anchor, slid_anchor(3));
+        assert_eq!(stored[1].anchor, slid_anchor(5));
+        assert_eq!(
+            stored_charts(&authority, "sheet:0")[1].anchor,
+            slid_anchor(5)
+        );
     }
 
     fn tall_sheet(name: &str, rows: u32) -> Sheet {

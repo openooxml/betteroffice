@@ -120,6 +120,53 @@ fn a_peer_outranks_the_step_above_an_add(left: &mut Workbook, right: &mut Workbo
     sync(left, right);
 }
 
+fn name(book: &mut Workbook, formula: &str) {
+    book.apply_ops(
+        vec![Op::SetDefinedName {
+            name: "Rate".into(),
+            refers_to: formula.into(),
+            scope: None,
+            hidden: None,
+        }],
+        CalculationOptions::default(),
+    )
+    .unwrap();
+}
+
+/// The name a step replaced lies past a peer's value, as the cell does in
+/// [`a_peer_outranks_the_step_above_an_add`], and a step above the add both
+/// deletes and writes it.
+fn a_peer_outranks_a_name_step_above_an_add(left: &mut Workbook, right: &mut Workbook) {
+    name(left, "1");
+    name(left, "2");
+    write(left, 0, 1, "older");
+    write(left, 0, 2, "older still");
+    append(left);
+    name(left, "3");
+    sync(left, right);
+    name(right, "4");
+    sync(left, right);
+    left.apply_ops(
+        vec![Op::SetDefinedName {
+            name: "Other".into(),
+            refers_to: "5".into(),
+            scope: None,
+            hidden: None,
+        }],
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    left.apply_ops(
+        vec![Op::DeleteDefinedName {
+            name: "Other".into(),
+            scope: None,
+        }],
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    assert!(left.history_state().undo_depth >= 7);
+}
+
 /// Steps above a sheet removal undo with only themselves on the manager's
 /// stack. That is safe only while yrs reads the rest of the stack as
 /// `undo_through_removal` assumes, so the same history must land on the same
@@ -129,6 +176,7 @@ fn partial_stack_undo_matches_the_full_stack() {
     for script in [
         overwrites_around_an_add as fn(&mut Workbook, &mut Workbook),
         a_peer_outranks_the_step_above_an_add,
+        a_peer_outranks_a_name_step_above_an_add,
     ] {
         let before = crate::authority::partial_stack_undos();
         let partial = history_trail(script);

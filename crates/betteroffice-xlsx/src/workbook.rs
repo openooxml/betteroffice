@@ -40,9 +40,9 @@ use xlsx_calc::{
     recalc_after_with_seed,
 };
 use xlsx_model::{
-    Border, BorderEdge, BorderStyle, CellFormat, CellRange, CellRef, CellValue, ChartAnchor, Fill,
-    FreezePane, HAlign, Hyperlink, MAX_COLS, MAX_ROWS, NumberFormat, Sheet, SheetChart, SheetId,
-    Stylesheet, VAlign, Workbook as WorkbookModel,
+    Border, BorderEdge, BorderStyle, CellFormat, CellRange, CellRef, CellValue, ChartAnchor,
+    DefinedName, Fill, FreezePane, HAlign, Hyperlink, MAX_COLS, MAX_ROWS, NumberFormat, Sheet,
+    SheetChart, SheetId, Stylesheet, VAlign, Workbook as WorkbookModel,
 };
 #[cfg(test)]
 use xlsx_ops::cell_state_for_input_no_eval;
@@ -70,9 +70,10 @@ use xlsx_render::{
 #[cfg(feature = "raster")]
 use crate::RenderedPng;
 use crate::authority::{
-    AuthorityError, HistoryUpdate, MAX_STATE_VECTOR_ENTRIES, SnapshotAdoption, StagedLocalUpdate,
-    StagedUpdate, SyncOrigin, WorkbookAuthority, WorkbookStructure,
-    is_collaborative_local_layout_op, is_structural_op, validate_hyperlink_edit_baseline,
+    AuthorityError, FILTER_DATABASE_NAME, HistoryUpdate, MAX_STATE_VECTOR_ENTRIES,
+    SnapshotAdoption, StagedLocalUpdate, StagedUpdate, SyncOrigin, WorkbookAuthority,
+    WorkbookStructure, is_collaborative_local_layout_op, is_structural_op,
+    validate_hyperlink_edit_baseline,
 };
 use crate::move_range::{move_range_ops, preserved_move_unsupported_part};
 use crate::sheet_json::{
@@ -1059,7 +1060,10 @@ impl Workbook {
         }
         let mut model = candidate.materialize().map_err(authority_error)?;
         retain_array_formulas(&self.model, &mut model);
-        self.gate_incoming(&model)
+        let dormant = candidate
+            .dormant_defined_names(&structure.sheet_keys)
+            .map_err(authority_error)?;
+        self.gate_incoming(&model, &dormant)
             .map_err(|error| Error::CollaborativeState(error.to_string()))?;
         let migrated = candidate.encode_state_as_update_v1();
         validate_collaboration_state(migrated.len(), candidate.state_vector_entries())?;
@@ -1104,7 +1108,7 @@ impl Workbook {
             .stage_updates_v1(updates, baseline)
             .map_err(authority_error)?;
         validate_collaboration_state(staged.state_bytes, staged.state_vector_entries)?;
-        self.gate_incoming(&staged.model)
+        self.gate_incoming(&staged.model, &staged.dormant_names)
             .map_err(|error| Error::CollaborativeState(error.to_string()))?;
         Ok(staged)
     }
@@ -1112,8 +1116,14 @@ impl Workbook {
     /// Everything a model arriving from outside must satisfy before this
     /// replica takes it on, whichever door it came through: a staged update and
     /// an adopted snapshot are the same foreign bytes and get the same answer.
-    fn gate_incoming(&self, model: &WorkbookModel) -> Result<()> {
-        validate_model(model)?;
+    /// `dormant` are stored names nothing shows yet. A redo or a later sheet shows
+    /// them with no check on this replica, so they are checked here, as if shown.
+    ///
+    /// The name table's size is left out: each replica's own table was within
+    /// the bound, so refusing their union would strand them apart for good.
+    fn gate_incoming(&self, model: &WorkbookModel, dormant: &[DefinedName]) -> Result<()> {
+        validate_model_sheets(model)?;
+        self.validate_incoming_names(model, dormant)?;
         validate_chart_source(
             model,
             self.source_package
@@ -1121,6 +1131,65 @@ impl Workbook {
                 .is_some_and(|package| package.facts().source_present()),
         )?;
         self.validate_incoming_anchors(model)
+    }
+
+    /// A name that differs from the opened table came from a peer, which ran
+    /// these checks only if it was an honest one. What the op left unchecked
+    /// stays unchecked here, so a source formula nobody touched is not judged.
+    fn validate_incoming_names(
+        &self,
+        staged: &WorkbookModel,
+        dormant: &[DefinedName],
+    ) -> Result<()> {
+        let source = self.authority.source_defined_names();
+        if staged.defined_names == source && dormant.is_empty() {
+            return Ok(());
+        }
+        let mut opened = HashMap::<_, Vec<_>>::with_capacity(source.len());
+        for name in source {
+            opened
+                .entry((name.local_sheet, name.name.to_ascii_lowercase()))
+                .or_default()
+                .push(name);
+        }
+        for name in staged.defined_names.iter().chain(dormant) {
+            let originals = opened
+                .get(&(name.local_sheet, name.name.to_ascii_lowercase()))
+                .map_or(&[][..], Vec::as_slice);
+            if originals.contains(&name) {
+                continue;
+            }
+            xlsx_ops::validate_defined_name(
+                staged,
+                &name.name,
+                name.local_sheet,
+                originals.is_empty(),
+            )?;
+            if originals
+                .iter()
+                .all(|original| original.formula != name.formula)
+            {
+                xlsx_ops::validate_defined_name_formula(&name.formula)?;
+            }
+        }
+        if let Some(package) = &self.source_package {
+            let names_only;
+            let table = if dormant.is_empty() {
+                staged
+            } else {
+                names_only = WorkbookModel {
+                    defined_names: [&staged.defined_names[..], dormant].concat(),
+                    ..WorkbookModel::default()
+                };
+                &names_only
+            };
+            xlsx_parse::validate_defined_name_edits(
+                table,
+                package.materialize()?,
+                &self.preserved.origins,
+            )?;
+        }
+        Ok(())
     }
 
     /// A merge verdict may only rest on what is true of the anchor itself.
@@ -1308,8 +1377,11 @@ impl Workbook {
         .map_err(Error::Package)
     }
 
+    /// A name table over the size bound still saves: the bound is on what this
+    /// engine holds in memory, not on the file. `DefinedNamesResult::over_limit`
+    /// reports it.
     pub fn save(&self) -> Result<Vec<u8>> {
-        validate_model(&self.model)?;
+        validate_model_sheets(&self.model)?;
         validate_chart_source(&self.model, self.source_package.is_some())?;
         match &self.source_package {
             Some(package) => {
@@ -3945,6 +4017,8 @@ fn refuse_collaborative_structure(ops: &[Op], mut sheets: usize) -> Result<()> {
         match op {
             Op::AddSheet { index, .. } if *index == sheets => sheets += 1,
             Op::AddSheet { .. } => return Err(Error::CollaborativeSheetPosition),
+            Op::SetDefinedName { name, .. } | Op::DeleteDefinedName { name, .. }
+                if !name.eq_ignore_ascii_case(FILTER_DATABASE_NAME) => {}
             op if is_structural_op(op) && !is_collaborative_local_layout_op(op) => {
                 return Err(Error::CollaborativeStructureOperation);
             }

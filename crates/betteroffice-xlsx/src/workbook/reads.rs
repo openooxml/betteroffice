@@ -115,6 +115,12 @@ pub struct DefinedNamesResult {
     pub total: usize,
     /// Document version observed by this read.
     pub version: String,
+    /// Set while the whole table is over the engine's size bound, which
+    /// collaborators can reach together. Adding to it is refused, deleting always
+    /// works, and it still saves, but such a file reopens only in other
+    /// applications until the table is back under the bound.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub over_limit: bool,
 }
 
 /// One conditional-format rule and its sheet range.
@@ -326,6 +332,8 @@ impl Workbook {
             next_offset: (next < total).then_some(next),
             total,
             version: self.version().to_string(),
+            over_limit: xlsx_model::workbook::defined_names_bytes(&self.model().defined_names)
+                > xlsx_model::workbook::MAX_DEFINED_NAME_BYTES,
         })
     }
 
