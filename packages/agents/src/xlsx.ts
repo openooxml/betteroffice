@@ -1,6 +1,6 @@
 import { editCharts, listCharts, readChartText, type XlsxChartEdit, type XlsxChartTextRead } from './xlsx-charts';
 import {
-  initWasm, isPngExportAvailable, openWorkbook, StaleProposalError, type WorkbookHandle, type XlsxCellRead, type XlsxEditStep,
+  initWasm, openWorkbook, StaleProposalError, type WorkbookHandle, type XlsxCellRead, type XlsxEditStep,
 } from '@betteroffice/xlsx';
 import type { WorkbookEditPeer } from '@betteroffice/xlsx/worker';
 import { DocumentToolError, type GrepOptions, type TextEdit } from './types';
@@ -118,7 +118,7 @@ export class XlsxAgentWorkbook extends PrototypeDocument<CellChange, XlsxEditSte
   overview() {
     this.alive();
     const read = unwrap(this.handle.readCells({ ranges: [] }));
-    return { name: this.name, format: this.format, version: read.version, sheets: read.sheets.length, capabilities: { grep: 'literal', proposals: 'cell inputs and formulas', render: isPngExportAvailable(), export: true, batchEdits: true, formatting: true, structure: true, sort: true, attachment: 'WorkbookHandle, including an editor edit peer' }, workflow: 'xlsx_outline lists stable sheet IDs and version; xlsx_read_range reads A1 ranges; write tools require that version and return changed cells. xlsx_preview renders a range. office_export saves a new file.' };
+    return { name: this.name, format: this.format, version: read.version, sheets: read.sheets.length, capabilities: { grep: 'literal', proposals: 'cell inputs and formulas', render: true, export: true, batchEdits: true, formatting: true, structure: true, sort: true, attachment: 'WorkbookHandle, including an editor edit peer' }, workflow: 'xlsx_outline lists stable sheet IDs and version; xlsx_read_range reads A1 ranges; write tools require that version and return changed cells. xlsx_preview renders a range. office_export saves a new file.' };
   }
 
   list(options: { offset?: number; limit?: number; story?: string; headingsOnly?: boolean } = {}) {

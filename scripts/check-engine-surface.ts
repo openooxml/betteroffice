@@ -31,7 +31,7 @@ export const FORMATS: Record<string, FormatConfig> = {
     wasm: "packages/xlsx/src/wasm/generated/xlsx_wasm.d.ts",
     native: "bindings/xlsx-native/index.d.ts",
     classes: ["XlsxDocument", "XlsxSnapshotBuilder"],
-    pending: ["XlsxDocument.renderPng", "XlsxDocument.renderRangePng"],
+    pending: [],
   },
   docx: {
     wasm: "packages/docx/src/wasm/generated/edit/docx_edit.d.ts",

@@ -3,6 +3,7 @@ import type { PipeCommandPayload, PipeOutputBatch } from '../../../../shared/col
 import type { AwarenessCursor, AwarenessPeer } from '../collaboration/types';
 import { createSessionHost, type SessionHost } from '../../../../shared/office-session/host';
 import { deferReply, isHostMessage, transferable } from '../../../../shared/office-session/protocol';
+import { canvasUnavailable } from '../render/png';
 import type { SessionTransport } from '../../../../shared/office-session/transport';
 import { SessionFailure, type MethodHandlers, type MethodPolicy } from '../../../../shared/office-session/types';
 import type { XlsxEditRefusal } from '../edits';
@@ -16,14 +17,13 @@ import {
   type Viewport, type WasmInitOptions,
 } from '../wasm/loader';
 import type { XlsxPngTarget } from '../wasm/pngTarget';
-import { pngRasterizers, workbookPngFonts } from '../wasm/pngDisplayList';
+import { workbookPngFonts } from '../wasm/pngDisplayList';
 import { localNowSerial } from './calculationClock';
 import { createWorkbookCommandState, projectEditState, translateWorkbookSheetIds, type WorkbookCommandState } from './commandHandlers';
 import { createWorkbookCommandHost } from './commandHost';
 import { isWorkbookCommandFrameRequest, WorkbookCommandRefusal } from './commandProtocol';
 import {
   WORKBOOK_SESSION_POLICIES,
-  WorkbookPngUnavailableError,
   type WorkbookPngOptions,
   type WorkbookCollaborationPipeReply,
   type WorkbookSessionEvents,
@@ -63,7 +63,6 @@ export function createWorkbookSessionHost(
   options: {
     initWasm?: (source?: ArrayBuffer | WebAssembly.Module, options?: WasmInitOptions) => Promise<void>;
     wasmModule?(): WebAssembly.Module | undefined;
-    renderPng?(displayListJson: string): Promise<Uint8Array>;
   } = {}
 ): SessionHost<Events> {
   let handle: WorkbookHandle | undefined;
@@ -158,14 +157,9 @@ export function createWorkbookSessionHost(
       mergedRanges: opened.visibleMergedRanges(sheet, viewport) };
   }
 
-  function pngExportAvailable() {
-    return isPngExportAvailable() || options.renderPng !== undefined;
-  }
-
   function renderPng(target: XlsxPngTarget, pngOptions: WorkbookPngOptions) {
     const opened = workbook();
-    if (!pngExportAvailable()) throw new WorkbookPngUnavailableError();
-    if (options.renderPng && !pngRasterizers.has(opened)) pngRasterizers.set(opened, options.renderPng);
+    if (!isPngExportAvailable()) throw canvasUnavailable();
     return deferReply(opened.renderPng(target, pngOptions).then(transferBytes));
   }
 
@@ -395,7 +389,7 @@ export function createWorkbookSessionHost(
           sheets: commands.sheetIds.map((id, index) => ({ id, index, name: info.sheetNames[index] })),
           activeSheet: info.activeSheet, commandContext: { ...commandIdentity,
             basis: { epoch: commands.epoch, version: opened.version() } },
-          throughSeq: commands.throughSeq, revision: recovery.revision, historyReset: commands.historyReset === true, pngExport: pngExportAvailable(),
+          throughSeq: commands.throughSeq, revision: recovery.revision, historyReset: commands.historyReset === true, pngExport: isPngExportAvailable(),
           selection: commands.selection, editState: commands.editState };
       } catch (error) {
         handle = undefined;
@@ -480,7 +474,7 @@ export function createWorkbookSessionHost(
         if (initial || !retainPeerHydration && input.includeEditState) projectEditState(opened, projection);
         const state = { format: 'xlsx' as const, stage: 'ready' as const, version, dirty,
           ...(collaborative && !retainPeerHydration ? { clientId: opened.clientId } : {}),
-          sheets: summaries, activeSheet: info.activeSheet, pngExport: pngExportAvailable(),
+          sheets: summaries, activeSheet: info.activeSheet, pngExport: isPngExportAvailable(),
           commandContext: { ...commandIdentity, basis: { epoch: commands.epoch, version: opened.version() } },
           ...(!retainPeerHydration && projection.editState ? { editState: projection.editState, selection: commands.selection } : {}) };
         if (!initial) return state;

@@ -6,8 +6,8 @@ const ROOT = resolve(import.meta.dir, '..');
 const WASM = 'wasm32-unknown-unknown';
 const RASTER = /^(tiny-skia(-path)?|\S*raster\S*) v/;
 
-const INITIAL_RASTER_ARTIFACTS = ['vsdx-wasm', 'xlsx-raster-wasm', 'xlsx-wasm'];
-const STILL_RASTER = ['xlsx-raster-wasm', 'xlsx-wasm'];
+const INITIAL_RASTER_ARTIFACTS = ['vsdx-wasm', 'xlsx-wasm'];
+const STILL_RASTER: string[] = [];
 
 const BUILD_SCRIPTS = ['build-docx-wasm', 'build-pptx-wasm', 'build-vsdx-wasm', 'build-xlsx-wasm'];
 

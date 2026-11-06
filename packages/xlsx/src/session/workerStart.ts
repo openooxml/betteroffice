@@ -5,7 +5,6 @@ import { wasmAssetUrl } from '../wasm/asset';
 import { engineKind } from '../wasm/engine';
 import { initWasm } from '../wasm/loader';
 import { createWorkbookSessionHost } from './host';
-import { renderPng } from './raster';
 
 export function startSessionWorker(scope: SessionScope): void {
   const transport = createScopeTransport(scope);
@@ -39,8 +38,6 @@ export function startSessionWorker(scope: SessionScope): void {
       return initializeLean(input);
     },
     wasmModule: () => module,
-    renderPng: (displayListJson) => renderPng(displayListJson, { progress: () => host.progress() }),
   });
   Object.assign(globalThis, { __betterofficeEngineProgress: () => host.progress() });
 }
-

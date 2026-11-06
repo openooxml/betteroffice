@@ -41,7 +41,7 @@ export async function displayListToPng(list: DisplayList, options: DisplayListTo
     options.signal?.throwIfAborted();
     const canvas = createCanvas(width, height);
     const ctx = canvas.getContext('2d') as CanvasRenderingContext2D | null;
-    if (!ctx) throw new PngExportError('canvas-unavailable', 'PNG export needs a 2d canvas context.');
+    if (!ctx) throw canvasUnavailable('PNG export needs a 2d canvas context.');
     paintDisplayList(ctx, withFaces(list, faces.family), dpr);
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -54,7 +54,7 @@ export async function displayListToPng(list: DisplayList, options: DisplayListTo
   } finally { faces.release(); }
 }
 
-/** The error for a runtime that can draw the PNG neither on a canvas nor with a rasterizer. */
+/** The error for a runtime without a canvas. */
 export function canvasUnavailable(detail = 'PNG export needs a canvas, and this environment has none.'): PngExportError {
   return new PngExportError('canvas-unavailable', `${detail} Use @betteroffice/xlsx-native.`);
 }
