@@ -841,6 +841,28 @@ test('a host scroll before the first caret placement still lets that placement s
   expect(scroller.scrollTop).toBeGreaterThan(scrollTop - 50);
 });
 
+test.each([
+  ['read-only', true],
+  ['editable', false],
+] as const)('a %s default caret seeded after a host scroll leaves the view where the host put it', async (_, readOnly) => {
+  const { session, input, scroller, replicaReadyRef, view, inputFor, expectCaret } =
+    await mount(readOnly, true, false);
+  act(() => {
+    scroller.scrollTop = 2000;
+    scroller.dispatchEvent(new Event('scroll'));
+  });
+  act(() => {
+    session.openDocx(bytes, true);
+    replicaReadyRef.current = true;
+    view.rerender(inputFor());
+  });
+  expectCaret(0);
+  expect(scroller.scrollTop).toBe(2000);
+  act(() => input.current!.setSelectionFromDisplay(3));
+  expectCaret(2);
+  expect(scroller.scrollTop).not.toBe(2000);
+});
+
 test('a reader wheel before the first caret placement keeps the view where the reader put it', async () => {
   const { input, scroller, scrollTop, expectCaret } = await mount(true, false);
   act(() => {

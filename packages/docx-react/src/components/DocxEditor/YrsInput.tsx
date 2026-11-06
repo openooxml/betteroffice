@@ -430,6 +430,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   // what keeps a viewer's viewport still during someone else's edit.
   const lastCaretScrollSelectionRef = useRef<YrsSelection | null | undefined>(undefined);
   const scrolledBeforeFirstCaretRef = useRef(false);
+  const viewMovedBeforeFirstCaretRef = useRef(false);
+  const defaultCaretRef = useRef<YrsSelection | null>(null);
   useLayoutEffect(() => {
     const inside = (target: EventTarget | null) => {
       const host = canvasHostRef?.current;
@@ -442,9 +444,16 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         scrolledBeforeFirstCaretRef.current = true;
       }
     };
+    const onScroll = (event: Event) => {
+      if (inside(event.target)) viewMovedBeforeFirstCaretRef.current = true;
+    };
     const types = [...READER_SCROLL, 'pointerdown', 'keydown'] as const;
     for (const type of types) document.addEventListener(type, onIntent, { capture: true, passive: true });
-    return () => { for (const type of types) document.removeEventListener(type, onIntent, true); };
+    document.addEventListener('scroll', onScroll, { capture: true, passive: true });
+    return () => {
+      for (const type of types) document.removeEventListener(type, onIntent, true);
+      document.removeEventListener('scroll', onScroll, true);
+    };
   }, [canvasHostRef]);
   // A selection the input shows without scrolling to it: a default caret, a replayed gesture.
   const quietSelectionRef = useRef<YrsSelection | null>(null);
@@ -640,6 +649,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     if (!first) return null;
     const loc = { story, paraId: first.paraId, offset: 0 };
     session.setSelection(loc);
+    defaultCaretRef.current = { anchor: loc, head: loc };
     return { anchor: loc, head: loc };
   }, [inputPositionMap, readSelection, session, story]);
 
@@ -2238,6 +2248,12 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     quietSelectionRef.current = null;
     const selectionIsQuiet = quiet && stickySelection && sameYrsSelection(quiet, stickySelection);
     const scroller = findVerticalScrollParentOrRoot(host);
+    const defaultCaretAfterScroll =
+      previousStickySelection === undefined &&
+      viewMovedBeforeFirstCaretRef.current &&
+      !!stickySelection &&
+      !!defaultCaretRef.current &&
+      sameYrsSelection(defaultCaretRef.current, stickySelection);
     const selectionChanged =
       (previousStickySelection === undefined
         ? !scrolledBeforeFirstCaretRef.current
@@ -2256,9 +2272,11 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     pendingLocalCaretRevealRef.current = null;
     if (
       selection.anchor === selection.head &&
+      !defaultCaretAfterScroll &&
       shouldScrollCaretIntoView(caretRevealOrigin, selectionChanged, readOnly)
     ) {
       const delta = scrollIntoViewDelta(scrollViewport(scroller), nextTop, nextTop + nextHeight, 24);
+      if (delta !== 0) console.log('F76REVEAL ' + JSON.stringify({ t: Math.round(performance.now()), delta, from: scroller.scrollTop, origin: caretRevealOrigin, selectionChanged, first: previousStickySelection === undefined, intent: scrolledBeforeFirstCaretRef.current, freshCommit, layoutUpdateOrigin, pending: !!pendingReveal }));
       if (delta !== 0) scroller.scrollTop += delta;
     }
   }, [

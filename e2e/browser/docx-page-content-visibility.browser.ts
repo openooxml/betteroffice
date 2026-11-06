@@ -324,3 +324,44 @@ for (const worker of [false, true]) {
     }
   });
 }
+
+for (const worker of [false, true]) {
+  test(`docx ${worker ? 'worker' : 'in-thread'} editor: a scroll position the host restores during open survives the first caret placement`, async ({ browser }) => {
+    test.setTimeout(120_000);
+    const context = await browser.newContext({ viewport: { width: 1440, height: 2000 } });
+    const page = await context.newPage();
+    try {
+      await page.goto(`/?format=docx&peerless=${worker ? 1 : 0}`);
+      await page.evaluate(() => {
+        const state = { restored: false, trace: [] as number[] };
+        (window as unknown as { restore: typeof state }).restore = state;
+        const tick = () => {
+          let scroller = document.querySelector('.canvas-page[data-page-index="0"], .paged-editor__page')?.parentElement ?? null;
+          while (scroller && !/(auto|scroll)/.test(getComputedStyle(scroller).overflowY)) scroller = scroller.parentElement;
+          if (scroller && !state.restored && scroller.scrollHeight > scroller.clientHeight + 2400) {
+            scroller.scrollTop = 2000;
+            state.restored = true;
+          } else if (scroller && state.restored && state.trace.length < 20_000) {
+            state.trace.push(scroller.scrollTop);
+          }
+          requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+      });
+      await page.locator('input[type=file]').last().setInputFiles({
+        name: 'visibility.docx',
+        mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        buffer: await longDocument(),
+      });
+      if (worker) await expect(page.locator('[data-docx-worker-editor]')).toHaveAttribute('aria-busy', 'false', { timeout: 60_000 });
+      else await expect.poll(() => page.getByTestId('yrs-input').first().evaluate((input) => (input as HTMLElement).style.height), { timeout: 60_000 }).not.toBe('1px');
+      const placed = await page.evaluate(() => (window as unknown as { restore: { trace: number[] } }).restore.trace.length);
+      await expect.poll(() => page.evaluate(() => (window as unknown as { restore: { trace: number[] } }).restore.trace.length),
+        { timeout: 60_000 }).toBeGreaterThanOrEqual(placed + 60);
+      const trace = await page.evaluate(() => (window as unknown as { restore: { trace: number[] } }).restore.trace);
+      expect(trace.filter((top) => Math.abs(top - 2000) >= 1)).toEqual([]);
+    } finally {
+      await context.close();
+    }
+  });
+}
