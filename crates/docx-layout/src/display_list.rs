@@ -4657,15 +4657,19 @@ type FontResolver =
 struct ShapeFontChain {
     ids: Vec<ooxml_text::FontId>,
     coverage_only: bool,
+    symbols_shape: bool,
     resolve: FontResolver,
 }
 
 impl ShapeFontChain {
-    fn new(ids: Vec<ooxml_text::FontId>, coverage_only: bool) -> Self {
+    fn new(ids: Vec<ooxml_text::FontId>, coverage_only: bool, symbols_shape: bool) -> Self {
         Self {
             ids,
             coverage_only,
-            resolve: if coverage_only {
+            symbols_shape,
+            resolve: if coverage_only && symbols_shape {
+                Self::resolve_covered_or_symbol
+            } else if coverage_only {
                 Self::resolve_covered
             } else {
                 Self::resolve_with_fallback
@@ -4690,6 +4694,17 @@ impl ShapeFontChain {
             return chain.iter().copied().find(|&id| store.metrics(id).is_ok());
         }
         store.resolve(chain, ch)
+    }
+
+    fn resolve_covered_or_symbol(
+        store: &ooxml_text::FontStore,
+        chain: &[ooxml_text::FontId],
+        ch: char,
+    ) -> Option<ooxml_text::FontId> {
+        if ooxml_text::measure::symbol_character(ch) {
+            return Self::resolve_with_fallback(store, chain, ch);
+        }
+        Self::resolve_covered(store, chain, ch)
     }
 
     fn resolve_with_style(
@@ -4724,6 +4739,7 @@ impl ShapeFontChain {
                     .flatten()
                     .is_some()
                     || (self.coverage_only && !ooxml_text::measure::needs_glyph(ch))
+                    || (self.symbols_shape && ooxml_text::measure::symbol_character(ch))
             }) {
                 return resolved;
             }
@@ -4757,6 +4773,9 @@ impl<'a> ShapeFonts<'a> {
             .flatten()
             .copied()
             .collect();
+        let symbols_shape = input
+            .font_chains
+            .contains_key("@betteroffice/fonts/coverage-symbols");
         let chains = input
             .font_chains
             .iter()
@@ -4768,6 +4787,7 @@ impl<'a> ShapeFonts<'a> {
                             .map(|&id| ooxml_text::FontId::from_u32(id))
                             .collect(),
                         ids.last().is_some_and(|id| coverage_only.contains(id)),
+                        symbols_shape,
                     ),
                 )
             })
@@ -14253,7 +14273,7 @@ mod tests {
                 );
             }
             let unknown = ooxml_text::FontId::from_u32(u32::MAX);
-            let chain = ShapeFontChain::new(vec![unknown, first, last], true);
+            let chain = ShapeFontChain::new(vec![unknown, first, last], true, false);
             assert_eq!((chain.resolve)(&store, &chain.ids, ch), Some(first));
         }
         let fonts = ShapeFonts {
@@ -14397,7 +14417,7 @@ mod tests {
             store: &store,
             chains: HashMap::from([(
                 "calibri|1|0".to_owned(),
-                ShapeFontChain::new(vec![ooxml_text::FontId::base_latin(true, false)], false),
+                ShapeFontChain::new(vec![ooxml_text::FontId::base_latin(true, false)], false, false),
             )]),
             coverage_only: false,
         };
