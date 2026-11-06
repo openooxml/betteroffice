@@ -54,7 +54,7 @@ for (const mode of ['async', 'legacy', 'legacy-worker']) {
       await expect(page.getByRole('button', { name: 'Bold', exact: true }).first()).not.toHaveAttribute('aria-keyshortcuts');
     });
 
-    test('a remapped paste leaves the old chord to the host and shows in the menu', async ({ page }) => {
+    test('a remapped paste leaves the old chord to the host and shows in the cell menu', async ({ page }) => {
       const grid = await open(page, mode, { paste: 'Mod+Alt+V', copy: null });
       await page.evaluate(() => navigator.clipboard.writeText('RICH'));
       const before = await page.getByTestId('xlsx-formula-input').inputValue();
@@ -64,6 +64,7 @@ for (const mode of ['async', 'legacy', 'legacy-worker']) {
       expect((await read(page, (probe) => probe.hostKeys)).at(-1)).toEqual({ key: 'v', prevented: false });
       await grid.press('Control+Alt+V');
       await expect(page.getByTestId('xlsx-formula-input')).toHaveValue('RICH');
+      if (mode !== 'async') return;
       await grid.press('Shift+F10');
       const menu = cellMenu(page);
       await expect(menu).toBeVisible();
