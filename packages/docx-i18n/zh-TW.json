@@ -727,6 +727,7 @@
     "failedToParse": "無法剖析文件",
     "linkRemoved": "已移除連結",
     "linkCopied": "已將連結複製到剪貼簿",
+    "pasteFailed": "無法完成貼上。未做任何變更。",
     "failedToSave": "無法儲存文件",
     "documentInput": "文件輸入",
     "documentPreview": "文件預覽",

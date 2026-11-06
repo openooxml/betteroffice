@@ -727,6 +727,7 @@
     "failedToParse": "Falha ao analisar documento",
     "linkRemoved": "Link removido",
     "linkCopied": "Link copiado para a área de transferência",
+    "pasteFailed": "Não foi possível concluir a colagem. Nada foi alterado.",
     "failedToSave": "Falha ao salvar documento",
     "documentInput": "Entrada do documento",
     "documentPreview": "Visualização do documento",

@@ -7,7 +7,7 @@ import { evaluateDocxCommand, type DocxCommandEnvironment } from '../../../comma
 import type { DocxCommandId, DocxCommandStore } from '../../../commands/types';
 import { storeAriaShortcut, storeShortcutLabel } from '../../../commands/shortcuts';
 import { normalizeInputEvent } from './inputEvents';
-import { admitInputIntents } from './inputAdmission';
+import { admitInputIntents, submitPasteFragment } from './inputAdmission';
 import { isPasteFragmentAllowed } from './clipboard';
 import { readClipboardFragment } from '../internals/clipboardHtml';
 import { WorkerObjectDialog } from './WorkerObjectDialog';
@@ -63,6 +63,7 @@ export function useWorkerContextMenu(options: {
   submit?(intent: PeerlessPropertyIntent): Promise<DocxCommandResult>;
   onWrapImage?: (handle: string, wrap: ImageLayoutTarget) => void | Promise<boolean>;
   onPaste?: () => void;
+  onPasteRefused?: () => void;
   onError?: (error: Error) => void;
   beginAddComment?(): Promise<void>;
   focusEditor?(): void;
@@ -165,8 +166,7 @@ export function useWorkerContextMenu(options: {
         if (!sameContextTarget(action, opened, latest)) throw new Error('Context menu target changed');
         if (options.environment().readOnly || options.environment().mode === 'viewing') return;
         if (isPasteFragmentAllowed(options.commands, fragment)) {
-          admitInputIntents(current.admission, [{ kind: 'pasteFragment', payload: { fragment } }],
-            { source: 'paste', fence: true });
+          submitPasteFragment(current.admission, fragment, { source: 'paste', fence: true }, () => options.onPasteRefused?.());
           options.onPaste?.();
           return;
         }

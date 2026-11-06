@@ -727,6 +727,7 @@
     "failedToParse": "Belge ayrıştırılamadı",
     "linkRemoved": "Bağlantı kaldırıldı",
     "linkCopied": "Bağlantı panoya kopyalandı",
+    "pasteFailed": "Yapıştırma tamamlanamadı. Hiçbir şey değiştirilmedi.",
     "failedToSave": "Belge kaydedilemedi",
     "documentInput": "Belge girişi",
     "documentPreview": "Belge önizlemesi",

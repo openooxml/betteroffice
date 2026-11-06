@@ -727,6 +727,7 @@
     "failedToParse": "Gagal membaca dokumen",
     "linkRemoved": "Tautan dihapus",
     "linkCopied": "Tautan disalin ke papan klip",
+    "pasteFailed": "Tempel tidak dapat diselesaikan. Tidak ada yang diubah.",
     "failedToSave": "Gagal menyimpan dokumen",
     "documentInput": "Masukan dokumen",
     "documentPreview": "Pratinjau dokumen",
