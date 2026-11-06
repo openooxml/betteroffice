@@ -1715,7 +1715,8 @@ impl EditSession {
     /// {"type":"fontSize","value":number}`. The six boolean types TOGGLE —
     /// they turn on unless the whole range already carries the mark — while
     /// font family, size and color SET. Errors on an
-    /// unknown `"type"` or a missing/mistyped `"value"`.
+    /// unknown `"type"` or a missing/mistyped `"value"`. Returns
+    /// `{"keptUnchanged": {reason: count}}`, as `format_range` does.
     #[allow(clippy::too_many_arguments)]
     pub fn toggle_mark(
         &self,
@@ -1727,7 +1728,7 @@ impl EditSession {
         mark_json: &str,
         author_name: Option<String>,
         author_date: Option<String>,
-    ) -> Result<(), JsValue> {
+    ) -> Result<String, JsValue> {
         self.core
             .toggle_mark(
                 story,
@@ -1762,6 +1763,9 @@ impl EditSession {
     /// `false` clears `bold`, `italic`, `underline` and `strike`. `color`
     /// takes exactly one of `rgb` or `themeColor`. `other` writes arbitrary
     /// run attributes, with `null` removing one. Errors on invalid types.
+    /// Returns `{"keptUnchanged": {reason: count}}`, the table-cell and
+    /// content-control paragraphs left unchanged because saving them
+    /// rewritten would lose content of their source.
     #[allow(clippy::too_many_arguments)]
     pub fn format_range(
         &self,
@@ -1773,7 +1777,7 @@ impl EditSession {
         delta_json: &str,
         author_name: Option<String>,
         author_date: Option<String>,
-    ) -> Result<(), JsValue> {
+    ) -> Result<String, JsValue> {
         self.core
             .format_range(
                 story,
@@ -1821,7 +1825,8 @@ impl EditSession {
 
     /// Clears every direct run-formatting attribute over `[start, end)`.
     /// Protected attributes — hyperlinks and tracked-change stamps — survive,
-    /// as do paragraph properties.
+    /// as do paragraph properties. Returns `{"keptUnchanged": {reason: count}}`
+    /// as [`Self::format_range`] does.
     #[allow(clippy::too_many_arguments)]
     pub fn clear_formatting(
         &self,
@@ -1832,7 +1837,7 @@ impl EditSession {
         end_offset: u32,
         author_name: Option<String>,
         author_date: Option<String>,
-    ) -> Result<(), JsValue> {
+    ) -> Result<String, JsValue> {
         self.core
             .clear_formatting(
                 story,

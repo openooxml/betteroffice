@@ -378,22 +378,28 @@ fn suggested_container_formatting_keeps_its_typed_session_error() {
         let author = Some("Ada".to_owned());
         let date = Some("2026-10-01T12:00:00Z".to_owned());
         let result = match operation {
-            "format" => core.format_range("body", id, 0, id, 5, r#"{"bold":true}"#, author, date),
-            "clear" => core.clear_formatting("body", id, 0, id, 5, author, date),
-            _ => core.toggle_mark(
-                "body",
-                id,
-                0,
-                id,
-                5,
-                if operation == "font" {
-                    r#"{"type":"fontFamily","value":"Arial"}"#
-                } else {
-                    r#"{"type":"bold"}"#
-                },
-                author,
-                date,
-            ),
+            "format" => core
+                .format_range("body", id, 0, id, 5, r#"{"bold":true}"#, author, date)
+                .map(|_| ()),
+            "clear" => core
+                .clear_formatting("body", id, 0, id, 5, author, date)
+                .map(|_| ()),
+            _ => core
+                .toggle_mark(
+                    "body",
+                    id,
+                    0,
+                    id,
+                    5,
+                    if operation == "font" {
+                        r#"{"type":"fontFamily","value":"Arial"}"#
+                    } else {
+                        r#"{"type":"bold"}"#
+                    },
+                    author,
+                    date,
+                )
+                .map(|_| ()),
         };
         assert_eq!(
             result.unwrap_err().kind,

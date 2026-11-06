@@ -193,6 +193,14 @@ import type { RenderedDomContext } from '../plugin-api/types';
 export type { DocxParagraphMatch } from '@betteroffice/docx/yrs';
 import type { DocxParagraphMatch } from '@betteroffice/docx/yrs';
 
+/** What a save reports beside its bytes. */
+export interface DocxEditorSaveInfo {
+  /** Paragraphs saved as they were, without their new formatting, so that no structure is lost. */
+  keptUnchanged?: { structure: number; paragraphs: unknown[] };
+  /** Parts written whole with less structure than their source, outside what the edits touched. */
+  structureDropped?: unknown[];
+}
+
 export interface DocxSelectionInfo {
   paraId: string | null;
   selectedText: string;
@@ -233,8 +241,12 @@ export interface DocxEditorBaseProps extends DocxEditorPluginProps {
   experimentalPrewarm?: boolean;
   /** Pre-parsed document (alternative to documentBuffer) */
   document?: Document | null;
-  /** Callback when document is saved */
-  onSave?: (buffer: ArrayBuffer) => void;
+  /**
+   * Callback when document is saved. `info.keptUnchanged` counts paragraphs the save wrote as
+   * they were, without their new formatting, because writing it would have dropped a
+   * hyperlink, field or drawing; absent when none were.
+   */
+  onSave?: (buffer: ArrayBuffer, info?: DocxEditorSaveInfo) => void;
   /** Owns File > Save and Cmd/Ctrl+S; return true to continue the built-in save. */
   onSaveRequest?: () => boolean | void | Promise<boolean | void>;
   /** Whether Save also downloads a copy. Defaults to true. */
