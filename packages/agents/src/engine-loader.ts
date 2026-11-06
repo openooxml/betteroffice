@@ -12,21 +12,18 @@ export interface EngineModules {
 }
 
 type Importers = { [F in EngineFormat]: () => Promise<EngineModules[F]> };
-interface Engine<T> { module: T; native: boolean }
+export interface Engine<T> { module: T; native: boolean }
 
 /** @internal */
 export function createEngineLoader(native: Importers | undefined, wasm: Importers, warn: (warning: Error) => void) {
   const loaded: Partial<{ [F in EngineFormat]: Engine<EngineModules[F]> }> = {};
   const pending: Partial<{ [F in EngineFormat]: Promise<Engine<EngineModules[F]>> }> = {};
-  const failures = new Set<EngineFormat>();
-  let warning: (Error & { code: string }) | undefined;
+  let warned = false;
   const unavailable = (format: EngineFormat, error: unknown) => {
-    failures.add(format);
-    if (warning) return;
+    if (warned) return;
+    warned = true;
     const reason = error instanceof Error ? error.message : String(error);
-    warning = Object.assign(new Error(), { code: 'BETTEROFFICE_AGENTS_NATIVE_UNAVAILABLE' });
-    Object.defineProperty(warning, 'message', { get: () => `Native engines unavailable for ${[...failures].join(', ')}: ${reason}. DOCX, PPTX and XLSX fall back to WebAssembly when their native engine cannot load. Previews on this path need @napi-rs/canvas installed.` });
-    warn(warning);
+    warn(Object.assign(new Error(`The native ${format} engine could not load: ${reason} Formats whose native engine cannot load use WebAssembly, and their previews need @napi-rs/canvas installed.`), { code: 'BETTEROFFICE_AGENTS_NATIVE_UNAVAILABLE' }));
   };
   const remember = <F extends EngineFormat>(format: F, engine: Engine<EngineModules[F]>) => {
     const ready = loaded[format] as Engine<EngineModules[F]> | undefined;

@@ -19,7 +19,7 @@ test('engine loader falls back per format and warns once across failures', async
   expect(warn).toHaveBeenCalledTimes(1);
   const warning = warn.mock.calls[0]![0];
   expect(warning).toMatchObject({ code: 'BETTEROFFICE_AGENTS_NATIVE_UNAVAILABLE' });
-  expect(warning.message).toContain('xlsx, pptx');
+  expect(warning.message).toContain('native xlsx engine');
   expect(warning.message).toContain('no native prebuilt');
   expect(warning.message).toContain('@napi-rs/canvas');
 });

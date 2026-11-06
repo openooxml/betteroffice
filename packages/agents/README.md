@@ -95,6 +95,7 @@ musl arm64/x64, and Windows arm64/x64. `@napi-rs/canvas` is only needed for prev
 on platforms without a native prebuilt. Deno needs `--allow-ffi`; without it agents
 warns and uses WebAssembly. Native engines have no 4 GiB WebAssembly memory cap.
 Browsers keep WebAssembly; pass module bytes as `wasm` for XLSX and PPTX.
+Font defaults for DOCX previews on those runtimes are configured on `@betteroffice/docx-native/layout`.
 
 ## Attached mode
 

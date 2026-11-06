@@ -1,12 +1,14 @@
 import { afterEach, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { createCanvas, loadImage } from '@napi-rs/canvas';
-import { configureDefaultFonts } from '@betteroffice/docx/layout';
+import { engines } from '#agents-engines';
 import type { DisplayList } from '@betteroffice/docx/layout/render';
 import JSZip from 'jszip';
 import { openDocx, type DocumentRenderer } from '../src';
 import { renderDocxPage } from '../src/render';
 import { fixture } from './fixture';
+
+const configureDefaultFonts = async (options: Parameters<typeof import('@betteroffice/docx/layout').configureDefaultFonts>[0]) => (await engines.load('docx')).module.layout.configureDefaultFonts(options);
 
 afterEach(() => configureDefaultFonts({}));
 
@@ -41,7 +43,7 @@ for (const embedded of [false, true]) {
     }
     const resolve = mock(() => async () => fallback);
     const module = { createFontProvider: () => ({ resolve }) };
-    configureDefaultFonts(embedded ? { load: async () => module } : { fonts: module });
+    await configureDefaultFonts(embedded ? { load: async () => module } : { fonts: module });
     const doc = await openDocx(await zip.generateAsync({ type: 'uint8array' }), { renderer: canvasRenderer });
     const register = spyOn(doc.session, 'registerFont');
     try {
@@ -50,7 +52,7 @@ for (const embedded of [false, true]) {
       expect(resolve).toHaveBeenCalledWith('Calibri', false, false);
       expect(register.mock.calls[0]?.[0]).toEqual(new Uint8Array(embedded ? face : fallback));
       expect(register.mock.calls.some(([bytes]) => bytes.byteLength === fallback.byteLength)).toBe(true);
-    } finally { register.mockRestore(); doc.close(); configureDefaultFonts({}); }
+    } finally { register.mockRestore(); doc.close(); await configureDefaultFonts({}); }
   });
 }
 
