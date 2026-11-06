@@ -117,7 +117,8 @@ The React editor uses a worker by default and exposes its own asynchronous API. 
 `workbook.propose(agentId, note, edits)` stages cell edits for review without applying them.
 `listProposals`, `acceptProposal`, and `rejectProposal` manage that queue; acceptance applies the
 proposal as one undo step and recalculates dependents. Check `isProposalsAvailable()` first;
-acceptance throws `StaleProposalError` if targeted cells have changed since staging.
+acceptance throws `StaleProposalError` if targeted cells have changed since staging. Listed proposals
+name those cells in `staleTargets`, so a host can warn before accepting.
 
 ## Version-checked edit batches
 

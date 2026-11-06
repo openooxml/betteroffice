@@ -472,10 +472,12 @@ pub struct PyProposal {
     note: Option<String>,
     #[pyo3(get)]
     edits: Vec<PyProposedEdit>,
+    #[pyo3(get)]
+    stale_targets: Vec<String>,
 }
 
 impl PyProposal {
-    fn from_core(proposal: &Proposal) -> Self {
+    fn from_core(workbook: &CoreWorkbook, proposal: &Proposal) -> Self {
         Self {
             id: proposal.id.clone(),
             agent_id: proposal.agent_id.clone(),
@@ -490,6 +492,12 @@ impl PyProposal {
                     before: edit.old_text.clone(),
                     after: edit.new_text.clone(),
                 })
+                .collect(),
+            stale_targets: proposal
+                .edits
+                .iter()
+                .filter(|edit| workbook.proposal_edit_is_stale(edit))
+                .map(|edit| CellRef::new(edit.row, edit.col).to_a1())
                 .collect(),
         }
     }
@@ -1104,14 +1112,14 @@ impl PyWorkbook {
                 CalculationOptions { now_serial },
             )
             .map_err(map_error)?;
-        Ok(PyProposal::from_core(&proposal))
+        Ok(PyProposal::from_core(&self.inner, &proposal))
     }
 
     fn proposals(&self) -> Vec<PyProposal> {
         self.inner
             .proposals()
             .iter()
-            .map(PyProposal::from_core)
+            .map(|proposal| PyProposal::from_core(&self.inner, proposal))
             .collect()
     }
 

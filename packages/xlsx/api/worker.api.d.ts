@@ -3603,6 +3603,11 @@ export interface Proposal {
     agentId: string;
     note: string | null;
     cells: ProposalCell[];
+    /**
+     * A1 addresses of the cells whose target moved, the same strings as
+     * {@link StaleProposalError.cells}. A changed dependency only shows at accept.
+     */
+    staleTargets?: string[];
     forceBlocked?: boolean;
 }
 /** A drifted proposal cell: its sheet index and catalog id beside the coordinates. */

@@ -505,6 +505,10 @@ class Workbook:
     def proposals(self) -> "list[Proposal]":
         return self._inner.proposals()
 
+    def list_proposals(self) -> "list[Proposal]":
+        """Alias of proposals, named as in the TypeScript API."""
+        return self.proposals()
+
     def accept_proposal(
         self,
         proposal_id: str,
