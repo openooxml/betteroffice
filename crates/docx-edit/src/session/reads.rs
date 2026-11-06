@@ -208,12 +208,7 @@ impl EditSessionCore {
     /// ids of the stories created, edited, or deleted after revision `since`.
     pub fn stories_changed_since(&self, since: f64) -> String {
         let (revision, stories) = self.engine.doc().stories_changed_since(since as u64);
-        json!({
-            "revision": revision,
-            "stories": stories,
-            "authoredRevision": self.engine.doc().authored_epoch.load(std::sync::atomic::Ordering::Relaxed)
-        })
-        .to_string()
+        json!({ "revision": revision, "stories": stories }).to_string()
     }
 
     /// Every story id in the document, sorted so the order is stable across

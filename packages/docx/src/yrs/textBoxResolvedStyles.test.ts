@@ -33,7 +33,7 @@ async function session(clientId = 97800 + sessions.length): Promise<YrsSession> 
   return result;
 }
 
-function fixture(): Uint8Array<ArrayBuffer> {
+function fixture(extraBody = ''): Uint8Array<ArrayBuffer> {
   const paragraph = '<w:p><w:pPr><w:pStyle w:val="Box"/></w:pPr><w:r><w:rPr><w:rStyle w:val="Accent"/></w:rPr><w:t>Styled box</w:t></w:r></w:p>';
   const nested = '<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc>' + paragraph + '</w:tc></w:tr></w:tbl>' +
     '<w:sdt><w:sdtPr/><w:sdtContent>' + paragraph + '</w:sdtContent></w:sdt>';
@@ -44,10 +44,54 @@ function fixture(): Uint8Array<ArrayBuffer> {
   add('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>');
   add('_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="office" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`);
   add('word/_rels/document.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="header" Type="${R}/header" Target="header1.xml"/><Relationship Id="styles" Type="${R}/styles" Target="styles.xml"/></Relationships>`);
-  add('word/styles.xml', `<w:styles xmlns:w="${W}"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:sz w:val="22"/><w:lang w:val="en-US"/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type="paragraph" w:styleId="Box"><w:pPr><w:jc w:val="center"/><w:spacing w:before="120" w:line="300"/></w:pPr><w:rPr><w:rFonts w:ascii="Courier New" w:hAnsi="Courier New"/><w:sz w:val="30"/></w:rPr></w:style><w:style w:type="character" w:styleId="Accent"><w:rPr><w:b/><w:lang w:val="de-DE"/></w:rPr></w:style></w:styles>`);
-  add('word/document.xml', `<w:document ${NS}><w:body>${drawing}${vml}<w:sectPr><w:headerReference w:type="default" r:id="header"/></w:sectPr></w:body></w:document>`);
+  add('word/styles.xml', `<w:styles xmlns:w="${W}"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:sz w:val="22"/><w:lang w:val="en-US"/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type="paragraph" w:styleId="Box"><w:pPr><w:jc w:val="center"/><w:spacing w:before="120" w:line="300"/></w:pPr><w:rPr><w:rFonts w:ascii="Courier New" w:hAnsi="Courier New"/><w:sz w:val="30"/></w:rPr></w:style><w:style w:type="character" w:styleId="Accent"><w:rPr><w:b/><w:lang w:val="de-DE"/></w:rPr></w:style><w:style w:type="character" w:styleId="Later"><w:rPr><w:rFonts w:ascii="Verdana" w:hAnsi="Verdana"/><w:sz w:val="42"/></w:rPr></w:style><w:style w:type="character" w:styleId="Secret"><w:rPr><w:vanish/></w:rPr></w:style></w:styles>`);
+  add('word/document.xml', `<w:document ${NS}><w:body>${extraBody}${drawing}${vml}<w:sectPr><w:headerReference w:type="default" r:id="header"/></w:sectPr></w:body></w:document>`);
   add('word/header1.xml', `<w:hdr ${NS}>${drawing}${vml}</w:hdr>`);
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
+}
+
+function updateEncoder() {
+  const bytes: number[] = [];
+  const uint = (value: number): void => {
+    while (value >= 128) {
+      bytes.push((value % 128) + 128);
+      value = Math.floor(value / 128);
+    }
+    bytes.push(value);
+  };
+  const string = (value: string): void => {
+    const encoded = new TextEncoder().encode(value);
+    uint(encoded.length);
+    bytes.push(...encoded);
+  };
+  return { uint, string, finish: () => Uint8Array.from(bytes) };
+}
+
+function mapStringUpdate(client: number, root: string, key: string, value: string): Uint8Array {
+  const encoder = updateEncoder();
+  for (const value of [1, 1, client, 0, 40, 1]) encoder.uint(value);
+  encoder.string(root);
+  encoder.string(key);
+  encoder.uint(1);
+  encoder.uint(119);
+  encoder.string(value);
+  encoder.uint(0);
+  return encoder.finish();
+}
+
+function invalidParentUpdate(): Uint8Array {
+  const encoder = updateEncoder();
+  const client = 111;
+  for (const value of [1, 2, client, 0, 40, 1]) encoder.uint(value);
+  encoder.string('invalidParent');
+  encoder.string('value');
+  encoder.uint(1);
+  encoder.uint(119);
+  encoder.string('scalar');
+  for (const value of [4, 0, client, 0]) encoder.uint(value);
+  encoder.string('child');
+  encoder.uint(0);
+  return encoder.finish();
 }
 
 function assertAuthored(value: unknown): void {
@@ -139,6 +183,7 @@ test('shared styles preserve payload strings and original bytes on both seed pat
   const before = await saveYrsDocx(legacy, { updateModifiedDate: false });
   expect(saved.bytes).toEqual(before.bytes);
   expect(saved.bytes).toEqual(bytes);
+  expect(before.bytes).toEqual(bytes);
   const older = await session();
   older.openDocx(bytes, false);
   older.loadState(legacy.encodeState());
@@ -195,4 +240,115 @@ test('edited text-box saves and Document projections contain only authored value
     for (const key of KEYS) expect(new TextDecoder().decode(part)).not.toContain(key);
   }
   assertAuthored(await parseDocx(saved.bytes.buffer as ArrayBuffer, { preloadFonts: false }));
+});
+
+for (const styleId of ['Later', 'Secret']) {
+  test(`host payload edits resolve an initially unused ${styleId} style before and after saving`, async () => {
+    const bytes = fixture();
+    const source = await session();
+    source.openDocx(bytes, true);
+    source.yrsBlocksForStory('body', {});
+    let offset = 0;
+    let edited = false;
+    for (const segment of source.storySegments('body')) {
+      if (segment.kind === 'text') offset += segment.text.length;
+      else {
+        if (segment.kind === 'embed' && typeof segment.payload.shapeJson === 'string') {
+          const shape = JSON.parse(segment.payload.shapeJson);
+          const run = shape.textBody.content[0].content[0];
+          run.content[0].text = 'Reassigned run';
+          run.formatting = { styleId };
+          source.applyRawOps('body', [{ op: 'setEmbedAttr', index: offset, key: 'shapeJson', value: JSON.stringify(shape) }]);
+          edited = true;
+          break;
+        }
+        offset += 1;
+      }
+    }
+    expect(edited).toBe(true);
+    const live = styledRuns(source, 'body', 'Reassigned run');
+    if (styleId === 'Secret') expect(live).toEqual([]);
+    else expect(live).toEqual([expect.objectContaining({ fontFamily: 'Verdana', fontSize: 21 })]);
+    const saved = await saveYrsDocx(source, { updateModifiedDate: false });
+    const xml = new TextDecoder().decode(unzipContainer(saved.bytes)['word/document.xml']);
+    expect(xml).toContain('Reassigned run');
+    expect(xml).toContain(`w:rStyle w:val="${styleId}"`);
+    const reopened = await session();
+    reopened.openDocx(saved.bytes, true);
+    expect(styledRuns(reopened, 'body', 'Reassigned run')).toEqual(live);
+  });
+}
+
+for (const path of ['loadState', 'applyUpdate', 'applyUpdateChunks', 'applyLocalUpdate', 'applyHostUpdate'] as const) {
+  test(`${path} invalidates projections before update callbacks project and save`, async () => {
+    const bytes = fixture('<w:p><w:r><w:t>Body</w:t></w:r></w:p><w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>');
+    const target = await session();
+    target.openDocx(bytes, true);
+    const peer = await session();
+    peer.loadState(target.encodeState());
+    const vector = target.encodeStateVector();
+    const cell = target.storyIds().find(story => story.startsWith('cell:'))!;
+    expect(cell).toBeDefined();
+    for (const story of ['body', cell]) {
+      const paraId = peer.paragraphs(story)[0]!.paraId;
+      peer.insertText({ story, paraId, offset: 0 }, 'Peer ');
+    }
+    const base = yrsToDocument(target, target.materializeDocx()!);
+    const projections: ReturnType<typeof yrsToDocument>[] = [];
+    const saves: ReturnType<typeof saveYrsDocx>[] = [];
+    const detach = target.onUpdate(() => {
+      projections.push(yrsToDocument(target, base));
+      saves.push(saveYrsDocx(target, { updateModifiedDate: false }));
+    });
+    if (path === 'applyUpdateChunks') target.applyUpdateChunks(peer.encodeStateAsUpdateChunks(vector, 1024 * 1024));
+    else if (path === 'applyHostUpdate') target.applyHostUpdate(peer.encodeStateAsUpdate(vector), ['body', cell]);
+    else target[path](path === 'loadState' ? peer.encodeState() : peer.encodeStateAsUpdate(vector));
+    detach();
+    expect(projections.length).toBeGreaterThan(0);
+    for (const projection of projections) expect(JSON.stringify(projection)).toContain('Peer ');
+    for (const saved of await Promise.all(saves)) {
+      const xml = new TextDecoder().decode(unzipContainer(saved.bytes)['word/document.xml']);
+      expect(xml.replace(/<[^>]*>/g, '')).toContain('Peer Body');
+      expect(xml.replace(/<[^>]*>/g, '')).toContain('Peer Cell');
+    }
+  });
+}
+
+test('a map-only remote update preserves original saved package bytes', async () => {
+  const bytes = fixture();
+  const source = await session();
+  source.openDocx(bytes, true);
+  const before = await saveYrsDocx(source, { updateModifiedDate: false });
+  const resolver = JSON.stringify({
+    enabled: true,
+    styles: {},
+    doc_defaults: { rPr: { fontFamily: { ascii: 'Verdana', hAnsi: 'Verdana' }, fontSize: 42 } },
+    default_paragraph: null,
+    default_table: null,
+    default_character: null,
+    table_paragraph_formatting: null,
+  });
+  source.applyUpdate(mapStringUpdate(Number.MAX_SAFE_INTEGER, 'shapeStyles', 'resolver', resolver));
+  for (const run of styledRuns(source, 'body')) expect(run).toMatchObject({ fontFamily: 'Verdana', fontSize: 21 });
+  expect(styledRuns(source, 'body').length).toBeGreaterThan(0);
+  const after = await saveYrsDocx(source, { updateModifiedDate: false });
+  expect(after.bytes).toEqual(before.bytes);
+  expect(after.bytes).toEqual(bytes);
+});
+
+test('a chunk integration error still invalidates projections for its committed authored prefix', async () => {
+  const bytes = fixture('<w:p><w:r><w:t>Body</w:t></w:r></w:p>');
+  const target = await session();
+  target.openDocx(bytes, true);
+  const peer = await session();
+  peer.loadState(target.encodeState());
+  const vector = target.encodeStateVector();
+  const paraId = peer.paragraphs('body')[0]!.paraId;
+  peer.insertText({ story: 'body', paraId, offset: 0 }, 'Committed ');
+  const base = yrsToDocument(target, target.materializeDocx()!);
+  expect(() => target.applyUpdateChunks([peer.encodeStateAsUpdate(vector), invalidParentUpdate()])).toThrow();
+  expect(target.paragraphs('body')[0]!.text).toBe('Committed Body');
+  expect(JSON.stringify(yrsToDocument(target, base))).toContain('Committed ');
+  const saved = await saveYrsDocx(target, { updateModifiedDate: false });
+  expect(new TextDecoder().decode(unzipContainer(saved.bytes)['word/document.xml']).replace(/<[^>]*>/g, '')).toContain('Committed Body');
 });

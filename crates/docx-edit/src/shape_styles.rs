@@ -1,18 +1,18 @@
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use yrs::{Doc, Map, ReadTxn, Transact};
+use yrs::{Any, Doc, Map, Out, ReadTxn, Transact};
 
 use crate::{EditingDoc, StyleResolver};
 
 pub(crate) const SHAPE_STYLES: &str = "shapeStyles";
 const RESOLVER: &str = "resolver";
+const MAX_RESOLVER_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Default)]
 pub(crate) struct ResolverCache {
-    json: Option<String>,
+    json: Option<Arc<str>>,
     resolver: Option<Arc<StyleResolver>>,
 }
 
@@ -21,56 +21,36 @@ impl EditingDoc {
         let txn = self.yrs_doc().transact();
         let json = txn
             .get_map(SHAPE_STYLES)
-            .and_then(|root| crate::map_string(&root, &txn, RESOLVER));
+            .and_then(|root| root.get(&txn, RESOLVER))
+            .and_then(|value| match value {
+                Out::Any(Any::String(json)) => Some(json),
+                _ => None,
+            });
         let mut cache = self.shape_styles.lock().unwrap();
-        if cache.json != json {
+        let unchanged = match (&cache.json, &json) {
+            (Some(previous), Some(current)) => {
+                Arc::ptr_eq(previous, current) || previous == current
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        if !unchanged {
             cache.resolver = json
                 .as_deref()
+                .filter(|json| json.len() <= MAX_RESOLVER_BYTES)
                 .and_then(|json| serde_json::from_str(json).ok())
                 .map(Arc::new);
-            cache.json = json;
         }
+        cache.json = json;
         cache.resolver.clone()
     }
 }
 
-fn references(value: &Value, styles: &mut BTreeSet<String>) {
+fn has_text_box_content(value: &Value, legacy: bool) -> bool {
     match value {
-        Value::Array(values) => {
-            for value in values {
-                references(value, styles);
-            }
-        }
-        Value::Object(values) => {
-            if matches!(
-                value.get("type").and_then(Value::as_str),
-                Some("paragraph" | "run" | "simpleField" | "complexField")
-            ) {
-                for path in ["/formatting/styleId", "/formatting/runProperties/styleId"] {
-                    if let Some(id) = value.pointer(path).and_then(Value::as_str) {
-                        styles.insert(id.to_owned());
-                    }
-                }
-            }
-            for (key, child) in values {
-                if key != "formatting" {
-                    references(child, styles);
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-fn collect(value: &Value, legacy: bool, styles: &mut BTreeSet<String>) -> bool {
-    match value {
-        Value::Array(values) => {
-            let mut found = false;
-            for value in values {
-                found |= collect(value, false, styles);
-            }
-            found
-        }
+        Value::Array(values) => values
+            .iter()
+            .any(|value| has_text_box_content(value, false)),
         Value::Object(values) => {
             let content = (value.get("type").and_then(Value::as_str) == Some("shape"))
                 .then(|| value.pointer("/textBody/content"))
@@ -80,53 +60,84 @@ fn collect(value: &Value, legacy: bool, styles: &mut BTreeSet<String>) -> bool {
                         .then(|| value.get("content"))
                         .flatten()
                 });
-            let mut found = false;
-            if let Some(content) = content.filter(|content| {
+            content.is_some_and(|content| {
                 content
                     .as_array()
                     .is_some_and(|content| !content.is_empty())
-            }) {
-                references(content, styles);
-                found = true;
-            }
-            for (key, child) in values {
-                found |= collect(child, key == "textBox", styles);
-            }
-            found
+            }) || values
+                .iter()
+                .any(|(key, child)| has_text_box_content(child, key == "textBox"))
         }
         _ => false,
     }
 }
 
-pub(crate) fn for_package(package: &Value, styles: &StyleResolver) -> Option<StyleResolver> {
-    let mut referenced = BTreeSet::new();
-    collect(package, false, &mut referenced).then(|| styles.for_shape_styles(&referenced))
+pub(crate) fn package_has_text_boxes(package: &Value) -> bool {
+    has_text_box_content(package, false)
 }
 
-pub(crate) fn seed(document: &EditingDoc, styles: &StyleResolver) {
-    let json = serde_json::to_string(styles).expect("shape style resolver JSON");
+pub(crate) fn has_entry(document: &EditingDoc) -> bool {
+    let txn = document.yrs_doc().transact();
+    txn.get_map(SHAPE_STYLES)
+        .is_some_and(|root| root.get(&txn, RESOLVER).is_some())
+}
+
+pub(crate) fn for_package(package: &Value, styles: &StyleResolver) -> Option<StyleResolver> {
+    package_has_text_boxes(package).then(|| styles.for_shape_styles())
+}
+
+pub(crate) fn seed(document: &EditingDoc, styles: Option<&StyleResolver>) {
+    let json = styles
+        .map(serde_json::to_string)
+        .transpose()
+        .expect("shape style resolver JSON");
+    let mut txn = document.yrs_doc().transact_mut();
+    let root = txn.get_map(SHAPE_STYLES).unwrap();
+    let previous = root.get(&txn, RESOLVER);
+    if let Some(previous) = previous {
+        match json {
+            Some(json) => {
+                let unchanged = match previous {
+                    Out::Any(Any::String(previous)) => previous.as_ref() == json.as_str(),
+                    _ => false,
+                };
+                if !unchanged {
+                    root.insert(&mut txn, RESOLVER, json);
+                }
+            }
+            None => {
+                root.remove(&mut txn, RESOLVER);
+            }
+        }
+        return;
+    }
+    drop(txn);
+    let Some(json) = json else {
+        return;
+    };
     let digest = Sha256::digest(json.as_bytes());
     let client = u64::from_le_bytes(digest[..8].try_into().unwrap()) & ((1 << 53) - 1);
     let seed = Doc::with_client_id(client);
     let root = seed.get_or_insert_map(SHAPE_STYLES);
     let mut txn = seed.transact_mut();
-    root.insert(&mut txn, RESOLVER, json);
+    root.insert(&mut txn, RESOLVER, json.as_str());
     let update = txn.encode_update_v1();
     drop(txn);
     document
         .apply_verbatim_v1(&update)
         .expect("shape style seed applies");
-}
-
-pub(crate) fn only_style_changes(txn: &yrs::TransactionMut<'_>) -> bool {
-    !txn.changed_parent_types().is_empty()
-        && txn.changed_parent_types().iter().all(|branch| {
-            matches!(branch.id(), yrs::BranchID::Root(name) if name.as_ref() == SHAPE_STYLES)
-        })
+    if !has_entry(document) {
+        let mut txn = document.yrs_doc().transact_mut();
+        txn.get_map(SHAPE_STYLES)
+            .unwrap()
+            .insert(&mut txn, RESOLVER, json);
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
     use serde_json::json;
 
@@ -137,7 +148,7 @@ mod tests {
     }
 
     #[test]
-    fn resolver_is_pruned_deterministic_cached_and_outside_authored_history() {
+    fn resolver_keeps_all_text_styles_is_deterministic_cached_and_outside_undo() {
         let styles = StyleResolver::new(Some(
             &json!({"docDefaults": {"rPr": {"fontSize": 22}}, "styles": [
                 {"styleId": "Normal", "type": "paragraph", "default": true},
@@ -153,18 +164,10 @@ mod tests {
         ));
         let doc = EditingDoc::new(75367);
         let undo = doc.undo_manager();
-        doc.mark_seeded();
-        let authored = doc
-            .authored_epoch
-            .load(std::sync::atomic::Ordering::Relaxed);
         let stories = doc.stories_changed_since(0);
-        seed(&doc, &for_package(&package(), &styles).unwrap());
+        seed(&doc, for_package(&package(), &styles).as_ref());
+        doc.mark_seeded();
         assert!(doc.unchanged_since_seeded());
-        assert_eq!(
-            doc.authored_epoch
-                .load(std::sync::atomic::Ordering::Relaxed),
-            authored
-        );
         assert_eq!(doc.stories_changed_since(0), stories);
         assert_eq!(undo.undo_depth(), 0);
         let txn = doc.yrs_doc().transact();
@@ -187,7 +190,8 @@ mod tests {
                 "DefaultCharacter",
                 "Mark",
                 "MarkBase",
-                "Normal"
+                "Normal",
+                "Unused"
             ])
         );
         assert_eq!(value["doc_defaults"]["rPr"]["fontSize"], 22);
@@ -196,7 +200,7 @@ mod tests {
         let first = doc.shape_style_resolver().unwrap();
         assert!(Arc::ptr_eq(&first, &doc.shape_style_resolver().unwrap()));
         let repeat = EditingDoc::new(75368);
-        seed(&repeat, &for_package(&package(), &styles).unwrap());
+        seed(&repeat, for_package(&package(), &styles).as_ref());
         assert_eq!(
             doc.encode_state_as_update_v1(),
             repeat.encode_state_as_update_v1()
@@ -215,12 +219,12 @@ mod tests {
             map.remove(&mut txn, RESOLVER);
         }
         assert!(doc.shape_style_resolver().is_none());
-        assert!(doc.unchanged_since_seeded());
+        assert!(!doc.unchanged_since_seeded());
         assert_eq!(undo.undo_depth(), 0);
     }
 
     #[test]
-    fn retained_comments_group_children_and_legacy_content_collect_style_references() {
+    fn retained_comments_group_children_and_legacy_content_trigger_style_seeding() {
         let styles = StyleResolver::new(Some(&json!({"styles": [
             {"styleId": "Box", "type": "paragraph", "rPr": {"fontSize": 30}},
             {"styleId": "Accent", "type": "character", "rPr": {"italic": true}}
@@ -245,10 +249,97 @@ mod tests {
         let package = json!({"type": "shape", "textBody": {"content": []}});
         let styles = for_package(&package, &StyleResolver::default());
         assert!(styles.is_none());
-        if let Some(styles) = styles {
-            seed(&doc, &styles);
-        }
+        seed(&doc, styles.as_ref());
         assert_eq!(doc.encode_state_as_update_v1(), before);
         assert!(doc.shape_style_resolver().is_none());
+    }
+
+    #[test]
+    fn equal_entries_reuse_the_resolver_and_cache_the_crdt_string_without_copying() {
+        let doc = EditingDoc::new(75378);
+        seed(&doc, Some(&StyleResolver::default()));
+        let first = doc.shape_style_resolver().unwrap();
+        let current = || {
+            let txn = doc.yrs_doc().transact();
+            let Out::Any(Any::String(json)) = txn
+                .get_map(SHAPE_STYLES)
+                .unwrap()
+                .get(&txn, RESOLVER)
+                .unwrap()
+            else {
+                panic!("resolver string")
+            };
+            json
+        };
+        let original = current();
+        assert!(Arc::ptr_eq(
+            doc.shape_styles.lock().unwrap().json.as_ref().unwrap(),
+            &original
+        ));
+        let before = doc.encode_state_as_update_v1();
+        seed(&doc, Some(&StyleResolver::default()));
+        assert_eq!(doc.encode_state_as_update_v1(), before);
+        {
+            let mut txn = doc.yrs_doc().transact_mut();
+            txn.get_map(SHAPE_STYLES)
+                .unwrap()
+                .insert(&mut txn, RESOLVER, original.to_string());
+        }
+        let replacement = current();
+        assert!(!Arc::ptr_eq(&original, &replacement));
+        assert!(Arc::ptr_eq(&first, &doc.shape_style_resolver().unwrap()));
+        assert!(Arc::ptr_eq(
+            doc.shape_styles.lock().unwrap().json.as_ref().unwrap(),
+            &replacement
+        ));
+        assert!(Arc::ptr_eq(&first, &doc.shape_style_resolver().unwrap()));
+    }
+
+    #[test]
+    fn oversized_and_invalid_entries_fall_back_and_cache_the_rejection() {
+        assert_eq!(
+            MAX_RESOLVER_BYTES,
+            docx_parse::ParseLimits::default().max_attribute_bytes
+        );
+        let doc = EditingDoc::new(75379);
+        let valid = serde_json::to_string(&StyleResolver::default()).unwrap();
+        let boundary = format!("{}{}", " ".repeat(MAX_RESOLVER_BYTES - valid.len()), valid);
+        for (json, accepted) in [
+            (valid.clone(), true),
+            (boundary.clone(), true),
+            (format!(" {boundary}"), false),
+            ("{".to_owned(), false),
+            ("{}".to_owned(), false),
+            ("null".to_owned(), false),
+        ] {
+            {
+                let mut txn = doc.yrs_doc().transact_mut();
+                txn.get_map(SHAPE_STYLES)
+                    .unwrap()
+                    .insert(&mut txn, RESOLVER, json);
+            }
+            assert_eq!(doc.shape_style_resolver().is_some(), accepted);
+            let cached = doc.shape_styles.lock().unwrap().json.clone().unwrap();
+            assert_eq!(doc.shape_style_resolver().is_some(), accepted);
+            assert!(Arc::ptr_eq(
+                &cached,
+                doc.shape_styles.lock().unwrap().json.as_ref().unwrap()
+            ));
+        }
+    }
+
+    #[test]
+    fn reseeding_a_removed_deterministic_entry_restores_it() {
+        let doc = EditingDoc::new(75386);
+        let styles = StyleResolver::default();
+        seed(&doc, Some(&styles));
+        let original = serde_json::to_value(doc.shape_style_resolver().unwrap().as_ref()).unwrap();
+        seed(&doc, None);
+        assert!(!has_entry(&doc));
+        seed(&doc, Some(&styles));
+        assert_eq!(
+            serde_json::to_value(doc.shape_style_resolver().unwrap().as_ref()).unwrap(),
+            original
+        );
     }
 }

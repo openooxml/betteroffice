@@ -209,6 +209,12 @@ impl EditSessionCore {
         let (envelope, parts, media) =
             crate::seed::parse_docx_package_with_media(source.clone(), digest.clone())?;
         let host_envelope = thin_docx_envelope(&envelope);
+        let clear_shape_styles = !seed_stories
+            && crate::shape_styles::has_entry(self.engine.doc())
+            && !crate::shape_styles::package_has_text_boxes(
+                &serde_json::to_value(&envelope.document.package)
+                    .map_err(|error| error.to_string())?,
+            );
         // Only stories seeded into an empty replica are what a fresh seed of the package holds.
         let fresh_seed = seed_stories && self.engine.doc().holds_nothing();
         let fonts = if seed_stories {
@@ -236,6 +242,9 @@ impl EditSessionCore {
         } else {
             let (mut metadata, index, fonts) =
                 crate::seed::replica_source(envelope, parts, source.clone(), digest.clone())?;
+            if clear_shape_styles {
+                crate::shape_styles::seed(self.engine.doc(), None);
+            }
             metadata.watch_comments(self.engine.doc());
             self.engine
                 .doc()

@@ -1739,23 +1739,14 @@ impl StyleResolver {
         resolver
     }
 
-    pub(crate) fn for_shape_styles(&self, referenced: &BTreeSet<String>) -> Self {
-        let mut keep = referenced.clone();
-        keep.extend(self.default_paragraph.iter().cloned());
-        keep.extend(self.default_character.iter().cloned());
-        let mut pending: Vec<_> = keep.iter().cloned().collect();
-        while let Some(id) = pending.pop() {
-            if let Some(parent) = self
-                .style(&id)
-                .and_then(|style| style.get("basedOn"))
-                .and_then(Value::as_str)
-                && keep.insert(parent.to_owned())
-            {
-                pending.push(parent.to_owned());
-            }
-        }
+    pub(crate) fn for_shape_styles(&self) -> Self {
         let mut styles = self.clone();
-        styles.styles.retain(|id, _| keep.contains(id));
+        styles.styles.retain(|_, style| {
+            matches!(
+                style.get("type").and_then(Value::as_str),
+                Some("paragraph" | "character")
+            )
+        });
         styles.default_table = None;
         styles.table_paragraph_formatting = None;
         styles.table_run_formatting = None;
@@ -6810,9 +6801,10 @@ fn seed_lowered(
     document
         .apply_raw_story_batches(deletes, &ctx)
         .map_err(|error| error.to_string())?;
-    if seed_shape_styles && let Some(styles) = &shape_styles {
-        crate::shape_styles::seed(document, styles);
-    }
+    crate::shape_styles::seed(
+        document,
+        shape_styles.as_ref().filter(|_| seed_shape_styles),
+    );
     let ranges = document
         .apply_raw_seed_batches(batches, &ctx)
         .map_err(|error| error.to_string())?;
@@ -10839,8 +10831,8 @@ mod shape_style_seed_tests {
         seed_parsed_docx_with(&parsed, parse_docx_for_edit(&bytes).unwrap(), None).unwrap();
         assert!(parsed.shape_style_resolver().is_none());
         assert_eq!(payloads(&parsed), actual);
-        assert_eq!(save_authored_shapes(&native, &bytes), bytes);
-        assert_eq!(save_authored_shapes(&parsed, &bytes), bytes);
+        let saved = save_authored_shapes(&native, &bytes);
+        assert_eq!(save_authored_shapes(&parsed, &bytes), saved);
         let cold = EditingDoc::new(75372);
         cold.apply_update_v1(&parsed.encode_state_as_update_v1())
             .unwrap();
@@ -10854,6 +10846,9 @@ mod shape_style_seed_tests {
             crate::bridge::yrs_doc_to_layout_blocks(&native, "body", &env).unwrap(),
             crate::bridge::yrs_doc_to_layout_blocks(&cold, "body", &env).unwrap()
         );
+        seed_parsed_docx_with(&native, parse_docx_for_edit(&bytes).unwrap(), None).unwrap();
+        assert!(native.shape_style_resolver().is_none());
+        assert_eq!(payloads(&native), payloads(&parsed));
     }
 
     #[test]
@@ -10872,7 +10867,7 @@ mod shape_style_seed_tests {
         assert_eq!(payload["textBoxJson"], wire);
         let doc = EditingDoc::new(75376);
         let styles = crate::shape_styles::for_package(&content, &StyleResolver::default()).unwrap();
-        crate::shape_styles::seed(&doc, &styles);
+        crate::shape_styles::seed(&doc, Some(&styles));
         assert_eq!(payload["textBoxJson"], wire);
         assert!(doc.shape_style_resolver().is_some());
     }
@@ -10906,7 +10901,7 @@ mod shape_style_seed_tests {
     }
 
     #[test]
-    fn shared_bootstrap_and_removed_styles_keep_authored_state_and_save_selection() {
+    fn shared_bootstrap_and_removed_styles_keep_authored_state_and_saved_bytes() {
         let bytes = package();
         let source = EditingDoc::new(75374);
         seed_from_docx_with_generation(&source, &bytes, "boxes").unwrap();
@@ -10939,8 +10934,10 @@ mod shape_style_seed_tests {
                 (story.story, canonical, checksum)
             })
             .collect();
-        let plan = source.paragraph_save_plan();
+        let parsed = EditingDoc::new(75380);
+        seed_parsed_docx_with(&parsed, parse_docx_for_edit(&bytes).unwrap(), None).unwrap();
         let saved = save_authored_shapes(&source, &bytes);
+        assert_eq!(save_authored_shapes(&parsed, &bytes), saved);
         assert_eq!(save_authored_shapes(&peer, &bytes), saved);
         {
             let mut txn = source.yrs_doc().transact_mut();
@@ -10949,7 +10946,6 @@ mod shape_style_seed_tests {
                 .remove(&mut txn, "resolver");
         }
         assert!(source.shape_style_resolver().is_none());
-        assert_eq!(source.paragraph_save_plan(), plan);
         for (story, canonical, checksum) in before {
             assert_eq!(crate::project_story(&source, &story).unwrap(), canonical);
             assert_eq!(crate::story_checksum(&source, &story).unwrap(), checksum);
@@ -10974,6 +10970,179 @@ mod shape_style_seed_tests {
             crate::bridge::yrs_doc_to_layout_blocks(&without, "body", &env).unwrap(),
             crate::bridge::yrs_doc_to_layout_blocks(&source, "body", &env).unwrap()
         );
-        assert_eq!(saved, bytes);
+    }
+
+    #[test]
+    fn native_open_captures_the_seed_baseline_after_styles_and_map_edits_preserve_saved_bytes() {
+        let bytes = package();
+        let session =
+            crate::session::EditSessionCore::new(75381, crate::session::Host::deterministic());
+        session
+            .open_docx_retaining(&bytes, true, None, None)
+            .unwrap();
+        let doc = session.engine.doc();
+        assert!(doc.shape_style_resolver().is_some());
+        assert!(doc.unchanged_since_seeded());
+        let saved = save_authored_shapes(doc, &bytes);
+        let mut styles =
+            serde_json::to_value(doc.shape_style_resolver().unwrap().as_ref()).unwrap();
+        styles["doc_defaults"]["rPr"]["fontSize"] = json!(44);
+        {
+            let mut txn = doc.yrs_doc().transact_mut();
+            txn.get_map(crate::shape_styles::SHAPE_STYLES)
+                .unwrap()
+                .insert(&mut txn, "resolver", styles.to_string());
+        }
+        assert!(!doc.unchanged_since_seeded());
+        assert_eq!(save_authored_shapes(doc, &bytes), saved);
+        crate::shape_styles::seed(doc, None);
+        assert_eq!(save_authored_shapes(doc, &bytes), saved);
+    }
+
+    #[test]
+    fn reopening_replaces_styles_in_both_seed_client_orders_and_clears_them_without_boxes() {
+        use sha2::{Digest, Sha256};
+
+        let a = package();
+        let mut parts = ooxml_opc::unzip_parts(&a).unwrap();
+        for (name, bytes) in &mut parts {
+            if name == "word/styles.xml" {
+                *bytes = String::from_utf8(bytes.clone())
+                    .unwrap()
+                    .replace("Courier New", "Verdana")
+                    .replace("w:val=\"30\"", "w:val=\"42\"")
+                    .into_bytes();
+            }
+        }
+        let b = ooxml_opc::rezip_parts(&parts).unwrap();
+        let no_boxes =
+            fixture::Package::new("<w:p><w:r><w:t>Direct body</w:t></w:r></w:p>").bytes();
+        let resolver_client = |bytes: &[u8]| {
+            let doc = EditingDoc::new(75382);
+            seed_from_docx(&doc, bytes).unwrap();
+            let json = serde_json::to_string(doc.shape_style_resolver().unwrap().as_ref()).unwrap();
+            let digest = Sha256::digest(json.as_bytes());
+            u64::from_le_bytes(digest[..8].try_into().unwrap()) & ((1 << 53) - 1)
+        };
+        assert_ne!(resolver_client(&a), resolver_client(&b));
+        for (a, b) in [(&a, &b), (&b, &a)] {
+            let session =
+                crate::session::EditSessionCore::new(75383, crate::session::Host::deterministic());
+            let fresh =
+                crate::session::EditSessionCore::new(75384, crate::session::Host::deterministic());
+            fresh
+                .open_docx_retaining(b, true, Some("shape-reseed"), None)
+                .unwrap();
+            for bytes in [a, b, a, b] {
+                session
+                    .open_docx_retaining(bytes, true, Some("shape-reseed"), None)
+                    .unwrap();
+                assert!(session.engine.doc().shape_style_resolver().is_some());
+                crate::bridge::yrs_doc_to_layout_blocks(
+                    session.engine.doc(),
+                    "body",
+                    &crate::bridge::RenderEnv::default(),
+                )
+                .unwrap();
+            }
+            assert_eq!(
+                serde_json::to_value(
+                    session
+                        .engine
+                        .doc()
+                        .shape_style_resolver()
+                        .unwrap()
+                        .as_ref()
+                )
+                .unwrap(),
+                serde_json::to_value(fresh.engine.doc().shape_style_resolver().unwrap().as_ref())
+                    .unwrap()
+            );
+            let env = crate::bridge::RenderEnv::default();
+            assert_eq!(
+                crate::bridge::yrs_doc_to_layout_blocks(session.engine.doc(), "body", &env)
+                    .unwrap(),
+                crate::bridge::yrs_doc_to_layout_blocks(fresh.engine.doc(), "body", &env).unwrap()
+            );
+            session
+                .open_docx_retaining(&no_boxes, true, Some("shape-reseed"), None)
+                .unwrap();
+            fresh
+                .open_docx_retaining(&no_boxes, true, Some("shape-reseed"), None)
+                .unwrap();
+            let txn = session.engine.doc().yrs_doc().transact();
+            assert!(
+                txn.get_map(crate::shape_styles::SHAPE_STYLES)
+                    .unwrap()
+                    .get(&txn, "resolver")
+                    .is_none()
+            );
+            drop(txn);
+            assert!(session.engine.doc().shape_style_resolver().is_none());
+            assert_eq!(
+                crate::bridge::yrs_doc_to_layout_blocks(session.engine.doc(), "body", &env)
+                    .unwrap(),
+                crate::bridge::yrs_doc_to_layout_blocks(fresh.engine.doc(), "body", &env).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_and_oversized_shared_entries_render_like_the_missing_entry() {
+        let doc = EditingDoc::new(75385);
+        seed_from_docx(&doc, &package()).unwrap();
+        let styles = serde_json::to_string(doc.shape_style_resolver().unwrap().as_ref()).unwrap();
+        crate::shape_styles::seed(&doc, None);
+        let env = crate::bridge::RenderEnv::default();
+        let direct = crate::bridge::yrs_doc_to_layout_blocks(&doc, "body", &env).unwrap();
+        for json in [
+            "{".to_owned(),
+            "{}".to_owned(),
+            format!(
+                "{}{}",
+                " ".repeat(docx_parse::ParseLimits::default().max_attribute_bytes),
+                styles
+            ),
+        ] {
+            {
+                let mut txn = doc.yrs_doc().transact_mut();
+                txn.get_map(crate::shape_styles::SHAPE_STYLES)
+                    .unwrap()
+                    .insert(&mut txn, "resolver", json);
+            }
+            assert!(doc.shape_style_resolver().is_none());
+            assert_eq!(
+                crate::bridge::yrs_doc_to_layout_blocks(&doc, "body", &env).unwrap(),
+                direct
+            );
+        }
+    }
+
+    #[test]
+    fn opening_a_source_without_boxes_clears_styles_without_reseeding_stories() {
+        let bytes = package();
+        let no_boxes =
+            fixture::Package::new("<w:p><w:r><w:t>Direct body</w:t></w:r></w:p>").bytes();
+        let session =
+            crate::session::EditSessionCore::new(75387, crate::session::Host::deterministic());
+        session
+            .open_docx_retaining(&bytes, true, None, None)
+            .unwrap();
+        let before = payloads(session.engine.doc());
+        session
+            .open_docx_retaining(&no_boxes, false, None, None)
+            .unwrap();
+        assert!(!crate::shape_styles::has_entry(session.engine.doc()));
+        assert!(session.engine.doc().shape_style_resolver().is_none());
+        assert_eq!(payloads(session.engine.doc()), before);
+        let direct = EditingDoc::new(75388);
+        direct
+            .apply_update_v1(&session.engine.doc().encode_state_as_update_v1())
+            .unwrap();
+        let env = crate::bridge::RenderEnv::default();
+        assert_eq!(
+            crate::bridge::yrs_doc_to_layout_blocks(session.engine.doc(), "body", &env).unwrap(),
+            crate::bridge::yrs_doc_to_layout_blocks(&direct, "body", &env).unwrap()
+        );
     }
 }
