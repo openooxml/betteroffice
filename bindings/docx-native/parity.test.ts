@@ -134,7 +134,10 @@ test('proposal rounds, decisions and withdrawals match through the package API',
       step(session.getProposals());
       const texts = session.paragraphs('body').map(({ text }) => text);
       const saved = await api.saveYrsDocx(session, { updateModifiedDate: false });
-      return { steps: JSON.parse(JSON.stringify(steps).replaceAll(sessionId, 'session')), texts, bytes: saved.bytes };
+      const nonce = version.slice(0, version.lastIndexOf('-') + 1);
+      expect(nonce.length).toBeGreaterThan(1);
+      const normalized = JSON.stringify(steps).replaceAll(sessionId, 'session').replaceAll(nonce, 'nonce-');
+      return { steps: JSON.parse(normalized), texts, bytes: saved.bytes };
     } finally { session.destroy(); }
   };
   const actual = await exercise(nativeYrs);
