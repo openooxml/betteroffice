@@ -7,7 +7,8 @@ import {
   releaseKeyFromInput,
 } from '../../../../shared/keyboard/nativeGesture';
 import type { PptxCommandController } from './createPptxCommandStore';
-import { isMacPlatform, isPluginCommandId, matchesChord, normalizeChord } from './descriptors';
+import { isMacPlatform, isPluginCommandId, normalizeChord } from './descriptors';
+import { matchesChord } from '../../../../shared/keyboard/match';
 import { pluginEventStore } from './pluginEvents';
 import { CLIPBOARD_IDS, inputKeepsChord, resolvePptxShortcuts, type PptxShortcuts } from './shortcuts';
 import type { PptxCommandId } from './types';

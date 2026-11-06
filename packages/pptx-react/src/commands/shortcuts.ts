@@ -1,4 +1,4 @@
-import { isMacPlatform } from '../../../../shared/keyboard/chords';
+import { isMacPlatform } from '../../../../shared/keyboard/format';
 import { inputKeepsChord } from './shortcutKeys';
 
 export { CLIPBOARD_IDS, inputKeepsChord } from './shortcutKeys';

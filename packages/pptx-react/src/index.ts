@@ -58,10 +58,9 @@ export { LocaleProvider, useTranslation, type LocaleProviderProps } from './i18n
 export { PptxCommandProvider, type PptxCommandProviderProps } from './commands/PptxCommandProvider';
 export { PptxCommandAdmissionError, type PptxCommandAdmissionCode } from './commands/createPptxCommandStore';
 // Keyboard shortcuts a host can remap or disable
-export {
-  resolvePptxShortcuts,
-  type PptxShortcutId,
-  type PptxShortcuts,
+export type {
+  PptxShortcutId,
+  PptxShortcuts,
 } from './commands/shortcuts';
 export type { ShortcutChord } from '../../../shared/keyboard/chords';
 export type { ResolvedShortcuts, ShortcutBinding, ShortcutIssue } from '../../../shared/keyboard/resolve';

@@ -26,7 +26,8 @@ import type { PptxEditorApi, PptxEditorProps, PptxInThreadEditorProps, PptxWorke
 import { PptxEditor, pptxLegacyEditorLoader } from './PptxEditor';
 import { paintSelection, SelectionOverlay } from './PptxEditorContent';
 import { EditorToolbar, PptxCommandProvider, ToolbarCommandButton } from './index';
-import { isMacPlatform, matchesChord } from './commands/descriptors';
+import { isMacPlatform } from './commands/descriptors';
+import { matchesChord } from '../../../shared/keyboard/match';
 import * as presenceRendering from './presence-rendering';
 import { workerEditorSessionOpener } from './worker/useEditableSessionPresentation';
 import { LEGACY_SYNC_API } from './runtimeOptions';

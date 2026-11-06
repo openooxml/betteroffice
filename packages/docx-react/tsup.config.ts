@@ -5,6 +5,7 @@ import { packageBoundary } from '../../scripts/package-boundary';
 export default defineConfig({
   entry: {
     index: 'src/index.ts',
+    shortcuts: 'src/shortcuts.ts',
     'peerless-harness': 'src/components/DocxEditor/peerless/browserHarness.ts',
   },
   format: ['esm'],

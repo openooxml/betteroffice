@@ -5,7 +5,8 @@ import {
   type PptxCommandScope,
   type PptxPluginCommandBinding,
 } from './createPptxCommandStore';
-import { BUILT_IN_CHORDS, isPluginCommandId, matchesChord, normalizeChord } from './descriptors';
+import { BUILT_IN_CHORDS, isPluginCommandId, normalizeChord } from './descriptors';
+import { matchesChord } from '../../../../shared/keyboard/match';
 import { testBinding } from './testing';
 import type { PptxCommandFailureCode, PptxCommandId, PptxPluginCommandId } from './types';
 

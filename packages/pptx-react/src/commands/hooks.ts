@@ -3,7 +3,7 @@ import { useTranslation } from '../i18n';
 import { pptxCommandController, type PptxChromeContext } from './createPptxCommandStore';
 import { PptxCommandContext } from './PptxCommandProvider';
 import { defaultArgs, formatChord, isPluginCommandId } from './descriptors';
-import { ariaChord } from '../../../../shared/keyboard/chords';
+import { ariaChord } from '../../../../shared/keyboard/format';
 import { chordLabels, storeAriaShortcut, storeShortcutLabel } from './shortcutLabels';
 import type {
   PptxCommandArgs,

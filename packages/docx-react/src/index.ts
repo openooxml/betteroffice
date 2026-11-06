@@ -48,11 +48,10 @@ export type {
 } from './components/sidebar/trackedChanges';
 
 // Keyboard shortcuts a host can remap or disable
-export {
-  resolveDocxShortcuts,
-  type DocxShortcutId,
-  type DocxShortcuts,
-  type DocxShortcutVariantId,
+export type {
+  DocxShortcutId,
+  DocxShortcuts,
+  DocxShortcutVariantId,
 } from './commands/shortcuts';
 export type { ShortcutChord } from '../../../shared/keyboard/chords';
 export type { ResolvedShortcuts, ShortcutBinding, ShortcutIssue } from '../../../shared/keyboard/resolve';

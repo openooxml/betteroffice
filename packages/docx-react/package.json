@@ -11,6 +11,11 @@
       "import": "./dist/index.mjs",
       "default": "./dist/index.mjs"
     },
+    "./shortcuts": {
+      "types": "./dist/shortcuts.d.mts",
+      "import": "./dist/shortcuts.mjs",
+      "default": "./dist/shortcuts.mjs"
+    },
     "./styles.css": "./dist/styles.css"
   },
   "sideEffects": [

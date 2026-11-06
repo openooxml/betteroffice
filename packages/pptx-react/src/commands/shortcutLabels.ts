@@ -1,5 +1,5 @@
 import type { TranslationKey } from '@betteroffice/pptx-i18n';
-import { ariaChord, formatChord, isMacPlatform, type ChordLabels } from '../../../../shared/keyboard/chords';
+import { ariaChord, formatChord, isMacPlatform, type ChordLabels } from '../../../../shared/keyboard/format';
 import { defaultArgs } from './descriptors';
 import type { PptxCommandArgs, PptxCommandId, PptxCommandShortcut, PptxCommandStore } from './types';
 

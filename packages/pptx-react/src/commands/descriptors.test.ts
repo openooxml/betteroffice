@@ -1,9 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import {
   formatChord,
-  matchesChord,
   PPTX_COMMAND_DESCRIPTORS,
 } from './descriptors';
+import { matchesChord } from '../../../../shared/keyboard/match';
 
 function key(init: KeyboardEventInit): KeyboardEvent {
   return {

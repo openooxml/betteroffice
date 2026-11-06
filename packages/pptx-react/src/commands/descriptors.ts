@@ -8,9 +8,9 @@ import type {
 import {
   normalizeChord as normalizeHostChord,
   parseChord,
-} from '../../../../shared/keyboard/chords';
+} from '../../../../shared/keyboard/format';
 
-export { formatChord, isMacPlatform, matchesChord } from '../../../../shared/keyboard/chords';
+export { formatChord, isMacPlatform } from '../../../../shared/keyboard/format';
 
 /** `chord` in canonical form, or null; contributed chords name `Mod`, never a physical `Ctrl`. */
 export function normalizeChord(chord: string): string | null {

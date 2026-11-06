@@ -1,4 +1,4 @@
-import { parseChord } from '../../../../shared/keyboard/chords';
+import { parseChord } from '../../../../shared/keyboard/format';
 
 /** Keys the text input and slide surface move or edit with, whatever the modifiers. */
 const INPUT_KEYS: ReadonlySet<string> = new Set([
