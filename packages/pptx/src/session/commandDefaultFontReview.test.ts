@@ -2,6 +2,7 @@ import { afterEach, expect, spyOn, test } from 'bun:test';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
 import { isClientMessage, isHostMessage } from '../../../../shared/office-session/protocol';
 import { defaultFontInstaller, type DefaultFontInstallation, type DefaultFontPayload } from '../../../../shared/pptxDefaultFonts';
+import * as progressive from '@betteroffice/fonts/progressive';
 import * as wasm from '../wasm/loader';
 import * as requests from '../wasm/fontRequests';
 import { createPresentationCommandClient, createSharedPresentationCommandClient } from './commandClient';
@@ -37,6 +38,9 @@ function connection(initial = ['active', 'target']) {
   let version = 0;
   let next = ['target'];
   const registered: string[] = [];
+  const faces: { bytes: Uint8Array | ArrayBuffer }[] = [];
+  const replaced: string[] = [];
+  const pngFonts: string[] = [];
   const changed = deferred<void>();
   const receipt = () => {
     ids = [...next]; version++; changed.resolve();
@@ -49,7 +53,12 @@ function connection(initial = ['active', 'target']) {
     canUndo: () => true, canRedo: () => true, addUndoBoundary() {},
     historyStep: receipt, applyUpdate: receipt, deleteSlide: receipt,
     snapshot: () => ({ slides: ids.map((id) => ({ id, shapes: [] })) }),
-    registerFont: (face: { family: string }) => { registered.push(face.family); return registered.length; },
+    registerFont: (face: { family: string; bytes: Uint8Array | ArrayBuffer }) => { registered.push(face.family); faces.push(face); return registered.length; },
+    replaceExportFace: (family: string) => { replaced.push(family); },
+    renderPng: async (_: unknown, options: { fonts?: { family: string }[] }) => {
+      pngFonts.push(...(options.fonts ?? []).map((face) => face.family));
+      return Uint8Array.of(7);
+    },
     dispose() {},
   } as unknown as wasm.PresentationHandle;
   const open = spyOn(wasm, 'openPresentation').mockReturnValue(handle);
@@ -74,7 +83,7 @@ function connection(initial = ['active', 'target']) {
     messages.push(message); pair.host.post(message, transfer);
   } }, { initWasm: async () => {} });
   restorers.push(() => pair.client.close());
-  return { transport: pair.client, messages, registered, changed: changed.promise, collect, layout, coverage,
+  return { transport: pair.client, messages, registered, faces, replaced, pngFonts, changed: changed.promise, collect, layout, coverage,
     replace(value: string[]) { next = value; } };
 }
 
@@ -278,3 +287,73 @@ test('invalid default font options are refused', async () => {
   await expect(createPresentationCommandClient(Uint8Array.of(0),
     { session: 'fonts', incarnation: 'worker', fonts: [], defaultFonts: 'no' as unknown as boolean }, wire.transport)).rejects.toThrow();
 });
+
+function slicedCapableBrowser() {
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: {
+    userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36' } });
+  const open = spyOn(progressive, 'openSlicedFace').mockRejectedValue(new Error('Network disabled'));
+  const load = Object.assign(async () => bytes, { slices: { ref: { format: 1, index: 'x', indexSha256: '' } } });
+  spyOn(fontModule.commandFontProvider, 'load').mockResolvedValue({
+    resolve: () => load, resolveFamily: () => undefined, resolveScriptFallback: () => undefined,
+    resolveLastResort: () => { throw new Error('Unexpected substitution'); },
+  } as never);
+  restorers.push(() => {
+    open.mockRestore();
+    if (original) Object.defineProperty(globalThis, 'navigator', original);
+    else Reflect.deleteProperty(globalThis, 'navigator');
+  });
+  return open;
+}
+
+async function openWith(wire: ReturnType<typeof connection>, options: { slicedFonts?: boolean }) {
+  const sent: unknown[] = [];
+  const client = await createPresentationCommandClient(Uint8Array.of(0), Object.assign({ session: 'fonts', incarnation: 'worker',
+    fonts: [], ...options }, { [defaultFontInstaller]: async () => {} }),
+  { ...wire.transport, post(message, transfer) { sent.push(message); wire.transport.post(message, transfer); } });
+  clients.push(client);
+  await client.flush();
+  return { client, sent };
+}
+
+test('a session that does not ask for sliced faces loads, registers and exports whole faces, with nothing new on the wire', async () => {
+  const wire = connection(['target']);
+  const open = slicedCapableBrowser();
+  const { client, sent } = await openWith(wire, {});
+  expect(new Uint8Array(await client.renderPng!({ slide: 0 }))).toEqual(Uint8Array.of(7));
+  expect(open).not.toHaveBeenCalled();
+  expect(wire.registered).toEqual(['Cambria']);
+  expect(wire.faces.map((face) => [...new Uint8Array(face.bytes)])).toEqual([[1, 2, 3]]);
+  expect(wire.replaced).toEqual([]);
+  expect(wire.pngFonts).toEqual([]);
+  expect(JSON.stringify([sent, wire.messages]).toLowerCase()).not.toContain('sliced');
+  expect(JSON.stringify([sent, wire.messages])).not.toContain('CoverageFont');
+});
+
+test('a session that asks for sliced faces tries them first', async () => {
+  const wire = connection(['target']);
+  const open = slicedCapableBrowser();
+  await openWith(wire, { slicedFonts: true });
+  expect(open).toHaveBeenCalledTimes(1);
+  expect(wire.registered).toEqual(['Cambria']);
+});
+
+test('PNG export of a sliced family carries the whole face by id and by family, for text measured with browser fonts', async () => {
+  const wire = connection(['target']);
+  slicedCapableBrowser().mockResolvedValue({ revision: 1, bytes: () => bytes, ensureText: async () => 1, prefetch() {} } as never);
+  const { client } = await openWith(wire, { slicedFonts: true });
+  await client.renderPng!({ slide: 0 });
+  expect(wire.replaced).toEqual(['Cambria']);
+  expect(wire.pngFonts).toEqual(['Cambria']);
+});
+
+test('a sliced face opened on a later slide is upgraded for PNG export', async () => {
+  const wire = connection(['active', 'target']);
+  slicedCapableBrowser().mockResolvedValue({ revision: 1, bytes: () => bytes, ensureText: async () => 1, prefetch() {} } as never);
+  const { client } = await openWith(wire, { slicedFonts: true });
+  await client.dispatch({ kind: 'activateSlide', payload: { slideId: 'target' } });
+  await client.flush();
+  await client.renderPng!({ slide: 0 });
+  expect(wire.replaced.filter((family) => family === 'Cambria').length).toBeGreaterThan(0);
+});
+

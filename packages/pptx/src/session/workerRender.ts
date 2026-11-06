@@ -6,7 +6,7 @@ import type { DefaultFontFace } from '../../../../shared/pptxDefaultFonts';
 import type { SlideDisplayList } from '../types';
 import { browserPresentationImageBlob, decodeBrowserImageBlob, needsElementDecode } from '../render/browserImage';
 import { buildRaster, createSlideRasterImages, paintRasterDirect, slideRasterCache, zero, type RasterEntry } from '../../../../shared/office-session/render/pptxSlideRaster';
-import { paintSlide, sizeCanvasForSlide } from '../render/canvas';
+import { paintSlide, sizeCanvasForSlide, type PaintFontCoverage } from '../render/canvas';
 import { createBrowserFrameImages } from '../render/browserFrameImages';
 import { frameAssetIds } from './frame';
 
@@ -34,7 +34,10 @@ interface WorkerSlideMedia {
   error?: { cause: unknown };
 }
 
-export function createPptxWorkerRenderer(port: MessagePort, slides: () => WorkerSlideSource | undefined = () => undefined) {
+export function createPptxWorkerRenderer(
+  port: MessagePort, slides: () => WorkerSlideSource | undefined = () => undefined,
+  coverage: () => PaintFontCoverage | undefined = () => undefined,
+) {
   const fontSet = (globalThis as typeof globalThis & { fonts?: FontFaceSet }).fonts;
   const installed: FontFace[] = [];
   const mediaCache = new Map<string, WorkerSlideMedia>();
@@ -54,6 +57,7 @@ export function createPptxWorkerRenderer(port: MessagePort, slides: () => Worker
   let fontError: unknown;
   let disposed = false;
   let running = false;
+  let supersede: (() => void) | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let previous: { slideId: string; epoch: number; content: number; factor: number; width: number; height: number;
     list: SlideDisplayList; } | undefined;
@@ -132,7 +136,13 @@ export function createPptxWorkerRenderer(port: MessagePort, slides: () => Worker
       canvas = new OffscreenCanvas(width, height);
       const ctx = canvas.getContext('2d') as CanvasRenderingContext2D | null;
       if (!ctx) return;
-      await paintRasterDirect(ctx, slide.displayList, viewport.dpr, viewport.scale, lease, paintSlide, live);
+      const fontCoverage = coverage();
+      if (fontCoverage) {
+        await (await import('../render/textFamilies')).prepareTextFamilies(slide.displayList, fontCoverage);
+        if (!live()) return;
+      }
+      await paintRasterDirect(ctx, slide.displayList, viewport.dpr, viewport.scale, lease, fontCoverage
+        ? (context, list, dpr, scale, options) => paintSlide(context, list, dpr, scale, { ...options, fontCoverage }) : paintSlide, live);
       if (!live()) return;
       const bitmap = typeof canvas.transferToImageBitmap === 'function' ? canvas.transferToImageBitmap()
         : await createImageBitmap(canvas);
@@ -143,6 +153,11 @@ export function createPptxWorkerRenderer(port: MessagePort, slides: () => Worker
       lease?.release();
       if (canvas) zero(canvas);
     }
+  }
+
+  function advance() {
+    revision += 1;
+    supersede?.();
   }
 
   function schedule() {
@@ -185,12 +200,19 @@ export function createPptxWorkerRenderer(port: MessagePort, slides: () => Worker
       const replace = full || !previous || previous.slideId !== frame.slideId || previous.factor !== factor ||
         previous.width !== width || previous.height !== height;
       const baseEpoch = replace ? null : previous!.epoch;
+      const fontCoverage = coverage();
+      if (fontCoverage) {
+        await Promise.race([import('../render/textFamilies').then((text) => text.prepareTextFamilies(frame.displayList, fontCoverage)),
+          new Promise<void>((resolve) => { supersede = resolve; })]);
+        if (!valid()) return;
+      }
       const lease = images.pin({ displayList: frame.displayList, frame: { media } });
       const jobs = [lease.ready];
       const cache = slideRasterCache<OffscreenCanvas>(images);
       try {
         entry = buildRaster((w, h) => new OffscreenCanvas(w, h), frame.displayList, viewport.dpr, viewport.scale,
-          lease, cache.byKey, cache.pool, jobs, () => {}, { paintSlide, sizeCanvasForSlide });
+          lease, cache.byKey, cache.pool, jobs, () => {}, { sizeCanvasForSlide, paintSlide: fontCoverage
+            ? (ctx, list: SlideDisplayList, dpr, scale, options) => paintSlide(ctx, list, dpr, scale, { ...options, fontCoverage }) : paintSlide });
       } catch (error) { lease.release(); throw error; }
       held?.release(); held = entry;
       await entry.ready;
@@ -213,13 +235,18 @@ export function createPptxWorkerRenderer(port: MessagePort, slides: () => Worker
         else { entry.release(); if (held === entry) held = undefined; }
       }
       running = false;
+      supersede = undefined;
       inline?.resolve();
       if (!disposed && (revision !== id || generation !== fonts)) schedule();
     }
   }
 
   function fonts(faces: readonly PptxPaintFont[]) {
-    if (disposed || !supported || !faces.length) return;
+    if (faces.length) refreshFonts(faces);
+  }
+
+  function refreshFonts(faces: readonly PptxPaintFont[]) {
+    if (disposed || !supported) return;
     if (parked) { parked.push(faces); return; }
     generation += 1;
     fontWork = fontWork.then(async () => {
@@ -236,9 +263,9 @@ export function createPptxWorkerRenderer(port: MessagePort, slides: () => Worker
       const cache = slideRasterCache<OffscreenCanvas>(images);
       for (const raster of cache.pool.canvases) zero(raster.canvas);
       cache.pool.canvases.length = 0;
-      revision += 1; schedule();
+      advance(); schedule();
     });
-    revision += 1; schedule(); announceFonts();
+    advance(); schedule(); announceFonts();
   }
 
   function announceFonts() {
@@ -248,7 +275,7 @@ export function createPptxWorkerRenderer(port: MessagePort, slides: () => Worker
 
   function resetMedia() {
     if (disposed) return;
-    revision += 1;
+    advance();
     if (timer !== undefined) clearTimeout(timer);
     timer = undefined;
     latest = undefined;
@@ -263,6 +290,7 @@ export function createPptxWorkerRenderer(port: MessagePort, slides: () => Worker
   function dispose() {
     if (disposed) return;
     disposed = true;
+    supersede?.();
     if (timer !== undefined) clearTimeout(timer);
     held?.release(); held = undefined;
     images.dispose(); mediaCache.clear(); mediaBlobs = new WeakMap();
@@ -283,14 +311,14 @@ export function createPptxWorkerRenderer(port: MessagePort, slides: () => Worker
       view = { scale: message.scale, dpr: message.dpr };
       if (parked) { const queued = parked; parked = undefined; for (const faces of queued) fonts(faces); }
     }
-    full = true; revision += 1; schedule();
+    full = true; advance(); schedule();
   };
   port.onmessageerror = dispose;
   port.start();
   return {
     frame(frame: WorkerSlideFrame) {
       if (disposed || !supported) return;
-      latest = frame; awaitingReply = true; revision += 1;
+      latest = frame; awaitingReply = true; advance();
     },
     afterReply() { awaitingReply = false; schedule(); },
     pending: () => !disposed && supported && awaitingReply && !!latest && !!view,
@@ -309,6 +337,7 @@ export function createPptxWorkerRenderer(port: MessagePort, slides: () => Worker
       });
     },
     fonts,
+    invalidateFonts: () => refreshFonts([]),
     resetMedia,
     defaultFonts(faces: readonly DefaultFontFace[]) {
       fonts(faces.map((face) => {
@@ -330,10 +359,11 @@ function renderPortMessage(message: unknown): message is { kind: typeof PPTX_REN
 export function listenPptxWorkerRender(transport: SessionTransport) {
   let renderer: ReturnType<typeof createPptxWorkerRenderer> | undefined;
   let source: WorkerSlideSource | undefined;
+  let coverage: (() => PaintFontCoverage | undefined) | undefined;
   const off = transport.listen((message) => {
     if (!renderPortMessage(message)) return;
     renderer?.dispose();
-    renderer = createPptxWorkerRenderer(message.port, () => source);
+    renderer = createPptxWorkerRenderer(message.port, () => source, () => coverage?.());
   });
   return {
     transport: { ...transport, listen: (listener) => transport.listen((message) => {
@@ -347,6 +377,8 @@ export function listenPptxWorkerRender(transport: SessionTransport) {
     resetMedia: () => renderer?.resetMedia(),
     defaultFonts: (faces: readonly DefaultFontFace[]) => renderer?.defaultFonts(faces),
     slides(value: WorkerSlideSource) { source = value; },
+    fontCoverage(value: () => PaintFontCoverage | undefined) { coverage = value; },
+    invalidateFonts: () => renderer?.invalidateFonts(),
     dispose() { off(); renderer?.dispose(); renderer = undefined; source = undefined; },
   };
 }

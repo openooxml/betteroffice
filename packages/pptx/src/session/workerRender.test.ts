@@ -518,3 +518,49 @@ test('worker font changes are announced so finished prerenders can be discarded'
   expect(port.generations).toEqual([1, 2]);
 });
 
+test('a prerender loads its text in the sliced face before painting, and draws with the revision that has it', async () => {
+  const prepared: [string, string][] = [];
+  const port = new Port();
+  const renderer = createPptxWorkerRenderer(port as unknown as MessagePort,
+    () => (slideId) => ({ slideId, version: '1', displayList: list('ahead'), mediaBytes: () => new Uint8Array() }),
+    () => ({ prepare: async (family, text) => { prepared.push([family, text]); return `${family} r2`; } }));
+  renderers.push(renderer);
+  port.send({ kind: 'view', scale: 1, dpr: 1 });
+  port.send({ kind: 'prerender', slideId: 'next', token: 1 });
+  await replies(port, 1);
+  expect(prepared[0]).toEqual(['Arial', 'ahead\nsteady']);
+  expect(Canvas.all[Canvas.all.length - 1]!.text).toEqual(['ahead', 'steady']);
+});
+
+test('with no font coverage, a worker raster draws its text straight away', async () => {
+  const { port, renderer } = host();
+  ack(renderer, frame(1)); await replies(port, 1);
+  expect(raster(port, 0).frameEpoch).toBe(1);
+  expect(Canvas.all.flatMap((canvas) => canvas.text)).toContain('steady');
+});
+
+test('a paint waiting on a font chunk gives way as soon as a newer frame arrives', async () => {
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const coverage = { prepare: async (family: string, text: string) => { if (text.includes('stalled')) await held; return family; } };
+  const port = new Port();
+  const renderer = createPptxWorkerRenderer(port as unknown as MessagePort, undefined, () => coverage);
+  renderers.push(renderer);
+  port.send({ kind: 'view', scale: 1, dpr: 1 });
+  ack(renderer, frame(1, list('stalled')));
+  await tick(); await tick();
+  ack(renderer, frame(2, list('covered')));
+  await replies(port, 1);
+  expect(raster(port, 0).frameEpoch).toBe(2);
+  release();
+});
+
+test('faces that register without installing still move the font generation on, so a stale prerender cannot show', async () => {
+  const { port, renderer } = host();
+  ack(renderer, frame(1)); await replies(port, 1);
+  const before = port.generations.length;
+  renderer.invalidateFonts();
+  await tick();
+  expect(port.generations).toHaveLength(before + 1);
+});
+

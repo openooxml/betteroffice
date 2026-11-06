@@ -9,6 +9,8 @@ import type { DeckSnapshot, ParagraphAlignment, ShapeRect, ShapeDraft, PresetSha
 import type {
   PresentationSessionOpenOptions, PresentationSlideSummary, PresentationWireFrame,
 } from './methods';
+import type { SlicedFontRead } from './commandSlicedFonts';
+import type { DefaultFontFace } from '../../../../shared/pptxDefaultFonts';
 
 export type PresentationCommandAccessMethods = Pick<PresentationHandle,
   'snapshot' | 'story' | 'findText' | 'validateEdits' | 'exportStructured' | 'exportMarkdown' | 'searchText' | 'listProposals' | 'comments' | 'previewProposal' | 'layoutProposalSlide' | 'layoutProposalDiffSlide' | 'layoutProposalDiffSlideById' | 'proposalSlideStrip' | 'layoutSlide' | 'encodeStateVector' | 'encodeStateAsUpdate'>;
@@ -230,6 +232,10 @@ export interface PresentationCommandFrame extends PresentationWireFrame {
 }
 
 export interface PresentationCommandAck extends PresentationCommandIdentity {
+  /** Families whose outlines load as text needs them; a paint prepares its text through `readCoverageFont`. */
+  slicedFamilies?: string[];
+  /** The styles of those families that draw under their own name, as `family|bold|italic`. */
+  slicedPlainStyles?: string[];
   epoch: number;
   throughSeq: number;
   version: string;
@@ -257,6 +263,7 @@ export interface PresentationCommandOpenOptions
   collaboration?: boolean;
   observeChanges?: boolean;
   defaultFonts?: boolean;
+  slicedFonts?: boolean;
 }
 
 export interface PresentationCommandOpenResult extends PresentationCommandAck {
@@ -302,7 +309,11 @@ export interface PresentationCommandReadResult extends PresentationCommandAck {
 
 export type PresentationCommandMethods = FontDecoderMethods & {
   /** Starts fetching the regular coverage face of each script (`cjk-jp`, `cjk-kr`, `cjk-sc`, `cjk-tc`) before the editor opens. */
-  prefetchCoverageFonts(scripts: string[]): void;
+  prefetchCoverageFonts(scripts: string[], sliced?: boolean): void;
+  /** A sliced face with `text` loaded, unless the caller's revision `have` is still current; null for other families. */
+  readCoverageFont(family: string, text: string, have: number | null): SlicedFontRead | null;
+  /** The complete sliced faces, for paints that do not prepare their text. */
+  wholeCoverageFonts(have: string[]): DefaultFontFace[];
   openCommandEditor(bytes: ArrayBuffer, options: PresentationCommandOpenOptions): PresentationCommandOpenResult;
   command(envelope: PresentationCommandEnvelope): PresentationCommandAck;
   thumbnailFrame(request: PresentationCommandThumbnailRequest): PresentationCommandThumbnailResult;
@@ -323,6 +334,8 @@ export type PresentationCommandEvents = {
 
 export interface PresentationCommandClient {
   readonly state: PresentationCommandOpenResult;
+  readCoverageFont?(family: string, text: string, have: number | null): Promise<SlicedFontRead | null>;
+  wholeCoverageFonts?(have: string[]): Promise<DefaultFontFace[]>;
   dispatch(intent: PresentationCommandIntent, basis?: PresentationCommandBasis): Promise<PresentationCommandAck>;
   flush(seq?: number): Promise<PresentationCommandAck>;
   save(): Promise<Uint8Array>;
@@ -345,6 +358,8 @@ export interface PresentationCommandClient {
 export const PRESENTATION_COMMAND_METHODS = {
   decodeFontFace: true,
   prefetchCoverageFonts: true,
+  readCoverageFont: true,
+  wholeCoverageFonts: true,
   openCommandEditor: true,
   command: true,
   thumbnailFrame: true,

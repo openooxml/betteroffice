@@ -3,7 +3,7 @@ export { decodePresentationImage, needsElementDecode, presentationImageBlob } fr
 export type { PresentationImageDecodeOptions } from './render/image';
 export { ProposalPictureMediaTooLargeError, StaleProposalError } from './proposals';
 export type { Proposal, ProposalAcceptance, ProposalChange, ProposalDiffSlide, ProposalEdit, ProposalPreview, ProposalStripEntry, ProposalShapeChange, ProposalTextChange } from './proposals';
-export type { CanvasImageResolver, PaintSlideOptions, SlideCanvasLike } from './render/canvas';
+export type { CanvasImageResolver, PaintFontCoverage, PaintSlideOptions, SlideCanvasLike } from './render/canvas';
 export { PngExportError } from '../../../shared/office-session/pngExportError';
 export type { PngExportCode } from '../../../shared/office-session/pngExportError';
 export type { PptxPngOptions, PptxPngTarget } from './wasm/pngOptions';

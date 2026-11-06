@@ -3,7 +3,7 @@ import {
   PptxWorkerEditorFailedError,
 } from '@betteroffice/pptx/worker';
 import { sizeCanvasForSlide } from '@betteroffice/pptx';
-import type { DeckSnapshot, PptxFontFace } from '@betteroffice/pptx';
+import type { DeckSnapshot, PaintFontCoverage, PptxFontFace } from '@betteroffice/pptx';
 import type {
   PptxWorkerSession, PresentationCommandClient, PresentationCommandFrame, PresentationCommandAck,
 } from '@betteroffice/pptx/worker';
@@ -78,6 +78,10 @@ export interface PeerlessPresentation {
   presentPrerendered?(slideId: string): boolean;
   /** After the activation settles, shows the confirmed slide again if it is not the presented prerender. */
   settlePrerendered?(slideId: string): void;
+  /** Prepares a main-thread paint's text in the worker's sliced faces. */
+  readonly fontCoverage?: PaintFontCoverage & { readonly thumbnails: PaintFontCoverage };
+  /** Installs complete faces for the paints that do not prepare their text: present mode and proposal review. */
+  ensureWholeFonts?(): Promise<void>;
   installFont(face: PptxFontFace): Promise<void>;
   setReadOnly(readOnly: boolean): void;
   setChangeObserver(enabled: boolean): void;
@@ -400,7 +404,7 @@ export function usePeerlessPresentation(
 
     try {
       session = peerlessSessionOpener.open(props.file, Object.assign({
-        fonts, defaultFonts: props.defaultFonts, clientId: props.clientId, collaboration: sessionCollaboration,
+        fonts, defaultFonts: props.defaultFonts, slicedFonts: props.experimentalSlicedFonts, clientId: props.clientId, collaboration: sessionCollaboration,
         readOnly: mode.current, observeChanges: observedChanges,
         activeSlideIndex: Number.isInteger(props.initialSlide) ? Math.max(0, props.initialSlide! - 1) : 0,
       }, { pptxDefaultFontInstaller: (faces: Parameters<typeof installDefaultFonts>[0], allowed?: (family: string) => boolean) =>
@@ -428,7 +432,8 @@ export function usePeerlessPresentation(
         }
         sendModes();
       }).catch(report);
-      void Promise.all([owner.ready, fontsReady]).then(async ([client]) => {
+      const slicedModule = props.experimentalSlicedFonts ? import('./peerlessFontCoverage') : undefined;
+      void Promise.all([owner.ready, fontsReady, slicedModule]).then(async ([client, , sliced]) => {
         while (current() && openingModes.size) await Promise.all([...openingModes]);
         if (!current()) return;
         base = peerlessViewStoreFactory.create(client, {
@@ -552,7 +557,14 @@ export function usePeerlessPresentation(
           visualListeners.add(listener);
           return () => { visualListeners.delete(listener); };
         };
+        const fontCoverage = sliced?.createPeerlessFontCoverage(client, current);
+        if (fontCoverage) disposers.push(() => fontCoverage.dispose());
         run = {
+          fontCoverage,
+          ensureWholeFonts: sliced?.createWholeFontInstaller(
+            async (have) => await client.wholeCoverageFonts?.(have) ?? [],
+            (faces) => installDefaultFonts(faces, installedFonts, current, warnFonts, (family) => !suppliedFamilies.has(family.trim().toLowerCase())),
+            (family) => suppliedFamilies.has(family.trim().toLowerCase())),
           fileGeneration, session: owner, client, store, images, thumbnailImages, collaborationClientId: sessionCollaboration?.clientId,
           visual: { subscribePresentation: subscribeVisual, getSnapshot: () => failedView ?? paintedView ?? getSnapshot() },
           getVisualSnapshot: () => visual, subscribeVisual,
@@ -585,6 +597,7 @@ export function usePeerlessPresentation(
             let source: Uint8Array | undefined = await readRecoveryBase();
             if (!currentFile()) throw new PptxWorkerEditorDisposedError();
             const recovering = peerlessSessionOpener.open(source, { fonts, defaultFonts: callbacks.current.defaultFonts,
+              slicedFonts: callbacks.current.experimentalSlicedFonts,
               ...(baseline.kind === 'update' ? { initialUpdate: baseline.update } : {}) });
             source = undefined;
             try {
@@ -642,7 +655,7 @@ export function usePeerlessPresentation(
               ? (target, options) => createWorkerFramePainter(target, render, { ...options, mainFirstFrame: true })
               : peerlessPainterFactories.frame;
             framePainter = factory(surface, {
-              ...token, images, current: (frame) => current() && fit === token && (!frame || frame === queuedFrame),
+              ...token, images, fontCoverage, current: (frame) => current() && fit === token && (!frame || frame === queuedFrame),
               beforeCommit: (currentPaint) => waitForMode(token, currentPaint),
               compose(raster, frame) {
                 if (!current() || fit !== token || getSnapshot().confirmed !== frame) return;

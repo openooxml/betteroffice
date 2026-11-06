@@ -477,7 +477,7 @@ export { decodePresentationImage, needsElementDecode, presentationImageBlob } fr
 export type { PresentationImageDecodeOptions } from './render/image';
 export { ProposalPictureMediaTooLargeError, StaleProposalError } from './proposals';
 export type { Proposal, ProposalAcceptance, ProposalChange, ProposalDiffSlide, ProposalEdit, ProposalPreview, ProposalStripEntry, ProposalShapeChange, ProposalTextChange } from './proposals';
-export type { CanvasImageResolver, PaintSlideOptions, SlideCanvasLike } from './render/canvas';
+export type { CanvasImageResolver, PaintFontCoverage, PaintSlideOptions, SlideCanvasLike } from './render/canvas';
 export { PngExportError } from '../../../shared/office-session/pngExportError';
 export type { PngExportCode } from '../../../shared/office-session/pngExportError';
 export type { PptxPngOptions, PptxPngTarget } from './wasm/pngOptions';
@@ -733,7 +733,25 @@ export interface PaintSlideOptions {
         italic: boolean;
         id: number;
     }) => string | undefined;
+    /**
+     * Makes the faces a slide draws with ready before any text is painted. Without it, text draws with each run's own
+     * family, as the host installed it.
+     */
+    fontCoverage?: PaintFontCoverage;
 }
+/** Prepares the fonts a paint draws text with. */
+export interface PaintFontCoverage {
+    /**
+     * Resolves once every character of `text` can be drawn in `family`, with the family name to draw it with (for
+     * example a newer installed revision of the same face).
+     */
+    prepare(family: string, text: string): Promise<string>;
+    /** The newest family to draw prepared text with now; a newer revision holds everything an older one did. */
+    latest?(family: string): string | undefined;
+    /** False for a style that draws under its own name, whatever the family's other styles do. Defaults to true. */
+    covers?(family: string, bold: boolean, italic: boolean): boolean;
+}
+export type TextFamilies = (family: string, bold?: boolean, italic?: boolean) => string;
 export interface SlideCanvasLike {
     width: number;
     height: number;
@@ -3351,6 +3369,12 @@ export interface PresentationHandle extends CollaborationReplica {
     registerFont(face: PptxFontFace): number;
     /** Registers a face drawn only where a run's own face has no glyph. */
     registerFallbackFont(face: PptxFontFace): number;
+    /** Gives PNG export the complete bytes of a family layout measured with only part of. */
+    replaceExportFace(family: string, bytes: Uint8Array, keep?: (face: {
+        id: number;
+        bold?: boolean;
+        italic?: boolean;
+    }) => boolean): void;
     layoutSlide(slideIndex: number): SlideDisplayList;
     /** `layoutSlide` with scope, layout and serialize time measured inside the renderer. */
     layoutSlideProfiled(slideIndex: number): ProfiledLayout;

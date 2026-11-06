@@ -5,7 +5,7 @@ import type { PptxBundledFont } from './bundledFonts';
 
 /** Prepares the session worker for `file` and loads the bundled faces with its decoder, keeping input order. */
 export function loadBundledFonts(file: Uint8Array, fonts: readonly (PptxFontFace | PptxBundledFont)[], warn: () => void,
-  options: { defaultFonts?: boolean; activeSlideIndex?: number } = {}) {
+  options: { defaultFonts?: boolean; activeSlideIndex?: number; slicedFonts?: boolean } = {}) {
   const prepared = preparePresentationFontDecoder(file, options);
   const { decoder } = prepared;
   const loaded = Promise.all(fonts.map(async (font): Promise<PptxFontFace | undefined> => {

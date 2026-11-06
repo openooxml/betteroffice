@@ -320,7 +320,8 @@ export function createPresentationSessionHost(
       options.workerRender?.defaultFonts(installed);
       return installed;
     },
-    onDefaultFonts: (result) => host.emit('defaultFonts', result.value, result.transfer), onPipeOutput() {
+    onDefaultFonts: (result) => host.emit('defaultFonts', result.value, result.transfer),
+    onSlicedFaces: () => options.workerRender?.invalidateFonts?.(), onPipeOutput() {
     if (disposed || pipeOutputTimer !== undefined) return;
     pipeOutputTimer = setTimeout(() => {
       pipeOutputTimer = undefined;
@@ -329,6 +330,7 @@ export function createPresentationSessionHost(
     }, 0);
   } });
   options.workerRender?.slides?.(commands.renderSlide);
+  options.workerRender?.fontCoverage?.(commands.fontCoverage);
   let queued: Promise<void> | undefined;
   const send = (message: unknown, transfer: Transferable[] | undefined, reply?: PptxRenderReply) => {
     if (reply && !disposed) {
