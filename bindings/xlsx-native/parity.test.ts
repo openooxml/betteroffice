@@ -117,4 +117,24 @@ describe('xlsx native/wasm package parity', () => {
     expect(await native.exportXlsxMarkdown(fixture)).toEqual(await wasm.exportXlsxMarkdown(fixture));
     expect(await native.exportXlsxStructured(fixture)).toEqual(await wasm.exportXlsxStructured(fixture));
   });
+
+  test('PNG range targets refuse bad ranges with the same error as the wasm range path', async () => {
+    const nativeWorkbook = native.openWorkbook(fixture, { calculation });
+    const wasmWorkbook = wasm.openWorkbook(fixture, { calculation });
+    const failure = (error: unknown) => ({ isError: error instanceof Error, name: (error as Error)?.name, message: String((error as Error)?.message ?? error) });
+    try {
+      for (const range of ['not a range', 'a1:b2', 'A0:B2', 'A1:XFE1', { kind: 'a1', a1: 'nope' }] as const) {
+        const target = { sheet: 0, range } as Parameters<WorkbookHandle['renderPng']>[0];
+        let wasmFailure: unknown;
+        try { wasmWorkbook.renderPngFonts(target); } catch (error) { wasmFailure = failure(error); }
+        let nativeFailure: unknown;
+        try { await nativeWorkbook.renderPng(target); } catch (error) { nativeFailure = failure(error); }
+        expect(wasmFailure).toMatchObject({ isError: true, message: expect.stringMatching(/^bad range: /) });
+        expect(nativeFailure).toEqual(wasmFailure);
+      }
+    } finally {
+      nativeWorkbook.dispose();
+      wasmWorkbook.dispose();
+    }
+  });
 });

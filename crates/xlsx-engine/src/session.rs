@@ -700,8 +700,7 @@ impl Session {
             },
             Target::Range(target) => betteroffice_xlsx::PngTarget::Range {
                 sheet: sheet(target.sheet)?,
-                range: CellRange::parse_a1(&target.range.to_ascii_uppercase())
-                    .map_err(|error| format!("invalid range {:?}: {error}", target.range))?,
+                range: parse_range(&target.range)?,
             },
         };
         self.workbook
