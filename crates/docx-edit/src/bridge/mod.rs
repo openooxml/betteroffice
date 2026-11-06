@@ -2457,9 +2457,11 @@ fn lower_table<T: ReadTxn>(
         .get("floating")
         .and_then(any_map)
         .map(lower_floating_table);
-    let compatibility_mode = map_number(tbl_pr, "compatibilityMode").and_then(|value| {
-        (value.is_finite() && (0.0..=255.0).contains(&value)).then_some(value as u8)
-    });
+    let compatibility_mode = map_number(tbl_pr, "compatibilityMode")
+        .and_then(|value| {
+            (value.is_finite() && (0.0..=255.0).contains(&value)).then_some(value as u8)
+        })
+        .or_else(|| Some(env.compatibility_flags.compatibility_mode).filter(|mode| *mode > 0));
     let layout_mode = map_string(tbl_pr, "tableLayout")
         .filter(|value| matches!(value.as_str(), "fixed" | "autofit"));
     let table_margin = |side: &str| {

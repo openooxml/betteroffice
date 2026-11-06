@@ -196,3 +196,31 @@ fn an_inserted_table_pads_its_cells_with_words_default_margins() {
         assert!((margin.unwrap() - 7.2).abs() < 1e-9);
     }
 }
+
+#[test]
+fn an_inserted_table_follows_the_document_compatibility_mode() {
+    let doc = EditingDoc::new(302);
+    doc.create_story("body", "ab", "Normal", "left").unwrap();
+    doc.insert_table(
+        &EditCtx::local("Owner", "2026-11-06T12:00:00Z"),
+        Position::new("body", 2),
+        1,
+        1,
+    )
+    .unwrap();
+    let mode = |document_mode: u8| {
+        let mut env = RenderEnv::default();
+        env.compatibility_flags.compatibility_mode = document_mode;
+        yrs_doc_to_layout_blocks(&doc, "body", &env)
+            .unwrap()
+            .iter()
+            .find_map(|block| match block {
+                LayoutBlock::Table(table) => Some(table.compatibility_mode),
+                _ => None,
+            })
+            .unwrap()
+    };
+    assert_eq!(mode(15), Some(15));
+    assert_eq!(mode(14), Some(14));
+    assert_eq!(mode(0), None);
+}
