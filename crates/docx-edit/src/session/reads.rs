@@ -125,8 +125,12 @@ impl EditSessionCore {
         let outcome = doc
             .format_text_target(&target, &delta)
             .map_err(EngineError::message)?;
-        outcome_json(&outcome.map(|()| json!({ "version": doc.version() })))
-            .map_err(EngineError::message)
+        outcome_json(
+            &outcome.map(|kept| {
+                json!({ "version": doc.version(), "keptUnchanged": super::text::kept_counts(&kept) })
+            }),
+        )
+        .map_err(EngineError::message)
     }
 
     /// Resolves a text target and anchors a side-map comment over it in one

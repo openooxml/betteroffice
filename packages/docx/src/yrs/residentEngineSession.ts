@@ -538,6 +538,15 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
     }
   };
 
+  const applyFormatting = <T>(story: string, apply: () => T): T => {
+    const since = storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
+    try {
+      return applyCommandMutation(story, apply);
+    } finally {
+      markProjectionStories(storiesChangedSince(since).stories);
+    }
+  };
+
   const proposalEngine: ResidentEngineSession['proposalEngine'] = {
     validateEdits: request => JSON.parse(session.validate_edits_json(JSON.stringify(request))),
     version: () => session.version(),
@@ -851,12 +860,12 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
     splitParagraph: (at, author) => applyCommandMutation(at.story, () =>
       JSON.parse(session.split_paragraph(at.story, at.paraId, at.offset, author?.name, author?.date))),
     nextParagraphStyle: at => session.next_paragraph_style(at.story, at.paraId, at.offset) ?? null,
-    toggleMark: (range, mark, suggesting) => applyCommandMutation(range.story, () =>
-      session.toggle_mark(...rangeArgs(range), JSON.stringify(mark), suggesting?.name, suggesting?.date)),
-    formatRange: (range, delta, suggesting) => applyCommandMutation(range.story, () =>
-      session.format_range(...rangeArgs(range), JSON.stringify(delta), suggesting?.name, suggesting?.date)),
-    clearFormatting: (range, suggesting) => applyCommandMutation(range.story, () =>
-      session.clear_formatting(...rangeArgs(range), suggesting?.name, suggesting?.date)),
+    toggleMark: (range, mark, suggesting) => applyFormatting(range.story, () =>
+      JSON.parse(session.toggle_mark(...rangeArgs(range), JSON.stringify(mark), suggesting?.name, suggesting?.date))),
+    formatRange: (range, delta, suggesting) => applyFormatting(range.story, () =>
+      JSON.parse(session.format_range(...rangeArgs(range), JSON.stringify(delta), suggesting?.name, suggesting?.date))),
+    clearFormatting: (range, suggesting) => applyFormatting(range.story, () =>
+      JSON.parse(session.clear_formatting(...rangeArgs(range), suggesting?.name, suggesting?.date))),
     setParagraphAttrs: (range, attrs, author) => applyCommandMutation(range.story, () =>
       session.set_paragraph_attrs(...rangeArgs(range), JSON.stringify(attrs), author?.name, author?.date)),
     applyParagraphStyle: (range, styleId, author) => applyCommandMutation(range.story, () =>

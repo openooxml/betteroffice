@@ -1,4 +1,4 @@
-import { DocxSectionError, createYrsSession, saveYrsDocx, type DocxCommentSaveBaseline, type DocxCommentSaveIdentity, type DocxParagraphTarget, type DocxProposalInput, type DocxProposalRecord, type DocxProposalSnapshot, type DocxProposalResult, type DocxProposalStateRequest, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
+import { DocxSectionError, createYrsSession, saveYrsDocx, type DocxDroppedStructure, type DocxKeptParagraph, type DocxCommentSaveBaseline, type DocxCommentSaveIdentity, type DocxParagraphTarget, type DocxProposalInput, type DocxProposalRecord, type DocxProposalSnapshot, type DocxProposalResult, type DocxProposalStateRequest, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
 import { readCommentPart, readSavedCommentIdentities, verifyCommentOutput, type CommentSource } from './comment-output';
 import { cellPosition, commentBody, commentRanges, commentRoot, commentText, continueList, deleteParagraph, deleteTableRow, formatParagraph, hostEdit, insertParagraphsBefore, insertParagraphsWithAnchorFormat, insertSectionBreak, replaceCommentText, setSection, insertTableRow, lineText, listLevel, mergeCells, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
 import { createDocxBatchSchema, type DocxAgentBatch, type DocxAgentEdit, type DocxEditOutcome } from './docx-schema';
@@ -648,6 +648,20 @@ export class DocxAgentDocument {
     return this.exportBytes(proposalId);
   }
 
+  /** Paragraphs the last export wrote as their source bytes, see `DocxSavedDocument.keptUnchanged`. */
+  exportKeptUnchanged() {
+    return this.lastKeptUnchanged;
+  }
+
+  private lastKeptUnchanged: { structure: number; paragraphs: Array<DocxKeptParagraph & { ref?: string }> } | undefined;
+
+  /** Story parts the last export wrote whole with less structure, see `DocxSavedDocument.structureDropped`. */
+  exportStructureDropped() {
+    return this.lastStructureDropped;
+  }
+
+  private lastStructureDropped: Array<Omit<DocxDroppedStructure, 'paragraphs'> & { paragraphs: Array<DocxDroppedStructure['paragraphs'][number] & { ref?: string }> }> | undefined;
+
   private async exportBytes(proposalId?: string, updateModifiedDate = true, inspect?: (draft: YrsSession) => void): Promise<Uint8Array> {
     const held = proposalId ? this.pending(proposalId) : undefined;
     const draft = await this.fork();
@@ -661,11 +675,27 @@ export class DocxAgentDocument {
       const comments = draft.listComments();
       const baseline = this.commentSaveBaseline && JSON.stringify(comments) === JSON.stringify(this.commentSaveBaseline.comments)
         ? this.commentSaveBaseline : undefined;
-      const bytes = (await saveYrsDocx(draft, { updateModifiedDate,
+      const saved = await saveYrsDocx(draft, { updateModifiedDate,
         commentIdentities: this.deletedComments.size ? this.commentSaveIdentities : undefined,
         commentBaseline: baseline,
         commentDeletion: !!baseline && !held && this.commentSaveBaselineVersion === version,
-      })).bytes;
+      });
+      const bytes = saved.bytes;
+      const refs = new Map([...this.identities.values()].map(paragraph => [paragraph.paraId, paragraph.ref]));
+      this.lastKeptUnchanged = saved.keptUnchanged && {
+        ...saved.keptUnchanged,
+        paragraphs: saved.keptUnchanged.paragraphs.map(paragraph => ({
+          ...paragraph,
+          ...(paragraph.paraId && refs.has(paragraph.paraId) ? { ref: refs.get(paragraph.paraId) } : {}),
+        })),
+      };
+      this.lastStructureDropped = saved.structureDropped?.map(part => ({
+        ...part,
+        paragraphs: part.paragraphs.map(paragraph => ({
+          ...paragraph,
+          ...(refs.has(paragraph.paraId) ? { ref: refs.get(paragraph.paraId) } : {}),
+        })),
+      }));
       const seeded = new Set((draft.materializeDocx()?.package.document.comments ?? []).map(comment => String(comment.id)));
       if (this.deletedComments.size && comments.some(comment => !seeded.has(comment.id))) {
         const source = await this.checkCommentPart(true);
@@ -691,13 +721,15 @@ export class DocxAgentDocument {
     const bytes = await this.exportBytes(proposalId, true, structure ? draft => { after = docxModelCounts(draft); } : undefined);
     const reopened = await openDocx(bytes);
     try {
+      const kept = this.lastKeptUnchanged;
+      const dropped = this.lastStructureDropped;
       const paragraphs = reopened.overview().paragraphs;
       const source = this.session.materializeDocx()?.originalBuffer;
-      if (!structure || !source || !after) return { reopened: true, bytes: bytes.length, paragraphs, checks: ['save', 'reopen'], unchecked: ['visual fidelity', 'semantic correctness', ...(structure ? [] : ['structure'])] };
+      if (!structure || !source || !after) return { reopened: true, bytes: bytes.length, paragraphs, checks: ['save', 'reopen'], unchecked: ['visual fidelity', 'semantic correctness', ...(structure ? [] : ['structure'])], structureDropped: dropped, keptUnchanged: kept };
       const original = new Uint8Array(source);
       this.sourceCounts ??= await sourceModelCounts(original);
       const report = await compareDocxStructure(original, bytes, this.sourceCounts, after);
-      return { reopened: true, bytes: bytes.length, paragraphs, checks: ['save', 'reopen', 'structure'], structure: report, unchecked: ['visual fidelity', 'semantic correctness'] };
+      return { reopened: true, bytes: bytes.length, paragraphs, checks: ['save', 'reopen', 'structure'], structure: report, unchecked: ['visual fidelity', 'semantic correctness'], structureDropped: dropped, keptUnchanged: kept };
     } finally { reopened.close(); }
   }
 
@@ -1456,8 +1488,8 @@ export class DocxAgentDocument {
       const p = this.get(edit.paragraph!);
       return draft => {
         requireParagraph(draft, p);
-        formatParagraph(draft, p, { language: slots });
-        return { result: { ref: p.ref } };
+        const keptUnchanged = formatParagraph(draft, p, { language: slots });
+        return { result: { ref: p.ref, ...(Object.keys(keptUnchanged).length > 0 ? { keptUnchanged } : {}) } };
       };
     }
     if (edit.op === 'format_text' || edit.op === 'add_comment' || edit.op === 'set_language') {
@@ -1487,8 +1519,8 @@ export class DocxAgentDocument {
       if (Object.values(delta).every(value => value === undefined)) throw new DocumentToolError('INVALID_ARGUMENT', 'format_text needs bold, italic or underline.');
       return draft => {
         requireParagraph(draft, p);
-        draft.formatRange(range, delta);
-        return { result: { ref: p.ref, start, end } };
+        const { keptUnchanged } = draft.formatRange(range, delta);
+        return { result: { ref: p.ref, start, end, ...(Object.keys(keptUnchanged).length > 0 ? { keptUnchanged } : {}) } };
       };
     }
     const p = this.get(edit.op === 'insert_paragraphs' ? (edit.before ?? edit.after)! : edit.op === 'set_paragraph_style' || edit.op === 'delete_paragraph' ? edit.paragraph : edit.op === 'merge_cells' ? edit.from : edit.row);

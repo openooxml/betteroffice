@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { dateSchema } from './tool-input';
+import type { YrsKeptReason } from '@betteroffice/docx/yrs';
 import { editLimit } from './edit-limits';
 
 const ref = z.string().min(1).max(128);
@@ -73,4 +74,6 @@ export interface DocxEditOutcome {
   deletedTable?: boolean;
   rowSpan?: number;
   colSpan?: number;
+  /** format_text: paragraphs inside a table or content control left unformatted because saving them rewritten would drop content, by reason. */
+  keptUnchanged?: Partial<Record<YrsKeptReason, number>>;
 }
