@@ -231,5 +231,14 @@
     "collapsePanel": "Zwiń {title}",
     "expandPanel": "Rozwiń {title}",
     "rowGutter": "Znaczniki wierszy wtyczek"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "del": "Del",
+    "escape": "Esc",
+    "pageUp": "Page Up",
+    "pageDown": "Page Down"
   }
 }

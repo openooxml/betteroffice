@@ -917,7 +917,7 @@ pub(crate) fn replay(
     current_map: &LoweringMap,
     local: &local::LocalLowering,
 ) -> Option<Vec<Replay>> {
-    if !replayable(units, local) {
+    if !local.matches_source(doc) || !replayable(units, local) {
         return None;
     }
     let txn = doc.yrs_doc().transact();
@@ -933,6 +933,7 @@ pub(crate) fn replay(
             .source_index()
             .map(|index| index.group_picture_sources())
             .unwrap_or_else(|| env.group_pictures.clone()),
+        shape_styles: super::shapes::ShapeStyles::new(doc),
         ..env.clone()
     };
     let env = &with_sources;
@@ -958,6 +959,7 @@ pub(crate) fn replay(
         let mut active_stories = BTreeSet::from(["body".to_owned()]);
         let mut replay_local = local::LocalLowering::new(local.enabled && !local.blocked);
         replay_local.source.clone_from(&local.source);
+        replay_local.shape_styles.clone_from(&local.shape_styles);
         if !env.hyperlink_style_font_sizes.is_empty() {
             replay_local.run_size_sources = run_size_provenance::Sources::new(doc);
         }

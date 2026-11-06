@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import type { OverflowMenuEntry } from '../../../../shared/react-toolbar/MenuList';
+import { XLSX_COMMAND_DESCRIPTORS } from '../commands/descriptors';
 import { evaluateXlsxCommand, type XlsxCommandEnvironment } from '../commands/evaluate';
 import { testEnvironment } from '../commands/testing';
 import type { XlsxCommandStore } from '../commands/types';
@@ -9,6 +10,7 @@ function store(overrides: Partial<XlsxCommandEnvironment> = {}) {
   const calls: unknown[] = [];
   const env = testEnvironment(overrides);
   const fake = {
+    getDescriptor: (id: keyof typeof XLSX_COMMAND_DESCRIPTORS) => XLSX_COMMAND_DESCRIPTORS[id],
     getState: (id: never, args?: never) => evaluateXlsxCommand(id, args, env),
     execute: async (id: string, args: unknown) => { calls.push([id, args]); return { ok: true, status: 'executed' }; },
   } as unknown as XlsxCommandStore;
@@ -22,7 +24,7 @@ const labels = (entries: readonly OverflowMenuEntry[]): unknown[] => entries.map
 describe('xlsx context menus', () => {
   test('the cell menu follows Excel order and shows the grid shortcuts', () => {
     const { fake } = store();
-    const entries = xlsxContextMenuEntries('cell', fake, (key) => key);
+    const entries = xlsxContextMenuEntries('cell', fake, (key) => (key === 'keys.ctrl' ? 'Ctrl' : key));
     expect(labels(entries)).toEqual([
       'commands.cut', 'commands.copy', 'commands.paste', 'commands.pastePlainText', '-',
       ['commands.insert', ['commands.insertRowsAbove', 'commands.insertRowsBelow', 'commands.insertColumnsLeft', 'commands.insertColumnsRight']],

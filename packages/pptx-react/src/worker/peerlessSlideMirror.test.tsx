@@ -1,5 +1,9 @@
 import { expect, test } from 'bun:test';
-import { act, fireEvent, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, waitFor } from '@testing-library/react';
+import type { SlideDisplayList, TextBoxPrimitive, TextLanguage } from '@betteroffice/pptx';
+import { LocaleProvider } from '../i18n';
+import { PeerlessSlideMirror } from './PeerlessSlideMirror';
+import type { PeerlessPresentation } from './usePeerlessPresentation';
 import { open } from './peerlessTestHarness';
 
 const mirror = (view: Awaited<ReturnType<typeof open>>['view']) => view.getByTestId('pptx-slide-mirror');
@@ -60,4 +64,45 @@ test('a host page document around the editor leaves the stage keys working', asy
   act(() => { (stage as HTMLElement).focus(); });
   fireEvent.keyDown(stage, { key: 'PageDown' });
   await waitFor(() => expect(mirror(view).getAttribute('aria-label')).toBe('Slide 2 of 2'));
+});
+
+test('paragraphs and joined headings mark authored languages without splitting one language into text nodes', () => {
+  const box = (shapeId: string, text: string, languages?: TextLanguage[]): TextBoxPrimitive => ({
+    kind: 'textBox', objectId: 1, shapeId, x: 0, y: 0, w: 400, h: 100, anchor: 'top', lines: [],
+    paragraphs: [{ level: 0, languages, runs: text.split('|').map((part) => ({
+      text: part, fontFamily: 'Arial', fontSizePt: 12, color: '#000000',
+    })) }],
+  });
+  const list: SlideDisplayList = {
+    contractVersion: 2, width: 960, height: 540, titleShape: 'title', primitives: [
+      box('title', 'Hello world', [{ start: 0, end: 11, lang: 'en-US' }]),
+      box('title', 'Bonjour', [{ start: 0, end: 7, lang: 'fr-FR' }]),
+      box('single', 'Whole |words', [{ start: 0, end: 11, lang: 'en-US' }]),
+      box('mixed', 'Hello bonjour world', [
+        { start: 0, end: 6, lang: 'en-US' }, { start: 6, end: 13, lang: 'fr-FR' }, { start: 13, end: 19, lang: 'en-US' },
+      ]),
+      box('unknown', 'Unmarked words'),
+    ],
+  };
+  const { container } = render(<LocaleProvider i18n={{ _lang: 'de' }}>
+    <PeerlessSlideMirror run={{} as PeerlessPresentation} list={list} label="Slide 1" scale={1} />
+  </LocaleProvider>);
+  const heading = container.querySelector('[role="heading"]')!;
+  expect(heading.getAttribute('lang')).toBe('en-US');
+  expect(heading.textContent).toBe('Hello world Bonjour');
+  expect(heading.querySelector('span')?.getAttribute('lang')).toBe('fr-FR');
+  expect(heading.querySelector('span')?.textContent).toBe('Bonjour');
+  const [single, mixed, unknown] = [...container.querySelectorAll('p')];
+  expect(single!.getAttribute('lang')).toBe('en-US');
+  expect(single!.textContent).toBe('Whole words');
+  expect(single!.childNodes.length).toBe(1);
+  expect(single!.firstChild!.nodeType).toBe(3);
+  expect(mixed!.getAttribute('lang')).toBe('en-US');
+  expect(mixed!.textContent).toBe('Hello bonjour world');
+  expect(mixed!.querySelectorAll('span')).toHaveLength(1);
+  expect(mixed!.querySelector('span')?.getAttribute('lang')).toBe('fr-FR');
+  expect(mixed!.querySelector('span')?.textContent).toBe('bonjour');
+  expect(unknown!.hasAttribute('lang')).toBe(false);
+  expect(unknown!.querySelector('[lang]')).toBeNull();
+  expect(unknown!.childNodes.length).toBe(1);
 });

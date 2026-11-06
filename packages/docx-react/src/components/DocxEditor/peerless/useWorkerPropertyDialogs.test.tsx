@@ -402,7 +402,7 @@ test('image context-menu wrap action refuses in header, footer, note stories and
     useWorkerContextMenu({
       binding: () => binding,
       environment: getEnvironment,
-      commands: { getState: () => ({ enabled: false }) },
+      commands: { getState: () => ({ enabled: false }), getDescriptor: () => ({ shortcuts: [] }) },
       clipboard: async () => {},
       submit,
       onWrapImage,

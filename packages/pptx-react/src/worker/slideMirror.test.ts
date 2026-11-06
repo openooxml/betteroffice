@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import type { SlideDisplayList, SlidePrimitive } from '@betteroffice/pptx';
+import type { SlideDisplayList, SlidePrimitive, TextLanguage } from '@betteroffice/pptx';
 import { slideMirrorItems, slideObjectName, slideTitle } from './slideMirror';
 
 const at = { objectId: 1, x: 10, y: 20, w: 30, h: 40 };
@@ -12,6 +12,10 @@ const image = (shapeId: string | undefined, name = 'Picture 2'): SlidePrimitive 
 const list = (primitives: SlidePrimitive[], altText?: SlideDisplayList['altText']): SlideDisplayList =>
   ({ contractVersion: 1, width: 960, height: 540, primitives, altText });
 const items = (value: SlideDisplayList) => slideMirrorItems(value, 'Picture');
+const languageText = (shapeId: string, value: string, languages?: TextLanguage[]): SlidePrimitive => ({
+  ...at, kind: 'textBox', shapeId, anchor: 'top', lines: [],
+  paragraphs: [{ level: 0, languages, runs: [{ text: value, fontFamily: 'Arial', fontSizePt: 12, color: '#000000' }] }],
+});
 
 test('a paragraph reads as one string across its runs', () => {
   const [item] = items(list([text('a', 'Quarterly |results| are in', '', 'Second\u000bline')]));
@@ -72,9 +76,116 @@ test('layout and master shapes read after the slide, and backgrounds not at all'
 test('the title placeholder reads as one heading, wherever it sits in the stack', () => {
   const value = { ...list([text('a', 'Intro'), text('b', 'Two line', 'title')]), titleShape: 'b' };
   expect(items(value).flatMap((item) => item.paragraphs)).toEqual([
-    { text: 'Intro', heading: false }, { text: 'Two line title', heading: true },
+    { text: 'Intro', heading: false, lang: null, segments: [{ text: 'Intro', lang: null }] },
+    { text: 'Two line title', heading: true, lang: null, segments: [{ text: 'Two line title', lang: null }] },
   ]);
   expect(slideTitle(value)).toBe('Two line title');
+});
+
+test('one language and unknown languages each keep a single segment across formatting runs', () => {
+  const single = languageText('a', 'Quarterly results', [
+    { start: 0, end: 10, lang: 'en-US' }, { start: 10, end: 17, lang: 'en-US' },
+  ]);
+  expect(items(list([single, text('b', 'Whole |words')])).flatMap((item) => item.paragraphs)).toEqual([
+    { text: 'Quarterly results', heading: false, lang: 'en-US', segments: [{ text: 'Quarterly results', lang: 'en-US' }] },
+    { text: 'Whole words', heading: false, lang: null, segments: [{ text: 'Whole words', lang: null }] },
+  ]);
+});
+
+test('mixed languages use the largest total coverage and preserve spaces after slicing raw utf16 offsets', () => {
+  const raw = ' \tHello😀 \n bonjour \t world  ';
+  const start = raw.indexOf('bonjour');
+  const end = start + 'bonjour'.length;
+  const value = languageText('a', raw, [
+    { start: 0, end: start, lang: 'en-US' },
+    { start, end, lang: 'fr-FR' },
+    { start: end, end: raw.length, lang: 'en-US' },
+  ]);
+  expect(items(list([value]))[0]!.paragraphs).toEqual([{
+    text: 'Hello😀 bonjour world', heading: false, lang: 'en-US', segments: [
+      { text: 'Hello😀 ', lang: 'en-US' }, { text: 'bonjour', lang: 'fr-FR' }, { text: ' world', lang: 'en-US' },
+    ],
+  }]);
+});
+
+test('unknown gaps do not split words and x-none never becomes a language', () => {
+  const value = languageText('a', 'whole words', [{ start: 0, end: 2, lang: 'en-US' }]);
+  const unknown = languageText('b', 'Unmarked', [{ start: 0, end: 8, lang: 'x-none' }]);
+  expect(items(list([value, unknown])).flatMap((item) => item.paragraphs)).toMatchObject([
+    { lang: null, segments: [{ text: 'whole', lang: 'en-US' }, { text: ' words', lang: null }] },
+    { lang: null, segments: [{ text: 'Unmarked', lang: null }] },
+  ]);
+});
+
+test('language tags inside a word or on punctuation do not split the text', () => {
+  const inside = languageText('a', 'Management review', [
+    { start: 0, end: 4, lang: 'en-US' }, { start: 4, end: 10, lang: 'de-DE' }, { start: 10, end: 17, lang: 'en-US' },
+  ]);
+  const punctuation = languageText('b', 'Windows（Ctrl）', [
+    { start: 0, end: 8, lang: 'ja-JP' }, { start: 8, end: 13, lang: 'ja-JP' }, { start: 13, end: 14, lang: 'en-US' },
+  ]);
+  const leading = languageText('c', '1. bonjour', [{ start: 0, end: 3, lang: 'en-US' }, { start: 3, end: 10, lang: 'fr-FR' }]);
+  expect(items(list([inside, punctuation, leading])).map((item) => item.paragraphs[0]!.segments)).toEqual([
+    [{ text: 'Management review', lang: 'en-US' }],
+    [{ text: 'Windows（Ctrl）', lang: 'ja-JP' }],
+    [{ text: '1. bonjour', lang: 'fr-FR' }],
+  ]);
+});
+
+test('a tagged word leaves unmarked text in the language of the page', () => {
+  const value = languageText('a', 'Please say bonjour to continue', [{ start: 11, end: 18, lang: 'fr-FR' }]);
+  expect(items(list([value]))[0]!.paragraphs[0]).toMatchObject({
+    lang: null,
+    segments: [{ text: 'Please say ', lang: null }, { text: 'bonjour', lang: 'fr-FR' }, { text: ' to continue', lang: null }],
+  });
+});
+
+test('a paragraph without letters keeps its language', () => {
+  const value = languageText('a', '2024', [{ start: 0, end: 4, lang: 'de-DE' }]);
+  expect(items(list([value]))[0]!.paragraphs[0]).toMatchObject({ lang: 'de-DE', segments: [{ text: '2024', lang: 'de-DE' }] });
+});
+
+test('a single letter in another language does not split the text', () => {
+  const value = languageText('a', 'Fキーを押す', [{ start: 0, end: 1, lang: 'en-US' }, { start: 1, end: 6, lang: 'ja-JP' }]);
+  expect(items(list([value]))[0]!.paragraphs[0]!.segments).toEqual([{ text: 'Fキーを押す', lang: 'ja-JP' }]);
+});
+
+test('regional variants of one language stay in one segment and scripts without spaces still change language', () => {
+  const regional = languageText('a', 'colour and color', [{ start: 0, end: 10, lang: 'en-GB' }, { start: 10, end: 16, lang: 'en-US' }]);
+  const unspaced = languageText('b', 'Mac版です', [{ start: 0, end: 3, lang: 'en-US' }, { start: 3, end: 6, lang: 'ja-JP' }]);
+  expect(items(list([regional, unspaced])).map((item) => item.paragraphs[0]!.segments)).toEqual([
+    [{ text: 'colour and color', lang: 'en-GB' }],
+    [{ text: 'Mac', lang: 'en-US' }, { text: '版です', lang: 'ja-JP' }],
+  ]);
+});
+
+test('a title joined from paragraphs keeps each language and table cells keep theirs', () => {
+  const first = languageText('title', 'Hello world', [{ start: 0, end: 11, lang: 'en-US' }]);
+  const second = languageText('title', 'Bonjour', [{ start: 0, end: 7, lang: 'fr-FR' }]);
+  const table: SlidePrimitive = {
+    ...at, kind: 'table', shapeId: 'table', name: 'Table', label: 'Table',
+    primitives: [languageText('cell', 'Guten Tag', [{ start: 0, end: 9, lang: 'de-DE' }])],
+  };
+  const value = { ...list([first, second, table]), titleShape: 'title' };
+  expect(items(value)[0]!.paragraphs).toEqual([{
+    text: 'Hello world Bonjour', heading: true, lang: 'en-US', segments: [
+      { text: 'Hello world ', lang: 'en-US' }, { text: 'Bonjour', lang: 'fr-FR' },
+    ],
+  }]);
+  expect(items(value)[1]!.paragraphs[0]!.lang).toBe('de-DE');
+  expect(slideTitle(value)).toBe('Hello world Bonjour');
+});
+
+test('spaces joining title paragraphs do not change which language covers the most text', () => {
+  const value = { ...list([
+    languageText('title', 'Hi', [{ start: 0, end: 2, lang: 'en-US' }]),
+    languageText('title', 'Oui', [{ start: 0, end: 3, lang: 'fr-FR' }]),
+  ]), titleShape: 'title' };
+  expect(items(value)[0]!.paragraphs).toEqual([{
+    text: 'Hi Oui', heading: true, lang: 'fr-FR', segments: [
+      { text: 'Hi ', lang: 'en-US' }, { text: 'Oui', lang: 'fr-FR' },
+    ],
+  }]);
 });
 
 test('a slide with an empty or missing title has none', () => {

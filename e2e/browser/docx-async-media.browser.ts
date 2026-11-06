@@ -198,9 +198,11 @@ async function properties(page: Page) {
   const button = page.getByRole('button', { name: 'Image properties', exact: true });
   await expect(button).toBeAttached();
   await expect(button).not.toHaveAttribute('aria-disabled', 'true');
+  const more = page.getByRole('button', { name: 'More actions', exact: true });
+  await expect(button.or(more).first()).toBeVisible();
   if (await button.isVisible()) await button.click();
   else {
-    await page.getByRole('button', { name: 'More actions', exact: true }).click();
+    await more.click();
     await page.getByRole('menuitem', { name: 'Image properties', exact: true }).click();
   }
   const dialog = page.getByRole('dialog', { name: 'Image Properties', exact: true });

@@ -1002,8 +1002,8 @@ pub struct WorkbookSnapshotBuilder {
     unevaluated: Unevaluated,
 }
 
-/// the restored session's re-derivation of the cells an uncomputable call
-/// leaves unevaluated, a step per advance like every other phase.
+/// the restored session's re-derivation of the cells an uncomputable or
+/// unknown call leaves unevaluated, a step per advance like every other phase.
 enum Unevaluated {
     /// looking through defined names, then each sheet's cells after the last
     /// one looked at, for a formula that may call an uncomputable function.

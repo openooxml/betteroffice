@@ -37,6 +37,8 @@ export interface ToolbarButtonBaseProps extends Omit<ToolbarButtonProps, 'active
   /** Always exposes the pressed state, also when not pressed. */
   toggle?: boolean;
   shortcut?: string | null;
+  /** The shortcut in `aria-keyshortcuts` form, such as `Control+B`. */
+  ariaShortcut?: string | null;
   className?: string;
   /** Overflow-menu entries; defaults to one item running `onClick`, `null` for none. */
   overflow?: (() => readonly OverflowMenuEntry[]) | null;
@@ -51,6 +53,7 @@ export function ToolbarButtonBase({
   description,
   title,
   shortcut,
+  ariaShortcut,
   onClick,
   children,
   style,
@@ -75,6 +78,7 @@ export function ToolbarButtonBase({
             id,
             label: title,
             shortcut: shortcut ?? undefined,
+            ariaShortcut: ariaShortcut ?? undefined,
             checked: toggle ? (active ?? false) : active,
             disabled,
             description: reason,
@@ -95,6 +99,7 @@ export function ToolbarButtonBase({
         aria-label={title}
         aria-pressed={pressed}
         aria-expanded={ariaExpanded}
+        aria-keyshortcuts={ariaShortcut ?? undefined}
         title={hint(title, shortcut, reason)}
         onMouseDown={(event) => event.preventDefault()}
         onMouseEnter={() => setHovered(true)}

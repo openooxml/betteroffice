@@ -10,7 +10,6 @@ import type { CSSProperties, KeyboardEvent, MouseEvent } from 'react';
 import type { XlsxWorkerViewerProps } from '../XlsxEditor';
 import { createXlsxCommandController } from '../commands/createXlsxCommandStore';
 import type { XlsxCommandBinding } from '../commands/createXlsxCommandStore';
-import { commandForEvent } from '../commands/descriptors';
 import { DEFAULT_FONT_FAMILIES, DEFAULT_FONT_SIZES } from '../commands/evaluate';
 import type { XlsxCommandEnvironment } from '../commands/evaluate';
 import type { XlsxCommandArgs, XlsxCommandResult } from '../commands/types';
@@ -285,7 +284,7 @@ export function XlsxSessionViewer(props: Omit<XlsxWorkerViewerProps, 'file'> & {
     return () => commands.detach(binding);
   }, [commands, binding]);
   useLayoutEffect(() => commands.refresh());
-  useCommandShortcuts(commands, rootRef);
+  useCommandShortcuts(commands, rootRef, props);
 
   const painted = run?.painted;
   const frame = painted?.frame.displayList;
@@ -388,20 +387,18 @@ export function XlsxSessionViewer(props: Omit<XlsxWorkerViewerProps, 'file'> & {
   };
   const onKeyDown = (event: KeyboardEvent) => {
     const selection = run?.selection;
-    if (!run?.view || !selection || commandForEvent(event)) return;
+    if (!run?.view || !selection || commands.claimsKey(event)) return;
     if (selectedChart) {
       if (event.key === 'Escape') setSelectedChart(null);
       if (event.key === 'Escape' || event.key.startsWith('Arrow')) event.preventDefault();
       return;
     }
-    if (event.ctrlKey || event.metaKey) {
-      const key = event.key.toLowerCase();
-      if (key === 'c' || key === 'x') {
-        if (!run.selectionNavigation.defer(run.selectionContext(), () => { void copy(); })) void copy();
-        event.preventDefault(); return;
-      }
-      if (key === 'v') { event.preventDefault(); return; }
+    const clipboard = commands.clipboardKey(event);
+    if (clipboard === 'copy' || clipboard === 'cut') {
+      if (!run.selectionNavigation.defer(run.selectionContext(), () => { void copy(); })) void copy();
+      event.preventDefault(); return;
     }
+    if (clipboard) { event.preventDefault(); return; }
     const request = selectionDataRequest(event);
     const movement = selectionKeyReducer(selection, event, limits()).type === 'move';
     if (request || movement) {

@@ -335,6 +335,7 @@ fn composed_chart(base: ShapeBase, chart: &ChartSpace) -> Primitive {
             h: (text.font.size_px * 1.25) as f32,
             anchor: TextAnchor::Top,
             paragraphs: vec![TextParagraph {
+                languages: Vec::new(),
                 align: Some(match text.align {
                     PlotTextAlign::Center => TextAlign::Center,
                     PlotTextAlign::Start => TextAlign::Left,
@@ -397,6 +398,7 @@ fn text_primitive(
             .paragraphs
             .into_iter()
             .map(|paragraph| TextParagraph {
+                languages: Vec::new(),
                 align: paragraph.align.map(|align| match align {
                     ComposedAlign::L => TextAlign::Left,
                     ComposedAlign::Ctr => TextAlign::Center,

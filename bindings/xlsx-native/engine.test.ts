@@ -629,6 +629,35 @@ describe('xlsx native engine parity', () => {
     }
   });
 
+  test('both engines keep and report a call to an unknown function by name', async () => {
+    const zip = await JSZip.loadAsync(fixture);
+    zip.file('xl/worksheets/sheet1.xml', '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1">'
+      + '<c r="A1"><f>IFERROR(REPRO_UNKNOWN_FUNCTION(1),0)</f><v>42</v></c>'
+      + '<c r="B1"><f>IFERROR(TYPO(1),0)</f></c>'
+      + '<c r="C1"><f>TYPO(1)</f></c></row></sheetData></worksheet>');
+    const bytes = await zip.generateAsync({ type: 'uint8array' });
+    const read = (doc: EngineDocument) => [
+      doc.calculationStatusJson(),
+      withoutVersion(doc.readCellsJson(JSON.stringify({
+        ranges: [{ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1:C1' } }],
+      }))),
+    ];
+    const wasmDoc = WasmDocument.openWithCalculationJson(bytes.slice(), context) as EngineDocument;
+    const nativeDoc = native.XlsxDocument.openWithCalculationJson(bytes.slice(), context) as EngineDocument;
+    try {
+      const [status, cells] = read(wasmDoc);
+      expect(JSON.parse(status).unevaluatedCells).toEqual([
+        { address: 'A1', functions: ['REPRO_UNKNOWN_FUNCTION'] },
+        { address: 'B1', functions: ['TYPO'] },
+        { address: 'C1', functions: ['TYPO'] },
+      ]);
+      expect(read(nativeDoc)).toEqual([status, cells]);
+    } finally {
+      wasmDoc.free();
+      nativeDoc.free();
+    }
+  });
+
   test('both engines keep and report a formula no offline engine can compute', async () => {
     const zip = await JSZip.loadAsync(fixture);
     zip.file('xl/worksheets/sheet1.xml', '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1">'

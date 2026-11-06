@@ -75,24 +75,27 @@ pub struct CalculationResult {
     pub budget_exhausted: bool,
     /// formula cells the engine could not compute, in address order. snapshots
     /// and recovery checkpoints do not carry the list: a restored session
-    /// re-derives it from its formulas, which show the uncomputable calls and
-    /// their readers but not the engine's other gaps until a recalculation
-    /// evaluates them again.
+    /// re-derives it from its formulas, which show the uncomputable and unknown
+    /// calls and their readers but not the engine's other gaps until a
+    /// recalculation evaluates them again.
     #[serde(default)]
     pub unevaluated_cells: Vec<UnevaluatedCell>,
 }
 
 /// a formula cell the engine could not compute, because it calls a function
-/// no offline engine can (`WEBSERVICE`, `RTD`, a `CUBE` function, an add-in)
-/// or reads a cell that does, or meets another gap of the engine, whose
-/// readers recalculate from the value it keeps. it keeps the value excel saved,
-/// or stays blank when the file saved none, unless only an engine gap was
-/// involved, which shows its error; excel recalculates it on open.
+/// no offline engine can (`WEBSERVICE`, `RTD`, a `CUBE` function, an add-in),
+/// one the engine does not know (a VBA function, a named lambda, a typo: it
+/// cannot tell these apart) or reads a cell that does, or meets another gap of
+/// the engine, whose readers recalculate from the value it keeps. it keeps the
+/// value excel saved. when the file saved none, an uncomputable function
+/// leaves it blank, an unknown one shows the engine's answer (`#NAME?`, or what
+/// a handler made of it) and a gap alone shows its error. excel recalculates
+/// it on open.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnevaluatedCell {
     pub address: CellAddress,
-    /// the uncomputable functions involved, sorted; empty when only gaps of
-    /// this engine were.
+    /// the uncomputable and unknown functions involved, sorted; empty when
+    /// only gaps of this engine were.
     pub functions: Vec<String>,
 }
 

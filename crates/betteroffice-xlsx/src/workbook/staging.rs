@@ -155,6 +155,7 @@ impl Workbook {
             self.undo.record(inverse);
         }
         self.apply_preserved_state_ops(&names_before, &ops);
+        self.rebase_answers(&names_before, &ops);
         if let Some(before) = preserved_before {
             self.preserved_undo.push(PreservedStateHistory {
                 before,

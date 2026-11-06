@@ -1,5 +1,7 @@
 /** Text and IME input surface backed by sticky session positions. */
 
+import { isKeyReleasedFromInput, takeClipboardGesture } from '../../../../../shared/keyboard/nativeGesture';
+import type { DocxClipboardFragment } from '@betteroffice/docx/yrs';
 import React, {
   forwardRef,
   memo,
@@ -92,6 +94,10 @@ export interface YrsInputRef {
   storedFormatting(): YrsStoredFormatting | null;
   insertText(text: string): void;
   deleteSelection(): void;
+  /** Pastes `fragment` when the target can take it, else `plain`. */
+  pasteContent?(plain: string, fragment: DocxClipboardFragment | null): void;
+  /** Writes the selection to the clipboard through the input's own copy path. */
+  copySelection?(cut: boolean): boolean;
   selectAll(): void;
   /** The selection's plain text, for an input whose document lives in the worker. */
   readSelectedText?(): Promise<string> | null;
@@ -1285,6 +1291,14 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     });
   }, [enqueueInputOperation, ensureSelection, holdOperation, inputPositionMap, readOnly, session, setSelection, story]);
 
+  const hasTextRange = useCallback((): boolean => {
+    const current = ensureSelection();
+    const map = current ? inputPositionMap(current.anchor.story) : null;
+    if (!current || !map) return false;
+    const range = toRange(current, map);
+    return range.start.paraId !== range.end.paraId || range.start.offset !== range.end.offset;
+  }, [ensureSelection, inputPositionMap]);
+
   const deleteSelection = useCallback(
     (queued = false, cut?: CutCopy): void => {
       if (holdOperation({ kind: 'delete-selection', cut })) return;
@@ -1597,6 +1611,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         discardedCompositionRef.current = false;
       }
       if (event.nativeEvent.isComposing || composingRef.current) return;
+      if (isKeyReleasedFromInput(event.nativeEvent)) return;
       const mod = event.metaKey || event.ctrlKey;
       const key = event.key.toLowerCase();
       if (mod && key === 'a') {
@@ -1727,13 +1742,19 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     [insertText]
   );
 
+  const copyWrittenRef = useRef(false);
   const handleCopy = useCallback(
     (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+      if (takeClipboardGesture(event.currentTarget) === 'ignore') {
+        event.preventDefault();
+        return;
+      }
       const slice = session ? yrsClipboardSlice(session) : null;
       const text = primedCopyRef.current ?? slice?.text ?? (session ? yrsSelectionPlainText(session) : '');
       primedCopyRef.current = null;
-      if (!text) return;
+      if (!text && !slice?.fragment) return;
       event.preventDefault();
+      copyWrittenRef.current = true;
       event.clipboardData.setData('text/plain', text);
       if (slice?.fragment) {
         event.clipboardData.setData('text/html', clipboardFragmentHtml(slice.fragment));
@@ -1742,11 +1763,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     [session]
   );
 
-  const handlePaste = useCallback(
-    (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
-      event.preventDefault();
-      const plain = event.clipboardData.getData('text/plain');
-      const fragment = parseClipboardHtml(event.clipboardData.getData('text/html') ?? '');
+  const pasteContent = useCallback(
+    (plain: string, fragment: DocxClipboardFragment | null) => {
       if (fragment && session && !readOnly && !isSuggesting && !holdInput) {
         verticalCaretGoalRef.current.reset();
         dispatchCaretInput();
@@ -1784,8 +1802,23 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     [dispatchCaretInput, enqueueInputOperation, ensureSelection, finishMutation, holdInput, inputPositionMap, insertText, isCurrentInput, isSuggesting, readOnly, session, suggestingAuthor]
   );
 
+  const handlePaste = useCallback(
+    (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+      event.preventDefault();
+      const gesture = takeClipboardGesture(event.currentTarget);
+      if (gesture === 'ignore') return;
+      const html = gesture === 'plain' ? '' : event.clipboardData.getData('text/html');
+      pasteContent(event.clipboardData.getData('text/plain'), parseClipboardHtml(html ?? ''));
+    },
+    [pasteContent]
+  );
+
   const handleCut = useCallback(
     (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+      if (takeClipboardGesture(event.currentTarget) === 'ignore') {
+        event.preventDefault();
+        return;
+      }
       if (readOnly || (!holdInput && replicaReadyRef?.current !== false)) return;
       event.preventDefault();
       const copied = copyAfterReplica(true);
@@ -2019,6 +2052,22 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       storedFormatting,
       insertText,
       deleteSelection,
+      pasteContent,
+      copySelection(cut) {
+        if (cut && (session?.cellSelection() || !hasTextRange())) return false;
+        const copied = copyAfterReplica(cut);
+        if (copied) {
+          if (cut) deleteSelection(true, copied);
+          return true;
+        }
+        textareaRef.current?.focus();
+        primeCopy();
+        copyWrittenRef.current = false;
+        document.execCommand('copy');
+        if (!copyWrittenRef.current) return false;
+        if (cut) deleteSelection();
+        return true;
+      },
       selectAll() {
         advanceInteractionEpoch();
         selectAll();
@@ -2027,6 +2076,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     [
       advanceInteractionEpoch,
       applyStoredFormatting,
+      copyAfterReplica,
       displayPositionToLoc,
       displaySelection,
       ensureSelection,
@@ -2037,6 +2087,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       isCurrentInput,
       queueSelection,
       deleteSelection,
+      hasTextRange,
+      pasteContent,
+      primeCopy,
       runAfterPendingInput,
       selectAll,
       session,

@@ -231,5 +231,14 @@
     "collapsePanel": "طي {title}",
     "expandPanel": "توسيع {title}",
     "rowGutter": "علامات صفوف المكونات الإضافية"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "del": "Del",
+    "escape": "Esc",
+    "pageUp": "Page Up",
+    "pageDown": "Page Down"
   }
 }

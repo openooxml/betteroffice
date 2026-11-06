@@ -53,6 +53,8 @@ export interface TextContextMenuItem {
   label: string;
   /** Keyboard shortcut hint */
   shortcut?: string;
+  /** The shortcut in `aria-keyshortcuts` form */
+  ariaShortcut?: string;
   /** Whether the item is disabled */
   disabled?: boolean;
   /** Whether to show divider after this item */
@@ -440,6 +442,7 @@ export const TextContextMenu: React.FC<TextContextMenuProps> = ({
       label: item.label,
       icon: getActionIcon(item.action),
       shortcut: item.shortcut,
+      ariaShortcut: item.ariaShortcut,
       disabled,
       onSelect: () => onAction(item.action),
     });

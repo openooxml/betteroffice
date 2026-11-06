@@ -242,17 +242,15 @@ fn slot_use(text: &str, complex: bool, hint: Option<&str>) -> (bool, bool) {
     (east_asia, cs)
 }
 
-fn scripts(runs: &[Run<'_>], paragraph_language: Option<&str>, run_languages: bool) -> Vec<String> {
+fn scripts(runs: &[Run<'_>], paragraph_language: Option<&str>, shape: bool) -> Vec<String> {
     ooxml_text::paragraph_scripts_with_languages(
         runs.iter().map(|(props, text)| {
-            (
-                text.as_deref().unwrap_or_default(),
-                if run_languages {
-                    props.east_asia_language.as_deref()
-                } else {
-                    paragraph_language
-                },
-            )
+            let language = if shape {
+                props.east_asia_language.as_deref().or(paragraph_language)
+            } else {
+                paragraph_language
+            };
+            (text.as_deref().unwrap_or_default(), language)
         }),
         false,
     )
@@ -488,34 +486,17 @@ impl<'a> Scan<'a> {
     fn paragraph_fonts(&mut self, node: &Node, table: &Props) -> bool {
         let ppr = node.child("w:pPr");
         let style_id = ppr.and_then(|node| node.val("w:pStyle"));
-        let style = if self.shape {
-            None
-        } else {
-            self.styles.get(style_id, "paragraph", self.complete)
-        };
-        let mut base = if self.shape {
-            Props::default()
-        } else {
-            self.styles.defaults.clone()
-        };
+        let style = self.styles.get(style_id, "paragraph", self.complete);
+        let mut base = self.styles.defaults.clone();
         base.merge(table, true);
         if let Some(style) = style {
             base.merge(&style.run, true);
         }
         let mut mark = base.clone();
-        if !self.shape
-            && let Some(character) = self.styles.get(None, "character", self.complete)
-        {
+        if let Some(character) = self.styles.get(None, "character", self.complete) {
             mark.merge(&character.run, true);
         }
-        let direct_mark = Props::parse(
-            if self.shape {
-                None
-            } else {
-                ppr.and_then(|node| node.child("w:rPr"))
-            },
-            self.theme,
-        );
+        let direct_mark = Props::parse(ppr.and_then(|node| node.child("w:rPr")), self.theme);
         if let Some(id) = direct_mark.style.as_deref() {
             let mut resolved = self.styles.defaults.clone();
             if let Some(character) = self.styles.get(None, "character", self.complete) {
@@ -564,7 +545,7 @@ impl<'a> Scan<'a> {
         for (index, (props, text)) in runs.iter().enumerate() {
             self.collector
                 .run(props, text.as_deref(), &default, &scripts);
-            if !(self.shape || generated_label && index == 0)
+            if !(generated_label && index == 0)
                 && (props.bold_cs != mark.bold_cs
                     || props.italic_cs != mark.italic_cs
                     || props.cs != mark.cs)
@@ -674,16 +655,19 @@ impl<'a> Scan<'a> {
                 }
                 "w:r" => {
                     let direct = Props::parse(child.child("w:rPr"), self.theme);
+                    let mut own_language = direct.east_asia_language.clone();
                     let mut props = base.clone();
-                    if !self.shape
-                        && let Some(id) = direct.style.as_deref()
+                    if let Some(id) = direct.style.as_deref()
                         && let Some(style) = self.styles.get(Some(id), "character", self.complete)
                     {
+                        own_language =
+                            own_language.or_else(|| style.run.east_asia_language.clone());
                         props.merge(&style.run, true);
                     }
                     props.merge(&direct, false);
                     if self.shape {
-                        props.rtl = None;
+                        props.east_asia_language =
+                            own_language.or_else(|| mark.east_asia_language.clone());
                     }
                     if props.hidden == Some(true) {
                         continue;

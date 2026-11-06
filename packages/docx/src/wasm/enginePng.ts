@@ -27,6 +27,7 @@ export async function renderPng(engine: DocxPngEngine, options: Pick<DocxPngOpti
   if (!canvasPngAvailable()) throw canvasUnavailable();
   options.signal?.throwIfAborted();
   const canvas = createCanvas(width, height);
+  if (!canvas.getContext('2d')) throw canvasUnavailable();
   let refused: Error | undefined;
   const resolve = createCanvasImageResolver({ media: engine.media });
   await rasterizeDisplayPageToBackBuffer(canvas, { ...engine.page, background: engine.page.background ?? '#ffffff' }, {

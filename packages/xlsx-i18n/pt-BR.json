@@ -231,5 +231,14 @@
     "collapsePanel": "Recolher {title}",
     "expandPanel": "Expandir {title}",
     "rowGutter": "Marcadores de linha de plugins"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "del": "Del",
+    "escape": "Esc",
+    "pageUp": "Page Up",
+    "pageDown": "Page Down"
   }
 }

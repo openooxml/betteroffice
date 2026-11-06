@@ -8,6 +8,7 @@ use crate::fmath;
 use crate::parser::Expr;
 
 use super::criteria::{self, Criterion};
+use super::special::{MAX_FACTORIAL, factorial};
 use super::{collect_numbers, finite, nth_int, nth_number};
 
 pub(crate) fn sum(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
@@ -2070,10 +2071,10 @@ pub(crate) fn fact(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         Ok(x) => x.trunc(),
         Err(e) => return err(e),
     };
-    if x > 170.0 {
+    if x > f64::from(MAX_FACTORIAL) {
         return err(ErrorValue::Num);
     }
-    num((2..=x as u32).map(f64::from).product())
+    num(factorial(x as u32))
 }
 
 /// COMBIN(number, chosen): ways to choose `chosen` of `number`, both

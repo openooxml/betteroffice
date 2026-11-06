@@ -231,5 +231,14 @@
     "collapsePanel": "{title} संक्षिप्त करें",
     "expandPanel": "{title} विस्तृत करें",
     "rowGutter": "प्लगइन पंक्ति चिह्न"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "del": "Del",
+    "escape": "Esc",
+    "pageUp": "Page Up",
+    "pageDown": "Page Down"
   }
 }

@@ -2875,7 +2875,9 @@ impl AuthorityHydrator {
         }
         let base = self.base.finish()?;
         let authority = WorkbookAuthority::hydrated(self.doc, Arc::new(base), self.next_sheet_id);
-        if !self.vector_validated && authority.encode_state_vector_v1() != self.state_vector {
+        if !self.vector_validated
+            && !same_state_vector(&authority.encode_state_vector_v1(), &self.state_vector)
+        {
             return Err(SnapshotError::new(
                 "authority snapshot state vector differs",
             ));
@@ -2936,6 +2938,15 @@ impl AuthorityHydrator {
     }
 }
 
+fn same_state_vector(left: &[u8], right: &[u8]) -> bool {
+    use yrs::updates::decoder::Decode;
+    left == right
+        || matches!(
+            (yrs::StateVector::decode_v1(left), yrs::StateVector::decode_v1(right)),
+            (Ok(left), Ok(right)) if left == right
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2946,6 +2957,14 @@ mod tests {
     use crate::snapshot::wire::unframe;
 
     use super::*;
+
+    #[test]
+    fn snapshot_state_vectors_compare_by_client_not_byte_order() {
+        assert!(same_state_vector(&[2, 1, 1, 5, 1], &[2, 5, 1, 1, 1]));
+        assert!(!same_state_vector(&[2, 1, 1, 5, 1], &[2, 5, 2, 1, 1]));
+        assert!(!same_state_vector(&[2, 1, 1, 5, 1], &[1, 1, 1]));
+        assert!(!same_state_vector(&[9], &[2, 1, 1, 5, 1]));
+    }
 
     #[test]
     fn precision_settings_are_rejected_by_the_legacy_date_reader() {

@@ -231,5 +231,14 @@
     "collapsePanel": "收合 {title}",
     "expandPanel": "展開 {title}",
     "rowGutter": "外掛程式列標記"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "del": "Del",
+    "escape": "Esc",
+    "pageUp": "Page Up",
+    "pageDown": "Page Down"
   }
 }

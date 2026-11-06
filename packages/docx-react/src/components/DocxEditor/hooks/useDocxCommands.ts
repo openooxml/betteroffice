@@ -1,3 +1,4 @@
+import { readClipboardFragment } from '../internals/clipboardHtml';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createT, deepMerge, en } from '@betteroffice/docx-i18n';
 import type { LocaleStrings, Translations } from '@betteroffice/docx-i18n';
@@ -122,6 +123,11 @@ const IMMEDIATE_COMMANDS: ReadonlySet<DocxCommandId> = new Set<DocxCommandId>([
   'replace',
   'reportIssue',
   'zoom',
+  'cut',
+  'copy',
+  'paste',
+  'pasteAsPlainText',
+  'selectAll',
   'insertImage',
   'imageProperties',
   'pageSetup',
@@ -129,6 +135,13 @@ const IMMEDIATE_COMMANDS: ReadonlySet<DocxCommandId> = new Set<DocxCommandId>([
 ]);
 
 const CELL_STORY = /:t\d+:r\d+c\d+/;
+
+function clipboardRefused(env: DocxCommandEnvironment): DocxCommandResult {
+  return {
+    ok: false,
+    failure: { code: 'command-failed', message: env.translate('commands.reasons.commandFailed') },
+  };
+}
 
 /** Inserts a decoded picture at the selection its picker was opened for. */
 export type DocxImageInsert = (
@@ -766,6 +779,51 @@ export function useDocxCommandBinding(inputs: DocxCommandInputs): DocxCommandsHa
         case 'reportIssue':
           openReportIssue();
           return OPENED;
+        case 'selectAll':
+          current.pagedEditorRef.current?.selectAll();
+          return executed(true);
+        case 'copy':
+        case 'cut': {
+          const paged = current.pagedEditorRef.current;
+          if (!paged) return executed(false);
+          const read = paged.readSelectedText();
+          if (!read) return executed(paged.copySelection(id === 'cut'));
+          return read.then((text) => navigator.clipboard.writeText(text)).then(
+            () => executed(true),
+            () => clipboardRefused(env)
+          );
+        }
+        case 'paste':
+        case 'pasteAsPlainText': {
+          const paged = current.pagedEditorRef.current;
+          if (!paged) return executed(false);
+          const session = paged.getYrsSession();
+          const target = () =>
+            JSON.stringify([
+              documentVersion.current,
+              session ? readSessionVersion(session) : null,
+              session?.selection() ?? null,
+              session?.cellSelection() ?? null,
+            ]);
+          const opened = target();
+          return (async () => {
+            try {
+              const fragment = id === 'paste' ? await readClipboardFragment() : null;
+              const text = await navigator.clipboard.readText();
+              if (!text && !fragment) return executed(false);
+              if (paged.getYrsSession() !== session || target() !== opened) {
+                return {
+                  ok: false,
+                  failure: { code: 'target-changed', message: env.translate('commands.reasons.targetChanged') },
+                };
+              }
+              paged.pasteContent(text, fragment);
+              return executed(true);
+            } catch {
+              return clipboardRefused(env);
+            }
+          })();
+        }
         case 'zoom': {
           const { scale } = args as DocxCommandArgs['zoom'];
           if (scale === current.zoom) return executed(false);

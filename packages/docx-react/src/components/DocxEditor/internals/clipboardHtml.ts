@@ -760,3 +760,25 @@ export function parseClipboardHtml(html: string): DocxClipboardFragment | null {
   const fragment: DocxClipboardFragment = { paragraphs: cleaned };
   return validClipboardFragment(fragment) ? fragment : null;
 }
+
+/** The rich content on the system clipboard, read through the async Clipboard API. */
+export async function readClipboardFragment(): Promise<DocxClipboardFragment | null> {
+  if (typeof navigator === 'undefined' || !navigator.clipboard || !('read' in navigator.clipboard)) return null;
+  let items: ClipboardItem[];
+  try {
+    items = await navigator.clipboard.read();
+  } catch {
+    return null;
+  }
+  for (const item of items) {
+    if (!item.types.includes('text/html')) continue;
+    let html: string;
+    try {
+      html = await (await item.getType('text/html')).text();
+    } catch {
+      return null;
+    }
+    return parseClipboardHtml(html);
+  }
+  return null;
+}
