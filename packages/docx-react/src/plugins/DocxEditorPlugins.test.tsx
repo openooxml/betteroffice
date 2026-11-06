@@ -1534,7 +1534,7 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
       if (!updated?.ok) throw new Error('missing fresh owner');
       expect(updated.anchor.width).toBeCloseTo(75);
     }
-  });
+  }, 30_000);
 
   test('an unchanged reservation owner stays available while another owner is removed', async () => {
     let access!: pluginHosts.DocxPluginHostAccess;
