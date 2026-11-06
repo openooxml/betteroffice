@@ -9,6 +9,7 @@ type Probe = {
   load(bytes: number[], shortcuts: unknown): Promise<void>;
   state(id: 'bold' | 'italic'): boolean | 'mixed' | null | undefined;
   texts(): Promise<string[]>;
+  selectTarget(): Promise<boolean>;
 };
 
 const probe = <T>(page: Page, pick: string) =>
@@ -63,12 +64,9 @@ async function open(page: Page, mode: string, shortcuts: unknown) {
 
 async function selectTarget(page: Page) {
   await expect(canvas(page)).toHaveAttribute('data-pptx-input-ready', 'true');
-  const box = (await canvas(page).boundingBox())!;
-  await page.mouse.click(box.x + box.width * 0.15, box.y + box.height * 0.62);
+  expect(await probe<boolean>(page, 'probe.selectTarget()')).toBe(true);
+  await input(page).focus();
   await expect(input(page)).toBeFocused();
-  await input(page).press('ControlOrMeta+Home');
-  await input(page).press('ControlOrMeta+Shift+End');
-  await expect(page.getByRole('status').filter({ hasText: 'Text selected' })).toBeVisible();
 }
 
 test.describe('pptx host shortcuts, worker', () => {

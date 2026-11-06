@@ -26,6 +26,15 @@ const probe = {
     open({ file: Uint8Array.from(bytes), fonts, shortcuts });
   },
   state(id: 'bold' | 'italic') { return probe.editor?.commands.getState(id).active ?? null; },
+  async selectTarget() {
+    const editor = probe.editor as PptxAsyncEditorApi;
+    const read = await editor.readContent() as unknown as {
+      slides: { id: string }[];
+      stories: { slideId: string; shapeId: string; storyId: string; text: string }[];
+    };
+    const story = read.stories.find((entry) => entry.slideId === read.slides[0]!.id && entry.text === 'Target')!;
+    return editor.selectText({ slide: 1, shapeId: story.shapeId, storyId: story.storyId, start: 0, end: story.text.length } as never);
+  },
   async texts() {
     const read = await probe.editor!.readContent();
     return (read as unknown as { stories: { text: string }[] }).stories.map((story) => story.text);
