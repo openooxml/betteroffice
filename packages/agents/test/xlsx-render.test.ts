@@ -3,7 +3,7 @@ import { createCanvas, GlobalFonts, loadImage } from '@napi-rs/canvas';
 import { createFontProvider, resolveLastResortFace } from '@betteroffice/fonts';
 import { decodeFontFace, paintDisplayList } from '@betteroffice/xlsx';
 import { openXlsx } from '../src/xlsx';
-import { renderXlsxRange } from '../src/xlsx-render';
+import { rangeExtent, renderXlsxRange } from '../src/xlsx-render';
 import { xlsxFixture } from './format-fixtures';
 
 test('XLSX previews paint a non-active sheet range at the requested size', async () => {
@@ -84,7 +84,37 @@ test('XLSX canvas previews draw unbundled families with the Word last-resort fac
   const register = spyOn(GlobalFonts, 'register');
   try {
     await renderXlsxRange(handle as never, 0, 'A1', { x: 0, y: 0, width: 40, height: 20 }, 1, provider);
-    const call = register.mock.calls.find(([, alias]) => alias === family);
-    expect(call && Buffer.from(call[0]).equals(word)).toBe(true);
+    expect(register).toHaveBeenCalledTimes(1);
+    expect(Buffer.from(register.mock.calls[0]![0]).equals(word)).toBe(true);
   } finally { register.mockRestore(); }
+});
+
+test('XLSX canvas previews in one process keep each workbook\'s faces apart', async () => {
+  const base = createFontProvider(undefined, { decoder: decodeFontFace });
+  const hebrew = await base.resolve('Noto Sans Hebrew', false, false)!();
+  const sans = await base.resolve('Arial', false, false)!();
+  const provider = (bytes: ArrayBuffer) => ({ ...base, resolve: () => async () => bytes });
+  const book = (family: string) => ({
+    sheetInfo: () => ({ activeSheet: 0 }),
+    setActiveSheet: () => {},
+    displayList: () => ({ width: 120, height: 24, commands: [{ op: 'text', x: 4, y: 18, text: 'Quarterly', fontFamily: family, fontSize: 12, color: '#000000' }] }),
+    renderPngFonts: () => [],
+  });
+  const viewport = { x: 0, y: 0, width: 120, height: 24 };
+  const alone = await renderXlsxRange(book('Unshared Face') as never, 0, 'A1', viewport, 1, provider(sans));
+  const other = await renderXlsxRange(book('Shared Face') as never, 0, 'A1', viewport, 1, provider(hebrew));
+  const shared = await renderXlsxRange(book('Shared Face') as never, 0, 'A1', viewport, 1, provider(sans));
+  expect(Buffer.from(other).equals(Buffer.from(alone))).toBe(false);
+  expect(Buffer.from(shared).equals(Buffer.from(alone))).toBe(true);
+  expect(GlobalFonts.families.some(({ family }) => family.startsWith('BetterOffice Preview'))).toBe(false);
+});
+
+test('XLSX canvas preview sizes match the engine\'s 32-bit range extent', () => {
+  const first = { x: 0, y: Math.fround(1.1) };
+  const last = { x: Math.fround(10.3), y: Math.fround(799.9), w: Math.fround(20.7), h: Math.fround(1.2) };
+  const extent = rangeExtent(first, last, 1);
+  const f = Math.fround;
+  expect(extent.pixelHeight).toBe(Math.ceil(f(f(f(last.y + last.h) - f(first.y)) * f(1))));
+  expect(extent.pixelWidth).toBe(Math.ceil(f(f(last.x + last.w) - first.x)));
+  expect(rangeExtent({ x: 0, y: 0 }, { x: 0, y: 0, w: 100, h: 50 }, 1.5)).toEqual({ width: 100, height: 50, pixelWidth: 150, pixelHeight: 75 });
 });
