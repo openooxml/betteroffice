@@ -31,6 +31,9 @@ const CROSSING_WORK: f64 = 8.0;
 /// Clip masks nested inside clip masks, each priced as its own layer; past
 /// this depth the document is refused.
 const MAX_CLIP_DEPTH: usize = 8;
+/// Per pixel of a bitmap's source, which `resvg` decodes every time it draws
+/// the image, inside a pattern tile once per fill: about 12 ns.
+const IMAGE_DECODE_WORK: f64 = 4.0;
 /// Per device pixel of outline length the rasteriser walks for a fill.
 const FILL_EDGE_WORK: f64 = 4.0;
 /// The same for a hairline, which is drawn a line at a time.
@@ -199,6 +202,8 @@ pub(super) fn measure(
         bottom: height,
     };
     let output = u64::from(size.width()) * u64::from(size.height());
+    let downscaled = f64::from(size.width()) < f64::from(tree.size().width().ceil())
+        || f64::from(size.height()) < f64::from(tree.size().height().ceil());
     let mut tally = Tally::default();
     let mut stack = vec![Frame {
         group: tree.root(),
@@ -237,10 +242,8 @@ pub(super) fn measure(
                             .saturating_add((pixels as u64).saturating_mul(1 + masks));
                         tally.peak = tally.peak.max(inner.live);
                         if let Some(clip) = group.clip_path() {
-                            let place = scale
-                                .pre_concat(group.abs_transform())
-                                .pre_concat(clip.transform());
-                            measure_clip(clip, place, layer, &mut tally, 1)?;
+                            let base = scale.pre_concat(group.abs_transform());
+                            measure_clip(clip, base, layer, &mut tally, 1)?;
                         }
                         inner.surface = layer;
                     }
@@ -256,9 +259,9 @@ pub(super) fn measure(
                         let area = Area::of(path.abs_bounding_box(), scale)
                             .map_or(frame.surface, |area| area.meet(frame.surface));
                         match fill.paint() {
-                            Paint::Pattern(pattern) if metafile => {
-                                measure_pattern(pattern, place, area, frame.live, &mut tally)?
-                            }
+                            Paint::Pattern(pattern) if metafile => measure_pattern(
+                                pattern, place, area, frame.live, downscaled, &mut tally,
+                            )?,
                             paint => tally.paint(area.pixels(), paint)?,
                         }
                         if area.pixels() > 0.0 {
@@ -269,9 +272,9 @@ pub(super) fn measure(
                         let area = Area::of(path.abs_stroke_bounding_box(), scale)
                             .map_or(frame.surface, |area| area.meet(frame.surface));
                         match stroke.paint() {
-                            Paint::Pattern(pattern) if metafile => {
-                                measure_pattern(pattern, place, area, frame.live, &mut tally)?
-                            }
+                            Paint::Pattern(pattern) if metafile => measure_pattern(
+                                pattern, place, area, frame.live, downscaled, &mut tally,
+                            )?,
                             paint => tally.paint(area.pixels(), paint)?,
                         }
                         let budget = strokes.as_deref_mut();
@@ -289,7 +292,9 @@ pub(super) fn measure(
                         } else {
                             IMAGE_WORK
                         };
-                        tally.work += PATH_WORK as f64 + area.pixels() * per_pixel;
+                        tally.work += PATH_WORK as f64
+                            + area.pixels() * per_pixel
+                            + decoded_pixels(image) * IMAGE_DECODE_WORK;
                         tally.painted += area.pixels();
                     }
                 }
@@ -331,14 +336,16 @@ pub(super) fn measure(
 
 /// Prices a metafile's pattern paint as `resvg` renders it: a tile pixmap at
 /// the paint's scale, unclipped, with every node of the tile drawn over all of
-/// it, then the tile spread across `area`. A tile's bitmap is decoded under
-/// the caller's image budget. A tile holding a pattern, text, mask or filter
+/// it, then the tile spread across `area`, its bitmaps decoded again for each
+/// fill. A tile that a reduced scale rounds away refuses that scale, since
+/// `resvg` would skip the fill. A tile holding a pattern, text, mask or filter
 /// of its own is refused.
 fn measure_pattern(
     pattern: &usvg::Pattern,
     place: Transform,
     area: Area,
     live: u64,
+    downscaled: bool,
     tally: &mut Tally,
 ) -> Result<(), SvgRefusal> {
     let (sx, sy) = place.pre_concat(pattern.transform()).get_scale();
@@ -350,8 +357,13 @@ fn measure_pattern(
         tally.exceed();
         return Ok(());
     }
+    if downscaled && (width < 1.0 || height < 1.0) {
+        tally.exceed();
+        return Ok(());
+    }
     let tile = width.max(0.0) * height.max(0.0);
     let mut nodes = 0_u64;
+    let mut decode = 0.0;
     let mut groups = vec![pattern.root()];
     while let Some(group) = groups.pop() {
         for node in group.children() {
@@ -374,12 +386,14 @@ fn measure_pattern(
                         return Err(SvgRefusal::UnsupportedElement);
                     }
                 }
-                Node::Image(_) => {}
+                Node::Image(image) => decode += decoded_pixels(image),
                 Node::Text(_) => return Err(SvgRefusal::UnsupportedElement),
             }
         }
     }
-    tally.work += tile * (1 + nodes) as f64 * LAYER_WORK + area.pixels() * PATTERN_WORK;
+    tally.work += tile * (1 + nodes) as f64 * LAYER_WORK
+        + area.pixels() * PATTERN_WORK
+        + decode * IMAGE_DECODE_WORK;
     tally.painted += area.pixels();
     tally.peak = tally.peak.max(live.saturating_add(tile as u64));
     Ok(())
@@ -500,7 +514,7 @@ fn layer(bounds: Option<Area>, parent: Area, width: f64, height: f64) -> Option<
 /// another raster per level.
 fn measure_clip(
     clip: &usvg::ClipPath,
-    place: Transform,
+    base: Transform,
     layer: Area,
     tally: &mut Tally,
     depth: usize,
@@ -508,13 +522,14 @@ fn measure_clip(
     if depth > MAX_CLIP_DEPTH {
         return Err(SvgRefusal::TooManyLayers);
     }
-    let nested = |inner: &usvg::ClipPath, place: Transform, tally: &mut Tally| {
+    let nested = |inner: &usvg::ClipPath, base: Transform, tally: &mut Tally| {
         tally.work += layer.pixels() * (LAYER_WORK + CLIP_WORK);
-        measure_clip(inner, place, layer, tally, depth + 1)
+        measure_clip(inner, base, layer, tally, depth + 1)
     };
     if let Some(inner) = clip.clip_path() {
-        nested(inner, place.pre_concat(inner.transform()), tally)?;
+        nested(inner, base, tally)?;
     }
+    let place = base.pre_concat(clip.transform());
     let mut stack = vec![clip.root()];
     while let Some(group) = stack.pop() {
         for node in group.children() {
@@ -522,10 +537,7 @@ fn measure_clip(
             match node {
                 Node::Group(group) => {
                     if let Some(inner) = group.clip_path() {
-                        let inner_place = place
-                            .pre_concat(group.abs_transform())
-                            .pre_concat(inner.transform());
-                        nested(inner, inner_place, tally)?;
+                        nested(inner, place.pre_concat(group.abs_transform()), tally)?;
                     }
                     stack.push(group);
                 }
@@ -604,6 +616,22 @@ fn closed(data: &tiny_skia::Path) -> impl Iterator<Item = PathSegment> + '_ {
 
 /// The control-polygon length of `segments` under `transform`, which a curve
 /// never exceeds.
+/// Pixels a bitmap decodes to, read from its header.
+fn decoded_pixels(image: &usvg::Image) -> f64 {
+    let data = match image.kind() {
+        usvg::ImageKind::JPEG(data)
+        | usvg::ImageKind::PNG(data)
+        | usvg::ImageKind::GIF(data)
+        | usvg::ImageKind::WEBP(data) => data,
+        usvg::ImageKind::SVG(_) => return 0.0,
+    };
+    image::ImageReader::new(std::io::Cursor::new(data.as_slice()))
+        .with_guessed_format()
+        .ok()
+        .and_then(|reader| reader.into_dimensions().ok())
+        .map_or(0.0, |(width, height)| f64::from(width) * f64::from(height))
+}
+
 /// How far a path's outline runs up and down in device pixels: the rows its
 /// edges cross, each one a coverage step on every sub-row.
 fn rise(segments: impl Iterator<Item = PathSegment>, transform: Transform) -> f64 {

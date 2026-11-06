@@ -22,10 +22,6 @@ use tiny_skia::{IntSize, Pixmap, PremultipliedColorU8, Transform};
 
 use crate::MAX_IMAGE_PIXELS;
 
-/// Work per pixel of a bitmap inside a metafile, which `resvg` decodes on
-/// every render whatever size it is drawn at: about 12 ns.
-const IMAGE_DECODE_WORK: u64 = 4;
-
 /// Peak memory one SVG decode may use beyond its output raster and group
 /// layers, which the caller charges to the slide's image budget.
 pub const SVG_MEMORY_ENVELOPE: u64 = 100 << 20;
@@ -434,9 +430,7 @@ pub(crate) fn parse_metafile_within(
         let mut strokes = (MAX_SVG_STROKE_VERBS / 2) as f64;
         let cost = guarded(|| cost::measure(&tree, scaled, Some(&mut strokes), true))??;
         let charged = cost.pixels.saturating_add(images);
-        let work = cost
-            .work
-            .saturating_add(images.saturating_mul(IMAGE_DECODE_WORK));
+        let work = cost.work;
         if work <= limit && charged <= budget {
             return Ok(SvgImage {
                 tree,
@@ -690,6 +684,66 @@ pub(crate) mod tests {
             priced(&clipped(40, &picture)).err(),
             Some(SvgRefusal::RenderTooCostly)
         );
+    }
+
+    #[test]
+    fn a_pattern_bitmap_is_charged_for_every_fill() {
+        let png = {
+            let image = image::RgbaImage::from_pixel(1024, 1024, image::Rgba([1, 2, 3, 255]));
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            image
+                .write_to(&mut bytes, image::ImageFormat::Png)
+                .expect("png");
+            encode64(&bytes.into_inner())
+        };
+        let fills: String = (0..1_000)
+            .map(|i| {
+                format!(
+                    r#"<rect x="{}" y="{}" width="2" height="2" fill="url(#t)"/>"#,
+                    i % 900,
+                    i / 2
+                )
+            })
+            .collect();
+        let body = format!(
+            r#"<pattern id="t" patternUnits="userSpaceOnUse" width="4" height="4"><image width="4" height="4" href="data:image/png;base64,{png}"/></pattern>{fills}"#
+        );
+        assert_eq!(priced(&body).err(), Some(SvgRefusal::RenderTooCostly));
+    }
+
+    #[test]
+    fn a_clip_on_a_clip_is_priced_in_the_space_it_renders_in() {
+        let mut zigzag = String::from("M0 0");
+        for vertex in 0..4_000 {
+            zigzag.push_str(&format!(
+                " L{} {}",
+                (vertex * 997) % 1000,
+                if vertex % 2 == 0 { 0 } else { 1000 }
+            ));
+        }
+        let inner: String = (0..3)
+            .map(|_| format!(r#"<path d="{zigzag} Z"/>"#))
+            .collect();
+        let body = format!(
+            r#"<clipPath id="i">{inner}</clipPath><clipPath id="o" clip-path="url(#i)" transform="scale(0.001)"><rect width="1000000" height="1000000"/></clipPath><g clip-path="url(#o)"><rect width="1000" height="1000" fill="red"/></g>"#
+        );
+        assert_eq!(priced(&body).err(), Some(SvgRefusal::RenderTooCostly));
+    }
+
+    #[test]
+    fn a_pattern_tile_a_reduced_scale_would_erase_refuses_that_scale() {
+        let full = r#"<rect width="1000" height="1000" fill="url(#h)"/>"#;
+        let body = format!(
+            r#"<pattern id="h" patternUnits="userSpaceOnUse" width="0.8" height="0.8"><rect width="0.4" height="0.4" fill="black"/></pattern>{}"#,
+            clipped(20, full)
+        );
+        if let Ok(image) = priced(&body) {
+            assert_eq!(
+                image.size.width(),
+                1000,
+                "drawn at full size, where its tile survives"
+            );
+        }
     }
 
     #[test]
