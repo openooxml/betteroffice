@@ -16,13 +16,13 @@ const EMU_PER_INCH: f64 = 914_400.0;
 const PIXELS_PER_INCH: f64 = 96.0;
 const MAX_SHAPE_BODY_DEPTH: usize = 8;
 
-/// Retained package styles for shape text lowering.
+/// Shared styles for shape text lowering.
 #[derive(Clone, Default)]
-pub struct ShapeStyles(Option<Arc<crate::seed::SourceMetadata>>);
+pub struct ShapeStyles(Option<Arc<crate::seed::StyleResolver>>);
 
 impl ShapeStyles {
-    pub(super) fn new(source: Option<Arc<crate::seed::SourceMetadata>>) -> Self {
-        Self(source)
+    pub(super) fn new(doc: &crate::EditingDoc) -> Self {
+        Self(doc.shape_style_resolver())
     }
 }
 

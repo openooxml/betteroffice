@@ -485,9 +485,10 @@ fn yrs_doc_to_mapped_layout_blocks_inner(
             .source_index()
             .map(|index| index.group_picture_sources())
             .unwrap_or_else(|| env.group_pictures.clone()),
-        shape_styles: shapes::ShapeStyles::new(doc.source_metadata()),
+        shape_styles: shapes::ShapeStyles::new(doc),
         ..env.clone()
     };
+    local.shape_styles = with_sources.shape_styles.clone();
     let env = &with_sources;
     let source = doc.source_metadata();
     local.source = source.as_ref().map(Arc::downgrade).unwrap_or_default();

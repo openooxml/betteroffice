@@ -541,3 +541,219 @@ fn text_box_style_numbering_does_not_synthesize_indent() {
         }
     }
 }
+
+#[test]
+fn shared_styles_survive_payload_edits_and_new_directly_formatted_runs() {
+    let content = paragraph("Derived", Some("Accent"), false).replace(
+        "</w:p>",
+        r#"<w:r><w:rPr><w:rStyle w:val="Accent"/></w:rPr><w:t>Unedited</w:t></w:r></w:p>"#,
+    );
+    let bytes = document(&content, TextBox::Drawing);
+    let source = EditingDoc::new(75360);
+    seed_from_docx(&source, &bytes).unwrap();
+    let doc = EditingDoc::new(75361);
+    doc.apply_update_v1(&source.encode_state_as_update_v1())
+        .unwrap();
+    let env = RenderEnv::default();
+    assert_eq!(
+        yrs_doc_to_layout_blocks(&doc, "body", &env).unwrap(),
+        yrs_doc_to_layout_blocks(&source, "body", &env).unwrap()
+    );
+    let original = yrs_doc_to_layout_blocks(&doc, "body", &env).unwrap();
+    let original = original
+        .iter()
+        .find_map(|block| match block {
+            LayoutBlock::Shape(shape) => shape.inner_text.as_ref()?.first(),
+            _ => None,
+        })
+        .unwrap();
+    let untouched = text_formatting(original, "Unedited");
+    assert_eq!(untouched.font_family.as_deref(), Some("Courier New"));
+    let mut offset = 0;
+    for segment in doc.story_segments("body").unwrap() {
+        match segment.content {
+            SegmentContent::Text(text) => offset += text.encode_utf16().count() as u32,
+            SegmentContent::OtherEmbed { payload, .. } if payload.contains_key("shapeJson") => {
+                let yrs::Any::String(json) = &payload["shapeJson"] else {
+                    panic!("shape JSON")
+                };
+                let mut shape: Value = serde_json::from_str(json).unwrap();
+                let runs = shape["textBody"]["content"][0]["content"]
+                    .as_array_mut()
+                    .unwrap();
+                runs[0]["content"][0]["text"] = json!("Edited");
+                runs[0]["formatting"]["fontSize"] = json!(40);
+                runs.push(
+                    json!({"type": "run", "formatting": {"styleId": "Accent", "italic": false,
+                    "color": {"rgb": "ABCDEF"}}, "content": [{"type": "text", "text": "New"}]}),
+                );
+                doc.set_embed_attrs(
+                    &EditCtx::local("", ""),
+                    Position::new("body", offset),
+                    vec![("shapeJson".to_owned(), yrs::Any::from(shape.to_string()))],
+                )
+                .unwrap();
+                break;
+            }
+            _ => offset += 1,
+        }
+    }
+    let blocks = yrs_doc_to_layout_blocks(&doc, "body", &env).unwrap();
+    let boxed = blocks
+        .iter()
+        .find_map(|block| match block {
+            LayoutBlock::Shape(shape) => shape.inner_text.as_ref()?.first(),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(text_formatting(boxed, "Unedited"), untouched);
+    let edited = text_formatting(boxed, "Edited");
+    assert_eq!(edited.font_family, untouched.font_family);
+    assert_eq!(edited.font_size, Some(20.0));
+    assert_eq!(edited.italic, Some(true));
+    let added = text_formatting(boxed, "New");
+    assert_eq!(added.font_family, untouched.font_family);
+    assert_eq!(added.font_size, untouched.font_size);
+    assert_eq!(added.italic, Some(false));
+    assert_eq!(added.color.as_deref(), Some("#ABCDEF"));
+}
+
+#[test]
+fn state_only_styles_cover_both_formats_stories_tables_and_sdts() {
+    use yrs::{Map, ReadTxn, Transact};
+
+    let paragraph = paragraph("Derived", Some("Accent"), false).replace(
+        "<w:rPr><w:rFonts w:ascii=\"Cambria\"",
+        "<w:rPr><w:rStyle w:val=\"BidiAccent\"/><w:rFonts w:ascii=\"Cambria\"",
+    );
+    let content = format!(
+        r#"{paragraph}<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc>{paragraph}</w:tc></w:tr></w:tbl><w:sdt><w:sdtPr/><w:sdtContent>{paragraph}</w:sdtContent></w:sdt>"#
+    );
+    let drawing = drawing(&content);
+    let vml = format!(
+        r#"<w:p><w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml"><v:shape id="VML" style="position:absolute;width:216pt;height:108pt"><v:textbox><w:txbxContent>{content}</w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p>"#
+    );
+    let bytes = fixture::Package::new(&format!(
+        r#"{drawing}{vml}<w:sectPr><w:headerReference w:type="default" r:id="rHeader"/></w:sectPr>"#
+    ))
+    .styles(STYLES)
+    .part(
+        "header1.xml",
+        "rHeader",
+        "header",
+        "header",
+        &format!("<w:hdr {}>{drawing}{vml}</w:hdr>", fixture::NS),
+    )
+    .bytes();
+    let source = EditingDoc::new(75362);
+    seed_from_docx(&source, &bytes).unwrap();
+    let peer = EditingDoc::new(75363);
+    peer.apply_update_v1(&source.encode_state_as_update_v1())
+        .unwrap();
+    assert!(peer.source_metadata().is_none());
+    let txn = peer.yrs_doc().transact();
+    assert_eq!(
+        txn.get_map(crate::shape_styles::SHAPE_STYLES)
+            .unwrap()
+            .len(&txn),
+        1
+    );
+    drop(txn);
+    for story in source.list_stories().stories {
+        let expected =
+            yrs_doc_to_layout_blocks(&source, &story.story, &RenderEnv::default()).unwrap();
+        let actual = yrs_doc_to_layout_blocks(&peer, &story.story, &RenderEnv::default()).unwrap();
+        assert_eq!(actual, expected);
+        let paragraphs: Vec<_> = actual
+            .iter()
+            .filter_map(|block| match block {
+                LayoutBlock::Shape(shape) => shape.inner_text.as_ref(),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(paragraphs.len(), 6);
+        for paragraph in paragraphs {
+            assert_eq!(
+                text_formatting(paragraph, "Sample").font_family.as_deref(),
+                Some("Courier New")
+            );
+        }
+    }
+}
+
+#[test]
+fn styles_arriving_after_first_paint_invalidate_resident_and_preview_lowering() {
+    use std::collections::BTreeSet;
+    use std::rc::Rc;
+    use yrs::{Map, ReadTxn, Transact};
+
+    let bytes = document(
+        &paragraph("Derived", Some("Accent"), false),
+        TextBox::Drawing,
+    );
+    for enabled in [false, true] {
+        let source = EditingDoc::new(75364);
+        seed_from_docx(&source, &bytes).unwrap();
+        let json = {
+            let mut txn = source.yrs_doc().transact_mut();
+            let map = txn.get_map(crate::shape_styles::SHAPE_STYLES).unwrap();
+            let json = crate::map_string(&map, &txn, "resolver").unwrap();
+            map.remove(&mut txn, "resolver");
+            json
+        };
+        let engine = crate::EngineSession::new(75365);
+        engine.set_local_lowering(enabled);
+        engine
+            .doc()
+            .apply_update_v1(&source.encode_state_as_update_v1())
+            .unwrap();
+        let env = RenderEnv::default();
+        let before = engine.lower_story_json("body", &env).unwrap();
+        let mut local = crate::bridge::local::LocalLowering::new(enabled);
+        let (blocks, map, _, preview) =
+            crate::bridge::preview::lower_recorded(engine.doc(), "body", &env, &mut local, true)
+                .unwrap();
+        assert!(local.matches_source(engine.doc()));
+        {
+            let mut txn = source.yrs_doc().transact_mut();
+            txn.get_map(crate::shape_styles::SHAPE_STYLES)
+                .unwrap()
+                .insert(&mut txn, "resolver", json);
+        }
+        engine
+            .doc()
+            .apply_update_v1(&source.encode_state_as_update_v1())
+            .unwrap();
+        assert!(!local.matches_source(engine.doc()));
+        let current: Vec<_> = blocks.into_iter().map(Rc::new).collect();
+        assert!(
+            crate::bridge::preview::replay(
+                engine.doc(),
+                &env,
+                &preview.unwrap(),
+                &BTreeSet::from(["late-style".to_owned()]),
+                &current,
+                &map,
+                &local
+            )
+            .is_none()
+        );
+        let after = engine.lower_story_json("body", &env).unwrap();
+        assert_ne!(before, after);
+        let cold = crate::EngineSession::new(75366);
+        cold.doc()
+            .apply_update_v1(&source.encode_state_as_update_v1())
+            .unwrap();
+        assert_eq!(after, cold.lower_story_json("body", &env).unwrap());
+        let mut preview_env = env.clone();
+        preview_env.revision_preview.insert(
+            "late-style".to_owned(),
+            crate::bridge::RevisionPreview::Accepted,
+        );
+        assert_eq!(
+            engine.lower_story_json("body", &preview_env).unwrap(),
+            cold.lower_story_json("body", &preview_env).unwrap()
+        );
+    }
+}

@@ -117,6 +117,7 @@ mod script_fonts;
 mod search;
 mod section_margins;
 mod sections;
+mod shape_styles;
 pub use sections::SectionInfo;
 mod seed;
 #[doc(hidden)]
@@ -673,9 +674,11 @@ pub struct EditingDoc {
     instance: u64,
     /// Rotated whenever the replica's content or retained source is replaced.
     version_nonce: AtomicU64,
-    /// The epoch at which the stories held exactly what seeding the retained source writes, or
+    /// The authored revision at which the stories held exactly what seeding the retained source writes, or
     /// `u64::MAX` when they never did since that source was retained.
     seeded_epoch: AtomicU64,
+    authored_epoch: Arc<AtomicU64>,
+    shape_styles: Mutex<shape_styles::ResolverCache>,
     metadata: Mutex<Option<Arc<seed::SourceMetadata>>>,
     segment_indexes: Mutex<EpochCache<SegmentIndex>>,
     paragraph_indexes: Mutex<EpochCache<ParagraphIndex>>,
@@ -726,6 +729,7 @@ impl EditingDoc {
         doc.get_or_insert_map(REMOVED_STORIES);
         doc.get_or_insert_map(COMMENTS);
         doc.get_or_insert_map(part_metadata::PART_METADATA);
+        doc.get_or_insert_map(shape_styles::SHAPE_STYLES);
         doc.get_or_insert_map(document_properties::DOCUMENT_PROPERTIES);
         doc.get_or_insert_map(style_languages::STYLE_LANGUAGES);
         doc.get_or_insert_map(section_margins::SECTION_MARGINS);
@@ -734,6 +738,8 @@ impl EditingDoc {
         doc.get_or_insert_map(identity::SESSION);
         let epoch = Arc::new(AtomicU64::new(0));
         let observed = Arc::clone(&epoch);
+        let authored_epoch = Arc::new(AtomicU64::new(0));
+        let authored = Arc::clone(&authored_epoch);
         let keeps_deleted = Arc::new(AtomicBool::new(keeps_deleted));
         let keeping = Arc::clone(&keeps_deleted);
         let commit_hooks = Rc::new(RefCell::new(CommitHooks::default()));
@@ -745,6 +751,9 @@ impl EditingDoc {
             .observe_after_transaction(move |txn| {
                 if !txn.delete_set().is_empty() || txn.after_state() != txn.before_state() {
                     observed.fetch_add(1, Ordering::Relaxed);
+                    if !shape_styles::only_style_changes(txn) {
+                        authored.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
                 for (_, hook) in &hooks.borrow().hooks {
                     hook(txn);
@@ -787,6 +796,8 @@ impl EditingDoc {
             version_nonce: AtomicU64::new(batch::mint_nonce(client_id, 0)),
             seeded_epoch: AtomicU64::new(u64::MAX),
             metadata: Mutex::new(None),
+            authored_epoch,
+            shape_styles: Mutex::default(),
             segment_indexes: Mutex::default(),
             paragraph_indexes: Mutex::default(),
             save_story_states,
@@ -884,6 +895,7 @@ impl EditingDoc {
         *self.metadata.lock().unwrap() = Some(Arc::new(source));
         // Story projections read the source, so none built before it is served again.
         self.epoch.fetch_add(1, Ordering::Relaxed);
+        self.authored_epoch.fetch_add(1, Ordering::Relaxed);
         self.rotate_version(entropy);
     }
 
@@ -934,6 +946,7 @@ impl EditingDoc {
     pub(crate) fn invalidate_projections(&self) {
         self.save_story_states.lock().unwrap().clear();
         self.epoch.fetch_add(1, Ordering::Relaxed);
+        self.authored_epoch.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Cached segment geometry for `story_id`, rebuilt when the doc changes.
@@ -1190,8 +1203,10 @@ impl EditingDoc {
     pub(crate) fn mark_seeded(&self) {
         self.save_story_states.lock().unwrap().clear();
         *self.prime_progress.lock().unwrap() = None;
-        self.seeded_epoch
-            .store(self.epoch.load(Ordering::Relaxed), Ordering::Relaxed);
+        self.seeded_epoch.store(
+            self.authored_epoch.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
     }
 
     #[cfg(all(test, feature = "wasm"))]
@@ -1205,10 +1220,10 @@ impl EditingDoc {
         self.doc.transact().state_vector().is_empty()
     }
 
-    /// Whether nothing has committed since [`Self::mark_seeded`] for the retained source.
+    /// Whether authored state is unchanged since seeding the retained source.
     pub(crate) fn unchanged_since_seeded(&self) -> bool {
         let seeded = self.seeded_epoch.load(Ordering::Relaxed);
-        seeded != u64::MAX && seeded == self.epoch.load(Ordering::Relaxed)
+        seeded != u64::MAX && seeded == self.authored_epoch.load(Ordering::Relaxed)
     }
 
     /// Keeps `media`, read from the retained package, as the table the

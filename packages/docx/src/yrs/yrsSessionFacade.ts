@@ -408,6 +408,18 @@ export function wrapSession(
     noteYrsStoriesDirty(facade, stories);
   };
 
+  const authoredRevision = (): number | undefined =>
+    (JSON.parse(session.stories_changed_since(Number.MAX_SAFE_INTEGER)) as {
+      authoredRevision?: number;
+    }).authoredRevision;
+
+  const applyState = <T>(operation: () => T, stories: 'all' | readonly string[] = 'all'): T => {
+    const before = authoredRevision();
+    const result = mutate(operation);
+    if (before === undefined || authoredRevision() !== before) markDirty(stories);
+    return result;
+  };
+
   const markReceiptStories = <T extends YrsTableReceipt>(receipt: T): T => {
     markDirty(receipt.createdStoryIds);
     markDirty(receipt.deletedStoryIds);
@@ -785,8 +797,7 @@ export function wrapSession(
     outlineGlyphJson: (fontId, glyphId) => session.outline_glyph_json(fontId, glyphId),
 
     loadState: (update) => {
-      markDirty('all');
-      mutate(() => {
+      applyState(() => {
         session.load(update);
         proposals.reset();
       });
@@ -888,8 +899,7 @@ export function wrapSession(
       return session.encode_diff_chunks(remoteStateVector.slice(), maxChunkBytes) as Uint8Array[];
     },
     applyUpdate: (update) => {
-      markDirty('all');
-      return mutate(
+      return applyState(
         () =>
           JSON.parse(
             session.apply_update_with_inference(update)
@@ -897,17 +907,14 @@ export function wrapSession(
       );
     },
     applyUpdateChunks: (updates) => {
-      markDirty('all');
-      mutate(() => session.apply_update_chunks([...updates]));
+      applyState(() => session.apply_update_chunks([...updates]));
     },
     applyLocalUpdate: (update) => {
       ensureUndo();
-      markDirty('all');
-      mutate(() => session.apply_local_update(update));
+      applyState(() => session.apply_local_update(update));
     },
     applyHostUpdate: (update, stories) => {
-      markDirty(stories ?? 'all');
-      mutate(() => session.apply_host_update(update));
+      applyState(() => session.apply_host_update(update), stories);
     },
     onUpdate: (listener) => {
       if (destroyed) throw new Error('yrs session is destroyed');
@@ -1533,8 +1540,10 @@ export function wrapSession(
     },
     paragraphSpans: (story) => JSON.parse(session.paragraph_spans(story)) as YrsParagraphLength[],
     storySegments: (story) => JSON.parse(session.story_segments(story)) as YrsStorySegment[],
-    storiesChangedSince: (since) =>
-      JSON.parse(session.stories_changed_since(since)) as { revision: number; stories: string[] },
+    storiesChangedSince: (since) => {
+      const { revision, stories } = JSON.parse(session.stories_changed_since(since)) as { revision: number; stories: string[] };
+      return { revision, stories };
+    },
     storySegmentUnitDigests: (story) =>
       JSON.parse(session.story_segment_unit_digests(story)) as string[],
     storySegmentUnits: (story, units) =>

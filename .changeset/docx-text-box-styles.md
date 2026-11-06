@@ -4,4 +4,4 @@
 "@betteroffice/rust-crates": patch
 ---
 
-Text boxes now apply paragraph and character styles by default, including inherited fonts, sizes, emphasis, colors, languages, alignment and spacing. `font_preflight` includes their styled faces and inherited language scripts; saving preserves original text-box formatting.
+Text boxes apply paragraph and character styles by default, including inherited fonts, colors, languages and spacing. Shared state preserves these styles across peers and payload text edits without changing saved payloads. `font_preflight` includes styled text-box faces and inherited language scripts.
