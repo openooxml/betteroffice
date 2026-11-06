@@ -1,11 +1,12 @@
 import { test, expect, type Page } from 'playwright/test';
+import JSZip from 'jszip';
 
 type Probe = {
   issues: { code: string; id: string }[];
   hostKeys: { key: string; prevented: boolean }[];
   saves: number;
   pluginRuns: number;
-  load(shortcuts: unknown): Promise<void>;
+  load(bytes: number[], shortcuts: unknown): void;
   state(id: 'bold' | 'italic'): boolean | 'mixed' | null | undefined;
   texts(): Promise<string[]>;
 };
@@ -17,10 +18,45 @@ const lastKey = (page: Page) => probe<{ key: string; prevented: boolean } | unde
 const canvas = (page: Page) => page.getByTestId('pptx-slide-canvas');
 const input = (page: Page) => page.getByRole('textbox', { name: 'Slide text', exact: true });
 
+async function fixture() {
+  const zip = new JSZip();
+  const p = 'http://schemas.openxmlformats.org/presentationml/2006/main';
+  const a = 'http://schemas.openxmlformats.org/drawingml/2006/main';
+  const r = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const rels = (body: string) => `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${body}</Relationships>`;
+  const shape = (id: number, text: string, y: number, rich = false) => `<p:sp>
+    <p:nvSpPr><p:cNvPr id="${id}" name="Text ${id}"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>
+    <p:spPr><a:xfrm><a:off x="914400" y="${y}"/><a:ext cx="3657600" cy="914400"/></a:xfrm>
+    <a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr>
+    <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr sz="2400"${rich ? ' b="1" i="1" u="sng"' : ''}>
+    <a:solidFill><a:srgbClr val="${rich ? 'CC1122' : '172554'}"/></a:solidFill><a:latin typeface="Arial"/>
+    </a:rPr><a:t>${text}</a:t></a:r><a:endParaRPr sz="2400"/></a:p></p:txBody></p:sp>`;
+  zip.file('[Content_Types].xml', `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+    <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+    <Default Extension="xml" ContentType="application/xml"/>
+    <Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>
+    ${[1, 2].map((index) => `<Override PartName="/ppt/slides/slide${index}.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>`).join('')}</Types>`);
+  zip.file('_rels/.rels', rels(`<Relationship Id="rId1" Type="${r}/officeDocument" Target="ppt/presentation.xml"/>`));
+  zip.file('ppt/presentation.xml', `<p:presentation xmlns:p="${p}" xmlns:r="${r}"><p:sldIdLst>
+    <p:sldId id="256" r:id="rId1"/><p:sldId id="257" r:id="rId2"/></p:sldIdLst>
+    <p:sldSz cx="9144000" cy="5143500"/><p:notesSz cx="6858000" cy="9144000"/></p:presentation>`);
+  zip.file('ppt/_rels/presentation.xml.rels', rels([1, 2].map((index) => `<Relationship Id="rId${index}" Type="${r}/slide" Target="slides/slide${index}.xml"/>`).join('')));
+  for (const index of [1, 2]) {
+    zip.file(`ppt/slides/slide${index}.xml`, `<p:sld xmlns:p="${p}" xmlns:a="${a}"><p:cSld><p:spTree>
+      <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+      <p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>
+      ${index === 1 ? shape(2, 'First box', 914400, true) + shape(3, 'Target', 2743200) : shape(2, 'Target', 914400)}
+      </p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>`);
+  }
+  return zip.generateAsync({ type: 'nodebuffer' });
+}
+
 async function open(page: Page, mode: string, shortcuts: unknown) {
   await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
   await page.goto(`/pptx-shortcuts.html?mode=${mode}`);
-  await page.evaluate((map) => (window as unknown as { __shortcuts: Probe }).__shortcuts.load(map), shortcuts);
+  const bytes = [...await fixture()];
+  await page.evaluate(([data, map]) => (window as unknown as { __shortcuts: Probe }).__shortcuts.load(data as number[], map),
+    [bytes, shortcuts] as const);
   await expect(canvas(page)).toBeVisible({ timeout: 120_000 });
   await expect.poll(() => probe(page, 'probe.editor !== null'), { timeout: 60_000 }).toBe(true);
 }
@@ -42,7 +78,7 @@ test.describe('pptx host shortcuts, worker', () => {
     await page.evaluate(() => navigator.clipboard.writeText('Outside'));
     await input(page).press('Control+V');
     await page.waitForTimeout(400);
-    expect(await probe<string[]>(page, 'probe.texts()')).toContain('Target');
+    expect(await probe<string[]>(page, 'probe.texts()')).not.toContain('Outside');
     expect(await lastKey(page)).toEqual({ key: 'v', prevented: false });
     await input(page).press('Control+Alt+V');
     await expect.poll(() => probe<string[]>(page, 'probe.texts()')).toContain('Outside');
@@ -54,7 +90,7 @@ test.describe('pptx host shortcuts, worker', () => {
     await page.evaluate(() => navigator.clipboard.writeText('Plain'));
     await input(page).press('Control+Shift+V');
     await page.waitForTimeout(400);
-    expect(await probe<string[]>(page, 'probe.texts()')).toContain('Target');
+    expect(await probe<string[]>(page, 'probe.texts()')).not.toContain('Plain');
     expect(await lastKey(page)).toEqual({ key: 'v', prevented: false });
     await input(page).press('Control+V');
     await expect.poll(() => probe<string[]>(page, 'probe.texts()')).toContain('Plain');
@@ -81,7 +117,7 @@ test.describe('pptx host shortcuts, worker', () => {
     await input(page).press('Control+Shift+X');
     await page.waitForTimeout(400);
     expect(await page.evaluate(() => navigator.clipboard.readText())).toBe('sentinel');
-    expect(await probe<string[]>(page, 'probe.texts()')).toContain('Target');
+    expect((await probe<string[]>(page, 'probe.texts()')).filter((text) => text === 'Target')).toHaveLength(2);
     await input(page).press('Control+Alt+X');
     await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('Target');
   });
