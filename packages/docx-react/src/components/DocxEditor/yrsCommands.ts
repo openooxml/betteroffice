@@ -256,8 +256,8 @@ export function yrsSelectionPlainText(session: YrsSession): string {
   return start === end ? '' : storyPlainText(session, range.story, start, end);
 }
 
-/** The current selection as a clipboard slice: plain text always, plus a fragment when it holds a table. */
-export function yrsClipboardSlice(session: YrsSession): DocxClipboardSlice {
+/** The current selection as a clipboard slice: plain text always, plus a fragment unless it exceeds the fragment limits. */
+export function yrsClipboardSlice(session: YrsSession, themeColors?: Readonly<Record<string, string>>): DocxClipboardSlice {
   const table = currentYrsTableTarget(session);
   if (table && !sameCell(table.range.anchor, table.range.head)) {
     return readClipboardSlice(session, { cells: table.range });
@@ -266,7 +266,7 @@ export function yrsClipboardSlice(session: YrsSession): DocxClipboardSlice {
   if (!range) return { text: '', fragment: null };
   const from = yrsStoryOffsetForLoc(session, { story: range.story, ...range.start });
   const to = yrsStoryOffsetForLoc(session, { story: range.story, ...range.end });
-  return readClipboardSlice(session, { story: range.story, from, to });
+  return readClipboardSlice(session, { story: range.story, from, to }, themeColors);
 }
 
 function tablePayload(session: YrsSession, table: YrsTableLoc): TablePayload | null {
