@@ -341,6 +341,9 @@ export function MenuList({
                 style={{
                   marginLeft: 16,
                   flexShrink: 0,
+                  maxWidth: '45%',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
                   whiteSpace: 'nowrap',
                   fontSize: 12,
                   color: colors.mutedText,
