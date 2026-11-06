@@ -915,6 +915,20 @@ describe('validClipboardFragment runs', () => {
     expect(validClipboardFragment(run({ href: 'https://example.test', tooltip: 'tab\there' }))).toBe(true);
   });
 
+  test('refuses malformed or XML-illegal strings anywhere in the payload', () => {
+    const src = 'data:image/png;base64,AA==';
+    for (const fragment of [
+      { paragraphs: [{ text: 'a\u0001' }] },
+      { paragraphs: [{ text: 'a\ud800' }] },
+      { paragraphs: [{ text: 'a', inlines: [{ text: 'a\u0001' }] }] },
+      { paragraphs: [{ text: '', inlines: [{ image: { src, alt: '\ud800' } }] }] },
+      { paragraphs: [{ text: '', inlines: [{ image: { src, alt: 'x\uffff' } }] }] },
+      { paragraphs: [{ text: '', inlines: [{ image: { src, ['k\ud800']: 1 } }] }] },
+    ]) expect(validClipboardFragment(fragment)).toBe(false);
+    expect(validClipboardFragment({ paragraphs: [{ text: '', inlines: [{ image: { src, alt: 'ok \ud83d\ude00' } }] }] })).toBe(true);
+    expect(validClipboardFragment({ paragraphs: [{ text: 'tab\there' }] })).toBe(true);
+  });
+
   test('refuses more runs than the budget', () => {
     const runs = Array.from({ length: 100_001 }, () => ({ text: 'a' }));
     expect(validClipboardFragment({ paragraphs: [{ text: 'a'.repeat(runs.length), runs }] })).toBe(false);

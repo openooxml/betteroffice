@@ -265,10 +265,11 @@ function plainObject(value: unknown): value is Record<string, unknown> {
 
 function jsonValue(value: unknown, depth = 0): boolean {
   if (depth > 32) return false;
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
+  if (value === null || typeof value === 'boolean') return true;
+  if (typeof value === 'string') return wellFormed(value);
   if (typeof value === 'number') return Number.isFinite(value);
   if (Array.isArray(value)) return value.every(entry => jsonValue(entry, depth + 1));
-  return plainObject(value) && Object.values(value).every(entry => jsonValue(entry, depth + 1));
+  return plainObject(value) && Object.entries(value).every(([key, entry]) => wellFormed(key) && jsonValue(entry, depth + 1));
 }
 
 function optionalMap(value: unknown): boolean {
@@ -279,7 +280,7 @@ function optionalMap(value: unknown): boolean {
 export function validClipboardFragment(value: unknown): value is DocxClipboardFragment {
   const budget = { cells: MAX_FRAGMENT_CELLS, text: MAX_FRAGMENT_TEXT, media: MAX_FRAGMENT_MEDIA, runs: MAX_FRAGMENT_RUNS };
   const text = (entry: unknown, allowEmpty: boolean): boolean => {
-    if (typeof entry !== 'string' || (!allowEmpty && entry === '') || LINE_BREAK.test(entry)) return false;
+    if (typeof entry !== 'string' || (!allowEmpty && entry === '') || LINE_BREAK.test(entry) || !wellFormed(entry)) return false;
     budget.text -= entry.length;
     return budget.text >= 0;
   };
@@ -419,7 +420,7 @@ export function validClipboardFragment(value: unknown): value is DocxClipboardFr
     for (const inline of paragraph.inlines) {
       if (!plainObject(inline) || Object.keys(inline).length !== 1) return false;
       if ('text' in inline) {
-        if (typeof inline.text !== 'string' || inline.text === '' || LINE_BREAK.test(inline.text)) return false;
+        if (typeof inline.text !== 'string' || inline.text === '' || LINE_BREAK.test(inline.text) || !wellFormed(inline.text)) return false;
         plain += inline.text;
       } else if ('image' in inline) {
         if (!validImage(inline.image)) return false;
