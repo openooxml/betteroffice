@@ -231,5 +231,14 @@
     "collapsePanel": "כווץ את {title}",
     "expandPanel": "הרחב את {title}",
     "rowGutter": "סימוני שורות של תוספים"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "del": "Del",
+    "escape": "Esc",
+    "pageUp": "Page Up",
+    "pageDown": "Page Down"
   }
 }

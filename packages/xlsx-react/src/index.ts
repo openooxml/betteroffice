@@ -70,6 +70,14 @@ export {
   XlsxCommandProvider,
   type XlsxCommandProviderProps,
 } from './commands/XlsxCommandProvider';
+// Keyboard shortcuts a host can remap or disable
+export {
+  resolveXlsxShortcuts,
+  type XlsxShortcutId,
+  type XlsxShortcuts,
+} from './commands/shortcuts';
+export type { ShortcutChord } from '../../../shared/keyboard/chords';
+export type { ResolvedShortcuts, ShortcutBinding, ShortcutIssue } from '../../../shared/keyboard/resolve';
 export {
   useXlsxCommands,
   useXlsxCommandState,

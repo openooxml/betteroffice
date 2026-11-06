@@ -1,8 +1,9 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import type { Rect } from '@betteroffice/xlsx';
 import { cellEditorColors } from '../viewer/cellEditorColors';
-import { commandForEvent } from '../commands/descriptors';
+import { xlsxCommandController } from '../commands/createXlsxCommandStore';
+import { XlsxCommandContext } from '../commands/XlsxCommandProvider';
 import { FormulaBarContext, presentInputValue, type FormulaBarBinding } from '../components/toolbar/FormulaBar';
 import type { WorkerDraftController } from './WorkerDraftController';
 import type { PeerlessWorkbookSession } from './usePeerlessSessionWorkbook';
@@ -94,6 +95,8 @@ export const PeerlessWorkerCellInput = memo(function PeerlessWorkerCellInput({ c
   zoom: number;
 }) {
   const { t } = useTranslation();
+  const store = useContext(XlsxCommandContext);
+  const commands = store ? xlsxCommandController(store) : null;
   const inputRef = useCallback((input: HTMLInputElement | null) => { controller.cellInput = input; }, [controller]);
   const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
   const draft = state.cell;
@@ -142,7 +145,7 @@ export const PeerlessWorkerCellInput = memo(function PeerlessWorkerCellInput({ c
     onCompositionStart={() => controller.start('cell')}
     onCompositionEnd={(event) => controller.end(event.nativeEvent.data, event.currentTarget.value)}
     onKeyDown={(event) => {
-      if (!commandForEvent(event)) event.stopPropagation();
+      if (!commands?.claimsKey(event)) event.stopPropagation();
       if (controller.key('cell', event)) return;
       if (controller.holdCellKey(event)) { event.preventDefault(); event.stopPropagation(); return; }
       if (event.key === 'Enter') { controller.commit('cell', event.shiftKey ? 'up' : 'down'); event.preventDefault(); }

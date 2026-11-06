@@ -231,5 +231,14 @@
     "collapsePanel": "{title} 접기",
     "expandPanel": "{title} 펼치기",
     "rowGutter": "추가 기능 행 표시"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "del": "Del",
+    "escape": "Esc",
+    "pageUp": "Page Up",
+    "pageDown": "Page Down"
   }
 }

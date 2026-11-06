@@ -231,5 +231,14 @@
     "collapsePanel": "Collapse {title}",
     "expandPanel": "Expand {title}",
     "rowGutter": "Plugin row markers"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "del": "Del",
+    "escape": "Esc",
+    "pageUp": "Page Up",
+    "pageDown": "Page Down"
   }
 }

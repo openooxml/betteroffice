@@ -231,5 +231,14 @@
     "collapsePanel": "Contraer {title}",
     "expandPanel": "Expandir {title}",
     "rowGutter": "Marcadores de fila de complementos"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Mayús",
+    "del": "Supr",
+    "escape": "Esc",
+    "pageUp": "Re Pág",
+    "pageDown": "Av Pág"
   }
 }

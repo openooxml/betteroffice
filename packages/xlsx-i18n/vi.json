@@ -231,5 +231,14 @@
     "collapsePanel": "Thu gọn {title}",
     "expandPanel": "Mở rộng {title}",
     "rowGutter": "Dấu hàng của plugin"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "del": "Del",
+    "escape": "Esc",
+    "pageUp": "Page Up",
+    "pageDown": "Page Down"
   }
 }

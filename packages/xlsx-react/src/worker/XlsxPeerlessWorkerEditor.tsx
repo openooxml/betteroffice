@@ -16,7 +16,7 @@ import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useReduc
 import type { KeyboardEvent, MouseEvent, SetStateAction, SyntheticEvent } from 'react';
 import { flushSync } from 'react-dom';
 import { createXlsxCommandController, XlsxCommandAdmissionError, XlsxHostRefusalError } from '../commands/createXlsxCommandStore';
-import { commandForEvent, isMacPlatform } from '../commands/descriptors';
+import { isMacPlatform } from '../commands/descriptors';
 import { useContextMenu } from '../../../../shared/react-toolbar/ContextMenu';
 import type { OverflowMenuEntry } from '../../../../shared/react-toolbar/MenuList';
 import { xlsxContextMenuEntries } from '../contextMenu/menus';
@@ -1353,6 +1353,11 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     } catch (error) { refused = { error }; }
     return { write, resolve, reject, refused, marker };
   };
+  const plainClipboardAccess = (): ReturnType<typeof clipboardAccess> => {
+    const read = navigator.clipboard.readText().then((text) => ({ text, html: null }));
+    void read.catch(() => {});
+    return { read };
+  };
   const clipboard = (kind: 'copy' | 'cut' | 'paste', access: ReturnType<typeof clipboardAccess>): Promise<unknown> => {
     if (!clipboardAllowed(kind)) {
       const refusal = new XlsxCommandAdmissionError('editor-unavailable');
@@ -1436,13 +1441,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     if (!clipboardAllowed(base) || draftController.getSnapshot().cell) {
       return handledRejection(new XlsxCommandAdmissionError('editor-unavailable'));
     }
-    let access: ReturnType<typeof clipboardAccess>;
-    if (kind === 'pastePlainText') {
-      const read = navigator.clipboard.readText().then((text) => ({ text, html: null }));
-      void read.catch(() => {});
-      access = { read };
-    } else access = clipboardAccess(base);
-    return clipboard(base, access);
+    return clipboard(base, kind === 'pastePlainText' ? plainClipboardAccess() : clipboardAccess(base));
   };
   const settledFor = (owner: NonNullable<typeof run>) => ownerRef.current === owner && owner.ready && owner.current &&
     !owner.retiring && !owner.failure && !coordinator.pending && !draftController.ownsFocus &&
@@ -1617,7 +1616,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       activate: (name) => { pendingActivation.current = name.toLowerCase(); bumpActivation(); },
     },
   });
-  useCommandShortcuts(commands, rootRef);
+  useCommandShortcuts(commands, rootRef, props);
   useEffect(() => {
     const name = pendingActivation.current;
     const entry = name === null ? undefined : catalog.find((sheet) => sheet.name.toLowerCase() === name);
@@ -1797,7 +1796,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   };
   const onKeyDown = (event: KeyboardEvent) => {
     if (fromPlugin(event) || !run?.ready || run.failure || !selectionRef.current || !viewRef.current ||
-      draftController.isComposing('formula') || commandForEvent(event)) return;
+      draftController.isComposing('formula') || commands.claimsKey(event)) return;
     const mod = event.metaKey || event.ctrlKey;
     const draft = draftController.getSnapshot().cell;
     if (draft) {
@@ -1834,10 +1833,11 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
         placeSelection(activeRef.current, next); return true;
       } }, task, cancel)) task();
     };
-    if (mod && ['c', 'x', 'v'].includes(event.key.toLowerCase())) {
-      const kind = event.key.toLowerCase() === 'c' ? 'copy' : event.key.toLowerCase() === 'x' ? 'cut' : 'paste';
+    const pressed = commands.clipboardKey(event);
+    if (pressed) {
+      const kind = pressed === 'pastePlainText' ? 'paste' : pressed;
       if (clipboardAllowed(kind)) {
-        const access = clipboardAccess(kind);
+        const access = pressed === 'pastePlainText' ? plainClipboardAccess() : clipboardAccess(kind);
         const refuse = () => access.reject?.(new XlsxCommandAdmissionError('editor-unavailable'));
         afterNavigation(() => draftController.getSnapshot().cell ? refuse() : clipboard(kind, access), refuse);
       }

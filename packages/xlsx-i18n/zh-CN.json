@@ -231,5 +231,14 @@
     "collapsePanel": "折叠{title}",
     "expandPanel": "展开{title}",
     "rowGutter": "插件行标记"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "del": "Del",
+    "escape": "Esc",
+    "pageUp": "Page Up",
+    "pageDown": "Page Down"
   }
 }

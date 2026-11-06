@@ -58,7 +58,6 @@ import {
   XlsxCommandAdmissionError,
   XlsxHostRefusalError,
 } from './commands/createXlsxCommandStore';
-import { commandForEvent } from './commands/descriptors';
 import { useXlsxCommand } from './commands/hooks';
 import {
   createInputCoordinator,
@@ -428,6 +427,8 @@ export function XlsxEditorContent({
   plugins,
   pluginGrants,
   onPluginError,
+  shortcuts,
+  onShortcutIssue,
 }: Omit<XlsxInThreadEditorProps, 'file'> & { file?: Uint8Array }) {
   const { t } = useTranslation();
   const collaborationEnabled = collaboration !== undefined;
@@ -1830,7 +1831,7 @@ export function XlsxEditorContent({
     });
   }, [captureTarget, cellClipboard, copyTarget, gatedClear, applyResult, readOnly, coordinator]);
 
-  const pasteSelection = useCallback(() => {
+  const pasteSelection = useCallback((plain = false) => {
     const handle = handleRef.current;
     const current = selectionRef.current;
     const selection = current && anchorSelection(current, workbookSelectionMerges(handle, activeSheetRef.current));
@@ -1839,7 +1840,8 @@ export function XlsxEditorContent({
     const accepted = cellClipboard.current;
     const reading = (async () => {
       try {
-        return await readCellClipboard();
+        const data = await readCellClipboard();
+        return plain ? { text: data.text, html: null } : data;
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
         return null;
@@ -1968,9 +1970,8 @@ export function XlsxEditorContent({
     (e: React.KeyboardEvent) => {
       const handle = handleRef.current;
       if (!handle || !selection || !sheetInfo || editing || fromPlugin(e)) return;
-      if (commandForEvent(e)) return;
+      if (commandController.claimsKey(e)) return;
       const mod = e.metaKey || e.ctrlKey;
-      const lower = e.key.toLowerCase();
 
       // a selected chart owns the keyboard: arrows nudge it, escape drops it,
       // and nothing else reaches the cells hidden behind it, the grid overlay
@@ -2003,22 +2004,13 @@ export function XlsxEditorContent({
         return;
       }
 
-      if (mod) {
-        if (lower === 'c') {
-          void copySelection();
-          e.preventDefault();
-          return;
-        }
-        if (lower === 'v') {
-          void pasteSelection();
-          e.preventDefault();
-          return;
-        }
-        if (lower === 'x') {
-          cutSelection();
-          e.preventDefault();
-          return;
-        }
+      const clipboard = commandController.clipboardKey(e);
+      if (clipboard) {
+        if (clipboard === 'copy') void copySelection();
+        else if (clipboard === 'cut') cutSelection();
+        else void pasteSelection(clipboard === 'pastePlainText');
+        e.preventDefault();
+        return;
       }
 
       const request = selectionDataRequest(e);
@@ -2429,7 +2421,7 @@ export function XlsxEditorContent({
     focusGrid: focusContainer,
   };
   useXlsxCommandBinding(commandController, bridge);
-  useCommandShortcuts(commandController, rootRef);
+  useCommandShortcuts(commandController, rootRef, { shortcuts, onShortcutIssue });
 
   const startComposition = (source: InputDraft['source']) => {
     let settle: (ended: boolean) => void = () => {};
@@ -2731,7 +2723,7 @@ export function XlsxEditorContent({
                     onCompositionStart={() => startComposition('cell')}
                     onCompositionEnd={endComposition}
                     onKeyDown={(e) => {
-                      if (!commandForEvent(e)) e.stopPropagation();
+                      if (!commandController.claimsKey(e)) e.stopPropagation();
                       if (e.nativeEvent.isComposing || e.keyCode === 229) return;
                       if (e.key === 'Enter') {
                         commitEditor(e.shiftKey ? 'up' : 'down');
