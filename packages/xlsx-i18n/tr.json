@@ -231,5 +231,14 @@
     "collapsePanel": "{title} daralt",
     "expandPanel": "{title} genişlet",
     "rowGutter": "Eklenti satır işaretleri"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "del": "Del",
+    "escape": "Esc",
+    "pageUp": "Page Up",
+    "pageDown": "Page Down"
   }
 }

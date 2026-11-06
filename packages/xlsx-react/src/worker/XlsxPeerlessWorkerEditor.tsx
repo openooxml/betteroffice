@@ -16,7 +16,7 @@ import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useReduc
 import type { KeyboardEvent, MouseEvent, SetStateAction, SyntheticEvent } from 'react';
 import { flushSync } from 'react-dom';
 import { createXlsxCommandController, XlsxCommandAdmissionError, XlsxHostRefusalError } from '../commands/createXlsxCommandStore';
-import { commandForEvent, isMacPlatform } from '../commands/descriptors';
+import { isMacPlatform } from '../commands/descriptors';
 import { useContextMenu } from '../../../../shared/react-toolbar/ContextMenu';
 import type { OverflowMenuEntry } from '../../../../shared/react-toolbar/MenuList';
 import { xlsxContextMenuEntries } from '../contextMenu/menus';
@@ -1617,7 +1617,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       activate: (name) => { pendingActivation.current = name.toLowerCase(); bumpActivation(); },
     },
   });
-  useCommandShortcuts(commands, rootRef);
+  useCommandShortcuts(commands, rootRef, props);
   useEffect(() => {
     const name = pendingActivation.current;
     const entry = name === null ? undefined : catalog.find((sheet) => sheet.name.toLowerCase() === name);
@@ -1797,7 +1797,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   };
   const onKeyDown = (event: KeyboardEvent) => {
     if (fromPlugin(event) || !run?.ready || run.failure || !selectionRef.current || !viewRef.current ||
-      draftController.isComposing('formula') || commandForEvent(event)) return;
+      draftController.isComposing('formula') || commands.claimsKey(event)) return;
     const mod = event.metaKey || event.ctrlKey;
     const draft = draftController.getSnapshot().cell;
     if (draft) {

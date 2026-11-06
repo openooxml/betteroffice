@@ -231,5 +231,14 @@
     "collapsePanel": "{title} を折りたたむ",
     "expandPanel": "{title} を展開する",
     "rowGutter": "プラグインの行マーカー"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "del": "Del",
+    "escape": "Esc",
+    "pageUp": "Page Up",
+    "pageDown": "Page Down"
   }
 }

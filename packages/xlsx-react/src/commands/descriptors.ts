@@ -6,6 +6,18 @@ import type {
   XlsxCommandShortcut,
   XlsxPluginCommandId,
 } from './types';
+import {
+  normalizeChord as normalizeHostChord,
+  parseChord,
+} from '../../../../shared/keyboard/chords';
+
+export { formatChord, isMacPlatform, matchesChord } from '../../../../shared/keyboard/chords';
+
+/** `chord` in canonical form, or null; contributed chords name `Mod`, never a physical `Ctrl`. */
+export function normalizeChord(chord: string): string | null {
+  const canonical = normalizeHostChord(chord);
+  return canonical && !parseChord(canonical).ctrl ? canonical : null;
+}
 
 type DescriptorTable = { readonly [K in XlsxCommandId]: XlsxCommandDescriptor<K> };
 
@@ -51,10 +63,12 @@ export const XLSX_COMMAND_DESCRIPTORS: DescriptorTable = Object.freeze({
   proposalsPanel: descriptor('proposalsPanel', 'proposals.panelLabel', false),
   proposalAccept: descriptor('proposalAccept', 'proposals.accept', true),
   proposalReject: descriptor('proposalReject', 'proposals.reject', false),
-  cut: descriptor('cut', 'commands.cut', true),
-  copy: descriptor('copy', 'commands.copy', false),
-  paste: descriptor('paste', 'commands.paste', true),
-  pastePlainText: descriptor('pastePlainText', 'commands.pastePlainText', true),
+  cut: descriptor('cut', 'commands.cut', true, [plain('Mod+X')]),
+  copy: descriptor('copy', 'commands.copy', false, [plain('Mod+C')]),
+  paste: descriptor('paste', 'commands.paste', true, [plain('Mod+V')]),
+  pastePlainText: descriptor('pastePlainText', 'commands.pastePlainText', true, [
+    plain('Mod+Shift+V'),
+  ]),
   clearContents: descriptor('clearContents', 'commands.clearContents', true),
   insertRows: descriptor('insertRows', 'commands.insertRowsAbove', true),
   insertColumns: descriptor('insertColumns', 'commands.insertColumnsLeft', true),
@@ -66,15 +80,8 @@ export const XLSX_COMMAND_DESCRIPTORS: DescriptorTable = Object.freeze({
   moveSheet: descriptor('moveSheet', 'commands.moveSheetLeft', true),
 });
 
-/**
- * Chords the grid handles itself before command shortcuts run (the clipboard
- * needs the native event), shown next to their commands in menus.
- */
-const GRID_SHORTCUTS: Partial<Record<XlsxCommandId, string>> = {
-  cut: 'Mod+X',
-  copy: 'Mod+C',
-  paste: 'Mod+V',
-  pastePlainText: 'Mod+Shift+V',
+/** Keys the grid handles itself, shown next to their commands in menus but never remappable. */
+export const GRID_SHORTCUTS: Partial<Record<XlsxCommandId, string>> = {
   clearContents: 'Delete',
 };
 
@@ -138,85 +145,6 @@ export function commandLabelKey<K extends XlsxCommandId>(
   return XLSX_COMMAND_DESCRIPTORS[id].labelKey;
 }
 
-interface ParsedChord {
-  mod: boolean;
-  shift: boolean;
-  alt: boolean;
-  key: string;
-}
-
-function parseChord(chord: string): ParsedChord {
-  const parts = chord.split('+');
-  const key = parts.length > 1 && parts[parts.length - 1] === '' ? '+' : parts[parts.length - 1];
-  const modifiers = new Set(parts.slice(0, -1));
-  return {
-    mod: modifiers.has('Mod'),
-    shift: modifiers.has('Shift'),
-    alt: modifiers.has('Alt'),
-    key: key.toLowerCase(),
-  };
-}
-
-const MODIFIERS: ReadonlySet<string> = new Set(['Mod', 'Shift', 'Alt']);
-
-/** `chord` in canonical form (`Mod+Alt+Shift+key`), or null when it is not a chord. */
-export function normalizeChord(chord: string): string | null {
-  if (typeof chord !== 'string' || chord.length === 0) return null;
-  const parts = chord.split('+');
-  const modifiers =
-    parts.length > 1 && parts[parts.length - 1] === '' ? parts.slice(0, -2) : parts.slice(0, -1);
-  if (!modifiers.every((modifier) => MODIFIERS.has(modifier))) return null;
-  const parsed = parseChord(chord);
-  if (parsed.key.length === 0) return null;
-  return [parsed.mod && 'Mod', parsed.alt && 'Alt', parsed.shift && 'Shift', parsed.key]
-    .filter(Boolean)
-    .join('+');
-}
-
-export function isMacPlatform(): boolean {
-  return typeof navigator !== 'undefined' && /Mac|iPod|iPhone|iPad/.test(navigator.platform);
-}
-
-type ChordEvent = Pick<KeyboardEvent, 'key' | 'metaKey' | 'ctrlKey' | 'shiftKey' | 'altKey'>;
-
-/** Whether a keydown event presses `chord`. */
-export function matchesChord(chord: string, event: ChordEvent, mac = isMacPlatform()): boolean {
-  const parsed = parseChord(chord);
-  const mod = mac ? event.metaKey : event.ctrlKey;
-  const other = mac ? event.ctrlKey : event.metaKey;
-  return (
-    parsed.mod === mod &&
-    !other &&
-    parsed.shift === event.shiftKey &&
-    parsed.alt === event.altKey &&
-    event.key.toLowerCase() === parsed.key
-  );
-}
-
-/** A chord as people read it on the current platform (`Ctrl+B`, `⌘B`). */
-export function formatChord(chord: string, mac = isMacPlatform()): string {
-  const parsed = parseChord(chord);
-  const key = parsed.key.length === 1 ? parsed.key.toUpperCase() : parsed.key.charAt(0).toUpperCase() + parsed.key.slice(1);
-  if (mac) {
-    return `${parsed.mod ? '⌘' : ''}${parsed.alt ? '⌥' : ''}${parsed.shift ? '⇧' : ''}${key}`;
-  }
-  return [parsed.mod && 'Ctrl', parsed.alt && 'Alt', parsed.shift && 'Shift', key]
-    .filter(Boolean)
-    .join('+');
-}
-
-/** The display chord for a command invoked with `args`, if it has one. */
-export function commandShortcut<K extends XlsxCommandId>(
-  id: K,
-  args?: XlsxCommandArgs[K]
-): string | null {
-  const shortcuts = XLSX_COMMAND_DESCRIPTORS[id].shortcuts as readonly XlsxCommandShortcut<K>[];
-  const key = JSON.stringify(args ?? null);
-  const match = shortcuts.find((shortcut) => JSON.stringify(shortcut.args) === key);
-  const grid = GRID_SHORTCUTS[id];
-  return match ? formatChord(match.chord) : grid ? formatChord(grid) : null;
-}
-
 /** Every shortcut binding, in descriptor order. */
 export const XLSX_COMMAND_BINDINGS: readonly { id: XlsxCommandId; shortcut: XlsxCommandShortcut }[] =
   Object.freeze(
@@ -260,6 +188,15 @@ const GRID_KEYS: ReadonlySet<string> = new Set([
 const GRID_MOD_KEYS: ReadonlySet<string> = new Set(['a', 'c', 'v', 'x']);
 
 /**
+ * Whether the grid keeps a canonical chord whatever a host maps: navigation and editing keys
+ * with any modifiers, and select all. The clipboard chords are commands a host may move.
+ */
+export function gridKeepsChord(canonical: string): boolean {
+  const parsed = parseChord(canonical);
+  return GRID_KEYS.has(parsed.key) || ((parsed.mod || parsed.ctrl) && parsed.key === 'a');
+}
+
+/**
  * Whether the grid consumes a canonical chord before shortcuts are dispatched: navigation and
  * editing keys with any modifiers, typing, select all and the clipboard.
  */
@@ -268,11 +205,4 @@ export function gridOwnsChord(canonical: string): boolean {
   if (GRID_KEYS.has(parsed.key)) return true;
   if (parsed.mod) return GRID_MOD_KEYS.has(parsed.key);
   return !parsed.alt && parsed.key.length === 1;
-}
-
-/** The command a keydown event invokes, if any. */
-export function commandForEvent(
-  event: ChordEvent
-): { id: XlsxCommandId; shortcut: XlsxCommandShortcut } | null {
-  return XLSX_COMMAND_BINDINGS.find(({ shortcut }) => matchesChord(shortcut.chord, event)) ?? null;
 }

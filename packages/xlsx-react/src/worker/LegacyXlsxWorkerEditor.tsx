@@ -21,7 +21,6 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { CSSProperties, KeyboardEvent, MouseEvent, SetStateAction, SyntheticEvent } from 'react';
 import { flushSync } from 'react-dom';
 import { createXlsxCommandController, XlsxCommandAdmissionError } from '../commands/createXlsxCommandStore';
-import { commandForEvent } from '../commands/descriptors';
 
 import type { InputDraft, InputSeal } from '../commands/inputCoordinator';
 import { inPluginChrome, pluginEventStore } from '../commands/pluginEvents';
@@ -1332,7 +1331,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   };
   const onKeyDown = (event: KeyboardEvent) => {
     if (fromPlugin(event) || runRef.current?.failure || !viewRef.current || !selectionRef.current ||
-      editingRef.current || commandForEvent(event)) return;
+      editingRef.current || commands.claimsKey(event)) return;
     const mod = event.metaKey || event.ctrlKey;
     const chart = chartRef.current;
     if (chart) {
@@ -1608,7 +1607,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     },
     afterPaint, focusGrid: focus, refuse: (reason) => setRefusal(reason.message),
   });
-  useCommandShortcuts(commands, rootRef);
+  useCommandShortcuts(commands, rootRef, props);
 
   useEffect(() => {
     if (!capturedFormat || !selection || !acceptInput() || dragging.current) return;
@@ -1826,7 +1825,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
                       }}
                       onCompositionStart={() => startComposition('cell')} onCompositionEnd={(event) => endComposition(event.currentTarget.value)}
                       onKeyDown={(event) => {
-                        if (!commandForEvent(event)) event.stopPropagation();
+                        if (!commands.shortcutAt(event)) event.stopPropagation();
                         if (event.nativeEvent.isComposing || event.keyCode === 229) return;
                         if (event.key === 'Enter') { commitDraft('cell', event.shiftKey ? 'up' : 'down'); event.preventDefault(); }
                         else if (event.key === 'Tab') { commitDraft('cell', event.shiftKey ? 'left' : 'right'); event.preventDefault(); }

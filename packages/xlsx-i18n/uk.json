@@ -231,5 +231,14 @@
     "collapsePanel": "Згорнути {title}",
     "expandPanel": "Розгорнути {title}",
     "rowGutter": "Позначки рядків плагінів"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "del": "Del",
+    "escape": "Esc",
+    "pageUp": "Page Up",
+    "pageDown": "Page Down"
   }
 }

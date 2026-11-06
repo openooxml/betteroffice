@@ -58,7 +58,6 @@ import {
   XlsxCommandAdmissionError,
   XlsxHostRefusalError,
 } from './commands/createXlsxCommandStore';
-import { commandForEvent } from './commands/descriptors';
 import { useXlsxCommand } from './commands/hooks';
 import {
   createInputCoordinator,
@@ -428,6 +427,8 @@ export function XlsxEditorContent({
   plugins,
   pluginGrants,
   onPluginError,
+  shortcuts,
+  onShortcutIssue,
 }: Omit<XlsxInThreadEditorProps, 'file'> & { file?: Uint8Array }) {
   const { t } = useTranslation();
   const collaborationEnabled = collaboration !== undefined;
@@ -1968,7 +1969,7 @@ export function XlsxEditorContent({
     (e: React.KeyboardEvent) => {
       const handle = handleRef.current;
       if (!handle || !selection || !sheetInfo || editing || fromPlugin(e)) return;
-      if (commandForEvent(e)) return;
+      if (commandController.claimsKey(e)) return;
       const mod = e.metaKey || e.ctrlKey;
       const lower = e.key.toLowerCase();
 
@@ -2429,7 +2430,7 @@ export function XlsxEditorContent({
     focusGrid: focusContainer,
   };
   useXlsxCommandBinding(commandController, bridge);
-  useCommandShortcuts(commandController, rootRef);
+  useCommandShortcuts(commandController, rootRef, { shortcuts, onShortcutIssue });
 
   const startComposition = (source: InputDraft['source']) => {
     let settle: (ended: boolean) => void = () => {};
@@ -2731,7 +2732,7 @@ export function XlsxEditorContent({
                     onCompositionStart={() => startComposition('cell')}
                     onCompositionEnd={endComposition}
                     onKeyDown={(e) => {
-                      if (!commandForEvent(e)) e.stopPropagation();
+                      if (!commandController.shortcutAt(e)) e.stopPropagation();
                       if (e.nativeEvent.isComposing || e.keyCode === 229) return;
                       if (e.key === 'Enter') {
                         commitEditor(e.shiftKey ? 'up' : 'down');

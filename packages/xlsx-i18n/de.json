@@ -231,5 +231,14 @@
     "collapsePanel": "{title} einklappen",
     "expandPanel": "{title} ausklappen",
     "rowGutter": "Zeilenmarkierungen von Plugins"
+  },
+  "keys": {
+    "ctrl": "Strg",
+    "alt": "Alt",
+    "shift": "Umschalt",
+    "del": "Entf",
+    "escape": "Esc",
+    "pageUp": "Bild auf",
+    "pageDown": "Bild ab"
   }
 }
