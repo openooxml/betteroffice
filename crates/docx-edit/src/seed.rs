@@ -10803,7 +10803,12 @@ mod shape_style_seed_tests {
         assert!(shapes.is_empty());
         let request = serde_json::from_value(json!({
             "determinism": {"seed": package_digest(bytes), "now": "2030-01-02T03:04:05.006Z"},
-            "document": package["document"], "headerEntries": package["headerEntries"],
+            "document": {
+                "content": package["document"]["content"],
+                "finalSectionProperties": package["document"]["finalSectionProperties"],
+                "comments": package["document"]["comments"],
+            },
+            "headerEntries": package["headerEntries"],
             "relationshipEntries": package["relationshipEntries"],
             "selective": {"changedParaIds": []}, "options": {"updateModifiedDate": false}
         }))

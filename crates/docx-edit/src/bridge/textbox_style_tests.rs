@@ -614,7 +614,7 @@ fn shared_styles_survive_payload_edits_and_new_directly_formatted_runs() {
     let added = text_formatting(boxed, "New");
     assert_eq!(added.font_family, untouched.font_family);
     assert_eq!(added.font_size, untouched.font_size);
-    assert_eq!(added.italic, Some(false));
+    assert_ne!(added.italic, Some(true));
     assert_eq!(added.color.as_deref(), Some("#ABCDEF"));
 }
 

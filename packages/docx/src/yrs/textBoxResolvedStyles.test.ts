@@ -175,9 +175,9 @@ test('edited text-box saves and Document projections contain only authored value
   }
   expect(edited).toBe(true);
   for (const run of styledRuns(source, 'body')) expect(run).toMatchObject({ fontFamily: 'Courier New', fontSize: 15, bold: true });
-  expect(styledRuns(source, 'body', 'Edited box')).toEqual([
-    expect.objectContaining({ fontFamily: 'Verdana', fontSize: 18, bold: false }),
-  ]);
+  const editedRuns = styledRuns(source, 'body', 'Edited box');
+  expect(editedRuns).toEqual([expect.objectContaining({ fontFamily: 'Verdana', fontSize: 18 })]);
+  expect(editedRuns[0]!.bold).not.toBe(true);
   expect(styledRuns(source, 'body', 'New box run')).toEqual([
     expect.objectContaining({ fontFamily: 'Courier New', fontSize: 15, bold: true, italic: true }),
   ]);

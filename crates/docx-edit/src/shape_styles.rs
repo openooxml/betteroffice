@@ -64,9 +64,13 @@ fn references(value: &Value, styles: &mut BTreeSet<String>) {
 
 fn collect(value: &Value, legacy: bool, styles: &mut BTreeSet<String>) -> bool {
     match value {
-        Value::Array(values) => values
-            .iter()
-            .fold(false, |found, value| collect(value, false, styles) || found),
+        Value::Array(values) => {
+            let mut found = false;
+            for value in values {
+                found |= collect(value, false, styles);
+            }
+            found
+        }
         Value::Object(values) => {
             let content = (value.get("type").and_then(Value::as_str) == Some("shape"))
                 .then(|| value.pointer("/textBody/content"))
