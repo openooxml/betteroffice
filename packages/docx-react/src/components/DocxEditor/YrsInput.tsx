@@ -2054,7 +2054,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       deleteSelection,
       pasteContent,
       copySelection(cut) {
-        if (cut && !hasTextRange()) return false;
+        if (cut && (session?.cellSelection() || !hasTextRange())) return false;
         const copied = copyAfterReplica(cut);
         if (copied) {
           if (cut) deleteSelection(true, copied);

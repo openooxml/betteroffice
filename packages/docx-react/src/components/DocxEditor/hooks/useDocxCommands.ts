@@ -797,11 +797,13 @@ export function useDocxCommandBinding(inputs: DocxCommandInputs): DocxCommandsHa
         case 'pasteAsPlainText': {
           const paged = current.pagedEditorRef.current;
           if (!paged) return executed(false);
+          const session = paged.getYrsSession();
           const target = () =>
             JSON.stringify([
               documentVersion.current,
-              latest.current.session ? readSessionVersion(latest.current.session) : null,
-              paged.getSelectionRange(),
+              session ? readSessionVersion(session) : null,
+              session?.selection() ?? null,
+              session?.cellSelection() ?? null,
             ]);
           const opened = target();
           return (async () => {
@@ -809,7 +811,7 @@ export function useDocxCommandBinding(inputs: DocxCommandInputs): DocxCommandsHa
               const fragment = id === 'paste' ? await readClipboardFragment() : null;
               const text = await navigator.clipboard.readText();
               if (!text && !fragment) return executed(false);
-              if (target() !== opened) {
+              if (paged.getYrsSession() !== session || target() !== opened) {
                 return {
                   ok: false,
                   failure: { code: 'target-changed', message: env.translate('commands.reasons.targetChanged') },
