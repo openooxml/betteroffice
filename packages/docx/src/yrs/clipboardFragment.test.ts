@@ -876,6 +876,30 @@ describe('validClipboardFragment runs', () => {
     expect(validClipboardFragment(cell({ unknownKey: true }))).toBe(false);
   });
 
+  test('refuses malformed Unicode in run text and link metadata', () => {
+    expect(validClipboardFragment(run({ href: 'https://example.test', tooltip: '\ud800' }))).toBe(false);
+    expect(validClipboardFragment(run({ href: 'https://example.test/\udc00' }))).toBe(false);
+    expect(validClipboardFragment({ paragraphs: [{ text: 'a\ud800', runs: [{ text: 'a\ud800' }] }] })).toBe(false);
+    expect(validClipboardFragment(run({ href: 'https://example.test', tooltip: 'ok \ud83d\ude00' }))).toBe(true);
+    expect(validClipboardFragment(run({ href: 'https://example.test', tooltip: '' }))).toBe(false);
+  });
+
+  test('a copy drops a malformed tooltip but keeps the link', () => {
+    const reader = fakeReader({ body: [textSegment('x', { hyperlink: { href: 'https://example.test', tooltip: '\ud800' } })] }, {});
+    expect(readClipboardSlice(reader, { story: 'body', from: 0, to: 1 }).fragment?.paragraphs[0]?.runs).toEqual([
+      { text: 'x', format: { other: {} }, href: 'https://example.test' },
+    ]);
+  });
+
+  test('refuses attribute values Word would not open', () => {
+    for (const attributes of [
+      { underline: { style: 'Evil' } }, { underline: { style: 'single', color: 'red' } }, { highlight: 'orange' },
+      { fontSize: { size: 0 } }, { fontSize: { size: -4 } }, { fontSize: { size: 21.5 } }, { characterSpacing: { scale: 0 } },
+      { emphasisMark: { type: 'star' } }, { textEffect: { effect: 'flame' } }, { textColor: { rgb: '12345' } },
+    ]) expect(validClipboardFragment(other(attributes))).toBe(false);
+    expect(validClipboardFragment(other({ highlight: '#A1B2C3', underline: { style: 'wave', color: 'auto' }, characterSpacing: { spacing: -20, position: 6 } }))).toBe(true);
+  });
+
   test('refuses more runs than the budget', () => {
     const runs = Array.from({ length: 100_001 }, () => ({ text: 'a' }));
     expect(validClipboardFragment({ paragraphs: [{ text: 'a'.repeat(runs.length), runs }] })).toBe(false);

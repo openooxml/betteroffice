@@ -106,7 +106,6 @@ const MAX_FRAGMENT_TEXT = 1_000_000;
 const MAX_FRAGMENT_DEPTH = 8;
 const MAX_FRAGMENT_MEDIA = 64 * 1024 * 1024;
 const MAX_FRAGMENT_RUNS = 100_000;
-const MAX_RUN_NUMBER = 100_000;
 const MAX_HREF_LENGTH = 8192;
 const MAX_TOOLTIP_LENGTH = 1024;
 const RUN_ATTRIBUTE_TEXT = /^[\p{L}\p{M}\p{N} _.,'#&()+-]{1,128}$/u;
@@ -121,8 +120,8 @@ const DEFAULT_THEME_COLORS: Readonly<Record<string, string>> = {
   accent3: 'A5A5A5', accent4: 'FFC000', accent5: '5B9BD5', accent6: '70AD47', hlink: '0563C1', folHlink: '954F72',
 };
 
-type RunFieldShape = 'text' | 'number' | 'boolean' | 'language';
-type RunAttributeShape = true | false | 'text' | Readonly<Record<string, RunFieldShape>>;
+type FieldCheck = (value: unknown) => boolean;
+type RunAttributeShape = true | false | FieldCheck | Readonly<Record<string, FieldCheck>>;
 const FORMAT_DELTA_KEYS = new Set(['bold', 'italic', 'underline', 'strike', 'color', 'highlight', 'fontSize', 'fontFamily', 'language', 'other']);
 const LANGUAGE_SLOTS = new Set(['latin', 'eastAsia', 'bidi']);
 
@@ -133,6 +132,17 @@ function validLanguageTag(value: unknown): boolean {
   return /^[a-z]{2,8}$/iu.test(first) && rest.every(part => /^[a-z0-9]{1,8}$/iu.test(part));
 }
 
+const oneOf = (...values: string[]): FieldCheck => value => typeof value === 'string' && values.includes(value);
+const integer = (min: number, max: number): FieldCheck => value =>
+  typeof value === 'number' && Number.isInteger(value) && value >= min && value <= max;
+const fontName: FieldCheck = value => typeof value === 'string' && RUN_ATTRIBUTE_TEXT.test(value);
+const hexColor: FieldCheck = value => typeof value === 'string' && (/^[0-9a-f]{6}$/iu.test(value) || value === 'auto');
+const HIGHLIGHT_NAMES = ['black', 'blue', 'cyan', 'green', 'magenta', 'red', 'yellow', 'white', 'darkBlue', 'darkCyan',
+  'darkGreen', 'darkMagenta', 'darkRed', 'darkYellow', 'darkGray', 'lightGray'];
+const highlight: FieldCheck = value => typeof value === 'string' && (HIGHLIGHT_NAMES.includes(value) || /^#?[0-9a-f]{6}$/iu.test(value));
+const UNDERLINE_STYLES = ['single', 'words', 'double', 'thick', 'dotted', 'dottedHeavy', 'dash', 'dashedHeavy', 'dashLong',
+  'dashLongHeavy', 'dotDash', 'dashDotHeavy', 'dotDotDash', 'dashDotDotHeavy', 'wave', 'wavyHeavy', 'wavyDouble'];
+
 /**
  * Run attributes a clipboard run may carry. Pasted payloads come from any page that can write the
  * clipboard, so this list and these shapes are checked on paste as well as on copy. References that
@@ -141,30 +151,23 @@ function validLanguageTag(value: unknown): boolean {
 const RUN_ATTRIBUTE_SHAPES: Readonly<Record<string, RunAttributeShape>> = {
   bold: true, italic: true, boldCs: true, italicCs: true, superscript: true, subscript: true,
   allCaps: true, smallCaps: true, emboss: true, imprint: true, textShadow: true, textOutline: true,
-  hidden: true, rtl: true, cs: true, doubleStrike: true, snapToGrid: false, highlight: 'text',
-  underline: { style: 'text', color: 'text' },
-  strike: { double: 'boolean' },
-  textColor: { rgb: 'text' },
-  fontSize: { size: 'number', sizeCs: 'number' },
-  fontFamily: { ascii: 'text', hAnsi: 'text', eastAsia: 'text', cs: 'text' },
-  characterSpacing: { spacing: 'number', position: 'number', scale: 'number', kerning: 'number' },
-  emphasisMark: { type: 'text' },
-  textEffect: { effect: 'text' },
-  language: { latin: 'language', eastAsia: 'language', bidi: 'language' },
+  hidden: true, rtl: true, cs: true, doubleStrike: true, snapToGrid: false, highlight,
+  underline: { style: oneOf(...UNDERLINE_STYLES), color: hexColor },
+  strike: { double: value => typeof value === 'boolean' },
+  textColor: { rgb: hexColor },
+  fontSize: { size: integer(1, 3276), sizeCs: integer(1, 3276) },
+  fontFamily: { ascii: fontName, hAnsi: fontName, eastAsia: fontName, cs: fontName },
+  characterSpacing: { spacing: integer(-31680, 31680), position: integer(-3168, 3168), scale: integer(1, 600), kerning: integer(0, 3276) },
+  emphasisMark: { type: oneOf('dot', 'comma', 'circle', 'underDot') },
+  textEffect: { effect: oneOf('blinkBackground', 'lights', 'antsBlack', 'antsRed', 'shimmer', 'sparkle') },
+  language: { latin: validLanguageTag, eastAsia: validLanguageTag, bidi: validLanguageTag },
 };
-
-function runFieldOk(shape: RunFieldShape, value: unknown): boolean {
-  if (shape === 'language') return validLanguageTag(value);
-  if (shape === 'text') return typeof value === 'string' && RUN_ATTRIBUTE_TEXT.test(value);
-  if (shape === 'number') return typeof value === 'number' && Number.isFinite(value) && Math.abs(value) <= MAX_RUN_NUMBER;
-  return typeof value === 'boolean';
-}
 
 function runAttributeOk(shape: RunAttributeShape, value: unknown): boolean {
   if (typeof shape === 'boolean') return value === shape;
-  if (shape === 'text') return runFieldOk('text', value);
+  if (typeof shape === 'function') return shape(value);
   return plainObject(value) && Object.keys(value).length > 0 &&
-    Object.entries(value).every(([field, entry]) => Object.hasOwn(shape, field) && runFieldOk(shape[field]!, entry));
+    Object.entries(value).every(([field, entry]) => Object.hasOwn(shape, field) && shape[field]!(entry));
 }
 
 function runAttributesOk(value: unknown): boolean {
@@ -199,9 +202,9 @@ function directRunAttributes(
     if (key === 'textColor' && plainObject(value)) {
       const rgb = themedRgb(value, themeColors);
       value = rgb ? { rgb } : undefined;
-    } else if (plainObject(value) && typeof shape === 'object') {
+    } else if (plainObject(value) && typeof shape === 'object' && shape !== null) {
       value = Object.fromEntries(Object.entries(value).filter(([field, entry]) =>
-        Object.hasOwn(shape, field) && runFieldOk(shape[field]!, entry)));
+        Object.hasOwn(shape, field) && (shape as Readonly<Record<string, FieldCheck>>)[field]!(entry)));
     }
     if (runAttributeOk(shape, value)) direct[key] = value;
   }
@@ -215,8 +218,7 @@ function clipboardRun(
 ): DocxClipboardRun {
   const link = record(attributes.hyperlink);
   const href = typeof link?.href === 'string' && validHref(link.href) ? link.href : undefined;
-  const tooltip = href && typeof link?.tooltip === 'string' && link.tooltip !== '' && link.tooltip.length <= MAX_TOOLTIP_LENGTH
-    ? link.tooltip : undefined;
+  const tooltip = href && validTooltip(link?.tooltip) ? link.tooltip : undefined;
   return {
     text,
     format: { other: directRunAttributes(attributes, themeColors) },
@@ -226,7 +228,11 @@ function clipboardRun(
 }
 
 function validHref(value: unknown): value is string {
-  return typeof value === 'string' && value.length <= MAX_HREF_LENGTH && HYPERLINK_HREF.test(value);
+  return typeof value === 'string' && value.length <= MAX_HREF_LENGTH && HYPERLINK_HREF.test(value) && wellFormed(value);
+}
+
+function validTooltip(value: unknown): value is string {
+  return typeof value === 'string' && value !== '' && value.length <= MAX_TOOLTIP_LENGTH && wellFormed(value);
 }
 const IMAGE_DATA_URL = /^data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/]+={0,2}$/iu;
 const IMAGE_IDENTITY_KEYS = new Set(['rId', '_kind', 'id', 'embedId', 'docPrId', 'docPr', 'drawingId']);
@@ -242,6 +248,12 @@ function validImage(value: unknown): value is Record<string, unknown> {
       (typeof value[key] === 'number' && Number.isFinite(value[key]) && value[key] > 0));
 }
 const LINE_BREAK = /[\n\r\u000B\u2028\u2029]/u;
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+/** Whether `value` is valid Unicode, which the engine's JSON reader requires. */
+function wellFormed(value: string): boolean {
+  return !LONE_SURROGATE.test(value);
+}
 
 function plainObject(value: unknown): value is Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -384,11 +396,11 @@ export function validClipboardFragment(value: unknown): value is DocxClipboardFr
       if (budget.runs < 0) return false;
       let joined = '';
       for (const run of paragraph.runs) {
-        if (!plainObject(run) || typeof run.text !== 'string' || run.text === '' || LINE_BREAK.test(run.text)) return false;
+        if (!plainObject(run) || typeof run.text !== 'string' || run.text === '' || LINE_BREAK.test(run.text) || !wellFormed(run.text)) return false;
         if (run.format !== undefined &&
           !(plainObject(run.format) && Object.keys(run.format).every(key => key === 'other') && runAttributesOk(run.format.other ?? {}))) return false;
         if (run.href !== undefined && !validHref(run.href)) return false;
-        if (run.tooltip !== undefined && (typeof run.tooltip !== 'string' || run.tooltip.length > MAX_TOOLTIP_LENGTH)) return false;
+        if (run.tooltip !== undefined && !validTooltip(run.tooltip)) return false;
         joined += run.text;
       }
       if (joined !== paragraph.text) return false;
