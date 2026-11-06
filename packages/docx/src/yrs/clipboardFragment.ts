@@ -249,10 +249,12 @@ function validImage(value: unknown): value is Record<string, unknown> {
 }
 const LINE_BREAK = /[\n\r\u000B\u2028\u2029]/u;
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+const XML_ILLEGAL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/;
+const RUN_KEYS = new Set(['text', 'format', 'href', 'tooltip']);
 
-/** Whether `value` is valid Unicode, which the engine's JSON reader requires. */
+/** Whether `value` is valid Unicode that XML 1.0 can hold, which the engine's JSON reader and a saved file require. */
 function wellFormed(value: string): boolean {
-  return !LONE_SURROGATE.test(value);
+  return !LONE_SURROGATE.test(value) && !XML_ILLEGAL.test(value);
 }
 
 function plainObject(value: unknown): value is Record<string, unknown> {
@@ -396,7 +398,7 @@ export function validClipboardFragment(value: unknown): value is DocxClipboardFr
       if (budget.runs < 0) return false;
       let joined = '';
       for (const run of paragraph.runs) {
-        if (!plainObject(run) || typeof run.text !== 'string' || run.text === '' || LINE_BREAK.test(run.text) || !wellFormed(run.text)) return false;
+        if (!plainObject(run) || !Object.keys(run).every(key => RUN_KEYS.has(key)) || typeof run.text !== 'string' || run.text === '' || LINE_BREAK.test(run.text) || !wellFormed(run.text)) return false;
         if (run.format !== undefined &&
           !(plainObject(run.format) && Object.keys(run.format).every(key => key === 'other') && runAttributesOk(run.format.other ?? {}))) return false;
         if (run.href !== undefined && !validHref(run.href)) return false;

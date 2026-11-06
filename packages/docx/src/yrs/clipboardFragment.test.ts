@@ -900,6 +900,21 @@ describe('validClipboardFragment runs', () => {
     expect(validClipboardFragment(other({ highlight: '#A1B2C3', underline: { style: 'wave', color: 'auto' }, characterSpacing: { spacing: -20, position: 6 } }))).toBe(true);
   });
 
+  test('refuses run keys a paste would misread', () => {
+    for (const extra of [{ image: null }, { image: { src: 'data:image/png;base64,AA==' } }, { kind: 'text' }, { tables: [] }]) {
+      expect(validClipboardFragment(run(extra))).toBe(false);
+    }
+  });
+
+  test('refuses characters XML cannot hold in run text and link metadata', () => {
+    for (const bad of ['\u0001', '\u000b', '\ufffe', '\uffff', '\u0000']) {
+      expect(validClipboardFragment(run({ href: 'https://example.test', tooltip: `a${bad}` }))).toBe(false);
+      expect(validClipboardFragment(run({ href: `https://example.test/${bad}` }))).toBe(false);
+      expect(validClipboardFragment({ paragraphs: [{ text: `a${bad}`, runs: [{ text: `a${bad}` }] }] })).toBe(false);
+    }
+    expect(validClipboardFragment(run({ href: 'https://example.test', tooltip: 'tab\there' }))).toBe(true);
+  });
+
   test('refuses more runs than the budget', () => {
     const runs = Array.from({ length: 100_001 }, () => ({ text: 'a' }));
     expect(validClipboardFragment({ paragraphs: [{ text: 'a'.repeat(runs.length), runs }] })).toBe(false);
