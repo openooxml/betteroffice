@@ -114,3 +114,18 @@ test('an updated page matches a fresh build after an edit inside a joined line',
   expect(runs(mirror).map((run) => [run.textContent, run.dataset.docStart, run.dataset.docEnd]))
     .toEqual([['alphax', '10', '16'], ['beta', '21', '25']]);
 });
+
+test('a list marker shaped as glyph runs mirrors as a hidden marker, apart from the item text', () => {
+  const marker = (index: number): DisplayPrimitive => ({
+    kind: 'glyphRun', fontId: 1, size: 16, color: '#000000', text: index === 0 ? '1' : '.',
+    glyphs: [{ id: 1, x: 72 + index * ADVANCE, y: 140, cluster: 0, advance: ADVANCE }],
+    blockKey: 'p1', listMarker: true, listMarkerRevision: index === 0 ? 'ins' : undefined,
+  }) as DisplayPrimitive;
+  const mirror = buildMirrorPage(page([marker(0), marker(1), ...clusters('p1', 10, 'Item', 96, 140)]), options);
+  const markers = Array.from(mirror.querySelectorAll<HTMLElement>('.layout-list-marker'));
+  expect(markers.map((element) => element.textContent)).toEqual(['1', '.']);
+  expect(markers.every((element) => element.getAttribute('aria-hidden') === 'true')).toBe(true);
+  expect(markers[0]!.style.color).toBe('rgb(46, 125, 50)');
+  expect(runs(mirror).filter((run) => !run.classList.contains('layout-list-marker')).map((run) => run.textContent))
+    .toEqual(['Item']);
+});

@@ -7160,38 +7160,64 @@ fn emit_line(
         let mut marker_attrs = block_ref.attrs();
         marker_attrs.list_marker = Some(true);
         marker_attrs.list_marker_revision = marker_revision;
-        prims.push(Primitive::Text(TextRunPrimitive {
-            text: marker.to_owned(),
-            paint_text: text_paint_override(ctx.shape, marker, &marker_format).map(Box::new),
-            x: px(marker_x),
-            baseline_y: px(baseline),
-            width: px(slot_width),
-            paint_clip: None,
-            font: resolved_css_font(ctx.shape, marker, &marker_format),
-            scripts: boxed_scripts(scripts),
-            color: color.to_owned(),
-            letter_spacing: None,
-            word_spacing: None,
-            rtl: geom.is_rtl.then_some(true),
-            opacity: None,
-            rotation_deg: None,
-            horizontal_scale: horizontal_scale_of(&marker_format),
-            substitute_scale: text_substitute_scale(
-                ctx.shape,
-                marker,
-                &marker_format,
-                base_bidi_level(geom.is_rtl),
-                false,
-            ),
-            all_caps: false,
-            small_caps: false,
-            hidden: false,
-            text_shadow: None,
-            text_outline: false,
-            emphasis_mark: None,
-            text_effect: None,
-            attrs: marker_attrs,
-        }));
+        let shaped = !geom.is_rtl
+            && bidi_char_levels(marker, base_bidi_direction(false))
+                .iter()
+                .all(|level| level % 2 == 0)
+            && ctx.shape.is_some_and(|shape| {
+                try_emit_glyph_runs(
+                    prims,
+                    shape,
+                    marker,
+                    &marker_format,
+                    None,
+                    None,
+                    marker_x,
+                    baseline,
+                    &None,
+                    0,
+                    None,
+                    None,
+                    &marker_attrs,
+                    color,
+                    &None,
+                    ooxml_text::AutoSpace::from_options(Some(false), Some(false)),
+                )
+            });
+        if !shaped {
+            prims.push(Primitive::Text(TextRunPrimitive {
+                text: marker.to_owned(),
+                paint_text: text_paint_override(ctx.shape, marker, &marker_format).map(Box::new),
+                x: px(marker_x),
+                baseline_y: px(baseline),
+                width: px(slot_width),
+                paint_clip: None,
+                font: resolved_css_font(ctx.shape, marker, &marker_format),
+                scripts: boxed_scripts(scripts),
+                color: color.to_owned(),
+                letter_spacing: None,
+                word_spacing: None,
+                rtl: geom.is_rtl.then_some(true),
+                opacity: None,
+                rotation_deg: None,
+                horizontal_scale: horizontal_scale_of(&marker_format),
+                substitute_scale: text_substitute_scale(
+                    ctx.shape,
+                    marker,
+                    &marker_format,
+                    base_bidi_level(geom.is_rtl),
+                    false,
+                ),
+                all_caps: false,
+                small_caps: false,
+                hidden: false,
+                text_shadow: None,
+                text_outline: false,
+                emphasis_mark: None,
+                text_effect: None,
+                attrs: marker_attrs,
+            }));
+        }
     }
 
     // Distribute justification slack across U+0020 clusters.
