@@ -860,12 +860,17 @@ fn collect_paragraph_font_requirements(
         for ch in attrs.list_marker.as_deref().unwrap_or("").chars() {
             characters.insert(ch);
         }
-        collector.characters(
-            family,
-            attrs.list_marker_bold.unwrap_or(false),
-            attrs.list_marker_italic.unwrap_or(false),
-            characters,
-        );
+        let bold = attrs.list_marker_bold.unwrap_or(false);
+        let italic = attrs.list_marker_italic.unwrap_or(false);
+        if attrs.list_marker_font_family.is_none()
+            && let Some(painted) = attrs.default_font_family.as_deref()
+            && painted != family
+        {
+            collector.name(painted, bold, italic, scripts, false);
+            collector.reach(painted, bold, italic, scripts);
+            collector.characters(painted, bold, italic, characters.clone());
+        }
+        collector.characters(family, bold, italic, characters);
     }
 }
 
@@ -7665,6 +7670,26 @@ mod tests {
         for key in ["first|1|0", "second|1|0", "default|1|0"] {
             assert_eq!(requirements[key].characters.iter().collect::<String>(), "Ω");
         }
+    }
+
+    #[test]
+    fn a_marker_requires_the_family_it_paints_with() {
+        let block: LayoutBlock = serde_json::from_value(json!({
+            "kind": "paragraph", "id": "p", "attrs": {
+                "listMarker": "7", "listMarkerItalic": true, "defaultFontFamily": "Aptos"
+            }, "runs": [{"kind": "text", "text": "Body", "fontFamily": "Segoe UI"}]
+        }))
+        .unwrap();
+        let mut collector = FontRequirementCollector::default();
+        collector.collect([&block], "Default");
+        let requirements = collector.finish();
+        assert_eq!(
+            requirements["aptos|0|1"]
+                .characters
+                .iter()
+                .collect::<String>(),
+            "7"
+        );
     }
 
     #[test]
