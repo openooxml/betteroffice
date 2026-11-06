@@ -221,6 +221,18 @@ fn attempt(
     let engine = |error: betteroffice_xlsx::Error| error.to_string();
     let outcome = match op {
         "applyOps" => apply_ops_json(workbook, &args["ops"], calculation),
+        "removeNewestConditionalFormat" => (|| {
+            let sheet = sheet_arg(args);
+            let newest = workbook
+                .conditional_formats(sheet)
+                .map_err(engine)?
+                .into_iter()
+                .max_by_key(|rule| rule.priority)
+                .ok_or("no conditional format to remove")?;
+            let op =
+                json!({ "type": "removeConditionalFormat", "sheet": sheet.0, "id": newest.id });
+            apply_ops_json(workbook, &json!([op]), calculation)
+        })(),
         "moveRange" => (|| {
             let source = wire_range(&args["source"])?;
             let destination = CellRef::parse_a1(args["destination"].as_str().unwrap())

@@ -882,6 +882,45 @@
       },
       "expectError": true
     },
+    { "op": "historyState", "args": {} },
+    {
+      "op": "applyOps",
+      "args": {
+        "ops": [
+          {
+            "type": "addConditionalFormat",
+            "sheet": 0,
+            "range": { "start": { "row": 0, "col": 0 }, "end": { "row": 2, "col": 0 } },
+            "kind": "cellIs",
+            "operator": "greaterThan",
+            "formulas": ["1"],
+            "format": { "bold": true }
+          }
+        ]
+      }
+    },
+    { "op": "conditionalFormats", "args": { "sheet": 0 } },
+    { "op": "removeNewestConditionalFormat", "args": { "sheet": 0 } },
+    { "op": "conditionalFormats", "args": { "sheet": 0 } },
+    { "op": "undo", "args": {} },
+    { "op": "conditionalFormats", "args": { "sheet": 0 } },
+    {
+      "op": "applyOps",
+      "args": { "ops": [{ "type": "setAutoFilter", "sheet": 0, "range": "A1:C5" }] }
+    },
+    { "op": "sheetInfo", "args": {} },
+    { "op": "listDefinedNames", "args": { "scope": 0 } },
+    {
+      "op": "applyOps",
+      "args": { "ops": [{ "type": "setAutoFilter", "sheet": 0, "range": null }] }
+    },
+    { "op": "sheetInfo", "args": {} },
+    { "op": "listDefinedNames", "args": { "scope": 0 } },
+    {
+      "op": "applyOps",
+      "args": { "ops": [{ "type": "setConditionalFormats", "sheet": 0, "formats": [] }] },
+      "expectError": true
+    },
     { "op": "historyState", "args": {} }
   ]
 }

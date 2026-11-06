@@ -158,6 +158,33 @@ def test_collaborative_workbooks_refuse_structural_ops(sample_bytes):
     assert workbook.can_undo is False
 
 
+def test_collaborative_rules_and_filters_replicate(sample_bytes):
+    left = bo.Workbook.open_collaborative(sample_bytes, client_id=7)
+    right = bo.Workbook.open_collaborative(sample_bytes, client_id=8)
+    rule = {
+        "type": "addConditionalFormat",
+        "sheet": 0,
+        "range": {"start": {"row": 0, "col": 0}, "end": {"row": 2, "col": 0}},
+        "kind": "expression",
+        "formulas": ["A1>1"],
+        "format": {"bold": True},
+    }
+    left.apply_ops([rule, {"type": "setAutoFilter", "sheet": 0, "range": "A1:C5"}])
+    right.apply_update(left.diff(right.state_vector()))
+    assert right.conditional_formats(0) == left.conditional_formats(0)
+    added = right.conditional_formats(0)[-1]["id"]
+    assert added.startswith("cf:7:")
+    right.apply_ops([{"type": "removeConditionalFormat", "sheet": 0, "id": added}])
+    left.apply_update(right.diff(left.state_vector()))
+    assert left.conditional_formats(0) == right.conditional_formats(0)
+    assert all(item["id"] != added for item in left.conditional_formats(0))
+    right.undo()
+    left.apply_update(right.diff(left.state_vector()))
+    assert left.conditional_formats(0)[-1]["id"] == added
+    with pytest.raises(bo.CollaborativeStructureError):
+        left.apply_ops([{"type": "setConditionalFormats", "sheet": 0, "formats": []}])
+
+
 def test_collaborative_sheet_limits_raise_the_structure_error(sample_bytes):
     left = bo.Workbook.open_collaborative(sample_bytes, client_id=7)
     right = bo.Workbook.open_collaborative(sample_bytes, client_id=8)

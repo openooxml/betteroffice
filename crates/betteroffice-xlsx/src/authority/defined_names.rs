@@ -5,7 +5,8 @@ use super::*;
 const EDIT_PREFIX: &str = "set:";
 const TOMBSTONE_PREFIX: &str = "del:";
 const WORKBOOK_SCOPE: &str = "*";
-/// A filter and its name stay out of the shared document together.
+/// A filter's hidden name. Every replica derives it from the filter, so it has
+/// no place in the shared document and no direct edit of it is taken.
 pub(crate) const FILTER_DATABASE_NAME: &str = "_xlnm._FilterDatabase";
 
 /// One name's value in the shared document, for a source name edited or a name
@@ -177,13 +178,27 @@ impl NameOverlay {
     }
 }
 
+fn is_filter_name(defined: &DefinedName) -> bool {
+    defined.name.eq_ignore_ascii_case(FILTER_DATABASE_NAME)
+}
+
+/// Whether two tables hold the same names once the derived filter names are
+/// left out.
+pub(super) fn same_except_filter_names(left: &[DefinedName], right: &[DefinedName]) -> bool {
+    left.iter()
+        .filter(|name| !is_filter_name(name))
+        .eq(right.iter().filter(|name| !is_filter_name(name)))
+}
+
 fn by_identity<'a>(
     names: &'a [DefinedName],
     keys: &[String],
 ) -> BTreeMap<String, (usize, &'a DefinedName)> {
     let mut table = BTreeMap::new();
     for (index, defined) in names.iter().enumerate() {
-        if let Some(identity) = name_identity(defined, keys) {
+        if !is_filter_name(defined)
+            && let Some(identity) = name_identity(defined, keys)
+        {
             table.entry(identity).or_insert((index, defined));
         }
     }

@@ -512,6 +512,7 @@ fn first_difference(left: &WorkbookModel, right: &WorkbookModel) -> String {
                 "conditional formats",
                 left.conditional_formats != right.conditional_formats,
             ),
+            ("auto filter", left.auto_filter != right.auto_filter),
             ("merges", left.merges != right.merges),
             ("column widths", left.col_widths != right.col_widths),
             ("row heights", left.row_heights != right.row_heights),
@@ -772,6 +773,7 @@ impl Workbook {
             header.client_id,
             header.next_sheet_id,
             true,
+            checkpoint.collaborative,
         )
         .map_err(invalid)?;
         if let Some(styles) = &source_markers {

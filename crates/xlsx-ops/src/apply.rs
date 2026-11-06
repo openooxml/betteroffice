@@ -434,25 +434,7 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
                 return Ok(InvertedOp(Vec::new()));
             }
             if let Some(range) = range {
-                if range.start.row > range.end.row
-                    || range.start.col > range.end.col
-                    || range.end.row >= MAX_ROWS
-                    || range.end.col >= MAX_COLS
-                {
-                    return Err(OpError::InvalidAutoFilter(
-                        "Use a valid worksheet range for the auto filter.".into(),
-                    ));
-                }
-                if let Some(filter) = &previous
-                    && ((range.start.col != filter.range.start.col
-                        && (!filter.filter_columns.is_empty() || filter.has_sort_state))
-                        || filter
-                            .filter_columns
-                            .iter()
-                            .any(|col| *col > range.end.col - range.start.col))
-                {
-                    return Err(OpError::InvalidAutoFilter("Keep the filter's first column and include all filtered columns, or remove the filter before creating a new range.".into()));
-                }
+                validate_auto_filter_range(range, previous.as_ref())?;
                 if wb
                     .tables
                     .iter()
@@ -462,25 +444,12 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
                 }
             }
             let name_op = match range {
-                Some(range) => {
-                    let absolute = |at: CellRef| {
-                        let mut at = at;
-                        at.abs_row = true;
-                        at.abs_col = true;
-                        at.to_a1()
-                    };
-                    Op::SetDefinedName {
-                        name: "_xlnm._FilterDatabase".into(),
-                        refers_to: format!(
-                            "'{}'!{}:{}",
-                            current.name.replace('\'', "''"),
-                            absolute(range.start),
-                            absolute(range.end)
-                        ),
-                        scope: Some(*sheet),
-                        hidden: Some(true),
-                    }
-                }
+                Some(range) => Op::SetDefinedName {
+                    name: "_xlnm._FilterDatabase".into(),
+                    refers_to: filter_database_formula(&current.name, *range),
+                    scope: Some(*sheet),
+                    hidden: Some(true),
+                },
                 None => Op::DeleteDefinedName {
                     name: "_xlnm._FilterDatabase".into(),
                     scope: Some(*sheet),
@@ -1990,7 +1959,8 @@ const CELL_IS_OPERATORS: &[&str] = &[
     "notBetween",
 ];
 
-fn validate_conditional_format(
+#[doc(hidden)]
+pub fn validate_conditional_format(
     kind: &str,
     operator: Option<&str>,
     formulas: &[String],
@@ -2041,6 +2011,51 @@ fn validate_conditional_format(
         }
     }
     Ok(cleaned)
+}
+
+/// Whether `range` can hold a filter that replaces `previous`, which keeps its
+/// filtered columns and sort state through the change.
+#[doc(hidden)]
+pub fn validate_auto_filter_range(
+    range: &CellRange,
+    previous: Option<&xlsx_model::AutoFilter>,
+) -> Result<(), OpError> {
+    if range.start.row > range.end.row
+        || range.start.col > range.end.col
+        || range.end.row >= MAX_ROWS
+        || range.end.col >= MAX_COLS
+    {
+        return Err(OpError::InvalidAutoFilter(
+            "Use a valid worksheet range for the auto filter.".into(),
+        ));
+    }
+    if let Some(filter) = previous
+        && ((range.start.col != filter.range.start.col
+            && (!filter.filter_columns.is_empty() || filter.has_sort_state))
+            || filter
+                .filter_columns
+                .iter()
+                .any(|col| *col > range.end.col - range.start.col))
+    {
+        return Err(OpError::InvalidAutoFilter("Keep the filter's first column and include all filtered columns, or remove the filter before creating a new range.".into()));
+    }
+    Ok(())
+}
+
+/// The formula of the hidden name a filter over `range` on `sheet` carries.
+#[doc(hidden)]
+pub fn filter_database_formula(sheet: &str, range: CellRange) -> String {
+    let absolute = |mut at: CellRef| {
+        at.abs_row = true;
+        at.abs_col = true;
+        at.to_a1()
+    };
+    format!(
+        "'{}'!{}:{}",
+        sheet.replace('\'', "''"),
+        absolute(range.start),
+        absolute(range.end)
+    )
 }
 
 fn next_conditional_format_id(groups: &[ConditionalFormatting]) -> String {

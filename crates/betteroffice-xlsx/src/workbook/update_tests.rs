@@ -167,6 +167,152 @@ fn a_peer_outranks_a_name_step_above_an_add(left: &mut Workbook, right: &mut Wor
     assert!(left.history_state().undo_depth >= 7);
 }
 
+fn filter(book: &mut Workbook, range: &str) {
+    book.apply_ops(
+        vec![Op::SetAutoFilter {
+            sheet: SheetId(0),
+            range: Some(CellRange::parse_a1(range).unwrap()),
+        }],
+        CalculationOptions::default(),
+    )
+    .unwrap();
+}
+
+fn rule(book: &mut Workbook, formula: &str) {
+    book.apply_ops(
+        vec![Op::AddConditionalFormat {
+            sheet: SheetId(0),
+            range: CellRange::parse_a1("A1:A5").unwrap(),
+            kind: "expression".into(),
+            operator: None,
+            formulas: vec![formula.into()],
+            format: Default::default(),
+        }],
+        CalculationOptions::default(),
+    )
+    .unwrap();
+}
+
+/// A filter's register and a rule's key go through the same walk as a cell: the
+/// value a step replaced lies past a peer's, and steps above the add both write
+/// and delete rule keys.
+fn a_peer_outranks_a_filter_step_above_an_add(left: &mut Workbook, right: &mut Workbook) {
+    filter(left, "A1:B2");
+    filter(left, "A1:B3");
+    rule(left, "A1>1");
+    write(left, 0, 2, "older still");
+    append(left);
+    filter(left, "A1:B4");
+    rule(left, "A1>2");
+    sync(left, right);
+    filter(right, "A1:B5");
+    sync(left, right);
+    let id = left.model().sheets[0].conditional_formats[0].rules[1]
+        .id
+        .clone();
+    left.apply_ops(
+        vec![Op::RemoveConditionalFormat {
+            sheet: SheetId(0),
+            id,
+        }],
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    assert!(left.history_state().undo_depth >= 8);
+}
+
+/// A standalone table is what its edits made it, so a filter whose name was
+/// deleted by hand stays without one: deriving names is for shared documents.
+#[test]
+fn a_standalone_filter_keeps_the_table_its_edits_left() {
+    let mut workbook = Workbook::from_model(model()).unwrap();
+    filter(&mut workbook, "A1:B2");
+    workbook
+        .apply_ops(
+            vec![Op::DeleteDefinedName {
+                name: FILTER_DATABASE_NAME.into(),
+                scope: Some(SheetId(0)),
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert!(workbook.model().defined_names.is_empty());
+    assert_eq!(workbook.authority.materialize().unwrap(), *workbook.model());
+}
+
+/// A batch that needs a full sync reaches the document through the sheet's frame
+/// alone: a filter a row insert moved and a rule added beside it go no other way.
+#[test]
+fn a_standalone_row_insert_stores_the_rules_and_filter_of_its_batch() {
+    let mut workbook = Workbook::from_model(model()).unwrap();
+    filter(&mut workbook, "C20:D30");
+    workbook
+        .apply_ops(
+            vec![
+                Op::AddConditionalFormat {
+                    sheet: SheetId(0),
+                    range: CellRange::parse_a1("A1:A5").unwrap(),
+                    kind: "expression".into(),
+                    operator: None,
+                    formulas: vec!["A1>2".into()],
+                    format: Default::default(),
+                },
+                Op::InsertRows {
+                    sheet: SheetId(0),
+                    at: 10,
+                    count: 1,
+                },
+            ],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let sheet = &workbook.model().sheets[0];
+    assert_eq!(sheet.conditional_formats.len(), 1);
+    assert_eq!(sheet.auto_filter.as_ref().unwrap().range.to_a1(), "C21:D31");
+    let stored = workbook.authority.materialize().unwrap();
+    assert_eq!(
+        (
+            &stored.sheets[0].auto_filter,
+            &stored.sheets[0].conditional_formats
+        ),
+        (&sheet.auto_filter, &sheet.conditional_formats)
+    );
+}
+
+#[test]
+fn local_rule_growth_stops_at_what_the_reader_takes_back() {
+    let sheet_of = |rules: usize| {
+        let mut model = WorkbookModel::default();
+        let mut sheet = xlsx_model::Sheet::new("Data");
+        sheet
+            .conditional_formats
+            .push(xlsx_model::ConditionalFormatting {
+                sqref: "A1".into(),
+                rules: vec![
+                    xlsx_model::ConditionalFormatRule {
+                        id: "cf1".into(),
+                        rule_type: "expression".into(),
+                        operator: None,
+                        formulas: Vec::new(),
+                        priority: 1,
+                        dxf_id: None,
+                        format: Default::default(),
+                        raw_xml: None,
+                    };
+                    rules
+                ],
+            });
+        model.sheets.push(sheet);
+        model
+    };
+    let (full, over) = (sheet_of(65_536), sheet_of(65_537));
+    assert!(super::refuse_rule_growth(&sheet_of(65_535), &full).is_ok());
+    assert!(super::refuse_rule_growth(&full, &over).is_err());
+    assert!(super::refuse_rule_growth(&over, &over).is_ok());
+    assert!(super::refuse_rule_growth(&over, &full).is_ok());
+    assert!(super::refuse_rule_growth(&sheet_of(1), &over).is_err());
+}
+
 /// Steps above a sheet removal undo with only themselves on the manager's
 /// stack. That is safe only while yrs reads the rest of the stack as
 /// `undo_through_removal` assumes, so the same history must land on the same
@@ -177,6 +323,7 @@ fn partial_stack_undo_matches_the_full_stack() {
         overwrites_around_an_add as fn(&mut Workbook, &mut Workbook),
         a_peer_outranks_the_step_above_an_add,
         a_peer_outranks_a_name_step_above_an_add,
+        a_peer_outranks_a_filter_step_above_an_add,
     ] {
         let before = crate::authority::partial_stack_undos();
         let partial = history_trail(script);
