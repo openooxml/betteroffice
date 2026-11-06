@@ -609,6 +609,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   );
 
   const advanceInteractionEpoch = useCallback((): void => {
+    defaultCaretRef.current = null;
     inputOperationQueueRef.current?.advanceInteractionEpoch();
   }, []);
 
@@ -688,6 +689,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   const setSelection = useCallback(
     (anchor: YrsLoc, head: YrsLoc = anchor, emit = true): void => {
       if (!session) return;
+      defaultCaretRef.current = null;
       session.setSelection(anchor, head);
       if (emit) {
         if (!readOnly) requestLocalCaretReveal();
@@ -1546,6 +1548,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   const handleBeforeInput = useCallback(
     (event: React.FormEvent<HTMLTextAreaElement>): void => {
+      defaultCaretRef.current = null;
       const native = event.nativeEvent as InputEvent;
       if (discardedCompositionRef.current) {
         event.preventDefault();
@@ -1640,6 +1643,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>): void => {
+      defaultCaretRef.current = null;
       if (!event.nativeEvent.isComposing && event.key !== 'Process' && event.keyCode !== 229) {
         discardedCompositionRef.current = false;
       }

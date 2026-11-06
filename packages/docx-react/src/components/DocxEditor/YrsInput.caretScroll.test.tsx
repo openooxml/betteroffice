@@ -863,6 +863,20 @@ test.each([
   expect(scroller.scrollTop).not.toBe(2000);
 });
 
+test('an explicit selection at the story start after a host scroll still scrolls into view while the default caret waits for layout', async () => {
+  const { session, input, scroller, view, inputFor, queries, expectCaret } =
+    await mount(false, true, true, { displayListQueries: null });
+  expect(session.selection()).not.toBeNull();
+  act(() => {
+    scroller.scrollTop = 2000;
+    scroller.dispatchEvent(new Event('scroll'));
+  });
+  act(() => input.current!.setSelectionFromDisplay(1));
+  act(() => view.rerender(inputFor({ displayListQueries: queries as unknown as DisplayListQueries })));
+  expectCaret(0);
+  expect(scroller.scrollTop).not.toBe(2000);
+});
+
 test('a reader wheel before the first caret placement keeps the view where the reader put it', async () => {
   const { input, scroller, scrollTop, expectCaret } = await mount(true, false);
   act(() => {
