@@ -2,9 +2,8 @@ import { useCallback, useContext, useMemo, useRef, useSyncExternalStore } from '
 import { useTranslation } from '../i18n';
 import { pptxCommandController, type PptxChromeContext } from './createPptxCommandStore';
 import { PptxCommandContext } from './PptxCommandProvider';
-import { defaultArgs, formatChord, isPluginCommandId } from './descriptors';
-import { ariaChord } from '../../../../shared/keyboard/format';
-import { chordLabels, storeAriaShortcut, storeShortcutLabel } from './shortcutLabels';
+import { defaultArgs, isPluginCommandId } from './descriptors';
+import { chordShortcut, storeShortcut } from './shortcutLabels';
 import type {
   PptxCommandArgs,
   PptxCommandDescriptor,
@@ -147,13 +146,14 @@ export function usePptxCommand(
     if (isPluginCommandId(id)) {
       const contributed = descriptor as PptxPluginCommandDescriptor | null;
       const chord = contributed?.shortcuts[0]?.chord;
+      const keys = chord ? chordShortcut(chord, t) : null;
       return {
         id,
         descriptor: contributed,
         state,
         label: contributed?.label ?? id,
-        shortcut: chord ? formatChord(chord, undefined, chordLabels(t)) : null,
-        ariaShortcut: chord ? ariaChord(chord) : null,
+        shortcut: keys?.shortcut ?? null,
+        ariaShortcut: keys?.ariaShortcut ?? null,
         execute: () => execute(),
       };
     }
@@ -163,8 +163,9 @@ export function usePptxCommand(
       descriptor: builtIn,
       state: state as PptxCommandState,
       label: t(builtIn.labelKey),
-      shortcut: storeShortcutLabel(store, id, t, parse(argsKey)),
-      ariaShortcut: storeAriaShortcut(store, id, parse(argsKey)),
+      shortcut: null,
+      ariaShortcut: null,
+      ...storeShortcut(store, id, t, parse(argsKey)),
       execute,
     };
   }, [store, id, descriptor, state, t, argsKey, execute]);

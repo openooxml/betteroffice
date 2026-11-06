@@ -1,7 +1,7 @@
 import type { TranslationKey } from '@betteroffice/pptx-i18n';
 import { commandMenuItem, menuSections } from '../../../../shared/react-toolbar/ContextMenu';
 import type { OverflowMenuEntry } from '../../../../shared/react-toolbar/MenuList';
-import { storeAriaShortcut, storeShortcutLabel } from '../commands/shortcutLabels';
+import { storeShortcut } from '../commands/shortcutLabels';
 import type { PptxCommandArgs, PptxCommandId, PptxCommandStore } from '../commands/types';
 
 /** @internal */
@@ -15,8 +15,7 @@ function item<K extends PptxCommandId>(store: PptxCommandStore, t: Translate, id
     id: `${id}:${JSON.stringify(args)}`,
     label: t(labelKey),
     state: store.getState(id, args),
-    shortcut: storeShortcutLabel(store, id, t, args),
-    ariaShortcut: storeAriaShortcut(store, id, args),
+    ...storeShortcut(store, id, t, args),
     run: () => { void store.execute(id, args); },
   });
 }

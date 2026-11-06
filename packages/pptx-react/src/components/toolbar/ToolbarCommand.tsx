@@ -9,7 +9,7 @@ import {
   type PptxPendingCommand,
 } from '../../commands/createPptxCommandStore';
 import { defaultArgs, isPluginCommandId } from '../../commands/descriptors';
-import { storeAriaShortcut, storeShortcutLabel } from '../../commands/shortcutLabels';
+import { storeShortcut } from '../../commands/shortcutLabels';
 import { MAX_FONT_POINTS, MIN_FONT_POINTS, MAX_ZOOM, MIN_ZOOM } from '../../commands/evaluate';
 import { usePptxCommand, usePptxCommands, usePptxCommandState } from '../../commands/hooks';
 import type {
@@ -235,8 +235,7 @@ function commandItem<K extends PptxCommandId>(
     id: key,
     label: labelFor(id, args, t, t(store.getDescriptor(id).labelKey)),
     icon: icon ? <ToolbarIcon name={icon} size={16} /> : undefined,
-    shortcut: (isSelectTool(id, args) ? 'Esc' : storeShortcutLabel(store, id, t, args)) ?? undefined,
-    ariaShortcut: (isSelectTool(id, args) ? 'Escape' : storeAriaShortcut(store, id, args)) ?? undefined,
+    ...(isSelectTool(id, args) ? { shortcut: 'Esc', ariaShortcut: 'Escape' } : storeShortcut(store, id, t, args)),
     checked: state.active,
     disabled: !state.enabled,
     description: reasonOf(state),

@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { en } from '@betteroffice/pptx-i18n';
 import { createPptxCommandController } from './createPptxCommandStore';
 import { resolvePptxShortcuts } from './shortcuts';
-import { storeAriaShortcut, storeShortcutLabel } from './shortcutLabels';
+import { storeShortcut } from './shortcutLabels';
 import { hostPluginChords, releasedChord, shortcutOwner, subscribeShortcuts } from './shortcutTable';
 import { applyShortcuts, pickChord, pressedChord, shortcutAt } from './useCommandShortcuts';
 
@@ -106,11 +106,10 @@ describe('command controller', () => {
   test('labels and aria names show the effective chord', () => {
     const controller = createPptxCommandController();
     applyShortcuts(controller, { paste: 'Mod+Alt+V', copy: null }, { mac: false });
-    expect(storeShortcutLabel(controller.store, 'paste', t, undefined, false)).toBe('Ctrl+Alt+V');
-    expect(storeShortcutLabel(controller.store, 'paste', t, undefined, true)).toBe('⌥⌘V');
-    expect(storeAriaShortcut(controller.store, 'paste', undefined, false)).toBe('Control+Alt+V');
-    expect(storeShortcutLabel(controller.store, 'copy', t, undefined, false)).toBeNull();
+    expect(storeShortcut(controller.store, 'paste', t, undefined, false)).toEqual({ shortcut: 'Ctrl+Alt+V', ariaShortcut: 'Control+Alt+V' });
+    expect(storeShortcut(controller.store, 'paste', t, undefined, true).shortcut).toBe('⌥⌘V');
+    expect(storeShortcut(controller.store, 'copy', t, undefined, false)).toEqual({});
     const names: Record<string, string> = { 'keys.ctrl': 'Strg', 'keys.shift': 'Umschalt' };
-    expect(storeShortcutLabel(controller.store, 'redo', (path) => names[path] ?? t(path), undefined, false)).toBe('Strg+Umschalt+Z');
+    expect(storeShortcut(controller.store, 'redo', (path) => names[path] ?? t(path), undefined, false).shortcut).toBe('Strg+Umschalt+Z');
   });
 });
