@@ -79,7 +79,7 @@
     "test:e2e:browser": "playwright test --config e2e/browser/playwright.config.ts",
     "test:e2e:browser:plugins": "playwright test --config e2e/browser/plugin-host/playwright.config.ts",
     "pretypecheck:e2e": "bun run build:fonts",
-    "typecheck:e2e": "tsc -p e2e/tsconfig.json",
+    "typecheck:e2e": "tsc -p e2e/tsconfig.json && tsc -p e2e/browser/plugin-host/tsconfig.json",
     "typecheck:shared": "tsc --noEmit -p shared/office-session/tsconfig.json && tsc --noEmit -p shared/editor-host/tsconfig.typecheck.json"
   },
   "license": "Apache-2.0",

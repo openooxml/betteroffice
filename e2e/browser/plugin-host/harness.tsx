@@ -267,7 +267,7 @@ function Harness() {
   if (!buffer) return null;
   return (
     <div style={{ height: '100%' }}>
-      <DocxEditor ref={setEditor} {...(fileProp ? { file: new File([buffer], 'upload.docx'), fileName: 'Aliased report.docx' } : { documentBuffer: buffer })} plugins={PLUGINS} pluginGrants={GRANTS} measurementFontProvider={new URLSearchParams(location.search).get('peerless') === '1' ? fonts : undefined} {...(new URLSearchParams(location.search).get('peerless') === '1' ? {} : { legacySyncApi: true as const })} />
+      <DocxEditor ref={setEditor} {...(fileProp ? { file: new File([buffer], 'upload.docx'), fileName: 'Aliased report.docx' } : { documentBuffer: buffer })} plugins={PLUGINS} pluginGrants={GRANTS} measurementFontProvider={new URLSearchParams(location.search).get('peerless') === '1' ? fonts : undefined} {...(new URLSearchParams(location.search).get('peerless') === '1' ? {} : { legacySyncApi: true }) as Record<never, never>} />
     </div>
   );
 }

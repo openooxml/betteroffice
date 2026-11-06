@@ -68,7 +68,7 @@ function Harness() {
   return (
     <div style={{ height: '100%' }}>
       <XlsxEditor
-        {...(workerOnly ? {} : { legacySyncApi: true, experimentalWorkerOpen: false })}
+        {...(workerOnly ? {} : { legacySyncApi: true, experimentalWorkerOpen: false }) as Record<never, never>}
         file={file}
         plugins={PLUGINS}
         onReady={(api) => {

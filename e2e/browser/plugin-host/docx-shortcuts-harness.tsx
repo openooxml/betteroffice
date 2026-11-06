@@ -1,6 +1,6 @@
 import { createRoot } from 'react-dom/client';
 import { useState } from 'react';
-import { DocxEditor, defineDocxPlugin, type DocxEditorProps, type DocxEditorRef, type DocxShortcuts, type ShortcutIssue } from '@betteroffice/docx-react';
+import { DocxEditor, defineDocxPlugin, type DocxEditorRef, type DocxShortcuts, type ShortcutIssue } from '@betteroffice/docx-react';
 import { setGoogleFontsEnabled } from '@betteroffice/docx/utils';
 import fontUrl from '../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf?url';
 import '../../../packages/docx-react/src/styles/editor.css';
@@ -8,7 +8,7 @@ import '../../../packages/docx-react/src/styles/editor.css';
 setGoogleFontsEnabled(false);
 const worker = new URLSearchParams(location.search).get('mode') !== 'legacy';
 const second = new URLSearchParams(location.search).has('two');
-const route: Partial<DocxEditorProps> = worker ? {} : { legacySyncApi: true, experimentalWorkerOpen: false } as never;
+const route = (worker ? {} : { legacySyncApi: true, experimentalWorkerOpen: false }) as Record<never, never>;
 let open: (buffer: ArrayBuffer, shortcuts: DocxShortcuts) => void = () => {};
 const probe = {
   editor: null as DocxEditorRef | null,

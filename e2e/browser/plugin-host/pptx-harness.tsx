@@ -175,7 +175,7 @@ function Harness() {
   if (!file || !fonts) return null;
   return (
     <div style={{ height: '100%' }}>
-      <PptxEditor {...(workerOnly ? {} : { legacySyncApi: true, experimentalWorkerOpen: false })}
+      <PptxEditor {...(workerOnly ? {} : { legacySyncApi: true, experimentalWorkerOpen: false }) as Record<never, never>}
         file={file}
         fonts={fonts}
         plugins={PLUGINS}
