@@ -43,6 +43,33 @@ pub struct SurfaceDisplayList {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background: Option<Paint>,
     pub primitives: Vec<Primitive>,
+    /// Alternative text by shape id. Holds only shapes that have some, and
+    /// nothing painted reads it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub alt_text: BTreeMap<String, ShapeAltText>,
+    /// The shape holding the slide's title placeholder, for assistive technology.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_shape: Option<String>,
+}
+
+/// What `p:cNvPr` says about a shape for assistive technology.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShapeAltText {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// The shape, or a group around it, is marked decorative.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub decorative: bool,
+    /// The nearest enclosing group with alternative text, by its key in the same map.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// Where the shape starts in `primitives` when what paints it carries no
+    /// shape id, as a picture drawn from a metafile's operations does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primitive: Option<u32>,
 }
 
 impl SurfaceDisplayList {
@@ -572,6 +599,8 @@ mod tests {
             height: 10.0,
             background: None,
             primitives: Vec::new(),
+            alt_text: BTreeMap::new(),
+            title_shape: None,
         };
         assert!(!list.has_glyphs());
         for primitive in [
@@ -617,6 +646,8 @@ mod tests {
                 label: Some("Chart".into()),
                 transform: Transform::default(),
             }],
+            alt_text: BTreeMap::new(),
+            title_shape: None,
         };
 
         let json = serde_json::to_string(&list).expect("serialize display list");

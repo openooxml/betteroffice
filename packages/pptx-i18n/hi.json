@@ -93,6 +93,11 @@
     "canvasLabel": "कुल {total} में से स्लाइड {current}",
     "canvasLabelWithSelection": "कुल {total} में से स्लाइड {current}; चयनित ऑब्जेक्ट {name}"
   },
+  "a11y": {
+    "slideWithTitle": "कुल {total} में से स्लाइड {current}: {title}",
+    "objectSelected": "{name} चयनित",
+    "editingText": "{name} संपादित किया जा रहा है"
+  },
   "editor": {
     "appLabel": "प्रस्तुति स्लाइड संपादक",
     "opening": "प्रस्तुति खोली जा रही है…",

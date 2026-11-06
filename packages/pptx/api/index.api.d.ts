@@ -489,7 +489,7 @@ export { PptxExportError } from './structuredExport';
 export type { ExportCompletion, ExportDiagnostic, ExportSeverity, MarkdownAnchor, PptxAnchor, PptxAnchorScope, PptxExportComment, PptxExportDiagnostic, PptxExportDiagnosticCode, PptxExportFailure, PptxExportFailureCode, PptxExportList, PptxExportMark, PptxExportNotes, PptxExportObject, PptxExportObjectKind, PptxExportOptions, PptxExportParagraph, PptxExportRefusal, PptxExportResult, PptxExportRun, PptxExportShape, PptxExportShapeKind, PptxExportSlide, PptxExportStory, PptxExportTable, PptxExportTableCell, PptxMarkdownContent, PptxMarkdownOptions, PptxSourceProvenance, PptxStructuredContent, PptxTextSpan, } from './structuredExport';
 export type { InspectPresentationOptions, OpenPresentationOptions, SavePresentationOptions, PresentationHandle, UndoCaptureMode, WasmInitInput, } from './wasm/loader';
 export type { EditSuccess, OperationFailure, OperationRefusal, PptxEditFailure, PptxEditFailureCode, PptxEditHistory, PptxEditPreview, PptxEditReceipt, PptxEditRefusal, PptxEditRequest, PptxEditResult, PptxEditSource, PptxEditStep, PptxEditTarget, PptxFindMatch, PptxFindRequest, PptxFindResult, PptxFindScope, PptxParagraphText, PptxReadRequest, PptxReadResult, PptxShapeTarget, PptxSlideTarget, PptxStoryTarget, PptxStoryText, PptxTextField, PptxTextGuard, PptxTextRange, PptxTextTarget, PptxValidationResult, ValidationSuccess, } from './edits';
-export type { BlipEffect, CaretStop, ColorTransform, ColorValue, CommentFlavor, CommentReceipt, CommentSnapshot, DeckSnapshot, EditProfile, GeometryPathCommand, HistoryProfile, HistoryResult, HitTestResult, ImageEffect, ImageCrop, ImagePrimitive, InheritedGeometry, LayoutProfile, Paint, ParagraphAlignment, ParagraphSnapshot, PictureDraft, PlaceholderPrimitive, PositionedGlyph, PositionedTextLine, PositionedTextRun, PresetShapeDraft, Profiled, ProfiledLayout, PptxFontFace, PptxCaretAnchor, PptxTextMatch, PptxTextSearchOptions, PrimitiveTransform, ShapeAdjustReceipt, ShapeDraft, ShapeFill, ShapeFillReceipt, ShapeGradient, ShapeKind, ShapeLineEnd, ShapeOutline, ShapePrimitive, ShapeReceipt, ShapeRect, ShapeSnapshot, ShapeStroke, ShapeStrokeReceipt, ShapeZOrderReceipt, SlideDisplayList, SlidePrimitive, SlideReceipt, SlideSnapshot, SlideLayoutSnapshot, HeaderFooterSettings, SlideHeaderFooterText, SlideDateText, SlideHeaderFooter, StorySnapshot, Stroke, StrokeEnd, TextBoxPrimitive, TextReceipt, TextParagraphDraft, TextRunSnapshot, TextStyle, TextStylePatch, TextStyleSnapshot, TransformReceipt, TableReceipt, UpdateEvent, } from './types';
+export type { BlipEffect, CaretStop, ColorTransform, ColorValue, CommentFlavor, CommentReceipt, CommentSnapshot, DeckSnapshot, EditProfile, GeometryPathCommand, HistoryProfile, HistoryResult, HitTestResult, ImageEffect, ImageCrop, ImagePrimitive, InheritedGeometry, LayoutProfile, Paint, ParagraphAlignment, ParagraphSnapshot, PictureDraft, PlaceholderPrimitive, PositionedGlyph, PositionedTextLine, PositionedTextRun, PresetShapeDraft, Profiled, ProfiledLayout, PptxFontFace, PptxCaretAnchor, PptxTextMatch, PptxTextSearchOptions, PrimitiveTransform, ShapeAdjustReceipt, ShapeDraft, ShapeFill, ShapeFillReceipt, ShapeGradient, ShapeKind, ShapeLineEnd, ShapeOutline, ShapePrimitive, ShapeReceipt, ShapeRect, ShapeSnapshot, ShapeStroke, ShapeStrokeReceipt, ShapeZOrderReceipt, ShapeAltText, SlideDisplayList, SlidePrimitive, SlideReceipt, SlideSnapshot, SlideLayoutSnapshot, HeaderFooterSettings, SlideHeaderFooterText, SlideDateText, SlideHeaderFooter, StorySnapshot, Stroke, StrokeEnd, TextBoxPrimitive, TextReceipt, TextParagraphDraft, TextRunSnapshot, TextStyle, TextStylePatch, TextStyleSnapshot, TransformReceipt, TableReceipt, UpdateEvent, } from './types';
 /** @internal */
 export { metafileImageBytes } from './render/image';
 /** @internal */
@@ -2770,12 +2770,27 @@ export interface TablePrimitive extends PrimitiveBase {
     primitives: SlidePrimitive[];
 }
 export type SlidePrimitive = ShapePrimitive | ImagePrimitive | TextBoxPrimitive | PlaceholderPrimitive | ChartPrimitive | TablePrimitive;
+/** What `p:cNvPr` says about a shape for assistive technology. */
+export interface ShapeAltText {
+    title?: string;
+    description?: string;
+    /** The shape, or a group around it, is marked decorative. */
+    decorative?: boolean;
+    /** The nearest enclosing group with alternative text, by its key in `altText`. */
+    group?: string;
+    /** Where the shape starts in `primitives` when what paints it carries no shape id. */
+    primitive?: number;
+}
 export interface SlideDisplayList {
     contractVersion: number;
     width: number;
     height: number;
     background?: Paint;
     primitives: SlidePrimitive[];
+    /** Alternative text by shape id, for the shapes that have some. */
+    altText?: Record<string, ShapeAltText>;
+    /** The shape holding the slide's title placeholder. */
+    titleShape?: string;
 }
 export type HitTestResult = {
     kind: 'shape';
