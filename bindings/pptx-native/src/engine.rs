@@ -1,14 +1,55 @@
 use std::cell::{Cell, RefCell};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use betteroffice_fonts::{
+    BundledFonts, FontLoading, FontManager, FontPack, FontSource, set_default_font_source,
+};
 use napi::bindgen_prelude::{
     ArrayBuffer, Either, JsObjectValue, Uint8Array, Uint8ArraySlice, Undefined,
 };
 use napi::{Env, Error, Result, Status};
 use napi_derive::napi;
 use pptx_engine::{Document, EngineError, ErrorKind, Host, Renderer};
+
+/// Internal, called by the package loader.
+#[napi(catch_unwind, js_name = "configureFontPacks")]
+pub fn configure_font_packs(
+    env: Env,
+    latin: Option<String>,
+    intl: Option<String>,
+    cjk: Option<String>,
+) -> Result<bool> {
+    static CONFIGURED: Mutex<bool> = Mutex::new(false);
+    let mut configured = CONFIGURED.lock().unwrap_or_else(|error| error.into_inner());
+    if *configured {
+        return Ok(false);
+    }
+    let directories = [
+        (FontPack::Latin, latin),
+        (FontPack::Intl, intl),
+        (FontPack::Cjk, cjk),
+    ]
+    .into_iter()
+    .filter_map(|(pack, directory)| directory.map(|directory| (pack, directory.into())))
+    .collect();
+    let fonts = BundledFonts::from_pack_directories(directories)
+        .map_err(|error| throw_error(&env, &error.to_string()))?;
+    let installed = set_default_font_source(FontSource::Provider(Arc::new(fonts))).is_ok();
+    *configured = true;
+    Ok(installed)
+}
+
+fn font_manager(env: &Env) -> Result<&'static FontManager> {
+    static MANAGER: OnceLock<FontManager> = OnceLock::new();
+    if let Some(manager) = MANAGER.get() {
+        return Ok(manager);
+    }
+    let manager = FontManager::new(&FontSource::default(), FontLoading::OnDemand)
+        .map_err(|error| throw_error(env, &error.to_string()))?;
+    Ok(MANAGER.get_or_init(|| manager))
+}
 
 #[napi(object)]
 pub struct DecodedFontFace {
@@ -1188,6 +1229,24 @@ impl PptxRenderer {
         let document = document.document(env)?;
         renderer
             .export_slide_json(document.session(), slide_index)
+            .map_err(|error| map_error(env, error))
+    }
+
+    /// Internal: registers the faces one slide needs from the installed font packs.
+    #[napi(catch_unwind, js_name = "registerDefaultFonts")]
+    pub fn register_default_fonts(
+        &mut self,
+        env: Env,
+        document: &PptxDocument,
+        slide_index: u32,
+    ) -> Result<()> {
+        let _call = EngineCall::new(env);
+        let manager = font_manager(&env)?;
+        let renderer = self.renderer_mut(env)?;
+        let _document_call = EngineCall::new(env);
+        let document = document.document(env)?;
+        renderer
+            .register_default_fonts(document.session(), slide_index, manager)
             .map_err(|error| map_error(env, error))
     }
 

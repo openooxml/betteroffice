@@ -195,3 +195,17 @@ for (const [decoration, properties] of [
     }
   });
 }
+
+test('default fonts leave the other styles of a registered family to that family', async () => {
+  const assets = new URL('../../packages/fonts-latin/assets', import.meta.url).pathname;
+  raw.configureFontPacks(assets, undefined, undefined);
+  const { document, renderer } = await pptxTextRaster('Liberation Sans', 'b="1"');
+  try {
+    const before = slidePng(renderer, document, 0, 1);
+    renderer.registerDefaultFonts(document, 0);
+    expect(slidePng(renderer, document, 0, 1)).toEqual(before);
+  } finally {
+    renderer.free();
+    document.free();
+  }
+});

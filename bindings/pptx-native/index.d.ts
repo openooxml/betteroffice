@@ -117,6 +117,8 @@ export declare class PptxRenderer {
   saveBytes(document: PptxDocument): Uint8Array
   layoutSlideJson(document: PptxDocument, slideIndex: number): string
   exportSlideJson(document: PptxDocument, slideIndex: number): string
+  /** Internal: registers the faces one slide needs from the installed font packs. */
+  registerDefaultFonts(document: PptxDocument, slideIndex: number): void
   renderPngTarget(document: PptxDocument, targetJson: string, optionsJson: string): Uint8Array
   layoutSlideProfiledJson(document: PptxDocument, slideIndex: number): string
   hitTestJson(x: number, y: number): string
@@ -134,6 +136,9 @@ export declare class PptxRenderer {
 }
 
 export declare function compileSlideJson(slideJson: string): string
+
+/** Internal, called by the package loader. */
+export declare function configureFontPacks(latin?: string | undefined | null, intl?: string | undefined | null, cjk?: string | undefined | null): boolean
 
 export interface DecodedFontFace {
   font: Uint8Array
