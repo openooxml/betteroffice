@@ -38,6 +38,13 @@ file.
 `Workbook.open` starts from cached values. Edits recalculate dependent formulas;
 `open_recalculated` and `recalculate()` request a full recalculation.
 
+`Calculation.unevaluated` lists the formulas the engine could not compute, each
+with the functions behind it, so you can tell a calculated value from one kept
+as Excel saved it. That covers functions no offline engine can run (`WEBSERVICE`,
+`RTD`) and names it does not know (a VBA function, a typo), even inside
+`IFERROR`, and the cells reading them. With no saved value, an unknown function
+shows `#NAME?` or what `IFERROR` answered, and is still listed.
+
 ## Render a sheet to PNG
 
 ```python

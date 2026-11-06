@@ -153,6 +153,40 @@ describe('wasm loader', () => {
     }
   });
 
+  it('keeps and reports calls to unknown functions by name', async () => {
+    const zip = await JSZip.loadAsync(sampleBytes());
+    zip.file('xl/worksheets/sheet1.xml', '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1">'
+      + '<c r="A1"><f>IFERROR(REPRO_UNKNOWN_FUNCTION(1),0)</f><v>42</v></c>'
+      + '<c r="B1"><f>A1*2</f><v>9</v></c>'
+      + '<c r="C1"><f>IFERROR(TYPO(1),0)</f></c></row></sheetData></worksheet>');
+    const bytes = await zip.generateAsync({ type: 'uint8array' });
+    const handle = openWorkbook(bytes, { calculation: { nowSerial: 45000, randSeed: 1 } });
+    try {
+      const reported = [
+        { address: 'A1', functions: ['REPRO_UNKNOWN_FUNCTION'] },
+        { address: 'B1', functions: ['REPRO_UNKNOWN_FUNCTION'] },
+        { address: 'C1', functions: ['TYPO'] },
+      ];
+      expect(handle.calculationStatus().unevaluatedCells).toEqual(reported);
+      expect(handle.recalculate().unevaluatedCells).toEqual(reported);
+      const read = handle.readCells({ ranges: [{ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1:C1' } }] });
+      if (!read.ok) throw new Error('read refused');
+      expect(read.ranges[0].cells[0].map((cell) => cell.displayText)).toEqual(['42', '9', '0']);
+      expect(read.calculation.unevaluatedCells?.map(({ a1, functions }) => ({ address: a1, functions })))
+        .toEqual(reported);
+      handle.editCell(0, 2, 0, '=SUMM(1,2)');
+      const typed = handle.readCells({ ranges: [{ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A3' } }] });
+      if (!typed.ok) throw new Error('read refused');
+      expect(typed.ranges[0].cells[0][0].displayText).toBe('#NAME?');
+      expect(handle.calculationStatus().unevaluatedCells).toEqual([
+        ...reported,
+        { address: 'A3', functions: ['SUMM'] },
+      ]);
+    } finally {
+      handle.dispose();
+    }
+  });
+
   it('keeps and reports formulas no offline engine can compute', async () => {
     const zip = await JSZip.loadAsync(sampleBytes());
     zip.file('xl/worksheets/sheet1.xml', '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1">'

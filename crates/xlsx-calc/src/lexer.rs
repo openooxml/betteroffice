@@ -183,6 +183,7 @@ impl Lexer<'_> {
                 '"' => self.lex_string()?,
                 '#' => self.lex_error_literal()?,
                 '\'' => self.lex_quoted_sheet_ref()?,
+                '[' if self.workbook_function_end().is_some() => self.lex_workbook_function(),
                 '(' => self.punct(TokKind::LParen),
                 ')' => self.punct(TokKind::RParen),
                 ',' => self.punct(TokKind::Comma),
@@ -345,6 +346,25 @@ impl Lexer<'_> {
             }
         }
         Err(ParseError::new(start, "unknown error literal"))
+    }
+
+    /// where `[1]!Foo` ends when one stands here before its `(`: the form
+    /// excel stores a call to a function of another workbook, an add-in's, in.
+    fn workbook_function_end(&self) -> Option<usize> {
+        let rest = self.input[self.pos..].strip_prefix('[')?;
+        let (index, name) = rest.split_once("]!")?;
+        let word = name
+            .find(|c: char| !c.is_alphanumeric() && !matches!(c, '_' | '.'))
+            .unwrap_or(name.len());
+        let named = !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit()) && word > 0;
+        (named && name[word..].starts_with('('))
+            .then_some(self.pos + "[".len() + index.len() + "]!".len() + word)
+    }
+
+    fn lex_workbook_function(&mut self) -> TokKind {
+        let start = self.pos;
+        self.pos = self.workbook_function_end().unwrap_or(self.pos);
+        TokKind::Ident(self.input[start..self.pos].to_string())
     }
 
     /// `'Quoted Sheet'!A1` or `'Quoted Sheet'!A1:B2`. `''` escapes a quote.

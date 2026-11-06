@@ -779,12 +779,13 @@ export interface XlsxRangeRead {
     cells: XlsxCellRead[][];
 }
 /**
- * A formula cell the engine could not compute: it keeps Excel's saved value,
- * or stays blank when the file saved none, unless only an engine gap was
- * involved, which shows its error.
+ * A formula cell the engine could not compute: it keeps Excel's saved value.
+ * When the file saved none, an uncomputable function leaves it blank, an
+ * unknown function shows what the engine answered (`#NAME?`, or what a handler
+ * like `IFERROR` made of it), and an engine gap alone shows its error.
  */
 export interface XlsxUnevaluatedCell extends XlsxCellAddress {
-    /** Uncomputable functions involved (`WEBSERVICE`, `RTD`, an add-in), sorted; empty when only engine gaps were. */
+    /** Functions involved, sorted: uncomputable ones (`WEBSERVICE`, `RTD`, an add-in) and names the engine does not know (a VBA function, a typo); empty when only engine gaps were. */
     functions: string[];
 }
 export interface XlsxReadCalculation {
@@ -3697,14 +3698,15 @@ export interface CalculationStatus {
     unevaluatedCells?: UnevaluatedCellStatus[];
 }
 /**
- * A formula cell the engine could not compute: it keeps Excel's saved value,
- * or stays blank when the file saved none, unless only an engine gap was
- * involved, which shows its error.
+ * A formula cell the engine could not compute: it keeps Excel's saved value.
+ * When the file saved none, an uncomputable function leaves it blank, an
+ * unknown function shows what the engine answered (`#NAME?`, or what a handler
+ * like `IFERROR` made of it), and an engine gap alone shows its error.
  */
 export interface UnevaluatedCellStatus {
     /** The cell, qualified by its sheet when that is not the active one. */
     address: string;
-    /** Uncomputable functions involved (`WEBSERVICE`, `RTD`, an add-in), sorted; empty when only engine gaps were. */
+    /** Functions involved, sorted: uncomputable ones (`WEBSERVICE`, `RTD`, an add-in) and names the engine does not know (a VBA function, a typo); empty when only engine gaps were. */
     functions: string[];
 }
 export type NumberFormat = 'automatic' | 'plainText' | 'number' | 'percent' | 'scientific' | 'currency' | 'date' | 'time' | 'custom';

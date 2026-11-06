@@ -89,6 +89,30 @@ fn rebase_edit(edit: &mut ProposedEdit, formula_input: bool, names: &[String], o
 }
 
 impl Workbook {
+    /// `before` are the sheet names `ops` were applied against. the graph's
+    /// answers follow their cells and formulas as a proposal's edits do.
+    pub(super) fn rebase_answers(&self, before: &[String], ops: &[Op]) {
+        let Some(graph) = &self.graph else {
+            return;
+        };
+        if !ops.iter().any(rebases_proposals) {
+            return;
+        }
+        let mut names = before.to_vec();
+        for op in ops {
+            if rebases_proposals(op) {
+                let sheets = xlsx_ops::ProposalSheets::new(&names);
+                graph.rebase_answered(|sheet, cell, formula| {
+                    let formula = sheets.remap(formula, sheet, op)?;
+                    let (mut sheet, mut row, mut col) = (sheet.0, cell.row, cell.col);
+                    remap_address(&mut sheet, &mut row, &mut col, op)
+                        .then(|| (SheetId(sheet), CellRef::new(row, col), formula))
+                });
+            }
+            rename_sheet_view(&mut names, op);
+        }
+    }
+
     pub(super) fn rebased_proposals(&self, ops: &[Op]) -> Option<Vec<Proposal>> {
         if !ops.iter().any(rebases_proposals) {
             return None;
