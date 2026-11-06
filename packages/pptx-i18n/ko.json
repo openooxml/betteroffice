@@ -244,6 +244,7 @@
     "cut": "잘라내기",
     "copy": "복사",
     "paste": "붙여넣기",
+    "pastePlainText": "일반 텍스트로 붙여넣기",
     "insert": "삽입",
     "delete": "삭제",
     "deleteTable": "표 삭제",
@@ -271,5 +272,14 @@
     "shape": "도형 메뉴",
     "table": "표 메뉴",
     "slide": "슬라이드 메뉴"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "del": "Del",
+    "escape": "Esc",
+    "pageUp": "Page Up",
+    "pageDown": "Page Down"
   }
 }

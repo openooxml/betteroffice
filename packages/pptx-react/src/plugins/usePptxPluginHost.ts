@@ -96,8 +96,13 @@ export function usePptxPluginHost(options: UsePptxPluginHostOptions): PptxPlugin
 
   useEffect(() => {
     host.syncCommands();
-    return host.subscribe(() => host.syncCommands());
-  }, [host]);
+    const unsubscribe = host.subscribe(() => host.syncCommands());
+    const unsubscribeShortcuts = options.commands.subscribeShortcuts(() => host.syncCommands());
+    return () => {
+      unsubscribe();
+      unsubscribeShortcuts();
+    };
+  }, [host, options.commands]);
 
   const activations = useSyncExternalStore(host.subscribe, host.activations, () => NO_ACTIVATIONS);
 

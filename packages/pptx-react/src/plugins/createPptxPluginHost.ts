@@ -13,7 +13,7 @@ import {
   type PptxCommandScope,
   type PptxPluginCommandBinding,
 } from '../commands/createPptxCommandStore';
-import { BUILT_IN_CHORDS, EDITING_CHORDS, normalizeChord } from '../commands/descriptors';
+import { EDITING_CHORDS, isPluginCommandId, normalizeChord } from '../commands/descriptors';
 import { commandReason } from '../commands/evaluate';
 import type {
   PptxCommandStore,
@@ -417,13 +417,23 @@ export function createPptxPluginHost(access: PptxPluginHostAccess | PptxPluginVi
         for (const command of definition.commands ?? []) {
           const id: PptxPluginCommandId = `plugin:${entry.pluginId}/${command.id}`;
           const shortcuts: { chord: string; args: null }[] = [];
-          for (const chord of command.shortcuts ?? []) {
+          const hostChords = commands.hostPluginChords(id);
+          for (const chord of hostChords ?? []) {
+            claimed.set(chord, id);
+            shortcuts.push({ chord, args: null });
+          }
+          for (const chord of hostChords ? [] : (command.shortcuts ?? [])) {
             const canonical = normalizeChord(chord)!;
-            const owner = BUILT_IN_CHORDS.has(canonical)
-              ? 'a built-in command'
-              : EDITING_CHORDS.has(canonical)
-                ? 'text editing'
-                : claimed.get(canonical);
+            const held = commands.shortcutOwner(canonical);
+            const editing = EDITING_CHORDS.has(canonical) && !commands.releasedChord(canonical);
+            const owner =
+              held !== undefined && isPluginCommandId(held)
+                ? held
+                : editing
+                  ? 'text editing'
+                  : held !== undefined
+                    ? 'a built-in command'
+                    : claimed.get(canonical);
             if (!owner) {
               claimed.set(canonical, id);
               shortcuts.push({ chord, args: null });
@@ -455,6 +465,7 @@ export function createPptxPluginHost(access: PptxPluginHostAccess | PptxPluginVi
         for (const local of definition.toolbar ?? [])
           toolbar.push(`plugin:${entry.pluginId}/${local}`);
       }
+      parts.push(`shortcuts:${commands.shortcutRevision()}`);
       const signature = parts.join('|');
       if (signature === commandSignature) {
         commands.refresh();

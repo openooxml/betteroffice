@@ -244,6 +244,7 @@
     "cut": "Вырезать",
     "copy": "Копировать",
     "paste": "Вставить",
+    "pastePlainText": "Вставить как обычный текст",
     "insert": "Вставка",
     "delete": "Удалить",
     "deleteTable": "Удалить таблицу",
@@ -271,5 +272,14 @@
     "shape": "Меню фигуры",
     "table": "Меню таблицы",
     "slide": "Меню слайда"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "del": "Del",
+    "escape": "Esc",
+    "pageUp": "Page Up",
+    "pageDown": "Page Down"
   }
 }

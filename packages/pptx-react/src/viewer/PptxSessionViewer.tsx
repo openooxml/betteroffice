@@ -87,7 +87,8 @@ export function PptxSessionViewer(props: ResolvedFontProps<PptxWorkerViewerProps
     return () => commands.detach(binding);
   }, [commands, binding]);
   useLayoutEffect(() => commands.refresh());
-  useCommandShortcuts({ commands, containerRef: rootRef, suspended: () => false });
+  useCommandShortcuts({ commands, containerRef: rootRef, suspended: () => false,
+    shortcuts: props.shortcuts, onShortcutIssue: props.onShortcutIssue });
 
   useEffect(() => {
     if (typeof window.matchMedia !== 'function') return;

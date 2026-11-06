@@ -179,15 +179,16 @@ describe('contributed commands', () => {
   test('chords normalize, and built-in chords are reserved', () => {
     expect(normalizeChord('Shift+Mod+b')).toBe('Mod+Shift+b');
     expect(normalizeChord('Ctrl+B')).toBeNull();
-    expect(normalizeChord('Mod++')).toBe('Mod++');
+    expect(normalizeChord('Mod++')).toBe('Mod+=');
     const plus = {
       key: '+',
+      code: 'Equal',
       ctrlKey: true,
       metaKey: false,
       shiftKey: false,
       altKey: false,
     };
-    expect(matchesChord('Mod+=', plus as KeyboardEvent, false)).toBe(false);
+    expect(matchesChord('Mod+=', plus as KeyboardEvent, false)).toBe(true);
     expect(matchesChord('Mod++', plus as KeyboardEvent, false)).toBe(true);
     expect(BUILT_IN_CHORDS.has('Mod++') || BUILT_IN_CHORDS.has('Mod+=')).toBe(false);
     expect(BUILT_IN_CHORDS.has('Mod+b')).toBe(true);

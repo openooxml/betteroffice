@@ -1,7 +1,7 @@
 import type { TranslationKey } from '@betteroffice/pptx-i18n';
 import { commandMenuItem, menuSections } from '../../../../shared/react-toolbar/ContextMenu';
 import type { OverflowMenuEntry } from '../../../../shared/react-toolbar/MenuList';
-import { commandShortcut, formatChord } from '../commands/descriptors';
+import { storeAriaShortcut, storeShortcutLabel } from '../commands/shortcuts';
 import type { PptxCommandArgs, PptxCommandId, PptxCommandStore } from '../commands/types';
 
 /** @internal */
@@ -9,15 +9,14 @@ export type PptxContextMenuTarget = 'text' | 'shape' | 'table' | 'slide' | 'empt
 
 type Translate = (key: TranslationKey) => string;
 
-const HINTS: Partial<Record<PptxCommandId, string>> = { cut: 'Mod+X', copy: 'Mod+C', paste: 'Mod+V' };
-
 function item<K extends PptxCommandId>(store: PptxCommandStore, t: Translate, id: K,
   args: PptxCommandArgs[K], labelKey = store.getDescriptor(id).labelKey): OverflowMenuEntry {
   return commandMenuItem({
     id: `${id}:${JSON.stringify(args)}`,
     label: t(labelKey),
     state: store.getState(id, args),
-    shortcut: HINTS[id] ? formatChord(HINTS[id]!) : commandShortcut(id, args),
+    shortcut: storeShortcutLabel(store, id, t, args),
+    ariaShortcut: storeAriaShortcut(store, id, args),
     run: () => { void store.execute(id, args); },
   });
 }

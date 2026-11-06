@@ -244,6 +244,7 @@
     "cut": "Kes",
     "copy": "Kopyala",
     "paste": "Yapıştır",
+    "pastePlainText": "Düz metin olarak yapıştır",
     "insert": "Ekle",
     "delete": "Sil",
     "deleteTable": "Tabloyu Sil",
@@ -271,5 +272,14 @@
     "shape": "Şekil menüsü",
     "table": "Tablo menüsü",
     "slide": "Slayt menüsü"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "del": "Del",
+    "escape": "Esc",
+    "pageUp": "Page Up",
+    "pageDown": "Page Down"
   }
 }

@@ -256,7 +256,8 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
   const contextMenu = usePeerlessContextMenu(presentation, commands, stage, canvas, review.diff, focus);
   const [workspace, available] = useDockArea(Boolean(props.plugins?.length));
   useCommandShortcuts({ commands: pptxCommandController(commands)!, containerRef: editor, editorInput: inputRef,
-    suspended: () => review.presenting || Boolean(presentation?.store.getSnapshot().composition) });
+    suspended: () => review.presenting || Boolean(presentation?.store.getSnapshot().composition),
+    shortcuts: props.shortcuts, onShortcutIssue: props.onShortcutIssue });
   useLayoutEffect(() => {
     api.current = null;
     if (!presentation?.current || !canvas.current) return;

@@ -1,5 +1,14 @@
 import type { Translations } from '@betteroffice/pptx-i18n';
-import { isPluginCommandId, isPptxCommandId, PPTX_COMMAND_DESCRIPTORS } from './descriptors';
+import {
+  isMacPlatform,
+  isPluginCommandId,
+  isPptxCommandId,
+  matchesChord,
+  PPTX_COMMAND_DESCRIPTORS,
+} from './descriptors';
+import type { ChordEvent } from '../../../../shared/keyboard/chords';
+import type { ResolvedShortcuts, ShortcutIssue } from '../../../../shared/keyboard/resolve';
+import { effectiveCommandShortcuts, resolvePptxShortcuts, type PptxShortcuts } from './shortcuts';
 import {
   commandReason,
   contributedCommandGate,
@@ -8,6 +17,7 @@ import {
 } from './evaluate';
 import type {
   PptxCommandArgs,
+  PptxCommandDescriptor,
   PptxCommandDisabledCode,
   PptxCommandFailureCode,
   PptxCommandId,
@@ -139,6 +149,28 @@ export interface PptxCommandController {
   pluginToolbar(): readonly PptxPluginCommandId[];
   /** Keyboard bindings of the contributed commands. */
   pluginShortcuts(): readonly { id: PptxPluginCommandId; chord: string }[];
+  /** Applies a host's shortcut map and returns what was wrong with it. */
+  setShortcuts(shortcuts: PptxShortcuts | undefined): readonly ShortcutIssue[];
+  /** The built-in command a keystroke presses, if any. */
+  shortcutAt(
+    event: ChordEvent,
+    mac?: boolean
+  ): { id: PptxCommandId; args: null; chord: string } | null;
+  /** The chord a keystroke presses, with who holds it now and who holds it by default. */
+  pressedChord(
+    event: ChordEvent,
+    mac?: boolean
+  ): { chord: string; owner: string | undefined; fallback: string | undefined } | null;
+  /** The shortcut id that holds a canonical chord. */
+  shortcutOwner(chord: string): string | undefined;
+  /** Whether the host moved or disabled the default holder of a canonical chord. */
+  releasedChord(chord: string): boolean;
+  /** Chords the host set for a contributed command; undefined keeps the plugin's own. */
+  hostPluginChords(id: PptxPluginCommandId): readonly string[] | undefined;
+  /** Changes whenever the shortcut map does. */
+  shortcutRevision(): number;
+  /** Notified after the shortcut map changes. */
+  subscribeShortcuts(listener: () => void): () => void;
   /**
    * A store acting for `scope`: its answer is checked inside each operation, and mutating
    * built-in commands refuse with `unsupported-policy`.
@@ -200,6 +232,29 @@ function knownCommand(id: unknown): id is AnyCommandId {
 }
 
 /** Creates the command store of one editor mount. */
+const defaultTables = new Map<boolean, ResolvedShortcuts>();
+
+function defaultShortcuts(mac: boolean): ResolvedShortcuts {
+  let table = defaultTables.get(mac);
+  if (!table) {
+    table = resolvePptxShortcuts(undefined, { mac });
+    defaultTables.set(mac, table);
+  }
+  return table;
+}
+
+/** The chord among `chords` a keystroke presses; one naming the typed character wins. */
+export function pickChord(chords: Iterable<string>, event: ChordEvent, mac = isMacPlatform()): string | null {
+  let found: string | null = null;
+  const typed = event.key.toLowerCase();
+  for (const chord of chords) {
+    if (!matchesChord(chord, event, mac)) continue;
+    if (chord.slice(chord.lastIndexOf('+') + 1) === typed) return chord;
+    found ??= chord;
+  }
+  return found;
+}
+
 export function createPptxCommandController(): PptxCommandController {
   let binding: PptxCommandBinding | null = null;
   let pluginCommands = new Map<PptxPluginCommandId, PptxPluginCommandBinding>();
@@ -213,6 +268,32 @@ export function createPptxCommandController(): PptxCommandController {
   const chromeListeners = new Set<() => void>();
   let chromeSnapshot: PptxChromeContext | null = null;
   let round = 0;
+  let shortcutMap: PptxShortcuts | undefined;
+  let revision = 0;
+  let resolved: { mac: boolean; table: ResolvedShortcuts } | null = null;
+  const shortcutListeners = new Set<() => void>();
+  const effectiveDescriptors = new Map<PptxCommandId, PptxCommandDescriptor>();
+  const shortcutTable = (mac = isMacPlatform()): ResolvedShortcuts => {
+    if (!shortcutMap) return defaultShortcuts(mac);
+    if (resolved?.mac !== mac) {
+      resolved = { mac, table: resolvePptxShortcuts(shortcutMap, { mac }) };
+      effectiveDescriptors.clear();
+    }
+    return resolved.table;
+  };
+  const effectiveDescriptor = (id: PptxCommandId): PptxCommandDescriptor => {
+    if (!shortcutMap) return PPTX_COMMAND_DESCRIPTORS[id];
+    const table = shortcutTable();
+    let descriptor = effectiveDescriptors.get(id);
+    if (!descriptor) {
+      descriptor = Object.freeze({
+        ...PPTX_COMMAND_DESCRIPTORS[id],
+        shortcuts: Object.freeze(effectiveCommandShortcuts(table, id)),
+      }) as PptxCommandDescriptor;
+      effectiveDescriptors.set(id, descriptor);
+    }
+    return descriptor;
+  };
 
   const environment = (executing: boolean): PptxCommandEnvironment | null => {
     if (!binding) return null;
@@ -387,7 +468,7 @@ export function createPptxCommandController(): PptxCommandController {
   const getDescriptor = (id: AnyCommandId) =>
     isPluginCommandId(id)
       ? pluginCommands.get(id)?.descriptor ?? null
-      : PPTX_COMMAND_DESCRIPTORS[id];
+      : effectiveDescriptor(id);
 
   const store = Object.freeze({
     getDescriptor,
@@ -539,6 +620,42 @@ export function createPptxCommandController(): PptxCommandController {
     },
     pluginToolbar: () => pluginToolbarIds,
     pluginShortcuts: () => pluginShortcutList,
+    setShortcuts(shortcuts) {
+      shortcutMap = shortcuts;
+      resolved = null;
+      revision += 1;
+      effectiveDescriptors.clear();
+      const { issues } = shortcutTable();
+      notify();
+      for (const listener of [...shortcutListeners]) listener();
+      return issues;
+    },
+    shortcutAt(event, mac = isMacPlatform()) {
+      const { owners } = shortcutTable(mac);
+      const chord = pickChord(owners.keys(), event, mac);
+      const id = chord === null ? undefined : owners.get(chord);
+      if (chord === null || id === undefined || isPluginCommandId(id)) return null;
+      return { id: id as PptxCommandId, args: null, chord };
+    },
+    pressedChord(event, mac = isMacPlatform()) {
+      const { owners } = shortcutTable(mac);
+      const fallbacks = defaultShortcuts(mac).owners;
+      const chord = pickChord(new Set([...owners.keys(), ...fallbacks.keys()]), event, mac);
+      return chord === null ? null : { chord, owner: owners.get(chord), fallback: fallbacks.get(chord) };
+    },
+    shortcutOwner: (chord) => shortcutTable().owners.get(chord),
+    releasedChord(chord) {
+      const fallback = defaultShortcuts(isMacPlatform()).owners.get(chord);
+      return fallback !== undefined && shortcutTable().owners.get(chord) !== fallback;
+    },
+    hostPluginChords: (id) => (shortcutMap ? shortcutTable().chords.get(id) : undefined),
+    shortcutRevision: () => revision,
+    subscribeShortcuts(listener) {
+      shortcutListeners.add(listener);
+      return () => {
+        shortcutListeners.delete(listener);
+      };
+    },
     scoped(scope) {
       let scoped = scopedStores.get(scope);
       if (!scoped) {

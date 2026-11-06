@@ -164,7 +164,7 @@ const SHAPE_COMMANDS: ReadonlySet<PptxCommandId> = new Set<PptxCommandId>([
 
 const SLIDE_COMMANDS: ReadonlySet<PptxCommandId> = new Set<PptxCommandId>(['insertSlide', 'tool']);
 const PEERLESS_COMMANDS: ReadonlySet<PptxCommandId> = new Set<PptxCommandId>([
-  'cut', 'copy', 'paste', 'deleteObject', 'deleteSlide', 'duplicateSlide', 'tableInsert', 'tableDelete',
+  'cut', 'copy', 'paste', 'pasteAsPlainText', 'deleteObject', 'deleteSlide', 'duplicateSlide', 'tableInsert', 'tableDelete',
 ]);
 
 function hexColor(value: string | null | undefined): string | null {

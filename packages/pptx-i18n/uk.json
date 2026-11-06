@@ -244,6 +244,7 @@
     "cut": "Вирізати",
     "copy": "Копіювати",
     "paste": "Вставити",
+    "pastePlainText": "Вставити як звичайний текст",
     "insert": "Вставлення",
     "delete": "Видалити",
     "deleteTable": "Видалити таблицю",
@@ -271,5 +272,14 @@
     "shape": "Меню фігури",
     "table": "Меню таблиці",
     "slide": "Меню слайда"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "del": "Del",
+    "escape": "Esc",
+    "pageUp": "Page Up",
+    "pageDown": "Page Down"
   }
 }

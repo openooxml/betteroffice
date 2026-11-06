@@ -6,6 +6,8 @@ import type { Translations } from '@betteroffice/pptx-i18n';
 import { Component, lazy, Suspense, useEffect, useMemo, useState, type CSSProperties, type JSX, type ReactNode } from 'react';
 import { LocaleProvider, useTranslation } from './i18n';
 import type { PptxCommandStore } from './commands/types';
+import type { PptxShortcuts } from './commands/shortcuts';
+import type { ShortcutIssue } from '../../../shared/keyboard/resolve';
 import type { PptxEditorPluginProps, PptxPlugin } from './plugins/types';
 import type { PptxWorkerEditorProps } from './worker/PptxWorkerEditor';
 import type { PptxWorkerEditorApi } from './worker/createWorkerEditorApi';
@@ -197,6 +199,17 @@ export interface PptxInThreadEditorProps extends PptxEditorPluginProps {
   toolbar?: ReactNode;
   /** Shows the toolbar region; defaults to true. */
   showToolbar?: boolean;
+  /**
+   * Remaps or disables keyboard shortcuts; menus and tooltips follow.
+   * @experimental
+   */
+  shortcuts?: PptxShortcuts;
+  /**
+   * Reports each entry of `shortcuts` that was refused, and each default a host chord displaced.
+   * Without it, refusals are logged in development builds.
+   * @experimental
+   */
+  onShortcutIssue?: (issue: ShortcutIssue) => void;
 }
 
 /** @deprecated Removed in 0.6.0. Use PptxAsyncEditorProps. */

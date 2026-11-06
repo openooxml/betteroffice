@@ -2,7 +2,9 @@ import { useCallback, useContext, useMemo, useRef, useSyncExternalStore } from '
 import { useTranslation } from '../i18n';
 import { pptxCommandController, type PptxChromeContext } from './createPptxCommandStore';
 import { PptxCommandContext } from './PptxCommandProvider';
-import { commandShortcut, defaultArgs, formatChord, isPluginCommandId } from './descriptors';
+import { defaultArgs, formatChord, isPluginCommandId } from './descriptors';
+import { ariaChord } from '../../../../shared/keyboard/chords';
+import { chordLabels, storeAriaShortcut, storeShortcutLabel } from './shortcuts';
 import type {
   PptxCommandArgs,
   PptxCommandDescriptor,
@@ -79,6 +81,8 @@ export interface PptxBoundCommand<K extends PptxCommandId> {
   label: string;
   /** The keyboard shortcut as people read it on this platform, such as `Ctrl+B`. */
   shortcut: string | null;
+  /** The shortcut in `aria-keyshortcuts` form, such as `Control+B`. */
+  ariaShortcut: string | null;
   /** Executes with `args`, falling back to the arguments bound to the hook. */
   execute(args?: PptxCommandArgs[K]): Promise<PptxCommandResult>;
 }
@@ -95,6 +99,8 @@ export interface PptxBoundPluginCommand {
   /** The contributed label, or the id while no plugin contributes it. */
   label: string;
   shortcut: string | null;
+  /** The shortcut in `aria-keyshortcuts` form. */
+  ariaShortcut: string | null;
   execute(): Promise<PptxPluginCommandResult>;
 }
 
@@ -115,10 +121,15 @@ export function usePptxCommand(
   const store = usePptxCommands();
   const state = usePptxCommandState(id as PptxCommandId, args as never);
   const { t } = useTranslation();
-  const descriptor = store.getDescriptor(id as PptxCommandId) as
-    | PptxCommandDescriptor
-    | PptxPluginCommandDescriptor
-    | null;
+  const readDescriptor = useCallback(
+    () =>
+      store.getDescriptor(id as PptxCommandId) as
+        | PptxCommandDescriptor
+        | PptxPluginCommandDescriptor
+        | null,
+    [store, id]
+  );
+  const descriptor = useSyncExternalStore(store.subscribe, readDescriptor, readDescriptor);
   const argsKey = args === undefined ? undefined : JSON.stringify(args);
   const execute = useCallback(
     (callArgs?: unknown) =>
@@ -141,7 +152,8 @@ export function usePptxCommand(
         descriptor: contributed,
         state,
         label: contributed?.label ?? id,
-        shortcut: chord ? formatChord(chord) : null,
+        shortcut: chord ? formatChord(chord, undefined, chordLabels(t)) : null,
+        ariaShortcut: chord ? ariaChord(chord) : null,
         execute: () => execute(),
       };
     }
@@ -151,10 +163,11 @@ export function usePptxCommand(
       descriptor: builtIn,
       state: state as PptxCommandState,
       label: t(builtIn.labelKey),
-      shortcut: commandShortcut(id, parse(argsKey)),
+      shortcut: storeShortcutLabel(store, id, t, parse(argsKey)),
+      ariaShortcut: storeAriaShortcut(store, id, parse(argsKey)),
       execute,
     };
-  }, [id, descriptor, state, t, argsKey, execute]);
+  }, [store, id, descriptor, state, t, argsKey, execute]);
 }
 
 /** The editor's locale, following its changes; `null` outside an editor. */

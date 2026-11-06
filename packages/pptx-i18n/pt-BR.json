@@ -244,6 +244,7 @@
     "cut": "Recortar",
     "copy": "Copiar",
     "paste": "Colar",
+    "pastePlainText": "Colar como texto simples",
     "insert": "Inserir",
     "delete": "Excluir",
     "deleteTable": "Excluir tabela",
@@ -271,5 +272,14 @@
     "shape": "Menu de forma",
     "table": "Menu de tabela",
     "slide": "Menu de slide"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "del": "Del",
+    "escape": "Esc",
+    "pageUp": "Page Up",
+    "pageDown": "Page Down"
   }
 }
