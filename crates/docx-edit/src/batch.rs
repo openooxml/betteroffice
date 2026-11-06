@@ -3389,7 +3389,8 @@ fn rehearse(
         txn.store().pending_update().is_some() || txn.store().pending_ds().is_some()
     };
     let diverged = pending
-        || rehearsal.encode_state_vector_v1() != stage.encode_state_vector_v1()
+        || rehearsal.yrs_doc().transact().state_vector()
+            != stage.yrs_doc().transact().state_vector()
         || changed_stories
             .iter()
             .any(|story| rehearsal.story_segments(story).ok() != stage.story_segments(story).ok());
@@ -3408,6 +3409,31 @@ mod direct_tests {
     use yrs::{Any, Map};
 
     use super::*;
+
+    fn client_update(client: u64) -> Vec<u8> {
+        let doc = yrs::Doc::with_client_id(client);
+        let map = doc.get_or_insert_map("clients");
+        let mut txn = doc.transact_mut();
+        map.insert(&mut txn, client.to_string(), client as f64);
+        txn.encode_update_v1()
+    }
+
+    #[test]
+    fn rehearsal_compares_state_vectors_not_their_byte_order() {
+        let base = client_update(1);
+        let update = client_update(5);
+        let rehearsed = EditingDoc::build(9002, false);
+        rehearsed.apply_verbatim_v1(&base).unwrap();
+        rehearsed.apply_verbatim_v1(&update).unwrap();
+        let stage = EditingDoc::build(9003, false);
+        stage.apply_verbatim_v1(&update).unwrap();
+        stage.apply_verbatim_v1(&base).unwrap();
+        assert_ne!(
+            rehearsed.encode_state_vector_v1(),
+            stage.encode_state_vector_v1()
+        );
+        rehearse(9004, &base, &update, &stage, &[]).unwrap();
+    }
 
     const DATE: &str = "2026-09-24T12:00:00Z";
 
