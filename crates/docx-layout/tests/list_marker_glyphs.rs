@@ -97,3 +97,18 @@ fn list_markers_stay_text_without_fonts() {
         serde_json::from_str(&build_display_list_json(&input(None)).unwrap()).unwrap();
     assert_eq!(markers(&list), vec![("text", "1.".to_owned())]);
 }
+
+#[test]
+fn list_markers_with_right_to_left_text_stay_text() {
+    let mut store = FontStore::new();
+    let id = store
+        .register(LIBERATION.to_vec())
+        .expect("fixture registers");
+    let mut value: serde_json::Value = serde_json::from_str(&input(Some(id.to_u32()))).unwrap();
+    value["measured"][0]["block"]["attrs"]["listMarker"] = serde_json::json!("אב1.");
+    let list: DisplayList = serde_json::from_str(
+        &build_display_list_json_with_fonts(&value.to_string(), &store).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(markers(&list), vec![("text", "אב1.".to_owned())]);
+}

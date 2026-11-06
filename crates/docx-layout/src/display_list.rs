@@ -7161,6 +7161,9 @@ fn emit_line(
         marker_attrs.list_marker = Some(true);
         marker_attrs.list_marker_revision = marker_revision;
         let shaped = !geom.is_rtl
+            && bidi_char_levels(marker, base_bidi_direction(false))
+                .iter()
+                .all(|level| level % 2 == 0)
             && ctx.shape.is_some_and(|shape| {
                 try_emit_glyph_runs(
                     prims,
@@ -7178,7 +7181,7 @@ fn emit_line(
                     &marker_attrs,
                     color,
                     &None,
-                    auto_space,
+                    ooxml_text::AutoSpace::from_options(Some(false), Some(false)),
                 )
             });
         if !shaped {
