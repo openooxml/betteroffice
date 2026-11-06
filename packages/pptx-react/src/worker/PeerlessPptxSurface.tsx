@@ -17,6 +17,7 @@ import { EditorChromeContext } from '../components/EditorToolbarContext';
 import { useTranslation } from '../i18n';
 import { pptxCommandController } from '../commands/createPptxCommandStore';
 import { useCommandShortcuts } from '../commands/useCommandShortcuts';
+import { isKeyReleasedFromInput } from '../../../../shared/keyboard/nativeGesture';
 import { inPluginChrome, pluginEventStore } from '../commands/pluginEvents';
 import { PluginDock, useDockArea } from '../plugins/PluginPanels';
 import { PluginOverlays } from '../plugins/PluginOverlays';
@@ -329,7 +330,7 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
             if (presentation.inputEnabled) void peerlessObjectCommand(presentation, { kind: 'remove' }).catch(() => {});
             return;
           }
-          peerlessHistoryKey(event, presentation.store);
+          if (!isKeyReleasedFromInput(event.nativeEvent)) peerlessHistoryKey(event, presentation.store);
           if (!event.defaultPrevented) navigatePeerlessSlide(event, presentation);
         }}
         onPointerDown={(event) => { if (!pluginEventStore(event.nativeEvent) && !inPluginChrome(event.target) && !review.diff && !insertion.onPointerDown(event) && !shapes.onPointerDown(event)) selection.onPointerDown(event); }}

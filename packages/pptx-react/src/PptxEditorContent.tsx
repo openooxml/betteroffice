@@ -48,6 +48,7 @@ import {
 import { PptxCommandContext } from './commands/PptxCommandProvider';
 import { inPluginChrome, pluginEventStore } from './commands/pluginEvents';
 import { useCommandShortcuts } from './commands/useCommandShortcuts';
+import { CLIPBOARD_IDS } from './commands/shortcuts';
 import {
   usePptxCommandBinding,
   type PptxExportOutcome,
@@ -2788,7 +2789,7 @@ export function PptxEditorContent({
   const presentingRef = useRef(presenting);
   presentingRef.current = presenting;
   useCommandShortcuts({ commands, containerRef: rootRef, suspended: () => presentingRef.current,
-    shortcuts, onShortcutIssue });
+    shortcuts, onShortcutIssue, unsupported: CLIPBOARD_IDS });
 
   const toolbarRegion =
     !showToolbar || toolbar === null ? null : (

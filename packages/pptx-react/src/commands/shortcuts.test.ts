@@ -36,6 +36,15 @@ describe('resolvePptxShortcuts', () => {
     expect(issues.map(({ code }) => code)).toEqual(['reserved-chord', 'reserved-chord', 'reserved-chord', 'reserved-chord']);
   });
 
+  test('refuses ids the editor cannot run without displacing their chord', () => {
+    const unsupported = new Set(['copy', 'paste']);
+    const { owners, issues } = resolvePptxShortcuts({ copy: 'Mod+S', paste: null, bold: 'Mod+Alt+B' }, { mac: false, unsupported });
+    expect(issues).toEqual([{ code: 'unknown-id', id: 'copy' }, { code: 'unknown-id', id: 'paste' }]);
+    expect(owners.get('Mod+s')).toBe('save');
+    expect(owners.get('Mod+v')).toBe('paste');
+    expect(owners.get('Mod+Alt+b')).toBe('bold');
+  });
+
   test('accepts plugin ids before the plugin is active', () => {
     const { owners } = resolvePptxShortcuts({ 'plugin:acme/run': 'Mod+Alt+R' }, { mac: false });
     expect(owners.get('Mod+Alt+r')).toBe('plugin:acme/run');

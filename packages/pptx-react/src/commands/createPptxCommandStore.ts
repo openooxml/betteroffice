@@ -149,8 +149,8 @@ export interface PptxCommandController {
   pluginToolbar(): readonly PptxPluginCommandId[];
   /** Keyboard bindings of the contributed commands. */
   pluginShortcuts(): readonly { id: PptxPluginCommandId; chord: string }[];
-  /** Applies a host's shortcut map and returns what was wrong with it. */
-  setShortcuts(shortcuts: PptxShortcuts | undefined): readonly ShortcutIssue[];
+  /** Applies a host's shortcut map and returns what was wrong with it; `unsupported` ids are refused. */
+  setShortcuts(shortcuts: PptxShortcuts | undefined, unsupported?: ReadonlySet<string>): readonly ShortcutIssue[];
   /** The built-in command a keystroke presses, if any. */
   shortcutAt(
     event: ChordEvent,
@@ -269,6 +269,7 @@ export function createPptxCommandController(): PptxCommandController {
   let chromeSnapshot: PptxChromeContext | null = null;
   let round = 0;
   let shortcutMap: PptxShortcuts | undefined;
+  let unsupportedIds: ReadonlySet<string> | undefined;
   let revision = 0;
   let resolved: { mac: boolean; table: ResolvedShortcuts } | null = null;
   const shortcutListeners = new Set<() => void>();
@@ -276,7 +277,7 @@ export function createPptxCommandController(): PptxCommandController {
   const shortcutTable = (mac = isMacPlatform()): ResolvedShortcuts => {
     if (!shortcutMap) return defaultShortcuts(mac);
     if (resolved?.mac !== mac) {
-      resolved = { mac, table: resolvePptxShortcuts(shortcutMap, { mac }) };
+      resolved = { mac, table: resolvePptxShortcuts(shortcutMap, { mac, unsupported: unsupportedIds }) };
       effectiveDescriptors.clear();
     }
     return resolved.table;
@@ -620,8 +621,9 @@ export function createPptxCommandController(): PptxCommandController {
     },
     pluginToolbar: () => pluginToolbarIds,
     pluginShortcuts: () => pluginShortcutList,
-    setShortcuts(shortcuts) {
+    setShortcuts(shortcuts, unsupported) {
       shortcutMap = shortcuts;
+      unsupportedIds = unsupported;
       resolved = null;
       revision += 1;
       effectiveDescriptors.clear();

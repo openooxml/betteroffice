@@ -47,10 +47,16 @@ export function usePeerlessPluginHost(run: PeerlessPresentation | null, commands
       if (binding.current === current) binding.current = null;
     };
   }, [host, run, run?.failure]);
+  const controller = pptxCommandController(commands);
   useLayoutEffect(() => {
     host.syncCommands();
-    return host.subscribe(() => host.syncCommands());
-  }, [host]);
+    const unsubscribe = host.subscribe(() => host.syncCommands());
+    const unsubscribeShortcuts = controller?.subscribeShortcuts(() => host.syncCommands());
+    return () => {
+      unsubscribe();
+      unsubscribeShortcuts?.();
+    };
+  }, [host, controller]);
 
   const subscribe = useCallback((listener: () => void) =>
     managed && run ? run.subscribeVisual(listener) : () => {}, [run, managed]);

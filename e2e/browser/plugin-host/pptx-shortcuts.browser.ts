@@ -109,6 +109,12 @@ for (const mode of ['worker', 'legacy']) {
       await expect(bold).toHaveAttribute('aria-keyshortcuts', 'Control+Alt+B');
     });
 
+    test('clipboard ids are refused only where there is no clipboard', async ({ page }) => {
+      await open(page, mode, { paste: 'Mod+Alt+V' });
+      const issues = await probe<{ code: string; id: string }[]>(page, 'probe.issues');
+      expect(issues.map(({ code, id }) => [code, id])).toEqual(mode === 'legacy' ? [['unknown-id', 'paste']] : []);
+    });
+
     test('refused entries are reported and plugin chords follow the map', async ({ page }) => {
       await open(page, mode, { bold: 'Mod+ArrowLeft', nope: 'Mod+J', 'plugin:acme.keys/run': 'Mod+Alt+K' });
       expect((await probe<{ code: string; id: string }[]>(page, 'probe.issues')).map(({ code, id }) => [code, id])).toEqual([

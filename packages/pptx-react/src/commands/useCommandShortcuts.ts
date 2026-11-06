@@ -9,7 +9,7 @@ import {
 import { pickChord, type PptxCommandController } from './createPptxCommandStore';
 import { normalizeChord } from './descriptors';
 import { pluginEventStore } from './pluginEvents';
-import { CLIPBOARD_IDS, type PptxShortcuts } from './shortcuts';
+import { CLIPBOARD_IDS, inputKeepsChord, type PptxShortcuts } from './shortcuts';
 import type { PptxCommandId } from './types';
 
 /** Commands whose shortcuts also work while a text field inside the editor has focus. */
@@ -52,6 +52,7 @@ export function useCommandShortcuts({
   suspended,
   shortcuts,
   onShortcutIssue,
+  unsupported,
 }: {
   commands: PptxCommandController;
   containerRef: RefObject<HTMLElement | null>;
@@ -59,6 +60,8 @@ export function useCommandShortcuts({
   suspended: () => boolean;
   shortcuts?: PptxShortcuts;
   onShortcutIssue?: (issue: ShortcutIssue) => void;
+  /** Ids this editor cannot run, refused from the host map. */
+  unsupported?: ReadonlySet<string>;
 }) {
   const suspendedRef = useRef(suspended);
   suspendedRef.current = suspended;
@@ -70,13 +73,13 @@ export function useCommandShortcuts({
   const reported = useRef(new Set<string>());
 
   useLayoutEffect(() => {
-    for (const issue of commands.setShortcuts(shortcutsRef.current)) {
+    for (const issue of commands.setShortcuts(shortcutsRef.current, unsupported)) {
       const key = JSON.stringify(issue);
       if (reported.current.has(key)) continue;
       reported.current.add(key);
       (issueRef.current ?? reportIssue)(issue);
     }
-  }, [commands, shortcutsKey]);
+  }, [commands, shortcutsKey, unsupported]);
 
   useEffect(() => {
     const owns = (event: KeyboardEvent): boolean => {
@@ -92,21 +95,25 @@ export function useCommandShortcuts({
       target !== null && target === editorInput?.current;
 
     const handleInputChord = (event: KeyboardEvent) => {
-      const input = event.target;
-      if (!isInput(input) || !owns(event)) return;
-      disarmClipboardGesture(input);
+      if (!owns(event)) return;
+      const target = event.target;
+      if (isInput(target)) disarmClipboardGesture(target);
       if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
       if (!event.ctrlKey && !event.metaKey && !event.altKey && !/^F\d/.test(event.key)) return;
       const pressed = commands.pressedChord(event);
       if (!pressed) {
-        const contributed = commands.pluginShortcuts().map(({ chord }) => normalizeChord(chord) ?? chord);
+        const contributed = commands.pluginShortcuts()
+          .map(({ chord }) => normalizeChord(chord) ?? chord)
+          .filter((chord) => !inputKeepsChord(chord));
         if (pickChord(contributed, event) !== null) releaseKeyFromInput(event);
         return;
       }
       const { owner, fallback } = pressed;
       if (owner === fallback) return;
       releaseKeyFromInput(event);
-      if (fallback !== undefined && CLIPBOARD_IDS.has(fallback)) armClipboardGesture(input, 'ignore');
+      if (isInput(target) && fallback !== undefined && CLIPBOARD_IDS.has(fallback)) {
+        armClipboardGesture(target, 'ignore');
+      }
     };
 
     const handleKeyDown = (event: KeyboardEvent) => {

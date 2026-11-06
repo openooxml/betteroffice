@@ -14,6 +14,7 @@ import {
   type PptxPluginCommandBinding,
 } from '../commands/createPptxCommandStore';
 import { EDITING_CHORDS, isPluginCommandId, normalizeChord } from '../commands/descriptors';
+import { inputKeepsChord } from '../commands/shortcuts';
 import { commandReason } from '../commands/evaluate';
 import type {
   PptxCommandStore,
@@ -425,7 +426,8 @@ export function createPptxPluginHost(access: PptxPluginHostAccess | PptxPluginVi
           for (const chord of hostChords ? [] : (command.shortcuts ?? [])) {
             const canonical = normalizeChord(chord)!;
             const held = commands.shortcutOwner(canonical);
-            const editing = EDITING_CHORDS.has(canonical) && !commands.releasedChord(canonical);
+            const editing = inputKeepsChord(canonical) ||
+              (EDITING_CHORDS.has(canonical) && !commands.releasedChord(canonical));
             const owner =
               held !== undefined && isPluginCommandId(held)
                 ? held

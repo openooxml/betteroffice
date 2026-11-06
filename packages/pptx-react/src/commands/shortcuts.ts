@@ -11,6 +11,7 @@ import {
   type ResolvedShortcuts,
   type ShortcutBinding,
   type ShortcutDefault,
+  type ShortcutIssue,
 } from '../../../../shared/keyboard/resolve';
 import { defaultArgs, isPluginCommandId, isPptxCommandId, PPTX_COMMAND_DESCRIPTORS } from './descriptors';
 import type {
@@ -36,7 +37,8 @@ export type PptxShortcutId = PptxNullArgsCommandId | PptxPluginCommandId;
  * its defaults; `null` disables it and leaves the keystroke to the host or browser. A chord taken
  * from another command's default wins over it. `cut`, `copy`, `paste` and `pasteAsPlainText` on a
  * chord other than their default use the async Clipboard API, which browsers may gate behind a
- * prompt. Text navigation and editing keys, select all and the context menu key cannot be bound.
+ * prompt; the non-worker editor and the viewer have no clipboard and report them as `unknown-id`.
+ * Text navigation and editing keys, select all and the context menu key cannot be bound.
  * @experimental
  */
 export type PptxShortcuts = Readonly<Partial<Record<PptxShortcutId, ShortcutBinding>>>;
@@ -98,13 +100,23 @@ function isBindable(id: string): boolean {
  */
 export function resolvePptxShortcuts(
   shortcuts: PptxShortcuts | undefined,
-  options: { mac?: boolean } = {}
+  options: { mac?: boolean; unsupported?: ReadonlySet<string> } = {}
 ): ResolvedShortcuts {
-  return resolveShortcuts(shortcutDefaults(), shortcuts, {
+  const { unsupported } = options;
+  const refused: ShortcutIssue[] = [];
+  const map = shortcuts && unsupported
+    ? Object.fromEntries(Object.entries(shortcuts).filter(([id, binding]) => {
+      if (binding === undefined || !unsupported.has(id)) return true;
+      refused.push({ code: 'unknown-id', id });
+      return false;
+    }))
+    : shortcuts;
+  const resolved = resolveShortcuts(shortcutDefaults(), map, {
     mac: options.mac ?? isMacPlatform(),
     isBindable,
     isReserved: (chord) => inputKeepsChord(chord),
   });
+  return refused.length ? { ...resolved, issues: Object.freeze([...refused, ...resolved.issues]) } : resolved;
 }
 
 /** The bindings of `id` in `resolved`, in descriptor form. */
