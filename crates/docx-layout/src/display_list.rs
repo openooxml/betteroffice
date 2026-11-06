@@ -8009,13 +8009,22 @@ fn emit_text_segment(
     attrs.logical_order = logical_order.or(fmt.logical_order);
     attrs.bidi_level = exact_advance.then_some(bidi_level).or(fmt.bidi_level);
     attrs.lang = fmt.language.as_ref().and_then(|language| {
-        if ooxml_text::level_is_rtl(bidi_level) {
+        let slots = ooxml_text::font_slot_use(
+            text,
+            fmt.complex_script == Some(true),
+            fmt.font_slots
+                .as_ref()
+                .and_then(|slots| slots.hint.as_deref()),
+        );
+        if ooxml_text::level_is_rtl(bidi_level) || slots.complex_script {
             language.bidi.clone().or_else(|| language.latin.clone())
-        } else {
+        } else if slots.east_asia {
             language
                 .east_asia
                 .clone()
                 .or_else(|| language.latin.clone())
+        } else {
+            language.latin.clone()
         }
     });
     if let Some(link) = &fmt.hyperlink {
