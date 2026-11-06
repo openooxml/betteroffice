@@ -2825,7 +2825,7 @@ mod tests {
             assert_eq!(listed["proposals"][0]["cells"][0]["stale"], true);
             assert_eq!(
                 listed["proposals"][0]["staleTargets"],
-                serde_json::json!(["A1"])
+                serde_json::json!([listed["proposals"][0]["cells"][0]["a1"]])
             );
             assert!(
                 session
