@@ -5,6 +5,7 @@ type Probe = {
   issues: { code: string; id: string; other?: string }[];
   hostKeys: { key: string; prevented: boolean }[];
   swallow: string | null;
+  pluginRuns: number;
   load(bytes: number[], shortcuts: unknown): void;
   saved(): Promise<number[]>;
 };
@@ -103,7 +104,7 @@ for (const mode of ['worker', 'legacy']) {
       await expect(page.getByRole('menuitem', { name: /select all/i })).not.toContainText('Ctrl');
     });
 
-    test('moving bold frees its chord and reports the default it displaced', async ({ page }) => {
+    test('moving bold frees its chord for another command', async ({ page }) => {
       const input = await open(page, mode, { bold: 'Mod+Alt+B', italic: 'Mod+B' });
       const issues = await page.evaluate(() => (window as unknown as { __shortcuts: Probe }).__shortcuts.issues);
       expect(issues).toEqual([]);
@@ -114,6 +115,41 @@ for (const mode of ['worker', 'legacy']) {
       expect(italic).not.toMatch(/<w:b\b/);
       await input.press('Control+Alt+B');
       expect(await documentXml(page)).toMatch(/<w:b\b/);
+    });
+
+    test('remapped select all, copy, cut and paste keep working', async ({ page }) => {
+      const input = await open(page, mode, { selectAll: 'Mod+Alt+A', copy: 'Mod+Alt+C', cut: 'Mod+Alt+X', paste: 'Mod+Alt+P' });
+      await input.press('Control+Alt+A');
+      await input.press('Control+Alt+C');
+      await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('Base text');
+      await input.press('ControlOrMeta+End');
+      await input.press('Control+Alt+P');
+      await expect.poll(() => documentXml(page)).toContain('Base textBase text');
+      await input.press('Control+Alt+A');
+      await input.press('Control+Alt+X');
+      await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('Base textBase text');
+      await expect.poll(() => documentXml(page)).not.toContain('Base text');
+    });
+
+    test('a released copy chord leaves the clipboard alone', async ({ page }) => {
+      const input = await open(page, mode, { copy: null, cut: null });
+      await page.evaluate(() => navigator.clipboard.writeText('KEEP'));
+      await input.press('Control+A');
+      await input.press('Control+C');
+      await input.press('Control+X');
+      await page.waitForTimeout(300);
+      expect(await page.evaluate(() => navigator.clipboard.readText())).toBe('KEEP');
+      expect(await documentXml(page)).toContain('Base text');
+    });
+
+    test('a plugin takes a chord the host freed and follows a host remap', async ({ page }) => {
+      const runs = () => page.evaluate(() => (window as unknown as { __shortcuts: Probe }).__shortcuts.pluginRuns);
+      const freed = await open(page, mode, { insertLink: null });
+      await freed.press('Control+K');
+      await expect.poll(runs).toBe(1);
+      const moved = await open(page, mode, { 'plugin:acme.keys/run': 'Mod+Alt+R' });
+      await moved.press('Control+Alt+R');
+      await expect.poll(runs).toBe(1);
     });
 
     test('a host chord over a default reports the displaced command', async ({ page }) => {

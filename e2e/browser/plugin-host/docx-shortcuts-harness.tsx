@@ -1,6 +1,6 @@
 import { createRoot } from 'react-dom/client';
 import { useState } from 'react';
-import { DocxEditor, type DocxEditorProps, type DocxEditorRef, type DocxShortcuts, type ShortcutIssue } from '@betteroffice/docx-react';
+import { DocxEditor, defineDocxPlugin, type DocxEditorProps, type DocxEditorRef, type DocxShortcuts, type ShortcutIssue } from '@betteroffice/docx-react';
 import { setGoogleFontsEnabled } from '@betteroffice/docx/utils';
 import fontUrl from '../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf?url';
 import '../../../packages/docx-react/src/styles/editor.css';
@@ -14,6 +14,7 @@ const probe = {
   issues: [] as ShortcutIssue[],
   hostKeys: [] as { key: string; prevented: boolean }[],
   swallow: null as string | null,
+  pluginRuns: 0,
   load(bytes: number[], shortcuts: DocxShortcuts) { open(Uint8Array.from(bytes).buffer, shortcuts); },
   async saved() { return [...new Uint8Array((await this.editor!.save())!)]; },
 };
@@ -23,6 +24,15 @@ window.addEventListener('keydown', (event) => {
   if (event.key.toLowerCase() === probe.swallow) event.preventDefault();
   probe.hostKeys.push({ key: event.key.toLowerCase(), prevented: event.defaultPrevented });
 });
+const plugin = defineDocxPlugin({
+  id: 'acme.keys',
+  createState: () => null,
+  commands: [{
+    id: 'run', label: 'Run', mutatesDocument: false, shortcuts: ['Mod+K'],
+    execute: () => { probe.pluginRuns += 1; return { ok: true, status: 'noop' }; },
+  }],
+} as never);
+const plugins = [plugin] as never;
 const fonts = [{ family: 'Liberation Sans', src: fontUrl }];
 const measurementFontProvider = { resolve: () => async () => (await fetch(fontUrl)).arrayBuffer() };
 
@@ -30,7 +40,7 @@ function Harness() {
   const [state, setState] = useState<{ buffer: ArrayBuffer; shortcuts: DocxShortcuts } | null>(null);
   open = (buffer, shortcuts) => setState({ buffer, shortcuts });
   return state && <DocxEditor {...route} ref={(editor) => { probe.editor = editor; }} documentBuffer={state.buffer}
-    fonts={fonts} measurementFontProvider={measurementFontProvider} shortcuts={state.shortcuts}
+    fonts={fonts} measurementFontProvider={measurementFontProvider} shortcuts={state.shortcuts} plugins={plugins}
     onShortcutIssue={(issue) => probe.issues.push(issue)} />;
 }
 createRoot(document.getElementById('root')!).render(<Harness />);
