@@ -9,7 +9,7 @@ import {
   type PptxPendingCommand,
 } from '../../commands/createPptxCommandStore';
 import { defaultArgs, isPluginCommandId } from '../../commands/descriptors';
-import { storeAriaShortcut, storeShortcutLabel } from '../../commands/shortcuts';
+import { storeAriaShortcut, storeShortcutLabel } from '../../commands/shortcutLabels';
 import { MAX_FONT_POINTS, MIN_FONT_POINTS, MAX_ZOOM, MIN_ZOOM } from '../../commands/evaluate';
 import { usePptxCommand, usePptxCommands, usePptxCommandState } from '../../commands/hooks';
 import type {

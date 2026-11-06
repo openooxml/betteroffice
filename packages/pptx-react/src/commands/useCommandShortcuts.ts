@@ -6,10 +6,10 @@ import {
   disarmClipboardGesture,
   releaseKeyFromInput,
 } from '../../../../shared/keyboard/nativeGesture';
-import { pickChord, type PptxCommandController } from './createPptxCommandStore';
-import { normalizeChord } from './descriptors';
+import type { PptxCommandController } from './createPptxCommandStore';
+import { isMacPlatform, isPluginCommandId, matchesChord, normalizeChord } from './descriptors';
 import { pluginEventStore } from './pluginEvents';
-import { CLIPBOARD_IDS, inputKeepsChord, type PptxShortcuts } from './shortcuts';
+import { CLIPBOARD_IDS, inputKeepsChord, resolvePptxShortcuts, type PptxShortcuts } from './shortcuts';
 import type { PptxCommandId } from './types';
 
 /** Commands whose shortcuts also work while a text field inside the editor has focus. */
@@ -41,6 +41,59 @@ function inputAlias(event: KeyboardEvent): { id: string; chord: string } | null 
     case 'x': return { id: 'cut', chord: 'Mod+x' };
     default: return null;
   }
+}
+
+type ChordEvent = Pick<KeyboardEvent, 'key' | 'code' | 'ctrlKey' | 'metaKey' | 'shiftKey' | 'altKey'>;
+
+/** The chord among `chords` a keystroke presses; one naming the typed character wins. */
+export function pickChord(chords: Iterable<string>, event: ChordEvent, mac = isMacPlatform()): string | null {
+  let found: string | null = null;
+  const typed = event.key.toLowerCase();
+  for (const chord of chords) {
+    if (!matchesChord(chord, event, mac)) continue;
+    if (chord.slice(chord.lastIndexOf('+') + 1) === typed) return chord;
+    found ??= chord;
+  }
+  return found;
+}
+
+/** Resolves a host map for this platform, applies it and returns what was wrong with it. */
+export function applyShortcuts(
+  commands: PptxCommandController,
+  shortcuts: PptxShortcuts | undefined,
+  options: { mac?: boolean; unsupported?: ReadonlySet<string> } = {}
+): readonly ShortcutIssue[] {
+  if (shortcuts === undefined) {
+    commands.setShortcuts(undefined);
+    return [];
+  }
+  const table = resolvePptxShortcuts(shortcuts, { mac: options.mac ?? isMacPlatform(), unsupported: options.unsupported });
+  commands.setShortcuts(table);
+  return table.issues;
+}
+
+/** The built-in command a keystroke presses, if any. */
+export function shortcutAt(
+  commands: PptxCommandController,
+  event: ChordEvent,
+  mac = isMacPlatform()
+): { id: PptxCommandId; chord: string } | null {
+  const { owners } = commands.shortcutTable();
+  const chord = pickChord(owners.keys(), event, mac);
+  const id = chord === null ? undefined : owners.get(chord);
+  return chord === null || id === undefined || isPluginCommandId(id) ? null : { id: id as PptxCommandId, chord };
+}
+
+/** The chord a keystroke presses, with who holds it now and who holds it by default. */
+export function pressedChord(
+  commands: PptxCommandController,
+  event: ChordEvent,
+  mac = isMacPlatform()
+): { chord: string; owner: string | undefined; fallback: string | undefined } | null {
+  const { owners } = commands.shortcutTable();
+  const fallbacks = commands.defaultShortcutTable().owners;
+  const chord = pickChord(new Set([...owners.keys(), ...fallbacks.keys()]), event, mac);
+  return chord === null ? null : { chord, owner: owners.get(chord), fallback: fallbacks.get(chord) };
 }
 
 function isTextField(target: EventTarget | null): boolean {
@@ -92,7 +145,7 @@ export function useCommandShortcuts({
   const reported = useRef(new Set<string>());
 
   useLayoutEffect(() => {
-    for (const issue of commands.setShortcuts(shortcutsRef.current, unsupported)) {
+    for (const issue of applyShortcuts(commands, shortcutsRef.current, { unsupported })) {
       const key = JSON.stringify(issue);
       if (reported.current.has(key)) continue;
       reported.current.add(key);
@@ -119,7 +172,7 @@ export function useCommandShortcuts({
       if (isInput(target)) disarmClipboardGesture(target);
       if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
       if (!event.ctrlKey && !event.metaKey && !event.altKey && !/^F\d/.test(event.key)) return;
-      const pressed = commands.pressedChord(event);
+      const pressed = pressedChord(commands, event);
       if (!pressed) {
         const alias = inputAlias(event);
         if (alias && commands.shortcutOwner(alias.chord) !== alias.id) {
@@ -146,7 +199,7 @@ export function useCommandShortcuts({
       if (!owns(event) || suspendedRef.current()) return;
       const target = event.target;
       const field = isTextField(target) && !isInput(target);
-      const binding = commands.shortcutAt(event);
+      const binding = shortcutAt(commands, event);
       if (!binding) {
         const list = commands.pluginShortcuts();
         const chord = pickChord(list.map(({ chord }) => normalizeChord(chord) ?? chord), event);

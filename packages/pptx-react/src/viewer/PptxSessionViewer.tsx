@@ -11,7 +11,7 @@ import type { PptxCommandEnvironment } from '../commands/evaluate';
 import { PptxCommandContext } from '../commands/PptxCommandProvider';
 import type { PptxCommandArgs, PptxCommandResult } from '../commands/types';
 import { useCommandShortcuts } from '../commands/useCommandShortcuts';
-import { CLIPBOARD_IDS } from '../commands/shortcuts';
+import { CLIPBOARD_IDS } from '../commands/shortcutKeys';
 import { EditorChromeContext } from '../components/EditorToolbarContext';
 import type { PptxZoom } from '../components/toolbarTypes';
 import { useTranslation } from '../i18n';

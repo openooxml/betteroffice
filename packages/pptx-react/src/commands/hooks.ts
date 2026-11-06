@@ -4,7 +4,7 @@ import { pptxCommandController, type PptxChromeContext } from './createPptxComma
 import { PptxCommandContext } from './PptxCommandProvider';
 import { defaultArgs, formatChord, isPluginCommandId } from './descriptors';
 import { ariaChord } from '../../../../shared/keyboard/chords';
-import { chordLabels, storeAriaShortcut, storeShortcutLabel } from './shortcuts';
+import { chordLabels, storeAriaShortcut, storeShortcutLabel } from './shortcutLabels';
 import type {
   PptxCommandArgs,
   PptxCommandDescriptor,

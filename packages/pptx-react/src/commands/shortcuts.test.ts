@@ -1,7 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import { en } from '@betteroffice/pptx-i18n';
-import { createPptxCommandController, pickChord } from './createPptxCommandStore';
-import { resolvePptxShortcuts, storeAriaShortcut, storeShortcutLabel } from './shortcuts';
+import { createPptxCommandController } from './createPptxCommandStore';
+import { resolvePptxShortcuts } from './shortcuts';
+import { storeAriaShortcut, storeShortcutLabel } from './shortcutLabels';
+import { applyShortcuts, pickChord, pressedChord, shortcutAt } from './useCommandShortcuts';
 
 function key(init: Partial<KeyboardEvent>): KeyboardEvent {
   return { key: '', code: '', metaKey: false, ctrlKey: false, shiftKey: false, altKey: false, ...init } as KeyboardEvent;
@@ -54,23 +56,26 @@ describe('resolvePptxShortcuts', () => {
 describe('command controller', () => {
   test('descriptors and dispatch follow the host map', () => {
     const controller = createPptxCommandController();
-    controller.setShortcuts({ pasteAsPlainText: 'Mod+Alt+V', bold: null });
+    applyShortcuts(controller, { pasteAsPlainText: 'Mod+Alt+V', bold: null }, { mac: false });
     expect(controller.store.getDescriptor('pasteAsPlainText').shortcuts.map(({ chord }) => chord)).toEqual(['Mod+Alt+v']);
     expect(controller.store.getDescriptor('bold').shortcuts).toEqual([]);
-    expect(controller.shortcutAt(key({ key: 'b', ctrlKey: true }), false)).toBeNull();
-    expect(controller.shortcutAt(key({ key: 'v', ctrlKey: true, altKey: true }), false)?.id).toBe('pasteAsPlainText');
+    expect(shortcutAt(controller, key({ key: 'b', ctrlKey: true }), false)).toBeNull();
+    expect(shortcutAt(controller, key({ key: 'v', ctrlKey: true, altKey: true }), false)?.id).toBe('pasteAsPlainText');
+    applyShortcuts(controller, undefined);
+    expect(controller.store.getDescriptor('bold').shortcuts.map(({ chord }) => chord)).toEqual(['Mod+B']);
+    expect(shortcutAt(controller, key({ key: 'b', ctrlKey: true }), false)?.id).toBe('bold');
   });
 
   test('a pressed chord names who holds it now and by default', () => {
     const controller = createPptxCommandController();
-    controller.setShortcuts({ paste: null, italic: 'Mod+B', bold: 'Mod+Alt+B' });
-    expect(controller.pressedChord(key({ key: 'v', ctrlKey: true }), false)).toEqual({
+    applyShortcuts(controller, { paste: null, italic: 'Mod+B', bold: 'Mod+Alt+B' }, { mac: false });
+    expect(pressedChord(controller, key({ key: 'v', ctrlKey: true }), false)).toEqual({
       chord: 'Mod+v', owner: undefined, fallback: 'paste',
     });
-    expect(controller.pressedChord(key({ key: 'b', ctrlKey: true }), false)).toEqual({
+    expect(pressedChord(controller, key({ key: 'b', ctrlKey: true }), false)).toEqual({
       chord: 'Mod+b', owner: 'italic', fallback: 'bold',
     });
-    expect(controller.pressedChord(key({ key: 'z', ctrlKey: true }), false)).toEqual({
+    expect(pressedChord(controller, key({ key: 'z', ctrlKey: true }), false)).toEqual({
       chord: 'Mod+z', owner: 'undo', fallback: 'undo',
     });
     expect(controller.releasedChord('Mod+v')).toBe(true);
@@ -88,18 +93,18 @@ describe('command controller', () => {
     const before = controller.shortcutRevision();
     let notified = 0;
     controller.subscribeShortcuts(() => { notified += 1; });
-    controller.setShortcuts({ 'plugin:acme/run': 'Mod+Alt+R', italic: null });
+    applyShortcuts(controller, { 'plugin:acme/run': 'Mod+Alt+R', italic: null }, { mac: false });
     expect(controller.shortcutRevision()).toBeGreaterThan(before);
     expect(notified).toBe(1);
     expect(controller.hostPluginChords('plugin:acme/run')).toEqual(['Mod+Alt+r']);
     expect(controller.hostPluginChords('plugin:acme/other')).toBeUndefined();
-    expect(controller.shortcutAt(key({ key: 'r', ctrlKey: true, altKey: true }), false)).toBeNull();
+    expect(shortcutAt(controller, key({ key: 'r', ctrlKey: true, altKey: true }), false)).toBeNull();
     expect(controller.shortcutOwner('Mod+i')).toBeUndefined();
   });
 
   test('labels and aria names show the effective chord', () => {
     const controller = createPptxCommandController();
-    controller.setShortcuts({ paste: 'Mod+Alt+V', copy: null });
+    applyShortcuts(controller, { paste: 'Mod+Alt+V', copy: null }, { mac: false });
     expect(storeShortcutLabel(controller.store, 'paste', t, undefined, false)).toBe('Ctrl+Alt+V');
     expect(storeShortcutLabel(controller.store, 'paste', t, undefined, true)).toBe('⌥⌘V');
     expect(storeAriaShortcut(controller.store, 'paste', undefined, false)).toBe('Control+Alt+V');

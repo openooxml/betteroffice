@@ -1,7 +1,7 @@
 import type { TranslationKey } from '@betteroffice/pptx-i18n';
 import { commandMenuItem, menuSections } from '../../../../shared/react-toolbar/ContextMenu';
 import type { OverflowMenuEntry } from '../../../../shared/react-toolbar/MenuList';
-import { storeAriaShortcut, storeShortcutLabel } from '../commands/shortcuts';
+import { storeAriaShortcut, storeShortcutLabel } from '../commands/shortcutLabels';
 import type { PptxCommandArgs, PptxCommandId, PptxCommandStore } from '../commands/types';
 
 /** @internal */

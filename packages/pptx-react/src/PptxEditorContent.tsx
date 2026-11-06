@@ -48,7 +48,7 @@ import {
 import { PptxCommandContext } from './commands/PptxCommandProvider';
 import { inPluginChrome, pluginEventStore } from './commands/pluginEvents';
 import { useCommandShortcuts } from './commands/useCommandShortcuts';
-import { CLIPBOARD_IDS } from './commands/shortcuts';
+import { CLIPBOARD_IDS } from './commands/shortcutKeys';
 import {
   usePptxCommandBinding,
   type PptxExportOutcome,

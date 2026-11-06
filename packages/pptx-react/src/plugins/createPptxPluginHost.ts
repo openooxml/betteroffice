@@ -14,7 +14,7 @@ import {
   type PptxPluginCommandBinding,
 } from '../commands/createPptxCommandStore';
 import { EDITING_CHORDS, isPluginCommandId, normalizeChord } from '../commands/descriptors';
-import { inputKeepsChord } from '../commands/shortcuts';
+import { inputKeepsChord } from '../commands/shortcutKeys';
 import { commandReason } from '../commands/evaluate';
 import type {
   PptxCommandStore,
