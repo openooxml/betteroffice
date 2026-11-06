@@ -356,11 +356,12 @@ test('drag_burst_does_not_render_slide_strip', async () => {
   await act(async () => { fireEvent.pointerDown(view.getByTestId('pptx-resize-se'), point()); });
   const before = stripRenders;
   const outline = view.getByTestId('pptx-shape-selection');
-  const transform = outline.style.transform;
+  const width = outline.style.width;
   for (let offset = 10; offset <= 60; offset += 10) {
     act(() => { fireEvent.pointerMove(stage, point(point().clientX + offset)); });
   }
-  expect(outline.style.transform).not.toBe(transform);
+  expect(outline.style.width).not.toBe(width);
+  expect(outline.style.transform).toBe('');
   expect(stripRenders).toBe(before);
   act(() => { fireEvent.pointerCancel(stage, point()); });
 });
