@@ -277,9 +277,9 @@
     "ctrl": "Strg",
     "alt": "Alt",
     "shift": "Umschalt",
-    "del": "Entf",
+    "delete": "Entf",
     "escape": "Esc",
-    "pageUp": "Bild auf",
-    "pageDown": "Bild ab"
+    "pageup": "Bild auf",
+    "pagedown": "Bild ab"
   }
 }

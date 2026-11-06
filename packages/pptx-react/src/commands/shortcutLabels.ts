@@ -11,15 +11,9 @@ export function chordShortcut(
   t: Translate,
   mac = isMacPlatform()
 ): { shortcut: string; ariaShortcut: string } {
-  const labels: ChordLabels = {
-    ctrl: t('keys.ctrl'),
-    alt: t('keys.alt'),
-    shift: t('keys.shift'),
-    delete: t('keys.del'),
-    escape: t('keys.escape'),
-    pageup: t('keys.pageUp'),
-    pagedown: t('keys.pageDown'),
-  };
+  const labels: ChordLabels = Object.fromEntries(
+    ['ctrl', 'alt', 'shift', 'delete', 'escape', 'pageup', 'pagedown'].map((key) => [key, t(`keys.${key}` as TranslationKey)])
+  );
   return { shortcut: formatChord(chord, mac, labels), ariaShortcut: ariaChord(chord, mac) };
 }
 

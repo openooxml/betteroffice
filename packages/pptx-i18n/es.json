@@ -277,9 +277,9 @@
     "ctrl": "Ctrl",
     "alt": "Alt",
     "shift": "Mayús",
-    "del": "Supr",
+    "delete": "Supr",
     "escape": "Esc",
-    "pageUp": "Re Pág",
-    "pageDown": "Av Pág"
+    "pageup": "Re Pág",
+    "pagedown": "Av Pág"
   }
 }

@@ -23,23 +23,18 @@ export type ChordEvent = Pick<
 export type ChordLabels = Readonly<Partial<Record<string, string>>>;
 
 const MODIFIERS: ReadonlySet<string> = new Set(['Ctrl', 'Mod', 'Shift', 'Alt']);
-/** @internal */
-export const NAMED_KEYS: Readonly<Record<string, string>> = {
-  space: 'Space',
-  enter: 'Enter',
-  tab: 'Tab',
-  escape: 'Esc',
-  backspace: 'Backspace',
-  delete: 'Del',
-  home: 'Home',
-  end: 'End',
-  pageup: 'Page Up',
-  pagedown: 'Page Down',
-  arrowup: '↑',
-  arrowdown: '↓',
-  arrowleft: '←',
-  arrowright: '→',
+/** Named keys in their `aria-keyshortcuts` spelling; the lowercase form is the chord key. */
+const KEY_NAMES =
+  'Space Enter Tab Escape Backspace Delete Home End PageUp PageDown ArrowUp ArrowDown ArrowLeft ArrowRight'.split(' ');
+const SHORT_LABELS: Readonly<Record<string, string>> = {
+  escape: 'Esc', delete: 'Del', pageup: 'Page Up', pagedown: 'Page Down',
+  arrowup: '↑', arrowdown: '↓', arrowleft: '←', arrowright: '→',
 };
+const ARIA_KEYS: Readonly<Record<string, string>> = Object.fromEntries(KEY_NAMES.map((name) => [name.toLowerCase(), name]));
+/** @internal Named keys with the label people read. */
+export const NAMED_KEYS: Readonly<Record<string, string>> = Object.fromEntries(
+  KEY_NAMES.map((name) => [name.toLowerCase(), SHORT_LABELS[name.toLowerCase()] ?? name])
+);
 /** @internal */
 export const FUNCTION_KEY = /^f([1-9]|1[0-2])$/;
 
@@ -108,11 +103,6 @@ export function formatChord(
     .join('+');
 }
 
-const ARIA_KEYS: Readonly<Record<string, string>> = Object.fromEntries(
-  'Space Enter Tab Escape Backspace Delete Home End PageUp PageDown ArrowUp ArrowDown ArrowLeft ArrowRight'
-    .split(' ')
-    .map((name) => [name.toLowerCase(), name])
-);
 
 /** A chord in the unlocalized form `aria-keyshortcuts` takes, such as `Control+Shift+V`. */
 export function ariaChord(chord: string, mac = isMacPlatform()): string {
