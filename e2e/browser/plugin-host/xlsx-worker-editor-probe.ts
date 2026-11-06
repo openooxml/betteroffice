@@ -11,7 +11,7 @@ export interface WorkerEditorApiProbe {
   applyEdits(request: Parameters<WorkbookHandle['applyEdits']>[0]): Promise<ReturnType<WorkbookHandle['applyEdits']>>;
   save(): Promise<Uint8Array>;
   readonly commands: {
-    getState(id: 'proposalsPanel'): { value: number };
+    getState(id: 'proposalsPanel'): { value?: number };
     getState(id: 'merge', args: { value: 'all' | 'unmerge' }): { enabled: boolean };
     execute(id: 'proposalsPanel', args: { open: boolean } | null): Promise<CommandResult>;
     execute(id: 'proposalAccept' | 'proposalReject', args: { proposalId: string }): Promise<CommandResult>;

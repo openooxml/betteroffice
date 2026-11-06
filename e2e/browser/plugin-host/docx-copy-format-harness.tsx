@@ -1,13 +1,13 @@
 import { createRoot } from 'react-dom/client';
 import { useState } from 'react';
-import { DocxEditor, type DocxEditorProps, type DocxEditorRef } from '@betteroffice/docx-react';
+import { DocxEditor, type DocxEditorRef } from '@betteroffice/docx-react';
 import { setGoogleFontsEnabled } from '@betteroffice/docx/utils';
 import fontUrl from '../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf?url';
 import '../../../packages/docx-react/src/styles/editor.css';
 
 setGoogleFontsEnabled(false);
 const params = new URLSearchParams(location.search);
-const route = (params.get('mode') === 'legacy' ? { legacySyncApi: true, experimentalWorkerOpen: false } : {}) as Partial<DocxEditorProps>;
+const route = (params.get('mode') === 'legacy' ? { legacySyncApi: true, experimentalWorkerOpen: false } : {}) as Record<never, never>;
 const editorMode = params.get('suggesting') ? { mode: 'suggesting' as const } : {};
 let open: (buffer: ArrayBuffer) => void = () => {};
 const probe = {
