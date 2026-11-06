@@ -270,10 +270,20 @@ function defaultShortcuts(mac: boolean): ResolvedShortcuts {
   return table;
 }
 
+/** The chord a keystroke presses; one naming the produced character beats a key-position match. */
 function pressedChord(table: ResolvedShortcuts, event: ChordEvent, mac: boolean): string | null {
-  for (const chord of table.owners.keys()) if (matchesChord(chord, event, mac)) return chord;
-  return null;
+  let found: string | null = null;
+  const typed = event.key.toLowerCase();
+  for (const chord of table.owners.keys()) {
+    if (!matchesChord(chord, event, mac)) continue;
+    if (chord.slice(chord.lastIndexOf('+') + 1) === typed) return chord;
+    found ??= chord;
+  }
+  return found;
 }
+
+const LETTER_CLIPBOARD: Readonly<Record<string, XlsxClipboardKind>> = { c: 'copy', x: 'cut', v: 'paste' };
+const CLIPBOARD_DEFAULTS: Readonly<Record<string, string>> = { copy: 'Mod+c', cut: 'Mod+x', paste: 'Mod+v' };
 
 /** Creates the command store of one editor mount. */
 export function createXlsxCommandController(): XlsxCommandController {
@@ -663,8 +673,8 @@ export function createXlsxCommandController(): XlsxCommandController {
       }
       if (pressedChord(defaultShortcuts(mac), event, mac) !== null) return null;
       if (!event.ctrlKey && !event.metaKey) return null;
-      const letter = event.key.toLowerCase();
-      return letter === 'c' ? 'copy' : letter === 'x' ? 'cut' : letter === 'v' ? 'paste' : null;
+      const kind = LETTER_CLIPBOARD[event.key.toLowerCase()];
+      return kind && table.owners.get(CLIPBOARD_DEFAULTS[kind]) === kind ? kind : null;
     },
     shortcutOwner: (chord) => shortcutTable().owners.get(chord),
     releasedChord(chord) {

@@ -103,6 +103,19 @@ describe('command controller', () => {
     expect(controller.clipboardKey(key({ key: 'c', metaKey: true }), true)).toBe('copy');
     expect(controller.clipboardKey(key({ key: 'b', ctrlKey: true }), false)).toBeNull();
     expect(controller.clipboardKey(key({ key: 'c' }), false)).toBeNull();
+    controller.setShortcuts({ cut: null, copy: 'Mod+Alt+C' });
+    expect(controller.clipboardKey(key({ key: 'x', ctrlKey: true, shiftKey: true }), false)).toBeNull();
+    expect(controller.clipboardKey(key({ key: 'c', ctrlKey: true, shiftKey: true }), false)).toBeNull();
+    expect(controller.clipboardKey(key({ key: 'v', ctrlKey: true, shiftKey: true, altKey: true }), false)).toBe('paste');
+  });
+
+  test('a chord naming the typed character wins over a key-position match', () => {
+    const controller = createXlsxCommandController();
+    controller.setShortcuts({ bold: 'Mod+Shift+1', italic: 'Mod+Shift+!' });
+    const bang = key({ key: '!', code: 'Digit1', ctrlKey: true, shiftKey: true });
+    expect(controller.shortcutAt(bang, false)?.id).toBe('italic');
+    const one = key({ key: '1', code: 'Digit1', ctrlKey: true, shiftKey: true });
+    expect(controller.shortcutAt(one, false)?.id).toBe('bold');
   });
 
   test('a layout without Latin letters still presses the chord', () => {
