@@ -17,6 +17,7 @@ export async function renderPptxSlide(
   if (!slide) throw new DocumentToolError('SLIDE_OUT_OF_RANGE', `Choose a slide index from 1 to ${snapshot.slides.length}.`);
   if (!Number.isFinite(scale) || scale < 0.25 || scale > 3) throw new DocumentToolError('INVALID_ARGUMENT', 'scale must be from 0.25 to 3.');
   try {
+    if (provider) await registerPptxFonts(handle, slide, provider, theme);
     const png = await handle.renderPng({ slide: slide.id }, { scale });
     const view = new DataView(png.buffer, png.byteOffset, png.byteLength);
     return { png, page, pageCount: snapshot.slides.length, width: view.getUint32(16), height: view.getUint32(20), warnings: ['Preview uses the presentation engine and bundled substitute fonts.'] };
@@ -26,6 +27,15 @@ export async function renderPptxSlide(
   return renderPptxSlideCanvas(handle, page, scale, provider, theme);
 }
 
+async function registerPptxFonts(handle: PresentationHandle, slide: SlideSnapshot, provider: BundledFontSource, theme?: PptxThemeFonts) {
+  const faces = pptxFontFaces([slide], theme);
+  if (faces.length > 64) throw new DocumentToolError('FONT_LIMIT', 'Slide uses more than 64 font styles. Reduce font variety before previewing.');
+  const loaded = await loadPptxFonts(faces, provider);
+  for (const font of loaded.fonts) handle.registerFont(font);
+  for (const font of loaded.fallbackFonts) handle.registerFallbackFont(font);
+  return loaded;
+}
+
 async function renderPptxSlideCanvas(handle: PresentationHandle, page: number, scale: number, provider?: BundledFontSource, theme?: PptxThemeFonts): Promise<RenderedPage> {
   const { createCanvas, GlobalFonts, loadImage } = await loadCanvas();
   const { module } = await engines.load('pptx');
@@ -33,17 +43,8 @@ async function renderPptxSlideCanvas(handle: PresentationHandle, page: number, s
   const snapshot = handle.snapshot();
   const slide = snapshot.slides[page - 1]!;
   const warnings = new Set<string>(['Preview uses the presentation engine and bundled substitute fonts.']);
-  const faces = pptxFontFaces([slide], theme);
-  if (faces.length > 64) throw new DocumentToolError('FONT_LIMIT', 'Slide uses more than 64 font styles. Reduce font variety before previewing.');
-  const { fonts, fallbackFonts } = await loadPptxFonts(faces, provider);
-  for (const font of fonts) {
-    handle.registerFont(font);
-    GlobalFonts.register(Buffer.from(font.bytes), font.family);
-  }
-  for (const font of fallbackFonts) {
-    handle.registerFallbackFont(font);
-    GlobalFonts.register(Buffer.from(font.bytes), font.family);
-  }
+  const { fonts, fallbackFonts } = await registerPptxFonts(handle, slide, provider, theme);
+  for (const font of [...fonts, ...fallbackFonts]) GlobalFonts.register(Buffer.from(font.bytes), font.family);
   const list = handle.layoutSlide(page - 1);
   const width = Math.ceil(list.width * scale);
   const height = Math.ceil(list.height * scale);

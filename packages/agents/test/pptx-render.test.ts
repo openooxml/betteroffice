@@ -184,3 +184,19 @@ test('PPTX previews propagate engine errors without using canvas', async () => {
     expect(layout).not.toHaveBeenCalled();
   } finally { layout.mockRestore(); render.mockRestore(); handle.dispose(); }
 });
+
+test('PPTX engine previews paint with the faces a supplied provider resolves', async () => {
+  const handle = openPresentation(await presentationFixture());
+  const png = new Uint8Array(await createCanvas(12, 7).encode('png'));
+  const render = spyOn(handle, 'renderPng').mockResolvedValue(png);
+  const register = spyOn(handle, 'registerFont');
+  const base = createFontProvider(undefined, { decoder: (await import('@betteroffice/pptx')).decodeFontFace });
+  const resolved: string[] = [];
+  const provider = { ...base, resolve: (family: string, bold: boolean, italic: boolean) => { resolved.push(family); return base.resolve(family, bold, italic); } };
+  try {
+    await renderPptxSlide(handle, 1, 1, provider);
+    expect(resolved.length).toBeGreaterThan(0);
+    expect(register).toHaveBeenCalled();
+    expect(register.mock.invocationCallOrder[0]).toBeLessThan(render.mock.invocationCallOrder[0]);
+  } finally { register.mockRestore(); render.mockRestore(); handle.dispose(); }
+});
