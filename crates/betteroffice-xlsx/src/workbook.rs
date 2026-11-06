@@ -2547,6 +2547,12 @@ impl Workbook {
         self.proposals.list()
     }
 
+    /// Whether this pending edit's target moved, so a plain accept refuses it. A changed
+    /// dependency of the target is only found at accept.
+    pub fn proposal_edit_is_stale(&self, edit: &ProposedEdit) -> bool {
+        proposal_edit_is_stale(&self.model, edit)
+    }
+
     pub fn accept_proposal(
         &mut self,
         id: &str,

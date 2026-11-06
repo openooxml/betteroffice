@@ -97,6 +97,7 @@ describe('xlsx native/wasm package parity', () => {
       expect(workbook.listProposals()[0]?.cells[0]?.a1).toBe('E9');
       workbook.applyOps([{ type: 'deleteRows', sheet: 0, at: 8, count: 1 }]);
       expect(workbook.listProposals()[0]?.cells[0]).toMatchObject({ a1: 'E9', stale: true });
+      expect(workbook.listProposals()[0]?.staleTargets).toEqual(['E9']);
       expect(() => workbook.acceptProposal(proposal.id)).toThrow();
       workbook.undo();
       const restored = workbook.listProposals();

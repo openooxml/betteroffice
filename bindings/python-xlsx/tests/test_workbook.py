@@ -524,6 +524,22 @@ def test_stale_proposal_exposes_cells_and_can_be_forced(sample_bytes):
     assert wb["Budget"]["H1"] == pytest.approx(10.0)
 
 
+def test_listed_proposals_name_their_stale_targets(sample_bytes):
+    wb = bo.Workbook.open(sample_bytes)
+    proposal = wb.propose("copilot", [("Budget", "H1", 10), ("Budget", "H2", 20)])
+    assert proposal.stale_targets == []
+    assert wb.list_proposals()[0].stale_targets == []
+
+    wb["Budget"]["H2"] = 999
+
+    assert [listed.id for listed in wb.list_proposals()] == [proposal.id]
+    assert wb.list_proposals()[0].stale_targets == ["H2"]
+    assert wb.proposals()[0].stale_targets == ["H2"]
+    with pytest.raises(bo.StaleProposalError) as caught:
+        wb.accept_proposal(proposal.id)
+    assert caught.value.cells == wb.list_proposals()[0].stale_targets
+
+
 def test_missing_proposal_raises_key_error(sample_bytes):
     with pytest.raises(KeyError, match="missing"):
         bo.Workbook.open(sample_bytes).accept_proposal("missing")

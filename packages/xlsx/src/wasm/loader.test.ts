@@ -664,8 +664,11 @@ describe('wasm loader — proposals', () => {
       const proposal = handle.propose('demo-agent', null, [
         { sheet: 0, row: 6, col: 4, input: '10' },
       ]);
+      expect(proposal.staleTargets).toEqual([]);
+      expect(handle.listProposals()).toEqual([proposal]);
       // mutate the proposal's target cell out from under it.
       handle.editCell(0, 6, 4, '999');
+      expect(handle.listProposals()[0]?.staleTargets).toEqual(['E7']);
 
       let stale: StaleProposalError | null = null;
       try {
