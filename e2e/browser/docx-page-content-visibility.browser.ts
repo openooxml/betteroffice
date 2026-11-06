@@ -281,3 +281,46 @@ test('docx worker editor: selection and find on skipped pages match fully painte
     await context.close();
   }
 });
+
+for (const worker of [false, true]) {
+  test(`docx ${worker ? 'worker' : 'in-thread'} editor: the first caret placement leaves a reader scrolling during open where they are`, async ({ browser }) => {
+    test.setTimeout(120_000);
+    const context = await browser.newContext({ viewport: { width: 1440, height: 2000 } });
+    const page = await context.newPage();
+    try {
+      await page.goto(`/?format=docx&peerless=${worker ? 1 : 0}`);
+      let wheeling = true;
+      const wheel = (async () => {
+        await page.mouse.move(720, 1200);
+        while (wheeling) {
+          await page.mouse.wheel(0, 40);
+          await page.waitForTimeout(16);
+        }
+      })();
+      await page.evaluate(() => {
+        const trace: number[] = [];
+        (window as unknown as { scrollTrace: number[] }).scrollTrace = trace;
+        const tick = () => {
+          let scroller = document.querySelector('.canvas-page[data-page-index="0"], .paged-editor__page')?.parentElement ?? null;
+          while (scroller && !/(auto|scroll)/.test(getComputedStyle(scroller).overflowY)) scroller = scroller.parentElement;
+          if (scroller && scroller.scrollHeight > scroller.clientHeight + 2000 && trace.length < 200) trace.push(scroller.scrollTop);
+          requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+      });
+      await page.locator('input[type=file]').last().setInputFiles({
+        name: 'visibility.docx',
+        mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        buffer: await longDocument(),
+      });
+      await expect.poll(() => page.evaluate(() => (window as unknown as { scrollTrace: number[] }).scrollTrace.length),
+        { timeout: 60_000 }).toBeGreaterThanOrEqual(60);
+      wheeling = false;
+      await wheel;
+      const trace = await page.evaluate(() => (window as unknown as { scrollTrace: number[] }).scrollTrace);
+      expect(trace.filter((top, index) => index > 0 && top < trace[index - 1]!)).toEqual([]);
+    } finally {
+      await context.close();
+    }
+  });
+}

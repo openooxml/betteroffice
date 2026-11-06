@@ -57,6 +57,7 @@ import {
 import { useTranslation } from '../../i18n';
 
 const READER_SCROLL = ['wheel', 'touchmove'] as const;
+const READER_SCROLL_KEYS = new Set(['PageDown', 'PageUp', ' ', 'ArrowDown', 'ArrowUp', 'Home', 'End']);
 
 export interface YrsDisplaySelection {
   anchor: number;
@@ -418,6 +419,23 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   // remote insert above the caret while sticky locs do not, so comparing locs is
   // what keeps a viewer's viewport still during someone else's edit.
   const lastCaretScrollSelectionRef = useRef<YrsSelection | null | undefined>(undefined);
+  const scrolledBeforeFirstCaretRef = useRef(false);
+  useLayoutEffect(() => {
+    const inside = (target: EventTarget | null) => {
+      const host = canvasHostRef?.current;
+      return !!host && target instanceof Node && (target.contains(host) || host.contains(target));
+    };
+    const onIntent = (event: Event) => {
+      if (event.type === 'keydown' && !READER_SCROLL_KEYS.has((event as KeyboardEvent).key)) return;
+      if (event.type === 'keydown' && event.target instanceof HTMLTextAreaElement) return;
+      if (inside(event.target) || event.target === document.body || event.target === document.documentElement) {
+        scrolledBeforeFirstCaretRef.current = true;
+      }
+    };
+    const types = [...READER_SCROLL, 'pointerdown', 'keydown'] as const;
+    for (const type of types) document.addEventListener(type, onIntent, { capture: true, passive: true });
+    return () => { for (const type of types) document.removeEventListener(type, onIntent, true); };
+  }, [canvasHostRef]);
   // A selection the input shows without scrolling to it: a default caret, a replayed gesture.
   const quietSelectionRef = useRef<YrsSelection | null>(null);
   displayListQueriesRef.current = displayListQueries;
@@ -2136,11 +2154,12 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     const quiet = quietSelectionRef.current;
     quietSelectionRef.current = null;
     const selectionIsQuiet = quiet && stickySelection && sameYrsSelection(quiet, stickySelection);
-    const selectionChanged =
-      (previousStickySelection === undefined ||
-        !sameYrsSelection(previousStickySelection, stickySelection)) &&
-      !selectionIsQuiet;
     const scroller = findVerticalScrollParentOrRoot(host);
+    const selectionChanged =
+      (previousStickySelection === undefined
+        ? !scrolledBeforeFirstCaretRef.current
+        : !sameYrsSelection(previousStickySelection, stickySelection)) &&
+      !selectionIsQuiet;
     const pendingReveal = pendingLocalCaretRevealRef.current;
     const freshCommit = layoutCommit === undefined || revealedLayoutCommitRef.current !== layoutCommit;
     if (sourceVersionOf(displayListQueries) === layoutCommitVersion) revealedLayoutCommitRef.current = layoutCommit;
