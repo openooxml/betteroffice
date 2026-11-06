@@ -1578,6 +1578,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     const slice = new Promise<ReturnType<typeof yrsClipboardSlice>>((resolve, reject) => {
       const apply = (source: YrsSession): void | Promise<void> => {
         try {
+          if (cut && source.cellSelection()) throw new Error('A cut over table cells is unavailable');
           const captured = yrsClipboardSlice(source, themeColors);
           if (captured.text) resolve(captured);
           else reject(new Error('Nothing is selected to copy'));
@@ -1841,13 +1842,13 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         return;
       }
       if (readOnly) return;
-      if (holdInput || replicaReadyRef?.current === false) {
+      const copied = copyAfterReplica(true);
+      if (copied) {
         event.preventDefault();
-        const copied = copyAfterReplica(true);
-        if (copied) deleteSelection(true, copied);
+        deleteSelection(true, copied);
         return;
       }
-      if (session?.cellSelection() || !hasTextRange()) {
+      if (holdInput || replicaReadyRef?.current === false || session?.cellSelection() || !hasTextRange()) {
         event.preventDefault();
         return;
       }
