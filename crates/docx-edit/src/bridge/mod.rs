@@ -2465,14 +2465,11 @@ fn lower_table<T: ReadTxn>(
     let layout_mode = map_string(tbl_pr, "tableLayout")
         .filter(|value| matches!(value.as_str(), "fixed" | "autofit"));
     let table_margin = |side: &str| {
-        Some(
-            table_margins
-                .and_then(|margins| map_number(margins, side))
-                .filter(|value| value.is_finite() && *value >= 0.0)
-                .unwrap_or_else(|| word_default_cell_margin(side)),
-        )
-        .map(twips_to_pixels)
-        .filter(|value| *value > 0.0)
+        let twips = table_margins
+            .and_then(|margins| map_number(margins, side))
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .unwrap_or_else(|| word_default_cell_margin(side));
+        (twips > 0.0).then(|| twips_to_pixels(twips))
     };
 
     Ok((
