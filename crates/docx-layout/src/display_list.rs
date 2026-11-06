@@ -7160,38 +7160,64 @@ fn emit_line(
         let mut marker_attrs = block_ref.attrs();
         marker_attrs.list_marker = Some(true);
         marker_attrs.list_marker_revision = marker_revision;
-        prims.push(Primitive::Text(TextRunPrimitive {
-            text: marker.to_owned(),
-            paint_text: text_paint_override(ctx.shape, marker, &marker_format).map(Box::new),
-            x: px(marker_x),
-            baseline_y: px(baseline),
-            width: px(slot_width),
-            paint_clip: None,
-            font: resolved_css_font(ctx.shape, marker, &marker_format),
-            scripts: boxed_scripts(scripts),
-            color: color.to_owned(),
-            letter_spacing: None,
-            word_spacing: None,
-            rtl: geom.is_rtl.then_some(true),
-            opacity: None,
-            rotation_deg: None,
-            horizontal_scale: horizontal_scale_of(&marker_format),
-            substitute_scale: text_substitute_scale(
-                ctx.shape,
-                marker,
-                &marker_format,
-                base_bidi_level(geom.is_rtl),
-                false,
-            ),
-            all_caps: false,
-            small_caps: false,
-            hidden: false,
-            text_shadow: None,
-            text_outline: false,
-            emphasis_mark: None,
-            text_effect: None,
-            attrs: marker_attrs,
-        }));
+        let shaped = !geom.is_rtl
+            && bidi_char_levels(marker, base_bidi_direction(false))
+                .iter()
+                .all(|level| level % 2 == 0)
+            && ctx.shape.is_some_and(|shape| {
+                try_emit_glyph_runs(
+                    prims,
+                    shape,
+                    marker,
+                    &marker_format,
+                    None,
+                    None,
+                    marker_x,
+                    baseline,
+                    &None,
+                    0,
+                    None,
+                    None,
+                    &marker_attrs,
+                    color,
+                    &None,
+                    ooxml_text::AutoSpace::from_options(Some(false), Some(false)),
+                )
+            });
+        if !shaped {
+            prims.push(Primitive::Text(TextRunPrimitive {
+                text: marker.to_owned(),
+                paint_text: text_paint_override(ctx.shape, marker, &marker_format).map(Box::new),
+                x: px(marker_x),
+                baseline_y: px(baseline),
+                width: px(slot_width),
+                paint_clip: None,
+                font: resolved_css_font(ctx.shape, marker, &marker_format),
+                scripts: boxed_scripts(scripts),
+                color: color.to_owned(),
+                letter_spacing: None,
+                word_spacing: None,
+                rtl: geom.is_rtl.then_some(true),
+                opacity: None,
+                rotation_deg: None,
+                horizontal_scale: horizontal_scale_of(&marker_format),
+                substitute_scale: text_substitute_scale(
+                    ctx.shape,
+                    marker,
+                    &marker_format,
+                    base_bidi_level(geom.is_rtl),
+                    false,
+                ),
+                all_caps: false,
+                small_caps: false,
+                hidden: false,
+                text_shadow: None,
+                text_outline: false,
+                emphasis_mark: None,
+                text_effect: None,
+                attrs: marker_attrs,
+            }));
+        }
     }
 
     // Distribute justification slack across U+0020 clusters.
@@ -7983,13 +8009,22 @@ fn emit_text_segment(
     attrs.logical_order = logical_order.or(fmt.logical_order);
     attrs.bidi_level = exact_advance.then_some(bidi_level).or(fmt.bidi_level);
     attrs.lang = fmt.language.as_ref().and_then(|language| {
-        if ooxml_text::level_is_rtl(bidi_level) {
+        let slots = ooxml_text::font_slot_use(
+            text,
+            fmt.complex_script == Some(true),
+            fmt.font_slots
+                .as_ref()
+                .and_then(|slots| slots.hint.as_deref()),
+        );
+        if ooxml_text::level_is_rtl(bidi_level) || slots.complex_script {
             language.bidi.clone().or_else(|| language.latin.clone())
-        } else {
+        } else if slots.east_asia {
             language
                 .east_asia
                 .clone()
                 .or_else(|| language.latin.clone())
+        } else {
+            language.latin.clone()
         }
     });
     if let Some(link) = &fmt.hyperlink {

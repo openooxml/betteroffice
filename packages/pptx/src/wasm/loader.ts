@@ -1,3 +1,4 @@
+import { upgradeExportFaces } from './exportFaces';
 import initWasmModule, {
   decodeFontFace as decodePackedFontFace,
   decodeTiffPng,
@@ -197,6 +198,8 @@ export interface PresentationHandle extends CollaborationReplica {
   registerFont(face: PptxFontFace): number;
   /** Registers a face drawn only where a run's own face has no glyph. */
   registerFallbackFont(face: PptxFontFace): number;
+  /** Gives PNG export the complete bytes of a family layout measured with only part of. */
+  replaceExportFace(family: string, bytes: Uint8Array, keep?: (face: { id: number; bold?: boolean; italic?: boolean }) => boolean): void;
   layoutSlide(slideIndex: number): SlideDisplayList;
   /** `layoutSlide` with scope, layout and serialize time measured inside the renderer. */
   layoutSlideProfiled(slideIndex: number): ProfiledLayout;
@@ -894,6 +897,10 @@ function openPresentationInternal(
     },
     registerFallbackFont(face: PptxFontFace): number {
       return keepFace(wasmCall(() => registerFont(renderer, face, true)), face, true);
+    },
+    replaceExportFace(family: string, bytes: Uint8Array, keep?: (face: { id: number; bold?: boolean; italic?: boolean }) => boolean): void {
+      upgradeExportFaces(exportFaces.values(), family, bytes, keep);
+      releasePng(doc);
     },
     renderPng(target: PptxPngTarget, options: PptxPngOptions = {}): Promise<Uint8Array> {
       let slide: number;

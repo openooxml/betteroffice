@@ -2310,7 +2310,7 @@ async function handle(request: ScheduledRequest): Promise<void> {
           story: anchor.story,
           from: storyOffsetForLoc(session.geometryReader, anchor),
           to: storyOffsetForLoc(session.geometryReader, focus),
-        });
+        }, commandInit ? (JSON.parse(commandInit.layoutInput) as { renderEnv?: YrsRenderEnv }).renderEnv?.themeColors : undefined);
         break;
       }
       case 'validateEdits':

@@ -36,7 +36,28 @@ export interface PaintSlideOptions {
   shapeChanges?: readonly ProposalShapeChange[];
   /** The family a run paints with in place of its own, e.g. an export's private face. */
   fontFamily?: (font: { family: string; bold: boolean; italic: boolean; id: number }) => string | undefined;
+  /**
+   * Makes the faces a slide draws with ready before any text is painted. Without it, text draws with each run's own
+   * family, as the host installed it.
+   */
+  fontCoverage?: PaintFontCoverage;
 }
+
+/** Prepares the fonts a paint draws text with. */
+export interface PaintFontCoverage {
+  /**
+   * Resolves once every character of `text` can be drawn in `family`, with the family name to draw it with (for
+   * example a newer installed revision of the same face).
+   */
+  prepare(family: string, text: string): Promise<string>;
+  /** The newest family to draw prepared text with now; a newer revision holds everything an older one did. */
+  latest?(family: string): string | undefined;
+  /** False for a style that draws under its own name, whatever the family's other styles do. Defaults to true. */
+  covers?(family: string, bold: boolean, italic: boolean): boolean;
+}
+
+export type TextFamilies = (family: string, bold?: boolean, italic?: boolean) => string;
+const ownFamilies: TextFamilies = (family) => family;
 
 interface ShadowBudget {
   remaining: number;
@@ -83,6 +104,8 @@ export async function paintSlide(
   options: PaintSlideOptions = {}
 ): Promise<void> {
   const chunks = await textChunks;
+  const families = options.fontCoverage
+    ? await (await import('./textFamilies')).prepareTextFamilies(list, options.fontCoverage) : ownFamilies;
   const shadowBudget = { remaining: options.maxShadowPixels ?? MAX_SHADOW_PIXELS };
   if (!Number.isSafeInteger(shadowBudget.remaining) || shadowBudget.remaining < 0)
     throw new Error('invalid shadow pixel budget');
@@ -97,7 +120,7 @@ export async function paintSlide(
       ctx.fillRect(0, 0, list.width, list.height);
     }
     for (const primitive of list.primitives)
-      await paintPrimitive(ctx, primitive, paintOptions, dpr * scale, shadowBudget, chunks);
+      await paintPrimitive(ctx, primitive, paintOptions, dpr * scale, shadowBudget, chunks, families);
   } finally {
     try { ctx.restore(); } finally { images?.release?.(); }
   }
@@ -109,7 +132,8 @@ async function paintPrimitive(
   options: PaintSlideOptions,
   deviceScale: number,
   shadowBudget: ShadowBudget,
-  textChunks: TextChunks
+  textChunks: TextChunks,
+  families: TextFamilies
 ): Promise<void> {
   ctx.save();
   try {
@@ -124,7 +148,7 @@ async function paintPrimitive(
         await paintImage(ctx, primitive, options.resolveImage, deviceScale, shadowBudget);
         break;
       case 'textBox':
-        paintTextBox(ctx, primitive, textChunks, options.textChanges, options.fontFamily);
+        paintTextBox(ctx, primitive, textChunks, families, options.textChanges, options.fontFamily);
         break;
       case 'placeholder':
         paintPlaceholder(ctx, primitive);
@@ -133,7 +157,7 @@ async function paintPrimitive(
       case 'table':
         await paintContainer(ctx, primitive, deleted ? { ...options,
           shapeChanges: options.shapeChanges?.filter(change => change.shapeId !== primitive.shapeId),
-        } : options, deviceScale, shadowBudget, textChunks);
+        } : options, deviceScale, shadowBudget, textChunks, families);
         break;
     }
   } finally {
@@ -147,13 +171,14 @@ async function paintContainer(
   options: PaintSlideOptions,
   deviceScale: number,
   shadowBudget: ShadowBudget,
-  textChunks: TextChunks
+  textChunks: TextChunks,
+  families: TextFamilies
 ): Promise<void> {
   ctx.beginPath();
   ctx.rect(container.x, container.y, container.w, container.h);
   ctx.clip();
   for (const primitive of container.primitives)
-    await paintPrimitive(ctx, primitive, options, deviceScale, shadowBudget, textChunks);
+    await paintPrimitive(ctx, primitive, options, deviceScale, shadowBudget, textChunks, families);
 }
 
 function applyTransform(
@@ -905,6 +930,7 @@ function paintTextBox(
   ctx: CanvasRenderingContext2D,
   textBox: TextBoxPrimitive,
   textChunks: TextChunks,
+  families: TextFamilies,
   textChanges: readonly ProposalTextChange[] = [],
   fontFamily?: PaintSlideOptions['fontFamily']
 ): void {
@@ -928,7 +954,7 @@ function paintTextBox(
     ctx.shadowOffsetY = shadow.dy ?? 0;
   }
   for (const line of textBox.lines) {
-    for (const run of line.runs) paintTextRun(ctx, run, line.baseline, textChunks, fontFamily);
+    for (const run of line.runs) paintTextRun(ctx, run, line.baseline, textChunks, families, fontFamily);
   }
   if (shadow) ctx.restore();
   paintTextChanges(ctx, textBox, changes, true);
@@ -971,11 +997,12 @@ function paintTextRun(
   run: PositionedTextRun,
   baseline: number,
   textChunks: TextChunks,
+  families: TextFamilies,
   fontFamily?: PaintSlideOptions['fontFamily']
 ): void {
   const style = run.italic ? 'italic ' : '';
   const weight = run.bold ? 'bold ' : '';
-  const family = fontFamily?.({ family: run.fontFamily, bold: run.bold === true, italic: run.italic === true, id: run.fontId }) ?? run.fontFamily;
+  const family = fontFamily?.({ family: run.fontFamily, bold: run.bold === true, italic: run.italic === true, id: run.fontId }) ?? families(run.fontFamily, run.bold, run.italic);
   ctx.font = `${style}${weight}${run.fontSizePx}px ${quoteFamily(family)}`;
   ctx.fillStyle = run.color;
   const spacing = run.letterSpacingPx ?? 0;

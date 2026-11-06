@@ -35,6 +35,19 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
   const { admission, viewStore, textareaRef, autoFocus, className, ariaLabel } = props;
   const textarea = useRef<HTMLTextAreaElement | null>(null);
   const composing = useRef(false);
+  const scrolledBeforeFirstCaret = useRef(false);
+  useLayoutEffect(() => {
+    const keys = new Set(['PageDown', 'PageUp', ' ', 'ArrowDown', 'ArrowUp', 'Home', 'End']);
+    const onIntent = (event: Event) => {
+      const host = props.caretHostRef?.current;
+      if (event.type === 'keydown' && (!keys.has((event as KeyboardEvent).key) || event.target instanceof HTMLTextAreaElement)) return;
+      const target = event.target;
+      if (host && target instanceof Node && (target.contains(host) || host.contains(target))) scrolledBeforeFirstCaret.current = true;
+    };
+    const types = ['wheel', 'touchmove', 'pointerdown', 'keydown'] as const;
+    for (const type of types) document.addEventListener(type, onIntent, { capture: true, passive: true });
+    return () => { for (const type of types) document.removeEventListener(type, onIntent, true); };
+  }, [props.caretHostRef]);
   const revealed = useRef<string | undefined>(undefined);
   const revealHold = useRef<{ seq?: number } | null>(null);
   const callbacks = useRef(props);
@@ -79,13 +92,14 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       const selection = state.workerSelection;
       const key = selection ? JSON.stringify([selection.anchor.story, selection.anchor.paraId, selection.anchor.offset,
         selection.focus.story, selection.focus.paraId, selection.focus.offset, cellFocus]) : '';
-      const changed = key !== revealed.current;
+      const scroller = host ? findVerticalScrollParentOrRoot(host) : null;
+      const scrolledSinceOpen = revealed.current === undefined && scrolledBeforeFirstCaret.current;
+      const changed = key !== revealed.current && !scrolledSinceOpen;
       revealed.current = key;
       const hold = revealHold.current;
       const held = !!hold && (hold.seq === undefined || geometry.coversThroughSeq <= hold.seq);
       if (hold?.seq !== undefined && geometry.coversThroughSeq >= hold.seq) revealHold.current = null;
-      if (!changed || held || !host || document.activeElement !== element) return;
-      const scroller = findVerticalScrollParentOrRoot(host);
+      if (!changed || held || !scroller || document.activeElement !== element) return;
       const delta = scrollIntoViewDelta(scrollViewport(scroller), top, top + height, 24);
       if (delta) scroller.scrollTop += delta;
     };

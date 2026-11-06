@@ -696,11 +696,11 @@ fn parse_text(text: &str, nodes: usize) -> Result<(Element, usize), ParseError> 
                 place(done, &mut stack, &mut root)?;
             }
             Event::Text(text) => {
-                let decoded = text.decode().map_err(xml_err)?;
+                let decoded = text.xml10_content().map_err(xml_err)?;
                 push_text(&decoded, &mut stack, &mut budget)?;
             }
             Event::CData(text) => {
-                let decoded = text.decode().map_err(xml_err)?;
+                let decoded = text.xml10_content().map_err(xml_err)?;
                 push_text(&decoded, &mut stack, &mut budget)?;
             }
             Event::GeneralRef(entity) => {

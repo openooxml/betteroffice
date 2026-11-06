@@ -433,6 +433,8 @@ async function createCommandClient(
         return bytes;
       } catch (error) { return reject(error, position.seq); }
     },
+    readCoverageFont: (family, text, have) => rpc.call.readCoverageFont(family, text, have),
+    wholeCoverageFonts: (have) => rpc.call.wholeCoverageFonts(have),
     async access(method, ...args) {
       const error = unavailable();
       if (error) throw error;

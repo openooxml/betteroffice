@@ -1266,6 +1266,15 @@ function inLogicalOrder<T extends BlockGroup['prims']>(prims: T): T {
   return prims.map((p) => (p.logicalOrder === undefined ? p : ordered[index++])) as T;
 }
 
+function applyListMarker(el: HTMLElement, p: { listMarker?: boolean; listMarkerRevision?: 'ins' | 'del' }): void {
+  if (!p.listMarker) return;
+  el.classList.add(MIRROR_CLASS_NAMES.listMarker);
+  el.setAttribute('aria-hidden', 'true');
+  if (p.listMarkerRevision) {
+    el.style.color = p.listMarkerRevision === 'ins' ? 'rgb(46, 125, 50)' : 'rgb(198, 40, 40)';
+  }
+}
+
 function applyContainerLanguageAndDirection(el: HTMLElement, prims: BlockGroup['prims']): void {
   const lang = prims.find((p) => p.lang)?.lang;
   if (lang) el.lang = lang;
@@ -1364,14 +1373,7 @@ function createMirrorPrimitive(
         }
         el.setAttribute('aria-hidden', 'true');
       }
-      if (p.listMarker) {
-        el.classList.add(MIRROR_CLASS_NAMES.listMarker);
-        el.setAttribute('aria-hidden', 'true');
-        if (p.listMarkerRevision) {
-          el.style.color =
-            p.listMarkerRevision === 'ins' ? 'rgb(46, 125, 50)' : 'rgb(198, 40, 40)';
-        }
-      }
+      applyListMarker(el, p);
       applyDocAttrs(el, p);
       return el;
     }
@@ -1395,6 +1397,7 @@ function createMirrorPrimitive(
         p.rotationDeg,
         p.horizontalScale
       );
+      applyListMarker(el, p);
       applyDocAttrs(el, p);
       return el;
     }

@@ -1,8 +1,12 @@
 //! shared quick-xml plumbing: depth-capped pull loop, text collection,
 //! attribute lookup, and opc path helpers. malformed input errors, never panics.
 
+use std::borrow::Cow;
+
 use quick_xml::Reader;
-use quick_xml::events::{BytesStart, Event};
+use quick_xml::events::attributes::Attribute;
+use quick_xml::events::{BytesStart, BytesText, Event};
+use quick_xml::name::QName;
 
 use crate::{MAX_DEPTH, ParseError};
 
@@ -59,8 +63,8 @@ pub(crate) fn collect_text(
     let mut out = String::new();
     loop {
         match next_event(reader, buf, depth)? {
-            Event::Text(t) => out.push_str(&t.decode().map_err(xml_err)?),
-            Event::CData(t) => out.push_str(&t.decode().map_err(xml_err)?),
+            Event::Text(t) => out.push_str(&t.xml10_content().map_err(xml_err)?),
+            Event::CData(t) => out.push_str(&t.xml10_content().map_err(xml_err)?),
             Event::GeneralRef(r) => {
                 let name = r.decode().map_err(xml_err)?;
                 out.push_str(&resolve_entity(&name)?);
@@ -80,6 +84,25 @@ pub(crate) fn resolve_entity(name: &str) -> Result<String, ParseError> {
     quick_xml::escape::unescape(&raw)
         .map(|c| c.into_owned())
         .map_err(|_| ParseError::Malformed(format!("unresolvable entity &{name};")))
+}
+
+/// Element text with a CR written as `&#13;`, since a literal one reads back as
+/// a line feed.
+pub(crate) fn text_event(text: &str) -> BytesText<'static> {
+    BytesText::from_escaped(quick_xml::escape::escape(text).replace('\r', "&#13;"))
+}
+
+/// An attribute whose value keeps its CR, LF and tab characters, written as
+/// character references since literal ones read back as spaces.
+pub(crate) fn text_attribute<'a>(name: &'a str, value: &str) -> Attribute<'a> {
+    let escaped = quick_xml::escape::escape(value)
+        .replace('\r', "&#13;")
+        .replace('\n', "&#10;")
+        .replace('\t', "&#9;");
+    Attribute {
+        key: QName(name.as_bytes()),
+        value: Cow::Owned(escaped.into_bytes()),
+    }
 }
 
 /// look up an attribute by its local name (namespace-prefix agnostic),

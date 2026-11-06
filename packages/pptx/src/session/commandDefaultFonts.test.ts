@@ -1,8 +1,10 @@
 import { afterEach, expect, mock, spyOn, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import * as fonts from '@betteroffice/fonts';
+import * as progressive from '@betteroffice/fonts/progressive';
 import type { DefaultFontFace } from '../../../../shared/pptxDefaultFonts';
 import { commandFontProvider, createCommandDefaultFonts, prefetchCoverageFaces } from './commandDefaultFonts';
+import { createSlicedFontFaces } from './commandSlicedFonts';
 import { decodeFontFace } from '../wasm/loader';
 import { engineKind } from '../wasm/engine';
 
@@ -338,3 +340,79 @@ test('browser refusal prevents coverage registration and settlement', async () =
     expect(beforeRegister).not.toHaveBeenCalled();
   } finally { fonts.dispose(); }
 });
+
+test('with sliced faces off, a sliced loader registers the whole face and its exact bytes', async () => {
+  const whole = new Uint8Array([9, 8, 7]).buffer;
+  const open = spyOn(progressive, 'openSlicedFace');
+  restorers.push(() => open.mockRestore());
+  const load = Object.assign(mock(async () => whole), { slices: { ref: { format: 1, index: 'x', indexSha256: '' } } });
+  provider(() => load as never);
+  const registered: DefaultFontFace[] = [];
+  const fonts = createCommandDefaultFonts([], () => [regular], (face) => { registered.push(face); }, () => {});
+  try {
+    await fonts.load();
+    expect(open).not.toHaveBeenCalled();
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(registered.map((face) => [...new Uint8Array(face.bytes as ArrayBuffer)])).toEqual([[9, 8, 7]]);
+  } finally { fonts.dispose(); }
+});
+
+test('with sliced faces off, coverage prefetch fetches whole faces', async () => {
+  const open = spyOn(progressive, 'openSlicedFace');
+  restorers.push(() => open.mockRestore());
+  const load = Object.assign(mock(async () => bytes), { slices: { ref: { format: 1, index: 'x', indexSha256: '' } } });
+  provider(() => undefined, () => load as never);
+  prefetchCoverageFaces(['cjk-jp'], Promise.resolve(), () => commandFontProvider.load());
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(load).toHaveBeenCalledTimes(1);
+  expect(open).not.toHaveBeenCalled();
+});
+
+test('a host-supplied face under a coverage family is never sliced over', async () => {
+  const skeleton = await notoSansJP();
+  const load = Object.assign(mock(async () => skeleton), { slices: { ref: { format: 1, index: 'x', indexSha256: '' } } });
+  provider(() => undefined, (script) => script === 'cjk-jp' ? load as never : undefined);
+  const open = spyOn(progressive, 'openSlicedFace').mockResolvedValue({ revision: 1, bytes: () => skeleton,
+    ensureText: async () => 1, prefetch() {} } as never);
+  restorers.push(() => open.mockRestore());
+  const browser = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { userAgent: 'Chrome/149.0' } });
+  restorers.push(() => {
+    if (browser) Object.defineProperty(globalThis, 'navigator', browser);
+    else Reflect.deleteProperty(globalThis, 'navigator');
+  });
+  const sliced = createSlicedFontFaces();
+  const fonts = createCommandDefaultFonts([{ family: 'Noto Sans JP' }], () => [{ ...regular, family: 'BIZ UD明朝', scripts: ['cjk-jp'] }],
+    () => {}, () => {}, undefined, undefined, undefined, sliced);
+  try {
+    await fonts.load();
+    expect(open).toHaveBeenCalled();
+    expect(sliced.families()).toEqual([]);
+  } finally { fonts.dispose(); sliced.dispose(); }
+});
+
+test('regular sliced with a whole substitute for bold: the family is sliced, and bold stays out of it', async () => {
+  const skeleton = await notoSansJP();
+  const sliceable = Object.assign(mock(async () => skeleton), { slices: { ref: { format: 1, index: 'x', indexSha256: '' } } });
+  provider((_family, bold) => (bold ? async () => bytes : sliceable) as never);
+  const open = spyOn(progressive, 'openSlicedFace').mockResolvedValue({ revision: 1, bytes: () => skeleton,
+    ensureText: async () => 1, prefetch() {} } as never);
+  restorers.push(() => open.mockRestore());
+  const browser = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { userAgent: 'Chrome/149.0' } });
+  restorers.push(() => {
+    if (browser) Object.defineProperty(globalThis, 'navigator', browser);
+    else Reflect.deleteProperty(globalThis, 'navigator');
+  });
+  const sliced = createSlicedFontFaces();
+  const fonts = createCommandDefaultFonts([], () => [regular, { ...regular, bold: true }], () => {}, () => {},
+    undefined, undefined, undefined, sliced);
+  try {
+    await fonts.load();
+    expect(sliced.families()).toEqual(['Calibri']);
+    expect(sliced.plainStyles()).toEqual(['calibri|1|0']);
+    expect(sliced.coverage.covers!('Calibri', true, false)).toBe(false);
+    expect(sliced.coverage.covers!('Calibri', false, false)).toBe(true);
+  } finally { fonts.dispose(); sliced.dispose(); }
+});
+
