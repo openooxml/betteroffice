@@ -8,9 +8,9 @@ const namespaces = `xmlns:p="${presentation}" xmlns:a="${drawing}" xmlns:r="${re
 const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
 const emu = (value: number) => Math.round(value * 9525);
 const frame = (x: number, y: number, w: number, h: number) => `<a:off x="${emu(x)}" y="${emu(y)}"/><a:ext cx="${emu(w)}" cy="${emu(h)}"/>`;
-const run = (text: string) => `<a:r><a:rPr sz="2400"><a:latin typeface="Liberation Sans"/></a:rPr><a:t>${text}</a:t></a:r>`;
-const textShape = (id: number, name: string, placeholder: string, y: number, runs: string[][]) =>
-  `<p:sp><p:nvSpPr><p:cNvPr id="${id}" name="${name}"/><p:cNvSpPr/><p:nvPr>${placeholder}</p:nvPr></p:nvSpPr><p:spPr><a:xfrm>${frame(40, y, 800, 100)}</a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/>${runs.map((parts) => `<a:p>${parts.map(run).join('')}</a:p>`).join('')}</p:txBody></p:sp>`;
+const run = (text: string, lang?: string) => `<a:r><a:rPr sz="2400"${lang ? ` lang="${lang}"` : ''}><a:latin typeface="Liberation Sans"/></a:rPr><a:t>${text}</a:t></a:r>`;
+const textShape = (id: number, name: string, placeholder: string, y: number, runs: string[][], languages?: string[][]) =>
+  `<p:sp><p:nvSpPr><p:cNvPr id="${id}" name="${name}"/><p:cNvSpPr/><p:nvPr>${placeholder}</p:nvPr></p:nvSpPr><p:spPr><a:xfrm>${frame(40, y, 800, 100)}</a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/>${runs.map((parts, paragraph) => `<a:p>${parts.map((text, index) => run(text, languages?.[paragraph]?.[index])).join('')}</a:p>`).join('')}</p:txBody></p:sp>`;
 const picture = (id: number, name: string, descr: string, x: number, decorative = false) =>
   `<p:pic><p:nvPicPr><p:cNvPr id="${id}" name="${name}" descr="${descr}">${decorative ? '<a:extLst><a:ext uri="{C183D7F6-B498-43B3-948B-1728B52AA6E4}"><adec:decorative xmlns:adec="http://schemas.microsoft.com/office/drawing/2017/decorative" val="1"/></a:ext></a:extLst>' : ''}</p:cNvPr><p:cNvPicPr/><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed="rId2"/><a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr><a:xfrm>${frame(x, 300, 100, 100)}</a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>`;
 const cell = (text: string) => `<a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p>${run(text)}</a:p></a:txBody><a:tcPr/></a:tc>`;
@@ -18,7 +18,7 @@ const table = `<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="6" name="Table"/
 const tree = '<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>';
 const slide = (body: string) => `<p:sld ${namespaces}><p:cSld><p:spTree>${tree}${body}</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>`;
 
-async function fixture() {
+async function fixture(languages = false) {
   const zip = new JSZip();
   const relationships = (items: string) => `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${items}</Relationships>`;
   const part = (n: number) => `<Override PartName="/ppt/slides/slide${n}.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>`;
@@ -31,17 +31,18 @@ async function fixture() {
   zip.file('ppt/slides/_rels/slide1.xml.rels', media);
   zip.file('ppt/slides/_rels/slide2.xml.rels', media);
   zip.file('ppt/slides/slide1.xml', slide(
-    textShape(2, 'Title 1', '<p:ph type="title"/>', 40, [['Quarterly results']]) +
-    textShape(3, 'Content 2', '', 160, [['Revenue ', 'grew ', 'twelve percent'], ['Costs stayed flat']]) +
+    textShape(2, 'Title 1', '<p:ph type="title"/>', 40, [['Quarterly results']], languages ? [['en-US']] : undefined) +
+    textShape(3, 'Content 2', '', 160, [['Revenue ', 'grew ', 'twelve percent'], ['Costs ', 'stayed ', 'flat']],
+      languages ? [['en-US', 'fr-FR', 'en-US'], ['en-US', 'en-US', 'en-US']] : undefined) +
     picture(4, 'Picture 3', 'A rising bar chart', 580) + picture(5, 'Picture 4', 'Should stay silent', 720, true) + table));
   zip.file('ppt/slides/slide2.xml', slide(textShape(2, 'Title 1', '<p:ph type="title"/>', 40, [['Next steps']])));
   return zip.generateAsync({ type: 'nodebuffer' });
 }
 
-async function open(page: Page) {
+async function open(page: Page, languages = false) {
   await page.goto('/?format=pptx');
   await page.locator('input[type=file]').last().setInputFiles({
-    name: 'reading.pptx', mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', buffer: await fixture(),
+    name: 'reading.pptx', mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', buffer: await fixture(languages),
   });
   await expect(page.getByTestId('pptx-worker-editor')).toBeVisible();
   await expect(page.getByTestId('pptx-worker-status')).toHaveCount(0);
@@ -86,6 +87,24 @@ test('pptx screen reader: the accessibility tree reads the slide in whole words'
   expect(nodes).toContainEqual({ role: 'image', name: 'A rising bar chart' });
   expect(nodes.map((node) => node.name)).not.toContain('Should stay silent');
   await expect(page.getByRole('application')).toHaveCount(1);
+});
+
+test('pptx screen reader: authored languages reach the DOM and one language stays one StaticText', async ({ page, context }) => {
+  await open(page, true);
+  await expect(mirror(page).getByRole('heading', { name: 'Quarterly results' })).toHaveAttribute('lang', 'en-US');
+  const mixed = mirror(page).locator('p').filter({ hasText: /^Revenue grew twelve percent$/ });
+  await expect(mixed).toHaveAttribute('lang', 'en-US');
+  await expect(mixed.locator('span')).toHaveCount(1);
+  await expect(mixed.locator('span')).toHaveAttribute('lang', 'fr-FR');
+  await expect(mixed.locator('span')).toHaveText('grew');
+  const single = mirror(page).locator('p').filter({ hasText: /^Costs stayed flat$/ });
+  await expect(single).toHaveAttribute('lang', 'en-US');
+  expect(await single.evaluate((node) => [...node.childNodes].map((child) => child.nodeType))).toEqual([3]);
+  const unknown = mirror(page).locator('p').filter({ hasText: /^North region$/ });
+  expect(await unknown.getAttribute('lang')).toBeNull();
+  const cdp = await context.newCDPSession(page);
+  await expect.poll(async () => (await accessibleSlide(cdp, 'Slide 1 of 2'))
+    .filter((node) => node.role === 'StaticText' && node.name === 'Costs stayed flat')).toHaveLength(1);
 });
 
 test('pptx screen reader: slide changes and shape selection are announced', async ({ page }) => {

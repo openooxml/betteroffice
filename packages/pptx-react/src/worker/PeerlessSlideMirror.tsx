@@ -4,7 +4,7 @@ import type { SlideDisplayList } from '@betteroffice/pptx';
 import { useTranslation } from '../i18n';
 import { navigatePeerlessSlide } from './peerlessNavigation';
 import type { PeerlessPresentation } from './usePeerlessPresentation';
-import { slideMirrorItems, type SlideMirrorItem } from './slideMirror';
+import { slideMirrorItems, type SlideMirrorItem, type SlideMirrorParagraph } from './slideMirror';
 
 const SETTLE_MS = 150;
 
@@ -12,13 +12,18 @@ const visuallyHidden: CSSProperties = {
   position: 'absolute', width: 1, height: 1, overflow: 'hidden', clipPath: 'inset(50%)', whiteSpace: 'nowrap',
 };
 
+function paragraphText(paragraph: SlideMirrorParagraph) {
+  return paragraph.segments.length === 1 ? paragraph.text : paragraph.segments.map((segment, index) =>
+    segment.lang && segment.lang !== paragraph.lang ? <span key={index} lang={segment.lang}>{segment.text}</span> : segment.text);
+}
+
 function MirrorItem({ item }: { item: SlideMirrorItem }) {
   const style: CSSProperties = { position: 'absolute', left: item.x, top: item.y, width: item.w, height: item.h, margin: 0 };
   if (item.paragraphs.length === 0) return <div role="img" aria-label={item.label!} style={style} />;
   return <div role={item.label ? 'group' : undefined} aria-label={item.label ?? undefined} style={style}>
     {item.paragraphs.map((paragraph, index) => paragraph.heading
-      ? <div key={index} role="heading" aria-level={2}>{paragraph.text}</div>
-      : <p key={index} style={{ margin: 0 }}>{paragraph.text}</p>)}
+      ? <div key={index} role="heading" aria-level={2} lang={paragraph.lang ?? undefined}>{paragraphText(paragraph)}</div>
+      : <p key={index} lang={paragraph.lang ?? undefined} style={{ margin: 0 }}>{paragraphText(paragraph)}</p>)}
   </div>;
 }
 

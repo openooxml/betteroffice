@@ -3665,6 +3665,7 @@ export interface TextBoxPrimitive extends PrimitiveBase {
     paragraphs: Array<{
         align?: 'left' | 'center' | 'right' | 'justify';
         level: number;
+        languages?: TextLanguage[];
         runs: Array<{
             text: string;
             fontFamily: string;
@@ -3679,6 +3680,12 @@ export interface TextBoxPrimitive extends PrimitiveBase {
     overflow?: boolean;
     /** `a:rPr/a:effectLst`: the shadow the box's glyphs are drawn with. */
     textShadow?: Shadow;
+}
+/** UTF-16 offsets into the paragraph's concatenated run text. */
+export interface TextLanguage {
+    start: number;
+    end: number;
+    lang: string;
 }
 export interface PlaceholderPrimitive extends PrimitiveBase {
     kind: 'placeholder';

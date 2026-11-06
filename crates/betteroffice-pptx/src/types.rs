@@ -48,6 +48,6 @@ pub use pptx_render::{
     CONTRACT_VERSION, CaretStop, FontSubstitution, GradientStop, GradientType, HitTestResult,
     ImageCrop, ImageEffect, Paint, PositionedGlyph, PositionedTextLine, PositionedTextRun,
     Primitive, ProposalDiffSlide, RenderError, RenderedSlide, ShapeAltText, Stroke,
-    SurfaceDisplayList, TextAlign, TextAnchor, TextParagraph as DisplayTextParagraph,
+    SurfaceDisplayList, TextAlign, TextAnchor, TextLanguage, TextParagraph as DisplayTextParagraph,
     TextRun as DisplayTextRun, Transform,
 };

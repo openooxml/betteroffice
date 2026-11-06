@@ -45,8 +45,8 @@ use crate::fmath;
 use crate::{
     CONTRACT_VERSION, CaretStop, GradientStop, GradientType, ImageCrop, ImageEffect, ImageTile,
     Paint, PositionedGlyph, PositionedTextLine, PositionedTextRun, Primitive, Shadow, ShapeAltText,
-    Stroke, StrokeEnd, SurfaceDisplayList, TextAlign, TextAnchor, TextParagraph, TextRun,
-    Transform,
+    Stroke, StrokeEnd, SurfaceDisplayList, TextAlign, TextAnchor, TextLanguage, TextParagraph,
+    TextRun, Transform,
 };
 use ooxml_metafile::{MetafileDrawing, decode as decode_metafile, is_metafile};
 
@@ -3376,6 +3376,7 @@ impl<'a> LayoutBuilder<'a> {
             .map(|paragraph| TextParagraph {
                 align: Some(paragraph.align),
                 level: paragraph.level,
+                languages: paragraph.languages.clone(),
                 runs: paragraph
                     .runs
                     .iter()
@@ -3915,6 +3916,139 @@ struct ContentParagraph {
     runs: Vec<ContentRun>,
     /// `a:endParaRPr/@lang` of the source paragraph.
     end_language: Option<String>,
+    mirror_languages: MirrorLanguages,
+}
+
+#[derive(Clone)]
+enum MirrorLanguages {
+    Exact(Vec<(u32, Option<String>)>),
+    Uniform(Option<String>),
+    Unknown,
+}
+
+fn known_language(language: Option<&str>) -> Option<&str> {
+    language
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty() && !tag.eq_ignore_ascii_case("x-none"))
+}
+
+fn source_language<'a>(
+    run: &'a pptx_parse::TextRun,
+    paragraph: &'a pptx_parse::TextParagraph,
+) -> Option<&'a str> {
+    known_language(run.properties.language.as_deref()).or_else(|| {
+        known_language(
+            paragraph
+                .end_properties
+                .as_ref()
+                .and_then(|properties| properties.language.as_deref()),
+        )
+    })
+}
+
+fn source_language_runs(source: &pptx_parse::TextParagraph, slide_number: i64) -> MirrorLanguages {
+    MirrorLanguages::Exact(
+        source
+            .runs
+            .iter()
+            .map(|run| {
+                let length = if run.field_type.as_deref() == Some("slidenum") {
+                    utf16_len(&slide_number.to_string())
+                } else {
+                    utf16_len(&run.text)
+                };
+                (length, source_language(run, source).map(str::to_owned))
+            })
+            .collect(),
+    )
+}
+
+fn mirror_languages(
+    sources: &[&pptx_parse::TextParagraph],
+    live: &[&str],
+    slide_number: i64,
+) -> MirrorLanguages {
+    if let [source] = sources
+        && same_text(live, &source.runs)
+    {
+        return source_language_runs(source, slide_number);
+    }
+    if sources.is_empty() {
+        return MirrorLanguages::Unknown;
+    }
+    let mut language = None;
+    let mut unmarked = false;
+    for source in sources {
+        if source.runs.is_empty()
+            && let Some(tag) = known_language(
+                source
+                    .end_properties
+                    .as_ref()
+                    .and_then(|properties| properties.language.as_deref()),
+            )
+        {
+            if language.is_some_and(|previous| previous != tag) {
+                return MirrorLanguages::Unknown;
+            }
+            language = Some(tag);
+        }
+        for run in &source.runs {
+            let Some(tag) = source_language(run, source) else {
+                unmarked |= !run.text.is_empty();
+                continue;
+            };
+            if language.is_some_and(|previous| previous != tag) {
+                return MirrorLanguages::Unknown;
+            }
+            language = Some(tag);
+        }
+    }
+    if unmarked && language.is_some() {
+        return MirrorLanguages::Unknown;
+    }
+    MirrorLanguages::Uniform(language.map(str::to_owned))
+}
+
+fn resolved_languages(
+    source: &MirrorLanguages,
+    length: u32,
+    default_language: Option<&str>,
+) -> Vec<TextLanguage> {
+    let mut languages: Vec<TextLanguage> = Vec::new();
+    let mut offset = 0;
+    let mut append = |length: u32, language: Option<&str>| {
+        let start = offset;
+        offset += length;
+        let Some(lang) = known_language(language).or_else(|| known_language(default_language))
+        else {
+            return;
+        };
+        if start == offset {
+            return;
+        }
+        if let Some(previous) = languages.last_mut()
+            && previous.end == start
+            && previous.lang == lang
+        {
+            previous.end = offset;
+            return;
+        }
+        languages.push(TextLanguage {
+            start,
+            end: offset,
+            lang: lang.to_owned(),
+        });
+    };
+    match source {
+        MirrorLanguages::Exact(runs) => {
+            for (length, language) in runs {
+                append(*length, language.as_deref());
+            }
+        }
+        MirrorLanguages::Uniform(language) => append(length, language.as_deref()),
+        MirrorLanguages::Unknown => {}
+    }
+    languages
 }
 
 #[derive(Clone)]
@@ -3949,8 +4083,6 @@ fn sourced_neighbours<'a>(
     out
 }
 
-/// Live story content; `with_languages` attaches the source languages that only font
-/// requests read, so layout skips that work.
 fn content_from_story(
     story: &StorySnapshot,
     source: Option<&TextBody>,
@@ -3987,25 +4119,45 @@ fn content_from_story(
                     let insertions = source_para
                         .map(|source| slide_number_insertions(source, &live))
                         .unwrap_or_default();
-                    let sources: Vec<&pptx_parse::TextParagraph> = if !with_languages {
-                        Vec::new()
-                    } else if paragraph.source_paragraphs.len() > 1 {
-                        paragraph
-                            .source_paragraphs
-                            .iter()
-                            .take(MAX_LANGUAGE_SOURCES)
-                            .filter_map(|joined| {
-                                source
-                                    .and_then(|body| source_paragraph(body, &story.id, &joined.id))
-                            })
-                            .collect()
-                    } else if source_para.is_some() {
-                        source_para.into_iter().collect()
+                    let sources: Vec<&pptx_parse::TextParagraph> =
+                        if paragraph.source_paragraphs.len() > 1
+                            || (source_para.is_none() && !paragraph.source_paragraphs.is_empty())
+                        {
+                            paragraph
+                                .source_paragraphs
+                                .iter()
+                                .take(MAX_LANGUAGE_SOURCES)
+                                .filter_map(|joined| {
+                                    source.and_then(|body| {
+                                        source_paragraph(body, &story.id, &joined.id)
+                                    })
+                                })
+                                .collect()
+                        } else {
+                            source_para.into_iter().collect()
+                        };
+                    let mirror_languages = if with_languages
+                        || paragraph.source_paragraphs.len() > MAX_LANGUAGE_SOURCES
+                        || (paragraph.source_paragraphs.len() > 1
+                            && sources.len() != paragraph.source_paragraphs.len())
+                    {
+                        MirrorLanguages::Unknown
                     } else {
-                        neighbours[index].iter().flatten().copied().collect()
+                        mirror_languages(&sources, &live, slide_number)
                     };
                     let mut live_languages = if with_languages {
-                        live_run_languages(&sources, &live)
+                        if paragraph.source_paragraphs.len() > 1 || source_para.is_some() {
+                            live_run_languages(&sources, &live)
+                        } else {
+                            live_run_languages(
+                                &neighbours[index]
+                                    .iter()
+                                    .flatten()
+                                    .copied()
+                                    .collect::<Vec<_>>(),
+                                &live,
+                            )
+                        }
                     } else {
                         Vec::new()
                     }
@@ -4069,6 +4221,7 @@ fn content_from_story(
                         insertion_index += 1;
                     }
                     ContentParagraph {
+                        mirror_languages,
                         alignment: paragraph.alignment.clone(),
                         level: paragraph.level,
                         bullet: paragraph
@@ -4107,6 +4260,7 @@ fn content_from_body(
             .paragraphs
             .iter()
             .map(|paragraph| ContentParagraph {
+                mirror_languages: source_language_runs(paragraph, slide_number),
                 alignment: paragraph.properties.alignment.clone(),
                 level: paragraph.properties.level,
                 bullet: paragraph.properties.bullet.clone(),
@@ -4157,6 +4311,7 @@ struct ResolvedParagraph {
     /// `a:pPr/@rtl`: margins, indent, bullet and run order mirror.
     rtl: bool,
     runs: Vec<ResolvedRun>,
+    languages: Vec<TextLanguage>,
 }
 
 struct ResolvedRun {
@@ -4279,6 +4434,7 @@ fn resolve_content(
             .as_ref()
             .and_then(|value| value.language.as_deref());
         let mut runs = Vec::with_capacity(paragraph.runs.len().max(1));
+        let paragraph_start = story_offset;
         for run in &paragraph.runs {
             let style = resolve_style(
                 renderer,
@@ -4346,6 +4502,11 @@ fn resolve_content(
             })
             .transpose()?;
         paragraphs.push(ResolvedParagraph {
+            languages: resolved_languages(
+                &paragraph.mirror_languages,
+                story_offset - paragraph_start,
+                language,
+            ),
             align: parse_align(alignment),
             justify: is_full_justification(alignment),
             level: paragraph.level,
@@ -4850,6 +5011,7 @@ fn chart_text_primitive(
         h: line_box.height(),
         anchor: TextAnchor::Top,
         paragraphs: vec![TextParagraph {
+            languages: Vec::new(),
             align: Some(align),
             level: 0,
             runs: vec![TextRun {
@@ -5009,6 +5171,7 @@ fn text_layout_key(
             bullet_style,
             rtl,
             runs,
+            languages: _,
         } = paragraph;
         key.push(match align {
             TextAlign::Left => 0,
@@ -5608,6 +5771,7 @@ fn prepend_bullet(
     }
     let bullet_x = (x + paragraph.indent_px).max(x - paragraph.margin_left_px.max(0.0));
     let marker = ResolvedParagraph {
+        languages: Vec::new(),
         align: paragraph.align,
         justify: false,
         level: paragraph.level,
@@ -8757,6 +8921,7 @@ mod tests {
             .resolve_face("Arial", false, false, &mut SubstitutionLog::default())
             .unwrap();
         ResolvedParagraph {
+            languages: Vec::new(),
             align: parse_align(Some(alignment)),
             justify: is_full_justification(Some(alignment)),
             level: 0,
@@ -9050,6 +9215,7 @@ mod tests {
             key_style(&mut changed_key, &changed);
             assert_ne!(original_key, changed_key);
             let paragraph = ResolvedParagraph {
+                languages: Vec::new(),
                 align: TextAlign::Left,
                 justify: false,
                 level: 0,
@@ -9135,6 +9301,7 @@ mod tests {
         let paragraph = |parts: &[&str]| {
             let mut start = 0;
             ResolvedParagraph {
+                languages: Vec::new(),
                 align: TextAlign::Justify,
                 justify: true,
                 level: 0,
@@ -9214,6 +9381,7 @@ mod tests {
         };
         let stack = |text: &str| {
             let paragraph = ResolvedParagraph {
+                languages: Vec::new(),
                 align: TextAlign::Left,
                 justify: false,
                 level: 0,
