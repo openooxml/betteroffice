@@ -726,3 +726,54 @@ describe('xlsx native engine parity', () => {
     expect(native.displayListCellLimit()).toBe(wasmDisplayListCellLimit());
   });
 });
+
+describe('control characters in formulas through applyOpsJson', () => {
+  test('both engines write a new one with CHAR and carry an opened one through paste, shift and move', async () => {
+    const main = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
+    const rels = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+    const zip = new JSZip();
+    zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>');
+    zip.file('_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rels}/officeDocument" Target="xl/workbook.xml"/></Relationships>`);
+    zip.file('xl/workbook.xml', `<workbook xmlns="${main}" xmlns:r="${rels}"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/></sheets></workbook>`);
+    zip.file('xl/_rels/workbook.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rels}/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`);
+    zip.file('xl/worksheets/sheet1.xml', `<worksheet xmlns="${main}"><sheetData><row r="1"><c r="D1" t="str"><f>"a&#1;b"</f><v>x</v></c></row></sheetData></worksheet>`);
+    const source = await zip.generateAsync({ type: 'uint8array' });
+    const refusal = 'U+0000, which a workbook file cannot store and CHAR cannot produce';
+    const refused = (run: () => unknown) => {
+      try {
+        run();
+      } catch (error) {
+        return String(error instanceof Error ? error.message : error);
+      }
+      return '';
+    };
+    const added = JSON.stringify({ ops: [{ type: 'setCell', sheet: 0, at: { row: 0, col: 7 }, cell: { formula: '"new\u0001"' } }] });
+    const shifted = JSON.stringify({
+      ops: [
+        { type: 'insertRows', sheet: 0, at: 0, count: 1 },
+        { type: 'setCell', sheet: 0, at: { row: 1, col: 3 }, cell: { formula: '"a\u0001b"' } },
+      ],
+    });
+    const saved: Uint8Array[] = [];
+    for (const engine of [WasmDocument, native.XlsxDocument]) {
+      const doc = engine.openWithCalculationJson(new Uint8Array(source), context);
+      try {
+        expect(JSON.parse(doc.applyOpsJson(added)).applied).toBe(true);
+        doc.editCellJson(JSON.stringify({ sheet: 0, row: 0, col: 8, input: '="typed\u0001"' }));
+        expect(refused(() => doc.editCellJson(JSON.stringify({ sheet: 0, row: 0, col: 10, input: '="nul\u0000"' })))).toContain(refusal);
+        doc.editCellsJson(JSON.stringify({ sheet: 0, edits: [{ row: 0, col: 9, input: '="a\u0001b"', copyFrom: { row: 0, col: 3 } }] }));
+        expect(JSON.parse(doc.applyOpsJson(shifted)).applied).toBe(true);
+        doc.moveRangeJson(JSON.stringify({ sheet: 0, source: 'D2', destination: 'G2' }));
+        saved.push(new Uint8Array(doc.saveBytes()));
+      } finally {
+        doc.free();
+      }
+    }
+    expect(saved[1]).toEqual(saved[0]);
+    const sheet = await (await JSZip.loadAsync(saved[0])).file('xl/worksheets/sheet1.xml')!.async('string');
+    expect(sheet.match(/a&#1;b/g)?.length).toBe(2);
+    expect(sheet).toContain('<f>(&quot;new&quot;&amp;CHAR(1))</f>');
+    expect(sheet).toContain('<f>(&quot;typed&quot;&amp;CHAR(1))</f>');
+    expect(sheet).not.toContain('nul');
+  });
+});

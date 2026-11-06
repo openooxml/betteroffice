@@ -852,25 +852,37 @@ impl Session {
     ) -> Result<String, String> {
         let args: EditBatchArgs =
             serde_json::from_str(args).map_err(|error| format!("bad edit args: {error}"))?;
-        let edits = args
+        let (edits, copied): (Vec<_>, Vec<_>) = args
             .edits
             .into_iter()
             .map(|edit| {
                 let cell = CellRef::new(edit.row, edit.col);
-                let input = match (edit.copy_from, edit.input.strip_prefix('=')) {
-                    (Some(origin), Some(formula)) => {
-                        format!("={}", moved_formula(formula, origin, cell)?)
-                    }
-                    _ => edit.input,
-                };
-                Ok(WorkbookCellInput { cell, input })
+                Ok(match (edit.copy_from, edit.input.strip_prefix('=')) {
+                    (Some(origin), Some(formula)) => (
+                        WorkbookCellInput {
+                            cell,
+                            input: format!("={}", moved_formula(formula, origin, cell)?),
+                        },
+                        true,
+                    ),
+                    _ => (
+                        WorkbookCellInput {
+                            cell,
+                            input: edit.input,
+                        },
+                        false,
+                    ),
+                })
             })
-            .collect::<Result<Vec<_>, String>>()?;
+            .collect::<Result<Vec<_>, String>>()?
+            .into_iter()
+            .unzip();
         let result = self
             .workbook
-            .edit_cells(
+            .edit_pasted_cells(
                 SheetId(args.sheet),
                 &edits,
+                &copied,
                 self.calculation_options(now_serial),
             )
             .map_err(|error| error.to_string())?;

@@ -9,7 +9,7 @@ use std::io;
 use std::iter::Peekable;
 use std::ops::Range;
 
-use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, Event};
+use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer};
 use xlsx_model::addr::{ColId, RowId};
 use xlsx_model::sort::sort_by_shared;
@@ -33,7 +33,9 @@ use crate::patch::{
     retains_source_styles, sheet_data_regeneration_loss,
 };
 use crate::read::SharedStringCells;
-use crate::xml::{resolve_part_path, text_attribute, text_event, xml_err};
+use crate::xml::{
+    encode_xstring, formula_text, resolve_part_path, text_attribute, text_event, xml_err,
+};
 
 mod app_titles;
 mod source_coordinates;
@@ -259,7 +261,7 @@ fn conditional_formatting_bytes(
                 for formula in &rule.formulas {
                     rule_xml.push_str(&format!(
                         "<formula>{}</formula>",
-                        escape_xml_text(&excel_formula(formula, names))
+                        formula_text(&excel_formula(formula, names))
                     ));
                 }
                 rule_xml.push_str("</cfRule>");
@@ -2167,7 +2169,7 @@ fn write_empty_element(
 ) -> io::Result<()> {
     let mut element = BytesStart::new(name);
     for attribute in attributes {
-        element.push_attribute((attribute.name.as_str(), attribute.value.as_str()));
+        element.push_attribute(text_attribute(&attribute.name, &attribute.value));
     }
     writer.write_event(Event::Empty(element))?;
     Ok(())
@@ -2356,7 +2358,7 @@ fn workbook_xml_with_template(
     let sheets_fragment = Some(fragment(|writer| {
         let mut element = BytesStart::new("sheets");
         for attribute in &sheets_attributes {
-            element.push_attribute((attribute.name.as_str(), attribute.value.as_str()));
+            element.push_attribute(text_attribute(&attribute.name, &attribute.value));
         }
         writer.write_event(Event::Start(element))?;
         for (sheet, plan) in wb.sheets.iter().zip(sheets) {
@@ -2663,7 +2665,7 @@ fn patch_defined_name(
     fragment(|writer| {
         let mut element = BytesStart::new(element_name.as_str());
         for attribute in &attributes {
-            element.push_attribute((attribute.name.as_str(), attribute.value.as_str()));
+            element.push_attribute(text_attribute(&attribute.name, &attribute.value));
         }
         writer.write_event(Event::Start(element))?;
         writer.write_event(Event::Text(text_event(&excel_formula(
@@ -3499,7 +3501,7 @@ fn write_hyperlinks(
     }
     let mut root = BytesStart::new("hyperlinks");
     for (name, value) in root_attributes {
-        root.push_attribute((name.as_str(), value.as_str()));
+        root.push_attribute(text_attribute(name, value));
     }
     w.write_event(Event::Start(root))?;
     for (link, relationship_id) in sheet.hyperlinks.iter().zip(ids) {
@@ -3797,7 +3799,8 @@ pub(crate) fn write_cell(
         element.write_text_content(text_event(&excel_formula(f, names)))?;
     }
     if let Some(v) = &value {
-        w.create_element("v").write_text_content(text_event(v))?;
+        w.create_element("v")
+            .write_text_content(BytesText::new(v))?;
     } else if let Some(s) = &inline {
         w.create_element("is").write_inner_content(|w| {
             write_text_el(w, s)?;
@@ -3838,7 +3841,7 @@ pub(crate) fn cell_value_markup(
         CellValue::Text { value } => {
             if cell.formula.is_some() {
                 markup.ty = Some("str");
-                markup.value = Some(value.clone());
+                markup.value = Some(encode_xstring(value));
             } else if let Some(index) = retained.or_else(|| sst_index.get(value.as_str()).copied())
             {
                 markup.ty = Some("s");
@@ -3875,7 +3878,7 @@ fn write_merges(w: &mut Writer<Vec<u8>>, sheet: &Sheet) -> io::Result<()> {
 fn write_text_el(w: &mut Writer<Vec<u8>>, text: &str) -> io::Result<()> {
     w.create_element("t")
         .with_attribute(("xml:space", "preserve"))
-        .write_text_content(text_event(text))?;
+        .write_text_content(BytesText::new(&encode_xstring(text)))?;
     Ok(())
 }
 
