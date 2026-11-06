@@ -42,7 +42,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsup",
+    "build": "tsup && tsup --config tsup.shortcuts.config.ts",
     "typecheck": "tsc --noEmit -p ."
   },
   "dependencies": {
