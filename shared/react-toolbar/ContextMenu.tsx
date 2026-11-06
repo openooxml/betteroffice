@@ -314,16 +314,19 @@ export function commandMenuItem(options: {
   label: string;
   state: MenuCommandState;
   shortcut?: string | null;
+  /** The shortcut in `aria-keyshortcuts` form. */
+  ariaShortcut?: string | null;
   icon?: ReactNode;
   run(): void;
 }): OverflowMenuEntry {
-  const { id, label, state, shortcut, icon, run } = options;
+  const { id, label, state, shortcut, ariaShortcut, icon, run } = options;
   return {
     kind: 'item',
     id,
     label,
     icon,
     shortcut: shortcut ?? undefined,
+    ariaShortcut: ariaShortcut ?? undefined,
     disabled: !state.enabled,
     description: state.enabled ? undefined : state.disabledReason?.message,
     onSelect: run,

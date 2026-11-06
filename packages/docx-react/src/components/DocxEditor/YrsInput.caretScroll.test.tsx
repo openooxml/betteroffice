@@ -829,3 +829,25 @@ test('a replica that fails to load drops the keys waiting for it', async () => {
   expect(t.session.selection()).toBeNull();
   expect(t.input.current!.hasPendingInput()).toBe(false);
 });
+
+test('a host scroll before the first caret placement still lets that placement scroll into view', async () => {
+  const { input, scroller, scrollTop, expectCaret } = await mount(true, false);
+  act(() => {
+    scroller.scrollTop = scrollTop - 50;
+    scroller.dispatchEvent(new Event('scroll'));
+  });
+  act(() => input.current!.setSelectionFromDisplay(2));
+  expectCaret(1);
+  expect(scroller.scrollTop).toBeGreaterThan(scrollTop - 50);
+});
+
+test('a reader wheel before the first caret placement keeps the view where the reader put it', async () => {
+  const { input, scroller, scrollTop, expectCaret } = await mount(true, false);
+  act(() => {
+    scroller.querySelector('.canvas-page')!.dispatchEvent(new Event('wheel', { bubbles: true }));
+  });
+  act(() => input.current!.setSelectionFromDisplay(2));
+  expectCaret(1);
+  expect(scroller.scrollTop).toBe(scrollTop);
+});
+

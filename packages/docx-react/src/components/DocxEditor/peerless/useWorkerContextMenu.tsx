@@ -164,7 +164,7 @@ export function useWorkerContextMenu(options: {
         const latest = current.viewStore.getSnapshot();
         if (!sameContextTarget(action, opened, latest)) throw new Error('Context menu target changed');
         if (options.environment().readOnly || options.environment().mode === 'viewing') return;
-        if (isPasteFragmentAllowed(options.commands)) {
+        if (isPasteFragmentAllowed(options.commands, fragment)) {
           admitInputIntents(current.admission, [{ kind: 'pasteFragment', payload: { fragment } }],
             { source: 'paste', fence: true });
           options.onPaste?.();

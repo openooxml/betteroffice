@@ -16,6 +16,7 @@ import type { CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import {
   applyClipboardFragment,
+  clipboardFragmentIsTextOnly,
   sameYrsSelection,
   tableBoundaryDeleteTarget,
   type YrsAuthor,
@@ -59,6 +60,7 @@ import {
 import { useTranslation } from '../../i18n';
 
 const READER_SCROLL = ['wheel', 'touchmove'] as const;
+const READER_SCROLL_KEYS = new Set(['PageDown', 'PageUp', ' ', 'ArrowDown', 'ArrowUp', 'Home', 'End']);
 
 export interface YrsDisplaySelection {
   anchor: number;
@@ -125,6 +127,8 @@ export interface YrsInputProps {
   readOnly: boolean;
   holdInput?: boolean;
   inputScope?: number;
+  /** Theme slot to hex, which a copy resolves theme colours with. */
+  themeColors?: Readonly<Record<string, string>>;
   replicaReadyRef?: React.RefObject<boolean>;
   /** Advances on input that supersedes input still waiting for the replica. */
   inputEpoch?: () => number;
@@ -299,6 +303,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     enabled,
     readOnly,
     holdInput = false,
+    themeColors,
     inputScope,
     replicaReadyRef,
     inputEpoch,
@@ -424,6 +429,23 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   // remote insert above the caret while sticky locs do not, so comparing locs is
   // what keeps a viewer's viewport still during someone else's edit.
   const lastCaretScrollSelectionRef = useRef<YrsSelection | null | undefined>(undefined);
+  const scrolledBeforeFirstCaretRef = useRef(false);
+  useLayoutEffect(() => {
+    const inside = (target: EventTarget | null) => {
+      const host = canvasHostRef?.current;
+      return !!host && target instanceof Node && (target.contains(host) || host.contains(target));
+    };
+    const onIntent = (event: Event) => {
+      if (event.type === 'keydown' && !READER_SCROLL_KEYS.has((event as KeyboardEvent).key)) return;
+      if (event.type === 'keydown' && event.target instanceof HTMLTextAreaElement) return;
+      if (inside(event.target) || event.target === document.body || event.target === document.documentElement) {
+        scrolledBeforeFirstCaretRef.current = true;
+      }
+    };
+    const types = [...READER_SCROLL, 'pointerdown', 'keydown'] as const;
+    for (const type of types) document.addEventListener(type, onIntent, { capture: true, passive: true });
+    return () => { for (const type of types) document.removeEventListener(type, onIntent, true); };
+  }, [canvasHostRef]);
   // A selection the input shows without scrolling to it: a default caret, a replayed gesture.
   const quietSelectionRef = useRef<YrsSelection | null>(null);
   displayListQueriesRef.current = displayListQueries;
@@ -1570,11 +1592,12 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     const result: CutCopy = { written: false };
     const copied = session;
     let written: Promise<void>;
-    const hasFragment = !session.isDisplayOnly() && !!yrsClipboardSlice(session).fragment;
+    const hasFragment = !session.isDisplayOnly() && !!yrsClipboardSlice(session, themeColors).fragment;
     const slice = new Promise<ReturnType<typeof yrsClipboardSlice>>((resolve, reject) => {
       const apply = (source: YrsSession): void | Promise<void> => {
         try {
-          const captured = yrsClipboardSlice(source);
+          if (cut && source.cellSelection()) throw new Error('A cut over table cells is unavailable');
+          const captured = yrsClipboardSlice(source, themeColors);
           if (captured.text) resolve(captured);
           else reject(new Error('Nothing is selected to copy'));
         } catch (error) {
@@ -1603,7 +1626,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       : text.then((blob) => blob.text()).then((value) => clipboard.writeText(value));
     written = write.then(() => { result.written = true; }, () => {});
     return result;
-  }, [enqueueInputOperation, holdInput, holdOperation, readOnly, replicaReadyRef, session]);
+  }, [enqueueInputOperation, holdInput, holdOperation, readOnly, replicaReadyRef, session, themeColors]);
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>): void => {
@@ -1620,6 +1643,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       } else if (mod && key === 'c' && !event.shiftKey && !event.altKey) {
         if (copyAfterReplica()) event.preventDefault();
         else primeCopy();
+      } else if (mod && key === 'x' && !event.shiftKey && !event.altKey) {
+        if (!readOnly) primeCopy();
       } else if (event.key === 'Enter') {
         event.preventDefault();
         splitParagraph();
@@ -1749,7 +1774,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         event.preventDefault();
         return;
       }
-      const slice = session ? yrsClipboardSlice(session) : null;
+      const slice = session ? yrsClipboardSlice(session, themeColors) : null;
       const text = primedCopyRef.current ?? slice?.text ?? (session ? yrsSelectionPlainText(session) : '');
       primedCopyRef.current = null;
       if (!text && !slice?.fragment) return;
@@ -1760,12 +1785,27 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         event.clipboardData.setData('text/html', clipboardFragmentHtml(slice.fragment));
       }
     },
-    [session]
+    [session, themeColors]
+  );
+
+  const writeCutEvent = useCallback(
+    (event: React.ClipboardEvent<HTMLTextAreaElement>): boolean => {
+      const slice = session ? yrsClipboardSlice(session, themeColors) : null;
+      const text = primedCopyRef.current ?? slice?.text ?? '';
+      primedCopyRef.current = null;
+      if (!text) return false;
+      event.preventDefault();
+      event.clipboardData.setData('text/plain', text);
+      if (slice?.fragment) event.clipboardData.setData('text/html', clipboardFragmentHtml(slice.fragment));
+      return true;
+    },
+    [session, themeColors]
   );
 
   const pasteContent = useCallback(
     (plain: string, fragment: DocxClipboardFragment | null) => {
-      if (fragment && session && !readOnly && !isSuggesting && !holdInput) {
+      const textOnly = !!fragment && clipboardFragmentIsTextOnly(fragment);
+      if (fragment && session && !readOnly && (!isSuggesting || textOnly) && !holdInput) {
         verticalCaretGoalRef.current.reset();
         dispatchCaretInput();
         enqueueInputOperation(() => {
@@ -1774,7 +1814,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           const map = current ? inputPositionMap(current.anchor.story) : null;
           if (!current || !map) return;
           const range = toRange(current, map);
-          if (!isBodyFlowStory(range.story)) {
+          if (!textOnly && !isBodyFlowStory(range.story)) {
             insertText(plain);
             return;
           }
@@ -1819,12 +1859,20 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         event.preventDefault();
         return;
       }
-      if (readOnly || (!holdInput && replicaReadyRef?.current !== false)) return;
-      event.preventDefault();
+      if (readOnly) return;
       const copied = copyAfterReplica(true);
-      if (copied) deleteSelection(true, copied);
+      if (copied) {
+        event.preventDefault();
+        deleteSelection(true, copied);
+        return;
+      }
+      if (holdInput || replicaReadyRef?.current === false || session?.cellSelection() || !hasTextRange()) {
+        event.preventDefault();
+        return;
+      }
+      if (writeCutEvent(event)) deleteSelection();
     },
-    [copyAfterReplica, deleteSelection, holdInput, readOnly, replicaReadyRef]
+    [copyAfterReplica, deleteSelection, hasTextRange, holdInput, readOnly, replicaReadyRef, session, writeCutEvent]
   );
 
   const hasHeldInput = useCallback(
@@ -2189,11 +2237,12 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     const quiet = quietSelectionRef.current;
     quietSelectionRef.current = null;
     const selectionIsQuiet = quiet && stickySelection && sameYrsSelection(quiet, stickySelection);
-    const selectionChanged =
-      (previousStickySelection === undefined ||
-        !sameYrsSelection(previousStickySelection, stickySelection)) &&
-      !selectionIsQuiet;
     const scroller = findVerticalScrollParentOrRoot(host);
+    const selectionChanged =
+      (previousStickySelection === undefined
+        ? !scrolledBeforeFirstCaretRef.current
+        : !sameYrsSelection(previousStickySelection, stickySelection)) &&
+      !selectionIsQuiet;
     const pendingReveal = pendingLocalCaretRevealRef.current;
     const freshCommit = layoutCommit === undefined || revealedLayoutCommitRef.current !== layoutCommit;
     if (sourceVersionOf(displayListQueries) === layoutCommitVersion) revealedLayoutCommitRef.current = layoutCommit;

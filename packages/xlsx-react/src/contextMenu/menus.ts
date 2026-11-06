@@ -1,7 +1,8 @@
 import type { TranslationKey } from '@betteroffice/xlsx-i18n';
 import { commandMenuItem, menuSections } from '../../../../shared/react-toolbar/ContextMenu';
 import type { OverflowMenuEntry } from '../../../../shared/react-toolbar/MenuList';
-import { commandLabelKey, commandShortcut } from '../commands/descriptors';
+import { commandLabelKey } from '../commands/descriptors';
+import { storeAriaShortcut, storeShortcutLabel } from '../commands/shortcuts';
 import type { XlsxCommandArgs, XlsxCommandId, XlsxCommandStore } from '../commands/types';
 
 /** What a context menu opened on. */
@@ -26,7 +27,8 @@ function item<K extends XlsxCommandId>(
     id: bound ? `${id}:${JSON.stringify(bound)}` : id,
     label: t(commandLabelKey(id, bound)),
     state: store.getState(id, args),
-    shortcut: commandShortcut(id, bound),
+    shortcut: storeShortcutLabel(store, id, t, bound),
+    ariaShortcut: storeAriaShortcut(store, id, bound),
     run: () => { void store.execute(id, args); },
   });
 }

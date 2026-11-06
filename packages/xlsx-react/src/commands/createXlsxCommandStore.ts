@@ -1,5 +1,21 @@
 import type { Translations } from '@betteroffice/xlsx-i18n';
-import { isPluginCommandId, isXlsxCommandId, XLSX_COMMAND_DESCRIPTORS } from './descriptors';
+import {
+  isMacPlatform,
+  isPluginCommandId,
+  isXlsxCommandId,
+  matchesChord,
+  XLSX_COMMAND_DESCRIPTORS,
+} from './descriptors';
+import type { ChordEvent } from '../../../../shared/keyboard/chords';
+import type { ResolvedShortcuts, ShortcutIssue } from '../../../../shared/keyboard/resolve';
+import {
+  effectiveCommandShortcuts,
+  isClipboardKind,
+  isGridGesture,
+  type XlsxClipboardKind,
+  resolveXlsxShortcuts,
+  type XlsxShortcuts,
+} from './shortcuts';
 import {
   commandReason,
   contributedCommandGate,
@@ -8,6 +24,7 @@ import {
 } from './evaluate';
 import type {
   XlsxCommandArgs,
+  XlsxCommandDescriptor,
   XlsxCommandDisabledCode,
   XlsxCommandFailureCode,
   XlsxCommandId,
@@ -148,6 +165,36 @@ export interface XlsxCommandController {
   pluginToolbar(): readonly XlsxPluginCommandId[];
   /** Keyboard bindings of the contributed commands. */
   pluginShortcuts(): readonly { id: XlsxPluginCommandId; chord: string }[];
+  /** Applies a host's shortcut map and returns what was wrong with it. */
+  setShortcuts(shortcuts: XlsxShortcuts | undefined): readonly ShortcutIssue[];
+  /**
+   * The built-in command a keystroke runs through the shortcut dispatcher, if any. The clipboard
+   * on its default keys is left out: the grid runs it.
+   */
+  shortcutAt(
+    event: ChordEvent,
+    mac?: boolean
+  ): { id: XlsxCommandId; args: null; chord: string } | null;
+  /**
+   * Whether a keystroke is not the grid's to handle: a command or plugin holds it, or the host
+   * moved or disabled the default it had.
+   */
+  claimsKey(event: ChordEvent, mac?: boolean): boolean;
+  /**
+   * The clipboard action the grid runs for a keystroke: the clipboard command holding its chord,
+   * or for a Mod chord no binding knows, the one its letter names.
+   */
+  clipboardKey(event: ChordEvent, mac?: boolean): XlsxClipboardKind | null;
+  /** The shortcut id that holds a canonical chord. */
+  shortcutOwner(chord: string): string | undefined;
+  /** Whether the host moved or disabled the default holder of a canonical chord. */
+  releasedChord(chord: string): boolean;
+  /** Chords the host set for a contributed command; undefined keeps the plugin's own. */
+  hostPluginChords(id: XlsxPluginCommandId): readonly string[] | undefined;
+  /** Changes whenever the shortcut map does. */
+  shortcutRevision(): number;
+  /** Notified after the shortcut map changes. */
+  subscribeShortcuts(listener: () => void): () => void;
   /**
    * A store acting for `scope`: its answer is checked inside each operation, and mutating
    * built-in commands refuse with `unsupported-policy`.
@@ -212,6 +259,36 @@ function knownCommand(id: unknown): id is AnyCommandId {
   return isXlsxCommandId(id) || isPluginCommandId(id);
 }
 
+const defaultTables = new Map<boolean, ResolvedShortcuts>();
+
+function defaultShortcuts(mac: boolean): ResolvedShortcuts {
+  let table = defaultTables.get(mac);
+  if (!table) {
+    table = resolveXlsxShortcuts(undefined, { mac });
+    defaultTables.set(mac, table);
+  }
+  return table;
+}
+
+function pressedChord(table: ResolvedShortcuts, event: ChordEvent, mac: boolean): string | null {
+  return pickChord(table.owners.keys(), event, mac);
+}
+
+/** The chord among `chords` a keystroke presses; one naming the typed character wins. */
+export function pickChord(chords: Iterable<string>, event: ChordEvent, mac = isMacPlatform()): string | null {
+  let found: string | null = null;
+  const typed = event.key.toLowerCase();
+  for (const chord of chords) {
+    if (!matchesChord(chord, event, mac)) continue;
+    if (chord.slice(chord.lastIndexOf('+') + 1) === typed) return chord;
+    found ??= chord;
+  }
+  return found;
+}
+
+const LETTER_CLIPBOARD: Readonly<Record<string, XlsxClipboardKind>> = { c: 'copy', x: 'cut', v: 'paste' };
+const CLIPBOARD_DEFAULTS: Readonly<Record<string, string>> = { copy: 'Mod+c', cut: 'Mod+x', paste: 'Mod+v' };
+
 /** Creates the command store of one editor mount. */
 export function createXlsxCommandController(): XlsxCommandController {
   let binding: XlsxCommandBinding | null = null;
@@ -226,6 +303,32 @@ export function createXlsxCommandController(): XlsxCommandController {
   const chromeListeners = new Set<() => void>();
   let chromeSnapshot: XlsxChromeContext | null = null;
   let round = 0;
+  let shortcutMap: XlsxShortcuts | undefined;
+  let revision = 0;
+  let resolved: { mac: boolean; table: ResolvedShortcuts } | null = null;
+  const shortcutListeners = new Set<() => void>();
+  const effectiveDescriptors = new Map<XlsxCommandId, XlsxCommandDescriptor>();
+  const shortcutTable = (mac = isMacPlatform()): ResolvedShortcuts => {
+    if (!shortcutMap) return defaultShortcuts(mac);
+    if (resolved?.mac !== mac) {
+      resolved = { mac, table: resolveXlsxShortcuts(shortcutMap, { mac }) };
+      effectiveDescriptors.clear();
+    }
+    return resolved.table;
+  };
+  const effectiveDescriptor = (id: XlsxCommandId): XlsxCommandDescriptor => {
+    if (!shortcutMap) return XLSX_COMMAND_DESCRIPTORS[id];
+    const table = shortcutTable();
+    let descriptor = effectiveDescriptors.get(id);
+    if (!descriptor) {
+      descriptor = Object.freeze({
+        ...XLSX_COMMAND_DESCRIPTORS[id],
+        shortcuts: Object.freeze(effectiveCommandShortcuts(table, id)),
+      }) as XlsxCommandDescriptor;
+      effectiveDescriptors.set(id, descriptor);
+    }
+    return descriptor;
+  };
 
   const environment = (executing: boolean): XlsxCommandEnvironment | null => {
     if (!binding) return null;
@@ -417,7 +520,7 @@ export function createXlsxCommandController(): XlsxCommandController {
   const getDescriptor = (id: AnyCommandId) =>
     isPluginCommandId(id)
       ? (pluginCommands.get(id)?.descriptor ?? null)
-      : XLSX_COMMAND_DESCRIPTORS[id];
+      : effectiveDescriptor(id);
 
   const store = Object.freeze({
     getDescriptor,
@@ -541,6 +644,55 @@ export function createXlsxCommandController(): XlsxCommandController {
     },
     pluginToolbar: () => pluginToolbarIds,
     pluginShortcuts: () => pluginShortcutList,
+    setShortcuts(shortcuts) {
+      shortcutMap = shortcuts;
+      resolved = null;
+      revision += 1;
+      effectiveDescriptors.clear();
+      const { issues } = shortcutTable();
+      notify();
+      for (const listener of [...shortcutListeners]) listener();
+      return issues;
+    },
+    shortcutAt(event, mac = isMacPlatform()) {
+      const chord = pressedChord(shortcutTable(mac), event, mac);
+      const id = chord === null ? undefined : shortcutTable(mac).owners.get(chord);
+      if (chord === null || id === undefined || isPluginCommandId(id)) return null;
+      if (isGridGesture(id, chord, defaultShortcuts(mac))) return null;
+      return { id: id as XlsxCommandId, args: null, chord };
+    },
+    claimsKey(event, mac = isMacPlatform()) {
+      const table = shortcutTable(mac);
+      const chord = pressedChord(table, event, mac);
+      if (chord !== null) return !isClipboardKind(table.owners.get(chord));
+      const fallback = pressedChord(defaultShortcuts(mac), event, mac);
+      return fallback !== null && table.owners.get(fallback) !== defaultShortcuts(mac).owners.get(fallback);
+    },
+    clipboardKey(event, mac = isMacPlatform()) {
+      const table = shortcutTable(mac);
+      const chord = pressedChord(table, event, mac);
+      if (chord !== null) {
+        const id = table.owners.get(chord);
+        return isClipboardKind(id) ? id : null;
+      }
+      if (pressedChord(defaultShortcuts(mac), event, mac) !== null) return null;
+      if (!event.ctrlKey && !event.metaKey) return null;
+      const kind = LETTER_CLIPBOARD[event.key.toLowerCase()];
+      return kind && table.owners.get(CLIPBOARD_DEFAULTS[kind]) === kind ? kind : null;
+    },
+    shortcutOwner: (chord) => shortcutTable().owners.get(chord),
+    releasedChord(chord) {
+      const fallback = defaultShortcuts(isMacPlatform()).owners.get(chord);
+      return fallback !== undefined && shortcutTable().owners.get(chord) !== fallback;
+    },
+    hostPluginChords: (id) => (shortcutMap ? shortcutTable().chords.get(id) : undefined),
+    shortcutRevision: () => revision,
+    subscribeShortcuts(listener) {
+      shortcutListeners.add(listener);
+      return () => {
+        shortcutListeners.delete(listener);
+      };
+    },
     scoped(scope) {
       let scoped = scopedStores.get(scope);
       if (!scoped) {

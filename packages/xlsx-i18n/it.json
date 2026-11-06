@@ -231,5 +231,14 @@
     "collapsePanel": "Comprimi {title}",
     "expandPanel": "Espandi {title}",
     "rowGutter": "Indicatori di riga dei plugin"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Maiusc",
+    "del": "Canc",
+    "escape": "Esc",
+    "pageUp": "PagSu",
+    "pageDown": "PagGiù"
   }
 }

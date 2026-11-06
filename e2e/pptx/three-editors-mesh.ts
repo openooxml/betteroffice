@@ -1,5 +1,7 @@
 import { expect } from 'bun:test';
 
+import { stateVectorEntries } from '../assertions';
+
 import {
   editStages,
   exchange,
@@ -81,8 +83,8 @@ export const threeEditorsMesh: PptxScenario = {
     exchange(peers, 'applyUpdate:afterRedo');
     const afterRedo = converged('snapshot:afterRedo');
     expect(afterRedo).toContain(slides[0]);
-    expect([...peers[1].handle.encodeStateVector()].join()).toBe(
-      [...peers[2].handle.encodeStateVector()].join()
+    expect(stateVectorEntries(peers[1].handle.encodeStateVector())).toEqual(
+      stateVectorEntries(peers[2].handle.encodeStateVector())
     );
   },
 };

@@ -9,7 +9,7 @@ use std::io;
 use std::iter::Peekable;
 use std::ops::Range;
 
-use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
+use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, Event};
 use quick_xml::{Reader, Writer};
 use xlsx_model::addr::{ColId, RowId};
 use xlsx_model::sort::sort_by_shared;
@@ -33,7 +33,7 @@ use crate::patch::{
     retains_source_styles, sheet_data_regeneration_loss,
 };
 use crate::read::SharedStringCells;
-use crate::xml::{resolve_part_path, xml_err};
+use crate::xml::{resolve_part_path, text_attribute, text_event, xml_err};
 
 mod app_titles;
 mod source_coordinates;
@@ -141,6 +141,7 @@ fn escape_xml_text(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+        .replace('\r', "&#13;")
 }
 
 fn escape_xml_attr(text: &str) -> String {
@@ -2373,7 +2374,7 @@ fn write_defined_name(
         element.push_attribute(("hidden", "1"));
     }
     w.write_event(Event::Start(element))?;
-    w.write_event(Event::Text(BytesText::new(&excel_formula(
+    w.write_event(Event::Text(text_event(&excel_formula(
         &defined.formula,
         names,
     ))))?;
@@ -2722,7 +2723,7 @@ fn patch_defined_name(
             element.push_attribute((attribute.name.as_str(), attribute.value.as_str()));
         }
         writer.write_event(Event::Start(element))?;
-        writer.write_event(Event::Text(BytesText::new(&excel_formula(
+        writer.write_event(Event::Text(text_event(&excel_formula(
             &defined.formula,
             names,
         ))))?;
@@ -3566,13 +3567,13 @@ fn write_hyperlinks(
             element.push_attribute((id_name, relationship_id.as_str()));
         }
         if let Some(location) = &link.location {
-            element.push_attribute(("location", location.as_str()));
+            element.push_attribute(text_attribute("location", location));
         }
         if let Some(tooltip) = &link.tooltip {
-            element.push_attribute(("tooltip", tooltip.as_str()));
+            element.push_attribute(text_attribute("tooltip", tooltip));
         }
         if let Some(display) = &link.display {
-            element.push_attribute(("display", display.as_str()));
+            element.push_attribute(text_attribute("display", display));
         }
         w.write_event(Event::Empty(element))?;
     }
@@ -3850,11 +3851,10 @@ pub(crate) fn write_cell(
                 .with_attribute(("t", "array"))
                 .with_attribute(("ref", reference.as_str()));
         }
-        element.write_text_content(BytesText::new(&excel_formula(f, names)))?;
+        element.write_text_content(text_event(&excel_formula(f, names)))?;
     }
     if let Some(v) = &value {
-        w.create_element("v")
-            .write_text_content(BytesText::new(v))?;
+        w.create_element("v").write_text_content(text_event(v))?;
     } else if let Some(s) = &inline {
         w.create_element("is").write_inner_content(|w| {
             write_text_el(w, s)?;
@@ -3932,7 +3932,7 @@ fn write_merges(w: &mut Writer<Vec<u8>>, sheet: &Sheet) -> io::Result<()> {
 fn write_text_el(w: &mut Writer<Vec<u8>>, text: &str) -> io::Result<()> {
     w.create_element("t")
         .with_attribute(("xml:space", "preserve"))
-        .write_text_content(BytesText::new(text))?;
+        .write_text_content(text_event(text))?;
     Ok(())
 }
 

@@ -5,6 +5,8 @@ import type {
 import type { CollaborationAwareness, CollaborationReplica } from '@betteroffice/xlsx/collaboration';
 import type { Translations } from '@betteroffice/xlsx-i18n';
 import type { XlsxCommandStore } from './commands/types';
+import type { XlsxShortcuts } from './commands/shortcuts';
+import type { ShortcutIssue } from '../../../shared/keyboard/resolve';
 import type { XlsxEditorPluginProps } from './plugins/types';
 import { LEGACY_SYNC_API } from './runtimeOptions';
 import type { XlsxProposalRequest, XlsxProposalResult, XlsxAsyncEditorApi } from './worker/createAsyncEditorApi';
@@ -163,6 +165,17 @@ export interface XlsxInThreadEditorProps extends XlsxEditorPluginProps, XlsxHost
   toolbar?: React.ReactNode;
   /** `false` hides the toolbar region, whatever `toolbar` is. */
   showToolbar?: boolean;
+  /**
+   * Remaps or disables keyboard shortcuts; menus and tooltips follow.
+   * @experimental
+   */
+  shortcuts?: XlsxShortcuts;
+  /**
+   * Reports each entry of `shortcuts` that was refused, and each default a host chord displaced.
+   * Without it, refusals are logged in development builds.
+   * @experimental
+   */
+  onShortcutIssue?: (issue: ShortcutIssue) => void;
 }
 
 /** @deprecated Removed in 0.6.0. Use XlsxAsyncEditorProps. */

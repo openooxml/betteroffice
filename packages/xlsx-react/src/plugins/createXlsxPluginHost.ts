@@ -13,7 +13,7 @@ import {
   type XlsxCommandScope,
   type XlsxPluginCommandBinding,
 } from '../commands/createXlsxCommandStore';
-import { BUILT_IN_CHORDS, gridOwnsChord, normalizeChord } from '../commands/descriptors';
+import { gridOwnsChord, isPluginCommandId, normalizeChord } from '../commands/descriptors';
 import { commandReason } from '../commands/evaluate';
 import type {
   XlsxCommandStore,
@@ -611,13 +611,24 @@ export function createXlsxPluginHost(
         for (const command of definition.commands ?? []) {
           const id: XlsxPluginCommandId = `plugin:${entry.pluginId}/${command.id}`;
           const shortcuts: { chord: string; args: null }[] = [];
-          for (const chord of command.shortcuts ?? []) {
+          const hostChords = commands.hostPluginChords(id);
+          for (const chord of hostChords ?? []) {
+            claimed.set(chord, id);
+            shortcuts.push({ chord, args: null });
+          }
+          for (const chord of hostChords ? [] : (command.shortcuts ?? [])) {
             const canonical = normalizeChord(chord)!;
-            const owner = BUILT_IN_CHORDS.has(canonical)
-              ? 'a built-in command'
-              : gridOwnsChord(canonical)
-              ? 'the grid'
-              : claimed.get(canonical);
+            const held = commands.shortcutOwner(canonical);
+            const owner =
+              held !== undefined
+                ? isPluginCommandId(held)
+                  ? held
+                  : gridOwnsChord(canonical)
+                    ? 'the grid'
+                    : 'a built-in command'
+                : gridOwnsChord(canonical) && !commands.releasedChord(canonical)
+                  ? 'the grid'
+                  : claimed.get(canonical);
             if (!owner) {
               claimed.set(canonical, id);
               shortcuts.push({ chord, args: null });
@@ -649,6 +660,7 @@ export function createXlsxPluginHost(
         for (const local of definition.toolbar ?? [])
           toolbar.push(`plugin:${entry.pluginId}/${local}`);
       }
+      parts.push(`shortcuts:${commands.shortcutRevision()}`);
       const signature = parts.join('|');
       if (signature === commandSignature) {
         commands.refresh();

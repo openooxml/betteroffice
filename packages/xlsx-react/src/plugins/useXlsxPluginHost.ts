@@ -189,8 +189,13 @@ export function useXlsxPluginHost(options: UseXlsxPluginHostOptions): XlsxPlugin
 
   useEffect(() => {
     host.syncCommands();
-    return host.subscribe(() => host.syncCommands());
-  }, [host]);
+    const unsubscribe = host.subscribe(() => host.syncCommands());
+    const unsubscribeShortcuts = options.commands.subscribeShortcuts(() => host.syncCommands());
+    return () => {
+      unsubscribe();
+      unsubscribeShortcuts();
+    };
+  }, [host, options.commands]);
 
   const proposalState = proposalSignature(options, host.version());
   useLayoutEffect(() => {
