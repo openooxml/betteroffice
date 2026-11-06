@@ -14,6 +14,8 @@ export type OverflowMenuEntry =
       label: string;
       icon?: ReactNode;
       shortcut?: string;
+      /** The shortcut in `aria-keyshortcuts` form. */
+      ariaShortcut?: string;
       /** Renders a checkbox item with this state. */
       checked?: boolean | 'mixed';
       /** Renders a radio item; `checked` marks the chosen one. */
@@ -269,6 +271,7 @@ export function MenuList({
             role={role}
             tabIndex={-1}
             data-entry={entry.id}
+            aria-keyshortcuts={isSubmenu ? undefined : entry.ariaShortcut}
             data-label={entry.label}
             data-submenu={isSubmenu ? entry.id : undefined}
             aria-haspopup={isSubmenu ? 'menu' : undefined}

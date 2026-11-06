@@ -5,8 +5,17 @@ import {
   isDocxCommandId,
   isMacPlatform,
   isPluginCommandId,
+  matchesChord,
   shortcutMatchesPlatform,
 } from './descriptors';
+import type { ChordEvent } from '../../../../shared/keyboard/chords';
+import type { ResolvedShortcuts, ShortcutIssue } from '../../../../shared/keyboard/resolve';
+import {
+  effectiveCommandShortcuts,
+  resolveDocxShortcuts,
+  shortcutTarget,
+  type DocxShortcuts,
+} from './shortcuts';
 import {
   commandReason,
   contributedCommandGate,
@@ -149,6 +158,19 @@ export interface DocxCommandController {
   pluginToolbar(): readonly DocxPluginCommandId[];
   /** Keyboard bindings of the contributed commands. */
   pluginShortcuts(): readonly { id: DocxPluginCommandId; chord: string }[];
+  /** Applies a host's shortcut map and returns what was wrong with it. */
+  setShortcuts(shortcuts: DocxShortcuts | undefined): readonly ShortcutIssue[];
+  /** The built-in command a keystroke presses, if any. */
+  shortcutAt(
+    event: ChordEvent,
+    mac: boolean
+  ): { id: DocxCommandId; args: unknown; chord: string } | null;
+  /** The shortcut id that holds a canonical chord. */
+  shortcutOwner(chord: string): string | undefined;
+  /** Chords the host set for a contributed command; undefined keeps the plugin's own. */
+  hostPluginChords(id: DocxPluginCommandId): readonly string[] | undefined;
+  /** Changes whenever the shortcut map does. */
+  shortcutRevision(): number;
   /**
    * A store acting for `scope`: its answer is checked inside each operation, and mutating
    * built-in commands refuse with `unsupported-policy`.
@@ -232,6 +254,31 @@ export function createDocxCommandController(): DocxCommandController {
   let pluginToolbarIds: readonly DocxPluginCommandId[] = Object.freeze([]);
   let pluginShortcutList: readonly { id: DocxPluginCommandId; chord: string }[] = Object.freeze([]);
   const scopedStores = new WeakMap<DocxCommandScope, DocxCommandStore>();
+  let shortcutMap: DocxShortcuts | undefined;
+  let revision = 0;
+  let resolved: { mac: boolean; table: ResolvedShortcuts } | null = null;
+  const effectiveDescriptors = new Map<DocxCommandId, DocxCommandDescriptor>();
+  const shortcutTable = (): ResolvedShortcuts => {
+    const mac = isMacPlatform();
+    if (resolved?.mac !== mac) {
+      resolved = { mac, table: resolveDocxShortcuts(shortcutMap, { mac }) };
+      effectiveDescriptors.clear();
+    }
+    return resolved.table;
+  };
+  const effectiveDescriptor = (id: DocxCommandId): DocxCommandDescriptor => {
+    if (!shortcutMap) return platformDescriptor(id);
+    const table = shortcutTable();
+    let descriptor = effectiveDescriptors.get(id);
+    if (!descriptor) {
+      descriptor = Object.freeze({
+        ...DOCX_COMMAND_DESCRIPTORS[id],
+        shortcuts: Object.freeze(effectiveCommandShortcuts(table, id)),
+      }) as DocxCommandDescriptor;
+      effectiveDescriptors.set(id, descriptor);
+    }
+    return descriptor;
+  };
   const listeners = new Set<() => void>();
   const snapshots = new Map<string, CachedSnapshot>();
   const chromeRoots = new Set<HTMLElement>();
@@ -411,7 +458,7 @@ export function createDocxCommandController(): DocxCommandController {
   };
 
   const getDescriptor = (id: AnyCommandId) =>
-    isPluginCommandId(id) ? (pluginCommands.get(id)?.descriptor ?? null) : platformDescriptor(id);
+    isPluginCommandId(id) ? (pluginCommands.get(id)?.descriptor ?? null) : effectiveDescriptor(id);
 
   const store = Object.freeze({
     getDescriptor,
@@ -551,6 +598,25 @@ export function createDocxCommandController(): DocxCommandController {
     },
     pluginToolbar: () => pluginToolbarIds,
     pluginShortcuts: () => pluginShortcutList,
+    setShortcuts(shortcuts) {
+      shortcutMap = shortcuts;
+      resolved = null;
+      revision += 1;
+      effectiveDescriptors.clear();
+      const { issues } = shortcutTable();
+      notify();
+      return issues;
+    },
+    shortcutAt(event, mac) {
+      for (const [chord, id] of shortcutTable().owners) {
+        if (isPluginCommandId(id) || !matchesChord(chord, event, mac)) continue;
+        return { ...shortcutTarget(id), chord };
+      }
+      return null;
+    },
+    shortcutOwner: (chord) => shortcutTable().owners.get(chord),
+    hostPluginChords: (id) => shortcutTable().chords.get(id),
+    shortcutRevision: () => revision,
     scoped(scope) {
       let scoped = scopedStores.get(scope);
       if (!scoped) {

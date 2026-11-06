@@ -66,6 +66,8 @@ import { useEditorEngineChoice, useDocxEditorRoute } from './DocxEditor/internal
 import { useDocxFileAliases } from './DocxEditor/internals/fileAliases';
 import { useOutlineSidebar } from './DocxEditor/hooks/useOutlineSidebar';
 import { useKeyboardShortcuts } from './DocxEditor/hooks/useKeyboardShortcuts';
+import type { DocxShortcuts } from '../commands/shortcuts';
+import type { ShortcutIssue } from '../../../../shared/keyboard/resolve';
 import { useFileIO } from './DocxEditor/hooks/useFileIO';
 import { usePageSetupControls } from './DocxEditor/hooks/usePageSetupControls';
 import { useWatermarkControls } from './DocxEditor/hooks/useWatermarkControls';
@@ -341,6 +343,18 @@ export interface DocxEditorBaseProps extends DocxEditorPluginProps {
    * This lets the browser or host app handle native find/history shortcuts.
    */
   disableFindReplaceShortcuts?: boolean;
+  /**
+   * Remaps or disables keyboard shortcuts; menus, tooltips and the shortcuts dialog follow. An
+   * entry for `find` or `replace` wins over `disableFindReplaceShortcuts`.
+   * @experimental
+   */
+  shortcuts?: DocxShortcuts;
+  /**
+   * Reports each entry of `shortcuts` that was refused, and each default a host chord displaced.
+   * Without it, refusals are logged in development builds.
+   * @experimental
+   */
+  onShortcutIssue?: (issue: ShortcutIssue) => void;
   /** Custom toolbar actions */
   toolbarExtra?: ReactNode;
   /**
@@ -934,6 +948,8 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
     allowHostProposals = false,
     showHostProposalsInSidebar = false,
     disableFindReplaceShortcuts = false,
+    shortcuts,
+    onShortcutIssue,
     toolbarExtra,
     toolbar,
     className = '',
@@ -1790,6 +1806,8 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
     containerRef,
     disableFindReplaceShortcuts,
     tableSelection,
+    shortcuts,
+    onShortcutIssue,
   });
 
   // Handle table insert from toolbar
@@ -1892,6 +1910,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
     contextMenuItems,
     handleContextMenuAction,
   } = useContextMenus({
+    commands: commandController.store,
     pagedEditorRef,
     focusActiveEditor,
     runTableAction: (action) => void commandController.store.execute('tableAction', action),
@@ -1979,6 +1998,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
       ? yrsCore.session
       : null;
   const pluginHost = useDocxPluginHost({
+    shortcutsKey: shortcuts === undefined ? undefined : JSON.stringify(shortcuts),
     experimentalWorkerOpen: workerOpen,
     plugins,
     pluginGrants,

@@ -488,7 +488,9 @@
         "pageUp": "Page préc.",
         "pageDown": "Page suiv.",
         "ctrl": "Ctrl",
-        "del": "Suppr"
+        "del": "Suppr",
+        "shift": "Maj",
+        "alt": "Alt"
       }
     },
     "objectGeometry": {

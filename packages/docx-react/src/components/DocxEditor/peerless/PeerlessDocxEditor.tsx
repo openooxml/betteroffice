@@ -250,7 +250,9 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const fileIO = useWorkerFileIO(recoverableProps, controller.ref, loadBuffer, () => active.current?.binding ?? null);
   const getBinding = useCallback(() => active.current?.binding ?? null, []);
   const navigation = useWorkerNavigation(controller, getBinding, scroller, host, zoom, recoverableProps);
+  const inputCommand = useRef<ReturnType<typeof useWorkerContextMenu>['input']>(async () => ({ ok: false, failure: { code: 'editor-unavailable', message: '' } }));
   useLayoutEffect(() => controller.update({ ...controllerOptions, imagePropertiesAvailable: propertyDialogs.imagePropertiesAvailable, image: propertyDialogs.imageState, onImageWrap: propertyDialogs.applyImageWrap, onImageTransform: propertyDialogs.applyImageTransform, search: search.host, pickImage: fileIO.pickImage, openSplitCell: propertyDialogs.openSplitCell, openTableProperties: propertyDialogs.openTableProperties, perform: async (id) => {
+    if (id === 'cut' || id === 'copy' || id === 'paste' || id === 'pasteAsPlainText' || id === 'selectAll') return inputCommand.current(id);
     if (id === 'pageSetup') return propertyDialogs.openPageSetup();
     if (id === 'paragraphSpacingDialog') return propertyDialogs.openParagraphSpacing();
     if (id === 'watermark') return propertyDialogs.openWatermark();
@@ -300,7 +302,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const rulers = useWorkerRulerControls(controller, reportRecoverableError, props.showRuler === true);
   const legacyRef = useRef<PagedEditorRef | null>(null);
   useKeyboardShortcuts({ commands: controller.commands, pagedEditorRef: legacyRef, containerRef: container,
-    disableFindReplaceShortcuts: props.disableFindReplaceShortcuts ?? false });
+    disableFindReplaceShortcuts: props.disableFindReplaceShortcuts ?? false, shortcuts: props.shortcuts, onShortcutIssue: props.onShortcutIssue });
   const [overlayLayer, setOverlayLayer] = useState<HTMLDivElement | null>(null);
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const [geometryRevision, redrawGeometry] = useState(0);
@@ -345,6 +347,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     return reserved.keyed;
   }, [pluginHost]);
   sentReservationsRef.current = sentReservations;
+  const shortcutsKey = props.shortcuts === undefined ? undefined : JSON.stringify(props.shortcuts);
+  useEffect(() => { pluginHost.syncCommands(); }, [pluginHost, shortcutsKey]);
   useEffect(() => {
     pluginHost.setReporter(props.onPluginError);
     pluginHost.setGrants(props.pluginGrants);
@@ -1065,6 +1069,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     environment: controller.environment, commands: controller.commands.store, clipboard: onClipboard,
     submit: controller.submit, onWrapImage: (handle, wrap) => propertyDialogs.applyImageWrap(wrap, handle),
     onPaste: props.onPaste, onError: reportRecoverableError, beginAddComment: workerComments.beginAddComment, focusEditor: focus });
+  inputCommand.current = contextMenu.input;
   useLayoutEffect(() => {
     active.current?.clipboard?.dispose();
     active.current = null;

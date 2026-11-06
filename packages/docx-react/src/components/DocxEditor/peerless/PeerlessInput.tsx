@@ -1,3 +1,4 @@
+import { isKeyReleasedFromInput, takeClipboardGesture } from '../../../../../../shared/keyboard/nativeGesture';
 import { useCallback, useLayoutEffect, useRef, useSyncExternalStore, type ReactElement, type Ref, type RefObject } from 'react';
 import { effectiveZoom } from '@betteroffice/docx/layout/render';
 import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
@@ -127,6 +128,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       const exit = escapeArmed && event.key === 'Tab';
       if (event.key !== 'Shift') clearEscape();
       if (event.defaultPrevented || state.composing || event.isComposing || event.keyCode === 229) return;
+      if (isKeyReleasedFromInput(event)) { active = null; return; }
       if (event.key === 'Escape') { escapeArmed = true; active = null; return; }
       if (exit || (event.key === 'Tab' && isReadOnly())) { active = null; return; }
       state = { ...state, trailingCompositionText: null };
@@ -231,8 +233,10 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       clearEscape();
       if (state.composing) return;
       event.preventDefault();
+      const gesture = takeClipboardGesture(element);
+      if (gesture === 'ignore') return;
       active = { id: ++nextEventId, phase: 'start', inputType: 'insertFromPaste', keyboard: false };
-      const html = event.clipboardData?.getData('text/html') ?? '';
+      const html = gesture === 'plain' ? '' : event.clipboardData?.getData('text/html') ?? '';
       if (html) {
         const fragment = parseClipboardHtml(html);
         if (fragment && callbacks.current.onPasteFragment?.(fragment, event.timeStamp) === true) {
@@ -293,6 +297,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
     const compositionend = (event: CompositionEvent) => finishComposition(event.data ?? composition?.text ?? element.value);
     const blur = () => { clearEscape(); if (composition) finishComposition(composition.text); active = null; };
     const copy = (event: ClipboardEvent) => {
+      if (takeClipboardGesture(element) === 'ignore') { event.preventDefault(); return; }
       if (!callbacks.current.onClipboard || state.composing) return;
       event.preventDefault();
       void callbacks.current.onClipboard(event.type === 'cut', event.clipboardData);
