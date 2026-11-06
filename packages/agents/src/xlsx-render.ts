@@ -30,7 +30,7 @@ export async function renderXlsxRange(
   for (const font of requests.values()) {
     let bytes: ArrayBuffer | undefined;
     try { bytes = await provider.resolve(font.family, font.bold, font.italic)?.(); } catch {}
-    bytes ??= await provider.resolveLastResort(font.family, font.bold, font.italic)();
+    bytes ??= await provider.resolveLastResort(font.family, font.bold, font.italic, 'word')();
     GlobalFonts.register(Buffer.from(bytes), font.family);
   }
   const canvas = createCanvas(Math.ceil(viewport.width * scale), Math.ceil(viewport.height * scale));

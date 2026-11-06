@@ -1,7 +1,9 @@
 import { expect, spyOn, test } from 'bun:test';
-import { createCanvas, loadImage } from '@napi-rs/canvas';
-import { paintDisplayList } from '@betteroffice/xlsx';
+import { createCanvas, GlobalFonts, loadImage } from '@napi-rs/canvas';
+import { createFontProvider, resolveLastResortFace } from '@betteroffice/fonts';
+import { decodeFontFace, paintDisplayList } from '@betteroffice/xlsx';
 import { openXlsx } from '../src/xlsx';
+import { renderXlsxRange } from '../src/xlsx-render';
 import { xlsxFixture } from './format-fixtures';
 
 test('XLSX previews paint a non-active sheet range at the requested size', async () => {
@@ -65,4 +67,24 @@ test('XLSX previews use the engine PNG where it can draw', async () => {
     expect(preview.png).toBe(png);
     expect([preview.width, preview.height]).toEqual([12, 7]);
   } finally { render.mockRestore(); book.close(); }
+});
+
+test('XLSX canvas previews draw unbundled families with the Word last-resort face', async () => {
+  const family = 'Humnst777 BT';
+  expect(resolveLastResortFace(family, false, false, 'word').family).toBe('Liberation Sans');
+  const provider = createFontProvider(undefined, { decoder: decodeFontFace });
+  const word = Buffer.from(await provider.resolveLastResort(family, false, false, 'word')());
+  expect(word.equals(Buffer.from(await provider.resolveLastResort(family, false, false)()))).toBe(false);
+  const handle = {
+    sheetInfo: () => ({ activeSheet: 0 }),
+    setActiveSheet: () => {},
+    displayList: () => ({ width: 40, height: 20, commands: [{ op: 'text', x: 2, y: 14, text: 'Hi', fontFamily: family, fontSize: 11, color: '#000000' }] }),
+    renderPngFonts: () => [],
+  };
+  const register = spyOn(GlobalFonts, 'register');
+  try {
+    await renderXlsxRange(handle as never, 0, 'A1', { x: 0, y: 0, width: 40, height: 20 }, 1, provider);
+    const call = register.mock.calls.find(([, alias]) => alias === family);
+    expect(call && Buffer.from(call[0]).equals(word)).toBe(true);
+  } finally { register.mockRestore(); }
 });
