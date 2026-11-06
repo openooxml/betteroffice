@@ -2,4 +2,4 @@
 '@betteroffice/docx-react': patch
 ---
 
-When the editor cannot apply a formatted paste, for example because a collaborator changed the text being pasted over, it now says so instead of ignoring the paste without a word.
+When the worker editor refuses a formatted paste, it now shows a notice instead of dropping the paste without a word.
