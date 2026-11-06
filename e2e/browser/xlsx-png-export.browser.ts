@@ -97,7 +97,7 @@ function evaluate(page: Page): Promise<Record<string, Export>> {
 
 test('an xlsx range exports through the canvas, in the page and in a worker session', async ({ page }) => {
   const result = await exports(page) as unknown as Record<string, Export> & { expected: { width: number; height: number } };
-  expect((result as unknown as { fonts: unknown }).fonts).toEqual([{ family: 'Arial', bold: false, italic: false }]);
+  expect((result as unknown as { fonts: unknown }).fonts).toEqual([{ family: 'Arial', bold: false, italic: false }, { family: 'Calibri', bold: false, italic: false }]);
   for (const name of ['thread range', 'thread used', 'worker range', 'worker used', 'thread range with a supplied face']) {
     const png = result[name];
     expect(png.error, name).toBeUndefined();
