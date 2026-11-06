@@ -766,8 +766,7 @@ where
     let pane_divider_color: Arc<str> = PANE_DIVIDER_COLOR.into();
     let print_font_family: Option<Arc<str>> = print.map(|(m, _)| m.font_family.as_str().into());
     let fallback_font_family: Arc<str> = print_font_family.clone().unwrap_or_else(|| {
-        styles
-            .font_for(0)
+        geometry::normal_font(styles)
             .and_then(|font| font.name.as_deref())
             .filter(|name| !name.trim().is_empty())
             .unwrap_or("Calibri")
@@ -3063,6 +3062,32 @@ mod tests {
             font: Some(0),
             ..Default::default()
         });
+        let families = screen_text_families(&wb);
+        assert_eq!(families.len(), 2);
+        for (text, family) in families {
+            assert_eq!(family.as_deref(), Some("Arial"), "{text}");
+        }
+    }
+
+    #[test]
+    fn screen_text_fallback_follows_the_grid_normal_font_and_covers_display_only_links() {
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(CellRef::new(0, 0), text_cell("Plain"));
+        sheet.hyperlinks.push(Hyperlink {
+            range: CellRange::parse_a1("C3").unwrap(),
+            external_target: None,
+            location: Some("Sheet1!A1".into()),
+            tooltip: None,
+            display: Some("Jump".into()),
+        });
+        let mut wb = Workbook::default();
+        wb.sheets.push(sheet);
+        wb.styles.fonts.push(xlsx_model::styles::Font {
+            name: Some("Arial".into()),
+            size_pt: Some(10.0),
+            ..Default::default()
+        });
+        wb.styles.cell_xfs.push(xlsx_model::styles::Xf::default());
         let families = screen_text_families(&wb);
         assert_eq!(families.len(), 2);
         for (text, family) in families {
