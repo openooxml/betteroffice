@@ -211,8 +211,8 @@ function serializeTable(table: DocxTableFragment): string {
 function serializeClipboardRun(run: DocxClipboardRun): string {
   const style = spanStyleForText(run.format?.other as Record<string, unknown> | undefined, run.format);
   const text = escapeHtml(run.text);
-  const content = style ? `<span style="${escapeHtml(style)}">${text}</span>` : text;
-  return run.href ? `<a href="${escapeHtml(run.href)}">${content}</a>` : content;
+  const markup = style ? `<span style="${escapeHtml(style)}">${text}</span>` : text;
+  return run.href ? `<a href="${escapeHtml(run.href)}">${markup}</a>` : markup;
 }
 
 /** HTML clipboard form of a fragment for Word, Google Docs and internal paste. */
