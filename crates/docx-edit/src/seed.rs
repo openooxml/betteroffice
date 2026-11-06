@@ -6739,10 +6739,6 @@ pub(crate) enum SeedMedia<'a> {
 
 /// Seeds every lowered story into `document` and retains the package context, with the identity
 /// index when there is one.
-pub(crate) fn package_shape_styles(package: &Value) -> Option<StyleResolver> {
-    crate::shape_styles::for_package(package, &StyleResolver::new(field(Some(package), "styles")))
-}
-
 fn seed_lowered(
     document: &EditingDoc,
     lowered: LoweredDocx,
@@ -6805,10 +6801,9 @@ fn seed_lowered(
     document
         .apply_raw_story_batches(deletes, &ctx)
         .map_err(|error| error.to_string())?;
-    crate::shape_styles::seed(
-        document,
-        shape_styles.as_ref().filter(|_| seed_shape_styles),
-    );
+    if let Some(styles) = shape_styles.as_ref().filter(|_| seed_shape_styles) {
+        crate::shape_styles::seed(document, styles);
+    }
     let ranges = document
         .apply_raw_seed_batches(batches, &ctx)
         .map_err(|error| error.to_string())?;
@@ -10868,7 +10863,7 @@ mod shape_style_seed_tests {
         assert_eq!(payload["textBoxJson"], wire);
         let doc = EditingDoc::new(75376);
         let styles = crate::shape_styles::for_package(&content, &StyleResolver::default()).unwrap();
-        crate::shape_styles::seed(&doc, Some(&styles));
+        crate::shape_styles::seed(&doc, &styles);
         assert_eq!(payload["textBoxJson"], wire);
         assert!(doc.shape_style_resolver().is_some());
     }
@@ -10996,16 +10991,17 @@ mod shape_style_seed_tests {
         }
         assert!(!doc.unchanged_since_seeded());
         assert_eq!(save_authored_shapes(doc, &bytes), saved);
-        crate::shape_styles::seed(doc, None);
+        {
+            let mut txn = doc.yrs_doc().transact_mut();
+            txn.get_map(crate::shape_styles::SHAPE_STYLES)
+                .unwrap()
+                .remove(&mut txn, "resolver");
+        }
         assert_eq!(save_authored_shapes(doc, &bytes), saved);
     }
 
-    #[test]
-    fn reopening_replaces_styles_in_both_seed_client_orders_and_clears_them_without_boxes() {
-        use sha2::{Digest, Sha256};
-
-        let a = package();
-        let mut parts = ooxml_opc::unzip_parts(&a).unwrap();
+    fn with_different_styles(bytes: &[u8]) -> Vec<u8> {
+        let mut parts = ooxml_opc::unzip_parts(bytes).unwrap();
         for (name, bytes) in &mut parts {
             if name == "word/styles.xml" {
                 *bytes = String::from_utf8(bytes.clone())
@@ -11015,82 +11011,101 @@ mod shape_style_seed_tests {
                     .into_bytes();
             }
         }
-        let b = ooxml_opc::rezip_parts(&parts).unwrap();
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    }
+
+    #[test]
+    fn reopening_preserves_shared_styles_with_different_styles_or_without_boxes() {
+        let a = package();
+        let b = with_different_styles(&a);
         let no_boxes =
             fixture::Package::new("<w:p><w:r><w:t>Direct body</w:t></w:r></w:p>").bytes();
-        let resolver_client = |bytes: &[u8]| {
-            let doc = EditingDoc::new(75382);
-            seed_from_docx(&doc, bytes).unwrap();
-            let json = serde_json::to_string(doc.shape_style_resolver().unwrap().as_ref()).unwrap();
-            let digest = Sha256::digest(json.as_bytes());
-            u64::from_le_bytes(digest[..8].try_into().unwrap()) & ((1 << 53) - 1)
-        };
-        assert_ne!(resolver_client(&a), resolver_client(&b));
-        for (a, b) in [(&a, &b), (&b, &a)] {
-            let session =
-                crate::session::EditSessionCore::new(75383, crate::session::Host::deterministic());
-            let fresh =
-                crate::session::EditSessionCore::new(75384, crate::session::Host::deterministic());
-            fresh
-                .open_docx_retaining(b, true, Some("shape-reseed"), None)
-                .unwrap();
-            let same = session.engine.doc();
-            for (index, bytes) in [a, b, a, b].into_iter().enumerate() {
-                session
-                    .open_docx_retaining(bytes, index == 0, Some("shape-reseed"), None)
-                    .unwrap();
-                let state = same.encode_state_as_update_v1();
-                session
-                    .open_docx_retaining(bytes, false, Some("shape-reseed"), None)
-                    .unwrap();
-                assert_eq!(same.encode_state_as_update_v1(), state);
-                assert!(session.engine.doc().shape_style_resolver().is_some());
-                crate::bridge::yrs_doc_to_layout_blocks(
-                    session.engine.doc(),
-                    "body",
-                    &crate::bridge::RenderEnv::default(),
-                )
-                .unwrap();
-            }
-            assert_eq!(
-                serde_json::to_value(
-                    session
-                        .engine
-                        .doc()
-                        .shape_style_resolver()
-                        .unwrap()
-                        .as_ref()
-                )
-                .unwrap(),
-                serde_json::to_value(fresh.engine.doc().shape_style_resolver().unwrap().as_ref())
-                    .unwrap()
-            );
-            let env = crate::bridge::RenderEnv::default();
-            assert_eq!(
-                crate::bridge::yrs_doc_to_layout_blocks(session.engine.doc(), "body", &env)
-                    .unwrap(),
-                crate::bridge::yrs_doc_to_layout_blocks(fresh.engine.doc(), "body", &env).unwrap()
-            );
+        let session =
+            crate::session::EditSessionCore::new(75383, crate::session::Host::deterministic());
+        session
+            .open_docx_retaining(&a, true, Some("shape-reopen"), None)
+            .unwrap();
+        let doc = session.engine.doc();
+        let state = doc.encode_state_as_update_v1();
+        let env = crate::bridge::RenderEnv::default();
+        let lowering: Vec<_> = doc
+            .list_stories()
+            .stories
+            .into_iter()
+            .map(|story| {
+                let blocks =
+                    crate::bridge::yrs_doc_to_layout_blocks(doc, &story.story, &env).unwrap();
+                (story.story, blocks)
+            })
+            .collect();
+        for bytes in [&b, &no_boxes] {
             session
-                .open_docx_retaining(&no_boxes, false, Some("shape-reseed"), None)
+                .open_docx_retaining(bytes, false, Some("shape-reopen"), None)
                 .unwrap();
-            fresh
-                .open_docx_retaining(&no_boxes, false, Some("shape-reseed"), None)
+            assert_eq!(doc.encode_state_as_update_v1(), state);
+            for (story, blocks) in &lowering {
+                assert_eq!(
+                    &crate::bridge::yrs_doc_to_layout_blocks(doc, story, &env).unwrap(),
+                    blocks
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn source_attachment_order_preserves_shared_styles_for_matching_and_different_packages() {
+        let a = package();
+        let b = with_different_styles(&a);
+        let seeded = EditingDoc::new(75382);
+        seed_from_docx(&seeded, &a).unwrap();
+        let state = seeded.encode_state_as_update_v1();
+        let env = crate::bridge::RenderEnv::default();
+        let different = EditingDoc::new(75384);
+        seed_from_docx(&different, &b).unwrap();
+        assert_ne!(
+            crate::bridge::yrs_doc_to_layout_blocks(&seeded, "body", &env).unwrap(),
+            crate::bridge::yrs_doc_to_layout_blocks(&different, "body", &env).unwrap()
+        );
+        for bytes in [&a, &b] {
+            let source_first =
+                crate::session::EditSessionCore::new(75387, crate::session::Host::deterministic());
+            source_first
+                .open_docx_retaining(bytes, false, None, None)
                 .unwrap();
-            let txn = session.engine.doc().yrs_doc().transact();
-            assert!(
-                txn.get_map(crate::shape_styles::SHAPE_STYLES)
-                    .unwrap()
-                    .get(&txn, "resolver")
-                    .is_none()
-            );
-            drop(txn);
-            assert!(session.engine.doc().shape_style_resolver().is_none());
+            source_first.load(&state).unwrap();
+            let state_first =
+                crate::session::EditSessionCore::new(75388, crate::session::Host::deterministic());
+            state_first.load(&state).unwrap();
+            state_first
+                .open_docx_retaining(bytes, false, None, None)
+                .unwrap();
+            assert_eq!(source_first.engine.doc().encode_state_as_update_v1(), state);
             assert_eq!(
-                crate::bridge::yrs_doc_to_layout_blocks(session.engine.doc(), "body", &env)
-                    .unwrap(),
-                crate::bridge::yrs_doc_to_layout_blocks(fresh.engine.doc(), "body", &env).unwrap()
+                source_first.engine.doc().encode_state_as_update_v1(),
+                state_first.engine.doc().encode_state_as_update_v1()
             );
+            for story in seeded.list_stories().stories {
+                let expected =
+                    crate::bridge::yrs_doc_to_layout_blocks(&seeded, &story.story, &env).unwrap();
+                assert_eq!(
+                    crate::bridge::yrs_doc_to_layout_blocks(
+                        source_first.engine.doc(),
+                        &story.story,
+                        &env
+                    )
+                    .unwrap(),
+                    expected
+                );
+                assert_eq!(
+                    crate::bridge::yrs_doc_to_layout_blocks(
+                        state_first.engine.doc(),
+                        &story.story,
+                        &env
+                    )
+                    .unwrap(),
+                    expected
+                );
+            }
         }
     }
 
@@ -11099,7 +11114,12 @@ mod shape_style_seed_tests {
         let doc = EditingDoc::new(75385);
         seed_from_docx(&doc, &package()).unwrap();
         let styles = serde_json::to_string(doc.shape_style_resolver().unwrap().as_ref()).unwrap();
-        crate::shape_styles::seed(&doc, None);
+        {
+            let mut txn = doc.yrs_doc().transact_mut();
+            txn.get_map(crate::shape_styles::SHAPE_STYLES)
+                .unwrap()
+                .remove(&mut txn, "resolver");
+        }
         let env = crate::bridge::RenderEnv::default();
         let direct = crate::bridge::yrs_doc_to_layout_blocks(&doc, "body", &env).unwrap();
         for json in [
@@ -11123,33 +11143,5 @@ mod shape_style_seed_tests {
                 direct
             );
         }
-    }
-
-    #[test]
-    fn opening_a_source_without_boxes_clears_styles_without_reseeding_stories() {
-        let bytes = package();
-        let no_boxes =
-            fixture::Package::new("<w:p><w:r><w:t>Direct body</w:t></w:r></w:p>").bytes();
-        let session =
-            crate::session::EditSessionCore::new(75387, crate::session::Host::deterministic());
-        session
-            .open_docx_retaining(&bytes, true, None, None)
-            .unwrap();
-        let before = payloads(session.engine.doc());
-        session
-            .open_docx_retaining(&no_boxes, false, None, None)
-            .unwrap();
-        assert!(!crate::shape_styles::has_entry(session.engine.doc()));
-        assert!(session.engine.doc().shape_style_resolver().is_none());
-        assert_eq!(payloads(session.engine.doc()), before);
-        let direct = EditingDoc::new(75388);
-        direct
-            .apply_update_v1(&session.engine.doc().encode_state_as_update_v1())
-            .unwrap();
-        let env = crate::bridge::RenderEnv::default();
-        assert_eq!(
-            crate::bridge::yrs_doc_to_layout_blocks(session.engine.doc(), "body", &env).unwrap(),
-            crate::bridge::yrs_doc_to_layout_blocks(&direct, "body", &env).unwrap()
-        );
     }
 }

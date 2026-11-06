@@ -72,50 +72,15 @@ fn has_text_box_content(value: &Value, legacy: bool) -> bool {
     }
 }
 
-pub(crate) fn package_has_text_boxes(package: &Value) -> bool {
-    has_text_box_content(package, false)
-}
-
-pub(crate) fn has_entry(document: &EditingDoc) -> bool {
-    let txn = document.yrs_doc().transact();
-    txn.get_map(SHAPE_STYLES)
-        .is_some_and(|root| root.get(&txn, RESOLVER).is_some())
-}
-
 pub(crate) fn for_package(package: &Value, styles: &StyleResolver) -> Option<StyleResolver> {
-    package_has_text_boxes(package).then(|| styles.for_shape_styles())
+    has_text_box_content(package, false).then(|| styles.for_shape_styles())
 }
 
-pub(crate) fn seed(document: &EditingDoc, styles: Option<&StyleResolver>) {
-    let json = styles
-        .map(serde_json::to_string)
-        .transpose()
-        .expect("shape style resolver JSON")
-        .filter(|json| json.len() <= MAX_RESOLVER_BYTES);
-    let mut txn = document.yrs_doc().transact_mut();
-    let root = txn.get_map(SHAPE_STYLES).unwrap();
-    let previous = root.get(&txn, RESOLVER);
-    if let Some(previous) = previous {
-        match json {
-            Some(json) => {
-                let unchanged = match previous {
-                    Out::Any(Any::String(previous)) => previous.as_ref() == json.as_str(),
-                    _ => false,
-                };
-                if !unchanged {
-                    root.insert(&mut txn, RESOLVER, json);
-                }
-            }
-            None => {
-                root.remove(&mut txn, RESOLVER);
-            }
-        }
+pub(crate) fn seed(document: &EditingDoc, styles: &StyleResolver) {
+    let json = serde_json::to_string(styles).expect("shape style resolver JSON");
+    if json.len() > MAX_RESOLVER_BYTES {
         return;
     }
-    drop(txn);
-    let Some(json) = json else {
-        return;
-    };
     let digest = Sha256::digest(json.as_bytes());
     let client = u64::from_le_bytes(digest[..8].try_into().unwrap()) & ((1 << 53) - 1);
     let seed = Doc::with_client_id(client);
@@ -127,12 +92,6 @@ pub(crate) fn seed(document: &EditingDoc, styles: Option<&StyleResolver>) {
     document
         .apply_verbatim_v1(&update)
         .expect("shape style seed applies");
-    if !has_entry(document) {
-        let mut txn = document.yrs_doc().transact_mut();
-        txn.get_map(SHAPE_STYLES)
-            .unwrap()
-            .insert(&mut txn, RESOLVER, json);
-    }
 }
 
 #[cfg(test)]
@@ -166,7 +125,7 @@ mod tests {
         let doc = EditingDoc::new(75367);
         let undo = doc.undo_manager();
         let stories = doc.stories_changed_since(0);
-        seed(&doc, for_package(&package(), &styles).as_ref());
+        seed(&doc, &for_package(&package(), &styles).unwrap());
         doc.mark_seeded();
         assert!(doc.unchanged_since_seeded());
         assert_eq!(doc.stories_changed_since(0), stories);
@@ -201,7 +160,7 @@ mod tests {
         let first = doc.shape_style_resolver().unwrap();
         assert!(Arc::ptr_eq(&first, &doc.shape_style_resolver().unwrap()));
         let repeat = EditingDoc::new(75368);
-        seed(&repeat, for_package(&package(), &styles).as_ref());
+        seed(&repeat, &for_package(&package(), &styles).unwrap());
         assert_eq!(
             doc.encode_state_as_update_v1(),
             repeat.encode_state_as_update_v1()
@@ -250,7 +209,9 @@ mod tests {
         let package = json!({"type": "shape", "textBody": {"content": []}});
         let styles = for_package(&package, &StyleResolver::default());
         assert!(styles.is_none());
-        seed(&doc, styles.as_ref());
+        if let Some(styles) = styles {
+            seed(&doc, &styles);
+        }
         assert_eq!(doc.encode_state_as_update_v1(), before);
         assert!(doc.shape_style_resolver().is_none());
     }
@@ -258,7 +219,7 @@ mod tests {
     #[test]
     fn equal_entries_reuse_the_resolver_and_cache_the_crdt_string_without_copying() {
         let doc = EditingDoc::new(75378);
-        seed(&doc, Some(&StyleResolver::default()));
+        seed(&doc, &StyleResolver::default());
         let first = doc.shape_style_resolver().unwrap();
         let current = || {
             let txn = doc.yrs_doc().transact();
@@ -277,9 +238,6 @@ mod tests {
             doc.shape_styles.lock().unwrap().json.as_ref().unwrap(),
             &original
         ));
-        let before = doc.encode_state_as_update_v1();
-        seed(&doc, Some(&StyleResolver::default()));
-        assert_eq!(doc.encode_state_as_update_v1(), before);
         {
             let mut txn = doc.yrs_doc().transact_mut();
             txn.get_map(SHAPE_STYLES)
@@ -299,15 +257,13 @@ mod tests {
     #[test]
     fn tables_over_the_read_budget_are_never_written() {
         let doc = EditingDoc::new(75386);
-        seed(&doc, Some(&StyleResolver::default()));
-        assert!(has_entry(&doc));
+        let before = doc.encode_state_as_update_v1();
         let big = StyleResolver::new(Some(&serde_json::json!({"styles": [
             {"type": "paragraph", "styleId": "x".repeat(MAX_RESOLVER_BYTES)}
         ]})));
-        seed(&doc, Some(&big));
-        assert!(!has_entry(&doc));
-        seed(&doc, Some(&big));
-        assert!(!has_entry(&doc));
+        seed(&doc, &big);
+        assert_eq!(doc.encode_state_as_update_v1(), before);
+        assert!(doc.shape_style_resolver().is_none());
     }
 
     #[test]
@@ -341,20 +297,5 @@ mod tests {
                 doc.shape_styles.lock().unwrap().json.as_ref().unwrap()
             ));
         }
-    }
-
-    #[test]
-    fn reseeding_a_removed_deterministic_entry_restores_it() {
-        let doc = EditingDoc::new(75386);
-        let styles = StyleResolver::default();
-        seed(&doc, Some(&styles));
-        let original = serde_json::to_value(doc.shape_style_resolver().unwrap().as_ref()).unwrap();
-        seed(&doc, None);
-        assert!(!has_entry(&doc));
-        seed(&doc, Some(&styles));
-        assert_eq!(
-            serde_json::to_value(doc.shape_style_resolver().unwrap().as_ref()).unwrap(),
-            original
-        );
     }
 }
