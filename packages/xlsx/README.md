@@ -96,8 +96,9 @@ measured from the workbook's normal font. The caller chooses paper size, margins
 a tab name; `range` is an A1 string, `{ kind: 'a1', a1 }`, zero-based `{ kind: 'rowCol', start, end }`, or `'used'`
 for the sheet's used range at call time.
 Options are `{ scale, maxWidth, maxHeight, signal }`. The editor's painter draws on a canvas, and the call
-rejects with `PngExportError` rather than paint a substitute font. Where there is no canvas, it names
-`@betteroffice/xlsx-native`; `isPngExportAvailable()` reports whether PNG export can run.
+rejects with `PngExportError` rather than paint a substitute font. Without a canvas, it rejects with
+code `canvas-unavailable`; use `@betteroffice/xlsx-native` for PNG export in that environment.
+`isPngExportAvailable()` reports whether PNG export can run.
 
 ## Worker sessions
 

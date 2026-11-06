@@ -3030,14 +3030,6 @@ export class XlsxDocument {
      */
     rejectProposalJson(args: string): string;
     /**
-     * render the current sheet viewport to png bytes (raster feature only).
-     */
-    renderPng(viewport_json: string): Uint8Array;
-    /**
-     * render an a1 range (default: used range) at an optional scale to png.
-     */
-    renderRangePng(args: string): Uint8Array;
-    /**
      * serialize the current workbook back to `.xlsx` bytes.
      */
     saveBytes(): Uint8Array;
@@ -3194,8 +3186,6 @@ export interface InitOutput {
     readonly xlsxdocument_recoveryCheckpoint: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_redoJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_rejectProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
-    readonly xlsxdocument_renderPng: (a: number, b: number, c: number) => [number, number, number, number];
-    readonly xlsxdocument_renderRangePng: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_saveBytes: (a: number) => [number, number, number, number];
     readonly xlsxdocument_searchTextJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_selectionDataJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -3801,8 +3791,8 @@ export declare function workbookDisplayListJson(handle: WorkbookHandle, viewport
 export type WasmInitInput = InitInput | Promise<InitInput>;
 export interface WasmInitOptions {
     /**
-     * `false` loads the smaller core without PNG export. On that core, PNG export and the
-     * standalone {@link renderXlsxMarkdown} reject; `exportMarkdown` on a workbook still works.
+     * `false` loads the smaller core without peer snapshots or standalone
+     * {@link renderXlsxMarkdown}; `exportMarkdown` on a workbook still works.
      */
     png?: boolean;
 }
@@ -3823,9 +3813,8 @@ export declare function getDisplayListCellLimit(): number;
  */
 export declare function isWasmAvailable(): boolean;
 /**
- * Whether `renderPng` can draw here: through a canvas, through the native
- * engine, or through a wasm build that still carries the rasterizer. Chrome can
- * disable an export control instead of calling and catching.
+ * Whether `renderPng` can draw here through a canvas or the native engine.
+ * Callers can disable an export control instead of calling and catching.
  */
 export declare function isPngExportAvailable(): boolean;
 /**

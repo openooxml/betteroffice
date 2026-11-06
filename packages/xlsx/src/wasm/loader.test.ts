@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import JSZip from 'jszip';
 import type { XlsxTextMatch, XlsxTextSearchOptions } from '../index';
+import { engineKind } from './engine';
 
 import {
   StaleProposalError,
@@ -454,13 +455,22 @@ describe('wasm loader', () => {
     expect(() => openWorkbook(new Uint8Array([1, 2, 3]))).toThrow();
   });
 
-  it('renders the fixture viewport to png bytes', async () => {
-    expect(isPngExportAvailable()).toBe(true);
+  it('exports PNG natively or rejects without a canvas', async () => {
+    expect(isPngExportAvailable()).toBe(engineKind === 'native');
     const handle = openWorkbook(sampleBytes());
     try {
-      const png = await handle.renderPng({ sheet: 0, viewport: { x: 0, y: 0, width: 400, height: 300 } });
-      expect(png.length).toBeGreaterThan(100);
-      expect(Array.from(png.subarray(0, 8))).toEqual(PNG_MAGIC);
+      const viewport = { x: 0, y: 0, width: 400, height: 300 };
+      if (engineKind === 'native') {
+        const png = await handle.renderPng({ sheet: 0, viewport });
+        expect(png.length).toBeGreaterThan(100);
+        expect(Array.from(png.subarray(0, 8))).toEqual(PNG_MAGIC);
+      } else {
+        for (const target of [{ sheet: 0, viewport }, { sheet: 0, range: 'A1:B2' }]) {
+          await expect(handle.renderPng(target)).rejects.toMatchObject({
+            name: 'PngExportError', code: 'canvas-unavailable', message: expect.stringContaining('@betteroffice/xlsx-native'),
+          });
+        }
+      }
     } finally {
       handle.dispose();
     }

@@ -97,7 +97,9 @@ function paintPattern(ctx: CanvasRenderingContext2D, cmd: PatternFillCmd, dpr: n
   const key = `${cmd.pattern}/${cmd.fg}/${cmd.bg}/${dpr}`;
   let pattern = cache.get(key);
   if (!pattern) {
-    const tile = typeof OffscreenCanvas === 'undefined' ? document.createElement('canvas') : new OffscreenCanvas(8, 8);
+    const tile = typeof OffscreenCanvas === 'function' ? new OffscreenCanvas(8, 8)
+      : typeof document !== 'undefined' ? document.createElement('canvas')
+      : new (ctx.canvas.constructor as new (width: number, height: number) => HTMLCanvasElement)(8, 8);
     tile.width = 8;
     tile.height = 8;
     const context = tile.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;

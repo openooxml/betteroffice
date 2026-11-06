@@ -10,7 +10,6 @@ type NativeAsset = { asset: string; native: string };
 export const NATIVE_ENGINES = {
   xlsx: [
     { engine: 'packages/xlsx/src/wasm/engine.ts', native: 'bindings/xlsx-native/js/engine.ts' },
-    { engine: 'packages/xlsx/src/wasm/engineRaster.ts', native: 'bindings/xlsx-native/js/engineRaster.ts' },
     { engine: 'packages/xlsx/src/wasm/enginePng.ts', native: 'bindings/xlsx-native/js/enginePng.ts' },
   ],
   pptx: [
