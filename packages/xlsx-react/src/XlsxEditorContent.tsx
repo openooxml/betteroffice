@@ -1831,7 +1831,7 @@ export function XlsxEditorContent({
     });
   }, [captureTarget, cellClipboard, copyTarget, gatedClear, applyResult, readOnly, coordinator]);
 
-  const pasteSelection = useCallback(() => {
+  const pasteSelection = useCallback((plain = false) => {
     const handle = handleRef.current;
     const current = selectionRef.current;
     const selection = current && anchorSelection(current, workbookSelectionMerges(handle, activeSheetRef.current));
@@ -1840,7 +1840,8 @@ export function XlsxEditorContent({
     const accepted = cellClipboard.current;
     const reading = (async () => {
       try {
-        return await readCellClipboard();
+        const data = await readCellClipboard();
+        return plain ? { text: data.text, html: null } : data;
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
         return null;
@@ -2007,7 +2008,7 @@ export function XlsxEditorContent({
       if (clipboard) {
         if (clipboard === 'copy') void copySelection();
         else if (clipboard === 'cut') cutSelection();
-        else void pasteSelection();
+        else void pasteSelection(clipboard === 'pastePlainText');
         e.preventDefault();
         return;
       }
@@ -2722,7 +2723,7 @@ export function XlsxEditorContent({
                     onCompositionStart={() => startComposition('cell')}
                     onCompositionEnd={endComposition}
                     onKeyDown={(e) => {
-                      if (!commandController.shortcutAt(e)) e.stopPropagation();
+                      if (!commandController.claimsKey(e)) e.stopPropagation();
                       if (e.nativeEvent.isComposing || e.keyCode === 229) return;
                       if (e.key === 'Enter') {
                         commitEditor(e.shiftKey ? 'up' : 'down');

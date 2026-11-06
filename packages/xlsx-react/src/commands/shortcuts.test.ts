@@ -36,6 +36,17 @@ describe('resolveXlsxShortcuts', () => {
     expect(issues.map(({ code }) => code)).toEqual(['reserved-chord', 'reserved-chord', 'reserved-chord', 'reserved-chord']);
   });
 
+  test('keeps region cycling and the context menu key', () => {
+    const { issues, owners } = resolveXlsxShortcuts({ bold: ['F6', 'Shift+F6', 'Shift+F10', 'F10', 'Mod+F6'] }, { mac: false });
+    expect(issues.map(({ code, chord }) => [code, chord])).toEqual([
+      ['reserved-chord', 'F6'],
+      ['reserved-chord', 'Shift+F6'],
+      ['reserved-chord', 'Shift+F10'],
+    ]);
+    expect(owners.get('f10')).toBe('bold');
+    expect(owners.get('Mod+f6')).toBe('bold');
+  });
+
   test('a host chord takes a clipboard default', () => {
     const { owners, chords, issues } = resolveXlsxShortcuts({ bold: 'Mod+C' }, { mac: false });
     expect(owners.get('Mod+c')).toBe('bold');

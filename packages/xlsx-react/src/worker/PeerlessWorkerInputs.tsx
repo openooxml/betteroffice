@@ -145,7 +145,7 @@ export const PeerlessWorkerCellInput = memo(function PeerlessWorkerCellInput({ c
     onCompositionStart={() => controller.start('cell')}
     onCompositionEnd={(event) => controller.end(event.nativeEvent.data, event.currentTarget.value)}
     onKeyDown={(event) => {
-      if (!commands?.shortcutAt(event)) event.stopPropagation();
+      if (!commands?.claimsKey(event)) event.stopPropagation();
       if (controller.key('cell', event)) return;
       if (controller.holdCellKey(event)) { event.preventDefault(); event.stopPropagation(); return; }
       if (event.key === 'Enter') { controller.commit('cell', event.shiftKey ? 'up' : 'down'); event.preventDefault(); }

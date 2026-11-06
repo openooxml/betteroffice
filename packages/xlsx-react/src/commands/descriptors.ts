@@ -189,11 +189,17 @@ const GRID_MOD_KEYS: ReadonlySet<string> = new Set(['a', 'c', 'v', 'x']);
 
 /**
  * Whether the grid keeps a canonical chord whatever a host maps: navigation and editing keys
- * with any modifiers, and select all. The clipboard chords are commands a host may move.
+ * with any modifiers, select all, region cycling (F6) and the context menu (Shift+F10). The clipboard chords are commands a host may move.
  */
 export function gridKeepsChord(canonical: string): boolean {
   const parsed = parseChord(canonical);
-  return GRID_KEYS.has(parsed.key) || ((parsed.mod || parsed.ctrl) && parsed.key === 'a');
+  const command = parsed.mod || parsed.ctrl || parsed.alt;
+  return (
+    GRID_KEYS.has(parsed.key) ||
+    ((parsed.mod || parsed.ctrl) && parsed.key === 'a') ||
+    (!command && parsed.key === 'f6') ||
+    (!command && parsed.shift && parsed.key === 'f10')
+  );
 }
 
 /**

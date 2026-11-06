@@ -1823,7 +1823,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
                       }}
                       onCompositionStart={() => startComposition('cell')} onCompositionEnd={(event) => endComposition(event.currentTarget.value)}
                       onKeyDown={(event) => {
-                        if (!commands.shortcutAt(event)) event.stopPropagation();
+                        if (!commands.claimsKey(event)) event.stopPropagation();
                         if (event.nativeEvent.isComposing || event.keyCode === 229) return;
                         if (event.key === 'Enter') { commitDraft('cell', event.shiftKey ? 'up' : 'down'); event.preventDefault(); }
                         else if (event.key === 'Tab') { commitDraft('cell', event.shiftKey ? 'left' : 'right'); event.preventDefault(); }

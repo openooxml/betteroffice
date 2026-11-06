@@ -1353,6 +1353,11 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     } catch (error) { refused = { error }; }
     return { write, resolve, reject, refused, marker };
   };
+  const plainClipboardAccess = (): ReturnType<typeof clipboardAccess> => {
+    const read = navigator.clipboard.readText().then((text) => ({ text, html: null }));
+    void read.catch(() => {});
+    return { read };
+  };
   const clipboard = (kind: 'copy' | 'cut' | 'paste', access: ReturnType<typeof clipboardAccess>): Promise<unknown> => {
     if (!clipboardAllowed(kind)) {
       const refusal = new XlsxCommandAdmissionError('editor-unavailable');
@@ -1436,13 +1441,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     if (!clipboardAllowed(base) || draftController.getSnapshot().cell) {
       return handledRejection(new XlsxCommandAdmissionError('editor-unavailable'));
     }
-    let access: ReturnType<typeof clipboardAccess>;
-    if (kind === 'pastePlainText') {
-      const read = navigator.clipboard.readText().then((text) => ({ text, html: null }));
-      void read.catch(() => {});
-      access = { read };
-    } else access = clipboardAccess(base);
-    return clipboard(base, access);
+    return clipboard(base, kind === 'pastePlainText' ? plainClipboardAccess() : clipboardAccess(base));
   };
   const settledFor = (owner: NonNullable<typeof run>) => ownerRef.current === owner && owner.ready && owner.current &&
     !owner.retiring && !owner.failure && !coordinator.pending && !draftController.ownsFocus &&
@@ -1838,7 +1837,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     if (pressed) {
       const kind = pressed === 'pastePlainText' ? 'paste' : pressed;
       if (clipboardAllowed(kind)) {
-        const access = clipboardAccess(kind);
+        const access = pressed === 'pastePlainText' ? plainClipboardAccess() : clipboardAccess(kind);
         const refuse = () => access.reject?.(new XlsxCommandAdmissionError('editor-unavailable'));
         afterNavigation(() => draftController.getSnapshot().cell ? refuse() : clipboard(kind, access), refuse);
       }

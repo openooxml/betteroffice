@@ -73,6 +73,21 @@ for (const mode of ['async', 'legacy', 'legacy-worker']) {
       await expect(menu.getByRole('menuitem', { name: 'Copy', exact: true })).not.toContainText('Ctrl');
     });
 
+    test('a released chord reaches the host from the cell editor and chrome', async ({ page }) => {
+      const grid = await open(page, mode, { save: null, copy: 'Mod+Alt+C' });
+      await grid.press('x');
+      const editor = page.getByTestId('xlsx-cell-editor');
+      await expect(editor).toBeFocused();
+      await editor.press('Control+S');
+      expect((await read(page, (probe) => probe.hostKeys)).at(-1)).toEqual({ key: 's', prevented: false });
+      await editor.press('Escape');
+      await page.getByRole('button', { name: 'Bold', exact: true }).first().focus();
+      await page.keyboard.press('Control+Alt+C');
+      const last = (await read(page, (probe) => probe.hostKeys)).at(-1);
+      expect(last?.key).toBe('c');
+      if (mode !== 'async') expect(last?.prevented).toBe(false);
+    });
+
     test('refused entries are reported and plugin chords follow the map', async ({ page }) => {
       const grid = await open(page, mode, {
         bold: 'Mod+ArrowLeft',

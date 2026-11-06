@@ -80,6 +80,8 @@ export function useCommandShortcuts(
         return;
       }
       if (isTextField(target) && !FIELD_COMMANDS.has(binding.id)) return;
+      const state = controller.store.getState(binding.id, binding.args as never);
+      if (!state.enabled && state.disabledReason.code === 'unsupported-command') return;
       event.preventDefault();
       if (event.repeat && !REPEATABLE.has(binding.id)) return;
       void controller.store.execute(binding.id, binding.args as never);
