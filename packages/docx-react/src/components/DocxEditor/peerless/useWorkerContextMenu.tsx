@@ -13,7 +13,6 @@ import { readClipboardFragment } from '../internals/clipboardHtml';
 import { WorkerObjectDialog } from './WorkerObjectDialog';
 import type { PeerlessPropertyIntent } from './inputEvents';
 import type { DocxCommandResult } from '../../../commands/types';
-import type { DocxClipboardFragment } from '@betteroffice/docx/yrs';
 import type { PeerlessViewSnapshot } from './viewStore';
 
 const IMAGE_WRAP_TARGETS: ReadonlySet<string> = new Set<ImageLayoutTarget>([

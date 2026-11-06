@@ -86,10 +86,11 @@ function isVariantId(id: string): id is DocxShortcutVariantId {
 }
 
 function shortcutDefaults(mac: boolean): ShortcutDefault[] {
-  return Object.values(DOCX_COMMAND_DESCRIPTORS).flatMap((descriptor) => {
+  return Object.values(DOCX_COMMAND_DESCRIPTORS).flatMap((descriptor): ShortcutDefault[] => {
     const shortcuts = (descriptor.shortcuts as readonly DocxCommandShortcut[]).filter((shortcut) =>
       shortcutMatchesPlatform(shortcut, mac)
     );
+    if (shortcuts.length === 0) return [];
     if (descriptor.id !== 'alignment') {
       return [{ id: descriptor.id, chords: shortcuts.map(({ chord }) => chord) }];
     }

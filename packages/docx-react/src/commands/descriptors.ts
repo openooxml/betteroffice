@@ -8,10 +8,17 @@ import type {
 import {
   formatChord,
   isMacPlatform,
-  normalizeChord,
+  normalizeChord as normalizeHostChord,
+  parseChord,
 } from '../../../../shared/keyboard/chords';
 
-export { formatChord, isMacPlatform, matchesChord, normalizeChord } from '../../../../shared/keyboard/chords';
+export { formatChord, isMacPlatform, matchesChord } from '../../../../shared/keyboard/chords';
+
+/** `chord` in canonical form, or null; contributed chords name `Mod`, never a physical `Ctrl`. */
+export function normalizeChord(chord: string): string | null {
+  const canonical = normalizeHostChord(chord);
+  return canonical && !parseChord(canonical).ctrl ? canonical : null;
+}
 
 type DescriptorTable = { readonly [K in DocxCommandId]: DocxCommandDescriptor<K> };
 

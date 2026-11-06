@@ -13,7 +13,7 @@
  * platform-aware key formatter live in `KeyboardShortcutsDialog/ShortcutItem.tsx`.
  */
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from '../../i18n';
 import type { TranslationKey } from '@betteroffice/docx-i18n';
 import {
@@ -26,7 +26,7 @@ import {
   getAllCategories,
 } from './KeyboardShortcutsDialog/data';
 import { localizeKeys, ShortcutItem } from './KeyboardShortcutsDialog/ShortcutItem';
-import { useDocxCommands } from '../../commands/hooks';
+import { DocxCommandContext } from '../../commands/DocxCommandProvider';
 export { formatKeys as formatShortcutKeys } from './KeyboardShortcutsDialog/ShortcutItem';
 
 // ============================================================================
@@ -128,7 +128,7 @@ export const KeyboardShortcutsDialog: React.FC<KeyboardShortcutsDialogProps> = (
   className = '',
 }) => {
   const { t } = useTranslation();
-  const commands = useDocxCommands();
+  const commands = useContext(DocxCommandContext) ?? undefined;
   const dialogRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [searchQuery, setSearchQuery] = useState('');
