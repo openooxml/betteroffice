@@ -1,6 +1,7 @@
 //! rewriting stored formulas on row/column insert/delete: refs shift, ranges
 //! clip, wholly deleted refs collapse to `#REF!`. runs before cells shift.
 
+use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
@@ -131,40 +132,64 @@ pub fn remap_proposal_formula(
     sheet_names: &[String],
     op: &Op,
 ) -> Option<String> {
-    if let Op::RenameSheet { sheet, name } | Op::RestoreSheet { sheet, name, .. } = op {
-        let renamed = scan_sheet_rename(source, sheet_names.get(sheet.0 as usize)?, name);
-        return (!renamed.ambiguous && renamed.formula.len() <= MAX_FORMULA_BYTES)
-            .then_some(renamed.formula);
+    ProposalSheets::new(sheet_names).remap(source, owner, op)
+}
+
+/// the sheet names many formulas remap against, indexed at most once.
+#[doc(hidden)]
+pub struct ProposalSheets<'a> {
+    sheet_names: &'a [String],
+    names: OnceCell<HashMap<String, SheetId>>,
+}
+
+impl<'a> ProposalSheets<'a> {
+    pub fn new(sheet_names: &'a [String]) -> Self {
+        Self {
+            sheet_names,
+            names: OnceCell::new(),
+        }
     }
-    let Some(target) = structural_target(op) else {
-        return Some(source.to_string());
-    };
-    let names = sheet_names
-        .iter()
-        .enumerate()
-        .map(|(index, name)| (name.to_lowercase(), SheetId(index as u32)))
-        .collect();
-    let index = SheetIndex {
-        names: &names,
-        target,
-        target_name: sheet_names.get(target.0 as usize)?,
-    };
-    if has_unresolvable_binding(source, &index) {
-        return None;
+
+    /// [`remap_proposal_formula`] over these names.
+    pub fn remap(&self, source: &str, owner: SheetId, op: &Op) -> Option<String> {
+        let sheet_names = self.sheet_names;
+        if let Op::RenameSheet { sheet, name } | Op::RestoreSheet { sheet, name, .. } = op {
+            let renamed = scan_sheet_rename(source, sheet_names.get(sheet.0 as usize)?, name);
+            return (!renamed.ambiguous && renamed.formula.len() <= MAX_FORMULA_BYTES)
+                .then_some(renamed.formula);
+        }
+        let Some(target) = structural_target(op) else {
+            return Some(source.to_string());
+        };
+        let names = self.names.get_or_init(|| {
+            sheet_names
+                .iter()
+                .enumerate()
+                .map(|(index, name)| (name.to_lowercase(), SheetId(index as u32)))
+                .collect()
+        });
+        let index = SheetIndex {
+            names,
+            target,
+            target_name: sheet_names.get(target.0 as usize)?,
+        };
+        if has_unresolvable_binding(source, &index) {
+            return None;
+        }
+        let expr = parse_formula(source).ok()?;
+        if contains_table_reference(&expr) {
+            return None;
+        }
+        let matches = |ref_sheet: &Option<String>| resolves_to_target(ref_sheet, owner, &index);
+        let mut changed = false;
+        let rewritten = transform(&expr, op, &matches, &mut changed);
+        if !changed {
+            return Some(source.to_string());
+        }
+        let formula = rewritten.to_formula();
+        parse_formula(&formula).ok()?;
+        Some(formula)
     }
-    let expr = parse_formula(source).ok()?;
-    if contains_table_reference(&expr) {
-        return None;
-    }
-    let matches = |ref_sheet: &Option<String>| resolves_to_target(ref_sheet, owner, &index);
-    let mut changed = false;
-    let rewritten = transform(&expr, op, &matches, &mut changed);
-    if !changed {
-        return Some(source.to_string());
-    }
-    let formula = rewritten.to_formula();
-    parse_formula(&formula).ok()?;
-    Some(formula)
 }
 
 pub(crate) fn remap_hyperlink_locations(wb: &mut Workbook, op: &Op) -> Vec<Op> {

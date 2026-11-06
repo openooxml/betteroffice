@@ -36,8 +36,8 @@ use ooxml_drawingml::chart::ChartSpace;
 use serde::{Deserialize, Serialize};
 use xlsx_calc::graph::DepGraph;
 use xlsx_calc::{
-    RecalcResult, rebuild_and_recalc_all_with_seed, recalc_after_with_recomputed,
-    recalc_after_with_seed,
+    RecalcResult, rebuild_and_recalc_all_after, rebuild_and_recalc_all_with_seed,
+    recalc_after_with_recomputed, recalc_after_with_seed,
 };
 use xlsx_model::{
     Border, BorderEdge, BorderStyle, CellFormat, CellRange, CellRef, CellValue, ChartAnchor,
@@ -1064,8 +1064,12 @@ impl Workbook {
             .map_err(|error| Error::CollaborativeState(error.to_string()))?;
         let migrated = candidate.encode_state_as_update_v1();
         validate_collaboration_state(migrated.len(), candidate.state_vector_entries())?;
-        let (graph, recalc) =
-            rebuild_and_recalc_all_with_seed(&mut model, options.now_serial, self.rand_seed);
+        let (graph, recalc) = rebuild_and_recalc_all_after(
+            &mut model,
+            self.graph.as_ref(),
+            options.now_serial,
+            self.rand_seed,
+        );
         let mut calculation = calculation_result(&recalc);
         calculation.changed = changed_cells_between(&self.model, &model);
         self.authority = candidate;
@@ -1326,8 +1330,12 @@ impl Workbook {
         let mut model = staged.model;
         retain_array_formulas(&self.model, &mut model);
         let update = staged.update;
-        let (graph, recalc) =
-            rebuild_and_recalc_all_with_seed(&mut model, options.now_serial, self.rand_seed);
+        let (graph, recalc) = rebuild_and_recalc_all_after(
+            &mut model,
+            self.graph.as_ref(),
+            options.now_serial,
+            self.rand_seed,
+        );
         let mut calculation = calculation_result(&recalc);
         calculation.changed = changed_cells_between(&self.model, &model);
         self.authority
@@ -2133,7 +2141,50 @@ impl Workbook {
             }
         }
         let ops = move_range_ops(&self.model, sheet, source, target)?;
+        self.carry_moved_answers(sheet, source, target, &ops);
         self.apply_ops(ops, options)
+    }
+
+    /// a move writes the cells it changes as plain values and formulas, and
+    /// none where a moved cell equals what it lands on, so what the graph holds
+    /// as answers has to be told where every formula in `source` went.
+    fn carry_moved_answers(
+        &self,
+        moved: SheetId,
+        source: CellRange,
+        target: CellRange,
+        ops: &[Op],
+    ) {
+        let Some(graph) = &self.graph else {
+            return;
+        };
+        let written: HashMap<_, _> = ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::SetCell { sheet, at, cell } => Some(((*sheet, *at), cell.formula.as_deref()?)),
+                _ => None,
+            })
+            .collect();
+        let mut moves: Vec<_> = written
+            .iter()
+            .filter(|((sheet, at), _)| *sheet != moved || !target.contains(*at))
+            .map(|(&(sheet, at), formula)| (sheet, at, at, (*formula).to_owned()))
+            .collect();
+        let cells = self.model.sheet(moved).into_iter();
+        moves.extend(
+            cells
+                .flat_map(|cells| cells.cells_in_range(source))
+                .filter_map(|(from, cell)| {
+                    let stored = cell.formula.as_deref()?;
+                    let to = CellRef::new(
+                        from.row - source.start.row + target.start.row,
+                        from.col - source.start.col + target.start.col,
+                    );
+                    let formula = written.get(&(moved, to)).copied().unwrap_or(stored);
+                    Some((moved, from, to, formula.to_owned()))
+                }),
+        );
+        graph.carry_answers(&moves);
     }
 
     pub fn apply_ops(
@@ -2335,6 +2386,7 @@ impl Workbook {
         let delta = self.geometry_delta(&ops);
         let rebased = self.rebased_proposals(&ops);
         self.apply_model_history(|undo, model| undo.undo(model))?;
+        self.rebase_answers(&names_before, &ops);
         self.bump_model_epoch();
         self.queue_geometry_delta(delta);
         self.edited_since_open = true;
@@ -2396,6 +2448,7 @@ impl Workbook {
         let delta = self.geometry_delta(&ops);
         let rebased = self.rebased_proposals(&ops);
         self.apply_model_history(|undo, model| undo.redo(model))?;
+        self.rebase_answers(&names_before, &ops);
         self.bump_model_epoch();
         self.queue_geometry_delta(delta);
         self.edited_since_open = true;
@@ -3523,8 +3576,12 @@ impl Workbook {
         self.bump_model_epoch();
         self.recalculated_since_open = true;
         self.calculations_since_open = self.calculations_since_open.saturating_add(1);
-        let (graph, result) =
-            rebuild_and_recalc_all_with_seed(&mut self.model, options.now_serial, self.rand_seed);
+        let (graph, result) = rebuild_and_recalc_all_after(
+            &mut self.model,
+            self.graph.as_ref(),
+            options.now_serial,
+            self.rand_seed,
+        );
         self.graph = Some(graph);
         self.dirty_geometry_cells(&result.changed);
         let result = calculation_result(&result);
@@ -3535,8 +3592,9 @@ impl Workbook {
 
     /// Derives what a recalculation would leave unevaluated, for a session
     /// opened or restored without one, under the calculation context it was
-    /// saved with, if any: the uncomputable calls the formulas reach over the
-    /// values held and the cells reading them, not the engine's other gaps.
+    /// saved with, if any: the uncomputable and unknown calls the formulas
+    /// reach over the values held and the cells reading them, not the engine's
+    /// other gaps.
     pub(crate) fn derive_unevaluated(&mut self, context: Option<CalculationOptions>) {
         if self.may_call_uncomputable() {
             self.ensure_graph();
@@ -3554,8 +3612,9 @@ impl Workbook {
         }
     }
 
-    /// whether any formula's text may call an uncomputable function, so a
-    /// workbook without one derives nothing and builds no graph for it.
+    /// whether any formula's text may call an uncomputable or unknown
+    /// function, so a workbook without one derives nothing and builds no graph
+    /// for it.
     fn may_call_uncomputable(&self) -> bool {
         let may_call = xlsx_calc::functions::may_call_uncomputable;
         self.model
