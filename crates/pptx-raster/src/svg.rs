@@ -22,6 +22,10 @@ use tiny_skia::{IntSize, Pixmap, PremultipliedColorU8, Transform};
 
 use crate::MAX_IMAGE_PIXELS;
 
+/// Work per pixel of a bitmap inside a metafile, which `resvg` decodes on
+/// every render whatever size it is drawn at: about 12 ns.
+const IMAGE_DECODE_WORK: u64 = 4;
+
 /// Peak memory one SVG decode may use beyond its output raster and group
 /// layers, which the caller charges to the slide's image budget.
 pub const SVG_MEMORY_ENVELOPE: u64 = 100 << 20;
@@ -248,6 +252,7 @@ pub struct SvgImage {
     tree: usvg::Tree,
     size: IntSize,
     pixels: u64,
+    work: u64,
 }
 
 /// Whether `bytes` are worth handing to [`parse`]. `image`'s sniffer never
@@ -269,6 +274,15 @@ pub fn parse(bytes: &[u8]) -> Result<SvgImage, SvgRefusal> {
 
 /// [`parse`], supersampling only as far as `pixels` of raster and layers.
 pub(crate) fn parse_within(bytes: &[u8], pixels: u64) -> Result<SvgImage, SvgRefusal> {
+    parse_within_work(bytes, pixels, MAX_SVG_RENDER_WORK)
+}
+
+/// [`parse_within`], rendering within `work` of the caller's budget too.
+pub(crate) fn parse_within_work(
+    bytes: &[u8],
+    pixels: u64,
+    work: u64,
+) -> Result<SvgImage, SvgRefusal> {
     if bytes.len() > MAX_SVG_BYTES {
         return Err(SvgRefusal::DocumentTooLarge);
     }
@@ -304,8 +318,13 @@ pub(crate) fn parse_within(bytes: &[u8], pixels: u64) -> Result<SvgImage, SvgRef
     audit::audit(&document)?;
     let tree = guarded(|| usvg::Tree::from_xmltree(&document, &sandbox()))?
         .map_err(|_| SvgRefusal::Unparsable)?;
-    let (size, pixels) = guarded(|| raster(&tree, pixels))??;
-    Ok(SvgImage { tree, size, pixels })
+    let (size, pixels, work) = guarded(|| raster(&tree, pixels, work))??;
+    Ok(SvgImage {
+        tree,
+        size,
+        pixels,
+        work,
+    })
 }
 
 pub(crate) fn metafile_fontdb(fonts: &ooxml_text::FontStore) -> Arc<usvg::fontdb::Database> {
@@ -323,9 +342,22 @@ pub(crate) fn has_text_element(bytes: &[u8]) -> bool {
 }
 
 /// Accepts only output of the bounded metafile player.
+#[cfg(test)]
 pub(crate) fn parse_metafile(
     bytes: &[u8],
     budget: u64,
+    fontdb: Option<Arc<usvg::fontdb::Database>>,
+) -> Result<SvgImage, SvgRefusal> {
+    parse_metafile_within(bytes, budget, MAX_SVG_RENDER_WORK, fontdb)
+}
+
+/// [`parse_metafile`], rendering within `work_left` of the caller's budget.
+/// Priced node by node; past the budget at its own size it renders at half
+/// or a quarter of it, and past that it is refused.
+pub(crate) fn parse_metafile_within(
+    bytes: &[u8],
+    budget: u64,
+    work_left: u64,
     fontdb: Option<Arc<usvg::fontdb::Database>>,
 ) -> Result<SvgImage, SvgRefusal> {
     if bytes.len() > MAX_SVG_BYTES {
@@ -388,18 +420,41 @@ pub(crate) fn parse_metafile(
     if size.width() > MAX_SVG_RASTER_DIM || size.height() > MAX_SVG_RASTER_DIM {
         return Err(SvgRefusal::RasterTooLarge);
     }
-    let area = u64::from(size.width()) * u64::from(size.height());
-    let pixels = area
-        .saturating_mul(1 + 2 * depth as u64)
-        .saturating_add(image_pixels.load(Ordering::Relaxed));
-    let work = area.saturating_mul(document.descendants().count() as u64);
-    if image_refused.load(Ordering::Relaxed) || pixels > budget || work > MAX_SVG_RENDER_WORK {
+    if image_refused.load(Ordering::Relaxed) {
         return Err(SvgRefusal::RenderTooCostly);
     }
-    Ok(SvgImage { tree, size, pixels })
+    let images = image_pixels.load(Ordering::Relaxed);
+    let limit = work_left.min(MAX_SVG_RENDER_WORK);
+    for divisor in [1, 2, 4] {
+        let scaled = IntSize::from_wh(
+            size.width().div_ceil(divisor),
+            size.height().div_ceil(divisor),
+        )
+        .ok_or(SvgRefusal::Unparsable)?;
+        let mut strokes = (MAX_SVG_STROKE_VERBS / 2) as f64;
+        let cost = guarded(|| cost::measure(&tree, scaled, Some(&mut strokes), true))??;
+        let charged = cost.pixels.saturating_add(images);
+        let work = cost
+            .work
+            .saturating_add(images.saturating_mul(IMAGE_DECODE_WORK));
+        if work <= limit && charged <= budget {
+            return Ok(SvgImage {
+                tree,
+                size: scaled,
+                pixels: charged,
+                work,
+            });
+        }
+    }
+    Err(SvgRefusal::RenderTooCostly)
 }
 
 impl SvgImage {
+    /// The render work this image was priced at, for the slide's budget.
+    pub(crate) fn work(&self) -> u64 {
+        self.work
+    }
+
     /// Pixels the render will allocate, for the caller's decode budget: the
     /// output raster plus the deepest stack of group layers and clip masks.
     pub fn pixels(&self) -> u64 {
@@ -458,7 +513,7 @@ fn guarded<T>(step: impl FnOnce() -> T) -> Result<T, SvgRefusal> {
 /// priced again with their strokes drawn, out of [`MAX_SVG_STROKE_VERBS`]
 /// pieces split between the two. At the intrinsic size only the painting
 /// refuses; a raster too large for the budget is the caller's to skip.
-fn raster(tree: &usvg::Tree, budget: u64) -> Result<(IntSize, u64), SvgRefusal> {
+fn raster(tree: &usvg::Tree, budget: u64, work: u64) -> Result<(IntSize, u64, u64), SvgRefusal> {
     let width = tree.size().width();
     let height = tree.size().height();
     if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
@@ -479,11 +534,11 @@ fn raster(tree: &usvg::Tree, budget: u64) -> Result<(IntSize, u64), SvgRefusal> 
     }
     let intrinsic = sizes[sizes.len() - 1];
     let fits = |cost: &cost::Cost, size: IntSize| {
-        cost.work <= MAX_SVG_RENDER_WORK && (cost.pixels <= budget || size == intrinsic)
+        cost.work <= work.min(MAX_SVG_RENDER_WORK) && (cost.pixels <= budget || size == intrinsic)
     };
     let mut first = intrinsic;
     for &size in &sizes {
-        if fits(&cost::measure(tree, size, None)?, size) {
+        if fits(&cost::measure(tree, size, None, false)?, size) {
             first = size;
             break;
         }
@@ -491,9 +546,9 @@ fn raster(tree: &usvg::Tree, budget: u64) -> Result<(IntSize, u64), SvgRefusal> 
     let share = (MAX_SVG_STROKE_VERBS / 2) as f64;
     let mut strokes = share;
     for size in [first, intrinsic] {
-        let cost = cost::measure(tree, size, Some(&mut strokes))?;
+        let cost = cost::measure(tree, size, Some(&mut strokes), false)?;
         if fits(&cost, size) {
-            return Ok((size, cost.pixels));
+            return Ok((size, cost.pixels, cost.work));
         }
         if size == intrinsic {
             break;
@@ -506,6 +561,151 @@ fn raster(tree: &usvg::Tree, budget: u64) -> Result<(IntSize, u64), SvgRefusal> 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    fn canvas(body: &str) -> String {
+        format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1000" viewBox="0 0 1000 1000">{body}</svg>"#
+        )
+    }
+
+    fn priced(body: &str) -> Result<SvgImage, SvgRefusal> {
+        parse_metafile(canvas(body).as_bytes(), MAX_IMAGE_PIXELS, None)
+    }
+
+    fn clipped(count: usize, inner: &str) -> String {
+        (0..count)
+            .map(|i| format!(r#"<clipPath id="c{i}"><rect x="1" y="1" width="998" height="998"/></clipPath><g clip-path="url(#c{i})">{inner}</g>"#))
+            .collect()
+    }
+
+    #[test]
+    fn full_canvas_clip_layers_step_down_and_then_are_refused() {
+        let full = r#"<rect width="1000" height="1000" fill="blue"/>"#;
+        let few = priced(&clipped(20, full)).expect("twenty clips");
+        assert!(few.size.width() < 1000, "drawn at a reduced scale");
+        assert_eq!(
+            priced(&clipped(40, full)).err(),
+            Some(SvgRefusal::RenderTooCostly)
+        );
+    }
+
+    #[test]
+    fn clip_geometry_with_many_crossings_is_priced() {
+        let mut d = String::from("M0 0");
+        for vertex in 0..8_000 {
+            d.push_str(&format!(
+                " L{} {}",
+                (vertex * 997) % 1000,
+                if vertex % 2 == 0 { 0 } else { 1000 }
+            ));
+        }
+        let body: String = (0..5)
+            .map(|i| format!(r#"<clipPath id="z{i}"><path d="{d} Z"/></clipPath><g clip-path="url(#z{i})"><rect width="1000" height="1000" fill="green"/></g>"#))
+            .collect();
+        assert_eq!(priced(&body).err(), Some(SvgRefusal::RenderTooCostly));
+    }
+
+    #[test]
+    fn nested_clips_are_priced_up_to_a_depth() {
+        let nest = |depth: usize| {
+            let mut body = String::new();
+            let mut inner = String::from(r#"<rect width="1000" height="1000" fill="purple"/>"#);
+            for level in 0..depth {
+                body.push_str(&format!(r#"<clipPath id="n{level}"><rect x="{level}" y="{level}" width="990" height="990"/></clipPath>"#));
+                inner = format!(r#"<g clip-path="url(#n{level})">{inner}</g>"#);
+            }
+            body + &inner
+        };
+        assert!(priced(&nest(3)).is_ok());
+        let deep = |depth: usize| {
+            let mut defs =
+                String::from(r#"<clipPath id="d0"><rect width="10" height="10"/></clipPath>"#);
+            for level in 1..depth {
+                defs.push_str(&format!(r#"<clipPath id="d{level}" clip-path="url(#d{})"><rect width="10" height="10"/></clipPath>"#, level - 1));
+            }
+            defs + &format!(
+                r#"<g clip-path="url(#d{})"><rect width="10" height="10" fill="red"/></g>"#,
+                depth - 1
+            )
+        };
+        assert!(priced(&deep(4)).is_ok());
+        assert_eq!(priced(&deep(12)).err(), Some(SvgRefusal::TooManyLayers));
+    }
+
+    #[test]
+    fn filters_and_masks_are_refused_in_metafiles() {
+        let blur = r#"<filter id="b" x="-50" y="-50" width="100" height="100"><feGaussianBlur stdDeviation="200"/></filter><rect x="490" y="490" width="20" height="20" fill="black" filter="url(#b)"/>"#;
+        assert_eq!(priced(blur).err(), Some(SvgRefusal::UnsupportedElement));
+        let mask = r#"<mask id="m"><rect width="1000" height="1000" fill="white"/></mask><rect width="1000" height="1000" fill="red" mask="url(#m)"/>"#;
+        assert_eq!(priced(mask).err(), Some(SvgRefusal::UnsupportedElement));
+    }
+
+    #[test]
+    fn a_pattern_tile_is_priced_at_its_unclipped_size() {
+        let huge = r#"<pattern id="p" patternUnits="userSpaceOnUse" width="8000" height="8000"><rect width="8000" height="8000" fill="magenta"/></pattern><rect width="4" height="4" fill="url(#p)"/>"#;
+        let image = priced(huge).expect("drawn smaller");
+        assert!(image.size.width() < 1000);
+        let flood: String = (0..2_000)
+            .map(|_| r#"<rect width="1000" height="1000" fill="url(#q)"/>"#)
+            .collect();
+        let flood = format!(
+            r#"<pattern id="q" patternUnits="userSpaceOnUse" width="8" height="8"><rect width="4" height="4" fill="black"/></pattern>{flood}"#
+        );
+        assert_eq!(priced(&flood).err(), Some(SvgRefusal::RenderTooCostly));
+    }
+
+    fn encode64(bytes: &[u8]) -> String {
+        const TABLE: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let word = chunk.iter().enumerate().fold(0u32, |word, (i, &byte)| {
+                word | u32::from(byte) << (16 - 8 * i)
+            });
+            for i in 0..4 {
+                out.push(if i <= chunk.len() {
+                    TABLE[(word >> (18 - 6 * i) & 63) as usize] as char
+                } else {
+                    '='
+                });
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn clipped_bitmaps_pay_their_decode_on_every_render() {
+        let png = {
+            let image = image::RgbaImage::from_pixel(1000, 1000, image::Rgba([1, 2, 3, 255]));
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            image
+                .write_to(&mut bytes, image::ImageFormat::Png)
+                .expect("png");
+            encode64(&bytes.into_inner())
+        };
+        let picture =
+            format!(r#"<image width="1000" height="1000" href="data:image/png;base64,{png}"/>"#);
+        assert!(priced(&clipped(2, &picture)).is_ok());
+        assert_eq!(
+            priced(&clipped(40, &picture)).err(),
+            Some(SvgRefusal::RenderTooCostly)
+        );
+    }
+
+    #[test]
+    fn a_metafile_renders_within_the_work_its_caller_has_left() {
+        let full = r#"<rect width="1000" height="1000" fill="blue"/>"#;
+        let body = canvas(&clipped(10, full));
+        let alone =
+            parse_metafile_within(body.as_bytes(), MAX_IMAGE_PIXELS, MAX_SVG_RENDER_WORK, None)
+                .expect("alone");
+        assert!(alone.work() <= MAX_SVG_RENDER_WORK);
+        let squeezed =
+            parse_metafile_within(body.as_bytes(), MAX_IMAGE_PIXELS, alone.work() / 2, None)
+                .expect("smaller");
+        assert!(squeezed.size.width() < alone.size.width());
+        assert!(parse_metafile_within(body.as_bytes(), MAX_IMAGE_PIXELS, 1, None).is_err());
+    }
 
     fn refusal(bytes: &[u8]) -> Option<SvgRefusal> {
         parse(bytes).err()
@@ -1784,7 +1984,7 @@ pub(crate) mod tests {
                 format!("M0 0L96 48L0 96{close}").repeat(200)
             ));
             let image = parse(source.as_bytes()).expect("parse");
-            cost::measure(&image.tree, image.size, None)
+            cost::measure(&image.tree, image.size, None, false)
                 .expect("price")
                 .work
         };

@@ -21,6 +21,7 @@ pub mod fuzzing {
         let mut budget = crate::ImageBudget {
             pixels: crate::MAX_SLIDE_IMAGE_PIXELS - pixels,
             bytes: crate::MAX_SLIDE_IMAGE_BYTES - pixels * 8,
+            work: 0,
         };
         let image = budget.decode(bytes, &[])?;
         Some((image.pixmap.width(), image.pixmap.height()))
@@ -69,6 +70,9 @@ pub const MAX_SLIDE_DIM: u32 = 16_384;
 pub const MAX_SLIDE_PIXELS: u64 = 16_777_216;
 /// One decoded image, at twice the surface a slide may allocate.
 pub const MAX_IMAGE_PIXELS: u64 = 33_554_432;
+/// Render work all of one slide's SVG and metafile pictures may spend
+/// together: twice what one picture may, about two seconds.
+pub const MAX_SLIDE_SVG_WORK: u64 = 2 * MAX_SVG_RENDER_WORK;
 /// Every image decoded for one slide, at four times that surface.
 pub const MAX_SLIDE_IMAGE_PIXELS: u64 = 67_108_864;
 /// One decoded image's source buffer plus the pixmap it converts to, at
@@ -1364,8 +1368,10 @@ impl ImageCache {
             } else {
                 None
             };
-            let image = svg::parse_metafile(&svg, left, fontdb).ok()?;
+            let work_left = MAX_SLIDE_SVG_WORK.saturating_sub(budget.work);
+            let image = svg::parse_metafile_within(&svg, left, work_left, fontdb).ok()?;
             budget.charge(image.pixels(), image.pixels().saturating_mul(8))?;
+            budget.work += image.work();
             let intrinsic = image.intrinsic();
             let (data, size) = image.render().ok()?;
             decoded_image(data, size, intrinsic, effects)?
@@ -1474,6 +1480,7 @@ fn effects_fingerprint(effects: &[pptx_render::ImageEffect]) -> u64 {
 struct ImageBudget {
     pixels: u64,
     bytes: u64,
+    work: u64,
 }
 
 /// Decoder limits holding one image to what the slide may still spend on
@@ -1552,9 +1559,11 @@ impl ImageBudget {
         let left = (MAX_SLIDE_IMAGE_PIXELS.saturating_sub(self.pixels))
             .min(MAX_SLIDE_IMAGE_BYTES.saturating_sub(self.bytes) / 8)
             .min(MAX_IMAGE_PIXELS);
-        let image = svg::parse_within(bytes, left).ok()?;
+        let work_left = MAX_SLIDE_SVG_WORK.saturating_sub(self.work);
+        let image = svg::parse_within_work(bytes, left, work_left).ok()?;
         let pixels = image.pixels();
         self.charge(pixels, pixels.saturating_mul(8))?;
+        self.work += image.work();
         let (data, size) = image.render().ok()?;
         Some((data, size, image.intrinsic()))
     }
@@ -3341,6 +3350,7 @@ mod tests {
         let mut budget = ImageBudget {
             pixels: MAX_SLIDE_IMAGE_PIXELS - 16,
             bytes: MAX_SLIDE_IMAGE_BYTES - 1024,
+            work: 0,
         };
         assert!(budget.decode_raster(&gif).is_none());
 
