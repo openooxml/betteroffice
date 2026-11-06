@@ -29,7 +29,7 @@ fn table(column: u32, cells: [&str; 2]) -> String {
         })
         .collect::<String>();
     format!(
-        r#"<w:tbl><w:tblPr><w:tblW w:w="{}" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="{column}"/><w:gridCol w:w="{column}"/></w:tblGrid><w:tr>{cells}</w:tr></w:tbl>"#,
+        r#"<w:tbl><w:tblPr><w:tblW w:w="{}" w:type="dxa"/><w:tblCellMar><w:left w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/></w:tblCellMar></w:tblPr><w:tblGrid><w:gridCol w:w="{column}"/><w:gridCol w:w="{column}"/></w:tblGrid><w:tr>{cells}</w:tr></w:tbl>"#,
         2 * column
     )
 }

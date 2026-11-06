@@ -2461,7 +2461,9 @@ fn lower_table<T: ReadTxn>(
         .and_then(|value| {
             (value.is_finite() && (0.0..=255.0).contains(&value)).then_some(value as u8)
         })
-        .or_else(|| Some(env.compatibility_flags.compatibility_mode).filter(|mode| *mode > 0));
+        .or_else(|| {
+            Some(env.compatibility_flags.compatibility_mode).filter(|mode| *mode > 0 && *mode != 12)
+        });
     let layout_mode = map_string(tbl_pr, "tableLayout")
         .filter(|value| matches!(value.as_str(), "fixed" | "autofit"));
     let table_margin = |side: &str| {
@@ -7110,13 +7112,18 @@ mod tests {
                 "blocks": [paragraph(para_id, text, start)],
                 "colSpan": 1.0,
                 "rowSpan": 1.0,
-                "padding": { "top": 0.0, "right": 0.0, "bottom": 0.0, "left": 0.0 }
+                "padding": {
+                    "top": 0.0, "right": twips_to_pixels(108.0),
+                    "bottom": 0.0, "left": twips_to_pixels(108.0)
+                }
             })
         };
         let mut expected = json!([{
             "kind": "table",
             "id": "placeholder",
             "tableLayout": "autofit",
+            "cellMarginLeft": twips_to_pixels(108.0),
+            "cellMarginRight": twips_to_pixels(108.0),
             "rows": [
                 {
                     "id": "placeholder", "isHeader": false,
