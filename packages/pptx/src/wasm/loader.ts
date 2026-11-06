@@ -15,7 +15,7 @@ import { wasmAssetUrl } from './asset';
 import { copyDecodedFace, fontBytes, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
 import { metafileImageBytes } from '../render/browserImage';
 import { MAX_TIFF_BYTES, isTiff } from '../../../../shared/media';
-import { renderPng as renderEnginePng } from './enginePng';
+import { releasePng, renderPng as renderEnginePng } from './enginePng';
 import { exportPictureBytes } from '../render/png';
 import type { PptxPngOptions, PptxPngTarget } from './pngOptions';
 export type { PptxPngOptions, PptxPngTarget } from './pngOptions';
@@ -627,15 +627,15 @@ function openPresentationInternal(
     try { doc.free(); } catch {}
     throw peer ? peerError(error) : error;
   }
-  const exportFaces = new Map<number, PptxFontFace & { id: number }>();
-  const keepFace = (id: number, face: PptxFontFace) => {
-    exportFaces.set(id, { id, family: face.family, bold: face.bold ?? false, italic: face.italic ?? false, bytes: face.bytes.slice() });
+  const exportFaces = new Map<number, PptxFontFace & { id: number; fallback?: boolean }>();
+  const keepFace = (id: number, face: PptxFontFace, fallback = false) => {
+    exportFaces.set(id, { id, family: face.family, bold: face.bold ?? false, italic: face.italic ?? false, bytes: face.bytes.slice(), fallback });
     return id;
   };
   if (!peer) {
     try {
       for (const face of options.fonts ?? []) keepFace(registerFont(renderer, face), face);
-      for (const face of options.fallbackFonts ?? []) keepFace(registerFont(renderer, face, true), face);
+      for (const face of options.fallbackFonts ?? []) keepFace(registerFont(renderer, face, true), face, true);
     } catch (error) {
       try { renderer.free(); } catch {}
       try { doc.free(); } catch {}
@@ -893,7 +893,7 @@ function openPresentationInternal(
       return keepFace(wasmCall(() => registerFont(renderer, face)), face);
     },
     registerFallbackFont(face: PptxFontFace): number {
-      return keepFace(wasmCall(() => registerFont(renderer, face, true)), face);
+      return keepFace(wasmCall(() => registerFont(renderer, face, true)), face, true);
     },
     renderPng(target: PptxPngTarget, options: PptxPngOptions = {}): Promise<Uint8Array> {
       let slide: number;
@@ -1274,6 +1274,11 @@ function openPresentationInternal(
         observerInstalled = false;
       }
       try {
+        releasePng(doc);
+      } catch (error) {
+        disposalError ??= error;
+      }
+      try {
         renderer.free();
       } catch (error) {
         disposalError ??= error;
@@ -1342,7 +1347,7 @@ function openPresentationInternal(
           }
           manifest = JSON.stringify(entries);
           wasmCall(() => {
-            for (const face of faces) keepFace(registerFont(renderer, face, face.fallback), face);
+            for (const face of faces) keepFace(registerFont(renderer, face, face.fallback), face, face.fallback);
             if (peer.kind === 'peer') doc.registerPeerFontsJson(manifest);
           });
           faces.length = 0;

@@ -13,8 +13,10 @@ name = "pptx_engine"
 default = ["metafile-svg"]
 metafile-svg = ["pptx-edit/metafile-svg"]
 raster = ["dep:pptx-raster"]
+fonts = ["dep:betteroffice-fonts", "betteroffice-fonts/manager", "pptx-render/font-registration"]
 
 [dependencies]
+betteroffice-fonts = { workspace = true, optional = true }
 ooxml-drawingml = { workspace = true, features = ["tiff"] }
 pptx-edit = { workspace = true, features = ["engine"] }
 pptx-parse.workspace = true

@@ -24,6 +24,12 @@ pub struct Renderer {
     generation: u64,
     next_token: u64,
     layout_keys: HashMap<String, LayoutKeyRecord>,
+    #[cfg(feature = "fonts")]
+    embedded_fonts_loaded: bool,
+    #[cfg(feature = "fonts")]
+    owned_font_families: HashSet<String>,
+    #[cfg(feature = "fonts")]
+    default_font_requests: HashSet<(String, bool, bool, Vec<String>)>,
     #[cfg(test)]
     layout_count: usize,
     #[cfg(test)]
@@ -60,6 +66,12 @@ impl Renderer {
             generation: 0,
             next_token: 0,
             layout_keys: HashMap::new(),
+            #[cfg(feature = "fonts")]
+            embedded_fonts_loaded: false,
+            #[cfg(feature = "fonts")]
+            owned_font_families: HashSet::new(),
+            #[cfg(feature = "fonts")]
+            default_font_requests: HashSet::new(),
             #[cfg(test)]
             layout_count: 0,
             #[cfg(test)]
@@ -68,6 +80,20 @@ impl Renderer {
     }
 
     pub fn register_font<'a>(
+        &mut self,
+        family: &str,
+        bold: bool,
+        italic: bool,
+        bytes: impl Into<std::borrow::Cow<'a, [u8]>>,
+    ) -> Result<u32, EngineError> {
+        let id = self.install_font(family, bold, italic, bytes)?;
+        #[cfg(feature = "fonts")]
+        self.owned_font_families
+            .insert(family.trim().to_lowercase());
+        Ok(id)
+    }
+
+    fn install_font<'a>(
         &mut self,
         family: &str,
         bold: bool,
@@ -101,6 +127,80 @@ impl Renderer {
         self.rendered.clear();
         self.last_slide = None;
         Ok(id)
+    }
+
+    /// Registers the deck's embedded faces and the faces `manager` resolves
+    /// for what one slide asks for. A family the caller or the deck supplies
+    /// keeps its faces first, whatever style the slide asks for.
+    #[cfg(feature = "fonts")]
+    pub fn register_default_fonts(
+        &mut self,
+        session: &pptx_edit::DeckSession,
+        slide_index: u32,
+        manager: &betteroffice_fonts::FontManager,
+    ) -> Result<(), EngineError> {
+        self.register_embedded_fonts(session);
+        let scope = slide_scope(session, slide_index)?;
+        let requests = self
+            .renderer
+            .requested_font_faces_with_scripts(session.package(), std::slice::from_ref(&scope))
+            .map_err(engine_error)?;
+        for request in requests {
+            let key = (
+                request.family.trim().to_lowercase(),
+                request.bold,
+                request.italic,
+                request.scripts.clone(),
+            );
+            if self.default_font_requests.contains(&key) {
+                continue;
+            }
+            let has_primary = self.owned_font_families.contains(&key.0)
+                || self
+                    .renderer
+                    .has_font_face(&request.family, request.bold, request.italic);
+            let faces = manager.resolve(
+                &request.family,
+                request.bold,
+                request.italic,
+                &request.scripts,
+                betteroffice_fonts::LastResortOffice::PowerPoint,
+            );
+            for (index, face) in faces.into_iter().enumerate() {
+                if index == 0 && !has_primary {
+                    let bytes = face.load().map_err(engine_error)?;
+                    self.install_font(&request.family, request.bold, request.italic, bytes)?;
+                } else if !self
+                    .renderer
+                    .has_fallback_font(&face.family, face.bold, face.italic)
+                {
+                    let bytes = face.load().map_err(engine_error)?;
+                    self.register_fallback_font(&face.family, face.bold, face.italic, bytes)?;
+                }
+            }
+            self.default_font_requests.insert(key);
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "fonts")]
+    fn register_embedded_fonts(&mut self, session: &pptx_edit::DeckSession) {
+        if std::mem::replace(&mut self.embedded_fonts_loaded, true) {
+            return;
+        }
+        let package = session.package();
+        let owner = &package.presentation.part_path;
+        let (directory, name) = owner.rsplit_once('/').unwrap_or(("", owner));
+        let relationships = format!("{directory}/_rels/{name}.rels");
+        let fonts = betteroffice_fonts::embedded_font_definitions(
+            owner,
+            package.part_bytes(owner).unwrap_or_default(),
+            package.part_bytes(&relationships).unwrap_or_default(),
+            |path| package.part_bytes(path),
+        );
+        for font in fonts {
+            let _ = self.register_font(&font.family, font.bold, font.italic, font.data);
+        }
     }
 
     pub fn save_bytes(&self, session: &pptx_edit::DeckSession) -> Result<Vec<u8>, EngineError> {
