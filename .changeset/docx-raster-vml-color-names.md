@@ -4,4 +4,4 @@
 '@betteroffice/python-docx': patch
 ---
 
-Native page PNGs accept VML color names such as `black`, which used to refuse the page.
+Native page PNGs accept VML color names, and a list marker in the paragraph's default font no longer refuses the page with a missing font chain.
