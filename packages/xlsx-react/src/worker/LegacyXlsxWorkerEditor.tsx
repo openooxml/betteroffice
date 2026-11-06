@@ -54,6 +54,7 @@ import type { WorkerEditorApiBridge } from './createWorkerEditorApi';
 import { useLegacySessionWorkbook, EditableWorkbookSession, type EditableSessionWorkbookProps } from './useEditableSessionWorkbook';
 import type { WorkerPaintRequest, WorkerPaintResult } from './WorkerPaintSource';
 import { WorkerPaintSource } from './WorkerPaintSource';
+import { A11yGridCell } from '../components/A11yGridCell';
 
 const BRAND = '#217346';
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -1311,14 +1312,10 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     event.currentTarget.style.cursor = chart?.movable && acceptInput() ? 'move' : chart || hyperlink ? 'pointer' : 'default';
     event.currentTarget.title = chart ? '' : hyperlink?.tooltip ?? '';
   };
-  const onClick = (event: MouseEvent) => {
-    if (fromPlugin(event) || runRef.current?.failure) return;
-    const { cell } = point(event);
-    const start = clickStart.current;
-    clickStart.current = null;
+  const followLink = (row: number, col: number) => {
     const frame = sourceRef.current?.painted?.displayList;
-    if (!cell || !start || !frame || cell.row !== start.row || cell.col !== start.col) return;
-    const hyperlink = hyperlinkAtCell(frame, cell.row, cell.col);
+    if (!frame || !runRef.current || runRef.current.failure) return;
+    const hyperlink = hyperlinkAtCell(frame, row, col);
     if (!hyperlink) return;
     const href = safeExternalHyperlink(hyperlink);
     if (href) { window.open(href, '_blank', 'noopener,noreferrer'); return; }
@@ -1328,6 +1325,15 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     if (!destination) return;
     const sheet = sheets.findIndex((entry) => entry.name.toLowerCase() === destination.sheetName.toLowerCase());
     if (sheet >= 0) navigate(sheet, selectionAt(destination));
+  };
+  const onClick = (event: MouseEvent) => {
+    if (fromPlugin(event) || runRef.current?.failure) return;
+    const { cell } = point(event);
+    const start = clickStart.current;
+    clickStart.current = null;
+    const frame = sourceRef.current?.painted?.displayList;
+    if (!cell || !start || !frame || cell.row !== start.row || cell.col !== start.col) return;
+    followLink(cell.row, cell.col);
   };
   const onKeyDown = (event: KeyboardEvent) => {
     if (fromPlugin(event) || runRef.current?.failure || !viewRef.current || !selectionRef.current ||
@@ -1847,7 +1853,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
               <div role="row"><span role="columnheader" />{a11yGrid.columnHeaders.map((header) =>
                 <span key={header.col} role="columnheader">{header.label}</span>)}</div>
               {a11yGrid.rows.map((row) => <div key={row.row} role="row"><span role="rowheader">{row.header}</span>
-                {row.cells.map((cell) => <span key={cell.col} role="gridcell" aria-selected={cell.selected}>{cell.label}</span>)}
+                {row.cells.map((cell) => <A11yGridCell key={cell.col} cell={cell} onFollowLink={followLink} />)}
               </div>)}
             </div>
             {a11yGrid.charts.map((chart, index) => <div key={`${index}:${chart.label}`} style={visuallyHidden} role="img" aria-label={chart.label} />)}

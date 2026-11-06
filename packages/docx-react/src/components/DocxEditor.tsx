@@ -138,6 +138,7 @@ import { DocxEditorToolbar } from './DocxEditor/DocxEditorToolbar';
 import { DocxEditorPagedArea } from './DocxEditor/DocxEditorPagedArea';
 import { ContentControlWidgets } from './DocxEditor/ContentControlWidgets';
 import { CanvasPagedArea } from './DocxEditor/CanvasPagesView';
+import { MirrorLinkRouteContext, useMirrorLinkRoute } from './DocxEditor/mirrorLinkRoute';
 import { useCanvasRenderer } from './DocxEditor/hooks/useDisplayList';
 import { LazyPeerlessDocxEditor } from './DocxEditor/peerless/PeerlessDocxEditorLoader';
 import { LEGACY_SYNC_API_PROP, PeerlessSyncApiError } from './DocxEditor/peerless/contracts';
@@ -1056,6 +1057,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
   // PagedEditor ref declared early so comment management can read the live
   // Yrs session before the tracked-changes effect drives `setComments`.
   const pagedEditorRef = useRef<PagedEditorRef>(null);
+  const mirrorLinkRoute = useMirrorLinkRoute();
   const fontScope = useFontLoadScope(fonts);
 
   const {
@@ -2763,6 +2765,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
         pagedArea={
           <TrackedChangesContext.Provider value={{ options: trackedChangesOptions, peers: reviewPeers, user: collaboration?.user,
             clientId: collaboration?.clientId, items: reviewSidebarItems, navigate: navigateReviewItem }}>
+          <MirrorLinkRouteContext.Provider value={mirrorLinkRoute}>
           <CanvasPagedArea
             renderer={canvasRenderer}
             a11y={{
@@ -2911,6 +2914,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
               heldGeometry={pluginHost.heldGeometry}
             />
           </CanvasPagedArea>
+          </MirrorLinkRouteContext.Provider>
           </TrackedChangesContext.Provider>
         }
         loadingIndicator={

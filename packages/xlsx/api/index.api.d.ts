@@ -51,6 +51,12 @@ export interface A11yCell {
     text: string;
     selected: boolean;
     label: string;
+    /**
+     * The cell's hyperlink as the mirror exposes it: a safe external URL, or
+     * `#Sheet!A1` for a place in the workbook. Absent when the cell has no link
+     * or its target is not one the editor follows.
+     */
+    href?: string;
 }
 /**
  * A column header: the letter (`"A"`) and its aria label (`"Column A"`).

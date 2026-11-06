@@ -14,6 +14,7 @@ import type {
 } from './displayList';
 import { textRunRect, glyphRunRect, lineRect, type GeoRect } from './displayListGeometry';
 import { collectInteractiveOverlayLayers, hideOccludedControl } from './interactiveOverlay';
+import { sanitizeHref } from '../../utils/sanitizeHref';
 
 export const MIRROR_CLASS_NAMES = {
   page: 'layout-page layout-page-mirror',
@@ -104,12 +105,17 @@ function pageRegionPrimitives(page: DisplayPage): DisplayPrimitive[] {
   ];
 }
 
+/** The href the mirror exposes for `p`: only one whose scheme is safe to follow. */
+function mirrorHref(p: { href?: string }): string | undefined {
+  return sanitizeHref(p.href);
+}
+
 /** Whether the mirror renders `p` as a link: a hyperlink, or a note reference. */
 function mirrorLinks(p: DisplayPrimitive): boolean {
-  if (p.kind === 'image') return Boolean(p.href);
+  if (p.kind === 'image') return Boolean(mirrorHref(p));
   return (
     (p.kind === 'text' || p.kind === 'glyphRun') &&
-    (Boolean(p.href) || p.noteRef?.id !== undefined)
+    (Boolean(mirrorHref(p)) || p.noteRef?.id !== undefined)
   );
 }
 
@@ -330,7 +336,7 @@ export function displayPageHoldsMirrorId(page: DisplayPage, id: string): boolean
   return pageRegionPrimitives(page).some(
     (p) =>
       (p.kind === 'text' || p.kind === 'glyphRun') &&
-      !p.href &&
+      !mirrorHref(p) &&
       p.noteRef?.id !== undefined &&
       String(p.noteRef.id) === noteId &&
       (p.noteRef.kind ?? 'footnote') === kind
@@ -1417,7 +1423,7 @@ function createMirrorPrimitive(
       return el;
     }
     case 'image': {
-      const el = p.href ? doc.createElement('a') : doc.createElement('div');
+      const el = mirrorHref(p) ? doc.createElement('a') : doc.createElement('div');
       el.className = MIRROR_CLASS_NAMES.image;
       if (p.decorative) {
         el.setAttribute('aria-hidden', 'true');
@@ -1442,7 +1448,7 @@ function createMirrorPrimitive(
       // NodeSelection → resize overlay). Linked images stay pointer-inert so
       // mouse clicks keep the canvas hyperlink routing; their mirror anchors
       // remain keyboard-activatable for a11y either way.
-      if (!p.href) el.style.pointerEvents = 'auto';
+      if (!mirrorHref(p)) el.style.pointerEvents = 'auto';
       return el;
     }
     case 'shape': {
@@ -1498,15 +1504,16 @@ function placeAt(el: HTMLElement, rect: GeoRect, offsetY = 0): void {
 /** The id a text primitive's note-reference mark claims, once per page. */
 function noteRefAnchorId(p: DocAttrs): string | undefined {
   const noteRef = p.noteRef;
-  if (noteRef?.id === undefined || p.href) return undefined;
+  if (noteRef?.id === undefined || mirrorHref(p)) return undefined;
   return `oox-noteref-${noteRef.kind ?? 'footnote'}-${noteRef.id}`;
 }
 
 function createTextMirrorElement(doc: Document, p: DocAttrs, ctx: MirrorBuildCtx): HTMLElement {
   const noteRef = p.noteRef?.id !== undefined ? p.noteRef : undefined;
-  const el = p.href || noteRef ? doc.createElement('a') : doc.createElement('span');
+  const href = mirrorHref(p);
+  const el = href || noteRef ? doc.createElement('a') : doc.createElement('span');
   applyHrefAttrs(el, p);
-  if (noteRef && !p.href) {
+  if (noteRef && !href) {
     // body footnote/endnote reference mark → doc-noteref link to the note's
     // mirror element (W17). Same-document fragment target; id/kind are
     // numeric/enum-derived, so the href cannot carry attacker markup.
@@ -1525,7 +1532,7 @@ function createTextMirrorElement(doc: Document, p: DocAttrs, ctx: MirrorBuildCtx
 }
 
 function applyHrefAttrs(el: HTMLElement, p: DocAttrs): void {
-  const { href } = p;
+  const href = mirrorHref(p);
   if (!href) return;
   el.setAttribute('href', href);
   el.dataset.href = href;
@@ -1742,9 +1749,8 @@ function applyDocAttrs(el: HTMLElement, p: DocAttrs): void {
     const description = [p.revision.author, p.revision.date].filter(Boolean).join(', ');
     if (description) el.setAttribute('aria-description', description);
   }
-  if (p.href) {
-    el.dataset.href = p.href;
-  }
+  const href = mirrorHref(p);
+  if (href) el.dataset.href = href;
   applyInlineSdtWidgetAttrs(el, p.inlineSdtWidget);
   applyBlockSdtAttrs(el, p.sdt);
   if (p.sdtPath?.length) el.dataset.sdtPath = p.sdtPath.map((sdt) => sdt.groupId).join(' ');

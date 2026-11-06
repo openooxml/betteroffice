@@ -12,6 +12,7 @@ import type { WorkerDraftController } from './WorkerDraftController';
 import { WorkerPresentationStore, useWorkerPresentation } from './WorkerPresentationStore';
 import { PresenceStrip, RemoteSelections } from '../presence/Presence';
 import { usePeerlessPresence } from './usePeerlessPresence';
+import { A11yGridCell } from '../components/A11yGridCell';
 
 const selectSelection = (state: ReturnType<WorkerPresentationStore['getSnapshot']>) => state.selection;
 const selectPainted = (state: ReturnType<WorkerPresentationStore['getSnapshot']>) => state.painted;
@@ -72,8 +73,9 @@ export const PeerlessWorkerOverlay = memo(function PeerlessWorkerOverlay({ store
   </div>;
 });
 
-export const PeerlessWorkerAccessibility = memo(function PeerlessWorkerAccessibility({ store, active, sheets }: {
+export const PeerlessWorkerAccessibility = memo(function PeerlessWorkerAccessibility({ store, active, sheets, onFollowLink }: {
   store: WorkerPresentationStore; active: number; sheets: WorkbookSheetSummary[];
+  onFollowLink?: (row: number, col: number) => void;
 }) {
   const { t } = useTranslation();
   const painted = useWorkerPresentation(store, selectPainted);
@@ -87,16 +89,18 @@ export const PeerlessWorkerAccessibility = memo(function PeerlessWorkerAccessibi
     emptyCellLabelSelected: t('a11y.emptyCellLabelSelected'),
   }) : null, [frame, visible, sheetName, t]);
   if (!grid) return null;
-  return <PeerlessAccessibilityGrid grid={grid} />;
+  return <PeerlessAccessibilityGrid grid={grid} onFollowLink={onFollowLink} />;
 });
 
-const PeerlessAccessibilityGrid = memo(function PeerlessAccessibilityGrid({ grid }: { grid: ReturnType<typeof buildA11yGrid> }) {
+const PeerlessAccessibilityGrid = memo(function PeerlessAccessibilityGrid({ grid, onFollowLink }: {
+  grid: ReturnType<typeof buildA11yGrid>; onFollowLink?: (row: number, col: number) => void;
+}) {
   return <>
     <div style={hidden} role="grid" aria-label={grid.label}>
       <div role="row"><span role="columnheader" />{grid.columnHeaders.map((header) =>
         <span key={header.col} role="columnheader">{header.label}</span>)}</div>
       {grid.rows.map((row) => <div key={row.row} role="row"><span role="rowheader">{row.header}</span>
-        {row.cells.map((cell) => <span key={cell.col} role="gridcell" aria-selected={cell.selected}>{cell.label}</span>)}
+        {row.cells.map((cell) => <A11yGridCell key={cell.col} cell={cell} onFollowLink={onFollowLink} />)}
       </div>)}
     </div>
     {grid.charts.map((chart, index) => <div key={`${index}:${chart.label}`} style={hidden} role="img" aria-label={chart.label} />)}

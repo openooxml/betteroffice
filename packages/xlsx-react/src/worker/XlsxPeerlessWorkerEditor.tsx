@@ -1777,14 +1777,10 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     event.currentTarget.style.cursor = chart?.movable && editable() ? 'move' : chart || link ? 'pointer' : 'default';
     event.currentTarget.title = chart ? '' : link?.tooltip ?? '';
   };
-  const onClick = (event: MouseEvent) => {
-    if (fromPlugin(event) || run?.failure) return;
-    const { cell } = point(event);
-    const start = clickStart.current;
-    clickStart.current = null;
+  const followLink = (row: number, col: number) => {
     const frame = sourceRef.current?.painted?.displayList;
-    if (!cell || !start || !frame || cell.row !== start.row || cell.col !== start.col) return;
-    const link = hyperlinkAtCell(frame, cell.row, cell.col);
+    if (!frame || run?.failure) return;
+    const link = hyperlinkAtCell(frame, row, col);
     if (!link) return;
     const href = safeExternalHyperlink(link);
     if (href) { window.open(href, '_blank', 'noopener,noreferrer'); return; }
@@ -1793,6 +1789,18 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     if (!destination) return;
     const sheet = sheets.findIndex((entry) => entry.name.toLowerCase() === destination.sheetName.toLowerCase());
     if (sheet >= 0) navigate(sheet, selectionAt(destination));
+  };
+  const followLinkRef = useRef(followLink);
+  followLinkRef.current = followLink;
+  const followLinkFromMirror = useCallback((row: number, col: number) => followLinkRef.current(row, col), []);
+  const onClick = (event: MouseEvent) => {
+    if (fromPlugin(event) || run?.failure) return;
+    const { cell } = point(event);
+    const start = clickStart.current;
+    clickStart.current = null;
+    const frame = sourceRef.current?.painted?.displayList;
+    if (!cell || !start || !frame || cell.row !== start.row || cell.col !== start.col) return;
+    followLink(cell.row, cell.col);
   };
   const onKeyDown = (event: KeyboardEvent) => {
     if (fromPlugin(event) || !run?.ready || run.failure || !selectionRef.current || !viewRef.current ||
@@ -1969,7 +1977,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
           {!props.file && !error && <div data-testid="xlsx-empty" role="status" style={{ position: 'absolute', inset: 0,
             display: 'grid', placeItems: 'center', color: '#5f6368', pointerEvents: 'none' }}>{t('editor.openPrompt')}</div>}
         </div>
-        <PeerlessWorkerAccessibility store={presentation} active={active} sheets={sheets} />
+        <PeerlessWorkerAccessibility store={presentation} active={active} sheets={sheets} onFollowLink={followLinkFromMirror} />
         <PeerlessWorkerAnnouncer store={presentation} active={active} sheets={sheets} focusTarget={scrollRef} announceRef={announceRef} />
         {refusal && <div data-testid="xlsx-input-refusal" role="alert">
           {refusal.message ?? <>{commandReason(refusal.code, { translate: t }).message}{refusal.detail ? `: ${refusal.detail}` : ''}</>}
