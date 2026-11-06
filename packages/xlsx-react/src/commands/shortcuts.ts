@@ -47,8 +47,14 @@ export type XlsxShortcutId = XlsxNullArgsCommandId | XlsxPluginCommandId;
  */
 export type XlsxShortcuts = Readonly<Partial<Record<XlsxShortcutId, ShortcutBinding>>>;
 
-/** Commands the grid runs itself on their default chords. */
-const GRID_GESTURES: ReadonlySet<string> = new Set(['cut', 'copy', 'paste', 'pastePlainText']);
+/** Clipboard commands, which the grid runs itself on whatever chord holds them. */
+export type XlsxClipboardKind = 'cut' | 'copy' | 'paste' | 'pastePlainText';
+
+const GRID_GESTURES: ReadonlySet<string> = new Set<XlsxClipboardKind>(['cut', 'copy', 'paste', 'pastePlainText']);
+
+export function isClipboardKind(id: string | undefined): id is XlsxClipboardKind {
+  return id !== undefined && GRID_GESTURES.has(id);
+}
 
 function shortcutDefaults(): ShortcutDefault[] {
   return Object.values(XLSX_COMMAND_DESCRIPTORS).flatMap((descriptor): ShortcutDefault[] => {

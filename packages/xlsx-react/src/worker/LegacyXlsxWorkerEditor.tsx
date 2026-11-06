@@ -1355,13 +1355,11 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       }
       return;
     }
-    if (mod) {
-      const key = event.key.toLowerCase();
-      if (key === 'c' || key === 'x' || key === 'v') {
-        const kind = key === 'c' ? 'copy' : key === 'x' ? 'cut' : 'paste';
-        if (!deferNavigation(() => clipboard(kind))) clipboard(kind);
-        event.preventDefault(); return;
-      }
+    const pressed = commands.clipboardKey(event);
+    if (pressed) {
+      const kind = pressed === 'pastePlainText' ? 'paste' : pressed;
+      if (!deferNavigation(() => clipboard(kind))) clipboard(kind);
+      event.preventDefault(); return;
     }
     const request = selectionDataRequest(event);
     const key = { key: event.key, ctrlKey: event.ctrlKey, metaKey: event.metaKey, altKey: event.altKey, shiftKey: event.shiftKey };

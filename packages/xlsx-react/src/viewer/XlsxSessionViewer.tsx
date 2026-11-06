@@ -393,14 +393,12 @@ export function XlsxSessionViewer(props: Omit<XlsxWorkerViewerProps, 'file'> & {
       if (event.key === 'Escape' || event.key.startsWith('Arrow')) event.preventDefault();
       return;
     }
-    if (event.ctrlKey || event.metaKey) {
-      const key = event.key.toLowerCase();
-      if (key === 'c' || key === 'x') {
-        if (!run.selectionNavigation.defer(run.selectionContext(), () => { void copy(); })) void copy();
-        event.preventDefault(); return;
-      }
-      if (key === 'v') { event.preventDefault(); return; }
+    const clipboard = commands.clipboardKey(event);
+    if (clipboard === 'copy' || clipboard === 'cut') {
+      if (!run.selectionNavigation.defer(run.selectionContext(), () => { void copy(); })) void copy();
+      event.preventDefault(); return;
     }
+    if (clipboard) { event.preventDefault(); return; }
     const request = selectionDataRequest(event);
     const movement = selectionKeyReducer(selection, event, limits()).type === 'move';
     if (request || movement) {

@@ -1834,8 +1834,9 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
         placeSelection(activeRef.current, next); return true;
       } }, task, cancel)) task();
     };
-    if (mod && ['c', 'x', 'v'].includes(event.key.toLowerCase())) {
-      const kind = event.key.toLowerCase() === 'c' ? 'copy' : event.key.toLowerCase() === 'x' ? 'cut' : 'paste';
+    const pressed = commands.clipboardKey(event);
+    if (pressed) {
+      const kind = pressed === 'pastePlainText' ? 'paste' : pressed;
       if (clipboardAllowed(kind)) {
         const access = clipboardAccess(kind);
         const refuse = () => access.reject?.(new XlsxCommandAdmissionError('editor-unavailable'));

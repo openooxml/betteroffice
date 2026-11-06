@@ -262,7 +262,7 @@ describe('xlsx command descriptors', () => {
     expect(matchesChord('Mod+Z', event({ metaKey: true }), true)).toBe(true);
     expect(matchesChord('Mod+Z', event({ ctrlKey: true, shiftKey: true }), false)).toBe(false);
     expect(formatChord('Mod+Shift+Z', false)).toBe('Ctrl+Shift+Z');
-    expect(formatChord('Mod+Shift+Z', true)).toBe('⌘⇧Z');
+    expect(formatChord('Mod+Shift+Z', true)).toBe('⇧⌘Z');
     const mod = isMacPlatform() ? { metaKey: true } : { ctrlKey: true };
     const controller = createXlsxCommandController();
     expect(controller.shortcutAt(event({ key: 'Z', shiftKey: true, ...mod }))?.id).toBe('redo');

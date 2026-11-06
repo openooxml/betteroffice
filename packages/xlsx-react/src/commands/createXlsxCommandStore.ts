@@ -10,7 +10,9 @@ import type { ChordEvent } from '../../../../shared/keyboard/chords';
 import type { ResolvedShortcuts, ShortcutIssue } from '../../../../shared/keyboard/resolve';
 import {
   effectiveCommandShortcuts,
+  isClipboardKind,
   isGridGesture,
+  type XlsxClipboardKind,
   resolveXlsxShortcuts,
   type XlsxShortcuts,
 } from './shortcuts';
@@ -178,6 +180,11 @@ export interface XlsxCommandController {
    * moved or disabled the default it had.
    */
   claimsKey(event: ChordEvent, mac?: boolean): boolean;
+  /**
+   * The clipboard action the grid runs for a keystroke: the clipboard command holding its chord,
+   * or for a Mod chord no binding knows, the one its letter names.
+   */
+  clipboardKey(event: ChordEvent, mac?: boolean): XlsxClipboardKind | null;
   /** The shortcut id that holds a canonical chord. */
   shortcutOwner(chord: string): string | undefined;
   /** Whether the host moved or disabled the default holder of a canonical chord. */
@@ -643,12 +650,21 @@ export function createXlsxCommandController(): XlsxCommandController {
     claimsKey(event, mac = isMacPlatform()) {
       const table = shortcutTable(mac);
       const chord = pressedChord(table, event, mac);
-      if (chord !== null) {
-        const id = table.owners.get(chord)!;
-        if (!isGridGesture(id, chord, defaultShortcuts(mac))) return true;
-      }
+      if (chord !== null) return !isClipboardKind(table.owners.get(chord));
       const fallback = pressedChord(defaultShortcuts(mac), event, mac);
       return fallback !== null && table.owners.get(fallback) !== defaultShortcuts(mac).owners.get(fallback);
+    },
+    clipboardKey(event, mac = isMacPlatform()) {
+      const table = shortcutTable(mac);
+      const chord = pressedChord(table, event, mac);
+      if (chord !== null) {
+        const id = table.owners.get(chord);
+        return isClipboardKind(id) ? id : null;
+      }
+      if (pressedChord(defaultShortcuts(mac), event, mac) !== null) return null;
+      if (!event.ctrlKey && !event.metaKey) return null;
+      const letter = event.key.toLowerCase();
+      return letter === 'c' ? 'copy' : letter === 'x' ? 'cut' : letter === 'v' ? 'paste' : null;
     },
     shortcutOwner: (chord) => shortcutTable().owners.get(chord),
     releasedChord(chord) {

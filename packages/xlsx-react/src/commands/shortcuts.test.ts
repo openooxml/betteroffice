@@ -72,10 +72,26 @@ describe('command controller', () => {
     controller.setShortcuts({ copy: 'Mod+Alt+C' });
     expect(controller.claimsKey(copy, false)).toBe(true);
     expect(controller.shortcutAt(copy, false)).toBeNull();
-    expect(controller.shortcutAt(key({ key: 'c', ctrlKey: true, altKey: true }), false)?.id).toBe('copy');
-    controller.setShortcuts({ copy: null });
+    const moved = key({ key: 'c', ctrlKey: true, altKey: true });
+    expect(controller.shortcutAt(moved, false)?.id).toBe('copy');
+    expect(controller.claimsKey(moved, false)).toBe(false);
+    expect(controller.clipboardKey(moved, false)).toBe('copy');
+    expect(controller.clipboardKey(copy, false)).toBeNull();
+    controller.setShortcuts({ copy: null, bold: 'Mod+X' });
     expect(controller.claimsKey(copy, false)).toBe(true);
     expect(controller.releasedChord('Mod+c')).toBe(true);
+    expect(controller.clipboardKey(key({ key: 'x', ctrlKey: true }), false)).toBeNull();
+    expect(controller.claimsKey(key({ key: 'x', ctrlKey: true }), false)).toBe(true);
+  });
+
+  test('the grid names the clipboard action of a keystroke', () => {
+    const controller = createXlsxCommandController();
+    expect(controller.clipboardKey(key({ key: 'c', ctrlKey: true }), false)).toBe('copy');
+    expect(controller.clipboardKey(key({ key: 'v', ctrlKey: true, shiftKey: true }), false)).toBe('pastePlainText');
+    expect(controller.clipboardKey(key({ key: 'v', ctrlKey: true, altKey: true }), false)).toBe('paste');
+    expect(controller.clipboardKey(key({ key: 'c', metaKey: true }), true)).toBe('copy');
+    expect(controller.clipboardKey(key({ key: 'b', ctrlKey: true }), false)).toBeNull();
+    expect(controller.clipboardKey(key({ key: 'c' }), false)).toBeNull();
   });
 
   test('a layout without Latin letters still presses the chord', () => {

@@ -1971,7 +1971,6 @@ export function XlsxEditorContent({
       if (!handle || !selection || !sheetInfo || editing || fromPlugin(e)) return;
       if (commandController.claimsKey(e)) return;
       const mod = e.metaKey || e.ctrlKey;
-      const lower = e.key.toLowerCase();
 
       // a selected chart owns the keyboard: arrows nudge it, escape drops it,
       // and nothing else reaches the cells hidden behind it, the grid overlay
@@ -2004,22 +2003,13 @@ export function XlsxEditorContent({
         return;
       }
 
-      if (mod) {
-        if (lower === 'c') {
-          void copySelection();
-          e.preventDefault();
-          return;
-        }
-        if (lower === 'v') {
-          void pasteSelection();
-          e.preventDefault();
-          return;
-        }
-        if (lower === 'x') {
-          cutSelection();
-          e.preventDefault();
-          return;
-        }
+      const clipboard = commandController.clipboardKey(e);
+      if (clipboard) {
+        if (clipboard === 'copy') void copySelection();
+        else if (clipboard === 'cut') cutSelection();
+        else void pasteSelection();
+        e.preventDefault();
+        return;
       }
 
       const request = selectionDataRequest(e);
