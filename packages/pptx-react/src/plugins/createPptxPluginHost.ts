@@ -13,8 +13,8 @@ import {
   type PptxCommandScope,
   type PptxPluginCommandBinding,
 } from '../commands/createPptxCommandStore';
-import { EDITING_CHORDS, isPluginCommandId, normalizeChord } from '../commands/descriptors';
-import { inputKeepsChord } from '../commands/shortcutKeys';
+import { isPluginCommandId, normalizeChord } from '../commands/descriptors';
+import { EDITING_CHORDS, inputKeepsChord } from '../commands/shortcutKeys';
 import { hostPluginChords, releasedChord, shortcutOwner } from '../commands/shortcutTable';
 import { commandReason } from '../commands/evaluate';
 import type {

@@ -5,7 +5,8 @@ import {
   type PptxCommandScope,
   type PptxPluginCommandBinding,
 } from './createPptxCommandStore';
-import { BUILT_IN_CHORDS, isPluginCommandId, normalizeChord } from './descriptors';
+import { isPluginCommandId, normalizeChord } from './descriptors';
+import { defaultShortcutTable } from './shortcutTable';
 import { matchesChord } from '../../../../shared/keyboard/match';
 import { testBinding } from './testing';
 import type { PptxCommandFailureCode, PptxCommandId, PptxPluginCommandId } from './types';
@@ -191,10 +192,11 @@ describe('contributed commands', () => {
     };
     expect(matchesChord('Mod+=', plus as KeyboardEvent, false)).toBe(true);
     expect(matchesChord('Mod++', plus as KeyboardEvent, false)).toBe(true);
-    expect(BUILT_IN_CHORDS.has('Mod++') || BUILT_IN_CHORDS.has('Mod+=')).toBe(false);
-    expect(BUILT_IN_CHORDS.has('Mod+b')).toBe(true);
-    expect(BUILT_IN_CHORDS.has('Mod+Shift+z')).toBe(true);
-    expect(BUILT_IN_CHORDS.has(normalizeChord('Mod+Shift+M')!)).toBe(false);
+    const builtIn = defaultShortcutTable().owners;
+    expect(builtIn.has('Mod++') || builtIn.has('Mod+=')).toBe(false);
+    expect(builtIn.has('Mod+b')).toBe(true);
+    expect(builtIn.has('Mod+Shift+z')).toBe(true);
+    expect(builtIn.has(normalizeChord('Mod+Shift+M')!)).toBe(false);
     const ids: unknown[] = ['plugin:acme/mark', 'plugin:acme/', 'plugin:/x', 'bold'];
     expect(ids.map(isPluginCommandId)).toEqual([true, false, false, false]);
     const builtIn: PptxCommandId = 'bold';

@@ -97,17 +97,3 @@ export function isPluginCommandId(value: unknown): value is PptxPluginCommandId 
 export function defaultArgs<K extends PptxCommandId>(id: K): PptxCommandArgs[K] {
   return (id === 'insertSlide' ? {} : null) as PptxCommandArgs[K];
 }
-
-/** Canonical chords the text input handles itself (clipboard and select all). */
-export const EDITING_CHORDS: ReadonlySet<string> = new Set(
-  ['Mod+A', 'Mod+C', 'Mod+V', 'Mod+X', 'Mod+Shift+V'].map((chord) => normalizeChord(chord)!)
-);
-
-/** Canonical chords of the built-in commands, which always win over contributed ones. */
-export const BUILT_IN_CHORDS: ReadonlySet<string> = new Set(
-  Object.values(PPTX_COMMAND_DESCRIPTORS).flatMap((descriptor) =>
-    (descriptor.shortcuts as readonly PptxCommandShortcut[]).map(
-      (shortcut) => normalizeChord(shortcut.chord)!
-    )
-  )
-);
