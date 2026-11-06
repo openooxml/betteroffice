@@ -268,11 +268,11 @@ fn read_item(
                 stack.push(name);
             }
             Event::Text(text) => {
-                let text = text.decode().map_err(xml_err)?;
+                let text = text.xml10_content().map_err(xml_err)?;
                 read_text(&text, expected, &stack, &mut offset, &mut valid);
             }
             Event::CData(text) => {
-                let text = text.decode().map_err(xml_err)?;
+                let text = text.xml10_content().map_err(xml_err)?;
                 read_text(&text, expected, &stack, &mut offset, &mut valid);
             }
             Event::GeneralRef(entity) => {

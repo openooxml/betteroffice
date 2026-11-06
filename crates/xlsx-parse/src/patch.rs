@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::iter::Peekable;
 use std::ops::Range;
 
-use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
+use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::{Reader, Writer};
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
 use xlsx_model::{Cell, CellRange, CellRef, ColId, ColStyle, Sheet, Workbook};
@@ -17,7 +17,7 @@ use crate::write::{
     SharedStringPlan, cell_value_markup, col_runs, fmt_num, fragment, shared_string_index,
     write_cell, write_col_run, write_cols, write_row,
 };
-use crate::xml::{attr, xml_err};
+use crate::xml::{attr, text_event, xml_err};
 use crate::{MAX_DEPTH, ParseError};
 
 #[cfg(test)]
@@ -681,7 +681,7 @@ impl SheetPatch<'_> {
             let mut writer = Writer::new(std::mem::take(out));
             writer
                 .create_element("v")
-                .write_text_content(BytesText::new(&value))
+                .write_text_content(text_event(&value))
                 .map_err(xml_err)?;
             *out = writer.into_inner();
         }

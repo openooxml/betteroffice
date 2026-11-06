@@ -599,8 +599,8 @@ fn collect_string_item(
     loop {
         match next_event(reader, buf, depth)? {
             Event::Start(e) if *depth == target + 1 && local_name(&e) == b"r" => runs = true,
-            Event::Text(t) => out.push_str(&t.decode().map_err(xml_err)?),
-            Event::CData(t) => out.push_str(&t.decode().map_err(xml_err)?),
+            Event::Text(t) => out.push_str(&t.xml10_content().map_err(xml_err)?),
+            Event::CData(t) => out.push_str(&t.xml10_content().map_err(xml_err)?),
             Event::GeneralRef(r) => {
                 let name = r.decode().map_err(xml_err)?;
                 out.push_str(&resolve_entity(&name)?);
@@ -931,13 +931,13 @@ fn parse_conditional_formats(
                 formula
                     .as_mut()
                     .unwrap()
-                    .push_str(&t.decode().map_err(xml_err)?);
+                    .push_str(&t.xml10_content().map_err(xml_err)?);
             }
             Event::CData(t) if formula.is_some() => {
                 formula
                     .as_mut()
                     .unwrap()
-                    .push_str(&t.decode().map_err(xml_err)?);
+                    .push_str(&t.xml10_content().map_err(xml_err)?);
             }
             Event::GeneralRef(r) if formula.is_some() => {
                 let name = r.decode().map_err(xml_err)?;
