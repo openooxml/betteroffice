@@ -1002,10 +1002,7 @@ impl Workbook {
         if self.authority.seeds_another_bootstrap(update) {
             return Err(Error::CollaborativeStructureChanged);
         }
-        let staged = self.stage_remote_updates(&[update], None)?;
-        if !structure.allows_transition(&staged.structure) {
-            return Err(Error::CollaborativeStructureChanged);
-        }
+        let staged = self.stage_remote_updates(&[update], None, &structure)?;
         if staged.pending {
             self.validate_pending_remote_update(update)?;
             let mut applied = if staged.effective {
@@ -1098,16 +1095,22 @@ impl Workbook {
         Ok(true)
     }
 
+    /// An update the structure refuses is refused for that, whatever else it
+    /// holds: a peer's shifted filter says nothing against tables it also moved.
     fn stage_remote_updates(
         &self,
         updates: &[&[u8]],
         baseline: Option<&[u8]>,
+        frozen: &WorkbookStructure,
     ) -> Result<StagedUpdate> {
         let staged = self
             .authority
             .stage_updates_v1(updates, baseline)
             .map_err(authority_error)?;
         validate_collaboration_state(staged.state_bytes, staged.state_vector_entries)?;
+        if !frozen.allows_transition(&staged.structure) {
+            return Err(Error::CollaborativeStructureChanged);
+        }
         self.gate_incoming(&staged.model, &staged.dormant_names)
             .map_err(|error| Error::CollaborativeState(error.to_string()))?;
         Ok(staged)
@@ -1124,6 +1127,7 @@ impl Workbook {
     fn gate_incoming(&self, model: &WorkbookModel, dormant: &[DefinedName]) -> Result<()> {
         validate_model_sheets(model)?;
         self.validate_incoming_names(model, dormant)?;
+        self.validate_incoming_filters(model)?;
         validate_chart_source(
             model,
             self.source_package
@@ -1192,6 +1196,30 @@ impl Workbook {
         Ok(())
     }
 
+    /// A filter a peer set may not sit on a table, whose own filter owns those
+    /// cells. Sheets nothing shows hold no table. What the source held is exempt,
+    /// as for an anchor.
+    fn validate_incoming_filters(&self, staged: &WorkbookModel) -> Result<()> {
+        for (index, sheet) in staged.sheets.iter().enumerate() {
+            let Some(filter) = &sheet.auto_filter else {
+                continue;
+            };
+            if self.authority.source_auto_filter(index) == Some(filter) {
+                continue;
+            }
+            if staged
+                .tables
+                .iter()
+                .any(|table| table.sheet.0 as usize == index && filter.range.overlaps(&table.range))
+            {
+                return Err(Error::InvalidOperation(
+                    "remote update sets an auto filter over a table".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// A merge verdict may only rest on what is true of the anchor itself.
     /// Whether it resolves to a drawable rectangle is a question about the
     /// anchor *and* the column widths it spans, and widths are replicated
@@ -1233,11 +1261,9 @@ impl Workbook {
             let staged = self.stage_remote_updates(
                 &[&update],
                 Some(baseline.get_or_insert_with(|| self.authority.encode_state_as_update_v1())),
+                structure,
             );
             match staged {
-                Ok(staged) if !structure.allows_transition(&staged.structure) => {
-                    self.pending_remote_updates.remove(index);
-                }
                 Ok(staged) if staged.pending => {
                     if staged.effective {
                         applied |= self.apply_staged_remote_update(staged, options)?.applied;
@@ -2171,6 +2197,9 @@ impl Workbook {
         let inverse = batch.finish();
         validate_model_sheets(&preview)?;
         validate_shared_drawings(&preview)?;
+        if self.is_collaborative() {
+            refuse_rule_growth(&self.model, &preview)?;
+        }
         if preview.defined_names != self.model.defined_names
             && let Some(package) = &self.source_package
         {
@@ -4019,10 +4048,43 @@ fn refuse_collaborative_structure(ops: &[Op], mut sheets: usize) -> Result<()> {
             Op::AddSheet { .. } => return Err(Error::CollaborativeSheetPosition),
             Op::SetDefinedName { name, .. } | Op::DeleteDefinedName { name, .. }
                 if !name.eq_ignore_ascii_case(FILTER_DATABASE_NAME) => {}
+            Op::AddConditionalFormat { .. }
+            | Op::RemoveConditionalFormat { .. }
+            | Op::SetAutoFilter { .. } => {}
             op if is_structural_op(op) && !is_collaborative_local_layout_op(op) => {
                 return Err(Error::CollaborativeStructureOperation);
             }
             _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// The rules a sheet may grow to in a collaborative session, the most the
+/// reader takes back from a file. Replicas may pass it together, so only local
+/// growth stops here.
+const MAX_SHARED_RULES_PER_SHEET: usize = 65_536;
+
+fn refuse_rule_growth(before: &WorkbookModel, after: &WorkbookModel) -> Result<()> {
+    let rules = |sheet: &xlsx_model::Sheet| {
+        sheet
+            .conditional_formats
+            .iter()
+            .map(|group| group.rules.len())
+            .sum::<usize>()
+    };
+    for (index, sheet) in after.sheets.iter().enumerate() {
+        let count = rules(sheet);
+        if count > MAX_SHARED_RULES_PER_SHEET
+            && before
+                .sheets
+                .get(index)
+                .is_none_or(|sheet| rules(sheet) < count)
+        {
+            return Err(Error::InvalidOperation(
+                "this sheet holds the most conditional formats a collaborative session keeps"
+                    .to_owned(),
+            ));
         }
     }
     Ok(())

@@ -285,6 +285,7 @@ fn historical_state_encodings_match_eager_acceptance() {
                 72,
                 0,
                 true,
+                true,
             )
             .unwrap();
             for mut fingerprints in [adopted_fingerprints, restored.base.fingerprints.clone()] {

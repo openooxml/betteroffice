@@ -112,6 +112,12 @@ def run():
         )
         return None
 
+    def remove_newest_conditional_format(args):
+        rules = workbook.conditional_formats(args["sheet"])
+        newest = max(rules, key=lambda rule: rule["priority"])
+        op = {"type": "removeConditionalFormat", "sheet": args["sheet"], "id": newest["id"]}
+        return mutation_result(workbook.apply_ops([op], now_serial=now_serial))
+
     def open_collaborative(args):
         nonlocal workbook
         workbook = Workbook.open_collaborative(
@@ -146,6 +152,7 @@ def run():
         "applyOps": lambda args: mutation_result(
             workbook.apply_ops(args["ops"], now_serial=now_serial)
         ),
+        "removeNewestConditionalFormat": remove_newest_conditional_format,
         "moveRange": lambda args: mutation_result(
             workbook.move_range(
                 args["sheet"], args["source"], args["destination"], now_serial=now_serial

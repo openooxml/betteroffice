@@ -30,8 +30,10 @@ use yrs::{
     Options, Origin, Out, ReadTxn, StateVector, Transact, TransactionMut, Update, WriteTxn,
 };
 
+mod auto_filters;
 #[cfg(test)]
 mod cascade_composition_tests;
+mod conditional_formats;
 mod defined_names;
 #[cfg(test)]
 mod fingerprint_composition_tests;
@@ -43,8 +45,16 @@ mod merges;
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod snapshot;
 pub(crate) mod snapshot_validation;
+use auto_filters::{
+    project_filter_names, stored_auto_filter, sync_auto_filter, validate_stored_auto_filter,
+};
+use conditional_formats::{
+    RULE_PREFIX, RuleIds, RuleOverlay, baseline_conditional_formats, sync_conditional_formats,
+};
 pub(crate) use defined_names::FILTER_DATABASE_NAME;
-use defined_names::{NameOverlay, dormant_names, scoped_name_keys, sync_defined_names};
+use defined_names::{
+    NameOverlay, dormant_names, same_except_filter_names, scoped_name_keys, sync_defined_names,
+};
 use fingerprints::Fingerprints;
 pub(crate) use hyperlinks::validate_hyperlink_edit_baseline;
 use hyperlinks::{
@@ -656,7 +666,12 @@ pub(crate) struct WorkbookStructure {
     hyperlinks: Vec<Vec<Hyperlink>>,
     baseline_hyperlinks: BTreeMap<String, Vec<Hyperlink>>,
     conditional_formats: Vec<Vec<ConditionalFormatting>>,
+    baseline_conditional_formats: BTreeMap<String, Vec<ConditionalFormatting>>,
     auto_filters: Vec<Option<xlsx_model::AutoFilter>>,
+    /// Whether a sheet, shown or not, stores a filter no operation can have
+    /// written over its source. Filters are the one per-sheet value a replica
+    /// may change and still have to refuse by what it holds.
+    foreign_auto_filter: bool,
     charts: Vec<Vec<ChartIdentity>>,
     merges: Vec<Vec<CellRange>>,
     baseline_merges: BTreeMap<String, Vec<CellRange>>,
@@ -679,24 +694,27 @@ impl WorkbookStructure {
 
     fn allows_change(&self, next: &Self) -> bool {
         self.generation == next.generation
+            && !next.foreign_auto_filter
             && appended_tail_changed_alone(&self.sheet_keys, &next.sheet_keys)
             && next.sheet_keys.iter().enumerate().all(|(at, key)| {
                 match self.sheet_keys.iter().position(|known| known == key) {
                     Some(before) => {
                         self.sheet_names[before] == next.sheet_names[at]
-                            && self.conditional_formats[before] == next.conditional_formats[at]
-                            && self.auto_filters[before] == next.auto_filters[at]
                             && self.charts[before] == next.charts[at]
                     }
-                    None => {
-                        next.conditional_formats[at].is_empty()
-                            && next.auto_filters[at].is_none()
-                            && next.charts[at].is_empty()
-                    }
+                    None => next.charts[at].is_empty(),
                 }
             })
             && keeps_every_sheet(&self.baseline_hyperlinks, &next.baseline_hyperlinks)
             && keeps_every_sheet(&self.baseline_merges, &next.baseline_merges)
+            && keeps_every_sheet(
+                &self.baseline_conditional_formats,
+                &next.baseline_conditional_formats,
+            )
+            && next
+                .baseline_conditional_formats
+                .iter()
+                .all(|(key, rules)| rules.is_empty() || !key.starts_with(APPENDED_SHEET_PREFIX))
     }
 
     /// Undoing and redoing an add replaces the appended sheet's map under the
@@ -723,7 +741,9 @@ impl WorkbookStructure {
             && self.hyperlinks == other.hyperlinks
             && self.baseline_hyperlinks == other.baseline_hyperlinks
             && self.conditional_formats == other.conditional_formats
+            && self.baseline_conditional_formats == other.baseline_conditional_formats
             && self.auto_filters == other.auto_filters
+            && self.foreign_auto_filter == other.foreign_auto_filter
             && self.charts == other.charts
             && self.merges == other.merges
             && self.baseline_merges == other.baseline_merges
@@ -949,6 +969,9 @@ pub(crate) struct WorkbookAuthority {
     next_sheet_id: u64,
     undo_stack: Vec<StackItem<()>>,
     redo_stack: Vec<StackItem<()>>,
+    /// A standalone table follows its edits in the base, so only a shared
+    /// document derives filter names and holds incoming filters to the source.
+    collaborative: bool,
 }
 
 struct SetCellSync {
@@ -1094,6 +1117,7 @@ impl WorkbookAuthority {
         client_id: u64,
         next_sheet_id: u64,
         row_styles: bool,
+        collaborative: bool,
     ) -> crate::snapshot::SnapshotResult<Self> {
         use crate::snapshot::SnapshotError;
         use crate::snapshot::wire::Reader;
@@ -1160,7 +1184,8 @@ impl WorkbookAuthority {
                 "Recovery authority has unresolved Yrs state",
             ));
         }
-        let authority = Self::hydrated(doc, Arc::new(base), next_sheet_id);
+        let mut authority = Self::hydrated(doc, Arc::new(base), next_sheet_id);
+        authority.collaborative = collaborative;
         authority.strict_materialize().map_err(SnapshotError::new)?;
         Ok(authority)
     }
@@ -1178,6 +1203,15 @@ impl WorkbookAuthority {
             next_sheet_id,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            collaborative: false,
+        }
+    }
+
+    /// A replica of this one's document kind and base over `doc`.
+    fn hydrated_alike(&self, doc: Doc) -> Self {
+        Self {
+            collaborative: self.collaborative,
+            ..Self::hydrated(doc, self.base.clone(), self.next_sheet_id)
         }
     }
 
@@ -1276,7 +1310,8 @@ impl WorkbookAuthority {
             hydrate_local_doc(&doc, &update).map_err(AuthorityError::InvalidState)?;
             xlsx_model::progress::pulse();
         }
-        let authority = Self::hydrated(doc, Arc::new(base), 0);
+        let mut authority = Self::hydrated(doc, Arc::new(base), 0);
+        authority.collaborative = client_id.is_some();
         xlsx_model::open_timing! {
             drop(timing_hydrate);
             let _timing_projection = xlsx_model::open_timing::span("authority_projection");
@@ -1295,6 +1330,26 @@ impl WorkbookAuthority {
     /// alone.
     pub(crate) fn source_defined_names(&self) -> &[DefinedName] {
         &self.base.defined_names
+    }
+
+    /// The filter the source holds for the sheet at `index`. Appended sheets
+    /// follow every source sheet, so past those there is none.
+    pub(crate) fn source_auto_filter(&self, index: usize) -> Option<&xlsx_model::AutoFilter> {
+        self.base.auto_filters.get(index)?.as_ref()
+    }
+
+    /// What a sheet's rules read as with no overlay.
+    fn baseline_rules<T: ReadTxn>(
+        &self,
+        sheet: &MapRef,
+        txn: &T,
+        key: &str,
+    ) -> Result<Vec<ConditionalFormatting>, String> {
+        let fallback = base_sheet_index(key)
+            .and_then(|base| self.base.conditional_formats.get(base))
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        baseline_conditional_formats(sheet, txn, fallback)
     }
 
     /// The names stored under a scope none of `keys` is. Each carries a sheet index
@@ -1905,7 +1960,7 @@ impl WorkbookAuthority {
         if hydrate_doc(&doc, update).is_err() {
             return SnapshotAdoption::NotApplicable;
         }
-        let mut candidate = Self::hydrated(doc, self.base.clone(), self.next_sheet_id);
+        let mut candidate = self.hydrated_alike(doc);
         if !candidate.is_whole_document() {
             return SnapshotAdoption::NotApplicable;
         }
@@ -2097,7 +2152,7 @@ impl WorkbookAuthority {
         if hydrate_doc(&doc, update).is_err() {
             return false;
         }
-        let candidate = Self::hydrated(doc, self.base.clone(), self.next_sheet_id);
+        let candidate = self.hydrated_alike(doc);
         candidate.is_whole_document()
             && !candidate
                 .doc
@@ -2216,7 +2271,7 @@ impl WorkbookAuthority {
             None => (false, apply_remote(&staged_doc, incoming)?),
         };
 
-        let staged = Self::hydrated(staged_doc, self.base.clone(), self.next_sheet_id);
+        let staged = self.hydrated_alike(staged_doc);
         let pending = held_back || has_pending(&staged.doc);
         if let Err(error) = staged.upgrade_schema_from(Some(&self.doc))
             && !pending
@@ -2360,7 +2415,7 @@ impl WorkbookAuthority {
     ) -> Result<StagedLocalUpdate, AuthorityError> {
         let staged_doc = Doc::with_client_id(self.client_id());
         hydrate_local_doc(&staged_doc, baseline).map_err(AuthorityError::InvalidState)?;
-        let mut staged = Self::hydrated(staged_doc, self.base.clone(), self.next_sheet_id);
+        let mut staged = self.hydrated_alike(staged_doc);
         if projection_valid {
             staged.plain_style_cells.store(
                 self.plain_style_cells.load(Ordering::Relaxed),
@@ -2961,6 +3016,7 @@ impl WorkbookAuthority {
         model.styles = styles;
         let mut plain = None;
         let mut plain_style_cells = 0;
+        let mut foreign_auto_filter = false;
         let expected_sheet_keys = sheet_schema_keys(version);
         let optional_sheet_keys = sheet_schema_optional_keys(version);
         for key in keys.iter() {
@@ -3015,7 +3071,7 @@ impl WorkbookAuthority {
             let hidden_dimensions = base_sheet
                 .and_then(|base| self.base.hidden_dimensions.get(base))
                 .unwrap_or(&EMPTY_HIDDEN_DIMENSIONS);
-            model.sheets.push(materialize_sheet(
+            let sheet = materialize_sheet(
                 &sheet_map,
                 &txn,
                 &style_indices,
@@ -3035,7 +3091,11 @@ impl WorkbookAuthority {
                     conditional_formats,
                     auto_filter,
                 },
-            )?);
+            )?;
+            foreign_auto_filter |= strict
+                && self.collaborative
+                && validate_stored_auto_filter(sheet.auto_filter.as_ref(), auto_filter).is_err();
+            model.sheets.push(sheet);
         }
         project_shared_frame_anchors(&mut model.sheets);
         let sheet_names = model
@@ -3045,6 +3105,9 @@ impl WorkbookAuthority {
             .collect();
         project_unique_sheet_names(&mut model.sheets);
         NameOverlay::read(&txn)?.apply(&mut model.defined_names, &keys)?;
+        if self.collaborative {
+            project_filter_names(&mut model, &keys, &self.base)?;
+        }
         let active = keys.iter().cloned().collect::<BTreeSet<_>>();
         let all_keys = sheets
             .keys(&txn)
@@ -3053,6 +3116,7 @@ impl WorkbookAuthority {
         let mut shared_types = BTreeMap::new();
         let mut baseline_hyperlinks = BTreeMap::new();
         let mut baseline_merges = BTreeMap::new();
+        let mut baseline_rules = BTreeMap::new();
         for key in all_keys {
             let sheet_map = sheets
                 .get(&txn, &key)
@@ -3067,7 +3131,7 @@ impl WorkbookAuthority {
                     optional_sheet_keys,
                     &format!("inactive sheet {key}"),
                 )?;
-                materialize_sheet(
+                let sheet = materialize_sheet(
                     &sheet_map,
                     &txn,
                     &style_indices,
@@ -3075,6 +3139,8 @@ impl WorkbookAuthority {
                     version,
                     SheetFallbacks::default(),
                 )?;
+                foreign_auto_filter |= self.collaborative
+                    && validate_stored_auto_filter(sheet.auto_filter.as_ref(), None).is_err();
             }
             let Some(Out::Any(baseline)) = sheet_map.get(&txn, MERGES) else {
                 return Err(format!("sheet {key} is missing merges"));
@@ -3089,6 +3155,7 @@ impl WorkbookAuthority {
             };
             baseline_hyperlinks.insert(key.clone(), link_baseline);
             baseline_merges.insert(key.clone(), merges_from_any(&baseline)?);
+            baseline_rules.insert(key.clone(), self.baseline_rules(&sheet_map, &txn, &key)?);
             shared_types.insert(key, sheet_shared_types(&sheet_map, &txn)?);
         }
         let structure = WorkbookStructure {
@@ -3107,11 +3174,13 @@ impl WorkbookAuthority {
                 .iter()
                 .map(|sheet| sheet.conditional_formats.clone())
                 .collect(),
+            baseline_conditional_formats: baseline_rules,
             auto_filters: model
                 .sheets
                 .iter()
                 .map(|sheet| sheet.auto_filter.clone())
                 .collect(),
+            foreign_auto_filter,
             charts: model
                 .sheets
                 .iter()
@@ -3177,6 +3246,9 @@ impl WorkbookAuthority {
                                 Op::AddSheet { .. }
                                     | Op::SetDefinedName { .. }
                                     | Op::DeleteDefinedName { .. }
+                                    | Op::AddConditionalFormat { .. }
+                                    | Op::RemoveConditionalFormat { .. }
+                                    | Op::SetAutoFilter { .. }
                             ))
                         && (!is_collaborative_local_layout_op(op)
                             || (!collaborative
@@ -3198,7 +3270,8 @@ impl WorkbookAuthority {
         let mut freeze_panes = HashSet::new();
         let mut merges = HashSet::new();
         let mut hyperlinks = HashSet::new();
-        let mut conditional_formats = HashSet::new();
+        let mut conditional_formats = BTreeSet::new();
+        let mut auto_filters = BTreeSet::new();
         let mut chart_anchors = BTreeSet::new();
         if !full_sync {
             let targets = targeted_sheet_keys(&current_keys, &keys, ops)?;
@@ -3239,12 +3312,13 @@ impl WorkbookAuthority {
                     (
                         Op::AddConditionalFormat { .. }
                         | Op::RemoveConditionalFormat { .. }
-                        | Op::SetConditionalFormats { .. }
-                        | Op::SetAutoFilter { .. }
-                        | Op::RestoreAutoFilter { .. },
+                        | Op::SetConditionalFormats { .. },
                         Some(key),
                     ) => {
                         conditional_formats.insert(key);
+                    }
+                    (Op::SetAutoFilter { .. } | Op::RestoreAutoFilter { .. }, Some(key)) => {
+                        auto_filters.insert(key);
                     }
                     (Op::SetChartAnchor { frame, .. }, Some(key)) => {
                         chart_anchors.insert((key, frame.clone()));
@@ -3270,7 +3344,7 @@ impl WorkbookAuthority {
         let names_before = if collaborative {
             let mut names = self.base.defined_names.clone();
             NameOverlay::read(&self.doc.transact())?.apply(&mut names, &current_keys)?;
-            Some(names).filter(|names| *names != model.defined_names)
+            Some(names).filter(|names| !same_except_filter_names(names, &model.defined_names))
         } else {
             None
         };
@@ -3295,6 +3369,7 @@ impl WorkbookAuthority {
             && hyperlinks.is_empty()
             && chart_anchors.is_empty()
             && conditional_formats.is_empty()
+            && auto_filters.is_empty()
             && names_before.is_none()
         {
             self.apply_history(history);
@@ -3313,6 +3388,13 @@ impl WorkbookAuthority {
                 _ => sheet.name.clone(),
             }
         };
+        let client = self.client_id();
+        let clock = self
+            .doc
+            .transact()
+            .state_vector()
+            .get(&ClientID::new(client));
+        let mut rule_ids = RuleIds::new(client, clock);
         let mut txn = self.doc.transact_mut_with(origin.as_str());
         let cell_formats = txn
             .get_map(CELL_FORMATS)
@@ -3348,14 +3430,28 @@ impl WorkbookAuthority {
             for (key, sheet) in keys.iter().zip(&model.sheets) {
                 let sheet_map = sheet_map_for_sync(&sheets, &mut txn, key)?;
                 let name = name_to_store(key, sheet);
-                sync_sheet(&sheet_map, &mut txn, sheet, &name, &model.styles)?;
+                sync_sheet(
+                    &sheet_map,
+                    &mut txn,
+                    sheet,
+                    &name,
+                    &model.styles,
+                    collaborative,
+                )?;
             }
         } else {
             for (key, sheet) in keys.iter().zip(&model.sheets) {
                 if newly_active.contains(key) {
                     let sheet_map = sheet_map_for_sync(&sheets, &mut txn, key)?;
                     let name = name_to_store(key, sheet);
-                    sync_sheet(&sheet_map, &mut txn, sheet, &name, &model.styles)?;
+                    sync_sheet(
+                        &sheet_map,
+                        &mut txn,
+                        sheet,
+                        &name,
+                        &model.styles,
+                        collaborative,
+                    )?;
                 }
             }
             let order_cells = |targets: HashSet<(String, CellRef)>| {
@@ -3464,15 +3560,42 @@ impl WorkbookAuthority {
                     sheet_parts_by_key(&sheets, &txn, &keys, model, &key)?;
                 sync_hyperlinks(&sheet_map, &mut txn, sheet_model, collaborative)?;
             }
-            for key in conditional_formats {
-                let (sheet_map, sheet_model) =
-                    sheet_parts_by_key(&sheets, &txn, &keys, model, &key)?;
-                let json = serde_json::to_string(&sheet_model.conditional_formats)
-                    .map_err(|error| format!("cannot encode sheet conditional formats: {error}"))?;
-                sheet_map.try_update(&mut txn, CONDITIONAL_FORMATS, json);
-                let json = serde_json::to_string(&sheet_model.auto_filter)
-                    .map_err(|error| format!("cannot encode sheet auto filter: {error}"))?;
-                sheet_map.try_update(&mut txn, AUTO_FILTER, json);
+            if collaborative {
+                for key in conditional_formats {
+                    let (sheet_map, sheet_model) =
+                        sheet_parts_by_key(&sheets, &txn, &keys, model, &key)?;
+                    let fallback = base_sheet_index(&key)
+                        .and_then(|base| self.base.conditional_formats.get(base))
+                        .map(Vec::as_slice)
+                        .unwrap_or_default();
+                    sync_conditional_formats(
+                        &mut txn,
+                        &sheet_map,
+                        sheet_model,
+                        fallback,
+                        &mut rule_ids,
+                    )?;
+                }
+                for key in auto_filters {
+                    let (sheet_map, sheet_model) =
+                        sheet_parts_by_key(&sheets, &txn, &keys, model, &key)?;
+                    let fallback = base_sheet_index(&key)
+                        .and_then(|base| self.base.auto_filters.get(base))
+                        .and_then(Option::as_ref);
+                    sync_auto_filter(&mut txn, &sheet_map, sheet_model, fallback)?;
+                }
+            } else {
+                for key in conditional_formats.union(&auto_filters) {
+                    let (sheet_map, sheet_model) =
+                        sheet_parts_by_key(&sheets, &txn, &keys, model, key)?;
+                    let json = serde_json::to_string(&sheet_model.conditional_formats).map_err(
+                        |error| format!("cannot encode sheet conditional formats: {error}"),
+                    )?;
+                    sheet_map.try_update(&mut txn, CONDITIONAL_FORMATS, json);
+                    let json = serde_json::to_string(&sheet_model.auto_filter)
+                        .map_err(|error| format!("cannot encode sheet auto filter: {error}"))?;
+                    sheet_map.try_update(&mut txn, AUTO_FILTER, json);
+                }
             }
             for (key, frame) in chart_anchors {
                 let (sheet_map, sheet_model) =
@@ -3793,7 +3916,7 @@ fn seed_in_chunks(
     let mut room = chunk;
     for (key, sheet) in keys.iter().zip(&model.sheets) {
         let sheet_map = sheets.insert(&mut txn, key.as_str(), MapPrelim::default());
-        let maps = sync_sheet_frame(&sheet_map, &mut txn, sheet, &sheet.name)?;
+        let maps = sync_sheet_frame(&sheet_map, &mut txn, sheet, &sheet.name, false)?;
         for (part, map) in maps.iter().enumerate() {
             let entries: Box<dyn Iterator<Item = (String, Any)> + '_> = match part {
                 0 => Box::new(number_entries(&sheet.col_widths)),
@@ -4961,8 +5084,9 @@ fn sync_sheet(
     sheet: &Sheet,
     name: &str,
     stylesheet: &Stylesheet,
+    collaborative: bool,
 ) -> Result<(), String> {
-    sync_sheet_with_style_key(sheet_map, txn, sheet, name, |style| {
+    sync_sheet_with_style_key(sheet_map, txn, sheet, name, collaborative, |style| {
         style_key(stylesheet, style)
     })
 }
@@ -4972,10 +5096,11 @@ fn sync_sheet_with_style_key(
     txn: &mut TransactionMut<'_>,
     sheet: &Sheet,
     name: &str,
+    collaborative: bool,
     style_key: impl Fn(u32) -> Result<String, String>,
 ) -> Result<(), String> {
     let [col_widths, contents, row_heights, styles] =
-        sync_sheet_frame(sheet_map, txn, sheet, name)?;
+        sync_sheet_frame(sheet_map, txn, sheet, name, collaborative)?;
     sync_numbers(&col_widths, txn, &sheet.col_widths);
     sync_map(&contents, txn, desired_contents(sheet));
     sync_numbers(&row_heights, txn, &sheet.row_heights);
@@ -4984,12 +5109,16 @@ fn sync_sheet_with_style_key(
 }
 
 /// Writes every key of a sheet but its per-cell entries, and returns the maps
-/// those go in: column widths, contents, row heights and styles.
+/// those go in: column widths, contents, row heights and styles. Under
+/// `collaborative`, rules and filters keep to their own writes, because storing
+/// the projection would fold rules into the baseline and overwrite a filter a
+/// peer set at the same time.
 fn sync_sheet_frame(
     sheet_map: &MapRef,
     txn: &mut TransactionMut<'_>,
     sheet: &Sheet,
     name: &str,
+    collaborative: bool,
 ) -> Result<[MapRef; 4], String> {
     let col_widths: MapRef = sheet_map.get_or_init(txn, COL_WIDTHS);
     let contents: MapRef = sheet_map.get_or_init(txn, CONTENTS);
@@ -5018,12 +5147,16 @@ fn sync_sheet_frame(
         .map_err(|error| format!("cannot encode sheet hyperlinks: {error}"))?;
     sheet_map.try_update(txn, HYPERLINKS, hyperlinks);
     clear_hyperlink_edits(sheet_map, txn);
-    if sheet.auto_filter.is_some() || sheet_map.get(txn, AUTO_FILTER).is_some() {
+    if !collaborative && (sheet.auto_filter.is_some() || sheet_map.get(txn, AUTO_FILTER).is_some())
+    {
         let json = serde_json::to_string(&sheet.auto_filter)
             .map_err(|error| format!("cannot encode sheet auto filter: {error}"))?;
         sheet_map.try_update(txn, AUTO_FILTER, json);
     }
-    if !sheet.conditional_formats.is_empty() || sheet_map.get(txn, CONDITIONAL_FORMATS).is_some() {
+    if !collaborative
+        && (!sheet.conditional_formats.is_empty()
+            || sheet_map.get(txn, CONDITIONAL_FORMATS).is_some())
+    {
         let conditional_formats = serde_json::to_string(&sheet.conditional_formats)
             .map_err(|error| format!("cannot encode sheet conditional formats: {error}"))?;
         sheet_map.try_update(txn, CONDITIONAL_FORMATS, conditional_formats);
@@ -5688,18 +5821,10 @@ fn materialize_sheet<T: ReadTxn>(
         _ => fallbacks.hyperlinks.to_vec(),
     };
     sheet.hyperlinks = project_hyperlinks(baseline_hyperlinks, sheet_map, txn)?;
-    sheet.auto_filter = match sheet_map.get(txn, AUTO_FILTER) {
-        Some(Out::Any(Any::String(json))) => serde_json::from_str(&json)
-            .map_err(|error| format!("sheet auto filter is invalid: {error}"))?,
-        Some(_) => return Err("sheet auto filter is not a string".to_string()),
-        None => fallbacks.auto_filter.cloned(),
-    };
-    sheet.conditional_formats = match sheet_map.get(txn, CONDITIONAL_FORMATS) {
-        Some(Out::Any(Any::String(json))) => serde_json::from_str(&json)
-            .map_err(|error| format!("sheet conditional formats are invalid: {error}"))?,
-        Some(_) => return Err("sheet conditional formats are not a string".to_string()),
-        None => fallbacks.conditional_formats.to_vec(),
-    };
+    sheet.auto_filter = stored_auto_filter(sheet_map, txn, fallbacks.auto_filter)?;
+    sheet.conditional_formats = RuleOverlay::read(sheet_map, txn)?.apply(
+        baseline_conditional_formats(sheet_map, txn, fallbacks.conditional_formats)?,
+    )?;
     sheet.charts = match (version, sheet_map.get(txn, CHARTS)) {
         (CHARTS_SCHEMA_VERSION.., Some(Out::Any(Any::String(json)))) => decode_charts(&json)?,
         (CHARTS_SCHEMA_VERSION.., Some(_)) => {
@@ -5962,6 +6087,10 @@ fn require_sheet_keys<T: ReadTxn>(
                 return Err(format!("{label} keys do not match the schema"));
             }
             insert_hyperlink_edit(&mut hyperlinks, key, &value)?;
+        } else if key.starts_with(RULE_PREFIX) {
+            if version < CHARTS_SCHEMA_VERSION {
+                return Err(format!("{label} keys do not match the schema"));
+            }
         } else if !expected.contains(&key) && !optional.contains(&key) {
             return Err(format!("{label} keys do not match the schema"));
         }
@@ -7272,7 +7401,8 @@ impl WorkbookAuthority {
             },
         };
         hydrate_local_doc(&doc, &bootstrap_update).map_err(AuthorityError::InvalidState)?;
-        let authority = Self::hydrated(doc, Arc::new(base), 0);
+        let mut authority = Self::hydrated(doc, Arc::new(base), 0);
+        authority.collaborative = client_id.is_some();
         authority
             .materialize_internal_oracle(true)
             .map_err(AuthorityError::InvalidState)?;
@@ -7424,6 +7554,9 @@ impl WorkbookAuthority {
             .collect();
         project_unique_sheet_names(&mut model.sheets);
         NameOverlay::read(&txn)?.apply(&mut model.defined_names, &keys)?;
+        if self.collaborative {
+            project_filter_names(&mut model, &keys, &self.base)?;
+        }
         let active = keys.iter().cloned().collect::<BTreeSet<_>>();
         let all_keys = sheets
             .keys(&txn)
@@ -7432,6 +7565,7 @@ impl WorkbookAuthority {
         let mut shared_types = BTreeMap::new();
         let mut baseline_hyperlinks = BTreeMap::new();
         let mut baseline_merges = BTreeMap::new();
+        let mut baseline_rules = BTreeMap::new();
         for key in all_keys {
             let sheet_map = sheets
                 .get(&txn, &key)
@@ -7467,6 +7601,7 @@ impl WorkbookAuthority {
             };
             baseline_hyperlinks.insert(key.clone(), link_baseline);
             baseline_merges.insert(key.clone(), merges_from_any(&baseline)?);
+            baseline_rules.insert(key.clone(), self.baseline_rules(&sheet_map, &txn, &key)?);
             shared_types.insert(key, sheet_shared_types(&sheet_map, &txn)?);
         }
         let structure = WorkbookStructure {
@@ -7485,11 +7620,13 @@ impl WorkbookAuthority {
                 .iter()
                 .map(|sheet| sheet.conditional_formats.clone())
                 .collect(),
+            baseline_conditional_formats: baseline_rules,
             auto_filters: model
                 .sheets
                 .iter()
                 .map(|sheet| sheet.auto_filter.clone())
                 .collect(),
+            foreign_auto_filter: false,
             charts: model
                 .sheets
                 .iter()
@@ -7595,18 +7732,10 @@ fn materialize_sheet_oracle<T: ReadTxn>(
         }
         _ => fallbacks.hyperlinks.to_vec(),
     };
-    sheet.auto_filter = match sheet_map.get(txn, AUTO_FILTER) {
-        Some(Out::Any(Any::String(json))) => serde_json::from_str(&json)
-            .map_err(|error| format!("sheet auto filter is invalid: {error}"))?,
-        Some(_) => return Err("sheet auto filter is not a string".to_string()),
-        None => fallbacks.auto_filter.cloned(),
-    };
-    sheet.conditional_formats = match sheet_map.get(txn, CONDITIONAL_FORMATS) {
-        Some(Out::Any(Any::String(json))) => serde_json::from_str(&json)
-            .map_err(|error| format!("sheet conditional formats are invalid: {error}"))?,
-        Some(_) => return Err("sheet conditional formats are not a string".to_string()),
-        None => fallbacks.conditional_formats.to_vec(),
-    };
+    sheet.auto_filter = stored_auto_filter(sheet_map, txn, fallbacks.auto_filter)?;
+    sheet.conditional_formats = RuleOverlay::read(sheet_map, txn)?.apply(
+        baseline_conditional_formats(sheet_map, txn, fallbacks.conditional_formats)?,
+    )?;
     sheet.charts = match (version, sheet_map.get(txn, CHARTS)) {
         (CHARTS_SCHEMA_VERSION.., Some(Out::Any(Any::String(json)))) => decode_charts(&json)?,
         (CHARTS_SCHEMA_VERSION.., Some(_)) => {
@@ -8133,6 +8262,7 @@ mod tests {
             &model.sheets[0],
             &model.sheets[0].name,
             &model.styles,
+            false,
         )
         .unwrap();
         assert!(
@@ -8169,6 +8299,7 @@ mod tests {
             105,
             0,
             true,
+            false,
         )
         .unwrap();
         assert_eq!(recovered.materialize().unwrap(), model);
@@ -9953,6 +10084,8 @@ mod tests {
         next.merges.push(Vec::new());
         next.baseline_hyperlinks.insert(key.to_string(), Vec::new());
         next.baseline_merges.insert(key.to_string(), Vec::new());
+        next.baseline_conditional_formats
+            .insert(key.to_string(), Vec::new());
         next
     }
 
@@ -10005,8 +10138,33 @@ mod tests {
         assert!(!frozen.allows_transition(&removed));
 
         let mut filtered = one.clone();
+        filtered.conditional_formats[0] = vec![ConditionalFormatting::default()];
         filtered.conditional_formats[2] = vec![ConditionalFormatting::default()];
-        assert!(!frozen.allows_transition(&filtered));
+        filtered.auto_filters[0] = Some(xlsx_model::AutoFilter {
+            range: CellRange::parse_a1("A1:B2").unwrap(),
+            raw_xml: None,
+            source_count: 1,
+            filter_columns: Vec::new(),
+            has_sort_state: false,
+        });
+        filtered.auto_filters[2] = filtered.auto_filters[0].clone();
+        assert!(frozen.allows_transition(&filtered));
+        assert!(filtered.allows_transition(&frozen));
+
+        for key in ["sheet:0", "replica:7:0"] {
+            let mut folded = one.clone();
+            folded
+                .baseline_conditional_formats
+                .insert(key.to_string(), vec![ConditionalFormatting::default()]);
+            assert!(!one.allows_transition(&folded), "{key}");
+            assert!(!folded.describes_same_workbook(&one), "{key}");
+        }
+        let mut dormant = frozen.clone();
+        dormant.baseline_conditional_formats.insert(
+            "replica:9:0".to_string(),
+            vec![ConditionalFormatting::default()],
+        );
+        assert!(!frozen.allows_transition(&dormant));
 
         let mut baseline = one.clone();
         baseline.baseline_merges.insert(
@@ -12217,9 +12375,14 @@ mod tests {
             let sheets = txn.get_or_insert_map(SHEETS);
             for (key, sheet) in keys.iter().zip(&model.sheets) {
                 let sheet_map = sheets.insert(&mut txn, key.as_str(), MapPrelim::default());
-                sync_sheet_with_style_key(&sheet_map, &mut txn, sheet, &sheet.name, |style| {
-                    Ok(style_keys[style as usize].clone())
-                })
+                sync_sheet_with_style_key(
+                    &sheet_map,
+                    &mut txn,
+                    sheet,
+                    &sheet.name,
+                    false,
+                    |style| Ok(style_keys[style as usize].clone()),
+                )
                 .unwrap();
             }
             meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION);

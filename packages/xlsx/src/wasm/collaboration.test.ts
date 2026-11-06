@@ -464,6 +464,58 @@ describe('wasm collaboration', () => {
     }
   });
 
+  it('replicates rules, filters and their undo', () => {
+    const left = collaborative(6031);
+    const right = collaborative(6032);
+    const sync = (from: WorkbookHandle, to: WorkbookHandle) =>
+      to.applyUpdate(from.encodeStateAsUpdate(to.encodeStateVector()));
+    const rule = (formula: string) => ({
+      type: 'addConditionalFormat',
+      sheet: 0,
+      range: { start: { row: 0, col: 0 }, end: { row: 2, col: 0 } },
+      kind: 'expression',
+      formulas: [formula],
+      format: { bold: true }
+    });
+    const filter = (replica: WorkbookHandle) => replica.sheetInfo().autoFilter;
+    const filterName = (replica: WorkbookHandle) =>
+      replica.listDefinedNames({ scope: 0 }).items.find((name) => name.name === '_xlnm._FilterDatabase');
+    try {
+      expect(left.applyOps([rule('A1>1')]).applied).toBe(true);
+      expect(right.applyOps([rule('A1>2')]).applied).toBe(true);
+      sync(left, right);
+      sync(right, left);
+      expect(left.conditionalFormats(0)).toEqual(right.conditionalFormats(0));
+      const added = left.conditionalFormats(0).filter((item) => item.id.startsWith('cf:'));
+      expect(added.map((item) => item.formulas[0])).toEqual(['A1>1', 'A1>2']);
+
+      expect(right.applyOps([{ type: 'removeConditionalFormat', sheet: 0, id: added[0].id }]).applied).toBe(true);
+      sync(right, left);
+      expect(left.conditionalFormats(0)).toEqual(right.conditionalFormats(0));
+      expect(left.conditionalFormats(0).some((item) => item.id === added[0].id)).toBe(false);
+      expect(right.undo().applied).toBe(true);
+      sync(right, left);
+      expect(left.conditionalFormats(0).some((item) => item.id === added[0].id)).toBe(true);
+
+      expect(left.applyOps([{ type: 'setAutoFilter', sheet: 0, range: 'A1:C5' }]).applied).toBe(true);
+      sync(left, right);
+      expect(filter(right)).toBe('A1:C5');
+      expect(filterName(right)?.refersTo).toContain('!$A$1:$C$5');
+      expect(filterName(right)).toEqual(filterName(left));
+      expect(left.undo().applied).toBe(true);
+      sync(left, right);
+      expect(filter(right)).toBe(filter(left));
+      expect(filterName(right)).toEqual(filterName(left));
+
+      expect(() => left.applyOps([{ type: 'setConditionalFormats', sheet: 0, formats: [] }])).toThrow(
+        'structural operations are unavailable in collaborative mode'
+      );
+    } finally {
+      left.dispose();
+      right.dispose();
+    }
+  });
+
   it('converges sheets appended under one name and refuses one added earlier', () => {
     const left = collaborative(6011);
     const right = collaborative(6012);
