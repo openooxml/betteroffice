@@ -91,7 +91,7 @@ test('XLSX canvas previews draw unbundled families with the Word last-resort fac
 
 test('XLSX canvas previews in one process keep each workbook\'s faces apart', async () => {
   const base = createFontProvider(undefined, { decoder: decodeFontFace });
-  const hebrew = await base.resolve('Noto Sans Hebrew', false, false)!();
+  const hebrew = await base.resolveFamily('Noto Sans Hebrew', false, false)!();
   const sans = await base.resolve('Arial', false, false)!();
   const provider = (bytes: ArrayBuffer) => ({ ...base, resolve: () => async () => bytes });
   const book = (family: string) => ({
