@@ -136,6 +136,22 @@ pub use intrinsic::measure_intrinsic_widths;
 
 use crate::font_store::{FontId, FontStore};
 
+/// Private-use, symbol and math characters, which belong to no writing system.
+#[doc(hidden)]
+pub fn symbol_character(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{2100}'..='\u{214f}'
+            | '\u{2190}'..='\u{23ff}'
+            | '\u{25a0}'..='\u{27bf}'
+            | '\u{27c0}'..='\u{27ef}'
+            | '\u{2980}'..='\u{2aff}'
+            | '\u{e000}'..='\u{f8ff}'
+            | '\u{1d400}'..='\u{1d7ff}'
+            | '\u{f0000}'..='\u{10ffff}'
+    )
+}
+
 #[doc(hidden)]
 pub fn needs_glyph(ch: char) -> bool {
     !ch.is_whitespace() && !ch.is_control() && !crate::shape::is_default_ignorable(ch)

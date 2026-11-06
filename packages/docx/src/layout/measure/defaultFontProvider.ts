@@ -5,6 +5,7 @@ import type { FontDecoder } from '../../../../../shared/office-session/fontDecod
 import { decodeFontFace } from '../../wasm/fontDecoder';
 
 export const IMPLICIT_FONT_COVERAGE = '@betteroffice/fonts/coverage';
+export const IMPLICIT_SYMBOL_SHAPING = '@betteroffice/fonts/coverage-symbols';
 
 export class ImplicitFontAbsentError extends Error {}
 

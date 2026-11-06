@@ -43,7 +43,7 @@ use crate::word_metrics::{kern_enabled, kern_features};
 
 use super::font_slots::{FontSlot, char_slot};
 use super::input::{FontChains, MeasureRequest, RunIn, validate_pt_size};
-use super::{MAX_RUN_TEXT_BYTES, MeasureError, needs_glyph, pt_to_px};
+use super::{MAX_RUN_TEXT_BYTES, MeasureError, needs_glyph, pt_to_px, symbol_character};
 
 /// Longest fallback chain a run keeps resolved per slot. Chains past it are
 /// rebuilt per character instead, so keeping them can never cost more memory
@@ -586,6 +586,7 @@ fn script_metrics(base_size_pt: f32, run: &RunIn) -> (f32, f32) {
 #[derive(Clone, Copy)]
 struct FontResolver {
     coverage_only: bool,
+    symbols_shape: bool,
     bold: bool,
     italic: bool,
 }
@@ -599,7 +600,7 @@ impl FontResolver {
         family: &str,
         track: bool,
     ) -> Option<FontId> {
-        if !self.coverage_only {
+        if !self.coverage_only || (self.symbols_shape && symbol_character(ch)) {
             return store.resolve_with_family_tracking(
                 chain,
                 ch,
@@ -620,12 +621,18 @@ impl FontResolver {
 
 #[cfg(test)]
 fn font_resolver(coverage_only: bool) -> FontResolver {
-    styled_font_resolver(coverage_only, false, false)
+    styled_font_resolver(coverage_only, false, false, false)
 }
 
-fn styled_font_resolver(coverage_only: bool, bold: bool, italic: bool) -> FontResolver {
+fn styled_font_resolver(
+    coverage_only: bool,
+    symbols_shape: bool,
+    bold: bool,
+    italic: bool,
+) -> FontResolver {
     FontResolver {
         coverage_only,
+        symbols_shape,
         bold,
         italic,
     }
@@ -658,7 +665,12 @@ pub(super) fn measure_plain_text(
 
     let levels = char_levels(text, base);
     let mut plan: Vec<(char, FontId, u8)> = Vec::new();
-    let resolve = styled_font_resolver(font_chains.coverage_only(chain), style.0, style.1);
+    let resolve = styled_font_resolver(
+        font_chains.coverage_only(chain),
+        font_chains.symbols_shape(),
+        style.0,
+        style.1,
+    );
     for (i, ch) in text.chars().enumerate() {
         let Some(font) = resolve.resolve(store, chain, ch, style.2, true) else {
             return Err(MeasureError::Unsupported("uncovered character".to_string()));
@@ -962,7 +974,12 @@ fn prepare_text_run(
             };
             validate_chain(store, &resolved)?;
             slot_resolvers[index].get_or_insert_with(|| {
-                styled_font_resolver(input.font_chains.coverage_only(&resolved), bold, italic)
+                styled_font_resolver(
+                    input.font_chains.coverage_only(&resolved),
+                    input.font_chains.symbols_shape(),
+                    bold,
+                    italic,
+                )
             });
             if resolved.len() <= MAX_KEPT_CHAIN_IDS {
                 slot_chains[index] = Some(resolved);
