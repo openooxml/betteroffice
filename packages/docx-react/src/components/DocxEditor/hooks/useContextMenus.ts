@@ -17,7 +17,8 @@ import { storeAriaShortcut, storeShortcutLabel } from '../../../commands/shortcu
 import { useDocxShortcutRevision } from '../../../commands/hooks';
 import type { DocxCommandId, DocxCommandStore } from '../../../commands/types';
 import type { PagedEditorRef } from '../PagedEditor';
-import { currentYrsTableTarget, yrsSelectedText, yrsSelectionPlainText } from '../yrsCommands';
+import { currentYrsTableTarget } from '../yrsCommands';
+import { readClipboardFragment } from '../internals/clipboardHtml';
 import type { DocxTableAction } from '../../../commands/types';
 
 interface TableContextInfo {
@@ -342,23 +343,24 @@ export function useContextMenus({
 
       switch (action) {
         case 'cut': {
-          const session = paged.getYrsSession();
-          const text = session ? yrsSelectedText(session) : '';
-          if (text) await navigator.clipboard.writeText(text).catch(() => undefined);
-          paged.deleteSelection();
+          paged.copySelection(true);
           break;
         }
         case 'copy': {
           const read = paged.readSelectedText();
-          const session = read ? null : paged.getYrsSession();
-          const text = read ? await read.catch(() => '') : session ? yrsSelectionPlainText(session) : '';
+          if (!read) {
+            paged.copySelection(false);
+            break;
+          }
+          const text = await read.catch(() => '');
           if (text) await navigator.clipboard.writeText(text).catch(() => undefined);
           break;
         }
         case 'paste': {
           try {
             const text = await navigator.clipboard.readText();
-            if (text) paged.insertText(text);
+            const fragment = await readClipboardFragment();
+            if (text || fragment) paged.pasteContent(text, fragment);
           } catch {
             // Clipboard access denied.
           }

@@ -1,9 +1,11 @@
 import {
   DOCX_CLIPBOARD_FRAGMENT_VERSION,
   clipboardFragmentHasPictures,
+  clipboardParagraphUnits,
   validClipboardFragment,
   type DocxClipboardFragment,
   type DocxClipboardParagraph,
+  type DocxClipboardRun,
   type DocxFragmentSegment,
   type DocxTableFragment,
   type DocxTableFragmentCell,
@@ -206,6 +208,13 @@ function serializeTable(table: DocxTableFragment): string {
   return html;
 }
 
+function serializeClipboardRun(run: DocxClipboardRun): string {
+  const style = spanStyleForText(run.format?.other as Record<string, unknown> | undefined, run.format);
+  const text = escapeHtml(run.text);
+  const content = style ? `<span style="${escapeHtml(style)}">${text}</span>` : text;
+  return run.href ? `<a href="${escapeHtml(run.href)}">${content}</a>` : content;
+}
+
 /** HTML clipboard form of a fragment for Word, Google Docs and internal paste. */
 export function clipboardFragmentHtml(fragment: DocxClipboardFragment): string {
   const version = clipboardFragmentHasPictures(fragment) ? DOCX_CLIPBOARD_FRAGMENT_VERSION : 1;
@@ -214,14 +223,14 @@ export function clipboardFragmentHtml(fragment: DocxClipboardFragment): string {
   for (const paragraph of fragment.paragraphs) {
     for (const table of paragraph.tables ?? []) html += serializeTable(table);
     if (paragraph.inlines || paragraph.text !== '' || (paragraph.tables ?? []).length === 0) {
-      const content = paragraph.inlines?.map(inline => {
-        if ('text' in inline) return escapeHtml(inline.text);
-        const image = inline.image;
+      const content = clipboardParagraphUnits(paragraph).map(unit => {
+        if ('text' in unit) return serializeClipboardRun(unit);
+        const image = unit.image;
         const dimensions = ['width', 'height'].map(key => typeof image[key] === 'number' && Number.isFinite(image[key]) && image[key] > 0
           ? ` ${key}="${image[key]}"` : '').join('');
         return `<img src="${escapeHtml(String(image.src))}" alt="${escapeHtml(typeof image.alt === 'string' ? image.alt : '')}"${dimensions}>`;
-      }).join('') ?? escapeHtml(paragraph.text);
-      html += `<p>${content}</p>`;
+      }).join('');
+      html += paragraph.runs ? `<p style="white-space:pre-wrap">${content}</p>` : `<p>${content}</p>`;
     }
   }
   html += '</div>';

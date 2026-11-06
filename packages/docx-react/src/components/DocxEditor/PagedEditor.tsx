@@ -2264,6 +2264,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             readOnly={(readOnly && !holdInput) || (!!partEdit && activeYrsRootStory === 'body')}
             holdInput={holdInput}
             inputScope={inputScope}
+            themeColors={yrsRenderEnv.themeColors}
             replicaReadyRef={yrsCore.experimentalWorkerOpen ? yrsCore.replicaReadyRef : undefined}
             inputEpoch={inputEpoch}
             applyPendingSelection={applyPendingSelection}
