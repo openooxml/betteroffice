@@ -97,7 +97,10 @@ test('proposal rounds, decisions and withdrawals match through the package API',
         step(result);
         return result.ok ? 'ok' : result.failure.code;
       };
-      expect(refusal(session.proposeChanges({ expectVersion: 'stale', proposals: [] }))).toBe('stale-version');
+      expect(refusal(session.proposeChanges({
+        expectVersion: 'stale',
+        proposals: [{ id: 'late', paragraph: third!, suggest, op: 'insertText', at: 'start', text: 'late ' }],
+      }))).toBe('stale-version');
       expect(refusal(session.proposeChanges({
         expectVersion: current.version,
         proposals: [{ id: 'absent', paragraph: first!, suggest, op: 'replaceText', search: 'absent', replaceWith: 'x' }],
