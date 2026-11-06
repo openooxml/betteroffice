@@ -244,6 +244,7 @@
     "cut": "قص",
     "copy": "نسخ",
     "paste": "لصق",
+    "pastePlainText": "لصق كنص عادي",
     "insert": "إدراج",
     "delete": "حذف",
     "deleteTable": "حذف جدول",
@@ -271,5 +272,14 @@
     "shape": "قائمة الشكل",
     "table": "قائمة الجدول",
     "slide": "قائمة الشريحة"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "delete": "Del",
+    "escape": "Esc",
+    "pageup": "Page Up",
+    "pagedown": "Page Down"
   }
 }

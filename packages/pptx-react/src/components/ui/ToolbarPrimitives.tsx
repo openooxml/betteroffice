@@ -57,6 +57,8 @@ export interface ToolbarButtonProps {
   title: string;
   /** Keyboard shortcut shown in the tooltip and overflow menu, such as `Ctrl+B`. */
   shortcut?: string;
+  /** The shortcut in `aria-keyshortcuts` form, such as `Control+B`. */
+  ariaShortcut?: string;
   onClick?: () => void;
   children: ReactNode;
   className?: string;
@@ -76,6 +78,7 @@ export const ToolbarButtonBase = forwardRef<HTMLButtonElement, ToolbarButtonProp
       description,
       title,
       shortcut,
+      ariaShortcut,
       onClick,
       children,
       className,
@@ -99,6 +102,7 @@ export const ToolbarButtonBase = forwardRef<HTMLButtonElement, ToolbarButtonProp
           aria-label={title}
           aria-pressed={active === undefined ? undefined : active}
           aria-expanded={ariaExpanded}
+          aria-keyshortcuts={ariaShortcut}
           title={tooltipText(title, shortcut, described.reason)}
           onMouseDown={(event) => event.preventDefault()}
           onMouseEnter={() => setHovered(true)}
@@ -127,13 +131,14 @@ export const ToolbarButtonBase = forwardRef<HTMLButtonElement, ToolbarButtonProp
 export function ToolbarButton(props: ToolbarButtonProps) {
   const buttonRef = useRef<HTMLButtonElement>(null);
   const id = useId();
-  const { active, disabled = false, description, title, shortcut, onClick, overflowLabel } = props;
+  const { active, disabled = false, description, title, shortcut, ariaShortcut, onClick, overflowLabel } = props;
   useOverflowSource(buttonRef, () => [
     {
       kind: 'item',
       id,
       label: overflowLabel ?? title,
       shortcut,
+      ariaShortcut,
       checked: active,
       disabled,
       description: disabled ? description : undefined,

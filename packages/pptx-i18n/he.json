@@ -244,6 +244,7 @@
     "cut": "גזור",
     "copy": "העתק",
     "paste": "הדבק",
+    "pastePlainText": "הדבק כטקסט פשוט",
     "insert": "הוספה",
     "delete": "מחק",
     "deleteTable": "מחק טבלה",
@@ -271,5 +272,14 @@
     "shape": "תפריט צורה",
     "table": "תפריט טבלה",
     "slide": "תפריט שקופית"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "delete": "Del",
+    "escape": "Esc",
+    "pageup": "Page Up",
+    "pagedown": "Page Down"
   }
 }

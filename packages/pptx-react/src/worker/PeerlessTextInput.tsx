@@ -1,3 +1,4 @@
+import { isKeyReleasedFromInput, takeClipboardGesture } from '../../../../shared/keyboard/nativeGesture';
 import { useEffect, useRef, useSyncExternalStore, type ReactElement, type RefObject } from 'react';
 import type { PeerlessViewStore } from './peerlessViewStore';
 import type { PeerlessVisualStore } from './usePeerlessPresentation';
@@ -123,7 +124,7 @@ export function PeerlessTextInput({ store, visual = store, viewport, onShortcut,
     }
 
     function keyDown(event: KeyboardEvent): void {
-      if (event.defaultPrevented) return;
+      if (event.defaultPrevented || isKeyReleasedFromInput(event)) return;
       const modifier = event.ctrlKey || event.metaKey;
       const key = event.key.toLowerCase();
       if (modifier && !event.altKey && (key === 'z' || key === 'y' && !event.shiftKey)) {
@@ -204,6 +205,7 @@ export function PeerlessTextInput({ store, visual = store, viewport, onShortcut,
     function paste(event: ClipboardEvent): void {
       if (store.getSnapshot().composition || store.getSnapshot().editState.readOnly) return;
       event.preventDefault();
+      if (takeClipboardGesture(input!) === 'ignore') return;
       const text = event.clipboardData?.getData('text/plain') ?? '';
       pastedText = text;
       insert(text, event.timeStamp, true);
@@ -219,8 +221,14 @@ export function PeerlessTextInput({ store, visual = store, viewport, onShortcut,
     input.addEventListener('compositionend', compositionEnd);
     input.addEventListener('input', inputEvent);
     input.addEventListener('paste', paste);
-    const copy = (event: ClipboardEvent) => { event.preventDefault(); shortcutRef.current?.('copy'); };
-    const cut = (event: ClipboardEvent) => { event.preventDefault(); if (!store.getSnapshot().editState.readOnly) shortcutRef.current?.('cut'); };
+    const copy = (event: ClipboardEvent) => {
+      event.preventDefault();
+      if (takeClipboardGesture(input!) !== 'ignore') shortcutRef.current?.('copy');
+    };
+    const cut = (event: ClipboardEvent) => {
+      event.preventDefault();
+      if (takeClipboardGesture(input!) !== 'ignore' && !store.getSnapshot().editState.readOnly) shortcutRef.current?.('cut');
+    };
     input.addEventListener('copy', copy); input.addEventListener('cut', cut);
     input.addEventListener('focus', focus);
     input.addEventListener('blur', blur);

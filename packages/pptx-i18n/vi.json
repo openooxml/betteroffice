@@ -244,6 +244,7 @@
     "cut": "Cắt",
     "copy": "Sao chép",
     "paste": "Dán",
+    "pastePlainText": "Dán dưới dạng văn bản thuần",
     "insert": "Chèn",
     "delete": "Xóa",
     "deleteTable": "Xóa bảng",
@@ -271,5 +272,14 @@
     "shape": "Menu hình dạng",
     "table": "Menu bảng",
     "slide": "Menu trang chiếu"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "delete": "Del",
+    "escape": "Esc",
+    "pageup": "Page Up",
+    "pagedown": "Page Down"
   }
 }

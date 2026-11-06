@@ -11,7 +11,7 @@ import {
 } from './evaluate';
 import type { CommandReason, PptxCommandId } from './types';
 
-const MENU_COMMANDS = new Set<PptxCommandId>(['cut', 'copy', 'paste', 'deleteObject', 'deleteSlide',
+const MENU_COMMANDS = new Set<PptxCommandId>(['cut', 'copy', 'paste', 'pasteAsPlainText', 'deleteObject', 'deleteSlide',
   'duplicateSlide', 'tableInsert', 'tableDelete']);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -56,6 +56,7 @@ export function pptxMenuGates(id: PptxCommandId, args: unknown,
         (current?.kind === 'range' ? null : 'text-selection-required') ??
         (env.clipboardWrite ? null : 'clipboard-unavailable'));
     case 'paste':
+    case 'pasteAsPlainText':
       return evaluation(textGate(env) ?? (current?.kind === 'shape' ? 'text-selection-required' : null) ??
         (env.clipboardRead ? null : 'clipboard-unavailable'));
     case 'deleteObject':

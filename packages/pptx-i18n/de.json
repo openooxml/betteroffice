@@ -244,6 +244,7 @@
     "cut": "Ausschneiden",
     "copy": "Kopieren",
     "paste": "Einfügen",
+    "pastePlainText": "Als Nur-Text einfügen",
     "insert": "Einfügen",
     "delete": "Löschen",
     "deleteTable": "Tabelle löschen",
@@ -271,5 +272,14 @@
     "shape": "Formmenü",
     "table": "Tabellenmenü",
     "slide": "Folienmenü"
+  },
+  "keys": {
+    "ctrl": "Strg",
+    "alt": "Alt",
+    "shift": "Umschalt",
+    "delete": "Entf",
+    "escape": "Esc",
+    "pageup": "Bild auf",
+    "pagedown": "Bild ab"
   }
 }

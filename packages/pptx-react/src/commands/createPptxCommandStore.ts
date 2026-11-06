@@ -1,5 +1,10 @@
 import type { Translations } from '@betteroffice/pptx-i18n';
-import { isPluginCommandId, isPptxCommandId, PPTX_COMMAND_DESCRIPTORS } from './descriptors';
+import {
+  isPluginCommandId,
+  isPptxCommandId,
+  PPTX_COMMAND_DESCRIPTORS,
+} from './descriptors';
+import type { ResolvedShortcuts } from '../../../../shared/keyboard/resolve';
 import {
   commandReason,
   contributedCommandGate,
@@ -8,6 +13,7 @@ import {
 } from './evaluate';
 import type {
   PptxCommandArgs,
+  PptxCommandDescriptor,
   PptxCommandDisabledCode,
   PptxCommandFailureCode,
   PptxCommandId,
@@ -139,6 +145,12 @@ export interface PptxCommandController {
   pluginToolbar(): readonly PptxPluginCommandId[];
   /** Keyboard bindings of the contributed commands. */
   pluginShortcuts(): readonly { id: PptxPluginCommandId; chord: string }[];
+  /** Replaces the host's resolved shortcuts; undefined restores the defaults. */
+  setShortcuts(table: ResolvedShortcuts | undefined): void;
+  /** The host's resolved shortcuts, or undefined while the defaults apply. */
+  hostShortcuts(): ResolvedShortcuts | undefined;
+  /** Changes whenever the shortcut map does; the store notifies its subscribers too. */
+  shortcutRevision(): number;
   /**
    * A store acting for `scope`: its answer is checked inside each operation, and mutating
    * built-in commands refuse with `unsupported-policy`.
@@ -213,6 +225,22 @@ export function createPptxCommandController(): PptxCommandController {
   const chromeListeners = new Set<() => void>();
   let chromeSnapshot: PptxChromeContext | null = null;
   let round = 0;
+  let hostTable: ResolvedShortcuts | undefined;
+  let revision = 0;
+  const effectiveDescriptors = new Map<PptxCommandId, PptxCommandDescriptor>();
+  const effectiveDescriptor = (id: PptxCommandId): PptxCommandDescriptor => {
+    if (!hostTable) return PPTX_COMMAND_DESCRIPTORS[id];
+    const table = hostTable;
+    let descriptor = effectiveDescriptors.get(id);
+    if (!descriptor) {
+      descriptor = Object.freeze({
+        ...PPTX_COMMAND_DESCRIPTORS[id],
+        shortcuts: Object.freeze((table.chords.get(id) ?? []).map((chord) => ({ chord, args: null }))),
+      }) as PptxCommandDescriptor;
+      effectiveDescriptors.set(id, descriptor);
+    }
+    return descriptor;
+  };
 
   const environment = (executing: boolean): PptxCommandEnvironment | null => {
     if (!binding) return null;
@@ -387,7 +415,7 @@ export function createPptxCommandController(): PptxCommandController {
   const getDescriptor = (id: AnyCommandId) =>
     isPluginCommandId(id)
       ? pluginCommands.get(id)?.descriptor ?? null
-      : PPTX_COMMAND_DESCRIPTORS[id];
+      : effectiveDescriptor(id);
 
   const store = Object.freeze({
     getDescriptor,
@@ -539,6 +567,14 @@ export function createPptxCommandController(): PptxCommandController {
     },
     pluginToolbar: () => pluginToolbarIds,
     pluginShortcuts: () => pluginShortcutList,
+    setShortcuts(table) {
+      hostTable = table;
+      revision += 1;
+      effectiveDescriptors.clear();
+      notify();
+    },
+    hostShortcuts: () => hostTable,
+    shortcutRevision: () => revision,
     scoped(scope) {
       let scoped = scopedStores.get(scope);
       if (!scoped) {

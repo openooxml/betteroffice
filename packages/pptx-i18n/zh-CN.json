@@ -244,6 +244,7 @@
     "cut": "剪切",
     "copy": "复制",
     "paste": "粘贴",
+    "pastePlainText": "粘贴为纯文本",
     "insert": "插入",
     "delete": "删除",
     "deleteTable": "删除表格",
@@ -271,5 +272,14 @@
     "shape": "形状菜单",
     "table": "表格菜单",
     "slide": "幻灯片菜单"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "delete": "Del",
+    "escape": "Esc",
+    "pageup": "Page Up",
+    "pagedown": "Page Down"
   }
 }

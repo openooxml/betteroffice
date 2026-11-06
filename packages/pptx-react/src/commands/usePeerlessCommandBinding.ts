@@ -22,10 +22,10 @@ import type { PptxCommandArgs, PptxCommandFailureCode, PptxCommandId, PptxComman
 interface Origin extends PptxCommandOrigin { run: PeerlessPresentation; slideId: string | null; target: string | null; id: PptxCommandId }
 
 const supported = new Set<PptxCommandId>(['bold', 'italic', 'underline', 'strikethrough', 'fontFamily', 'fontSize', 'fontSizeStep',
-  'cut', 'copy', 'paste', 'deleteObject', 'deleteSlide', 'duplicateSlide', 'tableInsert', 'tableDelete',
+  'cut', 'copy', 'paste', 'pasteAsPlainText', 'deleteObject', 'deleteSlide', 'duplicateSlide', 'tableInsert', 'tableDelete',
   'textColor', 'alignment', 'tool', 'insertImage', 'save', 'undo', 'redo', 'shapeFill', 'shapeStrokeColor', 'shapeStrokeWidth', 'shapeAdjustment', 'zOrder', 'insertSlide', 'zoom', 'proposalsPanel', 'proposalSelect', 'proposalDiff', 'proposalAccept', 'proposalReject', 'slideshow', 'exportPng']);
 
-const IMMEDIATE = new Set<PptxCommandId>(['tool', 'insertImage', 'cut', 'copy', 'paste']);
+const IMMEDIATE = new Set<PptxCommandId>(['tool', 'insertImage', 'cut', 'copy', 'paste', 'pasteAsPlainText']);
 
 function target(run: PeerlessPresentation): string | null {
   const selected = run.store.getSnapshot().selection;
@@ -98,9 +98,9 @@ export function usePeerlessCommandBinding(run: PeerlessPresentation | null, {
         const text = (action: Parameters<typeof formatPeerlessText>[1]) => formatPeerlessText(run.store, action);
         let operation: Promise<PresentationCommandAck | null> | null = null;
         switch (id) {
-          case 'cut': case 'copy': case 'paste': {
+          case 'cut': case 'copy': case 'paste': case 'pasteAsPlainText': {
             try {
-              if (id === 'paste') {
+              if (id === 'paste' || id === 'pasteAsPlainText') {
                 const ack = await peerlessPaste(run);
                 run.require();
                 const result: PptxCommandResult = ack ? receipt(ack, env) : { ok: true, status: 'noop' };

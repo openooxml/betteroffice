@@ -31,13 +31,18 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
+    },
+    "./shortcuts": {
+      "types": "./dist/shortcuts.d.ts",
+      "import": "./dist/shortcuts.js",
+      "default": "./dist/shortcuts.js"
     }
   },
   "files": [
     "dist"
   ],
   "scripts": {
-    "build": "tsup",
+    "build": "tsup && tsup --config tsup.shortcuts.config.ts",
     "typecheck": "tsc --noEmit -p ."
   },
   "dependencies": {

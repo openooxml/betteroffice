@@ -244,6 +244,7 @@
     "cut": "काटें",
     "copy": "कॉपी करें",
     "paste": "पेस्ट करें",
+    "pastePlainText": "सादे टेक्स्ट के रूप में पेस्ट करें",
     "insert": "डालें",
     "delete": "हटाएं",
     "deleteTable": "तालिका हटाएं",
@@ -271,5 +272,14 @@
     "shape": "आकृति मेनू",
     "table": "तालिका मेनू",
     "slide": "स्लाइड मेनू"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "delete": "Del",
+    "escape": "Esc",
+    "pageup": "Page Up",
+    "pagedown": "Page Down"
   }
 }
