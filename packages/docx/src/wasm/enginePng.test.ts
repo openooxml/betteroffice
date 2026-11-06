@@ -17,11 +17,12 @@ const engine = (drawn: DisplayPage, overrides: Partial<DocxPngEngine> = {}): Doc
 let restore: (() => void) | undefined;
 afterEach(() => { restore?.(); restore = undefined; });
 
-function stub(canvas = true) {
+function stub(canvas = true, context = true) {
   const calls = { sizes: [] as number[][], encoded: 0, backgrounds: [] as unknown[] };
   class Canvas {
     constructor(public width: number, public height: number) { calls.sizes.push([width, height]); }
     getContext() {
+      if (!context) return null;
       return new Proxy({} as Record<string, unknown>, {
         get(target, property) {
           if (property === 'fillRect') return () => { calls.backgrounds.push(target.fillStyle); };
@@ -70,6 +71,12 @@ describe.skipIf(engineKind === 'native')('canvas renderPng', () => {
     restore?.();
     stub(false);
     await expect(renderPng(engine(page([])), {})).rejects.toMatchObject({ code: 'canvas-unavailable', message: expect.stringContaining('@betteroffice/docx-native') });
+  });
+
+  test('a canvas without a 2d context, as in Deno, rejects as unavailable', async () => {
+    const calls = stub(true, false);
+    await expect(renderPng(engine(page([])), {})).rejects.toMatchObject({ name: 'PngExportError', code: 'canvas-unavailable', message: expect.stringContaining('@betteroffice/docx-native') });
+    expect(calls.encoded).toBe(0);
   });
 
   test('stops without encoding when aborted', async () => {
