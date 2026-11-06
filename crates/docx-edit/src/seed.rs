@@ -1646,6 +1646,14 @@ impl StyleResolver {
             self,
             merged.as_ref(),
         ));
+        for key in ["boldCs", "italicCs"] {
+            if let Some(value) = field(merged.as_ref(), key).and_then(Value::as_bool) {
+                attrs.insert(key.to_owned(), Value::Bool(value));
+            }
+        }
+        if let Some(value) = field(merged.as_ref(), "cs").and_then(Value::as_bool) {
+            attrs.insert("complexScript".to_owned(), Value::Bool(value));
+        }
         if let Some(hint) = field(field(merged.as_ref(), "fontFamily"), "hint")
             && let Some(fonts) = attrs.get_mut("fontFamily").and_then(Value::as_object_mut)
         {

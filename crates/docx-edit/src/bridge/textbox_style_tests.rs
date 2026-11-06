@@ -757,3 +757,16 @@ fn styles_arriving_after_first_paint_invalidate_resident_and_preview_lowering() 
         );
     }
 }
+
+#[test]
+fn text_box_runs_keep_complex_script_toggles_like_the_direct_path() {
+    let content = r#"<w:p><w:pPr><w:pStyle w:val="Derived"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Calibri" w:cs="Arial"/><w:bCs/><w:iCs/><w:cs/></w:rPr><w:t>Complex</w:t></w:r></w:p>"#;
+    let bytes = fixture::Package::new(&drawing(content))
+        .styles(STYLES)
+        .bytes();
+    let styled = lower_text_box_paragraphs(&bytes, &RenderEnv::default());
+    let formatting = text_formatting(&styled[0], "Complex");
+    assert_eq!(formatting.bold_cs, Some(true));
+    assert_eq!(formatting.italic_cs, Some(true));
+    assert_eq!(formatting.complex_script, Some(true));
+}
