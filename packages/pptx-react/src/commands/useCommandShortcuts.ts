@@ -24,6 +24,12 @@ const NATIVE_CHORDS: ReadonlyMap<string, string> = new Map([
   ['Mod+Shift+v', 'pasteAsPlainText'],
 ]);
 
+/** Modifier variants the text input reads as a clipboard command, with that command's default chord. */
+const LETTER_CLIPBOARD: Readonly<Record<string, { id: string; chord: string }>> = {
+  c: { id: 'copy', chord: 'Mod+c' },
+  x: { id: 'cut', chord: 'Mod+x' },
+};
+
 function isTextField(target: EventTarget | null): boolean {
   const element = target instanceof Element ? target : null;
   const field = element?.closest('input, textarea, select, [contenteditable]');
@@ -102,6 +108,12 @@ export function useCommandShortcuts({
       if (!event.ctrlKey && !event.metaKey && !event.altKey && !/^F\d/.test(event.key)) return;
       const pressed = commands.pressedChord(event);
       if (!pressed) {
+        const letter = LETTER_CLIPBOARD[event.key.toLowerCase()];
+        if (letter && (event.ctrlKey || event.metaKey) && commands.shortcutOwner(letter.chord) !== letter.id) {
+          releaseKeyFromInput(event);
+          if (isInput(target)) armClipboardGesture(target, 'ignore');
+          return;
+        }
         const contributed = commands.pluginShortcuts()
           .map(({ chord }) => normalizeChord(chord) ?? chord)
           .filter((chord) => !inputKeepsChord(chord));

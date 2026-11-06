@@ -78,6 +78,10 @@ test.describe('pptx host shortcuts, worker', () => {
     await input(page).press('Control+C');
     await page.waitForTimeout(400);
     expect(await page.evaluate(() => navigator.clipboard.readText())).toBe('sentinel');
+    await input(page).press('Control+Shift+X');
+    await page.waitForTimeout(400);
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe('sentinel');
+    expect(await probe<string[]>(page, 'probe.texts()')).toContain('Target');
     await input(page).press('Control+Alt+X');
     await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('Target');
   });
