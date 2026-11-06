@@ -117,6 +117,7 @@ mod script_fonts;
 mod search;
 mod section_margins;
 mod sections;
+mod shape_styles;
 pub use sections::SectionInfo;
 mod seed;
 #[doc(hidden)]
@@ -677,6 +678,7 @@ pub struct EditingDoc {
     /// The epoch at which the stories held exactly what seeding the retained source writes, or
     /// `u64::MAX` when they never did since that source was retained.
     seeded_epoch: AtomicU64,
+    shape_styles: Mutex<shape_styles::ResolverCache>,
     metadata: Mutex<Option<Arc<seed::SourceMetadata>>>,
     segment_indexes: Mutex<EpochCache<SegmentIndex>>,
     paragraph_indexes: Mutex<EpochCache<ParagraphIndex>>,
@@ -727,6 +729,7 @@ impl EditingDoc {
         doc.get_or_insert_map(REMOVED_STORIES);
         doc.get_or_insert_map(COMMENTS);
         doc.get_or_insert_map(part_metadata::PART_METADATA);
+        doc.get_or_insert_map(shape_styles::SHAPE_STYLES);
         doc.get_or_insert_map(document_properties::DOCUMENT_PROPERTIES);
         doc.get_or_insert_map(style_languages::STYLE_LANGUAGES);
         doc.get_or_insert_map(section_margins::SECTION_MARGINS);
@@ -788,6 +791,7 @@ impl EditingDoc {
             version_nonce: AtomicU64::new(batch::mint_nonce(client_id, 0)),
             seeded_epoch: AtomicU64::new(u64::MAX),
             metadata: Mutex::new(None),
+            shape_styles: Mutex::default(),
             segment_indexes: Mutex::default(),
             paragraph_indexes: Mutex::default(),
             save_story_states,

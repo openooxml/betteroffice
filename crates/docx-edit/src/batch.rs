@@ -728,6 +728,7 @@ fn direct_admissible<T: ReadTxn>(doc: &EditingDoc, txn: &T, steps: &[Planned]) -
             crate::REMOVED_STORIES,
             crate::COMMENTS,
             crate::part_metadata::PART_METADATA,
+            crate::shape_styles::SHAPE_STYLES,
             crate::document_properties::DOCUMENT_PROPERTIES,
             crate::style_languages::STYLE_LANGUAGES,
             crate::section_margins::SECTION_MARGINS,

@@ -76,10 +76,12 @@ impl Props {
             .enumerate()
             {
                 props.fonts[index] = fonts.attr(explicit).map(Rc::from);
-                if props.fonts[index].as_deref().is_none_or(str::is_empty)
-                    && let Some(reference) = fonts.attr(reference).filter(|value| !value.is_empty())
-                {
-                    props.fonts[index] = Some(theme.resolve(reference));
+                if let Some(reference) = fonts.attr(reference).filter(|value| !value.is_empty()) {
+                    if let Some(font) = theme.resolve_rfonts(reference) {
+                        props.fonts[index] = Some(font);
+                    } else if props.fonts[index].as_deref().is_none_or(str::is_empty) {
+                        props.fonts[index] = Some(theme.resolve(reference));
+                    }
                 }
             }
             props.hint = fonts
@@ -202,6 +204,20 @@ impl Theme {
             }
         }
         result
+    }
+
+    fn resolve_rfonts(&self, reference: &str) -> Option<Rc<str>> {
+        let (index, slot) = match reference.to_ascii_lowercase().as_str() {
+            "majorascii" | "majorhansi" => (0, 0),
+            "minorascii" | "minorhansi" => (1, 0),
+            "majoreastasia" => (0, 1),
+            "minoreastasia" => (1, 1),
+            "majorbidi" => (0, 2),
+            "minorbidi" => (1, 2),
+            _ => return None,
+        };
+        let font = &self.fonts[index][slot];
+        (!font.is_empty()).then(|| font.clone())
     }
 
     pub(crate) fn resolve(&self, reference: &str) -> Rc<str> {
