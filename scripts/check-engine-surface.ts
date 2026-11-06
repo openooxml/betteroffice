@@ -69,6 +69,12 @@ export const FORMATS: Record<string, FormatConfig> = {
     classes: ["PptxDocument", "PptxRenderer"],
     pending: [],
   },
+  "pptx-metafile": {
+    wasm: "packages/pptx/src/wasm/generated/metafile_svg_wasm.d.ts",
+    native: "bindings/pptx-native/index.d.ts",
+    classes: ["MetafileConverter"],
+    pending: ["MetafileConverter"],
+  },
 };
 
 const IGNORED_FUNCTIONS = new Set([
