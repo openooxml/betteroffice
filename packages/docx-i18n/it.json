@@ -727,6 +727,7 @@
     "failedToParse": "Impossibile analizzare il documento",
     "linkRemoved": "Collegamento rimosso",
     "linkCopied": "Collegamento copiato negli Appunti",
+    "pasteFailed": "Impossibile completare l’operazione Incolla. Non è stato modificato nulla.",
     "failedToSave": "Impossibile salvare il documento",
     "documentInput": "Immissione documento",
     "documentPreview": "Anteprima documento",

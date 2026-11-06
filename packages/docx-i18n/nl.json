@@ -727,6 +727,7 @@
     "failedToParse": "Kan document niet parseren",
     "linkRemoved": "Koppeling verwijderd",
     "linkCopied": "Koppeling gekopieerd naar klembord",
+    "pasteFailed": "Plakken kon niet worden voltooid. Er is niets gewijzigd.",
     "failedToSave": "Kan document niet opslaan",
     "documentInput": "Documentinvoer",
     "documentPreview": "Documentvoorbeeld",

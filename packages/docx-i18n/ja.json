@@ -727,6 +727,7 @@
     "failedToParse": "ドキュメントを解析できませんでした",
     "linkRemoved": "リンクが削除されました",
     "linkCopied": "リンクがクリップボードにコピーされました",
+    "pasteFailed": "貼り付けを完了できませんでした。何も変更されていません。",
     "failedToSave": "ドキュメントを保存できませんでした",
     "documentInput": "ドキュメント入力",
     "documentPreview": "ドキュメントのプレビュー",

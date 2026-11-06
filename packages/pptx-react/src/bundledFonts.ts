@@ -41,7 +41,7 @@ export interface BundledFontsResolverProps {
   file: Uint8Array | undefined;
   fonts: readonly Font[];
   fallback: ReactNode;
-  session: { defaultFonts?: boolean; initialSlide?: number };
+  session: { defaultFonts?: boolean; initialSlide?: number; experimentalSlicedFonts?: boolean };
   onReady?: (api: never) => unknown;
   onError?: (error: Error) => void;
   children: (fonts: readonly PptxFontFace[], onReady: (api: never) => unknown, onError: (error: Error) => void) => ReactNode;
@@ -73,8 +73,9 @@ export function BundledFontsResolver({ file, fonts, fallback, session, onReady, 
       try {
         const { loadBundledFonts } = await import('./bundledFontsLoad');
         if (!current()) return;
-        const { defaultFonts, initialSlide } = options.current;
+        const { defaultFonts, initialSlide, experimentalSlicedFonts } = options.current;
         const loading = loadBundledFonts(file, stable, () => { if (current()) warnFonts(); }, { defaultFonts,
+          slicedFonts: experimentalSlicedFonts,
           activeSlideIndex: Number.isInteger(initialSlide) ? Math.max(0, initialSlide! - 1) : 0 });
         prepared = loading;
         const loaded = await loading.fonts;

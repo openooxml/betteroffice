@@ -727,6 +727,7 @@
     "failedToParse": "فشل تحليل المستند",
     "linkRemoved": "تمت إزالة الارتباط",
     "linkCopied": "تم نسخ الارتباط إلى الحافظة",
+    "pasteFailed": "تعذّر إكمال اللصق. لم يتم تغيير أي شيء.",
     "failedToSave": "فشل حفظ المستند",
     "documentInput": "إدخال المستند",
     "documentPreview": "معاينة المستند",

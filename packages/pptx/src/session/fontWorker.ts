@@ -31,12 +31,12 @@ const abandonedWorkers = Registry ? new Registry(release => release()) : undefin
  * `activeSlideIndex` the editor will use.
  */
 export function preparePresentationFontDecoder(source: Uint8Array | ArrayBuffer,
-  options: { defaultFonts?: boolean; activeSlideIndex?: number } = {}): PreparedFontWorker {
+  options: { defaultFonts?: boolean; activeSlideIndex?: number; slicedFonts?: boolean } = {}): PreparedFontWorker {
   let owner = preparedWorkers.get(source);
   if (!owner || owner.retired()) {
     owner = createPreparedFontWorker();
     preparedWorkers.set(source, owner);
-    if (options.defaultFonts !== false) owner.prefetchCoverage(source, options.activeSlideIndex ?? 0);
+    if (options.defaultFonts !== false) owner.prefetchCoverage(source, options.activeSlideIndex ?? 0, options.slicedFonts === true);
   }
   return owner.handle();
 }
@@ -92,9 +92,9 @@ function createPreparedFontWorker() {
     retired: () => retired,
     shared: () => holders > 1,
     take,
-    prefetchCoverage(source: Uint8Array | ArrayBuffer, activeSlideIndex: number): void {
+    prefetchCoverage(source: Uint8Array | ArrayBuffer, activeSlideIndex: number, sliced: boolean): void {
       void import('./coverageScan').then((scan) => scan.activeSlideCoverageScripts(source, activeSlideIndex)).then((scripts) => {
-        if (scripts.length) connection.post({ protocol: 1, kind: 'call', id: UNTRACKED_CALL_ID, method: 'prefetchCoverageFonts', args: [scripts] }, []);
+        if (scripts.length) connection.post({ protocol: 1, kind: 'call', id: UNTRACKED_CALL_ID, method: 'prefetchCoverageFonts', args: sliced ? [scripts, true] : [scripts] }, []);
       }).catch(() => {});
     },
     /** A holder's own handle: the worker stops once every handle is released, or collected after its decodes. */

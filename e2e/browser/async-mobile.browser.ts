@@ -172,6 +172,20 @@ async function history(page: Page, format: Format, label: 'Undo' | 'Redo') {
   }
 }
 
+async function doubleTap(page: Page, x: number, y: number) {
+  const cdp = await page.context().newCDPSession(page);
+  try {
+    const start = Date.now() / 1000;
+    const touchPoints = [{ x, y, id: 1 }];
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints, timestamp: start });
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [], timestamp: start + 0.05 });
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints, timestamp: start + 0.15 });
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [], timestamp: start + 0.2 });
+  } finally {
+    await cdp.detach();
+  }
+}
+
 async function tapDocument(page: Page, format: Format, double = false) {
   let target: Locator;
   let x: number;
@@ -202,8 +216,8 @@ async function tapDocument(page: Page, format: Format, double = false) {
       y: (y - (viewport?.offsetTop ?? 0)) * (viewport?.scale ?? 1),
     };
   }, { x, y });
-  await page.touchscreen.tap(point.x, point.y);
-  if (double) await page.touchscreen.tap(point.x, point.y);
+  if (double) await doubleTap(page, point.x, point.y);
+  else await page.touchscreen.tap(point.x, point.y);
   if (format === 'xlsx') {
     await expect(page.getByTestId('xlsx-name-box')).toHaveValue('A1');
     await expect(page.getByTestId('xlsx-selection')).toBeVisible();

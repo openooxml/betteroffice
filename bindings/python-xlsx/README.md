@@ -119,7 +119,8 @@ wb.accept_proposal(proposal.id)     # or wb.reject_proposal(proposal.id)
 ```
 
 In standalone workbooks, accepting a proposal records one undo step.
-`proposals()` lists pending proposals.
+`proposals()`, or its alias `list_proposals()`, lists pending proposals. Each
+one's `stale_targets` names the cells that have moved as of that call.
 
 A proposal goes stale when one of its target cells changes after it was staged.
 `accept_proposal` then raises `StaleProposalError`, whose `cells` names the
@@ -307,7 +308,7 @@ editing.
 | `wb.merged_ranges(sheet, range)` | merged regions overlapping a range |
 | `wb.undo()` / `wb.redo()` | walk local history |
 | `wb.can_undo` / `wb.can_redo` / `wb.history()` | what history is available |
-| `wb.propose(...)` / `proposals()` / `accept_proposal` / `reject_proposal` | staged agent edits |
+| `wb.propose(...)` / `proposals()` / `list_proposals()` / `accept_proposal` / `reject_proposal` | staged agent edits |
 | `wb.version()` / `read_cells(...)` / `find_text(...)` | versioned reads |
 | `wb.validate_edits(...)` / `apply_edits(...)` | version-checked edit batches |
 | `wb.export_structured(...)` / `export_markdown(...)` | anchored JSON and Markdown export, never recalculated |

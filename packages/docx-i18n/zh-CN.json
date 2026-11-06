@@ -727,6 +727,7 @@
     "failedToParse": "解析文档失败",
     "linkRemoved": "链接已删除",
     "linkCopied": "链接已复制到剪贴板",
+    "pasteFailed": "无法完成粘贴。未做任何更改。",
     "failedToSave": "保存文档失败",
     "documentInput": "文档输入",
     "documentPreview": "文档预览",

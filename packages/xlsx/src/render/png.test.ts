@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import { PngExportError } from '../../../../shared/office-session/pngExportError';
 import type { DisplayList } from '../display-list/types';
 import { engineKind, renderPng, type XlsxPngEngine } from '../wasm/enginePng';
 import { displayListToPng } from './png';
@@ -37,8 +38,9 @@ function stubBrowser(options: { loadFails?: boolean; canvas?: boolean; faceFails
     }
     load() { return options.faceFails ? Promise.reject(new Error('bad font')) : Promise.resolve(this); }
   }
-  const saved = { OffscreenCanvas: scope.OffscreenCanvas, fonts: scope.fonts, FontFace: scope.FontFace };
+  const saved = { OffscreenCanvas: scope.OffscreenCanvas, document: scope.document, fonts: scope.fonts, FontFace: scope.FontFace };
   scope.OffscreenCanvas = options.canvas === false ? undefined : StubCanvas;
+  if (options.canvas === false) scope.document = undefined;
   scope.FontFace = StubFace;
   scope.fonts = {
     add(face: unknown) { calls.held.push(face); },
@@ -134,7 +136,7 @@ describe('supplied faces', () => {
 });
 
 describe.skipIf(engineKind === 'native')('the wasm PNG engine', () => {
-  function engine(overrides: Partial<XlsxPngEngine> = {}) {
+  function engine() {
     const seen: { sheet: number; call: string; json: string }[] = [];
     let active = 0;
     const value: XlsxPngEngine = {
@@ -142,11 +144,7 @@ describe.skipIf(engineKind === 'native')('the wasm PNG engine', () => {
       doc: {
         pngDisplayListJson(json) { seen.push({ sheet: active, call: 'viewport', json }); return JSON.stringify(list()); },
         rangePngDisplayListJson(json) { seen.push({ sheet: active, call: 'range', json }); return JSON.stringify({ ...list(), width: 60.2, height: 20.1 }); },
-        renderPng(json) { seen.push({ sheet: active, call: 'raster viewport', json }); return new Uint8Array([1]); },
-        renderRangePng(json) { seen.push({ sheet: active, call: 'raster range', json }); return new Uint8Array([2]); },
       },
-      rasterAvailable: false,
-      ...overrides,
     };
     return { value, seen };
   }
@@ -179,18 +177,17 @@ describe.skipIf(engineKind === 'native')('the wasm PNG engine', () => {
     expect(JSON.parse(seen[0].json)).toEqual({ scale: 2 });
   });
 
-  test('without a canvas, uses the rasterizer the build carries, then a session rasterizer, then names -native', async () => {
+  test('without a canvas, viewport and range exports reject and name the native package', async () => {
     stubBrowser({ canvas: false });
     const viewport = { x: 0, y: 0, width: 10, height: 10 };
-    const raster = engine({ rasterAvailable: true });
-    expect([...await renderPng(raster.value, { sheet: 0, range: 'A1' }, {})]).toEqual([2]);
-    const rasterized: string[] = [];
-    const lazy = engine({ rasterize: async (json) => { rasterized.push(json); return new Uint8Array([3]); } });
-    expect([...await renderPng(lazy.value, { sheet: 0, viewport }, {})]).toEqual([3]);
-    expect(lazy.seen.map(({ call }) => call)).toEqual(['viewport']);
-    expect(rasterized).toHaveLength(1);
-    await expect(renderPng(engine().value, { sheet: 0, viewport }, {})).rejects.toMatchObject({
-      name: 'PngExportError', code: 'canvas-unavailable', message: expect.stringContaining('@betteroffice/xlsx-native'),
-    });
+    const { value, seen } = engine();
+    for (const target of [{ sheet: 0, viewport }, { sheet: 0, range: 'A1' }]) {
+      const png = renderPng(value, target, {});
+      await expect(png).rejects.toBeInstanceOf(PngExportError);
+      await expect(png).rejects.toMatchObject({
+        name: 'PngExportError', code: 'canvas-unavailable', message: expect.stringContaining('@betteroffice/xlsx-native'),
+      });
+    }
+    expect(seen).toEqual([]);
   });
 });

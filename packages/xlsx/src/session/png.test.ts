@@ -1,11 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
+import { PngExportError } from '../../../../shared/office-session/pngExportError';
 import { isHostMessage } from '../../../../shared/office-session/protocol';
 import { engineKind } from '../wasm/engine';
 import { openWorkbookSession, type WorkbookSession } from './client';
 
 const fixture = new Uint8Array(readFileSync(new URL('../../test-fixtures/sample.xlsx', import.meta.url)));
-const charts = new Uint8Array(readFileSync(new URL('../../test-fixtures/charts.xlsx', import.meta.url)));
 const viewport = { x: 13.37, y: 21.125, width: 300.3, height: 180.7 };
 
 async function opened(png: boolean, bytes = fixture) {
@@ -26,40 +26,22 @@ async function opened(png: boolean, bytes = fixture) {
   }
 }
 
-function rasterRequests(requests: string[]) {
-  return requests.filter((url) => url.endsWith('/xlsx_raster_bg.wasm'));
-}
-
 async function failure(call: Promise<unknown>): Promise<string> {
   try { await call; }
   catch (error) { return error instanceof Error ? error.message : String(error); }
   throw new Error('Expected a rejected export');
 }
 
-async function matchingPng(lean: WorkbookSession, full: WorkbookSession, sheet: number) {
-  expect(await lean.call.renderPng({ sheet, viewport })).toEqual(await full.call.renderPng({ sheet, viewport }));
-  for (const [range, options] of [['A1:B3', {}], ['B2:D5', { scale: 0.75 }], ['A1:B3', { scale: 1.3 }],
-    ['A1:B3', { scale: 2 }], ['A1:D9', { scale: 1.3, maxWidth: 97, maxHeight: 41 }], ['used', {}], ['used', { scale: 0.75 }]] as const) {
-    expect(await lean.call.renderPng({ sheet, range }, options))
-      .toEqual(await full.call.renderPng({ sheet, range }, options));
-  }
-}
-
-describe.skipIf(engineKind === 'native')('lazy worker PNG export', () => {
-  test('loads raster only on the first export and matches full-core bytes after edits', async () => {
+describe.skipIf(engineKind === 'native')('worker PNG export without a canvas', () => {
+  test('full and lean sessions reject exports and preserve edits, frames and saves', async () => {
     const lean = await opened(false);
     const full = await opened(true);
     try {
-      expect(lean.session.pngExport).toBe(true);
-      expect(full.session.pngExport).toBe(true);
+      expect(lean.session.pngExport).toBe(false);
+      expect(full.session.pngExport).toBe(false);
       expect(lean.requests.some((url) => url.endsWith('/xlsx_wasm_lean_bg.wasm'))).toBe(true);
       expect(lean.requests.some((url) => url.endsWith('/xlsx_wasm_bg.wasm'))).toBe(false);
-      expect(rasterRequests(lean.requests)).toEqual([]);
-      for (const session of [lean.session, full.session]) {
-        await session.call.frame(viewport);
-        await session.save();
-      }
-      expect(rasterRequests(lean.requests)).toEqual([]);
+      expect(full.requests.some((url) => url.endsWith('/xlsx_wasm_bg.wasm'))).toBe(true);
       for (const [target, options] of [
         [{ sheet: 0, viewport: { ...viewport, width: -1 } }, {}],
         [{ sheet: 0, viewport: { ...viewport, width: 17000 } }, {}],
@@ -70,27 +52,23 @@ describe.skipIf(engineKind === 'native')('lazy worker PNG export', () => {
         const call = (session: WorkbookSession) => session.call.renderPng(target, options);
         expect(await failure(call(lean.session))).toBe(await failure(call(full.session)));
       }
-      expect(rasterRequests(lean.requests)).toEqual([]);
-      const [png, range] = await Promise.all([
-        lean.session.call.renderPng({ sheet: 1, viewport }),
-        lean.session.call.renderPng({ sheet: 0, range: 'A1:B3' }, { scale: 1.3 }),
-      ]);
-      expect(png).toEqual(await full.session.call.renderPng({ sheet: 1, viewport }));
-      expect(range).toEqual(await full.session.call.renderPng({ sheet: 0, range: 'A1:B3' }, { scale: 1.3 }));
-      expect([...png.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
-      expect(rasterRequests(lean.requests)).toHaveLength(1);
       for (const session of [lean.session, full.session]) {
+        for (const target of [{ sheet: 1, viewport }, { sheet: 0, range: 'A1:B3' }]) {
+          const png = session.call.renderPng(target);
+          await expect(png).rejects.toBeInstanceOf(PngExportError);
+          await expect(png).rejects.toMatchObject({
+            name: 'PngExportError', code: 'canvas-unavailable', message: expect.stringContaining('@betteroffice/xlsx-native'),
+          });
+        }
         await session.submit({ ...session.commandIdentity, basis: session.confirmedBasis, seq: 1,
           kind: 'editCell', payload: { args: [1, 0, 0, '1234'] } });
+        expect(session.state.activeSheet).toBe(0);
+        expect((await session.call.frame(viewport)).sheet).toBe(0);
+        expect(session.failure).toBeUndefined();
       }
-      await matchingPng(lean.session, full.session, 1);
-      await matchingPng(lean.session, full.session, 2);
-      expect(lean.session.state.activeSheet).toBe(0);
-      expect((await lean.session.call.frame(viewport)).sheet).toBe(0);
+      expect((await lean.session.call.frame(viewport)).displayList)
+        .toEqual((await full.session.call.frame(viewport)).displayList);
       expect(await lean.session.save()).toEqual(await full.session.save());
-      expect(rasterRequests(lean.requests)).toHaveLength(1);
-      expect(rasterRequests(full.requests)).toEqual([]);
-      expect(lean.session.failure).toBeUndefined();
     } finally {
       await lean.session.dispose();
       await full.session.dispose();
@@ -106,87 +84,5 @@ describe.skipIf(engineKind === 'native')('lazy worker PNG export', () => {
       expect(lean.requests.some((url) => url.endsWith('/xlsx_wasm_bg.wasm'))).toBe(false);
       expect(lean.session.failure).toBeUndefined();
     } finally { await lean.session.dispose(); }
-  }, 30_000);
-
-  test('preserves chart PNG bytes across the module boundary', async () => {
-    const lean = await opened(false, charts);
-    const full = await opened(true, charts);
-    try {
-      await matchingPng(lean.session, full.session, 0);
-      expect(rasterRequests(lean.requests)).toHaveLength(1);
-      expect(rasterRequests(full.requests)).toEqual([]);
-    } finally {
-      await lean.session.dispose();
-      await full.session.dispose();
-    }
-  }, 30_000);
-});
-
-async function controlled(entry: 'pngRasterDelayWorker' | 'pngRasterFailWorker') {
-  const worker = new Worker(new URL(`./testing/${entry}.ts`, import.meta.url), { type: 'module' });
-  const requests: string[] = [];
-  worker.addEventListener('message', (event: MessageEvent) => {
-    const message: unknown = event.data;
-    if (isHostMessage(message) && message.kind === 'event' && message.name === 'png-test-fetch' &&
-      typeof message.payload === 'string') requests.push(message.payload);
-  });
-  try {
-    const session = await openWorkbookSession(fixture, { worker: () => worker, png: false,
-      calculation: { nowSerial: 45000, randSeed: 1 } });
-    return { session, requests };
-  } catch (error) {
-    worker.terminate();
-    throw error;
-  }
-}
-
-async function edit(session: WorkbookSession, seq: number, value: string) {
-  await session.submit({ ...session.commandIdentity, basis: session.confirmedBasis, seq,
-    kind: 'editCell', payload: { args: [0, 2, 1, value] } });
-}
-
-describe.skipIf(engineKind === 'native')('lazy worker PNG export while the rasterizer loads', () => {
-  test('a slow raster download does not block later edits, frames or saves, which the export does not see', async () => {
-    const { session, requests } = await controlled('pngRasterDelayWorker');
-    const full = await opened(true);
-    try {
-      let settled = false;
-      const exported = session.call.renderPng({ sheet: 0, viewport }).finally(() => { settled = true; });
-      const edited = edit(session, 1, 'after export');
-      const before = await full.session.call.renderPng({ sheet: 0, viewport });
-      await edited;
-      expect((await session.call.frame(viewport)).sheet).toBe(0);
-      expect((await session.save()).byteLength).toBeGreaterThan(0);
-      while (rasterRequests(requests).length === 0) await Bun.sleep(5);
-      expect(settled).toBe(false);
-      expect(await exported).toEqual(before);
-      await edit(full.session, 1, 'after export');
-      const after = await full.session.call.renderPng({ sheet: 0, viewport });
-      expect(after).not.toEqual(before);
-      expect(await session.call.renderPng({ sheet: 0, viewport })).toEqual(after);
-      expect(rasterRequests(requests)).toHaveLength(1);
-      expect(session.failure).toBeUndefined();
-    } finally {
-      await session.dispose();
-      await full.session.dispose();
-    }
-  }, 30_000);
-
-  test('a failed raster download rejects only that export and the next export retries it', async () => {
-    const { session, requests } = await controlled('pngRasterFailWorker');
-    const full = await opened(true);
-    try {
-      expect(await failure(session.call.renderPng({ sheet: 0, viewport }))).toBe('Raster download failed');
-      expect(session.failure).toBeUndefined();
-      await edit(session, 1, 'after failure');
-      expect((await session.save()).byteLength).toBeGreaterThan(0);
-      await edit(full.session, 1, 'after failure');
-      expect(await session.call.renderPng({ sheet: 0, viewport })).toEqual(await full.session.call.renderPng({ sheet: 0, viewport }));
-      expect(rasterRequests(requests)).toHaveLength(2);
-      expect(session.failure).toBeUndefined();
-    } finally {
-      await session.dispose();
-      await full.session.dispose();
-    }
   }, 30_000);
 });

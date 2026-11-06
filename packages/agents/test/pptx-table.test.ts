@@ -1,15 +1,18 @@
-import { expect, test } from 'bun:test';
+import { beforeAll, expect, test } from 'bun:test';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import JSZip from 'jszip';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { openPresentation } from '@betteroffice/pptx';
+import { initWasm, openPresentation } from '@betteroffice/pptx';
 import { createOfficeMcpServer } from '../src/mcp';
 import { attachPptx, openPptx } from '../src/pptx';
 import { pptxEditSchema } from '../src/pptx-schema';
 import { tableFixture } from './pptx-fixture';
+import { initialize } from '../src/prototype';
+
+beforeAll(() => initialize('pptx', initWasm));
 
 async function connect(merged = false, fixture?: Uint8Array) {
   const root = await mkdtemp(join(tmpdir(), 'pptx-table-'));

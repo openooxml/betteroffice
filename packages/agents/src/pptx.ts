@@ -1,7 +1,8 @@
+import { engines } from '#agents-engines';
 import { imageSize } from 'image-size';
 import { pptxBatchSchema, pptxProposalEditSchema, type PptxAgentBatch, type PptxAgentEdit, type PptxProposalEdit } from './pptx-schema';
 import { loadPptxFonts, pptxFontFaces, pptxThemeFonts, renderPptxSlide, type PptxThemeFonts } from './pptx-render';
-import { initWasm, openPresentation, type CommentSnapshot, type PptxEditStep, type PptxStoryText, type PptxStoryTarget, type ProposalEdit, type Proposal, type PresentationHandle, type ShapeSnapshot, type SlideSnapshot, type ShapeRect, type StorySnapshot, type TextStyle } from '@betteroffice/pptx';
+import type { CommentSnapshot, PptxEditStep, PptxStoryText, PptxStoryTarget, ProposalEdit, Proposal, PresentationHandle, ShapeSnapshot, SlideSnapshot, ShapeRect, StorySnapshot, TextStyle } from '@betteroffice/pptx';
 import { DocumentToolError, unknownMatchError, type GrepOptions, type TextEdit, type RenderedPage } from './types';
 import { initialize, integer, plainText, PrototypeDocument, textWindow, unwrap, type PrototypeOptions, type AgentProposal } from './prototype';
 
@@ -39,10 +40,11 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
   }
 
   static async open(bytes: Uint8Array, options: PrototypeOptions & { maxEdits?: number } = {}) {
-    await initialize('pptx', initWasm, options.wasm);
+    const engine = await engines.load('pptx');
+    await initialize('pptx', engine.module.initWasm, options.wasm, engine.native);
     if (bytes.length > 64 * 1024 * 1024) throw new DocumentToolError('FILE_TOO_LARGE', 'Open a PPTX file up to 64 MiB.');
     const source = bytes.slice();
-    return new PptxAgentPresentation(openPresentation(source), options.name, true, pptxThemeFonts(source), options.maxEdits);
+    return new PptxAgentPresentation(engine.module.openPresentation(source), options.name, true, await pptxThemeFonts(source), options.maxEdits);
   }
 
   static attach(handle: PresentationHandle, options: { name?: string; maxEdits?: number } = {}) {
@@ -384,7 +386,9 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
     this.alive();
     if (page === undefined) throw new DocumentToolError('UNSUPPORTED', 'Use pptx_preview with a slide ID, or render(1) with a one-based slide index.');
     if (!proposal) return renderPptxSlide(this.handle, page, undefined, undefined, this.themeFonts);
-    const draft = openPresentation(await this.export(proposal));
+    const engine = await engines.load('pptx');
+    await initialize('pptx', engine.module.initWasm, undefined, engine.native);
+    const draft = engine.module.openPresentation(await this.export(proposal));
     try { return await renderPptxSlide(draft, page, undefined, undefined, this.themeFonts); }
     finally { draft.dispose(); }
   }
@@ -744,7 +748,11 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
       }
     }
   }
-  protected reopen(bytes: Uint8Array) { const reopened = openPresentation(bytes); reopened.dispose(); }
+  protected async reopen(bytes: Uint8Array) {
+    const engine = await engines.load('pptx');
+    await initialize('pptx', engine.module.initWasm, undefined, engine.native);
+    const reopened = engine.module.openPresentation(bytes); reopened.dispose();
+  }
   protected dispose() {
     for (const held of this.slideProposals.values()) {
       if (held.value.status === 'pending') this.handle.rejectProposal(held.engineId);

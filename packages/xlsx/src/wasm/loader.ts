@@ -30,7 +30,7 @@ export const decodeFontFace: FontDecoder = async (bytes, { codec, dict, maxOutpu
     dict === undefined ? undefined : fontBytes(dict), maxOutput));
 };
 import { wasmAssetUrl } from './asset';
-import { pngFontReaders, pngRasterizers, workbookPngFonts } from './pngDisplayList';
+import { pngFontReaders, workbookPngFonts } from './pngDisplayList';
 import { renderPng as renderEnginePng, type XlsxPngEngine } from './enginePng';
 import { pngDisplayList, resolvePngTarget, type ResolvedPngTarget } from './pngResolve';
 import type { XlsxPngFont, XlsxPngOptions, XlsxPngTarget } from './pngTarget';
@@ -453,6 +453,11 @@ export interface Proposal {
   agentId: string;
   note: string | null;
   cells: ProposalCell[];
+  /**
+   * A1 addresses of the cells whose target moved, the same strings as
+   * {@link StaleProposalError.cells}. A changed dependency only shows at accept.
+   */
+  staleTargets?: string[];
   forceBlocked?: boolean;
 }
 
@@ -693,7 +698,6 @@ export interface WorkbookHandle extends CollaborationReplica {
 let initialized = false;
 let engineMemory: WebAssembly.Memory | undefined;
 let initialization: Promise<void> | undefined;
-let pngExportAvailable = true;
 const displayListJsonReaders = new WeakMap<
   WorkbookHandle, (viewport: Viewport, sheet?: number) => string
 >();
@@ -711,8 +715,8 @@ export type WasmInitInput = InitInput | Promise<InitInput>;
 
 export interface WasmInitOptions {
   /**
-   * `false` loads the smaller core without PNG export. On that core, PNG export and the
-   * standalone {@link renderXlsxMarkdown} reject; `exportMarkdown` on a workbook still works.
+   * `false` loads the smaller core without peer snapshots or standalone
+   * {@link renderXlsxMarkdown}; `exportMarkdown` on a workbook still works.
    */
   png?: boolean;
 }
@@ -744,18 +748,12 @@ export function initWasm(
   if (initialized) return Promise.resolve();
   if (initialization) return initialization;
   const png = options.png !== false;
-  let module: WebAssembly.Module | undefined;
   const source = engineKind === 'native' || (input === undefined && png)
     ? input ?? wasmAssetUrl()
-    : compileWasmInput(input ?? wasmAssetUrl(png)).then((compiled) => {
-      module = compiled;
-      return compiled;
-    });
+    : compileWasmInput(input ?? wasmAssetUrl(png));
   initialization = initWasmModule({ module_or_path: source }).then(
     (output) => {
       engineMemory = output.memory;
-      pngExportAvailable = engineKind === 'native' || module === undefined ||
-        WebAssembly.Module.customSections(module, 'betteroffice.xlsx.no-png').length === 0;
       initialized = true;
     },
     (error: unknown) => {
@@ -800,19 +798,12 @@ export function isWasmAvailable(): boolean {
   return typeof WebAssembly === 'object';
 }
 
-/** Whether the embedded wasm core still carries the rasterizer (the `raster` cargo feature). */
-function rasterPngAvailable(): boolean {
-  return pngExportAvailable &&
-    typeof (XlsxDocument.prototype as { renderPng?: unknown }).renderPng === 'function';
-}
-
 /**
- * Whether `renderPng` can draw here: through a canvas, through the native
- * engine, or through a wasm build that still carries the rasterizer. Chrome can
- * disable an export control instead of calling and catching.
+ * Whether `renderPng` can draw here through a canvas or the native engine.
+ * Callers can disable an export control instead of calling and catching.
  */
 export function isPngExportAvailable(): boolean {
-  return engineKind === 'native' || canvasPngAvailable() || rasterPngAvailable();
+  return engineKind === 'native' || canvasPngAvailable();
 }
 
 /**
@@ -1072,8 +1063,6 @@ function wrapWorkbookDocument(
   function pngEngine(): XlsxPngEngine {
     return {
       doc: doc as unknown as XlsxPngEngine['doc'],
-      rasterAvailable: rasterPngAvailable(),
-      rasterize: pngRasterizers.get(handle),
       onSheet: (sheet, read) => {
         const active = parseJson<SheetInfo>(() => doc.sheetInfoJson()).activeSheet;
         if (sheet === active) return wasmCall(read);

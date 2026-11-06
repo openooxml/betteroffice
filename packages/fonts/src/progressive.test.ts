@@ -1,3 +1,4 @@
+import { textChunks } from './slices';
 import { expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
 import pack from '../../fonts-cjk/assets/manifest.json';
@@ -173,6 +174,41 @@ test('a listener that throws neither stops the others nor rejects the load', asy
   expect(seen).toEqual([2]);
 });
 
+test('ensureText loads the chunks of the characters it is given and resolves once they draw', async () => {
+  const reads: string[] = [];
+  const face = await openProgressiveFace(jpRef, transport(reads));
+  const index = JSON.parse(await Bun.file(new URL(jpRef.index, assets)).text()) as Index;
+  const skeleton = parseSkeleton(await decode(index.skeleton.file));
+  const characterIn = (chunk: number) => {
+    let codepoint = 0;
+    while (skeleton.chunkOfCodepoint(codepoint) !== chunk) codepoint += 1;
+    return String.fromCodePoint(codepoint);
+  };
+  reads.length = 0;
+  const revision = await face.ensureText(characterIn(70) + characterIn(71) + characterIn(70));
+  expect(reads.sort()).toEqual([index.chunks[69]!.file, index.chunks[70]!.file].sort());
+  expect(revision).toBe(face.revision);
+  reads.length = 0;
+  expect(await face.ensureText(characterIn(70) + 'A')).toBe(revision);
+  expect(reads).toEqual([]);
+});
+
+test('ensureText rejects when a character\'s chunk fails, and loads it on a later call', async () => {
+  const reads: string[] = [];
+  const index = JSON.parse(await Bun.file(new URL(jpRef.index, assets)).text()) as Index;
+  const broken = index.chunks[11]!.file;
+  let tampering = true;
+  const face = await openProgressiveFace(jpRef, transport(reads, (file) => tampering && file === broken));
+  const skeleton = parseSkeleton(await decode(index.skeleton.file));
+  let codepoint = 0;
+  while (skeleton.chunkOfCodepoint(codepoint) !== 12) codepoint += 1;
+  const text = String.fromCodePoint(codepoint);
+  await expect(face.ensureText(text)).rejects.toThrow('encoded bytes');
+  tampering = false;
+  expect(await face.ensureText(text)).toBe(face.revision);
+  expect(reads.filter((file) => file === broken)).toHaveLength(2);
+});
+
 test('a chunk that fails its checks rejects and loads on a later request', async () => {
   const reads: string[] = [];
   const index = JSON.parse(await Bun.file(new URL(jpRef.index, assets)).text()) as Index;
@@ -264,3 +300,28 @@ test('retain: false opens a fresh face each time instead of keeping one cached',
   expect(await openSlicedFace(dropped)).not.toBe(first);
   expect(await openSlicedFace(kept)).toBe(await openSlicedFace(kept));
 });
+
+test('text loads the chunks shaping composes into, and the parts of a character the face lacks', () => {
+  const map = new Map([[0x1100, 101], [0x1161, 101], [0x11a9, 102], [0xac02, 35], [0x304b, 3], [0x3099, 4], [0x304c, 9], [0x8c48, 60]]);
+  const chunks = (text: string) => [...new Set(textChunks(text, (codepoint) => map.get(codepoint)))].sort((a, b) => a - b);
+  expect(chunks('\u1100\u1161\u11a9')).toEqual([35, 101, 102]);
+  expect(chunks('\u304b\u3099')).toEqual([3, 4, 9]);
+  expect(chunks('\uf900')).toEqual([60]);
+  expect(chunks('\u304c')).toEqual([9]);
+});
+
+test('a base that composes with only some of its marks loads that composition', () => {
+  const map = new Map([[0x41, 0], [0x30a, 0], [0x301, 0], [0xc5, 41], [0xc1, 7]]);
+  const chunks = [...new Set(textChunks('A\u030a\u0301', (codepoint) => map.get(codepoint)))].sort((a, b) => a - b);
+  expect(chunks).toEqual([0, 7, 41]);
+});
+
+test('right-to-left text loads the mirrored characters it can be drawn with, and other text does not', () => {
+  const map = new Map([[0x2208, 5], [0x220b, 78], [0x5d0, 3]]);
+  const chunks = (text: string) => [...new Set(textChunks(text, (codepoint) => map.get(codepoint)))].sort((a, b) => a - b);
+  expect(chunks('\u202e\u2208\u202c')).toEqual([5, 78]);
+  expect(chunks('\u05d0\u2208')).toEqual([3, 5, 78]);
+  expect(chunks('\u2208')).toEqual([5]);
+  expect(chunks('\u05d0')).toEqual([3]);
+});
+

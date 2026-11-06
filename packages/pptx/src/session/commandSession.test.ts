@@ -205,6 +205,16 @@ test('font decoder RPC works before document open and preserves payload and deco
   } finally { decoded.mockRestore(); await rpc.dispose(); host.dispose(); }
 });
 
+test('main-thread paints can reach the worker for sliced faces through the session client', async () => {
+  const session = await readFile(new URL('./commandSession.ts', import.meta.url), 'utf8');
+  for (const method of ['readCoverageFont', 'wholeCoverageFonts']) expect(session.includes(`${method}: (`)).toBe(true);
+  const { rpc, dispose } = await open();
+  try {
+    expect(await rpc.call.readCoverageFont('Arial', 'text', null)).toBeNull();
+    expect(await rpc.call.wholeCoverageFonts([])).toEqual([]);
+  } finally { await dispose(); }
+});
+
 test('pipe_commands_use_collab_lane_without_user_input', () => {
   const registration = registerPresentationCommandHandlers();
   try {

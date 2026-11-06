@@ -9,6 +9,7 @@ import {
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
 import { createSessionWorker } from './sessionWorker';
 import { SessionFailure, type MethodPolicy, type Promisified } from '../../../../shared/office-session/types';
+import { PngExportError } from '../../../../shared/office-session/pngExportError';
 import { wasmAssetUrl } from '../wasm/asset';
 import { engineKind } from '../wasm/engine';
 import {
@@ -141,6 +142,10 @@ async function pngBytes(render: Promise<ArrayBuffer>): Promise<Uint8Array> {
   try { return new Uint8Array(await render); }
   catch (error) {
     if (error instanceof Error && error.name === 'WorkbookPngUnavailableError') throw new WorkbookPngUnavailableError();
+    if (error instanceof Error && error.name === 'PngExportError' && 'code' in error &&
+      (error.code === 'canvas-unavailable' || error.code === 'canvas-too-large' || error.code === 'font-unavailable')) {
+      throw new PngExportError(error.code, error.message);
+    }
     throw error;
   }
 }

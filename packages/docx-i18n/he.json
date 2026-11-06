@@ -727,6 +727,7 @@
     "failedToParse": "שגיאה בפתיחת המסמך",
     "linkRemoved": "הקישור הוסר",
     "linkCopied": "הקישור הועתק ללוח",
+    "pasteFailed": "לא ניתן היה להשלים את ההדבקה. לא שונה דבר.",
     "failedToSave": "שגיאה בשמירת המסמך",
     "documentInput": "קלט מסמך",
     "documentPreview": "תצוגה מקדימה של המסמך",

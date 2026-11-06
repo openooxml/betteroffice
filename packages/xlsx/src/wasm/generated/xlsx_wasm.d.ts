@@ -141,14 +141,6 @@ export class XlsxDocument {
      */
     rejectProposalJson(args: string): string;
     /**
-     * render the current sheet viewport to png bytes (raster feature only).
-     */
-    renderPng(viewport_json: string): Uint8Array;
-    /**
-     * render an a1 range (default: used range) at an optional scale to png.
-     */
-    renderRangePng(args: string): Uint8Array;
-    /**
      * serialize the current workbook back to `.xlsx` bytes.
      */
     saveBytes(): Uint8Array;
@@ -305,8 +297,6 @@ export interface InitOutput {
     readonly xlsxdocument_recoveryCheckpoint: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_redoJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_rejectProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
-    readonly xlsxdocument_renderPng: (a: number, b: number, c: number) => [number, number, number, number];
-    readonly xlsxdocument_renderRangePng: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_saveBytes: (a: number) => [number, number, number, number];
     readonly xlsxdocument_searchTextJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_selectionDataJson: (a: number, b: number, c: number) => [number, number, number, number];
