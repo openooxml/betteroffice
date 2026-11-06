@@ -152,8 +152,10 @@ test('XLSX canvas previews of many workbooks with distinct families keep the fac
   } as never, 0, 'A1', viewport, 1, provider);
   for (let i = 0; i < 20; i++) await render(`Warmup Family ${i}`, i % 2 === 1);
   const families = GlobalFonts.families.length;
-  const rss = process.memoryUsage().rss;
-  for (let i = 0; i < 1000; i++) await render(`Workbook Family ${i}`, i % 2 === 1);
-  expect(GlobalFonts.families.length).toBe(families);
-  expect(process.memoryUsage().rss - rss).toBeLessThan(64 * 1024 * 1024);
+  const register = spyOn(GlobalFonts, 'register');
+  try {
+    for (let i = 0; i < 1000; i++) await render(`Workbook Family ${i}`, i % 2 === 1);
+    expect(register).not.toHaveBeenCalled();
+    expect(GlobalFonts.families.length).toBe(families);
+  } finally { register.mockRestore(); }
 }, 120_000);
