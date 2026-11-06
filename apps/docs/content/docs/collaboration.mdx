@@ -90,8 +90,9 @@ or changes rooms.
 
 Collaborative workbooks synchronize cell content and formulas, cell formatting,
 column widths, row heights, row and column visibility, freeze panes, merged
-cells, single hyperlinks, chart positions, defined names and sheets added at the
-end of the workbook. Each collaborator's undo and redo synchronize their effects.
+cells, single hyperlinks, chart positions, defined names, conditional formats,
+auto filters and sheets added at the end of the workbook. Each collaborator's undo
+and redo synchronize their effects.
 
 When two collaborators add a sheet under one name at the same time, every
 replica keeps the name on the first sheet in the shared order and shows the other
@@ -132,6 +133,28 @@ refuses the file with that same error. The file itself is valid and opens in Exc
 To keep a workbook reopenable here, delete names until `overLimit` clears before
 saving.
 
+Conditional formats replicate rule by rule. Collaborators can add a rule or remove
+one, and every replica shows the same rules in the same order: rules from the file
+keep their priority, and added rules follow them in the order they were added,
+with concurrent adds ordered by client ID. An added rule's ID is chosen by the
+replica that adds it and looks like `cf:7:12:0`, so read it from
+`conditionalFormats` rather than predicting it. When two collaborators remove the
+same rule from the file, they share one removal. If the one whose removal won
+undoes it, the rule returns even though the other collaborator removed it too, and
+the other's undo changes nothing. A rule on an added sheet counts as content of
+that sheet, as a scoped name does, but it lives with the sheet: a rule that reaches
+the replicas after the add is undone is lost, like a cell. A replica refuses to add
+rules past 65,536 on one sheet, the most the reader takes back from a file. Two
+collaborators can pass it together, and every replica then keeps all of them.
+
+A sheet's auto filter is one value, like a cell. When two collaborators set it, or
+one sets it while another clears it, every replica keeps one of the two writes.
+Undoing the write that won shows the file's filter, not the other write, and
+undoing the write that lost changes nothing. The `_xlnm._FilterDatabase` name is
+worked out from the filter on every replica, so it always matches. A filter edit
+never hides or shows rows. If the file holds a stale `_xlnm._FilterDatabase` for a
+sheet with no filter, setting and then clearing a filter leaves that name in place.
+
 These edits are unavailable while collaborating and are refused without changing
 the workbook:
 
@@ -142,8 +165,7 @@ the workbook:
 | Removing a sheet | Two collaborators could remove the last sheets, and a concurrent edit could bring one back. |
 | Moving a sheet | Tables are stored by sheet position. |
 | Renaming a sheet | A rename rewrites every formula and defined name that mentions the sheet, which a concurrent edit would miss. |
-| Adding or removing conditional formats | A sheet's rules are one replicated value, so one of two concurrent changes would be lost. |
-| Setting or clearing an auto filter, or editing its `_xlnm._FilterDatabase` name | A filter and its hidden name have to change together, and filters are not replicated. |
+| Editing `_xlnm._FilterDatabase` directly | The name follows the sheet's filter on every replica, so it has no value of its own. Set or clear the filter instead. |
 | Editing charts beyond moving them | A sheet's charts are one replicated value, so one of two concurrent changes would be lost. |
 
 In JavaScript, `applyOps` throws `structural operations are unavailable in

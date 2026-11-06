@@ -137,10 +137,21 @@ fn invalid_batch_is_atomic() {
 }
 
 #[test]
-fn collaborative_mode_refuses_conditional_format_ops() {
+fn collaborative_mode_takes_rules_and_refuses_the_whole_table() {
     let mut wb = Workbook::open_collaborative(&bytes(None), 42).unwrap();
-    let result = wb.apply_ops(
+    wb.apply_ops(
         vec![add("cellIs", Some("greaterThan"), &["5"])],
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    let formats = wb.model().sheets[0].conditional_formats.clone();
+    assert_eq!(formats.len(), 1);
+    assert!(formats[0].rules[0].id.starts_with("cf:42:"));
+    let result = wb.apply_ops(
+        vec![Op::SetConditionalFormats {
+            sheet: SheetId(0),
+            formats,
+        }],
         CalculationOptions::default(),
     );
     assert!(
