@@ -21,7 +21,7 @@ use docx_layout::display_list::{
     LinePrimitive, PageBorderPrimitive, PageBorderSide, PageBorderZOrder, Primitive, RectPrimitive,
     RevisionKind, ShapePathCommand, ShapePrimitive,
 };
-use ooxml_raster::{encode_png, parse_css_color as parse_color};
+use ooxml_raster::{encode_png, parse_css_color};
 use ooxml_text::{FontId, FontStore};
 use serde_json::{Number, Value};
 use tiny_skia::{
@@ -3232,6 +3232,35 @@ fn solid_paint(color: &str, opacity: f32) -> Result<Paint<'static>, String> {
     Ok(paint)
 }
 
+fn vml_color(value: &str) -> Option<&'static str> {
+    const NAMES: [(&str, &str); 16] = [
+        ("black", "#000000"),
+        ("silver", "#c0c0c0"),
+        ("gray", "#808080"),
+        ("white", "#ffffff"),
+        ("maroon", "#800000"),
+        ("red", "#ff0000"),
+        ("purple", "#800080"),
+        ("fuchsia", "#ff00ff"),
+        ("green", "#008000"),
+        ("lime", "#00ff00"),
+        ("olive", "#808000"),
+        ("yellow", "#ffff00"),
+        ("navy", "#000080"),
+        ("blue", "#0000ff"),
+        ("teal", "#008080"),
+        ("aqua", "#00ffff"),
+    ];
+    NAMES
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(value.trim()))
+        .map(|(_, hex)| *hex)
+}
+
+pub(crate) fn parse_color(value: &str) -> Result<Color, String> {
+    parse_css_color(vml_color(value).unwrap_or(value))
+}
+
 pub(crate) fn color_with_opacity(value: &str, opacity: f32) -> Result<Color, String> {
     let mut color = parse_color(value)?;
     color.apply_opacity(opacity.clamp(0.0, 1.0));
@@ -3504,6 +3533,7 @@ mod shared_helper_tests {
             parse_color("#abcd"),
             Ok(Color::from_rgba8(170, 187, 204, 221))
         );
-        assert_eq!(parse_color("red"), Err("bad color: red".to_string()));
+        assert_eq!(parse_color("Black"), Ok(Color::from_rgba8(0, 0, 0, 255)));
+        assert_eq!(parse_color("ochre"), Err("bad color: ochre".to_string()));
     }
 }

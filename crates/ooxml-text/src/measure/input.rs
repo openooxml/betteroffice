@@ -200,6 +200,10 @@ impl FontChainDependencies {
 }
 
 impl FontChains<'_> {
+    pub(super) fn symbols_shape(&self) -> bool {
+        self.get("@betteroffice/fonts/coverage-symbols").is_some()
+    }
+
     pub(super) fn coverage_only(&self, chain: &[FontId]) -> bool {
         self.get("@betteroffice/fonts/coverage")
             .is_some_and(|ids| chain.last().is_some_and(|id| ids.contains(&id.to_u32())))

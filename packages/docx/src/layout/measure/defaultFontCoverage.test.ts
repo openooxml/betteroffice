@@ -149,3 +149,16 @@ test('a configured base URL decides the complete provider', async () => {
   configureDefaultFonts({ baseUrl: 'https://fonts.example/assets/' });
   expect(await resolveCompleteFontProvider()).toBe(await resolveDefaultFontProvider());
 });
+
+test('stand-ins shape a symbol no face covers, and leave an unlisted writing system to the no-provider path', async () => {
+  await wasm.preloadLayoutWasm();
+  const source = createRustMeasureSource({
+    engine: { registerFont: wasm.registerMeasureFont, registerSubstituteFont: wasm.registerSubstituteMeasureFont, clearFonts() {} },
+    standIns: true,
+  });
+  const requirements = [{ key: 'symbol|0|0', family: 'Symbol', bold: false, italic: false }];
+  await source.prepareFontRequirements(requirements);
+  const chains = source.measurementConfigForRequirements(requirements)!.fontChains;
+  expect(measure(chains, 'Symbol', 'a\uf07fb')).not.toBe('browser');
+  expect(measure(chains, 'Symbol', '\u1403\u14c4')).toBe('browser');
+});
