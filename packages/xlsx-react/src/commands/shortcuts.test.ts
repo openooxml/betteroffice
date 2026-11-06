@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { en } from '@betteroffice/xlsx-i18n';
-import { createXlsxCommandController } from './createXlsxCommandStore';
+import { createXlsxCommandController, pickChord } from './createXlsxCommandStore';
 import { resolveXlsxShortcuts, storeAriaShortcut, storeShortcutLabel } from './shortcuts';
 
 function key(init: Partial<KeyboardEvent>): KeyboardEvent {
@@ -116,6 +116,9 @@ describe('command controller', () => {
     expect(controller.shortcutAt(bang, false)?.id).toBe('italic');
     const one = key({ key: '1', code: 'Digit1', ctrlKey: true, shiftKey: true });
     expect(controller.shortcutAt(one, false)?.id).toBe('bold');
+    expect(pickChord(['Mod+Shift+1', 'Mod+Shift+!'], bang, false)).toBe('Mod+Shift+!');
+    expect(pickChord(['Mod+Shift+1', 'Mod+Shift+!'], one, false)).toBe('Mod+Shift+1');
+    expect(pickChord(['Mod+Shift+1'], bang, false)).toBe('Mod+Shift+1');
   });
 
   test('a layout without Latin letters still presses the chord', () => {

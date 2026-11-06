@@ -270,11 +270,15 @@ function defaultShortcuts(mac: boolean): ResolvedShortcuts {
   return table;
 }
 
-/** The chord a keystroke presses; one naming the produced character beats a key-position match. */
 function pressedChord(table: ResolvedShortcuts, event: ChordEvent, mac: boolean): string | null {
+  return pickChord(table.owners.keys(), event, mac);
+}
+
+/** The chord among `chords` a keystroke presses; one naming the typed character wins. */
+export function pickChord(chords: Iterable<string>, event: ChordEvent, mac = isMacPlatform()): string | null {
   let found: string | null = null;
   const typed = event.key.toLowerCase();
-  for (const chord of table.owners.keys()) {
+  for (const chord of chords) {
     if (!matchesChord(chord, event, mac)) continue;
     if (chord.slice(chord.lastIndexOf('+') + 1) === typed) return chord;
     found ??= chord;

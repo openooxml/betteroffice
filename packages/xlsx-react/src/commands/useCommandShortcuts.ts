@@ -1,8 +1,8 @@
 import { useEffect, useLayoutEffect, useRef } from 'react';
 import type { RefObject } from 'react';
 import type { ShortcutIssue } from '../../../../shared/keyboard/resolve';
-import type { XlsxCommandController } from './createXlsxCommandStore';
-import { matchesChord } from './descriptors';
+import { pickChord, type XlsxCommandController } from './createXlsxCommandStore';
+import { normalizeChord } from './descriptors';
 import { pluginEventStore } from './pluginEvents';
 import type { XlsxShortcuts } from './shortcuts';
 import type { XlsxCommandId } from './types';
@@ -71,9 +71,9 @@ export function useCommandShortcuts(
       if (!owned) return;
       const binding = controller.shortcutAt(event);
       if (!binding) {
-        const contributed = controller
-          .pluginShortcuts()
-          .find(({ chord }) => matchesChord(chord, event));
+        const shortcuts = controller.pluginShortcuts();
+        const pressed = pickChord(shortcuts.map(({ chord }) => normalizeChord(chord) ?? chord), event);
+        const contributed = shortcuts.find(({ chord }) => (normalizeChord(chord) ?? chord) === pressed);
         if (!contributed || isTextField(target)) return;
         event.preventDefault();
         if (!event.repeat) void controller.store.execute(contributed.id, null);
