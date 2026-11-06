@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { engines, loadCanvas } from '#agents-engines';
 import { createFontProvider, type BundledFontSource } from '@betteroffice/fonts';
 import type { DisplayList, Viewport, WorkbookHandle } from '@betteroffice/xlsx';
@@ -36,7 +35,7 @@ export async function renderXlsxRange(
     let bytes: ArrayBuffer | undefined;
     try { bytes = await provider.resolve(font.family, font.bold, font.italic)?.(); } catch {}
     bytes ??= await provider.resolveLastResort(font.family, font.bold, font.italic, 'word')();
-    const alias = previewFace(GlobalFonts, bytes);
+    const alias = await previewFace(GlobalFonts, bytes);
     if (alias) aliases.set(key, alias);
   }
   const painted = { ...list, commands: list.commands.map(cmd => {
@@ -57,8 +56,9 @@ export async function renderXlsxRange(
 const previewFaces = new Map<string, string>();
 
 /** The family a face's bytes are registered under: one alias per distinct face file, registered once per process and never removed, so concurrent renders and the host's own fonts never affect each other. */
-function previewFace(fonts: { register(font: Buffer, alias?: string): unknown }, bytes: ArrayBuffer): string | undefined {
-  const hash = createHash('sha256').update(new Uint8Array(bytes)).digest('hex').slice(0, 24);
+async function previewFace(fonts: { register(font: Buffer, alias?: string): unknown }, bytes: ArrayBuffer): Promise<string | undefined> {
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+  const hash = Array.from(digest.subarray(0, 12), byte => byte.toString(16).padStart(2, '0')).join('');
   let alias = previewFaces.get(hash);
   if (alias) return alias;
   alias = `BetterOffice Preview ${hash}`;
