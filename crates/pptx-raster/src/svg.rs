@@ -269,6 +269,7 @@ pub fn parse(bytes: &[u8]) -> Result<SvgImage, SvgRefusal> {
 }
 
 /// [`parse`], supersampling only as far as `pixels` of raster and layers.
+#[cfg(any(test, feature = "fuzzing"))]
 pub(crate) fn parse_within(bytes: &[u8], pixels: u64) -> Result<SvgImage, SvgRefusal> {
     parse_within_work(bytes, pixels, MAX_SVG_RENDER_WORK)
 }
