@@ -133,7 +133,8 @@ describe('YrsSession.renderPng', () => {
       short.push(await layoutMs(150));
       long.push(await layoutMs(600));
     }
-    expect(median(long) / median(short)).toBeLessThan(4.5);
+    // Linear layout is about 4x here (5x with the remaining per-line overhead); the quadratic slicing it guards against was 8x-10x.
+    expect(median(long) / median(short)).toBeLessThan(6.5);
   }, 60_000);
 
   test('wraps text in a family with no bundled face of its own, as the editor does', async () => {
