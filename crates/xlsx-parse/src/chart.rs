@@ -6,7 +6,8 @@
 mod edit;
 pub(crate) use edit::quoted_sheet;
 pub use edit::{
-    ChartMetadata, ChartSeriesInfo, chart_bytes, chart_metadata, chart_references, edit_chart,
+    ChartMetadata, ChartSeriesInfo, agreed_chart_bytes, chart_bytes, chart_metadata,
+    chart_references, conflicting_drawing_anchor, edit_chart,
 };
 
 #[cfg(feature = "test-counters")]
@@ -1019,22 +1020,20 @@ pub(crate) const MAX_CACHE_POINTS: u32 = 65_536;
 
 /// Write `refs` back into their `c:f` elements and regenerate the caches
 /// beside them from `workbook`, leaving every other byte alone. A cache that
-/// cannot be rebuilt is kept verbatim when its moved reference's cells read
-/// what the old cells read in `original`, since it still stands for them.
-/// Without `original`, for a part written by a chart edit against a workbook
-/// no longer at hand, it is kept when the moved reference keeps its shape, as
-/// a sheet rename or a row or column shift does.
+/// cannot be rebuilt is kept verbatim when its moved reference keeps its
+/// shape and still names cells of `workbook`, as a sheet rename or a row or
+/// column shift does: it then stands for the same cells it did before the
+/// move, as stale or as current as the cache of a reference that never moved.
 /// Refuses when the part no longer holds the references the model was built
-/// from, or when a moved reference's cells changed and its cache cannot be
-/// rebuilt, rather than leaving a reference pointing at one range while its
-/// cache still holds another's values.
+/// from, or when a moved reference changed shape or names no cells and its
+/// cache cannot be rebuilt, rather than leaving a reference pointing at one
+/// range while its cache still holds another's values.
 pub(crate) fn patch_chart_refs(
     part: &[u8],
     path: &str,
     refs: &[ChartRef],
     workbook: &xlsx_model::Workbook,
     owner: &str,
-    original: Option<(&xlsx_model::Workbook, &str)>,
 ) -> Result<Vec<u8>, ParseError> {
     let source = Part::decode(part)?;
     let sites = ref_sites(&source.tree()?)?;
@@ -1073,14 +1072,16 @@ pub(crate) fn patch_chart_refs(
         ) {
             Ok(markup) => markup,
             Err(_)
-                if match original {
-                    Some((original, original_owner)) => same_inputs(
-                        (&site.formula, original, original_owner),
-                        (&reference.formula, workbook, owner),
-                    ),
-                    None => reference_shape(&site.formula)
-                        .is_some_and(|shape| reference_shape(&reference.formula) == Some(shape)),
-                } =>
+                if reference_shape(&site.formula)
+                    .is_some_and(|shape| reference_shape(&reference.formula) == Some(shape))
+                    && reference_inputs(
+                        &reference.formula,
+                        workbook,
+                        owner,
+                        MAX_CACHE_POINTS as usize,
+                        ReferenceShape::Rectangular,
+                    )
+                    .is_ok() =>
             {
                 continue;
             }
@@ -1106,26 +1107,6 @@ fn reference_shape(formula: &str) -> Option<(u32, u32)> {
     split_qualifier(formula.trim())
         .and_then(|(_, area)| parse_area(area))
         .map(|(start, end)| (end.row - start.row + 1, end.col - start.col + 1))
-}
-
-/// Whether two references read the same values under the same number formats,
-/// each against its own workbook, so a cache authored for one stands for the
-/// other.
-fn same_inputs(
-    before: (&str, &xlsx_model::Workbook, &str),
-    after: (&str, &xlsx_model::Workbook, &str),
-) -> bool {
-    let limit = MAX_CACHE_POINTS as usize;
-    if reference_shape(before.0) != reference_shape(after.0) {
-        return false;
-    }
-    matches!(
-        (
-            reference_inputs(before.0, before.1, before.2, limit, ReferenceShape::Rectangular),
-            reference_inputs(after.0, after.1, after.2, limit, ReferenceShape::Rectangular),
-        ),
-        (Ok(before), Ok(after)) if before == after
-    )
 }
 
 /// What a rebuilt cache must be able to stand behind, and how many points the
@@ -1286,10 +1267,31 @@ fn regenerated_cache_inputs(
         };
         out.push_str(&format!(
             "<{prefix}pt idx=\"{index}\"><{prefix}v>{}</{prefix}v></{prefix}pt>",
-            escape_text(text)?
+            cache_point_text(text)
         ));
     }
     Ok(out)
+}
+
+/// A cache point's `c:v` text, which never fails: the value is an
+/// `ST_Xstring`, so a character xml 1.0 cannot carry is written as `_xHHHH_`,
+/// the form Excel writes, and no cell text can keep a cache from being saved.
+fn cache_point_text(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '\r' => out.push_str("&#13;"),
+            '\t' | '\n' => out.push(ch),
+            _ if ch < ' ' || ch == '\u{fffe}' || ch == '\u{ffff}' => {
+                out.push_str(&format!("_x{:04X}_", ch as u32));
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 /// One cached point, or `None` for a cell a cache omits.

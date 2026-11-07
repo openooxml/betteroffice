@@ -4,7 +4,7 @@
 //! that reserialization carries just the subset `read` models.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque, btree_map};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io;
 use std::iter::Peekable;
 use std::ops::Range;
@@ -859,9 +859,8 @@ struct ChartClaim<'a> {
 }
 
 /// What one sheet wants written into a drawing anchor it holds.
-struct AnchorClaim<'a> {
+struct AnchorClaim {
     anchor: ChartAnchor,
-    sheet: &'a str,
     moved: bool,
 }
 
@@ -875,8 +874,11 @@ fn patch_chart_parts(
     origins: &[Option<usize>],
     parts: &mut PartStore<'_>,
 ) -> Result<Vec<(String, Vec<u8>)>, ParseError> {
+    if let Some((drawing, _, first, second)) = crate::chart::conflicting_drawing_anchor(wb) {
+        return Err(conflicting_shared_part(drawing, first, second));
+    }
     let mut chart_refs: BTreeMap<&str, Vec<ChartClaim<'_>>> = BTreeMap::new();
-    let mut anchors: BTreeMap<&str, BTreeMap<usize, AnchorClaim<'_>>> = BTreeMap::new();
+    let mut anchors: BTreeMap<&str, BTreeMap<usize, AnchorClaim>> = BTreeMap::new();
     for (sheet, origin) in wb.sheets.iter().zip(origins) {
         let original_sheet = origin.and_then(|origin| package.original_workbook.sheets.get(origin));
         let source = original_sheet
@@ -912,12 +914,15 @@ fn patch_chart_parts(
                     },
                     original_sheet: original_sheet.map_or(&sheet.name, |sheet| &sheet.name),
                 });
-            claim_anchor(
-                anchors.entry(chart.drawing.as_str()).or_default(),
-                chart,
-                &sheet.name,
-                original.anchor != chart.anchor,
-            )?;
+            anchors
+                .entry(chart.drawing.as_str())
+                .or_default()
+                .entry(chart.anchor_index)
+                .or_insert(AnchorClaim {
+                    anchor: chart.anchor,
+                    moved: false,
+                })
+                .moved |= original.anchor != chart.anchor;
         }
     }
     let mut refreshes = Vec::new();
@@ -932,8 +937,16 @@ fn patch_chart_parts(
             continue;
         };
         let rewritten = if moved {
-            agreed_chart_bytes(source, path, &claims, wb, &package.original_workbook)?
-                .unwrap_or_else(|| source.to_vec())
+            crate::chart::agreed_chart_bytes(
+                source,
+                path,
+                &claims
+                    .iter()
+                    .map(|claim| (claim.chart, claim.sheet))
+                    .collect::<Vec<_>>(),
+                wb,
+            )?
+            .unwrap_or_else(|| source.to_vec())
         } else {
             source.to_vec()
         };
@@ -963,76 +976,6 @@ fn patch_chart_parts(
         )?;
     }
     Ok(refreshes)
-}
-
-/// Records what one sheet wants at a drawing anchor, refusing when a sheet
-/// that shares the drawing already asked for a different one.
-fn claim_anchor<'a>(
-    claims: &mut BTreeMap<usize, AnchorClaim<'a>>,
-    chart: &SheetChart,
-    sheet: &'a str,
-    moved: bool,
-) -> Result<(), ParseError> {
-    match claims.entry(chart.anchor_index) {
-        btree_map::Entry::Vacant(slot) => {
-            slot.insert(AnchorClaim {
-                anchor: chart.anchor,
-                sheet,
-                moved,
-            });
-        }
-        btree_map::Entry::Occupied(mut slot) => {
-            if slot.get().anchor != chart.anchor {
-                return Err(conflicting_shared_part(
-                    &chart.drawing,
-                    slot.get().sheet,
-                    sheet,
-                ));
-            }
-            slot.get_mut().moved |= moved;
-        }
-    }
-    Ok(())
-}
-
-/// The bytes a chart part must take, refused when the sheets anchoring it do
-/// not all patch it into the same thing. A shared part's references may be
-/// unqualified, so the sheet a cache is rebuilt against is part of what the
-/// sheets must agree on.
-fn agreed_chart_bytes(
-    source: &[u8],
-    path: &str,
-    claims: &[ChartClaim<'_>],
-    wb: &Workbook,
-    original: &Workbook,
-) -> Result<Option<Vec<u8>>, ParseError> {
-    let mut agreed: Option<(Vec<u8>, &str)> = None;
-    for claim in claims {
-        let base = match &claim.chart.raw_xml {
-            Some(xml) => crate::tree::Part::decode(source)?.encode_text(xml),
-            None => source.to_vec(),
-        };
-        let bytes = crate::chart::patch_chart_refs(
-            &base,
-            path,
-            claim.refs,
-            wb,
-            claim.sheet,
-            claim
-                .chart
-                .raw_xml
-                .is_none()
-                .then_some((original, claim.original_sheet)),
-        )?;
-        match &agreed {
-            Some((first, owner)) if *first != bytes => {
-                return Err(conflicting_shared_part(path, owner, claim.sheet));
-            }
-            Some(_) => {}
-            None => agreed = Some((bytes, claim.sheet)),
-        }
-    }
-    Ok(agreed.map(|(bytes, _)| bytes))
 }
 
 fn refreshed_chart_bytes(
@@ -1086,7 +1029,7 @@ fn refreshed_chart_bytes(
 /// Two sheets anchor one part and no longer agree on what it holds. The part
 /// can carry only one of them, so the save is refused rather than rewriting the
 /// chart the other sheet shows.
-fn conflicting_shared_part(path: &str, first: &str, second: &str) -> ParseError {
+pub(crate) fn conflicting_shared_part(path: &str, first: &str, second: &str) -> ParseError {
     ParseError::UnsupportedEdit(format!(
         "{path} is anchored by both sheet {first} and sheet {second}, which no longer agree on what it holds, and one part cannot carry both"
     ))
