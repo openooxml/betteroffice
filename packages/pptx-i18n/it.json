@@ -244,6 +244,7 @@
     "cut": "Taglia",
     "copy": "Copia",
     "paste": "Incolla",
+    "pastePlainText": "Incolla come testo normale",
     "insert": "Inserisci",
     "delete": "Elimina",
     "deleteTable": "Elimina tabella",
@@ -271,5 +272,14 @@
     "shape": "Menu forma",
     "table": "Menu tabella",
     "slide": "Menu diapositiva"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Maiusc",
+    "delete": "Canc",
+    "escape": "Esc",
+    "pageup": "PagSu",
+    "pagedown": "PagGiù"
   }
 }

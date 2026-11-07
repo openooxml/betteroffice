@@ -244,6 +244,7 @@
     "cut": "切り取り",
     "copy": "コピー",
     "paste": "貼り付け",
+    "pastePlainText": "書式なしテキストとして貼り付け",
     "insert": "挿入",
     "delete": "削除",
     "deleteTable": "表の削除",
@@ -271,5 +272,14 @@
     "shape": "図形メニュー",
     "table": "表メニュー",
     "slide": "スライドメニュー"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "delete": "Del",
+    "escape": "Esc",
+    "pageup": "Page Up",
+    "pagedown": "Page Down"
   }
 }

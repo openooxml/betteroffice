@@ -117,4 +117,42 @@ describe('xlsx native/wasm package parity', () => {
     expect(await native.exportXlsxMarkdown(fixture)).toEqual(await wasm.exportXlsxMarkdown(fixture));
     expect(await native.exportXlsxStructured(fixture)).toEqual(await wasm.exportXlsxStructured(fixture));
   });
+
+  test('PNG range targets refuse bad ranges with the same error as the wasm range path', async () => {
+    const nativeWorkbook = native.openWorkbook(fixture, { calculation });
+    const wasmWorkbook = wasm.openWorkbook(fixture, { calculation });
+    const failure = (error: unknown) => ({ isError: error instanceof Error, name: (error as Error)?.name, message: String((error as Error)?.message ?? error) });
+    try {
+      for (const range of ['not a range', 'A0:B2', 'A1:XFE1', 'b2:', { kind: 'a1', a1: 'A1:B' }] as const) {
+        const target = { sheet: 0, range } as Parameters<WorkbookHandle['renderPng']>[0];
+        let wasmFailure: unknown;
+        try { wasmWorkbook.renderPngFonts(target); } catch (error) { wasmFailure = failure(error); }
+        let nativeFailure: unknown;
+        try { await nativeWorkbook.renderPng(target); } catch (error) { nativeFailure = failure(error); }
+        expect(wasmFailure).toMatchObject({ isError: true, message: expect.stringMatching(/^bad range: /) });
+        expect(nativeFailure).toEqual(wasmFailure);
+      }
+    } finally {
+      nativeWorkbook.dispose();
+      wasmWorkbook.dispose();
+    }
+  });
+
+  test('PNG range targets read lowercase A1 as Excel does, on both engines', async () => {
+    const nativeWorkbook = native.openWorkbook(fixture, { calculation });
+    const wasmWorkbook = wasm.openWorkbook(fixture, { calculation });
+    try {
+      for (const [lower, upper] of [['a1:b2', 'A1:B2'], ['c3', 'C3'], ['a1:D4', 'A1:D4']]) {
+        const fonts = (workbook: WorkbookHandle, range: string) => workbook.renderPngFonts({ sheet: 0, range });
+        expect(fonts(wasmWorkbook, lower)).toEqual(fonts(wasmWorkbook, upper));
+        expect(fonts(nativeWorkbook, lower)).toEqual(fonts(wasmWorkbook, upper));
+        expect(fonts(nativeWorkbook, upper)).toEqual(fonts(wasmWorkbook, upper));
+        const png = async (range: string) => Buffer.from(await nativeWorkbook.renderPng({ sheet: 0, range }));
+        expect((await png(lower)).equals(await png(upper))).toBe(true);
+      }
+    } finally {
+      nativeWorkbook.dispose();
+      wasmWorkbook.dispose();
+    }
+  });
 });

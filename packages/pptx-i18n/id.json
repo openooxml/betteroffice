@@ -244,6 +244,7 @@
     "cut": "Potong",
     "copy": "Salin",
     "paste": "Tempel",
+    "pastePlainText": "Tempel sebagai teks biasa",
     "insert": "Sisipkan",
     "delete": "Hapus",
     "deleteTable": "Hapus Tabel",
@@ -271,5 +272,14 @@
     "shape": "Menu bentuk",
     "table": "Menu tabel",
     "slide": "Menu slide"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "delete": "Del",
+    "escape": "Esc",
+    "pageup": "Page Up",
+    "pagedown": "Page Down"
   }
 }

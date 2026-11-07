@@ -24,6 +24,8 @@ export interface PptxCommandArgs {
   cut: null;
   copy: null;
   paste: null;
+  /** Pastes the clipboard's text without formatting. */
+  pasteAsPlainText: null;
   deleteObject: null;
   deleteSlide: null;
   duplicateSlide: null;
@@ -97,6 +99,7 @@ export interface PptxCommandValues {
   cut: null;
   copy: null;
   paste: null;
+  pasteAsPlainText: null;
   deleteObject: null;
   deleteSlide: null;
   duplicateSlide: null;

@@ -200,6 +200,7 @@
     "cut": "Cut",
     "copy": "Copy",
     "paste": "Paste",
+    "pastePlainText": "Paste as plain text",
     "insert": "Insert",
     "delete": "Delete",
     "deleteTable": "Delete table",
@@ -221,5 +222,14 @@
     "label": "Collaborators",
     "moreCollaborators": "{count, plural, one {# more collaborator} other {# more collaborators}}",
     "moreSelections": "+{count, plural, one {# selection} other {# selections}}"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "delete": "Del",
+    "escape": "Esc",
+    "pageup": "Page Up",
+    "pagedown": "Page Down"
   }
 }

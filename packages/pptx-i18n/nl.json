@@ -244,6 +244,7 @@
     "cut": "Knippen",
     "copy": "Kopiëren",
     "paste": "Plakken",
+    "pastePlainText": "Plakken als platte tekst",
     "insert": "Invoegen",
     "delete": "Verwijderen",
     "deleteTable": "Tabel verwijderen",
@@ -271,5 +272,14 @@
     "shape": "Vormmenu",
     "table": "Tabelmenu",
     "slide": "Diamenu"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "delete": "Del",
+    "escape": "Esc",
+    "pageup": "Page Up",
+    "pagedown": "Page Down"
   }
 }

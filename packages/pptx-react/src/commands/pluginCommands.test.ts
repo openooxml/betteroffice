@@ -5,7 +5,9 @@ import {
   type PptxCommandScope,
   type PptxPluginCommandBinding,
 } from './createPptxCommandStore';
-import { BUILT_IN_CHORDS, isPluginCommandId, matchesChord, normalizeChord } from './descriptors';
+import { isPluginCommandId, normalizeChord } from './descriptors';
+import { defaultShortcutTable } from './shortcutTable';
+import { matchesChord } from '../../../../shared/keyboard/match';
 import { testBinding } from './testing';
 import type { PptxCommandFailureCode, PptxCommandId, PptxPluginCommandId } from './types';
 
@@ -179,20 +181,22 @@ describe('contributed commands', () => {
   test('chords normalize, and built-in chords are reserved', () => {
     expect(normalizeChord('Shift+Mod+b')).toBe('Mod+Shift+b');
     expect(normalizeChord('Ctrl+B')).toBeNull();
-    expect(normalizeChord('Mod++')).toBe('Mod++');
+    expect(normalizeChord('Mod++')).toBe('Mod+=');
     const plus = {
       key: '+',
+      code: 'Equal',
       ctrlKey: true,
       metaKey: false,
       shiftKey: false,
       altKey: false,
     };
-    expect(matchesChord('Mod+=', plus as KeyboardEvent, false)).toBe(false);
+    expect(matchesChord('Mod+=', plus as KeyboardEvent, false)).toBe(true);
     expect(matchesChord('Mod++', plus as KeyboardEvent, false)).toBe(true);
-    expect(BUILT_IN_CHORDS.has('Mod++') || BUILT_IN_CHORDS.has('Mod+=')).toBe(false);
-    expect(BUILT_IN_CHORDS.has('Mod+b')).toBe(true);
-    expect(BUILT_IN_CHORDS.has('Mod+Shift+z')).toBe(true);
-    expect(BUILT_IN_CHORDS.has(normalizeChord('Mod+Shift+M')!)).toBe(false);
+    const defaults = defaultShortcutTable().owners;
+    expect(defaults.has('Mod++') || defaults.has('Mod+=')).toBe(false);
+    expect(defaults.has('Mod+b')).toBe(true);
+    expect(defaults.has('Mod+Shift+z')).toBe(true);
+    expect(defaults.has(normalizeChord('Mod+Shift+M')!)).toBe(false);
     const ids: unknown[] = ['plugin:acme/mark', 'plugin:acme/', 'plugin:/x', 'bold'];
     expect(ids.map(isPluginCommandId)).toEqual([true, false, false, false]);
     const builtIn: PptxCommandId = 'bold';

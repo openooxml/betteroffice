@@ -244,6 +244,7 @@
     "cut": "Cortar",
     "copy": "Copiar",
     "paste": "Pegar",
+    "pastePlainText": "Pegar como texto sin formato",
     "insert": "Insertar",
     "delete": "Eliminar",
     "deleteTable": "Eliminar tabla",
@@ -271,5 +272,14 @@
     "shape": "Menú de forma",
     "table": "Menú de tabla",
     "slide": "Menú de diapositiva"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Mayús",
+    "delete": "Supr",
+    "escape": "Esc",
+    "pageup": "Re Pág",
+    "pagedown": "Av Pág"
   }
 }

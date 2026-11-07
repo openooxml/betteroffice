@@ -317,6 +317,7 @@ def test_capture_and_apply_format(sample_bytes):
     assert captured["rows"] == 1 and captured["columns"] == 1
     assert len(captured["formats"]) == 1
     assert workbook.apply_format(2, "C5:D6", captured).applied is True
+    assert workbook.capture_format(2, "a2") == captured
     formatting = workbook.selection_formatting(2, "C5:D6")
     assert formatting["bold"] is True
     assert formatting["fillColor"].lower() == "#ffcc00"

@@ -528,7 +528,8 @@ describe('xlsx native engine parity', () => {
       const used = JSON.parse(doc.rangePngDisplayListJson('{"scale":2}')) as { width: number; height: number };
       expect(size(render({ sheet: 0, range: 'used' }, { scale: 2 }))).toEqual([Math.ceil(used.width), Math.ceil(used.height)]);
       expect(() => render({ sheet: 99, viewport: box })).toThrow('sheet index 99 out of range');
-      expect(() => render({ sheet: 0, range: 'not a range' })).toThrow('invalid range');
+      expect(() => render({ sheet: 0, range: 'not a range' })).toThrow('bad range: malformed address');
+      expect(render({ sheet: 0, range: 'a1:b2' })).toEqual(render({ sheet: 0, range: 'A1:B2' }));
       expect(() => doc.renderPngTarget('{"sheet":0,"viewport":{"x":0,"y":0,"width":1e999,"height":1}}', '{}')).toThrow();
       expect(() => render({ sheet: 0, viewport: box }, { scale: 1, dpi: 2 })).toThrow('bad options');
       expect(() => render({ sheet: 0, viewport: box, extra: true })).toThrow('target must be');

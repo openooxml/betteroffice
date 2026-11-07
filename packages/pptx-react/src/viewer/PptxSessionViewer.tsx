@@ -11,6 +11,7 @@ import type { PptxCommandEnvironment } from '../commands/evaluate';
 import { PptxCommandContext } from '../commands/PptxCommandProvider';
 import type { PptxCommandArgs, PptxCommandResult } from '../commands/types';
 import { useCommandShortcuts } from '../commands/useCommandShortcuts';
+import { CLIPBOARD_IDS } from '../commands/shortcutKeys';
 import { EditorChromeContext } from '../components/EditorToolbarContext';
 import type { PptxZoom } from '../components/toolbarTypes';
 import { useTranslation } from '../i18n';
@@ -87,7 +88,8 @@ export function PptxSessionViewer(props: ResolvedFontProps<PptxWorkerViewerProps
     return () => commands.detach(binding);
   }, [commands, binding]);
   useLayoutEffect(() => commands.refresh());
-  useCommandShortcuts({ commands, containerRef: rootRef, suspended: () => false });
+  useCommandShortcuts({ commands, containerRef: rootRef, suspended: () => false,
+    shortcuts: props.shortcuts, onShortcutIssue: props.onShortcutIssue, unsupported: CLIPBOARD_IDS });
 
   useEffect(() => {
     if (typeof window.matchMedia !== 'function') return;
