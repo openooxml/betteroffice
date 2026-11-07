@@ -211,6 +211,11 @@ pub struct NoteRegion {
     pub y: Option<Number>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub height: Option<Number>,
+    /// Left edge of the column the region paints in; absent, the page's text area.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x: Option<Number>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<Number>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub columns: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -224,6 +229,10 @@ pub struct NoteRegion {
     /// Emitted only for notes that carry anchor or label data.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<NoteRegionNote>,
+    /// Notes this region continues from an earlier page: their opening, label and backlink
+    /// belong to the page that shows it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub continued_note_ids: Vec<i64>,
 }
 
 /// Backlink metadata for one note region entry.
@@ -3196,6 +3205,12 @@ struct NoteAreaIn {
     separator: Option<NoteItemIn>,
     #[serde(default)]
     notes: Vec<NoteItemIn>,
+    #[serde(default)]
+    continuation: Option<bool>,
+    #[serde(default)]
+    x: Option<f64>,
+    #[serde(default)]
+    width: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -3216,6 +3231,31 @@ struct NoteItemIn {
     /// formatted reference label (display number / custom mark); file-derived
     #[serde(default)]
     display_label: Option<String>,
+    #[serde(default)]
+    block_start: Option<usize>,
+    #[serde(default)]
+    line_start: Option<usize>,
+    #[serde(default)]
+    block_end: Option<usize>,
+    #[serde(default)]
+    line_end: Option<usize>,
+}
+
+impl NoteItemIn {
+    fn window(&self) -> Option<crate::types::NoteWindow> {
+        crate::types::NoteWindow::from_parts(
+            self.block_start,
+            self.line_start,
+            self.block_end,
+            self.line_end,
+        )
+    }
+
+    /// Whether the item shows the note's opening, where its label and backlink are.
+    fn shows_start(&self) -> bool {
+        self.window()
+            .is_none_or(|window| window.block_start == 0 && window.line_start == 0)
+    }
 }
 
 #[derive(Deserialize, Default, Clone, Copy)]
@@ -5309,8 +5349,69 @@ fn emit_note_item(
 ) -> f64 {
     let start = prims.len();
     let mut cursor = 0.0;
-    for (block, measure) in note.blocks.iter().zip(&note.measures) {
+    let window = note.window();
+    for (index, (block, measure)) in note.blocks.iter().zip(&note.measures).enumerate() {
+        let count = match measure {
+            MeasureIn::Paragraph(measure) => measure.lines.len(),
+            _ => 1,
+        };
+        let Some(lines) = crate::types::note_window_lines(window.as_ref(), index, count) else {
+            continue;
+        };
+        if window.is_some() && lines.is_empty() && count > 0 {
+            continue;
+        }
         match (block, measure) {
+            (BlockIn::Paragraph(block), MeasureIn::Paragraph(measure)) if window.is_some() => {
+                if lines.start == 0 {
+                    cursor += block
+                        .attrs
+                        .as_ref()
+                        .and_then(|attrs| attrs.spacing)
+                        .and_then(|spacing| spacing.before)
+                        .unwrap_or(0.0);
+                }
+                let shown: f64 = measure.lines[lines.clone()]
+                    .iter()
+                    .map(|line| line.line_height)
+                    .sum();
+                let fragment = ParagraphFragmentIn {
+                    horizontal_frame: None,
+                    block_id: block.id.clone(),
+                    x,
+                    y: y + cursor,
+                    width,
+                    height: shown,
+                    from_line: lines.start,
+                    to_line: lines.end,
+                    pm_start: block.pm_start,
+                    pm_end: block.pm_end,
+                    carried_from_prev: (lines.start > 0).then_some(true),
+                    carried_to_next: (lines.end < count).then_some(true),
+                };
+                emit_paragraph_fragment(
+                    prims,
+                    &fragment,
+                    block,
+                    measure,
+                    ctx,
+                    x,
+                    y + cursor,
+                    None,
+                    None,
+                    true,
+                    true,
+                );
+                cursor += shown;
+                if lines.end == count {
+                    cursor += measure.total_height
+                        - measure
+                            .lines
+                            .iter()
+                            .map(|line| line.line_height)
+                            .sum::<f64>();
+                }
+            }
             (BlockIn::Paragraph(block), MeasureIn::Paragraph(measure)) => {
                 let before = block
                     .attrs
@@ -5457,13 +5558,15 @@ fn emit_note_item(
 
 fn emit_note_regions(page: &PageIn, ctx: &RenderCtx<'_>) -> Vec<NoteRegion> {
     let margins = page.body_margins.as_ref().unwrap_or(&page.margins);
-    let content_width = (page.size.w - page.margins.left - page.margins.right).max(1.0);
+    let page_width = (page.size.w - page.margins.left - page.margins.right).max(1.0);
     let mut regions = Vec::with_capacity(page.note_areas.len());
     for area in &page.note_areas {
         let kind = area.kind.as_deref().unwrap_or("footnote");
         let y = area
             .y
             .unwrap_or(page.size.h - margins.bottom - area.height.unwrap_or(0.0));
+        let left = area.x.unwrap_or(page.margins.left);
+        let content_width = area.width.unwrap_or(page_width).max(1.0);
         let columns = area.columns.unwrap_or(1).max(1) as usize;
         let column_width =
             ((content_width - (columns - 1) as f64 * NOTE_COLUMN_GAP_PX) / columns as f64).max(1.0);
@@ -5477,16 +5580,21 @@ fn emit_note_regions(page: &PageIn, ctx: &RenderCtx<'_>) -> Vec<NoteRegion> {
                 &mut separator_primitives,
                 separator,
                 kind,
-                page.margins.left,
+                left,
                 y,
                 content_width,
                 ctx,
             );
         } else {
+            let length = if area.continuation == Some(true) {
+                content_width
+            } else {
+                content_width / 3.0
+            };
             separator_primitives.push(Primitive::Line(LinePrimitive {
-                x1: px(page.margins.left),
+                x1: px(left),
                 y1: px(y),
-                x2: px(page.margins.left + content_width / 3.0),
+                x2: px(left + length),
                 y2: px(y),
                 stroke_width: px(1.0),
                 color: "#000000".to_string(),
@@ -5503,7 +5611,7 @@ fn emit_note_regions(page: &PageIn, ctx: &RenderCtx<'_>) -> Vec<NoteRegion> {
         let mut primitives = Vec::new();
         let partitions = note_partitions(&area.notes, columns);
         for (column, notes) in partitions.into_iter().enumerate() {
-            let x = page.margins.left + column as f64 * (column_width + NOTE_COLUMN_GAP_PX);
+            let x = left + column as f64 * (column_width + NOTE_COLUMN_GAP_PX);
             let mut cursor = y + area
                 .separator
                 .as_ref()
@@ -5518,6 +5626,8 @@ fn emit_note_regions(page: &PageIn, ctx: &RenderCtx<'_>) -> Vec<NoteRegion> {
             section_id: area.section_id.clone(),
             y: area.y.map(px),
             height: area.height.map(px),
+            x: area.x.map(px),
+            width: area.width.map(px),
             columns: area.columns,
             separator_primitives,
             primitives,
@@ -5527,9 +5637,10 @@ fn emit_note_regions(page: &PageIn, ctx: &RenderCtx<'_>) -> Vec<NoteRegion> {
                 .notes
                 .iter()
                 .filter(|note| {
-                    note.anchor_doc_start.is_some()
-                        || note.anchor_doc_end.is_some()
-                        || note.display_label.is_some()
+                    note.shows_start()
+                        && (note.anchor_doc_start.is_some()
+                            || note.anchor_doc_end.is_some()
+                            || note.display_label.is_some())
                 })
                 .map(|note| NoteRegionNote {
                     id: note.id,
@@ -5537,6 +5648,12 @@ fn emit_note_regions(page: &PageIn, ctx: &RenderCtx<'_>) -> Vec<NoteRegion> {
                     anchor_doc_end: note.anchor_doc_end,
                     label: capped_string(note.display_label.as_deref(), MAX_NOTE_LABEL_CHARS),
                 })
+                .collect(),
+            continued_note_ids: area
+                .notes
+                .iter()
+                .filter(|note| !note.shows_start())
+                .filter_map(|note| note.id)
                 .collect(),
         });
     }

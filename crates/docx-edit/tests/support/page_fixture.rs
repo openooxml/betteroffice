@@ -301,7 +301,7 @@ pub fn with_body(body: &str) -> Vec<u8> {
 }
 
 /// `parts` with `settings` as the package's settings part.
-fn with_settings(mut parts: Vec<(String, Vec<u8>)>, settings: &str) -> Vec<(String, Vec<u8>)> {
+pub fn with_settings(mut parts: Vec<(String, Vec<u8>)>, settings: &str) -> Vec<(String, Vec<u8>)> {
     for (name, bytes) in &mut parts {
         let mut xml = String::from_utf8(std::mem::take(bytes)).unwrap();
         match name.as_str() {

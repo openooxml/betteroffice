@@ -1209,6 +1209,10 @@ pub struct ReservedBlock {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub width: Option<f64>,
     pub height: f64,
+    /// Extra height taken when the block opens a page or column, for a mark that only a
+    /// continued flow shows there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_lead: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1531,11 +1535,13 @@ impl PartialEq for ReservedBlock {
             reservation: _,
             width: _,
             height: _,
+            page_lead: _,
         } = other;
         self.id == other.id
             && self.reservation == other.reservation
             && self.width == other.width
             && self.height == other.height
+            && self.page_lead == other.page_lead
     }
 }
 
@@ -2675,6 +2681,92 @@ pub struct NoteLayoutItemContract {
     pub anchor_doc_end: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_mark_follows: Option<bool>,
+    /// First block of the note this page shows; the window fields are absent when the page
+    /// shows the whole note.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_start: Option<usize>,
+    /// First line of `block_start` shown; a block other than a paragraph counts as one line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_start: Option<usize>,
+    /// Last block shown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_end: Option<usize>,
+    /// End of the lines shown of `block_end`, exclusive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_end: Option<usize>,
+}
+
+/// The part of a note one page shows: blocks `block_start..=block_end`, from line `line_start`
+/// of the first to line `line_end` (exclusive) of the last.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NoteWindow {
+    pub block_start: usize,
+    pub line_start: usize,
+    pub block_end: usize,
+    pub line_end: usize,
+}
+
+impl NoteWindow {
+    pub fn of(item: &NoteLayoutItemContract) -> Option<Self> {
+        Self::from_parts(
+            item.block_start,
+            item.line_start,
+            item.block_end,
+            item.line_end,
+        )
+    }
+
+    pub fn from_parts(
+        block_start: Option<usize>,
+        line_start: Option<usize>,
+        block_end: Option<usize>,
+        line_end: Option<usize>,
+    ) -> Option<Self> {
+        if block_start.is_none()
+            && line_start.is_none()
+            && block_end.is_none()
+            && line_end.is_none()
+        {
+            return None;
+        }
+        Some(Self {
+            block_start: block_start.unwrap_or(0),
+            line_start: line_start.unwrap_or(0),
+            block_end: block_end.unwrap_or(usize::MAX),
+            line_end: line_end.unwrap_or(usize::MAX),
+        })
+    }
+
+    /// The lines of block `index`, which has `lines` of them, inside the window, or `None`
+    /// when the block lies outside it.
+    pub fn lines(&self, index: usize, lines: usize) -> Option<std::ops::Range<usize>> {
+        if index < self.block_start || index > self.block_end {
+            return None;
+        }
+        let start = if index == self.block_start {
+            self.line_start.min(lines)
+        } else {
+            0
+        };
+        let end = if index == self.block_end {
+            self.line_end.min(lines)
+        } else {
+            lines
+        };
+        Some(start..end.max(start))
+    }
+}
+
+/// The lines of block `index` a note item shows: all of them without a window.
+pub fn note_window_lines(
+    window: Option<&NoteWindow>,
+    index: usize,
+    lines: usize,
+) -> Option<std::ops::Range<usize>> {
+    match window {
+        Some(window) => window.lines(index, lines),
+        None => Some(0..lines),
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2698,6 +2790,15 @@ pub struct NoteAreaContract {
     pub separator: Option<NoteLayoutItemContract>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<Vec<NoteLayoutItemContract>>,
+    /// The area continues notes from the previous page, under a continuation separator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<bool>,
+    /// Left edge of the column the area paints in; absent, the page's text area.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x: Option<f64>,
+    /// Width of that column; absent, the page's text area.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

@@ -152,7 +152,7 @@ export function readPartGeometry(engine: ResidentEngineSession, frame: RetainedF
       pageIndex: page.pageIndex, pageId: page.pageId.toString(), x: 0, y: part.y, width: page.page.width, height: part.height });
     for (const area of page.page.noteAreas ?? []) for (const id of area.noteIds ?? area.notes?.flatMap(note => note.id === undefined ? [] : [note.id]) ?? []) result.push({ kind: area.kind ?? 'footnote',
       story: `${area.kind === 'endnote' ? 'en' : 'fn'}:${id}`, pageIndex: page.pageIndex, pageId: page.pageId.toString(),
-      x: 0, y: area.y ?? 0, width: page.page.width, height: area.height ?? 0 });
+      x: area.x ?? 0, y: area.y ?? 0, width: area.width ?? page.page.width, height: area.height ?? 0 });
   }
   return result;
 }
