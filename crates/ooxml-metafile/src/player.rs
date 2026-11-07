@@ -295,11 +295,12 @@ impl Combine {
 pub(crate) struct BitmapCache {
     /// Bitmaps kept so far, by content hash, so an equal one is shared.
     pub bitmaps: HashMap<u64, Vec<Arc<Bitmap>>>,
-    /// Bitmap sources seen so far, by a 128-bit hash keyed at random for
-    /// this replay, to their ids. Sources are not kept: a crafted collision
-    /// needs the keys, and a chance one has odds of about 2^-128.
+    /// Bitmap sources seen so far, by a 128-bit keyed hash, to their ids.
+    /// Sources are not kept, so two that collide count as one: a chance
+    /// collision has odds of about 2^-128 per pair, and one that is crafted
+    /// can only swap or drop a bitmap within this metafile.
     pub sources: HashMap<u128, usize>,
-    /// The two keys of that hash.
+    /// The keys of that hash, taken from the standard library's hash map keys.
     pub keys: [RandomState; 2],
     /// GDI bitmaps already cropped, by source id and how they were cropped.
     pub blits: HashMap<(usize, [u64; 7]), CroppedBlit>,
@@ -415,19 +416,18 @@ impl<const FULL: bool> Player<FULL> {
     /// one bitmap at a time, and is charged only if its pixels match no kept
     /// bitmap.
     pub(crate) fn source_id(&mut self, parts: &[&[u8]]) -> (usize, bool) {
-        let mut half = 0u8;
-        let [low, high] = self.cache.keys.each_ref().map(|keys| {
+        let half = |keys: &RandomState, domain: u8| {
             let mut hasher = keys.build_hasher();
-            hasher.write_u8(half);
-            half += 1;
+            hasher.write_u8(domain);
             hasher.write_usize(parts.len());
             for part in parts {
                 hasher.write_usize(part.len());
                 hasher.write(part);
             }
             hasher.finish()
-        });
-        let key = (u128::from(high) << 64) | u128::from(low);
+        };
+        let [low_keys, high_keys] = &self.cache.keys;
+        let key = (u128::from(half(high_keys, 1)) << 64) | u128::from(half(low_keys, 0));
         let next = self.cache.sources.len();
         match self.cache.sources.entry(key) {
             Entry::Occupied(entry) => (*entry.get(), true),
