@@ -443,7 +443,9 @@ dependencies = [
  "betteroffice-pptx-render",
  "image",
  "png",
+ "serde_json",
  "tiny-skia",
+ "unicode-properties",
 ]
 
 [[package]]
