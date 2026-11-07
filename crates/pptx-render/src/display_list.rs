@@ -449,7 +449,43 @@ pub enum Primitive {
         primitives: Vec<Primitive>,
         #[serde(default, skip_serializing_if = "Transform::is_identity")]
         transform: Transform,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        grid: Option<TableGrid>,
     },
+}
+
+/// The row and column structure of a table, for assistive technology.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableGrid {
+    pub rows: u32,
+    pub columns: u32,
+    /// Cells that start a span, in row then column order; cells merged into
+    /// another one are left out.
+    pub cells: Vec<TableGridCell>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableGridCell {
+    pub row: u32,
+    pub column: u32,
+    pub row_span: u32,
+    pub column_span: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<TableHeader>,
+    /// The `[start, end)` range of the table's primitives that hold the
+    /// cell's text.
+    pub primitives: [u32; 2],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TableHeader {
+    /// The cell heads its column, from the table's header row.
+    Column,
+    /// The cell heads its row, from the table's first column.
+    Row,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

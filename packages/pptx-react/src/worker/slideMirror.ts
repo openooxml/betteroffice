@@ -14,6 +14,22 @@ export interface SlideMirrorParagraph {
   segments: SlideMirrorSegment[];
 }
 
+export interface SlideMirrorCell {
+  row: number;
+  column: number;
+  rowSpan: number;
+  columnSpan: number;
+  /** Only a cell with text heads its column or row. */
+  header: 'column' | 'row' | null;
+  paragraphs: SlideMirrorParagraph[];
+}
+
+/** A table's cells by row, one entry per grid row; a row whose cells all continue spans from above is empty. */
+export interface SlideMirrorTable {
+  rows: SlideMirrorCell[][];
+  columns: number;
+}
+
 /** One shape as a screen reader meets it, in slide pixels. */
 export interface SlideMirrorItem {
   key: string;
@@ -23,6 +39,7 @@ export interface SlideMirrorItem {
   h: number;
   label: string | null;
   paragraphs: SlideMirrorParagraph[];
+  table?: SlideMirrorTable;
 }
 
 export const slideLinkOptions = { relative: false, protocols: ['http:', 'https:', 'mailto:', 'tel:'] } as const;
@@ -157,6 +174,52 @@ function paragraphs(primitive: SlidePrimitive): SlideMirrorParagraph[] {
   return primitive.kind === 'table' ? primitive.primitives.flatMap(paragraphs) : [];
 }
 
+const count = (value: unknown, min: number): value is number => Number.isInteger(value) && (value as number) >= min;
+
+/** The table's cells, or null when the engine sent no grid or one that does not fit the table. */
+const MAX_TABLE_SLOTS = 1_000_000;
+
+function mirrorTable(primitive: Extract<SlidePrimitive, { kind: 'table' }>): SlideMirrorTable | null {
+  const grid = primitive.grid;
+  if (!grid || !count(grid.rows, 1) || !count(grid.columns, 1) || grid.rows * grid.columns > MAX_TABLE_SLOTS ||
+    !Array.isArray(grid.cells) || grid.cells.length === 0) return null;
+  const children = primitive.primitives;
+  const rows: SlideMirrorCell[][] = Array.from({ length: grid.rows }, () => []);
+  const taken = new Set<number>();
+  const ranges: [number, number][] = [];
+  for (const cell of grid.cells) {
+    if (typeof cell !== 'object' || cell === null) return null;
+    const [start, end] = Array.isArray(cell.primitives) ? cell.primitives : [];
+    if (!count(cell.row, 0) || !count(cell.column, 0) || !count(cell.rowSpan, 1) || !count(cell.columnSpan, 1) ||
+      cell.row + cell.rowSpan > grid.rows || cell.column + cell.columnSpan > grid.columns ||
+      !count(start, 0) || !count(end, start) || end > children.length) return null;
+    for (let row = cell.row; row < cell.row + cell.rowSpan; row++) {
+      for (let column = cell.column; column < cell.column + cell.columnSpan; column++) {
+        const slot = row * grid.columns + column;
+        if (taken.has(slot)) return null;
+        taken.add(slot);
+      }
+    }
+    ranges.push([start, end]);
+    const text = children.slice(start, end).flatMap(paragraphs);
+    rows[cell.row]!.push({
+      row: cell.row, column: cell.column, rowSpan: cell.rowSpan, columnSpan: cell.columnSpan,
+      header: text.length && (cell.header === 'column' || cell.header === 'row') ? cell.header : null,
+      paragraphs: text,
+    });
+  }
+  const covered = new Uint8Array(children.length);
+  for (const [start, end] of ranges) {
+    for (let index = start; index < end; index++) {
+      if (covered[index]) return null;
+      covered[index] = 1;
+    }
+  }
+  if (children.some((child, index) => !covered[index] && paragraphs(child).length > 0)) return null;
+  for (const row of rows) row.sort((a, b) => a.column - b.column);
+  return { rows, columns: grid.columns };
+}
+
 /**
  * The slide in reading order: its own shapes back to front, as PowerPoint reads
  * them, then what the layout and master paint on every slide.
@@ -182,7 +245,9 @@ export function slideMirrorItems(list: SlideDisplayList, picture: string): Slide
     const entry = alt[id];
     describeGroups(primitive, entry?.group);
     const own = item(id, primitive);
-    own.paragraphs.push(...paragraphs(primitive));
+    const table = primitive.kind === 'table' && !own.table && !own.paragraphs.length ? mirrorTable(primitive) : null;
+    if (table) own.table = table;
+    else own.paragraphs.push(...paragraphs(primitive));
     if (entry?.decorative || primitive.kind === 'textBox') continue;
     const described = altLabel(entry);
     const artwork = primitive.kind === 'image' || painted.get(index) === id;
@@ -190,7 +255,7 @@ export function slideMirrorItems(list: SlideDisplayList, picture: string): Slide
     const fallback = entry?.group ? null : artwork ? primitive.name || picture : summary;
     own.label ??= described ?? fallback;
   }
-  const ordered = [...items.values()].filter((value) => value.label !== null || value.paragraphs.length > 0);
+  const ordered = [...items.values()].filter((value) => value.label !== null || value.paragraphs.length > 0 || value.table);
   const title = list.titleShape ? items.get(list.titleShape) : undefined;
   if (title?.paragraphs.length) {
     const parts = title.paragraphs.flatMap((paragraph, index) => [

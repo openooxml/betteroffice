@@ -595,6 +595,7 @@ fn table(primitives: Vec<Primitive>) -> Primitive {
         label: "Table, 2 rows, 2 columns".into(),
         primitives,
         transform: Transform::default(),
+        grid: None,
     }
 }
 
@@ -625,6 +626,7 @@ fn a_table_paints_exactly_as_the_chart_container_does() {
         label,
         primitives,
         transform,
+        ..
     } = table(table_children())
     else {
         unreachable!()
@@ -703,6 +705,7 @@ fn rotated(primitive: Primitive, rotation_deg: f32) -> Primitive {
             rotation_deg,
             ..Transform::default()
         },
+        grid: None,
     }
 }
 
@@ -721,6 +724,7 @@ fn a_table_turns_its_cells_and_its_clip_under_its_own_transform() {
         label,
         primitives,
         transform,
+        ..
     } = rotated(table(table_children()), 30.0)
     else {
         unreachable!()
