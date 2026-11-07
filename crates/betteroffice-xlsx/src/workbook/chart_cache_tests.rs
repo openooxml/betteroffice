@@ -6,8 +6,8 @@ const CHART_PART: &str = "xl/charts/chart1.xml";
 const CHART: &str = r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:barChart><c:ser><c:idx val="0"/><c:val><c:numRef><c:f>Sheet1!$B$5:$B$7</c:f><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="3"/><c:pt idx="0"><c:v>10</c:v></c:pt><c:pt idx="1" formatCode="0.00"><c:v>20</c:v></c:pt><c:pt idx="2"><c:formatCode>0.0</c:formatCode><c:v>30</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser><c:ser><c:idx val="1"/><c:val><c:numRef><c:f>Data!$C$2:$C$3</c:f><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="2"/><c:pt idx="0"><c:formatCode>0.0</c:formatCode><c:v>5</c:v></c:pt><c:pt idx="1"><c:v>6</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#;
 
 /// Sheet1 anchors a chart whose first series plots its own B5:B7 and whose
-/// second plots Data!C2:C3, both through caches whose points carry per-point
-/// format codes, content the cache regenerator does not model.
+/// second plots Data!C2:C3, both through caches with a `formatCode` element
+/// inside a point, content the cache regenerator does not model.
 fn charted_workbook() -> Workbook {
     charted_workbook_with_chart(CHART)
 }
@@ -429,6 +429,294 @@ fn reshaping_a_modelled_chart_cache_regenerates_it() {
     assert!(
         saved.contains("<c:f>Sheet1!$B$5:$B$8</c:f>") && saved.contains(r#"<c:ptCount val="4"/>"#),
         "{saved}"
+    );
+}
+
+/// A numeric cache whose points carry their own `formatCode`, the way Excel
+/// writes a point whose cell is formatted differently from the series. The
+/// authored code on idx 1 is deliberately not the cell's.
+fn point_format_chart(reference: &str, points: &str) -> String {
+    format!(
+        r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:barChart><c:ser><c:idx val="0"/><c:val><c:numRef><c:f>{reference}</c:f><c:numCache><c:formatCode>General</c:formatCode>{points}</c:numCache></c:numRef></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#
+    )
+}
+
+fn format_cell(workbook: &mut Workbook, address: &str, pattern: &str) {
+    workbook
+        .set_range_number_format(
+            SheetId(0),
+            CellRange::new(r(address), r(address)),
+            NumberFormatMutation::Custom {
+                pattern: pattern.into(),
+            },
+            options(),
+        )
+        .unwrap();
+}
+
+/// Each cached point of the first numeric cache as (idx, value, format), the
+/// format being the point's own `formatCode` or else the cache's, which is
+/// what a consumer reading the cache formats the value with.
+fn cached_points(saved: &str) -> (usize, Vec<(usize, String, String)>) {
+    let start = saved.find("<c:numCache>").unwrap();
+    let cache = &saved[start..saved.find("</c:numCache>").unwrap()];
+    let between = |text: &str, open: &str, close: &str| {
+        text.find(open).map(|at| {
+            let rest = &text[at + open.len()..];
+            rest[..rest.find(close).unwrap()].to_owned()
+        })
+    };
+    let series = between(cache, "<c:formatCode>", "</c:formatCode>").unwrap_or("General".into());
+    let count = between(cache, "<c:ptCount val=\"", "\"")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let points = cache
+        .split("<c:pt ")
+        .skip(1)
+        .map(|point| {
+            let head = &point[..point.find('>').unwrap()];
+            let index = between(head, "idx=\"", "\"").unwrap().parse().unwrap();
+            let format = between(head, "formatCode=\"", "\"")
+                .map(|code| code.replace("&quot;", "\"").replace("&amp;", "&"))
+                .unwrap_or_else(|| series.clone());
+            (index, between(point, "<c:v>", "</c:v>").unwrap(), format)
+        })
+        .collect();
+    (count, points)
+}
+
+fn expect_points(saved: &str, count: usize, expected: &[(usize, &str, &str)], label: &str) {
+    let expected = expected
+        .iter()
+        .map(|(index, value, format)| (*index, (*value).to_owned(), (*format).to_owned()))
+        .collect::<Vec<_>>();
+    assert_eq!(cached_points(saved), (count, expected), "{label}: {saved}");
+}
+
+#[test]
+fn reshaping_a_cache_with_point_formats_rebuilds_them_from_the_cells() {
+    let column = point_format_chart(
+        "Sheet1!$B$5:$B$7",
+        r#"<c:ptCount val="3"/><c:pt idx="0"><c:v>10</c:v></c:pt><c:pt idx="1" formatCode="0.00%"><c:v>20</c:v></c:pt><c:pt idx="2"><c:v>30</c:v></c:pt>"#,
+    );
+    for (label, op, reference, count, points) in [
+        (
+            "row inserted inside",
+            Op::InsertRows {
+                sheet: SheetId(0),
+                at: 5,
+                count: 1,
+            },
+            "Sheet1!$B$5:$B$8",
+            4,
+            vec![
+                (0, "10", "General"),
+                (2, "20", "0.0%"),
+                (3, "30", "General"),
+            ],
+        ),
+        (
+            "row deleted inside",
+            Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 6,
+                count: 1,
+            },
+            "Sheet1!$B$5:$B$6",
+            2,
+            vec![(0, "10", "General"), (1, "20", "0.0%")],
+        ),
+        (
+            "row inserted above",
+            Op::InsertRows {
+                sheet: SheetId(0),
+                at: 1,
+                count: 1,
+            },
+            "Sheet1!$B$6:$B$8",
+            3,
+            vec![
+                (0, "10", "General"),
+                (1, "20", "0.0%"),
+                (2, "30", "General"),
+            ],
+        ),
+    ] {
+        let mut workbook = charted_workbook_with_chart(&column);
+        format_cell(&mut workbook, "B6", "0.0%");
+        apply(&mut workbook, op);
+        let saved = saved_chart(&workbook);
+        assert!(
+            saved.contains(&format!("<c:f>{reference}</c:f>")),
+            "{label}: {saved}"
+        );
+        expect_points(&saved, count, &points, label);
+        Workbook::open(&workbook.save().unwrap()).unwrap();
+    }
+
+    let row = point_format_chart(
+        "Sheet1!$B$5:$D$5",
+        r##"<c:ptCount val="3"/><c:pt idx="0"><c:v>10</c:v></c:pt><c:pt idx="1" formatCode="0.0%"><c:v>0.5</c:v></c:pt><c:pt idx="2" formatCode="#,##0.00"><c:v>1234.5</c:v></c:pt>"##,
+    );
+    for (label, op, reference, count, points) in [
+        (
+            "column inserted inside",
+            Op::InsertCols {
+                sheet: SheetId(0),
+                at: 2,
+                count: 1,
+            },
+            "Sheet1!$B$5:$E$5",
+            4,
+            vec![
+                (0, "10", "General"),
+                (2, "0.5", "0.0%"),
+                (3, "1234.5", "#,##0.00"),
+            ],
+        ),
+        (
+            "column deleted inside",
+            Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 2,
+                count: 1,
+            },
+            "Sheet1!$B$5:$C$5",
+            2,
+            vec![(0, "10", "General"), (1, "1234.5", "#,##0.00")],
+        ),
+    ] {
+        let mut workbook = charted_workbook_with_chart(&row);
+        for (address, input, pattern) in [("C5", "0.5", "0.0%"), ("D5", "1234.5", "#,##0.00")] {
+            workbook
+                .edit_cell(SheetId(0), r(address), input, options())
+                .unwrap();
+            format_cell(&mut workbook, address, pattern);
+        }
+        apply(&mut workbook, op);
+        let saved = saved_chart(&workbook);
+        assert!(
+            saved.contains(&format!("<c:f>{reference}</c:f>")),
+            "{label}: {saved}"
+        );
+        expect_points(&saved, count, &points, label);
+        Workbook::open(&workbook.save().unwrap()).unwrap();
+    }
+}
+
+/// Reads xml text or an attribute value back: its entities and character
+/// references, and nothing else.
+fn read_xml_text(raw: &str) -> String {
+    let mut out = String::new();
+    let mut rest = raw;
+    while let Some(at) = rest.find('&') {
+        out.push_str(&rest[..at]);
+        let end = at + rest[at..].find(';').unwrap();
+        let name = &rest[at + 1..end];
+        out.push(match name {
+            "quot" => '"',
+            "apos" => '\'',
+            "lt" => '<',
+            "gt" => '>',
+            "amp" => '&',
+            _ => char::from_u32(name.strip_prefix('#').unwrap().parse().unwrap()).unwrap(),
+        });
+        rest = &rest[end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The format a consumer applies to cached point `index`: its own
+/// `formatCode` attribute, or else the cache's `formatCode`.
+fn point_format(chart: &str, index: usize) -> String {
+    let point = &chart[chart.find(&format!(r#"<c:pt idx="{index}""#)).unwrap()..];
+    let head = &point[..point.find('>').unwrap()];
+    let raw = match head.find(r#"formatCode=""#) {
+        Some(at) => {
+            let value = &head[at + r#"formatCode=""#.len()..];
+            value[..value.find('"').unwrap()].to_owned()
+        }
+        None => {
+            let start = chart.find("<c:formatCode>").unwrap() + "<c:formatCode>".len();
+            chart[start..start + chart[start..].find("</c:formatCode>").unwrap()].to_owned()
+        }
+    };
+    read_xml_text(&raw)
+}
+
+/// A point's format reads back as the cell's number format, whatever
+/// characters it holds: written with plain xml escaping, as the cache's own
+/// `formatCode` is, so markup, quotes and control characters are references
+/// and a literal `_xHHHH_` stays literal. Setting such a format after the
+/// cache was reshaped never fails the save.
+#[test]
+fn point_formats_with_any_characters_save_and_read_back() {
+    let column = point_format_chart(
+        "Sheet1!$B$5:$B$7",
+        r#"<c:ptCount val="3"/><c:pt idx="0"><c:v>10</c:v></c:pt><c:pt idx="1" formatCode="0.0%"><c:v>20</c:v></c:pt><c:pt idx="2"><c:v>30</c:v></c:pt>"#,
+    );
+    let long = format!("[$-409]#,##0.00\" units & <more>\";{}", "0".repeat(200));
+    for pattern in ["0\u{1}", "0\t0\n", "0_x0041_0", long.as_str()] {
+        let mut workbook = charted_workbook_with_chart(&column);
+        apply(
+            &mut workbook,
+            Op::InsertRows {
+                sheet: SheetId(0),
+                at: 5,
+                count: 1,
+            },
+        );
+        format_cell(&mut workbook, "B7", pattern);
+        let saved = workbook
+            .save()
+            .unwrap_or_else(|error| panic!("{pattern:?}: {error}"));
+        let parts = ooxml_opc::unzip_parts(&saved).unwrap();
+        let chart = String::from_utf8(
+            parts
+                .into_iter()
+                .find(|(path, _)| path == CHART_PART)
+                .unwrap()
+                .1,
+        )
+        .unwrap();
+        assert!(
+            chart.contains("<c:f>Sheet1!$B$5:$B$8</c:f>"),
+            "{pattern:?}: {chart}"
+        );
+        assert_eq!(point_format(&chart, 2), pattern, "{chart}");
+        assert_eq!(point_format(&chart, 0), "General", "{chart}");
+        assert!(!chart.contains('\u{1}'), "{chart}");
+        Workbook::open(&saved).unwrap();
+    }
+    let mut workbook = charted_workbook_with_chart(&column);
+    apply(
+        &mut workbook,
+        Op::InsertRows {
+            sheet: SheetId(0),
+            at: 5,
+            count: 1,
+        },
+    );
+    format_cell(&mut workbook, "B7", "0\u{1}");
+    assert!(
+        saved_chart(&workbook).contains(r#"<c:pt idx="2" formatCode="0&#1;"><c:v>20</c:v></c:pt>"#)
+    );
+}
+
+#[test]
+fn point_formats_are_modelled_only_on_numeric_points() {
+    let chart = r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:barChart><c:ser><c:idx val="0"/><c:cat><c:strRef><c:f>Sheet1!$A$5:$A$7</c:f><c:strCache><c:ptCount val="3"/><c:pt idx="0" formatCode="@"><c:v>North</c:v></c:pt></c:strCache></c:strRef></c:cat></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#;
+    let mut workbook = charted_workbook_with_chart(chart);
+    assert_refused_up_front(
+        &mut workbook,
+        Op::InsertRows {
+            sheet: SheetId(0),
+            at: 5,
+            count: 1,
+        },
+        "string point with a format code",
     );
 }
 

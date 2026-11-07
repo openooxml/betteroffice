@@ -30,7 +30,7 @@ use xlsx_model::{
 
 use crate::package::PartContentType;
 use crate::tree::{Edit, Element, Part, Replacement, names_are_resolvable, parse_tree};
-use crate::xml::{find_part, formula_text, resolve_part_path};
+use crate::xml::{attribute_text, find_part, formula_text, resolve_part_path};
 use crate::{MAX_CHART_ANCHORS, MAX_CHART_REFS, MAX_DEPTH, ParseError};
 
 /// relationship references inside a part (`r:id`).
@@ -860,6 +860,10 @@ struct CacheSite {
     /// whether the cache carries content [`regenerated_cache`] does not
     /// re-emit, which it would therefore delete.
     unmodelled_content: bool,
+    /// whether a point carries its own `formatCode`, as Excel writes for a
+    /// point whose cell is formatted differently from the series, so a
+    /// rebuild writes one for every such point.
+    point_formats: bool,
     /// the points the file was authored with, so a rebuild that would empty a
     /// populated cache can be recognized and declined.
     authored_points: usize,
@@ -971,6 +975,9 @@ fn cache_site(reference: &Element) -> Option<CacheSite> {
             .child("formatCode")
             .map(|element| element.text_content()),
         unmodelled_content: !cache_is_fully_modelled(cache),
+        point_formats: cache
+            .child_elements()
+            .any(|child| child.is(NS_CHART, "pt") && child.attribute(None, "formatCode").is_some()),
         authored_points: cache
             .child_elements()
             .filter(|child| child.is(NS_CHART, "pt"))
@@ -979,17 +986,22 @@ fn cache_site(reference: &Element) -> Option<CacheSite> {
 }
 
 /// Whether every byte of a cache's content is something the regenerator can
-/// write back. `extLst` and a per-point `formatCode` are legal cache content
-/// this crate does not model, so a cache carrying either is left alone rather
-/// than rebuilt without it.
+/// write back. A numeric point's `formatCode` (`CT_NumVal`) is rebuilt from
+/// the number format of the cell it reads. `extLst`, and anything else, is
+/// legal cache content this crate does not model, so a cache carrying it is
+/// left alone rather than rebuilt without it.
 fn cache_is_fully_modelled(cache: &Element) -> bool {
+    let numeric = cache.local_name() == "numCache";
     cache.child_elements().all(|child| {
         child.namespace() == Some(NS_CHART)
             && match child.local_name() {
                 "formatCode" => child.attributes.is_empty(),
                 "ptCount" => child.attributes.iter().all(|value| value.name == "val"),
                 "pt" => {
-                    child.attributes.iter().all(|value| value.name == "idx")
+                    child
+                        .attributes
+                        .iter()
+                        .all(|value| value.name == "idx" || (numeric && value.name == "formatCode"))
                         && child
                             .child_elements()
                             .all(|value| value.is(NS_CHART, "v") && value.attributes.is_empty())
@@ -1249,22 +1261,28 @@ fn regenerated_cache_inputs(
     }
     let prefix = &cache.prefix;
     let mut out = String::new();
-    if let Some(format_code) = format_override
+    let series_format = format_override
         .filter(|_| numeric)
-        .or(cache.format_code.as_deref())
-    {
+        .or(cache.format_code.as_deref());
+    if let Some(format_code) = series_format {
         out.push_str(&format!(
             "<{prefix}formatCode>{}</{prefix}formatCode>",
             formula_text(format_code)
         ));
     }
+    let point_formats = numeric && cache.point_formats && fidelity == CacheFidelity::Persisted;
     out.push_str(&format!("<{prefix}ptCount val=\"{}\"/>", cells.len()));
-    for (index, text) in points.iter().enumerate() {
+    for (index, (text, (_, code))) in points.iter().zip(cells).enumerate() {
         let Some(text) = text else {
             continue;
         };
+        let format = if point_formats && *code != series_format.unwrap_or("General") {
+            format!(" formatCode=\"{}\"", attribute_text(code))
+        } else {
+            String::new()
+        };
         out.push_str(&format!(
-            "<{prefix}pt idx=\"{index}\"><{prefix}v>{}</{prefix}v></{prefix}pt>",
+            "<{prefix}pt idx=\"{index}\"{format}><{prefix}v>{}</{prefix}v></{prefix}pt>",
             cache_point_text(text)
         ));
     }

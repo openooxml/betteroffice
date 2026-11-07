@@ -121,11 +121,15 @@ fn is_xml_char(ch: char) -> bool {
 /// An attribute whose value keeps its CR, LF, tab and other control characters,
 /// written as character references since literal ones read back as spaces.
 pub(crate) fn text_attribute<'a>(name: &'a str, value: &str) -> Attribute<'a> {
-    let escaped = char_references(&quick_xml::escape::escape(value), &['\r', '\n', '\t']);
     Attribute {
         key: QName(name.as_bytes()),
-        value: Cow::Owned(escaped.into_bytes()),
+        value: Cow::Owned(attribute_text(value).into_bytes()),
     }
+}
+
+/// The escaped value [`text_attribute`] writes, for markup built as text.
+pub(crate) fn attribute_text(value: &str) -> String {
+    char_references(&quick_xml::escape::escape(value), &['\r', '\n', '\t'])
 }
 
 /// Encode string item text the way Excel writes ST_Xstring: a CR and the other
