@@ -90,7 +90,7 @@ async function scrollToPage(page: Page, index: number, offset = 40) {
 }
 
 async function state(page: Page, worker: boolean) {
-  const layout = await page.evaluate(() => {
+  const readLayout = () => page.evaluate(() => {
     const pages = Array.from(document.querySelectorAll<HTMLElement>('.canvas-page[data-page-index]'));
     let scroller = pages[0]?.parentElement ?? null;
     while (scroller && !/(auto|scroll)/.test(getComputedStyle(scroller).overflowY)) scroller = scroller.parentElement;
@@ -112,6 +112,7 @@ async function state(page: Page, worker: boolean) {
     return { x: rect.x, y: rect.y, width: Math.min(rect.width, innerWidth - rect.x), height: Math.min(rect.height, innerHeight - rect.y) };
   });
   const readTree = async () => ({
+    layout: await readLayout(),
     text: await page.evaluate(() => Array.from(document.querySelectorAll<HTMLElement>('.canvas-page[data-page-index]'))
       .map((element) => `${element.dataset.pageIndex}:${element.textContent ?? ''}`)),
     aria: await root.ariaSnapshot(),
@@ -123,7 +124,8 @@ async function state(page: Page, worker: boolean) {
     if (JSON.stringify(next) === JSON.stringify(tree)) break;
     tree = next;
   }
-  return { ...layout, ...tree, pixels: await settledShot(page, clip) };
+  const { layout, ...rest } = tree;
+  return { ...layout, ...rest, pixels: await settledShot(page, clip) };
 }
 
 /** A screenshot of the document area once two consecutive captures agree. */
