@@ -234,5 +234,5 @@ export type {
 export type { XlsxDefinedNameOp, XlsxDefinedName, XlsxDefinedNamesRequest, XlsxDefinedNamesResult } from './definedNames';
 
 export type { ChartInfo, ChartSeriesInfo, ChartEdit, ChartMutation, ChartSeriesName } from './charts';
-export { fontPackDiagnostics } from './wasm/engine';
-export type { FontPackDiagnostic } from '../../../shared/fontPackDiagnostics';
+export { fontPackDiagnostics } from './fontPackDiagnostics';
+export type { FontPackDiagnostic } from './fontPackDiagnostics';

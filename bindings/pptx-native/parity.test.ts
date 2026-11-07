@@ -124,11 +124,7 @@ describe('font pack diagnostics', () => {
         const fromNative = nativeReport(path.join(root, 'assets'));
         expect([name, fromNative.map((entry: { pack: string; reason: string }) => [entry.pack, entry.reason])])
           .toEqual([name, reason ? [['intl', reason]] : []]);
-        if (reason === 'invalid-manifest') {
-          expect(fromPackage.map(({ pack, reason }) => [pack, reason])).toEqual([['intl', reason]]);
-        } else {
-          expect([name, fromPackage]).toEqual([name, fromNative]);
-        }
+        expect([name, fromPackage]).toEqual([name, fromNative]);
       } finally {
         fs.rmSync(root, { recursive: true, force: true });
       }

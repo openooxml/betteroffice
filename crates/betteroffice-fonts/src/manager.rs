@@ -333,7 +333,7 @@ pub enum FontPackProblem {
     },
     /// Files the catalog lists for the pack are not in its directory; `file` is the first of them by name.
     MissingFile { file: String, missing: usize },
-    /// The pack's manifest cannot be read or parsed.
+    /// The pack's manifest cannot be read or parsed; `reason` is the error, left out of the message.
     InvalidManifest { reason: String },
 }
 
@@ -374,9 +374,9 @@ impl fmt::Display for FontPackDiagnostic {
                     String::new()
                 },
             ),
-            FontPackProblem::InvalidManifest { reason } => write!(
+            FontPackProblem::InvalidManifest { .. } => write!(
                 f,
-                "{package} has an unreadable manifest ({reason}); its faces are substituted"
+                "{package} has an unreadable manifest; its faces are substituted"
             ),
         }
     }

@@ -35,8 +35,6 @@ function nodeModule<T>(name: string): T | undefined {
   }
 }
 
-const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
-
 function diagnostic(pack: Pack, reason: FontPackDiagnostic['reason'], detail: string): FontPackDiagnostic {
   return { pack, reason, detail: `@betteroffice/fonts-${pack} ${detail}; its faces are substituted` };
 }
@@ -62,13 +60,13 @@ function checkOnDisk(pack: Pack, asset: URL): FontPackDiagnostic | null | undefi
     if ((error as { code?: unknown }).code === 'ENOENT') {
       return missingFiles(pack, [...absent(PACK_FILES[pack]), 'manifest.json']) ?? null;
     }
-    return diagnostic(pack, 'invalid-manifest', `has an unreadable manifest (${message(error)})`);
+    return diagnostic(pack, 'invalid-manifest', 'has an unreadable manifest');
   }
   let version: unknown;
   try {
     version = (JSON.parse(text) as { version?: unknown } | null)?.version;
-  } catch (error) {
-    return diagnostic(pack, 'invalid-manifest', `has an unreadable manifest (${message(error)})`);
+  } catch {
+    return diagnostic(pack, 'invalid-manifest', 'has an unreadable manifest');
   }
   if (version !== PACK_VERSION) {
     const found = typeof version === 'string' ? version : 'of unknown version';
@@ -88,8 +86,8 @@ export async function checkInstalledPacks(importers: Record<Pack, () => Promise<
     let urls: AssetUrls | undefined;
     try {
       urls = await importers[pack]();
-    } catch (error) {
-      diagnostics.push(diagnostic(pack, 'invalid-manifest', `has an unreadable asset list (${message(error)})`));
+    } catch {
+      diagnostics.push(diagnostic(pack, 'invalid-manifest', 'has an unreadable manifest'));
       continue;
     }
     if (!urls) continue;
