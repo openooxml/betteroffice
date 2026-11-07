@@ -324,3 +324,52 @@ for (const worker of [false, true]) {
     }
   });
 }
+
+async function restoreDuringOpen(browser: Browser) {
+  const context = await browser.newContext({ viewport: { width: 1440, height: 2000 } });
+  const page = await context.newPage();
+  try {
+    await page.goto('/?format=docx&peerless=0');
+    await page.evaluate(() => {
+      const state = { restored: false, placedAtRestore: true, trace: [] as number[] };
+      (window as unknown as { restore: typeof state }).restore = state;
+      const placed = () => !!document.querySelector('[data-testid=yrs-input][data-caret-placed]');
+      const tick = () => {
+        let scroller = document.querySelector('.canvas-page[data-page-index="0"], .paged-editor__page')?.parentElement ?? null;
+        while (scroller && !/(auto|scroll)/.test(getComputedStyle(scroller).overflowY)) scroller = scroller.parentElement;
+        if (scroller && !state.restored && scroller.scrollHeight > scroller.clientHeight + 2400) {
+          state.placedAtRestore = placed();
+          scroller.scrollTop = 2000;
+          state.restored = true;
+        } else if (scroller && state.restored && state.trace.length < 20_000) {
+          state.trace.push(scroller.scrollTop);
+        }
+        requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    });
+    await page.locator('input[type=file]').last().setInputFiles({
+      name: 'visibility.docx',
+      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      buffer: await longDocument(),
+    });
+    await expect(page.locator('[data-testid=yrs-input][data-caret-placed]')).toBeAttached({ timeout: 60_000 });
+    const placed = await page.evaluate(() => (window as unknown as { restore: { trace: number[] } }).restore.trace.length);
+    await expect.poll(() => page.evaluate(() => (window as unknown as { restore: { trace: number[] } }).restore.trace.length),
+      { timeout: 60_000 }).toBeGreaterThanOrEqual(placed + 60);
+    return await page.evaluate(() => (window as unknown as { restore: { placedAtRestore: boolean; trace: number[] } }).restore);
+  } finally {
+    await context.close();
+  }
+}
+
+test('docx in-thread editor: a scroll position the host restores during open survives the first caret placement', async ({ browser }) => {
+  test.setTimeout(420_000);
+  let raced = false;
+  for (let attempt = 0; attempt < 6 && !raced; attempt++) {
+    const { placedAtRestore, trace } = await restoreDuringOpen(browser);
+    expect(trace.filter((top) => Math.abs(top - 2000) >= 1), `attempt ${attempt + 1}`).toEqual([]);
+    raced = !placedAtRestore;
+  }
+  expect(raced, 'a restore landed before the first caret placement').toBe(true);
+});
