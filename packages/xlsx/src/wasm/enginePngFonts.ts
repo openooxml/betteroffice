@@ -3,8 +3,7 @@ import {
   type BundledFontFace,
 } from '@betteroffice/fonts';
 import { PngExportError } from '../../../../shared/office-session/pngExportError';
-import type { PngRunFont } from '../../../../shared/office-session/pngFonts';
-import type { XlsxFontFace } from './pngTarget';
+import type { PngFontFace, PngRunFont } from '../../../../shared/office-session/pngFonts';
 import { decodeFontFace } from './loader';
 
 const loaded = new Map<string, Promise<Uint8Array>>();
@@ -33,16 +32,20 @@ function firstFace(font: PngRunFont): BundledFontFace {
 
 /**
  * Bundled faces for the fonts a sheet's text paints with, as the native engine draws them, so a canvas export
- * without `fonts` matches it. Each face keeps its own weight and style, so a family drawn with a regular face, such
- * as bold Calibri Light, gets synthetic bold as natively. A face that cannot load rejects with `font-unavailable`
+ * without `fonts` matches it. Each face serves the style the text asks for and installs with its own weight and
+ * style, so bold Calibri Light drawn with a regular face gets synthetic bold, and regular Arial Black its bold face,
+ * as natively. A face that cannot load rejects with `font-unavailable`
  * naming it; an abort rejects at once without waiting for loads other exports may share.
  */
-export async function defaultSheetFaces(fonts: readonly PngRunFont[], signal?: AbortSignal): Promise<XlsxFontFace[]> {
+export async function defaultSheetFaces(fonts: readonly PngRunFont[], signal?: AbortSignal): Promise<PngFontFace[]> {
   signal?.throwIfAborted();
   const loading = Promise.all(fonts.map(async (font) => {
     const face = firstFace(font);
     try {
-      return { family: font.family, bold: face.weight === 700, italic: face.style === 'italic', bytes: await load(face) };
+      return {
+        family: font.family, bold: font.bold, italic: font.italic, bytes: await load(face),
+        face: { bold: face.weight === 700, italic: face.style === 'italic' },
+      };
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       throw new PngExportError('font-unavailable', `${face.family} for ${font.family} could not load: ${reason}`);

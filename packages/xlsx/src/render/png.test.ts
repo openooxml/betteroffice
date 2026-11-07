@@ -214,11 +214,23 @@ describe.skipIf(engineKind === 'native')('the wasm PNG engine', () => {
   });
   const box = { sheet: 0, viewport: { x: 0, y: 0, width: 100, height: 40 } };
 
-  test('without fonts, a bundled face keeps its own weight so a bold run on a regular face is synthesized as natively', async () => {
+  const nativeFace = (family: string, bold: boolean) => bundled.resolveBundledFamilyFace(family, bold, false)
+    ?? bundled.resolveGlyphFallbackFace(family, bold, false, 'word') ?? bundled.resolveLastResortChoice(family, bold, false, 'word').face;
+
+  test('without fonts, a bold run on a regular face installs it regular so the bold is synthesized as natively', async () => {
     const calls = stubBrowser();
     await renderPng(sheetOf('Calibri Light', true), box, {});
-    const face = bundled.resolveBundledFamilyFace('Calibri Light', true, false)!;
-    expect(calls.faces.map((installed) => installed.weight)).toEqual([String(face.weight)]);
+    expect(nativeFace('Calibri Light', true).weight).toBe(400);
+    expect(calls.faces.map((installed) => installed.weight)).toEqual(['400']);
+    expect(calls.painted.some((font) => font.startsWith('bold ') && font.includes('bo-xlsx-png'))).toBe(true);
+  });
+
+  test('without fonts, a regular run on a bold face paints with that face, installed bold', async () => {
+    const calls = stubBrowser();
+    await renderPng(sheetOf('Arial Black'), box, {});
+    expect(nativeFace('Arial Black', false).weight).toBe(700);
+    expect(calls.faces.map((installed) => installed.weight)).toEqual(['700']);
+    expect(calls.painted.some((font) => !font.startsWith('bold ') && font.includes('bo-xlsx-png'))).toBe(true);
   });
 
   test('without fonts, an aborted export rejects with the abort reason and starts no load', async () => {
