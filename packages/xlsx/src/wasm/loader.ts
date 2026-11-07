@@ -1330,7 +1330,7 @@ function wrapWorkbookDocument(
       } catch (error) {
         return Promise.reject(error);
       }
-      return renderEnginePng(pngEngine(), resolved, options);
+      return renderEnginePng(pngEngine(), resolved, options).catch((error: unknown) => Promise.reject(toError(error)));
     },
     renderPngFonts: (target: XlsxPngTarget, options: XlsxPngOptions = {}): XlsxPngFont[] => workbookPngFonts(handle, target, options),
     save(): Uint8Array {
