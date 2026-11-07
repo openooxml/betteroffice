@@ -169,6 +169,8 @@ export type {
   ShapeZOrderReceipt,
   ShapeAltText,
   TextLanguage,
+  TextLink,
+  TextLinkTarget,
   SlideDisplayList,
   SlidePrimitive,
   SlideReceipt,

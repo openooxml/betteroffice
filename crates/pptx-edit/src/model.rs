@@ -277,6 +277,8 @@ pub struct SlideSnapshot {
 pub struct SlideScope {
     /// The slide's position in deck order.
     pub index: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slide_part_paths: Vec<Option<String>>,
     pub slide: SlideSnapshot,
     pub width_emu: i64,
     pub height_emu: i64,

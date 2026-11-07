@@ -587,6 +587,7 @@ export interface TextBoxPrimitive extends PrimitiveBase {
     align?: 'left' | 'center' | 'right' | 'justify';
     level: number;
     languages?: TextLanguage[];
+    links?: TextLink[];
     runs: Array<{
       text: string;
       fontFamily: string;
@@ -609,6 +610,18 @@ export interface TextLanguage {
   end: number;
   lang: string;
 }
+
+/** UTF-16 offsets into the paragraph's concatenated run text. */
+export interface TextLink {
+  start: number;
+  end: number;
+  target: TextLinkTarget;
+}
+
+export type TextLinkTarget =
+  | { kind: 'url'; href: string }
+  | { kind: 'slide'; index: number }
+  | { kind: 'jump'; jump: 'next' | 'previous' | 'first' | 'last' };
 
 export interface PlaceholderPrimitive extends PrimitiveBase {
   kind: 'placeholder';

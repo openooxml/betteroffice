@@ -366,6 +366,11 @@ impl Renderer {
         let version = Rc::new(session.version());
         self.sync_package(session);
         let mut keys = BTreeMap::new();
+        let slide_part_paths: Vec<_> = snapshot
+            .slides
+            .iter()
+            .map(|slide| slide.source_part_path.clone())
+            .collect();
         for (index, slide) in snapshot.slides.iter().enumerate() {
             let key = self.slide_key(
                 &version,
@@ -373,6 +378,11 @@ impl Renderer {
                 index,
                 snapshot.width_emu,
                 snapshot.height_emu,
+                if pptx_edit::paragraph::has_internal_slide_links(session.package(), slide) {
+                    &slide_part_paths
+                } else {
+                    &[]
+                },
             );
             keys.insert(slide.id.clone(), key);
         }
@@ -404,6 +414,7 @@ impl Renderer {
             scope.index,
             scope.width_emu,
             scope.height_emu,
+            &scope.slide_part_paths,
         );
         self.prune_layout_keys(session)?;
         Ok(key)
@@ -537,6 +548,7 @@ impl Renderer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn slide_key(
         &mut self,
         version: &Rc<pptx_edit::DocumentVersion>,
@@ -544,6 +556,7 @@ impl Renderer {
         index: usize,
         width: i64,
         height: i64,
+        slide_part_paths: &[Option<String>],
     ) -> String {
         if let Some(record) = self.layout_keys.get_mut(&slide.id)
             && record.generation == self.generation
@@ -553,6 +566,7 @@ impl Renderer {
                     && record.scope.index == index
                     && record.scope.width_emu == width
                     && record.scope.height_emu == height
+                    && record.scope.slide_part_paths == slide_part_paths
                     && float_bits(&record.scope.slide) == float_bits(slide)))
         {
             if record.validated_version != *version {
@@ -582,6 +596,7 @@ impl Renderer {
                     index,
                     width_emu: width,
                     height_emu: height,
+                    slide_part_paths: slide_part_paths.to_vec(),
                 },
                 font_epoch: self.font_epoch,
                 generation: self.generation,
@@ -604,6 +619,7 @@ impl Renderer {
             scope.index,
             scope.width_emu,
             scope.height_emu,
+            &scope.slide_part_paths,
         );
         self.prune_layout_keys(session)?;
         let id = &scope.slide.id;
@@ -741,6 +757,87 @@ mod tests {
     const DECK: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
     const FONT: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
 
+    #[allow(dead_code)]
+    mod link_fixture {
+        include!("../../pptx-parse/tests/support/header_footer.rs");
+    }
+
+    #[test]
+    fn only_internal_slide_links_depend_on_deck_order() {
+        let shape = |paragraphs: &str| {
+            link_fixture::placeholder(2, "body", paragraphs, false).replace(
+                "<p:spPr/>",
+                r#"<p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="8000000" cy="4000000"/></a:xfrm></p:spPr>"#,
+            )
+        };
+        let plain = shape(&link_fixture::text("Plain slide"));
+        let linked = shape(
+            r#"<a:p><a:r><a:rPr><a:hlinkClick r:id="jump" action="ppaction://hlinksldjump"/></a:rPr><a:t>Third slide</a:t></a:r></a:p>"#,
+        );
+        let source = link_fixture::deck(
+            &[(&plain, false), (&linked, false), ("", false)],
+            "",
+            "",
+            "",
+            None,
+        );
+        let mut parts = ooxml_opc::unzip_parts(&source).unwrap();
+        let (_, xml) = parts
+            .iter_mut()
+            .find(|(path, _)| path == "ppt/slides/_rels/slide2.xml.rels")
+            .unwrap();
+        *xml = String::from_utf8(xml.clone()).unwrap().replace(
+            "</Relationships>",
+            r#"<Relationship Id="jump" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slide3.xml"/></Relationships>"#,
+        ).into_bytes();
+        let session =
+            pptx_edit::DeckSession::open(&ooxml_opc::rezip_parts(&parts).unwrap(), 924).unwrap();
+        let context = EditCtx::local("test");
+        let ids = session.slide_ids().unwrap();
+        let mut renderer = Renderer::new();
+        renderer.register_font("Arial", false, false, FONT).unwrap();
+        renderer.layout_slide_json(&session, 0).unwrap();
+        renderer.layout_slide_json(&session, 1).unwrap();
+        let plain_key = renderer.slide_layout_key(&session, 0).unwrap();
+        assert!(session.slide_scope(0).unwrap().slide_part_paths.is_empty());
+        assert_eq!(session.slide_scope(1).unwrap().slide_part_paths.len(), 3);
+
+        session.insert_slide(&context, 3, None).unwrap();
+        let layouts = renderer.layout_count;
+        assert_eq!(renderer.slide_layout_key(&session, 0).unwrap(), plain_key);
+        renderer.layout_slide_json(&session, 0).unwrap();
+        assert_eq!(renderer.layout_count, layouts);
+        let linked_key = renderer.slide_layout_key(&session, 1).unwrap();
+        let snapshot: serde_json::Value =
+            serde_json::from_str(&renderer.snapshot_with_layout_keys_json(&session).unwrap())
+                .unwrap();
+        assert_eq!(snapshot["keys"][&ids[0]], plain_key);
+        assert_eq!(snapshot["keys"][&ids[1]], linked_key);
+
+        session.move_slide(&context, &ids[2], 3).unwrap();
+        assert_eq!(renderer.slide_layout_key(&session, 0).unwrap(), plain_key);
+        assert_ne!(renderer.slide_layout_key(&session, 1).unwrap(), linked_key);
+        let list: serde_json::Value =
+            serde_json::from_str(&renderer.layout_slide_json(&session, 1).unwrap()).unwrap();
+        let target = list["primitives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|primitive| primitive.get("paragraphs"))
+            .flat_map(|paragraphs| paragraphs.as_array().unwrap())
+            .find_map(|paragraph| paragraph.get("links"))
+            .unwrap();
+        assert_eq!(
+            target[0]["target"],
+            serde_json::json!({ "kind": "slide", "index": 3 })
+        );
+        let snapshot: serde_json::Value =
+            serde_json::from_str(&renderer.snapshot_with_layout_keys_json(&session).unwrap())
+                .unwrap();
+        assert_eq!(snapshot["keys"][&ids[0]], plain_key);
+        assert_ne!(snapshot["keys"][&ids[1]], linked_key);
+    }
+
     fn key(
         renderer: &mut Renderer,
         session: &pptx_edit::DeckSession,
@@ -753,6 +850,7 @@ mod tests {
             scope.index,
             scope.width_emu,
             scope.height_emu,
+            &scope.slide_part_paths,
         )
     }
 
@@ -1207,6 +1305,7 @@ mod tests {
                 scope.index,
                 scope.width_emu,
                 scope.height_emu,
+                &scope.slide_part_paths,
             )
         };
         for (name, set) in fields {
