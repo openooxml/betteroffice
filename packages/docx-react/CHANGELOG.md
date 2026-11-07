@@ -1,5 +1,185 @@
 # @betteroffice/docx-react
 
+## 0.6.0
+
+### Minor Changes
+
+- 3773773: Attached agent proposals use the shared engine; standalone behavior is unchanged. Adds opt-in DOCX `editPeer`, `proposeAsync`, `rejectAsync`, `discardAsync`, `keepRevisions`, `replaceText.at`, typed `TrackedRevisionConflictError`, `AcceptDateUnsupportedError` and `ProposalDecidedInEditorError`, and XLSX `getProposalStatus`, `onProposalChange` and `isProposalStale`.
+- cc2dc6c: Reads now include `drawing` (`wp:docPr` properties, placement and type) on drawing atoms by default, as do structured image and unsupported inlines. Plugins request a drawing's frame rects with the new `drawing` geometry target. Sessions seeded earlier read `drawing` as absent until reseeded.
+- 02bd5be: DOCX uses installed font packs by default for characters they cover. Uncovered scripts and unavailable CJK families retain browser and Google Fonts fallbacks unless disabled; configured fonts and document embeds still take precedence.
+- ba48e63: `DocxEditor` gains `shortcuts` and `onShortcutIssue`: hosts can remap or disable keyboard shortcuts in worker and non-worker modes, and menus, tooltips and the shortcuts dialog show the result.
+- e4b365a: `resolveDocxShortcuts`, `resolveXlsxShortcuts` and `resolvePptxShortcuts` load from each package's `./shortcuts` subpath, keeping them out of the editor bundle. They were never released from the package root, so nothing breaks.
+
+### Patch Changes
+
+- 79b93d3: The caret takes the colour of the text under it and stays visible on dark shading or highlights. The DOCX worker caret and the XLSX cell editor no longer pick up the host page's text colour.
+- fb7f6da: Suggesting mode now tracks character formatting and hyperlink edits through optional `suggesting` authors on `toggleMark`, `formatRange`, `clearFormatting` and `setHyperlink`. Character formatting over fields or inline content controls is refused with `SuggestedFormattingOverContainerError`; commands return `unsupported-suggesting`.
+- b7fa550: Adds Clear formatting shortcuts by default: Ctrl+Space on Windows and Linux, and ⌘\ on macOS, with translated shortcut help in every locale. Shortcut bindings can now be restricted to a platform through the optional `platform` field.
+- 14495c1: Keeps comment cards visible and steady while typing as their anchor positions update.
+- 359b7f2: The text context menu closes when you click anywhere outside it, including inside the page in worker mode.
+- 7a43677: The text and image context menus and the link popup close on a click outside them even when it comes right after they open.
+- 0372f1d: Reads now include `drawings` on inline content-control atoms by default, including text boxes and revision views. Drawing geometry targets accept an optional `index` to address a drawing inside a control, including footer controls.
+- dc75d14: Copying, cutting and pasting text inside the docx editor keeps its character formatting and links, also into table cells and between documents, where formatting pastes as direct formatting. Rich text targets get the formatting too.
+- 1608bd7: The in-thread editor no longer jumps back to the top of the document when you start scrolling while it is still opening.
+- cc7f362: Opening a Word document no longer downloads the save engine up front. The editor prepares saving as soon as you edit or reach for Save, so the first save stays fast and read-only opens download less.
+- 25ed84c: Word documents stay more responsive during typing and scrolling. Hit-test preparation waits for scrolling to pause and, while the editor is focused, for two seconds without document changes; larger pages wait for more idle time.
+- b64dd94: A scroll position the host restores while a document opens is kept: the editor's default caret at the start of the document no longer scrolls the view back to the top.
+- 09241d2: The Layout menu's Size list no longer repeats the inch dimensions of Japanese paper size names next to the sizes in the ruler unit.
+- afffd29: Adds a Layout menu by default with margin presets, orientation, paper sizes, and indentation controls in both DOCX editors. Preset dimensions follow `rulerUnit`, and labels are translated in every locale.
+- 8e6d70f: Navigating to a paragraph (from a plugin or the API) after an edit now stays at the paragraph, instead of jumping back to the caret when the editor paints the next frames.
+- 6b60afa: The caret in the canvas editor takes the colour of the text under it, so it stays visible on dark cell shading, dark highlights and in dark mode.
+- 60f7a7d: The Column width, Resize image and Move image dialogs show styled, spaced Cancel and Apply buttons and bordered fields, matching the editor's other dialogs.
+- 9e291d0: Worker-editor pages outside the viewport now skip rendering work while scrolling, so large documents scroll with fewer dropped frames; layout, accessibility and find are unchanged.
+- 4b9ca33: Fixes the page indicator flashing when resizing the editor or rotating a phone.
+- 45954df: Worker-editor pages now sit on whole device pixels and match their canvas size exactly, so page text is shown 1:1 instead of slightly resampled at 100% zoom on every display scale.
+- 8d05835: The Page Setup dialog shows and accepts margins in centimeters when `rulerUnit` is `'cm'`, in both editors.
+- 6708632: Adds the `paragraphSpacing` command and paragraph spacing controls in the line spacing menu for both editors. The menu and spacing dialog are available by default with translated labels.
+- e5533dd: Paste and paste as plain text pressed right after typing now paste: the command waits for the typed text to land instead of refusing because the document changed under it.
+- 2bfee58: Escape pressed right after clicking a picture now leaves the picture, instead of being lost while the selection was still landing.
+- c2f553d: The caret now moves with prepainted text while you type, at its real height, and settles when layout arrives. Moving or blinking the caret no longer causes a page layout.
+- d60b8e4: The worker editor opens bundled CJK faces from their skeleton and core and fetches outline chunks for the glyphs each page draws before painting it, so a first CJK frame downloads a fraction of the face; print waits for pending outlines.
+- 48c6d3c: Opening a Word document downloads about 4 MB less by using a smaller module for caret and selection queries.
+- 9588b74: The text context menu takes keyboard focus: arrow keys, Home/End and typeahead move between items, and Escape or choosing an item returns focus to the document.
+- 5db0183: When the worker editor refuses a formatted paste, it now shows a notice instead of dropping the paste without a word.
+- c48265f: A plugin asking for a reservation it no longer has now gets `missing-target` right away, instead of `layout-unavailable` until the editor relays out.
+- 4182d03: Keeps a plugin's reserved boxes available while another plugin's reservations change or that plugin is removed, instead of every plugin's anchors disappearing until the editor relays out.
+- 7a9c8de: A tracked-change balloon in dots review now appears where it belongs, instead of first showing one frame offset by the previous balloon's width.
+- c8db6a8: Review cards in the sidebar no longer re-render while a document with tracked changes or comments scrolls, unless the card's own data or position changed.
+- 11ce6ac: Ruler margin and indent markers show a tooltip with their name and value in `rulerUnit` while hovered, focused or dragged, and tab stop titles follow `rulerUnit`.
+- 4bfed8a: Scrolling a document no longer repositions the hidden text input on every scroll step; the input now moves with the page content, which lowers main-thread layout work while scrolling.
+- b3aac16: Scrolling a document no longer re-renders the toolbar and editor shell for every painted frame, which lowers main-thread work while scrolling. The page indicator also stays visible while frames arrive during a scroll.
+- d0fb8c1: Table column borders and the table's right edge can be dragged to resize columns again in the default worker editor. Handles follow the borders at any zoom, and a drag is one undo step.
+- 3056f24: Table row borders can be dragged to set a row's height in both docx editors. The height saves as an at-least `w:trHeight`, and a drag is one undo step. Adds `set_row_height` to the engine.
+- 6091ab3: The editor now loads the fallback font for Chinese, Japanese, Korean, Arabic or Hebrew text typed or pasted into a document that had none, instead of drawing empty boxes until the document is reopened.
+- 1d5efb7: The editors keep a left-to-right layout on right-to-left host pages, so the spreadsheet grid paints and menus stay on screen in Arabic or Hebrew apps.
+- 21a60e5: The DOCX editor keeps one copy of each bundled font instead of several, which lowers memory while opening and editing documents, most for CJK documents.
+- 23825ed: Screen-reader links in DOCX only expose safe targets, whatever their source. Following one from the keyboard or a screen reader opens it in a new tab without an opener, and an internal link moves the caret to its bookmark.
+- cc65f8e: READMEs state API compatibility as a versioning policy: releases are versioned with Changesets, the API can change between minor versions with every change in the changelog, and deprecations are announced before removal. The Python packages drop the development status classifier.
+- c1d5485: Context menus, table tools, the shortcut dialog, rulers, error screens, presence chips and other labels that were always English now follow the editor locale, and numbers, units and times in them use its formatting.
+- ad45f86: Editors decode packed fonts with their engine by default instead of downloading a separate decoder. Standalone font providers can opt into a decoder with `runtime.decoder`.
+- 3af54c4: A menu opened while its list is still loading always appears once the list arrives, and keys pressed meanwhile no longer reach the document behind it; Escape and Tab still dismiss it.
+- 8c70d22: Toolbar overflow and context menus now load their menu list separately and preload it when the browser is idle, so the editors' initial download is smaller. A menu that cannot load stays closed and retries.
+- e6d5c52: Package exports now carry a `default` condition next to `import`, so webpack consumers (`next build --webpack`, including editors loaded with `next/dynamic`) resolve every entry instead of failing with "Package path is not exported".
+- Updated dependencies [21d4394]
+- Updated dependencies [5421e9e]
+- Updated dependencies [1f2c008]
+- Updated dependencies [1282f77]
+- Updated dependencies [1d8ac98]
+- Updated dependencies [3773773]
+- Updated dependencies [f99e53a]
+- Updated dependencies [b2ccc11]
+- Updated dependencies [42fd2b6]
+- Updated dependencies [c0ae1af]
+- Updated dependencies [f831537]
+- Updated dependencies [e1a414e]
+- Updated dependencies [c2b9ac7]
+- Updated dependencies [062502a]
+- Updated dependencies [fb7f6da]
+- Updated dependencies [a13d67a]
+- Updated dependencies [b7fa550]
+- Updated dependencies [4592a3a]
+- Updated dependencies [802a67c]
+- Updated dependencies [0372f1d]
+- Updated dependencies [dc75d14]
+- Updated dependencies [cc2dc6c]
+- Updated dependencies [a9b74ab]
+- Updated dependencies [cc7f362]
+- Updated dependencies [3609ce4]
+- Updated dependencies [0a4285c]
+- Updated dependencies [02bd5be]
+- Updated dependencies [c3c5294]
+- Updated dependencies [c2281b5]
+- Updated dependencies [fa2717d]
+- Updated dependencies [ba48e63]
+- Updated dependencies [80fbccd]
+- Updated dependencies [51390c5]
+- Updated dependencies [e3b2ddb]
+- Updated dependencies [773c633]
+- Updated dependencies [8efeef9]
+- Updated dependencies [51a1bbf]
+- Updated dependencies [30134ef]
+- Updated dependencies [bf8880c]
+- Updated dependencies [f777004]
+- Updated dependencies [f31b62e]
+- Updated dependencies [f88d5cd]
+- Updated dependencies [afffd29]
+- Updated dependencies [5ea8ee1]
+- Updated dependencies [45aceb4]
+- Updated dependencies [b0072d1]
+- Updated dependencies [a09a352]
+- Updated dependencies [8c6a8a7]
+- Updated dependencies [5999962]
+- Updated dependencies [56c2c6c]
+- Updated dependencies [f44c229]
+- Updated dependencies [b312d8c]
+- Updated dependencies [3936cdb]
+- Updated dependencies [4dc30ef]
+- Updated dependencies [61f3ae2]
+- Updated dependencies [5a6445d]
+- Updated dependencies [45954df]
+- Updated dependencies [0cc6839]
+- Updated dependencies [6708632]
+- Updated dependencies [934104f]
+- Updated dependencies [22fc562]
+- Updated dependencies [4761a87]
+- Updated dependencies [c2f553d]
+- Updated dependencies [d60b8e4]
+- Updated dependencies [48c6d3c]
+- Updated dependencies [6b80d49]
+- Updated dependencies [c98f495]
+- Updated dependencies [7ad595e]
+- Updated dependencies [e20cdb3]
+- Updated dependencies [4b0842b]
+- Updated dependencies [f30d46e]
+- Updated dependencies [bb1207f]
+- Updated dependencies [875e0d6]
+- Updated dependencies [11ce6ac]
+- Updated dependencies [5e26101]
+- Updated dependencies [9ab2b61]
+- Updated dependencies [cfdeb9e]
+- Updated dependencies [7599ffb]
+- Updated dependencies [60aeefa]
+- Updated dependencies [fc50302]
+- Updated dependencies [c3a8e27]
+- Updated dependencies [734d754]
+- Updated dependencies [bb08976]
+- Updated dependencies [8c6a8a7]
+- Updated dependencies [670abd0]
+- Updated dependencies [308f7b3]
+- Updated dependencies [514e876]
+- Updated dependencies [ceb5208]
+- Updated dependencies [d0fb8c1]
+- Updated dependencies [3056f24]
+- Updated dependencies [c74b2b8]
+- Updated dependencies [c2e450c]
+- Updated dependencies [c87ef90]
+- Updated dependencies [0bee43d]
+- Updated dependencies [7774f6c]
+- Updated dependencies [59914af]
+- Updated dependencies [6091ab3]
+- Updated dependencies [d1fff89]
+- Updated dependencies [f8c262a]
+- Updated dependencies [dab515e]
+- Updated dependencies [ad45f86]
+- Updated dependencies [53502c6]
+- Updated dependencies [21a60e5]
+- Updated dependencies [4fb3025]
+- Updated dependencies [7b30d80]
+- Updated dependencies [37199d9]
+- Updated dependencies [23825ed]
+- Updated dependencies [681b02e]
+- Updated dependencies [6378188]
+- Updated dependencies [842d624]
+- Updated dependencies [351f13c]
+- Updated dependencies [7cf70f8]
+- Updated dependencies [55c25ba]
+- Updated dependencies [974d3ab]
+- Updated dependencies [6478dec]
+- Updated dependencies [e6d5c52]
+- Updated dependencies [6d79fc5]
+  - @betteroffice/docx@0.6.0
+  - @betteroffice/docx-i18n@0.6.0
+
 ## 0.5.1
 
 ### Patch Changes

@@ -1,5 +1,29 @@
 # @betteroffice/python-pptx
 
+## 0.3.0
+
+### Minor Changes
+
+- bd6c8b5: Adds `strike` to PPTX text styles and Python text runs and editing methods. Single and double strikethrough render by default, inherit from slide styles, and survive saving; clearing direct strikethrough removes the attribute when no inherited override is needed.
+- 34b5676: Adds opt-in `insertTableRow`, `deleteTableRow`, `insertTableColumn`, and `deleteTableColumn` proposals, including Python proposal dictionaries. Review previews show table structure changes with translated labels, and acceptance applies the proposal as one undo step.
+- 3e30099: Adds opt-in `reorderShape` proposals for moving shapes to the front, back, forward or backward, including Python dictionaries and agent tools. Review previews show the new stacking order with translated labels, and acceptance applies the proposal as one undo step.
+- 750cbbb: `render_png` takes a target: `render_png(slide)` becomes `render_png({"slide": slide})`, still by index or ID, with scale, background and shadow options as keywords.
+- 3eb1353: `Presentation.proposal_slide_strip` and `layout_proposal_diff_slide_by_id` match the TypeScript proposal preview API, and `render_proposal` resolves slide IDs and indices in the proposed deck, so inserted slides render. `Proposal.refs` and `ProposalChange.kind`, `before_index` and `after_index` carry the structural proposal fields.
+
+### Patch Changes
+
+- cc65f8e: READMEs state API compatibility as a versioning policy: releases are versioned with Changesets, the API can change between minor versions with every change in the changelog, and deprecations are announced before removal. The Python packages drop the development status classifier.
+- cade718: Kanji in Japanese decks now load and paint with Noto Sans JP instead of also fetching Noto Sans SC: Han text takes its CJK face from the run, paragraph mark or style language (Korean, Traditional and Simplified Chinese likewise).
+- 91c80bf: Adds opt-in `Presentation.open_from_update`, `set_collaborative` and undo capture controls to Rust and Python. Python adds opt-in `on_update` subscriptions with synchronous callbacks after edits and remote updates.
+- ffe5b78: Rust and Python presentations gain the TypeScript names as aliases: `add_undo_boundary`, `list_proposals`, `encode_state_vector`, `encode_state_as_update`, `encode_diff`, and `apply_update` in Rust. Existing names stay.
+- 34bb0eb: The Python `Presentation` gains the operations the Rust and TypeScript APIs have: text search, caret anchors, notes, layouts, backgrounds, pictures, z-order, table row and column edits, history receipts, every text style field and an opt-in acceptance receipt.
+- d34e388: Rust and Python presentations gain `hit_test`, `register_fallback_font` and `layout_proposal_diff_slide`, matching the TypeScript API. Python adds `inspect_presentation`, which includes media bytes unless `include_media=False`, as in TypeScript.
+- 1398cff: Default fonts now load CJK script coverage for unmapped families and mixed text when the CJK packs are available; other scripts keep the browser font. `requestedFontFacesJson` adds optional `scripts` per face, and presentations with only coverage fonts render successfully.
+- 47edf38: Slide text stored with CR LF or a lone CR reads as one line break, as in PowerPoint, so an edited paragraph no longer saves a stray carriage return and the text can be written back unchanged.
+- 2758dfd: The Python packages now install the bundled fonts as `betteroffice-fonts-latin`, `betteroffice-fonts-intl` and `betteroffice-fonts-cjk` and render with them from disk; nothing is downloaded. `register_font` still adds or replaces a family.
+- ad45f86: Adds opt-in `decode_font_face` calls for zstd and woff2t font pack faces. Rust facades expose the shared `betteroffice-fonts` decoder as `fonts`; Python returns font bytes and an optional transformed payload.
+- f13ed22: SVG and metafile pictures in native slide PNGs render within a bounded cost per picture and per slide, drawing at a reduced scale when a picture would cost more.
+
 ## 0.2.2
 
 ### Patch Changes

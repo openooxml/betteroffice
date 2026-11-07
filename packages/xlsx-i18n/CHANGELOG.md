@@ -1,5 +1,26 @@
 # @betteroffice/xlsx-i18n
 
+## 0.6.0
+
+### Minor Changes
+
+- 7b30d80: Adds `ar`, `es`, `it`, `ja`, `ko`, `nl`, `ru`, `uk`, `vi` and `zh-TW` (`zhTW`), and every shipped locale now translates every string with Office terminology and its language's plural forms.
+- 1519377: `XlsxEditor` gains `shortcuts` and `onShortcutIssue`: hosts can remap or disable keyboard shortcuts, clipboard keys included, in every engine mode; tooltips and context menus follow. Ctrl+Shift+V in the grid now pastes plain text.
+
+### Patch Changes
+
+- 4fb3025: The `de`, `fr`, `he`, `hi`, `id`, `pl`, `pt-BR`, `tr` and `zh-CN` editor strings are now fully translated with Office terminology and correct plurals. Removes 185 unused locale keys.
+- e6d5c52: Package exports now carry a `default` condition next to `import`, so webpack consumers (`next build --webpack`, including editors loaded with `next/dynamic`) resolve every entry instead of failing with "Package path is not exported".
+- e2cc9dd: The experimental plugin edit gate now also covers paste and cut: plugins see each changed cell, pasted formulas already moved, with `source` `paste` or `cut`, and any refusal refuses the whole gesture before the clipboard or cells change.
+- 45da678: Adds experimental `cellEditable` and `beforeCellCommit` plugin hooks: plugins can lock cells for typing and clearing, rewrite typed input, or refuse it with `host-refused`. Works in the in-thread and default worker editors; the legacy worker editor ends plugins that define them.
+- ae849a2: Adds an experimental `rowDecorations` plugin hook to the XLSX editor: plugins show badges and dots in a row gutter left of the grid, and a click or Enter sends `row-decoration-activate` to the owning plugin.
+- 9ff8a3f: Protected cell entries now report `sheet-protected` with a localized message by default. Unlocked cells on protected sheets remain editable.
+- 9ff8a3f: Typing into a locked cell on a protected sheet now reports `sheet-protected` ("This cell is on a protected sheet.") instead of a failed save; unlocked cells there can be edited. `XlsxCommandFailureCode` and `XlsxCommandAdmissionCode` gain `sheet-protected`, so exhaustive switches need a case.
+- 210f855: Adds context menus for cells and sheet tabs (right-click, Menu key or Shift+F10) and the commands behind them: `cut`, `copy`, `paste`, `pastePlainText`, `clearContents`, `insertRows`, `insertColumns`, `deleteRows`, `deleteColumns`, `insertSheet`, `deleteSheet`, `renameSheet` and `moveSheet`.
+- 4b9381b: A refused structural edit, such as a row insert a chart cannot follow, now shows why in the editor banner and says the workbook is unchanged, instead of "The cell entry before this could not be saved." Command results report it as `edit-unsupported`.
+- 8d59669: Pending proposals now survive structural edits and undo/redo by default. Targets and formulas rebase; optional `ProposalCell.stale` reports drift, and optional `Proposal.forceBlocked` hides force with a translated reason when deleted targets or unrewritable formulas prevent acceptance.
+- 91f06b0: Screen readers now hear the active cell (address, value, "has formula"), range size and sheet switches in the spreadsheet editor. The grid, cell editor and sheet tabs are labelled, sheet tabs use arrow keys, and F6 moves between toolbar, grid and tabs.
+
 ## 0.5.1
 
 ## 0.5.0
