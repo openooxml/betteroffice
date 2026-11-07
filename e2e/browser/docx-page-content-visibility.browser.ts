@@ -331,7 +331,7 @@ async function restoreDuringOpen(browser: Browser, worker: boolean) {
   try {
     await page.goto(`/?format=docx&peerless=${worker ? 1 : 0}`);
     await page.evaluate(() => {
-      const state = { restored: false, placedAtRestore: false, trace: [] as number[] };
+      const state = { restored: false, placedAtRestore: true, framesAfter: 0, trace: [] as number[] };
       (window as unknown as { restore: typeof state }).restore = state;
       const placed = () => {
         const height = document.querySelector<HTMLElement>('[data-testid=yrs-input], textarea.paged-editor__input')?.style.height ?? '';
@@ -345,6 +345,8 @@ async function restoreDuringOpen(browser: Browser, worker: boolean) {
           scroller.scrollTop = 2000;
           state.restored = true;
         } else if (scroller && state.restored && state.trace.length < 20_000) {
+          state.framesAfter += 1;
+          if (state.framesAfter <= 3 && placed()) state.placedAtRestore = true;
           state.trace.push(scroller.scrollTop);
         }
         requestAnimationFrame(tick);
