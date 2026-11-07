@@ -96,6 +96,7 @@
     "**/session/worker.*"
   ],
   "dependencies": {
+    "@betteroffice/fonts": "workspace:^",
     "@betteroffice/fonts-cjk": "workspace:^",
     "@betteroffice/fonts-intl": "workspace:^",
     "@betteroffice/fonts-latin": "workspace:^"

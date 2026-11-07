@@ -6,6 +6,8 @@ export interface PngFontFace {
   bold?: boolean;
   italic?: boolean;
   bytes: Uint8Array;
+  /** The face's own weight and style, where it serves a style it is not, such as a regular face for bold text. */
+  face?: { bold: boolean; italic: boolean };
 }
 
 /** A family and style a page or sheet asks for. */
@@ -78,7 +80,7 @@ export async function installPngFaces(options: InstallPngFacesOptions): Promise<
         if (!set || typeof FontFace === 'undefined') throw fontUnavailable(face.family, options.subject);
         family = `${options.prefix}-${id}-${installed.size}`;
         const loaded = await new FontFace(family, face.bytes.slice().buffer as ArrayBuffer, {
-          weight: face.bold ? '700' : '400', style: face.italic ? 'italic' : 'normal',
+          weight: (face.face?.bold ?? face.bold) ? '700' : '400', style: (face.face?.italic ?? face.italic) ? 'italic' : 'normal',
         }).load().catch(() => { throw fontUnavailable(face.family, options.subject); });
         set.add(loaded);
         added.push(loaded);

@@ -95,8 +95,9 @@ measured from the workbook's normal font. The caller chooses paper size, margins
 `await workbook.renderPng({ sheet, range })` a cell range, as PNG bytes. `sheet` is a zero-based index or
 a tab name; `range` is an A1 string, `{ kind: 'a1', a1 }`, zero-based `{ kind: 'rowCol', start, end }`, or `'used'`
 for the sheet's used range at call time.
-Options are `{ scale, maxWidth, maxHeight, signal }`. The editor's painter draws on a canvas, and the call
-rejects with `PngExportError` rather than paint a substitute font. Without a canvas, it rejects with
+Options are `{ scale, maxWidth, maxHeight, signal, fonts }`. The editor's painter draws on a canvas. Without
+`fonts`, it loads the bundled faces `@betteroffice/xlsx-native` draws the sheet's fonts with, so both engines
+match. The call rejects with `PngExportError` rather than paint a substitute font. Without a canvas, it rejects with
 code `canvas-unavailable`; use `@betteroffice/xlsx-native` for PNG export in that environment.
 `isPngExportAvailable()` reports whether PNG export can run.
 

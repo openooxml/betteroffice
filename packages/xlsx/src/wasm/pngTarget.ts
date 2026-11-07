@@ -47,8 +47,8 @@ export interface XlsxPngOptions {
    * Faces to paint the sheet's fonts with, matched by family and style. Each
    * export installs them under private names and drops them afterwards; one
    * that fails to load rejects with `PngExportError` `font-unavailable`. The
-   * editors pass the faces they paint with; without faces the export paints
-   * with the fonts the runtime has.
+   * editors pass the faces they paint with; without faces the export loads the
+   * bundled faces `@betteroffice/xlsx-native` draws the sheet's fonts with.
    */
   fonts?: ReadonlyArray<XlsxFontFace>;
 }
