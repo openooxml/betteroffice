@@ -62,7 +62,15 @@ function loadIntlAssetUrls(): Promise<Record<string, () => URL> | undefined> {
 
 let latinAssetUrls: Promise<Record<string, () => URL> | undefined> | undefined;
 
-class MissingCjkAddonError extends Error {}
+/** @internal A face whose optional add-on package is not installed. */
+class MissingFontAddonError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'MissingFontAddonError';
+  }
+}
+
+class MissingCjkAddonError extends MissingFontAddonError {}
 
 const UNRESOLVED_LATIN_ADDON =
   /^(?:Cannot find (?:module|package)|Failed to resolve module specifier|Error resolving module specifier|The specifier|Module name,) ["'“]@betteroffice\/fonts-latin["'”]/;
@@ -195,7 +203,7 @@ async function assetUrl(
     const resolveIntl = intl?.[file];
     if (resolveIntl) return resolveIntl();
     if (!intl) {
-      throw new Error(
+      throw new MissingFontAddonError(
         `Bundled font ${file} needs the optional intl add-on - install @betteroffice/fonts-intl`,
       );
     }
@@ -241,7 +249,11 @@ function sliceLocation(
 export function loadBundledFontBytes(
   face: BundledFontFace,
   options?: FontAssetOptions,
-  runtime?: { decoder?: FontDecoder; /** @internal Entries this call creates are dropped once settled; concurrent requests still share one decode. */ retain?: boolean },
+  runtime?: {
+    decoder?: FontDecoder;
+    /** @internal Entries this call creates are dropped once settled; concurrent requests still share one decode. */ retain?: boolean;
+    /** @internal Reject when the CJK add-on is missing instead of loading a Latin face in its place. */ strict?: boolean;
+  },
 ): Promise<ArrayBuffer> {
   return bundledFontBytes(face, loadPackedFontBytes, options, runtime);
 }
@@ -266,7 +278,7 @@ function bundledFontBytes(
       runtime,
     )
     : assetUrl(face, baseUrl).then((url) => loadFontBytes(face, url));
-  if (baseUrl !== undefined || !CJK_FILES.has(face.file)) return bytes;
+  if (baseUrl !== undefined || !CJK_FILES.has(face.file) || runtime?.strict) return bytes;
   return bytes.catch((error) => {
     if (!(error instanceof MissingCjkAddonError)) throw error;
     return bundledFontBytes(

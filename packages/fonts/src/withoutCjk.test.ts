@@ -138,3 +138,9 @@ test('CJK import failures reject without Latin fallback and retry after recovery
     globalThis.fetch = realFetch;
   }
 });
+
+test('a strict load rejects a missing CJK add-on instead of loading a Latin face', async () => {
+  const { BUNDLED_FONTS, loadBundledFontBytes } = await import('./index');
+  const cjk = BUNDLED_FONTS.find((face) => face.script?.startsWith('cjk-'))!;
+  await expect(loadBundledFontBytes(cjk, undefined, { strict: true })).rejects.toMatchObject({ name: 'MissingFontAddonError' });
+});

@@ -46,17 +46,18 @@ function assetIds(primitives: SlideDisplayList['primitives'], ids: Set<string>):
 }
 
 /**
- * Paints a slide through the canvas. With a document it lays the slide out again with the faces the presentation
+ * Paints a slide through the canvas. With a document and the slide's ID it lays that slide out again with the faces the presentation
  * registered, any new family in `options.fonts`, and the bundled faces for the rest, as the native export does.
  */
-export async function renderPng(engine: PptxPngEngine, target: { slide: number }, options: PptxEnginePngOptions): Promise<Uint8Array> {
+export async function renderPng(engine: PptxPngEngine, target: { slide: number; id?: string }, options: PptxEnginePngOptions): Promise<Uint8Array> {
   if (!canvasPngAvailable()) throw canvasUnavailable();
   let list: SlideDisplayList;
   let fonts: ReadonlyArray<PptxFontFace>;
-  if (engine.doc) {
+  if (engine.doc && target.id !== undefined) {
+    const measured = engine.fonts();
     fontLayout ??= await import('./enginePngFonts');
     const layout = await fontLayout.defaultFontLayout(
-      engine.doc as Parameters<typeof fontLayout.defaultFontLayout>[0], target.slide, engine.fonts(), options.fonts, options.signal);
+      engine.doc as Parameters<typeof fontLayout.defaultFontLayout>[0], target.id, measured, options.fonts, options.signal);
     list = layout.list;
     fonts = [...layout.fonts, ...(options.fonts ?? [])];
   } else {

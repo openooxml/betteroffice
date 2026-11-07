@@ -25,6 +25,7 @@ afterEach(() => { restore?.(); restore = undefined; });
 function stubBrowser() {
   const sizes: [number, number][] = [];
   const sources: Uint8Array[] = [];
+  const texts: string[] = [];
   class Canvas {
     constructor(width: number, height: number) { sizes.push([width, height]); }
     getContext() {
@@ -32,6 +33,7 @@ function stubBrowser() {
         get(target, property) {
           if (property === 'createLinearGradient' || property === 'createRadialGradient' || property === 'createPattern') return () => ({ addColorStop: () => undefined });
           if (property === 'measureText') return (text: string) => ({ width: text.length });
+          if (property === 'fillText') return (text: string) => { texts.push(text); };
           return property in target ? target[property as string] : () => undefined;
         },
         set(target, property, value) { target[property as string] = value; return true; },
@@ -57,7 +59,7 @@ function stubBrowser() {
     },
   });
   restore = () => { Object.assign(scope, saved); };
-  return { sizes, sources, held };
+  return { sizes, sources, held, texts };
 }
 
 const native = engineKind === 'native';
@@ -149,6 +151,8 @@ describe('PresentationHandle.renderPng', () => {
     const opened = { family: 'Liberation Sans', bytes: font.slice() };
     const handle = openPresentation(fixture, { clientId: 7103, fonts: [opened] });
     try {
+      const slide = handle.snapshot().slides[0]!;
+      handle.addTextBox(slide.id, { name: 'Registered', rect: { x: 100000, y: 100000, width: 3000000, height: 800000 }, text: 'Registered face', style: { fontFamily: 'Liberation Sans', fontSizePt: 18 } });
       const later = { family: 'Liberation Sans', bold: true, bytes: font.slice() };
       handle.registerFont(later);
       for (const face of [opened, later]) { face.bytes.fill(0); face.family = 'Changed'; }
@@ -173,6 +177,23 @@ test.skipIf(native)('canvas export lays the slide out with the bundled faces whe
     const first = browser.sources.length;
     await handle.renderPng({ slide: 0 });
     expect(browser.sources.length).toBe(2 * first);
+  } finally { handle.dispose(); }
+});
+
+test.skipIf(native)('canvas export draws the slide it was asked for when the deck changes while faces load', async () => {
+  const browser = stubBrowser();
+  const handle = openPresentation(fixture, { clientId: 7193 });
+  try {
+    const slides = handle.snapshot().slides;
+    const asked = slides[1]!.id;
+    handle.addTextBox(asked, { name: 'Marker', rect: { x: 100000, y: 100000, width: 3000000, height: 800000 }, text: 'Asked for', style: { fontFamily: 'Calibri', fontSizePt: 18 } });
+    const moved = handle.renderPng({ slide: 1 });
+    handle.moveSlide(asked, 0);
+    await moved;
+    expect(browser.texts.join(' ')).toContain('Asked for');
+    const removed = handle.renderPng({ slide: asked });
+    handle.deleteSlide(asked);
+    await expect(removed).rejects.toThrow(`no slide with ID ${JSON.stringify(asked)}`);
   } finally { handle.dispose(); }
 });
 

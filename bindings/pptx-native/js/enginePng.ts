@@ -48,7 +48,7 @@ function exportRenderer(faces: ReadonlyArray<PptxFontFace & { fallback?: boolean
  * faces, then the font packs for the rest. Options and size are checked as on
  * the canvas engine, so both reject alike.
  */
-export async function renderPng(engine: PptxPngEngine, target: { slide: number }, options: PptxEnginePngOptions): Promise<Uint8Array> {
+export async function renderPng(engine: PptxPngEngine, target: { slide: number; id?: string }, options: PptxEnginePngOptions): Promise<Uint8Array> {
   const request = slidePngRequest(engine.displayList(target.slide), options);
   options.signal?.throwIfAborted();
   const document = engine.doc as object;

@@ -36,7 +36,7 @@ const isItalic = (face: BundledFontFace) => face.style === 'italic';
 function load(face: BundledFontFace): Promise<Uint8Array> {
   let pending = loaded.get(face.file);
   if (!pending) {
-    const started = loadBundledFontBytes(face, undefined, { decoder: decodeFontFace }).then((buffer) => new Uint8Array(buffer));
+    const started = loadBundledFontBytes(face, undefined, { decoder: decodeFontFace, strict: true }).then((buffer) => new Uint8Array(buffer));
     started.catch(() => { if (loaded.get(face.file) === started) loaded.delete(face.file); });
     loaded.set(face.file, started);
     pending = started;
@@ -44,11 +44,15 @@ function load(face: BundledFontFace): Promise<Uint8Array> {
   return pending;
 }
 
-/** A face the slide needs, or the error the native export gives when it cannot load. */
-async function needed(face: BundledFontFace, family: string): Promise<Uint8Array> {
+/**
+ * A face the slide needs, the error the native export gives when it cannot load, or undefined when its add-on
+ * package is not installed, which the native export leaves out of the slide's faces the same way.
+ */
+async function needed(face: BundledFontFace, family: string): Promise<Uint8Array | undefined> {
   try {
     return await load(face);
   } catch (error) {
+    if (error instanceof Error && error.name === 'MissingFontAddonError') return undefined;
     const reason = error instanceof Error ? error.message : String(error);
     throw new PngExportError('font-unavailable', `${face.family} for ${family} could not load: ${reason}`);
   }
@@ -113,10 +117,10 @@ async function registerDefaults(exporter: Exporter, document: PptxDocument, slid
     for (const [index, face] of faces.entries()) {
       if (index === 0 && !hasPrimary) {
         const bytes = await needed(face, request.family);
-        register(exporter, { family: request.family, bold: request.bold, italic: request.italic, bytes }, false);
+        if (bytes) register(exporter, { family: request.family, bold: request.bold, italic: request.italic, bytes }, false);
       } else if (!exporter.fallback.has(faceKey(face.family, isBold(face), isItalic(face)))) {
         const bytes = await needed(face, request.family);
-        register(exporter, { family: face.family, bold: isBold(face), italic: isItalic(face), bytes }, true);
+        if (bytes) register(exporter, { family: face.family, bold: isBold(face), italic: isItalic(face), bytes }, true);
       }
     }
     exporter.requested.add(key);
@@ -126,20 +130,26 @@ async function registerDefaults(exporter: Exporter, document: PptxDocument, slid
 const current = (exporter: Exporter, measured: ExportFace[]) => exporter.measured.length === measured.length &&
   measured.every((face, index) => exporter.measured[index] === face && exporter.sources[index] === face.bytes);
 
+function slideIndex(document: PptxDocument, slideId: string): number {
+  const { slides } = JSON.parse(document.snapshotJson()) as { slides: Array<{ id: string }> };
+  const index = slides.findIndex((candidate) => candidate.id === slideId);
+  if (index < 0) throw new RangeError(`no slide with ID ${JSON.stringify(slideId)}`);
+  return index;
+}
+
 function release(exporter: Exporter): void {
   exporter.released = true;
   if (exporter.users === 0) exporter.renderer.free();
 }
 
 /**
- * Lays the slide out again in an export renderer holding the faces the presentation registered, any new family in
- * `added`, and the bundled faces the slide asks for, as the native export does, so both measure alike.
+ * Lays the slide with `slideId` out again, at the index it has once the faces are in, in an export renderer holding
+ * the faces the presentation registered, any new family in `added`, and the bundled faces the slide asks for, as the
+ * native export does, so both measure alike.
  */
 export async function defaultFontLayout(
-  document: PptxDocument, slide: number, measured: ExportFace[], added: ReadonlyArray<PptxFontFace> | undefined, signal?: AbortSignal,
+  document: PptxDocument, slideId: string, measured: ExportFace[], added: ReadonlyArray<PptxFontFace> | undefined, signal?: AbortSignal,
 ): Promise<{ list: SlideDisplayList; fonts: ExportFace[] }> {
-  const { slides } = JSON.parse(document.snapshotJson()) as { slides: Array<{ id: string }> };
-  const slideId = slides[slide]!.id;
   const known = new Set(measured.map((face) => familyKey(face.family)));
   const supplied = added?.filter((face) => !known.has(familyKey(face.family))) ?? [];
   let exporter = supplied.length ? undefined : exporters.get(document);
@@ -155,9 +165,10 @@ export async function defaultFontLayout(
   const held = exporter;
   held.users += 1;
   const run = held.queue.then(async () => {
+    slideIndex(document, slideId);
     await registerDefaults(held, document, slideId, signal);
     signal?.throwIfAborted();
-    const list = JSON.parse(held.renderer.exportSlideJson(document, slide)) as SlideDisplayList;
+    const list = JSON.parse(held.renderer.exportSlideJson(document, slideIndex(document, slideId))) as SlideDisplayList;
     return { list, fonts: [...held.faces] };
   });
   held.queue = run.catch(() => {});
