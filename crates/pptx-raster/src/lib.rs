@@ -157,6 +157,9 @@ pub struct RenderedSlide {
     /// Images whose bytes were missing, undecodable, or over budget. These are
     /// skipped and counted rather than failing the render.
     pub skipped_images: usize,
+    /// The skipped images that named a picture part, leaving out frames with
+    /// no image to draw.
+    pub unavailable_images: usize,
 }
 
 impl std::fmt::Debug for RenderedSlide {
@@ -166,6 +169,7 @@ impl std::fmt::Debug for RenderedSlide {
             .field("height", &self.height)
             .field("bytes", &self.bytes.len())
             .field("skipped_images", &self.skipped_images)
+            .field("unavailable_images", &self.unavailable_images)
             .finish()
     }
 }
@@ -251,6 +255,7 @@ pub fn render_slide_shared(
         asset_hashes: HashMap::new(),
         shape_clip_cache: None,
         skipped_images: 0,
+        unavailable_images: 0,
         shadow_pixels: 0,
         max_shadow_pixels: options.max_shadow_pixels,
     };
@@ -258,12 +263,14 @@ pub fn render_slide_shared(
         painter.paint(primitive, base, None)?;
     }
     let skipped_images = painter.skipped_images;
+    let unavailable_images = painter.unavailable_images;
 
     Ok(RenderedSlide {
         bytes: encode_png(pixmap, width, height)?,
         width,
         height,
         skipped_images,
+        unavailable_images,
     })
 }
 
@@ -350,6 +357,7 @@ struct Painter<'a, 'b> {
     asset_hashes: HashMap<String, u64>,
     shape_clip_cache: Option<ShapeClipCache>,
     skipped_images: usize,
+    unavailable_images: usize,
 }
 
 struct ShapeClipCache {
@@ -681,7 +689,10 @@ impl Painter<'_, '_> {
                         decoded = Some((source, fit));
                     }
                 }
-                None => self.skipped_images += 1,
+                None => {
+                    self.skipped_images += 1;
+                    self.unavailable_images += usize::from(asset_id.is_some());
+                }
             }
         }
         if let Some(shadow) = shadow {
@@ -1686,6 +1697,7 @@ mod tests {
             });
             let resources = RenderResources::new(&fonts, &images);
             let rendered = render_slide(&list, &resources, &RenderOptions::default()).unwrap();
+            assert_eq!(rendered.unavailable_images, 0, "{kind}");
             let pixmap = Pixmap::decode_png(&rendered.bytes).unwrap();
             let left = pixmap.pixel(30, 40).unwrap().demultiply();
             let right = pixmap.pixel(210, 40).unwrap().demultiply();
@@ -3184,7 +3196,7 @@ mod tests {
     fn a_missing_asset_is_skipped_and_counted() {
         let fonts = FontStore::new();
         let images = AssetMap::default();
-        for asset_id in [None, Some("ppt/media/image1.png")] {
+        for (asset_id, unavailable) in [(None, 0), (Some("ppt/media/image1.png"), 1)] {
             let mut list = empty_list(100.0, 100.0);
             list.primitives.push(Primitive::Image {
                 destination: None,
@@ -3212,6 +3224,7 @@ mod tests {
             )
             .expect("render");
             assert_eq!(rendered.skipped_images, 1, "asset_id: {asset_id:?}");
+            assert_eq!(rendered.unavailable_images, unavailable, "asset_id: {asset_id:?}");
         }
     }
 

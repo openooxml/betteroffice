@@ -1277,12 +1277,12 @@ impl PptxRenderer {
                 _ => map_error(env, error),
             })
             .and_then(|rendered| {
-                if rendered.skipped_images > 0 {
+                if rendered.unavailable_images > 0 {
                     return Err(throw_error(
                         &env,
                         &format!(
                             "png-picture-unavailable: {} picture(s) on this slide could not be drawn",
-                            rendered.skipped_images
+                            rendered.unavailable_images
                         ),
                     ));
                 }

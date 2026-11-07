@@ -84,6 +84,24 @@ test('native pptx PNG rejects a slide with a picture it cannot draw', async () =
   }
 });
 
+test('native pptx PNG draws a slide whose picture has no image to draw', async () => {
+  const zip = await JSZip.loadAsync(bytes());
+  const slide = await zip.file('ppt/slides/slide1.xml')!.async('string');
+  const emptied = slide.replace('<a:blip r:embed="rId2"/>', '<a:blip/>');
+  expect(emptied).not.toBe(slide);
+  zip.file('ppt/slides/slide1.xml', emptied);
+  const document = raw.PptxDocument.openCollaborative(await zip.generateAsync({ type: 'uint8array' }), 412);
+  const renderer = new raw.PptxRenderer();
+  try {
+    const font = new Uint8Array(readFileSync(new URL('../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url)));
+    renderer.registerFont('Arial', false, false, font);
+    expect(slidePng(renderer, document, 0, 1).length).toBeGreaterThan(8);
+  } finally {
+    renderer.free();
+    document.free();
+  }
+});
+
 test('native pptx PNG requires registered fonts for slide text', () => {
   const document = raw.PptxDocument.openCollaborative(bytes(), 402);
   const renderer = new raw.PptxRenderer();
