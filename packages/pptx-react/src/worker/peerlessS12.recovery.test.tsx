@@ -234,6 +234,28 @@ test('recovery after a crash on a deck whose state exceeds the update cap', asyn
   } finally { checkpoint.mockRestore(); }
 }, 60_000);
 
+test('recovery reports typing whose outcome the worker declared unknown instead of dropping it silently', async () => {
+  const error = mock((_error: Error) => {});
+  const value = await open({ onError: error });
+  const target = await story(value.api);
+  await act(async () => { await value.api.selectText({ slide: 1, shapeId: target.shapeId, storyId: target.storyId, start: 0, end: 0 }); });
+  const input = value.view.getByLabelText('Slide text');
+  await act(async () => { type(input, 'Accepted'); await value.api.flushPendingInput(); });
+  faultControl.unknown();
+  await act(async () => { type(input, 'Uncertain'); await value.api.flushPendingInput().catch(() => {}); });
+  await waitFor(() => expect(error).toHaveBeenCalledTimes(1));
+  const recovered = await value.api.recoverySave();
+  expect(recovered.unrecoveredIntents?.map((intent) => intent.kind)).toContain('insertText');
+  expect(recovered.unrecoveredIntents!.every((intent) => intent.reason === 'unknown-outcome')).toBe(true);
+  expect(error.mock.calls.some(([reported]) => /left out \d+ edit/.test(reported.message))).toBe(true);
+  const saved = wasm.openPresentation(recovered.bytes);
+  try {
+    const content = saved.readContent();
+    if (!content.ok) throw new Error(content.failure.message);
+    expect(content.stories[0]!.text).toBe(`Accepted${target.text}`);
+  } finally { saved.dispose(); }
+});
+
 test('unknown_outcome', async () => {
   const error = mock(() => {});
   const changed = mock((_snapshot: DeckSnapshot) => {});

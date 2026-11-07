@@ -92,8 +92,8 @@ function limit(value: number | undefined, fallback: number): number {
 const ledgers = new WeakMap<object, () => readonly CommandEnvelope<unknown>[]>();
 
 /**
- * @internal Envelopes the session submitted whose outcome has not arrived, in seq order, including those still
- * pending when the session terminated. Read-only; a session without recovery uses it to replay them elsewhere.
+ * @internal Envelopes the session submitted whose outcome has not arrived or is recorded as unknown, in seq order,
+ * including those still pending when the session terminated. Read-only; a session without recovery uses it to replay them elsewhere.
  */
 export function sessionUnacknowledged<P>(session: object): readonly CommandEnvelope<P>[] {
   return (ledgers.get(session)?.() ?? []) as readonly CommandEnvelope<P>[];
@@ -117,7 +117,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
   const log = new Map<number, LogEntry<P>>();
   let unacknowledgedAtTermination: CommandEnvelope<P>[] | undefined;
   function unacknowledgedEnvelopes(): CommandEnvelope<P>[] {
-    return [...log.values()].filter((entry) => entry.outcome === undefined)
+    return [...log.values()].filter((entry) => entry.outcome === undefined || entry.outcome.reason === 'unknown-outcome')
       .map((entry) => cloneData(entry.envelope)).sort((a, b) => a.seq - b.seq);
   }
   const dependencies = new Map<number, Set<number>>();

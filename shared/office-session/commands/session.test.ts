@@ -96,6 +96,20 @@ describe('worker edit session', () => {
     await h.session.dispose();
   });
 
+  it('lists an envelope whose outcome the session recorded as unknown', async () => {
+    const h = harness({ maxRecoveryAttempts: 0 });
+    for (const value of ['a', 'b']) h.session.submit('insert', value);
+    h.pump();
+    h.ack(0);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    h.pump();
+    h.calls[1]!.reply.reject(new Error('edit outcome is unknown'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    h.pump();
+    expect(sessionUnacknowledged<string>(h.session).map((envelope) => envelope.payload)).toEqual(['b']);
+    await h.session.dispose();
+  });
+
   for (const maxRecoveryAttempts of [undefined, 0]) {
     it(`lists submitted envelopes whose outcome has not arrived, in seq order${maxRecoveryAttempts === 0 ? ', without recovery' : ''}`, async () => {
       const h = harness(maxRecoveryAttempts === undefined ? {} : { maxRecoveryAttempts });
