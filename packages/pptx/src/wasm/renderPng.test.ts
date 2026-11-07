@@ -197,6 +197,36 @@ test.skipIf(native)('canvas export draws the slide it was asked for when the dec
   } finally { handle.dispose(); }
 });
 
+test.skipIf(native)('canvas export loads the faces of text added while faces load', async () => {
+  const browser = stubBrowser();
+  const box = (handle: ReturnType<typeof openPresentation>, slideId: string, name: string, fontFamily: string, y: number) =>
+    handle.addTextBox(slideId, { name, rect: { x: 100000, y, width: 3000000, height: 800000 }, text: name, style: { fontFamily, fontSizePt: 18 } });
+  const edited = openPresentation(fixture, { clientId: 7192 });
+  const fresh = openPresentation(fixture, { clientId: 7191 });
+  try {
+    const editedSlide = edited.snapshot().slides[0]!.id;
+    box(edited, editedSlide, 'First', 'Calibri', 100000);
+    const exported = edited.renderPng({ slide: 0 });
+    box(edited, editedSlide, 'Added later', 'Georgia', 1000000);
+    await exported;
+    const whileLoading = browser.sources.map((source) => source.length).sort();
+    browser.sources.length = 0;
+    const freshSlide = fresh.snapshot().slides[0]!.id;
+    box(fresh, freshSlide, 'First', 'Calibri', 100000);
+    box(fresh, freshSlide, 'Added later', 'Georgia', 1000000);
+    await fresh.renderPng({ slide: 0 });
+    expect(whileLoading).toEqual(browser.sources.map((source) => source.length).sort());
+  } finally { edited.dispose(); fresh.dispose(); }
+});
+
+test.skipIf(native)('a presentation disposed before its first canvas export starts rejects it', async () => {
+  stubBrowser();
+  const handle = openPresentation(fixture, { clientId: 7190 });
+  const exported = handle.renderPng({ slide: 0 });
+  handle.dispose();
+  await expect(exported).rejects.toThrow('presentation handle is disposed');
+});
+
 test.skipIf(native)('disposing a presentation frees its canvas export renderer', async () => {
   stubBrowser();
   const { PptxRenderer } = await import('./engine');

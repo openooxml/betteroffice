@@ -211,10 +211,17 @@ test('default fonts leave the other styles of a registered family to that family
 });
 
 test('native export rejects with font-unavailable naming a pack face that cannot load', () => {
-  const empty = require('node:fs').mkdtempSync(require('node:path').join(require('node:os').tmpdir(), 'pptx-no-packs-'));
+  const fs = require('node:fs') as typeof import('node:fs');
+  const path = require('node:path') as typeof import('node:path');
+  const assets = new URL('../../packages/fonts-latin/assets', import.meta.url).pathname;
+  const broken = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'pptx-broken-pack-'));
+  for (const name of fs.readdirSync(assets)) {
+    if (name === 'manifest.json') fs.copyFileSync(path.join(assets, name), path.join(broken, name));
+    else if (fs.statSync(path.join(assets, name)).isFile()) fs.writeFileSync(path.join(broken, name), 'not a font');
+  }
   const script = `
     const raw = require('./index.js');
-    raw.configureFontPacks(${JSON.stringify(empty)}, ${JSON.stringify(empty)}, ${JSON.stringify(empty)});
+    raw.configureFontPacks(${JSON.stringify(broken)}, undefined, undefined);
     const { renderPng } = await import('./js/enginePng.ts');
     const bytes = new Uint8Array(require('node:fs').readFileSync('../../apps/demo/public/betteroffice-demo.pptx'));
     const doc = raw.PptxDocument.openCollaborative(bytes, 1);
@@ -224,7 +231,7 @@ test('native export rejects with font-unavailable naming a pack face that cannot
     catch (error) { console.log('RESULT ' + JSON.stringify({ name: error?.name, code: error?.code, message: String(error?.message ?? error) })); }
   `;
   const child = Bun.spawnSync([process.execPath, '-e', script], { cwd: new URL('.', import.meta.url).pathname });
-  require('node:fs').rmSync(empty, { recursive: true, force: true });
+  fs.rmSync(broken, { recursive: true, force: true });
   const line = child.stdout.toString().split('\n').find((text) => text.startsWith('RESULT '));
   expect(line, child.stderr.toString()).toBeDefined();
   const result = JSON.parse(line!.slice(7));

@@ -193,7 +193,7 @@ async function assetUrl(
     const resolveLatin = latin?.[file];
     if (resolveLatin) return resolveLatin();
     if (!latin) {
-      throw new Error(
+      throw new MissingFontAddonError(
         `Bundled font ${file} needs @betteroffice/fonts-latin - install @betteroffice/fonts-latin`,
       );
     }
@@ -243,6 +243,20 @@ function sliceLocation(
     decoder: runtime?.decoder,
     retain: runtime?.retain,
   };
+}
+
+/**
+ * Whether the package that ships `face` is installed, checked without loading the face.
+ * @internal
+ */
+export async function bundledFaceInstalled(face: BundledFontFace): Promise<boolean> {
+  try {
+    await assetUrl(face, undefined);
+    return true;
+  } catch (error) {
+    if (error instanceof MissingFontAddonError) return false;
+    throw error;
+  }
 }
 
 /** Loads font bytes into consumer-owned buffers with retryable failures. */
