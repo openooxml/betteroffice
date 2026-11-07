@@ -185,7 +185,7 @@ fn play_full_emf(
     {
         return plus;
     }
-    let plus_drew = plus.as_ref().map(|player| !player.ops.is_empty());
+    let plus_drew = plus.as_ref().ok().map(|player| !player.ops.is_empty());
     drop(plus);
     let plus_spent = budget.spent_since(before);
     budget.refund(plus_spent.pixels);
@@ -196,8 +196,8 @@ fn play_full_emf(
     }
     match (gdi, plus_drew) {
         (Ok(gdi), _) if !gdi.ops.is_empty() => Ok(gdi),
-        (Err(error), Ok(false)) => Err(error),
-        (gdi, Ok(_)) => {
+        (Err(error), Some(false)) => Err(error),
+        (gdi, Some(_)) => {
             drop(gdi);
             budget.refund(budget.spent_since(before).pixels);
             budget.give_back(ReplayBudget {
@@ -210,7 +210,7 @@ fn play_full_emf(
             }
             plus
         }
-        (gdi, Err(_)) => gdi,
+        (gdi, None) => gdi,
     }
 }
 
