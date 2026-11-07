@@ -77,7 +77,7 @@ describe('YrsSession.renderPng', () => {
       session.openDocx(new Uint8Array(rezipPartsToArrayBuffer(parts)), true);
       const exported = session.renderPng({ page: 0 });
       if (native) await exported;
-      else expect((await exported.catch((error: { code?: string }) => error)).code).toBe('canvas-unavailable');
+      else expect(await exported.then(() => undefined, (error: { code?: string }) => error.code)).toBe('canvas-unavailable');
     } finally { session.destroy(); }
   });
 
