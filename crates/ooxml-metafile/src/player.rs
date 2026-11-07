@@ -8,7 +8,7 @@
 use std::cell::Cell;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::hash::{BuildHasher, DefaultHasher, Hash, Hasher, RandomState};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -295,8 +295,12 @@ impl Combine {
 pub(crate) struct BitmapCache {
     /// Bitmaps kept so far, by content hash, so an equal one is shared.
     pub bitmaps: HashMap<u64, Vec<Arc<Bitmap>>>,
-    /// Bitmap sources seen so far, each kept once, to their ids.
-    pub sources: HashMap<Box<[u8]>, usize>,
+    /// Bitmap sources seen so far, by a 128-bit hash keyed at random for
+    /// this replay, to their ids. Sources are not kept: a crafted collision
+    /// needs the keys, and a chance one has odds of about 2^-128.
+    pub sources: HashMap<u128, usize>,
+    /// The two keys of that hash.
+    pub keys: [RandomState; 2],
     /// GDI bitmaps already cropped, by source id and how they were cropped.
     pub blits: HashMap<(usize, [u64; 7]), CroppedBlit>,
     /// EMF+ images already built, by source id.
@@ -411,13 +415,21 @@ impl<const FULL: bool> Player<FULL> {
     /// one bitmap at a time, and is charged only if its pixels match no kept
     /// bitmap.
     pub(crate) fn source_id(&mut self, parts: &[&[u8]]) -> (usize, bool) {
-        let mut key = Vec::with_capacity(parts.iter().map(|part| part.len() + 8).sum());
-        for part in parts {
-            key.extend((part.len() as u64).to_le_bytes());
-            key.extend_from_slice(part);
-        }
+        let mut half = 0u8;
+        let [low, high] = self.cache.keys.each_ref().map(|keys| {
+            let mut hasher = keys.build_hasher();
+            hasher.write_u8(half);
+            half += 1;
+            hasher.write_usize(parts.len());
+            for part in parts {
+                hasher.write_usize(part.len());
+                hasher.write(part);
+            }
+            hasher.finish()
+        });
+        let key = (u128::from(high) << 64) | u128::from(low);
         let next = self.cache.sources.len();
-        match self.cache.sources.entry(key.into_boxed_slice()) {
+        match self.cache.sources.entry(key) {
             Entry::Occupied(entry) => (*entry.get(), true),
             Entry::Vacant(entry) => (*entry.insert(next), false),
         }
