@@ -53,7 +53,7 @@ pub fn configure_font_packs(
 static PACK_DIAGNOSTICS: OnceLock<String> = OnceLock::new();
 
 /// Internal: the installed font packs `configureFontPacks` left out, and why, as JSON.
-#[napi(js_name = "fontPackDiagnosticsJson")]
+#[napi(catch_unwind, js_name = "fontPackDiagnosticsJson")]
 pub fn font_pack_diagnostics_json() -> String {
     PACK_DIAGNOSTICS
         .get()
