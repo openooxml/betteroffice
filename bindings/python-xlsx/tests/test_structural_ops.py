@@ -339,3 +339,47 @@ def test_existing_calls_raise_the_subclass_and_still_catch_as_xlsx_error(sample_
     assert str(raised.value) == "cell text exceeds Excel's length limit"
     with pytest.raises(bo.OperationError):
         workbook.set_many(0, {"A1": "x" * 40000})
+
+
+def control_formula_bytes():
+    main = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    rels = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    package = "http://schemas.openxmlformats.org/package/2006/relationships"
+    parts = {
+        "[Content_Types].xml": '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>',
+        "_rels/.rels": f'<Relationships xmlns="{package}"><Relationship Id="rId1" Type="{rels}/officeDocument" Target="xl/workbook.xml"/></Relationships>',
+        "xl/workbook.xml": f'<workbook xmlns="{main}" xmlns:r="{rels}"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/></sheets></workbook>',
+        "xl/_rels/workbook.xml.rels": f'<Relationships xmlns="{package}"><Relationship Id="rId1" Type="{rels}/worksheet" Target="worksheets/sheet1.xml"/></Relationships>',
+        "xl/worksheets/sheet1.xml": f'<worksheet xmlns="{main}"><sheetData><row r="1"><c r="D1" t="str"><f>"a&#1;b"</f><v>x</v></c></row></sheetData></worksheet>',
+    }
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as archive:
+        for name, xml in parts.items():
+            archive.writestr(name, xml)
+    return out.getvalue()
+
+
+def test_a_new_control_character_formula_is_written_with_char_and_an_opened_one_moves():
+    workbook = bo.Workbook.open(control_formula_bytes())
+    added = workbook.apply_ops(
+        [{"type": "setCell", "sheet": 0, "at": {"row": 0, "col": 7}, "cell": {"formula": '"new\x01"'}}]
+    )
+    assert added.applied is True
+    assert workbook.set(0, "I1", '="typed\x01"').applied is True
+    with pytest.raises(ValueError, match="U\\+0000, which a workbook file cannot store and CHAR cannot produce"):
+        workbook.set(0, "J1", '="nul\x00"')
+    shifted = workbook.apply_ops(
+        [
+            {"type": "insertRows", "sheet": 0, "at": 0, "count": 1},
+            {"type": "setCell", "sheet": 0, "at": {"row": 1, "col": 3}, "cell": {"formula": '"a\x01b"'}},
+        ]
+    )
+    assert shifted.applied is True
+    assert workbook.move_range(0, "D2", "G2").applied is True
+    saved = workbook.save()
+    sheet = zipfile.ZipFile(io.BytesIO(saved)).read("xl/worksheets/sheet1.xml").decode()
+    assert "<f>(&quot;new&quot;&amp;CHAR(1))</f>" in sheet
+    assert "<f>(&quot;typed&quot;&amp;CHAR(1))</f>" in sheet
+    reopened = bo.Workbook.open(saved)
+    assert reopened.formula(0, "G2") == '"a\x01b"'
+    assert reopened.formula(0, "H2") == '("new"&CHAR(1))'

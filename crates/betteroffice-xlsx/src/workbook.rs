@@ -8,6 +8,7 @@ mod edit_tests;
 mod format_calculation_tests;
 #[cfg(test)]
 mod format_facets_tests;
+mod formula_entry;
 mod geometry;
 mod proposals;
 pub(crate) mod reads;
@@ -1731,7 +1732,7 @@ impl Workbook {
         options: CalculationOptions,
     ) -> Result<MutationResult> {
         self.validate_bounded_range(sheet, range)?;
-        self.apply_ops(
+        self.apply_carried_ops(
             vec![Op::PatchRangeStyle {
                 sheet,
                 range,
@@ -1749,7 +1750,7 @@ impl Workbook {
         options: CalculationOptions,
     ) -> Result<MutationResult> {
         self.validate_bounded_range(sheet, range)?;
-        self.apply_ops(
+        self.apply_carried_ops(
             vec![Op::SetRangeNumberFormat {
                 sheet,
                 range,
@@ -1880,7 +1881,7 @@ impl Workbook {
         options: CalculationOptions,
     ) -> Result<MutationResult> {
         self.validate_bounded_range(sheet, range)?;
-        self.apply_ops(
+        self.apply_carried_ops(
             vec![Op::ApplyRangeFormat {
                 sheet,
                 range,
@@ -1923,7 +1924,7 @@ impl Workbook {
         hyperlink: Hyperlink,
         options: CalculationOptions,
     ) -> Result<MutationResult> {
-        self.apply_ops(vec![Op::SetHyperlink { sheet, hyperlink }], options)
+        self.apply_carried_ops(vec![Op::SetHyperlink { sheet, hyperlink }], options)
     }
 
     pub fn remove_hyperlink(
@@ -1932,7 +1933,7 @@ impl Workbook {
         range: CellRange,
         options: CalculationOptions,
     ) -> Result<MutationResult> {
-        self.apply_ops(vec![Op::RemoveHyperlink { sheet, range }], options)
+        self.apply_carried_ops(vec![Op::RemoveHyperlink { sheet, range }], options)
     }
 
     pub fn edit_cell(
@@ -1970,8 +1971,9 @@ impl Workbook {
     ) -> Result<MutationResult> {
         self.validate_target(sheet, cell)?;
         let names = DefinedFunctionNames::new(&self.model.defined_names);
-        let (state, format) =
+        let (mut state, format) =
             edit_cell_state(&self.model, &names, sheet, cell, input, options.now_serial);
+        state.formula = entered_formula(&self.model, sheet, cell, state.formula)?;
         validate_cell_state(&state)?;
         if format.is_none()
             && cell_states_semantically_equal(&current_cell_state(&self.model, sheet, cell), &state)
@@ -2014,6 +2016,30 @@ impl Workbook {
         edits: &[CellInput],
         options: CalculationOptions,
     ) -> Result<MutationResult> {
+        self.edit_cells_from(sheet, edits, &[], options)
+    }
+
+    /// [`Workbook::edit_cells`] for a paste: `copied[i]` marks `edits[i]` as a
+    /// formula copied from a cell of this workbook and translated to its new
+    /// cell, so its text is carried as the source held it instead of entered
+    /// as typed text. Missing flags count as typed.
+    pub fn edit_pasted_cells(
+        &mut self,
+        sheet: SheetId,
+        edits: &[CellInput],
+        copied: &[bool],
+        options: CalculationOptions,
+    ) -> Result<MutationResult> {
+        self.edit_cells_from(sheet, edits, copied, options)
+    }
+
+    fn edit_cells_from(
+        &mut self,
+        sheet: SheetId,
+        edits: &[CellInput],
+        copied: &[bool],
+        options: CalculationOptions,
+    ) -> Result<MutationResult> {
         if edits.is_empty() {
             return Ok(MutationResult::default());
         }
@@ -2023,9 +2049,9 @@ impl Workbook {
         let mut preview = self.model.clone();
         let names = DefinedFunctionNames::new(&preview.defined_names);
         let mut per_op = Vec::with_capacity(edits.len());
-        for edit in edits {
+        for (index, edit) in edits.iter().enumerate() {
             self.validate_cell(edit.cell)?;
-            let (state, format) = edit_cell_state(
+            let (mut state, format) = edit_cell_state(
                 &preview,
                 &names,
                 sheet,
@@ -2033,6 +2059,9 @@ impl Workbook {
                 &edit.input,
                 options.now_serial,
             );
+            if !copied.get(index).copied().unwrap_or(false) {
+                state.formula = entered_formula(&preview, sheet, edit.cell, state.formula)?;
+            }
             validate_cell_state(&state)?;
             let old = current_cell_state(&preview, sheet, edit.cell);
             if format.is_none() && cell_states_semantically_equal(&old, &state) {
@@ -2142,7 +2171,7 @@ impl Workbook {
         }
         let ops = move_range_ops(&self.model, sheet, source, target)?;
         self.carry_moved_answers(sheet, source, target, &ops);
-        self.apply_ops(ops, options)
+        self.apply_carried_ops(ops, options)
     }
 
     /// a move writes the cells it changes as plain values and formulas, and
@@ -2187,12 +2216,17 @@ impl Workbook {
         graph.carry_answers(&moves);
     }
 
+    /// Applies `ops` as one undoable edit. A `SetCell` whose formula text is
+    /// new for its cell, compared with the cell as the earlier ops leave it,
+    /// is entered as typed text is ([`entered_formula`]): a control character
+    /// in a text literal is written as `CHAR(n)`. [`Workbook::move_range`] and a
+    /// paste with `copyFrom` carry opened formulas as they are.
     pub fn apply_ops(
         &mut self,
         ops: Vec<Op>,
         options: CalculationOptions,
     ) -> Result<MutationResult> {
-        self.apply_ops_marked(ops, options, &mut |_| {})
+        self.apply_ops_marked(ops, options, FormulaEntry::Introduced, &mut |_| {})
     }
 
     /// [`Workbook::apply_ops`] with its stages timed by `now`.
@@ -2202,13 +2236,26 @@ impl Workbook {
         options: CalculationOptions,
         now: &mut impl FnMut() -> f64,
     ) -> Result<(MutationResult, EditProfile)> {
-        profiled(now, |mark| self.apply_ops_marked(ops, options, mark))
+        profiled(now, |mark| {
+            self.apply_ops_marked(ops, options, FormulaEntry::Introduced, mark)
+        })
+    }
+
+    /// [`Workbook::apply_ops`] for ops the workbook builds itself to move or
+    /// restyle what it already holds, whose formula text is carried unchecked.
+    fn apply_carried_ops(
+        &mut self,
+        ops: Vec<Op>,
+        options: CalculationOptions,
+    ) -> Result<MutationResult> {
+        self.apply_ops_marked(ops, options, FormulaEntry::Carried, &mut |_| {})
     }
 
     fn apply_ops_marked(
         &mut self,
         mut ops: Vec<Op>,
         options: CalculationOptions,
+        entry: FormulaEntry,
         mark: &mut dyn FnMut(EditStage),
     ) -> Result<MutationResult> {
         if ops.is_empty() {
@@ -2224,6 +2271,11 @@ impl Workbook {
         let mut batch = xlsx_ops::InPlaceBatch::new(&mut preview);
         for op in &mut ops {
             keep_stored_formula(&mut batch, &defined, op);
+            if entry == FormulaEntry::Introduced
+                && let Op::SetCell { sheet, at, cell } = op
+            {
+                cell.formula = entered_formula(batch.workbook(), *sheet, *at, cell.formula.take())?;
+            }
             let staged = batch.workbook();
             if let Some(sheet) = worksheet_edit_target(op) {
                 self.ensure_worksheet_sheet_in(staged, &origins, sheet)?;
@@ -2570,7 +2622,7 @@ impl Workbook {
         let names = DefinedFunctionNames::new(&preview.defined_names);
         for edit in &request.edits {
             self.validate_target(edit.sheet, edit.cell)?;
-            let (state, format) = edit_cell_state(
+            let (mut state, format) = edit_cell_state(
                 &preview,
                 &names,
                 edit.sheet,
@@ -2578,6 +2630,7 @@ impl Workbook {
                 &edit.input,
                 options.now_serial,
             );
+            state.formula = entered_formula(&preview, edit.sheet, edit.cell, state.formula)?;
             validate_cell_state(&state)?;
             if format.is_some()
                 || !cell_states_semantically_equal(
@@ -2682,7 +2735,7 @@ impl Workbook {
             let sheet = SheetId(edit.sheet);
             let cell = CellRef::new(edit.row, edit.col);
             self.validate_target(sheet, cell)?;
-            let (state, format) = edit_cell_state(
+            let (mut state, format) = edit_cell_state(
                 &preview,
                 &names,
                 sheet,
@@ -2690,6 +2743,7 @@ impl Workbook {
                 &edit.input,
                 options.now_serial,
             );
+            state.formula = entered_formula(&preview, sheet, cell, state.formula)?;
             validate_cell_state(&state)?;
             if !cell_states_semantically_equal(&current_cell_state(&preview, sheet, cell), &state) {
                 touched.push((sheet, cell, state.formula.clone()));
@@ -2970,7 +3024,7 @@ impl Workbook {
                     })
             })
             .collect();
-        self.apply_ops(ops, options)
+        self.apply_carried_ops(ops, options)
     }
 
     #[cfg(feature = "raster")]
@@ -5024,6 +5078,34 @@ fn validate_range_size(range: CellRange) -> Result<()> {
         });
     }
     Ok(())
+}
+
+/// Whether a formula's text reaches the workbook as new entry, written in a
+/// form a file can store ([`entered_formula`]), or carried from content it
+/// already holds.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FormulaEntry {
+    Introduced,
+    Carried,
+}
+
+/// `formula` as entered into `at`: the formula the cell already holds in
+/// `model` stays as it is, and new text goes through
+/// [`formula_entry::storable_formula`]. Callers pass text already normalized
+/// against the stored formula ([`committed_formula`]), so a re-commit as
+/// displayed counts as the stored formula.
+pub(crate) fn entered_formula(
+    model: &WorkbookModel,
+    sheet: SheetId,
+    at: CellRef,
+    formula: Option<String>,
+) -> Result<Option<String>> {
+    match formula {
+        Some(formula) if stored_formula(model, sheet, at) != Some(formula.as_str()) => {
+            formula_entry::storable_formula(formula).map(Some)
+        }
+        formula => Ok(formula),
+    }
 }
 
 fn validate_cell_state(state: &CellState) -> Result<()> {

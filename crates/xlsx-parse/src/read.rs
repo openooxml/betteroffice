@@ -596,21 +596,46 @@ fn collect_string_item(
     let target = *depth;
     let mut out = String::new();
     let mut runs = false;
+    let mut text: Option<(usize, String)> = None;
     loop {
         match next_event(reader, buf, depth)? {
-            Event::Start(e) if *depth == target + 1 && local_name(&e) == b"r" => runs = true,
-            Event::Text(t) => out.push_str(&t.xml10_content().map_err(xml_err)?),
-            Event::CData(t) => out.push_str(&t.xml10_content().map_err(xml_err)?),
+            Event::Start(e) => {
+                if *depth == target + 1 && local_name(&e) == b"r" {
+                    runs = true;
+                }
+                if text.is_none() && local_name(&e) == b"t" {
+                    text = Some((*depth, String::new()));
+                }
+            }
+            Event::Text(t) => {
+                push_item_text(&mut text, &mut out, &t.xml10_content().map_err(xml_err)?)
+            }
+            Event::CData(t) => {
+                push_item_text(&mut text, &mut out, &t.xml10_content().map_err(xml_err)?)
+            }
             Event::GeneralRef(r) => {
                 let name = r.decode().map_err(xml_err)?;
-                out.push_str(&resolve_entity(&name)?);
+                push_item_text(&mut text, &mut out, &resolve_entity(&name)?);
             }
             Event::End(_) if *depth < target => break,
+            Event::End(_) => {
+                if let Some((_, value)) = text.take_if(|(opened, _)| *depth < *opened) {
+                    out.push_str(&unescape_name(&value));
+                }
+            }
             Event::Eof => return Err(ParseError::Malformed("unexpected eof in text".into())),
             _ => {}
         }
     }
     Ok((out, runs))
+}
+
+/// Text of the open `<t>`, decoded once the element ends, or item text outside one.
+fn push_item_text(text: &mut Option<(usize, String)>, out: &mut String, value: &str) {
+    match text {
+        Some((_, pending)) => pending.push_str(value),
+        None => out.push_str(value),
+    }
 }
 
 /// What a source worksheet's cells said that the model does not keep.
@@ -1187,7 +1212,7 @@ fn finalize_cell(
             None => CellValue::Empty,
         },
         Some("str") => CellValue::Text {
-            value: c.value_text.unwrap_or_default(),
+            value: unescape_name(&c.value_text.unwrap_or_default()),
         },
         Some("b") => CellValue::Bool {
             value: c.value_text.as_deref() == Some("1"),

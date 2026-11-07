@@ -29,10 +29,8 @@ use xlsx_model::{
 };
 
 use crate::package::PartContentType;
-use crate::tree::{
-    Edit, Element, Part, Replacement, escape_text, names_are_resolvable, parse_tree,
-};
-use crate::xml::{find_part, resolve_part_path};
+use crate::tree::{Edit, Element, Part, Replacement, names_are_resolvable, parse_tree};
+use crate::xml::{find_part, formula_text, resolve_part_path};
 use crate::{MAX_CHART_ANCHORS, MAX_CHART_REFS, MAX_DEPTH, ParseError};
 
 /// relationship references inside a part (`r:id`).
@@ -1269,7 +1267,7 @@ fn regenerated_cache_inputs(
     if let Some(format_code) = series_format {
         out.push_str(&format!(
             "<{prefix}formatCode>{}</{prefix}formatCode>",
-            escape_text(format_code)?
+            formula_text(format_code)
         ));
     }
     let point_formats = numeric && cache.point_formats && fidelity == CacheFidelity::Persisted;
@@ -1331,15 +1329,27 @@ fn is_xstring_escape(text: &str) -> bool {
 
 /// A cache point's `c:v` text, which never fails: the value is an
 /// `ST_Xstring`, so a character xml 1.0 cannot carry is written as `_xHHHH_`,
-/// the form Excel writes, and no cell text can keep a cache from being saved.
-fn cache_point_text(value: &str) -> String {
+/// the form Excel writes, an underscore that would start such an escape as
+/// `_x005F_`, and no cell text can keep a cache from being saved.
+pub(crate) fn cache_point_text(value: &str) -> String {
+    let bytes = value.as_bytes();
     let mut out = String::with_capacity(value.len());
-    for ch in value.chars() {
+    for (index, ch) in value.char_indices() {
         match ch {
             '&' => out.push_str("&amp;"),
             '<' => out.push_str("&lt;"),
             '>' => out.push_str("&gt;"),
             '\r' => out.push_str("&#13;"),
+            '_' if bytes
+                .get(index + 1)
+                .is_some_and(|b| matches!(b, b'x' | b'X'))
+                && bytes.get(index + 6) == Some(&b'_')
+                && bytes
+                    .get(index + 2..index + 6)
+                    .is_some_and(|hex| hex.iter().all(u8::is_ascii_hexdigit)) =>
+            {
+                out.push_str("_x005F_");
+            }
             '\t' | '\n' => out.push(ch),
             _ if ch < ' ' || ch == '\u{fffe}' || ch == '\u{ffff}' => {
                 out.push_str(&format!("_x{:04X}_", ch as u32));

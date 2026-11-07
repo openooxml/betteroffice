@@ -248,7 +248,7 @@ fn text_from_rich_text<E: ChartXml>(parent: Option<&E>) -> Option<String> {
         }
     }
     let text = first_deep(parent, "v", 0)
-        .map(E::descendant_text)
+        .map(|value| decode_xstring(&value.descendant_text()))
         .unwrap_or_default();
     nonempty_trimmed(&text)
 }
@@ -395,7 +395,7 @@ fn parse_string_cache<E: ChartXml>(parent: Option<&E>, budget: &mut Budget) -> V
     let mut next = 0;
     let entries = take_points(children(cache, "pt"), budget, |point| {
         let text = child(point, "v")
-            .map(E::descendant_text)
+            .map(|value| decode_xstring(&value.descendant_text()))
             .unwrap_or_default()
             .trim()
             .to_owned();
@@ -416,7 +416,7 @@ fn parse_num_cache<E: ChartXml>(parent: Option<&E>, budget: &mut Budget) -> Vec<
     };
     let mut next = 0;
     let entries = take_points(children(cache, "pt"), budget, |point| {
-        let text = child(point, "v")?.descendant_text();
+        let text = decode_xstring(&child(point, "v")?.descendant_text());
         let value = parse_number(Some(text.trim()))?;
         let index = point_index_attr(point, next);
         next = index.saturating_add(1);
@@ -439,7 +439,7 @@ fn parse_num_cache_with_strings<E: ChartXml>(
     let mut next = 0;
     let entries = take_points(children(cache, "pt"), budget, |point| {
         let text = child(point, "v")
-            .map(E::descendant_text)
+            .map(|value| decode_xstring(&value.descendant_text()))
             .unwrap_or_default()
             .trim()
             .to_owned();
@@ -977,6 +977,37 @@ fn data_labels_visible<E: ChartXml>(labels: Option<&E>) -> bool {
 fn nonempty_trimmed(value: &str) -> Option<String> {
     let value = value.trim();
     (!value.is_empty()).then(|| value.to_owned())
+}
+
+/// Decode the ST_Xstring escapes a `c:v` holds: `_xHHHH_` is the character with
+/// that code, and `_x005F_` escapes the underscore of a literal one.
+fn decode_xstring(source: &str) -> String {
+    if !source.contains("_x") && !source.contains("_X") {
+        return source.to_owned();
+    }
+    let bytes = source.as_bytes();
+    let mut out = String::with_capacity(source.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'_'
+            && matches!(bytes.get(index + 1), Some(b'x' | b'X'))
+            && bytes.get(index + 6) == Some(&b'_')
+            && bytes
+                .get(index + 2..index + 6)
+                .is_some_and(|hex| hex.iter().all(u8::is_ascii_hexdigit))
+            && let Some(decoded) = u32::from_str_radix(&source[index + 2..index + 6], 16)
+                .ok()
+                .and_then(char::from_u32)
+        {
+            out.push(decoded);
+            index += 7;
+            continue;
+        }
+        let ch = source[index..].chars().next().unwrap_or('\u{0}');
+        out.push(ch);
+        index += ch.len_utf8();
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1793,6 +1824,34 @@ mod tests {
         assert_eq!(values.len(), 4);
         assert!(values[0].is_nan() && values[2].is_nan());
         assert_eq!([values[1], values[3]], [7.0, 9.0]);
+    }
+
+    #[test]
+    fn cached_values_decode_st_xstring_escapes() {
+        let cache = Node::el(
+            "c:numCache",
+            vec![
+                Node::el("c:pt", vec![Node::text("c:v", "_x0031_")]).attr("idx", "0"),
+                Node::el("c:pt", vec![Node::text("c:v", "_x0032_")]).attr("idx", "1"),
+            ],
+        );
+        assert_eq!(
+            parse_num_cache(Some(&cache), &mut Budget::new()),
+            [1.0, 2.0]
+        );
+        let (_, numbers) = parse_num_cache_with_strings(Some(&cache), &mut Budget::new());
+        assert_eq!(numbers, [1.0, 2.0]);
+        let strings = Node::el(
+            "c:strCache",
+            vec![
+                Node::el("c:pt", vec![Node::text("c:v", "a_x000D_b")]).attr("idx", "0"),
+                Node::el("c:pt", vec![Node::text("c:v", "_x005F_x0041_")]).attr("idx", "1"),
+            ],
+        );
+        assert_eq!(
+            parse_string_cache(Some(&strings), &mut Budget::new()),
+            ["a\rb", "_x0041_"]
+        );
     }
 
     #[test]
