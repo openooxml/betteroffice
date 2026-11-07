@@ -104,7 +104,7 @@ UTF-16 code units.
 
 For embedded images, pass `paintSlide` an options object with `resolveImage`, a function mapping an
 asset ID to a canvas image source or a promise for one. It may return `null` for an unavailable image.
-`await handle.renderPng({ slide }, options?)` draws a slide (zero-based index or slide ID) as PNG bytes with the same painter, on a canvas. Options are `{ scale, background, maxShadowPixels, signal, fonts }`; `background` is `'slide'` (white under the slide), `'transparent'` or a `#rrggbb` color. It paints with the faces the presentation registered, and rejects with `PngExportError` rather than paint a substitute font. Where there is no canvas it names `@betteroffice/pptx-native`.
+`await handle.renderPng({ slide }, options?)` draws a slide (zero-based index or slide ID) as PNG bytes with the same painter, on a canvas. Options are `{ scale, background, maxShadowPixels, signal, fonts }`; `background` is `'slide'` (white under the slide), `'transparent'` or a `#rrggbb` color. It lays the slide out again with the faces the presentation registered, any new family in `fonts`, and the bundled faces for the rest, as `@betteroffice/pptx-native` does, so both engines break lines alike. It rejects with `PngExportError` (`font-unavailable`) when a face the slide needs cannot load, rather than paint a substitute font. Where there is no canvas it names `@betteroffice/pptx-native`.
 
 ## Saving and ownership
 

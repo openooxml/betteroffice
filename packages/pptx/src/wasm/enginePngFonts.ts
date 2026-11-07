@@ -2,6 +2,7 @@ import {
   loadBundledFontBytes, resolveBundledFamilyFace, resolveGlyphFallbackFace, resolveLastResortChoice, resolveScriptFallbackFace,
   type BundledFontFace, type BundledFontScript,
 } from '@betteroffice/fonts';
+import { PngExportError } from '../../../../shared/office-session/pngExportError';
 import type { RequestedFontFace } from '../../../../shared/pptxDefaultFonts';
 import type { PptxFontFace, SlideDisplayList } from '../types';
 import type { PptxDocument } from './generated/pptx_wasm.js';
@@ -25,21 +26,32 @@ interface Exporter {
 }
 
 const exporters = new WeakMap<object, Exporter>();
-const loaded = new Map<string, Promise<Uint8Array | undefined>>();
+const loaded = new Map<string, Promise<Uint8Array>>();
 
 const familyKey = (family: string) => family.trim().toLowerCase();
 const faceKey = (family: string, bold: boolean, italic: boolean) => JSON.stringify([familyKey(family), bold, italic]);
 const isBold = (face: BundledFontFace) => face.weight === 700;
 const isItalic = (face: BundledFontFace) => face.style === 'italic';
 
-function load(face: BundledFontFace): Promise<Uint8Array | undefined> {
+function load(face: BundledFontFace): Promise<Uint8Array> {
   let pending = loaded.get(face.file);
   if (!pending) {
-    pending = loadBundledFontBytes(face, undefined, { decoder: decodeFontFace }).then((buffer) => new Uint8Array(buffer));
-    pending.catch(() => { if (loaded.get(face.file) === pending) loaded.delete(face.file); });
-    loaded.set(face.file, pending);
+    const started = loadBundledFontBytes(face, undefined, { decoder: decodeFontFace }).then((buffer) => new Uint8Array(buffer));
+    started.catch(() => { if (loaded.get(face.file) === started) loaded.delete(face.file); });
+    loaded.set(face.file, started);
+    pending = started;
   }
-  return pending.catch(() => undefined);
+  return pending;
+}
+
+/** A face the slide needs, or the error the native export gives when it cannot load. */
+async function needed(face: BundledFontFace, family: string): Promise<Uint8Array> {
+  try {
+    return await load(face);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new PngExportError('font-unavailable', `${face.family} for ${family} could not load: ${reason}`);
+  }
 }
 
 function register(exporter: Exporter, face: PptxFontFace, fallback: boolean): void {
@@ -91,7 +103,7 @@ function resolve(request: RequestedFontFace): BundledFontFace[] {
 async function registerDefaults(exporter: Exporter, document: PptxDocument, slideId: string, signal?: AbortSignal): Promise<void> {
   const { faces: requests } = JSON.parse(exporter.renderer.requestedFontFacesJson(document, slideId)) as { faces: RequestedFontFace[] };
   const plans = requests.map((request) => ({ request, faces: resolve(request) }));
-  for (const plan of plans) for (const face of plan.faces) void load(face);
+  for (const plan of plans) for (const face of plan.faces) load(face).catch(() => {});
   for (const { request, faces } of plans) {
     signal?.throwIfAborted();
     const key = JSON.stringify([familyKey(request.family), request.bold, request.italic, request.scripts ?? []]);
@@ -100,11 +112,11 @@ async function registerDefaults(exporter: Exporter, document: PptxDocument, slid
       exporter.primary.has(faceKey(request.family, request.bold, request.italic));
     for (const [index, face] of faces.entries()) {
       if (index === 0 && !hasPrimary) {
-        const bytes = await load(face);
-        if (bytes) register(exporter, { family: request.family, bold: request.bold, italic: request.italic, bytes }, false);
+        const bytes = await needed(face, request.family);
+        register(exporter, { family: request.family, bold: request.bold, italic: request.italic, bytes }, false);
       } else if (!exporter.fallback.has(faceKey(face.family, isBold(face), isItalic(face)))) {
-        const bytes = await load(face);
-        if (bytes) register(exporter, { family: face.family, bold: isBold(face), italic: isItalic(face), bytes }, true);
+        const bytes = await needed(face, request.family);
+        register(exporter, { family: face.family, bold: isBold(face), italic: isItalic(face), bytes }, true);
       }
     }
     exporter.requested.add(key);
