@@ -598,6 +598,7 @@ fn cache_markup(
             .and_then(|item| child(item, "formatCode"))
             .map(|item| crate::read::unescape_name(&item.text_content())),
         unmodelled_content: false,
+        point_formats: false,
         authored_points: 0,
     };
     match regenerated_cache(

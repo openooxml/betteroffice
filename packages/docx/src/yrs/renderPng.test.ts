@@ -108,7 +108,7 @@ describe('YrsSession.renderPng', () => {
     try {
       const before = await pages();
       expect(before).toBeGreaterThan(0);
-      session.insertText({ story: 'body', paraId: session.paragraphs('body')[5]!.paraId, offset: 0 }, 'A great many more words at the start of this page. '.repeat(600));
+      session.insertText({ story: 'body', paraId: session.paragraphs('body')[0]!.paraId, offset: 0 }, 'A great many more words at the start of this page. '.repeat(75));
       expect(await pages()).toBeGreaterThan(before + 2);
       await session.renderPng({ page: before + 1 });
     } finally { session.destroy(); }
@@ -118,7 +118,7 @@ describe('YrsSession.renderPng', () => {
     stubBrowser();
     const session = await opened();
     try {
-      session.insertText({ story: 'body', paraId: session.paragraphs('body')[0]!.paraId, offset: 0 }, 'A great many more words at the start of this page. '.repeat(600));
+      session.insertText({ story: 'body', paraId: session.paragraphs('body')[0]!.paraId, offset: 0 }, 'A great many more words at the start of this page. '.repeat(300));
       const refused = await session.renderPng({ page: 9999 }).catch((error: Error) => error.message);
       expect(Number(/for (\d+) page/.exec(String(refused))?.[1])).toBeGreaterThan(20);
       const png = await session.renderPng({ page: 0 });
