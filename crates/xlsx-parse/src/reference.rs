@@ -450,7 +450,7 @@ fn named_area(element: &Element) -> Option<NamedArea> {
     if element.any_attribute_named("name") || element.any_attribute_named("id") {
         return None;
     }
-    let sheet = sole_attribute(element, "sheet")??.to_owned();
+    let sheet = crate::read::unescape_name(sole_attribute(element, "sheet")??);
     let (_, end) = parse_area(sole_attribute(element, "ref")??)?;
     Some((sheet, end))
 }

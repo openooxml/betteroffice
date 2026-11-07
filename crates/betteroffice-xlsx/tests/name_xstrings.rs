@@ -220,3 +220,81 @@ fn any_new_font_name_saves_as_valid_xml_and_reads_back() {
         );
     }
 }
+
+/// An edit that rewrites a defined name, here the formula of a name Excel
+/// stored as `_x005F_x0041_`, saves through the patched fragment, keeps the
+/// name's escape and reads back.
+#[test]
+fn an_escaped_defined_name_survives_an_edit_that_rewrites_it() {
+    let mut workbook = Workbook::open(&book("Second", "_x005F_x0041_", "Calibri")).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::RenameSheet {
+                sheet: SheetId(0),
+                name: "Info".into(),
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let saved = workbook.save().unwrap();
+    let xml = part(&saved, WORKBOOK);
+    assert!(
+        xml.contains(r#"<definedName name="_x005F_x0041_">Info!$A$1</definedName>"#),
+        "{xml}"
+    );
+    assert_xml10(&xml);
+    let reopened = Workbook::open(&saved).unwrap();
+    assert_eq!(reopened.model().defined_names[0].name, "_x0041_");
+}
+
+/// A pivot cache's `worksheetSource@sheet` is an `ST_Xstring` naming a sheet
+/// whose own name Excel wrote escaped. It binds to that sheet, so edits to
+/// other sheets go ahead while an edit under the source range is still refused.
+#[test]
+fn a_pivot_source_names_its_escaped_sheet() {
+    let mut model = betteroffice_xlsx::WorkbookModel::default();
+    for name in ["A\tB", "Report", "Notes"] {
+        model.sheets.push(betteroffice_xlsx::Sheet::new(name));
+    }
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    parts.push((
+        "xl/pivotCache/pivotCacheDefinition1.xml".to_owned(),
+        br#"<pivotCacheDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cacheSource type="worksheet"><worksheetSource ref="A1:B4" sheet="A_x0009_B"/></cacheSource></pivotCacheDefinition>"#.to_vec(),
+    ));
+    let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+    assert!(
+        part(&bytes, WORKBOOK).contains(r#"name="A_x0009_B""#),
+        "{}",
+        part(&bytes, WORKBOOK)
+    );
+    for op in [
+        Op::RenameSheet {
+            sheet: SheetId(2),
+            name: "Scratch".to_owned(),
+        },
+        Op::InsertRows {
+            sheet: SheetId(2),
+            at: 0,
+            count: 1,
+        },
+    ] {
+        let mut workbook = Workbook::open(&bytes).unwrap();
+        workbook
+            .apply_ops(vec![op.clone()], CalculationOptions::default())
+            .unwrap_or_else(|error| panic!("{op:?} was refused: {error:?}"));
+        workbook.save().unwrap();
+    }
+    let mut workbook = Workbook::open(&bytes).unwrap();
+    assert!(
+        workbook
+            .apply_ops(
+                vec![Op::InsertRows {
+                    sheet: SheetId(0),
+                    at: 1,
+                    count: 1,
+                }],
+                CalculationOptions::default(),
+            )
+            .is_err()
+    );
+}

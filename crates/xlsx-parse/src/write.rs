@@ -2566,14 +2566,14 @@ fn edited_defined_names(
         let source_name = attributes
             .iter()
             .find(|attr| attr.name == "name")
-            .map(|attr| attr.value.as_str());
+            .map(|attr| crate::read::unescape_name(&attr.value));
         let source_scope = attributes
             .iter()
             .find(|attr| attr.name == "localSheetId")
             .map(|attr| attr.value.parse::<u32>())
             .transpose()
             .map_err(|_| unsupported())?;
-        if source_name != Some(original.name.as_str())
+        if source_name.as_deref() != Some(original.name.as_str())
             || source_scope != original.local_sheet.map(|sheet| sheet.0)
         {
             return Err(unsupported());
