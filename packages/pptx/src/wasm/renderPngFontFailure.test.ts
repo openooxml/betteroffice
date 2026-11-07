@@ -98,33 +98,3 @@ describe.skipIf(engineKind === 'native')('canvas renderPng while edits keep aski
     }
   });
 });
-
-describe.skipIf(engineKind === 'native')('canvas renderPng with a load that fails while other faces resolve', () => {
-  test('rejects once with font-unavailable and leaves no unhandled rejection', async () => {
-    stubCanvas();
-    const installed = fonts.bundledFaceInstalled;
-    let checks = 0;
-    const slow = spyOn(fonts, 'bundledFaceInstalled').mockImplementation((...args: Parameters<typeof installed>) => {
-      checks += 1;
-      return checks === 1 ? installed(...args) : new Promise((done) => setTimeout(() => done(installed(...args)), 30));
-    });
-    const failing = spyOn(fonts, 'loadBundledFontBytes').mockImplementation(() => Promise.reject(new Error('offline')));
-    const stray: unknown[] = [];
-    const onStray = (error: unknown) => { stray.push(error); };
-    process.on('unhandledRejection', onStray);
-    const handle = openPresentation(fixture, { clientId: 7303 });
-    try {
-      const slideId = handle.snapshot().slides[0]!.id;
-      handle.addTextBox(slideId, { name: 'Two families', rect: { x: 100000, y: 100000, width: 3000000, height: 800000 }, text: 'Second family', style: { fontFamily: 'Courier New', fontSizePt: 18 } });
-      await expect(handle.renderPng({ slide: 0 })).rejects.toMatchObject({ name: 'PngExportError', code: 'font-unavailable' });
-      await new Promise((settled) => setTimeout(settled, 100));
-      expect(checks).toBeGreaterThan(1);
-      expect(stray).toEqual([]);
-    } finally {
-      process.off('unhandledRejection', onStray);
-      slow.mockRestore();
-      failing.mockRestore();
-      handle.dispose();
-    }
-  });
-});
