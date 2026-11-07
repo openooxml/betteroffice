@@ -6015,32 +6015,26 @@ fn keeps_an_unrebuildable_cache_whose_moved_reference_keeps_its_shape() {
     }
 }
 
-/// A point's `formatCode` is an `ST_Xstring` attribute: whatever a cell's
-/// number format holds, it is written so that an xml reader and then an
-/// `ST_Xstring` reader give the format back, and writing it never fails.
+/// A point's `formatCode` is written with plain xml escaping, as the cache's
+/// own `formatCode` is: whatever a cell's number format holds, an xml reader
+/// gives it back, a literal `_xHHHH_` stays literal, and writing it never
+/// fails.
 #[test]
-fn writes_any_point_format_as_an_xstring_attribute() {
+fn writes_any_point_format_with_plain_xml_escaping() {
     for (code, written) in [
         ("0.0%", "0.0%"),
         (
             r#"[$-409]#,##0.00" units & <more>""#,
             "[$-409]#,##0.00&quot; units &amp; &lt;more&gt;&quot;",
         ),
-        ("0\u{1}0\u{1f}\u{fffe}", "0_x0001_0_x001F__xFFFE_"),
+        ("0\u{1}0\u{1f}\u{fffe}", "0&#1;0&#31;&#65534;"),
         ("0\t0\n0\r", "0&#9;0&#10;0&#13;"),
-        (
-            "_x0041_ and _x00 and _x12G4_",
-            "_x005F_x0041_ and _x00 and _x12G4_",
-        ),
+        ("_x0041_ and _X0041_", "_x0041_ and _X0041_"),
     ] {
-        assert_eq!(
-            crate::chart::point_format_attribute(code),
-            written,
-            "{code:?}"
-        );
+        assert_eq!(crate::xml::attribute_text(code), written, "{code:?}");
     }
     let long = "0".repeat(255);
-    assert_eq!(crate::chart::point_format_attribute(&long), long);
+    assert_eq!(crate::xml::attribute_text(&long), long);
 }
 
 /// A cache may legally carry an `extLst` beside its points, and a string
