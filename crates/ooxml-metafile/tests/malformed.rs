@@ -918,6 +918,34 @@ fn an_emf_plus_image_that_cannot_be_built_is_not_rebuilt_for_free() {
         records.push(plus_eof());
         Emf::new(10, 10).rec(70, &plus(&records).1).bytes()
     };
-    assert!(replay(&objects(2)).is_ok());
-    assert!(replay(&objects(8)).is_err());
+    assert!(work_spent(&objects(64)) < work_spent(&objects(1)) + 64 * 64);
+}
+
+#[test]
+fn a_bitmap_that_cannot_be_decoded_is_not_decoded_again() {
+    let mut bmi = u32s(&[40, 4096, 4096]);
+    bmi.extend(u16s(&[1, 3]));
+    bmi.extend(u32s(&[0, 0, 0, 0, 0, 0]));
+    let blits = |count: usize| {
+        Emf::new(10, 10)
+            .recs(vec![
+                stretch_dibits(
+                    [0, 0, 10, 10],
+                    &(bmi.clone(), vec![0; 4]),
+                    SRCCOPY
+                );
+                count
+            ])
+            .bytes()
+    };
+    let drawing = replay(&blits(64)).unwrap();
+    assert_eq!(
+        drawing
+            .omissions
+            .iter()
+            .map(|omission| omission.count)
+            .sum::<usize>(),
+        64
+    );
+    assert!(work_spent(&blits(64)) < work_spent(&blits(1)) + 64 * 64);
 }

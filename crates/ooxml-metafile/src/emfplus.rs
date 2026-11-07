@@ -1617,6 +1617,9 @@ fn parse_image<const FULL: bool>(player: &mut Player<FULL>, data: &[u8]) -> Opti
             if let Some(bitmap) = player.plus_images.get(&source) {
                 return Some(PlusImage::Bitmap(Arc::clone(bitmap)));
             }
+            if player.failed_sources.contains(&source) {
+                return None;
+            }
             let pixels = u64::from(width) * u64::from(height);
             let budget = player
                 .limits
@@ -1640,7 +1643,13 @@ fn parse_image<const FULL: bool>(player: &mut Player<FULL>, data: &[u8]) -> Opti
                     mime,
                     bytes: bits.to_vec(),
                 },
-                None => Pixels::Rgba(pixel_data(bits, width, height, stride, format)?),
+                None => match pixel_data(bits, width, height, stride, format) {
+                    Some(rgba) => Pixels::Rgba(rgba),
+                    None => {
+                        player.failed_sources.insert(source);
+                        return None;
+                    }
+                },
             };
             let bitmap = Bitmap {
                 width,

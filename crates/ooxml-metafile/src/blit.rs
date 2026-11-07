@@ -323,6 +323,9 @@ fn draw<const FULL: bool>(player: &mut Player<FULL>, job: Blit<'_>) -> Option<()
     if let Some((bitmap, offset, whole)) = player.blits.get(&key).cloned() {
         return place(player, &job, bitmap, offset, whole);
     }
+    if player.failed_sources.contains(&source) {
+        return player.omit("bitmaps that could not be decoded");
+    }
     let budget = player
         .limits
         .bitmap_pixels
@@ -347,7 +350,10 @@ fn draw<const FULL: bool>(player: &mut Player<FULL>, job: Blit<'_>) -> Option<()
     }) {
         Ok(dib) => dib,
         Err(_) if player.overflowed => return None,
-        Err(_) => return player.omit("bitmaps that could not be decoded"),
+        Err(_) => {
+            player.failed_sources.insert(source);
+            return player.omit("bitmaps that could not be decoded");
+        }
     };
     let decoded = u64::from(dib.width) * u64::from(dib.height);
     let Some((bitmap, offset, whole)) = crop(

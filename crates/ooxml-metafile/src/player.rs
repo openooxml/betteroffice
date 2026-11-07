@@ -7,7 +7,7 @@
 
 use std::cell::Cell;
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -303,6 +303,8 @@ pub(crate) struct Player<const FULL: bool> {
     pub blits: HashMap<(usize, [u64; 7]), CroppedBlit>,
     /// EMF+ images already built, by source id.
     pub plus_images: HashMap<usize, Arc<Bitmap>>,
+    /// Sources that failed to decode, so a repeat is not decoded again.
+    pub failed_sources: HashSet<usize>,
     pub budget: Option<Rc<SharedBudget>>,
     pub refusal: Option<String>,
     /// How many metafiles enclose this one.
@@ -346,6 +348,7 @@ impl<const FULL: bool> Player<FULL> {
             sources: HashMap::new(),
             blits: HashMap::new(),
             plus_images: HashMap::new(),
+            failed_sources: HashSet::new(),
             budget: None,
             refusal: None,
             depth: 0,
