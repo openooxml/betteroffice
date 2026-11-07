@@ -180,7 +180,7 @@ fn assert_endnotes_follow_the_text_before_a_terminal_break(position: &str) {
     );
     let (engine, _) = fixture::laid_out(&fixture::with_body(&body), 9404);
     let layout: Value = serde_json::from_str(&engine.retained_layout_json().unwrap()).unwrap();
-    assert_eq!(layout_page_texts(&layout), ["A"], "{position}");
+    assert_eq!(layout_page_texts(&layout), ["A1"], "{position}");
     let pages = layout["layout"]["pages"].as_array().unwrap();
     assert!(
         pages[0]["noteAreas"]
@@ -1288,7 +1288,7 @@ fn keep_lines_column_width_oscillation_uses_one_stable_measure() {
     assert!(wide_height < remainder && remainder < narrow_height);
     let filler_height = narrow_height + 32.0;
     let body = format!(
-        "{}{}{}",
+        "{}{}{}{}",
         fixture::p(
             "7100000B",
             &format!(
@@ -1299,6 +1299,7 @@ fn keep_lines_column_width_oscillation_uses_one_stable_measure() {
         ),
         title,
         fixture::p("7100000C", r#"<w:r><w:br w:type="page"/></w:r>"#),
+        fixture::p("7100000D", &fixture::r("After the break")),
     );
     let columns = r#"<w:cols w:num="2" w:space="360" w:equalWidth="0"><w:col w:w="1800" w:space="360"/><w:col w:w="7920"/></w:cols>"#;
     let height = 2160 + ((filler_height + remainder) * 15.0).round() as u32;
@@ -1747,7 +1748,8 @@ fn an_edit_before_page_breaks_repaginates_only_its_own_page() {
             )
         })
         .collect();
-    let (engine, request) = fixture::laid_out(&fixture::with_body(&body), 9401);
+    let bytes = fixture::with_body(&body);
+    let (engine, request) = fixture::laid_out(&bytes, 9401);
     let before = engine.stats();
     assert!(before.retained_pages >= 6);
 
@@ -1769,10 +1771,14 @@ fn an_edit_before_page_breaks_repaginates_only_its_own_page() {
     assert_eq!(after.rebuilt_pages, 1, "later pages converge");
 
     let fresh = EngineSession::new(9402);
-    fresh
+    let state = engine.doc().encode_state_as_update_v1();
+    let metadata = engine.doc().encode_peer_metadata().unwrap();
+    let prepared = fresh
         .doc()
-        .apply_update_v1(&engine.doc().encode_state_as_update_v1())
+        .prepare_peer_bootstrap(&state, &metadata, Some(bytes.into()))
         .unwrap();
+    fresh.doc().install_peer_bootstrap(prepared, 17).unwrap();
+    fresh.doc().apply_update_v1(&state).unwrap();
     assert_eq!(
         fresh.layout_document_with_regions_json(&request).unwrap(),
         layout

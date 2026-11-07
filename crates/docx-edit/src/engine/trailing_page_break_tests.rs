@@ -90,7 +90,16 @@ fn emptying_a_terminal_text_and_break_paragraph_matches_fresh_open() {
 const PAIR_TEXT: &str = "text on its own page";
 const PAIRS: u32 = 3;
 
-fn break_pairs(notes: bool) -> Vec<u8> {
+/// Which notes the package carries: none, the fixture's own notes (an endnote and page-foot
+/// footnotes), or those notes with the footnotes placed at the document's end.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Notes {
+    None,
+    Fixture,
+    DocumentEndFootnotes,
+}
+
+fn break_pairs(notes: Notes) -> Vec<u8> {
     let body: String = (0..PAIRS)
         .map(|index| {
             format!(
@@ -106,8 +115,13 @@ fn break_pairs(notes: bool) -> Vec<u8> {
             )
         })
         .collect();
-    let bytes = lowering_pages::with_body(&format!("{body}<w:sectPr/>"));
-    if notes {
+    let section = if notes == Notes::DocumentEndFootnotes {
+        r#"<w:sectPr><w:footnotePr><w:pos w:val="docEnd"/></w:footnotePr></w:sectPr>"#
+    } else {
+        "<w:sectPr/>"
+    };
+    let bytes = lowering_pages::with_body(&format!("{body}{section}"));
+    if notes != Notes::None {
         return bytes;
     }
     let mut parts = ooxml_opc::unzip_parts(&bytes).unwrap();
@@ -162,11 +176,12 @@ fn edits_around_a_terminal_break_only_paragraph_match_a_fresh_peer() {
     let fonts = docx_layout::MeasureFonts::default();
     let _scope = fonts.enter();
     let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
-    for notes in [false, true] {
+    for notes in [Notes::None, Notes::Fixture, Notes::DocumentEndFootnotes] {
+        let notes_keep_break = notes == Notes::DocumentEndFootnotes;
         let bytes = break_pairs(notes);
         for (name, index, keeps_break) in edits {
             for resident in [false, true] {
-                let case = format!("notes={notes} resident={resident} edit at {name}");
+                let case = format!("notes={notes:?} resident={resident} edit at {name}");
                 let engine = EngineSession::new(9412);
                 engine.set_local_lowering(resident);
                 seed_from_docx(engine.doc(), &bytes).unwrap();
@@ -174,7 +189,7 @@ fn edits_around_a_terminal_break_only_paragraph_match_a_fresh_peer() {
                 engine
                     .layout_document_with_regions_retained_json(&request)
                     .unwrap();
-                let pages = PAIRS as usize + usize::from(notes);
+                let pages = PAIRS as usize + usize::from(notes_keep_break);
                 assert_eq!(engine.stats().retained_pages, pages, "{case}");
                 if resident {
                     engine
@@ -201,7 +216,7 @@ fn edits_around_a_terminal_break_only_paragraph_match_a_fresh_peer() {
                     serde_json::from_str(&engine.retained_layout_json().unwrap()).unwrap();
                 assert_eq!(
                     actual["layout"]["pages"].as_array().unwrap().len(),
-                    pages + usize::from(keeps_break && !notes),
+                    pages + usize::from(keeps_break && !notes_keep_break),
                     "{case}"
                 );
                 let peer = fresh_peer(&engine, &bytes);
