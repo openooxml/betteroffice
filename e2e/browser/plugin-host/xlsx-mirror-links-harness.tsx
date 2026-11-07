@@ -1,6 +1,6 @@
 import { createRoot } from 'react-dom/client';
 import { useState } from 'react';
-import { XlsxEditor, type XlsxEditorProps } from '@betteroffice/xlsx-react';
+import { XlsxEditor } from '@betteroffice/xlsx-react';
 
 const surface = new URLSearchParams(location.search).get('surface') ?? 'peerless';
 const route = (
@@ -8,7 +8,7 @@ const route = (
   : surface === 'legacy-worker' ? { legacySyncApi: true, experimentalWorkerOpen: true }
   : surface === 'viewer' ? { legacySyncApi: true, experimentalWorkerOpen: true, readOnly: true }
   : {}
-) as Partial<XlsxEditorProps>;
+) as Record<never, never>;
 let open: (file: Uint8Array) => void = () => {};
 const probe = {
   opened: [] as unknown[][],
