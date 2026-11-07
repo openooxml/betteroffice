@@ -99,6 +99,25 @@ enum Notes {
     DocumentEndFootnotes,
 }
 
+impl Notes {
+    /// The note reference the last text paragraph carries, so the notes really place.
+    fn reference(self) -> &'static str {
+        match self {
+            Notes::None => "",
+            Notes::Fixture => r#"<w:r><w:endnoteReference w:id="1"/></w:r>"#,
+            Notes::DocumentEndFootnotes => r#"<w:r><w:footnoteReference w:id="1"/></w:r>"#,
+        }
+    }
+
+    fn area_kind(self) -> Option<&'static str> {
+        match self {
+            Notes::None => None,
+            Notes::Fixture => Some("endnote"),
+            Notes::DocumentEndFootnotes => Some("footnote"),
+        }
+    }
+}
+
 fn break_pairs(notes: Notes) -> Vec<u8> {
     let body: String = (0..PAIRS)
         .map(|index| {
@@ -106,7 +125,15 @@ fn break_pairs(notes: Notes) -> Vec<u8> {
                 "{}{}",
                 lowering_pages::p(
                     &format!("{:08X}", 0x7000_0000 + index * 2),
-                    &lowering_pages::r(PAIR_TEXT)
+                    &format!(
+                        "{}{}",
+                        lowering_pages::r(PAIR_TEXT),
+                        if index + 1 == PAIRS {
+                            notes.reference()
+                        } else {
+                            ""
+                        }
+                    )
                 ),
                 lowering_pages::p(
                     &format!("{:08X}", 0x7000_0001 + index * 2),
@@ -158,28 +185,30 @@ fn fresh_peer(engine: &EngineSession, bytes: &[u8]) -> EngineSession {
 fn edits_around_a_terminal_break_only_paragraph_match_a_fresh_peer() {
     let pair = PAIR_TEXT.len() as u32 + 3;
     let last = pair * (PAIRS - 1);
-    let edits = [
-        ("start", 0, false),
-        ("middle", pair + 5, false),
-        ("inside the last text paragraph", last + 10, false),
-        (
-            "end of the last text paragraph",
-            last + PAIR_TEXT.len() as u32,
-            false,
-        ),
-        (
-            "final break-only paragraph",
-            last + PAIR_TEXT.len() as u32 + 1,
-            true,
-        ),
-    ];
+    let edits = |reference: u32| {
+        [
+            ("start", 0, false),
+            ("middle", pair + 5, false),
+            ("inside the last text paragraph", last + 10, false),
+            (
+                "end of the last text paragraph",
+                last + PAIR_TEXT.len() as u32,
+                false,
+            ),
+            (
+                "final break-only paragraph",
+                last + PAIR_TEXT.len() as u32 + reference + 1,
+                true,
+            ),
+        ]
+    };
     let fonts = docx_layout::MeasureFonts::default();
     let _scope = fonts.enter();
     let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
     for notes in [Notes::None, Notes::Fixture, Notes::DocumentEndFootnotes] {
         let notes_keep_break = notes == Notes::DocumentEndFootnotes;
         let bytes = break_pairs(notes);
-        for (name, index, keeps_break) in edits {
+        for (name, index, keeps_break) in edits(u32::from(notes != Notes::None)) {
             for resident in [false, true] {
                 let case = format!("notes={notes:?} resident={resident} edit at {name}");
                 let engine = EngineSession::new(9412);
@@ -219,6 +248,15 @@ fn edits_around_a_terminal_break_only_paragraph_match_a_fresh_peer() {
                     pages + usize::from(keeps_break && !notes_keep_break),
                     "{case}"
                 );
+                if let Some(kind) = notes.area_kind() {
+                    let placed = actual["layout"]["pages"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .flat_map(|page| page["noteAreas"].as_array().into_iter().flatten())
+                        .any(|area| area["kind"] == kind);
+                    assert!(placed, "{case}: the {kind} is placed");
+                }
                 let peer = fresh_peer(&engine, &bytes);
                 let expected: Value = serde_json::from_str(
                     &peer.layout_document_with_regions_json(&request).unwrap(),
