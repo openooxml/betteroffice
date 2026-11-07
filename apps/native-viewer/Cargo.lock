@@ -404,6 +404,7 @@ dependencies = [
  "betteroffice-pptx-render",
  "image",
  "tiny-skia 0.12.0",
+ "unicode-properties",
 ]
 
 [[package]]
