@@ -722,7 +722,7 @@ mod tests {
         })
         .unwrap();
         let piece = (40.0 + 82.0 - 62.0) / width(&unkerned);
-        let fit = if (FIT_MIN..=FIT_MAX).contains(&piece) {
+        let fit = if (FIT_MIN..=FIT_MAX).contains(&f64::from(piece)) {
             piece
         } else {
             1.0
