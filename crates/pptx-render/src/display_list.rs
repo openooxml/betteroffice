@@ -433,6 +433,9 @@ pub enum Primitive {
         primitives: Vec<Primitive>,
         #[serde(default, skip_serializing_if = "Transform::is_identity")]
         transform: Transform,
+        /// The plotted values as text, for assistive technology.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        data: Option<ooxml_drawingml::chart::ChartData>,
     },
     /// A laid-out table: one addressable object whose cells paint clipped to
     /// its rectangle, and whose `label` is the screen-reader summary.

@@ -349,3 +349,55 @@ test('a table of thousands of cells with spans reads in full in under a second',
   expect(last[last.length - 1]!.paragraphs[0]!.text).toBe('r59c49');
   expect(elapsed).toBeLessThan(1_000);
 });
+
+const chartData = (overrides: Partial<{ categories: unknown; series: unknown }> = {}) => ({
+  categories: ['Q1', 'Q2', 'Q3'],
+  series: [{ name: 'North', values: ['12', '19', '7'] }, { name: 'South', values: ['8', null, '21'] }],
+  ...overrides,
+});
+const chartPrimitive = (data: unknown): SlidePrimitive =>
+  ({ ...at, kind: 'chart', shapeId: 'c', name: 'Chart 1', label: 'Revenue, column chart, 2 series, 3 categories', primitives: [], data } as SlidePrimitive);
+
+test('a chart with data reads as its series by category under its summary', () => {
+  const [item] = items(list([chartPrimitive(chartData())]));
+  expect(item!.label).toBe('Revenue, column chart, 2 series, 3 categories');
+  expect(item!.chart).toEqual({
+    series: ['North', 'South'],
+    rows: [
+      { category: 'Q1', values: ['12', '8'] },
+      { category: 'Q2', values: ['19', null] },
+      { category: 'Q3', values: ['7', '21'] },
+    ],
+  });
+});
+
+test('a series without a name keeps its column with no header text', () => {
+  const [item] = items(list([chartPrimitive(chartData({ series: [{ values: ['1', '2', '3'] }, { name: ' ', values: ['4', '5', '6'] }] }))]));
+  expect(item!.chart!.series).toEqual([null, null]);
+});
+
+test('a chart without data, or with data that does not fit, reads as its summary only', () => {
+  const broken = [
+    undefined,
+    null,
+    chartData({ categories: [] }),
+    chartData({ series: [] }),
+    chartData({ categories: ['Q1', 'Q2'] }),
+    chartData({ categories: ['Q1', 2, 'Q3'] }),
+    chartData({ series: [null] }),
+    chartData({ series: [{ name: 'N', values: ['1', 2, '3'] }] }),
+    chartData({ series: [{ name: 5, values: ['1', '2', '3'] }] }),
+    chartData({ categories: Array.from({ length: 5_001 }, (_, index) => `c${index}`),
+      series: [0, 1].map(() => ({ values: Array.from({ length: 5_001 }, () => '1') })) }),
+    chartData({ categories: ['x'.repeat(600_000), 'y'.repeat(600_000), 'z'], series: [{ values: ['1', '2', '3'] }] }),
+  ];
+  for (const data of broken) {
+    const [item] = items(list([chartPrimitive(data)]));
+    expect(item!.chart).toBeUndefined();
+    expect(item!.label).toBe('Revenue, column chart, 2 series, 3 categories');
+  }
+});
+
+test('a decorative chart reads as nothing', () => {
+  expect(items(list([chartPrimitive(chartData())], { c: { decorative: true } }))).toEqual([]);
+});

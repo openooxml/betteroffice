@@ -237,3 +237,26 @@ test('a table with a grid renders table, row and header roles with spans and cou
   expect(view.getByRole('columnheader', { name: 'Region' })).toBeTruthy();
   expect(view.getByRole('rowheader', { name: 'North' })).toBeTruthy();
 });
+
+test('a chart with data renders a figure holding its values as a table with series and category headers', () => {
+  const list: SlideDisplayList = {
+    contractVersion: 2, width: 960, height: 540, primitives: [{
+      kind: 'chart', objectId: 1, shapeId: 'chart', x: 0, y: 0, w: 600, h: 300, name: 'Chart 1',
+      label: 'Revenue, column chart, 2 series, 2 categories', primitives: [],
+      data: { categories: ['Q1', ''], series: [{ name: 'North', values: ['12', null] }, { values: ['8', '14'] }] },
+    }],
+  };
+  const view = render(<LocaleProvider><PeerlessSlideMirror run={{} as PeerlessPresentation} list={list} label="Slide 1" scale={1} /></LocaleProvider>);
+  const figure = view.getByRole('figure', { name: 'Revenue, column chart, 2 series, 2 categories' });
+  const table = figure.querySelector('[role="table"]')!;
+  expect(table.getAttribute('aria-rowcount')).toBe('3');
+  expect(table.getAttribute('aria-colcount')).toBe('3');
+  expect([...table.querySelectorAll('[role="row"]')].map((row) => [...row.children].map((node) => [
+    node.getAttribute('role'), node.getAttribute('aria-colindex'), node.textContent,
+  ]))).toEqual([
+    [['cell', '1', ''], ['columnheader', '2', 'North'], ['cell', '3', '']],
+    [['rowheader', '1', 'Q1'], ['cell', '2', '12'], ['cell', '3', '8']],
+    [['cell', '1', ''], ['cell', '2', ''], ['cell', '3', '14']],
+  ]);
+  expect(view.queryByRole('img', { name: 'Revenue, column chart, 2 series, 2 categories' })).toBeNull();
+});

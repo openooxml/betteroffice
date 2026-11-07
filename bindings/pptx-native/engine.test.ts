@@ -503,6 +503,30 @@ describe('pptx native engine parity', () => {
     expect(run(native)).toEqual(run(wasm));
   });
 
+  test('chart data matches native and wasm for a chart with two series', () => {
+    const input = new Uint8Array(readFileSync(new URL('../../crates/pptx-render/tests/fixtures/data-labels.pptx', import.meta.url)));
+    const font = new Uint8Array(readFileSync(new URL('../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url)));
+    const run = (engine: Engine) => {
+      const doc = engine.PptxDocument.openCollaborative(input.slice(), 7);
+      const renderer = new engine.PptxRenderer();
+      try {
+        renderer.registerFont('Arial', false, false, font);
+        const list = JSON.parse(renderer.layoutSlideJson(doc, 0)) as SlideDisplayList;
+        const charts = list.primitives.flatMap((primitive) => primitive.kind === 'chart' ? [primitive] : []);
+        expect(charts).toHaveLength(1);
+        expect(charts[0]!.data).toEqual({
+          categories: ['Q1', 'Q2', 'Q3'],
+          series: [{ name: 'North', values: ['12', '19', '7'] }, { name: 'South', values: ['8', '14', '21'] }],
+        });
+        return charts[0]!.data;
+      } finally {
+        renderer.free();
+        doc.free();
+      }
+    };
+    expect(run(native)).toEqual(run(wasm));
+  });
+
   test('native versions differ between sessions opened from the same bytes and client id', () => {
     const first = native.PptxDocument.openCollaborative(bytes(), 7);
     const second = native.PptxDocument.openCollaborative(bytes(), 7);
