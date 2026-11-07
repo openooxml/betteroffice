@@ -881,6 +881,7 @@ test.each([
   ['Shift leaves the restored view', false, { key: 'Shift' }, true],
   ['read-only Enter leaves the restored view', true, { key: 'Enter' }, true],
   ['Ctrl+Home scrolls to the caret', false, { key: 'Home', ctrlKey: true }, false],
+  ['Delete scrolls to the caret it edits at', false, { key: 'Delete' }, false],
 ] as const)('after a host scroll while the default caret waits for layout, %s', async (_, readOnly, key, kept) => {
   const { session, scroller, view, inputFor, queries, expectCaret } =
     await mount(readOnly, true, true, { displayListQueries: null });

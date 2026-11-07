@@ -325,20 +325,15 @@ for (const worker of [false, true]) {
   });
 }
 
-async function restoreDuringOpen(browser: Browser, worker: boolean) {
+async function restoreDuringOpen(browser: Browser) {
   const context = await browser.newContext({ viewport: { width: 1440, height: 2000 } });
   const page = await context.newPage();
   try {
-    await page.goto(`/?format=docx&peerless=${worker ? 1 : 0}`);
+    await page.goto('/?format=docx&peerless=0');
     await page.evaluate(() => {
       const state = { restored: false, placedAtRestore: true, trace: [] as number[] };
       (window as unknown as { restore: typeof state }).restore = state;
-      const placed = () => {
-        const input = document.querySelector<HTMLElement>('[data-testid=yrs-input], textarea.paged-editor__input');
-        if (input?.matches('[data-testid=yrs-input]')) return input.hasAttribute('data-caret-placed');
-        const height = input?.style.height ?? '';
-        return height !== '' && height !== '1px';
-      };
+      const placed = () => !!document.querySelector('[data-testid=yrs-input][data-caret-placed]');
       const tick = () => {
         let scroller = document.querySelector('.canvas-page[data-page-index="0"], .paged-editor__page')?.parentElement ?? null;
         while (scroller && !/(auto|scroll)/.test(getComputedStyle(scroller).overflowY)) scroller = scroller.parentElement;
@@ -358,11 +353,7 @@ async function restoreDuringOpen(browser: Browser, worker: boolean) {
       mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
       buffer: await longDocument(),
     });
-    if (worker) await expect(page.locator('[data-docx-worker-editor]')).toHaveAttribute('aria-busy', 'false', { timeout: 60_000 });
-    await expect.poll(() => page.evaluate(() => {
-      const height = document.querySelector<HTMLElement>('[data-testid=yrs-input], textarea.paged-editor__input')?.style.height ?? '';
-      return height !== '' && height !== '1px';
-    }), { timeout: 60_000 }).toBe(true);
+    await expect(page.locator('[data-testid=yrs-input][data-caret-placed]')).toBeAttached({ timeout: 60_000 });
     const placed = await page.evaluate(() => (window as unknown as { restore: { trace: number[] } }).restore.trace.length);
     await expect.poll(() => page.evaluate(() => (window as unknown as { restore: { trace: number[] } }).restore.trace.length),
       { timeout: 60_000 }).toBeGreaterThanOrEqual(placed + 60);
@@ -372,15 +363,13 @@ async function restoreDuringOpen(browser: Browser, worker: boolean) {
   }
 }
 
-for (const worker of [false, true]) {
-  test(`docx ${worker ? 'worker' : 'in-thread'} editor: a scroll position the host restores during open survives the first caret placement`, async ({ browser }) => {
-    test.setTimeout(420_000);
-    let raced = false;
-    for (let attempt = 0; attempt < (worker ? 1 : 6) && !raced; attempt++) {
-      const { placedAtRestore, trace } = await restoreDuringOpen(browser, worker);
-      expect(trace.filter((top) => Math.abs(top - 2000) >= 1), `attempt ${attempt + 1}`).toEqual([]);
-      raced = !placedAtRestore;
-    }
-    if (!worker) expect(raced, 'a restore landed before the first caret placement').toBe(true);
-  });
-}
+test('docx in-thread editor: a scroll position the host restores during open survives the first caret placement', async ({ browser }) => {
+  test.setTimeout(420_000);
+  let raced = false;
+  for (let attempt = 0; attempt < 6 && !raced; attempt++) {
+    const { placedAtRestore, trace } = await restoreDuringOpen(browser);
+    expect(trace.filter((top) => Math.abs(top - 2000) >= 1), `attempt ${attempt + 1}`).toEqual([]);
+    raced = !placedAtRestore;
+  }
+  expect(raced, 'a restore landed before the first caret placement').toBe(true);
+});

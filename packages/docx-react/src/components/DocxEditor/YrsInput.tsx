@@ -706,6 +706,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       residentCaretReady = false,
       dirtyStories?: string | readonly string[]
     ): void => {
+      defaultCaretRef.current = null;
       verticalCaretGoalRef.current.reset();
       if (residentLayoutReady) requestLocalCaretReveal();
       if (!composingRef.current && textareaRef.current) textareaRef.current.value = '';
