@@ -79,6 +79,31 @@ function expectThrownParity(wasmCall: () => unknown, nativeCall: () => unknown):
 }
 
 describe('docx native engine parity', () => {
+  test('an empty docDefaults element leaves unstyled paragraphs without spacing in both engines', () => {
+    const encoder = new TextEncoder();
+    const bytes = wasm.rezip_docx({
+      '[Content_Types].xml': encoder.encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>'),
+      '_rels/.rels': encoder.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'),
+      'word/_rels/document.xml.rels': encoder.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>'),
+      'word/styles.xml': encoder.encode('<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault/><w:pPrDefault/></w:docDefaults><w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/></w:style></w:styles>'),
+      'word/document.xml': encoder.encode('<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Engine text</w:t></w:r></w:p><w:sectPr/></w:body></w:document>'),
+    });
+    const expected = new wasm.EditSession(23);
+    const actual = new native.EditSession(23);
+    try {
+      const lowered = (session: Session) => {
+        session.seed_from_docx(bytes, 'opening');
+        return JSON.parse(session.yrs_blocks_for_story('body', '{}')) as Array<{ kind: string; attrs?: { spacing?: { after?: number } } }>;
+      };
+      const wasmBlocks = lowered(expected);
+      expect(lowered(actual)).toEqual(wasmBlocks);
+      expect(wasmBlocks.find((block) => block.kind === 'paragraph')?.attrs?.spacing?.after ?? 0).toBe(0);
+    } finally {
+      actual.free();
+      expected.free();
+    }
+  });
+
   test('an inserted table takes the document table style margins in both engines', () => {
     const encoder = new TextEncoder();
     const styled = wasm.rezip_docx({
