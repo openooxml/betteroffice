@@ -6,7 +6,8 @@
 //! cannot reproduce as an omission instead of refusing.
 
 use std::cell::Cell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::hash_map::Entry;
+use std::collections::{BTreeMap, HashMap};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -284,8 +285,13 @@ pub(crate) struct Player<const FULL: bool> {
     pub bitmap_pixels: u64,
     /// Bitmaps kept so far, by content hash, so an equal one is shared.
     pub bitmaps: HashMap<u64, Vec<Arc<Bitmap>>>,
-    /// Hashes of the bitmap sources decoded so far.
-    pub sources: HashSet<u64>,
+    /// Bitmap sources seen so far, each kept once, to their ids.
+    pub sources: HashMap<Box<[u8]>, usize>,
+    /// GDI bitmaps already cropped, by source id and how they were cropped,
+    /// with their offset and whether they fill their whole destination.
+    pub blits: HashMap<(usize, [u64; 7]), (Arc<Bitmap>, (f64, f64), bool)>,
+    /// EMF+ images already built, by source id.
+    pub plus_images: HashMap<usize, Arc<Bitmap>>,
     pub budget: Option<Rc<SharedBudget>>,
     pub refusal: Option<String>,
     /// How many metafiles enclose this one.
@@ -326,7 +332,9 @@ impl<const FULL: bool> Player<FULL> {
             text_chars: 0,
             bitmap_pixels: 0,
             bitmaps: HashMap::new(),
-            sources: HashSet::new(),
+            sources: HashMap::new(),
+            blits: HashMap::new(),
+            plus_images: HashMap::new(),
             budget: None,
             refusal: None,
             depth: 0,
@@ -360,13 +368,21 @@ impl<const FULL: bool> Player<FULL> {
         Some(())
     }
 
-    /// Notes a bitmap source, returning whether an equal one was decoded
-    /// before. A repeat may decode past the pixel budget, as one bitmap at a
-    /// time, and is charged only if its pixels match no kept bitmap.
-    pub(crate) fn note_source(&mut self, parts: &[&[u8]]) -> bool {
-        let mut hasher = DefaultHasher::new();
-        parts.hash(&mut hasher);
-        !self.sources.insert(hasher.finish())
+    /// The id of a bitmap source, and whether an equal one came before. A
+    /// repeat whose result is not cached may decode past the pixel budget, as
+    /// one bitmap at a time, and is charged only if its pixels match no kept
+    /// bitmap.
+    pub(crate) fn source_id(&mut self, parts: &[&[u8]]) -> (usize, bool) {
+        let mut key = Vec::with_capacity(parts.iter().map(|part| part.len() + 8).sum());
+        for part in parts {
+            key.extend((part.len() as u64).to_le_bytes());
+            key.extend_from_slice(part);
+        }
+        let next = self.sources.len();
+        match self.sources.entry(key.into_boxed_slice()) {
+            Entry::Occupied(entry) => (*entry.get(), true),
+            Entry::Vacant(entry) => (*entry.insert(next), false),
+        }
     }
 
     /// Keeps `bitmap`, or returns an equal one already kept; `charged` is

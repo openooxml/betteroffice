@@ -1613,12 +1613,15 @@ fn parse_image<const FULL: bool>(player: &mut Player<FULL>, data: &[u8]) -> Opti
             } else {
                 return None;
             };
+            let (source, repeat) = player.source_id(&[data]);
+            if let Some(bitmap) = player.plus_images.get(&source) {
+                return Some(PlusImage::Bitmap(Arc::clone(bitmap)));
+            }
             let pixels = u64::from(width) * u64::from(height);
             let budget = player
                 .limits
                 .bitmap_pixels
                 .saturating_sub(player.bitmap_pixels);
-            let repeat = player.note_source(&[data]);
             let limit = if repeat { u64::MAX } else { budget };
             if pixels > limit.min(crate::dib::MAX_BITMAP_PIXELS) {
                 player.refuse::<()>("the metafile's bitmaps exceed the pixel budget");
@@ -1639,9 +1642,9 @@ fn parse_image<const FULL: bool>(player: &mut Player<FULL>, data: &[u8]) -> Opti
                 height,
                 pixels,
             };
-            Some(PlusImage::Bitmap(
-                player.share_bitmap(bitmap, charged, owed)?,
-            ))
+            let bitmap = player.share_bitmap(bitmap, charged, owed)?;
+            player.plus_images.insert(source, Arc::clone(&bitmap));
+            Some(PlusImage::Bitmap(bitmap))
         }
         2 => {
             let size = u32_at(data, 12)? as usize;

@@ -858,17 +858,51 @@ fn equal_emf_plus_images_share_one_charge_and_different_ones_do_not() {
     assert!(!drawn_twice(&image([1, 2])));
 }
 
-#[test]
-fn a_repeated_bitmap_pays_its_decodes_in_work() {
+/// A blank run-length bitmap declaring 4096 x 4096 in a few bytes, drawn
+/// `count` times with its source rectangle moved by `step` each time.
+fn blank_blits(count: i32, step: i32) -> Vec<u8> {
     let mut bmi = u32s(&[40, 4096, 4096]);
     bmi.extend(u16s(&[1, 8]));
     bmi.extend(u32s(&[1, 2, 0, 0, 2, 0, 0, 0x00ff_ffff]));
     let dib = (bmi, vec![0, 1]);
-    let blits = |count: usize| {
-        Emf::new(10, 10)
-            .recs(vec![stretch_dibits([0, 0, 10, 10], &dib, SRCCOPY); count])
-            .bytes()
+    Emf::new(10, 10)
+        .recs(
+            (0..count)
+                .map(|draw| {
+                    let (kind, mut body) = stretch_dibits([0, 0, 10, 10], &dib, SRCCOPY);
+                    body[24..28].copy_from_slice(&i32s(&[draw * step]));
+                    body[32..40].copy_from_slice(&i32s(&[4000, 4000]));
+                    (kind, body)
+                })
+                .collect(),
+        )
+        .bytes()
+}
+
+fn work_spent(bytes: &[u8]) -> u64 {
+    let mut budget = ReplayBudget::default();
+    let before = budget.work;
+    replay_with_budget(bytes, &mut budget).unwrap();
+    before - budget.work
+}
+
+#[test]
+fn a_bitmap_drawn_again_the_same_way_is_not_decoded_again() {
+    let drawing = replay(&blank_blits(64, 0)).unwrap();
+    assert_eq!(drawing.ops.len(), 64);
+    assert!(drawing.ops.windows(2).all(|pair| matches!(
+        pair,
+        [Op::Image(first), Op::Image(second)] if Arc::ptr_eq(&first.bitmap, &second.bitmap)
+    )));
+    assert!(work_spent(&blank_blits(64, 0)) < work_spent(&blank_blits(1, 0)) + 64 * 64);
+}
+
+#[test]
+fn equal_pixels_cropped_from_one_source_are_decoded_a_bounded_number_of_times() {
+    let drawing = replay(&blank_blits(2, 1)).unwrap();
+    let [Op::Image(first), Op::Image(second)] = &drawing.ops[..] else {
+        panic!("both pictures");
     };
-    assert!(drawn_twice(&blits(2)));
-    assert!(replay(&blits(8)).is_err());
+    assert!(Arc::ptr_eq(&first.bitmap, &second.bitmap));
+    assert!(replay(&blank_blits(8, 1)).is_err());
 }
