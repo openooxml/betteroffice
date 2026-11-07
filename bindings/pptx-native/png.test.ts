@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { expect, test } from 'bun:test';
 import JSZip from 'jszip';
 import type { SlideDisplayList } from '../../packages/pptx/src/types';
@@ -197,7 +198,7 @@ for (const [decoration, properties] of [
 }
 
 test('default fonts leave the other styles of a registered family to that family', async () => {
-  const assets = new URL('../../packages/fonts-latin/assets', import.meta.url).pathname;
+  const assets = fileURLToPath(new URL('../../packages/fonts-latin/assets', import.meta.url));
   raw.configureFontPacks(assets, undefined, undefined);
   const { document, renderer } = await pptxTextRaster('Liberation Sans', 'b="1"');
   try {
@@ -213,7 +214,7 @@ test('default fonts leave the other styles of a registered family to that family
 test('native export rejects with font-unavailable naming a pack face that cannot load', () => {
   const fs = require('node:fs') as typeof import('node:fs');
   const path = require('node:path') as typeof import('node:path');
-  const assets = new URL('../../packages/fonts-latin/assets', import.meta.url).pathname;
+  const assets = fileURLToPath(new URL('../../packages/fonts-latin/assets', import.meta.url));
   const broken = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'pptx-broken-pack-'));
   for (const name of fs.readdirSync(assets)) {
     if (name === 'manifest.json') fs.copyFileSync(path.join(assets, name), path.join(broken, name));
@@ -230,7 +231,7 @@ test('native export rejects with font-unavailable naming a pack face that cannot
     try { await renderPng(engine, { slide: 0 }, {}); console.log('RESULT ' + JSON.stringify({ ok: true })); }
     catch (error) { console.log('RESULT ' + JSON.stringify({ name: error?.name, code: error?.code, message: String(error?.message ?? error) })); }
   `;
-  const child = Bun.spawnSync([process.execPath, '-e', script], { cwd: new URL('.', import.meta.url).pathname });
+  const child = Bun.spawnSync([process.execPath, '-e', script], { cwd: fileURLToPath(new URL('.', import.meta.url)) });
   fs.rmSync(broken, { recursive: true, force: true });
   const line = child.stdout.toString().split('\n').find((text) => text.startsWith('RESULT '));
   expect(line, child.stderr.toString()).toBeDefined();
