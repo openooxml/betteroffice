@@ -6789,5 +6789,38 @@
       "redoDepth": 0,
       "undoDepth": 5
     }
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "applied": true,
+      "changed": [],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "selectionFormatting",
+    "result": {
+      "bold": false,
+      "borderPreset": "none",
+      "fillColor": "#ffffff",
+      "fontFamily": "Calibri",
+      "fontSize": 11,
+      "horizontalAlignment": "left",
+      "italic": false,
+      "numberFormat": "custom",
+      "numberFormatPattern": "0_x0041_\u0001\n0",
+      "strikethrough": false,
+      "textColor": "#000000",
+      "textWrapping": "overflow",
+      "verticalAlignment": "bottom"
+    }
+  },
+  {
+    "op": "save",
+    "result": {
+      "byteLength": 9896,
+      "sha256": "4872ab2d2615cdeaa99c76e91d847d4890e713a7c2de81392f25c3a5a4a36372"
+    }
   }
 ]

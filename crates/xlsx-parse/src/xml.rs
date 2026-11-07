@@ -138,7 +138,7 @@ pub(crate) fn encode_xstring(text: &str) -> String {
 /// A number format code (`ST_Xstring`) as element text, the way Excel writes
 /// it: [`encode_xstring`], then xml escaped. Writing one never fails.
 pub(crate) fn format_code_text(code: &str) -> String {
-    quick_xml::escape::escape(&xstring(code, false)).into_owned()
+    quick_xml::escape::escape(xstring(code, false)).into_owned()
 }
 
 /// A number format code (`ST_Xstring`) as an attribute value, the way Excel
@@ -146,7 +146,7 @@ pub(crate) fn format_code_text(code: &str) -> String {
 /// attribute normalization cannot fold them into spaces, then xml escaped.
 /// Writing one never fails.
 pub(crate) fn format_code_attribute_value(code: &str) -> String {
-    quick_xml::escape::escape(&xstring(code, true)).into_owned()
+    quick_xml::escape::escape(xstring(code, true)).into_owned()
 }
 
 /// [`format_code_attribute_value`] as a writer attribute.
