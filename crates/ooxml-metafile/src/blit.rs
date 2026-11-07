@@ -328,7 +328,9 @@ fn draw<const FULL: bool>(player: &mut Player<FULL>, job: Blit<'_>) -> Option<()
         return player.refuse("the metafile's bitmaps exceed the pixel budget");
     }
     let before = player.bitmap_pixels;
-    if !repeat {
+    if repeat {
+        player.charge(repeat_work(declared), 0)?;
+    } else {
         player.charge(0, declared)?;
     }
     let limit = if repeat {
@@ -395,6 +397,14 @@ fn draw<const FULL: bool>(player: &mut Player<FULL>, job: Blit<'_>) -> Option<()
     }));
     Some(())
 }
+
+/// Work a repeated source spends to decode again: its pixels are not charged
+/// twice, so the decode is paid in work instead.
+fn repeat_work(declared: u64) -> usize {
+    usize::try_from(declared / REPEAT_PIXELS_PER_WORK).unwrap_or(usize::MAX)
+}
+
+const REPEAT_PIXELS_PER_WORK: u64 = 16;
 
 fn declared_pixels(bmi: &[u8]) -> u64 {
     if u32_at(bmi, 0) == Some(12) {

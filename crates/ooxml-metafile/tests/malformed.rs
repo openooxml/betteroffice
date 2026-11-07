@@ -857,3 +857,18 @@ fn equal_emf_plus_images_share_one_charge_and_different_ones_do_not() {
     assert_eq!(pixels_spent(&same), u64::from(SIDE * SIDE));
     assert!(!drawn_twice(&image([1, 2])));
 }
+
+#[test]
+fn a_repeated_bitmap_pays_its_decodes_in_work() {
+    let mut bmi = u32s(&[40, 4096, 4096]);
+    bmi.extend(u16s(&[1, 8]));
+    bmi.extend(u32s(&[1, 2, 0, 0, 2, 0, 0, 0x00ff_ffff]));
+    let dib = (bmi, vec![0, 1]);
+    let blits = |count: usize| {
+        Emf::new(10, 10)
+            .recs(vec![stretch_dibits([0, 0, 10, 10], &dib, SRCCOPY); count])
+            .bytes()
+    };
+    assert!(drawn_twice(&blits(2)));
+    assert!(replay(&blits(8)).is_err());
+}
