@@ -25,6 +25,7 @@ import { useSessionWorkbook } from './useSessionWorkbook';
 import type { ViewerSession, ViewerSurface } from './useSessionWorkbook';
 import { WorkbookFailure } from '../components/WorkbookFailure';
 import { useDefaultFonts } from '../useDefaultFonts';
+import { A11yGridCell } from '../components/A11yGridCell';
 
 const BRAND = '#217346';
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -363,12 +364,9 @@ export function XlsxSessionViewer(props: Omit<XlsxWorkerViewerProps, 'file'> & {
       run.setSelection(extendTo(run.selection, cell, limits()));
     }
   };
-  const onClick = (event: MouseEvent) => {
-    const { cell } = point(event);
-    const start = clickStart.current;
-    clickStart.current = null;
-    if (!run || !frame || !cell || !start || cell.row !== start.row || cell.col !== start.col) return;
-    const hyperlink = hyperlinkAtCell(frame, cell.row, cell.col);
+  const followLink = (row: number, col: number) => {
+    if (!run || !frame) return;
+    const hyperlink = hyperlinkAtCell(frame, row, col);
     if (!hyperlink) return;
     const href = safeExternalHyperlink(hyperlink);
     if (href) { window.open(href, '_blank', 'noopener,noreferrer'); return; }
@@ -377,6 +375,13 @@ export function XlsxSessionViewer(props: Omit<XlsxWorkerViewerProps, 'file'> & {
     if (!destination) return;
     const sheet = sheets.findIndex((sheet) => sheet.name.toLowerCase() === destination.sheetName.toLowerCase());
     if (sheet >= 0) void run.selectCellsAsync(sheet, selectionAt(destination));
+  };
+  const onClick = (event: MouseEvent) => {
+    const { cell } = point(event);
+    const start = clickStart.current;
+    clickStart.current = null;
+    if (!run || !frame || !cell || !start || cell.row !== start.row || cell.col !== start.col) return;
+    followLink(cell.row, cell.col);
   };
   const copy = async () => {
     if (!run?.current || !selection) return;
@@ -498,7 +503,7 @@ export function XlsxSessionViewer(props: Omit<XlsxWorkerViewerProps, 'file'> & {
                   <span key={header.col} role="columnheader">{header.label}</span>)}</div>
                 {a11yGrid.rows.map((row) => <div key={row.row} role="row">
                   <span role="rowheader">{row.header}</span>{row.cells.map((cell) =>
-                    <span key={cell.col} role="gridcell" aria-selected={cell.selected}>{cell.label}</span>)}
+                    <A11yGridCell key={cell.col} cell={cell} onFollowLink={followLink} />)}
                 </div>)}
               </div>
               {a11yGrid.charts.map((chart, index) =>

@@ -119,6 +119,7 @@ import { useSelectionOverlay } from './hooks/useSelectionOverlay';
 import { useImageInteractions } from './hooks/useImageInteractions';
 import { usePagedScrollApi, type RevealPositionOutcome } from './hooks/usePagedScrollApi';
 import { usePagesPointer } from './hooks/usePagesPointer';
+import { useMirrorBookmarkFollower } from './mirrorLinkRoute';
 import {
   usePagedEditorCommandBridge,
   usePagedEditorRefApi,
@@ -1660,6 +1661,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       clearTableInsertTimer,
       hideTableInsertButton,
       getPositionFromMouse,
+      followBookmark,
     } = usePagesPointer({
       pagesContainerRef,
       yrsInputRef,
@@ -1695,6 +1697,12 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       setIsFocused,
       scrollToPositionImpl,
     });
+    const followBookmarkFromMirror = useCallback((name: string) => {
+      bumpInputEpoch();
+      yrsInputRef.current?.focus();
+      followBookmark(name);
+    }, [bumpInputEpoch, followBookmark, yrsInputRef]);
+    useMirrorBookmarkFollower(followBookmarkFromMirror);
 
     /**
      * Handle focus on container - redirect to hidden input.

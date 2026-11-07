@@ -110,6 +110,7 @@ import { WorkbookFailure } from './components/WorkbookFailure';
 
 import type { XlsxEditorApi, XlsxInThreadEditorProps, XlsxPointPosition } from './XlsxEditor.types';
 import { XlsxSaveRefusedError } from './XlsxSaveRefusedError';
+import { A11yGridCell } from './components/A11yGridCell';
 
 function readOnlyRefusal(handle: WorkbookHandle): XlsxEditRefusal {
   return {
@@ -2244,6 +2245,12 @@ export function XlsxEditorContent({
     },
     [activeSheet, sheetInfo, zoom]
   );
+  const followLinkFromMirror = useCallback(
+    (row: number, col: number) => {
+      activateHyperlink({ row, col });
+    },
+    [activateHyperlink]
+  );
 
   const onClick = useCallback(
     (e: React.MouseEvent) => {
@@ -2783,9 +2790,7 @@ export function XlsxEditorContent({
               <div key={r.row} role="row">
                 <span role="rowheader">{r.header}</span>
                 {r.cells.map((c) => (
-                  <span key={c.col} role="gridcell" aria-selected={c.selected}>
-                    {c.label}
-                  </span>
+                  <A11yGridCell key={c.col} cell={c} onFollowLink={followLinkFromMirror} />
                 ))}
               </div>
             ))}
