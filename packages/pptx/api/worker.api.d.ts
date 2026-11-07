@@ -3910,6 +3910,28 @@ export interface TablePrimitive extends PrimitiveBase {
     name: string;
     label: string;
     primitives: SlidePrimitive[];
+    /** The row and column structure, for assistive technology. Older engines
+     *  leave it out. */
+    grid?: TableGrid;
+}
+export interface TableGrid {
+    rows: number;
+    columns: number;
+    /** Cells that start a span, in row then column order; cells merged into
+     *  another one are left out. */
+    cells: TableGridCell[];
+}
+export interface TableGridCell {
+    row: number;
+    column: number;
+    rowSpan: number;
+    columnSpan: number;
+    /** `column` heads its column (the header row), `row` heads its row (the
+     *  first column). */
+    header?: 'column' | 'row';
+    /** The `[start, end)` range of the table's `primitives` that hold the
+     *  cell's text. */
+    primitives: [number, number];
 }
 export type SlidePrimitive = ShapePrimitive | ImagePrimitive | TextBoxPrimitive | PlaceholderPrimitive | ChartPrimitive | TablePrimitive;
 /** What `p:cNvPr` says about a shape for assistive technology. */

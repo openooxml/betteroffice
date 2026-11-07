@@ -7,7 +7,7 @@ import { activatePeerlessSlide, jumpPeerlessSlide, navigatePeerlessSlide } from 
 import type { PeerlessPresentation } from './usePeerlessPresentation';
 import {
   sameSlideLink, slideLinkOptions, slideMirrorItems,
-  type SlideMirrorItem, type SlideMirrorParagraph, type SlideMirrorSegment,
+  type SlideMirrorCell, type SlideMirrorItem, type SlideMirrorParagraph, type SlideMirrorSegment,
 } from './slideMirror';
 
 const SETTLE_MS = 150;
@@ -72,13 +72,33 @@ function followLink(event: MouseEvent<HTMLDivElement>, run: PeerlessPresentation
   if (safe) window.open(safe, '_blank', 'noopener,noreferrer');
 }
 
+function mirrorParagraphs(paragraphs: SlideMirrorParagraph[], run: PeerlessPresentation) {
+  return paragraphs.map((paragraph, index) => paragraph.heading
+    ? <div key={index} role="heading" aria-level={2} lang={paragraph.lang ?? undefined}>{paragraphText(paragraph, run)}</div>
+    : <p key={index} lang={paragraph.lang ?? undefined} style={{ margin: 0 }}>{paragraphText(paragraph, run)}</p>);
+}
+
+const cellRole = (cell: SlideMirrorCell) => cell.header === 'column' ? 'columnheader' : cell.header === 'row' ? 'rowheader' : 'cell';
+
 function MirrorItem({ item, run }: { item: SlideMirrorItem; run: PeerlessPresentation }) {
   const style: CSSProperties = { position: 'absolute', left: item.x, top: item.y, width: item.w, height: item.h, margin: 0 };
+  const { table } = item;
+  if (table) {
+    const grid = <div role="table" aria-label={item.label ?? undefined} aria-rowcount={table.rows.length}
+      aria-colcount={table.columns} style={item.paragraphs.length ? undefined : style}>
+      {table.rows.map((cells, row) => cells.length > 0 && <div key={row} role="row" aria-rowindex={row + 1}>
+        {cells.map((cell) => <div key={cell.column} role={cellRole(cell)} aria-colindex={cell.column + 1}
+          aria-rowspan={cell.rowSpan > 1 ? cell.rowSpan : undefined}
+          aria-colspan={cell.columnSpan > 1 ? cell.columnSpan : undefined}>
+          {mirrorParagraphs(cell.paragraphs, run)}
+        </div>)}
+      </div>)}
+    </div>;
+    return item.paragraphs.length ? <div style={style}>{grid}{mirrorParagraphs(item.paragraphs, run)}</div> : grid;
+  }
   if (item.paragraphs.length === 0) return <div role="img" aria-label={item.label!} style={style} />;
   return <div role={item.label ? 'group' : undefined} aria-label={item.label ?? undefined} style={style}>
-    {item.paragraphs.map((paragraph, index) => paragraph.heading
-      ? <div key={index} role="heading" aria-level={2} lang={paragraph.lang ?? undefined}>{paragraphText(paragraph, run)}</div>
-      : <p key={index} lang={paragraph.lang ?? undefined} style={{ margin: 0 }}>{paragraphText(paragraph, run)}</p>)}
+    {mirrorParagraphs(item.paragraphs, run)}
   </div>;
 }
 

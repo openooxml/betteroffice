@@ -171,6 +171,8 @@ export type {
   TextLanguage,
   TextLink,
   TextLinkTarget,
+  TableGrid,
+  TableGridCell,
   SlideDisplayList,
   SlidePrimitive,
   SlideReceipt,

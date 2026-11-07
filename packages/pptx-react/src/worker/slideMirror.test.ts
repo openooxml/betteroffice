@@ -238,3 +238,114 @@ test('safe urls and navigation targets survive paragraph and title merging', () 
       .toEqual({ kind: 'url', href });
   }
 });
+
+const grid = (cells: [number, number, number, number, 'column' | 'row' | undefined, number, number][], rows = 3, columns = 3) => ({
+  rows, columns,
+  cells: cells.map(([row, column, rowSpan, columnSpan, header, start, end]) =>
+    ({ row, column, rowSpan, columnSpan, ...(header ? { header } : {}), primitives: [start, end] as [number, number] })),
+});
+const gridTable = (value: ReturnType<typeof grid> | undefined, primitives: SlidePrimitive[]): SlidePrimitive =>
+  ({ ...at, kind: 'table', shapeId: 't', name: 'Table 1', label: 'Table, 3 rows, 3 columns', primitives, grid: value });
+const cellTexts = ['Region', 'Total', 'North', 'Q1', 'Q2', '9'];
+const merged = () => grid([
+  [0, 0, 1, 2, 'column', 1, 2], [0, 2, 1, 1, 'column', 2, 3],
+  [1, 0, 2, 1, 'row', 3, 4], [1, 1, 1, 1, undefined, 4, 5], [1, 2, 1, 1, undefined, 5, 5],
+  [2, 1, 1, 1, undefined, 5, 6], [2, 2, 1, 1, undefined, 6, 7],
+]);
+const cellPrimitives = () => [shape('t'), ...cellTexts.map((value) => text(undefined, value))];
+
+test('a table with a grid reads as rows of header and data cells with their spans', () => {
+  const [item] = items(list([gridTable(merged(), cellPrimitives())]));
+  expect(item!.label).toBe('Table, 3 rows, 3 columns');
+  expect(item!.paragraphs).toEqual([]);
+  expect(item!.table!.columns).toBe(3);
+  expect(item!.table!.rows.map((row) => row.map((cell) => [
+    cell.row, cell.column, cell.rowSpan, cell.columnSpan, cell.header, cell.paragraphs.map((paragraph) => paragraph.text).join(' '),
+  ]))).toEqual([
+    [[0, 0, 1, 2, 'column', 'Region'], [0, 2, 1, 1, 'column', 'Total']],
+    [[1, 0, 2, 1, 'row', 'North'], [1, 1, 1, 1, null, 'Q1'], [1, 2, 1, 1, null, '']],
+    [[2, 1, 1, 1, null, 'Q2'], [2, 2, 1, 1, null, '9']],
+  ]);
+});
+
+test('an empty header cell reads as a plain cell', () => {
+  const value = grid([[0, 0, 1, 1, 'column', 0, 1], [0, 1, 1, 1, 'column', 1, 1]], 1, 2);
+  const [item] = items(list([gridTable(value, [text(undefined, 'Name')])]));
+  expect(item!.table!.rows[0]!.map((cell) => cell.header)).toEqual(['column', null]);
+});
+
+test('a row whose cells all continue spans from above is kept empty', () => {
+  const value = grid([[0, 0, 2, 1, undefined, 0, 1], [0, 1, 2, 1, undefined, 1, 2]], 2, 2);
+  const [item] = items(list([gridTable(value, [text(undefined, 'Left'), text(undefined, 'Right')])]));
+  expect(item!.table!.rows.map((row) => row.length)).toEqual([2, 0]);
+});
+
+test('cell text keeps its links and languages', () => {
+  const linked: SlidePrimitive = {
+    ...at, kind: 'textBox', anchor: 'top', lines: [],
+    paragraphs: [{ level: 0, languages: [{ start: 0, end: 7, lang: 'fr-FR' }],
+      links: [{ start: 0, end: 7, target: { kind: 'url', href: 'https://example.test/' } }],
+      runs: [{ text: 'Bonjour', fontFamily: 'Arial', fontSizePt: 12, color: '#000000' }] }],
+  };
+  const value = grid([[0, 0, 1, 1, undefined, 0, 1]], 1, 1);
+  const [item] = items(list([gridTable(value, [linked])]));
+  expect(item!.table!.rows[0]![0]!.paragraphs).toEqual([{
+    text: 'Bonjour', heading: false, lang: 'fr-FR',
+    segments: [{ text: 'Bonjour', lang: 'fr-FR', link: { kind: 'url', href: 'https://example.test/' } }],
+  }]);
+});
+
+test('a table without a grid, or with one that does not fit it, reads as flat paragraphs', () => {
+  const broken = [
+    undefined,
+    grid([[0, 0, 1, 1, undefined, 0, 99]]),
+    grid([[0, 0, 1, 2, undefined, 0, 1], [0, 1, 1, 1, undefined, 1, 2]]),
+    grid([[2, 2, 2, 1, undefined, 0, 1]]),
+    grid([[0, 3, 1, 1, undefined, 0, 1]]),
+    grid([[0, 0, 0, 1, undefined, 0, 1]]),
+    grid([[0, 0, 1, 1, undefined, 2, 1]]),
+    grid([[0.5, 0, 1, 1, undefined, 0, 1]]),
+    grid([], 0, 3),
+    grid([]),
+    { ...merged(), cells: [null, ...merged().cells] },
+    { ...merged(), rows: 2_000_000 },
+    grid(merged().cells.map((cell, index) => [cell.row, cell.column, cell.rowSpan, cell.columnSpan, cell.header, index ? 2 : 1, index ? 3 : 2])),
+    grid(merged().cells.slice(0, 6).map((cell) => [cell.row, cell.column, cell.rowSpan, cell.columnSpan, cell.header, ...cell.primitives])),
+  ] as unknown as (ReturnType<typeof grid> | undefined)[];
+  for (const value of broken) {
+    const [item] = items(list([gridTable(value, cellPrimitives())]));
+    expect(item!.table).toBeUndefined();
+    expect(item!.paragraphs.map((paragraph) => paragraph.text)).toEqual(cellTexts);
+  }
+});
+
+test('titles and object names still read table text', () => {
+  const value = { ...list([gridTable(merged(), cellPrimitives())]), titleShape: 't' };
+  expect(slideTitle(value)).toBe(cellTexts.join(' '));
+  expect(slideObjectName(value, 't', 'Object')).toBe('Table 1');
+});
+
+test('a table of thousands of cells with spans reads in full in under a second', () => {
+  const rows = 60;
+  const columns = 50;
+  const cells: Parameters<typeof grid>[0] = [];
+  const primitives: SlidePrimitive[] = [];
+  for (let row = 0; row < rows; row++) {
+    const spanned = row % 2 === 0;
+    for (let column = 0; column < columns; column += spanned && column === 0 ? 2 : 1) {
+      const span = spanned && column === 0 ? 2 : 1;
+      cells.push([row, column, 1, span, row === 0 ? 'column' : undefined, primitives.length, primitives.length + 1]);
+      primitives.push(text(undefined, `r${row}c${column}`));
+    }
+  }
+  const started = performance.now();
+  const [item] = items(list([gridTable(grid(cells, rows, columns), primitives)]));
+  const elapsed = performance.now() - started;
+  expect(cells.length).toBe(30 * 49 + 30 * 50);
+  expect(item!.table!.rows).toHaveLength(rows);
+  expect(item!.table!.rows.flat()).toHaveLength(cells.length);
+  expect(item!.table!.rows[0]!.every((cell) => cell.header === 'column')).toBe(true);
+  const last = item!.table!.rows[59]!;
+  expect(last[last.length - 1]!.paragraphs[0]!.text).toBe('r59c49');
+  expect(elapsed).toBeLessThan(1_000);
+});

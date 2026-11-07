@@ -47,8 +47,8 @@ use crate::fmath;
 use crate::{
     CONTRACT_VERSION, CaretStop, GradientStop, GradientType, ImageCrop, ImageEffect, ImageTile,
     Paint, PositionedGlyph, PositionedTextLine, PositionedTextRun, Primitive, Shadow, ShapeAltText,
-    Stroke, StrokeEnd, SurfaceDisplayList, TextAlign, TextAnchor, TextLanguage, TextLink,
-    TextLinkTarget, TextParagraph, TextRun, Transform,
+    Stroke, StrokeEnd, SurfaceDisplayList, TableGrid, TableGridCell, TableHeader, TextAlign,
+    TextAnchor, TextLanguage, TextLink, TextLinkTarget, TextParagraph, TextRun, Transform,
 };
 use ooxml_metafile::{MetafileDrawing, decode as decode_metafile, is_metafile};
 
@@ -3190,7 +3190,10 @@ impl<'a> LayoutBuilder<'a> {
                 }
             }
         }
+        let properties = &table.properties;
+        let mut cells = Vec::with_capacity(plans.len());
         for plan in &plans {
+            let first = self.primitives.len() - start;
             let _ = self.render_text_box(
                 object_id,
                 shape_id,
@@ -3201,6 +3204,21 @@ impl<'a> LayoutBuilder<'a> {
                 plan.content.clone(),
                 cell_cascade(plan.text, &plan.inherited),
             )?;
+            let header = if properties.first_row && plan.row == 0 {
+                Some(TableHeader::Column)
+            } else if properties.first_col && plan.column == 0 {
+                Some(TableHeader::Row)
+            } else {
+                None
+            };
+            cells.push(TableGridCell {
+                row: plan.row as u32,
+                column: plan.column as u32,
+                row_span: plan.row_span as u32,
+                column_span: plan.span as u32,
+                header,
+                primitives: [first as u32, (self.primitives.len() - start) as u32],
+            });
         }
         let primitives = self.primitives.split_off(start);
         self.primitives.push(Primitive::Table {
@@ -3220,6 +3238,11 @@ impl<'a> LayoutBuilder<'a> {
             label: format!("Table, {row_count} rows, {column_count} columns"),
             primitives,
             transform,
+            grid: Some(TableGrid {
+                rows: row_count as u32,
+                columns: column_count as u32,
+                cells,
+            }),
         });
         Ok(())
     }

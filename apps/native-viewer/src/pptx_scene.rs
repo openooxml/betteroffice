@@ -1345,6 +1345,7 @@ mod tests {
                     label,
                     primitives,
                     transform,
+                    grid: None,
                 }
             } else {
                 Primitive::Chart {
@@ -1401,6 +1402,7 @@ mod tests {
                 label: String::new(),
                 primitives: Vec::new(),
                 transform: Transform::default(),
+                grid: None,
             }],
             ..source
         };
