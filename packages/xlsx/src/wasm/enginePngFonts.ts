@@ -34,8 +34,8 @@ function firstFace(font: PngRunFont): BundledFontFace {
  * Bundled faces for the fonts a sheet's text paints with, as the native engine draws them, so a canvas export
  * without `fonts` matches it. Each face serves the style the text asks for and installs with its own weight and
  * style, so bold Calibri Light drawn with a regular face gets synthetic bold, and regular Arial Black its bold face,
- * as natively. A face that cannot load rejects with `font-unavailable`
- * naming it; an abort rejects at once without waiting for loads other exports may share.
+ * as natively. A face that cannot load rejects with `font-unavailable` naming it; an abort rejects at once without
+ * waiting for loads other exports may share.
  */
 export async function defaultSheetFaces(fonts: readonly PngRunFont[], signal?: AbortSignal): Promise<PngFontFace[]> {
   signal?.throwIfAborted();
