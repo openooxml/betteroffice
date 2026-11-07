@@ -2248,6 +2248,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     const stickySelection = session?.selection() ?? null;
     const previousStickySelection = lastCaretScrollSelectionRef.current;
     lastCaretScrollSelectionRef.current = stickySelection;
+    textareaRef.current?.setAttribute('data-caret-placed', '');
     const quiet = quietSelectionRef.current;
     quietSelectionRef.current = null;
     const selectionIsQuiet = quiet && stickySelection && sameYrsSelection(quiet, stickySelection);
