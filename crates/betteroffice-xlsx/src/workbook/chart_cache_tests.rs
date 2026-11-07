@@ -605,6 +605,37 @@ fn reshaping_a_cache_with_point_formats_rebuilds_them_from_the_cells() {
     }
 }
 
+/// Reads a format code back from xml text or an attribute value: its entities
+/// and character references, then its `ST_Xstring` escapes, `_xHHHH_` or
+/// `_XHHHH_` as the workbook reader decodes them.
+fn read_format_code(raw: &str) -> String {
+    let text = read_xml_text(raw);
+    let mut out = String::new();
+    let mut rest = text.as_str();
+    while let Some(at) = rest.find('_') {
+        out.push_str(&rest[..at]);
+        let candidate = rest[at..].get(..7).filter(|candidate| {
+            matches!(&candidate[1..2], "x" | "X")
+                && candidate.ends_with('_')
+                && candidate[2..6]
+                    .chars()
+                    .all(|digit| digit.is_ascii_hexdigit())
+        });
+        match candidate {
+            Some(escape) => {
+                out.push(char::from_u32(u32::from_str_radix(&escape[2..6], 16).unwrap()).unwrap());
+                rest = &rest[at + 7..];
+            }
+            None => {
+                out.push('_');
+                rest = &rest[at + 1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Reads xml text or an attribute value back: its entities and character
 /// references, and nothing else.
 fn read_xml_text(raw: &str) -> String {
@@ -643,14 +674,15 @@ fn point_format(chart: &str, index: usize) -> String {
             chart[start..start + chart[start..].find("</c:formatCode>").unwrap()].to_owned()
         }
     };
-    read_xml_text(&raw)
+    read_format_code(&raw)
 }
 
 /// A point's format reads back as the cell's number format, whatever
-/// characters it holds: written with plain xml escaping, as the cache's own
-/// `formatCode` is, so markup, quotes and control characters are references
-/// and a literal `_xHHHH_` stays literal. Setting such a format after the
-/// cache was reshaped never fails the save.
+/// characters it holds: written as an `ST_Xstring`, as the cache's own
+/// `formatCode` is, so markup and quotes are entities, tab, line feed and
+/// control characters are `_xHHHH_`, and a literal `_xHHHH_` gets a leading
+/// `_x005F_`. Setting such a format after the cache was reshaped never fails
+/// the save.
 #[test]
 fn point_formats_with_any_characters_save_and_read_back() {
     let column = point_format_chart(
@@ -658,7 +690,14 @@ fn point_formats_with_any_characters_save_and_read_back() {
         r#"<c:ptCount val="3"/><c:pt idx="0"><c:v>10</c:v></c:pt><c:pt idx="1" formatCode="0.0%"><c:v>20</c:v></c:pt><c:pt idx="2"><c:v>30</c:v></c:pt>"#,
     );
     let long = format!("[$-409]#,##0.00\" units & <more>\";{}", "0".repeat(200));
-    for pattern in ["0\u{1}", "0\t0\n", "0_x0041_0", long.as_str()] {
+    for pattern in [
+        "0\u{1}",
+        "0\t0\n",
+        "0_x0041_0",
+        "0_X0041_0",
+        "0\u{0}0",
+        long.as_str(),
+    ] {
         let mut workbook = charted_workbook_with_chart(&column);
         apply(
             &mut workbook,
@@ -701,7 +740,8 @@ fn point_formats_with_any_characters_save_and_read_back() {
     );
     format_cell(&mut workbook, "B7", "0\u{1}");
     assert!(
-        saved_chart(&workbook).contains(r#"<c:pt idx="2" formatCode="0&#1;"><c:v>20</c:v></c:pt>"#)
+        saved_chart(&workbook)
+            .contains(r#"<c:pt idx="2" formatCode="0_x0001_"><c:v>20</c:v></c:pt>"#)
     );
 }
 

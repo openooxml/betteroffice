@@ -30,7 +30,7 @@ use xlsx_model::{
 
 use crate::package::PartContentType;
 use crate::tree::{Edit, Element, Part, Replacement, names_are_resolvable, parse_tree};
-use crate::xml::{attribute_text, find_part, formula_text, resolve_part_path};
+use crate::xml::{find_part, format_code_attribute_value, format_code_text, resolve_part_path};
 use crate::{MAX_CHART_ANCHORS, MAX_CHART_REFS, MAX_DEPTH, ParseError};
 
 /// relationship references inside a part (`r:id`).
@@ -973,7 +973,7 @@ fn cache_site(reference: &Element) -> Option<CacheSite> {
         span: cache.splice_target(),
         format_code: cache
             .child("formatCode")
-            .map(|element| element.text_content()),
+            .map(|element| crate::read::unescape_name(&element.text_content())),
         unmodelled_content: !cache_is_fully_modelled(cache),
         point_formats: cache
             .child_elements()
@@ -1267,7 +1267,7 @@ fn regenerated_cache_inputs(
     if let Some(format_code) = series_format {
         out.push_str(&format!(
             "<{prefix}formatCode>{}</{prefix}formatCode>",
-            formula_text(format_code)
+            format_code_text(format_code)
         ));
     }
     let point_formats = numeric && cache.point_formats && fidelity == CacheFidelity::Persisted;
@@ -1277,7 +1277,7 @@ fn regenerated_cache_inputs(
             continue;
         };
         let format = if point_formats && *code != series_format.unwrap_or("General") {
-            format!(" formatCode=\"{}\"", attribute_text(code))
+            format!(" formatCode=\"{}\"", format_code_attribute_value(code))
         } else {
             String::new()
         };

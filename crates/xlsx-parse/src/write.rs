@@ -4040,7 +4040,7 @@ fn styles_xml_with_template(
             writer
                 .create_element("numFmt")
                 .with_attribute(("numFmtId", id.to_string().as_str()))
-                .with_attribute(("formatCode", code.as_str()))
+                .with_attribute(crate::xml::format_code_attribute("formatCode", code))
                 .write_empty()?;
             Ok(())
         },
@@ -4189,7 +4189,7 @@ fn write_num_fmts(w: &mut Writer<Vec<u8>>, ss: &Stylesheet) -> io::Result<()> {
                 let id = id.to_string();
                 w.create_element("numFmt")
                     .with_attribute(("numFmtId", id.as_str()))
-                    .with_attribute(("formatCode", code.as_str()))
+                    .with_attribute(crate::xml::format_code_attribute("formatCode", code))
                     .write_empty()?;
             }
             Ok(())

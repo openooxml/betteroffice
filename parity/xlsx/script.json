@@ -921,6 +921,21 @@
       "args": { "ops": [{ "type": "setConditionalFormats", "sheet": 0, "formats": [] }] },
       "expectError": true
     },
-    { "op": "historyState", "args": {} }
+    { "op": "historyState", "args": {} },
+    {
+      "op": "applyOps",
+      "args": {
+        "ops": [
+          {
+            "type": "setRangeNumberFormat",
+            "sheet": 0,
+            "range": { "start": { "row": 0, "col": 1 }, "end": { "row": 0, "col": 1 } },
+            "format": { "type": "custom", "pattern": "0_x0041_\u0001\n0" }
+          }
+        ]
+      }
+    },
+    { "op": "selectionFormatting", "args": { "sheet": 0, "range": "B1:B1" } },
+    { "op": "save", "args": {} }
   ]
 }
