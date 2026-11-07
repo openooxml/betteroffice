@@ -1,3 +1,4 @@
+use crate::tree::escape_text;
 use xlsx_model::{ChartEdit, ChartRef, ChartSeriesName, SheetChart};
 pub use xlsx_model::{ChartMetadata, ChartSeriesInfo};
 
@@ -104,7 +105,8 @@ fn referenced_text(
             workbook.date_system,
         );
     }
-    descendant(element, NS_CHART, "v").map(Element::text_content)
+    descendant(element, NS_CHART, "v")
+        .map(|value| crate::read::unescape_name(&value.text_content()))
 }
 
 pub fn chart_metadata(
@@ -381,12 +383,21 @@ fn set_title(part: &[u8], title: &Option<String>) -> Result<Vec<u8>, ParseError>
 }
 
 fn validate_text(text: &str, field: &str) -> Result<(), ParseError> {
-    if text.chars().count() > 32767 || escape_text(text).is_err() {
-        return Err(ParseError::UnsupportedEdit(format!(
-            "{field} must contain at most 32767 XML text characters"
-        )));
+    escape_text(text).map_err(|_| text_limit(field))?;
+    validate_length(text, field)
+}
+
+fn validate_length(text: &str, field: &str) -> Result<(), ParseError> {
+    if text.chars().count() > 32767 {
+        return Err(text_limit(field));
     }
     Ok(())
+}
+
+fn text_limit(field: &str) -> ParseError {
+    ParseError::UnsupportedEdit(format!(
+        "{field} must contain at most 32767 XML text characters"
+    ))
 }
 
 /// A sheet name a reference may carry unquoted: letters, digits, `_` and `.`,
@@ -670,8 +681,8 @@ fn set_series(
         let content = if let Some(ChartSeriesName::Literal { text }) =
             name.as_ref().filter(|_| field == "name")
         {
-            validate_text(text, "name.text")?;
-            format!("<{p}v>{}</{p}v>", escape_text(text)?)
+            validate_length(text, "name.text")?;
+            format!("<{p}v>{}</{p}v>", cache_point_text(text))
         } else {
             let reference = if field == "name" {
                 match name.as_ref().unwrap() {

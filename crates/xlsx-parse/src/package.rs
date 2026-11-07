@@ -10,8 +10,8 @@ use xlsx_model::{CellRef, SheetId, Workbook};
 use crate::read::{SharedStringCells, SourceCellFacts};
 use crate::reference::UnpatchableReference;
 use crate::xml::{
-    attr, collect_text, find_part, local_name, next_event, reader, resolve_part_path, utf8_bom_len,
-    xml_err,
+    attr, collect_text, find_part, local_name, next_event, reader, resolve_part_path,
+    text_attribute, utf8_bom_len, xml_err,
 };
 use crate::{MAX_DEPTH, ParseError};
 
@@ -766,7 +766,7 @@ impl XmlTemplate {
                     }
                     let mut root = BytesStart::new(self.root_name.as_str());
                     for value in &values {
-                        root.push_attribute((value.name.as_str(), value.value.as_str()));
+                        root.push_attribute(text_attribute(&value.name, &value.value));
                     }
                     writer.write_event(Event::Start(root)).map_err(xml_err)?;
                     break;
@@ -1281,7 +1281,7 @@ impl XmlTemplate {
                     }
                     let mut root = BytesStart::new(self.root_name.as_str());
                     for attribute in &attributes {
-                        root.push_attribute((attribute.name.as_str(), attribute.value.as_str()));
+                        root.push_attribute(text_attribute(&attribute.name, &attribute.value));
                     }
                     let mut writer = Writer::new(Vec::new());
                     writer.write_event(Event::Start(root)).map_err(xml_err)?;

@@ -70,9 +70,85 @@ describe('line ends in formula text', () => {
       reopened.dispose();
     }
   });
+});
 
-  it('keeps a typed carriage return across save and reopen', async () => {
-    const handle = openWorkbook(await book('\n'));
+async function controlFormulaBook(d1 = '"a&#1;b"'): Promise<Uint8Array> {
+  const zip = new JSZip();
+  zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>');
+  zip.file('_rels/.rels', `<Relationships xmlns="${PACKAGE_RELS}"><Relationship Id="rId1" Type="${RELS}/officeDocument" Target="xl/workbook.xml"/></Relationships>`);
+  zip.file('xl/workbook.xml', `<workbook xmlns="${MAIN}" xmlns:r="${RELS}"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/></sheets></workbook>`);
+  zip.file('xl/_rels/workbook.xml.rels', `<Relationships xmlns="${PACKAGE_RELS}"><Relationship Id="rId1" Type="${RELS}/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`);
+  zip.file('xl/worksheets/sheet1.xml', `<worksheet xmlns="${MAIN}"><sheetData><row r="1"><c r="D1" t="str"><f>${d1}</f><v>x</v></c></row></sheetData></worksheet>`);
+  return zip.generateAsync({ type: 'uint8array' });
+}
+
+function thrown(run: () => unknown): string {
+  try {
+    run();
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  return '';
+}
+
+describe('control characters in formulas through applyOps', () => {
+  beforeAll(() => initWasm(new Uint8Array(readFileSync(WASM))));
+
+  it('writes a new one, typed or applied, with CHAR and refuses what has no storable form', async () => {
+    const handle = openWorkbook(await controlFormulaBook());
+    try {
+      const written = '=("a"&CHAR(1)&"b")';
+      handle.applyOps([{ type: 'setCell', sheet: 0, at: { row: 0, col: 7 }, cell: { formula: '"a\u0001b"' } }]);
+      handle.editCell(0, 0, 8, '="a\u0001b"');
+      handle.editCells(0, [{ row: 0, col: 9, input: '="a\u0001b"' }]);
+      for (const col of [7, 8, 9]) expect(handle.cell(0, 0, col).input).toBe(written);
+      const read = handle.readCells({ ranges: [{ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'H1:J1' } }] });
+      if (!read.ok) throw new Error(read.failure.message);
+      expect(read.ranges[0].cells[0].map((cell) => cell.value)).toEqual(Array(3).fill({ kind: 'text', value: 'a\u0001b' }));
+      expect(handle.cell(0, 0, 3).input).toBe('="a\u0001b"');
+      const version = handle.version();
+      expect(thrown(() => handle.editCell(0, 0, 10, '="a\u0000"'))).toContain('U+0000, which a workbook file cannot store and CHAR cannot produce');
+      expect(thrown(() => handle.applyOps([{ type: 'setCell', sheet: 0, at: { row: 0, col: 10 }, cell: { formula: '{"a\u0001",1}' } }]))).toContain('inside an array constant');
+      expect(handle.version()).toBe(version);
+      const sheet = await (await JSZip.loadAsync(new Uint8Array(handle.save()))).file('xl/worksheets/sheet1.xml')!.async('string');
+      expect(sheet.match(/<f>\(&quot;a&quot;&amp;CHAR\(1\)&amp;&quot;b&quot;\)<\/f>/g)?.length).toBe(3);
+      expect(sheet.match(/a&#1;b/g)?.length).toBe(1);
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it('pastes, moves, shifts and re-commits an opened one', async () => {
+    const handle = openWorkbook(await controlFormulaBook());
+    try {
+      expect(thrown(() => handle.editCells(0, [{ row: 0, col: 9, input: '="a\u0001b"', copyFrom: { row: 0, col: 3 } }]))).toBe('');
+      expect(thrown(() => handle.applyOps([
+        { type: 'insertRows', sheet: 0, at: 0, count: 1 },
+        { type: 'setCell', sheet: 0, at: { row: 1, col: 3 }, cell: { formula: '"a\u0001b"' } },
+      ]))).toBe('');
+      expect(thrown(() => handle.moveRange(0, 'D2', 'G2'))).toBe('');
+      expect(handle.cell(0, 1, 6).input).toBe('="a\u0001b"');
+      const sheet = await (await JSZip.loadAsync(new Uint8Array(handle.save()))).file('xl/worksheets/sheet1.xml')!.async('string');
+      expect(sheet.match(/a&#1;b/g)?.length).toBe(2);
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it('re-commits an opened prefixed formula as displayed', async () => {
+    const handle = openWorkbook(await controlFormulaBook('_xlfn.CONCAT("a&#1;b","")'));
+    try {
+      const shown = 'CONCAT("a\u0001b","")';
+      expect(thrown(() => handle.applyOps([{ type: 'setCell', sheet: 0, at: { row: 0, col: 3 }, cell: { formula: shown } }]))).toBe('');
+      expect(thrown(() => handle.editCell(0, 0, 3, `=${shown}`))).toBe('');
+      expect(handle.cell(0, 0, 3).input).toBe(`=${shown}`);
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it('keeps a typed carriage return across save and reopen as Excel spells it', async () => {
+    const handle = openWorkbook(await controlFormulaBook());
     let saved: Uint8Array;
     try {
       handle.editCell(0, 8, 9, 'a\rb');
@@ -81,12 +157,10 @@ describe('line ends in formula text', () => {
       handle.dispose();
     }
     const sheet = await (await JSZip.loadAsync(saved)).file('xl/worksheets/sheet1.xml')!.async('string');
-    expect(sheet).toContain('a&#13;b');
+    expect(sheet).toContain('a_x000D_b');
     const reopened = openWorkbook(saved);
     try {
-      const read = reopened.readCells({ ranges: [{ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'J9' } }] });
-      if (!read.ok) throw new Error(read.failure.message);
-      expect(read.ranges[0].cells[0][0].value).toEqual({ kind: 'text', value: 'a\rb' });
+      expect(reopened.cell(0, 8, 9).input).toBe('a\rb');
     } finally {
       reopened.dispose();
     }
