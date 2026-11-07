@@ -22,6 +22,7 @@ import type { RetainedLayoutMeta } from './layoutMeta';
 import type { ResidentEngineWorkerFontSync } from './residentEngineWorkerProtocol';
 import type { Document, ParagraphFormatting, Table, TextFormatting } from '../types/document';
 import type { CompatibilityFlags } from '../docx/settingsParser';
+import type { CellMargins } from '../types/formatting';
 import type { Theme } from '../types/drawingml';
 import type {
   DocxParagraphAnchor,
@@ -636,6 +637,10 @@ export type YrsRawOp =
 /** Host context for {@link YrsSession.yrsBlocksForStory} (theme + list numbering). */
 export interface YrsRenderEnv {
   compatibilityFlags?: Partial<CompatibilityFlags>;
+  /** `w:tblCellMar` of the document's table styles that set one, by style id. */
+  tableStyleCellMargins?: Record<string, CellMargins>;
+  /** The document's default table style id. */
+  defaultTableStyleId?: string;
   tocStyleIds?: string[];
   paragraphSpacingLinePx?: number;
   /** Section document-grid snap pitch in px (w:docGrid). The engine derives this from sections; hosts may omit it. */

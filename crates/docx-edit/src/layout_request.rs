@@ -231,6 +231,26 @@ fn render_environment(package: &Value) -> Value {
             );
         }
         env.insert("docDefaultFontSize".into(), json!(doc_default / 2.0));
+        let tables = styles.iter().filter(|style| style["type"] == "table");
+        let margins: Map<String, Value> = tables
+            .clone()
+            .filter_map(|style| {
+                let id = style["styleId"].as_str().filter(|id| !id.is_empty())?;
+                let margins = &style["tblPr"]["cellMargins"];
+                margins
+                    .is_object()
+                    .then(|| (id.to_owned(), margins.clone()))
+            })
+            .collect();
+        if !margins.is_empty() {
+            env.insert("tableStyleCellMargins".into(), Value::Object(margins));
+        }
+        if let Some(id) = tables
+            .filter(|style| style["default"].as_bool() == Some(true))
+            .find_map(|style| style["styleId"].as_str().filter(|id| !id.is_empty()))
+        {
+            env.insert("defaultTableStyleId".into(), json!(id));
+        }
     }
     env.insert("tocStyleIds".into(), Value::Array(toc_ids));
     Value::Object(env)
@@ -254,6 +274,29 @@ fn is_toc_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_the_table_style_cell_margins() {
+        let margins =
+            json!({"left": {"value": 108, "type": "dxa"}, "right": {"value": 108, "type": "dxa"}});
+        let request = region_layout_request(
+            &json!({
+                "document": {},
+                "styles": {"styles": [
+                    {"styleId": "Normal", "type": "paragraph", "default": true},
+                    {"styleId": "TableNormal", "type": "table", "default": true, "tblPr": {"cellMargins": margins}},
+                    {"styleId": "Plain", "type": "table", "tblPr": {}}
+                ]}
+            }),
+            24.0,
+        );
+        let env = &request["renderEnv"];
+        assert_eq!(
+            env["tableStyleCellMargins"],
+            json!({"TableNormal": margins})
+        );
+        assert_eq!(env["defaultTableStyleId"], "TableNormal");
+    }
 
     #[test]
     fn resolves_style_and_theme_environment() {

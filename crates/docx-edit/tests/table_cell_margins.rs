@@ -345,3 +345,65 @@ fn an_inserted_table_follows_the_document_compatibility_mode() {
     assert_eq!(mode(14), Some(14));
     assert_eq!(mode(0), None);
 }
+
+fn first_cell_padding(doc: &EditingDoc, env: &RenderEnv) -> docx_layout::types::BoxEdges {
+    yrs_doc_to_layout_blocks(doc, "body", env)
+        .unwrap()
+        .iter()
+        .find_map(|block| match block {
+            LayoutBlock::Table(table) => table.rows[0].cells[0].padding.clone(),
+            _ => None,
+        })
+        .unwrap()
+}
+
+#[test]
+fn the_host_environment_names_the_table_style_margins_for_a_document_opened_without_its_package() {
+    let doc = EditingDoc::new(304);
+    doc.create_story("body", "ab", "Normal", "left").unwrap();
+    doc.insert_table(
+        &EditCtx::local("Owner", "2026-11-07T12:00:00Z"),
+        Position::new("body", 2),
+        1,
+        2,
+    )
+    .unwrap();
+    assert_eq!(first_cell_padding(&doc, &RenderEnv::default()).left, 0.0);
+    let mut env = RenderEnv::default();
+    env.table_style_cell_margins.insert(
+        "TableNormal".to_owned(),
+        json!({"left": {"value": 144, "type": "dxa"}, "right": {"value": 72, "type": "dxa"}}),
+    );
+    env.default_table_style_id = Some("TableNormal".to_owned());
+    let padding = first_cell_padding(&doc, &env);
+    assert!((padding.left - 9.6).abs() < 1e-9);
+    assert!((padding.right - 4.8).abs() < 1e-9);
+}
+
+#[test]
+fn a_table_copied_with_its_source_formatting_takes_the_destination_style_for_unset_sides() {
+    let engine = EngineSession::new(75404);
+    seed_from_docx(engine.doc(), &package("<w:p/>", Some(STYLED))).unwrap();
+    let cell = json!({
+        "tcPr": {},
+        "content": [
+            {"kind": "text", "text": "x", "attributes": {}},
+            {"kind": "pilcrow", "properties": {}, "attributes": {}},
+        ],
+    });
+    engine
+        .doc()
+        .insert_table_fragment(
+            &EditCtx::local("Owner", "2026-11-07T12:00:00Z"),
+            Position::new("body", 0),
+            &json!({
+                "tblPr": {"_originalFormatting": {}, "cellMargins": {"right": 0}},
+                "grid": [],
+                "rows": [{"trPr": {}, "cells": [cell]}],
+            }),
+        )
+        .unwrap();
+    let padding = first_cell_padding(engine.doc(), &RenderEnv::default());
+    assert!((padding.left - 9.6).abs() < 1e-9);
+    assert_eq!(padding.right, 0.0);
+}

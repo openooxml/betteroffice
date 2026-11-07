@@ -75,6 +75,13 @@ pub use reservations::{Reservation, ReservationKind, ReservationSide, Reservatio
 #[serde(default, rename_all = "camelCase")]
 pub struct RenderEnv {
     pub compatibility_flags: docx_parse::CompatibilityFlags,
+    /// `w:tblCellMar` of the document's table styles that set one, by style
+    /// id, for the sides a table and its cells leave unset.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub table_style_cell_margins: BTreeMap<String, Value>,
+    /// The document's default table style.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_table_style_id: Option<String>,
     #[serde(skip_serializing_if = "BTreeSet::is_empty")]
     pub toc_style_ids: BTreeSet<String>,
     /// Six-digit RGB values keyed by OOXML theme slot. A missing slot falls
@@ -2235,7 +2242,7 @@ fn lower_table<T: ReadTxn>(
 
     let original = tbl_pr.get("_originalFormatting").and_then(any_map);
     let table_margins = tbl_pr.get("cellMargins").and_then(any_map);
-    let default_margins = editor_table_cell_margins(tbl_pr, local.source.upgrade().as_deref());
+    let default_margins = style_cell_margins(tbl_pr, env, local.source.upgrade().as_deref());
     let grid_widths: Vec<Option<f64>> = grid.iter().map(any_number).collect();
     let total_grid_width: f64 = grid_widths.iter().flatten().sum();
     let mut column_row_ends = vec![0usize; grid_widths.len()];
@@ -3652,28 +3659,36 @@ impl DefaultCellMargins {
     }
 }
 
-/// A loaded table already carries the margins its styles resolve to, and Word
-/// gives it none beyond them. A table the editor inserted or pasted carries no
-/// source formatting, so it takes what the document's table styles set (its
-/// own style, else the default table style), and none where they set nothing,
-/// as Word does when it opens the saved file.
-fn editor_table_cell_margins(
+/// What the document's table styles set for the sides a table and its cells
+/// leave unset: the table's own style, else the default table style, and none
+/// where they set nothing, as Word does. An opened table already carries its
+/// style margins, so this changes only tables inserted or pasted since. The
+/// host's environment names the styles; a document seeded from its package
+/// also has them in its source.
+fn style_cell_margins(
     tbl_pr: &std::collections::HashMap<String, Any>,
+    env: &RenderEnv,
     source: Option<&crate::seed::SourceMetadata>,
 ) -> DefaultCellMargins {
-    if tbl_pr.contains_key("_originalFormatting") {
-        return DefaultCellMargins([0.0; 4]);
-    }
-    let Some(source) = source else {
-        return DefaultCellMargins([0.0; 4]);
-    };
-    let style_id = map_string(tbl_pr, "styleId");
+    let style_id = map_string(tbl_pr, "styleId").filter(|id| !id.is_empty());
     let bidi = map_bool(tbl_pr, "bidi") == Some(true);
-    DefaultCellMargins(
-        source
-            .table_cell_margins(style_id.as_deref(), bidi)
-            .map(|side| side.unwrap_or(0.0)),
-    )
+    let sides = if !env.table_style_cell_margins.is_empty() || env.default_table_style_id.is_some()
+    {
+        let margins = style_id
+            .as_deref()
+            .and_then(|id| env.table_style_cell_margins.get(id))
+            .or_else(|| {
+                env.default_table_style_id
+                    .as_deref()
+                    .and_then(|id| env.table_style_cell_margins.get(id))
+            });
+        crate::seed::cell_margin_sides(margins, bidi)
+    } else if let Some(source) = source {
+        source.table_cell_margins(style_id.as_deref(), bidi)
+    } else {
+        [None; 4]
+    };
+    DefaultCellMargins(sides.map(|side| side.unwrap_or(0.0)))
 }
 
 fn lower_cell_borders(
@@ -6972,11 +6987,11 @@ mod tests {
         assert!((padding.right - 7.2).abs() < 1e-10);
         assert!((padding.top - 4.0).abs() < 1e-10);
         assert_eq!(padding.bottom, 0.0);
-        let loaded = std::collections::HashMap::from([(
-            "_originalFormatting".to_owned(),
-            Any::Map(std::collections::HashMap::new().into()),
-        )]);
-        let padding = lower_cell_padding(&empty, None, editor_table_cell_margins(&loaded, None));
+        let padding = lower_cell_padding(
+            &empty,
+            None,
+            style_cell_margins(&empty, &RenderEnv::default(), None),
+        );
         assert_eq!(
             [padding.top, padding.right, padding.bottom, padding.left],
             [0.0; 4]
