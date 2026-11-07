@@ -1643,7 +1643,6 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>): void => {
-      defaultCaretRef.current = null;
       if (!event.nativeEvent.isComposing && event.key !== 'Process' && event.keyCode !== 229) {
         discardedCompositionRef.current = false;
       }
@@ -2320,7 +2319,10 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       style={{ ...BASE_STYLE, ...positionStyle }}
       onBeforeInput={handleBeforeInput}
       onInput={handleInput}
-      onKeyDown={handleKeyDown}
+      onKeyDown={(event) => {
+        handleKeyDown(event);
+        if (event.defaultPrevented) defaultCaretRef.current = null;
+      }}
       onCompositionStart={handleCompositionStart}
       onCompositionUpdate={handleCompositionUpdate}
       onCompositionEnd={handleCompositionEnd}

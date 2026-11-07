@@ -877,6 +877,24 @@ test('an explicit selection at the story start after a host scroll still scrolls
   expect(scroller.scrollTop).not.toBe(2000);
 });
 
+test.each([
+  ['Shift leaves the restored view', { key: 'Shift' }, true],
+  ['Ctrl+Home scrolls to the caret', { key: 'Home', ctrlKey: true }, false],
+] as const)('after a host scroll while the default caret waits for layout, %s', async (_, key, kept) => {
+  const { session, scroller, view, inputFor, queries, expectCaret } =
+    await mount(false, true, true, { displayListQueries: null });
+  expect(session.selection()).not.toBeNull();
+  act(() => {
+    scroller.scrollTop = 2000;
+    scroller.dispatchEvent(new Event('scroll'));
+  });
+  await act(async () => { fireEvent.keyDown(view.getByTestId('yrs-input'), key); });
+  act(() => view.rerender(inputFor({ displayListQueries: queries as unknown as DisplayListQueries })));
+  expectCaret(0);
+  if (kept) expect(scroller.scrollTop).toBe(2000);
+  else expect(scroller.scrollTop).not.toBe(2000);
+});
+
 test('a reader wheel before the first caret placement keeps the view where the reader put it', async () => {
   const { input, scroller, scrollTop, expectCaret } = await mount(true, false);
   act(() => {
