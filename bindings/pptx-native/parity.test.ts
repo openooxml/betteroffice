@@ -93,10 +93,10 @@ describe('font pack diagnostics', () => {
     const fs = require('node:fs') as typeof import('node:fs');
     const path = require('node:path') as typeof import('node:path');
     const { checkInstalledPacks } = await import('../../packages/fonts/src/packDiagnostics');
-    const source = new URL('../../packages/fonts-intl', import.meta.url).pathname;
+    const source = require('node:url').fileURLToPath(new URL('../../packages/fonts-intl', import.meta.url));
     const nativeReport = (directory: string) => {
       const script = `const raw = require('./index.js'); raw.configureFontPacks(undefined, ${JSON.stringify(directory)}, undefined); console.log('RESULT ' + raw.fontPackDiagnosticsJson());`;
-      const child = Bun.spawnSync([process.execPath, '-e', script], { cwd: new URL('.', import.meta.url).pathname });
+      const child = Bun.spawnSync([process.execPath, '-e', script], { cwd: require('node:url').fileURLToPath(new URL('.', import.meta.url)) });
       const line = child.stdout.toString().split('\n').find((text) => text.startsWith('RESULT '));
       expect(line, child.stderr.toString()).toBeDefined();
       return JSON.parse(line!.slice(7));
