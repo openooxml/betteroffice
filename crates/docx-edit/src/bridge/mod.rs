@@ -75,6 +75,13 @@ pub use reservations::{Reservation, ReservationKind, ReservationSide, Reservatio
 #[serde(default, rename_all = "camelCase")]
 pub struct RenderEnv {
     pub compatibility_flags: docx_parse::CompatibilityFlags,
+    /// `w:tblCellMar` of the document's table styles that set one, by style
+    /// id, for the sides a table and its cells leave unset.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub table_style_cell_margins: BTreeMap<String, Value>,
+    /// The document's default table style.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_table_style_id: Option<String>,
     #[serde(skip_serializing_if = "BTreeSet::is_empty")]
     pub toc_style_ids: BTreeSet<String>,
     /// Six-digit RGB values keyed by OOXML theme slot. A missing slot falls
@@ -2235,6 +2242,7 @@ fn lower_table<T: ReadTxn>(
 
     let original = tbl_pr.get("_originalFormatting").and_then(any_map);
     let table_margins = tbl_pr.get("cellMargins").and_then(any_map);
+    let default_margins = style_cell_margins(tbl_pr, env, local.source.upgrade().as_deref());
     let grid_widths: Vec<Option<f64>> = grid.iter().map(any_number).collect();
     let total_grid_width: f64 = grid_widths.iter().flatten().sum();
     let mut column_row_ends = vec![0usize; grid_widths.len()];
@@ -2399,7 +2407,7 @@ fn lower_table<T: ReadTxn>(
                 vertical_align: map_string(tc_pr, "verticalAlign"),
                 background,
                 borders: lower_cell_borders(tc_pr, env),
-                padding: Some(lower_cell_padding(tc_pr, table_margins)),
+                padding: Some(lower_cell_padding(tc_pr, table_margins, default_margins)),
                 no_wrap: (map_bool(tc_pr, "noWrap") == Some(true)).then_some(true),
                 tracked_marker: tc_pr.get("cellMarker").and_then(any_json),
             });
@@ -2457,16 +2465,21 @@ fn lower_table<T: ReadTxn>(
         .get("floating")
         .and_then(any_map)
         .map(lower_floating_table);
-    let compatibility_mode = map_number(tbl_pr, "compatibilityMode").and_then(|value| {
-        (value.is_finite() && (0.0..=255.0).contains(&value)).then_some(value as u8)
-    });
+    let compatibility_mode = map_number(tbl_pr, "compatibilityMode")
+        .and_then(|value| {
+            (value.is_finite() && (0.0..=255.0).contains(&value)).then_some(value as u8)
+        })
+        .or_else(|| {
+            Some(env.compatibility_flags.compatibility_mode).filter(|mode| *mode > 0 && *mode != 12)
+        });
     let layout_mode = map_string(tbl_pr, "tableLayout")
         .filter(|value| matches!(value.as_str(), "fixed" | "autofit"));
     let table_margin = |side: &str| {
-        table_margins
+        let twips = table_margins
             .and_then(|margins| map_number(margins, side))
-            .map(twips_to_pixels)
-            .filter(|value| value.is_finite() && *value > 0.0)
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .unwrap_or_else(|| default_margins.side(side));
+        (twips > 0.0).then(|| twips_to_pixels(twips))
     };
 
     Ok((
@@ -3606,6 +3619,7 @@ fn lower_floating_table(value: &std::collections::HashMap<String, Any>) -> Float
 fn lower_cell_padding(
     tc_pr: &std::collections::HashMap<String, Any>,
     table_margins: Option<&std::collections::HashMap<String, Any>>,
+    default_margins: DefaultCellMargins,
 ) -> BoxEdges {
     let cell_margins = tc_pr.get("margins").and_then(any_map);
     let side = |key: &str| {
@@ -3619,7 +3633,7 @@ fn lower_cell_padding(
                     .map(twips_to_pixels)
                     .filter(|value| *value >= 0.0)
             })
-            .unwrap_or(0.0)
+            .unwrap_or_else(|| twips_to_pixels(default_margins.side(key)))
     };
     BoxEdges {
         top: side("top"),
@@ -3627,6 +3641,54 @@ fn lower_cell_padding(
         bottom: side("bottom"),
         left: side("left"),
     }
+}
+
+/// Cell margins in twips, `[top, right, bottom, left]`, for the sides no
+/// `w:tcMar` or resolved `w:tblCellMar` sets.
+#[derive(Clone, Copy)]
+struct DefaultCellMargins([f64; 4]);
+
+impl DefaultCellMargins {
+    fn side(self, side: &str) -> f64 {
+        match side {
+            "top" => self.0[0],
+            "right" => self.0[1],
+            "bottom" => self.0[2],
+            _ => self.0[3],
+        }
+    }
+}
+
+/// What the document's table styles set for the sides a table and its cells
+/// leave unset: the table's own style, else the default table style, and none
+/// where they set nothing, as Word does. An opened table already carries its
+/// style margins, so this changes only tables inserted or pasted since. The
+/// host's environment names the styles; a document seeded from its package
+/// also has them in its source.
+fn style_cell_margins(
+    tbl_pr: &std::collections::HashMap<String, Any>,
+    env: &RenderEnv,
+    source: Option<&crate::seed::SourceMetadata>,
+) -> DefaultCellMargins {
+    let style_id = map_string(tbl_pr, "styleId").filter(|id| !id.is_empty());
+    let bidi = map_bool(tbl_pr, "bidi") == Some(true);
+    let sides = if !env.table_style_cell_margins.is_empty() || env.default_table_style_id.is_some()
+    {
+        let margins = style_id
+            .as_deref()
+            .and_then(|id| env.table_style_cell_margins.get(id))
+            .or_else(|| {
+                env.default_table_style_id
+                    .as_deref()
+                    .and_then(|id| env.table_style_cell_margins.get(id))
+            });
+        crate::seed::cell_margin_sides(margins, bidi)
+    } else if let Some(source) = source {
+        source.table_cell_margins(style_id.as_deref(), bidi)
+    } else {
+        [None; 4]
+    };
+    DefaultCellMargins(sides.map(|side| side.unwrap_or(0.0)))
 }
 
 fn lower_cell_borders(
@@ -6903,9 +6965,37 @@ mod tests {
             ("left".to_owned(), Any::Number(108.0)),
             ("right".to_owned(), Any::Number(108.0)),
         ]);
-        let padding = lower_cell_padding(&cell, Some(&table));
+        let padding = lower_cell_padding(&cell, Some(&table), DefaultCellMargins([0.0; 4]));
         assert_eq!(padding.left, 0.0);
         assert!((padding.right - 7.2).abs() < 1e-10);
+    }
+
+    #[test]
+    fn unset_cell_sides_take_the_resolved_default_margins() {
+        let empty = std::collections::HashMap::new();
+        let normal_table = DefaultCellMargins([0.0, 108.0, 0.0, 108.0]);
+        let padding = lower_cell_padding(&empty, None, normal_table);
+        assert!((padding.left - 7.2).abs() < 1e-10);
+        assert!((padding.right - 7.2).abs() < 1e-10);
+        assert_eq!((padding.top, padding.bottom), (0.0, 0.0));
+        let table = std::collections::HashMap::from([
+            ("left".to_owned(), Any::Number(0.0)),
+            ("top".to_owned(), Any::Number(60.0)),
+        ]);
+        let padding = lower_cell_padding(&empty, Some(&table), normal_table);
+        assert_eq!(padding.left, 0.0);
+        assert!((padding.right - 7.2).abs() < 1e-10);
+        assert!((padding.top - 4.0).abs() < 1e-10);
+        assert_eq!(padding.bottom, 0.0);
+        let padding = lower_cell_padding(
+            &empty,
+            None,
+            style_cell_margins(&empty, &RenderEnv::default(), None),
+        );
+        assert_eq!(
+            [padding.top, padding.right, padding.bottom, padding.left],
+            [0.0; 4]
+        );
     }
 
     #[test]

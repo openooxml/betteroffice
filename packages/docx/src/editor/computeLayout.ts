@@ -118,6 +118,7 @@ export function buildResidentRegionLayoutRequest(
       ...renderEnv,
       ...defaultParagraphStyleEnv(document, renderEnv),
       ...chainFontSizeEnv(document, renderEnv),
+      ...tableStyleEnv(document, renderEnv),
       tocStyleIds: [...new Set([
         ...(renderEnv.tocStyleIds ?? []),
         ...(document?.package.styles?.styles ?? [])
@@ -126,6 +127,22 @@ export function buildResidentRegionLayoutRequest(
           .map((style) => style.styleId),
       ])],
     },
+  };
+}
+
+function tableStyleEnv(
+  document: Document | null,
+  renderEnv: YrsRenderEnv
+): Pick<YrsRenderEnv, 'tableStyleCellMargins' | 'defaultTableStyleId'> {
+  const tables = (document?.package.styles?.styles ?? []).filter((style) => style.type === 'table' && style.styleId);
+  const margins: NonNullable<YrsRenderEnv['tableStyleCellMargins']> = { ...(renderEnv.tableStyleCellMargins ?? {}) };
+  for (const style of tables) {
+    if (style.tblPr?.cellMargins && !(style.styleId in margins)) margins[style.styleId] = style.tblPr.cellMargins;
+  }
+  const defaultTableStyleId = renderEnv.defaultTableStyleId ?? tables.find((style) => style.default === true)?.styleId;
+  return {
+    ...(Object.keys(margins).length > 0 ? { tableStyleCellMargins: margins } : {}),
+    ...(defaultTableStyleId ? { defaultTableStyleId } : {}),
   };
 }
 
