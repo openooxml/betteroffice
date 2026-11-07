@@ -1,4 +1,4 @@
-export type PngExportCode = 'canvas-unavailable' | 'canvas-too-large' | 'font-unavailable';
+export type PngExportCode = 'canvas-unavailable' | 'canvas-too-large' | 'font-unavailable' | 'picture-unavailable';
 
 export class PngExportError extends Error {
   readonly code: PngExportCode;

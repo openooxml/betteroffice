@@ -1786,6 +1786,7 @@ export function wrapSession(
 
   registerSessionInternals(facade, {
     headerFooterAliases,
+    mediaSources: () => session.media_sources_json(),
     materializedSource,
     setHeaderFooterAliases: (json) => mutate(() => session.set_header_footer_aliases(json)),
     sourcePackage: () =>

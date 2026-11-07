@@ -216,6 +216,19 @@ impl EditSessionCore {
         media.bytes(index).ok().map(std::borrow::Cow::into_owned)
     }
 
+    /// The bytes a raster backend draws a `media:{n}` source from: an EMF or
+    /// WMF part itself rather than its SVG display copy.
+    #[doc(hidden)]
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn media_raster_bytes(&self, token: &str) -> Option<Vec<u8>> {
+        let media = self.engine.doc().media_table()?;
+        let index = docx_parse::media::media_token_index(token)?;
+        media
+            .raster_bytes(index)
+            .ok()
+            .map(std::borrow::Cow::into_owned)
+    }
+
     /// The media type of [`EditSessionCore::media_bytes`].
     pub fn media_type(&self, token: &str) -> Option<String> {
         let media = self.engine.doc().media_table()?;

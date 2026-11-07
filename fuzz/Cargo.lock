@@ -136,7 +136,11 @@ version = "0.5.1"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-ooxml-text",
+ "image",
  "png",
+ "resvg",
+ "simplecss",
+ "svgtypes",
  "tiny-skia",
 ]
 
@@ -202,10 +206,8 @@ dependencies = [
  "betteroffice-pptx-edit",
  "betteroffice-pptx-render",
  "image",
- "resvg",
- "simplecss",
- "svgtypes",
  "tiny-skia",
+ "unicode-properties",
 ]
 
 [[package]]

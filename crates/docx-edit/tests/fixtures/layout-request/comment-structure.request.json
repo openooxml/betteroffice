@@ -99,6 +99,7 @@
     },
     "defaultParagraphStyleId": "Normal",
     "defaultTabStopTwips": 720,
+    "defaultTableStyleId": "TableNormal",
     "docDefaultFontSize": 11,
     "docDefaultLanguage": {
       "bidi": "ar-SA",
@@ -238,6 +239,1808 @@
       "Title": 26
     },
     "showHiddenText": false,
+    "tableStyleCellMargins": {
+      "ColorfulGrid": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "ColorfulGrid-Accent1": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "ColorfulGrid-Accent2": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "ColorfulGrid-Accent3": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "ColorfulGrid-Accent4": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "ColorfulGrid-Accent5": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "ColorfulGrid-Accent6": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "ColorfulList": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "ColorfulList-Accent1": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "ColorfulList-Accent2": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "ColorfulList-Accent3": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "ColorfulList-Accent4": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "ColorfulList-Accent5": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "ColorfulList-Accent6": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "ColorfulShading": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "ColorfulShading-Accent1": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "ColorfulShading-Accent2": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "ColorfulShading-Accent3": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "ColorfulShading-Accent4": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "ColorfulShading-Accent5": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "ColorfulShading-Accent6": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "DarkList": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "DarkList-Accent1": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "DarkList-Accent2": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "DarkList-Accent3": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "DarkList-Accent4": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "DarkList-Accent5": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "DarkList-Accent6": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "LightGrid": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "LightGrid-Accent1": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "LightGrid-Accent2": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "LightGrid-Accent3": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "LightGrid-Accent4": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "LightGrid-Accent5": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "LightGrid-Accent6": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "LightList": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "LightList-Accent1": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "LightList-Accent2": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "LightList-Accent3": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "LightList-Accent4": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "LightList-Accent5": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "LightList-Accent6": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "LightShading": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "LightShading-Accent1": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "LightShading-Accent2": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "LightShading-Accent3": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "LightShading-Accent4": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "LightShading-Accent5": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "LightShading-Accent6": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumGrid1": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumGrid1-Accent1": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumGrid1-Accent2": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumGrid1-Accent3": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumGrid1-Accent4": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumGrid1-Accent5": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumGrid1-Accent6": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumGrid2": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumGrid2-Accent1": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumGrid2-Accent2": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumGrid2-Accent3": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumGrid2-Accent4": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumGrid2-Accent5": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumGrid2-Accent6": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumGrid3": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumGrid3-Accent1": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumGrid3-Accent2": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumGrid3-Accent3": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumGrid3-Accent4": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumGrid3-Accent5": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumGrid3-Accent6": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumList1": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumList1-Accent1": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumList1-Accent2": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumList1-Accent3": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumList1-Accent4": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumList1-Accent5": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumList1-Accent6": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumList2": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumList2-Accent1": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumList2-Accent2": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumList2-Accent3": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumList2-Accent4": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumList2-Accent5": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumList2-Accent6": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumShading1": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumShading1-Accent1": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumShading1-Accent2": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumShading1-Accent3": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumShading1-Accent4": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumShading1-Accent5": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumShading1-Accent6": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumShading2": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumShading2-Accent1": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumShading2-Accent2": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumShading2-Accent3": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumShading2-Accent4": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumShading2-Accent5": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "MediumShading2-Accent6": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "TableGrid": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      },
+      "TableNormal": {
+        "bottom": {
+          "type": "dxa",
+          "value": 0
+        },
+        "left": {
+          "type": "dxa",
+          "value": 108
+        },
+        "right": {
+          "type": "dxa",
+          "value": 108
+        },
+        "top": {
+          "type": "dxa",
+          "value": 0
+        }
+      }
+    },
     "themeColors": {
       "accent1": "4F81BD",
       "accent2": "C0504D",

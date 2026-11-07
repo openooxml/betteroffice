@@ -243,6 +243,34 @@ test('input uses its content host before the parent ref attaches', () => {
   } finally { view.unmount(); input.admission.dispose(); }
 });
 
+test('a scroll before the first caret placement keeps the view where it was moved', () => {
+  const scroller = document.createElement('div');
+  scroller.style.overflowY = 'auto';
+  Object.defineProperties(scroller, { clientHeight: { value: 600 }, scrollHeight: { value: 2400 } });
+  const host = document.createElement('div');
+  host.style.position = 'relative';
+  scroller.appendChild(host);
+  document.body.appendChild(scroller);
+  const bounds = (top: number) => ({ x: 0, y: top, top, bottom: top + 600, left: 0, right: 600, width: 600, height: 600, toJSON() {} });
+  scroller.getBoundingClientRect = () => bounds(0);
+  host.getBoundingClientRect = () => bounds(-scroller.scrollTop);
+  const input = mount(false, { caretHostRef: { current: host } });
+  const start = { story: 'body', paraId: 'p', offset: 0 };
+  input.snapshot.workerSelection = { anchor: start, focus: start };
+  input.session.state.selection = input.snapshot.workerSelection;
+  try {
+    act(() => { input.textarea.focus({ preventScroll: true }); });
+    act(() => { scroller.scrollTop = 300; fireEvent.scroll(scroller); });
+    act(() => {
+      input.viewStore.installFrameGeometry({ identity: input.snapshot.identity, coversThroughSeq: 0,
+        frameEpoch: 1, layoutRevision: 1, pages: [], caret: { x: 20, y: 50, width: 1, height: 12 }, selectionRects: [] });
+      input.refresh();
+    });
+    expect(input.textarea.style.top).toBe('50px');
+    expect(scroller.scrollTop).toBe(300);
+  } finally { input.unmount(); input.admission.dispose(); scroller.remove(); }
+});
+
 test('typing after scrolling reveals once and composition keeps content coordinates', async () => {
   const scroller = document.createElement('div');
   scroller.style.overflowY = 'auto';

@@ -1,3 +1,5 @@
+use std::collections::{BTreeSet, HashMap};
+
 use serde::{Deserialize, Serialize};
 use xlsx_model::{ChartAnchor, ChartEdit, SheetId};
 use xlsx_ops::Op;
@@ -111,35 +113,61 @@ impl Workbook {
             .facts()
             .chart_part_bytes(&chart.part)
             .ok_or_else(missing)?;
-        let read = match &chart.raw_xml {
-            Some(xml) => xlsx_parse::chart_references(xml.as_bytes())?,
-            None => xlsx_parse::chart_references(bytes)?,
+        Ok(xlsx_parse::chart_bytes(bytes, chart, model, owner)?)
+    }
+
+    /// Refuses a batch that leaves a chart part where a save could not write
+    /// it back: a reference reshaped around a multi-level or unmodelled cache
+    /// that cannot be rebuilt, or a part two sheets anchor that the batch
+    /// would give two sets of references. Every part the batch changed is
+    /// patched exactly as the save will. What decides that refusal is the
+    /// references and the sheets they name, not what the cells read, so the
+    /// recalculation after the batch cannot change it, short of cell text no
+    /// XML can carry. `inverse` is the batch's inverse, which records
+    /// a `SetCharts` for every sheet whose charts it changed, so a batch that
+    /// changes none costs nothing here.
+    pub(super) fn ensure_charts_follow(
+        &self,
+        preview: &xlsx_model::Workbook,
+        inverse: &[Op],
+    ) -> Result<()> {
+        let Some(package) = self.source_package.as_ref() else {
+            return Ok(());
         };
-        if read == chart.refs || chart.raw_xml.is_some() {
-            return Ok(xlsx_parse::chart_bytes(
-                bytes,
-                chart,
-                model,
-                owner,
-                (model, owner),
-            )?);
+        if !inverse.iter().any(|op| matches!(op, Op::SetCharts { .. })) {
+            return Ok(());
         }
-        let opened = package.materialize()?;
-        let original_owner = self
-            .model
-            .sheets
-            .iter()
-            .position(|sheet| sheet.name == owner)
-            .and_then(|index| self.preserved.origins.get(index).copied().flatten())
-            .and_then(|origin| opened.source_sheet_name(origin))
-            .unwrap_or(owner);
-        Ok(xlsx_parse::chart_bytes(
-            bytes,
-            chart,
-            model,
-            owner,
-            (opened.original_workbook(), original_owner),
-        )?)
+        #[cfg(test)]
+        CHART_CHECKS.set(CHART_CHECKS.get() + 1);
+        let changed = changed_chart_parts(&self.model, preview);
+        let mut claims: HashMap<&str, Vec<(&xlsx_model::SheetChart, &str)>> = HashMap::new();
+        for sheet in &preview.sheets {
+            for chart in &sheet.charts {
+                if changed.contains(chart.part.as_str()) {
+                    claims
+                        .entry(chart.part.as_str())
+                        .or_default()
+                        .push((chart, sheet.name.as_str()));
+                }
+            }
+        }
+        for part in changed {
+            let follows = package.facts().chart_part_bytes(part).is_some_and(|bytes| {
+                xlsx_parse::agreed_chart_bytes(
+                    bytes,
+                    part,
+                    claims.get(part).map_or(&[][..], Vec::as_slice),
+                    preview,
+                )
+                .is_ok()
+            });
+            if !follows {
+                return Err(Error::InvalidOperation(format!(
+                    "{part} references cells this edit would move, and it cannot be rewritten"
+                )));
+            }
+        }
+        Ok(())
     }
 
     pub fn edit_charts(
@@ -277,4 +305,40 @@ impl Workbook {
             ..MutationResult::default()
         })
     }
+}
+
+/// The chart parts of `after` some chart of which reads references, or holds
+/// an edit, that no chart of the same part in `before` does: the parts a save
+/// would patch differently. Linear in the charts of both.
+pub(super) fn changed_chart_parts<'a>(
+    before: &xlsx_model::Workbook,
+    after: &'a xlsx_model::Workbook,
+) -> BTreeSet<&'a str> {
+    let mut held: HashMap<&str, Vec<&xlsx_model::SheetChart>> = HashMap::new();
+    for chart in before.sheets.iter().flat_map(|sheet| &sheet.charts) {
+        held.entry(chart.part.as_str()).or_default().push(chart);
+    }
+    after
+        .sheets
+        .iter()
+        .flat_map(|sheet| &sheet.charts)
+        .filter(|chart| {
+            !held.get(chart.part.as_str()).is_some_and(|charts| {
+                charts
+                    .iter()
+                    .any(|kept| kept.refs == chart.refs && kept.raw_xml == chart.raw_xml)
+            })
+        })
+        .map(|chart| chart.part.as_str())
+        .collect()
+}
+
+#[cfg(test)]
+thread_local! {
+    static CHART_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn chart_check_count() -> usize {
+    CHART_CHECKS.get()
 }

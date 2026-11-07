@@ -190,7 +190,7 @@ test('native docx PNG uses display list font chains for text primitives', () => 
   }
 });
 
-test('native docx PNG resolves media tokens in every page region and skips missing images', () => {
+test('native docx PNG resolves media tokens in every page region and refuses a picture it cannot draw', () => {
   const parts = raw.unzip_docx(fixture) as Record<string, Uint8Array>;
   const blue = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYPj/HwADAgH/5ncLrgAAAABJRU5ErkJggg==';
   parts['word/media/image1.png'] = new Uint8Array(Buffer.from(blue, 'base64'));
@@ -204,7 +204,7 @@ test('native docx PNG resolves media tokens in every page region and skips missi
     const image = (x: number, relId = 'media:0') => ({ kind: 'image', relId, x, y: 10, w: 10, h: 10 });
     const list = JSON.stringify({ pages: [{
       pageIndex: 0, width: 160, height: 60,
-      primitives: [image(10), image(110, 'media:999'), image(130, `data:image/png;base64,${blue}`), {
+      primitives: [image(10), image(130, `data:image/png;base64,${blue}`), {
         kind: 'shape', x: 145, y: 10, w: 10, h: 10,
         geometryPath: [{ type: 'move', x: 145, y: 10 }, { type: 'line', x: 155, y: 10 }, { type: 'line', x: 155, y: 20 }, { type: 'line', x: 145, y: 20 }, { type: 'close' }],
         fillPaint: { kind: 'picture', pictureSrc: 'media:0', pictureFillMode: 'stretch' },
@@ -224,6 +224,29 @@ test('native docx PNG resolves media tokens in every page region and skips missi
       for (const x of [15, 35, 55, 75, 95, 135, 150]) expect(pixel(x)).toEqual([0, 0, 255, 255]);
       expect(pixel(115)).toEqual([255, 255, 255, 255]);
     }
+    const dropped = JSON.stringify({ pages: [{ pageIndex: 0, width: 160, height: 60, primitives: [image(10), image(110, 'media:999')] }] });
+    expect(() => pagePng(session, dropped, 0, 1)).toThrow('png-picture-unavailable: 1 picture(s) on this page could not be drawn');
+  } finally {
+    session.free();
+  }
+});
+
+test('native docx PNG draws an EMF picture that carries text from the metafile itself', () => {
+  const parts = raw.unzip_docx(fixture) as Record<string, Uint8Array>;
+  parts['word/media/image1.emf'] = new Uint8Array(readFileSync(new URL('../../crates/ooxml-metafile/tests/fixtures/libreoffice-one-line.emf', import.meta.url)));
+  parts['[Content_Types].xml'] = new TextEncoder().encode(new TextDecoder().decode(parts['[Content_Types].xml'])
+    .replace('</Types>', '<Default Extension="emf" ContentType="image/x-emf"/></Types>'));
+  const session = new raw.EditSession(407);
+  try {
+    session.set_media_tokens(true);
+    session.open_docx(raw.rezip_docx(parts), true);
+    const list = JSON.stringify({ pages: [{ pageIndex: 0, width: 200, height: 60,
+      primitives: [{ kind: 'image', relId: 'media:0', x: 0, y: 0, w: 200, h: 60 }] }] });
+    const png = pagePng(session, list, 0, 1);
+    const pixels = pngPixels(png);
+    let painted = 0;
+    for (let at = 0; at < pixels.length; at += 4) if (pixels[at] < 200 || pixels[at + 1] < 200 || pixels[at + 2] < 200) painted++;
+    expect(painted).toBeGreaterThan(20);
   } finally {
     session.free();
   }

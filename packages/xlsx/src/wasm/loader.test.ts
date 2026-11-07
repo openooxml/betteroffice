@@ -415,6 +415,34 @@ describe('wasm loader', () => {
     }
   });
 
+  it('refuses a row insert inside a multi-level chart range before it applies', async () => {
+    const zip = await JSZip.loadAsync(chartBytes());
+    const chart = await zip.file('xl/charts/chart1.xml')!.async('string');
+    const multiLevel = chart.replace(
+      /<c:cat><c:strRef><c:f>Charts!\$A\$2:\$A\$5<\/c:f>.*?<\/c:strRef><\/c:cat>/,
+      '<c:cat><c:multiLvlStrRef><c:f>Charts!$A$2:$B$5</c:f><c:multiLvlStrCache><c:ptCount val="4"/>'
+        + '<c:lvl><c:pt idx="0"><c:v>12</c:v></c:pt><c:pt idx="1"><c:v>18</c:v></c:pt><c:pt idx="2"><c:v>15</c:v></c:pt><c:pt idx="3"><c:v>24</c:v></c:pt></c:lvl>'
+        + '<c:lvl><c:pt idx="0"><c:v>Q1</c:v></c:pt><c:pt idx="1"><c:v>Q2</c:v></c:pt><c:pt idx="2"><c:v>Q3</c:v></c:pt><c:pt idx="3"><c:v>Q4</c:v></c:pt></c:lvl>'
+        + '</c:multiLvlStrCache></c:multiLvlStrRef></c:cat>'
+    );
+    expect(multiLevel).not.toBe(chart);
+    zip.file('xl/charts/chart1.xml', multiLevel);
+    const handle = openWorkbook(await zip.generateAsync({ type: 'uint8array' }));
+    try {
+      const saved = handle.save();
+      const history = handle.historyState();
+      expect(() => handle.applyOps([{ type: 'insertRows', sheet: 0, at: 3, count: 1 }])).toThrow(
+        'xl/charts/chart1.xml references cells this edit would move, and it cannot be rewritten'
+      );
+      expect(handle.historyState()).toEqual(history);
+      expect(handle.save()).toEqual(saved);
+      expect(handle.applyOps([{ type: 'insertRows', sheet: 0, at: 10, count: 1 }]).applied).toBe(true);
+      openWorkbook(handle.save()).dispose();
+    } finally {
+      handle.dispose();
+    }
+  });
+
   it('refuses to move a chart pinned to the sheet by an absolute anchor', () => {
     const handle = openWorkbook(chartBytes());
     const viewport = { x: 0, y: 0, width: 800, height: 800 };

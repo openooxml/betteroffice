@@ -21,6 +21,7 @@ import { useContextMenu } from '../../../../shared/react-toolbar/ContextMenu';
 import type { OverflowMenuEntry } from '../../../../shared/react-toolbar/MenuList';
 import { xlsxContextMenuEntries } from '../contextMenu/menus';
 import { commandReason, initialZoomScale } from '../commands/evaluate';
+import { REFUSAL_CAUSE_KEYS, type XlsxRefusalCause } from '../commands/refusalCause';
 import type { XlsxCommandFailureCode } from '../commands/types';
 import type { InputDraft, InputSeal } from '../commands/inputCoordinator';
 import { inPluginChrome, pluginEventStore } from '../commands/pluginEvents';
@@ -215,7 +216,9 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const { setSelection, selectionRef, setView, viewRef, setPainted } = presentation;
   const [catalog, setCatalog, catalogRef] = useSyncedState<WorkbookSheetSummary[]>([]);
   const [zoom, setZoom, zoomRef] = useSyncedState(initialZoomScale(props.initialZoom));
-  const [refusal, setRefusal] = useState<{ code: XlsxCommandFailureCode; detail?: string; message?: string } | null>(null);
+  const [refusal, setRefusal] = useState<{
+    code: XlsxCommandFailureCode; detail?: string; message?: string; cause?: XlsxRefusalCause;
+  } | null>(null);
   const [selectedChart, setSelectedChart, chartRef] = useSyncedState<{ id: string; movable: boolean } | null>(null);
   const [chartOffset, setChartOffset] = useState<{ x: number; y: number } | null>(null);
   const [renaming, setRenaming] = useState<number | null>(null);
@@ -316,6 +319,8 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       setRefusal({ code: error.code, message: error.message });
     } else if (error instanceof PeerlessWorkerCommandRefusal && error.status.reason === 'read-only') {
       setRefusal({ code: 'read-only' });
+    } else if (error instanceof PeerlessWorkerCommandRefusal && error.code === 'edit-unsupported') {
+      setRefusal({ code: error.code, cause: error.cause ?? 'other' });
     } else if (error instanceof WorkerInputRefusal) {
       setRefusal({ code: error.code, detail: error.code === 'sheet-protected' ? undefined : error.message });
     } else if (error instanceof XlsxCommandAdmissionError) setRefusal({ code: error.code });
@@ -1608,7 +1613,8 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       anchor.download = `${(propsRef.current.fileName ?? 'workbook.xlsx').replace(/\.xlsx$/i, '')}.png`;
       document.body.appendChild(anchor); anchor.click(); anchor.remove(); URL.revokeObjectURL(url);
     },
-    focusGrid: focus, refuse: (reason) => setRefusal({ code: reason.code as XlsxCommandFailureCode }),
+    focusGrid: focus, refuse: (reason) => setRefusal(reason.code === 'edit-unsupported'
+      ? { code: reason.code, message: reason.message } : { code: reason.code as XlsxCommandFailureCode }),
     menu: {
       clipboard: menuClipboard,
       clear: () => clear() ?? Promise.resolve(),
@@ -1777,14 +1783,10 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     event.currentTarget.style.cursor = chart?.movable && editable() ? 'move' : chart || link ? 'pointer' : 'default';
     event.currentTarget.title = chart ? '' : link?.tooltip ?? '';
   };
-  const onClick = (event: MouseEvent) => {
-    if (fromPlugin(event) || run?.failure) return;
-    const { cell } = point(event);
-    const start = clickStart.current;
-    clickStart.current = null;
+  const followLink = (row: number, col: number) => {
     const frame = sourceRef.current?.painted?.displayList;
-    if (!cell || !start || !frame || cell.row !== start.row || cell.col !== start.col) return;
-    const link = hyperlinkAtCell(frame, cell.row, cell.col);
+    if (!frame || run?.failure) return;
+    const link = hyperlinkAtCell(frame, row, col);
     if (!link) return;
     const href = safeExternalHyperlink(link);
     if (href) { window.open(href, '_blank', 'noopener,noreferrer'); return; }
@@ -1793,6 +1795,18 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     if (!destination) return;
     const sheet = sheets.findIndex((entry) => entry.name.toLowerCase() === destination.sheetName.toLowerCase());
     if (sheet >= 0) navigate(sheet, selectionAt(destination));
+  };
+  const followLinkRef = useRef(followLink);
+  followLinkRef.current = followLink;
+  const followLinkFromMirror = useCallback((row: number, col: number) => followLinkRef.current(row, col), []);
+  const onClick = (event: MouseEvent) => {
+    if (fromPlugin(event) || run?.failure) return;
+    const { cell } = point(event);
+    const start = clickStart.current;
+    clickStart.current = null;
+    const frame = sourceRef.current?.painted?.displayList;
+    if (!cell || !start || !frame || cell.row !== start.row || cell.col !== start.col) return;
+    followLink(cell.row, cell.col);
   };
   const onKeyDown = (event: KeyboardEvent) => {
     if (fromPlugin(event) || !run?.ready || run.failure || !selectionRef.current || !viewRef.current ||
@@ -1969,10 +1983,11 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
           {!props.file && !error && <div data-testid="xlsx-empty" role="status" style={{ position: 'absolute', inset: 0,
             display: 'grid', placeItems: 'center', color: '#5f6368', pointerEvents: 'none' }}>{t('editor.openPrompt')}</div>}
         </div>
-        <PeerlessWorkerAccessibility store={presentation} active={active} sheets={sheets} />
+        <PeerlessWorkerAccessibility store={presentation} active={active} sheets={sheets} onFollowLink={followLinkFromMirror} />
         <PeerlessWorkerAnnouncer store={presentation} active={active} sheets={sheets} focusTarget={scrollRef} announceRef={announceRef} />
         {refusal && <div data-testid="xlsx-input-refusal" role="alert">
-          {refusal.message ?? <>{commandReason(refusal.code, { translate: t }).message}{refusal.detail ? `: ${refusal.detail}` : ''}</>}
+          {refusal.message ?? (refusal.cause ? t(REFUSAL_CAUSE_KEYS[refusal.cause])
+            : <>{commandReason(refusal.code, { translate: t }).message}{refusal.detail ? `: ${refusal.detail}` : ''}</>)}
         </div>}
         {error && sheets.length > 0 && <WorkbookFailure kind="stopped" details={error.message} />}
         {gridMenu.element}{tabMenu.element}

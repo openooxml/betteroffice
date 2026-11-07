@@ -79,6 +79,44 @@ function expectThrownParity(wasmCall: () => unknown, nativeCall: () => unknown):
 }
 
 describe('docx native engine parity', () => {
+  test('an inserted table takes the document table style margins in both engines', () => {
+    const encoder = new TextEncoder();
+    const styled = wasm.rezip_docx({
+      '[Content_Types].xml': encoder.encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>'),
+      '_rels/.rels': encoder.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'),
+      'word/_rels/document.xml.rels': encoder.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>'),
+      'word/styles.xml': encoder.encode('<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="table" w:default="1" w:styleId="TableNormal"><w:name w:val="Normal Table"/><w:tblPr><w:tblInd w:w="0" w:type="dxa"/><w:tblCellMar><w:top w:w="0" w:type="dxa"/><w:left w:w="108" w:type="dxa"/><w:bottom w:w="0" w:type="dxa"/><w:right w:w="108" w:type="dxa"/></w:tblCellMar></w:tblPr></w:style></w:styles>'),
+      'word/document.xml': encoder.encode('<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Engine text</w:t></w:r></w:p><w:sectPr/></w:body></w:document>'),
+    });
+    const hostEnv = JSON.stringify({
+      tableStyleCellMargins: { TableNormal: { left: { value: 108, type: 'dxa' }, right: { value: 108, type: 'dxa' } } },
+      defaultTableStyleId: 'TableNormal',
+    });
+    for (const [bytes, env] of [[fixture, hostEnv], [styled, '{}']] as const) {
+      const expected = new wasm.EditSession(17);
+      const actual = new native.EditSession(17);
+      try {
+        const lowered = (session: Session) => {
+          session.seed_from_docx(bytes, 'opening');
+          session.insert_table('body', paragraphId(session), 0, 1, 2, 'Owner', '2026-11-07T12:00:00Z');
+          return JSON.parse(session.yrs_blocks_for_story('body', env)) as Array<{
+            kind: string;
+            rows?: Array<{ cells: Array<{ padding?: { left: number; right: number; top: number; bottom: number } }> }>;
+          }>;
+        };
+        const wasmBlocks = lowered(expected);
+        const nativeBlocks = lowered(actual);
+        expect(nativeBlocks).toEqual(wasmBlocks);
+        const padding = wasmBlocks.find((block) => block.kind === 'table')?.rows?.[0]?.cells[0]?.padding;
+        expect(padding?.left).toBeCloseTo(7.2, 6);
+        expect(padding?.right).toBeCloseTo(7.2, 6);
+      } finally {
+        actual.free();
+        expected.free();
+      }
+    }
+  });
+
   test.each(['open_docx', 'seed_from_docx'] as const)('%s reads the same synthetic package', (method) => {
     const expected = new wasm.EditSession(7);
     const actual = new native.EditSession(7);

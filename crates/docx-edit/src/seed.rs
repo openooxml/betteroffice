@@ -405,7 +405,41 @@ pub(crate) fn style_resolved_keys() -> impl Iterator<Item = &'static str> {
     ])
 }
 
+/// The sides of a `cellMargins` value in twips, `[top, right, bottom, left]`,
+/// with `start`/`end` read as left/right (right/left in a `bidi` table).
+pub(crate) fn cell_margin_sides(margins: Option<&Value>, bidi: bool) -> [Option<f64>; 4] {
+    let margins = margins.filter(|margins| !margins.is_null());
+    let (logical_left, logical_right) = if bidi {
+        ("end", "start")
+    } else {
+        ("start", "end")
+    };
+    let side = |keys: &[&str]| {
+        keys.iter().find_map(|key| {
+            let side = field(margins, key);
+            field(side, "value")
+                .or(side)
+                .and_then(Value::as_f64)
+                .filter(|value| value.is_finite() && *value >= 0.0)
+        })
+    };
+    [
+        side(&["top"]),
+        side(&["right", logical_right]),
+        side(&["bottom"]),
+        side(&["left", logical_left]),
+    ]
+}
+
 impl SourceMetadata {
+    pub(crate) fn table_cell_margins(
+        &self,
+        style_id: Option<&str>,
+        bidi: bool,
+    ) -> [Option<f64>; 4] {
+        self.styles.table_cell_margins(style_id, bidi)
+    }
+
     pub(crate) fn plain_patch_style_supported(
         &self,
         story: &str,
@@ -1625,6 +1659,25 @@ pub(crate) fn package_styles(
 }
 
 impl StyleResolver {
+    /// Cell margins in twips, `[top, right, bottom, left]`, that the document's
+    /// table styles give a table naming `style_id`: that style's
+    /// `w:tblCellMar`, else the default table style's, as seeding resolves them.
+    pub(crate) fn table_cell_margins(
+        &self,
+        style_id: Option<&str>,
+        bidi: bool,
+    ) -> [Option<f64>; 4] {
+        let default_style = self.default_style("table");
+        let table_style = style_id
+            .filter(|id| !id.is_empty())
+            .and_then(|id| self.style(id))
+            .or(default_style);
+        let margins = field(field(table_style, "tblPr"), "cellMargins")
+            .filter(|margins| !margins.is_null())
+            .or_else(|| field(field(default_style, "tblPr"), "cellMargins"));
+        cell_margin_sides(margins, bidi)
+    }
+
     pub(crate) fn render_paragraph(&self, paragraph: &Value) -> (JsonObject, Option<Arc<Value>>) {
         (
             paragraph_attrs(paragraph, self, &[], &[], None),

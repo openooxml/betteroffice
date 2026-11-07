@@ -26,6 +26,7 @@ export async function renderPng(engine: DocxPngEngine, options: Pick<DocxPngOpti
     const message = error instanceof Error ? error.message : '';
     if (message.startsWith('png-font-unavailable: ')) throw fontUnavailable(message.slice(22));
     if (message.startsWith('png-too-large: ')) throw new PngExportError('canvas-too-large', message.slice(15));
+    if (message.startsWith('png-picture-unavailable: ')) throw new PngExportError('picture-unavailable', message.slice(25));
     throw error;
   }
   options.signal?.throwIfAborted();

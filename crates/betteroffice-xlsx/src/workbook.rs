@@ -27,7 +27,7 @@ use self::proposals::proposal_edit_is_stale;
 
 use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, hash_map::Entry};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::{Range, RangeInclusive};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex, Weak};
@@ -2248,6 +2248,7 @@ impl Workbook {
         let inverse = batch.finish();
         validate_model_sheets(&preview)?;
         validate_shared_drawings(&preview)?;
+        self.ensure_charts_follow(&preview, &inverse)?;
         if self.is_collaborative() {
             refuse_rule_growth(&self.model, &preview)?;
         }
@@ -4340,25 +4341,12 @@ fn validate_model_sheets(model: &WorkbookModel) -> Result<()> {
 /// once merged, and a merge that can be refused is a merge that depends on
 /// delivery order. What arrives is projected instead.
 fn validate_shared_drawings(model: &WorkbookModel) -> Result<()> {
-    let mut claims: HashMap<(&str, usize), ChartAnchor> = HashMap::new();
-    for sheet in &model.sheets {
-        for chart in &sheet.charts {
-            match claims.entry((chart.drawing.as_str(), chart.anchor_index)) {
-                Entry::Vacant(slot) => {
-                    slot.insert(chart.anchor);
-                }
-                Entry::Occupied(slot) => {
-                    if *slot.get() != chart.anchor {
-                        return Err(Error::InvalidOperation(format!(
-                            "anchor {} of {} is held by two sheets that disagree on where it sits",
-                            chart.anchor_index, chart.drawing
-                        )));
-                    }
-                }
-            }
-        }
+    match xlsx_parse::conflicting_drawing_anchor(model) {
+        Some((drawing, index, _, _)) => Err(Error::InvalidOperation(format!(
+            "anchor {index} of {drawing} is held by two sheets that disagree on where it sits"
+        ))),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 fn worksheet_edit_target(op: &Op) -> Option<SheetId> {

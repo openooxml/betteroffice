@@ -569,6 +569,9 @@ pub struct PositionedTextRun {
     /// Pixels this run's baseline sits above the line's; negative is subscript.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub baseline_offset_px: f32,
+    /// Whether layout shaped the run with kerning; `false` below the run's `kern` threshold.
+    #[serde(default = "kerned_by_default", skip_serializing_if = "is_kerned")]
+    pub kerning: bool,
     pub glyphs: Vec<PositionedGlyph>,
 }
 
@@ -591,6 +594,14 @@ impl Transform {
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+fn kerned_by_default() -> bool {
+    true
+}
+
+fn is_kerned(value: &bool) -> bool {
+    *value
 }
 
 fn is_zero(value: &f32) -> bool {

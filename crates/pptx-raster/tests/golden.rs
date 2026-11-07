@@ -209,6 +209,7 @@ fn text_box(x: f32, y: f32, text: &str, size_px: f32, underline: bool) -> Primit
                 color: "#1b2733".into(),
                 baseline_offset_px: 0.0,
                 letter_spacing_px: 0.0,
+                kerning: true,
                 glyphs,
             }],
             caret_stops: vec![CaretStop { position: 0, x }],

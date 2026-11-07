@@ -18,7 +18,7 @@ name = "pptx_raster"
 fuzzing = []
 
 [dependencies]
-ooxml-raster.workspace = true
+ooxml-raster = { workspace = true, features = ["svg"] }
 image = { version = "0.25", default-features = false, features = [
   "bmp",
   "gif",
@@ -32,10 +32,9 @@ ooxml-metafile = { workspace = true, features = ["svg"] }
 ooxml-text.workspace = true
 pptx-edit = { workspace = true, features = ["metafile-svg"] }
 pptx-render.workspace = true
-resvg = { version = "0.48", default-features = false, features = ["text", "raster-images"] }
-simplecss = "=0.2.2"
-svgtypes = "=0.16.1"
+unicode-properties = { version = "0.1.4", default-features = false, features = ["general-category"] }
 tiny-skia = "0.12"
 
 [dev-dependencies]
 png = "0.18"
+serde_json = "1"

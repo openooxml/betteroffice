@@ -21,6 +21,7 @@ use docx_layout::display_list::{
     LinePrimitive, PageBorderPrimitive, PageBorderSide, PageBorderZOrder, Primitive, RectPrimitive,
     RevisionKind, ShapePathCommand, ShapePrimitive,
 };
+use ooxml_raster::svg;
 use ooxml_raster::{encode_png, parse_css_color};
 use ooxml_text::{FontId, FontStore};
 use serde_json::{Number, Value};
@@ -42,6 +43,9 @@ pub type ImageMap = HashMap<String, Vec<u8>>;
 pub const MAX_IMAGE_PIXELS: u64 = 33_554_432;
 /// Every image decoded for one page, at four times that surface.
 pub const MAX_PAGE_IMAGE_PIXELS: u64 = 67_108_864;
+/// Render work all of one page's SVG and metafile pictures may spend
+/// together: twice what one picture may.
+pub const MAX_PAGE_SVG_WORK: u64 = 2 * svg::MAX_SVG_RENDER_WORK;
 /// One decoded image's source buffer plus the pixmap it converts to, at
 /// [`MAX_IMAGE_PIXELS`] of RGBA8. A deeper source costs more per pixel, so
 /// pixels alone do not bound the memory a decode needs.
@@ -211,6 +215,7 @@ pub fn render_page_cached_scaled(
     let mut pixmap = Pixmap::new(width, height).ok_or_else(|| "invalid pixmap size".to_string())?;
     pixmap.fill(Color::WHITE);
     let mut renderer = Renderer::new(width, height, glyphs, images);
+    renderer.scratch.images.fonts = Some(resources.fonts);
     renderer.scale = scale;
     renderer.paint_page(&mut pixmap, page, resources)?;
     Ok(RenderedPage {
@@ -766,7 +771,7 @@ fn paint_shape<'k>(
     };
     let picture_draws = picture
         .as_ref()
-        .map(|source| picture_fill_draws(shape, source))
+        .map(|(source, intrinsic)| picture_fill_draws(shape, source, *intrinsic))
         .transpose()?;
     if let Some(draws) = &picture_draws {
         budget.charge_path(draws.draws.len() as u64)?;
@@ -783,7 +788,7 @@ fn paint_shape<'k>(
     }
     type Draw<'d> = Box<dyn Fn(&mut Pixmap, Transform, Option<&Mask>) + 'd>;
     let mut parts: Vec<Draw<'_>> = Vec::new();
-    if let (Some(source), Some(draws)) = (&picture, &picture_draws) {
+    if let (Some((source, _)), Some(draws)) = (&picture, &picture_draws) {
         let path = &path;
         parts.push(Box::new(
             move |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>| {
@@ -853,12 +858,15 @@ fn has_picture_fill(shape: &ShapePrimitive) -> bool {
 
 /// A picture fill's decoded source. `None` leaves the shape to its solid fill,
 /// as the web backend does for a picture it cannot resolve.
+/// A picture fill's decoded raster and, for an SVG, the size it tiles at.
+type PictureSource = (Arc<Pixmap>, Option<(f32, f32)>);
+
 fn picture_fill_source<'k>(
     shape: &'k ShapePrimitive,
     resources: &RenderResources<'_>,
     scratch: &mut Scratch<'k>,
     scope: ImageScope<'k>,
-) -> Option<Arc<Pixmap>> {
+) -> Option<PictureSource> {
     if !has_picture_fill(shape) {
         return None;
     }
@@ -871,7 +879,10 @@ fn picture_fill_source<'k>(
         scratch.images.skipped += 1;
         return None;
     };
-    scratch.images.resolve(source)
+    let key = scratch.images.cache.key(&source);
+    let pixmap = scratch.images.resolve(source)?;
+    let intrinsic = scratch.images.cache.intrinsic.get(&key).copied();
+    Some((pixmap, intrinsic))
 }
 
 /// What a picture fill draws: each source placement, the rectangle a stretched
@@ -891,7 +902,11 @@ fn fill_number(paint: &Value, object: &str, key: &str) -> f32 {
         .unwrap_or(0.0) as f32
 }
 
-fn picture_fill_draws(shape: &ShapePrimitive, source: &Pixmap) -> Result<PictureFillDraws, String> {
+fn picture_fill_draws(
+    shape: &ShapePrimitive,
+    source: &Pixmap,
+    intrinsic: Option<(f32, f32)>,
+) -> Result<PictureFillDraws, String> {
     let paint = shape
         .attrs
         .fill_paint
@@ -907,7 +922,9 @@ fn picture_fill_draws(shape: &ShapePrimitive, source: &Pixmap) -> Result<Picture
         .filter(|value| value.is_finite())
         .map_or(1.0, |value| value.clamp(0.0, 1.0) as f32);
     let tiled = paint.get("pictureFillMode").and_then(Value::as_str) == Some("tile");
-    if tiled && let Some(draws) = picture_tiles(paint, source, box_x, box_y, box_w, box_h) {
+    if tiled
+        && let Some(draws) = picture_tiles(paint, source, intrinsic, box_x, box_y, box_w, box_h)
+    {
         return Ok(PictureFillDraws {
             draws,
             frame: None,
@@ -954,12 +971,14 @@ fn picture_fill_draws(shape: &ShapePrimitive, source: &Pixmap) -> Result<Picture
 fn picture_tiles(
     paint: &Value,
     source: &Pixmap,
+    intrinsic: Option<(f32, f32)>,
     box_x: f32,
     box_y: f32,
     box_w: f32,
     box_h: f32,
 ) -> Option<Vec<Transform>> {
-    let (source_width, source_height) = (source.width() as f32, source.height() as f32);
+    let (source_width, source_height) =
+        intrinsic.unwrap_or((source.width() as f32, source.height() as f32));
     if box_w <= 0.0 || box_h <= 0.0 {
         return None;
     }
@@ -1000,7 +1019,10 @@ fn picture_tiles(
     let flip = text("flip").unwrap_or("none");
     let flip_x = matches!(flip, "x" | "xy");
     let flip_y = matches!(flip, "y" | "xy");
-    let (scale_x, scale_y) = (tile_w / source_width, tile_h / source_height);
+    let (scale_x, scale_y) = (
+        tile_w / source.width() as f32,
+        tile_h / source.height() as f32,
+    );
     let mut draws = Vec::new();
     let mut row = start_row;
     loop {
@@ -1766,6 +1788,8 @@ pub struct ImageCache {
     clock: u64,
     bytes: u64,
     hasher: std::hash::RandomState,
+    fontdb: Option<(u64, usize, Arc<svg::usvg::fontdb::Database>)>,
+    intrinsic: HashMap<u64, (f32, f32)>,
 }
 
 impl Default for ImageCache {
@@ -1782,7 +1806,22 @@ impl ImageCache {
             clock: 0,
             bytes: 0,
             hasher: std::hash::RandomState::new(),
+            fontdb: None,
+            intrinsic: HashMap::new(),
         }
+    }
+
+    /// The faces a metafile's text renders with, rebuilt when the store grows.
+    fn fontdb_for(&mut self, fonts: &FontStore) -> Arc<svg::usvg::fontdb::Database> {
+        let generation = (fonts.id(), fonts.font_count());
+        if let Some((id, count, fontdb)) = &self.fontdb
+            && (*id, *count) == generation
+        {
+            return Arc::clone(fontdb);
+        }
+        let fontdb = svg::metafile_fontdb(fonts);
+        self.fontdb = Some((generation.0, generation.1, Arc::clone(&fontdb)));
+        fontdb
     }
 
     /// Content digest of one source's bytes, namespaced by source kind.
@@ -1838,6 +1877,7 @@ impl ImageCache {
                 break;
             };
             self.recency.remove(&(stamp, evicted));
+            self.intrinsic.remove(&evicted);
             if let Some(entry) = self.entries.remove(&evicted) {
                 self.bytes -= entry.weight;
             }
@@ -1849,9 +1889,13 @@ impl ImageCache {
 /// source pays this page's decode budget, later references resolve free.
 struct PageImages<'c> {
     cache: &'c mut ImageCache,
+    fonts: Option<&'c FontStore>,
     resolved: HashMap<u64, Option<Arc<Pixmap>>>,
     pixels: u64,
     bytes: u64,
+    work: u64,
+    replay: ooxml_metafile::ReplayBudget,
+    intrinsic: Option<(f32, f32)>,
     skipped: usize,
 }
 
@@ -1859,9 +1903,13 @@ impl<'c> PageImages<'c> {
     fn new(cache: &'c mut ImageCache) -> Self {
         Self {
             cache,
+            fonts: None,
             resolved: HashMap::new(),
             pixels: 0,
             bytes: 0,
+            work: 0,
+            replay: ooxml_metafile::ReplayBudget::default(),
+            intrinsic: None,
             skipped: 0,
         }
     }
@@ -1925,6 +1973,11 @@ impl<'c> PageImages<'c> {
                 }
             }
         };
+        if let Some(intrinsic) = self.intrinsic.take()
+            && matches!(decoded, Decode::Decoded(_))
+        {
+            self.cache.intrinsic.insert(key, intrinsic);
+        }
         match decoded {
             Decode::Decoded(pixmap) => {
                 let pixmap = Arc::new(pixmap);
@@ -1939,6 +1992,63 @@ impl<'c> PageImages<'c> {
         }
     }
 
+    /// An SVG, or a metafile played into one, rasterized within what the
+    /// page's budget has left. A refusal the budget caused is retried by the
+    /// next page; one the document caused is cached.
+    fn decode_vector(&mut self, bytes: &[u8], charge: &mut ImageCharge) -> Decode {
+        let left = MAX_PAGE_IMAGE_PIXELS
+            .saturating_sub(self.pixels)
+            .min(MAX_PAGE_IMAGE_BYTES.saturating_sub(self.bytes) / 8)
+            .min(MAX_IMAGE_PIXELS);
+        let work_left = MAX_PAGE_SVG_WORK.saturating_sub(self.work);
+        let parsed = if ooxml_metafile::is_metafile(bytes) {
+            let Ok(markup) = ooxml_metafile::to_svg_with_budget(bytes, &mut self.replay) else {
+                return Decode::Refused;
+            };
+            let fontdb = if svg::has_text_element(markup.markup.as_bytes()) {
+                self.fonts.map(|fonts| self.cache.fontdb_for(fonts))
+            } else {
+                None
+            };
+            svg::parse_metafile_within(markup.markup.as_bytes(), left, work_left, fontdb)
+        } else {
+            svg::parse_within_work(bytes, left, work_left)
+        };
+        let image = match parsed {
+            Ok(image) => image,
+            Err(svg::SvgRefusal::RenderTooCostly | svg::SvgRefusal::RasterTooLarge)
+                if left < MAX_IMAGE_PIXELS || work_left < svg::MAX_SVG_RENDER_WORK =>
+            {
+                return Decode::OverBudget;
+            }
+            Err(_) => return Decode::Refused,
+        };
+        let pixels = image.pixels();
+        let cost = pixels.saturating_mul(8);
+        if pixels > MAX_IMAGE_PIXELS || cost > MAX_IMAGE_BYTES {
+            return Decode::Refused;
+        }
+        if self.pixels + pixels > MAX_PAGE_IMAGE_PIXELS || self.bytes + cost > MAX_PAGE_IMAGE_BYTES
+        {
+            return Decode::OverBudget;
+        }
+        self.pixels += pixels;
+        self.bytes += cost;
+        self.work += image.work();
+        charge.pixels = pixels;
+        charge.bytes_post = cost;
+        IMAGE_DECODE_COUNT.fetch_add(1, Ordering::Relaxed);
+        let Ok((mut data, size)) = image.render() else {
+            return Decode::Refused;
+        };
+        ooxml_raster::premultiply_rgba(&mut data);
+        self.intrinsic = Some(image.intrinsic());
+        match Pixmap::from_vec(data, size) {
+            Some(pixmap) => Decode::Decoded(pixmap),
+            None => Decode::Refused,
+        }
+    }
+
     /// `Decoded` pixels, `Refused` for content this backend will not draw
     /// (bytes it cannot decode, or an image past [`MAX_IMAGE_PIXELS`] or
     /// [`MAX_IMAGE_BYTES`]), or `OverBudget` when the page's decode budget
@@ -1946,6 +2056,10 @@ impl<'c> PageImages<'c> {
     /// so a stream that fails late still costs what it claimed.
     fn decode(&mut self, bytes: &[u8], charge: &mut ImageCharge) -> Decode {
         use image::ImageDecoder as _;
+
+        if ooxml_metafile::is_metafile(bytes) || svg::looks_like_svg(bytes) {
+            return self.decode_vector(bytes, charge);
+        }
 
         let Some(mut decoder) = image::ImageReader::new(Cursor::new(bytes))
             .with_guessed_format()

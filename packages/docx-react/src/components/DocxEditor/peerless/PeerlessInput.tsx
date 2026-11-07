@@ -44,7 +44,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       const target = event.target;
       if (host && target instanceof Node && (target.contains(host) || host.contains(target))) scrolledBeforeFirstCaret.current = true;
     };
-    const types = ['wheel', 'touchmove', 'pointerdown', 'keydown'] as const;
+    const types = ['wheel', 'touchmove', 'pointerdown', 'keydown', 'scroll'] as const;
     for (const type of types) document.addEventListener(type, onIntent, { capture: true, passive: true });
     return () => { for (const type of types) document.removeEventListener(type, onIntent, true); };
   }, [props.caretHostRef]);

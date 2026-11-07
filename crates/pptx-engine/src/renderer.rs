@@ -168,13 +168,17 @@ impl Renderer {
             );
             for (index, face) in faces.into_iter().enumerate() {
                 if index == 0 && !has_primary {
-                    let bytes = face.load().map_err(engine_error)?;
+                    let bytes = face
+                        .load()
+                        .map_err(|error| font_unavailable(&face.family, &request.family, error))?;
                     self.install_font(&request.family, request.bold, request.italic, bytes)?;
                 } else if !self
                     .renderer
                     .has_fallback_font(&face.family, face.bold, face.italic)
                 {
-                    let bytes = face.load().map_err(engine_error)?;
+                    let bytes = face
+                        .load()
+                        .map_err(|error| font_unavailable(&face.family, &request.family, error))?;
                     self.register_fallback_font(&face.family, face.bold, face.italic, bytes)?;
                 }
             }
@@ -710,6 +714,14 @@ impl Default for Renderer {
     }
 }
 
+/// A bundled face the slide needs that could not load, named as the PNG export reports it.
+#[cfg(feature = "fonts")]
+fn font_unavailable(face: &str, family: &str, error: impl std::fmt::Display) -> EngineError {
+    EngineError::message(format!(
+        "png-font-unavailable: {face} for {family} could not load: {error}"
+    ))
+}
+
 fn font_error(error: pptx_render::RenderError) -> EngineError {
     match error {
         pptx_render::RenderError::ResourceLimit(_) => {
@@ -909,6 +921,34 @@ mod tests {
         assert_eq!(renderer.last_slide, shown);
         assert_eq!(exported, renderer.layout_slide_json(&document, 1).unwrap());
         assert_ne!(renderer.last_slide, shown);
+    }
+
+    #[cfg(feature = "fonts")]
+    #[test]
+    fn default_fonts_name_the_face_that_cannot_load() {
+        let empty =
+            std::env::temp_dir().join(format!("pptx-engine-no-packs-{}", std::process::id()));
+        std::fs::create_dir_all(&empty).unwrap();
+        let manager = betteroffice_fonts::FontManager::new(
+            &betteroffice_fonts::FontSource::Bundled(betteroffice_fonts::BundledFontOptions {
+                packs: vec![betteroffice_fonts::FontPack::Latin],
+                base_url: Some(empty.clone()),
+            }),
+            betteroffice_fonts::FontLoading::OnDemand,
+        )
+        .unwrap();
+        let document = pptx_edit::DeckSession::open(DECK, 917).unwrap();
+        let mut renderer = Renderer::new();
+        let error = renderer
+            .register_default_fonts(&document, 0, &manager)
+            .unwrap_err();
+        let _ = std::fs::remove_dir_all(&empty);
+        assert!(
+            error.message.starts_with("png-font-unavailable: ")
+                && error.message.contains(" could not load: "),
+            "{}",
+            error.message
+        );
     }
 
     #[test]

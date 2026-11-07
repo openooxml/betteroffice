@@ -207,6 +207,7 @@ export type XlsxCommandDisabledCode =
 export type XlsxCommandFailureCode =
   | XlsxCommandDisabledCode
   | 'input-failed'
+  | 'edit-unsupported'
   | 'sheet-protected'
   | 'host-refused'
   | 'document-replaced'

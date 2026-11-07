@@ -5339,6 +5339,7 @@ fn chart_text_primitive(
                     color: text.color.to_owned(),
                     letter_spacing_px: tracking,
                     baseline_offset_px: 0.0,
+                    kerning: true,
                     glyphs,
                 }
             },
@@ -6574,6 +6575,11 @@ fn positioned_runs(
                     && run.underline == cluster.style.underline
                     && run.strike == cluster.style.strike
                     && run.color == cluster.style.color
+                    && run.kerning
+                        == kerned(
+                            cluster.style.kern_pt,
+                            autofit_size_pt(cluster.style.font_size_pt, scale),
+                        )
             });
         if !append {
             run_direction = None;
@@ -6596,6 +6602,10 @@ fn positioned_runs(
                 color: cluster.style.color.clone(),
                 letter_spacing_px: cluster.tracking,
                 baseline_offset_px,
+                kerning: kerned(
+                    cluster.style.kern_pt,
+                    autofit_size_pt(cluster.style.font_size_pt, scale),
+                ),
                 glyphs: Vec::new(),
             });
         }
