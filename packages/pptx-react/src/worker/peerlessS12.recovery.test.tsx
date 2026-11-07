@@ -166,6 +166,7 @@ test('recovery reports typing the worker never acknowledged before it failed ins
   await waitFor(() => expect(replyControl.count()).toBeGreaterThan(0));
   await act(async () => { faultControl.crash(); });
   await waitFor(() => expect(error).toHaveBeenCalled());
+  await act(async () => { replyControl.release(); });
   const recovered = await value.api.recoverySave();
   expect(recovered.unrecoveredIntents?.length).toBeGreaterThan(0);
   expect(recovered.unrecoveredIntents!.every((intent) => intent.reason === 'unknown-outcome')).toBe(true);

@@ -283,6 +283,7 @@ for (const format of ['docx', 'pptx'] as const) {
   test(`${format}: worker crash recovery preserves edits and accepts new typing`, async ({ page }, info) => {
     await open(page, format);
     await edit(page, format, 'BeforeCrash');
+    if (format === 'pptx') await expect(page.locator('.document-name')).toContainText('Edited');
     const workerName = format === 'docx' ? 'docxWorker' : `${format}SessionWorker`;
     const count = await page.evaluate(() => window.__asyncRobustness.workers.length);
     await page.evaluate((name) => {
