@@ -179,15 +179,15 @@ fn play_full_emf(
     if budget.exceeded.get() {
         return Err("the metafile draws more than the replay limits".to_owned());
     }
-    if plus.is_err() {
-        budget.refund(before.saturating_sub(budget.remaining.get().pixels));
-    }
+    let plus_pixels = before.saturating_sub(budget.remaining.get().pixels);
     if let Ok(player) = &plus
         && player.omissions.is_empty()
         && !player.ops.is_empty()
     {
         return plus;
     }
+    budget.refund(plus_pixels);
+    let before = budget.remaining.get().pixels;
     let gdi = play_emf::<true>(bytes, depth, false, Some(Rc::clone(&budget)));
     if budget.exceeded.get() {
         return Err("the metafile draws more than the replay limits".to_owned());
@@ -195,7 +195,12 @@ fn play_full_emf(
     match gdi {
         Ok(gdi) if !gdi.ops.is_empty() => Ok(gdi),
         Err(error) if plus.as_ref().is_ok_and(|plus| plus.ops.is_empty()) => Err(error),
-        gdi => plus.or(gdi),
+        _ if plus.is_ok() => {
+            budget.refund(before.saturating_sub(budget.remaining.get().pixels));
+            budget.spend(0, plus_pixels);
+            plus
+        }
+        gdi => gdi,
     }
 }
 

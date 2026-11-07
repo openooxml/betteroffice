@@ -949,3 +949,38 @@ fn a_bitmap_that_cannot_be_decoded_is_not_decoded_again() {
     );
     assert!(work_spent(&blits(64)) < work_spent(&blits(1)) + 64 * 64);
 }
+
+#[test]
+fn an_emf_plus_only_metafile_replayed_again_gets_back_its_first_pass_pixels() {
+    let side = 4096;
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    png.extend(13u32.to_be_bytes());
+    png.extend(b"IHDR");
+    png.extend(side.to_be_bytes());
+    png.extend(side.to_be_bytes());
+    png.extend([8, 6, 0, 0, 0, 0, 0, 0, 0, 7]);
+    let mut image = u32s(&[0xDBC0_1002, 1]);
+    image.extend(i32s(&[side as i32, side as i32, 0]));
+    image.extend(u32s(&[0, 1]));
+    image.extend(png);
+    let bytes = Emf::new(100, 100)
+        .rec(
+            70,
+            &plus(&[
+                plus_header(false),
+                (0x4008, 0x0501, image),
+                plus_draw_image(
+                    1,
+                    [0.0, 0.0, side as f32, side as f32],
+                    [0.0, 0.0, 50.0, 50.0],
+                ),
+                (0x4037, 0, Vec::new()),
+                plus_eof(),
+            ])
+            .1,
+        )
+        .bytes();
+    let drawing = replay(&bytes).unwrap();
+    assert!(drawing.ops.iter().any(|op| draws(op, 7)));
+    assert_eq!(pixels_spent(&bytes), u64::from(side * side));
+}
