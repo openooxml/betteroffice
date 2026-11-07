@@ -3224,7 +3224,10 @@ mod tests {
             )
             .expect("render");
             assert_eq!(rendered.skipped_images, 1, "asset_id: {asset_id:?}");
-            assert_eq!(rendered.unavailable_images, unavailable, "asset_id: {asset_id:?}");
+            assert_eq!(
+                rendered.unavailable_images, unavailable,
+                "asset_id: {asset_id:?}"
+            );
         }
     }
 
