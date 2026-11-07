@@ -598,6 +598,7 @@ impl FloatBitsWalk for pptx_parse::RunProperties {
             color,
             language,
             hyperlink_relationship_id,
+            hyperlink_action,
             effects,
         } = self;
         font_size_pt.float_bits(out);
@@ -613,6 +614,7 @@ impl FloatBitsWalk for pptx_parse::RunProperties {
         color.float_bits(out);
         language.float_bits(out);
         hyperlink_relationship_id.float_bits(out);
+        hyperlink_action.float_bits(out);
         effects.float_bits(out);
     }
 }

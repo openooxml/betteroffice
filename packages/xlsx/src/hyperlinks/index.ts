@@ -1,4 +1,5 @@
 import type { DisplayList, HyperlinkRegion } from '../display-list/types';
+import { sanitizeHref } from '../../../../shared/safeHref';
 
 export interface HyperlinkDestination {
   sheetName: string;
@@ -20,14 +21,12 @@ export function hyperlinkAtCell(
 }
 
 export function safeExternalHyperlink(link: HyperlinkRegion): string | null {
-  if (!link.externalTarget) return null;
-  let url: URL;
-  try {
-    url = new URL(link.externalTarget);
-  } catch {
-    return null;
-  }
-  if (!['http:', 'https:', 'mailto:', 'tel:'].includes(url.protocol)) return null;
+  const href = sanitizeHref(link.externalTarget, {
+    relative: false,
+    protocols: ['http:', 'https:', 'mailto:', 'tel:'],
+  });
+  if (!href) return null;
+  const url = new URL(href);
   if (link.location && !url.hash) url.hash = link.location.replace(/^#/, '');
   return url.href;
 }

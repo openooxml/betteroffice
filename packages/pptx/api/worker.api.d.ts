@@ -1201,6 +1201,12 @@ export type PresentationCommandEvents = {
     ack: PresentationCommandAck;
     collaborationPipe: PipeOutputBatch<PptxPresencePeer>[];
 };
+/** @internal An intent the worker had not acknowledged, for replay after a crash. */
+export interface PresentationPendingIntent {
+    seq: number;
+    intent: PresentationCommandIntent;
+    afterSeq?: number;
+}
 export interface PresentationCommandClient {
     readonly state: PresentationCommandOpenResult;
     readCoverageFont?(family: string, text: string, have: number | null): Promise<SlicedFontRead | null>;
@@ -1212,6 +1218,8 @@ export interface PresentationCommandClient {
     renderPng?(target: PptxPngTarget, options?: PptxPngOptions): Promise<Uint8Array>;
     access?<K extends PresentationCommandAccessMethod>(method: K, ...args: Parameters<PresentationCommandAccessMethods[K]>): Promise<ReturnType<PresentationCommandAccessMethods[K]>>;
     takeRecoveryUpdate?(): ArrayBuffer | undefined;
+    /** @internal Intents sent to the worker whose acknowledgement has not arrived, in send order, with the command each one follows. */
+    pendingIntents?(): PresentationPendingIntent[];
     checkpoint?(options?: {
         rebase?: boolean;
     }): Promise<PresentationCommandSaveResult>;
@@ -3823,6 +3831,7 @@ export interface TextBoxPrimitive extends PrimitiveBase {
         align?: 'left' | 'center' | 'right' | 'justify';
         level: number;
         languages?: TextLanguage[];
+        links?: TextLink[];
         runs: Array<{
             text: string;
             fontFamily: string;
@@ -3844,6 +3853,22 @@ export interface TextLanguage {
     end: number;
     lang: string;
 }
+/** UTF-16 offsets into the paragraph's concatenated run text. */
+export interface TextLink {
+    start: number;
+    end: number;
+    target: TextLinkTarget;
+}
+export type TextLinkTarget = {
+    kind: 'url';
+    href: string;
+} | {
+    kind: 'slide';
+    index: number;
+} | {
+    kind: 'jump';
+    jump: 'next' | 'previous' | 'first' | 'last';
+};
 export interface PlaceholderPrimitive extends PrimitiveBase {
     kind: 'placeholder';
     name: string;

@@ -1,6 +1,9 @@
 //! Font-independent paragraph semantics shared by rendering and export: the layout and master a
 //! slide inherits from, the paragraph-property cascade, and list markers.
 
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
+
 use ooxml_drawingml::{
     ColorValue, ResolvedCellStyle, TableCellPosition, TableStyleFlags, Theme,
     resolve_color_value_to_hex_with_theme, resolve_theme_font_ref,
@@ -469,6 +472,238 @@ impl<'a> SlideParents<'a> {
             layout,
             master,
         }
+    }
+}
+
+const MAX_LINK_WORK: usize = 65_536;
+
+/// Conservatively detects text that can depend on deck order.
+pub fn has_internal_slide_links(package: &PptxPackage, slide: &SlideSnapshot) -> bool {
+    let parents = SlideParents::resolve(
+        package,
+        slide.source_part_path.as_deref(),
+        slide.layout_part_path.as_deref(),
+    );
+    let links = SlideLinkDependencies::new(package);
+    if let Some(source) = parents.slide
+        && slide
+            .shapes
+            .iter()
+            .any(|shape| links.snapshot_shape(shape, source))
+    {
+        return true;
+    }
+    let show_layout = parents.slide.is_none_or(|slide| slide.show_master_shapes);
+    let show_master = show_layout
+        && parents
+            .layout
+            .is_none_or(|layout| layout.show_master_shapes);
+    parents
+        .layout
+        .filter(|_| show_layout)
+        .is_some_and(|layout| {
+            layout
+                .shapes
+                .iter()
+                .any(|node| links.inherited_node(node, &layout.part_path))
+        })
+        || parents
+            .master
+            .filter(|_| show_master)
+            .is_some_and(|master| {
+                master
+                    .shapes
+                    .iter()
+                    .any(|node| links.inherited_node(node, &master.part_path))
+            })
+}
+
+struct SlideLinkDependencies<'a> {
+    package: &'a PptxPackage,
+    work: Cell<usize>,
+    exhausted: Cell<bool>,
+    parts: RefCell<HashMap<usize, bool>>,
+    drawings: RefCell<HashSet<&'a str>>,
+}
+
+impl<'a> SlideLinkDependencies<'a> {
+    fn new(package: &'a PptxPackage) -> Self {
+        Self {
+            package,
+            work: Cell::new(0),
+            exhausted: Cell::new(false),
+            parts: RefCell::new(HashMap::new()),
+            drawings: RefCell::new(HashSet::new()),
+        }
+    }
+
+    fn charge_work(&self, work: usize) -> bool {
+        if self.exhausted.get() {
+            return false;
+        }
+        if work > MAX_LINK_WORK - self.work.get() {
+            self.exhausted.set(true);
+            return false;
+        }
+        self.work.set(self.work.get() + work);
+        true
+    }
+
+    fn part_has_slide_relationship(&self, part: &str) -> Option<bool> {
+        if self.exhausted.get() {
+            return None;
+        }
+        let Some(relationships) = self.package.relationships.get(part) else {
+            return Some(false);
+        };
+        let mut parts = self.parts.borrow_mut();
+        let key = relationships.as_ptr() as usize;
+        if let Some(has_slide) = parts.get(&key) {
+            return Some(*has_slide);
+        }
+        if !self.charge_work(relationships.len()) {
+            return None;
+        }
+        let has_slide = relationships.iter().any(|link| {
+            link.target_mode == pptx_parse::TargetMode::Internal && link.has_type("/slide")
+        });
+        parts.insert(key, has_slide);
+        Some(has_slide)
+    }
+
+    fn run(&self, run: &TextRun, has_slide_relationship: bool) -> bool {
+        !self.charge_work(1)
+            || run.properties.hyperlink_action.as_deref() == Some("ppaction://hlinksldjump")
+            || (has_slide_relationship && run.properties.hyperlink_relationship_id.is_some())
+    }
+
+    fn body(&self, body: &TextBody, part: &str) -> bool {
+        let Some(has_slide_relationship) = self.part_has_slide_relationship(part) else {
+            return true;
+        };
+        body.paragraphs.iter().any(|paragraph| {
+            paragraph
+                .runs
+                .iter()
+                .any(|run| self.run(run, has_slide_relationship))
+        })
+    }
+
+    fn graphic(&self, graphic: &GraphicFrameData, part: &str, depth: usize) -> bool {
+        match graphic {
+            GraphicFrameData::Table(table) => table
+                .rows
+                .iter()
+                .flat_map(|row| &row.cells)
+                .any(|cell| !cell.merged && self.body(&cell.text, part)),
+            GraphicFrameData::Diagram {
+                drawing_part_path: Some(path),
+                ..
+            } => self.drawing(path, depth),
+            _ => false,
+        }
+    }
+
+    fn drawing(&self, path: &str, depth: usize) -> bool {
+        if self.exhausted.get() {
+            return true;
+        }
+        if self.drawings.borrow().contains(path) {
+            return false;
+        }
+        if !self.charge_work(1) {
+            return true;
+        }
+        for drawing in &self.package.diagram_drawings {
+            if !self.charge_work(1) {
+                return true;
+            }
+            if drawing.part_path == path {
+                self.drawings.borrow_mut().insert(&drawing.part_path);
+                return drawing
+                    .shapes
+                    .iter()
+                    .any(|node| self.parsed_node(node, &drawing.part_path, depth + 1));
+            }
+        }
+        false
+    }
+
+    fn inherited_node(&self, node: &ShapeNode, part: &str) -> bool {
+        !self.charge_work(1)
+            || (shape_base(node).placeholder.is_none() && self.parsed_node_contents(node, part, 0))
+    }
+
+    fn parsed_node(&self, node: &ShapeNode, part: &str, depth: usize) -> bool {
+        !self.charge_work(1) || self.parsed_node_contents(node, part, depth)
+    }
+
+    fn parsed_node_contents(&self, node: &ShapeNode, part: &str, depth: usize) -> bool {
+        if shape_base(node).hidden {
+            return false;
+        }
+        if depth >= 128 {
+            return true;
+        }
+        match node {
+            ShapeNode::Shape(shape) => shape
+                .text
+                .as_ref()
+                .is_some_and(|body| self.body(body, part)),
+            ShapeNode::Group(group) => group
+                .children
+                .iter()
+                .any(|node| self.parsed_node(node, part, depth + 1)),
+            ShapeNode::GraphicFrame(frame) => self.graphic(&frame.data, part, depth),
+            ShapeNode::Picture(_) => false,
+        }
+    }
+
+    fn snapshot_shape(&self, shape: &ShapeSnapshot, source: &Slide) -> bool {
+        if !self.charge_work(1) {
+            return true;
+        }
+        if shape.hidden {
+            return false;
+        }
+        if shape.kind == crate::ShapeKind::Group {
+            return shape
+                .children
+                .iter()
+                .any(|shape| self.snapshot_shape(shape, source));
+        }
+        if shape.kind == crate::ShapeKind::GraphicFrame {
+            return shape
+                .graphic
+                .as_ref()
+                .is_some_and(|graphic| self.graphic(graphic, &source.part_path, 0));
+        }
+        if shape.text_stories.is_empty() || shape.source_id == 0 {
+            return false;
+        }
+        let node = self.source_node(&source.shapes, shape.source_id);
+        self.exhausted.get()
+            || node
+                .and_then(node_text)
+                .is_some_and(|body| self.body(body, &source.part_path))
+    }
+
+    fn source_node<'b>(&self, nodes: &'b [ShapeNode], id: u32) -> Option<&'b ShapeNode> {
+        for node in nodes {
+            if !self.charge_work(1) {
+                return None;
+            }
+            if shape_base(node).id == id {
+                return Some(node);
+            }
+            if let ShapeNode::Group(group) = node {
+                let found = self.source_node(&group.children, id);
+                if found.is_some() || self.exhausted.get() {
+                    return found;
+                }
+            }
+        }
+        None
     }
 }
 
@@ -1127,6 +1362,297 @@ fn format_roman(value: u32, upper: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dependency_base(id: u32) -> pptx_parse::ShapeBase {
+        pptx_parse::ShapeBase {
+            id,
+            name: format!("Shape {id}"),
+            title: None,
+            description: None,
+            decorative: false,
+            hidden: false,
+            placeholder: None,
+            transform: pptx_parse::ShapeTransform::default(),
+        }
+    }
+
+    fn dependency_frame(id: u32, path: &str) -> ShapeNode {
+        ShapeNode::GraphicFrame(pptx_parse::GraphicFrame {
+            base: dependency_base(id),
+            data: GraphicFrameData::Diagram {
+                relationship_ids: Vec::new(),
+                drawing_part_path: Some(path.to_owned()),
+            },
+        })
+    }
+
+    fn dependency_leaf(linked: bool) -> ShapeNode {
+        ShapeNode::Shape(pptx_parse::Shape {
+            base: dependency_base(3),
+            geometry: "rect".to_owned(),
+            has_preset_geometry: true,
+            paths: Vec::new(),
+            style: None,
+            adjust_values: Default::default(),
+            use_bg_fill: false,
+            fill: None,
+            picture_fill: None,
+            outline: None,
+            effects: None,
+            text: linked.then(|| TextBody {
+                paragraphs: vec![TextParagraph {
+                    runs: vec![TextRun {
+                        text: "Jump".to_owned(),
+                        properties: RunProperties {
+                            hyperlink_action: Some("ppaction://hlinksldjump".to_owned()),
+                            ..RunProperties::default()
+                        },
+                        field_id: None,
+                        field_type: None,
+                        line_break: false,
+                    }],
+                    ..TextParagraph::default()
+                }],
+                ..TextBody::default()
+            }),
+        })
+    }
+
+    #[test]
+    fn doubling_diagram_dependencies_visit_each_part_once() {
+        let mut package = PptxPackage::default();
+        let paths: Vec<_> = (0..32)
+            .map(|index| format!("ppt/diagrams/drawing{index}.xml"))
+            .collect();
+        for index in 0..paths.len() {
+            package.diagram_drawings.push(pptx_parse::DiagramDrawing {
+                part_path: paths[index].clone(),
+                synthesis_extent: None,
+                shapes: if index == 0 {
+                    vec![dependency_leaf(false)]
+                } else {
+                    vec![
+                        dependency_frame(1, &paths[index - 1]),
+                        dependency_frame(2, &paths[index - 1]),
+                    ]
+                },
+            });
+        }
+        let root = dependency_frame(100, paths.last().unwrap());
+        {
+            let links = SlideLinkDependencies::new(&package);
+            assert!(!links.parsed_node(&root, "ppt/slides/slide1.xml", 0));
+            assert_eq!(links.drawings.borrow().len(), 32);
+            assert!(links.work.get() < 1_024);
+            assert!(!links.exhausted.get());
+        }
+        package.diagram_drawings[0].shapes[0] = dependency_leaf(true);
+        let links = SlideLinkDependencies::new(&package);
+        assert!(links.parsed_node(&root, "ppt/slides/slide1.xml", 0));
+        assert!(!links.exhausted.get());
+    }
+
+    #[test]
+    fn cyclic_diagram_dependencies_keep_links_beyond_back_edges() {
+        for count in [1, 2] {
+            let mut package = PptxPackage::default();
+            for index in 0..count {
+                package.diagram_drawings.push(pptx_parse::DiagramDrawing {
+                    part_path: format!("ppt/diagrams/drawing{index}.xml"),
+                    synthesis_extent: None,
+                    shapes: vec![
+                        dependency_frame(
+                            1,
+                            &format!("ppt/diagrams/drawing{}.xml", (index + 1) % count),
+                        ),
+                        dependency_leaf(false),
+                    ],
+                });
+            }
+            let root = dependency_frame(100, "ppt/diagrams/drawing0.xml");
+            {
+                let links = SlideLinkDependencies::new(&package);
+                assert!(!links.parsed_node(&root, "ppt/slides/slide1.xml", 0));
+                assert_eq!(links.drawings.borrow().len(), count);
+                assert!(!links.exhausted.get());
+            }
+            package.diagram_drawings[count - 1].shapes[1] = dependency_leaf(true);
+            let links = SlideLinkDependencies::new(&package);
+            assert!(links.parsed_node(&root, "ppt/slides/slide1.xml", 0));
+            assert!(!links.exhausted.get());
+        }
+    }
+
+    #[test]
+    fn structural_dependency_work_cap_counts_textless_diagrams_and_groups() {
+        for diagram in [false, true] {
+            let mut package = PptxPackage::default();
+            let children = vec![dependency_leaf(false); MAX_LINK_WORK + 1];
+            let root = if diagram {
+                package.diagram_drawings.push(pptx_parse::DiagramDrawing {
+                    part_path: "ppt/diagrams/drawing1.xml".to_owned(),
+                    synthesis_extent: None,
+                    shapes: children,
+                });
+                dependency_frame(100, "ppt/diagrams/drawing1.xml")
+            } else {
+                ShapeNode::Group(pptx_parse::GroupShape {
+                    base: dependency_base(100),
+                    children,
+                })
+            };
+            let links = SlideLinkDependencies::new(&package);
+            assert!(links.parsed_node(&root, "ppt/slides/slide1.xml", 0));
+            assert_eq!(links.work.get(), MAX_LINK_WORK);
+            assert!(links.exhausted.get());
+        }
+    }
+
+    #[test]
+    fn slide_link_dependencies_scan_runs_and_relationships_conservatively() {
+        const COUNT: usize = 20_000;
+        let part = "ppt/slides/slide1.xml";
+        let mut package = PptxPackage::default();
+        let run = |relationship_id| TextRun {
+            text: "x".to_owned(),
+            properties: RunProperties {
+                hyperlink_relationship_id: relationship_id,
+                ..RunProperties::default()
+            },
+            field_id: None,
+            field_type: None,
+            line_break: false,
+        };
+        let mut body = TextBody {
+            paragraphs: vec![TextParagraph {
+                runs: (0..COUNT)
+                    .map(|index| run(Some(format!("missing{index}"))))
+                    .collect(),
+                ..TextParagraph::default()
+            }],
+            ..TextBody::default()
+        };
+        package.relationships.insert(
+            part.to_owned(),
+            (0..COUNT)
+                .map(|index| pptx_parse::Relationship {
+                    id: format!("present{index}"),
+                    relationship_type: "/slide".to_owned(),
+                    target: "https://example.test".to_owned(),
+                    target_mode: pptx_parse::TargetMode::External,
+                    resolved_target: None,
+                })
+                .collect(),
+        );
+        {
+            let links = SlideLinkDependencies::new(&package);
+            assert!(!links.body(&body, part));
+            assert_eq!(links.work.get(), 2 * COUNT);
+            assert!(!links.exhausted.get());
+        }
+        let relationship = &mut package.relationships.get_mut(part).unwrap()[0];
+        relationship.target_mode = pptx_parse::TargetMode::Internal;
+        relationship.target = "slide1.xml".to_owned();
+        relationship.resolved_target = Some(part.to_owned());
+        {
+            let links = SlideLinkDependencies::new(&package);
+            assert!(links.body(&body, part));
+            assert_eq!(links.work.get(), COUNT + 1);
+            assert!(!links.exhausted.get());
+        }
+        body.paragraphs[0].runs[0]
+            .properties
+            .hyperlink_relationship_id = Some("present0".to_owned());
+        {
+            let links = SlideLinkDependencies::new(&package);
+            assert!(links.body(&body, part));
+        }
+        package.relationships.clear();
+        {
+            let properties = &mut body.paragraphs[0].runs[0].properties;
+            properties.hyperlink_relationship_id = None;
+            properties.hyperlink_action = Some("ppaction://hlinksldjump".to_owned());
+        }
+        {
+            let links = SlideLinkDependencies::new(&package);
+            assert!(links.body(&body, part));
+            assert_eq!(links.work.get(), 1);
+        }
+        body.paragraphs[0].runs[0].properties.hyperlink_action = None;
+        {
+            let links = SlideLinkDependencies::new(&package);
+            assert!(!links.body(&body, part));
+            assert_eq!(links.work.get(), COUNT);
+            assert!(!links.exhausted.get());
+        }
+        package.relationships.insert(
+            part.to_owned(),
+            vec![
+                pptx_parse::Relationship {
+                    id: "unused".to_owned(),
+                    relationship_type: "/hyperlink".to_owned(),
+                    target: "https://example.test".to_owned(),
+                    target_mode: pptx_parse::TargetMode::External,
+                    resolved_target: None,
+                };
+                100_000
+            ],
+        );
+        {
+            let links = SlideLinkDependencies::new(&package);
+            assert!(links.body(&body, part));
+            assert_eq!(links.work.get(), 0);
+            assert!(links.exhausted.get());
+            assert!(links.parts.borrow().is_empty());
+        }
+    }
+
+    #[test]
+    fn slide_link_dependency_work_cap_returns_the_conservative_answer() {
+        let mut package = PptxPackage::default();
+        let mut body = TextBody {
+            paragraphs: vec![TextParagraph {
+                runs: vec![
+                    TextRun {
+                        text: "x".to_owned(),
+                        properties: RunProperties::default(),
+                        field_id: None,
+                        field_type: None,
+                        line_break: false,
+                    };
+                    MAX_LINK_WORK
+                ],
+                ..TextParagraph::default()
+            }],
+            ..TextBody::default()
+        };
+        {
+            let links = SlideLinkDependencies::new(&package);
+            assert!(!links.body(&body, "ppt/slides/slide1.xml"));
+            assert_eq!(links.work.get(), MAX_LINK_WORK);
+            assert!(links.body(&body, "ppt/slides/slide1.xml"));
+            assert!(links.exhausted.get());
+            assert_eq!(links.work.get(), MAX_LINK_WORK);
+        }
+        package.relationships.insert(
+            "ppt/slides/slide1.xml".to_owned(),
+            vec![
+                pptx_parse::Relationship {
+                    id: "unused".to_owned(),
+                    relationship_type: "/hyperlink".to_owned(),
+                    target: "https://example.test".to_owned(),
+                    target_mode: pptx_parse::TargetMode::External,
+                    resolved_target: None,
+                };
+                MAX_LINK_WORK + 1
+            ],
+        );
+        body.paragraphs[0].runs.truncate(1);
+        let links = SlideLinkDependencies::new(&package);
+        assert!(links.body(&body, "ppt/slides/slide1.xml"));
+        assert_eq!(links.work.get(), 0);
+        assert!(links.parts.borrow().is_empty());
+    }
 
     fn marker(counters: &mut ListCounters, bullet: Option<&Bullet>, level: u32) -> Option<String> {
         counters

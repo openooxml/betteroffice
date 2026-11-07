@@ -172,6 +172,7 @@ export function createPptxWorkerSession(
       renderPng: (target, options) => perform(() => opened.renderPng!(target, options)),
       access: (method, ...args) => perform(() => opened.access!(method, ...args)),
       takeRecoveryUpdate: () => opened.takeRecoveryUpdate?.(),
+      pendingIntents: () => opened.pendingIntents?.() ?? [],
       checkpoint: (options) => perform(() => opened.checkpoint!(options)),
       preparePicture: (bytes) => perform(() => opened.preparePicture!(bytes)),
       thumbnail: (slideId, knownRevision) => perform(() => opened.thumbnail(slideId, knownRevision)),
