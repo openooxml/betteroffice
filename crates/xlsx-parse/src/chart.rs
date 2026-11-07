@@ -30,7 +30,7 @@ use xlsx_model::{
 
 use crate::package::PartContentType;
 use crate::tree::{Edit, Element, Part, Replacement, names_are_resolvable, parse_tree};
-use crate::xml::{find_part, formula_text, resolve_part_path};
+use crate::xml::{find_part, format_code_text, resolve_part_path};
 use crate::{MAX_CHART_ANCHORS, MAX_CHART_REFS, MAX_DEPTH, ParseError};
 
 /// relationship references inside a part (`r:id`).
@@ -969,7 +969,7 @@ fn cache_site(reference: &Element) -> Option<CacheSite> {
         span: cache.splice_target(),
         format_code: cache
             .child("formatCode")
-            .map(|element| element.text_content()),
+            .map(|element| crate::read::unescape_name(&element.text_content())),
         unmodelled_content: !cache_is_fully_modelled(cache),
         authored_points: cache
             .child_elements()
@@ -1255,7 +1255,7 @@ fn regenerated_cache_inputs(
     {
         out.push_str(&format!(
             "<{prefix}formatCode>{}</{prefix}formatCode>",
-            formula_text(format_code)
+            format_code_text(format_code)
         ));
     }
     out.push_str(&format!("<{prefix}ptCount val=\"{}\"/>", cells.len()));

@@ -132,6 +132,32 @@ pub(crate) fn text_attribute<'a>(name: &'a str, value: &str) -> Attribute<'a> {
 /// characters XML 1.0 cannot carry become `_xHHHH_`, and an underscore that
 /// would start such an escape is written as `_x005F_`.
 pub(crate) fn encode_xstring(text: &str) -> String {
+    xstring(text, false)
+}
+
+/// A number format code (`ST_Xstring`) as element text, the way Excel writes
+/// it: [`encode_xstring`], then xml escaped. Writing one never fails.
+pub(crate) fn format_code_text(code: &str) -> String {
+    quick_xml::escape::escape(&xstring(code, false)).into_owned()
+}
+
+/// A number format code (`ST_Xstring`) as an attribute value, the way Excel
+/// writes it: [`encode_xstring`] with tab and line feed also as `_xHHHH_`, so
+/// attribute normalization cannot fold them into spaces, then xml escaped.
+/// Writing one never fails.
+pub(crate) fn format_code_attribute_value(code: &str) -> String {
+    quick_xml::escape::escape(&xstring(code, true)).into_owned()
+}
+
+/// [`format_code_attribute_value`] as a writer attribute.
+pub(crate) fn format_code_attribute<'a>(name: &'a str, code: &str) -> Attribute<'a> {
+    Attribute {
+        key: QName(name.as_bytes()),
+        value: Cow::Owned(format_code_attribute_value(code).into_bytes()),
+    }
+}
+
+fn xstring(text: &str, attribute: bool) -> String {
     let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
     for (index, ch) in text.char_indices() {
@@ -146,7 +172,7 @@ pub(crate) fn encode_xstring(text: &str) -> String {
             {
                 out.push_str("_x005F_");
             }
-            '\t' | '\n' => out.push(ch),
+            '\t' | '\n' if !attribute => out.push(ch),
             _ if !is_xml_char(ch) => {
                 out.push_str(&format!("_x{:04X}_", ch as u32));
             }

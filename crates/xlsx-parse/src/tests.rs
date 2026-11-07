@@ -8194,3 +8194,36 @@ fn full_precision_false_survives_serializing_a_new_workbook() {
     let parts = serialize_workbook(&workbook).unwrap();
     assert!(!parse_workbook(&parts).unwrap().full_precision);
 }
+
+/// A number format code is an `ST_Xstring`, written the way Excel writes one
+/// as element text and as an attribute value, and every code decodes back.
+#[test]
+fn format_codes_are_written_as_xstrings_and_decode_back() {
+    for (code, text, attribute) in [
+        ("0.0%", "0.0%", "0.0%"),
+        ("0\u{1}", "0_x0001_", "0_x0001_"),
+        ("0\t0\n0\r", "0\t0\n0_x000D_", "0_x0009_0_x000A_0_x000D_"),
+        (
+            "_x0041_ _X0041_ _x00 _x12G4_",
+            "_x005F_x0041_ _x005F_X0041_ _x00 _x12G4_",
+            "_x005F_x0041_ _x005F_X0041_ _x00 _x12G4_",
+        ),
+        (
+            r#"#,##0" & <a>""#,
+            "#,##0&quot; &amp; &lt;a&gt;&quot;",
+            "#,##0&quot; &amp; &lt;a&gt;&quot;",
+        ),
+        ("\u{0}\u{fffe}", "_x0000__xFFFE_", "_x0000__xFFFE_"),
+    ] {
+        assert_eq!(crate::xml::format_code_text(code), text, "{code:?}");
+        assert_eq!(
+            crate::xml::format_code_attribute_value(code),
+            attribute,
+            "{code:?}"
+        );
+        for written in [text, attribute] {
+            let unescaped = quick_xml::escape::unescape(written).unwrap();
+            assert_eq!(crate::read::unescape_name(&unescaped), code, "{written:?}");
+        }
+    }
+}
