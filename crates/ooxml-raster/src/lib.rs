@@ -1,6 +1,10 @@
 //! Shared tiny-skia raster helpers.
 
 mod glyph;
+#[cfg(all(feature = "svg", not(target_arch = "wasm32")))]
+pub mod svg;
+#[cfg(all(feature = "svg", target_arch = "wasm32"))]
+compile_error!("the svg rasterizer is native only");
 
 pub use glyph::{CachedGlyph, GlyphCache, fill_glyph};
 

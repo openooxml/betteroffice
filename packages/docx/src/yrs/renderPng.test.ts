@@ -5,6 +5,8 @@ import { engineKind } from '../wasm/enginePng';
 import { preloadEditWasm } from '../wasm/edit';
 import { preloadOpcWasm } from '../wasm/opc';
 import { createYrsSession, type YrsSession } from './index';
+import fixture from '../../../../crates/docx-edit/tests/fixtures/behind_objects.json';
+import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
 
 const root = resolve(import.meta.dir, '../../../..');
 const deck = new Uint8Array(readFileSync(resolve(root, 'apps/demo/public/betteroffice-demo.docx')));
@@ -59,6 +61,26 @@ async function opened(): Promise<YrsSession> {
 }
 
 describe('YrsSession.renderPng', () => {
+  test('draws an EMF picture that reaches the export as its media part', async () => {
+    stubBrowser();
+    const metafile = new Uint8Array(readFileSync(resolve(root, 'crates/ooxml-metafile/tests/fixtures/clip-bitmap.emf')));
+    const image = fixture.image.replace('IMAGE_RANK', '0').replace('IMAGE_BEHIND', '0');
+    const parts: PartsMap = new Map([
+      ['[Content_Types].xml', toBytes('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/x-emf"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')],
+      ['_rels/.rels', toBytes('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>')],
+      ['word/_rels/document.xml.rels', toBytes('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image.png"/></Relationships>')],
+      ['word/document.xml', toBytes(`<w:document ${fixture.namespaces}><w:body>${image}${fixture.body}</w:body></w:document>`)],
+      ['word/media/image.png', metafile],
+    ]);
+    const session = await createYrsSession();
+    try {
+      session.openDocx(new Uint8Array(rezipPartsToArrayBuffer(parts)), true);
+      const exported = session.renderPng({ page: 0 });
+      if (native) await exported;
+      else expect(await exported.then(() => undefined, (error: { code?: string }) => error.code)).toBe('canvas-unavailable');
+    } finally { session.destroy(); }
+  });
+
   test('sizes a page by scale and lays out once per version, leaving the session as it was', async () => {
     const calls = stubBrowser();
     const session = await opened();

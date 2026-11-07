@@ -14,8 +14,15 @@ categories = ["rendering", "graphics"]
 [lib]
 name = "ooxml_raster"
 
+[features]
+svg = ["dep:image", "dep:resvg", "dep:simplecss", "dep:svgtypes"]
+
 [dependencies]
 tiny-skia = "0.12"
 png = "0.18"
 ooxml-drawingml.workspace = true
 ooxml-text.workspace = true
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"], optional = true }
+resvg = { version = "0.48", default-features = false, features = ["text", "raster-images"], optional = true }
+simplecss = { version = "=0.2.2", optional = true }
+svgtypes = { version = "=0.16.1", optional = true }

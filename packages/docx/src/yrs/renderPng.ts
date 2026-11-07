@@ -7,6 +7,7 @@ import type { DisplayList } from '../layout/render/displayList';
 import { extractEmbeddedFontFaces } from '../utils';
 import { engineKind, renderPng as renderEnginePng } from '../wasm/enginePng';
 import { createYrsSession, type YrsSession } from './index';
+import { sessionMediaSources } from './sessionInternals';
 
 const IDLE_RELEASE_MS = 30_000;
 
@@ -47,12 +48,13 @@ export function createPngExporter(session: YrsSession) {
     held = undefined;
   };
 
-  async function layOut(state: Uint8Array, metadata: Uint8Array, source: ArrayBuffer, fonts: Held['fonts'], fontProvider: Held['fontProvider']): Promise<Held['laidOut'] extends Promise<infer T> ? T : never> {
+  async function layOut(state: Uint8Array, metadata: Uint8Array, media: string, source: ArrayBuffer, fonts: Held['fonts'], fontProvider: Held['fontProvider']): Promise<Held['laidOut'] extends Promise<infer T> ? T : never> {
     const copy = await createYrsSession();
     try {
       const bytes = new Uint8Array(source);
       const host = copy.openDocx(bytes, false, { mediaTokens: true });
       copy.bootstrapPeer(state, metadata, bytes, host, { mediaTokens: true });
+      if (media) copy.loadMediaSources(media);
       const document = copy.materializeDocx();
       if (!document) throw new Error('renderPng needs a session opened from DOCX bytes');
       const bundled = fontProvider ?? (engineKind === 'native' ? await resolveCompleteFontProvider() : undefined);
@@ -79,7 +81,7 @@ export function createPngExporter(session: YrsSession) {
     if (!source) throw new Error('renderPng needs a session opened from DOCX bytes');
     const entry: Held = {
       version, fonts, fontProvider, users: 0, stale: false,
-      laidOut: layOut(session.encodeState(), session.encodePeerMetadata(), source, fonts, fontProvider),
+      laidOut: layOut(session.encodeState(), session.encodePeerMetadata(), sessionMediaSources(session), source, fonts, fontProvider),
     };
     entry.laidOut.catch(() => { if (held === entry) held = undefined; });
     held = entry;

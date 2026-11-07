@@ -9,6 +9,8 @@ export interface YrsSessionInternals {
   setHeaderFooterAliases(json: string): void;
   sourcePackage(): { buffer: ArrayBuffer; keys: ReturnType<typeof editorSaveKeys> } | null;
   materializedSource(): Readonly<Document> | null;
+  /** The `data:` sources this session seeded, as `media:{n}` tokens; empty when none. */
+  mediaSources(): string;
   /** The opened source's note separators, keyed as `noteSeparatorKeys` does. */
   sourceNoteSeparators(): ReturnType<typeof noteSeparatorKeys> | null;
   /** Compares two DOCX packages into the empty session; bridge JSON. */
@@ -69,4 +71,9 @@ export function routedHeaderFooterRIds(
   return [canonical, ...[...(aliases ?? [])].flatMap(([alias, owner]) =>
     owner === canonical ? [alias] : []
   )];
+}
+
+/** The `data:` image sources the session seeded, as its media tokens. @internal */
+export function sessionMediaSources(session: YrsSession): string {
+  return registry.get(session)?.mediaSources() ?? '';
 }

@@ -6,13 +6,13 @@ compile_error!("betteroffice-pptx-raster is server-side only");
 
 mod blur;
 mod font;
-mod svg;
+use ooxml_raster::svg;
 
 /// Entry points for the fuzz targets in `fuzz/`; not a stable API.
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
 pub mod fuzzing {
-    pub use crate::svg::{SvgImage, parse as parse_svg};
+    pub use ooxml_raster::svg::{SvgImage, parse as parse_svg};
 
     /// Decodes `bytes` as a picture on a slide with `pixels` of its image
     /// budget left, as a slide render would, returning the decoded size.
@@ -1296,7 +1296,7 @@ pub struct ImageCache {
     retained: u64,
     cap: u64,
     metafiles: pptx_edit::MetafileSvgCache,
-    fontdb: Option<(u64, usize, Arc<resvg::usvg::fontdb::Database>)>,
+    fontdb: Option<(u64, usize, Arc<svg::usvg::fontdb::Database>)>,
 }
 
 type ImageKey = (u64, u64);
@@ -1382,7 +1382,7 @@ impl ImageCache {
         Some(image)
     }
 
-    fn fontdb_for(&mut self, fonts: &FontStore) -> Arc<resvg::usvg::fontdb::Database> {
+    fn fontdb_for(&mut self, fonts: &FontStore) -> Arc<svg::usvg::fontdb::Database> {
         let generation = (fonts.id(), fonts.font_count());
         if let Some((id, count, fontdb)) = &self.fontdb
             && (*id, *count) == generation
@@ -3018,14 +3018,14 @@ mod tests {
                 " ".repeat(MAX_SVG_BYTES)
             )
             .into_bytes(),
-            svg::tests::marker_chain(6, 12).into_bytes(),
+            svg::fixtures::marker_chain(6, 12).into_bytes(),
             br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><marker id="m" markerWidth="1e30" markerHeight="1e30" viewBox="0 0 1 1"><rect width="1" height="1"/></marker><path d="M0 0L5 5" stroke="#000" stroke-width="1e30" marker-end="url(#m)"/></svg>"##.to_vec(),
-            svg::tests::use_fan_out(10, 10).into_bytes(),
-            svg::tests::use_chain(256).into_bytes(),
-            svg::tests::document(r##"<g id="a"><use href="#b"/></g><g id="b"><use href="#a"/></g>"##).into_bytes(),
-            svg::tests::document(&fills).into_bytes(),
-            svg::tests::opacity_nest(MAX_SVG_LAYER_DEPTH + 1).into_bytes(),
-            svg::tests::document(r##"<rect width="96" height="96" fill="URL(http://example.invalid/p.svg#g)"/>"##).into_bytes(),
+            svg::fixtures::use_fan_out(10, 10).into_bytes(),
+            svg::fixtures::use_chain(256).into_bytes(),
+            svg::fixtures::document(r##"<g id="a"><use href="#b"/></g><g id="b"><use href="#a"/></g>"##).into_bytes(),
+            svg::fixtures::document(&fills).into_bytes(),
+            svg::fixtures::opacity_nest(MAX_SVG_LAYER_DEPTH + 1).into_bytes(),
+            svg::fixtures::document(r##"<rect width="96" height="96" fill="URL(http://example.invalid/p.svg#g)"/>"##).into_bytes(),
         ];
         for (index, bytes) in refused.iter().enumerate() {
             let images = AssetMap::from([("icon.svg", bytes.as_slice())]);
