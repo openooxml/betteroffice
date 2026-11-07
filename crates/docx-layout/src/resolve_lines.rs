@@ -112,20 +112,37 @@ mod tests {
             };
             if let Run::Text(text_run) = run {
                 let text_len = utf16_len(&text_run.text);
-                let start_char = if run_index == line.head_run { line.head_char } else { 0 };
-                let end_char = if run_index == line.tail_run { line.tail_char } else { text_len };
+                let start_char = if run_index == line.head_run {
+                    line.head_char
+                } else {
+                    0
+                };
+                let end_char = if run_index == line.tail_run {
+                    line.tail_char
+                } else {
+                    text_len
+                };
                 if start_char > 0 || end_char < text_len {
                     let text = utf16_slice(&text_run.text, start_char, end_char);
                     let mut sliced = text_run.clone();
                     sliced.text = text.clone();
                     sliced.pm_start = text_run.pm_start.map(|pm| pm + start_char as f64);
                     sliced.pm_end = text_run.pm_start.map(|pm| pm + end_char as f64);
-                    segments.push(ResolvedSegment { run: Run::Text(sliced), text });
+                    segments.push(ResolvedSegment {
+                        run: Run::Text(sliced),
+                        text,
+                    });
                 } else {
-                    segments.push(ResolvedSegment { run: run.clone(), text: text_run.text.clone() });
+                    segments.push(ResolvedSegment {
+                        run: run.clone(),
+                        text: text_run.text.clone(),
+                    });
                 }
             } else {
-                segments.push(ResolvedSegment { run: run.clone(), text: String::new() });
+                segments.push(ResolvedSegment {
+                    run: run.clone(),
+                    text: String::new(),
+                });
             }
         }
         segments
@@ -148,10 +165,21 @@ mod tests {
                 .collect();
             let texts = RunTexts::new(runs.len());
             for (head_run, head_char, tail_run, tail_char) in lines(&mut rng, &units) {
-                let line = TypesetRow { head_run, head_char, tail_run, tail_char, ..TypesetRow::default() };
-                let expected = serde_json::to_value(old_resolve_line_segments(&runs, &line)).unwrap();
-                let actual = serde_json::to_value(resolve_line_segments_in(&runs, &line, &texts)).unwrap();
-                assert_eq!(actual, expected, "line {head_run}:{head_char}..{tail_run}:{tail_char}");
+                let line = TypesetRow {
+                    head_run,
+                    head_char,
+                    tail_run,
+                    tail_char,
+                    ..TypesetRow::default()
+                };
+                let expected =
+                    serde_json::to_value(old_resolve_line_segments(&runs, &line)).unwrap();
+                let actual =
+                    serde_json::to_value(resolve_line_segments_in(&runs, &line, &texts)).unwrap();
+                assert_eq!(
+                    actual, expected,
+                    "line {head_run}:{head_char}..{tail_run}:{tail_char}"
+                );
             }
         }
     }

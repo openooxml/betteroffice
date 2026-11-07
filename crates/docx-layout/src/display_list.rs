@@ -6850,7 +6850,10 @@ fn authoritative_line_items<'a>(
         let run = block.runs.get(run_index)?;
         match run {
             RunIn::Text(text) => {
-                let visible = texts.get(run_index, &text.text).whole_scalars(start, end).to_string();
+                let visible = texts
+                    .get(run_index, &text.text)
+                    .whole_scalars(start, end)
+                    .to_string();
                 out.push(LinePaintItem::Text(LineTextItem {
                     text: visible,
                     fmt: &text.fmt,
@@ -6983,8 +6986,14 @@ fn emit_line<'a>(
         && attrs
             .and_then(|attrs| attrs.leading_inline_box.as_ref())
             .is_some();
-    let authoritative_items =
-        authoritative_line_items(block, line, ctx, default_bidi_level, leading_inline_box, texts);
+    let authoritative_items = authoritative_line_items(
+        block,
+        line,
+        ctx,
+        default_bidi_level,
+        leading_inline_box,
+        texts,
+    );
     let authoritative_active = authoritative_items.is_some();
     let authoritative_width = authoritative_items
         .as_ref()
@@ -14260,15 +14269,26 @@ mod tests {
                 .collect()
         }
 
-        fn old_resolve(runs: &[RunIn], line: &LineIn) -> Vec<(usize, String, Option<i64>, Option<i64>)> {
+        fn old_resolve(
+            runs: &[RunIn],
+            line: &LineIn,
+        ) -> Vec<(usize, String, Option<i64>, Option<i64>)> {
             let mut out = Vec::new();
             for run_index in line.head_run..=line.tail_run {
                 let Some(RunIn::Text(t)) = runs.get(run_index) else {
                     continue;
                 };
                 let total = t.text.encode_utf16().count();
-                let start = if run_index == line.head_run { line.head_char.min(total) } else { 0 };
-                let end = if run_index == line.tail_run { line.tail_char.min(total) } else { total };
+                let start = if run_index == line.head_run {
+                    line.head_char.min(total)
+                } else {
+                    0
+                };
+                let end = if run_index == line.tail_run {
+                    line.tail_char.min(total)
+                } else {
+                    total
+                };
                 let end = end.max(start);
                 let (pm_start, pm_end) = if start == 0 && end == total {
                     (t.pm_start, t.pm_end.or(t.pm_start.map(|p| p + end as i64)))
@@ -14310,10 +14330,18 @@ mod tests {
                             .then(|| (index, segment.text, segment.pm_start, segment.pm_end))
                     })
                     .collect();
-                assert_eq!(actual, old_resolve(&runs, &line), "line {head_run}:{head_char}..{tail_run}:{tail_char}");
+                assert_eq!(
+                    actual,
+                    old_resolve(&runs, &line),
+                    "line {head_run}:{head_char}..{tail_run}:{tail_char}"
+                );
                 for (run_index, run) in runs.iter().enumerate() {
                     if let RunIn::Text(text) = run {
-                        for (start, end) in [(head_char, tail_char), (tail_char, head_char + 5), (0, tail_char)] {
+                        for (start, end) in [
+                            (head_char, tail_char),
+                            (tail_char, head_char + 5),
+                            (0, tail_char),
+                        ] {
                             assert_eq!(
                                 texts.get(run_index, &text.text).whole_scalars(start, end),
                                 old_slice(&text.text, start, end)

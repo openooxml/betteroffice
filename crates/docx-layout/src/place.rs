@@ -45,7 +45,6 @@ use crate::paragraph_spacing::{
 };
 use crate::prescan::{LayoutPlan, SectionLayoutConfig, default_columns, prescan};
 use crate::resolve_lines::{ResolvedLine, ResolvedSegment, resolve_line_segments_in, utf16_len};
-use crate::utf16_index::RunTexts;
 use crate::section_breaks::resolve_page_margins;
 use crate::types::{
     BlockExtent, BlockId, ChartBlock, ChartExtent, ChartFragment, Fragment, ImageBlock,
@@ -54,6 +53,7 @@ use crate::types::{
     SectionBreakType, ShapeBlock, ShapeExtent, ShapeFragment, Size, TextBoxBlock, TextBoxExtent,
     TextBoxFragment,
 };
+use crate::utf16_index::RunTexts;
 
 /// Default page size (US Letter in pixels at 96 DPI).
 const DEFAULT_PAGE_SIZE: Size = Size {

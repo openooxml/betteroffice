@@ -17,7 +17,11 @@ pub(crate) struct Utf16Index<'a> {
 impl<'a> Utf16Index<'a> {
     pub(crate) fn new(text: &'a str) -> Self {
         if text.is_ascii() {
-            return Self { text, units: text.len(), marks: Vec::new() };
+            return Self {
+                text,
+                units: text.len(),
+                marks: Vec::new(),
+            };
         }
         let mut marks = Vec::with_capacity(text.len() / STRIDE + 1);
         let mut units = 0usize;
@@ -76,7 +80,11 @@ impl<'a> Utf16Index<'a> {
         let end = end.max(start).min(self.units);
         let low = self.ceil_byte(start);
         let high = self.floor(end).1;
-        if low >= high { "" } else { &self.text[low..high] }
+        if low >= high {
+            ""
+        } else {
+            &self.text[low..high]
+        }
     }
 }
 
@@ -88,7 +96,9 @@ pub(crate) struct RunTexts<'a> {
 
 impl<'a> RunTexts<'a> {
     pub(crate) fn new(runs: usize) -> Self {
-        Self { cells: (0..runs).map(|_| OnceCell::new()).collect() }
+        Self {
+            cells: (0..runs).map(|_| OnceCell::new()).collect(),
+        }
     }
 
     pub(crate) fn get(&self, run_index: usize, text: &'a str) -> &Utf16Index<'a> {
@@ -114,8 +124,19 @@ pub(crate) mod generated {
     }
 
     const PIECES: &[&str] = &[
-        "a", "Z", " ", "-", "é", "e\u{301}", "\u{1F600}", "\u{1F44D}\u{1F3FD}", "\u{05D0}\u{05D1}",
-        "\u{0627}\u{0644}", "\u{4E2D}", "\u{1F468}\u{200D}\u{1F469}", "\u{200F}",
+        "a",
+        "Z",
+        " ",
+        "-",
+        "é",
+        "e\u{301}",
+        "\u{1F600}",
+        "\u{1F44D}\u{1F3FD}",
+        "\u{05D0}\u{05D1}",
+        "\u{0627}\u{0644}",
+        "\u{4E2D}",
+        "\u{1F468}\u{200D}\u{1F469}",
+        "\u{200F}",
     ];
 
     pub(crate) fn text(rng: &mut Rng) -> String {
@@ -152,8 +173,9 @@ pub(crate) mod generated {
             .enumerate()
             .flat_map(|(run, &length)| (0..=length.max(1)).map(move |unit| (run, unit)))
             .collect();
-        let mut cuts: Vec<(usize, usize)> =
-            (0..2 + rng.below(12)).map(|_| positions[rng.below(positions.len())]).collect();
+        let mut cuts: Vec<(usize, usize)> = (0..2 + rng.below(12))
+            .map(|_| positions[rng.below(positions.len())])
+            .collect();
         cuts.push((0, 0));
         cuts.push(*positions.last().expect("a run"));
         cuts.sort();
@@ -206,8 +228,21 @@ mod tests {
             let total = text.encode_utf16().count();
             assert_eq!(index.len(), total);
             for start in 0..=total + 2 {
-                assert_eq!(index.exact_byte(start), old_exact_byte(&text, start), "{text:?} at {start}");
-                for end in [0, start.saturating_sub(1), start, start + 1, start + 2, total / 2, total, total + 3] {
+                assert_eq!(
+                    index.exact_byte(start),
+                    old_exact_byte(&text, start),
+                    "{text:?} at {start}"
+                );
+                for end in [
+                    0,
+                    start.saturating_sub(1),
+                    start,
+                    start + 1,
+                    start + 2,
+                    total / 2,
+                    total,
+                    total + 3,
+                ] {
                     assert_eq!(
                         index.whole_scalars(start, end),
                         old_whole_scalars(&text, start, end),
