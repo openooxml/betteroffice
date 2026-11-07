@@ -243,3 +243,27 @@ fn segment_kinds(path: &tiny_skia::Path) -> String {
         })
         .collect()
 }
+
+fn tiny_png() -> Vec<u8> {
+    let mut pixmap = Pixmap::new(2, 2).unwrap();
+    pixmap.fill(Color::from_rgba8(0, 0, 255, 255));
+    encode_png(pixmap, 2, 2).unwrap()
+}
+
+#[test]
+fn a_png_without_its_end_chunk_gets_one() {
+    let whole = tiny_png();
+    assert!(whole.ends_with(PNG_END));
+    let cut = &whole[..whole.len() - PNG_END.len()];
+    assert_eq!(png_with_end(cut).as_ref(), whole.as_slice());
+}
+
+#[test]
+fn other_streams_come_back_as_they_were() {
+    let whole = tiny_png();
+    let cut_inside_a_chunk = &whole[..whole.len() - PNG_END.len() - 3];
+    let header_only = &whole[..33];
+    for bytes in [&whole[..], cut_inside_a_chunk, header_only, b"GIF89a", b""] {
+        assert!(matches!(png_with_end(bytes), std::borrow::Cow::Borrowed(_)));
+    }
+}

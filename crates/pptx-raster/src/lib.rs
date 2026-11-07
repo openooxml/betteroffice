@@ -1525,7 +1525,8 @@ impl ImageBudget {
     fn decode_raster(&mut self, bytes: &[u8]) -> Option<(Vec<u8>, IntSize)> {
         use image::ImageDecoder as _;
 
-        let mut decoder = image::ImageReader::new(Cursor::new(bytes))
+        let bytes = ooxml_raster::png_with_end(bytes);
+        let mut decoder = image::ImageReader::new(Cursor::new(bytes.as_ref()))
             .with_guessed_format()
             .ok()?
             .into_decoder()
@@ -2909,6 +2910,27 @@ mod tests {
             transform: SlideTransform::default(),
         });
         list
+    }
+
+    #[test]
+    fn a_png_that_ends_without_its_closing_chunk_paints() {
+        let fonts = FontStore::new();
+        let png = split_source_png();
+        assert_eq!(&png[png.len() - 8..png.len() - 4], b"IEND");
+        let cut = &png[..png.len() - 12];
+        let images = AssetMap::from([("whole.png", png.as_slice()), ("cut.png", cut)]);
+        let render = |asset: &str| {
+            render_slide(
+                &picture_on_a_strip(asset, ImageCrop::default()),
+                &resources(&fonts, &images),
+                &RenderOptions::default(),
+            )
+            .expect("render")
+        };
+        let whole = render("whole.png");
+        let cut = render("cut.png");
+        assert_eq!(cut.skipped_images, 0);
+        assert_eq!(cut.bytes, whole.bytes);
     }
 
     #[test]

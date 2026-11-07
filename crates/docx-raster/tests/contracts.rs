@@ -730,6 +730,19 @@ fn a_picture_fill_it_cannot_resolve_keeps_the_solid_fill_and_counts_it() {
     assert_eq!(rendered.skipped_images, 1);
 }
 
+#[test]
+fn a_png_that_ends_without_its_closing_chunk_paints() {
+    let (fonts, chains, mut images) = empty_resources();
+    let source = solid_png(2, 2);
+    let cut = source[..source.len() - 12].to_vec();
+    assert_eq!(&source[source.len() - 8..source.len() - 4], b"IEND");
+    images.insert("rIdPicture".to_string(), cut);
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let rendered = render_page(&image_list("rIdPicture"), 0, &resources).unwrap();
+    assert_eq!(rendered.skipped_images, 0);
+    assert_eq!(pixel(&rendered.bytes, 10, 10), pixel(&source, 0, 0));
+}
+
 fn ellipse_image_scene(extra: Value) -> DisplayList {
     let mut image = json!({"kind":"image","relId":"rIdPicture","x":4,"y":4,"w":40,"h":40,"shapeType":"ellipse"});
     for (key, value) in extra.as_object().expect("object") {

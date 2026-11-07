@@ -2061,7 +2061,8 @@ impl<'c> PageImages<'c> {
             return self.decode_vector(bytes, charge);
         }
 
-        let Some(mut decoder) = image::ImageReader::new(Cursor::new(bytes))
+        let bytes = ooxml_raster::png_with_end(bytes);
+        let Some(mut decoder) = image::ImageReader::new(Cursor::new(bytes.as_ref()))
             .with_guessed_format()
             .ok()
             .and_then(|reader| reader.into_decoder().ok())
