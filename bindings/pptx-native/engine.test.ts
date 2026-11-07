@@ -384,6 +384,78 @@ describe('pptx native engine parity', () => {
     expect(run(native)).toEqual(run(wasm));
   });
 
+  test('paragraph links match native and wasm for external and slide targets', async () => {
+    const zip = new JSZip();
+    const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+    const ns = `xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="${rel}"`;
+    zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/><Override PartName="/ppt/slides/slide2.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/><Override PartName="/ppt/slides/slide3.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/></Types>');
+    zip.file('_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/officeDocument" Target="ppt/presentation.xml"/></Relationships>`);
+    zip.file('ppt/presentation.xml', `<p:presentation ${ns}><p:sldIdLst><p:sldId id="256" r:id="rId1"/><p:sldId id="257" r:id="rId2"/><p:sldId id="258" r:id="rId3"/></p:sldIdLst><p:sldSz cx="9144000" cy="6858000"/></p:presentation>`);
+    zip.file('ppt/_rels/presentation.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/slide" Target="slides/slide1.xml"/><Relationship Id="rId2" Type="${rel}/slide" Target="slides/slide2.xml"/><Relationship Id="rId3" Type="${rel}/slide" Target="slides/slide3.xml"/></Relationships>`);
+    const runs = '<a:r><a:rPr><a:hlinkClick r:id="url"/></a:rPr><a:t>Read</a:t></a:r><a:r><a:t> </a:t></a:r><a:r><a:rPr><a:hlinkClick r:id="third" action="ppaction://hlinksldjump"/></a:rPr><a:t>third</a:t></a:r>';
+    zip.file('ppt/slides/_rels/slide1.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="url" Type="${rel}/hyperlink" Target="https://example.test/docs" TargetMode="External"/><Relationship Id="third" Type="${rel}/slide" Target="slide3.xml"/></Relationships>`);
+    for (const index of [2, 3]) zip.file(`ppt/slides/slide${index}.xml`, `<p:sld ${ns}><p:cSld><p:spTree/></p:cSld></p:sld>`);
+    zip.file('ppt/slides/slide1.xml', `<p:sld ${ns}><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="2" name="Links"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="8000000" cy="1200000"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p>${runs}</a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>`);
+    const input = await zip.generateAsync({ type: 'uint8array' });
+    const font = new Uint8Array(readFileSync(new URL('../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url)));
+    const run = (engine: Engine) => {
+      const doc = engine.PptxDocument.openCollaborative(input.slice(), 7);
+      const renderer = new engine.PptxRenderer();
+      try {
+        renderer.registerFont('Arial', false, false, font);
+        const list = JSON.parse(renderer.layoutSlideJson(doc, 0)) as SlideDisplayList;
+        const paragraphs = list.primitives.flatMap((primitive) => primitive.kind === 'textBox' ? primitive.paragraphs : []);
+        expect(paragraphs).toHaveLength(1);
+        expect(paragraphs[0]!.runs.map((run) => run.text).join('')).toBe('Read third');
+        expect(paragraphs[0]!.links).toEqual([
+          { start: 0, end: 4, target: { kind: 'url', href: 'https://example.test/docs' } },
+          { start: 5, end: 10, target: { kind: 'slide', index: 2 } },
+        ]);
+        return paragraphs.map((paragraph) => paragraph.links);
+      } finally {
+        renderer.free();
+        doc.free();
+      }
+    };
+    expect(run(native)).toEqual(run(wasm));
+  });
+
+  test('link span budgets keep 1024 links identically in native and wasm', async () => {
+    const zip = new JSZip();
+    const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+    const ns = `xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="${rel}"`;
+    zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/></Types>');
+    zip.file('_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/officeDocument" Target="ppt/presentation.xml"/></Relationships>`);
+    zip.file('ppt/presentation.xml', `<p:presentation ${ns}><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst><p:sldSz cx="9144000" cy="6858000"/></p:presentation>`);
+    zip.file('ppt/_rels/presentation.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/slide" Target="slides/slide1.xml"/></Relationships>`);
+    const ids = Array.from({ length: 1_025 }, (_, index) => `link${index}`);
+    const runs = ids.map((id) => `<a:r><a:rPr><a:hlinkClick r:id="${id}"/></a:rPr><a:t>x</a:t></a:r>`).join('');
+    zip.file('ppt/slides/_rels/slide1.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${ids.map((id) => `<Relationship Id="${id}" Type="${rel}/hyperlink" Target="https://example.test/${id}" TargetMode="External"/>`).join('')}</Relationships>`);
+    zip.file('ppt/slides/slide1.xml', `<p:sld ${ns}><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="2" name="Links"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="8000000" cy="1200000"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p>${runs}</a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>`);
+    const input = await zip.generateAsync({ type: 'uint8array' });
+    const font = new Uint8Array(readFileSync(new URL('../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url)));
+    const run = (engine: Engine) => {
+      const doc = engine.PptxDocument.openCollaborative(input.slice(), 7);
+      const renderer = new engine.PptxRenderer();
+      try {
+        renderer.registerFont('Arial', false, false, font);
+        const list = JSON.parse(renderer.layoutSlideJson(doc, 0)) as SlideDisplayList;
+        const paragraphs = list.primitives.flatMap((primitive) => primitive.kind === 'textBox' ? primitive.paragraphs : []);
+        expect(paragraphs).toHaveLength(1);
+        expect(paragraphs[0]!.runs.map((run) => run.text).join('')).toBe('x'.repeat(1_025));
+        const links = paragraphs.flatMap((paragraph) => paragraph.links ?? []);
+        expect(links).toHaveLength(1_024);
+        expect(links[0]).toEqual({ start: 0, end: 1, target: { kind: 'url', href: 'https://example.test/link0' } });
+        expect(links[1_023]).toEqual({ start: 1_023, end: 1_024, target: { kind: 'url', href: 'https://example.test/link1023' } });
+        return links;
+      } finally {
+        renderer.free();
+        doc.free();
+      }
+    };
+    expect(run(native)).toEqual(run(wasm));
+  });
+
   test('native versions differ between sessions opened from the same bytes and client id', () => {
     const first = native.PptxDocument.openCollaborative(bytes(), 7);
     const second = native.PptxDocument.openCollaborative(bytes(), 7);

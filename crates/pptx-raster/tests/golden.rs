@@ -179,6 +179,7 @@ fn text_box(x: f32, y: f32, text: &str, size_px: f32, underline: bool) -> Primit
         anchor: TextAnchor::Top,
         paragraphs: vec![TextParagraph {
             languages: Vec::new(),
+            links: Vec::new(),
             align: None,
             level: 0,
             runs: Vec::new(),
