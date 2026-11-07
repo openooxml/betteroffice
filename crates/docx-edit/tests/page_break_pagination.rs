@@ -1778,3 +1778,54 @@ fn an_edit_before_page_breaks_repaginates_only_its_own_page() {
         layout
     );
 }
+
+#[test]
+fn an_edit_before_a_terminal_break_only_paragraph_repaginates_only_its_own_page() {
+    let paragraph = |id: u32| fixture::p(&format!("{id:08X}"), &fixture::r("text on its own page"));
+    let page_break = |id: u32| fixture::p(&format!("{id:08X}"), PAGE_BREAK);
+    let body: String = (0..6_u32)
+        .map(|index| {
+            format!(
+                "{}{}",
+                paragraph(0x7000_0000 + index * 2),
+                page_break(0x7000_0001 + index * 2)
+            )
+        })
+        .collect();
+    let bytes = body_document(&body);
+    let (engine, request) = fixture::laid_out(&bytes, 9401);
+    let before = engine.stats();
+    assert_eq!(before.retained_pages, 6);
+
+    engine
+        .doc()
+        .insert_text(
+            &EditCtx::local("", ""),
+            Position::new("body", 0),
+            "x",
+            FormatPolicy::Inherit,
+        )
+        .unwrap();
+    let layout = engine.layout_document_with_regions_json(&request).unwrap();
+    let after = engine.stats();
+    assert_eq!(
+        after.incremental_pagination_calls - before.incremental_pagination_calls,
+        1
+    );
+    assert_eq!(after.rebuilt_pages, 1, "later pages converge");
+    assert_eq!(after.retained_pages, 6);
+
+    let fresh = EngineSession::new(9402);
+    let state = engine.doc().encode_state_as_update_v1();
+    let metadata = engine.doc().encode_peer_metadata().unwrap();
+    let prepared = fresh
+        .doc()
+        .prepare_peer_bootstrap(&state, &metadata, Some(bytes.into()))
+        .unwrap();
+    fresh.doc().install_peer_bootstrap(prepared, 17).unwrap();
+    fresh.doc().apply_update_v1(&state).unwrap();
+    assert_eq!(
+        fresh.layout_document_with_regions_json(&request).unwrap(),
+        layout
+    );
+}
