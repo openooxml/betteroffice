@@ -2337,6 +2337,16 @@ import { type HostMessage } from './protocol';
 import type { SessionTransport } from './transport';
 import { SessionFailure, type Promisified, type SessionEvents, type SessionMethods } from './types';
 export declare const OFFICE_SESSION_SILENCE_MS = 60000;
+/**
+ * Starts fetching the worker's engine on this side while the worker boots, so the download overlaps the worker's own
+ * startup, and hands the response body over once the worker accepts it (no wasm on this thread). The body goes as a
+ * transferred stream, or as bytes where streams cannot be transferred. A worker from before this handoff never
+ * accepts: it compiles on its own and the body is cancelled when it advertises its module. The worker keeps its own
+ * path off http(s) and without fetch, and after a failed fetch, so it reports the same errors as before. Returns an
+ * abort for a session disposed mid-download.
+ * @internal
+ */
+export declare function supplyWasmFetch(transport: SessionTransport, url: URL): () => void;
 export declare function requestWasmCompile(transport: SessionTransport): void;
 export interface SessionClientOptions<M extends SessionMethods> {
     methods: {
@@ -2944,6 +2954,12 @@ import type { SessionFailureCode } from './types';
 export type ClientMessage = {
     protocol: 1;
     kind: 'wasm-compile';
+    /** The client is fetching the engine and will send it: wait for it instead of fetching. */
+    pending?: true;
+    /** The engine's response body, fetched by the client; the worker compiles it as it streams. */
+    stream?: ReadableStream<Uint8Array>;
+    /** The engine's bytes, where the stream could not be transferred; the worker compiles them. */
+    bytes?: ArrayBuffer;
 } | {
     protocol: 1;
     kind: 'call';
@@ -2960,7 +2976,12 @@ export interface ReplyError {
     code?: string;
     refusal?: unknown;
 }
-export type HostMessage = {
+export type HostMessage = 
+/** The worker waits for the engine body the client announced as pending; old workers never send it. */
+{
+    protocol: 1;
+    kind: 'wasm-accept';
+} | {
     protocol: 1;
     kind: 'wasm-module';
     url: string;

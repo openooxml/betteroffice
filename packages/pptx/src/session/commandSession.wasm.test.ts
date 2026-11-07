@@ -31,14 +31,19 @@ describe.skipIf(engineKind === 'native')('peerless session wasm reuse', () => {
       get bytes() { h.trace.push('font-access'); return new Uint8Array([4, 5, 6]); } }] });
     try {
       await first.ready;
-      expect(compileRequests(h.workers[0]!)).toEqual([{ protocol: 1, kind: 'wasm-compile' }]);
+      const requests = compileRequests(h.workers[0]!);
+      expect(requests[0]).toEqual({ protocol: 1, kind: 'wasm-compile', pending: true });
+      expect(requests).toHaveLength(2);
+      expect(Boolean((requests[1] as { stream?: unknown }).stream ?? (requests[1] as { bytes?: unknown }).bytes)).toBe(true);
       expect(h.trace.indexOf('post:wasm-compile')).toBeLessThan(h.trace.indexOf('font-access'));
       expect(h.trace.indexOf('post:wasm-compile')).toBeLessThan(h.trace.indexOf('post:openCommandEditor'));
-      expect(h.trace.indexOf('fetch')).toBeLessThan(h.trace.indexOf('receive:openCommandEditor'));
+      expect(h.trace.indexOf('page-fetch')).toBeLessThan(h.trace.indexOf('receive:openCommandEditor'));
+      expect(h.trace).not.toContain('fetch');
+      expect(h.workers[0]!.urls).toEqual([]);
       expect(h.compiles).toBe(1);
       expect(input(h.workers[0]!).wasm).toBeUndefined();
     } finally { await first.dispose(); }
-    const fetches = h.trace.filter((event) => event === 'fetch').length;
+    const fetches = h.trace.filter((event) => event === 'page-fetch' || event === 'fetch').length;
     const second = h.client.createPptxWorkerSession(bytes);
     try {
       const client = await second.ready;
@@ -48,7 +53,7 @@ describe.skipIf(engineKind === 'native')('peerless session wasm reuse', () => {
       expect(h.workers[1]!.sources[0]).toBeInstanceOf(WebAssembly.Module);
       expect(h.workers[1]!.modules).toEqual([]);
       expect(h.compiles).toBe(1);
-      expect(h.trace.filter((event) => event === 'fetch')).toHaveLength(fetches);
+      expect(h.trace.filter((event) => event === 'page-fetch' || event === 'fetch')).toHaveLength(fetches);
       expect(await client.save()).toEqual(bytes);
     } finally { await second.dispose(); }
   });
@@ -107,12 +112,65 @@ describe.skipIf(engineKind === 'native')('peerless session wasm reuse', () => {
     try {
       await retry.ready;
       expect(input(h.workers[1]!).wasm).toBeUndefined();
-      expect(compileRequests(h.workers[1]!)).toHaveLength(1);
+      expect(compileRequests(h.workers[1]!)).toHaveLength(2);
       expect(h.compiles).toBe(2);
     } finally { await retry.dispose(); }
     const cached = h.client.createPptxWorkerSession(new Uint8Array());
     try { await cached.ready; expect(input(h.workers[2]!).wasm).toBe(h.workers[1]!.modules[0]); expect(h.compiles).toBe(2); }
     finally { await cached.dispose(); }
+  });
+
+  test('a failed page fetch hands the engine to the worker, which reports its own error without hanging', async () => {
+    const h = factory();
+    h.pageFetch = () => Promise.reject(new TypeError('network'));
+    const session = h.client.createPptxWorkerSession(new Uint8Array());
+    try {
+      await session.ready;
+      expect(compileRequests(h.workers[0]!).map((request) => Object.keys(request).sort().join())).toEqual([
+        'kind,pending,protocol', 'kind,protocol',
+      ]);
+      expect(h.workers[0]!.urls).toHaveLength(1);
+      expect(h.compiles).toBe(1);
+    } finally { await session.dispose(); }
+    const missing = factory();
+    missing.pageFetch = () => Promise.resolve(new Response('', { status: 404 }));
+    const fallback = missing.client.createPptxWorkerSession(new Uint8Array());
+    try { await fallback.ready; expect(missing.workers[0]!.urls).toHaveLength(1); }
+    finally { await fallback.dispose(); }
+  });
+
+  test('disposing mid-download aborts the page fetch and posts nothing more', async () => {
+    const h = factory();
+    let signal: AbortSignal | undefined;
+    h.pageFetch = (_input, init) => {
+      signal = init?.signal ?? undefined;
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+      });
+    };
+    const session = h.client.createPptxWorkerSession(new Uint8Array());
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await session.dispose();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(signal?.aborted).toBe(true);
+    expect(compileRequests(h.workers[0]!)).toEqual([{ protocol: 1, kind: 'wasm-compile', pending: true }]);
+  });
+
+  test('a worker failing before it accepts the engine aborts the page fetch', async () => {
+    const h = factory();
+    let signal: AbortSignal | undefined;
+    h.pageFetch = (_input, init) => {
+      signal = init?.signal ?? undefined;
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+      });
+    };
+    const session = h.client.createPptxWorkerSession(new Uint8Array());
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    h.workers[0]!.crash();
+    await expect(session.ready).rejects.toThrow();
+    expect(signal?.aborted).toBe(true);
+    await session.dispose();
   });
 
   test('keys cached modules by asset URL', async () => {

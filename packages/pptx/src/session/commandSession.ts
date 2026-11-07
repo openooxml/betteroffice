@@ -5,7 +5,7 @@ import { createSessionWorker } from './sessionWorker';
 import { isHostMessage } from '../../../../shared/office-session/protocol';
 import { SessionFailure } from '../../../../shared/office-session/types';
 import { isWorkerEngineTrap } from '../../../../shared/office-session/trap';
-import { requestWasmCompile } from '../../../../shared/office-session/client';
+import { requestWasmCompile, supplyWasmFetch } from '../../../../shared/office-session/client';
 import { sessionWasmAssetUrl, shipsWasmAsset } from '../wasm/asset';
 import { takePresentationFontWorker } from './fontWorker';
 import type { OpenPresentationSessionOptions } from './client';
@@ -64,7 +64,9 @@ export function createPptxWorkerSession(
   const preparedWorker = options.worker ? undefined : takePresentationFontWorker(bytes);
   const transport = createWorkerTransport(options.worker ? options.worker() :
     preparedWorker ?? createSessionWorker());
-  if (cacheUrl && !wasm) requestWasmCompile(transport);
+  let stopEngineFetch = () => {};
+  if (cacheUrl && !wasm && preparedWorker) requestWasmCompile(transport);
+  else if (cacheUrl && !wasm) stopEngineFetch = supplyWasmFetch(transport, new URL(cacheUrl));
   const input = {
     session: crypto.randomUUID(), incarnation: crypto.randomUUID(),
     clientId: options.collaboration?.clientId ?? options.clientId, collaboration: options.collaboration != null,
@@ -88,6 +90,7 @@ export function createPptxWorkerSession(
 
   function fail(cause: unknown): void {
     if (disposed || failure) return;
+    stopEngineFetch();
     const message = typeof cause === 'object' && cause !== null && 'message' in cause &&
       typeof cause.message === 'string' ? cause.message : String(cause);
     failure = cause instanceof SessionFailure || cause instanceof CommandOutcomeUnknown ||
@@ -211,6 +214,7 @@ export function createPptxWorkerSession(
     dispose() {
       if (disposal) return disposal;
       disposed = true;
+      stopEngineFetch();
       rejectEnded(new PptxWorkerEditorDisposedError());
       options.signal?.removeEventListener('abort', abort);
       render?.dispose();
