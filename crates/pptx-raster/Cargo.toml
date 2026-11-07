@@ -32,7 +32,9 @@ ooxml-metafile = { workspace = true, features = ["svg"] }
 ooxml-text.workspace = true
 pptx-edit = { workspace = true, features = ["metafile-svg"] }
 pptx-render.workspace = true
+unicode-properties = { version = "0.1.4", default-features = false, features = ["general-category"] }
 tiny-skia = "0.12"
 
 [dev-dependencies]
 png = "0.18"
+serde_json = "1"

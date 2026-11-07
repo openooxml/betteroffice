@@ -1007,11 +1007,14 @@ function paintTextRun(
   ctx.fillStyle = run.color;
   const spacing = run.letterSpacingPx ?? 0;
   ctx.letterSpacing = spacing === 0 ? '0px' : `${spacing}px`;
+  const kerning = 'fontKerning' in ctx ? ctx.fontKerning : undefined;
+  if (kerning !== undefined) ctx.fontKerning = run.kerning === false ? 'none' : 'auto';
   const textRendering = 'textRendering' in ctx ? ctx.textRendering : undefined;
   if (textRendering !== undefined) ctx.textRendering = 'geometricPrecision';
   const runBaseline = baseline - (run.baselineOffsetPx ?? 0);
   textChunks.paintTextChunks(ctx, run, runBaseline, spacing);
   ctx.letterSpacing = '0px';
+  if (kerning !== undefined) ctx.fontKerning = kerning;
   if (textRendering !== undefined) ctx.textRendering = textRendering;
   if (run.underline) {
     ctx.fillRect(
