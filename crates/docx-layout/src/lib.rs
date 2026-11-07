@@ -79,6 +79,7 @@ pub mod prescan;
 pub mod progress;
 pub mod regions;
 pub mod resolve_lines;
+mod utf16_index;
 mod transcode;
 pub mod types;
 

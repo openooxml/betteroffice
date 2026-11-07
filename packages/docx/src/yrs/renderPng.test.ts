@@ -114,6 +114,28 @@ describe('YrsSession.renderPng', () => {
     } finally { session.destroy(); }
   });
 
+  test('lays out a long paragraph in time proportional to its length', async () => {
+    stubBrowser();
+    const layoutMs = async (repeats: number) => {
+      const session = await opened();
+      try {
+        session.insertText({ story: 'body', paraId: session.paragraphs('body')[5]!.paraId, offset: 0 }, 'A great many more words at the start of this page. '.repeat(repeats));
+        const started = performance.now();
+        await session.renderPng({ page: 9999 }).catch(() => undefined);
+        return performance.now() - started;
+      } finally { session.destroy(); }
+    };
+    const median = (values: number[]) => values.sort((a, b) => a - b)[1]!;
+    await layoutMs(150);
+    const short: number[] = [];
+    const long: number[] = [];
+    for (let round = 0; round < 3; round++) {
+      short.push(await layoutMs(150));
+      long.push(await layoutMs(600));
+    }
+    expect(median(long) / median(short)).toBeLessThan(4.5);
+  }, 60_000);
+
   test('wraps text in a family with no bundled face of its own, as the editor does', async () => {
     stubBrowser();
     const session = await opened();
