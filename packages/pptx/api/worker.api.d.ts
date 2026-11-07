@@ -1201,6 +1201,12 @@ export type PresentationCommandEvents = {
     ack: PresentationCommandAck;
     collaborationPipe: PipeOutputBatch<PptxPresencePeer>[];
 };
+/** @internal An intent the worker had not acknowledged, for replay after a crash. */
+export interface PresentationPendingIntent {
+    seq: number;
+    intent: PresentationCommandIntent;
+    afterSeq?: number;
+}
 export interface PresentationCommandClient {
     readonly state: PresentationCommandOpenResult;
     readCoverageFont?(family: string, text: string, have: number | null): Promise<SlicedFontRead | null>;
@@ -1212,6 +1218,8 @@ export interface PresentationCommandClient {
     renderPng?(target: PptxPngTarget, options?: PptxPngOptions): Promise<Uint8Array>;
     access?<K extends PresentationCommandAccessMethod>(method: K, ...args: Parameters<PresentationCommandAccessMethods[K]>): Promise<ReturnType<PresentationCommandAccessMethods[K]>>;
     takeRecoveryUpdate?(): ArrayBuffer | undefined;
+    /** @internal Intents sent to the worker whose acknowledgement has not arrived, in send order, with the command each one follows. */
+    pendingIntents?(): PresentationPendingIntent[];
     checkpoint?(options?: {
         rebase?: boolean;
     }): Promise<PresentationCommandSaveResult>;

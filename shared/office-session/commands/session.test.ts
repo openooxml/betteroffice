@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { SessionFailure } from '../types';
-import { createWorkerEditSession } from './session';
+import { createWorkerEditSession, sessionUnacknowledged } from './session';
 import type {
   Checkpoint, CommandAck, CommandConnection, CommandEnvelope, CommandOutcome,
   CommandTicket, EchoHooks, FrameEnvelope, WorkerEditSessionOptions,
@@ -83,6 +83,33 @@ function harness(overrides: Partial<WorkerEditSessionOptions<string, string, str
 }
 
 describe('worker edit session', () => {
+  it('still lists the envelopes that were unacknowledged when a crash ended the session without recovery', async () => {
+    const h = harness({ maxRecoveryAttempts: 0 });
+    for (const value of ['a', 'b', 'c']) h.session.submit('insert', value);
+    h.pump();
+    h.ack(0);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    h.pump();
+    h.fail(new SessionFailure('crash', 'worker crashed'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sessionUnacknowledged<string>(h.session).map((envelope) => envelope.payload)).toEqual(['b', 'c']);
+    await h.session.dispose();
+  });
+
+  for (const maxRecoveryAttempts of [undefined, 0]) {
+    it(`lists submitted envelopes whose outcome has not arrived, in seq order${maxRecoveryAttempts === 0 ? ', without recovery' : ''}`, async () => {
+      const h = harness(maxRecoveryAttempts === undefined ? {} : { maxRecoveryAttempts });
+      for (const value of ['a', 'b', 'c']) h.session.submit('insert', value);
+      h.pump();
+      expect(sessionUnacknowledged<string>(h.session).map((envelope) => envelope.payload)).toEqual(['a', 'b', 'c']);
+      h.ack(0);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      h.pump();
+      expect(sessionUnacknowledged<string>(h.session).map((envelope) => envelope.payload)).toEqual(['b', 'c']);
+      await h.session.dispose();
+    });
+  }
+
   for (const transactionalPresentation of [false, true]) {
     it(`releases a painter-owned frame once when a ${transactionalPresentation ? 'transactional' : 'cosmetic'} presentation overrun disposes the session`, async () => {
       let closes = 0;

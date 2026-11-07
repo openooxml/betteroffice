@@ -89,6 +89,16 @@ function limit(value: number | undefined, fallback: number): number {
   return value !== undefined && Number.isSafeInteger(value) && value > 0 ? value : fallback;
 }
 
+const ledgers = new WeakMap<object, () => readonly CommandEnvelope<unknown>[]>();
+
+/**
+ * @internal Envelopes the session submitted whose outcome has not arrived, in seq order, including those still
+ * pending when the session terminated. Read-only; a session without recovery uses it to replay them elsewhere.
+ */
+export function sessionUnacknowledged<P>(session: object): readonly CommandEnvelope<P>[] {
+  return (ledgers.get(session)?.() ?? []) as readonly CommandEnvelope<P>[];
+}
+
 /** @internal Creates a worker-backed edit session with coverage reconciliation and ordered recovery. */
 export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable = {}>(
   options: WorkerEditSessionOptions<O, P, S, E, F, X, Q>
@@ -105,6 +115,11 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
   const pending = new Set<TicketRecord>();
   const listeners = new Set<(state: EditSessionState<S, E>) => void>();
   const log = new Map<number, LogEntry<P>>();
+  let unacknowledgedAtTermination: CommandEnvelope<P>[] | undefined;
+  function unacknowledgedEnvelopes(): CommandEnvelope<P>[] {
+    return [...log.values()].filter((entry) => entry.outcome === undefined)
+      .map((entry) => cloneData(entry.envelope)).sort((a, b) => a.seq - b.seq);
+  }
   const dependencies = new Map<number, Set<number>>();
   const cancellations = new Set<IterableIterator<number>>();
   let cancellationQueued = false;
@@ -683,6 +698,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
       }
       settlePresentation(record, 'dropped');
     }
+    unacknowledgedAtTermination = unacknowledgedEnvelopes();
     log.clear();
     dependencies.clear();
     cancellations.clear();
@@ -1253,6 +1269,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
       return disposal;
     },
   };
+  ledgers.set(session, () => unacknowledgedAtTermination ? cloneData(unacknowledgedAtTermination) : unacknowledgedEnvelopes());
   const first = attach(options.connection);
   acceptAck(first, initial);
   if (options.connection.client.failure) fail(options.connection.client.failure);
