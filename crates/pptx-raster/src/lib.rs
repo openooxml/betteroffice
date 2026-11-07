@@ -2840,6 +2840,7 @@ mod tests {
                         label: String::new(),
                         primitives: vec![image],
                         transform: SlideTransform::default(),
+                        data: None,
                     }
                 } else {
                     image
@@ -3313,6 +3314,7 @@ mod tests {
                 transform: SlideTransform::default(),
             }],
             transform: SlideTransform::default(),
+            data: None,
         });
         let rendered = render_slide(
             &list,

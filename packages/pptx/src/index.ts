@@ -173,6 +173,8 @@ export type {
   TextLinkTarget,
   TableGrid,
   TableGridCell,
+  ChartData,
+  ChartDataSeries,
   SlideDisplayList,
   SlidePrimitive,
   SlideReceipt,

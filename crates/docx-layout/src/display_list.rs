@@ -10242,6 +10242,7 @@ fn plot_series_from<'a>(
         smooth: series.smooth,
         labels,
         line: None,
+        value_format: series.value_format.as_deref(),
     }
 }
 

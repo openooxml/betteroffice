@@ -636,6 +636,22 @@ export interface ChartPrimitive extends PrimitiveBase {
   name: string;
   label: string;
   primitives: SlidePrimitive[];
+  /** The plotted values as text, for assistive technology. Older engines
+   *  and charts over the size cap leave it out. */
+  data?: ChartData;
+}
+
+/** What a chart plots: one row per category and one column per series. */
+export interface ChartData {
+  categories: string[];
+  series: ChartDataSeries[];
+}
+
+export interface ChartDataSeries {
+  name?: string;
+  /** Each category's value as the chart's data labels would show it; `null`
+   *  where the chart has no number. */
+  values: (string | null)[];
 }
 
 /** A laid-out table. Its cells paint clipped to the table rectangle, and

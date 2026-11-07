@@ -453,6 +453,9 @@ pub struct PlotSeries<'a> {
     pub labels: Option<PlotDataLabels<'a>>,
     /// This series' own `c:spPr/a:ln`.
     pub line: Option<PlotLine<'a>>,
+    /// `c:val/c:numRef/c:numCache/c:formatCode`: the format the values were
+    /// cached with.
+    pub value_format: Option<&'a str>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -779,6 +782,7 @@ fn plot_series_from_model<'a>(
             color: line.color.as_deref(),
             width_emu: line.width_emu,
         }),
+        value_format: cached,
     }
 }
 
@@ -1016,16 +1020,7 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
         CHART_PAD
     };
 
-    let views: Vec<Vec<SeriesView<'_>>> = if chart.plot_groups.is_empty() {
-        vec![series_views(&chart.series, scan)]
-    } else {
-        chart
-            .plot_groups
-            .iter()
-            .take(MAX_PLOT_GROUPS)
-            .map(|group| series_views(&group.series, scan))
-            .collect()
-    };
+    let views = plotted_views(chart, scan);
     let mut families = plot_families(chart, &views, label_style);
     let primary_category_axis = families
         .iter()
@@ -3523,11 +3518,7 @@ fn label_field(
     percent_total: f64,
     number_format: Option<&str>,
 ) -> String {
-    let formatted = |value: f64| {
-        number_format
-            .and_then(|code| format_with_code(value, code))
-            .unwrap_or_else(|| format_number(value))
-    };
+    let formatted = |value: f64| format_value(value, number_format);
     match field {
         "SERIESNAME" => label_part(series.series.name.unwrap_or_default()),
         "CATEGORYNAME" => label_category(family.series, index),
@@ -3544,6 +3535,46 @@ fn label_field(
         }
         _ => String::new(),
     }
+}
+
+/// The series the chart draws, by plot group, read within `scan`.
+fn plotted_views<'a>(chart: &'a PlotChart<'_>, scan: &mut ScanBudget) -> Vec<Vec<SeriesView<'a>>> {
+    if chart.plot_groups.is_empty() {
+        vec![series_views(&chart.series, scan)]
+    } else {
+        chart
+            .plot_groups
+            .iter()
+            .take(MAX_PLOT_GROUPS)
+            .map(|group| series_views(&group.series, scan))
+            .collect()
+    }
+}
+
+/// A series the chart draws, read exactly as the drawing reads it.
+pub(crate) struct PlottedSeries<'a>(SeriesView<'a>);
+
+impl<'a> PlottedSeries<'a> {
+    pub(crate) fn series(&self) -> &'a PlotSeries<'a> {
+        self.0.series
+    }
+
+    /// The number format the data label at `index` uses: the point's own
+    /// label, else the series'. `None` where no label names one.
+    pub(crate) fn label_number_format(&self, index: usize) -> Option<&'a str> {
+        point_label_spec(&self.0, index).and_then(|spec| spec.number_format)
+    }
+}
+
+/// Every series the chart draws, in drawing order, within the same scan
+/// budget the drawing spends, so a series or point it leaves out is left out
+/// here too.
+pub(crate) fn plotted_series<'a>(chart: &'a PlotChart<'_>) -> Vec<PlottedSeries<'a>> {
+    plotted_views(chart, &mut ScanBudget::new())
+        .into_iter()
+        .flatten()
+        .map(PlottedSeries)
+        .collect()
 }
 
 fn point_label_spec<'a>(series: &SeriesView<'a>, index: usize) -> Option<PlotDataLabels<'a>> {
@@ -5403,6 +5434,13 @@ pub fn format_percent(value: f64) -> String {
         scaled
     };
     format_number(snapped) + "%"
+}
+
+/// `value` as a chart shows it: through `code` when it formats the value, else
+/// in the general number format.
+pub fn format_value(value: f64, code: Option<&str>) -> String {
+    code.and_then(|code| format_with_code(value, code))
+        .unwrap_or_else(|| format_number(value))
 }
 
 /// Formats `value` through the subset of `c:numFmt` codes that changes what a

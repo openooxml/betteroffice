@@ -522,6 +522,7 @@ fn golden_chart() {
                 ),
             ],
             transform: Transform::default(),
+            data: None,
         }]),
     );
 }
@@ -642,6 +643,7 @@ fn a_table_paints_exactly_as_the_chart_container_does() {
         label,
         primitives: primitives.clone(),
         transform,
+        data: None,
     };
     assert_eq!(
         render(&slide(vec![table(primitives)])),
@@ -742,6 +744,7 @@ fn a_table_turns_its_cells_and_its_clip_under_its_own_transform() {
             label,
             primitives,
             transform,
+            data: None,
         }]))
     );
 }
@@ -816,6 +819,7 @@ fn overflowing_text_escapes_its_box_but_respects_the_parent_clip() {
                     label: "".into(),
                     primitives: vec![text],
                     transform: Transform::default(),
+                    data: None,
                 }
             } else {
                 text

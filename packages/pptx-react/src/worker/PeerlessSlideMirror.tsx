@@ -82,7 +82,24 @@ const cellRole = (cell: SlideMirrorCell) => cell.header === 'column' ? 'columnhe
 
 function MirrorItem({ item, run }: { item: SlideMirrorItem; run: PeerlessPresentation }) {
   const style: CSSProperties = { position: 'absolute', left: item.x, top: item.y, width: item.w, height: item.h, margin: 0 };
-  const { table } = item;
+  const { table, chart } = item;
+  if (chart) {
+    return <div role="figure" aria-label={item.label ?? undefined} style={style}>
+      <div role="table" aria-rowcount={chart.rows.length + 1} aria-colcount={chart.series.length + 1}>
+        <div role="row" aria-rowindex={1}>
+          <div role="cell" aria-colindex={1} />
+          {chart.series.map((name, index) => <div key={index} role={name ? 'columnheader' : 'cell'} aria-colindex={index + 2}>
+            {name ?? ''}
+          </div>)}
+        </div>
+        {chart.rows.map((row, rowIndex) => <div key={rowIndex} role="row" aria-rowindex={rowIndex + 2}>
+          <div role={row.category.trim() ? 'rowheader' : 'cell'} aria-colindex={1}>{row.category}</div>
+          {row.values.map((value, index) => <div key={index} role="cell" aria-colindex={index + 2}>{value ?? ''}</div>)}
+        </div>)}
+      </div>
+      {mirrorParagraphs(item.paragraphs, run)}
+    </div>;
+  }
   if (table) {
     const grid = <div role="table" aria-label={item.label ?? undefined} aria-rowcount={table.rows.length}
       aria-colcount={table.columns} style={item.paragraphs.length ? undefined : style}>
