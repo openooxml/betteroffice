@@ -1,4 +1,4 @@
-import { canvasPngAvailable, canvasUnavailable, displayListToPng } from '../render/png';
+import { canvasPngAvailable, canvasUnavailable, displayListToPng, sheetFonts } from '../render/png';
 import { pngDisplayList, type ResolvedPngTarget } from './pngResolve';
 import type { XlsxPngOptions } from './pngTarget';
 
@@ -16,11 +16,21 @@ export interface XlsxPngEngine {
 /** Which engine this module draws with; the native package swaps in its own. */
 export const engineKind: 'wasm' | 'native' = 'wasm';
 
-/** Draws a resolved target through the canvas. */
+let defaultFaces: typeof import('./enginePngFonts') | undefined;
+
+/**
+ * Draws a resolved target through the canvas. Without `fonts` it paints with the bundled faces the native engine
+ * draws the sheet's fonts with, loaded on first use.
+ */
 export async function renderPng(engine: XlsxPngEngine, target: ResolvedPngTarget, options: XlsxPngOptions): Promise<Uint8Array> {
   if (!canvasPngAvailable()) throw canvasUnavailable();
   const { list, ...size } = pngDisplayList(engine, target, options);
-  return displayListToPng(list, { ...size, signal: options.signal, fonts: options.fonts });
+  let fonts = options.fonts;
+  if (fonts === undefined) {
+    defaultFaces ??= await import('./enginePngFonts');
+    fonts = await defaultFaces.defaultSheetFaces(sheetFonts(list), options.signal);
+  }
+  return displayListToPng(list, { ...size, signal: options.signal, fonts });
 }
 
 export default renderPng;

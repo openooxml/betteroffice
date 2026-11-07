@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, spyOn, test } from 'bun:test';
+import * as bundled from '@betteroffice/fonts';
 import { PngExportError } from '../../../../shared/office-session/pngExportError';
 import type { DisplayList } from '../display-list/types';
 import { engineKind, renderPng, type XlsxPngEngine } from '../wasm/enginePng';
@@ -7,13 +8,13 @@ import { displayListToPng } from './png';
 const text = { op: 'text', x: 4, y: 12, text: 'Total', fontSize: 11, color: '#000000', fontFamily: 'Brand Sans' } as const;
 const list = (commands: DisplayList['commands'] = [text]): DisplayList => ({ width: 120.5, height: 40, commands });
 
-interface Calls { sizes: [number, number][]; ctx: string[]; encoded: number; loads: string[]; transforms: number[][]; painted: string[]; faces: { family: string; weight: string; style: string }[]; held: unknown[]; }
+interface Calls { sizes: [number, number][]; ctx: string[]; encoded: number; loads: string[]; transforms: number[][]; painted: string[]; faces: { family: string; weight: string; style: string }[]; held: unknown[]; bytes: number[]; }
 
 let undo: (() => void) | undefined;
 afterEach(() => { undo?.(); undo = undefined; });
 
 function stubBrowser(options: { loadFails?: boolean; canvas?: boolean; faceFails?: boolean } = {}) {
-  const calls: Calls = { sizes: [], ctx: [], encoded: 0, loads: [], transforms: [], painted: [], faces: [], held: [] };
+  const calls: Calls = { sizes: [], ctx: [], encoded: 0, loads: [], transforms: [], painted: [], faces: [], held: [], bytes: [] };
   class StubCanvas {
     constructor(width: number, height: number) { calls.sizes.push([width, height]); }
     getContext() {
@@ -32,8 +33,9 @@ function stubBrowser(options: { loadFails?: boolean; canvas?: boolean; faceFails
   const scope = globalThis as Record<string, unknown>;
   class StubFace {
     family: string;
-    constructor(family: string, _bytes: ArrayBuffer, descriptors: { weight: string; style: string }) {
+    constructor(family: string, bytes: ArrayBuffer | Uint8Array, descriptors: { weight: string; style: string }) {
       this.family = family;
+      calls.bytes.push(bytes.byteLength);
       calls.faces.push({ family, ...descriptors });
     }
     load() { return options.faceFails ? Promise.reject(new Error('bad font')) : Promise.resolve(this); }
@@ -175,6 +177,39 @@ describe.skipIf(engineKind === 'native')('the wasm PNG engine', () => {
     await renderPng(value, { sheet: 1, range: 'used' }, { scale: 2 });
     expect(seen.map(({ sheet, call }) => [sheet, call])).toEqual([[1, 'range']]);
     expect(JSON.parse(seen[0].json)).toEqual({ scale: 2 });
+  });
+
+  test('without fonts, a face the native engine would draw with fails to load and the export rejects naming it', async () => {
+    stubBrowser();
+    const failing = spyOn(bundled, 'loadBundledFontBytes').mockImplementation(() => Promise.reject(new Error('offline')));
+    try {
+      const georgia: XlsxPngEngine = {
+        onSheet: (_sheet, read) => read(),
+        doc: {
+          pngDisplayListJson: () => JSON.stringify(list([{ ...text, fontFamily: 'Georgia' }])),
+          rangePngDisplayListJson: () => JSON.stringify(list([{ ...text, fontFamily: 'Georgia' }])),
+        },
+      };
+      await expect(renderPng(georgia, { sheet: 0, viewport: { x: 0, y: 0, width: 100, height: 40 } }, {})).rejects.toMatchObject({
+        name: 'PngExportError', code: 'font-unavailable', message: expect.stringContaining('for Georgia could not load: offline'),
+      });
+      expect(failing).toHaveBeenCalled();
+    } finally { failing.mockRestore(); }
+  });
+
+  test('without fonts, the sheet paints with the bundled face the native engine draws its font with', async () => {
+    const calls = stubBrowser();
+    const { value } = engine();
+    await renderPng(value, { sheet: 0, viewport: { x: 0, y: 0, width: 100, height: 40 } }, {});
+    const face = bundled.resolveGlyphFallbackFace('Brand Sans', false, false, 'word') ?? bundled.resolveLastResortChoice('Brand Sans', false, false, 'word').face;
+    expect(calls.bytes).toEqual([(await bundled.loadBundledFontBytes(face)).byteLength]);
+  });
+
+  test('with fonts, the sheet paints only with the faces passed', async () => {
+    const calls = stubBrowser();
+    const { value } = engine();
+    await renderPng(value, { sheet: 0, viewport: { x: 0, y: 0, width: 100, height: 40 } }, { fonts: [{ family: 'Brand Sans', bytes: new Uint8Array([1, 2, 3]) }] });
+    expect(calls.bytes).toEqual([3]);
   });
 
   test('without a canvas, viewport and range exports reject and name the native package', async () => {
