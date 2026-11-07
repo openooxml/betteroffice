@@ -78,11 +78,25 @@ impl SharedBudget {
 
     /// Gives back pixels whose bitmaps were dropped.
     pub(crate) fn refund(&self, pixels: u64) {
+        self.give_back(crate::ReplayBudget { work: 0, pixels });
+    }
+
+    /// Gives back work and pixels a dropped pass spent.
+    pub(crate) fn give_back(&self, spent: crate::ReplayBudget) {
         let remaining = self.remaining.get();
         self.remaining.set(crate::ReplayBudget {
-            pixels: remaining.pixels.saturating_add(pixels),
-            ..remaining
+            work: remaining.work.saturating_add(spent.work),
+            pixels: remaining.pixels.saturating_add(spent.pixels),
         });
+    }
+
+    /// What was spent since `before`.
+    pub(crate) fn spent_since(&self, before: crate::ReplayBudget) -> crate::ReplayBudget {
+        let remaining = self.remaining.get();
+        crate::ReplayBudget {
+            work: before.work.saturating_sub(remaining.work),
+            pixels: before.pixels.saturating_sub(remaining.pixels),
+        }
     }
 }
 
@@ -269,8 +283,7 @@ impl Combine {
 }
 
 /// Bitmaps a replay built, kept so an equal source or bitmap is built and
-/// charged once. A fallback replay of the same metafile takes over the cache
-/// of the pass it may replace, so bitmaps alive in both are charged once.
+/// charged once.
 #[derive(Default)]
 pub(crate) struct BitmapCache {
     /// Bitmaps kept so far, by content hash, so an equal one is shared.

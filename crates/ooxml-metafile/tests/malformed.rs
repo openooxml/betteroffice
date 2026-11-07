@@ -984,3 +984,28 @@ fn an_emf_plus_only_metafile_replayed_again_gets_back_its_first_pass_pixels() {
     assert!(drawing.ops.iter().any(|op| draws(op, 7)));
     assert_eq!(pixels_spent(&bytes), u64::from(side * side));
 }
+
+#[test]
+fn a_dual_fallback_draws_bitmaps_its_set_aside_emf_plus_pass_also_held() {
+    let bytes = Emf::new(100, 100)
+        .rec(
+            70,
+            &plus(&[
+                plus_header(true),
+                plus_png(1, 1),
+                plus_draw_image(
+                    1,
+                    [0.0, 0.0, SIDE as f32, SIDE as f32],
+                    [0.0, 0.0, 50.0, 50.0],
+                ),
+                (0x4037, 0, Vec::new()),
+                plus_eof(),
+            ])
+            .1,
+        )
+        .recs(vec![stretch_dibits([0, 0, 50, 50], &png_dib(3), SRCCOPY)])
+        .bytes();
+    let drawing = replay(&bytes).unwrap();
+    assert!(matches!(&drawing.ops[..], [op] if draws(op, 3)));
+    assert_eq!(pixels_spent(&bytes), u64::from(SIDE * SIDE));
+}
