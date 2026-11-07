@@ -71,23 +71,28 @@ describe.skipIf(engineKind === 'native')('canvas renderPng with a bundled face t
 describe.skipIf(engineKind === 'native')('canvas renderPng while edits keep asking for new faces', () => {
   test('rejects with font-unavailable after a bounded number of loading rounds', async () => {
     stubCanvas();
-    const original = fonts.loadBundledFontBytes;
+    const original = fonts.bundledFaceInstalled;
     const handle = openPresentation(fixture, { clientId: 7302 });
     const slideId = handle.snapshot().slides[0]!.id;
-    const styles = ['Georgia', 'Cambria', 'Times New Roman', 'Courier New', 'Arial'].flatMap((fontFamily) =>
-      [[false, false], [true, false], [false, true], [true, true]].map(([bold, italic]) => ({ fontFamily, bold, italic })));
     let edits = 0;
-    const loading = spyOn(fonts, 'loadBundledFontBytes').mockImplementation((...args: Parameters<typeof original>) => {
-      const style = styles[edits % styles.length]!;
+    const loading = spyOn(fonts, 'bundledFaceInstalled').mockImplementation((...args: Parameters<typeof original>) => {
       edits += 1;
-      handle.addTextBox(slideId, { name: `Edit ${edits}`, rect: { x: 100000, y: 100000, width: 3000000, height: 800000 }, text: `Edit ${edits}`, style: { ...style, fontSizePt: 18 } });
+      handle.addTextBox(slideId, { name: `Edit ${edits}`, rect: { x: 100000, y: 100000, width: 3000000, height: 800000 }, text: `Edit ${edits}`, style: { fontFamily: `Edited Family ${edits}`, fontSizePt: 18 } });
       return original(...args);
     });
+    const extra = { family: 'Supplied Only Here', bytes: new Uint8Array(await readFile(resolve(root, 'crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'))) };
+    const stray: unknown[] = [];
+    const onStray = (error: unknown) => { stray.push(error); };
+    process.on('unhandledRejection', onStray);
     try {
       await expect(handle.renderPng({ slide: 0 })).rejects.toMatchObject({ name: 'PngExportError', code: 'font-unavailable' });
+      await expect(handle.renderPng({ slide: 0 }, { fonts: [extra] })).rejects.toMatchObject({ name: 'PngExportError', code: 'font-unavailable' });
+      await new Promise((settled) => setTimeout(settled, 50));
+      expect(stray).toEqual([]);
       loading.mockRestore();
       expect(new TextDecoder().decode(await handle.renderPng({ slide: 0 }))).toBe('png');
     } finally {
+      process.off('unhandledRejection', onStray);
       loading.mockRestore();
       handle.dispose();
     }

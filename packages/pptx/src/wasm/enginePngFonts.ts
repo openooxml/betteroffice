@@ -120,39 +120,40 @@ const hasPrimary = (exporter: Exporter, request: RequestedFontFace) =>
 
 const hasFallback = (exporter: Exporter, face: BundledFontFace) => exporter.fallback.has(faceKey(face.family, isBold(face), isItalic(face)));
 
-/**
- * Registers the faces the slide asks for that the export renderer lacks, in the native engine's order: the first
- * installed face as the family's primary unless the family has one, the rest as fallbacks. Returns undefined when
- * there is nothing to load, so a caller can lay out without yielding.
- */
-function registerDefaults(exporter: Exporter, document: PptxDocument, slideId: string, signal?: AbortSignal): Promise<void> | undefined {
+/** The requests of the slide's current version the export renderer has not served yet. */
+function missingRequests(exporter: Exporter, document: PptxDocument, slideId: string): RequestedFontFace[] {
   const { faces: requests } = JSON.parse(exporter.renderer.requestedFontFacesJson(document, slideId)) as { faces: RequestedFontFace[] };
-  const wanted = requests.filter((request) => !exporter.requested.has(requestKey(request)));
-  if (!wanted.length) return undefined;
-  return (async () => {
-    const plans = await Promise.all(wanted.map(async (request) => {
-      const faces = await resolve(request);
-      const primary = hasPrimary(exporter, request);
-      const loads = faces.map((face, index) => (index === 0 && !primary) || !hasFallback(exporter, face)
-        ? needed(face, request.family) : undefined);
-      return { request, faces, loads };
-    }));
-    const bytes = await Promise.all(plans.map((plan) => Promise.all(plan.loads)));
-    signal?.throwIfAborted();
-    for (const [planIndex, { request, faces }] of plans.entries()) {
-      if (exporter.requested.has(requestKey(request))) continue;
-      const primary = hasPrimary(exporter, request);
-      for (const [index, face] of faces.entries()) {
-        const data = bytes[planIndex]![index];
-        if (index === 0 && !primary) {
-          if (data) register(exporter, { family: request.family, bold: request.bold, italic: request.italic, bytes: data }, false);
-        } else if (!hasFallback(exporter, face)) {
-          if (data) register(exporter, { family: face.family, bold: isBold(face), italic: isItalic(face), bytes: data }, true);
-        }
+  return requests.filter((request) => !exporter.requested.has(requestKey(request)));
+}
+
+/**
+ * Loads the faces `wanted` resolves to, then registers them in the native engine's order: the first installed face
+ * as the family's primary unless the family has one, the rest as fallbacks. Nothing registers until every load
+ * has settled, so a failed pass leaves the renderer as it was.
+ */
+async function registerDefaults(exporter: Exporter, wanted: RequestedFontFace[], signal?: AbortSignal): Promise<void> {
+  const plans = await Promise.all(wanted.map(async (request) => {
+    const faces = await resolve(request);
+    const primary = hasPrimary(exporter, request);
+    const loads = faces.map((face, index) => (index === 0 && !primary) || !hasFallback(exporter, face)
+      ? needed(face, request.family) : undefined);
+    return { request, faces, loads };
+  }));
+  const bytes = await Promise.all(plans.map((plan) => Promise.all(plan.loads)));
+  signal?.throwIfAborted();
+  for (const [planIndex, { request, faces }] of plans.entries()) {
+    if (exporter.requested.has(requestKey(request))) continue;
+    const primary = hasPrimary(exporter, request);
+    for (const [index, face] of faces.entries()) {
+      const data = bytes[planIndex]![index];
+      if (index === 0 && !primary) {
+        if (data) register(exporter, { family: request.family, bold: request.bold, italic: request.italic, bytes: data }, false);
+      } else if (!hasFallback(exporter, face)) {
+        if (data) register(exporter, { family: face.family, bold: isBold(face), italic: isItalic(face), bytes: data }, true);
       }
-      exporter.requested.add(requestKey(request));
     }
-  })();
+    exporter.requested.add(requestKey(request));
+  }
 }
 
 const current = (exporter: Exporter, measured: ExportFace[]) => exporter.measured.length === measured.length &&
@@ -198,12 +199,12 @@ export async function defaultFontLayout(
   const run = held.queue.then(async () => {
     for (let round = 0; ; round += 1) {
       const version = document.documentVersion();
-      const pending = registerDefaults(held, document, slideId, signal);
-      if (!pending) break;
+      const wanted = missingRequests(held, document, slideId);
+      if (!wanted.length) break;
       if (round === MAX_FONT_ROUNDS) {
         throw new PngExportError('font-unavailable', 'the faces this slide needs kept changing while they loaded; export again');
       }
-      await pending;
+      await registerDefaults(held, wanted, signal);
       if (document.documentVersion() === version) break;
     }
     signal?.throwIfAborted();
