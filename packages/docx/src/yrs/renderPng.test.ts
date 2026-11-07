@@ -125,16 +125,16 @@ describe('YrsSession.renderPng', () => {
         return performance.now() - started;
       } finally { session.destroy(); }
     };
-    const median = (values: number[]) => values.sort((a, b) => a - b)[1]!;
     await layoutMs(150);
-    const short: number[] = [];
-    const long: number[] = [];
-    for (let round = 0; round < 3; round++) {
-      short.push(await layoutMs(150));
-      long.push(await layoutMs(600));
+    let short = Infinity;
+    let long = Infinity;
+    for (let round = 0; round < 5; round++) {
+      short = Math.min(short, await layoutMs(150));
+      long = Math.min(long, await layoutMs(600));
     }
-    // Linear layout is about 4x here (5x with the remaining per-line overhead); the quadratic slicing it guards against was 8x-10x.
-    expect(median(long) / median(short)).toBeLessThan(6.5);
+    // Load only adds time, so the fastest run tracks the cost. Linear layout is
+    // about 4x-5x here; the quadratic slicing it guards against was 8x-10x.
+    expect(long / short).toBeLessThan(6.5);
   }, 60_000);
 
   test('wraps text in a family with no bundled face of its own, as the editor does', async () => {
