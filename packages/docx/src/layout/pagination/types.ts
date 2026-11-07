@@ -1482,6 +1482,10 @@ export type NoteAreaContract = {
   sectionId?: string;
   /** The area continues notes from the previous page, under a continuation separator. */
   continuation?: boolean;
+  /** Left edge of the column the area paints in; undefined = the page's text area. */
+  x?: number;
+  /** Width of that column; undefined = the page's text area. */
+  width?: number;
 };
 
 /**

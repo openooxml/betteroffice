@@ -884,12 +884,16 @@ fn in_typeable_area(page: &DisplayPage, x: f64, y: f64) -> bool {
 /// header/footer band gets. An area stating no band, or a zero-height one, owns
 /// no point: the list does not say where its notes paint, so claiming the
 /// region would route a click out of the body with nowhere to send it.
-fn in_note_area(area: &NoteRegion, y: f64) -> bool {
+fn in_note_area(area: &NoteRegion, x: f64, y: f64) -> bool {
     let px = |value: &Option<Number>| value.as_ref().and_then(Number::as_f64);
     let (Some(top), Some(height)) = (px(&area.y), px(&area.height)) else {
         return false;
     };
-    height > 0.0 && y >= top && y <= top + height
+    let across = match (px(&area.x), px(&area.width)) {
+        (Some(left), Some(width)) => x >= left && x <= left + width,
+        _ => true,
+    };
+    height > 0.0 && y >= top && y <= top + height && across
 }
 
 /// Whether the topmost image under the point is one a click would select.
@@ -1533,7 +1537,7 @@ pub fn hit_test_regions(dl: &DisplayList, page_index: usize, x: f64, y: f64) -> 
             });
         }
     }
-    if let Some(area) = page.note_areas.iter().find(|area| in_note_area(area, y)) {
+    if let Some(area) = page.note_areas.iter().find(|area| in_note_area(area, x, y)) {
         let story = note_stories(area)
             .into_iter()
             .map(|story| (text_box_distance_squared(story.primitives, x, y), story))

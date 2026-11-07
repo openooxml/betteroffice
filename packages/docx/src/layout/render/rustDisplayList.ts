@@ -142,6 +142,8 @@ export interface DisplayListNoteArea {
   separator?: DisplayListNoteItem;
   notes?: DisplayListNoteItem[];
   continuation?: boolean;
+  x?: number;
+  width?: number;
 }
 
 /** Stable reviewer palette entry for comments/revisions. */

@@ -142,7 +142,7 @@ describe('docx native engine parity', () => {
     }
   });
 
-  test('endnotes taller than the last page flow onto new pages in both engines', () => {
+  test('endnotes taller than the last page flow onto new pages, in both engines', () => {
     const encoder = new TextEncoder();
     const main = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
     const officeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml';
@@ -199,6 +199,17 @@ describe('docx native engine parity', () => {
         expect(area.y + area.height).toBeLessThanOrEqual(page.size.h - page.margins.bottom + 0.5);
       }
       expect(areas.flatMap(({ area }) => area.notes.map((note) => note.id)).filter((id, index, ids) => ids[index - 1] !== id)).toEqual([1, 2, 3]);
+      const display = actual.build_display_list_json(layout);
+      expect(display).toBe(expected.build_display_list_json(layout));
+      type DisplayArea = { kind?: string; primitives?: { groupId?: string }[]; continuedNoteIds?: number[] };
+      const displayPages = (JSON.parse(display) as { pages: { noteAreas?: DisplayArea[] }[] }).pages;
+      const shownOn = (id: number) => displayPages.filter((page) => (page.noteAreas ?? []).some((area) =>
+        area.kind === 'endnote' && (area.primitives ?? []).some((primitive) => primitive.groupId === `endnote-${id}`))).length;
+      const split = [1, 2, 3].filter((id) => shownOn(id) === 2);
+      expect(split.length).toBeGreaterThan(0);
+      for (const id of split) {
+        expect(displayPages.filter((page) => (page.noteAreas ?? []).some((area) => area.continuedNoteIds?.includes(id))).length).toBe(1);
+      }
     } finally {
       actual.free();
       expected.free();

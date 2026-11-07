@@ -8,8 +8,8 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 use crate::footnotes::{
-    NoteContent, NoteKind, NoteRefLocation, NoteSeparatorHeights, content_map,
-    map_note_anchors_to_pages, note_item, page_for_map_id,
+    NoteContent, NoteKind, NoteRefLocation, NoteSeparatorHeights, OrderedMap, collect_note_refs,
+    content_map, map_note_anchors_to_pages, note_item, page_for_map_id,
 };
 use crate::keep_together::{paragraph_is_unbreakable, paragraph_widow_control};
 use crate::measure_blocks::extent_height;
@@ -88,7 +88,7 @@ pub fn flow_target_page<'a>(
         FlowEnd::Section => pages
             .iter()
             .rev()
-            .find(|page| page.region_section_index == section_index),
+            .find(|page| page.region_section_index <= section_index),
     }
 }
 
@@ -126,8 +126,9 @@ impl EndnoteFlow {
 }
 
 /// The slices of `content` the flow may not split, as `(block, lines, height)`; a block other
-/// than a paragraph is one line. Heights add up to what painting the whole note advances.
-fn note_slices(content: &NoteContent) -> Vec<(usize, Range<usize>, f64)> {
+/// than a paragraph is one line. Heights add up to what painting the whole note advances. A
+/// paragraph kept whole that is taller than `room` splits between lines anyway, as in Word.
+fn note_slices(content: &NoteContent, room: f64) -> Vec<(usize, Range<usize>, f64)> {
     let mut slices = Vec::new();
     for (index, (block, measure)) in content.blocks.iter().zip(&content.measures).enumerate() {
         match (block, measure) {
@@ -146,8 +147,10 @@ fn note_slices(content: &NoteContent) -> Vec<(usize, Range<usize>, f64)> {
                 let lines: f64 = extent.lines.iter().map(|line| line.line_height).sum();
                 let tail = extent.total_height - lines;
                 let mut cuts = vec![0];
-                if !paragraph_is_unbreakable(paragraph, extent) {
-                    let widow = paragraph_widow_control(paragraph, extent);
+                if !paragraph_is_unbreakable(paragraph, extent)
+                    || before + extent.total_height > room
+                {
+                    let widow = paragraph_widow_control(paragraph, extent) && count >= 4;
                     let (first, last) = if widow {
                         (2, count - 2)
                     } else {
@@ -199,6 +202,16 @@ pub fn flow_endnotes(
 ) -> EndnoteFlow {
     let anchors = map_note_anchors_to_pages(pages, refs);
     let contents = content_map(contents);
+    let mut sections = HashMap::new();
+    let mut section = 0;
+    for entry in measured.iter() {
+        for reference in collect_note_refs(std::slice::from_ref(&entry.block)) {
+            sections.entry(reference.map_id()).or_insert(section);
+        }
+        if advances_region_section(&entry.block) {
+            section += 1;
+        }
+    }
     let mut groups: Vec<(Option<usize>, Vec<&NoteContent>)> = Vec::new();
     let mut seen = HashSet::new();
     for reference in refs {
@@ -209,7 +222,10 @@ pub fn flow_endnotes(
         let Some(anchor) = page_for_map_id(pages, &anchors, map_id) else {
             continue;
         };
-        let section = anchor.region_section_index;
+        let section = sections
+            .get(&map_id)
+            .copied()
+            .unwrap_or(anchor.region_section_index);
         let Some(end) = endnote_flow_end(regions, section) else {
             continue;
         };
@@ -244,7 +260,7 @@ pub fn flow_endnotes(
             Some(section) => pages
                 .iter()
                 .rev()
-                .find(|page| page.region_section_index == section),
+                .find(|page| page.region_section_index <= section),
             None => pages.last(),
         };
         let separator = target.map_or_else(
@@ -252,6 +268,10 @@ pub fn flow_endnotes(
             |page| separator_heights.height_for_page(NoteKind::Endnote, page),
         );
         let width = target.map_or(0.0, flow_column_width);
+        let room = target.map_or(f64::INFINITY, |page| {
+            let margins = page.body_margins.as_ref().unwrap_or(&page.margins);
+            page.size.h - margins.top - margins.bottom
+        });
         let end = if section.is_some() {
             FlowEnd::Section
         } else {
@@ -260,7 +280,7 @@ pub fn flow_endnotes(
         let mut blocks = Vec::new();
         for content in notes {
             let map_id = content.map_id();
-            let mut slices = note_slices(content);
+            let mut slices = note_slices(content, room - separator);
             if slices.is_empty() && content.height > 0.0 {
                 slices.push((0, 0..0, content.height));
             }
@@ -340,7 +360,9 @@ pub fn remove_flowed<T>(items: &mut Vec<T>, inserted: &[usize]) {
 }
 
 struct Placed {
+    x: f64,
     y: f64,
+    width: f64,
     height: f64,
     piece: Piece,
 }
@@ -396,77 +418,116 @@ pub fn attach_flowed_endnote_areas(
                     return None;
                 };
                 Some(Placed {
+                    x: reserved.x,
                     y: reserved.y,
+                    width: reserved.width,
                     height: reserved.height,
                     piece: flow.pieces.get(id)?.clone(),
                 })
             })
             .collect();
-        let Some(first) = placed.first() else {
-            continue;
-        };
-        let y = first.y;
-        let bottom = placed
-            .iter()
-            .map(|placed| placed.y + placed.height)
-            .fold(y, f64::max);
-        let separator = (first.height - first.piece.height).max(0.0);
-        let continuation = !first.piece.opens_run;
-        let end = first.piece.end;
-        let mut notes: Vec<NoteLayoutItemContract> = Vec::new();
-        let mut ids = Vec::new();
-        let mut index = 0;
-        while index < placed.len() {
-            let map_id = placed[index].piece.map_id;
-            let mut last = index;
-            while last + 1 < placed.len() && placed[last + 1].piece.map_id == map_id {
-                last += 1;
-            }
-            let (from, to) = (&placed[index].piece, &placed[last].piece);
-            if let Some(content) = contents.get(&map_id).copied() {
-                let mut item = note_item(content);
-                item.height = Some(
-                    placed[index..=last]
-                        .iter()
-                        .map(|placed| placed.piece.height)
-                        .sum(),
-                );
-                if from.index > 0 || to.index + 1 < to.count {
-                    item.block_start = Some(from.block);
-                    item.line_start = Some(from.lines.start);
-                    item.block_end = Some(to.block);
-                    item.line_end = Some(to.lines.end);
-                }
-                notes.push(item);
-                ids.push(map_id as f64);
-            }
-            index = last + 1;
-        }
-        if notes.is_empty() {
-            continue;
-        }
+        let columns = page
+            .columns
+            .as_ref()
+            .is_some_and(|columns| columns.count > 1.0);
         let measured_separator = separator_heights
             .get_for_page(NoteKind::Endnote, page)
             .is_some();
+        let mut areas = Vec::new();
+        let mut ids = Vec::new();
+        let mut start = 0;
+        while start < placed.len() {
+            let mut end = start + 1;
+            while end < placed.len()
+                && !placed[end].piece.opens_run
+                && placed[end].x == placed[start].x
+            {
+                end += 1;
+            }
+            let segment = &placed[start..end];
+            start = end;
+            if let Some(area) = segment_area(
+                segment,
+                &contents,
+                (columns, measured_separator),
+                page.section_id.clone(),
+                &mut ids,
+            ) {
+                areas.push(area);
+            }
+        }
+        if areas.is_empty() {
+            continue;
+        }
         page.footnote_ids.get_or_insert_with(Vec::new).extend(ids);
-        page.note_areas
-            .get_or_insert_with(Vec::new)
-            .push(NoteAreaContract {
-                page_index: None,
-                section_id: page.section_id.clone(),
-                kind: Some(NoteKind::Endnote.as_str().to_owned()),
-                placement: Some(end.placement().to_owned()),
-                y: Some(y),
-                height: Some(bottom - y),
-                columns: Some(1),
-                separator: measured_separator.then(|| NoteLayoutItemContract {
-                    height: Some(separator),
-                    ..Default::default()
-                }),
-                notes: Some(notes),
-                continuation: continuation.then_some(true),
-            });
+        page.note_areas.get_or_insert_with(Vec::new).extend(areas);
     }
+}
+
+/// The note area of one run of flowed blocks in one column of a page: a run starts after the
+/// body text of the document or a section, so two runs on a page have body text between them.
+fn segment_area(
+    segment: &[Placed],
+    contents: &OrderedMap<i64, &NoteContent>,
+    (columns, measured_separator): (bool, bool),
+    section_id: Option<String>,
+    ids: &mut Vec<f64>,
+) -> Option<NoteAreaContract> {
+    let first = segment.first()?;
+    let y = first.y;
+    let bottom = segment
+        .iter()
+        .map(|placed| placed.y + placed.height)
+        .fold(y, f64::max);
+    let separator = (first.height - first.piece.height).max(0.0);
+    let mut notes: Vec<NoteLayoutItemContract> = Vec::new();
+    let mut index = 0;
+    while index < segment.len() {
+        let map_id = segment[index].piece.map_id;
+        let mut last = index;
+        while last + 1 < segment.len() && segment[last + 1].piece.map_id == map_id {
+            last += 1;
+        }
+        let (from, to) = (&segment[index].piece, &segment[last].piece);
+        if let Some(content) = contents.get(&map_id).copied() {
+            let mut item = note_item(content);
+            item.height = Some(
+                segment[index..=last]
+                    .iter()
+                    .map(|placed| placed.piece.height)
+                    .sum(),
+            );
+            if from.index > 0 || to.index + 1 < to.count {
+                item.block_start = Some(from.block);
+                item.line_start = Some(from.lines.start);
+                item.block_end = Some(to.block);
+                item.line_end = Some(to.lines.end);
+            }
+            notes.push(item);
+            ids.push(map_id as f64);
+        }
+        index = last + 1;
+    }
+    if notes.is_empty() {
+        return None;
+    }
+    Some(NoteAreaContract {
+        page_index: None,
+        section_id,
+        kind: Some(NoteKind::Endnote.as_str().to_owned()),
+        placement: Some(first.piece.end.placement().to_owned()),
+        y: Some(y),
+        height: Some(bottom - y),
+        columns: Some(1),
+        separator: measured_separator.then(|| NoteLayoutItemContract {
+            height: Some(separator),
+            ..Default::default()
+        }),
+        notes: Some(notes),
+        continuation: (!first.piece.opens_run).then_some(true),
+        x: columns.then_some(first.x),
+        width: columns.then_some(first.width),
+    })
 }
 
 #[cfg(test)]
@@ -508,12 +569,13 @@ mod tests {
 
     #[test]
     fn widow_control_keeps_two_lines_at_both_ends_of_a_split() {
-        let slices = note_slices(&note(1, 6));
+        let slices = note_slices(&note(1, 6), f64::INFINITY);
         let ranges: Vec<_> = slices.iter().map(|(_, lines, _)| lines.clone()).collect();
         assert_eq!(ranges, [0..2, 2..3, 3..4, 4..6]);
         let total: f64 = slices.iter().map(|(_, _, height)| height).sum();
         assert_eq!(total, 4.0 + 6.0 * 20.0 + 6.0);
-        assert_eq!(note_slices(&note(2, 3)).len(), 1);
+        assert_eq!(note_slices(&note(2, 3), f64::INFINITY).len(), 1);
+        assert_eq!(note_slices(&note(2, 3), 40.0).len(), 3);
     }
 
     #[test]

@@ -2793,6 +2793,12 @@ pub struct NoteAreaContract {
     /// The area continues notes from the previous page, under a continuation separator.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation: Option<bool>,
+    /// Left edge of the column the area paints in; absent, the page's text area.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x: Option<f64>,
+    /// Width of that column; absent, the page's text area.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

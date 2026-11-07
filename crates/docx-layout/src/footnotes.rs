@@ -1065,6 +1065,8 @@ pub fn attach_note_areas(
                 }),
                 notes: Some(group.iter().map(|content| note_item(content)).collect()),
                 continuation: None,
+                x: None,
+                width: None,
             });
         }
         if !areas.is_empty() {

@@ -211,6 +211,11 @@ pub struct NoteRegion {
     pub y: Option<Number>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub height: Option<Number>,
+    /// Left edge of the column the region paints in; absent, the page's text area.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x: Option<Number>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<Number>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub columns: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -3202,6 +3207,10 @@ struct NoteAreaIn {
     notes: Vec<NoteItemIn>,
     #[serde(default)]
     continuation: Option<bool>,
+    #[serde(default)]
+    x: Option<f64>,
+    #[serde(default)]
+    width: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -5549,13 +5558,15 @@ fn emit_note_item(
 
 fn emit_note_regions(page: &PageIn, ctx: &RenderCtx<'_>) -> Vec<NoteRegion> {
     let margins = page.body_margins.as_ref().unwrap_or(&page.margins);
-    let content_width = (page.size.w - page.margins.left - page.margins.right).max(1.0);
+    let page_width = (page.size.w - page.margins.left - page.margins.right).max(1.0);
     let mut regions = Vec::with_capacity(page.note_areas.len());
     for area in &page.note_areas {
         let kind = area.kind.as_deref().unwrap_or("footnote");
         let y = area
             .y
             .unwrap_or(page.size.h - margins.bottom - area.height.unwrap_or(0.0));
+        let left = area.x.unwrap_or(page.margins.left);
+        let content_width = area.width.unwrap_or(page_width).max(1.0);
         let columns = area.columns.unwrap_or(1).max(1) as usize;
         let column_width =
             ((content_width - (columns - 1) as f64 * NOTE_COLUMN_GAP_PX) / columns as f64).max(1.0);
@@ -5569,7 +5580,7 @@ fn emit_note_regions(page: &PageIn, ctx: &RenderCtx<'_>) -> Vec<NoteRegion> {
                 &mut separator_primitives,
                 separator,
                 kind,
-                page.margins.left,
+                left,
                 y,
                 content_width,
                 ctx,
@@ -5581,9 +5592,9 @@ fn emit_note_regions(page: &PageIn, ctx: &RenderCtx<'_>) -> Vec<NoteRegion> {
                 content_width / 3.0
             };
             separator_primitives.push(Primitive::Line(LinePrimitive {
-                x1: px(page.margins.left),
+                x1: px(left),
                 y1: px(y),
-                x2: px(page.margins.left + length),
+                x2: px(left + length),
                 y2: px(y),
                 stroke_width: px(1.0),
                 color: "#000000".to_string(),
@@ -5600,7 +5611,7 @@ fn emit_note_regions(page: &PageIn, ctx: &RenderCtx<'_>) -> Vec<NoteRegion> {
         let mut primitives = Vec::new();
         let partitions = note_partitions(&area.notes, columns);
         for (column, notes) in partitions.into_iter().enumerate() {
-            let x = page.margins.left + column as f64 * (column_width + NOTE_COLUMN_GAP_PX);
+            let x = left + column as f64 * (column_width + NOTE_COLUMN_GAP_PX);
             let mut cursor = y + area
                 .separator
                 .as_ref()
@@ -5615,6 +5626,8 @@ fn emit_note_regions(page: &PageIn, ctx: &RenderCtx<'_>) -> Vec<NoteRegion> {
             section_id: area.section_id.clone(),
             y: area.y.map(px),
             height: area.height.map(px),
+            x: area.x.map(px),
+            width: area.width.map(px),
             columns: area.columns,
             separator_primitives,
             primitives,

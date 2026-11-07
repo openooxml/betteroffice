@@ -31,7 +31,8 @@ fn reference(id: usize) -> String {
     format!(r#"<w:r><w:endnoteReference w:id="{id}"/></w:r>"#)
 }
 
-/// A package whose body is `body` and whose endnotes `1..` hold `notes`, one paragraph each.
+/// A package whose body is `body` and whose endnotes `1..` hold `notes`, one paragraph each: a
+/// note starting with `<` is the paragraph's own content, any other its text.
 fn endnotes_docx(body: &str, notes: &[String], settings: Option<&str>) -> Vec<u8> {
     let mut xml = format!(
         concat!(
@@ -42,10 +43,15 @@ fn endnotes_docx(body: &str, notes: &[String], settings: Option<&str>) -> Vec<u8
         NS
     );
     for (index, text) in notes.iter().enumerate() {
+        let content = if text.starts_with('<') {
+            text.clone()
+        } else {
+            fixture::r(text)
+        };
         xml.push_str(&format!(
             r#"<w:endnote w:id="{}">{}</w:endnote>"#,
             index + 1,
-            fixture::p(&format!("{:08X}", 0x5000_0000 + index), &fixture::r(text))
+            fixture::p(&format!("{:08X}", 0x5000_0000 + index), &content)
         ));
     }
     xml.push_str("</w:endnotes>");
@@ -491,6 +497,205 @@ fn an_edit_before_flowed_endnotes_lays_out_as_a_fresh_session_does() {
             fresh
                 .layout_document_with_regions_retained_json(&request)
                 .unwrap()
+        );
+    }
+}
+
+fn endnote_areas(page: &Value) -> Vec<&Value> {
+    page["noteAreas"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|area| area["kind"] == "endnote")
+        .collect()
+}
+
+/// The body fragments of `page` an endnote area paints over: both overlap down the page and,
+/// when the area names its column, across it. A paragraph fragment states the text area's
+/// width; its lines fill no more than one column.
+fn overlapped_body(page: &Value, area: &Value) -> Vec<String> {
+    let top = area["y"].as_f64().unwrap();
+    let bottom = area_bottom(area);
+    let span = area["x"].as_f64().zip(area["width"].as_f64());
+    page["fragments"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|fragment| fragment["kind"] != "reserved")
+        .filter(|fragment| {
+            let y = fragment["y"].as_f64().unwrap();
+            let height = fragment["height"].as_f64().unwrap();
+            let x = fragment["x"].as_f64().unwrap();
+            let width = fragment["width"]
+                .as_f64()
+                .unwrap()
+                .min(span.map_or(f64::INFINITY, |(_, across)| across));
+            y + height > top + 0.5
+                && y + 0.5 < bottom
+                && span
+                    .is_none_or(|(left, across)| x + width > left + 0.5 && x + 0.5 < left + across)
+        })
+        .map(|fragment| fragment["blockId"].to_string())
+        .collect()
+}
+
+#[test]
+fn section_end_endnotes_after_a_continuous_break_get_an_area_each() {
+    let body = format!(
+        "{}{}{}<w:sectPr><w:type w:val=\"continuous\"/>{NARROW_PAGE}</w:sectPr>",
+        fixture::p(
+            "31000001",
+            &format!("{}{}", fixture::r("First section"), reference(1))
+        ),
+        fixture::p(
+            "31000002",
+            &format!(
+                r#"<w:pPr><w:sectPr>{NARROW_PAGE}</w:sectPr></w:pPr>{}"#,
+                fixture::r("First section ends")
+            )
+        ),
+        fixture::p(
+            "31000003",
+            &format!("{}{}", fixture::r("Second section"), reference(2))
+        ),
+    );
+    let bytes = endnotes_docx(
+        &body,
+        &[words(1, 6), words(2, 6)],
+        Some(r#"<w:endnotePr><w:pos w:val="sectEnd"/></w:endnotePr>"#),
+    );
+    let (_, _, layout) = laid_out(&bytes, 68);
+    let page = &pages(&layout)[0];
+    let areas = endnote_areas(page);
+    assert_eq!(areas.len(), 2, "one area for each section's endnotes");
+    assert_eq!(note_ids(areas[0]), [1]);
+    assert_eq!(note_ids(areas[1]), [2]);
+    for area in &areas {
+        assert!(area["separator"]["height"].as_f64().unwrap() > 0.0);
+        assert!(area.get("continuation").is_none());
+        let over = overlapped_body(page, area);
+        assert!(
+            over.is_empty(),
+            "endnotes {:?} paint over {over:?}",
+            note_ids(area)
+        );
+    }
+    assert!(areas[1]["y"].as_f64().unwrap() >= area_bottom(areas[0]));
+}
+
+#[test]
+fn endnotes_in_two_columns_paint_in_the_column_they_flow_into() {
+    let body = format!(
+        r#"{}<w:sectPr><w:cols w:num="2" w:space="720"/>{NARROW_PAGE}</w:sectPr>"#,
+        (1..=4)
+            .map(|id| fixture::p(
+                &format!("{:08X}", 0x3200_0000 + id),
+                &format!("{}{}", fixture::r(&format!("Body {id}")), reference(id))
+            ))
+            .collect::<String>()
+    );
+    let notes: Vec<String> = (1..=4).map(|note| words(note, 50)).collect();
+    let (engine, request, layout) = laid_out(&endnotes_docx(&body, &notes, None), 69);
+    let page = &pages(&layout)[0];
+    let areas = endnote_areas(page);
+    assert!(areas.len() >= 2, "{} areas", areas.len());
+    let lefts: Vec<f64> = areas
+        .iter()
+        .map(|area| area["x"].as_f64().unwrap())
+        .collect();
+    assert!(
+        lefts[1] > lefts[0] + areas[0]["width"].as_f64().unwrap() - 0.5,
+        "{lefts:?}"
+    );
+    assert_eq!(areas[1]["continuation"], true);
+    for area in &areas {
+        let over = overlapped_body(page, area);
+        assert!(
+            over.is_empty(),
+            "endnotes {:?} paint over {over:?}",
+            note_ids(area)
+        );
+    }
+    let display: Value = serde_json::from_str(
+        &engine
+            .build_display_list_json(&layout_json(&engine, &request))
+            .unwrap(),
+    )
+    .unwrap();
+    let painted = display["pages"][0]["noteAreas"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|area| area["kind"] == "endnote")
+        .collect::<Vec<_>>();
+    for (area, left) in painted.iter().zip(&lefts) {
+        let width = area["width"].as_f64().unwrap();
+        for primitive in area["primitives"].as_array().unwrap() {
+            if let Some(x) = primitive["x"].as_f64() {
+                assert!(
+                    x + 0.5 >= *left && x < left + width,
+                    "a primitive at {x} outside its column at {left}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_kept_together_endnote_taller_than_a_page_continues_on_the_next() {
+    let text = words(1, 400);
+    let note = format!("<w:pPr><w:keepLines/></w:pPr>{}", fixture::r(&text));
+    let body = format!(
+        "{}<w:sectPr>{NARROW_PAGE}</w:sectPr>",
+        fixture::p(
+            "33000001",
+            &format!("{}{}", fixture::r("Body"), reference(1))
+        )
+    );
+    let (engine, request, layout) = laid_out(&endnotes_docx(&body, &[note], None), 70);
+    let display: Value = serde_json::from_str(
+        &engine
+            .build_display_list_json(&layout_json(&engine, &request))
+            .unwrap(),
+    )
+    .unwrap();
+    let parts = &painted_notes(&display)["endnote-1"];
+    assert!(parts.len() > 1, "the note paints on {} page", parts.len());
+    let shown: String = parts.iter().map(|(_, text)| text.as_str()).collect();
+    let squeezed: String = text.split_whitespace().collect();
+    assert!(shown.ends_with(&squeezed));
+    assert_eq!(shown.matches(&squeezed).count(), 1);
+    for (index, page) in pages(&layout).iter().enumerate() {
+        for area in endnote_areas(page) {
+            assert!(
+                area_bottom(area) <= content_bottom(page) + 0.5,
+                "page {index}: endnotes end at {} below the text area",
+                area_bottom(area)
+            );
+        }
+    }
+    let paged = engine
+        .export_structured_with_pages(&PageExportOptions {
+            stories: Some(vec![StorySelection::Body, StorySelection::Endnotes]),
+            ..PageExportOptions::new(RevisionView::Markup)
+        })
+        .unwrap()
+        .content;
+    let markdown = render_docx_markdown_with_pages(
+        &paged.structured,
+        PageAnnotations::from(&paged.layout),
+        &PageMarkdownOptions {
+            page_markers: Some(true),
+            ..PageMarkdownOptions::default()
+        },
+    )
+    .unwrap()
+    .markdown;
+    for word in text.split_whitespace() {
+        assert_eq!(
+            word_count(&markdown, word),
+            1,
+            "{word} in the extracted text"
         );
     }
 }
