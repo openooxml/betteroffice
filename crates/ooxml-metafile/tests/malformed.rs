@@ -1009,3 +1009,32 @@ fn a_dual_fallback_draws_bitmaps_its_set_aside_emf_plus_pass_also_held() {
     assert!(matches!(&drawing.ops[..], [op] if draws(op, 3)));
     assert_eq!(pixels_spent(&bytes), u64::from(SIDE * SIDE));
 }
+
+#[test]
+fn separate_replays_never_share_bitmaps() {
+    let bytes = Emf::new(100, 100)
+        .recs(vec![
+            stretch_dibits([0, 0, 50, 50], &png_dib(1), SRCCOPY),
+            stretch_dibits([50, 50, 50, 50], &png_dib(1), SRCCOPY),
+        ])
+        .bytes();
+    let images = |drawing: &ooxml_metafile::drawing::Drawing| {
+        drawing
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Image(image) => Some(Arc::clone(&image.bitmap)),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let (first, second) = (replay(&bytes).unwrap(), replay(&bytes).unwrap());
+    let (first, second) = (images(&first), images(&second));
+    assert_eq!((first.len(), second.len()), (2, 2));
+    assert!(Arc::ptr_eq(&first[0], &first[1]));
+    assert!(
+        first
+            .iter()
+            .all(|one| second.iter().all(|other| !Arc::ptr_eq(one, other)))
+    );
+}
