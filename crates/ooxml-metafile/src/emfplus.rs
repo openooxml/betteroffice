@@ -1618,11 +1618,15 @@ fn parse_image<const FULL: bool>(player: &mut Player<FULL>, data: &[u8]) -> Opti
                 .limits
                 .bitmap_pixels
                 .saturating_sub(player.bitmap_pixels);
-            if pixels > budget.min(crate::dib::MAX_BITMAP_PIXELS) {
+            let repeat = player.note_source(&[data]);
+            let limit = if repeat { u64::MAX } else { budget };
+            if pixels > limit.min(crate::dib::MAX_BITMAP_PIXELS) {
                 player.refuse::<()>("the metafile's bitmaps exceed the pixel budget");
                 return None;
             }
-            player.charge(0, pixels)?;
+            let charged = if repeat { 0 } else { pixels };
+            let owed = pixels - charged;
+            player.charge(0, charged)?;
             let pixels = match mime {
                 Some(mime) => Pixels::Encoded {
                     mime,
@@ -1635,7 +1639,9 @@ fn parse_image<const FULL: bool>(player: &mut Player<FULL>, data: &[u8]) -> Opti
                 height,
                 pixels,
             };
-            Some(PlusImage::Bitmap(Arc::new(bitmap)))
+            Some(PlusImage::Bitmap(
+                player.share_bitmap(bitmap, charged, owed)?,
+            ))
         }
         2 => {
             let size = u32_at(data, 12)? as usize;

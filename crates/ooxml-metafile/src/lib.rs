@@ -174,9 +174,13 @@ fn play_full_emf(
     if depth == 0 && dual && gdi_draws_nothing(bytes, &budget) {
         return play_emf::<true>(bytes, depth, false, Some(budget));
     }
+    let before = budget.remaining.get().pixels;
     let plus = play_emf::<true>(bytes, depth, true, Some(Rc::clone(&budget)));
     if budget.exceeded.get() {
         return Err("the metafile draws more than the replay limits".to_owned());
+    }
+    if plus.is_err() {
+        budget.refund(before.saturating_sub(budget.remaining.get().pixels));
     }
     if let Ok(player) = &plus
         && player.omissions.is_empty()

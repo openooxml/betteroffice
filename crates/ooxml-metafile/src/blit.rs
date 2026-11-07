@@ -323,17 +323,27 @@ fn draw<const FULL: bool>(player: &mut Player<FULL>, job: Blit<'_>) -> Option<()
         .bitmap_pixels
         .saturating_sub(player.bitmap_pixels);
     let declared = declared_pixels(job.bmi);
-    if declared > budget {
+    let repeat = player.note_source(&[job.bmi, job.bits, &job.usage.to_le_bytes()]);
+    if declared > budget && !repeat {
         return player.refuse("the metafile's bitmaps exceed the pixel budget");
     }
-    player.charge(0, declared)?;
-    let dib = match decode(job.bmi, job.bits, job.usage, budget, |pixels| {
-        player.charge(0, pixels.saturating_sub(declared)).is_some()
+    let before = player.bitmap_pixels;
+    if !repeat {
+        player.charge(0, declared)?;
+    }
+    let limit = if repeat {
+        crate::dib::MAX_BITMAP_PIXELS
+    } else {
+        budget
+    };
+    let dib = match decode(job.bmi, job.bits, job.usage, limit, |pixels| {
+        repeat || player.charge(0, pixels.saturating_sub(declared)).is_some()
     }) {
         Ok(dib) => dib,
         Err(_) if player.overflowed => return None,
         Err(_) => return player.omit("bitmaps that could not be decoded"),
     };
+    let decoded = u64::from(dib.width) * u64::from(dib.height);
     let Some((bitmap, offset, whole)) = crop(
         dib,
         job.source,
@@ -375,9 +385,11 @@ fn draw<const FULL: bool>(player: &mut Player<FULL>, job: Blit<'_>) -> Option<()
             parallelogram(corners.map(|corner| apply(to_output, corner))),
         );
     }
+    let charged = player.bitmap_pixels.saturating_sub(before);
+    let bitmap = player.share_bitmap(bitmap, charged, if repeat { decoded } else { 0 })?;
     player.push_op(Op::Image(Image {
         transform,
-        bitmap: Arc::new(bitmap),
+        bitmap,
         opacity: job.opacity.clamp(0.0, 1.0),
         clip,
     }));

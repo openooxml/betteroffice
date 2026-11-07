@@ -6,7 +6,8 @@
 //! cannot reproduce as an omission instead of refusing.
 
 use std::cell::Cell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -72,6 +73,15 @@ impl SharedBudget {
         });
         self.exceeded.set(exceeded);
         !exceeded
+    }
+
+    /// Gives back pixels whose bitmaps were dropped.
+    pub(crate) fn refund(&self, pixels: u64) {
+        let remaining = self.remaining.get();
+        self.remaining.set(crate::ReplayBudget {
+            pixels: remaining.pixels.saturating_add(pixels),
+            ..remaining
+        });
     }
 }
 
@@ -272,6 +282,10 @@ pub(crate) struct Player<const FULL: bool> {
     pub omissions: BTreeMap<&'static str, usize>,
     pub text_chars: usize,
     pub bitmap_pixels: u64,
+    /// Bitmaps kept so far, by content hash, so an equal one is shared.
+    pub bitmaps: HashMap<u64, Vec<Arc<Bitmap>>>,
+    /// Hashes of the bitmap sources decoded so far.
+    pub sources: HashSet<u64>,
     pub budget: Option<Rc<SharedBudget>>,
     pub refusal: Option<String>,
     /// How many metafiles enclose this one.
@@ -311,6 +325,8 @@ impl<const FULL: bool> Player<FULL> {
             omissions: BTreeMap::new(),
             text_chars: 0,
             bitmap_pixels: 0,
+            bitmaps: HashMap::new(),
+            sources: HashSet::new(),
             budget: None,
             refusal: None,
             depth: 0,
@@ -342,6 +358,48 @@ impl<const FULL: bool> Player<FULL> {
             return self.refuse("the metafile draws more than the replay limits");
         }
         Some(())
+    }
+
+    /// Notes a bitmap source, returning whether an equal one was decoded
+    /// before. A repeat may decode past the pixel budget, as one bitmap at a
+    /// time, and is charged only if its pixels match no kept bitmap.
+    pub(crate) fn note_source(&mut self, parts: &[&[u8]]) -> bool {
+        let mut hasher = DefaultHasher::new();
+        parts.hash(&mut hasher);
+        !self.sources.insert(hasher.finish())
+    }
+
+    /// Keeps `bitmap`, or returns an equal one already kept; `charged` is
+    /// what it cost so far, refunded when an equal one is reused, and
+    /// `uncharged` what it still owes when it is kept.
+    pub(crate) fn share_bitmap(
+        &mut self,
+        bitmap: Bitmap,
+        charged: u64,
+        uncharged: u64,
+    ) -> Option<Arc<Bitmap>> {
+        let mut hasher = DefaultHasher::new();
+        bitmap.hash(&mut hasher);
+        let key = hasher.finish();
+        if let Some(equal) = self
+            .bitmaps
+            .get(&key)
+            .and_then(|kept| kept.iter().find(|kept| ***kept == bitmap))
+        {
+            let equal = Arc::clone(equal);
+            self.bitmap_pixels = self.bitmap_pixels.saturating_sub(charged);
+            if FULL && let Some(budget) = &self.budget {
+                budget.refund(charged);
+            }
+            return Some(equal);
+        }
+        self.charge(0, uncharged)?;
+        let bitmap = Arc::new(bitmap);
+        self.bitmaps
+            .entry(key)
+            .or_default()
+            .push(Arc::clone(&bitmap));
+        Some(bitmap)
     }
 
     /// Spends commands and pixels built outside `push`.
