@@ -1,5 +1,138 @@
 # @betteroffice/pptx-react
 
+## 0.6.0
+
+### Minor Changes
+
+- e65df1c: Editors given `fonts` now load bundled faces for the other families a deck uses, including light members such as Calibri Light, so their text keeps its metrics. Supplied families keep the app's faces. Pass `defaultFonts={false}` to fetch no default fonts.
+- e4b365a: `PptxEditor` gains `shortcuts` and `onShortcutIssue`: hosts can remap or disable keyboard shortcuts, clipboard keys included; tooltips and context menus follow. New `pasteAsPlainText` command on Ctrl+Shift+V.
+- 0979b79: Adds `title`, `description` and `decorative` to pptx read shapes, from shape alternative text at every depth. Sessions seeded before this change read them as absent until reseeded.
+- c10ba8c: Adds opt-in `addTextBox`, `addShape`, `addPicture`, and `removeShape` proposals with local shape and story refs, insertion outlines, deletion strikes, and an 8 MB decoded media total limit. Exports `decodeBrowserPresentationImage` for browser image decoding without WASM.
+- c664499: Adds opt-in slide structure proposals with local refs, `proposalSlideStrip`, and `layoutProposalDiffSlideById`. The editor previews inserted, deleted, and moved slides before acceptance, and `office_propose` accepts slide structure edits for PPTX.
+- bd6c8b5: Adds `strike` formatting and the `strikethrough` editor command and toolbar button. Single and double strikethrough render by default, preserving inherited formatting and explicit overrides; deck schema moves to 2.4, so older peers refuse documents migrated by this version.
+- e4b365a: `resolveDocxShortcuts`, `resolveXlsxShortcuts` and `resolvePptxShortcuts` load from each package's `./shortcuts` subpath, keeping them out of the editor bundle. They were never released from the package root, so nothing breaks.
+
+### Patch Changes
+
+- 1d5efb7: The editors keep a left-to-right layout on right-to-left host pages, so the spreadsheet grid paints and menus stay on screen in Arabic or Hebrew apps.
+- cc65f8e: READMEs state API compatibility as a versioning policy: releases are versioned with Changesets, the API can change between minor versions with every change in the changelog, and deprecations are announced before removal. The Python packages drop the development status classifier.
+- 0f2f9d9: Adds opt-in `PptxBundledFont` descriptors to `PptxEditor`'s `fonts` prop, decoded in the editor worker before opening. Existing byte faces remain supported.
+- a45ba76: Breaking: `slideToPng` becomes the handle's `renderPng`, which decodes images and paints with registered faces itself.
+
+  ```ts
+  await slideToPng(handle.layoutSlide(i), { scale: 2, resolveImage }); // before
+  await handle.renderPng({ slide: i }, { scale: 2 }); // after
+  ```
+
+- 17214d6: The slide text caret and IME preedit text take the colour of the text under them and stay visible on dark slides and dark shape fills, instead of a fixed dark grey or the host page's text colour.
+- b6f8ae7: Adds context menus for text, objects, tables, and slide thumbnails in the default worker editor, enabled by default. Adds `cut`, `copy`, `paste`, `deleteObject`, `deleteSlide`, `duplicateSlide`, `tableInsert`, and `tableDelete` commands and worker support for `duplicateSlide`.
+- fe7a975: Unconfigured editors now load bundled fonts per family before the first paint. App fonts still take precedence, and uncovered characters retain browser font fallback.
+- 24179a4: Bold and italic runs in families whose bundled face has only a regular style, such as Chinese, Japanese and Korean fonts, are now drawn bold and slanted instead of upright regular. Lighter members such as Calibri Light keep their own weight.
+- e67e831: The default PowerPoint editor downloads about two thirds less code up front: the deprecated legacy editor and the in-thread fallback editor now load only when used.
+- 40f8868: Metafile pictures with labels, bitmaps or complex paint now draw through a lazy SVG replay in editors and native PNG exports, keeping the original media when saving. Adds `metafileSvg` and `metafileImageBytes` for hosts resolving display bytes.
+- 96a3fb3: Adds paragraph `languages` to slide display lists. Screen readers use authored text languages by default, including mixed-language paragraphs and titles, while paragraphs with one language remain a single text node.
+- 3e7d0f6: Adds opt-in `setStoryParagraphs` proposals for paragraph rewrites with bullets, alignment, styled runs and `@ref` story targets. Review previews show inserted and deleted text and mark shapes changed by paragraph properties.
+- 01a0e1f: Plugin reads include `headerFooter` with visible slide footer, slide number and date text, plus stored settings in `layout.headerFooter`. These facts are included by default and optional for older engines.
+- 18b3628: New `experimentalSlicedFonts` editor option, off by default: in Chromium and Firefox it loads only the Chinese, Japanese or Korean outlines a slide needs. In `@betteroffice/fonts`, `ensureText` and `prefetch` also load the characters shaping composes text into.
+- 9e8097c: The PowerPoint editor keeps its private crash-recovery copy of the opened file as a Blob instead of in page memory, lowering page memory by the file's size.
+- eb1ac5d: Crash recovery in the PowerPoint editor now works on picture-heavy decks: it reopens the original file and replays the edits instead of loading an open-time state export that could exceed the 64 MiB update limit, and opening no longer spends time exporting that state.
+- d4667b6: Lower PowerPoint editor memory on large decks: crash recovery keeps one copy of the opening state and the edits since then, instead of re-encoding and copying the whole presentation at every automatic checkpoint.
+- 60336bd: Screen readers can now read the current slide in the presentation editor: its text in whole words, alt text for pictures and shapes, and table text. Slide changes and shape selection are announced, and slide thumbnails are named.
+- 5b8a7b9: Ctrl or Cmd+A now selects all text in the active text box or table cell in the worker editor, and no longer selects the page's own text when nothing on the slide is selected.
+- 3313017: Adds opt-in `setSlideLayout` and `setSlideBackground` proposals with `@ref` slide targets. Review previews show layout artwork and inherited picture backgrounds, with translated labels for both changes.
+- fea115a: Slide thumbnails in the PowerPoint editor no longer keep their full-resolution pictures decoded after painting, lowering memory on picture-heavy decks.
+- c485cb0: Typing no longer repaints the active slide's thumbnail on every keystroke; it updates once input pauses, and switching slides still shows each thumbnail's latest edits.
+- 34b5676: Adds opt-in `insertTableRow`, `deleteTableRow`, `insertTableColumn`, and `deleteTableColumn` proposals, including Python proposal dictionaries. Review previews show table structure changes with translated labels, and acceptance applies the proposal as one undo step.
+- ec768e6: Slide thumbnails in the PowerPoint editor decode pictures at thumbnail size instead of full resolution, lowering memory on picture-heavy decks.
+- 7f372fa: Clicking a slide thumbnail in the PowerPoint editor shows the slide one frame sooner. The worker starts painting it when the pointer is pressed, and the click shows that picture if the deck and view are unchanged.
+- 61c7e5e: Typing in a PowerPoint text box no longer allocates and repaints a full slide canvas per keystroke: the editor reuses the slide raster and repaints only the lines that changed.
+- 66a0623: Moves active slide painting into the editor worker by default. Slides opened before the worker is ready paint on the main thread, and the main painter remains the fallback for unsupported environments and images.
+- 3e30099: Adds opt-in `reorderShape` proposals for moving shapes to the front, back, forward or backward, including Python dictionaries and agent tools. Review previews show the new stacking order with translated labels, and acceptance applies the proposal as one undo step.
+- c1d5485: Context menus, table tools, the shortcut dialog, rulers, error screens, presence chips and other labels that were always English now follow the editor locale, and numbers, units and times in them use its formatting.
+- ad45f86: Editors decode packed fonts with their engine by default instead of downloading a separate decoder. Standalone font providers can opt into a decoder with `runtime.decoder`.
+- 3af54c4: A menu opened while its list is still loading always appears once the list arrives, and keys pressed meanwhile no longer reach the document behind it; Escape and Tab still dismiss it.
+- 8c70d22: Toolbar overflow and context menus now load their menu list separately and preload it when the browser is idle, so the editors' initial download is smaller. A menu that cannot load stays closed and retries.
+- e6d5c52: Package exports now carry a `default` condition next to `import`, so webpack consumers (`next build --webpack`, including editors loaded with `next/dynamic`) resolve every entry instead of failing with "Package path is not exported".
+- 3d988e4: `XlsxEditor` and `PptxEditor` with `legacySyncApi` now call `onReady` once the first frame is painted. A hidden or zero-size editor calls it once it is shown.
+- Updated dependencies [f99e53a]
+- Updated dependencies [de8f092]
+- Updated dependencies [d17d538]
+- Updated dependencies [3609ce4]
+- Updated dependencies [fa2717d]
+- Updated dependencies [5999962]
+- Updated dependencies [56c2c6c]
+- Updated dependencies [f44c229]
+- Updated dependencies [d60b8e4]
+- Updated dependencies [9ab2b61]
+- Updated dependencies [ad45f86]
+- Updated dependencies [39ae19a]
+- Updated dependencies [53502c6]
+- Updated dependencies [ec04baa]
+- Updated dependencies [d60b8e4]
+- Updated dependencies [21a60e5]
+- Updated dependencies [19c20c3]
+- Updated dependencies [4fb3025]
+- Updated dependencies [7b30d80]
+- Updated dependencies [df33f6a]
+- Updated dependencies [37199d9]
+- Updated dependencies [78ad2e2]
+- Updated dependencies [681b02e]
+- Updated dependencies [cc65f8e]
+- Updated dependencies [6378188]
+- Updated dependencies [842d624]
+- Updated dependencies [3418edd]
+- Updated dependencies [a45ba76]
+- Updated dependencies [cade718]
+- Updated dependencies [53151fd]
+- Updated dependencies [b6f8ae7]
+- Updated dependencies [1398cff]
+- Updated dependencies [fe7a975]
+- Updated dependencies [24179a4]
+- Updated dependencies [ccbdbf5]
+- Updated dependencies [e65df1c]
+- Updated dependencies [84578e1]
+- Updated dependencies [a5a8ddb]
+- Updated dependencies [0530412]
+- Updated dependencies [e4b365a]
+- Updated dependencies [e664196]
+- Updated dependencies [40f8868]
+- Updated dependencies [96a3fb3]
+- Updated dependencies [4cfcf6e]
+- Updated dependencies [3e7d0f6]
+- Updated dependencies [01a0e1f]
+- Updated dependencies [c45b6ff]
+- Updated dependencies [0f2f9d9]
+- Updated dependencies [18b3628]
+- Updated dependencies [eb1ac5d]
+- Updated dependencies [d4667b6]
+- Updated dependencies [8b61ea4]
+- Updated dependencies [6329841]
+- Updated dependencies [dfd1833]
+- Updated dependencies [906e337]
+- Updated dependencies [60336bd]
+- Updated dependencies [1398cff]
+- Updated dependencies [0979b79]
+- Updated dependencies [c10ba8c]
+- Updated dependencies [01a0e1f]
+- Updated dependencies [3313017]
+- Updated dependencies [c664499]
+- Updated dependencies [bd6c8b5]
+- Updated dependencies [34b5676]
+- Updated dependencies [ec768e6]
+- Updated dependencies [7f372fa]
+- Updated dependencies [dc78510]
+- Updated dependencies [66a0623]
+- Updated dependencies [76515fc]
+- Updated dependencies [47edf38]
+- Updated dependencies [3e30099]
+- Updated dependencies [7cf70f8]
+- Updated dependencies [55c25ba]
+- Updated dependencies [ad45f86]
+- Updated dependencies [e6d5c52]
+  - @betteroffice/fonts@1.0.0
+  - @betteroffice/pptx@0.6.0
+  - @betteroffice/pptx-i18n@0.6.0
+
 ## 0.5.1
 
 ### Patch Changes

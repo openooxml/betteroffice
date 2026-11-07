@@ -1,5 +1,148 @@
 # @betteroffice/xlsx-react
 
+## 0.6.0
+
+### Minor Changes
+
+- 3773773: Attached agent proposals use the shared engine; standalone behavior is unchanged. Adds opt-in DOCX `editPeer`, `proposeAsync`, `rejectAsync`, `discardAsync`, `keepRevisions`, `replaceText.at`, typed `TrackedRevisionConflictError`, `AcceptDateUnsupportedError` and `ProposalDecidedInEditorError`, and XLSX `getProposalStatus`, `onProposalChange` and `isProposalStale`.
+- e4b365a: `resolveDocxShortcuts`, `resolveXlsxShortcuts` and `resolvePptxShortcuts` load from each package's `./shortcuts` subpath, keeping them out of the editor bundle. They were never released from the package root, so nothing breaks.
+- 3adc24b: Breaking: workbook `renderPng(viewport)` and `renderRangePng(options)` become `await renderPng({ sheet, viewport } | { sheet, range }, { scale, maxWidth, maxHeight })`, painted with the editor's painter on a canvas. It rejects with `PngExportError` rather than substitute a font.
+- 1346f3c: The xlsx editor loads metric-compatible bundled fonts for workbook families from `@betteroffice/fonts` and repaints when they arrive. On by default; `defaultFonts={false}` opts out. Worker sessions expose `call.decodeFontFace`.
+- 82fd297: Adds opt-in `allowHostProposals` for read-only proposal review and `proposeChanges` on legacy editor APIs. Adds proposal `getAnchorGeometry` queries and `proposal-change` events, plus optional `allowHostProposals` on session `setReadOnly` commands.
+- 1519377: `XlsxEditor` gains `shortcuts` and `onShortcutIssue`: hosts can remap or disable keyboard shortcuts, clipboard keys included, in every engine mode; tooltips and context menus follow. Ctrl+Shift+V in the grid now pastes plain text.
+- 9ff8a3f: Typing into a locked cell on a protected sheet now reports `sheet-protected` ("This cell is on a protected sheet.") instead of a failed save; unlocked cells there can be edited. `XlsxCommandFailureCode` and `XlsxCommandAdmissionCode` gain `sheet-protected`, so exhaustive switches need a case.
+
+### Patch Changes
+
+- 79b93d3: The caret takes the colour of the text under it and stays visible on dark shading or highlights. The DOCX worker caret and the XLSX cell editor no longer pick up the host page's text colour.
+- 1d5efb7: The editors keep a left-to-right layout on right-to-left host pages, so the spreadsheet grid paints and menus stay on screen in Arabic or Hebrew apps.
+- 19c20c3: The spreadsheet editor no longer keeps decoded copies of bundled fonts after the browser has registered them, which cuts page memory by about 2.5 to 5 MB.
+- 23825ed: Hyperlink cells are real links in the XLSX screen-reader grid. Following one takes the same path as a click: safe web and mail targets open in a new tab, places in the workbook are selected. `A11yCell.href` is new.
+- cc65f8e: READMEs state API compatibility as a versioning policy: releases are versioned with Changesets, the API can change between minor versions with every change in the changelog, and deprecations are announced before removal. The Python packages drop the development status classifier.
+- c1d5485: Context menus, table tools, the shortcut dialog, rulers, error screens, presence chips and other labels that were always English now follow the editor locale, and numbers, units and times in them use its formatting.
+- ad45f86: Editors decode packed fonts with their engine by default instead of downloading a separate decoder. Standalone font providers can opt into a decoder with `runtime.decoder`.
+- 3af54c4: A menu opened while its list is still loading always appears once the list arrives, and keys pressed meanwhile no longer reach the document behind it; Escape and Tab still dismiss it.
+- 8c70d22: Toolbar overflow and context menus now load their menu list separately and preload it when the browser is idle, so the editors' initial download is smaller. A menu that cannot load stays closed and retries.
+- e6d5c52: Package exports now carry a `default` condition next to `import`, so webpack consumers (`next build --webpack`, including editors loaded with `next/dynamic`) resolve every entry instead of failing with "Package path is not exported".
+- 9ce4911: Collaborators can add sheets at the end of a workbook and merge cells in the editor. Sheets added at once under one name read `Name (2)`. Collaborating peers must update together: older peers refuse the new schema.
+- 303a383: The in-thread editor no longer stays in a fallback font after opening until the first scroll or edit.
+- 5797065: Loads collaboration support and presence UI only when collaboration is configured. Default editor opens download less JavaScript, while collaborative sessions retain synchronization and presence behavior.
+- 2922d83: The default spreadsheet editor downloads less code up front: the deprecated legacy editor and the in-thread fallback editor now load only when used.
+- 9fa3613: Reduces the default worker editor download by loading PNG rendering on the first PNG export. PNG export remains available without changing editor or session APIs.
+- 95f9416: The default editor no longer downloads the legacy worker session hook, editor API and input coordinator when it opens a workbook.
+- e2cc9dd: The experimental plugin edit gate now also covers paste and cut: plugins see each changed cell, pasted formulas already moved, with `source` `paste` or `cut`, and any refusal refuses the whole gesture before the clipboard or cells change.
+- 45da678: Adds experimental `cellEditable` and `beforeCellCommit` plugin hooks: plugins can lock cells for typing and clearing, rewrite typed input, or refuse it with `host-refused`. Works in the in-thread and default worker editors; the legacy worker editor ends plugins that define them.
+- 421a628: Adds `headerFooter` facts to plugin `readCells` sheet entries: printable left, center and right sections and the active first, odd and even variants; null when a sheet has none. Workbook snapshots written by this version do not decode in 0.5.1.
+- 7c568b9: Spreadsheet plugins can hit-test the grid: `geometry.getPositionAtPoint(clientX, clientY)` now answers the cell under a point, matching the editor's own answer, in every editor. It returns null outside the grid, over charts and after the workbook is replaced.
+- ae849a2: Adds an experimental `rowDecorations` plugin hook to the XLSX editor: plugins show badges and dots in a row gutter left of the grid, and a click or Enter sends `row-decoration-activate` to the owning plugin.
+- 3d988e4: `XlsxEditor` and `PptxEditor` with `legacySyncApi` now call `onReady` once the first frame is painted. A hidden or zero-size editor calls it once it is shown.
+- 9ff8a3f: Protected cell entries now report `sheet-protected` with a localized message by default. Unlocked cells on protected sheets remain editable.
+- 26e36a3: Switching to a neighbouring sheet tab in the spreadsheet editor shows the new sheet immediately. Neighbouring sheets are prepared in the background while the editor is idle and replaced by the confirmed view once it arrives.
+- 210f855: Adds context menus for cells and sheet tabs (right-click, Menu key or Shift+F10) and the commands behind them: `cut`, `copy`, `paste`, `pastePlainText`, `clearContents`, `insertRows`, `insertColumns`, `deleteRows`, `deleteColumns`, `insertSheet`, `deleteSheet`, `renameSheet` and `moveSheet`.
+- ae70d35: When a rejected plugin definition shares its id with an accepted one, edit gating and row decorations now use the accepted plugin's hooks instead of the rejected one's.
+- 00a990d: When a collaborator or an agent deletes the sheet you are viewing, the editor now moves to the sheet the workbook keeps active instead of failing with "Sheet index is out of range".
+- 4b9381b: A refused structural edit, such as a row insert a chart cannot follow, now shows why in the editor banner and says the workbook is unchanged, instead of "The cell entry before this could not be saved." Command results report it as `edit-unsupported`.
+- 8d59669: Pending proposals now survive structural edits and undo/redo by default. Targets and formulas rebase; optional `ProposalCell.stale` reports drift, and optional `Proposal.forceBlocked` hides force with a translated reason when deleted targets or unrewritable formulas prevent acceptance.
+- 91f06b0: Screen readers now hear the active cell (address, value, "has formula"), range size and sheet switches in the spreadsheet editor. The grid, cell editor and sheet tabs are labelled, sheet tabs use arrow keys, and F6 moves between toolbar, grid and tabs.
+- Updated dependencies [3773773]
+- Updated dependencies [f99e53a]
+- Updated dependencies [c548eea]
+- Updated dependencies [de8f092]
+- Updated dependencies [d17d538]
+- Updated dependencies [3609ce4]
+- Updated dependencies [5999962]
+- Updated dependencies [56c2c6c]
+- Updated dependencies [d60b8e4]
+- Updated dependencies [9ab2b61]
+- Updated dependencies [ad45f86]
+- Updated dependencies [39ae19a]
+- Updated dependencies [53502c6]
+- Updated dependencies [ec04baa]
+- Updated dependencies [d60b8e4]
+- Updated dependencies [21a60e5]
+- Updated dependencies [19c20c3]
+- Updated dependencies [4fb3025]
+- Updated dependencies [7b30d80]
+- Updated dependencies [df33f6a]
+- Updated dependencies [37199d9]
+- Updated dependencies [23825ed]
+- Updated dependencies [b0d5d34]
+- Updated dependencies [681b02e]
+- Updated dependencies [cc65f8e]
+- Updated dependencies [6378188]
+- Updated dependencies [842d624]
+- Updated dependencies [e65df1c]
+- Updated dependencies [18b3628]
+- Updated dependencies [dc78510]
+- Updated dependencies [7cf70f8]
+- Updated dependencies [55c25ba]
+- Updated dependencies [ad45f86]
+- Updated dependencies [e6d5c52]
+- Updated dependencies [702b174]
+- Updated dependencies [dac1245]
+- Updated dependencies [317d85c]
+- Updated dependencies [f77d138]
+- Updated dependencies [f92d560]
+- Updated dependencies [c06b68d]
+- Updated dependencies [f25a90c]
+- Updated dependencies [74407d2]
+- Updated dependencies [e5bb91a]
+- Updated dependencies [2dbf721]
+- Updated dependencies [3adc24b]
+- Updated dependencies [7e850af]
+- Updated dependencies [fec61ca]
+- Updated dependencies [b5d9f51]
+- Updated dependencies [34b0f7c]
+- Updated dependencies [7183550]
+- Updated dependencies [8017c8a]
+- Updated dependencies [9ce4911]
+- Updated dependencies [bb3e6b7]
+- Updated dependencies [1346f3c]
+- Updated dependencies [4b01734]
+- Updated dependencies [5d3376b]
+- Updated dependencies [14b82ff]
+- Updated dependencies [9d433be]
+- Updated dependencies [82fd297]
+- Updated dependencies [1519377]
+- Updated dependencies [711c41a]
+- Updated dependencies [5797065]
+- Updated dependencies [9fa3613]
+- Updated dependencies [2b444de]
+- Updated dependencies [45959a2]
+- Updated dependencies [6821205]
+- Updated dependencies [6d5edbc]
+- Updated dependencies [0036740]
+- Updated dependencies [9d85035]
+- Updated dependencies [e2cc9dd]
+- Updated dependencies [45da678]
+- Updated dependencies [421a628]
+- Updated dependencies [ae849a2]
+- Updated dependencies [a9f5adc]
+- Updated dependencies [057f74a]
+- Updated dependencies [abeaece]
+- Updated dependencies [83d0750]
+- Updated dependencies [9ff8a3f]
+- Updated dependencies [9ff8a3f]
+- Updated dependencies [210f855]
+- Updated dependencies [ac02839]
+- Updated dependencies [4b9381b]
+- Updated dependencies [8d59669]
+- Updated dependencies [0422127]
+- Updated dependencies [2c28650]
+- Updated dependencies [91f06b0]
+- Updated dependencies [b5f3ca2]
+- Updated dependencies [9d9de00]
+- Updated dependencies [e200f5e]
+- Updated dependencies [df287ec]
+- Updated dependencies [8001b2f]
+- Updated dependencies [c1525f7]
+- Updated dependencies [5ee5cd3]
+- Updated dependencies [3c4f665]
+- Updated dependencies [14251f8]
+  - @betteroffice/xlsx@0.6.0
+  - @betteroffice/fonts@1.0.0
+  - @betteroffice/xlsx-i18n@0.6.0
+
 ## 0.5.1
 
 ### Patch Changes
