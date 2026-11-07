@@ -142,6 +142,69 @@ describe('docx native engine parity', () => {
     }
   });
 
+  test('endnotes taller than the last page flow onto new pages in both engines', () => {
+    const encoder = new TextEncoder();
+    const main = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+    const officeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml';
+    const relType = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+    const words = (note: number) => Array.from({ length: 40 }, (_, index) => `n${note}t${index}`).join(' ');
+    const notes = [1, 2, 3].map((id) => `<w:endnote w:id="${id}"><w:p><w:r><w:t xml:space="preserve">${words(id)}</w:t></w:r></w:p></w:endnote>`).join('');
+    const body = [1, 2, 3].map((id) => `<w:p><w:r><w:t>Body ${id}</w:t></w:r><w:r><w:endnoteReference w:id="${id}"/></w:r></w:p>`).join('');
+    const bytes = wasm.rezip_docx({
+      '[Content_Types].xml': encoder.encode(`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="${officeType}.document.main+xml"/><Override PartName="/word/endnotes.xml" ContentType="${officeType}.endnotes+xml"/></Types>`),
+      '_rels/.rels': encoder.encode(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${relType}/officeDocument" Target="word/document.xml"/></Relationships>`),
+      'word/_rels/document.xml.rels': encoder.encode(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId2" Type="${relType}/endnotes" Target="endnotes.xml"/></Relationships>`),
+      'word/endnotes.xml': encoder.encode(`<w:endnotes ${main}><w:endnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:endnote><w:endnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:endnote>${notes}</w:endnotes>`),
+      'word/document.xml': encoder.encode(`<w:document ${main}><w:body>${body}<w:sectPr><w:pgSz w:w="4320" w:h="2880"/><w:pgMar w:top="300" w:right="300" w:bottom="300" w:left="300" w:header="0" w:footer="0" w:gutter="0"/></w:sectPr></w:body></w:document>`),
+    });
+    const expected = new wasm.EditSession(29);
+    const actual = new native.EditSession(29);
+    try {
+      expected.open_docx(bytes, true, 'opening');
+      actual.open_docx(bytes, true, 'opening');
+      const font = expected.register_measure_font(fontBytes);
+      expect(actual.register_measure_font(fontBytes)).toBe(font);
+      const request = {
+        bodyStory: 'body',
+        regions: { sections: [{
+          sectionId: 'main',
+          properties: {
+            pageWidth: 4320, pageHeight: 2880,
+            marginTop: 300, marginRight: 300, marginBottom: 300, marginLeft: 300,
+          },
+        }] },
+        notes: { contents: [1, 2, 3].map((id) => ({ id, noteKind: 'endnote', height: 0 })) },
+        measurement: {
+          fontChains: {} as Record<string, number[]>,
+          defaults: { fontSize: 11, fontFamily: 'Calibri' },
+          authoritativeShaping: true,
+        },
+        renderEnv: {},
+      };
+      const requirements = JSON.parse(expected.layout_font_requirements_json(JSON.stringify(request))) as { key: string }[];
+      for (const requirement of requirements) request.measurement.fontChains[requirement.key] = [font];
+      const input = JSON.stringify(request);
+      const layout = actual.layout_document_with_regions_json(input);
+      expect(layout).toBe(expected.layout_document_with_regions_json(input));
+      type Area = { kind?: string; y: number; height: number; continuation?: boolean; notes: { id: number }[] };
+      type Page = { fragments: { y: number; height: number }[]; size: { h: number }; margins: { bottom: number }; noteAreas?: Area[] };
+      const pages = (JSON.parse(layout) as { layout: { pages: Page[] } }).layout.pages;
+      const areas = pages.flatMap((page) => (page.noteAreas ?? []).filter((area) => area.kind === 'endnote').map((area) => ({ page, area })));
+      expect(areas.length).toBeGreaterThan(1);
+      expect(areas[0]!.area.continuation).toBeUndefined();
+      for (const { area } of areas.slice(1)) expect(area.continuation).toBe(true);
+      for (const { page, area } of areas) {
+        const body = Math.max(0, ...page.fragments.map((fragment) => fragment.y + fragment.height));
+        expect(area.y + 0.5).toBeGreaterThanOrEqual(body);
+        expect(area.y + area.height).toBeLessThanOrEqual(page.size.h - page.margins.bottom + 0.5);
+      }
+      expect(areas.flatMap(({ area }) => area.notes.map((note) => note.id)).filter((id, index, ids) => ids[index - 1] !== id)).toEqual([1, 2, 3]);
+    } finally {
+      actual.free();
+      expected.free();
+    }
+  });
+
   test.each(['open_docx', 'seed_from_docx'] as const)('%s reads the same synthetic package', (method) => {
     const expected = new wasm.EditSession(7);
     const actual = new native.EditSession(7);

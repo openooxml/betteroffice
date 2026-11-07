@@ -94,6 +94,8 @@ export interface NoteRegion {
    * `noteIds`; undefined = legacy region without backlink data.
    */
   notes?: NoteRegionNote[];
+  /** Notes this region continues from an earlier page, which shows their opening. */
+  continuedNoteIds?: number[];
 }
 
 /** Backlink metadata for one note in a NoteRegion. */

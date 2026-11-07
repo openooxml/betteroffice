@@ -8,6 +8,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use docx_layout::display_list::DisplayList;
+use docx_layout::endnote_flow::{
+    EndnoteFlow, attach_flowed_endnote_areas, flow_column_width, flow_endnotes, flow_target_page,
+    flows_with_body, remove_flowed, take_flowed_fragments,
+};
 use docx_layout::footnotes::{
     FOOTNOTE_COLUMN_GAP_PX, NoteKind, NoteSeparatorHeights, OrderedMap, apply_note_presentation,
     assign_note_presentations, attach_note_areas, build_note_presentations,
@@ -2117,6 +2121,9 @@ struct PaginationState {
     region_placements: Vec<RegionPlacementState>,
     block_fingerprints: Vec<Fingerprint>,
     measured_spacing: Vec<BlockSpacing>,
+    /// The flowed endnote blocks that end the last pass's arena, kept aside while the arena
+    /// holds the body alone.
+    flowed_tail: Option<FlowedTail>,
     options_fingerprint: u64,
     revision_preview_key: u64,
     /// The decisions [`Self::revision_preview_key`] identifies.
@@ -2141,7 +2148,112 @@ struct PaginationState {
     pagination_blocks_placed: u64,
 }
 
+#[derive(Debug)]
+struct FlowedTail {
+    body_len: usize,
+    /// Each flowed block with its fingerprint, at its index in the full arena, ascending.
+    blocks: Vec<(usize, MeasuredBlock, Fingerprint)>,
+    /// Each flowed block's fragment, at its page and its index among the page's fragments.
+    fragments: Vec<(usize, usize, Fragment)>,
+}
+
 impl PaginationState {
+    /// Takes the flowed endnote blocks out of the retained arena, so the next edit walks and
+    /// measures the body alone; [`Self::restore_flowed_tail`] puts them back before that edit
+    /// places, so placement still resumes from this pass.
+    fn retain_body_only(&mut self, flow: &EndnoteFlow) {
+        self.flowed_tail = None;
+        let Some(input) = self.input.as_mut().filter(|_| !flow.is_empty()) else {
+            return;
+        };
+        let len = input.measured.len();
+        if self.block_fingerprints.len() != len
+            || self.measured_spacing.len() != len
+            || flow.inserted().last().is_some_and(|&last| last >= len)
+        {
+            remove_flowed(&mut input.measured, flow.inserted());
+            remove_flowed(&mut self.block_fingerprints, flow.inserted());
+            remove_flowed(&mut self.measured_spacing, flow.inserted());
+            self.checkpoints.clear();
+            self.region_placements.clear();
+            return;
+        }
+        let mut blocks = Vec::with_capacity(flow.inserted().len());
+        for &index in flow.inserted().iter().rev() {
+            self.measured_spacing.remove(index);
+            blocks.push((
+                index,
+                input.measured.remove(index),
+                self.block_fingerprints.remove(index),
+            ));
+        }
+        blocks.reverse();
+        self.flowed_tail = Some(FlowedTail {
+            body_len: input.measured.len(),
+            blocks,
+            fragments: Vec::new(),
+        });
+    }
+
+    fn keep_flowed_fragments(&mut self, fragments: Vec<(usize, usize, Fragment)>) {
+        match self.flowed_tail.as_mut() {
+            Some(tail) => tail.fragments = fragments,
+            None if !fragments.is_empty() => {
+                self.checkpoints.clear();
+                self.region_placements.clear();
+            }
+            None => {}
+        }
+    }
+
+    /// Puts the blocks and fragments [`Self::retain_body_only`] took out back, so placement
+    /// compares the retained pass with one that flows endnotes too.
+    fn restore_flowed_tail(&mut self) {
+        let Some(tail) = self.flowed_tail.take() else {
+            return;
+        };
+        let restorable = self.input.as_ref().is_some_and(|input| {
+            input.measured.len() == tail.body_len
+                && self.block_fingerprints.len() == tail.body_len
+                && self.measured_spacing.len() == tail.body_len
+        }) && self.layout.as_ref().is_some_and(|layout| {
+            tail.fragments.iter().all(|(page, index, _)| {
+                layout
+                    .pages
+                    .get(*page)
+                    .is_some_and(|page| *index <= page.fragments.len() + tail.fragments.len())
+            })
+        });
+        if !restorable {
+            self.checkpoints.clear();
+            self.region_placements.clear();
+            return;
+        }
+        let input = self.input.as_mut().expect("restorable input");
+        let inserted: Vec<usize> = tail.blocks.iter().map(|(index, ..)| *index).collect();
+        for (index, block, fingerprint) in tail.blocks {
+            input.measured.insert(index, block);
+            self.block_fingerprints.insert(index, fingerprint);
+            self.measured_spacing.insert(index, BlockSpacing::None);
+        }
+        self.moved_blocks = std::mem::take(&mut self.moved_blocks)
+            .into_iter()
+            .map(|mut moved| {
+                for &index in &inserted {
+                    if index <= moved {
+                        moved += 1;
+                    }
+                }
+                moved
+            })
+            .collect();
+        let layout = self.layout.as_mut().expect("restorable layout");
+        for (page, index, fragment) in tail.fragments {
+            let fragments = &mut layout.pages[page].fragments;
+            fragments.insert(index.min(fragments.len()), fragment);
+        }
+    }
+
     fn set_font_dependencies(
         &mut self,
         dependencies: Vec<FontChainDependencies>,
@@ -2944,6 +3056,51 @@ fn section_start_of_first_changed_break(
         .rposition(|block| matches!(block.block, LayoutBlock::SectionBreak(_)))
         .unwrap_or(0);
     dirty.min(section_start)
+}
+
+/// Adds the flowing endnotes to every arena the note passes replay; each gets the same blocks.
+fn flow_endnotes_into<'a>(
+    inputs: impl Iterator<Item = &'a mut LayoutInput>,
+    layout: &Layout,
+    refs: &[docx_layout::footnotes::NoteRefLocation],
+    contents: &[docx_layout::footnotes::NoteContent],
+    separator_heights: &NoteSeparatorHeights,
+    regions: &DocumentRegions,
+) -> EndnoteFlow {
+    let mut flow = EndnoteFlow::default();
+    for input in inputs {
+        flow = flow_endnotes(
+            &mut input.measured,
+            &layout.pages,
+            refs,
+            contents,
+            separator_heights,
+            regions,
+        );
+    }
+    flow
+}
+
+fn insert_flowed_spacing(spacing: &mut Vec<BlockSpacing>, flow: &EndnoteFlow) {
+    for &index in flow.inserted() {
+        spacing.insert(index.min(spacing.len()), BlockSpacing::None);
+    }
+}
+
+/// Splices the flowed blocks' fingerprints into the body's, which keep any refinement.
+fn insert_flowed_fingerprints(
+    fingerprints: &mut Vec<Fingerprint>,
+    input: Option<&LayoutInput>,
+    flow: &EndnoteFlow,
+) -> Result<(), String> {
+    let Some(input) = input else {
+        return Ok(());
+    };
+    for &index in flow.inserted() {
+        let fingerprint = measured_fingerprint(&input.measured[index])?;
+        fingerprints.insert(index.min(fingerprints.len()), fingerprint);
+    }
+    Ok(())
 }
 
 fn measured_fingerprints(input: &LayoutInput) -> Result<Vec<Fingerprint>, String> {
@@ -4183,6 +4340,8 @@ fn placement_block_is_coupled(block: &LayoutBlock) -> bool {
 enum RegionPlacementPhase {
     Body,
     Shape(usize),
+    /// The body with flowed endnotes.
+    Notes,
 }
 
 const MAX_RETAINED_REGION_UNSHARED_PAGES: usize = 16;
@@ -7723,6 +7882,7 @@ impl EngineSession {
             }))
         .then(|| input.clone());
         let mut restamped_pages = Vec::new();
+        self.pagination.borrow_mut().restore_flowed_tail();
         let (mut initial_layout, mut arena) = if refs.is_empty() {
             self.layout_document_value_with_fingerprints(
                 input,
@@ -7777,6 +7937,25 @@ impl EngineSession {
                 input.options.note_separator_heights = Some(separator_heights.clone());
             }
         }
+        let arenas: Vec<&mut LayoutInput> = if provisional {
+            Vec::new()
+        } else {
+            base_input.iter_mut().chain(arena.iter_mut()).collect()
+        };
+        let flow = flow_endnotes_into(
+            arenas.into_iter(),
+            &initial_layout,
+            &refs,
+            &notes.contents,
+            &separator_heights,
+            &regions,
+        );
+        insert_flowed_spacing(&mut measured_spacing, &flow);
+        insert_flowed_fingerprints(
+            &mut block_fingerprints,
+            base_input.as_ref().or(arena.as_ref()),
+            &flow,
+        )?;
         let stabilized = stabilize_note_layout(
             |reserved| {
                 let mut copy;
@@ -7836,6 +8015,7 @@ impl EngineSession {
             self.pagination.borrow_mut().layout = Some(stabilized.layout);
         }
         let mut pagination = self.pagination.borrow_mut();
+        pagination.retain_body_only(&flow);
         let certified = exact_cut.filter(|cut| cut_exact_prefix(&mut pagination, cut.pages));
         let layout = pagination
             .layout
@@ -7859,6 +8039,8 @@ impl EngineSession {
             &separator_heights,
             &regions,
         );
+        attach_flowed_endnote_areas(layout, &flow, &notes.contents, &separator_heights);
+        let flowed_fragments = take_flowed_fragments(layout, &flow);
         let note_settlement = if notes_converged {
             NoteSettlement::Converged
         } else {
@@ -7898,6 +8080,7 @@ impl EngineSession {
             })
             .transpose()?;
         pagination.note_changed_pages = note_changed_pages;
+        pagination.keep_flowed_fragments(flowed_fragments);
         let page_count = certified.map_or(usize::MAX, |cut| cut.pages);
         restamped_pages.retain(|&page| page < page_count);
         if let Some(pages) = &mut pagination.restamped_pages {
@@ -8101,6 +8284,7 @@ impl EngineSession {
                 None,
             )?;
         }
+        self.pagination.borrow_mut().restore_flowed_tail();
         let previous_notes = note_page_keys(self.pagination.borrow().layout.as_ref());
         let previous_page_count = self
             .pagination
@@ -8192,6 +8376,30 @@ impl EngineSession {
                 input.options.note_separator_heights = Some(separator_heights.clone());
             }
         }
+        let arenas: Vec<&mut LayoutInput> = if provisional {
+            Vec::new()
+        } else {
+            base_input.iter_mut().chain(arena.iter_mut()).collect()
+        };
+        let flow = flow_endnotes_into(
+            arenas.into_iter(),
+            &initial_layout,
+            &refs,
+            &notes.contents,
+            &separator_heights,
+            &regions,
+        );
+        insert_flowed_spacing(&mut measured_spacing, &flow);
+        insert_flowed_fingerprints(
+            &mut block_fingerprints,
+            base_input.as_ref().or(arena.as_ref()),
+            &flow,
+        )?;
+        let note_phase = if flow.is_empty() {
+            RegionPlacementPhase::Body
+        } else {
+            RegionPlacementPhase::Notes
+        };
         let mut final_arena = None;
         let stabilized = stabilize_note_layout(
             |reserved| {
@@ -8231,7 +8439,7 @@ impl EngineSession {
                     place_region_pass(
                         pass,
                         &fingerprints,
-                        RegionPlacementPhase::Body,
+                        note_phase,
                         &mut placement_passes,
                         &self.pagination.borrow(),
                     )?
@@ -8255,7 +8463,9 @@ impl EngineSession {
             base_input.take()
         };
         drop(base_input);
-        placement_passes.previous.clear();
+        if flow.is_empty() {
+            placement_passes.previous.clear();
+        }
         let notes_converged = stabilized.converged;
         if let Some(mut final_input) = final_arena.or(plain_final_arena).or(arena) {
             final_input.options.footnote_reserved_heights =
@@ -8288,9 +8498,29 @@ impl EngineSession {
             } else {
                 let options = serde_json::to_value(&final_input.options)
                     .map_err(|error| error.to_string())?;
-                let pass = placement_passes.next.iter().rfind(|pass| {
-                    pass.phase == RegionPlacementPhase::Body && pass.options == options
-                });
+                let flowed_layout = if !flow.is_empty()
+                    && !placement_passes
+                        .next
+                        .iter()
+                        .any(|pass| pass.phase == note_phase && pass.options == options)
+                {
+                    let mut layout = place_region_pass(
+                        &mut final_input,
+                        &block_fingerprints,
+                        note_phase,
+                        &mut placement_passes,
+                        &self.pagination.borrow(),
+                    )
+                    .map_err(layout_error_message)?;
+                    apply_document_regions(&mut layout, &regions);
+                    Some(layout)
+                } else {
+                    None
+                };
+                let pass = placement_passes
+                    .next
+                    .iter()
+                    .rfind(|pass| pass.phase == note_phase && pass.options == options);
                 let deltas = self
                     .pagination
                     .borrow()
@@ -8308,7 +8538,7 @@ impl EngineSession {
                         cached_page_totals,
                         docx_layout::place::IncrementalLayout {
                             checkpointed: docx_layout::place::CheckpointedLayout {
-                                layout: stabilized.layout,
+                                layout: flowed_layout.unwrap_or(stabilized.layout),
                                 checkpoints: pass.checkpoints.clone(),
                                 placed_blocks: placement_passes.placed_blocks,
                                 rebuilt_page_start: pass.rebuilt_page_start,
@@ -8336,8 +8566,10 @@ impl EngineSession {
         } else {
             self.pagination.borrow_mut().layout = Some(stabilized.layout);
         }
+        placement_passes.previous.clear();
         let mut pagination = self.pagination.borrow_mut();
         pagination.region_placements = placement_passes.next;
+        pagination.retain_body_only(&flow);
         pagination.pagination_blocks_placed = pagination
             .pagination_blocks_placed
             .wrapping_add(placement_passes.placed_blocks as u64);
@@ -8379,6 +8611,7 @@ impl EngineSession {
             &separator_heights,
             &regions,
         );
+        attach_flowed_endnote_areas(layout, &flow, &notes.contents, &separator_heights);
         let note_settlement = if notes_converged {
             NoteSettlement::Converged
         } else {
@@ -8419,6 +8652,12 @@ impl EngineSession {
         if uses_region_path {
             compact_region_placements(&mut pagination)?;
         }
+        let flowed_fragments = pagination
+            .layout
+            .as_mut()
+            .map(|layout| take_flowed_fragments(layout, &flow))
+            .unwrap_or_default();
+        pagination.keep_flowed_fragments(flowed_fragments);
         pagination.note_changed_pages.extend(note_changed_pages);
         pagination.note_changed_pages.sort_unstable();
         pagination.note_changed_pages.dedup();
@@ -8800,15 +9039,23 @@ impl EngineSession {
             else {
                 continue;
             };
-            let Some(page) = layout.pages.iter().find(|page| page.number == page_number) else {
+            let Some(anchor) = layout.pages.iter().find(|page| page.number == page_number) else {
                 continue;
             };
-            let columns = regions.footnote_columns(page.region_section_index);
-            let content_width = page.size.w - page.margins.left - page.margins.right;
-            let width = ((content_width
-                - (columns.saturating_sub(1) as f64) * FOOTNOTE_COLUMN_GAP_PX)
-                / columns as f64)
-                .max(1.0);
+            let flowed = flows_with_body(content.note_kind, regions, anchor.region_section_index);
+            let page = flowed
+                .then(|| flow_target_page(&layout.pages, regions, anchor.region_section_index))
+                .flatten()
+                .unwrap_or(anchor);
+            let width = if flowed {
+                flow_column_width(page)
+            } else {
+                let columns = regions.footnote_columns(page.region_section_index);
+                let content_width = page.size.w - page.margins.left - page.margins.right;
+                ((content_width - (columns.saturating_sub(1) as f64) * FOOTNOTE_COLUMN_GAP_PX)
+                    / columns as f64)
+                    .max(1.0)
+            };
             let prefix = match content.note_kind {
                 docx_layout::footnotes::NoteKind::Footnote => "fn",
                 docx_layout::footnotes::NoteKind::Endnote => "en",
@@ -9450,6 +9697,7 @@ impl EngineSession {
         } = run;
         let mut pagination = self.pagination.borrow_mut();
         pagination.input = Some(input);
+        pagination.flowed_tail = None;
         pagination.measured_spacing = measured_spacing;
         pagination.moved_blocks.clear();
         if trigger.uses_region_path() {
@@ -27843,10 +28091,12 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                     .iter()
                     .map(|note| note["height"].as_f64().unwrap())
                     .sum();
-                assert_eq!(
-                    page["footnoteReservedHeight"].as_f64().unwrap(),
-                    separator_height + note_height
-                );
+                let taken = if kind == "footnote" {
+                    &page["footnoteReservedHeight"]
+                } else {
+                    &area["height"]
+                };
+                assert_eq!(taken.as_f64().unwrap(), separator_height + note_height);
             }
         }
     }

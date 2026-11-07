@@ -123,9 +123,14 @@ export interface DisplayListNoteItem {
   anchorDocStart?: number;
   anchorDocEnd?: number;
   customMarkFollows?: boolean;
+  /** Part of the note shown, as `NoteLayoutItem`'s window; absent = the whole note. */
+  blockStart?: number;
+  lineStart?: number;
+  blockEnd?: number;
+  lineEnd?: number;
 }
 
-/** Typed non-fragmented note-region input for the Rust display builder. */
+/** Typed note-region input for the Rust display builder. */
 export interface DisplayListNoteArea {
   pageIndex?: number;
   sectionId?: string;
@@ -136,6 +141,7 @@ export interface DisplayListNoteArea {
   columns?: number;
   separator?: DisplayListNoteItem;
   notes?: DisplayListNoteItem[];
+  continuation?: boolean;
 }
 
 /** Stable reviewer palette entry for comments/revisions. */

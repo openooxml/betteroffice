@@ -327,6 +327,7 @@ export function displayPageHoldsMirrorId(page: DisplayPage, id: string): boolean
       (area) =>
         (area.kind ?? 'footnote') === kind &&
         (area.noteIds ?? []).some((candidate) => String(candidate) === noteId) &&
+        !(area.continuedNoteIds ?? []).some((candidate) => String(candidate) === noteId) &&
         (area.primitives ?? []).some((p) => p.groupId === `${kind}-${noteId}`)
     );
   }
@@ -1894,11 +1895,17 @@ function buildMirrorNoteArea(
       const index = remaining.indexOf(primitive);
       if (index >= 0) remaining.splice(index, 1);
     }
-    const note = doc.createElement('aside');
+    // a note split across pages is one note: only the part showing its opening names it
+    const continued = area.continuedNoteIds?.includes(noteId) ?? false;
+    const note = doc.createElement(continued ? 'div' : 'aside');
     note.className = MIRROR_CLASS_NAMES.note;
-    note.id = `oox-${groupId}`;
     note.dataset.noteId = String(noteId);
-    note.setAttribute('role', area.kind === 'endnote' ? 'doc-endnote' : 'doc-footnote');
+    if (continued) {
+      note.dataset.noteContinued = 'true';
+    } else {
+      note.id = `oox-${groupId}`;
+      note.setAttribute('role', area.kind === 'endnote' ? 'doc-endnote' : 'doc-footnote');
+    }
     const meta = noteMetaById.get(noteId);
     if (meta) {
       if (meta.label !== undefined) note.dataset.noteLabel = meta.label;
