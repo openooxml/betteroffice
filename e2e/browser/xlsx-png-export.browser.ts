@@ -2,11 +2,19 @@ import { test, expect, type Page } from 'playwright/test';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { readFile } from 'node:fs/promises';
-import { extname, resolve } from 'node:path';
+import { extname, resolve, sep } from 'node:path';
 import JSZip from 'jszip';
 
 const root = resolve(import.meta.dirname, '../..');
-const types: Record<string, string> = { '.js': 'text/javascript', '.mjs': 'text/javascript', '.wasm': 'application/wasm' };
+const types: Record<string, string> = { '.js': 'text/javascript', '.mjs': 'text/javascript', '.wasm': 'application/wasm', '.json': 'application/json' };
+const fontPackages = ['fonts', 'fonts-latin', 'fonts-intl', 'fonts-cjk'];
+const fontEntry = (name: string, entry = 'index') => `/npm/@betteroffice/${name}/dist/${entry}.js`;
+const imports = Object.fromEntries(fontPackages.map((name) => [`@betteroffice/${name}`, fontEntry(name)]));
+/** A worker has no import map, so the served modules name the font packages by URL, as a bundler would resolve them. */
+const resolveFontSpecifiers = (code: string) => code.replace(
+  /(["'])@betteroffice\/(fonts(?:-latin|-intl|-cjk)?)(?:\/(progressive|cdn))?\1/g,
+  (_match, quote: string, name: string, entry?: string) => `${quote}${fontEntry(name, entry)}${quote}`,
+);
 const main = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
 const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
 
@@ -28,14 +36,26 @@ async function exports(page: Page): Promise<Record<string, Export>> {
   const server = createServer(async (request, response) => {
     const path = new URL(request.url ?? '/', 'http://x').pathname;
     try {
-      if (path === '/') return response.writeHead(200, { 'content-type': 'text/html' }).end('<!doctype html><title>png</title>');
+      if (path === '/') {
+        return response.writeHead(200, { 'content-type': 'text/html' })
+          .end(`<!doctype html><title>png</title><script type="importmap">${JSON.stringify({ imports })}</script>`);
+      }
       if (path === '/__fixture/doc') return response.writeHead(200).end(doc);
       if (path === '/__fixture/font') return response.writeHead(200).end(await readFile(resolve(root, 'packages/fonts/assets/ComicRelief-Regular.ttf')));
+      const fonts = /^\/npm\/@betteroffice\/([a-z-]+)\/((?:dist|assets)\/.+)$/.exec(path);
+      if (fonts) {
+        const directory = resolve(root, 'packages', fonts[1]);
+        const file = resolve(directory, fonts[2]);
+        if (!fontPackages.includes(fonts[1]) || !file.startsWith(directory + sep)) return response.writeHead(404).end();
+        const body = await readFile(file);
+        return response.writeHead(200, { 'content-type': types[extname(file)] ?? 'application/octet-stream' })
+          .end(/\.m?js$/.test(file) ? resolveFontSpecifiers(body.toString('utf8')) : body);
+      }
       const file = path.replace('/__xlsx/', '');
       let body: Buffer | string = await readFile(resolve(root, 'packages/xlsx/dist', file));
       if (/\.m?js$/.test(file)) {
-        body = body.toString('utf8').replace(/(["'])#session-(worker|scope)\1/g, (_, quote: string, name: string) =>
-          `${quote}/__xlsx/session${name[0].toUpperCase()}${name.slice(1)}.browser.js${quote}`);
+        body = resolveFontSpecifiers(body.toString('utf8').replace(/(["'])#session-(worker|scope)\1/g, (_, quote: string, name: string) =>
+          `${quote}/__xlsx/session${name[0].toUpperCase()}${name.slice(1)}.browser.js${quote}`));
       }
       response.writeHead(200, { 'content-type': types[extname(file)] ?? 'application/octet-stream' }).end(body);
     } catch { response.writeHead(404).end(); }
