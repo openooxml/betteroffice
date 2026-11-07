@@ -384,6 +384,37 @@ function preflight(handle: WorkbookHandle, state: WorkbookCommandState, op: Work
   }
 }
 
+/**
+ * What a structural edit was refused to protect, as an editor names it to the user: a chart,
+ * a table, a pivot table, or anything else that names the cells the edit would move.
+ */
+export type WorkbookStructuralRefusalCause = 'chart' | 'table' | 'pivot' | 'other';
+
+/** The structural refusal result an `unsupported` status carries: the engine's message and its cause. */
+export interface WorkbookStructuralRefusalResult {
+  failure: { code: 'unsupported'; cause: WorkbookStructuralRefusalCause; message: string };
+}
+
+/** Reads the cause from a structural refusal the engine raised. */
+export function structuralRefusalCause(message: string): WorkbookStructuralRefusalCause {
+  if (/^(?:chart |anchor \d+ of )/.test(message) || message === 'range move cannot safely preserve charts') return 'chart';
+  if (message === 'range move cannot safely preserve Excel tables') return 'table';
+  const part = /^(.+?) references cells this (?:edit would move|move would relocate), and it cannot be rewritten$/
+    .exec(message)?.[1].toLowerCase().replace(/^\//, '');
+  if (!part) return 'other';
+  if (part.startsWith('xl/charts/') || part.startsWith('xl/drawings/')) return 'chart';
+  if (part.startsWith('xl/tables/')) return 'table';
+  if (part.startsWith('xl/pivottables/') || part.startsWith('xl/pivotcache/')) return 'pivot';
+  return 'other';
+}
+
+function structuralRefusal(message: string): WorkbookCommandRefusal {
+  const result: WorkbookStructuralRefusalResult = {
+    failure: { code: 'unsupported', cause: structuralRefusalCause(message), message },
+  };
+  return new WorkbookCommandRefusal('unsupported', result);
+}
+
 export function classifyRefusal(error: unknown, method?: WorkbookReplayMethod): WorkbookCommandRefusal | undefined {
   if (error instanceof WorkbookCommandRefusal) return error;
   if (method === 'acceptProposal' && error instanceof StaleProposalError) {
@@ -418,12 +449,12 @@ export function classifyRefusal(error: unknown, method?: WorkbookReplayMethod): 
     /^chart .+ cannot change how it follows a grid edit$/.test(error.message) ||
     /^chart .+ cannot be resized: a one-cell extent is not written back$/.test(error.message) ||
     /^chart .+ cannot change its anchor kind$/.test(error.message)
-  )) return new WorkbookCommandRefusal('unsupported');
+  )) return structuralRefusal(error.message);
   if (method === 'moveRange' && (
     /^range move cannot safely preserve .+$/.test(error.message) ||
     /^.+ contains worksheet features a cell move cannot safely preserve$/.test(error.message) ||
     /^.+ references cells this move would relocate, and it cannot be rewritten$/.test(error.message)
-  )) return new WorkbookCommandRefusal('unsupported');
+  )) return structuralRefusal(error.message);
   if (method === 'applyOps' &&
     /^chart frame .+ does not hold the chart part and anchor this op was recorded against; its drawing has changed$/.test(error.message)) {
     return new WorkbookCommandRefusal('stale-target');

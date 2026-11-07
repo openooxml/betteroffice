@@ -2730,6 +2730,8 @@ export interface PositionedTextRun {
     color: string;
     letterSpacingPx?: number;
     baselineOffsetPx?: number;
+    /** `false` when layout shaped the run without kerning, below its `kern` threshold; absent when kerned. */
+    kerning?: false;
     glyphs: PositionedGlyph[];
 }
 export interface PositionedTextLine {

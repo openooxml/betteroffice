@@ -21,6 +21,7 @@ import { useContextMenu } from '../../../../shared/react-toolbar/ContextMenu';
 import type { OverflowMenuEntry } from '../../../../shared/react-toolbar/MenuList';
 import { xlsxContextMenuEntries } from '../contextMenu/menus';
 import { commandReason, initialZoomScale } from '../commands/evaluate';
+import { REFUSAL_CAUSE_KEYS, type XlsxRefusalCause } from '../commands/refusalCause';
 import type { XlsxCommandFailureCode } from '../commands/types';
 import type { InputDraft, InputSeal } from '../commands/inputCoordinator';
 import { inPluginChrome, pluginEventStore } from '../commands/pluginEvents';
@@ -215,7 +216,9 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const { setSelection, selectionRef, setView, viewRef, setPainted } = presentation;
   const [catalog, setCatalog, catalogRef] = useSyncedState<WorkbookSheetSummary[]>([]);
   const [zoom, setZoom, zoomRef] = useSyncedState(initialZoomScale(props.initialZoom));
-  const [refusal, setRefusal] = useState<{ code: XlsxCommandFailureCode; detail?: string; message?: string } | null>(null);
+  const [refusal, setRefusal] = useState<{
+    code: XlsxCommandFailureCode; detail?: string; message?: string; cause?: XlsxRefusalCause;
+  } | null>(null);
   const [selectedChart, setSelectedChart, chartRef] = useSyncedState<{ id: string; movable: boolean } | null>(null);
   const [chartOffset, setChartOffset] = useState<{ x: number; y: number } | null>(null);
   const [renaming, setRenaming] = useState<number | null>(null);
@@ -316,6 +319,8 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       setRefusal({ code: error.code, message: error.message });
     } else if (error instanceof PeerlessWorkerCommandRefusal && error.status.reason === 'read-only') {
       setRefusal({ code: 'read-only' });
+    } else if (error instanceof PeerlessWorkerCommandRefusal && error.code === 'edit-unsupported') {
+      setRefusal({ code: error.code, cause: error.cause ?? 'other' });
     } else if (error instanceof WorkerInputRefusal) {
       setRefusal({ code: error.code, detail: error.code === 'sheet-protected' ? undefined : error.message });
     } else if (error instanceof XlsxCommandAdmissionError) setRefusal({ code: error.code });
@@ -1608,7 +1613,8 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       anchor.download = `${(propsRef.current.fileName ?? 'workbook.xlsx').replace(/\.xlsx$/i, '')}.png`;
       document.body.appendChild(anchor); anchor.click(); anchor.remove(); URL.revokeObjectURL(url);
     },
-    focusGrid: focus, refuse: (reason) => setRefusal({ code: reason.code as XlsxCommandFailureCode }),
+    focusGrid: focus, refuse: (reason) => setRefusal(reason.code === 'edit-unsupported'
+      ? { code: reason.code, message: reason.message } : { code: reason.code as XlsxCommandFailureCode }),
     menu: {
       clipboard: menuClipboard,
       clear: () => clear() ?? Promise.resolve(),
@@ -1980,7 +1986,8 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
         <PeerlessWorkerAccessibility store={presentation} active={active} sheets={sheets} onFollowLink={followLinkFromMirror} />
         <PeerlessWorkerAnnouncer store={presentation} active={active} sheets={sheets} focusTarget={scrollRef} announceRef={announceRef} />
         {refusal && <div data-testid="xlsx-input-refusal" role="alert">
-          {refusal.message ?? <>{commandReason(refusal.code, { translate: t }).message}{refusal.detail ? `: ${refusal.detail}` : ''}</>}
+          {refusal.message ?? (refusal.cause ? t(REFUSAL_CAUSE_KEYS[refusal.cause])
+            : <>{commandReason(refusal.code, { translate: t }).message}{refusal.detail ? `: ${refusal.detail}` : ''}</>)}
         </div>}
         {error && sheets.length > 0 && <WorkbookFailure kind="stopped" details={error.message} />}
         {gridMenu.element}{tabMenu.element}

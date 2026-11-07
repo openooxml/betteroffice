@@ -9,7 +9,7 @@ import type {
   WorkbookAck, WorkbookCommand, WorkbookCommandPayload, WorkbookFormatTokenResult, WorkbookToolbarPayload,
 } from './commandProtocol';
 import type { WorkbookSession } from './client';
-import { classifyRefusal, createWorkbookCommandState, workbookAdmissionBudget } from './commandHandlers';
+import { classifyRefusal, createWorkbookCommandState, structuralRefusalCause, workbookAdmissionBudget } from './commandHandlers';
 import { createWorkbookCommandHost } from './commandHost';
 import * as toolbarCommands from './commandToolbar';
 import { WORKBOOK_REPLAY_MUTATORS, type WorkbookReplayMethod } from './replay';
@@ -2062,6 +2062,41 @@ describe('workbook commands', () => {
       expect(session.failure?.code).toBe('crash');
       await expect(session.save()).rejects.toBeInstanceOf(SessionFailure);
     } finally { failing.mockRestore(); await session.dispose(); }
+  });
+
+  test('structural refusals carry the engine message and what the edit would have broken', () => {
+    for (const [method, message, cause] of [
+      ['applyOps', 'xl/charts/chart1.xml references cells this edit would move, and it cannot be rewritten', 'chart'],
+      ['applyOps', 'xl/drawings/drawing2.xml references cells this edit would move, and it cannot be rewritten', 'chart'],
+      ['applyOps', 'xl/tables/table1.xml references cells this edit would move, and it cannot be rewritten', 'table'],
+      ['applyOps', 'xl/pivotTables/pivotTable1.xml references cells this edit would move, and it cannot be rewritten', 'pivot'],
+      ['applyOps', 'xl/pivotCache/pivotCacheDefinition1.xml references cells this edit would move, and it cannot be rewritten', 'pivot'],
+      ['applyOps', 'xl/workbook.xml references cells this edit would move, and it cannot be rewritten', 'other'],
+      ['applyOps', 'chart reference in xl/charts/chart1.xml cannot be safely rewritten', 'chart'],
+      ['applyOps', 'anchor 0 of xl/drawings/drawing1.xml is held by two sheets that disagree on where it sits', 'chart'],
+      ['applyOps', 'chart xl/charts/chart1.xml cannot change how it follows a grid edit', 'chart'],
+      ['applyOps', 'formula at sheet 0, B1 cannot be safely rewritten', 'other'],
+      ['applyOps', 'defined name Dynamic cannot be safely rewritten', 'other'],
+      ['moveRange', 'range move cannot safely preserve charts', 'chart'],
+      ['moveRange', 'range move cannot safely preserve Excel tables', 'table'],
+      ['moveRange', 'range move cannot safely preserve merged cells', 'other'],
+      ['moveRange', 'xl/pivotTables/pivotTable1.xml references cells this move would relocate, and it cannot be rewritten', 'pivot'],
+      ['moveRange', 'xl/worksheets/sheet1.xml contains worksheet features a cell move cannot safely preserve', 'other'],
+    ] as const) {
+      expect(structuralRefusalCause(message)).toBe(cause);
+      expect(classifyRefusal(new Error(message), method)).toMatchObject({
+        reason: 'unsupported',
+        result: { failure: { code: 'unsupported', cause, message } },
+      });
+    }
+    for (const message of [
+      'structural operations are unavailable in collaborative mode',
+      'collaborative sheets can only be added at the end of the workbook',
+    ]) {
+      const refusal = classifyRefusal(new Error(message), 'applyOps');
+      expect(refusal?.reason).toBe('unsupported');
+      expect(refusal?.result).toBeUndefined();
+    }
   });
 
   test('copy origin errors from batch edits are classified as invalid commands', () => {
