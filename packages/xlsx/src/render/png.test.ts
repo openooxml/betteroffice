@@ -205,6 +205,46 @@ describe.skipIf(engineKind === 'native')('the wasm PNG engine', () => {
     expect(calls.bytes).toEqual([(await bundled.loadBundledFontBytes(face)).byteLength]);
   });
 
+  const sheetOf = (fontFamily: string, bold = false): XlsxPngEngine => ({
+    onSheet: (_sheet, read) => read(),
+    doc: {
+      pngDisplayListJson: () => JSON.stringify(list([{ ...text, fontFamily, bold }])),
+      rangePngDisplayListJson: () => JSON.stringify(list([{ ...text, fontFamily, bold }])),
+    },
+  });
+  const box = { sheet: 0, viewport: { x: 0, y: 0, width: 100, height: 40 } };
+
+  test('without fonts, a bundled face keeps its own weight so a bold run on a regular face is synthesized as natively', async () => {
+    const calls = stubBrowser();
+    await renderPng(sheetOf('Calibri Light', true), box, {});
+    const face = bundled.resolveBundledFamilyFace('Calibri Light', true, false)!;
+    expect(calls.faces.map((installed) => installed.weight)).toEqual([String(face.weight)]);
+  });
+
+  test('without fonts, an aborted export rejects with the abort reason and starts no load', async () => {
+    stubBrowser();
+    const loading = spyOn(bundled, 'loadBundledFontBytes');
+    try {
+      const controller = new AbortController();
+      controller.abort(new Error('stopped'));
+      await expect(renderPng(sheetOf('Cambria'), box, { signal: controller.signal })).rejects.toThrow('stopped');
+      expect(loading).not.toHaveBeenCalled();
+    } finally { loading.mockRestore(); }
+  });
+
+  test('without fonts, an export aborted while a face loads rejects at once', async () => {
+    stubBrowser();
+    const stalled = spyOn(bundled, 'loadBundledFontBytes').mockImplementation(() => new Promise(() => {}));
+    try {
+      const controller = new AbortController();
+      const exported = renderPng(sheetOf('Courier New'), box, { signal: controller.signal });
+      await new Promise((settled) => setTimeout(settled, 10));
+      controller.abort(new Error('stopped'));
+      await expect(exported).rejects.toThrow('stopped');
+      expect(stalled).toHaveBeenCalled();
+    } finally { stalled.mockRestore(); }
+  });
+
   test('with fonts, the sheet paints only with the faces passed', async () => {
     const calls = stubBrowser();
     const { value } = engine();

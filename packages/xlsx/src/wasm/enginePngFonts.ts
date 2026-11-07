@@ -33,18 +33,31 @@ function firstFace(font: PngRunFont): BundledFontFace {
 
 /**
  * Bundled faces for the fonts a sheet's text paints with, as the native engine draws them, so a canvas export
- * without `fonts` matches it. A face that cannot load rejects with `font-unavailable` naming it.
+ * without `fonts` matches it. Each face keeps its own weight and style, so a family drawn with a regular face, such
+ * as bold Calibri Light, gets synthetic bold as natively. A face that cannot load rejects with `font-unavailable`
+ * naming it; an abort rejects at once without waiting for loads other exports may share.
  */
 export async function defaultSheetFaces(fonts: readonly PngRunFont[], signal?: AbortSignal): Promise<XlsxFontFace[]> {
-  const faces = await Promise.all(fonts.map(async (font) => {
+  signal?.throwIfAborted();
+  const loading = Promise.all(fonts.map(async (font) => {
     const face = firstFace(font);
     try {
-      return { family: font.family, bold: font.bold, italic: font.italic, bytes: await load(face) };
+      return { family: font.family, bold: face.weight === 700, italic: face.style === 'italic', bytes: await load(face) };
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       throw new PngExportError('font-unavailable', `${face.family} for ${font.family} could not load: ${reason}`);
     }
   }));
-  signal?.throwIfAborted();
-  return faces;
+  if (!signal) return loading;
+  let stop: (() => void) | undefined;
+  const aborted = new Promise<never>((_, reject) => {
+    stop = () => reject(signal.reason);
+    signal.addEventListener('abort', stop, { once: true });
+  });
+  loading.catch(() => {});
+  try {
+    return await Promise.race([loading, aborted]);
+  } finally {
+    signal.removeEventListener('abort', stop!);
+  }
 }

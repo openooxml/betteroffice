@@ -95,6 +95,7 @@ impl Workbook {
             } = command
             {
                 let family = font_family.as_deref().unwrap_or("Calibri");
+                let requested = primary_family(family);
                 let scripts =
                     ooxml_text::paragraph_scripts_with_han_fallback([text.as_ref()], false);
                 let key = (
@@ -107,7 +108,7 @@ impl Workbook {
                     continue;
                 }
                 let faces = self.font_manager.resolve(
-                    family,
+                    requested,
                     *bold,
                     *italic,
                     &scripts,
@@ -154,6 +155,20 @@ impl Workbook {
         }
         Ok(registry)
     }
+}
+
+/// The family a CSS-style list such as a chart's `"Calibri", sans-serif` asks for first, as the canvas reads it.
+fn primary_family(family: &str) -> &str {
+    let head = family.split(',').next().unwrap_or(family).trim();
+    let head = head
+        .strip_prefix('"')
+        .and_then(|inner| inner.strip_suffix('"'))
+        .or_else(|| {
+            head.strip_prefix('\'')
+                .and_then(|inner| inner.strip_suffix('\''))
+        })
+        .unwrap_or(head);
+    if head.is_empty() { family } else { head }
 }
 
 impl FontRegistry {
@@ -233,6 +248,31 @@ mod tests {
             .unwrap();
         assert_ne!(bold, regular);
         assert_eq!(fonts.fonts.font_data("Calibri", true, false).unwrap(), bold);
+    }
+
+    #[cfg(feature = "fonts-latin")]
+    #[test]
+    fn a_family_list_resolves_its_first_family() {
+        let workbook = Workbook::open(&fixture()).unwrap();
+        let mut display = workbook.display_list(&viewport()).unwrap();
+        for command in &mut display.commands {
+            if let DrawCmd::Text { font_family, .. } = command {
+                *font_family = Some("\"Calibri\", sans-serif".into());
+            }
+        }
+        let fonts = workbook.raster_fonts(&display).unwrap();
+        let bold = BundledFonts::default()
+            .resolve_family("Calibri", true, false)
+            .unwrap()
+            .load()
+            .unwrap();
+        assert_eq!(
+            fonts
+                .fonts
+                .font_data("\"Calibri\", sans-serif", true, false)
+                .unwrap(),
+            bold
+        );
     }
 
     #[test]

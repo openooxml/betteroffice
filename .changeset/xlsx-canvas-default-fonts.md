@@ -1,5 +1,8 @@
 ---
 '@betteroffice/xlsx': patch
+'@betteroffice/xlsx-native': patch
+'@betteroffice/python-xlsx': patch
+'@betteroffice/rust-crates': patch
 ---
 
-`renderPng` in the browser without `fonts` now paints with the bundled faces the native engine draws the sheet's fonts with, instead of the browser's fonts, so canvas and native PNGs match. A face that cannot load rejects with `PngExportError` (`font-unavailable`).
+Browser `renderPng` without `fonts` paints with the bundled faces native uses, so canvas and native PNGs match; a face that cannot load rejects with `font-unavailable`. Native chart text in a family list (`Calibri, sans-serif`) now resolves its first family.
