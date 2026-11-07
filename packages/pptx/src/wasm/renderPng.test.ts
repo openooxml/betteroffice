@@ -1,6 +1,7 @@
 import { afterEach, beforeAll, describe, expect, test, spyOn } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import JSZip from 'jszip';
 import { initWasm, openPresentation } from '../index';
 import { engineKind } from './engine';
 
@@ -140,6 +141,22 @@ describe('PresentationHandle.renderPng', () => {
       else {
         await expect(exported).rejects.toMatchObject({ name: 'PngExportError', code: 'canvas-unavailable' });
         expect(browser.sizes).toEqual([]);
+      }
+    } finally { handle.dispose(); }
+  });
+
+  test('a picture the engine cannot decode rejects natively and is left out on the canvas', async () => {
+    const browser = stubBrowser();
+    const zip = await JSZip.loadAsync(fixture);
+    zip.file('ppt/media/betteroffice-mark.png', new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]));
+    const deck = await zip.generateAsync({ type: 'uint8array' });
+    const handle = openPresentation(deck, { clientId: 7106, fonts: [{ family: 'Liberation Sans', bytes: font }] });
+    try {
+      const exported = handle.renderPng({ slide: 0 });
+      if (native) await expect(exported).rejects.toMatchObject({ name: 'PngExportError', code: 'picture-unavailable' });
+      else {
+        expect(new TextDecoder().decode(await exported)).toBe('png');
+        expect(browser.sizes).toHaveLength(1);
       }
     } finally { handle.dispose(); }
   });

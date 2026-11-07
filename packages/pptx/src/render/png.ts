@@ -45,8 +45,8 @@ export function pictureUnavailable(kind: 'svg' | 'metafile'): PngExportError {
 
 /**
  * A picture's bytes for an export. A metafile that will not convert is left out
- * where a document exists, as on screen and natively; without one, conversion
- * may simply be absent, so it rejects rather than lose the picture.
+ * where a document exists, as on screen; without one, conversion may simply be
+ * absent, so it rejects rather than lose the picture.
  */
 export function exportPictureBytes(source: Uint8Array, convert: () => Uint8Array | undefined): Uint8Array | undefined {
   const bytes = metafileImageBytes(source, convert);

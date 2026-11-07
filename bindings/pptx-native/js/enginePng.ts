@@ -73,6 +73,7 @@ export async function renderPng(engine: PptxPngEngine, target: { slide: number }
     const message = error instanceof Error ? error.message : '';
     if (message.startsWith('png-font-unavailable: ')) throw new PngExportError('font-unavailable', message.slice(22));
     if (message.startsWith('png-too-large: ')) throw new PngExportError('canvas-too-large', message.slice(15));
+    if (message.startsWith('png-picture-unavailable: ')) throw new PngExportError('picture-unavailable', message.slice(25));
     throw error;
   } finally {
     if (supplied) renderer.free();

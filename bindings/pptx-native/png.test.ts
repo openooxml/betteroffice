@@ -68,6 +68,22 @@ test('native pptx rasterizes a scoped slide at two scales', () => {
   }
 });
 
+test('native pptx PNG rejects a slide with a picture it cannot draw', async () => {
+  const zip = await JSZip.loadAsync(bytes());
+  zip.file('ppt/media/betteroffice-mark.png', new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]));
+  const document = raw.PptxDocument.openCollaborative(await zip.generateAsync({ type: 'uint8array' }), 411);
+  const renderer = new raw.PptxRenderer();
+  try {
+    const font = new Uint8Array(readFileSync(new URL('../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url)));
+    renderer.registerFont('Arial', false, false, font);
+    expect(() => slidePng(renderer, document, 0, 1)).toThrow('png-picture-unavailable: 1 picture(s) on this slide could not be drawn');
+    expect(slidePng(renderer, document, 1, 1).length).toBeGreaterThan(8);
+  } finally {
+    renderer.free();
+    document.free();
+  }
+});
+
 test('native pptx PNG requires registered fonts for slide text', () => {
   const document = raw.PptxDocument.openCollaborative(bytes(), 402);
   const renderer = new raw.PptxRenderer();
