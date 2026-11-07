@@ -129,7 +129,7 @@ const UNKERNED: ShapeFeature = ShapeFeature {
     value: 0,
 };
 const FIT_MIN: f64 = 0.75;
-const FIT_MAX: f64 = 1.33;
+const FIT_MAX: f64 = 1.45;
 
 /// Whitespace as the canvas backend's `\s` reads it: ECMAScript white space and line terminators.
 fn is_space(ch: char) -> bool {
@@ -285,7 +285,7 @@ fn pieces(run: &PositionedTextRun) -> Option<(Vec<u16>, Vec<Piece>)> {
 }
 
 /// The stretch of a piece measured `own` wide, as the canvas backend scales its pieces: the span to the next piece
-/// over the measured width, left at 1 for CJK, tab or degenerate pieces and outside 0.75 to 1.33.
+/// over the measured width, left at 1 for CJK, tab or degenerate pieces and outside 0.75 to 1.45.
 fn piece_stretch(piece: &Piece, text: &[u16], own: f64) -> f64 {
     let cjk = char::decode_utf16(text.iter().copied())
         .filter_map(Result::ok)
@@ -604,12 +604,15 @@ mod tests {
 
     #[test]
     fn the_stretch_limit_is_compared_on_single_precision_values() {
-        let span = 13.3_f32;
-        let mut at_limit = run("##", &[(0, 0.0, 9.0), (1, span, 9.0)], 2.0 * span);
+        let span = 5.8_f32;
+        let mut at_limit = run("##", &[(0, 0.0, 3.0), (1, span, 3.0)], 2.0 * span);
         at_limit.x = 0.0;
-        let placed = fitted_pieces(&at_limit, 0.0, per_unit(10.0)).unwrap();
-        let fit = f64::from(span) / 10.0;
-        assert!(fit > 1.33, "13.3 in single precision is a little over 13.3");
+        let placed = fitted_pieces(&at_limit, 0.0, per_unit(4.0)).unwrap();
+        let fit = f64::from(span) / 4.0;
+        assert!(
+            fit > FIT_MAX,
+            "5.8 in single precision is a little over 5.8"
+        );
         assert_eq!(placed[0].stretch, 1.0, "{placed:?}");
     }
 
@@ -719,7 +722,7 @@ mod tests {
         })
         .unwrap();
         let piece = (40.0 + 82.0 - 62.0) / width(&unkerned);
-        let fit = if (0.75..=1.33).contains(&piece) {
+        let fit = if (FIT_MIN..=FIT_MAX).contains(&piece) {
             piece
         } else {
             1.0
