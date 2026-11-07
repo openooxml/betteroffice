@@ -1613,11 +1613,11 @@ fn parse_image<const FULL: bool>(player: &mut Player<FULL>, data: &[u8]) -> Opti
             } else {
                 return None;
             };
-            let (source, repeat) = player.source_id(&[data]);
-            if let Some(bitmap) = player.plus_images.get(&source) {
+            let (source, repeat) = player.source_id(&[b"emf+", data]);
+            if let Some(bitmap) = player.cache.plus_images.get(&source) {
                 return Some(PlusImage::Bitmap(Arc::clone(bitmap)));
             }
-            if player.failed_sources.contains(&source) {
+            if player.cache.failed_sources.contains(&source) {
                 return None;
             }
             let pixels = u64::from(width) * u64::from(height);
@@ -1646,7 +1646,7 @@ fn parse_image<const FULL: bool>(player: &mut Player<FULL>, data: &[u8]) -> Opti
                 None => match pixel_data(bits, width, height, stride, format) {
                     Some(rgba) => Pixels::Rgba(rgba),
                     None => {
-                        player.failed_sources.insert(source);
+                        player.cache.failed_sources.insert(source);
                         return None;
                     }
                 },
@@ -1657,7 +1657,7 @@ fn parse_image<const FULL: bool>(player: &mut Player<FULL>, data: &[u8]) -> Opti
                 pixels,
             };
             let bitmap = player.share_bitmap(bitmap, charged, owed)?;
-            player.plus_images.insert(source, Arc::clone(&bitmap));
+            player.cache.plus_images.insert(source, Arc::clone(&bitmap));
             Some(PlusImage::Bitmap(bitmap))
         }
         2 => {

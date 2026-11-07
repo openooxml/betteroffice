@@ -268,6 +268,23 @@ impl Combine {
     }
 }
 
+/// Bitmaps a replay built, kept so an equal source or bitmap is built and
+/// charged once. A fallback replay of the same metafile takes over the cache
+/// of the pass it may replace, so bitmaps alive in both are charged once.
+#[derive(Default)]
+pub(crate) struct BitmapCache {
+    /// Bitmaps kept so far, by content hash, so an equal one is shared.
+    pub bitmaps: HashMap<u64, Vec<Arc<Bitmap>>>,
+    /// Bitmap sources seen so far, each kept once, to their ids.
+    pub sources: HashMap<Box<[u8]>, usize>,
+    /// GDI bitmaps already cropped, by source id and how they were cropped.
+    pub blits: HashMap<(usize, [u64; 7]), CroppedBlit>,
+    /// EMF+ images already built, by source id.
+    pub plus_images: HashMap<usize, Arc<Bitmap>>,
+    /// Sources that failed to decode, so a repeat is not decoded again.
+    pub failed_sources: HashSet<usize>,
+}
+
 pub(crate) struct Player<const FULL: bool> {
     pub dc: Dc,
     pub saved: Vec<Dc>,
@@ -295,16 +312,7 @@ pub(crate) struct Player<const FULL: bool> {
     pub omissions: BTreeMap<&'static str, usize>,
     pub text_chars: usize,
     pub bitmap_pixels: u64,
-    /// Bitmaps kept so far, by content hash, so an equal one is shared.
-    pub bitmaps: HashMap<u64, Vec<Arc<Bitmap>>>,
-    /// Bitmap sources seen so far, each kept once, to their ids.
-    pub sources: HashMap<Box<[u8]>, usize>,
-    /// GDI bitmaps already cropped, by source id and how they were cropped.
-    pub blits: HashMap<(usize, [u64; 7]), CroppedBlit>,
-    /// EMF+ images already built, by source id.
-    pub plus_images: HashMap<usize, Arc<Bitmap>>,
-    /// Sources that failed to decode, so a repeat is not decoded again.
-    pub failed_sources: HashSet<usize>,
+    pub cache: BitmapCache,
     pub budget: Option<Rc<SharedBudget>>,
     pub refusal: Option<String>,
     /// How many metafiles enclose this one.
@@ -344,11 +352,7 @@ impl<const FULL: bool> Player<FULL> {
             omissions: BTreeMap::new(),
             text_chars: 0,
             bitmap_pixels: 0,
-            bitmaps: HashMap::new(),
-            sources: HashMap::new(),
-            blits: HashMap::new(),
-            plus_images: HashMap::new(),
-            failed_sources: HashSet::new(),
+            cache: BitmapCache::default(),
             budget: None,
             refusal: None,
             depth: 0,
@@ -392,8 +396,8 @@ impl<const FULL: bool> Player<FULL> {
             key.extend((part.len() as u64).to_le_bytes());
             key.extend_from_slice(part);
         }
-        let next = self.sources.len();
-        match self.sources.entry(key.into_boxed_slice()) {
+        let next = self.cache.sources.len();
+        match self.cache.sources.entry(key.into_boxed_slice()) {
             Entry::Occupied(entry) => (*entry.get(), true),
             Entry::Vacant(entry) => (*entry.insert(next), false),
         }
@@ -412,6 +416,7 @@ impl<const FULL: bool> Player<FULL> {
         bitmap.hash(&mut hasher);
         let key = hasher.finish();
         if let Some(equal) = self
+            .cache
             .bitmaps
             .get(&key)
             .and_then(|kept| kept.iter().find(|kept| ***kept == bitmap))
@@ -425,7 +430,8 @@ impl<const FULL: bool> Player<FULL> {
         }
         self.charge(0, uncharged)?;
         let bitmap = Arc::new(bitmap);
-        self.bitmaps
+        self.cache
+            .bitmaps
             .entry(key)
             .or_default()
             .push(Arc::clone(&bitmap));

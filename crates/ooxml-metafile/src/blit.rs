@@ -318,12 +318,12 @@ fn draw<const FULL: bool>(player: &mut Player<FULL>, job: Blit<'_>) -> Option<()
             Recolor::None
         }
     };
-    let (source, repeat) = player.source_id(&[job.bmi, job.bits, &job.usage.to_le_bytes()]);
+    let (source, repeat) = player.source_id(&[b"gdi", job.bmi, job.bits, &job.usage.to_le_bytes()]);
     let key = (source, crop_key(&job, recolor));
-    if let Some((bitmap, offset, whole)) = player.blits.get(&key).cloned() {
+    if let Some((bitmap, offset, whole)) = player.cache.blits.get(&key).cloned() {
         return place(player, &job, bitmap, offset, whole);
     }
-    if player.failed_sources.contains(&source) {
+    if player.cache.failed_sources.contains(&source) {
         return player.omit("bitmaps that could not be decoded");
     }
     let budget = player
@@ -351,7 +351,7 @@ fn draw<const FULL: bool>(player: &mut Player<FULL>, job: Blit<'_>) -> Option<()
         Ok(dib) => dib,
         Err(_) if player.overflowed => return None,
         Err(_) => {
-            player.failed_sources.insert(source);
+            player.cache.failed_sources.insert(source);
             return player.omit("bitmaps that could not be decoded");
         }
     };
@@ -369,6 +369,7 @@ fn draw<const FULL: bool>(player: &mut Player<FULL>, job: Blit<'_>) -> Option<()
     let charged = player.bitmap_pixels.saturating_sub(before);
     let bitmap = player.share_bitmap(bitmap, charged, if repeat { decoded } else { 0 })?;
     player
+        .cache
         .blits
         .insert(key, (Arc::clone(&bitmap), offset, whole));
     place(player, &job, bitmap, offset, whole)

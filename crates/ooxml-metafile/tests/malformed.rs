@@ -952,7 +952,7 @@ fn a_bitmap_that_cannot_be_decoded_is_not_decoded_again() {
 
 #[test]
 fn an_emf_plus_only_metafile_replayed_again_gets_back_its_first_pass_pixels() {
-    let side = 4096;
+    let side: u32 = 4096;
     let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
     png.extend(13u32.to_be_bytes());
     png.extend(b"IHDR");

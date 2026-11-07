@@ -175,32 +175,31 @@ fn play_full_emf(
         return play_emf::<true>(bytes, depth, false, Some(budget));
     }
     let before = budget.remaining.get().pixels;
-    let plus = play_emf::<true>(bytes, depth, true, Some(Rc::clone(&budget)));
+    let mut plus = play_emf::<true>(bytes, depth, true, Some(Rc::clone(&budget)));
     if budget.exceeded.get() {
         return Err("the metafile draws more than the replay limits".to_owned());
     }
-    let plus_pixels = before.saturating_sub(budget.remaining.get().pixels);
     if let Ok(player) = &plus
         && player.omissions.is_empty()
         && !player.ops.is_empty()
     {
         return plus;
     }
-    budget.refund(plus_pixels);
-    let before = budget.remaining.get().pixels;
-    let gdi = play_emf::<true>(bytes, depth, false, Some(Rc::clone(&budget)));
+    let cache = match &mut plus {
+        Ok(player) => std::mem::take(&mut player.cache),
+        Err(_) => {
+            budget.refund(before.saturating_sub(budget.remaining.get().pixels));
+            player::BitmapCache::default()
+        }
+    };
+    let gdi = play_emf_cached::<true>(bytes, depth, false, Some(Rc::clone(&budget)), cache);
     if budget.exceeded.get() {
         return Err("the metafile draws more than the replay limits".to_owned());
     }
     match gdi {
         Ok(gdi) if !gdi.ops.is_empty() => Ok(gdi),
         Err(error) if plus.as_ref().is_ok_and(|plus| plus.ops.is_empty()) => Err(error),
-        _ if plus.is_ok() => {
-            budget.refund(before.saturating_sub(budget.remaining.get().pixels));
-            budget.spend(0, plus_pixels);
-            plus
-        }
-        gdi => gdi,
+        gdi => plus.or(gdi),
     }
 }
 
@@ -308,6 +307,23 @@ pub(crate) fn play_emf<const FULL: bool>(
     prefer_plus: bool,
     budget: Option<Rc<SharedBudget>>,
 ) -> Result<Player<FULL>, String> {
+    play_emf_cached(
+        bytes,
+        depth,
+        prefer_plus,
+        budget,
+        player::BitmapCache::default(),
+    )
+}
+
+/// Plays an EMF reusing the bitmaps `cache` holds from an earlier pass.
+fn play_emf_cached<const FULL: bool>(
+    bytes: &[u8],
+    depth: usize,
+    prefer_plus: bool,
+    budget: Option<Rc<SharedBudget>>,
+    cache: player::BitmapCache,
+) -> Result<Player<FULL>, String> {
     let malformed = || "the EMF header is malformed".to_owned();
     if u32_at(bytes, 0) != Some(1)
         || u32_at(bytes, 40) != Some(emf::EMF_SIGNATURE)
@@ -324,6 +340,7 @@ pub(crate) fn play_emf<const FULL: bool>(
     };
     let mut player = Player::<FULL>::new(frame, handles + 1, unit);
     player.budget = budget;
+    player.cache = cache;
     player.depth = depth;
     player.prefer_plus = prefer_plus;
     if FULL {
