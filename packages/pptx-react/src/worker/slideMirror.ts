@@ -1,8 +1,10 @@
-import type { ShapeAltText, SlideDisplayList, SlidePrimitive, TextLanguage } from '@betteroffice/pptx';
+import type { ShapeAltText, SlideDisplayList, SlidePrimitive, TextLanguage, TextLink, TextLinkTarget } from '@betteroffice/pptx';
+import { sanitizeHref } from '../../../../shared/safeHref';
 
 export interface SlideMirrorSegment {
   text: string;
   lang: string | null;
+  link?: TextLinkTarget;
 }
 
 export interface SlideMirrorParagraph {
@@ -23,6 +25,16 @@ export interface SlideMirrorItem {
   paragraphs: SlideMirrorParagraph[];
 }
 
+export const slideLinkOptions = { relative: false, protocols: ['http:', 'https:', 'mailto:', 'tel:'] } as const;
+
+export function sameSlideLink(a: TextLinkTarget | undefined, b: TextLinkTarget | undefined): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a.kind === 'url' && b.kind === 'url' ? a.href === b.href
+    : a.kind === 'slide' && b.kind === 'slide' ? a.index === b.index
+    : a.kind === 'jump' && b.kind === 'jump' && a.jump === b.jump;
+}
+
 const inherited = (shapeId: string) => shapeId.startsWith('master:') || shapeId.startsWith('layout:');
 const spoken = (text: string) => text.replace(/[\s\u000b]+/g, ' ');
 
@@ -41,6 +53,10 @@ function wordAligned(parts: SlideMirrorSegment[]): SlideMirrorSegment[] {
   for (const part of parts) {
     let { text } = part;
     const previous = aligned[aligned.length - 1];
+    if (previous && !sameSlideLink(previous.link, part.link)) {
+      aligned.push({ ...part });
+      continue;
+    }
     if (previous && previous.lang !== part.lang) {
       if (midWord(previous.text, text)) {
         const [rest] = /^[\p{L}\p{N}\p{M}]+/u.exec(text)!;
@@ -60,7 +76,7 @@ function wordAligned(parts: SlideMirrorSegment[]): SlideMirrorSegment[] {
       previous.text += text;
       continue;
     }
-    aligned.push({ text, lang: part.lang });
+    aligned.push({ ...part, text });
   }
   return aligned;
 }
@@ -79,8 +95,8 @@ function mirrorParagraph(source: SlideMirrorSegment[], heading = false): SlideMi
     if (!previous || previous.text.endsWith(' ')) text = text.trimStart();
     if (!text) continue;
     const language = part.lang && lang && primaryTag(part.lang) === primaryTag(lang) ? lang : part.lang;
-    if (previous && previous.lang === language) previous.text += text;
-    else segments.push({ text, lang: language });
+    if (previous && previous.lang === language && sameSlideLink(previous.link, part.link)) previous.text += text;
+    else segments.push({ text, lang: language, ...(part.link ? { link: part.link } : {}) });
   }
   const last = segments[segments.length - 1];
   if (last) {
@@ -106,13 +122,36 @@ function languageParts(text: string, languages: TextLanguage[] = []): SlideMirro
   return parts;
 }
 
+function linkedParts(text: string, languages: TextLanguage[] = [], links: TextLink[] = []): SlideMirrorSegment[] {
+  const parts = wordAligned(languageParts(text, languages));
+  const valid = links.filter((link) => Number.isInteger(link.start) && Number.isInteger(link.end) &&
+    link.start >= 0 && link.end > link.start && link.end <= text.length &&
+    (link.target.kind !== 'url' || sanitizeHref(link.target.href, slideLinkOptions) !== undefined))
+    .sort((a, b) => a.start - b.start);
+  const result: SlideMirrorSegment[] = [];
+  let offset = 0;
+  let linkIndex = 0;
+  for (const part of parts) {
+    const end = offset + part.text.length;
+    while (offset < end) {
+      while (linkIndex < valid.length && valid[linkIndex]!.end <= offset) linkIndex++;
+      const span = valid[linkIndex];
+      const stop = span ? Math.min(end, span.start > offset ? span.start : span.end) : end;
+      const link = span && span.start <= offset ? span.target : undefined;
+      result.push({ text: text.slice(offset, stop), lang: part.lang, ...(link ? { link } : {}) });
+      offset = stop;
+    }
+  }
+  return result;
+}
+
 function altLabel(entry: ShapeAltText | undefined): string | null {
   return [entry?.title, entry?.description].filter(Boolean).join(': ') || null;
 }
 
 function paragraphs(primitive: SlidePrimitive): SlideMirrorParagraph[] {
   if (primitive.kind === 'textBox') return primitive.paragraphs.flatMap((paragraph) => {
-    const value = mirrorParagraph(languageParts(paragraph.runs.map((run) => run.text).join(''), paragraph.languages));
+    const value = mirrorParagraph(linkedParts(paragraph.runs.map((run) => run.text).join(''), paragraph.languages, paragraph.links));
     return value ? [value] : [];
   });
   return primitive.kind === 'table' ? primitive.primitives.flatMap(paragraphs) : [];

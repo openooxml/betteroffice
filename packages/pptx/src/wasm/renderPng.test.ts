@@ -1,6 +1,7 @@
 import { afterEach, beforeAll, describe, expect, test, spyOn } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import * as fonts from '@betteroffice/fonts';
 import { initWasm, openPresentation } from '../index';
 import { engineKind } from './engine';
 
@@ -25,6 +26,7 @@ afterEach(() => { restore?.(); restore = undefined; });
 function stubBrowser() {
   const sizes: [number, number][] = [];
   const sources: Uint8Array[] = [];
+  const texts: string[] = [];
   class Canvas {
     constructor(width: number, height: number) { sizes.push([width, height]); }
     getContext() {
@@ -32,6 +34,7 @@ function stubBrowser() {
         get(target, property) {
           if (property === 'createLinearGradient' || property === 'createRadialGradient' || property === 'createPattern') return () => ({ addColorStop: () => undefined });
           if (property === 'measureText') return (text: string) => ({ width: text.length });
+          if (property === 'fillText') return (text: string) => { texts.push(text); };
           return property in target ? target[property as string] : () => undefined;
         },
         set(target, property, value) { target[property as string] = value; return true; },
@@ -57,7 +60,7 @@ function stubBrowser() {
     },
   });
   restore = () => { Object.assign(scope, saved); };
-  return { sizes, sources, held };
+  return { sizes, sources, held, texts };
 }
 
 const native = engineKind === 'native';
@@ -149,17 +152,104 @@ describe('PresentationHandle.renderPng', () => {
     const opened = { family: 'Liberation Sans', bytes: font.slice() };
     const handle = openPresentation(fixture, { clientId: 7103, fonts: [opened] });
     try {
+      const slide = handle.snapshot().slides[0]!;
+      handle.addTextBox(slide.id, { name: 'Registered', rect: { x: 100000, y: 100000, width: 3000000, height: 800000 }, text: 'Registered face', style: { fontFamily: 'Liberation Sans', fontSizePt: 18 } });
       const later = { family: 'Liberation Sans', bold: true, bytes: font.slice() };
       handle.registerFont(later);
       for (const face of [opened, later]) { face.bytes.fill(0); face.family = 'Changed'; }
       const png = await handle.renderPng({ slide: 0 });
       if (native) expect(isPng(png)).toBe(true);
       else {
-        expect(browser.sources.length).toBeGreaterThan(0);
-        for (const source of browser.sources) expect(source).toEqual(font);
+        expect(browser.sources.some((source) => source.length === font.length && source.every((byte, index) => byte === font[index]))).toBe(true);
+        for (const source of browser.sources) expect(source.some((byte) => byte !== 0)).toBe(true);
       }
     } finally { handle.dispose(); }
   });
+});
+
+test.skipIf(native)('canvas export lays the slide out with the bundled faces when no fonts are passed', async () => {
+  const browser = stubBrowser();
+  const handle = openPresentation(fixture, { clientId: 7195 });
+  try {
+    const before = handle.layoutSlide(0);
+    await handle.renderPng({ slide: 0 });
+    expect(browser.sources.length).toBeGreaterThan(0);
+    expect(handle.layoutSlide(0)).toEqual(before);
+    const first = browser.sources.length;
+    await handle.renderPng({ slide: 0 });
+    expect(browser.sources.length).toBe(2 * first);
+  } finally { handle.dispose(); }
+});
+
+test.skipIf(native)('canvas export draws the slide it was asked for when the deck changes while faces load', async () => {
+  const browser = stubBrowser();
+  const handle = openPresentation(fixture, { clientId: 7193 });
+  try {
+    const slides = handle.snapshot().slides;
+    const asked = slides[1]!.id;
+    handle.addTextBox(asked, { name: 'Marker', rect: { x: 100000, y: 100000, width: 3000000, height: 800000 }, text: 'Asked for', style: { fontFamily: 'Calibri', fontSizePt: 18 } });
+    const moved = handle.renderPng({ slide: 1 });
+    handle.moveSlide(asked, 0);
+    await moved;
+    expect(browser.texts.join('').replace(/\s+/g, '')).toContain('Askedfor');
+    const removed = handle.renderPng({ slide: asked });
+    handle.deleteSlide(asked);
+    await expect(removed).rejects.toThrow(`no slide with ID ${JSON.stringify(asked)}`);
+  } finally { handle.dispose(); }
+});
+
+test.skipIf(native)('canvas export loads the faces of text added while faces load', async () => {
+  const browser = stubBrowser();
+  const box = (handle: ReturnType<typeof openPresentation>, slideId: string, name: string, style: { fontFamily: string; bold?: boolean; italic?: boolean }, y: number) =>
+    handle.addTextBox(slideId, { name, rect: { x: 100000, y, width: 3000000, height: 800000 }, text: name, style: { ...style, fontSizePt: 18 } });
+  const first = { fontFamily: 'Courier New', bold: true, italic: true };
+  const later = { fontFamily: 'Georgia', bold: true, italic: true };
+  const edited = openPresentation(fixture, { clientId: 7192 });
+  const fresh = openPresentation(fixture, { clientId: 7191 });
+  const original = fonts.loadBundledFontBytes;
+  let edits = 0;
+  const editedSlide = edited.snapshot().slides[0]!.id;
+  const loading = spyOn(fonts, 'loadBundledFontBytes').mockImplementation((...args: Parameters<typeof original>) => {
+    if (edits === 0) {
+      edits += 1;
+      box(edited, editedSlide, 'Added later', later, 1000000);
+    }
+    return original(...args);
+  });
+  try {
+    box(edited, editedSlide, 'First', first, 100000);
+    await edited.renderPng({ slide: 0 });
+    loading.mockRestore();
+    expect(edits).toBe(1);
+    const whileLoading = browser.sources.map((source) => source.length).sort();
+    browser.sources.length = 0;
+    const freshSlide = fresh.snapshot().slides[0]!.id;
+    box(fresh, freshSlide, 'First', first, 100000);
+    box(fresh, freshSlide, 'Added later', later, 1000000);
+    await fresh.renderPng({ slide: 0 });
+    expect(whileLoading).toEqual(browser.sources.map((source) => source.length).sort());
+  } finally { loading.mockRestore(); edited.dispose(); fresh.dispose(); }
+});
+
+test.skipIf(native)('a presentation disposed before its first canvas export starts rejects it', async () => {
+  stubBrowser();
+  const handle = openPresentation(fixture, { clientId: 7190 });
+  const exported = handle.renderPng({ slide: 0 });
+  handle.dispose();
+  await expect(exported).rejects.toThrow('presentation handle is disposed');
+});
+
+test.skipIf(native)('disposing a presentation frees its canvas export renderer', async () => {
+  stubBrowser();
+  const { PptxRenderer } = await import('./engine');
+  const free = spyOn(PptxRenderer.prototype, 'free');
+  try {
+    const handle = openPresentation(fixture, { clientId: 7194 });
+    await handle.renderPng({ slide: 0 });
+    free.mockClear();
+    handle.dispose();
+    expect(free).toHaveBeenCalledTimes(2);
+  } finally { free.mockRestore(); }
 });
 
 test.skipIf(!native)('native export paints slide text from the font packs with no fonts passed', async () => {

@@ -178,6 +178,7 @@ function mount(initial: YrsSession, overrides: Partial<DocxCommandInputs> = {}) 
     hook,
     bridge,
     opened,
+    paged: editor as unknown as Record<string, unknown>,
     get store() {
       return hook.result.current.commands.controller.store;
     },
@@ -224,6 +225,39 @@ describe('editor command binding', () => {
     expect(await editor.store.execute('paragraphSpacing', { before: 240 })).toEqual({ ok: true, status: 'executed' });
     expect(format).toHaveBeenCalledWith({ type: 'paragraphSpacing', before: 240 });
     expect(editor.store.getState('paragraphSpacing').value).toEqual({ before: 240, after: 0 });
+  });
+
+  test('paste as plain text applies after input typed before it, which lands while the clipboard is read', async () => {
+    const { session } = await newSession();
+    const editor = mount(session);
+    const { paged } = editor;
+    const location = session.selection()!.head;
+    let landed = false;
+    const land = () => {
+      if (landed) return;
+      landed = true;
+      session.setSelection({ ...location, offset: location.offset + 1 }, { ...location, offset: location.offset + 1 });
+    };
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = () => { land(); resolve(); }; });
+    paged.flushPendingInput = () => pending;
+    const pasted = mock((_text: string) => {});
+    paged.pasteContent = pasted;
+    const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { readText: async () => { land(); return 'RICH'; } },
+    });
+    try {
+      const result = editor.store.execute('pasteAsPlainText', null);
+      setTimeout(release, 0);
+      expect(await result).toEqual({ ok: true, status: 'executed' });
+      expect(pasted).toHaveBeenCalledTimes(1);
+      expect(pasted.mock.calls[0]![0]).toBe('RICH');
+    } finally {
+      if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard);
+      else Reflect.deleteProperty(navigator, 'clipboard');
+    }
   });
 
   test('paragraph spacing dialog refuses completion after the target changes', async () => {

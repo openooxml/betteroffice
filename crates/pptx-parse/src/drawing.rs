@@ -2191,6 +2191,10 @@ pub(crate) fn parse_run_properties(element: Option<&XmlElement>) -> RunPropertie
                     .or_else(|| value.attribute_local("id"))
             })
             .map(str::to_owned),
+        hyperlink_action: element
+            .child("hlinkClick")
+            .and_then(|value| value.attribute("action"))
+            .map(str::to_owned),
         effects: parse_effects(element),
     }
 }

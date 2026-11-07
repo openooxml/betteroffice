@@ -85,8 +85,27 @@ export interface PeerlessPresentation {
   installFont(face: PptxFontFace): Promise<void>;
   setReadOnly(readOnly: boolean): void;
   setChangeObserver(enabled: boolean): void;
-  recover(): Promise<{ bytes: Uint8Array; recovery: true; throughSeq: number; version: string }>;
+  recover(): Promise<PeerlessRecoveryResult>;
 }
+
+/** An edit sent just before the worker failed whose outcome never arrived, so recovery left it out. */
+export interface PeerlessUnrecoveredIntent {
+  seq: number;
+  kind: string;
+  reason: 'unknown-outcome';
+}
+
+export interface PeerlessRecoveryResult {
+  bytes: Uint8Array;
+  recovery: true;
+  throughSeq: number;
+  version: string;
+  /** Document edits left out because their outcome is unknown; recovery does not replay them. */
+  unrecoveredIntents?: PeerlessUnrecoveredIntent[];
+}
+
+/** Writes that change nothing a reader would miss when left out. */
+const UNREPORTED_WRITES = new Set<string>(['registerFont', 'compositionStart']);
 
 const THUMBNAIL_IMAGE_DIMENSION = 512;
 
@@ -586,11 +605,22 @@ export function usePeerlessPresentation(
             if (!currentFile()) throw new PptxWorkerEditorDisposedError();
             const baseline = recovery.baseline && recovery.validate();
             if (baseline?.kind === 'source' && !recoveryBase?.size) throw new Error('Recovery baseline is unavailable');
+            const unrecoveredIntents: PeerlessUnrecoveredIntent[] = (client.pendingIntents?.() ?? [])
+              .filter(({ intent }) => PRESENTATION_COMMAND_ADMISSION[intent.kind] === 'local-write' && !UNREPORTED_WRITES.has(intent.kind))
+              .map(({ seq, intent }) => ({ seq, kind: intent.kind, reason: 'unknown-outcome' }));
+            const reported = <T extends object>(result: T): T & { unrecoveredIntents?: PeerlessUnrecoveredIntent[] } => {
+              if (!unrecoveredIntents.length) return result;
+              try {
+                callbacks.current.onError?.(new Error(`Recovery left out ${unrecoveredIntents.length} edit(s) made just before the failure, `
+                  + 'because whether they were applied is unknown'));
+              } catch {}
+              return { ...result, unrecoveredIntents };
+            };
             if (!recovery.hasUncheckpointedUpdates()) {
               const saved = recovery.saved;
               const bytes = saved.bytes?.slice() ?? await readRecoveryBase();
               if (!currentFile()) throw new PptxWorkerEditorDisposedError();
-              return { ...saved, bytes, recovery: true };
+              return reported({ ...saved, bytes, recovery: true as const });
             }
             if (!baseline) throw new Error('Recovery baseline is unavailable');
             const journal = recovery.journal.slice();
@@ -616,7 +646,7 @@ export function usePeerlessPresentation(
               const bytes = await replay.save();
               if (!currentFile()) throw new PptxWorkerEditorDisposedError();
               const latest = journal[journal.length - 1]!;
-              return { bytes, throughSeq: latest.throughSeq, version: latest.version, recovery: true };
+              return reported({ bytes, throughSeq: latest.throughSeq, version: latest.version, recovery: true as const });
             } finally { await recovering.dispose(); }
           },
           async installFont(face) {

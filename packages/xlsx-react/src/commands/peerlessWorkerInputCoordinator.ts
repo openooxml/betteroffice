@@ -5,6 +5,7 @@ import type {
   CommandStatus, WorkbookAck, WorkbookCommand, WorkbookCommandFrameRequest, WorkbookCommandSelection,
 } from '@betteroffice/xlsx/worker';
 
+import { refusalCause, refusedEdit, type XlsxRefusalCause } from './refusalCause';
 import { WorkerInputRefusal } from './workerInputErrors';
 
 function deferred<T>() {
@@ -403,7 +404,7 @@ export function createPeerlessWorkerInputCoordinator(
       entry.result.resolve(status);
       emit({ type: 'accepted', seq: status.seq, target: entry.target, draft: entry.draft, status });
     } else {
-      const error = new PeerlessWorkerCommandRefusal(status, entry.target, entry.draft);
+      const error = new PeerlessWorkerCommandRefusal(status, entry.target, entry.draft, entry.input);
       entry.ticket.failure = { error };
       if (boundary === entry.ticket) boundary = undefined;
       if (last === entry.ticket) last = undefined;
@@ -917,15 +918,20 @@ export function createPeerlessWorkerInputCoordinator(
 }
 
 export class PeerlessWorkerCommandRefusal extends WorkerInputRefusal {
+  /** What the edit would have broken, when the workbook declined it as an edit. */
+  readonly cause: XlsxRefusalCause | null;
+
   constructor(
     readonly status: CommandStatus, readonly target: XlsxRangeTarget | null,
-    readonly draft: InputDraft | null
+    readonly draft: InputDraft | null, readonly input: PeerlessWorkerCommandInput | null = null
   ) {
     const result = status.result as { failure?: { message?: string } } | undefined;
     const protectedCell = status.reason === 'locked-target' &&
       /^(?:[A-Z]+[1-9]\d* is locked on protected sheet |sheet [\s\S]+ is protected$)/.test(result?.failure?.message ?? '');
+    const declined = !protectedCell && refusedEdit(status, draft, input);
     super(protectedCell ? 'This cell is on a protected sheet.' : status.reason ?? 'Worker command refused',
-      false, protectedCell ? 'sheet-protected' : 'input-failed');
+      false, protectedCell ? 'sheet-protected' : declined ? 'edit-unsupported' : 'input-failed');
+    this.cause = declined ? refusalCause(status) : null;
     this.name = 'XlsxWorkerCommandRefusal';
   }
 }

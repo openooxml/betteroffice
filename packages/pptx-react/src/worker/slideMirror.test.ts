@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import type { SlideDisplayList, SlidePrimitive, TextLanguage } from '@betteroffice/pptx';
+import type { SlideDisplayList, SlidePrimitive, TextLanguage, TextLink } from '@betteroffice/pptx';
 import { slideMirrorItems, slideObjectName, slideTitle } from './slideMirror';
 
 const at = { objectId: 1, x: 10, y: 20, w: 30, h: 40 };
@@ -200,4 +200,41 @@ test('an announcement prefers alt text, then the name, then the text', () => {
   expect(slideObjectName(value, 'b', 'Shape')).toBe('Only text');
   expect(slideObjectName(value, 'c', 'Shape')).toBe('Shape');
   expect(slideObjectName(list([image('d')], { d: { decorative: true, description: 'Silent' } }), 'd', 'Shape')).toBe('Picture 2');
+});
+
+const linkedText = (value: string, links: TextLink[], languages?: TextLanguage[]): SlidePrimitive => ({
+  ...at, kind: 'textBox', shapeId: 'links', anchor: 'top', lines: [],
+  paragraphs: [{ level: 0, links, languages, runs: [{ text: value, fontFamily: 'Arial', fontSizePt: 12, color: '#000000' }] }],
+});
+
+test('link boundaries use raw utf16 offsets independently of language and word boundaries', () => {
+  const target = { kind: 'url', href: 'https://example.test' } as const;
+  const paragraph = items(list([linkedText('A😀 Management bonjour', [{ start: 4, end: 8, target }], [
+    { start: 0, end: 15, lang: 'en-US' }, { start: 15, end: 22, lang: 'fr-FR' },
+  ])]))[0]!.paragraphs[0]!;
+  expect(paragraph.text).toBe('A😀 Management bonjour');
+  expect(paragraph.segments).toEqual([
+    { text: 'A😀 ', lang: 'en-US' },
+    { text: 'Mana', lang: 'en-US', link: target },
+    { text: 'gement ', lang: 'en-US' },
+    { text: 'bonjour', lang: 'fr-FR' },
+  ]);
+});
+
+test('refused link targets leave unlinked text in a single segment', () => {
+  for (const href of ['javascript:alert(1)', 'JaVaScRiPt:alert(1)', 'java\tscript:alert(1)', '\x01javascript:alert(1)', 'data:text/html,bad', 'vbscript:bad', 'file:///tmp/file', 'foo.html', '//evil', 'ftp://example.test']) {
+    expect(items(list([linkedText('Whole words', [{ start: 0, end: 5, target: { kind: 'url', href } }])]))[0]!.paragraphs[0]!.segments)
+      .toEqual([{ text: 'Whole words', lang: null }]);
+  }
+});
+
+test('safe urls and navigation targets survive paragraph and title merging', () => {
+  const target = { kind: 'jump', jump: 'next' } as const;
+  const first = linkedText('Next slide', [{ start: 0, end: 10, target }]);
+  const value = { ...list([first]), titleShape: 'links' };
+  expect(items(value)[0]!.paragraphs[0]).toMatchObject({ heading: true, segments: [{ text: 'Next slide', link: target }] });
+  for (const href of ['https://example.test/path', 'HTTP://example.test', 'mailto:reader@example.test', 'tel:+123', ' \tHTTPS://example.test/\r']) {
+    expect(items(list([linkedText('Read', [{ start: 0, end: 4, target: { kind: 'url', href } }])]))[0]!.paragraphs[0]!.segments[0]!.link)
+      .toEqual({ kind: 'url', href });
+  }
 });

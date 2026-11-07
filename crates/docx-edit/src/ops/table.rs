@@ -607,9 +607,13 @@ fn validate_fragment_table(
         return Err(invalid("table nesting exceeds eight levels"));
     }
     let object = fragment_object(value, "table")?;
+    // A copied table carries the compatibility mode of the document it came
+    // from. Word lays out the pasted table with the destination's mode, which
+    // a table without one takes from the layout environment.
     let tbl_pr = match object.get("tblPr") {
         Some(Value::Object(map)) => map
             .iter()
+            .filter(|(key, _)| key.as_str() != "compatibilityMode")
             .map(|(key, entry)| Ok((key.clone(), fragment_any(entry, "tblPr entry")?)))
             .collect::<OpResult<HashMap<String, Any>>>()?,
         _ => return Err(invalid("table tblPr must be an object")),

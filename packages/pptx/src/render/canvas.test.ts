@@ -673,17 +673,17 @@ describe('PPTX canvas replay', () => {
     }
   });
 
-  test('paints named family width departures at each glyph position without scaling', async () => {
+  test('paints named family width departures at each glyph position, fitted to the span up to the next', async () => {
     const text = 'Recommendation 6:';
     const run = syntheticPositionedRun(text, Array.from(text, (_, index) => [index, 40 + index * 9, 8]));
     run.fontFamily = 'Corbel';
     run.width = text.length * 9;
     const { calls, scales } = await fittedPositionedRun(run);
     expect(calls).toEqual(Array.from(text, (text, index) => ({ text, x: 40 + index * 9 })));
-    expect(scales).toEqual(Array.from(text, () => 1));
+    expect(scales).toEqual(Array.from(text, () => 9 / 8));
   });
 
-  test('splits named width runs only at pen departures', async () => {
+  test('splits named width runs only at pen departures and fits each piece within the stretch limits', async () => {
     const run = syntheticPositionedRun('ab cd', [
       [0, 40, 8], [1, 49, 8], [2, 58, 8], [3, 66, 8], [4, 75, 8],
     ]);
@@ -691,7 +691,23 @@ describe('PPTX canvas replay', () => {
     expect(calls).toEqual([
       { text: 'a', x: 40 }, { text: 'b', x: 49 }, { text: ' c', x: 58 }, { text: 'd', x: 75 },
     ]);
-    expect(scales).toEqual([1, 1, 1, 1]);
+    expect(scales).toEqual([9 / 8, 9 / 8, 17 / 16, 1]);
+  });
+
+  test('measures and paints a run laid out without kerning with kerning off, then restores it', async () => {
+    const seen: string[] = [];
+    const state: Record<string, unknown> = {
+      fontKerning: 'normal',
+      measureText: (text: string) => { seen.push(`measure:${String(state.fontKerning)}`); return { width: text.length * 8 }; },
+      fillText: () => { seen.push(`fill:${String(state.fontKerning)}`); },
+    };
+    const run = syntheticPositionedRun('ab cd', [[0, 40, 8], [1, 49, 8], [2, 58, 8], [3, 66, 8], [4, 75, 8]]);
+    run.kerning = false;
+    await paintPositionedRun(run, state);
+    expect(seen.some((entry) => entry.startsWith('measure:'))).toBe(true);
+    expect(seen.some((entry) => entry.startsWith('fill:'))).toBe(true);
+    expect(seen.every((entry) => entry.endsWith(':none'))).toBe(true);
+    expect(state.fontKerning).toBe('normal');
   });
 
   test('keeps justified words unscaled at their glyph positions', async () => {
