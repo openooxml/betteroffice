@@ -155,11 +155,38 @@ describe('PresentationHandle.renderPng', () => {
       const png = await handle.renderPng({ slide: 0 });
       if (native) expect(isPng(png)).toBe(true);
       else {
-        expect(browser.sources.length).toBeGreaterThan(0);
-        for (const source of browser.sources) expect(source).toEqual(font);
+        expect(browser.sources.some((source) => source.length === font.length && source.every((byte, index) => byte === font[index]))).toBe(true);
+        for (const source of browser.sources) expect(source.some((byte) => byte !== 0)).toBe(true);
       }
     } finally { handle.dispose(); }
   });
+});
+
+test.skipIf(native)('canvas export lays the slide out with the bundled faces when no fonts are passed', async () => {
+  const browser = stubBrowser();
+  const handle = openPresentation(fixture, { clientId: 7195 });
+  try {
+    const before = handle.layoutSlide(0);
+    await handle.renderPng({ slide: 0 });
+    expect(browser.sources.length).toBeGreaterThan(0);
+    expect(handle.layoutSlide(0)).toEqual(before);
+    const first = browser.sources.length;
+    await handle.renderPng({ slide: 0 });
+    expect(browser.sources.length).toBe(2 * first);
+  } finally { handle.dispose(); }
+});
+
+test.skipIf(native)('disposing a presentation frees its canvas export renderer', async () => {
+  stubBrowser();
+  const { PptxRenderer } = await import('./engine');
+  const free = spyOn(PptxRenderer.prototype, 'free');
+  try {
+    const handle = openPresentation(fixture, { clientId: 7194 });
+    await handle.renderPng({ slide: 0 });
+    free.mockClear();
+    handle.dispose();
+    expect(free).toHaveBeenCalledTimes(2);
+  } finally { free.mockRestore(); }
 });
 
 test.skipIf(!native)('native export paints slide text from the font packs with no fonts passed', async () => {

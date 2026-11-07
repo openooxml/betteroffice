@@ -26,8 +26,12 @@ export interface PptxEnginePngOptions {
 /** Which engine this module draws with; the native package swaps in its own. */
 export const engineKind: 'wasm' | 'native' = 'wasm';
 
-/** Frees what an export kept for `document`; the canvas engine keeps nothing. */
-export function releasePng(_document: object): void {}
+let fontLayout: typeof import('./enginePngFonts') | undefined;
+
+/** Frees the export renderer an export kept for `document`. */
+export function releasePng(document: object): void {
+  fontLayout?.releaseDefaultFontLayout(document);
+}
 
 function decodesOnlyWithDocument(bytes: Uint8Array): boolean {
   try { return needsElementDecode(browserPresentationImageBlob(bytes)); } catch { return false; }
@@ -41,10 +45,24 @@ function assetIds(primitives: SlideDisplayList['primitives'], ids: Set<string>):
   return ids;
 }
 
-/** Paints a slide through the canvas, with the faces layout measured with and any the caller adds. */
+/**
+ * Paints a slide through the canvas. With a document it lays the slide out again with the faces the presentation
+ * registered, any new family in `options.fonts`, and the bundled faces for the rest, as the native export does.
+ */
 export async function renderPng(engine: PptxPngEngine, target: { slide: number }, options: PptxEnginePngOptions): Promise<Uint8Array> {
   if (!canvasPngAvailable()) throw canvasUnavailable();
-  const list = engine.displayList(target.slide);
+  let list: SlideDisplayList;
+  let fonts: ReadonlyArray<PptxFontFace>;
+  if (engine.doc) {
+    fontLayout ??= await import('./enginePngFonts');
+    const layout = await fontLayout.defaultFontLayout(
+      engine.doc as Parameters<typeof fontLayout.defaultFontLayout>[0], target.slide, engine.fonts(), options.fonts, options.signal);
+    list = layout.list;
+    fonts = [...layout.fonts, ...(options.fonts ?? [])];
+  } else {
+    list = engine.displayList(target.slide);
+    fonts = [...engine.fonts(), ...(options.fonts ?? [])];
+  }
   const images = new Map<string, CanvasImageSource | null>();
   try {
     for (const assetId of assetIds(list.primitives, new Set())) {
@@ -56,7 +74,7 @@ export async function renderPng(engine: PptxPngEngine, target: { slide: number }
       images.set(assetId, bytes?.byteLength ? await decodeBrowserPresentationImage(bytes, 'image could not decode').catch(() => null) : null);
     }
     return await slideListToPng(list, {
-      ...options, fonts: [...engine.fonts(), ...(options.fonts ?? [])], resolveImage: (assetId) => images.get(assetId) ?? null,
+      ...options, fonts, resolveImage: (assetId) => images.get(assetId) ?? null,
     });
   } finally {
     for (const image of images.values()) (image as { close?: () => void } | null)?.close?.();

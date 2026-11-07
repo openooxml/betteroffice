@@ -936,7 +936,7 @@ function openPresentationInternal(
           });
         },
         fonts: () => [...exportFaces.values()],
-      }, { slide }, options).then((bytes) => { assertAlive(); return bytes; });
+      }, { slide }, options).then((bytes) => { assertAlive(); return bytes; }, (error) => { assertAlive(); throw error; });
     },
     layoutSlide(slideIndex: number): SlideDisplayList {
       return jsonWasmCall(() => renderer.layoutSlideJson(doc, slideIndex));
