@@ -48,7 +48,7 @@ function exportRenderer(faces: ReadonlyArray<PptxFontFace & { fallback?: boolean
  * faces, then the font packs for the rest. Options and size are checked as on
  * the canvas engine, so both reject alike.
  */
-export async function renderPng(engine: PptxPngEngine, target: { slide: number }, options: PptxEnginePngOptions): Promise<Uint8Array> {
+export async function renderPng(engine: PptxPngEngine, target: { slide: number; id?: string }, options: PptxEnginePngOptions): Promise<Uint8Array> {
   const request = slidePngRequest(engine.displayList(target.slide), options);
   options.signal?.throwIfAborted();
   const document = engine.doc as object;
@@ -70,7 +70,7 @@ export async function renderPng(engine: PptxPngEngine, target: { slide: number }
     bytes = renderer.renderPngTarget(document, JSON.stringify({ slide: target.slide }),
       JSON.stringify({ scale: request.scale, background: request.background, maxShadowPixels: options.maxShadowPixels }));
   } catch (error) {
-    const message = error instanceof Error ? error.message : '';
+    const message = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
     if (message.startsWith('png-font-unavailable: ')) throw new PngExportError('font-unavailable', message.slice(22));
     if (message.startsWith('png-too-large: ')) throw new PngExportError('canvas-too-large', message.slice(15));
     throw error;
