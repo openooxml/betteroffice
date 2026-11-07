@@ -489,7 +489,7 @@ export { PptxExportError } from './structuredExport';
 export type { ExportCompletion, ExportDiagnostic, ExportSeverity, MarkdownAnchor, PptxAnchor, PptxAnchorScope, PptxExportComment, PptxExportDiagnostic, PptxExportDiagnosticCode, PptxExportFailure, PptxExportFailureCode, PptxExportList, PptxExportMark, PptxExportNotes, PptxExportObject, PptxExportObjectKind, PptxExportOptions, PptxExportParagraph, PptxExportRefusal, PptxExportResult, PptxExportRun, PptxExportShape, PptxExportShapeKind, PptxExportSlide, PptxExportStory, PptxExportTable, PptxExportTableCell, PptxMarkdownContent, PptxMarkdownOptions, PptxSourceProvenance, PptxStructuredContent, PptxTextSpan, } from './structuredExport';
 export type { InspectPresentationOptions, OpenPresentationOptions, SavePresentationOptions, PresentationHandle, UndoCaptureMode, WasmInitInput, } from './wasm/loader';
 export type { EditSuccess, OperationFailure, OperationRefusal, PptxEditFailure, PptxEditFailureCode, PptxEditHistory, PptxEditPreview, PptxEditReceipt, PptxEditRefusal, PptxEditRequest, PptxEditResult, PptxEditSource, PptxEditStep, PptxEditTarget, PptxFindMatch, PptxFindRequest, PptxFindResult, PptxFindScope, PptxParagraphText, PptxReadRequest, PptxReadResult, PptxShapeTarget, PptxSlideTarget, PptxStoryTarget, PptxStoryText, PptxTextField, PptxTextGuard, PptxTextRange, PptxTextTarget, PptxValidationResult, ValidationSuccess, } from './edits';
-export type { BlipEffect, CaretStop, ColorTransform, ColorValue, CommentFlavor, CommentReceipt, CommentSnapshot, DeckSnapshot, EditProfile, GeometryPathCommand, HistoryProfile, HistoryResult, HitTestResult, ImageEffect, ImageCrop, ImagePrimitive, InheritedGeometry, LayoutProfile, Paint, ParagraphAlignment, ParagraphSnapshot, PictureDraft, PlaceholderPrimitive, PositionedGlyph, PositionedTextLine, PositionedTextRun, PresetShapeDraft, Profiled, ProfiledLayout, PptxFontFace, PptxCaretAnchor, PptxTextMatch, PptxTextSearchOptions, PrimitiveTransform, ShapeAdjustReceipt, ShapeDraft, ShapeFill, ShapeFillReceipt, ShapeGradient, ShapeKind, ShapeLineEnd, ShapeOutline, ShapePrimitive, ShapeReceipt, ShapeRect, ShapeSnapshot, ShapeStroke, ShapeStrokeReceipt, ShapeZOrderReceipt, ShapeAltText, TextLanguage, SlideDisplayList, SlidePrimitive, SlideReceipt, SlideSnapshot, SlideLayoutSnapshot, HeaderFooterSettings, SlideHeaderFooterText, SlideDateText, SlideHeaderFooter, StorySnapshot, Stroke, StrokeEnd, TextBoxPrimitive, TextReceipt, TextParagraphDraft, TextRunSnapshot, TextStyle, TextStylePatch, TextStyleSnapshot, TransformReceipt, TableReceipt, UpdateEvent, } from './types';
+export type { BlipEffect, CaretStop, ColorTransform, ColorValue, CommentFlavor, CommentReceipt, CommentSnapshot, DeckSnapshot, EditProfile, GeometryPathCommand, HistoryProfile, HistoryResult, HitTestResult, ImageEffect, ImageCrop, ImagePrimitive, InheritedGeometry, LayoutProfile, Paint, ParagraphAlignment, ParagraphSnapshot, PictureDraft, PlaceholderPrimitive, PositionedGlyph, PositionedTextLine, PositionedTextRun, PresetShapeDraft, Profiled, ProfiledLayout, PptxFontFace, PptxCaretAnchor, PptxTextMatch, PptxTextSearchOptions, PrimitiveTransform, ShapeAdjustReceipt, ShapeDraft, ShapeFill, ShapeFillReceipt, ShapeGradient, ShapeKind, ShapeLineEnd, ShapeOutline, ShapePrimitive, ShapeReceipt, ShapeRect, ShapeSnapshot, ShapeStroke, ShapeStrokeReceipt, ShapeZOrderReceipt, ShapeAltText, TextLanguage, TextLink, TextLinkTarget, SlideDisplayList, SlidePrimitive, SlideReceipt, SlideSnapshot, SlideLayoutSnapshot, HeaderFooterSettings, SlideHeaderFooterText, SlideDateText, SlideHeaderFooter, StorySnapshot, Stroke, StrokeEnd, TextBoxPrimitive, TextReceipt, TextParagraphDraft, TextRunSnapshot, TextStyle, TextStylePatch, TextStyleSnapshot, TransformReceipt, TableReceipt, UpdateEvent, } from './types';
 /** @internal */
 export { metafileImageBytes } from './render/image';
 /** @internal */
@@ -2752,6 +2752,7 @@ export interface TextBoxPrimitive extends PrimitiveBase {
         align?: 'left' | 'center' | 'right' | 'justify';
         level: number;
         languages?: TextLanguage[];
+        links?: TextLink[];
         runs: Array<{
             text: string;
             fontFamily: string;
@@ -2773,6 +2774,22 @@ export interface TextLanguage {
     end: number;
     lang: string;
 }
+/** UTF-16 offsets into the paragraph's concatenated run text. */
+export interface TextLink {
+    start: number;
+    end: number;
+    target: TextLinkTarget;
+}
+export type TextLinkTarget = {
+    kind: 'url';
+    href: string;
+} | {
+    kind: 'slide';
+    index: number;
+} | {
+    kind: 'jump';
+    jump: 'next' | 'previous' | 'first' | 'last';
+};
 export interface PlaceholderPrimitive extends PrimitiveBase {
     kind: 'placeholder';
     name: string;

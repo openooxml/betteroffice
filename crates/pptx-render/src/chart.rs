@@ -752,6 +752,7 @@ mod tests {
                 anchor: crate::TextAnchor::Top,
                 paragraphs: vec![crate::TextParagraph {
                     languages: Vec::new(),
+                    links: Vec::new(),
                     align: None,
                     level: 0,
                     runs: vec![crate::TextRun {

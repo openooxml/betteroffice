@@ -469,6 +469,8 @@ pub struct TextParagraph {
     pub runs: Vec<TextRun>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub languages: Vec<TextLanguage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<TextLink>,
 }
 
 /// UTF-16 offsets into the paragraph's concatenated run text.
@@ -478,6 +480,23 @@ pub struct TextLanguage {
     pub start: u32,
     pub end: u32,
     pub lang: String,
+}
+
+/// UTF-16 offsets into the paragraph's concatenated run text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextLink {
+    pub start: u32,
+    pub end: u32,
+    pub target: TextLinkTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum TextLinkTarget {
+    Url { href: String },
+    Slide { index: u32 },
+    Jump { jump: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

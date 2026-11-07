@@ -2383,17 +2383,29 @@ pub(crate) fn slide_scope(
     let slides = required_map(&txn, SLIDES)?;
     let shapes = required_map(&txn, SHAPES)?;
     let stories = required_map(&txn, STORIES)?;
-    let mut ids = live_slide_ids(&txn)?;
+    let ids = live_slide_ids(&txn)?;
     if slide_index >= ids.len() {
         return Err(EditError::OutOfBounds {
             index: slide_index.min(u32::MAX as usize) as u32,
             length: ids.len() as u32,
         });
     }
-    let slide_id = ids.swap_remove(slide_index);
+    let slide = snapshot_slide(&slides, &shapes, &stories, package, &txn, &ids[slide_index])?;
+    let slide_part_paths = if crate::paragraph::has_internal_slide_links(package, &slide) {
+        ids.iter()
+            .map(|id| {
+                let slide = live_entry(&slides, &txn, id)
+                    .ok_or_else(|| EditError::SlideNotFound(id.clone()))?;
+                Ok(map_string(&slide, &txn, "sourcePartPath"))
+            })
+            .collect::<EditResult<Vec<_>>>()?
+    } else {
+        Vec::new()
+    };
     Ok(SlideScope {
         index: slide_index,
-        slide: snapshot_slide(&slides, &shapes, &stories, package, &txn, &slide_id)?,
+        slide_part_paths,
+        slide,
         width_emu: required_i64(&meta, &txn, "widthEmu")?,
         height_emu: required_i64(&meta, &txn, "heightEmu")?,
     })
