@@ -911,7 +911,7 @@ fn equal_pixels_cropped_from_one_source_are_decoded_a_bounded_number_of_times() 
 fn an_emf_plus_image_that_cannot_be_built_is_not_rebuilt_for_free() {
     let objects = |count: u16| {
         let mut body = u32s(&[0xDBC0_1002, 1]);
-        body.extend(i32s(&[4096, 4096, 0]));
+        body.extend(i32s(&[2048, 2048, 0]));
         body.extend(u32s(&[0, 0]));
         let mut records = vec![plus_header(false)];
         records.extend((0..count).map(|id| (0x4008, 0x0500 | id, body.clone())));
