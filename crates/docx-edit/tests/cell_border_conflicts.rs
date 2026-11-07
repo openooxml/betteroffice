@@ -33,7 +33,7 @@ fn build_table(
     let tbl_w = col_w * cols;
     let mut xml = format!(r#"<w:tbl><w:tblPr><w:tblW w:w="{tbl_w}" w:type="dxa"/>"#);
     xml.push_str(tbl_borders);
-    xml.push_str(r#"<w:tblLayout w:type="fixed"/><w:tblCellMar><w:left w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/></w:tblCellMar></w:tblPr><w:tblGrid>"#);
+    xml.push_str(r#"<w:tblLayout w:type="fixed"/></w:tblPr><w:tblGrid>"#);
     for _ in 0..cols {
         xml.push_str(&format!(r#"<w:gridCol w:w="{col_w}"/>"#));
     }

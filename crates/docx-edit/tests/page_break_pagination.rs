@@ -1342,7 +1342,7 @@ fn single_column_ignores_an_unequal_column_definition() {
 #[test]
 fn a_table_after_a_column_break_uses_the_second_column_width() {
     let body = format!(
-        r#"{}{}<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/><w:tblLayout w:type="fixed"/><w:tblCellMar><w:left w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/></w:tblCellMar></w:tblPr><w:tblGrid><w:gridCol w:w="3954"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="5000" w:type="pct"/></w:tcPr>{}</w:tc></w:tr></w:tbl>"#,
+        r#"{}{}<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/><w:tblLayout w:type="fixed"/></w:tblPr><w:tblGrid><w:gridCol w:w="3954"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="5000" w:type="pct"/></w:tcPr>{}</w:tc></w:tr></w:tbl>"#,
         fixture::p("71000005", &fixture::r("First column")),
         fixture::p("71000006", r#"<w:r><w:br w:type="column"/></w:r>"#),
         fixture::p("71000007", &fixture::r("Table text")),

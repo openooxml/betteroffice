@@ -2235,6 +2235,7 @@ fn lower_table<T: ReadTxn>(
 
     let original = tbl_pr.get("_originalFormatting").and_then(any_map);
     let table_margins = tbl_pr.get("cellMargins").and_then(any_map);
+    let default_margins = editor_table_cell_margins(tbl_pr, local.source.upgrade().as_deref());
     let grid_widths: Vec<Option<f64>> = grid.iter().map(any_number).collect();
     let total_grid_width: f64 = grid_widths.iter().flatten().sum();
     let mut column_row_ends = vec![0usize; grid_widths.len()];
@@ -2399,7 +2400,7 @@ fn lower_table<T: ReadTxn>(
                 vertical_align: map_string(tc_pr, "verticalAlign"),
                 background,
                 borders: lower_cell_borders(tc_pr, env),
-                padding: Some(lower_cell_padding(tc_pr, table_margins)),
+                padding: Some(lower_cell_padding(tc_pr, table_margins, default_margins)),
                 no_wrap: (map_bool(tc_pr, "noWrap") == Some(true)).then_some(true),
                 tracked_marker: tc_pr.get("cellMarker").and_then(any_json),
             });
@@ -2470,7 +2471,7 @@ fn lower_table<T: ReadTxn>(
         let twips = table_margins
             .and_then(|margins| map_number(margins, side))
             .filter(|value| value.is_finite() && *value >= 0.0)
-            .unwrap_or_else(|| word_default_cell_margin(side));
+            .unwrap_or_else(|| default_margins.side(side));
         (twips > 0.0).then(|| twips_to_pixels(twips))
     };
 
@@ -3611,6 +3612,7 @@ fn lower_floating_table(value: &std::collections::HashMap<String, Any>) -> Float
 fn lower_cell_padding(
     tc_pr: &std::collections::HashMap<String, Any>,
     table_margins: Option<&std::collections::HashMap<String, Any>>,
+    default_margins: DefaultCellMargins,
 ) -> BoxEdges {
     let cell_margins = tc_pr.get("margins").and_then(any_map);
     let side = |key: &str| {
@@ -3624,7 +3626,7 @@ fn lower_cell_padding(
                     .map(twips_to_pixels)
                     .filter(|value| *value >= 0.0)
             })
-            .unwrap_or_else(|| twips_to_pixels(word_default_cell_margin(key)))
+            .unwrap_or_else(|| twips_to_pixels(default_margins.side(key)))
     };
     BoxEdges {
         top: side("top"),
@@ -3634,13 +3636,44 @@ fn lower_cell_padding(
     }
 }
 
-/// Word's built-in cell margin in twips for a side no `w:tcMar`, `w:tblCellMar`
-/// or table style sets: 108 left and right, none above or below.
-fn word_default_cell_margin(side: &str) -> f64 {
-    match side {
-        "left" | "right" => 108.0,
-        _ => 0.0,
+/// Cell margins in twips, `[top, right, bottom, left]`, for the sides no
+/// `w:tcMar` or resolved `w:tblCellMar` sets.
+#[derive(Clone, Copy)]
+struct DefaultCellMargins([f64; 4]);
+
+impl DefaultCellMargins {
+    fn side(self, side: &str) -> f64 {
+        match side {
+            "top" => self.0[0],
+            "right" => self.0[1],
+            "bottom" => self.0[2],
+            _ => self.0[3],
+        }
     }
+}
+
+/// A loaded table already carries the margins its styles resolve to, and Word
+/// gives it none beyond them. A table the editor inserted or pasted carries no
+/// source formatting, so it takes what the document's table styles set (its
+/// own style, else the default table style), and none where they set nothing,
+/// as Word does when it opens the saved file.
+fn editor_table_cell_margins(
+    tbl_pr: &std::collections::HashMap<String, Any>,
+    source: Option<&crate::seed::SourceMetadata>,
+) -> DefaultCellMargins {
+    if tbl_pr.contains_key("_originalFormatting") {
+        return DefaultCellMargins([0.0; 4]);
+    }
+    let Some(source) = source else {
+        return DefaultCellMargins([0.0; 4]);
+    };
+    let style_id = map_string(tbl_pr, "styleId");
+    let bidi = map_bool(tbl_pr, "bidi") == Some(true);
+    DefaultCellMargins(
+        source
+            .table_cell_margins(style_id.as_deref(), bidi)
+            .map(|side| side.unwrap_or(0.0)),
+    )
 }
 
 fn lower_cell_borders(
@@ -6917,28 +6950,37 @@ mod tests {
             ("left".to_owned(), Any::Number(108.0)),
             ("right".to_owned(), Any::Number(108.0)),
         ]);
-        let padding = lower_cell_padding(&cell, Some(&table));
+        let padding = lower_cell_padding(&cell, Some(&table), DefaultCellMargins([0.0; 4]));
         assert_eq!(padding.left, 0.0);
         assert!((padding.right - 7.2).abs() < 1e-10);
     }
 
     #[test]
-    fn cell_padding_falls_back_to_word_default_margins() {
+    fn unset_cell_sides_take_the_resolved_default_margins() {
         let empty = std::collections::HashMap::new();
-        let padding = lower_cell_padding(&empty, None);
+        let normal_table = DefaultCellMargins([0.0, 108.0, 0.0, 108.0]);
+        let padding = lower_cell_padding(&empty, None, normal_table);
         assert!((padding.left - 7.2).abs() < 1e-10);
         assert!((padding.right - 7.2).abs() < 1e-10);
-        assert_eq!(padding.top, 0.0);
-        assert_eq!(padding.bottom, 0.0);
+        assert_eq!((padding.top, padding.bottom), (0.0, 0.0));
         let table = std::collections::HashMap::from([
             ("left".to_owned(), Any::Number(0.0)),
             ("top".to_owned(), Any::Number(60.0)),
         ]);
-        let padding = lower_cell_padding(&empty, Some(&table));
+        let padding = lower_cell_padding(&empty, Some(&table), normal_table);
         assert_eq!(padding.left, 0.0);
         assert!((padding.right - 7.2).abs() < 1e-10);
         assert!((padding.top - 4.0).abs() < 1e-10);
         assert_eq!(padding.bottom, 0.0);
+        let loaded = std::collections::HashMap::from([(
+            "_originalFormatting".to_owned(),
+            Any::Map(std::collections::HashMap::new().into()),
+        )]);
+        let padding = lower_cell_padding(&empty, None, editor_table_cell_margins(&loaded, None));
+        assert_eq!(
+            [padding.top, padding.right, padding.bottom, padding.left],
+            [0.0; 4]
+        );
     }
 
     #[test]
@@ -7112,18 +7154,13 @@ mod tests {
                 "blocks": [paragraph(para_id, text, start)],
                 "colSpan": 1.0,
                 "rowSpan": 1.0,
-                "padding": {
-                    "top": 0.0, "right": twips_to_pixels(108.0),
-                    "bottom": 0.0, "left": twips_to_pixels(108.0)
-                }
+                "padding": { "top": 0.0, "right": 0.0, "bottom": 0.0, "left": 0.0 }
             })
         };
         let mut expected = json!([{
             "kind": "table",
             "id": "placeholder",
             "tableLayout": "autofit",
-            "cellMarginLeft": twips_to_pixels(108.0),
-            "cellMarginRight": twips_to_pixels(108.0),
             "rows": [
                 {
                     "id": "placeholder", "isHeader": false,

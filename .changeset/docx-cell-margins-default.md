@@ -5,4 +5,4 @@
 '@betteroffice/rust-crates': patch
 ---
 
-Table cells with no cell margins in the document, such as tables inserted or pasted in the editor, lay out with Word's default 0.19 cm left and right margins, so text wraps on screen where Word and LibreOffice wrap it.
+Tables inserted or pasted in the editor lay out with the cell margins of the document's table styles, as Word shows them once saved, so text wraps on screen where Word wraps it. Opened tables are unchanged.
