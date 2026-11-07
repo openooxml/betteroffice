@@ -35,12 +35,17 @@ function stubCanvas() {
     convertToBlob(request: { type: string }) { return Promise.resolve(new Blob(['png'], { type: request.type })); }
   }
   class Face { constructor(public family: string) {} load() { return Promise.resolve(this); } }
+  const held: Face[] = [];
   const scope = globalThis as Record<string, unknown>;
   const saved = { OffscreenCanvas: scope.OffscreenCanvas, FontFace: scope.FontFace, fonts: scope.fonts, Image: scope.Image, createImageBitmap: scope.createImageBitmap };
   Object.assign(scope, {
     OffscreenCanvas: Canvas, FontFace: Face, Image: undefined,
     createImageBitmap: () => Promise.reject(new Error('no decoder in this test')),
-    fonts: { add() {}, delete() { return true; }, load() { return Promise.resolve([]); } },
+    fonts: {
+      add(face: Face) { held.push(face); },
+      delete(face: Face) { held.splice(held.indexOf(face), 1); return true; },
+      load(request: string) { return Promise.resolve(held.filter((face) => request.includes(`"${face.family}"`))); },
+    },
   });
   restore = () => { Object.assign(scope, saved); };
 }

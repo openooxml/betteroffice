@@ -1,6 +1,7 @@
 import { afterEach, beforeAll, describe, expect, test, spyOn } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import * as fonts from '@betteroffice/fonts';
 import { initWasm, openPresentation } from '../index';
 import { engineKind } from './engine';
 
@@ -199,24 +200,35 @@ test.skipIf(native)('canvas export draws the slide it was asked for when the dec
 
 test.skipIf(native)('canvas export loads the faces of text added while faces load', async () => {
   const browser = stubBrowser();
-  const box = (handle: ReturnType<typeof openPresentation>, slideId: string, name: string, fontFamily: string, y: number) =>
-    handle.addTextBox(slideId, { name, rect: { x: 100000, y, width: 3000000, height: 800000 }, text: name, style: { fontFamily, fontSizePt: 18 } });
+  const box = (handle: ReturnType<typeof openPresentation>, slideId: string, name: string, style: { fontFamily: string; bold?: boolean; italic?: boolean }, y: number) =>
+    handle.addTextBox(slideId, { name, rect: { x: 100000, y, width: 3000000, height: 800000 }, text: name, style: { ...style, fontSizePt: 18 } });
+  const first = { fontFamily: 'Courier New', bold: true, italic: true };
+  const later = { fontFamily: 'Georgia', bold: true, italic: true };
   const edited = openPresentation(fixture, { clientId: 7192 });
   const fresh = openPresentation(fixture, { clientId: 7191 });
+  const original = fonts.loadBundledFontBytes;
+  let edits = 0;
+  const editedSlide = edited.snapshot().slides[0]!.id;
+  const loading = spyOn(fonts, 'loadBundledFontBytes').mockImplementation((...args: Parameters<typeof original>) => {
+    if (edits === 0) {
+      edits += 1;
+      box(edited, editedSlide, 'Added later', later, 1000000);
+    }
+    return original(...args);
+  });
   try {
-    const editedSlide = edited.snapshot().slides[0]!.id;
-    box(edited, editedSlide, 'First', 'Calibri', 100000);
-    const exported = edited.renderPng({ slide: 0 });
-    box(edited, editedSlide, 'Added later', 'Georgia', 1000000);
-    await exported;
+    box(edited, editedSlide, 'First', first, 100000);
+    await edited.renderPng({ slide: 0 });
+    loading.mockRestore();
+    expect(edits).toBe(1);
     const whileLoading = browser.sources.map((source) => source.length).sort();
     browser.sources.length = 0;
     const freshSlide = fresh.snapshot().slides[0]!.id;
-    box(fresh, freshSlide, 'First', 'Calibri', 100000);
-    box(fresh, freshSlide, 'Added later', 'Georgia', 1000000);
+    box(fresh, freshSlide, 'First', first, 100000);
+    box(fresh, freshSlide, 'Added later', later, 1000000);
     await fresh.renderPng({ slide: 0 });
     expect(whileLoading).toEqual(browser.sources.map((source) => source.length).sort());
-  } finally { edited.dispose(); fresh.dispose(); }
+  } finally { loading.mockRestore(); edited.dispose(); fresh.dispose(); }
 });
 
 test.skipIf(native)('a presentation disposed before its first canvas export starts rejects it', async () => {
