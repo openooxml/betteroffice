@@ -29,6 +29,38 @@ pub fn encode_png(pixmap: Pixmap, width: u32, height: u32) -> Result<Vec<u8>, St
     Ok(data)
 }
 
+const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+const PNG_END: &[u8] = b"\0\0\0\0IEND\xaeB`\x82";
+
+/// A PNG that stops after its last whole chunk without the closing `IEND`,
+/// with that chunk appended, as browsers decode it. Anything else, including a
+/// stream cut inside a chunk, comes back as it was.
+pub fn png_with_end(bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    let Some(mut rest) = bytes.strip_prefix(PNG_SIGNATURE) else {
+        return bytes.into();
+    };
+    let mut image_data = false;
+    while !rest.is_empty() {
+        let Some((header, body)) = rest.split_first_chunk::<8>() else {
+            return bytes.into();
+        };
+        let length = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize;
+        let kind = &header[4..];
+        if kind == b"IEND" {
+            return bytes.into();
+        }
+        image_data |= kind == b"IDAT";
+        let Some(next) = length.checked_add(4).and_then(|chunk| body.get(chunk..)) else {
+            return bytes.into();
+        };
+        rest = next;
+    }
+    if !image_data {
+        return bytes.into();
+    }
+    [bytes, PNG_END].concat().into()
+}
+
 /// Parses hexadecimal RGB or RGBA digits, including short forms.
 pub fn parse_hex_rgba(hex: &str) -> Option<[u8; 4]> {
     let expanded;
