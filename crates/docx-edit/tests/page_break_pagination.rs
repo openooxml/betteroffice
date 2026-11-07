@@ -166,7 +166,7 @@ fn source_content_after_a_break_only_paragraph_keeps_the_break() {
     assert_eq!(page_texts(&body), ["A", ""]);
 }
 
-fn assert_endnotes_keep_terminal_break(position: &str) {
+fn assert_endnotes_follow_the_text_before_a_terminal_break(position: &str) {
     let body = format!(
         r#"{}{}<w:sectPr><w:endnotePr><w:pos w:val="{position}"/></w:endnotePr></w:sectPr>"#,
         fixture::p(
@@ -180,27 +180,34 @@ fn assert_endnotes_keep_terminal_break(position: &str) {
     );
     let (engine, _) = fixture::laid_out(&fixture::with_body(&body), 9404);
     let layout: Value = serde_json::from_str(&engine.retained_layout_json().unwrap()).unwrap();
-    assert_eq!(layout_page_texts(&layout).len(), 2);
+    assert_eq!(layout_page_texts(&layout), ["A"], "{position}");
+    let pages = layout["layout"]["pages"].as_array().unwrap();
+    assert!(
+        pages[0]["noteAreas"]
+            .as_array()
+            .is_some_and(|areas| areas.iter().any(|area| area["kind"] == "endnote")),
+        "{position}: the endnote follows the text on its page"
+    );
     let blocks: Value = serde_json::from_str(
         &engine
             .lower_story_json("body", &RenderEnv::default())
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(
+    assert_ne!(
         blocks.as_array().unwrap().last().unwrap()["kind"],
         "pageBreak"
     );
 }
 
 #[test]
-fn document_end_endnotes_keep_a_terminal_break_only_paragraphs_break() {
-    assert_endnotes_keep_terminal_break("docEnd");
+fn document_end_endnotes_follow_the_text_before_a_terminal_break_only_paragraph() {
+    assert_endnotes_follow_the_text_before_a_terminal_break("docEnd");
 }
 
 #[test]
-fn final_section_endnotes_keep_a_terminal_break_only_paragraphs_break() {
-    assert_endnotes_keep_terminal_break("sectEnd");
+fn final_section_endnotes_follow_the_text_before_a_terminal_break_only_paragraph() {
+    assert_endnotes_follow_the_text_before_a_terminal_break("sectEnd");
 }
 
 #[test]

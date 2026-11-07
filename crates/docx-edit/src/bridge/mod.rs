@@ -743,18 +743,13 @@ fn can_omit_trailing_body_page_break<T: ReadTxn>(
         .or_else(|| read.settings.as_ref()?.get("footnotePr")?.get("position"))
         .and_then(Value::as_str)
         .unwrap_or("pageBottom");
-    !txn.get_map(crate::STORIES).is_some_and(|stories| {
-        stories.iter(txn).any(|(id, _)| {
-            let note_id = id.strip_prefix("en:").or_else(|| {
-                if matches!(footnote_position, "docEnd" | "sectEnd") {
-                    id.strip_prefix("fn:")
-                } else {
-                    None
-                }
-            });
-            note_id.is_some_and(|id| id.parse::<i64>().is_ok_and(|id| id > 0))
+    !matches!(footnote_position, "docEnd" | "sectEnd")
+        || !txn.get_map(crate::STORIES).is_some_and(|stories| {
+            stories.iter(txn).any(|(id, _)| {
+                id.strip_prefix("fn:")
+                    .is_some_and(|id| id.parse::<i64>().is_ok_and(|id| id > 0))
+            })
         })
-    })
 }
 
 #[allow(clippy::too_many_arguments)]
