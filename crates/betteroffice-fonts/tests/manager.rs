@@ -149,11 +149,31 @@ fn flat_pack_directories_skip_unreadable_manifests_and_incomplete_packs() {
 }
 
 #[test]
-fn pack_directories_that_do_not_exist_are_not_installed_and_report_nothing() {
+fn pack_directories_that_do_not_exist_report_every_file_missing() {
     let root = tempfile::tempdir().unwrap();
     let absent = root.path().join("absent");
-    let provider = BundledFonts::from_pack_directories(vec![(FontPack::Latin, absent)]).unwrap();
-    assert!(provider.pack_diagnostics().is_empty());
+    let provider =
+        BundledFonts::from_pack_directories(vec![(FontPack::Latin, absent.clone())]).unwrap();
+    assert!(provider.resolve_family("Calibri", false, false).is_none());
+    let mut files: Vec<&str> = betteroffice_fonts::catalog::catalog()
+        .faces
+        .iter()
+        .filter(|face| face.pack == FontPack::Latin)
+        .map(|face| face.file.as_str())
+        .chain(["manifest.json"])
+        .collect();
+    files.sort_unstable();
+    assert_eq!(
+        provider.pack_diagnostics(),
+        [FontPackDiagnostic {
+            pack: FontPack::Latin,
+            directory: absent,
+            problem: FontPackProblem::MissingFile {
+                file: files[0].to_string(),
+                missing: files.len(),
+            },
+        }]
+    );
     deploy_flat(root.path());
     let provider =
         BundledFonts::from_pack_directories(vec![(FontPack::Latin, root.path().into())]).unwrap();

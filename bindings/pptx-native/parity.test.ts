@@ -110,6 +110,7 @@ describe('font pack diagnostics', () => {
       }, 'version-mismatch'],
       ['no manifest', (assets) => fs.rmSync(path.join(assets, 'manifest.json')), 'missing-file'],
       ['unreadable manifest', (assets) => fs.writeFileSync(path.join(assets, 'manifest.json'), '{'), 'invalid-manifest'],
+      ['no assets directory', (assets) => fs.rmSync(assets, { recursive: true }), 'missing-file'],
     ];
     for (const [name, damage, reason] of breakages) {
       const root = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'font-pack-'));

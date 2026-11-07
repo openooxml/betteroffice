@@ -437,8 +437,8 @@ impl BundledFonts {
         &self.diagnostics
     }
 
-    /// A pack whose directory does not exist is not installed and is skipped quietly; an installed pack that
-    /// cannot be used is skipped with a diagnostic in [`Self::pack_diagnostics`].
+    /// Every listed pack is installed: callers leave out the packs they cannot find. One that cannot be used,
+    /// including one whose directory is gone, is skipped with a diagnostic in [`Self::pack_diagnostics`].
     #[doc(hidden)]
     pub fn from_pack_directories(directories: Vec<(FontPack, PathBuf)>) -> Result<Self, FontError> {
         for (index, (pack, directory)) in directories.iter().enumerate() {
@@ -469,9 +469,6 @@ impl BundledFonts {
                         source,
                     })?
                     .join(directory);
-            }
-            if !directory.is_dir() {
-                continue;
             }
             match pack_problem(pack, &directory) {
                 Some(problem) => bundled.diagnostics.push(FontPackDiagnostic {
