@@ -1,5 +1,6 @@
 import { createRequire } from 'node:module';
 import type * as Wasm from '../../../packages/docx/src/wasm/generated/edit/docx_edit.js';
+import { warnFontPackDiagnostics } from '../../../shared/fontPackDiagnostics';
 
 export type { DecodedFontFace, InitInput, InitOutput, SyncInitInput } from '../../../packages/docx/src/wasm/generated/edit/docx_edit.js';
 
@@ -138,3 +139,5 @@ async function initNativeEngine(): Promise<{ memory: undefined }> {
 }
 
 export default initNativeEngine as unknown as typeof Wasm.default;
+
+void import('@betteroffice/fonts').then((fonts) => fonts.checkFontPacks()).then(warnFontPackDiagnostics, () => {});

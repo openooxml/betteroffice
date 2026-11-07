@@ -92,6 +92,13 @@ configureDefaultFonts({ fonts, baseUrl: 'https://cdn.example.com/betteroffice-fo
   `dist/decoder/`, which bundlers emit next to the entry. When neither loads, decoding fails with
   `Font decoder wasm not found` and both URLs.
 
+## Checking installed packs
+
+`checkFontPacks()` lists installed add-on packages that cannot be used, such as a `@betteroffice/fonts-cjk` from
+another release or with missing files, each with the pack and the reason (`version-mismatch`, `missing-file`,
+`invalid-manifest`). Their faces are substituted as when the pack is not installed. Under Node the files are checked on
+disk; in a browser only the package's asset list is compared, since checking the files would fetch them.
+
 ## Bundlers
 
 With rollup, esbuild or a Vite build that inlines the package, mark the font packages as external

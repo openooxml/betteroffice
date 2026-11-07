@@ -205,3 +205,5 @@ export { PptxPeerNotReadyError, PptxWorkerEditorDisposedError } from './session/
 export { openPresentationSession } from './session/client';
 /** @internal */
 export { createPptxWorkerEditorSession } from './session/editorSession';
+export { fontPackDiagnostics } from './wasm/engine';
+export type { FontPackDiagnostic } from '../../../shared/fontPackDiagnostics';

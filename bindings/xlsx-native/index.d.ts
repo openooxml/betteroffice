@@ -123,6 +123,9 @@ export declare function exportXlsxMarkdownJson(bytes: Uint8Array, options: strin
 
 export declare function exportXlsxStructuredJson(bytes: Uint8Array, options: string): string
 
+/** Internal: the installed font packs `configureFontPacks` left out, and why, as JSON. */
+export declare function fontPackDiagnosticsJson(): string
+
 export declare function renderXlsxMarkdownJson(content: string, options: string): string
 
 /** @internal Test hook: sets the calling thread's engine memory budget in bytes; 0 restores the default. */

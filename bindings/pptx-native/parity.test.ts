@@ -83,3 +83,55 @@ describe('pptx native/wasm package parity', () => {
     expect(await native.exportPptxStructured(fixture)).toEqual(await wasm.exportPptxStructured(fixture));
   });
 });
+
+describe('font pack diagnostics', () => {
+  test('both packages report the installed packs alike', async () => {
+    expect(await native.fontPackDiagnostics()).toEqual(await wasm.fontPackDiagnostics());
+  });
+
+  test('a broken installed pack is named with the same reason and detail by the native loader and the package check', async () => {
+    const fs = require('node:fs') as typeof import('node:fs');
+    const path = require('node:path') as typeof import('node:path');
+    const { checkInstalledPacks } = await import('../../packages/fonts/src/packDiagnostics');
+    const source = new URL('../../packages/fonts-intl', import.meta.url).pathname;
+    const nativeReport = (directory: string) => {
+      const script = `const raw = require('./index.js'); raw.configureFontPacks(undefined, ${JSON.stringify(directory)}, undefined); console.log('RESULT ' + raw.fontPackDiagnosticsJson());`;
+      const child = Bun.spawnSync([process.execPath, '-e', script], { cwd: new URL('.', import.meta.url).pathname });
+      const line = child.stdout.toString().split('\n').find((text) => text.startsWith('RESULT '));
+      expect(line, child.stderr.toString()).toBeDefined();
+      return JSON.parse(line!.slice(7));
+    };
+    const breakages: Array<[string, (assets: string) => void, string]> = [
+      ['intact', () => {}, ''],
+      ['missing file', (assets) => fs.rmSync(path.join(assets, 'NotoSansThai-Bold.ttf.zst')), 'missing-file'],
+      ['other release', (assets) => {
+        const manifest = path.join(assets, 'manifest.json');
+        fs.writeFileSync(manifest, JSON.stringify({ ...JSON.parse(fs.readFileSync(manifest, 'utf8')), version: '0.0.1' }));
+      }, 'version-mismatch'],
+      ['no manifest', (assets) => fs.rmSync(path.join(assets, 'manifest.json')), 'missing-file'],
+      ['unreadable manifest', (assets) => fs.writeFileSync(path.join(assets, 'manifest.json'), '{'), 'invalid-manifest'],
+    ];
+    for (const [name, damage, reason] of breakages) {
+      const root = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'font-pack-'));
+      try {
+        fs.cpSync(path.join(source, 'src'), path.join(root, 'src'), { recursive: true });
+        fs.cpSync(path.join(source, 'assets'), path.join(root, 'assets'), { recursive: true });
+        damage(path.join(root, 'assets'));
+        const { INTL_FONT_ASSET_URLS } = await import(path.join(root, 'src/index.ts'));
+        const fromPackage = await checkInstalledPacks({
+          latin: async () => undefined, intl: async () => INTL_FONT_ASSET_URLS, cjk: async () => undefined,
+        });
+        const fromNative = nativeReport(path.join(root, 'assets'));
+        expect([name, fromNative.map((entry: { pack: string; reason: string }) => [entry.pack, entry.reason])])
+          .toEqual([name, reason ? [['intl', reason]] : []]);
+        if (reason === 'invalid-manifest') {
+          expect(fromPackage.map(({ pack, reason }) => [pack, reason])).toEqual([['intl', reason]]);
+        } else {
+          expect([name, fromPackage]).toEqual([name, fromNative]);
+        }
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    }
+  });
+});
