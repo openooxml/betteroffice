@@ -6,6 +6,8 @@ import { inputReady } from './pptx-async-helpers';
 type Format = 'docx' | 'xlsx' | 'pptx';
 type BrowserProbe = {
   workers: { worker: Worker; url: string; active: boolean }[];
+  /** Holds messages from session workers while set, so their acknowledgements never arrive before a crash. */
+  holdWorkerMessages: boolean;
   printed: number;
   popups: Window[];
   painted(): string;
@@ -94,7 +96,7 @@ async function instrument(page: Page) {
   await page.addInitScript(() => {
     const texts = new WeakMap<HTMLCanvasElement, string[]>();
     const probe: BrowserProbe = {
-      workers: [], printed: 0, popups: [],
+      workers: [], printed: 0, popups: [], holdWorkerMessages: false,
       painted() {
         const canvas = document.querySelector<HTMLCanvasElement>('[data-testid="pptx-slide-canvas"]');
         return canvas ? (texts.get(canvas) ?? []).join('') : '';
@@ -104,6 +106,18 @@ async function instrument(page: Page) {
     window.Worker = new Proxy(window.Worker, {
       construct(target, args) {
         const worker = Reflect.construct(target, args) as Worker;
+        const gate = (listener: (event: MessageEvent) => void) => function (this: Worker, event: MessageEvent) {
+          if (!probe.holdWorkerMessages) listener.call(this, event);
+        };
+        const listen = worker.addEventListener.bind(worker);
+        worker.addEventListener = ((type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) =>
+          listen(type, type === 'message' && typeof listener === 'function'
+            ? gate(listener as (event: MessageEvent) => void) as EventListener : listener, options)) as typeof worker.addEventListener;
+        let onmessage: ((event: MessageEvent) => void) | null = null;
+        Object.defineProperty(worker, 'onmessage', { configurable: true, get: () => onmessage, set: (value) => {
+          if (onmessage === null && value) listen('message', gate((event) => onmessage?.call(worker, event)) as EventListener);
+          onmessage = value;
+        } });
         const record = { worker, url: String(args[0]), active: true };
         const terminate = worker.terminate.bind(worker);
         worker.terminate = () => { record.active = false; terminate(); };
@@ -237,6 +251,33 @@ async function history(page: Page, format: Format, info: TestInfo, value: string
 }
 
 test.beforeEach(async ({ page }) => { await instrument(page); });
+
+test('pptx: an edit the worker painted but never acknowledged before it crashed is reported, not dropped silently', async ({ page }, info) => {
+  await open(page, 'pptx');
+  await inputReady(page);
+  const box = await canvas(page, 'pptx').boundingBox();
+  expect(box).not.toBeNull();
+  await page.mouse.click(box!.x + box!.width * 0.12, box!.y + box!.height * 0.22);
+  await expect(slideInput(page)).toBeFocused();
+  await slideInput(page).press('Home');
+  await page.evaluate(() => { window.__asyncRobustness.holdWorkerMessages = true; });
+  await page.keyboard.insertText('Held');
+  await expect.poll(() => painted(page)).toContain('Held');
+  await page.evaluate(() => {
+    const record = [...window.__asyncRobustness.workers].reverse().find((entry) => entry.active && entry.url.includes('pptxSessionWorker'));
+    if (!record) throw new Error('No active pptx worker');
+    record.worker.dispatchEvent(new ErrorEvent('error', { message: 'Browser worker failure', error: new Error('Browser worker failure') }));
+    record.worker.terminate();
+  });
+  await page.evaluate(() => { window.__asyncRobustness.holdWorkerMessages = false; });
+  const downloading = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Download recovered presentation', exact: true }).click();
+  const recovered = info.outputPath('recovered.pptx');
+  await (await downloading).saveAs(recovered);
+  const slide = await (await JSZip.loadAsync(await readFile(recovered))).file('ppt/slides/slide1.xml')!.async('string');
+  expect(slide).not.toContain('Held');
+  await expect(page.locator('.notice[role=alert]')).toContainText(/left out \d+ edit/);
+});
 
 for (const format of ['docx', 'pptx'] as const) {
   test(`${format}: worker crash recovery preserves edits and accepts new typing`, async ({ page }, info) => {
