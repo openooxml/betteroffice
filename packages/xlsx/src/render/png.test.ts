@@ -233,6 +233,30 @@ describe.skipIf(engineKind === 'native')('the wasm PNG engine', () => {
     expect(calls.painted.some((font) => !font.startsWith('bold ') && font.includes('bo-xlsx-png'))).toBe(true);
   });
 
+  test('without fonts, a family whose bundled face is in a package not installed paints with the next face natively', async () => {
+    const calls = stubBrowser();
+    const primary = bundled.resolveBundledFamilyFace('Calibri', false, false)!;
+    const original = bundled.bundledFaceInstalled;
+    const installed = spyOn(bundled, 'bundledFaceInstalled')
+      .mockImplementation((face) => face.file === primary.file ? Promise.resolve(false) : original(face));
+    try {
+      await renderPng(sheetOf('Calibri'), box, {});
+      const next = bundled.resolveGlyphFallbackFace('Calibri', false, false, 'word') ?? bundled.resolveLastResortChoice('Calibri', false, false, 'word').face;
+      expect(next.file).not.toBe(primary.file);
+      expect(calls.bytes).toEqual([(await bundled.loadBundledFontBytes(next)).byteLength]);
+    } finally { installed.mockRestore(); }
+  });
+
+  test('without fonts, faces load strictly, so a missing add-on rejects instead of painting another face', async () => {
+    stubBrowser();
+    const loading = spyOn(bundled, 'loadBundledFontBytes');
+    try {
+      await renderPng(sheetOf('Times New Roman', true), box, {});
+      expect(loading.mock.calls.length).toBeGreaterThan(0);
+      expect(loading.mock.calls.every((call) => call[2]?.strict === true)).toBe(true);
+    } finally { loading.mockRestore(); }
+  });
+
   test('without fonts, an aborted export rejects with the abort reason and starts no load', async () => {
     stubBrowser();
     const loading = spyOn(bundled, 'loadBundledFontBytes');
