@@ -1629,7 +1629,12 @@ fn parse_image<const FULL: bool>(player: &mut Player<FULL>, data: &[u8]) -> Opti
             }
             let charged = if repeat { 0 } else { pixels };
             let owed = pixels - charged;
-            player.charge(0, charged)?;
+            let work = if repeat {
+                crate::player::repeat_work(pixels)
+            } else {
+                0
+            };
+            player.charge(work, charged)?;
             let pixels = match mime {
                 Some(mime) => Pixels::Encoded {
                     mime,

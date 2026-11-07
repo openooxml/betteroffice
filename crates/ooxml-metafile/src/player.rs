@@ -86,6 +86,18 @@ impl SharedBudget {
     }
 }
 
+/// A cropped GDI bitmap, its offset in the source rectangle, and whether it
+/// fills its whole destination.
+pub(crate) type CroppedBlit = (Arc<Bitmap>, (f64, f64), bool);
+
+/// Work a repeated source spends to decode again: its pixels are not charged
+/// twice, so the decode is paid in work instead.
+pub(crate) fn repeat_work(pixels: u64) -> usize {
+    usize::try_from(pixels / REPEAT_PIXELS_PER_WORK).unwrap_or(usize::MAX)
+}
+
+const REPEAT_PIXELS_PER_WORK: u64 = 16;
+
 pub(crate) type Xform = [f64; 6];
 
 pub(crate) const IDENTITY: Xform = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
@@ -287,9 +299,8 @@ pub(crate) struct Player<const FULL: bool> {
     pub bitmaps: HashMap<u64, Vec<Arc<Bitmap>>>,
     /// Bitmap sources seen so far, each kept once, to their ids.
     pub sources: HashMap<Box<[u8]>, usize>,
-    /// GDI bitmaps already cropped, by source id and how they were cropped,
-    /// with their offset and whether they fill their whole destination.
-    pub blits: HashMap<(usize, [u64; 7]), (Arc<Bitmap>, (f64, f64), bool)>,
+    /// GDI bitmaps already cropped, by source id and how they were cropped.
+    pub blits: HashMap<(usize, [u64; 7]), CroppedBlit>,
     /// EMF+ images already built, by source id.
     pub plus_images: HashMap<usize, Arc<Bitmap>>,
     pub budget: Option<Rc<SharedBudget>>,
