@@ -191,7 +191,7 @@ test.skipIf(native)('canvas export draws the slide it was asked for when the dec
     const moved = handle.renderPng({ slide: 1 });
     handle.moveSlide(asked, 0);
     await moved;
-    expect(browser.texts.join(' ')).toContain('Asked for');
+    expect(browser.texts.join('').replace(/\s+/g, '')).toContain('Askedfor');
     const removed = handle.renderPng({ slide: asked });
     handle.deleteSlide(asked);
     await expect(removed).rejects.toThrow(`no slide with ID ${JSON.stringify(asked)}`);
