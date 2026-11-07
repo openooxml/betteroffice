@@ -18,6 +18,7 @@ import {
   type XlsxSelectionEnvironment,
 } from './evaluate';
 import { XLSX_COMMAND_DESCRIPTORS } from './descriptors';
+import { REFUSAL_CAUSE_KEYS } from './refusalCause';
 
 import {
   PeerlessWorkerCommandRefusal, type PeerlessWorkerCommandInput, type PeerlessWorkerCommandSession,
@@ -437,6 +438,9 @@ export function createPeerlessWorkerXlsxCommandBinding(
         }
         if (error.status.reason === 'read-only') return fail('read-only');
         if (id === 'proposalReject' && error.status.reason === 'missing-target') return fail('proposal-not-found');
+        if (error.code === 'edit-unsupported') {
+          return { ok: false, failure: { code: error.code, message: env.translate(REFUSAL_CAUSE_KEYS[error.cause ?? 'other']) } };
+        }
         return fail(error.code);
       }
       if (error instanceof XlsxCommandAdmissionError) {

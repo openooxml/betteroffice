@@ -41,6 +41,7 @@ import type {
 export type XlsxCommandAdmissionCode = Extract<
   XlsxCommandFailureCode,
   | 'input-failed'
+  | 'edit-unsupported'
   | 'sheet-protected'
   | 'host-refused'
   | 'document-replaced'
@@ -51,6 +52,7 @@ export type XlsxCommandAdmissionCode = Extract<
 
 const ADMISSION_MESSAGES: Record<XlsxCommandAdmissionCode, string> = {
   'input-failed': 'Input accepted earlier could not be written',
+  'edit-unsupported': "This edit can't be applied here. The workbook is unchanged.",
   'sheet-protected': 'This cell is on a protected sheet.',
   'host-refused': 'This edit is not allowed.',
   'document-replaced': 'The workbook was replaced',
@@ -233,6 +235,7 @@ function snapshotKey(id: AnyCommandId, args: unknown): string {
 function disabledCode(code: XlsxCommandFailureCode): XlsxCommandDisabledCode {
   switch (code) {
     case 'input-failed':
+    case 'edit-unsupported':
     case 'sheet-protected':
     case 'host-refused':
     case 'target-changed':
