@@ -1276,7 +1276,18 @@ impl PptxRenderer {
                 ErrorKind::Message => throw_error(&env, &png_error(&error.message)),
                 _ => map_error(env, error),
             })
-            .and_then(|rendered| byte_result(env, rendered.bytes))
+            .and_then(|rendered| {
+                if rendered.unavailable_images > 0 {
+                    return Err(throw_error(
+                        &env,
+                        &format!(
+                            "png-picture-unavailable: {} picture(s) on this slide could not be drawn",
+                            rendered.unavailable_images
+                        ),
+                    ));
+                }
+                byte_result(env, rendered.bytes)
+            })
     }
 
     #[napi(catch_unwind)]
