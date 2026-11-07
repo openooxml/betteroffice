@@ -26,6 +26,8 @@ interface Exporter {
 }
 
 const exporters = new WeakMap<object, Exporter>();
+/** Loading rounds an export waits through while edits keep asking for new faces. */
+const MAX_FONT_ROUNDS = 4;
 const loaded = new Map<string, Promise<Uint8Array>>();
 
 const familyKey = (family: string) => family.trim().toLowerCase();
@@ -171,8 +173,9 @@ function release(exporter: Exporter): void {
 /**
  * Lays the slide with `slideId` out again in an export renderer holding the faces the presentation registered, any
  * new family in `added`, and the bundled faces the slide asks for, as the native export does, so both measure alike.
- * Faces are collected again until the document stays unchanged while they load; the layout then runs without
- * yielding, on that version and at the slide's index in it.
+ * Faces are collected again until the document stays unchanged while they load, at most `MAX_FONT_ROUNDS` times;
+ * the layout then runs without yielding, on that version and at the slide's index in it. Edits that keep asking
+ * for new faces past that reject with `font-unavailable`, so the caller can export again.
  */
 export async function defaultFontLayout(
   document: PptxDocument, slideId: string, measured: ExportFace[], added: ReadonlyArray<PptxFontFace> | undefined, signal?: AbortSignal,
@@ -193,10 +196,13 @@ export async function defaultFontLayout(
   const held = exporter;
   held.users += 1;
   const run = held.queue.then(async () => {
-    for (;;) {
+    for (let round = 0; ; round += 1) {
       const version = document.documentVersion();
       const pending = registerDefaults(held, document, slideId, signal);
       if (!pending) break;
+      if (round === MAX_FONT_ROUNDS) {
+        throw new PngExportError('font-unavailable', 'the faces this slide needs kept changing while they loaded; export again');
+      }
       await pending;
       if (document.documentVersion() === version) break;
     }

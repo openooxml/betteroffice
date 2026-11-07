@@ -62,3 +62,29 @@ describe.skipIf(engineKind === 'native')('canvas renderPng with a bundled face t
     }
   });
 });
+
+describe.skipIf(engineKind === 'native')('canvas renderPng while edits keep asking for new faces', () => {
+  test('rejects with font-unavailable after a bounded number of loading rounds', async () => {
+    stubCanvas();
+    const original = fonts.loadBundledFontBytes;
+    const handle = openPresentation(fixture, { clientId: 7302 });
+    const slideId = handle.snapshot().slides[0]!.id;
+    const styles = ['Georgia', 'Cambria', 'Times New Roman', 'Courier New', 'Arial'].flatMap((fontFamily) =>
+      [[false, false], [true, false], [false, true], [true, true]].map(([bold, italic]) => ({ fontFamily, bold, italic })));
+    let edits = 0;
+    const loading = spyOn(fonts, 'loadBundledFontBytes').mockImplementation((...args: Parameters<typeof original>) => {
+      const style = styles[edits % styles.length]!;
+      edits += 1;
+      handle.addTextBox(slideId, { name: `Edit ${edits}`, rect: { x: 100000, y: 100000, width: 3000000, height: 800000 }, text: `Edit ${edits}`, style: { ...style, fontSizePt: 18 } });
+      return original(...args);
+    });
+    try {
+      await expect(handle.renderPng({ slide: 0 })).rejects.toMatchObject({ name: 'PngExportError', code: 'font-unavailable' });
+      loading.mockRestore();
+      expect(new TextDecoder().decode(await handle.renderPng({ slide: 0 }))).toBe('png');
+    } finally {
+      loading.mockRestore();
+      handle.dispose();
+    }
+  });
+});
