@@ -392,8 +392,8 @@ fn failed_nested_images_spend_work_and_decoded_pixels() {
     let before = budget;
     let svg = to_svg_with_budget(&repeated_nested_images(&inner, 1), &mut budget).unwrap();
     assert!(svg.markup.contains("<path"));
-    assert_eq!(before.pixels - budget.pixels, 1024 * 1024);
-    assert!(budget.work < before.work);
+    assert_eq!(before.pixels, budget.pixels);
+    assert!(before.work - budget.work >= 1024 * 1024 / 16);
     assert_eq!(
         to_svg(&repeated_nested_images(&inner, 17)).unwrap_err().0,
         "the metafile draws more than the replay limits"

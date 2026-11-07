@@ -188,7 +188,9 @@ fn play_full_emf(
     let plus_drew = plus.as_ref().ok().map(|player| !player.ops.is_empty());
     drop(plus);
     let plus_spent = budget.spent_since(before);
-    budget.refund(plus_spent.pixels);
+    if !budget.release(plus_spent.pixels) {
+        return Err("the metafile draws more than the replay limits".to_owned());
+    }
     let before = budget.remaining.get();
     let gdi = play_emf::<true>(bytes, depth, false, Some(Rc::clone(&budget)));
     if budget.exceeded.get() {
@@ -199,7 +201,9 @@ fn play_full_emf(
         (Err(error), Some(false)) => Err(error),
         (gdi, Some(_)) => {
             drop(gdi);
-            budget.refund(budget.spent_since(before).pixels);
+            if !budget.release(budget.spent_since(before).pixels) {
+                return Err("the metafile draws more than the replay limits".to_owned());
+            }
             budget.give_back(ReplayBudget {
                 work: plus_spent.work,
                 pixels: 0,

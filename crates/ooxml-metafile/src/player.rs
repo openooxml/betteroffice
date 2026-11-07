@@ -81,6 +81,13 @@ impl SharedBudget {
         self.give_back(crate::ReplayBudget { work: 0, pixels });
     }
 
+    /// Gives back the pixels a dropped pass held, paying for their decoding
+    /// in work instead, so passes that are set aside stay bounded.
+    pub(crate) fn release(&self, pixels: u64) -> bool {
+        self.refund(pixels);
+        self.spend(repeat_work(pixels) as u64, 0)
+    }
+
     /// Gives back work and pixels a dropped pass spent.
     pub(crate) fn give_back(&self, spent: crate::ReplayBudget) {
         let remaining = self.remaining.get();
