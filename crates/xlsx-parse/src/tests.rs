@@ -5973,8 +5973,7 @@ fn keeps_an_unrebuildable_cache_whose_moved_reference_keeps_its_shape() {
         workbook.sheets[0].cell(CellRef::new(4, 1)).unwrap().value,
         CellValue::Number { value: 4.0 }
     );
-    let unmodelled =
-        r#"<c:numCache><c:pt idx="0" formatCode="0.00"><c:v>3</c:v></c:pt></c:numCache>"#;
+    let unmodelled = r#"<c:numCache><c:pt idx="0"><c:v>3</c:v></c:pt><c:extLst><c:ext uri="{9F0C0C0A}"/></c:extLst></c:numCache>"#;
     let part = String::from_utf8(CHART.to_vec()).unwrap().replace(
         r#"<c:numCache><c:pt idx="0"><c:v>3</c:v></c:pt></c:numCache>"#,
         unmodelled,
@@ -6016,9 +6015,38 @@ fn keeps_an_unrebuildable_cache_whose_moved_reference_keeps_its_shape() {
     }
 }
 
-/// A cache may legally carry an `extLst` beside its points, or a `formatCode`
-/// on a single point. Neither survives a rebuild, so the save is refused
-/// rather than quietly changing the labels a consumer reads back.
+/// A point's `formatCode` is an `ST_Xstring` attribute: whatever a cell's
+/// number format holds, it is written so that an xml reader and then an
+/// `ST_Xstring` reader give the format back, and writing it never fails.
+#[test]
+fn writes_any_point_format_as_an_xstring_attribute() {
+    for (code, written) in [
+        ("0.0%", "0.0%"),
+        (
+            r#"[$-409]#,##0.00" units & <more>""#,
+            "[$-409]#,##0.00&quot; units &amp; &lt;more&gt;&quot;",
+        ),
+        ("0\u{1}0\u{1f}\u{fffe}", "0_x0001_0_x001F__xFFFE_"),
+        ("0\t0\n0\r", "0&#9;0&#10;0&#13;"),
+        (
+            "_x0041_ and _x00 and _x12G4_",
+            "_x005F_x0041_ and _x00 and _x12G4_",
+        ),
+    ] {
+        assert_eq!(
+            crate::chart::point_format_attribute(code),
+            written,
+            "{code:?}"
+        );
+    }
+    let long = "0".repeat(255);
+    assert_eq!(crate::chart::point_format_attribute(&long), long);
+}
+
+/// A cache may legally carry an `extLst` beside its points, and a string
+/// point carries no `formatCode` (`CT_StrVal`). Neither survives a rebuild,
+/// so the save is refused rather than quietly changing the labels a consumer
+/// reads back.
 #[test]
 fn refuses_to_rebuild_a_cache_holding_content_it_does_not_model() {
     let parsed = parse_workbook_with_package(&charted_package()).unwrap();
@@ -6031,8 +6059,8 @@ fn refuses_to_rebuild_a_cache_holding_content_it_does_not_model() {
             r#"<c:numCache><c:pt idx="0"><c:v>3</c:v></c:pt><c:extLst><c:ext uri="{9F0C0C0A}"/></c:extLst></c:numCache>"#,
         ),
         (
-            "per-point format code",
-            r#"<c:numCache><c:pt idx="0" formatCode="0.00"><c:v>3</c:v></c:pt></c:numCache>"#,
+            "format code on a string point",
+            r#"<c:numCache><c:pt idx="0"><c:v>3</c:v><c:formatCode>0.00</c:formatCode></c:pt></c:numCache>"#,
         ),
     ] {
         let part = source.replace(

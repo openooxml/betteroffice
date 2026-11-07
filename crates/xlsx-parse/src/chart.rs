@@ -862,6 +862,10 @@ struct CacheSite {
     /// whether the cache carries content [`regenerated_cache`] does not
     /// re-emit, which it would therefore delete.
     unmodelled_content: bool,
+    /// whether a point carries its own `formatCode`, as Excel writes for a
+    /// point whose cell is formatted differently from the series, so a
+    /// rebuild writes one for every such point.
+    point_formats: bool,
     /// the points the file was authored with, so a rebuild that would empty a
     /// populated cache can be recognized and declined.
     authored_points: usize,
@@ -973,6 +977,9 @@ fn cache_site(reference: &Element) -> Option<CacheSite> {
             .child("formatCode")
             .map(|element| element.text_content()),
         unmodelled_content: !cache_is_fully_modelled(cache),
+        point_formats: cache
+            .child_elements()
+            .any(|child| child.is(NS_CHART, "pt") && child.attribute(None, "formatCode").is_some()),
         authored_points: cache
             .child_elements()
             .filter(|child| child.is(NS_CHART, "pt"))
@@ -981,17 +988,22 @@ fn cache_site(reference: &Element) -> Option<CacheSite> {
 }
 
 /// Whether every byte of a cache's content is something the regenerator can
-/// write back. `extLst` and a per-point `formatCode` are legal cache content
-/// this crate does not model, so a cache carrying either is left alone rather
-/// than rebuilt without it.
+/// write back. A numeric point's `formatCode` (`CT_NumVal`) is rebuilt from
+/// the number format of the cell it reads. `extLst`, and anything else, is
+/// legal cache content this crate does not model, so a cache carrying it is
+/// left alone rather than rebuilt without it.
 fn cache_is_fully_modelled(cache: &Element) -> bool {
+    let numeric = cache.local_name() == "numCache";
     cache.child_elements().all(|child| {
         child.namespace() == Some(NS_CHART)
             && match child.local_name() {
                 "formatCode" => child.attributes.is_empty(),
                 "ptCount" => child.attributes.iter().all(|value| value.name == "val"),
                 "pt" => {
-                    child.attributes.iter().all(|value| value.name == "idx")
+                    child
+                        .attributes
+                        .iter()
+                        .all(|value| value.name == "idx" || (numeric && value.name == "formatCode"))
                         && child
                             .child_elements()
                             .all(|value| value.is(NS_CHART, "v") && value.attributes.is_empty())
@@ -1251,26 +1263,70 @@ fn regenerated_cache_inputs(
     }
     let prefix = &cache.prefix;
     let mut out = String::new();
-    if let Some(format_code) = format_override
+    let series_format = format_override
         .filter(|_| numeric)
-        .or(cache.format_code.as_deref())
-    {
+        .or(cache.format_code.as_deref());
+    if let Some(format_code) = series_format {
         out.push_str(&format!(
             "<{prefix}formatCode>{}</{prefix}formatCode>",
             escape_text(format_code)?
         ));
     }
+    let point_formats = numeric && cache.point_formats && fidelity == CacheFidelity::Persisted;
     out.push_str(&format!("<{prefix}ptCount val=\"{}\"/>", cells.len()));
-    for (index, text) in points.iter().enumerate() {
+    for (index, (text, (_, code))) in points.iter().zip(cells).enumerate() {
         let Some(text) = text else {
             continue;
         };
+        let format = if point_formats && *code != series_format.unwrap_or("General") {
+            format!(" formatCode=\"{}\"", point_format_attribute(code))
+        } else {
+            String::new()
+        };
         out.push_str(&format!(
-            "<{prefix}pt idx=\"{index}\"><{prefix}v>{}</{prefix}v></{prefix}pt>",
+            "<{prefix}pt idx=\"{index}\"{format}><{prefix}v>{}</{prefix}v></{prefix}pt>",
             cache_point_text(text)
         ));
     }
     Ok(out)
+}
+
+/// A point's `formatCode` attribute, which never fails. The value is an
+/// `ST_Xstring`, so a character xml 1.0 cannot carry is written as
+/// `_xHHHH_`, and a literal `_xHHHH_` in the code is kept literal with a
+/// leading `_x005F_`. Quotes and markup are escaped, and tab, line feed and
+/// carriage return are written as references so attribute normalization does
+/// not fold them into spaces. A number format any cell can hold therefore
+/// cannot keep a cache from being saved.
+pub(crate) fn point_format_attribute(code: &str) -> String {
+    let mut out = String::with_capacity(code.len());
+    for (at, ch) in code.char_indices() {
+        match ch {
+            '_' if is_xstring_escape(&code[at..]) => out.push_str("_x005F_"),
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\t' => out.push_str("&#9;"),
+            '\n' => out.push_str("&#10;"),
+            '\r' => out.push_str("&#13;"),
+            _ if ch < ' ' || ch == '\u{fffe}' || ch == '\u{ffff}' => {
+                out.push_str(&format!("_x{:04X}_", ch as u32));
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Whether `text` starts with an `_xHHHH_` escape, which an `ST_Xstring`
+/// reader would decode.
+fn is_xstring_escape(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes.len() >= 7
+        && bytes.starts_with(b"_x")
+        && bytes[2..6].iter().all(u8::is_ascii_hexdigit)
+        && bytes[6] == b'_'
 }
 
 /// A cache point's `c:v` text, which never fails: the value is an

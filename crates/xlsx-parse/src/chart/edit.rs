@@ -587,6 +587,7 @@ fn cache_markup(
             .and_then(|item| child(item, "formatCode"))
             .map(Element::text_content),
         unmodelled_content: false,
+        point_formats: false,
         authored_points: 0,
     };
     match regenerated_cache(
