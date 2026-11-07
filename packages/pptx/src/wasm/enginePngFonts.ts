@@ -132,14 +132,12 @@ function missingRequests(exporter: Exporter, document: PptxDocument, slideId: st
  * has settled, so a failed pass leaves the renderer as it was.
  */
 async function registerDefaults(exporter: Exporter, wanted: RequestedFontFace[], signal?: AbortSignal): Promise<void> {
-  const plans = await Promise.all(wanted.map(async (request) => {
-    const faces = await resolve(request);
+  const plans = await Promise.all(wanted.map(async (request) => ({ request, faces: await resolve(request) })));
+  const bytes = await Promise.all(plans.map(({ request, faces }) => {
     const primary = hasPrimary(exporter, request);
-    const loads = faces.map((face, index) => (index === 0 && !primary) || !hasFallback(exporter, face)
-      ? needed(face, request.family) : undefined);
-    return { request, faces, loads };
+    return Promise.all(faces.map((face, index) => (index === 0 && !primary) || !hasFallback(exporter, face)
+      ? needed(face, request.family) : undefined));
   }));
-  const bytes = await Promise.all(plans.map((plan) => Promise.all(plan.loads)));
   signal?.throwIfAborted();
   for (const [planIndex, { request, faces }] of plans.entries()) {
     if (exporter.requested.has(requestKey(request))) continue;
