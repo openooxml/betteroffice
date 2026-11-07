@@ -16,4 +16,4 @@ license-file = "LICENSE-OFL"
 name = "base_latin"
 
 [dev-dependencies]
-skrifa = "0.44"
+skrifa = "0.45"
