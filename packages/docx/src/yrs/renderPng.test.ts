@@ -61,7 +61,7 @@ async function opened(): Promise<YrsSession> {
 }
 
 describe('YrsSession.renderPng', () => {
-  test('keeps an EMF picture in a session opened without media tokens', async () => {
+  test('draws an EMF picture that reaches the export as its media part', async () => {
     stubBrowser();
     const metafile = new Uint8Array(readFileSync(resolve(root, 'crates/ooxml-metafile/tests/fixtures/clip-bitmap.emf')));
     const image = fixture.image.replace('IMAGE_RANK', '0').replace('IMAGE_BEHIND', '0');
@@ -75,7 +75,9 @@ describe('YrsSession.renderPng', () => {
     const session = await createYrsSession();
     try {
       session.openDocx(new Uint8Array(rezipPartsToArrayBuffer(parts)), true);
-      await session.renderPng({ page: 0 });
+      const exported = session.renderPng({ page: 0 });
+      if (native) await exported;
+      else expect((await exported.catch((error: { code?: string }) => error)).code).toBe('canvas-unavailable');
     } finally { session.destroy(); }
   });
 

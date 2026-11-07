@@ -1721,3 +1721,40 @@ fn a_picture_this_backend_cannot_decode_is_counted_as_skipped() {
     let rendered = render_page(&vector_picture_scene(), 0, &resources).unwrap();
     assert_eq!(rendered.skipped_images, 1);
 }
+
+#[test]
+fn an_svg_past_the_picture_limits_is_refused() {
+    let (fonts, chains, mut images) = empty_resources();
+    images.insert(
+        "rIdVector".to_string(),
+        br##"<svg xmlns="http://www.w3.org/2000/svg" width="8191" height="8191" viewBox="0 0 8191 8191"><rect width="8191" height="8191" fill="#ff0000"/></svg>"##.to_vec(),
+    );
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let rendered = render_page(&vector_picture_scene(), 0, &resources).unwrap();
+    assert_eq!(rendered.skipped_images, 1);
+}
+
+#[test]
+fn an_svg_picture_fill_tiles_at_its_own_size() {
+    let (fonts, chains, mut images) = empty_resources();
+    images.insert(
+        "rIdPicture".to_string(),
+        br##"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 8 8"><rect width="4" height="8" fill="#ff0000"/><rect x="4" width="4" height="8" fill="#0000ff"/></svg>"##.to_vec(),
+    );
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let scene = list(
+        30.0,
+        30.0,
+        vec![picture_shape(
+            json!({"kind":"picture","pictureRelId":"rIdPicture","pictureFillMode":"tile","pictureTile":{"alignment":"tl"}}),
+            None,
+        )],
+    );
+    let png = render_png(&scene, 0, &resources).unwrap();
+    let red = pixel(&png, 6, 14);
+    let blue = pixel(&png, 10, 14);
+    let red_again = pixel(&png, 14, 14);
+    assert!(red[0] > 200 && red[2] < 80, "{red:?}");
+    assert!(blue[2] > 200 && blue[0] < 80, "{blue:?}");
+    assert!(red_again[0] > 200 && red_again[2] < 80, "{red_again:?}");
+}
