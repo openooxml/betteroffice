@@ -192,8 +192,16 @@ mod tests {
     fn a_save_keeps_and_reports_a_fragment_that_cannot_follow_a_rename() {
         for (dv, name, code) in [
             ("Data!A1&lt;x/&gt;", "New Data", None),
-            ("Data!A1<x/>", "New Data", Some(SaveWarningCode::UnrewritableFormula)),
-            ("Data!$A$1:$A$5", "D\u{1}", Some(SaveWarningCode::UnwritableReference)),
+            (
+                "Data!A1<x/>",
+                "New Data",
+                Some(SaveWarningCode::UnrewritableFormula),
+            ),
+            (
+                "Data!$A$1:$A$5",
+                "D\u{1}",
+                Some(SaveWarningCode::UnwritableReference),
+            ),
         ] {
             let source = book(dv);
             let mut workbook = Workbook::open(&source).unwrap();
@@ -212,7 +220,11 @@ mod tests {
             assert_eq!(warning.part, OTHER);
             assert_eq!(warning.element.as_deref(), Some("data-validation"));
             assert_eq!(warning.sheet.as_deref(), Some("Other"));
-            assert!(warning.message.contains("kept as the file wrote them"), "{}", warning.message);
+            assert!(
+                warning.message.contains("kept as the file wrote them"),
+                "{}",
+                warning.message
+            );
             assert_eq!(workbook.save_warnings(), warnings);
         }
     }
