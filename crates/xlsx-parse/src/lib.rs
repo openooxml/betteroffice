@@ -29,7 +29,7 @@ pub use axis::SheetAxes;
 pub use chart::{
     ChartMetadata, ChartRefresh, ChartRefreshPlan, ChartSeriesInfo, agreed_chart_bytes,
     chart_bytes, chart_metadata, chart_references, chart_space, conflicting_drawing_anchor,
-    edit_chart, edited_chart_space, preserved_chart_space,
+    edit_chart, edited_chart_space, is_unwritable_chart_reference, preserved_chart_space,
 };
 #[cfg(feature = "test-counters")]
 pub use chart::{chart_counters, chart_save_counters, reset_chart_counters};

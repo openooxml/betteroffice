@@ -1415,6 +1415,16 @@ impl Workbook {
     /// A name table over the size bound still saves: the bound is on what this
     /// engine holds in memory, not on the file. `DefinedNamesResult::over_limit`
     /// reports it.
+    /// [`Workbook::save`], with a warning for every part the save wrote
+    /// differently from what the workbook holds. Only a chart reference xml
+    /// cannot carry, that the part does not already hold, does that: no
+    /// `c:f` can be written with it, so the save keeps the chart part as the
+    /// file wrote it. Opened content and accepted edits never cause one.
+    pub fn save_with_warnings(&self) -> Result<(Vec<u8>, Vec<crate::SaveWarning>)> {
+        let bytes = self.save()?;
+        Ok((bytes, self.chart_save_warnings()))
+    }
+
     pub fn save(&self) -> Result<Vec<u8>> {
         validate_model_sheets(&self.model)?;
         validate_chart_source(&self.model, self.source_package.is_some())?;
@@ -4882,11 +4892,6 @@ fn validate_charts(charts: &[SheetChart]) -> Result<()> {
                     "chart reference exceeds the supported length".to_string(),
                 ));
             }
-            if !is_writable_xml_text(&reference.formula) {
-                return Err(Error::InvalidOperation(
-                    "chart reference contains a character xml cannot carry".to_string(),
-                ));
-            }
         }
     }
     Ok(())
@@ -5017,14 +5022,6 @@ fn is_package_part_path(path: &str) -> bool {
         && path.chars().all(|character| {
             !character.is_control() && character != '"' && character != '<' && character != '>'
         })
-}
-
-/// Whether every character is one xml 1.0 can carry in element content.
-fn is_writable_xml_text(value: &str) -> bool {
-    value.chars().all(|character| {
-        matches!(character, '\t' | '\n' | '\r')
-            || (character >= ' ' && character != '\u{fffe}' && character != '\u{ffff}')
-    })
 }
 
 fn validate_hyperlinks(hyperlinks: &[Hyperlink]) -> Result<()> {
