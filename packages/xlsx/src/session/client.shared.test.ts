@@ -1,4 +1,4 @@
-import { expect, test } from 'bun:test';
+import { expect, spyOn, test } from 'bun:test';
 import { isClientMessage, type ClientMessage } from '../../../../shared/office-session/protocol';
 import type { SessionTransport } from '../../../../shared/office-session/transport';
 import type { PipeCommandPayload } from '../../../../shared/collaboration-pipe/protocol';
@@ -148,10 +148,13 @@ test('a third collaboration callback opts into the pipe route', async () => {
 
 const reads: { name: string; method: string; call(session: WorkbookSession): Promise<unknown>;
   value(seq: number): unknown; expected(seq: number): unknown }[] = [
-  { name: 'save', method: 'save', call: (session) => session.save(),
-    value: (seq) => Uint8Array.of(seq).buffer, expected: (seq) => Uint8Array.of(seq) },
-  { name: 'call.save', method: 'save', call: (session) => session.call.save(),
-    value: (seq) => Uint8Array.of(seq).buffer, expected: (seq) => Uint8Array.of(seq).buffer },
+  { name: 'save', method: 'saveWithWarnings', call: (session) => session.save(),
+    value: (seq) => ({ bytes: Uint8Array.of(seq).buffer, warnings: [] }), expected: (seq) => Uint8Array.of(seq) },
+  { name: 'saveWithWarnings', method: 'saveWithWarnings', call: (session) => session.saveWithWarnings(),
+    value: (seq) => ({ bytes: Uint8Array.of(seq).buffer, warnings: [] }),
+    expected: (seq) => ({ bytes: Uint8Array.of(seq), warnings: [] }) },
+  { name: 'call.save', method: 'saveWithWarnings', call: (session) => session.call.save(),
+    value: (seq) => ({ bytes: Uint8Array.of(seq).buffer, warnings: [] }), expected: (seq) => Uint8Array.of(seq).buffer },
   { name: 'version', method: 'version', call: (session) => session.call.version(),
     value: (seq) => `opaque:${seq}`, expected: (seq) => `opaque:${seq}` },
   { name: 'cellInputs', method: 'cellInputs', call: (session) => session.call.cellInputs(0, 'A1'),
@@ -294,17 +297,46 @@ for (const frames of ['compatibility', 'shared', 'both', 'neither'] as const) {
 }
 
 test('an ordinary RPC before the first edit holds later dispatch', async () => {
-  const port = controlled((seq) => Uint8Array.of(seq).buffer);
+  const port = controlled((seq) => ({ bytes: Uint8Array.of(seq).buffer, warnings: [] }));
   const session = await createWorkbookSession(new Uint8Array(), {}, port.transport);
   try {
     const saved = session.save();
     const later = session.submit(command(1));
-    expect(port.events).toEqual(['save:0']);
+    expect(port.events).toEqual(['saveWithWarnings:0']);
     port.reply(0);
     expect(await saved).toEqual(Uint8Array.of(0));
     await drain();
-    expect(port.events).toEqual(['save:0', 'send:1']);
+    expect(port.events).toEqual(['saveWithWarnings:0', 'send:1']);
     port.ack(1);
     expect(await later).toMatchObject({ seq: 1, status: 'applied' });
   } finally { await session.dispose(); }
+});
+
+test('save emits each save warning on the calling thread, and saveWithWarnings returns them instead', async () => {
+  const warning = {
+    code: 'unwritable-reference', part: 'xl/charts/chart1.xml', element: 'chart', sheet: 'Data',
+    message: 'xl/charts/chart1.xml on sheet Data was kept as the file wrote it',
+  } as const;
+  const port = controlled(() => ({ bytes: Uint8Array.of(7).buffer, warnings: [warning] }));
+  const session = await createWorkbookSession(new Uint8Array(), {}, port.transport);
+  const emitted = spyOn(process, 'emitWarning').mockImplementation(() => {});
+  try {
+    const answer = async <T>(call: Promise<T>) => {
+      await drain();
+      port.reply(port.calls.length - 1);
+      return call;
+    };
+    expect(await answer(session.save())).toEqual(Uint8Array.of(7));
+    expect(await answer(session.call.save())).toEqual(Uint8Array.of(7).buffer);
+    expect(emitted.mock.calls).toEqual([
+      [warning.message, { type: 'BetterOfficeSaveWarning', code: 'BETTEROFFICE_SAVE_WARNING' }],
+      [warning.message, { type: 'BetterOfficeSaveWarning', code: 'BETTEROFFICE_SAVE_WARNING' }],
+    ]);
+    expect(await answer(session.saveWithWarnings())).toEqual({ bytes: Uint8Array.of(7), warnings: [warning] });
+    expect(emitted.mock.calls).toHaveLength(2);
+    expect(port.calls.map((call) => call.method)).toEqual(['saveWithWarnings', 'saveWithWarnings', 'saveWithWarnings']);
+  } finally {
+    emitted.mockRestore();
+    await session.dispose();
+  }
 });

@@ -965,6 +965,17 @@ impl XlsxDocument {
             .and_then(|bytes| byte_result(env, bytes))
     }
 
+    /// The warnings a save of the workbook as it is now carries, as a JSON
+    /// array of `{ code, part, element?, sheet?, message }`; `[]` on an
+    /// ordinary save.
+    #[napi(catch_unwind)]
+    pub fn save_warnings_json(&self, env: Env) -> Result<String> {
+        let _call = EngineCall::new(env);
+        self.document(env)?
+            .save_warnings_json()
+            .map_err(|error| map_error(env, error))
+    }
+
     #[napi(catch_unwind, factory)]
     pub fn open(env: Env, bytes: Uint8Array) -> Result<Self> {
         let bytes = bytes.to_vec();

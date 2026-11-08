@@ -82,6 +82,12 @@ export declare class XlsxDocument {
   exportStructuredJson(options: string): string
   exportMarkdownJson(options: string, markdownOptions: string): string
   saveBytes(): Uint8Array
+  /**
+   * The warnings a save of the workbook as it is now carries, as a JSON
+   * array of `{ code, part, element?, sheet?, message }`; `[]` on an
+   * ordinary save.
+   */
+  saveWarningsJson(): string
   static open(bytes: Uint8Array): XlsxDocument
   static openWithCalculationJson(bytes: Uint8Array, context: string): XlsxDocument
   /** Checkpoints are only restorable by the same engine version and codec. */

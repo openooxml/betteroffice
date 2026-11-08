@@ -77,6 +77,7 @@ export const xlsxdocument_recoveryCheckpoint: (a: number, b: number, c: number) 
 export const xlsxdocument_redoJson: (a: number) => [number, number, number, number];
 export const xlsxdocument_rejectProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_saveBytes: (a: number) => [number, number, number, number];
+export const xlsxdocument_saveWarningsJson: (a: number) => [number, number, number, number];
 export const xlsxdocument_searchTextJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_selectionDataJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_selectionFormattingJson: (a: number, b: number, c: number) => [number, number, number, number];

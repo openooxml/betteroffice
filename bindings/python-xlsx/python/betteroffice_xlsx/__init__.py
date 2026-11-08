@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import dataclasses
 import datetime
 import json
 import math
 import numbers
 import os
+import warnings
 from typing import Any, TypedDict, Iterable, Iterator, Mapping, Union
 
 from ._betteroffice_xlsx import (
@@ -79,7 +81,35 @@ class PngRangeTarget(TypedDict):
     range: "str | RangeAddress"
 
 
+@dataclasses.dataclass(frozen=True)
+class SaveWarning:
+    """A part a save wrote differently from what the workbook holds, and why.
+
+    `code` is stable to match on; `message` is for people."""
+
+    code: str
+    part: str
+    message: str
+    element: "str | None" = None
+    sheet: "str | None" = None
+
+
+@dataclasses.dataclass(frozen=True)
+class SaveResult:
+    """The saved bytes and the warnings the save carries."""
+
+    bytes: bytes
+    warnings: "list[SaveWarning]"
+
+
+def _warn_save(found: "list[SaveWarning]") -> None:
+    for warning in found:
+        warnings.warn(warning.message, RuntimeWarning, stacklevel=3)
+
+
 __all__ = [
+    "SaveResult",
+    "SaveWarning",
     "Viewport",
     "ViewportTarget",
     "PngRangeTarget",
@@ -291,12 +321,36 @@ class Workbook:
         )
 
     def save(self) -> bytes:
-        """Serialize back to XLSX bytes."""
-        return self._inner.save()
+        """Serialize back to XLSX bytes. Each save warning is also raised as a
+        RuntimeWarning; `save_with_warnings` returns them instead."""
+        data = self._inner.save()
+        _warn_save(self._save_warnings())
+        return data
 
     def save_path(self, path: "str | os.PathLike[str]") -> None:
-        """Serialize to a filesystem path."""
+        """Serialize to a filesystem path, raising each save warning as a
+        RuntimeWarning."""
         self._inner.save_path(os.fspath(path))
+        _warn_save(self._save_warnings())
+
+    def save_with_warnings(self) -> "SaveResult":
+        """Serialize back to XLSX bytes, with a warning for every part the save
+        wrote differently from what the workbook holds; none on an ordinary
+        save."""
+        data = self._inner.save()
+        return SaveResult(bytes=data, warnings=self._save_warnings())
+
+    def _save_warnings(self) -> "list[SaveWarning]":
+        return [
+            SaveWarning(
+                code=entry["code"],
+                part=entry["part"],
+                message=entry["message"],
+                element=entry.get("element"),
+                sheet=entry.get("sheet"),
+            )
+            for entry in json.loads(self._inner._save_warnings_json())
+        ]
 
     @classmethod
     def open_collaborative(

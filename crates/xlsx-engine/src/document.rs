@@ -592,6 +592,10 @@ impl Document {
         self.session.save().map_err(message)
     }
 
+    pub fn save_warnings_json(&self) -> Result<String, EngineError> {
+        self.session.save_warnings_json().map_err(message)
+    }
+
     pub fn version(&self) -> &'static str {
         self.host.version
     }

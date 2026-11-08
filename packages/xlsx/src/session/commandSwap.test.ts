@@ -84,7 +84,7 @@ describe('workbook command swap compatibility', () => {
             }
             sequences.set(message.id, input.seq);
             events.push(`send:${input.seq}:${message.method}`);
-          } else if (message.method === 'save') events.push('save');
+          } else if (message.method === 'saveWithWarnings') events.push('save');
         }
         pair.client.post(message, transfer);
       },

@@ -929,6 +929,9 @@ export type XlsxExportResult<T> = {
 } | OperationRefusal<XlsxExportFailure>;
 export type { XlsxHeaderFooterText, XlsxHeaderFooterPair, XlsxSheetHeaderFooter } from './edits';
 
+// ---- saveWarnings.d.ts ----
+export type { SaveResult, SaveWarning, SaveWarningCode } from '../../../shared/office-session/saveWarnings';
+
 // ---- selection/types.d.ts ----
 /**
  * Pure selection types. Plain data only — no DOM, no framework — so the model
@@ -1038,6 +1041,7 @@ import { type PipeCommandPayload } from '../../../../shared/collaboration-pipe/p
 import type { AwarenessCursor } from '../collaboration/types';
 import { type SessionTransport } from '../../../../shared/office-session/transport';
 import { SessionFailure, type Promisified } from '../../../../shared/office-session/types';
+import { type SaveResult } from '../../../../shared/office-session/saveWarnings';
 import { type OpenWorkbookOptions, type Viewport, type WorkbookHandle } from '../wasm/loader';
 import { type WorkbookFrame, type WorkbookFrameOptions, type WorkbookInitialPaint, type WorkbookSessionEvents, type WorkbookSessionMethods, type WorkbookSessionOpenOptions, type WorkbookSessionState } from './methods';
 import type { CommandBasis, CommandIdentity, CommandStatus, WorkbookAck, WorkbookCommand, WorkbookCommandFrame, WorkbookCommandSelection, WorkbookEditState } from './commandProtocol';
@@ -1092,7 +1096,10 @@ export interface WorkbookSession {
          */
         frame(viewport: Viewport, options?: WorkbookFrameOptions): Promise<WorkbookFrame>;
     };
+    /** saved bytes; each save warning is also emitted as a Node process warning on this thread. */
     save(): Promise<Uint8Array>;
+    /** saved bytes with a warning for every part the save wrote differently from what the workbook holds. */
+    saveWithWarnings(): Promise<SaveResult>;
     on<K extends keyof WorkbookSessionEvents>(name: K, listener: (payload: WorkbookSessionEvents[K]) => void): () => void;
     onFailure(listener: (failure: SessionFailure) => void): () => void;
     readonly failure: SessionFailure | undefined;
@@ -1407,6 +1414,7 @@ export {};
 
 // ---- session/methods.d.ts ----
 import type { FontDecoderMethods } from '../../../../shared/office-session/fontDecoder';
+import type { SaveWarning } from '../../../../shared/office-session/saveWarnings';
 import type { XlsxDefinedNamesRequest, XlsxDefinedNamesResult } from '../definedNames';
 import type { PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
 import type { MethodPolicies, SessionState } from '../../../../shared/office-session';
@@ -1595,6 +1603,10 @@ export type WorkbookSessionMethods = FontDecoderMethods & {
     exportMarkdown(options?: XlsxExportOptions, markdownOptions?: XlsxMarkdownOptions): XlsxExportResult<XlsxMarkdownContent>;
     printDisplayList(sheet: number, range: string, metrics: PrintMetrics, gridlines: boolean): ArrayBuffer;
     save(): ArrayBuffer;
+    saveWithWarnings(): {
+        bytes: ArrayBuffer;
+        warnings: SaveWarning[];
+    };
     dispose(): void;
 };
 export declare const WORKBOOK_SESSION_METHODS: {
@@ -1628,6 +1640,7 @@ export declare const WORKBOOK_SESSION_METHODS: {
     exportMarkdown: true;
     printDisplayList: true;
     save: true;
+    saveWithWarnings: true;
     dispose: true;
 };
 export declare const WORKBOOK_SESSION_POLICIES: MethodPolicies<WorkbookSessionMethods>;
@@ -2774,6 +2787,36 @@ export declare function isClientMessage(value: unknown): value is ClientMessage;
 export declare function isHostMessage(value: unknown): value is HostMessage;
 export {};
 
+// ---- shared/office-session/saveWarnings.d.ts ----
+/**
+ * `unwritable-reference`: the document holds a reference with a character XML 1.0 cannot carry, which the
+ * part cannot be written with, so the save kept the part as the file wrote it. New codes may be added.
+ */
+export type SaveWarningCode = 'unwritable-reference';
+/** A part a save wrote differently from what the document holds, and why. */
+export interface SaveWarning {
+    /** Stable, to match on. */
+    code: SaveWarningCode;
+    /** The package part, such as `xl/charts/chart1.xml`. */
+    part: string;
+    /** What inside the part, such as `chart`. */
+    element?: string;
+    /** The sheet the part belongs to, in a workbook. */
+    sheet?: string;
+    /** A sentence for people; not stable, match on `code`. */
+    message: string;
+}
+/** The saved bytes and the warnings the save carries; `warnings` is empty on an ordinary save. */
+export interface SaveResult {
+    bytes: Uint8Array;
+    warnings: SaveWarning[];
+}
+/**
+ * Emits each warning as a Node process warning with code `BETTEROFFICE_SAVE_WARNING`, so server hosts can
+ * filter it. Does nothing outside Node.
+ */
+export declare function warnSaveWarnings(warnings: readonly SaveWarning[]): void;
+
 // ---- shared/office-session/scheduler.d.ts ----
 export type SchedulerLane = 'input' | 'collab' | 'interactive' | 'background';
 declare const FOREGROUND_LANES: readonly ["input", "collab", "interactive"];
@@ -3055,6 +3098,12 @@ export class XlsxDocument {
      * serialize the current workbook back to `.xlsx` bytes.
      */
     saveBytes(): Uint8Array;
+    /**
+     * The warnings a save of the workbook as it is now carries, as a JSON
+     * array of `{ code, part, element?, sheet?, message }`; `[]` on an
+     * ordinary save.
+     */
+    saveWarningsJson(): string;
     searchTextJson(args: string): string;
     selectionDataJson(args: string): string;
     selectionFormattingJson(args: string): string;
@@ -3209,6 +3258,7 @@ export interface InitOutput {
     readonly xlsxdocument_redoJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_rejectProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_saveBytes: (a: number) => [number, number, number, number];
+    readonly xlsxdocument_saveWarningsJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_searchTextJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_selectionDataJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_selectionFormattingJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -3265,6 +3315,7 @@ import type { XlsxDefinedNamesRequest, XlsxDefinedNamesResult } from '../defined
 import type { Direction, SelectionData } from '../selection/types';
 import type { InitInput } from './generated/xlsx_wasm.js';
 import { type FontDecoder } from '../../../../shared/office-session/fontDecoder';
+import { type SaveResult } from '../../../../shared/office-session/saveWarnings';
 export declare const decodeFontFace: FontDecoder;
 import type { XlsxPngFont, XlsxPngOptions, XlsxPngTarget } from './pngTarget';
 export type { XlsxFontFace, XlsxPngFont, XlsxPngOptions, XlsxPngTarget, XlsxRangeAddress, XlsxSheetRef } from './pngTarget';
@@ -3756,8 +3807,16 @@ export interface WorkbookHandle extends CollaborationReplica {
      * @internal
      */
     renderPngFonts(target: XlsxPngTarget, options?: XlsxPngOptions): XlsxPngFont[];
-    /** serialize the workbook back to .xlsx bytes. */
+    /**
+     * serialize the workbook back to .xlsx bytes. each save warning is also emitted as a Node process
+     * warning with code `BETTEROFFICE_SAVE_WARNING`; {@link WorkbookHandle.saveWithWarnings} returns them.
+     */
     save(): Uint8Array;
+    /**
+     * serialize the workbook back to .xlsx bytes, with a warning for every part the save wrote differently
+     * from what the workbook holds; none on an ordinary save.
+     */
+    saveWithWarnings(): SaveResult;
     /**
      * stage an agent's proposed edits for human review without applying them.
      * returns the {@link Proposal} with per-cell formatted before/after previews.
@@ -4004,6 +4063,7 @@ export { createWorkbookEditSession } from './session/editSession';
 export { WorkbookPngUnavailableError } from './session/methods';
 export { PngExportError } from '../../../shared/office-session/pngExportError';
 export type { PngExportCode } from '../../../shared/office-session/pngExportError';
+export type { SaveResult, SaveWarning, SaveWarningCode } from './saveWarnings';
 export type { XlsxFontFace, XlsxPngFont, XlsxPngOptions, XlsxPngTarget, XlsxRangeAddress, XlsxSheetRef } from './wasm/pngTarget';
 export type { WorkbookEditSession } from './session/editSession';
 /** @experimental */
