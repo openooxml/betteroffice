@@ -2410,6 +2410,12 @@ fn lower_table<T: ReadTxn>(
                 padding: Some(lower_cell_padding(tc_pr, table_margins, default_margins)),
                 no_wrap: (map_bool(tc_pr, "noWrap") == Some(true)).then_some(true),
                 tracked_marker: tc_pr.get("cellMarker").and_then(any_json),
+                merge_continuation: tc_pr
+                    .get("_originalFormatting")
+                    .and_then(any_map)
+                    .and_then(|formatting| map_string(formatting, "vMerge"))
+                    .is_some_and(|merge| merge == "continue")
+                    .then_some(true),
             });
             for end in column_row_ends.iter_mut().skip(column).take(colspan) {
                 *end = row_index.saturating_add(row_span.unwrap_or(1.0) as usize);
@@ -2505,11 +2511,27 @@ fn lower_table<T: ReadTxn>(
             cell_margin_left: table_margin("left"),
             cell_margin_right: table_margin("right"),
             gridlines: env.show_table_gridlines.then_some(true),
+            first_column: table_look_first_column(tbl_pr).then_some(true),
             pm_start: Some(pm_start as f64),
             pm_end: Some((pm_start + node_size) as f64),
         },
         node_size,
     ))
+}
+
+/// The table's own `w:tblLook` asks for first-column formatting, by its
+/// attribute or by bit `0x0080` of its legacy hex value.
+fn table_look_first_column(tbl_pr: &std::collections::HashMap<String, Any>) -> bool {
+    let Some(look) = tbl_pr.get("look").and_then(any_map) else {
+        return false;
+    };
+    map_bool(look, "firstColumn")
+        .or_else(|| {
+            map_string(look, "value")
+                .and_then(|value| u32::from_str_radix(value.trim(), 16).ok())
+                .map(|bits| bits & 0x0080 != 0)
+        })
+        .unwrap_or(false)
 }
 
 fn resolve_paragraph_auto_text_color(
@@ -7092,6 +7114,64 @@ mod tests {
             &EditCtx::local("", DATE),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn a_table_look_first_column_reaches_the_layout_table() {
+        let first_column = |tbl_pr: &str| {
+            let doc = EditingDoc::new(43);
+            replace_story_with_paragraph(&doc, "body:t0:r0c0", "c00p", "A");
+            doc.create_story("body", "", "Normal", "left").unwrap();
+            doc.apply_raw_ops(
+                "body",
+                vec![
+                    RawOp::Delete { index: 0, len: 1 },
+                    RawOp::InsertEmbed {
+                        index: 0,
+                        kind: "table".to_owned(),
+                        payload: vec![
+                            ("tblPr".to_owned(), Any::from_json(tbl_pr).unwrap()),
+                            ("grid".to_owned(), Any::from_json("[]").unwrap()),
+                            (
+                                "rows".to_owned(),
+                                Any::from_json(
+                                    r#"[{"trPr":{"isHeader":true},"cells":[
+                                      {"tcPr":{"colspan":1,"rowspan":1},"story":"body:t0:r0c0"}
+                                    ]}]"#,
+                                )
+                                .unwrap(),
+                            ),
+                        ],
+                        attrs: Attrs::new(),
+                    },
+                ],
+                &EditCtx::local("", DATE),
+            )
+            .unwrap();
+            let blocks = serde_json::to_value(
+                yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap(),
+            )
+            .unwrap();
+            blocks.pointer("/0/firstColumn").cloned()
+        };
+        assert_eq!(
+            first_column(r#"{"look":{"firstColumn":true}}"#),
+            Some(json!(true))
+        );
+        assert_eq!(
+            first_column(r#"{"look":{"value":"04A0"}}"#),
+            Some(json!(true))
+        );
+        assert_eq!(
+            first_column(r#"{"look":{"value":"04A0","firstColumn":false}}"#),
+            None
+        );
+        assert_eq!(first_column(r#"{"look":{"value":"0420"}}"#), None);
+        assert_eq!(
+            first_column("{}"),
+            None,
+            "a table without its own look asks for nothing"
+        );
     }
 
     #[test]
