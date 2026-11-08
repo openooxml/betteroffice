@@ -23,6 +23,7 @@ import type { Direction, SelectionData } from '../selection/types';
 import type { InitInput } from './generated/xlsx_wasm.js';
 import { copyDecodedFace, fontBytes, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
 import { isEngineTrap } from '../../../../shared/office-session/trap';
+import { warnSaveWarnings, type SaveResult, type SaveWarning } from '../../../../shared/saveWarnings';
 
 export const decodeFontFace: FontDecoder = async (bytes, { codec, dict, maxOutput }) => {
   await initWasm();
@@ -57,6 +58,11 @@ import type {
   XlsxStructuredContent,
 } from '../exports';
 
+
+function docSaveWarnings(doc: object): SaveWarning[] {
+  const fn = (doc as { saveWarningsJson?: () => string }).saveWarningsJson;
+  return typeof fn === 'function' ? (JSON.parse(fn.call(doc)) as SaveWarning[]) : [];
+}
 /**
  * A scrolled window into a sheet. `x`/`y` are content-pixel offsets into the
  * non-frozen body. Mirrors the Rust `Viewport`.
@@ -637,8 +643,16 @@ export interface WorkbookHandle extends CollaborationReplica {
    * @internal
    */
   renderPngFonts(target: XlsxPngTarget, options?: XlsxPngOptions): XlsxPngFont[];
-  /** serialize the workbook back to .xlsx bytes. */
+  /**
+   * serialize the workbook back to .xlsx bytes. each save warning is also emitted as a Node process
+   * warning with code `BETTEROFFICE_SAVE_WARNING`; {@link WorkbookHandle.saveWithWarnings} returns them.
+   */
   save(): Uint8Array;
+  /**
+   * serialize the workbook back to .xlsx bytes, with a warning for every part the save wrote differently
+   * from what the workbook holds; none on an ordinary save.
+   */
+  saveWithWarnings(): SaveResult;
   /**
    * stage an agent's proposed edits for human review without applying them.
    * returns the {@link Proposal} with per-cell formatted before/after previews.
@@ -1334,7 +1348,13 @@ function wrapWorkbookDocument(
     },
     renderPngFonts: (target: XlsxPngTarget, options: XlsxPngOptions = {}): XlsxPngFont[] => workbookPngFonts(handle, target, options),
     save(): Uint8Array {
-      return wasmCall(() => doc.saveBytes());
+      const bytes = wasmCall(() => doc.saveBytes());
+      warnSaveWarnings(wasmCall(() => docSaveWarnings(doc)));
+      return bytes;
+    },
+    saveWithWarnings(): SaveResult {
+      const bytes = wasmCall(() => doc.saveBytes());
+      return { bytes, warnings: wasmCall(() => docSaveWarnings(doc)) };
     },
     propose(agentId: string, note: string | null, edits: ProposalEdit[]): Proposal {
       const proposal = mutatingWasmCall(() => {

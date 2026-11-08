@@ -3,6 +3,7 @@ import type {
   WorkbookCommandFrame, WorkbookCommandSelection, WorkbookEditState, WorkbookSession,
 } from '../worker';
 import type { WorkbookSharedAck } from './commandProtocol';
+import type { SaveResult } from '../saveWarnings';
 
 type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
 type Assert<T extends true> = T;
@@ -28,6 +29,7 @@ export type CommandSwapCompatibility = [
     Pick<WorkbookCommandFrame, 'session' | 'incarnation' | 'coversThroughSeq'>) => boolean>>,
   Assert<Equal<WorkbookSession['whenPresented'], (seq: number) => Promise<void>>>,
   Assert<Equal<WorkbookSession['save'], () => Promise<Uint8Array>>>,
+  Assert<Equal<WorkbookSession['saveWithWarnings'], () => Promise<SaveResult>>>,
   Assert<Equal<WorkbookSession['editState'], Readonly<Partial<WorkbookEditState>>>>,
   Assert<Equal<WorkbookSession['selection'], WorkbookCommandSelection | undefined>>,
   Assert<Equal<Extract<WorkbookCommand, { kind: 'select' }>['payload'], { selection: WorkbookCommandSelection }>>,

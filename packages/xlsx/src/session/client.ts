@@ -10,6 +10,7 @@ import { createWorkerTransport, type SessionTransport } from '../../../../shared
 import { createSessionWorker } from './sessionWorker';
 import { SessionFailure, type MethodPolicy, type Promisified } from '../../../../shared/office-session/types';
 import { PngExportError } from '../../../../shared/office-session/pngExportError';
+import { warnSaveWarnings, type SaveResult } from '../../../../shared/saveWarnings';
 import { wasmAssetUrl } from '../wasm/asset';
 import { engineKind } from '../wasm/engine';
 import {
@@ -116,7 +117,10 @@ export interface WorkbookSession {
      */
     frame(viewport: Viewport, options?: WorkbookFrameOptions): Promise<WorkbookFrame>;
   };
+  /** saved bytes; each save warning is also emitted as a Node process warning on this thread. */
   save(): Promise<Uint8Array>;
+  /** saved bytes with a warning for every part the save wrote differently from what the workbook holds. */
+  saveWithWarnings(): Promise<SaveResult>;
   on<K extends keyof WorkbookSessionEvents>(
     name: K, listener: (payload: WorkbookSessionEvents[K]) => void
   ): () => void;
@@ -449,7 +453,7 @@ export async function createWorkbookSession(
   }
   const {
     version, listDefinedNames, readCells, findText, validateEdits, applyEdits, frame, sheetView, cellGeometry, selectionData,
-    cellInputs, translateFormulas, captureFormat, sheets, calculationStatus, save,
+    cellInputs, translateFormulas, captureFormat, sheets, calculationStatus, saveWithWarnings,
     renderPng, renderPngFonts, exportStructured, exportMarkdown, printDisplayList,
     collaborationStateVector, collaborationStateAsUpdate,
   } = calls;
@@ -574,7 +578,13 @@ export async function createWorkbookSession(
     call: {
       decodeFontFace: (bytes, options) => calls.decodeFontFace(bytes as ArrayBuffer, options),
       version, listDefinedNames, readCells, findText, validateEdits, applyEdits, sheetView, cellGeometry, selectionData, cellInputs,
-      translateFormulas, captureFormat, sheets, calculationStatus, save, command, exportStructured, exportMarkdown,
+      translateFormulas, captureFormat, sheets, calculationStatus, command, exportStructured, exportMarkdown,
+      save: async () => {
+        const { bytes, warnings } = await saveWithWarnings();
+        warnSaveWarnings(warnings);
+        return bytes;
+      },
+      saveWithWarnings,
       collaborationStateVector, collaborationStateAsUpdate,
       renderPng: (target, options = {}) => {
         const { signal, ...wire } = options;
@@ -589,7 +599,15 @@ export async function createWorkbookSession(
       printDisplayList: async (...args) => JSON.parse(new TextDecoder().decode(await printDisplayList(...args))),
       frame: async (viewport, options) => decodeFrame(await frame(viewport, options)),
     },
-    save: async () => new Uint8Array(await save()),
+    save: async () => {
+      const { bytes, warnings } = await saveWithWarnings();
+      warnSaveWarnings(warnings);
+      return new Uint8Array(bytes);
+    },
+    saveWithWarnings: async () => {
+      const { bytes, warnings } = await saveWithWarnings();
+      return { bytes: new Uint8Array(bytes), warnings };
+    },
     on: (name, listener) => client.on(name, listener),
     onFailure: (listener) => edits.onFailure(listener),
     get failure() { return edits.failure ?? client.failure; },

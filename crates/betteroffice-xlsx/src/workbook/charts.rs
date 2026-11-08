@@ -138,7 +138,12 @@ impl Workbook {
         let mut warnings = Vec::new();
         for sheet in &self.model.sheets {
             for chart in &sheet.charts {
-                if warned.contains(chart.part.as_str()) {
+                if warned.contains(chart.part.as_str())
+                    || chart
+                        .refs
+                        .iter()
+                        .all(|reference| xml_writable(&reference.formula))
+                {
                     continue;
                 }
                 let Some(source) = facts.chart_part_bytes(&chart.part) else {
@@ -149,8 +154,14 @@ impl Workbook {
                 {
                     warned.insert(chart.part.as_str());
                     warnings.push(crate::SaveWarning {
+                        code: crate::SaveWarningCode::UnwritableReference,
                         part: chart.part.clone(),
-                        reason: "kept as the file wrote it: the workbook holds a chart reference with a character XML cannot carry, which no chart reference can be written with".to_owned(),
+                        element: Some("chart".to_owned()),
+                        sheet: Some(sheet.name.clone()),
+                        message: format!(
+                            "{} on sheet {} was kept as the file wrote it: the workbook holds a chart reference with a character XML cannot carry",
+                            chart.part, sheet.name
+                        ),
                     });
                 }
             }
@@ -382,6 +393,14 @@ pub(super) fn chart_check_count() -> usize {
     CHART_CHECKS.get()
 }
 
+/// Whether every character is one xml 1.0 can carry in element content.
+fn xml_writable(value: &str) -> bool {
+    value.chars().all(|character| {
+        matches!(character, '\t' | '\n' | '\r')
+            || (character >= ' ' && character != '\u{fffe}' && character != '\u{ffff}')
+    })
+}
+
 #[cfg(test)]
 mod reference_tests {
     use super::Workbook;
@@ -412,8 +431,38 @@ mod reference_tests {
                 .unwrap_or_else(|error| panic!("{installed:?}: {error}"));
             assert_eq!(chart_part(&saved), chart_part(&source), "{installed:?}");
             assert_eq!(warnings.len(), 1, "{installed:?}: {warnings:?}");
+            assert_eq!(
+                warnings[0].code,
+                crate::SaveWarningCode::UnwritableReference
+            );
             assert_eq!(warnings[0].part, CHART);
-            assert!(warnings[0].reason.contains("character XML cannot carry"));
+            assert_eq!(warnings[0].element.as_deref(), Some("chart"));
+            assert_eq!(warnings[0].sheet.as_deref(), Some("A\u{1}B"));
+            assert!(warnings[0].message.contains("character XML cannot carry"));
+            assert_eq!(workbook.save_warnings(), warnings);
         }
+    }
+    /// An honest workbook never warns: not as opened, and not after an edit
+    /// refreshes the cache of a chart whose authored reference holds such a
+    /// character.
+    #[test]
+    fn an_honest_save_carries_no_warning() {
+        let source = book();
+        let mut workbook = Workbook::open(&source).unwrap();
+        assert_eq!(workbook.save_with_warnings().unwrap().1, []);
+        workbook
+            .apply_ops(
+                vec![xlsx_ops::Op::SetCell {
+                    sheet: xlsx_model::SheetId(0),
+                    at: xlsx_model::CellRef::parse_a1("B3").unwrap(),
+                    cell: xlsx_ops::CellState {
+                        value: xlsx_model::CellValue::Number { value: 5.0 },
+                        ..Default::default()
+                    },
+                }],
+                crate::CalculationOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(workbook.save_warnings(), []);
     }
 }

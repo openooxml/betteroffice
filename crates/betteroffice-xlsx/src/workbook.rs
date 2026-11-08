@@ -1422,7 +1422,14 @@ impl Workbook {
     /// file wrote it. Opened content and accepted edits never cause one.
     pub fn save_with_warnings(&self) -> Result<(Vec<u8>, Vec<crate::SaveWarning>)> {
         let bytes = self.save()?;
-        Ok((bytes, self.chart_save_warnings()))
+        Ok((bytes, self.save_warnings()))
+    }
+
+    /// The warnings [`Workbook::save_with_warnings`] would return for the
+    /// workbook as it is now, without saving. Cheap: empty unless the workbook
+    /// holds a chart reference with a character xml cannot carry.
+    pub fn save_warnings(&self) -> Vec<crate::SaveWarning> {
+        self.chart_save_warnings()
     }
 
     pub fn save(&self) -> Result<Vec<u8>> {

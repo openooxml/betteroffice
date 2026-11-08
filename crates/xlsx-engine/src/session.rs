@@ -1235,6 +1235,10 @@ impl Session {
         self.workbook.save().map_err(|error| error.to_string())
     }
 
+    pub fn save_warnings_json(&self) -> Result<String, String> {
+        serde_json::to_string(&self.workbook.save_warnings()).map_err(|error| error.to_string())
+    }
+
     pub fn document_version(&self) -> String {
         self.workbook.version().to_string()
     }
