@@ -76,7 +76,7 @@ fn an_edit_that_would_rewrite_such_a_reference_is_refused_and_the_chart_kept() {
         },
     )
     .unwrap_err();
-    assert!(error.to_string().contains("cannot be rewritten"), "{error}");
+    assert!(error.to_string().contains("xml cannot carry"), "{error}");
     assert_eq!(workbook.model(), &before);
     assert_eq!(
         part(&saved_without_warnings(&workbook), CHART),
@@ -157,4 +157,33 @@ fn a_recovery_checkpoint_of_such_a_workbook_restores_and_saves_the_chart_as_auth
         part(&saved_without_warnings(&restored), CHART),
         part(&source, CHART)
     );
+}
+
+/// Renaming a plotted sheet to a name holding a character xml cannot carry
+/// would write the chart's reference anew with it, so the rename is refused
+/// up front with the same reason as before, and nothing changes.
+#[test]
+fn a_rename_that_would_write_such_a_reference_is_refused() {
+    let source = book();
+    let mut workbook = Workbook::open(&source).unwrap();
+    apply(
+        &mut workbook,
+        Op::RenameSheet {
+            sheet: SheetId(0),
+            name: "Data".into(),
+        },
+    )
+    .unwrap();
+    let before = workbook.model().clone();
+    let error = apply(
+        &mut workbook,
+        Op::RenameSheet {
+            sheet: SheetId(0),
+            name: "Data\u{7}".into(),
+        },
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("xml cannot carry"), "{error}");
+    assert_eq!(workbook.model(), &before);
+    saved_without_warnings(&workbook);
 }

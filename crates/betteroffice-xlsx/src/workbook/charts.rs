@@ -184,19 +184,26 @@ impl Workbook {
             }
         }
         for part in changed {
-            let follows = package.facts().chart_part_bytes(part).is_some_and(|bytes| {
+            let outcome = package.facts().chart_part_bytes(part).map(|bytes| {
                 xlsx_parse::agreed_chart_bytes(
                     bytes,
                     part,
                     claims.get(part).map_or(&[][..], Vec::as_slice),
                     preview,
                 )
-                .is_ok()
             });
-            if !follows {
-                return Err(Error::InvalidOperation(format!(
-                    "{part} references cells this edit would move, and it cannot be rewritten"
-                )));
+            match outcome {
+                Some(Ok(_)) => {}
+                Some(Err(error)) if xlsx_parse::is_unwritable_chart_reference(&error) => {
+                    return Err(Error::InvalidOperation(
+                        "chart reference contains a character xml cannot carry".to_string(),
+                    ));
+                }
+                _ => {
+                    return Err(Error::InvalidOperation(format!(
+                        "{part} references cells this edit would move, and it cannot be rewritten"
+                    )));
+                }
             }
         }
         Ok(())
