@@ -471,7 +471,7 @@ export function classifyRefusal(error: unknown, method?: WorkbookReplayMethod): 
   if (method === 'applyOps' && (
     /^the anchor of .+ would leave the sheet grid$/.test(error.message) ||
     /^defined name .+ has a formula above the length limit$/.test(error.message) ||
-    /^(?:chart reference exceeds the supported length|chart reference contains a character xml cannot carry)$/.test(error.message)
+    /^(?:chart reference exceeds the supported length|chart reference contains a character xml cannot carry|sheet name contains a character xml cannot carry, and the workbook references the sheet)$/.test(error.message)
   )) return new WorkbookCommandRefusal('invalid-step');
   if ((method === 'applyOps' || method === 'moveChart') &&
     /^(?:anchor offset is out of range|anchor extent is not positive|anchor corners are inverted or coincident|anchor cell is outside the worksheet grid|anchor extends beyond the worksheet grid)$/.test(error.message)) {

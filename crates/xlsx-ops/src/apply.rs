@@ -28,12 +28,28 @@ pub struct InvertedOp(pub Vec<Op>);
 pub enum OpError {
     SheetNotFound(SheetId),
     SheetIndexOutOfRange(usize),
-    FormulaNotRewritable { sheet: SheetId, cell: CellRef },
-    DefinedNameNotRewritable { name: String },
-    ChartRefNotRewritable { part: String },
-    ChartAnchorNotMovable { part: String },
-    ChartNotFound { frame: String },
-    ChartFrameShifted { frame: String },
+    FormulaNotRewritable {
+        sheet: SheetId,
+        cell: CellRef,
+    },
+    DefinedNameNotRewritable {
+        name: String,
+    },
+    /// A rename would write a sheet name holding a character xml 1.0 cannot
+    /// carry into formula text, which has no escape for one.
+    SheetNameNotWritable,
+    ChartRefNotRewritable {
+        part: String,
+    },
+    ChartAnchorNotMovable {
+        part: String,
+    },
+    ChartNotFound {
+        frame: String,
+    },
+    ChartFrameShifted {
+        frame: String,
+    },
     NumFmtTableFull,
     InvalidStyle(String),
     InvalidConditionalFormat(String),
@@ -55,6 +71,10 @@ impl fmt::Display for OpError {
                 "formula at sheet {}, {} cannot be safely rewritten",
                 sheet.0,
                 cell.to_a1()
+            ),
+            OpError::SheetNameNotWritable => write!(
+                f,
+                "sheet name contains a character xml cannot carry, and the workbook references the sheet"
             ),
             OpError::DefinedNameNotRewritable { name } => {
                 write!(f, "defined name {name} cannot be safely rewritten")
@@ -682,7 +702,7 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
                 .clone();
             let renamed_names = rename_defined_names(wb, &old, name)?;
             let formulas = rename_sheet_references(wb, &old, name)?;
-            let hyperlinks = rename_hyperlink_locations(wb, &old, name);
+            let hyperlinks = rename_hyperlink_locations(wb, &old, name)?;
             let defined_names = renamed_names.map(|names| replace_defined_names(wb, names));
             let charts = rename_chart_refs(wb, &old, name);
             sheet_mut(wb, *sheet)?.name = name.clone();
@@ -1789,7 +1809,11 @@ fn remap_hyperlinks(sheet: &mut Sheet, op: &Op) {
         .collect();
 }
 
-fn rename_hyperlink_locations(wb: &mut Workbook, old_name: &str, new_name: &str) -> Vec<Op> {
+fn rename_hyperlink_locations(
+    wb: &mut Workbook,
+    old_name: &str,
+    new_name: &str,
+) -> Result<Vec<Op>, OpError> {
     let mut restores = Vec::new();
     for (index, sheet) in wb.sheets.iter_mut().enumerate() {
         let mut changed = false;
@@ -1798,7 +1822,7 @@ fn rename_hyperlink_locations(wb: &mut Workbook, old_name: &str, new_name: &str)
             let Some(location) = &hyperlink.location else {
                 continue;
             };
-            let rewritten = rename_hyperlink_location(location, old_name, new_name);
+            let rewritten = rename_hyperlink_location(location, old_name, new_name)?;
             if rewritten != *location {
                 hyperlink.location = Some(rewritten);
                 changed = true;
@@ -1812,7 +1836,7 @@ fn rename_hyperlink_locations(wb: &mut Workbook, old_name: &str, new_name: &str)
             });
         }
     }
-    restores
+    Ok(restores)
 }
 
 fn remove_sheet(wb: &mut Workbook, index: usize) -> Result<InvertedOp, OpError> {

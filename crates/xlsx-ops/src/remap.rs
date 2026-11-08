@@ -1931,7 +1931,11 @@ pub(crate) fn rename_sheet_references(
             let Some(source) = &stored.formula else {
                 continue;
             };
-            let rewritten = rename_formula_sheet(source, old_name, new_name);
+            let rewritten = writable_rename(
+                source,
+                new_name,
+                rename_formula_sheet(source, old_name, new_name),
+            )?;
             if rewritten != *source {
                 if rewritten.len() > MAX_FORMULA_BYTES {
                     return Err(OpError::FormulaNotRewritable { sheet: owner, cell });
@@ -1968,11 +1972,32 @@ fn split_location_reference(source: &str) -> Option<(Expr, &str)> {
 /// rename the sheet inside an internal hyperlink location. locations are
 /// commonly written `#Sheet!A1`; the leading `#` is not part of the reference
 /// and must not reach the formula rewriter, but its presence is preserved.
-pub(crate) fn rename_hyperlink_location(location: &str, old_name: &str, new_name: &str) -> String {
-    match location.strip_prefix('#') {
+pub(crate) fn rename_hyperlink_location(
+    location: &str,
+    old_name: &str,
+    new_name: &str,
+) -> Result<String, OpError> {
+    let renamed = match location.strip_prefix('#') {
         Some(reference) => format!("#{}", rename_formula_sheet(reference, old_name, new_name)),
         None => rename_formula_sheet(location, old_name, new_name),
+    };
+    writable_rename(location, new_name, renamed)
+}
+
+/// `renamed`, the text `source` takes after a sheet rename, refused when the
+/// rename wrote `new_name` into it and the name holds a character xml 1.0
+/// cannot carry: formula text and hyperlink locations have no escape for one,
+/// so it could only be written as invalid xml. Text that does not reference
+/// the sheet is unchanged and never refused.
+fn writable_rename(source: &str, new_name: &str, renamed: String) -> Result<String, OpError> {
+    if renamed != source
+        && !new_name.chars().all(|ch| {
+            matches!(ch, '\t' | '\n' | '\r') || (ch >= ' ' && ch != '\u{fffe}' && ch != '\u{ffff}')
+        })
+    {
+        return Err(OpError::SheetNameNotWritable);
     }
+    Ok(renamed)
 }
 
 pub(crate) fn rename_formula_sheet(source: &str, old_name: &str, new_name: &str) -> String {
@@ -2063,7 +2088,7 @@ pub(crate) fn rename_defined_names(
             continue;
         }
         let mut defined = defined.clone();
-        defined.formula = renamed.formula;
+        defined.formula = writable_rename(&defined.formula, new_name, renamed.formula)?;
         rewritten.push(defined);
     }
     if rewritten == *previous {
@@ -3941,15 +3966,15 @@ mod tests {
     #[test]
     fn rename_hyperlink_location_preserves_the_leading_hash() {
         assert_eq!(
-            rename_hyperlink_location("#Target!A1", "Target", "Renamed"),
+            rename_hyperlink_location("#Target!A1", "Target", "Renamed").unwrap(),
             "#Renamed!A1"
         );
         assert_eq!(
-            rename_hyperlink_location("Target!A1", "Target", "Renamed"),
+            rename_hyperlink_location("Target!A1", "Target", "Renamed").unwrap(),
             "Renamed!A1"
         );
         assert_eq!(
-            rename_hyperlink_location("#Target!A1", "Target", "New Target"),
+            rename_hyperlink_location("#Target!A1", "Target", "New Target").unwrap(),
             "#'New Target'!A1"
         );
     }
@@ -3957,27 +3982,45 @@ mod tests {
     #[test]
     fn rename_hyperlink_location_handles_quoted_and_bare_targets() {
         assert_eq!(
-            rename_hyperlink_location("#'My Sheet'!A1", "My Sheet", "Renamed"),
+            rename_hyperlink_location("#'My Sheet'!A1", "My Sheet", "Renamed").unwrap(),
             "#Renamed!A1"
         );
         assert_eq!(
-            rename_hyperlink_location("'My Sheet'!A1:B2", "My Sheet", "Renamed"),
+            rename_hyperlink_location("'My Sheet'!A1:B2", "My Sheet", "Renamed").unwrap(),
             "Renamed!A1:B2"
         );
         assert_eq!(
-            rename_hyperlink_location("#'It''s Data'!A1", "It's Data", "Renamed"),
+            rename_hyperlink_location("#'It''s Data'!A1", "It's Data", "Renamed").unwrap(),
             "#Renamed!A1"
         );
         for location in ["#MyRange", "MyRange", "#Target", "#A1"] {
             assert_eq!(
-                rename_hyperlink_location(location, "Target", "Renamed"),
+                rename_hyperlink_location(location, "Target", "Renamed").unwrap(),
                 location
             );
         }
         assert_eq!(
-            rename_hyperlink_location("#Target!A1#2", "Target", "Renamed"),
+            rename_hyperlink_location("#Target!A1#2", "Target", "Renamed").unwrap(),
             "#Renamed!A1#2"
         );
+    }
+
+    /// A rename refuses to write a sheet name xml 1.0 cannot carry into text
+    /// that references the sheet; text that does not reference it is left
+    /// alone and never refused.
+    #[test]
+    fn a_rename_refuses_to_write_a_name_xml_cannot_carry_into_a_reference() {
+        for new_name in ["Data\u{1}", "Data\u{0}", "Data\u{fffe}"] {
+            assert_eq!(
+                rename_hyperlink_location("#Target!A1", "Target", new_name),
+                Err(OpError::SheetNameNotWritable)
+            );
+            assert_eq!(
+                rename_hyperlink_location("#Other!A1", "Target", new_name),
+                Ok("#Other!A1".to_owned())
+            );
+        }
+        assert!(rename_hyperlink_location("#Target!A1", "Target", "Tab\tName").is_ok());
     }
 
     #[test]
