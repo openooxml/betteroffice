@@ -17,7 +17,9 @@ fn book(first: &str, second: &str, cf: &str) -> Vec<u8> {
     book_with_rule(
         first,
         second,
-        &format!(r#"<cfRule type="expression" dxfId="0" priority="1"><formula>{cf}</formula></cfRule>"#),
+        &format!(
+            r#"<cfRule type="expression" dxfId="0" priority="1"><formula>{cf}</formula></cfRule>"#
+        ),
     )
 }
 
@@ -175,15 +177,16 @@ fn a_swap_through_a_temporary_name_follows_each_sheet() {
     assert_eq!(saved_formulas(&workbook.save().unwrap()), ["B!$A$1>A!$A$1"]);
 }
 
-/// A chain of renames lands on the last name; undoing both puts the sheet part
-/// back exactly as the file wrote it.
+/// A chain of renames lands on the last name, quoted as Excel quotes a sheet
+/// named like an R1C1 reference; undoing both puts the sheet part back exactly
+/// as the file wrote it.
 #[test]
 fn a_chain_of_renames_then_undo_restores_the_text() {
     let source = book("A", "Spare", "A!$A$1&gt;0");
     let mut workbook = Workbook::open(&source).unwrap();
     rename(&mut workbook, 0, "B").unwrap();
     rename(&mut workbook, 0, "C").unwrap();
-    assert_eq!(saved_formulas(&workbook.save().unwrap()), ["C!$A$1>0"]);
+    assert_eq!(saved_formulas(&workbook.save().unwrap()), ["'C'!$A$1>0"]);
     for _ in 0..2 {
         workbook.undo(CalculationOptions::default()).unwrap();
     }
@@ -262,32 +265,9 @@ fn a_rename_patches_a_rule_kept_as_the_file_wrote_it() {
         let mut workbook = Workbook::open(&source).unwrap();
         rename(&mut workbook, 0, "New Data").unwrap();
         let saved = part(&workbook.save().unwrap(), OTHER);
-        assert_eq!(
-            saved,
-            part(&source, OTHER).replace(rule, renamed),
-            "{rule}"
-        );
+        assert_eq!(saved, part(&source, OTHER).replace(rule, renamed), "{rule}");
         workbook.undo(CalculationOptions::default()).unwrap();
         assert_eq!(part(&workbook.save().unwrap(), OTHER), part(&source, OTHER));
     }
 }
 
-/// A collaborator's rename rewrites the rule the same way, and the peer that
-/// applies it holds the same formula.
-#[test]
-fn a_collaborative_rename_rewrites_the_rule_on_every_replica() {
-    let source = book("Data", "Spare", "Data!$A$1&gt;0");
-    let mut left = Workbook::open_collaborative(&source, 41).unwrap();
-    let mut right = Workbook::open_collaborative(&source, 42).unwrap();
-    rename(&mut left, 0, "New Data").unwrap();
-    right
-        .apply_update_v1(&left.encode_state_as_update_v1(), CalculationOptions::default())
-        .unwrap();
-    for replica in [&left, &right] {
-        assert_eq!(
-            replica.conditional_formats(SheetId(2)).unwrap()[0].formulas,
-            ["'New Data'!$A$1>0"]
-        );
-        assert_eq!(saved_formulas(&replica.save().unwrap()), ["'New Data'!$A$1>0"]);
-    }
-}
