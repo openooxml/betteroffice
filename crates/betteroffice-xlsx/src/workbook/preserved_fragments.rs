@@ -40,7 +40,8 @@ impl Workbook {
             return Ok(());
         }
         let package = package.materialize()?;
-        let Some(failure) = xlsx_parse::preserved_fragment_failures(preview, package, origins)
+        let Some(failure) = package
+            .fragments_not_following_renames(preview, origins)
             .into_iter()
             .next()
         else {

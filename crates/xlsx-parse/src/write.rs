@@ -1383,7 +1383,7 @@ pub struct PreservedFragmentFailure {
 /// Every preserved formula fragment of `wb`'s kept source sheets that cannot
 /// follow the renames since `package` was read. Empty when every one can, or
 /// nothing was renamed.
-pub fn preserved_fragment_failures(
+pub(crate) fn preserved_fragment_failures(
     wb: &Workbook,
     package: &PreservedPackage,
     origins: &[Option<usize>],

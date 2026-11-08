@@ -246,6 +246,19 @@ impl PreservedPackage {
             .map(UnpatchableReference::part)
     }
 
+    /// The formulas this package keeps as the file wrote them (data
+    /// validations and extension formulas) that cannot follow the sheet
+    /// renames `wb` holds since the package was read, sheets mapped by
+    /// `origins`.
+    #[doc(hidden)]
+    pub fn fragments_not_following_renames(
+        &self,
+        wb: &Workbook,
+        origins: &[Option<usize>],
+    ) -> Vec<crate::write::PreservedFragmentFailure> {
+        crate::write::preserved_fragment_failures(wb, self, origins)
+    }
+
     /// Returns a preserved part that renaming, dropping or reordering `sheet`
     /// would strand.
     #[doc(hidden)]

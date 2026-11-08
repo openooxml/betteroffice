@@ -71,10 +71,7 @@ pub use write::{
     validate_defined_name_edits,
 };
 #[doc(hidden)]
-pub use write::{
-    FragmentFailure, FragmentFailureReason, FragmentKind, PreservedFragmentFailure,
-    preserved_fragment_failures,
-};
+pub use write::{FragmentFailure, FragmentFailureReason, FragmentKind, PreservedFragmentFailure};
 
 use xlsx_model::{SheetId, Workbook};
 
