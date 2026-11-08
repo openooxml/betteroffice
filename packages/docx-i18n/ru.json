@@ -799,6 +799,7 @@
     "pageLabel": "Страница {number}",
     "headerLabel": "Верхний колонтитул страницы",
     "footerLabel": "Нижний колонтитул страницы",
+    "chartNoData": "Нет данных",
     "selected": "Выделено",
     "selectionCleared": "Выделение снято",
     "commentedText": "Текст с примечанием",

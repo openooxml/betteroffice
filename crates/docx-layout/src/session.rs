@@ -229,7 +229,7 @@ const SHIFT_INLINE_WIDGET: u8 = 1 << 4;
 /// Shift only the masked fields a primitive has (frame-delta run flag).
 const SHIFT_PRESENT_ONLY: u8 = 1 << 7;
 
-fn primitive_attrs_mut(
+pub(crate) fn primitive_attrs_mut(
     primitive: &mut crate::display_list::Primitive,
 ) -> &mut crate::display_list::DocAttrs {
     use crate::display_list::Primitive;

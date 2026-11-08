@@ -799,6 +799,7 @@
     "pageLabel": "पेज {number}",
     "headerLabel": "पेज हेडर",
     "footerLabel": "पेज फ़ुटर",
+    "chartNoData": "कोई डेटा नहीं",
     "selected": "चयनित",
     "selectionCleared": "चयन साफ़ किया गया",
     "commentedText": "टिप्पणी किया गया टेक्स्ट",

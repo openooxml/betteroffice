@@ -799,6 +799,7 @@
     "pageLabel": "第 {number} 页",
     "headerLabel": "页眉",
     "footerLabel": "页脚",
+    "chartNoData": "无数据",
     "selected": "已选",
     "selectionCleared": "已清除选择",
     "commentedText": "带批注的文本",

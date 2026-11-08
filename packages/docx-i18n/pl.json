@@ -799,6 +799,7 @@
     "pageLabel": "Strona {number}",
     "headerLabel": "Nagłówek strony",
     "footerLabel": "Stopka strony",
+    "chartNoData": "Brak danych",
     "selected": "Zaznaczono",
     "selectionCleared": "Wyczyszczono zaznaczenie",
     "commentedText": "Tekst z komentarzem",

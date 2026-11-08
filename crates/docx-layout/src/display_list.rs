@@ -85,7 +85,7 @@ use ooxml_drawingml::chart::{
     PlotAxis, PlotAxisKind, PlotAxisRange, PlotAxisTitles, PlotChart, PlotChartText,
     PlotDataLabels, PlotGroup, PlotLegend, PlotLine, PlotMarker, PlotMarkerSymbol, PlotOp,
     PlotPoint, PlotRect, PlotSeries, PlotSink, PlotTextAlign, PlotTextStyle, blank_numbers,
-    chart_aria_label, fallback_label_width, plot_chart_into,
+    chart_aria_label, chart_data, chart_plots_no_points, fallback_label_width, plot_chart_into,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -403,7 +403,7 @@ pub struct DocAttrs {
     pub inline_sdt_widget: Option<Box<InlineSdtWidgetAttrs>>,
     /// accessibility summary for primitives that compose one chart block.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chart: Option<ChartA11yAttrs>,
+    pub chart: Option<Box<ChartA11yAttrs>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logical_order: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -637,6 +637,10 @@ pub struct ChartA11yAttrs {
     /// The placed chart box every primitive of the chart paints inside.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frame: Option<Box<ContentFrame>>,
+    /// The plotted values as text, with no categories or series when the
+    /// chart caches no points; carried by the chart's first primitive only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<Box<ooxml_drawingml::chart::ChartData>>,
 }
 
 /// The grid position of the cell a primitive paints inside.
@@ -10286,15 +10290,16 @@ fn emit_chart_fragment(prims: &mut Vec<Primitive>, frag: &ChartFragmentIn, block
     } else {
         block.height
     };
-    attrs.chart = Some(ChartA11yAttrs {
+    attrs.chart = Some(Box::new(ChartA11yAttrs {
         label: chart_aria_label(&chart),
+        data: None,
         frame: Some(Box::new(ContentFrame {
             x: Some(px(frag.x)),
             y: Some(px(frag.y)),
             w: Some(px(width)),
             h: Some(px(height)),
         })),
-    });
+    }));
     attrs.aria_label = block.chart.title.clone();
     attrs.aria_description = block.chart.description.clone();
     attrs.decorative = block.chart.decorative.filter(|decorative| *decorative);
@@ -10312,6 +10317,19 @@ fn emit_chart_fragment(prims: &mut Vec<Primitive>, frag: &ChartFragmentIn, block
             attrs: &attrs,
         },
     );
+    if let Some(data) = chart_data(&chart)
+        .or_else(|| chart_plots_no_points(&chart).then(ooxml_drawingml::chart::ChartData::default))
+        && let Some(first) = prims[stamp_from..]
+            .iter_mut()
+            .filter_map(|primitive| {
+                crate::session::primitive_attrs_mut(primitive)
+                    .chart
+                    .as_mut()
+            })
+            .next()
+    {
+        first.data = Some(Box::new(data));
+    }
     stamp_sdt_range(&mut prims[stamp_from..], &block.sdt_groups, false);
 }
 
@@ -18253,15 +18271,16 @@ mod tests {
     #[test]
     fn rotated_cell_content_turns_the_chart_frame_with_its_primitives() {
         let attrs = DocAttrs {
-            chart: Some(ChartA11yAttrs {
+            chart: Some(Box::new(ChartA11yAttrs {
                 label: "Chart".to_owned(),
+                data: None,
                 frame: Some(Box::new(ContentFrame {
                     x: Some(px(10.0)),
                     y: Some(px(20.0)),
                     w: Some(px(40.0)),
                     h: Some(px(30.0)),
                 })),
-            }),
+            })),
             ..DocAttrs::default()
         };
         let mut prims = vec![

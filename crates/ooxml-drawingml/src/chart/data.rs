@@ -100,6 +100,15 @@ pub fn chart_data(chart: &PlotChart<'_>) -> Option<ChartData> {
     })
 }
 
+/// Whether `chart` caches no category, value or x value for any plotted
+/// series, so it has nothing a data table could show.
+pub fn chart_plots_no_points(chart: &PlotChart<'_>) -> bool {
+    plotted_series(chart).iter().all(|plotted| {
+        let series = plotted.series();
+        series.categories.is_empty() && series.values.is_empty() && series.x_values.is_empty()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

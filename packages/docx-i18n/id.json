@@ -799,6 +799,7 @@
     "pageLabel": "Halaman {number}",
     "headerLabel": "Header halaman",
     "footerLabel": "Footer halaman",
+    "chartNoData": "Tidak ada data",
     "selected": "Dipilih",
     "selectionCleared": "Pilihan dihapus",
     "commentedText": "Teks yang dikomentari",

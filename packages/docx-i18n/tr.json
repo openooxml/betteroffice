@@ -799,6 +799,7 @@
     "pageLabel": "Sayfa {number}",
     "headerLabel": "Sayfa üst bilgisi",
     "footerLabel": "Sayfa alt bilgisi",
+    "chartNoData": "Veri yok",
     "selected": "Seçildi",
     "selectionCleared": "Seçim temizlendi",
     "commentedText": "Yorum yapılan metin",

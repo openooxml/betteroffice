@@ -799,6 +799,7 @@
     "pageLabel": "Seite {number}",
     "headerLabel": "Kopfzeile",
     "footerLabel": "Fußzeile",
+    "chartNoData": "Keine Daten",
     "selected": "Ausgewählt",
     "selectionCleared": "Auswahl aufgehoben",
     "commentedText": "Kommentierter Text",

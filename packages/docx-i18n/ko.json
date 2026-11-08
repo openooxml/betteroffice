@@ -799,6 +799,7 @@
     "pageLabel": "{number}페이지",
     "headerLabel": "페이지 머리글",
     "footerLabel": "페이지 바닥글",
+    "chartNoData": "데이터 없음",
     "selected": "선택됨",
     "selectionCleared": "선택이 취소되었습니다",
     "commentedText": "메모가 있는 텍스트",

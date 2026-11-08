@@ -799,6 +799,7 @@
     "pageLabel": "Página {number}",
     "headerLabel": "Encabezado de página",
     "footerLabel": "Pie de página",
+    "chartNoData": "Sin datos",
     "selected": "Seleccionado",
     "selectionCleared": "Selección borrada",
     "commentedText": "Texto comentado",

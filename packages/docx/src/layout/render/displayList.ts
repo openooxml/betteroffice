@@ -282,6 +282,15 @@ export interface ChartA11yAttrs {
   label: string;
   /** The placed chart box every primitive of the chart paints inside. */
   frame?: { x?: number; y?: number; w?: number; h?: number };
+  /** The plotted values as text, on the chart's first primitive only: one
+   *  row per category, one column per series; empty when the chart caches
+   *  no points. */
+  data?: ChartData;
+}
+
+export interface ChartData {
+  categories: string[];
+  series: { name?: string; values: (string | null)[] }[];
 }
 
 // attributes shared by primitives that map back to document content; replaces
