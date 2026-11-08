@@ -52,7 +52,8 @@ pub fn decode_reduced(bytes: &[u8], max_pixels: u64) -> Option<(Vec<u8>, u32, u3
 /// source past [`MAX_SOURCE_FACTOR`] times `max_pixels`.
 pub fn reduced_size(width: u32, height: u32, max_pixels: u64) -> Option<(u32, u32)> {
     let longer = width.max(height);
-    if longer == 0
+    if width == 0
+        || height == 0
         || longer > MAX_SOURCE_SIDE
         || max_pixels == 0
         || u64::from(width) * u64::from(height) > max_pixels.saturating_mul(MAX_SOURCE_FACTOR)
@@ -81,10 +82,11 @@ pub fn reduced_size(width: u32, height: u32, max_pixels: u64) -> Option<(u32, u3
 /// What [`decode_reduced`] costs for a `width` x `height` source: the source
 /// pixels it reads, charged as decode work the way a whole decode is, and the
 /// bytes it may hold. Those are the reduced raster and one rotated copy of it,
-/// an IDCT intermediate of at most four times its pixels (one scale step above
-/// it) and never past `max_pixels`, and what the source format holds at its
-/// own size: a progressive JPEG's coefficients, collected before any IDCT, or
-/// a PNG's raw, previous and expanded rows.
+/// the box filter's row of sums and counts, an IDCT intermediate of at most
+/// four times its pixels (one scale step above it) and never past
+/// `max_pixels`, and what the source format holds at its own size: a
+/// progressive JPEG's coefficients, collected before any IDCT, or a PNG's
+/// raw, previous and expanded rows.
 pub fn reduced_cost(bytes: &[u8], width: u32, height: u32, max_pixels: u64) -> Option<(u64, u64)> {
     let (target_width, target_height) = reduced_size(width, height, max_pixels)?;
     let pixels = u64::from(target_width) * u64::from(target_height);
@@ -103,6 +105,7 @@ pub fn reduced_cost(bytes: &[u8], width: u32, height: u32, max_pixels: u64) -> O
         u64::from(width) * u64::from(height),
         pixels
             .saturating_mul(8)
+            .saturating_add(u64::from(target_width) * 36)
             .saturating_add(intermediate.saturating_mul(3))
             .saturating_add(source),
     ))
