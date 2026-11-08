@@ -306,6 +306,24 @@ const LATIN_FACES: &[(&[&str], RequestedLineMetrics)] = &[
     (&["wingdings 3"], latin(2048, 1900, -432, 0)),
 ];
 
+/// Bold faces whose span differs from their family's regular face, read off
+/// the bold font programs Word embeds.
+const BOLD_FACES: &[(&[&str], RequestedLineMetrics)] = &[
+    (&["simplified arabic"], latin(2048, 2416, -989, 0)),
+    (&["traditional arabic"], latin(2048, 2095, -1044, 0)),
+];
+
+/// [`requested_line_metrics`] for a face of the given weight: a bold face
+/// listed in [`BOLD_FACES`] measures with its own span.
+pub fn requested_line_metrics_styled(family: &str, bold: bool) -> Option<RequestedLineMetrics> {
+    let key = family.trim().to_lowercase();
+    let key = requested_family_name(&key);
+    bold.then(|| BOLD_FACES.iter().find(|(names, _)| names.contains(&key)))
+        .flatten()
+        .map(|&(_, metrics)| metrics)
+        .or_else(|| requested_line_metrics(key))
+}
+
 /// Vertical metrics Word measures `family` with, or `None` for a family this
 /// table does not cover. Matching is case-insensitive and trimmed, the same
 /// normalization hosts apply to a `w:rFonts` name.
