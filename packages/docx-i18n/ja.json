@@ -799,6 +799,7 @@
     "pageLabel": "{number} ページ",
     "headerLabel": "ページ ヘッダー",
     "footerLabel": "ページ フッター",
+    "chartNoData": "データなし",
     "selected": "選択中",
     "selectionCleared": "選択が解除されました",
     "commentedText": "コメント付きテキスト",

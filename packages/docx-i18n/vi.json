@@ -799,6 +799,7 @@
     "pageLabel": "Trang {number}",
     "headerLabel": "Đầu trang",
     "footerLabel": "Chân trang",
+    "chartNoData": "Không có dữ liệu",
     "selected": "Đã chọn",
     "selectionCleared": "Đã bỏ chọn",
     "commentedText": "Văn bản có nhận xét",

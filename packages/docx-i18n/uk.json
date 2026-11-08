@@ -799,6 +799,7 @@
     "pageLabel": "Сторінка {number}",
     "headerLabel": "Верхній колонтитул сторінки",
     "footerLabel": "Нижній колонтитул сторінки",
+    "chartNoData": "Немає даних",
     "selected": "Вибрано",
     "selectionCleared": "Виділення знято",
     "commentedText": "Коментований текст",

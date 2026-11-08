@@ -5,7 +5,7 @@ const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 
 import { createRef, useRef } from 'react';
-import type { TFunction } from '@betteroffice/docx-i18n';
+import { de, type TFunction, type Translations } from '@betteroffice/docx-i18n';
 import { createRenderedDomContext } from '@betteroffice/docx/plugin-api/RenderedDomContext';
 import {
   applyFrameDeltaOwned,
@@ -17,6 +17,7 @@ import {
   type DisplayPrimitive,
   type RetainedFrame,
 } from '@betteroffice/docx/layout/render';
+import { LocaleProvider } from '../../i18n';
 import { CanvasInteractiveOverlay } from './CanvasInteractiveOverlay';
 import { CanvasPageMirror } from './CanvasPageMirror';
 import { CanvasPagesView } from './CanvasPagesView';
@@ -225,6 +226,26 @@ test('an edit on a page in the window rebuilds only the edited paragraph of its 
   expect(created.length).toBeLessThanOrEqual(6);
   expect(container.querySelector('[data-block-id="b15"]')!.textContent).toContain('wordsx');
   expect(container.querySelector('[data-block-id="b16"] > span')!.getAttribute('data-doc-start')).toBe('2601');
+});
+
+test('a chart that caches no points is described as having no data in the editor language', async () => {
+  const chart = { label: 'Sales, pie chart, 1 series, 0 categories', frame: { x: 0, y: 0, w: 200, h: 100 } };
+  const page: DisplayPage = {
+    pageIndex: 0, width: 300, height: 200,
+    primitives: [
+      { kind: 'rect', x: 0, y: 0, w: 200, h: 100, fill: '#fff', blockId: 7, chart: { ...chart, data: { categories: [], series: [] } } },
+      { kind: 'text', x: 10, y: 20, baselineY: 25, width: 30, text: 'Sales', font: '10px sans-serif', color: '#000', blockId: 7, chart },
+    ] as DisplayPrimitive[],
+  };
+  const described = async (i18n?: Translations) => {
+    const { container, unmount } = render(<LocaleProvider i18n={i18n}><CanvasPageMirror page={page} /></LocaleProvider>);
+    await act(async () => {});
+    const value = container.querySelector('.layout-run-chart[role="img"]')?.getAttribute('aria-description');
+    unmount();
+    return value;
+  };
+  expect(await described(de)).toBe(de.a11y!.chartNoData!);
+  expect(await described()).toBe('No data');
 });
 
 test('an update that reorders blocks keeps focus on the link it kept', async () => {

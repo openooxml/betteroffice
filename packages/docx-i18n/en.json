@@ -799,6 +799,7 @@
     "pageLabel": "Page {number}",
     "headerLabel": "Page header",
     "footerLabel": "Page footer",
+    "chartNoData": "No data",
     "selected": "Selected",
     "selectionCleared": "Selection cleared",
     "commentedText": "Commented text",

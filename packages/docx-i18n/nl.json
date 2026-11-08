@@ -799,6 +799,7 @@
     "pageLabel": "Pagina {number}",
     "headerLabel": "Paginakoptekst",
     "footerLabel": "Paginavoettekst",
+    "chartNoData": "Geen gegevens",
     "selected": "Geselecteerd",
     "selectionCleared": "Selectie gewist",
     "commentedText": "Tekst met opmerking",

@@ -31,6 +31,7 @@ const mirrorLabels = (page: DisplayPage, t: TFunction) => ({
     page: t('a11y.pageLabel', { number: page.pageIndex + 1 }),
     header: t('a11y.headerLabel'),
     footer: t('a11y.footerLabel'),
+    chartNoData: t('a11y.chartNoData'),
   },
 });
 const makeMirror = (page: DisplayPage, t: TFunction): HTMLElement =>

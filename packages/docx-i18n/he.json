@@ -799,6 +799,7 @@
     "pageLabel": "עמוד {number}",
     "headerLabel": "כותרת עליונה של העמוד",
     "footerLabel": "כותרת תחתונה של העמוד",
+    "chartNoData": "אין נתונים",
     "selected": "נבחר",
     "selectionCleared": "הבחירה נוקתה",
     "commentedText": "טקסט עם הערה",

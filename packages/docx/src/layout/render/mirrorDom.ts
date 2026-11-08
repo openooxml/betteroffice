@@ -1,6 +1,7 @@
 /** Builds an accessible display-list mirror with DOM APIs only. */
 
 import type {
+  ChartData,
   DocAttrs,
   DisplayPage,
   DisplayPrimitive,
@@ -32,6 +33,9 @@ export const MIRROR_CLASS_NAMES = {
   image: 'layout-run layout-run-image',
   shape: 'layout-run layout-run-shape',
   chart: 'layout-run layout-run-chart',
+  chartTable: 'layout-chart-table',
+  chartRow: 'layout-chart-row',
+  chartCell: 'layout-chart-cell',
   decoration: 'layout-decoration',
   line: 'layout-mirror-line',
   pageBorder: 'layout-page-border',
@@ -72,6 +76,9 @@ export interface MirrorLabels {
    * hardcoded English), so no locale bypasses i18n.
    */
   noteBacklink?: string;
+  /** description of a chart that caches no points, e.g. "No data"; without
+   *  it such a chart gets no description */
+  chartNoData?: string;
 }
 
 /** per-page build state threaded through the mirror walk */
@@ -230,6 +237,9 @@ const MIRROR_STRUCTURE = [
   MIRROR_CLASS_NAMES.table,
   MIRROR_CLASS_NAMES.tableRow,
   MIRROR_CLASS_NAMES.tableCell,
+  MIRROR_CLASS_NAMES.chartTable,
+  MIRROR_CLASS_NAMES.chartRow,
+  MIRROR_CLASS_NAMES.chartCell,
   MIRROR_CLASS_NAMES.notes,
   MIRROR_CLASS_NAMES.blockSdt,
 ];
@@ -581,6 +591,9 @@ function renderMirrorPage(
           if (occludedWidgets.has(p)) parts.push('occluded');
         }
         parts.push(noteRefIds.join(' '));
+        if (prims.some((p) => 'chart' in p && p.chart?.data && isEmptyChartData(p.chart.data))) {
+          parts.push(labels?.chartNoData ?? '');
+        }
         sig = parts.join('\n');
       } catch {
         sig = `\u0000${++unmatchedSignatures}`;
@@ -1037,6 +1050,55 @@ function populateBlock(
   stampDocRange(el, prims);
 }
 
+const MAX_CHART_CELLS = 10_000;
+const MAX_CHART_TEXT = 1024 * 1024;
+
+/** A chart's values as an ARIA table, or null when they do not fit its shape or the caps. */
+function chartTable(data: ChartData, doc: Document): HTMLElement | null {
+  const { categories, series } = data as Partial<ChartData>;
+  if (!Array.isArray(categories) || !Array.isArray(series) || !categories.length || !series.length ||
+    categories.length * series.length > MAX_CHART_CELLS) return null;
+  let left = MAX_CHART_TEXT;
+  const text = (value: unknown): value is string => typeof value === 'string' && (left -= value.length) >= 0;
+  if (!categories.every(text)) return null;
+  for (const entry of series) {
+    if (typeof entry !== 'object' || entry === null || !Array.isArray(entry.values) ||
+      entry.values.length !== categories.length) return null;
+    if (entry.name !== undefined && !text(entry.name)) return null;
+    if (!entry.values.every((value) => value === null || text(value))) return null;
+  }
+  const element = (className: string, role: string, content?: string) => {
+    const node = doc.createElement('div');
+    node.className = className;
+    node.setAttribute('role', role);
+    if (content) node.textContent = content;
+    return node;
+  };
+  const table = element(MIRROR_CLASS_NAMES.chartTable, 'table');
+  table.setAttribute('aria-rowcount', String(categories.length + 1));
+  table.setAttribute('aria-colcount', String(series.length + 1));
+  const row = (index: number) => {
+    const node = element(MIRROR_CLASS_NAMES.chartRow, 'row');
+    node.setAttribute('aria-rowindex', String(index + 1));
+    table.appendChild(node);
+    return node;
+  };
+  const cell = (parent: HTMLElement, column: number, role: string, content: string) => {
+    const node = element(MIRROR_CLASS_NAMES.chartCell, content.trim() ? role : 'cell', content);
+    node.setAttribute('aria-colindex', String(column + 1));
+    parent.appendChild(node);
+  };
+  const header = row(0);
+  cell(header, 0, 'cell', '');
+  series.forEach((entry, index) => cell(header, index + 1, 'columnheader', entry.name ?? ''));
+  categories.forEach((category, rowIndex) => {
+    const body = row(rowIndex + 1);
+    cell(body, 0, 'rowheader', category);
+    series.forEach((entry, index) => cell(body, index + 1, 'cell', entry.values[rowIndex] ?? ''));
+  });
+  return table;
+}
+
 /** Populate one paragraph-like block without re-interpreting table metadata. */
 function populateParagraphBlock(
   el: HTMLElement,
@@ -1072,7 +1134,28 @@ function populateParagraphBlock(
     if (withLineRange.toLine !== undefined) el.dataset.toLine = String(withLineRange.toLine);
   }
   applyContainerLanguageAndDirection(el, prims);
+  if (chart) {
+    for (const child of Array.from(el.children)) {
+      child.setAttribute('aria-hidden', 'true');
+      child.removeAttribute('aria-label');
+      child.removeAttribute('aria-description');
+    }
+  }
+  const table = chart?.data ? chartTable(chart.data, doc) : null;
+  if (table) {
+    el.setAttribute('role', 'figure');
+    el.appendChild(table);
+  }
   applyBlockObjectA11y(el, prims);
+  const noData = ctx.labels?.chartNoData;
+  if (noData && chart?.data && isEmptyChartData(chart.data) && el.getAttribute('role') === 'img') {
+    const description = el.getAttribute('aria-description');
+    el.setAttribute('aria-description', description ? `${description}. ${noData}` : noData);
+  }
+}
+
+function isEmptyChartData(data: ChartData): boolean {
+  return Array.isArray(data.categories) && Array.isArray(data.series) && !data.categories.length && !data.series.length;
 }
 
 const JOIN_IGNORED_ATTRIBUTES = new Set(['data-doc-start', 'data-doc-end', 'data-logical-order', 'style']);
