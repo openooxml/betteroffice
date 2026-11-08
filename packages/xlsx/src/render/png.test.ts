@@ -281,6 +281,113 @@ describe.skipIf(engineKind === 'native')('the wasm PNG engine', () => {
     } finally { stalled.mockRestore(); }
   });
 
+  const cells = (commands: Array<{ fontFamily: string; text: string; bold?: boolean }>): XlsxPngEngine => {
+    const json = JSON.stringify(list(commands.map((cell, index) => ({ ...text, y: 12 + index * 16, ...cell }))));
+    return { onSheet: (_sheet, read) => read(), doc: { pngDisplayListJson: () => json, rangePngDisplayListJson: () => json } };
+  };
+  const korean = bundled.resolveScriptFallbackFace('cjk-kr', false, false)!;
+  const KOREAN_BYTES = 7777;
+  const sameFace = (a: bundled.BundledFontFace, b: bundled.BundledFontFace) => a.family === b.family && a.weight === b.weight && a.style === b.style;
+  async function nativeChain(family: string, scripts: bundled.BundledFontScript[][]): Promise<bundled.BundledFontFace[]> {
+    const chain: bundled.BundledFontFace[] = [];
+    const push = async (face: bundled.BundledFontFace | undefined) => {
+      if (face && await bundled.bundledFaceInstalled(face) && !chain.some((known) => sameFace(known, face))) chain.push(face);
+    };
+    for (const request of scripts) {
+      const primary = bundled.resolveBundledFamilyFace(family, false, false);
+      const installed = primary && await bundled.bundledFaceInstalled(primary) ? primary : undefined;
+      await push(installed);
+      for (const script of request) await push(bundled.resolveScriptFallbackFace(script, false, false));
+      await push(bundled.resolveGlyphFallbackFace(family, false, false, 'word'));
+      const last = bundled.resolveLastResortChoice(family, false, false, 'word');
+      if (!last.onlyIfPrimaryFails || !installed) await push(last.face);
+    }
+    return chain;
+  }
+  function koreanLoads(stalled?: bundled.BundledFontFace) {
+    const original = bundled.loadBundledFontBytes;
+    const files: string[] = [];
+    const spy = spyOn(bundled, 'loadBundledFontBytes').mockImplementation((face, ...rest) => {
+      files.push(face.file);
+      if (face.file === stalled?.file) return new Promise(() => {});
+      return face.file === korean.file ? Promise.resolve(new ArrayBuffer(KOREAN_BYTES)) : original(face, ...rest);
+    });
+    return { files, restore: () => spy.mockRestore() };
+  }
+
+  test('without fonts, a sheet with Latin text only installs one face per font and loads no script face', async () => {
+    const calls = stubBrowser();
+    const loads = koreanLoads();
+    try {
+      await renderPng(cells([
+        { fontFamily: 'Calibri', text: 'Total' }, { fontFamily: 'Calibri', text: 'Überschrift – 2024', bold: true },
+        { fontFamily: 'Cambria', text: '€ 12,50 ✓' },
+      ]), box, {});
+      expect(calls.faces.length).toBe(3);
+      expect(loads.files).not.toContain(korean.file);
+      expect(calls.painted.filter((font) => font.includes('bo-xlsx-png')).every((font) => font.split('bo-xlsx-png').length === 2)).toBe(true);
+    } finally { loads.restore(); }
+  });
+
+  test('without fonts, a font with Korean text anywhere on the sheet paints all its text through the native chain', async () => {
+    const calls = stubBrowser();
+    const loads = koreanLoads();
+    try {
+      await renderPng(cells([{ fontFamily: 'Calibri', text: 'Total' }, { fontFamily: 'Calibri', text: '합계 2024' }]), box, {});
+      const chain = await nativeChain('Calibri', [[], ['cjk-kr']]);
+      expect(chain.some((face) => sameFace(face, korean))).toBe(true);
+      expect(calls.faces.length).toBe(chain.length);
+      expect(calls.bytes).toContain(KOREAN_BYTES);
+      const listed = calls.painted.filter((font) => font.includes('bo-xlsx-png'));
+      expect(listed.length).toBeGreaterThan(0);
+      for (const font of listed) {
+        const names = [...font.matchAll(/"(bo-xlsx-png-[^"]+)"/g)].map((match) => match[1]);
+        expect(names.length).toBe(chain.length);
+        expect(font.endsWith(', sans-serif')).toBe(true);
+      }
+    } finally { loads.restore(); }
+  });
+
+  test('without fonts, a family with no bundled face draws Korean text with the script face first, as natively', async () => {
+    const calls = stubBrowser();
+    const loads = koreanLoads();
+    try {
+      await renderPng(cells([{ fontFamily: 'Brand Gothic', text: '합계 2024' }]), box, {});
+      const chain = await nativeChain('Brand Gothic', [['cjk-kr']]);
+      expect(sameFace(chain[0]!, korean)).toBe(true);
+      expect(calls.bytes[0]).toBe(KOREAN_BYTES);
+      expect(calls.faces.length).toBe(chain.length);
+    } finally { loads.restore(); }
+  });
+
+  test('without fonts, a script face whose package is not installed is left out and never loaded', async () => {
+    const calls = stubBrowser();
+    const loads = koreanLoads();
+    const original = bundled.bundledFaceInstalled;
+    const installed = spyOn(bundled, 'bundledFaceInstalled')
+      .mockImplementation((face) => face.file === korean.file ? Promise.resolve(false) : original(face));
+    try {
+      await renderPng(cells([{ fontFamily: 'Calibri', text: '합계 2024' }]), box, {});
+      expect(loads.files).not.toContain(korean.file);
+      expect(calls.bytes).not.toContain(KOREAN_BYTES);
+      expect(calls.faces.length).toBe((await nativeChain('Calibri', [['cjk-kr']])).length);
+    } finally { installed.mockRestore(); loads.restore(); }
+  });
+
+  test('without fonts, an export aborted while a script face loads rejects at once', async () => {
+    stubBrowser();
+    const thai = bundled.resolveScriptFallbackFace('thai', false, false)!;
+    const loads = koreanLoads(thai);
+    try {
+      const controller = new AbortController();
+      const exported = renderPng(cells([{ fontFamily: 'Brand Gothic', text: 'สวัสดี' }]), box, { signal: controller.signal });
+      await new Promise((settled) => setTimeout(settled, 10));
+      controller.abort(new Error('stopped'));
+      await expect(exported).rejects.toThrow('stopped');
+      expect(loads.files).toContain(thai.file);
+    } finally { loads.restore(); }
+  });
+
   test('with fonts, the sheet paints only with the faces passed', async () => {
     const calls = stubBrowser();
     const { value } = engine();
