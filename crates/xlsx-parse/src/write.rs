@@ -939,7 +939,7 @@ fn patch_chart_parts(
             continue;
         };
         let rewritten = if moved {
-            crate::chart::agreed_chart_bytes(
+            match crate::chart::agreed_chart_bytes(
                 source,
                 path,
                 &claims
@@ -947,8 +947,15 @@ fn patch_chart_parts(
                     .map(|claim| (claim.chart, claim.sheet))
                     .collect::<Vec<_>>(),
                 wb,
-            )?
-            .unwrap_or_else(|| source.to_vec())
+            ) {
+                Ok(bytes) => bytes.unwrap_or_else(|| source.to_vec()),
+                Err(ParseError::UnsupportedEdit(reason))
+                    if reason == crate::chart::UNWRITABLE_REFERENCE =>
+                {
+                    source.to_vec()
+                }
+                Err(error) => return Err(error),
+            }
         } else {
             source.to_vec()
         };

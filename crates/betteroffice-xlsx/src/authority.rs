@@ -1332,11 +1332,6 @@ impl WorkbookAuthority {
         &self.base.defined_names
     }
 
-    /// Every chart the source holds, on any of its sheets, as it was opened.
-    pub(crate) fn source_charts(&self) -> impl Iterator<Item = &SheetChart> {
-        self.base.charts.iter().flatten()
-    }
-
     /// The filter the source holds for the sheet at `index`. Appended sheets
     /// follow every source sheet, so past those there is none.
     pub(crate) fn source_auto_filter(&self, index: usize) -> Option<&xlsx_model::AutoFilter> {

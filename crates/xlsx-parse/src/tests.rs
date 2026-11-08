@@ -8227,3 +8227,25 @@ fn format_codes_are_written_as_xstrings_and_decode_back() {
         }
     }
 }
+
+/// A chart reference xml 1.0 cannot carry is never written: one the part
+/// already holds is left in place, and one that would have to be written anew
+/// is refused with its own reason, which a save answers by keeping the part.
+#[test]
+fn a_chart_reference_holding_a_character_xml_cannot_carry_is_never_written() {
+    let part = br#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:barChart><c:ser><c:val><c:numRef><c:f>'A&#1;B'!$B$2:$B$4</c:f></c:numRef></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#;
+    let reference = |formula: &str| xlsx_model::ChartRef {
+        kind: xlsx_model::ChartRefKind::Values,
+        formula: formula.to_owned(),
+    };
+    assert_eq!(
+        patch_refs(part, &[reference("'A\u{1}B'!$B$2:$B$4")]).unwrap(),
+        part.to_vec()
+    );
+    for rewritten in ["'A\u{1}B'!$B$3:$B$5", "Data!$B$2\u{0}"] {
+        assert!(matches!(
+            patch_refs(part, &[reference(rewritten)]).unwrap_err(),
+            ParseError::UnsupportedEdit(reason) if reason == crate::chart::UNWRITABLE_REFERENCE
+        ));
+    }
+}

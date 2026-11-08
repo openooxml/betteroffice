@@ -1021,7 +1021,6 @@ impl Workbook {
             return unchanged(steps);
         }
         validate_model_sheets(&preview)?;
-        self.validate_chart_references(&preview)?;
         let mut inverse = Vec::new();
         for chunk in per_op.into_iter().rev() {
             inverse.extend(chunk);

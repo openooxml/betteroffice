@@ -1767,11 +1767,6 @@ impl WorkbookSnapshotBuilder {
                 &mut self.authority_keys,
                 budget,
             )?;
-            if self.authority_validated {
-                workbook
-                    .validate_chart_references(&workbook.model)
-                    .map_err(|refused| error(refused.to_string()))?;
-            }
             return Ok(SnapshotProgress::pending());
         }
         if !self.anchors_done {

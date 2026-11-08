@@ -126,34 +126,6 @@ impl Workbook {
     /// XML can carry. `inverse` is the batch's inverse, which records
     /// a `SetCharts` for every sheet whose charts it changed, so a batch that
     /// changes none costs nothing here.
-    /// A chart reference holding a character xml 1.0 cannot carry is kept
-    /// only as the source wrote it: an opened chart's reference at the same
-    /// position, which a save leaves in place. One an edit or a peer would
-    /// introduce or rewrite could not be written back, so it is refused before
-    /// anything changes, and the chart stays as authored.
-    pub(super) fn validate_chart_references(&self, model: &xlsx_model::Workbook) -> Result<()> {
-        for chart in model.sheets.iter().flat_map(|sheet| &sheet.charts) {
-            for (index, reference) in chart.refs.iter().enumerate() {
-                if super::is_writable_xml_text(&reference.formula) {
-                    continue;
-                }
-                let authored = self.authority.source_charts().any(|source| {
-                    source.part == chart.part
-                        && source
-                            .refs
-                            .get(index)
-                            .is_some_and(|opened| opened.formula == reference.formula)
-                });
-                if !authored {
-                    return Err(Error::InvalidOperation(
-                        "chart reference contains a character xml cannot carry".to_string(),
-                    ));
-                }
-            }
-        }
-        Ok(())
-    }
-
     pub(super) fn ensure_charts_follow(
         &self,
         preview: &xlsx_model::Workbook,
@@ -303,7 +275,6 @@ impl Workbook {
             return Ok(MutationResult::default());
         }
         validate_model_sheets(&preview)?;
-        self.validate_chart_references(&preview)?;
         validate_shared_drawings(&preview)?;
         let inverse = changed
             .iter()
@@ -374,59 +345,33 @@ pub(super) fn chart_check_count() -> usize {
 
 #[cfg(test)]
 mod reference_tests {
-    use xlsx_model::{
-        AnchorCell, AnchorEditAs, ChartAnchor, ChartRef, ChartRefKind, Sheet, SheetChart,
-    };
-
     use super::Workbook;
 
-    fn model(formula: &str) -> xlsx_model::Workbook {
-        let mut sheet = Sheet::new("A\u{1}B");
-        sheet.charts.push(SheetChart {
-            raw_xml: None,
-            part: "xl/charts/chart1.xml".to_owned(),
-            drawing: "xl/drawings/drawing1.xml".to_owned(),
-            anchor_index: 0,
-            anchor: ChartAnchor::TwoCell {
-                from: AnchorCell::default(),
-                to: AnchorCell {
-                    col: 4,
-                    row: 8,
-                    ..AnchorCell::default()
-                },
-                edit_as: AnchorEditAs::TwoCell,
-            },
-            refs: vec![ChartRef {
-                kind: ChartRefKind::Values,
-                formula: formula.to_owned(),
-            }],
-        });
-        let mut model = xlsx_model::Workbook::default();
-        model.sheets.push(sheet);
-        model
+    include!("../../tests/fixtures/chart_control_book.rs");
+
+    fn chart_part(bytes: &[u8]) -> Vec<u8> {
+        ooxml_opc::unzip_parts(bytes)
+            .unwrap()
+            .into_iter()
+            .find(|(path, _)| path == CHART)
+            .map(|(_, bytes)| bytes)
+            .unwrap()
     }
 
-    /// The check every edit, peer state and hydrated snapshot passes: a
-    /// reference holding a character xml cannot carry is accepted only as the
-    /// opened chart wrote it, at the same position of the same part.
+    /// Whatever door a rewritten reference xml cannot carry comes through, a
+    /// peer state, a snapshot, a checkpoint or one not yet known, the save
+    /// keeps the chart part as authored instead of failing or writing invalid
+    /// xml.
     #[test]
-    fn only_an_authored_reference_may_hold_a_character_xml_cannot_carry() {
-        let authored = "'A\u{1}B'!$B$2:$B$4";
-        let workbook = Workbook::from_model(model(authored)).unwrap();
-        workbook
-            .validate_chart_references(&model(authored))
-            .unwrap();
-        workbook
-            .validate_chart_references(&model("Data!$B$2:$B$4"))
-            .unwrap();
-        for rewritten in ["'A\u{1}B'!$B$3:$B$5", "Data!$B$2\u{1}"] {
-            let error = workbook
-                .validate_chart_references(&model(rewritten))
-                .unwrap_err();
-            assert!(error.to_string().contains("xml cannot carry"), "{error}");
+    fn a_save_keeps_the_chart_as_authored_whatever_installed_such_a_reference() {
+        let source = book();
+        for installed in ["'A\u{1}B'!$B$3:$B$5", "Data!$B$2\u{0}"] {
+            let mut workbook = Workbook::open(&source).unwrap();
+            workbook.model.sheets[0].charts[0].refs[0].formula = installed.to_owned();
+            let saved = workbook
+                .save()
+                .unwrap_or_else(|error| panic!("{installed:?}: {error}"));
+            assert_eq!(chart_part(&saved), chart_part(&source), "{installed:?}");
         }
-        let mut other_part = model(authored);
-        other_part.sheets[0].charts[0].part = "xl/charts/chart2.xml".to_owned();
-        assert!(workbook.validate_chart_references(&other_part).is_err());
     }
 }

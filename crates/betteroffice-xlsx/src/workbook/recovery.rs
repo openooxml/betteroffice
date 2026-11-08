@@ -834,7 +834,6 @@ impl Workbook {
         workbook.graph = Some(DepGraph::build(&model));
         workbook.model = model;
         workbook.authority = authority;
-        workbook.validate_chart_references(&workbook.model)?;
         if checkpoint.collaborative {
             workbook.mode = WorkbookMode::Collaborative {
                 structure: Box::new(workbook.authority.structure().map_err(authority_error)?),

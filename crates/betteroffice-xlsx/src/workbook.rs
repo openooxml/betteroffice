@@ -1131,7 +1131,6 @@ impl Workbook {
     /// the bound, so refusing their union would strand them apart for good.
     fn gate_incoming(&self, model: &WorkbookModel, dormant: &[DefinedName]) -> Result<()> {
         validate_model_sheets(model)?;
-        self.validate_chart_references(model)?;
         self.validate_incoming_names(model, dormant)?;
         self.validate_incoming_filters(model)?;
         validate_chart_source(
@@ -2300,7 +2299,6 @@ impl Workbook {
         }
         let inverse = batch.finish();
         validate_model_sheets(&preview)?;
-        self.validate_chart_references(&preview)?;
         validate_shared_drawings(&preview)?;
         self.ensure_charts_follow(&preview, &inverse)?;
         if self.is_collaborative() {
@@ -5014,14 +5012,6 @@ fn is_package_part_path(path: &str) -> bool {
         && path.chars().all(|character| {
             !character.is_control() && character != '"' && character != '<' && character != '>'
         })
-}
-
-/// Whether every character is one xml 1.0 can carry in element content.
-fn is_writable_xml_text(value: &str) -> bool {
-    value.chars().all(|character| {
-        matches!(character, '\t' | '\n' | '\r')
-            || (character >= ' ' && character != '\u{fffe}' && character != '\u{ffff}')
-    })
 }
 
 fn validate_hyperlinks(hyperlinks: &[Hyperlink]) -> Result<()> {
