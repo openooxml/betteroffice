@@ -1519,7 +1519,20 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
     await act(async () => { changed = await ref.current!.applyEdits(appendRequest(version, paragraph.paraId)); });
     if (!changed.ok) throw new Error(changed.failure.message);
     rerender({ plugins: other === 'removed' ? [a] : [a, b] });
-    await until(() => geometry()?.layout.version === changed.version && answer(a.id, 'a')?.ok === true);
+    const waitFor = async (done: () => boolean, seen: () => unknown) => {
+      try {
+        await until(done);
+      } catch (error) {
+        throw new Error(`wait failed, saw ${JSON.stringify(seen())}: ${String(error)}`);
+      }
+    };
+    const owners = () => ({ version: geometry()?.layout.version, a: answer(a.id, 'a'), b: answer(b.id, 'b') });
+    const settled = () => {
+      const owner = answer(b.id, 'b');
+      return other === 'removed' ? owner?.ok === false : owner?.ok === true && Math.abs(owner.anchor.width - 75) < 0.5;
+    };
+    // A layout at the edited version can come from before the host saw the owner change.
+    await waitFor(() => geometry()?.layout.version === changed.version && answer(a.id, 'a')?.ok === true && settled(), owners);
     await act(async () => { await ref.current!.flushPendingInput(); await ref.current!.readParagraphs({ view: 'accepted' }); });
     const retained = answer(a.id, 'a');
     expect(retained?.ok).toBe(true);
@@ -1528,7 +1541,9 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
     const updated = answer(b.id, 'b');
     if (other === 'removed') {
       expect(updated).toMatchObject({ ok: false, failure: { code: 'missing-target' } });
-      expect(geometry()!.dom.getRectsForRange(7, 11).some((rect) => rect.width > 0)).toBe(true);
+      // b leaves the host before the layout without it is drawn, and both layouts share the edit's reservationsVersion.
+      const drawn = () => geometry()?.dom.getRectsForRange(7, 11) ?? [];
+      await waitFor(() => drawn().some((rect) => rect.width > 0), () => ({ layout: geometry()?.layout.id, widths: drawn().map((rect) => rect.width) }));
     } else {
       expect(updated?.ok).toBe(true);
       if (!updated?.ok) throw new Error('missing fresh owner');
