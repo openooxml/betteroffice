@@ -14,15 +14,24 @@ const OTHER: &str = "xl/worksheets/sheet3.xml";
 /// Sheets `first` and `second` (part 1 and 2), then `Other` (part 3), whose
 /// conditional-format rule holds the formula given.
 fn book(first: &str, second: &str, cf: &str) -> Vec<u8> {
+    book_with_rule(
+        first,
+        second,
+        &format!(r#"<cfRule type="expression" dxfId="0" priority="1"><formula>{cf}</formula></cfRule>"#),
+    )
+}
+
+/// [`book`] with `Other`'s rule written out in full.
+fn book_with_rule(first: &str, second: &str, rule: &str) -> Vec<u8> {
     let other = format!(
         concat!(
             r#"<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="{MAIN}" xmlns:r="{DOC_RELS}"><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>"#,
-            r#"<conditionalFormatting sqref="A1"><cfRule type="expression" dxfId="0" priority="1"><formula>{cf}</formula></cfRule></conditionalFormatting>"#,
+            r#"<conditionalFormatting sqref="A1">{rule}</conditionalFormatting>"#,
             r#"</worksheet>"#
         ),
         MAIN = MAIN,
         DOC_RELS = DOC_RELS,
-        cf = cf,
+        rule = rule,
     );
     let plain = |cells: &str| {
         format!(
@@ -232,4 +241,53 @@ fn a_rename_to_a_name_xml_cannot_carry_is_refused_when_a_rule_references_it() {
     );
     assert_eq!(workbook.model(), &before);
     assert_eq!(part(&workbook.save().unwrap(), OTHER), part(&source, OTHER));
+}
+
+/// A rule kept as the file wrote it is patched in place: what the workbook does
+/// not model, such as `stopIfTrue` or a colour scale, is kept, and a `cfvo`
+/// formula is renamed like a `formula` element.
+#[test]
+fn a_rename_patches_a_rule_kept_as_the_file_wrote_it() {
+    for (rule, renamed) in [
+        (
+            r#"<cfRule type="expression" dxfId="0" priority="1" stopIfTrue="1"><formula>Data!$A$1&gt;0</formula></cfRule>"#,
+            r#"<cfRule type="expression" dxfId="0" priority="1" stopIfTrue="1"><formula>'New Data'!$A$1&gt;0</formula></cfRule>"#,
+        ),
+        (
+            r#"<cfRule type="colorScale" priority="1"><colorScale><cfvo type="formula" val="Data!$A$1"/><cfvo type="max"/><color rgb="FFFF0000"/><color rgb="FF00FF00"/></colorScale></cfRule>"#,
+            r#"<cfRule type="colorScale" priority="1"><colorScale><cfvo type="formula" val="&apos;New Data&apos;!$A$1"/><cfvo type="max"/><color rgb="FFFF0000"/><color rgb="FF00FF00"/></colorScale></cfRule>"#,
+        ),
+    ] {
+        let source = book_with_rule("Data", "Spare", rule);
+        let mut workbook = Workbook::open(&source).unwrap();
+        rename(&mut workbook, 0, "New Data").unwrap();
+        let saved = part(&workbook.save().unwrap(), OTHER);
+        assert_eq!(
+            saved,
+            part(&source, OTHER).replace(rule, renamed),
+            "{rule}"
+        );
+        workbook.undo(CalculationOptions::default()).unwrap();
+        assert_eq!(part(&workbook.save().unwrap(), OTHER), part(&source, OTHER));
+    }
+}
+
+/// A collaborator's rename rewrites the rule the same way, and the peer that
+/// applies it holds the same formula.
+#[test]
+fn a_collaborative_rename_rewrites_the_rule_on_every_replica() {
+    let source = book("Data", "Spare", "Data!$A$1&gt;0");
+    let mut left = Workbook::open_collaborative(&source, 41).unwrap();
+    let mut right = Workbook::open_collaborative(&source, 42).unwrap();
+    rename(&mut left, 0, "New Data").unwrap();
+    right
+        .apply_update_v1(&left.encode_state_as_update_v1(), CalculationOptions::default())
+        .unwrap();
+    for replica in [&left, &right] {
+        assert_eq!(
+            replica.conditional_formats(SheetId(2)).unwrap()[0].formulas,
+            ["'New Data'!$A$1>0"]
+        );
+        assert_eq!(saved_formulas(&replica.save().unwrap()), ["'New Data'!$A$1>0"]);
+    }
 }

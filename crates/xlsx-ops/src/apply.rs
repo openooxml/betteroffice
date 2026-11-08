@@ -702,10 +702,22 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
                 .clone();
             let renamed_names = rename_defined_names(wb, &old, name)?;
             let renamed_hyperlinks = renamed_hyperlink_locations(wb, &old, name)?;
+            let renamed_formats = crate::remap::renamed_conditional_formats(wb, &old, name)?;
             let formulas = rename_sheet_references(wb, &old, name)?;
             let hyperlinks = set_hyperlink_locations(wb, renamed_hyperlinks);
             let defined_names = renamed_names.map(|names| replace_defined_names(wb, names));
             let charts = rename_chart_refs(wb, &old, name);
+            let mut conditional_formats = Vec::with_capacity(renamed_formats.len());
+            for (format_sheet, formats) in renamed_formats {
+                let previous = std::mem::replace(
+                    &mut sheet_mut(wb, format_sheet)?.conditional_formats,
+                    formats,
+                );
+                conditional_formats.push(Op::SetConditionalFormats {
+                    sheet: format_sheet,
+                    formats: previous,
+                });
+            }
             sheet_mut(wb, *sheet)?.name = name.clone();
             let mut inverse = vec![Op::RestoreSheet {
                 sheet: *sheet,
@@ -715,6 +727,7 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
             inverse.extend(hyperlinks);
             inverse.extend(defined_names);
             inverse.extend(charts);
+            inverse.extend(conditional_formats);
             Ok(InvertedOp(inverse))
         }
         Op::RestoreSheet {
