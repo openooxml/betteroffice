@@ -10,6 +10,36 @@ use serde_json::{Value, json};
 
 const FONT: &[u8] = include_bytes!("assets/Carlito-Regular.ttf");
 
+#[test]
+fn compound_family_paints_upright_under_its_first_name() {
+    let block: LayoutBlock = serde_json::from_value(json!({
+        "kind": "paragraph", "id": "p", "runs": [
+            {"kind": "text", "text": "A", "fontFamily": "Book,Italic", "bold": true}
+        ]
+    }))
+    .unwrap();
+    let requirements = collect_font_requirements([&block], "Calibri");
+    assert!(requirements.iter().all(|r| !r.key.ends_with("|1")));
+    let mut fonts = FontStore::new();
+    let id = fonts.register(FONT.to_vec()).unwrap();
+    let chains: FontChains = requirements
+        .into_iter()
+        .map(|requirement| (requirement.key, vec![id]))
+        .collect();
+    let list: DisplayList = serde_json::from_value(json!({
+        "pages": [{
+            "pageIndex": 0, "width": 30.0, "height": 20.0,
+            "primitives": [{
+                "kind": "text", "text": "A", "x": 2, "baselineY": 15, "width": 10,
+                "font": "700 12px Book,Italic, sans-serif", "color": "#000000"
+            }]
+        }]
+    }))
+    .unwrap();
+    let images = ImageMap::new();
+    render_png(&list, 0, &RenderResources::new(&fonts, &chains, &images)).unwrap();
+}
+
 fn renders_with_required_chains(block: Value, measure: Value, fragment: Value) {
     let input = json!({
         "measured": [{"block": block, "measure": measure}],
