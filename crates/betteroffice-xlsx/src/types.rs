@@ -119,7 +119,8 @@ pub struct EditProfile {
 }
 
 /// Why a save wrote a part differently from what the workbook holds. A stable
-/// code to match on; new codes may be added.
+/// code to match on; new codes may be added, so treat an unknown one as a
+/// generic warning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
