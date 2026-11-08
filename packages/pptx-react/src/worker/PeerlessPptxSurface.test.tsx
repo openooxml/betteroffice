@@ -637,6 +637,31 @@ function heldImage() {
   } };
 }
 
+function heldFrames() {
+  const queued = new Map<number, FrameRequestCallback>();
+  let nextId = 0;
+  const request = spyOn(window, 'requestAnimationFrame').mockImplementation(((callback: FrameRequestCallback) => {
+    const id = ++nextId;
+    queued.set(id, callback);
+    return id;
+  }) as typeof window.requestAnimationFrame);
+  const cancel = spyOn(window, 'cancelAnimationFrame').mockImplementation(((id: number) => {
+    queued.delete(id);
+  }) as typeof window.cancelAnimationFrame);
+  restorers.push(() => { request.mockRestore(); cancel.mockRestore(); });
+  return {
+    get pending() { return queued.size; },
+    async release() {
+      await act(async () => {
+        const due = [...queued.values()];
+        queued.clear();
+        for (const callback of due) callback(performance.now());
+        await new Promise((resolve) => window.setTimeout(resolve, 0));
+      });
+    },
+  };
+}
+
 function stripClock() {
   const set = window.setTimeout;
   const clear = window.clearTimeout;
@@ -2867,6 +2892,7 @@ describe('peerless stage fit', () => {
 
   test.each([false, true])('strip_switches_immediately_repaints_the_new_thumbnail_after_a_frame_and_keeps_the_departing_latest_revision (%s)', async (batched) => {
     const clock = stripClock();
+    const frames = heldFrames();
     const value = stripRun();
     const view = render(value.strip());
     try {
@@ -2885,9 +2911,10 @@ describe('peerless stage fit', () => {
         await flushStage(() => { next = value.confirm('other', 3); });
       }
       expect(value.store.getSnapshot().thumbnails.has('slide')).toBe(false);
+      expect(frames.pending).toBeGreaterThan(0);
       expect(paints.slice(initial)).toEqual([latest]);
       expect(view.container.querySelector('[aria-current="page"]')?.textContent).toBe('2');
-      await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 60)); });
+      await frames.release();
       await flushStage();
       expect(paints.slice(initial)).toHaveLength(2);
       expect(paints.slice(initial)).toContain(next);
@@ -3209,6 +3236,7 @@ describe('peerless stage fit', () => {
   });
 
   test('strip_paints_a_newly_active_thumbnail_only_after_the_next_frame', async () => {
+    const frames = heldFrames();
     const value = stripRun();
     const view = render(value.strip());
     try {
@@ -3216,8 +3244,9 @@ describe('peerless stage fit', () => {
       const initial = paints.length;
       let switched!: PeerlessConfirmedFrame;
       await flushStage(() => { switched = value.confirm('other', 1); });
+      expect(frames.pending).toBeGreaterThan(0);
       expect(paints.slice(initial)).not.toContain(switched);
-      await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 60)); });
+      await frames.release();
       await flushStage();
       expect(paints.slice(initial)).toContain(switched);
     } finally { view.unmount(); value.dispose(); }
