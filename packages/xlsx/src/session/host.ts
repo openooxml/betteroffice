@@ -611,6 +611,12 @@ export function createWorkbookSessionHost(
         bytes.byteLength === bytes.buffer.byteLength ? bytes.buffer : new Uint8Array(bytes).buffer;
       return transferable(buffer, [buffer]);
     },
+    saveWithWarnings() {
+      const { bytes, warnings } = workbook().saveWithWarnings();
+      const buffer = bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0 &&
+        bytes.byteLength === bytes.buffer.byteLength ? bytes.buffer : new Uint8Array(bytes).buffer;
+      return transferable({ bytes: buffer, warnings }, [buffer]);
+    },
     dispose() {
       workbook();
       dispose();

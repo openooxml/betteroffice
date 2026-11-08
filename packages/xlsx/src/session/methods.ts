@@ -1,4 +1,5 @@
 import type { FontDecoderMethods } from '../../../../shared/office-session/fontDecoder';
+import type { SaveWarning } from '../../../../shared/office-session/saveWarnings';
 import type { XlsxDefinedNamesRequest, XlsxDefinedNamesResult } from '../definedNames';
 import type { PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
 import type { MethodPolicies, SessionState } from '../../../../shared/office-session';
@@ -204,6 +205,7 @@ export type WorkbookSessionMethods = FontDecoderMethods & {
   exportMarkdown(options?: XlsxExportOptions, markdownOptions?: XlsxMarkdownOptions): XlsxExportResult<XlsxMarkdownContent>;
   printDisplayList(sheet: number, range: string, metrics: PrintMetrics, gridlines: boolean): ArrayBuffer;
   save(): ArrayBuffer;
+  saveWithWarnings(): { bytes: ArrayBuffer; warnings: SaveWarning[] };
   dispose(): void;
 };
 
@@ -238,6 +240,7 @@ export const WORKBOOK_SESSION_METHODS = {
   exportMarkdown: true,
   printDisplayList: true,
   save: true,
+  saveWithWarnings: true,
   dispose: true,
 } satisfies { readonly [K in keyof WorkbookSessionMethods]-?: true };
 
@@ -272,5 +275,6 @@ export const WORKBOOK_SESSION_POLICIES: MethodPolicies<WorkbookSessionMethods> =
   exportMarkdown: { lane: 'interactive', reorderable: false },
   printDisplayList: { lane: 'interactive', reorderable: false },
   save: { lane: 'interactive' },
+  saveWithWarnings: { lane: 'interactive' },
   dispose: { lane: 'interactive' },
 };

@@ -102,10 +102,12 @@ export async function run(format: string): Promise<StepResult[]> {
         const call = () => target.operations[op](mapStrings(args, resolve) as Record<string, unknown>);
         let result = expectError === true ? await refusal(call) : await call();
         if (op === 'save') {
-          if (!(result instanceof Uint8Array)) throw new TypeError('save must return bytes');
+          const saved = result instanceof Uint8Array ? { bytes: result } : result as { bytes?: unknown; warnings?: unknown };
+          if (!(saved.bytes instanceof Uint8Array)) throw new TypeError('save must return bytes');
           result = {
-            sha256: createHash('sha256').update(result).digest('hex'),
-            byteLength: result.byteLength
+            sha256: createHash('sha256').update(saved.bytes).digest('hex'),
+            byteLength: saved.bytes.byteLength,
+            ...('warnings' in saved ? { warnings: saved.warnings } : {})
           };
         }
         results.push({ op, result: mapStrings(result, normalize) });

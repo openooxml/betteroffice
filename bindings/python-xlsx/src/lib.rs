@@ -817,6 +817,12 @@ impl PyWorkbook {
         Ok(PyBytes::new(py, &bytes))
     }
 
+    fn _save_warnings_json(&self, py: Python<'_>) -> PyResult<String> {
+        let warnings = py.detach(|| self.inner.save_warnings());
+        serde_json::to_string(&warnings)
+            .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))
+    }
+
     fn save_path(&self, py: Python<'_>, path: PathBuf) -> PyResult<()> {
         enum Failure {
             Engine(CoreError),

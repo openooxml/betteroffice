@@ -95,11 +95,13 @@ function session() {
     printDisplayList: mock<WorkbookSession['call']['printDisplayList']>(async () => { throw new Error('Unexpected export'); }),
     sheets: async () => sheets, calculationStatus: async () => ({ limitedCells: [] }),
     save: async () => new Uint8Array([8, 9]).buffer,
+    saveWithWarnings: async () => ({ bytes: new Uint8Array([8, 9]).buffer, warnings: [] }),
   };
   const viewer: WorkbookSession = {
     ...testSessionCommands(),
     state: { format: 'xlsx', stage: 'ready', version: 0, dirty: false, sheets, activeSheet: 0 },
-    call, save: mock(async () => new Uint8Array([8, 9])), on: () => () => {},
+    call, save: mock(async () => new Uint8Array([8, 9])),
+    saveWithWarnings: mock(async () => ({ bytes: new Uint8Array([8, 9]), warnings: [] })), on: () => () => {},
     onFailure: (listener) => { failure = listener; return () => { failure = undefined; }; },
     failure: undefined, dispose: mock(async () => {}),
   };

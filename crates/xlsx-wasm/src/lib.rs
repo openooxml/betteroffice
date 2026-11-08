@@ -764,6 +764,14 @@ impl XlsxDocument {
         self.inner.save_bytes().map_err(map_engine_error)
     }
 
+    /// The warnings a save of the workbook as it is now carries, as a JSON
+    /// array of `{ code, part, element?, sheet?, message }`; `[]` on an
+    /// ordinary save.
+    #[wasm_bindgen(js_name = saveWarningsJson)]
+    pub fn save_warnings_json(&self) -> Result<String, JsValue> {
+        self.inner.save_warnings_json().map_err(map_engine_error)
+    }
+
     /// crate version string.
     pub fn version() -> String {
         xlsx_engine::Session::version().to_string()

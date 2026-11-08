@@ -118,12 +118,33 @@ pub struct EditProfile {
     pub result_ms: f64,
 }
 
+/// Why a save wrote a part differently from what the workbook holds. A stable
+/// code to match on; new codes may be added.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum SaveWarningCode {
+    /// The workbook holds a reference with a character xml 1.0 cannot carry,
+    /// which the part cannot be written with, so it was kept as authored.
+    UnwritableReference,
+}
+
 /// A part a save wrote differently from what the workbook holds, and why.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct SaveWarning {
+    pub code: SaveWarningCode,
     /// The package part, such as `xl/charts/chart1.xml`.
     pub part: String,
-    pub reason: String,
+    /// What inside the part, such as `chart`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub element: Option<String>,
+    /// The sheet the part belongs to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sheet: Option<String>,
+    /// A sentence for people; not stable, match on `code`.
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
