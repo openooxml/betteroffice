@@ -145,19 +145,19 @@ pub(crate) fn format_code_text(code: &str) -> String {
     quick_xml::escape::escape(xstring(code, false)).into_owned()
 }
 
-/// A number format code (`ST_Xstring`) as an attribute value, the way Excel
-/// writes it: [`encode_xstring`] with tab and line feed also as `_xHHHH_`, so
-/// attribute normalization cannot fold them into spaces, then xml escaped.
-/// Writing one never fails.
-pub(crate) fn format_code_attribute_value(code: &str) -> String {
-    quick_xml::escape::escape(xstring(code, true)).into_owned()
+/// An `ST_Xstring` attribute value (a number format code, a sheet, defined or
+/// font name), the way Excel writes it: [`encode_xstring`] with tab and line
+/// feed also as `_xHHHH_`, so attribute normalization cannot fold them into
+/// spaces, then xml escaped. Writing one never fails.
+pub(crate) fn xstring_attribute_value(value: &str) -> String {
+    quick_xml::escape::escape(xstring(value, true)).into_owned()
 }
 
-/// [`format_code_attribute_value`] as a writer attribute.
-pub(crate) fn format_code_attribute<'a>(name: &'a str, code: &str) -> Attribute<'a> {
+/// [`xstring_attribute_value`] as a writer attribute.
+pub(crate) fn xstring_attribute<'a>(name: &'a str, value: &str) -> Attribute<'a> {
     Attribute {
         key: QName(name.as_bytes()),
-        value: Cow::Owned(format_code_attribute_value(code).into_bytes()),
+        value: Cow::Owned(xstring_attribute_value(value).into_bytes()),
     }
 }
 

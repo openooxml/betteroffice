@@ -324,12 +324,12 @@ fn parse_workbook_xml(data: &[u8]) -> Result<WorkbookMeta, ParseError> {
                     );
                 }
                 b"sheet" if sheets_depth.is_some_and(|sheets| depth == sheets + 1) => {
-                    let name = attr(&e, b"name")?.unwrap_or_default();
+                    let name = unescape_name(&attr(&e, b"name")?.unwrap_or_default());
                     let rid = attr(&e, b"id")?;
                     sheets.push(SheetEntry { name, rid });
                 }
                 b"definedName" => {
-                    let name = attr(&e, b"name")?.unwrap_or_default();
+                    let name = unescape_name(&attr(&e, b"name")?.unwrap_or_default());
                     let local_sheet = attr(&e, b"localSheetId")?
                         .and_then(|value| value.parse::<u32>().ok())
                         .map(SheetId);
