@@ -1750,6 +1750,7 @@ describe('workbook commands', () => {
     { method: 'applyOps', message: 'sheet name contains a character xml cannot carry, and the workbook references the sheet', reason: 'invalid-step' },
     { method: 'applyOps', message: "the data validation formulas on sheet 'Other' cannot follow the sheet rename", reason: 'invalid-step' },
     { method: 'applyOps', message: "the sparkline formulas on sheet 'Q1 Sales' cannot follow the sheet rename", reason: 'invalid-step' },
+    { method: 'applyOps', message: "the data validation formulas on sheet 'Other' name a deleted sheet whose name this sheet took, and cannot follow the sheet rename", reason: 'invalid-step' },
   ] as const) {
     for (const fault of ['precommit', 'postcommit', 'trap'] as const) {
       test(`${fault} ${refusal.message} retains refusal and context guards`, async () => {

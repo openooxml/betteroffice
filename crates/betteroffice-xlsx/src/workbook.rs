@@ -2301,6 +2301,9 @@ impl Workbook {
                 self.ensure_worksheet_sheet_in(staged, &origins, sheet)?;
             }
             self.ensure_references_stay_valid(&names, op)?;
+            if let Op::RenameSheet { sheet, .. } = op {
+                self.ensure_taken_name_rename_follows(staged, &origins, *sheet)?;
+            }
             validate_op(staged, op)?;
             validate_insert_capacity(staged, op)?;
             batch.apply(op)?;

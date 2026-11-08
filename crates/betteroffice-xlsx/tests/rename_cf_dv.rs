@@ -351,3 +351,58 @@ fn a_preserved_formula_the_rename_cannot_read_refuses_the_rename() {
     assert_eq!(workbook.model(), &before);
     assert_eq!(part(&workbook.save().unwrap(), OTHER), part(&source, OTHER));
 }
+
+/// Renames are judged by sheet identity: a batch that moves sheets and
+/// renames them back to the names their positions held still renamed both
+/// sheets, so a fragment that cannot follow refuses it.
+#[test]
+fn a_batch_of_moves_and_compensating_renames_is_still_a_rename() {
+    let source = sparkline_book("Data!A1:C1", "Data!A1<x/>");
+    let mut workbook = Workbook::open(&source).unwrap();
+    let before = workbook.model().clone();
+    let rename = |sheet: u32, name: &str| Op::RenameSheet {
+        sheet: SheetId(sheet),
+        name: name.into(),
+    };
+    let error = workbook
+        .apply_ops(
+            vec![
+                Op::MoveSheet { from: 1, to: 0 },
+                rename(0, "Temp"),
+                rename(1, "Spare"),
+                rename(0, "Data"),
+            ],
+            CalculationOptions::default(),
+        )
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "the data validation formulas on sheet 'Other' cannot follow the sheet rename"
+    );
+    assert_eq!(workbook.model(), &before);
+}
+
+/// A sheet that took a deleted sheet's name holds the references that name
+/// it, as cell formulas do, but has no source identity for the save to
+/// follow, so renaming it while a preserved formula names it is refused.
+#[test]
+fn renaming_a_sheet_that_took_a_deleted_sheets_name_is_refused_when_a_fragment_names_it() {
+    let source = book("Data", "Spare", "1", "Data!$A$1:$A$5");
+    let mut workbook = Workbook::open(&source).unwrap();
+    apply(&mut workbook, Op::RemoveSheet { index: 0 }).unwrap();
+    apply(
+        &mut workbook,
+        Op::AddSheet {
+            index: 0,
+            name: "Data".into(),
+        },
+    )
+    .unwrap();
+    let before = workbook.model().clone();
+    let error = rename(&mut workbook, 0, "Z").unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "the data validation formulas on sheet 'Other' name a deleted sheet whose name this sheet took, and cannot follow the sheet rename"
+    );
+    assert_eq!(workbook.model(), &before);
+}

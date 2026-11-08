@@ -75,6 +75,31 @@ pub(crate) fn rename_preserved_fragments(
     Ok(patched)
 }
 
+/// The kind of the first preserved formula in `template` that names `sheet`,
+/// or the kind of a fragment that does not read, which may name it.
+pub(crate) fn fragment_naming_sheet(template: &XmlTemplate, sheet: &str) -> Option<FragmentKind> {
+    let probe = [(sheet.to_owned(), format!("{sheet} "))];
+    template.children.iter().find_map(|child| {
+        let in_extension = match child.local_name.as_str() {
+            "dataValidations" => false,
+            "extLst" => true,
+            _ => return None,
+        };
+        if !template.is_root_child_named(child, &child.local_name) {
+            return None;
+        }
+        match rename_fragment(&child.bytes, in_extension, &probe) {
+            Ok(None) => None,
+            Ok(Some(_)) => Some(if in_extension {
+                FragmentKind::Extension
+            } else {
+                FragmentKind::DataValidation
+            }),
+            Err(failure) => Some(failure.kind),
+        }
+    })
+}
+
 fn kind_of(stack: &[Vec<u8>], in_extension: bool) -> FragmentKind {
     if !in_extension {
         return FragmentKind::DataValidation;

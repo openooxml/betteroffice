@@ -6,6 +6,7 @@
 use xlsx_parse::{FragmentFailureReason, FragmentKind};
 
 use crate::{SaveWarning, SaveWarningCode};
+use xlsx_model::SheetId;
 
 use super::Workbook;
 use crate::{Error, Result};
@@ -63,6 +64,46 @@ impl Workbook {
             .collect()
     }
 
+    /// Refuses renaming sheet `index` of `staged` when it holds a name a
+    /// source sheet held, that source sheet is gone, and a preserved formula
+    /// names it. The formula binds to this sheet by name, as cell formulas
+    /// do, but the save renames preserved formulas by source sheet identity,
+    /// which this sheet does not have, so it could not follow the rename.
+    pub(super) fn ensure_taken_name_rename_follows(
+        &self,
+        staged: &xlsx_model::Workbook,
+        origins: &[Option<usize>],
+        index: SheetId,
+    ) -> Result<()> {
+        let Some(package) = self.source_package.as_ref() else {
+            return Ok(());
+        };
+        let at = index.0 as usize;
+        let (Some(sheet), Some(None)) = (staged.sheets.get(at), origins.get(at)) else {
+            return Ok(());
+        };
+        let package = package.materialize()?;
+        let deleted_source_name = package
+            .source_sheet_names()
+            .enumerate()
+            .any(|(source, name)| name == sheet.name && !origins.contains(&Some(source)));
+        if !deleted_source_name {
+            return Ok(());
+        }
+        let Some((source, kind)) = package.fragment_naming_sheet(&sheet.name) else {
+            return Ok(());
+        };
+        let holder = origins
+            .iter()
+            .position(|origin| *origin == Some(source))
+            .and_then(|at| staged.sheets.get(at))
+            .map_or_else(|| sheet.name.clone(), |sheet| sheet.name.clone());
+        Err(Error::InvalidOperation(format!(
+            "the {} formulas on sheet '{holder}' name a deleted sheet whose name this sheet took, and cannot follow the sheet rename",
+            described(kind)
+        )))
+    }
+
     /// Refuses `preview` when a sheet it renamed is named in a preserved
     /// formula the save cannot rewrite: the new name holds a character xml
     /// cannot carry, refused as cell formulas are, or the fragment does not
@@ -75,12 +116,16 @@ impl Workbook {
         let Some(package) = self.source_package.as_ref() else {
             return Ok(());
         };
-        if preview.sheets.iter().map(|sheet| &sheet.name).eq(self
-            .model
-            .sheets
+        let current = self
+            .preserved
+            .origins
             .iter()
-            .map(|sheet| &sheet.name))
-        {
+            .zip(&self.model.sheets)
+            .filter_map(|(origin, sheet)| Some(((*origin)?, sheet.name.as_str())))
+            .collect::<std::collections::HashMap<_, _>>();
+        if preview.sheets.iter().zip(origins).all(|(sheet, origin)| {
+            origin.is_none_or(|origin| current.get(&origin) == Some(&sheet.name.as_str()))
+        }) {
             return Ok(());
         }
         let package = package.materialize()?;

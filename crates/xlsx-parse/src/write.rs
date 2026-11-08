@@ -1350,6 +1350,7 @@ impl SheetIds {
 
 /// The source sheet each sheet keeps: the first in-range claim of a source
 /// index keeps it, later claims are new sheets.
+pub(crate) use fragment_rename::fragment_naming_sheet;
 pub use fragment_rename::{FragmentFailure, FragmentFailureReason, FragmentKind};
 
 /// Each kept source sheet's name in the file with the current name of that
