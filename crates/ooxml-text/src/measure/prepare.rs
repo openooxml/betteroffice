@@ -1333,7 +1333,8 @@ mod tests {
                 glyphs.swap(a, b);
             }
             let expected = old_cluster_advances(&glyphs, &byte_to_char);
-            let actual = cluster_advances(glyphs.iter().copied(), &byte_to_char, seg_start, seg_len);
+            let actual =
+                cluster_advances(glyphs.iter().copied(), &byte_to_char, seg_start, seg_len);
             assert_eq!(actual.len(), expected.len());
             for (a, e) in actual.iter().zip(&expected) {
                 assert_eq!(a.0, e.0);
@@ -1349,7 +1350,8 @@ mod tests {
                 .map(|_| {
                     let mut store = FontStore::new();
                     store.register_slice(FIXTURE).unwrap();
-                    let text = "A great many more words at the start of this page. ".repeat(repeats);
+                    let text =
+                        "A great many more words at the start of this page. ".repeat(repeats);
                     let input = input_with(serde_json::json!([{ "kind": "text", "text": text }]));
                     let started = std::time::Instant::now();
                     prepare_runs(&store, &input.as_request()).unwrap();
