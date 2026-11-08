@@ -33,6 +33,12 @@ fn book(first: &str, second: &str, cf: &str, dv: &str) -> Vec<u8> {
         cf = cf,
         dv = dv,
     );
+    package(first, second, other)
+}
+
+/// Sheets `first` and `second` (part 1 and 2), then `Other` (part 3) written
+/// as given.
+fn package(first: &str, second: &str, other: String) -> Vec<u8> {
     let plain = |cells: &str| {
         format!(
             r#"<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="{MAIN}"><sheetData>{cells}</sheetData></worksheet>"#
@@ -285,4 +291,62 @@ fn a_rename_to_a_name_xml_cannot_carry_is_refused_when_a_cf_or_dv_formula_refere
         assert_eq!(workbook.model(), &before);
         assert_eq!(part(&workbook.save().unwrap(), OTHER), part(&source, OTHER));
     }
+}
+
+/// `Other` with a sparkline over `formula` and a data validation whose
+/// formula is `dv`, both kept as the file wrote them.
+fn sparkline_book(formula: &str, dv: &str) -> Vec<u8> {
+    package(
+        "Data",
+        "Spare",
+        format!(
+            concat!(
+                r#"<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="{MAIN}" xmlns:r="{DOC_RELS}"><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>"#,
+                r#"<dataValidations count="1"><dataValidation type="list" allowBlank="1" sqref="B1"><formula1>{dv}</formula1></dataValidation></dataValidations>"#,
+                r#"<extLst><ext uri="{{05C60535-1F16-4fd2-B633-F4F36F0B64E0}}" xmlns:x14="{X14}"><x14:sparklineGroups xmlns:xm="{XM}"><x14:sparklineGroup displayEmptyCellsAs="gap"><x14:colorSeries rgb="FF376092"/><x14:sparklines><x14:sparkline><xm:f>{formula}</xm:f><xm:sqref>D1</xm:sqref></x14:sparkline></x14:sparklines></x14:sparklineGroup></x14:sparklineGroups></ext></extLst></worksheet>"#
+            ),
+            MAIN = MAIN,
+            DOC_RELS = DOC_RELS,
+            X14 = X14,
+            XM = XM,
+            formula = formula,
+            dv = dv,
+        ),
+    )
+}
+
+/// A sparkline's data range follows the rename like the other extension
+/// formulas, and everything else in the part keeps its bytes; undo writes
+/// the part back as the file had it.
+#[test]
+fn a_sparkline_range_follows_the_rename_and_the_rest_of_the_part_is_kept() {
+    let source = sparkline_book("Data!A1:C1", "1");
+    let mut workbook = Workbook::open(&source).unwrap();
+    rename(&mut workbook, 0, "New Data").unwrap();
+    assert_eq!(
+        part(&workbook.save().unwrap(), OTHER),
+        part(&source, OTHER).replace(
+            "<xm:f>Data!A1:C1</xm:f>",
+            "<xm:f>&apos;New Data&apos;!A1:C1</xm:f>"
+        )
+    );
+    workbook.undo(CalculationOptions::default()).unwrap();
+    assert_eq!(part(&workbook.save().unwrap(), OTHER), part(&source, OTHER));
+}
+
+/// A preserved formula that does not read as text the rename can rewrite
+/// refuses the rename up front, naming the kind of formula and its sheet,
+/// instead of saving it unrenamed.
+#[test]
+fn a_preserved_formula_the_rename_cannot_read_refuses_the_rename() {
+    let source = sparkline_book("Data!A1:C1", "Data!A1<x/>");
+    let mut workbook = Workbook::open(&source).unwrap();
+    let before = workbook.model().clone();
+    let error = rename(&mut workbook, 0, "New Data").unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "the data validation formulas on sheet 'Other' cannot follow the sheet rename"
+    );
+    assert_eq!(workbook.model(), &before);
+    assert_eq!(part(&workbook.save().unwrap(), OTHER), part(&source, OTHER));
 }
