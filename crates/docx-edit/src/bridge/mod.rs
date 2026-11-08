@@ -4921,6 +4921,44 @@ fn has_nonfinite(formatting: &RunFormatting) -> bool {
         .any(|value| !value.is_finite())
 }
 
+/// The text a run draws: a character whose `w:rFonts` slot names a symbol
+/// face (Symbol, Wingdings, Webdings) addresses a glyph by font position, so
+/// layout gets the covered character for it. A slot the table leaves unnamed
+/// but the base-latin backstop draws its own glyph for stays as stored.
+/// Display only: the story, saves, find and copy keep the stored characters,
+/// and every replacement keeps the UTF-16 width so offsets still line up.
+pub(super) fn symbol_display_text(formatting: &RunFormatting, text: String) -> String {
+    let slots = formatting.font_slots.as_ref();
+    let family = |slot: usize| {
+        slots
+            .and_then(|slots| match slot {
+                0 => slots.ascii.as_deref(),
+                1 => slots.h_ansi.as_deref(),
+                2 => slots.east_asia.as_deref(),
+                _ => slots.cs.as_deref(),
+            })
+            .or_else(|| slots.and_then(|slots| slots.h_ansi.as_deref()))
+            .or_else(|| slots.and_then(|slots| slots.ascii.as_deref()))
+            .or(formatting.font_family.as_deref())
+    };
+    let symbol_face = |slot: usize| family(slot).and_then(ooxml_text::SymbolFont::named);
+    if (0..4).all(|slot| symbol_face(slot).is_none()) {
+        return text;
+    }
+    let hint = slots.and_then(|slots| slots.hint.as_deref()) == Some("eastAsia");
+    let complex_script = formatting.complex_script.unwrap_or(false);
+    ooxml_text::font_slot_characters(&text, complex_script, hint)
+        .map(|(character, slot)| {
+            symbol_face(slot)
+                .and_then(|face| match face.shape(character) {
+                    None if ooxml_text::font_store::base_latin_alias(character) => None,
+                    _ => face.substitute(character),
+                })
+                .unwrap_or(character)
+        })
+        .collect()
+}
+
 fn raw_run_to_layout(raw: RawRun, paragraph_pm_start: u64) -> Run {
     let pm_start = Some((paragraph_pm_start + 1 + u64::from(raw.pm_start)) as f64);
     let pm_end = Some((paragraph_pm_start + 1 + u64::from(raw.pm_end)) as f64);
@@ -4933,8 +4971,8 @@ fn raw_run_to_layout(raw: RawRun, paragraph_pm_start: u64) -> Run {
             inline_sdt_widget: raw.inline_sdt_widget,
         }),
         RawRunKind::Text(text) => Run::Text(TextRun {
+            text: symbol_display_text(&raw.formatting, text),
             fmt: raw.formatting,
-            text,
             pm_start,
             pm_end,
             inline_sdt_widget: raw.inline_sdt_widget,

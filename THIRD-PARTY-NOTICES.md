@@ -249,3 +249,16 @@ Copyright 2019 Octavian Oncescu.
 
 License: MIT. Both unmodified upstream licences are included as
 `MIT-mimalloc.txt` in each docx-native and pptx-native platform package.
+
+---
+
+## Adobe Symbol Encoding to Unicode table
+
+`crates/ooxml-drawingml/src/adobe-symbol.txt` is the unmodified mapping table
+from https://www.unicode.org/Public/MAPPINGS/VENDORS/ADOBE/symbol.txt (table
+version 1.0, 2011 July 12), Copyright (c) 1991-2011 Unicode, Inc. It is compiled
+into every engine that draws text, and its notice stays attached in the file as
+its terms require: "Unicode, Inc. hereby grants the right to freely use the
+information supplied in this file in the creation of products supporting the
+Unicode Standard, and to make copies of this file in any form for internal or
+external distribution as long as this notice remains attached."

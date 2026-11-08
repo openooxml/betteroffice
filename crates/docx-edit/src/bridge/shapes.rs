@@ -858,8 +858,8 @@ fn shape_document_runs(run: &Value, styles: &ShapeRunStyles<'_>) -> Vec<Run> {
                 .filter(|text| !text.is_empty())
                 .map(|text| {
                     Run::Text(TextRun {
+                        text: super::symbol_display_text(&formatting, text),
                         fmt: formatting.clone(),
-                        text,
                         pm_start: None,
                         pm_end: None,
                         inline_sdt_widget: None,

@@ -1,5 +1,5 @@
-//! Legacy symbol faces — Wingdings, Wingdings 2, Wingdings 3 and Webdings —
-//! address glyphs by font position through a `(3, 0)` private-use cmap at
+//! Legacy symbol faces — Symbol, Wingdings, Wingdings 2, Wingdings 3 and
+//! Webdings — address glyphs by font position through a `(3, 0)` private-use cmap at
 //! `U+F020..=U+F0FF`, or by the raw byte. The character a file stores for one
 //! of them is a slot number, not the character to draw, so a host without the
 //! face draws a Latin letter or a tofu box.
@@ -9,10 +9,18 @@
 //! slot's shape comes from the face's own glyph name (`square2`, `trianglert`)
 //! and its size from the ink width of that glyph, matched against the ink width
 //! of the candidates in Liberation Sans at the same em.
+//!
+//! Symbol uses the Adobe Symbol Encoding to Unicode table published by the
+//! Unicode Consortium (`adobe-symbol.txt`, kept verbatim with its notice).
+//! Its Corporate Use targets (bracket pieces, serif and sans-serif ©®™) are
+//! private-use characters no face covers, so those slots count as unmapped.
+
+use std::sync::OnceLock;
 
 /// A symbol face that addresses glyphs by font position.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SymbolFont {
+    Symbol,
     Wingdings,
     Wingdings2,
     Wingdings3,
@@ -26,6 +34,7 @@ const UNKNOWN_SLOT: char = '\u{2022}';
 impl SymbolFont {
     pub fn named(typeface: &str) -> Option<Self> {
         match typeface.trim().to_ascii_lowercase().as_str() {
+            "symbol" => Some(Self::Symbol),
             "wingdings" => Some(Self::Wingdings),
             "wingdings 2" => Some(Self::Wingdings2),
             "wingdings 3" => Some(Self::Wingdings3),
@@ -36,6 +45,7 @@ impl SymbolFont {
 
     fn slots(self) -> &'static [(u8, char)] {
         match self {
+            Self::Symbol => adobe_symbol(),
             Self::Wingdings => &WINGDINGS,
             Self::Wingdings2 => &WINGDINGS_2,
             Self::Wingdings3 => &WINGDINGS_3,
@@ -59,6 +69,72 @@ impl SymbolFont {
             .find(|(position, _)| *position == slot)
             .map(|(_, replacement)| *replacement)
     }
+
+    /// `text` as this face draws it: every slot replaced by its covered
+    /// character, or by the bullet stand-in when the table has none. `None`
+    /// when `text` addresses no slot. Every replacement is one BMP code unit,
+    /// like the slot it replaces, so UTF-16 offsets into `text` still hold.
+    pub fn display_text(self, text: &str) -> Option<SymbolText> {
+        if !text
+            .chars()
+            .any(|character| symbol_slot(character).is_some())
+        {
+            return None;
+        }
+        let mut unmapped = 0;
+        let text = text
+            .chars()
+            .map(|character| match symbol_slot(character) {
+                None => character,
+                Some(_) => self.shape(character).unwrap_or_else(|| {
+                    unmapped += 1;
+                    UNKNOWN_SLOT
+                }),
+            })
+            .collect();
+        Some(SymbolText { text, unmapped })
+    }
+}
+
+/// Text a symbol face draws, with the number of slots that fell back to the
+/// bullet stand-in.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SymbolText {
+    pub text: String,
+    pub unmapped: usize,
+}
+
+const ADOBE_SYMBOL: &str = include_str!("adobe-symbol.txt");
+
+/// The Adobe table's non-private-use targets by Symbol slot. A slot the table
+/// lists twice (space, Delta, Omega, mu, fraction) keeps its first entry.
+fn adobe_symbol() -> &'static [(u8, char)] {
+    static TABLE: OnceLock<Vec<(u8, char)>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut table: Vec<(u8, char)> = Vec::new();
+        for line in ADOBE_SYMBOL.lines().filter(|line| !line.starts_with('#')) {
+            let mut fields = line.split('\t');
+            let (Some(unicode), Some(slot)) = (fields.next(), fields.next()) else {
+                continue;
+            };
+            let (Ok(unicode), Ok(slot)) = (
+                u32::from_str_radix(unicode, 16),
+                u8::from_str_radix(slot, 16),
+            ) else {
+                continue;
+            };
+            let Some(character) = char::from_u32(unicode) else {
+                continue;
+            };
+            if (0xE000..=0xF8FF).contains(&unicode)
+                || table.iter().any(|(position, _)| *position == slot)
+            {
+                continue;
+            }
+            table.push((slot, character));
+        }
+        table
+    })
 }
 
 /// The font position `character` addresses. `0x20` is the faces' own space, so
@@ -169,6 +245,93 @@ mod tests {
         assert_eq!(SymbolFont::Wingdings.substitute('\u{f0a0}'), Some('▪'));
         assert_eq!(SymbolFont::Wingdings.substitute('l'), Some('●'));
         assert_eq!(SymbolFont::Wingdings3.substitute('\u{f075}'), Some('►'));
+    }
+
+    #[test]
+    fn symbol_slots_follow_the_adobe_table_in_both_ranges() {
+        assert_eq!(SymbolFont::named("Symbol"), Some(SymbolFont::Symbol));
+        for (slot, expected) in [
+            ('a', 'α'),
+            ('p', 'π'),
+            ('D', 'Δ'),
+            ('W', 'Ω'),
+            ('m', 'µ'),
+            ('\u{a4}', '⁄'),
+            ('\u{b7}', '•'),
+            ('\u{ae}', '→'),
+            ('\u{a3}', '≤'),
+            ('\u{d6}', '√'),
+            ('1', '1'),
+        ] {
+            let private_use = char::from_u32(0xF000 + slot as u32).expect("private-use slot");
+            assert_eq!(
+                SymbolFont::Symbol.substitute(slot),
+                Some(expected),
+                "{slot:?}"
+            );
+            assert_eq!(
+                SymbolFont::Symbol.substitute(private_use),
+                Some(expected),
+                "{private_use:?}"
+            );
+        }
+        assert_eq!(SymbolFont::Symbol.substitute(' '), None);
+        assert_eq!(SymbolFont::Symbol.substitute('α'), None);
+    }
+
+    #[test]
+    fn symbol_keeps_one_entry_per_slot_and_drops_corporate_use_targets() {
+        let table = adobe_symbol();
+        assert_eq!(table.len(), 160);
+        for (index, (slot, _)) in table.iter().enumerate() {
+            assert!(
+                table[index + 1..].iter().all(|(other, _)| other != slot),
+                "{slot:#x} listed twice"
+            );
+        }
+        assert_eq!(SymbolFont::Symbol.shape('\u{f0e6}'), None);
+        assert_eq!(SymbolFont::Symbol.substitute('\u{f0e6}'), Some('•'));
+        assert_eq!(SymbolFont::Symbol.substitute('\u{f080}'), Some('•'));
+    }
+
+    #[test]
+    fn every_target_is_one_bmp_code_unit_like_its_slot() {
+        for face in [
+            SymbolFont::Symbol,
+            SymbolFont::Wingdings,
+            SymbolFont::Wingdings2,
+            SymbolFont::Wingdings3,
+            SymbolFont::Webdings,
+        ] {
+            for slot in (0x21..=0xFFu32).chain(0xF021..=0xF0FF) {
+                let character = char::from_u32(slot).expect("slot char");
+                let drawn = face.substitute(character).expect("slot");
+                assert_eq!(drawn.len_utf16(), 1, "{face:?} {slot:#x}");
+                assert_eq!(drawn.len_utf16(), character.len_utf16());
+                assert!(
+                    !(0xE000..=0xF8FF).contains(&(drawn as u32)),
+                    "{face:?} {slot:#x}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn display_text_maps_slots_counts_stand_ins_and_keeps_utf16_length() {
+        let text = "a+b \u{f0b3} \u{f0e6}x日";
+        let drawn = SymbolFont::Symbol.display_text(text).expect("slots");
+        assert_eq!(drawn.text, "α+β ≥ •ξ日");
+        assert_eq!(drawn.unmapped, 1);
+        assert_eq!(
+            drawn.text.encode_utf16().count(),
+            text.encode_utf16().count()
+        );
+        assert_eq!(SymbolFont::Symbol.display_text("日本 αβ"), None);
+        let wingdings = SymbolFont::Wingdings
+            .display_text("l\u{f0e0}\u{f0fc}")
+            .expect("slots");
+        assert_eq!(wingdings.text, "●••");
+        assert_eq!(wingdings.unmapped, 2);
     }
 
     #[test]

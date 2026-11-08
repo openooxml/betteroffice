@@ -4813,8 +4813,19 @@ fn resolve_content(
             )?;
             let start = story_offset;
             story_offset = story_offset.saturating_add(utf16_len(&run.text));
+            let requested =
+                resolve_font_request(theme, &run.style, properties.default_run.as_ref()).family;
+            let drawn = ooxml_text::SymbolFont::named(&requested)
+                .and_then(|font| font.display_text(&run.text))
+                .map(|symbol| symbol.text);
             let mut cased = Vec::new();
-            push_cased_runs(&mut cased, &run.text, start, language, style);
+            push_cased_runs(
+                &mut cased,
+                drawn.as_deref().unwrap_or(&run.text),
+                start,
+                language,
+                style,
+            );
             if properties.rtl == Some(true) {
                 let mut directed = Vec::new();
                 for run in cased {
@@ -5066,7 +5077,7 @@ fn resolve_bullet_style(
         let emulated = ooxml_text::SymbolFont::named(&family).is_some_and(|font| {
             written_marker
                 .chars()
-                .all(|character| font.substitute(character).is_some())
+                .all(|character| font.shape(character).is_some())
         });
         let mut ignored = SubstitutionLog::default();
         let log = if emulated {
