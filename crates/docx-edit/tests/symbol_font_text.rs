@@ -78,7 +78,7 @@ fn symbol_face_slots_draw_their_covered_characters_and_keep_the_stored_text() {
     );
 }
 
-fn first_run(body: &str) -> (String, Option<String>, Option<String>) {
+fn first_run(body: &str) -> (String, [Option<String>; 3]) {
     let bytes = fixture::with_body(body);
     let doc = EditingDoc::new(5101);
     seed_from_docx(&doc, &bytes).unwrap();
@@ -102,11 +102,10 @@ fn first_run(body: &str) -> (String, Option<String>, Option<String>) {
     let Run::Text(run) = &paragraph.runs[0] else {
         panic!("text run");
     };
-    let slots = run.fmt.font_slots.as_ref();
+    let slots = run.fmt.font_slots.clone().unwrap_or_default();
     (
         run.text.clone(),
-        slots.and_then(|slots| slots.ascii.clone()),
-        slots.and_then(|slots| slots.h_ansi.clone()),
+        [slots.ascii, slots.h_ansi, slots.east_asia],
     )
 }
 
@@ -120,21 +119,35 @@ fn a_replacement_in_another_slot_still_draws_with_the_symbol_face() {
             ),
         ))
     };
+    let name = |value: &str| Some(value.to_owned());
     assert_eq!(
         run("a+b"),
         (
             "α+β".to_owned(),
-            Some("Symbol".to_owned()),
-            Some("Symbol".to_owned())
+            [name("Symbol"), name("Symbol"), name("Calibri")]
         )
     );
     assert_eq!(
-        run("a\u{e9}"),
+        run("a\u{301}"),
         (
-            "α\u{e9}".to_owned(),
-            Some("Symbol".to_owned()),
-            Some("Calibri".to_owned())
+            "α\u{301}".to_owned(),
+            [name("Symbol"), name("Symbol"), name("Calibri")]
         ),
+        "a combining mark keeps its base's family"
+    );
+    assert_eq!(
+        run("a日"),
+        (
+            "α日".to_owned(),
+            [name("Symbol"), name("Symbol"), name("Calibri")]
+        ),
+        "an unnamed slot is pinned to the family it fell back to"
+    );
+    let (text, slots) = run("a\u{e9}");
+    assert_eq!(text, "α\u{e9}");
+    assert_eq!(
+        slots[1],
+        name("Calibri"),
         "a character that keeps the slot's own family leaves the slots alone"
     );
 }

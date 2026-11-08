@@ -4926,8 +4926,10 @@ fn has_nonfinite(formatting: &RunFormatting) -> bool {
 /// layout gets the covered character the face's table names for it; a slot
 /// the table does not name stays as stored. A replacement can fall in another
 /// slot than the character it replaces (`a` is ASCII, `α` is not), so that
-/// slot is pointed at the symbol face too, unless another character of the
-/// run still needs the slot's own family. Display only: the story, saves, find
+/// slot is pointed at the symbol face too, and every slot is then named
+/// explicitly so none follows the re-pointed one through fallback; a combining
+/// mark keeps its base's family. When another character of the run still
+/// needs a slot's own family, the slots stay as they are. Display only: the story, saves, find
 /// and copy keep the stored characters, and every replacement keeps the UTF-16
 /// width so offsets still line up.
 pub(super) fn symbol_display_run(formatting: &mut RunFormatting, text: String) -> String {
@@ -4955,50 +4957,48 @@ pub(super) fn symbol_display_run(formatting: &mut RunFormatting, text: String) -
     }
     let hint = slots.and_then(|slots| slots.hint.as_deref()) == Some("eastAsia");
     let complex_script = formatting.complex_script.unwrap_or(false);
-    let mut wanted: Vec<(char, Option<String>)> = Vec::new();
+    let mut wanted: Vec<Option<String>> = Vec::new();
     let drawn: String = ooxml_text::font_slot_characters(&text, complex_script, hint)
         .map(|(character, slot)| {
-            let shape = symbol_face(slot).and_then(|face| face.shape(character));
-            wanted.push((character, shape.and_then(|_| family(slot))));
-            shape.unwrap_or(character)
+            wanted.push(family(slot));
+            symbol_face(slot)
+                .and_then(|face| face.shape(character))
+                .unwrap_or(character)
         })
         .collect();
     if drawn == text {
         return text;
     }
     let mut targets: [Option<Option<String>>; 4] = [None, None, None, None];
-    for ((_, slot), (_, symbol)) in
-        ooxml_text::font_slot_characters(&drawn, complex_script, hint).zip(&wanted)
+    for ((_, slot), want) in
+        ooxml_text::font_slot_characters(&drawn, complex_script, hint).zip(wanted)
     {
-        let want = symbol.clone().or_else(|| family(slot));
         match &targets[slot] {
             None => targets[slot] = Some(want),
             Some(existing) if *existing == want => {}
             Some(_) => return drawn,
         }
     }
+    let pinned: Vec<Option<String>> = (0..4)
+        .map(|slot| targets[slot].clone().unwrap_or_else(|| family(slot)))
+        .collect();
+    if (0..4).all(|slot| pinned[slot] == family(slot)) {
+        return drawn;
+    }
     let mut repointed = formatting.font_slots.clone().unwrap_or_default();
-    let mut changed = false;
-    for (slot, target) in targets.into_iter().enumerate() {
-        let Some(Some(target)) = target else {
-            continue;
-        };
-        if family(slot).as_deref() == Some(target.as_str()) {
-            continue;
-        }
+    for (slot, target) in pinned.into_iter().enumerate() {
         let (name, theme) = match slot {
             0 => (&mut repointed.ascii, &mut repointed.ascii_theme),
             1 => (&mut repointed.h_ansi, &mut repointed.h_ansi_theme),
             2 => (&mut repointed.east_asia, &mut repointed.east_asia_theme),
             _ => (&mut repointed.cs, &mut repointed.cs_theme),
         };
-        *name = Some(target);
-        *theme = None;
-        changed = true;
+        if *name != target {
+            *name = target;
+            *theme = None;
+        }
     }
-    if changed {
-        formatting.font_slots = Some(repointed);
-    }
+    formatting.font_slots = Some(repointed);
     drawn
 }
 
