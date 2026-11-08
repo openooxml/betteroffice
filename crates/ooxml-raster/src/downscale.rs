@@ -85,8 +85,8 @@ pub fn reduced_size(width: u32, height: u32, max_pixels: u64) -> Option<(u32, u3
 /// the box filter's row of sums and counts, an IDCT intermediate of at most
 /// four times its pixels (one scale step above it) and never past
 /// `max_pixels`, and what the source format holds at its own size: a
-/// progressive JPEG's coefficients, collected before any IDCT, or a PNG's
-/// raw, previous and expanded rows.
+/// progressive JPEG's coefficients, collected before any IDCT, a baseline
+/// JPEG's row of MCU coefficients, or a PNG's raw, previous and expanded rows.
 pub fn reduced_cost(bytes: &[u8], width: u32, height: u32, max_pixels: u64) -> Option<(u64, u64)> {
     let (target_width, target_height) = reduced_size(width, height, max_pixels)?;
     let pixels = u64::from(target_width) * u64::from(target_height);
@@ -96,7 +96,7 @@ pub fn reduced_cost(bytes: &[u8], width: u32, height: u32, max_pixels: u64) -> O
         if frame.progressive {
             frame.coefficient_bytes()
         } else {
-            0
+            frame.mcu_row_bytes()
         }
     } else {
         png_row_bytes(bytes, width)?
@@ -140,6 +140,24 @@ struct JpegFrame {
 }
 
 impl JpegFrame {
+    /// The bytes of one row of MCUs of 16-bit coefficients for every
+    /// component, at the full source width: what a baseline decode holds while
+    /// it decodes, whatever scale it outputs.
+    fn mcu_row_bytes(&self) -> u64 {
+        let horizontal = self
+            .sampling
+            .iter()
+            .map(|(h, _)| *h)
+            .max()
+            .unwrap_or(1)
+            .max(1);
+        let across = u64::from(self.width.div_ceil(8 * horizontal));
+        self.sampling
+            .iter()
+            .map(|(h, v)| across * u64::from(*h) * u64::from(*v) * 64 * 2)
+            .sum()
+    }
+
     /// The bytes of the 16-bit DCT coefficients a progressive decode holds for
     /// every block of every component, padded to whole MCUs.
     fn coefficient_bytes(&self) -> u64 {
