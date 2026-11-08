@@ -291,6 +291,8 @@ const LATIN_FACES: &[(&[&str], RequestedLineMetrics)] = &[
     (&["cambria math"], latin(2048, 1595, -455, 353)),
     (&["calibri light"], latin(2048, 1536, -512, 452)),
     (&["roboto"], latin(2048, 1900, -500, 0)),
+    (&["simplified arabic"], latin(2048, 2416, -979, 0)),
+    (&["traditional arabic"], latin(2048, 2036, -1025, 0)),
     // Lucida Bright runs 1.113x the last-resort Liberation Sans it falls back
     // to: its advances over a-z, weighted by English letter frequency and one
     // space per 5.1 letters, against Liberation Sans's. Measured off the
@@ -573,6 +575,8 @@ mod tests {
             ("Tw Cen MT", 2230.0 / 2048.0),
             ("Tw Cen MT Condensed", 2188.0 / 2048.0),
             ("Cambria", 2401.0 / 2048.0),
+            ("Simplified Arabic", 3395.0 / 2048.0),
+            ("Traditional Arabic", 3061.0 / 2048.0),
         ] {
             let metrics = requested_line_metrics(family).expect(family);
             let measured = (f32::from(metrics.hhea_ascender) - f32::from(metrics.hhea_descender)

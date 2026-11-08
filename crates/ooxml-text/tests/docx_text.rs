@@ -1173,6 +1173,40 @@ fn segoe_ui_weight_families_measure_paragraphs_at_the_requested_span() {
 }
 
 #[test]
+fn arabic_families_word_ships_measure_paragraphs_at_their_own_span() {
+    let (mut store, base) = store_with_font();
+    let measure = |store: &FontStore, family: &str, font: ooxml_text::FontId| {
+        let key = format!("{}|0|0", family.trim().to_lowercase());
+        let input = serde_json::from_value(serde_json::json!({
+            "block": {
+                "kind": "paragraph",
+                "runs": [{ "kind": "text", "text": "Ag fi", "fontFamily": family }]
+            },
+            "maxWidth": 1000.0,
+            "fontChains": { (key): [font.to_u32()] },
+            "defaults": { "fontSize": 14.0, "fontFamily": family }
+        }))
+        .unwrap();
+        let extent = ooxml_text::measure::measure_paragraph(store, &input).unwrap();
+        assert_eq!(extent.lines.len(), 1);
+        extent.lines[0].line_height
+    };
+    for (family, span) in [
+        ("Simplified Arabic", 3395.0 / 2048.0),
+        ("Traditional Arabic", 3061.0 / 2048.0),
+    ] {
+        let view = store.register_named_substitute(base, family).expect(family);
+        assert_ne!(view, base, "{family} measures through its own view");
+        let height = measure(&store, family, view);
+        let expected = 14.0 * 96.0 / 72.0 * span;
+        assert!(
+            (height - expected).abs() < 0.01,
+            "{family}: {height} vs {expected}"
+        );
+    }
+}
+
+#[test]
 fn segoe_ui_light_and_semilight_measure_at_word_advances() {
     let (mut store, base) = store_with_font();
     for family in ["Segoe UI Light", "Segoe UI Semilight"] {
