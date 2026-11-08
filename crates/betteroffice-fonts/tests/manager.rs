@@ -617,3 +617,46 @@ fn on_demand_defers_local_reads_and_preload_reads_at_open() {
         })
     ));
 }
+
+#[test]
+fn naskh_styled_families_chain_noto_naskh_arabic_as_their_arabic_fallback() {
+    let root = tempfile::tempdir().unwrap();
+    deploy_flat(root.path());
+    let latin =
+        BundledFonts::from_pack_directories(vec![(FontPack::Latin, root.path().into())]).unwrap();
+    let manager = FontManager::new(
+        &FontSource::Provider(Arc::new(latin)),
+        FontLoading::OnDemand,
+    )
+    .unwrap();
+    let arabic = |family: &str, bold: bool| {
+        manager
+            .resolve(
+                family,
+                bold,
+                false,
+                &["arabic".to_string()],
+                LastResortOffice::Word,
+            )
+            .into_iter()
+            .filter(|face| face.family.contains("Arabic"))
+            .map(|face| (face.family, face.bold))
+            .collect::<Vec<_>>()
+    };
+    for family in ["Simplified Arabic", "Traditional Arabic"] {
+        for bold in [false, true] {
+            assert_eq!(
+                arabic(family, bold),
+                [("Noto Naskh Arabic".to_string(), false)]
+            );
+        }
+    }
+    for family in ["Arial", "Times New Roman"] {
+        for bold in [false, true] {
+            assert_eq!(
+                arabic(family, bold),
+                [("Noto Sans Arabic".to_string(), bold)]
+            );
+        }
+    }
+}

@@ -193,11 +193,11 @@ export function createRustMeasureSource(options: {
                 if (implicit) return false;
               }
               if (
-                registry.getCachedScriptFallbackIds([script], false) !==
+                registry.getCachedScriptFallbackIds([script], false, requirement.family) !==
                 undefined
               )
                 return false;
-              await registry.getScriptFallbackIds([script]);
+              await registry.getScriptFallbackIds([script], requirement.family);
               return true;
             } catch {
               return false;
@@ -210,7 +210,7 @@ export function createRustMeasureSource(options: {
         const earlier = [
           ...(registry.getCachedFontIdChain(requirement.family, requirement.bold, requirement.italic, false) ?? []),
           ...(implicit && hosted?.has(requirement.family.trim().toLowerCase()) ? [] :
-            registry.getCachedScriptFallbackIds(requirement.scripts ?? [], false) ?? []),
+            registry.getCachedScriptFallbackIds(requirement.scripts ?? [], false, requirement.family) ?? []),
         ];
         return registry.prepareBaseLatin(requirement.family, requirement.bold, requirement.italic,
           requirement.characters ?? [], earlier, requirement.key);
@@ -233,6 +233,7 @@ export function createRustMeasureSource(options: {
         scriptIds: implicit && hosted?.has(requirement.family.trim().toLowerCase()) ? [] : registry.getCachedScriptFallbackIds(
           requirement.scripts ?? [],
           false,
+          requirement.family,
         ),
       }));
       if (
@@ -254,6 +255,8 @@ export function createRustMeasureSource(options: {
         );
         const scriptIds = implicit && hosted?.has(requirement.family.trim().toLowerCase()) ? [] : registry.getCachedScriptFallbackIds(
           requirement.scripts ?? [],
+          true,
+          requirement.family,
         );
         if (familyIds === undefined || scriptIds === undefined)
           return undefined;
@@ -293,7 +296,7 @@ export function createRustMeasureSource(options: {
         settled.set(requirement.key, registry.settledBaseLatinCharacters(requirement.key));
         const familyIds = registry.getCachedFontIdChain(requirement.family, requirement.bold, requirement.italic, false);
         const scriptIds = implicit && hosted?.has(requirement.family.trim().toLowerCase()) ? [] :
-          registry.getCachedScriptFallbackIds(requirement.scripts ?? [], false);
+          registry.getCachedScriptFallbackIds(requirement.scripts ?? [], false, requirement.family);
         if (familyIds === undefined || scriptIds === undefined) continue;
         const earlier = [...familyIds, ...scriptIds];
         const coverage = earlier.map(id => registry.coverageOf(id));

@@ -1826,6 +1826,14 @@
       "NotoSansKR-Regular.otf.zst"
     ]
   },
+  "requestedFamilyScriptFallback": {
+    "simplified arabic": {
+      "arabic": "NotoNaskhArabic-Regular.ttf.zst"
+    },
+    "traditional arabic": {
+      "arabic": "NotoNaskhArabic-Regular.ttf.zst"
+    }
+  },
   "lastResortFamilies": {
     "powerpoint": {
       "sans": "Carlito",

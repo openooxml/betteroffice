@@ -51,6 +51,7 @@ pub struct Catalog {
     pub width_matched_substitutes: BTreeMap<String, WidthMatchedSubstitute>,
     pub emulated_symbol_families: Vec<String>,
     pub script_fallback_order: BTreeMap<String, Vec<String>>,
+    pub requested_family_script_fallback: BTreeMap<String, BTreeMap<String, String>>,
     pub last_resort_families: BTreeMap<String, LastResortFamilies>,
     pub glyph_fallback_families: Vec<String>,
 }
