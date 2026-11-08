@@ -290,7 +290,10 @@ fn a_patched_rule_reads_back_a_name_with_whitespace_controls() {
             let mut workbook = Workbook::open(&book_with_rule("Data", "Spare", rule)).unwrap();
             rename(&mut workbook, 0, name).unwrap();
             let held = rule_formulas(&workbook);
-            assert!(held[0].starts_with(&format!("'{name}'!")), "{name:?}: {held:?}");
+            assert!(
+                held[0].starts_with(&format!("'{name}'!")),
+                "{name:?}: {held:?}"
+            );
             let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
             assert_eq!(rule_formulas(&reopened), held, "{name:?} {rule}");
             assert_eq!(reopened.model().sheets[0].name, name);
@@ -313,6 +316,10 @@ fn a_patched_rule_keeps_an_authored_control_character_as_a_reference() {
         assert_eq!(held, ["'New Data'!$A$1&\"a\u{1}b\""], "{rule}");
         let saved = workbook.save().unwrap();
         assert!(!part(&saved, OTHER).contains('\u{1}'), "{rule}");
-        assert_eq!(rule_formulas(&Workbook::open(&saved).unwrap()), held, "{rule}");
+        assert_eq!(
+            rule_formulas(&Workbook::open(&saved).unwrap()),
+            held,
+            "{rule}"
+        );
     }
 }
