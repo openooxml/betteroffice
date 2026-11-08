@@ -595,13 +595,15 @@ impl FontStore {
         let selection = entry.metrics.os2_fs_selection;
         let family = family.trim().to_lowercase();
         let family = crate::word_fonts::requested_family_name(&family);
-        let table = family_metrics(family, selection & (1 << 5) != 0, selection & 1 != 0);
-        let requested = crate::word_fonts::requested_line_metrics(family).map(|mut requested| {
-            if table.is_some() {
-                requested.advance_scale = 1.0;
-            }
-            requested
-        });
+        let bold = selection & (1 << 5) != 0;
+        let table = family_metrics(family, bold, selection & 1 != 0);
+        let requested =
+            crate::word_fonts::requested_line_metrics_styled(family, bold).map(|mut requested| {
+                if table.is_some() {
+                    requested.advance_scale = 1.0;
+                }
+                requested
+            });
         let widths = table.filter(|metrics| !runs_at_own_widths(self, owner, metrics));
         if requested.is_none() && widths.is_none() {
             return Ok(base);

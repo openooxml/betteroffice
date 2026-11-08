@@ -291,6 +291,8 @@ const LATIN_FACES: &[(&[&str], RequestedLineMetrics)] = &[
     (&["cambria math"], latin(2048, 1595, -455, 353)),
     (&["calibri light"], latin(2048, 1536, -512, 452)),
     (&["roboto"], latin(2048, 1900, -500, 0)),
+    (&["simplified arabic"], latin(2048, 2416, -979, 0)),
+    (&["traditional arabic"], latin(2048, 2036, -1025, 0)),
     // Lucida Bright runs 1.113x the last-resort Liberation Sans it falls back
     // to: its advances over a-z, weighted by English letter frequency and one
     // space per 5.1 letters, against Liberation Sans's. Measured off the
@@ -303,6 +305,24 @@ const LATIN_FACES: &[(&[&str], RequestedLineMetrics)] = &[
     (&["lucida calligraphy"], latin(2048, 1900, -666, 0)),
     (&["wingdings 3"], latin(2048, 1900, -432, 0)),
 ];
+
+/// Bold faces whose span differs from their family's regular face, read off
+/// the bold font programs Word embeds.
+const BOLD_FACES: &[(&[&str], RequestedLineMetrics)] = &[
+    (&["simplified arabic"], latin(2048, 2416, -989, 0)),
+    (&["traditional arabic"], latin(2048, 2095, -1044, 0)),
+];
+
+/// [`requested_line_metrics`] for a face of the given weight: a bold face
+/// listed in [`BOLD_FACES`] measures with its own span.
+pub fn requested_line_metrics_styled(family: &str, bold: bool) -> Option<RequestedLineMetrics> {
+    let key = family.trim().to_lowercase();
+    let key = requested_family_name(&key);
+    bold.then(|| BOLD_FACES.iter().find(|(names, _)| names.contains(&key)))
+        .flatten()
+        .map(|&(_, metrics)| metrics)
+        .or_else(|| requested_line_metrics(key))
+}
 
 /// Vertical metrics Word measures `family` with, or `None` for a family this
 /// table does not cover. Matching is case-insensitive and trimmed, the same
@@ -573,6 +593,8 @@ mod tests {
             ("Tw Cen MT", 2230.0 / 2048.0),
             ("Tw Cen MT Condensed", 2188.0 / 2048.0),
             ("Cambria", 2401.0 / 2048.0),
+            ("Simplified Arabic", 3395.0 / 2048.0),
+            ("Traditional Arabic", 3061.0 / 2048.0),
         ] {
             let metrics = requested_line_metrics(family).expect(family);
             let measured = (f32::from(metrics.hhea_ascender) - f32::from(metrics.hhea_descender)
