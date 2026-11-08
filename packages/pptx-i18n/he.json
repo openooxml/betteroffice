@@ -94,6 +94,7 @@
     "canvasLabelWithSelection": "שקופית {current} מתוך {total}; אובייקט נבחר {name}"
   },
   "a11y": {
+    "chartNoData": "אין נתונים",
     "slideWithTitle": "שקופית {current} מתוך {total}: {title}",
     "objectSelected": "{name} נבחר",
     "editingText": "עריכת {name}"

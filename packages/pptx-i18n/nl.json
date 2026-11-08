@@ -94,6 +94,7 @@
     "canvasLabelWithSelection": "Dia {current} van {total}; geselecteerd object {name}"
   },
   "a11y": {
+    "chartNoData": "Geen gegevens",
     "slideWithTitle": "Dia {current} van {total}: {title}",
     "objectSelected": "{name} geselecteerd",
     "editingText": "{name} bewerken"

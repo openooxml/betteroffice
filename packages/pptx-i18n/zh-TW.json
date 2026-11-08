@@ -94,6 +94,7 @@
     "canvasLabelWithSelection": "第 {current} 張投影片，共 {total} 張；已選取物件 {name}"
   },
   "a11y": {
+    "chartNoData": "無資料",
     "slideWithTitle": "第 {current} 張投影片，共 {total} 張：{title}",
     "objectSelected": "已選取 {name}",
     "editingText": "正在編輯 {name}"

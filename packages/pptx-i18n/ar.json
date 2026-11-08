@@ -94,6 +94,7 @@
     "canvasLabelWithSelection": "الشريحة {current} من {total}؛ الكائن المحدد {name}"
   },
   "a11y": {
+    "chartNoData": "لا توجد بيانات",
     "slideWithTitle": "الشريحة {current} من {total}: {title}",
     "objectSelected": "تم تحديد {name}",
     "editingText": "جارٍ تحرير {name}"

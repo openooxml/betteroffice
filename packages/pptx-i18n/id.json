@@ -94,6 +94,7 @@
     "canvasLabelWithSelection": "Slide {current} dari {total}; objek terpilih {name}"
   },
   "a11y": {
+    "chartNoData": "Tidak ada data",
     "slideWithTitle": "Slide {current} dari {total}: {title}",
     "objectSelected": "{name} dipilih",
     "editingText": "Mengedit {name}"

@@ -1,6 +1,7 @@
 import { expect, mock, spyOn, test } from 'bun:test';
 import { act, fireEvent, render, waitFor } from '@testing-library/react';
 import type { SlideDisplayList, TextBoxPrimitive, TextLanguage, TextLinkTarget } from '@betteroffice/pptx';
+import { de } from '@betteroffice/pptx-i18n';
 import { LocaleProvider } from '../i18n';
 import { PeerlessSlideMirror } from './PeerlessSlideMirror';
 import type { PeerlessPresentation } from './usePeerlessPresentation';
@@ -236,6 +237,24 @@ test('a table with a grid renders table, row and header roles with spans and cou
   ]);
   expect(view.getByRole('columnheader', { name: 'Region' })).toBeTruthy();
   expect(view.getByRole('rowheader', { name: 'North' })).toBeTruthy();
+});
+
+test('a chart that caches no points is described as having no data in the editor language', () => {
+  const list: SlideDisplayList = {
+    contractVersion: 2, width: 960, height: 540, primitives: [{
+      kind: 'chart', objectId: 1, shapeId: 'chart', x: 0, y: 0, w: 600, h: 300, name: 'Chart 1',
+      label: 'Untitled chart, doughnut chart, 0 series, 0 categories', primitives: [], data: { categories: [], series: [] },
+    }],
+  };
+  const description = (i18n?: typeof de) => {
+    const view = render(<LocaleProvider i18n={i18n}><PeerlessSlideMirror run={{} as PeerlessPresentation} list={list} label="Slide 1" scale={1} /></LocaleProvider>);
+    const chart = view.getByRole('img', { name: 'Untitled chart, doughnut chart, 0 series, 0 categories' });
+    const text = chart.getAttribute('aria-description');
+    view.unmount();
+    return text;
+  };
+  expect(description()).toBe('No data');
+  expect(description(de)).toBe('Keine Daten');
 });
 
 test('a chart with data renders a figure holding its values as a table with series and category headers', () => {

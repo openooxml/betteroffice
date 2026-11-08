@@ -394,8 +394,17 @@ test('a chart without data, or with data that does not fit, reads as its summary
   for (const data of broken) {
     const [item] = items(list([chartPrimitive(data)]));
     expect(item!.chart).toBeUndefined();
+    expect(item!.chartNoData).toBeUndefined();
     expect(item!.label).toBe('Revenue, column chart, 2 series, 3 categories');
   }
+});
+
+test('a chart that caches no points reads as its summary and is marked as having no data', () => {
+  const [item] = items(list([chartPrimitive({ categories: [], series: [] })]));
+  expect(item!.chart).toBeUndefined();
+  expect(item!.chartNoData).toBe(true);
+  expect(item!.label).toBe('Revenue, column chart, 2 series, 3 categories');
+  expect(items(list([chartPrimitive({ categories: [], series: [] })], { c: { decorative: true } }))).toEqual([]);
 });
 
 test('a decorative chart reads as nothing', () => {

@@ -636,8 +636,9 @@ export interface ChartPrimitive extends PrimitiveBase {
   name: string;
   label: string;
   primitives: SlidePrimitive[];
-  /** The plotted values as text, for assistive technology. Older engines
-   *  and charts over the size cap leave it out. */
+  /** The plotted values as text, for assistive technology, with no categories
+   *  or series when the chart caches no points. Older engines and charts over
+   *  the size cap leave it out. */
   data?: ChartData;
 }
 
