@@ -114,6 +114,29 @@ describe('YrsSession.renderPng', () => {
     } finally { session.destroy(); }
   });
 
+  test('lays out a long paragraph in time proportional to its length', async () => {
+    stubBrowser();
+    const layoutMs = async (repeats: number) => {
+      const session = await opened();
+      try {
+        session.insertText({ story: 'body', paraId: session.paragraphs('body')[5]!.paraId, offset: 0 }, 'A great many more words at the start of this page. '.repeat(repeats));
+        const started = performance.now();
+        await session.renderPng({ page: 9999 }).catch(() => undefined);
+        return performance.now() - started;
+      } finally { session.destroy(); }
+    };
+    await layoutMs(150);
+    let short = Infinity;
+    let long = Infinity;
+    for (let round = 0; round < 5; round++) {
+      short = Math.min(short, await layoutMs(150));
+      long = Math.min(long, await layoutMs(600));
+    }
+    // Load only adds time, so the fastest run tracks the cost. Linear layout is
+    // about 4x-5x here; the quadratic slicing it guards against was 8x-10x.
+    expect(long / short).toBeLessThan(6.5);
+  }, 60_000);
+
   test('wraps text in a family with no bundled face of its own, as the editor does', async () => {
     stubBrowser();
     const session = await opened();

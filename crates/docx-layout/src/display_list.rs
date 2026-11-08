@@ -79,6 +79,7 @@
 //! host with a single number type.
 
 use crate::fmath;
+use crate::utf16_index::RunTexts;
 use ooxml_drawingml::GeometryPathCommand;
 use ooxml_drawingml::chart::{
     PlotAxis, PlotAxisKind, PlotAxisRange, PlotAxisTitles, PlotChart, PlotChartText,
@@ -4308,35 +4309,11 @@ struct ResolvedSegment<'a> {
     pm_end: Option<i64>,
 }
 
-fn utf16_len(text: &str) -> usize {
-    text.encode_utf16().count()
-}
-
-/// Slice using UTF-16 offsets. Start/end are snapped to
-/// scalar boundaries so malformed hand-authored envelopes cannot split a
-/// surrogate pair; authoritative cluster metadata already lands on grapheme
-/// boundaries and therefore passes through unchanged.
-fn slice_utf16(text: &str, start: usize, end: usize) -> String {
-    slice_utf16_with_total(text, utf16_len(text), start, end)
-}
-
-/// [`slice_utf16`] with the text's utf16 length precomputed, so per-line run
-/// slicing measures each run once instead of once per bound.
-fn slice_utf16_with_total(text: &str, total: usize, start: usize, end: usize) -> String {
-    let start = start.min(total);
-    let end = end.max(start).min(total);
-    let mut units = 0usize;
-    text.chars()
-        .filter_map(|ch| {
-            let next = units + ch.len_utf16();
-            let keep = units >= start && next <= end;
-            units = next;
-            keep.then_some(ch)
-        })
-        .collect()
-}
-
-fn resolve_line_segments<'a>(runs: &'a [RunIn], line: &LineIn) -> Vec<ResolvedSegment<'a>> {
+fn resolve_line_segments<'a>(
+    runs: &'a [RunIn],
+    line: &LineIn,
+    texts: &RunTexts<'a>,
+) -> Vec<ResolvedSegment<'a>> {
     #[cfg(any(test, feature = "test-support"))]
     crate::work_counters::resolved_line();
     let mut out = Vec::new();
@@ -4346,7 +4323,8 @@ fn resolve_line_segments<'a>(runs: &'a [RunIn], line: &LineIn) -> Vec<ResolvedSe
         };
         match run {
             RunIn::Text(t) => {
-                let total = utf16_len(&t.text);
+                let index = texts.get(run_index, &t.text);
+                let total = index.len();
                 let start = if run_index == line.head_run {
                     line.head_char.min(total)
                 } else {
@@ -4358,7 +4336,7 @@ fn resolve_line_segments<'a>(runs: &'a [RunIn], line: &LineIn) -> Vec<ResolvedSe
                     total
                 };
                 let end = end.max(start);
-                let text = slice_utf16_with_total(&t.text, total, start, end);
+                let text = index.whole_scalars(start, end).to_string();
                 // an unsliced run keeps its own document span; a boundary slice
                 // shifts the positions to match (text runs are 1 position per char)
                 let (pm_start, pm_end) = if start == 0 && end == total {
@@ -6750,6 +6728,7 @@ pub(crate) fn emit_paragraph_fragment(
     let mut line_top = origin_y;
     let mut last_line: Option<LinePaintMetrics> = None;
     let scripts = paragraph_scripts(&block.runs);
+    let texts = RunTexts::new(block.runs.len());
     for idx in frag.from_line..frag.to_line.min(total_lines) {
         let line = &measure.lines[idx];
         // lead skip reserves vertical space above the line (float push-down)
@@ -6782,6 +6761,7 @@ pub(crate) fn emit_paragraph_fragment(
             &block_ref,
             ctx,
             &scripts,
+            &texts,
         );
         for primitive in &mut prims[line_stamp_from..] {
             if let Some(attrs) = doc_attrs_mut(primitive) {
@@ -6924,6 +6904,7 @@ fn authoritative_line_items<'a>(
     ctx: &RenderCtx<'_>,
     default_level: u8,
     leading_inline_box: bool,
+    texts: &RunTexts<'a>,
 ) -> Option<Vec<LinePaintItem<'a>>> {
     let mut slices: Vec<(usize, usize, usize, f64, u8, u64, Option<u64>)> = Vec::new();
     if !line.bidi_slices.is_empty() {
@@ -6986,7 +6967,10 @@ fn authoritative_line_items<'a>(
         let run = block.runs.get(run_index)?;
         match run {
             RunIn::Text(text) => {
-                let visible = slice_utf16(&text.text, start, end);
+                let visible = texts
+                    .get(run_index, &text.text)
+                    .whole_scalars(start, end)
+                    .to_string();
                 out.push(LinePaintItem::Text(LineTextItem {
                     text: visible,
                     fmt: &text.fmt,
@@ -7096,17 +7080,19 @@ pub(crate) fn line_text_insets(
 /// their resolved widths (tabs/images exact, text distributed over the measured
 /// line width), decorations ride with their run in paint order (highlight and
 /// comment tint behind the glyphs, underline/strike after).
-fn emit_line(
+#[allow(clippy::too_many_arguments)]
+fn emit_line<'a>(
     prims: &mut Vec<Primitive>,
-    block: &ParagraphBlockIn,
+    block: &'a ParagraphBlockIn,
     line: &LineIn,
     geom: LineGeom,
     block_ref: &BlockRef,
     ctx: &RenderCtx<'_>,
     scripts: &[String],
+    texts: &RunTexts<'a>,
 ) -> Option<LinePaintMetrics> {
     let echo_start = prims.len();
-    let segments = resolve_line_segments(&block.runs, line);
+    let segments = resolve_line_segments(&block.runs, line, texts);
     let attrs = block.attrs.as_ref();
     let auto_space = ooxml_text::AutoSpace::from_options(
         attrs.and_then(|attrs| attrs.auto_space_de),
@@ -7117,8 +7103,14 @@ fn emit_line(
         && attrs
             .and_then(|attrs| attrs.leading_inline_box.as_ref())
             .is_some();
-    let authoritative_items =
-        authoritative_line_items(block, line, ctx, default_bidi_level, leading_inline_box);
+    let authoritative_items = authoritative_line_items(
+        block,
+        line,
+        ctx,
+        default_bidi_level,
+        leading_inline_box,
+        texts,
+    );
     let authoritative_active = authoritative_items.is_some();
     let authoritative_width = authoritative_items
         .as_ref()
@@ -14374,6 +14366,110 @@ fn normalize_integral_json_numbers(value: &mut Value) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn shared_offsets_resolve_every_line_exactly_as_a_fresh_scan() {
+        use super::*;
+        use crate::utf16_index::generated::{Rng, lines, runs};
+
+        fn old_slice(text: &str, start: usize, end: usize) -> String {
+            let total = text.encode_utf16().count();
+            let start = start.min(total);
+            let end = end.max(start).min(total);
+            let mut units = 0usize;
+            text.chars()
+                .filter_map(|ch| {
+                    let next = units + ch.len_utf16();
+                    let keep = units >= start && next <= end;
+                    units = next;
+                    keep.then_some(ch)
+                })
+                .collect()
+        }
+
+        fn old_resolve(
+            runs: &[RunIn],
+            line: &LineIn,
+        ) -> Vec<(usize, String, Option<i64>, Option<i64>)> {
+            let mut out = Vec::new();
+            for run_index in line.head_run..=line.tail_run {
+                let Some(RunIn::Text(t)) = runs.get(run_index) else {
+                    continue;
+                };
+                let total = t.text.encode_utf16().count();
+                let start = if run_index == line.head_run {
+                    line.head_char.min(total)
+                } else {
+                    0
+                };
+                let end = if run_index == line.tail_run {
+                    line.tail_char.min(total)
+                } else {
+                    total
+                };
+                let end = end.max(start);
+                let (pm_start, pm_end) = if start == 0 && end == total {
+                    (t.pm_start, t.pm_end.or(t.pm_start.map(|p| p + end as i64)))
+                } else {
+                    match t.pm_start {
+                        Some(p) => (Some(p + start as i64), Some(p + end as i64)),
+                        None => (None, None),
+                    }
+                };
+                out.push((run_index, old_slice(&t.text, start, end), pm_start, pm_end));
+            }
+            out
+        }
+
+        let mut rng = Rng::new(0xfeed);
+        for _ in 0..1500 {
+            let runs: Vec<RunIn> = runs(&mut rng)
+                .into_iter()
+                .map(|run| serde_json::from_value(run).unwrap())
+                .collect();
+            let units: Vec<usize> = runs
+                .iter()
+                .map(|run| match run {
+                    RunIn::Text(text) => text.text.encode_utf16().count(),
+                    _ => 0,
+                })
+                .collect();
+            let texts = RunTexts::new(runs.len());
+            for (head_run, head_char, tail_run, tail_char) in lines(&mut rng, &units) {
+                let line: LineIn = serde_json::from_value(serde_json::json!({
+                    "headRun": head_run, "headChar": head_char, "tailRun": tail_run, "tailChar": tail_char,
+                }))
+                .unwrap();
+                let actual: Vec<_> = resolve_line_segments(&runs, &line, &texts)
+                    .into_iter()
+                    .filter_map(|segment| {
+                        let index = runs.iter().position(|run| std::ptr::eq(run, segment.run))?;
+                        matches!(segment.run, RunIn::Text(_))
+                            .then(|| (index, segment.text, segment.pm_start, segment.pm_end))
+                    })
+                    .collect();
+                assert_eq!(
+                    actual,
+                    old_resolve(&runs, &line),
+                    "line {head_run}:{head_char}..{tail_run}:{tail_char}"
+                );
+                for (run_index, run) in runs.iter().enumerate() {
+                    if let RunIn::Text(text) = run {
+                        for (start, end) in [
+                            (head_char, tail_char),
+                            (tail_char, head_char + 5),
+                            (0, tail_char),
+                        ] {
+                            assert_eq!(
+                                texts.get(run_index, &text.text).whole_scalars(start, end),
+                                old_slice(&text.text, start, end)
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn paragraph_scripts_take_kana_and_hangul_context_across_runs() {

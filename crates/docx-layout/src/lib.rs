@@ -81,6 +81,7 @@ pub mod regions;
 pub mod resolve_lines;
 mod transcode;
 pub mod types;
+mod utf16_index;
 
 pub mod break_policy;
 pub mod cell_layout;

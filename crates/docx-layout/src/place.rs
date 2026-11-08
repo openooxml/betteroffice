@@ -44,7 +44,7 @@ use crate::paragraph_spacing::{
     apply_contextual_spacing_measured, get_spacing_after, get_spacing_before,
 };
 use crate::prescan::{LayoutPlan, SectionLayoutConfig, default_columns, prescan};
-use crate::resolve_lines::{ResolvedLine, ResolvedSegment, resolve_line_segments, utf16_len};
+use crate::resolve_lines::{ResolvedLine, ResolvedSegment, resolve_line_segments_in, utf16_len};
 use crate::section_breaks::resolve_page_margins;
 use crate::types::{
     BlockExtent, BlockId, ChartBlock, ChartExtent, ChartFragment, Fragment, ImageBlock,
@@ -53,6 +53,7 @@ use crate::types::{
     SectionBreakType, ShapeBlock, ShapeExtent, ShapeFragment, Size, TextBoxBlock, TextBoxExtent,
     TextBoxFragment,
 };
+use crate::utf16_index::RunTexts;
 
 /// Default page size (US Letter in pixels at 96 DPI).
 const DEFAULT_PAGE_SIZE: Size = Size {
@@ -1686,13 +1687,14 @@ fn build_resolved_lines(
     from_line: usize,
     to_line: usize,
 ) -> Vec<ResolvedLine> {
+    let texts = RunTexts::new(block.runs.len());
     let mut resolved = Vec::new();
     for line_index in from_line..to_line {
         let Some(line) = measure.lines.get(line_index) else {
             continue;
         };
         resolved.push(ResolvedLine {
-            segments: resolve_line_segments(&block.runs, line),
+            segments: resolve_line_segments_in(&block.runs, line, &texts),
         });
     }
     resolved
