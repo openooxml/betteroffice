@@ -2049,6 +2049,44 @@ impl<'c> PageImages<'c> {
         }
     }
 
+    /// A JPEG or PNG past [`MAX_IMAGE_PIXELS`], decoded at a reduced size
+    /// charged to the page before it allocates.
+    fn decode_reduced(
+        &mut self,
+        bytes: &[u8],
+        width: u32,
+        height: u32,
+        charge: &mut ImageCharge,
+    ) -> Decode {
+        let Some((pixels, cost)) =
+            ooxml_raster::downscale::reduced_cost(width, height, MAX_IMAGE_PIXELS)
+        else {
+            return Decode::Refused;
+        };
+        if cost > MAX_IMAGE_BYTES {
+            return Decode::Refused;
+        }
+        if self.pixels + pixels > MAX_PAGE_IMAGE_PIXELS || self.bytes + cost > MAX_PAGE_IMAGE_BYTES
+        {
+            return Decode::OverBudget;
+        }
+        self.pixels += pixels;
+        self.bytes += cost;
+        charge.pixels = pixels;
+        charge.bytes_post = cost;
+        IMAGE_DECODE_COUNT.fetch_add(1, Ordering::Relaxed);
+        let Some((mut data, width, height)) =
+            ooxml_raster::downscale::decode_reduced(bytes, MAX_IMAGE_PIXELS)
+        else {
+            return Decode::Refused;
+        };
+        ooxml_raster::premultiply_rgba(&mut data);
+        match IntSize::from_wh(width, height).and_then(|size| Pixmap::from_vec(data, size)) {
+            Some(pixmap) => Decode::Decoded(pixmap),
+            None => Decode::Refused,
+        }
+    }
+
     /// `Decoded` pixels, `Refused` for content this backend will not draw
     /// (bytes it cannot decode, or an image past [`MAX_IMAGE_PIXELS`] or
     /// [`MAX_IMAGE_BYTES`]), or `OverBudget` when the page's decode budget
@@ -2072,7 +2110,7 @@ impl<'c> PageImages<'c> {
         let (declared_width, declared_height) = decoder.dimensions();
         let declared = u64::from(declared_width) * u64::from(declared_height);
         if declared > MAX_IMAGE_PIXELS {
-            return Decode::Refused;
+            return self.decode_reduced(&bytes, declared_width, declared_height, charge);
         }
         if self.pixels + declared > MAX_PAGE_IMAGE_PIXELS {
             return Decode::OverBudget;
@@ -3407,6 +3445,46 @@ fn ensure_keys(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn decoded_size(bytes: &[u8]) -> Option<(u32, u32)> {
+        let mut cache = ImageCache::default();
+        let mut page = PageImages::new(&mut cache);
+        match page.decode(bytes, &mut ImageCharge::default()) {
+            Decode::Decoded(pixmap) => Some((pixmap.width(), pixmap.height())),
+            _ => None,
+        }
+    }
+
+    fn solid_rgb_png(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, width, height);
+            encoder.set_color(png::ColorType::Rgb);
+            encoder.set_compression(png::Compression::Fast);
+            let mut writer = encoder.write_header().expect("png header");
+            let mut stream = writer.stream_writer().expect("png stream");
+            let row = [0x11_u8, 0x66, 0xcc].repeat(width as usize);
+            for _ in 0..height {
+                std::io::Write::write_all(&mut stream, &row).expect("png row");
+            }
+            stream.finish().expect("png finish");
+        }
+        bytes
+    }
+
+    #[test]
+    fn only_a_picture_past_the_pixel_cap_is_decoded_reduced() {
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+            .encode_image(&image::RgbImage::from_pixel(
+                5000,
+                1000,
+                image::Rgb([200, 40, 10]),
+            ))
+            .expect("jpeg");
+        assert_eq!(decoded_size(&jpeg), Some((5000, 1000)));
+        assert_eq!(decoded_size(&solid_rgb_png(6000, 6000)), Some((4096, 4096)));
+    }
 
     fn clip(x: f32, y: f32, w: f32, h: f32) -> FRect {
         FRect { x, y, w, h }
