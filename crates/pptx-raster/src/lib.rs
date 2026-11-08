@@ -1544,6 +1544,9 @@ impl ImageBudget {
             .ok()?;
         let (declared_width, declared_height) = decoder.dimensions();
         let declared = u64::from(declared_width) * u64::from(declared_height);
+        if declared > MAX_IMAGE_PIXELS {
+            return self.decode_reduced(&bytes, declared_width, declared_height);
+        }
         let cost = decoder
             .total_bytes()
             .saturating_add(declared.saturating_mul(4));
@@ -1561,6 +1564,30 @@ impl ImageBudget {
         decoded.apply_orientation(orientation);
         let size = IntSize::from_wh(decoded.width(), decoded.height())?;
         Some((decoded.into_rgba8().into_raw(), size))
+    }
+
+    /// A JPEG or PNG past [`MAX_IMAGE_PIXELS`], decoded at a reduced size, or
+    /// `None` when no reduction fits. The slide is charged the source pixels the
+    /// decode reads and the bytes it may hold, before it allocates.
+    fn decode_reduced(
+        &mut self,
+        bytes: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Option<(Vec<u8>, IntSize)> {
+        let (pixels, cost) =
+            ooxml_raster::downscale::reduced_cost(bytes, width, height, MAX_IMAGE_PIXELS)?;
+        if self.pixels + pixels > MAX_SLIDE_IMAGE_PIXELS
+            || cost > MAX_IMAGE_BYTES
+            || self.bytes + cost > MAX_SLIDE_IMAGE_BYTES
+        {
+            return None;
+        }
+        self.pixels += pixels;
+        self.bytes += cost;
+        let (data, width, height) =
+            ooxml_raster::downscale::decode_reduced(bytes, MAX_IMAGE_PIXELS)?;
+        Some((data, IntSize::from_wh(width, height)?))
     }
 
     /// The same, from an SVG the sandbox accepts, with its intrinsic size,

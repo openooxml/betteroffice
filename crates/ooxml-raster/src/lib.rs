@@ -5,6 +5,10 @@ mod glyph;
 pub mod svg;
 #[cfg(all(feature = "svg", target_arch = "wasm32"))]
 compile_error!("the svg rasterizer is native only");
+#[cfg(all(feature = "downscale", not(target_arch = "wasm32")))]
+pub mod downscale;
+#[cfg(all(feature = "downscale", target_arch = "wasm32"))]
+compile_error!("the reduced raster decoder is native only");
 
 pub use glyph::{CachedGlyph, GlyphCache, fill_glyph};
 

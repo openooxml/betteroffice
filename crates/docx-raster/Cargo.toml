@@ -19,7 +19,7 @@ default = ["base-latin"]
 base-latin = ["docx-layout/base-latin", "ooxml-text/base-latin"]
 
 [dependencies]
-ooxml-raster = { workspace = true, features = ["svg"] }
+ooxml-raster = { workspace = true, features = ["svg", "downscale"] }
 ooxml-metafile = { workspace = true, features = ["svg"] }
 base64 = "0.22"
 docx-layout.workspace = true

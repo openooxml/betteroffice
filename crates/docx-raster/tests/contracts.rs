@@ -1307,8 +1307,8 @@ fn a_shared_cache_does_not_spend_the_next_pages_budget_on_refusals() {
 }
 
 /// PNG headers declaring a bomb-sized surface, with an IDAT too short to
-/// decode. The declared extent is the only thing the budget may consult, so
-/// these skip on the cap and never on the truncated stream.
+/// decode. The larger is past what a reduced decode may read and skips on its
+/// header; the smaller reaches the reduced decode and skips on its stream.
 const BOMB_40000_SQUARE: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAnEAAAJxACAIAAADebplSAAAAC0lEQVR4nGNgQAUAABAAATm9j2UAAAAASUVORK5CYII=";
 const BOMB_9000_SQUARE: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAIygAACMoCAIAAADit+XtAAAAC0lEQVR4nGNgQAUAABAAATm9j2UAAAAASUVORK5CYII=";
 

@@ -18,7 +18,7 @@ name = "pptx_raster"
 fuzzing = []
 
 [dependencies]
-ooxml-raster = { workspace = true, features = ["svg"] }
+ooxml-raster = { workspace = true, features = ["svg", "downscale"] }
 image = { version = "0.25", default-features = false, features = [
   "bmp",
   "gif",
