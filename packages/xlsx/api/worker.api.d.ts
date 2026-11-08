@@ -930,7 +930,7 @@ export type XlsxExportResult<T> = {
 export type { XlsxHeaderFooterText, XlsxHeaderFooterPair, XlsxSheetHeaderFooter } from './edits';
 
 // ---- saveWarnings.d.ts ----
-export type { SaveResult, SaveWarning, SaveWarningCode } from '../../../shared/saveWarnings';
+export type { SaveResult, SaveWarning, SaveWarningCode } from '../../../shared/office-session/saveWarnings';
 
 // ---- selection/types.d.ts ----
 /**
@@ -1041,7 +1041,7 @@ import { type PipeCommandPayload } from '../../../../shared/collaboration-pipe/p
 import type { AwarenessCursor } from '../collaboration/types';
 import { type SessionTransport } from '../../../../shared/office-session/transport';
 import { SessionFailure, type Promisified } from '../../../../shared/office-session/types';
-import { type SaveResult } from '../../../../shared/saveWarnings';
+import { type SaveResult } from '../../../../shared/office-session/saveWarnings';
 import { type OpenWorkbookOptions, type Viewport, type WorkbookHandle } from '../wasm/loader';
 import { type WorkbookFrame, type WorkbookFrameOptions, type WorkbookInitialPaint, type WorkbookSessionEvents, type WorkbookSessionMethods, type WorkbookSessionOpenOptions, type WorkbookSessionState } from './methods';
 import type { CommandBasis, CommandIdentity, CommandStatus, WorkbookAck, WorkbookCommand, WorkbookCommandFrame, WorkbookCommandSelection, WorkbookEditState } from './commandProtocol';
@@ -1414,7 +1414,7 @@ export {};
 
 // ---- session/methods.d.ts ----
 import type { FontDecoderMethods } from '../../../../shared/office-session/fontDecoder';
-import type { SaveWarning } from '../../../../shared/saveWarnings';
+import type { SaveWarning } from '../../../../shared/office-session/saveWarnings';
 import type { XlsxDefinedNamesRequest, XlsxDefinedNamesResult } from '../definedNames';
 import type { PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
 import type { MethodPolicies, SessionState } from '../../../../shared/office-session';
@@ -2787,6 +2787,36 @@ export declare function isClientMessage(value: unknown): value is ClientMessage;
 export declare function isHostMessage(value: unknown): value is HostMessage;
 export {};
 
+// ---- shared/office-session/saveWarnings.d.ts ----
+/**
+ * `unwritable-reference`: the document holds a reference with a character XML 1.0 cannot carry, which the
+ * part cannot be written with, so the save kept the part as the file wrote it. New codes may be added.
+ */
+export type SaveWarningCode = 'unwritable-reference';
+/** A part a save wrote differently from what the document holds, and why. */
+export interface SaveWarning {
+    /** Stable, to match on. */
+    code: SaveWarningCode;
+    /** The package part, such as `xl/charts/chart1.xml`. */
+    part: string;
+    /** What inside the part, such as `chart`. */
+    element?: string;
+    /** The sheet the part belongs to, in a workbook. */
+    sheet?: string;
+    /** A sentence for people; not stable, match on `code`. */
+    message: string;
+}
+/** The saved bytes and the warnings the save carries; `warnings` is empty on an ordinary save. */
+export interface SaveResult {
+    bytes: Uint8Array;
+    warnings: SaveWarning[];
+}
+/**
+ * Emits each warning as a Node process warning with code `BETTEROFFICE_SAVE_WARNING`, so server hosts can
+ * filter it. Does nothing outside Node.
+ */
+export declare function warnSaveWarnings(warnings: readonly SaveWarning[]): void;
+
 // ---- shared/office-session/scheduler.d.ts ----
 export type SchedulerLane = 'input' | 'collab' | 'interactive' | 'background';
 declare const FOREGROUND_LANES: readonly ["input", "collab", "interactive"];
@@ -2920,36 +2950,6 @@ export declare class SessionFailure extends Error {
     readonly diagnostics?: string | undefined;
     constructor(code: SessionFailureCode, message: string, diagnostics?: string | undefined);
 }
-
-// ---- shared/saveWarnings.d.ts ----
-/**
- * `unwritable-reference`: the document holds a reference with a character XML 1.0 cannot carry, which the
- * part cannot be written with, so the save kept the part as the file wrote it. New codes may be added.
- */
-export type SaveWarningCode = 'unwritable-reference';
-/** A part a save wrote differently from what the document holds, and why. */
-export interface SaveWarning {
-    /** Stable, to match on. */
-    code: SaveWarningCode;
-    /** The package part, such as `xl/charts/chart1.xml`. */
-    part: string;
-    /** What inside the part, such as `chart`. */
-    element?: string;
-    /** The sheet the part belongs to, in a workbook. */
-    sheet?: string;
-    /** A sentence for people; not stable, match on `code`. */
-    message: string;
-}
-/** The saved bytes and the warnings the save carries; `warnings` is empty on an ordinary save. */
-export interface SaveResult {
-    bytes: Uint8Array;
-    warnings: SaveWarning[];
-}
-/**
- * Emits each warning as a Node process warning with code `BETTEROFFICE_SAVE_WARNING`, so server hosts can
- * filter it. Does nothing outside Node.
- */
-export declare function warnSaveWarnings(warnings: readonly SaveWarning[]): void;
 
 // ---- wasm/generated/xlsx_wasm.d.ts ----
 /* tslint:disable */
@@ -3315,7 +3315,7 @@ import type { XlsxDefinedNamesRequest, XlsxDefinedNamesResult } from '../defined
 import type { Direction, SelectionData } from '../selection/types';
 import type { InitInput } from './generated/xlsx_wasm.js';
 import { type FontDecoder } from '../../../../shared/office-session/fontDecoder';
-import { type SaveResult } from '../../../../shared/saveWarnings';
+import { type SaveResult } from '../../../../shared/office-session/saveWarnings';
 export declare const decodeFontFace: FontDecoder;
 import type { XlsxPngFont, XlsxPngOptions, XlsxPngTarget } from './pngTarget';
 export type { XlsxFontFace, XlsxPngFont, XlsxPngOptions, XlsxPngTarget, XlsxRangeAddress, XlsxSheetRef } from './pngTarget';
