@@ -513,7 +513,10 @@ mod tests {
             model.sheets[0].charts = (0..16).map(chart).collect();
             match invalid {
                 1 => model.sheets[0].charts[15].part.clear(),
-                2 => model.sheets[0].charts[15].refs[31].formula = "\0".to_owned(),
+                2 => {
+                    model.sheets[0].charts[15].refs[31].formula =
+                        "x".repeat(MAX_CHART_FIELD_BYTES + 1)
+                }
                 3 => model.sheets[0].charts[15].drawing = "x".repeat(budget.max_bytes() + 1),
                 _ => {}
             }

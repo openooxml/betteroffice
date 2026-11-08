@@ -9049,8 +9049,9 @@ fn sample_chart() -> SheetChart {
 /// Chart state a peer controls reaches the writer, so an off-grid anchor, a
 /// smuggled part path and two charts claiming one anchor are all refused before
 /// anything is written. A reference holding a character xml cannot carry is
-/// opened content here, kept as authored; tests/chart_control_references.rs
-/// covers the edits and peers that would rewrite one.
+/// opened content here, kept as authored. tests/chart_control_references.rs
+/// covers the edits and snapshots that would rewrite one, and workbook/charts.rs
+/// the check that peer states and hydrated snapshots pass.
 #[test]
 fn refuses_chart_state_the_writer_could_not_express() {
     let off_grid = {

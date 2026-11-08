@@ -161,3 +161,29 @@ fn undo_puts_back_the_authored_reference_without_refusal() {
     );
     assert_eq!(part(&workbook.save().unwrap(), CHART), part(&source, CHART));
 }
+
+/// A snapshot of such a workbook hydrates, and the hydrated workbook saves its
+/// chart as authored.
+#[test]
+fn a_snapshot_of_such_a_workbook_hydrates_and_saves_the_chart_as_authored() {
+    let source = book();
+    let workbook = Workbook::open(&source).unwrap();
+    let budget = betteroffice_xlsx::SnapshotBudget::new(8, 65536).unwrap();
+    let mut encoder =
+        betteroffice_xlsx::WorkbookSnapshotEncoder::new(&workbook, None, budget).unwrap();
+    let mut builder = betteroffice_xlsx::WorkbookSnapshotBuilder::new();
+    while let Some(chunk) = encoder.next(&workbook).unwrap() {
+        builder.push(&chunk).unwrap();
+    }
+    while !builder
+        .advance(budget)
+        .unwrap_or_else(|error| panic!("hydration refused: {error}"))
+        .is_ready()
+    {}
+    let (restored, _) = builder.finish().unwrap().into_parts();
+    assert_eq!(
+        restored.model().sheets[0].charts[0].refs[0].formula,
+        "'A\u{1}B'!$B$2:$B$4"
+    );
+    assert_eq!(part(&restored.save().unwrap(), CHART), part(&source, CHART));
+}

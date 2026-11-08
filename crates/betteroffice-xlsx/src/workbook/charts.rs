@@ -371,3 +371,62 @@ thread_local! {
 pub(super) fn chart_check_count() -> usize {
     CHART_CHECKS.get()
 }
+
+#[cfg(test)]
+mod reference_tests {
+    use xlsx_model::{
+        AnchorCell, AnchorEditAs, ChartAnchor, ChartRef, ChartRefKind, Sheet, SheetChart,
+    };
+
+    use super::Workbook;
+
+    fn model(formula: &str) -> xlsx_model::Workbook {
+        let mut sheet = Sheet::new("A\u{1}B");
+        sheet.charts.push(SheetChart {
+            raw_xml: None,
+            part: "xl/charts/chart1.xml".to_owned(),
+            drawing: "xl/drawings/drawing1.xml".to_owned(),
+            anchor_index: 0,
+            anchor: ChartAnchor::TwoCell {
+                from: AnchorCell::default(),
+                to: AnchorCell {
+                    col: 4,
+                    row: 8,
+                    ..AnchorCell::default()
+                },
+                edit_as: AnchorEditAs::TwoCell,
+            },
+            refs: vec![ChartRef {
+                kind: ChartRefKind::Values,
+                formula: formula.to_owned(),
+            }],
+        });
+        let mut model = xlsx_model::Workbook::default();
+        model.sheets.push(sheet);
+        model
+    }
+
+    /// The check every edit, peer state and hydrated snapshot passes: a
+    /// reference holding a character xml cannot carry is accepted only as the
+    /// opened chart wrote it, at the same position of the same part.
+    #[test]
+    fn only_an_authored_reference_may_hold_a_character_xml_cannot_carry() {
+        let authored = "'A\u{1}B'!$B$2:$B$4";
+        let workbook = Workbook::from_model(model(authored)).unwrap();
+        workbook
+            .validate_chart_references(&model(authored))
+            .unwrap();
+        workbook
+            .validate_chart_references(&model("Data!$B$2:$B$4"))
+            .unwrap();
+        for rewritten in ["'A\u{1}B'!$B$3:$B$5", "Data!$B$2\u{1}"] {
+            let error = workbook
+                .validate_chart_references(&model(rewritten))
+                .unwrap_err();
+            assert!(error.to_string().contains("xml cannot carry"), "{error}");
+        }
+        let mut other_part = model(authored);
+        other_part.sheets[0].charts[0].part = "xl/charts/chart2.xml".to_owned();
+        assert!(workbook.validate_chart_references(&other_part).is_err());
+    }
+}
