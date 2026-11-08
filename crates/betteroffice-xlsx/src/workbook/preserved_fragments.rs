@@ -86,9 +86,12 @@ impl Workbook {
             return Ok(());
         };
         let package = package.materialize()?;
-        let deleted_source_name = package.source_sheet_names().enumerate().any(|(source, name)| {
-            sheet_names_equal(name, &sheet.name) && !origins.contains(&Some(source))
-        });
+        let deleted_source_name = package
+            .source_sheet_names()
+            .enumerate()
+            .any(|(source, name)| {
+                sheet_names_equal(name, &sheet.name) && !origins.contains(&Some(source))
+            });
         if !deleted_source_name {
             return Ok(());
         }
