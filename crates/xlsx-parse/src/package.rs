@@ -218,7 +218,10 @@ impl PreservedPackage {
     /// Each source sheet's name as the file wrote it, by source index.
     #[doc(hidden)]
     pub fn source_sheet_names(&self) -> impl Iterator<Item = &str> {
-        self.original_workbook.sheets.iter().map(|sheet| sheet.name.as_str())
+        self.original_workbook
+            .sheets
+            .iter()
+            .map(|sheet| sheet.name.as_str())
     }
 
     #[doc(hidden)]
@@ -269,7 +272,10 @@ impl PreservedPackage {
     /// preserved formulas (data validations and extension formulas) name
     /// `sheet`, or may name it because they do not read, with their kind.
     #[doc(hidden)]
-    pub fn fragment_naming_sheet(&self, sheet: &str) -> Option<(usize, crate::write::FragmentKind)> {
+    pub fn fragment_naming_sheet(
+        &self,
+        sheet: &str,
+    ) -> Option<(usize, crate::write::FragmentKind)> {
         self.sheets.iter().enumerate().find_map(|(index, source)| {
             if !source.is_worksheet() {
                 return None;
