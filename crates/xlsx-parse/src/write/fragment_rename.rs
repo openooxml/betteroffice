@@ -242,8 +242,7 @@ mod tests {
 
     #[test]
     fn every_extension_formula_follows_the_rename() {
-        let xml =
-            r#"<extLst><ext uri="u" xmlns:x14="x" xmlns:xm="m"><x14:sparklineGroups><x14:sparklineGroup><x14:sparklines><x14:sparkline><xm:f>Data!A1:C1</xm:f><xm:sqref>D1</xm:sqref></x14:sparkline></x14:sparklines></x14:sparklineGroup></x14:sparklineGroups></ext></extLst>"#;
+        let xml = r#"<extLst><ext uri="u" xmlns:x14="x" xmlns:xm="m"><x14:sparklineGroups><x14:sparklineGroup><x14:sparklines><x14:sparkline><xm:f>Data!A1:C1</xm:f><xm:sqref>D1</xm:sqref></x14:sparkline></x14:sparklines></x14:sparklineGroup></x14:sparklineGroups></ext></extLst>"#;
         assert_eq!(
             patched(xml, true, &[("Data", "B")]).as_deref(),
             Some(xml.replace("<xm:f>Data!", "<xm:f>B!").as_str())

@@ -63,6 +63,8 @@ pub use save_oracle::with_legacy_save_path;
 pub use styles::legacy_style_reads;
 #[doc(hidden)]
 pub use styles::source_style_xml_markers;
+#[doc(hidden)]
+pub use write::{FragmentFailure, FragmentFailureReason, FragmentKind, PreservedFragmentFailure};
 pub use write::{
     SaveEdits, SerializedParts, serialize_workbook, serialize_workbook_with_active_sheet,
     serialize_workbook_with_package_and_origins_after_edits,
@@ -70,8 +72,6 @@ pub use write::{
     serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes,
     validate_defined_name_edits,
 };
-#[doc(hidden)]
-pub use write::{FragmentFailure, FragmentFailureReason, FragmentKind, PreservedFragmentFailure};
 
 use xlsx_model::{SheetId, Workbook};
 
