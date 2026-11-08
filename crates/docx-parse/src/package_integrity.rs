@@ -4,6 +4,7 @@ use quick_xml::events::Event;
 use quick_xml::name::{Namespace, ResolveResult};
 use quick_xml::{NsReader, XmlVersion};
 
+use crate::formatting::{MAX_TEXT_SCALE, text_scale};
 use crate::media::MediaTable;
 use crate::xml::{ParseLimits, namespaces};
 
@@ -13,6 +14,7 @@ pub(crate) fn package_warnings(
     limits: &ParseLimits,
 ) -> Vec<String> {
     let mut warnings = Vec::new();
+    warnings.extend(text_scale_warning(parts));
     let content_types = ooxml_opc::parse_content_types(parts);
     if content_types.is_ok()
         || matches!(
@@ -203,6 +205,40 @@ pub(crate) fn package_warnings(
         ));
     }
     warnings
+}
+
+/// Counts the `w:w` values the parser leaves unset or holds to the maximum.
+fn text_scale_warning(parts: &[(String, Vec<u8>)]) -> Option<String> {
+    let finder = memchr::memmem::Finder::new(b"<w:w ");
+    let (mut unset, mut held) = (0_usize, 0_usize);
+    for (_, xml) in parts
+        .iter()
+        .filter(|(path, _)| path.starts_with("word/") && path.ends_with(".xml"))
+    {
+        for start in finder.find_iter(xml) {
+            let element = &xml[start..];
+            let element = &element[..memchr::memchr(b'>', element).unwrap_or(element.len())];
+            let Some(value) = attribute_value(element, b"w:val=\"") else {
+                continue;
+            };
+            match value.trim().parse::<f64>() {
+                Ok(scale) if scale > MAX_TEXT_SCALE => held += 1,
+                Ok(scale) if text_scale(scale).is_some() => {}
+                _ => unset += 1,
+            }
+        }
+    }
+    (unset + held > 0).then(|| {
+        format!(
+            "BetterOffice found run character scales outside 1 to 600: {unset} treated as unset and {held} held to 600."
+        )
+    })
+}
+
+fn attribute_value<'a>(element: &'a [u8], name: &[u8]) -> Option<&'a str> {
+    let start = memchr::memmem::find(element, name)? + name.len();
+    let value = &element[start..];
+    std::str::from_utf8(&value[..memchr::memchr(b'"', value)?]).ok()
 }
 
 fn is_namespace(namespace: &ResolveResult<'_>, expected: &str) -> bool {

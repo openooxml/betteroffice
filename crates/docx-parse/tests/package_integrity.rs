@@ -541,3 +541,18 @@ fn word_namespaces_and_main_content_types_accept_relocated_and_empty_documents()
         }
     }
 }
+
+#[test]
+fn run_scales_outside_the_schema_are_counted() {
+    let run = |value: &str| {
+        format!(r#"<w:p><w:r><w:rPr><w:w w:val="{value}"/></w:rPr><w:t>x</w:t></w:r></w:p>"#)
+    };
+    let body = ["0", "0", "wide", "700", "600", "100"].map(run).concat();
+    let warnings = package(&body, &[]).document.warnings.unwrap_or_default();
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("3 treated as unset and 1 held to 600")),
+        "{warnings:?}"
+    );
+}
