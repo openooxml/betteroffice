@@ -1430,7 +1430,9 @@ impl Workbook {
     /// workbook as it is now, without saving. Cheap: empty unless the workbook
     /// holds a chart reference with a character xml cannot carry.
     pub fn save_warnings(&self) -> Vec<crate::SaveWarning> {
-        self.chart_save_warnings()
+        let mut warnings = self.chart_save_warnings();
+        warnings.extend(self.fragment_save_warnings());
+        warnings
     }
 
     pub fn save(&self) -> Result<Vec<u8>> {

@@ -127,6 +127,9 @@ pub enum SaveWarningCode {
     /// The workbook holds a reference with a character xml 1.0 cannot carry,
     /// which the part cannot be written with, so it was kept as authored.
     UnwritableReference,
+    /// The part holds a formula, kept as the file wrote it, that does not read
+    /// as text a sheet rename can rewrite, so it was kept unrenamed.
+    UnrewritableFormula,
 }
 
 /// A part a save wrote differently from what the workbook holds, and why.
