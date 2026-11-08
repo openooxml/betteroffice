@@ -2001,13 +2001,17 @@ pub(crate) fn renamed_conditional_formats(
     Ok(planned)
 }
 
-/// `escaped` with each of `chars` written as a character reference, which
-/// reading gives back where a literal one would be normalized away: a CR in
-/// element text, and a CR, LF or tab in an attribute value.
-fn char_references(escaped: &str, chars: &[char]) -> String {
+/// `escaped` with `also`, and every character XML 1.0 cannot carry literally,
+/// written as decimal character references, as xlsx-parse writes formula text
+/// and attribute values: a CR in element text, and a CR, LF or tab in an
+/// attribute value, would otherwise read back normalized, and a control
+/// character an authored formula brought in through a reference would be
+/// invalid. A NUL, which no reference can carry, is written as it came.
+fn char_references(escaped: &str, also: &[char]) -> String {
     let mut out = String::with_capacity(escaped.len());
     for ch in escaped.chars() {
-        if chars.contains(&ch) {
+        let xml_char = ch >= ' ' && ch != '\u{fffe}' && ch != '\u{ffff}';
+        if ch != '\0' && (also.contains(&ch) || (!xml_char && !matches!(ch, '\t' | '\n'))) {
             out.push_str(&format!("&#{};", u32::from(ch)));
         } else {
             out.push(ch);

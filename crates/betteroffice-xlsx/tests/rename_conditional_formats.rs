@@ -297,3 +297,22 @@ fn a_patched_rule_reads_back_a_name_with_whitespace_controls() {
         }
     }
 }
+
+/// An authored formula holding a control character it brought in through a
+/// character reference keeps it as a reference when the rename patches the
+/// rule, so the part stays valid xml and reads back the same text.
+#[test]
+fn a_patched_rule_keeps_an_authored_control_character_as_a_reference() {
+    for rule in [
+        r#"<cfRule type="expression" dxfId="0" priority="1"><formula>Data!$A$1&amp;"a&#1;b"</formula></cfRule>"#,
+        r#"<cfRule type="colorScale" priority="1"><colorScale><cfvo type="formula" val="Data!$A$1&amp;&quot;a&#1;b&quot;"/><cfvo type="max"/><color rgb="FFFF0000"/><color rgb="FF00FF00"/></colorScale></cfRule>"#,
+    ] {
+        let mut workbook = Workbook::open(&book_with_rule("Data", "Spare", rule)).unwrap();
+        rename(&mut workbook, 0, "New Data").unwrap();
+        let held = rule_formulas(&workbook);
+        assert_eq!(held, ["'New Data'!$A$1&\"a\u{1}b\""], "{rule}");
+        let saved = workbook.save().unwrap();
+        assert!(!part(&saved, OTHER).contains('\u{1}'), "{rule}");
+        assert_eq!(rule_formulas(&Workbook::open(&saved).unwrap()), held, "{rule}");
+    }
+}
