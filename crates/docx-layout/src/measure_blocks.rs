@@ -301,6 +301,36 @@ pub fn collect_font_requirements<'a>(
     collector.finish().into_values().collect()
 }
 
+/// The fonts the text of `blocks` is measured with: [`collect_font_requirements`]
+/// without the fonts only charts paint with, which no measurement depends on.
+pub fn collect_measured_font_requirements<'a>(
+    blocks: impl IntoIterator<Item = &'a LayoutBlock>,
+    default_family: &str,
+) -> Vec<FontRequirement> {
+    let mut collector = FontRequirementCollector::default();
+    collector.collect_measured(blocks, default_family);
+    collector.finish().into_values().collect()
+}
+
+/// The first family of a CSS family list, unquoted: the family a painter keys
+/// a font shorthand by.
+pub fn css_primary_family(families: &str) -> &str {
+    let mut quote = None;
+    let mut first = families;
+    for (index, character) in families.char_indices() {
+        match character {
+            '\'' | '"' if quote == Some(character) => quote = None,
+            '\'' | '"' if quote.is_none() => quote = Some(character),
+            ',' if quote.is_none() => {
+                first = &families[..index];
+                break;
+            }
+            _ => {}
+        }
+    }
+    first.trim().trim_matches(['\'', '"']).trim()
+}
+
 /// [`collect_font_requirements`] into `requirements`, keyed as it keys them,
 /// for callers gathering several block runs without copying them. It keeps
 /// every family the blocks name and only those, since a later call may reach
@@ -365,10 +395,58 @@ impl FontRequirementCollector {
         default_family: &str,
     ) {
         for block in blocks {
+            self.collect_measured([block], default_family);
+            self.collect_charts(block);
+        }
+    }
+
+    /// Adds the fonts `blocks` measure text with, as
+    /// [`collect_measured_font_requirements`] does.
+    pub fn collect_measured<'a>(
+        &mut self,
+        blocks: impl IntoIterator<Item = &'a LayoutBlock>,
+        default_family: &str,
+    ) {
+        for block in blocks {
             walk_paragraphs(std::slice::from_ref(block), &mut |paragraph| {
                 let scripts = paragraph_scripts(paragraph);
                 collect_paragraph_font_requirements(paragraph, &scripts, default_family, self);
             });
+        }
+    }
+
+    fn collect_charts(&mut self, block: &LayoutBlock) {
+        walk_charts(std::slice::from_ref(block), &mut |chart| {
+            self.collect_chart(chart);
+        });
+    }
+
+    /// Every style chart text can resolve to: a chart's own and inherited
+    /// `c:txPr` combine per field, and its default title is bold.
+    fn collect_chart(&mut self, chart: &Value) {
+        let mut text = ChartFontText::default();
+        text.gather(chart);
+        let scripts = ooxml_text::paragraph_scripts_with_languages(
+            text.strings.iter().map(|string| (*string, None)),
+            false,
+        );
+        let mut characters = FontCharacters::default();
+        for ch in text.strings.iter().flat_map(|string| string.chars()) {
+            characters.insert(ch);
+        }
+        let default = css_primary_family(ooxml_drawingml::chart::CHART_FONT_FAMILY);
+        let italics: &[bool] = if text.italic {
+            &[false, true]
+        } else {
+            &[false]
+        };
+        for family in std::iter::once(default).chain(text.fonts) {
+            for bold in [false, true] {
+                for &italic in italics {
+                    self.name(family, bold, italic, &scripts, true);
+                    self.characters(family, bold, italic, characters.clone());
+                }
+            }
         }
     }
 
@@ -397,6 +475,7 @@ impl FontRequirementCollector {
             });
         }
         for block in blocks {
+            self.collect_charts(block);
             walk_paragraphs(std::slice::from_ref(block), &mut |paragraph| {
                 let scripts = match &paragraph.id {
                     BlockId::Str(id) if !id.is_empty() => segment_scripts[id].clone(),
@@ -528,16 +607,20 @@ impl FontRequirementCollector {
 
     /// A family and style the text names, which measurement reaches when `reached`.
     fn name(&mut self, family: &str, bold: bool, italic: bool, scripts: &[String], reached: bool) {
-        let key = add_font_requirement(family, bold, italic, scripts, &mut self.named);
-        if reached {
-            self.used.insert(key);
+        for family in painted_families(family) {
+            let key = add_font_requirement(family, bold, italic, scripts, &mut self.named);
+            if reached {
+                self.used.insert(key);
+            }
         }
     }
 
     /// A family and style measurement resolves a slot the text leaves unnamed to.
     fn reach(&mut self, family: &str, bold: bool, italic: bool, scripts: &[String]) {
-        let key = add_font_requirement(family, bold, italic, scripts, &mut self.implicit);
-        self.used.insert(key);
+        for family in painted_families(family) {
+            let key = add_font_requirement(family, bold, italic, scripts, &mut self.implicit);
+            self.used.insert(key);
+        }
     }
 
     fn characters(&mut self, family: &str, bold: bool, italic: bool, characters: FontCharacters) {
@@ -582,6 +665,75 @@ pub fn measured_synthetically<'a>(extents: impl IntoIterator<Item = &'a BlockExt
         }
     }
     extents.into_iter().any(block)
+}
+
+/// A family as text names it, then the family its font shorthand paints under
+/// when a comma or quotes make the two differ.
+fn painted_families(family: &str) -> impl Iterator<Item = &str> {
+    let painted = css_primary_family(family);
+    std::iter::once(family).chain((painted != family && !painted.is_empty()).then_some(painted))
+}
+
+/// What chart text paints with, read off a chart's JSON whatever part of the
+/// chart carries it.
+#[derive(Default)]
+struct ChartFontText<'a> {
+    fonts: Vec<&'a str>,
+    italic: bool,
+    strings: Vec<&'a str>,
+}
+
+impl<'a> ChartFontText<'a> {
+    fn gather(&mut self, value: &'a Value) {
+        match value {
+            Value::String(string) => self.strings.push(string),
+            Value::Array(items) => items.iter().for_each(|item| self.gather(item)),
+            Value::Object(fields) => {
+                for (key, field) in fields {
+                    match (key.as_str(), field) {
+                        ("font", Value::String(font)) => {
+                            let font = css_primary_family(font);
+                            if !font.is_empty() && !self.fonts.contains(&font) {
+                                self.fonts.push(font);
+                            }
+                        }
+                        ("italic", Value::Bool(true)) => self.italic = true,
+                        _ => self.gather(field),
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The charts of `blocks`, whether blocks of their own or inline in a paragraph.
+fn walk_charts(blocks: &[LayoutBlock], visit: &mut impl FnMut(&Value)) {
+    fn chart_blocks(blocks: &[LayoutBlock], visit: &mut impl FnMut(&Value)) {
+        for block in blocks {
+            match block {
+                LayoutBlock::Chart(chart) => visit(&chart.chart),
+                LayoutBlock::Table(table) => {
+                    for row in &table.rows {
+                        for cell in &row.cells {
+                            chart_blocks(&cell.blocks, visit);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    chart_blocks(blocks, visit);
+    walk_paragraphs(blocks, &mut |paragraph| {
+        for run in &paragraph.runs {
+            if let Run::Image(image) = run
+                && let Some(chart) = &image.inline_chart
+            {
+                visit(&chart.chart);
+            }
+        }
+    });
 }
 
 fn walk_paragraphs(blocks: &[LayoutBlock], visit: &mut impl FnMut(&ParagraphBlock)) {
@@ -7608,6 +7760,72 @@ mod tests {
             serde_json::to_value(preview).unwrap(),
             serde_json::to_value(standalone_preview.finish()).unwrap()
         );
+    }
+
+    #[test]
+    fn collects_the_styles_chart_text_can_paint_with() {
+        let chart = json!({
+            "chartType": "column",
+            "title": "سلام",
+            "text": {"font": "Georgia"},
+            "legend": {"text": {"font": "\"Segoe UI\", sans-serif", "italic": true}},
+            "series": [{"name": "North"}]
+        });
+        let inline = json!({
+            "kind": "image", "src": "", "width": 100, "height": 40,
+            "inlineChart": {
+                "kind": "chart", "id": "c", "width": 100, "height": 40,
+                "chart": {"text": {"font": "Inline Font"}}
+            }
+        });
+        let blocks: Vec<LayoutBlock> = serde_json::from_value(json!([
+            {"kind": "chart", "id": "b", "width": 100, "height": 40, "chart": chart},
+            {"kind": "paragraph", "id": "p", "runs": [inline]}
+        ]))
+        .unwrap();
+        for preview in [false, true] {
+            let mut collector = FontRequirementCollector::default();
+            if preview {
+                collector.collect_preview(&blocks, "Calibri");
+            } else {
+                collector.collect(&blocks, "Calibri");
+            }
+            let requirements = collector.finish();
+            for key in [
+                "calibri|0|0",
+                "calibri|1|0",
+                "calibri|1|1",
+                "georgia|1|0",
+                "segoe ui|0|1",
+                "inline font|1|0",
+            ] {
+                assert!(requirements.contains_key(key), "{key}");
+            }
+            assert!(
+                requirements["georgia|0|0"]
+                    .scripts
+                    .contains(&"arabic".to_owned())
+            );
+        }
+        let measured = collect_measured_font_requirements(&blocks, "Calibri");
+        assert!(measured.iter().all(|r| r.key.starts_with("calibri|0|0")));
+    }
+
+    #[test]
+    fn collects_the_family_a_compound_name_paints_under() {
+        let keys = font_requirement_keys(
+            json!({"kind": "text", "text": "A", "fontFamily": "Book,Italic", "bold": true}),
+        );
+        assert!(keys.contains(&"book,italic|1|0".to_owned()));
+        assert!(keys.contains(&"book|1|0".to_owned()));
+    }
+
+    #[test]
+    fn css_primary_family_matches_the_font_shorthand_rules() {
+        assert_eq!(css_primary_family("Calibri, sans-serif"), "Calibri");
+        assert_eq!(css_primary_family("\"Last, First\", serif"), "Last, First");
+        assert_eq!(css_primary_family(" 'Aptos Display' "), "Aptos Display");
+        assert_eq!(css_primary_family("Book,Italic"), "Book");
     }
 
     fn font_requirement_keys(run: Value) -> Vec<String> {
