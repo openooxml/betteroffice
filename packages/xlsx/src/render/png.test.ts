@@ -297,7 +297,7 @@ describe.skipIf(engineKind === 'native')('the wasm PNG engine', () => {
       const primary = bundled.resolveBundledFamilyFace(family, false, false);
       const installed = primary && await bundled.bundledFaceInstalled(primary) ? primary : undefined;
       await push(installed);
-      for (const script of request) await push(bundled.resolveScriptFallbackFace(script, false, false));
+      for (const script of request) await push(bundled.resolveScriptFallbackFace(script, false, false, family));
       await push(bundled.resolveGlyphFallbackFace(family, false, false, 'word'));
       const last = bundled.resolveLastResortChoice(family, false, false, 'word');
       if (!last.onlyIfPrimaryFails || !installed) await push(last.face);

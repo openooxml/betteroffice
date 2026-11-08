@@ -55,7 +55,7 @@ async function chainFaces(fonts: Fonts, { font, scripts }: SheetFontRequest): Pr
   const primary = await installedFace(fonts, fonts.resolveBundledFamilyFace(font.family, font.bold, font.italic));
   push(primary);
   for (const script of scripts) {
-    push(await installedFace(fonts, fonts.resolveScriptFallbackFace(script as BundledFontScript, font.bold, font.italic)));
+    push(await installedFace(fonts, fonts.resolveScriptFallbackFace(script as BundledFontScript, font.bold, font.italic, font.family)));
   }
   push(await installedFace(fonts, fonts.resolveGlyphFallbackFace(font.family, font.bold, font.italic, 'word')));
   const last = fonts.resolveLastResortChoice(font.family, font.bold, font.italic, 'word');
