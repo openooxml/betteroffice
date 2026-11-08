@@ -187,3 +187,16 @@ fn a_snapshot_of_such_a_workbook_hydrates_and_saves_the_chart_as_authored() {
     );
     assert_eq!(part(&restored.save().unwrap(), CHART), part(&source, CHART));
 }
+
+/// A recovery checkpoint of such a workbook restores, and the restored
+/// workbook saves its chart as authored.
+#[test]
+fn a_recovery_checkpoint_of_such_a_workbook_restores_and_saves_the_chart_as_authored() {
+    let source = book();
+    let workbook = Workbook::open(&source).unwrap();
+    let checkpoint = workbook.recovery_checkpoint(0, None).unwrap();
+    let (restored, ..) = Workbook::restore_recovery_checkpoint(&checkpoint)
+        .unwrap_or_else(|error| panic!("restore refused: {error}"));
+    assert_eq!(restored.model(), workbook.model());
+    assert_eq!(part(&restored.save().unwrap(), CHART), part(&source, CHART));
+}
