@@ -344,7 +344,6 @@ pub fn collect_font_requirements_into<'a>(
     let mut collector = FontRequirementCollector::default();
     collector.collect(blocks, default_family);
     collector.merge_named_into(requirements);
-    add_painted_aliases(requirements);
 }
 
 /// Fonts any revision preview may need. Returns false for script fallbacks or
@@ -357,7 +356,6 @@ pub fn collect_preview_font_requirements_into<'a>(
     let mut collector = FontRequirementCollector::default();
     let stable_markers = collector.collect_preview(blocks, default_family);
     collector.merge_named_into(requirements);
-    add_painted_aliases(requirements);
     stable_markers
         && requirements
             .values()
@@ -577,15 +575,17 @@ impl FontRequirementCollector {
         requirements
     }
 
-    /// Merges every named requirement and nothing else, as main collects them:
-    /// an implicit entry kept here would lead the scripts a later call names.
+    /// Merges every named requirement, with the families those paint under, and
+    /// nothing else, as main collects them: an implicit entry kept here would
+    /// lead the scripts a later call names.
     fn merge_named_into(mut self, requirements: &mut BTreeMap<String, FontRequirement>) {
-        self.used.extend(self.named.keys().cloned());
         for (key, requirement) in &self.implicit {
             if let Some(named) = self.named.get_mut(key) {
                 named.characters.extend(&requirement.characters);
             }
         }
+        add_painted_aliases(&mut self.named);
+        self.used.extend(self.named.keys().cloned());
         self.implicit.clear();
         self.merge_into(requirements);
     }
@@ -7917,6 +7917,22 @@ mod tests {
         let mut preview = BTreeMap::new();
         collect_preview_font_requirements_into([&block], "Calibri", &mut preview);
         assert!(preview.contains_key("book|0|0"));
+    }
+
+    #[test]
+    fn repeated_gathering_does_not_alias_a_painted_family_again() {
+        let block: LayoutBlock = serde_json::from_value(json!({
+            "kind": "paragraph", "id": "p", "runs": [{
+                "kind": "text", "text": "A", "fontFamily": "\"Last, First\", serif"
+            }]
+        }))
+        .unwrap();
+        let mut gathered = BTreeMap::new();
+        for _ in 0..2 {
+            collect_font_requirements_into([&block], "Calibri", &mut gathered);
+        }
+        assert!(gathered.contains_key("last, first|0|0"));
+        assert!(!gathered.contains_key("last|0|0"));
     }
 
     #[test]
