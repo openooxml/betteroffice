@@ -93,7 +93,14 @@ fn a_reduced_decode_holds_no_more_than_its_charge() {
             1125,
         ),
         ("png", png(1600, 1125, png::BitDepth::Eight), 1600, 1125),
+        ("half-thin jpeg", baseline_jpeg(32_000, 30), 32_000, 30),
         ("thin jpeg", baseline_jpeg(60_000, 30), 60_000, 30),
+        (
+            "half-wide 16-bit png",
+            png(32_768, 30, png::BitDepth::Sixteen),
+            32_768,
+            30,
+        ),
         (
             "wide 16-bit png",
             png(65_535, 30, png::BitDepth::Sixteen),

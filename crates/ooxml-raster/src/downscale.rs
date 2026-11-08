@@ -26,6 +26,12 @@ pub const MAX_SOURCE_FACTOR: u64 = 2;
 /// row buffer grows with its width, so a wider source is refused.
 pub const MAX_SOURCE_SIDE: u32 = 65_535;
 
+/// The bytes per source column a PNG decoder holds beyond its rows.
+const PNG_DECODER_COLUMN_BYTES: u64 = 80;
+
+/// The bytes per source column a JPEG decoder holds beyond its coefficients.
+const JPEG_DECODER_COLUMN_BYTES: u64 = 112;
+
 /// Straight RGBA of a JPEG or PNG whose declared size is past `max_pixels`,
 /// reduced to [`REDUCED_MAX_SIDE`] on its longer side, or less where that
 /// still would not fit. `None` when no reduction fits, or the picture is not
@@ -93,11 +99,12 @@ pub fn reduced_cost(bytes: &[u8], width: u32, height: u32, max_pixels: u64) -> O
     let intermediate = pixels.saturating_mul(4).min(max_pixels);
     let source = if bytes.starts_with(&[0xFF, 0xD8]) {
         let frame = jpeg_frame(bytes)?;
-        if frame.progressive {
+        let held = if frame.progressive {
             frame.coefficient_bytes()
         } else {
             frame.mcu_row_bytes()
-        }
+        };
+        held.saturating_add(u64::from(width) * JPEG_DECODER_COLUMN_BYTES)
     } else {
         png_row_bytes(bytes, width)?
     };
@@ -112,8 +119,8 @@ pub fn reduced_cost(bytes: &[u8], width: u32, height: u32, max_pixels: u64) -> O
 }
 
 /// The bytes a streaming PNG decode holds at the source width: the raw row
-/// and the previous one it unfilters against, plus the row expanded to 8-bit
-/// RGBA. `None` when the header is not a PNG one.
+/// and the previous one it unfilters against, the row expanded to 8-bit RGBA,
+/// and the decoder's own buffers. `None` when the header is not a PNG one.
 fn png_row_bytes(bytes: &[u8], width: u32) -> Option<u64> {
     if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") || bytes.get(12..16)? != b"IHDR" {
         return None;
@@ -127,7 +134,7 @@ fn png_row_bytes(bytes: &[u8], width: u32) -> Option<u64> {
         _ => return None,
     };
     let raw = (u64::from(width) * channels * depth).div_ceil(8) + 1;
-    Some(raw * 2 + u64::from(width) * 4)
+    Some(raw * 2 + u64::from(width) * (4 + PNG_DECODER_COLUMN_BYTES))
 }
 
 /// A JPEG frame header: its size, whether it is progressive, and each
