@@ -4923,15 +4923,17 @@ fn has_nonfinite(formatting: &RunFormatting) -> bool {
 
 /// The text a run draws: a character whose `w:rFonts` slot names a symbol
 /// face (Symbol, Wingdings, Webdings) addresses a glyph by font position, so
-/// layout gets the covered character the face's table names for it; a slot
-/// the table does not name stays as stored. A replacement can fall in another
-/// slot than the character it replaces (`a` is ASCII, `α` is not), so that
-/// slot is pointed at the symbol face too, and every slot is then named
-/// explicitly so none follows the re-pointed one through fallback; a combining
-/// mark keeps its base's family. When another character of the run still
-/// needs a slot's own family, the slots stay as they are. Display only: the story, saves, find
-/// and copy keep the stored characters, and every replacement keeps the UTF-16
-/// width so offsets still line up.
+/// layout gets the covered character the face's table names for it. A slot
+/// the table does not name stays as stored, and so does a private-use slot
+/// the base-latin backstop draws with its own glyph for that face.
+///
+/// A replacement can fall in another slot than the character it replaces
+/// (`a` is ASCII, `α` is not), so that slot is pointed at the symbol face too,
+/// and every slot is then named explicitly so none follows the re-pointed one
+/// through fallback; a combining mark keeps its base's family. When another
+/// character of the run still needs a slot's own family, the slots stay as
+/// they are. Display only: the story, saves, find and copy keep the stored
+/// characters, and every replacement keeps the UTF-16 width.
 pub(super) fn symbol_display_run(formatting: &mut RunFormatting, text: String) -> String {
     let slots = formatting.font_slots.as_ref();
     let family = |slot: usize| -> Option<String> {
@@ -4962,6 +4964,7 @@ pub(super) fn symbol_display_run(formatting: &mut RunFormatting, text: String) -
         .map(|(character, slot)| {
             wanted.push(family(slot));
             symbol_face(slot)
+                .filter(|_| !ooxml_text::font_store::base_latin_alias(character))
                 .and_then(|face| face.shape(character))
                 .unwrap_or(character)
         })

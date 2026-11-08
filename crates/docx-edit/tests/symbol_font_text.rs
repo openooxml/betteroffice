@@ -17,7 +17,7 @@ fn body() -> String {
         ),
         fixture::p(
             "00000002",
-            r#"<w:r><w:sym w:font="Symbol" w:char="F061"/><w:sym w:font="Wingdings" w:char="F0E0"/><w:sym w:font="Wingdings" w:char="F0D8"/><w:sym w:font="Wingdings" w:char="F0FC"/></w:r>"#,
+            r#"<w:r><w:sym w:font="Symbol" w:char="F061"/><w:sym w:font="Wingdings" w:char="F0E0"/><w:sym w:font="Wingdings" w:char="F0D8"/><w:sym w:font="Wingdings" w:char="F0FC"/><w:sym w:font="Wingdings" w:char="F06C"/></w:r>"#,
         ),
         fixture::p(
             "00000003",
@@ -61,14 +61,18 @@ fn symbol_face_slots_draw_their_covered_characters_and_keep_the_stored_text() {
     let plan = doc.paragraph_save_plan();
 
     let drawn = layout_texts(&doc);
-    assert_eq!(drawn, ["α+β ≥ π", "α\u{f0e0}►\u{f0fc}", "ab"]);
+    assert_eq!(drawn, ["α+β ≥ π", "α\u{f0e0}\u{f0d8}\u{f0fc}●", "ab"]);
     for (drawn, stored) in drawn.iter().zip(&stored) {
         assert_eq!(drawn.encode_utf16().count(), stored.encode_utf16().count());
     }
 
     assert_eq!(
         stored,
-        ["a+b \u{f0b3} p", "\u{f061}\u{f0e0}\u{f0d8}\u{f0fc}", "ab"],
+        [
+            "a+b \u{f0b3} p",
+            "\u{f061}\u{f0e0}\u{f0d8}\u{f0fc}\u{f06c}",
+            "ab"
+        ],
         "the story keeps the stored characters"
     );
     assert_eq!(
