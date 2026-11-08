@@ -8217,7 +8217,7 @@ fn format_codes_are_written_as_xstrings_and_decode_back() {
     ] {
         assert_eq!(crate::xml::format_code_text(code), text, "{code:?}");
         assert_eq!(
-            crate::xml::format_code_attribute_value(code),
+            crate::xml::xstring_attribute_value(code),
             attribute,
             "{code:?}"
         );

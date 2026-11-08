@@ -303,7 +303,7 @@ fn parse_style_pools(
                 }
                 b"name" if font.is_some() => {
                     if let Some(v) = attr(&e, b"val")? {
-                        font.as_mut().unwrap().name = Some(v);
+                        font.as_mut().unwrap().name = Some(crate::read::unescape_name(&v));
                     }
                 }
                 b"color" if font.is_some() => {

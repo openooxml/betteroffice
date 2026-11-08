@@ -9,6 +9,7 @@ use std::io;
 use std::iter::Peekable;
 use std::ops::Range;
 
+use quick_xml::events::attributes::Attribute;
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer};
 use xlsx_model::addr::{ColId, RowId};
@@ -2162,6 +2163,16 @@ fn source_content_type<'a>(package: &'a PreservedPackage, path: &str) -> Option<
     effective_content_type(&package.content_types, path).map(|resolved| resolved.value)
 }
 
+/// A sheet or defined name's `name` attribute is an `ST_Xstring`, written as
+/// Excel writes one; every other attribute keeps its references.
+fn name_or_text_attribute(attribute: &XmlAttribute) -> Attribute<'_> {
+    if attribute.name == "name" {
+        crate::xml::xstring_attribute(&attribute.name, &attribute.value)
+    } else {
+        text_attribute(&attribute.name, &attribute.value)
+    }
+}
+
 fn write_empty_element(
     writer: &mut Writer<Vec<u8>>,
     name: &str,
@@ -2271,7 +2282,7 @@ fn workbook_xml(wb: &Workbook, active_sheet: SheetId) -> Result<Vec<u8>, ParseEr
                         let rid = format!("rId{}", i + 1);
                         let sid = (i + 1).to_string();
                         w.create_element("sheet")
-                            .with_attribute(("name", sheet.name.as_str()))
+                            .with_attribute(crate::xml::xstring_attribute("name", &sheet.name))
                             .with_attribute(("sheetId", sid.as_str()))
                             .with_attribute(("r:id", rid.as_str()))
                             .write_empty()?;
@@ -2310,7 +2321,7 @@ fn write_defined_name(
     names: FormulaNames<'_>,
 ) -> io::Result<()> {
     let mut element = BytesStart::new("definedName");
-    element.push_attribute(("name", defined.name.as_str()));
+    element.push_attribute(crate::xml::xstring_attribute("name", &defined.name));
     let local_sheet = defined.local_sheet.map(|sheet| sheet.0.to_string());
     if let Some(local_sheet) = &local_sheet {
         element.push_attribute(("localSheetId", local_sheet.as_str()));
@@ -2376,7 +2387,11 @@ fn workbook_xml_with_template(
                 REL_ID_ATTRIBUTE,
                 plan.relationship.id().unwrap_or_default().to_owned(),
             );
-            write_empty_element(writer, "sheet", &attributes)?;
+            let mut element = BytesStart::new("sheet");
+            for attribute in &attributes {
+                element.push_attribute(name_or_text_attribute(attribute));
+            }
+            writer.write_event(Event::Empty(element))?;
         }
         writer.write_event(Event::End(BytesEnd::new("sheets")))?;
         Ok(())
@@ -2551,14 +2566,14 @@ fn edited_defined_names(
         let source_name = attributes
             .iter()
             .find(|attr| attr.name == "name")
-            .map(|attr| attr.value.as_str());
+            .map(|attr| crate::read::unescape_name(&attr.value));
         let source_scope = attributes
             .iter()
             .find(|attr| attr.name == "localSheetId")
             .map(|attr| attr.value.parse::<u32>())
             .transpose()
             .map_err(|_| unsupported())?;
-        if source_name != Some(original.name.as_str())
+        if source_name.as_deref() != Some(original.name.as_str())
             || source_scope != original.local_sheet.map(|sheet| sheet.0)
         {
             return Err(unsupported());
@@ -2665,7 +2680,7 @@ fn patch_defined_name(
     fragment(|writer| {
         let mut element = BytesStart::new(element_name.as_str());
         for attribute in &attributes {
-            element.push_attribute(text_attribute(&attribute.name, &attribute.value));
+            element.push_attribute(name_or_text_attribute(attribute));
         }
         writer.write_event(Event::Start(element))?;
         writer.write_event(Event::Text(text_event(&excel_formula(
@@ -4040,7 +4055,7 @@ fn styles_xml_with_template(
             writer
                 .create_element("numFmt")
                 .with_attribute(("numFmtId", id.to_string().as_str()))
-                .with_attribute(crate::xml::format_code_attribute("formatCode", code))
+                .with_attribute(crate::xml::xstring_attribute("formatCode", code))
                 .write_empty()?;
             Ok(())
         },
@@ -4189,7 +4204,7 @@ fn write_num_fmts(w: &mut Writer<Vec<u8>>, ss: &Stylesheet) -> io::Result<()> {
                 let id = id.to_string();
                 w.create_element("numFmt")
                     .with_attribute(("numFmtId", id.as_str()))
-                    .with_attribute(crate::xml::format_code_attribute("formatCode", code))
+                    .with_attribute(crate::xml::xstring_attribute("formatCode", code))
                     .write_empty()?;
             }
             Ok(())
@@ -4237,7 +4252,7 @@ fn write_font(w: &mut Writer<Vec<u8>>, font: &Font) -> io::Result<()> {
         }
         if let Some(name) = &font.name {
             w.create_element("name")
-                .with_attribute(("val", name.as_str()))
+                .with_attribute(crate::xml::xstring_attribute("val", name))
                 .write_empty()?;
         }
         Ok(())

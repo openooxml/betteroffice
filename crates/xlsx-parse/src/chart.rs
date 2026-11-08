@@ -30,7 +30,7 @@ use xlsx_model::{
 
 use crate::package::PartContentType;
 use crate::tree::{Edit, Element, Part, Replacement, names_are_resolvable, parse_tree};
-use crate::xml::{find_part, format_code_attribute_value, format_code_text, resolve_part_path};
+use crate::xml::{find_part, format_code_text, resolve_part_path, xstring_attribute_value};
 use crate::{MAX_CHART_ANCHORS, MAX_CHART_REFS, MAX_DEPTH, ParseError};
 
 /// relationship references inside a part (`r:id`).
@@ -1277,7 +1277,7 @@ fn regenerated_cache_inputs(
             continue;
         };
         let format = if point_formats && *code != series_format.unwrap_or("General") {
-            format!(" formatCode=\"{}\"", format_code_attribute_value(code))
+            format!(" formatCode=\"{}\"", xstring_attribute_value(code))
         } else {
             String::new()
         };
