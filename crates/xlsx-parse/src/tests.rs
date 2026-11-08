@@ -6062,7 +6062,7 @@ fn refuses_to_write_a_reference_xml_cannot_carry() {
     };
     let error = patch_refs(CACHELESS, &reference("Data!\u{7}$C$1")).unwrap_err();
     assert!(
-        matches!(&error, ParseError::UnsupportedEdit(message) if message.contains("U+0007")),
+        crate::chart::is_unwritable_chart_reference(&error),
         "{error:?}"
     );
 
