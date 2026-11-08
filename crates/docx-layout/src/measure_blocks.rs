@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::collections::btree_map::Entry;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use ooxml_text::measure::{FontChainDependencies, FontChains};
 use serde::{Deserialize, Serialize};
@@ -309,7 +309,7 @@ pub fn collect_measured_font_requirements<'a>(
 ) -> Vec<FontRequirement> {
     let mut collector = FontRequirementCollector::default();
     collector.collect_measured(blocks, default_family);
-    collector.finish().into_values().collect()
+    collector.finish_measured().into_values().collect()
 }
 
 /// The first family of a CSS family list, unquoted: the family a painter keys
@@ -371,7 +371,13 @@ pub struct FontRequirementCollector {
     implicit: BTreeMap<String, FontRequirement>,
     used: HashSet<String>,
     preferred_cjk: Option<&'static str>,
+    chart_families: HashSet<String>,
 }
+
+/// Distinct families charts may add to a document's requirements. Past it a page
+/// painting another chart font fails alone when rasterized, where resolving
+/// every font a hostile chart names could fail the whole document's layout.
+const MAX_CHART_FONT_FAMILIES: usize = 64;
 
 impl FontRequirementCollector {
     /// Puts the CJK script of the document's default East Asian language
@@ -425,7 +431,7 @@ impl FontRequirementCollector {
     /// `c:txPr` combine per field, and its default title is bold.
     fn collect_chart(&mut self, chart: &Value) {
         let mut text = ChartFontText::default();
-        text.gather(chart);
+        text.gather(chart, true);
         let scripts = ooxml_text::paragraph_scripts_with_languages(
             text.strings.iter().map(|string| (*string, None)),
             false,
@@ -441,6 +447,12 @@ impl FontRequirementCollector {
             &[false]
         };
         for family in std::iter::once(default).chain(text.fonts) {
+            if !self.chart_families.contains(family) {
+                if self.chart_families.len() >= MAX_CHART_FONT_FAMILIES {
+                    continue;
+                }
+                self.chart_families.insert(family.to_owned());
+            }
             for bold in [false, true] {
                 for &italic in italics {
                     self.name(family, bold, italic, &scripts, true);
@@ -543,8 +555,36 @@ impl FontRequirementCollector {
     }
 
     /// The requirements measurement can reach, keyed as
-    /// [`collect_font_requirements`] keys them.
+    /// [`collect_font_requirements`] keys them, and the family a compound or
+    /// quoted name paints under, which only the rasterizer looks up.
     pub fn finish(self) -> BTreeMap<String, FontRequirement> {
+        let mut requirements = self.finish_measured();
+        let painted: Vec<FontRequirement> = requirements
+            .values()
+            .filter(|requirement| {
+                let family = css_primary_family(&requirement.family);
+                family != requirement.family && !family.is_empty()
+            })
+            .cloned()
+            .collect();
+        for requirement in painted {
+            let key = add_font_requirement(
+                css_primary_family(&requirement.family),
+                requirement.bold,
+                requirement.italic,
+                &requirement.scripts,
+                &mut requirements,
+            );
+            requirements
+                .get_mut(&key)
+                .unwrap()
+                .characters
+                .extend(&requirement.characters);
+        }
+        requirements
+    }
+
+    fn finish_measured(self) -> BTreeMap<String, FontRequirement> {
         let preferred = self.preferred_cjk;
         let mut requirements = BTreeMap::new();
         self.merge_into(&mut requirements);
@@ -575,6 +615,7 @@ impl FontRequirementCollector {
             implicit,
             used,
             preferred_cjk: _,
+            chart_families: _,
         } = self;
         for (key, requirement) in implicit {
             if let Some(named) = named.get_mut(&key) {
@@ -607,20 +648,16 @@ impl FontRequirementCollector {
 
     /// A family and style the text names, which measurement reaches when `reached`.
     fn name(&mut self, family: &str, bold: bool, italic: bool, scripts: &[String], reached: bool) {
-        for family in painted_families(family) {
-            let key = add_font_requirement(family, bold, italic, scripts, &mut self.named);
-            if reached {
-                self.used.insert(key);
-            }
+        let key = add_font_requirement(family, bold, italic, scripts, &mut self.named);
+        if reached {
+            self.used.insert(key);
         }
     }
 
     /// A family and style measurement resolves a slot the text leaves unnamed to.
     fn reach(&mut self, family: &str, bold: bool, italic: bool, scripts: &[String]) {
-        for family in painted_families(family) {
-            let key = add_font_requirement(family, bold, italic, scripts, &mut self.implicit);
-            self.used.insert(key);
-        }
+        let key = add_font_requirement(family, bold, italic, scripts, &mut self.implicit);
+        self.used.insert(key);
     }
 
     fn characters(&mut self, family: &str, bold: bool, italic: bool, characters: FontCharacters) {
@@ -667,38 +704,34 @@ pub fn measured_synthetically<'a>(extents: impl IntoIterator<Item = &'a BlockExt
     extents.into_iter().any(block)
 }
 
-/// A family as text names it, then the family its font shorthand paints under
-/// when a comma or quotes make the two differ.
-fn painted_families(family: &str) -> impl Iterator<Item = &str> {
-    let painted = css_primary_family(family);
-    std::iter::once(family).chain((painted != family && !painted.is_empty()).then_some(painted))
-}
-
 /// What chart text paints with, read off a chart's JSON whatever part of the
 /// chart carries it.
 #[derive(Default)]
 struct ChartFontText<'a> {
-    fonts: Vec<&'a str>,
+    fonts: BTreeSet<&'a str>,
     italic: bool,
     strings: Vec<&'a str>,
 }
 
 impl<'a> ChartFontText<'a> {
-    fn gather(&mut self, value: &'a Value) {
+    /// Styles under `points` are kept in the part but never painted: labels
+    /// style per series, so they add text and no fonts.
+    fn gather(&mut self, value: &'a Value, painted: bool) {
         match value {
             Value::String(string) => self.strings.push(string),
-            Value::Array(items) => items.iter().for_each(|item| self.gather(item)),
+            Value::Array(items) => items.iter().for_each(|item| self.gather(item, painted)),
             Value::Object(fields) => {
                 for (key, field) in fields {
                     match (key.as_str(), field) {
-                        ("font", Value::String(font)) => {
+                        ("font", Value::String(font)) if painted => {
                             let font = css_primary_family(font);
-                            if !font.is_empty() && !self.fonts.contains(&font) {
-                                self.fonts.push(font);
+                            if !font.is_empty() {
+                                self.fonts.insert(font);
                             }
                         }
-                        ("italic", Value::Bool(true)) => self.italic = true,
-                        _ => self.gather(field),
+                        ("italic", Value::Bool(true)) if painted => self.italic = true,
+                        ("points", _) => self.gather(field, false),
+                        _ => self.gather(field, painted),
                     }
                 }
             }
@@ -7818,6 +7851,36 @@ mod tests {
         );
         assert!(keys.contains(&"book,italic|1|0".to_owned()));
         assert!(keys.contains(&"book|1|0".to_owned()));
+        let block: LayoutBlock = serde_json::from_value(json!({
+            "kind": "paragraph", "id": "p", "runs": [
+                {"kind": "text", "text": "A", "fontFamily": "Book,Italic"}
+            ]
+        }))
+        .unwrap();
+        let measured = collect_measured_font_requirements([&block], "Calibri");
+        assert!(measured.iter().any(|r| r.key == "book,italic|0|0"));
+        assert!(measured.iter().all(|r| r.key != "book|0|0"));
+    }
+
+    #[test]
+    fn chart_fonts_stop_at_the_family_limit_and_skip_unpainted_points() {
+        let fonts: Vec<Value> = (0..1_100)
+            .map(|index| json!({"text": {"font": format!("Font {index}")}}))
+            .collect();
+        let block: LayoutBlock = serde_json::from_value(json!({
+            "kind": "chart", "id": "b", "width": 100, "height": 40,
+            "chart": {
+                "axisList": fonts,
+                "series": [{"dataLabels": {"points": [{
+                    "labels": {"text": {"font": "Point Font", "italic": true}}
+                }]}}]
+            }
+        }))
+        .unwrap();
+        let requirements = collect_font_requirements([&block], "Calibri");
+        assert_eq!(requirements.len(), MAX_CHART_FONT_FAMILIES * 2);
+        assert!(requirements.iter().all(|r| !r.italic));
+        assert!(requirements.iter().any(|r| r.key == "calibri|1|0"));
     }
 
     #[test]
