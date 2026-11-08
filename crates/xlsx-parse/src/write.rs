@@ -39,6 +39,7 @@ use crate::xml::{
 };
 
 mod app_titles;
+mod fragment_rename;
 mod source_coordinates;
 mod style_derivation;
 mod views;
@@ -680,8 +681,16 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
             (sheet.name.as_str(), axes)
         })
         .collect::<Vec<_>>();
+    let renamed = sheet_renames(wb, package, &claimed);
     for (index, (sheet, plan)) in wb.sheets.iter().zip(&sheets).enumerate() {
         let source = plan.origin.and_then(|origin| package.sheets.get(origin));
+        let renamed_template = source
+            .filter(|source| source.is_worksheet())
+            .and_then(|source| {
+                fragment_rename::rename_preserved_fragments(&source.template, &renamed)
+                    .ok()
+                    .flatten()
+            });
         let original = plan
             .origin
             .and_then(|origin| package.original_workbook.sheets.get(origin));
@@ -705,6 +714,12 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
                         })
                     })
                 {
+                    if let Some(template) = &renamed_template {
+                        parts.set(
+                            plan.path.clone(),
+                            template.render(Vec::new(), worksheet_child_rank)?,
+                        )?;
+                    }
                     continue;
                 }
                 worksheet_xml_with_template(
@@ -712,6 +727,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
                     wb,
                     original,
                     source,
+                    renamed_template.as_ref().unwrap_or(&source.template),
                     package,
                     provenance,
                     shared_string_plan.as_ref(),
@@ -1334,6 +1350,68 @@ impl SheetIds {
 
 /// The source sheet each sheet keeps: the first in-range claim of a source
 /// index keeps it, later claims are new sheets.
+pub use fragment_rename::{FragmentFailure, FragmentFailureReason, FragmentKind};
+
+/// Each kept source sheet's name in the file with the current name of that
+/// same sheet, for the sheets whose name changed: the map a rename patch of
+/// preserved formulas follows, by sheet identity rather than rename history.
+fn sheet_renames(
+    wb: &Workbook,
+    package: &PreservedPackage,
+    claimed: &[Option<usize>],
+) -> Vec<(String, String)> {
+    wb.sheets
+        .iter()
+        .zip(claimed)
+        .filter_map(|(sheet, origin)| {
+            let original = package.original_workbook.sheets.get((*origin)?)?;
+            (original.name != sheet.name).then(|| (original.name.clone(), sheet.name.clone()))
+        })
+        .collect()
+}
+
+/// A preserved formula fragment a save would keep as the file wrote it
+/// because it cannot follow the sheet renames: on which sheet, in which part,
+/// and why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreservedFragmentFailure {
+    pub sheet: String,
+    pub part: String,
+    pub failure: FragmentFailure,
+}
+
+/// Every preserved formula fragment of `wb`'s kept source sheets that cannot
+/// follow the renames since `package` was read. Empty when every one can, or
+/// nothing was renamed.
+pub fn preserved_fragment_failures(
+    wb: &Workbook,
+    package: &PreservedPackage,
+    origins: &[Option<usize>],
+) -> Vec<PreservedFragmentFailure> {
+    let claimed = claimed_origins(package, origins);
+    let renamed = sheet_renames(wb, package, &claimed);
+    if renamed.is_empty() {
+        return Vec::new();
+    }
+    wb.sheets
+        .iter()
+        .zip(&claimed)
+        .filter_map(|(sheet, origin)| {
+            let source = package.sheets.get((*origin)?)?;
+            if !source.is_worksheet() {
+                return None;
+            }
+            fragment_rename::rename_preserved_fragments(&source.template, &renamed)
+                .err()
+                .map(|failure| PreservedFragmentFailure {
+                    sheet: sheet.name.clone(),
+                    part: source.path.clone(),
+                    failure,
+                })
+        })
+        .collect()
+}
+
 fn claimed_origins(package: &PreservedPackage, origins: &[Option<usize>]) -> Vec<Option<usize>> {
     let mut claimed = HashSet::new();
     origins
@@ -3090,6 +3168,7 @@ fn worksheet_xml_with_template(
     wb: &Workbook,
     original: Option<&Sheet>,
     source: &PreservedSheet,
+    template: &XmlTemplate,
     package: &PreservedPackage,
     shared_string_cells: &SharedStringCells,
     shared_string_plan: Option<&SharedStringPlan>,
@@ -3098,7 +3177,6 @@ fn worksheet_xml_with_template(
     sheet_index: usize,
     cf_plan: &CfPlan,
 ) -> Result<WorksheetOutput, ParseError> {
-    let template = &source.template;
     let defined = DefinedFunctionNames::new(&wb.defined_names);
     let names = defined.visible_from(Some(SheetId(sheet_index as u32)));
     if let Some(original) = original

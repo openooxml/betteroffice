@@ -10,6 +10,7 @@ mod format_calculation_tests;
 mod format_facets_tests;
 mod formula_entry;
 mod geometry;
+mod preserved_fragments;
 mod proposals;
 pub(crate) mod reads;
 pub(crate) mod recovery;
@@ -2311,6 +2312,7 @@ impl Workbook {
         validate_model_sheets(&preview)?;
         validate_shared_drawings(&preview)?;
         self.ensure_charts_follow(&preview, &inverse)?;
+        self.ensure_preserved_fragments_follow(&preview, &origins)?;
         if self.is_collaborative() {
             refuse_rule_growth(&self.model, &preview)?;
         }

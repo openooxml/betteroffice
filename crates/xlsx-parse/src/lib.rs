@@ -70,6 +70,11 @@ pub use write::{
     serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes,
     validate_defined_name_edits,
 };
+#[doc(hidden)]
+pub use write::{
+    FragmentFailure, FragmentFailureReason, FragmentKind, PreservedFragmentFailure,
+    preserved_fragment_failures,
+};
 
 use xlsx_model::{SheetId, Workbook};
 
