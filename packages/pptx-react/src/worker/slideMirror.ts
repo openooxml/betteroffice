@@ -40,6 +40,13 @@ export interface SlideMirrorItem {
   label: string | null;
   paragraphs: SlideMirrorParagraph[];
   table?: SlideMirrorTable;
+  chart?: SlideMirrorChart;
+}
+
+/** A chart's data: a column per series and a row per category. */
+export interface SlideMirrorChart {
+  series: (string | null)[];
+  rows: { category: string; values: (string | null)[] }[];
 }
 
 export const slideLinkOptions = { relative: false, protocols: ['http:', 'https:', 'mailto:', 'tel:'] } as const;
@@ -178,6 +185,35 @@ const count = (value: unknown, min: number): value is number => Number.isInteger
 
 /** The table's cells, or null when the engine sent no grid or one that does not fit the table. */
 const MAX_TABLE_SLOTS = 1_000_000;
+const MAX_CHART_CELLS = 10_000;
+const MAX_CHART_TEXT = 1024 * 1024;
+
+const chartText = (value: unknown, budget: { left: number }): value is string => {
+  if (typeof value !== 'string') return false;
+  budget.left -= value.length;
+  return budget.left >= 0;
+};
+
+/** The chart's data, or null when the engine sent none or it does not fit the chart's shape or the caps. */
+function mirrorChart(primitive: Extract<SlidePrimitive, { kind: 'chart' }>): SlideMirrorChart | null {
+  const data = primitive.data;
+  if (typeof data !== 'object' || data === null || !Array.isArray(data.categories) || !Array.isArray(data.series)) return null;
+  const { categories, series } = data;
+  if (!categories.length || !series.length || categories.length * series.length > MAX_CHART_CELLS) return null;
+  const budget = { left: MAX_CHART_TEXT };
+  if (!categories.every((category) => chartText(category, budget))) return null;
+  const names: (string | null)[] = [];
+  for (const entry of series) {
+    if (typeof entry !== 'object' || entry === null || !Array.isArray(entry.values) || entry.values.length !== categories.length) return null;
+    if (entry.name !== undefined && !chartText(entry.name, budget)) return null;
+    if (!entry.values.every((value) => value === null || chartText(value, budget))) return null;
+    names.push(entry.name?.trim() ? entry.name : null);
+  }
+  return {
+    series: names,
+    rows: categories.map((category, index) => ({ category, values: series.map((entry) => entry.values[index] ?? null) })),
+  };
+}
 
 function mirrorTable(primitive: Extract<SlidePrimitive, { kind: 'table' }>): SlideMirrorTable | null {
   const grid = primitive.grid;
@@ -248,6 +284,8 @@ export function slideMirrorItems(list: SlideDisplayList, picture: string): Slide
     const table = primitive.kind === 'table' && !own.table && !own.paragraphs.length ? mirrorTable(primitive) : null;
     if (table) own.table = table;
     else own.paragraphs.push(...paragraphs(primitive));
+    const chart = primitive.kind === 'chart' && !entry?.decorative && !own.chart ? mirrorChart(primitive) : null;
+    if (chart) own.chart = chart;
     if (entry?.decorative || primitive.kind === 'textBox') continue;
     const described = altLabel(entry);
     const artwork = primitive.kind === 'image' || painted.get(index) === id;
@@ -255,7 +293,7 @@ export function slideMirrorItems(list: SlideDisplayList, picture: string): Slide
     const fallback = entry?.group ? null : artwork ? primitive.name || picture : summary;
     own.label ??= described ?? fallback;
   }
-  const ordered = [...items.values()].filter((value) => value.label !== null || value.paragraphs.length > 0 || value.table);
+  const ordered = [...items.values()].filter((value) => value.label !== null || value.paragraphs.length > 0 || value.table || value.chart);
   const title = list.titleShape ? items.get(list.titleShape) : undefined;
   if (title?.paragraphs.length) {
     const parts = title.paragraphs.flatMap((paragraph, index) => [

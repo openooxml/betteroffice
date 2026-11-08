@@ -87,6 +87,7 @@ pub mod break_policy;
 pub mod cell_layout;
 pub mod column_balancing;
 pub mod display_list;
+pub mod endnote_flow;
 pub mod floating_objects;
 pub mod footnotes;
 pub mod header_footer;

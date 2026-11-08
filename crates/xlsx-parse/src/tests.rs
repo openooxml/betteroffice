@@ -6015,28 +6015,6 @@ fn keeps_an_unrebuildable_cache_whose_moved_reference_keeps_its_shape() {
     }
 }
 
-/// A point's `formatCode` is written with plain xml escaping, as the cache's
-/// own `formatCode` is: whatever a cell's number format holds, an xml reader
-/// gives it back, a literal `_xHHHH_` stays literal, and writing it never
-/// fails.
-#[test]
-fn writes_any_point_format_with_plain_xml_escaping() {
-    for (code, written) in [
-        ("0.0%", "0.0%"),
-        (
-            r#"[$-409]#,##0.00" units & <more>""#,
-            "[$-409]#,##0.00&quot; units &amp; &lt;more&gt;&quot;",
-        ),
-        ("0\u{1}0\u{1f}\u{fffe}", "0&#1;0&#31;&#65534;"),
-        ("0\t0\n0\r", "0&#9;0&#10;0&#13;"),
-        ("_x0041_ and _X0041_", "_x0041_ and _X0041_"),
-    ] {
-        assert_eq!(crate::xml::attribute_text(code), written, "{code:?}");
-    }
-    let long = "0".repeat(255);
-    assert_eq!(crate::xml::attribute_text(&long), long);
-}
-
 /// A cache may legally carry an `extLst` beside its points, and a string
 /// point carries no `formatCode` (`CT_StrVal`). Neither survives a rebuild,
 /// so the save is refused rather than quietly changing the labels a consumer
@@ -8215,4 +8193,37 @@ fn full_precision_false_survives_serializing_a_new_workbook() {
     };
     let parts = serialize_workbook(&workbook).unwrap();
     assert!(!parse_workbook(&parts).unwrap().full_precision);
+}
+
+/// A number format code is an `ST_Xstring`, written the way Excel writes one
+/// as element text and as an attribute value, and every code decodes back.
+#[test]
+fn format_codes_are_written_as_xstrings_and_decode_back() {
+    for (code, text, attribute) in [
+        ("0.0%", "0.0%", "0.0%"),
+        ("0\u{1}", "0_x0001_", "0_x0001_"),
+        ("0\t0\n0\r", "0\t0\n0_x000D_", "0_x0009_0_x000A_0_x000D_"),
+        (
+            "_x0041_ _X0041_ _x00 _x12G4_",
+            "_x005F_x0041_ _x005F_X0041_ _x00 _x12G4_",
+            "_x005F_x0041_ _x005F_X0041_ _x00 _x12G4_",
+        ),
+        (
+            r#"#,##0" & <a>""#,
+            "#,##0&quot; &amp; &lt;a&gt;&quot;",
+            "#,##0&quot; &amp; &lt;a&gt;&quot;",
+        ),
+        ("\u{0}\u{fffe}", "_x0000__xFFFE_", "_x0000__xFFFE_"),
+    ] {
+        assert_eq!(crate::xml::format_code_text(code), text, "{code:?}");
+        assert_eq!(
+            crate::xml::format_code_attribute_value(code),
+            attribute,
+            "{code:?}"
+        );
+        for written in [text, attribute] {
+            let unescaped = quick_xml::escape::unescape(written).unwrap();
+            assert_eq!(crate::read::unescape_name(&unescaped), code, "{written:?}");
+        }
+    }
 }

@@ -1294,6 +1294,7 @@ mod tests {
                         label: String::new(),
                         primitives: vec![text],
                         transform: Transform::default(),
+                        data: None,
                     }
                 } else {
                     text
@@ -1359,6 +1360,7 @@ mod tests {
                     label,
                     primitives,
                     transform,
+                    data: None,
                 }
             }
         };

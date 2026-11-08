@@ -934,6 +934,10 @@ pub(crate) fn build_layout_map(
                         _ => NotePlacement::PageBottom,
                     };
                     let occurrence_id = format!("p{page_index}.{name}.{id}");
+                    let flow = match kind {
+                        LayoutNoteKind::Footnote => occurrence_id.clone(),
+                        LayoutNoteKind::Endnote => story.clone(),
+                    };
                     Occurrence {
                         record: StoryOccurrence {
                             id: occurrence_id.clone(),
@@ -953,7 +957,7 @@ pub(crate) fn build_layout_map(
                             },
                         },
                         root: story,
-                        flow: occurrence_id,
+                        flow,
                     }
                 }
             };

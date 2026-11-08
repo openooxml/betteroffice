@@ -274,7 +274,7 @@ fn parse_style_pools(
                 b"numFmt" if unfiltered || (section == Section::NumFmts && depth == 3) => {
                     if let (Some(id), Some(code)) = (
                         attr(&e, b"numFmtId")?.and_then(|v| v.parse::<u16>().ok()),
-                        attr(&e, b"formatCode")?,
+                        attr(&e, b"formatCode")?.map(|code| crate::read::unescape_name(&code)),
                     ) {
                         cap(ss.num_fmts.len())?;
                         ss.num_fmts.push((id, code));

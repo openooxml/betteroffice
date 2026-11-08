@@ -444,3 +444,33 @@ test('a text-only mirror keeps labels and attributes of ancestors of retained co
   );
   expect(textOnly.textContent).toBe('Link descriptionLinkOther text');
 });
+
+test('an endnote split across two pages is one note in the mirror', () => {
+  const part = (pageIndex: number, words: string, continued: boolean): DisplayPage => ({
+    pageIndex,
+    width: 100,
+    height: 100,
+    primitives: [],
+    noteAreas: [
+      {
+        kind: 'endnote',
+        y: 50,
+        height: 20,
+        noteIds: [9],
+        ...(continued ? { continuedNoteIds: [9] } : { notes: [{ id: 9, label: '9', anchorDocStart: 4, anchorDocEnd: 5 }] }),
+        primitives: [text({ groupId: 'endnote-9', text: words })],
+      },
+    ],
+  });
+  const split = [part(0, 'opening words', false), part(1, 'closing words', true)];
+  const mirrors = split.map((page) => buildMirrorPage(page));
+  const all = (selector: string) => mirrors.flatMap((mirror) => Array.from(mirror.querySelectorAll(selector)));
+  expect(all('#oox-endnote-9')).toHaveLength(1);
+  expect(all('[role="doc-endnote"]')).toHaveLength(1);
+  expect(all('[role="doc-backlink"]')).toHaveLength(1);
+  expect(all('[data-note-id="9"]')).toHaveLength(2);
+  const read = mirrors.map((mirror) => mirror.textContent ?? '').join(' ');
+  expect(read.split('opening words')).toHaveLength(2);
+  expect(read.split('closing words')).toHaveLength(2);
+  expect(split.map((page) => displayPageHoldsMirrorId(page, 'oox-endnote-9'))).toEqual([true, false]);
+});
