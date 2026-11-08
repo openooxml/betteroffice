@@ -126,6 +126,38 @@ impl Workbook {
     /// XML can carry. `inverse` is the batch's inverse, which records
     /// a `SetCharts` for every sheet whose charts it changed, so a batch that
     /// changes none costs nothing here.
+    /// The chart parts a save keeps as authored because the workbook holds a
+    /// reference for them that no `c:f` can carry, decided as the save decides
+    /// it, once per part.
+    pub(super) fn chart_save_warnings(&self) -> Vec<crate::SaveWarning> {
+        let Some(package) = self.source_package.as_ref() else {
+            return Vec::new();
+        };
+        let facts = package.facts();
+        let mut warned = BTreeSet::new();
+        let mut warnings = Vec::new();
+        for sheet in &self.model.sheets {
+            for chart in &sheet.charts {
+                if warned.contains(chart.part.as_str()) {
+                    continue;
+                }
+                let Some(source) = facts.chart_part_bytes(&chart.part) else {
+                    continue;
+                };
+                if let Err(error) = xlsx_parse::chart_bytes(source, chart, &self.model, &sheet.name)
+                    && xlsx_parse::is_unwritable_chart_reference(&error)
+                {
+                    warned.insert(chart.part.as_str());
+                    warnings.push(crate::SaveWarning {
+                        part: chart.part.clone(),
+                        reason: "kept as the file wrote it: the workbook holds a chart reference with a character XML cannot carry, which no chart reference can be written with".to_owned(),
+                    });
+                }
+            }
+        }
+        warnings
+    }
+
     pub(super) fn ensure_charts_follow(
         &self,
         preview: &xlsx_model::Workbook,
@@ -152,19 +184,26 @@ impl Workbook {
             }
         }
         for part in changed {
-            let follows = package.facts().chart_part_bytes(part).is_some_and(|bytes| {
+            let outcome = package.facts().chart_part_bytes(part).map(|bytes| {
                 xlsx_parse::agreed_chart_bytes(
                     bytes,
                     part,
                     claims.get(part).map_or(&[][..], Vec::as_slice),
                     preview,
                 )
-                .is_ok()
             });
-            if !follows {
-                return Err(Error::InvalidOperation(format!(
-                    "{part} references cells this edit would move, and it cannot be rewritten"
-                )));
+            match outcome {
+                Some(Ok(_)) => {}
+                Some(Err(error)) if xlsx_parse::is_unwritable_chart_reference(&error) => {
+                    return Err(Error::InvalidOperation(
+                        "chart reference contains a character xml cannot carry".to_string(),
+                    ));
+                }
+                _ => {
+                    return Err(Error::InvalidOperation(format!(
+                        "{part} references cells this edit would move, and it cannot be rewritten"
+                    )));
+                }
             }
         }
         Ok(())
@@ -341,4 +380,40 @@ thread_local! {
 #[cfg(test)]
 pub(super) fn chart_check_count() -> usize {
     CHART_CHECKS.get()
+}
+
+#[cfg(test)]
+mod reference_tests {
+    use super::Workbook;
+
+    include!("../../tests/fixtures/chart_control_book.rs");
+
+    fn chart_part(bytes: &[u8]) -> Vec<u8> {
+        ooxml_opc::unzip_parts(bytes)
+            .unwrap()
+            .into_iter()
+            .find(|(path, _)| path == CHART)
+            .map(|(_, bytes)| bytes)
+            .unwrap()
+    }
+
+    /// Whatever door a rewritten reference xml cannot carry comes through, a
+    /// peer state, a snapshot, a checkpoint or one not yet known, the save
+    /// keeps the chart part as authored instead of failing or writing invalid
+    /// xml, and says so with one warning naming the part.
+    #[test]
+    fn a_save_keeps_the_chart_as_authored_whatever_installed_such_a_reference() {
+        let source = book();
+        for installed in ["'A\u{1}B'!$B$3:$B$5", "Data!$B$2\u{0}"] {
+            let mut workbook = Workbook::open(&source).unwrap();
+            workbook.model.sheets[0].charts[0].refs[0].formula = installed.to_owned();
+            let (saved, warnings) = workbook
+                .save_with_warnings()
+                .unwrap_or_else(|error| panic!("{installed:?}: {error}"));
+            assert_eq!(chart_part(&saved), chart_part(&source), "{installed:?}");
+            assert_eq!(warnings.len(), 1, "{installed:?}: {warnings:?}");
+            assert_eq!(warnings[0].part, CHART);
+            assert!(warnings[0].reason.contains("character XML cannot carry"));
+        }
+    }
 }

@@ -1038,6 +1038,19 @@ pub(crate) const MAX_CACHE_POINTS: u32 = 65_536;
 /// from, or when a moved reference changed shape or names no cells and its
 /// cache cannot be rebuilt, rather than leaving a reference pointing at one
 /// range while its cache still holds another's values.
+/// Why a chart reference cannot be written: it holds a character xml 1.0
+/// cannot carry, and `c:f` is plain text with no escape for one. Only a file
+/// that already wrote such a reference can hold it; an edit that would write
+/// it anew is refused with this reason, and a save keeps the part as authored.
+pub(crate) const UNWRITABLE_REFERENCE: &str =
+    "chart reference contains a character xml cannot carry";
+
+/// Whether `error` is a chart part refused for [`UNWRITABLE_REFERENCE`], which
+/// a save answers by keeping that part as authored.
+pub fn is_unwritable_chart_reference(error: &ParseError) -> bool {
+    matches!(error, ParseError::UnsupportedEdit(reason) if reason == UNWRITABLE_REFERENCE)
+}
+
 pub(crate) fn patch_chart_refs(
     part: &[u8],
     path: &str,
@@ -1058,6 +1071,9 @@ pub(crate) fn patch_chart_refs(
     for (site, reference) in sites.iter().zip(refs) {
         if site.formula == reference.formula {
             continue;
+        }
+        if crate::tree::escape_text(&reference.formula).is_err() {
+            return Err(ParseError::UnsupportedEdit(UNWRITABLE_REFERENCE.into()));
         }
         let Some(span) = site.span.clone() else {
             return Err(ParseError::UnsupportedEdit(

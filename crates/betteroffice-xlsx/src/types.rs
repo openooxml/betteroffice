@@ -118,6 +118,14 @@ pub struct EditProfile {
     pub result_ms: f64,
 }
 
+/// A part a save wrote differently from what the workbook holds, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SaveWarning {
+    /// The package part, such as `xl/charts/chart1.xml`.
+    pub part: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MutationResult {
     pub applied: bool,

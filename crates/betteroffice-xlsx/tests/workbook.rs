@@ -9047,8 +9047,11 @@ fn sample_chart() -> SheetChart {
 }
 
 /// Chart state a peer controls reaches the writer, so an off-grid anchor, a
-/// character xml cannot carry, a smuggled part path and two charts claiming one
-/// anchor are all refused before anything is written.
+/// smuggled part path and two charts claiming one anchor are all refused before
+/// anything is written. A reference holding a character xml cannot carry is
+/// opened content here, kept as authored. tests/chart_control_references.rs
+/// covers the edits and snapshots that would rewrite one, and workbook/charts.rs
+/// the check that peer states and hydrated snapshots pass.
 #[test]
 fn refuses_chart_state_the_writer_could_not_express() {
     let off_grid = {
@@ -9064,11 +9067,6 @@ fn refuses_chart_state_the_writer_could_not_express() {
         };
         (chart, "off the sheet grid")
     };
-    let illegal_character = {
-        let mut chart = sample_chart();
-        chart.refs[0].formula = "Data!$A$1\u{7}".to_owned();
-        (chart, "xml cannot carry")
-    };
     let traversal = {
         let mut chart = sample_chart();
         chart.part = "../../etc/passwd".to_owned();
@@ -9079,7 +9077,7 @@ fn refuses_chart_state_the_writer_could_not_express() {
         chart.drawing = "/xl/drawings/drawing1.xml".to_owned();
         (chart, "not a package part path")
     };
-    for (chart, reason) in [off_grid, illegal_character, traversal, absolute] {
+    for (chart, reason) in [off_grid, traversal, absolute] {
         let Err(error) = Workbook::from_model(charted_model(chart)) else {
             panic!("{reason} must be refused");
         };
