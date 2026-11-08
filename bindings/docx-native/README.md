@@ -30,6 +30,10 @@ there is no runtime engine switch. Native initialization needs no WebAssembly as
 Default fonts need no setup: the Latin, international and CJK font packs install with this
 package and each face is read from disk the first time a document needs it; nothing is fetched.
 
+An installed font pack that cannot be used (another release, missing files, an unreadable manifest) is skipped and its
+faces substituted; the process warns once per pack with code `BETTEROFFICE_FONT_PACK`, and `fontPackDiagnostics()`
+lists each one with the pack and the reason.
+
 The previous `Document` and `openDocument` facade has been removed. Use the
 [DOCX API](https://docs.betteroffice.dev/docs/javascript) with the native package name.
 Browser imports throw; use `@betteroffice/docx` in browsers.

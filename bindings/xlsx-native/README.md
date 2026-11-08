@@ -4,6 +4,10 @@ The `@betteroffice/xlsx` API on the native Rust engine, for Node.js, Bun and Den
 Prebuilt binaries cover macOS arm64/x64, GNU and musl Linux arm64/x64, and Windows arm64/x64.
 PNG export renders with the installed Latin, international and CJK font packs; nothing is fetched.
 
+An installed font pack that cannot be used (another release, missing files, an unreadable manifest) is skipped and its
+faces substituted; the process warns once per pack with code `BETTEROFFICE_FONT_PACK`, and `fontPackDiagnostics()`
+lists each one with the pack and the reason.
+
 Worker sessions on Node.js >= 20.16 / 22.3 run on `worker_threads`, keeping the process alive until the session is disposed.
 
 ```sh

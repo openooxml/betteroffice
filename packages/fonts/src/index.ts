@@ -9,6 +9,7 @@ import { loadFontBytes } from './bytes';
 import { loadPackedFontBytes, readPackedFontBytes, isBaseLatinFont, isLatinFont, sliceDecoder, sliceRefOf } from './packed';
 import { BASE_LATIN_FONT_ASSET_URLS } from './base-latin';
 import type { SliceLocation } from './progressive';
+import { checkInstalledPacks, type FontPackDiagnostic } from './packDiagnostics';
 
 export interface FontAssetOptions {
   /**
@@ -387,3 +388,14 @@ export const decodeFontFaceOutsideEngine: FontDecoder = async (bytes, { codec, d
     decoder.releaseFontDecoder();
   }
 };
+
+export type { FontPackDiagnostic } from './packDiagnostics';
+
+/**
+ * The installed font add-on packages that cannot be used (another release, missing files, an unreadable
+ * manifest), each naming the pack and the reason. Their faces are substituted as when the pack is not installed;
+ * a pack that is not installed is not reported.
+ */
+export function checkFontPacks(): Promise<FontPackDiagnostic[]> {
+  return checkInstalledPacks({ latin: loadLatinAssetUrls, intl: loadIntlAssetUrls, cjk: loadCjkAssetUrls });
+}

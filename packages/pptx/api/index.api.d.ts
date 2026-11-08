@@ -471,6 +471,12 @@ export type PptxFindResult = {
     truncated: boolean;
 } | PptxEditRefusal;
 
+// ---- fontPackDiagnostics.d.ts ----
+import type { FontPackDiagnostic } from '../../../shared/fontPackDiagnostics';
+export type { FontPackDiagnostic };
+/** The installed font add-on packages that cannot be used, and why; their faces are substituted. */
+export declare function fontPackDiagnostics(): Promise<FontPackDiagnostic[]>;
+
 // ---- index.d.ts ----
 export { paintSlide, sizeCanvasForSlide } from './render/canvas';
 export { decodePresentationImage, needsElementDecode, presentationImageBlob } from './render/image';
@@ -498,6 +504,8 @@ export { PptxPeerNotReadyError, PptxWorkerEditorDisposedError } from './session/
 export { openPresentationSession } from './session/client';
 /** @internal */
 export { createPptxWorkerEditorSession } from './session/editorSession';
+export { fontPackDiagnostics } from './fontPackDiagnostics';
+export type { FontPackDiagnostic } from './fontPackDiagnostics';
 
 // ---- proposals.d.ts ----
 import type { DeckSnapshot, ParagraphAlignment, ShapeDraft, PresetShapeDraft, PictureDraft, ShapeFill, ShapeRect, ShapeSnapshot, ShapeStroke, SlideDisplayList, TextParagraphDraft, TextStyleSnapshot } from './types';
@@ -1518,6 +1526,22 @@ export interface CollaborationPipeHost<C = PipeCursor, P = PipePeer> {
 }
 export declare function createCollaborationPipeHost<Prov extends PipeProvider<C, P>, C = PipeCursor, P = PipePeer>(options: CollaborationPipeHostOptions<Prov, C, P>): CollaborationPipeHost<C, P>;
 export {};
+
+// ---- shared/fontPackDiagnostics.d.ts ----
+/** An installed font pack that cannot be used, so its faces are substituted. */
+export interface FontPackDiagnostic {
+    /** The add-on package: `@betteroffice/fonts-latin`, `-intl` or `-cjk`. */
+    pack: 'latin' | 'intl' | 'cjk';
+    /** `version-mismatch`: another release is installed; `missing-file`: files are absent; `invalid-manifest`: its manifest cannot be read. */
+    reason: 'version-mismatch' | 'missing-file' | 'invalid-manifest';
+    /** A sentence naming the package and what is wrong. */
+    detail: string;
+}
+/**
+ * Emits each diagnostic once per pack and process as a Node process warning with code `BETTEROFFICE_FONT_PACK`,
+ * so server hosts can filter it. Does nothing outside Node.
+ */
+export declare function warnFontPackDiagnostics(diagnostics: readonly FontPackDiagnostic[]): void;
 
 // ---- shared/host-contracts/edits.d.ts ----
 /**

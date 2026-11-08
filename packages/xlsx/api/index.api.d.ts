@@ -1057,6 +1057,12 @@ export type XlsxExportResult<T> = {
 } | OperationRefusal<XlsxExportFailure>;
 export type { XlsxHeaderFooterText, XlsxHeaderFooterPair, XlsxSheetHeaderFooter } from './edits';
 
+// ---- fontPackDiagnostics.d.ts ----
+import type { FontPackDiagnostic } from '../../../shared/fontPackDiagnostics';
+export type { FontPackDiagnostic };
+/** The installed font add-on packages that cannot be used, and why; their faces are substituted. */
+export declare function fontPackDiagnostics(): Promise<FontPackDiagnostic[]>;
+
 // ---- hittest/index.d.ts ----
 /**
  * Pure hit-testing over a frame's {@link GridMeta}: map a viewport-local point
@@ -1138,6 +1144,8 @@ export type { EditSuccess, OperationFailure, OperationRefusal, ValidationSuccess
 export type { ExportCompletion, ExportDiagnostic, ExportSeverity, MarkdownAnchor, XlsxAnchor, XlsxExportCell, XlsxExportDefinedName, XlsxExportDiagnostic, XlsxExportDiagnosticCode, XlsxExportFailure, XlsxExportFailureCode, XlsxExportHyperlink, XlsxExportMerge, XlsxExportObject, XlsxExportOptions, XlsxExportResult, XlsxExportScope, XlsxExportSheet, XlsxExportTable, XlsxExportValue, XlsxFormulaResult, XlsxMarkdownContent, XlsxMarkdownOptions, XlsxObjectKind, XlsxSheetIdentity, XlsxSheetVisibility, XlsxSourcePart, XlsxStructuredContent, } from './exports';
 export type { XlsxDefinedNameOp, XlsxDefinedName, XlsxDefinedNamesRequest, XlsxDefinedNamesResult } from './definedNames';
 export type { ChartInfo, ChartSeriesInfo, ChartEdit, ChartMutation, ChartSeriesName } from './charts';
+export { fontPackDiagnostics } from './fontPackDiagnostics';
+export type { FontPackDiagnostic } from './fontPackDiagnostics';
 
 // ---- render/canvas2d.d.ts ----
 /**
@@ -2271,6 +2279,22 @@ export declare function validPipeCursor(cursor: unknown, maxFrameBytes: number):
 export declare function validPipePayload<C = PipeCursor>(payload: unknown, maxFrameBytes: number, shape: PipePayloadShape): payload is PipeCommandPayload<C>;
 /** Epoch time of this context's provider clock zero: performance.now() when present, else Date.now(). */
 export declare function clockOrigin(): number;
+
+// ---- shared/fontPackDiagnostics.d.ts ----
+/** An installed font pack that cannot be used, so its faces are substituted. */
+export interface FontPackDiagnostic {
+    /** The add-on package: `@betteroffice/fonts-latin`, `-intl` or `-cjk`. */
+    pack: 'latin' | 'intl' | 'cjk';
+    /** `version-mismatch`: another release is installed; `missing-file`: files are absent; `invalid-manifest`: its manifest cannot be read. */
+    reason: 'version-mismatch' | 'missing-file' | 'invalid-manifest';
+    /** A sentence naming the package and what is wrong. */
+    detail: string;
+}
+/**
+ * Emits each diagnostic once per pack and process as a Node process warning with code `BETTEROFFICE_FONT_PACK`,
+ * so server hosts can filter it. Does nothing outside Node.
+ */
+export declare function warnFontPackDiagnostics(diagnostics: readonly FontPackDiagnostic[]): void;
 
 // ---- shared/host-contracts/edits.d.ts ----
 /**

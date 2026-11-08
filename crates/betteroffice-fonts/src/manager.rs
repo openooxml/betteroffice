@@ -323,10 +323,70 @@ impl FontSource {
     }
 }
 
+/// Why an installed font pack was left out.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FontPackProblem {
+    /// The pack's manifest names another release than this catalog's.
+    VersionMismatch {
+        expected: String,
+        found: Option<String>,
+    },
+    /// Files the catalog lists for the pack are not in its directory; `file` is the first of them by name.
+    MissingFile { file: String, missing: usize },
+    /// The pack's manifest cannot be read or parsed; `reason` is the error, left out of the message.
+    InvalidManifest { reason: String },
+}
+
+/// An installed font pack that cannot be used, so its faces are substituted.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FontPackDiagnostic {
+    pub pack: FontPack,
+    pub directory: PathBuf,
+    pub problem: FontPackProblem,
+}
+
+impl FontPackDiagnostic {
+    /// `version-mismatch`, `missing-file` or `invalid-manifest`.
+    pub fn reason(&self) -> &'static str {
+        match self.problem {
+            FontPackProblem::VersionMismatch { .. } => "version-mismatch",
+            FontPackProblem::MissingFile { .. } => "missing-file",
+            FontPackProblem::InvalidManifest { .. } => "invalid-manifest",
+        }
+    }
+}
+
+impl fmt::Display for FontPackDiagnostic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let package = format!("@betteroffice/fonts-{}", self.pack.as_str());
+        match &self.problem {
+            FontPackProblem::VersionMismatch { expected, found } => write!(
+                f,
+                "{package} {} does not match the {expected} release the engine needs; its faces are substituted",
+                found.as_deref().unwrap_or("of unknown version"),
+            ),
+            FontPackProblem::MissingFile { file, missing } => write!(
+                f,
+                "{package} is missing {file}{}; its faces are substituted",
+                if *missing > 1 {
+                    format!(" and {} more files", missing - 1)
+                } else {
+                    String::new()
+                },
+            ),
+            FontPackProblem::InvalidManifest { .. } => write!(
+                f,
+                "{package} has an unreadable manifest; its faces are substituted"
+            ),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct BundledFonts {
     options: BundledFontOptions,
     directories: HashMap<FontPack, PathBuf>,
+    diagnostics: Vec<FontPackDiagnostic>,
 }
 
 impl BundledFonts {
@@ -368,9 +428,17 @@ impl BundledFonts {
         Ok(Self {
             options,
             directories: HashMap::new(),
+            diagnostics: Vec::new(),
         })
     }
 
+    /// Installed packs [`Self::from_pack_directories`] left out, and why.
+    pub fn pack_diagnostics(&self) -> &[FontPackDiagnostic] {
+        &self.diagnostics
+    }
+
+    /// Every listed pack is installed: callers leave out the packs they cannot find. One that cannot be used,
+    /// including one whose directory is gone, is skipped with a diagnostic in [`Self::pack_diagnostics`].
     #[doc(hidden)]
     pub fn from_pack_directories(directories: Vec<(FontPack, PathBuf)>) -> Result<Self, FontError> {
         for (index, (pack, directory)) in directories.iter().enumerate() {
@@ -391,6 +459,7 @@ impl BundledFonts {
                 base_url: None,
             },
             directories: HashMap::new(),
+            diagnostics: Vec::new(),
         };
         for (pack, mut directory) in directories {
             if directory.is_relative() {
@@ -401,25 +470,17 @@ impl BundledFonts {
                     })?
                     .join(directory);
             }
-            let Ok(bytes) = std::fs::read(directory.join("manifest.json")) else {
-                continue;
-            };
-            let Ok(manifest) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-                continue;
-            };
-            let version = manifest.get("version").and_then(serde_json::Value::as_str);
-            if !catalog()
-                .faces
-                .iter()
-                .filter(|face| face.pack == pack)
-                .all(|face| {
-                    version == Some(face.version.as_str()) && directory.join(&face.file).is_file()
-                })
-            {
-                continue;
+            match pack_problem(pack, &directory) {
+                Some(problem) => bundled.diagnostics.push(FontPackDiagnostic {
+                    pack,
+                    directory,
+                    problem,
+                }),
+                None => {
+                    bundled.options.packs.push(pack);
+                    bundled.directories.insert(pack, directory);
+                }
             }
-            bundled.options.packs.push(pack);
-            bundled.directories.insert(pack, directory);
         }
         Ok(bundled)
     }
@@ -460,6 +521,59 @@ impl BundledFonts {
         }
         handle
     }
+}
+
+/// Why the pack installed at `directory` cannot be used, or `None` when every face it should hold is there.
+fn pack_problem(pack: FontPack, directory: &Path) -> Option<FontPackProblem> {
+    let faces: Vec<_> = catalog()
+        .faces
+        .iter()
+        .filter(|face| face.pack == pack)
+        .collect();
+    let missing = |manifest: bool| {
+        let mut files: Vec<&str> = faces
+            .iter()
+            .filter(|face| !directory.join(&face.file).is_file())
+            .map(|face| face.file.as_str())
+            .collect();
+        if manifest {
+            files.push("manifest.json");
+        }
+        files.sort_unstable();
+        files.first().map(|file| FontPackProblem::MissingFile {
+            file: (*file).to_string(),
+            missing: files.len(),
+        })
+    };
+    let bytes = match std::fs::read(directory.join("manifest.json")) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return missing(true),
+        Err(error) => {
+            return Some(FontPackProblem::InvalidManifest {
+                reason: error.to_string(),
+            });
+        }
+    };
+    let manifest = match serde_json::from_slice::<serde_json::Value>(&bytes) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            return Some(FontPackProblem::InvalidManifest {
+                reason: error.to_string(),
+            });
+        }
+    };
+    let found = manifest.get("version").and_then(serde_json::Value::as_str);
+    if let Some(expected) = faces
+        .iter()
+        .map(|face| face.version.as_str())
+        .find(|version| Some(*version) != found)
+    {
+        return Some(FontPackProblem::VersionMismatch {
+            expected: expected.into(),
+            found: found.map(str::to_string),
+        });
+    }
+    missing(false)
 }
 
 impl FontProvider for BundledFonts {
