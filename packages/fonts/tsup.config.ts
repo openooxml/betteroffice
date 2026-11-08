@@ -8,7 +8,8 @@ export default defineConfig({
   dts: { resolve: true },
   splitting: false,
   sourcemap: false,
-  clean: true,
+  // scripts/build-fonts-decoder.ts writes decoder/ on its own, so a rebuild here must not delete it.
+  clean: ['!decoder/**'],
   minify: false,
   // The Word-family alias table is full of CJK; esbuild would otherwise
   // `\uHHHH`-escape every entry.
