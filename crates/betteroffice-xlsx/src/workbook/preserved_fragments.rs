@@ -7,6 +7,7 @@ use xlsx_parse::{FragmentFailureReason, FragmentKind};
 
 use crate::{SaveWarning, SaveWarningCode};
 use xlsx_model::SheetId;
+use xlsx_model::sheet_qualifier::sheet_names_equal;
 
 use super::Workbook;
 use crate::{Error, Result};
@@ -64,11 +65,13 @@ impl Workbook {
             .collect()
     }
 
-    /// Refuses renaming sheet `index` of `staged` when it holds a name a
-    /// source sheet held, that source sheet is gone, and a preserved formula
-    /// names it. The formula binds to this sheet by name, as cell formulas
-    /// do, but the save renames preserved formulas by source sheet identity,
-    /// which this sheet does not have, so it could not follow the rename.
+    /// Refuses renaming sheet `index` of `staged` when its name, compared as
+    /// sheet names are, is one a source sheet held, that source sheet is
+    /// gone, and a preserved formula names it. The formula binds to this
+    /// sheet by name, as cell formulas do, whether it took the name when it
+    /// was added or by a rename, but the save renames preserved formulas by
+    /// source sheet identity, which ties none of them to this sheet, so it
+    /// could not follow the rename.
     pub(super) fn ensure_taken_name_rename_follows(
         &self,
         staged: &xlsx_model::Workbook,
@@ -79,14 +82,13 @@ impl Workbook {
             return Ok(());
         };
         let at = index.0 as usize;
-        let (Some(sheet), Some(None)) = (staged.sheets.get(at), origins.get(at)) else {
+        let Some(sheet) = staged.sheets.get(at) else {
             return Ok(());
         };
         let package = package.materialize()?;
-        let deleted_source_name = package
-            .source_sheet_names()
-            .enumerate()
-            .any(|(source, name)| name == sheet.name && !origins.contains(&Some(source)));
+        let deleted_source_name = package.source_sheet_names().enumerate().any(|(source, name)| {
+            sheet_names_equal(name, &sheet.name) && !origins.contains(&Some(source))
+        });
         if !deleted_source_name {
             return Ok(());
         }

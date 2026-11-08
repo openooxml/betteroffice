@@ -406,3 +406,30 @@ fn renaming_a_sheet_that_took_a_deleted_sheets_name_is_refused_when_a_fragment_n
     );
     assert_eq!(workbook.model(), &before);
 }
+
+/// The taken-name refusal compares names as sheet names compare, ignoring
+/// case, and holds whether the sheet took the deleted sheet's name when it
+/// was added or by a rename of its own.
+#[test]
+fn a_taken_name_is_matched_ignoring_case_and_however_it_was_taken() {
+    let expected = "the data validation formulas on sheet 'Other' name a deleted sheet whose name this sheet took, and cannot follow the sheet rename";
+    for take in [
+        Op::AddSheet {
+            index: 0,
+            name: "data".into(),
+        },
+        Op::RenameSheet {
+            sheet: SheetId(0),
+            name: "Data".into(),
+        },
+    ] {
+        let source = book("Data", "Spare", "1", "Data!$A$1:$A$5");
+        let mut workbook = Workbook::open(&source).unwrap();
+        apply(&mut workbook, Op::RemoveSheet { index: 0 }).unwrap();
+        apply(&mut workbook, take.clone()).unwrap();
+        let before = workbook.model().clone();
+        let error = rename(&mut workbook, 0, "Z").unwrap_err();
+        assert_eq!(error.to_string(), expected, "{take:?}");
+        assert_eq!(workbook.model(), &before);
+    }
+}
