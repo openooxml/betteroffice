@@ -9,7 +9,7 @@
 '@betteroffice/xlsx': patch
 '@betteroffice/xlsx-native': patch
 '@betteroffice/python-xlsx': patch
-'@betteroffice/rust-crates': patch
+'@betteroffice/rust-crates': minor
 ---
 
 Arabic text set in Simplified Arabic or Traditional Arabic now falls back to the bundled Naskh face, closer to those fonts' style and width.
