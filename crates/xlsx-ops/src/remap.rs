@@ -11,8 +11,8 @@ use xlsx_calc::{ColumnRange, RowRange, parse_formula};
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS, col_to_letters};
 use xlsx_model::workbook::{MAX_DEFINED_NAME_BYTES, defined_names_bytes};
 use xlsx_model::{
-    AnchorCell, AnchorEditAs, CellRange, CellRef, ChartAnchor, DefinedName, ErrorValue, SheetId,
-    Workbook,
+    AnchorCell, AnchorEditAs, CellRange, CellRef, ChartAnchor, ConditionalFormatRule,
+    ConditionalFormatting, DefinedName, ErrorValue, SheetId, Workbook,
 };
 
 use crate::apply::OpError;
@@ -1686,15 +1686,6 @@ fn sheet_qualifiers(source: &str) -> Vec<Qualifier> {
     out
 }
 
-pub(crate) fn formula_names_sheet(source: &str, name: &str) -> bool {
-    sheet_qualifiers(source).iter().any(|qualifier| {
-        qualifier.bound
-            && !qualifier.external
-            && (sheet_names_equal(&qualifier.first, name)
-                || sheet_names_equal(&qualifier.last, name))
-    })
-}
-
 pub(crate) fn formula_has_sheet_span(source: &str) -> bool {
     sheet_qualifiers(source)
         .iter()
@@ -1959,6 +1950,195 @@ pub(crate) fn rename_sheet_references(
         }
     }
     Ok(restores)
+}
+
+/// Every sheet's conditional formats as a rename of `old_name` to `new_name`
+/// leaves them: each rule formula naming the sheet rewritten as
+/// [`rename_sheet_references`] rewrites cell formulas, and a rule kept as the
+/// file wrote it patched to the same text. Only sheets with such a formula
+/// are listed. Nothing changes here, so a refusal leaves the workbook as it
+/// was.
+pub(crate) fn renamed_conditional_formats(
+    wb: &Workbook,
+    old_name: &str,
+    new_name: &str,
+) -> Result<Vec<(SheetId, Vec<ConditionalFormatting>)>, OpError> {
+    let mut planned = Vec::new();
+    for (index, sheet) in wb.sheets.iter().enumerate() {
+        let mut formats = sheet.conditional_formats.clone();
+        let mut changed = false;
+        for rule in formats.iter_mut().flat_map(|group| group.rules.iter_mut()) {
+            let mut renamed = Vec::with_capacity(rule.formulas.len());
+            for formula in &rule.formulas {
+                let rewritten = writable_rename(
+                    formula,
+                    new_name,
+                    rename_formula_sheet(formula, old_name, new_name),
+                )?;
+                if rewritten.len() > MAX_FORMULA_BYTES {
+                    return Err(unrewritable_rule(rule, &sheet.name));
+                }
+                renamed.push(rewritten);
+            }
+            if renamed == rule.formulas {
+                continue;
+            }
+            if let Some(raw) = &rule.raw_xml {
+                match rename_conditional_format_xml(raw, old_name, new_name) {
+                    Some((xml, authored)) if authored == rule.formulas => {
+                        rule.raw_xml = Some(xml);
+                    }
+                    _ => return Err(unrewritable_rule(rule, &sheet.name)),
+                }
+            }
+            rule.formulas = renamed;
+            changed = true;
+        }
+        if changed {
+            planned.push((SheetId(index as u32), formats));
+        }
+    }
+    Ok(planned)
+}
+
+/// `escaped` with `also`, and every character XML 1.0 cannot carry literally,
+/// written as decimal character references, as xlsx-parse writes formula text
+/// and attribute values: a CR in element text, and a CR, LF or tab in an
+/// attribute value, would otherwise read back normalized, and a control
+/// character an authored formula brought in through a reference would be
+/// invalid. A NUL, which no reference can carry, is written as it came.
+fn char_references(escaped: &str, also: &[char]) -> String {
+    let mut out = String::with_capacity(escaped.len());
+    for ch in escaped.chars() {
+        let xml_char = ch >= ' ' && ch != '\u{fffe}' && ch != '\u{ffff}';
+        if ch != '\0' && (also.contains(&ch) || (!xml_char && !matches!(ch, '\t' | '\n'))) {
+            out.push_str(&format!("&#{};", u32::from(ch)));
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn unrewritable_rule(rule: &ConditionalFormatRule, sheet: &str) -> OpError {
+    OpError::InvalidConditionalFormat(format!(
+        "conditional format {} on sheet '{sheet}' cannot be rewritten for the rename",
+        rule.id
+    ))
+}
+
+/// `raw`, a `cfRule` as the file wrote it, with the sheet named in each
+/// `formula` element and each `cfvo` formula renamed, plus the formula text
+/// it held before, in document order. `None` when the fragment does not read.
+fn rename_conditional_format_xml(
+    raw: &str,
+    old_name: &str,
+    new_name: &str,
+) -> Option<(String, Vec<String>)> {
+    use quick_xml::escape::{escape, partial_escape};
+    use quick_xml::{Reader, events::Event};
+
+    let mut reader = Reader::from_str(raw);
+    let mut edits = Vec::new();
+    let mut authored = Vec::new();
+    let mut formula: Option<(usize, String)> = None;
+    loop {
+        let start = reader.buffer_position() as usize;
+        match reader.read_event().ok()? {
+            Event::Start(element) if element.local_name().as_ref() == b"formula" => {
+                if formula.is_some() {
+                    return None;
+                }
+                formula = Some((reader.buffer_position() as usize, String::new()));
+            }
+            Event::Text(text) if formula.is_some() => {
+                formula.as_mut()?.1.push_str(&text.xml10_content().ok()?);
+            }
+            Event::CData(text) if formula.is_some() => {
+                formula
+                    .as_mut()?
+                    .1
+                    .push_str(std::str::from_utf8(&text.into_inner()).ok()?);
+            }
+            Event::GeneralRef(reference) if formula.is_some() => {
+                let name = reference.decode().ok()?;
+                let resolved = match name.as_ref() {
+                    "lt" => '<',
+                    "gt" => '>',
+                    "amp" => '&',
+                    "quot" => '"',
+                    "apos" => '\'',
+                    numeric => {
+                        let code = numeric.strip_prefix('#')?;
+                        let code = match code.strip_prefix('x') {
+                            Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+                            None => code.parse().ok()?,
+                        };
+                        char::from_u32(code)?
+                    }
+                };
+                formula.as_mut()?.1.push(resolved);
+            }
+            Event::End(element) if element.local_name().as_ref() == b"formula" => {
+                let (content, text) = formula.take()?;
+                let renamed = rename_formula_sheet(&text, old_name, new_name);
+                if renamed != text {
+                    edits.push((
+                        content..start,
+                        char_references(&partial_escape(renamed.as_str()), &['\r']),
+                    ));
+                }
+                authored.push(text);
+            }
+            Event::Start(element) | Event::Empty(element)
+                if element.local_name().as_ref() == b"cfvo" =>
+            {
+                let mut is_formula = false;
+                let mut value = None;
+                for attribute in element.attributes() {
+                    let attribute = attribute.ok()?;
+                    match attribute.key.as_ref() {
+                        b"type" => {
+                            is_formula = attribute
+                                .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                                .ok()?
+                                == "formula";
+                        }
+                        b"val" => {
+                            let text = attribute
+                                .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                                .ok()?
+                                .into_owned();
+                            let offset = start + 1 + attribute.value.as_ptr() as usize
+                                - element.as_ref().as_ptr() as usize;
+                            value = Some((offset..offset + attribute.value.len(), text));
+                        }
+                        _ => {}
+                    }
+                }
+                if is_formula && let Some((span, text)) = value {
+                    let renamed = rename_formula_sheet(&text, old_name, new_name);
+                    if renamed != text {
+                        edits.push((
+                            span,
+                            char_references(&escape(renamed.as_str()), &['\r', '\n', '\t']),
+                        ));
+                    }
+                    authored.push(text);
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    if formula.is_some() {
+        return None;
+    }
+    let mut xml = raw.to_owned();
+    for (span, replacement) in edits.into_iter().rev() {
+        xml.replace_range(span, &replacement);
+    }
+    Some((xml, authored))
 }
 
 /// Splits a hyperlink location into its reference and any trailing `#` fragment.
