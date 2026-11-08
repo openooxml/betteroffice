@@ -270,4 +270,3 @@ fn a_rename_patches_a_rule_kept_as_the_file_wrote_it() {
         assert_eq!(part(&workbook.save().unwrap(), OTHER), part(&source, OTHER));
     }
 }
-

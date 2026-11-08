@@ -2064,7 +2064,10 @@ fn rename_conditional_format_xml(
                 let (content, text) = formula.take()?;
                 let renamed = rename_formula_sheet(&text, old_name, new_name);
                 if renamed != text {
-                    edits.push((content..start, partial_escape(renamed.as_str()).into_owned()));
+                    edits.push((
+                        content..start,
+                        partial_escape(renamed.as_str()).into_owned(),
+                    ));
                 }
                 authored.push(text);
             }
