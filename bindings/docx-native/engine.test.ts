@@ -1185,3 +1185,56 @@ test('native and wasm track and resolve character formatting with the same optio
     }
   }
 });
+
+test('native and wasm mark the same table row headers in the display list', () => {
+  const encoder = new TextEncoder();
+  const w = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+  const cell = (text: string) => `<w:tc><w:tcPr><w:tcW w:w="1500" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:tc>`;
+  const row = (texts: string[], header = false) => `<w:tr>${header ? '<w:trPr><w:tblHeader/></w:trPr>' : ''}${texts.map(cell).join('')}</w:tr>`;
+  const bytes = wasm.rezip_docx({
+    '[Content_Types].xml': encoder.encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'),
+    '_rels/.rels': encoder.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'),
+    'word/document.xml': encoder.encode(`<w:document xmlns:w="${w}"><w:body><w:tbl><w:tblPr><w:tblLook w:val="04A0" w:firstRow="1" w:firstColumn="1"/></w:tblPr><w:tblGrid><w:gridCol w:w="1500"/><w:gridCol w:w="1500"/></w:tblGrid>${row(['Region', 'Q1'], true)}${row(['North', '12'])}</w:tbl><w:p/><w:sectPr/></w:body></w:document>`),
+  });
+  type Cell = { row: number; col: number; isHeader?: boolean; isRowHeader?: boolean; headerIds?: string[] };
+  const run = (engine: Engine) => {
+    const session = new engine.EditSession(77);
+    try {
+      session.open_docx(bytes, true);
+      const font = session.register_measure_font(fontBytes);
+      const fontChains = { 'calibri|0|0': [font], 'calibri|1|0': [font] };
+      const layout = session.layout_document_with_regions_json(JSON.stringify({
+        bodyStory: 'body',
+        regions: { sections: [{ sectionId: 'main', properties: {
+          pageWidth: 12240, pageHeight: 15840, marginTop: 1440, marginRight: 1440, marginBottom: 1440, marginLeft: 1440,
+        } }] },
+        measurement: { fontChains, defaults: { fontSize: 11, fontFamily: 'Calibri' }, authoritativeShaping: true },
+        renderEnv: { themeColors: (JSON.parse(session.materialize_docx() ?? '{}') as {
+          document?: { package?: { theme?: { colorScheme?: Record<string, string> } } };
+        }).document?.package?.theme?.colorScheme ?? {} },
+      }));
+      const list = JSON.parse(session.build_display_list_json(JSON.stringify({ ...JSON.parse(layout), fontChains }))) as {
+        pages: { primitives: { kind: string; cell?: Cell }[] }[];
+      };
+      const cells = new Map<string, Omit<Cell, 'headerIds'> & { headerIds: number }>();
+      for (const primitive of list.pages.flatMap((page) => page.primitives)) {
+        const ref = primitive.cell;
+        if (!ref || cells.has(`${ref.row}:${ref.col}`)) continue;
+        cells.set(`${ref.row}:${ref.col}`, {
+          row: ref.row, col: ref.col, isHeader: ref.isHeader, isRowHeader: ref.isRowHeader, headerIds: ref.headerIds?.length ?? 0,
+        });
+      }
+      return [...cells.values()].sort((a, b) => a.row - b.row || a.col - b.col);
+    } finally {
+      session.free();
+    }
+  };
+  const nativeCells = run(native);
+  expect(nativeCells).toEqual([
+    { row: 0, col: 0, isHeader: true, isRowHeader: undefined, headerIds: 0 },
+    { row: 0, col: 1, isHeader: true, isRowHeader: undefined, headerIds: 0 },
+    { row: 1, col: 0, isHeader: undefined, isRowHeader: true, headerIds: 0 },
+    { row: 1, col: 1, isHeader: undefined, isRowHeader: undefined, headerIds: 2 },
+  ]);
+  expect(nativeCells).toEqual(run(wasm));
+});

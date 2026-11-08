@@ -150,6 +150,9 @@ export interface TableCellRef {
   cellId?: string;
   /** Cell participates as a row/column header. */
   isHeader?: boolean;
+  /** Cell heads its row: the table has header rows and first-column
+   *  formatting, and the cell starts in grid column 0. */
+  isRowHeader?: boolean;
   /** Header cell was repeated on a continuation page. */
   repeatedHeader?: boolean;
   /** Word `w:noWrap` cell behavior. */

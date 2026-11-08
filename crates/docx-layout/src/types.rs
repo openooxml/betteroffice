@@ -869,6 +869,10 @@ pub struct TableCell {
     pub no_wrap: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tracked_marker: Option<Value>,
+    /// The source cell continues a vertical merge (`w:vMerge` without
+    /// `restart`), even where layout gives it a slot of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_continuation: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -977,6 +981,10 @@ pub struct TableBlock {
     /// Report the cell edges without a visible border as view-only guides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gridlines: Option<bool>,
+    /// The table's own `w:tblLook` asks for first-column formatting; with
+    /// header rows, the cells of grid column 0 head their rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_column: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pm_start: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1621,6 +1629,7 @@ impl PartialEq for TableBlock {
             cell_margin_left: _,
             cell_margin_right: _,
             gridlines: _,
+            first_column: _,
             pm_start: _,
             pm_end: _,
         } = other;
@@ -1645,6 +1654,7 @@ impl PartialEq for TableBlock {
             && self.cell_margin_left == other.cell_margin_left
             && self.cell_margin_right == other.cell_margin_right
             && self.gridlines == other.gridlines
+            && self.first_column == other.first_column
     }
 }
 

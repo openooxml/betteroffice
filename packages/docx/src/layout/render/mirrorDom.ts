@@ -148,7 +148,7 @@ const MIRROR_LABEL_REFERENCES = ['aria-labelledby', 'aria-describedby'] as const
 const MIRROR_LABELLED = MIRROR_LABEL_REFERENCES.map((name) => `[${name}]`).join(', ');
 
 const MIRROR_CELL = `.${MIRROR_CLASS_NAMES.tableCell}`;
-const MIRROR_HEADER_CELL = `${MIRROR_CELL}[role="columnheader"]`;
+const MIRROR_HEADER_CELL = `${MIRROR_CELL}[role="columnheader"], ${MIRROR_CELL}[role="rowheader"]`;
 
 function mirrorKeptElements(mirror: HTMLElement): { kept: Set<Element>; onPath: Set<Element> } {
   const byId = new Map<string, Element>();
@@ -1023,6 +1023,9 @@ function populateBlock(
         paragraphEl.style.top = '0';
         populateParagraphBlock(paragraphEl, blockPrims, doc, offsetY, ctx);
         cellEl.appendChild(paragraphEl);
+      }
+      if (!cell.ref.isHeader && cell.ref.isRowHeader && /[^\s\u200b\ufeff]/u.test(cellEl.textContent ?? '')) {
+        cellEl.setAttribute('role', 'rowheader');
       }
       stampDocRangeFromDescendants(cellEl, cell.prims);
       applyContainerLanguageAndDirection(cellEl, cell.prims);

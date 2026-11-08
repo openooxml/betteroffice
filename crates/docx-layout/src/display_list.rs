@@ -659,6 +659,12 @@ pub struct TableCellRef {
     pub cell_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_header: Option<bool>,
+    /// The cell heads its row: the table has header rows and asks for
+    /// first-column formatting, and the cell starts in grid column 0 without
+    /// continuing a vertical merge. Like a column header, it names no other
+    /// header.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_row_header: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repeated_header: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2312,6 +2318,9 @@ pub(crate) struct TableBlockIn {
     pub(crate) floating: Option<FloatingTablePositionIn>,
     #[serde(default)]
     gridlines: Option<bool>,
+    /// The table's own `w:tblLook` asks for first-column formatting.
+    #[serde(default)]
+    first_column: Option<bool>,
 }
 
 pub(crate) type FloatingTablePositionIn = crate::types::FloatingTablePosition;
@@ -2357,6 +2366,8 @@ struct TableCellIn {
     no_wrap: Option<bool>,
     #[serde(default)]
     tracked_marker: Option<CellMarkerIn>,
+    #[serde(default)]
+    merge_continuation: Option<bool>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -11136,23 +11147,39 @@ pub(crate) fn emit_table_fragment(
         // itself so consumers know it is a re-paint.
         let is_header = p.g.row_index < semantic_header_count
             || block.rows[p.g.row_index].is_header == Some(true);
+        let row_headers = semantic_header_count > 0 && block.first_column == Some(true);
+        let is_row_header = row_headers
+            && !is_header
+            && p.g.column_index == 0
+            && cell.merge_continuation != Some(true);
         let cell_id = format!("{table_id}-r{}-c{}", p.g.row_index, p.g.column_index);
-        let header_ids = if is_header {
+        let header_ids = if is_header || is_row_header {
             Vec::new()
         } else {
-            (0..semantic_header_count)
-                .filter_map(|header_row| {
-                    grid.iter()
-                        .find(|cell| {
-                            cell.row_index == header_row
-                                && p.g.column_index >= cell.column_index
-                                && p.g.column_index < cell.column_index + cell.col_span
-                        })
-                        .map(|cell| {
-                            format!("{table_id}-r{}-c{}", cell.row_index, cell.column_index)
-                        })
+            let column_headers = (0..semantic_header_count).filter_map(|header_row| {
+                grid.iter()
+                    .find(|cell| {
+                        cell.row_index == header_row
+                            && p.g.column_index >= cell.column_index
+                            && p.g.column_index < cell.column_index + cell.col_span
+                    })
+                    .map(|cell| format!("{table_id}-r{}-c{}", cell.row_index, cell.column_index))
+            });
+            let row_header = (row_headers && !is_row_header)
+                .then(|| {
+                    grid.iter().find(|cell| {
+                        cell.column_index == 0
+                            && cell.row_index >= semantic_header_count
+                            && block.rows[cell.row_index].is_header != Some(true)
+                            && block.rows[cell.row_index].cells[cell.cell_index].merge_continuation
+                                != Some(true)
+                            && p.g.row_index >= cell.row_index
+                            && p.g.row_index < cell.row_index + cell.row_span
+                    })
                 })
-                .collect()
+                .flatten()
+                .map(|cell| format!("{table_id}-r{}-c{}", cell.row_index, cell.column_index));
+            column_headers.chain(row_header).collect()
         };
         let cell_ref = TableCellRef {
             row: p.g.row_index as u64,
@@ -11162,6 +11189,7 @@ pub(crate) fn emit_table_fragment(
             continuation: if p.selectable { None } else { Some(true) },
             cell_id: Some(cell_id),
             is_header: is_header.then_some(true),
+            is_row_header: is_row_header.then_some(true),
             repeated_header: (carried && p.g.row_index < header_row_count).then_some(true),
             no_wrap: cell.no_wrap.filter(|value| *value),
             header_ids,
@@ -11567,6 +11595,7 @@ pub(crate) fn emit_table_fragment(
                     continuation: None,
                     cell_id: Some(format!("{table_id}-r{}-c{}", g.row_index, g.column_index)),
                     is_header: None,
+                    is_row_header: None,
                     repeated_header: None,
                     no_wrap: None,
                     header_ids: Vec::new(),
