@@ -155,8 +155,10 @@ impl<'a> ProposalSheets<'a> {
         let sheet_names = self.sheet_names;
         if let Op::RenameSheet { sheet, name } | Op::RestoreSheet { sheet, name, .. } = op {
             let renamed = scan_sheet_rename(source, sheet_names.get(sheet.0 as usize)?, name);
-            return (!renamed.ambiguous && renamed.formula.len() <= MAX_FORMULA_BYTES)
-                .then_some(renamed.formula);
+            if renamed.ambiguous || renamed.formula.len() > MAX_FORMULA_BYTES {
+                return None;
+            }
+            return writable_rename(source, name, renamed.formula).ok();
         }
         let Some(target) = structural_target(op) else {
             return Some(source.to_string());

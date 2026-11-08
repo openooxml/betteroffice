@@ -8,7 +8,7 @@ use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
 use xlsx_model::workbook::{DEFINED_NAME_ENTRY_BYTES, MAX_DEFINED_NAME_BYTES, defined_names_bytes};
 use xlsx_model::{
     Cell, CellRange, CellRef, ColId, ConditionalFormatRule, ConditionalFormatting, DefinedName,
-    DifferentialFormat, RowId, Sheet, SheetId, Workbook,
+    DifferentialFormat, Hyperlink, RowId, Sheet, SheetId, Workbook,
 };
 
 use crate::formatting::{mutate_number_format, patch_cell_format};
@@ -701,8 +701,9 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
                 .name
                 .clone();
             let renamed_names = rename_defined_names(wb, &old, name)?;
+            let renamed_hyperlinks = renamed_hyperlink_locations(wb, &old, name)?;
             let formulas = rename_sheet_references(wb, &old, name)?;
-            let hyperlinks = rename_hyperlink_locations(wb, &old, name)?;
+            let hyperlinks = set_hyperlink_locations(wb, renamed_hyperlinks);
             let defined_names = renamed_names.map(|names| replace_defined_names(wb, names));
             let charts = rename_chart_refs(wb, &old, name);
             sheet_mut(wb, *sheet)?.name = name.clone();
@@ -1809,13 +1810,15 @@ fn remap_hyperlinks(sheet: &mut Sheet, op: &Op) {
         .collect();
 }
 
-fn rename_hyperlink_locations(
-    wb: &mut Workbook,
+/// Each sheet's hyperlinks after a sheet rename, for the sheets it changes.
+/// Nothing is written yet, so a refused rename leaves every sheet as it was.
+fn renamed_hyperlink_locations(
+    wb: &Workbook,
     old_name: &str,
     new_name: &str,
-) -> Result<Vec<Op>, OpError> {
-    let mut restores = Vec::new();
-    for (index, sheet) in wb.sheets.iter_mut().enumerate() {
+) -> Result<Vec<(usize, Vec<Hyperlink>)>, OpError> {
+    let mut renamed = Vec::new();
+    for (index, sheet) in wb.sheets.iter().enumerate() {
         let mut changed = false;
         let mut hyperlinks = sheet.hyperlinks.clone();
         for hyperlink in &mut hyperlinks {
@@ -1829,14 +1832,21 @@ fn rename_hyperlink_locations(
             }
         }
         if changed {
-            let old = std::mem::replace(&mut sheet.hyperlinks, hyperlinks);
-            restores.push(Op::SetHyperlinks {
-                sheet: SheetId(index as u32),
-                hyperlinks: old,
-            });
+            renamed.push((index, hyperlinks));
         }
     }
-    Ok(restores)
+    Ok(renamed)
+}
+
+/// Writes [`renamed_hyperlink_locations`] and returns the ops restoring them.
+fn set_hyperlink_locations(wb: &mut Workbook, renamed: Vec<(usize, Vec<Hyperlink>)>) -> Vec<Op> {
+    renamed
+        .into_iter()
+        .map(|(index, hyperlinks)| Op::SetHyperlinks {
+            sheet: SheetId(index as u32),
+            hyperlinks: std::mem::replace(&mut wb.sheets[index].hyperlinks, hyperlinks),
+        })
+        .collect()
 }
 
 fn remove_sheet(wb: &mut Workbook, index: usize) -> Result<InvertedOp, OpError> {
@@ -3052,6 +3062,65 @@ mod tests {
 
         assert_eq!(wb.formula(SheetId(1), r("A1")), Some("Future!A1"));
         assert_eq!(wb.formula(SheetId(1), r("A2")), Some("Sheet1!A1"));
+    }
+
+    /// A rename to a name xml 1.0 cannot carry, refused because a formula and
+    /// a hyperlink reference the sheet, leaves the workbook exactly as it was
+    /// through `apply`, which renames in place.
+    #[test]
+    fn a_refused_rename_leaves_the_workbook_untouched() {
+        let mut wb = wb_one_sheet();
+        wb.sheets.push(Sheet::new("Other"));
+        let other = wb.sheet_mut(SheetId(1)).unwrap();
+        other.set_cell(
+            r("A1"),
+            Cell {
+                formula: Some("Sheet1!A1".into()),
+                ..Cell::default()
+            },
+        );
+        other.hyperlinks.push(Hyperlink {
+            range: CellRange::parse_a1("B1").unwrap(),
+            external_target: None,
+            location: Some("Sheet1!A1".into()),
+            tooltip: None,
+            display: None,
+        });
+        let before = wb.clone();
+        let error = apply(
+            &mut wb,
+            &Op::RenameSheet {
+                sheet: SheetId(0),
+                name: "Sheet1\u{1}".into(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error, OpError::SheetNameNotWritable);
+        assert_eq!(wb, before);
+    }
+
+    /// A pending proposal formula that a rename would rewrite with a name xml
+    /// cannot carry goes stale, as one it cannot remap does; a writable rename
+    /// still rebases it.
+    #[test]
+    fn a_proposal_formula_goes_stale_rather_than_take_a_name_xml_cannot_carry() {
+        let names = vec!["Data".to_owned(), "Other".to_owned()];
+        let rename = |name: &str| Op::RenameSheet {
+            sheet: SheetId(0),
+            name: name.to_owned(),
+        };
+        assert_eq!(
+            crate::remap_proposal_formula("Data!A1", SheetId(1), &names, &rename("Data\u{1}")),
+            None
+        );
+        assert_eq!(
+            crate::remap_proposal_formula("Other!A1", SheetId(1), &names, &rename("Data\u{1}")),
+            Some("Other!A1".to_owned())
+        );
+        assert_eq!(
+            crate::remap_proposal_formula("Data!A1", SheetId(1), &names, &rename("New Data")),
+            Some("'New Data'!A1".to_owned())
+        );
     }
 
     #[test]
