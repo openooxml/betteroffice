@@ -7,8 +7,8 @@ use crate::snapshot::{SnapshotBudget, SnapshotError, SnapshotResult};
 
 use super::super::{
     MAX_CHART_FIELD_BYTES, MAX_CHART_REFS_PER_CHART, MAX_CHARTS_PER_SHEET, MAX_COL_WIDTH,
-    MAX_HYPERLINKS_PER_SHEET, MAX_ROW_HEIGHT, is_writable_xml_text, ranges_intersect,
-    validate_cell_ref, validate_charts, validate_hyperlinks, validate_range, validate_sheet_name,
+    MAX_HYPERLINKS_PER_SHEET, MAX_ROW_HEIGHT, ranges_intersect, validate_cell_ref, validate_charts,
+    validate_hyperlinks, validate_range, validate_sheet_name,
 };
 
 #[derive(Default)]
@@ -259,9 +259,7 @@ impl ModelValidation {
                         }
                         if let Some(reference) = chart.refs.get(self.other - 1) {
                             let bytes = admit(reference.formula.len().saturating_add(16), budget)?;
-                            if reference.formula.len() > MAX_CHART_FIELD_BYTES
-                                || !is_writable_xml_text(&reference.formula)
-                            {
+                            if reference.formula.len() > MAX_CHART_FIELD_BYTES {
                                 return Err(SnapshotError::new(
                                     "snapshot chart reference is invalid",
                                 ));

@@ -126,6 +126,34 @@ impl Workbook {
     /// XML can carry. `inverse` is the batch's inverse, which records
     /// a `SetCharts` for every sheet whose charts it changed, so a batch that
     /// changes none costs nothing here.
+    /// A chart reference holding a character xml 1.0 cannot carry is kept
+    /// only as the source wrote it: an opened chart's reference at the same
+    /// position, which a save leaves in place. One an edit or a peer would
+    /// introduce or rewrite could not be written back, so it is refused before
+    /// anything changes, and the chart stays as authored.
+    pub(super) fn validate_chart_references(&self, model: &xlsx_model::Workbook) -> Result<()> {
+        for chart in model.sheets.iter().flat_map(|sheet| &sheet.charts) {
+            for (index, reference) in chart.refs.iter().enumerate() {
+                if super::is_writable_xml_text(&reference.formula) {
+                    continue;
+                }
+                let authored = self.authority.source_charts().any(|source| {
+                    source.part == chart.part
+                        && source
+                            .refs
+                            .get(index)
+                            .is_some_and(|opened| opened.formula == reference.formula)
+                });
+                if !authored {
+                    return Err(Error::InvalidOperation(
+                        "chart reference contains a character xml cannot carry".to_string(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn ensure_charts_follow(
         &self,
         preview: &xlsx_model::Workbook,
@@ -275,6 +303,7 @@ impl Workbook {
             return Ok(MutationResult::default());
         }
         validate_model_sheets(&preview)?;
+        self.validate_chart_references(&preview)?;
         validate_shared_drawings(&preview)?;
         let inverse = changed
             .iter()

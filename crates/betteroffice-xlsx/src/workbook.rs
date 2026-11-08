@@ -1131,6 +1131,7 @@ impl Workbook {
     /// the bound, so refusing their union would strand them apart for good.
     fn gate_incoming(&self, model: &WorkbookModel, dormant: &[DefinedName]) -> Result<()> {
         validate_model_sheets(model)?;
+        self.validate_chart_references(model)?;
         self.validate_incoming_names(model, dormant)?;
         self.validate_incoming_filters(model)?;
         validate_chart_source(
@@ -2299,6 +2300,7 @@ impl Workbook {
         }
         let inverse = batch.finish();
         validate_model_sheets(&preview)?;
+        self.validate_chart_references(&preview)?;
         validate_shared_drawings(&preview)?;
         self.ensure_charts_follow(&preview, &inverse)?;
         if self.is_collaborative() {
@@ -4880,11 +4882,6 @@ fn validate_charts(charts: &[SheetChart]) -> Result<()> {
             if reference.formula.len() > MAX_CHART_FIELD_BYTES {
                 return Err(Error::InvalidOperation(
                     "chart reference exceeds the supported length".to_string(),
-                ));
-            }
-            if !is_writable_xml_text(&reference.formula) {
-                return Err(Error::InvalidOperation(
-                    "chart reference contains a character xml cannot carry".to_string(),
                 ));
             }
         }
