@@ -333,8 +333,9 @@ pub fn css_primary_family(families: &str) -> &str {
 
 /// [`collect_font_requirements`] into `requirements`, keyed as it keys them,
 /// for callers gathering several block runs without copying them. It keeps
-/// every family the blocks name and only those, since a later call may reach
-/// one; gather with a [`FontRequirementCollector`] to drop the unused ones.
+/// every family the blocks name and the families those paint under, since a
+/// later call may reach one; gather with a [`FontRequirementCollector`] to drop
+/// the unused ones.
 pub fn collect_font_requirements_into<'a>(
     blocks: impl IntoIterator<Item = &'a LayoutBlock>,
     default_family: &str,
@@ -343,6 +344,7 @@ pub fn collect_font_requirements_into<'a>(
     let mut collector = FontRequirementCollector::default();
     collector.collect(blocks, default_family);
     collector.merge_named_into(requirements);
+    add_painted_aliases(requirements);
 }
 
 /// Fonts any revision preview may need. Returns false for script fallbacks or
@@ -355,6 +357,7 @@ pub fn collect_preview_font_requirements_into<'a>(
     let mut collector = FontRequirementCollector::default();
     let stable_markers = collector.collect_preview(blocks, default_family);
     collector.merge_named_into(requirements);
+    add_painted_aliases(requirements);
     stable_markers
         && requirements
             .values()
@@ -558,29 +561,11 @@ impl FontRequirementCollector {
     /// [`collect_font_requirements`] keys them, and the family a compound or
     /// quoted name paints under, which only the rasterizer looks up.
     pub fn finish(self) -> BTreeMap<String, FontRequirement> {
-        let mut requirements = self.finish_measured();
-        let painted: Vec<FontRequirement> = requirements
-            .values()
-            .filter(|requirement| {
-                let family = css_primary_family(&requirement.family);
-                family != requirement.family && !family.is_empty()
-            })
-            .cloned()
-            .collect();
-        for requirement in painted {
-            let key = add_font_requirement(
-                css_primary_family(&requirement.family),
-                requirement.bold,
-                requirement.italic,
-                &requirement.scripts,
-                &mut requirements,
-            );
-            requirements
-                .get_mut(&key)
-                .unwrap()
-                .characters
-                .extend(&requirement.characters);
-        }
+        let preferred = self.preferred_cjk;
+        let mut requirements = BTreeMap::new();
+        self.merge_into(&mut requirements);
+        add_painted_aliases(&mut requirements);
+        prefer_cjk_script(&mut requirements, preferred);
         requirements
     }
 
@@ -588,11 +573,7 @@ impl FontRequirementCollector {
         let preferred = self.preferred_cjk;
         let mut requirements = BTreeMap::new();
         self.merge_into(&mut requirements);
-        if let Some(preferred) = preferred {
-            for requirement in requirements.values_mut() {
-                prefer_script(&mut requirement.scripts, preferred);
-            }
-        }
+        prefer_cjk_script(&mut requirements, preferred);
         requirements
     }
 
@@ -1056,6 +1037,44 @@ fn collect_paragraph_font_requirements(
             collector.characters(painted, bold, italic, characters.clone());
         }
         collector.characters(family, bold, italic, characters);
+    }
+}
+
+/// Adds the family each compound or quoted name paints under, which only the
+/// rasterizer looks up.
+fn add_painted_aliases(requirements: &mut BTreeMap<String, FontRequirement>) {
+    let painted: Vec<FontRequirement> = requirements
+        .values()
+        .filter(|requirement| {
+            let family = css_primary_family(&requirement.family);
+            family != requirement.family && !family.is_empty()
+        })
+        .cloned()
+        .collect();
+    for requirement in painted {
+        let key = add_font_requirement(
+            css_primary_family(&requirement.family),
+            requirement.bold,
+            requirement.italic,
+            &requirement.scripts,
+            requirements,
+        );
+        requirements
+            .get_mut(&key)
+            .unwrap()
+            .characters
+            .extend(&requirement.characters);
+    }
+}
+
+fn prefer_cjk_script(
+    requirements: &mut BTreeMap<String, FontRequirement>,
+    preferred: Option<&str>,
+) {
+    if let Some(preferred) = preferred {
+        for requirement in requirements.values_mut() {
+            prefer_script(&mut requirement.scripts, preferred);
+        }
     }
 }
 
@@ -7881,6 +7900,42 @@ mod tests {
         assert_eq!(requirements.len(), MAX_CHART_FONT_FAMILIES * 2);
         assert!(requirements.iter().all(|r| !r.italic));
         assert!(requirements.iter().any(|r| r.key == "calibri|1|0"));
+    }
+
+    #[test]
+    fn gathering_into_a_map_adds_the_family_a_compound_name_paints_under() {
+        let block: LayoutBlock = serde_json::from_value(json!({
+            "kind": "paragraph", "id": "p", "runs": [{
+                "kind": "text", "text": "A", "fontFamily": "Book,Italic"
+            }]
+        }))
+        .unwrap();
+        let mut gathered = BTreeMap::new();
+        collect_font_requirements_into([&block], "Calibri", &mut gathered);
+        assert!(gathered.contains_key("book,italic|0|0"));
+        assert!(gathered["book|0|0"].characters.iter().any(|ch| ch == 'A'));
+        let mut preview = BTreeMap::new();
+        collect_preview_font_requirements_into([&block], "Calibri", &mut preview);
+        assert!(preview.contains_key("book|0|0"));
+    }
+
+    #[test]
+    fn a_compound_name_merged_into_its_painted_family_keeps_the_documents_script_first() {
+        let paragraph = |id: &str, family: &str, text: &str, language: &str| -> LayoutBlock {
+            serde_json::from_value(json!({"kind": "paragraph", "id": id, "runs": [{
+                "kind": "text", "text": text, "fontFamily": family,
+                "language": {"eastAsia": language}
+            }]}))
+            .unwrap()
+        };
+        let japanese = paragraph("jp", "Book", "漢字", "ja-JP");
+        let chinese = paragraph("zh", "Book,Italic", "汉字", "zh-CN");
+        for order in [[&japanese, &chinese], [&chinese, &japanese]] {
+            let mut collector = FontRequirementCollector::default();
+            collector.prefer_east_asian_language(Some("zh-CN"));
+            collector.collect(order, "Calibri");
+            assert_eq!(collector.finish()["book|0|0"].scripts, ["cjk-sc", "cjk-jp"]);
+        }
     }
 
     #[test]
