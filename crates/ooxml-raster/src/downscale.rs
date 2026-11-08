@@ -82,13 +82,14 @@ pub fn reduced_size(width: u32, height: u32, max_pixels: u64) -> Option<(u32, u3
 /// pixels it reads, charged as decode work the way a whole decode is, and the
 /// bytes it may hold. Those are the reduced raster and one rotated copy of it,
 /// an IDCT intermediate of at most four times its pixels (one scale step above
-/// it) and never past `max_pixels`, and for a progressive JPEG the
-/// source-sized coefficients it collects before any IDCT.
+/// it) and never past `max_pixels`, and what the source format holds at its
+/// own size: a progressive JPEG's coefficients, collected before any IDCT, or
+/// a PNG's raw, previous and expanded rows.
 pub fn reduced_cost(bytes: &[u8], width: u32, height: u32, max_pixels: u64) -> Option<(u64, u64)> {
     let (target_width, target_height) = reduced_size(width, height, max_pixels)?;
     let pixels = u64::from(target_width) * u64::from(target_height);
     let intermediate = pixels.saturating_mul(4).min(max_pixels);
-    let coefficients = if bytes.starts_with(&[0xFF, 0xD8]) {
+    let source = if bytes.starts_with(&[0xFF, 0xD8]) {
         let frame = jpeg_frame(bytes)?;
         if frame.progressive {
             frame.coefficient_bytes()
@@ -96,15 +97,34 @@ pub fn reduced_cost(bytes: &[u8], width: u32, height: u32, max_pixels: u64) -> O
             0
         }
     } else {
-        0
+        png_row_bytes(bytes, width)?
     };
     Some((
         u64::from(width) * u64::from(height),
         pixels
             .saturating_mul(8)
             .saturating_add(intermediate.saturating_mul(3))
-            .saturating_add(coefficients),
+            .saturating_add(source),
     ))
+}
+
+/// The bytes a streaming PNG decode holds at the source width: the raw row
+/// and the previous one it unfilters against, plus the row expanded to 8-bit
+/// RGBA. `None` when the header is not a PNG one.
+fn png_row_bytes(bytes: &[u8], width: u32) -> Option<u64> {
+    if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") || bytes.get(12..16)? != b"IHDR" {
+        return None;
+    }
+    let depth = u64::from(*bytes.get(24)?);
+    let channels = match *bytes.get(25)? {
+        0 | 3 => 1,
+        2 => 3,
+        4 => 2,
+        6 => 4,
+        _ => return None,
+    };
+    let raw = (u64::from(width) * channels * depth).div_ceil(8) + 1;
+    Some(raw * 2 + u64::from(width) * 4)
 }
 
 /// A JPEG frame header: its size, whether it is progressive, and each
