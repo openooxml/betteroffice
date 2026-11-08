@@ -12,11 +12,12 @@ function fakeSession(): WorkbookSession {
     call: { decodeFontFace: unexpected, version: unexpected, readCells: unexpected, findText: unexpected, validateEdits: unexpected,
       applyEdits: unexpected, command: unexpected, frame: unexpected, sheetView: unexpected,
       cellGeometry: unexpected, cellInputs: unexpected, translateFormulas: unexpected, selectionData: unexpected, captureFormat: unexpected, sheets: unexpected,
-      calculationStatus: unexpected, save: unexpected,
+      calculationStatus: unexpected, save: unexpected, saveWithWarnings: unexpected,
       collaborationStateVector: unexpected, collaborationStateAsUpdate: unexpected, listDefinedNames: unexpected,
       renderPng: unexpected, renderPngFonts: unexpected, exportStructured: unexpected,
       exportMarkdown: unexpected, printDisplayList: unexpected },
-    save: unexpected, on: () => () => {}, onFailure: () => () => {}, failure: undefined, dispose: async () => {},
+    save: unexpected, saveWithWarnings: unexpected, on: () => () => {}, onFailure: () => () => {}, failure: undefined,
+    dispose: async () => {},
   };
 }
 

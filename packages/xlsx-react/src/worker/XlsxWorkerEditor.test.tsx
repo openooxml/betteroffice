@@ -214,6 +214,7 @@ function harness(realFacade = false, normalizeInput = false) {
     state: { format: 'xlsx', stage: 'ready', version: 0, dirty: false, activeSheet: 0,
       sheets: [{ id: 'sheet:0', index: 0, name: 'First' }, { id: 'sheet:1', index: 1, name: 'Second' }] },
     call: sessionMethods as unknown as WorkbookSession['call'], save: sessionSave,
+    saveWithWarnings: mock(async () => ({ bytes: new Uint8Array([0]), warnings: [] })),
     on: () => () => {},
     onFailure(listener) {
       failureListeners.add(listener);
@@ -484,7 +485,8 @@ function peerlessHarness(toolbarCommands = false, workerCommands = false, defaul
     }),
     onAck: (listener) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
     on: () => () => {}, onFailure: (listener) => { failures.add(listener); return () => { failures.delete(listener); }; },
-    save: mock(async () => new Uint8Array([8, 9])), dispose: mock(async () => {}),
+    save: mock(async () => new Uint8Array([8, 9])),
+    saveWithWarnings: mock(async () => ({ bytes: new Uint8Array([8, 9]), warnings: [] })), dispose: mock(async () => {}),
     markPresented: mock((paint) => {
       presentedThroughSeq = Math.max(presentedThroughSeq, paint.coversThroughSeq);
       for (const pending of presentations.splice(0)) {

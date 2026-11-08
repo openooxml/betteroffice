@@ -23,7 +23,7 @@ import type { Direction, SelectionData } from '../selection/types';
 import type { InitInput } from './generated/xlsx_wasm.js';
 import { copyDecodedFace, fontBytes, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
 import { isEngineTrap } from '../../../../shared/office-session/trap';
-import { warnSaveWarnings, type SaveResult, type SaveWarning } from '../../../../shared/saveWarnings';
+import { warnSaveWarnings, type SaveResult, type SaveWarning } from '../../../../shared/office-session/saveWarnings';
 
 export const decodeFontFace: FontDecoder = async (bytes, { codec, dict, maxOutput }) => {
   await initWasm();

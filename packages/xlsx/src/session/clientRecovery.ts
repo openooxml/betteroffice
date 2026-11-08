@@ -3,7 +3,7 @@ import type { Checkpoint } from '../../../../shared/office-session/commands/type
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
 import { createSessionWorker } from './sessionWorker';
 import { SessionFailure } from '../../../../shared/office-session/types';
-import { warnSaveWarnings } from '../../../../shared/saveWarnings';
+import { warnSaveWarnings } from '../../../../shared/office-session/saveWarnings';
 import type { OpenWorkbookSessionOptions, WorkbookSession } from './client';
 import type { CommandStatus, WorkbookAck, WorkbookCommand, WorkbookCommandContext, WorkbookSharedCommand } from './commandProtocol';
 import { localNowSerial } from './calculationClock';

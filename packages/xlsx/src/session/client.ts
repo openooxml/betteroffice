@@ -10,7 +10,7 @@ import { createWorkerTransport, type SessionTransport } from '../../../../shared
 import { createSessionWorker } from './sessionWorker';
 import { SessionFailure, type MethodPolicy, type Promisified } from '../../../../shared/office-session/types';
 import { PngExportError } from '../../../../shared/office-session/pngExportError';
-import { warnSaveWarnings, type SaveResult } from '../../../../shared/saveWarnings';
+import { warnSaveWarnings, type SaveResult } from '../../../../shared/office-session/saveWarnings';
 import { wasmAssetUrl } from '../wasm/asset';
 import { engineKind } from '../wasm/engine';
 import {

@@ -1,5 +1,5 @@
 import type { FontDecoderMethods } from '../../../../shared/office-session/fontDecoder';
-import type { SaveWarning } from '../../../../shared/saveWarnings';
+import type { SaveWarning } from '../../../../shared/office-session/saveWarnings';
 import type { XlsxDefinedNamesRequest, XlsxDefinedNamesResult } from '../definedNames';
 import type { PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
 import type { MethodPolicies, SessionState } from '../../../../shared/office-session';
