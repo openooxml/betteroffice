@@ -1,8 +1,10 @@
 /**
  * `unwritable-reference`: the document holds a reference with a character XML 1.0 cannot carry, which the
- * part cannot be written with, so the save kept the part as the file wrote it. New codes may be added.
+ * part cannot be written with, so the save kept the part as the file wrote it. `unrewritable-formula`: the part
+ * holds a formula, kept as the file wrote it, that a sheet rename could not rewrite, so it was kept unrenamed.
+ * New codes may be added; handle a code you do not know as a generic warning.
  */
-export type SaveWarningCode = 'unwritable-reference';
+export type SaveWarningCode = 'unwritable-reference' | 'unrewritable-formula';
 
 /** A part a save wrote differently from what the document holds, and why. */
 export interface SaveWarning {

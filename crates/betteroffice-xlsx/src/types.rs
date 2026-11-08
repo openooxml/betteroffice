@@ -119,7 +119,8 @@ pub struct EditProfile {
 }
 
 /// Why a save wrote a part differently from what the workbook holds. A stable
-/// code to match on; new codes may be added.
+/// code to match on; new codes may be added, so treat an unknown one as a
+/// generic warning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
@@ -127,6 +128,9 @@ pub enum SaveWarningCode {
     /// The workbook holds a reference with a character xml 1.0 cannot carry,
     /// which the part cannot be written with, so it was kept as authored.
     UnwritableReference,
+    /// The part holds a formula, kept as the file wrote it, that does not read
+    /// as text a sheet rename can rewrite, so it was kept unrenamed.
+    UnrewritableFormula,
 }
 
 /// A part a save wrote differently from what the workbook holds, and why.

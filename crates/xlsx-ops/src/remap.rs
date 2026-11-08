@@ -9,6 +9,10 @@ use xlsx_calc::lexer::MAX_FORMULA_BYTES;
 use xlsx_calc::parser::Expr;
 use xlsx_calc::{ColumnRange, RowRange, parse_formula};
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS, col_to_letters};
+use xlsx_model::sheet_qualifier::{
+    ParsedSheetToken, Qualifier, is_function_call, next_char_len, parse_sheet_token,
+    qualifier_token, quoted_endpoints, sheet_names_equal, sheet_qualifiers, skip_string,
+};
 use xlsx_model::workbook::{MAX_DEFINED_NAME_BYTES, defined_names_bytes};
 use xlsx_model::{
     AnchorCell, AnchorEditAs, CellRange, CellRef, ChartAnchor, ConditionalFormatRule,
@@ -1592,113 +1596,10 @@ fn parse_axis_endpoint(source: &str) -> Option<(bool, Axis, u32)> {
     Some((absolute, Axis::Col, cell.col))
 }
 
-/// One sheet qualifier found in a formula. A 3-D qualifier names two
-/// endpoints and covers every sheet between them in workbook order, whether it
-/// is written `Jan:Mar!` or, as Excel writes it, `'Jan:Mar'!`.
-struct Qualifier {
-    span: core::ops::Range<usize>,
-    first: String,
-    last: String,
-    /// preceded by `]`, so it names a sheet in another workbook.
-    external: bool,
-    /// followed by `!`, so it really qualifies a reference.
-    bound: bool,
-    /// followed by `(`, so it is a function call rather than a sheet name.
-    call: bool,
-}
-
-impl Qualifier {
-    fn is_span(&self) -> bool {
-        self.first != self.last
-    }
-}
-
-/// Every sheet qualifier in `source`, in order, skipping strings and the
-/// `[book]` prefixes of external references.
-fn sheet_qualifiers(source: &str) -> Vec<Qualifier> {
-    let bytes = source.as_bytes();
-    let mut out = Vec::new();
-    let mut index = 0;
-    let mut bracket_depth = 0_u32;
-    while index < bytes.len() {
-        if bytes[index] == b'"' {
-            index = skip_string(source, index);
-            continue;
-        }
-        if bytes[index] == b'[' {
-            bracket_depth = bracket_depth.saturating_add(1);
-            index += 1;
-            continue;
-        }
-        if bytes[index] == b']' {
-            bracket_depth = bracket_depth.saturating_sub(1);
-            index += 1;
-            continue;
-        }
-        if bracket_depth != 0 {
-            index += next_char_len(source, index);
-            continue;
-        }
-        let Some(first) = parse_sheet_token(source, index) else {
-            index += next_char_len(source, index);
-            continue;
-        };
-        let external = first.start > 0 && bytes[first.start - 1] == b']';
-        if bytes.get(first.end) == Some(&b'!') {
-            let (start, end) = quoted_endpoints(&first.name);
-            out.push(Qualifier {
-                span: first.start..first.end,
-                first: start,
-                last: end,
-                external,
-                bound: true,
-                call: false,
-            });
-            index = first.end + 1;
-            continue;
-        }
-        if bytes.get(first.end) == Some(&b':')
-            && let Some(second) = parse_sheet_token(source, first.end + 1)
-            && bytes.get(second.end) == Some(&b'!')
-        {
-            out.push(Qualifier {
-                span: first.start..second.end,
-                first: first.name,
-                last: second.name,
-                external,
-                bound: true,
-                call: false,
-            });
-            index = second.end + 1;
-            continue;
-        }
-        let call = is_function_call(source, &first);
-        index = first.end;
-        out.push(Qualifier {
-            span: first.start..first.end,
-            first: first.name.clone(),
-            last: first.name,
-            external,
-            bound: false,
-            call,
-        });
-    }
-    out
-}
-
 pub(crate) fn formula_has_sheet_span(source: &str) -> bool {
     sheet_qualifiers(source)
         .iter()
         .any(|qualifier| qualifier.bound && source[qualifier.span.clone()].contains(':'))
-}
-
-/// `'Jan:Mar'` names the span from `Jan` to `Mar`; a sheet name cannot itself
-/// contain a colon, so the split is unambiguous.
-fn quoted_endpoints(name: &str) -> (String, String) {
-    match name.split_once(':') {
-        Some((first, last)) => (first.to_owned(), last.to_owned()),
-        None => (name.to_owned(), name.to_owned()),
-    }
 }
 
 /// How a qualifier resolves against the workbook the edit targets.
@@ -2246,11 +2147,6 @@ fn scan_sheet_rename(source: &str, old_name: &str, new_name: &str) -> SheetRenam
     SheetRename { formula, ambiguous }
 }
 
-/// An unquoted token followed by `(` is a function call, never a sheet name.
-fn is_function_call(source: &str, token: &ParsedSheetToken) -> bool {
-    !source[token.start..].starts_with('\'') && source[token.end..].trim_start().starts_with('(')
-}
-
 /// Rewrites defined names through a sheet rename, dropping any whose formula
 /// names the old sheet as a bare token, where the intent cannot be resolved.
 /// Returns the rewritten list when it changed, leaving the workbook as is.
@@ -2282,64 +2178,6 @@ pub(crate) fn rename_defined_names(
     Ok(Some(rewritten))
 }
 
-fn next_char_len(source: &str, index: usize) -> usize {
-    source[index..]
-        .chars()
-        .next()
-        .map(char::len_utf8)
-        .unwrap_or(1)
-}
-
-struct ParsedSheetToken {
-    start: usize,
-    end: usize,
-    name: String,
-}
-
-fn parse_sheet_token(source: &str, start: usize) -> Option<ParsedSheetToken> {
-    let bytes = source.as_bytes();
-    if bytes.get(start) == Some(&b'\'') {
-        let mut index = start + 1;
-        let mut name = String::new();
-        while index < bytes.len() {
-            if bytes[index] == b'\'' {
-                if bytes.get(index + 1) == Some(&b'\'') {
-                    name.push('\'');
-                    index += 2;
-                } else {
-                    return Some(ParsedSheetToken {
-                        start,
-                        end: index + 1,
-                        name,
-                    });
-                }
-            } else {
-                let character = source[index..].chars().next()?;
-                name.push(character);
-                index += character.len_utf8();
-            }
-        }
-        return None;
-    }
-    let first = source[start..].chars().next()?;
-    if !is_unquoted_sheet_char(first) {
-        return None;
-    }
-    let mut end = start;
-    while end < bytes.len() {
-        let character = source[end..].chars().next()?;
-        if !is_unquoted_sheet_char(character) {
-            break;
-        }
-        end += character.len_utf8();
-    }
-    Some(ParsedSheetToken {
-        start,
-        end,
-        name: source[start..end].to_string(),
-    })
-}
-
 /// The end of the array constant at `start`, or `None` when its brace never
 /// closes. Its cells are literals, so nothing inside names a cell.
 fn skip_array_constant(source: &str, start: usize) -> Option<usize> {
@@ -2353,106 +2191,6 @@ fn skip_array_constant(source: &str, start: usize) -> Option<usize> {
         }
     }
     None
-}
-
-fn skip_string(source: &str, start: usize) -> usize {
-    let bytes = source.as_bytes();
-    let mut index = start + 1;
-    while index < bytes.len() {
-        if bytes[index] == b'"' {
-            index += 1;
-            if bytes.get(index) == Some(&b'"') {
-                index += 1;
-            } else {
-                break;
-            }
-        } else {
-            index += source[index..]
-                .chars()
-                .next()
-                .map(char::len_utf8)
-                .unwrap_or(1);
-        }
-    }
-    index
-}
-
-fn sheet_names_equal(left: &str, right: &str) -> bool {
-    left.to_lowercase() == right.to_lowercase()
-}
-
-fn is_unquoted_sheet_char(character: char) -> bool {
-    !character.is_whitespace()
-        && !matches!(
-            character,
-            '"' | '\''
-                | '!'
-                | ':'
-                | '+'
-                | '-'
-                | '*'
-                | '/'
-                | '^'
-                | '&'
-                | '='
-                | '<'
-                | '>'
-                | '('
-                | ')'
-                | ','
-                | '%'
-                | '['
-                | ']'
-        )
-}
-
-fn sheet_token(name: &str) -> String {
-    if is_simple_sheet_name(name) {
-        name.to_string()
-    } else {
-        format!("'{}'", name.replace('\'', "''"))
-    }
-}
-
-/// A qualifier naming one sheet, or the span between two. Excel writes a span
-/// unquoted when both endpoints are simple and `'first:last'` otherwise.
-fn qualifier_token(first: &str, last: &str) -> String {
-    if sheet_names_equal(first, last) {
-        return sheet_token(first);
-    }
-    if is_simple_sheet_name(first) && is_simple_sheet_name(last) {
-        return format!("{first}:{last}");
-    }
-    format!(
-        "'{}:{}'",
-        first.replace('\'', "''"),
-        last.replace('\'', "''")
-    )
-}
-
-fn is_simple_sheet_name(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || character == '_')
-        && !name
-            .chars()
-            .next()
-            .is_some_and(|character| character.is_ascii_digit())
-        && CellRef::parse_a1(name).is_err()
-        && !is_r1c1_reference(name)
-}
-
-fn is_r1c1_reference(name: &str) -> bool {
-    let upper = name.to_ascii_uppercase();
-    if matches!(upper.as_str(), "R" | "C") {
-        return true;
-    }
-    let Some(rest) = upper.strip_prefix('R') else {
-        return false;
-    };
-    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
-    rest.as_bytes().get(digits) == Some(&b'C')
 }
 
 /// whether a reference read from `owner` points at the edited sheet.

@@ -10,6 +10,7 @@ mod format_calculation_tests;
 mod format_facets_tests;
 mod formula_entry;
 mod geometry;
+mod preserved_fragments;
 mod proposals;
 pub(crate) mod reads;
 pub(crate) mod recovery;
@@ -1429,7 +1430,9 @@ impl Workbook {
     /// workbook as it is now, without saving. Cheap: empty unless the workbook
     /// holds a chart reference with a character xml cannot carry.
     pub fn save_warnings(&self) -> Vec<crate::SaveWarning> {
-        self.chart_save_warnings()
+        let mut warnings = self.chart_save_warnings();
+        warnings.extend(self.fragment_save_warnings());
+        warnings
     }
 
     pub fn save(&self) -> Result<Vec<u8>> {
@@ -2298,6 +2301,9 @@ impl Workbook {
                 self.ensure_worksheet_sheet_in(staged, &origins, sheet)?;
             }
             self.ensure_references_stay_valid(&names, op)?;
+            if let Op::RenameSheet { sheet, .. } = op {
+                self.ensure_taken_name_rename_follows(staged, &origins, *sheet)?;
+            }
             validate_op(staged, op)?;
             validate_insert_capacity(staged, op)?;
             batch.apply(op)?;
@@ -2318,6 +2324,7 @@ impl Workbook {
         validate_model_sheets(&preview)?;
         validate_shared_drawings(&preview)?;
         self.ensure_charts_follow(&preview, &inverse)?;
+        self.ensure_preserved_fragments_follow(&preview, &origins)?;
         if self.is_collaborative() {
             refuse_rule_growth(&self.model, &preview)?;
         }
