@@ -7,7 +7,7 @@ use std::io::Cursor;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use image::{DynamicImage, ImageDecoder, RgbaImage, imageops::FilterType};
+use image::{DynamicImage, ImageDecoder, RgbaImage};
 
 /// Pictures decoded through [`decode_reduced`], for tests.
 #[doc(hidden)]
@@ -80,10 +80,10 @@ pub fn reduced_size(width: u32, height: u32, max_pixels: u64) -> Option<(u32, u3
 
 /// What [`decode_reduced`] costs for a `width` x `height` source: the source
 /// pixels it reads, charged as decode work the way a whole decode is, and the
-/// bytes it may hold. Those are the reduced raster, an IDCT intermediate of at
-/// most four times its pixels (one scale step above it) and never past
-/// `max_pixels`, and for a progressive JPEG the source-sized coefficients it
-/// collects before any IDCT.
+/// bytes it may hold. Those are the reduced raster and one rotated copy of it,
+/// an IDCT intermediate of at most four times its pixels (one scale step above
+/// it) and never past `max_pixels`, and for a progressive JPEG the
+/// source-sized coefficients it collects before any IDCT.
 pub fn reduced_cost(bytes: &[u8], width: u32, height: u32, max_pixels: u64) -> Option<(u64, u64)> {
     let (target_width, target_height) = reduced_size(width, height, max_pixels)?;
     let pixels = u64::from(target_width) * u64::from(target_height);
@@ -101,7 +101,7 @@ pub fn reduced_cost(bytes: &[u8], width: u32, height: u32, max_pixels: u64) -> O
     Some((
         u64::from(width) * u64::from(height),
         pixels
-            .saturating_mul(4)
+            .saturating_mul(8)
             .saturating_add(intermediate.saturating_mul(3))
             .saturating_add(coefficients),
     ))
@@ -205,31 +205,26 @@ fn jpeg(bytes: &[u8], max_pixels: u64) -> Option<RgbaImage> {
         }
         request = ((request.0 / 2).max(1), (request.1 / 2).max(1));
     };
-    let format = decoder.info()?.pixel_format;
-    if !matches!(
-        format,
-        jpeg_decoder::PixelFormat::RGB24 | jpeg_decoder::PixelFormat::L8
-    ) {
-        return None;
-    }
+    let samples = match decoder.info()?.pixel_format {
+        jpeg_decoder::PixelFormat::RGB24 => 3,
+        jpeg_decoder::PixelFormat::L8 => 1,
+        _ => return None,
+    };
     let orientation = image::codecs::jpeg::JpegDecoder::new(Cursor::new(bytes))
         .and_then(|mut header| header.orientation())
         .ok()?;
     let pixels = decoder.decode().ok()?;
-    let decoded = match format {
-        jpeg_decoder::PixelFormat::RGB24 => {
-            DynamicImage::ImageRgb8(image::RgbImage::from_raw(width, height, pixels)?)
-        }
-        jpeg_decoder::PixelFormat::L8 => {
-            DynamicImage::ImageLuma8(image::GrayImage::from_raw(width, height, pixels)?)
-        }
-        _ => return None,
-    };
-    let mut reduced = if width <= target_width && height <= target_height {
-        decoded
-    } else {
-        decoded.resize_exact(target_width, target_height, FilterType::Triangle)
-    };
+    let (out_width, out_height) = (target_width.min(width), target_height.min(height));
+    let mut reducer = BoxReducer::new(width, height, out_width, out_height);
+    let stride = width as usize * samples;
+    if pixels.len() < stride * height as usize {
+        return None;
+    }
+    for row in pixels.chunks_exact(stride).take(height as usize) {
+        reducer.push_row(row, samples)?;
+    }
+    drop(pixels);
+    let mut reduced = DynamicImage::ImageRgba8(reducer.finish()?);
     reduced.apply_orientation(orientation);
     Some(reduced.into_rgba8())
 }
@@ -249,24 +244,56 @@ fn png(bytes: &[u8], max_pixels: u64) -> Option<RgbaImage> {
         return None;
     }
     let samples = color.samples();
-    let row_bytes = target_width as usize * 4;
-    let mut sums = vec![0f64; row_bytes];
-    let mut counts = vec![0u32; target_width as usize];
-    let mut output = vec![0u8; row_bytes * target_height as usize];
-    let mut current = 0usize;
-    let mut y = 0u64;
+    let mut reducer = BoxReducer::new(width, height, target_width, target_height);
     while let Some(row) = reader.next_row().ok()? {
-        let target_row = (y * u64::from(target_height) / u64::from(height))
-            .min(u64::from(target_height) - 1) as usize;
-        if target_row != current {
-            flush(
-                &mut sums,
-                &mut counts,
-                &mut output[current * row_bytes..][..row_bytes],
-            );
-            current = target_row;
+        reducer.push_row(row.data(), samples)?;
+    }
+    reducer.finish()
+}
+
+/// An alpha-weighted box filter fed one source row at a time: it holds one
+/// row of sums and the reduced raster, never the source.
+struct BoxReducer {
+    width: u32,
+    height: u32,
+    target_width: u32,
+    target_height: u32,
+    sums: Vec<f64>,
+    counts: Vec<u32>,
+    output: Vec<u8>,
+    current: usize,
+    rows: u32,
+}
+
+impl BoxReducer {
+    fn new(width: u32, height: u32, target_width: u32, target_height: u32) -> Self {
+        Self {
+            width,
+            height,
+            target_width,
+            target_height,
+            sums: vec![0.0; target_width as usize * 4],
+            counts: vec![0; target_width as usize],
+            output: vec![0; target_width as usize * target_height as usize * 4],
+            current: 0,
+            rows: 0,
         }
-        for (x, pixel) in row.data().chunks_exact(samples).enumerate() {
+    }
+
+    /// Adds the next source row of 8-bit gray, gray-alpha, RGB or RGBA pixels.
+    fn push_row(&mut self, row: &[u8], samples: usize) -> Option<()> {
+        let target_row = (u64::from(self.rows) * u64::from(self.target_height)
+            / u64::from(self.height))
+        .min(u64::from(self.target_height) - 1) as usize;
+        if target_row != self.current {
+            self.flush();
+            self.current = target_row;
+        }
+        for (x, pixel) in row
+            .chunks_exact(samples)
+            .take(self.width as usize)
+            .enumerate()
+        {
             let (red, green, blue, alpha) = match *pixel {
                 [gray] => (gray, gray, gray, 255),
                 [gray, alpha] => (gray, gray, gray, alpha),
@@ -274,41 +301,44 @@ fn png(bytes: &[u8], max_pixels: u64) -> Option<RgbaImage> {
                 [red, green, blue, alpha] => (red, green, blue, alpha),
                 _ => return None,
             };
-            let column = (x as u64 * u64::from(target_width) / u64::from(width)) as usize;
+            let column = (x as u64 * u64::from(self.target_width) / u64::from(self.width)) as usize;
             let at = column * 4;
             let weight = f64::from(alpha);
-            sums[at] += f64::from(red) * weight;
-            sums[at + 1] += f64::from(green) * weight;
-            sums[at + 2] += f64::from(blue) * weight;
-            sums[at + 3] += weight;
-            counts[column] += 1;
+            self.sums[at] += f64::from(red) * weight;
+            self.sums[at + 1] += f64::from(green) * weight;
+            self.sums[at + 2] += f64::from(blue) * weight;
+            self.sums[at + 3] += weight;
+            self.counts[column] += 1;
         }
-        y += 1;
+        self.rows += 1;
+        Some(())
     }
-    if y != u64::from(height) {
-        return None;
-    }
-    flush(
-        &mut sums,
-        &mut counts,
-        &mut output[current * row_bytes..][..row_bytes],
-    );
-    RgbaImage::from_raw(target_width, target_height, output)
-}
 
-/// Writes one reduced row from its alpha-weighted sums and clears them.
-fn flush(sums: &mut [f64], counts: &mut [u32], row: &mut [u8]) {
-    for (column, count) in counts.iter_mut().enumerate() {
-        let at = column * 4;
-        let alpha = sums[at + 3];
-        if *count > 0 && alpha > 0.0 {
-            for channel in 0..3 {
-                row[at + channel] = (sums[at + channel] / alpha).round() as u8;
-            }
-            row[at + 3] = (alpha / f64::from(*count)).round() as u8;
+    /// The reduced raster, or `None` when the source ended early.
+    fn finish(mut self) -> Option<RgbaImage> {
+        if self.rows != self.height {
+            return None;
         }
-        sums[at..at + 4].fill(0.0);
-        *count = 0;
+        self.flush();
+        RgbaImage::from_raw(self.target_width, self.target_height, self.output)
+    }
+
+    /// Writes the current reduced row from its sums and clears them.
+    fn flush(&mut self) {
+        let row_bytes = self.target_width as usize * 4;
+        let row = &mut self.output[self.current * row_bytes..][..row_bytes];
+        for (column, count) in self.counts.iter_mut().enumerate() {
+            let at = column * 4;
+            let alpha = self.sums[at + 3];
+            if *count > 0 && alpha > 0.0 {
+                for channel in 0..3 {
+                    row[at + channel] = (self.sums[at + channel] / alpha).round() as u8;
+                }
+                row[at + 3] = (alpha / f64::from(*count)).round() as u8;
+            }
+            self.sums[at..at + 4].fill(0.0);
+            *count = 0;
+        }
     }
 }
 
