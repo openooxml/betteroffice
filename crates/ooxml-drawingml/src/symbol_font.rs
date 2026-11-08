@@ -70,10 +70,11 @@ impl SymbolFont {
             .map(|(_, replacement)| *replacement)
     }
 
-    /// `text` as this face draws it: every slot replaced by its covered
-    /// character, or by the bullet stand-in when the table has none. `None`
-    /// when `text` addresses no slot. Every replacement is one BMP code unit,
-    /// like the slot it replaces, so UTF-16 offsets into `text` still hold.
+    /// Run text as this face draws it: every slot the table names replaced by
+    /// its covered character. A slot the table does not name stays as stored,
+    /// so distinct symbols never collapse into one stand-in, and is counted.
+    /// `None` when `text` addresses no slot. Every replacement is one BMP code
+    /// unit, like the slot it replaces, so UTF-16 offsets into `text` hold.
     pub fn display_text(self, text: &str) -> Option<SymbolText> {
         if !text
             .chars()
@@ -88,7 +89,7 @@ impl SymbolFont {
                 None => character,
                 Some(_) => self.shape(character).unwrap_or_else(|| {
                     unmapped += 1;
-                    UNKNOWN_SLOT
+                    character
                 }),
             })
             .collect();
@@ -96,8 +97,7 @@ impl SymbolFont {
     }
 }
 
-/// Text a symbol face draws, with the number of slots that fell back to the
-/// bullet stand-in.
+/// Text a symbol face draws, with the number of slots its table does not name.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SymbolText {
     pub text: String,
@@ -317,10 +317,10 @@ mod tests {
     }
 
     #[test]
-    fn display_text_maps_slots_counts_stand_ins_and_keeps_utf16_length() {
+    fn display_text_maps_named_slots_keeps_and_counts_the_rest() {
         let text = "a+b \u{f0b3} \u{f0e6}x日";
         let drawn = SymbolFont::Symbol.display_text(text).expect("slots");
-        assert_eq!(drawn.text, "α+β ≥ •ξ日");
+        assert_eq!(drawn.text, "α+β ≥ \u{f0e6}ξ日");
         assert_eq!(drawn.unmapped, 1);
         assert_eq!(
             drawn.text.encode_utf16().count(),
@@ -330,7 +330,7 @@ mod tests {
         let wingdings = SymbolFont::Wingdings
             .display_text("l\u{f0e0}\u{f0fc}")
             .expect("slots");
-        assert_eq!(wingdings.text, "●••");
+        assert_eq!(wingdings.text, "●\u{f0e0}\u{f0fc}");
         assert_eq!(wingdings.unmapped, 2);
     }
 

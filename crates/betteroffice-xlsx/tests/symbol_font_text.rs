@@ -107,7 +107,7 @@ fn stored(workbook: &Workbook) -> Vec<String> {
 fn symbol_face_cells_draw_the_characters_their_slots_address() {
     let bytes = package();
     let workbook = Workbook::open(&bytes).unwrap();
-    assert_eq!(drawn(&workbook), ["α+β ≥ π", "●•", "ab"]);
+    assert_eq!(drawn(&workbook), ["α+β ≥ π", "●\u{f0e0}", "ab"]);
 
     let expected = ["a+b \u{f0b3} p", "l\u{f0e0}", "ab"];
     assert_eq!(stored(&workbook), expected);

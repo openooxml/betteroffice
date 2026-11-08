@@ -61,7 +61,7 @@ fn symbol_face_slots_draw_their_covered_characters_and_keep_the_stored_text() {
     let plan = doc.paragraph_save_plan();
 
     let drawn = layout_texts(&doc);
-    assert_eq!(drawn, ["α+β ≥ π", "α•►\u{f0fc}", "ab"]);
+    assert_eq!(drawn, ["α+β ≥ π", "α\u{f0e0}►\u{f0fc}", "ab"]);
     for (drawn, stored) in drawn.iter().zip(&stored) {
         assert_eq!(drawn.encode_utf16().count(), stored.encode_utf16().count());
     }
@@ -75,5 +75,53 @@ fn symbol_face_slots_draw_their_covered_characters_and_keep_the_stored_text() {
         doc.paragraph_save_plan(),
         plan,
         "laying out changes nothing to save"
+    );
+}
+
+fn first_run(body: &str) -> (String, Option<String>, Option<String>) {
+    let bytes = fixture::with_body(body);
+    let doc = EditingDoc::new(5101);
+    seed_from_docx(&doc, &bytes).unwrap();
+    let blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+    let LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
+        panic!("paragraph");
+    };
+    let Run::Text(run) = &paragraph.runs[0] else {
+        panic!("text run");
+    };
+    let slots = run.fmt.font_slots.as_ref();
+    (
+        run.text.clone(),
+        slots.and_then(|slots| slots.ascii.clone()),
+        slots.and_then(|slots| slots.h_ansi.clone()),
+    )
+}
+
+#[test]
+fn a_replacement_in_another_slot_still_draws_with_the_symbol_face() {
+    let run = |text: &str| {
+        first_run(&fixture::p(
+            "00000004",
+            &format!(
+                r#"<w:r><w:rPr><w:rFonts w:ascii="Symbol" w:hAnsi="Calibri"/></w:rPr><w:t>{text}</w:t></w:r>"#
+            ),
+        ))
+    };
+    assert_eq!(
+        run("a+b"),
+        (
+            "α+β".to_owned(),
+            Some("Symbol".to_owned()),
+            Some("Symbol".to_owned())
+        )
+    );
+    assert_eq!(
+        run("a\u{e9}"),
+        (
+            "α\u{e9}".to_owned(),
+            Some("Symbol".to_owned()),
+            Some("Calibri".to_owned())
+        ),
+        "a character that keeps the slot's own family leaves the slots alone"
     );
 }

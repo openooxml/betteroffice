@@ -53,7 +53,7 @@ fn symbol_face_run_text_draws_the_characters_its_slots_address() {
         .unwrap()
         .display_list;
     assert_eq!(drawn(&list, 10).trim(), "α+β ≥ π");
-    assert_eq!(drawn(&list, 11).trim(), "●•");
+    assert_eq!(drawn(&list, 11).trim(), "●\u{f0e0}");
     assert_eq!(drawn(&list, 12).trim(), "a+b");
 
     let expected = ["a+b \u{f0b3} p", "l\u{f0e0}", "a+b"];

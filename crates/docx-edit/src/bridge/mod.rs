@@ -4923,13 +4923,16 @@ fn has_nonfinite(formatting: &RunFormatting) -> bool {
 
 /// The text a run draws: a character whose `w:rFonts` slot names a symbol
 /// face (Symbol, Wingdings, Webdings) addresses a glyph by font position, so
-/// layout gets the covered character for it. A slot the table leaves unnamed
-/// but the base-latin backstop draws its own glyph for stays as stored.
-/// Display only: the story, saves, find and copy keep the stored characters,
-/// and every replacement keeps the UTF-16 width so offsets still line up.
-pub(super) fn symbol_display_text(formatting: &RunFormatting, text: String) -> String {
+/// layout gets the covered character the face's table names for it; a slot
+/// the table does not name stays as stored. A replacement can fall in another
+/// slot than the character it replaces (`a` is ASCII, `α` is not), so that
+/// slot is pointed at the symbol face too, unless another character of the
+/// run still needs the slot's own family. Display only: the story, saves, find
+/// and copy keep the stored characters, and every replacement keeps the UTF-16
+/// width so offsets still line up.
+pub(super) fn symbol_display_run(formatting: &mut RunFormatting, text: String) -> String {
     let slots = formatting.font_slots.as_ref();
-    let family = |slot: usize| {
+    let family = |slot: usize| -> Option<String> {
         slots
             .and_then(|slots| match slot {
                 0 => slots.ascii.as_deref(),
@@ -4940,23 +4943,63 @@ pub(super) fn symbol_display_text(formatting: &RunFormatting, text: String) -> S
             .or_else(|| slots.and_then(|slots| slots.h_ansi.as_deref()))
             .or_else(|| slots.and_then(|slots| slots.ascii.as_deref()))
             .or(formatting.font_family.as_deref())
+            .map(str::to_owned)
     };
-    let symbol_face = |slot: usize| family(slot).and_then(ooxml_text::SymbolFont::named);
+    let symbol_face = |slot: usize| {
+        family(slot)
+            .as_deref()
+            .and_then(ooxml_text::SymbolFont::named)
+    };
     if (0..4).all(|slot| symbol_face(slot).is_none()) {
         return text;
     }
     let hint = slots.and_then(|slots| slots.hint.as_deref()) == Some("eastAsia");
     let complex_script = formatting.complex_script.unwrap_or(false);
-    ooxml_text::font_slot_characters(&text, complex_script, hint)
+    let mut wanted: Vec<(char, Option<String>)> = Vec::new();
+    let drawn: String = ooxml_text::font_slot_characters(&text, complex_script, hint)
         .map(|(character, slot)| {
-            symbol_face(slot)
-                .and_then(|face| match face.shape(character) {
-                    None if ooxml_text::font_store::base_latin_alias(character) => None,
-                    _ => face.substitute(character),
-                })
-                .unwrap_or(character)
+            let shape = symbol_face(slot).and_then(|face| face.shape(character));
+            wanted.push((character, shape.and_then(|_| family(slot))));
+            shape.unwrap_or(character)
         })
-        .collect()
+        .collect();
+    if drawn == text {
+        return text;
+    }
+    let mut targets: [Option<Option<String>>; 4] = [None, None, None, None];
+    for ((_, slot), (_, symbol)) in
+        ooxml_text::font_slot_characters(&drawn, complex_script, hint).zip(&wanted)
+    {
+        let want = symbol.clone().or_else(|| family(slot));
+        match &targets[slot] {
+            None => targets[slot] = Some(want),
+            Some(existing) if *existing == want => {}
+            Some(_) => return drawn,
+        }
+    }
+    let mut repointed = formatting.font_slots.clone().unwrap_or_default();
+    let mut changed = false;
+    for (slot, target) in targets.into_iter().enumerate() {
+        let Some(Some(target)) = target else {
+            continue;
+        };
+        if family(slot).as_deref() == Some(target.as_str()) {
+            continue;
+        }
+        let (name, theme) = match slot {
+            0 => (&mut repointed.ascii, &mut repointed.ascii_theme),
+            1 => (&mut repointed.h_ansi, &mut repointed.h_ansi_theme),
+            2 => (&mut repointed.east_asia, &mut repointed.east_asia_theme),
+            _ => (&mut repointed.cs, &mut repointed.cs_theme),
+        };
+        *name = Some(target);
+        *theme = None;
+        changed = true;
+    }
+    if changed {
+        formatting.font_slots = Some(repointed);
+    }
+    drawn
 }
 
 fn raw_run_to_layout(raw: RawRun, paragraph_pm_start: u64) -> Run {
@@ -4970,13 +5013,17 @@ fn raw_run_to_layout(raw: RawRun, paragraph_pm_start: u64) -> Run {
             pm_end,
             inline_sdt_widget: raw.inline_sdt_widget,
         }),
-        RawRunKind::Text(text) => Run::Text(TextRun {
-            text: symbol_display_text(&raw.formatting, text),
-            fmt: raw.formatting,
-            pm_start,
-            pm_end,
-            inline_sdt_widget: raw.inline_sdt_widget,
-        }),
+        RawRunKind::Text(text) => {
+            let mut fmt = raw.formatting;
+            let text = symbol_display_run(&mut fmt, text);
+            Run::Text(TextRun {
+                fmt,
+                text,
+                pm_start,
+                pm_end,
+                inline_sdt_widget: raw.inline_sdt_widget,
+            })
+        }
         RawRunKind::Tab => Run::Tab(TabRun {
             fmt: raw.formatting,
             pm_start,
