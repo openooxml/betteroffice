@@ -1006,6 +1006,15 @@ where
         let font_family = font
             .and_then(|f| f.family.clone())
             .or_else(|| Some(fallback_font_family.clone()));
+        let text = match font_family
+            .as_deref()
+            .and_then(ooxml_drawingml::SymbolFont::named)
+        {
+            Some(face) if parts.is_empty() && matches!(cell.value, CellValue::Text { .. }) => face
+                .display_text(&text)
+                .map_or(text, |symbol| symbol.text.into()),
+            _ => text,
+        };
 
         let left_pad = print.map_or(TEXT_PAD_PX, |(m, _)| 3.0 * 96.0 / m.dpi);
         let right_pad = print.map_or(TEXT_PAD_PX, |(m, _)| 2.0 * 96.0 / m.dpi);

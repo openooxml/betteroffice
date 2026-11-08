@@ -857,9 +857,11 @@ fn shape_document_runs(run: &Value, styles: &ShapeRunStyles<'_>) -> Vec<Run> {
             Some("text") => string(content, "text")
                 .filter(|text| !text.is_empty())
                 .map(|text| {
+                    let mut fmt = formatting.clone();
+                    let text = super::symbol_display_run(&mut fmt, text);
                     Run::Text(TextRun {
-                        fmt: formatting.clone(),
                         text,
+                        fmt,
                         pm_start: None,
                         pm_end: None,
                         inline_sdt_widget: None,
