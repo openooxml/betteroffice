@@ -1747,6 +1747,7 @@ describe('workbook commands', () => {
     { method: 'applyOps', message: 'defined name Dynamic cannot be safely rewritten', reason: 'unsupported' },
     { method: 'applyOps', message: 'chart reference in xl/charts/chart1.xml cannot be safely rewritten', reason: 'unsupported' },
     { method: 'applyOps', message: 'xl/tables/table1.xml references cells this edit would move, and it cannot be rewritten', reason: 'unsupported' },
+    { method: 'applyOps', message: 'sheet name contains a character xml cannot carry, and the workbook references the sheet', reason: 'invalid-step' },
   ] as const) {
     for (const fault of ['precommit', 'postcommit', 'trap'] as const) {
       test(`${fault} ${refusal.message} retains refusal and context guards`, async () => {
