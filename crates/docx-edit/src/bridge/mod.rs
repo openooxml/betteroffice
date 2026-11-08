@@ -4970,14 +4970,21 @@ pub(super) fn symbol_display_run(formatting: &mut RunFormatting, text: String) -
         return text;
     }
     let mut targets: [Option<Option<String>>; 4] = [None, None, None, None];
+    let mut conflict = false;
     for ((_, slot), want) in
         ooxml_text::font_slot_characters(&drawn, complex_script, hint).zip(wanted)
     {
         match &targets[slot] {
             None => targets[slot] = Some(want),
             Some(existing) if *existing == want => {}
-            Some(_) => return drawn,
+            Some(_) => {
+                conflict = true;
+                break;
+            }
         }
+    }
+    if conflict {
+        return drawn;
     }
     let pinned: Vec<Option<String>> = (0..4)
         .map(|slot| targets[slot].clone().unwrap_or_else(|| family(slot)))
