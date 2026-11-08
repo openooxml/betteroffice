@@ -400,7 +400,7 @@ pub fn parse_metafile_within(
         let same = kept.entry(hasher.finish()).or_default();
         if let Some((_, earlier)) = same
             .iter()
-            .find(|(earlier_png, earlier)| *earlier_png == png && **earlier == data)
+            .find(|(earlier_png, earlier)| *earlier_png == png && **earlier == *data)
         {
             return Some(kind(Arc::clone(earlier)));
         }
