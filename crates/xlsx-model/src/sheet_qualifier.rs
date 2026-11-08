@@ -337,9 +337,16 @@ mod tests {
     fn strings_external_references_and_bare_names_are_left_alone() {
         let pairs = renamed(&[("Data", "New Data")]);
         for source in ["\"Data!A1\"&Data", "[1]Data!A1", "Data", "SUM(Data)"] {
-            assert_eq!(rename_sheets(source, &pairs), (source.to_owned(), vec![]), "{source}");
+            assert_eq!(
+                rename_sheets(source, &pairs),
+                (source.to_owned(), vec![]),
+                "{source}"
+            );
         }
         assert_eq!(rename_sheets("'data'!A1", &pairs).0, "'New Data'!A1");
-        assert_eq!(rename_sheets("Data:Other!A1", &pairs).0, "'New Data:Other'!A1");
+        assert_eq!(
+            rename_sheets("Data:Other!A1", &pairs).0,
+            "'New Data:Other'!A1"
+        );
     }
 }

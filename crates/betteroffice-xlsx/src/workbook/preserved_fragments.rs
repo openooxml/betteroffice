@@ -31,11 +31,11 @@ impl Workbook {
         let Some(package) = self.source_package.as_ref() else {
             return Ok(());
         };
-        if preview
+        if preview.sheets.iter().map(|sheet| &sheet.name).eq(self
+            .model
             .sheets
             .iter()
-            .map(|sheet| &sheet.name)
-            .eq(self.model.sheets.iter().map(|sheet| &sheet.name))
+            .map(|sheet| &sheet.name))
         {
             return Ok(());
         }

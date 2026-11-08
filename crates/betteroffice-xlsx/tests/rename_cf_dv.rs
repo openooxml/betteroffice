@@ -209,8 +209,9 @@ fn a_swap_through_a_temporary_name_follows_each_sheet() {
     );
 }
 
-/// A chain of renames lands on the last name; undoing all of them puts the
-/// sheet part back exactly as the file wrote it.
+/// A chain of renames lands on the last name, quoted as Excel quotes a sheet
+/// named like an R1C1 reference; undoing all of them puts the sheet part back
+/// exactly as the file wrote it.
 #[test]
 fn a_chain_of_renames_then_undo_restores_the_text() {
     let source = book("A", "Spare", "A!$A$1&gt;0", "A!$A$1:$A$5");
@@ -219,7 +220,7 @@ fn a_chain_of_renames_then_undo_restores_the_text() {
     rename(&mut workbook, 0, "C").unwrap();
     assert_eq!(
         saved_formulas(&workbook.save().unwrap()),
-        ["C!$A$1>0", "C!$A$1:$A$5", "C!$A$1>0", "C!$A$1:$A$5"]
+        ["'C'!$A$1>0", "'C'!$A$1:$A$5", "'C'!$A$1>0", "'C'!$A$1:$A$5"]
     );
     for _ in 0..2 {
         workbook.undo(CalculationOptions::default()).unwrap();

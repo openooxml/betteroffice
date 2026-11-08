@@ -96,7 +96,9 @@ fn is_formula(name: &[u8], stack: &[Vec<u8>], in_extension: bool) -> bool {
         name == b"f"
     } else {
         matches!(name, b"formula1" | b"formula2")
-            && stack.last().is_some_and(|parent| parent.as_slice() == b"dataValidation")
+            && stack
+                .last()
+                .is_some_and(|parent| parent.as_slice() == b"dataValidation")
     }
 }
 
@@ -240,9 +242,8 @@ mod tests {
 
     #[test]
     fn every_extension_formula_follows_the_rename() {
-        let xml = concat!(
-            r#"<extLst><ext uri="u" xmlns:x14="x" xmlns:xm="m"><x14:sparklineGroups><x14:sparklineGroup><x14:sparklines><x14:sparkline><xm:f>Data!A1:C1</xm:f><xm:sqref>D1</xm:sqref></x14:sparkline></x14:sparklines></x14:sparklineGroup></x14:sparklineGroups></ext></extLst>"#
-        );
+        let xml =
+            r#"<extLst><ext uri="u" xmlns:x14="x" xmlns:xm="m"><x14:sparklineGroups><x14:sparklineGroup><x14:sparklines><x14:sparkline><xm:f>Data!A1:C1</xm:f><xm:sqref>D1</xm:sqref></x14:sparkline></x14:sparklines></x14:sparklineGroup></x14:sparklineGroups></ext></extLst>"#;
         assert_eq!(
             patched(xml, true, &[("Data", "B")]).as_deref(),
             Some(xml.replace("<xm:f>Data!", "<xm:f>B!").as_str())
@@ -252,11 +253,13 @@ mod tests {
     #[test]
     fn a_name_xml_cannot_carry_and_a_fragment_that_does_not_read_fail() {
         let xml = r#"<dataValidations><dataValidation><formula1>Data!A1</formula1></dataValidation></dataValidations>"#;
-        let error = rename_fragment(xml.as_bytes(), false, &renamed(&[("Data", "D\u{1}")])).unwrap_err();
+        let error =
+            rename_fragment(xml.as_bytes(), false, &renamed(&[("Data", "D\u{1}")])).unwrap_err();
         assert_eq!(error.reason, FragmentFailureReason::UnwritableName);
         assert_eq!(error.kind, FragmentKind::DataValidation);
         let broken = r#"<dataValidations><dataValidation><formula1>Data!A1<x/></formula1></dataValidation></dataValidations>"#;
-        let error = rename_fragment(broken.as_bytes(), false, &renamed(&[("Data", "New")])).unwrap_err();
+        let error =
+            rename_fragment(broken.as_bytes(), false, &renamed(&[("Data", "New")])).unwrap_err();
         assert_eq!(error.reason, FragmentFailureReason::Unreadable);
     }
 }

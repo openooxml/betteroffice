@@ -10,8 +10,8 @@ use xlsx_calc::parser::Expr;
 use xlsx_calc::{ColumnRange, RowRange, parse_formula};
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS, col_to_letters};
 use xlsx_model::sheet_qualifier::{
-    ParsedSheetToken, Qualifier, is_function_call, next_char_len, parse_sheet_token, qualifier_token,
-    quoted_endpoints, sheet_names_equal, sheet_qualifiers, skip_string,
+    ParsedSheetToken, Qualifier, is_function_call, next_char_len, parse_sheet_token,
+    qualifier_token, quoted_endpoints, sheet_names_equal, sheet_qualifiers, skip_string,
 };
 use xlsx_model::workbook::{MAX_DEFINED_NAME_BYTES, defined_names_bytes};
 use xlsx_model::{
