@@ -17,6 +17,14 @@ fn part(bytes: &[u8], name: &str) -> Vec<u8> {
         .unwrap_or_default()
 }
 
+/// A save of honest state: opened content and accepted edits never make a
+/// save keep a part differently from what the workbook holds.
+fn saved_without_warnings(workbook: &Workbook) -> Vec<u8> {
+    let (bytes, warnings) = workbook.save_with_warnings().unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    bytes
+}
+
 fn apply(workbook: &mut Workbook, op: Op) -> betteroffice_xlsx::Result<()> {
     workbook
         .apply_ops(vec![op], CalculationOptions::default())
@@ -32,7 +40,10 @@ fn an_opened_chart_reference_holding_a_control_character_opens_and_is_kept() {
         Workbook::open(&source).unwrap_or_else(|error| panic!("refused at open: {error}"));
     let chart = &workbook.model().sheets[0].charts[0];
     assert_eq!(chart.refs[0].formula, "'A\u{1}B'!$B$2:$B$4");
-    assert_eq!(part(&workbook.save().unwrap(), CHART), part(&source, CHART));
+    assert_eq!(
+        part(&saved_without_warnings(&workbook), CHART),
+        part(&source, CHART)
+    );
 
     let mut workbook = Workbook::open(&source).unwrap();
     workbook
@@ -43,7 +54,7 @@ fn an_opened_chart_reference_holding_a_control_character_opens_and_is_kept() {
             CalculationOptions::default(),
         )
         .unwrap();
-    let saved = workbook.save().unwrap();
+    let saved = saved_without_warnings(&workbook);
     assert_eq!(part(&saved, CHART), part(&source, CHART));
     Workbook::open(&saved).unwrap();
 }
@@ -67,7 +78,10 @@ fn an_edit_that_would_rewrite_such_a_reference_is_refused_and_the_chart_kept() {
     .unwrap_err();
     assert!(error.to_string().contains("cannot be rewritten"), "{error}");
     assert_eq!(workbook.model(), &before);
-    assert_eq!(part(&workbook.save().unwrap(), CHART), part(&source, CHART));
+    assert_eq!(
+        part(&saved_without_warnings(&workbook), CHART),
+        part(&source, CHART)
+    );
 }
 
 /// Renaming the sheet writes a reference xml can carry; undo puts back the
@@ -84,7 +98,7 @@ fn undo_puts_back_the_authored_reference_without_refusal() {
         },
     )
     .unwrap();
-    let renamed = workbook.save().unwrap();
+    let renamed = saved_without_warnings(&workbook);
     let chart = String::from_utf8(part(&renamed, CHART)).unwrap();
     assert!(chart.contains("<c:f>Data!$B$2:$B$4</c:f>"), "{chart}");
     workbook
@@ -94,7 +108,10 @@ fn undo_puts_back_the_authored_reference_without_refusal() {
         workbook.model().sheets[0].charts[0].refs[0].formula,
         "'A\u{1}B'!$B$2:$B$4"
     );
-    assert_eq!(part(&workbook.save().unwrap(), CHART), part(&source, CHART));
+    assert_eq!(
+        part(&saved_without_warnings(&workbook), CHART),
+        part(&source, CHART)
+    );
 }
 
 /// A snapshot of such a workbook hydrates, and the hydrated workbook saves its
@@ -120,7 +137,10 @@ fn a_snapshot_of_such_a_workbook_hydrates_and_saves_the_chart_as_authored() {
         restored.model().sheets[0].charts[0].refs[0].formula,
         "'A\u{1}B'!$B$2:$B$4"
     );
-    assert_eq!(part(&restored.save().unwrap(), CHART), part(&source, CHART));
+    assert_eq!(
+        part(&saved_without_warnings(&restored), CHART),
+        part(&source, CHART)
+    );
 }
 
 /// A recovery checkpoint of such a workbook restores, and the restored
@@ -133,5 +153,8 @@ fn a_recovery_checkpoint_of_such_a_workbook_restores_and_saves_the_chart_as_auth
     let (restored, ..) = Workbook::restore_recovery_checkpoint(&checkpoint)
         .unwrap_or_else(|error| panic!("restore refused: {error}"));
     assert_eq!(restored.model(), workbook.model());
-    assert_eq!(part(&restored.save().unwrap(), CHART), part(&source, CHART));
+    assert_eq!(
+        part(&saved_without_warnings(&restored), CHART),
+        part(&source, CHART)
+    );
 }

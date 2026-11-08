@@ -1045,6 +1045,12 @@ pub(crate) const MAX_CACHE_POINTS: u32 = 65_536;
 pub(crate) const UNWRITABLE_REFERENCE: &str =
     "chart reference contains a character xml cannot carry";
 
+/// Whether `error` is a chart part refused for [`UNWRITABLE_REFERENCE`], which
+/// a save answers by keeping that part as authored.
+pub fn is_unwritable_chart_reference(error: &ParseError) -> bool {
+    matches!(error, ParseError::UnsupportedEdit(reason) if reason == UNWRITABLE_REFERENCE)
+}
+
 pub(crate) fn patch_chart_refs(
     part: &[u8],
     path: &str,

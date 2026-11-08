@@ -949,9 +949,7 @@ fn patch_chart_parts(
                 wb,
             ) {
                 Ok(bytes) => bytes.unwrap_or_else(|| source.to_vec()),
-                Err(ParseError::UnsupportedEdit(reason))
-                    if reason == crate::chart::UNWRITABLE_REFERENCE =>
-                {
+                Err(error) if crate::chart::is_unwritable_chart_reference(&error) => {
                     source.to_vec()
                 }
                 Err(error) => return Err(error),
