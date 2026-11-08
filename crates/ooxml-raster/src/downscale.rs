@@ -20,7 +20,11 @@ pub const REDUCED_MAX_SIDE: u32 = 4096;
 
 /// How many times `max_pixels` a source may declare and still be reduced.
 /// Reducing reads the whole source, so a larger one is refused as before.
-pub const MAX_SOURCE_FACTOR: u64 = 4;
+pub const MAX_SOURCE_FACTOR: u64 = 2;
+
+/// The longest side a reduced source may declare, JPEG's own limit. A PNG
+/// row buffer grows with its width, so a wider source is refused.
+pub const MAX_SOURCE_SIDE: u32 = 65_535;
 
 /// Straight RGBA of a JPEG or PNG whose declared size is past `max_pixels`,
 /// reduced to [`REDUCED_MAX_SIDE`] on its longer side, or less where that
@@ -49,6 +53,7 @@ pub fn decode_reduced(bytes: &[u8], max_pixels: u64) -> Option<(Vec<u8>, u32, u3
 pub fn reduced_size(width: u32, height: u32, max_pixels: u64) -> Option<(u32, u32)> {
     let longer = width.max(height);
     if longer == 0
+        || longer > MAX_SOURCE_SIDE
         || max_pixels == 0
         || u64::from(width) * u64::from(height) > max_pixels.saturating_mul(MAX_SOURCE_FACTOR)
     {
@@ -73,19 +78,109 @@ pub fn reduced_size(width: u32, height: u32, max_pixels: u64) -> Option<(u32, u3
     Some((target_width, target_height))
 }
 
-/// The pixels and bytes [`decode_reduced`] may hold for a `width` x
-/// `height` picture: the reduced raster, plus an IDCT intermediate of at most
-/// four times its pixels (one scale step above it), never past `max_pixels`.
-pub fn reduced_cost(width: u32, height: u32, max_pixels: u64) -> Option<(u64, u64)> {
+/// What [`decode_reduced`] costs for a `width` x `height` source: the source
+/// pixels it reads, charged as decode work the way a whole decode is, and the
+/// bytes it may hold. Those are the reduced raster, an IDCT intermediate of at
+/// most four times its pixels (one scale step above it) and never past
+/// `max_pixels`, and for a progressive JPEG the source-sized coefficients it
+/// collects before any IDCT.
+pub fn reduced_cost(bytes: &[u8], width: u32, height: u32, max_pixels: u64) -> Option<(u64, u64)> {
     let (target_width, target_height) = reduced_size(width, height, max_pixels)?;
     let pixels = u64::from(target_width) * u64::from(target_height);
     let intermediate = pixels.saturating_mul(4).min(max_pixels);
+    let coefficients = if bytes.starts_with(&[0xFF, 0xD8]) {
+        let frame = jpeg_frame(bytes)?;
+        if frame.progressive {
+            frame.coefficient_bytes()
+        } else {
+            0
+        }
+    } else {
+        0
+    };
     Some((
-        pixels,
+        u64::from(width) * u64::from(height),
         pixels
             .saturating_mul(4)
-            .saturating_add(intermediate.saturating_mul(3)),
+            .saturating_add(intermediate.saturating_mul(3))
+            .saturating_add(coefficients),
     ))
+}
+
+/// A JPEG frame header: its size, whether it is progressive, and each
+/// component's sampling factors.
+struct JpegFrame {
+    width: u32,
+    height: u32,
+    progressive: bool,
+    sampling: Vec<(u32, u32)>,
+}
+
+impl JpegFrame {
+    /// The bytes of the 16-bit DCT coefficients a progressive decode holds for
+    /// every block of every component, padded to whole MCUs.
+    fn coefficient_bytes(&self) -> u64 {
+        let horizontal = self
+            .sampling
+            .iter()
+            .map(|(h, _)| *h)
+            .max()
+            .unwrap_or(1)
+            .max(1);
+        let vertical = self
+            .sampling
+            .iter()
+            .map(|(_, v)| *v)
+            .max()
+            .unwrap_or(1)
+            .max(1);
+        let across = u64::from(self.width.div_ceil(8 * horizontal));
+        let down = u64::from(self.height.div_ceil(8 * vertical));
+        self.sampling
+            .iter()
+            .map(|(h, v)| across * u64::from(*h) * down * u64::from(*v) * 64 * 2)
+            .sum()
+    }
+}
+
+fn jpeg_frame(bytes: &[u8]) -> Option<JpegFrame> {
+    let mut at = 2;
+    while at + 4 <= bytes.len() {
+        if bytes[at] != 0xFF {
+            return None;
+        }
+        let marker = bytes[at + 1];
+        if marker == 0xFF {
+            at += 1;
+            continue;
+        }
+        if marker == 0x01 || (0xD0..=0xD7).contains(&marker) {
+            at += 2;
+            continue;
+        }
+        let length = usize::from(u16::from_be_bytes([bytes[at + 2], bytes[at + 3]]));
+        if (0xC0..=0xCF).contains(&marker) && !matches!(marker, 0xC4 | 0xC8 | 0xCC) {
+            let frame = bytes.get(at + 4..at + 2 + length)?;
+            let count = usize::from(*frame.get(5)?);
+            let sampling = (0..count)
+                .map(|index| {
+                    let factors = *frame.get(6 + index * 3 + 1)?;
+                    Some((
+                        u32::from(factors >> 4).max(1),
+                        u32::from(factors & 0x0F).max(1),
+                    ))
+                })
+                .collect::<Option<Vec<_>>>()?;
+            return Some(JpegFrame {
+                height: u32::from(u16::from_be_bytes([*frame.get(1)?, *frame.get(2)?])),
+                width: u32::from(u16::from_be_bytes([*frame.get(3)?, *frame.get(4)?])),
+                progressive: matches!(marker, 0xC2 | 0xC6 | 0xCA | 0xCE),
+                sampling,
+            });
+        }
+        at += 2 + length;
+    }
+    None
 }
 
 fn jpeg(bytes: &[u8], max_pixels: u64) -> Option<RgbaImage> {
@@ -111,6 +206,15 @@ fn jpeg(bytes: &[u8], max_pixels: u64) -> Option<RgbaImage> {
         request = ((request.0 / 2).max(1), (request.1 / 2).max(1));
     };
     let format = decoder.info()?.pixel_format;
+    if !matches!(
+        format,
+        jpeg_decoder::PixelFormat::RGB24 | jpeg_decoder::PixelFormat::L8
+    ) {
+        return None;
+    }
+    let orientation = image::codecs::jpeg::JpegDecoder::new(Cursor::new(bytes))
+        .and_then(|mut header| header.orientation())
+        .ok()?;
     let pixels = decoder.decode().ok()?;
     let decoded = match format {
         jpeg_decoder::PixelFormat::RGB24 => {
@@ -126,11 +230,7 @@ fn jpeg(bytes: &[u8], max_pixels: u64) -> Option<RgbaImage> {
     } else {
         decoded.resize_exact(target_width, target_height, FilterType::Triangle)
     };
-    if let Ok(orientation) = image::codecs::jpeg::JpegDecoder::new(Cursor::new(bytes))
-        .and_then(|mut header| header.orientation())
-    {
-        reduced.apply_orientation(orientation);
-    }
+    reduced.apply_orientation(orientation);
     Some(reduced.into_rgba8())
 }
 
@@ -149,9 +249,6 @@ fn png(bytes: &[u8], max_pixels: u64) -> Option<RgbaImage> {
         return None;
     }
     let samples = color.samples();
-    let columns: Vec<usize> = (0..width)
-        .map(|x| (u64::from(x) * u64::from(target_width) / u64::from(width)) as usize)
-        .collect();
     let row_bytes = target_width as usize * 4;
     let mut sums = vec![0f64; row_bytes];
     let mut counts = vec![0u32; target_width as usize];
@@ -177,7 +274,7 @@ fn png(bytes: &[u8], max_pixels: u64) -> Option<RgbaImage> {
                 [red, green, blue, alpha] => (red, green, blue, alpha),
                 _ => return None,
             };
-            let column = *columns.get(x)?;
+            let column = (x as u64 * u64::from(target_width) / u64::from(width)) as usize;
             let at = column * 4;
             let weight = f64::from(alpha);
             sums[at] += f64::from(red) * weight;
@@ -263,8 +360,8 @@ mod tests {
 
     #[test]
     fn a_jpeg_past_its_budget_decodes_reduced_within_it() {
-        let (pixels, width, height) = decode_reduced(&jpeg_of(640, 480), 80_000).expect("reduced");
-        assert!(u64::from(width) * u64::from(height) <= 80_000);
+        let (pixels, width, height) = decode_reduced(&jpeg_of(640, 480), 160_000).expect("reduced");
+        assert!(u64::from(width) * u64::from(height) <= 160_000);
         assert_eq!(pixels.len(), width as usize * height as usize * 4);
         assert!(pixels[0] > 150 && pixels[1] < 90 && pixels[3] == 255);
     }
@@ -278,12 +375,35 @@ mod tests {
             .expect("frame header");
         bytes[at + 5..at + 9].copy_from_slice(&[0xEA, 0x60, 0xEA, 0x60]);
         assert!(decode_reduced(&bytes, CAP).is_none());
-        assert_eq!(reduced_cost(60_000, 60_000, CAP), None);
+        assert_eq!(reduced_cost(&bytes, 60_000, 60_000, CAP), None);
+    }
+
+    #[test]
+    fn a_progressive_jpeg_is_charged_its_source_sized_coefficients() {
+        let mut bytes = jpeg_of(16, 16);
+        let at = bytes
+            .windows(2)
+            .position(|marker| marker == [0xFF, 0xC0])
+            .expect("frame header");
+        bytes[at + 1] = 0xC2;
+        bytes[at + 5..at + 9].copy_from_slice(&8000u16.to_be_bytes().repeat(2));
+        let (pixels, cost) = reduced_cost(&bytes, 8000, 8000, 40_000_000).expect("cost");
+        assert_eq!(pixels, 64_000_000);
+        let frame = jpeg_frame(&bytes).expect("frame");
+        assert!(frame.progressive);
+        assert!(cost >= frame.coefficient_bytes());
+        assert!(frame.coefficient_bytes() >= 64_000_000 * 2);
+    }
+
+    #[test]
+    fn a_source_wider_than_a_jpeg_may_be_is_refused_from_its_header() {
+        assert_eq!(reduced_size(MAX_SOURCE_SIDE + 1, 1, CAP), None);
+        assert!(reduced_size(MAX_SOURCE_SIDE, 2, CAP).is_some());
     }
 
     #[test]
     fn a_png_past_its_budget_streams_into_a_reduced_raster() {
-        let (pixels, width, height) = decode_reduced(&png_of(600, 400), 60_000).expect("reduced");
+        let (pixels, width, height) = decode_reduced(&png_of(400, 300), 60_000).expect("reduced");
         assert!(u64::from(width) * u64::from(height) <= 60_000);
         let (whole, rest) = pixels.as_chunks::<4>();
         assert!(rest.is_empty());

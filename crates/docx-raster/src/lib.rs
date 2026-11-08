@@ -2049,8 +2049,9 @@ impl<'c> PageImages<'c> {
         }
     }
 
-    /// A JPEG or PNG past [`MAX_IMAGE_PIXELS`], decoded at a reduced size
-    /// charged to the page before it allocates.
+    /// A JPEG or PNG past [`MAX_IMAGE_PIXELS`], decoded at a reduced size. The
+    /// page is charged the source pixels the decode reads and the bytes it may
+    /// hold, before it allocates.
     fn decode_reduced(
         &mut self,
         bytes: &[u8],
@@ -2059,7 +2060,7 @@ impl<'c> PageImages<'c> {
         charge: &mut ImageCharge,
     ) -> Decode {
         let Some((pixels, cost)) =
-            ooxml_raster::downscale::reduced_cost(width, height, MAX_IMAGE_PIXELS)
+            ooxml_raster::downscale::reduced_cost(bytes, width, height, MAX_IMAGE_PIXELS)
         else {
             return Decode::Refused;
         };
