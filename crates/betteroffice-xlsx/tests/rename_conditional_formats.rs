@@ -270,3 +270,30 @@ fn a_rename_patches_a_rule_kept_as_the_file_wrote_it() {
         assert_eq!(part(&workbook.save().unwrap(), OTHER), part(&source, OTHER));
     }
 }
+
+fn rule_formulas(workbook: &Workbook) -> Vec<String> {
+    workbook.model().sheets[2].conditional_formats[0].rules[0]
+        .formulas
+        .clone()
+}
+
+/// A name holding a tab, line feed or carriage return, which xml carries only
+/// as a character reference where reading would otherwise normalize it, is
+/// patched so the file reads back as the formula the workbook holds.
+#[test]
+fn a_patched_rule_reads_back_a_name_with_whitespace_controls() {
+    for name in ["A\tB", "A\nB", "A\rB"] {
+        for rule in [
+            r#"<cfRule type="expression" dxfId="0" priority="1"><formula>Data!$A$1&gt;0</formula></cfRule>"#,
+            r#"<cfRule type="colorScale" priority="1"><colorScale><cfvo type="formula" val="Data!$A$1"/><cfvo type="max"/><color rgb="FFFF0000"/><color rgb="FF00FF00"/></colorScale></cfRule>"#,
+        ] {
+            let mut workbook = Workbook::open(&book_with_rule("Data", "Spare", rule)).unwrap();
+            rename(&mut workbook, 0, name).unwrap();
+            let held = rule_formulas(&workbook);
+            assert!(held[0].starts_with(&format!("'{name}'!")), "{name:?}: {held:?}");
+            let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+            assert_eq!(rule_formulas(&reopened), held, "{name:?} {rule}");
+            assert_eq!(reopened.model().sheets[0].name, name);
+        }
+    }
+}

@@ -2001,6 +2001,21 @@ pub(crate) fn renamed_conditional_formats(
     Ok(planned)
 }
 
+/// `escaped` with each of `chars` written as a character reference, which
+/// reading gives back where a literal one would be normalized away: a CR in
+/// element text, and a CR, LF or tab in an attribute value.
+fn char_references(escaped: &str, chars: &[char]) -> String {
+    let mut out = String::with_capacity(escaped.len());
+    for ch in escaped.chars() {
+        if chars.contains(&ch) {
+            out.push_str(&format!("&#{};", u32::from(ch)));
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 fn unrewritable_rule(rule: &ConditionalFormatRule, sheet: &str) -> OpError {
     OpError::InvalidConditionalFormat(format!(
         "conditional format {} on sheet '{sheet}' cannot be rewritten for the rename",
@@ -2066,7 +2081,7 @@ fn rename_conditional_format_xml(
                 if renamed != text {
                     edits.push((
                         content..start,
-                        partial_escape(renamed.as_str()).into_owned(),
+                        char_references(&partial_escape(renamed.as_str()), &['\r']),
                     ));
                 }
                 authored.push(text);
@@ -2100,7 +2115,10 @@ fn rename_conditional_format_xml(
                 if is_formula && let Some((span, text)) = value {
                     let renamed = rename_formula_sheet(&text, old_name, new_name);
                     if renamed != text {
-                        edits.push((span, escape(renamed.as_str()).into_owned()));
+                        edits.push((
+                            span,
+                            char_references(&escape(renamed.as_str()), &['\r', '\n', '\t']),
+                        ));
                     }
                     authored.push(text);
                 }
