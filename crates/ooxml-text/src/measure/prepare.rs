@@ -347,6 +347,61 @@ fn apply_auto_space(input: &MeasureRequest<'_>, prepared: &mut [PreparedRun]) {
 }
 
 /// `(utf16 offset, char)` for every character of a run, ascending.
+/// Each glyph's advance summed onto the segment character its cluster starts
+/// at, in the order the characters are first reached. `byte_to_char` maps byte
+/// offsets in the shaped text to character indices in
+/// `seg_start..seg_start + seg_len`.
+fn cluster_advances(
+    glyphs: impl Iterator<Item = (usize, f32)>,
+    byte_to_char: &[(usize, usize)],
+    seg_start: usize,
+    seg_len: usize,
+) -> Vec<(usize, f32)> {
+    let mut slots: Vec<Option<usize>> = vec![None; seg_len];
+    let mut clusters: Vec<(usize, f32)> = Vec::new();
+    for (cluster, advance) in glyphs {
+        // last mapped shaped-char at or before this cluster byte
+        let slot = byte_to_char.partition_point(|&(byte, _)| byte <= cluster);
+        let Some(&(_, char_index)) = slot.checked_sub(1).and_then(|i| byte_to_char.get(i)) else {
+            continue;
+        };
+        let known = match char_index
+            .checked_sub(seg_start)
+            .and_then(|offset| slots.get(offset))
+        {
+            Some(known) => *known,
+            None => clusters.iter().position(|(start, _)| *start == char_index),
+        };
+        match known {
+            Some(index) => clusters[index].1 += advance,
+            None => {
+                if let Some(entry) = char_index
+                    .checked_sub(seg_start)
+                    .and_then(|offset| slots.get_mut(offset))
+                {
+                    *entry = Some(clusters.len());
+                }
+                clusters.push((char_index, advance));
+            }
+        }
+    }
+    clusters
+}
+
+/// For each source character index below `char_count`, the first cluster whose
+/// logical order is that index.
+fn first_cluster_by_char(chars: &[CharAdv], char_count: usize) -> Vec<Option<usize>> {
+    let mut first = vec![None; char_count];
+    for (index, cluster) in chars.iter().enumerate() {
+        if let Some(entry) = first.get_mut(cluster.logical_order as usize)
+            && entry.is_none()
+        {
+            *entry = Some(index);
+        }
+    }
+    first
+}
+
 fn utf16_chars(text: &str) -> Vec<(u32, char)> {
     let mut offset = 0u32;
     text.chars()
@@ -1105,24 +1160,12 @@ fn prepare_text_run(
             first_plan.language.as_deref(),
         )
         .map_err(|e| MeasureError::Invalid(format!("shaping failed: {e}")))?;
-        let mut glyph_clusters: Vec<(usize, f32)> = Vec::new();
-        for g in &glyphs {
-            let cluster = g.cluster as usize;
-            // last mapped shaped-char at or before this cluster byte
-            let slot = byte_to_char.partition_point(|&(byte, _)| byte <= cluster);
-            let Some(&(_, char_index)) = slot.checked_sub(1).and_then(|i| byte_to_char.get(i))
-            else {
-                continue;
-            };
-            if let Some((_, advance)) = glyph_clusters
-                .iter_mut()
-                .find(|(start, _)| *start == char_index)
-            {
-                *advance += g.x_advance;
-            } else {
-                glyph_clusters.push((char_index, g.x_advance));
-            }
-        }
+        let mut glyph_clusters = cluster_advances(
+            glyphs.iter().map(|g| (g.cluster as usize, g.x_advance)),
+            &byte_to_char,
+            seg_start,
+            seg_end - seg_start,
+        );
         glyph_clusters.sort_by_key(|&(start, _)| start);
         if glyph_clusters
             .first()
@@ -1170,15 +1213,14 @@ fn prepare_text_run(
     let byte_offsets: Vec<usize> = text.char_indices().map(|(b, _)| b).collect();
     let mut breaks: Vec<usize> = Vec::new();
     if !text.is_empty() {
+        let first_cluster = first_cluster_by_char(&chars, byte_offsets.len());
         for bo in break_opportunities(text) {
             if bo.byte_index == 0 || bo.byte_index >= text.len() {
                 continue;
             }
             // opportunities are always char boundaries (line_break.rs)
             if let Ok(char_index) = byte_offsets.binary_search(&bo.byte_index)
-                && let Some(cluster_index) = chars
-                    .iter()
-                    .position(|cluster| cluster.logical_order as usize == char_index)
+                && let Some(cluster_index) = first_cluster[char_index]
             {
                 breaks.push(cluster_index);
             }
@@ -1218,6 +1260,139 @@ mod tests {
     use crate::font_store::FontStore;
 
     const FIXTURE: &[u8] = include_bytes!("../../tests/fonts/LiberationSans-Regular.ttf");
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn below(&mut self, bound: usize) -> usize {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 % bound.max(1) as u64) as usize
+        }
+    }
+
+    fn old_cluster_advances(
+        glyphs: &[(usize, f32)],
+        byte_to_char: &[(usize, usize)],
+    ) -> Vec<(usize, f32)> {
+        let mut glyph_clusters: Vec<(usize, f32)> = Vec::new();
+        for &(cluster, x_advance) in glyphs {
+            let slot = byte_to_char.partition_point(|&(byte, _)| byte <= cluster);
+            let Some(&(_, char_index)) = slot.checked_sub(1).and_then(|i| byte_to_char.get(i))
+            else {
+                continue;
+            };
+            if let Some((_, advance)) = glyph_clusters
+                .iter_mut()
+                .find(|(start, _)| *start == char_index)
+            {
+                *advance += x_advance;
+            } else {
+                glyph_clusters.push((char_index, x_advance));
+            }
+        }
+        glyph_clusters
+    }
+
+    #[test]
+    fn cluster_advances_match_a_search_of_the_clusters_seen_so_far() {
+        let mut rng = Rng(0x5eed_cafe);
+        for _ in 0..3000 {
+            let seg_start = rng.below(6);
+            let seg_len = 1 + rng.below(80);
+            // shaped chars per source char (1 plain, 2-3 for expansions), 1-4 bytes each
+            let mut byte_to_char = Vec::new();
+            let mut starts = Vec::new();
+            let mut byte = 0usize;
+            for char_index in seg_start..seg_start + seg_len {
+                starts.push(byte);
+                for _ in 0..1 + rng.below(3) {
+                    byte_to_char.push((byte, char_index));
+                    byte += 1 + rng.below(4);
+                }
+            }
+            // glyphs: ligatures (one glyph for several chars), combining marks (several
+            // glyphs on one cluster), right-to-left order, and cluster bytes inside a char
+            let mut glyphs: Vec<(usize, f32)> = Vec::new();
+            let mut index = 0;
+            while index < starts.len() {
+                let span = 1 + rng.below(3);
+                for _ in 0..1 + rng.below(3) {
+                    let jitter = if rng.below(5) == 0 { rng.below(3) } else { 0 };
+                    glyphs.push((starts[index] + jitter, (rng.below(2000) as f32) / 7.0));
+                }
+                index += span;
+            }
+            if rng.below(2) == 0 {
+                glyphs.reverse();
+            }
+            if rng.below(4) == 0 {
+                let a = rng.below(glyphs.len());
+                let b = rng.below(glyphs.len());
+                glyphs.swap(a, b);
+            }
+            let expected = old_cluster_advances(&glyphs, &byte_to_char);
+            let actual = cluster_advances(glyphs.iter().copied(), &byte_to_char, seg_start, seg_len);
+            assert_eq!(actual.len(), expected.len());
+            for (a, e) in actual.iter().zip(&expected) {
+                assert_eq!(a.0, e.0);
+                assert_eq!(a.1.to_bits(), e.1.to_bits());
+            }
+        }
+    }
+
+    #[test]
+    fn preparing_one_long_run_takes_time_proportional_to_its_length() {
+        let fastest = |repeats: usize| {
+            (0..3)
+                .map(|_| {
+                    let mut store = FontStore::new();
+                    store.register_slice(FIXTURE).unwrap();
+                    let text = "A great many more words at the start of this page. ".repeat(repeats);
+                    let input = input_with(serde_json::json!([{ "kind": "text", "text": text }]));
+                    let started = std::time::Instant::now();
+                    prepare_runs(&store, &input.as_request()).unwrap();
+                    started.elapsed().as_secs_f64()
+                })
+                .fold(f64::INFINITY, f64::min)
+        };
+        let short = fastest(300);
+        let long = fastest(1200);
+        // Four times the text: about 4x when linear, about 16x when every glyph or
+        // break opportunity searched the clusters already prepared.
+        assert!(long / short < 8.0, "{long} / {short}");
+    }
+
+    #[test]
+    fn first_cluster_by_char_matches_a_search_from_the_start() {
+        let mut rng = Rng(0xfeed_beef);
+        for _ in 0..3000 {
+            let char_count = rng.below(90);
+            let clusters: Vec<CharAdv> = (0..rng.below(100))
+                .map(|_| CharAdv {
+                    utf16_offset: 0,
+                    utf16_len: 1,
+                    source_chars: 1,
+                    advance: 1.0,
+                    is_space: false,
+                    is_fit_space: false,
+                    level: 0,
+                    logical_order: rng.below(char_count + 5) as u32,
+                    font_size_pt: 11.0,
+                    metrics_font: FontId(0),
+                    baseline_shift_px: 0.0,
+                })
+                .collect();
+            let first = first_cluster_by_char(&clusters, char_count);
+            for (char_index, found) in first.iter().enumerate() {
+                let expected = clusters
+                    .iter()
+                    .position(|cluster| cluster.logical_order as usize == char_index);
+                assert_eq!(*found, expected, "char {char_index}");
+            }
+        }
+    }
 
     fn input_with(runs: serde_json::Value) -> MeasureInput {
         serde_json::from_value(serde_json::json!({
