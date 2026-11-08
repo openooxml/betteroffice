@@ -82,7 +82,20 @@ fn first_run(body: &str) -> (String, Option<String>, Option<String>) {
     let bytes = fixture::with_body(body);
     let doc = EditingDoc::new(5101);
     seed_from_docx(&doc, &bytes).unwrap();
+    let stored = |doc: &EditingDoc| {
+        doc.story_segments("body")
+            .unwrap()
+            .into_iter()
+            .map(|segment| segment.attributes)
+            .collect::<Vec<_>>()
+    };
+    let before = stored(&doc);
     let blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+    assert_eq!(stored(&doc), before, "the stored run fonts are untouched");
+    assert!(
+        format!("{before:?}").contains("Calibri"),
+        "the stored hAnsi font stays Calibri: {before:?}"
+    );
     let LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
         panic!("paragraph");
     };
