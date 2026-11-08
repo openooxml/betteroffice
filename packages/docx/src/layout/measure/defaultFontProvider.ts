@@ -96,8 +96,9 @@ function implicitFontProvider(
     resolveFamily: (family, bold, italic) => checked(
       provider.resolveFamily(family, bold, italic), manager.resolveBundledFamilyFace(family, bold, italic)
     ),
-    resolveScriptFallback: (script, bold, italic) => checked(
-      provider.resolveScriptFallback(script, bold, italic), manager.resolveScriptFallbackFace(script, bold, italic)
+    resolveScriptFallback: (script, bold, italic, family) => checked(
+      provider.resolveScriptFallback(script, bold, italic, family),
+      manager.resolveScriptFallbackFace(script, bold, italic, family)
     ),
     resolveGlyphFallback: (family, bold, italic, office) => fallsBack(family) ? checkedFamilyFallback(
       checked(

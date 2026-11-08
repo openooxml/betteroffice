@@ -8,7 +8,8 @@ use serde::Deserialize;
 use crate::catalog::{BundledFontFace, catalog};
 use crate::{
     Decoded, FaceError, LastResortOffice, decode_font_face, resolve_bundled_family_face,
-    resolve_glyph_fallback_face, resolve_last_resort_choice, resolve_script_fallback_face,
+    resolve_family_script_fallback_face, resolve_glyph_fallback_face, resolve_last_resort_choice,
+    resolve_script_fallback_face,
 };
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq)]
@@ -185,7 +186,9 @@ impl FontManager {
             push(primary);
         }
         for script in scripts {
-            if let Some(face) = provider.resolve_script_fallback(script, bold, italic) {
+            if let Some(face) =
+                provider.resolve_family_script_fallback(family, script, bold, italic)
+            {
                 push(face);
             }
         }
@@ -293,6 +296,16 @@ pub trait FontProvider: Send + Sync {
         bold: bool,
         italic: bool,
     ) -> Option<FontFaceHandle>;
+    /// Script fallback for text requesting `family`; defaults to `resolve_script_fallback`.
+    fn resolve_family_script_fallback(
+        &self,
+        _family: &str,
+        script: &str,
+        bold: bool,
+        italic: bool,
+    ) -> Option<FontFaceHandle> {
+        self.resolve_script_fallback(script, bold, italic)
+    }
     fn resolve_glyph_fallback(
         &self,
         family: &str,
@@ -590,6 +603,18 @@ impl FontProvider for BundledFonts {
         italic: bool,
     ) -> Option<FontFaceHandle> {
         resolve_script_fallback_face(script, bold, italic)
+            .filter(|face| self.options.packs.contains(&face.pack))
+            .map(|face| self.handle(face))
+    }
+
+    fn resolve_family_script_fallback(
+        &self,
+        family: &str,
+        script: &str,
+        bold: bool,
+        italic: bool,
+    ) -> Option<FontFaceHandle> {
+        resolve_family_script_fallback_face(family, script, bold, italic)
             .filter(|face| self.options.packs.contains(&face.pack))
             .map(|face| self.handle(face))
     }

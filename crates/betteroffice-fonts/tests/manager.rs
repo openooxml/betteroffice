@@ -617,3 +617,83 @@ fn on_demand_defers_local_reads_and_preload_reads_at_open() {
         })
     ));
 }
+
+#[test]
+fn naskh_styled_families_chain_noto_naskh_arabic_as_their_arabic_fallback() {
+    let root = tempfile::tempdir().unwrap();
+    deploy_flat(root.path());
+    let latin =
+        BundledFonts::from_pack_directories(vec![(FontPack::Latin, root.path().into())]).unwrap();
+    let manager = FontManager::new(
+        &FontSource::Provider(Arc::new(latin)),
+        FontLoading::OnDemand,
+    )
+    .unwrap();
+    let arabic = |family: &str, bold: bool| {
+        manager
+            .resolve(
+                family,
+                bold,
+                false,
+                &["arabic".to_string()],
+                LastResortOffice::Word,
+            )
+            .into_iter()
+            .filter(|face| face.family.contains("Arabic"))
+            .map(|face| (face.family, face.bold))
+            .collect::<Vec<_>>()
+    };
+    for family in ["Simplified Arabic", "Traditional Arabic"] {
+        for bold in [false, true] {
+            assert_eq!(
+                arabic(family, bold),
+                [("Noto Naskh Arabic".to_string(), false)]
+            );
+        }
+    }
+    for family in ["Arial", "Times New Roman"] {
+        for bold in [false, true] {
+            assert_eq!(
+                arabic(family, bold),
+                [("Noto Sans Arabic".to_string(), bold)]
+            );
+        }
+    }
+}
+
+#[test]
+fn native_chains_match_the_shared_arabic_fallback_cases() {
+    let root = tempfile::tempdir().unwrap();
+    deploy_flat(root.path());
+    let latin =
+        BundledFonts::from_pack_directories(vec![(FontPack::Latin, root.path().into())]).unwrap();
+    let manager = FontManager::new(
+        &FontSource::Provider(Arc::new(latin)),
+        FontLoading::OnDemand,
+    )
+    .unwrap();
+    let cases: Vec<serde_json::Value> =
+        serde_json::from_str(include_str!("../data/script-fallback-chains.json")).unwrap();
+    for case in &cases {
+        let family = case["family"].as_str().unwrap();
+        let bold = case["bold"].as_bool().unwrap();
+        let expected = betteroffice_fonts::catalog::catalog()
+            .faces
+            .iter()
+            .find(|face| face.file == case["arabic"].as_str().unwrap())
+            .unwrap();
+        for office in [LastResortOffice::Word, LastResortOffice::PowerPoint] {
+            let arabic: Vec<_> = manager
+                .resolve(family, bold, false, &["arabic".to_string()], office)
+                .into_iter()
+                .filter(|face| face.family.contains("Arabic"))
+                .map(|face| (face.family, face.bold))
+                .collect();
+            assert_eq!(
+                arabic,
+                [(expected.family.clone(), expected.weight == 700)],
+                "{case}"
+            );
+        }
+    }
+}
