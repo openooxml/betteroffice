@@ -807,6 +807,26 @@ impl FontStore {
         Ok(FontId(entry.bytes_of.unwrap_or(id.0 as usize) as u32))
     }
 
+    /// The first registration that measures and paints exactly as `id` does:
+    /// the same bytes, metrics and widths. Registering a font or its substitute
+    /// view again yields a new id for one face, and this names that face
+    /// whatever the host's registration history. Base Latin ids name themselves.
+    pub fn canonical_face(&self, id: FontId) -> FontId {
+        let Some(target) = self.fonts.get(id.0 as usize) else {
+            return id;
+        };
+        let owner = target.bytes_of.unwrap_or(id.0 as usize);
+        let widths = |entry: &FontEntry| entry.widths.map(std::ptr::from_ref);
+        let mut fonts = self.fonts.iter().enumerate();
+        let first = fonts.find(|(index, entry)| {
+            entry.bytes_of.unwrap_or(*index) == owner
+                && entry.metrics == target.metrics
+                && entry.advance_scale == target.advance_scale
+                && widths(entry) == widths(target)
+        });
+        first.map_or(id, |(index, _)| FontId(index as u32))
+    }
+
     /// Parsed shaping face memoized at registration. `None` when rustybuzz
     /// rejected bytes skrifa accepted.
     pub(crate) fn shaping_face(
@@ -1261,6 +1281,28 @@ mod tests {
         let view = store.register_named_substitute(alias, "Calibri").unwrap();
         assert_eq!(store.byte_owner(view).unwrap(), owner);
         assert_eq!(store.face_count(), 1);
+    }
+
+    #[test]
+    fn repeated_registrations_name_their_first_and_distinct_views_stay_distinct() {
+        let mut store = FontStore::new();
+        let owner = store.register_slice(LIBERATION_SANS).unwrap();
+        let view = store
+            .register_named_substitute(owner, "Arial Narrow")
+            .unwrap();
+        let alias = store.register_slice(LIBERATION_SANS).unwrap();
+        let repeat = store
+            .register_named_substitute(alias, "Arial Narrow")
+            .unwrap();
+        let other = store.register_named_substitute(alias, "MS Mincho").unwrap();
+        assert_eq!(store.font_count(), 5);
+        assert_eq!(store.canonical_face(owner), owner);
+        assert_eq!(store.canonical_face(alias), owner);
+        assert_eq!(store.canonical_face(view), view);
+        assert_eq!(store.canonical_face(repeat), view);
+        assert_eq!(store.canonical_face(other), other);
+        let unknown = FontId::from_u32(u32::MAX);
+        assert_eq!(store.canonical_face(unknown), unknown);
     }
 
     #[test]

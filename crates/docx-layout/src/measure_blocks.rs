@@ -1976,6 +1976,7 @@ fn extent_weight(extent: &ParagraphExtent) -> usize {
                         .bidi_slices
                         .as_ref()
                         .map_or(0, |v| v.capacity() * size_of::<TypesetBidiSlice>())
+                    + row.glyph_runs.as_ref().map_or(0, String::capacity)
             })
             .sum::<usize>()
 }

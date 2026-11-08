@@ -1982,6 +1982,10 @@ pub struct TypesetRow {
     pub cluster_advances: Option<Vec<TypesetClusterAdvance>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bidi_slices: Option<Vec<TypesetBidiSlice>>,
+    /// The glyph runs measurement shaped the line with, in visual order, as
+    /// [`ooxml_text::pack_glyph_runs`] packs them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub glyph_runs: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -3179,6 +3183,7 @@ mod contract_tests {
         assert!(row.run_advances.is_none());
         assert!(row.cluster_advances.is_none());
         assert!(row.bidi_slices.is_none());
+        assert!(row.glyph_runs.is_none());
     }
 
     #[test]
