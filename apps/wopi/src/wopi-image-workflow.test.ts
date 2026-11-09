@@ -67,7 +67,7 @@ const EXPECTED_PATHS = [
 const RELEASE_CONTEXT_IF =
   "github.repository == 'openooxml/betteroffice' && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.repository.fork == false && startsWith(github.workflow_ref, format('{0}/.github/workflows/release.yml@refs/heads/main', github.repository))";
 const PUBLISH_IF =
-  "${{ inputs.publish && " + RELEASE_CONTEXT_IF + " && vars.WOPI_IMAGE_PUBLISH == 'true' }}";
+  "${{ inputs.publish && inputs.sha != '' && github.repository == 'openooxml/betteroffice' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.event.repository.fork == false && vars.WOPI_IMAGE_PUBLISH == 'true' }}";
 const RELEASE_WOPI_IF =
   "needs.release.result == 'success' && needs.release.outputs.published == 'true' && " +
   RELEASE_CONTEXT_IF + " && vars.WOPI_IMAGE_PUBLISH == 'true'";
@@ -115,6 +115,25 @@ function inspectVersionTag({ status = 0, stdout = "", stderr = "" } = {}) {
   }
 }
 
+function checkCurrentVersion(version: string, mainVersion: string) {
+  const workflow = loadWorkflow(wopiWorkflowPath);
+  const check = workflow.jobs.publish!.steps!.find((step) => step.id === "current")!;
+  const directory = mkdtempSync(join(tmpdir(), "wopi-image-current-"));
+  try {
+    writeFileSync(
+      join(directory, "gh"),
+      ["#!/bin/sh", `printf '%s' '${JSON.stringify({ version: mainVersion })}'`].join("\n"),
+      { mode: 0o755 },
+    );
+    return spawnSync("bash", ["--noprofile", "--norc", "-e", "-o", "pipefail", "-c", check.run!], {
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${directory}:${process.env.PATH}`, GH_REPO: "o/r", VERSION: version },
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 describe("wopi-image workflow", () => {
   test("triggers on pull requests and main pushes with the image paths", () => {
     const workflow = loadWorkflow(wopiWorkflowPath);
@@ -122,8 +141,9 @@ describe("wopi-image workflow", () => {
     expect(on.pull_request.paths).toEqual(EXPECTED_PATHS);
     expect(on.push.branches).toEqual(["main"]);
     expect(on.push.paths).toEqual(EXPECTED_PATHS);
-    const workflowCall = on.workflow_call as { inputs?: Record<string, { type?: string }> };
-    expect(workflowCall.inputs?.publish.type).toBe("boolean");
+    const dispatch = on.workflow_dispatch as { inputs?: Record<string, { type?: string }> };
+    expect(dispatch.inputs?.publish.type).toBe("boolean");
+    expect(dispatch.inputs?.sha.type).toBe("string");
   });
 
   test("never pushes on the pull request or main push build path", () => {
@@ -165,7 +185,8 @@ describe("wopi-image workflow", () => {
       "ghcr.io/${{ github.repository_owner }}/betteroffice-wopi:latest",
     );
     expect(String(built.with?.labels)).toContain("org.opencontainers.image.source=");
-    expect(String(built.with?.labels)).toContain("org.opencontainers.image.revision=${{ github.sha }}");
+    expect(String(built.with?.labels)).toContain("org.opencontainers.image.revision=${{ inputs.sha }}");
+    expect((publish.steps ?? [])[0]!.with?.ref).toBe("${{ inputs.sha }}");
     expect(String(built.with?.labels)).toContain("org.opencontainers.image.licenses=Apache-2.0");
     expect(built.with?.sbom).toBe(true);
     expect(String(built.with?.provenance)).toContain("mode=max");
@@ -238,14 +259,25 @@ describe("wopi-image workflow", () => {
     expect(result.output).toBe("");
   });
 
-  test("gates WOPI write permissions on main pushes from this repository's release workflow", () => {
-    const publish = loadWorkflow(wopiWorkflowPath).jobs.publish!;
-    const caller = loadWorkflow(releaseWorkflowPath).jobs["wopi-image"]!;
-    for (const job of [publish, caller]) {
-      expect(job.permissions?.packages).toBe("write");
-      expect(job.if).toContain(RELEASE_CONTEXT_IF);
-      expect(job.if).not.toContain("||");
-    }
+  test("refuses a version main has moved past before anything can be pushed", () => {
+    expect(checkCurrentVersion("0.2.0", "0.2.0").status).toBe(0);
+    const stale = checkCurrentVersion("0.1.0", "0.2.0");
+    expect(stale.status).toBe(1);
+    expect(stale.stdout).toContain("latest would move backward");
+    const steps = loadWorkflow(wopiWorkflowPath).jobs.publish!.steps!;
+    const current = steps.findIndex((step) => step.id === "current");
+    expect(current).toBeGreaterThan(-1);
+    expect(current).toBeLessThan(steps.findIndex((step) => step.id === "exists"));
+    expect(current).toBeLessThan(steps.findIndex((step) => step.id === "build"));
+  });
+
+  test("a publish waits on approval in its own concurrency group", () => {
+    const source = Bun.YAML.parse(readFileSync(wopiWorkflowPath, "utf8")) as {
+      concurrency: { group: string; "cancel-in-progress": string };
+    };
+    expect(source.concurrency.group).toContain("inputs.publish && 'publish'");
+    expect(source.concurrency.group).not.toBe("release");
+    expect(source.concurrency["cancel-in-progress"]).toBe("${{ github.event_name == 'pull_request' }}");
   });
 
   test("publishes only after approval of the ghcr-wopi-image environment", () => {
@@ -301,11 +333,8 @@ describe("wopi-image workflow", () => {
 describe("release workflow WOPI image job", () => {
   test("calls the publish path only after publishing and only behind the variable", () => {
     const workflow = loadWorkflow(releaseWorkflowPath);
-    const callers = Object.values(workflow.jobs).filter(
-      (job) => job.uses === "./.github/workflows/wopi-image.yml",
-    );
-    expect(callers).toHaveLength(1);
-    const caller = callers[0]!;
+    const caller = workflow.jobs["wopi-image"]!;
+    expect(Object.values(workflow.jobs).some((job) => job.uses?.includes("wopi-image.yml"))).toBe(false);
     const needs = Array.isArray(caller.needs) ? caller.needs : [caller.needs];
     expect(needs).toContain("release");
     expect(workflow.jobs.release!.outputs).toEqual({
@@ -315,13 +344,14 @@ describe("release workflow WOPI image job", () => {
     expect(caller.if).toBe(RELEASE_WOPI_IF);
     expect(caller.if).not.toContain("||");
     expect(caller.if).not.toContain("outputs.publishing");
-    expect(caller.with?.publish).toBe(true);
-    expect(caller.permissions).toEqual({
-      contents: "read",
-      packages: "write",
-      "id-token": "write",
-      attestations: "write",
-    });
+    expect(caller.if).toContain(RELEASE_CONTEXT_IF);
+    expect(caller.permissions).toEqual({ actions: "write" });
+    const dispatch = caller.steps![0]!;
+    expect(dispatch.run).toContain("actions/workflows/wopi-image.yml/dispatches");
+    expect(dispatch.run).toContain('-F "inputs[publish]=true"');
+    expect(dispatch.run).toContain('-f "inputs[sha]=$SHA"');
+    expect(dispatch.env?.SHA).toBe("${{ github.sha }}");
+    expect(JSON.stringify(caller)).not.toContain("gh run watch");
   });
 });
 

@@ -1,13 +1,15 @@
 name: WOPI image
 
 # Pull requests and main pushes build and smoke test the image without
-# pushing. Publishing happens only through workflow_call from release.yml
-# after packages publish, only when WOPI_IMAGE_PUBLISH is true, and only after
-# a required reviewer approves the ghcr-wopi-image environment.
+# pushing. release.yml dispatches a publish run after packages publish, and does
+# not wait for it: a run waiting on approval here must not hold the release
+# concurrency group. Publishing needs WOPI_IMAGE_PUBLISH to be true and a required
+# reviewer to approve the ghcr-wopi-image environment.
 # The image version is the version field of apps/wopi/package.json: that
 # package stays private and is never published to npm, so bump its version
 # there to change the version tag below. A version tag that already exists
-# is never overwritten, and latest moves only when a new version is pushed.
+# is never overwritten, and latest moves only when a new version is pushed. A
+# version main has moved past is refused, so a rerun cannot move latest backward.
 on:
   pull_request:
     paths:
@@ -36,19 +38,23 @@ on:
       - "Cargo.toml"
       - ".dockerignore"
       - ".github/workflows/wopi-image.yml"
-  workflow_call:
+  workflow_dispatch:
     inputs:
       publish:
-        description: Publish the image (release workflow only, after packages publish)
+        description: Publish the image to ghcr, after environment approval
         type: boolean
         default: false
+        required: false
+      sha:
+        description: Commit to publish
+        type: string
         required: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: wopi-image-${{ github.event.pull_request.number || github.run_id }}
+  group: wopi-image-${{ github.event.pull_request.number || (inputs.publish && 'publish') || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -116,7 +122,7 @@ jobs:
 
   publish:
     name: Publish WOPI image
-    if: ${{ inputs.publish && github.repository == 'openooxml/betteroffice' && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.repository.fork == false && startsWith(github.workflow_ref, format('{0}/.github/workflows/release.yml@refs/heads/main', github.repository)) && vars.WOPI_IMAGE_PUBLISH == 'true' }}
+    if: ${{ inputs.publish && inputs.sha != '' && github.repository == 'openooxml/betteroffice' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.event.repository.fork == false && vars.WOPI_IMAGE_PUBLISH == 'true' }}
     environment: ghcr-wopi-image
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -127,6 +133,8 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.sha }}
 
       - name: Read the WOPI package version
         id: version
@@ -137,6 +145,19 @@ jobs:
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Refuse a version main has moved past
+        id: current
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          current=$(gh api -H "Accept: application/vnd.github.raw+json" "repos/$GH_REPO/contents/apps/wopi/package.json?ref=main" | node -pe "JSON.parse(require('fs').readFileSync(0, 'utf8')).version")
+          if [ "$current" != "$VERSION" ]; then
+            echo "::error::Version $VERSION is not main's WOPI version ($current): refusing to publish it, since latest would move backward."
+            exit 1
+          fi
 
       - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
 
@@ -179,7 +200,7 @@ jobs:
           labels: |
             org.opencontainers.image.title=betteroffice-wopi
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.revision=${{ inputs.sha }}
             org.opencontainers.image.version=${{ steps.version.outputs.version }}
             org.opencontainers.image.licenses=Apache-2.0
           sbom: true

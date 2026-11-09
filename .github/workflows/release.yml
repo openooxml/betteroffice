@@ -292,16 +292,23 @@ jobs:
           exit $status
 
   # Runs only when this run published and WOPI_IMAGE_PUBLISH opts in; without
-  # that variable the WOPI image is never pushed.
+  # that variable the WOPI image is never pushed. It dispatches and does not wait:
+  # the publish waits on a reviewer, which would hold the release concurrency group.
   wopi-image:
-    name: Publish WOPI image
+    name: Start the WOPI image publish
     needs: release
     if: needs.release.result == 'success' && needs.release.outputs.published == 'true' && github.repository == 'openooxml/betteroffice' && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.repository.fork == false && startsWith(github.workflow_ref, format('{0}/.github/workflows/release.yml@refs/heads/main', github.repository)) && vars.WOPI_IMAGE_PUBLISH == 'true'
-    uses: ./.github/workflows/wopi-image.yml
-    with:
-      publish: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
-      contents: read
-      packages: write
-      id-token: write
-      attestations: write
+      actions: write
+    steps:
+      - name: Dispatch the publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          gh api --method POST -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/$GH_REPO/actions/workflows/wopi-image.yml/dispatches" \
+            -f ref=main -F "inputs[publish]=true" -f "inputs[sha]=$SHA"
