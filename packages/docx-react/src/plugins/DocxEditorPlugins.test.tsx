@@ -333,9 +333,9 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
     rerender({ plugins: [plugin], i18n: { _lang: 'fr' } });
     await until(() => events.some((event) => event.type === 'locale-change'));
     expect(events.filter((event) => event.type === 'locale-change')).toEqual([
-      { type: 'locale-change', generation: last(contexts).snapshot.generation, locale: 'fr' },
+      { type: 'locale-change', generation: contexts.at(-1)!.snapshot.generation, locale: 'fr' },
     ]);
-    expect(last(contexts).snapshot.locale).toBe('fr');
+    expect(contexts.at(-1)!.snapshot.locale).toBe('fr');
     rerender({ plugins: [plugin], i18n: { _lang: 'fr' } });
     await settle();
     expect(events.filter((event) => event.type === 'locale-change')).toHaveLength(1);
@@ -355,9 +355,9 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
     rerender({ plugins: [plugin], i18n: { _lang: 'invalid_tag' } });
     await until(() => events.some((event) => event.type === 'locale-change'));
     expect(events.filter((event) => event.type === 'locale-change')).toEqual([
-      { type: 'locale-change', generation: last(contexts).snapshot.generation, locale: 'en' },
+      { type: 'locale-change', generation: contexts.at(-1)!.snapshot.generation, locale: 'en' },
     ]);
-    expect(last(contexts).snapshot.locale).toBe('en');
+    expect(contexts.at(-1)!.snapshot.locale).toBe('en');
   });
 
   for (const readOnly of [false, true]) {
@@ -2187,9 +2187,9 @@ describe('DocxEditor plugins (peer-less engine)', () => {
     view.rerender(element('fr'));
     await until(() => events.some((event) => event.type === 'locale-change'));
     expect(events.filter((event) => event.type === 'locale-change')).toEqual([
-      { type: 'locale-change', generation: last(contexts).snapshot.generation, locale: 'fr' },
+      { type: 'locale-change', generation: contexts.at(-1)!.snapshot.generation, locale: 'fr' },
     ]);
-    expect(last(contexts).snapshot.locale).toBe('fr');
+    expect(contexts.at(-1)!.snapshot.locale).toBe('fr');
     await act(async () => { await ref.current!.whenLayoutComplete({ timeoutMs: 3000 }); });
   });
 
