@@ -2334,6 +2334,24 @@ test('worker column edge drags converge with a concurrent edit in a cell of the 
   }
 }, TIMEOUT);
 
+test('a cell holding only a block control has a working object handle', async () => {
+  const cellXml = (content: string) => `<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>${content}</w:tc>`;
+  const text = (value: string) => `<w:p><w:r><w:t>${value}</w:t></w:r></w:p>`;
+  const bodyXml = '<w:p/><w:tbl><w:tblPr><w:tblLayout w:type="fixed"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>' +
+    `<w:tr>${cellXml(text('A'))}${cellXml(`<w:sdt><w:sdtPr><w:id w:val="9"/></w:sdtPr><w:sdtContent>${text('B')}</w:sdtContent></w:sdt>`)}</w:tr></w:tbl><w:p/>`;
+  const { client, engine, initial } = await openWorker({ bodyXml });
+  try {
+    const cell = initial.frame.payload.geometry!.objects.find(object => object.kind === 'cell' && object.story === 'body:t0:r0c1');
+    if (!cell) throw new Error('Control-only cell has no object');
+    const resized = await client.edit(intent(1, 0, 'resizeObject', {
+      handle: cell.handle, expectVersion: initial.frame.payload.documentVersion!, columnEdge: 1, deltaTwips: 200,
+    }));
+    expect(resized.outcomes[0]?.status).toBe('applied');
+    expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [2200, 1800]);
+    expect(engine.paragraphs('body:t0:r0c1:sdt0')[0]?.text).toBe('B');
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
 test('worker row border drags set an at-least height in one undo step and never start below the stored height', async () => {
   const { client, engine, initial } = await openWorker({ bodyXml: THREE_COLUMNS });
   try {
@@ -3716,6 +3734,32 @@ function cellPoint(engine: { paragraphs(story: string): { paraId: string; text: 
 function cellObjects(response: { frame?: DocxCommandFrame | null }) {
   return response.frame!.payload.geometry!.objects.filter((object) => object.kind === 'cell');
 }
+
+test('merging cells across a block control keeps the control through save and reopen', async () => {
+  const text = (value: string) => `<w:p><w:r><w:t>${value}</w:t></w:r></w:p>`;
+  const bodyXml = '<w:p/><w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>' +
+    `<w:tr><w:tc>${text('A')}</w:tc><w:tc><w:sdt><w:sdtPr><w:id w:val="9"/><w:tag w:val="keep"/></w:sdtPr><w:sdtContent>${text('B')}</w:sdtContent></w:sdt></w:tc></w:tr></w:tbl><w:p/>`;
+  const { client, engine } = await openWorker({ bodyXml });
+  let reopened: Awaited<ReturnType<typeof openWorker>> | undefined;
+  try {
+    const inside = cellPoint(engine, 'B');
+    expect(inside.story).toContain(':sdt');
+    expect((await client.edit(intent(1, 0, 'select', { selection: inside.selection }))).outcomes[0]?.status).toBe('noop');
+    const at = (column: number) => ({ story: 'body', tableIndex: 0, row: 0, column });
+    engine.setCellSelection({ anchor: at(0), head: at(1) });
+    expect((await client.edit(intent(2, 0, 'mergeTableCells', {}))).outcomes[0]?.status).toBe('applied');
+    const saved = await savedWorkerDocumentXml(client);
+    const control = /<w:sdt[ >][\s\S]*?<\/w:sdt>/.exec(saved)?.[0];
+    if (!control) throw new Error('Merge lost the block control');
+    expect(control).toContain('w:val="keep"');
+    expect(control).toContain('>B<');
+    expect(saved).toContain('>A<');
+    expect(saved.match(/<w:tc[ >]/g)).toHaveLength(1);
+    const body = /<w:body>([\s\S]*?)(?:<w:sectPr[\s\S]*)?<\/w:body>/.exec(saved)![1]!;
+    reopened = await openWorker({ bodyXml: body });
+    expect(cellPoint(reopened.engine, 'B').story).toContain(':sdt');
+  } finally { reopened?.client.destroy(); client.destroy(); }
+}, TIMEOUT);
 
 test('worker orders table structure commands with single version steps duplicates and refusals', async () => {
   const { client, engine, initial } = await openWorker({ bodyXml: TABLE_BODY });

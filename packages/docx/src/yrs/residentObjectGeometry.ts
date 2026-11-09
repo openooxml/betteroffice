@@ -8,6 +8,7 @@ import { deriveDisplayListSelectedCellRects, type DisplayListSelectedCellSpec, t
 import { findImagePrimitiveByDocPos } from '../layout/render/displayListImages';
 import { rootOf } from './residentCommandTableSelection';
 import type { DisplayPrimitive } from '../layout/render/displayList';
+import { cellStart } from './residentCommandTableSelection';
 
 export interface ResidentObjectRect {
   pageId: string;
@@ -155,14 +156,17 @@ export function resolveResidentObject(engine: ResidentEngineSession, handle: str
   if (!target) return null;
   if (!engine.geometryReader.hasStory(target.story) || !engine.geometryReader.hasStory(target.position.story)) return null;
   if (target.kind !== 'image') {
-    const paragraph = engine.geometryReader.paragraphSpans(target.story)
-      .find(span => target.kind === 'cell' || span.paraId === target.paraId);
+    if (target.kind === 'cell') {
+      const start = cellStart(engine, target.story);
+      const cell = resolveCell(engine, target.story);
+      if (!start || !cell || identity(engine.encodeStickyPosition(cell.at)) !== identity(target.position)) return null;
+      return { ...start, kind: target.kind, cell: cell.cell };
+    }
+    const paragraph = engine.geometryReader.paragraphSpans(target.story).find(span => span.paraId === target.paraId);
     if (!paragraph) return null;
-    const cell = target.kind === 'cell' ? resolveCell(engine, target.story) : null;
-    if (target.kind === 'cell' && !cell) return null;
-    const at = cell?.at ?? { story: target.story, paraId: paragraph.paraId, offset: paragraph.length };
+    const at = { story: target.story, paraId: paragraph.paraId, offset: paragraph.length };
     if (identity(engine.encodeStickyPosition(at)) !== identity(target.position)) return null;
-    return { story: target.story, paraId: paragraph.paraId, offset: 0, kind: target.kind, ...(cell ? { cell: cell.cell } : {}) };
+    return { story: target.story, paraId: paragraph.paraId, offset: 0, kind: target.kind };
   }
   const at = engine.resolveStickyPosition(target.position);
   if (!at || !engine.geometryReader.hasStory(at.story)) return null;

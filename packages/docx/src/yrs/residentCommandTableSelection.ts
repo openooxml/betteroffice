@@ -25,7 +25,7 @@ export function resolveLiveCell(engine: DocxWorkerCommandEngine, story: string):
   if (!projection) return null;
   let best: YrsCellLoc | null = null;
   for (const table of projection.allTables()) {
-    const cell = table.cells.find((candidate) => candidate.story === story);
+    const cell = table.cells.find((candidate) => candidate.story === story || story.startsWith(`${candidate.story}:`));
     if (!cell) continue;
     if (!best || table.story.length > best.story.length) {
       best = { story: table.story, tableIndex: table.tableIndex, row: cell.row, column: cell.column };
@@ -67,7 +67,15 @@ export function tableRangeFor(
   return { anchor: { ...focused, row: 0, column: 0 }, head: { ...focused, row: endRow, column: endColumn } };
 }
 
-export function cellStart(engine: DocxWorkerCommandEngine, story: string): YrsLoc | null {
+/** The first caret of a cell: its first block, entering a block control that comes before any paragraph. */
+export function cellStart(engine: Pick<DocxWorkerCommandEngine, 'geometryReader'>, story: string): YrsLoc | null {
+  for (const segment of engine.geometryReader.storySegments(story)) {
+    if (segment.kind === 'pilcrow') break;
+    if (segment.kind === 'embed' && segment.embedKind === 'blockSdt' && typeof segment.payload.story === 'string') {
+      const inner = cellStart(engine, segment.payload.story);
+      if (inner) return inner;
+    }
+  }
   const first = engine.geometryReader.paragraphSpans(story)[0];
   return first ? { story, paraId: first.paraId, offset: 0 } : null;
 }
