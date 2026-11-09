@@ -2821,6 +2821,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
               onYrsContentChange={handleYrsContentChange}
               onPagedSelectionChange={handlePagedSelectionChange}
               onYrsSelectionChange={handleYrsToolbarSelectionChange}
+              onYrsPartSelectionChange={pluginHost.publishSelection}
               onViewerSelectionChange={handlePagedViewerSelectionChange}
               onRenderedDomContextReady={
                 pluginHost.managed || onRenderedDomContextReady

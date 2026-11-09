@@ -1408,7 +1408,7 @@ test('selection anchors project the displayed range, caret and missing selection
   const dom = createRenderedDomContext(pages, 1, { displayListQueries: source,
     projector: createCanvasHostProjector(pages, source, 1) });
   const layout = { id: 'selection', version: 'v1', previewVersion: 0, zoom: 1, pageCount: 1 };
-  let selection: { from: number; to: number; layoutId: string; focus?: number } | null = { from: 2, to: 8, layoutId: layout.id };
+  let selection: { story: string; from: number; to: number; layoutId: string; focus?: number } | null = { story: 'body', from: 2, to: 8, layoutId: layout.id };
   let shown = true;
   const geometry = createPluginGeometry(layout, dom, layer, () => shown, () => null, source,
     () => null, undefined, undefined, undefined, undefined, () => selection);
@@ -1416,16 +1416,101 @@ test('selection anchors project the displayed range, caret and missing selection
     version: 'v1', layoutId: layout.id,
     rects: [{ pageIndex: 0, x: 12, y: 40, width: 6, height: 12 }],
     anchor: { pageIndex: 0, x: 18, y: 40, width: 0, height: 12 } });
-  selection = { from: 2, to: 8, layoutId: layout.id, focus: 2 };
+  selection = { story: 'body', from: 2, to: 8, layoutId: layout.id, focus: 2 };
   expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: true,
     anchor: { x: 12, y: 40, width: 0, height: 12 } });
-  selection = { from: 5, to: 5, layoutId: layout.id };
+  selection = { story: 'body', from: 5, to: 5, layoutId: layout.id };
   expect(await geometry.readAnchorGeometries([{ kind: 'selection' }])).toMatchObject([{ ok: true,
     rects: [], anchor: { x: 15, y: 40, width: 0, height: 12 } }]);
   selection = null;
   expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: false, failure: { code: 'missing-target' } });
-  selection = { from: 1, to: 2, layoutId: 'old' };
+  selection = { story: 'body', from: 1, to: 2, layoutId: 'old' };
   expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
   shown = false;
   expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
+});
+
+test.each(['header', 'footer'] as const)('%s selection geometry follows its story and focus without reading body geometry', async (region) => {
+  const pages = document.createElement('div');
+  const layer = document.createElement('div');
+  for (let pageIndex = 0; pageIndex < 2; pageIndex += 1) {
+    const canvas = document.createElement('canvas');
+    canvas.dataset.pageIndex = String(pageIndex);
+    place(canvas, rectAt(10, 20 + pageIndex * PAGE.height, PAGE.width, PAGE.height));
+    pages.append(canvas);
+  }
+  place(pages, rectAt(10, 20, PAGE.width, 2 * PAGE.height));
+  place(layer, rectAt(0, 0, PAGE.width, 2 * PAGE.height));
+  const story = 'hf:running';
+  let anchorOffset = 1;
+  let headOffset = 4;
+  const at = (offset: number) => ({ story, paraId: 'p', offset });
+  const session = {
+    version: () => 'v1', hasStory: () => true,
+    selection: () => ({ anchor: at(anchorOffset), head: at(headOffset) }),
+    getProposals: () => ({ version: 'v1', previewVersion: 0, proposals: [] }),
+    listRevisions: () => [],
+    paragraphSpans: () => [{ paraId: 'p', length: 6 }],
+    storySegments: () => [
+      { kind: 'text', text: 'abcdef', attributes: {} },
+      { kind: 'pilcrow', paraId: 'p', properties: {}, attributes: {} },
+    ],
+  } as unknown as YrsSession;
+  const bodyRange = spyOn({ read: () => [RANGE] }, 'read');
+  const bodyCaret = spyOn({ read: () => RANGE }, 'read');
+  const band = (pageIndex: number, from: number, width: number) => ({ pageIndex, x: 30 + from, y: region === 'header' ? 5 : 180, width, height: 12 });
+  const source = {
+    ...queries(), pageCount: () => 2,
+    rangeRects: bodyRange, caretRect: bodyCaret, anchorRect: bodyCaret,
+    displayList: { pages: [0, 1].map((pageIndex) => ({ pageIndex, ...PAGE, primitives: [], [region]: { rId: 'running' } })) },
+    hfRangeRects: (part: string, rId: string, from: number, to: number) => part === region && rId === 'running'
+      ? [0, 1].map((pageIndex) => band(pageIndex, from, to - from)) : [],
+    hfCaretRects: (part: string, rId: string, pos: number) => part === region && rId === 'running'
+      ? [0, 1].map((pageIndex) => band(pageIndex, pos, 0)) : [],
+    hfAnchorRects: () => [],
+  } as unknown as DisplayListQueries;
+  const dom = createRenderedDomContext(pages, 1, { displayListQueries: source,
+    projector: createCanvasHostProjector(pages, source, 1) });
+  const layout = { id: 'part-selection', version: 'v1', previewVersion: 0, zoom: 1, pageCount: 2 };
+  const editor = { hasPendingInput: () => false, yrsLocToDisplayPosition: (loc: { offset: number }) => loc.offset + 1 };
+  const geometry = createPluginGeometry(layout, dom, layer, () => true, () => null, source,
+    () => ({ session, editor, presented: true }), undefined, undefined, () => true, undefined,
+    () => ({ story, from: Math.min(anchorOffset, headOffset) + 1, to: Math.max(anchorOffset, headOffset) + 1, layoutId: layout.id }));
+  const target: DocxGeometryTarget = { kind: 'range', version: layout.version,
+    range: { story, start: { paraId: 'p', offset: 1 }, end: { paraId: 'p', offset: 4 }, view: 'accepted' } };
+  const expected = anchored(geometry.getAnchorGeometry(target));
+  const forward = anchored(geometry.getAnchorGeometry({ kind: 'selection' }));
+  expect(forward.rects).toEqual(expected.rects);
+  expect(forward.anchor).toMatchObject({ pageIndex: 0, x: 45, width: 0 });
+  anchorOffset = 4;
+  headOffset = 1;
+  const backward = anchored(geometry.getAnchorGeometry({ kind: 'selection' }));
+  expect(backward.rects).toEqual(expected.rects);
+  expect(backward.anchor).toMatchObject({ pageIndex: 0, x: 42, width: 0 });
+  anchorOffset = headOffset;
+  expect(await geometry.readAnchorGeometries([{ kind: 'selection' }])).toMatchObject([
+    { ok: true, rects: [], anchor: backward.anchor },
+  ]);
+  expect(bodyRange).not.toHaveBeenCalled();
+  expect(bodyCaret).not.toHaveBeenCalled();
+});
+
+test.each(['fn:1', 'en:1', 'comment:1'])('selection in unsupported story %s returns the same failure as a range', (story) => {
+  const pages = document.createElement('div');
+  const layer = document.createElement('div');
+  const canvas = document.createElement('canvas');
+  canvas.dataset.pageIndex = '0';
+  pages.append(canvas);
+  for (const element of [pages, layer, canvas]) place(element, rectAt(0, 0, PAGE.width, PAGE.height));
+  const source = { ...queries(), anchorRect: () => RANGE, hitTestRegions: () => null } as unknown as DisplayListQueries;
+  const dom = createRenderedDomContext(pages, 1, { displayListQueries: source,
+    projector: createCanvasHostProjector(pages, source, 1) });
+  const layout = { id: 'notes', version: 'v1', previewVersion: 0, zoom: 1, pageCount: 1 };
+  const geometry = createPluginGeometry(layout, dom, layer, () => true, () => null, source,
+    () => ({ session: { version: () => 'v1' } as unknown as YrsSession,
+      editor: { hasPendingInput: () => false, yrsLocToDisplayPosition: () => null }, presented: true }),
+    undefined, undefined, undefined, undefined, () => ({ story, from: 1, to: 3, layoutId: layout.id }));
+  const range = geometry.getAnchorGeometry({ kind: 'range', version: layout.version, range: { ...TEXT_RANGE, story } });
+  expect(geometry.getAnchorGeometry({ kind: 'selection' })).toEqual(range);
+  refused(range, 'unsupported');
 });

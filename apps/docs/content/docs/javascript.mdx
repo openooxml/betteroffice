@@ -184,6 +184,7 @@ and a focus-end anchor in overlay pixels. A caret has empty `rects` and a caret
 `anchor`; no selection returns `missing-target`. In the default worker editor,
 geometry is `pending` while selection mapping is read;
 `readAnchorGeometries([{ kind: "selection" }])` waits for that mapping.
+Header and footer selections use their story's geometry; stories without geometry support return `unsupported`.
 
 **Focus and locale.** `snapshot.focused` is true while focus is inside the
 editor's document surface; docked panels, toolbar controls, and host chrome are

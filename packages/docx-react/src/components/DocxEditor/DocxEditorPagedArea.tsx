@@ -96,6 +96,7 @@ export function DocxEditorPagedArea({
   onYrsHistoryChange,
   onPagedSelectionChange,
   onYrsSelectionChange,
+  onYrsPartSelectionChange,
   onViewerSelectionChange,
   onRenderedDomContextReady,
   pluginOverlays,
@@ -192,6 +193,7 @@ export function DocxEditorPagedArea({
   onYrsHistoryChange?: (canUndo: boolean, canRedo: boolean) => void;
   onPagedSelectionChange: NonNullable<PagedEditorProps['onSelectionChange']>;
   onYrsSelectionChange: (selection: YrsToolbarSelection) => void;
+  onYrsPartSelectionChange?: PagedEditorProps['onYrsPartSelectionChange'];
   onViewerSelectionChange?: (selection: ViewerSelectionChange) => void;
   onRenderedDomContextReady:
     | ((ctx: RenderedDomContext, queries: DisplayListQueries) => void)
@@ -498,6 +500,7 @@ export function DocxEditorPagedArea({
         onViewerSelectionChange={onViewerSelectionChange}
         onYrsPartSelectionChange={(part, selection) => {
           if (partEditStory(part, yrsCore.session) === partStory) setPartSelection(selection);
+          onYrsPartSelectionChange?.(part, selection);
         }}
         onRenderedDomContextReady={onRenderedDomContextReady}
         pluginOverlays={pluginOverlays}

@@ -53,6 +53,7 @@ import * as pluginHosts from './createDocxPluginHost';
 import * as workerPluginGeometry from '../components/DocxEditor/peerless/workerPluginGeometry';
 import { scopePluginGeometry } from './geometry';
 import * as canvasReplay from '../components/DocxEditor/canvasReplay';
+import * as headerFooterEditing from '../components/DocxEditor/hooks/useHeaderFooterEditing';
 import {
   resetEngineChoiceForTests,
   setMissingWorkerCapabilitiesForTests,
@@ -339,6 +340,47 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
     await settle(400);
     expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
   });
+
+  if (experimentalWorkerOpen === false) {
+    test.each(['header', 'footer'] as const)('caret moves in uniformly formatted %s text settle independently of toolbar updates', async (part) => {
+      const events: DocxPluginEvent[] = [];
+      const contexts: DocxPluginContext<null>[] = [];
+      const onSelectionChange = mock(() => {});
+      const plugin = defineDocxPlugin({ id: 'part-settle', createState: () => null,
+        initialize(context) { contexts.push(context); },
+        onEvent(_context, event) { events.push(event); } });
+      const original = headerFooterEditing.useHeaderFooterEditing;
+      let open: ReturnType<typeof original>['handleHeaderFooterDoubleClick'] | undefined;
+      const editing = spyOn(headerFooterEditing, 'useHeaderFooterEditing').mockImplementation((options) => {
+        const result = original(options);
+        open = result.handleHeaderFooterDoubleClick;
+        return result;
+      });
+      try {
+        const { ref } = await mount({ plugins: [plugin], onSelectionChange });
+        await act(async () => { open!(part, 1); });
+        await act(async () => { ref.current!.getEditorRef()!.setSelection(2, 2); });
+        await settle(400);
+        expect(contexts[0]!.snapshot.selectionSettled).toBe(true);
+        const story = ref.current!.getEditorRef()!.getYrsSession()!.selection()!.head.story;
+        expect(story.startsWith('hf:')).toBe(true);
+        events.length = 0;
+        onSelectionChange.mockClear();
+        await act(async () => { ref.current!.getEditorRef()!.setSelection(3, 3); });
+        expect(onSelectionChange).not.toHaveBeenCalled();
+        expect(contexts[0]!.snapshot.selectionSettled).toBe(false);
+        expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(0);
+        await settle(400);
+        expect(events.filter((event) => event.type === 'selection-settle')).toMatchObject([
+          { source: 'keyboard', selection: { displayRange: { story, from: 3, to: 3 } } },
+        ]);
+        expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
+        expect(contexts[0]!.snapshot.selectionSettled).toBe(true);
+        await settle(400);
+        expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
+      } finally { editing.mockRestore(); }
+    });
+  }
 
   test('plugins receive the resolved locale and one event when it changes', async () => {
     const contexts: DocxPluginContext<null>[] = [];
@@ -2552,4 +2594,3 @@ describe('DocxEditor plugins (worker engine)', () => {
     }
   });
 });
-

@@ -45,6 +45,7 @@ import type {
   DocxPluginLayout,
   DocxPluginPageRect,
   DocxPluginRect,
+  DocxPluginSelection,
 } from './types';
 
 import { flushEditorInput } from '../components/DocxEditor/editorBatches';
@@ -502,7 +503,8 @@ export function placeRepeated(
   routed: readonly string[],
   ranges: Interval[],
   hidden: readonly Interval[],
-  paragraph: number | null
+  paragraph: number | null,
+  focus?: number
 ): DocxAnchorGeometryResult {
   const rIds = new Set(routed);
   const pages = queries.displayList?.pages ?? [];
@@ -541,15 +543,17 @@ export function placeRepeated(
   const first = firstOf(drawn);
   const last = ranges.at(-1);
   const gap = last && widen(last, hidden);
-  const end = first
-    ? lastInReadingOrder(drawn.filter(({ pageIndex }) => pageIndex === first.pageIndex))
-    : firstOf(
-        [...built.values()].flatMap(({ region, rId }) => [
-          ...(gap ? queries.hfCaretRects(region, rId, gap.from) : []),
-          ...(gap ? queries.hfCaretRects(region, rId, gap.to) : []),
-          ...(paragraph === null ? [] : queries.hfAnchorRects(region, rId, paragraph)),
-        ])
-      );
+  const end = focus !== undefined
+    ? firstOf([...built.values()].flatMap(({ region, rId }) => queries.hfCaretRects(region, rId, focus)))
+    : first
+      ? lastInReadingOrder(drawn.filter(({ pageIndex }) => pageIndex === first.pageIndex))
+      : firstOf(
+          [...built.values()].flatMap(({ region, rId }) => [
+            ...(gap ? queries.hfCaretRects(region, rId, gap.from) : []),
+            ...(gap ? queries.hfCaretRects(region, rId, gap.to) : []),
+            ...(paragraph === null ? [] : queries.hfAnchorRects(region, rId, paragraph)),
+          ])
+        );
   const unbuiltPages = [...new Set(bands.filter((band) => band.unbuilt).map((band) => band.pageIndex))];
   if (end) return respond(drawn, { ...end, width: 0 }, unbuiltPages);
   const unbuilt = bands.find((band) => band.unbuilt);
@@ -640,7 +644,7 @@ export function createPluginGeometry(
   readPoint?: (clientX: number, clientY: number) => Promise<DocxPointPosition | null>,
   complete: () => boolean = () => false,
   viewport: () => DocxPluginRect = () => visibleViewport(layer, layer, layer),
-  selection: () => { from: number; to: number; layoutId: string; focus?: number } | null = () => null
+  selection: () => (NonNullable<DocxPluginSelection['displayRange']> & { focus?: number }) | null = () => null
 ): DocxPluginGeometry {
   const shown = () => dom.zoom === layout.zoom && current();
   const projector = createCanvasHostProjector(dom.pagesContainer, queries, dom.zoom);
@@ -695,7 +699,8 @@ export function createPluginGeometry(
     target: AnchorGeometryTarget | null,
     raw?: { ok: true; ranges: RawAnchorRange[]; paragraph: YrsLoc; drawing?: boolean; drawingOffset?: number },
     reservationTarget = false,
-    hiddenTarget = false
+    hiddenTarget = false,
+    focus?: number
   ): DocxAnchorGeometryResult => {
     if (!shown()) return unavailable();
     const live = access(reservationTarget);
@@ -755,7 +760,8 @@ export function createPluginGeometry(
         routed,
         [...ranges],
         hidden,
-        paragraph
+        paragraph,
+        focus
       );
     }
     const window = displayWindowOf(queries)?.read();
@@ -894,8 +900,21 @@ export function createPluginGeometry(
         if (range.layoutId !== layout.id) return unavailable();
         const from = Math.min(range.from, range.to);
         const to = Math.max(range.from, range.to);
-        const rects = from === to ? [] : queries.rangeRects(from, to).filter((rect) => rect.width > 0);
         const focus = range.focus ?? range.to;
+        const root = anchorDisplayRoot(range.story);
+        if (root === null) return anchorFailure('unsupported', 'The range has no display position');
+        if (root !== 'body') {
+          const live = access();
+          const sticky = live?.session.selection();
+          if (!live || !sticky || anchorDisplayRoot(sticky.anchor.story) !== root ||
+            anchorDisplayRoot(sticky.head.story) !== root) return unavailable();
+          const anchor = live.editor.yrsLocToDisplayPosition(sticky.anchor);
+          const head = live.editor.yrsLocToDisplayPosition(sticky.head);
+          if (anchor === null || head === null || Math.min(anchor, head) !== from || Math.max(anchor, head) !== to) return unavailable();
+          const [start, end] = anchor <= head ? [sticky.anchor, sticky.head] : [sticky.head, sticky.anchor];
+          return anchorGeometry(null, { ok: true, ranges: [{ start, end }], paragraph: { ...start, offset: 0 } }, false, false, head);
+        }
+        const rects = from === to ? [] : queries.rangeRects(from, to).filter((rect) => rect.width > 0);
         const caret = from === to || focus === from
           ? caretAt(queries, focus) ?? queries.caretRect(focus) ?? queries.anchorRect(focus)
           : endOf({ from, to });

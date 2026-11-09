@@ -24,6 +24,9 @@ import {
   type YrsSession,
 } from '@betteroffice/docx/yrs';
 import { createResidentEngineSession, type ResidentEngineSession } from '@betteroffice/docx/yrs/residentEngineSession';
+import { commandSelectionRange } from '@betteroffice/docx/yrs/residentCommandAnchors';
+import type { DocxCommandSelection } from '@betteroffice/docx/yrs/residentCommandProtocol';
+import type { DocxDocumentRead } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
 import { storyAnchorsDocx } from '../../../plugins/__fixtures__/storyAnchorsDocx';
 import { createDocxPluginHost } from '../../../plugins/createDocxPluginHost';
 import { defineDocxPlugin } from '../../../plugins/defineDocxPlugin';
@@ -286,12 +289,13 @@ async function laidOut(first = 0, end = 2 ** 32 - 1, reservations?: DocxReservat
 
 interface ShellOptions {
   zoom?: number; window?: readonly [number, number]; answer?(result: ProposalGeometryTarget): ProposalGeometryTarget;
+  selection?: DocxCommandSelection;
   /** The reservation set the frame was laid out with, and the one the editor sends. */
   laidOutWith?: { version: string; key: string | null }; sent?(): DocxReservationsPayload | null;
 }
 
 /** The peer-less plugin geometry over `laid`'s frame, its targets answered by the worker read. */
-async function shellOf({ engine, frame, window: built }: LaidOut, { zoom = 1, window, answer = (result) => result, laidOutWith, sent = () => null }: ShellOptions = {}) {
+async function shellOf({ engine, frame, window: built }: LaidOut, { zoom = 1, window, answer = (result) => result, selection, laidOutWith, sent = () => null }: ShellOptions = {}) {
   const shown = window ?? built;
   const container = document.createElement('div');
   const host = document.createElement('div');
@@ -316,7 +320,7 @@ async function shellOf({ engine, frame, window: built }: LaidOut, { zoom = 1, wi
   const layer = document.createElement('div');
   layer.getBoundingClientRect = container.getBoundingClientRect;
   const identity = { session: 's', incarnation: 1, epoch: 1 };
-  const view = { identity, version: 0, throughSeq: 0, presentedThroughSeq: 0, workerSelection: null, anchors: null, editState: undefined,
+  const view = { identity, version: 0, throughSeq: 0, presentedThroughSeq: 0, workerSelection: selection ?? null, anchors: null, editState: undefined,
     geometry: { identity, coversThroughSeq: 0, frameEpoch: frame.frameEpoch, layoutRevision: 1, pages, caret: null, selectionRects: [],
       ...(laidOutWith ? { reservations: laidOutWith } : {}) } };
   const version = engine.geometryReader.version();
@@ -324,8 +328,12 @@ async function shellOf({ engine, frame, window: built }: LaidOut, { zoom = 1, wi
   const reads: unknown[] = [];
   const controller = { getSnapshot: () => ({ status: 'ready', view }),
     review: async () => review, describedReview: () => review,
-    readAt: async (request: { targets: Parameters<typeof computeAnchorTargetGeometry>[1] }) => {
+    readAt: async (request: DocxDocumentRead) => {
       reads.push(request);
+      if (request.kind === 'commentSelectionRange') return commandSelectionRange(engine, request.selection);
+      if (request.kind === 'rawSelectionInfo') return engine.selectionText({ story: request.selection.anchor.story,
+        start: request.selection.anchor, end: request.selection.focus });
+      if (request.kind !== 'anchorTargets') throw new Error(`Unexpected read: ${request.kind}`);
       return computeAnchorTargetGeometry(engine.geometryReader, request.targets).map(answer);
     },
     ref: { getZoom: () => zoom, readParagraphs: async () => ({ ok: true, version, paragraphs: [] }) } };
@@ -354,6 +362,27 @@ function ok(result: DocxAnchorGeometryResult) {
 }
 
 const pageIndices = (result: DocxAnchorGeometryResult) => [...new Set(ok(result).rects.map(({ pageIndex }) => pageIndex))];
+
+test.each([
+  ['hf:rIdH1', '10000001', '{{odd}}'],
+  ['hf:rIdF1', '10000021', '{{first}}'],
+] as const)('worker selection in %s anchors at its focus in either direction and when collapsed', async (story, paraId, text) => {
+  const laid = await laidOut();
+  const target = range(laid, laid.engine.geometryReader.version(), story, paraId, text);
+  const start = { story, ...target.range.start };
+  const end = { story, ...target.range.end };
+  for (const [anchor, focus] of [[start, end], [end, start], [start, start]] as const) {
+    const shell = await shellOf(laid, { selection: { anchor, focus } });
+    try {
+      const selected = ok(await shell.anchor({ kind: 'selection' }));
+      const caret = ok(await shell.anchor({ ...target, range: { ...target.range, start: focus, end: focus } }));
+      expect(selected.anchor).toEqual(caret.anchor);
+      expect(selected.anchor.width).toBe(0);
+      expect(selected.rects).toEqual(anchor === focus ? [] : ok(await shell.anchor(target)).rects);
+      expect(selected.anchor.pageIndex).toBe(story === 'hf:rIdH1' ? 2 : 0);
+    } finally { shell.plugin.dispose(); }
+  }
+});
 
 test('a header target has rects on every built page that paints it and its anchor on the earliest', async () => {
   const laid = await laidOut();

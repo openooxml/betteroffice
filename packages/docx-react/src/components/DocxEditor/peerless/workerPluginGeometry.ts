@@ -255,6 +255,7 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
       if (target.kind === 'proposal' && !resolved) return { ok: false, failure: { code: 'unknown-proposal', message: 'No proposal is registered' } };
       if (!resolved) return (target.kind === 'selection' ? selectionRead?.failed : entry.failed.has(keyOf(target))) ? readFailed : request ? pending : unavailable();
       if (!resolved.ok) return resolved;
+      const focus = target.kind === 'selection' && selectionRead?.focus?.ok ? selectionRead.focus.ranges[0]?.from : undefined;
       if (resolved.drawing) {
         const pos = resolved.ranges[0]?.from;
         if (pos === undefined) return { ok: false, failure: { code: 'unsupported', message: 'The target has no display position' } };
@@ -262,7 +263,8 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
         return placeDrawing(repeatedOf(measured), pos, resolved.root ? resolved.rIds : undefined);
       }
       if (resolved.root) {
-        return resolved.rIds ? placeRepeated(repeatedOf(measured), resolved.rIds, [...resolved.ranges], resolved.hidden ?? [], resolved.paragraph)
+        if (target.kind === 'selection' && focus === undefined) return selectionRead?.focus && !selectionRead.focus.ok ? selectionRead.focus : unavailable();
+        return resolved.rIds ? placeRepeated(repeatedOf(measured), resolved.rIds, [...resolved.ranges], resolved.hidden ?? [], resolved.paragraph, focus)
           : { ok: false, failure: { code: 'unsupported', message: 'The target has no display position' } };
       }
       if (hide) {
@@ -274,7 +276,6 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
       const rects = raw.map(measured.project).filter(value => value !== null);
       const end = raw.at(-1);
       const collapsed = target.kind === 'selection' && resolved.ranges.length === 1 && resolved.ranges[0]!.from === resolved.ranges[0]!.to;
-      const focus = target.kind === 'selection' && selectionRead?.focus?.ok ? selectionRead.focus.ranges[0]?.from : undefined;
       const caret = focus !== undefined || collapsed
         ? queries.caretRect?.(focus ?? resolved.ranges[0]!.from) ?? queries.anchorRect(focus ?? resolved.ranges[0]!.from) : null;
       const anchorRect = caret ? { ...caret, width: 0 }
