@@ -5348,7 +5348,10 @@ fn lower_character_spacing(attributes: Option<&Attrs>, result: &mut RunFormattin
     if let Some(position) = map_number(map, "position").filter(|value| *value != 0.0) {
         result.position_px = Some(half_points_to_pixels(position));
     }
-    if let Some(scale) = map_number(map, "scale").filter(|value| *value != 100.0) {
+    if let Some(scale) = map_number(map, "scale")
+        .and_then(docx_parse::formatting::text_scale)
+        .filter(|value| *value != 100.0)
+    {
         result.horizontal_scale = Some(scale);
     }
     if let Some(kerning) = map_number(map, "kerning").filter(|value| *value > 0.0) {
@@ -6879,6 +6882,27 @@ mod tests {
                 .map(|(key, value)| (key.to_owned(), value))
                 .collect::<HashMap<_, _>>(),
         ))
+    }
+
+    #[test]
+    fn a_run_scale_outside_the_schema_never_reaches_layout() {
+        for (scale, expected) in [
+            (0.0, None),
+            (-5.0, None),
+            (100.0, None),
+            (50.0, Some(50.0)),
+            (700.0, Some(600.0)),
+        ] {
+            let spacing = Any::Map(std::sync::Arc::new(HashMap::from([(
+                "scale".to_owned(),
+                Any::Number(scale),
+            )])));
+            let attributes: Attrs =
+                HashMap::from([(std::sync::Arc::from("characterSpacing"), spacing)]);
+            let mut lowered = RunFormatting::default();
+            lower_character_spacing(Some(&attributes), &mut lowered);
+            assert_eq!(lowered.horizontal_scale, expected, "scale {scale}");
+        }
     }
 
     #[test]

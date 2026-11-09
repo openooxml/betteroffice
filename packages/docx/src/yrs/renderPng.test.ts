@@ -21,7 +21,7 @@ let restore: (() => void) | undefined;
 afterEach(() => { restore?.(); restore = undefined; });
 
 function stubBrowser() {
-  const calls = { sizes: [] as [number, number][], fills: 0, encoded: 0, bitmaps: 0 };
+  const calls = { sizes: [] as [number, number][], fills: 0, encoded: 0, scales: [] as number[][], bitmaps: 0 };
   class Canvas {
     constructor(public width: number, public height: number) {}
     getContext() {
@@ -29,6 +29,7 @@ function stubBrowser() {
       return new Proxy({} as Record<string, unknown>, {
         get(target, property) {
           if (property === 'fill') return () => { calls.fills++; };
+          if (property === 'scale') return (x: number, y: number) => { calls.scales.push([x, y]); };
           if (property === 'measureText') return (text: string) => ({ width: text.length });
           if (property === 'createLinearGradient' || property === 'createRadialGradient' || property === 'createPattern') return () => ({ addColorStop: () => undefined });
           return property in target ? target[property as string] : () => undefined;
@@ -171,6 +172,26 @@ describe('YrsSession.renderPng', () => {
       await session.renderPng({ page: 0 });
       expect(calls.bitmaps).toBe(0);
     } finally { session.destroy(); }
+  });
+
+  test('a run scale of 0 draws at full width, as Word does', async () => {
+    if (native) return;
+    const scales = async (value: string) => {
+      const calls = stubBrowser();
+      const parts: PartsMap = new Map([
+        ['[Content_Types].xml', toBytes('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')],
+        ['_rels/.rels', toBytes('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>')],
+        ['word/document.xml', toBytes(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr><w:w w:val="${value}"/></w:rPr><w:t>Engine text</w:t></w:r></w:p><w:sectPr/></w:body></w:document>`)],
+      ]);
+      const session = await createYrsSession();
+      try {
+        session.openDocx(new Uint8Array(rezipPartsToArrayBuffer(parts)), true);
+        await session.renderPng({ page: 0 });
+        return calls.scales;
+      } finally { session.destroy(); restore?.(); restore = undefined; }
+    };
+    expect(await scales('50')).toContainEqual([0.5, 1]);
+    expect((await scales('0')).filter(([x]) => x === 0)).toEqual([]);
   });
 
   test('wraps text in a family with no bundled face of its own, as the editor does', async () => {
