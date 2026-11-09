@@ -3,6 +3,7 @@ import { imageSize } from 'image-size';
 import { createFontProvider } from '@betteroffice/fonts';
 import type { YrsSession } from '@betteroffice/docx/yrs';
 import type { ResidentFontRequirement } from '@betteroffice/docx/layout';
+import { cleanupGuard } from './cleanup';
 import { DocumentToolError, type DocumentRenderer } from './types';
 
 const previewWarning = 'Preview uses BetterOffice layout and bundled substitute fonts; compare with the target Office application when exact fidelity matters.';
@@ -11,10 +12,11 @@ export const renderDocxPage: DocumentRenderer = async (session, pageNumber) => {
   try {
     const png = await session.renderPng({ page: pageNumber - 1 });
     const prepared = await layoutDocxPage(session);
+    const release = cleanupGuard(prepared.dispose);
     try {
       const view = new DataView(png.buffer, png.byteOffset, png.byteLength);
       return { png, page: pageNumber, pageCount: prepared.layout.pages.length, width: view.getUint32(16), height: view.getUint32(20), warnings: [previewWarning, ...(!prepared.notesConverged ? ['Footnote pagination did not converge.'] : [])] };
-    } finally { prepared.dispose(); }
+    } catch (error) { throw release.failed(error); } finally { release.run(); }
   } catch (error) {
     const code = (error as { code?: unknown } | null)?.code;
     if (code === 'canvas-unavailable') return renderDocxPageCanvas(session, pageNumber);
@@ -38,7 +40,7 @@ async function layoutDocxPage(original: YrsSession) {
       const bytes = new Uint8Array(sourceDocument.originalBuffer);
       const host = session.openDocx(bytes, false);
       session.bootstrapPeer(original.encodeState(), original.encodePeerMetadata(), bytes, host);
-    } catch (error) { session.destroy(); throw error; }
+    } catch (error) { throw cleanupGuard(() => session.destroy()).failed(error); }
   }
   const dispose = () => { if (session !== original) session.destroy(); };
   try {
@@ -57,7 +59,7 @@ async function layoutDocxPage(original: YrsSession) {
     if (!measurement) throw new DocumentToolError('FONT_UNAVAILABLE', 'Required fonts could not be loaded. Install @betteroffice/fonts and the optional coverage packages @betteroffice/fonts-cjk and @betteroffice/fonts-intl as needed.');
     const { layout, notesConverged } = module.editor.computeLayout({ document, pageGap: 0, session, renderEnv, measurement });
     return { session, module, document, measurement, layout, notesConverged, dispose };
-  } catch (error) { dispose(); throw error; }
+  } catch (error) { throw cleanupGuard(dispose).failed(error); }
 }
 
 const renderDocxPageCanvas: DocumentRenderer = async (original, pageNumber) => {
@@ -65,6 +67,7 @@ const renderDocxPageCanvas: DocumentRenderer = async (original, pageNumber) => {
   const prepared = await layoutDocxPage(original);
   const { session, module, document, measurement, layout, notesConverged } = prepared;
   const { buildRustDisplayList, drawDisplayPage, GlyphCache } = module.render;
+  const release = cleanupGuard(prepared.dispose);
   try {
     const kernel = module.editor.getLayoutKernelInputs(layout)!;
     const display = await buildRustDisplayList({ ...kernel, layout, fontChains: measurement.fontChains }, session);
@@ -114,5 +117,5 @@ const renderDocxPageCanvas: DocumentRenderer = async (original, pageNumber) => {
       },
     });
     return { png: await canvas.encode('png'), page: pageNumber, pageCount: display.pages.length, width: canvas.width, height: canvas.height, warnings: [...warnings] };
-  } finally { prepared.dispose(); }
+  } catch (error) { throw release.failed(error); } finally { release.run(); }
 };
