@@ -587,6 +587,8 @@
     "noDocumentLoaded": "불러온 문서가 없습니다",
     "failedToLoad": "이 문서를 열 수 없습니다",
     "failedToLoadDescription": "파일이 손상되었거나 이 편집기에서 아직 읽을 수 없는 내용이 포함되어 있을 수 있습니다.",
+    "failedToLoadDamaged": "파일이 손상되었거나 완전한 Word 문서가 아닙니다.",
+    "failedToLoadUnsupported": "이 문서에는 이 편집기가 아직 읽을 수 없는 내용이 있습니다.",
     "editorUnavailable": "편집기를 불러올 수 없습니다",
     "editorUnavailableDescription": "연결을 확인한 후 페이지를 새로 고치세요.",
     "reloadPage": "페이지 새로 고침",

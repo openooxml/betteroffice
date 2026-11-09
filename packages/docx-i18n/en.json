@@ -587,6 +587,8 @@
     "noDocumentLoaded": "No document loaded",
     "failedToLoad": "Couldn't open this document",
     "failedToLoadDescription": "The file may be damaged, or it uses something this editor can't read yet.",
+    "failedToLoadDamaged": "The file is damaged or isn't a complete Word document.",
+    "failedToLoadUnsupported": "This document uses something this editor can't read yet.",
     "editorUnavailable": "The editor couldn't load",
     "editorUnavailableDescription": "Check your connection, then reload the page.",
     "reloadPage": "Reload page",

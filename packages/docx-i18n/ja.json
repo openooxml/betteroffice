@@ -587,6 +587,8 @@
     "noDocumentLoaded": "ドキュメントが読み込まれていません",
     "failedToLoad": "このドキュメントを開けませんでした",
     "failedToLoadDescription": "ファイルが破損しているか、このエディターでまだ読み取れないものが使われている可能性があります。",
+    "failedToLoadDamaged": "ファイルが破損しているか、完全な Word 文書ではありません。",
+    "failedToLoadUnsupported": "この文書には、このエディターでまだ読み取れない内容が含まれています。",
     "editorUnavailable": "エディターを読み込めませんでした",
     "editorUnavailableDescription": "接続を確認してから、ページを再読み込みしてください。",
     "reloadPage": "ページの再読み込み",

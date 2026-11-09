@@ -587,6 +587,8 @@
     "noDocumentLoaded": "Chưa tải tài liệu nào",
     "failedToLoad": "Không thể mở tài liệu này",
     "failedToLoadDescription": "Tệp có thể bị hỏng, hoặc dùng thứ mà trình chỉnh sửa này chưa đọc được.",
+    "failedToLoadDamaged": "Tệp bị hỏng hoặc không phải là tài liệu Word hoàn chỉnh.",
+    "failedToLoadUnsupported": "Tài liệu này dùng nội dung mà trình soạn thảo này chưa đọc được.",
     "editorUnavailable": "Trình chỉnh sửa không thể tải",
     "editorUnavailableDescription": "Kiểm tra kết nối, rồi tải lại trang.",
     "reloadPage": "Tải lại trang",

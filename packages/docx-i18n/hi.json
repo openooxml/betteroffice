@@ -587,6 +587,8 @@
     "noDocumentLoaded": "कोई दस्तावेज़ लोड नहीं हुआ",
     "failedToLoad": "दस्तावेज़ लोड करने में विफल",
     "failedToLoadDescription": "फ़ाइल क्षतिग्रस्त हो सकती है, या इसमें कुछ ऐसा है जिसे यह संपादक अभी पढ़ नहीं सकता।",
+    "failedToLoadDamaged": "फ़ाइल क्षतिग्रस्त है या पूरा Word दस्तावेज़ नहीं है।",
+    "failedToLoadUnsupported": "यह दस्तावेज़ कुछ ऐसा उपयोग करता है जिसे यह संपादक अभी नहीं पढ़ सकता।",
     "editorUnavailable": "संपादक लोड नहीं हो सका",
     "editorUnavailableDescription": "अपना कनेक्शन जांचें, फिर पेज को फिर से लोड करें।",
     "reloadPage": "पेज फिर से लोड करें",

@@ -587,6 +587,8 @@
     "noDocumentLoaded": "未加载文档",
     "failedToLoad": "文档加载失败",
     "failedToLoadDescription": "文件可能已损坏，或使用了此编辑器尚无法读取的内容。",
+    "failedToLoadDamaged": "文件已损坏,或不是完整的 Word 文档。",
+    "failedToLoadUnsupported": "此文档使用了此编辑器尚无法读取的内容。",
     "editorUnavailable": "编辑器无法加载",
     "editorUnavailableDescription": "请检查网络连接，然后重新加载页面。",
     "reloadPage": "重新加载页面",

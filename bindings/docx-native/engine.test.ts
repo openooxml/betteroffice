@@ -3,6 +3,8 @@ import { beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import initWasm, * as wasm from '../../packages/docx/src/wasm/generated/edit/docx_edit.js';
 import initPreflight, { font_preflight as wasmFontPreflight } from '../../packages/docx/src/wasm/generated/preflight/docx_preflight.js';
 
+import { openFailureKind } from '../../packages/docx-react/src/components/openFailure';
+
 type Engine = typeof wasm;
 type Session = wasm.EditSession;
 type ParagraphRead = {
@@ -1286,6 +1288,48 @@ test('native and wasm mark the same list markers as numbered', () => {
   expect(markers.numbered.trim()).toBe('Part 3.');
   expect(markers.hidden.trim()).not.toBe('');
   expect(run(wasm)).toEqual(markers);
+});
+
+test('broken packages open or fail the same on native and wasm, and a failure reads as damaged', () => {
+  const encoder = new TextEncoder();
+  const w = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+  const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const types = encoder.encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
+  const rels = encoder.encode(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/officeDocument" Target="word/document.xml"/></Relationships>`);
+  const document = encoder.encode(`<w:document xmlns:w="${w}"><w:body><w:p/><w:sectPr/></w:body></w:document>`);
+  const good = { '[Content_Types].xml': types, '_rels/.rels': rels, 'word/document.xml': document };
+  const without = (name: keyof typeof good) => Object.fromEntries(Object.entries(good).filter(([part]) => part !== name));
+  const zipped = wasm.rezip_docx(good);
+  const cases: [string, Uint8Array][] = [
+    ['not a zip', encoder.encode('this is not a zip file')],
+    ['a truncated zip', zipped.slice(0, zipped.length >> 1)],
+    ['no content types', wasm.rezip_docx(without('[Content_Types].xml'))],
+    ['no package relationships', wasm.rezip_docx(without('_rels/.rels'))],
+    ['no main part', wasm.rezip_docx(without('word/document.xml'))],
+    ['a main part that is not XML', wasm.rezip_docx({ ...good, 'word/document.xml': encoder.encode('<w:document') })],
+    ['a main part of another kind', wasm.rezip_docx({ ...good, 'word/document.xml': encoder.encode('<other/>') })],
+  ];
+  const failure = (engine: Engine, bytes: Uint8Array) => {
+    const session = new engine.EditSession(80);
+    try {
+      session.open_docx(bytes, true);
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    } finally {
+      session.free();
+    }
+  };
+  const outcomes = cases.map(([name, bytes]) => {
+    const message = failure(native, bytes);
+    return {
+      name, sameOnWasm: failure(wasm, bytes) === message,
+      kind: message === null ? 'opens' : openFailureKind(message),
+    };
+  });
+  expect(outcomes).toEqual(cases.map(([name]) => ({
+    name, sameOnWasm: true, kind: name === 'no content types' || name === 'no package relationships' ? 'opens' : 'damaged',
+  })));
 });
 
 test('native and wasm carry the same chart data in the display list', () => {

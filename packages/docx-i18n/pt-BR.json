@@ -587,6 +587,8 @@
     "noDocumentLoaded": "Nenhum documento carregado",
     "failedToLoad": "Falha ao carregar documento",
     "failedToLoadDescription": "O arquivo pode estar danificado ou usa algo que este editor ainda não consegue ler.",
+    "failedToLoadDamaged": "O arquivo está danificado ou não é um documento do Word completo.",
+    "failedToLoadUnsupported": "Este documento usa algo que este editor ainda não consegue ler.",
     "editorUnavailable": "O editor não pôde ser carregado",
     "editorUnavailableDescription": "Verifique sua conexão e recarregue a página.",
     "reloadPage": "Recarregar página",

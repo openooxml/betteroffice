@@ -587,6 +587,8 @@
     "noDocumentLoaded": "尚未載入文件",
     "failedToLoad": "無法開啟此文件",
     "failedToLoadDescription": "檔案可能已損毀，或使用了此編輯器尚無法讀取的功能。",
+    "failedToLoadDamaged": "檔案已損毀,或不是完整的 Word 文件。",
+    "failedToLoadUnsupported": "此文件使用了此編輯器尚無法讀取的內容。",
     "editorUnavailable": "編輯器無法載入",
     "editorUnavailableDescription": "請檢查連線，然後重新載入頁面。",
     "reloadPage": "重新載入頁面",
