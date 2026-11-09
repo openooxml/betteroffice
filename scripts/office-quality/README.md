@@ -73,7 +73,7 @@ The driver discards one warmup per engine/document, then starts five fresh proce
 
 The current source's bundled fonts are frozen once and shared by both native builds and LibreOffice. Linux workers use a Fontconfig configuration restricted to that bundle, including its Word-family aliases. Build metadata records source/binary/host hashes, Rust version and optimization settings; reports record fonts, LibreOffice build, runner image, architecture, and comparison-library versions. Local macOS LibreOffice uses system font discovery and reports that distinction.
 
-LibreOffice fidelity separately exports the entire document to PDF, rasterizes every page through the pinned PyMuPDF version at 150 DPI, and uses the same Word references, grayscale SSIM, page penalties, and at-most-one-pixel edge adjustment as the existing DOCX comparison. It does not replace the Office references. Sources and references are hash-verified. Scoring omits redundant HTML-gallery PNGs and logs page progress; individual LibreOffice renders remain in artifacts. All selected documents are attempted on every run. Failures stay visible in coverage and diagnostics.
+LibreOffice fidelity separately exports the entire document to PDF, rasterizes every page with the pinned pypdfium2 (PDFium) version at 150 DPI on white, and uses the same Word references, grayscale SSIM, page penalties, and at-most-one-pixel edge adjustment as the existing DOCX comparison. It does not replace the Office references. Sources and references are hash-verified. Scoring omits redundant HTML-gallery PNGs and logs page progress; individual LibreOffice renders remain in artifacts. All selected documents are attempted on every run. Failures stay visible in coverage and diagnostics.
 
 The reconciler requires every planned shard and document, matching plan hashes, builds, font bundles, versions, and measurement settings before updating the README or R2. Download `docx-benchmark-diagnostics-*` for per-trial durations, commands, logs, first-page native PNGs, and full LibreOffice renders. These artifacts expire after seven days. `docx-native-*` contains the executable builds and font bundle. Artifacts are never committed.
 
@@ -119,7 +119,7 @@ the public Office references, so a page can be compared by swiping or by a diffe
 
 ## Office references
 
-Requires macOS and desktop Word, PowerPoint, or Excel. Run exports serially into fresh directories:
+Requires macOS and desktop Word, PowerPoint, or Excel. Office exports a PDF, which is kept as `reference.pdf` and is the source of truth: the PNGs are rasterized from it with pypdfium2 at 150 DPI, each page sized to its points × DPI / 72 rounded up (with a 0.001 px tolerance), so references can be rebuilt reproducibly from the stored PDFs. Run exports serially into fresh directories:
 
 ```sh
 .source/office-quality/venv/bin/python scripts/office-quality/reference.py \
