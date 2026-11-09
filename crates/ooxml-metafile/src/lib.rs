@@ -31,7 +31,8 @@ pub use drawing::{Drawing, Omission, Refusal};
 pub use shapes::{MetafileDrawing, MetafileOp, MetafileStroke, decode};
 #[cfg(feature = "svg")]
 pub use svg::{
-    MAX_SVG_BYTES, Svg, placeholder_svg, to_svg, to_svg_with_budget, to_svg_with_limits,
+    MAX_SVG_BYTES, Svg, is_placeholder_svg, placeholder_svg, to_svg, to_svg_with_budget,
+    to_svg_with_limits,
 };
 #[cfg(feature = "svg")]
 pub use svg_session::SvgSession;

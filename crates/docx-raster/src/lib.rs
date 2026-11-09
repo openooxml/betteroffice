@@ -2458,6 +2458,9 @@ impl<'c> PageImages<'c> {
                 "bytes",
             );
         }
+        if ooxml_metafile::is_placeholder_svg(bytes) {
+            return Decode::Refused(PictureReason::Metafile);
+        }
         if ooxml_metafile::is_metafile(bytes) || svg::looks_like_svg(bytes) {
             return self.decode_vector(bytes, charge);
         }
@@ -4101,6 +4104,18 @@ mod tests {
                 .is_some()
         );
         assert!(next.pictures.is_empty());
+    }
+
+    #[test]
+    fn the_parsers_metafile_stand_in_is_reported_as_a_metafile_placeholder() {
+        let scene = picture_scene(&["rIdStandIn"]);
+        let images = ImageMap::from([(
+            "rIdStandIn".to_owned(),
+            ooxml_metafile::placeholder_svg(96.0, 72.5).into_bytes(),
+        )]);
+        let rendered = render_pictures(&scene, &images, &mut ImageCache::default(), 1.0);
+        assert_eq!(rendered.skipped_pictures.len(), 1);
+        assert_eq!(rendered.skipped_pictures[0].reason, PictureReason::Metafile);
     }
 
     #[test]

@@ -4,7 +4,7 @@ import type { DisplayList, DisplayPage } from '../layout/render/displayList';
 import { engineKind, renderPng, type DocxPngEngine } from './enginePng';
 
 const page = (primitives: unknown[], size = { width: 200, height: 100 }) => ({ pageIndex: 0, ...size, primitives }) as unknown as DisplayPage;
-const picture = { kind: 'image', x: 0, y: 0, w: 10, h: 10, relId: 'media:logo' };
+const picture = { kind: 'image', x: 0, y: 0, w: 10, h: 10, relId: 'media:0' };
 const glyphs = { kind: 'glyphRun', x: 0, y: 0, fontId: 1, size: 12, color: '#000000', text: 'A', glyphs: [{ id: 5, x: 0, y: 0, advance: 6 }] };
 const svg = new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg"/>');
 
@@ -62,7 +62,7 @@ describe.skipIf(engineKind === 'native')('canvas renderPng', () => {
     expect(new TextDecoder().decode(await renderPng(engine(page([picture])), { onDiagnostic: (diagnostic) => diagnostics.push(diagnostic) }))).toBe('png');
     expect(calls.encoded).toBe(1);
     expect(calls.fills).toEqual(['rgb(242, 242, 242)']);
-    expect(diagnostics).toEqual([{ code: 'picture-unavailable', pictures: [{ id: 'media:logo', reason: 'unsupported' }] }]);
+    expect(diagnostics).toEqual([{ code: 'picture-unavailable', pictures: [{ id: 'media:0', reason: 'unsupported' }] }]);
   });
 
   test('a picture whose part cannot be read paints a placeholder, reported as missing; a data URL is named by its header', async () => {
@@ -72,7 +72,7 @@ describe.skipIf(engineKind === 'native')('canvas renderPng', () => {
     await renderPng(engine(page([picture, data]), { media: () => null }), { onDiagnostic: (diagnostic) => diagnostics.push(diagnostic) });
     expect(calls.fills).toEqual(['rgb(242, 242, 242)', 'rgb(242, 242, 242)']);
     expect(diagnostics).toEqual([{ code: 'picture-unavailable', pictures: [
-      { id: 'media:logo', reason: 'missing' }, { id: 'data:image/svg+xml;base64', reason: 'unsupported' },
+      { id: 'media:0', reason: 'missing' }, { id: 'data:image/svg+xml;base64', reason: 'unsupported' },
     ] }]);
   });
 
@@ -92,7 +92,7 @@ describe.skipIf(engineKind === 'native')('canvas renderPng', () => {
     await renderPng(engine(page([picture]), { media: () => ({ bytes: new Uint8Array([1, 2, 3]), mimeType: 'image/jpeg' }) }), { onDiagnostic: (diagnostic) => diagnostics.push(diagnostic) });
     expect(calls.drawn).toBe(0);
     expect(calls.fills).toEqual(['rgb(242, 242, 242)']);
-    expect(diagnostics).toEqual([{ code: 'picture-unavailable', pictures: [{ id: 'media:logo', reason: 'decode-failed' }] }]);
+    expect(diagnostics).toEqual([{ code: 'picture-unavailable', pictures: [{ id: 'media:0', reason: 'decode-failed' }] }]);
   });
 
   test('the stand-in the parser shows for an unconvertible metafile paints the placeholder, reported as metafile', async () => {
@@ -101,7 +101,7 @@ describe.skipIf(engineKind === 'native')('canvas renderPng', () => {
     const standIn = new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg" width="96" height="72.5" viewBox="0 0 96 72.5" preserveAspectRatio="none"><rect x="0.5" y="0.5" width="95" height="71.5" fill="#f1f3f4" stroke="#c4c7c5"/><g transform="translate(48 36.25) scale(1.5104)" fill="none" stroke="#9aa0a6" stroke-width="1.5" stroke-linejoin="round"><rect x="-12" y="-9" width="24" height="18" rx="2"/><circle cx="-5" cy="-3.5" r="2"/><path d="M-10 7L-3 0L2 5L5 2L10 7"/></g></svg>');
     await renderPng(engine(page([picture]), { media: () => ({ bytes: standIn, mimeType: 'image/svg+xml' }) }), { onDiagnostic: (diagnostic) => diagnostics.push(diagnostic) });
     expect(calls.fills).toEqual(['rgb(242, 242, 242)']);
-    expect(diagnostics).toEqual([{ code: 'picture-unavailable', pictures: [{ id: 'media:logo', reason: 'metafile' }] }]);
+    expect(diagnostics).toEqual([{ code: 'picture-unavailable', pictures: [{ id: 'media:0', reason: 'metafile' }] }]);
   });
 
   test('a picture fill without a reference paints a placeholder instead of its solid fill', async () => {
