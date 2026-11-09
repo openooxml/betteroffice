@@ -954,6 +954,7 @@ export function PptxEditorContent({
     handle: openedHandle,
     reviewing: canvasReview.reviewing,
     selection: pluginSelection,
+    textSelection: selection,
     pointAt: (frame, clientX, clientY) =>
       (backend ? workerRef.current?.frame(workerRef.current.active)?.displayList === frame :
         modelRef.current?.frame === frame) ? hostPointRef.current(clientX, clientY) : null,

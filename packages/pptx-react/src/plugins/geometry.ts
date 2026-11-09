@@ -23,6 +23,11 @@ export interface PresentedSlide {
   scale: number;
 }
 
+export interface SelectionCaret {
+  affinity?: 'upstream' | 'downstream';
+  focusLine?: number;
+}
+
 const layoutIds = new WeakMap<PresentedSlide, string>();
 const geometryIndexes = new WeakMap<SlideDisplayList, CommandGeometryIndex>();
 let nextLayoutId = 0;
@@ -120,7 +125,8 @@ export function createAnchorGeometry(
   current: () => boolean,
   toOverlay: (rect: PptxPluginRect) => PptxPluginRect | null,
   getShapeRect: (shapeId: string) => PptxPluginRect | null,
-  selection: () => PptxPluginSelection
+  selection: () => PptxPluginSelection,
+  caret: SelectionCaret = {}
 ): Pick<PptxPluginGeometry, 'getAnchorGeometry' | 'readAnchorGeometries'> {
   const failure = (
     code: 'stale-version' | 'missing-target' | 'layout-unavailable',
@@ -156,8 +162,14 @@ export function createAnchorGeometry(
       Math.min(value.anchor, value.focus) < 0 || Math.max(value.anchor, value.focus) > (story.textLength ?? 0)) {
       return failure('missing-target', 'The text range does not exist.');
     }
-    const geometry = selectionGeometry(index, { slideId: selected.slideId, shapeId: value.shapeId,
-      storyId: value.storyId, anchor: value.anchor, focus: value.focus, affinity: 'downstream' });
+    const key = JSON.stringify([value.shapeId, value.storyId]);
+    const line = target.kind === 'selection' && value.anchor === value.focus && caret.focusLine !== undefined
+      ? index.lines.get(key)?.[caret.focusLine] : undefined;
+    const geometryIndex = line && value.focus >= line.line.start && value.focus <= line.line.end
+      ? { ...index, lines: new Map([[key, [line]]]) } : index;
+    const geometry = selectionGeometry(geometryIndex, { slideId: selected.slideId, shapeId: value.shapeId,
+      storyId: value.storyId, anchor: value.anchor, focus: value.focus,
+      affinity: target.kind === 'selection' ? caret.affinity ?? 'downstream' : 'downstream' });
     const rects: PptxPluginRect[] = [];
     if (value.anchor !== value.focus) {
       for (const rect of geometry.selectionRects) {
@@ -186,7 +198,8 @@ export function createPluginGeometry(
   current: () => boolean,
   pointAt: (frame: SlideDisplayList, clientX: number, clientY: number) => PptxPointPosition | null,
   stage: HTMLElement = layer,
-  selection: () => PptxPluginSelection = () => null
+  selection: () => PptxPluginSelection = () => null,
+  caret: SelectionCaret = {}
 ): PptxPluginGeometry {
   const toOverlay = (rect: PptxPluginRect) =>
     current() ? slideRectToOverlay(canvas, layer, presented.frame, rect) : null;
@@ -198,7 +211,7 @@ export function createPluginGeometry(
   };
   return {
     layout,
-    ...createAnchorGeometry(layout, pluginGeometryIndex(presented.frame), current, toOverlay, getShapeRect, selection),
+    ...createAnchorGeometry(layout, pluginGeometryIndex(presented.frame), current, toOverlay, getShapeRect, selection, caret),
     get viewport() { return slideViewport(stage, layer); },
     toOverlayRect(input) {
       const rect = input?.rect;

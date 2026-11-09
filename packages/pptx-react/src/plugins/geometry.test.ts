@@ -15,6 +15,7 @@ import {
   slideRectToOverlay,
   slideViewport,
   type PresentedSlide,
+  type SelectionCaret,
 } from './geometry';
 
 function box(left: number, top: number, width: number, height: number): DOMRect {
@@ -231,7 +232,7 @@ test('viewport measures the stage client box relative to the overlay and follows
   expect(slideViewport(stage, layer)).toEqual({ x: -35, y: 167, width: 780, height: 580 });
 });
 
-function textGeometry(textValue = 'abcdefghij') {
+function textGeometry(textValue = 'abcdefghij', caret: SelectionCaret = {}) {
   const slide = presented();
   const text: TextBoxPrimitive = {
     kind: 'textBox', objectId: 1, shapeId: 'title', storyId: 'story',
@@ -249,7 +250,7 @@ function textGeometry(textValue = 'abcdefghij') {
   let selection: PptxPluginSelection = null;
   const layout = pluginLayout(slide, 'v1')!;
   const geometry = createPluginGeometry(layout, slide, element(box(50, 60, 640, 360)), layer,
-    () => current, () => null, layer, () => selection);
+    () => current, () => null, layer, () => selection, caret);
   const range = { kind: 'range', version: 'v1', slideId: layout.slideId,
     shapeId: 'title', storyId: 'story', anchor: 1, focus: 9 } as const;
   return {
@@ -355,6 +356,27 @@ describe('plugin anchor geometry', () => {
       expect(geometry.getAnchorGeometry(target)).toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
     }
     expect(await geometry.readAnchorGeometries([range])).toEqual([geometry.getAnchorGeometry(range)]);
+  });
+
+  test('collapsed selection anchors preserve the editor caret line at a wrap boundary', async () => {
+    for (const caret of [{ focusLine: 0 }, { affinity: 'upstream' as const }]) {
+      const { geometry, range, select } = textGeometry('abcdefghij', caret);
+      select({ kind: 'text', shapeId: range.shapeId, storyId: range.storyId, anchor: 5, focus: 5 });
+      const target = { kind: 'selection' } as const;
+      const answer = geometry.getAnchorGeometry(target);
+      expect(answer).toMatchObject({
+        ok: true, rects: [], anchor: { x: 115, y: 65, width: 0.5, height: 10 },
+      });
+      expect(await geometry.readAnchorGeometries([target])).toEqual([answer]);
+      expect(geometry.getAnchorGeometry({ ...range, anchor: 5, focus: 5 })).toMatchObject({
+        ok: true, rects: [], anchor: { x: 90, y: 75, width: 0.5, height: 10 },
+      });
+    }
+    const { geometry, range, select } = textGeometry('abcdefghij', { focusLine: 1 });
+    select({ kind: 'text', shapeId: range.shapeId, storyId: range.storyId, anchor: 5, focus: 5 });
+    expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({
+      ok: true, rects: [], anchor: { x: 90, y: 75, width: 0.5, height: 10 },
+    });
   });
 
   test('batch reads return the synchronous answers in target order', async () => {

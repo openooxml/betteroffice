@@ -15,7 +15,7 @@ import { createPresentationCommandClient } from '../../../pptx/src/session/comma
 import { registerPresentationCommandHandlers } from '../../../pptx/src/session/commandHost';
 import { initWasm } from '../../../pptx/src/wasm/loader';
 import { SessionFailure } from '../../../../shared/office-session/types';
-import type { PptxReadRequest, SlideDisplayList, TextBoxPrimitive } from '@betteroffice/pptx';
+import type { DeckSnapshot, PptxReadRequest, SlideDisplayList, TextBoxPrimitive } from '@betteroffice/pptx';
 import type {
   PptxWorkerSession, PresentationCommandAck, PresentationCommandClient, PresentationCommandFrame,
   PresentationCommandIntent, PresentationCommandOpenResult, PresentationCommandReadResult,
@@ -23,6 +23,8 @@ import type {
   PresentationCommandSelected, PresentationCommandSelection, PresentationCommandThumbnailResult,
 } from '@betteroffice/pptx/worker';
 import { PptxEditor, pptxPeerlessEditorLoader } from '../PptxEditor';
+import { definePptxPlugin } from '../plugins/definePptxPlugin';
+import type { PptxPluginContext } from '../plugins/types';
 import type { PptxAsyncEditorApi } from './createPeerlessEditorApi';
 import type { PeerlessConfirmedFrame, PeerlessViewSnapshot } from './peerlessViewStore';
 import { peerlessPainterFactories, peerlessSessionOpener, type PeerlessPresentation } from './usePeerlessPresentation';
@@ -34,6 +36,7 @@ import { isCommandAck, isCommandEnvelope } from '../../../../shared/office-sessi
 import type { HostMessage } from '../../../../shared/office-session/protocol';
 import { createPresentationSessionHost } from '../../../pptx/src/session/host';
 import { createLocalEchoPainter } from './localEchoPainter';
+import { peerlessPrerenders } from './workerFramePainter';
 import * as peerlessViewStore from './peerlessViewStore';
 
 const { createPeerlessViewStore, commitComposition, PEERLESS_PENDING_INTENTS } = peerlessViewStore;
@@ -476,6 +479,129 @@ test('p2_peerless_mount_ready_after_first_authoritative_paint', async () => {
   expect(() => legacy.handle).toThrow(pptxWorker.PptxWorkerUnsupportedError);
   view.unmount();
   expect(value.owner.dispose).toHaveBeenCalledTimes(1);
+});
+
+function geometryProbe(client: FakeCommandClient) {
+  const deck = { slides: client.state.slides.map(({ id }) => ({
+    id, shapes: [{ id: 'box', children: [], textStories: [] }],
+  })) } as unknown as DeckSnapshot;
+  Object.assign(client, { access: async () => deck });
+  const bounds = spyOn(Element.prototype, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 960, 540));
+  restorers.push(() => bounds.mockRestore());
+  const contexts: PptxPluginContext<null>[] = [];
+  const plugin = definePptxPlugin<null>({
+    id: 'geometry-probe', createState: () => null,
+    onEvent(context) { contexts.push(context); },
+  });
+  return { plugin, contexts, context: () => contexts[contexts.length - 1] };
+}
+
+test('peerless selection anchor follows the upstream caret after End on a wrapped line', async () => {
+  const value = session();
+  const list = JSON.parse(new TextDecoder().decode(value.client.state.frame.displayList)) as SlideDisplayList;
+  const box = list.primitives[0] as TextBoxPrimitive;
+  const first = box.lines[0];
+  box.lines = [
+    { ...first, end: 2, width: 20, caretStops: first.caretStops.slice(0, 3) },
+    { ...first, start: 2, y: 60, baseline: 75, width: 10,
+      caretStops: [{ position: 2, x: 20 }, { position: 3, x: 30 }] },
+  ];
+  value.client.state.frame = { ...value.client.state.frame,
+    displayList: new TextEncoder().encode(JSON.stringify(list)).buffer };
+  const probe = geometryProbe(value.client);
+  const view = render(<PptxEditor fonts={[]} file={file} showToolbar={false}
+    plugins={[probe.plugin]} />);
+  await waitFor(() => expect(probe.context()?.geometry).toBeTruthy());
+  const input = view.container.querySelector('textarea');
+  if (!input) throw new Error('Expected text input');
+  await act(async () => { input.focus(); fireEvent.keyDown(input, { key: 'End' }); });
+  await waitFor(() => expect(probe.context().snapshot.selection?.target).toMatchObject({ anchor: 2, focus: 2 }));
+  const geometry = probe.context().geometry!;
+  const caret = view.getByTestId('pptx-caret');
+  const rect = { x: Number.parseFloat(caret.style.left), y: Number.parseFloat(caret.style.top),
+    width: 1, height: Number.parseFloat(caret.style.height) };
+  expect(rect).toEqual({ x: 40, y: 40, width: 1, height: 20 });
+  expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({
+    ok: true, rects: [], anchor: geometry.toOverlayRect({ space: 'slide-px', rect }),
+  });
+  expect(geometry.getAnchorGeometry({ kind: 'range', version: geometry.layout.version,
+    slideId: 'slide', shapeId: 'box', storyId: 'story', anchor: 2, focus: 2 })).toMatchObject({
+    ok: true, rects: [], anchor: geometry.toOverlayRect({
+      space: 'slide-px', rect: { x: 20, y: 60, width: 1, height: 20 },
+    }),
+  });
+});
+
+test('peerless prerender presentation invalidates retained geometry until the confirmed frame paints', async () => {
+  const value = session();
+  value.client.state.slides.push({ id: 'other', index: 1, name: null, layoutPartPath: null });
+  let commit: ReturnType<typeof deferred<void>> | undefined;
+  let presented = false;
+  const factory = spyOn(peerlessPainterFactories, 'frame').mockImplementation((canvas, options = {}) => {
+    const painter = createCommandFramePainter(canvas, {
+      ...options,
+      async beforeCommit(current) { await options.beforeCommit?.(current); await commit?.promise; },
+      onCommit(frame, view) {
+        if (options.onCommit) { presented = false; options.onCommit(frame, view); }
+      },
+    });
+    if (options.onCommit) peerlessPrerenders.set(painter, {
+      request() {}, drop() {},
+      present() { presented = true; canvas.getContext('2d')!.clearRect(0, 0, canvas.width, canvas.height); return true; },
+      presented: () => presented,
+      restore() { presented = false; return true; },
+    });
+    return painter;
+  });
+  restorers.push(() => factory.mockRestore());
+  const probe = geometryProbe(value.client);
+  const view = render(<PptxEditor fonts={[]} file={file} showToolbar={false} plugins={[probe.plugin]} />);
+  await waitFor(() => expect(probe.context()?.geometry).toBeTruthy());
+  const retained = probe.context().geometry!;
+  const range = { kind: 'range', version: retained.layout.version,
+    slideId: 'slide', shapeId: 'box', storyId: 'story', anchor: 0, focus: 2 } as const;
+  const targets = [{ kind: 'selection' } as const, range];
+  const input = { space: 'slide-px', rect: { x: 20, y: 40, width: 1, height: 20 } } as const;
+  for (const target of targets) expect(retained.getAnchorGeometry(target).ok).toBe(true);
+  expect(retained.getShapeRect('box')).not.toBeNull();
+  expect(retained.toOverlayRect(input)).not.toBeNull();
+  value.client.hold = true;
+  const other = view.container.querySelector<HTMLButtonElement>('button[data-slide-id="other"]');
+  if (!other) throw new Error('Expected second slide');
+  fireEvent.pointerDown(other, { button: 0, isPrimary: true });
+  fireEvent.click(other);
+  expect(presented).toBe(true);
+  for (const target of targets) expect(retained.getAnchorGeometry(target)).toMatchObject({
+    ok: false, failure: { code: 'layout-unavailable' },
+  });
+  expect(retained.getShapeRect('box')).toBeNull();
+  expect(retained.toOverlayRect(input)).toBeNull();
+  expect(await retained.readAnchorGeometries(targets)).toEqual(targets.map((target) => retained.getAnchorGeometry(target)));
+  await waitFor(() => expect(probe.context().geometry).toBeNull());
+  const activation = value.client.sent.find((intent) => intent.kind === 'activateSlide');
+  if (!activation) throw new Error('Expected slide activation');
+  commit = deferred<void>();
+  await act(async () => {
+    value.client.state = { ...value.client.state, activeSlideId: 'other',
+      selection: { ...textSelection(value.client.state.selection), slideId: 'other' } };
+    value.client.ack(activation.seq, {
+      ...value.client.state.frame, slideId: 'other', slideIndex: 1, epoch: value.client.state.frame.epoch + 1,
+    });
+  });
+  expect(presented).toBe(true);
+  expect(probe.context().geometry).toBeNull();
+  for (const target of targets) expect(retained.getAnchorGeometry(target)).toMatchObject({
+    ok: false, failure: { code: 'layout-unavailable' },
+  });
+  await act(async () => { commit!.resolve(); });
+  await waitFor(() => expect(probe.context().geometry?.layout.slideId).toBe('other'));
+  const geometry = probe.context().geometry!;
+  expect(geometry.getAnchorGeometry({ ...range, slideId: 'other' }).ok).toBe(true);
+  expect(geometry.getShapeRect('box')).not.toBeNull();
+  expect(geometry.toOverlayRect(input)).not.toBeNull();
+  for (const target of targets) expect(retained.getAnchorGeometry(target)).toMatchObject({
+    ok: false, failure: { code: 'layout-unavailable' },
+  });
 });
 
 test('p2_peerless_mount_never_initializes_main_wasm', async () => {

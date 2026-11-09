@@ -14,7 +14,7 @@ import { trackFocus } from '../../../../shared/plugin-host/focusTracker';
 import type { TFunction } from '@betteroffice/pptx-i18n';
 import type { PptxCommandController } from '../commands/createPptxCommandStore';
 import { subscribeShortcuts } from '../commands/shortcutTable';
-import type { PptxPointPosition } from '../PptxEditor';
+import type { PptxPointPosition, PptxTextSelection } from '../PptxEditor';
 import type { PptxPluginEditorAccess } from './createPluginClients';
 import {
   createPptxPluginHost,
@@ -43,6 +43,7 @@ export interface UsePptxPluginHostOptions extends PptxEditorPluginProps {
   /** Proposal review paints a preview over the slide, so no layout is published meanwhile. */
   reviewing: boolean;
   selection: PptxPluginSelection;
+  textSelection: PptxTextSelection | null;
   /** Hit-tests client coordinates while `frame` is the editor's current frame. */
   pointAt(frame: SlideDisplayList, clientX: number, clientY: number): PptxPointPosition | null;
   t: TFunction;
@@ -186,12 +187,13 @@ export function usePptxPluginHost(options: UsePptxPluginHostOptions): PptxPlugin
               presented.canvas.isConnected,
             (frame, clientX, clientY) => latest.current.pointAt(frame, clientX, clientY),
             options.focusRoot?.current ?? layer,
-            () => selection
+            () => selection,
+            { focusLine: latest.current.textSelection?.focusLine }
           )
         : null,
     // `moved` rebuilds the geometry when its elements move without a new frame.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [host, layout, presented, layer, moved]
+    [host, layout, presented, layer, moved, options.textSelection?.focusLine]
   );
   geometryRef.current = geometry;
 

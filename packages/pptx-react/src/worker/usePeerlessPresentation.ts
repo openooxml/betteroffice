@@ -586,7 +586,8 @@ export function usePeerlessPresentation(
             (family) => suppliedFamilies.has(family.trim().toLowerCase())),
           fileGeneration, session: owner, client, store, images, thumbnailImages, collaborationClientId: sessionCollaboration?.clientId,
           visual: { subscribePresentation: subscribeVisual, getSnapshot: () => failedView ?? paintedView ?? getSnapshot() },
-          getVisualSnapshot: () => visual, subscribeVisual,
+          getVisualSnapshot: () => framePainter && peerlessPrerenders.get(framePainter)?.presented() ? null : visual,
+          subscribeVisual,
           get ready() { return whenPainted(); },
           get current() { return current(); },
           get selectionEnabled() { return selectionEnabled(); },
@@ -662,7 +663,9 @@ export function usePeerlessPresentation(
             if (framePainter) peerlessPrerenders.get(framePainter)?.drop();
           },
           presentPrerendered(slideId) {
-            return Boolean(current() && framePainter && peerlessPrerenders.get(framePainter)?.present(slideId, client.state.version));
+            const presented = Boolean(current() && framePainter && peerlessPrerenders.get(framePainter)?.present(slideId, client.state.version));
+            if (presented) notifyVisual();
+            return presented;
           },
           settlePrerendered(slideId) {
             const prerender = framePainter && peerlessPrerenders.get(framePainter);

@@ -73,6 +73,8 @@ export function usePeerlessPluginHost(run: PeerlessPresentation | null, commands
   const visual = useSyncExternalStore(subscribe, snapshot, snapshot);
   const confirmed = visual?.view.confirmed;
   const fit = visual?.fit;
+  const selected = visual?.view.selection;
+  const affinity = selected?.kind === 'object' ? undefined : selected?.affinity;
   const version = confirmed?.frame.version;
   const [shapes, setShapes] = useState<{ run: PeerlessPresentation; version: string; deck: DeckSnapshot } | null>(null);
   useEffect(() => {
@@ -118,7 +120,7 @@ export function usePeerlessPluginHost(run: PeerlessPresentation | null, commands
     };
     return (selection: PptxPluginSelection): PptxPluginGeometry => ({
       layout,
-      ...createAnchorGeometry(layout, indexed, current, toOverlay, getShapeRect, () => selection),
+      ...createAnchorGeometry(layout, indexed, current, toOverlay, getShapeRect, () => selection, { affinity }),
       get viewport() { return slideViewport(stage.current ?? layer, layer); },
       toOverlayRect: (input) => {
         const rect = input?.rect;
@@ -135,7 +137,7 @@ export function usePeerlessPluginHost(run: PeerlessPresentation | null, commands
         return hit ? { ...hit, version: frame.version, layoutId: layout.id } : null;
       },
     });
-  }, [host, managed, reviewing, run, confirmed, fit, canvas, layer, shapes, stage]);
+  }, [host, managed, reviewing, run, confirmed, fit, affinity, canvas, layer, shapes, stage]);
   geometry.current = presentedGeometry;
   useLayoutEffect(() => {
     host.layoutChanged(presentedGeometry?.(null).layout ?? null);
