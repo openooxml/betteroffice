@@ -92,22 +92,55 @@ fn paragraph_texts(session: &EditSessionCore) -> Vec<String> {
 }
 
 #[test]
-fn an_empty_read_answers_as_a_full_read_does() {
-    let read = |session: &EditSessionCore, story: Option<&str>, para_ids: Option<Vec<String>>| {
-        session.engine.doc().read_paragraphs(&ReadParagraphsRequest {
-            story: story.map(str::to_owned),
-            para_ids,
-            view: EditTextView::Accepted,
-        })
+fn an_empty_read_answers_with_the_version_of_a_full_read() {
+    fn read(
+        session: &EditSessionCore,
+        story: Option<&str>,
+        para_ids: Option<Vec<String>>,
+    ) -> Result<crate::target::ReadParagraphsResponse, crate::target::EditRefusal> {
+        session
+            .engine
+            .doc()
+            .read_paragraphs(&ReadParagraphsRequest {
+                story: story.map(str::to_owned),
+                para_ids,
+                view: EditTextView::Accepted,
+            })
+    }
+    let same = |session: &EditSessionCore| {
+        let empty = read(session, None, Some(Vec::new())).unwrap();
+        let full = read(session, None, None).unwrap();
+        assert_eq!(empty.version, full.version);
+        assert!(empty.paragraphs.is_empty());
+        assert!(!full.paragraphs.is_empty());
+        full.version
     };
     let session = core(1);
-    let fresh = read(&session, None, Some(Vec::new()));
-    let full = read(&session, None, None);
-    assert_eq!(fresh.is_ok(), full.is_ok());
-    if let (Ok(fresh), Ok(full)) = (&fresh, &full) {
-        assert_eq!(fresh.version, full.version);
-        assert!(fresh.paragraphs.is_empty());
-    }
+    let seeded: Value = serde_json::from_str(&session.load_json(BODY).unwrap()).unwrap();
+    let para_id = seeded["body"][0].as_str().unwrap().to_owned();
+    session.track_undo();
+    let opened = same(&session);
+    session
+        .insert_text("body", &para_id, 5, "!", None, None)
+        .unwrap();
+    let edited = same(&session);
+    assert_ne!(edited, opened);
+    assert!(session.undo());
+    let undone = same(&session);
+    assert_ne!(undone, edited);
+    let remote = core(2);
+    let doc = session.engine.doc();
+    remote
+        .engine
+        .doc()
+        .apply_update_v1(&doc.encode_state_as_update_v1())
+        .unwrap();
+    remote
+        .insert_text("body", &para_id, 0, "r", None, None)
+        .unwrap();
+    doc.apply_update_v1(&remote.engine.doc().encode_state_as_update_v1())
+        .unwrap();
+    assert_ne!(same(&session), undone);
     assert!(read(&session, Some("missing"), Some(Vec::new())).is_err());
     assert!(read(&session, Some("missing"), None).is_err());
 }
