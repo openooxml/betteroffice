@@ -11,8 +11,9 @@ export function cleanupGuard(cleanup: () => void) {
       done = true;
       try { cleanup(); }
       catch (error) {
-        if (failure instanceof Error && Object.isExtensible(failure)) {
-          Object.defineProperty(failure, 'suppressed', { value: error, configurable: true, writable: true });
+        if (failure instanceof Error) {
+          try { Reflect.defineProperty(failure, 'suppressed', { value: error, configurable: true, writable: true }); }
+          catch { /* the failure stays the one to report */ }
         }
       }
       return failure;

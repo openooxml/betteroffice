@@ -40,3 +40,12 @@ test('a cleanup guard cleans up once and leaves a frozen failure alone', () => {
   expect(cleanup).toHaveBeenCalledTimes(1);
   expect(() => cleanupGuard(cleanup).run()).toThrow('free failed');
 });
+
+test('a cleanup guard keeps a failure whose suppressed property cannot be written', () => {
+  const fixed = Object.defineProperty(new Error('fixed'), 'suppressed', { value: 'prior' });
+  const trapped = new Proxy(new Error('trapped'), { defineProperty() { throw new Error('trap'); } });
+  for (const failure of [fixed, trapped]) {
+    expect(cleanupGuard(() => { throw new Error('free failed'); }).failed(failure)).toBe(failure);
+  }
+  expect((fixed as Error & { suppressed: unknown }).suppressed).toBe('prior');
+});
