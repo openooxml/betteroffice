@@ -27,6 +27,7 @@ import {
   usePptxCommand,
   usePptxCommands,
   type PptxCommandResult,
+  type PptxAnchorGeometryResult,
   type PptxCommandStore,
   type PptxEditorApi,
   type PptxPlugin,
@@ -957,6 +958,68 @@ describe('PptxEditor plugins', () => {
     expect(changes).toEqual([]);
   });
 
+  test('a plugin reads selection anchor geometry after selecting text', async () => {
+    const canvases = fakeContexts();
+    const bounds = spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(
+      () => ({ left: 0, top: 0, width: 640, height: 360, x: 0, y: 0, right: 640, bottom: 360 } as DOMRect)
+    );
+    try {
+      const contexts: PptxPluginContext<null>[] = [];
+      const answers: PptxAnchorGeometryResult[] = [];
+      const plugin = definePptxPlugin<null>({
+        id: 'selection-geometry',
+        createState: () => null,
+        onEvent(context) {
+          contexts.push(context);
+          if (context.snapshot.selection?.target.kind === 'text' && context.geometry) {
+            answers.push(context.geometry.getAnchorGeometry({ kind: 'selection' }));
+          }
+        },
+      });
+      const { api } = await mount({ plugins: [plugin] });
+      await until(() => contexts.some((context) => context.geometry !== null));
+      const content = await read(api());
+      const story = content.stories.find((candidate) => candidate.slideId === content.slides[0].id && candidate.text.length > 3)!;
+      await act(async () => {
+        expect(await last(contexts).navigation.selectText({
+          slideId: story.slideId, shapeId: story.shapeId, storyId: story.storyId, anchor: 3, focus: 1,
+        }, { expectVersion: content.version })).toEqual({ ok: true });
+      });
+      await until(() => answers.some((answer) => answer.ok));
+      const context = last(contexts);
+      const geometry = context.geometry!;
+      const answer = geometry.getAnchorGeometry({ kind: 'selection' });
+      expect(answer.ok).toBe(true);
+      if (!answer.ok) throw new Error(answer.failure.message);
+      expect(answer.rects.length).toBeGreaterThan(0);
+      expect(answer.version).toBe(content.version);
+      expect(answer.layoutId).toBe(context.snapshot.layout!.id);
+      expect(answer).toEqual(geometry.getAnchorGeometry({
+        kind: 'range', version: content.version, slideId: story.slideId,
+        shapeId: story.shapeId, storyId: story.storyId, anchor: 3, focus: 1,
+      }));
+      expect(await geometry.readAnchorGeometries([{ kind: 'selection' }])).toEqual([answer]);
+      await act(async () => {
+        expect(await last(contexts).navigation.selectText({
+          slideId: story.slideId, shapeId: story.shapeId, storyId: story.storyId, anchor: 2, focus: 2,
+        }, { expectVersion: content.version })).toEqual({ ok: true });
+      });
+      await until(() => {
+        const selection = last(contexts).snapshot.selection?.target;
+        return selection?.kind === 'text' && selection.anchor === 2 && selection.focus === 2 && last(contexts).geometry !== null;
+      });
+      expect(last(contexts).geometry!.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: true, rects: [] });
+      const retained = geometry.getAnchorGeometry({ kind: 'selection' });
+      expect(retained.ok).toBe(true);
+      if (!retained.ok) throw new Error(retained.failure.message);
+      expect(retained.rects).toEqual(answer.rects);
+      expect(context.snapshot.selection?.target).toMatchObject({ kind: 'text', anchor: 3, focus: 1 });
+    } finally {
+      bounds.mockRestore();
+      canvases.restore();
+    }
+  });
+
   test('layouts follow the presented frame, its version, slide and zoom', async () => {
     const canvases = fakeContexts();
     try {
@@ -1025,6 +1088,7 @@ describe('PptxEditor plugins', () => {
       const story = content.stories.find(
         (candidate) => candidate.slideId === content.slides[2].id
       )!;
+      const retained = last(contexts).geometry!;
       await act(async () => {
         api().handle.propose('Agent', null, [
           { type: 'replaceText', storyId: story.storyId, start: 0, end: 0, text: 'Proposed ' },
@@ -1033,6 +1097,9 @@ describe('PptxEditor plugins', () => {
       });
       await until(() => marker() === null);
       expect(last(contexts).geometry).toBeNull();
+      expect(retained.getAnchorGeometry({ kind: 'selection' })).toMatchObject({
+        ok: false, failure: { code: 'layout-unavailable' },
+      });
       expect(last(layouts)).toBeNull();
       await act(async () => {
         await api().commands.execute('proposalDiff', { enabled: false });

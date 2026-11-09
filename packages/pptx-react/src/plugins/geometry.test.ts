@@ -4,11 +4,14 @@ import type {
   ShapeSnapshot,
   SlideDisplayList,
   SlidePrimitive,
+  TextBoxPrimitive,
 } from '@betteroffice/pptx';
+import type { PptxGeometryTarget, PptxPluginSelection } from './types';
 import {
   createPluginGeometry,
   EMU_PER_PIXEL,
   pluginLayout,
+  pluginGeometryIndex,
   slideRectToOverlay,
   slideViewport,
   type PresentedSlide,
@@ -226,4 +229,132 @@ test('viewport measures the stage client box relative to the overlay and follows
   expect(slideViewport(stage, layer)).toEqual({ x: -35, y: 87, width: 780, height: 580 });
   layer.getBoundingClientRect = () => box(140, -100, 1280, 720);
   expect(slideViewport(stage, layer)).toEqual({ x: -35, y: 167, width: 780, height: 580 });
+});
+
+function textGeometry(textValue = 'abcdefghij') {
+  const slide = presented();
+  const text: TextBoxPrimitive = {
+    kind: 'textBox', objectId: 1, shapeId: 'title', storyId: 'story',
+    x: 100, y: 50, w: 400, h: 80, anchor: 'top',
+    paragraphs: [{ level: 0, runs: [{ text: textValue, fontFamily: 'Arial', fontSizePt: 12, color: '#000000' }] }],
+    lines: [0, 5].map((start, row) => ({
+      x: 100, y: 50 + row * 20, width: 50, height: 20, baseline: 65 + row * 20,
+      start, end: start + 5, runs: [],
+      caretStops: Array.from({ length: 6 }, (_, index) => ({ position: start + index, x: 100 + index * 10 })),
+    })),
+  };
+  slide.frame = { ...slide.frame, primitives: [text] };
+  const layer = element(box(10, 20, 640, 360));
+  let current = true;
+  let selection: PptxPluginSelection = null;
+  const layout = pluginLayout(slide, 'v1')!;
+  const geometry = createPluginGeometry(layout, slide, element(box(50, 60, 640, 360)), layer,
+    () => current, () => null, layer, () => selection);
+  const range = { kind: 'range', version: 'v1', slideId: layout.slideId,
+    shapeId: 'title', storyId: 'story', anchor: 1, focus: 9 } as const;
+  return {
+    slide, geometry, range,
+    select(target: NonNullable<PptxPluginSelection>['target'] | null) {
+      selection = target ? { slideId: layout.slideId, slide: 1, target } : null;
+    },
+    invalidate() { current = false; },
+  };
+}
+
+describe('plugin anchor geometry', () => {
+  test('maps a two-line text range and its focus-end anchor into overlay pixels', () => {
+    const { geometry, range } = textGeometry();
+    expect(geometry.getAnchorGeometry(range)).toEqual({
+      ok: true,
+      rects: [
+        { x: 95, y: 65, width: 20, height: 10 },
+        { x: 90, y: 75, width: 20, height: 10 },
+      ],
+      anchor: { x: 110, y: 75, width: 0.5, height: 10 },
+      pageRect: { x: 40, y: 40, width: 640, height: 360 },
+      version: 'v1', layoutId: geometry.layout.id,
+    });
+    expect(geometry.getAnchorGeometry({ ...range, anchor: 9, focus: 1 })).toMatchObject({
+      ok: true, anchor: { x: 95, y: 65, width: 0.5, height: 10 },
+    });
+  });
+
+  test('collapsed text has no rectangles and anchors to its caret', () => {
+    const { geometry, range } = textGeometry();
+    expect(geometry.getAnchorGeometry({ ...range, anchor: 2, focus: 2 })).toMatchObject({
+      ok: true, rects: [], anchor: { x: 100, y: 65, width: 0.5, height: 10 },
+    });
+  });
+
+  test('text ranges use UTF-16 story offsets', () => {
+    const { geometry, range } = textGeometry('a😀bcdefgh');
+    expect(geometry.getAnchorGeometry({ ...range, anchor: 1, focus: 3 })).toMatchObject({
+      ok: true,
+      rects: [{ x: 95, y: 65, width: 10, height: 10 }],
+      anchor: { x: 105, y: 65, width: 0.5, height: 10 },
+    });
+  });
+
+  test('refuses ranges read at another version', () => {
+    const { geometry, range } = textGeometry();
+    expect(geometry.getAnchorGeometry({ ...range, version: 'v0' })).toMatchObject({
+      ok: false, failure: { code: 'stale-version' },
+    });
+  });
+
+  test('unknown shapes, stories and invalid offsets are missing targets', () => {
+    const { geometry, range } = textGeometry();
+    for (const target of [
+      { ...range, shapeId: 'unknown' }, { ...range, storyId: 'unknown' },
+      { ...range, anchor: -1 }, { ...range, focus: 11 }, { ...range, focus: Number.NaN },
+    ]) {
+      expect(geometry.getAnchorGeometry(target)).toMatchObject({
+        ok: false, failure: { code: 'missing-target' },
+      });
+    }
+  });
+
+  test('selection resolves text, shapes and slides, and refuses no selection', () => {
+    const { geometry, range, select } = textGeometry();
+    const target = { kind: 'selection' } as const;
+    expect(geometry.getAnchorGeometry(target)).toMatchObject({ ok: false, failure: { code: 'missing-target' } });
+    select({ kind: 'text', shapeId: range.shapeId, storyId: range.storyId, anchor: 9, focus: 1 });
+    expect(geometry.getAnchorGeometry(target)).toEqual(geometry.getAnchorGeometry({ ...range, anchor: 9, focus: 1 }));
+    select({ kind: 'shape', shapeId: 'title' });
+    const rect = geometry.getShapeRect('title');
+    expect(rect).not.toBeNull();
+    expect(geometry.getAnchorGeometry(target)).toMatchObject({ ok: true, rects: [rect], anchor: rect });
+    select({ kind: 'shape', shapeId: 'unknown' });
+    expect(geometry.getAnchorGeometry(target)).toMatchObject({ ok: false, failure: { code: 'missing-target' } });
+    select({ kind: 'slide' });
+    const pageRect = { x: 40, y: 40, width: 640, height: 360 };
+    expect(geometry.getAnchorGeometry(target)).toMatchObject({ ok: true, rects: [pageRect], anchor: pageRect, pageRect });
+  });
+
+  test('retained anchor geometry refuses once its frame is no longer presented', async () => {
+    const { geometry, range, invalidate } = textGeometry();
+    invalidate();
+    for (const target of [range, { kind: 'selection' } as const]) {
+      expect(geometry.getAnchorGeometry(target)).toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
+    }
+    expect(await geometry.readAnchorGeometries([range])).toEqual([geometry.getAnchorGeometry(range)]);
+  });
+
+  test('batch reads return the synchronous answers in target order', async () => {
+    const { geometry, range, select } = textGeometry();
+    select({ kind: 'text', shapeId: range.shapeId, storyId: range.storyId, anchor: 1, focus: 9 });
+    const targets: PptxGeometryTarget[] = [
+      { kind: 'selection' }, range, { ...range, anchor: 2, focus: 2 },
+      { ...range, version: 'old' }, { ...range, shapeId: 'missing' },
+    ];
+    expect(await geometry.readAnchorGeometries(targets)).toEqual(targets.map((target) => geometry.getAnchorGeometry(target)));
+    expect(await geometry.readAnchorGeometries([])).toEqual([]);
+  });
+
+  test('reuses the geometry index of a presented frame', () => {
+    const { slide } = textGeometry();
+    const index = pluginGeometryIndex(slide.frame);
+    expect(pluginGeometryIndex(slide.frame)).toBe(index);
+    expect(pluginGeometryIndex({ ...slide.frame })).not.toBe(index);
+  });
 });

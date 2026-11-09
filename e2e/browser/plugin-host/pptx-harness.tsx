@@ -8,6 +8,7 @@ import {
   type PptxAsyncEditorApi,
   type PptxPluginContext,
   type PptxPluginEvent,
+  type PptxPluginGeometry,
   type PptxPluginNavigationResult,
   type PptxPluginSelection,
 } from '@betteroffice/pptx-react';
@@ -25,11 +26,12 @@ interface ProbeWindow {
   editor: PptxEditorApi | PptxAsyncEditorApi | null;
   navigation: PptxPluginNavigationResult | null;
   selection: PptxPluginSelection;
+  geometry: PptxPluginGeometry | null;
   marks: number;
 }
 
 const workerOnly = new URLSearchParams(location.search).get('engine') === 'worker';
-const probe: ProbeWindow = { events: [], editor: null, navigation: null, selection: null, marks: 0 };
+const probe: ProbeWindow = { events: [], editor: null, navigation: null, selection: null, geometry: null, marks: 0 };
 (window as unknown as { __probe: ProbeWindow }).__probe = probe;
 
 async function refresh(context: ProbeContext) {
@@ -84,6 +86,7 @@ const alignment = definePptxPlugin<ProbeState>({
   },
   panel: { title: 'Probe', placement: 'right', render: ProbePanel },
   overlay: ({ context, geometry }) => {
+    probe.geometry = geometry;
     const slide = geometry.toOverlayRect({
       space: 'slide-px',
       rect: { x: 0, y: 0, width: geometry.layout.width, height: geometry.layout.height },

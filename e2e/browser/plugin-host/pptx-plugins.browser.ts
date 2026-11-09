@@ -2,6 +2,11 @@ import { test, expect, type Page } from 'playwright/test';
 import { pinnedEvaluate } from '../pinned-evaluate';
 import { renderedBox } from '../rendered-box';
 
+type ProbeRect = { x: number; y: number; width: number; height: number };
+type ProbeAnchorResult =
+  | { ok: true; rects: readonly ProbeRect[]; anchor: ProbeRect; pageRect: ProbeRect; version: string; layoutId: string }
+  | { ok: false; failure: { code: string; message: string } };
+
 interface Probe {
   editor: {
     commands: { execute(id: string, args: unknown): Promise<unknown> };
@@ -21,6 +26,10 @@ interface Probe {
   } | null;
   navigation: unknown;
   selection: { target: { kind: string } } | null;
+  geometry: {
+    getAnchorGeometry(target: { kind: 'selection' }): ProbeAnchorResult;
+    getShapeRect(shapeId: string): ProbeRect | null;
+  } | null;
   marks: number;
 }
 
@@ -143,6 +152,40 @@ test('pptx: overlays leave the pointer to the slide beneath them', async ({ page
   const box = await renderedBox(page.locator('[data-probe-shape]'));
   await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
   await expect.poll(async () => (await probe(page)).selection?.target.kind).not.toBe('slide');
+});
+
+test('pptx: text selection anchor rectangles lie inside the selected shape', async ({ page }) => {
+  await open(page, engine);
+  const selected = await pinnedEvaluate(page, async () => {
+    const editor = (window as unknown as { __probe: Probe }).__probe.editor!;
+    const content = await editor.readContent();
+    const story = content.stories.find((candidate) => candidate.slideId === content.slides[0].id && candidate.text.length > 3)!;
+    const ok = await editor.selectText({ slide: 1, shapeId: story.shapeId, storyId: story.storyId, start: 0, end: 3 });
+    return { ok, shapeId: story.shapeId };
+  });
+  expect(selected.ok).toBe(true);
+  await expect.poll(async () => (await probe(page)).selection?.target.kind).toBe('text');
+  const readGeometry = () => pinnedEvaluate(page, (shapeId) => {
+    const geometry = (window as unknown as { __probe: Probe }).__probe.geometry;
+    return geometry ? { answer: geometry.getAnchorGeometry({ kind: 'selection' }), shape: geometry.getShapeRect(shapeId) } : null;
+  }, selected.shapeId);
+  await expect.poll(async () => {
+    const result = await readGeometry();
+    if (!result?.answer.ok || !result.shape || !result.answer.rects.length) return false;
+    const shape = result.shape;
+    return result.answer.rects.every((rect) => rect.x >= shape.x - 1 && rect.y >= shape.y - 1 &&
+      rect.x + rect.width <= shape.x + shape.width + 1 && rect.y + rect.height <= shape.y + shape.height + 1);
+  }).toBe(true);
+  const result = (await readGeometry())!;
+  expect(result.shape).not.toBeNull();
+  if (!result.answer.ok || !result.shape) throw new Error('Missing selection geometry');
+  expect(result.answer.rects.length).toBeGreaterThan(0);
+  for (const rect of result.answer.rects) {
+    expect(rect.x).toBeGreaterThanOrEqual(result.shape.x - 1);
+    expect(rect.y).toBeGreaterThanOrEqual(result.shape.y - 1);
+    expect(rect.x + rect.width).toBeLessThanOrEqual(result.shape.x + result.shape.width + 1);
+    expect(rect.y + rect.height).toBeLessThanOrEqual(result.shape.y + result.shape.height + 1);
+  }
 });
 
 test('pptx: navigation shows the slide and keeps focus in the panel', async ({ page }) => {

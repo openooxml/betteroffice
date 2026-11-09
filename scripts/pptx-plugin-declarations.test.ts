@@ -26,6 +26,8 @@ const CONSUMER = `import {
   definePptxPlugin,
   usePptxCommand,
   type PptxPluginContext,
+  type PptxAnchorGeometryResult,
+  type PptxGeometryTarget,
   type PptxPluginRect,
   type PptxPluginGrant,
   type PptxPluginNavigationResult,
@@ -77,6 +79,24 @@ export const review = definePptxPlugin<State>({
       }
     }
     if (event.type === 'selection-change' && event.selection?.target.kind === 'text') {
+      const target: PptxGeometryTarget = {
+        ...event.selection.target, kind: 'range', version: event.version, slideId: event.selection.slideId,
+      };
+      const anchor: PptxAnchorGeometryResult | undefined = context.geometry?.getAnchorGeometry({ kind: 'selection' });
+      const anchors: PptxAnchorGeometryResult[] | undefined = await context.geometry?.readAnchorGeometries([target, { kind: 'selection' }]);
+      if (anchor?.ok) {
+        const rects: readonly PptxPluginRect[] = anchor.rects;
+        const caret: PptxPluginRect = anchor.anchor;
+        const pageRect: PptxPluginRect = anchor.pageRect;
+        const version: string = anchor.version;
+        const layoutId: string = anchor.layoutId;
+        void [rects, caret, pageRect, version, layoutId];
+      } else if (anchor) {
+        const code: 'stale-version' | 'missing-target' | 'layout-unavailable' = anchor.failure.code;
+        const message: string = anchor.failure.message;
+        void [code, message];
+      }
+      void anchors;
       const result: PptxPluginNavigationResult = await context.navigation.selectText(
         { slideId: event.selection.slideId, ...event.selection.target },
         { expectVersion: event.version }

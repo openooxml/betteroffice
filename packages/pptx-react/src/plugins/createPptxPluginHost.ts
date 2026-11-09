@@ -55,7 +55,7 @@ export type PptxPluginActivation = RuntimeActivation<Definition, Context>;
 export interface PptxPluginHostAccess extends PptxPluginEditorAccess {
   translate(key: TranslationKey): string;
   /** Geometry of the presented frame that shows the current version, or null. */
-  geometry(): PptxPluginGeometry | null;
+  geometry(selection?: PptxPluginSelection): PptxPluginGeometry | null;
 }
 
 export type PptxPluginDocument = Pick<PresentationHandle, 'version' | 'onUpdate'>;
@@ -209,7 +209,7 @@ export function createPptxPluginHost(access: PptxPluginHostAccess | PptxPluginVi
       () => runtime.grant(pluginId) as PptxPluginGrant,
       scopedCommandStore(controller(), scopeFor(invocation))
     );
-    const geometry = access.geometry();
+    const geometry = access.geometry(invocation.snapshot.selection);
     return {
       pluginId,
       snapshot: invocation.snapshot,

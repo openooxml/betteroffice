@@ -64,13 +64,13 @@ export interface PptxPluginHostBinding {
 export function usePptxPluginHost(options: UsePptxPluginHostOptions): PptxPluginHostBinding {
   const latest = useRef(options);
   latest.current = options;
-  const geometryRef = useRef<PptxPluginGeometry | null>(null);
+  const geometryRef = useRef<((selection: PptxPluginSelection) => PptxPluginGeometry) | null>(null);
 
   const [host] = useState(() =>
     createPptxPluginHost({
       ...options.access,
       translate: (key) => latest.current.t(key),
-      geometry: () => geometryRef.current,
+      geometry: (selection = null) => geometryRef.current?.(selection) ?? null,
     })
   );
 
@@ -174,17 +174,19 @@ export function usePptxPluginHost(options: UsePptxPluginHostOptions): PptxPlugin
   const geometry = useMemo(
     () =>
       layout && presented && layer
-        ? createPluginGeometry(
+        ? (selection: PptxPluginSelection) => createPluginGeometry(
             layout,
             presented,
             presented.canvas,
             layer,
             () =>
+              !latest.current.reviewing &&
               host.layoutId() === layout.id &&
               presentedRef.current === presented &&
               presented.canvas.isConnected,
             (frame, clientX, clientY) => latest.current.pointAt(frame, clientX, clientY),
-            options.focusRoot?.current ?? layer
+            options.focusRoot?.current ?? layer,
+            () => selection
           )
         : null,
     // `moved` rebuilds the geometry when its elements move without a new frame.

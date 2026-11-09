@@ -516,8 +516,16 @@ painted frame of the current version, and not during proposal review.
 converts `slide-emu` (9,525 EMU per pixel) or `slide-px` rectangles into pixels
 of the unscaled overlay layer on the slide, `getShapeRect(shapeId)` returns a
 shape's rendered bounds including group descendants, and `getPositionAtPoint`
-hit-tests client coordinates with `version` and `layoutId`. The layer
-sits below selection handles and proposal controls and ignores the pointer
+hit-tests client coordinates with `version` and `layoutId`.
+`geometry.getAnchorGeometry(target)` accepts a `PptxGeometryTarget` of
+`{ kind: "selection" }` or `{ kind: "range", version, slideId, shapeId, storyId, anchor, focus }`,
+using UTF-16 story offsets. Its `PptxAnchorGeometryResult` returns `rects` per line,
+a focus-end `anchor`, the slide's `pageRect` in overlay pixels, `version`, and `layoutId`.
+Collapsed text has empty `rects` and a caret anchor; shape and slide selections use their bounds.
+Failures are `stale-version`, `missing-target`, or `layout-unavailable`.
+`geometry.readAnchorGeometries(targets)` wraps the same synchronous answers in a promise,
+in target order, without pending results. Both methods are experimental.
+The layer sits below selection handles and proposal controls and ignores the pointer
 unless an element sets `pointer-events: auto`. Panels dock left, right or bottom
 of the slide beside the thumbnail rail, and become drawers in a narrow editor.
 Place `<PptxPluginToolbar />` in replacement chrome to keep contributed toolbar
