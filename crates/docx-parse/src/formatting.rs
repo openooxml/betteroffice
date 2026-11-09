@@ -1334,7 +1334,7 @@ fn boolean_child(parent: &XmlElement, name: &str) -> Option<bool> {
 /// A `w:w` percentage the renderers can use. The schema allows 1 to 600. Word
 /// draws a run with 0 at full width, so that and anything else not positive
 /// count as unset; past the maximum is held to it.
-fn text_scale(scale: f64) -> Option<f64> {
+pub fn text_scale(scale: f64) -> Option<f64> {
     (scale > 0.0).then_some(scale.min(MAX_TEXT_SCALE))
 }
 

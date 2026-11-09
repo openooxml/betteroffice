@@ -5348,8 +5348,11 @@ fn lower_character_spacing(attributes: Option<&Attrs>, result: &mut RunFormattin
     if let Some(position) = map_number(map, "position").filter(|value| *value != 0.0) {
         result.position_px = Some(half_points_to_pixels(position));
     }
-    if let Some(scale) = map_number(map, "scale").filter(|value| *value > 0.0 && *value != 100.0) {
-        result.horizontal_scale = Some(scale.min(600.0));
+    if let Some(scale) = map_number(map, "scale")
+        .and_then(docx_parse::formatting::text_scale)
+        .filter(|value| *value != 100.0)
+    {
+        result.horizontal_scale = Some(scale);
     }
     if let Some(kerning) = map_number(map, "kerning").filter(|value| *value > 0.0) {
         result.kerning_min_pt = Some(kerning / 2.0);
