@@ -14,6 +14,12 @@ import zipfile
 from raster import open_pdf, page_fonts, page_size_pt, pdf_metadata, render_page
 from xlsx_reference import export_profile
 
+
+def recorded_pdf_metadata(capture_profile, document):
+    exports = (capture_profile or {}).get('office_pdf_metadata')
+    return exports[0] if exports else pdf_metadata(document)
+
+
 OFFICE = {
     '.docx': ('Word', 'com.microsoft.Word', '''
         open file name inputPath read only true add to recent files false
@@ -119,9 +125,8 @@ end run
                                             width_px=image.width, height_px=image.height))
             if page_bounds:
                 record['capture_profile'] = dict(kind='office-page-bounds', pages=page_bounds)
-            exports = (record.get('capture_profile') or {}).get('office_pdf_metadata')
             record.update(status='ok', pages=len(document), fonts=sorted(fonts),
-                          pdf_metadata=exports[0] if exports else pdf_metadata(document))
+                          pdf_metadata=recorded_pdf_metadata(record.get('capture_profile'), document))
         shutil.copy2(pdf, args.out / 'reference.pdf')
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError, OSError) as error:
         record['error'] = getattr(error, 'stderr', None) or str(error)
