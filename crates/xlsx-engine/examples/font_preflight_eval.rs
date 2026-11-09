@@ -109,7 +109,7 @@ fn evaluate(path: &Path) -> Value {
     };
     let (preflight, preflight_ms) = timed(|| {
         let result = ooxml_font_preflight::xlsx_font_preflight(&bytes)
-            .map_err(|_| "preflight failed".to_owned())?;
+            .map_err(|error| format!("preflight: {error}"))?;
         serde_json::from_str::<Value>(&result.to_json())
             .map_err(|_| "invalid preflight response".to_owned())
     });
@@ -119,11 +119,11 @@ fn evaluate(path: &Path) -> Value {
     let mut errors = Vec::new();
     match preflight {
         Ok(value) => output["preflight"] = value,
-        Err(_) => errors.push("preflight failed"),
+        Err(message) => errors.push(message),
     }
     match engine {
         Ok(value) => output["engine"] = value,
-        Err(_) => errors.push("engine failed"),
+        Err(_) => errors.push("engine failed".to_owned()),
     }
     if errors.is_empty() {
         let expected = face_keys(&output["engine"]);
