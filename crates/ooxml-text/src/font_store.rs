@@ -37,14 +37,18 @@ pub(crate) struct ShapeCacheKey {
     pub features: Vec<([u8; 4], u32)>,
     pub direction: u8,
     pub language: Option<String>,
+    pub before: String,
+    pub after: String,
 }
 
 impl ShapeCacheKey {
     /// Retained bytes for cache accounting: the owned text plus the owned
-    /// key fields callers control (features, language).
+    /// key fields callers control (features, language, context).
     fn weight(&self) -> usize {
         self.text.len()
             + self.language.as_ref().map_or(0, String::len)
+            + self.before.len()
+            + self.after.len()
             + self.features.len() * std::mem::size_of::<([u8; 4], u32)>()
     }
 }
@@ -1159,6 +1163,8 @@ mod tests {
             features: Vec::new(),
             direction: 1,
             language: None,
+            before: String::new(),
+            after: String::new(),
         }
     }
 
