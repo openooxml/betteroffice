@@ -156,7 +156,7 @@ test('skips oversized rasters and SVG before native image decoding', async () =>
 });
 
 test('a picture no engine can draw previews as a placeholder with a warning', async () => {
-  const doc = await openDocx(await imageFixture(new Uint8Array([137, 80, 78, 71, 1, 2, 3, 4]), 'png', 'image/png'));
+  const doc = await openDocx(await imageFixture(new Uint8Array([137, 80, 78, 71, 1, 2, 3, 4]), 'png', 'image/png'), { renderer: renderDocxPage });
   try {
     const preview = await doc.render(1);
     expect([...preview.png.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);

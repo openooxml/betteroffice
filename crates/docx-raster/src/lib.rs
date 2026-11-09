@@ -866,7 +866,14 @@ fn paint_shape<'k>(
         let path = &path;
         parts.push(Box::new(
             move |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>| {
-                paint_picture_placeholder(target, path, Some(path), transform, mask, opacity);
+                paint_picture_placeholder(
+                    target,
+                    path,
+                    Some(PlaceholderBorder::Stroke(path)),
+                    transform,
+                    mask,
+                    opacity,
+                );
             },
         ));
     }
@@ -1662,11 +1669,18 @@ fn build_shape_path(commands: &[ShapePathCommand]) -> Result<Path, String> {
 const PLACEHOLDER_FILL: [u8; 4] = [242, 242, 242, 255];
 const PLACEHOLDER_BORDER: [u8; 4] = [191, 191, 191, 255];
 
+/// Where a placeholder's border goes: a ring filled exactly inside a frame, or
+/// a 1-unit stroke along an outline.
+enum PlaceholderBorder<'p> {
+    Ring(&'p Path),
+    Stroke(&'p Path),
+}
+
 /// What a picture this backend cannot draw paints: a light box with a border, no text.
 fn paint_picture_placeholder(
     pixmap: &mut Pixmap,
     path: &Path,
-    border: Option<&Path>,
+    border: Option<PlaceholderBorder<'_>>,
     transform: Transform,
     mask: Option<&Mask>,
     opacity: f32,
@@ -1682,12 +1696,14 @@ fn paint_picture_placeholder(
     let mut color = Color::from_rgba8(r, g, b, a);
     color.apply_opacity(opacity.clamp(0.0, 1.0));
     paint.set_color(color);
-    if let Some(border) = border {
+    if let Some(PlaceholderBorder::Ring(ring)) = border {
+        pixmap.fill_path(ring, &paint, FillRule::EvenOdd, transform, mask);
+    } else if let Some(PlaceholderBorder::Stroke(outline)) = border {
         let stroke = Stroke {
             width: 1.0,
             ..Stroke::default()
         };
-        pixmap.stroke_path(border, &paint, &stroke, transform, mask);
+        pixmap.stroke_path(outline, &paint, &stroke, transform, mask);
     } else {
         pixmap.fill_path(path, &paint, FillRule::Winding, transform, mask);
     }
@@ -1735,14 +1751,19 @@ fn paint_image<'k>(
         } else {
             PathBuilder::from_rect(rect)
         };
-        let border = Rect::from_xywh(frame.x + 0.5, frame.y + 0.5, frame.w - 1.0, frame.h - 1.0)
-            .and_then(|rect| {
-                if ellipse {
-                    PathBuilder::from_oval(rect)
-                } else {
-                    Some(PathBuilder::from_rect(rect))
-                }
-            });
+        let border = if ellipse {
+            Rect::from_xywh(frame.x + 0.5, frame.y + 0.5, frame.w - 1.0, frame.h - 1.0)
+                .and_then(PathBuilder::from_oval)
+        } else {
+            Rect::from_xywh(frame.x + 1.0, frame.y + 1.0, frame.w - 2.0, frame.h - 2.0).and_then(
+                |inner| {
+                    let mut ring = PathBuilder::new();
+                    ring.push_rect(rect);
+                    ring.push_rect(inner);
+                    ring.finish()
+                },
+            )
+        };
         let frame_mask = if ellipse {
             scratch.budget.charge_masks(
                 scratch
@@ -1757,7 +1778,13 @@ fn paint_image<'k>(
         paint_picture_placeholder(
             pixmap,
             &path,
-            border.as_ref(),
+            border.as_ref().map(|border| {
+                if ellipse {
+                    PlaceholderBorder::Stroke(border)
+                } else {
+                    PlaceholderBorder::Ring(border)
+                }
+            }),
             image_transform,
             frame_mask.as_ref().or(mask),
             opacity,
@@ -3902,6 +3929,53 @@ mod tests {
     }
 
     #[test]
+    fn a_rotated_and_flipped_frame_keeps_a_closed_placeholder_border() {
+        let scene: DisplayList = serde_json::from_value(json!({
+            "pages": [{
+                "pageIndex": 0,
+                "width": 40,
+                "height": 40,
+                "primitives": [{
+                    "kind": "image",
+                    "relId": "rIdMissing",
+                    "x": 10,
+                    "y": 15,
+                    "w": 20,
+                    "h": 10,
+                    "rotationDeg": 90,
+                    "flipH": true
+                }]
+            }]
+        }))
+        .expect("display list");
+        for scale in [1u32, 2] {
+            let rendered = render_pictures(
+                &scene,
+                &ImageMap::new(),
+                &mut ImageCache::default(),
+                scale as f32,
+            );
+            assert_eq!(rendered.skipped_pictures.len(), 1);
+            let at = |x: u32, y: u32| picture_pixel(&rendered.bytes, x * scale, y * scale);
+            assert_eq!(at(20, 20), PLACEHOLDER_FILL);
+            for (x, y) in [(15, 20), (24, 20), (20, 10), (20, 29), (15, 10), (24, 29)] {
+                assert_eq!(
+                    at(x, y),
+                    PLACEHOLDER_BORDER,
+                    "border at {x},{y} scale {scale}"
+                );
+            }
+            for (x, y) in [(14, 20), (25, 20), (20, 9), (20, 30)] {
+                assert_eq!(
+                    at(x, y),
+                    [255, 255, 255, 255],
+                    "outside at {x},{y} scale {scale}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn missing_and_unknown_pictures_paint_scaled_placeholders_and_report_reasons() {
         let scene = picture_scene(&["rIdMissing", "rIdGarbage"]);
         let images = ImageMap::from([("rIdGarbage".to_owned(), b"not an image".to_vec())]);
@@ -4423,7 +4497,7 @@ mod tests {
         put(&mut cache, 1, MAX_IMAGE_CACHE_BYTES / 2);
         put(&mut cache, 2, MAX_IMAGE_CACHE_BYTES / 2);
         put(&mut cache, 3, 1);
-        cache.get(1).expect("key 1 still cached");
+        let _ = cache.get(1).expect("key 1 still cached");
         put(&mut cache, 4, MAX_IMAGE_CACHE_BYTES / 2);
         // `put` bypasses `insert`, so drive the same eviction loop by hand.
         while cache.bytes > MAX_IMAGE_CACHE_BYTES {
