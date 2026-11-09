@@ -32,7 +32,7 @@ pub use ooxml_drawingml::normalize_table_column_widths;
 use serde::Serialize;
 
 use crate::cell_layout::table_compat_leading_shift;
-use crate::types::TableBlock;
+use crate::types::{LayoutBlock, Run, TableBlock, TableRow};
 
 /// Twips per inch.
 const TWIPS_PER_INCH: f64 = 1440.0;
@@ -129,6 +129,88 @@ pub fn resolve_cell_grid(table_block: &TableBlock) -> Vec<ResolvedGridCell> {
         }
     }
     out
+}
+
+/// Removes rows marked `w:hidden` (§17.4.20) whose cells show nothing once
+/// hidden text is gone, as Word does when hidden text is not shown: they take
+/// no height, paint nothing and leave the borders of the rows around them as
+/// if they were never there. The mark only hides the end-of-row mark, so a
+/// marked row with visible content stays. A vertical merge shrinks by the
+/// rows it loses; one that starts in a removed row restarts at its first
+/// remaining row. A table left with no rows takes no space.
+pub fn drop_hidden_rows(table: &mut TableBlock) {
+    let hidden: Vec<bool> = table
+        .rows
+        .iter()
+        .map(|row| row.hidden == Some(true) && !row_shows_content(row))
+        .collect();
+    if !hidden.contains(&true) {
+        return;
+    }
+    let grid = resolve_cell_grid(table);
+    let mut restarted = Vec::new();
+    for cell in grid.iter().filter(|cell| cell.row_span > 1) {
+        let end = (cell.row_index + cell.row_span).min(hidden.len());
+        let mut visible = (cell.row_index..end).filter(|row| !hidden[*row]);
+        let first = visible.next();
+        let span = Some((1 + visible.count()) as f64);
+        let source = &mut table.rows[cell.row_index].cells[cell.cell_index];
+        if !hidden[cell.row_index] {
+            source.row_span = span;
+        } else if let Some(first) = first {
+            let mut moved = source.clone();
+            moved.row_span = span;
+            restarted.push((first, cell.column_index, moved));
+        }
+    }
+    restarted.sort_by_key(|(row, column, _)| (*row, *column));
+    let mut inserted = 0;
+    let mut previous_row = None;
+    for (row, column, cell) in restarted {
+        if previous_row != Some(row) {
+            previous_row = Some(row);
+            inserted = 0;
+        }
+        let before = grid
+            .iter()
+            .filter(|other| other.row_index == row && other.column_index < column)
+            .count();
+        table.rows[row].cells.insert(before + inserted, cell);
+        inserted += 1;
+    }
+    let mut index = 0;
+    table.rows.retain(|_| {
+        index += 1;
+        !hidden[index - 1]
+    });
+}
+
+fn row_shows_content(row: &TableRow) -> bool {
+    row.cells
+        .iter()
+        .any(|cell| cell.blocks.iter().any(block_shows_content))
+}
+
+fn block_shows_content(block: &LayoutBlock) -> bool {
+    match block {
+        LayoutBlock::Paragraph(paragraph) => {
+            paragraph.runs.iter().any(|run| match run {
+                Run::Text(run) => !run.text.is_empty(),
+                _ => true,
+            }) || paragraph.attrs.as_ref().is_some_and(|attrs| {
+                attrs.list_marker_hidden != Some(true)
+                    && attrs
+                        .list_marker
+                        .as_deref()
+                        .is_some_and(|marker| !marker.is_empty())
+            })
+        }
+        LayoutBlock::Table(table) => table.rows.iter().any(row_shows_content),
+        LayoutBlock::SectionBreak(_) | LayoutBlock::PageBreak(_) | LayoutBlock::ColumnBreak(_) => {
+            false
+        }
+        _ => true,
+    }
 }
 
 /// Total grid columns: the furthest column any cell reaches, and every row's
