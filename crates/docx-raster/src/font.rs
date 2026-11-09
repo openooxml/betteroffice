@@ -1020,11 +1020,7 @@ fn parse_font(font: &str) -> Result<FontSpec, String> {
     }
     let family_start = size_index + size_token.len();
     let family_list = font[family_start..].trim();
-    let family = first_font_family(family_list)
-        .trim()
-        .trim_matches(['\'', '"'])
-        .trim()
-        .to_string();
+    let family = docx_layout::measure_blocks::css_primary_family(family_list).to_string();
     if family.is_empty() {
         return Err(format!("CSS font shorthand has no family: {font}"));
     }
@@ -1035,19 +1031,6 @@ fn parse_font(font: &str) -> Result<FontSpec, String> {
         italic,
         small_caps,
     })
-}
-
-fn first_font_family(value: &str) -> &str {
-    let mut quote = None;
-    for (index, character) in value.char_indices() {
-        match character {
-            '\'' | '"' if quote == Some(character) => quote = None,
-            '\'' | '"' if quote.is_none() => quote = Some(character),
-            ',' if quote.is_none() => return &value[..index],
-            _ => {}
-        }
-    }
-    value
 }
 
 fn text_rect(run: &TextRunPrimitive, size: f32) -> Result<FRect, String> {

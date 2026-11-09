@@ -2485,7 +2485,7 @@ fn missing_font_chains<'a>(
 ) -> Vec<String> {
     let chains = measurement.get("fontChains");
     let defaults = measurement.get("defaults").cloned().unwrap_or_default();
-    docx_layout::measure_blocks::collect_font_requirements(
+    docx_layout::measure_blocks::collect_measured_font_requirements(
         blocks,
         docx_layout::measure_blocks::default_font_family(&defaults),
     )

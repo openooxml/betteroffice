@@ -3185,13 +3185,35 @@ fn chart_drawing_anchored(chart: &Value) -> bool {
             .is_some_and(|wrap_type| wrap_type != "inline")
 }
 
+/// Replaces `+mj-*` and `+mn-*` typefaces in a chart's layout copy with the
+/// theme's fonts; the chart part keeps the references.
+fn resolve_chart_theme_fonts(value: &mut Value, theme: Option<&docx_parse::Theme>) {
+    match value {
+        Value::Array(items) => items
+            .iter_mut()
+            .for_each(|item| resolve_chart_theme_fonts(item, theme)),
+        Value::Object(fields) => {
+            if let Some(Value::String(font)) = fields.get_mut("font")
+                && (font.starts_with("+mj-") || font.starts_with("+mn-"))
+            {
+                *font = docx_parse::resolve_theme_font_ref(theme, font);
+            }
+            fields
+                .values_mut()
+                .for_each(|field| resolve_chart_theme_fonts(field, theme));
+        }
+        _ => {}
+    }
+}
+
 fn lower_chart_block(
     values: &std::collections::HashMap<String, Any>,
     pm_start: Option<u64>,
     env: &RenderEnv,
 ) -> Option<ChartBlock> {
-    let chart = map_string(values, "chartJson")
+    let mut chart = map_string(values, "chartJson")
         .and_then(|value| serde_json::from_str::<Value>(&value).ok())?;
+    resolve_chart_theme_fonts(&mut chart, env.font_theme.as_ref());
     let (width, height) = constrain_to_page(
         map_number(values, "width")
             .filter(|value| *value != 0.0)
@@ -6498,6 +6520,33 @@ mod tests {
     fn yrs_attrs(value: Value) -> Attrs {
         let value = crate::seed::any_from_value(value).unwrap();
         attrs_from_any(Some(&value))
+    }
+
+    #[test]
+    fn chart_theme_typefaces_lower_to_the_theme_fonts() {
+        let mut theme = docx_parse::Theme::default();
+        theme.font_scheme.major_font.latin = "Theme Major".to_owned();
+        theme.font_scheme.minor_font.latin = "Theme Minor".to_owned();
+        let env = RenderEnv {
+            font_theme: Some(theme),
+            ..RenderEnv::default()
+        };
+        let chart = json!({
+            "chartType": "column",
+            "text": {"font": "+mn-lt", "bold": true},
+            "titleText": {"font": "+mj-lt"},
+            "legend": {"text": {"font": "Georgia"}},
+            "series": [{"name": "+mn-lt"}]
+        });
+        let values = std::collections::HashMap::from([(
+            "chartJson".to_owned(),
+            Any::from(chart.to_string()),
+        )]);
+        let block = lower_chart_block(&values, None, &env).unwrap();
+        assert_eq!(block.chart["text"]["font"], json!("Theme Minor"));
+        assert_eq!(block.chart["titleText"]["font"], json!("Theme Major"));
+        assert_eq!(block.chart["legend"]["text"]["font"], json!("Georgia"));
+        assert_eq!(block.chart["series"][0]["name"], json!("+mn-lt"));
     }
 
     #[test]
