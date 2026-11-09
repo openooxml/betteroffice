@@ -803,6 +803,7 @@
     "footerLabel": "Page footer",
     "chartNoData": "No data",
     "pictureName": "Picture",
+    "bulletMarker": "bullet",
     "selected": "Selected",
     "selectionCleared": "Selection cleared",
     "commentedText": "Commented text",
