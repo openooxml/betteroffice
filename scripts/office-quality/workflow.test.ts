@@ -203,6 +203,7 @@ const steps = Object.entries<any>(workflow.jobs).flatMap(([job, definition]) =>
 const CORPUS_FREE = new Set(['build-native.mjs', 'build-format.mjs', 'build-roundtrip.mjs', 'native-fonts.ts',
   'install-libreoffice.sh', 'asset-cache.mjs', 'publish-renders.mjs', 'private-store.mjs']);
 const BINARY_ARTIFACTS = /^(docx-native-\$\{\{ matrix\.channel \}\}|docx-native-fonts|xlsx-native-\$\{\{ matrix\.channel \}\}|pptx-native-\$\{\{ matrix\.channel \}\}|roundtrip-native-\$\{\{ matrix\.format \}\}-\$\{\{ matrix\.channel \}\})$/;
+const README = "${{ (!inputs.private_corpus && !inputs.report_only && inputs.corpus_origin == '' && inputs.samples == '' && inputs.collection == 'office-quality') || (inputs.private_corpus && inputs.publish_readme && !inputs.report_only) }}";
 const PRIVATE_OFF = /(^|&& |^\$\{\{ )!inputs\.private_corpus( &&|$| \}\}$)/;
 
 test('private corpus runs are an explicit input that refuses sample lists and render publishing', () => {
@@ -251,8 +252,9 @@ test('private runs upload no per-document artifact and touch no asset cache, ren
     }
     if (uses.startsWith('actions/cache') && step.with.path.includes('fidelity-assets') || step.id === 'asset-cache' || String(step.run ?? '').includes('publish-renders.mjs') ||
         ['oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6'].includes(uses) && job === 'publish' ||
-        ['Replace the generated README section', 'Detect a changed report'].includes(step.name))
+        false)
       expect({ job, name: step.name ?? uses, if: step.if }).toEqual({ job, name: step.name ?? uses, if: expect.stringMatching(PRIVATE_OFF) });
+    if (['Replace the generated README section', 'Detect a changed report'].includes(step.name)) expect(step.if).toBe(README);
     const cache = step.env?.QUALITY_ASSET_CACHE;
     if (cache !== undefined) expect(cache).toStartWith('${{ !inputs.private_corpus && ');
   }
@@ -383,7 +385,18 @@ test('the pin step refuses private runs on another branch or commit', async () =
 });
 
 const AGGREGATE_ONLY = '${{ runner.temp }}/fidelity-report/section.md\n${{ runner.temp }}/fidelity-report/aggregate.json\n';
-const README = "${{ !inputs.private_corpus && !inputs.report_only && inputs.corpus_origin == '' && inputs.samples == '' && inputs.collection == 'office-quality' }}";
+test('a private run commits the README only when publish_readme asks for it', () => {
+  expect(workflow.on.workflow_dispatch.inputs.publish_readme).toEqual({
+    description: "Private corpus run: commit this run's aggregate-only section to the README (the owner's decision)",
+    default: false, required: false, type: 'boolean',
+  });
+  const guard = prepare.steps.find((step: any) => step.name === 'Keep README publishing to private runs');
+  expect(guard.if).toBe('inputs.publish_readme && (!inputs.private_corpus || inputs.report_only)');
+  expect(guard.run).toContain('exit 1');
+  expect(prepare.steps.indexOf(guard)).toBeLessThan(prepare.steps.findIndex((step: any) => step.id === 'plan'));
+  const merge = publish.steps.find((step: any) => String(step.run ?? '').includes('merge.mjs'));
+  expect(merge.env?.QUALITY_PRIVATE ?? workflow.env.QUALITY_PRIVATE).toBe("${{ inputs.private_corpus && 'true' || 'false' }}");
+});
 
 test('only a default showcase run commits the README; report-only runs publish nothing', () => {
   expect(workflow.on.workflow_dispatch.inputs.report_only).toEqual({
