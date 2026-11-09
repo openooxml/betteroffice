@@ -10,6 +10,19 @@ use napi::{Env, Error, JsValue, Result, Status, Unknown, ValueType};
 use napi_derive::napi;
 use xlsx_engine::{Document, EngineError, ErrorKind, Host, SnapshotBuilder};
 
+#[napi(catch_unwind, js_name = "font_preflight")]
+pub fn font_preflight(env: Env, bytes: Uint8Array) -> Result<String> {
+    ooxml_font_preflight::xlsx_font_preflight(&bytes)
+        .map(|result| result.to_json())
+        .map_err(|error| {
+            let message = error.to_string();
+            match env.throw(&message) {
+                Ok(()) => Error::new(Status::PendingException, message),
+                Err(error) => error,
+            }
+        })
+}
+
 /// Internal, called by the package loader.
 #[napi(catch_unwind, js_name = "configureFontPacks")]
 pub fn configure_font_packs(

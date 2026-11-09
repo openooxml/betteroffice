@@ -553,6 +553,13 @@ jobs:
           ls packages/pptx/dist/*.d.ts | sed 's#.*/##' > "$RUNNER_TEMP/pptx-wasm-declarations"
           ls bindings/pptx-native/dist/*.d.ts | sed 's#.*/##' | diff "$RUNNER_TEMP/pptx-wasm-declarations" -
           while read -r file; do cmp "packages/pptx/dist/$file" "bindings/pptx-native/dist/$file"; done < "$RUNNER_TEMP/pptx-wasm-declarations"
+          for format in pptx xlsx; do
+            asset_chunks=$(grep -rlF --include='*.js' "./generated/preflight/${format}_preflight_bg.wasm" "packages/$format/dist")
+            test -n "$asset_chunks"
+            while IFS= read -r chunk; do
+              test "$(dirname "$chunk")" = "packages/$format/dist"
+            done <<< "$asset_chunks"
+          done
           (cd packages/docx && bunx tsup)
           for asset in edit/docx_edit parse/docx_parse query/docx_query opc/ooxml_opc preflight/docx_preflight; do
             asset_chunks=$(grep -rlF --include='*.mjs' "./generated/${asset}_bg.wasm" packages/docx/dist)
@@ -584,6 +591,8 @@ jobs:
           bun scripts/check-engine-surface.ts docx-parse
           bun scripts/check-engine-surface.ts docx-query
           bun scripts/check-engine-surface.ts docx-opc
+          bun scripts/check-engine-surface.ts pptx-preflight
+          bun scripts/check-engine-surface.ts xlsx-preflight
           bun scripts/check-engine-surface.ts docx-preflight
           bun scripts/check-engine-surface.ts pptx-metafile
 

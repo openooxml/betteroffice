@@ -1,3 +1,5 @@
+import initPreflight, { font_preflight as wasmFontPreflight } from '../../packages/xlsx/src/wasm/generated/preflight/xlsx_preflight.js';
+import { fontPreflightFixture } from '../../packages/xlsx/src/wasm/__fixtures__/fontPreflight';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -18,6 +20,9 @@ const viewport = JSON.stringify({ x: 0, y: 0, width: 300, height: 120 });
 const withoutVersion = (json: string) => json.replace(/"version":"[0-9a-f]{32}-\d+"/g, '"version":""');
 
 beforeAll(async () => {
+  await initPreflight({
+    module_or_path: readFileSync(new URL('../../packages/xlsx/src/wasm/generated/preflight/xlsx_preflight_bg.wasm', import.meta.url)),
+  });
   await initWasm({
     module_or_path: readFileSync(new URL('../../packages/xlsx/src/wasm/generated/xlsx_wasm_bg.wasm', import.meta.url)),
   });
@@ -776,4 +781,15 @@ describe('control characters in formulas through applyOpsJson', () => {
     expect(sheet).toContain('<f>(&quot;typed&quot;&amp;CHAR(1))</f>');
     expect(sheet).not.toContain('nul');
   });
+});
+
+test('standalone font preflight has native and wasm parity on synthetic bytes', async () => {
+  const nativePreflight = (native as unknown as { font_preflight: typeof wasmFontPreflight }).font_preflight;
+  const bytes = await fontPreflightFixture();
+  const expected = JSON.parse(wasmFontPreflight(bytes));
+  expect(expected.complete).toBe(true);
+  expect(expected.faces.length).toBeGreaterThan(0);
+  expect(JSON.parse(nativePreflight(bytes))).toEqual(expected);
+  const invalid = new Uint8Array([1, 2, 3]);
+  expectThrownParity(() => wasmFontPreflight(invalid), () => nativePreflight(invalid));
 });

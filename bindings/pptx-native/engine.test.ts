@@ -1,3 +1,5 @@
+import initPreflight, { font_preflight as wasmFontPreflight } from '../../packages/pptx/src/wasm/generated/preflight/pptx_preflight.js';
+import { fontPreflightFixture } from '../../packages/pptx/src/wasm/__fixtures__/fontPreflight';
 import { readFileSync } from 'node:fs';
 import { beforeAll, describe, expect, test } from 'bun:test';
 import JSZip from 'jszip';
@@ -32,6 +34,9 @@ type Snapshot = {
 let wasmMemory: WebAssembly.Memory;
 
 beforeAll(async () => {
+  await initPreflight({
+    module_or_path: readFileSync(new URL('../../packages/pptx/src/wasm/generated/preflight/pptx_preflight_bg.wasm', import.meta.url)),
+  });
   ({ memory: wasmMemory } = await initWasm({
     module_or_path: readFileSync(new URL('../../packages/pptx/src/wasm/generated/pptx_wasm_bg.wasm', import.meta.url)),
   }));
@@ -844,4 +849,15 @@ test.each(['setSlideLayout', 'setSlideBackground'] as const)('%s proposal JSON, 
     for (const renderer of renderers) renderer.free();
     for (const doc of docs) doc.free();
   }
+});
+
+test('standalone font preflight has native and wasm parity on synthetic bytes', async () => {
+  const nativePreflight = (native as unknown as { font_preflight: typeof wasmFontPreflight }).font_preflight;
+  const bytes = await fontPreflightFixture();
+  const expected = JSON.parse(wasmFontPreflight(bytes, 0));
+  expect(expected.complete).toBe(true);
+  expect(expected.faces.length).toBeGreaterThan(0);
+  expect(JSON.parse(nativePreflight(bytes, 0))).toEqual(expected);
+  const invalid = new Uint8Array([1, 2, 3]);
+  expectThrownParity(() => wasmFontPreflight(invalid, 0), () => nativePreflight(invalid, 0));
 });

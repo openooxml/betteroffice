@@ -1,7 +1,21 @@
+#[cfg(feature = "docx")]
 mod collect;
+#[cfg(feature = "docx")]
 mod map;
+#[cfg(any(feature = "pptx", feature = "xlsx"))]
+mod model;
+#[cfg(feature = "pptx")]
+mod pptx;
+#[cfg(feature = "docx")]
 mod properties;
+#[cfg(feature = "xlsx")]
+mod xlsx;
 mod xml;
+
+#[cfg(feature = "pptx")]
+pub use pptx::pptx_font_preflight;
+#[cfg(feature = "xlsx")]
+pub use xlsx::{OPENING_VIEWPORT_COLUMNS, OPENING_VIEWPORT_ROWS, xlsx_font_preflight};
 mod zip;
 
 use std::collections::BTreeSet;
@@ -10,8 +24,11 @@ use std::fmt;
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
+#[cfg(feature = "docx")]
 use collect::{Collector, Numbering, Scan};
+#[cfg(feature = "docx")]
 use map::Map;
+#[cfg(feature = "docx")]
 use properties::{Props, Styles, Theme};
 use xml::Node;
 use zip::Zip;
@@ -34,17 +51,21 @@ pub struct FontPreflight {
 pub enum PreflightError {
     Zip,
     Xml,
+    #[cfg(feature = "docx")]
     MissingDocument,
+    MissingPart,
     Limit,
 }
 
 impl fmt::Display for PreflightError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
-            Self::Zip => "Invalid or unsupported DOCX ZIP",
-            Self::Xml => "Invalid or unsupported DOCX XML",
+            Self::Zip => "Invalid or unsupported OOXML ZIP",
+            Self::Xml => "Invalid or unsupported OOXML XML",
+            #[cfg(feature = "docx")]
             Self::MissingDocument => "Missing word/document.xml",
-            Self::Limit => "DOCX preflight limit exceeded",
+            Self::MissingPart => "Missing required OOXML part",
+            Self::Limit => "OOXML preflight limit exceeded",
         })
     }
 }
@@ -123,6 +144,7 @@ impl Parts<'_> {
 }
 
 pub(crate) const MAX_RELATIONSHIPS: usize = 4096;
+#[cfg(feature = "docx")]
 const MAX_REFERENCES: usize = 4096;
 
 struct Relationship {
@@ -131,7 +153,11 @@ struct Relationship {
     target: String,
 }
 
-fn relationships(root: Option<&Node>, complete: &mut bool) -> Vec<Relationship> {
+fn relationships_from(
+    root: Option<&Node>,
+    directory: &str,
+    complete: &mut bool,
+) -> Vec<Relationship> {
     let mut result = Vec::new();
     let mut ids = BTreeSet::new();
     for (index, node) in root.into_iter().flat_map(|node| &node.children).enumerate() {
@@ -155,7 +181,10 @@ fn relationships(root: Option<&Node>, complete: &mut bool) -> Vec<Relationship> 
         let mut segments = if target.starts_with('/') {
             Vec::new()
         } else {
-            vec!["word"]
+            directory
+                .split('/')
+                .filter(|part| !part.is_empty())
+                .collect()
         };
         let mut valid = true;
         for segment in target.split('/') {
@@ -180,6 +209,7 @@ fn relationships(root: Option<&Node>, complete: &mut bool) -> Vec<Relationship> 
     result
 }
 
+#[cfg(feature = "docx")]
 fn reference(set: &mut BTreeSet<String>, key: String, complete: &mut bool) {
     if set.len() < MAX_REFERENCES || set.contains(&key) {
         set.insert(key);
@@ -188,6 +218,7 @@ fn reference(set: &mut BTreeSet<String>, key: String, complete: &mut bool) {
     }
 }
 
+#[cfg(feature = "docx")]
 fn references(
     node: &Node,
     header_footer: &mut BTreeSet<String>,
@@ -212,6 +243,7 @@ fn references(
     }
 }
 
+#[cfg(feature = "docx")]
 fn uses_numbering(node: &Node, styles: &Styles, complete: &mut bool) -> bool {
     if node.name == "w:p" {
         let ppr = node.child("w:pPr");
@@ -232,6 +264,7 @@ fn uses_numbering(node: &Node, styles: &Styles, complete: &mut bool) -> bool {
         .any(|node| uses_numbering(node, styles, complete))
 }
 
+#[cfg(feature = "docx")]
 pub fn docx_font_preflight(bytes: &[u8]) -> Result<FontPreflight, PreflightError> {
     let mut parts = Parts {
         zip: Zip::new(bytes)?,
@@ -245,7 +278,7 @@ pub fn docx_font_preflight(bytes: &[u8]) -> Result<FontPreflight, PreflightError
         return Err(PreflightError::Xml);
     }
     let rels = parts.part("word/_rels/document.xml.rels", &mut complete)?;
-    let rels = relationships(rels.as_ref(), &mut complete);
+    let rels = relationships_from(rels.as_ref(), "word", &mut complete);
     let target = |kind, default: &str| {
         rels.iter()
             .find(|rel| rel.kind == kind)
@@ -407,7 +440,7 @@ pub fn docx_font_preflight(bytes: &[u8]) -> Result<FontPreflight, PreflightError
 }
 
 /// wasm wrapper over [`docx_font_preflight`]: DOCX bytes in, font requirements JSON out.
-#[cfg(feature = "wasm")]
+#[cfg(all(feature = "wasm", feature = "docx"))]
 #[wasm_bindgen]
 pub fn font_preflight(bytes: &[u8]) -> Result<String, JsValue> {
     docx_font_preflight(bytes)
@@ -415,16 +448,40 @@ pub fn font_preflight(bytes: &[u8]) -> Result<String, JsValue> {
         .map_err(|error| JsValue::from_str(&error.to_string()))
 }
 
+#[cfg(feature = "docx")]
 fn join(prefix: &str, value: &str) -> String {
     let mut result = prefix.to_owned();
     result.push_str(value);
     result
 }
 
+#[cfg(feature = "docx")]
 fn normal_note(node: &Node) -> bool {
     matches!(node.name, "w:footnote" | "w:endnote")
         && node.attr("type").is_none_or(|kind| kind == "normal")
 }
 
+#[cfg(all(feature = "wasm", feature = "pptx", not(feature = "docx")))]
+#[wasm_bindgen]
+pub fn font_preflight(bytes: &[u8], active_slide: u32) -> Result<String, JsValue> {
+    pptx_font_preflight(bytes, active_slide as usize)
+        .map(|result| result.to_json())
+        .map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
+#[cfg(all(
+    feature = "wasm",
+    feature = "xlsx",
+    not(any(feature = "docx", feature = "pptx"))
+))]
+#[wasm_bindgen]
+pub fn font_preflight(bytes: &[u8]) -> Result<String, JsValue> {
+    xlsx_font_preflight(bytes)
+        .map(|result| result.to_json())
+        .map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
 #[cfg(test)]
+mod test_support;
+#[cfg(all(test, feature = "docx"))]
 mod tests;

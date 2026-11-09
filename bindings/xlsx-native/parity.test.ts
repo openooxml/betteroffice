@@ -1,3 +1,4 @@
+import { fontPreflightFixture } from '../../packages/xlsx/src/wasm/__fixtures__/fontPreflight';
 // Normalization: ZIP container headers, entry order, directory entries and compression only.
 // These can differ between Rust targets; every part name and uncompressed byte must match.
 // Both opens recalculate with nowSerial=45000.75 and randSeed=42; the fixture and edits contain no volatile functions.
@@ -238,4 +239,12 @@ describe('xlsx native/wasm package parity', () => {
       wasmWorkbook.dispose();
     }
   });
+});
+
+test('standalone font preflight matches through both package entries', async () => {
+  const bytes = await fontPreflightFixture();
+  const wasmCore = await import('../../packages/xlsx/src/index');
+  const nativeCore = await import('./dist/index.js') as unknown as typeof wasmCore;
+  await nativeCore.preloadPreflightWasm();
+  expect(await nativeCore.fontPreflight(bytes)).toEqual(await wasmCore.fontPreflight(bytes));
 });
