@@ -1531,7 +1531,6 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
       const owner = answer(b.id, 'b');
       return other === 'removed' ? owner?.ok === false : owner?.ok === true && Math.abs(owner.anchor.width - 75) < 0.5;
     };
-    // A layout at the edited version can come from before the host saw the owner change.
     await waitFor(() => geometry()?.layout.version === changed.version && answer(a.id, 'a')?.ok === true && settled(), owners);
     await act(async () => { await ref.current!.flushPendingInput(); await ref.current!.readParagraphs({ view: 'accepted' }); });
     const retained = answer(a.id, 'a');
