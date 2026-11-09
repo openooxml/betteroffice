@@ -587,6 +587,8 @@
     "noDocumentLoaded": "Belum ada dokumen yang dimuat",
     "failedToLoad": "Gagal Memuat Dokumen",
     "failedToLoadDescription": "Berkas mungkin rusak, atau menggunakan sesuatu yang belum dapat dibaca editor ini.",
+    "failedToLoadDamaged": "File rusak atau bukan dokumen Word yang lengkap.",
+    "failedToLoadUnsupported": "Dokumen ini menggunakan sesuatu yang belum dapat dibaca editor ini.",
     "editorUnavailable": "Editor tidak dapat dimuat",
     "editorUnavailableDescription": "Periksa koneksi Anda, lalu muat ulang halaman.",
     "reloadPage": "Muat ulang halaman",

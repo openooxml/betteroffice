@@ -587,6 +587,8 @@
     "noDocumentLoaded": "Aucun document chargé",
     "failedToLoad": "Échec du chargement du document",
     "failedToLoadDescription": "Le fichier est peut-être endommagé ou utilise un élément que cet éditeur ne peut pas encore lire.",
+    "failedToLoadDamaged": "Le fichier est endommagé ou n'est pas un document Word complet.",
+    "failedToLoadUnsupported": "Ce document utilise un élément que cet éditeur ne sait pas encore lire.",
     "editorUnavailable": "L’éditeur n’a pas pu se charger",
     "editorUnavailableDescription": "Vérifiez votre connexion, puis rechargez la page.",
     "reloadPage": "Recharger la page",

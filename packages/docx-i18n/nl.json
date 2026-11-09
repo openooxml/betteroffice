@@ -587,6 +587,8 @@
     "noDocumentLoaded": "Geen document geladen",
     "failedToLoad": "Kan dit document niet openen",
     "failedToLoadDescription": "Het bestand is mogelijk beschadigd, of gebruikt iets dat deze editor nog niet kan lezen.",
+    "failedToLoadDamaged": "Het bestand is beschadigd of is geen volledig Word-document.",
+    "failedToLoadUnsupported": "Dit document gebruikt iets dat deze editor nog niet kan lezen.",
     "editorUnavailable": "De editor kan niet worden geladen",
     "editorUnavailableDescription": "Controleer uw verbinding en laad de pagina opnieuw.",
     "reloadPage": "Pagina opnieuw laden",

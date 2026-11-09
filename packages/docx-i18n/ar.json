@@ -587,6 +587,8 @@
     "noDocumentLoaded": "لم يتم تحميل أي مستند",
     "failedToLoad": "تعذر فتح هذا المستند",
     "failedToLoadDescription": "قد يكون الملف تالفًا، أو يستخدم شيئًا لا يستطيع هذا المحرر قراءته بعد.",
+    "failedToLoadDamaged": "الملف تالف أو ليس مستند Word كاملاً.",
+    "failedToLoadUnsupported": "يستخدم هذا المستند شيئًا لا يستطيع هذا المحرر قراءته بعد.",
     "editorUnavailable": "تعذر تحميل المحرر",
     "editorUnavailableDescription": "تحقق من اتصالك، ثم أعد تحميل الصفحة.",
     "reloadPage": "إعادة تحميل الصفحة",

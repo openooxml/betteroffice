@@ -587,6 +587,8 @@
     "noDocumentLoaded": "לא נטען מסמך",
     "failedToLoad": "טעינת המסמך נכשלה",
     "failedToLoadDescription": "ייתכן שהקובץ פגום, או שהוא משתמש במשהו שעורך זה עדיין אינו יכול לקרוא.",
+    "failedToLoadDamaged": "הקובץ פגום או שאינו מסמך Word שלם.",
+    "failedToLoadUnsupported": "מסמך זה משתמש במשהו שהעורך הזה עדיין לא יודע לקרוא.",
     "editorUnavailable": "טעינת העורך נכשלה",
     "editorUnavailableDescription": "בדוק את החיבור, ולאחר מכן טען מחדש את העמוד.",
     "reloadPage": "טען מחדש את העמוד",
