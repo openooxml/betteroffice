@@ -15,14 +15,17 @@ use fixture::{FONT, p, r, region_request, with_body};
 use serde_json::Value;
 use yrs::Any;
 
-fn scaled_runs<'a>(value: &'a Value, found: &mut Vec<&'a Value>) {
+fn drawn_runs<'a>(value: &'a Value, found: &mut Vec<&'a Value>) {
     match value {
-        Value::Array(items) => items.iter().for_each(|item| scaled_runs(item, found)),
+        Value::Array(items) => items.iter().for_each(|item| drawn_runs(item, found)),
         Value::Object(entries) => {
-            if entries.get("text").and_then(Value::as_str) == Some("Scaled") {
+            if matches!(
+                entries.get("kind").and_then(Value::as_str),
+                Some("text" | "glyphRun")
+            ) {
                 found.push(value);
             }
-            entries.values().for_each(|item| scaled_runs(item, found));
+            entries.values().for_each(|item| drawn_runs(item, found));
         }
         _ => {}
     }
@@ -61,7 +64,7 @@ fn a_state_holding_a_run_scale_of_0_lays_out_at_full_width() {
     let display: Value =
         serde_json::from_str(&engine.build_display_list_json(&output).unwrap()).unwrap();
     let mut runs = Vec::new();
-    scaled_runs(&display, &mut runs);
+    drawn_runs(&display, &mut runs);
     assert!(!runs.is_empty(), "the run is drawn");
     for run in runs {
         assert_eq!(run.get("horizontalScale"), None, "{run}");
