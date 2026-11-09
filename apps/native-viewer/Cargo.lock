@@ -253,6 +253,8 @@ dependencies = [
  "indexmap",
  "libm",
  "serde",
+ "tiff",
+ "weezl",
 ]
 
 [[package]]

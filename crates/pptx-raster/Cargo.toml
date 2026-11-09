@@ -27,7 +27,7 @@ image = { version = "0.25", default-features = false, features = [
   "tiff",
   "webp",
 ] }
-ooxml-drawingml.workspace = true
+ooxml-drawingml = { workspace = true, features = ["tiff"] }
 ooxml-metafile = { workspace = true, features = ["svg"] }
 ooxml-text.workspace = true
 pptx-edit = { workspace = true, features = ["metafile-svg"] }
