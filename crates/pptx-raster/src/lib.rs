@@ -1537,11 +1537,15 @@ impl ImageBudget {
         use image::ImageDecoder as _;
 
         let bytes = ooxml_raster::png_with_end(bytes);
-        let mut decoder = image::ImageReader::new(Cursor::new(bytes.as_ref()))
+        let reader = image::ImageReader::new(Cursor::new(bytes.as_ref()))
             .with_guessed_format()
-            .ok()?
-            .into_decoder()
             .ok()?;
+        let tiff = reader.format() == Some(image::ImageFormat::Tiff);
+        let mut decoder = match reader.into_decoder() {
+            Ok(decoder) => decoder,
+            Err(_) if tiff => return self.transcode_tiff(&bytes),
+            Err(_) => return None,
+        };
         let (declared_width, declared_height) = decoder.dimensions();
         let declared = u64::from(declared_width) * u64::from(declared_height);
         if declared > MAX_IMAGE_PIXELS {
@@ -1564,6 +1568,19 @@ impl ImageBudget {
         decoded.apply_orientation(orientation);
         let size = IntSize::from_wh(decoded.width(), decoded.height())?;
         Some((decoded.into_rgba8().into_raw(), size))
+    }
+
+    /// A TIFF `image` cannot open, such as CMYK with alpha, through the decoder
+    /// the canvas engine uses. The slide is charged before any pixels decode.
+    fn transcode_tiff(&mut self, bytes: &[u8]) -> Option<(Vec<u8>, IntSize)> {
+        let (pixels, cost) = ooxml_drawingml::media::tiff_transcode_cost(bytes)?;
+        self.charge(pixels, cost)?;
+        let png = ooxml_drawingml::media::decode_tiff_png(bytes).ok()?;
+        let rgba = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+            .ok()?
+            .into_rgba8();
+        let size = IntSize::from_wh(rgba.width(), rgba.height())?;
+        Some((rgba.into_raw(), size))
     }
 
     /// A JPEG or PNG past [`MAX_IMAGE_PIXELS`], decoded at a reduced size, or
@@ -3425,6 +3442,180 @@ mod tests {
         let mut budget = ImageBudget::default();
         let (_, size) = budget.decode_raster(&gif).expect("ordinary gif decodes");
         assert_eq!((size.width(), size.height()), (64, 64));
+    }
+
+    /// An uncompressed 8-bit CMYK TIFF with an alpha sample per pixel.
+    fn cmyka_tiff(width: u16, height: u16, samples: &[u8]) -> Vec<u8> {
+        cmyka_tiff_tagged(width, height, samples, 1, 5, &[])
+    }
+
+    fn cmyka_tiff_tagged(
+        width: u16,
+        height: u16,
+        samples: &[u8],
+        compression: u32,
+        per_pixel: u16,
+        extra: &[(u16, u16, u32, u32)],
+    ) -> Vec<u8> {
+        let count = 10 + extra.len();
+        let bits_offset = 8 + 2 + count * 12 + 4;
+        let extras = per_pixel - 4;
+        let extras_offset = bits_offset + usize::from(per_pixel) * 2;
+        let data_offset = extras_offset + usize::from(extras) * 2;
+        let mut entries: Vec<(u16, u16, u32, u32)> = vec![
+            (256, 3, 1, u32::from(width)),
+            (257, 3, 1, u32::from(height)),
+            (258, 3, u32::from(per_pixel), bits_offset as u32),
+            (259, 3, 1, compression),
+            (262, 3, 1, 5),
+            (273, 4, 1, data_offset as u32),
+            (277, 3, 1, u32::from(per_pixel)),
+            (278, 3, 1, u32::from(height)),
+            (279, 4, 1, samples.len() as u32),
+            (
+                338,
+                3,
+                u32::from(extras),
+                if extras == 1 { 2 } else { extras_offset as u32 },
+            ),
+        ];
+        entries.extend_from_slice(extra);
+        entries.sort_by_key(|entry| entry.0);
+        let mut tiff = b"II*\0\x08\0\0\0".to_vec();
+        tiff.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        for (tag, kind, count, value) in entries {
+            tiff.extend_from_slice(&tag.to_le_bytes());
+            tiff.extend_from_slice(&kind.to_le_bytes());
+            tiff.extend_from_slice(&count.to_le_bytes());
+            tiff.extend_from_slice(&value.to_le_bytes());
+        }
+        tiff.extend_from_slice(&0u32.to_le_bytes());
+        for _ in 0..per_pixel {
+            tiff.extend_from_slice(&8u16.to_le_bytes());
+        }
+        for _ in 0..extras {
+            tiff.extend_from_slice(&2u16.to_le_bytes());
+        }
+        tiff.extend_from_slice(samples);
+        tiff
+    }
+
+    /// A valid 2x1 8-bit palette TIFF.
+    fn palette_tiff() -> Vec<u8> {
+        let colormap_offset = 8 + 2 + 8 * 12 + 4;
+        let data_offset = colormap_offset + 768 * 2;
+        let entries: [(u16, u16, u32, u32); 8] = [
+            (256, 3, 1, 2),
+            (257, 3, 1, 1),
+            (258, 3, 1, 8),
+            (259, 3, 1, 1),
+            (262, 3, 1, 3),
+            (273, 4, 1, data_offset as u32),
+            (279, 4, 1, 2),
+            (320, 3, 768, colormap_offset as u32),
+        ];
+        let mut tiff = b"II*\0\x08\0\0\0".to_vec();
+        tiff.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        for (tag, kind, count, value) in entries {
+            tiff.extend_from_slice(&tag.to_le_bytes());
+            tiff.extend_from_slice(&kind.to_le_bytes());
+            tiff.extend_from_slice(&count.to_le_bytes());
+            tiff.extend_from_slice(&value.to_le_bytes());
+        }
+        tiff.extend_from_slice(&0u32.to_le_bytes());
+        tiff.extend_from_slice(&[0; 768 * 2]);
+        tiff.extend_from_slice(&[0, 1]);
+        tiff
+    }
+
+    #[test]
+    fn a_cmyk_tiff_with_alpha_draws_with_the_colors_the_canvas_engine_gives_it() {
+        let tiff = cmyka_tiff(2, 1, &[255, 0, 0, 0, 255, 0, 0, 0, 255, 128]);
+        assert!(
+            image::ImageReader::new(Cursor::new(&tiff))
+                .with_guessed_format()
+                .unwrap()
+                .into_decoder()
+                .is_err()
+        );
+        let mut budget = ImageBudget::default();
+        let (rgba, size) = budget.decode_raster(&tiff).expect("decodes");
+        assert_eq!((size.width(), size.height()), (2, 1));
+        assert_eq!(rgba, [0, 255, 255, 255, 0, 0, 0, 128]);
+        assert_eq!(budget.pixels, 2);
+        assert_eq!(budget.bytes, 2 * 10 + 2 * 16);
+    }
+
+    #[test]
+    fn a_transcoded_tiff_is_refused_when_the_slide_has_no_budget_left() {
+        let tiff = cmyka_tiff(2, 1, &[0; 10]);
+        let mut budget = ImageBudget {
+            pixels: MAX_SLIDE_IMAGE_PIXELS - 1,
+            bytes: 0,
+            work: 0,
+        };
+        assert!(budget.decode_raster(&tiff).is_none());
+        assert_eq!(budget.pixels, MAX_SLIDE_IMAGE_PIXELS - 1);
+        assert_eq!(budget.bytes, 0);
+    }
+
+    #[test]
+    fn a_tiff_whose_decode_the_charge_cannot_bound_is_never_transcoded() {
+        for (index, tiff) in [
+            cmyka_tiff_tagged(2, 1, &[0; 10], 7, 5, &[]),
+            cmyka_tiff_tagged(2, 1, &[0; 10], 6, 5, &[]),
+            cmyka_tiff_tagged(
+                2,
+                1,
+                &[0; 10],
+                1,
+                5,
+                &[(322, 4, 1, 100_000_000), (323, 4, 1, 1)],
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(
+                ooxml_drawingml::media::tiff_transcode_cost(&tiff),
+                None,
+                "case {index}"
+            );
+            let mut budget = ImageBudget::default();
+            assert!(budget.decode_raster(&tiff).is_none(), "case {index}");
+            assert_eq!((budget.pixels, budget.bytes), (0, 0), "case {index}");
+        }
+    }
+
+    #[test]
+    fn a_palette_tiff_is_not_transcoded_since_its_color_map_is_unbounded() {
+        assert_eq!(
+            ooxml_drawingml::media::tiff_transcode_cost(&palette_tiff()),
+            None
+        );
+    }
+
+    #[test]
+    fn a_tiff_with_more_samples_than_any_color_the_transcoder_converts_costs_nothing() {
+        let tiff = cmyka_tiff_tagged(2, 1, &[0; 12], 1, 6, &[]);
+        assert_eq!(ooxml_drawingml::media::tiff_transcode_cost(&tiff), None);
+    }
+
+    #[test]
+    fn a_tiff_neither_decoder_can_read_stays_unavailable() {
+        let mut truncated = cmyka_tiff(2, 1, &[0; 10]);
+        truncated.truncate(truncated.len() - 4);
+        assert!(ImageBudget::default().decode_raster(&truncated).is_none());
+        assert!(
+            ImageBudget::default()
+                .decode_raster(b"II*\0garbage")
+                .is_none()
+        );
+        assert!(
+            ImageBudget::default()
+                .decode_raster(b"not an image")
+                .is_none()
+        );
     }
 }
 
