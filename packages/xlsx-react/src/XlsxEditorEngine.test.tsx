@@ -187,6 +187,20 @@ describe('XlsxEditor engine dispatch', () => {
     expect(errors).toHaveLength(2);
   });
 
+  it('reports once when the host rerenders with a new plugins array from onPluginError', async () => {
+    const errors: XlsxPluginError[] = [];
+    function Host() {
+      const [, setCount] = useState(0);
+      return <XlsxEditor legacySyncApi experimentalWorkerOpen readOnly file={file}
+        plugins={[defineXlsxPlugin({ id: 'acme.inline', createState: () => null })]}
+        onPluginError={(error) => { errors.push(error); setCount((value) => value + 1); }} />;
+    }
+    render(<Host />);
+    await waitFor(() => expect(errors).toHaveLength(1));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+    expect(errors).toHaveLength(1);
+  });
+
   it('logs unsupported legacy viewer plugins when onPluginError is absent', async () => {
     const plugins = ['acme.first', 'acme.second'].map((id) => defineXlsxPlugin({ id, createState: () => null }));
     const messages: unknown[][] = [];

@@ -25,12 +25,13 @@ export function LegacyXlsxEditor(props: GeneralEditorSessionProps | XlsxLegacyEd
   if (choice !== session || choice.editor !== editor) setChoice({ ...session, editor });
   useEffect(() => { if (session.reason && session.reason !== 'in-thread') warnXlsxEngine(session.reason); }, [session.reason]);
   const viewer = !session.reason && !editor;
-  const reportedPlugins = useRef<typeof props.plugins>(undefined);
+  const reportedPlugins = useRef(new Set<string>());
   useEffect(() => {
-    const plugins = props.plugins;
-    if (!viewer || !plugins?.length || reportedPlugins.current === plugins) return;
-    reportedPlugins.current = plugins;
-    for (const plugin of plugins) {
+    if (!viewer) return;
+    for (const plugin of props.plugins ?? []) {
+      const key = `${plugin.id}\u0000${plugin.revision ?? ''}`;
+      if (reportedPlugins.current.has(key)) continue;
+      reportedPlugins.current.add(key);
       const error: XlsxPluginError = {
         pluginId: plugin.id,
         generation: null,
