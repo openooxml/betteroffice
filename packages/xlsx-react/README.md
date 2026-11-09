@@ -115,6 +115,11 @@ clients support version-checked operations. See
 [Host XLSX editor plugins](https://docs.betteroffice.dev/docs/javascript#host-xlsx-editor-plugins)
 and [Edit XLSX in version-checked batches](https://docs.betteroffice.dev/docs/javascript#edit-xlsx-in-version-checked-batches).
 
+Plugins read `snapshot.focused` and `snapshot.locale`, and receive
+`focus-change` and `locale-change`. Focus covers the document surface; docked panels
+and toolbar controls are outside. Locale is the canonical `i18n._lang`, defaulting to `en`.
+`layout.viewport` remains the grid viewport in sheet pixels.
+
 ## Structured export
 
 Await `api.exportStructured()` or `api.exportMarkdown()` for content with positional anchors and

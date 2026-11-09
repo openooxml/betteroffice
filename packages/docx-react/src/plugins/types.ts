@@ -22,9 +22,12 @@ import type {
   PluginError,
   PluginErrorPhase,
   PluginFailureCode,
+  PluginFocusChangeEvent,
   PluginGrant,
   PluginLoadReason,
+  PluginLocaleChangeEvent,
   PluginRefusal,
+  PluginViewportChangeEvent,
 } from '../../../../shared/host-contracts/plugins';
 import type {
   DocxCommandArgs,
@@ -159,6 +162,10 @@ export interface DocxPluginSelection {
 }
 
 export interface DocxPluginSnapshot {
+  /** @experimental Focus inside the document surface. */
+  focused: boolean;
+  /** @experimental The editor's resolved locale tag. */
+  locale: string;
   /** The open document; changes when a document replaces it. */
   generation: string;
   version: string;
@@ -225,6 +232,8 @@ export type DocxAnchorGeometryResult =
  * `getPositionAtPoint` return null once the layout is no longer rendered.
  */
 export interface DocxPluginGeometry {
+  /** @experimental The visible document area in overlay-layer pixels. */
+  viewport: DocxPluginRect;
   layout: DocxPluginLayout;
   /** @experimental DOM access that a data-only geometry facade may replace in a minor release. */
   dom: RenderedDomContext;
@@ -292,11 +301,23 @@ export interface DocxPluginNavigation {
   >;
 }
 
+/** @experimental The plugin API may change in minor releases. */
+export type DocxPluginFocusChangeEvent = PluginFocusChangeEvent;
+
+/** @experimental The plugin API may change in minor releases. */
+export type DocxPluginLocaleChangeEvent = PluginLocaleChangeEvent;
+
+/** @experimental The plugin API may change in minor releases. */
+export type DocxPluginViewportChangeEvent = PluginViewportChangeEvent<DocxPluginRect>;
+
 /**
  * Lifecycle notifications describe current state; several changes may arrive as one.
  * `layout-change` repeats once the pages have painted a layout that arrived before its pixels.
  */
 export type DocxPluginEvent =
+  | DocxPluginFocusChangeEvent
+  | DocxPluginLocaleChangeEvent
+  | DocxPluginViewportChangeEvent
   | { type: 'load'; generation: string; version: string; reason: PluginLoadReason }
   | { type: 'document-change'; generation: string; version: string }
   | { type: 'proposal-change'; generation: string; version: string; previewVersion: number }

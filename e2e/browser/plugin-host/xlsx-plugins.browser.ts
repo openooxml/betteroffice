@@ -1,3 +1,4 @@
+import type { XlsxPluginEvent } from '@betteroffice/xlsx-react';
 import { test, expect, type Page } from 'playwright/test';
 import { pinnedEvaluate } from '../pinned-evaluate';
 import { renderedBox } from '../rendered-box';
@@ -93,6 +94,22 @@ for (const engine of ['legacy', 'worker'] as const) {
       if (engine === 'worker') expect(count).toBe(0);
       else expect(count).toBeGreaterThan(0);
     });
+test('document focus excludes the plugin panel', async ({ page }) => {
+  await open(page, engine);
+  const events = () => page.evaluate(() =>
+    (window as unknown as { __probe: { events: XlsxPluginEvent[] } }).__probe.events
+      .filter((event) => event.type === 'focus-change'));
+  await page.getByTestId('probe-input').click();
+  await page.evaluate(() => {
+    (window as unknown as { __probe: { events: XlsxPluginEvent[] } }).__probe.events = [];
+  });
+  await page.getByTestId('xlsx-scroll').locator('canvas').first().click({ position: { x: 100, y: 100 } });
+  await expect.poll(async () => (await events()).at(-1)?.focused).toBe(true);
+  await page.getByTestId('probe-input').click();
+  await expect.poll(async () => (await events()).at(-1)?.focused).toBe(false);
+  expect((await events()).map((event) => event.focused)).toEqual([true, false]);
+});
+
 test('xlsx: overlays land on the painted cells at every zoom, scrolled and in frozen panes', async ({
   page,
 }) => {

@@ -42,6 +42,7 @@ import type {
   DocxPluginGeometry,
   DocxPluginGrant,
   DocxPluginLayout,
+  DocxPluginRect,
   DocxPluginSelection,
   DocxPluginSnapshot,
 } from './types';
@@ -74,6 +75,8 @@ export interface DocxPluginHost {
   version(): string;
   previewVersion(): number;
   selectionChanged(selection: DocxPluginSelection): void;
+  focusChanged(focused: boolean): void;
+  localeChanged(locale: string): void;
   modeChanged(mode: EditorMode, readOnly: boolean): void;
   layoutChanged(layout: DocxPluginLayout | null): void;
   /**
@@ -157,12 +160,15 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
   let detachGeometry: (() => void) | null = null;
   let installed = false;
   let generations = 0;
+  let viewport: DocxPluginRect | null = null;
   let commandSignature: string | null = null;
   const state = {
     version: '',
     previewVersion: 0,
     mode: 'editing' as EditorMode,
     readOnly: false,
+    focused: false,
+    locale: 'en',
     selection: EMPTY_SELECTION,
     layout: null as DocxPluginLayout | null,
     geometryLayout: null as DocxPluginLayout | null,
@@ -258,6 +264,8 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       version: state.version,
       mode: state.mode,
       readOnly: state.readOnly,
+      focused: state.focused,
+      locale: state.locale,
       grant: runtime.grant(pluginId) as DocxPluginGrant,
       selection: state.selection,
       layout: state.layout,
@@ -279,10 +287,19 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
   });
 
   const observeGeometry = (): void => {
-    if (!detachGeometry) detachGeometry = access.subscribeGeometry?.(() => runtime.touch()) ?? null;
+    if (!detachGeometry) detachGeometry = access.subscribeGeometry?.(() => { notifyViewport(); runtime.touch(); }) ?? null;
   };
 
   const notify = (event: DocxPluginEvent): void => runtime.notify(event);
+  const notifyViewport = (): void => {
+    const generation = runtime.generation();
+    const geometry = state.layout ? access.geometry() : null;
+    const next = geometry && sameLayout(geometry.layout, state.layout) ? geometry.viewport ?? null : null;
+    if (viewport === next || (viewport && next && viewport.x === next.x && viewport.y === next.y &&
+      viewport.width === next.width && viewport.height === next.height)) return;
+    viewport = next ? { ...next } : null;
+    if (generation) notify({ type: 'viewport-change', generation, viewport });
+  };
   const hasGeometry = (): boolean => {
     const geometry = access.geometry();
     return !!geometry && sameLayout(geometry.layout, state.layout);
@@ -290,6 +307,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
   const notifyLayout = (generation: string): void => {
     if (hasGeometry()) state.geometryLayout = state.layout;
     notify({ type: 'layout-change', generation, layout: state.layout });
+    notifyViewport();
   };
 
   const documentChanged = (): void => {
@@ -301,6 +319,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
     if (state.layout && state.layout.version !== version) {
       state.layout = null;
       notify({ type: 'layout-change', generation, layout: null });
+      notifyViewport();
     }
   };
 
@@ -318,6 +337,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       previewVersion: snapshot.previewVersion,
     });
     if (invalidated) notify({ type: 'layout-change', generation, layout: null });
+    notifyViewport();
   };
 
   /** Observes document and proposal changes while plugins are installed. */
@@ -412,6 +432,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       state.selection = EMPTY_SELECTION;
       observe();
       observeGeometry();
+      viewport = null;
       generations += 1;
       runtime.open(`document-${generations}`);
     },
@@ -433,6 +454,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       state.layout = null;
       state.selection = EMPTY_SELECTION;
       observeGeometry();
+      viewport = null;
       generations += 1;
       runtime.open(`document-${generations}`);
     },
@@ -445,6 +467,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       if (state.layout) {
         state.layout = null;
         notify({ type: 'layout-change', generation, layout: null });
+        notifyViewport();
       }
     },
 
@@ -462,6 +485,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       if (invalidated) state.layout = null;
       notify({ type: 'proposal-change', generation, version: snapshot.version, previewVersion: snapshot.previewVersion });
       if (invalidated) notify({ type: 'layout-change', generation, layout: null });
+      notifyViewport();
     },
 
     generation: () => runtime.generation(),
@@ -475,6 +499,20 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       if (generation) {
         notify({ type: 'selection-change', generation, version: state.version, selection });
       }
+    },
+
+    focusChanged(focused) {
+      if (focused === state.focused) return;
+      state.focused = focused;
+      const generation = runtime.generation();
+      if (generation) notify({ type: 'focus-change', generation, focused });
+    },
+
+    localeChanged(locale) {
+      if (locale === state.locale) return;
+      state.locale = locale;
+      const generation = runtime.generation();
+      if (generation) notify({ type: 'locale-change', generation, locale });
     },
 
     modeChanged(mode, readOnly) {
@@ -499,7 +537,10 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
 
     layoutId: () => (runtime.generation() === null ? null : state.layout?.id ?? null),
 
-    geometryChanged: () => runtime.touch(),
+    geometryChanged() {
+      notifyViewport();
+      runtime.touch();
+    },
 
     layoutPresented(layout) {
       const generation = runtime.generation();

@@ -17,8 +17,10 @@ import type {
   PluginError,
   PluginErrorPhase,
   PluginFailureCode,
+  PluginFocusChangeEvent,
   PluginGrant,
   PluginLoadReason,
+  PluginLocaleChangeEvent,
   PluginRefusal,
 } from '../../../../shared/host-contracts/plugins';
 import type {
@@ -191,6 +193,10 @@ export type XlsxPluginSelection = {
 } | null;
 
 export interface XlsxPluginSnapshot {
+  /** @experimental Focus inside the document surface. */
+  focused: boolean;
+  /** @experimental The editor's resolved locale tag. */
+  locale: string;
   /** The open workbook; changes when a workbook replaces it. */
   generation: string;
   version: string;
@@ -243,8 +249,16 @@ export interface XlsxPluginNavigation {
   ): Promise<XlsxPluginNavigationResult>;
 }
 
+/** @experimental The plugin API may change in minor releases. */
+export type XlsxPluginFocusChangeEvent = PluginFocusChangeEvent;
+
+/** @experimental The plugin API may change in minor releases. */
+export type XlsxPluginLocaleChangeEvent = PluginLocaleChangeEvent;
+
 /** Lifecycle notifications describe current state; several changes may arrive as one. */
 export type XlsxPluginEvent =
+  | XlsxPluginFocusChangeEvent
+  | XlsxPluginLocaleChangeEvent
   | { type: 'load'; generation: string; version: string; reason: PluginLoadReason }
   | { type: 'document-change'; generation: string; version: string }
   | { type: 'proposal-change'; generation: string; version: string; previewVersion: number }

@@ -171,6 +171,18 @@ once with the reason. Plugins are matched by `id` and `revision`, so new array
 identities and reordering keep their state; React StrictMode's double setup
 creates two distinct activations.
 
+**Focus and locale.** `snapshot.focused` is true while focus is inside the
+editor's document surface; docked panels, toolbar controls, and host chrome are
+outside. `focus-change` carries `focused`. `snapshot.locale`
+contains the canonical `i18n._lang` (`en` by default); `locale-change` carries
+`locale`. The load snapshot includes both fields. These signals are on by default
+for installed plugins.
+
+`geometry.viewport` is the scroller's visible client box intersected with the
+editor root, in overlay-layer pixels. Its `y` changes as the pages scroll.
+`viewport-change` carries the new rectangle on scroll, resize, or zoom, or `null`
+when no layout is shown.
+
 **Stale results.** `setState(next, atVersion)` returns `false` for a superseded
 or ended context or when the document is no longer at `atVersion`, which
 defaults to the version the context was created at. Use `context.run(action)` in
@@ -478,6 +490,17 @@ type); unavailable facts are `null`. These fields are optional for older engines
 Slides also include `headerFooter` with visible slide footer, slide number and date
 placeholder text; `layout.headerFooter` reports stored layout or master settings, which do not gate those placeholders.
 
+**Focus and locale.** `snapshot.focused` is true while focus is inside the
+editor's document surface; docked panels, toolbar controls, and host chrome are
+outside. `focus-change` carries `focused`. `snapshot.locale`
+contains the canonical `i18n._lang` (`en` by default); `locale-change` carries
+`locale`. The load snapshot includes both fields. These signals are on by default
+for installed plugins.
+
+`geometry.viewport` is the visible slide stage in overlay-layer pixels.
+`viewport-change` carries the new rectangle on scroll, resize, or zoom, or `null`
+when no layout is shown.
+
 **Selection and navigation.** `snapshot.selection` names the current slide
 (session `slideId` and one-based `slide`) and a slide, shape or text target;
 text keeps its `anchor`/`focus` direction. `navigation.goToSlide`,
@@ -686,6 +709,15 @@ Enter or Space on it sends `{ type: "row-decoration-activate", id, sheetId, row 
 to its plugin only, and only while its current set still has that item. A throw, a duplicate id, a row out of range, an unknown kind or tone, text
 that is too long or more than 10,000 items ends the plugin with the
 `row-decorations` phase.
+
+**Focus and locale.** `snapshot.focused` is true while focus is inside the
+editor's document surface; docked panels, toolbar controls, and host chrome are
+outside. `focus-change` carries `focused`. `snapshot.locale`
+contains the canonical `i18n._lang` (`en` by default); `locale-change` carries
+`locale`. The load snapshot includes both fields. These signals are on by default
+for installed plugins.
+
+`layout.viewport` remains the visible grid in sheet pixels.
 
 **Selection and navigation.** `snapshot.selection` names the active sheet
 (session `sheetId` and zero-based `sheetIndex`), the selected cells with their

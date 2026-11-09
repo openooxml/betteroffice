@@ -141,6 +141,8 @@ export type {
   XlsxPluginError,
   XlsxPluginErrorPhase,
   XlsxPluginEvent,
+  XlsxPluginFocusChangeEvent,
+  XlsxPluginLocaleChangeEvent,
   XlsxPluginFailureCode,
   XlsxPluginGeometry,
   XlsxGeometryTarget,
