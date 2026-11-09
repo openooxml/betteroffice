@@ -350,13 +350,14 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     const settled = (source: 'pointer' | 'touch' | 'keyboard' | 'api') => pluginHost.selectionSettled(source, generation);
     const machine = createSelectionSettle({
       root: () => host.current?.querySelector('[data-docx-worker-editor]') ?? null,
+      canSettle: pluginGeometry.selectionMapped,
       onUnsettle: () => { generation = pluginHost.generation(); pluginHost.selectionUnsettled(generation); },
       onSettle: settled,
       onResettle: settled,
     });
     settleRef.current = machine;
     return () => { machine.dispose(); settleRef.current = null; };
-  }, [pluginHost, managedPlugins, documentReady, shellState.view?.identity.session,
+  }, [pluginHost, pluginGeometry, managedPlugins, documentReady, shellState.view?.identity.session,
     shellState.view?.identity.incarnation, shellState.view?.identity.epoch]);
   useLayoutEffect(() => {
     if (!managedPlugins) return;
@@ -403,7 +404,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       if (layout && pluginGeometry.geometry()) props.onRenderedDomContextReady?.(pluginGeometry.geometry()!.dom);
       const selection = { formatting: toolbar ? yrsSelectionState({ context: toolbar, startParagraphIndex: -1, endParagraphIndex: -1 }) : null, displayRange: pluginGeometry.displaySelection() };
       pluginHost.selectionChanged(selection);
-      settleRef.current?.notifySelectionChange(JSON.stringify(selection));
+      settleRef.current?.notifySelectionChange(`${workerDocumentVersion(shellState.view)}|${JSON.stringify(shellState.view?.workerSelection ?? null)}`);
       if (layout) pluginHost.geometryPresented(layout);
       pluginHost.geometryChanged();
       pluginHost.syncCommands();

@@ -163,6 +163,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
   let installed = false;
   let generations = 0;
   let settledSelection: string | null = null;
+  let settleEvent: Extract<DocxPluginEvent, { type: 'selection-settle' }> | null = null;
   let viewport: DocxPluginRect | null = null;
   let commandSignature: string | null = null;
   const state = {
@@ -287,6 +288,10 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       generation: snapshot.generation,
       grant: grant as DocxPluginGrant,
     }),
+    eventCurrent: (event, snapshot) => event.type !== 'selection-settle' ||
+      (event === settleEvent && event.version === snapshot.version &&
+        settledSelection === `${snapshot.version}|${JSON.stringify(snapshot.selection)}` &&
+        JSON.stringify(event.selection) === JSON.stringify(snapshot.selection)),
     validate: definitionProblem,
     report,
   });
@@ -295,7 +300,10 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
     if (!detachGeometry) detachGeometry = access.subscribeGeometry?.(() => { notifyViewport(); runtime.touch(); }) ?? null;
   };
 
-  const notify = (event: DocxPluginEvent): void => runtime.notify(event);
+  const notify = (event: DocxPluginEvent): void => {
+    if (event.type === 'selection-change' || event.type === 'document-change') settleEvent = null;
+    runtime.notify(event);
+  };
   const notifyViewport = (): void => {
     const generation = runtime.generation();
     const geometry = state.layout ? access.geometry() : null;
@@ -436,6 +444,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       state.layout = null;
       state.selectionSettled = true;
       settledSelection = null;
+      settleEvent = null;
       state.selection = EMPTY_SELECTION;
       observe();
       observeGeometry();
@@ -461,6 +470,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       state.layout = null;
       state.selectionSettled = true;
       settledSelection = null;
+      settleEvent = null;
       state.selection = EMPTY_SELECTION;
       observeGeometry();
       viewport = null;
@@ -513,6 +523,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
     selectionUnsettled(expected = runtime.generation()) {
       if (!expected || runtime.generation() !== expected || !state.selectionSettled) return;
       state.selectionSettled = false;
+      settleEvent = null;
       runtime.touch();
     },
 
@@ -520,14 +531,15 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       if (!expected || runtime.generation() !== expected) return;
       const changed = !state.selectionSettled;
       state.selectionSettled = true;
-      const key = JSON.stringify(state.selection);
+      const key = `${state.version}|${JSON.stringify(state.selection)}`;
       if (key === settledSelection) {
         if (changed) runtime.touch();
         return;
       }
       settledSelection = key;
-      notify({ type: 'selection-settle', generation: expected, version: state.version,
-        selection: state.selection, source });
+      settleEvent = { type: 'selection-settle', generation: expected, version: state.version,
+        selection: state.selection, source };
+      notify(settleEvent);
     },
 
     focusChanged(focused) {

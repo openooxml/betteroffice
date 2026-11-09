@@ -106,11 +106,19 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
     entry.read = Promise.resolve().then(async () => {
       const accepted = async (point: typeof selection.anchor) => ({ paraId: point.paraId,
         offset: (await controller.readAt({ kind: 'rawSelectionInfo', selection: { anchor: point, focus: point } }, version)).before.length });
-      const start = await accepted(selection.anchor);
-      const end = await accepted(selection.focus);
+      const ordered = await controller.readAt({ kind: 'commentSelectionRange', selection }, version);
+      if (!ordered) {
+        entry.mapped = anchorFailure('missing-target', 'The selection did not resolve');
+        return false;
+      }
+      const start = await accepted({ ...ordered.start, story: ordered.story });
+      const end = await accepted({ ...ordered.end, story: ordered.story });
+      const focus = selection.focus.paraId === ordered.start.paraId && selection.focus.offset === ordered.start.offset
+        ? start : selection.focus.paraId === ordered.end.paraId && selection.focus.offset === ordered.end.offset
+          ? end : await accepted(selection.focus);
       const result = await controller.readAt({ kind: 'anchorTargets', targets: [{ kind: 'range', version, range: {
         story: selection.anchor.story, start, end, view: 'accepted',
-      } }, { kind: 'range', version, range: { story: selection.focus.story, start: end, end, view: 'accepted' } }] }, version);
+      } }, { kind: 'range', version, range: { story: selection.focus.story, start: focus, end: focus, view: 'accepted' } }] }, version);
       if (current !== source || selectionRead !== entry || JSON.stringify(controller.getSnapshot().view?.workerSelection) !== JSON.stringify(selection)) return false;
       entry.mapped = result[0];
       entry.focus = result[1];
@@ -379,6 +387,11 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
     update,
     clear,
     displaySelection: () => displaySelection,
+    selectionMapped: () => {
+      const selection = controller.getSnapshot().view?.workerSelection;
+      return !selection || (!!current && valid(current.layout, current.frame) && !!displaySelection &&
+        selectionRead?.key === `${current.layout.id}|${JSON.stringify(selection)}` && selectionRead.mapped?.ok === true);
+    },
     geometry: () => {
       const snapshot = controller.getSnapshot();
       return current && snapshot.status === 'ready' && snapshot.view && sameView(current.frame.identity, snapshot.view.identity) ? current.geometry : null;

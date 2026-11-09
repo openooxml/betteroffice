@@ -50,6 +50,7 @@ import {
 } from '../index';
 import { isMacPlatform } from '../commands/descriptors';
 import * as pluginHosts from './createDocxPluginHost';
+import * as workerPluginGeometry from '../components/DocxEditor/peerless/workerPluginGeometry';
 import { scopePluginGeometry } from './geometry';
 import * as canvasReplay from '../components/DocxEditor/canvasReplay';
 import {
@@ -2211,6 +2212,54 @@ describe('DocxEditor plugins (peer-less engine)', () => {
     await settle(400);
     expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
   });
+
+  test('a slow worker selection mapping settles once with the pointer source and mapped range', async () => {
+    const create = workerPluginGeometry.createWorkerPluginGeometry;
+    let hold = false;
+    let mappingHeld = false;
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    let mountedGeometry: ReturnType<typeof create> | null = null;
+    const geometry = spyOn(workerPluginGeometry, 'createWorkerPluginGeometry').mockImplementation((controller, ...args) => {
+      const readAt = controller.readAt;
+      mountedGeometry = create({ ...controller, readAt: (async (request: Parameters<typeof readAt>[0], version: string) => {
+        if (hold && request.kind === 'anchorTargets') { mappingHeld = true; await pending; }
+        return readAt(request, version);
+      }) as typeof readAt }, ...args);
+      return mountedGeometry;
+    });
+    const events: DocxPluginEvent[] = [];
+    const plugin = defineDocxPlugin({ id: 'slow-settle', createState: () => null,
+      onEvent(_context, event) { events.push(event); } });
+    try {
+      const { view } = await mount({ plugins: [plugin] });
+      await until(() => mountedGeometry?.selectionMapped() === true);
+      await settle(400);
+      events.length = 0;
+      hold = true;
+      const input = view.container.querySelector<HTMLTextAreaElement>('[data-docx-worker-editor] textarea')!;
+      await act(async () => {
+        input.focus();
+        fireEvent.keyDown(input, { key: 'ArrowRight', shiftKey: true });
+      });
+      await until(() => mappingHeld);
+      await act(async () => {
+        fireEvent.pointerDown(input, { pointerType: 'mouse' });
+        fireEvent.pointerUp(input, { pointerType: 'mouse' });
+      });
+      await settle(700);
+      expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(0);
+      hold = false;
+      await act(async () => { release(); });
+      await until(() => events.some((event) => event.type === 'selection-settle'));
+      const settled = events.filter((event) => event.type === 'selection-settle');
+      expect(settled).toHaveLength(1);
+      expect(settled[0]!.source).toBe('pointer');
+      expect(settled[0]!.selection.displayRange).not.toBeNull();
+      await settle(700);
+      expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
+    } finally { hold = false; release(); geometry.mockRestore(); }
+  }, 15_000);
 
   test('the default worker receives the locale and one change after rerender', async () => {
     const contexts: DocxPluginContext<null>[] = [];

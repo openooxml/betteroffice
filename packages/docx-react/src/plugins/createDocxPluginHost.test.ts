@@ -599,3 +599,59 @@ test('selection settling publishes the current snapshot once and ignores superse
   expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
   host.close('unmounted');
 });
+
+
+for (const changed of ['selection', 'version', 'selection-returned', 'selection-mutated', 'unchanged'] as const) {
+  test(`queued selection settles are checked at dispatch (${changed})`, async () => {
+    const { host } = setup();
+    const open = () => host.openWorker('v1');
+    let entered!: () => void;
+    let release!: () => void;
+    let finished!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const drained = new Promise<void>((resolve) => { finished = resolve; });
+    const events: DocxPluginEvent[] = [];
+    const delivered: Array<{ event: DocxPluginEvent; version: string; selection: unknown }> = [];
+    host.setPlugins([defineDocxPlugin({ id: 'queued-settle', createState: () => null,
+      async onEvent(context, event) {
+        if (event.type === 'mode-change') { entered(); await held; }
+        if (event.type === 'selection-settle') {
+          delivered.push({ event, version: context.snapshot.version, selection: context.snapshot.selection });
+        }
+        events.push(event);
+        if (event.type === 'locale-change') finished();
+      } })]);
+    open();
+    await settle();
+    const first = { formatting: null, displayRange: { story: 'body', from: 1, to: 5, layoutId: 'layout' } };
+    const second = { formatting: null, displayRange: { story: 'body', from: 2, to: 6, layoutId: 'layout' } };
+    host.modeChanged('viewing', true);
+    await started;
+    try {
+      host.selectionChanged(first);
+      host.selectionUnsettled();
+      host.selectionSettled('pointer');
+      if (changed === 'selection' || changed === 'selection-returned') host.selectionChanged(second);
+      if (changed === 'selection-returned') host.selectionChanged(first);
+      if (changed === 'selection-mutated') first.displayRange.to = 6;
+      if (changed === 'version') host.workerChanged('v2');
+      host.localeChanged('de');
+      release();
+      await drained;
+      const settled = events.filter((event) => event.type === 'selection-settle');
+      expect(settled).toHaveLength(changed === 'unchanged' ? 1 : 0);
+      for (const item of delivered) if (item.event.type === 'selection-settle') {
+        expect(item.event.version).toBe(item.version);
+        expect(item.event.selection).toEqual(item.selection);
+      }
+      if (changed !== 'unchanged' && changed !== 'selection-returned') {
+        host.selectionUnsettled();
+        host.selectionSettled('keyboard');
+        host.localeChanged('fr');
+        await settle();
+        expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
+      }
+    } finally { release(); host.close('unmounted'); }
+  });
+}

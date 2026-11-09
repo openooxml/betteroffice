@@ -74,6 +74,8 @@ export interface PluginRuntimeOptions<
   currentVersion(): string | null;
   loadEvent(snapshot: Snapshot, reason: PluginLoadReason): Event;
   grantsEvent(snapshot: Snapshot, grant: PluginGrant<string>): Event;
+  /** Whether a queued event still describes the snapshot at dispatch. */
+  eventCurrent?(event: Event, snapshot: Snapshot): boolean;
   /** A problem that disables the plugin, or null. */
   validate?(plugin: Plugin): unknown;
   report(error: PluginError<Phase | RuntimePhase>): void;
@@ -443,9 +445,10 @@ export function createPluginRuntime<
         const event = activation.pending.shift();
         if (!event) break;
         if (!activation.registration.plugin.onEvent) continue;
-        const outcome = await hook(activation, 'event', channelOf(event), (context) =>
-          activation.registration.plugin.onEvent?.(context, event as Event)
-        );
+        const outcome = await hook(activation, 'event', channelOf(event), (context, invocation) => {
+          if (options.eventCurrent && !options.eventCurrent(event as Event, invocation.snapshot)) return;
+          return activation.registration.plugin.onEvent?.(context, event as Event);
+        });
         if (outcome === 'ended') break;
       }
     } finally {

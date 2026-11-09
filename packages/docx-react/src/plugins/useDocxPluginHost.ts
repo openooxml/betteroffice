@@ -539,7 +539,11 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
         latest.current.editorRootRef?.current ?? layer, layer),
       () => {
         const range = selectionRef.current.displayRange;
-        if (!range || latest.current.viewerDocumentRead) return range;
+        if (!range) return null;
+        if (latest.current.viewerSelection || latest.current.viewerDocumentRead) {
+          const head = viewerSelectionRef.current?.head;
+          return typeof head === 'number' ? { ...range, focus: head } : range;
+        }
         const editor = latest.current.pagedEditorRef.current;
         const head = editor?.getYrsSession()?.selection()?.head;
         const focus = head && editor?.yrsLocToDisplayPosition(head);

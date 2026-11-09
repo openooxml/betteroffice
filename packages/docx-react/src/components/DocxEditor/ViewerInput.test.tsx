@@ -171,6 +171,7 @@ test('viewer publication uses ordered display positions, worker paragraph identi
   const { ref, show, answer, has } = mount(queries, undefined, undefined, (selection) => changes.push(selection));
   act(() => ref.current!.setSelectionFromDisplay(12, 1));
   expect(changes.at(-1)).toEqual({
+    head: 1,
     displayRange: { story: 'body', from: 1, to: 12, layoutId: layoutIdOf(queries) },
     isMultiParagraph: false,
   });
@@ -184,12 +185,13 @@ test('viewer publication uses ordered display positions, worker paragraph identi
   const next = frame('A');
   show(next);
   expect(changes.at(-1)).toEqual({
+    head: 1,
     displayRange: { story: 'body', from: 1, to: 12, layoutId: layoutIdOf(next) },
     isMultiParagraph: true,
   });
   expect(has('selectionText', 'A')).toBe(false);
   show(frame('B'));
-  expect(changes.at(-1)).toEqual({ displayRange: null, isMultiParagraph: false });
+  expect(changes.at(-1)).toEqual({ head: null, displayRange: null, isMultiParagraph: false });
 });
 
 test.each([

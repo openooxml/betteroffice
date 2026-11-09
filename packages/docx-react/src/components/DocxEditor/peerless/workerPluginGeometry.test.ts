@@ -243,6 +243,7 @@ test('plugin selection ranges label the native worker caret with its accepted of
   const reads: { kind: string; targets?: { range: unknown }[] }[] = [];
   const readAt = async (request: { kind: string; selection?: { anchor: { offset: number } } }) => {
     reads.push(request);
+    if (request.kind === 'commentSelectionRange') return { story: 'body', start: { paraId: 'p', offset: 3 }, end: { paraId: 'p', offset: 3 } };
     return request.kind === 'rawSelectionInfo' ? { paraId: 'p', selectedText: '', paragraphText: 'abc', before: 'a', after: 'bc' }
       : [{ ok: false, failure: { code: 'missing-target', message: 'unused' } }];
   };

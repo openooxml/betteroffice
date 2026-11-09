@@ -218,6 +218,7 @@ export function createXlsxPluginHost(
   let installed = false;
   let generations = 0;
   let settledSelection: string | null = null;
+  let settleEvent: Extract<XlsxPluginEvent, { type: 'selection-settle' }> | null = null;
   let commandSignature: string | null = null;
   const state = {
     version: '',
@@ -368,11 +369,18 @@ export function createXlsxPluginHost(
       generation: snapshot.generation,
       grant: grant as XlsxPluginGrant,
     }),
+    eventCurrent: (event, snapshot) => event.type !== 'selection-settle' ||
+      (event === settleEvent && event.version === snapshot.version &&
+        settledSelection === `${snapshot.version}|${JSON.stringify(snapshot.selection)}` &&
+        JSON.stringify(event.selection) === JSON.stringify(snapshot.selection)),
     validate: definitionProblem,
     report,
   });
 
-  const notify = (event: XlsxPluginEvent): void => runtime.notify(event);
+  const notify = (event: XlsxPluginEvent): void => {
+    if (event.type === 'selection-change' || event.type === 'document-change') settleEvent = null;
+    runtime.notify(event);
+  };
 
   const documentChanged = (): void => {
     const generation = runtime.generation();
@@ -553,6 +561,7 @@ export function createXlsxPluginHost(
       state.layout = null;
       state.selectionSettled = true;
       settledSelection = null;
+      settleEvent = null;
       state.proposals = JSON.stringify({ proposals: [], staleFor: {}, version: null });
       state.previewVersion = 0;
       state.selection = 'identity' in access && access.selection ? access.selection(next) : null;
@@ -594,6 +603,7 @@ export function createXlsxPluginHost(
     selectionUnsettled(expected = runtime.generation()) {
       if (!expected || runtime.generation() !== expected || !state.selectionSettled) return;
       state.selectionSettled = false;
+      settleEvent = null;
       runtime.touch();
     },
 
@@ -601,14 +611,15 @@ export function createXlsxPluginHost(
       if (!expected || runtime.generation() !== expected) return;
       const changed = !state.selectionSettled;
       state.selectionSettled = true;
-      const key = JSON.stringify(state.selection);
+      const key = `${state.version}|${JSON.stringify(state.selection)}`;
       if (key === settledSelection) {
         if (changed) runtime.touch();
         return;
       }
       settledSelection = key;
-      notify({ type: 'selection-settle', generation: expected, version: state.version,
-        selection: state.selection, source });
+      settleEvent = { type: 'selection-settle', generation: expected, version: state.version,
+        selection: state.selection, source };
+      notify(settleEvent);
     },
 
     focusChanged(focused) {

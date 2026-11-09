@@ -6,7 +6,11 @@ import type { XlsxPluginEvent } from './types';
 
 const settle = () => new Promise((done) => setTimeout(done, 0));
 function setupSignals() {
-  const document = { version: () => 'v1', onUpdate: () => () => {} } as unknown as WorkbookHandle;
+  let version = 'v1';
+  const updates = new Set<() => void>();
+  const document = { version: () => version, onUpdate: (listener: () => void) => {
+    updates.add(listener); return () => { updates.delete(listener); };
+  } } as unknown as WorkbookHandle;
   const host = createXlsxPluginHost({
     handle: () => document,
     admit: async <T>(_handle: WorkbookHandle, operation: () => T) => ({ ok: true as const, value: operation() }),
@@ -17,7 +21,10 @@ function setupSignals() {
     geometry: () => null,
     translate: (key) => key,
   });
-  return { host, open: () => host.open(document) };
+  return { host, open: () => host.open(document), change(next: string) {
+    version = next;
+    for (const listener of updates) listener();
+  } };
 }
 
 test('focus and locale are deduplicated in snapshots and events', async () => {
@@ -114,3 +121,58 @@ test('selection settling publishes the current snapshot once and ignores superse
   expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
   host.close('unmounted');
 });
+
+
+for (const changed of ['selection', 'version', 'selection-returned', 'selection-mutated', 'unchanged'] as const) {
+  test(`queued selection settles are checked at dispatch (${changed})`, async () => {
+    const { host, open, change } = setupSignals();
+    let entered!: () => void;
+    let release!: () => void;
+    let finished!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const drained = new Promise<void>((resolve) => { finished = resolve; });
+    const events: XlsxPluginEvent[] = [];
+    const delivered: Array<{ event: XlsxPluginEvent; version: string; selection: unknown }> = [];
+    host.setPlugins([defineXlsxPlugin({ id: 'queued-settle', createState: () => null,
+      async onEvent(context, event) {
+        if (event.type === 'mode-change') { entered(); await held; }
+        if (event.type === 'selection-settle') {
+          delivered.push({ event, version: context.snapshot.version, selection: context.snapshot.selection });
+        }
+        events.push(event);
+        if (event.type === 'locale-change') finished();
+      } })]);
+    open();
+    await settle();
+    const first = { sheetId: 'sheet:0', sheetIndex: 0, cells: { anchor: { row: 0, col: 0 }, focus: { row: 2, col: 2 } }, chartId: null };
+    const second = { ...first, cells: { anchor: { row: 1, col: 1 }, focus: { row: 3, col: 3 } } };
+    host.modeChanged(true);
+    await started;
+    try {
+      host.selectionChanged(first);
+      host.selectionUnsettled();
+      host.selectionSettled('pointer');
+      if (changed === 'selection' || changed === 'selection-returned') host.selectionChanged(second);
+      if (changed === 'selection-returned') host.selectionChanged(first);
+      if (changed === 'selection-mutated') first.cells.focus.row = 3;
+      if (changed === 'version') change('v2');
+      host.localeChanged('de');
+      release();
+      await drained;
+      const settled = events.filter((event) => event.type === 'selection-settle');
+      expect(settled).toHaveLength(changed === 'unchanged' ? 1 : 0);
+      for (const item of delivered) if (item.event.type === 'selection-settle') {
+        expect(item.event.version).toBe(item.version);
+        expect(item.event.selection).toEqual(item.selection);
+      }
+      if (changed !== 'unchanged' && changed !== 'selection-returned') {
+        host.selectionUnsettled();
+        host.selectionSettled('keyboard');
+        host.localeChanged('fr');
+        await settle();
+        expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
+      }
+    } finally { release(); host.close('unmounted'); }
+  });
+}

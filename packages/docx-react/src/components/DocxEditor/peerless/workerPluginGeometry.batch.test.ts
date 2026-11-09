@@ -48,15 +48,25 @@ async function shell(built: [boolean, boolean] = [true, true], withSelection = f
   const answerOf = (asked: DocxGeometryTarget): ProposalGeometryTarget => {
     const base = idOf(asked) === 'late' ? 150 : 10;
     const from = withSelection && asked.kind === 'range' ? base + asked.range.start.offset : base;
-    const to = withSelection && asked.kind === 'range' ? base + asked.range.end.offset : from + 5;
+    const to = withSelection && asked.kind === 'range'
+      ? (asked.range.end.paraId === 'late' ? 150 : 10) + asked.range.end.offset : from + 5;
+    if (to < from) return { ok: false, failure: { code: 'missing-target', message: 'The range is reversed' } };
     return { ok: true, ranges: [{ from, to }], paragraph: from } as ProposalGeometryTarget;
   };
   const controller = { getSnapshot: () => ({ status: 'ready', view }), review: async () => review, describedReview: () => review,
-    readAt: (request: { kind: string; targets: DocxGeometryTarget[]; selection?: { anchor: { offset: number } } }) => request.kind === 'rawSelectionInfo'
-      ? Promise.resolve({ before: 'x'.repeat(request.selection!.anchor.offset) })
-      : new Promise((resolve, reject) => {
+    readAt: (request: { kind: string; targets: DocxGeometryTarget[]; selection?: NonNullable<typeof view.workerSelection> }) => {
+      if (request.kind === 'rawSelectionInfo') return Promise.resolve({ before: 'x'.repeat(request.selection!.anchor.offset) });
+      if (request.kind === 'commentSelectionRange') {
+        const { anchor, focus } = request.selection!;
+        const position = (point: typeof anchor) => (point.paraId === 'late' ? 150 : 10) + point.offset;
+        const [start, end] = position(anchor) <= position(focus) ? [anchor, focus] : [focus, anchor];
+        return Promise.resolve({ story: start.story, start: { paraId: start.paraId, offset: start.offset },
+          end: { paraId: end.paraId, offset: end.offset } });
+      }
+      return new Promise((resolve, reject) => {
         reads.push({ targets: request.targets, resolve: () => resolve(request.targets.map(answerOf)), reject: (error = new Error('worker gone')) => reject(error) });
-      }),
+      });
+    },
     ref: { getZoom: () => zoom } };
   restore.push(spyOn(display, 'loadRustDisplayListQueryEngine').mockResolvedValue({} as never));
   restore.push(spyOn(display, 'createDisplayListQueries').mockImplementation(((list: { pages: { unbuilt?: boolean }[] }) => ({
@@ -318,6 +328,7 @@ test('worker selection anchors wait for mapping, then answer the same selection 
   const s = await shell([true, true], true);
   try {
     const geometry = s.plugin.geometry()!;
+    expect(s.plugin.selectionMapped()).toBe(false);
     expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: false, failure: { code: 'pending' } });
     let finished = false;
     const read = geometry.readAnchorGeometries([{ kind: 'selection' }]).then((answers) => { finished = true; return answers; });
@@ -328,6 +339,7 @@ test('worker selection anchors wait for mapping, then answer the same selection 
     expect(await read).toMatchObject([{ ok: true, version: 'v1', layoutId: geometry.layout.id,
       rects: [{ pageIndex: 0, x: 10, y: 10, width: 5, height: 12 }],
       anchor: { pageIndex: 0, x: 15, y: 10, width: 0, height: 12 } }]);
+    expect(s.plugin.selectionMapped()).toBe(true);
     expect(s.plugin.displaySelection()).toMatchObject({ from: 10, to: 15, layoutId: geometry.layout.id });
     s.view = { ...s.view, version: 1, workerSelection: { ...s.view.workerSelection!, focus: { ...s.view.workerSelection!.focus, offset: 0 } } };
     const updating = s.plugin.update();
@@ -339,5 +351,35 @@ test('worker selection anchors wait for mapping, then answer the same selection 
     expect(await collapsed).toMatchObject([{ ok: true, rects: [], anchor: { width: 0, height: 12 } }]);
     s.view = { ...s.view, workerSelection: null };
     expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: false, failure: { code: 'missing-target' } });
+  } finally { s.plugin.dispose(); }
+});
+
+
+for (const acrossParagraphs of [false, true]) test(`backward worker selections normalize document order and keep the focus (${acrossParagraphs ? 'paragraphs' : 'one paragraph'})`, async () => {
+  const s = await shell([true, true], true);
+  try {
+    await s.answer();
+    await s.updating;
+    s.view = { ...s.view, workerSelection: {
+      anchor: { story: 'body', paraId: acrossParagraphs ? 'late' : 'selection', offset: 5 },
+      focus: { story: 'body', paraId: 'selection', offset: 1 },
+    } };
+    const updating = s.plugin.update();
+    for (let turn = 0; turn < 20; turn++) await Promise.resolve();
+    const targets = s.reads[0]!.targets;
+    expect(targets[0]).toMatchObject({ kind: 'range', range: {
+      start: { paraId: 'selection', offset: 1 },
+      end: { paraId: acrossParagraphs ? 'late' : 'selection', offset: 5 },
+    } });
+    expect(targets[1]).toMatchObject({ kind: 'range', range: {
+      start: { paraId: 'selection', offset: 1 }, end: { paraId: 'selection', offset: 1 },
+    } });
+    const read = s.plugin.geometry()!.readAnchorGeometries([{ kind: 'selection' }]);
+    await s.answer();
+    await updating;
+    expect(await read).toMatchObject([{ ok: true,
+      rects: [{ x: 11, y: 10, width: acrossParagraphs ? 144 : 4, height: 12 }],
+      anchor: { pageIndex: 0, x: 11, y: 10, width: 0, height: 12 },
+    }]);
   } finally { s.plugin.dispose(); }
 });

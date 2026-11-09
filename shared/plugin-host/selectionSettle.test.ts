@@ -37,14 +37,16 @@ function harness(tick: (ms: number) => void, pending: () => number) {
   const sources: string[] = [];
   let unsettled = 0;
   let resettled = 0;
+  let ready = true;
   const machine = createSelectionSettle({ root,
+    canSettle: () => ready,
     onUnsettle: () => { unsettled++; },
     onSettle: (source) => sources.push(source),
     onResettle: () => { resettled++; },
   });
   const down = (pointerType = 'mouse') => root.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerType }));
   const up = () => document.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
-  return { root, machine, tick, pending, sources, down, up, unsettled: () => unsettled, resettled: () => resettled };
+  return { root, machine, tick, pending, sources, down, up, ready: (value: boolean) => { ready = value; }, unsettled: () => unsettled, resettled: () => resettled };
 }
 
 test('drag settles exactly once 350 ms after release', () => clocked((h) => {
@@ -137,4 +139,22 @@ test('pointer cancellation releases the gesture and dispose clears its timer', (
   h.machine.notifySelectionChange('ignored');
   h.tick(350);
   expect(h.sources).toEqual(['touch']);
+}));
+
+
+test('a slow selection mapping settles once when ready and keeps its pointer source', () => clocked((h) => {
+  h.ready(false);
+  h.down();
+  h.machine.notifySelectionChange('acknowledged-selection');
+  h.up();
+  h.tick(700);
+  expect(h.sources).toEqual([]);
+  h.machine.notifySelectionChange('acknowledged-selection');
+  expect(h.sources).toEqual([]);
+  h.ready(true);
+  h.machine.notifySelectionChange('acknowledged-selection');
+  expect(h.sources).toEqual(['pointer']);
+  h.machine.notifySelectionChange('acknowledged-selection');
+  h.tick(700);
+  expect(h.sources).toEqual(['pointer']);
 }));

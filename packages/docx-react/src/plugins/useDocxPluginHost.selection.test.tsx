@@ -82,6 +82,7 @@ async function setup(viewerSelection: boolean) {
 test('viewer provenance survives subscriber and layout publication without reading shell selection', async () => {
   const view = await setup(true);
   const selection: ViewerSelectionChange = {
+    head: 12,
     displayRange: { story: 'body', from: 1, to: 12, layoutId: 'presented-layout' },
     isMultiParagraph: false,
   };
@@ -101,7 +102,7 @@ test('viewer provenance survives subscriber and layout publication without readi
   expect(view.propSelections).toHaveLength(beforeSettle + 1);
   expect(view.propSelections.at(-1)?.isMultiParagraph).toBe(true);
   expect(view.events).toHaveLength(1);
-  await publish({ displayRange: null, isMultiParagraph: false });
+  await publish({ head: null, displayRange: null, isMultiParagraph: false });
   expect(view.propSelections.at(-1)).toEqual({
     hasSelection: false, isMultiParagraph: false, textFormatting: {}, paragraphFormatting: {},
     styleId: null, startParagraphIndex: -1, endParagraphIndex: -1,

@@ -77,6 +77,7 @@ const ViewerInputComponent = forwardRef<YrsInputRef, ViewerInputProps>(function 
       const queries = queriesRef.current;
       const capture = controller.settledCapture();
       const selection: ViewerSelectionChange = {
+        head: range?.head ?? null,
         displayRange: range && queries ? {
           story,
           from: Math.min(range.anchor, range.head),

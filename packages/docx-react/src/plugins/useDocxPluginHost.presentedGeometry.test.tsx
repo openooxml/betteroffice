@@ -29,7 +29,7 @@ afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
-function setup() {
+function setup(viewer = false) {
   const snapshot: DocxProposalSnapshot = { version: 'v1', previewVersion: 0, proposals: [] };
   const session = {
     version: () => snapshot.version,
@@ -90,6 +90,8 @@ function setup() {
     writeModeRef: { current: 'viewing' },
     mode: 'viewing',
     readOnly: true,
+    viewerSelection: viewer,
+    viewerDocumentRead: viewer ? async () => { throw new Error('Unexpected worker read'); } : undefined,
     commands: createDocxCommandController(),
     session,
     loadGeneration: 0,
@@ -217,4 +219,28 @@ test('overlays keep their node when a new frame retires geometry before activati
   expect(marker()?.getAttribute('data-layout')).toBe(current.layout.id);
   rendered.rerender(overlays(view.result.current.activations));
   expect(marker() === before).toBe(true);
+});
+
+
+test('a backward worker viewer selection anchors to its head through layout publication', async () => {
+  const view = setup(true);
+  view.queries.rangeRects = (from, to) => [{ pageIndex: 0, x: from, y: 20, width: to - from, height: 12 }];
+  view.queries.hitTestRegions = () => null;
+  view.queries.caretRect = (position) => ({ pageIndex: 0, x: position, y: 20, width: 0, height: 12 });
+  await act(async () => {
+    view.attachLayer();
+    view.emitDom();
+    view.present();
+  });
+  await waitFor(() => expect(view.result.current.activations[0]?.context.geometry).toBeTruthy());
+  const layoutId = view.result.current.activations[0]!.context.geometry!.layout.id;
+  await act(async () => view.result.current.publishViewerSelection({
+    head: 1, displayRange: { story: 'body', from: 1, to: 12, layoutId }, isMultiParagraph: false,
+  }));
+  const geometry = () => view.result.current.activations[0]!.context.geometry!;
+  expect(geometry().getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: true,
+    rects: [{ x: 1, y: 20, width: 11, height: 12 }], anchor: { x: 1, y: 20, width: 0, height: 12 } });
+  await act(async () => view.result.current.publishSelection());
+  expect(geometry().getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: true,
+    anchor: { x: 1, y: 20, width: 0, height: 12 } });
 });

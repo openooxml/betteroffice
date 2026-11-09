@@ -6,6 +6,8 @@ export interface SelectionSettleOptions {
   root: Element | (() => Element | null);
   isEditorTarget?(target: EventTarget | null): boolean;
   settleMs?: number;
+  /** Re-notify the same key when this becomes true. */
+  canSettle?(): boolean;
   onUnsettle(): void;
   onSettle(source: Source): void;
   onResettle?(source: Source): void;
@@ -19,13 +21,14 @@ function isTypingKey(event: KeyboardEvent): boolean {
 }
 
 export function createSelectionSettle({
-  root, isEditorTarget, settleMs = 350, onUnsettle, onSettle, onResettle,
+  root, isEditorTarget, settleMs = 350, canSettle = () => true, onUnsettle, onSettle, onResettle,
 }: SelectionSettleOptions) {
   const rootOf = () => typeof root === 'function' ? root() : root;
   const document = rootOf()?.ownerDocument ?? globalThis.document;
   let active = true;
   let pointerDown = false;
   let typing = false;
+  let waiting = false;
   let source: Source = 'keyboard';
   let key: string | undefined;
   let settledKey: string | undefined;
@@ -36,23 +39,30 @@ export function createSelectionSettle({
     if (timer !== null) clearTimeout(timer);
     timer = null;
   };
+  const settle = () => {
+    if (!active || pointerDown || !canSettle()) return;
+    waiting = false;
+    if (key === settledKey) onResettle?.(source);
+    else {
+      settledKey = key;
+      onSettle(source);
+    }
+  };
   const schedule = () => {
     clear();
+    waiting = false;
     if (!active || pointerDown) return;
     timer = setTimeout(() => {
       timer = null;
-      if (!active || pointerDown) return;
-      if (key === settledKey) onResettle?.(source);
-      else {
-        settledKey = key;
-        onSettle(source);
-      }
+      waiting = true;
+      settle();
     }, settleMs);
   };
   const down = (event: PointerEvent) => {
     if (!inside(event.target)) return;
     pointerDown = true;
     typing = false;
+    waiting = false;
     source = event.pointerType === 'touch' ? 'touch' : 'pointer';
     clear();
     onUnsettle();
@@ -73,7 +83,12 @@ export function createSelectionSettle({
   document.addEventListener('keydown', keydown, true);
   return {
     notifySelectionChange(next: string, apiInFlight = false) {
-      if (!active || next === key) return;
+      if (!active) return;
+      if (next === key) {
+        if (waiting) settle();
+        return;
+      }
+      waiting = false;
       key = next;
       onUnsettle();
       if (!pointerDown) {
