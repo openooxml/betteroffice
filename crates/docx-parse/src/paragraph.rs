@@ -1476,6 +1476,7 @@ fn parse_drawing_owned_inner(
             Some(context) => parse_smart_art_from_drawing(
                 element,
                 relationships,
+                Some(context.media),
                 Some(&mut *context.smart_art),
                 budget,
             )?,

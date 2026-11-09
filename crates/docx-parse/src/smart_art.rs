@@ -6,10 +6,14 @@ use indexmap::IndexMap;
 
 use crate::drawingml::{ShapeFill, ShapeOutline, preset_geometry_to_path};
 use crate::image::{ImagePadding, ImageSize, ImageWrap, parse_anchor_position, parse_anchor_wrap};
-use crate::relationships::RelationshipMap;
+use crate::media::MediaMap;
+use crate::relationships::{
+    RelationshipMap, TargetMode, parse_relationships, relationship_part_path,
+};
 use crate::scalars::ColorValue;
 use crate::shape::{
     DrawingScene, DrawingSceneNode, Shape, ShapeOffset, ShapeTextBody, parse_drawing_scene_tree,
+    resolve_shape_fill_pictures,
 };
 use crate::xml::{ParseBudget, ParseError, XmlElement, parse_xml};
 
@@ -43,6 +47,7 @@ pub fn is_smart_art_drawing(drawing: &XmlElement) -> bool {
 pub fn parse_smart_art_from_drawing(
     drawing: &XmlElement,
     relationships: Option<&RelationshipMap>,
+    media: Option<&MediaMap>,
     context: Option<&mut SmartArtContext>,
     budget: &mut ParseBudget<'_>,
 ) -> Result<Option<Shape>, ParseError> {
@@ -62,13 +67,15 @@ pub fn parse_smart_art_from_drawing(
         .and_then(|relationship| resolve_internal_target(Some(&relationship.target)));
     let size = get_drawing_extent(drawing);
 
-    if let Some(drawing_xml) = data_path
+    if let Some((drawing_path, drawing_xml)) = data_path
         .as_deref()
         .and_then(|path| find_pre_rendered_drawing(path, context))
     {
         let parsed = parse_diagram_drawing_scene(drawing_xml, "SmartArt drawing", budget)?;
         if !parsed.shapes.is_empty() {
             let mut shape = diagram_group(size, parsed.shapes, parsed.scene);
+            let own = drawing_relationships(drawing_path, context, budget)?;
+            resolve_shape_fill_pictures(&mut shape, own.as_ref(), media);
             retain_drawing_source(&mut shape, drawing);
             return Ok(Some(shape));
         }
@@ -520,19 +527,43 @@ fn has_uri_scheme(target: &str) -> bool {
 fn find_pre_rendered_drawing<'a>(
     data_path: &str,
     context: &'a SmartArtContext,
-) -> Option<&'a [u8]> {
+) -> Option<(&'a str, &'a [u8])> {
     let (directory, filename) = data_path.rsplit_once('/')?;
     let number = data_file_number(filename)?;
     let direct = format!("{directory}/drawing{number}.xml");
-    if let Some(xml) = context.parts.get(&direct) {
-        return Some(xml);
+    if let Some((path, xml)) = context.parts.get_key_value(&direct) {
+        return Some((path.as_str(), xml.as_slice()));
     }
     let suffix = format!("/drawing{number}.xml").to_ascii_lowercase();
     context
         .parts
         .iter()
         .find(|(path, _)| path.to_ascii_lowercase().ends_with(&suffix))
-        .map(|(_, xml)| xml.as_slice())
+        .map(|(path, xml)| (path.as_str(), xml.as_slice()))
+}
+
+/// The relationships of a diagram drawing part, its pictures' references, with
+/// each internal target made a package path: they are relative to that part.
+fn drawing_relationships(
+    part: &str,
+    context: &SmartArtContext,
+    budget: &mut ParseBudget<'_>,
+) -> Result<Option<RelationshipMap>, ParseError> {
+    let path = relationship_part_path(part);
+    let Some(xml) = context.parts.get(&path) else {
+        return Ok(None);
+    };
+    let mut relationships = parse_relationships(xml, &path, budget)?;
+    let directory = part.rsplit_once('/').map_or("", |(directory, _)| directory);
+    for relationship in relationships.values_mut() {
+        if relationship.target_mode != Some(TargetMode::External)
+            && !relationship.target.starts_with('/')
+        {
+            relationship.target =
+                normalize_package_path(&format!("{directory}/{}", relationship.target));
+        }
+    }
+    Ok(Some(relationships))
 }
 
 fn data_file_number(filename: &str) -> Option<&str> {
@@ -796,6 +827,51 @@ mod tests {
     }
 
     #[test]
+    fn a_pre_rendered_picture_fill_resolves_against_its_own_part() {
+        let mut context = SmartArtContext::default();
+        context.parts.insert(
+            "word/diagrams/drawing1.xml".to_owned(),
+            br#"<dsp:drawing xmlns:dsp="dsp" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><dsp:spTree><dsp:sp><dsp:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="10" cy="10"/></a:xfrm><a:prstGeom prst="rect"/><a:blipFill><a:blip r:embed="rId1"/></a:blipFill></dsp:spPr></dsp:sp></dsp:spTree></dsp:drawing>"#.to_vec(),
+        );
+        context.parts.insert(
+            "word/diagrams/_rels/drawing1.xml.rels".to_owned(),
+            br#"<Relationships><Relationship Id="rId1" Type="image" Target="../media/image4.png"/></Relationships>"#.to_vec(),
+        );
+        let relationships = RelationshipMap::from([(
+            "rId1".to_owned(),
+            Relationship {
+                id: "rId1".to_owned(),
+                relationship_type: "diagramData".to_owned(),
+                target: "diagrams/data1.xml".to_owned(),
+                target_mode: None,
+            },
+        )]);
+        let media = MediaMap::from([(
+            "word/media/image4.png".to_owned(),
+            std::sync::Arc::new(crate::media::MediaFile {
+                path: "word/media/image4.png".to_owned(),
+                filename: None,
+                mime_type: "image/png".to_owned(),
+                base64: String::new(),
+                data_url: "media:4".to_owned(),
+            }),
+        )]);
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let shape = parse_smart_art_from_drawing(
+            &drawing(),
+            Some(&relationships),
+            Some(&media),
+            Some(&mut context),
+            &mut budget,
+        )
+        .unwrap()
+        .unwrap();
+        let fill = shape.children.unwrap().remove(0).fill_paint.unwrap();
+        assert_eq!(fill.picture.unwrap().src.as_deref(), Some("media:4"));
+    }
+
+    #[test]
     fn basic_process_fallback_builds_two_chevrons() {
         let mut context = SmartArtContext::default();
         context.parts.insert(
@@ -831,6 +907,7 @@ mod tests {
         let shape = parse_smart_art_from_drawing(
             &drawing(),
             Some(&relationships),
+            None,
             Some(&mut context),
             &mut budget,
         )
