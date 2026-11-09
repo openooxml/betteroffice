@@ -373,6 +373,9 @@ pub struct DocAttrs {
     /// The marker is a number or label a reader needs, not a bullet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub list_marker_numbered: Option<bool>,
+    /// The marker is a visible bullet, whatever its stored character.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub list_marker_bullet: Option<bool>,
     /// Pending tracked-change paint for the synthetic numbering glyph.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub list_marker_revision: Option<RevisionKind>,
@@ -7530,13 +7533,18 @@ fn emit_line<'a>(
         };
         let mut marker_attrs = block_ref.attrs();
         marker_attrs.list_marker = Some(true);
-        marker_attrs.list_marker_numbered = (attrs.and_then(|attrs| attrs.list_is_bullet)
-            != Some(true)
+        let list_is_bullet = attrs.and_then(|attrs| attrs.list_is_bullet);
+        let symbol_face = attrs
+            .and_then(|attrs| attrs.list_marker_font_family.as_deref())
+            .is_some_and(|family| ooxml_text::SymbolFont::named(family).is_some());
+        let numbered = list_is_bullet != Some(true)
             && marker.chars().any(char::is_alphanumeric)
-            && !attrs
-                .and_then(|attrs| attrs.list_marker_font_family.as_deref())
-                .is_some_and(|family| ooxml_text::SymbolFont::named(family).is_some()))
-        .then_some(true);
+            && !symbol_face;
+        marker_attrs.list_marker_numbered = numbered.then_some(true);
+        marker_attrs.list_marker_bullet = (!numbered
+            && marker.chars().any(|c| !c.is_whitespace())
+            && !(list_is_bullet == Some(false) && symbol_face))
+            .then_some(true);
         marker_attrs.list_marker_revision = marker_revision;
         let shaped = !geom.is_rtl
             && bidi_char_levels(marker, base_bidi_direction(false))
@@ -16866,6 +16874,7 @@ mod tests {
         assert_eq!(marker["text"], "1.");
         assert_eq!(marker["listMarkerRevision"], "ins");
         assert_eq!(marker["listMarkerNumbered"], true);
+        assert!(marker.get("listMarkerBullet").is_none());
         assert_eq!(marker["color"], REVISION_INS_COLOR);
         assert!(marker["font"].as_str().unwrap().contains("Aptos"));
         assert!(marker["font"].as_str().unwrap().contains("700"));
@@ -16900,7 +16909,22 @@ mod tests {
                 .find(|primitive| primitive["listMarker"] == true)
                 .unwrap();
             assert!(marker.get("listMarkerNumbered").is_none(), "{text}");
+            assert_eq!(marker["listMarkerBullet"], true, "{text}");
         }
+
+        input["measured"][0]["block"]["attrs"]["listIsBullet"] = Value::Bool(false);
+        input["measured"][0]["block"]["attrs"]["listMarker"] = Value::from("1.");
+        input["measured"][0]["block"]["attrs"]["listMarkerFontFamily"] = Value::from("Symbol");
+        let output: Value =
+            serde_json::from_str(&build_display_list_json(&input.to_string()).unwrap()).unwrap();
+        let marker = output["pages"][0]["primitives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|primitive| primitive["listMarker"] == true)
+            .unwrap();
+        assert!(marker.get("listMarkerNumbered").is_none());
+        assert!(marker.get("listMarkerBullet").is_none());
     }
 
     /// Marker overrun extends its slot and shifts only the first line's text.

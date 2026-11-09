@@ -255,3 +255,12 @@ test('the aggregate counts failures by area, channel and stage without their mes
   const text = JSON.stringify(aggregate);
   for (const leak of ['demo', 'navigation', 'corpus.betteroffice.dev']) expect(text.includes(leak) && leak).toBe(false);
 });
+
+test('a private run headline names no per-document site and lists no document', () => {
+  const input = report();
+  const shown = renderSection(input, { privateCorpus: true });
+  expect(shown).not.toContain('benchmarks.betteroffice.dev');
+  expect(shown).toContain('per-document results are not published');
+  for (const sample of input.samples) expect(shown).not.toContain(sample.id);
+  expect(renderSection(input)).toContain('https://benchmarks.betteroffice.dev');
+});
