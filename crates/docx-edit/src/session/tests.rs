@@ -97,7 +97,7 @@ fn an_empty_read_answers_with_the_version_of_a_full_read() {
         session: &EditSessionCore,
         story: Option<&str>,
         para_ids: Option<Vec<String>>,
-    ) -> Result<crate::target::ReadParagraphsResponse, crate::target::EditRefusal> {
+    ) -> Result<crate::ReadParagraphsResponse, crate::EditRefusal> {
         session
             .engine
             .doc()
