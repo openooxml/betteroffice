@@ -8,7 +8,7 @@ use crate::drawingml::{ShapeFill, ShapeOutline, preset_geometry_to_path};
 use crate::image::{ImagePadding, ImageSize, ImageWrap, parse_anchor_position, parse_anchor_wrap};
 use crate::media::MediaMap;
 use crate::relationships::{
-    RelationshipMap, TargetMode, parse_relationships, relationship_part_path,
+    RelationshipMap, TargetMode, parse_relationships, relationship_part_path, resolve_relative_path,
 };
 use crate::scalars::ColorValue;
 use crate::shape::{
@@ -74,8 +74,16 @@ pub fn parse_smart_art_from_drawing(
         let parsed = parse_diagram_drawing_scene(drawing_xml, "SmartArt drawing", budget)?;
         if !parsed.shapes.is_empty() {
             let mut shape = diagram_group(size, parsed.shapes, parsed.scene);
-            let own = drawing_relationships(drawing_path, context, budget)?;
-            resolve_shape_fill_pictures(&mut shape, own.as_ref(), media);
+            if memchr::memmem::find(drawing_xml, b"blip").is_some() {
+                let path = drawing_path.to_owned();
+                match drawing_relationships(&path, context, budget) {
+                    Ok(own) => resolve_shape_fill_pictures(&mut shape, own.as_ref(), media),
+                    Err(_) => context.warnings.push(format!(
+                        "SmartArt pictures were left unresolved: {} could not be read.",
+                        relationship_part_path(&path)
+                    )),
+                }
+            }
             retain_drawing_source(&mut shape, drawing);
             return Ok(Some(shape));
         }
@@ -550,17 +558,18 @@ fn drawing_relationships(
     budget: &mut ParseBudget<'_>,
 ) -> Result<Option<RelationshipMap>, ParseError> {
     let path = relationship_part_path(part);
-    let Some(xml) = context.parts.get(&path) else {
+    let Some(xml) = context
+        .parts
+        .iter()
+        .find(|(candidate, _)| candidate.eq_ignore_ascii_case(&path))
+        .map(|(_, xml)| xml)
+    else {
         return Ok(None);
     };
     let mut relationships = parse_relationships(xml, &path, budget)?;
-    let directory = part.rsplit_once('/').map_or("", |(directory, _)| directory);
     for relationship in relationships.values_mut() {
-        if relationship.target_mode != Some(TargetMode::External)
-            && !relationship.target.starts_with('/')
-        {
-            relationship.target =
-                normalize_package_path(&format!("{directory}/{}", relationship.target));
+        if relationship.target_mode != Some(TargetMode::External) {
+            relationship.target = resolve_relative_path(part, &relationship.target)?;
         }
     }
     Ok(Some(relationships))
@@ -824,6 +833,41 @@ mod tests {
         .root()
         .unwrap()
         .clone()
+    }
+
+    #[test]
+    fn an_unreadable_drawing_rels_leaves_the_picture_fill_unresolved_and_warns() {
+        let mut context = SmartArtContext::default();
+        context.parts.insert(
+            "word/diagrams/drawing1.xml".to_owned(),
+            br#"<dsp:drawing xmlns:dsp="dsp" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><dsp:spTree><dsp:sp><dsp:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="10" cy="10"/></a:xfrm><a:prstGeom prst="rect"/><a:blipFill><a:blip r:embed="rId1"/></a:blipFill></dsp:spPr></dsp:sp></dsp:spTree></dsp:drawing>"#.to_vec(),
+        );
+        context.parts.insert(
+            "word/diagrams/_rels/drawing1.xml.rels".to_owned(),
+            b"<Relationships><not closed".to_vec(),
+        );
+        let relationships = RelationshipMap::from([(
+            "rId1".to_owned(),
+            Relationship {
+                id: "rId1".to_owned(),
+                relationship_type: "diagramData".to_owned(),
+                target: "diagrams/data1.xml".to_owned(),
+                target_mode: None,
+            },
+        )]);
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let shape = parse_smart_art_from_drawing(
+            &drawing(),
+            Some(&relationships),
+            Some(&MediaMap::new()),
+            Some(&mut context),
+            &mut budget,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(shape.children.unwrap()[0].fill_paint.is_some());
+        assert_eq!(context.warnings.len(), 1);
     }
 
     #[test]
