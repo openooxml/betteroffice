@@ -1041,6 +1041,51 @@ mod tests {
         assert_eq!(value["controls"][0]["story"], "body");
     }
 
+    fn cell_doc(cell: &str) -> EditingDoc {
+        let body = format!(
+            r#"<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr/>{cell}</w:tc></w:tr></w:tbl><w:p w14:paraId="00000009"><w:r><w:t>Tail</w:t></w:r></w:p>"#
+        );
+        let doc = EditingDoc::new(88003);
+        crate::seed_from_docx(&doc, &package(&body)).unwrap();
+        doc
+    }
+
+    fn block_control(id: u32, content: &str) -> String {
+        format!(
+            r#"<w:sdt><w:sdtPr><w:id w:val="{id}"/></w:sdtPr><w:sdtContent>{content}</w:sdtContent></w:sdt>"#
+        )
+    }
+
+    const INSIDE: &str = r#"<w:p w14:paraId="00000008"><w:r><w:t>Inside</w:t></w:r></w:p>"#;
+
+    #[test]
+    fn a_cell_holding_only_a_block_control_resolves_through_its_content_story() {
+        for cell in [
+            block_control(1, INSIDE),
+            block_control(1, &block_control(2, INSIDE)),
+        ] {
+            let doc = cell_doc(&cell);
+            let layout = layout_positions(&doc);
+            assert!(
+                layout.0.iter().any(|paragraph| paragraph.1 == "00000008"),
+                "the control's paragraph is laid out"
+            );
+            let value =
+                serde_json::to_value(doc.resident_geometry("body", &whole(None)).unwrap()).unwrap();
+            assert_eq!(resident_positions(&value), layout);
+            assert_eq!(value["tables"][0]["cells"][0]["paraId"], "00000008");
+        }
+    }
+
+    #[test]
+    fn a_cell_without_any_block_keeps_the_document_open() {
+        let doc = cell_doc("");
+        let value =
+            serde_json::to_value(doc.resident_geometry("body", &whole(None)).unwrap()).unwrap();
+        assert_eq!(value["tables"][0]["cells"].as_array().unwrap().len(), 1);
+        assert_eq!(resident_positions(&value), layout_positions(&doc));
+    }
+
     #[test]
     fn resident_geometry_after_inline_controls_follows_edits_like_a_rebuild() {
         let doc = controls_doc();
