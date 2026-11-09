@@ -71,8 +71,8 @@ Upgrading from 0.4? See [Migrating to 0.5](https://docs.betteroffice.dev/docs/mi
 ## Fonts
 
 BetterOffice ships open fonts with the same advance widths as the Microsoft core fonts, so
-pagination and line breaks match Office. Packs are compressed with zstd; the Latin pack adds shared
-family dictionaries and a WOFF2-style glyph transform.
+pagination and line breaks match Office. Packs are compressed with zstd, each bold or italic against
+its family's Regular; Latin faces also use a WOFF2-style glyph transform.
 
 **Browser editors.** While the main engine initializes, a small preflight WebAssembly module scans
 the document in parallel and starts loading only the fonts it needs from jsDelivr, with CJK fonts
