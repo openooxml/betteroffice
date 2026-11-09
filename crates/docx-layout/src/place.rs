@@ -155,6 +155,118 @@ fn pristine_paragraph_start(
                 }))
 }
 
+/// Paragraph-relative shapes placed ahead of the paragraph that anchors them.
+struct HoistedRun {
+    page_index: usize,
+    shapes: Vec<(usize, usize)>,
+}
+
+fn is_paragraph_relative(shape: &ShapeBlock) -> bool {
+    shape
+        .position
+        .as_ref()
+        .and_then(|position| position.vertical.as_ref())
+        .and_then(|vertical| vertical.relative_to.as_deref())
+        == Some("paragraph")
+}
+
+fn follows_authored_break(preceding: &[MeasuredBlock]) -> bool {
+    preceding
+        .iter()
+        .rev()
+        .find(|measured| {
+            !matches!(&measured.block, LayoutBlock::Shape(shape) if shape.position.is_some())
+        })
+        .is_some_and(|measured| {
+            matches!(
+                measured.block,
+                LayoutBlock::PageBreak(_)
+                    | LayoutBlock::ColumnBreak(_)
+                    | LayoutBlock::SectionBreak(_)
+            )
+        })
+}
+
+/// Whether a paragraph leaves the page only because its first line has no room.
+fn first_line_overflows(measured: &MeasuredBlock, paginator: &mut Paginator) -> bool {
+    let (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(measure)) =
+        (&measured.block, &measured.measure)
+    else {
+        return false;
+    };
+    if measure.lines.is_empty()
+        || crate::break_policy::breaks_before_block(&measured.block).is_some()
+        || measure
+            .lines
+            .iter()
+            .any(|line| line.float_skip_before.is_some_and(|skip| skip > 0.0))
+    {
+        return false;
+    }
+    let state_idx = paginator.get_current();
+    let leading = paginator
+        .leading_spacing(get_spacing_before(block))
+        .max(paginator.state(state_idx).deferred_spacing);
+    let first_line = &measure.lines[0];
+    !paginator.fits_on_current_page(
+        first_line.line_height + leading,
+        trailing_leading(block, first_line),
+    )
+}
+
+/// Moves a hoisted run onto the page its paragraph landed on, ahead of the
+/// paragraph. A paragraph placed in several fragments keeps its run behind.
+fn relocate_hoisted_run(
+    run: &HoistedRun,
+    measured: &[MeasuredBlock],
+    paginator: &mut Paginator,
+    paragraph_start: (usize, usize),
+    placed_fragments: usize,
+) {
+    let (page_index, paragraph_index) = paragraph_start;
+    let state_idx = paginator.get_current();
+    if page_index <= run.page_index
+        || placed_fragments != 1
+        || paginator.state(state_idx).page_index != page_index
+        || paginator.pages[run.page_index].fragments.len() <= run.shapes.len()
+    {
+        return;
+    }
+    let Some(Fragment::Paragraph(paragraph)) =
+        paginator.pages[page_index].fragments.get(paragraph_index)
+    else {
+        return;
+    };
+    let flow_y = paragraph.y;
+    for &(block_index, fragment_index) in run.shapes.iter().rev() {
+        let fragment = paginator.pages[run.page_index]
+            .fragments
+            .remove(fragment_index);
+        paginator.pages[page_index]
+            .fragments
+            .insert(paragraph_index, fragment);
+        let (LayoutBlock::Shape(block), BlockExtent::Shape(measure)) =
+            (&measured[block_index].block, &measured[block_index].measure)
+        else {
+            continue;
+        };
+        let (x, y) = resolve_object_position_at(
+            block.position.as_ref(),
+            measure.width,
+            measure.height,
+            paginator,
+            flow_y,
+        );
+        let column_x = paginator.get_column_x(paginator.state(state_idx).column_index);
+        if let Fragment::Shape(shape) = &mut paginator.pages[page_index].fragments[paragraph_index]
+        {
+            shape.x = x;
+            shape.y = y;
+            shape.wrap_offset_x = Some(x - column_x);
+        }
+    }
+}
+
 fn is_floating_drawing(block: &LayoutBlock) -> bool {
     match block {
         LayoutBlock::Shape(shape) => shape.position.is_some(),
@@ -1041,6 +1153,7 @@ fn place<F: PartialEq>(
     }
 
     let mut keep_run: Option<KeepRun<'_>> = None;
+    let mut hoisted_run: Option<HoistedRun> = None;
     for (i, mb) in measured.iter().enumerate().skip(start_index) {
         crate::progress::tick();
         let section_mark = plan.section_marks[i];
@@ -1066,6 +1179,18 @@ fn place<F: PartialEq>(
             checkpointed_page = Some(page_index);
             checkpoints.push(checkpoint);
         }
+        let anchor_run = match &mb.block {
+            LayoutBlock::Paragraph(_) => hoisted_run.take(),
+            LayoutBlock::Shape(shape) if shape.position.is_some() => None,
+            _ => {
+                hoisted_run = None;
+                None
+            }
+        };
+        let page_before_keep = anchor_run.is_some().then(|| {
+            let state_idx = paginator.get_current();
+            paginator.state(state_idx).page_index
+        });
         let fragments_before = paginator.page_fragment_counts();
         // pageBreakBefore, or a hard page-break run, forces a fresh page and
         // keeps the paragraph's space-before net of the previous space-after
@@ -1175,6 +1300,12 @@ fn place<F: PartialEq>(
             }
         }
 
+        let anchors_follow = !section_mark
+            && page_before_keep.is_some_and(|page| {
+                let state_idx = paginator.get_current();
+                paginator.state(state_idx).page_index == page
+            })
+            && first_line_overflows(mb, paginator);
         match &mb.block {
             LayoutBlock::Paragraph(block) => {
                 let BlockExtent::Paragraph(measure) = &mb.measure else {
@@ -1227,6 +1358,20 @@ fn place<F: PartialEq>(
                     ));
                 };
                 layout_shape(block, measure, paginator);
+                if is_paragraph_relative(block) && !follows_authored_break(&measured[..i]) {
+                    let state_idx = paginator.get_current();
+                    let page_index = paginator.state(state_idx).page_index;
+                    let fragment_index = paginator.pages[page_index].fragments.len() - 1;
+                    let run = hoisted_run.get_or_insert_with(|| HoistedRun {
+                        page_index,
+                        shapes: Vec::new(),
+                    });
+                    if run.page_index != page_index {
+                        run.page_index = page_index;
+                        run.shapes.clear();
+                    }
+                    run.shapes.push((i, fragment_index));
+                }
             }
 
             LayoutBlock::Chart(block) => {
@@ -1348,7 +1493,21 @@ fn place<F: PartialEq>(
                 let before = fragments_before.get(page).copied().unwrap_or(0);
                 (*count > before).then_some((page, before))
             });
+        if anchors_follow
+            && let Some(run) = &anchor_run
+            && let Some(paragraph_start) = first_changed_page
+        {
+            let placed_fragments: usize = fragments_after
+                .iter()
+                .enumerate()
+                .map(|(page, count)| {
+                    count.saturating_sub(fragments_before.get(page).copied().unwrap_or(0))
+                })
+                .sum();
+            relocate_hoisted_run(run, measured, paginator, paragraph_start, placed_fragments);
+        }
         if let Some((page_index, 0)) = first_changed_page
+            && anchor_run.is_none()
             && checkpointed_page != Some(page_index)
             && (!matches!(mb.block, LayoutBlock::Paragraph(_))
                 || fragments_after[page_index] == 1
@@ -2324,6 +2483,18 @@ fn resolve_object_position(
     paginator: &mut Paginator,
 ) -> (f64, f64) {
     let state_idx = paginator.get_current();
+    let flow_y = paginator.state(state_idx).pen_y;
+    resolve_object_position_at(position, width, height, paginator, flow_y)
+}
+
+fn resolve_object_position_at(
+    position: Option<&ImageRunPosition>,
+    width: f64,
+    height: f64,
+    paginator: &mut Paginator,
+    flow_y: f64,
+) -> (f64, f64) {
+    let state_idx = paginator.get_current();
     let state = paginator.state(state_idx);
     let page = &paginator.pages[state.page_index];
     let margins = page.body_anchor_margins.as_ref().unwrap_or(&page.margins);
@@ -2340,9 +2511,9 @@ fn resolve_object_position(
             margin_top: margins.top,
             margin_bottom: margins.bottom,
             flow_x: column_x,
-            flow_y: state.pen_y,
+            flow_y,
             flow_width: paginator.column_width(),
-            flow_height: state.content_limit - state.pen_y,
+            flow_height: state.content_limit - flow_y,
             odd_page: page.number % 2 == 1,
         },
     )
@@ -3755,6 +3926,345 @@ mod pagination_rule_tests {
         };
         assert_eq!((shape.y, moved.y, moved.height), (50.0, 40.0, 50.0));
         assert_eq!(moved.y + 30.0, shape.y + shape.height);
+    }
+
+    fn hoisted_shape(id: &str, relative_to: &str) -> serde_json::Value {
+        json!({
+            "block": {
+                "kind": "shape", "id": id, "shapeType": "rect",
+                "width": 50, "height": 40, "geometryPath": [], "children": [],
+                "wrapType": "inFront",
+                "position": {
+                    "horizontal": {"relativeTo": "page", "posOffset": 30},
+                    "vertical": {"relativeTo": relative_to, "posOffset": 5}
+                }
+            },
+            "measure": {"kind": "shape", "width": 50, "height": 40}
+        })
+    }
+
+    fn shape_pages(layout: &Layout, id: &str) -> Vec<usize> {
+        let id = serde_json::to_value(id).unwrap();
+        layout
+            .pages
+            .iter()
+            .enumerate()
+            .filter(|(_, page)| {
+                page.fragments.iter().any(|fragment| {
+                    matches!(fragment, Fragment::Shape(shape)
+                        if serde_json::to_value(&shape.block_id).unwrap() == id)
+                })
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    #[test]
+    fn paragraph_relative_shapes_follow_a_paragraph_whose_first_line_overflows() {
+        let mut value = input(vec![
+            paragraph(0, 4, 20.0, json!({})),
+            hoisted_shape("a", "paragraph"),
+            hoisted_shape("b", "paragraph"),
+            paragraph(1, 1, 30.0, json!({})),
+        ]);
+        let layout = layout_document(&mut value).unwrap();
+        assert_eq!(layout.pages.len(), 2);
+        assert_eq!(layout.pages[0].fragments.len(), 1);
+        let kinds: Vec<_> = layout.pages[1]
+            .fragments
+            .iter()
+            .map(|fragment| match fragment {
+                Fragment::Shape(shape) => {
+                    assert_eq!((shape.x, shape.y), (30.0, 15.0));
+                    serde_json::to_string(&shape.block_id).unwrap()
+                }
+                Fragment::Paragraph(_) => "paragraph".to_owned(),
+                _ => panic!("unexpected fragment"),
+            })
+            .collect();
+        assert_eq!(kinds, ["\"a\"", "\"b\"", "paragraph"]);
+    }
+
+    #[test]
+    fn a_relocated_shape_measures_from_a_paragraph_pushed_below_a_float_band() {
+        let mut value = input(vec![
+            paragraph(0, 3, 20.0, json!({})),
+            hoisted_shape("a", "paragraph"),
+            paragraph(1, 1, 35.0, json!({"spacing": {"before": 20}})),
+        ]);
+        value.options.section_page_float_bands =
+            serde_json::from_value(json!([{"default": [{"top": 40, "bottom": 47}]}])).unwrap();
+        let layout = layout_document(&mut value).unwrap();
+        let [Fragment::Shape(shape), Fragment::Paragraph(paragraph)] =
+            &layout.pages[1].fragments[..]
+        else {
+            panic!(
+                "shape then paragraph expected on the second page: {}",
+                serde_json::to_string(&layout.pages).unwrap()
+            )
+        };
+        assert_eq!(paragraph.y, 47.0);
+        assert_eq!(shape.y, 52.0);
+    }
+
+    #[test]
+    fn hoisted_shapes_stay_behind_unless_the_first_line_is_what_overflows() {
+        let float_skip = json!({
+            "block": {
+                "kind": "paragraph", "id": 1,
+                "runs": [{ "kind": "text", "text": "x", "fmt": {} }], "attrs": {},
+            },
+            "measure": {
+                "kind": "paragraph",
+                "lines": [{
+                    "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 1, "width": 10.0,
+                    "ascent": 8.0, "descent": 2.0, "lineHeight": 30.0, "floatSkipBefore": 50.0
+                }],
+                "totalHeight": 80.0,
+            },
+        });
+        for (name, shape_kind, anchor) in [
+            (
+                "page break before",
+                "paragraph",
+                paragraph(1, 1, 30.0, json!({"pageBreakBefore": true})),
+            ),
+            (
+                "first line fits",
+                "paragraph",
+                paragraph(1, 3, 15.0, json!({"keepLines": true})),
+            ),
+            ("float skip", "paragraph", float_skip),
+            ("page relative", "page", paragraph(1, 1, 30.0, json!({}))),
+            ("spans pages", "paragraph", paragraph(1, 8, 30.0, json!({}))),
+        ] {
+            let mut value = input(vec![
+                paragraph(0, 4, 20.0, json!({})),
+                hoisted_shape("a", shape_kind),
+                anchor,
+            ]);
+            let layout = layout_document(&mut value).unwrap();
+            assert!(layout.pages.len() > 1, "{name}");
+            assert_eq!(shape_pages(&layout, "a"), [0], "{name}");
+        }
+    }
+
+    #[test]
+    fn a_shape_stays_behind_a_paragraph_split_across_columns_of_the_next_page() {
+        let mut value = input(vec![
+            paragraph(0, 9, 20.0, json!({})),
+            hoisted_shape("a", "paragraph"),
+            paragraph(1, 6, 30.0, json!({})),
+        ]);
+        value.options.columns = serde_json::from_value(json!({"count": 2, "gap": 0})).unwrap();
+        let layout = layout_document(&mut value).unwrap();
+        assert_eq!(layout.pages.len(), 2);
+        assert_eq!(shape_pages(&layout, "a"), [0]);
+    }
+
+    fn anchor_lines(lines: serde_json::Value, attrs: serde_json::Value) -> serde_json::Value {
+        let total: f64 = lines
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|line| {
+                line["lineHeight"].as_f64().unwrap()
+                    + line["floatSkipBefore"].as_f64().unwrap_or(0.0)
+            })
+            .sum();
+        json!({
+            "block": {
+                "kind": "paragraph", "id": 1,
+                "runs": [{ "kind": "text", "text": "x", "fmt": {} }], "attrs": attrs,
+            },
+            "measure": { "kind": "paragraph", "lines": lines, "totalHeight": total },
+        })
+    }
+
+    fn led_line(height: f64) -> serde_json::Value {
+        json!({
+            "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 1, "width": 10,
+            "ascent": 16.0, "descent": 4.0, "lineHeight": height,
+        })
+    }
+
+    #[test]
+    fn a_shape_stays_behind_a_kept_paragraph_whose_first_line_fits_without_its_leading() {
+        let mut value = input(vec![
+            paragraph(0, 3, 25.0, json!({})),
+            hoisted_shape("a", "paragraph"),
+            anchor_lines(
+                json!([led_line(30.0), led_line(30.0), led_line(30.0)]),
+                json!({"keepLines": true}),
+            ),
+        ]);
+        let layout = layout_document(&mut value).unwrap();
+        assert_eq!(layout.pages.len(), 2);
+        assert_eq!(shape_pages(&layout, "a"), [0]);
+    }
+
+    #[test]
+    fn a_shape_lands_on_its_paragraphs_page_around_a_float_band() {
+        for (bottom, expected_page) in [(90, 0), (100, 1), (110, 0)] {
+            let mut value = input(vec![
+                paragraph(0, 2, 25.0, json!({})),
+                hoisted_shape("a", "paragraph"),
+                anchor_lines(json!([led_line(30.0)]), json!({})),
+            ]);
+            value.options.section_page_float_bands =
+                serde_json::from_value(json!([{"default": [{"top": 85, "bottom": bottom}]}]))
+                    .unwrap();
+            let layout = layout_document(&mut value).unwrap();
+            let paragraph_page = layout
+                .pages
+                .iter()
+                .position(|page| {
+                    page.fragments.iter().any(|fragment| {
+                        matches!(fragment, Fragment::Paragraph(paragraph)
+                            if serde_json::to_value(&paragraph.block_id).unwrap() == json!(1.0))
+                    })
+                })
+                .unwrap();
+            assert_eq!(paragraph_page, expected_page, "band bottom {bottom}");
+            assert_eq!(
+                shape_pages(&layout, "a"),
+                [paragraph_page],
+                "band bottom {bottom}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_first_line_that_fits_below_a_float_band_keeps_the_shape_behind() {
+        let mut value = input(vec![
+            paragraph(0, 2, 25.0, json!({})),
+            hoisted_shape("a", "paragraph"),
+            anchor_lines(json!([led_line(30.0)]), json!({"keepNext": true})),
+            paragraph(2, 1, 30.0, json!({})),
+        ]);
+        value.options.section_page_float_bands =
+            serde_json::from_value(json!([{"default": [{"top": 85, "bottom": 90}]}])).unwrap();
+        let layout = layout_document(&mut value).unwrap();
+        assert_eq!(layout.pages.len(), 2);
+        assert_eq!(shape_pages(&layout, "a"), [0]);
+    }
+
+    #[test]
+    fn a_shape_stays_behind_when_keep_with_next_moves_an_oversized_first_line() {
+        let mut value = input(vec![
+            hoisted_shape("p", "page"),
+            hoisted_shape("a", "paragraph"),
+            paragraph(
+                1,
+                1,
+                20.0,
+                json!({"keepNext": true, "spacing": {"before": 100}}),
+            ),
+            paragraph(2, 1, 20.0, json!({})),
+        ]);
+        let layout = layout_document(&mut value).unwrap();
+        assert_eq!(layout.pages.len(), 2);
+        assert_eq!(shape_pages(&layout, "a"), [0]);
+    }
+
+    #[test]
+    fn a_float_skip_on_a_later_line_keeps_the_shape_behind() {
+        let mut skipped = line(30.0);
+        skipped["floatSkipBefore"] = json!(5.0);
+        let mut value = input(vec![
+            paragraph(0, 4, 20.0, json!({})),
+            hoisted_shape("a", "paragraph"),
+            anchor_lines(json!([line(30.0), skipped]), json!({})),
+        ]);
+        let layout = layout_document(&mut value).unwrap();
+        assert_eq!(layout.pages.len(), 2);
+        assert_eq!(shape_pages(&layout, "a"), [0]);
+    }
+
+    #[test]
+    fn a_shape_stays_behind_a_keep_with_next_group_whose_first_line_fits() {
+        let mut value = input(vec![
+            paragraph(0, 4, 20.0, json!({})),
+            hoisted_shape("a", "paragraph"),
+            paragraph(1, 1, 15.0, json!({"keepNext": true})),
+            paragraph(2, 1, 30.0, json!({})),
+        ]);
+        let layout = layout_document(&mut value).unwrap();
+        assert_eq!(layout.pages.len(), 2);
+        assert_eq!(layout.pages[1].fragments.len(), 2);
+        assert_eq!(shape_pages(&layout, "a"), [0]);
+    }
+
+    #[test]
+    fn a_shape_after_a_continuous_section_break_stays_with_the_text_above_it() {
+        let mut value = input(vec![
+            paragraph(0, 4, 20.0, json!({})),
+            json!({
+                "block": {"kind": "sectionBreak", "id": 9, "type": "continuous"},
+                "measure": {"kind": "sectionBreak"}
+            }),
+            hoisted_shape("a", "paragraph"),
+            paragraph(1, 1, 30.0, json!({})),
+        ]);
+        value.options.body_break_type = Some(SectionBreakType::Continuous);
+        let layout = layout_document(&mut value).unwrap();
+        assert_eq!(layout.pages.len(), 2);
+        assert_eq!(shape_pages(&layout, "a"), [0]);
+    }
+
+    #[test]
+    fn incremental_layout_matches_full_around_a_relocated_shape() {
+        let document = |anchor: serde_json::Value, tail_height: f64| -> Vec<serde_json::Value> {
+            let mut blocks = vec![
+                paragraph(0, 4, 20.0, json!({})),
+                hoisted_shape("a", "paragraph"),
+                anchor,
+            ];
+            blocks.extend((2..12).map(|id| paragraph(id, 1, tail_height, json!({}))));
+            blocks
+        };
+        let moved = || paragraph(1, 1, 30.0, json!({}));
+        let kept = || paragraph(1, 3, 15.0, json!({"keepLines": true}));
+        let mut tail_edit = document(moved(), 20.0);
+        tail_edit[8] = paragraph(7, 1, 35.0, json!({}));
+        for (before, after, dirty) in [
+            (document(moved(), 20.0), tail_edit, 8),
+            (document(moved(), 20.0), document(kept(), 20.0), 2),
+            (document(kept(), 20.0), document(moved(), 20.0), 2),
+        ] {
+            let mut previous_input = input(before);
+            let previous = layout_document_checkpointed(&mut previous_input).unwrap();
+            assert!(
+                previous
+                    .checkpoints
+                    .iter()
+                    .all(|checkpoint| checkpoint.block_index != 2)
+            );
+            let previous_fingerprints = vec![1_u64; after.len()];
+            let mut next_fingerprints = previous_fingerprints.clone();
+            next_fingerprints[dirty] = 2;
+            let mut previous_layout = previous.layout;
+            let mut incremental_input = input(after.clone());
+            let incremental = layout_document_incremental(
+                &mut incremental_input,
+                &mut previous_layout,
+                &previous.checkpoints,
+                &previous_fingerprints,
+                &next_fingerprints,
+                dirty,
+            )
+            .unwrap();
+            let mut full_input = input(after);
+            let full = layout_document_checkpointed(&mut full_input).unwrap();
+            assert_eq!(
+                serde_json::to_string(&incremental.layout).unwrap(),
+                serde_json::to_string(&full.layout).unwrap()
+            );
+            if dirty == 8 {
+                assert!(incremental.placed_blocks < full.placed_blocks);
+                assert_eq!(shape_pages(&incremental.layout, "a"), [1]);
+            }
+        }
     }
 
     #[test]
