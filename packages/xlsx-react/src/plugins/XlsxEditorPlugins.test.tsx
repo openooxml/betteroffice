@@ -1165,7 +1165,12 @@ describe('XlsxEditor plugins', () => {
     } finally {
       release();
     }
-    const toolbarButton = within(view.container).getByRole('button', { name: 'Gesture bold', exact: true });
+    const more = view.getByTestId('xlsx-toolbar-more');
+    act(() => more.focus());
+    fireEvent.keyDown(more, { key: 'ArrowDown' });
+    const overflow = view.getByRole('menu', { name: 'More toolbar items' });
+    const toolbarButton = within(overflow).queryByRole('menuitem', { name: /^Gesture bold/ })
+      ?? within(overflow).getByRole('menuitemcheckbox', { name: /^Gesture bold/ });
     const releaseToolbar = trackPluginGestures(toolbarButton.closest<HTMLElement>('[data-plugin-activation]')!, trusted, currentEvent);
     try {
       fireEvent.click(toolbarButton);
