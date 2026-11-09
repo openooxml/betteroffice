@@ -314,7 +314,10 @@ pub fn xlsx_font_preflight(bytes: &[u8]) -> Result<FontPreflight, PreflightError
             }
         }
     }
-    let mut merges = Vec::new();
+    let mut merged_anchors =
+        [[false; OPENING_VIEWPORT_COLUMNS as usize]; OPENING_VIEWPORT_ROWS as usize];
+    let mut covered = merged_anchors;
+    let mut merge_count = 0;
     if let Some(root) = sheet.child("s:mergeCells") {
         for node in &root.children {
             if let Some((start, end)) = node
@@ -323,11 +326,29 @@ pub fn xlsx_font_preflight(bytes: &[u8]) -> Result<FontPreflight, PreflightError
                 .and_then(|(start, end)| Some((address(start)?, address(end)?)))
             {
                 if start.0 < OPENING_VIEWPORT_ROWS && start.1 < OPENING_VIEWPORT_COLUMNS {
-                    if merges.len() == MAX_STYLE_ENTRIES {
+                    if merge_count == MAX_STYLE_ENTRIES {
                         complete = false;
                         break;
                     }
-                    merges.push((start, end));
+                    merge_count += 1;
+                    merged_anchors[start.0 as usize][start.1 as usize] |= end != start;
+                    for (r, row) in covered
+                        .iter_mut()
+                        .enumerate()
+                        .take((end.0 + 1).min(OPENING_VIEWPORT_ROWS) as usize)
+                        .skip(start.0 as usize)
+                    {
+                        for (c, cell) in row
+                            .iter_mut()
+                            .enumerate()
+                            .take((end.1 + 1).min(OPENING_VIEWPORT_COLUMNS) as usize)
+                            .skip(start.1 as usize)
+                        {
+                            if (r as u32, c as u32) != start {
+                                *cell = true;
+                            }
+                        }
+                    }
                 }
             } else {
                 complete = false;
@@ -355,17 +376,12 @@ pub fn xlsx_font_preflight(bytes: &[u8]) -> Result<FontPreflight, PreflightError
                     continue;
                 }
                 if row_hidden || hidden_columns[c as usize] {
-                    if merges
-                        .iter()
-                        .any(|&(start, end)| start == (r, c) && end != start)
-                    {
+                    if merged_anchors[r as usize][c as usize] {
                         complete = false;
                     }
                     continue;
                 }
-                if merges.iter().any(|&(start, end)| {
-                    (r, c) != start && r >= start.0 && r <= end.0 && c >= start.1 && c <= end.1
-                }) {
+                if covered[r as usize][c as usize] {
                     continue;
                 }
                 if cell.child("s:f").is_some() {

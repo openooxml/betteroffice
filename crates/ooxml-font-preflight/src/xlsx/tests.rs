@@ -144,6 +144,28 @@ fn merged_cells_exclude_covered_values() {
 }
 
 #[test]
+fn overlapping_merge_ranges_keep_covered_anchors_hidden() {
+    let sheet = worksheet(
+        r#"<row r="1"><c r="A1"><v>1</v></c><c r="B1" s="1"><v>2</v></c><c r="C1" s="2"><v>3</v></c></row>"#,
+        r#"<mergeCells><mergeCell ref="A1:B1"/><mergeCell ref="B1:C1"/><mergeCell ref="C1:C1"/></mergeCells>"#,
+    );
+    let result = xlsx_font_preflight(&fixture(&sheet, STYLES, None, &[], false)).unwrap();
+    assert!(result.complete);
+    assert_eq!(keys(&result), [("Base", false, false)]);
+}
+
+#[test]
+fn hidden_merge_anchors_stay_incomplete_with_single_cell_ranges() {
+    let sheet = worksheet(
+        r#"<row r="1" hidden="1"><c r="A1" s="2"><v>1</v></c></row><row r="2"><c r="A2"><v>2</v></c></row>"#,
+        r#"<mergeCells><mergeCell ref="A1:B1"/><mergeCell ref="A1:A1"/></mergeCells>"#,
+    );
+    let result = xlsx_font_preflight(&fixture(&sheet, STYLES, None, &[], false)).unwrap();
+    assert!(!result.complete);
+    assert_eq!(keys(&result), [("Base", false, false)]);
+}
+
+#[test]
 fn missing_shared_strings_and_unknown_styles_are_incomplete() {
     let sheet = worksheet(
         r#"<row r="1"><c r="A1" s="99"><v>1</v></c><c r="B1" t="s"><v>5</v></c></row>"#,

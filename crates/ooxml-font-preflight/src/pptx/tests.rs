@@ -41,6 +41,20 @@ fn fixture(
     extra: &[(&str, &str)],
     deflate: bool,
 ) -> Vec<u8> {
+    let table_styles = format!(
+        r#"<a:tblStyleLst xmlns:a="{A}"><a:tblStyle styleId="table"><a:wholeTbl><a:tcTxStyle i="on"/></a:wholeTbl><a:firstRow><a:tcTxStyle b="on"/></a:firstRow><a:lastRow><a:tcTxStyle b="off"/></a:lastRow></a:tblStyle></a:tblStyleLst>"#
+    );
+    fixture_with_table_styles(slide, layout, master, extra, deflate, &table_styles)
+}
+
+fn fixture_with_table_styles(
+    slide: &str,
+    layout: &str,
+    master: &str,
+    extra: &[(&str, &str)],
+    deflate: bool,
+    table_styles: &str,
+) -> Vec<u8> {
     let presentation = format!(
         r#"<p:presentation xmlns:p="{P}" xmlns:r="{R}"><p:sldIdLst><p:sldId id="256" r:id="first"/><p:sldId id="257" r:id="second"/></p:sldIdLst><p:defaultTextStyle><a:lvl1pPr xmlns:a="{A}"><a:defRPr><a:latin typeface="Default"/></a:defRPr></a:lvl1pPr></p:defaultTextStyle></p:presentation>"#
     );
@@ -54,9 +68,6 @@ fn fixture(
     let master_rels = rels(&[("theme", "theme", "../theme/one.xml")]);
     let theme = format!(
         r#"<a:theme xmlns:a="{A}"><a:themeElements><a:fontScheme><a:majorFont><a:latin typeface="Heading"/><a:ea typeface="Heading EA"/><a:cs typeface="Heading CS"/></a:majorFont><a:minorFont><a:latin typeface="Body"/><a:ea typeface=""/><a:cs typeface="Body CS"/><a:font script="Hans" typeface="Unused"/></a:minorFont></a:fontScheme></a:themeElements></a:theme>"#
-    );
-    let table_styles = format!(
-        r#"<a:tblStyleLst xmlns:a="{A}"><a:tblStyle styleId="table"><a:wholeTbl><a:tcTxStyle i="on"/></a:wholeTbl><a:firstRow><a:tcTxStyle b="on"/></a:firstRow><a:lastRow><a:tcTxStyle b="off"/></a:lastRow></a:tblStyle></a:tblStyleLst>"#
     );
     let mut parts = vec![
         ("ppt/presentation.xml", presentation.as_bytes()),
@@ -253,6 +264,126 @@ fn table_styles_apply_only_to_painted_cells() {
 }
 
 #[test]
+fn table_style_def_preserves_inherited_bold_and_italic() {
+    let slide = part(
+        "sld",
+        &format!(
+            r#"<p:graphicFrame><a:graphic><a:graphicData><a:tbl><a:tblPr firstRow="1"><a:tableStyleId>table</a:tableStyleId></a:tblPr><a:tr><a:tc><a:txBody>{}</a:txBody></a:tc></a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame>"#,
+            run("+mn-lt", "Text")
+        ),
+        "",
+    );
+    for (value, expected) in [
+        ("def", true),
+        ("unknown", true),
+        ("off", false),
+        ("0", false),
+        ("false", false),
+        ("on", true),
+        ("1", true),
+        ("true", true),
+    ] {
+        for (attribute, bold, italic) in [("b", expected, false), ("i", false, expected)] {
+            let styles = format!(
+                r#"<a:tblStyleLst xmlns:a="{A}"><a:tblStyle styleId="table"><a:wholeTbl><a:tcTxStyle {attribute}="on"/></a:wholeTbl><a:firstRow><a:tcTxStyle {attribute}="{value}"/></a:firstRow></a:tblStyle></a:tblStyleLst>"#
+            );
+            let result = pptx_font_preflight(
+                &fixture_with_table_styles(
+                    &slide,
+                    &part("sldLayout", "", ""),
+                    &part("sldMaster", "", ""),
+                    &[],
+                    false,
+                    &styles,
+                ),
+                0,
+            )
+            .unwrap();
+            assert!(result.complete);
+            assert_eq!(
+                keys(&result),
+                [("Body", bold, italic)],
+                "{attribute}={value}"
+            );
+        }
+    }
+}
+
+#[test]
+fn table_without_properties_exhausts_the_shared_node_budget() {
+    let rows = "<a:tr><a:tc><a:txBody><a:p/></a:txBody></a:tc></a:tr>".repeat(50_000);
+    let slide = part(
+        "sld",
+        &format!(
+            "<p:graphicFrame><a:graphic><a:graphicData><a:tbl>{rows}</a:tbl></a:graphicData></a:graphic></p:graphicFrame>"
+        ),
+        "",
+    );
+    let bytes = fixture(
+        &slide,
+        &part("sldLayout", "", ""),
+        &part("sldMaster", "", ""),
+        &[],
+        false,
+    );
+    let mut parts = Parts {
+        zip: Zip::new(&bytes).unwrap(),
+        nodes: xml::MAX_NODES,
+    };
+    let mut complete = true;
+    assert!(
+        parts
+            .part("ppt/slides/one.xml", &mut complete)
+            .unwrap()
+            .is_some()
+    );
+    assert!(complete);
+    assert_eq!(
+        pptx_font_preflight(&bytes, 0).unwrap_err(),
+        PreflightError::Limit
+    );
+}
+
+#[test]
+fn missing_table_style_regions_charge_attribute_free_sibling_searches() {
+    let rows = "<a:tr><a:tc><a:txBody><a:p/></a:txBody></a:tc></a:tr>".repeat(256);
+    let slide = part(
+        "sld",
+        &format!(
+            "<p:graphicFrame><a:graphic><a:graphicData><a:tbl><a:tblPr><a:tableStyleId>table</a:tableStyleId></a:tblPr>{rows}</a:tbl></a:graphicData></a:graphic></p:graphicFrame>"
+        ),
+        "",
+    );
+    let regions = "<a:firstRow/>".repeat(1024);
+    let styles = format!(
+        r#"<a:tblStyleLst xmlns:a="{A}"><a:tblStyle styleId="table">{regions}</a:tblStyle></a:tblStyleLst>"#
+    );
+    let bytes = fixture_with_table_styles(
+        &slide,
+        &part("sldLayout", "", ""),
+        &part("sldMaster", "", ""),
+        &[],
+        false,
+        &styles,
+    );
+    assert_eq!(
+        pptx_font_preflight(&bytes, 0).unwrap_err(),
+        PreflightError::Limit
+    );
+}
+
+#[test]
+fn missing_master_styles_charge_attribute_free_sibling_searches() {
+    let slide = part("sld", &shape("", &"<a:p/>".repeat(256)), "");
+    let master = part("sldMaster", "", &"<p:extLst/>".repeat(1024));
+    let bytes = fixture(&slide, &part("sldLayout", "", ""), &master, &[], false);
+    assert_eq!(
+        pptx_font_preflight(&bytes, 0).unwrap_err(),
+        PreflightError::Limit
+    );
+}
+
+#[test]
 fn missing_dependencies_and_unresolved_graphics_are_incomplete() {
     let slide = part("sld", &shape("", &run("Explicit", "Text")), "");
     let presentation = format!(
@@ -318,7 +449,7 @@ fn malformed_zip_xml_and_missing_parts_are_errors() {
 }
 
 #[test]
-fn font_and_work_budgets_return_partial_results() {
+fn font_budget_returns_partial_results_and_work_budget_errors() {
     let body: String = (0..513)
         .map(|index| run(&format!("Font{index}"), "x"))
         .collect();
@@ -347,7 +478,9 @@ fn font_and_work_budgets_return_partial_results() {
         faces: Faces::default(),
         complete: true,
         work: 0,
+        limited: false,
     };
     assert!(!scan.charge());
     assert!(!scan.complete);
+    assert_eq!(scan.finish().unwrap_err(), PreflightError::Limit);
 }

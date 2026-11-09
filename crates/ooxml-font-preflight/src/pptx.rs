@@ -2,7 +2,6 @@ use crate::model::{DrawingTheme, Faces};
 use crate::xml::Node;
 use crate::{FontPreflight, Parts, PreflightError, xml, zip::Zip};
 
-const MAX_WORK: usize = 1_000_000;
 const LEVELS: [&str; 9] = [
     "a:lvl1pPr",
     "a:lvl2pPr",
@@ -27,14 +26,22 @@ fn flag(value: Option<&str>) -> Option<bool> {
     value.map(|value| matches!(value, "1" | "true" | "on"))
 }
 
+fn table_flag(value: Option<&str>) -> Option<bool> {
+    match value? {
+        "on" | "1" | "true" => Some(true),
+        "off" | "0" | "false" => Some(false),
+        _ => None,
+    }
+}
+
 impl Run {
-    fn parse(node: Option<&Node>) -> Self {
+    fn parse(node: Option<&Node>, scan: &mut Scan<'_>) -> Self {
         let Some(node) = node else {
             return Self::default();
         };
         Self {
-            family: node
-                .child("a:latin")
+            family: scan
+                .child(node, "a:latin")
                 .and_then(|node| node.attr("typeface"))
                 .map(str::to_owned),
             bold: flag(node.attr("b")),
@@ -66,54 +73,41 @@ struct Paragraph {
     bullet_family: Option<String>,
 }
 
+struct TableStyle<'a> {
+    node: Option<&'a Node>,
+    builtin: bool,
+    first_row: bool,
+    last_row: bool,
+    first_col: bool,
+    last_col: bool,
+    band_row: bool,
+}
+
 impl Paragraph {
-    fn merge(&mut self, node: Option<&Node>, work: &mut usize, complete: &mut bool) {
+    fn merge(&mut self, node: Option<&Node>, scan: &mut Scan<'_>) {
         let Some(node) = node else { return };
-        let run = node.child("a:defRPr");
-        let cost = node.children.len() + run.map_or(0, |node| node.children.len());
-        let Some(remaining) = work.checked_sub(cost) else {
-            *complete = false;
-            *work = 0;
-            return;
-        };
-        *work = remaining;
-        self.run.merge(&Run::parse(run));
-        if node.child("a:buNone").is_some() {
+        let run = scan.child(node, "a:defRPr");
+        self.run.merge(&Run::parse(run, scan));
+        if scan.child(node, "a:buNone").is_some() {
             self.bullet = Some(false);
         }
-        if let Some(marker) = node.child("a:buChar") {
+        if let Some(marker) = scan.child(node, "a:buChar") {
             self.bullet = Some(marker.attr("char").is_some_and(|value| !value.is_empty()));
         }
-        if node.child("a:buAutoNum").is_some() {
+        if scan.child(node, "a:buAutoNum").is_some() {
             self.bullet = Some(true);
         }
-        if node.child("a:buFontTx").is_some() {
+        if scan.child(node, "a:buFontTx").is_some() {
             self.bullet_family = None;
         }
-        if let Some(font) = node.child("a:buFont") {
+        if let Some(font) = scan.child(node, "a:buFont") {
             self.bullet_family = font.attr("typeface").map(str::to_owned);
         }
     }
 }
 
-fn level(style: Option<&Node>, index: usize) -> Option<&Node> {
-    let style = style?;
-    if index < LEVELS.len() {
-        style.child(LEVELS[index])
-    } else {
-        style.child(LEVELS[0])
-    }
-}
-
 fn paragraphs(body: &Node) -> impl Iterator<Item = &Node> {
     body.children.iter().filter(|node| node.name == "a:p")
-}
-
-fn placeholder(shape: &Node) -> Option<&Node> {
-    shape
-        .children
-        .iter()
-        .find_map(|node| node.path(&["p:nvPr", "p:ph"]))
 }
 
 fn placeholder_type(node: &Node) -> &str {
@@ -156,6 +150,7 @@ struct Scan<'a> {
     faces: Faces,
     complete: bool,
     work: usize,
+    limited: bool,
 }
 
 impl Scan<'_> {
@@ -164,12 +159,55 @@ impl Scan<'_> {
     }
 
     fn spend(&mut self, count: usize) -> bool {
+        if self.limited {
+            return false;
+        }
         if let Some(work) = self.work.checked_sub(count) {
             self.work = work;
             true
         } else {
             self.complete = false;
+            self.work = 0;
+            self.limited = true;
             false
+        }
+    }
+
+    fn child<'a>(&mut self, node: &'a Node, name: &str) -> Option<&'a Node> {
+        for child in &node.children {
+            if !self.charge() {
+                return None;
+            }
+            if child.name == name {
+                return Some(child);
+            }
+        }
+        None
+    }
+
+    fn path<'a>(&mut self, node: &'a Node, names: &[&str]) -> Option<&'a Node> {
+        names
+            .iter()
+            .try_fold(node, |node, name| self.child(node, name))
+    }
+
+    fn placeholder<'a>(&mut self, shape: &'a Node) -> Option<&'a Node> {
+        for node in &shape.children {
+            if !self.charge() {
+                return None;
+            }
+            if let Some(ph) = self.path(node, &["p:nvPr", "p:ph"]) {
+                return Some(ph);
+            }
+        }
+        None
+    }
+
+    fn finish(self) -> Result<FontPreflight, PreflightError> {
+        if self.limited {
+            Err(PreflightError::Limit)
+        } else {
+            Ok(self.faces.finish(self.complete))
         }
     }
 
@@ -178,7 +216,10 @@ impl Scan<'_> {
             if !self.charge() {
                 return None;
             }
-            if placeholder(shape).is_some_and(|value| matches_placeholder(value, target)) {
+            if self
+                .placeholder(shape)
+                .is_some_and(|value| matches_placeholder(value, target))
+            {
                 return Some(shape);
             }
             if shape.name == "p:grpSp"
@@ -219,8 +260,8 @@ impl Scan<'_> {
             return;
         }
         let own_paragraphs: Vec<_> = paragraphs(body).collect();
-        let own_list = body.child("a:lstStyle");
-        let parent_lists = parents.map(|body| body.and_then(|body| body.child("a:lstStyle")));
+        let own_list = self.child(body, "a:lstStyle");
+        let parent_lists = parents.map(|body| body.and_then(|body| self.child(body, "a:lstStyle")));
         let parent_paragraphs = parents.map(|body| {
             body.map(|body| paragraphs(body).collect::<Vec<_>>())
                 .unwrap_or_default()
@@ -229,7 +270,7 @@ impl Scan<'_> {
             if !self.charge() || self.faces.limited {
                 break;
             }
-            let ppr = own.child("a:pPr");
+            let ppr = self.child(own, "a:pPr");
             let level_index = ppr
                 .and_then(|node| node.attr("lvl"))
                 .and_then(|value| value.parse::<usize>().ok())
@@ -243,28 +284,17 @@ impl Scan<'_> {
             };
             let master_style = self
                 .master
-                .and_then(|node| node.path(&["p:txStyles", style_kind]));
-            if !self.spend(master_style.map_or(0, |node| node.children.len())) {
-                return;
-            }
+                .and_then(|node| self.path(node, &["p:txStyles", style_kind]));
             if table_run.is_some() {
-                let authored = master_style.and_then(|node| node.child(LEVELS[level_index]));
+                let authored = master_style.and_then(|node| self.child(node, LEVELS[level_index]));
                 if authored.is_some() {
-                    properties.merge(authored, &mut self.work, &mut self.complete);
+                    properties.merge(authored, self);
                 } else {
-                    let style = self.presentation.child("p:defaultTextStyle");
-                    if !self.spend(style.map_or(0, |node| node.children.len())) {
-                        return;
-                    }
+                    let style = self.child(self.presentation, "p:defaultTextStyle");
+                    properties.merge(style.and_then(|node| self.child(node, "a:defPPr")), self);
                     properties.merge(
-                        style.and_then(|node| node.child("a:defPPr")),
-                        &mut self.work,
-                        &mut self.complete,
-                    );
-                    properties.merge(
-                        level(style, level_index),
-                        &mut self.work,
-                        &mut self.complete,
+                        style.and_then(|node| self.child(node, LEVELS[level_index])),
+                        self,
                     );
                 }
                 if let Some(run) = table_run {
@@ -272,24 +302,15 @@ impl Scan<'_> {
                 }
             } else {
                 properties.merge(
-                    level(master_style, level_index),
-                    &mut self.work,
-                    &mut self.complete,
+                    master_style.and_then(|node| self.child(node, LEVELS[level_index])),
+                    self,
                 );
                 if ph.is_none() {
-                    let style = self.presentation.child("p:defaultTextStyle");
-                    if !self.spend(style.map_or(0, |node| node.children.len())) {
-                        return;
-                    }
+                    let style = self.child(self.presentation, "p:defaultTextStyle");
+                    properties.merge(style.and_then(|node| self.child(node, "a:defPPr")), self);
                     properties.merge(
-                        style.and_then(|node| node.child("a:defPPr")),
-                        &mut self.work,
-                        &mut self.complete,
-                    );
-                    properties.merge(
-                        level(style, level_index),
-                        &mut self.work,
-                        &mut self.complete,
+                        style.and_then(|node| self.child(node, LEVELS[level_index])),
+                        self,
                     );
                 }
             }
@@ -299,39 +320,26 @@ impl Scan<'_> {
                 .rev()
                 .chain(std::iter::once((own_list, &own_paragraphs)))
             {
-                if !self.spend(list.map_or(0, |node| node.children.len())) {
-                    return;
-                }
+                properties.merge(list.and_then(|node| self.child(node, "a:defPPr")), self);
                 properties.merge(
-                    list.and_then(|node| node.child("a:defPPr")),
-                    &mut self.work,
-                    &mut self.complete,
-                );
-                properties.merge(
-                    list.and_then(|node| node.child(LEVELS[level_index])),
-                    &mut self.work,
-                    &mut self.complete,
+                    list.and_then(|node| self.child(node, LEVELS[level_index])),
+                    self,
                 );
                 let source = source_paragraphs
                     .get(index)
                     .or_else(|| source_paragraphs.get(level_index));
-                if !self.spend(source.map_or(0, |node| node.children.len())) {
-                    return;
-                }
-                properties.merge(
-                    source.and_then(|node| node.child("a:pPr")),
-                    &mut self.work,
-                    &mut self.complete,
-                );
+                properties.merge(source.and_then(|node| self.child(node, "a:pPr")), self);
             }
             let end = std::iter::once(&own_paragraphs)
                 .chain(parent_paragraphs.iter())
                 .find_map(|paragraphs| {
                     paragraphs
                         .get(index)
-                        .and_then(|node| node.child("a:endParaRPr"))
+                        .and_then(|node| self.child(node, "a:endParaRPr"))
                 });
-            let end_language = own.child("a:endParaRPr").and_then(|node| node.attr("lang"));
+            let end_language = self
+                .child(own, "a:endParaRPr")
+                .and_then(|node| node.attr("lang"));
             let style_language = properties.run.language.as_deref();
             let runs: Vec<_> = own
                 .children
@@ -339,8 +347,12 @@ impl Scan<'_> {
                 .filter(|node| matches!(node.name, "a:r" | "a:fld" | "a:br"))
                 .collect();
             let text_context = ooxml_text::paragraph_scripts_with_languages(
-                runs.iter()
-                    .map(|run| (run.child("a:t").map_or("", |node| node.text.as_str()), None)),
+                runs.iter().map(|run| {
+                    (
+                        self.child(run, "a:t").map_or("", |node| node.text.as_str()),
+                        None,
+                    )
+                }),
                 false,
             );
             let mut paragraph_scripts = Vec::new();
@@ -349,11 +361,8 @@ impl Scan<'_> {
                 if !self.charge() {
                     break;
                 }
-                let rpr = run.child("a:rPr");
-                if !self.spend(rpr.map_or(0, |node| node.children.len())) {
-                    break;
-                }
-                let direct = Run::parse(rpr);
+                let rpr = self.child(run, "a:rPr");
+                let direct = Run::parse(rpr, self);
                 let language = [direct.language.as_deref(), end_language, style_language]
                     .into_iter()
                     .flatten()
@@ -361,7 +370,7 @@ impl Scan<'_> {
                 let text = if run.name == "a:fld" && run.attr("type") == Some("slidenum") {
                     "1"
                 } else {
-                    run.child("a:t").map_or("", |node| node.text.as_str())
+                    self.child(run, "a:t").map_or("", |node| node.text.as_str())
                 };
                 let mut scripts =
                     ooxml_text::paragraph_scripts_with_languages([(text, language)], false);
@@ -393,7 +402,7 @@ impl Scan<'_> {
             }
             let first = first.unwrap_or_else(|| {
                 let mut run = properties.run.clone();
-                run.merge(&Run::parse(end));
+                run.merge(&Run::parse(end, self));
                 run
             });
             self.record(&first, &[]);
@@ -411,26 +420,20 @@ impl Scan<'_> {
         }
     }
 
-    fn table_run(&self, table: &Node, row: usize, col: usize, rows: usize, cols: usize) -> Run {
-        let properties = table.child("a:tblPr");
-        let id = properties
-            .and_then(|node| node.child("a:tableStyleId"))
-            .map(|node| node.text.trim());
-        let style = id.and_then(|id| {
-            self.table_styles?
-                .children
-                .iter()
-                .find(|node| node.name == "a:tblStyle" && node.attr("styleId") == Some(id))
-        });
-        let active = |key| flag(properties.and_then(|node| node.attr(key))) == Some(true);
-        let first_row = active("firstRow");
-        let last_row = active("lastRow");
+    fn table_run(
+        &mut self,
+        style: &TableStyle<'_>,
+        row: usize,
+        col: usize,
+        rows: usize,
+        cols: usize,
+    ) -> Run {
+        let first_row = style.first_row;
+        let last_row = style.last_row;
         let mut run = Run::default();
-        if let Some(style) = style {
+        if let Some(node) = style.node {
             let mut regions = vec!["a:wholeTbl"];
-            if active("bandRow")
-                && row >= usize::from(first_row)
-                && row + usize::from(last_row) < rows
+            if style.band_row && row >= usize::from(first_row) && row + usize::from(last_row) < rows
             {
                 regions.push(if (row - usize::from(first_row)).is_multiple_of(2) {
                     "a:band1H"
@@ -439,8 +442,8 @@ impl Scan<'_> {
                 });
             }
             for (name, selected) in [
-                ("a:firstCol", active("firstCol") && col == 0),
-                ("a:lastCol", active("lastCol") && col + 1 == cols),
+                ("a:firstCol", style.first_col && col == 0),
+                ("a:lastCol", style.last_col && col + 1 == cols),
                 ("a:firstRow", first_row && row == 0),
                 ("a:lastRow", last_row && row + 1 == rows),
             ] {
@@ -449,19 +452,19 @@ impl Scan<'_> {
                 }
             }
             for region in regions {
-                if let Some(text) = style.path(&[region, "a:tcTxStyle"]) {
+                if let Some(text) = self.path(node, &[region, "a:tcTxStyle"]) {
                     run.merge(&Run {
-                        bold: flag(text.attr("b")),
-                        italic: flag(text.attr("i")),
+                        bold: table_flag(text.attr("b")),
+                        italic: table_flag(text.attr("i")),
                         ..Run::default()
                     });
                 }
             }
-        } else if id == Some("{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}")
+        } else if style.builtin
             && ((first_row && row == 0)
                 || (last_row && row + 1 == rows)
-                || (active("firstCol") && col == 0)
-                || (active("lastCol") && col + 1 == cols))
+                || (style.first_col && col == 0)
+                || (style.last_col && col + 1 == cols))
         {
             run.bold = Some(true);
         }
@@ -469,26 +472,58 @@ impl Scan<'_> {
     }
 
     fn table(&mut self, table: &Node) {
+        if !self.spend(table.children.len()) {
+            return;
+        }
+        let properties = self.child(table, "a:tblPr");
+        let id = properties
+            .and_then(|node| self.child(node, "a:tableStyleId"))
+            .map(|node| node.text.trim());
+        let node = id.and_then(|id| {
+            let styles = self.table_styles?;
+            for node in &styles.children {
+                if !self.charge() {
+                    return None;
+                }
+                if node.name == "a:tblStyle" && node.attr("styleId") == Some(id) {
+                    return Some(node);
+                }
+            }
+            None
+        });
+        let active = |key| flag(properties.and_then(|node| node.attr(key))) == Some(true);
+        let style = TableStyle {
+            node,
+            builtin: id == Some("{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}"),
+            first_row: active("firstRow"),
+            last_row: active("lastRow"),
+            first_col: active("firstCol"),
+            last_col: active("lastCol"),
+            band_row: active("bandRow"),
+        };
         let rows: Vec<_> = table
             .children
             .iter()
             .filter(|node| node.name == "a:tr")
             .collect();
-        let cols = table
-            .child("a:tblGrid")
-            .map_or(0, |node| node.children.len())
-            .max(
-                rows.iter()
-                    .map(|row| {
-                        row.children
-                            .iter()
-                            .filter(|node| node.name == "a:tc")
-                            .count()
-                    })
-                    .max()
-                    .unwrap_or(0),
+        let mut cols = self
+            .child(table, "a:tblGrid")
+            .map_or(0, |node| node.children.len());
+        for row in &rows {
+            if !self.spend(row.children.len()) {
+                return;
+            }
+            cols = cols.max(
+                row.children
+                    .iter()
+                    .filter(|node| node.name == "a:tc")
+                    .count(),
             );
+        }
         for (row_index, row) in rows.iter().enumerate() {
+            if !self.spend(row.children.len()) {
+                return;
+            }
             for (col, cell) in row
                 .children
                 .iter()
@@ -503,11 +538,8 @@ impl Scan<'_> {
                 {
                     continue;
                 }
-                if let Some(body) = cell.child("a:txBody") {
-                    if !self.spend(self.table_styles.map_or(0, |node| node.children.len())) {
-                        return;
-                    }
-                    let run = self.table_run(table, row_index, col, rows.len(), cols);
+                if let Some(body) = self.child(cell, "a:txBody") {
+                    let run = self.table_run(&style, row_index, col, rows.len(), cols);
                     self.body(body, [None, None], None, Some(&run));
                 }
             }
@@ -519,29 +551,43 @@ impl Scan<'_> {
             if !self.charge() || self.faces.limited {
                 return;
             }
-            if shape
-                .children
-                .iter()
-                .filter_map(|node| node.child("p:cNvPr"))
-                .any(|node| flag(node.attr("hidden")) == Some(true))
-            {
+            let mut hidden = false;
+            for node in &shape.children {
+                if !self.charge() {
+                    return;
+                }
+                if self
+                    .child(node, "p:cNvPr")
+                    .is_some_and(|node| flag(node.attr("hidden")) == Some(true))
+                {
+                    hidden = true;
+                    break;
+                }
+            }
+            if hidden {
                 continue;
             }
-            let ph = placeholder(shape);
+            let ph = self.placeholder(shape);
             if !placeholders && ph.is_some() {
                 continue;
             }
             match shape.name {
                 "p:grpSp" => self.shapes(shape, inherit, true),
                 "p:sp" | "p:cxnSp" => {
-                    if let Some(body) = shape.child("p:txBody") {
+                    if let Some(body) = self.child(shape, "p:txBody") {
                         let parents = if inherit {
                             ph.map(|ph| {
-                                let layout = tree(self.layout).and_then(|tree| self.find(tree, ph));
-                                let master = tree(self.master).and_then(|tree| self.find(tree, ph));
+                                let layout = self
+                                    .layout
+                                    .and_then(|node| self.path(node, &["p:cSld", "p:spTree"]))
+                                    .and_then(|tree| self.find(tree, ph));
+                                let master = self
+                                    .master
+                                    .and_then(|node| self.path(node, &["p:cSld", "p:spTree"]))
+                                    .and_then(|tree| self.find(tree, ph));
                                 [
-                                    layout.and_then(|shape| shape.child("p:txBody")),
-                                    master.and_then(|shape| shape.child("p:txBody")),
+                                    layout.and_then(|shape| self.child(shape, "p:txBody")),
+                                    master.and_then(|shape| self.child(shape, "p:txBody")),
                                 ]
                             })
                             .unwrap_or([None, None])
@@ -552,8 +598,8 @@ impl Scan<'_> {
                     }
                 }
                 "p:graphicFrame" => {
-                    if let Some(graphic) = shape.path(&["a:graphic", "a:graphicData"]) {
-                        if let Some(table) = graphic.child("a:tbl") {
+                    if let Some(graphic) = self.path(shape, &["a:graphic", "a:graphicData"]) {
+                        if let Some(table) = self.child(graphic, "a:tbl") {
                             self.table(table);
                         } else if !graphic.children.is_empty() {
                             self.complete = false;
@@ -660,7 +706,8 @@ pub fn pptx_font_preflight(
         theme: DrawingTheme::parse(theme.as_ref().map(|(_, node)| node)),
         faces: Faces::default(),
         complete,
-        work: MAX_WORK,
+        work: parts.nodes,
+        limited: false,
     };
     if flag(slide.attr("showMasterSp")) != Some(false) {
         if layout.is_none_or(|node| flag(node.attr("showMasterSp")) != Some(false))
@@ -675,7 +722,7 @@ pub fn pptx_font_preflight(
     if let Some(tree) = tree(Some(&slide)) {
         scan.shapes(tree, true, true);
     }
-    Ok(scan.faces.finish(scan.complete))
+    scan.finish()
 }
 
 #[cfg(test)]
