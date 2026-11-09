@@ -577,6 +577,7 @@ test('selection settling publishes the current snapshot once and ignores superse
   host.selectionUnsettled();
   host.selectionChanged(selection);
   host.workerChanged('v2');
+  await settle();
   expect(host.activations()[0]!.context.snapshot.selectionSettled).toBe(false);
   host.selectionSettled('pointer');
   host.selectionSettled('pointer');

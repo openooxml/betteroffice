@@ -197,23 +197,6 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   const selectionRef = useRef<DocxPluginSelection>({ formatting: null, displayRange: null });
   const settleRef = useRef<ReturnType<typeof createSelectionSettle> | null>(null);
   const managed = (options.plugins?.length ?? 0) > 0;
-  useEffect(() => {
-    if (!managed || !options.session) return;
-    let generation = host.generation();
-    const settled = (source: 'pointer' | 'touch' | 'keyboard' | 'api') => host.selectionSettled(source, generation);
-    const machine = createSelectionSettle({
-      root: () => latest.current.focusRoot?.() ?? null,
-      isEditorTarget: (target) => {
-        const id = latest.current.focusRoot?.()?.getAttribute('data-docx-input');
-        return !!id && target instanceof Element && target.id === id;
-      },
-      onUnsettle: () => { generation = host.generation(); host.selectionUnsettled(generation); },
-      onSettle: settled,
-      onResettle: settled,
-    });
-    settleRef.current = machine;
-    return () => { machine.dispose(); settleRef.current = null; };
-  }, [host, managed, options.session, options.loadGeneration]);
   const locale = resolvedLocale(options.locale ?? options.i18n?._lang);
   useLayoutEffect(() => { host.localeChanged(locale); }, [host, locale]);
   useLayoutEffect(() => {
@@ -326,14 +309,12 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   const reservationsRef = useRef({ resolved: reservations, payload: reservationSets });
   reservationsRef.current = { resolved: reservations, payload: reservationSets };
 
-  const publishSelection = useCallback(() => {
-    if (!latest.current.plugins?.length) return;
+  const refreshSelection = useCallback((): DocxPluginSelection => {
     if (latest.current.viewerSelection) {
       const selection = { formatting: null, displayRange: viewerSelectionRef.current?.displayRange ?? null };
       selectionRef.current = selection;
       host.selectionChanged(selection);
-      settleRef.current?.notifySelectionChange(JSON.stringify(selection));
-      return;
+      return selection;
     }
     const editor = latest.current.pagedEditorRef.current;
     const range = editor?.getSelectionRange() ?? null;
@@ -348,8 +329,43 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
     };
     selectionRef.current = selection;
     host.selectionChanged(selection);
-    settleRef.current?.notifySelectionChange(JSON.stringify(selection));
+    return selection;
   }, [host]);
+
+  const publishSelection = useCallback(() => {
+    if (!latest.current.plugins?.length) return;
+    const selection = refreshSelection();
+    const key = latest.current.viewerSelection || latest.current.viewerDocumentRead
+      ? JSON.stringify(selection)
+      : JSON.stringify([host.version(),
+        (latest.current.pagedEditorRef.current?.getYrsSession() ?? latest.current.session)?.selection() ?? null,
+        selection.formatting]);
+    settleRef.current?.notifySelectionChange(key);
+  }, [host, refreshSelection]);
+
+  useEffect(() => {
+    if (!managed || !options.session) return;
+    let generation = host.generation();
+    const settled = (source: 'pointer' | 'touch' | 'keyboard' | 'api') => host.selectionSettled(source, generation);
+    const machine = createSelectionSettle({
+      root: () => latest.current.focusRoot?.() ?? null,
+      isEditorTarget: (target) => {
+        const id = latest.current.focusRoot?.()?.getAttribute('data-docx-input');
+        return !!id && target instanceof Element && target.id === id;
+      },
+      canSettle: () => {
+        if (!generation || host.generation() !== generation) return false;
+        const selection = refreshSelection();
+        return selection.displayRange !== null || latest.current.viewerSelection === true ||
+          !(latest.current.pagedEditorRef.current?.getYrsSession() ?? latest.current.session)?.selection();
+      },
+      onUnsettle: () => { generation = host.generation(); host.selectionUnsettled(generation); },
+      onSettle: settled,
+      onResettle: settled,
+    });
+    settleRef.current = machine;
+    return () => { machine.dispose(); settleRef.current = null; };
+  }, [host, managed, options.session, options.loadGeneration, refreshSelection]);
 
   const publishViewerSelection = useCallback((selection: ViewerSelectionChange) => {
     viewerSelectionRef.current = selection;

@@ -20,8 +20,9 @@ afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
-async function setup(viewerSelection: boolean) {
+async function setup(viewerSelection: boolean, initialRange: { from: number; to: number } | null = { from: 5, to: 9 }) {
   let shellReads = 0;
+  let range = initialRange;
   const session = {
     version: () => 'v1',
     getProposals: () => ({ version: 'v1', previewVersion: 0, proposals: [] }),
@@ -38,10 +39,11 @@ async function setup(viewerSelection: boolean) {
   stampRevisionPreviewKey(queries, '');
   const editor = {
     getYrsSession: () => session,
-    getSelectionRange: () => ({ from: 5, to: 9 }),
+    getSelectionRange: () => range,
     getLayout: () => null,
   } as unknown as PagedEditorRef;
   const events: DocxPluginSelection[] = [];
+  const settledSelections: DocxPluginSelection[] = [];
   const propSelections: Array<SelectionState | null> = [];
   const subscribedSelections: Array<SelectionState | null> = [];
   const subscribers = { current: new Set<(state: SelectionState | null) => void>([
@@ -52,6 +54,7 @@ async function setup(viewerSelection: boolean) {
     createState: () => null,
     onEvent(_context, event) {
       if (event.type === 'selection-change') events.push(event.selection);
+      if (event.type === 'selection-settle') settledSelections.push(event.selection);
     },
   });
   const options = {
@@ -75,8 +78,33 @@ async function setup(viewerSelection: boolean) {
     return { host, tracker };
   });
   await waitFor(() => expect(result.current.host.activations[0]?.context.snapshot.layout).toBeTruthy());
-  return { result, rerender, events, propSelections, subscribedSelections,
+  return { result, rerender, events, settledSelections, propSelections, subscribedSelections,
+    setRange: (next: typeof range) => { range = next; },
     shellReads: () => shellReads };
+}
+
+for (const mappedBeforeDeadline of [true, false]) {
+  test(`editor selection settles with its current display range (mapped before deadline: ${mappedBeforeDeadline})`, async () => {
+    const view = await setup(false, null);
+    const range = { from: 5, to: 9 };
+    if (mappedBeforeDeadline) view.setRange(range);
+    await act(async () => { await new Promise((done) => setTimeout(done, 400)); });
+    if (!mappedBeforeDeadline) {
+      expect(view.settledSelections).toEqual([]);
+      expect(view.result.current.host.activations[0]!.context.snapshot.selectionSettled).toBe(false);
+      view.setRange(range);
+      await act(async () => view.result.current.host.publishSelection());
+    }
+    expect(view.settledSelections).toEqual([{
+      formatting: null,
+      displayRange: { story: 'header:stale', ...range,
+        layoutId: view.result.current.host.activations[0]!.context.snapshot.layout!.id },
+    }]);
+    expect(view.result.current.host.activations[0]!.context.snapshot.selectionSettled).toBe(true);
+    await act(async () => view.result.current.host.publishSelection());
+    await act(async () => { await new Promise((done) => setTimeout(done, 400)); });
+    expect(view.settledSelections).toHaveLength(1);
+  });
 }
 
 test('viewer provenance survives subscriber and layout publication without reading shell selection', async () => {

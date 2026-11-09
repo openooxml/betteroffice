@@ -99,6 +99,7 @@ test('selection settling publishes the current snapshot once and ignores superse
   const selection = { sheetId: 'sheet:0', sheetIndex: 0, cells: { anchor: { row: 0, col: 0 }, focus: { row: 2, col: 2 } }, chartId: null };
   host.selectionUnsettled();
   host.selectionChanged(selection);
+  await settle();
   expect(host.activations()[0]!.context.snapshot.selectionSettled).toBe(false);
   host.selectionSettled('pointer');
   host.selectionSettled('pointer');
