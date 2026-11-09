@@ -940,6 +940,15 @@ describe('docx native engine parity', () => {
     }
   });
 
+  test('an unreadable relationships part warns the same way in both engines', () => {
+    const parts = wasm.unzip_docx(fixture) as Record<string, Uint8Array>;
+    const damaged = wasm.rezip_docx({ ...parts, 'word/_rels/header1.xml.rels': new TextEncoder().encode('<Relationships><not closed') });
+    const output = native.parse_docx_s4(damaged);
+    expect(output).toBe(wasm.parse_docx_s4(damaged));
+    expect((JSON.parse(output) as { projection: { warnings?: string[] } }).projection.warnings?.[0]).toContain('word/_rels/header1.xml.rels');
+    expect((JSON.parse(native.parse_docx_s4(fixture)) as { projection: Record<string, unknown> }).projection).not.toHaveProperty('warnings');
+  });
+
   test('free functions preserve ZIP shapes, parse JSON, exports and sanitization', () => {
     const expected = wasm.unzip_docx(fixture) as Record<string, Uint8Array>;
     const actual = native.unzip_docx(fixture) as Record<string, Uint8Array>;
