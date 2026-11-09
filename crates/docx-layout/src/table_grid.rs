@@ -207,7 +207,7 @@ fn block_shows_content(block: &LayoutBlock) -> bool {
                         || field
                             .fallback
                             .as_deref()
-                            .is_some_and(|text| text.chars().any(|ch| !ch.is_whitespace()))
+                            .is_some_and(|text| !text.is_empty())
                 }
                 _ => true,
             }) || paragraph.attrs.as_ref().is_some_and(|attrs| {
