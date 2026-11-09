@@ -861,7 +861,7 @@
       "targetChanged": "Bu eylemin açıldığı içerik uygulanmadan önce değişti.",
       "commandFailed": "Komut tamamlanamadı.",
       "permissionDenied": "Ana uygulama bu eklentinin bu komutu kullanmasına izin vermedi.",
-      "unsupportedPolicy": "Eklentiler bu komutu henüz çalıştıramaz. Bunun yerine bir düzenleme toplu işlemi kullanın.",
+      "unsupportedPolicy": "Bu komut, eklentinin kendi arayüzünde bir kullanıcı işlemi gerektirir.",
       "pluginUnavailable": "Eklenti artık etkin değil.",
       "aborted": "Eklenti eylemi komut çalışmadan önce iptal edildi."
     }

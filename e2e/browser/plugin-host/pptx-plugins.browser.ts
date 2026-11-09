@@ -3,8 +3,13 @@ import { pinnedEvaluate } from '../pinned-evaluate';
 import { renderedBox } from '../rendered-box';
 
 interface Probe {
+  mutation: unknown;
+  runMutation(): Promise<unknown>;
   editor: {
-    commands: { execute(id: string, args: unknown): Promise<unknown> };
+    commands: {
+      execute(id: string, args: unknown): Promise<unknown>;
+      getState(id: string): { active?: boolean | 'mixed' };
+    };
     readContent(): Promise<{
       version: string;
       slides: { id: string; notes?: string; shapes: { id: string; x: number; y: number }[] }[];
@@ -87,6 +92,40 @@ for (const engine of ['legacy', 'worker'] as const) {
       if (engine === 'worker') expect(count).toBe(0);
       else expect(count).toBeGreaterThan(0);
     });
+test('pptx: a plugin panel gesture admits a granted built-in mutation', async ({ page }) => {
+  await open(page, engine);
+  expect(await pinnedEvaluate(page, async () => {
+    const editor = (window as unknown as { __probe: Probe }).__probe.editor!;
+    const read = await editor.readContent();
+    const story = read.stories.find((entry) => entry.text.length >= 3)!;
+    return editor.selectText({ slide: read.slides.findIndex((slide) => slide.id === story.slideId) + 1,
+      shapeId: story.shapeId, storyId: story.storyId, start: 0, end: 3 });
+  })).toBe(true);
+  const state = () => pinnedEvaluate(page, async () => {
+    const editor = (window as unknown as { __probe: Probe }).__probe.editor!;
+    return { version: (await editor.readContent()).version, bold: editor.commands.getState('bold').active };
+  });
+  const before = await state();
+  await expect(page.getByTestId('probe-mutation')).toHaveAttribute('data-version', before.version);
+  await page.getByTestId('probe-mutation').click();
+  await expect.poll(() => page.evaluate(() =>
+    (window as unknown as { __probe: Probe }).__probe.mutation)).toMatchObject({ ok: true, status: 'executed' });
+  await expect.poll(async () => (await state()).bold).toBe(before.bold !== true);
+  expect((await state()).version).not.toBe(before.version);
+  const after = await state();
+  expect(await pinnedEvaluate(page, () =>
+    (window as unknown as { __probe: Probe }).__probe.runMutation())).toMatchObject({
+    ok: false, failure: { code: 'unsupported-policy' },
+  });
+  expect(await state()).toEqual(after);
+  await page.getByTestId('probe-timer-mutation').click();
+  await expect.poll(() => page.evaluate(() =>
+    (window as unknown as { __probe: Probe }).__probe.mutation)).toMatchObject({
+    ok: false, failure: { code: 'unsupported-policy' },
+  });
+  expect(await state()).toEqual(after);
+});
+
 test('pptx: overlays land on the presented slide at every zoom and while scrolled', async ({
   page,
 }) => {

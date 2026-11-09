@@ -151,7 +151,7 @@
       "commandFailed": "De wijziging kon niet worden toegepast.",
       "commandRefused": "De opdracht is geweigerd.",
       "permissionDenied": "De hosttoepassing heeft deze plug-in geen toestemming gegeven om deze opdracht te gebruiken.",
-      "unsupportedPolicy": "Plug-ins kunnen deze opdracht nog niet uitvoeren. Gebruik in plaats daarvan een bewerkingsbatch.",
+      "unsupportedPolicy": "Deze opdracht vereist een gebruikersactie in de eigen interface van de plug-in.",
       "pluginUnavailable": "De plug-in is niet meer actief.",
       "aborted": "De plug-inactie is geannuleerd voordat de opdracht werd uitgevoerd.",
       "clipboardUnavailable": "Deze browser staat plakken vanuit een menu niet toe. Gebruik de sneltoets.",

@@ -1,4 +1,5 @@
 import { test, expect, type Page } from 'playwright/test';
+import JSZip from 'jszip';
 
 let peerless = false;
 
@@ -37,6 +38,57 @@ async function offsets(page: Page) {
       box.width - canvas.width,
       box.height - canvas.height,
     ].map((value) => Math.abs(value));
+  });
+}
+
+for (const engine of ['legacy', 'worker'] as const) {
+  test(`a plugin panel gesture clears formatting (${engine})`, async ({ page }) => {
+    await page.goto(engine === 'worker' ? '/?peerless=1' : '/?engine=legacy');
+    await expect(page.locator('canvas[data-page-index="0"]')).toBeVisible({ timeout: 120_000 });
+    await expect(page.locator('[data-probe-page="0"]')).toBeAttached({ timeout: 60_000 });
+    const zip = new JSZip();
+    zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
+    zip.file('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
+    zip.file('word/document.xml', '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr><w:b/></w:rPr><w:t>Gesture text</w:t></w:r></w:p><w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>');
+    const bytes = [...await zip.generateAsync({ type: 'uint8array' })];
+    type GestureProbe = { __probe: {
+      mutation: unknown;
+      runMutation(): Promise<unknown>;
+      editor: {
+        loadDocumentBuffer(buffer: ArrayBuffer): Promise<void>;
+        readParagraphs(request: { view: 'accepted' }): Promise<{ version: string }>;
+        commands: { getState(id: string): { active?: boolean | 'mixed' } };
+      };
+    } };
+    await operate(page, (data) => (window as unknown as GestureProbe).__probe.editor
+      .loadDocumentBuffer(Uint8Array.from(data).buffer), bytes);
+    const input = page.locator(engine === 'worker' ? '.paged-editor__input' : '[data-testid="yrs-input"]');
+    await input.focus();
+    await input.press('ControlOrMeta+Home');
+    await input.press('ControlOrMeta+Shift+ArrowRight');
+    const state = () => operate(page, async () => {
+      const editor = (window as unknown as GestureProbe).__probe.editor;
+      return { version: (await editor.readParagraphs({ view: 'accepted' })).version,
+        bold: editor.commands.getState('bold').active };
+    });
+    await expect.poll(async () => (await state()).bold).toBe(true);
+    const before = await state();
+    await expect(page.getByTestId('probe-mutation')).toHaveAttribute('data-version', before.version);
+    await page.getByTestId('probe-mutation').click();
+    await expect.poll(() => page.evaluate(() =>
+      (window as unknown as GestureProbe).__probe.mutation)).toMatchObject({ ok: true, status: 'executed' });
+    await expect.poll(async () => (await state()).bold).toBe(false);
+    expect((await state()).version).not.toBe(before.version);
+    const after = await state();
+    expect(await operate(page, () => (window as unknown as GestureProbe).__probe.runMutation()))
+      .toMatchObject({ ok: false, failure: { code: 'unsupported-policy' } });
+    expect(await state()).toEqual(after);
+    await page.getByTestId('probe-timer-mutation').click();
+    await expect.poll(() => page.evaluate(() =>
+      (window as unknown as GestureProbe).__probe.mutation)).toMatchObject({
+      ok: false, failure: { code: 'unsupported-policy' },
+    });
+    expect(await state()).toEqual(after);
   });
 }
 

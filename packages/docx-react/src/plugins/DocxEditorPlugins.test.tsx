@@ -1,3 +1,4 @@
+import { trackPluginGestures } from '../../../../shared/plugin-host/gesture';
 import { LEGACY_SYNC_API_PROP } from '../components/DocxEditor/peerless/contracts';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
@@ -531,34 +532,90 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
     ).toMatchObject({ ok: false, failure: { code: 'stale-version' } });
   });
 
-  test('granted built-in mutations still refuse without a policy path', async () => {
-    function Probe() {
+  test('granted built-in mutations need a gesture in their panel', async () => {
+    const results: unknown[] = [];
+    const toolbarResults: unknown[] = [];
+    function Probe({ context }: { context: DocxPluginContext<State> }) {
       const bold = useDocxCommands().getState('bold');
       return (
-        <output data-testid="probe">{bold.enabled ? 'enabled' : bold.disabledReason.code}</output>
+        <div>
+          <output data-testid="probe">{bold.enabled ? 'enabled' : bold.disabledReason.code}</output>
+          <button type="button" data-testid="gesture-bold" onClick={() => {
+            void context.commands.execute('bold', null).then((result) => results.push(result));
+          }}>Bold</button>
+          <button type="button" data-testid="delayed-bold" onClick={() => {
+            setTimeout(() => {
+              void context.commands.execute('bold', null).then((result) => results.push(result));
+            }, 0);
+          }}>Delayed bold</button>
+        </div>
       );
     }
     const { plugin, contexts, log } = recorder('acme.review', {
       panel: { title: 'Review', placement: 'left', render: Probe },
+      commands: [{ id: 'format', label: 'Gesture bold', mutatesDocument: true, execute(context) {
+        const result = context.commands.execute('bold', null);
+        void result.then((value) => toolbarResults.push(value));
+        return result;
+      } }],
+      toolbar: ['format'],
     });
-    const { ref, view } = await mount({
+    const { ref, view, rerender } = await mount({
       plugins: [plugin],
       pluginGrants: { 'acme.review': { document: 'write', commands: ['bold', 'reviewNext'] } },
     });
     await until(() => log.includes('load:loaded'));
     await selectFirstWord(ref);
     await settle();
-    expect(within(view.container).getByTestId('probe').textContent).toBe('unsupported-policy');
+    expect(within(view.container).getByTestId('probe').textContent).toBe('enabled');
     const context = contexts.at(-1)!;
     expect(await context.commands.execute('bold', null)).toMatchObject({
       ok: false,
       failure: { code: 'unsupported-policy' },
     });
+    const before = ref.current!.commands.getState('bold').active;
+    const button = within(view.container).getByTestId('gesture-bold');
+    const release = trackPluginGestures(button.closest<HTMLElement>('[data-plugin-activation]')!, () => true);
+    try {
+      fireEvent.click(button);
+      await until(() => results.length === 1);
+      expect(results[0]).toMatchObject({ ok: true, status: 'executed' });
+      expect(ref.current!.commands.getState('bold').active).toBe(!before);
+      fireEvent.click(within(view.container).getByTestId('delayed-bold'));
+      await until(() => results.length === 2);
+      expect(results[1]).toMatchObject({ ok: false, failure: { code: 'unsupported-policy' } });
+      expect(ref.current!.commands.getState('bold').active).toBe(!before);
+    } finally {
+      release();
+    }
+    const toolbarButton = within(view.container).getByRole('button', { name: 'Gesture bold', exact: true });
+    const releaseToolbar = trackPluginGestures(toolbarButton.closest<HTMLElement>('[data-plugin-activation]')!, () => true);
+    try {
+      fireEvent.click(toolbarButton);
+      await until(() => toolbarResults.length === 1);
+      expect(toolbarResults[0]).toMatchObject({ ok: true, status: 'executed' });
+      expect(ref.current!.commands.getState('bold').active).toBe(before);
+    } finally {
+      releaseToolbar();
+    }
     expect(await context.commands.execute('reviewNext', null)).toMatchObject({
       ok: false,
       failure: { code: 'no-revisions' },
     });
     expect(ref.current!.commands.getState('bold').enabled).toBe(true);
+    await act(async () => {
+      rerender({ plugins: [plugin], pluginGrants: { 'acme.review': { commands: ['bold'] } } });
+    });
+    await until(() => within(view.container).getByTestId('probe').textContent === 'permission-denied');
+    const ungrantedButton = within(view.container).getByTestId('gesture-bold');
+    const releaseUngrant = trackPluginGestures(ungrantedButton.closest<HTMLElement>('[data-plugin-activation]')!, () => true);
+    try {
+      fireEvent.click(ungrantedButton);
+      await until(() => results.length === 3);
+      expect(results[2]).toMatchObject({ ok: false, failure: { code: 'permission-denied' } });
+    } finally {
+      releaseUngrant();
+    }
   });
 
   test('edit batches need their grant, respect viewing mode and revocation', async () => {

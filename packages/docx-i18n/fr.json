@@ -861,7 +861,7 @@
       "targetChanged": "Le contenu pour lequel cette action a été ouverte a changé avant son application.",
       "commandFailed": "La commande n’a pas pu aboutir.",
       "permissionDenied": "L’application hôte n’a pas autorisé ce plugin à utiliser cette commande.",
-      "unsupportedPolicy": "Les plugins ne peuvent pas encore exécuter cette commande. Utilisez plutôt un lot de modifications.",
+      "unsupportedPolicy": "Cette commande nécessite une action utilisateur dans la propre interface du plugin.",
       "pluginUnavailable": "Le plugin n’est plus actif.",
       "aborted": "L’action du plugin a été annulée avant l’exécution de la commande."
     }

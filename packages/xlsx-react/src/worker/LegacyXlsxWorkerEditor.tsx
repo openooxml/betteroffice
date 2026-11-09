@@ -1,3 +1,4 @@
+import { usePluginGestures } from '../../../../shared/plugin-host/usePluginGestures';
 import {
   anchorSelection, clearedCells, copiedRange, createSelectionDataNavigation, mergeAnchorCell, reachesSheetEdge,
   selectionDataRequest, selectionFrameContains, selectionHidden, selectionMerges, workbookSelectionMerges,
@@ -120,6 +121,7 @@ function revealAxis(position: number, size: number, frozen: boolean, scroll: num
 export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   const { t } = useTranslation();
   const rootRef = useRef<HTMLDivElement>(null);
+  usePluginGestures(rootRef);
   const scrollRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const editorInputRef = useRef<HTMLInputElement | null>(null);

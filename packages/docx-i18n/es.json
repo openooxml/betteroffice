@@ -861,7 +861,7 @@
       "targetChanged": "El contenido para el que se abrió esta acción cambió antes de que pudiera aplicarse.",
       "commandFailed": "No se pudo completar el comando.",
       "permissionDenied": "La aplicación host no ha permitido que este complemento use este comando.",
-      "unsupportedPolicy": "Los complementos aún no pueden ejecutar este comando. Use en su lugar un lote de ediciones.",
+      "unsupportedPolicy": "Este comando requiere una acción del usuario en la interfaz del propio complemento.",
       "pluginUnavailable": "El complemento ya no está activo.",
       "aborted": "La acción del complemento se canceló antes de que se ejecutara el comando."
     }

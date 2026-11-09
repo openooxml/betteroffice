@@ -1,3 +1,4 @@
+import { usePluginGestures } from '../../../shared/plugin-host/usePluginGestures';
 import type { ResolvedFontProps } from './bundledFonts';
 import { ProposalSlideStrip } from './components/ProposalSlideStrip';
 import { installBrowserFonts, useFontWarning, useStableFonts as useStableFontFaces } from './fontFaces';
@@ -475,6 +476,7 @@ export function PptxEditorContent({
   initialZoomRef.current = initialZoom;
   const onErrorRef = useRef(onError);
   const rootRef = useRef<HTMLDivElement>(null);
+  usePluginGestures(rootRef);
   const stageRef = useRef<HTMLDivElement>(null);
   const canvasHostRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);

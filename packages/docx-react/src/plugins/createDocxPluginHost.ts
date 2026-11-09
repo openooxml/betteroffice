@@ -1,3 +1,4 @@
+import { pluginActivationId } from '../../../../shared/plugin-host/gesture';
 import type { TranslationKey } from '@betteroffice/docx-i18n';
 import type { YrsSession } from '@betteroffice/docx/yrs';
 import {
@@ -580,6 +581,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
               mutatesDocument: command.mutatesDocument,
               shortcuts: Object.freeze(shortcuts),
             }),
+            activationId: pluginActivationId(entry.activation),
             state: () => commandState(entry.pluginId, command),
             execute: () => executeCommand(entry.pluginId, command),
           });

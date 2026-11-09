@@ -123,6 +123,12 @@ use `EditorToolbar` with `mode="commands"`.
 See [Host PPTX editor plugins](https://docs.betteroffice.dev/docs/javascript#host-pptx-editor-plugins)
 for panels, overlays, lifecycle, permissions, and error handling.
 
+Granted mutating built-in commands require `document: "write"` and a call while a trusted
+`click`, `keydown`, or `pointerup` in that plugin's own UI is being handled, including its
+contributed toolbar buttons. Synchronous calls and microtasks before the event finishes
+dispatching qualify. Timers, later unrelated events, awaits that outlive dispatch,
+synthetic events, and gestures outside that plugin's UI refuse with `unsupported-policy`.
+
 ## Version-checked edit batches
 
 `readContent`, `findText`, `validateEdits`, and `applyEdits` on the editor API return promises and run

@@ -115,6 +115,12 @@ clients support version-checked operations. See
 [Host XLSX editor plugins](https://docs.betteroffice.dev/docs/javascript#host-xlsx-editor-plugins)
 and [Edit XLSX in version-checked batches](https://docs.betteroffice.dev/docs/javascript#edit-xlsx-in-version-checked-batches).
 
+Granted mutating built-in commands require `document: "write"` and a call while a trusted
+`click`, `keydown`, or `pointerup` in that plugin's own UI is being handled, including its
+contributed toolbar buttons. Synchronous calls and microtasks before the event finishes
+dispatching qualify. Timers, later unrelated events, awaits that outlive dispatch,
+synthetic events, and gestures outside that plugin's UI refuse with `unsupported-policy`.
+
 ## Structured export
 
 Await `api.exportStructured()` or `api.exportMarkdown()` for content with positional anchors and

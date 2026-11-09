@@ -1,3 +1,4 @@
+import { usePluginGestures } from '../../../../shared/plugin-host/usePluginGestures';
 import type { NavigationContext } from '../selectionData';
 import {
   copiedSelection, createSelectionDataNavigation, MAX_CLEAR_CELLS, mergeAnchorCell, sameSelection, selectionDataRequest, selectionFrameContains, selectionHidden, selectionMerges,
@@ -200,6 +201,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const { t } = useTranslation();
   const [cellClipboard] = useState(() => new CellClipboard());
   const rootRef = useRef<HTMLDivElement>(null);
+  usePluginGestures(rootRef);
   const scrollRef = useRef<HTMLDivElement>(null);
   const announceRef = useRef<(() => void) | null>(null);
   const gridId = useId();

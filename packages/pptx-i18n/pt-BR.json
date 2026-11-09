@@ -235,7 +235,7 @@
       "gestureActive": "Conclua primeiro o gesto do ponteiro.",
       "commandFailed": "O comando falhou.",
       "permissionDenied": "O aplicativo host não permitiu que este plugin usasse este comando.",
-      "unsupportedPolicy": "Os plugins ainda não podem executar este comando. Use um lote de edições.",
+      "unsupportedPolicy": "Este comando exige uma ação do usuário na interface do próprio plugin.",
       "pluginUnavailable": "O plugin não está mais ativo.",
       "aborted": "A ação do plugin foi cancelada antes de o comando ser executado.",
       "clipboardUnavailable": "O acesso à área de transferência está indisponível ou foi negado.",

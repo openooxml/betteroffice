@@ -21,6 +21,8 @@ interface ProbeState {
 type ProbeContext = DocxPluginContext<ProbeState>;
 
 interface ProbeWindow {
+  mutation: unknown;
+  runMutation(): Promise<unknown>;
   editor: DocxEditorRef | null;
   geometry: DocxPluginGeometry | null;
   navigation: unknown;
@@ -34,6 +36,8 @@ const fileProp = new URLSearchParams(location.search).get('prop') === 'file';
 
 const probe: ProbeWindow = {
   editor: null,
+  mutation: null,
+  runMutation: async () => null,
   geometry: null,
   navigation: null,
   marks: 0,
@@ -54,9 +58,22 @@ async function refresh(context: ProbeContext) {
 }
 
 function ProbePanel({ context }: { context: ProbeContext }) {
+  probe.runMutation = () => context.commands.execute('clearFormatting', null);
   const last = context.state.paragraphs.at(-1);
   return (
     <div>
+      <button type="button" data-testid="probe-mutation" data-version={context.snapshot.version} onMouseDown={(event) => event.preventDefault()}
+        onClick={() => { void probe.runMutation().then((result) => { probe.mutation = result; }); }}>
+        Apply formatting
+      </button>
+      <button type="button" data-testid="probe-timer-mutation" onMouseDown={(event) => event.preventDefault()}
+        onClick={async () => {
+          probe.mutation = null;
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          probe.mutation = await probe.runMutation();
+        }}>
+        Apply formatting after a timer
+      </button>
       <button
         type="button"
         data-testid="probe-navigate"
@@ -252,7 +269,7 @@ const second = defineDocxPlugin({
 });
 
 const PLUGINS = [alignment, second];
-const GRANTS = { 'probe.alignment': { document: 'write', editBatches: true } } as const;
+const GRANTS = { 'probe.alignment': { document: 'write', editBatches: true, commands: ['clearFormatting'] } } as const;
 
 function Harness() {
   const [buffer, setBuffer] = useState<ArrayBuffer | null>(null);
@@ -267,7 +284,7 @@ function Harness() {
   if (!buffer) return null;
   return (
     <div style={{ height: '100%' }}>
-      <DocxEditor ref={setEditor} {...(fileProp ? { file: new File([buffer], 'upload.docx'), fileName: 'Aliased report.docx' } : { documentBuffer: buffer })} plugins={PLUGINS} pluginGrants={GRANTS} measurementFontProvider={new URLSearchParams(location.search).get('peerless') === '1' ? fonts : undefined} {...(new URLSearchParams(location.search).get('peerless') === '1' ? {} : { legacySyncApi: true }) as Record<never, never>} />
+      <DocxEditor experimentalWorkerOpen={new URLSearchParams(location.search).get('engine') === 'legacy' ? false : undefined} ref={setEditor} {...(fileProp ? { file: new File([buffer], 'upload.docx'), fileName: 'Aliased report.docx' } : { documentBuffer: buffer })} plugins={PLUGINS} pluginGrants={GRANTS} measurementFontProvider={new URLSearchParams(location.search).get('peerless') === '1' ? fonts : undefined} {...(new URLSearchParams(location.search).get('peerless') === '1' ? {} : { legacySyncApi: true }) as Record<never, never>} />
     </div>
   );
 }

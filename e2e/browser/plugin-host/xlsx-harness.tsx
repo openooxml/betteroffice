@@ -16,6 +16,8 @@ import workbookUrl from '../../../packages/xlsx/test-fixtures/sample.xlsx?url';
 type ProbeContext = XlsxPluginContext<null>;
 
 interface ProbeWindow {
+  mutation: unknown;
+  runMutation(): Promise<unknown>;
   editor: XlsxEditorApi | XlsxAsyncEditorApi | null;
   /** Runs `action` in the probe plugin's context, the same on either engine. */
   act<T>(action: (context: ProbeContext) => Promise<T>): Promise<T>;
@@ -29,6 +31,8 @@ const workerOnly = new URLSearchParams(location.search).get('engine') === 'worke
 let pluginContext: ProbeContext | null = null;
 const probe: ProbeWindow = {
   editor: null,
+  mutation: null,
+  runMutation: async () => null,
   act: (action) =>
     new Promise((resolve, reject) => void pluginContext!.run((context) => action(context).then(resolve, reject))),
   navigation: null,
@@ -39,8 +43,21 @@ const probe: ProbeWindow = {
 (window as unknown as { __probe: ProbeWindow }).__probe = probe;
 
 function ProbePanel({ context }: { context: ProbeContext }) {
+  probe.runMutation = () => context.commands.execute('bold', null);
   return (
     <div>
+      <button type="button" data-testid="probe-mutation" data-version={context.snapshot.version} onMouseDown={(event) => event.preventDefault()}
+        onClick={() => { void probe.runMutation().then((result) => { probe.mutation = result; }); }}>
+        Apply formatting
+      </button>
+      <button type="button" data-testid="probe-timer-mutation" onMouseDown={(event) => event.preventDefault()}
+        onClick={async () => {
+          probe.mutation = null;
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          probe.mutation = await probe.runMutation();
+        }}>
+        Apply formatting after a timer
+      </button>
       <button
         type="button"
         data-testid="probe-navigate"
@@ -210,7 +227,7 @@ function Harness() {
         {...(workerOnly ? {} : { legacySyncApi: true, experimentalWorkerOpen: false }) as Record<never, never>}
         file={file}
         plugins={PLUGINS}
-        pluginGrants={{ 'probe.alignment': { document: 'write', editBatches: true } }}
+        pluginGrants={{ 'probe.alignment': { document: 'write', editBatches: true, commands: ['bold'] } }}
         onReady={(api) => {
           probe.editor = api;
         }}

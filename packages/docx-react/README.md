@@ -137,6 +137,12 @@ version-checked operations. See [DOCX edit batches](https://docs.betteroffice.de
 and [paragraph anchors](https://docs.betteroffice.dev/docs/javascript#docx-paragraph-anchors)
 for target addressing, persisted identities, and refusals.
 
+Granted mutating built-in commands require `document: "write"` and a call while a trusted
+`click`, `keydown`, or `pointerup` in that plugin's own UI is being handled, including its
+contributed toolbar buttons. Synchronous calls and microtasks before the event finishes
+dispatching qualify. Timers, later unrelated events, awaits that outlive dispatch,
+synthetic events, and gestures outside that plugin's UI refuse with `unsupported-policy`.
+
 ## Structured export and content controls
 
 For `exportStructuredWithPages(options)` in the default worker editor, see

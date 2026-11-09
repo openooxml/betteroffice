@@ -20,6 +20,8 @@ interface ProbeState {
 type ProbeContext = PptxPluginContext<ProbeState>;
 
 interface ProbeWindow {
+  mutation: unknown;
+  runMutation(): Promise<unknown>;
   editor: PptxEditorApi | PptxAsyncEditorApi | null;
   navigation: PptxPluginNavigationResult | null;
   selection: PptxPluginSelection;
@@ -27,7 +29,7 @@ interface ProbeWindow {
 }
 
 const workerOnly = new URLSearchParams(location.search).get('engine') === 'worker';
-const probe: ProbeWindow = { editor: null, navigation: null, selection: null, marks: 0 };
+const probe: ProbeWindow = { editor: null, navigation: null, selection: null, marks: 0, mutation: null, runMutation: async () => null };
 (window as unknown as { __probe: ProbeWindow }).__probe = probe;
 
 async function refresh(context: ProbeContext) {
@@ -41,9 +43,22 @@ async function refresh(context: ProbeContext) {
 }
 
 function ProbePanel({ context }: { context: ProbeContext }) {
+  probe.runMutation = () => context.commands.execute('bold', null);
   const last = context.state.slides.at(-1);
   return (
     <div>
+      <button type="button" data-testid="probe-mutation" data-version={context.snapshot.version} onMouseDown={(event) => event.preventDefault()}
+        onClick={() => { void probe.runMutation().then((result) => { probe.mutation = result; }); }}>
+        Apply formatting
+      </button>
+      <button type="button" data-testid="probe-timer-mutation" onMouseDown={(event) => event.preventDefault()}
+        onClick={async () => {
+          probe.mutation = null;
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          probe.mutation = await probe.runMutation();
+        }}>
+        Apply formatting after a timer
+      </button>
       <button
         type="button"
         data-testid="probe-navigate"
@@ -179,6 +194,7 @@ function Harness() {
         file={file}
         fonts={fonts}
         plugins={PLUGINS}
+        pluginGrants={{ 'probe.alignment': { document: 'write', commands: ['bold'] } }}
         onReady={(api) => {
           probe.editor = api;
         }}
