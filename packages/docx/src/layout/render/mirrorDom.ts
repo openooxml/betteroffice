@@ -135,7 +135,7 @@ function noteHasBacklink(area: NoteRegion, noteId: number): boolean {
   );
 }
 
-/** Whether `buildMirrorPage(page)` holds a table header cell, which cells on other pages may name. */
+/** Whether `buildMirrorPage(page)` may hold a table header cell, which cells on other pages may name; a cell marked as a header with nothing to read reads as a plain cell. */
 export function mirrorPageHasHeaderCells(page: DisplayPage): boolean {
   return pageRegionPrimitives(page).some((p) => p.cell?.isHeader === true);
 }
@@ -806,7 +806,7 @@ interface BlockGroup {
   el: HTMLElement;
   prims: Exclude<DisplayPrimitive, { kind: 'line' }>[];
   table?: DisplayTableMetadata;
-  cells?: Array<{ el: HTMLElement; bounds?: GeoRect }>;
+  cells?: Array<{ el: HTMLElement; bounds?: GeoRect; headerRole?: 'columnheader' | 'rowheader' }>;
 }
 
 // shared body/region flow: primitives sharing a blockId group under one
@@ -986,7 +986,7 @@ function populateBlock(
       const cell = cells.get(colIndex)!;
       const cellEl = doc.createElement('div');
       cellEl.className = MIRROR_CLASS_NAMES.tableCell;
-      cellEl.setAttribute('role', cell.ref.isHeader ? 'columnheader' : 'cell');
+      cellEl.setAttribute('role', 'cell');
       cellEl.setAttribute('aria-colindex', String(colIndex + 1));
       if (cell.ref.cellId) cellEl.id = cell.ref.cellId;
       if (cell.ref.headerIds?.length) {
@@ -1037,12 +1037,10 @@ function populateBlock(
         populateParagraphBlock(paragraphEl, blockPrims, doc, offsetY, ctx);
         cellEl.appendChild(paragraphEl);
       }
-      if (!cell.ref.isHeader && cell.ref.isRowHeader && /[^\s\u200b\ufeff]/u.test(cellEl.textContent ?? '')) {
-        cellEl.setAttribute('role', 'rowheader');
-      }
       stampDocRangeFromDescendants(cellEl, cell.prims);
       applyContainerLanguageAndDirection(cellEl, cell.prims);
-      group.cells.push({ el: cellEl, bounds: boundsOfPrimitives(cell.prims) });
+      const headerRole = cell.ref.isHeader ? 'columnheader' : cell.ref.isRowHeader ? 'rowheader' : undefined;
+      group.cells.push({ el: cellEl, bounds: boundsOfPrimitives(cell.prims), headerRole });
       rowEl.appendChild(cellEl);
     }
   }
@@ -1097,6 +1095,21 @@ function chartTable(data: ChartData, doc: Document): HTMLElement | null {
     series.forEach((entry, index) => cell(body, index + 1, 'cell', entry.values[rowIndex] ?? ''));
   });
   return table;
+}
+
+/** Whether `node` holds anything assistive technology can read: text, or a named object such as a picture. */
+function mirrorHasName(node: Node): boolean {
+  for (const child of Array.from(node.childNodes)) {
+    if (child.nodeType === 3) {
+      if (/[^\s\u200b\ufeff]/u.test(child.nodeValue ?? '')) return true;
+      continue;
+    }
+    if (child.nodeType !== 1) continue;
+    const element = child as Element;
+    if (element.getAttribute('aria-hidden') === 'true' || element.hasAttribute('inert')) continue;
+    if (element.getAttribute('aria-label')?.trim() || mirrorHasName(element)) return true;
+  }
+  return false;
 }
 
 /** Populate one paragraph-like block without re-interpreting table metadata. */
@@ -1296,6 +1309,12 @@ function nestTableBlocks(blocks: Map<number | string, BlockGroup>): void {
     );
     candidates.sort((a, b) => rectArea(a.bounds!) - rectArea(b.bounds!));
     candidates[0]?.el.appendChild(group.el);
+  }
+  // A header needs something to read, which a table nested in it can supply.
+  for (const group of blocks.values()) {
+    for (const cell of group.cells ?? []) {
+      if (cell.headerRole && mirrorHasName(cell.el)) cell.el.setAttribute('role', cell.headerRole);
+    }
   }
 }
 
