@@ -71,4 +71,4 @@ objc2 = "=0.5.2"
 objc2-foundation = { version = "=0.2.2", features = ["NSArray", "NSURL"] }
 
 [patch.crates-io]
-yrs = { path = "vendor/yrs" }
+yrs = { git = "https://github.com/openooxml/y-crdt.git", rev = "5349f4e11ec46a5ad842f08415b315cb6d5c53af" }

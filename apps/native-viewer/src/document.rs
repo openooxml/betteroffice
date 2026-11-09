@@ -1720,7 +1720,7 @@ mod tests {
             0x65, 0xe5, 0x65, 0x00,
         ];
         let bare = Update::decode_v1(&hostile);
-        assert!(matches!(bare, Err(yrs::encoding::read::Error::Custom(_))));
+        assert!(matches!(bare, Err(yrs::encoding::read::Error::UnexpectedValue)));
 
         let bytes = test_fixtures::editing_docx(
             r#"<w:p w14:paraId="11111111"><w:r><w:t>Safe</w:t></w:r></w:p>"#,
