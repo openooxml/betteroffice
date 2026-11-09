@@ -158,8 +158,6 @@ export function createAnchorGeometry(
     }
     const geometry = selectionGeometry(index, { slideId: selected.slideId, shapeId: value.shapeId,
       storyId: value.storyId, anchor: value.anchor, focus: value.focus, affinity: 'downstream' });
-    const anchor = geometry.caret && toOverlay(geometry.caret);
-    if (!anchor) return failure('missing-target', 'The text range is not displayed.');
     const rects: PptxPluginRect[] = [];
     if (value.anchor !== value.focus) {
       for (const rect of geometry.selectionRects) {
@@ -168,6 +166,10 @@ export function createAnchorGeometry(
         rects.push(mapped);
       }
     }
+    const anchor = value.anchor === value.focus
+      ? geometry.caret && toOverlay(geometry.caret)
+      : rects[value.focus > value.anchor ? rects.length - 1 : 0];
+    if (!anchor) return failure('missing-target', 'The text range is not displayed.');
     return answer(rects, anchor);
   };
   return {

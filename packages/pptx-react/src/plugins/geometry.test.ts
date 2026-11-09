@@ -270,12 +270,29 @@ describe('plugin anchor geometry', () => {
         { x: 95, y: 65, width: 20, height: 10 },
         { x: 90, y: 75, width: 20, height: 10 },
       ],
-      anchor: { x: 110, y: 75, width: 0.5, height: 10 },
+      anchor: { x: 90, y: 75, width: 20, height: 10 },
       pageRect: { x: 40, y: 40, width: 640, height: 360 },
       version: 'v1', layoutId: geometry.layout.id,
     });
     expect(geometry.getAnchorGeometry({ ...range, anchor: 9, focus: 1 })).toMatchObject({
-      ok: true, anchor: { x: 95, y: 65, width: 0.5, height: 10 },
+      ok: true, anchor: { x: 95, y: 65, width: 20, height: 10 },
+    });
+  });
+
+  test('wrapped ranges anchor to the selected fragment at the focus end', () => {
+    const { geometry, range } = textGeometry();
+    const firstLine = { x: 95, y: 65, width: 20, height: 10 };
+    expect(geometry.getAnchorGeometry({ ...range, anchor: 1, focus: 5 })).toMatchObject({
+      ok: true, rects: [firstLine], anchor: firstLine,
+    });
+    expect(geometry.getAnchorGeometry({ ...range, anchor: 5, focus: 1 })).toMatchObject({
+      ok: true, rects: [firstLine], anchor: firstLine,
+    });
+    const focusLine = { x: 110, y: 65, width: 5, height: 10 };
+    expect(geometry.getAnchorGeometry({ ...range, anchor: 6, focus: 4 })).toMatchObject({
+      ok: true,
+      rects: [focusLine, { x: 90, y: 75, width: 5, height: 10 }],
+      anchor: focusLine,
     });
   });
 
@@ -291,7 +308,7 @@ describe('plugin anchor geometry', () => {
     expect(geometry.getAnchorGeometry({ ...range, anchor: 1, focus: 3 })).toMatchObject({
       ok: true,
       rects: [{ x: 95, y: 65, width: 10, height: 10 }],
-      anchor: { x: 105, y: 65, width: 0.5, height: 10 },
+      anchor: { x: 95, y: 65, width: 10, height: 10 },
     });
   });
 
