@@ -253,13 +253,15 @@ fn snapshot_initial_peer_matches_sheet_edit_history_and_live_reorder_refusal() {
         assert!(deleted_clock_total(&worker) > 1);
         for workbook in [&mut worker, &mut peer] {
             {
-                let mut txn = workbook.authority.snapshot_transaction_for_test();
+                let mut txn = workbook
+                    .authority_for_test()
+                    .snapshot_transaction_for_test();
                 let order = txn.get_array("xlsx:sheet-order").unwrap();
                 let key = order.get(&txn, 0).unwrap().cast::<String>().unwrap();
                 order.remove_range(&mut txn, 0, 1);
                 order.insert(&mut txn, 31, key);
             }
-            workbook.model = workbook.authority.materialize().unwrap();
+            workbook.model = workbook.authority_for_test().materialize().unwrap();
         }
         assert_edited_identity(&worker, &peer);
         assert_eq!(worker.model().sheets[31].name, "Renamed");
@@ -451,9 +453,9 @@ fn snapshot_refusal_leaves_the_non_snapshot_open_path_usable() {
         let mut worker = Workbook::open(&empty_worker().save().unwrap()).unwrap();
         let budget = SnapshotBudget::new(records, bytes).unwrap();
         let mut snapshot = decoded_snapshot(&encode(&worker, budget));
-        worker.authority.snapshot_skip_gc_for_test();
+        worker.authority_mut_for_test().snapshot_skip_gc_for_test();
         {
-            let mut txn = worker.authority.snapshot_transaction_for_test();
+            let mut txn = worker.authority_for_test().snapshot_transaction_for_test();
             let mut client = 1;
             while txn
                 .state_vector()
@@ -472,7 +474,10 @@ fn snapshot_refusal_leaves_the_non_snapshot_open_path_usable() {
             txn.apply_update(Update::decode_v1(&update).unwrap())
                 .unwrap();
         }
-        assert_eq!(worker.authority.materialize().unwrap(), *worker.model());
+        assert_eq!(
+            worker.authority_for_test().materialize().unwrap(),
+            *worker.model()
+        );
         let failure = WorkbookSnapshotEncoder::new(&worker, Some(context()), budget)
             .err()
             .unwrap();
@@ -867,7 +872,7 @@ fn snapshot_authority_schema_and_authored_model_agree_before_ready() {
         canonical_model(peer.model())
     );
     {
-        let mut txn = worker.authority.snapshot_transaction_for_test();
+        let mut txn = worker.authority_for_test().snapshot_transaction_for_test();
         txn.get_map("xlsx")
             .unwrap()
             .insert(&mut txn, "schemaVersion", 999_i64);
@@ -906,7 +911,7 @@ fn snapshot_authority_schema_and_authored_model_agree_before_ready() {
     })
     .unwrap();
     {
-        let mut txn = worker.authority.snapshot_transaction_for_test();
+        let mut txn = worker.authority_for_test().snapshot_transaction_for_test();
         let sheets = txn.get_map("xlsx:sheets").unwrap();
         let sheet = sheets
             .get(&txn, "sheet:0")
@@ -1029,6 +1034,7 @@ fn snapshot_charts_require_source_package_before_ready() {
     let budget = budgets()[0];
     let mut worker = worker(&source(false, false));
     assert!(!worker.model.sheets[0].charts.is_empty());
+    worker.authority_for_test();
     worker.source_package = None;
     worker.source_container = None;
     let chunks = encode(&worker, budget);
@@ -1273,6 +1279,7 @@ fn snapshot_anchor_reconstruction_visits_allocations_and_refusal_are_bounded() {
             chart
         })
         .collect();
+    original.authority_for_test();
     let Some(PackageSlot::Present(package)) = original.source_package.take() else {
         panic!("source package is not materialized");
     };
@@ -1455,6 +1462,7 @@ fn released_styles() -> (Vec<u8>, Vec<u8>) {
 fn released_reading_of(source: &[u8], released: &[u8]) -> Workbook {
     let mut opened = Workbook::open(source).unwrap();
     let mut workbook = Workbook::open(released).unwrap();
+    workbook.authority_for_test();
     workbook.source_package = opened.source_package.take();
     workbook.source_container = opened.source_container.take();
     workbook
@@ -1561,7 +1569,9 @@ fn marked_xfs_keep_main_snapshot_bytes_and_record_tags() {
     let mut styles = serde_json::to_value(&worker.model.styles).unwrap();
     styles.as_object_mut().unwrap().remove("xfs_with_extra_xml");
     worker.model.styles = serde_json::from_value(styles).unwrap();
-    worker.authority.clear_xf_xml_markers_for_test();
+    worker
+        .authority_mut_for_test()
+        .clear_xf_xml_markers_for_test();
     assert!(!worker.model().styles.xf_has_extra_xml(2));
     assert_eq!(marked, fixed_snapshot(&worker));
     assert_eq!(
@@ -1668,7 +1678,7 @@ fn restores_follow_custom_styles_relationship_and_ignore_unreferenced_malformed_
         assert!(!workbook.model().styles.xf_has_extra_xml(0));
         assert!(
             workbook
-                .authority
+                .authority_for_test()
                 .materialize()
                 .unwrap()
                 .styles
@@ -1704,7 +1714,7 @@ fn snapshots_ignore_malformed_source_styles_when_restoring_markers() {
     assert!(!restored.model().styles.xf_has_extra_xml(1));
     assert!(
         !restored
-            .authority
+            .authority_for_test()
             .materialize()
             .unwrap()
             .styles
