@@ -2334,6 +2334,24 @@ test('worker column edge drags converge with a concurrent edit in a cell of the 
   }
 }, TIMEOUT);
 
+test('a cell holding only a block control has a working object handle', async () => {
+  const cellXml = (content: string) => `<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>${content}</w:tc>`;
+  const text = (value: string) => `<w:p><w:r><w:t>${value}</w:t></w:r></w:p>`;
+  const bodyXml = '<w:p/><w:tbl><w:tblPr><w:tblLayout w:type="fixed"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>' +
+    `<w:tr>${cellXml(text('A'))}${cellXml(`<w:sdt><w:sdtPr><w:id w:val="9"/></w:sdtPr><w:sdtContent>${text('B')}</w:sdtContent></w:sdt>`)}</w:tr></w:tbl><w:p/>`;
+  const { client, engine, initial } = await openWorker({ bodyXml });
+  try {
+    const cell = initial.frame.payload.geometry!.objects.find(object => object.kind === 'cell' && object.story === 'body:t0:r0c1');
+    if (!cell) throw new Error('Control-only cell has no object');
+    const resized = await client.edit(intent(1, 0, 'resizeObject', {
+      handle: cell.handle, expectVersion: initial.frame.payload.documentVersion!, columnEdge: 1, deltaTwips: 200,
+    }));
+    expect(resized.outcomes[0]?.status).toBe('applied');
+    expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [2200, 1800]);
+    expect(engine.paragraphs('body:t0:r0c1:sdt0')[0]?.text).toBe('B');
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
 test('worker row border drags set an at-least height in one undo step and never start below the stored height', async () => {
   const { client, engine, initial } = await openWorker({ bodyXml: THREE_COLUMNS });
   try {
