@@ -92,6 +92,27 @@ fn paragraph_texts(session: &EditSessionCore) -> Vec<String> {
 }
 
 #[test]
+fn an_empty_read_answers_as_a_full_read_does() {
+    let read = |session: &EditSessionCore, story: Option<&str>, para_ids: Option<Vec<String>>| {
+        session.engine.doc().read_paragraphs(&ReadParagraphsRequest {
+            story: story.map(str::to_owned),
+            para_ids,
+            view: EditTextView::Accepted,
+        })
+    };
+    let session = core(1);
+    let fresh = read(&session, None, Some(Vec::new()));
+    let full = read(&session, None, None);
+    assert_eq!(fresh.is_ok(), full.is_ok());
+    if let (Ok(fresh), Ok(full)) = (&fresh, &full) {
+        assert_eq!(fresh.version, full.version);
+        assert!(fresh.paragraphs.is_empty());
+    }
+    assert!(read(&session, Some("missing"), Some(Vec::new())).is_err());
+    assert!(read(&session, Some("missing"), None).is_err());
+}
+
+#[test]
 fn text_edits_marks_and_raw_ops_run_without_wasm() {
     let session = core(1);
     let seeded: Value = serde_json::from_str(&session.load_json(BODY).unwrap()).unwrap();
