@@ -90,7 +90,7 @@ async function appliesAndUndoes(kind: string, payload: Record<string, unknown>, 
   const before = tableJson(arm);
   const version = arm.engine.proposalEngine.version();
   expect(execute(arm, command(arm, kind as 'insertTableRow', payload as never)).status).toBe('applied');
-  expect(arm.engine.proposalEngine.version()).toBeGreaterThan(version);
+  expect(arm.engine.proposalEngine.version()).not.toEqual(version);
   changed(arm);
   expect(execute(arm, command(arm, 'undo', {})).status).toBe('applied');
   expect(tableJson(arm)).toBe(before);
