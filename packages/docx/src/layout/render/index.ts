@@ -81,6 +81,7 @@ export {
 export {
   buildRustDisplayList,
   buildRustDisplayFrame,
+  openPagedDisplay,
   loadRustDisplayListQueryEngine,
   loadedRustDisplayListQueryEngine,
   type DisplayListBuildInputs,

@@ -65,14 +65,13 @@ async function layoutDocxPage(original: YrsSession) {
 const renderDocxPageCanvas: DocumentRenderer = async (original, pageNumber) => {
   const { createCanvas, loadImage, Path2D } = await loadCanvas();
   const prepared = await layoutDocxPage(original);
-  const { session, module, document, measurement, layout, notesConverged } = prepared;
-  const { buildRustDisplayList, drawDisplayPage, GlyphCache } = module.render;
+  const { session, module, document, measurement, notesConverged } = prepared;
+  const { openPagedDisplay, drawDisplayPage, GlyphCache } = module.render;
   const release = cleanupGuard(prepared.dispose);
   try {
-    const kernel = module.editor.getLayoutKernelInputs(layout)!;
-    const display = await buildRustDisplayList({ ...kernel, layout, fontChains: measurement.fontChains }, session);
-    const page = display.pages[pageNumber - 1];
-    if (!page) throw new DocumentToolError('PAGE_OUT_OF_RANGE', `Choose a page from 1 to ${display.pages.length}.`, { pageCount: display.pages.length });
+    const display = openPagedDisplay(session, measurement.fontChains);
+    const page = display.page(pageNumber - 1);
+    if (!page) throw new DocumentToolError('PAGE_OUT_OF_RANGE', `Choose a page from 1 to ${display.pageCount}.`, { pageCount: display.pageCount });
     if (!Number.isFinite(page.width) || !Number.isFinite(page.height) || page.width <= 0 || page.height <= 0 || Math.ceil(page.width) * Math.ceil(page.height) > 16_000_000) {
       throw new DocumentToolError('PAGE_TOO_LARGE', 'Page exceeds the 16 megapixel render limit.');
     }
@@ -116,6 +115,6 @@ const renderDocxPageCanvas: DocumentRenderer = async (original, pageNumber) => {
         } catch (error) { warnings.add(error instanceof DocumentToolError ? error.message : 'An embedded image could not be decoded.'); images.set(id, null); return null; }
       },
     });
-    return { png: await canvas.encode('png'), page: pageNumber, pageCount: display.pages.length, width: canvas.width, height: canvas.height, warnings: [...warnings] };
+    return { png: await canvas.encode('png'), page: pageNumber, pageCount: display.pageCount, width: canvas.width, height: canvas.height, warnings: [...warnings] };
   } catch (error) { throw release.failed(error); } finally { release.run(); }
 };
