@@ -94,8 +94,8 @@ pub fn parse_docx_s4_projection(data: &[u8]) -> Result<S4Projection, ParseError>
         let Some(root) = document.root() else {
             continue;
         };
-        let owner_path = relationship_path_for_part(path);
-        let relationships = if unreadable.contains(&owner_path.to_ascii_lowercase()) {
+        let owner_path = relationship_path_for_part(path).to_ascii_lowercase();
+        let relationships = if unreadable.contains(&owner_path) {
             None
         } else {
             relationship_parts
@@ -151,7 +151,7 @@ fn read_relationship_parts(
         match parse_relationships(xml, path, &mut attempt) {
             Ok(relationships) => {
                 *budget = attempt;
-                read.parts.insert(path.clone(), relationships);
+                read.parts.insert(path.to_ascii_lowercase(), relationships);
             }
             Err(error) if path.eq_ignore_ascii_case(DOCUMENT_RELATIONSHIPS) => return Err(error),
             Err(_) => {
@@ -505,6 +505,30 @@ mod tests {
             parse_docx_s4_projection(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
         assert_eq!(projection.warnings.len(), 1);
         assert!(header_image(&projection)["src"].is_null());
+    }
+
+    #[test]
+    fn a_readable_relationships_part_named_in_another_case_is_the_part_s_own() {
+        let bytes = package(None, DOCUMENT_RELS);
+        let borrowed = header_image(&parse_docx_s4_projection(&bytes).unwrap());
+        let mut parts = ooxml_opc::unzip_parts(&bytes).unwrap();
+        let mut other = base64::engine::general_purpose::STANDARD
+            .decode(PNG)
+            .unwrap();
+        other.push(0);
+        parts.push(("word/media/image2.png".to_owned(), other));
+        parts.push((
+            "word/_rels/Header1.xml.RELS".to_owned(),
+            DOCUMENT_RELS
+                .replace("image1.png", "image2.png")
+                .into_bytes(),
+        ));
+        let projection =
+            parse_docx_s4_projection(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+        let own = header_image(&projection);
+        assert!(projection.warnings.is_empty());
+        assert!(own["src"].is_string(), "{own}");
+        assert_ne!(own["src"], borrowed["src"]);
     }
 
     #[test]
