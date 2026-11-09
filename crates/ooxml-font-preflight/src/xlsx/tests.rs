@@ -369,6 +369,17 @@ fn malformed_inputs_and_shared_xml_fail_without_panicking() {
 }
 
 #[test]
+fn worksheet_over_the_node_budget_is_refused() {
+    let rows = r#"<row r="1"/>"#.repeat(crate::xml::MAX_NODES + 1);
+    let sheet = worksheet(&rows, "");
+    let bytes = fixture(&sheet, STYLES, None, &[], false);
+    assert_eq!(
+        xlsx_font_preflight(&bytes).unwrap_err(),
+        PreflightError::Limit
+    );
+}
+
+#[test]
 fn xml_byte_and_face_budgets_are_bounded() {
     let sheet = worksheet(r#"<row r="1"><c r="A1"><v>1</v></c></row>"#, "");
     let bytes = fixture(&sheet, STYLES, None, &[], false);

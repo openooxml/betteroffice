@@ -284,6 +284,7 @@ impl Scan<'_> {
         parents: [Option<&Node>; 2],
         ph: Option<&Node>,
         table_run: Option<&Run>,
+        snapshot: bool,
     ) {
         let source_work = body.children.len()
             + parents
@@ -396,17 +397,22 @@ impl Scan<'_> {
                 if !self.charge() {
                     break;
                 }
+                let text = if run.name == "a:br" {
+                    "\n"
+                } else if run.name == "a:fld" && run.attr("type") == Some("slidenum") {
+                    "1"
+                } else {
+                    self.child(run, "a:t").map_or("", |node| node.text.as_str())
+                };
+                if snapshot && text.is_empty() {
+                    continue;
+                }
                 let rpr = self.child(run, "a:rPr");
                 let direct = Run::parse(rpr, self);
                 let language = [direct.language.as_deref(), end_language, style_language]
                     .into_iter()
                     .flatten()
                     .find(|tag| ooxml_text::han_script_for_language(tag).is_some());
-                let text = if run.name == "a:fld" && run.attr("type") == Some("slidenum") {
-                    "1"
-                } else {
-                    self.child(run, "a:t").map_or("", |node| node.text.as_str())
-                };
                 let mut scripts =
                     ooxml_text::paragraph_scripts_with_languages([(text, language)], false);
                 if language.is_none()
@@ -506,7 +512,7 @@ impl Scan<'_> {
         run
     }
 
-    fn table(&mut self, table: &Node) {
+    fn table(&mut self, table: &Node, snapshot: bool) {
         if !self.spend(table.children.len()) {
             return;
         }
@@ -575,7 +581,7 @@ impl Scan<'_> {
                 }
                 if let Some(body) = self.child(cell, "a:txBody") {
                     let run = self.table_run(&style, row_index, col, rows.len(), cols);
-                    self.body(body, [None, None], None, Some(&run));
+                    self.body(body, [None, None], None, Some(&run), snapshot);
                 }
             }
         }
@@ -629,13 +635,13 @@ impl Scan<'_> {
                         } else {
                             [None, None]
                         };
-                        self.body(body, parents, ph, None);
+                        self.body(body, parents, ph, None, inherit);
                     }
                 }
                 "p:graphicFrame" => {
                     if let Some(graphic) = self.path(shape, &["a:graphic", "a:graphicData"]) {
                         if let Some(table) = self.child(graphic, "a:tbl") {
-                            self.table(table);
+                            self.table(table, inherit);
                         } else if !graphic.children.is_empty() {
                             self.complete = false;
                         }

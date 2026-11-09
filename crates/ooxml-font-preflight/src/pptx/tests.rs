@@ -348,6 +348,72 @@ fn singleton_title_placeholder_matches_by_type() {
 }
 
 #[test]
+fn empty_snapshot_runs_use_end_paragraph_properties() {
+    let visible = r#"<a:p><a:r><a:rPr i="1"><a:latin typeface="Lato"/></a:rPr><a:t>Text</a:t></a:r><a:endParaRPr><a:latin typeface="Unused"/></a:endParaRPr></a:p>"#;
+    for empty in [
+        r#"<a:r><a:rPr i="1"><a:latin typeface="Lato"/></a:rPr><a:t/></a:r>"#,
+        r#"<a:r><a:rPr i="1"><a:latin typeface="Lato"/></a:rPr></a:r>"#,
+        r#"<a:fld type="datetime1"><a:rPr i="1"><a:latin typeface="Lato"/></a:rPr><a:t/></a:fld>"#,
+    ] {
+        let shapes = shape(
+            "",
+            &format!(
+                r#"{visible}<a:p>{empty}<a:endParaRPr><a:latin typeface="Calibri"/><a:ea typeface="Calibri"/><a:cs typeface="Calibri"/></a:endParaRPr></a:p>"#
+            ),
+        );
+        for inherited in [false, true] {
+            let slide = part("sld", if inherited { "" } else { &shapes }, "");
+            let layout = part("sldLayout", if inherited { &shapes } else { "" }, "");
+            let result = pptx_font_preflight(
+                &fixture(&slide, &layout, &part("sldMaster", "", ""), &[], false),
+                0,
+            )
+            .unwrap();
+            assert!(result.complete);
+            let expected = if inherited {
+                vec![("Lato", false, true)]
+            } else {
+                vec![("Calibri", false, false), ("Lato", false, true)]
+            };
+            assert_eq!(keys(&result), expected, "{inherited}: {empty}");
+        }
+    }
+}
+
+#[test]
+fn breaks_and_slide_number_fields_keep_their_run_properties() {
+    for run in [
+        r#"<a:br><a:rPr i="1"><a:latin typeface="Lato"/></a:rPr></a:br>"#,
+        r#"<a:fld type="slidenum"><a:rPr i="1"><a:latin typeface="Lato"/></a:rPr><a:t/></a:fld>"#,
+        r#"<a:fld type="datetime1"><a:rPr i="1"><a:latin typeface="Lato"/></a:rPr><a:t>Text</a:t></a:fld>"#,
+    ] {
+        let slide = part(
+            "sld",
+            &shape(
+                "",
+                &format!(
+                    r#"<a:p>{run}<a:endParaRPr><a:latin typeface="Calibri"/></a:endParaRPr></a:p>"#
+                ),
+            ),
+            "",
+        );
+        let result = pptx_font_preflight(
+            &fixture(
+                &slide,
+                &part("sldLayout", "", ""),
+                &part("sldMaster", "", ""),
+                &[],
+                false,
+            ),
+            0,
+        )
+        .unwrap();
+        assert!(result.complete);
+        assert_eq!(keys(&result), [("Lato", false, true)], "{run}");
+    }
+}
+
+#[test]
 fn inherited_shapes_hidden_groups_and_show_master_shapes() {
     let hidden = shape("", &run("Hidden", "Text")).replace("id=\"2\"", "id=\"2\" hidden=\"1\"");
     let slide = part(

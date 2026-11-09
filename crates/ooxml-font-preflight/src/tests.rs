@@ -291,6 +291,43 @@ fn normal_without_default_and_paragraph_mark_fonts() {
 }
 
 #[test]
+fn duplicate_default_character_styles_select_the_lowest_style_id() {
+    let defaults = styles("").replace(
+        r#"w:ascii="Base" w:hAnsi="Base""#,
+        r#"w:asciiTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi""#,
+    );
+    let theme = THEME.replace(r#"typeface="Body""#, r#"typeface="Calibri""#);
+    let body = document(
+        r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:b/></w:rPr><w:t>Text</w:t></w:r></w:p><w:p/>"#,
+    );
+    let ordinary =
+        r#"<w:style w:type="character" w:default="1" w:styleId="DefaultParagraphFont"/>"#;
+    for id in ["ZCustom", "ACustom"] {
+        let custom = format!(
+            r#"<w:style w:type="character" w:default="1" w:styleId="{id}"><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr></w:style>"#
+        );
+        for definitions in [format!("{custom}{ordinary}"), format!("{ordinary}{custom}")] {
+            let styles = defaults.replace("</w:styles>", &format!("{definitions}</w:styles>"));
+            let result = docx_font_preflight(&zip(
+                &[
+                    ("word/document.xml", body.as_bytes()),
+                    ("word/styles.xml", styles.as_bytes()),
+                    ("word/theme/theme1.xml", theme.as_bytes()),
+                ],
+                false,
+            ))
+            .unwrap();
+            assert!(result.complete);
+            let mut expected = vec![("Arial", false, false), ("Arial", true, false)];
+            if id == "ZCustom" {
+                expected.push(("Calibri", false, false));
+            }
+            assert_eq!(keys(&result), expected, "{id}: {definitions}");
+        }
+    }
+}
+
+#[test]
 fn math_names_the_engine_fallback_and_inherited_slots() {
     let result = scan(
         "",

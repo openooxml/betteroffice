@@ -333,7 +333,10 @@ impl Styles {
             };
             let kind = node.attr("type").unwrap_or("paragraph");
             if node.attr("default").and_then(on_off) == Some(true)
-                && !result.defaults_by_type.contains_key(kind)
+                && result
+                    .defaults_by_type
+                    .get(kind)
+                    .is_none_or(|current| id < current.as_str())
             {
                 result
                     .defaults_by_type
