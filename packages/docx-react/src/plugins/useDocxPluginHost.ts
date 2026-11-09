@@ -22,6 +22,7 @@ import {
 import type { RenderedDomContext } from '@betteroffice/docx/plugin-api';
 import type { DocxDocumentReadValues } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
 import {
+  anchorDisplayRoot,
   anchorFailure,
   resolveReservations,
   type AnchorGeometryTarget,
@@ -356,8 +357,9 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
       canSettle: () => {
         if (!generation || host.generation() !== generation) return false;
         const selection = refreshSelection();
-        return selection.displayRange !== null || latest.current.viewerSelection === true ||
-          !(latest.current.pagedEditorRef.current?.getYrsSession() ?? latest.current.session)?.selection();
+        if (selection.displayRange !== null || latest.current.viewerSelection === true) return true;
+        const sticky = (latest.current.pagedEditorRef.current?.getYrsSession() ?? latest.current.session)?.selection();
+        return !sticky || anchorDisplayRoot(sticky.head.story) === null;
       },
       onUnsettle: () => { generation = host.generation(); host.selectionUnsettled(generation); },
       onSettle: settled,

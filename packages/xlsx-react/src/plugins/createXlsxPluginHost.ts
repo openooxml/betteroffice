@@ -296,6 +296,8 @@ export function createXlsxPluginHost(
     );
     const geometry = access.geometry();
     const point = geometry?.getPositionAtPoint ?? null;
+    const selection = JSON.stringify(invocation.snapshot.selection);
+    const selectionCurrent = () => selection === JSON.stringify(state.selection);
     return {
       pluginId,
       snapshot: invocation.snapshot,
@@ -311,15 +313,17 @@ export function createXlsxPluginHost(
         layout: geometry.layout,
         getCellRect: (target) => invocation.refusal() ? null : geometry.getCellRect(target),
         getRangeRect: (target) => invocation.refusal() ? null : geometry.getRangeRect(target),
-        getAnchorGeometry: (target) => invocation.refusal()
+        getAnchorGeometry: (target) => invocation.refusal() || (target.kind === 'selection' && !selectionCurrent())
           ? { ok: false, failure: { code: 'layout-unavailable', message: 'The plugin context is no longer current' } }
           : geometry.getAnchorGeometry(target),
         readAnchorGeometries: async (targets) => {
           if (invocation.refusal()) return targets.map(() => ({ ok: false as const,
             failure: { code: 'layout-unavailable' as const, message: 'The plugin context is no longer current' } }));
           const answers = await geometry.readAnchorGeometries(targets);
-          return invocation.refusal() ? targets.map(() => ({ ok: false as const,
-            failure: { code: 'layout-unavailable' as const, message: 'The plugin context is no longer current' } })) : answers;
+          return answers.map((answer, index) => invocation.refusal() ||
+            (targets[index]!.kind === 'selection' && !selectionCurrent())
+            ? { ok: false as const, failure: { code: 'layout-unavailable' as const,
+                message: 'The plugin context is no longer current' } } : answer);
         },
         getPositionAtPoint: point && ((clientX, clientY) => invocation.refusal() ? null : point(clientX, clientY)),
       } : null,

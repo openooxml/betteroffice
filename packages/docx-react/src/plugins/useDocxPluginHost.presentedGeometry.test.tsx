@@ -171,6 +171,42 @@ test('geometry that exists before its layout is presented adds no layout change'
   expect(view.events).toEqual([false, true]);
 });
 
+test('retained contexts refuse selection geometry after selection changes within one layout', async () => {
+  const view = setup(true);
+  view.queries.rangeRects = (from, to) => [{ pageIndex: 0, x: from, y: 20, width: to - from, height: 12 }];
+  view.queries.anchorRect = (position) => ({ pageIndex: 0, x: position, y: 20, width: 0, height: 12 });
+  view.queries.hitTestRegions = () => null;
+  await act(async () => {
+    view.attachLayer();
+    view.emitDom();
+    view.present();
+  });
+  await waitFor(() => expect(view.result.current.activations[0]?.context.geometry).toBeTruthy());
+  const layout = view.result.current.activations[0]!.context.snapshot.layout!;
+  const first = { story: 'body', from: 1, to: 4, layoutId: layout.id };
+  await act(async () => view.result.current.publishViewerSelection({
+    head: first.to, displayRange: first, isMultiParagraph: false,
+  }));
+  const retained = view.result.current.activations[0]!.context;
+  expect(retained.snapshot.selection.displayRange).toEqual(first);
+  expect(retained.geometry!.getAnchorGeometry({ kind: 'selection' }))
+    .toMatchObject({ ok: true, rects: [{ x: 1, width: 3 }] });
+  const second = { ...first, from: 8, to: 12 };
+  await act(async () => view.result.current.publishViewerSelection({
+    head: second.to, displayRange: second, isMultiParagraph: false,
+  }));
+  const current = view.result.current.activations[0]!.context;
+  expect(current.snapshot.version).toBe(retained.snapshot.version);
+  expect(current.snapshot.layout).toEqual(layout);
+  expect(current.geometry!.getAnchorGeometry({ kind: 'selection' }))
+    .toMatchObject({ ok: true, rects: [{ x: 8, width: 4 }] });
+  expect(retained.snapshot.selection.displayRange).toEqual(first);
+  expect(retained.geometry!.getAnchorGeometry({ kind: 'selection' }))
+    .toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
+  expect(await retained.geometry!.readAnchorGeometries([{ kind: 'selection' }]))
+    .toMatchObject([{ ok: false, failure: { code: 'layout-unavailable' } }]);
+});
+
 test('overlays keep their node when a new frame retires geometry before activations publish', async () => {
   const view = setup();
   await act(async () => {

@@ -20,7 +20,7 @@ afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
-async function setup(viewerSelection: boolean, initialRange: { from: number; to: number } | null = { from: 5, to: 9 }) {
+async function setup(viewerSelection: boolean, initialRange: { from: number; to: number } | null = { from: 5, to: 9 }, story = 'hf:stale') {
   let shellReads = 0;
   let range = initialRange;
   const session = {
@@ -28,7 +28,7 @@ async function setup(viewerSelection: boolean, initialRange: { from: number; to:
     getProposals: () => ({ version: 'v1', previewVersion: 0, proposals: [] }),
     onUpdate: () => () => {},
     onProposalChange: () => () => {},
-    selection: () => { shellReads += 1; return { head: { story: 'header:stale' } }; },
+    selection: () => { shellReads += 1; return { head: { story } }; },
   } as unknown as YrsSession;
   const queries = {
     displayList: { pages: [] },
@@ -97,9 +97,21 @@ for (const mappedBeforeDeadline of [true, false]) {
     }
     expect(view.settledSelections).toEqual([{
       formatting: null,
-      displayRange: { story: 'header:stale', ...range,
+      displayRange: { story: 'hf:stale', ...range,
         layoutId: view.result.current.host.activations[0]!.context.snapshot.layout!.id },
     }]);
+    expect(view.result.current.host.activations[0]!.context.snapshot.selectionSettled).toBe(true);
+    await act(async () => view.result.current.host.publishSelection());
+    await act(async () => { await new Promise((done) => setTimeout(done, 400)); });
+    expect(view.settledSelections).toHaveLength(1);
+  });
+}
+
+for (const story of ['fn:1', 'en:1']) {
+  test(`${story} selection settles without a display range`, async () => {
+    const view = await setup(false, null, story);
+    await act(async () => { await new Promise((done) => setTimeout(done, 400)); });
+    expect(view.settledSelections).toEqual([{ formatting: null, displayRange: null }]);
     expect(view.result.current.host.activations[0]!.context.snapshot.selectionSettled).toBe(true);
     await act(async () => view.result.current.host.publishSelection());
     await act(async () => { await new Promise((done) => setTimeout(done, 400)); });
@@ -154,7 +166,7 @@ test('an editor session preserves formatting payloads and does not notify for nu
   expect(view.propSelections[0]).toBe(selection);
   expect(view.events.at(-1)).toEqual({
     formatting: selection,
-    displayRange: { story: 'header:stale', from: 5, to: 9,
+    displayRange: { story: 'hf:stale', from: 5, to: 9,
       layoutId: view.result.current.host.activations[0]!.context.snapshot.layout!.id },
   });
   const before = view.events.length;

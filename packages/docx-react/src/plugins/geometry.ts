@@ -120,16 +120,19 @@ const scopedGeometries = new WeakMap<DocxPluginGeometry, Map<string, DocxPluginG
 /** `geometry` as plugin `pluginId` reads it: its `reservation` targets name its own reservations. */
 export function scopePluginGeometry(
   geometry: DocxPluginGeometry,
-  pluginId: string
+  pluginId: string,
+  selectionCurrent?: () => boolean
 ): DocxPluginGeometry {
   let byPlugin = scopedGeometries.get(geometry);
   if (!byPlugin) {
     byPlugin = new Map();
     scopedGeometries.set(geometry, byPlugin);
   }
-  let scoped = byPlugin.get(pluginId);
+  let scoped = selectionCurrent ? undefined : byPlugin.get(pluginId);
   if (!scoped) {
+    const superseded = () => anchorFailure('layout-unavailable', 'The plugin selection is no longer current');
     const reservation = (target: DocxGeometryTarget) => {
+      if (target.kind === 'selection' && selectionCurrent && !selectionCurrent()) return superseded();
       if (target.kind !== 'reservation') return geometry.getAnchorGeometry(target);
       const reader = reservationReaders.get(geometry);
       return reader
@@ -150,15 +153,21 @@ export function scopePluginGeometry(
       getPositionAtPoint: (clientX, clientY) => geometry.getPositionAtPoint(clientX, clientY),
       readPositionAtPoint: (clientX, clientY) => geometry.readPositionAtPoint(clientX, clientY),
       readAnchorGeometries: async (targets) => {
-        if (!targets.some((target) => target.kind === 'reservation')) return geometry.readAnchorGeometries(targets);
+        if (selectionCurrent && !selectionCurrent() && targets.every((target) => target.kind === 'selection')) {
+          return targets.map(superseded);
+        }
         const reader = reservationReaders.get(geometry);
-        return reader?.read ? reader.read(pluginId, targets) : targets.map(reservation);
+        const answers = await (!targets.some((target) => target.kind === 'reservation')
+          ? geometry.readAnchorGeometries(targets)
+          : reader?.read ? reader.read(pluginId, targets) : targets.map(reservation));
+        return answers.map((answer, index) => targets[index]!.kind === 'selection' &&
+          selectionCurrent && !selectionCurrent() ? superseded() : answer);
       },
       getPageRect: (pageIndex) => geometry.getPageRect(pageIndex),
       isPageBuilt: (pageIndex) => geometry.isPageBuilt(pageIndex),
       getAnchorGeometry: reservation,
     };
-    byPlugin.set(pluginId, scoped);
+    if (!selectionCurrent) byPlugin.set(pluginId, scoped);
   }
   return scoped;
 }

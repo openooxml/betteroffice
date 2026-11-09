@@ -259,6 +259,7 @@ export interface DocxPluginGeometry {
    * indices are `missing-target`. Refuses stale or unrendered layouts.
    * In the worker-only editor, a target whose geometry is still being read is `pending`, and one
    * whose read failed is `read-failed`; overlays render again once either read settles.
+   * A `selection` target answers `layout-unavailable` once the context's selection is superseded.
    */
   getAnchorGeometry(target: DocxGeometryTarget): DocxAnchorGeometryResult;
   /**

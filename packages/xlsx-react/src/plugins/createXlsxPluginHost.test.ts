@@ -2,10 +2,10 @@ import { expect, test } from 'bun:test';
 import type { WorkbookHandle } from '@betteroffice/xlsx';
 import { createXlsxPluginHost } from './createXlsxPluginHost';
 import { defineXlsxPlugin } from './defineXlsxPlugin';
-import type { XlsxPluginEvent } from './types';
+import type { XlsxAnchorGeometryResult, XlsxPluginEvent, XlsxPluginGeometry, XlsxPluginLayout } from './types';
 
 const settle = () => new Promise((done) => setTimeout(done, 0));
-function setupSignals() {
+function setupSignals(geometry: () => XlsxPluginGeometry | null = () => null) {
   let version = 'v1';
   const updates = new Set<() => void>();
   const document = { version: () => version, onUpdate: (listener: () => void) => {
@@ -18,7 +18,7 @@ function setupSignals() {
     applyEdits: () => { throw new Error('Unavailable'); },
     commands: () => null,
     navigator: { selectCells: () => null, scrollToCell: () => null },
-    geometry: () => null,
+    geometry,
     translate: (key) => key,
   });
   return { host, open: () => host.open(document), change(next: string) {
@@ -26,6 +26,53 @@ function setupSignals() {
     for (const listener of updates) listener();
   } };
 }
+
+test('contexts bind synchronous and pending geometry to their snapshot selection', async () => {
+  const layout: XlsxPluginLayout = { id: 'layout', version: 'v1', sheetId: 'sheet:0', zoom: 1,
+    viewport: { x: 0, y: 0, width: 300, height: 200 } };
+  let x = 0;
+  let pending: Promise<void> | null = null;
+  let release!: () => void;
+  const answer = (): XlsxAnchorGeometryResult => ({ ok: true, version: 'v1', previewVersion: 0,
+    layoutId: layout.id, rects: [{ x, y: 0, width: 64, height: 20 }],
+    anchor: { x, y: 0, width: 64, height: 20 },
+    pageRect: { x: 0, y: 0, width: 300, height: 200 } });
+  const geometry = { layout, getAnchorGeometry: answer, getPositionAtPoint: null,
+    readAnchorGeometries: async (targets) => { if (pending) await pending; return targets.map(answer); },
+  } as XlsxPluginGeometry;
+  const { host, open } = setupSignals(() => geometry);
+  host.setPlugins([defineXlsxPlugin({ id: 'selection-geometry', createState: () => null })]);
+  open();
+  const first = { sheetId: layout.sheetId, sheetIndex: 0,
+    cells: { anchor: { row: 0, col: 0 }, focus: { row: 0, col: 0 } }, chartId: null };
+  host.layoutChanged(layout);
+  host.selectionChanged(first);
+  await settle();
+  const retained = host.activations()[0]!.context;
+  expect(retained.geometry!.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: true, rects: [{ x: 0 }] });
+  pending = new Promise<void>((resolve) => { release = resolve; });
+  const targets = [{ kind: 'selection' }, { kind: 'proposal', id: 'p' }] as const;
+  const read = retained.geometry!.readAnchorGeometries(targets);
+  x = 64;
+  host.selectionChanged({ ...first,
+    cells: { anchor: { row: 0, col: 1 }, focus: { row: 0, col: 1 } } });
+  await settle();
+  const current = host.activations()[0]!.context;
+  expect(current.snapshot.version).toBe(retained.snapshot.version);
+  expect(current.snapshot.layout).toEqual(retained.snapshot.layout);
+  expect(current.geometry!.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: true, rects: [{ x: 64 }] });
+  expect(retained.snapshot.selection).toEqual(first);
+  expect(retained.geometry!.getAnchorGeometry({ kind: 'selection' }))
+    .toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
+  expect(retained.geometry!.getAnchorGeometry(targets[1])).toMatchObject({ ok: true });
+  release();
+  expect(await read).toMatchObject([
+    { ok: false, failure: { code: 'layout-unavailable' } }, { ok: true },
+  ]);
+  expect(await retained.geometry!.readAnchorGeometries([{ kind: 'selection' }]))
+    .toMatchObject([{ ok: false, failure: { code: 'layout-unavailable' } }]);
+  host.close('unmounted');
+});
 
 test('focus and locale are deduplicated in snapshots and events', async () => {
   const { host, open } = setupSignals();

@@ -229,6 +229,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       scopedCommandStore(controller(), scopeFor(invocation))
     );
     const geometry = access.geometry();
+    const selection = JSON.stringify(invocation.snapshot.selection);
     return {
       pluginId,
       snapshot: invocation.snapshot,
@@ -242,7 +243,8 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       edits: clients.edits,
       geometry:
         geometry && sameLayout(invocation.snapshot.layout, geometry.layout)
-          ? scopePluginGeometry(geometry, pluginId)
+          ? scopePluginGeometry(geometry, pluginId, () => !invocation.refusal() &&
+              selection === JSON.stringify(state.selection))
           : null,
       navigation: clients.navigation,
       setState: (next, atVersion) => invocation.setState(next, atVersion),

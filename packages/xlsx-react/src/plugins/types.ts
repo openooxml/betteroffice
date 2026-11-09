@@ -168,6 +168,7 @@ export type XlsxAnchorGeometryResult =
  * Geometry of the painted grid. Rectangles are in pixels of the overlay layer, already zoomed
  * and clipped to the visible grid. Cell and range queries return null for unpainted layouts
  * and cells outside the visible sheet; anchor queries return a typed failure.
+ * A `selection` target answers `layout-unavailable` once the context's selection is superseded.
  */
 export interface XlsxPluginGeometry {
   layout: XlsxPluginLayout;

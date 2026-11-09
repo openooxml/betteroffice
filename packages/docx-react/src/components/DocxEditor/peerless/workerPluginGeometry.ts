@@ -324,15 +324,22 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
     const readAll: ReadAll = async (targets, retry, owner) => {
       const sameDocument = () => !!current && sameView(current.frame.identity, frame.identity);
       if (!sameDocument()) return targets.map(unavailable);
+      const selection = JSON.stringify(controller.getSnapshot().view?.workerSelection);
       const asked = measure();
       await Promise.all(targets.map(target => {
         const item = target.kind === 'reservation' && owner !== undefined ? reserved(owner, target.id, asked) : null;
         return item && 'hide' in item ? requestTarget(item.hide, retry) : requestTarget(target, retry);
       }));
       if (!sameDocument()) return targets.map(unavailable);
-      if (current!.geometry !== geometry) return current!.readAll(targets, false, owner);
-      const measured = measure();
-      return targets.map(target => answer(target, false, measured, owner));
+      let results: DocxAnchorGeometryResult[];
+      if (current!.geometry !== geometry) results = await current!.readAll(targets, false, owner);
+      else {
+        const measured = measure();
+        results = targets.map(target => answer(target, false, measured, owner));
+      }
+      const selectionCurrent = JSON.stringify(controller.getSnapshot().view?.workerSelection) === selection;
+      return results.map((result, index) => targets[index]!.kind === 'selection' &&
+        !selectionCurrent ? unavailable() : result);
     };
     registerReservationReader(geometry, {
       get: (owner, id) => answer({ kind: 'reservation', id }, true, measure(), owner),
@@ -390,8 +397,8 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
     displaySelection: () => displaySelection,
     selectionMapped: () => {
       const selection = controller.getSnapshot().view?.workerSelection;
-      return !selection || (!!current && valid(current.layout, current.frame) && !!displaySelection &&
-        selectionRead?.key === `${current.layout.id}|${JSON.stringify(selection)}` && selectionRead.mapped?.ok === true);
+      return !selection || (!!current && valid(current.layout, current.frame) &&
+        selectionRead?.key === `${current.layout.id}|${JSON.stringify(selection)}` && selectionRead.mapped !== undefined);
     },
     geometry: () => {
       const snapshot = controller.getSnapshot();

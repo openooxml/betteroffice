@@ -4,7 +4,7 @@ import { registerWorkerProposalAuthority } from '../components/DocxEditor/intern
 import { createDocxPluginHost, type DocxPluginHostAccess } from './createDocxPluginHost';
 import { defineDocxPlugin } from './defineDocxPlugin';
 import type { DocxProposalSnapshot } from './proposalPreview';
-import type { DocxPluginEvent, DocxPluginGeometry, DocxPluginLayout } from './types';
+import type { DocxAnchorGeometryResult, DocxPluginEvent, DocxPluginGeometry, DocxPluginLayout } from './types';
 
 function stubSession(previewVersion = 0) {
   const updates = new Set<() => void>();
@@ -90,6 +90,57 @@ const layout = (previewVersion: number): DocxPluginLayout => ({
   pageCount: 1,
 });
 const settle = () => new Promise((done) => setTimeout(done, 0));
+
+for (const mode of ['session', 'worker'] as const) {
+  test(`${mode} contexts bind synchronous and pending geometry to their snapshot selection`, async () => {
+    const frame = layout(0);
+    let x = 1;
+    let pending: Promise<void> | null = null;
+    let release!: () => void;
+    const answer = (): DocxAnchorGeometryResult => ({ ok: true, version: 'v1', previewVersion: 0,
+      layoutId: frame.id, rects: [{ pageIndex: 0, x, y: 0, width: 3, height: 12 }],
+      anchor: { pageIndex: 0, x: x + 3, y: 0, width: 0, height: 12 },
+      pageRect: { x: 0, y: 0, width: 100, height: 200 } });
+    const geometry = { layout: frame,
+      getAnchorGeometry: answer,
+      readAnchorGeometries: async (targets) => { if (pending) await pending; return targets.map(answer); },
+    } as DocxPluginGeometry;
+    const { host, plugin } = setup(() => geometry);
+    host.setPlugins([plugin]);
+    if (mode === 'session') host.open(stubSession().session);
+    else host.openWorker('v1');
+    const first = { formatting: null,
+      displayRange: { story: 'body', from: 1, to: 4, layoutId: frame.id } };
+    host.layoutChanged(frame);
+    host.selectionChanged(first);
+    await host.notificationsIdle();
+    const retained = host.activations()[0]!.context;
+    expect(retained.geometry!.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: true, rects: [{ x: 1 }] });
+    pending = new Promise<void>((resolve) => { release = resolve; });
+    const targets = [{ kind: 'selection' }, { kind: 'range', version: 'v1', range: {
+      story: 'body', start: { paraId: 'p', offset: 0 }, end: { paraId: 'p', offset: 3 }, view: 'accepted',
+    } }] as const;
+    const read = retained.geometry!.readAnchorGeometries(targets);
+    x = 8;
+    host.selectionChanged({ ...first, displayRange: { ...first.displayRange, from: 8, to: 11 } });
+    await host.notificationsIdle();
+    const current = host.activations()[0]!.context;
+    expect(current.snapshot.version).toBe(retained.snapshot.version);
+    expect(current.snapshot.layout).toEqual(retained.snapshot.layout);
+    expect(current.geometry!.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: true, rects: [{ x: 8 }] });
+    expect(retained.snapshot.selection).toEqual(first);
+    expect(retained.geometry!.getAnchorGeometry({ kind: 'selection' }))
+      .toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
+    expect(retained.geometry!.getAnchorGeometry(targets[1])).toMatchObject({ ok: true });
+    release();
+    expect(await read).toMatchObject([
+      { ok: false, failure: { code: 'layout-unavailable' } }, { ok: true },
+    ]);
+    expect(await retained.geometry!.readAnchorGeometries([{ kind: 'selection' }]))
+      .toMatchObject([{ ok: false, failure: { code: 'layout-unavailable' } }]);
+    host.close('unmounted');
+  });
+}
 
 for (const mode of ['session', 'worker'] as const) {
   describe(`plugin host ${mode} geometry subscriptions`, () => {

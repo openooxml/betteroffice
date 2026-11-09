@@ -25,7 +25,7 @@ const unavailable = { ok: false, failure: { code: 'layout-unavailable', message:
 const readFailed = { ok: false, failure: { code: 'read-failed', message: 'The worker could not read the target geometry' } } as const;
 
 /** A two-page worker shell whose pages are built per `built`, its anchor reads held until `answer()`. */
-async function shell(built: [boolean, boolean] = [true, true], withSelection = false) {
+async function shell(built: [boolean, boolean] = [true, true], withSelection = false, story = 'body') {
   const container = document.createElement('div');
   const host = document.createElement('div');
   host.setAttribute('data-docx-pages-host', '');
@@ -41,11 +41,14 @@ async function shell(built: [boolean, boolean] = [true, true], withSelection = f
     pages: unbuilt.map((pending, pageIndex) => ({ page: { pageId: String(pageIndex), pageIndex }, transform: [1, 0, 0, 1, 0, 0],
       bounds: { x: 0, y: pageIndex * (PAGE.height + GAP), ...PAGE },
       displayPage: { width: PAGE.width, height: PAGE.height, positionSpan: [pageIndex * 100, pageIndex * 100 + 99], ...(pending ? { unbuilt: true } : {}) } })) });
-  let view = { identity, version: 0, throughSeq: 0, presentedThroughSeq: 0, workerSelection: withSelection ? { anchor: { story: 'body', paraId: 'selection', offset: 0 }, focus: { story: 'body', paraId: 'selection', offset: 5 } } : null, anchors: null, editState: undefined,
+  let view = { identity, version: 0, throughSeq: 0, presentedThroughSeq: 0, workerSelection: withSelection ? { anchor: { story, paraId: 'selection', offset: 0 }, focus: { story, paraId: 'selection', offset: 5 } } : null, anchors: null, editState: undefined,
     geometry: frameOf(1, built.map(value => !value)) };
   const review = { version: 'v1', previewVersion: 0 };
   const reads: { targets: DocxGeometryTarget[]; resolve(): void; reject(error?: Error): void }[] = [];
   const answerOf = (asked: DocxGeometryTarget): ProposalGeometryTarget => {
+    if (asked.kind === 'range' && ['fn:1', 'en:1'].includes(asked.range.story)) {
+      return { ok: false, failure: { code: 'unsupported', message: 'The target has no display position' } };
+    }
     const base = idOf(asked) === 'late' ? 150 : 10;
     const from = withSelection && asked.kind === 'range' ? base + asked.range.start.offset : base;
     const to = withSelection && asked.kind === 'range'
@@ -351,6 +354,46 @@ test('worker selection anchors wait for mapping, then answer the same selection 
     expect(await collapsed).toMatchObject([{ ok: true, rects: [], anchor: { width: 0, height: 12 } }]);
     s.view = { ...s.view, workerSelection: null };
     expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: false, failure: { code: 'missing-target' } });
+  } finally { s.plugin.dispose(); }
+});
+
+for (const story of ['fn:1', 'en:1']) {
+  test(`worker ${story} selection is ready once unsupported mapping finishes`, async () => {
+    const s = await shell([true, true], true, story);
+    try {
+      expect(s.plugin.selectionMapped()).toBe(false);
+      const read = s.plugin.geometry()!.readAnchorGeometries([{ kind: 'selection' }]);
+      await s.answer();
+      await s.updating;
+      expect(await read).toMatchObject([{ ok: false, failure: { code: 'unsupported' } }]);
+      expect(s.plugin.displaySelection()).toBeNull();
+      expect(s.plugin.selectionMapped()).toBe(true);
+      expect(s.plugin.geometry()!.getAnchorGeometry({ kind: 'selection' }))
+        .toMatchObject({ ok: false, failure: { code: 'unsupported' } });
+    } finally { s.plugin.dispose(); }
+  });
+}
+
+test('worker selection reads refuse a selection superseded before the reply', async () => {
+  const s = await shell([true, true], true);
+  try {
+    const geometry = s.plugin.geometry()!;
+    const read = geometry.readAnchorGeometries([{ kind: 'selection' }]);
+    const first = s.reads.shift()!;
+    s.view = { ...s.view, version: 1, workerSelection: {
+      anchor: { story: 'body', paraId: 'selection', offset: 1 },
+      focus: { story: 'body', paraId: 'selection', offset: 6 },
+    } };
+    const updating = s.plugin.update();
+    for (let turn = 0; turn < 20; turn++) await Promise.resolve();
+    await s.answer();
+    await updating;
+    expect(geometry.getAnchorGeometry({ kind: 'selection' }))
+      .toMatchObject({ ok: true, version: 'v1', layoutId: geometry.layout.id,
+        anchor: { x: 16, y: 10, width: 0, height: 12 } });
+    first.resolve();
+    await s.updating;
+    expect(await read).toEqual([unavailable]);
   } finally { s.plugin.dispose(); }
 });
 
