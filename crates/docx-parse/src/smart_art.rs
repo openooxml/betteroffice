@@ -25,6 +25,7 @@ const MAX_SAFE_DRAWING_NUMBER: f64 = 1_000_000_000_000.0;
 pub struct SmartArtContext {
     pub parts: IndexMap<String, Vec<u8>>,
     pub warnings: Vec<String>,
+    pub(crate) drawing_relationships: HashMap<String, Option<RelationshipMap>>,
 }
 
 pub fn create_smart_art_context<S: AsRef<[u8]>>(all_xml: &IndexMap<String, S>) -> SmartArtContext {
@@ -37,6 +38,7 @@ pub fn create_smart_art_context<S: AsRef<[u8]>>(all_xml: &IndexMap<String, S>) -
     SmartArtContext {
         parts,
         warnings: Vec::new(),
+        drawing_relationships: HashMap::new(),
     }
 }
 
@@ -76,13 +78,8 @@ pub fn parse_smart_art_from_drawing(
             let mut shape = diagram_group(size, parsed.shapes, parsed.scene);
             if memchr::memmem::find(drawing_xml, b"blip").is_some() {
                 let path = drawing_path.to_owned();
-                match drawing_relationships(&path, context, budget) {
-                    Ok(own) => resolve_shape_fill_pictures(&mut shape, own.as_ref(), media),
-                    Err(_) => context.warnings.push(format!(
-                        "SmartArt pictures were left unresolved: {} could not be read.",
-                        relationship_part_path(&path)
-                    )),
-                }
+                let own = drawing_relationships(&path, context, budget);
+                resolve_shape_fill_pictures(&mut shape, own, media);
             }
             retain_drawing_source(&mut shape, drawing);
             return Ok(Some(shape));
@@ -551,28 +548,45 @@ fn find_pre_rendered_drawing<'a>(
 }
 
 /// The relationships of a diagram drawing part, its pictures' references, with
-/// each internal target made a package path: they are relative to that part.
-fn drawing_relationships(
+/// each internal target made a package path: they are relative to that part. A
+/// part is read once, on a copy of `budget`: a picture lookup must not spend
+/// what the rest of the package may need, and a part it cannot read costs the
+/// pictures only, with a warning.
+fn drawing_relationships<'c>(
     part: &str,
-    context: &SmartArtContext,
-    budget: &mut ParseBudget<'_>,
-) -> Result<Option<RelationshipMap>, ParseError> {
-    let path = relationship_part_path(part);
-    let Some(xml) = context
-        .parts
-        .iter()
-        .find(|(candidate, _)| candidate.eq_ignore_ascii_case(&path))
-        .map(|(_, xml)| xml)
-    else {
-        return Ok(None);
-    };
-    let mut relationships = parse_relationships(xml, &path, budget)?;
-    for relationship in relationships.values_mut() {
-        if relationship.target_mode != Some(TargetMode::External) {
-            relationship.target = resolve_relative_path(part, &relationship.target)?;
-        }
+    context: &'c mut SmartArtContext,
+    budget: &ParseBudget<'_>,
+) -> Option<&'c RelationshipMap> {
+    if !context.drawing_relationships.contains_key(part) {
+        let path = relationship_part_path(part);
+        let xml = context
+            .parts
+            .iter()
+            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(&path))
+            .map(|(_, xml)| xml);
+        let parsed = match xml.map(|xml| parse_relationships(xml, &path, &mut budget.clone())) {
+            None => None,
+            Some(Ok(mut relationships)) => {
+                relationships.retain(|_, relationship| {
+                    relationship.target_mode == Some(TargetMode::External)
+                        || resolve_relative_path(part, &relationship.target)
+                            .map(|target| relationship.target = target)
+                            .is_ok()
+                });
+                Some(relationships)
+            }
+            Some(Err(_)) => {
+                context.warnings.push(format!(
+                    "SmartArt pictures were left unresolved: {path} could not be read."
+                ));
+                None
+            }
+        };
+        context
+            .drawing_relationships
+            .insert(part.to_owned(), parsed);
     }
-    Ok(Some(relationships))
+    context.drawing_relationships.get(part)?.as_ref()
 }
 
 fn data_file_number(filename: &str) -> Option<&str> {
@@ -868,6 +882,46 @@ mod tests {
         .unwrap();
         assert!(shape.children.unwrap()[0].fill_paint.is_some());
         assert_eq!(context.warnings.len(), 1);
+    }
+
+    #[test]
+    fn a_drawing_rels_past_the_budget_spends_none_of_it_and_is_read_once() {
+        let mut context = SmartArtContext::default();
+        let rels = "word/diagrams/_rels/drawing1.xml.rels";
+        context.parts.insert(
+            rels.to_owned(),
+            br#"<Relationships><Relationship Id="rId1" Type="image" Target="../media/a.png"/><Relationship Id="rId2" Type="image" Target="../media/b.png"/></Relationships>"#.to_vec(),
+        );
+        let limits = ParseLimits {
+            max_relationships: 1,
+            ..ParseLimits::default()
+        };
+        let budget = ParseBudget::new(&limits);
+        let part = "word/diagrams/drawing1.xml";
+        assert!(drawing_relationships(part, &mut context, &budget).is_none());
+        assert!(drawing_relationships(part, &mut context, &budget).is_none());
+        assert_eq!(context.warnings.len(), 1);
+        let mut budget = budget;
+        let own = br#"<Relationships><Relationship Id="rId1" Type="image" Target="a.png"/></Relationships>"#;
+        assert_eq!(
+            parse_relationships(own, "own", &mut budget).unwrap().len(),
+            1
+        );
+    }
+
+    #[test]
+    fn an_unsafe_target_loses_only_its_own_picture() {
+        let mut context = SmartArtContext::default();
+        context.parts.insert(
+            "word/diagrams/_rels/drawing1.xml.rels".to_owned(),
+            br#"<Relationships><Relationship Id="rId1" Type="image" Target="../../../../outside.png"/><Relationship Id="rId2" Type="image" Target="../media/b.png"/></Relationships>"#.to_vec(),
+        );
+        let limits = ParseLimits::default();
+        let budget = ParseBudget::new(&limits);
+        let own =
+            drawing_relationships("word/diagrams/drawing1.xml", &mut context, &budget).unwrap();
+        assert!(!own.contains_key("rId1"));
+        assert_eq!(own["rId2"].target, "word/media/b.png");
     }
 
     #[test]
