@@ -370,6 +370,9 @@ pub struct DocAttrs {
     /// paragraph. The mirror uses this to expose the stable list-marker class.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub list_marker: Option<bool>,
+    /// The marker is a number or label a reader needs, not a bullet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub list_marker_numbered: Option<bool>,
     /// Pending tracked-change paint for the synthetic numbering glyph.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub list_marker_revision: Option<RevisionKind>,
@@ -2198,6 +2201,8 @@ pub(crate) struct ParaAttrsIn {
     /// Pre-computed list marker text.
     #[serde(default)]
     list_marker: Option<String>,
+    #[serde(default)]
+    list_is_bullet: Option<bool>,
     /// w:vanish on the numbering level rPr — a hidden marker reserves no slot
     #[serde(default)]
     list_marker_hidden: Option<bool>,
@@ -7283,6 +7288,13 @@ fn emit_line<'a>(
         };
         let mut marker_attrs = block_ref.attrs();
         marker_attrs.list_marker = Some(true);
+        marker_attrs.list_marker_numbered = (attrs.and_then(|attrs| attrs.list_is_bullet)
+            != Some(true)
+            && marker.chars().any(char::is_alphanumeric)
+            && !attrs
+                .and_then(|attrs| attrs.list_marker_font_family.as_deref())
+                .is_some_and(|family| ooxml_text::SymbolFont::named(family).is_some()))
+        .then_some(true);
         marker_attrs.list_marker_revision = marker_revision;
         let shaped = !geom.is_rtl
             && bidi_char_levels(marker, base_bidi_direction(false))
@@ -16486,6 +16498,7 @@ mod tests {
             .expect("synthetic list marker");
         assert_eq!(marker["text"], "1.");
         assert_eq!(marker["listMarkerRevision"], "ins");
+        assert_eq!(marker["listMarkerNumbered"], true);
         assert_eq!(marker["color"], REVISION_INS_COLOR);
         assert!(marker["font"].as_str().unwrap().contains("Aptos"));
         assert!(marker["font"].as_str().unwrap().contains("700"));
@@ -16500,6 +16513,27 @@ mod tests {
             .find(|primitive| primitive["listMarker"] == true)
             .unwrap();
         assert_eq!(marker["color"], "#FF0000");
+
+        for (bullet, text, font) in [
+            (Value::Bool(true), "q", "Aptos"),
+            (Value::Null, "\u{2022}", "Aptos"),
+            (Value::Null, "q", "Wingdings"),
+            (Value::Null, "c", "Webdings"),
+        ] {
+            input["measured"][0]["block"]["attrs"]["listIsBullet"] = bullet;
+            input["measured"][0]["block"]["attrs"]["listMarker"] = Value::from(text);
+            input["measured"][0]["block"]["attrs"]["listMarkerFontFamily"] = Value::from(font);
+            let output: Value =
+                serde_json::from_str(&build_display_list_json(&input.to_string()).unwrap())
+                    .unwrap();
+            let marker = output["pages"][0]["primitives"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|primitive| primitive["listMarker"] == true)
+                .unwrap();
+            assert!(marker.get("listMarkerNumbered").is_none(), "{text}");
+        }
     }
 
     /// Marker overrun extends its slot and shifts only the first line's text.
