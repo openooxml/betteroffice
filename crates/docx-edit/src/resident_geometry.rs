@@ -911,19 +911,16 @@ mod tests {
     /// Paragraph content ranges, inline control nodes by paragraph and block control nodes by
     /// content story, as the layout bridge places them.
     fn layout_positions(doc: &EditingDoc) -> (Paragraphs, Inline, Blocks) {
-        fn visit(blocks: &[LayoutBlock], ends: &mut HashMap<u64, (u64, Option<String>)>) {
+        fn visit(blocks: &[LayoutBlock], ends: &mut HashMap<u64, (u64, Vec<String>)>) {
             for block in blocks {
                 match block {
                     LayoutBlock::Paragraph(paragraph) => {
-                        let group = paragraph
-                            .sdt_groups
-                            .as_ref()
-                            .and_then(|groups| groups.first());
+                        let groups = paragraph.sdt_groups.iter().flatten();
                         ends.insert(
                             paragraph.pm_start.unwrap() as u64,
                             (
                                 paragraph.pm_end.unwrap() as u64,
-                                group.map(|group| group.id.clone()),
+                                groups.map(|group| group.id.clone()).collect(),
                             ),
                         );
                     }
@@ -945,11 +942,17 @@ mod tests {
         for &(start, source) in &map.paragraph_blocks {
             let (slot, para_id) = &map.paragraphs[source as usize];
             let story = map.stories[*slot as usize].clone();
-            let (end, group) = ends[&start].clone();
+            let (end, nested) = ends[&start].clone();
             paragraphs.insert((story.clone(), para_id.clone(), start + 1, end - 1));
-            if let Some(group) = group {
-                let entry = groups.entry(group).or_insert((story, end));
+            // Outermost first: each level out is one story up and one position further.
+            let mut content = story.as_str();
+            for (depth, group) in nested.into_iter().rev().enumerate() {
+                let end = end + depth as u64;
+                let entry = groups.entry(group).or_insert((content.to_owned(), end));
                 entry.1 = entry.1.max(end);
+                content = content
+                    .rsplit_once(':')
+                    .map_or(content, |(parent, _)| parent);
             }
         }
         let blocks = groups
@@ -1100,35 +1103,23 @@ mod tests {
     const INSIDE: &str = r#"<w:p w14:paraId="00000008"><w:r><w:t>Inside</w:t></w:r></w:p>"#;
 
     #[test]
-    fn a_cell_holding_only_a_block_control_resolves_through_its_content_story() {
-        let doc = cell_doc(&block_control(1, INSIDE));
-        let layout = layout_positions(&doc);
-        assert!(
-            layout.0.iter().any(|paragraph| paragraph.1 == "00000008"),
-            "the control's paragraph is laid out"
-        );
-        let value =
-            serde_json::to_value(doc.resident_geometry("body", &whole(None)).unwrap()).unwrap();
-        assert_eq!(resident_positions(&value), layout);
-        assert_eq!(value["tables"][0]["cells"][0]["paraId"], "00000008");
-    }
-
-    #[test]
-    fn a_cell_holding_only_nested_block_controls_records_each_control() {
-        let doc = cell_doc(&block_control(1, &block_control(2, INSIDE)));
-        let value =
-            serde_json::to_value(doc.resident_geometry("body", &whole(None)).unwrap()).unwrap();
-        let (paragraphs, _, controls) = resident_positions(&value);
-        assert_eq!(paragraphs, layout_positions(&doc).0);
-        // The paragraph's content is 6..12, so its node is 5..13 and each control wraps the next.
-        assert_eq!(
-            controls,
-            BTreeSet::from([
-                ("body:t0:r0c0:sdt0".to_owned(), 3, 15),
-                ("body:t0:r0c0:sdt0:sdt0".to_owned(), 4, 14),
-            ])
-        );
-        assert_eq!(value["tables"][0]["cells"][0]["paraId"], "00000008");
+    fn a_cell_holding_only_block_controls_resolves_through_their_content_stories() {
+        for (cell, controls) in [
+            (block_control(1, INSIDE), 1),
+            (block_control(1, &block_control(2, INSIDE)), 2),
+        ] {
+            let doc = cell_doc(&cell);
+            let layout = layout_positions(&doc);
+            assert!(
+                layout.0.iter().any(|paragraph| paragraph.1 == "00000008"),
+                "the control's paragraph is laid out"
+            );
+            assert_eq!(layout.2.len(), controls);
+            let value =
+                serde_json::to_value(doc.resident_geometry("body", &whole(None)).unwrap()).unwrap();
+            assert_eq!(resident_positions(&value), layout);
+            assert_eq!(value["tables"][0]["cells"][0]["paraId"], "00000008");
+        }
     }
 
     #[test]
