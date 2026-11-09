@@ -2120,6 +2120,12 @@ impl<'c> PageImages<'c> {
             outcome.clone()
         } else {
             let outcome = match self.cache.get(key) {
+                Some((Err(failure), charge)) => {
+                    if !self.charge(charge) {
+                        self.refusal = None;
+                    }
+                    Err(failure)
+                }
                 Some((cached, charge)) if self.charge(charge) => cached,
                 Some(_) => Err(self
                     .refusal
@@ -4095,6 +4101,31 @@ mod tests {
                 .is_some()
         );
         assert!(next.pictures.is_empty());
+    }
+
+    #[test]
+    fn a_cached_refusal_keeps_its_reason_on_a_page_without_budget_left() {
+        let mut cache = ImageCache::default();
+        let broken = b"cached refusal";
+        let key = cache.key(&ImageSource::Registered(broken));
+        cache.insert(
+            key,
+            Err(PictureFailure::new(PictureReason::DecodeFailed)),
+            ImageCharge {
+                bytes_pre: 256,
+                ..ImageCharge::default()
+            },
+        );
+        let mut page = PageImages::new(&mut cache);
+        page.bytes = MAX_PAGE_IMAGE_BYTES - 1;
+        assert!(
+            page.resolve("rIdBroken", ImageSource::Registered(broken))
+                .is_none()
+        );
+        assert_eq!(page.pictures.len(), 1);
+        assert_eq!(page.pictures[0].reason, PictureReason::DecodeFailed);
+        assert_eq!(page.pictures[0].limit, None);
+        assert!(page.refusal.is_none());
     }
 
     /// A 2x1 uncompressed 8-bit RGB TIFF with this compression tag.

@@ -47,15 +47,18 @@ export interface DrawPageOptions {
 const PLACEHOLDER_FILL = 'rgb(242, 242, 242)';
 const PLACEHOLDER_BORDER = 'rgb(191, 191, 191)';
 
-function paintPicturePlaceholder(ctx: CanvasRenderingContext2D, trace: () => void): void {
+/** Paints the placeholder; `inside` keeps a frame's border within it, a shape's border is centred on its outline. */
+function paintPicturePlaceholder(ctx: CanvasRenderingContext2D, trace: () => void, inside: boolean): void {
   ctx.fillStyle = PLACEHOLDER_FILL;
   trace();
   ctx.fill();
   ctx.save();
-  trace();
-  ctx.clip();
+  if (inside) {
+    trace();
+    ctx.clip();
+  }
   ctx.strokeStyle = PLACEHOLDER_BORDER;
-  ctx.lineWidth = 2;
+  ctx.lineWidth = inside ? 2 : 1;
   ctx.setLineDash([]);
   trace();
   ctx.stroke();
@@ -619,16 +622,23 @@ async function drawShape(
   // already-decoded sources. The default resolver only decodes data:/blob:.
   const pictureSource =
     fillKind === 'picture' ? (fillPaint?.pictureSrc ?? fillPaint?.pictureRelId) : undefined;
-  if (fillKind === 'picture' && pictureSource && resolveImage) {
+  const unavailable = shape.geometryPath.length ? onPictureUnavailable : undefined;
+  if (fillKind === 'picture' && !pictureSource && unavailable) {
+    unavailable('');
+    paintPicturePlaceholder(ctx, () => {
+      ctx.beginPath();
+      appendShapePath(ctx, shape.geometryPath);
+    }, false);
+  } else if (fillKind === 'picture' && pictureSource && resolveImage) {
     const source = await resolveImage(pictureSource);
     if (source) {
       drawPictureShapeFill(ctx, shape, path, source);
-    } else if (onPictureUnavailable) {
-      onPictureUnavailable(pictureSource);
+    } else if (unavailable) {
+      unavailable(pictureSource);
       paintPicturePlaceholder(ctx, () => {
         ctx.beginPath();
         appendShapePath(ctx, shape.geometryPath);
-      });
+      }, false);
     } else {
       // unresolvable picture: fall back to the legacy solid fill so the shape
       // is not invisible (matches the pre-picture-payload behavior baseline)
@@ -1409,7 +1419,7 @@ async function drawImagePrimitive(
         ctx.beginPath();
         ctx.rect(frame.x, frame.y, frame.w, frame.h);
       }
-    });
+    }, true);
   } else if (image.shapeType === 'ellipse') {
     ctx.save();
     traceImageEllipse(ctx, frame);
