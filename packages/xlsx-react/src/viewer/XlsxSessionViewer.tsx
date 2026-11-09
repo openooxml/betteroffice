@@ -25,7 +25,7 @@ import { useSessionWorkbook } from './useSessionWorkbook';
 import type { ViewerSession, ViewerSurface } from './useSessionWorkbook';
 import { WorkbookFailure } from '../components/WorkbookFailure';
 import { useDefaultFonts } from '../useDefaultFonts';
-import { A11yGridCell } from '../components/A11yGridCell';
+import { A11yGridTable } from '../components/A11yGridCell';
 
 const BRAND = '#217346';
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -498,14 +498,7 @@ export function XlsxSessionViewer(props: Omit<XlsxWorkerViewerProps, 'file'> & {
               </div>
             </div>
             {a11yGrid && <>
-              <div style={visuallyHidden} role="grid" aria-label={a11yGrid.label}>
-                <div role="row"><span role="columnheader" />{a11yGrid.columnHeaders.map((header) =>
-                  <span key={header.col} role="columnheader">{header.label}</span>)}</div>
-                {a11yGrid.rows.map((row) => <div key={row.row} role="row">
-                  <span role="rowheader">{row.header}</span>{row.cells.map((cell) =>
-                    <A11yGridCell key={cell.col} cell={cell} onFollowLink={followLink} />)}
-                </div>)}
-              </div>
+              <A11yGridTable grid={a11yGrid} style={visuallyHidden} onFollowLink={followLink} />
               {a11yGrid.charts.map((chart, index) =>
                 <div key={`${index}:${chart.label}`} style={visuallyHidden} role="img" aria-label={chart.label} />)}
             </>}
