@@ -363,6 +363,21 @@ async function settled(page: Page) {
   await paintTurns(page);
 }
 
+async function caretSettled(page: Page) {
+  await expect.poll(() => page.evaluate(async () => {
+    const probe = window.__docxPeerlessInput;
+    const covered = () => {
+      const last = probe.commands.at(-1);
+      return { count: probe.commands.length, covered: !last || (probe.acks.some((ack) => ack.throughSeq >= last.seq) &&
+        probe.frames.some((frame) => frame.coversThroughSeq >= last.seq)) };
+    };
+    const first = covered();
+    await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    const second = covered();
+    return first.covered && second.covered && first.count === second.count;
+  })).toBe(true);
+}
+
 async function paintTurns(page: Page) {
   await pinnedEvaluate(page, () => new Promise<void>((resolve) => {
     requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
@@ -807,7 +822,7 @@ async function echoDocumentBytes() {
 }
 
 async function expectEchoMatchesReply(page: Page, canvas: Locator, label: string, press: () => Promise<void>) {
-  await settled(page);
+  await caretSettled(page);
   expect(await page.evaluate(() => window.__docxPeerlessInput.frames.at(-1)?.payload.echoContext),
     `${label}: the caret line must carry an echo context`).toBeDefined();
   const before = await canvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL());
@@ -923,7 +938,7 @@ test('echo paints the caret line of a wrapped paragraph before the reply and rec
   expect(await harnessText(page)).toBe(ECHO_PARAGRAPHS.join(''));
 });
 
-test('echo paints exactly the pixels of the reply for inserts and backspaces', { tag: '@harness' }, async ({ page }) => {
+test('echo paints exactly the pixels of the reply for inserts and backspaces on a settled caret', { tag: '@harness' }, async ({ page }) => {
   requirePeerlessHarness();
   await openHarness(page, 1, await echoDocumentBytes());
   const input = await focusHarness(page);
