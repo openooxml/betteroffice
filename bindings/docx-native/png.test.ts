@@ -209,6 +209,46 @@ test('native docx PNG uses display list font chains for text primitives', () => 
   }
 });
 
+const smartArtParts = (drawingRels = '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/></Relationships>') => ({
+  '[Content_Types].xml': encoder.encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'),
+  '_rels/.rels': encoder.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'),
+  'word/_rels/document.xml.rels': encoder.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDm" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramData" Target="diagrams/data1.xml"/></Relationships>'),
+  'word/document.xml': encoder.encode('<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="914400"/><wp:docPr id="1" name="Diagram"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/diagram"><dgm:relIds r:dm="rIdDm"/></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p><w:sectPr/></w:body></w:document>'),
+  'word/diagrams/data1.xml': encoder.encode('<dgm:dataModel xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram"/>'),
+  'word/diagrams/drawing1.xml': encoder.encode('<dsp:drawing xmlns:dsp="http://schemas.microsoft.com/office/drawing/2008/diagram" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><dsp:spTree><dsp:nvGrpSpPr/><dsp:grpSpPr/><dsp:sp modelId="{1}"><dsp:nvSpPr><dsp:cNvPr id="0" name=""/><dsp:cNvSpPr/></dsp:nvSpPr><dsp:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:blipFill><a:blip r:embed="rId1"/><a:stretch><a:fillRect/></a:stretch></a:blipFill></dsp:spPr></dsp:sp></dsp:spTree></dsp:drawing>'),
+  'word/diagrams/_rels/drawing1.xml.rels': encoder.encode(drawingRels),
+  'word/media/image1.png': new Uint8Array(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYPj/HwADAgH/5ncLrgAAAABJRU5ErkJggg==', 'base64')),
+});
+
+test('native docx draws a SmartArt picture fill from the drawing part\'s own relationships', () => {
+  const session = new raw.EditSession(407);
+  try {
+    session.set_media_tokens(true);
+    session.open_docx(raw.rezip_docx(smartArtParts()), true);
+    const pixels = pngPixels(pagePng(session, pngDisplayList(session), 0, 1));
+    let blue = 0;
+    for (let offset = 0; offset < pixels.length; offset += 4) {
+      if (pixels[offset]! < 40 && pixels[offset + 2]! > 200) blue++;
+    }
+    expect(blue).toBeGreaterThan(1000);
+  } finally {
+    session.free();
+  }
+});
+
+test('native docx opens a document whose SmartArt drawing relationships cannot be read, and warns', () => {
+  const session = new raw.EditSession(408);
+  try {
+    session.set_media_tokens(true);
+    session.open_docx(raw.rezip_docx(smartArtParts('<Relationships><not closed')), true);
+    const { document } = JSON.parse(session.materialize_docx()!) as { document: { warnings?: string[] } };
+    expect(document.warnings?.some((warning) => warning.includes('SmartArt pictures were left unresolved'))).toBe(true);
+    expect(() => pagePng(session, pngDisplayList(session), 0, 1)).toThrow('png-picture-unavailable');
+  } finally {
+    session.free();
+  }
+});
+
 test('native docx PNG resolves media tokens in every page region and refuses a picture it cannot draw', () => {
   const parts = raw.unzip_docx(fixture) as Record<string, Uint8Array>;
   const blue = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYPj/HwADAgH/5ncLrgAAAABJRU5ErkJggg==';

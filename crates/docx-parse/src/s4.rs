@@ -236,8 +236,13 @@ fn project_drawing(
     } else if matches!(chart, DrawingChart::Unread) {
         return Ok(None);
     } else if is_smart_art_drawing(drawing) {
-        let Some(shape) =
-            parse_smart_art_from_drawing(drawing, relationships, Some(smart_art), budget)?
+        let Some(shape) = parse_smart_art_from_drawing(
+            drawing,
+            relationships,
+            Some(media),
+            Some(smart_art),
+            budget,
+        )?
         else {
             return Ok(None);
         };
