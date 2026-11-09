@@ -11,10 +11,9 @@ export function cleanupGuard(cleanup: () => void) {
       done = true;
       try { cleanup(); }
       catch (error) {
-        if (failure instanceof Error) {
-          try { Reflect.defineProperty(failure, 'suppressed', { value: error, configurable: true, writable: true }); }
-          catch { /* the failure stays the one to report */ }
-        }
+        try {
+          if (failure instanceof Error) Reflect.defineProperty(failure, 'suppressed', { value: error, configurable: true, writable: true });
+        } catch { /* the failure stays the one to report */ }
       }
       return failure;
     },
