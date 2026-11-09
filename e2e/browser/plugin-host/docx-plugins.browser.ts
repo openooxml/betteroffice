@@ -53,6 +53,8 @@ for (const engine of ['legacy', 'worker'] as const) {
     const bytes = [...await zip.generateAsync({ type: 'uint8array' })];
     type GestureProbe = { __probe: {
       mutation: unknown;
+      nestedMutations: unknown[];
+      nativeClick: boolean | null;
       runMutation(): Promise<unknown>;
       editor: {
         loadDocumentBuffer(buffer: ArrayBuffer): Promise<void>;
@@ -77,11 +79,19 @@ for (const engine of ['legacy', 'worker'] as const) {
     await page.getByTestId('probe-mutation').click();
     await expect.poll(() => page.evaluate(() =>
       (window as unknown as GestureProbe).__probe.mutation)).toMatchObject({ ok: true, status: 'executed' });
+    expect(await page.evaluate(() => (window as unknown as GestureProbe).__probe.nativeClick)).toBe(true);
     await expect.poll(async () => (await state()).bold).toBe(false);
     expect((await state()).version).not.toBe(before.version);
     const after = await state();
     expect(await operate(page, () => (window as unknown as GestureProbe).__probe.runMutation()))
       .toMatchObject({ ok: false, failure: { code: 'unsupported-policy' } });
+    expect(await state()).toEqual(after);
+    await page.getByTestId('probe-nested-mutations').click();
+    await expect.poll(() => page.evaluate(() =>
+      (window as unknown as GestureProbe).__probe.nestedMutations)).toMatchObject([
+      { ok: false, failure: { code: 'unsupported-policy' } },
+      { ok: false, failure: { code: 'unsupported-policy' } },
+    ]);
     expect(await state()).toEqual(after);
     await page.getByTestId('probe-timer-mutation').click();
     await expect.poll(() => page.evaluate(() =>

@@ -12,7 +12,24 @@ afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
-function setup(trusted?: (event: Event) => boolean) {
+let dispatching: Event | undefined;
+
+function on(target: EventTarget, type: string, listener: (event: Event) => void) {
+  target.addEventListener(type, (event) => {
+    const previous = dispatching;
+    dispatching = event;
+    try {
+      listener(event);
+    } finally {
+      dispatching = previous;
+    }
+  });
+}
+
+function setup(
+  trusted?: (event: Event) => boolean,
+  currentEvent: () => Event | undefined = () => dispatching
+) {
   const ancestor = document.createElement('div');
   const root = document.createElement('div');
   const marker = document.createElement('div');
@@ -23,7 +40,7 @@ function setup(trusted?: (event: Event) => boolean) {
   root.append(marker);
   ancestor.append(root);
   document.body.append(ancestor);
-  cleanups.push(() => ancestor.remove(), trackPluginGestures(root, trusted));
+  cleanups.push(() => ancestor.remove(), trackPluginGestures(root, trusted, currentEvent));
   return { ancestor, root, marker, button, id };
 }
 
@@ -32,10 +49,10 @@ describe('plugin gestures', () => {
     test(`${type} stays open through ancestor bubble handlers and closes after dispatch`, async () => {
       const { ancestor, button, id } = setup(() => true);
       const seen: boolean[] = [];
-      button.addEventListener(type, () => {
+      on(button, type, () => {
         seen.push(gestureFor(id));
       });
-      ancestor.addEventListener(type, () => seen.push(gestureFor(id)));
+      on(ancestor, type, () => seen.push(gestureFor(id)));
       button.dispatchEvent(new Event(type, { bubbles: true }));
       expect(seen).toEqual([true, true]);
       expect(gestureFor(id)).toBe(false);
@@ -46,19 +63,19 @@ describe('plugin gestures', () => {
 
   test('synthetic events do not open a gesture', () => {
     const { button, id } = setup();
-    button.addEventListener('click', () => expect(gestureFor(id)).toBe(false));
+    on(button, 'click', () => expect(gestureFor(id)).toBe(false));
     button.click();
   });
 
   test('gestures belong to the marked activation, including across editor mounts', () => {
     const first = setup(() => true);
     const second = setup(() => true);
-    first.button.addEventListener('click', () => {
+    on(first.button, 'click', () => {
       expect(gestureFor(first.id)).toBe(true);
       expect(gestureFor(second.id)).toBe(false);
     });
     first.button.click();
-    second.button.addEventListener('click', () => {
+    on(second.button, 'click', () => {
       expect(gestureFor(first.id)).toBe(false);
       expect(gestureFor(second.id)).toBe(true);
     });
@@ -67,13 +84,13 @@ describe('plugin gestures', () => {
 
   test('host chrome does not open a gesture', () => {
     const { root, id } = setup(() => true);
-    root.addEventListener('click', () => expect(gestureFor(id)).toBe(false));
+    on(root, 'click', () => expect(gestureFor(id)).toBe(false));
     root.click();
   });
 
   test('stopped propagation closes after dispatch and the fallback', async () => {
     const { button, id } = setup(() => true);
-    button.addEventListener('click', (event) => {
+    on(button, 'click', (event) => {
       event.stopPropagation();
       expect(gestureFor(id)).toBe(true);
     });
@@ -85,11 +102,30 @@ describe('plugin gestures', () => {
 
   test('nested synthetic events cannot borrow an open gesture', () => {
     const { button, id } = setup((event) => event.type === 'click');
-    button.addEventListener('click', () => {
+    on(button, 'click', () => {
       expect(gestureFor(id)).toBe(true);
       button.dispatchEvent(new Event('keydown', { bubbles: true }));
     });
-    button.addEventListener('keydown', () => expect(gestureFor(id)).toBe(false));
+    on(button, 'keydown', () => expect(gestureFor(id)).toBe(false));
+    button.click();
+  });
+
+  for (const type of ['input', 'plugin-action']) {
+    test(`a nested synthetic ${type} event cannot borrow the trusted click`, () => {
+      const { button, id } = setup(() => true);
+      on(button, type, () => expect(gestureFor(id)).toBe(false));
+      on(button, 'click', () => {
+        expect(gestureFor(id)).toBe(true);
+        button.dispatchEvent(type === 'input' ? new Event(type) : new CustomEvent(type));
+        expect(gestureFor(id)).toBe(true);
+      });
+      button.click();
+    });
+  }
+
+  test('a missing current event refuses even during a trusted click', () => {
+    const { button, id } = setup(() => true, () => undefined);
+    on(button, 'click', () => expect(gestureFor(id)).toBe(false));
     button.click();
   });
 
@@ -98,18 +134,18 @@ describe('plugin gestures', () => {
     const hostButton = document.createElement('button');
     document.body.append(hostButton);
     cleanups.push(() => hostButton.remove());
-    hostButton.addEventListener('click', () => expect(gestureFor(id)).toBe(false));
-    button.addEventListener('click', () => {
+    on(hostButton, 'click', () => expect(gestureFor(id)).toBe(false));
+    on(button, 'click', () => {
       expect(gestureFor(id)).toBe(true);
       hostButton.click();
     });
     button.click();
   });
 
-  test('the timeout clears the stopped event even if its dispatch phase is retained', async () => {
-    const { button, id } = setup(() => true);
+  test('the timeout clears the stopped event even if its phase and current event are retained', async () => {
     const event = new Event('click', { bubbles: true });
-    button.addEventListener('click', (event) => event.stopPropagation());
+    const { button, id } = setup(() => true, () => event);
+    on(button, 'click', (event) => event.stopPropagation());
     button.dispatchEvent(event);
     Object.defineProperty(event, 'eventPhase', { value: Event.BUBBLING_PHASE });
     expect(gestureFor(id)).toBe(true);

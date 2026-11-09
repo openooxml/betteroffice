@@ -1108,6 +1108,9 @@ describe('XlsxEditor plugins', () => {
   });
 
   editorTest('granted built-in mutations need a gesture in their panel; granted views run', async () => {
+    let dispatching: Event | undefined;
+    const trusted = (event: Event) => { dispatching = event; return true; };
+    const currentEvent = () => dispatching;
     const results: unknown[] = [];
     const toolbarResults: unknown[] = [];
     function Probe({ context }: { context: XlsxPluginContext<State> }) {
@@ -1149,7 +1152,7 @@ describe('XlsxEditor plugins', () => {
     });
     const before = api().commands.getState('bold').active;
     const button = within(view.container).getByTestId('gesture-bold');
-    const release = trackPluginGestures(button.closest<HTMLElement>('[data-plugin-activation]')!, () => true);
+    const release = trackPluginGestures(button.closest<HTMLElement>('[data-plugin-activation]')!, trusted, currentEvent);
     try {
       fireEvent.click(button);
       await until(() => results.length === 1);
@@ -1163,7 +1166,7 @@ describe('XlsxEditor plugins', () => {
       release();
     }
     const toolbarButton = within(view.container).getByRole('button', { name: 'Gesture bold', exact: true });
-    const releaseToolbar = trackPluginGestures(toolbarButton.closest<HTMLElement>('[data-plugin-activation]')!, () => true);
+    const releaseToolbar = trackPluginGestures(toolbarButton.closest<HTMLElement>('[data-plugin-activation]')!, trusted, currentEvent);
     try {
       fireEvent.click(toolbarButton);
       await until(() => toolbarResults.length === 1);
@@ -1183,7 +1186,7 @@ describe('XlsxEditor plugins', () => {
     });
     await until(() => within(view.container).getByTestId('probe').textContent === 'permission-denied');
     const ungrantedButton = within(view.container).getByTestId('gesture-bold');
-    const releaseUngrant = trackPluginGestures(ungrantedButton.closest<HTMLElement>('[data-plugin-activation]')!, () => true);
+    const releaseUngrant = trackPluginGestures(ungrantedButton.closest<HTMLElement>('[data-plugin-activation]')!, trusted, currentEvent);
     try {
       fireEvent.click(ungrantedButton);
       await until(() => results.length === 3);

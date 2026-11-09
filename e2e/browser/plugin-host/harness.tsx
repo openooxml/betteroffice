@@ -22,6 +22,8 @@ type ProbeContext = DocxPluginContext<ProbeState>;
 
 interface ProbeWindow {
   mutation: unknown;
+  nestedMutations: unknown[];
+  nativeClick: boolean | null;
   runMutation(): Promise<unknown>;
   editor: DocxEditorRef | null;
   geometry: DocxPluginGeometry | null;
@@ -37,6 +39,8 @@ const fileProp = new URLSearchParams(location.search).get('prop') === 'file';
 const probe: ProbeWindow = {
   editor: null,
   mutation: null,
+  nestedMutations: [],
+  nativeClick: null,
   runMutation: async () => null,
   geometry: null,
   navigation: null,
@@ -63,8 +67,24 @@ function ProbePanel({ context }: { context: ProbeContext }) {
   return (
     <div>
       <button type="button" data-testid="probe-mutation" data-version={context.snapshot.version} onMouseDown={(event) => event.preventDefault()}
-        onClick={() => { void probe.runMutation().then((result) => { probe.mutation = result; }); }}>
+        onClick={(event) => {
+          probe.nativeClick = window.event === event.nativeEvent;
+          void probe.runMutation().then((result) => { probe.mutation = result; });
+        }}>
         Apply formatting
+      </button>
+      <button type="button" data-testid="probe-nested-mutations" onMouseDown={(event) => event.preventDefault()}
+        onClick={(event) => {
+          probe.nestedMutations = [];
+          const button = event.currentTarget;
+          for (const nested of [new Event('input'), new CustomEvent('plugin-action')]) {
+            button.addEventListener(nested.type, () => {
+              void context.commands.execute('bold', null).then((result) => { probe.nestedMutations.push(result); });
+            }, { once: true });
+            button.dispatchEvent(nested);
+          }
+        }}>
+        Apply formatting from nested events
       </button>
       <button type="button" data-testid="probe-timer-mutation" onMouseDown={(event) => event.preventDefault()}
         onClick={async () => {
@@ -269,7 +289,7 @@ const second = defineDocxPlugin({
 });
 
 const PLUGINS = [alignment, second];
-const GRANTS = { 'probe.alignment': { document: 'write', editBatches: true, commands: ['clearFormatting'] } } as const;
+const GRANTS = { 'probe.alignment': { document: 'write', editBatches: true, commands: ['clearFormatting', 'bold'] } } as const;
 
 function Harness() {
   const [buffer, setBuffer] = useState<ArrayBuffer | null>(null);

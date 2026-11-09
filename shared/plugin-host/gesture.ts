@@ -1,6 +1,11 @@
 const activations = new WeakMap<object, string>();
 let nextActivation = 0;
-let current: { activationId: string; event: Event; close(): void } | null = null;
+let current: {
+  activationId: string;
+  event: Event;
+  currentEvent(): Event | undefined;
+  close(): void;
+} | null = null;
 
 export function pluginActivationId(activation: object): string {
   let id = activations.get(activation);
@@ -12,12 +17,14 @@ export function pluginActivationId(activation: object): string {
 }
 
 export function gestureFor(activationId: string): boolean {
-  return current?.activationId === activationId && current.event.eventPhase !== Event.NONE;
+  return current?.activationId === activationId && current.event.eventPhase !== Event.NONE &&
+    current.currentEvent() === current.event;
 }
 
 export function trackPluginGestures(
   root: HTMLElement,
-  trusted: (event: Event) => boolean = (event) => event.isTrusted
+  trusted: (event: Event) => boolean = (event) => event.isTrusted,
+  currentEvent: () => Event | undefined = () => root.ownerDocument.defaultView?.event
 ): () => void {
   const window = root.ownerDocument.defaultView;
   const types = ['click', 'keydown', 'pointerup'] as const;
@@ -38,7 +45,7 @@ export function trackPluginGestures(
       close = null;
     };
     close = closeGesture;
-    current = { activationId, event, close: closeGesture };
+    current = { activationId, event, currentEvent, close: closeGesture };
   };
   const bubble = (event: Event) => {
     if (current?.event === event) current.close();
