@@ -77,3 +77,49 @@ test('a_row_inserted_from_inside_a_block_control_is_undoable_and_keeps_the_contr
   expect(execute(arm, command(arm, 'undo', {})).status).toBe('applied');
   expect(rows()).toBe(2);
 }, TIMEOUT);
+
+const tableJson = (arm: Arm) => JSON.stringify(arm.engine.tablePayload('body', 0));
+
+/** Applies a table command from inside the control, then expects undo to restore the table and the control's text. */
+async function appliesAndUndoes(kind: string, payload: Record<string, unknown>, changed: (arm: Arm) => void, cells?: [number, number, number, number]) {
+  const arm = await at('B');
+  if (cells) arm.engine.setCellSelection({
+    anchor: { story: 'body', tableIndex: 0, row: cells[0], column: cells[1] },
+    head: { story: 'body', tableIndex: 0, row: cells[2], column: cells[3] },
+  });
+  const before = tableJson(arm);
+  const version = arm.engine.proposalEngine.version();
+  expect(execute(arm, command(arm, kind as 'insertTableRow', payload as never)).status).toBe('applied');
+  expect(arm.engine.proposalEngine.version()).toBeGreaterThan(version);
+  changed(arm);
+  expect(execute(arm, command(arm, 'undo', {})).status).toBe('applied');
+  expect(tableJson(arm)).toBe(before);
+  expect(arm.engine.paragraphs(storyOf(arm, 'B'))[0]!.text).toBe('B');
+  expect(arm.engine.paragraphs(storyOf(arm, 'C'))[0]!.text).toBe('C');
+}
+
+const rows = (arm: Arm) => (arm.engine.tablePayload('body', 0) as unknown as { rows: { cells: { tcPr?: Record<string, unknown> }[] }[] }).rows;
+
+test('deleting_a_row_from_inside_a_block_control_takes_that_row_and_undoes', async () => {
+  await appliesAndUndoes('deleteTableRow', {}, (arm) => {
+    expect(rows(arm)).toHaveLength(1);
+    expect(arm.engine.geometryReader.storyIds().some((id) => arm.engine.paragraphs(id)[0]?.text === 'C')).toBe(true);
+    expect(arm.engine.geometryReader.storyIds().some((id) => arm.engine.paragraphs(id)[0]?.text === 'A')).toBe(false);
+  });
+}, TIMEOUT);
+
+test('merging_cells_from_inside_a_block_control_keeps_the_controls_text_and_undoes', async () => {
+  await appliesAndUndoes('mergeTableCells', {}, (arm) => {
+    expect(rows(arm)[0]!.cells).toHaveLength(1);
+    const texts = arm.engine.geometryReader.storyIds().flatMap((id) => arm.engine.paragraphs(id).map((paragraph) => paragraph.text));
+    expect(texts).toContain('A');
+    expect(texts).toContain('B');
+  }, [0, 0, 0, 1]);
+}, TIMEOUT);
+
+test('shading_from_inside_a_block_control_shades_its_cell_only_and_undoes', async () => {
+  await appliesAndUndoes('setTableCellShading', { color: 'FF0000' }, (arm) => {
+    const shaded = rows(arm).map((row) => row.cells.map((cell) => cell.tcPr?.backgroundColor === 'FF0000'));
+    expect(shaded).toEqual([[false, true], [false, false]]);
+  });
+}, TIMEOUT);
