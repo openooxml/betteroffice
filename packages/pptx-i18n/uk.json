@@ -94,6 +94,7 @@
     "canvasLabelWithSelection": "Слайд {current} із {total}; вибраний об’єкт {name}"
   },
   "a11y": {
+    "chartNoData": "Немає даних",
     "slideWithTitle": "Слайд {current} із {total}: {title}",
     "objectSelected": "Вибрано: {name}",
     "editingText": "Редагування: {name}"

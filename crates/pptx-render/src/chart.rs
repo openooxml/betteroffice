@@ -5,7 +5,8 @@ use std::collections::{BTreeSet, HashMap};
 use ooxml_drawingml::GeometryPathCommand;
 use ooxml_drawingml::chart::{
     CHART_FONT_FAMILY, ChartSpace, PlotChart, PlotDataLabels, PlotFill, PlotFont, PlotOp, PlotRect,
-    PlotSink, PlotTextAlign, PlotTextStyle, chart_aria_label, chart_data, plot_chart_into,
+    PlotSink, PlotTextAlign, PlotTextStyle, chart_aria_label, chart_data, chart_plots_no_points,
+    plot_chart_into,
 };
 use ooxml_text::paragraph_scripts_with_han_fallback;
 
@@ -68,7 +69,9 @@ pub(crate) fn chart_primitive<'a>(
         label: chart_aria_label(&chart),
         primitives,
         transform: frame.transform,
-        data: chart_data(&chart),
+        data: chart_data(&chart).or_else(|| {
+            chart_plots_no_points(&chart).then(ooxml_drawingml::chart::ChartData::default)
+        }),
     })
 }
 

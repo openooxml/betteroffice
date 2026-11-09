@@ -94,6 +94,7 @@
     "canvasLabelWithSelection": "कुल {total} में से स्लाइड {current}; चयनित ऑब्जेक्ट {name}"
   },
   "a11y": {
+    "chartNoData": "कोई डेटा नहीं",
     "slideWithTitle": "कुल {total} में से स्लाइड {current}: {title}",
     "objectSelected": "{name} चयनित",
     "editingText": "{name} संपादित किया जा रहा है"

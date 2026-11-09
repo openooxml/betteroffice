@@ -94,6 +94,7 @@
     "canvasLabelWithSelection": "Слайд {current} из {total}; выбран объект {name}"
   },
   "a11y": {
+    "chartNoData": "Нет данных",
     "slideWithTitle": "Слайд {current} из {total}: {title}",
     "objectSelected": "Выбрано: {name}",
     "editingText": "Редактирование: {name}"

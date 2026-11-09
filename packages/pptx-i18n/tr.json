@@ -94,6 +94,7 @@
     "canvasLabelWithSelection": "{total} slayttan {current}. slayt; seçili nesne {name}"
   },
   "a11y": {
+    "chartNoData": "Veri yok",
     "slideWithTitle": "{total} slayttan {current}. slayt: {title}",
     "objectSelected": "{name} seçildi",
     "editingText": "{name} düzenleniyor"

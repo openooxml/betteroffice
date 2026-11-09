@@ -94,6 +94,7 @@
     "canvasLabelWithSelection": "第 {current} 张幻灯片，共 {total} 张; 已选对象 {name}"
   },
   "a11y": {
+    "chartNoData": "无数据",
     "slideWithTitle": "第 {current} 张幻灯片，共 {total} 张：{title}",
     "objectSelected": "已选择 {name}",
     "editingText": "正在编辑 {name}"

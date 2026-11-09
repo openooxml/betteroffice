@@ -94,6 +94,7 @@
     "canvasLabelWithSelection": "Trang chiếu {current} / {total}; đối tượng đã chọn {name}"
   },
   "a11y": {
+    "chartNoData": "Không có dữ liệu",
     "slideWithTitle": "Trang chiếu {current} / {total}: {title}",
     "objectSelected": "Đã chọn {name}",
     "editingText": "Đang chỉnh sửa {name}"

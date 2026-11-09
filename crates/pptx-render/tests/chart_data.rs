@@ -56,6 +56,37 @@ fn with_north_cache(cache: &str) -> Vec<u8> {
     ooxml_opc::rezip_parts(&parts).unwrap()
 }
 
+/// The fixture with every series removed from its first chart.
+fn without_series() -> Vec<u8> {
+    let parts = ooxml_opc::unzip_parts(FIXTURE)
+        .unwrap()
+        .into_iter()
+        .map(|(path, body)| {
+            if path != "ppt/charts/chart1.xml" {
+                return (path, body);
+            }
+            let mut xml = String::from_utf8(body).unwrap();
+            while let Some(start) = xml.find("<c:ser>") {
+                let end = xml[start..].find("</c:ser>").unwrap() + start + "</c:ser>".len();
+                xml.replace_range(start..end, "");
+            }
+            (path, xml.into_bytes())
+        })
+        .collect::<Vec<_>>();
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn a_chart_that_caches_no_points_carries_empty_data() {
+    assert_eq!(
+        data(&chart(&without_series(), 7)),
+        &ChartData {
+            categories: Vec::new(),
+            series: Vec::new(),
+        }
+    );
+}
+
 #[test]
 fn a_chart_carries_its_categories_and_series_values() {
     let chart = chart(FIXTURE, 4201);

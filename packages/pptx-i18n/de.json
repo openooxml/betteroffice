@@ -94,6 +94,7 @@
     "canvasLabelWithSelection": "Folie {current} von {total}; ausgewähltes Objekt {name}"
   },
   "a11y": {
+    "chartNoData": "Keine Daten",
     "slideWithTitle": "Folie {current} von {total}: {title}",
     "objectSelected": "{name} ausgewählt",
     "editingText": "{name} wird bearbeitet"

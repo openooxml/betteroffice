@@ -41,6 +41,8 @@ export interface SlideMirrorItem {
   paragraphs: SlideMirrorParagraph[];
   table?: SlideMirrorTable;
   chart?: SlideMirrorChart;
+  /** A chart that caches no points: it reads as its name and that it has no data. */
+  chartNoData?: boolean;
 }
 
 /** A chart's data: a column per series and a row per category. */
@@ -215,6 +217,9 @@ function mirrorChart(primitive: Extract<SlidePrimitive, { kind: 'chart' }>): Sli
   };
 }
 
+const plotsNoPoints = ({ data }: Extract<SlidePrimitive, { kind: 'chart' }>) =>
+  Array.isArray(data?.categories) && Array.isArray(data?.series) && !data.categories.length && !data.series.length;
+
 function mirrorTable(primitive: Extract<SlidePrimitive, { kind: 'table' }>): SlideMirrorTable | null {
   const grid = primitive.grid;
   if (!grid || !count(grid.rows, 1) || !count(grid.columns, 1) || grid.rows * grid.columns > MAX_TABLE_SLOTS ||
@@ -286,6 +291,7 @@ export function slideMirrorItems(list: SlideDisplayList, picture: string): Slide
     else own.paragraphs.push(...paragraphs(primitive));
     const chart = primitive.kind === 'chart' && !entry?.decorative && !own.chart ? mirrorChart(primitive) : null;
     if (chart) own.chart = chart;
+    if (primitive.kind === 'chart' && !entry?.decorative && plotsNoPoints(primitive)) own.chartNoData = true;
     if (entry?.decorative || primitive.kind === 'textBox') continue;
     const described = altLabel(entry);
     const artwork = primitive.kind === 'image' || painted.get(index) === id;

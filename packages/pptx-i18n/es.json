@@ -94,6 +94,7 @@
     "canvasLabelWithSelection": "Diapositiva {current} de {total}; objeto seleccionado {name}"
   },
   "a11y": {
+    "chartNoData": "Sin datos",
     "slideWithTitle": "Diapositiva {current} de {total}: {title}",
     "objectSelected": "{name} seleccionado",
     "editingText": "Editando {name}"

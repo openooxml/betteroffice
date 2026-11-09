@@ -94,6 +94,7 @@
     "canvasLabelWithSelection": "{total}개 중 {current}번째 슬라이드, 선택한 개체 {name}"
   },
   "a11y": {
+    "chartNoData": "데이터 없음",
     "slideWithTitle": "{total}개 중 {current}번째 슬라이드: {title}",
     "objectSelected": "{name} 선택됨",
     "editingText": "{name} 편집 중"

@@ -80,7 +80,7 @@ function mirrorParagraphs(paragraphs: SlideMirrorParagraph[], run: PeerlessPrese
 
 const cellRole = (cell: SlideMirrorCell) => cell.header === 'column' ? 'columnheader' : cell.header === 'row' ? 'rowheader' : 'cell';
 
-function MirrorItem({ item, run }: { item: SlideMirrorItem; run: PeerlessPresentation }) {
+function MirrorItem({ item, run, noData }: { item: SlideMirrorItem; run: PeerlessPresentation; noData: string }) {
   const style: CSSProperties = { position: 'absolute', left: item.x, top: item.y, width: item.w, height: item.h, margin: 0 };
   const { table, chart } = item;
   if (chart) {
@@ -113,8 +113,9 @@ function MirrorItem({ item, run }: { item: SlideMirrorItem; run: PeerlessPresent
     </div>;
     return item.paragraphs.length ? <div style={style}>{grid}{mirrorParagraphs(item.paragraphs, run)}</div> : grid;
   }
-  if (item.paragraphs.length === 0) return <div role="img" aria-label={item.label!} style={style} />;
-  return <div role={item.label ? 'group' : undefined} aria-label={item.label ?? undefined} style={style}>
+  const description = item.chartNoData ? noData : undefined;
+  if (item.paragraphs.length === 0) return <div role="img" aria-label={item.label!} aria-description={description} style={style} />;
+  return <div role={item.label ? 'group' : undefined} aria-label={item.label ?? undefined} aria-description={item.label ? description : undefined} style={style}>
     {mirrorParagraphs(item.paragraphs, run)}
   </div>;
 }
@@ -133,6 +134,7 @@ export const PeerlessSlideMirror = memo(function PeerlessSlideMirror({ run, list
   const { t } = useTranslation();
   const [focused, setFocused] = useState(false);
   const picture = t('objects.defaultPictureName');
+  const noData = t('a11y.chartNoData');
   const items = useMemo(() => slideMirrorItems(list, picture), [list, picture]);
   return <div role="document" tabIndex={0} aria-label={label} data-testid="pptx-slide-mirror"
     onKeyDown={(event) => navigatePeerlessSlide(event, run)}
@@ -141,7 +143,7 @@ export const PeerlessSlideMirror = memo(function PeerlessSlideMirror({ run, list
     style={{ position: 'absolute', inset: 0, pointerEvents: 'none', outline: focused ? '2px solid #2563eb' : 'none', outlineOffset: -2 }}>
     <div style={{ position: 'absolute', left: 0, top: 0, width: list.width, height: list.height, opacity: 0,
       overflow: 'hidden', userSelect: 'none', transform: `scale(${scale})`, transformOrigin: '0 0' }}>
-      {items.map((item) => <MirrorItem key={item.key} item={item} run={run} />)}
+      {items.map((item) => <MirrorItem key={item.key} item={item} run={run} noData={noData} />)}
     </div>
   </div>;
 });
