@@ -328,3 +328,39 @@ describe('overlay coordinates', () => {
     ).toBeNull();
   });
 });
+
+for (const peerless of [false, true]) test(`selection anchors follow ranges and refuse offscreen cells (${peerless ? 'peerless' : 'in-thread'})`, async () => {
+  const frame = painted();
+  const layout = pluginLayout(frame, 'v1')!;
+  let selection: import('./types').XlsxPluginSelection = { sheetId: frame.sheetId, sheetIndex: 0,
+    cells: { anchor: { row: 0, col: 0 }, focus: { row: 11, col: 4 } }, chartId: null };
+  let live = true;
+  const geometry = peerless
+    ? createPeerlessPluginGeometry(layout, frame, element(110, 60), element(100, 50),
+        () => ({ version: live ? 'v1' : 'v2', painted: frame }), undefined, undefined, () => selection)
+    : createPluginGeometry(layout, frame, element(110, 60), element(100, 50), () => live,
+        undefined, undefined, () => selection);
+  for (const range of [
+    { top: 0, left: 0, bottom: 11, right: 4 },
+    { top: 10, left: 4, bottom: 12, right: 6 },
+  ]) {
+    selection.cells = { anchor: { row: range.top, col: range.left }, focus: { row: range.bottom, col: range.right } };
+    const rect = geometry.getRangeRect({ sheetId: frame.sheetId, range });
+    expect(rect).not.toBeNull();
+    expect(await geometry.readAnchorGeometries([{ kind: 'selection' }])).toMatchObject([
+      { ok: true, version: 'v1', layoutId: layout.id, rects: [rect], anchor: rect },
+    ]);
+  }
+  const region = { top: 10, left: 4, bottom: 12, right: 6 };
+  selection.cells = { anchor: { row: 10, col: 4 }, focus: { row: 10, col: 4 }, range: region };
+  expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: true,
+    rects: [geometry.getRangeRect({ sheetId: frame.sheetId, range: region })] });
+  selection.cells = { anchor: { row: 300, col: 300 }, focus: { row: 302, col: 302 } };
+  expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
+  selection.chartId = 'chart';
+  expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: false, failure: { code: 'missing-target' } });
+  selection = null;
+  expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: false, failure: { code: 'missing-target' } });
+  live = false;
+  expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
+});

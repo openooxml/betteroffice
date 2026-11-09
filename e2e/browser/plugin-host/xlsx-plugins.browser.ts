@@ -2,7 +2,17 @@ import { test, expect, type Page } from 'playwright/test';
 import { pinnedEvaluate } from '../pinned-evaluate';
 import { renderedBox } from '../rendered-box';
 
+type ProbeRect = { x: number; y: number; width: number; height: number };
+
+interface ProbeGeometry {
+  getCellRect(target: unknown): ProbeRect | null;
+  getRangeRect(target: unknown): ProbeRect | null;
+  getAnchorGeometry(target: unknown): unknown;
+  readAnchorGeometries(targets: unknown[]): Promise<unknown[]>;
+}
+
 interface ProbeContext {
+  geometry: ProbeGeometry | null;
   snapshot: { version: string };
   read: {
     version(): Promise<{ ok: boolean; version: string }>;
@@ -84,7 +94,7 @@ async function misalignment(page: Page): Promise<number> {
   });
 }
 
-type ProbeEvent = { type: string; focused?: boolean; viewport?: { x: number; y: number; width: number; height: number } | null };
+type ProbeEvent = { type: string; focused?: boolean; source?: string };
 
 for (const engine of ['legacy', 'worker'] as const) {
   test.describe(`xlsx plugins (${engine})`, () => {
@@ -95,6 +105,42 @@ for (const engine of ['legacy', 'worker'] as const) {
       if (engine === 'worker') expect(count).toBe(0);
       else expect(count).toBeGreaterThan(0);
     });
+test('dragging A1:C3 settles once and anchors to getRangeRect', async ({ page }) => {
+  await open(page, engine);
+  const points = await pinnedEvaluate(page, () => (window as unknown as { __probe: Probe }).__probe.act(async (context) => {
+    const geometry = context.geometry!;
+    const start = geometry.getCellRect({ sheetId: 'sheet:0', row: 0, col: 0 })!;
+    const end = geometry.getCellRect({ sheetId: 'sheet:0', row: 2, col: 2 })!;
+    const layer = document.querySelector('[data-testid="plugin-overlays"]')!.getBoundingClientRect();
+    return { start: { x: layer.left + start.x + 1, y: layer.top + start.y + start.height / 2 },
+      end: { x: layer.left + end.x + end.width / 2, y: layer.top + end.y + end.height / 2 } };
+  }));
+  await page.waitForTimeout(400);
+  await page.evaluate(() => { (window as unknown as { __probe: { events: ProbeEvent[] } }).__probe.events = []; });
+  await page.mouse.move(points.start.x, points.start.y);
+  await page.mouse.down();
+  await page.mouse.move(points.end.x, points.end.y, { steps: 8 });
+  expect(await page.evaluate(() => (window as unknown as { __probe: { events: ProbeEvent[] } }).__probe.events
+    .filter((event) => event.type === 'selection-settle'))).toHaveLength(0);
+  await page.mouse.up();
+  const events = () => page.evaluate(() => (window as unknown as { __probe: { events: ProbeEvent[] } }).__probe.events
+    .filter((event) => event.type === 'selection-settle'));
+  await expect.poll(async () => (await events()).length).toBe(1);
+  await page.waitForTimeout(400);
+  expect(await events()).toHaveLength(1);
+  expect(await events()).toMatchObject([{ source: 'pointer', selection: { cells: {
+    anchor: { row: 0, col: 0 }, focus: { row: 2, col: 2 },
+  } } }]);
+  const geometry = await pinnedEvaluate(page, () => (window as unknown as { __probe: Probe }).__probe.act(async (context) => ({
+    selected: context.geometry!.getAnchorGeometry({ kind: 'selection' }),
+    range: context.geometry!.getRangeRect({ sheetId: 'sheet:0', range: { top: 0, left: 0, bottom: 2, right: 2 } }),
+    read: await context.geometry!.readAnchorGeometries([{ kind: 'selection' }]),
+  })));
+  expect(geometry.range).not.toBeNull();
+  expect(geometry.selected).toMatchObject({ ok: true, rects: [geometry.range], anchor: geometry.range });
+  expect(geometry.read).toEqual([geometry.selected]);
+});
+
 test('document focus excludes the plugin panel', async ({ page }) => {
   await open(page, engine);
   const events = () => page.evaluate(() =>

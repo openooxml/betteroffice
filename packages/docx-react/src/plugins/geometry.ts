@@ -639,7 +639,8 @@ export function createPluginGeometry(
   held: () => boolean = () => false,
   readPoint?: (clientX: number, clientY: number) => Promise<DocxPointPosition | null>,
   complete: () => boolean = () => false,
-  viewport: () => DocxPluginRect = () => visibleViewport(layer, layer, layer)
+  viewport: () => DocxPluginRect = () => visibleViewport(layer, layer, layer),
+  selection: () => { from: number; to: number; layoutId: string; focus?: number } | null = () => null
 ): DocxPluginGeometry {
   const shown = () => dom.zoom === layout.zoom && current();
   const projector = createCanvasHostProjector(dom.pagesContainer, queries, dom.zoom);
@@ -885,10 +886,27 @@ export function createPluginGeometry(
       return shown() && position && position.version === layout.version
         ? { ...position, layoutId: layout.id } : null;
     },
-    getAnchorGeometry: (target) =>
-      target.kind === 'reservation'
+    getAnchorGeometry(target) {
+      if (target.kind === 'selection') {
+        if (!shown()) return unavailable();
+        const range = selection();
+        if (!range) return anchorFailure('missing-target', 'No selection is available');
+        if (range.layoutId !== layout.id) return unavailable();
+        const from = Math.min(range.from, range.to);
+        const to = Math.max(range.from, range.to);
+        const rects = from === to ? [] : queries.rangeRects(from, to).filter((rect) => rect.width > 0);
+        const focus = range.focus ?? range.to;
+        const caret = from === to || focus === from
+          ? caretAt(queries, focus) ?? queries.caretRect(focus) ?? queries.anchorRect(focus)
+          : endOf({ from, to });
+        const anchor = caret ? { ...caret, width: 0 } : null;
+        if (rects.some((rect) => pendingPage(rect.pageIndex)) || (anchor && pendingPage(anchor.pageIndex))) return unavailable();
+        return respond(rects, anchor, unbuiltPagesOf(queries, [{ from, to }]));
+      }
+      return target.kind === 'reservation'
         ? anchorFailure('unsupported', 'Reservations are read through a plugin context')
-        : anchorGeometry(target),
+        : anchorGeometry(target);
+    },
   };
   registerReservationReader(created, { get: reservation });
   return created;

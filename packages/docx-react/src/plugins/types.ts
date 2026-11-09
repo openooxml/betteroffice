@@ -27,6 +27,7 @@ import type {
   PluginLoadReason,
   PluginLocaleChangeEvent,
   PluginRefusal,
+  PluginSelectionSettleEvent,
   PluginViewportChangeEvent,
 } from '../../../../shared/host-contracts/plugins';
 import type {
@@ -174,6 +175,8 @@ export interface DocxPluginSnapshot {
   readOnly: boolean;
   grant: DocxPluginGrant;
   selection: DocxPluginSelection;
+  /** @experimental Whether the selection has finished changing. */
+  selectionSettled: boolean;
   /** Null while no rendered layout shows `version`. */
   layout: DocxPluginLayout | null;
 }
@@ -192,6 +195,8 @@ export interface DocxPluginPageRect extends DocxAnchorRect {
 }
 
 export type DocxGeometryTarget =
+  /** @experimental The current selection in this layout. */
+  | { kind: 'selection' }
   | { kind: 'proposal'; id: string }
   | { kind: 'revision'; revisionId: string }
   | { kind: 'paragraph'; paragraph: DocxParagraphAnchor }
@@ -310,11 +315,15 @@ export type DocxPluginLocaleChangeEvent = PluginLocaleChangeEvent;
 /** @experimental The plugin API may change in minor releases. */
 export type DocxPluginViewportChangeEvent = PluginViewportChangeEvent<DocxPluginRect>;
 
+/** @experimental The plugin API may change in minor releases. */
+export type DocxPluginSelectionSettleEvent = PluginSelectionSettleEvent<DocxPluginSelection>;
+
 /**
  * Lifecycle notifications describe current state; several changes may arrive as one.
  * `layout-change` repeats once the pages have painted a layout that arrived before its pixels.
  */
 export type DocxPluginEvent =
+  | DocxPluginSelectionSettleEvent
   | DocxPluginFocusChangeEvent
   | DocxPluginLocaleChangeEvent
   | DocxPluginViewportChangeEvent

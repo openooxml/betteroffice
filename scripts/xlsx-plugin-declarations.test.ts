@@ -28,6 +28,8 @@ const CONSUMER = `import {
   useXlsxCommand,
   type XlsxEditorApi,
   type XlsxPluginContext,
+  type XlsxPluginSelectionSettleEvent,
+  type XlsxGeometryTarget,
   type XlsxPluginGrant,
   type XlsxPluginNavigationResult,
 } from '@betteroffice/xlsx-react';
@@ -45,8 +47,18 @@ export const review = defineXlsxPlugin<State>({
   async onEvent(context, event) {
     const focused: boolean = context.snapshot.focused;
     const locale: string = context.snapshot.locale;
-    void [focused, locale];
+    const settled: boolean = context.snapshot.selectionSettled;
+    const target: XlsxGeometryTarget = { kind: 'selection' };
+    const anchor = context.geometry?.getAnchorGeometry(target);
+    const anchors = await context.geometry?.readAnchorGeometries([target]);
+    void [focused, locale, settled, anchor, anchors];
     switch (event.type) {
+      case 'selection-settle': {
+        const settled: XlsxPluginSelectionSettleEvent = event;
+        const source: 'pointer' | 'touch' | 'keyboard' | 'api' = settled.source;
+        void [source, settled.version, settled.selection];
+        break;
+      }
       case 'focus-change': {
         const focused: boolean = event.focused;
         void focused;

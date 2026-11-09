@@ -321,6 +321,24 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
     buffer: ArrayBuffer = documentBytes()
   ) => mountEditor(props, strict, buffer, experimentalWorkerOpen);
 
+  test('selection changes emit one selection-settle after the quiet window', async () => {
+    const events: DocxPluginEvent[] = [];
+    const plugin = defineDocxPlugin({ id: 'settle', createState: () => null,
+      onEvent(_context, event) { events.push(event); } });
+    const { ref } = await mount({ plugins: [plugin] });
+    await settle(400);
+    events.length = 0;
+    await act(async () => { ref.current!.getEditorRef()!.setSelection(1, 4); });
+    expect(events.filter((event) => event.type === 'selection-settle')).toEqual([]);
+    await settle(400);
+    expect(events.filter((event) => event.type === 'selection-settle')).toMatchObject([
+      { source: 'keyboard', selection: { displayRange: { from: 1, to: 4 } } },
+    ]);
+    expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
+    await settle(400);
+    expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
+  });
+
   test('plugins receive the resolved locale and one event when it changes', async () => {
     const contexts: DocxPluginContext<null>[] = [];
     const events: DocxPluginEvent[] = [];
@@ -2172,6 +2190,27 @@ describe('DocxEditor plugins (peer-less engine)', () => {
     });
     return { ref, view };
   };
+
+  test('the default worker emits one settled selection after keyboard navigation', async () => {
+    const events: DocxPluginEvent[] = [];
+    const plugin = defineDocxPlugin({ id: 'settle', createState: () => null,
+      onEvent(_context, event) { events.push(event); } });
+    const { view } = await mount({ plugins: [plugin] });
+    await settle(400);
+    events.length = 0;
+    const input = view.container.querySelector<HTMLTextAreaElement>('[data-docx-worker-editor] textarea')!;
+    await act(async () => {
+      input.focus();
+      fireEvent.keyDown(input, { key: 'ArrowRight', shiftKey: true });
+    });
+    await until(() => events.some((event) => event.type === 'selection-change'));
+    expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(0);
+    await settle(400);
+    expect(events.filter((event) => event.type === 'selection-settle')).toMatchObject([{ source: 'keyboard' }]);
+    expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
+    await settle(400);
+    expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
+  });
 
   test('the default worker receives the locale and one change after rerender', async () => {
     const contexts: DocxPluginContext<null>[] = [];

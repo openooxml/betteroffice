@@ -9,6 +9,7 @@ import {
 } from 'react';
 import type { RefObject } from 'react';
 import { resolvedLocale } from '../i18n/LocaleContext';
+import { createSelectionSettle } from '../../../../shared/plugin-host/selectionSettle';
 import { trackFocus } from '../../../../shared/plugin-host/focusTracker';
 import type { TFunction } from '@betteroffice/xlsx-i18n';
 import type { Proposal } from '@betteroffice/xlsx';
@@ -116,7 +117,22 @@ export function useXlsxPluginHost(options: UseXlsxPluginHostOptions): XlsxPlugin
     }, options.createClients, { editGate: options.editGate })
   );
 
+  const selectionRef = useRef<XlsxPluginSelection>(null);
+  const settleRef = useRef<ReturnType<typeof createSelectionSettle> | null>(null);
   const managed = (options.plugins?.length ?? 0) > 0;
+  useEffect(() => {
+    if (!managed || !options.handle) return;
+    let generation = host.generation();
+    const settled = (source: 'pointer' | 'touch' | 'keyboard' | 'api') => host.selectionSettled(source, generation);
+    const machine = createSelectionSettle({
+      root: () => latest.current.focusRoot?.current ?? null,
+      onUnsettle: () => { generation = host.generation(); host.selectionUnsettled(generation); },
+      onSettle: settled,
+      onResettle: settled,
+    });
+    settleRef.current = machine;
+    return () => { machine.dispose(); settleRef.current = null; };
+  }, [host, managed, options.handle]);
   const locale = resolvedLocale(options.locale);
   useLayoutEffect(() => { host.localeChanged(locale); }, [host, locale]);
   useLayoutEffect(() => {
@@ -158,12 +174,13 @@ export function useXlsxPluginHost(options: UseXlsxPluginHostOptions): XlsxPlugin
                 painted: live ? paintedRef.current : null };
             },
             proposals,
-            pointAt
+            pointAt,
+            () => selectionRef.current
           ) ?? null : createPluginGeometry(layout, painted, canvas, layer, () =>
               host.layoutId() === layout.id &&
               paintedRef.current === painted &&
               canvas.isConnected &&
-              layer.isConnected, proposals, pointAt)
+              layer.isConnected, proposals, pointAt, () => selectionRef.current)
         : null;
     host.layoutChanged(layout);
     host.geometryChanged();
@@ -221,7 +238,11 @@ export function useXlsxPluginHost(options: UseXlsxPluginHostOptions): XlsxPlugin
     (row) => t('a11y.rowHeaderLabel', { row: row + 1 })), [decorations, activeSheetId, t]);
 
   useEffect(() => {
-    if (managed) host.selectionChanged(options.selection);
+    if (managed) {
+      selectionRef.current = options.selection;
+      host.selectionChanged(options.selection);
+      settleRef.current?.notifySelectionChange(JSON.stringify(options.selection));
+    }
   }, [host, managed, options.handle, options.selection]);
 
   useEffect(() => {

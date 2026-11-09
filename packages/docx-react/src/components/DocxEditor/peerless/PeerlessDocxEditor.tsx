@@ -88,6 +88,7 @@ import { geometryMatchesDocument, type PeerlessFrameGeometry, type PeerlessViewI
 import { useTranslation } from '../../../i18n';
 import { resolvedLocale } from '../../../i18n/LocaleContext';
 import { visibleViewport } from '../../../plugins/geometry';
+import { createSelectionSettle } from '../../../../../../shared/plugin-host/selectionSettle';
 import { trackFocus } from '../../../../../../shared/plugin-host/focusTracker';
 
 const PREVIEW_CUT = { blocks: 200, paragraphBudget: 256 };
@@ -342,6 +343,21 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const locale = resolvedLocale(props.i18n?._lang);
   useLayoutEffect(() => { pluginHost.localeChanged(locale); }, [pluginHost, locale]);
   const managedPlugins = Boolean(props.plugins?.length);
+  const settleRef = useRef<ReturnType<typeof createSelectionSettle> | null>(null);
+  useEffect(() => {
+    if (!managedPlugins || !documentReady) return;
+    let generation = pluginHost.generation();
+    const settled = (source: 'pointer' | 'touch' | 'keyboard' | 'api') => pluginHost.selectionSettled(source, generation);
+    const machine = createSelectionSettle({
+      root: () => host.current?.querySelector('[data-docx-worker-editor]') ?? null,
+      onUnsettle: () => { generation = pluginHost.generation(); pluginHost.selectionUnsettled(generation); },
+      onSettle: settled,
+      onResettle: settled,
+    });
+    settleRef.current = machine;
+    return () => { machine.dispose(); settleRef.current = null; };
+  }, [pluginHost, managedPlugins, documentReady, shellState.view?.identity.session,
+    shellState.view?.identity.incarnation, shellState.view?.identity.epoch]);
   useLayoutEffect(() => {
     if (!managedPlugins) return;
     return trackFocus(() => {
@@ -385,7 +401,9 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       pluginHost.layoutChanged(layout);
       const toolbar = shellState.view?.editState?.toolbar;
       if (layout && pluginGeometry.geometry()) props.onRenderedDomContextReady?.(pluginGeometry.geometry()!.dom);
-      pluginHost.selectionChanged({ formatting: toolbar ? yrsSelectionState({ context: toolbar, startParagraphIndex: -1, endParagraphIndex: -1 }) : null, displayRange: pluginGeometry.displaySelection() });
+      const selection = { formatting: toolbar ? yrsSelectionState({ context: toolbar, startParagraphIndex: -1, endParagraphIndex: -1 }) : null, displayRange: pluginGeometry.displaySelection() };
+      pluginHost.selectionChanged(selection);
+      settleRef.current?.notifySelectionChange(JSON.stringify(selection));
       if (layout) pluginHost.geometryPresented(layout);
       pluginHost.geometryChanged();
       pluginHost.syncCommands();

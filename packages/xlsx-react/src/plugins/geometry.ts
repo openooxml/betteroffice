@@ -1,7 +1,7 @@
-import { cellRect, rangeRect } from '@betteroffice/xlsx';
+import { cellRect, normalizeRange, rangeRect } from '@betteroffice/xlsx';
 import type { CellRange, DisplayList, GridMeta, Proposal, Viewport } from '@betteroffice/xlsx';
 import type { XlsxPointPosition } from '../XlsxEditor.types';
-import type { XlsxAnchorGeometryResult, XlsxPluginGeometry, XlsxPluginLayout, XlsxPluginRect } from './types';
+import type { XlsxAnchorGeometryResult, XlsxPluginGeometry, XlsxPluginLayout, XlsxPluginRect, XlsxPluginSelection } from './types';
 
 export interface ProposalGeometrySnapshot {
   proposals: readonly Proposal[];
@@ -138,12 +138,14 @@ export function createPluginGeometry(
   layer: HTMLElement,
   current: () => boolean,
   proposals: () => ProposalGeometrySnapshot | null = () => ({ proposals: [], sheetIndex: -1, previewVersion: 0 }),
-  pointAt?: EditorPointQuery
+  pointAt?: EditorPointQuery,
+  selection: () => XlsxPluginSelection = () => null
 ): XlsxPluginGeometry {
   const place = (rect: { x: number; y: number; w: number; h: number } | null) =>
     rect ? gridRectToOverlay(painted, rect, canvasOrigin(canvas, layer)) : null;
-  return {
+  const geometry: XlsxPluginGeometry = {
     layout,
+    readAnchorGeometries: async (targets) => targets.map((target) => geometry.getAnchorGeometry(target)),
     getAnchorGeometry(target) {
       const failure = (code: Extract<XlsxAnchorGeometryResult, { ok: false }>['failure']['code'],
         message: string): XlsxAnchorGeometryResult => ({ ok: false, failure: { code, message } });
@@ -151,6 +153,18 @@ export function createPluginGeometry(
       let snapshot: ProposalGeometrySnapshot | null;
       try { snapshot = proposals(); }
       catch { return failure('read-failed', 'The proposals could not be read'); }
+      if (target.kind === 'selection') {
+        const selected = selection();
+        if (!selected?.cells || selected.chartId) return failure('missing-target', 'No cell selection is available');
+        if (selected.sheetId !== layout.sheetId) return failure('layout-unavailable', 'The selected sheet is not painted');
+        if (!snapshot) return failure('layout-unavailable', 'The selection layout is being refreshed');
+        const rect = geometry.getRangeRect({ sheetId: selected.sheetId, range: normalizeRange(selected.cells) });
+        if (!rect) return failure('layout-unavailable', 'The selection is outside the painted grid');
+        return { ok: true, version: layout.version, previewVersion: snapshot.previewVersion,
+          layoutId: layout.id, rects: [rect], anchor: rect,
+          pageRect: { ...canvasOrigin(canvas, layer), width: painted.frame.width * painted.zoom,
+            height: painted.frame.height * painted.zoom } };
+      }
       if (!snapshot) return failure('pending', 'The proposals are being refreshed');
       const { proposals: pending, sheetIndex, previewVersion } = snapshot;
       const proposal = pending.find((value) => value.id === target.id);
@@ -211,4 +225,5 @@ export function createPluginGeometry(
         }
       : null,
   };
+  return geometry;
 }

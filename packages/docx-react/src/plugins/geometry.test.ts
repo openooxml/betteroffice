@@ -1390,3 +1390,42 @@ test('viewport intersects the scroller client box with the editor root in overla
   place(layer, rectAt(80, -460, 1200, 2400), { clientLeft: 2, clientTop: 3, scrollLeft: 7, scrollTop: 11 });
   expect(visibleViewport(scroller, root, layer)).toEqual({ x: 35, y: 268, width: 400, height: 290 });
 });
+
+test('selection anchors project the displayed range, caret and missing selection', async () => {
+  const pages = document.createElement('div');
+  const layer = document.createElement('div');
+  const canvas = document.createElement('canvas');
+  canvas.dataset.pageIndex = '0';
+  pages.append(canvas);
+  place(pages, rectAt(10, 20, 100, 200));
+  place(canvas, rectAt(10, 20, 100, 200));
+  place(layer, rectAt(0, 0, 100, 200));
+  const source = { ...queries(),
+    rangeRects: (from: number, to: number) => [{ pageIndex: 0, x: from, y: 20, width: to - from, height: 12 }],
+    hitTestRegions: () => null,
+    anchorRect: (pos: number) => ({ pageIndex: 0, x: pos, y: 20, width: 0, height: 12 }),
+  } as unknown as DisplayListQueries;
+  const dom = createRenderedDomContext(pages, 1, { displayListQueries: source,
+    projector: createCanvasHostProjector(pages, source, 1) });
+  const layout = { id: 'selection', version: 'v1', previewVersion: 0, zoom: 1, pageCount: 1 };
+  let selection: { from: number; to: number; layoutId: string; focus?: number } | null = { from: 2, to: 8, layoutId: layout.id };
+  let shown = true;
+  const geometry = createPluginGeometry(layout, dom, layer, () => shown, () => null, source,
+    () => null, undefined, undefined, undefined, undefined, () => selection);
+  expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: true,
+    version: 'v1', layoutId: layout.id,
+    rects: [{ pageIndex: 0, x: 12, y: 40, width: 6, height: 12 }],
+    anchor: { pageIndex: 0, x: 18, y: 40, width: 0, height: 12 } });
+  selection = { from: 2, to: 8, layoutId: layout.id, focus: 2 };
+  expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: true,
+    anchor: { x: 12, y: 40, width: 0, height: 12 } });
+  selection = { from: 5, to: 5, layoutId: layout.id };
+  expect(await geometry.readAnchorGeometries([{ kind: 'selection' }])).toMatchObject([{ ok: true,
+    rects: [], anchor: { x: 15, y: 40, width: 0, height: 12 } }]);
+  selection = null;
+  expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: false, failure: { code: 'missing-target' } });
+  selection = { from: 1, to: 2, layoutId: 'old' };
+  expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
+  shown = false;
+  expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
+});

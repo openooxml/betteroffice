@@ -1,6 +1,18 @@
 import { test, expect, type Page } from 'playwright/test';
 
-type ProbeEvent = { type: string; focused?: boolean; viewport?: { x: number; y: number; width: number; height: number } | null };
+type ProbeRect = { x: number; y: number; width: number; height: number };
+type ProbeEvent = { type: string; focused?: boolean; source?: string; viewport?: ProbeRect | null };
+type ProbeAnchor = { ok: true; rects: ProbeRect[] } | { ok: false; failure: { code: string } };
+interface DocxProbe {
+  editor: {
+    readParagraphs(request: unknown): Promise<{ ok: true; version: string; paragraphs: { paraId: string; text: string }[] } | { ok: false }>;
+    readSelectionInfo(): Promise<{ selectedText?: string } | null>;
+  };
+  geometry: {
+    readAnchorGeometries(targets: unknown[]): Promise<ProbeAnchor[]>;
+    getAnchorGeometry(target: unknown): ProbeAnchor;
+  };
+}
 
 let peerless = false;
 
@@ -45,6 +57,52 @@ async function offsets(page: Page) {
 for (const mode of ['hybrid', 'peerless'] as const) {
   test.describe(mode, () => {
     test.beforeEach(() => { peerless = mode === 'peerless'; });
+test('double-click settles once, preserves the word and anchors to its painted box', async ({ page }) => {
+  await open(page);
+  const word = await operate(page, async () => {
+    const probe = (window as unknown as { __probe: DocxProbe }).__probe;
+    const read = await probe.editor.readParagraphs({ story: 'body', view: 'accepted' });
+    if (!read.ok) throw new Error('Paragraph read failed');
+    const paragraph = read.paragraphs.find((value) => /[A-Za-z]{3,}/.test(value.text))!;
+    const match = /[A-Za-z]{3,}/.exec(paragraph.text)!;
+    const [result] = await probe.geometry.readAnchorGeometries([{ kind: 'range', version: read.version,
+      range: { story: 'body', view: 'accepted', start: { paraId: paragraph.paraId, offset: match.index },
+        end: { paraId: paragraph.paraId, offset: match.index + match[0].length } } }]);
+    if (!result?.ok || !result.rects[0]) throw new Error('Word has no painted box');
+    const rect = result.rects[0];
+    const layer = document.querySelector('[data-testid="plugin-overlays"]')!.getBoundingClientRect();
+    return { text: match[0], x: layer.left + rect.x, y: layer.top + rect.y, width: rect.width, height: rect.height };
+  });
+  await page.waitForTimeout(400);
+  await page.evaluate(() => { (window as unknown as { __probe: { events: ProbeEvent[] } }).__probe.events = []; });
+  await page.mouse.dblclick(word.x + word.width / 2, word.y + word.height / 2);
+  const events = () => page.evaluate(() => (window as unknown as { __probe: { events: ProbeEvent[] } }).__probe.events
+    .filter((event) => event.type === 'selection-settle'));
+  await expect.poll(async () => (await events()).length).toBe(1);
+  await page.waitForTimeout(400);
+  expect(await events()).toMatchObject([{ source: 'pointer' }]);
+  expect(await events()).toHaveLength(1);
+  const selected = await operate(page, async () => {
+    const probe = (window as unknown as { __probe: DocxProbe }).__probe;
+    return (await probe.editor.readSelectionInfo())?.selectedText;
+  });
+  expect(selected?.trim()).toBe(word.text);
+  const rects = await page.evaluate(() => {
+    const geometry = (window as unknown as { __probe: DocxProbe }).__probe.geometry;
+    const result = geometry.getAnchorGeometry({ kind: 'selection' });
+    if (!result.ok) throw new Error(result.failure.code);
+    const layer = document.querySelector('[data-testid="plugin-overlays"]')!.getBoundingClientRect();
+    return result.rects.map((rect) => ({ x: layer.left + rect.x, y: layer.top + rect.y, width: rect.width, height: rect.height }));
+  });
+  expect(rects.some((rect) => rect.x <= word.x + 1.5 && rect.y <= word.y + 1.5 &&
+    rect.x + rect.width >= word.x + word.width - 1.5 && rect.y + rect.height >= word.y + word.height - 1.5)).toBe(true);
+  const highlight = page.locator('[data-testid^="selection-rect-"], [data-docx-worker-editor] div[aria-hidden="true"][style*="rgba(59, 130, 246, 0.25)"]').first();
+  await expect(highlight).toBeVisible();
+  const painted = (await highlight.boundingBox())!;
+  expect(rects.some((rect) => rect.x <= painted.x + 1.5 && rect.y <= painted.y + 1.5 &&
+    rect.x + rect.width >= painted.x + painted.width - 1.5 && rect.y + rect.height >= painted.y + painted.height - 1.5)).toBe(true);
+});
+
 test('document focus excludes the plugin panel', async ({ page }) => {
   await open(page);
   const events = () => page.evaluate(() =>

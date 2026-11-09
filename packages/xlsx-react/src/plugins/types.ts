@@ -22,6 +22,7 @@ import type {
   PluginLoadReason,
   PluginLocaleChangeEvent,
   PluginRefusal,
+  PluginSelectionSettleEvent,
 } from '../../../../shared/host-contracts/plugins';
 import type {
   XlsxCommandArgs,
@@ -140,7 +141,10 @@ export interface XlsxPluginCellPosition extends XlsxPointPosition {
   layoutId: string;
 }
 
-export type XlsxGeometryTarget = { kind: 'proposal'; id: string };
+export type XlsxGeometryTarget =
+  | { kind: 'proposal'; id: string }
+  /** @experimental The selected cell ranges in this layout. */
+  | { kind: 'selection' };
 
 export type XlsxAnchorGeometryResult =
   | {
@@ -168,6 +172,8 @@ export type XlsxAnchorGeometryResult =
 export interface XlsxPluginGeometry {
   layout: XlsxPluginLayout;
   getAnchorGeometry(target: XlsxGeometryTarget): XlsxAnchorGeometryResult;
+  /** @experimental Reads every target in order. */
+  readAnchorGeometries(targets: readonly XlsxGeometryTarget[]): Promise<XlsxAnchorGeometryResult[]>;
   /** One grid cell, without merge expansion; zero-based `row` and `col`. */
   getCellRect(target: { sheetId: string; row: number; col: number }): XlsxPluginRect | null;
   /** The visible part of an inclusive range, such as a merged area. */
@@ -203,6 +209,8 @@ export interface XlsxPluginSnapshot {
   readOnly: boolean;
   grant: XlsxPluginGrant;
   selection: XlsxPluginSelection;
+  /** @experimental Whether the selection has finished changing. */
+  selectionSettled: boolean;
   /** Null while no painted frame shows `version`. */
   layout: XlsxPluginLayout | null;
 }
@@ -255,8 +263,12 @@ export type XlsxPluginFocusChangeEvent = PluginFocusChangeEvent;
 /** @experimental The plugin API may change in minor releases. */
 export type XlsxPluginLocaleChangeEvent = PluginLocaleChangeEvent;
 
+/** @experimental The plugin API may change in minor releases. */
+export type XlsxPluginSelectionSettleEvent = PluginSelectionSettleEvent<XlsxPluginSelection>;
+
 /** Lifecycle notifications describe current state; several changes may arrive as one. */
 export type XlsxPluginEvent =
+  | XlsxPluginSelectionSettleEvent
   | XlsxPluginFocusChangeEvent
   | XlsxPluginLocaleChangeEvent
   | { type: 'load'; generation: string; version: string; reason: PluginLoadReason }

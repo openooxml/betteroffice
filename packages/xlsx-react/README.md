@@ -120,6 +120,13 @@ Plugins read `snapshot.focused` and `snapshot.locale`, and receive
 and toolbar controls are outside. Locale is the canonical `i18n._lang`, defaulting to `en`.
 `layout.viewport` remains the grid viewport in sheet pixels.
 
+`selection-settle` reports the current selection and its source after a 350 ms quiet
+window; `snapshot.selectionSettled` is false while it changes. These experimental
+signals are on for installed plugins. `geometry.getAnchorGeometry({ kind: "selection" })`
+anchors to the selection. Offscreen cells return `layout-unavailable`, and charts
+return `missing-target`. `readAnchorGeometries` returns the same answers in a promise.
+In-cell editing anchors to the cell.
+
 ## Structured export
 
 Await `api.exportStructured()` or `api.exportMarkdown()` for content with positional anchors and

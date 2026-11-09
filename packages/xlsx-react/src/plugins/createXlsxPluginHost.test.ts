@@ -66,6 +66,8 @@ test('a superseded generation receives no queued signals', async () => {
   const superseded = host.generation();
   host.focusChanged(true);
   host.localeChanged('de');
+  host.selectionUnsettled();
+  host.selectionSettled('keyboard');
   open();
   release();
   await settle();
@@ -75,5 +77,40 @@ test('a superseded generation receives no queued signals', async () => {
   host.focusChanged(false);
   await settle();
   expect(events[events.length - 1]).toEqual({ type: 'focus-change', generation: host.generation()!, focused: false });
+  host.close('unmounted');
+});
+
+
+test('selection settling publishes the current snapshot once and ignores superseded generations', async () => {
+  const { host, open } = setupSignals();
+  const events: XlsxPluginEvent[] = [];
+  host.setPlugins([defineXlsxPlugin({ id: 'selection-settle', createState: () => null,
+    onEvent(_context, event) { events.push(event); } })]);
+  open();
+  await settle();
+  expect(host.activations()[0]!.context.snapshot.selectionSettled).toBe(true);
+  const selection = { sheetId: 'sheet:0', sheetIndex: 0, cells: { anchor: { row: 0, col: 0 }, focus: { row: 2, col: 2 } }, chartId: null };
+  host.selectionUnsettled();
+  host.selectionChanged(selection);
+  expect(host.activations()[0]!.context.snapshot.selectionSettled).toBe(false);
+  host.selectionSettled('pointer');
+  host.selectionSettled('pointer');
+  await settle();
+  expect(events.filter((event) => event.type === 'selection-settle')).toEqual([
+    { type: 'selection-settle', generation: host.generation()!, version: host.version(), selection, source: 'pointer' },
+  ]);
+  expect(host.activations()[0]!.context.snapshot.selectionSettled).toBe(true);
+  host.selectionUnsettled();
+  host.selectionSettled('keyboard');
+  await settle();
+  expect(host.activations()[0]!.context.snapshot.selectionSettled).toBe(true);
+  expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
+  const previous = host.generation();
+  open();
+  host.selectionUnsettled(previous);
+  host.selectionSettled('touch', previous);
+  await settle();
+  expect(host.activations()[0]!.context.snapshot.selectionSettled).toBe(true);
+  expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
   host.close('unmounted');
 });

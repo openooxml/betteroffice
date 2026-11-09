@@ -27,6 +27,8 @@ const CONSUMER = `import {
   defineDocxPlugin,
   useDocxCommand,
   type DocxPluginContext,
+  type DocxPluginSelectionSettleEvent,
+  type DocxGeometryTarget,
   type DocxPluginRect,
   type DocxPluginGrant,
   type DocxPluginSidebarItem,
@@ -51,10 +53,20 @@ export const review = defineDocxPlugin<State>({
   async onEvent(context, event) {
     const focused: boolean = context.snapshot.focused;
     const locale: string = context.snapshot.locale;
-    void [focused, locale];
+    const settled: boolean = context.snapshot.selectionSettled;
+    const target: DocxGeometryTarget = { kind: 'selection' };
+    const anchor = context.geometry?.getAnchorGeometry(target);
+    const anchors = await context.geometry?.readAnchorGeometries([target]);
+    void [focused, locale, settled, anchor, anchors];
     const viewport: DocxPluginRect | undefined = context.geometry?.viewport;
     void viewport;
     switch (event.type) {
+      case 'selection-settle': {
+        const settled: DocxPluginSelectionSettleEvent = event;
+        const source: 'pointer' | 'touch' | 'keyboard' | 'api' = settled.source;
+        void [source, settled.version, settled.selection];
+        break;
+      }
       case 'focus-change': {
         const focused: boolean = event.focused;
         void focused;

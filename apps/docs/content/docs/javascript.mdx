@@ -171,6 +171,20 @@ once with the reason. Plugins are matched by `id` and `revision`, so new array
 identities and reordering keep their state; React StrictMode's double setup
 creates two distinct activations.
 
+**Selection settling (experimental).** `selection-settle` carries the current
+`generation`, `version`, `selection` and `source` (`pointer`, `touch`, `keyboard`
+or `api`) after 350 ms without selection changes following pointer release or
+keyboard navigation. Repeated clicks settle once; unchanged selections do not
+emit again. `snapshot.selectionSettled` starts true, becomes false during a gesture
+or selection change, and returns true when it settles. API navigation currently
+uses the `keyboard` source.
+
+`geometry.getAnchorGeometry({ kind: "selection" })` returns selection fragments
+and a focus-end anchor in overlay pixels. A caret has empty `rects` and a caret
+`anchor`; no selection returns `missing-target`. In the default worker editor,
+geometry is `pending` while selection mapping is read;
+`readAnchorGeometries([{ kind: "selection" }])` waits for that mapping.
+
 **Focus and locale.** `snapshot.focused` is true while focus is inside the
 editor's document surface; docked panels, toolbar controls, and host chrome are
 outside. `focus-change` carries `focused`. `snapshot.locale`
@@ -652,6 +666,21 @@ const review = defineXlsxPlugin<{ sheets: number }>({
   onPluginError={(error) => console.error(error.pluginId, error.phase, error.error)}
 />;
 ```
+
+**Selection settling (experimental).** `selection-settle` carries the current
+`generation`, `version`, `selection` and `source` (`pointer`, `touch`, `keyboard`
+or `api`) after 350 ms without selection changes following pointer release or
+keyboard navigation. Repeated clicks settle once; unchanged selections do not
+emit again. `snapshot.selectionSettled` starts true, becomes false during a gesture
+or selection change, and returns true when it settles. API navigation currently
+uses the `keyboard` source.
+
+`geometry.getAnchorGeometry({ kind: "selection" })` returns the selected cell
+range using `getRangeRect`, clipped to the visible grid. Offscreen selections
+return `layout-unavailable`; a selected chart or absent selection returns
+`missing-target`. In-cell editing anchors to the cell, without exposing its text
+selection. `readAnchorGeometries(targets)` reads the same synchronous answers in
+order through a promise.
 
 **Lifecycle and grants** follow the DOCX editor: fresh state,
 `initialize` and one `load` event per workbook (repeated when a change the hook

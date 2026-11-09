@@ -543,6 +543,8 @@ test('a superseded generation receives no queued signals', async () => {
     onEvent(_context, event) { events.push(event); } })]);
   open();
   const superseded = host.generation();
+  host.selectionUnsettled();
+  host.selectionSettled('keyboard');
   host.focusChanged(true);
   host.localeChanged('de');
   const layout: DocxPluginLayout = { id: 'layout', version: 'v1', previewVersion: 0, zoom: 1, pageCount: 1 };
@@ -558,5 +560,42 @@ test('a superseded generation receives no queued signals', async () => {
   host.focusChanged(false);
   await settle();
   expect(events.at(-1)).toEqual({ type: 'focus-change', generation: host.generation()!, focused: false });
+  host.close('unmounted');
+});
+
+
+test('selection settling publishes the current snapshot once and ignores superseded generations', async () => {
+  const { host } = setup();
+  const open = () => host.openWorker('v1');
+  const events: DocxPluginEvent[] = [];
+  host.setPlugins([defineDocxPlugin({ id: 'selection-settle', createState: () => null,
+    onEvent(_context, event) { events.push(event); } })]);
+  open();
+  await settle();
+  expect(host.activations()[0]!.context.snapshot.selectionSettled).toBe(true);
+  const selection = { formatting: null, displayRange: { story: 'body', from: 1, to: 5, layoutId: 'layout' } };
+  host.selectionUnsettled();
+  host.selectionChanged(selection);
+  host.workerChanged('v2');
+  expect(host.activations()[0]!.context.snapshot.selectionSettled).toBe(false);
+  host.selectionSettled('pointer');
+  host.selectionSettled('pointer');
+  await settle();
+  expect(events.filter((event) => event.type === 'selection-settle')).toEqual([
+    { type: 'selection-settle', generation: host.generation()!, version: host.version(), selection, source: 'pointer' },
+  ]);
+  expect(host.activations()[0]!.context.snapshot.selectionSettled).toBe(true);
+  host.selectionUnsettled();
+  host.selectionSettled('keyboard');
+  await settle();
+  expect(host.activations()[0]!.context.snapshot.selectionSettled).toBe(true);
+  expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
+  const previous = host.generation();
+  open();
+  host.selectionUnsettled(previous);
+  host.selectionSettled('touch', previous);
+  await settle();
+  expect(host.activations()[0]!.context.snapshot.selectionSettled).toBe(true);
+  expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
   host.close('unmounted');
 });

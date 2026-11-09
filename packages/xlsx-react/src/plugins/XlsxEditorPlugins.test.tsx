@@ -443,6 +443,26 @@ const headerFooterSheets = [
 ];
 
 describe('peer-less plugins', () => {
+  test('worker selection changes emit one selection-settle after acknowledgement', async () => {
+    const host = pluginWorker();
+    const plugin = recorder('settle');
+    try {
+      const view = await host.mount({ plugins: [plugin.plugin] });
+      await settle(400);
+      plugin.events.length = 0;
+      fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowDown', shiftKey: true });
+      const command = await host.dispatched(1);
+      await act(async () => { host.ack(command); });
+      expect(plugin.events.filter((event) => event.type === 'selection-settle')).toHaveLength(0);
+      await settle(400);
+      expect(plugin.events.filter((event) => event.type === 'selection-settle')).toMatchObject([{ source: 'keyboard' }]);
+      expect(plugin.events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
+      expect(last(plugin.contexts).snapshot.selectionSettled).toBe(true);
+      await settle(400);
+      expect(plugin.events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
+    } finally { host.restore(); }
+  });
+
   test('worker plugins receive the locale and one change after rerender', async () => {
     const host = pluginWorker();
     const contexts: XlsxPluginContext<null>[] = [];
@@ -2807,6 +2827,25 @@ describe('XlsxEditor plugin adapters', () => {
     await until(() => last(contexts) !== retained && last(contexts).geometry !== null);
     expect(last(contexts).geometry!.getPositionAtPoint!(...point)).toMatchObject({ row, col });
   });
+});
+
+test('selection changes emit exactly one selection-settle after the quiet window', async () => {
+  const plugin = recorder('settle');
+  const mounted = await mount({ plugins: [plugin.plugin] });
+  await settle(400);
+  plugin.events.length = 0;
+  await act(async () => { mounted.api().selectCells(0, {
+    anchor: { row: 0, col: 0 }, focus: { row: 2, col: 2 },
+  }); });
+  expect(plugin.events.filter((event) => event.type === 'selection-settle')).toEqual([]);
+  await settle(400);
+  expect(plugin.events.filter((event) => event.type === 'selection-settle')).toMatchObject([
+    { source: 'keyboard', selection: { cells: { focus: { row: 2, col: 2 } } } },
+  ]);
+  expect(plugin.events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
+  expect(last(plugin.contexts).snapshot.selectionSettled).toBe(true);
+  await settle(400);
+  expect(plugin.events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
 });
 
 test('plugins receive the resolved locale and one event when it changes', async () => {

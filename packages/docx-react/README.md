@@ -136,6 +136,12 @@ and toolbar controls are outside. Locale is the canonical `i18n._lang`, defaulti
 `geometry.viewport` is the visible document area in overlay-layer pixels;
 `viewport-change` reports scroll, resize, or zoom changes, with `null` when no layout is shown.
 
+`selection-settle` reports the current selection and its source after a 350 ms quiet
+window; `snapshot.selectionSettled` is false while it changes. These experimental
+signals are on for installed plugins. `geometry.getAnchorGeometry({ kind: "selection" })`
+anchors to the selection. Worker reads may be `pending`; `readAnchorGeometries` waits.
+Collapsed selections return a caret anchor and empty `rects`.
+
 ## Edit batches and paragraph anchors
 
 The ref's `readParagraphs`, `findText`, `validateEdits`, and `applyEdits` flush pending input before

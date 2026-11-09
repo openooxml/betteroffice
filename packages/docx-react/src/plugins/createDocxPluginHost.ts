@@ -75,6 +75,8 @@ export interface DocxPluginHost {
   version(): string;
   previewVersion(): number;
   selectionChanged(selection: DocxPluginSelection): void;
+  selectionUnsettled(generation?: string | null): void;
+  selectionSettled(source: 'pointer' | 'touch' | 'keyboard' | 'api', generation?: string | null): void;
   focusChanged(focused: boolean): void;
   localeChanged(locale: string): void;
   modeChanged(mode: EditorMode, readOnly: boolean): void;
@@ -160,6 +162,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
   let detachGeometry: (() => void) | null = null;
   let installed = false;
   let generations = 0;
+  let settledSelection: string | null = null;
   let viewport: DocxPluginRect | null = null;
   let commandSignature: string | null = null;
   const state = {
@@ -169,6 +172,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
     readOnly: false,
     focused: false,
     locale: 'en',
+    selectionSettled: true,
     selection: EMPTY_SELECTION,
     layout: null as DocxPluginLayout | null,
     geometryLayout: null as DocxPluginLayout | null,
@@ -268,6 +272,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       locale: state.locale,
       grant: runtime.grant(pluginId) as DocxPluginGrant,
       selection: state.selection,
+      selectionSettled: state.selectionSettled,
       layout: state.layout,
     }),
     currentVersion: () => runtime.generation() === null ? null : session ? readSessionVersion(session) : state.version,
@@ -429,6 +434,8 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       state.version = readSessionVersion(next) ?? '';
       state.previewVersion = proposalSnapshot(next)?.previewVersion ?? 0;
       state.layout = null;
+      state.selectionSettled = true;
+      settledSelection = null;
       state.selection = EMPTY_SELECTION;
       observe();
       observeGeometry();
@@ -452,6 +459,8 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       state.version = version;
       state.previewVersion = 0;
       state.layout = null;
+      state.selectionSettled = true;
+      settledSelection = null;
       state.selection = EMPTY_SELECTION;
       observeGeometry();
       viewport = null;
@@ -499,6 +508,26 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       if (generation) {
         notify({ type: 'selection-change', generation, version: state.version, selection });
       }
+    },
+
+    selectionUnsettled(expected = runtime.generation()) {
+      if (!expected || runtime.generation() !== expected || !state.selectionSettled) return;
+      state.selectionSettled = false;
+      runtime.touch();
+    },
+
+    selectionSettled(source, expected = runtime.generation()) {
+      if (!expected || runtime.generation() !== expected) return;
+      const changed = !state.selectionSettled;
+      state.selectionSettled = true;
+      const key = JSON.stringify(state.selection);
+      if (key === settledSelection) {
+        if (changed) runtime.touch();
+        return;
+      }
+      settledSelection = key;
+      notify({ type: 'selection-settle', generation: expected, version: state.version,
+        selection: state.selection, source });
     },
 
     focusChanged(focused) {

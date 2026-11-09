@@ -128,3 +128,12 @@ export interface PluginViewportChangeEvent<Rect> {
   generation: string;
   viewport: Rect | null;
 }
+
+/** @experimental The plugin API may change in minor releases. */
+export interface PluginSelectionSettleEvent<Selection> {
+  type: 'selection-settle';
+  generation: string;
+  version: string;
+  selection: Selection;
+  source: 'pointer' | 'touch' | 'keyboard' | 'api';
+}

@@ -22,6 +22,7 @@ import {
 import type { RenderedDomContext } from '@betteroffice/docx/plugin-api';
 import type { DocxDocumentReadValues } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
 import {
+  anchorFailure,
   resolveReservations,
   type AnchorGeometryTarget,
   type DocxReservationsPayload,
@@ -29,6 +30,7 @@ import {
   type ResidentEngineWorkerClient,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
+import { createSelectionSettle } from '../../../../shared/plugin-host/selectionSettle';
 import { trackFocus } from '../../../../shared/plugin-host/focusTracker';
 import { resolvedLocale } from '../i18n/LocaleContext';
 import type { DocxCommandController } from '../commands/createDocxCommandStore';
@@ -64,6 +66,7 @@ import type {
   DocxEditorPluginProps,
   DocxPluginGeometry,
   DocxPluginLayout,
+  DocxPluginSelection,
   DocxPluginSidebarItem,
 } from './types';
 
@@ -191,7 +194,26 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
     })
   );
 
+  const selectionRef = useRef<DocxPluginSelection>({ formatting: null, displayRange: null });
+  const settleRef = useRef<ReturnType<typeof createSelectionSettle> | null>(null);
   const managed = (options.plugins?.length ?? 0) > 0;
+  useEffect(() => {
+    if (!managed || !options.session) return;
+    let generation = host.generation();
+    const settled = (source: 'pointer' | 'touch' | 'keyboard' | 'api') => host.selectionSettled(source, generation);
+    const machine = createSelectionSettle({
+      root: () => latest.current.focusRoot?.() ?? null,
+      isEditorTarget: (target) => {
+        const id = latest.current.focusRoot?.()?.getAttribute('data-docx-input');
+        return !!id && target instanceof Element && target.id === id;
+      },
+      onUnsettle: () => { generation = host.generation(); host.selectionUnsettled(generation); },
+      onSettle: settled,
+      onResettle: settled,
+    });
+    settleRef.current = machine;
+    return () => { machine.dispose(); settleRef.current = null; };
+  }, [host, managed, options.session, options.loadGeneration]);
   const locale = resolvedLocale(options.locale ?? options.i18n?._lang);
   useLayoutEffect(() => { host.localeChanged(locale); }, [host, locale]);
   useLayoutEffect(() => {
@@ -307,7 +329,10 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   const publishSelection = useCallback(() => {
     if (!latest.current.plugins?.length) return;
     if (latest.current.viewerSelection) {
-      host.selectionChanged({ formatting: null, displayRange: viewerSelectionRef.current?.displayRange ?? null });
+      const selection = { formatting: null, displayRange: viewerSelectionRef.current?.displayRange ?? null };
+      selectionRef.current = selection;
+      host.selectionChanged(selection);
+      settleRef.current?.notifySelectionChange(JSON.stringify(selection));
       return;
     }
     const editor = latest.current.pagedEditorRef.current;
@@ -316,17 +341,23 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
     const story = latest.current.viewerDocumentRead
       ? 'body'
       : editor?.getYrsSession()?.selection()?.head.story ?? 'body';
-    host.selectionChanged({
+    const selection = {
       formatting: formattingRef.current,
       displayRange:
         range && layout ? { story, from: range.from, to: range.to, layoutId: layout.id } : null,
-    });
+    };
+    selectionRef.current = selection;
+    host.selectionChanged(selection);
+    settleRef.current?.notifySelectionChange(JSON.stringify(selection));
   }, [host]);
 
   const publishViewerSelection = useCallback((selection: ViewerSelectionChange) => {
     viewerSelectionRef.current = selection;
     if (!latest.current.plugins?.length) return;
-    host.selectionChanged({ formatting: null, displayRange: selection.displayRange });
+    const current = { formatting: null, displayRange: selection.displayRange };
+    selectionRef.current = current;
+    host.selectionChanged(current);
+    settleRef.current?.notifySelectionChange(JSON.stringify(current));
   }, [host]);
 
   useEffect(() => {
@@ -505,10 +536,24 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
       ),
       () => layoutComplete(latest.current.pagedEditorRef.current, dom.queries),
       () => visibleViewport(latest.current.scrollContainerRef?.current ?? layer,
-        latest.current.editorRootRef?.current ?? layer, layer)
+        latest.current.editorRootRef?.current ?? layer, layer),
+      () => {
+        const range = selectionRef.current.displayRange;
+        if (!range || latest.current.viewerDocumentRead) return range;
+        const editor = latest.current.pagedEditorRef.current;
+        const head = editor?.getYrsSession()?.selection()?.head;
+        const focus = head && editor?.yrsLocToDisplayPosition(head);
+        return range && head?.story === range.story && typeof focus === 'number' &&
+          focus >= Math.min(range.from, range.to) && focus <= Math.max(range.from, range.to)
+          ? { ...range, focus } : range;
+      }
     );
     const resolveAnchor = created.getAnchorGeometry;
     created.getAnchorGeometry = (target) => {
+      if (target.kind === 'selection' && (!isPresented(dom.context.pagesContainer, shownList) ||
+        latest.current.pagedEditorRef.current?.hasPendingInput())) {
+        return anchorFailure('layout-unavailable', 'No rendered layout shows this selection yet');
+      }
       const previous = proposalTarget;
       proposalTarget = target.kind === 'proposal';
       try { return resolveAnchor(target); }
