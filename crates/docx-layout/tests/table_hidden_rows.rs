@@ -70,12 +70,31 @@ fn a_hidden_middle_row_lays_out_as_if_absent() {
     let mut hidden = three_rows(Some(true));
     drop_hidden_rows(&mut hidden);
     let without = table(vec![row("r0", "#00aa00", 24.0), row("r2", "#0000aa", 30.0)]);
-    assert_eq!(hidden, without);
+    let sources: Vec<_> = hidden.rows.iter().map(|row| row.source_row).collect();
+    assert_eq!(sources, vec![Some(0), Some(2)]);
+    let mut renumbered = hidden.clone();
+    for row in &mut renumbered.rows {
+        row.source_row = None;
+    }
+    assert_eq!(renumbered, without);
+    let (_, renumbered_display) = render(renumbered);
+    let (expected_measure, expected_display) = render(without);
+    assert_eq!(renumbered_display, expected_display);
 
     let (measure, display) = render(hidden);
-    let (expected_measure, expected_display) = render(without);
     assert_eq!(measure, expected_measure);
-    assert_eq!(display, expected_display);
+    let mut cell_rows: Vec<u64> = primitives(&display)
+        .iter()
+        .filter_map(|p| p["cell"]["row"].as_u64())
+        .collect();
+    cell_rows.sort_unstable();
+    cell_rows.dedup();
+    assert_eq!(cell_rows, vec![0, 2]);
+    let row_counts: Vec<u64> = primitives(&display)
+        .iter()
+        .filter_map(|p| p["table"]["rowCount"].as_u64())
+        .collect();
+    assert!(!row_counts.is_empty() && row_counts.iter().all(|count| *count == 3));
     assert_eq!(measure["rows"].as_array().unwrap().len(), 2);
     let (painted_measure, _) = render(three_rows(None));
     assert!(
@@ -202,8 +221,21 @@ fn a_merge_through_a_hidden_row_loses_only_that_row() {
             vec![("\"a3\"".to_owned(), None), ("\"b3\"".to_owned(), None)],
         ]
     );
-    let (measure, _) = render(through);
+    let (measure, display) = render(through);
     assert_eq!(measure["rows"].as_array().unwrap().len(), 3);
+    let refs: Vec<(u64, u64, u64)> = primitives(&display)
+        .iter()
+        .filter(|p| p["cell"].is_object() && p["cell"]["continuation"].is_null())
+        .map(|p| {
+            let cell = &p["cell"];
+            let get = |key: &str| cell[key].as_u64().unwrap();
+            (get("row"), get("col"), get("rowSpan"))
+        })
+        .collect();
+    assert!(refs.contains(&(0, 0, 3)), "{refs:?}");
+    assert!(refs.contains(&(2, 1, 1)), "{refs:?}");
+    assert!(refs.contains(&(3, 0, 1)), "{refs:?}");
+    assert!(refs.iter().all(|(row, _, _)| *row != 1), "{refs:?}");
 }
 
 #[test]

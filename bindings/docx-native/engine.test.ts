@@ -1507,7 +1507,7 @@ test('native and wasm leave hidden table rows out of the display list unless hid
   };
   const hidden = run(native, false);
   expect(hidden.text).toBe('AlphaCharlieTail');
-  expect(hidden.rows).toEqual([0, 1]);
+  expect(hidden.rows).toEqual([0, 2]);
   expect(hidden).toEqual(run(wasm, false));
   const shown = run(native, true);
   expect(shown.text).toBe('AlphaBravoCharlieDeltaEchoTail');

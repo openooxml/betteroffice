@@ -274,3 +274,64 @@ fn a_merge_across_a_hidden_row_spans_only_the_visible_rows() {
     assert!(!painted(&starting.primitives, "Bravo"));
     assert!(painted(&starting.primitives, "SideAlpha"));
 }
+
+fn cell_rows(primitives: &[Value]) -> Vec<u64> {
+    let mut rows: Vec<u64> = primitives
+        .iter()
+        .filter_map(|primitive| primitive["cell"]["row"].as_u64())
+        .collect();
+    rows.sort_unstable();
+    rows.dedup();
+    rows
+}
+
+#[test]
+fn cells_after_a_removed_row_keep_their_source_row_index() {
+    let rows = [row("Alpha", ""), hidden_row("Bravo"), row("Charlie", "")];
+    let hidden = render(&rows, false);
+    let table = hidden.table.unwrap();
+    assert_eq!(table["block"]["rows"][1]["sourceRow"], json!(2));
+    assert_eq!(cell_rows(&hidden.primitives), vec![0, 2]);
+    let charlie = hidden
+        .primitives
+        .iter()
+        .filter(|primitive| primitive["cell"]["row"] == json!(2))
+        .filter_map(|primitive| primitive["text"].as_str())
+        .collect::<String>();
+    assert!(charlie.contains("Charlie"), "{charlie}");
+    assert!(
+        hidden
+            .primitives
+            .iter()
+            .filter_map(|primitive| primitive["table"]["rowCount"].as_u64())
+            .all(|count| count == 3)
+    );
+
+    let shown = render(&rows, true);
+    assert_eq!(cell_rows(&shown.primitives), vec![0, 1, 2]);
+    assert!(
+        shown.table.unwrap()["block"]["rows"][1]
+            .get("sourceRow")
+            .is_none()
+    );
+}
+
+#[test]
+fn a_hidden_row_holding_only_an_empty_field_is_removed() {
+    let field = r#"<w:tr><w:trPr><w:hidden/></w:trPr><w:tc><w:tcPr><w:tcW w:w="4680" w:type="dxa"/></w:tcPr><w:p><w:fldSimple w:instr=" DATE "><w:r><w:t/></w:r></w:fldSimple></w:p></w:tc></w:tr>"#;
+    let rows = [row("Alpha", ""), field.to_owned(), row("Charlie", "")];
+    let hidden = render(&rows, false);
+    let table = hidden.table.unwrap();
+    assert_eq!(table["block"]["rows"].as_array().unwrap().len(), 2);
+    assert_eq!(cell_rows(&hidden.primitives), vec![0, 2]);
+
+    let filled = field.replace("<w:t/>", "<w:t>9 November 2026</w:t>");
+    let kept = render(&[row("Alpha", ""), filled, row("Charlie", "")], false);
+    assert_eq!(
+        kept.table.unwrap()["block"]["rows"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+}

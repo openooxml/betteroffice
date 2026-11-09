@@ -179,8 +179,9 @@ pub fn drop_hidden_rows(table: &mut TableBlock) {
         inserted += 1;
     }
     let mut index = 0;
-    table.rows.retain(|_| {
+    table.rows.retain_mut(|row| {
         index += 1;
+        row.source_row.get_or_insert(index as u64 - 1);
         !hidden[index - 1]
     });
 }
@@ -196,6 +197,18 @@ fn block_shows_content(block: &LayoutBlock) -> bool {
         LayoutBlock::Paragraph(paragraph) => {
             paragraph.runs.iter().any(|run| match run {
                 Run::Text(run) => !run.text.is_empty(),
+                // a field with an empty result paints nothing unless layout computes it
+                Run::Field(field) => {
+                    matches!(field.field_type.as_str(), "PAGE" | "NUMPAGES")
+                        || field
+                            .raw_type
+                            .as_deref()
+                            .is_some_and(|kind| kind.eq_ignore_ascii_case("SEQ"))
+                        || field
+                            .fallback
+                            .as_deref()
+                            .is_some_and(|text| text.chars().any(|ch| !ch.is_whitespace()))
+                }
                 _ => true,
             }) || paragraph.attrs.as_ref().is_some_and(|attrs| {
                 attrs.list_marker_hidden != Some(true)
