@@ -39,10 +39,10 @@ test('focus and locale are deduplicated in snapshots and events', async () => {
   host.localeChanged('fr');
   await settle();
   expect(events.filter((event) => event.type === 'focus-change')).toEqual([
-    { type: 'focus-change', generation: host.generation(), focused: true },
+    { type: 'focus-change', generation: host.generation()!, focused: true },
   ]);
   expect(events.filter((event) => event.type === 'locale-change')).toEqual([
-    { type: 'locale-change', generation: host.generation(), locale: 'fr' },
+    { type: 'locale-change', generation: host.generation()!, locale: 'fr' },
   ]);
   expect(host.activations()[0]!.context.snapshot).toMatchObject({ focused: true, locale: 'fr' });
   host.close('unmounted');
@@ -73,12 +73,12 @@ test('viewport changes compare values and clear when layout disappears', async (
   host.geometryChanged();
   host.geometryChanged();
   await settle();
-  expect(events).toEqual([{ type: 'viewport-change', generation: host.generation(),
+  expect(events).toEqual([{ type: 'viewport-change', generation: host.generation()!,
     viewport: { ...rect, y: 80 } }]);
   host.layoutChanged(null);
   host.geometryChanged();
   await settle();
-  expect(events.at(-1)).toEqual({ type: 'viewport-change', generation: host.generation(), viewport: null });
+  expect(events[events.length - 1]).toEqual({ type: 'viewport-change', generation: host.generation()!, viewport: null });
   expect(events.filter((event) => event.type === 'viewport-change')).toHaveLength(2);
   host.close('unmounted');
 });
@@ -115,6 +115,6 @@ test('a superseded generation receives no queued signals', async () => {
   expect(host.activations()[0]!.context.snapshot).toMatchObject({ focused: true, locale: 'de' });
   host.focusChanged(false);
   await settle();
-  expect(events.at(-1)).toEqual({ type: 'focus-change', generation: host.generation(), focused: false });
+  expect(events[events.length - 1]).toEqual({ type: 'focus-change', generation: host.generation()!, focused: false });
   host.close('unmounted');
 });

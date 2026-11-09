@@ -1,4 +1,3 @@
-import type { PptxPluginEvent } from '@betteroffice/pptx-react';
 import { test, expect, type Page } from 'playwright/test';
 import { pinnedEvaluate } from '../pinned-evaluate';
 import { renderedBox } from '../rendered-box';
@@ -74,6 +73,8 @@ async function misalignment(page: Page): Promise<number> {
   });
 }
 
+type ProbeEvent = { type: string; focused?: boolean; viewport?: { x: number; y: number; width: number; height: number } | null };
+
 for (const engine of ['legacy', 'worker'] as const) {
   test.describe(`pptx plugins (${engine})`, () => {
     test.beforeEach(async ({ page }) => {
@@ -91,11 +92,11 @@ for (const engine of ['legacy', 'worker'] as const) {
 test('document focus excludes the plugin panel', async ({ page }) => {
   await open(page, engine);
   const events = () => page.evaluate(() =>
-    (window as unknown as { __probe: { events: PptxPluginEvent[] } }).__probe.events
+    (window as unknown as { __probe: { events: ProbeEvent[] } }).__probe.events
       .filter((event) => event.type === 'focus-change'));
   await page.getByTestId('probe-input').click();
   await page.evaluate(() => {
-    (window as unknown as { __probe: { events: PptxPluginEvent[] } }).__probe.events = [];
+    (window as unknown as { __probe: { events: ProbeEvent[] } }).__probe.events = [];
   });
   await page.getByTestId('pptx-slide-canvas').click({ position: { x: 100, y: 100 } });
   await expect.poll(async () => (await events()).at(-1)?.focused).toBe(true);
@@ -107,7 +108,7 @@ test('document focus excludes the plugin panel', async ({ page }) => {
 test('resizing the page changes the viewport', async ({ page }) => {
   await open(page, engine);
   const viewport = () => page.evaluate(() =>
-    (window as unknown as { __probe: { events: PptxPluginEvent[] } }).__probe.events
+    (window as unknown as { __probe: { events: ProbeEvent[] } }).__probe.events
       .filter((event) => event.type === 'viewport-change' && event.viewport !== null).at(-1));
   await expect.poll(viewport).toMatchObject({ type: 'viewport-change' });
   const before = (await viewport())!;

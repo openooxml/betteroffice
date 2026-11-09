@@ -9,7 +9,7 @@ function setupSignals() {
   const document = { version: () => 'v1', onUpdate: () => () => {} } as unknown as WorkbookHandle;
   const host = createXlsxPluginHost({
     handle: () => document,
-    admit: async (_handle, operation) => ({ ok: true, value: operation() }),
+    admit: async <T>(_handle: WorkbookHandle, operation: () => T) => ({ ok: true as const, value: operation() }),
     readOnlyRefusal: () => null,
     applyEdits: () => { throw new Error('Unavailable'); },
     commands: () => null,
@@ -38,10 +38,10 @@ test('focus and locale are deduplicated in snapshots and events', async () => {
   host.localeChanged('fr');
   await settle();
   expect(events.filter((event) => event.type === 'focus-change')).toEqual([
-    { type: 'focus-change', generation: host.generation(), focused: true },
+    { type: 'focus-change', generation: host.generation()!, focused: true },
   ]);
   expect(events.filter((event) => event.type === 'locale-change')).toEqual([
-    { type: 'locale-change', generation: host.generation(), locale: 'fr' },
+    { type: 'locale-change', generation: host.generation()!, locale: 'fr' },
   ]);
   expect(host.activations()[0]!.context.snapshot).toMatchObject({ focused: true, locale: 'fr' });
   host.close('unmounted');
@@ -74,6 +74,6 @@ test('a superseded generation receives no queued signals', async () => {
   expect(host.activations()[0]!.context.snapshot).toMatchObject({ focused: true, locale: 'de' });
   host.focusChanged(false);
   await settle();
-  expect(events.at(-1)).toEqual({ type: 'focus-change', generation: host.generation(), focused: false });
+  expect(events[events.length - 1]).toEqual({ type: 'focus-change', generation: host.generation()!, focused: false });
   host.close('unmounted');
 });

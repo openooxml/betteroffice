@@ -1,5 +1,6 @@
-import type { DocxPluginEvent } from '@betteroffice/docx-react';
 import { test, expect, type Page } from 'playwright/test';
+
+type ProbeEvent = { type: string; focused?: boolean; viewport?: { x: number; y: number; width: number; height: number } | null };
 
 let peerless = false;
 
@@ -47,11 +48,11 @@ for (const mode of ['hybrid', 'peerless'] as const) {
 test('document focus excludes the plugin panel', async ({ page }) => {
   await open(page);
   const events = () => page.evaluate(() =>
-    (window as unknown as { __probe: { events: DocxPluginEvent[] } }).__probe.events
+    (window as unknown as { __probe: { events: ProbeEvent[] } }).__probe.events
       .filter((event) => event.type === 'focus-change'));
   await page.getByTestId('probe-input').click();
   await page.evaluate(() => {
-    (window as unknown as { __probe: { events: DocxPluginEvent[] } }).__probe.events = [];
+    (window as unknown as { __probe: { events: ProbeEvent[] } }).__probe.events = [];
   });
   await page.locator('canvas[data-page-index="0"]').click({ position: { x: 100, y: 100 } });
   await expect.poll(async () => (await events()).at(-1)?.focused).toBe(true);
@@ -63,7 +64,7 @@ test('document focus excludes the plugin panel', async ({ page }) => {
 test('scrolling moves the viewport in overlay pixels', async ({ page }) => {
   await open(page);
   const viewport = () => page.evaluate(() =>
-    (window as unknown as { __probe: { events: DocxPluginEvent[] } }).__probe.events
+    (window as unknown as { __probe: { events: ProbeEvent[] } }).__probe.events
       .filter((event) => event.type === 'viewport-change' && event.viewport !== null).at(-1));
   await expect.poll(viewport).toMatchObject({ type: 'viewport-change' });
   const before = (await viewport())!;
