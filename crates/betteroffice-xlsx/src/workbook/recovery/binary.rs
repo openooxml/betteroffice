@@ -624,6 +624,10 @@ impl Codec for Op {
                 name.write(w);
                 formulas.write(w);
             }
+            Self::SetTables { tables } => {
+                w.u8(37);
+                tables.write(w);
+            }
         }
     }
 
@@ -800,6 +804,9 @@ impl Codec for Op {
                 sheet: Codec::read(r)?,
                 name: Codec::read(r)?,
                 formulas: Codec::read(r)?,
+            },
+            37 => Self::SetTables {
+                tables: Codec::read(r)?,
             },
             _ => return Err(SnapshotError::new("invalid recovery Op")),
         })

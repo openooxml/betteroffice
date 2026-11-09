@@ -1823,6 +1823,123 @@ pub(crate) fn rename_sheet_references(
     Ok(restores)
 }
 
+/// `text` with every structured reference to a table in `dropped` (`Table[...]`,
+/// or the bare table name) replaced by `#REF!`, as Excel saves a reference to a
+/// deleted table; `None` when nothing names one, or the text does not lex.
+pub(crate) fn remove_table_references(text: &str, dropped: &[String]) -> Option<String> {
+    if dropped.is_empty() {
+        return None;
+    }
+    let lower = text.to_lowercase();
+    if !dropped
+        .iter()
+        .any(|table| lower.contains(&table.to_lowercase()))
+    {
+        return None;
+    }
+    let tokens = xlsx_calc::lex_for_rewrite(text).ok()?;
+    let drops = |table: &str| {
+        dropped
+            .iter()
+            .any(|name| name.to_lowercase() == table.to_lowercase())
+    };
+    let mut out = String::with_capacity(text.len());
+    let mut copied = 0;
+    for (at, token) in tokens.iter().enumerate() {
+        let external = at > 0
+            && matches!(&tokens[at - 1].kind, xlsx_calc::TokKind::Ident(word) if word.starts_with('['));
+        let names_dropped = !external
+            && match &token.kind {
+                xlsx_calc::TokKind::TableRef { table, .. } => drops(table),
+                xlsx_calc::TokKind::Ident(word) => {
+                    drops(word)
+                        && !matches!(
+                            tokens.get(at + 1).map(|next| &next.kind),
+                            Some(xlsx_calc::TokKind::LParen)
+                        )
+                        && !first_sheet_of_range(&tokens[at + 1..])
+                }
+                _ => false,
+            };
+        if names_dropped {
+            out.push_str(&text[copied..token.start]);
+            out.push_str("#REF!");
+            copied = token.end;
+        }
+    }
+    (copied > 0).then(|| {
+        out.push_str(&text[copied..]);
+        out
+    })
+}
+
+/// Whether `rest`, the tokens after a bare word, makes that word the first
+/// sheet of a 3-D range: a `:` and then a reference qualified by the last
+/// sheet (`First:Last!A1`).
+fn first_sheet_of_range(rest: &[xlsx_calc::Token]) -> bool {
+    use xlsx_calc::TokKind;
+    matches!(rest.first().map(|token| &token.kind), Some(TokKind::Colon))
+        && matches!(
+            rest.get(1).map(|token| &token.kind),
+            Some(
+                TokKind::Ref { sheet: Some(_), .. }
+                    | TokKind::Range { sheet: Some(_), .. }
+                    | TokKind::ColumnRange { sheet: Some(_), .. }
+                    | TokKind::RowRange { sheet: Some(_), .. }
+            )
+        )
+}
+
+/// Whether `text` names a table in `dropped` in a form the rewrite cannot
+/// read, so a deletion dropping that table would leave it behind.
+pub(crate) fn names_unrewritable_table(text: &str, dropped: &[String]) -> bool {
+    let lower = text.to_lowercase();
+    dropped
+        .iter()
+        .any(|table| lower.contains(&table.to_lowercase()))
+        && xlsx_calc::lex_for_rewrite(text).is_err()
+}
+
+/// Refuses a deletion that drops the tables in `dropped` when a cell formula
+/// on another sheet, or a defined name, names one of them in text the
+/// rewrite cannot read: it would keep naming a table that is gone.
+pub(crate) fn ensure_table_references_rewritable(
+    wb: &Workbook,
+    removed: usize,
+    dropped: &[String],
+) -> Result<(), OpError> {
+    if dropped.is_empty() {
+        return Ok(());
+    }
+    for (index, sheet) in wb.sheets.iter().enumerate() {
+        if index == removed {
+            continue;
+        }
+        for (at, cell) in sheet.iter_cells() {
+            if cell
+                .formula
+                .as_deref()
+                .is_some_and(|formula| names_unrewritable_table(formula, dropped))
+            {
+                return Err(OpError::FormulaNotRewritable {
+                    sheet: SheetId(index as u32),
+                    cell: at,
+                });
+            }
+        }
+    }
+    if let Some(defined) = wb
+        .defined_names
+        .iter()
+        .find(|defined| names_unrewritable_table(&defined.formula, dropped))
+    {
+        return Err(OpError::DefinedNameNotRewritable {
+            name: defined.name.clone(),
+        });
+    }
+    Ok(())
+}
+
 /// The cell formulas on every sheet but `removed` that `lost` rewrites for
 /// that sheet's deletion: the sheet's index before the removal, the cell, the
 /// new formula and the cell as it was. Nothing changes here.
@@ -2520,6 +2637,64 @@ fn clip_interval(a: u32, b: u32, at: u32, count: u32) -> Option<(u32, u32)> {
 mod tests {
     use super::*;
     use xlsx_model::{Cell, CellProvider, Hyperlink, Sheet};
+
+    /// A structured reference to a dropped table, in either form and any
+    /// case, becomes `#REF!`, also beside a reference into another workbook;
+    /// other tables, string literals, functions, another workbook's names and
+    /// a text that names no dropped table are left alone.
+    #[test]
+    fn structured_references_to_a_dropped_table_become_ref() {
+        let dropped = ["Amounts".to_owned()];
+        for (source, expected) in [
+            ("SUM(Amounts[Amt])", Some("SUM(#REF!)")),
+            ("SUM(amounts[[#This Row],[Amt]])*2", Some("SUM(#REF!)*2")),
+            ("Amounts[#All]", Some("#REF!")),
+            ("ROWS(Amounts)", Some("ROWS(#REF!)")),
+            (
+                "SUM(Amounts[Amt])+SUM(Prices[Price])",
+                Some("SUM(#REF!)+SUM(Prices[Price])"),
+            ),
+            ("SUM(Prices[Price])", None),
+            ("\"Amounts[Amt]\"&A1", None),
+            ("AmountsTotal+1", None),
+            ("SUM(Data!A1)", None),
+            ("[1]!B1+SUM(Amounts[Amt])", Some("[1]!B1+SUM(#REF!)")),
+        ] {
+            assert_eq!(
+                remove_table_references(source, &dropped).as_deref(),
+                expected,
+                "{source}"
+            );
+        }
+        for (source, expected) in [
+            (
+                "[1]Data!$A$1+Amounts[[#This Row],[Amt]]",
+                Some("[1]Data!$A$1+#REF!"),
+            ),
+            ("[1]!Amounts+1", None),
+            ("SUM(Amounts:Data!A1)", None),
+            ("SUM(Amounts:'Data two'!A1:B2)", None),
+            ("SUM(Amounts:Data!Total)", Some("SUM(#REF!:Data!Total)")),
+            ("[2]Amounts[Amt]", None),
+            ("Data!Amounts", None),
+        ] {
+            assert_eq!(
+                remove_table_references(source, &dropped).as_deref(),
+                expected,
+                "{source}"
+            );
+        }
+        assert!(names_unrewritable_table(
+            "[Book.xlsx]Data!A1+SUM(Amounts[Amt])",
+            &dropped
+        ));
+        assert!(!names_unrewritable_table(
+            "[1]Data!A1+SUM(Amounts[Amt])",
+            &dropped
+        ));
+        assert!(!names_unrewritable_table("[Book.xlsx]Data!A1", &dropped));
+        assert_eq!(remove_table_references("SUM(Amounts[Amt])", &[]), None);
+    }
 
     fn r(a1: &str) -> CellRef {
         CellRef::parse_a1(a1).unwrap()

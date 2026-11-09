@@ -34,7 +34,7 @@ pub use engine::{
 };
 pub use eval::{EvalContext, evaluate};
 pub use graph::UnevaluatedCell;
-pub use lexer::{ParseError, TokKind, Token, lex};
+pub use lexer::{ParseError, TokKind, Token, lex, lex_for_rewrite};
 pub use parser::{BinaryOp, Expr, MAX_DEPTH, UnaryOp, parse_formula};
 pub use reference::{ColumnRange, RowRange, TableBand, TableSpec};
 

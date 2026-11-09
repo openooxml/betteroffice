@@ -2,6 +2,7 @@
 // These can differ between Rust targets; every part name and uncompressed byte must match.
 // Both opens recalculate with nowSerial=45000.75 and randSeed=42; the fixture and edits contain no volatile functions.
 import { readFileSync } from 'node:fs';
+import JSZip from 'jszip';
 import { beforeAll, describe, expect, test } from 'bun:test';
 import * as wasm from '../../packages/xlsx/src/wasm/loader';
 import { FORMATS } from '../../scripts/api-surface';
@@ -19,6 +20,46 @@ beforeAll(async () => {
   await native.initWasm();
   await wasm.initWasm(readFileSync(new URL('../../packages/xlsx/src/wasm/generated/xlsx_wasm_bg.wasm', import.meta.url)));
 });
+
+const MAIN = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
+const DOC_RELS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+
+/** `First`, `Data` holding table `Amounts` (1, 2), `Later` holding table `Prices` (10, 20), and `Other`
+ * summing both through structured references. */
+async function tablesFixture() {
+  const rels = (entries: [string, string, string][]) =>
+    `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${entries
+      .map(([id, kind, target]) => `<Relationship Id="${id}" Type="${DOC_RELS}/${kind}" Target="${target}"/>`)
+      .join('')}</Relationships>`;
+  const sheet = (rows: string, tail = '') =>
+    `<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="${MAIN}" xmlns:r="${DOC_RELS}"><sheetData>${rows}</sheetData>${tail}</worksheet>`;
+  const column = (header: string, values: number[]) =>
+    `<row r="1"><c r="A1" t="inlineStr"><is><t>${header}</t></is></c></row>` +
+    values.map((value, at) => `<row r="${at + 2}"><c r="A${at + 2}"><v>${value}</v></c></row>`).join('');
+  const table = (id: number, name: string, header: string) =>
+    `<?xml version="1.0" encoding="UTF-8"?><table xmlns="${MAIN}" id="${id}" name="${name}" displayName="${name}" ref="A1:A3"><tableColumns count="1"><tableColumn id="1" name="${header}"/></tableColumns></table>`;
+  const tablePart = '<tableParts count="1"><tablePart r:id="rIdT"/></tableParts>';
+  const override = (part: string, type: string) =>
+    `<Override PartName="${part}" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.${type}+xml"/>`;
+  const zip = new JSZip();
+  zip.file('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>' +
+    override('/xl/workbook.xml', 'sheet.main') +
+    [1, 2, 3, 4].map((n) => override(`/xl/worksheets/sheet${n}.xml`, 'worksheet')).join('') +
+    [1, 2].map((n) => override(`/xl/tables/table${n}.xml`, 'table')).join('') + '</Types>');
+  zip.file('_rels/.rels', rels([['rId1', 'officeDocument', 'xl/workbook.xml']]));
+  zip.file('xl/workbook.xml', `<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="${MAIN}" xmlns:r="${DOC_RELS}"><sheets>${['First', 'Data', 'Later', 'Other']
+    .map((name, at) => `<sheet name="${name}" sheetId="${at + 1}" r:id="rId${at + 1}"/>`).join('')}</sheets></workbook>`);
+  zip.file('xl/_rels/workbook.xml.rels', rels([1, 2, 3, 4].map((n) => [`rId${n}`, 'worksheet', `worksheets/sheet${n}.xml`])));
+  zip.file('xl/worksheets/sheet1.xml', sheet('<row r="1"><c r="A1"><v>100</v></c></row>'));
+  zip.file('xl/worksheets/sheet2.xml', sheet(column('Amt', [1, 2]), tablePart));
+  zip.file('xl/worksheets/_rels/sheet2.xml.rels', rels([['rIdT', 'table', '../tables/table1.xml']]));
+  zip.file('xl/worksheets/sheet3.xml', sheet(column('Price', [10, 20]), tablePart));
+  zip.file('xl/worksheets/_rels/sheet3.xml.rels', rels([['rIdT', 'table', '../tables/table2.xml']]));
+  zip.file('xl/worksheets/sheet4.xml', sheet('<row r="1"><c r="A1"><f>SUM(Amounts[Amt])</f><v>3</v></c></row><row r="2"><c r="A2"><f>SUM(Prices[Price])</f><v>30</v></c></row>'));
+  zip.file('xl/tables/table1.xml', table(1, 'Amounts', 'Amt'));
+  zip.file('xl/tables/table2.xml', table(2, 'Prices', 'Price'));
+  return new Uint8Array(await zip.generateAsync({ type: 'uint8array' }));
+}
 
 async function compare(script: (workbook: WorkbookHandle) => unknown) {
   const nativeWorkbook = native.openWorkbook(fixture, { calculation });
@@ -116,6 +157,48 @@ describe('xlsx native/wasm package parity', () => {
     });
     expect(await native.exportXlsxMarkdown(fixture)).toEqual(await wasm.exportXlsxMarkdown(fixture));
     expect(await native.exportXlsxStructured(fixture)).toEqual(await wasm.exportXlsxStructured(fixture));
+  });
+
+  test('deleting and inserting sheets around tables, with undo and redo, matches on both engines', async () => {
+    const bytes = await tablesFixture();
+    const nativeWorkbook = native.openWorkbook(bytes, { calculation });
+    const wasmWorkbook = wasm.openWorkbook(bytes, { calculation });
+    const sums = (workbook: WorkbookHandle) => {
+      const other = workbook.sheetInfo().sheetNames.length - 1;
+      return [workbook.cell(other, 0, 0), workbook.cell(other, 1, 0)];
+    };
+    const script = (workbook: WorkbookHandle) => {
+      let internal = 'applied';
+      try {
+        workbook.applyOps([{ type: 'setTables', tables: [] }]);
+      } catch (error) {
+        internal = String((error as Error)?.message ?? error);
+      }
+      const opened = sums(workbook);
+      workbook.applyOps([{ type: 'removeSheet', index: 1 }]);
+      const removed = sums(workbook);
+      workbook.undo();
+      const undone = sums(workbook);
+      workbook.redo();
+      const redone = sums(workbook);
+      workbook.undo();
+      workbook.applyOps([{ type: 'addSheet', index: 0, name: 'New' }]);
+      const inserted = sums(workbook);
+      return { internal, opened, removed, undone, redone, inserted };
+    };
+    try {
+      const nativeResult = script(nativeWorkbook);
+      const wasmResult = script(wasmWorkbook);
+      expect(nativeResult).toEqual(wasmResult);
+      expect(wasmResult.internal).toContain('restore sheet operations are internal');
+      expect(wasmResult.undone).toEqual(wasmResult.opened);
+      expect(wasmResult.inserted).toEqual(wasmResult.opened);
+      expect(wasmResult.redone).toEqual(wasmResult.removed);
+      await expectSavedPartsEqual(nativeWorkbook.save(), wasmWorkbook.save());
+    } finally {
+      nativeWorkbook.dispose();
+      wasmWorkbook.dispose();
+    }
   });
 
   test('PNG range targets refuse bad ranges with the same error as the wasm range path', async () => {
