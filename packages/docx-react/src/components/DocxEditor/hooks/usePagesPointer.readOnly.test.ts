@@ -622,3 +622,26 @@ test('read-only selection wins over a link inside a selected cell range', () => 
     expect(links.length > 0).toBe(followed);
   }
 });
+
+
+for (const region of ['header', 'footer'] as const) test(`T11/B6: DV ${region} selection is unreachable today`, async () => {
+  const queries = fakeQueries();
+  const originalHit = queries.hitTestRegions;
+  queries.hitTestRegions = (page, x, y) => y < HEADER_BOTTOM
+    ? { region, rId: 'rId7', pos: 1, target: 'text' }
+    : originalHit(page, x, y);
+  const opened: string[] = [];
+  const h = options({ viewerSelection: true, displayListQueries: queries,
+    onHeaderFooterDoubleClick: part => { opened.push(part); }, yrsSession: null });
+  renderHook(() => usePagesPointer(h.opts));
+  mouse('mousedown', 200, 400, canvasOf(), 1);
+  mouse('mouseup', 200, 400, window, 1);
+  expect(h.selections.length).toBeGreaterThan(0);
+  mouse('mousedown', 200, 20, canvasOf(), 2);
+  mouse('mouseup', 200, 20, window, 2);
+  mouse('dblclick', 200, 20, canvasOf(), 2);
+  await nextFrame();
+  expect(opened).toEqual([]);
+  expect(h.opts.yrsRootStory).toBe('body');
+  expect(h.noteClicks).toEqual([]);
+});

@@ -364,3 +364,42 @@ for (const peerless of [false, true]) test(`selection anchors follow ranges and 
   live = false;
   expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
 });
+
+
+for (const engine of ['XI', 'XL', 'XP'] as const) test(`F: ${engine} selection mapping-pending is unreachable`, async () => {
+  const frame = painted();
+  const layout = pluginLayout(frame, 'v1')!;
+  let current = true;
+  let refreshing = false;
+  let selection: import('./types').XlsxPluginSelection = null;
+  const proposals = () => refreshing ? null : { proposals: [], sheetIndex: 0, previewVersion: 0 };
+  const geometry = engine === 'XP'
+    ? createPeerlessPluginGeometry(layout, frame, element(0, 0), element(0, 0),
+        () => ({ version: current ? 'v1' : 'v2', painted: frame }), proposals, undefined, () => selection)
+    : createPluginGeometry(layout, frame, element(0, 0), element(0, 0), () => current,
+        proposals, undefined, () => selection);
+  const check = async (expected: string) => {
+    const sync = geometry.getAnchorGeometry({ kind: 'selection' });
+    const asyncResults = await geometry.readAnchorGeometries([{ kind: 'selection' }]);
+    expect(asyncResults).toEqual([sync]);
+    expect(sync.ok ? 'ok' : sync.failure.code).toBe(expected);
+    expect(sync.ok || sync.failure.code !== 'pending').toBe(true);
+  };
+  await check('missing-target');
+  selection = { sheetId: 'sheet:0', sheetIndex: 0, chartId: null, cells: {
+    anchor: { row: 0, col: 0 }, focus: { row: 0, col: 0 },
+  } };
+  await check('ok');
+  refreshing = true;
+  await check('layout-unavailable');
+  refreshing = false;
+  selection.sheetId = 'sheet:1';
+  await check('layout-unavailable');
+  selection.sheetId = 'sheet:0';
+  selection.cells = { anchor: { row: 900, col: 900 }, focus: { row: 901, col: 901 } };
+  await check('layout-unavailable');
+  selection.chartId = 'chart';
+  await check('missing-target');
+  current = false;
+  await check('layout-unavailable');
+});

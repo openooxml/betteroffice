@@ -14,6 +14,9 @@ import type { SelectionState } from '../components/DocxEditor/types';
 import { defineDocxPlugin } from './defineDocxPlugin';
 import { PluginOverlays } from './PluginOverlays';
 import { useDocxPluginHost, type UseDocxPluginHostOptions } from './useDocxPluginHost';
+import { ViewerSelectionController } from '../components/DocxEditor/internals/viewerSelectionController';
+import { selectionClock } from '../../../../e2e/browser/plugin-host/selection-clock';
+import type { DocxAnchorGeometryResult } from './types';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -30,11 +33,12 @@ afterAll(async () => {
 });
 
 function setup(viewer = false) {
+  const updates = new Set<() => void>();
   const snapshot: DocxProposalSnapshot = { version: 'v1', previewVersion: 0, proposals: [] };
   const session = {
     version: () => snapshot.version,
     getProposals: () => snapshot,
-    onUpdate: () => () => {},
+    onUpdate: (listener: () => void) => { updates.add(listener); return () => { updates.delete(listener); }; },
     onProposalChange: () => () => {},
     selection: () => null,
   } as unknown as YrsSession;
@@ -73,11 +77,13 @@ function setup(viewer = false) {
     hasPendingInput: () => false,
   } as unknown as PagedEditorRef;
   const events: boolean[] = [];
+  const settles: Array<DocxAnchorGeometryResult | null> = [];
   const plugin = defineDocxPlugin({
     id: 'test.presented-geometry',
     createState: () => null,
     onEvent(context, event) {
       if (event.type === 'layout-change' && event.layout) events.push(context.geometry !== null);
+      if (event.type === 'selection-settle') settles.push(context.geometry?.getAnchorGeometry({ kind: 'selection' }) ?? null);
     },
     overlay: ({ geometry }) =>
       geometry.toOverlayRect({ x: 0, y: 0, width: 100, height: 200 }) ? (
@@ -109,7 +115,15 @@ function setup(viewer = false) {
     { initialProps: options }
   );
   return {
-    events,
+    events, settles,
+    remoteVersion(version: string) {
+      snapshot.version = version;
+      stampSourceVersion(queries, version);
+      stampSourceVersion(layout, version);
+      for (const update of updates) update();
+      result.current.onRenderedDomContext(createRenderedDomContext(pages, 1), queries);
+      markPresented(pages, displayList);
+    },
     result,
     options,
     rerender,
@@ -279,4 +293,69 @@ test('a backward worker viewer selection anchors to its head through layout publ
   await act(async () => view.result.current.publishSelection());
   expect(geometry().getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: true,
     anchor: { x: 1, y: 20, width: 0, height: 12 } });
+});
+
+
+for (const collapsed of [false, true]) test(`T10: DV body ${collapsed ? 'caret' : 'range'} settles once with its anchor`, async () => {
+  const clock = selectionClock();
+  const view = setup(true);
+  try {
+    view.queries.rangeRects = (from, to) => [{ pageIndex: 0, x: from, y: 20, width: to - from, height: 12 }];
+    view.queries.caretRect = position => ({ pageIndex: 0, x: position, y: 20, width: 0, height: 12 });
+    view.queries.hitTestRegions = () => null;
+    await act(async () => { view.attachLayer(); view.emitDom(); view.present(); });
+    await waitFor(() => expect(view.result.current.activations[0]?.context.geometry).toBeTruthy());
+    await act(async () => { await clock.tick(350); });
+    view.settles.length = 0;
+    const layoutId = view.result.current.activations[0]!.context.snapshot.layout!.id;
+    await act(async () => view.result.current.publishViewerSelection({ head: 1,
+      displayRange: { story: 'body', from: 1, to: collapsed ? 1 : 4, layoutId }, isMultiParagraph: false }));
+    await act(async () => { await clock.tick(349); });
+    expect(view.settles).toEqual([]);
+    await act(async () => { await clock.tick(1); });
+    expect(view.settles).toMatchObject([{ ok: true, anchor: { x: 1, width: 0 } }]);
+    if (collapsed) expect(view.settles[0]).toMatchObject({ rects: [] });
+    else expect(view.settles[0]).toMatchObject({ rects: [{ x: 1, width: 3 }] });
+    await act(async () => { await clock.tick(700); });
+    expect(view.settles).toHaveLength(1);
+  } finally { cleanup(); clock.restore(); }
+});
+
+test('T4d: a new DV document version clears selection and settles once as none', async () => {
+  const clock = selectionClock();
+  const view = setup(true);
+  const controller = new ViewerSelectionController({ story: 'body', queries: () => view.queries,
+    read: (async () => ({ version: 'v1', value: null })) as never });
+  const publish = () => {
+    const selection = controller.displaySelection();
+    view.result.current.publishViewerSelection({ head: selection?.head ?? null,
+      displayRange: selection ? { story: 'body', from: Math.min(selection.anchor, selection.head), to: Math.max(selection.anchor, selection.head),
+        layoutId: view.result.current.activations[0]!.context.snapshot.layout!.id } : null,
+      isMultiParagraph: false });
+  };
+  const stop = controller.subscribe(publish);
+  try {
+    view.queries.rangeRects = (from, to) => [{ pageIndex: 0, x: from, y: 20, width: to - from, height: 12 }];
+    view.queries.caretRect = position => ({ pageIndex: 0, x: position, y: 20, width: 0, height: 12 });
+    view.queries.hitTestRegions = () => null;
+    await act(async () => { view.attachLayer(); view.emitDom(); view.present(); });
+    await waitFor(() => expect(view.result.current.activations[0]?.context.geometry).toBeTruthy());
+    await act(async () => {
+      controller.onFrame({ version: 'v1', preview: false, asOpened: false });
+      controller.select(1, 4);
+      await clock.tick(350);
+    });
+    expect(view.settles[view.settles.length - 1]).toMatchObject({ ok: true });
+    view.settles.length = 0;
+    await act(async () => {
+      view.remoteVersion('v2');
+      controller.onFrame({ version: 'v2', preview: false, asOpened: false });
+    });
+    expect(controller.displaySelection()).toBeNull();
+    await act(async () => { await clock.tick(350); });
+    expect(view.settles).toMatchObject([{ ok: false, failure: { code: 'missing-target' } }]);
+    expect(view.result.current.activations[0]!.context.snapshot.selectionSettled).toBe(true);
+    await act(async () => { await clock.tick(700); });
+    expect(view.settles).toHaveLength(1);
+  } finally { stop(); controller.reset(); cleanup(); clock.restore(); }
 });

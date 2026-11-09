@@ -108,20 +108,72 @@ test('settling the same selection again restores the state without another event
   expect(h.resettled()).toBe(1);
 }));
 
-test('a typing key updates the selection without resetting an existing timer', () => clocked((h) => {
+test('T23: a typing key restarts the quiet window', () => clocked((h) => {
   h.machine.notifySelectionChange('before');
   h.tick(300);
   h.root.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'x' }));
   h.machine.notifySelectionChange('after');
   h.tick(50);
+  expect(h.sources).toEqual([]);
+  h.tick(299);
+  expect(h.sources).toEqual([]);
+  h.tick(1);
   expect(h.sources).toEqual(['keyboard']);
 }));
 
-test('API selection changes report their source', () => clocked((h) => {
-  h.machine.notifySelectionChange('api', true);
+test('D1: programmatic selection changes have the keyboard source and no API flag', () => clocked((h) => {
+  const args: Parameters<typeof h.machine.notifySelectionChange> = ['programmatic'];
+  type HasApiFlag = Parameters<typeof h.machine.notifySelectionChange> extends [string] ? false : true;
+  const hasApiFlag: HasApiFlag = false;
+  expect(hasApiFlag).toBe(false);
+  expect(h.machine.notifySelectionChange.length).toBe(1);
+  Reflect.apply(h.machine.notifySelectionChange, h.machine, [...args, true]);
   h.tick(350);
-  expect(h.sources).toEqual(['api']);
+  expect(h.sources).toEqual(['keyboard']);
 }));
+
+test('T6: focus change neither cancels nor restarts a pending settle', () => clocked((h) => {
+  h.machine.notifySelectionChange('focus');
+  h.tick(200);
+  h.root.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+  h.root.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+  h.tick(149);
+  expect(h.sources).toEqual([]);
+  h.tick(1);
+  expect(h.sources).toEqual(['keyboard']);
+}));
+
+test('T23: continuous typing longer than the window settles once after the last key', () => clocked((h) => {
+  for (let index = 0; index < 8; index++) {
+    h.root.dispatchEvent(new KeyboardEvent('keydown', { key: 'x', bubbles: true }));
+    h.machine.notifySelectionChange(`typed:${index}`);
+    h.tick(100);
+    expect(h.sources).toEqual([]);
+  }
+  h.tick(249);
+  expect(h.sources).toEqual([]);
+  h.tick(1);
+  expect(h.sources).toEqual(['keyboard']);
+}));
+
+for (const end of ['outside-window', 'blur', 'lostpointercapture', 'touch-scroll'] as const) {
+  test(`T24: Pressed exits after ${end}`, () => clocked((h) => {
+    h.down(end === 'touch-scroll' ? 'touch' : 'mouse');
+    h.machine.notifySelectionChange(end);
+    h.tick(700);
+    expect(h.sources).toEqual([]);
+    if (end === 'outside-window') window.dispatchEvent(new PointerEvent('pointerup'));
+    if (end === 'blur') window.dispatchEvent(new Event('blur'));
+    if (end === 'lostpointercapture') h.root.dispatchEvent(new PointerEvent('lostpointercapture', { bubbles: true }));
+    if (end === 'touch-scroll') document.dispatchEvent(new PointerEvent('pointercancel', { bubbles: true, pointerType: 'touch' }));
+    h.tick(349);
+    expect(h.sources).toEqual([]);
+    h.tick(1);
+    expect(h.sources).toEqual([end === 'touch-scroll' ? 'touch' : 'pointer']);
+    h.tick(700);
+    expect(h.sources).toHaveLength(1);
+  }));
+}
 
 test('pointer cancellation releases the gesture and dispose clears its timer', () => clocked((h) => {
   h.down('touch');

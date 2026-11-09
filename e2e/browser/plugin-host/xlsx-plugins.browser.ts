@@ -1,6 +1,7 @@
 import { test, expect, type Page } from 'playwright/test';
 import { pinnedEvaluate } from '../pinned-evaluate';
 import { renderedBox } from '../rendered-box';
+import { selectionClock } from './selection-clock';
 
 type ProbeRect = { x: number; y: number; width: number; height: number };
 
@@ -139,6 +140,34 @@ test('dragging A1:C3 settles once and anchors to getRangeRect', async ({ page })
   expect(geometry.range).not.toBeNull();
   expect(geometry.selected).toMatchObject({ ok: true, rects: [geometry.range], anchor: geometry.range });
   expect(geometry.read).toEqual([geometry.selected]);
+});
+
+test('T22: shift-arrow settles once with the painted range anchor', async ({ page }) => {
+  await page.addInitScript({ content: `window.__selectionClock = (${selectionClock.toString()})();` });
+  await open(page, engine);
+  const tick = (ms: number) => page.evaluate(async value => {
+    await (window as unknown as { __selectionClock: { tick(ms: number): Promise<void> } }).__selectionClock.tick(value);
+  }, ms);
+  await tick(350);
+  await page.evaluate(() => { (window as unknown as { __probe: { events: ProbeEvent[] } }).__probe.events = []; });
+  await page.getByTestId('xlsx-scroll').focus();
+  await page.keyboard.press('Shift+ArrowDown');
+  await expect.poll(async () => (await probe(page)).selection?.cells?.focus).toEqual({ row: 1, col: 0 });
+  await expect(page.getByTestId('xlsx-selection')).toBeVisible();
+  const events = () => page.evaluate(() => (window as unknown as { __probe: { events: ProbeEvent[] } }).__probe.events.filter(event => event.type === 'selection-settle'));
+  await tick(349);
+  expect(await events()).toHaveLength(0);
+  await tick(1);
+  await expect.poll(async () => (await events()).length).toBe(1);
+  expect(await events()).toMatchObject([{ source: 'keyboard', selection: { cells: { focus: { row: 1, col: 0 } } } }]);
+  const anchor = await pinnedEvaluate(page, () => (window as unknown as { __probe: Probe }).__probe.act(async context => ({
+    selection: await context.geometry!.readAnchorGeometries([{ kind: 'selection' }]),
+    range: context.geometry!.getRangeRect({ sheetId: 'sheet:0', range: { top: 0, left: 0, bottom: 1, right: 0 } }),
+  })));
+  expect(anchor.range).not.toBeNull();
+  expect(anchor.selection).toMatchObject([{ ok: true, rects: [anchor.range], anchor: anchor.range }]);
+  await tick(700);
+  expect(await events()).toHaveLength(1);
 });
 
 test('document focus excludes the plugin panel', async ({ page }) => {

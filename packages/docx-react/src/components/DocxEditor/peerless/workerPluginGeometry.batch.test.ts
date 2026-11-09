@@ -5,6 +5,7 @@ import type { ProposalGeometryTarget } from '@betteroffice/docx/yrs';
 import type { DocxGeometryTarget } from '../../../plugins/types';
 import { WorkerReadSupersededError } from './shellController';
 import { createWorkerPluginGeometry } from './workerPluginGeometry';
+import { selectionClock } from '../../../../../../e2e/browser/plugin-host/selection-clock';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -425,4 +426,29 @@ for (const acrossParagraphs of [false, true]) test(`backward worker selections n
       anchor: { pageIndex: 0, x: 11, y: 10, width: 0, height: 12 },
     }]);
   } finally { s.plugin.dispose(); }
+});
+
+
+test('F: a held worker selection read expires with layout-unavailable', async () => {
+  const clock = selectionClock();
+  const s = await shell([true, true], true);
+  try {
+    const geometry = s.plugin.geometry()!;
+    expect(s.reads.length).toBeGreaterThan(0);
+    expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: false, failure: { code: 'pending' } });
+    clock.holdWaits();
+    let result: Awaited<ReturnType<typeof geometry.readAnchorGeometries>> | undefined;
+    const pending = geometry.readAnchorGeometries([{ kind: 'selection' }]).then(value => { result = value; });
+    for (let turn = 0; turn < 40; turn++) await Promise.resolve();
+    expect(result).toBeUndefined();
+    await clock.expire();
+    expect(result).toBeDefined();
+    expect(result).toMatchObject([{ ok: false, failure: { code: 'layout-unavailable' } }]);
+    expect(s.reads.length).toBeGreaterThan(0);
+    await pending;
+  } finally {
+    for (const read of s.reads.splice(0)) read.resolve();
+    s.plugin.dispose();
+    clock.restore();
+  }
 });

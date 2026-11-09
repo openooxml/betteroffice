@@ -1410,8 +1410,13 @@ test('selection anchors project the displayed range, caret and missing selection
   const layout = { id: 'selection', version: 'v1', previewVersion: 0, zoom: 1, pageCount: 1 };
   let selection: { story: string; from: number; to: number; layoutId: string; focus?: number } | null = { story: 'body', from: 2, to: 8, layoutId: layout.id };
   let shown = true;
+  let stickySelection = false;
+  const session = { version: () => 'v1', selection: () => stickySelection ? {
+    anchor: { story: 'body', paraId: 'p', offset: 1 }, head: { story: 'body', paraId: 'p', offset: 3 },
+  } : null } as unknown as YrsSession;
   const geometry = createPluginGeometry(layout, dom, layer, () => shown, () => null, source,
-    () => null, undefined, undefined, undefined, undefined, () => selection);
+    () => ({ session, editor: { hasPendingInput: () => false, yrsLocToDisplayPosition: () => null }, presented: true }),
+    undefined, undefined, undefined, undefined, () => selection);
   expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: true,
     version: 'v1', layoutId: layout.id,
     rects: [{ pageIndex: 0, x: 12, y: 40, width: 6, height: 12 }],
@@ -1424,6 +1429,8 @@ test('selection anchors project the displayed range, caret and missing selection
     rects: [], anchor: { x: 15, y: 40, width: 0, height: 12 } }]);
   selection = null;
   expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: false, failure: { code: 'missing-target' } });
+  stickySelection = true;
+  expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: false, failure: { code: 'pending' } });
   selection = { story: 'body', from: 1, to: 2, layoutId: 'old' };
   expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
   shown = false;

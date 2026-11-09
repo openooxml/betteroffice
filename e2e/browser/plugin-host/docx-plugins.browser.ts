@@ -1,4 +1,5 @@
 import { test, expect, type Page } from 'playwright/test';
+import { selectionClock } from './selection-clock';
 
 type ProbeRect = { x: number; y: number; width: number; height: number };
 type ProbeEvent = { type: string; focused?: boolean; source?: string; viewport?: ProbeRect | null };
@@ -7,6 +8,7 @@ interface DocxProbe {
   editor: {
     readParagraphs(request: unknown): Promise<{ ok: true; version: string; paragraphs: { paraId: string; text: string }[] } | { ok: false }>;
     readSelectionInfo(): Promise<{ selectedText?: string } | null>;
+    flushPendingInput(): Promise<void>;
   };
   geometry: {
     readAnchorGeometries(targets: unknown[]): Promise<ProbeAnchor[]>;
@@ -101,6 +103,56 @@ test('double-click settles once, preserves the word and anchors to its painted b
   const painted = (await highlight.boundingBox())!;
   expect(rects.some((rect) => rect.x <= painted.x + 1.5 && rect.y <= painted.y + 1.5 &&
     rect.x + rect.width >= painted.x + painted.width - 1.5 && rect.y + rect.height >= painted.y + painted.height - 1.5)).toBe(true);
+});
+
+test('T22: triple click then shift-arrow each settle once with current selection geometry', async ({ page }) => {
+  await page.addInitScript({ content: `window.__selectionClock = (${selectionClock.toString()})();` });
+  await open(page);
+  const tick = (ms: number) => page.evaluate(async value => {
+    await (window as unknown as { __selectionClock: { tick(ms: number): Promise<void> } }).__selectionClock.tick(value);
+  }, ms);
+  await tick(350);
+  await page.evaluate(() => { (window as unknown as { __probe: { events: ProbeEvent[] } }).__probe.events = []; });
+  const position = await operate(page, async () => {
+    const probe = (window as unknown as { __probe: DocxProbe }).__probe;
+    const read = await probe.editor.readParagraphs({ story: 'body', view: 'accepted' });
+    if (!read.ok) throw new Error('Paragraph read failed');
+    const paragraph = read.paragraphs.find(candidate => candidate.text.length > 4)!;
+    const [result] = await probe.geometry.readAnchorGeometries([{ kind: 'range', version: read.version,
+      range: { story: 'body', view: 'accepted', start: { paraId: paragraph.paraId, offset: 0 }, end: { paraId: paragraph.paraId, offset: 4 } } }]);
+    if (!result?.ok || !result.rects[0]) throw new Error('No text box');
+    const box = result.rects[0];
+    const layer = document.querySelector('[data-testid="plugin-overlays"]')!.getBoundingClientRect();
+    return { x: layer.left + box.x + box.width / 2, y: layer.top + box.y + box.height / 2 };
+  });
+  await page.mouse.click(position.x, position.y, { clickCount: 3 });
+  const events = () => page.evaluate(() => (window as unknown as { __probe: { events: ProbeEvent[] } }).__probe.events.filter(event => event.type === 'selection-settle'));
+  const ready = () => operate(page, async () => {
+    const probe = (window as unknown as { __probe: DocxProbe }).__probe;
+    await probe.editor.flushPendingInput();
+    const [anchor] = await probe.geometry.readAnchorGeometries([{ kind: 'selection' }]);
+    return { anchor, text: (await probe.editor.readSelectionInfo())?.selectedText };
+  });
+  const triple = await ready();
+  expect(triple.anchor).toMatchObject({ ok: true });
+  expect(triple.text!.length).toBeGreaterThan(4);
+  await tick(349);
+  expect(await events()).toHaveLength(0);
+  await tick(1);
+  await expect.poll(async () => (await events()).length).toBe(1);
+  expect(await events()).toMatchObject([{ source: 'pointer' }]);
+  await page.evaluate(() => { (window as unknown as { __probe: { events: ProbeEvent[] } }).__probe.events = []; });
+  await page.keyboard.press('Shift+ArrowLeft');
+  const extended = await ready();
+  expect(extended.text).not.toBe(triple.text);
+  expect(extended.anchor).toMatchObject({ ok: true });
+  await tick(349);
+  expect(await events()).toHaveLength(0);
+  await tick(1);
+  await expect.poll(async () => (await events()).length).toBe(1);
+  expect(await events()).toMatchObject([{ source: 'keyboard' }]);
+  await tick(700);
+  expect(await events()).toHaveLength(1);
 });
 
 test('document focus excludes the plugin panel', async ({ page }) => {

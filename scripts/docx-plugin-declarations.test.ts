@@ -63,8 +63,9 @@ export const review = defineDocxPlugin<State>({
     switch (event.type) {
       case 'selection-settle': {
         const settled: DocxPluginSelectionSettleEvent = event;
-        const source: 'pointer' | 'touch' | 'keyboard' | 'api' = settled.source;
-        void [source, settled.version, settled.selection];
+        const source: 'pointer' | 'touch' | 'keyboard' = settled.source;
+        const publicSources: Record<typeof settled.source, true> = { pointer: true, touch: true, keyboard: true };
+        void [source, publicSources, settled.version, settled.selection];
         break;
       }
       case 'focus-change': {
