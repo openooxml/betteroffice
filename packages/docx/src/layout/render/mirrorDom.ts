@@ -297,7 +297,8 @@ export function reduceMirrorToText(mirror: HTMLElement): HTMLElement {
       const accessible = object || Boolean(element.getAttribute('aria-label'));
       if (element.children.length === 0) {
         if (element.textContent && !object) {
-          element.replaceWith(plainRun(element, element.textContent));
+          const marker = element.classList.contains(MIRROR_CLASS_NAMES.listMarker);
+          element.replaceWith(plainRun(element, marker ? `${element.textContent.trimEnd()} ` : element.textContent));
         } else if (!accessible) {
           element.remove();
         }
@@ -1130,7 +1131,7 @@ function populateParagraphBlock(
   for (const p of inLogicalOrder(prims)) {
     const child = renderMirrorPrimitive(p, doc, offsetY, ctx);
     const textRun = p.kind === 'glyphRun' || p.kind === 'text';
-    if (textRun && open && joinTextRunElement(open, child)) continue;
+    if (textRun && open && (joinTextRunElement(open, child) || joinNumberedMarker(open, child))) continue;
     el.appendChild(child);
     if (textRun) open = child;
     else if (p.kind !== 'decoration' && p.kind !== 'rect') open = null;
@@ -1174,26 +1175,8 @@ function isEmptyChartData(data: ChartData): boolean {
 const JOIN_IGNORED_ATTRIBUTES = new Set(['data-doc-start', 'data-doc-end', 'data-logical-order', 'style']);
 const JOIN_IGNORED_STYLES = new Set(['left', 'width']);
 
-/** One document position per UTF-16 unit, which a field result showing more text than it occupies does not have. */
-function coversItsText(run: HTMLElement, text: Text): boolean {
-  return Number(run.dataset.docEnd) - Number(run.dataset.docStart) === text.length;
-}
-
-/**
- * Appends text run `next` to the touching run `open` on the same line when
- * nothing else tells them apart, so a line shaped cluster by cluster reads as
- * one text node: screen readers otherwise hear each positioned cluster as its
- * own word. Returns false, touching nothing, when they differ.
- */
-function joinTextRunElement(open: HTMLElement, next: HTMLElement): boolean {
-  if (open.tagName !== next.tagName || open.id || next.id) return false;
-  const openText = open.firstChild;
-  const nextText = next.firstChild;
-  if (open.childNodes.length !== 1 || next.childNodes.length !== 1) return false;
-  if (openText?.nodeType !== 3 || nextText?.nodeType !== 3) return false;
-  const end = open.dataset.docEnd;
-  if (end === undefined || end !== next.dataset.docStart || next.dataset.docEnd === undefined) return false;
-  if (!coversItsText(open, openText as Text) || !coversItsText(next, nextText as Text)) return false;
+/** Whether `next` touches `open` on its line and nothing else tells them apart; widens `open` to cover both if so. */
+function joinTouchingBox(open: HTMLElement, next: HTMLElement): boolean {
   const openLeft = parseFloat(open.style.left);
   const openRight = openLeft + parseFloat(open.style.width);
   const nextLeft = parseFloat(next.style.left);
@@ -1216,6 +1199,40 @@ function joinTextRunElement(open: HTMLElement, next: HTMLElement): boolean {
   const left = Math.min(openLeft, nextLeft);
   open.style.left = `${left}px`;
   open.style.width = `${Math.max(openRight, nextRight) - left}px`;
+  return true;
+}
+
+/** Reads a number shaped run by run, such as "3", ".", "2", as one number. */
+function joinNumberedMarker(open: HTMLElement, next: HTMLElement): boolean {
+  const numbered = (run: HTMLElement) =>
+    run.classList.contains(MIRROR_CLASS_NAMES.listMarker) && !run.hasAttribute('aria-hidden');
+  if (!numbered(open) || !numbered(next) || open.tagName !== next.tagName) return false;
+  if (!joinTouchingBox(open, next)) return false;
+  open.textContent = `${open.textContent ?? ''}${next.textContent ?? ''}`;
+  return true;
+}
+
+/** One document position per UTF-16 unit, which a field result showing more text than it occupies does not have. */
+function coversItsText(run: HTMLElement, text: Text): boolean {
+  return Number(run.dataset.docEnd) - Number(run.dataset.docStart) === text.length;
+}
+
+/**
+ * Appends text run `next` to the touching run `open` on the same line when
+ * nothing else tells them apart, so a line shaped cluster by cluster reads as
+ * one text node: screen readers otherwise hear each positioned cluster as its
+ * own word. Returns false, touching nothing, when they differ.
+ */
+function joinTextRunElement(open: HTMLElement, next: HTMLElement): boolean {
+  if (open.tagName !== next.tagName || open.id || next.id) return false;
+  const openText = open.firstChild;
+  const nextText = next.firstChild;
+  if (open.childNodes.length !== 1 || next.childNodes.length !== 1) return false;
+  if (openText?.nodeType !== 3 || nextText?.nodeType !== 3) return false;
+  const end = open.dataset.docEnd;
+  if (end === undefined || end !== next.dataset.docStart || next.dataset.docEnd === undefined) return false;
+  if (!coversItsText(open, openText as Text) || !coversItsText(next, nextText as Text)) return false;
+  if (!joinTouchingBox(open, next)) return false;
   (openText as Text).appendData((nextText as Text).data);
   open.dataset.docEnd = next.dataset.docEnd;
   return true;
@@ -1378,10 +1395,13 @@ function inLogicalOrder<T extends BlockGroup['prims']>(prims: T): T {
   return prims.map((p) => (p.logicalOrder === undefined ? p : ordered[index++])) as T;
 }
 
-function applyListMarker(el: HTMLElement, p: { listMarker?: boolean; listMarkerRevision?: 'ins' | 'del' }): void {
+function applyListMarker(
+  el: HTMLElement,
+  p: { listMarker?: boolean; listMarkerNumbered?: boolean; listMarkerRevision?: 'ins' | 'del' }
+): void {
   if (!p.listMarker) return;
   el.classList.add(MIRROR_CLASS_NAMES.listMarker);
-  el.setAttribute('aria-hidden', 'true');
+  if (!p.listMarkerNumbered) el.setAttribute('aria-hidden', 'true');
   if (p.listMarkerRevision) {
     el.style.color = p.listMarkerRevision === 'ins' ? 'rgb(46, 125, 50)' : 'rgb(198, 40, 40)';
   }

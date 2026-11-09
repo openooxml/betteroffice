@@ -356,6 +356,8 @@ export interface DocAttrs {
   revision?: { author: string; date: string; revisionId: string; kind: 'ins' | 'del' | 'format' };
   /** Synthetic numbering glyph for the first line of a list paragraph. */
   listMarker?: boolean;
+  /** The marker is a number or label a reader needs, not a bullet. */
+  listMarkerNumbered?: boolean;
   /** Pending suggestion paint for a synthetic numbering glyph. */
   listMarkerRevision?: 'ins' | 'del';
   structuralRevision?: StructuralRevision;

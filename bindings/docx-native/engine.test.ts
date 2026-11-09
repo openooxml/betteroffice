@@ -1239,6 +1239,55 @@ test('native and wasm mark the same table row headers in the display list', () =
   expect(nativeCells).toEqual(run(wasm));
 });
 
+test('native and wasm mark the same list markers as numbered', () => {
+  const encoder = new TextEncoder();
+  const w = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+  const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const level = (format: string, text: string) =>
+    `<w:lvl w:ilvl="0"><w:start w:val="3"/><w:numFmt w:val="${format}"/><w:lvlText w:val="${text}"/><w:lvlJc w:val="left"/></w:lvl>`;
+  const item = (num: number, text: string) =>
+    `<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="${num}"/></w:numPr></w:pPr><w:r><w:t>${text}</w:t></w:r></w:p>`;
+  const bytes = wasm.rezip_docx({
+    '[Content_Types].xml': encoder.encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/></Types>'),
+    '_rels/.rels': encoder.encode(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/officeDocument" Target="word/document.xml"/></Relationships>`),
+    'word/_rels/document.xml.rels': encoder.encode(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/numbering" Target="numbering.xml"/></Relationships>`),
+    'word/numbering.xml': encoder.encode(`<w:numbering xmlns:w="${w}"><w:abstractNum w:abstractNumId="0">${level('decimal', 'Part %1.')}</w:abstractNum><w:abstractNum w:abstractNumId="1">${level('bullet', 'q')}</w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num><w:num w:numId="2"><w:abstractNumId w:val="1"/></w:num></w:numbering>`),
+    'word/document.xml': encoder.encode(`<w:document xmlns:w="${w}"><w:body>${item(1, 'Alpha')}${item(2, 'Beta')}<w:sectPr/></w:body></w:document>`),
+  });
+  const run = (engine: Engine) => {
+    const session = new engine.EditSession(79);
+    try {
+      session.open_docx(bytes, true);
+      const font = session.register_measure_font(fontBytes);
+      const fontChains = { 'calibri|0|0': [font], 'calibri|1|0': [font] };
+      const layout = session.layout_document_with_regions_json(JSON.stringify({
+        bodyStory: 'body',
+        regions: { sections: [{ sectionId: 'main', properties: {
+          pageWidth: 12240, pageHeight: 15840, marginTop: 1440, marginRight: 1440, marginBottom: 1440, marginLeft: 1440,
+        } }] },
+        measurement: { fontChains, defaults: { fontSize: 11, fontFamily: 'Calibri' }, authoritativeShaping: true },
+        renderEnv: { themeColors: (JSON.parse(session.materialize_docx() ?? '{}') as {
+          document?: { package?: { theme?: { colorScheme?: Record<string, string> } } };
+        }).document?.package?.theme?.colorScheme ?? {} },
+      }));
+      const list = JSON.parse(session.build_display_list_json(JSON.stringify({ ...JSON.parse(layout), fontChains }))) as {
+        pages: { primitives: { listMarker?: boolean; listMarkerNumbered?: boolean; text?: string }[] }[];
+      };
+      const markers = list.pages.flatMap((page) => page.primitives).filter((primitive) => primitive.listMarker);
+      return {
+        numbered: markers.filter((marker) => marker.listMarkerNumbered).map((marker) => marker.text).join(''),
+        hidden: markers.filter((marker) => !marker.listMarkerNumbered).map((marker) => marker.text).join(''),
+      };
+    } finally {
+      session.free();
+    }
+  };
+  const markers = run(native);
+  expect(markers.numbered.trim()).toBe('Part 3.');
+  expect(markers.hidden.trim()).not.toBe('');
+  expect(run(wasm)).toEqual(markers);
+});
+
 test('native and wasm carry the same chart data in the display list', () => {
   const encoder = new TextEncoder();
   const w = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
