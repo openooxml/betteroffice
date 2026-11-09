@@ -597,18 +597,19 @@ impl XlsxDocument {
         fonts: Option<Vec<PngFontFace>>,
     ) -> Result<Uint8Array> {
         let _call = EngineCall::new(env);
-        let fonts = fonts.unwrap_or_default();
-        let faces: Vec<_> = fonts
-            .iter()
-            .map(|face| betteroffice_xlsx::PngFontFace {
-                family: &face.family,
-                bold: face.bold.unwrap_or(false),
-                italic: face.italic.unwrap_or(false),
-                bytes: &face.bytes,
-            })
-            .collect();
+        let faces: Option<Vec<_>> = fonts.as_ref().map(|fonts| {
+            fonts
+                .iter()
+                .map(|face| betteroffice_xlsx::PngFontFace {
+                    family: &face.family,
+                    bold: face.bold.unwrap_or(false),
+                    italic: face.italic.unwrap_or(false),
+                    bytes: &face.bytes,
+                })
+                .collect()
+        });
         self.document(env)?
-            .render_png_target_with_faces(&target_json, &options_json, &faces)
+            .render_png_target_with_faces(&target_json, &options_json, faces.as_deref())
             .map_err(|error| map_error(env, error))
             .and_then(|bytes| byte_result(env, bytes))
     }

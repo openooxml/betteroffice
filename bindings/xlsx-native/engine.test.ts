@@ -141,7 +141,7 @@ describe('xlsx native engine parity', () => {
       zip.file('xl/workbook.xml', `<workbook xmlns="${main}" xmlns:r="${rels}"><sheets><sheet name="Fonts" sheetId="1" r:id="rId1"/></sheets></workbook>`);
       zip.file('xl/_rels/workbook.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rels}/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="${rels}/styles" Target="styles.xml"/></Relationships>`);
       zip.file('xl/styles.xml', `<styleSheet xmlns="${main}"><fonts count="1"><font><sz val="24"/><name val="Calibri"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf/></cellStyleXfs><cellXfs count="1"><xf/></cellXfs></styleSheet>`);
-      zip.file('xl/worksheets/sheet1.xml', `<worksheet xmlns="${main}"><cols><col min="1" max="1" width="40" customWidth="1"/></cols><sheetData><row r="1" ht="40" customHeight="1"><c r="A1" t="inlineStr"><is><t>ABCABC</t></is></c></row></sheetData></worksheet>`);
+      zip.file('xl/worksheets/sheet1.xml', `<worksheet xmlns="${main}"><cols><col min="1" max="1" width="40" customWidth="1"/></cols><sheetData><row r="1" ht="40" customHeight="1"><c r="A1" t="inlineStr"><is><t>ABCABC</t></is></c></row><row r="2" ht="40" customHeight="1"><c r="A2" t="inlineStr"><is><t>\u65e5\u672c\u8a9e \u0928\u092e\u0938\u094d\u0924\u0947</t></is></c></row></sheetData></worksheet>`);
       const entry = await import('./dist/index.js') as typeof import('../../packages/xlsx/src/index');
       await entry.initWasm();
       return entry.openWorkbook(await zip.generateAsync({ type: 'uint8array' }));
@@ -161,12 +161,15 @@ describe('xlsx native engine parity', () => {
       }
     });
 
-    test('a face for a family the sheet does not use changes nothing and is never loaded', async () => {
+    test('an absent list keeps the bundled faces and an explicit one replaces them', async () => {
       const workbook = await openFixture();
       try {
-        const baseline = Buffer.from(await workbook.renderPng(view));
-        const rendered = await workbook.renderPng(view, { fonts: [{ family: 'Not Used', bytes: new Uint8Array([1, 2, 3]) }] });
-        expect(Buffer.from(rendered).equals(baseline)).toBe(true);
+        const absent = Buffer.from(await workbook.renderPng(view));
+        const empty = Buffer.from(await workbook.renderPng(view, { fonts: [] }));
+        expect(empty.equals(absent)).toBe(false);
+        expect(Buffer.from(await workbook.renderPng(view)).equals(absent)).toBe(true);
+        const unused = await workbook.renderPng(view, { fonts: [{ family: 'Not Used', bytes: new Uint8Array([1, 2, 3]) }] });
+        expect(Buffer.from(unused).equals(empty)).toBe(true);
       } finally {
         workbook.dispose();
       }

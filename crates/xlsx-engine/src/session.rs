@@ -619,16 +619,16 @@ impl Session {
         target_json: &str,
         options_json: &str,
     ) -> Result<Vec<u8>, String> {
-        self.render_png_target_with_faces(target_json, options_json, &[])
+        self.render_png_target_with_faces(target_json, options_json, None)
     }
 
-    /// [`Self::render_png_target`], painting with `faces` for this export only.
+    /// [`Self::render_png_target`]. `Some` paints with those faces alone, for this export only.
     #[cfg(feature = "raster")]
     pub fn render_png_target_with_faces(
         &self,
         target_json: &str,
         options_json: &str,
-        faces: &[betteroffice_xlsx::PngFontFace<'_>],
+        faces: Option<&[betteroffice_xlsx::PngFontFace<'_>]>,
     ) -> Result<Vec<u8>, String> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]

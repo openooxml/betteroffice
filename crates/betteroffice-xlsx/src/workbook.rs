@@ -3054,16 +3054,16 @@ impl Workbook {
         target: crate::PngTarget,
         options: &RenderOptions,
     ) -> Result<RenderedPng> {
-        self.render_png_with_faces(target, options, &[])
+        self.render_png_with_faces(target, options, None)
     }
 
-    /// [`Self::render_png`], painting with `faces` for this export only.
+    /// [`Self::render_png`]. `Some` paints with those faces alone, for this export only; `None` resolves bundled faces.
     #[cfg(feature = "raster")]
     pub fn render_png_with_faces(
         &self,
         target: crate::PngTarget,
         options: &RenderOptions,
-        faces: &[crate::PngFontFace<'_>],
+        faces: Option<&[crate::PngFontFace<'_>]>,
     ) -> Result<RenderedPng> {
         if !(options.scale.is_finite() && options.scale > 0.0) {
             return Err(Error::InvalidScale(options.scale));
@@ -3113,24 +3113,23 @@ impl Workbook {
         display_list: &DisplayList,
         width: u32,
         height: u32,
-        faces: &[crate::PngFontFace<'_>],
+        faces: Option<&[crate::PngFontFace<'_>]>,
     ) -> Result<RenderedPng> {
         #[cfg(feature = "fonts")]
-        let bytes = {
-            let fonts = self.raster_fonts(display_list)?;
-            if faces.is_empty() {
+        let bytes = match faces {
+            Some(faces) => xlsx_raster::render_png_with_fonts(
+                display_list,
+                &crate::font::supplied_fonts(display_list, faces)?,
+            ),
+            None => {
+                let fonts = self.raster_fonts(display_list)?;
                 xlsx_raster::render_png_with_fonts(display_list, fonts.fonts())
-            } else {
-                xlsx_raster::render_png_with_fonts(
-                    display_list,
-                    &fonts.with_supplied(display_list, faces)?,
-                )
             }
-            .map_err(Error::Raster)?
-        };
+        }
+        .map_err(Error::Raster)?;
         #[cfg(not(feature = "fonts"))]
         let bytes = {
-            if let Some(face) = faces.first() {
+            if let Some(face) = faces.and_then(<[_]>::first) {
                 return Err(Error::FontUnavailable {
                     family: face.family.to_owned(),
                 });
@@ -3162,16 +3161,16 @@ impl Workbook {
 
     #[cfg(feature = "raster")]
     pub fn render_sheet(&self, sheet: SheetId, options: &RenderOptions) -> Result<RenderedPng> {
-        self.render_sheet_with_faces(sheet, options, &[])
+        self.render_sheet_with_faces(sheet, options, None)
     }
 
-    /// [`Self::render_sheet`], painting with `faces` for this export only.
+    /// [`Self::render_sheet`], with `faces` as in [`Self::render_png_with_faces`].
     #[cfg(feature = "raster")]
     pub fn render_sheet_with_faces(
         &self,
         sheet: SheetId,
         options: &RenderOptions,
-        faces: &[crate::PngFontFace<'_>],
+        faces: Option<&[crate::PngFontFace<'_>]>,
     ) -> Result<RenderedPng> {
         let (display_list, width, height) = self.range_png_display_list_for(sheet, options)?;
         self.rasterize_display_list(&display_list, width, height, faces)

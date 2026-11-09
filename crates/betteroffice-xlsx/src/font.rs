@@ -218,53 +218,48 @@ fn supplied_face<'a, 'b>(
     })
 }
 
-impl FontRegistry {
-    /// The fonts for one export: each supplied face first, then the faces resolved for that font.
-    pub(crate) fn with_supplied(
-        &self,
-        display: &DisplayList,
-        faces: &[PngFontFace<'_>],
-    ) -> Result<RasterFonts> {
-        let mut fonts = RasterFonts::default();
-        let mut seen = HashSet::new();
-        for command in &display.commands {
-            let DrawCmd::Text {
-                font_family,
-                bold,
-                italic,
-                chart,
-                ..
-            } = command
-            else {
-                continue;
-            };
-            let family = font_family.as_deref().unwrap_or("Calibri");
-            if !seen.insert((family.trim().to_lowercase(), *bold, *italic)) {
-                continue;
-            }
-            if let Some(face) = font_family
-                .as_deref()
-                .and_then(|name| suppliable_family(name, *chart))
-                .and_then(|name| supplied_face(faces, name, *bold, *italic))
-            {
-                fonts
-                    .register_font(
-                        family,
-                        *bold,
-                        *italic,
-                        face.bytes.to_vec(),
-                        face.bold,
-                        face.italic,
-                    )
-                    .map_err(|_| Error::FontUnavailable {
-                        family: face.family.to_owned(),
-                    })?;
-            }
-            fonts.extend_chain(&self.fonts, family, *bold, *italic);
+/// The fonts for an export given `faces`: those alone, as the canvas export paints without the bundled faces.
+pub(crate) fn supplied_fonts(
+    display: &DisplayList,
+    faces: &[PngFontFace<'_>],
+) -> Result<RasterFonts> {
+    let mut fonts = RasterFonts::default();
+    let mut seen = HashSet::new();
+    for command in &display.commands {
+        let DrawCmd::Text {
+            font_family: Some(family),
+            bold,
+            italic,
+            chart,
+            ..
+        } = command
+        else {
+            continue;
+        };
+        if !seen.insert((family.trim().to_lowercase(), *bold, *italic)) {
+            continue;
         }
-        Ok(fonts)
+        if let Some(face) = suppliable_family(family, *chart)
+            .and_then(|name| supplied_face(faces, name, *bold, *italic))
+        {
+            fonts
+                .register_font(
+                    family,
+                    *bold,
+                    *italic,
+                    face.bytes.to_vec(),
+                    face.bold,
+                    face.italic,
+                )
+                .map_err(|_| Error::FontUnavailable {
+                    family: face.family.to_owned(),
+                })?;
+        }
     }
+    Ok(fonts)
+}
 
+impl FontRegistry {
     pub(crate) fn fonts(&self) -> &RasterFonts {
         &self.fonts
     }
