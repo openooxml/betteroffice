@@ -1101,21 +1101,34 @@ mod tests {
 
     #[test]
     fn a_cell_holding_only_a_block_control_resolves_through_its_content_story() {
-        for cell in [
-            block_control(1, INSIDE),
-            block_control(1, &block_control(2, INSIDE)),
-        ] {
-            let doc = cell_doc(&cell);
-            let layout = layout_positions(&doc);
-            assert!(
-                layout.0.iter().any(|paragraph| paragraph.1 == "00000008"),
-                "the control's paragraph is laid out"
-            );
-            let value =
-                serde_json::to_value(doc.resident_geometry("body", &whole(None)).unwrap()).unwrap();
-            assert_eq!(resident_positions(&value), layout);
-            assert_eq!(value["tables"][0]["cells"][0]["paraId"], "00000008");
-        }
+        let doc = cell_doc(&block_control(1, INSIDE));
+        let layout = layout_positions(&doc);
+        assert!(
+            layout.0.iter().any(|paragraph| paragraph.1 == "00000008"),
+            "the control's paragraph is laid out"
+        );
+        let value =
+            serde_json::to_value(doc.resident_geometry("body", &whole(None)).unwrap()).unwrap();
+        assert_eq!(resident_positions(&value), layout);
+        assert_eq!(value["tables"][0]["cells"][0]["paraId"], "00000008");
+    }
+
+    #[test]
+    fn a_cell_holding_only_nested_block_controls_records_each_control() {
+        let doc = cell_doc(&block_control(1, &block_control(2, INSIDE)));
+        let value =
+            serde_json::to_value(doc.resident_geometry("body", &whole(None)).unwrap()).unwrap();
+        let (paragraphs, _, controls) = resident_positions(&value);
+        assert_eq!(paragraphs, layout_positions(&doc).0);
+        // The paragraph's content is 6..12, so its node is 5..13 and each control wraps the next.
+        assert_eq!(
+            controls,
+            BTreeSet::from([
+                ("body:t0:r0c0:sdt0".to_owned(), 3, 15),
+                ("body:t0:r0c0:sdt0:sdt0".to_owned(), 4, 14),
+            ])
+        );
+        assert_eq!(value["tables"][0]["cells"][0]["paraId"], "00000008");
     }
 
     #[test]
