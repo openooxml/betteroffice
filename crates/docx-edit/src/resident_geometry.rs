@@ -143,6 +143,41 @@ fn array(value: Option<&Any>) -> &[Any] {
     }
 }
 
+/// The first paragraph of `story`, through the block controls it holds when it
+/// has none of its own. Empty when the story holds no paragraph at all.
+fn first_paragraph_id(
+    doc: &EditingDoc,
+    outline: &GeometryPositionOutline,
+    story: &str,
+    depth: usize,
+) -> Result<String, String> {
+    if let Some(paragraph) = outline
+        .get(story)
+        .and_then(|projected| projected.paragraphs.first())
+    {
+        return Ok(paragraph.para_id.clone());
+    }
+    if depth > 256 {
+        return Ok(String::new());
+    }
+    let units = doc
+        .story_segment_units(story)
+        .map_err(|error| error.to_string())?;
+    for segment in units.iter().flatten() {
+        let SegmentContent::OtherEmbed { kind, payload } = &segment.content else {
+            continue;
+        };
+        if kind == "blockSdt" {
+            let content = child(payload.get("story"), format!("{story}:sdt0"));
+            let para_id = first_paragraph_id(doc, outline, &content, depth + 1)?;
+            if !para_id.is_empty() {
+                return Ok(para_id);
+            }
+        }
+    }
+    Ok(String::new())
+}
+
 fn child(value: Option<&Any>, fallback: String) -> String {
     match value {
         Some(Any::String(value)) => value.to_string(),
@@ -179,49 +214,57 @@ impl ResidentGeometryIndex {
             let mut cursor = projected.content_start;
             let mut table_index = 0;
             for (index, unit) in units.iter().enumerate() {
-                let Some(properties) = unit.iter().find_map(|segment| match &segment.content {
+                let properties = unit.iter().find_map(|segment| match &segment.content {
                     SegmentContent::Pilcrow(properties) => Some(properties),
                     _ => None,
-                }) else {
-                    continue;
+                });
+                // A story can end in a block control with no paragraph after it.
+                let paragraph = match properties {
+                    Some(properties) => match paragraphs.get(properties.para_id.as_str()) {
+                        Some(paragraph) => Some(*paragraph),
+                        None => continue,
+                    },
+                    None => None,
                 };
-                let Some(paragraph) = paragraphs.get(properties.para_id.as_str()) else {
-                    continue;
-                };
-                let from = projected.content_start + paragraph.display_start + 1;
-                let to = from + paragraph.length;
-                let mut expanded = 0;
-                let inline = paragraph
-                    .controls
-                    .iter()
-                    .map(|&[offset, size]| {
-                        let start = from + offset + expanded;
-                        expanded += size - 1;
-                        (start, size)
-                    })
-                    .collect();
-                records.push((
-                    from,
-                    to,
-                    Item::Paragraph(ResidentParagraph {
-                        story: story.clone(),
-                        para_id: properties.para_id.clone(),
-                        index: index as u32,
+                if let (Some(properties), Some(paragraph)) = (properties, paragraph) {
+                    let from = projected.content_start + paragraph.display_start + 1;
+                    let to = from + paragraph.length;
+                    let mut expanded = 0;
+                    let inline = paragraph
+                        .controls
+                        .iter()
+                        .map(|&[offset, size]| {
+                            let start = from + offset + expanded;
+                            expanded += size - 1;
+                            (start, size)
+                        })
+                        .collect();
+                    records.push((
                         from,
                         to,
-                        leading: paragraph.leading,
-                        length: paragraph.length - expanded + paragraph.leading,
-                        story_order: 0,
-                        controls: Vec::new(),
-                    }),
-                    inline,
-                ));
+                        Item::Paragraph(ResidentParagraph {
+                            story: story.clone(),
+                            para_id: properties.para_id.clone(),
+                            index: index as u32,
+                            from,
+                            to,
+                            leading: paragraph.leading,
+                            length: paragraph.length - expanded + paragraph.leading,
+                            story_order: 0,
+                            controls: Vec::new(),
+                        }),
+                        inline,
+                    ));
+                }
                 let mut leading = 0;
                 for segment in unit {
                     let SegmentContent::OtherEmbed { kind, payload } = &segment.content else {
                         continue;
                     };
                     if kind == "table" {
+                        let Some(paragraph) = paragraph else {
+                            break;
+                        };
                         let id = tables.len();
                         let start = cursor;
                         let mut size = 0;
@@ -257,12 +300,7 @@ impl ResidentGeometryIndex {
                                     .size;
                                 let cell_from = start + 2 + size + row_size;
                                 let cell_to = cell_from + content_size + 2;
-                                let para_id = outline[&cell_story]
-                                    .paragraphs
-                                    .first()
-                                    .ok_or_else(|| "missing cell paragraph".to_owned())?
-                                    .para_id
-                                    .clone();
+                                let para_id = first_paragraph_id(doc, &outline, &cell_story, 0)?;
                                 let cell = ResidentCell {
                                     story: cell_story,
                                     para_id,
@@ -329,7 +367,10 @@ impl ResidentGeometryIndex {
                         leading += 1;
                     }
                 }
-                cursor = projected.content_start + paragraph.display_start + paragraph.length + 2;
+                if let Some(paragraph) = paragraph {
+                    cursor =
+                        projected.content_start + paragraph.display_start + paragraph.length + 2;
+                }
             }
         }
         let mut containers: Vec<(u64, u64, Vec<&str>)> = tables
