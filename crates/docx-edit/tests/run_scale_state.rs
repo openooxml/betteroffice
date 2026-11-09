@@ -65,8 +65,13 @@ fn a_state_holding_a_run_scale_of_0_lays_out_at_full_width() {
         serde_json::from_str(&engine.build_display_list_json(&output).unwrap()).unwrap();
     let mut runs = Vec::new();
     drawn_runs(&display, &mut runs);
-    assert!(!runs.is_empty(), "the run is drawn");
+    let text: String = runs.iter().filter_map(|run| run["text"].as_str()).collect();
+    assert_eq!(text, "Scaled", "{runs:?}");
     for run in runs {
         assert_eq!(run.get("horizontalScale"), None, "{run}");
+        assert!(
+            run["width"].as_f64().is_none_or(|width| width > 0.0),
+            "{run}"
+        );
     }
 }
