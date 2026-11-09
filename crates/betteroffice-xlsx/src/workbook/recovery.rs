@@ -1737,7 +1737,7 @@ mod tests {
                     .unwrap()
                     .facts()
                     .unpatchable_reference_part(),
-                Some("xl/workbook.xml")
+                Some("xl/charts/chart1.xml")
             );
             let failure = book
                 .apply_ops(
@@ -1751,7 +1751,7 @@ mod tests {
                 .unwrap_err();
             assert_eq!(
                 failure.to_string(),
-                "xl/workbook.xml references cells this edit would move, and it cannot be rewritten"
+                "xl/charts/chart1.xml references cells this edit would move, and it cannot be rewritten"
             );
             assert_eq!(book.save().unwrap(), saved);
         }

@@ -43,6 +43,9 @@ pub(crate) const NS_PACKAGE_RELATIONSHIPS: &str =
 const NS_CHART: &str = "http://schemas.openxmlformats.org/drawingml/2006/chart";
 /// `cx:chartSpace`, whose reference syntax and caches are their own vocabulary.
 const NS_CHART_EX: &str = "http://schemas.microsoft.com/office/drawing/2014/chartex";
+/// The 2012 chart extensions, whose `f` and `sqref` hold more references: a
+/// data label range, the full range behind a filtered series.
+const NS_CHART_2012: &str = "http://schemas.microsoft.com/office/drawing/2012/chart";
 /// the worksheet drawing vocabulary that carries the anchors.
 pub(crate) const NS_SPREADSHEET_DRAWING: &str =
     "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing";
@@ -1731,22 +1734,35 @@ pub(crate) fn chart_reference_areas(
     owner: Option<&str>,
 ) -> Result<Option<Vec<(String, CellRef)>>, ParseError> {
     let root = parse_tree(part)?;
-    if !names_are_resolvable(&root) || unsupported_reference_form(&root, 0) {
+    if !names_are_resolvable(&root) || unreadable_reference_form(&root, 0) {
         return Ok(None);
     }
+    let mut formulas = ref_sites(&root)?
+        .into_iter()
+        .map(|site| site.formula)
+        .collect::<Vec<_>>();
+    extension_reference_texts(&root, 0, &mut formulas);
     let mut areas = Vec::new();
-    for site in ref_sites(&root)? {
-        let formula = site.formula.trim();
-        if formula.is_empty() || formula == ErrorValue::Ref.as_str() {
+    for formula in &formulas {
+        let formula = formula.trim();
+        if formula.is_empty()
+            || formula == ErrorValue::Ref.as_str()
+            || is_string_literal(formula)
+            || is_external_area(formula)
+        {
             continue;
         }
         let Some((qualifier, area)) = split_qualifier(formula) else {
             return Ok(None);
         };
-        let (Some(sheet), Some((_, end))) = (
-            qualifier.or_else(|| owner.map(str::to_owned)),
-            parse_area(area),
-        ) else {
+        let Some(sheet) = qualifier.or_else(|| owner.map(str::to_owned)) else {
+            return Ok(None);
+        };
+        if area == ErrorValue::Ref.as_str() {
+            areas.push((sheet, CellRef::new(0, 0)));
+            continue;
+        }
+        let Some((_, end)) = parse_area(area) else {
             return Ok(None);
         };
         areas.push((sheet, end));
@@ -1852,6 +1868,77 @@ fn chart_claims(element: &Element, depth: usize) -> usize {
 /// classic `c:chartSpace` whose references are all `c:f` is covered; ChartEx,
 /// pivot-sourced and externally-cached charts, and the `sqref` extension
 /// references filtered series carry, are not.
+/// [`unsupported_reference_form`] as the structural-edit guard reads it: the
+/// 2012 extensions' `f` and `sqref` are no reason to assume every cell named,
+/// since [`extension_reference_texts`] reads them as references of their own.
+/// Nothing rewrites them, so an edit moving what they name is still refused.
+fn unreadable_reference_form(element: &Element, depth: usize) -> bool {
+    if depth == 0 && !element.is(NS_CHART, "chartSpace") {
+        return true;
+    }
+    if depth > MAX_DEPTH {
+        return true;
+    }
+    let extension =
+        element.namespace() == Some(NS_CHART_2012) && matches!(element.local_name(), "f" | "sqref");
+    let unsupported = !extension
+        && (element.namespace() == Some(NS_CHART_EX)
+            || element.local_name() == "sqref"
+            || element.is(NS_CHART, "pivotSource")
+            || element.is(NS_CHART, "externalData")
+            || (element.local_name() == "f" && element.namespace() != Some(NS_CHART)));
+    unsupported
+        || element
+            .child_elements()
+            .any(|child| unreadable_reference_form(child, depth + 1))
+}
+
+/// The text of every 2012 extension `f` and `sqref`, each one reference.
+fn extension_reference_texts(element: &Element, depth: usize, out: &mut Vec<String>) {
+    if depth > MAX_DEPTH {
+        return;
+    }
+    if element.namespace() == Some(NS_CHART_2012) && matches!(element.local_name(), "f" | "sqref") {
+        out.push(element.text_content());
+        return;
+    }
+    for child in element.child_elements() {
+        extension_reference_texts(child, depth + 1, out);
+    }
+}
+
+/// `"text"`, a doubled quote escaping one: series text written as a literal,
+/// which names no cell.
+fn is_string_literal(formula: &str) -> bool {
+    formula.len() >= 2
+        && formula.starts_with('"')
+        && formula.ends_with('"')
+        && !formula[1..formula.len() - 1]
+            .replace("\"\"", "")
+            .contains('"')
+}
+
+/// `[1]Sheet!$A$1` or `'[1]Sheet name'!$A$1`: an area in another workbook,
+/// which names no sheet of this one.
+fn is_external_area(formula: &str) -> bool {
+    let (quoted, body) = match formula.strip_prefix('\'') {
+        Some(rest) => (true, rest),
+        None => (false, formula),
+    };
+    let Some((index, rest)) = body.strip_prefix('[').and_then(|body| body.split_once(']')) else {
+        return false;
+    };
+    if index.is_empty() || !index.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    let local = if quoted {
+        format!("'{rest}")
+    } else {
+        rest.to_owned()
+    };
+    matches!(split_qualifier(&local), Some((Some(_), area)) if parse_area(area).is_some())
+}
+
 fn unsupported_reference_form(element: &Element, depth: usize) -> bool {
     if depth == 0 && !element.is(NS_CHART, "chartSpace") {
         return true;
