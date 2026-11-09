@@ -58,6 +58,9 @@ impl Parts<'_> {
         let (directory, file) = source.rsplit_once('/').unwrap_or(("", source));
         let path = format!("{directory}/_rels/{file}.rels");
         let root = self.part(&path, complete)?;
+        if root.as_ref().is_some_and(Node::has_alternate_content) {
+            *complete = false;
+        }
         if root
             .as_ref()
             .is_some_and(|root| root.name != "Relationships")

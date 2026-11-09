@@ -8,6 +8,60 @@ pub const OPENING_VIEWPORT_ROWS: u32 = 50;
 pub const OPENING_VIEWPORT_COLUMNS: u32 = 20;
 const MAX_STYLE_ENTRIES: usize = 4096;
 
+#[derive(Clone, Copy)]
+enum AlternateMode {
+    Styles,
+    Worksheet,
+    Unsupported,
+}
+
+fn resolve_alternate_content(node: &mut Node, mode: AlternateMode, complete: &mut bool) {
+    let mut children = Vec::new();
+    let mut wrapped = false;
+    for mut child in std::mem::take(&mut node.children) {
+        if child.name != "AlternateContent" {
+            resolve_alternate_content(&mut child, mode, complete);
+            children.push(child);
+            continue;
+        }
+        wrapped = true;
+        if matches!(mode, AlternateMode::Unsupported)
+            || (matches!(mode, AlternateMode::Worksheet)
+                && !matches!(node.name, "s:sheetData" | "s:row" | "s:c"))
+        {
+            *complete = false;
+        }
+        let mut taken = false;
+        for mut branch in child.children {
+            if !matches!(branch.name, "Choice" | "Fallback") {
+                *complete = false;
+                resolve_alternate_content(&mut branch, mode, complete);
+                children.push(branch);
+                continue;
+            }
+            if taken && matches!(mode, AlternateMode::Styles) {
+                continue;
+            }
+            taken = true;
+            branch.name = node.name;
+            resolve_alternate_content(&mut branch, mode, complete);
+            children.extend(branch.children);
+        }
+        if !taken {
+            *complete = false;
+        }
+    }
+    if wrapped && matches!(mode, AlternateMode::Worksheet) && node.name == "s:c" {
+        let mut seen = BTreeSet::new();
+        children.reverse();
+        children.retain(|child| {
+            !matches!(child.name, "s:v" | "s:f" | "s:is") || seen.insert(child.name)
+        });
+        children.reverse();
+    }
+    node.children = children;
+}
+
 fn flag(value: Option<&str>) -> bool {
     value.is_some_and(|value| matches!(value, "1" | "true" | "on"))
 }
@@ -114,69 +168,70 @@ impl Styles {
             format_ids: Vec::new(),
         };
         let Some(root) = root else { return result };
-        if let Some(fonts) = root.child("s:fonts") {
-            for (index, node) in fonts
-                .children
-                .iter()
-                .filter(|node| node.name == "s:font")
-                .enumerate()
-            {
-                if index == MAX_STYLE_ENTRIES {
-                    *complete = false;
-                    break;
-                }
-                result.fonts.push(Font {
-                    family: node.val("s:name").map(unescape),
-                    bold: node
-                        .child("s:b")
-                        .is_some_and(|node| node.attr("val").is_none_or(|value| flag(Some(value)))),
-                    italic: node
-                        .child("s:i")
-                        .is_some_and(|node| node.attr("val").is_none_or(|value| flag(Some(value)))),
-                    scheme: node.child("s:scheme").is_some(),
-                });
+        for (index, node) in root
+            .children
+            .iter()
+            .filter(|node| node.name == "s:fonts")
+            .flat_map(|node| &node.children)
+            .filter(|node| node.name == "s:font")
+            .enumerate()
+        {
+            if index == MAX_STYLE_ENTRIES {
+                *complete = false;
+                break;
             }
+            let property = |name| node.children.iter().rev().find(|child| child.name == name);
+            result.fonts.push(Font {
+                family: property("s:name")
+                    .and_then(|node| node.attr("val"))
+                    .map(unescape),
+                bold: property("s:b")
+                    .is_some_and(|node| node.attr("val").is_none_or(|value| flag(Some(value)))),
+                italic: property("s:i")
+                    .is_some_and(|node| node.attr("val").is_none_or(|value| flag(Some(value)))),
+                scheme: property("s:scheme").is_some(),
+            });
         }
-        if let Some(formats) = root.child("s:numFmts") {
-            for (index, node) in formats
-                .children
-                .iter()
-                .filter(|node| node.name == "s:numFmt")
-                .enumerate()
-            {
-                if index == MAX_STYLE_ENTRIES {
-                    *complete = false;
-                    break;
-                }
-                if let Some(id) = number(node, "numFmtId", complete) {
-                    result
-                        .custom_formats
-                        .insert(id, node.attr("formatCode").unwrap_or_default().to_owned());
-                }
+        for (index, node) in root
+            .children
+            .iter()
+            .filter(|node| node.name == "s:numFmts")
+            .flat_map(|node| &node.children)
+            .filter(|node| node.name == "s:numFmt")
+            .enumerate()
+        {
+            if index == MAX_STYLE_ENTRIES {
+                *complete = false;
+                break;
             }
-        }
-        if let Some(xfs) = root.child("s:cellXfs") {
-            for (index, node) in xfs
-                .children
-                .iter()
-                .filter(|node| node.name == "s:xf")
-                .enumerate()
-            {
-                if index == MAX_STYLE_ENTRIES {
-                    *complete = false;
-                    break;
-                }
-                result.xfs.push(
-                    if node.attr("applyFont").is_none_or(|value| flag(Some(value))) {
-                        number(node, "fontId", complete)
-                    } else {
-                        None
-                    },
-                );
+            if let Some(id) = number(node, "numFmtId", complete) {
                 result
-                    .format_ids
-                    .push(number(node, "numFmtId", complete).unwrap_or(0));
+                    .custom_formats
+                    .insert(id, node.attr("formatCode").unwrap_or_default().to_owned());
             }
+        }
+        for (index, node) in root
+            .children
+            .iter()
+            .filter(|node| node.name == "s:cellXfs")
+            .flat_map(|node| &node.children)
+            .filter(|node| node.name == "s:xf")
+            .enumerate()
+        {
+            if index == MAX_STYLE_ENTRIES {
+                *complete = false;
+                break;
+            }
+            result.xfs.push(
+                if node.attr("applyFont").is_none_or(|value| flag(Some(value))) {
+                    number(node, "fontId", complete)
+                } else {
+                    None
+                },
+            );
+            result
+                .format_ids
+                .push(number(node, "numFmtId", complete).unwrap_or(0));
         }
         result
     }
@@ -225,9 +280,10 @@ pub fn xlsx_font_preflight(bytes: &[u8]) -> Result<FontPreflight, PreflightError
         nodes: xml::MAX_NODES,
     };
     let mut complete = true;
-    let workbook = parts
+    let mut workbook = parts
         .part("xl/workbook.xml", &mut complete)?
         .ok_or(PreflightError::MissingPart)?;
+    resolve_alternate_content(&mut workbook, AlternateMode::Unsupported, &mut complete);
     if workbook.name != "s:workbook" {
         return Err(PreflightError::Xml);
     }
@@ -266,9 +322,10 @@ pub fn xlsx_font_preflight(bytes: &[u8]) -> Result<FontPreflight, PreflightError
         .find(|rel| Some(rel.id.as_str()) == id && rel.kind == "worksheet")
         .map(|rel| rel.target.as_str())
         .unwrap_or(&fallback_path);
-    let sheet = parts
+    let mut sheet = parts
         .part(path, &mut complete)?
         .ok_or(PreflightError::MissingPart)?;
+    resolve_alternate_content(&mut sheet, AlternateMode::Worksheet, &mut complete);
     if sheet.name != "s:worksheet" {
         return Err(PreflightError::Xml);
     }
@@ -277,7 +334,10 @@ pub fn xlsx_font_preflight(bytes: &[u8]) -> Result<FontPreflight, PreflightError
         .find(|rel| rel.kind == "styles")
         .map(|rel| rel.target.as_str())
         .unwrap_or("xl/styles.xml");
-    let styles = parts.part(styles_path, &mut complete)?;
+    let mut styles = parts.part(styles_path, &mut complete)?;
+    if let Some(styles) = &mut styles {
+        resolve_alternate_content(styles, AlternateMode::Styles, &mut complete);
+    }
     if styles.is_none() && rels.iter().any(|rel| rel.kind == "styles") {
         complete = false;
     }
@@ -355,15 +415,26 @@ pub fn xlsx_font_preflight(bytes: &[u8]) -> Result<FontPreflight, PreflightError
             }
         }
     }
-    let mut cells = BTreeMap::new();
-    let mut string_ids = BTreeSet::new();
+    let mut candidates = BTreeMap::new();
+    let mut hidden_rows = [false; OPENING_VIEWPORT_ROWS as usize];
     if let Some(data) = sheet.child("s:sheetData") {
         for row in &data.children {
             if row.name != "s:row" {
                 continue;
             }
-            let row_hidden = flag(row.attr("hidden"))
-                || row.attr("ht").and_then(|value| value.parse::<f64>().ok()) == Some(0.0);
+            let height = row.attr("ht").and_then(|value| value.parse::<f64>().ok());
+            let index = number(row, "r", &mut complete).unwrap_or(1).checked_sub(1);
+            if let Some(index) = index {
+                if let Some(hidden) = hidden_rows.get_mut(index) {
+                    if flag(row.attr("hidden")) || height == Some(0.0) {
+                        *hidden = true;
+                    } else if height.is_some() {
+                        *hidden = false;
+                    }
+                }
+            } else {
+                complete = false;
+            }
             for cell in &row.children {
                 if cell.name != "s:c" {
                     continue;
@@ -375,71 +446,86 @@ pub fn xlsx_font_preflight(bytes: &[u8]) -> Result<FontPreflight, PreflightError
                 if r >= OPENING_VIEWPORT_ROWS || c >= OPENING_VIEWPORT_COLUMNS {
                     continue;
                 }
-                if row_hidden || hidden_columns[c as usize] {
-                    if merged_anchors[r as usize][c as usize] {
+                if cell.attr("s").is_none()
+                    && cell.child("s:f").is_none()
+                    && cell.attr("t").is_none_or(|kind| kind == "n")
+                    && cell
+                        .child("s:v")
+                        .is_none_or(|node| node.text.trim().is_empty())
+                {
+                    if candidates.contains_key(&(r, c)) {
                         complete = false;
                     }
                     continue;
                 }
-                if covered[r as usize][c as usize] {
-                    continue;
-                }
-                if cell.child("s:f").is_some() {
-                    complete = false;
-                }
-                let value = cell.child("s:v").map(|node| node.text.as_str());
-                let kind = cell.attr("t").unwrap_or("n");
-                let inline = cell.child("s:is");
-                if !matches!(kind, "n" | "s" | "str" | "inlineStr" | "b" | "e") {
-                    complete = false;
-                    continue;
-                }
-                if kind == "n"
-                    && value.is_some_and(|value| {
-                        !value.trim().is_empty() && value.trim().parse::<f64>().is_err()
-                    })
-                {
-                    complete = false;
-                    continue;
-                }
-                if kind == "inlineStr" {
-                    let mut pieces = Vec::new();
-                    if let Some(inline) = inline {
-                        text_pieces(inline, &mut pieces);
-                    }
-                    if pieces.iter().all(|piece| piece.is_empty()) {
-                        continue;
-                    }
-                } else if value.is_none_or(str::is_empty)
-                    || (kind == "n" && value.is_some_and(|value| value.trim().is_empty()))
-                {
-                    continue;
-                }
-                let style = number(cell, "s", &mut complete).unwrap_or(0);
-                if let Some(code) = styles
-                    .format_ids
-                    .get(style)
-                    .and_then(|id| styles.custom_formats.get(id))
-                {
-                    if code == ";;;" {
-                        continue;
-                    }
-                    complete = false;
-                }
-                if kind == "s" {
-                    if let Some(id) = value.and_then(|value| value.trim().parse::<usize>().ok()) {
-                        string_ids.insert(id);
-                    } else {
-                        complete = false;
-                    }
-                }
-                if cells.insert((r, c), (cell, style)).is_some() {
-                    complete = false;
-                }
+                candidates.insert((r, c), cell);
             }
         }
     }
-    let shared = if string_ids.is_empty() {
+    let mut cells = BTreeMap::new();
+    let mut string_ids = BTreeSet::new();
+    for ((r, c), cell) in candidates {
+        if hidden_rows[r as usize] || hidden_columns[c as usize] {
+            if merged_anchors[r as usize][c as usize] {
+                complete = false;
+            }
+            continue;
+        }
+        if covered[r as usize][c as usize] {
+            continue;
+        }
+        if cell.child("s:f").is_some() {
+            complete = false;
+        }
+        let value = cell.child("s:v").map(|node| node.text.as_str());
+        let kind = cell.attr("t").unwrap_or("n");
+        let inline = cell.child("s:is");
+        if !matches!(kind, "n" | "s" | "str" | "inlineStr" | "b" | "e") {
+            complete = false;
+            continue;
+        }
+        if kind == "n"
+            && value.is_some_and(|value| {
+                !value.trim().is_empty() && value.trim().parse::<f64>().is_err()
+            })
+        {
+            complete = false;
+            continue;
+        }
+        if kind == "inlineStr" {
+            let mut pieces = Vec::new();
+            if let Some(inline) = inline {
+                text_pieces(inline, &mut pieces);
+            }
+            if pieces.iter().all(|piece| piece.is_empty()) {
+                continue;
+            }
+        } else if value.is_none_or(str::is_empty)
+            || (kind == "n" && value.is_some_and(|value| value.trim().is_empty()))
+        {
+            continue;
+        }
+        let style = number(cell, "s", &mut complete).unwrap_or(0);
+        if let Some(code) = styles
+            .format_ids
+            .get(style)
+            .and_then(|id| styles.custom_formats.get(id))
+        {
+            if code == ";;;" {
+                continue;
+            }
+            complete = false;
+        }
+        if kind == "s" {
+            if let Some(id) = value.and_then(|value| value.trim().parse::<usize>().ok()) {
+                string_ids.insert(id);
+            } else {
+                complete = false;
+            }
+        }
+        cells.insert((r, c), (cell, style));
+    }
+    let mut shared = if string_ids.is_empty() {
         None
     } else {
         let path = rels
@@ -449,6 +535,9 @@ pub fn xlsx_font_preflight(bytes: &[u8]) -> Result<FontPreflight, PreflightError
             .unwrap_or("xl/sharedStrings.xml");
         parts.part(path, &mut complete)?
     };
+    if let Some(shared) = &mut shared {
+        resolve_alternate_content(shared, AlternateMode::Unsupported, &mut complete);
+    }
     if shared.as_ref().is_some_and(|node| node.name != "s:sst") {
         return Err(PreflightError::Xml);
     }

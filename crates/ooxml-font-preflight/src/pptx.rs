@@ -141,6 +141,41 @@ fn tree(root: Option<&Node>) -> Option<&Node> {
     root?.path(&["p:cSld", "p:spTree"])
 }
 
+fn resolve_alternate_content(node: &mut Node, complete: &mut bool) {
+    let mut children = Vec::new();
+    for mut child in std::mem::take(&mut node.children) {
+        if child.name != "AlternateContent" {
+            resolve_alternate_content(&mut child, complete);
+            children.push(child);
+            continue;
+        }
+        if !matches!(node.name, "p:spTree" | "p:grpSp") {
+            *complete = false;
+            children.push(child);
+            continue;
+        }
+        let branch = child
+            .children
+            .iter()
+            .position(|branch| branch.name == "Choice" && branch.supported_choice)
+            .or_else(|| {
+                child
+                    .children
+                    .iter()
+                    .position(|branch| branch.name == "Fallback")
+            });
+        if let Some(index) = branch {
+            let mut branch = child.children.remove(index);
+            branch.name = node.name;
+            resolve_alternate_content(&mut branch, complete);
+            children.extend(branch.children);
+        } else {
+            *complete = false;
+        }
+    }
+    node.children = children;
+}
+
 struct Scan<'a> {
     presentation: &'a Node,
     layout: Option<&'a Node>,
@@ -606,12 +641,6 @@ impl Scan<'_> {
                         }
                     }
                 }
-                "AlternateContent" => {
-                    self.complete = false;
-                    if let Some(choice) = shape.children.first() {
-                        self.shapes(choice, inherit, placeholders);
-                    }
-                }
                 _ => {}
             }
         }
@@ -631,9 +660,10 @@ pub fn pptx_font_preflight(
         nodes: xml::MAX_NODES,
     };
     let mut complete = true;
-    let presentation = parts
+    let mut presentation = parts
         .part("ppt/presentation.xml", &mut complete)?
         .ok_or(PreflightError::MissingPart)?;
+    resolve_alternate_content(&mut presentation, &mut complete);
     if presentation.name != "p:presentation" {
         return Err(PreflightError::Xml);
     }
@@ -651,14 +681,15 @@ pub fn pptx_font_preflight(
         .find(|rel| rel.id == id && rel.kind == "slide")
         .ok_or(PreflightError::MissingPart)?
         .target;
-    let slide = parts
+    let mut slide = parts
         .part(path, &mut complete)?
         .ok_or(PreflightError::MissingPart)?;
+    resolve_alternate_content(&mut slide, &mut complete);
     if slide.name != "p:sld" || tree(Some(&slide)).is_none() {
         return Err(PreflightError::Xml);
     }
     let slide_rels = parts.rels(path, &mut complete)?;
-    let layout = parts.related(&slide_rels, "slideLayout", &mut complete)?;
+    let mut layout = parts.related(&slide_rels, "slideLayout", &mut complete)?;
     if layout.is_none() {
         complete = false;
     }
@@ -666,7 +697,7 @@ pub fn pptx_font_preflight(
         Some((path, _)) => parts.rels(path, &mut complete)?,
         None => Vec::new(),
     };
-    let master = parts.related(&layout_rels, "slideMaster", &mut complete)?;
+    let mut master = parts.related(&layout_rels, "slideMaster", &mut complete)?;
     if master.is_none() {
         complete = false;
     }
@@ -674,11 +705,14 @@ pub fn pptx_font_preflight(
         Some((path, _)) => parts.rels(path, &mut complete)?,
         None => Vec::new(),
     };
-    let theme = parts.related(&master_rels, "theme", &mut complete)?;
+    let mut theme = parts.related(&master_rels, "theme", &mut complete)?;
     if theme.is_none() {
         complete = false;
     }
-    let table_styles = if has_table(&slide)
+    for (_, root) in [&mut layout, &mut master, &mut theme].into_iter().flatten() {
+        resolve_alternate_content(root, &mut complete);
+    }
+    let mut table_styles = if has_table(&slide)
         || layout.as_ref().is_some_and(|(_, node)| has_table(node))
         || master.as_ref().is_some_and(|(_, node)| has_table(node))
     {
@@ -686,6 +720,9 @@ pub fn pptx_font_preflight(
     } else {
         None
     };
+    if let Some((_, root)) = &mut table_styles {
+        resolve_alternate_content(root, &mut complete);
+    }
     for (part, name) in [
         (layout.as_ref(), "p:sldLayout"),
         (master.as_ref(), "p:sldMaster"),

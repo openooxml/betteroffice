@@ -4,6 +4,7 @@ use crate::test_support::zip;
 const P: &str = "http://schemas.openxmlformats.org/presentationml/2006/main";
 const A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
 const R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+const MC: &str = "http://schemas.openxmlformats.org/markup-compatibility/2006";
 
 fn rels(entries: &[(&str, &str, &str)]) -> String {
     let mut xml = String::from("<Relationships>");
@@ -90,7 +91,13 @@ fn fixture_with_table_styles(
         ("ppt/theme/one.xml", theme.as_bytes()),
         ("ppt/tableStyles.xml", table_styles.as_bytes()),
     ];
-    parts.extend(extra.iter().map(|(name, xml)| (*name, xml.as_bytes())));
+    for &(name, xml) in extra {
+        if let Some(part) = parts.iter_mut().find(|(path, _)| *path == name) {
+            part.1 = xml.as_bytes();
+        } else {
+            parts.push((name, xml.as_bytes()));
+        }
+    }
     zip(&parts, deflate)
 }
 
@@ -100,6 +107,174 @@ fn keys(result: &FontPreflight) -> Vec<(&str, bool, bool)> {
         .iter()
         .map(|face| (face.family.as_str(), face.bold, face.italic))
         .collect()
+}
+
+#[test]
+fn alternate_content_shapes_select_the_supported_branch() {
+    let choice = shape("", &run("Choice", "Text"));
+    let fallback = shape("", &run("Fallback", "Text"));
+    for (declarations, requires, expected) in [
+        (format!(r#"xmlns:d="{A}""#), "d", "Choice"),
+        (format!(r#"xmlns:s="{P}""#), "s", "Choice"),
+        (format!(r#"xmlns:d="{A}" xmlns:s="{P}""#), "d s", "Choice"),
+        (String::from(r#"xmlns:f="urn:future""#), "f", "Fallback"),
+        (
+            format!(r#"xmlns:d="{A}" xmlns:f="urn:future""#),
+            "d f",
+            "Fallback",
+        ),
+        (format!(r#"xmlns:d="{A}""#), "", "Fallback"),
+        (String::new(), "a", "Fallback"),
+    ] {
+        for on_choice in [false, true] {
+            let (outer, inner) = if on_choice {
+                ("", declarations.as_str())
+            } else {
+                (declarations.as_str(), "")
+            };
+            let wrapped = format!(
+                r#"<mc:AlternateContent xmlns:mc="{MC}" {outer}><mc:Choice {inner} Requires="{requires}">{choice}</mc:Choice><mc:Fallback>{fallback}</mc:Fallback></mc:AlternateContent>"#
+            );
+            let slide = part("sld", &wrapped, "");
+            let result = pptx_font_preflight(
+                &fixture(
+                    &slide,
+                    &part("sldLayout", "", ""),
+                    &part("sldMaster", "", ""),
+                    &[],
+                    false,
+                ),
+                0,
+            )
+            .unwrap();
+            assert!(result.complete);
+            assert_eq!(keys(&result), [(expected, false, false)]);
+        }
+    }
+}
+
+#[test]
+fn alternate_content_shapes_skip_unsupported_choices_and_keep_branch_order() {
+    let first = shape("", &run("First", "Text"));
+    let second = shape("", &run("Second", "Text"));
+    let fallback = shape("", &run("Fallback", "Text"));
+    let nested = format!(
+        r#"<p:grpSp><mc:AlternateContent xmlns:mc="{MC}" xmlns:d="{A}"><mc:Fallback>{fallback}</mc:Fallback><mc:Choice xmlns:f="urn:future" Requires="f">{fallback}</mc:Choice><mc:Choice Requires="d">{first}{second}</mc:Choice><mc:Choice Requires="d">{fallback}</mc:Choice></mc:AlternateContent></p:grpSp>"#
+    );
+    let wrapped = format!(
+        r#"<mc:AlternateContent xmlns:mc="{MC}"><mc:Fallback>{nested}</mc:Fallback></mc:AlternateContent>"#
+    );
+    let slide = part("sld", &wrapped, "");
+    let result = pptx_font_preflight(
+        &fixture(
+            &slide,
+            &part("sldLayout", "", ""),
+            &part("sldMaster", "", ""),
+            &[],
+            false,
+        ),
+        0,
+    )
+    .unwrap();
+    assert!(result.complete);
+    assert_eq!(
+        keys(&result),
+        [("First", false, false), ("Second", false, false)]
+    );
+}
+
+#[test]
+fn alternate_content_placeholders_inherit_the_selected_layout_and_master() {
+    let ph = r#"<p:ph type="body" idx="3"/>"#;
+    let slide = part("sld", &shape(ph, "<a:p/>"), "");
+    let layout = part(
+        "sldLayout",
+        &format!(
+            r#"<mc:AlternateContent xmlns:mc="{MC}"><mc:Choice Requires="future">{}</mc:Choice><mc:Fallback>{}</mc:Fallback></mc:AlternateContent>"#,
+            shape(ph, &run("Unused", "Text")),
+            shape(ph, r#"<a:p><a:pPr><a:defRPr b="1"/></a:pPr></a:p>"#),
+        ),
+        "",
+    );
+    let master = part(
+        "sldMaster",
+        &format!(
+            r#"<mc:AlternateContent xmlns:mc="{MC}" xmlns:d="{A}"><mc:Choice Requires="d">{}</mc:Choice></mc:AlternateContent>"#,
+            shape(
+                ph,
+                r#"<a:p><a:pPr><a:defRPr><a:latin typeface="Inherited"/></a:defRPr></a:pPr></a:p>"#,
+            ),
+        ),
+        "",
+    );
+    let result = pptx_font_preflight(&fixture(&slide, &layout, &master, &[], false), 0).unwrap();
+    assert!(result.complete);
+    assert_eq!(keys(&result), [("Inherited", true, false)]);
+}
+
+#[test]
+fn unhandled_alternate_content_in_loaded_parts_is_incomplete() {
+    let wrapper =
+        format!(r#"<mc:AlternateContent xmlns:mc="{MC}"><mc:Fallback/></mc:AlternateContent>"#);
+    let slide = part("sld", &shape("", &run("Explicit", "Text")), "");
+    let layout = part("sldLayout", "", "");
+    let master = part("sldMaster", "", "");
+    for (path, xml) in [
+        (
+            "ppt/slides/one.xml",
+            part(
+                "sld",
+                &shape("", &format!("{}{wrapper}", run("Explicit", "Text"))),
+                "",
+            ),
+        ),
+        ("ppt/slideLayouts/one.xml", part("sldLayout", "", &wrapper)),
+        ("ppt/slideMasters/one.xml", part("sldMaster", "", &wrapper)),
+        (
+            "ppt/slideMasters/_rels/one.xml.rels",
+            rels(&[("theme", "theme", "../theme/one.xml")])
+                .replace("</Relationships>", &format!("{wrapper}</Relationships>")),
+        ),
+        (
+            "ppt/theme/one.xml",
+            format!(
+                r#"<a:theme xmlns:a="{A}"><a:themeElements>{wrapper}</a:themeElements></a:theme>"#
+            ),
+        ),
+        (
+            "ppt/presentation.xml",
+            format!(
+                r#"<p:presentation xmlns:p="{P}" xmlns:r="{R}"><p:sldIdLst><p:sldId r:id="first"/></p:sldIdLst>{wrapper}</p:presentation>"#
+            ),
+        ),
+    ] {
+        let result = pptx_font_preflight(
+            &fixture(&slide, &layout, &master, &[(path, &xml)], false),
+            0,
+        )
+        .unwrap();
+        assert!(!result.complete, "{path}");
+        assert_eq!(keys(&result), [("Explicit", false, false)], "{path}");
+    }
+    let table = format!(
+        r#"<p:graphicFrame><a:graphic><a:graphicData><a:tbl><a:tr><a:tc><a:txBody>{}</a:txBody></a:tc></a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame>"#,
+        run("Explicit", "Text"),
+    );
+    let styles = format!(r#"<a:tblStyleLst xmlns:a="{A}">{wrapper}</a:tblStyleLst>"#);
+    let result = pptx_font_preflight(
+        &fixture_with_table_styles(
+            &part("sld", &table, ""),
+            &layout,
+            &master,
+            &[],
+            false,
+            &styles,
+        ),
+        0,
+    )
+    .unwrap();
+    assert!(!result.complete);
+    assert_eq!(keys(&result), [("Explicit", false, false)]);
 }
 
 #[test]
@@ -326,18 +501,6 @@ fn table_without_properties_exhausts_the_shared_node_budget() {
         &[],
         false,
     );
-    let mut parts = Parts {
-        zip: Zip::new(&bytes).unwrap(),
-        nodes: xml::MAX_NODES,
-    };
-    let mut complete = true;
-    assert!(
-        parts
-            .part("ppt/slides/one.xml", &mut complete)
-            .unwrap()
-            .is_some()
-    );
-    assert!(complete);
     assert_eq!(
         pptx_font_preflight(&bytes, 0).unwrap_err(),
         PreflightError::Limit
@@ -449,7 +612,7 @@ fn malformed_zip_xml_and_missing_parts_are_errors() {
 }
 
 #[test]
-fn font_budget_returns_partial_results_and_work_budget_errors() {
+fn font_budget_returns_partial_results() {
     let body: String = (0..513)
         .map(|index| run(&format!("Font{index}"), "x"))
         .collect();
@@ -467,20 +630,4 @@ fn font_budget_returns_partial_results_and_work_budget_errors() {
     .unwrap();
     assert!(!result.complete);
     assert_eq!(result.faces.len(), 512);
-    let mut nodes = 20;
-    let root = xml::parse(part("sld", "", "").as_bytes(), &mut nodes).unwrap();
-    let mut scan = Scan {
-        presentation: &root,
-        layout: None,
-        master: None,
-        table_styles: None,
-        theme: DrawingTheme::parse(None),
-        faces: Faces::default(),
-        complete: true,
-        work: 0,
-        limited: false,
-    };
-    assert!(!scan.charge());
-    assert!(!scan.complete);
-    assert_eq!(scan.finish().unwrap_err(), PreflightError::Limit);
 }

@@ -3,6 +3,7 @@ use crate::test_support::zip;
 
 const S: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 const R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+const MC: &str = "http://schemas.openxmlformats.org/markup-compatibility/2006";
 const STYLES: &str = r#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts><font><name val="Base"/></font><font><name val="Styled"/><b/><i/></font><font><name val="Unused"/></font></fonts><cellXfs><xf fontId="0"/><xf fontId="1"/><xf fontId="2"/><xf fontId="1" applyFont="0"/></cellXfs></styleSheet>"#;
 
 fn worksheet(rows: &str, tail: &str) -> String {
@@ -44,6 +45,135 @@ fn keys(result: &FontPreflight) -> Vec<(&str, bool, bool)> {
         .iter()
         .map(|face| (face.family.as_str(), face.bold, face.italic))
         .collect()
+}
+
+fn alternate(choice: &str, fallback: &str) -> String {
+    format!(
+        r#"<mc:AlternateContent xmlns:mc="{MC}" xmlns:future="urn:future"><mc:Choice Requires="future">{choice}</mc:Choice><mc:Fallback>{fallback}</mc:Fallback></mc:AlternateContent>"#
+    )
+}
+
+#[test]
+fn alternate_content_cells_follow_worksheet_read_order() {
+    let first = r#"<c r="A1" s="2"><v>1</v></c>"#;
+    let last = r#"<c r="A1" s="1"><v>2</v></c>"#;
+    for wrapped in [
+        alternate(first, last),
+        alternate("", last),
+        alternate(last, ""),
+        alternate(first, &alternate("", last)),
+    ] {
+        let sheet = worksheet(&format!(r#"<row r="1">{wrapped}</row>"#), "");
+        let result = xlsx_font_preflight(&fixture(&sheet, STYLES, None, &[], false)).unwrap();
+        assert!(result.complete);
+        assert_eq!(keys(&result), [("Styled", true, true)]);
+    }
+    let wrapped = alternate(r#"<c r="B1" s="2"><v>1</v></c>"#, last);
+    let sheet = worksheet(&format!(r#"<row r="1">{wrapped}</row>"#), "");
+    let result = xlsx_font_preflight(&fixture(&sheet, STYLES, None, &[], false)).unwrap();
+    assert!(result.complete);
+    assert_eq!(
+        keys(&result),
+        [("Styled", true, true), ("Unused", false, false)]
+    );
+}
+
+#[test]
+fn alternate_content_rows_follow_worksheet_read_order() {
+    let rows = alternate(
+        r#"<row r="1"><c r="A1" s="2"><v>1</v></c></row>"#,
+        r#"<row r="1"><c r="A1" s="1"><v>2</v></c></row>"#,
+    );
+    let sheet = worksheet(&rows, "");
+    let result = xlsx_font_preflight(&fixture(&sheet, STYLES, None, &[], false)).unwrap();
+    assert!(result.complete);
+    assert_eq!(keys(&result), [("Styled", true, true)]);
+    let rows = alternate(
+        r#"<row r="1" hidden="1"><c r="A1" s="1"><v>1</v></c></row>"#,
+        r#"<row r="1"><c r="A1" s="1"><v>2</v></c></row>"#,
+    );
+    let sheet = worksheet(&rows, "");
+    let result = xlsx_font_preflight(&fixture(&sheet, STYLES, None, &[], false)).unwrap();
+    assert!(result.complete);
+    assert!(result.faces.is_empty());
+}
+
+#[test]
+fn alternate_content_cell_values_use_the_last_value() {
+    let values = alternate("<v/>", "<v>1</v>");
+    let sheet = worksheet(
+        &format!(r#"<row r="1"><c r="A1" s="1">{values}</c></row>"#),
+        "",
+    );
+    let result = xlsx_font_preflight(&fixture(&sheet, STYLES, None, &[], false)).unwrap();
+    assert!(result.complete);
+    assert_eq!(keys(&result), [("Styled", true, true)]);
+}
+
+#[test]
+fn alternate_content_style_pools_take_the_first_branch() {
+    let fonts = r#"<fonts><font><name val="Base"/></font><font><name val="Styled"/><b/><i/></font></fonts>"#;
+    let xfs = r#"<cellXfs><xf fontId="0"/><xf fontId="1"/></cellXfs>"#;
+    let unused_pools =
+        r#"<fonts><font><name val="Unused"/></font></fonts><cellXfs><xf fontId="0"/></cellXfs>"#;
+    let wrapped_pools = alternate(&format!("{fonts}{xfs}"), unused_pools);
+    let wrapped_fonts = alternate(
+        r#"<font><name val="Styled"/><b/><i/></font>"#,
+        r#"<font><name val="Unused"/></font>"#,
+    );
+    let wrapped_xfs = alternate(r#"<xf fontId="1"/>"#, r#"<xf fontId="0"/>"#);
+    let wrapped_properties =
+        alternate(r#"<name val="Styled"/><b/><i/>"#, r#"<name val="Unused"/>"#);
+    let pools = [
+        wrapped_pools,
+        format!(r#"<fonts><font><name val="Base"/></font>{wrapped_fonts}</fonts>{xfs}"#),
+        format!(r#"{fonts}<cellXfs><xf fontId="0"/>{wrapped_xfs}</cellXfs>"#),
+        format!(
+            r#"<fonts><font><name val="Base"/></font><font>{wrapped_properties}</font></fonts>{xfs}"#
+        ),
+        format!(
+            r#"<fonts><font><name val="Base"/></font><font><name val="Unused"/>{wrapped_properties}</font></fonts>{xfs}"#
+        ),
+        format!(
+            r#"<mc:AlternateContent xmlns:mc="{MC}"><mc:Fallback>{fonts}{xfs}</mc:Fallback><mc:Choice Requires="future">{unused_pools}</mc:Choice></mc:AlternateContent>"#
+        ),
+    ];
+    let sheet = worksheet(r#"<row r="1"><c r="A1" s="1"><v>1</v></c></row>"#, "");
+    for pools in pools {
+        let styles = format!(r#"<styleSheet xmlns="{S}">{pools}</styleSheet>"#);
+        let result = xlsx_font_preflight(&fixture(&sheet, &styles, None, &[], false)).unwrap();
+        assert!(result.complete);
+        assert_eq!(keys(&result), [("Styled", true, true)]);
+    }
+    let formats = alternate(
+        r#"<numFmt numFmtId="164" formatCode=";;;"/>"#,
+        r#"<numFmt numFmtId="164" formatCode="0"/>"#,
+    );
+    let styles = STYLES
+        .replace(
+            "<cellXfs>",
+            &format!("<numFmts>{formats}</numFmts><cellXfs>"),
+        )
+        .replace("<xf fontId=\"2\"/>", "<xf fontId=\"2\" numFmtId=\"164\"/>");
+    let sheet = worksheet(
+        r#"<row r="1"><c r="A1" s="1"><v>1</v></c><c r="B1" s="2"><v>2</v></c></row>"#,
+        "",
+    );
+    let result = xlsx_font_preflight(&fixture(&sheet, &styles, None, &[], false)).unwrap();
+    assert!(result.complete);
+    assert_eq!(keys(&result), [("Styled", true, true)]);
+}
+
+#[test]
+fn unhandled_alternate_content_is_incomplete() {
+    let columns = alternate("", r#"<col min="1" max="1"/>"#);
+    let sheet = worksheet(
+        r#"<row r="1"><c r="A1" s="1"><v>1</v></c></row>"#,
+        &format!("<cols>{columns}</cols>"),
+    );
+    let result = xlsx_font_preflight(&fixture(&sheet, STYLES, None, &[], false)).unwrap();
+    assert!(!result.complete);
+    assert_eq!(keys(&result), [("Styled", true, true)]);
 }
 
 #[test]

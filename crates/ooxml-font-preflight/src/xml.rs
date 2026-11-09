@@ -17,6 +17,8 @@ pub(crate) struct Node {
     pub(crate) children: Vec<Node>,
     pub(crate) text: String,
     pub(crate) incomplete: bool,
+    #[cfg(feature = "pptx")]
+    pub(crate) supported_choice: bool,
 }
 
 impl Node {
@@ -29,12 +31,16 @@ impl Node {
     pub(crate) fn child(&self, name: &str) -> Option<&Self> {
         self.children.iter().find(|child| child.name == name)
     }
-    #[cfg(any(feature = "docx", feature = "xlsx"))]
+    #[cfg(feature = "docx")]
     pub(crate) fn val(&self, name: &str) -> Option<&str> {
         self.child(name)?.attr("val")
     }
     pub(crate) fn path(&self, names: &[&str]) -> Option<&Self> {
         names.iter().try_fold(self, |node, name| node.child(name))
+    }
+    #[cfg(any(feature = "pptx", feature = "xlsx"))]
+    pub(crate) fn has_alternate_content(&self) -> bool {
+        self.name == "AlternateContent" || self.children.iter().any(Self::has_alternate_content)
     }
 }
 
@@ -486,6 +492,7 @@ fn name(namespace: u8, local: &[u8]) -> &'static str {
 
 fn attribute(local: &[u8]) -> Option<&'static str> {
     Some(match local {
+        b"Requires" => "Requires",
         b"activeTab" => "activeTab",
         b"state" => "state",
         b"sheetId" => "sheetId",
@@ -633,7 +640,12 @@ pub(crate) fn parse(bytes: &[u8], nodes: &mut usize) -> Result<Node, PreflightEr
                             .map_err(|_| PreflightError::Xml)?;
                         let prefix = prefix.to_vec();
                         let previous = bindings.insert(prefix.clone(), namespace(value.as_bytes()));
-                        history.push((prefix, previous));
+                        let supported = matches!(
+                            value.as_bytes(),
+                            b"http://schemas.openxmlformats.org/drawingml/2006/main"
+                                | b"http://schemas.openxmlformats.org/presentationml/2006/main"
+                        );
+                        history.push((prefix, previous, supported));
                     }
                 }
                 let qualified = start.name();
@@ -657,6 +669,9 @@ pub(crate) fn parse(bytes: &[u8], nodes: &mut usize) -> Result<Node, PreflightEr
                         let Some(key) = attribute(attr.key.local_name().as_ref()) else {
                             continue;
                         };
+                        if key == "Requires" && attr.key.as_ref() != b"Requires" {
+                            continue;
+                        }
                         if attr.value.len() > MAX_VALUE_BYTES * 8 {
                             incomplete = true;
                             continue;
@@ -682,6 +697,25 @@ pub(crate) fn parse(bytes: &[u8], nodes: &mut usize) -> Result<Node, PreflightEr
                         }
                     }
                 }
+                #[cfg(feature = "pptx")]
+                if node.name == "Choice"
+                    && let Some((parent, parent_scope)) = stack.last()
+                    && parent.name == "AlternateContent"
+                {
+                    node.supported_choice = node.attr("Requires").is_some_and(|requires| {
+                        let mut prefixes = requires.split_whitespace().peekable();
+                        prefixes.peek().is_some()
+                            && prefixes.all(|prefix| {
+                                history[*parent_scope..]
+                                    .iter()
+                                    .rev()
+                                    .find(|(declared, _, _)| {
+                                        declared.as_slice() == prefix.as_bytes()
+                                    })
+                                    .is_some_and(|(_, _, supported)| *supported)
+                            })
+                    });
+                }
                 stack.push((node, scope));
             }
             Event::End(_) => {
@@ -693,7 +727,7 @@ pub(crate) fn parse(bytes: &[u8], nodes: &mut usize) -> Result<Node, PreflightEr
                     return Err(PreflightError::Xml);
                 }
                 while history.len() > scope {
-                    let (prefix, previous) = history.pop().ok_or(PreflightError::Xml)?;
+                    let (prefix, previous, _) = history.pop().ok_or(PreflightError::Xml)?;
                     if let Some(previous) = previous {
                         bindings.insert(prefix, previous);
                     } else {
