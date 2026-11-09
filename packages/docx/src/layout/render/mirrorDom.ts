@@ -79,6 +79,8 @@ export interface MirrorLabels {
   /** description of a chart that caches no points, e.g. "No data"; without
    *  it such a chart gets no description */
   chartNoData?: string;
+  /** name of a picture without alternative text, e.g. "Picture"; without it such a picture gets no image role */
+  picture?: string;
 }
 
 /** per-page build state threaded through the mirror walk */
@@ -594,6 +596,9 @@ function renderMirrorPage(
         parts.push(noteRefIds.join(' '));
         if (prims.some((p) => 'chart' in p && p.chart?.data && isEmptyChartData(p.chart.data))) {
           parts.push(labels?.chartNoData ?? '');
+        }
+        if (prims.some((p) => p.kind === 'image' && !p.altText && !p.ariaLabel && !p.ariaDescription && !p.decorative && !p.hiddenObject)) {
+          parts.push(labels?.picture ?? '');
         }
         sig = parts.join('\n');
       } catch {
@@ -1554,8 +1559,11 @@ function createMirrorPrimitive(
       if (p.decorative) {
         el.setAttribute('aria-hidden', 'true');
       } else {
-        el.setAttribute('role', 'img');
-        if (p.altText) el.setAttribute('aria-label', p.altText);
+        const name = p.altText || p.ariaLabel || p.ariaDescription || ctx.labels?.picture;
+        if (name) {
+          if (!mirrorHref(p)) el.setAttribute('role', 'img');
+          el.setAttribute('aria-label', name);
+        }
       }
       applyHrefAttrs(el, p);
       el.dataset.relId = p.relId;
@@ -1582,8 +1590,9 @@ function createMirrorPrimitive(
       el.className = MIRROR_CLASS_NAMES.shape;
       if (p.decorative) {
         el.setAttribute('aria-hidden', 'true');
-      } else {
+      } else if (p.ariaLabel || p.ariaDescription) {
         el.setAttribute('role', 'img');
+        el.setAttribute('aria-label', p.ariaLabel || p.ariaDescription!);
       }
       placeAt(el, { x: p.x, y: p.y, w: p.w, h: p.h }, offsetY);
       applyShapeMirrorTransform(el, p.transform);
