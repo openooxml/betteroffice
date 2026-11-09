@@ -1,4 +1,4 @@
-import { fontCdnConfiguration } from '@betteroffice/fonts';
+import { getFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import type { CollaborationPipeChannel } from '../../../../shared/collaboration-pipe/main';
 import type { XlsxPngOptions, XlsxPngTarget } from '../wasm/pngTarget';
 import { pipeOpBuffers, type PipeCommandPayload, type PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
@@ -165,8 +165,9 @@ function prepareOpen(bytes: Uint8Array | ArrayBuffer, options: OpenWorkbookSessi
   const calculation = options.calculation ?? (options.includeEditState && !options.retainPeerHydration && !options.collaborative
     ? { nowSerial: localNowSerial(Date.now()), randSeed: globalThis.crypto.getRandomValues(new Uint32Array(1))[0] >>> 0 }
     : undefined);
+  const fontCdn = getFontCdnConfiguration();
   const input: WorkbookSessionOpenOptions & { retainPeerHydration?: boolean } = {
-    fontCdn: fontCdnConfiguration(),
+    ...(fontCdn ? { fontCdn } : {}),
     collaborative: options.collaborative,
     clientId: options.clientId,
     calculation: calculation ? { ...calculation } : undefined,

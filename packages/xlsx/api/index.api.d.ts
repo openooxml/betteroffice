@@ -1694,6 +1694,7 @@ export {};
 
 // ---- session/methods.d.ts ----
 import type { FontDecoderMethods } from '../../../../shared/office-session/fontDecoder';
+import type { FontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import type { SaveWarning } from '../../../../shared/office-session/saveWarnings';
 import type { XlsxDefinedNamesRequest, XlsxDefinedNamesResult } from '../definedNames';
 import type { PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
@@ -1766,7 +1767,7 @@ export type WorkbookWireFrame = Omit<WorkbookFrame, 'displayList'> & {
 export interface WorkbookSessionOpenOptions extends OpenWorkbookOptions {
     wasm?: ArrayBuffer | WebAssembly.Module;
     /** @internal */
-    fontCdn?: import('@betteroffice/fonts').FontCdnConfiguration;
+    fontCdn?: FontCdnConfiguration;
     png?: boolean;
     initialViewport?: WorkbookInitialPaintRequest;
     includeEditState?: boolean;
@@ -2936,6 +2937,17 @@ export declare function isCommandEnvelope(value: unknown): value is CommandEnvel
 export declare function isCommandAck(value: unknown): value is CommandAck<unknown, unknown, unknown>;
 /** @internal Identifies the unknown-outcome reply error and its preserved sequence. */
 export declare function isCommandOutcomeUnknownError(value: unknown): value is CommandOutcomeUnknownError;
+
+// ---- shared/office-session/fontCdn.d.ts ----
+/** @internal */
+export interface FontCdnConfiguration {
+    baseUrl: string | false;
+    timeoutMs: number;
+}
+/** @internal */
+export declare function getFontCdnConfiguration(): FontCdnConfiguration | undefined;
+/** @internal */
+export declare function setFontCdnConfiguration(configuration: FontCdnConfiguration | undefined): void;
 
 // ---- shared/office-session/fontDecoder.d.ts ----
 export type FontDecoder = (bytes: ArrayBuffer | Uint8Array, options: {

@@ -1,5 +1,6 @@
 import { metafileImageBytes } from '../render/browserImage';
 import { createSessionHost, type SessionHost } from '../../../../shared/office-session/host';
+import { setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { createCommandFontInstallation } from './commandFontInstallation';
 import { deferReply, isHostMessage, transferable, type TransferResult } from '../../../../shared/office-session/protocol';
 import type { SessionTransport } from '../../../../shared/office-session/transport';
@@ -141,7 +142,7 @@ export function createPresentationSessionHost(
     async open(_, bytes, input = {}) {
       if (disposed) throw new Error('Presentation session is disposed');
       if (handle || editor) throw new Error('Presentation session is already open');
-      if (input.fontCdn) (await import('@betteroffice/fonts')).configureFontCdn(input.fontCdn);
+      if (input.fontCdn) setFontCdnConfiguration(input.fontCdn);
       await (options.initWasm ?? initWasm)(input.wasm);
       if (disposed) throw new Error('Presentation session is disposed');
       const opened = openPresentation(new Uint8Array(bytes), {
@@ -244,7 +245,7 @@ export function createPresentationSessionHost(
     async beginEditor(_, bytes, input) {
       if (disposed) throw new Error('Presentation session is disposed');
       if (handle || editor) throw new Error('Presentation session is already open');
-      if (input.fontCdn) (await import('@betteroffice/fonts')).configureFontCdn(input.fontCdn);
+      if (input.fontCdn) setFontCdnConfiguration(input.fontCdn);
       editor = true;
       const module = await (options.initEditorWasm ?? initializePresentationEditorWasm)(input.wasm);
       if (disposed) throw new Error('Presentation session is disposed');

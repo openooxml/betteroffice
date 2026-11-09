@@ -1,4 +1,4 @@
-import { afterEach, expect, mock, test } from 'bun:test';
+import { afterEach, beforeEach, expect, mock, test } from 'bun:test';
 import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -12,6 +12,7 @@ import { fontAssetResponse } from './test-assets';
 import { openSlicedFace, sliceSourceOf } from './progressive-entry';
 import { parseSkeleton } from './slices';
 import { writeFontCdnTree } from '../../../scripts/fonts/cdn-tree';
+import { getFontCdnConfiguration, setFontCdnConfiguration, type FontCdnConfiguration } from '../../../shared/office-session/fontCdn';
 
 let installed = false;
 for (const [name, manifest, exported] of [
@@ -62,16 +63,41 @@ function serveAssets(requests: string[], inspect?: (url: URL, options?: RequestI
   }) as typeof fetch;
 }
 
+let previousConfiguration: FontCdnConfiguration | undefined;
+beforeEach(() => {
+  previousConfiguration = getFontCdnConfiguration();
+  setFontCdnConfiguration(undefined);
+});
+
 afterEach(() => {
-  fonts.configureFontCdn({ baseUrl: false });
+  setFontCdnConfiguration(previousConfiguration);
   globalThis.fetch = originalFetch;
 });
 
 test('CDN loading starts disabled and preserves missing-pack errors', async () => {
+  expect(getFontCdnConfiguration()).toBeUndefined();
   expect(fonts.fontCdnConfiguration()).toEqual({ baseUrl: false, timeoutMs: 30_000 });
+  expect(getFontCdnConfiguration()).toBeUndefined();
   expect(await fonts.bundledFaceInstalled(regular)).toBe(false);
   await expect(fonts.loadBundledFontBytes(regular, undefined, runtime)).rejects.toMatchObject({ name: 'MissingFontAddonError' });
   await expect(fonts.loadBundledFontBytes(japanese, undefined, runtime)).rejects.toThrow('install @betteroffice/fonts-cjk');
+});
+
+test('session clients and separate package copies share font CDN configuration', async () => {
+  fonts.configureFontCdn({ baseUrl: new URL('https://shared-fonts.example/root'), timeoutMs: 4321 });
+  const configured = { baseUrl: 'https://shared-fonts.example/root/', timeoutMs: 4321 };
+  expect(Reflect.get(globalThis, Symbol.for('betteroffice.fonts.cdn'))).toEqual(configured);
+  expect(getFontCdnConfiguration()).toEqual(configured);
+  const copy: typeof import('./fontCdn') = await import(new URL('./fontCdn.ts?copy', import.meta.url).href);
+  expect(copy.fontCdnConfiguration()).toEqual(configured);
+  copy.configureFontCdn({ baseUrl: false, timeoutMs: 1234 });
+  expect(fonts.fontCdnConfiguration()).toEqual({ baseUrl: false, timeoutMs: 1234 });
+  expect(getFontCdnConfiguration()).toEqual({ baseUrl: false, timeoutMs: 1234 });
+  fonts.configureFontCdn({ baseUrl: configured.baseUrl });
+  expect(copy.fontCdnConfiguration()).toEqual({ baseUrl: configured.baseUrl, timeoutMs: 30_000 });
+  const snapshot = getFontCdnConfiguration()!;
+  snapshot.baseUrl = false;
+  expect(getFontCdnConfiguration()).toEqual({ baseUrl: configured.baseUrl, timeoutMs: 30_000 });
 });
 
 test('a missing Latin pack loads pinned bytes with private requests and a package decoder', async () => {

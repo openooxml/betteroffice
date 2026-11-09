@@ -1,4 +1,5 @@
 import type { FontDecoderMethods } from '../../../../shared/office-session/fontDecoder';
+import type { FontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import type { SaveWarning } from '../../../../shared/office-session/saveWarnings';
 import type { XlsxDefinedNamesRequest, XlsxDefinedNamesResult } from '../definedNames';
 import type { PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
@@ -95,7 +96,7 @@ export type WorkbookWireFrame = Omit<WorkbookFrame, 'displayList'> & {
 export interface WorkbookSessionOpenOptions extends OpenWorkbookOptions {
   wasm?: ArrayBuffer | WebAssembly.Module;
   /** @internal */
-  fontCdn?: import('@betteroffice/fonts').FontCdnConfiguration;
+  fontCdn?: FontCdnConfiguration;
   png?: boolean;
   initialViewport?: WorkbookInitialPaintRequest;
   includeEditState?: boolean;

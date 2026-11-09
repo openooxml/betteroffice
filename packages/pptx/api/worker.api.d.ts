@@ -778,6 +778,7 @@ export {};
 
 // ---- session/commandProtocol.d.ts ----
 import type { FontDecoderMethods } from '../../../../shared/office-session/fontDecoder';
+import type { FontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import type { PipeCommandPayload, PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
 import type { PptxPresenceCursor, PptxPresencePeer } from '../collaboration/types';
 import type { SessionFailure } from '../../../../shared/office-session/types';
@@ -1178,7 +1179,7 @@ export interface PresentationCommandReadResult extends PresentationCommandAck {
 }
 export type PresentationCommandMethods = FontDecoderMethods & {
     /** Starts fetching the regular coverage face of each script (`cjk-jp`, `cjk-kr`, `cjk-sc`, `cjk-tc`) before the editor opens. */
-    prefetchCoverageFonts(scripts: string[], sliced?: boolean, fontCdn?: import('@betteroffice/fonts').FontCdnConfiguration): void;
+    prefetchCoverageFonts(scripts: string[], sliced?: boolean, fontCdn?: FontCdnConfiguration): void;
     /** A sliced face with `text` loaded, unless the caller's revision `have` is still current; null for other families. */
     readCoverageFont(family: string, text: string, have: number | null): SlicedFontRead | null;
     /** The complete sliced faces, for paints that do not prepare their text. */
@@ -1503,6 +1504,7 @@ export declare function frameAssetIds(displayList: SlideDisplayList): Set<string
 
 // ---- session/methods.d.ts ----
 import type { MethodPolicies, SessionState } from '../../../../shared/office-session';
+import type { FontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import type { PptxEditRequest, PptxEditResult, PptxFindRequest, PptxFindResult, PptxReadRequest, PptxReadResult, PptxValidationResult } from '../edits';
 import type { SlideDisplayList } from '../types';
 import type { OpenPresentationOptions } from '../wasm/loader';
@@ -1544,7 +1546,7 @@ export interface PresentationSessionOpenOptions extends Omit<OpenPresentationOpt
     fallbackFonts?: readonly PresentationSessionFont[];
     wasm?: ArrayBuffer | WebAssembly.Module;
     /** @internal */
-    fontCdn?: import('@betteroffice/fonts').FontCdnConfiguration;
+    fontCdn?: FontCdnConfiguration;
 }
 /**
  * Slide metadata without layout; indices are zero-based.
@@ -2641,6 +2643,17 @@ export declare function isCommandEnvelope(value: unknown): value is CommandEnvel
 export declare function isCommandAck(value: unknown): value is CommandAck<unknown, unknown, unknown>;
 /** @internal Identifies the unknown-outcome reply error and its preserved sequence. */
 export declare function isCommandOutcomeUnknownError(value: unknown): value is CommandOutcomeUnknownError;
+
+// ---- shared/office-session/fontCdn.d.ts ----
+/** @internal */
+export interface FontCdnConfiguration {
+    baseUrl: string | false;
+    timeoutMs: number;
+}
+/** @internal */
+export declare function getFontCdnConfiguration(): FontCdnConfiguration | undefined;
+/** @internal */
+export declare function setFontCdnConfiguration(configuration: FontCdnConfiguration | undefined): void;
 
 // ---- shared/office-session/fontDecoder.d.ts ----
 export type FontDecoder = (bytes: ArrayBuffer | Uint8Array, options: {

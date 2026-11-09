@@ -1,4 +1,5 @@
 import type { BundledFontLoader, BundledFontScript } from '@betteroffice/fonts';
+import type { FontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { scriptFontFace } from './commandScriptFonts';
 import type { DefaultFontFace, DefaultFontLanding, RequestedFontFace } from '../../../../shared/pptxDefaultFonts';
 import { decodeFontFace } from '../wasm/loader';
@@ -18,7 +19,7 @@ const sessionDecoder = sessionFontDecoder(async (bytes, options) => {
 
 export const commandFontProvider = {
   /** @internal */
-  async load(fontCdn?: import('@betteroffice/fonts').FontCdnConfiguration) {
+  async load(fontCdn?: FontCdnConfiguration) {
     const fonts = await import('@betteroffice/fonts');
     if (fontCdn) fonts.configureFontCdn(fontCdn);
     return fonts.createFontProvider(undefined, { decoder: sessionDecoder });

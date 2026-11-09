@@ -1,4 +1,5 @@
 import type { MethodPolicies, SessionState } from '../../../../shared/office-session';
+import type { FontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import type {
   PptxEditRequest,
   PptxEditResult,
@@ -51,7 +52,7 @@ export interface PresentationSessionOpenOptions
   fallbackFonts?: readonly PresentationSessionFont[];
   wasm?: ArrayBuffer | WebAssembly.Module;
   /** @internal */
-  fontCdn?: import('@betteroffice/fonts').FontCdnConfiguration;
+  fontCdn?: FontCdnConfiguration;
 }
 
 /**

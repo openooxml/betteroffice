@@ -2,6 +2,7 @@ import type { CollaborationPipeHost } from '../../../../shared/collaboration-pip
 import type { PipeCommandPayload, PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
 import type { AwarenessCursor, AwarenessPeer } from '../collaboration/types';
 import { createSessionHost, type SessionHost } from '../../../../shared/office-session/host';
+import { setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { deferReply, isHostMessage, transferable } from '../../../../shared/office-session/protocol';
 import { canvasUnavailable } from '../render/png';
 import type { SessionTransport } from '../../../../shared/office-session/transport';
@@ -373,7 +374,7 @@ export function createWorkbookSessionHost(
       if (checkpoint.epoch !== recovery.epoch || checkpoint.version !== recovery.revision ||
         checkpoint.throughSeq !== recovery.throughSeq) throw new TypeError('Workbook recovery envelope mismatch');
       if (isCollaborativeWorkbookRecovery(recovery.engine)) throw new Error('Recovery is unavailable for collaborative workbooks');
-      if (input.fontCdn) (await import('@betteroffice/fonts')).configureFontCdn(input.fontCdn);
+      if (input.fontCdn) setFontCdnConfiguration(input.fontCdn);
       enginePng = input.png;
       await (options.initWasm ?? initWasm)(input.wasm, { png: input.png });
       if (disposed) throw new Error('Workbook session is disposed');
@@ -413,7 +414,7 @@ export function createWorkbookSessionHost(
       retainedHydration = retainPeerHydration;
       let wasm = input.wasm;
       if (retainPeerHydration && wasm instanceof ArrayBuffer) wasm = await WebAssembly.compile(wasm);
-      if (input.fontCdn) (await import('@betteroffice/fonts')).configureFontCdn(input.fontCdn);
+      if (input.fontCdn) setFontCdnConfiguration(input.fontCdn);
       enginePng = input.png;
       await (options.initWasm ?? initWasm)(wasm, { png: input.png });
       wasm ??= options.wasmModule?.();

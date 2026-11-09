@@ -8,6 +8,7 @@ import { createMetafileSvg } from './metafileSvg';
 import { PptxDocument, engineKind } from '../wasm/engine';
 import { deferReply, transferable, type TransferResult } from '../../../../shared/office-session/protocol';
 import { isCommandEnvelope } from '../../../../shared/office-session/commands/types';
+import { setFontCdnConfiguration, type FontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { extendTextRange, graphemeBoundaries, textRangeAt } from '../../../../shared/textSelection';
 import { SessionFailure, type MethodHandlers, type MethodPolicies } from '../../../../shared/office-session/types';
 import type { PptxEditRequest, PptxEditResult, PptxStoryTarget, PptxStoryText, PptxTextField } from '../edits';
@@ -148,7 +149,7 @@ export function registerPresentationCommandHandlers(
   let gatingFonts = false;
   const gatedDefaultFonts: DefaultFontLanding[] = [];
   let fontProvider: ReturnType<FontModule['commandFontProvider']['load']> | undefined;
-  let fontCdn: import('@betteroffice/fonts').FontCdnConfiguration | undefined;
+  let fontCdn: FontCdnConfiguration | undefined;
   const sessionFontProvider = (fonts: FontModule) => () => (fontProvider ??= fonts.commandFontProvider.load(fontCdn));
   let requestedFonts: ((slideId?: string) => RequestedFontFace[]) | undefined;
   const suppliedFonts: { family: string }[] = [];
@@ -1702,7 +1703,7 @@ export function registerPresentationCommandHandlers(
       const slicing = input.slicedFonts === true
         ? import('./commandSlicedFonts').then((sliced) => sliced.createSlicedFontFaces(), () => undefined) : undefined;
       try {
-        if (fontCdn) (await import('@betteroffice/fonts')).configureFontCdn(fontCdn);
+        if (fontCdn) setFontCdnConfiguration(fontCdn);
         const wasmReady = (options.initWasm ?? initWasm)(input.wasm);
         let openingMetafiles: Promise<void> | undefined;
         let scanned: { openingSlideMetafile: boolean; packageMetafile: boolean } | undefined;
