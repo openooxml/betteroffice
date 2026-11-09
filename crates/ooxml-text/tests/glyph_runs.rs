@@ -209,3 +209,143 @@ fn plain_text_lines_cost_little_on_the_wire() {
     let limit = (4 + 19 + runs[0].glyphs.len() * 6).div_ceil(3) * 4;
     assert!(packed.len() <= limit, "{packed}");
 }
+
+fn measure_runs(store: &FontStore, runs: Value, chains: Value) -> Value {
+    let input = json!({
+        "block": { "kind": "paragraph", "runs": runs, "attrs": { "bidi": true } },
+        "maxWidth": 1000.0,
+        "fontChains": chains,
+        "defaults": { "fontSize": 12.0, "fontFamily": "Naskh" },
+        "authoritativeShaping": true
+    });
+    serde_json::from_str(&measure_paragraph_json(store, &input.to_string()).unwrap()).unwrap()
+}
+
+fn split_word_chains(naskh: FontId, latin: FontId) -> Value {
+    json!({
+        "naskh|0|0": [naskh.to_u32()],
+        "other naskh|0|0": [naskh.to_u32()],
+        "ascii one|0|0": [latin.to_u32()],
+        "ascii two|0|0": [latin.to_u32()]
+    })
+}
+
+fn visual_ids(line: &Value) -> Vec<u64> {
+    glyph_runs(line).iter().flat_map(run_ids).collect()
+}
+
+#[test]
+fn a_word_split_by_an_ascii_font_difference_joins() {
+    let (store, latin, naskh) = store();
+    let (first, second) = ("مس", "تقبل");
+    let whole = shaped_ids(&store, naskh, &format!("{first}{second}"));
+    let measured = measure_runs(
+        &store,
+        json!([
+            { "kind": "text", "text": first, "fontSlots": { "ascii": "Ascii One", "cs": "Naskh" }, "color": "#ff0000" },
+            { "kind": "text", "text": second, "fontSlots": { "ascii": "Ascii Two", "cs": "Naskh" } }
+        ]),
+        split_word_chains(naskh, latin),
+    );
+    let line = &measured["lines"][0];
+    assert_eq!(glyph_runs(line).len(), 2);
+    assert_eq!(visual_ids(line), whole);
+    let isolated = [
+        shaped_ids(&store, naskh, second),
+        shaped_ids(&store, naskh, first),
+    ]
+    .concat();
+    assert_ne!(visual_ids(line), isolated);
+}
+
+#[test]
+fn a_word_split_by_a_complex_script_difference_stays_apart() {
+    let (store, latin, naskh) = store();
+    let (first, second) = ("مس", "تقبل");
+    let base = json!({ "kind": "text", "text": second, "fontSlots": { "cs": "Naskh" } });
+    let mut differing = vec![];
+    for (key, value) in [
+        ("fontSlots", json!({ "cs": "Other Naskh" })),
+        ("fontSizeCs", json!(14.0)),
+        ("language", json!({ "bidi": "fa-IR" })),
+    ] {
+        let mut run = base.clone();
+        run[key] = value;
+        differing.push(run);
+    }
+    for second_run in differing {
+        let measured = measure_runs(
+            &store,
+            json!([
+                { "kind": "text", "text": first, "fontSlots": { "cs": "Naskh" } },
+                second_run
+            ]),
+            split_word_chains(naskh, latin),
+        );
+        let ids = visual_ids(&measured["lines"][0]);
+        assert_ne!(
+            ids,
+            shaped_ids(&store, naskh, &format!("{first}{second}")),
+            "{measured}"
+        );
+        // The first run alone shapes at the default size either way.
+        let first_ids = run_ids(glyph_runs(&measured["lines"][0]).last().unwrap());
+        assert_eq!(first_ids, shaped_ids(&store, naskh, first), "{measured}");
+    }
+}
+
+#[test]
+fn context_stops_at_a_run_that_is_not_text() {
+    let (store, latin, naskh) = store();
+    let (first, second) = ("مس", "تقبل");
+    let isolated = [
+        shaped_ids(&store, naskh, second),
+        shaped_ids(&store, naskh, first),
+    ]
+    .concat();
+    let measured = measure_runs(
+        &store,
+        json!([
+            { "kind": "text", "text": first, "fontSlots": { "cs": "Naskh" } },
+            { "kind": "tab" },
+            { "kind": "text", "text": second, "fontSlots": { "cs": "Naskh" } }
+        ]),
+        split_word_chains(naskh, latin),
+    );
+    assert_eq!(visual_ids(&measured["lines"][0]), isolated);
+}
+
+#[test]
+fn latin_runs_measure_with_no_context() {
+    let (store, latin, naskh) = store();
+    let measured = |authoritative: bool| {
+        let input = json!({
+            "block": { "kind": "paragraph", "runs": [
+                { "kind": "text", "text": "offi" },
+                { "kind": "text", "text": "ce AV", "color": "#ff0000" },
+                { "kind": "text", "text": "AV" }
+            ] },
+            "maxWidth": 1000.0,
+            "fontChains": { "liberation sans|0|0": [latin.to_u32(), naskh.to_u32()] },
+            "defaults": { "fontSize": 12.0, "fontFamily": "Liberation Sans" },
+            "authoritativeShaping": authoritative
+        });
+        let out = measure_paragraph_json(&store, &input.to_string()).unwrap();
+        serde_json::from_str::<Value>(&out).unwrap()
+    };
+    let authoritative = measured(true);
+    let line = &authoritative["lines"][0];
+    let ids = visual_ids(line);
+    let separately: Vec<u64> = ["offi", "ce AV", "AV"]
+        .iter()
+        .flat_map(|text| {
+            shape_with_direction(&store, latin, text, SIZE_PX, &KERN_OFF, ShapeDirection::Ltr)
+                .unwrap()
+                .iter()
+                .map(|glyph| u64::from(glyph.glyph_id))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(ids, separately);
+    assert_eq!(line["width"], measured(false)["lines"][0]["width"]);
+}

@@ -1,9 +1,8 @@
-import { buildResidentRegionLayoutRequest, computeLayout, documentRenderEnv, getLayoutKernelInputs } from '../editor/computeLayout';
+import { buildResidentRegionLayoutRequest, computeLayout, documentRenderEnv } from '../editor/computeLayout';
 import { createRustMeasureSource, resolveCompleteFontProvider, type BundledFontProvider, type ResidentFontRequirement } from '../layout/measure';
 import type { EmbeddedFaceInput } from '../layout/measure/fontRegistry';
 import { fontUnavailable, pngPage, pngScale, type DocxPngFontFace, type DocxPngOptions, type DocxPngTarget } from '../layout/render/png';
-import { buildRustDisplayList } from '../layout/render/rustDisplayList';
-import type { DisplayList } from '../layout/render/displayList';
+import { openPagedDisplay } from '../layout/render/rustDisplayList';
 import { extractEmbeddedFontFaces } from '../utils';
 import { engineKind, renderPng as renderEnginePng } from '../wasm/enginePng';
 import { createYrsSession, type YrsSession } from './index';
@@ -15,7 +14,7 @@ interface Held {
   version: string;
   fonts: ReadonlyArray<DocxPngFontFace> | undefined;
   fontProvider: BundledFontProvider | undefined;
-  laidOut: Promise<{ copy: YrsSession; displayList: DisplayList; fontChains: Record<string, number[]> }>;
+  laidOut: Promise<{ copy: YrsSession; display: ReturnType<typeof openPagedDisplay>; fontChains: Record<string, number[]> }>;
   users: number;
   stale: boolean;
 }
@@ -67,9 +66,8 @@ export function createPngExporter(session: YrsSession) {
       await measure.prepareFontRequirements(requirements);
       const measurement = measure.measurementConfigForRequirements(requirements);
       if (!measurement) throw fontUnavailable('The fonts this document lays out with could not be loaded. Install @betteroffice/fonts, or pass them in `fonts`.');
-      const { layout } = computeLayout({ document, pageGap: 0, session: copy, renderEnv, measurement });
-      const displayList = await buildRustDisplayList({ ...getLayoutKernelInputs(layout)!, layout, fontChains: measurement.fontChains }, copy);
-      return { copy, displayList, fontChains: measurement.fontChains ?? {} };
+      computeLayout({ document, pageGap: 0, session: copy, renderEnv, measurement });
+      return { copy, display: openPagedDisplay(copy, measurement.fontChains), fontChains: measurement.fontChains ?? {} };
     } catch (error) {
       try { copy.destroy(); } catch { /* the layout failure is the one to report */ }
       throw error;
@@ -102,12 +100,12 @@ export function createPngExporter(session: YrsSession) {
       if (idle !== undefined) clearTimeout(idle);
       idle = undefined;
       try {
-        const { copy, displayList, fontChains } = await entry.laidOut;
+        const { copy, display, fontChains } = await entry.laidOut;
         assertAlive();
-        const page = displayList.pages[index];
-        if (!page) throw new RangeError(`page index ${index} out of range for ${displayList.pages.length} page(s)`);
+        const page = display.page(index);
+        if (!page) throw new RangeError(`page index ${index} out of range for ${display.pageCount} page(s)`);
         const bytes = await renderEnginePng({
-          displayList, fontChains, page, session: copy,
+          displayList: display.displayList, fontChains, page, session: copy,
           outlineGlyph: (fontId, glyphId) => copy.outlineGlyphJson(fontId, glyphId),
           media: (token) => copy.mediaSource(token),
         }, options);

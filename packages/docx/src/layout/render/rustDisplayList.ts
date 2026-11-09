@@ -22,7 +22,7 @@
 
 import type { Layout } from '../pagination/types';
 import type { MeasuredBlock } from '../pagination/measuredBlock';
-import type { DisplayList } from './displayList';
+import type { DisplayList, DisplayPage } from './displayList';
 import { applyFrameDelta, decodeFrameDelta, type RetainedFrame } from './frameDelta';
 
 /**
@@ -547,6 +547,52 @@ export async function buildRustDisplayList(
     return JSON.parse(json) as DisplayList;
   } catch (error) {
     throw new RustDisplayListSourceError('parse', error);
+  }
+}
+
+/** What {@link openPagedDisplay} needs of a session holding a retained layout. */
+export interface PagedDisplayEngine {
+  retainedHeadersFootersJson(): string | undefined;
+  setDisplayWindow(start: number, end: number): void;
+  setDisplayRetainBuiltPages(retain: boolean): void;
+  buildDisplayListFrame(input: string, expectedFrameEpoch: number): Uint8Array;
+  buildDisplayPagesFrame(pages: readonly number[], expectedFrameEpoch: number): Uint8Array;
+  releaseDisplayPagesFrame(pages: number[], expectedFrameEpoch: number): Uint8Array | null;
+}
+
+/**
+ * Builds a retained layout's display list one page at a time and holds only the
+ * page last asked for, so what a page costs does not grow with the document.
+ * A page object stays valid after a later page replaces it. @internal
+ */
+export function openPagedDisplay(engine: PagedDisplayEngine, fontChains: DisplayListBuildInputs['fontChains']) {
+  try {
+    engine.setDisplayWindow(0, 1);
+    engine.setDisplayRetainBuiltPages(false);
+    const headersFooters = engine.retainedHeadersFootersJson();
+    let frame = applyFrameDelta(null, decodeFrameDelta(engine.buildDisplayListFrame(encodeDisplayListFrameExtras({
+      fontChains,
+      ...(headersFooters === undefined ? {} : { headersFooters: JSON.parse(headersFooters) }),
+    } as DisplayListBuildInputs), 0)));
+    return {
+      get pageCount() { return frame.pages.length; },
+      get displayList() { return frame.displayList; },
+      page(index: number): DisplayPage | undefined {
+        const entry = frame.pages[index];
+        if (!entry?.page.unbuilt) return entry?.page;
+        try {
+          const built = frame.pages.filter(({ page }) => !page.unbuilt).map(({ pageIndex }) => pageIndex);
+          const released = built.length ? engine.releaseDisplayPagesFrame(built, frame.frameEpoch) : null;
+          if (released) frame = applyFrameDelta(frame, decodeFrameDelta(released));
+          frame = applyFrameDelta(frame, decodeFrameDelta(engine.buildDisplayPagesFrame([index], frame.frameEpoch)));
+        } catch (error) {
+          throw new RustDisplayListSourceError('build', error);
+        }
+        return frame.pages[index]!.page;
+      },
+    };
+  } catch (error) {
+    throw error instanceof RustDisplayListSourceError ? error : new RustDisplayListSourceError('build', error);
   }
 }
 

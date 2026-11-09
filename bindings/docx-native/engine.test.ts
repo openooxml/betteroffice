@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { beforeAll, describe, expect, spyOn, test } from 'bun:test';
+import { applyFrameDelta, decodeFrameDelta } from '../../packages/docx/src/layout/render/frameDelta';
 import initWasm, * as wasm from '../../packages/docx/src/wasm/generated/edit/docx_edit.js';
 import initPreflight, { font_preflight as wasmFontPreflight } from '../../packages/docx/src/wasm/generated/preflight/docx_preflight.js';
 
@@ -218,16 +219,19 @@ describe('docx native engine parity', () => {
     }
   });
 
-  test('measured glyph runs of an Arabic paragraph match in both engines', () => {
+  test.each([
+    ['Arabic', 'مرحبا', 'بالعالم', true, () => new Uint8Array(readFileSync(new URL('../../packages/fonts/assets/NotoNaskhArabic-Regular.ttf', import.meta.url)))],
+    ['Devanagari', 'नमस्ते', 'क्षत्रिय', false, () => wasm.decodeFontFace(new Uint8Array(readFileSync(new URL('../../packages/fonts-intl/assets/NotoSansDevanagari-Regular.ttf.zst', import.meta.url))), 'zstd').font],
+  ] as const)('measured glyph runs of a %s paragraph match in both engines', (_script, first, second, rtl, scriptFont) => {
     const encoder = new TextEncoder();
     const main = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
-    const words = Array.from({ length: 12 }, () => 'مرحبا بالعالم').join(' ');
+    const words = Array.from({ length: 12 }, () => `${first} ${second}`).join(' ');
     const bytes = wasm.rezip_docx({
       '[Content_Types].xml': encoder.encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'),
       '_rels/.rels': encoder.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'),
-      'word/document.xml': encoder.encode(`<w:document ${main}><w:body><w:p><w:pPr><w:bidi/></w:pPr><w:r><w:rPr><w:rtl/></w:rPr><w:t xml:space="preserve">${words}</w:t></w:r><w:r><w:t xml:space="preserve"> Latin tail</w:t></w:r></w:p><w:sectPr/></w:body></w:document>`),
+      'word/document.xml': encoder.encode(`<w:document ${main}><w:body><w:p>${rtl ? '<w:pPr><w:bidi/></w:pPr>' : ''}<w:r>${rtl ? '<w:rPr><w:rtl/></w:rPr>' : ''}<w:t xml:space="preserve">${words}</w:t></w:r><w:r><w:t xml:space="preserve"> Latin tail</w:t></w:r></w:p><w:sectPr/></w:body></w:document>`),
     });
-    const naskhBytes = new Uint8Array(readFileSync(new URL('../../packages/fonts/assets/NotoNaskhArabic-Regular.ttf', import.meta.url)));
+    const scriptBytes = scriptFont();
     const expected = new wasm.EditSession(31);
     const actual = new native.EditSession(31);
     try {
@@ -235,8 +239,8 @@ describe('docx native engine parity', () => {
       actual.open_docx(bytes, true, 'opening');
       const latin = expected.register_measure_font(fontBytes);
       expect(actual.register_measure_font(fontBytes)).toBe(latin);
-      const naskh = expected.register_measure_font(naskhBytes);
-      expect(actual.register_measure_font(naskhBytes)).toBe(naskh);
+      const script = expected.register_measure_font(scriptBytes);
+      expect(actual.register_measure_font(scriptBytes)).toBe(script);
       const request = {
         bodyStory: 'body',
         regions: { sections: [{
@@ -254,10 +258,11 @@ describe('docx native engine parity', () => {
         renderEnv: {},
       };
       const requirements = JSON.parse(expected.layout_font_requirements_json(JSON.stringify(request))) as { key: string }[];
-      for (const requirement of requirements) request.measurement.fontChains[requirement.key] = [latin, naskh];
+      for (const requirement of requirements) request.measurement.fontChains[requirement.key] = [latin, script];
       const input = JSON.stringify(request);
       const layout = actual.layout_document_with_regions_json(input);
-      expect(layout).toBe(expected.layout_document_with_regions_json(input));
+      const expectedLayout = expected.layout_document_with_regions_json(input);
+      expect(layout).toBe(expectedLayout);
       const glyphRuns = (value: unknown): string[] => {
         if (Array.isArray(value)) return value.flatMap(glyphRuns);
         if (value === null || typeof value !== 'object') return [];
@@ -267,9 +272,18 @@ describe('docx native engine parity', () => {
       };
       const lines = glyphRuns(JSON.parse(layout));
       expect(lines.length).toBeGreaterThan(1);
-      expect(lines).toEqual(glyphRuns(JSON.parse(expected.layout_document_with_regions_json(input))));
+      expect(lines).toEqual(glyphRuns(JSON.parse(expectedLayout)));
       const display = actual.build_display_list_json(layout);
       expect(display).toBe(expected.build_display_list_json(layout));
+      // Only the font-aware frame build shapes; the JSON build above has no font store.
+      const extras = JSON.stringify({ fontChains: request.measurement.fontChains });
+      const frame = actual.build_display_list_frame(extras, 0);
+      expect(frame).toEqual(expected.build_display_list_frame(extras, 0));
+      const painted = applyFrameDelta(null, decodeFrameDelta(frame)).pages
+        .flatMap((page) => page.page.primitives)
+        .flatMap((primitive) => (primitive.kind === 'glyphRun' ? [primitive.text] : []));
+      expect(painted).toContain(first);
+      expect(painted).toContain(second);
     } finally {
       actual.free();
       expected.free();

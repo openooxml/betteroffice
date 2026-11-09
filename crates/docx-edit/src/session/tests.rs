@@ -271,6 +271,62 @@ fn unknown_selection_story_matches_shim_error() {
 }
 
 #[test]
+fn a_resident_frame_paints_an_arabic_word_from_its_measured_glyphs() {
+    let session = core(1);
+    session
+        .load_json(r#"[{"storyId":"body","paragraphs":[{"text":"مرحبا بالعالم"}]}]"#)
+        .unwrap();
+    let font = session
+        .register_measure_font(include_bytes!(
+            "../../../../packages/fonts/assets/NotoNaskhArabic-Regular.ttf"
+        ))
+        .unwrap();
+    let request = serde_json::json!({
+        "bodyStory": "body",
+        "regions": {"sections": [{
+            "sectionId": "main",
+            "properties": {
+                "pageWidth": 4320,
+                "pageHeight": 2880,
+                "marginTop": 300,
+                "marginRight": 300,
+                "marginBottom": 300,
+                "marginLeft": 300
+            }
+        }]},
+        "measurement": {
+            "fontChains": {"calibri|0|0": [font]},
+            "defaults": {"fontSize": 11, "fontFamily": "Calibri"},
+            "authoritativeShaping": true
+        },
+        "renderEnv": {}
+    });
+    session
+        .layout_document_with_regions_json(&request.to_string())
+        .unwrap();
+    session
+        .build_display_list_frame(
+            &serde_json::json!({"fontChains": {"calibri|0|0": [font]}}).to_string(),
+            0.0,
+        )
+        .unwrap();
+    let texts = session
+        .engine
+        .with_display_list(|list| {
+            list.pages[0]
+                .primitives
+                .iter()
+                .filter_map(|primitive| match primitive {
+                    docx_layout::display_list::Primitive::GlyphRun(run) => Some(run.text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap();
+    assert_eq!(texts, ["مرحبا بالعالم"]);
+}
+
+#[test]
 fn fonts_layout_frames_and_resident_input_run_without_wasm() {
     let session = core(1);
     let seeded: Value = serde_json::from_str(&session.load_json(BODY).unwrap()).unwrap();

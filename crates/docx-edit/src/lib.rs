@@ -1747,6 +1747,10 @@ impl EditingDoc {
     /// (created, edited, or deleted), sorted.
     pub fn stories_changed_since(&self, since: u64) -> (u64, Vec<String>) {
         let revisions = self.story_revisions.lock().unwrap();
+        // Stamps never exceed `current`, and geometry reads ask this once per story.
+        if since >= revisions.current {
+            return (revisions.current, Vec::new());
+        }
         let mut stories: Vec<String> = revisions
             .stamped
             .iter()
@@ -2467,6 +2471,41 @@ mod tests {
         let loaded = EditingDoc::new(3);
         loaded.load_state_v1(&oversized).unwrap();
         assert_eq!(loaded.encode_state_vector_v1(), a.encode_state_vector_v1());
+    }
+
+    #[test]
+    fn story_revisions_report_each_change_once_and_keep_older_readers_whole() {
+        let (a, b) = peers("one two", 1, 2);
+        let mut undo = a.undo_manager();
+        let (start, _) = a.stories_changed_since(0);
+        a.insert_text(
+            &local("A"),
+            Position::new("body", 3),
+            "!",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        let (edited, stories) = a.stories_changed_since(start);
+        assert_eq!(stories, ["body"], "a local edit");
+        assert_eq!(a.stories_changed_since(edited), (edited, Vec::new()));
+        assert!(undo.undo());
+        let (undone, stories) = a.stories_changed_since(edited);
+        assert!(undone > edited);
+        assert_eq!(stories, ["body"], "an undo");
+        assert_eq!(a.stories_changed_since(undone), (undone, Vec::new()));
+        assert_eq!(
+            a.stories_changed_since(start).1,
+            ["body"],
+            "an older reader"
+        );
+        assert_eq!(a.stories_changed_since(undone + 1), (undone, Vec::new()));
+        let (before, _) = b.stories_changed_since(0);
+        b.apply_update_v1(&a.encode_state_as_update_v1()).unwrap();
+        let (after, stories) = b.stories_changed_since(before);
+        assert!(after > before);
+        assert_eq!(stories, ["body"], "a collaboration update");
+        assert_eq!(b.stories_changed_since(after), (after, Vec::new()));
+        assert_eq!(b.stories_changed_since(0).1, ["body", "header:rId7"]);
     }
 
     #[test]

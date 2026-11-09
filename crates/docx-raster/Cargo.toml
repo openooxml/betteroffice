@@ -23,6 +23,7 @@ ooxml-raster = { workspace = true, features = ["svg", "downscale"] }
 ooxml-metafile = { workspace = true, features = ["svg"] }
 base64 = "0.22"
 docx-layout.workspace = true
+ooxml-drawingml = { workspace = true, features = ["tiff"] }
 image = { version = "0.25", default-features = false, features = ["bmp", "gif", "jpeg", "png", "tiff", "webp"] }
 ooxml-text.workspace = true
 serde_json = "1"

@@ -638,6 +638,72 @@ fn shared_chart_parts_fixture(damage: impl FnOnce(String) -> String) -> Vec<(Str
     parts
 }
 
+/// `charts.xlsx` with a plain sheet `Spare` after `Charts`, and the first
+/// chart's values read from another workbook, a form the save does not
+/// rewrite, so that chart is one no save rewrites.
+fn external_values_fixture() -> Vec<u8> {
+    let mut parts = ooxml_opc::unzip_parts(FIXTURE).unwrap();
+    rewrite_part(&mut parts, "xl/charts/chart1.xml", |text| {
+        text.replacen(
+            "<c:f>Charts!$B$2:$B$5</c:f>",
+            "<c:f>[1]Charts!$B$2:$B$5</c:f>",
+            1,
+        )
+    });
+    set_part(
+        &mut parts,
+        "xl/worksheets/sheet2.xml",
+        br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>"#.to_vec(),
+    );
+    rewrite_part(&mut parts, "xl/workbook.xml", |text| {
+        text.replace(
+            r#"<sheet name="Charts" sheetId="1" r:id="rId1"/>"#,
+            r#"<sheet name="Charts" sheetId="1" r:id="rId1"/><sheet name="Spare" sheetId="2" r:id="rId2"/>"#,
+        )
+    });
+    rewrite_part(&mut parts, "xl/_rels/workbook.xml.rels", |text| {
+        text.replace(
+            "</Relationships>",
+            r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#,
+        )
+    });
+    rewrite_part(&mut parts, CONTENT_TYPES, |text| {
+        text.replace(
+            "</Types>",
+            r#"<Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#,
+        )
+    });
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+/// A chart reading another workbook names no sheet of this one through that
+/// reference, so it does not stop deleting a sheet it does not plot; the
+/// sheet it does plot stays fenced off, as it was.
+#[test]
+fn a_chart_reading_another_workbook_does_not_block_deleting_an_unrelated_sheet() {
+    let package = external_values_fixture();
+    let mut workbook = Workbook::open(&package).unwrap();
+    let error = workbook
+        .apply_ops(
+            vec![Op::RemoveSheet { index: 0 }],
+            CalculationOptions::default(),
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("references cells this edit would move"),
+        "{error}"
+    );
+    workbook
+        .apply_ops(
+            vec![Op::RemoveSheet { index: 1 }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(workbook.model().sheets.len(), 1);
+}
+
 /// One anchor row this crate cannot read, which costs the whole drawing.
 fn unreadable_anchor(drawing: String) -> String {
     drawing.replacen("<xdr:row>5</xdr:row>", "<xdr:row>not-a-row</xdr:row>", 1)

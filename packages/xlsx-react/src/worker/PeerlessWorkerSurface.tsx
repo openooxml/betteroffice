@@ -12,7 +12,7 @@ import type { WorkerDraftController } from './WorkerDraftController';
 import { WorkerPresentationStore, useWorkerPresentation } from './WorkerPresentationStore';
 import { PresenceStrip, RemoteSelections } from '../presence/Presence';
 import { usePeerlessPresence } from './usePeerlessPresence';
-import { A11yGridCell } from '../components/A11yGridCell';
+import { A11yGridTable } from '../components/A11yGridCell';
 
 const selectSelection = (state: ReturnType<WorkerPresentationStore['getSnapshot']>) => state.selection;
 const selectPainted = (state: ReturnType<WorkerPresentationStore['getSnapshot']>) => state.painted;
@@ -96,13 +96,7 @@ const PeerlessAccessibilityGrid = memo(function PeerlessAccessibilityGrid({ grid
   grid: ReturnType<typeof buildA11yGrid>; onFollowLink?: (row: number, col: number) => void;
 }) {
   return <>
-    <div style={hidden} role="grid" aria-label={grid.label}>
-      <div role="row"><span role="columnheader" />{grid.columnHeaders.map((header) =>
-        <span key={header.col} role="columnheader">{header.label}</span>)}</div>
-      {grid.rows.map((row) => <div key={row.row} role="row"><span role="rowheader">{row.header}</span>
-        {row.cells.map((cell) => <A11yGridCell key={cell.col} cell={cell} onFollowLink={onFollowLink} />)}
-      </div>)}
-    </div>
+    <A11yGridTable grid={grid} style={hidden} onFollowLink={onFollowLink} />
     {grid.charts.map((chart, index) => <div key={`${index}:${chart.label}`} style={hidden} role="img" aria-label={chart.label} />)}
   </>;
 });
