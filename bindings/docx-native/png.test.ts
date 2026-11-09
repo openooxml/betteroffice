@@ -88,6 +88,25 @@ test('native docx rasterizes the compiled page at two scales', () => {
   }
 });
 
+test('native docx draws a run scale of 0 at full width, as Word does', () => {
+  const scaled = (properties: string) => {
+    const session = new raw.EditSession(405);
+    try {
+      session.open_docx(raw.rezip_docx({
+        '[Content_Types].xml': encoder.encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'),
+        '_rels/.rels': encoder.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'),
+        'word/document.xml': encoder.encode(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r>${properties}<w:t>Engine text</w:t></w:r></w:p><w:sectPr/></w:body></w:document>`),
+      }), true);
+      return Buffer.from(pagePng(session, pngDisplayList(session), 0, 1));
+    } finally {
+      session.free();
+    }
+  };
+  const plain = scaled('');
+  expect(scaled('<w:rPr><w:w w:val="0"/></w:rPr>').equals(plain)).toBe(true);
+  expect(scaled('<w:rPr><w:w w:val="50"/></w:rPr>').equals(plain)).toBe(false);
+});
+
 test('native docx PNG refuses invalid input, missing fonts and oversized surfaces', () => {
   const session = new raw.EditSession(402);
   try {
