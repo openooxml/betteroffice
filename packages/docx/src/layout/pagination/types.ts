@@ -1094,6 +1094,8 @@ export type TypesetRow = {
   clusterAdvances?: TypesetClusterAdvance[];
   /** Bidi slices with separate visual/logical order. */
   bidiSlices?: TypesetBidiSlice[];
+  /** Glyph runs measurement shaped the line with, packed; only the Rust engines read them. Undefined = paint reshapes. */
+  glyphRuns?: string;
 };
 
 export type TypesetRunAdvance = {

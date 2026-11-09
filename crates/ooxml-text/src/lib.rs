@@ -85,9 +85,10 @@ pub use line_break::{
     BreakOpportunity, break_allowed_between, break_opportunities, presentation_break_opportunities,
 };
 pub use measure::{
-    FontChains, FontSlotUse, MeasureError, MeasureInput, MeasureRequest, ParagraphExtentOut,
-    TypesetRowOut, font_slot_characters, font_slot_use, measure_paragraph, measure_paragraph_json,
-    measure_paragraph_typed, min_content_width_typed,
+    FontChains, FontSlotUse, GlyphRunHead, GlyphRunWriter, MeasureError, MeasureInput,
+    MeasureRequest, MeasuredGlyph, MeasuredGlyphRun, ParagraphExtentOut, TypesetRowOut,
+    font_slot_characters, font_slot_use, measure_paragraph, measure_paragraph_json,
+    measure_paragraph_typed, min_content_width_typed, pack_glyph_runs, unpack_glyph_runs,
 };
 pub use ooxml_drawingml::symbol_font;
 pub use outline::{GlyphOutline, PathCmd};

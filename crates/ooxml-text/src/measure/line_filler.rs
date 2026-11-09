@@ -43,11 +43,11 @@ use crate::font_store::FontId;
 use super::floats;
 use super::input::{CompatIn, FloatSegmentIn, FloatZoneIn, RunIn, SpacingIn, TabStopIn};
 use super::prepare::{
-    CharAdv, PreparedField, PreparedImage, PreparedRun, PreparedTab, PreparedText,
+    CharAdv, PreparedField, PreparedImage, PreparedRun, PreparedTab, PreparedText, ShapedSegment,
 };
 use super::{
-    MAX_LINES, MeasureError, ParagraphExtentOut, TypesetBidiSliceOut, TypesetClusterAdvanceOut,
-    TypesetRowOut, TypesetRowSegmentOut, TypesetRunAdvanceOut, pt_to_px,
+    GlyphRunHead, GlyphRunWriter, MAX_LINES, MeasureError, ParagraphExtentOut, TypesetBidiSliceOut,
+    TypesetClusterAdvanceOut, TypesetRowOut, TypesetRowSegmentOut, TypesetRunAdvanceOut, pt_to_px,
 };
 use crate::word_metrics as wm;
 
@@ -368,6 +368,7 @@ pub(super) fn empty_paragraph_extent(
             run_advances: None,
             cluster_advances: None,
             bidi_slices: None,
+            glyph_runs: None,
         }],
         total_height: total,
     })
@@ -880,10 +881,10 @@ impl Filler<'_> {
         };
         let float_skip_before = (self.pending_float_skip > 0.0).then_some(self.pending_float_skip);
         self.pending_float_skip = 0.0;
-        let (run_advances, cluster_advances, bidi_slices) = if self.p.authoritative_shaping {
-            advance_metadata(&self.cur.contributions)
+        let metadata = if self.p.authoritative_shaping {
+            advance_metadata(&self.cur.contributions, self.p.prepared)
         } else {
-            (None, None, None)
+            AdvanceMetadata::default()
         };
 
         self.lines.push(TypesetRowOut {
@@ -900,9 +901,10 @@ impl Filler<'_> {
             segments,
             float_skip_before,
             marker_tab_offset: None,
-            run_advances,
-            cluster_advances,
-            bidi_slices,
+            run_advances: metadata.run_advances,
+            cluster_advances: metadata.cluster_advances,
+            bidi_slices: metadata.bidi_slices,
+            glyph_runs: metadata.glyph_runs,
         });
 
         // Float probes advance by text height, excluding image growth.
@@ -1063,29 +1065,138 @@ impl Filler<'_> {
     }
 }
 
-/// Reorders a line's contributions visually and derives the three advance
-/// tables. Cluster and slice x offsets accumulate in visual order; run
-/// advances merge contributions that are adjacent *visually* and share a run
-/// index, so a run cut by a direction change appears once per visual piece.
+#[derive(Default)]
+struct AdvanceMetadata {
+    run_advances: Option<Vec<TypesetRunAdvanceOut>>,
+    cluster_advances: Option<Vec<TypesetClusterAdvanceOut>>,
+    bidi_slices: Option<Vec<TypesetBidiSliceOut>>,
+    glyph_runs: Option<String>,
+}
+
+/// The visual slice of one shaped segment the line walk is inside.
+struct OpenGlyphRun<'a> {
+    text: &'a PreparedText,
+    segment: &'a ShapedSegment,
+    run_index: u32,
+    start_char: u32,
+    end_char: u32,
+    x_offset: f32,
+    advance: f32,
+}
+
+impl<'a> OpenGlyphRun<'a> {
+    fn open(
+        c: &LineContribution,
+        (text, segment): (&'a PreparedText, &'a ShapedSegment),
+        x_offset: f32,
+    ) -> Self {
+        Self {
+            text,
+            segment,
+            run_index: c.run_index,
+            start_char: c.start_char,
+            end_char: c.end_char,
+            x_offset,
+            advance: c.advance,
+        }
+    }
+
+    /// Whether `c`, next in visual order, is the following cluster of the
+    /// same segment.
+    fn continues(&self, c: &LineContribution, segment: &ShapedSegment) -> bool {
+        let adjacent = if crate::bidi::level_is_rtl(segment.level) {
+            c.end_char == self.start_char
+        } else {
+            c.start_char == self.end_char
+        };
+        adjacent && c.run_index == self.run_index && std::ptr::eq(self.segment, segment)
+    }
+
+    /// Whether `c` is a cluster of the open run's segment, which spares the
+    /// segment search for all but the first cluster of a slice.
+    fn covers(&self, c: &LineContribution) -> bool {
+        c.shaped_cluster
+            && c.run_index == self.run_index
+            && (self.segment.utf16_start..self.segment.utf16_end).contains(&c.start_char)
+    }
+
+    fn extend(&mut self, c: &LineContribution) {
+        self.start_char = self.start_char.min(c.start_char);
+        self.end_char = self.end_char.max(c.end_char);
+        self.advance += c.advance;
+    }
+
+    fn close(self, writer: &mut GlyphRunWriter) {
+        writer.push(
+            GlyphRunHead {
+                run_index: self.run_index,
+                start_char: self.start_char,
+                end_char: self.end_char,
+                font_id: self.segment.font.to_u32(),
+                bidi_level: self.segment.level,
+                x_offset: self.x_offset,
+                advance: self.advance,
+            },
+            self.text
+                .shaped
+                .glyphs_in(self.segment, self.start_char, self.end_char),
+        );
+    }
+}
+
+/// The text run and shaped segment a text cluster contribution came from.
+fn shaped_segment<'a>(
+    prepared: &'a [PreparedRun],
+    c: &LineContribution,
+) -> Option<(&'a PreparedText, &'a ShapedSegment)> {
+    match prepared.get(c.run_index as usize)? {
+        PreparedRun::Text(text) if c.shaped_cluster => {
+            Some((text, text.shaped.segment_at(c.start_char)?))
+        }
+        _ => None,
+    }
+}
+
+/// Reorders a line's contributions visually and derives the advance tables
+/// and glyph runs. Cluster, slice and glyph-run x offsets accumulate in
+/// visual order; run advances merge contributions that are adjacent
+/// *visually* and share a run index, so a run cut by a direction change
+/// appears once per visual piece. Glyph runs merge visually adjacent
+/// clusters of one shaped segment and carry its measured glyphs.
 fn advance_metadata(
     contributions: &[LineContribution],
-) -> (
-    Option<Vec<TypesetRunAdvanceOut>>,
-    Option<Vec<TypesetClusterAdvanceOut>>,
-    Option<Vec<TypesetBidiSliceOut>>,
-) {
+    prepared: &[PreparedRun],
+) -> AdvanceMetadata {
     if contributions.is_empty() {
-        return (None, None, None);
+        return AdvanceMetadata::default();
     }
     let levels: Vec<u8> = contributions.iter().map(|c| c.level).collect();
     let visual = crate::bidi::visual_order_for_levels(&levels);
     let mut runs: Vec<TypesetRunAdvanceOut> = Vec::new();
     let mut clusters = Vec::new();
     let mut slices = Vec::new();
+    let mut glyph_runs = GlyphRunWriter::default();
+    let mut open: Option<OpenGlyphRun> = None;
     let mut x = 0.0f32;
 
     for (visual_order, &logical_index) in visual.iter().enumerate() {
         let c = contributions[logical_index];
+        let shaped = open
+            .as_ref()
+            .filter(|run| run.covers(&c))
+            .map(|run| (run.text, run.segment))
+            .or_else(|| shaped_segment(prepared, &c));
+        match open.as_mut() {
+            Some(run) if shaped.is_some_and(|(_, segment)| run.continues(&c, segment)) => {
+                run.extend(&c)
+            }
+            _ => {
+                if let Some(run) = open.take() {
+                    run.close(&mut glyph_runs);
+                }
+                open = shaped.map(|shaped| OpenGlyphRun::open(&c, shaped, x));
+            }
+        }
         if c.shaped_cluster {
             clusters.push(TypesetClusterAdvanceOut {
                 run_index: c.run_index,
@@ -1122,12 +1233,16 @@ fn advance_metadata(
         }
         x += c.advance;
     }
+    if let Some(run) = open {
+        run.close(&mut glyph_runs);
+    }
 
-    (
-        (!runs.is_empty()).then_some(runs),
-        (!clusters.is_empty()).then_some(clusters),
-        (!slices.is_empty()).then_some(slices),
-    )
+    AdvanceMetadata {
+        run_advances: (!runs.is_empty()).then_some(runs),
+        cluster_advances: (!clusters.is_empty()).then_some(clusters),
+        bidi_slices: (!slices.is_empty()).then_some(slices),
+        glyph_runs: glyph_runs.finish(),
+    }
 }
 
 /// UTF-16 offset of char index `i` (or the run's total length past the end).
@@ -1400,6 +1515,7 @@ mod tests {
                     baseline_shift_px: 0.0,
                 },
             ],
+            shaped: Default::default(),
             utf16_len: 4,
             breaks: vec![],
             letter_spacing: 0.0,
@@ -1479,6 +1595,7 @@ mod tests {
             .collect();
         PreparedRun::Text(PreparedText {
             chars,
+            shaped: Default::default(),
             utf16_len: offset,
             breaks,
             letter_spacing: spacing,

@@ -123,6 +123,7 @@ mod input;
 mod intrinsic;
 mod line_filler;
 mod list_marker;
+mod packed_glyphs;
 mod prepare;
 mod tabs;
 
@@ -133,6 +134,10 @@ pub use input::{
     RunLanguageSlotsIn, SpacingIn, TabStopIn,
 };
 pub use intrinsic::measure_intrinsic_widths;
+pub use packed_glyphs::{
+    GlyphRunHead, GlyphRunWriter, MeasuredGlyph, MeasuredGlyphRun, pack_glyph_runs,
+    unpack_glyph_runs,
+};
 
 use crate::font_store::{FontId, FontStore};
 
@@ -224,6 +229,12 @@ pub struct TypesetRowOut {
     /// `Some` only under `authoritativeShaping`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bidi_slices: Option<Vec<TypesetBidiSliceOut>>,
+    /// The glyph runs measurement shaped the line's text with, in visual paint
+    /// order, as [`pack_glyph_runs`] packs them. A line break inside a shaped
+    /// segment cuts its glyphs at a cluster boundary rather than reshaping them.
+    /// `Some` only under `authoritativeShaping`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub glyph_runs: Option<String>,
 }
 
 /// Advance of one run's slice of a line. A run split by direction yields one
@@ -604,6 +615,7 @@ fn zero_row() -> TypesetRowOut {
         run_advances: None,
         cluster_advances: None,
         bidi_slices: None,
+        glyph_runs: None,
     }
 }
 

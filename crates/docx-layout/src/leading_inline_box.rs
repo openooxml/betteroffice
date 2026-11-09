@@ -129,5 +129,103 @@ pub(crate) fn restore_extent(paragraph: &ParagraphBlock, extent: &mut ParagraphE
                 slice.run_index.is_some()
             });
         }
+        if let Some(packed) = line.glyph_runs.as_deref() {
+            let shift = (has_box && !is_rtl).then_some(size.width as f32);
+            line.glyph_runs = without_leading_box(packed, shift);
+        }
+    }
+}
+
+/// The packed glyph runs of a line without the leading box's reserved run:
+/// the others move down one run index, and `shift` moves them left on the line
+/// when the box sat before them. `None` when no run is left.
+fn without_leading_box(packed: &str, shift: Option<f32>) -> Option<String> {
+    let mut runs = ooxml_text::unpack_glyph_runs(packed)?;
+    runs.retain_mut(|run| {
+        let Some(index) = run.head.run_index.checked_sub(1) else {
+            return false;
+        };
+        run.head.run_index = index;
+        if let Some(shift) = shift {
+            run.head.x_offset = (run.head.x_offset - shift).max(0.0);
+        }
+        true
+    });
+    ooxml_text::pack_glyph_runs(&runs)
+}
+
+#[cfg(test)]
+mod glyph_run_tests {
+    use super::without_leading_box;
+    use ooxml_text::{
+        GlyphRunHead, MeasuredGlyph, MeasuredGlyphRun, pack_glyph_runs, unpack_glyph_runs,
+    };
+
+    fn run(run_index: u32, x_offset: f32, start: u32, bidi_level: u8) -> MeasuredGlyphRun {
+        let rtl = bidi_level % 2 == 1;
+        let glyphs = (0..4u32)
+            .map(|index| MeasuredGlyph {
+                id: 40 + index,
+                cluster: start + if rtl { 3 - index } else { index },
+                advance: 5.5,
+                dx: if rtl && index == 1 { -1.25 } else { 0.0 },
+                dy: if rtl && index == 1 { 2.5 } else { 0.0 },
+            })
+            .collect();
+        MeasuredGlyphRun {
+            head: GlyphRunHead {
+                run_index,
+                start_char: start,
+                end_char: start + 4,
+                font_id: 3,
+                bidi_level,
+                x_offset,
+                advance: 22.0,
+            },
+            glyphs,
+        }
+    }
+
+    fn expected(runs: &[MeasuredGlyphRun], shift: f32) -> Vec<MeasuredGlyphRun> {
+        runs.iter()
+            .map(|run| {
+                let mut run = run.clone();
+                run.head.run_index -= 1;
+                run.head.x_offset = (run.head.x_offset - shift).max(0.0);
+                run
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_shifted_line_keeps_its_latin_and_arabic_glyphs() {
+        for level in [0, 1] {
+            let runs = [run(1, 30.0, 0, level), run(2, 52.0, 4, level)];
+            let packed = pack_glyph_runs(&runs).unwrap();
+            let shifted = without_leading_box(&packed, Some(30.0)).unwrap();
+            assert_eq!(unpack_glyph_runs(&shifted).unwrap(), expected(&runs, 30.0));
+        }
+    }
+
+    #[test]
+    fn without_a_shift_only_the_run_indexes_move() {
+        let runs = [run(1, 12.0, 0, 1), run(2, 34.0, 4, 0)];
+        let packed = pack_glyph_runs(&runs).unwrap();
+        let moved = without_leading_box(&packed, None).unwrap();
+        assert_eq!(unpack_glyph_runs(&moved).unwrap(), expected(&runs, 0.0));
+    }
+
+    #[test]
+    fn the_reserved_run_is_dropped_and_an_empty_line_packs_to_nothing() {
+        let reserved = run(0, 0.0, 0, 0);
+        let kept = run(1, 30.0, 0, 0);
+        let packed = pack_glyph_runs(&[reserved.clone(), kept.clone()]).unwrap();
+        let moved = without_leading_box(&packed, None).unwrap();
+        assert_eq!(
+            unpack_glyph_runs(&moved).unwrap(),
+            expected(std::slice::from_ref(&kept), 0.0)
+        );
+        let alone = pack_glyph_runs(&[reserved]).unwrap();
+        assert_eq!(without_leading_box(&alone, None), None);
     }
 }

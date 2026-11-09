@@ -43,6 +43,7 @@ use crate::word_metrics::{kern_enabled, kern_features};
 
 use super::font_slots::{FontSlot, char_slot};
 use super::input::{FontChains, MeasureRequest, RunIn, validate_pt_size};
+use super::packed_glyphs::MeasuredGlyph;
 use super::{MAX_RUN_TEXT_BYTES, MeasureError, needs_glyph, pt_to_px, symbol_character};
 
 /// Longest fallback chain a run keeps resolved per slot. Chains past it are
@@ -77,10 +78,67 @@ impl CharAdv {
     }
 }
 
+/// One shaping call of a run: the face that shaped `utf16_start..utf16_end`
+/// at `level`, as [`FontStore::canonical_face`] names it, and its glyphs in
+/// [`MeasuredShaping::glyphs`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct ShapedSegment {
+    pub font: FontId,
+    pub utf16_start: u32,
+    pub utf16_end: u32,
+    pub glyph_start: u32,
+    pub glyph_end: u32,
+    pub level: u8,
+}
+
+/// The glyphs a run was measured with, kept only under `authoritativeShaping`.
+/// Segments ascend in logical order and do not overlap.
+#[derive(Debug, Clone, Default)]
+pub(super) struct MeasuredShaping {
+    pub segments: Vec<ShapedSegment>,
+    pub glyphs: Vec<MeasuredGlyph>,
+}
+
+impl MeasuredShaping {
+    /// The segment that shaped the cluster starting at UTF-16 offset `at`.
+    pub fn segment_at(&self, at: u32) -> Option<&ShapedSegment> {
+        let index = self
+            .segments
+            .partition_point(|segment| segment.utf16_end <= at);
+        self.segments
+            .get(index)
+            .filter(|segment| segment.utf16_start <= at)
+    }
+
+    /// The glyphs of `segment` whose clusters start in `start..end`, in visual
+    /// order. Shaped clusters are monotonic in visual order, ascending left to
+    /// right and descending right to left, so a cut at cluster boundaries
+    /// needs no reshaping.
+    pub fn glyphs_in(&self, segment: &ShapedSegment, start: u32, end: u32) -> &[MeasuredGlyph] {
+        let glyphs = self
+            .glyphs
+            .get(segment.glyph_start as usize..segment.glyph_end as usize)
+            .unwrap_or(&[]);
+        let (from, to) = if crate::bidi::level_is_rtl(segment.level) {
+            (
+                glyphs.partition_point(|glyph| glyph.cluster >= end),
+                glyphs.partition_point(|glyph| glyph.cluster >= start),
+            )
+        } else {
+            (
+                glyphs.partition_point(|glyph| glyph.cluster < start),
+                glyphs.partition_point(|glyph| glyph.cluster < end),
+            )
+        };
+        &glyphs[from..to.max(from)]
+    }
+}
+
 /// A text run ready for line filling.
 #[derive(Debug, Clone)]
 pub(super) struct PreparedText {
     pub chars: Vec<CharAdv>,
+    pub shaped: MeasuredShaping,
     /// Total UTF-16 length of the original text.
     pub utf16_len: u32,
     /// Character indices (into `chars`) where a line may break — i.e. the
@@ -1113,6 +1171,7 @@ fn prepare_text_run(
 
     // Same-style directional ranges preserve kerning and ligatures.
     let mut chars: Vec<CharAdv> = Vec::new();
+    let mut measured = MeasuredShaping::default();
     let mut seg_start = 0;
     while seg_start < plan.len() {
         let first_plan = &plan[seg_start];
@@ -1160,6 +1219,32 @@ fn prepare_text_run(
             first_plan.language.as_deref(),
         )
         .map_err(|e| MeasureError::Invalid(format!("shaping failed: {e}")))?;
+        if input.authoritative_shaping {
+            let horizontal = seg_scale * scale;
+            let glyph_start = measured.glyphs.len() as u32;
+            measured.glyphs.reserve(glyphs.len());
+            measured.glyphs.extend(glyphs.iter().filter_map(|glyph| {
+                let slot =
+                    byte_to_char.partition_point(|&(byte, _)| byte <= glyph.cluster as usize);
+                let &(_, char_index) = byte_to_char.get(slot.checked_sub(1)?)?;
+                Some(MeasuredGlyph {
+                    id: glyph.glyph_id,
+                    cluster: plan[char_index].utf16_offset,
+                    advance: glyph.x_advance * horizontal,
+                    dx: glyph.x_offset * horizontal,
+                    dy: glyph.y_offset * seg_scale,
+                })
+            }));
+            let last = &plan[seg_end - 1];
+            measured.segments.push(ShapedSegment {
+                font: store.canonical_face(font),
+                utf16_start: first_plan.utf16_offset,
+                utf16_end: last.utf16_offset + last.utf16_len,
+                glyph_start,
+                glyph_end: measured.glyphs.len() as u32,
+                level: seg_level,
+            });
+        }
         let mut glyph_clusters = cluster_advances(
             glyphs.iter().map(|g| (g.cluster as usize, g.x_advance)),
             &byte_to_char,
@@ -1244,6 +1329,7 @@ fn prepare_text_run(
     let first_baseline_shift = chars.first().map_or(0.0, |c| c.baseline_shift_px);
     Ok(PreparedText {
         chars,
+        shaped: measured,
         utf16_len: utf16_total,
         breaks,
         letter_spacing,
