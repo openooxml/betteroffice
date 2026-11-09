@@ -4,11 +4,12 @@
 //! that reserialization carries just the subset `read` models.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque, btree_map};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io;
 use std::iter::Peekable;
 use std::ops::Range;
 
+use quick_xml::events::attributes::Attribute;
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer};
 use xlsx_model::addr::{ColId, RowId};
@@ -33,9 +34,12 @@ use crate::patch::{
     retains_source_styles, sheet_data_regeneration_loss,
 };
 use crate::read::SharedStringCells;
-use crate::xml::{resolve_part_path, xml_err};
+use crate::xml::{
+    encode_xstring, formula_text, resolve_part_path, text_attribute, text_event, xml_err,
+};
 
 mod app_titles;
+mod fragment_rename;
 mod source_coordinates;
 mod style_derivation;
 mod views;
@@ -141,6 +145,7 @@ fn escape_xml_text(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+        .replace('\r', "&#13;")
 }
 
 fn escape_xml_attr(text: &str) -> String {
@@ -258,7 +263,7 @@ fn conditional_formatting_bytes(
                 for formula in &rule.formulas {
                     rule_xml.push_str(&format!(
                         "<formula>{}</formula>",
-                        escape_xml_text(&excel_formula(formula, names))
+                        formula_text(&excel_formula(formula, names))
                     ));
                 }
                 rule_xml.push_str("</cfRule>");
@@ -676,8 +681,16 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
             (sheet.name.as_str(), axes)
         })
         .collect::<Vec<_>>();
+    let edits = sheet_edits(wb, package, &claimed);
     for (index, (sheet, plan)) in wb.sheets.iter().zip(&sheets).enumerate() {
         let source = plan.origin.and_then(|origin| package.sheets.get(origin));
+        let renamed_template = source
+            .filter(|source| source.is_worksheet())
+            .and_then(|source| {
+                fragment_rename::rename_preserved_fragments(&source.template, &edits)
+                    .ok()
+                    .flatten()
+            });
         let original = plan
             .origin
             .and_then(|origin| package.original_workbook.sheets.get(origin));
@@ -701,6 +714,12 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
                         })
                     })
                 {
+                    if let Some(template) = &renamed_template {
+                        parts.set(
+                            plan.path.clone(),
+                            template.render(Vec::new(), worksheet_child_rank)?,
+                        )?;
+                    }
                     continue;
                 }
                 worksheet_xml_with_template(
@@ -708,6 +727,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
                     wb,
                     original,
                     source,
+                    renamed_template.as_ref().unwrap_or(&source.template),
                     package,
                     provenance,
                     shared_string_plan.as_ref(),
@@ -858,9 +878,8 @@ struct ChartClaim<'a> {
 }
 
 /// What one sheet wants written into a drawing anchor it holds.
-struct AnchorClaim<'a> {
+struct AnchorClaim {
     anchor: ChartAnchor,
-    sheet: &'a str,
     moved: bool,
 }
 
@@ -874,8 +893,11 @@ fn patch_chart_parts(
     origins: &[Option<usize>],
     parts: &mut PartStore<'_>,
 ) -> Result<Vec<(String, Vec<u8>)>, ParseError> {
+    if let Some((drawing, _, first, second)) = crate::chart::conflicting_drawing_anchor(wb) {
+        return Err(conflicting_shared_part(drawing, first, second));
+    }
     let mut chart_refs: BTreeMap<&str, Vec<ChartClaim<'_>>> = BTreeMap::new();
-    let mut anchors: BTreeMap<&str, BTreeMap<usize, AnchorClaim<'_>>> = BTreeMap::new();
+    let mut anchors: BTreeMap<&str, BTreeMap<usize, AnchorClaim>> = BTreeMap::new();
     for (sheet, origin) in wb.sheets.iter().zip(origins) {
         let original_sheet = origin.and_then(|origin| package.original_workbook.sheets.get(origin));
         let source = original_sheet
@@ -911,12 +933,15 @@ fn patch_chart_parts(
                     },
                     original_sheet: original_sheet.map_or(&sheet.name, |sheet| &sheet.name),
                 });
-            claim_anchor(
-                anchors.entry(chart.drawing.as_str()).or_default(),
-                chart,
-                &sheet.name,
-                original.anchor != chart.anchor,
-            )?;
+            anchors
+                .entry(chart.drawing.as_str())
+                .or_default()
+                .entry(chart.anchor_index)
+                .or_insert(AnchorClaim {
+                    anchor: chart.anchor,
+                    moved: false,
+                })
+                .moved |= original.anchor != chart.anchor;
         }
     }
     let mut refreshes = Vec::new();
@@ -931,8 +956,21 @@ fn patch_chart_parts(
             continue;
         };
         let rewritten = if moved {
-            agreed_chart_bytes(source, path, &claims, wb, &package.original_workbook)?
-                .unwrap_or_else(|| source.to_vec())
+            match crate::chart::agreed_chart_bytes(
+                source,
+                path,
+                &claims
+                    .iter()
+                    .map(|claim| (claim.chart, claim.sheet))
+                    .collect::<Vec<_>>(),
+                wb,
+            ) {
+                Ok(bytes) => bytes.unwrap_or_else(|| source.to_vec()),
+                Err(error) if crate::chart::is_unwritable_chart_reference(&error) => {
+                    source.to_vec()
+                }
+                Err(error) => return Err(error),
+            }
         } else {
             source.to_vec()
         };
@@ -962,76 +1000,6 @@ fn patch_chart_parts(
         )?;
     }
     Ok(refreshes)
-}
-
-/// Records what one sheet wants at a drawing anchor, refusing when a sheet
-/// that shares the drawing already asked for a different one.
-fn claim_anchor<'a>(
-    claims: &mut BTreeMap<usize, AnchorClaim<'a>>,
-    chart: &SheetChart,
-    sheet: &'a str,
-    moved: bool,
-) -> Result<(), ParseError> {
-    match claims.entry(chart.anchor_index) {
-        btree_map::Entry::Vacant(slot) => {
-            slot.insert(AnchorClaim {
-                anchor: chart.anchor,
-                sheet,
-                moved,
-            });
-        }
-        btree_map::Entry::Occupied(mut slot) => {
-            if slot.get().anchor != chart.anchor {
-                return Err(conflicting_shared_part(
-                    &chart.drawing,
-                    slot.get().sheet,
-                    sheet,
-                ));
-            }
-            slot.get_mut().moved |= moved;
-        }
-    }
-    Ok(())
-}
-
-/// The bytes a chart part must take, refused when the sheets anchoring it do
-/// not all patch it into the same thing. A shared part's references may be
-/// unqualified, so the sheet a cache is rebuilt against is part of what the
-/// sheets must agree on.
-fn agreed_chart_bytes(
-    source: &[u8],
-    path: &str,
-    claims: &[ChartClaim<'_>],
-    wb: &Workbook,
-    original: &Workbook,
-) -> Result<Option<Vec<u8>>, ParseError> {
-    let mut agreed: Option<(Vec<u8>, &str)> = None;
-    for claim in claims {
-        let base = match &claim.chart.raw_xml {
-            Some(xml) => crate::tree::Part::decode(source)?.encode_text(xml),
-            None => source.to_vec(),
-        };
-        let bytes = crate::chart::patch_chart_refs(
-            &base,
-            path,
-            claim.refs,
-            wb,
-            claim.sheet,
-            claim
-                .chart
-                .raw_xml
-                .is_none()
-                .then_some((original, claim.original_sheet)),
-        )?;
-        match &agreed {
-            Some((first, owner)) if *first != bytes => {
-                return Err(conflicting_shared_part(path, owner, claim.sheet));
-            }
-            Some(_) => {}
-            None => agreed = Some((bytes, claim.sheet)),
-        }
-    }
-    Ok(agreed.map(|(bytes, _)| bytes))
 }
 
 fn refreshed_chart_bytes(
@@ -1085,7 +1053,7 @@ fn refreshed_chart_bytes(
 /// Two sheets anchor one part and no longer agree on what it holds. The part
 /// can carry only one of them, so the save is refused rather than rewriting the
 /// chart the other sheet shows.
-fn conflicting_shared_part(path: &str, first: &str, second: &str) -> ParseError {
+pub(crate) fn conflicting_shared_part(path: &str, first: &str, second: &str) -> ParseError {
     ParseError::UnsupportedEdit(format!(
         "{path} is anchored by both sheet {first} and sheet {second}, which no longer agree on what it holds, and one part cannot carry both"
     ))
@@ -1382,6 +1350,85 @@ impl SheetIds {
 
 /// The source sheet each sheet keeps: the first in-range claim of a source
 /// index keeps it, later claims are new sheets.
+pub use fragment_rename::{FragmentFailure, FragmentFailureReason, FragmentKind};
+
+/// The sheet edits preserved formulas follow, by sheet identity rather than
+/// edit history: the source sheets in file order, those no kept sheet claims,
+/// and each kept source sheet's name in the file with its current name when
+/// they differ.
+fn sheet_edits(
+    wb: &Workbook,
+    package: &PreservedPackage,
+    claimed: &[Option<usize>],
+) -> fragment_rename::SheetEdits {
+    let source = &package.original_workbook.sheets;
+    let kept = claimed
+        .iter()
+        .filter_map(|origin| *origin)
+        .collect::<Vec<_>>();
+    fragment_rename::SheetEdits {
+        moved: claimed.iter().any(Option::is_none) || kept.windows(2).any(|pair| pair[0] > pair[1]),
+        source_order: source.iter().map(|sheet| sheet.name.clone()).collect(),
+        removed: source
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !claimed.contains(&Some(*index)))
+            .map(|(_, sheet)| sheet.name.clone())
+            .collect(),
+        renamed: wb
+            .sheets
+            .iter()
+            .zip(claimed)
+            .filter_map(|(sheet, origin)| {
+                let original = source.get((*origin)?)?;
+                (original.name != sheet.name).then(|| (original.name.clone(), sheet.name.clone()))
+            })
+            .collect(),
+    }
+}
+
+/// A preserved formula fragment a save would keep as the file wrote it
+/// because it cannot follow the sheet renames: on which sheet, in which part,
+/// and why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreservedFragmentFailure {
+    pub sheet: String,
+    pub part: String,
+    pub failure: FragmentFailure,
+}
+
+/// Every preserved formula fragment of `wb`'s kept source sheets that cannot
+/// follow the renames since `package` was read. Empty when every one can, or
+/// nothing was renamed.
+pub(crate) fn preserved_fragment_failures(
+    wb: &Workbook,
+    package: &PreservedPackage,
+    origins: &[Option<usize>],
+) -> Vec<PreservedFragmentFailure> {
+    let claimed = claimed_origins(package, origins);
+    let edits = sheet_edits(wb, package, &claimed);
+    if edits.is_empty() {
+        return Vec::new();
+    }
+    wb.sheets
+        .iter()
+        .zip(&claimed)
+        .filter_map(|(sheet, origin)| {
+            let source = package.sheets.get((*origin)?)?;
+            if !source.is_worksheet() {
+                return None;
+            }
+            fragment_rename::rename_preserved_fragments(&source.template, &edits)
+                .err()
+                .map(|failure| PreservedFragmentFailure {
+                    sheet: sheet.name.clone(),
+                    part: source.path.clone(),
+                    failure,
+                })
+        })
+        .collect()
+}
+
 fn claimed_origins(package: &PreservedPackage, origins: &[Option<usize>]) -> Vec<Option<usize>> {
     let mut claimed = HashSet::new();
     origins
@@ -2216,6 +2263,16 @@ fn source_content_type<'a>(package: &'a PreservedPackage, path: &str) -> Option<
     effective_content_type(&package.content_types, path).map(|resolved| resolved.value)
 }
 
+/// A sheet or defined name's `name` attribute is an `ST_Xstring`, written as
+/// Excel writes one; every other attribute keeps its references.
+fn name_or_text_attribute(attribute: &XmlAttribute) -> Attribute<'_> {
+    if attribute.name == "name" {
+        crate::xml::xstring_attribute(&attribute.name, &attribute.value)
+    } else {
+        text_attribute(&attribute.name, &attribute.value)
+    }
+}
+
 fn write_empty_element(
     writer: &mut Writer<Vec<u8>>,
     name: &str,
@@ -2223,7 +2280,7 @@ fn write_empty_element(
 ) -> io::Result<()> {
     let mut element = BytesStart::new(name);
     for attribute in attributes {
-        element.push_attribute((attribute.name.as_str(), attribute.value.as_str()));
+        element.push_attribute(text_attribute(&attribute.name, &attribute.value));
     }
     writer.write_event(Event::Empty(element))?;
     Ok(())
@@ -2325,7 +2382,7 @@ fn workbook_xml(wb: &Workbook, active_sheet: SheetId) -> Result<Vec<u8>, ParseEr
                         let rid = format!("rId{}", i + 1);
                         let sid = (i + 1).to_string();
                         w.create_element("sheet")
-                            .with_attribute(("name", sheet.name.as_str()))
+                            .with_attribute(crate::xml::xstring_attribute("name", &sheet.name))
                             .with_attribute(("sheetId", sid.as_str()))
                             .with_attribute(("r:id", rid.as_str()))
                             .write_empty()?;
@@ -2364,7 +2421,7 @@ fn write_defined_name(
     names: FormulaNames<'_>,
 ) -> io::Result<()> {
     let mut element = BytesStart::new("definedName");
-    element.push_attribute(("name", defined.name.as_str()));
+    element.push_attribute(crate::xml::xstring_attribute("name", &defined.name));
     let local_sheet = defined.local_sheet.map(|sheet| sheet.0.to_string());
     if let Some(local_sheet) = &local_sheet {
         element.push_attribute(("localSheetId", local_sheet.as_str()));
@@ -2373,7 +2430,7 @@ fn write_defined_name(
         element.push_attribute(("hidden", "1"));
     }
     w.write_event(Event::Start(element))?;
-    w.write_event(Event::Text(BytesText::new(&excel_formula(
+    w.write_event(Event::Text(text_event(&excel_formula(
         &defined.formula,
         names,
     ))))?;
@@ -2412,7 +2469,7 @@ fn workbook_xml_with_template(
     let sheets_fragment = Some(fragment(|writer| {
         let mut element = BytesStart::new("sheets");
         for attribute in &sheets_attributes {
-            element.push_attribute((attribute.name.as_str(), attribute.value.as_str()));
+            element.push_attribute(text_attribute(&attribute.name, &attribute.value));
         }
         writer.write_event(Event::Start(element))?;
         for (sheet, plan) in wb.sheets.iter().zip(sheets) {
@@ -2430,7 +2487,11 @@ fn workbook_xml_with_template(
                 REL_ID_ATTRIBUTE,
                 plan.relationship.id().unwrap_or_default().to_owned(),
             );
-            write_empty_element(writer, "sheet", &attributes)?;
+            let mut element = BytesStart::new("sheet");
+            for attribute in &attributes {
+                element.push_attribute(name_or_text_attribute(attribute));
+            }
+            writer.write_event(Event::Empty(element))?;
         }
         writer.write_event(Event::End(BytesEnd::new("sheets")))?;
         Ok(())
@@ -2605,14 +2666,14 @@ fn edited_defined_names(
         let source_name = attributes
             .iter()
             .find(|attr| attr.name == "name")
-            .map(|attr| attr.value.as_str());
+            .map(|attr| crate::read::unescape_name(&attr.value));
         let source_scope = attributes
             .iter()
             .find(|attr| attr.name == "localSheetId")
             .map(|attr| attr.value.parse::<u32>())
             .transpose()
             .map_err(|_| unsupported())?;
-        if source_name != Some(original.name.as_str())
+        if source_name.as_deref() != Some(original.name.as_str())
             || source_scope != original.local_sheet.map(|sheet| sheet.0)
         {
             return Err(unsupported());
@@ -2719,10 +2780,10 @@ fn patch_defined_name(
     fragment(|writer| {
         let mut element = BytesStart::new(element_name.as_str());
         for attribute in &attributes {
-            element.push_attribute((attribute.name.as_str(), attribute.value.as_str()));
+            element.push_attribute(name_or_text_attribute(attribute));
         }
         writer.write_event(Event::Start(element))?;
-        writer.write_event(Event::Text(BytesText::new(&excel_formula(
+        writer.write_event(Event::Text(text_event(&excel_formula(
             &defined.formula,
             names,
         ))))?;
@@ -3124,6 +3185,7 @@ fn worksheet_xml_with_template(
     wb: &Workbook,
     original: Option<&Sheet>,
     source: &PreservedSheet,
+    template: &XmlTemplate,
     package: &PreservedPackage,
     shared_string_cells: &SharedStringCells,
     shared_string_plan: Option<&SharedStringPlan>,
@@ -3132,7 +3194,6 @@ fn worksheet_xml_with_template(
     sheet_index: usize,
     cf_plan: &CfPlan,
 ) -> Result<WorksheetOutput, ParseError> {
-    let template = &source.template;
     let defined = DefinedFunctionNames::new(&wb.defined_names);
     let names = defined.visible_from(Some(SheetId(sheet_index as u32)));
     if let Some(original) = original
@@ -3555,7 +3616,7 @@ fn write_hyperlinks(
     }
     let mut root = BytesStart::new("hyperlinks");
     for (name, value) in root_attributes {
-        root.push_attribute((name.as_str(), value.as_str()));
+        root.push_attribute(text_attribute(name, value));
     }
     w.write_event(Event::Start(root))?;
     for (link, relationship_id) in sheet.hyperlinks.iter().zip(ids) {
@@ -3566,13 +3627,13 @@ fn write_hyperlinks(
             element.push_attribute((id_name, relationship_id.as_str()));
         }
         if let Some(location) = &link.location {
-            element.push_attribute(("location", location.as_str()));
+            element.push_attribute(text_attribute("location", location));
         }
         if let Some(tooltip) = &link.tooltip {
-            element.push_attribute(("tooltip", tooltip.as_str()));
+            element.push_attribute(text_attribute("tooltip", tooltip));
         }
         if let Some(display) = &link.display {
-            element.push_attribute(("display", display.as_str()));
+            element.push_attribute(text_attribute("display", display));
         }
         w.write_event(Event::Empty(element))?;
     }
@@ -3850,7 +3911,7 @@ pub(crate) fn write_cell(
                 .with_attribute(("t", "array"))
                 .with_attribute(("ref", reference.as_str()));
         }
-        element.write_text_content(BytesText::new(&excel_formula(f, names)))?;
+        element.write_text_content(text_event(&excel_formula(f, names)))?;
     }
     if let Some(v) = &value {
         w.create_element("v")
@@ -3895,7 +3956,7 @@ pub(crate) fn cell_value_markup(
         CellValue::Text { value } => {
             if cell.formula.is_some() {
                 markup.ty = Some("str");
-                markup.value = Some(value.clone());
+                markup.value = Some(encode_xstring(value));
             } else if let Some(index) = retained.or_else(|| sst_index.get(value.as_str()).copied())
             {
                 markup.ty = Some("s");
@@ -3932,7 +3993,7 @@ fn write_merges(w: &mut Writer<Vec<u8>>, sheet: &Sheet) -> io::Result<()> {
 fn write_text_el(w: &mut Writer<Vec<u8>>, text: &str) -> io::Result<()> {
     w.create_element("t")
         .with_attribute(("xml:space", "preserve"))
-        .write_text_content(BytesText::new(text))?;
+        .write_text_content(BytesText::new(&encode_xstring(text)))?;
     Ok(())
 }
 
@@ -4094,7 +4155,7 @@ fn styles_xml_with_template(
             writer
                 .create_element("numFmt")
                 .with_attribute(("numFmtId", id.to_string().as_str()))
-                .with_attribute(("formatCode", code.as_str()))
+                .with_attribute(crate::xml::xstring_attribute("formatCode", code))
                 .write_empty()?;
             Ok(())
         },
@@ -4243,7 +4304,7 @@ fn write_num_fmts(w: &mut Writer<Vec<u8>>, ss: &Stylesheet) -> io::Result<()> {
                 let id = id.to_string();
                 w.create_element("numFmt")
                     .with_attribute(("numFmtId", id.as_str()))
-                    .with_attribute(("formatCode", code.as_str()))
+                    .with_attribute(crate::xml::xstring_attribute("formatCode", code))
                     .write_empty()?;
             }
             Ok(())
@@ -4291,7 +4352,7 @@ fn write_font(w: &mut Writer<Vec<u8>>, font: &Font) -> io::Result<()> {
         }
         if let Some(name) = &font.name {
             w.create_element("name")
-                .with_attribute(("val", name.as_str()))
+                .with_attribute(crate::xml::xstring_attribute("val", name))
                 .write_empty()?;
         }
         Ok(())

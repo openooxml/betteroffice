@@ -52,6 +52,7 @@
     "decreaseFontSize": "縮小字型",
     "increaseFontSize": "放大字型",
     "underline": "底線",
+    "strikethrough": "刪除線",
     "more": "更多",
     "fillColor": "填滿色彩",
     "noFill": "無填滿",
@@ -91,6 +92,12 @@
     "fallbackTitle": "投影片 {number}",
     "canvasLabel": "第 {current} 張投影片，共 {total} 張",
     "canvasLabelWithSelection": "第 {current} 張投影片，共 {total} 張；已選取物件 {name}"
+  },
+  "a11y": {
+    "chartNoData": "無資料",
+    "slideWithTitle": "第 {current} 張投影片，共 {total} 張：{title}",
+    "objectSelected": "已選取 {name}",
+    "editingText": "正在編輯 {name}"
   },
   "editor": {
     "appLabel": "簡報投影片編輯器",
@@ -156,6 +163,17 @@
     "stalePreview": "此預覽使用更新後的投影片。套用將覆寫已變更的目標。",
     "geometry": "位置與大小 (x, y, 寬度, 高度)",
     "geometryValues": "{before} → {after} pt",
+    "layoutChanged": "版面配置已變更",
+    "backgroundChanged": "背景已變更",
+    "rowInserted": "已插入列",
+    "rowDeleted": "已刪除列",
+    "columnInserted": "已插入欄",
+    "columnDeleted": "已刪除欄",
+    "broughtToFront": "已移到最上層",
+    "sentToBack": "已移到最下層",
+    "broughtForward": "已上移一層",
+    "sentBackward": "已下移一層",
+    "zOrderChanged": "堆疊順序已變更",
     "appearance": "外觀或文字格式已變更",
     "changedAgain": "目標再次變更。套用前請檢閱更新後的預覽。",
     "canvasTitle": "此投影片上的變更",
@@ -168,7 +186,14 @@
     "canvasStale": "目標已變更。請開啟檢閱詳細資料，以在套用前檢查更新後的預覽。",
     "previousPosition": "先前",
     "proposedPosition": "提議",
-    "loadingDiff": "正在載入變更…"
+    "loadingDiff": "正在載入變更…",
+    "slideStrip": null,
+    "previewSlide": null,
+    "insertedShape": null,
+    "deletedShape": null,
+    "insertedSlide": null,
+    "deletedSlide": null,
+    "movedFrom": null
   },
   "commands": {
     "moreControls": "更多控制項",
@@ -212,8 +237,25 @@
       "permissionDenied": "主機應用程式尚未允許此外掛程式使用此命令。",
       "unsupportedPolicy": "外掛程式尚無法執行此命令。請改用編輯批次。",
       "pluginUnavailable": "外掛程式已不再作用中。",
-      "aborted": "外掛程式動作在命令執行前已取消。"
-    }
+      "aborted": "外掛程式動作在命令執行前已取消。",
+      "clipboardUnavailable": "無法存取剪貼簿或存取遭到拒絕。",
+      "tableRequired": "請先將游標置於表格儲存格中。",
+      "lastSlide": "無法刪除最後一張投影片。"
+    },
+    "cut": "剪下",
+    "copy": "複製",
+    "paste": "貼上",
+    "pastePlainText": "以純文字貼上",
+    "insert": "插入",
+    "delete": "刪除",
+    "deleteTable": "刪除表格",
+    "duplicateSlide": "複製投影片",
+    "insertRowsAbove": "在上方插入列",
+    "insertRowsBelow": "在下方插入列",
+    "insertColumnsLeft": "在左側插入欄",
+    "insertColumnsRight": "在右側插入欄",
+    "deleteRows": "刪除列",
+    "deleteColumns": "刪除欄"
   },
   "plugins": {
     "toolbarGroup": "外掛程式",
@@ -225,5 +267,20 @@
     "label": "共同作業者",
     "moreCollaborators": "{count, plural, other {還有 # 位共同作業者}}",
     "moreSelections": "+{count, plural, other {# 個選取範圍}}"
+  },
+  "contextMenu": {
+    "text": "文字功能表",
+    "shape": "圖案功能表",
+    "table": "表格功能表",
+    "slide": "投影片功能表"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "delete": "Del",
+    "escape": "Esc",
+    "pageup": "Page Up",
+    "pagedown": "Page Down"
   }
 }

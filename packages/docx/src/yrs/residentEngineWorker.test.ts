@@ -57,7 +57,37 @@ import {
 } from './residentEngineWorkerProtocol';
 import type { EchoGlyphProvider } from './residentCommandViewProjection';
 
-let startWorker: (scope: unknown, canvas: unknown, harness: unknown, clock: unknown, fetch: unknown, decode: unknown) => void;
+let startWorker: (scope: unknown, canvas: unknown, harness: unknown, clock: unknown, fetch: unknown, decode: unknown, schedule: unknown, unschedule: unknown) => void;
+const retireWorkerTimers: (() => void)[] = [];
+
+afterEach(() => {
+  for (const retire of retireWorkerTimers.splice(0)) retire();
+});
+
+function testScopedTimers() {
+  const armed = new Set<ReturnType<typeof setTimeout>>();
+  let retired = false;
+  retireWorkerTimers.push(() => {
+    retired = true;
+    for (const handle of armed) globalThis.clearTimeout(handle);
+    armed.clear();
+  });
+  return {
+    schedule(callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]) {
+      if (retired) return 0 as unknown as ReturnType<typeof setTimeout>;
+      const handle = globalThis.setTimeout(() => {
+        armed.delete(handle);
+        callback(...args);
+      }, ms);
+      armed.add(handle);
+      return handle;
+    },
+    unschedule(handle: ReturnType<typeof setTimeout>) {
+      armed.delete(handle);
+      globalThis.clearTimeout(handle);
+    },
+  };
+}
 
 beforeAll(async () => {
   const frameDelta = resolve(import.meta.dir, '../layout/render/frameDelta.ts');
@@ -112,7 +142,7 @@ beforeAll(async () => {
     `,
   };
   const result = await Bun.build({
-    entrypoints: [resolve(import.meta.dir, 'residentEngineWorker.ts')],
+    entrypoints: [resolve(import.meta.dir, 'docxWorker.browser.ts')],
     target: 'bun',
     format: 'iife',
     plugins: [
@@ -153,6 +183,8 @@ beforeAll(async () => {
     'performance',
     'fetch',
     'createImageBitmap',
+    'setTimeout',
+    'clearTimeout',
     await result.outputs[0].text()
   ) as typeof startWorker;
 }, 30_000);
@@ -268,6 +300,7 @@ function worker() {
     session: {
       initializeComments() {},
       primeSaveSeedStates: mock(() => true),
+      primeSaveSeedStatesSlice: mock((_paragraphs: number, _inflated: number, _bytes: number) => 0),
       partGeometry: () => [],
       proposalEngine: { version: () => 'v' },
       geometryReader: { storyIds: () => ['body'] },
@@ -410,8 +443,10 @@ function worker() {
       canvas.height = buffer.height;
     },
   };
+  const timers = testScopedTimers();
   startWorker(scope, Surface, harness, { now: () => harness.now() },
-    (source: string) => harness.fetchImage(source), (blob: Blob) => harness.decodeImage(blob));
+    (source: string) => harness.fetchImage(source), (blob: Blob) => harness.decodeImage(blob),
+    timers.schedule, timers.unschedule);
   function send(request: ResidentEngineWorkerRequestWithoutId) {
     const id = ++nextId;
     return new Promise<DocxEngineWorkerResponse>((resolve) => {
@@ -2530,13 +2565,36 @@ describe('document worker warmup', () => {
     try {
       await client.commandInit(COMMAND_INIT);
       const before = replies.length;
-      await settleWarmup(() => w.harness.session.primeSaveSeedStates.mock.calls.length === 1);
-      expect(w.harness.session.primeSaveSeedStates).toHaveBeenCalledWith(4096, 16 * 1024 * 1024);
+      await settleWarmup(() => w.harness.session.primeSaveSeedStatesSlice.mock.calls.length === 1);
+      expect(w.harness.session.primeSaveSeedStatesSlice).toHaveBeenCalledWith(4096, 16 * 1024 * 1024, 16 * 1024);
+      expect(w.harness.session.primeSaveSeedStates).not.toHaveBeenCalled();
       expect(replies).toHaveLength(before);
       await client.edit(commandEnvelope(1));
       advanceTimers(5_000);
       await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
-      expect(w.harness.session.primeSaveSeedStates).toHaveBeenCalledTimes(1);
+      expect(w.harness.session.primeSaveSeedStatesSlice).toHaveBeenCalledTimes(1);
+    } finally {
+      client.destroy();
+    }
+  });
+
+  test('save seed priming runs in slices until the states are known', async () => {
+    const { w, client } = await commandWorker();
+    w.harness.now = () => now;
+    const answers = [1, 1, 0];
+    w.harness.session.primeSaveSeedStatesSlice.mockImplementation(() => answers.shift() ?? 0);
+    try {
+      await client.commandInit(COMMAND_INIT);
+      await settleWarmup(() => w.harness.session.primeSaveSeedStatesSlice.mock.calls.length === 3);
+      advanceTimers(5_000);
+      await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+      const calls = w.harness.session.primeSaveSeedStatesSlice.mock.calls;
+      expect(calls).toHaveLength(3);
+      for (const [paragraphs, inflated, bytes] of calls) {
+        expect([paragraphs, inflated]).toEqual([4096, 16 * 1024 * 1024]);
+        expect(bytes).toBeGreaterThanOrEqual(2 * 1024);
+        expect(bytes).toBeLessThanOrEqual(1024 * 1024);
+      }
     } finally {
       client.destroy();
     }
@@ -2549,7 +2607,7 @@ describe('document worker warmup', () => {
       await client.commandInit({ ...COMMAND_INIT, readOnly: true });
       advanceTimers(5_000);
       await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
-      expect(w.harness.session.primeSaveSeedStates).not.toHaveBeenCalled();
+      expect(w.harness.session.primeSaveSeedStatesSlice).not.toHaveBeenCalled();
     } finally {
       client.destroy();
     }
@@ -2563,7 +2621,7 @@ describe('document worker warmup', () => {
       await client.commandInit(COMMAND_INIT);
       advanceTimers(5_000);
       await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
-      expect(w.harness.session.primeSaveSeedStates).not.toHaveBeenCalled();
+      expect(w.harness.session.primeSaveSeedStatesSlice).not.toHaveBeenCalled();
     } finally {
       client.destroy();
     }

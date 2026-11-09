@@ -135,7 +135,14 @@
       "unsupportedCommand": "Ще не підтримується.",
       "invalidArguments": "Це значення неприпустиме.",
       "inputFailed": "Попереднє введення в клітинку не вдалося зберегти.",
+      "editUnsupported": "Цю зміну не можна застосувати тут. Книгу не змінено.",
+      "editUnsupportedChart": "Цю зміну не можна застосувати: діаграма використовує клітинки, які вона зсунула б. Книгу не змінено.",
+      "editUnsupportedTable": "Цю зміну не можна застосувати: таблиця використовує клітинки, які вона зсунула б. Книгу не змінено.",
+      "editUnsupportedPivot": "Цю зміну не можна застосувати: зведена таблиця використовує клітинки, які вона зсунула б. Книгу не змінено.",
       "sheetProtected": "Ця клітинка розташована на захищеному аркуші.",
+      "hostRefused": "Ця зміна заборонена.",
+      "tooManyToCheck": "Забагато клітинок для перевірки плагінами (ліміт {limit}).",
+      "hostStarting": "Редактор ще запускається. Спробуйте ще раз за мить.",
       "documentReplaced": "Відкрито іншу книгу.",
       "targetChanged": "Виділення змінилося.",
       "gestureActive": "Спочатку завершіть переміщення діаграми.",
@@ -146,8 +153,31 @@
       "permissionDenied": "Головна програма не надала цьому плагіну дозволу використовувати цю команду.",
       "unsupportedPolicy": "Плагіни ще не можуть виконувати цю команду. Скористайтеся пакетом редагування.",
       "pluginUnavailable": "Плагін більше не активний.",
-      "aborted": "Дію плагіна скасовано до виконання команди."
-    }
+      "aborted": "Дію плагіна скасовано до виконання команди.",
+      "clipboardUnavailable": "Цей браузер не дозволяє вставляти з меню. Скористайтеся сполученням клавіш.",
+      "lastSheet": "У книзі має бути щонайменше один аркуш.",
+      "sheetAtEdge": "Аркуш не можна перемістити далі.",
+      "sheetNameInvalid": "Назва аркуша має містити від 1 до 31 символу, бути унікальною й не містити : \\ / ? * [ ].",
+      "clipboardDenied": "Браузер не дозволив доступ до буфера обміну."
+    },
+    "cut": "Вирізати",
+    "copy": "Копіювати",
+    "paste": "Вставити",
+    "pastePlainText": "Вставити як звичайний текст",
+    "clearContents": "Очистити вміст",
+    "insert": "Вставити",
+    "delete": "Видалити",
+    "insertRowsAbove": "Вставити рядки вище",
+    "insertRowsBelow": "Вставити рядки нижче",
+    "insertColumnsLeft": "Вставити стовпці ліворуч",
+    "insertColumnsRight": "Вставити стовпці праворуч",
+    "deleteRows": "Видалити рядки",
+    "deleteColumns": "Видалити стовпці",
+    "insertSheet": "Вставити аркуш",
+    "deleteSheet": "Видалити аркуш",
+    "renameSheet": "Перейменувати",
+    "moveSheetLeft": "Перемістити ліворуч",
+    "moveSheetRight": "Перемістити праворуч"
   },
   "editor": {
     "appLabel": "Редактор електронних таблиць",
@@ -162,7 +192,11 @@
     "showDetails": "Показати подробиці",
     "openPrompt": "Відкрити файл XLSX",
     "sheetTabsLabel": "Аркуші",
-    "clearExceedsLimit": "Очищення перевищує ліміт клітинок."
+    "clearExceedsLimit": "Очищення перевищує ліміт клітинок.",
+    "cellMenuLabel": "Меню клітинки",
+    "sheetTabMenuLabel": "Меню ярлика аркуша",
+    "renameSheetLabel": "Перейменувати аркуш",
+    "sheetNamePrefix": "Аркуш"
   },
   "presence": {
     "label": "Співавтори",
@@ -178,6 +212,7 @@
     "accept": "Прийняти",
     "reject": "Відхилити",
     "forceApply": "Застосувати примусово",
+    "forceBlockedReason": "Цю пропозицію неможливо застосувати після зміни структури.",
     "staleWarning": "Клітинки, змінені після створення пропозиції: {cells}"
   },
   "a11y": {
@@ -187,12 +222,27 @@
     "cellLabel": "{address}, {value}",
     "cellLabelSelected": "{address}, {value}, вибрано",
     "emptyCellLabel": "{address}, порожньо",
-    "emptyCellLabelSelected": "{address}, порожньо, вибрано"
+    "emptyCellLabelSelected": "{address}, порожньо, вибрано",
+    "hasFormula": "{label}, містить формулу",
+    "rangeSelected": "Виділено {start} – {end}, {rows, plural, one {# рядок} few {# рядки} many {# рядків} other {# рядка}} на {columns, plural, one {# стовпець} few {# стовпці} many {# стовпців} other {# стовпця}}",
+    "sheetActivated": "{name}, аркуш {index} з {count}",
+    "cellInputLabel": "Редагувати клітинку {address}",
+    "gridRoleDescription": "аркуш"
   },
   "plugins": {
     "toolbarGroup": "Плагіни",
     "panelTabs": "Панелі плагінів",
     "collapsePanel": "Згорнути {title}",
-    "expandPanel": "Розгорнути {title}"
+    "expandPanel": "Розгорнути {title}",
+    "rowGutter": "Позначки рядків плагінів"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "del": "Del",
+    "escape": "Esc",
+    "pageUp": "Page Up",
+    "pageDown": "Page Down"
   }
 }

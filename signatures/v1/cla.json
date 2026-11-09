@@ -101,6 +101,12 @@
       "id": 1776746,
       "signed_at": "2026-10-18T02:27:12Z",
       "pull_request_no": 1466
+    },
+    {
+      "name": "moevis",
+      "id": 3747445,
+      "signed_at": "2026-11-04T13:20:34Z",
+      "pull_request_no": 2228
     }
   ]
 }

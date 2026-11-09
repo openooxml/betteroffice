@@ -44,7 +44,7 @@ use crate::paragraph_spacing::{
     apply_contextual_spacing_measured, get_spacing_after, get_spacing_before,
 };
 use crate::prescan::{LayoutPlan, SectionLayoutConfig, default_columns, prescan};
-use crate::resolve_lines::{ResolvedLine, ResolvedSegment, resolve_line_segments, utf16_len};
+use crate::resolve_lines::{ResolvedLine, ResolvedSegment, resolve_line_segments_in, utf16_len};
 use crate::section_breaks::resolve_page_margins;
 use crate::types::{
     BlockExtent, BlockId, ChartBlock, ChartExtent, ChartFragment, Fragment, ImageBlock,
@@ -53,6 +53,7 @@ use crate::types::{
     SectionBreakType, ShapeBlock, ShapeExtent, ShapeFragment, Size, TextBoxBlock, TextBoxExtent,
     TextBoxFragment,
 };
+use crate::utf16_index::RunTexts;
 
 /// Default page size (US Letter in pixels at 96 DPI).
 const DEFAULT_PAGE_SIZE: Size = Size {
@@ -1686,13 +1687,14 @@ fn build_resolved_lines(
     from_line: usize,
     to_line: usize,
 ) -> Vec<ResolvedLine> {
+    let texts = RunTexts::new(block.runs.len());
     let mut resolved = Vec::new();
     for line_index in from_line..to_line {
         let Some(line) = measure.lines.get(line_index) else {
             continue;
         };
         resolved.push(ResolvedLine {
-            segments: resolve_line_segments(&block.runs, line),
+            segments: resolve_line_segments_in(&block.runs, line, &texts),
         });
     }
     resolved
@@ -2194,9 +2196,17 @@ fn layout_image(block: &ImageBlock, measure: &ImageExtent, paginator: &mut Pagin
 /// Places reserved space like an inline image block, clipped to the column it
 /// lands in.
 fn layout_reserved(block: &ReservedBlock, measure: &ImageExtent, paginator: &mut Paginator) {
-    let state_idx = paginator.ensure_fits(measure.height);
+    let mut state_idx = paginator.ensure_fits(measure.height);
+    let mut height = measure.height;
+    if let Some(lead) = block.page_lead.filter(|lead| *lead > 0.0) {
+        let state = paginator.state(state_idx);
+        if state.pen_y <= state.content_top {
+            height += lead;
+            state_idx = paginator.ensure_fits(height);
+        }
+    }
     let column_index = paginator.state(state_idx).column_index;
-    let height = measure.height.min(paginator.get_column_capacity()).max(0.0);
+    let height = height.min(paginator.get_column_capacity()).max(0.0);
     let fragment = Fragment::Reserved(ReservedFragment {
         block_id: block.id.clone(),
         x: paginator.get_column_x(column_index),

@@ -22,6 +22,8 @@ import initWasmModule, {
 import type { Direction, SelectionData } from '../selection/types';
 import type { InitInput } from './generated/xlsx_wasm.js';
 import { copyDecodedFace, fontBytes, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
+import { isEngineTrap } from '../../../../shared/office-session/trap';
+import { warnSaveWarnings, type SaveResult, type SaveWarning } from '../../../../shared/office-session/saveWarnings';
 
 export const decodeFontFace: FontDecoder = async (bytes, { codec, dict, maxOutput }) => {
   await initWasm();
@@ -29,7 +31,12 @@ export const decodeFontFace: FontDecoder = async (bytes, { codec, dict, maxOutpu
     dict === undefined ? undefined : fontBytes(dict), maxOutput));
 };
 import { wasmAssetUrl } from './asset';
-import { pngDisplayListReaders } from './pngDisplayList';
+import { pngFontReaders, workbookPngFonts } from './pngDisplayList';
+import { renderPng as renderEnginePng, type XlsxPngEngine } from './enginePng';
+import { pngDisplayList, resolvePngTarget, type ResolvedPngTarget } from './pngResolve';
+import type { XlsxPngFont, XlsxPngOptions, XlsxPngTarget } from './pngTarget';
+import { canvasPngAvailable, sheetFonts } from '../render/png';
+export type { XlsxFontFace, XlsxPngFont, XlsxPngOptions, XlsxPngTarget, XlsxRangeAddress, XlsxSheetRef } from './pngTarget';
 import { OPEN_SYNC_CLIENT } from '../collaboration/validation';
 import type { CollaborationReplica, CollaborationUpdateOrigin } from '../collaboration/types';
 import type { ChartRegion, DisplayList, Rect } from '../display-list/types';
@@ -51,6 +58,11 @@ import type {
   XlsxStructuredContent,
 } from '../exports';
 
+
+function docSaveWarnings(doc: object): SaveWarning[] {
+  const fn = (doc as { saveWarningsJson?: () => string }).saveWarningsJson;
+  return typeof fn === 'function' ? (JSON.parse(fn.call(doc)) as SaveWarning[]) : [];
+}
 /**
  * A scrolled window into a sheet. `x`/`y` are content-pixel offsets into the
  * non-frozen body. Mirrors the Rust `Viewport`.
@@ -144,14 +156,15 @@ export interface CalculationStatus {
 }
 
 /**
- * A formula cell the engine could not compute: it keeps Excel's saved value,
- * or stays blank when the file saved none, unless only an engine gap was
- * involved, which shows its error.
+ * A formula cell the engine could not compute: it keeps Excel's saved value.
+ * When the file saved none, an uncomputable function leaves it blank, an
+ * unknown function shows what the engine answered (`#NAME?`, or what a handler
+ * like `IFERROR` made of it), and an engine gap alone shows its error.
  */
 export interface UnevaluatedCellStatus {
   /** The cell, qualified by its sheet when that is not the active one. */
   address: string;
-  /** Uncomputable functions involved (`WEBSERVICE`, `RTD`, an add-in), sorted; empty when only engine gaps were. */
+  /** Functions involved, sorted: uncomputable ones (`WEBSERVICE`, `RTD`, an add-in) and names the engine does not know (a VBA function, a typo); empty when only engine gaps were. */
   functions: string[];
 }
 
@@ -433,6 +446,7 @@ export interface ProposalCell {
   a1: string;
   oldText: string;
   newText: string;
+  stale?: boolean;
 }
 
 /**
@@ -445,6 +459,12 @@ export interface Proposal {
   agentId: string;
   note: string | null;
   cells: ProposalCell[];
+  /**
+   * A1 addresses of the cells whose target moved, the same strings as
+   * {@link StaleProposalError.cells}. A changed dependency only shows at accept.
+   */
+  staleTargets?: string[];
+  forceBlocked?: boolean;
 }
 
 /** A drifted proposal cell: its sheet index and catalog id beside the coordinates. */
@@ -500,6 +520,7 @@ function displayErrorFrom(message: string): DisplayTooLargeError | null {
 
 // the wasm reports a stale accept as a JSON error naming each drifted cell.
 function staleErrorFrom(message: string): StaleProposalError | null {
+  if (message.startsWith('Stale proposal:')) return new StaleProposalError([]);
   if (!message.startsWith('{')) return null;
   try {
     const parsed = JSON.parse(message) as {
@@ -611,19 +632,27 @@ export interface WorkbookHandle extends CollaborationReplica {
   visibleMergedRanges(sheet: number, viewport: Viewport): MergedRange[];
   historyState(): HistoryState;
   /**
-   * render the current sheet viewport to png bytes via the native raster
-   * backend — the same display list the canvas paints, rasterized server-side.
-   * throws if the embedded wasm was built without png export (the `raster`
-   * cargo feature); guard with {@link isPngExportAvailable}.
+   * Draws a viewport or a cell range of a sheet as PNG bytes, with the
+   * editor's painter on a canvas. Rejects with `PngExportError` rather than
+   * paint a substitute font, and where no canvas exists names
+   * `@betteroffice/xlsx-native`.
    */
-  renderPng(viewport: Viewport): Uint8Array;
+  renderPng(target: XlsxPngTarget, options?: XlsxPngOptions): Promise<Uint8Array>;
   /**
-   * render an a1 range (default: the used range) at an optional scale to png.
-   * dimensions are capped wasm-side; same availability guard as renderPng.
+   * The fonts `renderPng` would paint for the same target. The editors use it to forward the faces they paint with; not public until every format has it.
+   * @internal
    */
-  renderRangePng(opts?: { range?: string; scale?: number }): Uint8Array;
-  /** serialize the workbook back to .xlsx bytes. */
+  renderPngFonts(target: XlsxPngTarget, options?: XlsxPngOptions): XlsxPngFont[];
+  /**
+   * serialize the workbook back to .xlsx bytes. each save warning is also emitted as a Node process
+   * warning with code `BETTEROFFICE_SAVE_WARNING`; {@link WorkbookHandle.saveWithWarnings} returns them.
+   */
   save(): Uint8Array;
+  /**
+   * serialize the workbook back to .xlsx bytes, with a warning for every part the save wrote differently
+   * from what the workbook holds; none on an ordinary save.
+   */
+  saveWithWarnings(): SaveResult;
   /**
    * stage an agent's proposed edits for human review without applying them.
    * returns the {@link Proposal} with per-cell formatted before/after previews.
@@ -633,6 +662,11 @@ export interface WorkbookHandle extends CollaborationReplica {
   propose(agentId: string, note: string | null, edits: ProposalEdit[]): Proposal;
   /** every pending proposal, oldest first. empty when none or unsupported. */
   listProposals(): Proposal[];
+  /** The pending state or the last decision made through this handle. */
+  getProposalStatus(id: string): 'pending' | 'accepted' | 'rejected' | undefined;
+  isProposalStale(id: string): boolean;
+  /** Observe proposals created or decided through this handle. */
+  onProposalChange(listener: (proposals: Proposal[]) => void): () => void;
   /**
    * apply a pending proposal as one undo step and recalc dependents. throws
    * {@link StaleProposalError} when the base changed since it was staged and
@@ -678,7 +712,6 @@ export interface WorkbookHandle extends CollaborationReplica {
 let initialized = false;
 let engineMemory: WebAssembly.Memory | undefined;
 let initialization: Promise<void> | undefined;
-let pngExportAvailable = true;
 const displayListJsonReaders = new WeakMap<
   WorkbookHandle, (viewport: Viewport, sheet?: number) => string
 >();
@@ -695,6 +728,10 @@ export function workbookDisplayListJson(
 export type WasmInitInput = InitInput | Promise<InitInput>;
 
 export interface WasmInitOptions {
+  /**
+   * `false` loads the smaller core without peer snapshots or standalone
+   * {@link renderXlsxMarkdown}; `exportMarkdown` on a workbook still works.
+   */
   png?: boolean;
 }
 
@@ -725,18 +762,12 @@ export function initWasm(
   if (initialized) return Promise.resolve();
   if (initialization) return initialization;
   const png = options.png !== false;
-  let module: WebAssembly.Module | undefined;
   const source = engineKind === 'native' || (input === undefined && png)
     ? input ?? wasmAssetUrl()
-    : compileWasmInput(input ?? wasmAssetUrl(png)).then((compiled) => {
-      module = compiled;
-      return compiled;
-    });
+    : compileWasmInput(input ?? wasmAssetUrl(png));
   initialization = initWasmModule({ module_or_path: source }).then(
     (output) => {
       engineMemory = output.memory;
-      pngExportAvailable = engineKind === 'native' || module === undefined ||
-        WebAssembly.Module.customSections(module, 'betteroffice.xlsx.no-png').length === 0;
       initialized = true;
     },
     (error: unknown) => {
@@ -782,13 +813,11 @@ export function isWasmAvailable(): boolean {
 }
 
 /**
- * Whether the embedded wasm core was built with png export (the `raster` cargo
- * feature). The wasm-bindgen method only exists on the class when compiled in,
- * so chrome can disable an export control instead of calling and catching.
+ * Whether `renderPng` can draw here through a canvas or the native engine.
+ * Callers can disable an export control instead of calling and catching.
  */
 export function isPngExportAvailable(): boolean {
-  return pngExportAvailable &&
-    typeof (XlsxDocument.prototype as { renderPng?: unknown }).renderPng === 'function';
+  return engineKind === 'native' || canvasPngAvailable();
 }
 
 /**
@@ -936,6 +965,8 @@ function wrapWorkbookDocument(
 ): WorkbookHandle {
   const collaborativeClientId = resolveCollaborativeClientId(options);
   const listeners = new Map<number, WorkbookUpdateListener>();
+  const proposalDecisions = new Map<string, 'accepted' | 'rejected'>();
+  const proposalListeners = new Set<(proposals: Proposal[]) => void>();
   const pendingUpdates: Array<{ update: Uint8Array; origin: WorkbookUpdateOrigin; fromPeer: boolean }> = [];
   let applyingPeerUpdate = 0;
   let nextListenerId = 0;
@@ -946,6 +977,15 @@ function wrapWorkbookDocument(
   let wasmCallDepth = 0;
   let flushingUpdates = false;
   let displayCapWarned = false;
+
+  function notifyProposals(): void {
+    if (!proposalListeners.size) return;
+    const proposals = handle.listProposals();
+    for (const listener of proposalListeners) {
+      try { listener(structuredClone(proposals)); }
+      catch (error) { console.error('xlsx proposal listener failed', error); }
+    }
+  }
 
   function reportDisplayLimit(frame: DisplayList): void {
     if (!frame.truncated || displayCapWarned) return;
@@ -1008,7 +1048,7 @@ function wrapWorkbookDocument(
         failure = error;
         failed = true;
       }
-      if (drainUpdates) {
+      if (drainUpdates && !(failed && isEngineTrap(failure))) {
         try {
           drainWasmUpdates();
         } catch (error) {
@@ -1032,6 +1072,18 @@ function wrapWorkbookDocument(
 
   function parseJson<T>(operation: () => string, drainUpdates = false): T {
     return wasmCall(() => JSON.parse(operation()) as T, drainUpdates);
+  }
+
+  function pngEngine(): XlsxPngEngine {
+    return {
+      doc: doc as unknown as XlsxPngEngine['doc'],
+      onSheet: (sheet, read) => {
+        const active = parseJson<SheetInfo>(() => doc.sheetInfoJson()).activeSheet;
+        if (sheet === active) return wasmCall(read);
+        mutatingWasmCall(() => doc.setActiveSheet(sheet));
+        try { return wasmCall(read); } finally { mutatingWasmCall(() => doc.setActiveSheet(active)); }
+      },
+    };
   }
 
   function displayListJson(viewport: Viewport, sheet?: number): string {
@@ -1285,25 +1337,27 @@ function wrapWorkbookDocument(
     historyState(): HistoryState {
       return parseJson(() => doc.historyStateJson());
     },
-    renderPng(viewport: Viewport): Uint8Array {
-      return wasmCall(() => {
-        const fn = (doc as { renderPng?: (v: string) => Uint8Array }).renderPng;
-        if (typeof fn !== 'function') throw new Error('png export not in this build');
-        return fn.call(doc, JSON.stringify(viewport)).slice();
-      });
+    renderPng(target: XlsxPngTarget, options: XlsxPngOptions = {}): Promise<Uint8Array> {
+      let resolved: ResolvedPngTarget;
+      try {
+        resolved = resolvePngTarget(target, options, parseJson<SheetInfo>(() => doc.sheetInfoJson()).sheetNames);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return renderEnginePng(pngEngine(), resolved, options).catch((error: unknown) => Promise.reject(toError(error)));
     },
-    renderRangePng(opts?: { range?: string; scale?: number }): Uint8Array {
-      return wasmCall(() => {
-        const fn = (doc as { renderRangePng?: (a: string) => Uint8Array }).renderRangePng;
-        if (typeof fn !== 'function') throw new Error('png export not in this build');
-        return fn.call(doc, JSON.stringify(opts ?? {})).slice();
-      });
-    },
+    renderPngFonts: (target: XlsxPngTarget, options: XlsxPngOptions = {}): XlsxPngFont[] => workbookPngFonts(handle, target, options),
     save(): Uint8Array {
-      return wasmCall(() => doc.saveBytes());
+      const bytes = wasmCall(() => doc.saveBytes());
+      warnSaveWarnings(wasmCall(() => docSaveWarnings(doc)));
+      return bytes;
+    },
+    saveWithWarnings(): SaveResult {
+      const bytes = wasmCall(() => doc.saveBytes());
+      return { bytes, warnings: wasmCall(() => docSaveWarnings(doc)) };
     },
     propose(agentId: string, note: string | null, edits: ProposalEdit[]): Proposal {
-      return mutatingWasmCall(() => {
+      const proposal = mutatingWasmCall(() => {
         const fn = (doc as { proposeJson?: (a: string) => string }).proposeJson;
         if (typeof fn !== 'function') throw new Error('proposals not in this build');
         const wireEdits = edits.map(({ numberFormat, ...edit }) => ({
@@ -1316,6 +1370,8 @@ function wrapWorkbookDocument(
           fn.call(doc, JSON.stringify({ agentId, note, edits: wireEdits }))
         ) as Proposal;
       });
+      notifyProposals();
+      return proposal;
     },
     listProposals(): Proposal[] {
       return wasmCall(() => {
@@ -1324,26 +1380,54 @@ function wrapWorkbookDocument(
         return (JSON.parse(fn.call(doc)) as { proposals: Proposal[] }).proposals;
       });
     },
+    onProposalChange(listener) {
+      assertAlive();
+      if (typeof listener !== 'function') throw new TypeError('proposal listener must be a function');
+      proposalListeners.add(listener);
+      return () => { proposalListeners.delete(listener); };
+    },
+    getProposalStatus(id: string) {
+      if (handle.listProposals().some(proposal => proposal.id === id)) return 'pending';
+      return proposalDecisions.get(id);
+    },
+    isProposalStale(id: string) {
+      const draft = openWorkbookRecoveryCheckpoint(workbookRecoveryCheckpoint(handle, 0), 0);
+      try {
+        draft.acceptProposal(id);
+        return false;
+      } catch (error) {
+        if (error instanceof StaleProposalError) return true;
+        throw error;
+      } finally { draft.dispose(); }
+    },
     acceptProposal(id: string, opts?: { force?: boolean }): EditResult & { proposalId: string } {
       try {
-        return mutatingWasmCall(() => {
+        const accepted = mutatingWasmCall(() => {
           const fn = (doc as { acceptProposalJson?: (a: string) => string }).acceptProposalJson;
           if (typeof fn !== 'function') throw new Error('proposals not in this build');
-          return JSON.parse(
+          const result = JSON.parse(
             fn.call(doc, JSON.stringify({ id, force: opts?.force ?? false }))
           ) as EditResult & { proposalId: string };
+          proposalDecisions.set(id, 'accepted');
+          return result;
         });
+        notifyProposals();
+        return accepted;
       } catch (e) {
         const message = e instanceof Error ? e.message : typeof e === 'string' ? e : String(e);
         throw staleErrorFrom(message) ?? toError(e);
       }
     },
     rejectProposal(id: string): boolean {
-      return mutatingWasmCall(() => {
+      const rejected = mutatingWasmCall(() => {
         const fn = (doc as { rejectProposalJson?: (a: string) => string }).rejectProposalJson;
         if (typeof fn !== 'function') return false;
-        return (JSON.parse(fn.call(doc, JSON.stringify({ id }))) as { removed: boolean }).removed;
+        const removed = (JSON.parse(fn.call(doc, JSON.stringify({ id }))) as { removed: boolean }).removed;
+        if (removed) proposalDecisions.set(id, 'rejected');
+        return removed;
       });
+      if (rejected) notifyProposals();
+      return rejected;
     },
     isProposalsAvailable(): boolean {
       return wasmCall(() => typeof (doc as { proposeJson?: unknown }).proposeJson === 'function');
@@ -1386,6 +1470,8 @@ function wrapWorkbookDocument(
     dispose(): void {
       if (disposed) return;
       disposed = true;
+      proposalDecisions.clear();
+      proposalListeners.clear();
       listeners.clear();
       pendingUpdates.length = 0;
       let disposalError: unknown;
@@ -1412,10 +1498,8 @@ function wrapWorkbookDocument(
     }
     return json;
   });
-  pngDisplayListReaders.set(handle, {
-    viewport: (viewport) => wasmCall(() => doc.pngDisplayListJson(JSON.stringify(viewport))),
-    range: (options) => wasmCall(() => doc.rangePngDisplayListJson(JSON.stringify(options ?? {}))),
-  });
+  pngFontReaders.set(handle, (target, options) => sheetFonts(pngDisplayList(pngEngine(),
+    resolvePngTarget(target, options, parseJson<SheetInfo>(() => doc.sheetInfoJson()).sheetNames), options).list));
   recoveryReaders.set(handle, (throughSeq, preserveHistory) => wasmCall(() => doc.recoveryCheckpoint(throughSeq, preserveHistory)));
   peerHydrationReaders.set(handle, () => wasmCall(() => (doc as PeerDocument).peerHydrationJson()));
   peerVersionAdopters.set(handle, (version) => wasmCall(() => (doc as PeerDocument).adoptPeerVersion(version)));
@@ -1424,7 +1508,25 @@ function wrapWorkbookDocument(
     next: () => wasmCall(() => (doc as SnapshotDocument).nextPeerSnapshotChunk()),
     end: () => wasmCall(() => (doc as SnapshotDocument).endPeerSnapshot()),
   });
+  formulaMovers.set(handle, (items) => parseJson(() => doc.translateFormulasJson(JSON.stringify(items))));
   return handle;
+}
+
+type FormulaMoves = readonly { formula: string; from: CellPoint; to: CellPoint }[];
+type MovedFormulas = ({ ok: true; formula: string } | { ok: false; error: string })[];
+
+const formulaMovers = new WeakMap<WorkbookHandle, (items: FormulaMoves) => MovedFormulas>();
+
+/**
+ * @internal Formulas, without their `=`, moved from one cell to another as a paste moves them, by
+ * the engine of `handle`; per item the moved formula, or why a paste would refuse it.
+ */
+export function translateFormulasOn(
+  handle: WorkbookHandle, items: readonly { formula: string; from: CellPoint; to: CellPoint }[]
+): ({ ok: true; formula: string } | { ok: false; error: string })[] {
+  const move = formulaMovers.get(handle);
+  if (!move) throw new TypeError('translateFormulasOn needs a workbook this package opened');
+  return move(items);
 }
 
 type SnapshotDocument = XlsxDocument & {

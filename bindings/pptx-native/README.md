@@ -1,7 +1,7 @@
 # @betteroffice/pptx-native
 
 The `@betteroffice/pptx` API on the native Rust engine, for Node.js, Bun and Deno.
-Prebuilt binaries cover macOS arm64/x64, GNU Linux arm64/x64, and Windows x64.
+Prebuilt binaries cover macOS arm64/x64, GNU and musl Linux arm64/x64, and Windows arm64/x64.
 
 Worker sessions on Node.js >= 20.16 / 22.3 run on `worker_threads`, keeping the process alive until the session is disposed.
 
@@ -34,6 +34,10 @@ export async function updatePresentation(bytes: Uint8Array): Promise<Uint8Array>
 
 Default fonts need no setup: the Latin, international and CJK font packs install with this
 package and each face is read from disk the first time a slide needs it; nothing is fetched.
+
+An installed font pack that cannot be used (another release, missing files, an unreadable manifest) is skipped and its
+faces substituted; the process warns once per pack with code `BETTEROFFICE_FONT_PACK`, and `fontPackDiagnostics()`
+lists each one with the pack and the reason.
 
 Browsers need the WebAssembly engine: the `browser` export condition of this package throws, so
 use `@betteroffice/pptx` there.

@@ -13,7 +13,8 @@ const { act, cleanup, fireEvent, render } = await import('@testing-library/react
 afterEach(cleanup);
 afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
 
-function setup(defer?: (task: () => void, pendingOnly?: boolean) => boolean) {
+function setup(defer?: (task: () => void, pendingOnly?: boolean) => boolean,
+  reads: { held?: Promise<void>; resolveSheet?: (sheetId: string) => number | undefined } = {}) {
   let resolve!: (value: string) => void;
   const prefill = mock(() => new Promise<string>((done) => { resolve = done; }));
   const edits: WorkerNativeDraft[] = [];
@@ -26,7 +27,7 @@ function setup(defer?: (task: () => void, pendingOnly?: boolean) => boolean) {
     generation: () => 1, identity: () => state.identity, valueRevision: () => state.valueRevision, navigation: () => state.navigation,
     selection: () => state.selection, sheet: () => state.sheet,
     target: () => ({ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1' } }),
-    resolveSheet: () => 0, editable: () => true, prefill, select,
+    resolveSheet: reads.resolveSheet ?? (() => 0), editable: () => true, prefill, select,
     selectionTarget: () => undefined, dependency: () => null, navigate: () => {},
     committed: () => {}, fail: (error) => { throw error; }, report: (error) => { throw error; }, focus,
   });
@@ -34,7 +35,7 @@ function setup(defer?: (task: () => void, pendingOnly?: boolean) => boolean) {
     get submittedThroughSeq() { return state.throughSeq; },
     get pending() { return state.pending; },
     setDraft: () => {},
-    runAfterPendingInput: (operation: () => Promise<string>) => operation(),
+    runAfterPendingInput: (operation: () => Promise<string>) => reads.held ? reads.held.then(operation) : operation(),
     reserveInput: (input: PeerlessWorkerPendingInput) => ({ seq: null, result: input.ready.then((ready) => {
       const draft = input.draft() as WorkerNativeDraft | null;
       if (ready && draft?.modified) edits.push(draft);
@@ -542,6 +543,25 @@ describe('loading cell input', () => {
     await complete();
     expect(edits).toEqual([]);
     expect(controller.getSnapshot().cell).toBeNull();
+  });
+
+  test('a held prefill reads the sheet its draft names when the read runs, and skips a removed sheet', async () => {
+    for (const removed of [false, true]) {
+      let release!: () => void;
+      const held = new Promise<void>((done) => { release = done; });
+      const sheets = new Map<string, number>([['sheet:0', 1]]);
+      const { controller, prefill, state } = setup(undefined, { held, resolveSheet: (sheetId) => sheets.get(sheetId) });
+      state.sheet = 1;
+      controller.open();
+      expect(prefill).not.toHaveBeenCalled();
+      if (removed) sheets.delete('sheet:0');
+      else sheets.set('sheet:0', 0);
+      release();
+      await held; await Promise.resolve(); await Promise.resolve();
+      if (removed) expect(prefill).not.toHaveBeenCalled();
+      else expect(prefill.mock.calls[0]).toMatchObject([0, { row: 0, col: 0 }]);
+      controller.dispose();
+    }
   });
 
   test('seeded opens never hold input or fetch a prefill', () => {

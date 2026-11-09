@@ -135,7 +135,14 @@
       "unsupportedCommand": "Chưa được hỗ trợ.",
       "invalidArguments": "Giá trị này không hợp lệ.",
       "inputFailed": "Không thể lưu mục nhập ô trước đó.",
+      "editUnsupported": "Không thể áp dụng chỉnh sửa này tại đây. Sổ làm việc không thay đổi.",
+      "editUnsupportedChart": "Không thể áp dụng chỉnh sửa này: một biểu đồ dùng các ô mà chỉnh sửa sẽ di chuyển. Sổ làm việc không thay đổi.",
+      "editUnsupportedTable": "Không thể áp dụng chỉnh sửa này: một bảng dùng các ô mà chỉnh sửa sẽ di chuyển. Sổ làm việc không thay đổi.",
+      "editUnsupportedPivot": "Không thể áp dụng chỉnh sửa này: một bảng tổng hợp dùng các ô mà chỉnh sửa sẽ di chuyển. Sổ làm việc không thay đổi.",
       "sheetProtected": "Ô này nằm trên một trang tính được bảo vệ.",
+      "hostRefused": "Không được phép chỉnh sửa này.",
+      "tooManyToCheck": "Quá nhiều ô để plugin kiểm tra (giới hạn {limit}).",
+      "hostStarting": "Trình chỉnh sửa vẫn đang khởi động. Hãy thử lại sau giây lát.",
       "documentReplaced": "Đã mở một sổ làm việc khác.",
       "targetChanged": "Vùng chọn đã thay đổi.",
       "gestureActive": "Hãy hoàn tất việc di chuyển biểu đồ trước.",
@@ -146,8 +153,31 @@
       "permissionDenied": "Ứng dụng chủ chưa cho phép plugin này dùng lệnh này.",
       "unsupportedPolicy": "Plugin chưa thể chạy lệnh này. Hãy dùng một đợt chỉnh sửa thay thế.",
       "pluginUnavailable": "Plugin không còn hoạt động.",
-      "aborted": "Hành động của plugin đã bị hủy trước khi lệnh chạy."
-    }
+      "aborted": "Hành động của plugin đã bị hủy trước khi lệnh chạy.",
+      "clipboardUnavailable": "Trình duyệt này không cho phép dán từ menu. Hãy dùng phím tắt.",
+      "lastSheet": "Sổ làm việc cần ít nhất một trang tính.",
+      "sheetAtEdge": "Không thể di chuyển trang tính xa hơn.",
+      "sheetNameInvalid": "Tên trang tính cần từ 1 đến 31 ký tự, không trùng lặp và không chứa : \\ / ? * [ ].",
+      "clipboardDenied": "Trình duyệt không cho phép truy cập bảng tạm."
+    },
+    "cut": "Cắt",
+    "copy": "Sao chép",
+    "paste": "Dán",
+    "pastePlainText": "Dán dưới dạng văn bản thuần",
+    "clearContents": "Xóa nội dung",
+    "insert": "Chèn",
+    "delete": "Xóa",
+    "insertRowsAbove": "Chèn hàng phía trên",
+    "insertRowsBelow": "Chèn hàng phía dưới",
+    "insertColumnsLeft": "Chèn cột bên trái",
+    "insertColumnsRight": "Chèn cột bên phải",
+    "deleteRows": "Xóa hàng",
+    "deleteColumns": "Xóa cột",
+    "insertSheet": "Chèn trang tính",
+    "deleteSheet": "Xóa trang tính",
+    "renameSheet": "Đổi tên",
+    "moveSheetLeft": "Di chuyển sang trái",
+    "moveSheetRight": "Di chuyển sang phải"
   },
   "editor": {
     "appLabel": "Trình chỉnh sửa bảng tính",
@@ -162,7 +192,11 @@
     "showDetails": "Hiển thị chi tiết",
     "openPrompt": "Mở tệp XLSX",
     "sheetTabsLabel": "Trang tính",
-    "clearExceedsLimit": "Xóa vượt quá giới hạn ô"
+    "clearExceedsLimit": "Xóa vượt quá giới hạn ô",
+    "cellMenuLabel": "Menu ô",
+    "sheetTabMenuLabel": "Menu tab trang tính",
+    "renameSheetLabel": "Đổi tên trang tính",
+    "sheetNamePrefix": "Trang tính"
   },
   "presence": {
     "label": "Cộng tác viên",
@@ -178,6 +212,7 @@
     "accept": "Chấp nhận",
     "reject": "Từ chối",
     "forceApply": "Buộc áp dụng",
+    "forceBlockedReason": "Không thể áp dụng đề xuất này sau khi cấu trúc thay đổi.",
     "staleWarning": "Các ô đã thay đổi kể từ khi đề xuất: {cells}"
   },
   "a11y": {
@@ -187,12 +222,27 @@
     "cellLabel": "{address}, {value}",
     "cellLabelSelected": "{address}, {value}, đã chọn",
     "emptyCellLabel": "{address}, trống",
-    "emptyCellLabelSelected": "{address}, trống, đã chọn"
+    "emptyCellLabelSelected": "{address}, trống, đã chọn",
+    "hasFormula": "{label}, có công thức",
+    "rangeSelected": "Đã chọn {start} đến {end}, {rows} hàng x {columns} cột",
+    "sheetActivated": "{name}, trang tính {index}/{count}",
+    "cellInputLabel": "Chỉnh sửa ô {address}",
+    "gridRoleDescription": "trang tính"
   },
   "plugins": {
     "toolbarGroup": "Plugin",
     "panelTabs": "Ngăn plugin",
     "collapsePanel": "Thu gọn {title}",
-    "expandPanel": "Mở rộng {title}"
+    "expandPanel": "Mở rộng {title}",
+    "rowGutter": "Dấu hàng của plugin"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "del": "Del",
+    "escape": "Esc",
+    "pageUp": "Page Up",
+    "pageDown": "Page Down"
   }
 }

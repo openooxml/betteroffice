@@ -488,7 +488,9 @@
         "pageUp": "Page Up",
         "pageDown": "Page Down",
         "ctrl": "Ctrl",
-        "del": "Del"
+        "del": "Del",
+        "shift": "Shift",
+        "alt": "Alt"
       }
     },
     "objectGeometry": {
@@ -528,6 +530,7 @@
     "paragraphMarkInserted": "تم إدراج فاصل فقرة",
     "paragraphMarkDeleted": "تم حذف فاصل فقرة",
     "paragraphPropertiesChanged": "تم تغيير خصائص الفقرة",
+    "runPropertiesChanged": "تم تغيير تنسيق النص",
     "rowInserted": "تم إدراج صف",
     "rowDeleted": "تم حذف صف",
     "rowPropertiesChanged": "تم تغيير خصائص الصف",
@@ -584,6 +587,8 @@
     "noDocumentLoaded": "لم يتم تحميل أي مستند",
     "failedToLoad": "تعذر فتح هذا المستند",
     "failedToLoadDescription": "قد يكون الملف تالفًا، أو يستخدم شيئًا لا يستطيع هذا المحرر قراءته بعد.",
+    "failedToLoadDamaged": "الملف تالف أو ليس مستند Word كاملاً.",
+    "failedToLoadUnsupported": "يستخدم هذا المستند شيئًا لا يستطيع هذا المحرر قراءته بعد.",
     "editorUnavailable": "تعذر تحميل المحرر",
     "editorUnavailableDescription": "تحقق من اتصالك، ثم أعد تحميل الصفحة.",
     "reloadPage": "إعادة تحميل الصفحة",
@@ -724,6 +729,7 @@
     "failedToParse": "فشل تحليل المستند",
     "linkRemoved": "تمت إزالة الارتباط",
     "linkCopied": "تم نسخ الارتباط إلى الحافظة",
+    "pasteFailed": "تعذّر إكمال اللصق. لم يتم تغيير أي شيء.",
     "failedToSave": "فشل حفظ المستند",
     "documentInput": "إدخال المستند",
     "documentPreview": "معاينة المستند",
@@ -795,6 +801,8 @@
     "pageLabel": "الصفحة {number}",
     "headerLabel": "رأس الصفحة",
     "footerLabel": "تذييل الصفحة",
+    "chartNoData": "لا توجد بيانات",
+    "pictureName": "صورة",
     "selected": "تم التحديد",
     "selectionCleared": "تم مسح التحديد",
     "commentedText": "نص معلّق عليه",

@@ -234,3 +234,31 @@ License: MIT. The unmodified upstream licence is included under
 `packages/fonts/LICENSES/MIT-wuff.txt`, in the docx, pptx, xlsx and vsdx packages,
 in each native platform package and in each Python wheel, which link it through
 `betteroffice-fonts`.
+
+---
+
+## mimalloc
+
+The `@betteroffice/docx-native` and `@betteroffice/pptx-native` binaries
+statically link mimalloc 2.3.2 as their memory allocator,
+https://github.com/microsoft/mimalloc, through the `mimalloc` 0.1.52 and
+`libmimalloc-sys` 0.1.49 Rust crates, https://github.com/purpleprotocol/mimalloc_rust.
+
+Copyright (c) 2018-2025 Microsoft Corporation, Daan Leijen.
+Copyright 2019 Octavian Oncescu.
+
+License: MIT. Both unmodified upstream licences are included as
+`MIT-mimalloc.txt` in each docx-native and pptx-native platform package.
+
+---
+
+## Adobe Symbol Encoding to Unicode table
+
+`crates/ooxml-drawingml/src/adobe-symbol.txt` is the unmodified mapping table
+from https://www.unicode.org/Public/MAPPINGS/VENDORS/ADOBE/symbol.txt (table
+version 1.0, 2011 July 12), Copyright (c) 1991-2011 Unicode, Inc. It is compiled
+into every engine that draws text, and its notice stays attached in the file as
+its terms require: "Unicode, Inc. hereby grants the right to freely use the
+information supplied in this file in the creation of products supporting the
+Unicode Standard, and to make copies of this file in any form for internal or
+external distribution as long as this notice remains attached."

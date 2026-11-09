@@ -1172,6 +1172,61 @@ fn segoe_ui_weight_families_measure_paragraphs_at_the_requested_span() {
     }
 }
 
+const LIBERATION_SANS_BOLD: &[u8] =
+    include_bytes!("../../../packages/fonts/assets/LiberationSans-Bold.ttf");
+
+/// Arabic text in a run whose complex-script font is Simplified or Traditional
+/// Arabic takes its glyphs from the Arabic fallback later in the chain, while
+/// the chain head, the measured view of the substitute, sets the line at the
+/// complex-script size with the span of the face Word embeds for that weight.
+#[test]
+fn arabic_complex_script_runs_measure_at_the_span_word_uses() {
+    for (bold, base_bytes) in [(false, LIBERATION_SANS), (true, LIBERATION_SANS_BOLD)] {
+        for (family, regular_span, bold_span) in [
+            ("Simplified Arabic", 3395.0 / 2048.0, 3405.0 / 2048.0),
+            ("Traditional Arabic", 3061.0 / 2048.0, 3139.0 / 2048.0),
+        ] {
+            let mut store = FontStore::new();
+            let base = store.register(base_bytes.to_vec()).unwrap();
+            let naskh = store.register(NOTO_NASKH_ARABIC.to_vec()).unwrap();
+            let view = store.register_named_substitute(base, family).expect(family);
+            assert_ne!(view, base, "{family} measures through its own view");
+            let key = family.to_lowercase();
+            let input = serde_json::from_value(serde_json::json!({
+                "block": {
+                    "kind": "paragraph",
+                    "runs": [{
+                        "kind": "text",
+                        "text": "\u{0627}\u{0644}\u{0633}\u{0644}\u{0627}\u{0645} \u{0639}\u{0644}\u{064a}\u{0643}\u{0645}",
+                        "fontSlots": { "ascii": "Latin", "hAnsi": "Latin", "eastAsia": "Latin", "cs": family },
+                        "fontSizeCs": 14.0,
+                        "bold": bold,
+                        "boldCs": bold
+                    }]
+                },
+                "maxWidth": 1000.0,
+                "fontChains": {
+                    "latin|0|0": [base.to_u32()],
+                    "latin|1|0": [base.to_u32()],
+                    (format!("{key}|0|0")): [view.to_u32(), naskh.to_u32()],
+                    (format!("{key}|1|0")): [view.to_u32(), naskh.to_u32()]
+                },
+                "defaults": { "fontSize": 11.0, "fontFamily": "Latin" }
+            }))
+            .unwrap();
+            let extent = ooxml_text::measure::measure_paragraph(&store, &input).unwrap();
+            assert_eq!(extent.lines.len(), 1, "{family} bold={bold}");
+            let span = if bold { bold_span } else { regular_span };
+            let expected = 14.0 * 96.0 / 72.0 * span;
+            let height = extent.lines[0].line_height;
+            assert!(
+                (height - expected).abs() < 0.01,
+                "{family} bold={bold}: {height} vs {expected}"
+            );
+        }
+    }
+}
+
 #[test]
 fn segoe_ui_light_and_semilight_measure_at_word_advances() {
     let (mut store, base) = store_with_font();

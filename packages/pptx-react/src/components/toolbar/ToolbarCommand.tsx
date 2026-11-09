@@ -8,7 +8,8 @@ import {
   pptxCommandController,
   type PptxPendingCommand,
 } from '../../commands/createPptxCommandStore';
-import { commandShortcut, defaultArgs, isPluginCommandId } from '../../commands/descriptors';
+import { defaultArgs, isPluginCommandId } from '../../commands/descriptors';
+import { storeShortcut } from '../../commands/shortcutLabels';
 import { MAX_FONT_POINTS, MIN_FONT_POINTS, MAX_ZOOM, MIN_ZOOM } from '../../commands/evaluate';
 import { usePptxCommand, usePptxCommands, usePptxCommandState } from '../../commands/hooks';
 import type {
@@ -38,6 +39,7 @@ const COMMAND_ICONS: Partial<Record<PptxCommandId, ToolbarIconName>> = {
   bold: 'bold',
   italic: 'italic',
   underline: 'underline',
+  strikethrough: 'strikethrough',
   textColor: 'textColor',
   insertSlide: 'newSlide',
   insertImage: 'insertImage',
@@ -74,6 +76,7 @@ const TEST_IDS: Partial<Record<PptxCommandId, string>> = {
   bold: 'pptx-bold',
   italic: 'pptx-italic',
   underline: 'pptx-underline',
+  strikethrough: 'pptx-strikethrough',
   insertSlide: 'pptx-new-slide',
   insertImage: 'pptx-insert-image',
   save: 'pptx-save',
@@ -145,9 +148,8 @@ function testIdFor(id: PptxCommandId, args: unknown): string | undefined {
   return TEST_IDS[id];
 }
 
-function hintFor(id: PptxCommandId, args: unknown): string | null {
-  if (id === 'tool' && record(args)?.value === 'select') return 'Esc';
-  return commandShortcut(id, args as never);
+function isSelectTool(id: PptxCommandId, args: unknown): boolean {
+  return id === 'tool' && record(args)?.value === 'select';
 }
 
 /**
@@ -233,7 +235,7 @@ function commandItem<K extends PptxCommandId>(
     id: key,
     label: labelFor(id, args, t, t(store.getDescriptor(id).labelKey)),
     icon: icon ? <ToolbarIcon name={icon} size={16} /> : undefined,
-    shortcut: hintFor(id, args) ?? undefined,
+    ...(isSelectTool(id, args) ? { shortcut: 'Esc', ariaShortcut: 'Escape' } : storeShortcut(store, id, t, args)),
     checked: state.active,
     disabled: !state.enabled,
     description: reasonOf(state),
@@ -445,7 +447,8 @@ export function ToolbarCommandButton<K extends PptxCommandId | PptxPluginCommand
       disabled={!command.state.enabled}
       description={reasonOf(command.state as PptxCommandState)}
       title={name}
-      shortcut={(builtIn ? hintFor(builtIn, args) : command.shortcut) ?? undefined}
+      shortcut={(builtIn && isSelectTool(builtIn, args) ? 'Esc' : command.shortcut) ?? undefined}
+      ariaShortcut={(builtIn && isSelectTool(builtIn, args) ? 'Escape' : command.ariaShortcut) ?? undefined}
       className={className}
       style={!icon && !children ? { padding: '0 8px', ...style } : style}
       testId={builtIn ? testIdFor(builtIn, args) : undefined}

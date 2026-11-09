@@ -12,7 +12,9 @@ export declare const __napiBindingTarget: 'native' | 'wasm32-wasi' | 'wasm32-was
 export declare class EditSession {
   free(): void
   register_measure_font(bytes: Uint8Array): number
+  update_measure_font_outlines(fontId: number, bytes: Uint8Array): void
   decode_font(bytes: Uint8Array): Uint8Array
+  take_base_latin_miss(): boolean
   register_substitute_measure_font(base: number, requestedFamily: string): number
   clear_measure_fonts(): void
   measure_paragraph_json(input: string): string
@@ -32,6 +34,7 @@ export declare class EditSession {
   retained_kernel_inputs_json(): string
   reset_frame_base(): void
   build_display_list_json(input: string): string
+  renderPngTarget(displayListJson: string, targetJson: string, optionsJson: string): Uint8Array
   build_display_list_frame(input: string, expectedFrameEpoch: number): Uint8Array
   set_display_window(start: number, end: number): void
   set_display_retain_built_pages(retain: boolean): void
@@ -76,7 +79,7 @@ export declare class EditSession {
   cell_selection(): string
   clear_cell_selection(): string | undefined
   clear_content_control_value(embedId: string): void
-  clear_formatting(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number): void
+  clear_formatting(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number, authorName?: string | undefined | null, authorDate?: string | undefined | null): string
   clear_undo_input_time(): void
   clear_update_event_observation(): void
   client_id(): number
@@ -108,7 +111,7 @@ export declare class EditSession {
   find_content_controls_json(query: string, options: string): string
   find_text_json(request: string): string
   finish_compared_docx_json(bytes: Uint8Array): string
-  format_range(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number, deltaJson: string): void
+  format_range(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number, deltaJson: string, authorName?: string | undefined | null, authorDate?: string | undefined | null): string
   format_text_target_json(targetJson: string, deltaJson: string): string
   geometry_position_outline_json(root: string): string
   has_pending_update(): boolean
@@ -153,6 +156,7 @@ export declare class EditSession {
   paragraph_id_count(story: string, paraId: string): number
   paragraph_identities(): string
   prime_save_seed_states(paragraphs: number, inflated: number): boolean
+  prime_save_seed_states_slice(paragraphs: number, inflated: number, maxBytes: number): number
   paragraph_save_plan(): string
   paragraph_spans(story: string): string
   paragraph_unit(story: string, paraId: string): number
@@ -190,13 +194,17 @@ export declare class EditSession {
   set_cell_shading(rangeJson: string, color?: string | undefined | null): string
   set_cell_text_format(rangeJson: string, patchJson: string): string
   set_column_width(atJson: string, widthTwips: number): string
+  set_row_height(atJson: string, heightTwips: number, rule: string): string
   set_comment_ranges(commentId: string, rangesJson: string): void
   set_content_control_value_at(story: string, paraId: string, offset: number, valueJson: string): void
   set_content_control_value(embedId: string, valueJson: string): void
   set_content_control_value_index(story: string, index: number, json: string): void
+  style_languages_json(): string
+  set_style_language(styleId: string | undefined | null, slotsJson: string): boolean
+  patch_style_languages_xml(source: string): string
   set_document_property(key: string, json: string): boolean
   set_header_footer_aliases(json: string): void
-  set_hyperlink(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number, hyperlinkJson: string): void
+  set_hyperlink(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number, hyperlinkJson: string, authorName?: string | undefined | null, authorDate?: string | undefined | null): void
   set_image_geometry_at(story: string, paraId: string, offset: number, geometryJson: string): void
   set_image_geometry(embedId: string, geometryJson: string): void
   set_media_tokens(enabled: boolean): void
@@ -229,7 +237,7 @@ export declare class EditSession {
   story_segment_units(story: string, units: Uint32Array): string
   story_segments(story: string): string
   table_payload(story: string, tableIndex: number): string | undefined
-  toggle_mark(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number, markJson: string): void
+  toggle_mark(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number, markJson: string, authorName?: string | undefined | null, authorDate?: string | undefined | null): string
   track_undo(): void
   undo_capture_mode(): string
   undo(): boolean

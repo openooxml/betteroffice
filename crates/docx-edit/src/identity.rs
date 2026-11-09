@@ -39,6 +39,7 @@ use yrs::{
 };
 
 use crate::bridge::run_size_provenance::ParagraphSizes;
+use crate::format::KeptReason;
 use crate::{
     EditCtx, EditResult, EditingDoc, KIND_KEY, PARA_ID, ParagraphId, STORIES, StoryId, map_string,
     pilcrows, story_ref,
@@ -291,6 +292,13 @@ pub struct ParagraphSavePlan {
     pub patched_parts: Vec<(String, Vec<(u32, String)>)>,
     pub spliced_parts: Vec<SplicedPart>,
     pub section_spliced_parts: Vec<SplicedPart>,
+    /// Parts no paragraph of which can be spliced, because the parser does not read them as
+    /// written, whose changes are all run formatting: each is written from the model, or kept as
+    /// its source when that would drop structure.
+    pub whole_parts: Vec<SplicedPart>,
+    /// `(part path, ordinals)`: the paragraphs an edit changed or removed in a part with no splice
+    /// plan, which a whole write of it may rightly change.
+    pub touched_parts: Vec<(String, Vec<u32>)>,
 }
 
 /// A story part whose stories hold the paragraphs seeded from it that they still hold in the
@@ -312,6 +320,9 @@ pub struct SplicedPart {
     pub paragraph_patches: Vec<ParagraphPatchV1>,
     pub legacy_paragraphs: Vec<LegacyParagraphV1>,
     pub table_patches: Vec<S13TablePatch>,
+    /// The ordinals among `changed` whose text, embeds and paragraph properties are as seeded,
+    /// only their run formatting changed.
+    pub format_only: Vec<u32>,
 }
 
 impl Eq for SplicedPart {}
@@ -443,6 +454,10 @@ pub(crate) struct SourceIndex {
     run_size_paragraphs: Mutex<BTreeMap<usize, BTreeMap<u32, docx_parse::xml::XmlElement>>>,
     #[serde(skip)]
     run_size_seeded: OnceLock<SeededUnitDigests>,
+    /// Seeded digests of paragraphs read from the session while it was unchanged since seeding,
+    /// keyed like [`Self::run_size_seeded`].
+    #[serde(skip)]
+    run_size_unchanged: Mutex<BTreeMap<String, (String, [u8; 32])>>,
 }
 
 type SeededUnitDigests = BTreeMap<String, Option<(String, [u8; 32])>>;
@@ -543,6 +558,43 @@ impl SourceIndex {
         self.bytes.clone()
     }
 
+    /// Whether any of `ordinals` in `part` is a paragraph [`rewriting_loses_source_runs`]; an
+    /// unreadable part or paragraph counts as one.
+    fn rewrite_loses_source_runs(
+        &self,
+        part: &SourcePart,
+        ordinals: &[u32],
+        loses: fn(&str) -> bool,
+    ) -> bool {
+        if ordinals.is_empty() {
+            return false;
+        }
+        let read = || -> Option<String> {
+            let package = ooxml_opc::RetainedPackage::from_bytes(self.bytes()).ok()?;
+            let position = package.parts().position(|(path, _)| path == part.path())?;
+            String::from_utf8(package.read(position).ok()?).ok()
+        };
+        let Some(xml) = read() else {
+            return true;
+        };
+        ordinals.iter().any(|&ordinal| {
+            let Some(start) = part
+                .occurrence(ordinal)
+                .map(|occurrence| occurrence.tag.start)
+            else {
+                return true;
+            };
+            docx_parse::serializer::element_span(&xml[start..], &[])
+                .is_none_or(|span| loses(&xml[start..][span]))
+        })
+    }
+
+    fn part_xml(&self, part: &SourcePart) -> Option<String> {
+        let package = ooxml_opc::RetainedPackage::from_bytes(self.bytes()).ok()?;
+        let position = package.parts().position(|(path, _)| path == part.path())?;
+        String::from_utf8(package.read(position).ok()?).ok()
+    }
+
     fn paragraph_xml(&self, part: &SourcePart, ordinal: u32) -> Option<String> {
         let package = ooxml_opc::RetainedPackage::from_bytes(self.bytes()).ok()?;
         let position = package.parts().position(|(path, _)| path == part.path())?;
@@ -558,35 +610,66 @@ impl SourceIndex {
             return None;
         }
         self.view_of(key)?;
-        let seeded = self.run_size_seeded.get_or_init(|| {
-            #[cfg(test)]
-            RUN_SIZE_SEEDED_SNAPSHOTS.with(|count| count.set(count.get() + 1));
-            let mut units = BTreeMap::new();
-            for (story, state) in self.seed_states() {
-                for unit in &state.units {
-                    if let Some(key) = &unit.key {
-                        match units.entry(key.clone()) {
-                            std::collections::btree_map::Entry::Vacant(entry) => {
-                                entry.insert(Some((story.clone(), unit.digest)));
-                            }
-                            std::collections::btree_map::Entry::Occupied(mut entry) => {
-                                entry.insert(None);
+        let unchanged = self.run_size_unchanged.lock().unwrap().get(key).cloned();
+        let (seed_story, fingerprint) = match unchanged {
+            Some(seeded) => seeded,
+            None => {
+                let seeded = self.run_size_seeded.get_or_init(|| {
+                    #[cfg(test)]
+                    RUN_SIZE_SEEDED_SNAPSHOTS.with(|count| count.set(count.get() + 1));
+                    let mut units = BTreeMap::new();
+                    for (story, state) in self.seed_states() {
+                        for unit in &state.units {
+                            if let Some(key) = &unit.key {
+                                match units.entry(key.clone()) {
+                                    std::collections::btree_map::Entry::Vacant(entry) => {
+                                        entry.insert(Some((story.clone(), unit.digest)));
+                                    }
+                                    std::collections::btree_map::Entry::Occupied(mut entry) => {
+                                        entry.insert(None);
+                                    }
+                                }
                             }
                         }
                     }
-                }
+                    units
+                });
+                seeded.get(key)?.clone()?
             }
-            units
-        });
-        let (seed_story, fingerprint) = seeded.get(key)?.as_ref()?;
+        };
         if seed_story != story {
             return None;
         }
         let mut cache = self.run_size_sources.lock().unwrap();
         cache
             .entry(key.to_owned())
-            .or_insert_with(|| self.collect_run_sizes(key, *fingerprint).map(Arc::new))
+            .or_insert_with(|| self.collect_run_sizes(key, fingerprint).map(Arc::new))
             .clone()
+    }
+
+    /// Whether a paragraph read from the session now is what seeding recorded: no commit has
+    /// landed since seeding, seed states are not yet known, and the package was opened under
+    /// its own digest, so the session's stories are those a reseed would give.
+    pub(crate) fn reads_as_seeded(&self, doc: &EditingDoc) -> bool {
+        doc.unchanged_since_seeded()
+            && !self.seed_states_initialized()
+            && self.opened_under_own_digest()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reseed_for_tests(&self) {
+        self.seed_states();
+    }
+
+    /// Records the seeded digest of the paragraph `key` closes in `story`, read from a session
+    /// for which [`Self::reads_as_seeded`] holds, where `key` closes no other paragraph, so a
+    /// run size proof for it needs no seed states.
+    pub(crate) fn note_seeded_run_size(&self, key: &str, story: &str, fingerprint: [u8; 32]) {
+        self.run_size_unchanged
+            .lock()
+            .unwrap()
+            .entry(key.to_owned())
+            .or_insert_with(|| (story.to_owned(), fingerprint));
     }
 
     fn collect_run_sizes(&self, key: &str, fingerprint: [u8; 32]) -> Option<ParagraphSizes> {
@@ -705,6 +788,7 @@ impl SourceIndex {
             run_size_sources: Mutex::new(BTreeMap::new()),
             run_size_paragraphs: Mutex::new(BTreeMap::new()),
             run_size_seeded: OnceLock::new(),
+            run_size_unchanged: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -1648,151 +1732,258 @@ fn story_fingerprint_for_save(
     budget: &mut Option<usize>,
     seeded: Option<SaveSeeds<'_>>,
 ) -> Option<([u8; 32], Vec<UnitState>, bool)> {
-    use sha2::{Digest, Sha256};
-    #[cfg(test)]
-    STORY_FINGERPRINTS.with(|count| count.set(count.get() + 1));
-    let mut segments = doc.story_segments_in(txn, story).ok()?;
-    strip_display_only_keys(&mut segments);
-    if let Some(media) = doc.media_table() {
-        match budget.as_mut() {
-            None => crate::media::write_segment_data_urls(&mut segments, &media).ok()?,
-            Some(budget) => {
-                let written =
-                    crate::media::write_segment_data_urls_within(&mut segments, &media, budget);
-                if !written.ok()? {
+    let mut fingerprint = StoryFingerprint::start(doc, txn, story, comments, budget, seeded)?;
+    fingerprint.advance(budget, usize::MAX)?;
+    fingerprint.finish()
+}
+
+/// What a [`EditingDoc::prime_save_seed_states_slice`] call left: seed states known, more
+/// slices to go, or a prime this session declines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrimeSlice {
+    Known,
+    Pending,
+    Declined,
+}
+
+/// Stories of more segments than this are read in a slice of their own before any is digested.
+const PRIME_SLICE_SEGMENTS: usize = 512;
+/// What reading and closing a story, and taking each segment apart, count against a slice's
+/// `max_bytes`, beside the canonical bytes digested.
+const PRIME_STORY_COST: usize = 1024;
+const PRIME_SEGMENT_COST: usize = 64;
+
+/// A save seed state prime between slices: the stories still to digest, the one under way and
+/// the states of those done, as of the commit epoch it started at.
+pub(crate) struct PrimeProgress {
+    epoch: u64,
+    budget: Option<usize>,
+    stories: std::collections::VecDeque<String>,
+    roots: HashMap<String, String>,
+    comments: HashMap<String, BTreeMap<String, Vec<(u32, u32)>>>,
+    states: HashMap<String, Arc<StoryState>>,
+    current: Option<(String, StoryFingerprint<'static>)>,
+}
+
+/// A story's [`story_fingerprint_for_save`], taken a few segments at a time.
+struct StoryFingerprint<'a> {
+    story: String,
+    seeded: Option<SaveSeeds<'a>>,
+    segments: std::vec::IntoIter<crate::StorySegment>,
+    boundaries: std::iter::Peekable<std::vec::IntoIter<(u32, String, bool)>>,
+    units: Vec<UnitState>,
+    unit: UnitDigest,
+    blocks: sha2::Sha256,
+    block_content: Vec<serde_json::Value>,
+    inline_content: sha2::Sha256,
+    section_content: sha2::Sha256,
+    inline: bool,
+    unit_segments: Vec<crate::StorySegment>,
+    markers: Vec<(u32, String, bool)>,
+    block_positions: Vec<u32>,
+    start: u32,
+    position: u32,
+    bytes: Vec<u8>,
+    section_bytes: Vec<u8>,
+}
+
+impl<'a> StoryFingerprint<'a> {
+    fn start(
+        doc: &EditingDoc,
+        txn: &Transaction<'_>,
+        story: &str,
+        comments: &BTreeMap<String, Vec<(u32, u32)>>,
+        budget: &mut Option<usize>,
+        seeded: Option<SaveSeeds<'a>>,
+    ) -> Option<Self> {
+        use sha2::Digest;
+        #[cfg(test)]
+        STORY_FINGERPRINTS.with(|count| count.set(count.get() + 1));
+        let mut segments = doc.story_segments_in(txn, story).ok()?;
+        strip_display_only_keys(&mut segments);
+        if let Some(media) = doc.media_table() {
+            match budget.as_mut() {
+                None => crate::media::write_segment_data_urls(&mut segments, &media).ok()?,
+                Some(budget) => {
+                    let written =
+                        crate::media::write_segment_data_urls_within(&mut segments, &media, budget);
+                    if !written.ok()? {
+                        *budget = 0;
+                        return None;
+                    }
+                }
+            }
+        }
+        let mut boundaries: Vec<(u32, String, bool)> = comments
+            .iter()
+            .flat_map(|(key, anchors)| {
+                anchors.iter().flat_map(move |(start, end)| {
+                    [(*start, key.clone(), false), (*end, key.clone(), true)]
+                })
+            })
+            .collect();
+        boundaries.sort_unstable();
+        Some(Self {
+            story: story.to_owned(),
+            seeded,
+            segments: segments.into_iter(),
+            boundaries: boundaries.into_iter().peekable(),
+            units: Vec::new(),
+            unit: UnitDigest::default(),
+            blocks: sha2::Sha256::new(),
+            block_content: Vec::new(),
+            inline_content: sha2::Sha256::new(),
+            section_content: sha2::Sha256::new(),
+            inline: false,
+            unit_segments: Vec::new(),
+            markers: Vec::new(),
+            block_positions: Vec::new(),
+            start: 0,
+            position: 0,
+            bytes: Vec::new(),
+            section_bytes: Vec::new(),
+        })
+    }
+
+    /// Digests segments until about `max_bytes` canonical bytes went in, answering whether every
+    /// segment did and how many bytes this call digested; `None` where the whole story yields
+    /// none.
+    fn advance(&mut self, budget: &mut Option<usize>, max_bytes: usize) -> Option<(bool, usize)> {
+        use sha2::Digest;
+        let seeded_units = self
+            .seeded
+            .map(|seeded| seeded.units)
+            .filter(|units| units.unique);
+        let mut digested = 0usize;
+        for segment in self.segments.by_ref() {
+            if let Some(budget) = budget.as_mut() {
+                let Some(rest) = budget.checked_sub(segment_text_len(&segment)) else {
                     *budget = 0;
                     return None;
-                }
+                };
+                *budget = rest;
             }
-        }
-    }
-    let mut boundaries: Vec<(u32, &str, bool)> = comments
-        .iter()
-        .flat_map(|(key, anchors)| {
-            anchors.iter().flat_map(move |(start, end)| {
-                [(*start, key.as_str(), false), (*end, key.as_str(), true)]
-            })
-        })
-        .collect();
-    boundaries.sort_unstable();
-    let mut boundaries = boundaries.into_iter().peekable();
-    let mut units = Vec::new();
-    let mut unit = UnitDigest::default();
-    let mut blocks = Sha256::new();
-    let mut block_content = Vec::new();
-    let mut inline_content = Sha256::new();
-    let mut section_content = Sha256::new();
-    let mut inline = false;
-    let mut unit_segments = Vec::new();
-    let mut markers = Vec::new();
-    let mut block_positions = Vec::new();
-    let mut start = 0u32;
-    let mut position = 0u32;
-    let mut bytes = Vec::new();
-    let mut section_bytes = Vec::new();
-    let seeded_units = seeded
-        .map(|seeded| seeded.units)
-        .filter(|units| units.unique);
-    for segment in segments {
-        if let Some(budget) = budget.as_mut() {
-            let Some(rest) = budget.checked_sub(segment_text_len(&segment)) else {
-                *budget = 0;
-                return None;
+            segment_canonical(&segment, &mut self.bytes, &mut self.section_bytes);
+            digested = digested.saturating_add(self.bytes.len() + PRIME_SEGMENT_COST);
+            self.unit.segment(&self.bytes);
+            self.section_content.update(&self.section_bytes);
+            self.section_content.update(b"\n");
+            let block = matches!(&segment.content, crate::SegmentContent::OtherEmbed { kind, .. }
+                if matches!(kind.as_str(), "table" | "blockSdt"));
+            if !block {
+                self.inline_content.update(&self.bytes);
+                self.inline_content.update(b"\n");
+            }
+            self.position += match &segment.content {
+                crate::SegmentContent::Text(text) => {
+                    u32::try_from(text.encode_utf16().count()).ok()?
+                }
+                _ => 1,
             };
-            *budget = rest;
-        }
-        segment_canonical(&segment, &mut bytes, &mut section_bytes);
-        unit.segment(&bytes);
-        section_content.update(&section_bytes);
-        section_content.update(b"\n");
-        let block = matches!(&segment.content, crate::SegmentContent::OtherEmbed { kind, .. }
-            if matches!(kind.as_str(), "table" | "blockSdt"));
-        if !block {
-            inline_content.update(&bytes);
-            inline_content.update(b"\n");
-        }
-        position += match &segment.content {
-            crate::SegmentContent::Text(text) => u32::try_from(text.encode_utf16().count()).ok()?,
-            _ => 1,
-        };
-        if block {
-            block_positions.push(position - start - 1);
-        } else {
-            unit_segments.push(segment.clone());
-        }
-        match &segment.content {
-            crate::SegmentContent::Pilcrow(properties) => {
-                while let Some((at, key, end)) = boundaries.next_if(|(at, ..)| *at < position) {
-                    let marker = unit.marker(at - start, key, end)?;
-                    let relative = at - start;
-                    let excluded = block_positions.partition_point(|&at| at < relative) as u32;
-                    markers.push((relative - excluded, key.to_owned(), end));
-                    section_content.update(&marker);
-                    inline_content.update(&marker);
+            if block {
+                self.block_positions.push(self.position - self.start - 1);
+            } else {
+                self.unit_segments.push(segment.clone());
+            }
+            match &segment.content {
+                crate::SegmentContent::Pilcrow(properties) => {
+                    let position = self.position;
+                    while let Some((at, key, end)) =
+                        self.boundaries.next_if(|(at, ..)| *at < position)
+                    {
+                        let marker = self.unit.marker(at - self.start, &key, end)?;
+                        let relative = at - self.start;
+                        let excluded =
+                            self.block_positions.partition_point(|&at| at < relative) as u32;
+                        self.markers.push((relative - excluded, key, end));
+                        self.section_content.update(&marker);
+                        self.inline_content.update(&marker);
+                    }
+                    self.start = self.position;
+                    self.block_positions.clear();
+                    self.units.push(UnitState::from_projection(
+                        UnitProjection {
+                            key: Some(properties.para_id.clone()),
+                            digest: std::mem::take(&mut self.unit).finish(),
+                            blocks: std::mem::take(&mut self.blocks).finalize().into(),
+                            block_content: std::mem::take(&mut self.block_content),
+                            content_digest: std::mem::take(&mut self.inline_content)
+                                .finalize()
+                                .into(),
+                            section_digest: std::mem::take(&mut self.section_content)
+                                .finalize()
+                                .into(),
+                            inline: std::mem::take(&mut self.inline),
+                            markers: std::mem::take(&mut self.markers),
+                        },
+                        std::mem::take(&mut self.unit_segments),
+                        seeded_units,
+                    ));
                 }
-                start = position;
-                block_positions.clear();
-                units.push(UnitState::from_projection(
-                    UnitProjection {
-                        key: Some(properties.para_id.clone()),
-                        digest: std::mem::take(&mut unit).finish(),
-                        blocks: std::mem::take(&mut blocks).finalize().into(),
-                        block_content: std::mem::take(&mut block_content),
-                        content_digest: std::mem::take(&mut inline_content).finalize().into(),
-                        section_digest: std::mem::take(&mut section_content).finalize().into(),
-                        inline: std::mem::take(&mut inline),
-                        markers: std::mem::take(&mut markers),
-                    },
-                    std::mem::take(&mut unit_segments),
-                    seeded_units,
-                ));
+                crate::SegmentContent::OtherEmbed { kind, .. }
+                    if matches!(kind.as_str(), "table" | "blockSdt") =>
+                {
+                    self.blocks.update(&self.bytes);
+                    self.blocks.update(b"\n");
+                    self.block_content.push(segment_value(&segment));
+                }
+                _ => self.inline = true,
             }
-            crate::SegmentContent::OtherEmbed { kind, .. }
-                if matches!(kind.as_str(), "table" | "blockSdt") =>
-            {
-                blocks.update(&bytes);
-                blocks.update(b"\n");
-                block_content.push(segment_value(&segment));
+            if digested >= max_bytes {
+                return Some((self.segments.as_slice().is_empty(), digested));
             }
-            _ => inline = true,
         }
+        Some((true, digested))
     }
-    for (at, key, end) in boundaries {
-        let marker = unit.marker(at.saturating_sub(start), key, end)?;
-        let relative = at.saturating_sub(start);
-        let excluded = block_positions.partition_point(|&at| at < relative) as u32;
-        markers.push((relative.saturating_sub(excluded), key.to_owned(), end));
-        section_content.update(&marker);
-        inline_content.update(&marker);
+
+    fn finish(mut self) -> Option<([u8; 32], Vec<UnitState>, bool)> {
+        use sha2::{Digest, Sha256};
+        let seeded_units = self
+            .seeded
+            .map(|seeded| seeded.units)
+            .filter(|units| units.unique);
+        for (at, key, end) in self.boundaries.by_ref() {
+            let marker = self.unit.marker(at.saturating_sub(self.start), &key, end)?;
+            let relative = at.saturating_sub(self.start);
+            let excluded = self.block_positions.partition_point(|&at| at < relative) as u32;
+            self.markers
+                .push((relative.saturating_sub(excluded), key, end));
+            self.section_content.update(&marker);
+            self.inline_content.update(&marker);
+        }
+        let trailing = self.unit.finish();
+        let empty: [u8; 32] = Sha256::new().finalize().into();
+        let mut units = self.units;
+        if trailing != empty {
+            units.push(UnitState::from_projection(
+                UnitProjection {
+                    key: None,
+                    digest: trailing,
+                    blocks: self.blocks.finalize().into(),
+                    block_content: self.block_content,
+                    content_digest: self.inline_content.finalize().into(),
+                    section_digest: self.section_content.finalize().into(),
+                    inline: self.inline,
+                    markers: self.markers,
+                },
+                self.unit_segments,
+                seeded_units,
+            ));
+        }
+        let mut hasher = Sha256::new();
+        let seed = self
+            .seeded
+            .and_then(|seeded| seeded.stories.get(&self.story));
+        let mut same_seed = seed.is_some_and(|seed| seed.units.len() == units.len());
+        for (index, unit) in units.iter().enumerate() {
+            hasher.update(unit.digest);
+            same_seed = same_seed
+                && seed.is_some_and(|seed| {
+                    Arc::ptr_eq(&unit.projection, &seed.units[index].projection)
+                });
+        }
+        Some((hasher.finalize().into(), units, same_seed))
     }
-    let trailing = unit.finish();
-    let empty: [u8; 32] = Sha256::new().finalize().into();
-    if trailing != empty {
-        units.push(UnitState::from_projection(
-            UnitProjection {
-                key: None,
-                digest: trailing,
-                blocks: blocks.finalize().into(),
-                block_content,
-                content_digest: inline_content.finalize().into(),
-                section_digest: section_content.finalize().into(),
-                inline,
-                markers,
-            },
-            unit_segments,
-            seeded_units,
-        ));
-    }
-    let mut hasher = Sha256::new();
-    let seed = seeded.and_then(|seeded| seeded.stories.get(story));
-    let mut same_seed = seed.is_some_and(|seed| seed.units.len() == units.len());
-    for (index, unit) in units.iter().enumerate() {
-        hasher.update(unit.digest);
-        same_seed = same_seed
-            && seed
-                .is_some_and(|seed| Arc::ptr_eq(&unit.projection, &seed.units[index].projection));
-    }
-    Some((hasher.finalize().into(), units, same_seed))
 }
 
 #[cfg(all(test, feature = "wasm"))]
@@ -1870,6 +2061,15 @@ impl Pilcrow {
                 valid(source?.seeded.get(&self.key)?.source_para_id.clone()).map(|id| (id, true))
             })
     }
+}
+
+/// How many paragraphs each session key closes across every story.
+pub(crate) fn paragraph_key_counts<T: ReadTxn>(txn: &T) -> HashMap<String, usize> {
+    let mut counts = HashMap::new();
+    for pilcrow in Scan::new(txn).pilcrows {
+        *counts.entry(pilcrow.key).or_insert(0) += 1;
+    }
+    counts
 }
 
 /// Every story and pilcrow, stories in sorted order, plus each nested story's parent.
@@ -3495,44 +3695,169 @@ impl EditingDoc {
     /// counted at every use, would take more than that; returns whether they
     /// are known.
     pub fn prime_save_seed_states(&self, max_paragraphs: u32, max_inflated_bytes: u32) -> bool {
+        self.prime_save_seed_states_slice(max_paragraphs, max_inflated_bytes, u32::MAX)
+            == PrimeSlice::Known
+    }
+
+    /// [`Self::prime_save_seed_states`], a slice at a time: digests stories until about
+    /// `max_bytes` canonical bytes went in, then stops and keeps its progress for the next call.
+    /// A commit between slices drops the progress and declines, as a prime of the edited
+    /// session would.
+    pub fn prime_save_seed_states_slice(
+        &self,
+        max_paragraphs: u32,
+        max_inflated_bytes: u32,
+        max_bytes: u32,
+    ) -> PrimeSlice {
+        let mut progress = self.prime_progress.lock().unwrap();
         let bytes = match self.source.lock().unwrap().as_ref() {
-            Some(SourcePackage::Ready(index)) if index.seed_states_initialized() => return true,
+            Some(SourcePackage::Ready(index)) if index.seed_states_initialized() => {
+                *progress = None;
+                return PrimeSlice::Known;
+            }
             Some(SourcePackage::Ready(index)) => index.bytes(),
             Some(SourcePackage::Pending(bytes, _)) => bytes.clone(),
-            None => return false,
+            None => {
+                *progress = None;
+                return PrimeSlice::Declined;
+            }
         };
-        if !self.unchanged_since_seeded() || self.media.lock().unwrap().is_none() {
-            return false;
-        }
-        if bytes.as_ref().len() as u64 > u64::from(max_inflated_bytes) {
-            return false;
-        }
-        let Ok(package) = ooxml_opc::RetainedPackage::from_bytes(bytes) else {
-            return false;
-        };
-        let inflated = package.parts().map(|(_, size)| size);
-        if inflated.fold(0u64, u64::saturating_add) > u64::from(max_inflated_bytes) {
-            return false;
+        let epoch = self.epoch.load(Ordering::Relaxed);
+        if progress
+            .as_ref()
+            .is_some_and(|progress| progress.epoch != epoch)
+        {
+            *progress = None;
+            return PrimeSlice::Declined;
         }
         let txn = self.yrs_doc().transact();
-        if self.committed_scan(&txn).pilcrows.len() > max_paragraphs as usize {
-            return false;
+        if progress.is_none() {
+            if !self.unchanged_since_seeded() || self.media.lock().unwrap().is_none() {
+                return PrimeSlice::Declined;
+            }
+            if bytes.as_ref().len() as u64 > u64::from(max_inflated_bytes) {
+                return PrimeSlice::Declined;
+            }
+            let Ok(package) = ooxml_opc::RetainedPackage::from_bytes(bytes) else {
+                return PrimeSlice::Declined;
+            };
+            let inflated = package.parts().map(|(_, size)| size);
+            if inflated.fold(0u64, u64::saturating_add) > u64::from(max_inflated_bytes) {
+                return PrimeSlice::Declined;
+            }
+            let scan = self.committed_scan(&txn);
+            if scan.pilcrows.len() > max_paragraphs as usize {
+                return PrimeSlice::Declined;
+            }
+            let Some(source) = self.source_index() else {
+                return PrimeSlice::Declined;
+            };
+            if source.seed_states_initialized() {
+                return PrimeSlice::Known;
+            }
+            if !source.opened_under_own_digest() {
+                return PrimeSlice::Declined;
+            }
+            *progress = Some(PrimeProgress {
+                epoch,
+                budget: Some((max_inflated_bytes as usize).max(1)),
+                stories: scan.stories.iter().cloned().collect(),
+                roots: scan
+                    .stories
+                    .iter()
+                    .map(|story| (story.clone(), scan.root(story).to_owned()))
+                    .collect(),
+                comments: scan
+                    .stories
+                    .iter()
+                    .map(|story| {
+                        (
+                            story.clone(),
+                            crate::canonical::story_comment_anchors(&txn, story),
+                        )
+                    })
+                    .collect(),
+                states: HashMap::new(),
+                current: None,
+            });
         }
-        let Some(source) = self.source_index() else {
-            return false;
+        let Some(state) = progress.as_mut() else {
+            return PrimeSlice::Declined;
         };
-        if source.seed_states_initialized() {
-            return true;
+        let mut left = max_bytes as usize;
+        loop {
+            if state.current.is_none() {
+                let Some(story) = state.stories.pop_front() else {
+                    let stories = std::mem::take(&mut state.states);
+                    *progress = None;
+                    let Some(source) = self.source_index() else {
+                        return PrimeSlice::Declined;
+                    };
+                    source.seed_states_or(|| self.live_save_seed_states(stories));
+                    return PrimeSlice::Known;
+                };
+                let comments = state.comments.get(&story).cloned().unwrap_or_default();
+                left = left.saturating_sub(PRIME_STORY_COST);
+                match StoryFingerprint::start(
+                    self,
+                    &txn,
+                    &story,
+                    &comments,
+                    &mut state.budget,
+                    None,
+                ) {
+                    Some(fingerprint) => {
+                        let large = fingerprint.segments.len() > PRIME_SLICE_SEGMENTS;
+                        state.current = Some((story, fingerprint));
+                        if large && max_bytes != u32::MAX {
+                            return PrimeSlice::Pending;
+                        }
+                    }
+                    None => {
+                        state.comments.remove(&story);
+                        if state.budget == Some(0) {
+                            *progress = None;
+                            return PrimeSlice::Declined;
+                        }
+                        if left == 0 {
+                            return PrimeSlice::Pending;
+                        }
+                        continue;
+                    }
+                }
+            }
+            let Some((_, fingerprint)) = state.current.as_mut() else {
+                continue;
+            };
+            let advanced = fingerprint.advance(&mut state.budget, left.max(1));
+            if let Some((false, _)) = advanced {
+                return PrimeSlice::Pending;
+            }
+            let Some((story, fingerprint)) = state.current.take() else {
+                continue;
+            };
+            let comments = state.comments.remove(&story).unwrap_or_default();
+            if let Some((true, used)) = advanced {
+                left = left.saturating_sub(used);
+                if let Some((fingerprint, units, _)) = fingerprint.finish() {
+                    let root = state.roots.get(&story).cloned().unwrap_or_default();
+                    let story_state = Arc::new(StoryState {
+                        root,
+                        fingerprint,
+                        units,
+                        comments,
+                    });
+                    state.states.insert(story, story_state);
+                }
+            }
+            if state.budget == Some(0) {
+                *progress = None;
+                return PrimeSlice::Declined;
+            }
+            if left == 0 {
+                return PrimeSlice::Pending;
+            }
         }
-        if !source.opened_under_own_digest() {
-            return false;
-        }
-        let budget = (max_inflated_bytes as usize).max(1);
-        let Some(stories) = story_states_within(self, &txn, Some(budget)) else {
-            return false;
-        };
-        source.seed_states_or(|| self.live_save_seed_states(stories));
-        true
     }
 
     /// The paragraph IDs a save of this session applies; see
@@ -3583,6 +3908,8 @@ impl EditingDoc {
             patched_parts: Vec::new(),
             spliced_parts: Vec::new(),
             section_spliced_parts: Vec::new(),
+            whole_parts: Vec::new(),
+            touched_parts: Vec::new(),
         };
         let metadata = self.source_metadata();
         let seeded = if let Some(ready) = ready {
@@ -3603,6 +3930,9 @@ impl EditingDoc {
                 continue;
             }
             if let Some(mut spliced) = spliced_part(&source, index, seeded, &live, &by_key) {
+                let same_stories = part_stories(seeded, part)
+                    .keys()
+                    .eq(part_stories(&live, part).keys());
                 if part.as_written {
                     for &ordinal in &spliced.changed {
                         let key = &part.backed[&ordinal][0];
@@ -3622,6 +3952,9 @@ impl EditingDoc {
                             seeded_markers: &was.markers,
                             live_markers: &now.markers,
                         };
+                        if same_stories && formatting_alone(was, now) {
+                            spliced.format_only.push(ordinal);
+                        }
                         match crate::paragraph_patch_plan::diff_paragraph_v1(
                             was.segments.as_deref().expect("seeded segments retained"),
                             now.segments.as_deref().expect("changed segments retained"),
@@ -3631,12 +3964,84 @@ impl EditingDoc {
                             Err(legacy) => spliced.legacy_paragraphs.push(legacy),
                         }
                     }
-                    plan.spliced_parts.push(spliced);
-                } else if part.kind == SourceStoryKind::Body {
-                    plan.section_spliced_parts.push(spliced);
+                    let rewritten: Vec<u32> = spliced
+                        .legacy_paragraphs
+                        .iter()
+                        .map(|legacy| legacy.ordinal)
+                        .collect();
+                    let reformatted: Vec<u32> = spliced
+                        .paragraph_patches
+                        .iter()
+                        .filter(|patch| !patch.run_edits.is_empty())
+                        .map(|patch| patch.ordinal)
+                        .collect();
+                    let formatting_alone = !spliced.changed.is_empty()
+                        && spliced.format_only.len() == spliced.changed.len()
+                        && spliced.inserted.is_empty()
+                        && spliced.removed.is_empty()
+                        && spliced.table_patches.is_empty();
+                    if formatting_alone
+                        || !ends_with_inline_tail(seeded, part)
+                        || (!source.rewrite_loses_source_runs(
+                            part,
+                            &rewritten,
+                            rewriting_loses_source_runs,
+                        ) && !source.rewrite_loses_source_runs(
+                            part,
+                            &reformatted,
+                            reformatting_loses_fields,
+                        ))
+                    {
+                        plan.spliced_parts.push(spliced);
+                    }
+                } else {
+                    let formatted: Vec<u32> = spliced
+                        .changed
+                        .iter()
+                        .copied()
+                        .filter(|ordinal| !spliced.section_only.contains(ordinal))
+                        .collect();
+                    let formatting = formatted.iter().all(|ordinal| {
+                        let key = &part.backed[ordinal][0];
+                        let (_, was) = seeded_units[key.as_str()];
+                        let (_, now) = live_units[key.as_str()];
+                        formatting_alone(was, now)
+                    });
+                    if formatting && same_stories {
+                        spliced.format_only = formatted;
+                    }
+                    if formatting
+                        && same_stories
+                        && !spliced.changed.is_empty()
+                        && spliced.inserted.is_empty()
+                        && spliced.removed.is_empty()
+                        && spliced.table_patches.is_empty()
+                    {
+                        plan.whole_parts.push(spliced.clone());
+                    }
+                    if part.kind == SourceStoryKind::Body {
+                        plan.section_spliced_parts.push(spliced);
+                    }
                 }
             }
             if stories_of(seeded, part) != stories_of(&live, part) {
+                let touched: Vec<u32> = part
+                    .backed
+                    .iter()
+                    .filter(|(_, keys)| {
+                        keys.iter().any(|key| {
+                            seeded_units.get(key.as_str()).is_some_and(|(story, was)| {
+                                live_units.get(key.as_str()).is_none_or(|(now_story, now)| {
+                                    story != now_story
+                                        || was.blocks != now.blocks
+                                        || (was.digest != now.digest && !formatting_alone(was, now))
+                                })
+                            })
+                        })
+                    })
+                    .map(|(ordinal, _)| *ordinal)
+                    .collect();
+                plan.touched_parts.push((part.path().to_owned(), touched));
                 continue;
             }
             let mut patches = Vec::new();
@@ -4094,7 +4499,9 @@ fn spliced_part(
         let (is_units, is_tail) = split_tail(&now.units);
         match (was_tail, is_tail) {
             (None, None) => {}
-            (Some(was), Some(is)) if was.content_digest == is.content_digest && !is.inline => {}
+            (Some(was), Some(is))
+                if was.content_digest == is.content_digest
+                    && (!is.inline || was.digest == is.digest) => {}
             _ => return None,
         }
         let was_keys: HashMap<&str, &UnitState> = was_units
@@ -4105,6 +4512,12 @@ fn spliced_part(
             .iter()
             .map(|unit| unit.key.as_deref())
             .collect::<Option<_>>()?;
+        if was_tail.is_some_and(|tail| tail.inline)
+            && (was_keys.len() != is_keys.len()
+                || was_keys.keys().any(|key| !is_keys.contains(key)))
+        {
+            return None;
+        }
         fn kept<'u>(units: &'u [UnitState], keep: impl Fn(&str) -> bool) -> Vec<&'u str> {
             units
                 .iter()
@@ -4248,6 +4661,7 @@ fn spliced_part(
         paragraph_patches: Vec::new(),
         legacy_paragraphs: Vec::new(),
         table_patches: rows.tables,
+        format_only: Vec::new(),
     })
 }
 
@@ -4308,7 +4722,259 @@ fn last_block_paragraph(
     ordinals.into_iter().max()
 }
 
+/// Whether a run formatting patch of `xml`, one source paragraph, would drop field characters:
+/// the patch writer flattens a field nested in another field's result and field characters
+/// inside a hyperlink, as in a table of contents entry.
+fn reformatting_loses_fields(xml: &str) -> bool {
+    let mut hyperlinks = 0usize;
+    let mut fields = 0usize;
+    for tag in xml.split('<').skip(1) {
+        let tag = tag.split('>').next().unwrap_or_default();
+        let closing = tag.starts_with('/');
+        let name = tag
+            .trim_start_matches('/')
+            .split(|c: char| c.is_whitespace() || c == '/')
+            .next()
+            .unwrap_or_default();
+        match name.rsplit_once(':').map_or(name, |(_, local)| local) {
+            "hyperlink" if !tag.ends_with('/') => {
+                if closing {
+                    hyperlinks = hyperlinks.saturating_sub(1)
+                } else {
+                    hyperlinks += 1
+                }
+            }
+            "fldChar" if !closing => {
+                if hyperlinks > 0 {
+                    return true;
+                }
+                if tag.contains("\"begin\"") {
+                    fields += 1;
+                    if fields > 1 {
+                        return true;
+                    }
+                } else if tag.contains("\"end\"") {
+                    fields = fields.saturating_sub(1);
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Whether rewriting `xml`, one source paragraph, from the model would lose run content the
+/// model does not round-trip: alternate content with its fallback, a page or column break (also
+/// one inside a tracked insertion), a bookmark or permission anchor inside a hyperlink, a
+/// field nested in another field's result, or a hyperlink holding field characters. A part where
+/// such a paragraph would be rewritten from the model (a legacy paragraph) is written whole, as
+/// a part that cannot splice is.
+fn rewriting_loses_source_runs(xml: &str) -> bool {
+    source_rewrite_loss(xml, false).is_some()
+}
+
+/// The source paragraphs of a package, each part read once.
+pub(crate) struct SourceParagraphs {
+    index: Arc<SourceIndex>,
+    parts: HashMap<usize, Option<(String, Vec<std::ops::Range<usize>>)>>,
+}
+
+impl SourceParagraphs {
+    pub(crate) fn new(index: Arc<SourceIndex>) -> Self {
+        Self {
+            index,
+            parts: HashMap::new(),
+        }
+    }
+
+    /// Why saving the paragraph seeded as `key` rewritten from the model would lose content of
+    /// its source (see [`rewriting_loses_source_runs`]; a content control inside it counts too).
+    /// `None` for a paragraph with no source, or one that rewrites whole.
+    pub(crate) fn rewrite_loss(&mut self, key: &str) -> Option<KeptReason> {
+        let ((part, ordinal), _) = self.index.view_of(key)?;
+        let index = &self.index;
+        let source = &index.parts[part];
+        let Some((xml, cell_controls)) = self.parts.entry(part).or_insert_with(|| {
+            let xml = index.part_xml(source)?;
+            let controls = cell_control_spans(&xml)?;
+            Some((xml, controls))
+        }) else {
+            return Some(KeptReason::Unreadable);
+        };
+        let Some(start) = source
+            .occurrence(ordinal)
+            .map(|occurrence| occurrence.tag.start)
+        else {
+            return Some(KeptReason::Unreadable);
+        };
+        if cell_controls.iter().any(|span| span.contains(&start)) {
+            return Some(KeptReason::ContentControl);
+        }
+        let paragraph = xml
+            .get(start..)
+            .and_then(|rest| Some(&rest[docx_parse::serializer::element_span(rest, &[])?]));
+        match paragraph {
+            Some(paragraph) => source_rewrite_loss(paragraph, true),
+            None => Some(KeptReason::Unreadable),
+        }
+    }
+}
+
+/// The spans of `xml` taken by content controls that wrap a table cell (a `w:sdt` whose parent is
+/// a `w:tr`): rewriting a row drops such a wrapper, so the paragraphs inside one are kept.
+/// `None` on markup it cannot follow.
+fn cell_control_spans(xml: &str) -> Option<Vec<std::ops::Range<usize>>> {
+    let mut spans = Vec::new();
+    let mut open: Vec<(&str, usize)> = Vec::new();
+    let mut at = 0;
+    while let Some(found) = xml[at..].find('<') {
+        let start = at + found;
+        let rest = &xml[start..];
+        if let Some((_, close)) = [
+            ("<!--", "-->"),
+            ("<![CDATA[", "]]>"),
+            ("<?", "?>"),
+            ("<!", ">"),
+        ]
+        .into_iter()
+        .find(|(open, _)| rest.starts_with(open))
+        {
+            at = start + rest.find(close)? + close.len();
+            continue;
+        }
+        let end = start + rest.find('>')?;
+        let tag = &xml[start + 1..end];
+        at = end + 1;
+        let name = tag
+            .trim_start_matches('/')
+            .split(|c: char| c.is_whitespace() || c == '/')
+            .next()
+            .unwrap_or_default();
+        if tag.starts_with('/') {
+            let (opened, from) = open.pop()?;
+            if opened != name {
+                return None;
+            }
+            if name == "w:sdt" && open.last().is_some_and(|(parent, _)| *parent == "w:tr") {
+                spans.push(from..at);
+            }
+        } else if !tag.ends_with('/') {
+            open.push((name, start));
+        }
+    }
+    open.is_empty().then_some(spans)
+}
+
+fn source_rewrite_loss(xml: &str, content_controls: bool) -> Option<KeptReason> {
+    let mut hyperlinks = 0usize;
+    let mut fields = 0usize;
+    let mut rest = xml;
+    'scan: while let Some(at) = rest.find('<') {
+        rest = &rest[at..];
+        for (open, close) in [("<!--", "-->"), ("<![CDATA[", "]]>"), ("<?", "?>")] {
+            if rest.starts_with(open) {
+                let Some(end) = rest.find(close) else {
+                    return Some(KeptReason::Unreadable);
+                };
+                rest = &rest[end + close.len()..];
+                continue 'scan;
+            }
+        }
+        let Some(end) = rest.find('>') else {
+            return Some(KeptReason::Unreadable);
+        };
+        let tag = &rest[1..end];
+        rest = &rest[end + 1..];
+        let closing = tag.starts_with('/');
+        let empty = tag.ends_with('/');
+        let name = tag
+            .trim_start_matches('/')
+            .split(|c: char| c.is_whitespace() || c == '/')
+            .next()
+            .unwrap_or_default();
+        let local = name.rsplit_once(':').map_or(name, |(_, local)| local);
+        match local {
+            "AlternateContent" => return Some(KeptReason::AlternateContent),
+            "br" if tag.contains("\"page\"") || tag.contains("\"column\"") => {
+                return Some(KeptReason::Break);
+            }
+            "sdt" if content_controls => return Some(KeptReason::ContentControl),
+            "hyperlink" if !empty => {
+                if closing {
+                    hyperlinks = hyperlinks.saturating_sub(1);
+                } else {
+                    hyperlinks += 1;
+                }
+            }
+            "bookmarkStart" | "bookmarkEnd" | "permStart" | "permEnd" if hyperlinks > 0 => {
+                return Some(KeptReason::HyperlinkMarker);
+            }
+            "fldChar" if !closing => {
+                if hyperlinks > 0 {
+                    return Some(KeptReason::Field);
+                }
+                if tag.contains("\"begin\"") {
+                    fields += 1;
+                    if fields > 1 {
+                        return Some(KeptReason::Field);
+                    }
+                } else if tag.contains("\"end\"") {
+                    fields = fields.saturating_sub(1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// `units` without, and then with, the segments after the last pilcrow.
+/// Whether a story of `part` ends with inline content after its last pilcrow. Such a part
+/// splices only since the unchanged tail is accepted; before, it was always written whole.
+fn ends_with_inline_tail(seeded: &HashMap<String, Arc<StoryState>>, part: &SourcePart) -> bool {
+    part_stories(seeded, part)
+        .values()
+        .any(|state| split_tail(&state.units).1.is_some_and(|tail| tail.inline))
+}
+
+/// Whether a paragraph's change is of run formatting alone: its markers, content, paragraph
+/// properties and every other run attribute are as they were.
+fn formatting_alone(was: &UnitState, now: &UnitState) -> bool {
+    let (Some(seeded), Some(live)) = (was.segments.as_deref(), now.segments.as_deref()) else {
+        return false;
+    };
+    was.markers == now.markers
+        && segments_without_formatting(seeded) == segments_without_formatting(live)
+}
+
+/// A paragraph's segments without their run attributes, adjacent text joined, as text that
+/// changes formatting only splits or merges where the attributes differ.
+fn segments_without_formatting(
+    segments: &[crate::StorySegment],
+) -> Vec<(crate::SegmentContent, BTreeMap<String, yrs::Any>)> {
+    let mut contents: Vec<(crate::SegmentContent, BTreeMap<String, yrs::Any>)> = Vec::new();
+    for segment in segments {
+        let attributes: BTreeMap<String, yrs::Any> = segment
+            .attributes
+            .iter()
+            .filter(|(key, value)| {
+                !crate::format::FORMATTING_ATTRS.contains(&key.as_str())
+                    && **value != yrs::Any::Null
+            })
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        if let crate::SegmentContent::Text(text) = &segment.content
+            && let Some((crate::SegmentContent::Text(joined), last)) = contents.last_mut()
+            && *last == attributes
+        {
+            joined.push_str(text);
+        } else {
+            contents.push((segment.content.clone(), attributes));
+        }
+    }
+    contents
+}
+
 fn split_tail(units: &[UnitState]) -> (&[UnitState], Option<&UnitState>) {
     match units.split_last() {
         Some((tail, rest)) if tail.key.is_none() => (rest, Some(tail)),
@@ -5222,6 +5888,93 @@ mod tests {
         assert!(session.prime_save_seed_states(paragraphs, size));
         assert!(source.seed_states_initialized());
         assert_eq!(source.reseed_calls.load(Ordering::Relaxed), 0);
+    }
+
+    fn principal_session() -> crate::session::EditSessionCore {
+        let bytes = ooxml_opc::rezip_parts(&crate::seed::fixture::principal_parts()).unwrap();
+        let session =
+            crate::session::EditSessionCore::new(41, crate::session::Host::deterministic());
+        session.open_docx(&bytes, true, None, None).unwrap();
+        session
+    }
+
+    fn assert_same_seed_states(left: &SourceIndex, right: &SourceIndex) {
+        let (left, right) = (left.seed_states(), right.seed_states());
+        assert_eq!(left.len(), right.len());
+        for (story, was) in right {
+            let is = &left[story];
+            assert!(
+                was.root == is.root
+                    && was.fingerprint == is.fingerprint
+                    && was.comments == is.comments
+                    && was.units == is.units,
+                "{story}"
+            );
+        }
+    }
+
+    #[test]
+    fn sliced_priming_records_the_one_shot_seed_states() {
+        let whole = principal_session();
+        assert!(whole.prime_save_seed_states(u32::MAX, u32::MAX));
+        let whole_source = whole.engine.doc().source_index().unwrap();
+        for max_bytes in [1, 64, 4096] {
+            let sliced = principal_session();
+            let doc = sliced.engine.doc();
+            let mut slices = 0;
+            loop {
+                match doc.prime_save_seed_states_slice(u32::MAX, u32::MAX, max_bytes) {
+                    PrimeSlice::Pending => slices += 1,
+                    PrimeSlice::Known => break,
+                    PrimeSlice::Declined => panic!("declined at {max_bytes}"),
+                }
+            }
+            if max_bytes < 4096 {
+                assert!(slices > 1, "{max_bytes}");
+            }
+            assert!(doc.prime_progress.lock().unwrap().is_none());
+            let source = doc.source_index().unwrap();
+            assert_eq!(source.reseed_calls.load(Ordering::Relaxed), 0);
+            assert_same_seed_states(&source, &whole_source);
+            assert_eq!(
+                sliced.paragraph_save_plan().unwrap(),
+                whole.paragraph_save_plan().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn a_commit_between_prime_slices_declines_and_keeps_the_fallback() {
+        let session = principal_session();
+        let expected = principal_session();
+        let doc = session.engine.doc();
+        assert_eq!(
+            doc.prime_save_seed_states_slice(u32::MAX, u32::MAX, 1),
+            PrimeSlice::Pending
+        );
+        for session in [&session, &expected] {
+            session
+                .engine
+                .doc()
+                .insert_text(
+                    &ctx(),
+                    Position::new("body", 0),
+                    "New ",
+                    FormatPolicy::Plain,
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            doc.prime_save_seed_states_slice(u32::MAX, u32::MAX, 1),
+            PrimeSlice::Declined
+        );
+        assert!(doc.prime_progress.lock().unwrap().is_none());
+        let source = doc.source_index().unwrap();
+        assert!(!source.seed_states_initialized());
+        assert_eq!(
+            session.paragraph_save_plan().unwrap(),
+            expected.paragraph_save_plan().unwrap()
+        );
     }
 
     #[test]

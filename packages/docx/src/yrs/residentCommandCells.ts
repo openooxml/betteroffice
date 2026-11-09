@@ -1,6 +1,7 @@
 import type { YrsCellLoc, YrsTableRange } from './index';
 import type { DocxCommandPayloads, DocxCommandSelection, DocxWorkerCommandEngine } from './residentCommandProtocol';
 import { tableAnchors, type TablePayload } from './storyPlainText';
+import { cellStart } from './residentCommandTableSelection';
 
 export interface DocxCellNavigationPlan {
   selection: DocxCommandSelection;
@@ -9,10 +10,8 @@ export interface DocxCellNavigationPlan {
 }
 
 function cellSelection(engine: DocxWorkerCommandEngine, story: string): DocxCommandSelection | null {
-  const paragraph = engine.geometryReader.paragraphSpans(story)[0];
-  if (!paragraph) return null;
-  const at = { story, paraId: paragraph.paraId, offset: 0 };
-  return { anchor: at, focus: at };
+  const at = cellStart(engine, story);
+  return at && { anchor: at, focus: at };
 }
 
 export function resolveCellNavigation(
@@ -30,7 +29,8 @@ export function resolveCellNavigation(
   const payload = engine.tablePayload(table.story, table.tableIndex) as TablePayload | null;
   if (!payload || !Array.isArray(payload.rows)) return null;
   const { anchors } = tableAnchors(payload);
-  const currentIndex = anchors.findIndex((cell) => cell.story === story);
+  const cellStory = story.slice(0, match.index + match[0].length);
+  const currentIndex = anchors.findIndex((cell) => cell.story === cellStory);
   if (currentIndex < 0) return null;
   const current = anchors[currentIndex]!;
   const at = { ...table, row: current.row, column: current.column };

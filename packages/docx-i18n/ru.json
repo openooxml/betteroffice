@@ -488,7 +488,9 @@
         "pageUp": "Page Up",
         "pageDown": "Page Down",
         "ctrl": "Ctrl",
-        "del": "Del"
+        "del": "Del",
+        "shift": "Shift",
+        "alt": "Alt"
       }
     },
     "objectGeometry": {
@@ -528,6 +530,7 @@
     "paragraphMarkInserted": "Вставлен разрыв абзаца",
     "paragraphMarkDeleted": "Удалён разрыв абзаца",
     "paragraphPropertiesChanged": "Изменены свойства абзаца",
+    "runPropertiesChanged": "Изменено форматирование текста",
     "rowInserted": "Вставлена строка",
     "rowDeleted": "Удалена строка",
     "rowPropertiesChanged": "Изменены свойства строки",
@@ -584,6 +587,8 @@
     "noDocumentLoaded": "Документ не загружен",
     "failedToLoad": "Не удалось открыть этот документ",
     "failedToLoadDescription": "Возможно, файл повреждён или содержит то, что этот редактор пока не может прочитать.",
+    "failedToLoadDamaged": "Файл повреждён или не является полным документом Word.",
+    "failedToLoadUnsupported": "В этом документе есть то, что этот редактор пока не умеет читать.",
     "editorUnavailable": "Не удалось загрузить редактор",
     "editorUnavailableDescription": "Проверьте подключение и перезагрузите страницу.",
     "reloadPage": "Перезагрузить страницу",
@@ -724,6 +729,7 @@
     "failedToParse": "Не удалось обработать документ",
     "linkRemoved": "Ссылка удалена",
     "linkCopied": "Ссылка скопирована в буфер обмена",
+    "pasteFailed": "Не удалось завершить вставку. Ничего не изменено.",
     "failedToSave": "Не удалось сохранить документ",
     "documentInput": "Ввод документа",
     "documentPreview": "Предварительный просмотр документа",
@@ -795,6 +801,8 @@
     "pageLabel": "Страница {number}",
     "headerLabel": "Верхний колонтитул страницы",
     "footerLabel": "Нижний колонтитул страницы",
+    "chartNoData": "Нет данных",
+    "pictureName": "Рисунок",
     "selected": "Выделено",
     "selectionCleared": "Выделение снято",
     "commentedText": "Текст с примечанием",

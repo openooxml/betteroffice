@@ -90,6 +90,7 @@ mod header_footer;
 mod heading;
 mod identity;
 mod inline_content;
+pub mod layout_request;
 mod list_marker;
 pub mod media;
 mod paragraph_facts;
@@ -97,6 +98,7 @@ mod resident_font;
 #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
 mod resident_geometry;
 mod sort;
+mod style_languages;
 pub use resident_font::{ResidentFontError, decode_resident_font};
 mod op;
 mod ops;
@@ -115,6 +117,7 @@ mod script_fonts;
 mod search;
 mod section_margins;
 mod sections;
+mod shape_styles;
 pub use sections::SectionInfo;
 mod seed;
 #[doc(hidden)]
@@ -143,8 +146,9 @@ pub use canonical::{CanonicalItem, checksum, project_story, story_checksum, to_c
 pub use ctx::{EditCtx, EditOrigin, SuggestCtx};
 pub use engine::{EngineSession, EngineStats, RegionLayoutProgress};
 pub use format::{
-    ColorPatch, FontFamilyPatch, FormatPolicy, HYPERLINK, InlineFormatDelta, Patch, SimpleFormat,
-    StrikePatch, UnderlinePatch, highlight_color_name,
+    ColorPatch, FontFamilyPatch, FormatPolicy, HYPERLINK, InlineFormatDelta, KeptReason,
+    KeptUnchanged, LanguagePatch, Patch, SimpleFormat, StrikePatch, UnderlinePatch,
+    highlight_color_name,
 };
 pub use geometry::{
     GeometryEndpoint, GeometryParagraphOutline, GeometryPositionOutline, GeometryRange,
@@ -674,10 +678,13 @@ pub struct EditingDoc {
     /// The epoch at which the stories held exactly what seeding the retained source writes, or
     /// `u64::MAX` when they never did since that source was retained.
     seeded_epoch: AtomicU64,
+    shape_styles: Mutex<shape_styles::ResolverCache>,
     metadata: Mutex<Option<Arc<seed::SourceMetadata>>>,
     segment_indexes: Mutex<EpochCache<SegmentIndex>>,
     paragraph_indexes: Mutex<EpochCache<ParagraphIndex>>,
     save_story_states: Arc<Mutex<identity::StoryStateCache>>,
+    /// A save seed state prime in progress; see [`EditingDoc::prime_save_seed_states_slice`].
+    prime_progress: Mutex<Option<identity::PrimeProgress>>,
     #[cfg(test)]
     save_story_cache_disabled: AtomicBool,
     sticky_positions: Mutex<sticky_positions::StickyPositions>,
@@ -722,7 +729,9 @@ impl EditingDoc {
         doc.get_or_insert_map(REMOVED_STORIES);
         doc.get_or_insert_map(COMMENTS);
         doc.get_or_insert_map(part_metadata::PART_METADATA);
+        doc.get_or_insert_map(shape_styles::SHAPE_STYLES);
         doc.get_or_insert_map(document_properties::DOCUMENT_PROPERTIES);
+        doc.get_or_insert_map(style_languages::STYLE_LANGUAGES);
         doc.get_or_insert_map(section_margins::SECTION_MARGINS);
         doc.get_or_insert_map(identity::PARAGRAPH_IDS);
         doc.get_or_insert_map(identity::SOURCE_PARAGRAPH_IDS);
@@ -782,9 +791,11 @@ impl EditingDoc {
             version_nonce: AtomicU64::new(batch::mint_nonce(client_id, 0)),
             seeded_epoch: AtomicU64::new(u64::MAX),
             metadata: Mutex::new(None),
+            shape_styles: Mutex::default(),
             segment_indexes: Mutex::default(),
             paragraph_indexes: Mutex::default(),
             save_story_states,
+            prime_progress: Mutex::new(None),
             #[cfg(test)]
             save_story_cache_disabled: AtomicBool::new(false),
             sticky_positions: Mutex::default(),
@@ -1173,6 +1184,7 @@ impl EditingDoc {
     /// Retains the package the stories were, or will be, seeded from.
     pub(crate) fn retain_source(&self, source: identity::SourcePackage) {
         self.save_story_states.lock().unwrap().clear();
+        *self.prime_progress.lock().unwrap() = None;
         self.seeded_epoch.store(u64::MAX, Ordering::Relaxed);
         *self.media.lock().unwrap() = None;
         *self.source.lock().unwrap() = Some(source);
@@ -1182,6 +1194,7 @@ impl EditingDoc {
     /// installed media writes, as a fresh seed of that package would.
     pub(crate) fn mark_seeded(&self) {
         self.save_story_states.lock().unwrap().clear();
+        *self.prime_progress.lock().unwrap() = None;
         self.seeded_epoch
             .store(self.epoch.load(Ordering::Relaxed), Ordering::Relaxed);
     }
@@ -1734,6 +1747,10 @@ impl EditingDoc {
     /// (created, edited, or deleted), sorted.
     pub fn stories_changed_since(&self, since: u64) -> (u64, Vec<String>) {
         let revisions = self.story_revisions.lock().unwrap();
+        // Stamps never exceed `current`, and geometry reads ask this once per story.
+        if since >= revisions.current {
+            return (revisions.current, Vec::new());
+        }
         let mut stories: Vec<String> = revisions
             .stamped
             .iter()
@@ -2454,6 +2471,41 @@ mod tests {
         let loaded = EditingDoc::new(3);
         loaded.load_state_v1(&oversized).unwrap();
         assert_eq!(loaded.encode_state_vector_v1(), a.encode_state_vector_v1());
+    }
+
+    #[test]
+    fn story_revisions_report_each_change_once_and_keep_older_readers_whole() {
+        let (a, b) = peers("one two", 1, 2);
+        let mut undo = a.undo_manager();
+        let (start, _) = a.stories_changed_since(0);
+        a.insert_text(
+            &local("A"),
+            Position::new("body", 3),
+            "!",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        let (edited, stories) = a.stories_changed_since(start);
+        assert_eq!(stories, ["body"], "a local edit");
+        assert_eq!(a.stories_changed_since(edited), (edited, Vec::new()));
+        assert!(undo.undo());
+        let (undone, stories) = a.stories_changed_since(edited);
+        assert!(undone > edited);
+        assert_eq!(stories, ["body"], "an undo");
+        assert_eq!(a.stories_changed_since(undone), (undone, Vec::new()));
+        assert_eq!(
+            a.stories_changed_since(start).1,
+            ["body"],
+            "an older reader"
+        );
+        assert_eq!(a.stories_changed_since(undone + 1), (undone, Vec::new()));
+        let (before, _) = b.stories_changed_since(0);
+        b.apply_update_v1(&a.encode_state_as_update_v1()).unwrap();
+        let (after, stories) = b.stories_changed_since(before);
+        assert!(after > before);
+        assert_eq!(stories, ["body"], "a collaboration update");
+        assert_eq!(b.stories_changed_since(after), (after, Vec::new()));
+        assert_eq!(b.stories_changed_since(0).1, ["body", "header:rId7"]);
     }
 
     #[test]

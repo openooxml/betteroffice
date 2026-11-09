@@ -1,4 +1,5 @@
-import { tableAnchors, yrsToDocument, type SectionPropertyPatch, type SectionStartKind, type DocxEditStep, type DocxParagraphInput, type DocxParagraphTarget, type TableCellAnchor, type TablePayload, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
+import { engines } from '#agents-engines';
+import type { SectionPropertyPatch, SectionStartKind, DocxEditStep, DocxParagraphInput, DocxParagraphTarget, TableCellAnchor, TablePayload, YrsSession, YrsStorySegment } from '@betteroffice/docx/yrs';
 import type { BlockContent, ParagraphContent, Run, TextFormatting, ParagraphFormatting } from '@betteroffice/docx/types/document';
 import { plainText } from './prototype';
 import { DocumentToolError, type TableCellPosition } from './types';
@@ -16,7 +17,7 @@ export interface TableCell {
 export interface ParagraphStyle { id: string; name?: string; isDefault: boolean }
 
 type Pilcrow = Extract<YrsStorySegment, { kind: 'pilcrow' }>;
-const PROTECTED = new Set(['ins', 'del', 'hyperlink']);
+const PROTECTED = new Set(['ins', 'del', 'hyperlink', 'rPrChange']);
 const runAttributes = (attributes: Record<string, unknown>) => Object.fromEntries(Object.entries(attributes).filter(([key]) => !PROTECTED.has(key)));
 const PARAGRAPH_PROPERTIES = new Set([
   'pStyle', 'numPr', 'numPrFromStyle', '_originalFormatting', 'defaultTextFormatting',
@@ -24,13 +25,48 @@ const PARAGRAPH_PROPERTIES = new Set([
   'beforeAutospacing', 'afterAutospacing', 'lineSpacing', 'lineSpacingRule', 'spacingExplicit',
   'indentLeft', 'indentRight', 'indentFirstLine', 'hangingIndent', 'borders', 'shading', 'tabs',
   'pageBreakBefore', 'keepNext', 'keepLines', 'widowControl', 'contextualSpacing', 'snapToGrid',
-  'autoSpaceDE', 'autoSpaceDN', 'outlineLevel', 'bidi',
+  'autoSpaceDE', 'autoSpaceDN', 'outlineLevel', 'bidi', 'language',
 ]);
 const ONE_OFF = new Set(['pageBreakBefore', 'frame']);
 const LIST_PROPERTIES = [...PARAGRAPH_PROPERTIES,
   'listNumFmt', 'listIsBullet', 'listMarker', 'listMarkerHidden', 'listMarkerBold', 'listMarkerItalic', 'listMarkerColor',
   'listMarkerFontFamily', 'listMarkerFontSize', 'listMarkerSuffix', 'listLevelNumFmts', 'listAbstractNumId', 'adjustRightInd',
 ].filter(key => !ONE_OFF.has(key));
+
+function tableAnchors(payload: TablePayload): { anchors: TableCellAnchor[]; columns: number } {
+  const limit = 16_384;
+  const span = (value: unknown) => typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : 1;
+  let merges: Array<{ start: number; end: number; lastRow: number }> = [];
+  const anchors: TableCellAnchor[] = [];
+  let columns = Math.min(payload.grid?.length ?? 0, limit);
+  payload.rows.forEach((row, rowIndex) => {
+    merges = merges.filter(merge => merge.lastRow >= rowIndex);
+    const next: typeof merges = [];
+    const original = row.trPr?._originalFormatting as Record<string, unknown> | undefined;
+    const grid = (key: string) => {
+      const value = row.trPr && key in row.trPr ? row.trPr[key] : original?.[key];
+      return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? Math.min(value, limit) : 0;
+    };
+    let column = grid('gridBefore');
+    let index = 0;
+    for (const cell of row.cells ?? []) {
+      while (index < merges.length && merges[index].start <= column) {
+        const merge = merges[index++];
+        column = Math.max(column, merge.end); next.push(merge);
+      }
+      const rowspan = Math.max(1, Math.min(span(cell.tcPr?.rowspan), payload.rows.length - rowIndex));
+      const colspan = Math.max(1, Math.min(span(cell.tcPr?.colspan), limit - column));
+      anchors.push({ row: rowIndex, column, rowspan, colspan, story: cell.story });
+      if (rowspan > 1) next.push({ start: column, end: column + colspan, lastRow: rowIndex + rowspan - 1 });
+      column += colspan;
+      columns = Math.max(columns, column);
+    }
+    while (index < merges.length) next.push(merges[index++]);
+    columns = Math.max(columns, Math.min(limit, next.reduce((end, merge) => Math.max(end, merge.end), column) + grid('gridAfter')));
+    merges = next;
+  });
+  return { anchors, columns };
+}
 
 export function tableCells(story: string, segments: readonly YrsStorySegment[]): Map<string, TableCell> {
   const cells = new Map<string, TableCell>();
@@ -242,9 +278,10 @@ function paragraphSegments(draft: YrsSession, target: DocxParagraphTarget) {
   return { content: segments.slice(start, end), mark: segments[end] as Pilcrow };
 }
 
-function formatParagraph(draft: YrsSession, target: DocxParagraphTarget, delta: Parameters<YrsSession['formatTextTarget']>[1]) {
+export function formatParagraph(draft: YrsSession, target: DocxParagraphTarget, delta: Parameters<YrsSession['formatTextTarget']>[1]) {
   const result = draft.formatTextTarget({ kind: 'paragraph', story: target.story, paraId: target.paraId }, delta);
   if (!result.ok) throw new DocumentToolError(result.failure.code.toUpperCase().replaceAll('-', '_'), result.failure.message);
+  return result.keptUnchanged ?? {};
 }
 
 function inlineLength(child: ParagraphContent): number {
@@ -273,7 +310,7 @@ function openingRun(draft: YrsSession, target: DocxParagraphTarget, source: NonN
   const key = JSON.stringify([target.story, target.paraId]);
   // Lookup IDs exist only in this read projection, including for paragraphs without saved IDs.
   const view: YrsSession = { ...draft, storyParagraphIds: story => draft.paragraphSpans(story).map(({ paraId }) => JSON.stringify([story, paraId])) };
-  const pkg = yrsToDocument(view, source).package;
+  const pkg = engines.get('docx').module.yrs.yrsToDocument(view, source).package;
   const find = (blocks: readonly BlockContent[], tableRun?: TextFormatting, tableParagraph?: ParagraphFormatting): ReturnType<typeof openingRun> => {
     for (const block of blocks) {
       if (block.type === 'paragraph' && block.paraId === key) {

@@ -70,6 +70,13 @@ export {
   XlsxCommandProvider,
   type XlsxCommandProviderProps,
 } from './commands/XlsxCommandProvider';
+// Keyboard shortcuts a host can remap or disable
+export type {
+  XlsxShortcutId,
+  XlsxShortcuts,
+} from './commands/shortcuts';
+export type { ShortcutChord } from '../../../shared/keyboard/chords';
+export type { ResolvedShortcuts, ShortcutBinding, ShortcutIssue } from '../../../shared/keyboard/resolve';
 export {
   useXlsxCommands,
   useXlsxCommandState,
@@ -121,17 +128,23 @@ export type {
   PluginLoadReason,
   XlsxEditorPluginProps,
   XlsxPlugin,
+  XlsxPluginCellCommit,
   XlsxPluginCellPosition,
+  XlsxPluginCellRef,
+  XlsxPluginCommitDecision,
   XlsxPluginCommand,
   XlsxPluginCommandClient,
   XlsxPluginContext,
   XlsxPluginDefinition,
   XlsxPluginEditClient,
+  XlsxPluginEditGateContext,
   XlsxPluginError,
   XlsxPluginErrorPhase,
   XlsxPluginEvent,
   XlsxPluginFailureCode,
   XlsxPluginGeometry,
+  XlsxGeometryTarget,
+  XlsxAnchorGeometryResult,
   XlsxPluginGrant,
   XlsxPluginLayout,
   XlsxPluginNavigation,
@@ -142,6 +155,8 @@ export type {
   XlsxPluginReadClient,
   XlsxPluginRect,
   XlsxPluginRefusal,
+  XlsxPluginRowDecoration,
+  XlsxPluginRowDecorations,
   XlsxPluginSelection,
   XlsxPluginSnapshot,
 } from './plugins/types';

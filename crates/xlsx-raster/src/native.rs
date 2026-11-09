@@ -396,17 +396,5 @@ pub fn render_png_with_fonts(dl: &DisplayList, fonts: &RasterFonts) -> Result<Ve
         }
     }
 
-    let pixels = pixmap.take_demultiplied();
-    let mut data = Vec::new();
-    {
-        let mut encoder = png::Encoder::new(&mut data, w, h);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        encoder.set_compression(png::Compression::Fast);
-        let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
-        writer
-            .write_image_data(&pixels)
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(data)
+    ooxml_raster::encode_png(pixmap, w, h)
 }

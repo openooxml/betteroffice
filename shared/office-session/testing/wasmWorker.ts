@@ -33,7 +33,7 @@ export async function sessionWasmFactory<Client>(clientPath: string, workerPath:
               export const wasmAssetUrl = (png = true) => new URL(png
               ? testHarness.assetUrl : testHarness.assetUrl.replace(/\\.wasm$/, '_lean.wasm'));
               export const sessionWasmAssetUrl = () => new URL(testHarness.assetUrl.replace(/\\.wasm$/, '_editor.wasm'));
-              export const rasterWasmAssetUrl = () => new URL('raster.wasm', testHarness.assetUrl);`,
+              export const metafileWasmAssetUrl = () => new URL('metafile.wasm', testHarness.assetUrl);`,
             loader: 'js',
           }));
           build.onLoad({ filter: /\/wasm\/loader\.ts$/ }, () => ({
@@ -79,6 +79,7 @@ export async function sessionWasmFactory<Client>(clientPath: string, workerPath:
               export const openWorkbookRecoveryCheckpoint = () => { throw new Error('openWorkbookRecoveryCheckpoint is not stubbed'); };
               export const adoptWorkbookPeerVersion = () => { throw new Error('adoptWorkbookPeerVersion is not stubbed'); };
               export const createWorkbookSnapshotBuilder = () => { throw new Error('createWorkbookSnapshotBuilder is not stubbed'); };
+              export const translateFormulasOn = () => { throw new Error('translateFormulasOn is not stubbed'); };
             `,
             loader: 'js',
           }));
@@ -94,7 +95,7 @@ export async function sessionWasmFactory<Client>(clientPath: string, workerPath:
   const [clientCode, workerCode] = await Promise.all([
     bundle(resolve(clientPath), true), bundle(resolve(workerPath)),
   ]);
-  const startClient = new Function('testHarness', 'Worker', clientCode);
+  const startClient = new Function('testHarness', 'Worker', 'fetch', clientCode);
   const startWorker = new Function('self', 'WebAssembly', 'fetch', 'testHarness', workerCode);
 
   return () => {
@@ -108,6 +109,19 @@ export async function sessionWasmFactory<Client>(clientPath: string, workerPath:
     let nextCompile: (() => Promise<WebAssembly.Module>) | undefined;
     let nextInitializeError: Error | undefined;
     const clientHarness = { client: undefined as unknown as Client, get assetUrl() { return assetUrl; } };
+    let pageFetch: ((input: URL, init?: RequestInit) => Promise<Response>) | undefined;
+    const compileOnce = () => {
+      compiles += 1;
+      trace.push('compile');
+      const compile = nextCompile;
+      nextCompile = undefined;
+      return compile ? compile() : Promise.resolve(module);
+    };
+    const clientFetch = (input: URL, init?: RequestInit) => {
+      trace.push('page-fetch');
+      if (pageFetch) return pageFetch(input, init);
+      return Promise.resolve(new Response(WASM_BYTES, { headers: { 'Content-Type': 'application/wasm' } }));
+    };
 
     class TestWorker implements WasmTestWorker {
       readonly requests: ClientMessage[] = [];
@@ -139,14 +153,8 @@ export async function sessionWasmFactory<Client>(clientPath: string, workerPath:
         startWorker(scope, {
           Module: moduleConstructor,
           RuntimeError: runtimeError,
-          compileStreaming: () => {
-            compiles += 1;
-            trace.push('compile');
-            const compile = nextCompile;
-            nextCompile = undefined;
-            return compile ? compile() : Promise.resolve(module);
-          },
-          compile: () => { throw new Error('Unexpected byte compile'); },
+          compileStreaming: () => compileOnce(),
+          compile: () => compileOnce(),
         }, (input: URL) => {
           worker.urls.push(input.href);
           trace.push('fetch');
@@ -171,6 +179,7 @@ export async function sessionWasmFactory<Client>(clientPath: string, workerPath:
               version: () => '0',
               sheetInfo: () => ({ sheetIds: [], sheetNames: [], activeSheet: 0 }),
               save: () => bytes.slice(),
+              saveWithWarnings: () => ({ bytes: bytes.slice(), warnings: [] }),
               dispose() {},
             };
           },
@@ -190,9 +199,9 @@ export async function sessionWasmFactory<Client>(clientPath: string, workerPath:
       }
 
       postMessage(message: ClientMessage, transfer: Transferable[] = []) {
+        const data = structuredClone(message, { transfer });
         this.requests.push(message);
         trace.push(`post:${message.kind === 'call' ? message.method : message.kind}`);
-        const data = structuredClone(message, { transfer });
         queueMicrotask(() => {
           trace.push(`receive:${data.kind === 'call' ? data.method : data.kind}`);
           this.dispatch(this.scopeListeners, 'message', { data });
@@ -216,11 +225,12 @@ export async function sessionWasmFactory<Client>(clientPath: string, workerPath:
       crash() { this.dispatch(this.listeners, 'error', { message: 'Worker crashed' }); }
     }
 
-    startClient(clientHarness, TestWorker);
+    startClient(clientHarness, TestWorker, clientFetch);
     return {
       client: clientHarness.client, workers, module, trace,
       get compiles() { return compiles; },
       set assetUrl(url: string) { assetUrl = url; },
+      set pageFetch(fetcher: ((input: URL, init?: RequestInit) => Promise<Response>) | undefined) { pageFetch = fetcher; },
       worker: () => new TestWorker(new URL('https://example.test/worker.mjs')) as unknown as Worker,
       rejectCompile(error: Error) { nextCompile = () => Promise.reject(error); },
       rejectInitialize(error: Error) { nextInitializeError = error; },

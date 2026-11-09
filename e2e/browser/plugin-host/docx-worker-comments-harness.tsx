@@ -23,7 +23,7 @@ const probe = {
   },
   async saved() { return [...new Uint8Array((await this.editor!.save())!)]; },
 };
-(window as unknown as { __workerComments: WorkerCommentsProbe }).__workerComments = probe;
+(window as unknown as { __workerComments: typeof probe }).__workerComments = probe;
 const fonts = [{ family: 'Liberation Sans', src: fontUrl }];
 const measurementFontProvider = { resolve: () => async () => (await fetch(fontUrl)).arrayBuffer() };
 

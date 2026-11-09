@@ -153,6 +153,20 @@ describe('XlsxEditor engine dispatch', () => {
     expect(warn.mock.calls[0]?.[0]).toContain('removed in 0.6.0');
   });
 
+  it('mounts the hybrid editor for a read-only workbook that allows host proposals', async () => {
+    const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen readOnly allowHostProposals file={file} />);
+    await waitFor(() => expect(view.getByTestId('worker-editor').getAttribute('data-read-only')).toBe('true'));
+    expect(view.queryByTestId('worker-viewer')).toBeNull();
+    view.rerender(<XlsxEditor legacySyncApi experimentalWorkerOpen readOnly file={file} />);
+    expect(view.getByTestId('worker-editor')).toBeDefined();
+  });
+
+  it('mounts the hybrid viewer for a read-only workbook without host proposals', async () => {
+    const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen readOnly file={file} />);
+    await waitFor(() => expect(view.getByTestId('worker-viewer')).toBeDefined());
+    expect(view.queryByTestId('worker-editor')).toBeNull();
+  });
+
   it('runs the in-thread engine for legacySyncApi without experimentalWorkerOpen', async () => {
     const view = render(<XlsxEditor legacySyncApi file={file} />);
     await waitFor(() => expectInThread(view), MOUNTED);

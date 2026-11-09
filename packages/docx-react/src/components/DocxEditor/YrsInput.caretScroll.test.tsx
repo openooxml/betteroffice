@@ -829,3 +829,81 @@ test('a replica that fails to load drops the keys waiting for it', async () => {
   expect(t.session.selection()).toBeNull();
   expect(t.input.current!.hasPendingInput()).toBe(false);
 });
+
+test('a host scroll before the first caret placement still lets that placement scroll into view', async () => {
+  const { input, scroller, scrollTop, expectCaret } = await mount(true, false);
+  act(() => {
+    scroller.scrollTop = scrollTop - 50;
+    scroller.dispatchEvent(new Event('scroll'));
+  });
+  act(() => input.current!.setSelectionFromDisplay(2));
+  expectCaret(1);
+  expect(scroller.scrollTop).toBeGreaterThan(scrollTop - 50);
+});
+
+test.each([
+  ['read-only', true],
+  ['editable', false],
+] as const)('a %s default caret seeded after a host scroll leaves the view where the host put it', async (_, readOnly) => {
+  const { session, input, scroller, replicaReadyRef, view, inputFor, expectCaret } =
+    await mount(readOnly, true, false);
+  act(() => {
+    scroller.scrollTop = 2000;
+    scroller.dispatchEvent(new Event('scroll'));
+  });
+  act(() => {
+    session.openDocx(bytes, true);
+    replicaReadyRef.current = true;
+    view.rerender(inputFor());
+  });
+  expectCaret(0);
+  expect(scroller.scrollTop).toBe(2000);
+  act(() => input.current!.setSelectionFromDisplay(3));
+  expectCaret(2);
+  expect(scroller.scrollTop).not.toBe(2000);
+});
+
+test('an explicit selection at the story start after a host scroll still scrolls into view while the default caret waits for layout', async () => {
+  const { session, input, scroller, view, inputFor, queries, expectCaret } =
+    await mount(false, true, true, { displayListQueries: null });
+  expect(session.selection()).not.toBeNull();
+  act(() => {
+    scroller.scrollTop = 2000;
+    scroller.dispatchEvent(new Event('scroll'));
+  });
+  act(() => input.current!.setSelectionFromDisplay(1));
+  act(() => view.rerender(inputFor({ displayListQueries: queries as unknown as DisplayListQueries })));
+  expectCaret(0);
+  expect(scroller.scrollTop).not.toBe(2000);
+});
+
+test.each([
+  ['Shift leaves the restored view', false, { key: 'Shift' }, true],
+  ['read-only Enter leaves the restored view', true, { key: 'Enter' }, true],
+  ['Ctrl+Home scrolls to the caret', false, { key: 'Home', ctrlKey: true }, false],
+  ['Delete scrolls to the caret it edits at', false, { key: 'Delete' }, false],
+] as const)('after a host scroll while the default caret waits for layout, %s', async (_, readOnly, key, kept) => {
+  const { session, scroller, view, inputFor, queries, expectCaret } =
+    await mount(readOnly, true, true, { displayListQueries: null });
+  expect(session.selection()).not.toBeNull();
+  act(() => {
+    scroller.scrollTop = 2000;
+    scroller.dispatchEvent(new Event('scroll'));
+  });
+  await act(async () => { fireEvent.keyDown(view.getByTestId('yrs-input'), key); });
+  act(() => view.rerender(inputFor({ displayListQueries: queries as unknown as DisplayListQueries })));
+  expectCaret(0);
+  if (kept) expect(scroller.scrollTop).toBe(2000);
+  else expect(scroller.scrollTop).not.toBe(2000);
+});
+
+test('a reader wheel before the first caret placement keeps the view where the reader put it', async () => {
+  const { input, scroller, scrollTop, expectCaret } = await mount(true, false);
+  act(() => {
+    scroller.querySelector('.canvas-page')!.dispatchEvent(new Event('wheel', { bubbles: true }));
+  });
+  act(() => input.current!.setSelectionFromDisplay(2));
+  expectCaret(1);
+  expect(scroller.scrollTop).toBe(scrollTop);
+});
+

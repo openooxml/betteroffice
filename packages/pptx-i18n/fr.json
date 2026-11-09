@@ -52,6 +52,7 @@
     "decreaseFontSize": "Réduire la taille de police",
     "increaseFontSize": "Augmenter la taille de police",
     "underline": "Souligné",
+    "strikethrough": "Barré",
     "more": "Plus",
     "fillColor": "Couleur de remplissage",
     "noFill": "Aucun remplissage",
@@ -91,6 +92,12 @@
     "fallbackTitle": "Diapositive {number}",
     "canvasLabel": "Diapositive {current} sur {total}",
     "canvasLabelWithSelection": "Diapositive {current} sur {total} ; objet sélectionné {name}"
+  },
+  "a11y": {
+    "chartNoData": "Aucune donnée",
+    "slideWithTitle": "Diapositive {current} sur {total}: {title}",
+    "objectSelected": "{name} sélectionné",
+    "editingText": "Modification de {name}"
   },
   "editor": {
     "appLabel": "Éditeur de diapositives de présentation",
@@ -156,6 +163,17 @@
     "stalePreview": "Cet aperçu utilise la diapositive mise à jour. L'application remplacera les cibles modifiées.",
     "geometry": "Position et taille (x, y, largeur, hauteur)",
     "geometryValues": "{before} → {after} pt",
+    "layoutChanged": "Disposition modifiée",
+    "backgroundChanged": "Arrière-plan modifié",
+    "rowInserted": "Ligne insérée",
+    "rowDeleted": "Ligne supprimée",
+    "columnInserted": "Colonne insérée",
+    "columnDeleted": "Colonne supprimée",
+    "broughtToFront": "Placé au premier plan",
+    "sentToBack": "Placé à l’arrière-plan",
+    "broughtForward": "Avancé d’un plan",
+    "sentBackward": "Reculé d’un plan",
+    "zOrderChanged": "Ordre de superposition modifié",
     "appearance": "Apparence ou mise en forme du texte modifiée",
     "changedAgain": "La cible a encore changé. Vérifiez l'aperçu actualisé avant d'appliquer.",
     "canvasTitle": "Modifications sur cette diapositive",
@@ -168,7 +186,14 @@
     "canvasStale": "Cibles modifiées. Ouvrez les détails de la révision pour inspecter l'aperçu mis à jour avant d'appliquer.",
     "previousPosition": "Avant",
     "proposedPosition": "Proposé",
-    "loadingDiff": "Chargement des modifications…"
+    "loadingDiff": "Chargement des modifications…",
+    "slideStrip": null,
+    "previewSlide": null,
+    "insertedShape": null,
+    "deletedShape": null,
+    "insertedSlide": null,
+    "deletedSlide": null,
+    "movedFrom": null
   },
   "commands": {
     "moreControls": "Autres commandes",
@@ -212,8 +237,25 @@
       "permissionDenied": "L'application hôte n'a pas autorisé ce plugin à utiliser cette commande.",
       "unsupportedPolicy": "Les plugins ne peuvent pas encore exécuter cette commande. Utilisez plutôt un lot de modifications.",
       "pluginUnavailable": "Le plugin n'est plus actif.",
-      "aborted": "L'action du plugin a été annulée avant l'exécution de la commande."
-    }
+      "aborted": "L'action du plugin a été annulée avant l'exécution de la commande.",
+      "clipboardUnavailable": "L’accès au presse-papiers est indisponible ou a été refusé.",
+      "tableRequired": "Placez d’abord le curseur dans une cellule du tableau.",
+      "lastSlide": "Impossible de supprimer la dernière diapositive."
+    },
+    "cut": "Couper",
+    "copy": "Copier",
+    "paste": "Coller",
+    "pastePlainText": "Coller en texte brut",
+    "insert": "Insérer",
+    "delete": "Supprimer",
+    "deleteTable": "Supprimer le tableau",
+    "duplicateSlide": "Dupliquer la diapositive",
+    "insertRowsAbove": "Insérer des lignes au-dessus",
+    "insertRowsBelow": "Insérer des lignes en dessous",
+    "insertColumnsLeft": "Insérer des colonnes à gauche",
+    "insertColumnsRight": "Insérer des colonnes à droite",
+    "deleteRows": "Supprimer les lignes",
+    "deleteColumns": "Supprimer les colonnes"
   },
   "plugins": {
     "toolbarGroup": "Plugins",
@@ -225,5 +267,20 @@
     "label": "Collaborateurs",
     "moreCollaborators": "{count, plural, one {# collaborateur supplémentaire} many {# collaborateurs supplémentaires} other {# collaborateurs supplémentaires}}",
     "moreSelections": "+{count, plural, one {# sélection} many {# sélections} other {# sélections}}"
+  },
+  "contextMenu": {
+    "text": "Menu du texte",
+    "shape": "Menu de la forme",
+    "table": "Menu du tableau",
+    "slide": "Menu de la diapositive"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Maj",
+    "delete": "Suppr",
+    "escape": "Échap",
+    "pageup": "Page préc.",
+    "pagedown": "Page suiv."
   }
 }

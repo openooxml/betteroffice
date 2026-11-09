@@ -248,7 +248,7 @@ fn text_from_rich_text<E: ChartXml>(parent: Option<&E>) -> Option<String> {
         }
     }
     let text = first_deep(parent, "v", 0)
-        .map(E::descendant_text)
+        .map(|value| decode_xstring(&value.descendant_text()))
         .unwrap_or_default();
     nonempty_trimmed(&text)
 }
@@ -395,7 +395,7 @@ fn parse_string_cache<E: ChartXml>(parent: Option<&E>, budget: &mut Budget) -> V
     let mut next = 0;
     let entries = take_points(children(cache, "pt"), budget, |point| {
         let text = child(point, "v")
-            .map(E::descendant_text)
+            .map(|value| decode_xstring(&value.descendant_text()))
             .unwrap_or_default()
             .trim()
             .to_owned();
@@ -416,7 +416,7 @@ fn parse_num_cache<E: ChartXml>(parent: Option<&E>, budget: &mut Budget) -> Vec<
     };
     let mut next = 0;
     let entries = take_points(children(cache, "pt"), budget, |point| {
-        let text = child(point, "v")?.descendant_text();
+        let text = decode_xstring(&child(point, "v")?.descendant_text());
         let value = parse_number(Some(text.trim()))?;
         let index = point_index_attr(point, next);
         next = index.saturating_add(1);
@@ -439,7 +439,7 @@ fn parse_num_cache_with_strings<E: ChartXml>(
     let mut next = 0;
     let entries = take_points(children(cache, "pt"), budget, |point| {
         let text = child(point, "v")
-            .map(E::descendant_text)
+            .map(|value| decode_xstring(&value.descendant_text()))
             .unwrap_or_default()
             .trim()
             .to_owned();
@@ -605,7 +605,7 @@ fn parse_series<E: ChartXml>(
                             .or_else(|| first_deep(element, "numLit", 0))
                     })
                     .and_then(|cache| child(cache, "formatCode"))
-                    .map(|code| code.descendant_text())
+                    .map(|code| decode_xstring(&code.descendant_text()))
                     .filter(|code| !code.is_empty()),
                 axis_ids: (!axis_ids.is_empty()).then(|| axis_ids.to_vec()),
                 points: (!points.is_empty()).then_some(points),
@@ -682,7 +682,7 @@ fn label_switches<E: ChartXml>(labels: &E) -> ChartDataLabels {
         position: val_attr(child(labels, "dLblPos")).map(str::to_owned),
         number_format: child(labels, "numFmt")
             .and_then(|value| value.attribute(None, "formatCode"))
-            .map(str::to_owned),
+            .map(decode_xstring),
         text: parse_text_properties(child(labels, "txPr")),
         points: None,
     }
@@ -800,7 +800,7 @@ fn parse_axis<E: ChartXml>(axis: &E) -> ChartAxis {
         reversed: val_attr(scaling.and_then(|value| child(value, "orientation"))) == Some("maxMin"),
         number_format: child(axis, "numFmt")
             .and_then(|value| value.attribute(None, "formatCode"))
-            .map(str::to_owned),
+            .map(decode_xstring),
         major_tick_mark: val_attr(child(axis, "majorTickMark")).map(str::to_owned),
         minor_tick_mark: val_attr(child(axis, "minorTickMark")).map(str::to_owned),
         tick_label_position: val_attr(child(axis, "tickLblPos")).map(str::to_owned),
@@ -977,6 +977,37 @@ fn data_labels_visible<E: ChartXml>(labels: Option<&E>) -> bool {
 fn nonempty_trimmed(value: &str) -> Option<String> {
     let value = value.trim();
     (!value.is_empty()).then(|| value.to_owned())
+}
+
+/// Decode the ST_Xstring escapes a `c:v` holds: `_xHHHH_` is the character with
+/// that code, and `_x005F_` escapes the underscore of a literal one.
+fn decode_xstring(source: &str) -> String {
+    if !source.contains("_x") && !source.contains("_X") {
+        return source.to_owned();
+    }
+    let bytes = source.as_bytes();
+    let mut out = String::with_capacity(source.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'_'
+            && matches!(bytes.get(index + 1), Some(b'x' | b'X'))
+            && bytes.get(index + 6) == Some(&b'_')
+            && bytes
+                .get(index + 2..index + 6)
+                .is_some_and(|hex| hex.iter().all(u8::is_ascii_hexdigit))
+            && let Some(decoded) = u32::from_str_radix(&source[index + 2..index + 6], 16)
+                .ok()
+                .and_then(char::from_u32)
+        {
+            out.push(decoded);
+            index += 7;
+            continue;
+        }
+        let ch = source[index..].chars().next().unwrap_or('\u{0}');
+        out.push(ch);
+        index += ch.len_utf8();
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1796,6 +1827,34 @@ mod tests {
     }
 
     #[test]
+    fn cached_values_decode_st_xstring_escapes() {
+        let cache = Node::el(
+            "c:numCache",
+            vec![
+                Node::el("c:pt", vec![Node::text("c:v", "_x0031_")]).attr("idx", "0"),
+                Node::el("c:pt", vec![Node::text("c:v", "_x0032_")]).attr("idx", "1"),
+            ],
+        );
+        assert_eq!(
+            parse_num_cache(Some(&cache), &mut Budget::new()),
+            [1.0, 2.0]
+        );
+        let (_, numbers) = parse_num_cache_with_strings(Some(&cache), &mut Budget::new());
+        assert_eq!(numbers, [1.0, 2.0]);
+        let strings = Node::el(
+            "c:strCache",
+            vec![
+                Node::el("c:pt", vec![Node::text("c:v", "a_x000D_b")]).attr("idx", "0"),
+                Node::el("c:pt", vec![Node::text("c:v", "_x005F_x0041_")]).attr("idx", "1"),
+            ],
+        );
+        assert_eq!(
+            parse_string_cache(Some(&strings), &mut Budget::new()),
+            ["a\rb", "_x0041_"]
+        );
+    }
+
+    #[test]
     fn a_point_index_at_the_top_of_its_range_does_not_overflow() {
         let top = usize::MAX.to_string();
         let cache = Node::el(
@@ -2310,6 +2369,74 @@ mod tests {
         assert_eq!(points[0].labels.show_value, Some(false));
         assert_eq!(points[0].labels.show_category_name, Some(true));
         assert!(points[0].labels.points.is_none());
+    }
+
+    /// Format codes are `ST_Xstring` wherever a chart holds one: the value
+    /// cache's `c:formatCode` and a `c:numFmt@formatCode` on labels or an axis
+    /// read decoded, and a literal escape written with `_x005F_` reads literal.
+    #[test]
+    fn chart_format_codes_read_their_xstring_escapes() {
+        let series = Node::el(
+            "c:ser",
+            vec![
+                Node::el(
+                    "c:dLbls",
+                    vec![Node::el("c:numFmt", Vec::new()).attr("formatCode", "0_x005F_x0041_0")],
+                ),
+                Node::el(
+                    "c:val",
+                    vec![Node::el(
+                        "c:numRef",
+                        vec![
+                            Node::text("c:f", "Sheet1!$B$2:$B$3"),
+                            Node::el(
+                                "c:numCache",
+                                vec![
+                                    Node::text("c:formatCode", r"mmm\_x000a_yyyy"),
+                                    Node::val("c:ptCount", "1"),
+                                    Node::el("c:pt", vec![Node::text("c:v", "1")]).attr("idx", "0"),
+                                ],
+                            ),
+                        ],
+                    )],
+                ),
+            ],
+        );
+        let space = parse_chart_space(&Node::el(
+            "c:chartSpace",
+            vec![Node::el(
+                "c:chart",
+                vec![Node::el(
+                    "c:plotArea",
+                    vec![
+                        Node::el("c:barChart", vec![series]),
+                        Node::el(
+                            "c:valAx",
+                            vec![
+                                Node::val("c:axId", "1"),
+                                Node::el("c:numFmt", Vec::new()).attr("formatCode", "0_x0001_"),
+                            ],
+                        ),
+                    ],
+                )],
+            )],
+        ))
+        .expect("chart space parses");
+        let series = &space.plot_groups[0].series[0];
+        assert_eq!(series.value_format.as_deref(), Some("mmm\\\nyyyy"));
+        assert_eq!(
+            series
+                .data_labels
+                .as_ref()
+                .and_then(|labels| labels.number_format.as_deref()),
+            Some("0_x0041_0")
+        );
+        assert_eq!(
+            space.axis_list.as_ref().unwrap()[0]
+                .number_format
+                .as_deref(),
+            Some("0\u{1}")
+        );
     }
 
     #[test]

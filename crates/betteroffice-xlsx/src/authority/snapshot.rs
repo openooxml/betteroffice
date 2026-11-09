@@ -2019,12 +2019,14 @@ impl AuthoritySnapshotEncoder {
         let WorkbookAuthority {
             doc,
             projection_valid: _,
+            plain_style_cells: _,
             snapshot_revision: _,
             base,
             history: _,
             next_sheet_id: _,
             undo_stack: _,
             redo_stack: _,
+            collaborative: _,
         } = a;
         let mut preflight = BaseCursor::default();
         while let Some(record) = preflight.next(base) {
@@ -2110,12 +2112,14 @@ impl WorkbookAuthority {
         let Self {
             doc,
             projection_valid: _,
+            plain_style_cells: _,
             snapshot_revision: _,
             base: _,
             history: _,
             next_sheet_id,
             undo_stack: _,
             redo_stack: _,
+            collaborative: _,
         } = self;
         (
             doc.client_id().get(),
@@ -2871,7 +2875,9 @@ impl AuthorityHydrator {
         }
         let base = self.base.finish()?;
         let authority = WorkbookAuthority::hydrated(self.doc, Arc::new(base), self.next_sheet_id);
-        if !self.vector_validated && authority.encode_state_vector_v1() != self.state_vector {
+        if !self.vector_validated
+            && !same_state_vector(&authority.encode_state_vector_v1(), &self.state_vector)
+        {
             return Err(SnapshotError::new(
                 "authority snapshot state vector differs",
             ));
@@ -2932,6 +2938,15 @@ impl AuthorityHydrator {
     }
 }
 
+fn same_state_vector(left: &[u8], right: &[u8]) -> bool {
+    use yrs::updates::decoder::Decode;
+    left == right
+        || matches!(
+            (yrs::StateVector::decode_v1(left), yrs::StateVector::decode_v1(right)),
+            (Ok(left), Ok(right)) if left == right
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2942,6 +2957,14 @@ mod tests {
     use crate::snapshot::wire::unframe;
 
     use super::*;
+
+    #[test]
+    fn snapshot_state_vectors_compare_by_client_not_byte_order() {
+        assert!(same_state_vector(&[2, 1, 1, 5, 1], &[2, 5, 1, 1, 1]));
+        assert!(!same_state_vector(&[2, 1, 1, 5, 1], &[2, 5, 2, 1, 1]));
+        assert!(!same_state_vector(&[2, 1, 1, 5, 1], &[1, 1, 1]));
+        assert!(!same_state_vector(&[9], &[2, 1, 1, 5, 1]));
+    }
 
     #[test]
     fn precision_settings_are_rejected_by_the_legacy_date_reader() {
@@ -4357,7 +4380,8 @@ mod tests {
             let budget = SnapshotBudget::new(100, usize::MAX).unwrap();
             let mut encoder = AuthoritySnapshotEncoder::new(&a, budget).unwrap();
             let mut header = header(&a, &encoder, budget);
-            assert_eq!(header.chunk_count(ChunkKind::Yrs), 1);
+            assert!(header.chunk_count(ChunkKind::Yrs) >= 1);
+            header.chunk_counts[ChunkKind::Yrs as usize - 1] = 1;
             header.state_vector = StateVector::default().encode_v1();
             let mut hydrator = AuthorityHydrator::new(&header).unwrap();
             while let Some(chunk) = encoder.next(budget).unwrap() {

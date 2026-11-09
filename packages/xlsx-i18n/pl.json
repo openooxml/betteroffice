@@ -135,7 +135,14 @@
       "unsupportedCommand": "Nie jest jeszcze obsługiwane.",
       "invalidArguments": "Ta wartość jest nieprawidłowa.",
       "inputFailed": "Poprzedniego wpisu w komórce nie można było zapisać.",
+      "editUnsupported": "Tej zmiany nie można tu zastosować. Skoroszyt nie został zmieniony.",
+      "editUnsupportedChart": "Tej zmiany nie można zastosować: wykres używa komórek, które zostałyby przesunięte. Skoroszyt nie został zmieniony.",
+      "editUnsupportedTable": "Tej zmiany nie można zastosować: tabela używa komórek, które zostałyby przesunięte. Skoroszyt nie został zmieniony.",
+      "editUnsupportedPivot": "Tej zmiany nie można zastosować: tabela przestawna używa komórek, które zostałyby przesunięte. Skoroszyt nie został zmieniony.",
       "sheetProtected": "Ta komórka znajduje się w chronionym arkuszu.",
+      "hostRefused": "Ta zmiana jest niedozwolona.",
+      "tooManyToCheck": "Za dużo komórek do sprawdzenia przez wtyczki (limit {limit}).",
+      "hostStarting": "Edytor wciąż się uruchamia. Spróbuj ponownie za chwilę.",
       "documentReplaced": "Otwarto inny skoroszyt.",
       "targetChanged": "Zaznaczenie uległo zmianie.",
       "gestureActive": "Najpierw zakończ przenoszenie wykresu.",
@@ -146,8 +153,31 @@
       "permissionDenied": "Aplikacja hosta nie zezwoliła tej wtyczce na użycie tego polecenia.",
       "unsupportedPolicy": "Wtyczki nie mogą jeszcze uruchamiać tego polecenia. Użyj zamiast tego pakietu edycji.",
       "pluginUnavailable": "Wtyczka nie jest już aktywna.",
-      "aborted": "Działanie wtyczki zostało anulowane przed wykonaniem polecenia."
-    }
+      "aborted": "Działanie wtyczki zostało anulowane przed wykonaniem polecenia.",
+      "clipboardUnavailable": "Ta przeglądarka nie pozwala wklejać z menu. Użyj skrótu klawiaturowego.",
+      "lastSheet": "Skoroszyt musi mieć co najmniej jeden arkusz.",
+      "sheetAtEdge": "Arkusza nie można przenieść dalej.",
+      "sheetNameInvalid": "Nazwy arkuszy muszą mieć od 1 do 31 znaków, być unikatowe i nie mogą zawierać : \\ / ? * [ ].",
+      "clipboardDenied": "Przeglądarka nie zezwoliła na dostęp do schowka."
+    },
+    "cut": "Wytnij",
+    "copy": "Kopiuj",
+    "paste": "Wklej",
+    "pastePlainText": "Wklej jako zwykły tekst",
+    "clearContents": "Wyczyść zawartość",
+    "insert": "Wstaw",
+    "delete": "Usuń",
+    "insertRowsAbove": "Wstaw wiersze powyżej",
+    "insertRowsBelow": "Wstaw wiersze poniżej",
+    "insertColumnsLeft": "Wstaw kolumny z lewej",
+    "insertColumnsRight": "Wstaw kolumny z prawej",
+    "deleteRows": "Usuń wiersze",
+    "deleteColumns": "Usuń kolumny",
+    "insertSheet": "Wstaw arkusz",
+    "deleteSheet": "Usuń arkusz",
+    "renameSheet": "Zmień nazwę",
+    "moveSheetLeft": "Przenieś w lewo",
+    "moveSheetRight": "Przenieś w prawo"
   },
   "editor": {
     "appLabel": "Edytor arkuszy kalkulacyjnych",
@@ -162,7 +192,11 @@
     "showDetails": "Pokaż szczegóły",
     "openPrompt": "Otwórz plik XLSX",
     "sheetTabsLabel": "Arkusze",
-    "clearExceedsLimit": "Czyszczenie przekracza limit komórek."
+    "clearExceedsLimit": "Czyszczenie przekracza limit komórek.",
+    "cellMenuLabel": "Menu komórki",
+    "sheetTabMenuLabel": "Menu karty arkusza",
+    "renameSheetLabel": "Zmień nazwę arkusza",
+    "sheetNamePrefix": "Arkusz"
   },
   "presence": {
     "label": "Współpracownicy",
@@ -178,6 +212,7 @@
     "accept": "Zaakceptuj",
     "reject": "Odrzuć",
     "forceApply": "Wymuś zastosowanie",
+    "forceBlockedReason": "Tej propozycji nie można zastosować po zmianie struktury.",
     "staleWarning": "Komórki zmienione od czasu propozycji: {cells}"
   },
   "a11y": {
@@ -187,12 +222,27 @@
     "cellLabel": "{address}, {value}",
     "cellLabelSelected": "{address}, {value}, zaznaczono",
     "emptyCellLabel": "{address}, pusta",
-    "emptyCellLabelSelected": "{address}, pusta, zaznaczono"
+    "emptyCellLabelSelected": "{address}, pusta, zaznaczono",
+    "hasFormula": "{label}, zawiera formułę",
+    "rangeSelected": "Zaznaczono {start} do {end}, {rows, plural, one {# wiersz} few {# wiersze} many {# wierszy} other {# wiersza}} na {columns, plural, one {# kolumnę} few {# kolumny} many {# kolumn} other {# kolumny}}",
+    "sheetActivated": "{name}, arkusz {index} z {count}",
+    "cellInputLabel": "Edytuj komórkę {address}",
+    "gridRoleDescription": "arkusz"
   },
   "plugins": {
     "toolbarGroup": "Wtyczki",
     "panelTabs": "Panele wtyczek",
     "collapsePanel": "Zwiń {title}",
-    "expandPanel": "Rozwiń {title}"
+    "expandPanel": "Rozwiń {title}",
+    "rowGutter": "Znaczniki wierszy wtyczek"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "del": "Del",
+    "escape": "Esc",
+    "pageUp": "Page Up",
+    "pageDown": "Page Down"
   }
 }

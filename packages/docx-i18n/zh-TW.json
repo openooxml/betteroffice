@@ -488,7 +488,9 @@
         "pageUp": "Page Up",
         "pageDown": "Page Down",
         "ctrl": "Ctrl",
-        "del": "Del"
+        "del": "Del",
+        "shift": "Shift",
+        "alt": "Alt"
       }
     },
     "objectGeometry": {
@@ -528,6 +530,7 @@
     "paragraphMarkInserted": "已插入段落分隔符號",
     "paragraphMarkDeleted": "已刪除段落分隔符號",
     "paragraphPropertiesChanged": "已變更段落內容",
+    "runPropertiesChanged": "已變更文字格式設定",
     "rowInserted": "已插入列",
     "rowDeleted": "已刪除列",
     "rowPropertiesChanged": "已變更列內容",
@@ -584,6 +587,8 @@
     "noDocumentLoaded": "尚未載入文件",
     "failedToLoad": "無法開啟此文件",
     "failedToLoadDescription": "檔案可能已損毀，或使用了此編輯器尚無法讀取的功能。",
+    "failedToLoadDamaged": "檔案已損毀,或不是完整的 Word 文件。",
+    "failedToLoadUnsupported": "此文件使用了此編輯器尚無法讀取的內容。",
     "editorUnavailable": "編輯器無法載入",
     "editorUnavailableDescription": "請檢查連線，然後重新載入頁面。",
     "reloadPage": "重新載入頁面",
@@ -724,6 +729,7 @@
     "failedToParse": "無法剖析文件",
     "linkRemoved": "已移除連結",
     "linkCopied": "已將連結複製到剪貼簿",
+    "pasteFailed": "無法完成貼上。未做任何變更。",
     "failedToSave": "無法儲存文件",
     "documentInput": "文件輸入",
     "documentPreview": "文件預覽",
@@ -795,6 +801,8 @@
     "pageLabel": "第 {number} 頁",
     "headerLabel": "頁首",
     "footerLabel": "頁尾",
+    "chartNoData": "無資料",
+    "pictureName": "圖片",
     "selected": "已選取",
     "selectionCleared": "已清除選取範圍",
     "commentedText": "已加註解的文字",

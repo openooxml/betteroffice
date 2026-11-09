@@ -52,6 +52,7 @@
     "decreaseFontSize": "Giảm cỡ phông",
     "increaseFontSize": "Tăng cỡ phông",
     "underline": "Gạch chân",
+    "strikethrough": "Gạch ngang",
     "more": "Thêm",
     "fillColor": "Màu tô",
     "noFill": "Không tô",
@@ -91,6 +92,12 @@
     "fallbackTitle": "Trang chiếu {number}",
     "canvasLabel": "Trang chiếu {current} / {total}",
     "canvasLabelWithSelection": "Trang chiếu {current} / {total}; đối tượng đã chọn {name}"
+  },
+  "a11y": {
+    "chartNoData": "Không có dữ liệu",
+    "slideWithTitle": "Trang chiếu {current} / {total}: {title}",
+    "objectSelected": "Đã chọn {name}",
+    "editingText": "Đang chỉnh sửa {name}"
   },
   "editor": {
     "appLabel": "Trình chỉnh sửa trang chiếu",
@@ -156,6 +163,17 @@
     "stalePreview": "Bản xem trước này dùng trang chiếu đã cập nhật. Việc áp dụng sẽ ghi đè các đối tượng đã thay đổi.",
     "geometry": "Vị trí và kích cỡ (x, y, chiều rộng, chiều cao)",
     "geometryValues": "{before} → {after} pt",
+    "layoutChanged": "Đã thay đổi bố cục",
+    "backgroundChanged": "Đã thay đổi nền",
+    "rowInserted": "Đã chèn hàng",
+    "rowDeleted": "Đã xóa hàng",
+    "columnInserted": "Đã chèn cột",
+    "columnDeleted": "Đã xóa cột",
+    "broughtToFront": "Đưa lên trên cùng",
+    "sentToBack": "Đưa xuống dưới cùng",
+    "broughtForward": "Đưa lên một lớp",
+    "sentBackward": "Đưa xuống một lớp",
+    "zOrderChanged": "Đã đổi thứ tự xếp chồng",
     "appearance": "Đã thay đổi diện mạo hoặc định dạng văn bản",
     "changedAgain": "Đối tượng lại thay đổi. Hãy xem lại bản xem trước đã làm mới trước khi áp dụng.",
     "canvasTitle": "Thay đổi trên trang chiếu này",
@@ -168,7 +186,14 @@
     "canvasStale": "Đối tượng đã thay đổi. Hãy mở Chi tiết xem xét để kiểm tra bản xem trước đã cập nhật trước khi áp dụng.",
     "previousPosition": "Trước",
     "proposedPosition": "Đã đề xuất",
-    "loadingDiff": "Đang tải thay đổi…"
+    "loadingDiff": "Đang tải thay đổi…",
+    "slideStrip": null,
+    "previewSlide": null,
+    "insertedShape": null,
+    "deletedShape": null,
+    "insertedSlide": null,
+    "deletedSlide": null,
+    "movedFrom": null
   },
   "commands": {
     "moreControls": "Điều khiển khác",
@@ -212,8 +237,25 @@
       "permissionDenied": "Ứng dụng chủ chưa cho phép plugin này dùng lệnh này.",
       "unsupportedPolicy": "Plugin chưa thể chạy lệnh này. Hãy dùng một đợt chỉnh sửa thay thế.",
       "pluginUnavailable": "Plugin không còn hoạt động.",
-      "aborted": "Hành động của plugin đã bị hủy trước khi lệnh chạy."
-    }
+      "aborted": "Hành động của plugin đã bị hủy trước khi lệnh chạy.",
+      "clipboardUnavailable": "Không thể truy cập bảng tạm hoặc quyền truy cập đã bị từ chối.",
+      "tableRequired": "Trước tiên, hãy đặt con trỏ vào một ô trong bảng.",
+      "lastSlide": "Không thể xóa trang chiếu cuối cùng."
+    },
+    "cut": "Cắt",
+    "copy": "Sao chép",
+    "paste": "Dán",
+    "pastePlainText": "Dán dưới dạng văn bản thuần",
+    "insert": "Chèn",
+    "delete": "Xóa",
+    "deleteTable": "Xóa bảng",
+    "duplicateSlide": "Nhân đôi trang chiếu",
+    "insertRowsAbove": "Chèn hàng bên trên",
+    "insertRowsBelow": "Chèn hàng bên dưới",
+    "insertColumnsLeft": "Chèn cột bên trái",
+    "insertColumnsRight": "Chèn cột bên phải",
+    "deleteRows": "Xóa hàng",
+    "deleteColumns": "Xóa cột"
   },
   "plugins": {
     "toolbarGroup": "Plugin",
@@ -225,5 +267,20 @@
     "label": "Cộng tác viên",
     "moreCollaborators": "{count, plural, other {# cộng tác viên nữa}}",
     "moreSelections": "+{count, plural, other {# lựa chọn}}"
+  },
+  "contextMenu": {
+    "text": "Menu văn bản",
+    "shape": "Menu hình dạng",
+    "table": "Menu bảng",
+    "slide": "Menu trang chiếu"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "delete": "Del",
+    "escape": "Esc",
+    "pageup": "Page Up",
+    "pagedown": "Page Down"
   }
 }

@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { BATCH_RUNS, LABEL, allocate, busyHosted, hostedJobs, parseGroups, route, share } from './ci-route.mjs';
+import { BATCH_RUNS, LABEL, ROUTER, allocate, busyHosted, hostedJobs, parseGroups, route, share } from './ci-route.mjs';
 
 const script = fileURLToPath(new URL('./ci-route.mjs', import.meta.url));
 const REPOSITORY = 'openooxml/betteroffice';
@@ -62,7 +62,7 @@ describe('runner routing', () => {
     expect(allocate(groups, 0)).toEqual({ packages: '', python: '', package_tests: '', rust: '' });
   });
 
-  test('only queued and running jobs on a single GitHub-hosted label count', () => {
+  test('only queued and running jobs on a single GitHub-hosted label count, routers excepted', () => {
     expect(
       hostedJobs([
         job('queued', 'ubuntu-latest'),
@@ -72,6 +72,8 @@ describe('runner routing', () => {
         job('in_progress', 'kyora-8x8'),
         { status: 'queued', labels: ['self-hosted', 'linux'] },
         { status: 'queued' },
+        { name: ROUTER, status: 'in_progress', labels: ['ubuntu-latest'] },
+        { name: ROUTER, status: 'queued', labels: ['ubuntu-latest'] },
       ])
     ).toBe(3);
   });

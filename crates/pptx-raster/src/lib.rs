@@ -6,13 +6,13 @@ compile_error!("betteroffice-pptx-raster is server-side only");
 
 mod blur;
 mod font;
-mod svg;
+use ooxml_raster::svg;
 
 /// Entry points for the fuzz targets in `fuzz/`; not a stable API.
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
 pub mod fuzzing {
-    pub use crate::svg::{SvgImage, parse as parse_svg};
+    pub use ooxml_raster::svg::{SvgImage, parse as parse_svg};
 
     /// Decodes `bytes` as a picture on a slide with `pixels` of its image
     /// budget left, as a slide render would, returning the decoded size.
@@ -21,6 +21,7 @@ pub mod fuzzing {
         let mut budget = crate::ImageBudget {
             pixels: crate::MAX_SLIDE_IMAGE_PIXELS - pixels,
             bytes: crate::MAX_SLIDE_IMAGE_BYTES - pixels * 8,
+            work: 0,
         };
         let image = budget.decode(bytes, &[])?;
         Some((image.pixmap.width(), image.pixmap.height()))
@@ -45,6 +46,7 @@ use std::io::Cursor;
 use std::sync::Arc;
 
 use ooxml_drawingml::GeometryPathCommand;
+use ooxml_raster::encode_png;
 use ooxml_text::{FontId, FontStore};
 use pptx_render::{
     GradientType, ImageCrop, ImageDestination, ImageTile, Paint as SlidePaint, Primitive,
@@ -68,6 +70,9 @@ pub const MAX_SLIDE_DIM: u32 = 16_384;
 pub const MAX_SLIDE_PIXELS: u64 = 16_777_216;
 /// One decoded image, at twice the surface a slide may allocate.
 pub const MAX_IMAGE_PIXELS: u64 = 33_554_432;
+/// Render work all of one slide's SVG and metafile pictures may spend
+/// together: twice what one picture may, about two seconds.
+pub const MAX_SLIDE_SVG_WORK: u64 = 2 * MAX_SVG_RENDER_WORK;
 /// Every image decoded for one slide, at four times that surface.
 pub const MAX_SLIDE_IMAGE_PIXELS: u64 = 67_108_864;
 /// One decoded image's source buffer plus the pixmap it converts to, at
@@ -152,6 +157,9 @@ pub struct RenderedSlide {
     /// Images whose bytes were missing, undecodable, or over budget. These are
     /// skipped and counted rather than failing the render.
     pub skipped_images: usize,
+    /// The skipped images that named a picture part, leaving out frames with
+    /// no image to draw.
+    pub unavailable_images: usize,
 }
 
 impl std::fmt::Debug for RenderedSlide {
@@ -161,6 +169,7 @@ impl std::fmt::Debug for RenderedSlide {
             .field("height", &self.height)
             .field("bytes", &self.bytes.len())
             .field("skipped_images", &self.skipped_images)
+            .field("unavailable_images", &self.unavailable_images)
             .finish()
     }
 }
@@ -246,6 +255,7 @@ pub fn render_slide_shared(
         asset_hashes: HashMap::new(),
         shape_clip_cache: None,
         skipped_images: 0,
+        unavailable_images: 0,
         shadow_pixels: 0,
         max_shadow_pixels: options.max_shadow_pixels,
     };
@@ -253,12 +263,14 @@ pub fn render_slide_shared(
         painter.paint(primitive, base, None)?;
     }
     let skipped_images = painter.skipped_images;
+    let unavailable_images = painter.unavailable_images;
 
     Ok(RenderedSlide {
         bytes: encode_png(pixmap, width, height)?,
         width,
         height,
         skipped_images,
+        unavailable_images,
     })
 }
 
@@ -333,22 +345,6 @@ fn surface_dimension(value: f32, scale: f32, label: &str) -> Result<u32, String>
     Ok((scaled.ceil() as u32).max(1))
 }
 
-fn encode_png(pixmap: Pixmap, width: u32, height: u32) -> Result<Vec<u8>, String> {
-    let pixels = pixmap.take_demultiplied();
-    let mut data = Vec::new();
-    {
-        let mut encoder = png::Encoder::new(&mut data, width, height);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        encoder.set_compression(png::Compression::Fast);
-        let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
-        writer
-            .write_image_data(&pixels)
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(data)
-}
-
 struct Painter<'a, 'b> {
     pixmap: &'a mut Pixmap,
     scale: f32,
@@ -361,6 +357,7 @@ struct Painter<'a, 'b> {
     asset_hashes: HashMap<String, u64>,
     shape_clip_cache: Option<ShapeClipCache>,
     skipped_images: usize,
+    unavailable_images: usize,
 }
 
 struct ShapeClipCache {
@@ -692,7 +689,10 @@ impl Painter<'_, '_> {
                         decoded = Some((source, fit));
                     }
                 }
-                None => self.skipped_images += 1,
+                None => {
+                    self.skipped_images += 1;
+                    self.unavailable_images += usize::from(asset_id.is_some());
+                }
             }
         }
         if let Some(shadow) = shadow {
@@ -1161,31 +1161,7 @@ fn frame_rect(x: f32, y: f32, w: f32, h: f32) -> Result<Rect, String> {
 /// scales by the box before it is placed — the same mapping `buildPath` does in
 /// the canvas backend.
 fn geometry_path(commands: &[GeometryPathCommand], x: f32, y: f32, w: f32, h: f32) -> Option<Path> {
-    if commands.is_empty() {
-        return None;
-    }
-    let px = |value: f64| x + value as f32 * w;
-    let py = |value: f64| y + value as f32 * h;
-    let mut builder = PathBuilder::new();
-    for command in commands {
-        match *command {
-            GeometryPathCommand::Move { x, y } => builder.move_to(px(x), py(y)),
-            GeometryPathCommand::Line { x, y } => builder.line_to(px(x), py(y)),
-            GeometryPathCommand::Quad { cpx, cpy, x, y } => {
-                builder.quad_to(px(cpx), py(cpy), px(x), py(y))
-            }
-            GeometryPathCommand::Cubic {
-                cp1x,
-                cp1y,
-                cp2x,
-                cp2y,
-                x,
-                y,
-            } => builder.cubic_to(px(cp1x), py(cp1y), px(cp2x), py(cp2y), px(x), py(y)),
-            GeometryPathCommand::Close => builder.close(),
-        }
-    }
-    builder.finish()
+    ooxml_raster::path_from_commands(commands, |px, py| (x + px as f32 * w, y + py as f32 * h))
 }
 
 fn shader_paint(
@@ -1331,7 +1307,7 @@ pub struct ImageCache {
     retained: u64,
     cap: u64,
     metafiles: pptx_edit::MetafileSvgCache,
-    fontdb: Option<(u64, usize, Arc<resvg::usvg::fontdb::Database>)>,
+    fontdb: Option<(u64, usize, Arc<svg::usvg::fontdb::Database>)>,
 }
 
 type ImageKey = (u64, u64);
@@ -1403,8 +1379,10 @@ impl ImageCache {
             } else {
                 None
             };
-            let image = svg::parse_metafile(&svg, left, fontdb).ok()?;
+            let work_left = MAX_SLIDE_SVG_WORK.saturating_sub(budget.work);
+            let image = svg::parse_metafile_within(&svg, left, work_left, fontdb).ok()?;
             budget.charge(image.pixels(), image.pixels().saturating_mul(8))?;
+            budget.work += image.work();
             let intrinsic = image.intrinsic();
             let (data, size) = image.render().ok()?;
             decoded_image(data, size, intrinsic, effects)?
@@ -1415,7 +1393,7 @@ impl ImageCache {
         Some(image)
     }
 
-    fn fontdb_for(&mut self, fonts: &FontStore) -> Arc<resvg::usvg::fontdb::Database> {
+    fn fontdb_for(&mut self, fonts: &FontStore) -> Arc<svg::usvg::fontdb::Database> {
         let generation = (fonts.id(), fonts.font_count());
         if let Some((id, count, fontdb)) = &self.fontdb
             && (*id, *count) == generation
@@ -1513,6 +1491,7 @@ fn effects_fingerprint(effects: &[pptx_render::ImageEffect]) -> u64 {
 struct ImageBudget {
     pixels: u64,
     bytes: u64,
+    work: u64,
 }
 
 /// Decoder limits holding one image to what the slide may still spend on
@@ -1557,13 +1536,21 @@ impl ImageBudget {
     fn decode_raster(&mut self, bytes: &[u8]) -> Option<(Vec<u8>, IntSize)> {
         use image::ImageDecoder as _;
 
-        let mut decoder = image::ImageReader::new(Cursor::new(bytes))
+        let bytes = ooxml_raster::png_with_end(bytes);
+        let reader = image::ImageReader::new(Cursor::new(bytes.as_ref()))
             .with_guessed_format()
-            .ok()?
-            .into_decoder()
             .ok()?;
+        let tiff = reader.format() == Some(image::ImageFormat::Tiff);
+        let mut decoder = match reader.into_decoder() {
+            Ok(decoder) => decoder,
+            Err(_) if tiff => return self.transcode_tiff(&bytes),
+            Err(_) => return None,
+        };
         let (declared_width, declared_height) = decoder.dimensions();
         let declared = u64::from(declared_width) * u64::from(declared_height);
+        if declared > MAX_IMAGE_PIXELS {
+            return self.decode_reduced(&bytes, declared_width, declared_height);
+        }
         let cost = decoder
             .total_bytes()
             .saturating_add(declared.saturating_mul(4));
@@ -1583,6 +1570,43 @@ impl ImageBudget {
         Some((decoded.into_rgba8().into_raw(), size))
     }
 
+    /// A TIFF `image` cannot open, such as CMYK with alpha, through the decoder
+    /// the canvas engine uses. The slide is charged before any pixels decode.
+    fn transcode_tiff(&mut self, bytes: &[u8]) -> Option<(Vec<u8>, IntSize)> {
+        let (pixels, cost) = ooxml_drawingml::media::tiff_transcode_cost(bytes)?;
+        self.charge(pixels, cost)?;
+        let png = ooxml_drawingml::media::decode_tiff_png(bytes).ok()?;
+        let rgba = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+            .ok()?
+            .into_rgba8();
+        let size = IntSize::from_wh(rgba.width(), rgba.height())?;
+        Some((rgba.into_raw(), size))
+    }
+
+    /// A JPEG or PNG past [`MAX_IMAGE_PIXELS`], decoded at a reduced size, or
+    /// `None` when no reduction fits. The slide is charged the source pixels the
+    /// decode reads and the bytes it may hold, before it allocates.
+    fn decode_reduced(
+        &mut self,
+        bytes: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Option<(Vec<u8>, IntSize)> {
+        let (pixels, cost) =
+            ooxml_raster::downscale::reduced_cost(bytes, width, height, MAX_IMAGE_PIXELS)?;
+        if self.pixels + pixels > MAX_SLIDE_IMAGE_PIXELS
+            || cost > MAX_IMAGE_BYTES
+            || self.bytes + cost > MAX_SLIDE_IMAGE_BYTES
+        {
+            return None;
+        }
+        self.pixels += pixels;
+        self.bytes += cost;
+        let (data, width, height) =
+            ooxml_raster::downscale::decode_reduced(bytes, MAX_IMAGE_PIXELS)?;
+        Some((data, IntSize::from_wh(width, height)?))
+    }
+
     /// The same, from an SVG the sandbox accepts, with its intrinsic size,
     /// supersampled only as far as the budget left allows. The charge covers
     /// the raster and every layer the render stacks on it. A refusal is an
@@ -1591,9 +1615,11 @@ impl ImageBudget {
         let left = (MAX_SLIDE_IMAGE_PIXELS.saturating_sub(self.pixels))
             .min(MAX_SLIDE_IMAGE_BYTES.saturating_sub(self.bytes) / 8)
             .min(MAX_IMAGE_PIXELS);
-        let image = svg::parse_within(bytes, left).ok()?;
+        let work_left = MAX_SLIDE_SVG_WORK.saturating_sub(self.work);
+        let image = svg::parse_within_work(bytes, left, work_left).ok()?;
         let pixels = image.pixels();
         self.charge(pixels, pixels.saturating_mul(8))?;
+        self.work += image.work();
         let (data, size) = image.render().ok()?;
         Some((data, size, image.intrinsic()))
     }
@@ -1620,11 +1646,7 @@ fn decoded_image(
     effects: &[pptx_render::ImageEffect],
 ) -> Option<DecodedImage> {
     pptx_render::apply_image_effects(&mut data, effects);
-    let (pixels, _) = data.as_chunks_mut::<4>();
-    for pixel in pixels {
-        let color = ColorU8::from_rgba(pixel[0], pixel[1], pixel[2], pixel[3]).premultiply();
-        *pixel = [color.red(), color.green(), color.blue(), color.alpha()];
-    }
+    ooxml_raster::premultiply_rgba(&mut data);
     Some(DecodedImage {
         pixmap: Arc::new(Pixmap::from_vec(data, size)?),
         intrinsic,
@@ -1638,31 +1660,9 @@ pub(crate) fn parse_color(value: &str) -> Result<Color, String> {
         return Ok(Color::TRANSPARENT);
     }
     if let Some(hex) = value.strip_prefix('#') {
-        return parse_hex_color(hex).ok_or_else(|| format!("bad color: {value}"));
+        return ooxml_raster::parse_hex_color(hex).ok_or_else(|| format!("bad color: {value}"));
     }
     Err(format!("bad color: {value}"))
-}
-
-fn parse_hex_color(hex: &str) -> Option<Color> {
-    let expanded;
-    let hex = match hex.len() {
-        3 | 4 => {
-            expanded = hex
-                .chars()
-                .flat_map(|character| [character, character])
-                .collect::<String>();
-            expanded.as_str()
-        }
-        6 | 8 => hex,
-        _ => return None,
-    };
-    let byte = |index: usize| u8::from_str_radix(hex.get(index..index + 2)?, 16).ok();
-    Some(Color::from_rgba8(
-        byte(0)?,
-        byte(2)?,
-        byte(4)?,
-        if hex.len() == 8 { byte(6)? } else { 255 },
-    ))
 }
 
 #[cfg(test)]
@@ -1742,6 +1742,7 @@ mod tests {
             });
             let resources = RenderResources::new(&fonts, &images);
             let rendered = render_slide(&list, &resources, &RenderOptions::default()).unwrap();
+            assert_eq!(rendered.unavailable_images, 0, "{kind}");
             let pixmap = Pixmap::decode_png(&rendered.bytes).unwrap();
             let left = pixmap.pixel(30, 40).unwrap().demultiply();
             let right = pixmap.pixel(210, 40).unwrap().demultiply();
@@ -1757,6 +1758,8 @@ mod tests {
             height,
             background: None,
             primitives: Vec::new(),
+            alt_text: Default::default(),
+            title_shape: None,
         }
     }
 
@@ -2881,6 +2884,7 @@ mod tests {
                         label: String::new(),
                         primitives: vec![image],
                         transform: SlideTransform::default(),
+                        data: None,
                     }
                 } else {
                     image
@@ -2963,6 +2967,27 @@ mod tests {
             transform: SlideTransform::default(),
         });
         list
+    }
+
+    #[test]
+    fn a_png_that_ends_without_its_closing_chunk_paints() {
+        let fonts = FontStore::new();
+        let png = split_source_png();
+        assert_eq!(&png[png.len() - 8..png.len() - 4], b"IEND");
+        let cut = &png[..png.len() - 12];
+        let images = AssetMap::from([("whole.png", png.as_slice()), ("cut.png", cut)]);
+        let render = |asset: &str| {
+            render_slide(
+                &picture_on_a_strip(asset, ImageCrop::default()),
+                &resources(&fonts, &images),
+                &RenderOptions::default(),
+            )
+            .expect("render")
+        };
+        let whole = render("whole.png");
+        let cut = render("cut.png");
+        assert_eq!(cut.skipped_images, 0);
+        assert_eq!(cut.bytes, whole.bytes);
     }
 
     #[test]
@@ -3072,14 +3097,14 @@ mod tests {
                 " ".repeat(MAX_SVG_BYTES)
             )
             .into_bytes(),
-            svg::tests::marker_chain(6, 12).into_bytes(),
+            svg::fixtures::marker_chain(6, 12).into_bytes(),
             br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><marker id="m" markerWidth="1e30" markerHeight="1e30" viewBox="0 0 1 1"><rect width="1" height="1"/></marker><path d="M0 0L5 5" stroke="#000" stroke-width="1e30" marker-end="url(#m)"/></svg>"##.to_vec(),
-            svg::tests::use_fan_out(10, 10).into_bytes(),
-            svg::tests::use_chain(256).into_bytes(),
-            svg::tests::document(r##"<g id="a"><use href="#b"/></g><g id="b"><use href="#a"/></g>"##).into_bytes(),
-            svg::tests::document(&fills).into_bytes(),
-            svg::tests::opacity_nest(MAX_SVG_LAYER_DEPTH + 1).into_bytes(),
-            svg::tests::document(r##"<rect width="96" height="96" fill="URL(http://example.invalid/p.svg#g)"/>"##).into_bytes(),
+            svg::fixtures::use_fan_out(10, 10).into_bytes(),
+            svg::fixtures::use_chain(256).into_bytes(),
+            svg::fixtures::document(r##"<g id="a"><use href="#b"/></g><g id="b"><use href="#a"/></g>"##).into_bytes(),
+            svg::fixtures::document(&fills).into_bytes(),
+            svg::fixtures::opacity_nest(MAX_SVG_LAYER_DEPTH + 1).into_bytes(),
+            svg::fixtures::document(r##"<rect width="96" height="96" fill="URL(http://example.invalid/p.svg#g)"/>"##).into_bytes(),
         ];
         for (index, bytes) in refused.iter().enumerate() {
             let images = AssetMap::from([("icon.svg", bytes.as_slice())]);
@@ -3238,7 +3263,7 @@ mod tests {
     fn a_missing_asset_is_skipped_and_counted() {
         let fonts = FontStore::new();
         let images = AssetMap::default();
-        for asset_id in [None, Some("ppt/media/image1.png")] {
+        for (asset_id, unavailable) in [(None, 0), (Some("ppt/media/image1.png"), 1)] {
             let mut list = empty_list(100.0, 100.0);
             list.primitives.push(Primitive::Image {
                 destination: None,
@@ -3266,6 +3291,10 @@ mod tests {
             )
             .expect("render");
             assert_eq!(rendered.skipped_images, 1, "asset_id: {asset_id:?}");
+            assert_eq!(
+                rendered.unavailable_images, unavailable,
+                "asset_id: {asset_id:?}"
+            );
         }
     }
 
@@ -3329,6 +3358,7 @@ mod tests {
                 transform: SlideTransform::default(),
             }],
             transform: SlideTransform::default(),
+            data: None,
         });
         let rendered = render_slide(
             &list,
@@ -3404,6 +3434,7 @@ mod tests {
         let mut budget = ImageBudget {
             pixels: MAX_SLIDE_IMAGE_PIXELS - 16,
             bytes: MAX_SLIDE_IMAGE_BYTES - 1024,
+            work: 0,
         };
         assert!(budget.decode_raster(&gif).is_none());
 
@@ -3411,5 +3442,199 @@ mod tests {
         let mut budget = ImageBudget::default();
         let (_, size) = budget.decode_raster(&gif).expect("ordinary gif decodes");
         assert_eq!((size.width(), size.height()), (64, 64));
+    }
+
+    /// An uncompressed 8-bit CMYK TIFF with an alpha sample per pixel.
+    fn cmyka_tiff(width: u16, height: u16, samples: &[u8]) -> Vec<u8> {
+        cmyka_tiff_tagged(width, height, samples, 1, 5, &[])
+    }
+
+    fn cmyka_tiff_tagged(
+        width: u16,
+        height: u16,
+        samples: &[u8],
+        compression: u32,
+        per_pixel: u16,
+        extra: &[(u16, u16, u32, u32)],
+    ) -> Vec<u8> {
+        let count = 10 + extra.len();
+        let bits_offset = 8 + 2 + count * 12 + 4;
+        let extras = per_pixel - 4;
+        let extras_offset = bits_offset + usize::from(per_pixel) * 2;
+        let data_offset = extras_offset + usize::from(extras) * 2;
+        let mut entries: Vec<(u16, u16, u32, u32)> = vec![
+            (256, 3, 1, u32::from(width)),
+            (257, 3, 1, u32::from(height)),
+            (258, 3, u32::from(per_pixel), bits_offset as u32),
+            (259, 3, 1, compression),
+            (262, 3, 1, 5),
+            (273, 4, 1, data_offset as u32),
+            (277, 3, 1, u32::from(per_pixel)),
+            (278, 3, 1, u32::from(height)),
+            (279, 4, 1, samples.len() as u32),
+            (
+                338,
+                3,
+                u32::from(extras),
+                if extras == 1 { 2 } else { extras_offset as u32 },
+            ),
+        ];
+        entries.extend_from_slice(extra);
+        entries.sort_by_key(|entry| entry.0);
+        let mut tiff = b"II*\0\x08\0\0\0".to_vec();
+        tiff.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        for (tag, kind, count, value) in entries {
+            tiff.extend_from_slice(&tag.to_le_bytes());
+            tiff.extend_from_slice(&kind.to_le_bytes());
+            tiff.extend_from_slice(&count.to_le_bytes());
+            tiff.extend_from_slice(&value.to_le_bytes());
+        }
+        tiff.extend_from_slice(&0u32.to_le_bytes());
+        for _ in 0..per_pixel {
+            tiff.extend_from_slice(&8u16.to_le_bytes());
+        }
+        for _ in 0..extras {
+            tiff.extend_from_slice(&2u16.to_le_bytes());
+        }
+        tiff.extend_from_slice(samples);
+        tiff
+    }
+
+    /// A valid 2x1 8-bit palette TIFF.
+    fn palette_tiff() -> Vec<u8> {
+        let colormap_offset = 8 + 2 + 8 * 12 + 4;
+        let data_offset = colormap_offset + 768 * 2;
+        let entries: [(u16, u16, u32, u32); 8] = [
+            (256, 3, 1, 2),
+            (257, 3, 1, 1),
+            (258, 3, 1, 8),
+            (259, 3, 1, 1),
+            (262, 3, 1, 3),
+            (273, 4, 1, data_offset as u32),
+            (279, 4, 1, 2),
+            (320, 3, 768, colormap_offset as u32),
+        ];
+        let mut tiff = b"II*\0\x08\0\0\0".to_vec();
+        tiff.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        for (tag, kind, count, value) in entries {
+            tiff.extend_from_slice(&tag.to_le_bytes());
+            tiff.extend_from_slice(&kind.to_le_bytes());
+            tiff.extend_from_slice(&count.to_le_bytes());
+            tiff.extend_from_slice(&value.to_le_bytes());
+        }
+        tiff.extend_from_slice(&0u32.to_le_bytes());
+        tiff.extend_from_slice(&[0; 768 * 2]);
+        tiff.extend_from_slice(&[0, 1]);
+        tiff
+    }
+
+    #[test]
+    fn a_cmyk_tiff_with_alpha_draws_with_the_colors_the_canvas_engine_gives_it() {
+        let tiff = cmyka_tiff(2, 1, &[255, 0, 0, 0, 255, 0, 0, 0, 255, 128]);
+        assert!(
+            image::ImageReader::new(Cursor::new(&tiff))
+                .with_guessed_format()
+                .unwrap()
+                .into_decoder()
+                .is_err()
+        );
+        let mut budget = ImageBudget::default();
+        let (rgba, size) = budget.decode_raster(&tiff).expect("decodes");
+        assert_eq!((size.width(), size.height()), (2, 1));
+        assert_eq!(rgba, [0, 255, 255, 255, 0, 0, 0, 128]);
+        assert_eq!(budget.pixels, 2);
+        assert_eq!(budget.bytes, 2 * 10 + 2 * 16);
+    }
+
+    #[test]
+    fn a_transcoded_tiff_is_refused_when_the_slide_has_no_budget_left() {
+        let tiff = cmyka_tiff(2, 1, &[0; 10]);
+        let mut budget = ImageBudget {
+            pixels: MAX_SLIDE_IMAGE_PIXELS - 1,
+            bytes: 0,
+            work: 0,
+        };
+        assert!(budget.decode_raster(&tiff).is_none());
+        assert_eq!(budget.pixels, MAX_SLIDE_IMAGE_PIXELS - 1);
+        assert_eq!(budget.bytes, 0);
+    }
+
+    #[test]
+    fn a_tiff_whose_decode_the_charge_cannot_bound_is_never_transcoded() {
+        for (index, tiff) in [
+            cmyka_tiff_tagged(2, 1, &[0; 10], 7, 5, &[]),
+            cmyka_tiff_tagged(2, 1, &[0; 10], 6, 5, &[]),
+            cmyka_tiff_tagged(
+                2,
+                1,
+                &[0; 10],
+                1,
+                5,
+                &[(322, 4, 1, 100_000_000), (323, 4, 1, 1)],
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(
+                ooxml_drawingml::media::tiff_transcode_cost(&tiff),
+                None,
+                "case {index}"
+            );
+            let mut budget = ImageBudget::default();
+            assert!(budget.decode_raster(&tiff).is_none(), "case {index}");
+            assert_eq!((budget.pixels, budget.bytes), (0, 0), "case {index}");
+        }
+    }
+
+    #[test]
+    fn a_palette_tiff_is_not_transcoded_since_its_color_map_is_unbounded() {
+        assert_eq!(
+            ooxml_drawingml::media::tiff_transcode_cost(&palette_tiff()),
+            None
+        );
+    }
+
+    #[test]
+    fn a_tiff_with_more_samples_than_any_color_the_transcoder_converts_costs_nothing() {
+        let tiff = cmyka_tiff_tagged(2, 1, &[0; 12], 1, 6, &[]);
+        assert_eq!(ooxml_drawingml::media::tiff_transcode_cost(&tiff), None);
+    }
+
+    #[test]
+    fn a_tiff_neither_decoder_can_read_stays_unavailable() {
+        let mut truncated = cmyka_tiff(2, 1, &[0; 10]);
+        truncated.truncate(truncated.len() - 4);
+        assert!(ImageBudget::default().decode_raster(&truncated).is_none());
+        assert!(
+            ImageBudget::default()
+                .decode_raster(b"II*\0garbage")
+                .is_none()
+        );
+        assert!(
+            ImageBudget::default()
+                .decode_raster(b"not an image")
+                .is_none()
+        );
+    }
+}
+
+#[cfg(test)]
+mod shared_helper_tests {
+    use super::*;
+
+    #[test]
+    fn color_keeps_hex_and_transparent_grammar() {
+        for value in ["#abc", "#abcd", "#abcdef", "#abcdef01", "TRANSPARENT"] {
+            assert!(parse_color(value).is_ok());
+        }
+        for value in ["rgba(1,2,3,0.5)", "rgb(1,2,3)", "#ggg", "red"] {
+            assert_eq!(parse_color(value), Err(format!("bad color: {value}")));
+        }
+    }
+
+    #[test]
+    fn empty_geometry_stays_absent() {
+        assert!(geometry_path(&[], 1.0, 2.0, 3.0, 4.0).is_none());
     }
 }

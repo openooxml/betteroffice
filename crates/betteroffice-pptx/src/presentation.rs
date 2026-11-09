@@ -122,6 +122,33 @@ impl Presentation {
             proposal: preview.proposal,
             snapshot: preview.snapshot,
             text_changes: preview.text_changes,
+            shape_changes: preview.shape_changes,
+            frame: rendered.display_list,
+        })
+    }
+
+    pub fn proposal_slide_strip(&self, id: &str) -> Result<Vec<crate::ProposalStripEntry>> {
+        Ok(self.session.proposal_slide_strip(id)?)
+    }
+
+    pub fn layout_proposal_diff_slide_by_id(
+        &self,
+        id: &str,
+        slide_id: &str,
+    ) -> Result<crate::ProposalDiffSlide> {
+        let preview = self
+            .session
+            .preview_proposal_diff_slide_by_id(id, slide_id)?;
+        #[cfg(feature = "fonts")]
+        self.prepare_fonts(self.session.package(), std::slice::from_ref(&preview.scope))?;
+        let rendered = self
+            .renderer()
+            .layout_scoped_slide(self.session.package(), &preview.scope)?;
+        Ok(crate::ProposalDiffSlide {
+            proposal: preview.proposal,
+            snapshot: preview.snapshot,
+            text_changes: preview.text_changes,
+            shape_changes: preview.shape_changes,
             frame: rendered.display_list,
         })
     }

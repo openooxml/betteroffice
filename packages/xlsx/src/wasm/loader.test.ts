@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import JSZip from 'jszip';
 import type { XlsxTextMatch, XlsxTextSearchOptions } from '../index';
+import { engineKind } from './engine';
 
 import {
   StaleProposalError,
@@ -148,6 +149,40 @@ describe('wasm loader', () => {
       const position = handle.cellPosition(0, 7, 2);
       expect(position.x).toBeGreaterThan(0);
       expect(position.y).toBeGreaterThan(0);
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it('keeps and reports calls to unknown functions by name', async () => {
+    const zip = await JSZip.loadAsync(sampleBytes());
+    zip.file('xl/worksheets/sheet1.xml', '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1">'
+      + '<c r="A1"><f>IFERROR(REPRO_UNKNOWN_FUNCTION(1),0)</f><v>42</v></c>'
+      + '<c r="B1"><f>A1*2</f><v>9</v></c>'
+      + '<c r="C1"><f>IFERROR(TYPO(1),0)</f></c></row></sheetData></worksheet>');
+    const bytes = await zip.generateAsync({ type: 'uint8array' });
+    const handle = openWorkbook(bytes, { calculation: { nowSerial: 45000, randSeed: 1 } });
+    try {
+      const reported = [
+        { address: 'A1', functions: ['REPRO_UNKNOWN_FUNCTION'] },
+        { address: 'B1', functions: ['REPRO_UNKNOWN_FUNCTION'] },
+        { address: 'C1', functions: ['TYPO'] },
+      ];
+      expect(handle.calculationStatus().unevaluatedCells).toEqual(reported);
+      expect(handle.recalculate().unevaluatedCells).toEqual(reported);
+      const read = handle.readCells({ ranges: [{ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1:C1' } }] });
+      if (!read.ok) throw new Error('read refused');
+      expect(read.ranges[0].cells[0].map((cell) => cell.displayText)).toEqual(['42', '9', '0']);
+      expect(read.calculation.unevaluatedCells?.map(({ a1, functions }) => ({ address: a1, functions })))
+        .toEqual(reported);
+      handle.editCell(0, 2, 0, '=SUMM(1,2)');
+      const typed = handle.readCells({ ranges: [{ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A3' } }] });
+      if (!typed.ok) throw new Error('read refused');
+      expect(typed.ranges[0].cells[0][0].displayText).toBe('#NAME?');
+      expect(handle.calculationStatus().unevaluatedCells).toEqual([
+        ...reported,
+        { address: 'A3', functions: ['SUMM'] },
+      ]);
     } finally {
       handle.dispose();
     }
@@ -380,6 +415,34 @@ describe('wasm loader', () => {
     }
   });
 
+  it('refuses a row insert inside a multi-level chart range before it applies', async () => {
+    const zip = await JSZip.loadAsync(chartBytes());
+    const chart = await zip.file('xl/charts/chart1.xml')!.async('string');
+    const multiLevel = chart.replace(
+      /<c:cat><c:strRef><c:f>Charts!\$A\$2:\$A\$5<\/c:f>.*?<\/c:strRef><\/c:cat>/,
+      '<c:cat><c:multiLvlStrRef><c:f>Charts!$A$2:$B$5</c:f><c:multiLvlStrCache><c:ptCount val="4"/>'
+        + '<c:lvl><c:pt idx="0"><c:v>12</c:v></c:pt><c:pt idx="1"><c:v>18</c:v></c:pt><c:pt idx="2"><c:v>15</c:v></c:pt><c:pt idx="3"><c:v>24</c:v></c:pt></c:lvl>'
+        + '<c:lvl><c:pt idx="0"><c:v>Q1</c:v></c:pt><c:pt idx="1"><c:v>Q2</c:v></c:pt><c:pt idx="2"><c:v>Q3</c:v></c:pt><c:pt idx="3"><c:v>Q4</c:v></c:pt></c:lvl>'
+        + '</c:multiLvlStrCache></c:multiLvlStrRef></c:cat>'
+    );
+    expect(multiLevel).not.toBe(chart);
+    zip.file('xl/charts/chart1.xml', multiLevel);
+    const handle = openWorkbook(await zip.generateAsync({ type: 'uint8array' }));
+    try {
+      const saved = handle.save();
+      const history = handle.historyState();
+      expect(() => handle.applyOps([{ type: 'insertRows', sheet: 0, at: 3, count: 1 }])).toThrow(
+        'xl/charts/chart1.xml references cells this edit would move, and it cannot be rewritten'
+      );
+      expect(handle.historyState()).toEqual(history);
+      expect(handle.save()).toEqual(saved);
+      expect(handle.applyOps([{ type: 'insertRows', sheet: 0, at: 10, count: 1 }]).applied).toBe(true);
+      openWorkbook(handle.save()).dispose();
+    } finally {
+      handle.dispose();
+    }
+  });
+
   it('refuses to move a chart pinned to the sheet by an absolute anchor', () => {
     const handle = openWorkbook(chartBytes());
     const viewport = { x: 0, y: 0, width: 800, height: 800 };
@@ -454,13 +517,22 @@ describe('wasm loader', () => {
     expect(() => openWorkbook(new Uint8Array([1, 2, 3]))).toThrow();
   });
 
-  it('renders the fixture viewport to png bytes', () => {
-    expect(isPngExportAvailable()).toBe(true);
+  it('exports PNG natively or rejects without a canvas', async () => {
+    expect(isPngExportAvailable()).toBe(engineKind === 'native');
     const handle = openWorkbook(sampleBytes());
     try {
-      const png = handle.renderPng({ x: 0, y: 0, width: 400, height: 300 });
-      expect(png.length).toBeGreaterThan(100);
-      expect(Array.from(png.subarray(0, 8))).toEqual(PNG_MAGIC);
+      const viewport = { x: 0, y: 0, width: 400, height: 300 };
+      if (engineKind === 'native') {
+        const png = await handle.renderPng({ sheet: 0, viewport });
+        expect(png.length).toBeGreaterThan(100);
+        expect(Array.from(png.subarray(0, 8))).toEqual(PNG_MAGIC);
+      } else {
+        for (const target of [{ sheet: 0, viewport }, { sheet: 0, range: 'A1:B2' }]) {
+          await expect(handle.renderPng(target)).rejects.toMatchObject({
+            name: 'PngExportError', code: 'canvas-unavailable', message: expect.stringContaining('@betteroffice/xlsx-native'),
+          });
+        }
+      }
     } finally {
       handle.dispose();
     }
@@ -664,8 +736,11 @@ describe('wasm loader — proposals', () => {
       const proposal = handle.propose('demo-agent', null, [
         { sheet: 0, row: 6, col: 4, input: '10' },
       ]);
+      expect(proposal.staleTargets).toEqual([]);
+      expect(handle.listProposals()).toEqual([proposal]);
       // mutate the proposal's target cell out from under it.
       handle.editCell(0, 6, 4, '999');
+      expect(handle.listProposals()[0]?.staleTargets).toEqual(['E7']);
 
       let stale: StaleProposalError | null = null;
       try {
@@ -684,6 +759,74 @@ describe('wasm loader — proposals', () => {
       const forced = handle.acceptProposal(proposal.id, { force: true });
       expect(forced.applied).toBe(true);
       expect(handle.cell(0, 6, 4).input).toBe('10');
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  for (const mutation of ['dependent', 'style'] as const) {
+    it.skipIf(!available)(`checks ${mutation} proposal staleness without changing the workbook or proposal`, () => {
+      const handle = openWorkbook(sampleBytes());
+      const events: unknown[] = [];
+      const off = handle.onProposalChange(proposals => { events.push(proposals); });
+      try {
+        handle.editCells(0, [
+          { row: 1, col: 1, input: '120' },
+          { row: 1, col: 2, input: '135' },
+          { row: 1, col: 3, input: '150' },
+          { row: 1, col: 4, input: '=SUM(B2:D2)' },
+        ]);
+        const proposal = handle.propose('Agent', null, [{ sheet: 0, row: 1, col: 1, input: '200' }]);
+        const before = { version: handle.version(), history: handle.historyState(), proposals: handle.listProposals(), vector: handle.encodeStateVector() };
+        expect(handle.isProposalStale(proposal.id)).toBe(false);
+        expect({ version: handle.version(), history: handle.historyState(), proposals: handle.listProposals(), vector: handle.encodeStateVector() }).toEqual(before);
+        if (mutation === 'dependent') handle.editCell(0, 1, 2, '140');
+        else handle.patchRangeStyle(0, 'B2', { bold: true });
+        const stale = { version: handle.version(), history: handle.historyState(), proposals: handle.listProposals(), vector: handle.encodeStateVector() };
+        for (let attempt = 0; attempt < 2; attempt++) {
+          expect(handle.isProposalStale(proposal.id)).toBe(true);
+          expect({ version: handle.version(), history: handle.historyState(), proposals: handle.listProposals(), vector: handle.encodeStateVector() }).toEqual(stale);
+        }
+        expect(events).toHaveLength(1);
+        expect(handle.cell(0, 1, 1).input).toBe('120');
+        expect(() => handle.acceptProposal(proposal.id)).toThrow(StaleProposalError);
+        expect(handle.getProposalStatus(proposal.id)).toBe('pending');
+      } finally { off(); handle.dispose(); }
+    });
+  }
+
+  it.skipIf(!available)('lists rebased proposals after insertRows and stale proposals after deletion', () => {
+    const handle = openWorkbook(sampleBytes());
+    try {
+      handle.setNumberFormat(0, 'F7', 'plainText');
+      const proposal = handle.propose('agent', null, [
+        { sheet: 0, row: 6, col: 4, input: '42' },
+        { sheet: 0, row: 6, col: 5, input: '=A1' },
+        { sheet: 0, row: 6, col: 6, input: '=SUM(' },
+      ]);
+      const before = handle.listProposals()[0]!;
+      expect(before.cells.map((cell) => cell.newText)).toEqual(['42', '=A1', '=SUM(']);
+      for (const cell of before.cells) expect(cell).not.toHaveProperty('input');
+      handle.applyOps([{ type: 'insertRows', sheet: 0, at: 5, count: 2 }]);
+      expect(handle.listProposals()[0]).toMatchObject({
+        id: proposal.id, cells: [
+          { sheet: 0, row: 8, col: 4, a1: 'E9' },
+          { sheet: 0, row: 8, col: 5, a1: 'F9' },
+          { sheet: 0, row: 8, col: 6, a1: 'G9' },
+        ],
+      });
+      const after = handle.listProposals()[0]!;
+      expect(after.cells.map((cell) => cell.newText)).toEqual(before.cells.map((cell) => cell.newText));
+      for (const cell of after.cells) expect(cell).not.toHaveProperty('input');
+      handle.applyOps([{ type: 'deleteRows', sheet: 0, at: 8, count: 1 }]);
+      expect(handle.listProposals()[0]?.cells[0]).toMatchObject({ a1: 'E9', stale: true });
+      expect(() => handle.acceptProposal(proposal.id)).toThrow(StaleProposalError);
+      expect(() => handle.acceptProposal(proposal.id, { force: true })).toThrow(StaleProposalError);
+      handle.undo();
+      handle.acceptProposal(proposal.id);
+      expect(handle.cell(0, 8, 4).input).toBe('42');
+      expect(handle.cell(0, 8, 5)).toMatchObject({ input: "'=A1", isFormula: false });
+      expect(handle.cell(0, 8, 6)).toMatchObject({ input: "'=SUM(", isFormula: false });
     } finally {
       handle.dispose();
     }

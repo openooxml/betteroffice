@@ -310,13 +310,23 @@ fn all_ops() -> Vec<Op> {
             name: "Restored".into(),
             formulas: vec![(sheet, at, cell)],
         },
+        Op::SetTables {
+            tables: vec![xlsx_model::Table {
+                name: "Sales".into(),
+                sheet,
+                range,
+                header_rows: 1,
+                totals_rows: 0,
+                columns: vec!["Year".into()],
+            }],
+        },
     ]
 }
 
 #[test]
 fn every_op_has_a_fixed_tag_and_round_trips() {
     let ops = all_ops();
-    assert_eq!(ops.len(), 37);
+    assert_eq!(ops.len(), 38);
     for (tag, op) in ops.into_iter().enumerate() {
         assert_eq!(encoded(&op)[0], tag as u8);
         round_trip(op);
@@ -401,6 +411,7 @@ fn checkpoint_round_trips_every_op_and_calculation_and_proposal_fields() {
             a1: "A1".into(),
             old_text: "9".into(),
             new_text: "25%".into(),
+            stale: Some(true),
         }],
         ghosts: vec![ProposalGhost {
             sheet: 0,

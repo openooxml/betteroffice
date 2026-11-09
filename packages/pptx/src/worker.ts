@@ -6,7 +6,10 @@ export {
 /** @internal */
 export type { EffectiveTextStyle, SelectionTextFormatting } from './textFormatting';
 /** @internal */
+export { presentationStoryFormatting } from './wasm/loader';
+/** @internal */
 export { browserFrameImages } from './render/browserFrameImages';
+export { decodeBrowserPresentationImage } from './render/browserImage';
 /** @experimental */
 export { createPptxWorkerEditorSession } from './session/editorSession';
 export { preparePresentationFontDecoder } from './session/fontWorker';

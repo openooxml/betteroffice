@@ -10,18 +10,19 @@ type NativeAsset = { asset: string; native: string };
 export const NATIVE_ENGINES = {
   xlsx: [
     { engine: 'packages/xlsx/src/wasm/engine.ts', native: 'bindings/xlsx-native/js/engine.ts' },
-    { engine: 'packages/xlsx/src/wasm/engineRaster.ts', native: 'bindings/xlsx-native/js/engineRaster.ts' },
+    { engine: 'packages/xlsx/src/wasm/enginePng.ts', native: 'bindings/xlsx-native/js/enginePng.ts' },
   ],
-  pptx: {
-    engine: 'packages/pptx/src/wasm/engine.ts',
-    native: 'bindings/pptx-native/js/engine.ts',
-  },
+  pptx: [
+    { engine: 'packages/pptx/src/wasm/engine.ts', native: 'bindings/pptx-native/js/engine.ts' },
+    { engine: 'packages/pptx/src/wasm/enginePng.ts', native: 'bindings/pptx-native/js/enginePng.ts' },
+  ],
   docx: [
     { engine: 'packages/docx/src/wasm/engineEdit.ts', native: 'bindings/docx-native/js/engineEdit.ts' },
     { engine: 'packages/docx/src/wasm/engineParse.ts', native: 'bindings/docx-native/js/engineParse.ts' },
     { engine: 'packages/docx/src/wasm/engineQuery.ts', native: 'bindings/docx-native/js/engineQuery.ts' },
     { engine: 'packages/docx/src/wasm/engineOpc.ts', native: 'bindings/docx-native/js/engineOpc.ts' },
     { engine: 'packages/docx/src/wasm/enginePreflight.ts', native: 'bindings/docx-native/js/enginePreflight.ts' },
+    { engine: 'packages/docx/src/wasm/enginePng.ts', native: 'bindings/docx-native/js/enginePng.ts' },
   ],
 } as const;
 

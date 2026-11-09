@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
-import { evaluatePptxCommand, nextFontSize } from './evaluate';
+import { evaluatePptxCommand, nextFontSize, type PptxTextEnvironment } from './evaluate';
+import { clipboardRefusal } from './menuGates';
 import { testEnvironment } from './testing';
 import type { PptxCommandArgs, PptxCommandId } from './types';
 
@@ -23,6 +24,91 @@ const picture = {
 };
 
 describe('PPTX command gate', () => {
+  test('clipboard commands require text and the matching browser API', () => {
+    for (const id of ['cut', 'copy', 'paste'] as const) {
+      expect(gate(id, null)).toBeNull();
+      expect(gate(id, null, { text: null })).toBe('text-selection-required');
+      expect(gate(id, null, { text: 'unsupported' })).toBe('unsupported-selection');
+      expect(gate(id, null, { reviewing: true })).toBe('review-active');
+      expect(gate(id, {} as never)).toBe('invalid-arguments');
+    }
+    const caret = { ...(testEnvironment().text as PptxTextEnvironment), kind: 'caret' as const };
+    const shape = { ...caret, kind: 'shape' as const };
+    for (const id of ['cut', 'copy'] as const) {
+      expect(gate(id, null, { text: caret })).toBe('text-selection-required');
+      expect(gate(id, null, { text: shape })).toBe('text-selection-required');
+      expect(gate(id, null, { clipboardWrite: false })).toBe('clipboard-unavailable');
+    }
+    expect(gate('paste', null, { text: caret })).toBeNull();
+    expect(gate('paste', null, { text: shape })).toBe('text-selection-required');
+    expect(gate('paste', null, { clipboardRead: false })).toBe('clipboard-unavailable');
+    expect(gate('copy', null, { readOnly: true })).toBeNull();
+    expect(gate('cut', null, { readOnly: true })).toBe('read-only');
+    expect(gate('paste', null, { readOnly: true })).toBe('read-only');
+  });
+
+  test('menu commands stay unavailable without the binding that brings their gates', () => {
+    for (const [id, args] of [['cut', null], ['paste', null], ['deleteObject', null], ['deleteSlide', null],
+      ['duplicateSlide', null], ['tableInsert', { kind: 'row', position: 'after' }], ['tableDelete', { kind: 'table' }]] as const) {
+      expect(gate(id, args as never, { gates: undefined })).not.toBeNull();
+    }
+    expect(gate('bold', null, { gates: undefined })).toBeNull();
+  });
+
+  test('menu reasons read the menu table and only browser refusals map to clipboard-unavailable', () => {
+    expect(evaluatePptxCommand('deleteSlide', null, testEnvironment({ slideCount: 1 })).disabledReason)
+      .toEqual({ code: 'last-slide', message: 'The last slide cannot be deleted.' });
+    expect(evaluatePptxCommand('tableDelete', { kind: 'row' }, testEnvironment({ table: null })).disabledReason)
+      .toEqual({ code: 'table-required', message: 'Place the cursor in a table cell first.' });
+    const env = testEnvironment();
+    expect(clipboardRefusal(new DOMException('Denied', 'NotAllowedError'), env)).toEqual({ ok: false, failure: {
+      code: 'clipboard-unavailable', message: 'Clipboard access is unavailable or was denied.',
+    } });
+    expect(clipboardRefusal(new Error('boom'), env)).toBeNull();
+    expect(clipboardRefusal(null, env)).toBeNull();
+  });
+
+  test('object deletion works for pictures and requires a writable selected object', () => {
+    expect(gate('deleteObject', null, { shape: picture })).toBeNull();
+    expect(gate('deleteObject', null, { shape: null })).toBe('shape-required');
+    expect(gate('deleteObject', null, { readOnly: true })).toBe('read-only');
+    expect(gate('deleteObject', null, { reviewing: true })).toBe('review-active');
+  });
+
+  test('slide commands require a slide and preserve the final slide', () => {
+    for (const id of ['deleteSlide', 'duplicateSlide'] as const) {
+      expect(gate(id, null)).toBeNull();
+      expect(gate(id, null, { slide: null })).toBe('slide-required');
+      expect(gate(id, null, { readOnly: true })).toBe('read-only');
+      expect(gate(id, null, { reviewing: true })).toBe('review-active');
+      expect(gate(id, {} as never)).toBe('invalid-arguments');
+    }
+    expect(gate('deleteSlide', null, { slideCount: 1 })).toBe('last-slide');
+    expect(gate('duplicateSlide', null, { slideCount: 1 })).toBeNull();
+  });
+
+  test('every table operation requires an editable table cell', () => {
+    for (const kind of ['row', 'column'] as const) {
+      for (const position of ['before', 'after'] as const) {
+        const args = { kind, position };
+        expect(gate('tableInsert', args)).toBeNull();
+        expect(gate('tableInsert', args, { table: null })).toBe('table-required');
+        expect(gate('tableInsert', args, { readOnly: true })).toBe('read-only');
+        expect(gate('tableInsert', args, { reviewing: true })).toBe('review-active');
+        expect(gate('tableInsert', args, { slide: null })).toBe('slide-required');
+      }
+    }
+    for (const kind of ['row', 'column', 'table'] as const) {
+      expect(gate('tableDelete', { kind })).toBeNull();
+      expect(gate('tableDelete', { kind }, { table: null })).toBe('table-required');
+      expect(gate('tableDelete', { kind }, { readOnly: true })).toBe('read-only');
+      expect(gate('tableDelete', { kind }, { reviewing: true })).toBe('review-active');
+    }
+    expect(gate('tableInsert', { kind: 'cell', position: 'after' } as never)).toBe('invalid-arguments');
+    expect(gate('tableInsert', { kind: 'row', position: 'above' } as never)).toBe('invalid-arguments');
+    expect(gate('tableDelete', { kind: 'cell' } as never)).toBe('invalid-arguments');
+  });
+
   test('text commands need a writable, reviewed-out text target', () => {
     expect(gate('bold')).toBeNull();
     expect(gate('bold', null, { readOnly: true })).toBe('read-only');
@@ -33,7 +119,7 @@ describe('PPTX command gate', () => {
   });
 
   test('text toggle commands report false active state without a text environment', () => {
-    for (const id of ['bold', 'italic', 'underline'] as const) {
+    for (const id of ['bold', 'italic', 'underline', 'strikethrough'] as const) {
       const readOnly = evaluatePptxCommand(id, undefined, testEnvironment({ readOnly: true }));
       expect(readOnly.enabled).toBe(false);
       expect(readOnly.active).toBe(false);

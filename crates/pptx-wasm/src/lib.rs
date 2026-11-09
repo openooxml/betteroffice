@@ -71,7 +71,7 @@ impl PptxRenderer {
         family: &str,
         bold: bool,
         italic: bool,
-        bytes: &[u8],
+        bytes: Vec<u8>,
     ) -> Result<u32, JsValue> {
         self.inner
             .register_font(family, bold, italic, bytes)
@@ -84,7 +84,7 @@ impl PptxRenderer {
         family: &str,
         bold: bool,
         italic: bool,
-        bytes: &[u8],
+        bytes: Vec<u8>,
     ) -> Result<u32, JsValue> {
         self.inner
             .register_fallback_font(family, bold, italic, bytes)
@@ -104,6 +104,18 @@ impl PptxRenderer {
     ) -> Result<String, JsValue> {
         self.inner
             .layout_slide_json(document.session(), slide_index)
+            .map_err(js_error)
+    }
+
+    /// `layoutSlideJson` for an export: hit testing keeps the slide it had.
+    #[wasm_bindgen(js_name = exportSlideJson)]
+    pub fn export_slide_json(
+        &mut self,
+        document: &PptxDocument,
+        slide_index: u32,
+    ) -> Result<String, JsValue> {
+        self.inner
+            .export_slide_json(document.session(), slide_index)
             .map_err(js_error)
     }
 
@@ -191,6 +203,18 @@ impl PptxRenderer {
     ) -> Result<String, JsValue> {
         self.inner
             .layout_proposal_slide_json(document.session(), id, slide_index)
+            .map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = layoutProposalDiffSlideByIdJson)]
+    pub fn layout_proposal_diff_slide_by_id_json(
+        &self,
+        document: &PptxDocument,
+        id: &str,
+        slide_id: &str,
+    ) -> Result<String, JsValue> {
+        self.inner
+            .layout_proposal_diff_slide_by_id_json(document.session(), id, slide_id)
             .map_err(js_error)
     }
 

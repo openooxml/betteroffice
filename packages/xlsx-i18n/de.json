@@ -135,7 +135,14 @@
       "unsupportedCommand": "Noch nicht unterstützt.",
       "invalidArguments": "Dieser Wert ist ungültig.",
       "inputFailed": "Die vorherige Zelleneingabe konnte nicht gespeichert werden.",
+      "editUnsupported": "Diese Bearbeitung kann hier nicht ausgeführt werden. Die Arbeitsmappe bleibt unverändert.",
+      "editUnsupportedChart": "Diese Bearbeitung kann nicht ausgeführt werden: Ein Diagramm verwendet Zellen, die sie verschieben würde. Die Arbeitsmappe bleibt unverändert.",
+      "editUnsupportedTable": "Diese Bearbeitung kann nicht ausgeführt werden: Eine Tabelle verwendet Zellen, die sie verschieben würde. Die Arbeitsmappe bleibt unverändert.",
+      "editUnsupportedPivot": "Diese Bearbeitung kann nicht ausgeführt werden: Eine Pivot-Tabelle verwendet Zellen, die sie verschieben würde. Die Arbeitsmappe bleibt unverändert.",
       "sheetProtected": "Diese Zelle liegt auf einem geschützten Blatt.",
+      "hostRefused": "Diese Bearbeitung ist nicht zulässig.",
+      "tooManyToCheck": "Zu viele Zellen für die Prüfung durch Plugins (Limit {limit}).",
+      "hostStarting": "Der Editor wird noch gestartet. Versuche es gleich noch einmal.",
       "documentReplaced": "Eine andere Arbeitsmappe wurde geöffnet.",
       "targetChanged": "Die Auswahl hat sich geändert.",
       "gestureActive": "Beenden Sie zuerst das Verschieben des Diagramms.",
@@ -146,8 +153,31 @@
       "permissionDenied": "Die Host-Anwendung hat diesem Plugin diesen Befehl nicht erlaubt.",
       "unsupportedPolicy": "Plugins können diesen Befehl noch nicht ausführen. Verwenden Sie stattdessen einen Bearbeitungsstapel.",
       "pluginUnavailable": "Das Plugin ist nicht mehr aktiv.",
-      "aborted": "Die Plugin-Aktion wurde abgebrochen, bevor der Befehl ausgeführt wurde."
-    }
+      "aborted": "Die Plugin-Aktion wurde abgebrochen, bevor der Befehl ausgeführt wurde.",
+      "clipboardUnavailable": "Dieser Browser erlaubt kein Einfügen über ein Menü. Verwenden Sie die Tastenkombination.",
+      "lastSheet": "Eine Arbeitsmappe braucht mindestens ein Blatt.",
+      "sheetAtEdge": "Das Blatt kann nicht weiter verschoben werden.",
+      "sheetNameInvalid": "Blattnamen brauchen 1 bis 31 Zeichen, müssen eindeutig sein und dürfen : \\ / ? * [ ] nicht enthalten.",
+      "clipboardDenied": "Der Browser hat den Zugriff auf die Zwischenablage nicht erlaubt."
+    },
+    "cut": "Ausschneiden",
+    "copy": "Kopieren",
+    "paste": "Einfügen",
+    "pastePlainText": "Als Nur-Text einfügen",
+    "clearContents": "Inhalte löschen",
+    "insert": "Einfügen",
+    "delete": "Löschen",
+    "insertRowsAbove": "Zeilen oberhalb einfügen",
+    "insertRowsBelow": "Zeilen unterhalb einfügen",
+    "insertColumnsLeft": "Spalten links einfügen",
+    "insertColumnsRight": "Spalten rechts einfügen",
+    "deleteRows": "Zeilen löschen",
+    "deleteColumns": "Spalten löschen",
+    "insertSheet": "Blatt einfügen",
+    "deleteSheet": "Blatt löschen",
+    "renameSheet": "Umbenennen",
+    "moveSheetLeft": "Nach links verschieben",
+    "moveSheetRight": "Nach rechts verschieben"
   },
   "editor": {
     "appLabel": "Editor für Tabellen",
@@ -162,7 +192,11 @@
     "showDetails": "Details anzeigen",
     "openPrompt": "Eine XLSX-Datei öffnen",
     "sheetTabsLabel": "Blätter",
-    "clearExceedsLimit": "Das Löschen überschreitet das Zelllimit."
+    "clearExceedsLimit": "Das Löschen überschreitet das Zelllimit.",
+    "cellMenuLabel": "Zellenmenü",
+    "sheetTabMenuLabel": "Menü der Blattregisterkarte",
+    "renameSheetLabel": "Blatt umbenennen",
+    "sheetNamePrefix": "Arbeitsblatt"
   },
   "presence": {
     "label": "Mitbearbeiter",
@@ -178,6 +212,7 @@
     "accept": "Annehmen",
     "reject": "Ablehnen",
     "forceApply": "Trotzdem übernehmen",
+    "forceBlockedReason": "Dieser Vorschlag kann nach einer Strukturänderung nicht übernommen werden.",
     "staleWarning": "Zellen haben sich seit dem Vorschlag geändert: {cells}"
   },
   "a11y": {
@@ -187,12 +222,27 @@
     "cellLabel": "{address}, {value}",
     "cellLabelSelected": "{address}, {value}, ausgewählt",
     "emptyCellLabel": "{address}, leer",
-    "emptyCellLabelSelected": "{address}, leer, ausgewählt"
+    "emptyCellLabelSelected": "{address}, leer, ausgewählt",
+    "hasFormula": "{label}, enthält Formel",
+    "rangeSelected": "{start} bis {end} ausgewählt, {rows, plural, one {# Zeile} other {# Zeilen}} mal {columns, plural, one {# Spalte} other {# Spalten}}",
+    "sheetActivated": "{name}, Arbeitsblatt {index} von {count}",
+    "cellInputLabel": "Zelle {address} bearbeiten",
+    "gridRoleDescription": "Arbeitsblatt"
   },
   "plugins": {
     "toolbarGroup": "Plugins",
     "panelTabs": "Plugin-Bereiche",
     "collapsePanel": "{title} einklappen",
-    "expandPanel": "{title} ausklappen"
+    "expandPanel": "{title} ausklappen",
+    "rowGutter": "Zeilenmarkierungen von Plugins"
+  },
+  "keys": {
+    "ctrl": "Strg",
+    "alt": "Alt",
+    "shift": "Umschalt",
+    "del": "Entf",
+    "escape": "Esc",
+    "pageUp": "Bild auf",
+    "pageDown": "Bild ab"
   }
 }

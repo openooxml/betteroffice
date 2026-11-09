@@ -304,6 +304,7 @@ impl DeckSession {
             source_run_properties::SourceProperty::Spacing,
             source_run_properties::SourceProperty::Kern,
             source_run_properties::SourceProperty::Caps,
+            source_run_properties::SourceProperty::Strike,
             source_run_properties::SourceProperty::Color,
         ] {
             source_run_properties::import_source(&self, &mut import, property)?;
@@ -489,6 +490,7 @@ impl DeckSession {
     /// from now on, and local structural table undo and redo items are dropped.
     pub fn set_collaborative(&self) -> EditResult<()> {
         self.collaborative.set(true);
+        self.proposals.borrow_mut().previews.clear();
         let mut undo = self.undo.borrow_mut();
         let tables: Vec<_> = undo.tracked_tables().cloned().collect();
         for id in &tables {

@@ -52,6 +52,7 @@
     "decreaseFontSize": "Perkecil ukuran font",
     "increaseFontSize": "Perbesar ukuran font",
     "underline": "Garis Bawah",
+    "strikethrough": "Coret",
     "more": "Lainnya",
     "fillColor": "Warna Isian",
     "noFill": "Tanpa Isian",
@@ -91,6 +92,12 @@
     "fallbackTitle": "Slide {number}",
     "canvasLabel": "Slide {current} dari {total}",
     "canvasLabelWithSelection": "Slide {current} dari {total}; objek terpilih {name}"
+  },
+  "a11y": {
+    "chartNoData": "Tidak ada data",
+    "slideWithTitle": "Slide {current} dari {total}: {title}",
+    "objectSelected": "{name} dipilih",
+    "editingText": "Mengedit {name}"
   },
   "editor": {
     "appLabel": "Editor slide presentasi",
@@ -156,6 +163,17 @@
     "stalePreview": "Pratinjau ini menggunakan slide yang diperbarui. Menerapkannya akan menimpa target yang berubah.",
     "geometry": "Posisi dan ukuran (x, y, lebar, tinggi)",
     "geometryValues": "{before} → {after} pt",
+    "layoutChanged": "Tata letak diubah",
+    "backgroundChanged": "Latar belakang diubah",
+    "rowInserted": "Baris disisipkan",
+    "rowDeleted": "Baris dihapus",
+    "columnInserted": "Kolom disisipkan",
+    "columnDeleted": "Kolom dihapus",
+    "broughtToFront": "Dibawa ke paling depan",
+    "sentToBack": "Dikirim ke paling belakang",
+    "broughtForward": "Dimajukan satu tingkat",
+    "sentBackward": "Dimundurkan satu tingkat",
+    "zOrderChanged": "Urutan tumpukan diubah",
     "appearance": "Tampilan atau pemformatan teks berubah",
     "changedAgain": "Target berubah lagi. Tinjau pratinjau yang dimuat ulang sebelum menerapkannya.",
     "canvasTitle": "Perubahan pada slide ini",
@@ -168,7 +186,14 @@
     "canvasStale": "Target berubah. Buka detail peninjauan untuk memeriksa pratinjau terbaru sebelum menerapkannya.",
     "previousPosition": "Sebelumnya",
     "proposedPosition": "Diusulkan",
-    "loadingDiff": "Memuat perubahan…"
+    "loadingDiff": "Memuat perubahan…",
+    "slideStrip": null,
+    "previewSlide": null,
+    "insertedShape": null,
+    "deletedShape": null,
+    "insertedSlide": null,
+    "deletedSlide": null,
+    "movedFrom": null
   },
   "commands": {
     "moreControls": "Kontrol lainnya",
@@ -212,8 +237,25 @@
       "permissionDenied": "Aplikasi host tidak mengizinkan plugin ini menggunakan perintah ini.",
       "unsupportedPolicy": "Plugin belum dapat menjalankan perintah ini. Gunakan batch edit sebagai gantinya.",
       "pluginUnavailable": "Plugin tidak lagi aktif.",
-      "aborted": "Tindakan plugin dibatalkan sebelum perintah dijalankan."
-    }
+      "aborted": "Tindakan plugin dibatalkan sebelum perintah dijalankan.",
+      "clipboardUnavailable": "Akses papan klip tidak tersedia atau ditolak.",
+      "tableRequired": "Letakkan kursor di sel tabel terlebih dahulu.",
+      "lastSlide": "Slide terakhir tidak dapat dihapus."
+    },
+    "cut": "Potong",
+    "copy": "Salin",
+    "paste": "Tempel",
+    "pastePlainText": "Tempel sebagai teks biasa",
+    "insert": "Sisipkan",
+    "delete": "Hapus",
+    "deleteTable": "Hapus Tabel",
+    "duplicateSlide": "Duplikasikan slide",
+    "insertRowsAbove": "Sisipkan baris di atas",
+    "insertRowsBelow": "Sisipkan baris di bawah",
+    "insertColumnsLeft": "Sisipkan kolom di kiri",
+    "insertColumnsRight": "Sisipkan kolom di kanan",
+    "deleteRows": "Hapus baris",
+    "deleteColumns": "Hapus kolom"
   },
   "plugins": {
     "toolbarGroup": "Plugin",
@@ -225,5 +267,20 @@
     "label": "Kolaborator",
     "moreCollaborators": "{count, plural, other {# kolaborator lainnya}}",
     "moreSelections": "+{count, plural, other {# pilihan}}"
+  },
+  "contextMenu": {
+    "text": "Menu teks",
+    "shape": "Menu bentuk",
+    "table": "Menu tabel",
+    "slide": "Menu slide"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "delete": "Del",
+    "escape": "Esc",
+    "pageup": "Page Up",
+    "pagedown": "Page Down"
   }
 }

@@ -3,23 +3,26 @@ import type { PipeCommandPayload, PipeOutputBatch } from '../../../../shared/col
 import type { PptxPresenceCursor, PptxPresencePeer } from '../collaboration/types';
 import type { SessionFailure } from '../../../../shared/office-session/types';
 import type { PresentationHandle } from '../wasm/loader';
+import type { PptxPngOptions, PptxPngTarget } from '../wasm/pngOptions';
 import type { PptxEditRequest, PptxEditResult, PptxReadRequest, PptxReadResult, PptxStoryTarget } from '../edits';
 import type { DeckSnapshot, ParagraphAlignment, ShapeRect, ShapeDraft, PresetShapeDraft, ShapeReceipt, TextStyle, TextStyleSnapshot } from '../types';
 import type {
   PresentationSessionOpenOptions, PresentationSlideSummary, PresentationWireFrame,
 } from './methods';
+import type { SlicedFontRead } from './commandSlicedFonts';
+import type { DefaultFontFace } from '../../../../shared/pptxDefaultFonts';
 
 export type PresentationCommandAccessMethods = Pick<PresentationHandle,
-  'snapshot' | 'story' | 'findText' | 'validateEdits' | 'exportStructured' | 'exportMarkdown' | 'searchText' | 'listProposals' | 'comments' | 'previewProposal' | 'layoutProposalSlide' | 'layoutProposalDiffSlide' | 'layoutSlide' | 'encodeStateVector' | 'encodeStateAsUpdate'>;
+  'snapshot' | 'story' | 'findText' | 'validateEdits' | 'exportStructured' | 'exportMarkdown' | 'searchText' | 'listProposals' | 'comments' | 'previewProposal' | 'layoutProposalSlide' | 'layoutProposalDiffSlide' | 'layoutProposalDiffSlideById' | 'proposalSlideStrip' | 'layoutSlide' | 'encodeStateVector' | 'encodeStateAsUpdate'>;
 export type PresentationCommandAccessMethod = keyof PresentationCommandAccessMethods;
 export type PresentationCommandAccessResult = ReturnType<PresentationCommandAccessMethods[PresentationCommandAccessMethod]>;
 
 export type PresentationCommandMutationMethods = Pick<PresentationHandle,
   'insertTableRow' | 'deleteTableRow' | 'insertTableColumn' | 'deleteTableColumn' |
   'setShapeFill' | 'setShapeStroke' | 'setShapeAdjust' | 'removeShape' | 'bringShapeToFront' |
-  'sendShapeToBack' | 'bringShapeForward' | 'sendShapeBackward' | 'insertSlide' | 'deleteSlide' | 'moveSlide' | 'setSlideNotes' | 'addComment' | 'replyToComment' | 'setCommentStatus' | 'setCommentPosition' | 'removeComment' | 'setCommentFlavor' | 'propose' | 'acceptProposal' | 'rejectProposal'>;
+  'sendShapeToBack' | 'bringShapeForward' | 'sendShapeBackward' | 'insertSlide' | 'deleteSlide' | 'moveSlide' | 'duplicateSlide' | 'setSlideNotes' | 'addComment' | 'replyToComment' | 'setCommentStatus' | 'setCommentPosition' | 'removeComment' | 'setCommentFlavor' | 'propose' | 'acceptProposal' | 'rejectProposal'>;
 export const PRESENTATION_COMMAND_MUTATIONS = ['insertTableRow', 'deleteTableRow', 'insertTableColumn', 'deleteTableColumn', 'setShapeFill', 'setShapeStroke', 'setShapeAdjust', 'removeShape',
-  'bringShapeToFront', 'sendShapeToBack', 'bringShapeForward', 'sendShapeBackward', 'insertSlide', 'deleteSlide', 'moveSlide', 'setSlideNotes', 'addComment', 'replyToComment', 'setCommentStatus', 'setCommentPosition', 'removeComment', 'setCommentFlavor', 'propose', 'acceptProposal', 'rejectProposal'] as const satisfies readonly (keyof PresentationCommandMutationMethods)[];
+  'bringShapeToFront', 'sendShapeToBack', 'bringShapeForward', 'sendShapeBackward', 'insertSlide', 'deleteSlide', 'moveSlide', 'duplicateSlide', 'setSlideNotes', 'addComment', 'replyToComment', 'setCommentStatus', 'setCommentPosition', 'removeComment', 'setCommentFlavor', 'propose', 'acceptProposal', 'rejectProposal'] as const satisfies readonly (keyof PresentationCommandMutationMethods)[];
 
 export type PresentationCommandMutation = { [K in keyof PresentationCommandMutationMethods]: {
   method: K; args: Parameters<PresentationCommandMutationMethods[K]>;
@@ -109,7 +112,7 @@ export type PresentationCommandPayloads = {
   activateSlide: Partial<PresentationCommandInput> & { slideId: string };
   insertText: PresentationCommandTextInput & { text: string; style?: TextStyle };
   replaceText: PresentationCommandTextInput & { text: string; style?: TextStyle };
-  formatText: PresentationCommandTextInput & { patch: TextStyle; toggle?: 'bold' | 'italic' | 'underline';
+  formatText: PresentationCommandTextInput & { patch: TextStyle; toggle?: 'bold' | 'italic' | 'underline' | 'strikethrough';
     fontSizeStep?: { direction: 'increase' | 'decrease'; sizes: readonly number[] } };
   setParagraphAlignment: PresentationCommandTextInput & { alignment: ParagraphAlignment | null };
   deleteBackward: PresentationCommandTextInput & { unit: 'codePoint'; count?: number };
@@ -229,6 +232,10 @@ export interface PresentationCommandFrame extends PresentationWireFrame {
 }
 
 export interface PresentationCommandAck extends PresentationCommandIdentity {
+  /** Families whose outlines load as text needs them; a paint prepares its text through `readCoverageFont`. */
+  slicedFamilies?: string[];
+  /** The styles of those families that draw under their own name, as `family|bold|italic`. */
+  slicedPlainStyles?: string[];
   epoch: number;
   throughSeq: number;
   version: string;
@@ -256,6 +263,7 @@ export interface PresentationCommandOpenOptions
   collaboration?: boolean;
   observeChanges?: boolean;
   defaultFonts?: boolean;
+  slicedFonts?: boolean;
 }
 
 export interface PresentationCommandOpenResult extends PresentationCommandAck {
@@ -300,11 +308,19 @@ export interface PresentationCommandReadResult extends PresentationCommandAck {
 }
 
 export type PresentationCommandMethods = FontDecoderMethods & {
+  /** Starts fetching the regular coverage face of each script (`cjk-jp`, `cjk-kr`, `cjk-sc`, `cjk-tc`) before the editor opens. */
+  prefetchCoverageFonts(scripts: string[], sliced?: boolean): void;
+  /** A sliced face with `text` loaded, unless the caller's revision `have` is still current; null for other families. */
+  readCoverageFont(family: string, text: string, have: number | null): SlicedFontRead | null;
+  /** The complete sliced faces, for paints that do not prepare their text. */
+  wholeCoverageFonts(have: string[]): DefaultFontFace[];
   openCommandEditor(bytes: ArrayBuffer, options: PresentationCommandOpenOptions): PresentationCommandOpenResult;
   command(envelope: PresentationCommandEnvelope): PresentationCommandAck;
   thumbnailFrame(request: PresentationCommandThumbnailRequest): PresentationCommandThumbnailResult;
   flushCommandEditor(fence: PresentationCommandFence): PresentationCommandAck;
   saveCommandEditor(fence: PresentationCommandFence): PresentationCommandSaveResult;
+  /** Draws a slide as PNG bytes in the worker, after the fenced commands. */
+  renderCommandPng(fence: PresentationCommandFence, target: PptxPngTarget, options: Omit<PptxPngOptions, 'signal'>): ArrayBuffer;
   accessCommandEditor(fence: PresentationCommandFence, method: PresentationCommandAccessMethod, args: unknown[]): PresentationCommandAccessResult;
   checkpointCommandEditor(fence: PresentationCommandFence, options?: { rebase?: boolean }): PresentationCommandSaveResult;
   prepareCommandPicture(fence: PresentationCommandFence, bytes: ArrayBuffer): ArrayBuffer;
@@ -316,13 +332,26 @@ export type PresentationCommandEvents = {
   collaborationPipe: PipeOutputBatch<PptxPresencePeer>[];
 };
 
+/** @internal An intent the worker had not acknowledged, for replay after a crash. */
+export interface PresentationPendingIntent {
+  seq: number;
+  intent: PresentationCommandIntent;
+  afterSeq?: number;
+}
+
 export interface PresentationCommandClient {
   readonly state: PresentationCommandOpenResult;
+  readCoverageFont?(family: string, text: string, have: number | null): Promise<SlicedFontRead | null>;
+  wholeCoverageFonts?(have: string[]): Promise<DefaultFontFace[]>;
   dispatch(intent: PresentationCommandIntent, basis?: PresentationCommandBasis): Promise<PresentationCommandAck>;
   flush(seq?: number): Promise<PresentationCommandAck>;
   save(): Promise<Uint8Array>;
+  /** Draws a slide as PNG bytes in the worker, after the commands sent so far. */
+  renderPng?(target: PptxPngTarget, options?: PptxPngOptions): Promise<Uint8Array>;
   access?<K extends PresentationCommandAccessMethod>(method: K, ...args: Parameters<PresentationCommandAccessMethods[K]>): Promise<ReturnType<PresentationCommandAccessMethods[K]>>;
   takeRecoveryUpdate?(): ArrayBuffer | undefined;
+  /** @internal Intents sent to the worker whose acknowledgement has not arrived, in send order, with the command each one follows. */
+  pendingIntents?(): PresentationPendingIntent[];
   checkpoint?(options?: { rebase?: boolean }): Promise<PresentationCommandSaveResult>;
   preparePicture?(bytes: ArrayBuffer): Promise<ArrayBuffer>;
   read(request?: PptxReadRequest): Promise<PresentationCommandReadResult>;
@@ -337,11 +366,15 @@ export interface PresentationCommandClient {
 
 export const PRESENTATION_COMMAND_METHODS = {
   decodeFontFace: true,
+  prefetchCoverageFonts: true,
+  readCoverageFont: true,
+  wholeCoverageFonts: true,
   openCommandEditor: true,
   command: true,
   thumbnailFrame: true,
   flushCommandEditor: true,
   saveCommandEditor: true,
+  renderCommandPng: true,
   readEditor: true,
   prepareCommandPicture: true,
   accessCommandEditor: true,

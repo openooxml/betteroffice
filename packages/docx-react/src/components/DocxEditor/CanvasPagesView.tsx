@@ -32,7 +32,7 @@ import { CanvasPageMirror } from './CanvasPageMirror';
 import { CanvasInteractiveOverlay } from './CanvasInteractiveOverlay';
 import type { PageChromeHandle } from './usePageChrome';
 import { CanvasA11yLiveRegion, type CanvasA11yLiveRegionProps } from './CanvasA11yLiveRegion';
-import { CANVAS_PAGE_GAP_PX, CANVAS_PAGES_PADDING_PX } from '@betteroffice/docx/layout/render';
+import { CANVAS_PAGE_GAP_PX, CANVAS_PAGES_PADDING_PX, canvasPageStack } from '@betteroffice/docx/layout/render';
 import { SIDEBAR_DOCUMENT_SHIFT } from '../sidebar/constants';
 import { ParseError } from '../DocxEditorHelpers';
 import { useTranslation } from '../../i18n';
@@ -89,7 +89,7 @@ export function CanvasPagedArea({
         />
       ) : renderer.status === 'error' ? (
         <div data-testid="canvas-renderer-error" role="alert" style={{ minHeight: 240 }}>
-          <ParseError message={renderer.error?.message ?? t('errors.canvasRendererFailed')} />
+          <ParseError opening={false} message={renderer.error?.message ?? t('errors.canvasRendererFailed')} />
         </div>
       ) : null}
       {children}
@@ -353,15 +353,8 @@ export function CanvasPagesView({
   // Column-space page tops/bottoms from display-list geometry alone (no DOM
   // reads): padding, then each page height at the current zoom plus the gap.
   const pageOffsets = useMemo(() => {
-    const tops = new Array<number>(displayList.pages.length);
-    const bottoms = new Array<number>(displayList.pages.length);
-    let y = CANVAS_PAGES_PADDING_PX;
-    displayList.pages.forEach((page, index) => {
-      tops[index] = y;
-      bottoms[index] = y + page.height * zoom;
-      y = bottoms[index] + CANVAS_PAGE_GAP_PX;
-    });
-    return { tops, bottoms };
+    const boxes = canvasPageStack(displayList.pages, { zoom, padding: CANVAS_PAGES_PADDING_PX });
+    return { tops: boxes.map((box) => box.top), bottoms: boxes.map((box) => box.top + box.height) };
   }, [displayList, zoom]);
   useLayoutEffect(() => {
     if (!windowingEnabled) {

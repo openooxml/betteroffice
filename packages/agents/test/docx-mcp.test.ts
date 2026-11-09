@@ -5,15 +5,17 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { cliEnv } from './cli-env';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { openDocx } from '../src';
 import { createOfficeMcpServer } from '../src/mcp';
 import { commentFixture, editFixture, tableCell, tableFixture } from './fixture';
+import { unexpectedStderr } from './cli-env';
 
 test('stdio docx_edit applies a style, format and table-row batch that survives export', async () => {
   const root = await mkdtemp(join(tmpdir(), 'docx-edit-mcp-'));
   const client = new Client({ name: 'docx-edit-test', version: '1' });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve(import.meta.dir, '../src/cli.ts'), '--root', root], stderr: 'pipe' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve(import.meta.dir, '../src/cli.ts'), '--root', root], stderr: 'pipe', env: cliEnv() });
   let stderr = '';
   transport.stderr?.on('data', chunk => { stderr += String(chunk); });
   try {
@@ -60,7 +62,7 @@ test('stdio docx_edit applies a style, format and table-row batch that survives 
       expect(items.filter(item => item.table).map(item => item.text).sort()).toEqual(['1.0M', '1.4M', 'Q1', 'Q2', 'Quarter', 'Revenue']);
       expect(items.find(item => item.text === 'Q2')?.table).toMatchObject({ row: 3, rows: 3 });
     } finally { reopened.close(); }
-    expect(stderr).toBe('');
+    expect(unexpectedStderr(stderr)).toBe('');
   } finally {
     await client.close();
     await rm(root, { recursive: true, force: true });

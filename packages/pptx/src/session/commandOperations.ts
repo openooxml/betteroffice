@@ -1,3 +1,4 @@
+import { presentationContexts } from '../wasm/presentationContext';
 import type { PptxEditStep } from '../edits';
 import type { ProposalEdit } from '../proposals';
 import type { PresentationHandle } from '../wasm/loader';
@@ -54,17 +55,33 @@ export function prepareCommandOperation(handle: PresentationHandle, mutation: Pr
     const [agent, note, edits] = args;
     if (!text(agent, 1024) || !agent.trim() || note !== null && !text(note) ||
       !Array.isArray(edits) || !edits.length || edits.length > 256) return null;
-    try { if (JSON.stringify(edits).length > 1e6) return null; }
+    try { if (JSON.stringify(edits).length > 1e6 + 4 * Math.ceil(8 * 1024 * 1024 / 3)) return null; }
     catch { return null; }
     if (handle.listProposals().length >= 64) return null;
     const fields = new Map<ProposalEdit['type'], readonly string[]>([
+      ['addTextBox', ['ref', 'slideId', 'draft']],
+      ['addShape', ['ref', 'slideId', 'draft']],
+      ['addPicture', ['ref', 'slideId', 'draft']],
+      ['removeShape', ['slideId', 'shapeId']],
+      ['reorderShape', ['slideId', 'shapeId', 'to']],
+      ['insertTableRow', ['slideId', 'shapeId', 'index', 'position', 'cells']],
+      ['deleteTableRow', ['slideId', 'shapeId', 'index']],
+      ['insertTableColumn', ['slideId', 'shapeId', 'index', 'position', 'cells', 'width']],
+      ['deleteTableColumn', ['slideId', 'shapeId', 'index']],
+      ['insertSlide', ['ref', 'afterSlideId', 'layoutPartPath']],
+      ['duplicateSlide', ['ref', 'slideId', 'afterSlideId']],
+      ['deleteSlide', ['slideId']],
+      ['moveSlide', ['slideId', 'afterSlideId']],
       ['replaceText', ['storyId', 'start', 'end', 'text', 'style']],
       ['formatText', ['storyId', 'start', 'end', 'patch']],
       ['setParagraphAlignment', ['storyId', 'start', 'end', 'alignment']],
+      ['setStoryParagraphs', ['storyId', 'paragraphs']],
       ['setShapeRect', ['slideId', 'shapeId', 'rect']],
       ['setShapeFill', ['slideId', 'shapeId', 'color']],
       ['setShapeStroke', ['slideId', 'shapeId', 'stroke']],
       ['setShapeAdjust', ['slideId', 'shapeId', 'adjustments']],
+      ['setSlideLayout', ['slideId', 'layoutPartPath', 'mapping']],
+      ['setSlideBackground', ['slideId', 'background']],
       ['setSlideNotes', ['slideId', 'text']],
     ]);
     const onlyKeys = (value: unknown, keys: readonly string[]) => Boolean(value && typeof value === 'object' &&
@@ -76,7 +93,7 @@ export function prepareCommandOperation(handle: PresentationHandle, mutation: Pr
         Object.entries(value).every(([key, entry]) => text(key) && validValues(entry, depth + 1));
     };
     const style = (value: unknown, extended = false) => {
-      const keys = ['bold', 'italic', 'fontFamily', 'underline', 'color', 'fontSizePt', 'spacingPt', 'baselinePct'];
+      const keys = ['bold', 'italic', 'fontFamily', 'underline', 'strike', 'color', 'fontSizePt', 'spacingPt', 'baselinePct'];
       if (extended) keys.push('kernPt', 'caps');
       if (!onlyKeys(value, keys)) return false;
       return Object.entries(value as Record<string, unknown>).every(([key, entry]) => {
@@ -85,6 +102,7 @@ export function prepareCommandOperation(handle: PresentationHandle, mutation: Pr
           case 'bold':
           case 'italic': return typeof entry === 'boolean';
           case 'fontFamily': return text(entry);
+          case 'strike': return typeof entry === 'string' && ['noStrike', 'sngStrike', 'dblStrike'].includes(entry);
           case 'underline': return typeof entry === 'string' && ['none', 'words', 'sng', 'dbl', 'heavy', 'dotted',
             'dottedHeavy', 'dash', 'dashHeavy', 'dashLong', 'dashLongHeavy', 'dotDash', 'dotDashHeavy',
             'dotDotDash', 'dotDotDashHeavy', 'wavy', 'wavyHeavy', 'wavyDbl'].includes(entry);
@@ -103,20 +121,25 @@ export function prepareCommandOperation(handle: PresentationHandle, mutation: Pr
     if (!content.ok) return null;
     const steps: PptxEditStep[] = [];
     const canonicalEdits: ProposalEdit[] = [];
+    const staged = edits.some(edit => ['insertSlide', 'duplicateSlide', 'deleteSlide', 'moveSlide', 'addTextBox', 'addShape', 'addPicture', 'removeShape', 'reorderShape', 'setStoryParagraphs', 'setSlideLayout', 'setSlideBackground', 'insertTableRow', 'deleteTableRow', 'insertTableColumn', 'deleteTableColumn'].includes(edit?.type));
     for (const candidate of edits) {
       if (!candidate || typeof candidate !== 'object') return null;
       const keys = fields.get(candidate.type);
       if (!keys || !onlyKeys(candidate, ['type', ...keys])) return null;
       const source = candidate as unknown as Record<string, unknown>;
       const edit = Object.fromEntries(['type', ...keys].map((key) => [key, source[key]])) as ProposalEdit;
-      if (!validValues(edit) || edit.type === 'replaceText' && edit.style != null && !style(edit.style, true) ||
+      const values = edit.type === 'addPicture' ? { ...edit, draft: { ...edit.draft, mediaBase64: undefined } } : edit;
+      if (edit.type === 'addPicture' && !text(edit.draft?.mediaBase64, 4 * Math.ceil(8 * 1024 * 1024 / 3))) return null;
+      if (!validValues(values) || edit.type === 'replaceText' && edit.style != null && !style(edit.style, true) ||
         edit.type === 'formatText' && !style(edit.patch) ||
         edit.type === 'setShapeRect' && !onlyKeys(edit.rect, ['x', 'y', 'width', 'height']) ||
         edit.type === 'setShapeStroke' && !onlyKeys(edit.stroke, ['color', 'widthPt'])) return null;
       canonicalEdits.push(edit);
+      if (staged) continue;
       if ('storyId' in edit) {
         const story = content.stories.find((story) => story.storyId === edit.storyId);
         if (!story) return null;
+        if (edit.type === 'setStoryParagraphs') return null;
         const target = { kind: 'range' as const, slideId: story.slideId, shapeId: story.shapeId, storyId: story.storyId, start: edit.start, end: edit.end };
         if (edit.type === 'replaceText') steps.push({ op: 'replaceText', target, text: edit.text });
         else if (edit.type === 'formatText') {
@@ -127,12 +150,25 @@ export function prepareCommandOperation(handle: PresentationHandle, mutation: Pr
         else return null;
       } else {
         if (!['setShapeRect', 'setShapeFill', 'setShapeStroke', 'setShapeAdjust', 'setSlideNotes'].includes(edit.type)) return null;
+        if (edit.type === 'addTextBox' || edit.type === 'addShape' || edit.type === 'addPicture' || edit.type === 'removeShape' || edit.type === 'reorderShape') return null;
+        if (edit.type === 'setSlideLayout' || edit.type === 'setSlideBackground') return null;
+        if (edit.type === 'insertTableRow' || edit.type === 'deleteTableRow' || edit.type === 'insertTableColumn' || edit.type === 'deleteTableColumn') return null;
+        if (edit.type === 'insertSlide' || edit.type === 'duplicateSlide' || edit.type === 'deleteSlide' || edit.type === 'moveSlide') return null;
         const { type, ...fields } = edit;
         const { slideId, ...rest } = fields;
         const shapeId = 'shapeId' in rest ? rest.shapeId : undefined;
         if ('shapeId' in rest) delete (rest as { shapeId?: string }).shapeId;
         steps.push({ op: type, target: shapeId === undefined ? { slideId } : { slideId, shapeId }, ...rest } as PptxEditStep);
       }
+    }
+    if (JSON.stringify(canonicalEdits.map(edit => edit.type === 'addPicture'
+      ? { ...edit, draft: { ...edit.draft, mediaBase64: undefined } } : edit)).length > 1e6) return null;
+    if (staged) {
+      const context = presentationContexts.get(handle);
+      if (!context || typeof context.doc.validateProposalJson !== 'function') return null;
+      try { context.jsonWasmCall(() => context.doc.validateProposalJson(JSON.stringify({ agentId: agent, note, edits: canonicalEdits }))); }
+      catch { return null; }
+      return () => handle.propose(agent, note, canonicalEdits);
     }
     const expectVersion = handle.version();
     try { if (!handle.validateEdits({ expectVersion, steps }).ok) return null; }
@@ -147,6 +183,8 @@ export function prepareCommandOperation(handle: PresentationHandle, mutation: Pr
     if (!proposal) return null;
     if (method === 'rejectProposal') return () => handle.rejectProposal(proposal.id);
     if (args[1]?.force !== undefined && typeof args[1].force !== 'boolean' || proposal.staleTargets.length && !args[1]?.force) return null;
+    try { handle.previewProposal(proposal.id); }
+    catch { return null; }
     return () => handle.acceptProposal(proposal.id, args[1]);
   }
   if (method === 'insertSlide') {
@@ -167,6 +205,11 @@ export function prepareCommandOperation(handle: PresentationHandle, mutation: Pr
   if (method === 'moveSlide') {
     const index = args[1];
     return Number.isSafeInteger(index) && index >= 0 && index < snapshot.slides.length ? () => handle.moveSlide(slide.id, index) : null;
+  }
+  if (method === 'duplicateSlide') {
+    const index = args[1];
+    return args.length === 2 && Number.isSafeInteger(index) && index >= 0 && index <= snapshot.slides.length
+      ? () => handle.duplicateSlide(slide.id, index) : null;
   }
   const shape = findTopLevelShape(slide, args[1]);
   if (!shape || shape.id !== args[1]) return null;

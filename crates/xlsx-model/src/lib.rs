@@ -11,6 +11,7 @@ pub mod numfmt;
 pub mod open_timing;
 pub mod progress;
 pub mod rich_text;
+pub mod sheet_qualifier;
 #[doc(hidden)]
 pub mod sort;
 pub mod styles;

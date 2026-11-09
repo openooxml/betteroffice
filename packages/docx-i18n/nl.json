@@ -488,7 +488,9 @@
         "pageUp": "Page Up",
         "pageDown": "Page Down",
         "ctrl": "Ctrl",
-        "del": "Del"
+        "del": "Del",
+        "shift": "Shift",
+        "alt": "Alt"
       }
     },
     "objectGeometry": {
@@ -528,6 +530,7 @@
     "paragraphMarkInserted": "Alinea-einde ingevoegd",
     "paragraphMarkDeleted": "Alinea-einde verwijderd",
     "paragraphPropertiesChanged": "Alinea-eigenschappen gewijzigd",
+    "runPropertiesChanged": "Tekstopmaak gewijzigd",
     "rowInserted": "Rij ingevoegd",
     "rowDeleted": "Rij verwijderd",
     "rowPropertiesChanged": "Rijeigenschappen gewijzigd",
@@ -584,6 +587,8 @@
     "noDocumentLoaded": "Geen document geladen",
     "failedToLoad": "Kan dit document niet openen",
     "failedToLoadDescription": "Het bestand is mogelijk beschadigd, of gebruikt iets dat deze editor nog niet kan lezen.",
+    "failedToLoadDamaged": "Het bestand is beschadigd of is geen volledig Word-document.",
+    "failedToLoadUnsupported": "Dit document gebruikt iets dat deze editor nog niet kan lezen.",
     "editorUnavailable": "De editor kan niet worden geladen",
     "editorUnavailableDescription": "Controleer uw verbinding en laad de pagina opnieuw.",
     "reloadPage": "Pagina opnieuw laden",
@@ -724,6 +729,7 @@
     "failedToParse": "Kan document niet parseren",
     "linkRemoved": "Koppeling verwijderd",
     "linkCopied": "Koppeling gekopieerd naar klembord",
+    "pasteFailed": "Plakken kon niet worden voltooid. Er is niets gewijzigd.",
     "failedToSave": "Kan document niet opslaan",
     "documentInput": "Documentinvoer",
     "documentPreview": "Documentvoorbeeld",
@@ -795,6 +801,8 @@
     "pageLabel": "Pagina {number}",
     "headerLabel": "Paginakoptekst",
     "footerLabel": "Paginavoettekst",
+    "chartNoData": "Geen gegevens",
+    "pictureName": "Afbeelding",
     "selected": "Geselecteerd",
     "selectionCleared": "Selectie gewist",
     "commentedText": "Tekst met opmerking",

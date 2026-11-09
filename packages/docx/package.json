@@ -11,125 +11,149 @@
   "imports": {
     "#session-worker": {
       "node": "./dist/sessionWorker.node.mjs",
-      "default": "./dist/sessionWorker.browser.mjs"
-    },
-    "#session-scope": {
-      "node": "./dist/sessionScope.node.mjs",
-      "default": "./dist/sessionScope.browser.mjs"
+      "default": "./dist/sessionWorker.missing.mjs"
     }
   },
   "exports": {
     ".": {
       "types": "./dist/core.d.mts",
-      "import": "./dist/core.mjs"
+      "import": "./dist/core.mjs",
+      "default": "./dist/core.mjs"
     },
     "./docx": {
       "types": "./dist/docx/index.d.mts",
-      "import": "./dist/docx/index.mjs"
+      "import": "./dist/docx/index.mjs",
+      "default": "./dist/docx/index.mjs"
     },
     "./docx/wrapTypes": {
       "types": "./dist/docx/wrapTypes.d.mts",
-      "import": "./dist/docx/wrapTypes.mjs"
+      "import": "./dist/docx/wrapTypes.mjs",
+      "default": "./dist/docx/wrapTypes.mjs"
     },
     "./styles": {
       "types": "./dist/styles/index.d.mts",
-      "import": "./dist/styles/index.mjs"
+      "import": "./dist/styles/index.mjs",
+      "default": "./dist/styles/index.mjs"
     },
     "./layout/pagination": {
       "types": "./dist/layout/pagination/index.d.mts",
-      "import": "./dist/layout/pagination/index.mjs"
+      "import": "./dist/layout/pagination/index.mjs",
+      "default": "./dist/layout/pagination/index.mjs"
     },
     "./layout/render": {
       "types": "./dist/layout/render/index.d.mts",
-      "import": "./dist/layout/render/index.mjs"
+      "import": "./dist/layout/render/index.mjs",
+      "default": "./dist/layout/render/index.mjs"
     },
     "./layout": {
       "types": "./dist/layout/index.d.mts",
-      "import": "./dist/layout/index.mjs"
+      "import": "./dist/layout/index.mjs",
+      "default": "./dist/layout/index.mjs"
     },
     "./plugin-api": {
       "types": "./dist/plugin-api/index.d.mts",
-      "import": "./dist/plugin-api/index.mjs"
+      "import": "./dist/plugin-api/index.mjs",
+      "default": "./dist/plugin-api/index.mjs"
     },
     "./plugin-api/RenderedDomContext": {
       "types": "./dist/plugin-api/RenderedDomContext.d.mts",
-      "import": "./dist/plugin-api/RenderedDomContext.mjs"
+      "import": "./dist/plugin-api/RenderedDomContext.mjs",
+      "default": "./dist/plugin-api/RenderedDomContext.mjs"
     },
     "./plugin-api/resolveItemPositions": {
       "types": "./dist/plugin-api/resolveItemPositions.d.mts",
-      "import": "./dist/plugin-api/resolveItemPositions.mjs"
+      "import": "./dist/plugin-api/resolveItemPositions.mjs",
+      "default": "./dist/plugin-api/resolveItemPositions.mjs"
     },
     "./types/document": {
       "types": "./dist/types/document.d.mts",
-      "import": "./dist/types/document.mjs"
+      "import": "./dist/types/document.mjs",
+      "default": "./dist/types/document.mjs"
     },
     "./types/content": {
       "types": "./dist/types/content.d.mts",
-      "import": "./dist/types/content.mjs"
+      "import": "./dist/types/content.mjs",
+      "default": "./dist/types/content.mjs"
     },
     "./utils": {
       "types": "./dist/utils/index.d.mts",
-      "import": "./dist/utils/index.mjs"
+      "import": "./dist/utils/index.mjs",
+      "default": "./dist/utils/index.mjs"
     },
     "./utils/cardStyles": {
       "types": "./dist/utils/cardStyles.d.mts",
-      "import": "./dist/utils/cardStyles.mjs"
+      "import": "./dist/utils/cardStyles.mjs",
+      "default": "./dist/utils/cardStyles.mjs"
     },
     "./utils/comments": {
       "types": "./dist/utils/comments.d.mts",
-      "import": "./dist/utils/comments.mjs"
+      "import": "./dist/utils/comments.mjs",
+      "default": "./dist/utils/comments.mjs"
     },
     "./utils/stylePreview": {
       "types": "./dist/utils/stylePreview.d.mts",
-      "import": "./dist/utils/stylePreview.mjs"
+      "import": "./dist/utils/stylePreview.mjs",
+      "default": "./dist/utils/stylePreview.mjs"
     },
     "./utils/findReplace": {
       "types": "./dist/utils/findReplace.d.mts",
-      "import": "./dist/utils/findReplace.mjs"
+      "import": "./dist/utils/findReplace.mjs",
+      "default": "./dist/utils/findReplace.mjs"
     },
     "./utils/findVerticalScrollParent": {
       "types": "./dist/utils/findVerticalScrollParent.d.mts",
-      "import": "./dist/utils/findVerticalScrollParent.mjs"
+      "import": "./dist/utils/findVerticalScrollParent.mjs",
+      "default": "./dist/utils/findVerticalScrollParent.mjs"
     },
     "./utils/fontOptions": {
       "types": "./dist/utils/fontOptions.d.mts",
-      "import": "./dist/utils/fontOptions.mjs"
+      "import": "./dist/utils/fontOptions.mjs",
+      "default": "./dist/utils/fontOptions.mjs"
     },
     "./utils/listState": {
       "types": "./dist/utils/listState.d.mts",
-      "import": "./dist/utils/listState.mjs"
+      "import": "./dist/utils/listState.mjs",
+      "default": "./dist/utils/listState.mjs"
     },
     "./utils/reportIssue": {
       "types": "./dist/utils/reportIssue.d.mts",
-      "import": "./dist/utils/reportIssue.mjs"
+      "import": "./dist/utils/reportIssue.mjs",
+      "default": "./dist/utils/reportIssue.mjs"
     },
     "./utils/sidebarConstants": {
       "types": "./dist/utils/sidebarConstants.d.mts",
-      "import": "./dist/utils/sidebarConstants.mjs"
+      "import": "./dist/utils/sidebarConstants.mjs",
+      "default": "./dist/utils/sidebarConstants.mjs"
     },
     "./utils/units": {
       "types": "./dist/utils/units.d.mts",
-      "import": "./dist/utils/units.mjs"
+      "import": "./dist/utils/units.mjs",
+      "default": "./dist/utils/units.mjs"
     },
     "./utils/autoScroll": {
       "types": "./dist/utils/autoScroll.d.mts",
-      "import": "./dist/utils/autoScroll.mjs"
+      "import": "./dist/utils/autoScroll.mjs",
+      "default": "./dist/utils/autoScroll.mjs"
     },
     "./yrs": {
       "types": "./dist/yrs/index.d.mts",
-      "import": "./dist/yrs/index.mjs"
+      "import": "./dist/yrs/index.mjs",
+      "default": "./dist/yrs/index.mjs"
     },
     "./collaboration": {
       "types": "./dist/collaboration/index.d.mts",
-      "import": "./dist/collaboration/index.mjs"
+      "import": "./dist/collaboration/index.mjs",
+      "default": "./dist/collaboration/index.mjs"
     },
     "./editor": {
       "types": "./dist/editor/index.d.mts",
-      "import": "./dist/editor/index.mjs"
+      "import": "./dist/editor/index.mjs",
+      "default": "./dist/editor/index.mjs"
     },
     "./worker": {
       "types": "./dist/worker.d.mts",
-      "import": "./dist/worker.mjs"
+      "import": "./dist/worker.mjs",
+      "default": "./dist/worker.mjs"
     }
   },
   "typesVersions": {

@@ -17,7 +17,7 @@ use crate::write::{
     SharedStringPlan, cell_value_markup, col_runs, fmt_num, fragment, shared_string_index,
     write_cell, write_col_run, write_cols, write_row,
 };
-use crate::xml::{attr, xml_err};
+use crate::xml::{attr, text_attribute, xml_err};
 use crate::{MAX_DEPTH, ParseError};
 
 #[cfg(test)]
@@ -1126,7 +1126,7 @@ fn write_start_tag(
 ) -> Result<(), ParseError> {
     let mut element = BytesStart::new(name);
     for attribute in attributes {
-        element.push_attribute((attribute.name.as_str(), attribute.value.as_str()));
+        element.push_attribute(text_attribute(&attribute.name, &attribute.value));
     }
     let mut writer = Writer::new(std::mem::take(out));
     let event = if empty {

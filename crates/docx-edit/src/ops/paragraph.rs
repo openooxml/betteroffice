@@ -653,6 +653,33 @@ impl EditingDoc {
         })
     }
 
+    pub(crate) fn set_paragraph_language(
+        &self,
+        ctx: &EditCtx,
+        target: &crate::ParagraphTarget,
+        patch: &Any,
+    ) -> OpResult<()> {
+        let mut txn = self.transact_for(ctx);
+        let story = story_ref(&txn, &target.story)?;
+        let map = crate::pilcrows(&story, &txn)
+            .into_iter()
+            .map(|(_, map)| map)
+            .find(|map| {
+                crate::map_string(map, &txn, PARA_ID).as_deref() == Some(target.para_id.as_str())
+            })
+            .ok_or_else(|| OpError::UnknownPara(target.para_id.clone()))?;
+        let previous = map.get(&txn, "language").and_then(|value| match value {
+            Out::Any(value) => Some(value),
+            _ => None,
+        });
+        let language = crate::format::merge_language(previous.as_ref(), patch);
+        if previous.as_ref() != Some(&language) {
+            map.insert(&mut txn, "language", language);
+            identity::promote(self, &mut txn, &map);
+        }
+        Ok(())
+    }
+
     /// Applies a tri-state paragraph attribute delta to the selected
     /// paragraphs in one transaction. In suggesting mode a `pPrChange` record
     /// capturing the before and after property maps is appended to every

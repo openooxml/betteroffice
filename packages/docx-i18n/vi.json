@@ -488,7 +488,9 @@
         "pageUp": "Page Up",
         "pageDown": "Page Down",
         "ctrl": "Ctrl",
-        "del": "Del"
+        "del": "Del",
+        "shift": "Shift",
+        "alt": "Alt"
       }
     },
     "objectGeometry": {
@@ -528,6 +530,7 @@
     "paragraphMarkInserted": "Đã chèn dấu ngắt đoạn",
     "paragraphMarkDeleted": "Đã xóa dấu ngắt đoạn",
     "paragraphPropertiesChanged": "Đã thay đổi thuộc tính đoạn văn",
+    "runPropertiesChanged": "Đã thay đổi định dạng văn bản",
     "rowInserted": "Đã chèn hàng",
     "rowDeleted": "Đã xóa hàng",
     "rowPropertiesChanged": "Đã thay đổi thuộc tính hàng",
@@ -584,6 +587,8 @@
     "noDocumentLoaded": "Chưa tải tài liệu nào",
     "failedToLoad": "Không thể mở tài liệu này",
     "failedToLoadDescription": "Tệp có thể bị hỏng, hoặc dùng thứ mà trình chỉnh sửa này chưa đọc được.",
+    "failedToLoadDamaged": "Tệp bị hỏng hoặc không phải là tài liệu Word hoàn chỉnh.",
+    "failedToLoadUnsupported": "Tài liệu này dùng nội dung mà trình soạn thảo này chưa đọc được.",
     "editorUnavailable": "Trình chỉnh sửa không thể tải",
     "editorUnavailableDescription": "Kiểm tra kết nối, rồi tải lại trang.",
     "reloadPage": "Tải lại trang",
@@ -724,6 +729,7 @@
     "failedToParse": "Không thể phân tích tài liệu",
     "linkRemoved": "Đã xóa liên kết",
     "linkCopied": "Đã sao chép liên kết vào bảng tạm",
+    "pasteFailed": "Không thể hoàn tất thao tác dán. Không có gì thay đổi.",
     "failedToSave": "Không thể lưu tài liệu",
     "documentInput": "Đầu vào tài liệu",
     "documentPreview": "Xem trước tài liệu",
@@ -795,6 +801,8 @@
     "pageLabel": "Trang {number}",
     "headerLabel": "Đầu trang",
     "footerLabel": "Chân trang",
+    "chartNoData": "Không có dữ liệu",
+    "pictureName": "Ảnh",
     "selected": "Đã chọn",
     "selectionCleared": "Đã bỏ chọn",
     "commentedText": "Văn bản có nhận xét",

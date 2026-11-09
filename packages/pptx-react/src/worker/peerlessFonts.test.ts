@@ -289,3 +289,35 @@ for (const mode of ['worker', 'viewer', 'in-thread'] as const) {
     }
   });
 }
+
+test('paint font forwarding replays earlier host faces and forwards later successful installations', async () => {
+  const { createPptxPaintFontForwarder } = await import('./peerlessFonts');
+  const { pptxWorkerRenderClients } = await import('../../../../shared/office-session/render/pptxWorkerRender');
+  const descriptors = ['FontFace', 'document'].map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const);
+  const owner = {}, forwarded: string[] = [], added: string[] = [];
+  const forwarder = createPptxPaintFontForwarder();
+  class Face {
+    constructor(readonly family: string) {}
+    async load() { return this; }
+  }
+  Object.defineProperty(globalThis, 'FontFace', { configurable: true, value: Face });
+  Object.defineProperty(globalThis, 'document', { configurable: true, value: { fonts: { add: (face: Face) => added.push(face.family) } } });
+  pptxWorkerRenderClients.set(owner, { supported: true, fonts: (faces) => forwarded.push(...faces.map((face) => face.family)),
+    view() {}, resync() {}, prerender: () => 0, idle() {}, subscribe: () => () => {}, dispose() {},
+  });
+  try {
+    const installed: FontFace[] = [];
+    await installFonts([{ family: 'Early', bytes: Uint8Array.of(1) }], installed, () => true, () => {}, forwarder.installed);
+    expect(forwarded).toEqual([]);
+    forwarder.attach(owner);
+    await installFonts([{ family: 'Late', bytes: Uint8Array.of(2) }], installed, () => true, () => {}, forwarder.installed);
+    expect(added).toEqual(['Early', 'Late']);
+    expect(forwarded).toEqual(['Early', 'Late']);
+  } finally {
+    forwarder.dispose(); pptxWorkerRenderClients.delete(owner);
+    for (const [key, descriptor] of descriptors) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else Reflect.deleteProperty(globalThis, key);
+    }
+  }
+});

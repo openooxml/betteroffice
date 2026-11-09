@@ -1,5 +1,6 @@
 //! PyO3 bindings over the `betteroffice-docx` facade.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -63,6 +64,20 @@ create_exception!(
     DocxError,
     "The engine refused a structured export's or a content-control listing's options."
 );
+
+fn png_target_index(target: &Bound<'_, PyAny>) -> PyResult<usize> {
+    let invalid =
+        || PyValueError::new_err("target must be a dict containing only a nonnegative page index");
+    let target = target.cast::<PyDict>().map_err(|_| invalid())?;
+    if target.len() != 1 {
+        return Err(invalid());
+    }
+    let index = target.get_item("page")?.ok_or_else(invalid)?;
+    if index.is_instance_of::<PyBool>() {
+        return Err(invalid());
+    }
+    index.extract::<usize>().map_err(|_| invalid())
+}
 
 fn map_error(error: CoreError) -> PyErr {
     let message = error.to_string();
@@ -867,12 +882,15 @@ impl PyLayout {
 }
 
 /// One rasterized page. `skipped_images` counts the image references the
-/// backend could not resolve and left undrawn.
+/// backend could not resolve and left undrawn; `skipped_effects` counts, by
+/// kind, the effects it left out of primitives it otherwise drew.
 #[pyclass(module = "betteroffice_docx", name = "Png", frozen)]
 pub struct PyPng {
     data: Vec<u8>,
     #[pyo3(get)]
     skipped_images: usize,
+    #[pyo3(get)]
+    skipped_effects: BTreeMap<String, usize>,
 }
 
 #[pymethods]
@@ -1341,9 +1359,24 @@ impl PyDocument {
             .map_err(map_error)
     }
 
-    /// Rasterize one display-list page to deterministic PNG bytes.
+    #[pyo3(signature = (target, *, scale = 1.0))]
+    fn render_png(&self, py: Python<'_>, target: &Bound<'_, PyAny>, scale: f32) -> PyResult<PyPng> {
+        let target = betteroffice_docx::PngTarget {
+            page: png_target_index(target)?,
+        };
+        let options = betteroffice_docx::RenderOptions { scale };
+        let rendered = py
+            .detach(|| self.inner.render_png(target, &options))
+            .map_err(map_error)?;
+        Ok(PyPng {
+            data: rendered.bytes,
+            skipped_images: rendered.skipped_images,
+            skipped_effects: rendered.skipped_effects,
+        })
+    }
+
     #[pyo3(signature = (display_list, page = 0))]
-    fn render_png(
+    fn render_display_list_png(
         &self,
         py: Python<'_>,
         display_list: &PyDisplayList,
@@ -1351,11 +1384,12 @@ impl PyDocument {
     ) -> PyResult<PyPng> {
         let list = &display_list.inner;
         let rendered = py
-            .detach(|| self.inner.render_png(list, page))
+            .detach(|| self.inner.render_display_list_png(list, page))
             .map_err(map_error)?;
         Ok(PyPng {
             data: rendered.bytes,
             skipped_images: rendered.skipped_images,
+            skipped_effects: rendered.skipped_effects,
         })
     }
 

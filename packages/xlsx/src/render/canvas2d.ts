@@ -17,11 +17,11 @@ import type {
   TextAlign,
   TextCmd,
 } from '../display-list/types';
+import { fontSizePx, fontString } from './fontString';
 import { PATTERN_MASKS } from './patterns';
 import { paintNumberFormat } from './number-format';
 import { wrapLines, wrappedLineY } from './wrap';
 
-const PX_PER_PT = 96 / 72;
 const STACKED_LINE_HEIGHT_RATIO = 1.2;
 const STACKED_ASCENT_RATIO = 0.8;
 
@@ -97,7 +97,9 @@ function paintPattern(ctx: CanvasRenderingContext2D, cmd: PatternFillCmd, dpr: n
   const key = `${cmd.pattern}/${cmd.fg}/${cmd.bg}/${dpr}`;
   let pattern = cache.get(key);
   if (!pattern) {
-    const tile = typeof OffscreenCanvas === 'undefined' ? document.createElement('canvas') : new OffscreenCanvas(8, 8);
+    const tile = typeof OffscreenCanvas === 'function' ? new OffscreenCanvas(8, 8)
+      : typeof document !== 'undefined' ? document.createElement('canvas')
+      : new (ctx.canvas.constructor as new (width: number, height: number) => HTMLCanvasElement)(8, 8);
     tile.width = 8;
     tile.height = 8;
     const context = tile.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
@@ -250,6 +252,7 @@ function paintText(ctx: CanvasRenderingContext2D, cmd: TextCmd): void {
   }
   ctx.fillStyle = cmd.color;
   ctx.font = fontString(cmd);
+  (ctx as CanvasRenderingContext2D & { textRendering?: string }).textRendering = 'geometricPrecision';
   ctx.textBaseline = 'alphabetic';
   if (cmd.stacked) {
     paintStackedText(ctx, cmd);
@@ -423,23 +426,6 @@ function paintRun(
   if (cmd.underline || cmd.strike || cmd.dashedUnderline) paintDecorations(ctx, cmd, text, x, align);
 }
 
-// css font shorthand: `[italic] [bold] <size>px <family>`. Workbook fonts are
-// often not installed on the host (Calibri on macOS); without a fallback the
-// browser's unknown-family default is serif.
-function fontString(cmd: TextCmd): string {
-  const style = cmd.italic ? 'italic ' : '';
-  const weight = cmd.bold ? 'bold ' : '';
-  const family = cmd.fontFamily
-    ? cmd.chart
-      ? cmd.fontFamily
-      : `"${cmd.fontFamily.replace(/"/g, '\\"')}", sans-serif`
-    : 'sans-serif';
-  return `${style}${weight}${fontSizePx(cmd)}px ${family}`;
-}
-
-function fontSizePx(cmd: TextCmd): number {
-  return cmd.fontSize * PX_PER_PT;
-}
 
 function paintDecorations(
   ctx: CanvasRenderingContext2D,

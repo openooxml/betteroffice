@@ -43,7 +43,8 @@ use crate::word_metrics::{kern_enabled, kern_features};
 
 use super::font_slots::{FontSlot, char_slot};
 use super::input::{FontChains, MeasureRequest, RunIn, validate_pt_size};
-use super::{MAX_RUN_TEXT_BYTES, MeasureError, needs_glyph, pt_to_px};
+use super::packed_glyphs::MeasuredGlyph;
+use super::{MAX_RUN_TEXT_BYTES, MeasureError, needs_glyph, pt_to_px, symbol_character};
 
 /// Longest fallback chain a run keeps resolved per slot. Chains past it are
 /// rebuilt per character instead, so keeping them can never cost more memory
@@ -59,6 +60,7 @@ pub(super) struct CharAdv {
     pub utf16_offset: u32,
     /// UTF-16 code units covered by the complete shaped cluster.
     pub utf16_len: u32,
+    pub source_chars: u32,
     pub advance: f32,
     pub is_space: bool,
     /// ASCII space or U+3000: trailing instances ignore wrap fit, never justify-compressed.
@@ -70,10 +72,73 @@ pub(super) struct CharAdv {
     pub baseline_shift_px: f32,
 }
 
+impl CharAdv {
+    pub fn advance_with_spacing(&self, spacing: f32) -> f32 {
+        self.advance + spacing * self.source_chars as f32
+    }
+}
+
+/// One shaping call of a run: the face that shaped `utf16_start..utf16_end`
+/// at `level`, as [`FontStore::canonical_face`] names it, and its glyphs in
+/// [`MeasuredShaping::glyphs`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct ShapedSegment {
+    pub font: FontId,
+    pub utf16_start: u32,
+    pub utf16_end: u32,
+    pub glyph_start: u32,
+    pub glyph_end: u32,
+    pub level: u8,
+}
+
+/// The glyphs a run was measured with, kept only under `authoritativeShaping`.
+/// Segments ascend in logical order and do not overlap.
+#[derive(Debug, Clone, Default)]
+pub(super) struct MeasuredShaping {
+    pub segments: Vec<ShapedSegment>,
+    pub glyphs: Vec<MeasuredGlyph>,
+}
+
+impl MeasuredShaping {
+    /// The segment that shaped the cluster starting at UTF-16 offset `at`.
+    pub fn segment_at(&self, at: u32) -> Option<&ShapedSegment> {
+        let index = self
+            .segments
+            .partition_point(|segment| segment.utf16_end <= at);
+        self.segments
+            .get(index)
+            .filter(|segment| segment.utf16_start <= at)
+    }
+
+    /// The glyphs of `segment` whose clusters start in `start..end`, in visual
+    /// order. Shaped clusters are monotonic in visual order, ascending left to
+    /// right and descending right to left, so a cut at cluster boundaries
+    /// needs no reshaping.
+    pub fn glyphs_in(&self, segment: &ShapedSegment, start: u32, end: u32) -> &[MeasuredGlyph] {
+        let glyphs = self
+            .glyphs
+            .get(segment.glyph_start as usize..segment.glyph_end as usize)
+            .unwrap_or(&[]);
+        let (from, to) = if crate::bidi::level_is_rtl(segment.level) {
+            (
+                glyphs.partition_point(|glyph| glyph.cluster >= end),
+                glyphs.partition_point(|glyph| glyph.cluster >= start),
+            )
+        } else {
+            (
+                glyphs.partition_point(|glyph| glyph.cluster < start),
+                glyphs.partition_point(|glyph| glyph.cluster < end),
+            )
+        };
+        &glyphs[from..to.max(from)]
+    }
+}
+
 /// A text run ready for line filling.
 #[derive(Debug, Clone)]
 pub(super) struct PreparedText {
     pub chars: Vec<CharAdv>,
+    pub shaped: MeasuredShaping,
     /// Total UTF-16 length of the original text.
     pub utf16_len: u32,
     /// Character indices (into `chars`) where a line may break — i.e. the
@@ -220,6 +285,18 @@ pub(super) fn prepare_runs(
     store: &FontStore,
     input: &MeasureRequest<'_>,
 ) -> Result<Vec<PreparedRun>, MeasureError> {
+    let result = prepare_runs_inner(store, input);
+    if matches!(&result, Err(MeasureError::Unsupported(reason)) if reason == "uncovered character")
+    {
+        scan_base_latin_coverage(store, input);
+    }
+    result
+}
+
+fn prepare_runs_inner(
+    store: &FontStore,
+    input: &MeasureRequest<'_>,
+) -> Result<Vec<PreparedRun>, MeasureError> {
     let bidi_levels = paragraph_run_levels(input);
     let mut prepared = Vec::with_capacity(input.block.runs.len());
     for (run_index, run) in input.block.runs.iter().enumerate() {
@@ -328,6 +405,61 @@ fn apply_auto_space(input: &MeasureRequest<'_>, prepared: &mut [PreparedRun]) {
 }
 
 /// `(utf16 offset, char)` for every character of a run, ascending.
+/// Each glyph's advance summed onto the segment character its cluster starts
+/// at, in the order the characters are first reached. `byte_to_char` maps byte
+/// offsets in the shaped text to character indices in
+/// `seg_start..seg_start + seg_len`.
+fn cluster_advances(
+    glyphs: impl Iterator<Item = (usize, f32)>,
+    byte_to_char: &[(usize, usize)],
+    seg_start: usize,
+    seg_len: usize,
+) -> Vec<(usize, f32)> {
+    let mut slots: Vec<Option<usize>> = vec![None; seg_len];
+    let mut clusters: Vec<(usize, f32)> = Vec::new();
+    for (cluster, advance) in glyphs {
+        // last mapped shaped-char at or before this cluster byte
+        let slot = byte_to_char.partition_point(|&(byte, _)| byte <= cluster);
+        let Some(&(_, char_index)) = slot.checked_sub(1).and_then(|i| byte_to_char.get(i)) else {
+            continue;
+        };
+        let known = match char_index
+            .checked_sub(seg_start)
+            .and_then(|offset| slots.get(offset))
+        {
+            Some(known) => *known,
+            None => clusters.iter().position(|(start, _)| *start == char_index),
+        };
+        match known {
+            Some(index) => clusters[index].1 += advance,
+            None => {
+                if let Some(entry) = char_index
+                    .checked_sub(seg_start)
+                    .and_then(|offset| slots.get_mut(offset))
+                {
+                    *entry = Some(clusters.len());
+                }
+                clusters.push((char_index, advance));
+            }
+        }
+    }
+    clusters
+}
+
+/// For each source character index below `char_count`, the first cluster whose
+/// logical order is that index.
+fn first_cluster_by_char(chars: &[CharAdv], char_count: usize) -> Vec<Option<usize>> {
+    let mut first = vec![None; char_count];
+    for (index, cluster) in chars.iter().enumerate() {
+        if let Some(entry) = first.get_mut(cluster.logical_order as usize)
+            && entry.is_none()
+        {
+            *entry = Some(index);
+        }
+    }
+    first
+}
+
 fn utf16_chars(text: &str) -> Vec<(u32, char)> {
     let mut offset = 0u32;
     text.chars()
@@ -540,6 +672,7 @@ fn prepare_field_run(
         pt_to_px(font_size_pt),
         base_direction(run.rtl, input),
         input.font_chains,
+        (run.bold, run.italic, family),
     )?;
     Ok(PreparedField {
         width,
@@ -563,25 +696,59 @@ fn script_metrics(base_size_pt: f32, run: &RunIn) -> (f32, f32) {
     }
 }
 
-type FontResolver = fn(&FontStore, &[FontId], char) -> Option<FontId>;
+#[derive(Clone, Copy)]
+struct FontResolver {
+    coverage_only: bool,
+    symbols_shape: bool,
+    bold: bool,
+    italic: bool,
+}
 
+impl FontResolver {
+    fn resolve(
+        self,
+        store: &FontStore,
+        chain: &[FontId],
+        ch: char,
+        family: &str,
+        track: bool,
+    ) -> Option<FontId> {
+        if !self.coverage_only || (self.symbols_shape && symbol_character(ch)) {
+            return store.resolve_with_family_tracking(
+                chain,
+                ch,
+                self.bold,
+                self.italic,
+                family,
+                track,
+            );
+        }
+        if !needs_glyph(ch) {
+            return chain.iter().copied().find(|&id| store.metrics(id).is_ok());
+        }
+        store
+            .resolve_with_family_tracking(chain, ch, self.bold, self.italic, family, track)
+            .filter(|&id| covered_character(store, id, ch).ok().flatten().is_some())
+    }
+}
+
+#[cfg(test)]
 fn font_resolver(coverage_only: bool) -> FontResolver {
-    if coverage_only {
-        resolve_covered
-    } else {
-        resolve_with_fallback
-    }
+    styled_font_resolver(coverage_only, false, false, false)
 }
 
-fn resolve_with_fallback(store: &FontStore, chain: &[FontId], ch: char) -> Option<FontId> {
-    store.resolve(chain, ch).or_else(|| chain.last().copied())
-}
-
-fn resolve_covered(store: &FontStore, chain: &[FontId], ch: char) -> Option<FontId> {
-    if !needs_glyph(ch) {
-        return chain.iter().copied().find(|&id| store.metrics(id).is_ok());
+fn styled_font_resolver(
+    coverage_only: bool,
+    symbols_shape: bool,
+    bold: bool,
+    italic: bool,
+) -> FontResolver {
+    FontResolver {
+        coverage_only,
+        symbols_shape,
+        bold,
+        italic,
     }
-    store.resolve(chain, ch)
 }
 
 /// Width of `text` shaped plainly through `chain` — no caps, letter spacing
@@ -594,6 +761,7 @@ pub(super) fn measure_plain_text(
     size_px: f32,
     base: crate::bidi::BaseDirection,
     font_chains: FontChains<'_>,
+    style: (bool, bool, &str),
 ) -> Result<f32, MeasureError> {
     if text.len() > MAX_RUN_TEXT_BYTES {
         return Err(MeasureError::Unsupported(format!(
@@ -610,9 +778,14 @@ pub(super) fn measure_plain_text(
 
     let levels = char_levels(text, base);
     let mut plan: Vec<(char, FontId, u8)> = Vec::new();
-    let resolve = font_resolver(font_chains.coverage_only(chain));
+    let resolve = styled_font_resolver(
+        font_chains.coverage_only(chain),
+        font_chains.symbols_shape(),
+        style.0,
+        style.1,
+    );
     for (i, ch) in text.chars().enumerate() {
-        let Some(font) = resolve(store, chain, ch) else {
+        let Some(font) = resolve.resolve(store, chain, ch, style.2, true) else {
             return Err(MeasureError::Unsupported("uncovered character".to_string()));
         };
         let shaped = if ch == '\u{2011}' {
@@ -642,6 +815,99 @@ pub(super) fn measure_plain_text(
         seg_start = seg_end;
     }
     Ok(width)
+}
+
+fn family_for_slot<'a>(run: &'a RunIn, slot: FontSlot, fallback: &'a str) -> &'a str {
+    let slots = run.font_slots.as_ref();
+    let selected = match slot {
+        FontSlot::Ascii => slots.and_then(|s| s.ascii.as_deref()),
+        FontSlot::HAnsi => slots.and_then(|s| s.h_ansi.as_deref()),
+        FontSlot::EastAsia => slots.and_then(|s| s.east_asia.as_deref()),
+        FontSlot::Cs => slots.and_then(|s| s.cs.as_deref()),
+    };
+    selected
+        .or_else(|| slots.and_then(|s| s.h_ansi.as_deref()))
+        .or_else(|| slots.and_then(|s| s.ascii.as_deref()))
+        .or(run.font_family.as_deref())
+        .unwrap_or(fallback)
+}
+
+fn language_for_slot(run: &RunIn, slot: FontSlot) -> Option<&str> {
+    let language = run.language.as_ref()?;
+    match slot {
+        FontSlot::EastAsia => language.east_asia.as_deref().or(language.latin.as_deref()),
+        FontSlot::Cs => language.bidi.as_deref().or(language.latin.as_deref()),
+        FontSlot::Ascii | FontSlot::HAnsi => language.latin.as_deref(),
+    }
+}
+
+fn scan_base_latin_coverage(store: &FontStore, input: &MeasureRequest<'_>) {
+    for run in &input.block.runs {
+        if run.kind != "text" || run.hidden {
+            continue;
+        }
+        let mut seen = [[0u32; 64]; 4];
+        let mut previous = FontSlot::HAnsi;
+        let hint = run
+            .font_slots
+            .as_ref()
+            .and_then(|slots| slots.hint.as_deref())
+            == Some("eastAsia");
+        let mut chains: [Option<Vec<FontId>>; 4] = [None, None, None, None];
+        for ch in run.text.as_deref().unwrap_or("").chars() {
+            let slot = char_slot(ch, run.complex_script, hint, previous);
+            previous = slot;
+            let caps = run.all_caps || (run.small_caps && ch.is_lowercase());
+            if !caps && crate::font_store::base_latin_character_index(ch).is_none() {
+                continue;
+            }
+            let family = family_for_slot(run, slot, &input.defaults.font_family);
+            let bold = if slot == FontSlot::Cs {
+                run.bold_cs.unwrap_or(run.bold)
+            } else {
+                run.bold
+            };
+            let italic = if slot == FontSlot::Cs {
+                run.italic_cs.unwrap_or(run.italic)
+            } else {
+                run.italic
+            };
+            let chain = chains[slot.index()].get_or_insert_with(|| {
+                match input.chain_for(family, bold, italic) {
+                    Err(_) if matches!(slot, FontSlot::EastAsia | FontSlot::Cs) => {
+                        let base =
+                            family_for_slot(run, FontSlot::HAnsi, &input.defaults.font_family);
+                        input
+                            .chain_for(base, bold, italic)
+                            .or_else(|_| input.chain_for(base, run.bold, run.italic))
+                            .or_else(|_| input.chain_for(base, false, false))
+                            .unwrap_or_default()
+                    }
+                    chain => chain.unwrap_or_default(),
+                }
+            });
+            if chain.len() > MAX_KEPT_CHAIN_IDS {
+                continue;
+            }
+            let characters = if caps {
+                uppercase_for_language(ch, language_for_slot(run, slot))
+            } else {
+                vec![ch]
+            };
+            for character in characters {
+                let Some(index) = crate::font_store::base_latin_character_index(character) else {
+                    continue;
+                };
+                let word = &mut seen[slot.index()][index / 32];
+                if *word & (1 << (index % 32)) != 0 {
+                    continue;
+                }
+                *word |= 1 << (index % 32);
+                let _ = store
+                    .resolve_with_family_tracking(chain, character, bold, italic, family, true);
+            }
+        }
+    }
 }
 
 /// Builds a text run's cluster advance table: validate and clamp the run's
@@ -729,28 +995,6 @@ fn prepare_text_run(
         Many(Vec<char>),
     }
 
-    fn family_for_slot<'a>(run: &'a RunIn, slot: FontSlot, fallback: &'a str) -> &'a str {
-        let slots = run.font_slots.as_ref();
-        let selected = match slot {
-            FontSlot::Ascii => slots.and_then(|s| s.ascii.as_deref()),
-            FontSlot::HAnsi => slots.and_then(|s| s.h_ansi.as_deref()),
-            FontSlot::EastAsia => slots.and_then(|s| s.east_asia.as_deref()),
-            FontSlot::Cs => slots.and_then(|s| s.cs.as_deref()),
-        };
-        selected
-            .or_else(|| slots.and_then(|s| s.h_ansi.as_deref()))
-            .or_else(|| slots.and_then(|s| s.ascii.as_deref()))
-            .or(run.font_family.as_deref())
-            .unwrap_or(fallback)
-    }
-    fn language_for_slot(run: &RunIn, slot: FontSlot) -> Option<&str> {
-        let language = run.language.as_ref()?;
-        match slot {
-            FontSlot::EastAsia => language.east_asia.as_deref().or(language.latin.as_deref()),
-            FontSlot::Cs => language.bidi.as_deref().or(language.latin.as_deref()),
-            FontSlot::Ascii | FontSlot::HAnsi => language.latin.as_deref(),
-        }
-    }
     fn supports_smcp(store: &FontStore, font: FontId, ch: char, size_px: f32, level: u8) -> bool {
         let text = ch.to_string();
         let plain = shape_with_direction(store, font, &text, size_px, &[], shape_direction(level));
@@ -824,8 +1068,8 @@ fn prepare_text_run(
         };
         let (font_size_pt, baseline_shift_px) = script_metrics(base_size_pt, run);
         let index = slot.index();
+        let family = family_for_slot(run, slot, &input.defaults.font_family);
         if slot_chains[index].is_none() {
-            let family = family_for_slot(run, slot, &input.defaults.font_family);
             // Release the previous rebuilt chain before allocating the next, so
             // a run never holds two of them at once.
             oversized = Vec::new();
@@ -842,8 +1086,14 @@ fn prepare_text_run(
                 resolved => resolved?,
             };
             validate_chain(store, &resolved)?;
-            slot_resolvers[index]
-                .get_or_insert_with(|| font_resolver(input.font_chains.coverage_only(&resolved)));
+            slot_resolvers[index].get_or_insert_with(|| {
+                styled_font_resolver(
+                    input.font_chains.coverage_only(&resolved),
+                    input.font_chains.symbols_shape(),
+                    bold,
+                    italic,
+                )
+            });
             if resolved.len() <= MAX_KEPT_CHAIN_IDS {
                 slot_chains[index] = Some(resolved);
             } else {
@@ -853,7 +1103,7 @@ fn prepare_text_run(
         let chain = slot_chains[index].as_deref().unwrap_or(&oversized);
         let resolve = slot_resolvers[index].expect("slot resolver");
         let first = shaped[0];
-        let Some(mut font) = resolve(store, chain, first) else {
+        let Some(mut font) = resolve.resolve(store, chain, first, family, true) else {
             return Err(MeasureError::Unsupported("uncovered character".to_string()));
         };
         let mut features = kern_features(run.kerning_min_pt.is_some_and(|threshold| {
@@ -866,7 +1116,7 @@ fn prepare_text_run(
             && run.small_caps
             && !run.all_caps
             && ch.is_lowercase()
-            && let Some(original_font) = resolve(store, chain, ch)
+            && let Some(original_font) = resolve.resolve(store, chain, ch, family, false)
             && supports_smcp(
                 store,
                 original_font,
@@ -921,6 +1171,7 @@ fn prepare_text_run(
 
     // Same-style directional ranges preserve kerning and ligatures.
     let mut chars: Vec<CharAdv> = Vec::new();
+    let mut measured = MeasuredShaping::default();
     let mut seg_start = 0;
     while seg_start < plan.len() {
         let first_plan = &plan[seg_start];
@@ -968,24 +1219,38 @@ fn prepare_text_run(
             first_plan.language.as_deref(),
         )
         .map_err(|e| MeasureError::Invalid(format!("shaping failed: {e}")))?;
-        let mut glyph_clusters: Vec<(usize, f32)> = Vec::new();
-        for g in &glyphs {
-            let cluster = g.cluster as usize;
-            // last mapped shaped-char at or before this cluster byte
-            let slot = byte_to_char.partition_point(|&(byte, _)| byte <= cluster);
-            let Some(&(_, char_index)) = slot.checked_sub(1).and_then(|i| byte_to_char.get(i))
-            else {
-                continue;
-            };
-            if let Some((_, advance)) = glyph_clusters
-                .iter_mut()
-                .find(|(start, _)| *start == char_index)
-            {
-                *advance += g.x_advance;
-            } else {
-                glyph_clusters.push((char_index, g.x_advance));
-            }
+        if input.authoritative_shaping {
+            let horizontal = seg_scale * scale;
+            let glyph_start = measured.glyphs.len() as u32;
+            measured.glyphs.reserve(glyphs.len());
+            measured.glyphs.extend(glyphs.iter().filter_map(|glyph| {
+                let slot =
+                    byte_to_char.partition_point(|&(byte, _)| byte <= glyph.cluster as usize);
+                let &(_, char_index) = byte_to_char.get(slot.checked_sub(1)?)?;
+                Some(MeasuredGlyph {
+                    id: glyph.glyph_id,
+                    cluster: plan[char_index].utf16_offset,
+                    advance: glyph.x_advance * horizontal,
+                    dx: glyph.x_offset * horizontal,
+                    dy: glyph.y_offset * seg_scale,
+                })
+            }));
+            let last = &plan[seg_end - 1];
+            measured.segments.push(ShapedSegment {
+                font: store.canonical_face(font),
+                utf16_start: first_plan.utf16_offset,
+                utf16_end: last.utf16_offset + last.utf16_len,
+                glyph_start,
+                glyph_end: measured.glyphs.len() as u32,
+                level: seg_level,
+            });
         }
+        let mut glyph_clusters = cluster_advances(
+            glyphs.iter().map(|g| (g.cluster as usize, g.x_advance)),
+            &byte_to_char,
+            seg_start,
+            seg_end - seg_start,
+        );
         glyph_clusters.sort_by_key(|&(start, _)| start);
         if glyph_clusters
             .first()
@@ -1003,6 +1268,7 @@ fn prepare_text_run(
             chars.push(CharAdv {
                 utf16_offset: pc.utf16_offset,
                 utf16_len,
+                source_chars: (end - start) as u32,
                 advance: advance * pc.advance_scale * scale,
                 is_space: plan[start..end]
                     .iter()
@@ -1032,15 +1298,14 @@ fn prepare_text_run(
     let byte_offsets: Vec<usize> = text.char_indices().map(|(b, _)| b).collect();
     let mut breaks: Vec<usize> = Vec::new();
     if !text.is_empty() {
+        let first_cluster = first_cluster_by_char(&chars, byte_offsets.len());
         for bo in break_opportunities(text) {
             if bo.byte_index == 0 || bo.byte_index >= text.len() {
                 continue;
             }
             // opportunities are always char boundaries (line_break.rs)
             if let Ok(char_index) = byte_offsets.binary_search(&bo.byte_index)
-                && let Some(cluster_index) = chars
-                    .iter()
-                    .position(|cluster| cluster.logical_order as usize == char_index)
+                && let Some(cluster_index) = first_cluster[char_index]
             {
                 breaks.push(cluster_index);
             }
@@ -1064,6 +1329,7 @@ fn prepare_text_run(
     let first_baseline_shift = chars.first().map_or(0.0, |c| c.baseline_shift_px);
     Ok(PreparedText {
         chars,
+        shaped: measured,
         utf16_len: utf16_total,
         breaks,
         letter_spacing,
@@ -1081,6 +1347,141 @@ mod tests {
 
     const FIXTURE: &[u8] = include_bytes!("../../tests/fonts/LiberationSans-Regular.ttf");
 
+    struct Rng(u64);
+
+    impl Rng {
+        fn below(&mut self, bound: usize) -> usize {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 % bound.max(1) as u64) as usize
+        }
+    }
+
+    fn old_cluster_advances(
+        glyphs: &[(usize, f32)],
+        byte_to_char: &[(usize, usize)],
+    ) -> Vec<(usize, f32)> {
+        let mut glyph_clusters: Vec<(usize, f32)> = Vec::new();
+        for &(cluster, x_advance) in glyphs {
+            let slot = byte_to_char.partition_point(|&(byte, _)| byte <= cluster);
+            let Some(&(_, char_index)) = slot.checked_sub(1).and_then(|i| byte_to_char.get(i))
+            else {
+                continue;
+            };
+            if let Some((_, advance)) = glyph_clusters
+                .iter_mut()
+                .find(|(start, _)| *start == char_index)
+            {
+                *advance += x_advance;
+            } else {
+                glyph_clusters.push((char_index, x_advance));
+            }
+        }
+        glyph_clusters
+    }
+
+    #[test]
+    fn cluster_advances_match_a_search_of_the_clusters_seen_so_far() {
+        let mut rng = Rng(0x5eed_cafe);
+        for _ in 0..3000 {
+            let seg_start = rng.below(6);
+            let seg_len = 1 + rng.below(80);
+            // shaped chars per source char (1 plain, 2-3 for expansions), 1-4 bytes each
+            let mut byte_to_char = Vec::new();
+            let mut starts = Vec::new();
+            let mut byte = 0usize;
+            for char_index in seg_start..seg_start + seg_len {
+                starts.push(byte);
+                for _ in 0..1 + rng.below(3) {
+                    byte_to_char.push((byte, char_index));
+                    byte += 1 + rng.below(4);
+                }
+            }
+            // glyphs: ligatures (one glyph for several chars), combining marks (several
+            // glyphs on one cluster), right-to-left order, and cluster bytes inside a char
+            let mut glyphs: Vec<(usize, f32)> = Vec::new();
+            let mut index = 0;
+            while index < starts.len() {
+                let span = 1 + rng.below(3);
+                for _ in 0..1 + rng.below(3) {
+                    let jitter = if rng.below(5) == 0 { rng.below(3) } else { 0 };
+                    glyphs.push((starts[index] + jitter, (rng.below(2000) as f32) / 7.0));
+                }
+                index += span;
+            }
+            if rng.below(2) == 0 {
+                glyphs.reverse();
+            }
+            if rng.below(4) == 0 {
+                let a = rng.below(glyphs.len());
+                let b = rng.below(glyphs.len());
+                glyphs.swap(a, b);
+            }
+            let expected = old_cluster_advances(&glyphs, &byte_to_char);
+            let actual =
+                cluster_advances(glyphs.iter().copied(), &byte_to_char, seg_start, seg_len);
+            assert_eq!(actual.len(), expected.len());
+            for (a, e) in actual.iter().zip(&expected) {
+                assert_eq!(a.0, e.0);
+                assert_eq!(a.1.to_bits(), e.1.to_bits());
+            }
+        }
+    }
+
+    #[test]
+    fn preparing_one_long_run_takes_time_proportional_to_its_length() {
+        let fastest = |repeats: usize| {
+            (0..3)
+                .map(|_| {
+                    let mut store = FontStore::new();
+                    store.register_slice(FIXTURE).unwrap();
+                    let text =
+                        "A great many more words at the start of this page. ".repeat(repeats);
+                    let input = input_with(serde_json::json!([{ "kind": "text", "text": text }]));
+                    let started = std::time::Instant::now();
+                    prepare_runs(&store, &input.as_request()).unwrap();
+                    started.elapsed().as_secs_f64()
+                })
+                .fold(f64::INFINITY, f64::min)
+        };
+        let short = fastest(300);
+        let long = fastest(1200);
+        // Four times the text: about 4x when linear, about 16x when every glyph or
+        // break opportunity searched the clusters already prepared.
+        assert!(long / short < 8.0, "{long} / {short}");
+    }
+
+    #[test]
+    fn first_cluster_by_char_matches_a_search_from_the_start() {
+        let mut rng = Rng(0xfeed_beef);
+        for _ in 0..3000 {
+            let char_count = rng.below(90);
+            let clusters: Vec<CharAdv> = (0..rng.below(100))
+                .map(|_| CharAdv {
+                    utf16_offset: 0,
+                    utf16_len: 1,
+                    source_chars: 1,
+                    advance: 1.0,
+                    is_space: false,
+                    is_fit_space: false,
+                    level: 0,
+                    logical_order: rng.below(char_count + 5) as u32,
+                    font_size_pt: 11.0,
+                    metrics_font: FontId(0),
+                    baseline_shift_px: 0.0,
+                })
+                .collect();
+            let first = first_cluster_by_char(&clusters, char_count);
+            for (char_index, found) in first.iter().enumerate() {
+                let expected = clusters
+                    .iter()
+                    .position(|cluster| cluster.logical_order as usize == char_index);
+                assert_eq!(*found, expected, "char {char_index}");
+            }
+        }
+    }
+
     fn input_with(runs: serde_json::Value) -> MeasureInput {
         serde_json::from_value(serde_json::json!({
             "block": { "kind": "paragraph", "runs": runs },
@@ -1089,6 +1490,52 @@ mod tests {
             "defaults": { "fontSize": 12.0, "fontFamily": "Liberation Sans" }
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn unsupported_paragraphs_do_not_shape_the_remaining_text() {
+        for combined in [false, true] {
+            let mut store = FontStore::new();
+            let font = store.register_slice(FIXTURE).unwrap();
+            let tail = "remaining latin ".repeat(1000);
+            let runs = if combined {
+                serde_json::json!([{"kind": "text", "text": format!("😀{tail}"), "smallCaps": true}])
+            } else {
+                serde_json::json!([
+                    {"kind": "text", "text": "😀"},
+                    {"kind": "text", "text": tail, "smallCaps": true}
+                ])
+            };
+            let mut input = input_with(runs);
+            input.font_chains.insert(
+                "@betteroffice/fonts/coverage".to_owned(),
+                vec![font.to_u32()],
+            );
+            assert!(prepare_runs(&store, &input.as_request()).is_err());
+            assert_eq!(store.shape_cache_len(), 0);
+        }
+    }
+
+    #[test]
+    fn implicit_nonbreaking_hyphen_keeps_measured_glyphs() {
+        let mut store = FontStore::new();
+        let font = store.register_slice(FIXTURE).unwrap();
+        assert!(!store.covers(font, '\u{2011}').unwrap());
+        assert!(
+            covered_character(&store, font, '\u{2011}')
+                .unwrap()
+                .is_some()
+        );
+        let mut input = input_with(serde_json::json!([{
+            "kind": "text", "text": "co\u{2011}operate"
+        }]));
+        let expected = prepare_runs(&store, &input.as_request()).unwrap();
+        input.font_chains.insert(
+            "@betteroffice/fonts/coverage".to_owned(),
+            vec![font.to_u32()],
+        );
+        let actual = prepare_runs(&store, &input.as_request()).unwrap();
+        assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
     }
 
     #[test]
@@ -1129,16 +1576,14 @@ mod tests {
             assert_eq!(store.resolve(&chain, ch), store.resolve(&[fallback], ch));
             for chains in [&configured, &unrelated] {
                 assert_eq!(
-                    font_resolver(FontChains::Hash(chains).coverage_only(&chain))(
-                        &store, &chain, ch
-                    ),
+                    font_resolver(FontChains::Hash(chains).coverage_only(&chain))
+                        .resolve(&store, &chain, ch, "", false),
                     Some(fallback)
                 );
             }
             assert_eq!(
-                font_resolver(FontChains::Hash(&implicit).coverage_only(&chain))(
-                    &store, &chain, ch
-                ),
+                font_resolver(FontChains::Hash(&implicit).coverage_only(&chain))
+                    .resolve(&store, &chain, ch, "", false),
                 Some(font)
             );
         }
@@ -1146,13 +1591,30 @@ mod tests {
         assert!(store.covers(fallback, '€').unwrap());
         assert!(needs_glyph('\u{0939}'));
         assert_eq!(
-            font_resolver(FontChains::Hash(&implicit).coverage_only(&chain))(
-                &store, &chain, '\u{0939}'
-            ),
+            font_resolver(FontChains::Hash(&implicit).coverage_only(&chain))
+                .resolve(&store, &chain, '\u{0939}', "", false),
             None
         );
         let unknown = FontId::from_u32(u32::MAX);
         assert!(store.covers(unknown, '\t').is_err());
+        #[cfg(not(feature = "base-latin"))]
+        {
+            let mut input = input_with(serde_json::json!([
+                { "kind": "text", "text": "\u{0939}" },
+                { "kind": "text", "text": "A" }
+            ]));
+            input.font_chains.insert(
+                "@betteroffice/fonts/coverage".to_owned(),
+                vec![font.to_u32()],
+            );
+            assert!(prepare_runs(&store, &input.as_request()).is_err());
+            assert!(store.take_base_latin_miss());
+            input.block.runs[1].text = Some(format!("{}B", "A".repeat(1000)));
+            assert!(prepare_runs(&store, &input.as_request()).is_err());
+            assert!(store.take_base_latin_miss());
+            assert!(prepare_runs(&store, &input.as_request()).is_err());
+            assert!(!store.take_base_latin_miss());
+        }
     }
 
     /// Offsets are UTF-16 code units, not UTF-8 bytes: 'é' is 2 bytes but

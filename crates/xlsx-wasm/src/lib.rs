@@ -42,11 +42,6 @@ pub fn decode_font_face(
     Ok(object.into())
 }
 
-#[cfg(all(target_arch = "wasm32", not(feature = "raster")))]
-#[used]
-#[unsafe(link_section = "betteroffice.xlsx.no-png")]
-static PNG_EXPORT_UNAVAILABLE: [u8; 1] = [1];
-
 /// days from the 1900 epoch to 1970-01-01, phantom-1900 leap day included.
 const UNIX_EPOCH_SERIAL: f64 = 25569.0;
 const MS_PER_DAY: f64 = 86_400_000.0;
@@ -470,36 +465,6 @@ impl XlsxDocument {
             .map_err(map_engine_error)
     }
 
-    /// render the current sheet viewport to png bytes (raster feature only).
-    #[wasm_bindgen(js_name = renderPng)]
-    pub fn render_png(&self, viewport_json: &str) -> Result<Vec<u8>, JsValue> {
-        #[cfg(feature = "raster")]
-        {
-            self.inner
-                .render_png(viewport_json)
-                .map_err(map_engine_error)
-        }
-        #[cfg(not(feature = "raster"))]
-        {
-            let _ = viewport_json;
-            Err(JsValue::from_str("png export not in this build"))
-        }
-    }
-
-    /// render an a1 range (default: used range) at an optional scale to png.
-    #[wasm_bindgen(js_name = renderRangePng)]
-    pub fn render_range_png(&self, args: &str) -> Result<Vec<u8>, JsValue> {
-        #[cfg(feature = "raster")]
-        {
-            self.inner.render_range_png(args).map_err(map_engine_error)
-        }
-        #[cfg(not(feature = "raster"))]
-        {
-            let _ = args;
-            Err(JsValue::from_str("png export not in this build"))
-        }
-    }
-
     /// serialized `SheetInfo`: stable IDs, names, active index, content extent.
     #[wasm_bindgen(js_name = sheetInfoJson)]
     pub fn sheet_info_json(&self) -> Result<String, JsValue> {
@@ -566,6 +531,14 @@ impl XlsxDocument {
     #[wasm_bindgen(js_name = editCellsJson)]
     pub fn edit_cells_json(&mut self, args: &str) -> Result<String, JsValue> {
         self.inner.edit_cells_json(args).map_err(map_engine_error)
+    }
+
+    /// @internal
+    #[wasm_bindgen(js_name = translateFormulasJson)]
+    pub fn translate_formulas_json(&self, args: &str) -> Result<String, JsValue> {
+        self.inner
+            .translate_formulas_json(args)
+            .map_err(map_engine_error)
     }
 
     #[wasm_bindgen(js_name = moveRangeJson)]
@@ -791,6 +764,14 @@ impl XlsxDocument {
         self.inner.save_bytes().map_err(map_engine_error)
     }
 
+    /// The warnings a save of the workbook as it is now carries, as a JSON
+    /// array of `{ code, part, element?, sheet?, message }`; `[]` on an
+    /// ordinary save.
+    #[wasm_bindgen(js_name = saveWarningsJson)]
+    pub fn save_warnings_json(&self) -> Result<String, JsValue> {
+        self.inner.save_warnings_json().map_err(map_engine_error)
+    }
+
     /// crate version string.
     pub fn version() -> String {
         xlsx_engine::Session::version().to_string()
@@ -820,5 +801,15 @@ pub fn export_xlsx_markdown_json(
 
 #[wasm_bindgen(js_name = renderXlsxMarkdownJson)]
 pub fn render_xlsx_markdown_json(content: &str, options: &str) -> Result<String, JsValue> {
-    xlsx_engine::render_xlsx_markdown_json(content, options).map_err(map_engine_error)
+    #[cfg(feature = "structured-render")]
+    {
+        xlsx_engine::render_xlsx_markdown_json(content, options).map_err(map_engine_error)
+    }
+    #[cfg(not(feature = "structured-render"))]
+    {
+        let _ = (content, options);
+        Err(JsValue::from_str(
+            "rendering structured content not in this build",
+        ))
+    }
 }

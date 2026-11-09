@@ -22,7 +22,7 @@ use super::staging::CommitHistory;
 use super::target::{CellTarget, FindRequest, RangeTarget, ReadRequest, Resolved, cell_target};
 use super::{
     StagedApply, Workbook, authority_error, calculation_result, cell_states_semantically_equal,
-    committed_formula, current_cell_state, edit_cell_state, validate_cell_state,
+    committed_formula, current_cell_state, edit_cell_state, entered_formula, validate_cell_state,
     validate_model_sheets, validate_op, written_cell_style,
 };
 use crate::authority::{SyncOrigin, cell_format_fits};
@@ -763,7 +763,7 @@ impl Workbook {
             EditOperation::SetCellInputs { inputs, .. } => {
                 let mut states = Vec::new();
                 for (cell, input) in resolved.iter().zip(inputs.iter().flatten()) {
-                    let (state, format) = edit_cell_state(
+                    let (mut state, format) = edit_cell_state(
                         &self.model,
                         &defined,
                         resolved.sheet,
@@ -771,12 +771,17 @@ impl Workbook {
                         input,
                         now_serial,
                     );
-                    validate_cell_state(&state).map_err(|error| {
-                        at(
-                            EditFailureCode::InvalidStep,
-                            format!("the input for {}: {error}", cell.to_a1()),
-                        )
-                    })?;
+                    entered_formula(&self.model, resolved.sheet, cell, state.formula.take())
+                        .and_then(|formula| {
+                            state.formula = formula;
+                            validate_cell_state(&state)
+                        })
+                        .map_err(|error| {
+                            at(
+                                EditFailureCode::InvalidStep,
+                                format!("the input for {}: {error}", cell.to_a1()),
+                            )
+                        })?;
                     if format.is_some()
                         || !cell_states_semantically_equal(
                             &current_cell_state(&self.model, resolved.sheet, cell),
@@ -818,13 +823,25 @@ impl Workbook {
                 let mut states = Vec::new();
                 for (cell, source) in resolved.iter().zip(formulas.iter().flatten()) {
                     let current = current_cell_state(&self.model, resolved.sheet, cell);
-                    let state = CellState {
-                        value: CellValue::Empty,
-                        formula: Some(committed_formula(
+                    let formula = entered_formula(
+                        &self.model,
+                        resolved.sheet,
+                        cell,
+                        Some(committed_formula(
                             source.clone(),
                             current.formula.as_deref(),
                             names,
                         )),
+                    )
+                    .map_err(|error| {
+                        at(
+                            EditFailureCode::InvalidStep,
+                            format!("the formula for {}: {error}", cell.to_a1()),
+                        )
+                    })?;
+                    let state = CellState {
+                        value: CellValue::Empty,
+                        formula,
                         style: written_cell_style(&self.model, resolved.sheet, cell, false),
                     };
                     if !cell_states_semantically_equal(&current, &state) {
@@ -1031,7 +1048,10 @@ impl Workbook {
         };
         if !self
             .authority
-            .rehearse_local_update(&baseline, prepared.update())
+            .rehearse_local_update(
+                &baseline,
+                prepared.update().expect("batch commits stage an update"),
+            )
             .map_err(authority_error)?
         {
             return Err(Error::CollaborativeState(

@@ -52,6 +52,7 @@
     "decreaseFontSize": "Decrease font size",
     "increaseFontSize": "Increase font size",
     "underline": "Underline",
+    "strikethrough": "Strikethrough",
     "more": "More",
     "fillColor": "Fill color",
     "noFill": "No fill",
@@ -91,6 +92,12 @@
     "fallbackTitle": "Slide {number}",
     "canvasLabel": "Slide {current} of {total}",
     "canvasLabelWithSelection": "Slide {current} of {total}; selected object {name}"
+  },
+  "a11y": {
+    "chartNoData": "No data",
+    "slideWithTitle": "Slide {current} of {total}: {title}",
+    "objectSelected": "{name} selected",
+    "editingText": "Editing {name}"
   },
   "editor": {
     "appLabel": "Presentation slide editor",
@@ -139,36 +146,10 @@
   },
   "proposals": {
     "title": "Agent proposals",
-    "close": "Close",
-    "empty": "No changes awaiting review.",
-    "preview": "Preview changes",
-    "previewTitle": "Review proposed changes",
-    "before": "Current slide",
-    "after": "Proposed slide",
     "accept": "Accept proposal",
     "reject": "Reject",
-    "force": "Apply updated proposal",
-    "blank": "Empty",
-    "target": "Slide {slide} · {name}",
-    "targetLabel": "Change",
-    "targetMissing": "The target is no longer available",
-    "stale": "These objects changed after the proposal was created. Preview the current changes before applying.",
-    "stalePreview": "This preview uses the updated slide. Applying will override the changed targets.",
-    "geometry": "Position and size (x, y, width, height)",
-    "geometryValues": "{before} → {after} pt",
-    "appearance": "Appearance or text formatting changed",
-    "changedAgain": "The target changed again. Review the refreshed preview before applying.",
     "canvasTitle": "Changes on this slide",
-    "editSlide": "Edit slide",
-    "showDiff": "Show changes",
-    "details": "Review details",
-    "removed": "Removed",
-    "added": "Added",
-    "reviewHint": "Review mode · changes apply when accepted",
-    "canvasStale": "Targets changed. Open Review details to inspect the updated preview before applying.",
-    "previousPosition": "Previous",
-    "proposedPosition": "Proposed",
-    "loadingDiff": "Loading changes…"
+    "showDiff": "Show changes"
   },
   "commands": {
     "moreControls": "More controls",
@@ -212,8 +193,25 @@
       "permissionDenied": "The host application has not allowed this plugin to use this command.",
       "unsupportedPolicy": "Plugins can't run this command yet. Use an edit batch instead.",
       "pluginUnavailable": "The plugin is no longer active.",
-      "aborted": "The plugin action was cancelled before the command ran."
-    }
+      "aborted": "The plugin action was cancelled before the command ran.",
+      "clipboardUnavailable": "Clipboard access is unavailable or was denied.",
+      "tableRequired": "Place the cursor in a table cell first.",
+      "lastSlide": "The last slide cannot be deleted."
+    },
+    "cut": "Cut",
+    "copy": "Copy",
+    "paste": "Paste",
+    "pastePlainText": "Paste as plain text",
+    "insert": "Insert",
+    "delete": "Delete",
+    "deleteTable": "Delete table",
+    "duplicateSlide": "Duplicate slide",
+    "insertRowsAbove": "Insert rows above",
+    "insertRowsBelow": "Insert rows below",
+    "insertColumnsLeft": "Insert columns to the left",
+    "insertColumnsRight": "Insert columns to the right",
+    "deleteRows": "Delete rows",
+    "deleteColumns": "Delete columns"
   },
   "plugins": {
     "toolbarGroup": "Plugins",
@@ -225,5 +223,14 @@
     "label": "Collaborators",
     "moreCollaborators": "{count, plural, one {# more collaborator} other {# more collaborators}}",
     "moreSelections": "+{count, plural, one {# selection} other {# selections}}"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "delete": "Del",
+    "escape": "Esc",
+    "pageup": "Page Up",
+    "pagedown": "Page Down"
   }
 }

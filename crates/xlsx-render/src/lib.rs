@@ -765,6 +765,13 @@ where
     .into();
     let pane_divider_color: Arc<str> = PANE_DIVIDER_COLOR.into();
     let print_font_family: Option<Arc<str>> = print.map(|(m, _)| m.font_family.as_str().into());
+    let fallback_font_family: Arc<str> = print_font_family.clone().unwrap_or_else(|| {
+        geometry::normal_font(styles)
+            .and_then(|font| font.name.as_deref())
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or("Calibri")
+            .into()
+    });
     let indent_step = geometry::indent_step_px(styles, print.map(|(m, _)| m));
     let mut fx = FrameStyles::new(styles, sheet_ref);
     let geom = geometry.expect("sheet geometry initialized");
@@ -998,7 +1005,16 @@ where
         let strike = font.is_some_and(|f| f.strike);
         let font_family = font
             .and_then(|f| f.family.clone())
-            .or_else(|| print_font_family.clone());
+            .or_else(|| Some(fallback_font_family.clone()));
+        let text = match font_family
+            .as_deref()
+            .and_then(ooxml_drawingml::SymbolFont::named)
+        {
+            Some(face) if parts.is_empty() && matches!(cell.value, CellValue::Text { .. }) => face
+                .display_text(&text)
+                .map_or(text, |symbol| symbol.text.into()),
+            _ => text,
+        };
 
         let left_pad = print.map_or(TEXT_PAD_PX, |(m, _)| 3.0 * 96.0 / m.dpi);
         let right_pad = print.map_or(TEXT_PAD_PX, |(m, _)| 2.0 * 96.0 / m.dpi);
@@ -1174,7 +1190,7 @@ where
             strike: false,
             highlight: None,
             dashed_underline: false,
-            font_family: print_font_family.clone(),
+            font_family: Some(fallback_font_family.clone()),
             number_format: None,
             ghost: false,
             chart: false,
@@ -3004,6 +3020,88 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(text.contains(&("Website", HYPERLINK_COLOR, true)));
         assert!(text.contains(&("Jump", HYPERLINK_COLOR, true)));
+    }
+
+    fn screen_text_families(wb: &Workbook) -> Vec<(String, Option<String>)> {
+        build_display_list(
+            wb,
+            SheetId(0),
+            &Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: 400.0,
+                height: 120.0,
+            },
+        )
+        .unwrap()
+        .commands
+        .iter()
+        .filter_map(|command| match command {
+            DrawCmd::Text {
+                text, font_family, ..
+            } => Some((text.to_string(), font_family.as_deref().map(str::to_owned))),
+            _ => None,
+        })
+        .collect()
+    }
+
+    #[test]
+    fn screen_text_without_a_family_takes_the_normal_font_or_calibri() {
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(CellRef::new(0, 0), text_cell("Plain"));
+        sheet.set_cell(CellRef::new(1, 0), text_cell("Website"));
+        sheet.hyperlinks.push(Hyperlink {
+            range: CellRange::parse_a1("A2").unwrap(),
+            external_target: Some("https://example.com".into()),
+            location: None,
+            tooltip: None,
+            display: None,
+        });
+        let mut wb = Workbook::default();
+        wb.sheets.push(sheet);
+        for (text, family) in screen_text_families(&wb) {
+            assert_eq!(family.as_deref(), Some("Calibri"), "{text}");
+        }
+        wb.styles.fonts.push(xlsx_model::styles::Font {
+            name: Some("Arial".into()),
+            size_pt: Some(10.0),
+            ..Default::default()
+        });
+        wb.styles.cell_xfs.push(xlsx_model::styles::Xf {
+            font: Some(0),
+            ..Default::default()
+        });
+        let families = screen_text_families(&wb);
+        assert_eq!(families.len(), 2);
+        for (text, family) in families {
+            assert_eq!(family.as_deref(), Some("Arial"), "{text}");
+        }
+    }
+
+    #[test]
+    fn screen_text_fallback_follows_the_grid_normal_font_and_covers_display_only_links() {
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(CellRef::new(0, 0), text_cell("Plain"));
+        sheet.hyperlinks.push(Hyperlink {
+            range: CellRange::parse_a1("C3").unwrap(),
+            external_target: None,
+            location: Some("Sheet1!A1".into()),
+            tooltip: None,
+            display: Some("Jump".into()),
+        });
+        let mut wb = Workbook::default();
+        wb.sheets.push(sheet);
+        wb.styles.fonts.push(xlsx_model::styles::Font {
+            name: Some("Arial".into()),
+            size_pt: Some(10.0),
+            ..Default::default()
+        });
+        wb.styles.cell_xfs.push(xlsx_model::styles::Xf::default());
+        let families = screen_text_families(&wb);
+        assert_eq!(families.len(), 2);
+        for (text, family) in families {
+            assert_eq!(family.as_deref(), Some("Arial"), "{text}");
+        }
     }
 
     #[test]

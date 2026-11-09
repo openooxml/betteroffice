@@ -1,5 +1,5 @@
-import { useCallback, useLayoutEffect, useRef } from 'react';
-import type { DisplayList, WorkbookSession } from '@betteroffice/xlsx';
+import { useCallback, useLayoutEffect, useMemo, useRef } from 'react';
+import type { DisplayList, WorkbookSession, XlsxFontFace, XlsxPngFont } from '@betteroffice/xlsx';
 import type { createDefaultFontPainter } from './defaultFonts';
 
 export const defaultFontPainterModule = { load: () => import('./defaultFonts') };
@@ -12,10 +12,15 @@ export function useDefaultFonts(
   repaintRef.current = repaint;
   const settledRef = useRef(settled);
   settledRef.current = settled;
-  const state = useRef<{ painter?: ReturnType<typeof createDefaultFontPainter>; last?: DisplayList }>(undefined);
+  const state = useRef<{ owner: unknown; painter?: ReturnType<typeof createDefaultFontPainter>; last?: DisplayList }>(undefined);
+  const openingFrame = useRef<DisplayList>(undefined);
   useLayoutEffect(() => {
     if (defaultFonts === false || decoder === undefined) return;
-    const current: NonNullable<typeof state.current> = {};
+    const current: NonNullable<typeof state.current> = { owner };
+    if (owner != null) {
+      current.last = openingFrame.current;
+      openingFrame.current = undefined;
+    }
     state.current = current;
     void defaultFontPainterModule.load().then(({ createDefaultFontPainter }) => {
       if (state.current !== current) return;
@@ -33,12 +38,25 @@ export function useDefaultFonts(
       if (state.current === current) state.current = undefined;
     };
   }, [owner, decoder, defaultFonts]);
-  return useCallback((displayList: DisplayList, paint: () => void): boolean => {
+  const paintWithFonts = useCallback((displayList: DisplayList, paint: () => void): boolean => {
     const current = state.current;
+    if (current && current.owner == null) openingFrame.current = displayList;
     if (current?.painter) return current.painter.paint(displayList, paint);
     paint();
     if (!current) return true;
     current.last = displayList;
     return false;
   }, []);
+  return useMemo(() => Object.assign(paintWithFonts, {
+    preload: (displayList: DisplayList, idle: () => boolean) => { state.current?.painter?.preload(displayList, idle); },
+  }), [paintWithFonts]);
+}
+
+/** The faces a PNG export should paint `fonts` with, as the editor paints them; none when default fonts are off. */
+export async function editorExportFaces(
+  fonts: readonly XlsxPngFont[], decoder: WorkbookSession['call']['decodeFontFace'] | null | undefined, defaultFonts: boolean | undefined,
+): Promise<XlsxFontFace[] | undefined> {
+  if (defaultFonts === false || fonts.length === 0) return undefined;
+  const { exportFaces } = await defaultFontPainterModule.load();
+  return exportFaces(fonts, decoder);
 }

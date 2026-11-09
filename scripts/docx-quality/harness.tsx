@@ -60,7 +60,7 @@ api.oracleInit = async (input: number[], fonts: boolean, profile?: unknown) => {
   root.render(
     <DocxEditor
       ref={editor}
-      {...(legacySyncApi ? { legacySyncApi: true as const } : {})}
+      {...(legacySyncApi ? { legacySyncApi: true } : {}) as Record<never, never>}
       documentBuffer={bytes}
       readOnly
       initialZoom={1}

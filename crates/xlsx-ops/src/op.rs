@@ -5,7 +5,7 @@ use serde::de::{Error as _, IntoDeserializer};
 use serde::{Deserialize, Serialize};
 use xlsx_model::{
     Cell, CellRange, CellRef, CellValue, ChartAnchor, ColId, ColStyle, ConditionalFormatting,
-    DefinedName, DifferentialFormat, FreezePane, Hyperlink, RowId, SheetChart, SheetId,
+    DefinedName, DifferentialFormat, FreezePane, Hyperlink, RowId, SheetChart, SheetId, Table,
 };
 
 use crate::formatting::{CapturedFormat, NumberFormatMutation, StylePatch};
@@ -352,6 +352,12 @@ define_ops! {
             sheet: SheetId,
             name: String,
             formulas: Vec<(SheetId, CellRef, CellState)>,
+        },
+        /// Absolute replacement of the table list, emitted as the inverse of
+        /// sheet removal and insertion.
+        #[doc(hidden)]
+        SetTables => "setTables" {
+            tables: Vec<Table>,
         },
     }
 }

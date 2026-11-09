@@ -1,5 +1,6 @@
 //! S4 drawing and media projection.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use base64::Engine as _;
@@ -31,6 +32,8 @@ pub struct S4Projection {
     pub chart_entries: Vec<(String, Chart)>,
     pub xml_parts: Vec<S4XmlPart>,
     pub smart_art_warnings: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -74,13 +77,12 @@ pub fn parse_docx_s4_projection(data: &[u8]) -> Result<S4Projection, ParseError>
         .collect::<IndexMap<String, &[u8]>>();
     let charts = parse_chart_parts(&all_xml, &limits);
     let mut smart_art = create_smart_art_context(&all_xml);
-    let mut relationship_parts = IndexMap::new();
-    for (path, &xml) in &all_xml {
-        if path.to_ascii_lowercase().ends_with(".rels") {
-            relationship_parts.insert(path.clone(), parse_relationships(xml, path, &mut budget)?);
-        }
-    }
-    let document_relationships = relationship_parts.get("word/_rels/document.xml.rels");
+    let RelationshipParts {
+        parts: relationship_parts,
+        unreadable,
+        warnings,
+    } = read_relationship_parts(&all_xml, &mut budget)?;
+    let document_relationships = relationship_parts.get(DOCUMENT_RELATIONSHIPS);
     let mut xml_parts = Vec::new();
     for (path, &xml) in &all_xml {
         // Chart parts carry no drawing, VML or watermark leaf, and
@@ -92,10 +94,14 @@ pub fn parse_docx_s4_projection(data: &[u8]) -> Result<S4Projection, ParseError>
         let Some(root) = document.root() else {
             continue;
         };
-        let owner_path = relationship_path_for_part(path);
-        let relationships = relationship_parts
-            .get(&owner_path)
-            .or(document_relationships);
+        let owner_path = relationship_path_for_part(path).to_ascii_lowercase();
+        let relationships = if unreadable.contains(&owner_path) {
+            None
+        } else {
+            relationship_parts
+                .get(&owner_path)
+                .or(document_relationships)
+        };
         if let Some(part) = project_s4_xml_part(
             path,
             root,
@@ -113,7 +119,50 @@ pub fn parse_docx_s4_projection(data: &[u8]) -> Result<S4Projection, ParseError>
         chart_entries: charts.into_iter().collect(),
         xml_parts,
         smart_art_warnings: smart_art.warnings,
+        warnings,
     })
+}
+
+const DOCUMENT_RELATIONSHIPS: &str = "word/_rels/document.xml.rels";
+
+struct RelationshipParts {
+    parts: IndexMap<String, RelationshipMap>,
+    unreadable: HashSet<String>,
+    warnings: Vec<String>,
+}
+
+/// Every relationships part of the package. One that cannot be read costs only
+/// the part it belongs to, and what it spent of `budget`, with a warning; the
+/// document's own still fails, as opening the document does.
+fn read_relationship_parts(
+    all_xml: &IndexMap<String, &[u8]>,
+    budget: &mut ParseBudget<'_>,
+) -> Result<RelationshipParts, ParseError> {
+    let mut read = RelationshipParts {
+        parts: IndexMap::new(),
+        unreadable: HashSet::new(),
+        warnings: Vec::new(),
+    };
+    for (path, &xml) in all_xml {
+        if !path.to_ascii_lowercase().ends_with(".rels") {
+            continue;
+        }
+        let mut attempt = budget.clone();
+        match parse_relationships(xml, path, &mut attempt) {
+            Ok(relationships) => {
+                *budget = attempt;
+                read.parts.insert(path.to_ascii_lowercase(), relationships);
+            }
+            Err(error) if path.eq_ignore_ascii_case(DOCUMENT_RELATIONSHIPS) => return Err(error),
+            Err(_) => {
+                read.warnings.push(format!(
+                    "{path} could not be read, so its part's references were left unresolved."
+                ));
+                read.unreadable.insert(path.to_ascii_lowercase());
+            }
+        }
+    }
+    Ok(read)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -236,8 +285,13 @@ fn project_drawing(
     } else if matches!(chart, DrawingChart::Unread) {
         return Ok(None);
     } else if is_smart_art_drawing(drawing) {
-        let Some(shape) =
-            parse_smart_art_from_drawing(drawing, relationships, Some(smart_art), budget)?
+        let Some(shape) = parse_smart_art_from_drawing(
+            drawing,
+            relationships,
+            Some(media),
+            Some(smart_art),
+            budget,
+        )?
         else {
             return Ok(None);
         };
@@ -373,9 +427,145 @@ mod tests {
             chart_entries: Vec::new(),
             xml_parts: Vec::new(),
             smart_art_warnings: Vec::new(),
+            warnings: Vec::new(),
         })
         .unwrap();
+        assert!(
+            !String::from_utf8(
+                base64::engine::general_purpose::STANDARD
+                    .decode(&envelope.canonical_base64)
+                    .unwrap()
+            )
+            .unwrap()
+            .contains("warnings\":[")
+        );
         assert_eq!(envelope.wire_version, 1);
         assert_eq!(envelope.canonical_sha256.len(), 64);
+    }
+
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYPj/HwADAgH/5ncLrgAAAABJRU5ErkJggg==";
+
+    fn package(header_rels: Option<&str>, document_rels: &str) -> Vec<u8> {
+        let mut parts: Vec<(String, Vec<u8>)> = vec![
+            ("[Content_Types].xml".to_owned(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec()),
+            ("word/document.xml".to_owned(), br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>"#.to_vec()),
+            ("word/header1.xml".to_owned(), br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:p><w:r><w:pict><v:shape style="width:10px;height:10px"><v:imagedata r:id="rId1"/></v:shape></w:pict></w:r></w:p></w:hdr>"#.to_vec()),
+            ("word/_rels/document.xml.rels".to_owned(), document_rels.as_bytes().to_vec()),
+            ("word/media/image1.png".to_owned(), base64::engine::general_purpose::STANDARD.decode(PNG).unwrap()),
+        ];
+        if let Some(rels) = header_rels {
+            parts.push((
+                "word/_rels/header1.xml.rels".to_owned(),
+                rels.as_bytes().to_vec(),
+            ));
+        }
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    }
+
+    const DOCUMENT_RELS: &str = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/></Relationships>"#;
+
+    fn header_image(projection: &S4Projection) -> serde_json::Value {
+        projection
+            .xml_parts
+            .iter()
+            .find(|part| part.path == "word/header1.xml")
+            .unwrap()
+            .vml_images[0]
+            .value["image"]
+            .clone()
+    }
+
+    #[test]
+    fn an_unreadable_part_relationships_warns_and_borrows_nothing_from_the_document() {
+        let borrowed = parse_docx_s4_projection(&package(None, DOCUMENT_RELS)).unwrap();
+        assert!(borrowed.warnings.is_empty());
+        assert!(
+            header_image(&borrowed)["src"].is_string(),
+            "{}",
+            header_image(&borrowed)
+        );
+
+        let projection =
+            parse_docx_s4_projection(&package(Some("<Relationships><not closed"), DOCUMENT_RELS))
+                .unwrap();
+        assert_eq!(projection.warnings.len(), 1);
+        assert!(projection.warnings[0].contains("word/_rels/header1.xml.rels"));
+        assert_eq!(header_image(&projection)["rId"], "rId1");
+        assert!(
+            header_image(&projection)["src"].is_null(),
+            "{}",
+            header_image(&projection)
+        );
+    }
+
+    #[test]
+    fn an_unreadable_relationships_part_named_in_another_case_borrows_nothing_either() {
+        let bytes = package(None, DOCUMENT_RELS);
+        let mut parts = ooxml_opc::unzip_parts(&bytes).unwrap();
+        parts.push((
+            "word/_rels/Header1.xml.RELS".to_owned(),
+            b"<Relationships><not closed".to_vec(),
+        ));
+        let projection =
+            parse_docx_s4_projection(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+        assert_eq!(projection.warnings.len(), 1);
+        assert!(header_image(&projection)["src"].is_null());
+    }
+
+    #[test]
+    fn a_readable_relationships_part_named_in_another_case_is_the_part_s_own() {
+        let bytes = package(None, DOCUMENT_RELS);
+        let borrowed = header_image(&parse_docx_s4_projection(&bytes).unwrap());
+        let mut parts = ooxml_opc::unzip_parts(&bytes).unwrap();
+        let mut other = base64::engine::general_purpose::STANDARD
+            .decode(PNG)
+            .unwrap();
+        other.push(0);
+        parts.push(("word/media/image2.png".to_owned(), other));
+        parts.push((
+            "word/_rels/Header1.xml.RELS".to_owned(),
+            DOCUMENT_RELS
+                .replace("image1.png", "image2.png")
+                .into_bytes(),
+        ));
+        let projection =
+            parse_docx_s4_projection(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+        let own = header_image(&projection);
+        assert!(projection.warnings.is_empty());
+        assert!(own["src"].is_string(), "{own}");
+        assert_ne!(own["src"], borrowed["src"]);
+    }
+
+    #[test]
+    fn unreadable_document_relationships_still_fail() {
+        assert!(parse_docx_s4_projection(&package(None, "<Relationships><not closed")).is_err());
+    }
+
+    #[test]
+    fn an_unreadable_part_spends_none_of_the_budget() {
+        let limits = ParseLimits {
+            max_relationships: 2,
+            ..ParseLimits::default()
+        };
+        let mut budget = ParseBudget::new(&limits);
+        let rel = |id: &str| format!(r#"<Relationship Id="{id}" Type="image" Target="a.png"/>"#);
+        let big = format!(
+            "<Relationships>{}{}{}</Relationships>",
+            rel("rId1"),
+            rel("rId2"),
+            rel("rId3")
+        );
+        let small = format!(
+            "<Relationships>{}{}</Relationships>",
+            rel("rId1"),
+            rel("rId2")
+        );
+        let parts = IndexMap::from([
+            ("word/_rels/header1.xml.rels".to_owned(), big.as_bytes()),
+            (DOCUMENT_RELATIONSHIPS.to_owned(), small.as_bytes()),
+        ]);
+        let read = read_relationship_parts(&parts, &mut budget).unwrap();
+        assert!(read.unreadable.contains("word/_rels/header1.xml.rels"));
+        assert_eq!(read.parts[DOCUMENT_RELATIONSHIPS].len(), 2);
     }
 }

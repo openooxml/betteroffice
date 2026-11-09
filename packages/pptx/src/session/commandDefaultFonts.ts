@@ -1,7 +1,9 @@
-import type { BundledFontScript } from '@betteroffice/fonts';
+import type { BundledFontLoader, BundledFontScript } from '@betteroffice/fonts';
 import { scriptFontFace } from './commandScriptFonts';
 import type { DefaultFontFace, DefaultFontLanding, RequestedFontFace } from '../../../../shared/pptxDefaultFonts';
 import { decodeFontFace } from '../wasm/loader';
+import { sessionFontDecoder } from './sessionFontDecoder';
+import type { createSlicedFontFaces } from './commandSlicedFonts';
 
 type FontRequest =
   | { kind: 'primary'; family: string; bold: boolean; italic: boolean }
@@ -9,10 +11,10 @@ type FontRequest =
 
 let decoderReady: Promise<unknown> = Promise.resolve();
 
-const sessionDecoder: typeof decodeFontFace = async (bytes, options) => {
+const sessionDecoder = sessionFontDecoder(async (bytes, options) => {
   await decoderReady.catch(() => {});
   return decodeFontFace(bytes, options);
-};
+});
 
 export const commandFontProvider = {
   async load() { return (await import('@betteroffice/fonts')).createFontProvider(undefined, { decoder: sessionDecoder }); },
@@ -25,11 +27,18 @@ export const commandFontProvider = {
  */
 export function prefetchCoverageFaces(
   scripts: readonly string[], wasmReady: Promise<unknown>, provider: () => ReturnType<typeof commandFontProvider.load>,
+  sliced = false,
 ): void {
   decoderReady = wasmReady;
   if (!scripts.length) return;
-  void provider().then((source) => {
-    for (const script of scripts) void source.resolveScriptFallback(script as BundledFontScript, false, false)?.().catch(() => {});
+  void provider().then(async (source) => {
+    for (const script of scripts) {
+      const load = source.resolveScriptFallback(script as BundledFontScript, false, false);
+      if (load?.slices && sliced && (await import('./commandSlicedFonts')).slicedFacesSupported()) {
+        const { openSlicedFace } = await import('@betteroffice/fonts/progressive');
+        void openSlicedFace(load.slices).catch(() => {});
+      } else void load?.().catch(() => {});
+    }
   }).catch(() => {});
 }
 
@@ -41,6 +50,7 @@ export function createCommandDefaultFonts(
   install?: (faces: readonly DefaultFontFace[]) => Promise<readonly DefaultFontFace[]>,
   beforeRegister?: () => void,
   shared?: () => ReturnType<typeof commandFontProvider.load>,
+  sliced?: ReturnType<typeof createSlicedFontFaces>,
 ) {
   const families = new Set(supplied.map((face) => face.family.trim().toLowerCase()));
   const attempted = new Set<string>();
@@ -78,7 +88,7 @@ export function createCommandDefaultFonts(
         if (disposed || finished) return undefined;
         let bold = face.bold;
         let italic = face.italic;
-        let load: (() => Promise<ArrayBuffer>) | undefined;
+        let load: BundledFontLoader | undefined;
         let light: (() => Promise<ArrayBuffer>) | undefined;
         if (face.kind === 'coverage') {
           load = source.resolveScriptFallback(face.script as BundledFontScript, bold, italic);
@@ -90,15 +100,31 @@ export function createCommandDefaultFonts(
         } else {
           const named = source.resolve(face.family, bold, italic) ?? source.resolveFamily(face.family, bold, italic);
           light = named ? undefined : source.resolveLightVariant?.(face.family, bold, italic);
-          load = named ?? light;
+          load = named ?? light ?? source.resolveLastResort(face.family, bold, italic, 'powerpoint');
         }
         if (!load) return undefined;
+        if (load.slices && sliced?.supported()) {
+          try {
+            const { openSlicedFace } = await import('@betteroffice/fonts/progressive');
+            const opened = await openSlicedFace(load.slices);
+            if (disposed || finished || suppliedFamily(face)) return undefined;
+            const skeleton = face.kind === 'coverage' ? await scriptFontFace(face.script, bold, italic, opened.bytes())
+              : { family: face.family, bold: face.bold, italic: face.italic, bytes: opened.bytes() };
+            if (skeleton && !families.has(skeleton.family.trim().toLowerCase())) {
+              sliced.add(skeleton.family, { get revision() { return opened.revision; }, bytes: () => opened.bytes(),
+                ensureText: (text) => opened.ensureText(text), prefetch: (text) => opened.prefetch(text),
+                chunksOf: (text) => opened.chunksOf(text), loadedChunks: () => opened.loadedChunks() }, load);
+              return disposed || finished ? undefined : skeleton;
+            }
+          } catch {}
+        }
         const bytes = await load();
         if (disposed || finished || suppliedFamily(face)) return undefined;
         const loaded = face.kind === 'coverage'
           ? await scriptFontFace(face.script, bold, italic, bytes)
           : { family: face.family, bold: face.bold, italic: face.italic, bytes, ...(light ? { ownWeight: true } : {}) };
         if (!loaded || disposed || finished) return undefined;
+        sliced?.plain(loaded.family, loaded.bold, loaded.italic);
         const identity = JSON.stringify([loaded.family.trim().toLowerCase(), loaded.bold, loaded.italic]);
         let installation = installations.get(identity);
         if (!installation) {

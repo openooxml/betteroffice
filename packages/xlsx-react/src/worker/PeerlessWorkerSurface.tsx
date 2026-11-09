@@ -6,11 +6,13 @@ import type { CollaborationAwareness } from '@betteroffice/xlsx/collaboration';
 import { useTranslation } from '../i18n';
 import { expandRangeToMergedCells, scaledRect } from '../viewer/sessionGeometry';
 import { PeerlessWorkerCellInput, usePeerlessReadOnly } from './PeerlessWorkerInputs';
+import { cellEditorColors } from '../viewer/cellEditorColors';
 import type { PeerlessWorkbookSession } from './usePeerlessSessionWorkbook';
 import type { WorkerDraftController } from './WorkerDraftController';
 import { WorkerPresentationStore, useWorkerPresentation } from './WorkerPresentationStore';
 import { PresenceStrip, RemoteSelections } from '../presence/Presence';
 import { usePeerlessPresence } from './usePeerlessPresence';
+import { A11yGridCell } from '../components/A11yGridCell';
 
 const selectSelection = (state: ReturnType<WorkerPresentationStore['getSnapshot']>) => state.selection;
 const selectPainted = (state: ReturnType<WorkerPresentationStore['getSnapshot']>) => state.painted;
@@ -53,6 +55,8 @@ export const PeerlessWorkerOverlay = memo(function PeerlessWorkerOverlay({ store
   const chartRect = selectedChart ? painted?.displayList.charts?.find((chart) => chart.id === selectedChart.id)?.rect : null;
   const rect = useCallback((row: number, col: number, sheet: number) =>
     painted?.geometry && painted.request.sheet === sheet ? cellRect(painted.geometry, row, col) : null, [painted]);
+  const colors = useCallback((sheet: number, bounds: { x: number; y: number; w: number; h: number }) =>
+    cellEditorColors(painted?.request.sheet === sheet ? painted.displayList : null, bounds), [painted]);
   const outline = (bounds: NonNullable<typeof selectionRect>, border: string, background?: string): CSSProperties => {
     const scaled = scaledRect(bounds, scale);
     return { position: 'absolute', left: scaled.x, top: scaled.y, width: scaled.w, height: scaled.h,
@@ -65,12 +69,13 @@ export const PeerlessWorkerOverlay = memo(function PeerlessWorkerOverlay({ store
     {focusRect && !selectedChart && <div style={outline(focusRect, '2px solid #217346')} />}
     {chartRect && <div data-testid="xlsx-chart-selection" data-chart-id={selectedChart?.id} aria-hidden
       style={{ ...outline(chartRect, '2px solid #217346'), transform: `translate(${chartOffset?.x ?? 0}px, ${chartOffset?.y ?? 0}px)` }} />}
-    <PeerlessWorkerCellInput controller={controller} zoom={scale} disabled={unavailable} rect={rect} />
+    <PeerlessWorkerCellInput controller={controller} zoom={scale} disabled={unavailable} rect={rect} colors={colors} />
   </div>;
 });
 
-export const PeerlessWorkerAccessibility = memo(function PeerlessWorkerAccessibility({ store, active, sheets }: {
+export const PeerlessWorkerAccessibility = memo(function PeerlessWorkerAccessibility({ store, active, sheets, onFollowLink }: {
   store: WorkerPresentationStore; active: number; sheets: WorkbookSheetSummary[];
+  onFollowLink?: (row: number, col: number) => void;
 }) {
   const { t } = useTranslation();
   const painted = useWorkerPresentation(store, selectPainted);
@@ -84,16 +89,18 @@ export const PeerlessWorkerAccessibility = memo(function PeerlessWorkerAccessibi
     emptyCellLabelSelected: t('a11y.emptyCellLabelSelected'),
   }) : null, [frame, visible, sheetName, t]);
   if (!grid) return null;
-  return <PeerlessAccessibilityGrid grid={grid} />;
+  return <PeerlessAccessibilityGrid grid={grid} onFollowLink={onFollowLink} />;
 });
 
-const PeerlessAccessibilityGrid = memo(function PeerlessAccessibilityGrid({ grid }: { grid: ReturnType<typeof buildA11yGrid> }) {
+const PeerlessAccessibilityGrid = memo(function PeerlessAccessibilityGrid({ grid, onFollowLink }: {
+  grid: ReturnType<typeof buildA11yGrid>; onFollowLink?: (row: number, col: number) => void;
+}) {
   return <>
     <div style={hidden} role="grid" aria-label={grid.label}>
       <div role="row"><span role="columnheader" />{grid.columnHeaders.map((header) =>
         <span key={header.col} role="columnheader">{header.label}</span>)}</div>
       {grid.rows.map((row) => <div key={row.row} role="row"><span role="rowheader">{row.header}</span>
-        {row.cells.map((cell) => <span key={cell.col} role="gridcell" aria-selected={cell.selected}>{cell.label}</span>)}
+        {row.cells.map((cell) => <A11yGridCell key={cell.col} cell={cell} onFollowLink={onFollowLink} />)}
       </div>)}
     </div>
     {grid.charts.map((chart, index) => <div key={`${index}:${chart.label}`} style={hidden} role="img" aria-label={chart.label} />)}

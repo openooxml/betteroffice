@@ -115,6 +115,12 @@ pub struct DefinedNamesResult {
     pub total: usize,
     /// Document version observed by this read.
     pub version: String,
+    /// Set while the whole table is over the engine's size bound, which
+    /// collaborators can reach together. Adding to it is refused, deleting always
+    /// works, and it still saves, but such a file reopens only in other
+    /// applications until the table is back under the bound.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub over_limit: bool,
 }
 
 /// One conditional-format rule and its sheet range.
@@ -157,16 +163,16 @@ pub struct CalculationStatus {
     pub unevaluated_cells: Vec<UnevaluatedStatus>,
 }
 
-/// A formula cell the engine could not compute: it keeps Excel's saved value,
-/// or stays blank when the file saved none, unless only an engine gap was
-/// involved, which shows its error.
+/// A formula cell the engine could not compute: it keeps Excel's saved value.
+/// When the file saved none, an uncomputable function leaves it blank, an
+/// unknown function shows the engine's answer, and a gap alone shows its error.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UnevaluatedStatus {
     /// The cell formatted relative to the active sheet.
     pub address: String,
-    /// The uncomputable functions involved, sorted; empty when only gaps of
-    /// the engine were.
+    /// The uncomputable and unknown functions involved, sorted; empty when
+    /// only gaps of the engine were.
     pub functions: Vec<String>,
 }
 
@@ -326,6 +332,8 @@ impl Workbook {
             next_offset: (next < total).then_some(next),
             total,
             version: self.version().to_string(),
+            over_limit: xlsx_model::workbook::defined_names_bytes(&self.model().defined_names)
+                > xlsx_model::workbook::MAX_DEFINED_NAME_BYTES,
         })
     }
 

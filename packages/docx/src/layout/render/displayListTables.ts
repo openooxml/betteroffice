@@ -102,6 +102,8 @@ export interface DisplayListSelectedCellRect {
   w: number;
   h: number;
   exact: boolean;
+  /** This box is a header row's copy on a continuation page. */
+  repeatedHeader?: boolean;
   region: 'body' | 'header' | 'footer';
   rId?: string;
 }
@@ -478,6 +480,7 @@ interface CellGridAccum {
   maxX: number;
   maxY: number;
   exactClip?: GeoRect;
+  repeatedHeader?: boolean;
 }
 
 interface TableGridAccum {
@@ -511,8 +514,10 @@ function upsertCellGrid(
     existing.rowSpan = Math.max(existing.rowSpan, cell.rowSpan);
     existing.colSpan = Math.max(existing.colSpan, cell.colSpan);
     if (exactClip) existing.exactClip = exactClip;
+    if (cell.repeatedHeader) existing.repeatedHeader = true;
   } else {
     a.cells.set(key, {
+      repeatedHeader: cell.repeatedHeader,
       row: cell.row,
       col: cell.col,
       rowSpan: cell.rowSpan,
@@ -753,6 +758,7 @@ export function deriveDisplayListSelectedCellRects(
           w: Math.max(1, right - x),
           h: Math.max(1, bottom - y),
           exact,
+          ...(contentCell?.repeatedHeader ? { repeatedHeader: true } : {}),
           region: regionPrims.kind,
           rId: regionPrims.rId,
         });

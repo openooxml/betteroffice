@@ -488,7 +488,9 @@
         "pageUp": "Page Up",
         "pageDown": "Page Down",
         "ctrl": "Ctrl",
-        "del": "Del"
+        "del": "Del",
+        "shift": "Shift",
+        "alt": "Alt"
       }
     },
     "objectGeometry": {
@@ -528,6 +530,7 @@
     "paragraphMarkInserted": "Wstawiono podział akapitu",
     "paragraphMarkDeleted": "Usunięto podział akapitu",
     "paragraphPropertiesChanged": "Zmieniono właściwości akapitu",
+    "runPropertiesChanged": "Zmieniono formatowanie tekstu",
     "rowInserted": "Wstawiono wiersz",
     "rowDeleted": "Usunięto wiersz",
     "rowPropertiesChanged": "Zmieniono właściwości wiersza",
@@ -584,6 +587,8 @@
     "noDocumentLoaded": "Nie załadowano dokumentu",
     "failedToLoad": "Nie udało się załadować dokumentu",
     "failedToLoadDescription": "Plik może być uszkodzony albo zawiera elementy, których ten edytor jeszcze nie potrafi odczytać.",
+    "failedToLoadDamaged": "Plik jest uszkodzony lub nie jest kompletnym dokumentem Word.",
+    "failedToLoadUnsupported": "Ten dokument zawiera element, którego ten edytor nie potrafi jeszcze odczytać.",
     "editorUnavailable": "Nie udało się załadować edytora",
     "editorUnavailableDescription": "Sprawdź połączenie, a następnie odśwież stronę.",
     "reloadPage": "Odśwież stronę",
@@ -724,6 +729,7 @@
     "failedToParse": "Nie udało się przetworzyć dokumentu",
     "linkRemoved": "Usunięto łącze",
     "linkCopied": "Skopiowano łącze do schowka",
+    "pasteFailed": "Nie udało się ukończyć wklejania. Nic nie zostało zmienione.",
     "failedToSave": "Nie udało się zapisać dokumentu",
     "documentInput": "Dane wejściowe dokumentu",
     "documentPreview": "Podgląd dokumentu",
@@ -795,6 +801,8 @@
     "pageLabel": "Strona {number}",
     "headerLabel": "Nagłówek strony",
     "footerLabel": "Stopka strony",
+    "chartNoData": "Brak danych",
+    "pictureName": "Obraz",
     "selected": "Zaznaczono",
     "selectionCleared": "Wyczyszczono zaznaczenie",
     "commentedText": "Tekst z komentarzem",

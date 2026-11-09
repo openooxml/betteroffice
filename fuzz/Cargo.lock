@@ -90,6 +90,8 @@ dependencies = [
  "indexmap",
  "libm",
  "serde",
+ "tiff",
+ "weezl",
 ]
 
 [[package]]
@@ -129,6 +131,21 @@ dependencies = [
 [[package]]
 name = "betteroffice-ooxml-diff"
 version = "0.5.1"
+
+[[package]]
+name = "betteroffice-ooxml-raster"
+version = "0.5.1"
+dependencies = [
+ "betteroffice-drawingml",
+ "betteroffice-ooxml-text",
+ "image",
+ "jpeg-decoder",
+ "png",
+ "resvg",
+ "simplecss",
+ "svgtypes",
+ "tiny-skia",
+]
 
 [[package]]
 name = "betteroffice-ooxml-text"
@@ -187,15 +204,13 @@ version = "0.5.1"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-metafile",
+ "betteroffice-ooxml-raster",
  "betteroffice-ooxml-text",
  "betteroffice-pptx-edit",
  "betteroffice-pptx-render",
  "image",
- "png",
- "resvg",
- "simplecss",
- "svgtypes",
  "tiny-skia",
+ "unicode-properties",
 ]
 
 [[package]]
@@ -732,6 +747,12 @@ dependencies = [
  "getrandom",
  "libc",
 ]
+
+[[package]]
+name = "jpeg-decoder"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00810f1d8b74be64b13dbf3db89ac67740615d6c891f0e7b6179326533011a07"
 
 [[package]]
 name = "js-sys"
@@ -1499,9 +1520,8 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "yrs"
-version = "0.27.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3987db9bdbe6f0f49c58ec3d0daf4750a70b40019c190f6c6708abfcdfe6bea0"
+version = "0.27.3"
+source = "git+https://github.com/openooxml/y-crdt.git?rev=e785c00611ebce79ece115defa25295982cac165#e785c00611ebce79ece115defa25295982cac165"
 dependencies = [
  "arc-swap",
  "async-lock",

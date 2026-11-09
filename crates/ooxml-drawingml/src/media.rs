@@ -8,6 +8,63 @@ pub const MAX_IMAGE_PIXELS: u64 = 33_554_432;
 pub const MAX_IMAGE_BYTES: u64 = 268_435_456;
 pub const MAX_TIFF_BYTES: u64 = 32 * 1024 * 1024;
 
+/// CMYK with alpha, the most samples a pixel of any color it converts has.
+const MAX_TRANSCODED_SAMPLES: u16 = 5;
+
+/// Most bytes a PNG encode and its decode hold per pixel: the RGBA, the filtered
+/// stream, the zlib output and the PNG, then the decoded RGBA.
+const PNG_ROUND_TRIP_BYTES_PER_PIXEL: u64 = 16;
+
+/// The pixels and the most bytes [`decode_tiff_png`] and a decode of its PNG
+/// hold, read without decoding any pixels, or `None` for a TIFF whose decode
+/// that does not bound: tiles size their buffers by `TileWidth`, an embedded
+/// JPEG by its own header, rows by every encoded sample, extra ones included, and
+/// a palette by its `ColorMap` count.
+pub fn tiff_transcode_cost(data: &[u8]) -> Option<(u64, u64)> {
+    use tiff_crate::decoder::Decoder;
+    use tiff_crate::tags::Tag;
+
+    let mut decoder = Decoder::new(Cursor::new(data)).ok()?;
+    let (width, height) = decoder.dimensions().ok()?;
+    if decoder.find_tag(Tag::TileWidth).ok()?.is_some() {
+        return None;
+    }
+    let compression = tag_u16(&mut decoder, Tag::Compression).ok()?.unwrap_or(1);
+    if !matches!(compression, 1 | 5 | 8 | 32773 | 32946) {
+        return None;
+    }
+    let encoded_samples = tag_u16(&mut decoder, Tag::SamplesPerPixel)
+        .ok()?
+        .unwrap_or(1);
+    if encoded_samples > MAX_TRANSCODED_SAMPLES {
+        return None;
+    }
+    let pixels = u64::from(width) * u64::from(height);
+    let color = decoder.colortype().ok()?;
+    let sample_bytes = u64::from(color.bit_depth().div_ceil(8)).max(1);
+    let held = decoded_tiff_bytes(Some(color), pixels).max(
+        pixels
+            .saturating_mul(u64::from(encoded_samples))
+            .saturating_mul(sample_bytes),
+    );
+    let bytes = held
+        .saturating_mul(2)
+        .saturating_add(pixels.saturating_mul(PNG_ROUND_TRIP_BYTES_PER_PIXEL));
+    Some((pixels, bytes))
+}
+
+fn decoded_tiff_bytes(color: Option<tiff_crate::ColorType>, pixels: u64) -> u64 {
+    match color {
+        Some(color) => {
+            let sample_bytes = u64::from(color.bit_depth().div_ceil(8)).max(1);
+            pixels
+                .saturating_mul(u64::from(color.num_samples()))
+                .saturating_mul(sample_bytes)
+        }
+        None => pixels.saturating_mul(2),
+    }
+}
+
 pub fn decode_tiff_png(data: &[u8]) -> Result<Vec<u8>, String> {
     use tiff_crate::decoder::{Decoder, DecodingResult};
     use tiff_crate::tags::Tag;
@@ -33,15 +90,7 @@ pub fn decode_tiff_png(data: &[u8]) -> Result<Vec<u8>, String> {
         Err(_) if photometric == 3 => None,
         Err(error) => return Err(error.to_string()),
     };
-    let decoded_bytes = match color {
-        Some(color) => {
-            let sample_bytes = u64::from(color.bit_depth().div_ceil(8)).max(1);
-            pixels
-                .saturating_mul(u64::from(color.num_samples()))
-                .saturating_mul(sample_bytes)
-        }
-        None => pixels.saturating_mul(2),
-    };
+    let decoded_bytes = decoded_tiff_bytes(color, pixels);
     if !image_fits_budget(
         pixels,
         decoded_bytes.saturating_add(pixels.saturating_mul(4)),

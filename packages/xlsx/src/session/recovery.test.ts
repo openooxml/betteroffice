@@ -33,6 +33,54 @@ function session(batched = false) {
     { [K in keyof WorkbookSessionEvents]: WorkbookSessionEvents[K] }>(pair.client, { methods: WORKBOOK_SESSION_METHODS });
 }
 
+function recoveryMetadata(bytes: Uint8Array, update: (value: Record<string, unknown>) => void): Uint8Array {
+  const header = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const length = header.getUint32(9, true);
+  const metadata = JSON.parse(new TextDecoder().decode(bytes.subarray(21, 21 + length)));
+  update(metadata);
+  const payload = new TextEncoder().encode(JSON.stringify(metadata));
+  const engine = bytes.subarray(21 + length);
+  const result = new Uint8Array(21 + payload.length + engine.length);
+  result.set(bytes.subarray(0, 21));
+  result.set(payload, 21);
+  result.set(engine, 21 + payload.length);
+  const resultHeader = new DataView(result.buffer);
+  resultHeader.setUint32(9, payload.length, true);
+  let hash = 2166136261;
+  for (const byte of [...result.subarray(0, 17), ...result.subarray(21)]) hash = Math.imul(hash ^ byte, 16777619);
+  resultHeader.setUint32(17, hash >>> 0, true);
+  return result;
+}
+
+test.each([false, true])('old checkpoints retain readOnly=%s with host proposals disabled', async (readOnly) => {
+  await initWasm(await readFile(new URL('../wasm/generated/xlsx_wasm_bg.wasm', import.meta.url)));
+  const original = session();
+  const replacement = session();
+  try {
+    const opened = await original.call.open(await workbookBytes(), { includeEditState: true });
+    const context = opened.commandContext!;
+    const input = (seq: number, kind: string, payload: WorkbookCommand['payload']): WorkbookSharedCommand => ({
+      session: context.session, incarnation: 1, seq, basis: { epoch: context.basis.epoch, version: 0 },
+      kind, payload: { payload },
+    });
+    await original.call.edit(input(1, 'setReadOnly', { readOnly }));
+    const checkpoint = await original.call.checkpoint();
+    checkpoint.state = recoveryMetadata(checkpoint.state, (value) => { delete value.allowHostProposals; });
+    expect(decodeWorkbookRecovery(checkpoint.state).allowHostProposals).toBe(false);
+    expect(await replacement.call.openRecovery(checkpoint)).toMatchObject({ editState: { readOnly } });
+    expect(await replacement.call.save()).toEqual(await original.call.save());
+    const edit = await replacement.call.edit(input(2, 'editCell', { args: [0, 0, 0, '7'] }));
+    expect(edit.outcomes).toMatchObject([{ seq: 2, status: readOnly ? 'refused' : 'applied',
+      ...(readOnly ? { reason: 'read-only' } : {}) }]);
+    if (readOnly) {
+      const proposal = await replacement.call.edit(input(3, 'propose', {
+        args: ['host', null, [{ sheet: 0, row: 0, col: 0, input: '9' }]],
+      }));
+      expect(proposal.outcomes).toMatchObject([{ seq: 3, status: 'refused', reason: 'read-only' }]);
+    }
+  } finally { await original.dispose(); await replacement.dispose(); }
+});
+
 test('checkpoint after N commands restores a fresh session boundary', async () => {
   await initWasm(await readFile(new URL('../wasm/generated/xlsx_wasm_bg.wasm', import.meta.url)));
   const original = session();
@@ -156,6 +204,8 @@ test('checkpoint restores edited state and command metadata without a peer', asy
   const state = createWorkbookCommandState(identity, { epoch: 3, version: opened.version() }, selected, [selected.sheetId]);
   state.nextSheetId = 5;
   state.calculation = { nowSerial: 45000, randSeed: 12 };
+  state.readOnly = true;
+  state.allowHostProposals = true;
   state.formats.set('format:2', { rows: 1, columns: 1, formats: [{}] });
   const engine = new Uint8Array([7, 8, 9]);
   const host = createWorkbookCommandHost({ handle: opened, state, revision: 9,
@@ -170,9 +220,10 @@ test('checkpoint restores edited state and command metadata without a peer', asy
   expect(checkpoint).toMatchObject({ throughSeq: 2, version: 9, epoch: 3 });
   const recovery = decodeWorkbookRecovery(checkpoint.state);
   expect(recovery.engine).toEqual(engine);
+  expect(recovery).toMatchObject({ readOnly: true, allowHostProposals: true });
   const restored = restoreWorkbookCommandState(opened, recovery, { session: 'book', incarnation: 'replacement' });
   expect(restored).toMatchObject({ throughSeq: 2, nextSheetId: 5, calculation: state.calculation,
-    selection: selected, readOnly: false, historyReset: true, historySelections: [] });
+    selection: selected, readOnly: true, allowHostProposals: true, historyReset: true, historySelections: [] });
   expect(restored.formats).toEqual(state.formats);
   if (!state.editState) throw new Error('Missing captured edit state');
   expect(restored.editState).toEqual({ ...state.editState, historyReset: true });
@@ -190,6 +241,16 @@ test('checkpoint restores edited state and command metadata without a peer', asy
   expect(ack).toMatchObject({ throughSeq: 3, version: 9, engineVersion: 'engine:edited',
     editState: { canUndo: false, canRedo: false, historyReset: true } });
 });
+
+test.each([null, 0, 1, 'true', {}, []].map((permission) => [permission] as const))(
+  'recovery rejects malformed host proposal permission %j', (permission) => {
+    const opened = handle();
+    const state = createWorkbookCommandState({ session: 'book', incarnation: 'first' },
+      { epoch: 1, version: opened.version() }, { sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1' } }, ['sheet:0']);
+    const bytes = encodeWorkbookRecovery(new Uint8Array([1]), state, 0, [[0, opened.version()]]);
+    const malformed = recoveryMetadata(bytes, (value) => { value.allowHostProposals = permission; });
+    expect(() => decodeWorkbookRecovery(malformed)).toThrow('Invalid workbook recovery checkpoint');
+  });
 
 test('recovery refuses corrupt metadata before command admission', () => {
   const opened = handle();

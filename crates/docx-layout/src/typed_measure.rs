@@ -470,6 +470,7 @@ fn row_from_out(row: ooxml_text::TypesetRowOut) -> TypesetRow {
                 })
                 .collect()
         }),
+        glyph_runs: row.glyph_runs,
     }
 }
 
@@ -734,6 +735,37 @@ mod parity_tests {
         let start = typed.lines[1].head_char;
         assert!(text[start..].starts_with("scenario,"));
         assert!(typed.lines[0].width <= 624.0);
+    }
+
+    #[test]
+    fn measured_glyph_runs_match_the_json_path() {
+        crate::clear_measure_fonts();
+        let latin = crate::register_measure_font(FIXTURE).unwrap();
+        let naskh = crate::register_measure_font(include_bytes!(
+            "../../../packages/fonts/assets/NotoNaskhArabic-Regular.ttf"
+        ))
+        .unwrap();
+        let chain = vec![latin, naskh];
+        let config = MeasurementConfig {
+            font_chains: BTreeMap::from([("liberation sans|0|0".to_owned(), chain)]),
+            defaults: json!({"fontFamily": "Liberation Sans", "fontSize": 12}),
+            compat: json!({}),
+            authoritative_shaping: true,
+        };
+        let paragraph = paragraph(vec![text_run("abc سلام def مرحبا بالعالم")], None);
+        for width in [1000.0, 60.0] {
+            let typed = measure_paragraph(&paragraph, width, &config, None, 0.0).unwrap();
+            let json = legacy_measure(&paragraph, width, &config, None, 0.0).unwrap();
+            assert_eq!(
+                serde_json::to_string(&typed).unwrap(),
+                serde_json::to_string(&json).unwrap()
+            );
+            let value = serde_json::to_value(&typed).unwrap();
+            for line in value["lines"].as_array().unwrap() {
+                let runs = line["glyphRuns"].as_str();
+                assert!(runs.is_some_and(|runs| !runs.is_empty()), "{line}");
+            }
+        }
     }
 
     #[test]

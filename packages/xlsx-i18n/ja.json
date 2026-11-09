@@ -135,7 +135,14 @@
       "unsupportedCommand": "まだサポートされていません。",
       "invalidArguments": "この値は有効ではありません。",
       "inputFailed": "この前のセルの入力を保存できませんでした。",
+      "editUnsupported": "この編集はここでは適用できません。ブックは変更されていません。",
+      "editUnsupportedChart": "この編集は適用できません。移動されるセルをグラフが使用しています。ブックは変更されていません。",
+      "editUnsupportedTable": "この編集は適用できません。移動されるセルをテーブルが使用しています。ブックは変更されていません。",
+      "editUnsupportedPivot": "この編集は適用できません。移動されるセルをピボットテーブルが使用しています。ブックは変更されていません。",
       "sheetProtected": "このセルは保護されたシート上にあります。",
+      "hostRefused": "この編集は許可されていません。",
+      "tooManyToCheck": "プラグインが確認できるセル数を超えています（上限 {limit}）。",
+      "hostStarting": "エディターはまだ起動中です。しばらくしてからもう一度お試しください。",
       "documentReplaced": "別のブックが開かれました。",
       "targetChanged": "選択範囲が変更されました。",
       "gestureActive": "グラフの移動を先に完了してください。",
@@ -146,8 +153,31 @@
       "permissionDenied": "ホスト アプリケーションがこのプラグインによるこのコマンドの使用を許可していません。",
       "unsupportedPolicy": "プラグインはまだこのコマンドを実行できません。代わりに編集バッチを使用してください。",
       "pluginUnavailable": "プラグインは現在アクティブではありません。",
-      "aborted": "コマンドが実行される前にプラグインの操作がキャンセルされました。"
-    }
+      "aborted": "コマンドが実行される前にプラグインの操作がキャンセルされました。",
+      "clipboardUnavailable": "このブラウザーではメニューから貼り付けできません。キーボード ショートカットを使用してください。",
+      "lastSheet": "ブックには少なくとも 1 つのシートが必要です。",
+      "sheetAtEdge": "シートをこれ以上移動できません。",
+      "sheetNameInvalid": "シート名は 1～31 文字で一意である必要があり、: \\ / ? * [ ] は使用できません。",
+      "clipboardDenied": "ブラウザーでクリップボードへのアクセスが許可されませんでした。"
+    },
+    "cut": "切り取り",
+    "copy": "コピー",
+    "paste": "貼り付け",
+    "pastePlainText": "書式なしテキストとして貼り付け",
+    "clearContents": "数式と値のクリア",
+    "insert": "挿入",
+    "delete": "削除",
+    "insertRowsAbove": "上に行を挿入",
+    "insertRowsBelow": "下に行を挿入",
+    "insertColumnsLeft": "左に列を挿入",
+    "insertColumnsRight": "右に列を挿入",
+    "deleteRows": "行の削除",
+    "deleteColumns": "列の削除",
+    "insertSheet": "シートの挿入",
+    "deleteSheet": "シートの削除",
+    "renameSheet": "名前の変更",
+    "moveSheetLeft": "左へ移動",
+    "moveSheetRight": "右へ移動"
   },
   "editor": {
     "appLabel": "スプレッドシート エディター",
@@ -162,7 +192,11 @@
     "showDetails": "詳細を表示",
     "openPrompt": "XLSX ファイルを開く",
     "sheetTabsLabel": "シート",
-    "clearExceedsLimit": "クリアがセルの上限を超えています"
+    "clearExceedsLimit": "クリアがセルの上限を超えています",
+    "cellMenuLabel": "セル メニュー",
+    "sheetTabMenuLabel": "シート見出しメニュー",
+    "renameSheetLabel": "シート名の変更",
+    "sheetNamePrefix": "シート"
   },
   "presence": {
     "label": "共同編集者",
@@ -178,6 +212,7 @@
     "accept": "承諾",
     "reject": "却下",
     "forceApply": "強制的に適用",
+    "forceBlockedReason": "構造の変更により、この提案は適用できません。",
     "staleWarning": "提案後に変更されたセル：{cells}"
   },
   "a11y": {
@@ -187,12 +222,27 @@
     "cellLabel": "{address}、{value}",
     "cellLabelSelected": "{address}、{value}、選択中",
     "emptyCellLabel": "{address}、空白",
-    "emptyCellLabelSelected": "{address}、空白、選択中"
+    "emptyCellLabelSelected": "{address}、空白、選択中",
+    "hasFormula": "{label}、数式あり",
+    "rangeSelected": "{start} から {end} を選択、{rows} 行 × {columns} 列",
+    "sheetActivated": "{name}、シート {index}/{count}",
+    "cellInputLabel": "セル {address} を編集",
+    "gridRoleDescription": "ワークシート"
   },
   "plugins": {
     "toolbarGroup": "プラグイン",
     "panelTabs": "プラグイン パネル",
     "collapsePanel": "{title} を折りたたむ",
-    "expandPanel": "{title} を展開する"
+    "expandPanel": "{title} を展開する",
+    "rowGutter": "プラグインの行マーカー"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "del": "Del",
+    "escape": "Esc",
+    "pageUp": "Page Up",
+    "pageDown": "Page Down"
   }
 }

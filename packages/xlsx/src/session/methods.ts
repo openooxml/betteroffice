@@ -1,9 +1,14 @@
 import type { FontDecoderMethods } from '../../../../shared/office-session/fontDecoder';
+import type { SaveWarning } from '../../../../shared/office-session/saveWarnings';
 import type { XlsxDefinedNamesRequest, XlsxDefinedNamesResult } from '../definedNames';
 import type { PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
 import type { MethodPolicies, SessionState } from '../../../../shared/office-session';
 import type { Direction, SelectionData } from '../selection/types';
 import type { DisplayList, Rect } from '../display-list/types';
+import type { XlsxPngFont, XlsxPngOptions, XlsxPngTarget } from '../wasm/pngTarget';
+
+/** PNG options a session call carries; an abort signal stays on the caller's side. */
+export type WorkbookPngOptions = Omit<XlsxPngOptions, 'signal'>;
 import type { AwarenessPeer, CollaborationUpdateOrigin } from '../collaboration/types';
 import type { XlsxExportOptions, XlsxExportResult, XlsxMarkdownContent, XlsxMarkdownOptions, XlsxStructuredContent } from '../exports';
 import type {
@@ -22,7 +27,8 @@ import type {
   XlsxValidationResult,
 } from '../edits';
 import type {
-  CalculationStatus, CapturedFormat, CellEdit, CellPosition, MergedRange, OpenWorkbookOptions, PrintMetrics, SheetInfo, Viewport,
+  CalculationStatus, CapturedFormat, CellEdit, CellPoint, CellPosition, MergedRange, OpenWorkbookOptions, PrintMetrics, SheetInfo,
+  Viewport,
 } from '../wasm/loader';
 
 /** @internal */
@@ -181,16 +187,25 @@ export type WorkbookSessionMethods = FontDecoderMethods & {
   sheetView(sheet: number): WorkbookSheetView;
   cellGeometry(sheet: number, row: number, col: number): WorkbookCellGeometry;
   cellInputs(sheet: number, range: string): WorkbookCellInputs;
+  /** @internal Formulas, without their `=`, moved between cells as a paste moves them. */
+  translateFormulas(
+    items: readonly { formula: string; from: CellPoint; to: CellPoint }[]
+  ): ({ ok: true; formula: string } | { ok: false; error: string })[];
   selectionData(sheet: number, row: number, col: number, direction?: Direction | 'usedRange' | 'rowEnd' | 'merge'): SelectionData;
   captureFormat(sheet: number, range: string): CapturedFormat;
   sheets(): WorkbookSheetSummary[];
   calculationStatus(): CalculationStatus;
-  renderPng(viewport: Viewport, options?: WorkbookFrameOptions): ArrayBuffer;
-  renderRangePng(options?: { range?: string; scale?: number }, frameOptions?: WorkbookFrameOptions): ArrayBuffer;
+  renderPng(target: XlsxPngTarget, options?: WorkbookPngOptions): ArrayBuffer;
+  /**
+   * The fonts `renderPng` would paint for the same target. The editors use it to forward the faces they paint with; not public until every format has it.
+   * @internal
+   */
+  renderPngFonts(target: XlsxPngTarget, options?: WorkbookPngOptions): XlsxPngFont[];
   exportStructured(options?: XlsxExportOptions): XlsxExportResult<XlsxStructuredContent>;
   exportMarkdown(options?: XlsxExportOptions, markdownOptions?: XlsxMarkdownOptions): XlsxExportResult<XlsxMarkdownContent>;
   printDisplayList(sheet: number, range: string, metrics: PrintMetrics, gridlines: boolean): ArrayBuffer;
   save(): ArrayBuffer;
+  saveWithWarnings(): { bytes: ArrayBuffer; warnings: SaveWarning[] };
   dispose(): void;
 };
 
@@ -214,16 +229,18 @@ export const WORKBOOK_SESSION_METHODS = {
   sheetView: true,
   cellGeometry: true,
   cellInputs: true,
+  translateFormulas: true,
   selectionData: true,
   captureFormat: true,
   sheets: true,
   calculationStatus: true,
   renderPng: true,
-  renderRangePng: true,
+  renderPngFonts: true,
   exportStructured: true,
   exportMarkdown: true,
   printDisplayList: true,
   save: true,
+  saveWithWarnings: true,
   dispose: true,
 } satisfies { readonly [K in keyof WorkbookSessionMethods]-?: true };
 
@@ -247,15 +264,17 @@ export const WORKBOOK_SESSION_POLICIES: MethodPolicies<WorkbookSessionMethods> =
   sheetView: { lane: 'interactive' },
   cellGeometry: { lane: 'interactive' },
   cellInputs: { lane: 'interactive' },
+  translateFormulas: { lane: 'interactive' },
   selectionData: { lane: 'interactive', reorderable: false },
   captureFormat: { lane: 'interactive', reorderable: false },
   sheets: { lane: 'interactive' },
   calculationStatus: { lane: 'interactive' },
   renderPng: { lane: 'interactive', reorderable: false },
-  renderRangePng: { lane: 'interactive', reorderable: false },
+  renderPngFonts: { lane: 'interactive', reorderable: false },
   exportStructured: { lane: 'interactive', reorderable: false },
   exportMarkdown: { lane: 'interactive', reorderable: false },
   printDisplayList: { lane: 'interactive', reorderable: false },
   save: { lane: 'interactive' },
+  saveWithWarnings: { lane: 'interactive' },
   dispose: { lane: 'interactive' },
 };

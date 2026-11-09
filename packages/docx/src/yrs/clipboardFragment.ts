@@ -51,11 +51,23 @@ export interface DocxTableFragment {
 
 export type DocxClipboardInline = { text: string } | { image: Record<string, unknown> };
 
-/** @internal A paragraph's leading tables and ordered inline content. */
+/**
+ * @internal One formatted run of a clipboard paragraph; the runs of a paragraph join to its `text`.
+ * A run with `format.other` replaces the character formatting at the paste target, as Keep Source does.
+ */
+export interface DocxClipboardRun {
+  text: string;
+  format?: YrsInlineFormatDelta;
+  href?: string;
+  tooltip?: string;
+}
+
+/** @internal A paragraph's leading tables and ordered inline content. With `inlines`, `runs` pairs one to one with its text entries. */
 export interface DocxClipboardParagraph {
   tables?: DocxTableFragment[];
   text: string;
   inlines?: DocxClipboardInline[];
+  runs?: DocxClipboardRun[];
 }
 
 /** @internal Copied or pasted content in document order; consecutive paragraphs are separate paragraphs. */
@@ -63,7 +75,7 @@ export interface DocxClipboardFragment {
   paragraphs: DocxClipboardParagraph[];
 }
 
-/** @internal What a copy writes: plain text plus a fragment for tables or pictures. */
+/** @internal What a copy writes: plain text plus a fragment, null when the selection exceeds the fragment limits. */
 export interface DocxClipboardSlice {
   text: string;
   fragment: DocxClipboardFragment | null;
@@ -74,13 +86,157 @@ export function clipboardFragmentHasPictures(fragment: DocxClipboardFragment | n
   return fragment?.paragraphs.some(paragraph => paragraph.inlines?.some(inline => 'image' in inline)) ?? false;
 }
 
+/** @internal Whether a fragment holds only text, so it can paste wherever text can. */
+export function clipboardFragmentIsTextOnly(fragment: DocxClipboardFragment): boolean {
+  return !clipboardFragmentHasPictures(fragment) && fragment.paragraphs.every(paragraph => (paragraph.tables ?? []).length === 0);
+}
+
+/** @internal A paragraph's inline content in order, its text as formatted runs where it has them. */
+export function clipboardParagraphUnits(paragraph: DocxClipboardParagraph): Array<DocxClipboardRun | { image: Record<string, unknown> }> {
+  const { inlines, runs } = paragraph;
+  if (!runs) return inlines ?? (paragraph.text === '' ? [] : [{ text: paragraph.text }]);
+  if (!inlines) return runs;
+  let next = 0;
+  return inlines.map(inline => 'image' in inline ? inline : runs[next++]!);
+}
+
 const MAX_FRAGMENT_CELLS = 10_000;
 const MAX_FRAGMENT_PARAGRAPHS = 1_000;
 const MAX_FRAGMENT_TEXT = 1_000_000;
 const MAX_FRAGMENT_DEPTH = 8;
 const MAX_FRAGMENT_MEDIA = 64 * 1024 * 1024;
+const MAX_FRAGMENT_RUNS = 100_000;
+const MAX_HREF_LENGTH = 8192;
+const MAX_TOOLTIP_LENGTH = 1024;
+const RUN_ATTRIBUTE_TEXT = /^[\p{L}\p{M}\p{N} _.,'#&()+-]{1,128}$/u;
+const HYPERLINK_HREF = /^(?:https?:|mailto:|#)[^\s\u0000-\u0020]*$/iu;
+const THEME_SLOTS: Readonly<Record<string, string>> = {
+  dark1: 'dk1', text1: 'dk1', tx1: 'dk1', light1: 'lt1', background1: 'lt1', bg1: 'lt1',
+  dark2: 'dk2', text2: 'dk2', tx2: 'dk2', light2: 'lt2', background2: 'lt2', bg2: 'lt2',
+  hyperlink: 'hlink', followedhyperlink: 'folHlink', folhlink: 'folHlink',
+};
+const DEFAULT_THEME_COLORS: Readonly<Record<string, string>> = {
+  dk1: '000000', lt1: 'FFFFFF', dk2: '44546A', lt2: 'E7E6E6', accent1: '4472C4', accent2: 'ED7D31',
+  accent3: 'A5A5A5', accent4: 'FFC000', accent5: '5B9BD5', accent6: '70AD47', hlink: '0563C1', folHlink: '954F72',
+};
+
+type FieldCheck = (value: unknown) => boolean;
+type RunAttributeShape = true | false | FieldCheck | Readonly<Record<string, FieldCheck>>;
+const FORMAT_DELTA_KEYS = new Set(['bold', 'italic', 'underline', 'strike', 'color', 'highlight', 'fontSize', 'fontFamily', 'language', 'other']);
+const LANGUAGE_SLOTS = new Set(['latin', 'eastAsia', 'bidi']);
+
+/** The language tags the engine accepts, so a pasted tag can never fail after the paste began. */
+function validLanguageTag(value: unknown): boolean {
+  if (typeof value !== 'string' || value.length > 35) return false;
+  const [first = '', ...rest] = value.split('-');
+  return /^[a-z]{2,8}$/iu.test(first) && rest.every(part => /^[a-z0-9]{1,8}$/iu.test(part));
+}
+
+const oneOf = (...values: string[]): FieldCheck => value => typeof value === 'string' && values.includes(value);
+const integer = (min: number, max: number): FieldCheck => value =>
+  typeof value === 'number' && Number.isInteger(value) && value >= min && value <= max;
+const fontName: FieldCheck = value => typeof value === 'string' && RUN_ATTRIBUTE_TEXT.test(value);
+const hexColor: FieldCheck = value => typeof value === 'string' && (/^[0-9a-f]{6}$/iu.test(value) || value === 'auto');
+const HIGHLIGHT_NAMES = ['black', 'blue', 'cyan', 'green', 'magenta', 'red', 'yellow', 'white', 'darkBlue', 'darkCyan',
+  'darkGreen', 'darkMagenta', 'darkRed', 'darkYellow', 'darkGray', 'lightGray'];
+const highlight: FieldCheck = value => typeof value === 'string' && (HIGHLIGHT_NAMES.includes(value) || /^#?[0-9a-f]{6}$/iu.test(value));
+const UNDERLINE_STYLES = ['single', 'words', 'double', 'thick', 'dotted', 'dottedHeavy', 'dash', 'dashedHeavy', 'dashLong',
+  'dashLongHeavy', 'dotDash', 'dashDotHeavy', 'dotDotDash', 'dashDotDotHeavy', 'wave', 'wavyHeavy', 'wavyDouble'];
+
+/**
+ * Run attributes a clipboard run may carry. Pasted payloads come from any page that can write the
+ * clipboard, so this list and these shapes are checked on paste as well as on copy. References that
+ * only mean something in the source document (`runStyle`, theme slots) are resolved away on copy.
+ */
+const RUN_ATTRIBUTE_SHAPES: Readonly<Record<string, RunAttributeShape>> = {
+  bold: true, italic: true, boldCs: true, italicCs: true, superscript: true, subscript: true,
+  allCaps: true, smallCaps: true, emboss: true, imprint: true, textShadow: true, textOutline: true,
+  hidden: true, rtl: true, cs: true, doubleStrike: true, snapToGrid: false, highlight,
+  underline: { style: oneOf(...UNDERLINE_STYLES), color: hexColor },
+  strike: { double: value => typeof value === 'boolean' },
+  textColor: { rgb: hexColor },
+  fontSize: { size: integer(1, 3276), sizeCs: integer(1, 3276) },
+  fontFamily: { ascii: fontName, hAnsi: fontName, eastAsia: fontName, cs: fontName },
+  characterSpacing: { spacing: integer(-31680, 31680), position: integer(-3168, 3168), scale: integer(1, 600), kerning: integer(0, 3276) },
+  emphasisMark: { type: oneOf('dot', 'comma', 'circle', 'underDot') },
+  textEffect: { effect: oneOf('blinkBackground', 'lights', 'antsBlack', 'antsRed', 'shimmer', 'sparkle') },
+  language: { latin: validLanguageTag, eastAsia: validLanguageTag, bidi: validLanguageTag },
+};
+
+function runAttributeOk(shape: RunAttributeShape, value: unknown): boolean {
+  if (typeof shape === 'boolean') return value === shape;
+  if (typeof shape === 'function') return shape(value);
+  return plainObject(value) && Object.keys(value).length > 0 &&
+    Object.entries(value).every(([field, entry]) => Object.hasOwn(shape, field) && shape[field]!(entry));
+}
+
+function runAttributesOk(value: unknown): boolean {
+  return plainObject(value) && Object.entries(value).every(([key, entry]) =>
+    Object.hasOwn(RUN_ATTRIBUTE_SHAPES, key) && runAttributeOk(RUN_ATTRIBUTE_SHAPES[key]!, entry));
+}
+
+function themedRgb(color: Record<string, unknown>, themeColors: Readonly<Record<string, string>> | undefined): string | null {
+  const direct = typeof color.rgb === 'string' ? color.rgb.replace(/^#/, '') : null;
+  const slot = typeof color.themeColor === 'string' ? color.themeColor : null;
+  if (!slot) return direct;
+  const canonical = THEME_SLOTS[slot.toLowerCase()] ?? slot;
+  const base = (themeColors?.[slot] ?? themeColors?.[canonical] ?? DEFAULT_THEME_COLORS[canonical] ?? direct)?.replace(/^#/, '');
+  if (!base || !/^[0-9a-f]{6}$/iu.test(base)) return direct;
+  const fraction = (value: unknown): number | null =>
+    typeof value === 'string' && /^[0-9a-f]{2}$/iu.test(value) ? Number.parseInt(value, 16) / 255 : null;
+  const tint = fraction(color.themeTint);
+  const shade = fraction(color.themeShade);
+  const channels = [0, 2, 4].map(index => Number.parseInt(base.slice(index, index + 2), 16));
+  const adjusted = channels.map(channel => tint !== null ? channel * tint + 255 * (1 - tint) : shade !== null ? channel * shade : channel);
+  return adjusted.map(channel => Math.round(channel).toString(16).padStart(2, '0')).join('').toUpperCase();
+}
+
+/** Direct formatting of a run, which reads the same in any document: seeding already merged its styles in. */
+function directRunAttributes(
+  attributes: Record<string, unknown>,
+  themeColors: Readonly<Record<string, string>> | undefined,
+): Record<string, unknown> {
+  const direct: Record<string, unknown> = {};
+  for (const [key, shape] of Object.entries(RUN_ATTRIBUTE_SHAPES)) {
+    let value = attributes[key];
+    if (key === 'textColor' && plainObject(value)) {
+      const rgb = themedRgb(value, themeColors);
+      value = rgb ? { rgb } : undefined;
+    } else if (plainObject(value) && typeof shape === 'object' && shape !== null) {
+      value = Object.fromEntries(Object.entries(value).filter(([field, entry]) =>
+        Object.hasOwn(shape, field) && (shape as Readonly<Record<string, FieldCheck>>)[field]!(entry)));
+    }
+    if (runAttributeOk(shape, value)) direct[key] = value;
+  }
+  return direct;
+}
+
+function clipboardRun(
+  text: string,
+  attributes: Record<string, unknown>,
+  themeColors: Readonly<Record<string, string>> | undefined,
+): DocxClipboardRun {
+  const link = record(attributes.hyperlink);
+  const href = typeof link?.href === 'string' && validHref(link.href) ? link.href : undefined;
+  const tooltip = href && validTooltip(link?.tooltip) ? link.tooltip : undefined;
+  return {
+    text,
+    format: { other: directRunAttributes(attributes, themeColors) },
+    ...(href ? { href } : {}),
+    ...(tooltip ? { tooltip } : {}),
+  };
+}
+
+function validHref(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= MAX_HREF_LENGTH && HYPERLINK_HREF.test(value) && wellFormed(value);
+}
+
+function validTooltip(value: unknown): value is string {
+  return typeof value === 'string' && value !== '' && value.length <= MAX_TOOLTIP_LENGTH && wellFormed(value);
+}
 const IMAGE_DATA_URL = /^data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/]+={0,2}$/iu;
-const IMAGE_IDENTITY_KEYS = new Set(['rId', '_kind', 'id', 'embedId', 'docPrId', 'docPr', 'drawingId']);
+const IMAGE_IDENTITY_KEYS = new Set(['rId', '_kind', 'id', 'embedId', 'docPrId', 'docPr', 'drawingId',
+  'paraId', 'ooxmlParaId', 'sourceParaId', 'paraOrigin', 'content', 'value', 'sdtType', 'propertiesJson']);
 
 function independentImage(payload: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(payload).filter(([key]) => !IMAGE_IDENTITY_KEYS.has(key)));
@@ -93,6 +249,14 @@ function validImage(value: unknown): value is Record<string, unknown> {
       (typeof value[key] === 'number' && Number.isFinite(value[key]) && value[key] > 0));
 }
 const LINE_BREAK = /[\n\r\u000B\u2028\u2029]/u;
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+const XML_ILLEGAL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/;
+const RUN_KEYS = new Set(['text', 'format', 'href', 'tooltip']);
+
+/** Whether `value` is valid Unicode that XML 1.0 can hold, which the engine's JSON reader and a saved file require. */
+function wellFormed(value: string): boolean {
+  return !LONE_SURROGATE.test(value) && !XML_ILLEGAL.test(value);
+}
 
 function plainObject(value: unknown): value is Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -102,10 +266,11 @@ function plainObject(value: unknown): value is Record<string, unknown> {
 
 function jsonValue(value: unknown, depth = 0): boolean {
   if (depth > 32) return false;
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
+  if (value === null || typeof value === 'boolean') return true;
+  if (typeof value === 'string') return wellFormed(value);
   if (typeof value === 'number') return Number.isFinite(value);
   if (Array.isArray(value)) return value.every(entry => jsonValue(entry, depth + 1));
-  return plainObject(value) && Object.values(value).every(entry => jsonValue(entry, depth + 1));
+  return plainObject(value) && Object.entries(value).every(([key, entry]) => wellFormed(key) && jsonValue(entry, depth + 1));
 }
 
 function optionalMap(value: unknown): boolean {
@@ -114,9 +279,9 @@ function optionalMap(value: unknown): boolean {
 
 /** @internal Strict shape and size check for a pasted or copied clipboard fragment. */
 export function validClipboardFragment(value: unknown): value is DocxClipboardFragment {
-  const budget = { cells: MAX_FRAGMENT_CELLS, text: MAX_FRAGMENT_TEXT, media: MAX_FRAGMENT_MEDIA };
+  const budget = { cells: MAX_FRAGMENT_CELLS, text: MAX_FRAGMENT_TEXT, media: MAX_FRAGMENT_MEDIA, runs: MAX_FRAGMENT_RUNS };
   const text = (entry: unknown, allowEmpty: boolean): boolean => {
-    if (typeof entry !== 'string' || (!allowEmpty && entry === '') || LINE_BREAK.test(entry)) return false;
+    if (typeof entry !== 'string' || (!allowEmpty && entry === '') || LINE_BREAK.test(entry) || !wellFormed(entry)) return false;
     budget.text -= entry.length;
     return budget.text >= 0;
   };
@@ -129,6 +294,11 @@ export function validClipboardFragment(value: unknown): value is DocxClipboardFr
   const formatOk = (format: unknown): boolean => {
     if (format === undefined) return true;
     if (!plainObject(format) || !jsonValue(format)) return false;
+    if (!Object.keys(format).every(key => FORMAT_DELTA_KEYS.has(key))) return false;
+    const language = format.language;
+    if (language !== undefined && language !== null &&
+      !(plainObject(language) && Object.entries(language).every(([slot, tag]) =>
+        LANGUAGE_SLOTS.has(slot) && (tag === null || validLanguageTag(tag))))) return false;
     const boolOrNull = (entry: unknown): boolean => entry === undefined || entry === null || typeof entry === 'boolean';
     if (!boolOrNull(format.bold) || !boolOrNull(format.italic)) return false;
     const underline = format.underline;
@@ -158,7 +328,7 @@ export function validClipboardFragment(value: unknown): value is DocxClipboardFr
         (fontFamily.hAnsi === undefined || typeof fontFamily.hAnsi === 'string'))) return false;
     const other = format.other;
     if (other !== undefined &&
-      !(plainObject(other) && !('ins' in other) && !('del' in other) && !('hyperlink' in other))) return false;
+      !(plainObject(other) && !('ins' in other) && !('del' in other) && !('hyperlink' in other) && !('rPrChange' in other))) return false;
     return true;
   };
   const segment = (entry: unknown, depth: number): boolean => {
@@ -224,13 +394,34 @@ export function validClipboardFragment(value: unknown): value is DocxClipboardFr
   return value.paragraphs.every(paragraph => {
     if (!plainObject(paragraph) || !text(paragraph.text, true) ||
       !(paragraph.tables === undefined || (Array.isArray(paragraph.tables) && paragraph.tables.every(entry => table(entry, 1))))) return false;
+    if (paragraph.runs !== undefined) {
+      if (!Array.isArray(paragraph.runs) || paragraph.runs.length === 0) return false;
+      budget.runs -= paragraph.runs.length;
+      if (budget.runs < 0) return false;
+      let joined = '';
+      for (const run of paragraph.runs) {
+        if (!plainObject(run) || !Object.keys(run).every(key => RUN_KEYS.has(key)) || typeof run.text !== 'string' || run.text === '' || LINE_BREAK.test(run.text) || !wellFormed(run.text)) return false;
+        if (run.format !== undefined &&
+          !(plainObject(run.format) && Object.keys(run.format).every(key => key === 'other') && runAttributesOk(run.format.other ?? {}))) return false;
+        if (run.href !== undefined && !validHref(run.href)) return false;
+        if (run.tooltip !== undefined && !validTooltip(run.tooltip)) return false;
+        joined += run.text;
+      }
+      if (joined !== paragraph.text) return false;
+      if (paragraph.inlines !== undefined) {
+        if (!Array.isArray(paragraph.inlines)) return false;
+        const texts = paragraph.inlines.filter(inline => plainObject(inline) && 'text' in inline);
+        const runs = paragraph.runs as Array<{ text: string }>;
+        if (texts.length !== runs.length || !texts.every((inline, index) => (inline as { text: unknown }).text === runs[index]!.text)) return false;
+      }
+    }
     if (paragraph.inlines === undefined) return true;
     if (!Array.isArray(paragraph.inlines) || paragraph.inlines.length > MAX_FRAGMENT_TEXT) return false;
     let plain = '';
     for (const inline of paragraph.inlines) {
       if (!plainObject(inline) || Object.keys(inline).length !== 1) return false;
       if ('text' in inline) {
-        if (typeof inline.text !== 'string' || inline.text === '' || LINE_BREAK.test(inline.text)) return false;
+        if (typeof inline.text !== 'string' || inline.text === '' || LINE_BREAK.test(inline.text) || !wellFormed(inline.text)) return false;
         plain += inline.text;
       } else if ('image' in inline) {
         if (!validImage(inline.image)) return false;
@@ -248,7 +439,8 @@ export type ClipboardTableReader = Pick<YrsSession, 'tablePayload' | 'storySegme
 /** @internal Engine surface a fragment paste needs. */
 export type ClipboardPasteEngine = Pick<
   YrsSession,
-  'deleteRange' | 'splitParagraph' | 'insertText' | 'insertTableFragment' | 'validateTableFragment' | 'insertImage'
+  'deleteRange' | 'splitParagraph' | 'insertText' | 'insertTableFragment' | 'validateTableFragment' | 'insertImage' |
+  'clearFormatting' | 'formatRange' | 'setHyperlink'
 >;
 
 /** @internal Inclusive grid bounds for {@link readTableFragment}. */
@@ -527,6 +719,7 @@ export function readTableFragment(
 export function readClipboardSlice(
   reader: ClipboardTableReader,
   target: ClipboardSliceTarget,
+  themeColors?: Readonly<Record<string, string>>,
 ): DocxClipboardSlice {
   if ('cells' in target) {
     const { anchor, head } = target.cells;
@@ -556,7 +749,7 @@ export function readClipboardSlice(
   const to = Math.max(target.from, target.to);
   const text = storyPlainText(reader, target.story, from, to);
   const paragraphs: DocxClipboardParagraph[] = [];
-  let current: { tables: DocxTableFragment[]; text: string; inlines: DocxClipboardInline[] } = { tables: [], text: '', inlines: [] };
+  let current: { tables: DocxTableFragment[]; text: string; inlines: DocxClipboardInline[]; runs: DocxClipboardRun[] } = { tables: [], text: '', inlines: [], runs: [] };
   let sawRichContent = false;
   let sawBoundary = false;
   let sawUnrepresentableEmbed = false;
@@ -565,21 +758,23 @@ export function readClipboardSlice(
       ...(current.tables.length > 0 ? { tables: current.tables } : {}),
       text: current.text,
       ...(current.inlines.some(inline => 'image' in inline) ? { inlines: current.inlines } : {}),
+      ...(current.runs.length > 0 ? { runs: current.runs } : {}),
     });
-    current = { tables: [], text: '', inlines: [] };
+    current = { tables: [], text: '', inlines: [], runs: [] };
   };
-  const appendText = (value: string): void => {
+  const appendText = (value: string, attributes: Record<string, unknown>): void => {
     if (value === '') return;
     current.text += value;
     current.inlines.push({ text: value });
+    current.runs.push(clipboardRun(value, attributes, themeColors));
   };
-  const appendPlainText = (value: string): void => {
+  const appendPlainText = (value: string, attributes: Record<string, unknown>): void => {
     const parts = value.split('\n');
-    appendText(parts[0] ?? '');
+    appendText(parts[0] ?? '', attributes);
     for (const part of parts.slice(1)) {
       sawBoundary = true;
       push();
-      appendText(part);
+      appendText(part, attributes);
     }
   };
   let offset = 0;
@@ -588,7 +783,7 @@ export function readClipboardSlice(
     offset += segment.kind === 'text' ? segment.text.length : 1;
     if (offset <= from || start >= to) continue;
     if (segment.kind === 'text') {
-      appendText(segment.text.slice(Math.max(from, start) - start, Math.min(to, offset) - start));
+      appendText(segment.text.slice(Math.max(from, start) - start, Math.min(to, offset) - start), segment.attributes);
     } else if (segment.kind === 'pilcrow') {
       sawBoundary = true;
       push();
@@ -604,23 +799,35 @@ export function readClipboardSlice(
       current.inlines.push({ image });
       sawRichContent = true;
     } else if (segment.embedKind === 'tab') {
-      appendText('\t');
+      appendText('\t', segment.attributes);
     } else if (segment.embedKind === 'break') {
       sawBoundary = true;
       push();
     } else {
       const plain = embedPlainText(reader, segment.embedKind, segment.payload);
       if (!clipboardTextEmbed(reader, segment.embedKind, segment.payload, plain)) sawUnrepresentableEmbed = true;
-      appendPlainText(plain);
+      appendPlainText(plain, segment.attributes);
     }
   }
   if (sawBoundary || current.tables.length > 0 || current.inlines.length > 0) push();
-  const fragment = sawRichContent ? { paragraphs } : null;
-  if (fragment && clipboardFragmentHasPictures(fragment)) {
+  const fragment = sawRichContent || paragraphs.some(paragraph => paragraph.text !== '') ? { paragraphs } : null;
+  if (!fragment) return { text, fragment };
+  if (clipboardFragmentHasPictures(fragment)) {
     if (sawUnrepresentableEmbed) throw new Error('Picture selection contains unsupported clipboard objects');
     if (!validClipboardFragment(fragment)) throw new Error('Clipboard fragment exceeds the supported size or shape');
+    return { text, fragment };
   }
-  return { text, fragment };
+  const runsFit = validClipboardFragment({ paragraphs: paragraphs.map(({ text: paragraphText, runs }) => ({ text: paragraphText, ...(runs ? { runs } : {}) })) });
+  if (runsFit) return { text, fragment };
+  if (!sawRichContent) return { text, fragment: null };
+  return { text, fragment: { paragraphs: paragraphs.map(({ runs: _runs, ...paragraph }) => paragraph) } };
+}
+
+function formatInsertedRun(engine: ClipboardPasteEngine, range: YrsStoryRange, run: DocxClipboardRun): void {
+  const { other, ...typed } = run.format ?? {};
+  if (other) engine.clearFormatting(range);
+  if (Object.keys(typed).length > 0 || Object.keys(other ?? {}).length > 0) engine.formatRange(range, run.format!);
+  if (run.href) engine.setHyperlink(range, { href: run.href, ...(run.tooltip ? { tooltip: run.tooltip } : {}) });
 }
 
 /**
@@ -663,12 +870,13 @@ export function applyClipboardFragment(
     for (const table of paragraph.tables ?? []) {
       caret = engine.insertTableFragment(caret, table, suggesting).after;
     }
-    for (const inline of paragraph.inlines ?? (paragraph.text === '' ? [] : [{ text: paragraph.text }])) {
-      const inserted = 'image' in inline
-        ? engine.insertImage(caret, independentImage(inline.image), suggesting)
-        : engine.insertText(caret, inline.text, suggesting);
+    for (const unit of clipboardParagraphUnits(paragraph)) {
+      const inserted = 'image' in unit
+        ? engine.insertImage(caret, independentImage(unit.image), suggesting)
+        : engine.insertText(caret, unit.text, suggesting);
       if (!inserted.range) throw new Error('Clipboard insertion receipt lacks range');
       caret = { story: inserted.range.story, ...inserted.range.end };
+      if ('text' in unit) formatInsertedRun(engine, inserted.range, unit);
     }
   });
   return caret;

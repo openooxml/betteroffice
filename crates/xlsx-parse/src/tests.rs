@@ -5946,9 +5946,79 @@ fn refuses_a_moved_reference_whose_cache_cannot_be_regenerated() {
     }
 }
 
-/// A cache may legally carry an `extLst` beside its points, or a `formatCode`
-/// on a single point. Neither survives a rebuild, so the save is refused
-/// rather than quietly changing the labels a consumer reads back.
+/// A cache that cannot be rebuilt follows a reference that moves without
+/// changing shape, as a row or column shift moves it, whatever the cells it
+/// lands on now read: it stands for the cells it always did, as an unmoved
+/// reference's cache does after an edit. A reshaped reference, or one that
+/// names no cells, still refuses.
+#[test]
+fn keeps_an_unrebuildable_cache_whose_moved_reference_keeps_its_shape() {
+    let mut parts = charted_package();
+    let sheet = String::from_utf8(
+        parts
+            .iter()
+            .find(|(path, _)| path == "xl/worksheets/sheet1.xml")
+            .unwrap()
+            .1
+            .clone(),
+    )
+    .unwrap()
+    .replace(
+        "<sheetData/>",
+        r#"<sheetData><row r="2"><c r="B2"><v>1</v></c></row><row r="3"><c r="B3"><v>2</v></c></row><row r="4"><c r="B4"><v>3</v></c></row><row r="5"><c r="B5"><v>4</v></c></row></sheetData>"#,
+    );
+    set_part(&mut parts, "xl/worksheets/sheet1.xml", sheet.as_bytes());
+    let workbook = parse_workbook(&parts).unwrap();
+    assert_eq!(
+        workbook.sheets[0].cell(CellRef::new(4, 1)).unwrap().value,
+        CellValue::Number { value: 4.0 }
+    );
+    let unmodelled = r#"<c:numCache><c:pt idx="0"><c:v>3</c:v></c:pt><c:extLst><c:ext uri="{9F0C0C0A}"/></c:extLst></c:numCache>"#;
+    let part = String::from_utf8(CHART.to_vec()).unwrap().replace(
+        r#"<c:numCache><c:pt idx="0"><c:v>3</c:v></c:pt></c:numCache>"#,
+        unmodelled,
+    );
+    let mut refs = parse_workbook_with_package(&charted_package())
+        .unwrap()
+        .workbook
+        .sheets[0]
+        .charts[0]
+        .refs
+        .clone();
+    let patch = |refs: &[xlsx_model::ChartRef]| {
+        crate::chart::patch_chart_refs(
+            part.as_bytes(),
+            "xl/charts/chart1.xml",
+            refs,
+            &workbook,
+            "Data",
+        )
+    };
+
+    refs[2].formula = "Data!$B$3:$B$5".to_owned();
+    let kept = String::from_utf8(patch(&refs).unwrap()).unwrap();
+    assert_eq!(
+        kept,
+        part.replace("<c:f>Data!$B$2:$B$4</c:f>", "<c:f>Data!$B$3:$B$5</c:f>")
+    );
+
+    for (formula, reason) in [
+        ("Data!$B$2:$B$5", "does not model"),
+        ("Missing!$B$3:$B$5", "does not model"),
+    ] {
+        refs[2].formula = formula.to_owned();
+        let error = patch(&refs).unwrap_err();
+        assert!(
+            matches!(&error, ParseError::UnsupportedEdit(message) if message.contains(reason)),
+            "{formula}: {error:?}"
+        );
+    }
+}
+
+/// A cache may legally carry an `extLst` beside its points, and a string
+/// point carries no `formatCode` (`CT_StrVal`). Neither survives a rebuild,
+/// so the save is refused rather than quietly changing the labels a consumer
+/// reads back.
 #[test]
 fn refuses_to_rebuild_a_cache_holding_content_it_does_not_model() {
     let parsed = parse_workbook_with_package(&charted_package()).unwrap();
@@ -5961,8 +6031,8 @@ fn refuses_to_rebuild_a_cache_holding_content_it_does_not_model() {
             r#"<c:numCache><c:pt idx="0"><c:v>3</c:v></c:pt><c:extLst><c:ext uri="{9F0C0C0A}"/></c:extLst></c:numCache>"#,
         ),
         (
-            "per-point format code",
-            r#"<c:numCache><c:pt idx="0" formatCode="0.00"><c:v>3</c:v></c:pt></c:numCache>"#,
+            "format code on a string point",
+            r#"<c:numCache><c:pt idx="0"><c:v>3</c:v><c:formatCode>0.00</c:formatCode></c:pt></c:numCache>"#,
         ),
     ] {
         let part = source.replace(
@@ -5992,7 +6062,7 @@ fn refuses_to_write_a_reference_xml_cannot_carry() {
     };
     let error = patch_refs(CACHELESS, &reference("Data!\u{7}$C$1")).unwrap_err();
     assert!(
-        matches!(&error, ParseError::UnsupportedEdit(message) if message.contains("U+0007")),
+        crate::chart::is_unwritable_chart_reference(&error),
         "{error:?}"
     );
 
@@ -6226,9 +6296,9 @@ fn save_shared(
 }
 
 /// One chart part cannot hold two sheets' references at once. A save where the
-/// sheets sharing it no longer want the same content is refused, rather than
-/// writing whichever sheet came last and silently rewriting the chart the other
-/// one shows.
+/// sheets sharing it no longer want the same references in it is refused,
+/// rather than writing whichever sheet came last and silently rewriting the
+/// chart the other one shows.
 #[test]
 fn refuses_a_shared_chart_part_its_sheets_disagree_on() {
     let parsed = parse_workbook_with_package(&shared_chart_package()).unwrap();
@@ -6259,24 +6329,40 @@ fn refuses_a_shared_chart_part_its_sheets_disagree_on() {
                 && message.contains("sheet Second")),
         "{error:?}"
     );
+}
 
-    let mut owners_diverge = parsed.workbook.clone();
-    owners_diverge.sheets[0].set_cell(
-        CellRef::parse_a1("A2").unwrap(),
-        Cell {
-            value: CellValue::Number { value: 5.0 },
-            ..Cell::default()
-        },
-    );
-    for sheet in &mut owners_diverge.sheets {
-        sheet.charts[0].refs[0].formula = "$A$2:$A$3".to_owned();
+/// Sheets writing the same unqualified references into a shared part still
+/// rebuild its cache from their own cells. That is no disagreement about what
+/// the part references, and what the cells read must never fail a save: the
+/// part takes the cache of the first sheet anchoring it.
+#[test]
+fn a_shared_chart_part_its_sheets_cache_differently_takes_the_first_sheets_cache() {
+    let parsed = parse_workbook_with_package(&shared_chart_package()).unwrap();
+    for (edited, expect_five) in [(0, true), (1, false)] {
+        let mut owners_diverge = parsed.workbook.clone();
+        owners_diverge.sheets[edited].set_cell(
+            CellRef::parse_a1("A2").unwrap(),
+            Cell {
+                value: CellValue::Number { value: 5.0 },
+                ..Cell::default()
+            },
+        );
+        for sheet in &mut owners_diverge.sheets {
+            sheet.charts[0].refs[0].formula = "$A$2:$A$3".to_owned();
+        }
+        let saved = save_shared(&parsed, &owners_diverge).unwrap();
+        let patched = String::from_utf8(part_bytes(&saved, "xl/charts/chart1.xml")).unwrap();
+        assert!(patched.contains("<c:f>$A$2:$A$3</c:f>"), "{patched}");
+        assert_eq!(
+            patched.contains(r#"<c:pt idx="0"><c:v>5</c:v></c:pt>"#),
+            expect_five,
+            "edited sheet {edited}: {patched}"
+        );
+        let reopened = parse_workbook_with_package(&saved).unwrap();
+        for sheet in &reopened.workbook.sheets {
+            assert_eq!(sheet.charts[0].refs[0].formula, "$A$2:$A$3");
+        }
     }
-    let error = save_shared(&parsed, &owners_diverge).unwrap_err();
-    assert!(
-        matches!(&error, ParseError::UnsupportedEdit(message)
-            if message.contains("xl/charts/chart1.xml")),
-        "an unqualified reference each sheet caches differently is still a disagreement: {error:?}"
-    );
 }
 
 /// Sharing a chart part between two sheets is legal, and the common case is
@@ -7240,14 +7326,7 @@ fn refuses_a_part_declaring_a_foreign_encoding() {
 /// Patch a chart part against a workbook holding the sheet its references name.
 fn patch_refs(part: &[u8], refs: &[xlsx_model::ChartRef]) -> Result<Vec<u8>, ParseError> {
     let workbook = parse_workbook(&charted_package()).unwrap();
-    crate::chart::patch_chart_refs(
-        part,
-        "xl/charts/chart1.xml",
-        refs,
-        &workbook,
-        "Data",
-        Some((&workbook, "Data")),
-    )
+    crate::chart::patch_chart_refs(part, "xl/charts/chart1.xml", refs, &workbook, "Data")
 }
 
 fn encode_utf16(text: &str, big_endian: bool, bom: bool) -> Vec<u8> {
@@ -8114,4 +8193,59 @@ fn full_precision_false_survives_serializing_a_new_workbook() {
     };
     let parts = serialize_workbook(&workbook).unwrap();
     assert!(!parse_workbook(&parts).unwrap().full_precision);
+}
+
+/// A number format code is an `ST_Xstring`, written the way Excel writes one
+/// as element text and as an attribute value, and every code decodes back.
+#[test]
+fn format_codes_are_written_as_xstrings_and_decode_back() {
+    for (code, text, attribute) in [
+        ("0.0%", "0.0%", "0.0%"),
+        ("0\u{1}", "0_x0001_", "0_x0001_"),
+        ("0\t0\n0\r", "0\t0\n0_x000D_", "0_x0009_0_x000A_0_x000D_"),
+        (
+            "_x0041_ _X0041_ _x00 _x12G4_",
+            "_x005F_x0041_ _x005F_X0041_ _x00 _x12G4_",
+            "_x005F_x0041_ _x005F_X0041_ _x00 _x12G4_",
+        ),
+        (
+            r#"#,##0" & <a>""#,
+            "#,##0&quot; &amp; &lt;a&gt;&quot;",
+            "#,##0&quot; &amp; &lt;a&gt;&quot;",
+        ),
+        ("\u{0}\u{fffe}", "_x0000__xFFFE_", "_x0000__xFFFE_"),
+    ] {
+        assert_eq!(crate::xml::format_code_text(code), text, "{code:?}");
+        assert_eq!(
+            crate::xml::xstring_attribute_value(code),
+            attribute,
+            "{code:?}"
+        );
+        for written in [text, attribute] {
+            let unescaped = quick_xml::escape::unescape(written).unwrap();
+            assert_eq!(crate::read::unescape_name(&unescaped), code, "{written:?}");
+        }
+    }
+}
+
+/// A chart reference xml 1.0 cannot carry is never written: one the part
+/// already holds is left in place, and one that would have to be written anew
+/// is refused with its own reason, which a save answers by keeping the part.
+#[test]
+fn a_chart_reference_holding_a_character_xml_cannot_carry_is_never_written() {
+    let part = br#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:barChart><c:ser><c:val><c:numRef><c:f>'A&#1;B'!$B$2:$B$4</c:f></c:numRef></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#;
+    let reference = |formula: &str| xlsx_model::ChartRef {
+        kind: xlsx_model::ChartRefKind::Values,
+        formula: formula.to_owned(),
+    };
+    assert_eq!(
+        patch_refs(part, &[reference("'A\u{1}B'!$B$2:$B$4")]).unwrap(),
+        part.to_vec()
+    );
+    for rewritten in ["'A\u{1}B'!$B$3:$B$5", "Data!$B$2\u{0}"] {
+        assert!(matches!(
+            patch_refs(part, &[reference(rewritten)]).unwrap_err(),
+            ParseError::UnsupportedEdit(reason) if reason == crate::chart::UNWRITABLE_REFERENCE
+        ));
+    }
 }

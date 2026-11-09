@@ -4,15 +4,15 @@ import type { TranslationKey } from '@betteroffice/docx-i18n';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
 import { TextContextMenu, type TextContextAction, type TextContextMenuItem } from '../../TextContextMenu';
 import { evaluateDocxCommand, type DocxCommandEnvironment } from '../../../commands/evaluate';
-import type { DocxCommandStore } from '../../../commands/types';
+import type { DocxCommandId, DocxCommandStore } from '../../../commands/types';
+import { storeAriaShortcut, storeShortcutLabel } from '../../../commands/shortcuts';
 import { normalizeInputEvent } from './inputEvents';
-import { admitInputIntents } from './inputAdmission';
+import { admitInputIntents, submitPasteFragment } from './inputAdmission';
 import { isPasteFragmentAllowed } from './clipboard';
-import { parseClipboardHtml } from '../internals/clipboardHtml';
+import { readClipboardFragment } from '../internals/clipboardHtml';
 import { WorkerObjectDialog } from './WorkerObjectDialog';
 import type { PeerlessPropertyIntent } from './inputEvents';
 import type { DocxCommandResult } from '../../../commands/types';
-import type { DocxClipboardFragment } from '@betteroffice/docx/yrs';
 import type { PeerlessViewSnapshot } from './viewStore';
 
 const IMAGE_WRAP_TARGETS: ReadonlySet<string> = new Set<ImageLayoutTarget>([
@@ -55,27 +55,6 @@ function isBodyStory(story: string | undefined): boolean {
   return story === undefined || story === 'body' || story.startsWith('body:');
 }
 
-async function readClipboardFragment(): Promise<DocxClipboardFragment | null> {
-  if (typeof navigator === 'undefined' || !navigator.clipboard || !('read' in navigator.clipboard)) return null;
-  let items: ClipboardItem[];
-  try {
-    items = await navigator.clipboard.read();
-  } catch {
-    return null;
-  }
-  for (const item of items) {
-    if (!item.types.includes('text/html')) continue;
-    let html: string;
-    try {
-      html = await (await item.getType('text/html')).text();
-    } catch {
-      return null;
-    }
-    return parseClipboardHtml(html);
-  }
-  return null;
-}
-
 export function useWorkerContextMenu(options: {
   binding(): PeerlessEditSessionBinding | null;
   environment(): DocxCommandEnvironment;
@@ -84,8 +63,10 @@ export function useWorkerContextMenu(options: {
   submit?(intent: PeerlessPropertyIntent): Promise<DocxCommandResult>;
   onWrapImage?: (handle: string, wrap: ImageLayoutTarget) => void | Promise<boolean>;
   onPaste?: () => void;
+  onPasteRefused?: () => void;
   onError?: (error: Error) => void;
   beginAddComment?(): Promise<void>;
+  focusEditor?(): void;
 }) {
   const [menu, setMenu] = useState<{
     binding: PeerlessEditSessionBinding; snapshot: ReturnType<PeerlessEditSessionBinding['viewStore']['getSnapshot']>;
@@ -123,6 +104,10 @@ export function useWorkerContextMenu(options: {
     selection.anchor.paraId !== selection.focus.paraId || selection.anchor.offset !== selection.focus.offset);
   const readOnly = options.environment().readOnly || options.environment().mode === 'viewing';
   const t = options.environment().translate;
+  const keys = (id: DocxCommandId) => ({
+    shortcut: storeShortcutLabel(options.commands, id, t as never) ?? undefined,
+    ariaShortcut: storeAriaShortcut(options.commands, id) ?? undefined,
+  });
   const evaluateWrap = (wrap: ImageLayoutTarget, target = menu?.object) => {
     const env = options.environment();
     const currentSelection = options.binding()?.viewStore.getSnapshot().workerSelection ?? selection;
@@ -135,13 +120,14 @@ export function useWorkerContextMenu(options: {
     return evaluateDocxCommand('imageWrap', { wrap }, { ...env, bodyStory, image });
   };
   const items: TextContextMenuItem[] = [
-    { action: 'copy', label: t('contextMenu.copy'), disabled: !hasSelection },
+    { action: 'copy', label: t('contextMenu.copy'), disabled: !hasSelection, ...keys('copy') },
     ...readOnly ? [] : [
-      { action: 'cut' as const, label: t('contextMenu.cut'), disabled: !hasSelection },
-      { action: 'paste' as const, label: t('contextMenu.paste') },
+      { action: 'cut' as const, label: t('contextMenu.cut'), disabled: !hasSelection, ...keys('cut') },
+      { action: 'paste' as const, label: t('contextMenu.paste'), ...keys('paste') },
+      { action: 'pasteAsPlainText' as const, label: t('contextMenu.pastePlainText'), ...keys('pasteAsPlainText') },
       { action: 'delete' as const, label: t('contextMenu.delete'), disabled: !hasSelection },
     ],
-    { action: 'selectAll', label: t('contextMenu.selectAll') },
+    { action: 'selectAll', label: t('contextMenu.selectAll'), ...keys('selectAll') },
   ];
   if (hasSelection && !readOnly && options.beginAddComment && (selection?.focus.story === 'body' || selection?.focus.story.startsWith('body:'))) {
     items.push({ action: 'addComment', label: t('contextMenu.addComment') });
@@ -166,6 +152,54 @@ export function useWorkerContextMenu(options: {
       items.push({ action, label: t(`table.${key}`), disabled: !options.commands.getState('tableAction', action).enabled });
     }
   }
+  const pasteClipboard = async (
+    current: PeerlessEditSessionBinding,
+    action: 'paste' | 'pasteAsPlainText',
+    opened: PeerlessViewSnapshot,
+    target: PeerlessViewSnapshot['workerSelection'] | undefined,
+  ) => {
+    if (action === 'paste') {
+      const fragment = await readClipboardFragment();
+      if (fragment) {
+        if (current !== options.binding()) throw new Error('Document was replaced');
+        const latest = current.viewStore.getSnapshot();
+        if (!sameContextTarget(action, opened, latest)) throw new Error('Context menu target changed');
+        if (options.environment().readOnly || options.environment().mode === 'viewing') return;
+        if (isPasteFragmentAllowed(options.commands, fragment)) {
+          submitPasteFragment(current.admission, fragment, { source: 'paste', fence: true }, () => options.onPasteRefused?.());
+          options.onPaste?.();
+          return;
+        }
+      }
+    }
+    const text = await navigator.clipboard.readText();
+    if (current !== options.binding()) throw new Error('Document was replaced');
+    const latest = current.viewStore.getSnapshot();
+    if (!sameContextTarget(action, opened, latest)) throw new Error('Context menu target changed');
+    if (options.environment().readOnly || options.environment().mode === 'viewing') return;
+    const intents = normalizeInputEvent({ source: 'paste', text, eventId: 1, inputTime: performance.now() },
+      { composing: false, compositionId: null, lastHandledEventId: null, trailingCompositionText: null }).intents;
+    if (target && intents[0]?.kind === 'replaceSelection') intents[0].payload.selection = target;
+    admitInputIntents(current.admission, intents, { source: 'paste', fence: true });
+    options.onPaste?.();
+  };
+  const selectAll = (current: PeerlessEditSessionBinding) => {
+    current.commands.submit({ kind: 'navigate', payload: { unit: 'document-boundary', direction: 'backward', extend: false } }, { source: 'selection', fence: true });
+    current.commands.submit({ kind: 'navigate', payload: { unit: 'document-boundary', direction: 'forward', extend: true } }, { source: 'selection', fence: true });
+  };
+  /** Runs a clipboard or select-all command from a remapped shortcut. */
+  const input = async (id: 'cut' | 'copy' | 'paste' | 'pasteAsPlainText' | 'selectAll'): Promise<DocxCommandResult> => {
+    const current = options.binding();
+    if (!current) return { ok: false, failure: { code: 'editor-unavailable', message: options.environment().translate('commands.reasons.commandFailed') } };
+    try {
+      if (id === 'copy' || id === 'cut') await options.clipboard(id === 'cut');
+      else if (id === 'selectAll') selectAll(current);
+      else await pasteClipboard(current, id, structuredClone(current.viewStore.getSnapshot()), undefined);
+      return { ok: true, status: 'executed' };
+    } catch {
+      return { ok: false, failure: { code: 'command-failed', message: options.environment().translate('commands.reasons.commandFailed') } };
+    }
+  };
   const action = async (action: TextContextAction) => {
     if (!menu) return;
     if (action.startsWith('wrap:') && menu.object?.kind === 'image') {
@@ -194,40 +228,12 @@ export function useWorkerContextMenu(options: {
       const snapshot = current.viewStore.getSnapshot();
       if (!sameContextTarget(action, menu.snapshot, snapshot)) throw new Error('Context menu target changed');
       if (action === 'copy' || action === 'cut') { await options.clipboard(action === 'cut'); return; }
-      if (action === 'selectAll') {
-        current.commands.submit({ kind: 'navigate', payload: { unit: 'document-boundary', direction: 'backward', extend: false } }, { source: 'selection', fence: true });
-        current.commands.submit({ kind: 'navigate', payload: { unit: 'document-boundary', direction: 'forward', extend: true } }, { source: 'selection', fence: true });
-        return;
-      }
+      if (action === 'selectAll') { selectAll(current); return; }
       if (options.environment().readOnly || options.environment().mode === 'viewing') return;
       if (action === 'addComment') await options.beginAddComment?.();
       else if (action === 'delete' && selection) current.commands.submit({ kind: 'replaceSelection', payload: { text: '', selection } }, { fence: true, source: 'paste' });
       else if (action === 'paste' || action === 'pasteAsPlainText') {
-        if (action === 'paste') {
-          const fragment = await readClipboardFragment();
-          if (fragment) {
-            if (current !== options.binding()) throw new Error('Document was replaced');
-            const latest = current.viewStore.getSnapshot();
-            if (!sameContextTarget(action, menu.snapshot, latest)) throw new Error('Context menu target changed');
-            if (options.environment().readOnly || options.environment().mode === 'viewing') return;
-            if (isPasteFragmentAllowed(options.commands)) {
-              admitInputIntents(current.admission, [{ kind: 'pasteFragment', payload: { fragment } }],
-                { source: 'paste', fence: true });
-              options.onPaste?.();
-              return;
-            }
-          }
-        }
-        const text = await navigator.clipboard.readText();
-        if (current !== options.binding()) throw new Error('Document was replaced');
-        const latest = current.viewStore.getSnapshot();
-        if (!sameContextTarget(action, menu.snapshot, latest)) throw new Error('Context menu target changed');
-        if (options.environment().readOnly || options.environment().mode === 'viewing') return;
-        const intents = normalizeInputEvent({ source: 'paste', text, eventId: 1, inputTime: performance.now() },
-          { composing: false, compositionId: null, lastHandledEventId: null, trailingCompositionText: null }).intents;
-        if (selection && intents[0]?.kind === 'replaceSelection') intents[0].payload.selection = selection;
-        admitInputIntents(current.admission, intents, { source: 'paste', fence: true });
-        options.onPaste?.();
+        await pasteClipboard(current, action, menu.snapshot, selection);
       } else await options.commands.execute('tableAction', action as never);
     } catch (error) { options.onError?.(error instanceof Error ? error : new Error(String(error))); }
   };
@@ -245,7 +251,8 @@ export function useWorkerContextMenu(options: {
       return true;
     } catch (error) { options.onError?.(error instanceof Error ? error : new Error(String(error))); return false; }
   };
-  return { open, element: <>{menu && <TextContextMenu isOpen position={menu.position} hasSelection={hasSelection}
-    isEditable={!readOnly} items={items} onAction={(value) => { void action(value); }} onClose={close} />}
+  return { open, input, element: <>{menu && <TextContextMenu isOpen position={menu.position} hasSelection={hasSelection}
+    isEditable={!readOnly} items={items} onAction={(value) => { void action(value); }} onClose={close}
+    returnFocus={options.focusEditor} />}
     {dialog?.menu.object && <WorkerObjectDialog action={dialog.action} target={dialog.menu.object} apply={applyObject} close={() => setDialog(null)} />}</> };
 }

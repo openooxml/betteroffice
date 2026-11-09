@@ -87,14 +87,68 @@ record_codec!(RecoveryCalculation = 0 { cells, deleted_cells, arrays, styles, hi
 record_codec!(RecoveryHiddenSizes = 0 { cols, rows } => validate_hidden_sizes);
 record_codec!(RecoveryAxes = 0 { rows, cols });
 record_codec!(RecoveryHistory = 0 { undo, sheet_order, preserved_undo, preserved_redo });
-record_codec!(RecoveryPreservedHistory = 0 { before, after });
+impl Codec for RecoveryPreservedHistory {
+    fn write(&self, w: &mut Writer) {
+        w.u8(1);
+        self.before.write(w);
+        self.after.write(w);
+        self.proposals_before.write(w);
+        self.proposals_after.write(w);
+    }
+
+    fn read(r: &mut Reader<'_>) -> SnapshotResult<Self> {
+        let tag = r.u8()?;
+        if tag > 1 {
+            return Err(SnapshotError::new(
+                "invalid recovery RecoveryPreservedHistory",
+            ));
+        }
+        Ok(Self {
+            before: Codec::read(r)?,
+            after: Codec::read(r)?,
+            proposals_before: if tag == 1 { Codec::read(r)? } else { None },
+            proposals_after: if tag == 1 { Codec::read(r)? } else { None },
+        })
+    }
+}
 record_codec!(RecoveryPreserved = 0 { state, axes });
 record_codec!(Transaction = 0 { ops, author, proposed });
 record_codec!(CellState = 0 { value, formula, style });
 record_codec!(Proposal = 0 { id, agent_id, note, edits, ghosts });
-record_codec!(ProposedEdit = 0 {
-    sheet, row, col, input, old_state, number_format, a1, old_text, new_text
-});
+impl Codec for ProposedEdit {
+    fn write(&self, w: &mut Writer) {
+        w.u8(1);
+        self.sheet.write(w);
+        self.row.write(w);
+        self.col.write(w);
+        self.input.write(w);
+        self.old_state.write(w);
+        self.number_format.write(w);
+        self.a1.write(w);
+        self.old_text.write(w);
+        self.new_text.write(w);
+        self.stale.write(w);
+    }
+
+    fn read(r: &mut Reader<'_>) -> SnapshotResult<Self> {
+        let tag = r.u8()?;
+        if tag > 1 {
+            return Err(SnapshotError::new("invalid recovery ProposedEdit"));
+        }
+        Ok(Self {
+            sheet: Codec::read(r)?,
+            row: Codec::read(r)?,
+            col: Codec::read(r)?,
+            input: Codec::read(r)?,
+            old_state: Codec::read(r)?,
+            number_format: Codec::read(r)?,
+            a1: Codec::read(r)?,
+            old_text: Codec::read(r)?,
+            new_text: Codec::read(r)?,
+            stale: if tag == 1 { Codec::read(r)? } else { None },
+        })
+    }
+}
 record_codec!(ProposalGhost = 0 { sheet, row, col, old_text, new_text, alignment_value });
 record_codec!(StylePatch = 0 {
     bold, italic, strikethrough, font_family, font_size, text_color, fill_color, border,
@@ -570,6 +624,10 @@ impl Codec for Op {
                 name.write(w);
                 formulas.write(w);
             }
+            Self::SetTables { tables } => {
+                w.u8(37);
+                tables.write(w);
+            }
         }
     }
 
@@ -746,6 +804,9 @@ impl Codec for Op {
                 sheet: Codec::read(r)?,
                 name: Codec::read(r)?,
                 formulas: Codec::read(r)?,
+            },
+            37 => Self::SetTables {
+                tables: Codec::read(r)?,
             },
             _ => return Err(SnapshotError::new("invalid recovery Op")),
         })

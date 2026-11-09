@@ -488,7 +488,9 @@
         "pageUp": "Bild auf",
         "pageDown": "Bild ab",
         "ctrl": "Strg",
-        "del": "Entf"
+        "del": "Entf",
+        "shift": "Umschalt",
+        "alt": "Alt"
       }
     },
     "objectGeometry": {
@@ -528,6 +530,7 @@
     "paragraphMarkInserted": "Absatzmarke eingefügt",
     "paragraphMarkDeleted": "Absatzmarke gelöscht",
     "paragraphPropertiesChanged": "Absatzeigenschaften geändert",
+    "runPropertiesChanged": "Zeichenformatierung geändert",
     "rowInserted": "Zeile eingefügt",
     "rowDeleted": "Zeile gelöscht",
     "rowPropertiesChanged": "Zeileneigenschaften geändert",
@@ -584,6 +587,8 @@
     "noDocumentLoaded": "Kein Dokument geladen",
     "failedToLoad": "Dokument konnte nicht geladen werden",
     "failedToLoadDescription": "Die Datei ist möglicherweise beschädigt oder verwendet etwas, das dieser Editor noch nicht lesen kann.",
+    "failedToLoadDamaged": "Die Datei ist beschädigt oder kein vollständiges Word-Dokument.",
+    "failedToLoadUnsupported": "Dieses Dokument enthält etwas, das dieser Editor noch nicht lesen kann.",
     "editorUnavailable": "Der Editor konnte nicht geladen werden",
     "editorUnavailableDescription": "Überprüfen Sie Ihre Verbindung und laden Sie die Seite neu.",
     "reloadPage": "Seite neu laden",
@@ -724,6 +729,7 @@
     "failedToParse": "Dokument konnte nicht verarbeitet werden",
     "linkRemoved": "Link entfernt",
     "linkCopied": "Link in Zwischenablage kopiert",
+    "pasteFailed": "Das Einfügen konnte nicht abgeschlossen werden. Es wurde nichts geändert.",
     "failedToSave": "Dokument konnte nicht gespeichert werden",
     "documentInput": "Dokumenteingabe",
     "documentPreview": "Dokumentvorschau",
@@ -795,6 +801,8 @@
     "pageLabel": "Seite {number}",
     "headerLabel": "Kopfzeile",
     "footerLabel": "Fußzeile",
+    "chartNoData": "Keine Daten",
+    "pictureName": "Bild",
     "selected": "Ausgewählt",
     "selectionCleared": "Auswahl aufgehoben",
     "commentedText": "Kommentierter Text",

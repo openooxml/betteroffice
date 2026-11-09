@@ -1,3 +1,4 @@
+import type { ResolvedFontProps } from './bundledFonts';
 import { useEffect, useMemo, useState, type JSX } from 'react';
 import type { PptxAsyncEditorProps, PptxEditorCollaborationOptions, PptxEditorProps, PptxInThreadEditorProps, PptxWorkerViewerProps } from './PptxEditor';
 import { PptxEditorContent } from './PptxEditorContent';
@@ -16,7 +17,7 @@ function choosePptxEngine(workerOpen: boolean | undefined, collaboration: PptxEd
   if (!workerAvailable) return 'no-worker';
 }
 
-export function PptxEditorSession(props: Exclude<PptxEditorProps, PptxAsyncEditorProps>) {
+export function PptxEditorSession(props: ResolvedFontProps<Exclude<PptxEditorProps, PptxAsyncEditorProps>>) {
   useEffect(() => { warnPptxEngine('legacy-sync-api'); }, []);
   const fonts = useStableFonts(props.fonts);
   const workerOpen = props.experimentalWorkerOpen;
@@ -34,13 +35,13 @@ export function PptxEditorSession(props: Exclude<PptxEditorProps, PptxAsyncEdito
   const editable = session.editable || needsEditor;
   if (choice !== session || choice.editable !== editable) setChoice({ ...session, editable });
   useEffect(() => { if (engine.reason && engine.reason !== 'in-thread') warnPptxEngine(engine.reason); }, [engine.reason]);
-  const Editor = PptxWorkerEditor as (props: WorkerEditorSessionProps) => JSX.Element;
+  const Editor = PptxWorkerEditor as (props: ResolvedFontProps<WorkerEditorSessionProps>) => JSX.Element;
   return engine.reason ? (
-    <PptxEditorContent {...props as PptxInThreadEditorProps} />
+    <PptxEditorContent {...props as ResolvedFontProps<PptxInThreadEditorProps>} />
   ) : editable ? (
-    <Editor {...props as WorkerEditorSessionProps} />
+    <Editor {...props as ResolvedFontProps<WorkerEditorSessionProps>} />
   ) : (
-    <PptxSessionViewer {...props as PptxWorkerViewerProps} />
+    <PptxSessionViewer {...props as ResolvedFontProps<PptxWorkerViewerProps>} />
   );
 }
 

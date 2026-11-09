@@ -292,12 +292,12 @@ fn inspect(
             }
             Event::Text(text) => {
                 if let Some((_, value)) = &mut positioned_text {
-                    value.push_str(&text.decode().map_err(xml_err)?);
+                    value.push_str(&text.xml10_content().map_err(xml_err)?);
                 }
             }
             Event::CData(text) => {
                 if let Some((_, value)) = &mut positioned_text {
-                    value.push_str(&text.decode().map_err(xml_err)?);
+                    value.push_str(&text.xml10_content().map_err(xml_err)?);
                 }
             }
             Event::GeneralRef(reference) => {

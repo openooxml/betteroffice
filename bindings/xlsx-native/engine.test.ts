@@ -1,8 +1,14 @@
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { inflateSync } from 'node:zlib';
 import { beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import JSZip from 'jszip';
 import initWasm, { XlsxDocument as WasmDocument, XlsxSnapshotBuilder as WasmSnapshotBuilder, decodeFontFace as wasmDecodeFontFace, displayListCellLimit as wasmDisplayListCellLimit } from '../../packages/xlsx/src/wasm/generated/xlsx_wasm.js';
 import { expectFontFace, fontCases, fontErrorCases } from '../font-fixtures';
+import { cappedExtent } from '../../packages/xlsx/src/wasm/pngResolve';
 
 const native = require('./index.js');
 
@@ -27,8 +33,8 @@ type EngineDocument = {
   encodeStateAsUpdate(): Uint8Array;
   encodeDiff(stateVector: Uint8Array): Uint8Array;
   recoveryCheckpoint(throughSeq: number): Uint8Array;
-  renderPng(viewportJson: string): Uint8Array;
-  renderRangePng(args: string): Uint8Array;
+  renderPngTarget(targetJson: string, optionsJson: string): Uint8Array;
+  rangePngDisplayListJson(args: string): string;
   startUpdateObservation(): void;
   drainUpdateEvent(): Uint8Array;
   undoJson(): string;
@@ -45,6 +51,42 @@ function expectPlainBytes(bytes: Uint8Array) {
   expect(Object.getPrototypeOf(bytes)).toBe(Uint8Array.prototype);
   expect(bytes.byteOffset).toBe(0);
   expect(bytes.buffer.byteLength).toBe(bytes.byteLength);
+}
+
+function pngPixels(bytes: Uint8Array): Uint8Array {
+  const png = Buffer.from(bytes);
+  expect([...png.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+  expect([png[24], png[25], png[28]]).toEqual([8, 6, 0]);
+  const stride = png.readUInt32BE(16) * 4;
+  const height = png.readUInt32BE(20);
+  const chunks: Buffer[] = [];
+  for (let offset = 8; offset < png.length;) {
+    const size = png.readUInt32BE(offset);
+    if (png.toString('ascii', offset + 4, offset + 8) === 'IDAT') {
+      chunks.push(png.subarray(offset + 8, offset + 8 + size));
+    }
+    offset += size + 12;
+  }
+  const filtered = inflateSync(Buffer.concat(chunks));
+  expect(filtered.length).toBe(height * (stride + 1));
+  const pixels = new Uint8Array(height * stride);
+  for (let row = 0; row < height; row++) {
+    const filter = filtered[row * (stride + 1)];
+    expect(filter).toBeLessThanOrEqual(4);
+    for (let col = 0; col < stride; col++) {
+      const index = row * stride + col;
+      const left = col >= 4 ? pixels[index - 4] : 0;
+      const up = row > 0 ? pixels[index - stride] : 0;
+      const corner = row > 0 && col >= 4 ? pixels[index - stride - 4] : 0;
+      const estimate = left + up - corner;
+      const distances = [Math.abs(estimate - left), Math.abs(estimate - up), Math.abs(estimate - corner)];
+      const paeth = distances[0] <= distances[1] && distances[0] <= distances[2]
+        ? left : distances[1] <= distances[2] ? up : corner;
+      const prediction = [0, left, up, Math.floor((left + up) / 2), paeth][filter];
+      pixels[index] = (filtered[row * (stride + 1) + col + 1] + prediction) & 255;
+    }
+  }
+  return pixels;
 }
 
 function caughtValue(call: () => unknown): unknown {
@@ -84,6 +126,70 @@ function runScript(doc: EngineDocument) {
 }
 
 describe('xlsx native engine parity', () => {
+  test('the package renders installed CJK and Devanagari faces without fetching', async () => {
+    const main = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
+    const rels = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+    const zip = new JSZip();
+    zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>');
+    zip.file('_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rels}/officeDocument" Target="xl/workbook.xml"/></Relationships>`);
+    zip.file('xl/workbook.xml', `<workbook xmlns="${main}" xmlns:r="${rels}"><sheets><sheet name="Fonts" sheetId="1" r:id="rId1"/></sheets></workbook>`);
+    zip.file('xl/_rels/workbook.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rels}/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="${rels}/styles" Target="styles.xml"/></Relationships>`);
+    zip.file('xl/styles.xml', `<styleSheet xmlns="${main}"><fonts count="1"><font><sz val="24"/><name val="Calibri"/><color rgb="FF000000"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf/></cellStyleXfs><cellXfs count="1"><xf fontId="0" fillId="0" borderId="0" numFmtId="0" xfId="0"/></cellXfs></styleSheet>`);
+    zip.file('xl/worksheets/sheet1.xml', `<worksheet xmlns="${main}"><cols><col min="1" max="1" width="40" customWidth="1"/></cols><sheetData><row r="1" ht="48" customHeight="1"><c r="A1" t="inlineStr"><is><t>漢字テスト</t></is></c></row><row r="2" ht="48" customHeight="1"><c r="A2" t="inlineStr"><is><t>नमस्ते</t></is></c></row></sheetData></worksheet>`);
+    const source = await zip.generateAsync({ type: 'uint8array' });
+    const view = { x: 0, y: 0, width: 300, height: 150 };
+    const ranges = ['A1', 'A2'];
+    const fetch = spyOn(globalThis, 'fetch').mockImplementation(() => {
+      throw new Error('PNG font loading must not fetch');
+    });
+    try {
+      const script = join(mkdtempSync(join(tmpdir(), 'xlsx-native-fonts-')), 'baseline.mjs');
+      writeFileSync(script, `
+        import { createRequire } from 'node:module';
+        import { readFileSync } from 'node:fs';
+        globalThis.fetch = () => { throw new Error('PNG font loading must not fetch'); };
+        const { XlsxDocument } = createRequire(import.meta.url)(${JSON.stringify(fileURLToPath(new URL('./index.js', import.meta.url)))});
+        const doc = XlsxDocument.open(new Uint8Array(readFileSync(0)));
+        try {
+          process.stdout.write(JSON.stringify({
+            png: Buffer.from(doc.renderPngTarget(${JSON.stringify(JSON.stringify({ sheet: 0, viewport: view }))}, '{}')).toString('base64'),
+            ranges: ${JSON.stringify(ranges)}.map(range => Buffer.from(doc.renderPngTarget(JSON.stringify({ sheet: 0, range }), JSON.stringify({ scale: 2 }))).toString('base64')),
+          }));
+        } finally { doc.free(); }
+      `);
+      const baseline = spawnSync(process.execPath, [script], { input: source, encoding: 'utf8' });
+      expect(baseline.status, baseline.stderr).toBe(0);
+      const withoutPacks = JSON.parse(baseline.stdout) as { png: string; ranges: string[] };
+      const entry = await import('./dist/index.js') as typeof import('../../packages/xlsx/src/index');
+      await entry.initWasm();
+      const workbook = entry.openWorkbook(source);
+      try {
+        expect(Buffer.from(await workbook.renderPng({ sheet: 0, viewport: view }))).not.toEqual(Buffer.from(withoutPacks.png, 'base64'));
+        for (const [row, range] of ranges.entries()) {
+          const rendered = await workbook.renderPng({ sheet: 0, range }, { scale: 2 });
+          const pixels = pngPixels(rendered);
+          expect(Buffer.from(rendered)).not.toEqual(Buffer.from(withoutPacks.ranges[row], 'base64'));
+          workbook.editCell(0, row, 0, '\u{10ffff}'.repeat(5));
+          const placeholder = pngPixels(await workbook.renderPng({ sheet: 0, range }, { scale: 2 }));
+          expect(pixels.length).toBe(placeholder.length);
+          let ink = 0;
+          let changed = 0;
+          for (let i = 0; i < pixels.length; i += 4) {
+            if (pixels[i] < 128 && pixels[i + 1] < 128 && pixels[i + 2] < 128 && pixels[i + 3] > 128) ink++;
+            if (Math.abs(pixels[i] - placeholder[i]) > 64) changed++;
+          }
+          expect(ink).toBeGreaterThan(100);
+          expect(changed).toBeGreaterThan(100);
+        }
+      } finally {
+        workbook.dispose();
+      }
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      fetch.mockRestore();
+    }
+  }, 30_000);
+
   test('linked font decoder returns known answers and matching native and wasm errors', () => {
     expect(typeof wasmDecodeFontFace).toBe('function');
     expect(typeof native.decodeFontFace).toBe('function');
@@ -124,8 +230,8 @@ describe('xlsx native engine parity', () => {
         doc.encodeStateAsUpdate(),
         doc.encodeDiff(new Uint8Array([0])),
         doc.recoveryCheckpoint(0),
-        doc.renderPng(viewport),
-        doc.renderRangePng(JSON.stringify({ range: 'A1:B2' })),
+        doc.renderPngTarget(JSON.stringify({ sheet: 0, viewport: JSON.parse(viewport) }), '{}'),
+        doc.renderPngTarget(JSON.stringify({ sheet: 0, range: 'A1:B2' }), '{}'),
         doc.saveBytes(),
       ]) expectPlainBytes(bytes);
       expect(drained.byteLength).toBeGreaterThan(0);
@@ -393,6 +499,64 @@ describe('xlsx native engine parity', () => {
     }
   });
 
+  test('renderPngTarget draws both target forms, scales and caps them, and refuses bad input', () => {
+    const doc = native.XlsxDocument.openWithCalculationJson(new Uint8Array(fixture), context) as EngineDocument;
+    const size = (bytes: Uint8Array) => {
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      return [view.getUint32(16), view.getUint32(20)];
+    };
+    const render = (target: unknown, options: unknown = {}) => doc.renderPngTarget(JSON.stringify(target), JSON.stringify(options));
+    const box = { x: 0, y: 0, width: 300, height: 120 };
+    try {
+      expect(size(render({ sheet: 0, viewport: box }))).toEqual([300, 120]);
+      expect(size(render({ sheet: 0, viewport: box }, { scale: 2 }))).toEqual([600, 240]);
+      const [width, height] = size(render({ sheet: 0, range: 'A1:D8' }));
+      const [doubleWidth, doubleHeight] = size(render({ sheet: 0, range: 'a1:d8' }, { scale: 2 }));
+      expect(doubleWidth).toBeGreaterThanOrEqual(2 * width - 2);
+      expect(doubleWidth).toBeLessThanOrEqual(2 * width);
+      expect(doubleHeight).toBeGreaterThanOrEqual(2 * height - 2);
+      expect(doubleHeight).toBeLessThanOrEqual(2 * height);
+      for (const target of [{ sheet: 0, viewport: box }, { sheet: 0, range: 'A1:D8' }]) {
+        for (const scale of [1, 1.3, 2.7]) {
+          const [cappedWidth, cappedHeight] = size(render(target, { scale, maxWidth: 37, maxHeight: 23 }));
+          expect(cappedWidth).toBeLessThanOrEqual(37);
+          expect(cappedWidth).toBeGreaterThanOrEqual(36);
+          expect(cappedHeight).toBeLessThanOrEqual(23);
+          expect(cappedHeight).toBeGreaterThanOrEqual(22);
+        }
+      }
+      const used = JSON.parse(doc.rangePngDisplayListJson('{"scale":2}')) as { width: number; height: number };
+      expect(size(render({ sheet: 0, range: 'used' }, { scale: 2 }))).toEqual([Math.ceil(used.width), Math.ceil(used.height)]);
+      expect(() => render({ sheet: 99, viewport: box })).toThrow('sheet index 99 out of range');
+      expect(() => render({ sheet: 0, range: 'not a range' })).toThrow('bad range: malformed address');
+      expect(render({ sheet: 0, range: 'a1:b2' })).toEqual(render({ sheet: 0, range: 'A1:B2' }));
+      expect(() => doc.renderPngTarget('{"sheet":0,"viewport":{"x":0,"y":0,"width":1e999,"height":1}}', '{}')).toThrow();
+      expect(() => render({ sheet: 0, viewport: box }, { scale: 1, dpi: 2 })).toThrow('bad options');
+      expect(() => render({ sheet: 0, viewport: box, extra: true })).toThrow('target must be');
+      expect(() => render({ sheet: 0, viewport: { ...box, z: 1 } })).toThrow('target must be');
+    } finally {
+      doc.free();
+    }
+  });
+
+  test('the canvas path caps a viewport to the same PNG size as the native engine', () => {
+    const doc = native.XlsxDocument.openWithCalculationJson(new Uint8Array(fixture), context) as EngineDocument;
+    try {
+      for (const [extent, cap, scale] of [
+        [300, 37, 1], [300, 37, 1.3], [300, 37, 2.7], [300, 100, 3], [300, 391, 1.3], [300, 390, 1.3],
+        [300, 810, 2.7], [300, 811, 2.7], [120.5, 23, 1.3], [64.75, 97, 0.75], [300, 1, 2.7],
+      ] as const) {
+        const bytes = doc.renderPngTarget(JSON.stringify({ sheet: 0, viewport: { x: 0, y: 0, width: extent, height: 40 } }),
+          JSON.stringify({ scale, maxWidth: cap }));
+        const nativeWidth = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(16);
+        const canvasWidth = Math.max(1, Math.ceil(Math.fround(cappedExtent(extent, cap, scale) * Math.fround(scale))));
+        expect(canvasWidth, `extent ${extent}, cap ${cap}, scale ${scale}`).toBe(nativeWidth);
+      }
+    } finally {
+      doc.free();
+    }
+  });
+
   test('collaborative documents with the same client id encode identical updates', () => {
     const wasmDoc = WasmDocument.openCollaborative(new Uint8Array(fixture), 4321) as EngineDocument;
     const nativeDoc = native.XlsxDocument.openCollaborative(new Uint8Array(fixture), 4321) as EngineDocument;
@@ -466,6 +630,35 @@ describe('xlsx native engine parity', () => {
     }
   });
 
+  test('both engines keep and report a call to an unknown function by name', async () => {
+    const zip = await JSZip.loadAsync(fixture);
+    zip.file('xl/worksheets/sheet1.xml', '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1">'
+      + '<c r="A1"><f>IFERROR(REPRO_UNKNOWN_FUNCTION(1),0)</f><v>42</v></c>'
+      + '<c r="B1"><f>IFERROR(TYPO(1),0)</f></c>'
+      + '<c r="C1"><f>TYPO(1)</f></c></row></sheetData></worksheet>');
+    const bytes = await zip.generateAsync({ type: 'uint8array' });
+    const read = (doc: EngineDocument) => [
+      doc.calculationStatusJson(),
+      withoutVersion(doc.readCellsJson(JSON.stringify({
+        ranges: [{ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1:C1' } }],
+      }))),
+    ];
+    const wasmDoc = WasmDocument.openWithCalculationJson(bytes.slice(), context) as EngineDocument;
+    const nativeDoc = native.XlsxDocument.openWithCalculationJson(bytes.slice(), context) as EngineDocument;
+    try {
+      const [status, cells] = read(wasmDoc);
+      expect(JSON.parse(status).unevaluatedCells).toEqual([
+        { address: 'A1', functions: ['REPRO_UNKNOWN_FUNCTION'] },
+        { address: 'B1', functions: ['TYPO'] },
+        { address: 'C1', functions: ['TYPO'] },
+      ]);
+      expect(read(nativeDoc)).toEqual([status, cells]);
+    } finally {
+      wasmDoc.free();
+      nativeDoc.free();
+    }
+  });
+
   test('both engines keep and report a formula no offline engine can compute', async () => {
     const zip = await JSZip.loadAsync(fixture);
     zip.file('xl/worksheets/sheet1.xml', '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1">'
@@ -531,5 +724,56 @@ describe('xlsx native engine parity', () => {
     expect(native.displayListCellLimit()).toBeGreaterThan(0);
     expect(native.XlsxDocument.version()).toBe(WasmDocument.version());
     expect(native.displayListCellLimit()).toBe(wasmDisplayListCellLimit());
+  });
+});
+
+describe('control characters in formulas through applyOpsJson', () => {
+  test('both engines write a new one with CHAR and carry an opened one through paste, shift and move', async () => {
+    const main = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
+    const rels = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+    const zip = new JSZip();
+    zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>');
+    zip.file('_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rels}/officeDocument" Target="xl/workbook.xml"/></Relationships>`);
+    zip.file('xl/workbook.xml', `<workbook xmlns="${main}" xmlns:r="${rels}"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/></sheets></workbook>`);
+    zip.file('xl/_rels/workbook.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rels}/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`);
+    zip.file('xl/worksheets/sheet1.xml', `<worksheet xmlns="${main}"><sheetData><row r="1"><c r="D1" t="str"><f>"a&#1;b"</f><v>x</v></c></row></sheetData></worksheet>`);
+    const source = await zip.generateAsync({ type: 'uint8array' });
+    const refusal = 'U+0000, which a workbook file cannot store and CHAR cannot produce';
+    const refused = (run: () => unknown) => {
+      try {
+        run();
+      } catch (error) {
+        return String(error instanceof Error ? error.message : error);
+      }
+      return '';
+    };
+    const added = JSON.stringify({ ops: [{ type: 'setCell', sheet: 0, at: { row: 0, col: 7 }, cell: { formula: '"new\u0001"' } }] });
+    const shifted = JSON.stringify({
+      ops: [
+        { type: 'insertRows', sheet: 0, at: 0, count: 1 },
+        { type: 'setCell', sheet: 0, at: { row: 1, col: 3 }, cell: { formula: '"a\u0001b"' } },
+      ],
+    });
+    const saved: Uint8Array[] = [];
+    for (const engine of [WasmDocument, native.XlsxDocument]) {
+      const doc = engine.openWithCalculationJson(new Uint8Array(source), context);
+      try {
+        expect(JSON.parse(doc.applyOpsJson(added)).applied).toBe(true);
+        doc.editCellJson(JSON.stringify({ sheet: 0, row: 0, col: 8, input: '="typed\u0001"' }));
+        expect(refused(() => doc.editCellJson(JSON.stringify({ sheet: 0, row: 0, col: 10, input: '="nul\u0000"' })))).toContain(refusal);
+        doc.editCellsJson(JSON.stringify({ sheet: 0, edits: [{ row: 0, col: 9, input: '="a\u0001b"', copyFrom: { row: 0, col: 3 } }] }));
+        expect(JSON.parse(doc.applyOpsJson(shifted)).applied).toBe(true);
+        doc.moveRangeJson(JSON.stringify({ sheet: 0, source: 'D2', destination: 'G2' }));
+        saved.push(new Uint8Array(doc.saveBytes()));
+      } finally {
+        doc.free();
+      }
+    }
+    expect(saved[1]).toEqual(saved[0]);
+    const sheet = await (await JSZip.loadAsync(saved[0])).file('xl/worksheets/sheet1.xml')!.async('string');
+    expect(sheet.match(/a&#1;b/g)?.length).toBe(2);
+    expect(sheet).toContain('<f>(&quot;new&quot;&amp;CHAR(1))</f>');
+    expect(sheet).toContain('<f>(&quot;typed&quot;&amp;CHAR(1))</f>');
+    expect(sheet).not.toContain('nul');
   });
 });

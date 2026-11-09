@@ -488,7 +488,9 @@
         "pageUp": "Page Up",
         "pageDown": "Page Down",
         "ctrl": "Ctrl",
-        "del": "Del"
+        "del": "Del",
+        "shift": "Shift",
+        "alt": "Alt"
       }
     },
     "objectGeometry": {
@@ -528,6 +530,7 @@
     "paragraphMarkInserted": "Eklenen paragraf işareti",
     "paragraphMarkDeleted": "Silinen paragraf işareti",
     "paragraphPropertiesChanged": "Değiştirilen paragraf özellikleri",
+    "runPropertiesChanged": "Değiştirilen metin biçimlendirmesi",
     "rowInserted": "Eklenen satır",
     "rowDeleted": "Silinen satır",
     "rowPropertiesChanged": "Değiştirilen satır özellikleri",
@@ -584,6 +587,8 @@
     "noDocumentLoaded": "Yüklü belge yok",
     "failedToLoad": "Belge yüklenemedi",
     "failedToLoadDescription": "Dosya hasarlı olabilir veya bu düzenleyicinin henüz okuyamadığı bir şey kullanıyor olabilir.",
+    "failedToLoadDamaged": "Dosya hasarlı veya eksiksiz bir Word belgesi değil.",
+    "failedToLoadUnsupported": "Bu belge, bu düzenleyicinin henüz okuyamadığı bir şey kullanıyor.",
     "editorUnavailable": "Düzenleyici yüklenemedi",
     "editorUnavailableDescription": "Bağlantınızı denetleyip sayfayı yeniden yükleyin.",
     "reloadPage": "Sayfayı yeniden yükle",
@@ -724,6 +729,7 @@
     "failedToParse": "Belge ayrıştırılamadı",
     "linkRemoved": "Bağlantı kaldırıldı",
     "linkCopied": "Bağlantı panoya kopyalandı",
+    "pasteFailed": "Yapıştırma tamamlanamadı. Hiçbir şey değiştirilmedi.",
     "failedToSave": "Belge kaydedilemedi",
     "documentInput": "Belge girişi",
     "documentPreview": "Belge önizlemesi",
@@ -795,6 +801,8 @@
     "pageLabel": "Sayfa {number}",
     "headerLabel": "Sayfa üst bilgisi",
     "footerLabel": "Sayfa alt bilgisi",
+    "chartNoData": "Veri yok",
+    "pictureName": "Resim",
     "selected": "Seçildi",
     "selectionCleared": "Seçim temizlendi",
     "commentedText": "Yorum yapılan metin",

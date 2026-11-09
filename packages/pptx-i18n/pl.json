@@ -52,6 +52,7 @@
     "decreaseFontSize": "Zmniejsz rozmiar czcionki",
     "increaseFontSize": "Zwiększ rozmiar czcionki",
     "underline": "Podkreślenie",
+    "strikethrough": "Przekreślenie",
     "more": "Więcej",
     "fillColor": "Kolor wypełnienia",
     "noFill": "Brak wypełnienia",
@@ -91,6 +92,12 @@
     "fallbackTitle": "Slajd {number}",
     "canvasLabel": "Slajd {current} z {total}",
     "canvasLabelWithSelection": "Slajd {current} z {total}; zaznaczony obiekt {name}"
+  },
+  "a11y": {
+    "chartNoData": "Brak danych",
+    "slideWithTitle": "Slajd {current} z {total}: {title}",
+    "objectSelected": "Zaznaczono: {name}",
+    "editingText": "Edytowanie: {name}"
   },
   "editor": {
     "appLabel": "Edytor slajdów prezentacji",
@@ -156,6 +163,17 @@
     "stalePreview": "Ten podgląd używa zaktualizowanego slajdu. Zastosowanie nadpisze zmienione elementy docelowe.",
     "geometry": "Położenie i rozmiar (x, y, szerokość, wysokość)",
     "geometryValues": "{before} → {after} pt",
+    "layoutChanged": "Zmieniono układ",
+    "backgroundChanged": "Zmieniono tło",
+    "rowInserted": "Wstawiono wiersz",
+    "rowDeleted": "Usunięto wiersz",
+    "columnInserted": "Wstawiono kolumnę",
+    "columnDeleted": "Usunięto kolumnę",
+    "broughtToFront": "Przeniesiono na wierzch",
+    "sentToBack": "Przeniesiono na spód",
+    "broughtForward": "Przeniesiono o warstwę do przodu",
+    "sentBackward": "Przeniesiono o warstwę do tyłu",
+    "zOrderChanged": "Zmieniono kolejność warstw",
     "appearance": "Zmieniono wygląd lub formatowanie tekstu",
     "changedAgain": "Element docelowy zmienił się ponownie. Przed zastosowaniem sprawdź odświeżony podgląd.",
     "canvasTitle": "Zmiany na tym slajdzie",
@@ -168,7 +186,14 @@
     "canvasStale": "Elementy docelowe uległy zmianie. Otwórz szczegóły sprawdzenia, aby przed zastosowaniem przejrzeć zaktualizowany podgląd.",
     "previousPosition": "Poprzedni",
     "proposedPosition": "Proponowany",
-    "loadingDiff": "Ładowanie zmian…"
+    "loadingDiff": "Ładowanie zmian…",
+    "slideStrip": null,
+    "previewSlide": null,
+    "insertedShape": null,
+    "deletedShape": null,
+    "insertedSlide": null,
+    "deletedSlide": null,
+    "movedFrom": null
   },
   "commands": {
     "moreControls": "Więcej elementów sterujących",
@@ -212,8 +237,25 @@
       "permissionDenied": "Aplikacja hosta nie zezwoliła tej wtyczce na użycie tego polecenia.",
       "unsupportedPolicy": "Wtyczki nie mogą jeszcze uruchamiać tego polecenia. Użyj zamiast tego pakietu edycji.",
       "pluginUnavailable": "Wtyczka nie jest już aktywna.",
-      "aborted": "Działanie wtyczki zostało anulowane przed wykonaniem polecenia."
-    }
+      "aborted": "Działanie wtyczki zostało anulowane przed wykonaniem polecenia.",
+      "clipboardUnavailable": "Dostęp do schowka jest niedostępny lub został odrzucony.",
+      "tableRequired": "Najpierw umieść kursor w komórce tabeli.",
+      "lastSlide": "Nie można usunąć ostatniego slajdu."
+    },
+    "cut": "Wytnij",
+    "copy": "Kopiuj",
+    "paste": "Wklej",
+    "pastePlainText": "Wklej jako zwykły tekst",
+    "insert": "Wstawianie",
+    "delete": "Usuń",
+    "deleteTable": "Usuń tabelę",
+    "duplicateSlide": "Duplikuj slajd",
+    "insertRowsAbove": "Wstaw wiersze powyżej",
+    "insertRowsBelow": "Wstaw wiersze poniżej",
+    "insertColumnsLeft": "Wstaw kolumny z lewej",
+    "insertColumnsRight": "Wstaw kolumny z prawej",
+    "deleteRows": "Usuń wiersze",
+    "deleteColumns": "Usuń kolumny"
   },
   "plugins": {
     "toolbarGroup": "Wtyczki",
@@ -225,5 +267,20 @@
     "label": "Współpracownicy",
     "moreCollaborators": "{count, plural, one {jeszcze # współpracownik} few {jeszcze # współpracownicy} many {jeszcze # współpracowników} other {jeszcze # współpracownika}}",
     "moreSelections": "+{count, plural, one {# zaznaczenie} few {# zaznaczenia} many {# zaznaczeń} other {# zaznaczenia}}"
+  },
+  "contextMenu": {
+    "text": "Menu tekstu",
+    "shape": "Menu kształtu",
+    "table": "Menu tabeli",
+    "slide": "Menu slajdu"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "delete": "Del",
+    "escape": "Esc",
+    "pageup": "Page Up",
+    "pagedown": "Page Down"
   }
 }

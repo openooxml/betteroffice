@@ -52,6 +52,7 @@
     "decreaseFontSize": "Уменьшить размер шрифта",
     "increaseFontSize": "Увеличить размер шрифта",
     "underline": "Подчеркнутый",
+    "strikethrough": "Зачеркнутый",
     "more": "Ещё",
     "fillColor": "Цвет заливки",
     "noFill": "Нет заливки",
@@ -91,6 +92,12 @@
     "fallbackTitle": "Слайд {number}",
     "canvasLabel": "Слайд {current} из {total}",
     "canvasLabelWithSelection": "Слайд {current} из {total}; выбран объект {name}"
+  },
+  "a11y": {
+    "chartNoData": "Нет данных",
+    "slideWithTitle": "Слайд {current} из {total}: {title}",
+    "objectSelected": "Выбрано: {name}",
+    "editingText": "Редактирование: {name}"
   },
   "editor": {
     "appLabel": "Редактор слайдов презентации",
@@ -156,6 +163,17 @@
     "stalePreview": "В этом просмотре используется обновлённый слайд. Применение перезапишет изменённые цели.",
     "geometry": "Положение и размер (x, y, ширина, высота)",
     "geometryValues": "{before} → {after} пт",
+    "layoutChanged": "Макет изменён",
+    "backgroundChanged": "Фон изменён",
+    "rowInserted": "Строка вставлена",
+    "rowDeleted": "Строка удалена",
+    "columnInserted": "Столбец вставлен",
+    "columnDeleted": "Столбец удалён",
+    "broughtToFront": "Перемещено на передний план",
+    "sentToBack": "Перемещено на задний план",
+    "broughtForward": "Перемещено на слой вперёд",
+    "sentBackward": "Перемещено на слой назад",
+    "zOrderChanged": "Порядок наложения изменён",
     "appearance": "Изменён внешний вид или форматирование текста",
     "changedAgain": "Цель снова изменилась. Перед применением проверьте обновлённый просмотр.",
     "canvasTitle": "Изменения на этом слайде",
@@ -168,7 +186,14 @@
     "canvasStale": "Цели изменились. Откройте «Сведения о проверке», чтобы просмотреть обновлённый просмотр перед применением.",
     "previousPosition": "Предыдущее",
     "proposedPosition": "Предлагаемое",
-    "loadingDiff": "Загрузка изменений…"
+    "loadingDiff": "Загрузка изменений…",
+    "slideStrip": null,
+    "previewSlide": null,
+    "insertedShape": null,
+    "deletedShape": null,
+    "insertedSlide": null,
+    "deletedSlide": null,
+    "movedFrom": null
   },
   "commands": {
     "moreControls": "Дополнительные элементы управления",
@@ -212,8 +237,25 @@
       "permissionDenied": "Главное приложение не разрешило этому плагину использовать эту команду.",
       "unsupportedPolicy": "Плагины пока не могут выполнять эту команду. Используйте вместо этого пакет изменений.",
       "pluginUnavailable": "Плагин больше не активен.",
-      "aborted": "Действие плагина было отменено до выполнения команды."
-    }
+      "aborted": "Действие плагина было отменено до выполнения команды.",
+      "clipboardUnavailable": "Доступ к буферу обмена недоступен или запрещён.",
+      "tableRequired": "Сначала поместите курсор в ячейку таблицы.",
+      "lastSlide": "Нельзя удалить последний слайд."
+    },
+    "cut": "Вырезать",
+    "copy": "Копировать",
+    "paste": "Вставить",
+    "pastePlainText": "Вставить как обычный текст",
+    "insert": "Вставка",
+    "delete": "Удалить",
+    "deleteTable": "Удалить таблицу",
+    "duplicateSlide": "Дублировать слайд",
+    "insertRowsAbove": "Вставить строки сверху",
+    "insertRowsBelow": "Вставить строки снизу",
+    "insertColumnsLeft": "Вставить столбцы слева",
+    "insertColumnsRight": "Вставить столбцы справа",
+    "deleteRows": "Удалить строки",
+    "deleteColumns": "Удалить столбцы"
   },
   "plugins": {
     "toolbarGroup": "Плагины",
@@ -225,5 +267,20 @@
     "label": "Соавторы",
     "moreCollaborators": "{count, plural, one {ещё # соавтор} few {ещё # соавтора} many {ещё # соавторов} other {ещё # соавтора}}",
     "moreSelections": "+{count, plural, one {# выделение} few {# выделения} many {# выделений} other {# выделения}}"
+  },
+  "contextMenu": {
+    "text": "Меню текста",
+    "shape": "Меню фигуры",
+    "table": "Меню таблицы",
+    "slide": "Меню слайда"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "delete": "Del",
+    "escape": "Esc",
+    "pageup": "Page Up",
+    "pagedown": "Page Down"
   }
 }

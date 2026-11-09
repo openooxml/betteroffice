@@ -1,4 +1,6 @@
+import { wasmBytes } from '#agents-engines';
 import { DocumentToolError, type GrepOptions, type RenderedPage } from './types';
+import { editLimit } from './edit-limits';
 
 export interface PrototypeOptions {
   name?: string;
@@ -47,19 +49,15 @@ export function plainText(value: string) {
   }
 }
 
-export async function initialize(format: 'xlsx' | 'pptx', init: (input?: Uint8Array) => Promise<void>, wasm?: Uint8Array) {
-  if (!wasm && typeof process !== 'undefined' && process.versions?.node) {
-    const { readFile } = await import('node:fs/promises');
-    const entry = format === 'xlsx' ? import.meta.resolve('@betteroffice/xlsx') : import.meta.resolve('@betteroffice/pptx');
-    const directory = entry.endsWith('/src/index.ts') ? './wasm/generated' : './generated';
-    wasm = await readFile(new URL(`${directory}/${format}_wasm_bg.wasm`, entry));
-  }
-  await init(wasm);
+export async function initialize(format: 'xlsx' | 'pptx', init: (input?: Uint8Array) => Promise<void>, wasm?: Uint8Array, native = false) {
+  await init(native ? undefined : wasm ?? await wasmBytes(format));
 }
 
 export abstract class PrototypeDocument<Change, Step> {
-  private readonly proposals = new Map<string, { value: AgentProposal<Change>; steps: Step[] }>();
-  private readonly cursors = new Map<string, { signature: string; version: string; offset: number }>();
+  protected readonly maxEdits: number;
+  protected constructor(maxEdits?: number) { this.maxEdits = editLimit(maxEdits); }
+  private readonly proposals = new Map<string, { value: AgentProposal<Change>; steps: Step[]; engineId?: string }>();
+  private readonly cursors = new Map<string, { signature: string; version: string; offset: number; remaining?: string[] }>();
   private nextId = 1;
   protected readonly prefix = crypto.randomUUID();
   protected closed = false;
@@ -69,8 +67,14 @@ export abstract class PrototypeDocument<Change, Step> {
   protected abstract validate(steps: Step[], version: string): void;
   protected abstract apply(steps: Step[], version: string): unknown;
   protected abstract save(steps?: Step[]): Uint8Array | Promise<Uint8Array>;
-  protected abstract reopen(bytes: Uint8Array): void;
+  protected abstract reopen(bytes: Uint8Array): void | Promise<void>;
   protected abstract dispose(): void;
+
+  protected createProposal(_value: AgentProposal<Change>, _steps: Step[]): string | undefined { return undefined; }
+  protected proposalStatus(_engineId: string): AgentProposal<Change>['status'] | undefined { return undefined; }
+  protected proposalStale(_engineId: string, _steps: Step[], version: string): boolean { return version !== this.currentVersion(); }
+  protected acceptProposal(_engineId: string, _steps: Step[], _version: string): unknown { throw new DocumentToolError('UNSUPPORTED', 'Engine proposal acceptance is unavailable.'); }
+  protected rejectProposal(_engineId: string): void {}
 
   protected alive() {
     if (this.closed) throw new DocumentToolError('CLOSED', 'This document is closed. Open it again.');
@@ -78,35 +82,42 @@ export abstract class PrototypeDocument<Change, Step> {
 
   protected stage(input: { author: string; note?: string }, changes: Change[], steps: Step[], version: string) {
     this.alive();
-    if (!input.author || input.author.length > 200 || (input.note?.length ?? 0) > 2000 || !changes.length || changes.length > 32) {
-      throw new DocumentToolError('INVALID_ARGUMENT', 'Supply an author (1–200 characters), note (up to 2000), and 1–32 edits.');
+    if (!input.author || input.author.length > 200 || (input.note?.length ?? 0) > 2000 || !changes.length || changes.length > this.maxEdits) {
+      throw new DocumentToolError('INVALID_ARGUMENT', `Supply an author (1-200 characters), note (up to 2000), and 1-${this.maxEdits} edits.`);
     }
-    if (JSON.stringify(changes).length > 32000) throw new DocumentToolError('EDIT_LIMIT', 'Combined proposal changes must fit in 32000 UTF-16 units.');
+    const maxChars = Math.max(32000, 1000 * this.maxEdits);
+    if (JSON.stringify(changes).length > maxChars) throw new DocumentToolError('EDIT_LIMIT', `Combined proposal changes must fit in ${maxChars} UTF-16 units.`);
     this.validate(steps, version);
+    this.synchronizeProposals();
     if (this.proposals.size >= 64) {
       const old = [...this.proposals].find(([, held]) => held.value.status !== 'pending');
       if (old) this.proposals.delete(old[0]);
       else throw new DocumentToolError('PROPOSAL_LIMIT', 'Reject or discard a proposal before staging more than 64.');
     }
     const value: AgentProposal<Change> = { id: `proposal${this.nextId++}`, author: input.author, note: input.note ?? '', status: 'pending', version, changes, stale: false };
-    this.proposals.set(value.id, { value: structuredClone(value), steps: structuredClone(steps) });
+    const engineId = this.createProposal(value, steps);
+    this.proposals.set(value.id, { value: structuredClone(value), steps: structuredClone(steps), engineId });
     return value;
   }
 
   review(id: string) {
-    const { value } = this.held(id);
-    return structuredClone({ ...value, stale: value.status === 'pending' && value.version !== this.currentVersion() });
+    const held = this.held(id);
+    return structuredClone({ ...held.value, stale: this.isStale(held) });
   }
 
   listProposals() {
     this.alive();
-    return [...this.proposals.values()].map(({ value }) => ({ id: value.id, author: value.author, note: value.note.slice(0, 120), status: value.status, changes: value.changes.length, stale: value.status === 'pending' && value.version !== this.currentVersion() }));
+    this.synchronizeProposals();
+    return [...this.proposals.values()].map(held => {
+      const { value } = held;
+      return { id: value.id, author: value.author, note: value.note.slice(0, 120), status: value.status, changes: value.changes.length, stale: this.isStale(held) };
+    });
   }
 
   async accept(id: string, options: { tracked?: boolean; date?: string } = {}) {
     if (options.tracked || options.date) throw new DocumentToolError('UNSUPPORTED', 'Tracked acceptance is available for DOCX only. Omit tracked and date.');
     const held = this.pending(id);
-    const receipt = this.apply(held.steps, held.value.version);
+    const receipt = held.engineId ? this.acceptProposal(held.engineId, held.steps, held.value.version) : this.apply(held.steps, held.value.version);
     held.value.status = 'accepted';
     return { id, status: 'accepted' as const, receipt };
   }
@@ -114,20 +125,25 @@ export abstract class PrototypeDocument<Change, Step> {
   reject(id: string) {
     const held = this.held(id);
     if (held.value.status !== 'pending') throw new DocumentToolError('PROPOSAL_CLOSED', `Proposal is ${held.value.status}.`);
+    if (held.engineId) this.rejectProposal(held.engineId);
     held.value.status = 'rejected';
     return { id, status: 'rejected' as const };
   }
 
-  discard(id: string) { this.held(id); this.proposals.delete(id); }
+  discard(id: string) {
+    const held = this.held(id);
+    if (held.engineId && held.value.status === 'pending') this.rejectProposal(held.engineId);
+    this.proposals.delete(id);
+  }
 
   async export(id?: string) {
     this.alive();
     return this.save(id ? this.pending(id).steps : undefined);
   }
 
-  async verify(id?: string) {
+  async verify(id?: string, _options?: { structure?: boolean }) {
     const bytes = await this.export(id);
-    this.reopen(bytes);
+    await this.reopen(bytes);
     return { reopened: true, bytes: bytes.length, checks: ['save', 'reopen'], unchecked: ['visual fidelity', 'semantic correctness', ...(this.format === 'xlsx' ? ['formula correctness'] : [])] };
   }
 
@@ -144,6 +160,8 @@ export abstract class PrototypeDocument<Change, Step> {
     this.dispose();
   }
 
+  protected searchKey(_hit: unknown): string | undefined { return undefined; }
+
   protected searchPage<T>(options: GrepOptions, hits: T[], clipped = false) {
     const limit = integer(options.limit ?? 20, 1, 100, 'limit');
     const signature = JSON.stringify([options.query, options.caseSensitive, options.story]);
@@ -152,7 +170,12 @@ export abstract class PrototypeDocument<Change, Step> {
     if (options.cursor && (!cursor || cursor.version !== version || cursor.signature !== signature)) {
       throw new DocumentToolError('STALE_CURSOR', 'Search changed or the document was edited. Repeat grep without cursor.');
     }
-    const offset = cursor?.offset ?? 0;
+    let offset = cursor?.offset ?? 0;
+    if (cursor?.remaining) {
+      const remaining = new Set(cursor.remaining);
+      const index = hits.findIndex(hit => remaining.has(this.searchKey(hit) ?? ''));
+      offset = index < 0 ? hits.length : index;
+    }
     const matches: T[] = [];
     let size = 0;
     for (const hit of hits.slice(offset, offset + limit)) {
@@ -164,9 +187,18 @@ export abstract class PrototypeDocument<Change, Step> {
     if (offset + matches.length < hits.length) {
       nextCursor = `${this.prefix}:cursor${this.nextId++}`;
       if (this.cursors.size >= 64) this.cursors.delete(this.cursors.keys().next().value!);
-      this.cursors.set(nextCursor, { signature, version, offset: offset + matches.length });
+      const keys = hits.slice(offset + matches.length).map(hit => this.searchKey(hit));
+      this.cursors.set(nextCursor, { signature, version, offset: offset + matches.length,
+        ...(keys.every((key): key is string => key !== undefined) ? { remaining: keys } : {}),
+      });
     }
     return { matches, nextCursor, version, truncated: clipped, ...(clipped ? { warning: 'Search stopped at 10000 matches. Narrow query or story to search beyond this cap.' } : {}) };
+  }
+
+  protected preserveSearchVersion(version: string) {
+    for (const cursor of this.cursors.values()) {
+      if (cursor.version === version) cursor.version = this.currentVersion();
+    }
   }
 
   protected checkQuery(options: GrepOptions) {
@@ -174,8 +206,21 @@ export abstract class PrototypeDocument<Change, Step> {
     if (!options.query || options.query.length > 1000 || /[\r\n]/.test(options.query)) throw new DocumentToolError('INVALID_ARGUMENT', 'query must be 1–1000 characters within one paragraph or cell.');
   }
 
+  private synchronizeProposals() {
+    for (const held of this.proposals.values()) {
+      if (held.engineId) held.value.status = this.proposalStatus(held.engineId) ?? held.value.status;
+    }
+  }
+
+  private isStale(held: { value: AgentProposal<Change>; steps: Step[]; engineId?: string }) {
+    return held.value.status === 'pending' && (held.engineId
+      ? this.proposalStale(held.engineId, held.steps, held.value.version)
+      : held.value.version !== this.currentVersion());
+  }
+
   private held(id: string) {
     this.alive();
+    this.synchronizeProposals();
     const held = this.proposals.get(id);
     if (!held) throw new DocumentToolError('UNKNOWN_PROPOSAL', 'Stage a proposal first.');
     return held;
@@ -184,7 +229,7 @@ export abstract class PrototypeDocument<Change, Step> {
   private pending(id: string) {
     const held = this.held(id);
     if (held.value.status !== 'pending') throw new DocumentToolError('PROPOSAL_CLOSED', `Proposal is ${held.value.status}.`);
-    if (held.value.version !== this.currentVersion()) throw new DocumentToolError('STALE_TARGET', 'The document changed. Read fresh targets and create a new proposal.');
+    if (this.isStale(held)) throw new DocumentToolError('STALE_TARGET', 'The document changed. Read fresh targets and create a new proposal.');
     return held;
   }
 }

@@ -190,8 +190,8 @@ pub struct EvalContext<'a> {
     exhausted: Rc<Cell<bool>>,
     unhandled_budget_errors: Rc<Cell<u64>>,
     unsupported_functions: Rc<Cell<u64>>,
-    /// names of the uncomputable functions this evaluation called, in call
-    /// order; no handler answers for them.
+    /// names of the uncomputable and unknown functions this evaluation
+    /// called, in call order; no handler answers for them.
     uncomputable: Rc<RefCell<Vec<String>>>,
     other_workbook: Rc<Cell<bool>>,
     defined_name_stack: Rc<RefCell<Vec<DefinedNameKey>>>,
@@ -566,9 +566,10 @@ impl<'a> EvalContext<'a> {
         self.unsupported_functions.get() != 0 || !self.uncomputable.borrow().is_empty()
     }
 
-    /// notes a call no offline engine can compute. unlike other gaps it
-    /// survives `IFERROR` and every other handler: what excel returned for the
-    /// call is unknown, so no handler's answer is known either.
+    /// notes a call the engine cannot compute, offline or at all. unlike
+    /// other gaps it survives `IFERROR` and every other handler: what excel
+    /// returned for the call is unknown, so no handler's answer is known
+    /// either.
     pub(crate) fn record_uncomputable(&self, name: String) {
         self.uncomputable.borrow_mut().push(name);
     }
@@ -822,8 +823,9 @@ pub fn evaluate(expr: &Expr, ctx: &EvalContext<'_>) -> CellValue {
 
 /// a call to a function the engine has no implementation for. one no
 /// offline engine can compute is `#VALUE!`, what excel shows without the
-/// service it needs; any other name is excel's own `#NAME?`, an engine gap a
-/// handler may answer.
+/// service it needs; any other name is excel's own `#NAME?`. the engine
+/// cannot tell a typo from a function excel knows, so either call survives a
+/// handler, whose answer is known no better than the call's.
 pub(crate) fn unimplemented_call(name: &str, ctx: &EvalContext<'_>) -> ErrorValue {
     match crate::functions::uncomputable(name) {
         Some(name) => {
@@ -832,6 +834,7 @@ pub(crate) fn unimplemented_call(name: &str, ctx: &EvalContext<'_>) -> ErrorValu
         }
         None => {
             ctx.record_unsupported_function();
+            ctx.record_uncomputable(crate::functions::bare_name(name).to_owned());
             ErrorValue::Name
         }
     }

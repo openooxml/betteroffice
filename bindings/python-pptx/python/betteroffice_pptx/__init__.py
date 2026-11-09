@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import os
 import json
-from typing import Any, Callable, Iterator, Literal, Mapping, Sequence, Union, overload
+from typing import Any, TypedDict, Callable, Iterator, Literal, Mapping, Sequence, Union, overload
+
 from .edits import (
     PptxEditFailure,
     PptxEditFailureCode,
@@ -45,13 +46,14 @@ from .exports import (
     PptxStructuredContent,
     PptxStructuredResult,
 )
-from .proposals import Proposal, ProposalChange, ProposalPreview
+from .proposals import Proposal, ProposalChange, ProposalPreview, ProposalStripEntry
 from .render import (
     HitTestResult,
     MediaContent,
     MediaSummary,
     PresentationInspection,
     ProposalDiffSlide,
+    ProposalShapeChange,
     ProposalTextChange,
     ShapeHit,
     SlideDisplayList,
@@ -99,7 +101,12 @@ from ._betteroffice_pptx import (
 from ._betteroffice_pptx import Presentation as _Presentation
 from ._betteroffice_pptx import PptxError, __version__
 
+class PngTarget(TypedDict):
+    slide: "int | str"
+
+
 __all__ = [
+    "PngTarget",
     "decode_font_face",
     "AdjustEdit",
     "CaretAnchor",
@@ -166,6 +173,8 @@ __all__ = [
     "ProposalChange",
     "ProposalDiffSlide",
     "ProposalPreview",
+    "ProposalShapeChange",
+    "ProposalStripEntry",
     "ProposalTextChange",
     "StaleProposalError",
     "RangeError",
@@ -426,6 +435,7 @@ class Presentation:
         color: "str | None" = None,
         font_family: "str | None" = None,
         underline: "str | None" = None,
+        strike: "str | None" = None,
         spacing_pt: "float | None" = None,
         baseline_pct: "float | None" = None,
         kern_pt: "float | None" = None,
@@ -446,6 +456,7 @@ class Presentation:
             color=color,
             font_family=font_family,
             underline=underline,
+            strike=strike,
             spacing_pt=spacing_pt,
             baseline_pct=baseline_pct,
             kern_pt=kern_pt,
@@ -580,6 +591,7 @@ class Presentation:
         color: "str | None" = None,
         font_family: "str | None" = None,
         underline: "str | None" = None,
+        strike: "str | None" = None,
         spacing_pt: "float | None" = None,
         baseline_pct: "float | None" = None,
         kern_pt: "float | None" = None,
@@ -596,6 +608,7 @@ class Presentation:
             color=color,
             font_family=font_family,
             underline=underline,
+            strike=strike,
             spacing_pt=spacing_pt,
             baseline_pct=baseline_pct,
             kern_pt=kern_pt,
@@ -618,6 +631,7 @@ class Presentation:
         color: "str | None" = None,
         font_family: "str | None" = None,
         underline: "str | None" = None,
+        strike: "str | None" = None,
         spacing_pt: "float | None" = None,
         baseline_pct: "float | None" = None,
     ) -> TextEdit:
@@ -632,6 +646,7 @@ class Presentation:
             color=color,
             font_family=font_family,
             underline=underline,
+            strike=strike,
             spacing_pt=spacing_pt,
             baseline_pct=baseline_pct,
         )
@@ -770,8 +785,15 @@ class Presentation:
             json.loads(self._inner.preview_proposal_json(proposal_id))
         )
 
+    def proposal_slide_strip(self, proposal_id: str) -> list[ProposalStripEntry]:
+        """Read proposed slide order, including deleted slide ghosts."""
+        return [
+            ProposalStripEntry._from_dict(value)
+            for value in json.loads(self._inner.proposal_slide_strip_json(proposal_id))
+        ]
+
     def render_proposal(self, proposal_id: str, slide: SlideKey) -> DisplayList:
-        """Render one proposed slide without changing the presentation."""
+        """Render a proposed slide by ID or zero-based preview index."""
         return self._inner.render_proposal(proposal_id, slide)
 
     def layout_proposal_diff_slide(
@@ -779,6 +801,12 @@ class Presentation:
     ) -> ProposalDiffSlide:
         """Lay out proposal changes against the current slide."""
         return self._inner.layout_proposal_diff_slide(proposal_id, slide)
+
+    def layout_proposal_diff_slide_by_id(
+        self, proposal_id: str, slide_id: str,
+    ) -> ProposalDiffSlide:
+        """Lay out changes for a live, inserted, or deleted slide ID."""
+        return self._inner.layout_proposal_diff_slide_by_id(proposal_id, slide_id)
 
     @overload
     def accept_proposal(
@@ -890,17 +918,10 @@ class Presentation:
         """
         return json.loads(self._inner.apply_edits_json(_request_json(request)))
 
-    def render_png(
-        self,
-        slide: SlideKey,
-        *,
-        scale: float = 1.0,
-        background: str = "slide",
-        max_shadow_pixels: "int | None" = None,
-    ) -> Png:
-        """Rasterize a slide to PNG bytes. Register a font first."""
+    def render_png(self, target: PngTarget, *, scale: float = 1.0,
+                   background: str = "slide", max_shadow_pixels: "int | None" = None) -> Png:
         return self._inner.render_png(
-            slide, scale=scale, background=background, max_shadow_pixels=max_shadow_pixels
+            target, scale=scale, background=background, max_shadow_pixels=max_shadow_pixels
         )
 
     def save(self) -> bytes:

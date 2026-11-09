@@ -82,6 +82,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
+name = "betteroffice-base-latin"
+version = "0.5.1"
+
+[[package]]
 name = "betteroffice-docx"
 version = "0.5.1"
 dependencies = [
@@ -147,9 +151,13 @@ name = "betteroffice-docx-native"
 version = "0.5.1"
 dependencies = [
  "betteroffice-docx-engine",
+ "betteroffice-docx-layout",
+ "betteroffice-docx-raster",
  "betteroffice-fonts",
  "betteroffice-ooxml-font-preflight",
+ "betteroffice-ooxml-text",
  "getrandom 0.3.4",
+ "mimalloc",
  "napi",
  "napi-build",
  "napi-derive",
@@ -173,7 +181,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror",
- "wasm-bindgen",
 ]
 
 [[package]]
@@ -192,9 +199,10 @@ version = "0.5.1"
 dependencies = [
  "base64 0.22.1",
  "betteroffice-docx-layout",
+ "betteroffice-metafile",
+ "betteroffice-ooxml-raster",
  "betteroffice-ooxml-text",
  "image",
- "png",
  "serde_json",
  "tiny-skia",
 ]
@@ -247,9 +255,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "betteroffice-ooxml-raster"
+version = "0.5.1"
+dependencies = [
+ "betteroffice-drawingml",
+ "betteroffice-ooxml-text",
+ "image",
+ "jpeg-decoder",
+ "png",
+ "resvg",
+ "simplecss",
+ "svgtypes",
+ "tiny-skia",
+]
+
+[[package]]
 name = "betteroffice-ooxml-text"
 version = "0.5.1"
 dependencies = [
+ "betteroffice-base-latin",
  "betteroffice-drawingml",
  "rustybuzz",
  "serde",
@@ -300,8 +324,10 @@ name = "betteroffice-pptx-engine"
 version = "0.0.0"
 dependencies = [
  "betteroffice-drawingml",
+ "betteroffice-fonts",
  "betteroffice-pptx-edit",
  "betteroffice-pptx-parse",
+ "betteroffice-pptx-raster",
  "betteroffice-pptx-render",
  "serde",
  "serde_json",
@@ -313,11 +339,15 @@ name = "betteroffice-pptx-native"
 version = "0.5.1"
 dependencies = [
  "betteroffice-fonts",
+ "betteroffice-pptx-edit",
  "betteroffice-pptx-engine",
  "getrandom 0.3.4",
+ "mimalloc",
  "napi",
  "napi-build",
  "napi-derive",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -349,15 +379,13 @@ version = "0.5.1"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-metafile",
+ "betteroffice-ooxml-raster",
  "betteroffice-ooxml-text",
  "betteroffice-pptx-edit",
  "betteroffice-pptx-render",
  "image",
- "png",
- "resvg",
- "simplecss",
- "svgtypes",
  "tiny-skia",
+ "unicode-properties",
 ]
 
 [[package]]
@@ -455,11 +483,11 @@ name = "betteroffice-vsdx-raster"
 version = "0.5.1"
 dependencies = [
  "betteroffice-drawingml",
+ "betteroffice-ooxml-raster",
  "betteroffice-ooxml-text",
  "betteroffice-vsdx-parse",
  "betteroffice-vsdx-render",
  "image",
- "png",
  "rustybuzz",
  "tiny-skia",
 ]
@@ -554,6 +582,7 @@ dependencies = [
  "napi",
  "napi-build",
  "napi-derive",
+ "serde_json",
 ]
 
 [[package]]
@@ -584,15 +613,17 @@ dependencies = [
  "betteroffice-python-common",
  "betteroffice-xlsx",
  "pyo3",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
 name = "betteroffice-xlsx-raster"
 version = "0.5.1"
 dependencies = [
+ "betteroffice-ooxml-raster",
  "betteroffice-xlsx-render",
  "libm",
- "png",
  "rustybuzz",
  "tiny-skia",
  "unicode-segmentation",
@@ -1154,6 +1185,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "jpeg-decoder"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00810f1d8b74be64b13dbf3db89ac67740615d6c891f0e7b6179326533011a07"
+
+[[package]]
 name = "js-sys"
 version = "0.3.103"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1199,6 +1236,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9fbbcab51052fe104eb5e5d351cf728d30a5be1fe14d9be8a3b097481fb97de"
 
 [[package]]
+name = "libmimalloc-sys"
+version = "0.1.49"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a45a52f43e1c16f667ccfe4dd8c85b7f7c204fd5e3bf46c5b0db9a5c3c0b8e9"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1218,6 +1264,15 @@ name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+
+[[package]]
+name = "mimalloc"
+version = "0.1.52"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d4139bb28d14ad1facf21d5eb8825051b326e172d216b39f6d31df53cc97862"
+dependencies = [
+ "libmimalloc-sys",
+]
 
 [[package]]
 name = "miniz_oxide"
@@ -2053,8 +2108,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 [[package]]
 name = "yrs"
 version = "0.27.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d3a728b1abffeca5b9e5319c5b81e04b73790cbdc1e342da8d91b440b3026cb"
+source = "git+https://github.com/openooxml/y-crdt.git?rev=e785c00611ebce79ece115defa25295982cac165#e785c00611ebce79ece115defa25295982cac165"
 dependencies = [
  "arc-swap",
  "async-lock",

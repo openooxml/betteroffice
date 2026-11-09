@@ -60,6 +60,8 @@ struct RecoveryHistory {
 struct RecoveryPreservedHistory {
     before: RecoveryPreserved,
     after: RecoveryPreserved,
+    proposals_before: Option<Vec<Proposal>>,
+    proposals_after: Option<Vec<Proposal>>,
 }
 
 struct RecoveryPreserved {
@@ -116,6 +118,8 @@ impl RecoveryPreservedHistory {
         let history = Self {
             before: RecoveryPreserved::capture(&history.before, states)?,
             after: RecoveryPreserved::capture(&history.after, states)?,
+            proposals_before: history.proposals_before.clone(),
+            proposals_after: history.proposals_after.clone(),
         };
         pulse();
         Ok(history)
@@ -125,6 +129,8 @@ impl RecoveryPreservedHistory {
         let history = PreservedStateHistory {
             before: self.before.restore(states)?,
             after: self.after.restore(states)?,
+            proposals_before: self.proposals_before,
+            proposals_after: self.proposals_after,
         };
         pulse();
         Ok(history)
@@ -468,7 +474,7 @@ impl RecoveryCalculation {
                 sheet.set_array_formula(*at, *range);
             }
         }
-        validate_model(&model)?;
+        validate_model_sheets(&model)?;
         Ok(model)
     }
 }
@@ -506,6 +512,7 @@ fn first_difference(left: &WorkbookModel, right: &WorkbookModel) -> String {
                 "conditional formats",
                 left.conditional_formats != right.conditional_formats,
             ),
+            ("auto filter", left.auto_filter != right.auto_filter),
             ("merges", left.merges != right.merges),
             ("column widths", left.col_widths != right.col_widths),
             ("row heights", left.row_heights != right.row_heights),
@@ -766,6 +773,7 @@ impl Workbook {
             header.client_id,
             header.next_sheet_id,
             true,
+            checkpoint.collaborative,
         )
         .map_err(invalid)?;
         if let Some(styles) = &source_markers {
@@ -1408,10 +1416,10 @@ mod tests {
         assert!(!captured_ids.contains(&expected_ids[2]));
         assert_eq!(&expected_ids[..2], captured_ids.as_slice());
         let restored_keys = restored.authority.structure().unwrap().sheet_keys;
-        assert_eq!(
-            restored_keys[2],
-            format!("replica:{}:{}", restored_identity.0, restored_identity.2)
-        );
+        let minted = restored_keys[2]
+            .strip_prefix(&format!("replica:{}:", restored_identity.0))
+            .unwrap();
+        assert_eq!(minted.split(':').count(), 2);
         assert!(!captured_keys.contains(&restored_keys[2]));
         assert_eq!(&restored_keys[..2], captured_keys.as_slice());
         assert_eq!(restored.save().unwrap(), workbook.save().unwrap());

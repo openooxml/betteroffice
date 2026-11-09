@@ -91,9 +91,15 @@ refused rather than discarding the source workbook.
 measured from the workbook's normal font. The caller chooses paper size, margins, and pagination;
 `paintDisplayList` accepts an optional origin in backing-store pixels for positioning the result.
 
-`workbook.renderPng(viewport)` exports the active sheet's viewport. `workbook.renderRangePng()` exports
-its used range, or accepts `{ range, scale }` to select an A1 range and raster scale. Both return PNG
-bytes synchronously; check `isPngExportAvailable()` before calling them.
+`await workbook.renderPng({ sheet, viewport })` draws a viewport of a sheet, and
+`await workbook.renderPng({ sheet, range })` a cell range, as PNG bytes. `sheet` is a zero-based index or
+a tab name; `range` is an A1 string, `{ kind: 'a1', a1 }`, zero-based `{ kind: 'rowCol', start, end }`, or `'used'`
+for the sheet's used range at call time.
+Options are `{ scale, maxWidth, maxHeight, signal, fonts }`. The editor's painter draws on a canvas. Without
+`fonts`, it loads the bundled faces `@betteroffice/xlsx-native` draws the sheet's fonts with, so both engines
+match. The call rejects with `PngExportError` rather than paint a substitute font. Without a canvas, it rejects with
+code `canvas-unavailable`; use `@betteroffice/xlsx-native` for PNG export in that environment.
+`isPngExportAvailable()` reports whether PNG export can run.
 
 ## Worker sessions
 
@@ -112,7 +118,8 @@ The React editor uses a worker by default and exposes its own asynchronous API. 
 `workbook.propose(agentId, note, edits)` stages cell edits for review without applying them.
 `listProposals`, `acceptProposal`, and `rejectProposal` manage that queue; acceptance applies the
 proposal as one undo step and recalculates dependents. Check `isProposalsAvailable()` first;
-acceptance throws `StaleProposalError` if targeted cells have changed since staging.
+acceptance throws `StaleProposalError` if targeted cells have changed since staging. Listed proposals
+name those cells in `staleTargets`, so a host can warn before accepting.
 
 ## Version-checked edit batches
 
@@ -135,10 +142,16 @@ to a binary transport. See the [collaboration guide](https://docs.betteroffice.d
 for provider lifecycle, transport setup, and shared starting state.
 
 Open the workbook with `openWorkbook(bytes, { collaborative: true })`. Collaborative workbooks
-synchronize cell content, formulas, styles, column widths and row heights, with local undo and
-redo whose effects synchronize.
-Structural edits throw: inserting or deleting rows and columns, adding, removing, moving or renaming
-sheets, and changing charts or defined names.
+synchronize cell content, formulas, styles, column widths and row heights, row and column
+visibility, freeze panes, merged cells, single hyperlinks, chart positions, defined names,
+conditional formats, auto filters and sheets added at the end, with local undo and redo whose
+effects synchronize.
+
+Other structural edits are refused without changing the workbook: `applyOps` throws and editor
+sessions report the command as refused with reason `unsupported`. That covers inserting or deleting
+rows and columns, adding a sheet anywhere but the end, removing, moving or renaming sheets and chart
+edits beyond moving a chart. See the
+[collaboration guide](https://docs.betteroffice.dev/docs/collaboration#xlsx-limits) for the reasons.
 
 ## Operation profiles
 

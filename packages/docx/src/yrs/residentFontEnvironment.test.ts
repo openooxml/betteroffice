@@ -122,6 +122,10 @@ test('decoded worker fonts stay in their owning measurement session', async () =
 }, TIMEOUT);
 
 test('commands that may need new fonts: fallback script text, reformatting and remote merges, never bytes alone', () => {
+  expect(commandMayNeedNewFonts('insertText', { text: 'A' })).toBe(false);
+  expect(commandMayNeedNewFonts('insertText', { text: 'B' })).toBe(false);
+  expect(commandMayNeedNewFonts('applyEdits', { request: { steps: [{ op: 'insertText', text: 'Ω' }] } })).toBe(false);
+  expect(commandMayNeedNewFonts('insertImage', { image: { data: Uint8Array.of(65) } })).toBe(false);
   expect(commandMayNeedNewFonts('insertText', { text: 'plain caf\u00e9' })).toBe(false);
   expect(commandMayNeedNewFonts('deleteBackward', {})).toBe(false);
   for (const text of ['\u65e5\u672c', '\u304b', '\ud55c', '\u05d0', '\u0627', '\u{20000}']) {

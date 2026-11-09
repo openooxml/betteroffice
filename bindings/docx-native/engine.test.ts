@@ -3,6 +3,8 @@ import { beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import initWasm, * as wasm from '../../packages/docx/src/wasm/generated/edit/docx_edit.js';
 import initPreflight, { font_preflight as wasmFontPreflight } from '../../packages/docx/src/wasm/generated/preflight/docx_preflight.js';
 
+import { openFailureKind } from '../../packages/docx-react/src/components/openFailure';
+
 type Engine = typeof wasm;
 type Session = wasm.EditSession;
 type ParagraphRead = {
@@ -79,6 +81,201 @@ function expectThrownParity(wasmCall: () => unknown, nativeCall: () => unknown):
 }
 
 describe('docx native engine parity', () => {
+  test('an empty docDefaults element leaves unstyled paragraphs without spacing in both engines', () => {
+    const encoder = new TextEncoder();
+    const bytes = wasm.rezip_docx({
+      '[Content_Types].xml': encoder.encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>'),
+      '_rels/.rels': encoder.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'),
+      'word/_rels/document.xml.rels': encoder.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>'),
+      'word/styles.xml': encoder.encode('<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault/><w:pPrDefault/></w:docDefaults><w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/></w:style></w:styles>'),
+      'word/document.xml': encoder.encode('<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Engine text</w:t></w:r></w:p><w:sectPr/></w:body></w:document>'),
+    });
+    const expected = new wasm.EditSession(23);
+    const actual = new native.EditSession(23);
+    try {
+      const lowered = (session: Session) => {
+        session.seed_from_docx(bytes, 'opening');
+        return JSON.parse(session.yrs_blocks_for_story('body', '{}')) as Array<{ kind: string; attrs?: { spacing?: { after?: number } } }>;
+      };
+      const wasmBlocks = lowered(expected);
+      expect(lowered(actual)).toEqual(wasmBlocks);
+      expect(wasmBlocks.find((block) => block.kind === 'paragraph')?.attrs?.spacing?.after ?? 0).toBe(0);
+    } finally {
+      actual.free();
+      expected.free();
+    }
+  });
+
+  test('an inserted table takes the document table style margins in both engines', () => {
+    const encoder = new TextEncoder();
+    const styled = wasm.rezip_docx({
+      '[Content_Types].xml': encoder.encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>'),
+      '_rels/.rels': encoder.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'),
+      'word/_rels/document.xml.rels': encoder.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>'),
+      'word/styles.xml': encoder.encode('<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="table" w:default="1" w:styleId="TableNormal"><w:name w:val="Normal Table"/><w:tblPr><w:tblInd w:w="0" w:type="dxa"/><w:tblCellMar><w:top w:w="0" w:type="dxa"/><w:left w:w="108" w:type="dxa"/><w:bottom w:w="0" w:type="dxa"/><w:right w:w="108" w:type="dxa"/></w:tblCellMar></w:tblPr></w:style></w:styles>'),
+      'word/document.xml': encoder.encode('<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Engine text</w:t></w:r></w:p><w:sectPr/></w:body></w:document>'),
+    });
+    const hostEnv = JSON.stringify({
+      tableStyleCellMargins: { TableNormal: { left: { value: 108, type: 'dxa' }, right: { value: 108, type: 'dxa' } } },
+      defaultTableStyleId: 'TableNormal',
+    });
+    for (const [bytes, env] of [[fixture, hostEnv], [styled, '{}']] as const) {
+      const expected = new wasm.EditSession(17);
+      const actual = new native.EditSession(17);
+      try {
+        const lowered = (session: Session) => {
+          session.seed_from_docx(bytes, 'opening');
+          session.insert_table('body', paragraphId(session), 0, 1, 2, 'Owner', '2026-11-07T12:00:00Z');
+          return JSON.parse(session.yrs_blocks_for_story('body', env)) as Array<{
+            kind: string;
+            rows?: Array<{ cells: Array<{ padding?: { left: number; right: number; top: number; bottom: number } }> }>;
+          }>;
+        };
+        const wasmBlocks = lowered(expected);
+        const nativeBlocks = lowered(actual);
+        expect(nativeBlocks).toEqual(wasmBlocks);
+        const padding = wasmBlocks.find((block) => block.kind === 'table')?.rows?.[0]?.cells[0]?.padding;
+        expect(padding?.left).toBeCloseTo(7.2, 6);
+        expect(padding?.right).toBeCloseTo(7.2, 6);
+      } finally {
+        actual.free();
+        expected.free();
+      }
+    }
+  });
+
+  test('endnotes taller than the last page flow onto new pages, in both engines', () => {
+    const encoder = new TextEncoder();
+    const main = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+    const officeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml';
+    const relType = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+    const words = (note: number) => Array.from({ length: 40 }, (_, index) => `n${note}t${index}`).join(' ');
+    const notes = [1, 2, 3].map((id) => `<w:endnote w:id="${id}"><w:p><w:r><w:t xml:space="preserve">${words(id)}</w:t></w:r></w:p></w:endnote>`).join('');
+    const body = [1, 2, 3].map((id) => `<w:p><w:r><w:t>Body ${id}</w:t></w:r><w:r><w:endnoteReference w:id="${id}"/></w:r></w:p>`).join('');
+    const bytes = wasm.rezip_docx({
+      '[Content_Types].xml': encoder.encode(`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="${officeType}.document.main+xml"/><Override PartName="/word/endnotes.xml" ContentType="${officeType}.endnotes+xml"/></Types>`),
+      '_rels/.rels': encoder.encode(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${relType}/officeDocument" Target="word/document.xml"/></Relationships>`),
+      'word/_rels/document.xml.rels': encoder.encode(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId2" Type="${relType}/endnotes" Target="endnotes.xml"/></Relationships>`),
+      'word/endnotes.xml': encoder.encode(`<w:endnotes ${main}><w:endnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:endnote><w:endnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:endnote>${notes}</w:endnotes>`),
+      'word/document.xml': encoder.encode(`<w:document ${main}><w:body>${body}<w:sectPr><w:pgSz w:w="4320" w:h="2880"/><w:pgMar w:top="300" w:right="300" w:bottom="300" w:left="300" w:header="0" w:footer="0" w:gutter="0"/></w:sectPr></w:body></w:document>`),
+    });
+    const expected = new wasm.EditSession(29);
+    const actual = new native.EditSession(29);
+    try {
+      expected.open_docx(bytes, true, 'opening');
+      actual.open_docx(bytes, true, 'opening');
+      const font = expected.register_measure_font(fontBytes);
+      expect(actual.register_measure_font(fontBytes)).toBe(font);
+      const request = {
+        bodyStory: 'body',
+        regions: { sections: [{
+          sectionId: 'main',
+          properties: {
+            pageWidth: 4320, pageHeight: 2880,
+            marginTop: 300, marginRight: 300, marginBottom: 300, marginLeft: 300,
+          },
+        }] },
+        notes: { contents: [1, 2, 3].map((id) => ({ id, noteKind: 'endnote', height: 0 })) },
+        measurement: {
+          fontChains: {} as Record<string, number[]>,
+          defaults: { fontSize: 11, fontFamily: 'Calibri' },
+          authoritativeShaping: true,
+        },
+        renderEnv: {},
+      };
+      const requirements = JSON.parse(expected.layout_font_requirements_json(JSON.stringify(request))) as { key: string }[];
+      for (const requirement of requirements) request.measurement.fontChains[requirement.key] = [font];
+      const input = JSON.stringify(request);
+      const layout = actual.layout_document_with_regions_json(input);
+      expect(layout).toBe(expected.layout_document_with_regions_json(input));
+      type Area = { kind?: string; y: number; height: number; continuation?: boolean; notes: { id: number }[] };
+      type Page = { fragments: { y: number; height: number }[]; size: { h: number }; margins: { bottom: number }; noteAreas?: Area[] };
+      const pages = (JSON.parse(layout) as { layout: { pages: Page[] } }).layout.pages;
+      const areas = pages.flatMap((page) => (page.noteAreas ?? []).filter((area) => area.kind === 'endnote').map((area) => ({ page, area })));
+      expect(areas.length).toBeGreaterThan(1);
+      expect(areas[0]!.area.continuation).toBeUndefined();
+      for (const { area } of areas.slice(1)) expect(area.continuation).toBe(true);
+      for (const { page, area } of areas) {
+        const body = Math.max(0, ...page.fragments.map((fragment) => fragment.y + fragment.height));
+        expect(area.y + 0.5).toBeGreaterThanOrEqual(body);
+        expect(area.y + area.height).toBeLessThanOrEqual(page.size.h - page.margins.bottom + 0.5);
+      }
+      expect(areas.flatMap(({ area }) => area.notes.map((note) => note.id)).filter((id, index, ids) => ids[index - 1] !== id)).toEqual([1, 2, 3]);
+      const display = actual.build_display_list_json(layout);
+      expect(display).toBe(expected.build_display_list_json(layout));
+      type DisplayArea = { kind?: string; primitives?: { groupId?: string }[]; continuedNoteIds?: number[] };
+      const displayPages = (JSON.parse(display) as { pages: { noteAreas?: DisplayArea[] }[] }).pages;
+      const shownOn = (id: number) => displayPages.filter((page) => (page.noteAreas ?? []).some((area) =>
+        area.kind === 'endnote' && (area.primitives ?? []).some((primitive) => primitive.groupId === `endnote-${id}`))).length;
+      const split = [1, 2, 3].filter((id) => shownOn(id) === 2);
+      expect(split.length).toBeGreaterThan(0);
+      for (const id of split) {
+        expect(displayPages.filter((page) => (page.noteAreas ?? []).some((area) => area.continuedNoteIds?.includes(id))).length).toBe(1);
+      }
+    } finally {
+      actual.free();
+      expected.free();
+    }
+  });
+
+  test('measured glyph runs of an Arabic paragraph match in both engines', () => {
+    const encoder = new TextEncoder();
+    const main = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+    const words = Array.from({ length: 12 }, () => 'مرحبا بالعالم').join(' ');
+    const bytes = wasm.rezip_docx({
+      '[Content_Types].xml': encoder.encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'),
+      '_rels/.rels': encoder.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'),
+      'word/document.xml': encoder.encode(`<w:document ${main}><w:body><w:p><w:pPr><w:bidi/></w:pPr><w:r><w:rPr><w:rtl/></w:rPr><w:t xml:space="preserve">${words}</w:t></w:r><w:r><w:t xml:space="preserve"> Latin tail</w:t></w:r></w:p><w:sectPr/></w:body></w:document>`),
+    });
+    const naskhBytes = new Uint8Array(readFileSync(new URL('../../packages/fonts/assets/NotoNaskhArabic-Regular.ttf', import.meta.url)));
+    const expected = new wasm.EditSession(31);
+    const actual = new native.EditSession(31);
+    try {
+      expected.open_docx(bytes, true, 'opening');
+      actual.open_docx(bytes, true, 'opening');
+      const latin = expected.register_measure_font(fontBytes);
+      expect(actual.register_measure_font(fontBytes)).toBe(latin);
+      const naskh = expected.register_measure_font(naskhBytes);
+      expect(actual.register_measure_font(naskhBytes)).toBe(naskh);
+      const request = {
+        bodyStory: 'body',
+        regions: { sections: [{
+          sectionId: 'main',
+          properties: {
+            pageWidth: 4320, pageHeight: 15840,
+            marginTop: 300, marginRight: 300, marginBottom: 300, marginLeft: 300,
+          },
+        }] },
+        measurement: {
+          fontChains: {} as Record<string, number[]>,
+          defaults: { fontSize: 11, fontFamily: 'Calibri' },
+          authoritativeShaping: true,
+        },
+        renderEnv: {},
+      };
+      const requirements = JSON.parse(expected.layout_font_requirements_json(JSON.stringify(request))) as { key: string }[];
+      for (const requirement of requirements) request.measurement.fontChains[requirement.key] = [latin, naskh];
+      const input = JSON.stringify(request);
+      const layout = actual.layout_document_with_regions_json(input);
+      expect(layout).toBe(expected.layout_document_with_regions_json(input));
+      const glyphRuns = (value: unknown): string[] => {
+        if (Array.isArray(value)) return value.flatMap(glyphRuns);
+        if (value === null || typeof value !== 'object') return [];
+        const record = value as Record<string, unknown>;
+        const own = typeof record.glyphRuns === 'string' ? [record.glyphRuns] : [];
+        return [...own, ...Object.values(record).flatMap(glyphRuns)];
+      };
+      const lines = glyphRuns(JSON.parse(layout));
+      expect(lines.length).toBeGreaterThan(1);
+      expect(lines).toEqual(glyphRuns(JSON.parse(expected.layout_document_with_regions_json(input))));
+      const display = actual.build_display_list_json(layout);
+      expect(display).toBe(expected.build_display_list_json(layout));
+    } finally {
+      actual.free();
+      expected.free();
+    }
+  });
+
   test.each(['open_docx', 'seed_from_docx'] as const)('%s reads the same synthetic package', (method) => {
     const expected = new wasm.EditSession(7);
     const actual = new native.EditSession(7);
@@ -96,6 +293,27 @@ describe('docx native engine parity', () => {
     } finally {
       actual.free();
       expected.free();
+    }
+  });
+
+  test('set_row_height matches wasm and refuses the same input', () => {
+    const expected = new wasm.EditSession(13);
+    const actual = new native.EditSession(13);
+    try {
+      for (const session of [expected, actual]) {
+        session.seed_from_docx(fixture, 'opening');
+        session.insert_table('body', paragraphId(session), 0, 2, 2);
+      }
+      const at = JSON.stringify({ story: 'body', tableIndex: 0, row: 1, column: 0 });
+      expect(JSON.parse(actual.set_row_height(at, 720, 'atLeast'))).toEqual(JSON.parse(expected.set_row_height(at, 720, 'atLeast')));
+      const payload = JSON.parse(actual.table_payload('body', 0)!);
+      expect(payload).toEqual(JSON.parse(expected.table_payload('body', 0)!));
+      expect(payload.rows[1].trPr).toMatchObject({ height: 720, heightRule: 'atLeast' });
+      expectThrownParity(() => expected.set_row_height(at, 0, 'atLeast'), () => actual.set_row_height(at, 0, 'atLeast'));
+      expectThrownParity(() => expected.set_row_height(at, 720, 'auto'), () => actual.set_row_height(at, 720, 'auto'));
+    } finally {
+      expected.free();
+      actual.free();
     }
   });
 
@@ -343,6 +561,7 @@ describe('docx native engine parity', () => {
       expectPlainBytes(decoded);
       expect(decoded).toEqual(expected.decode_font(fontBytes));
       expect(decoded).toEqual(fontBytes);
+      expect(actual.take_base_latin_miss()).toBe(expected.take_base_latin_miss());
       const echo = actual.echo_glyph_set_json(font, 11, true, 'Ab!');
       expect(echo).toBe(expected.echo_glyph_set_json(font, 11, true, 'Ab!'));
       const glyph = JSON.parse(echo).glyphIds[0] as number;
@@ -781,6 +1000,15 @@ describe('docx native engine parity', () => {
     }
   });
 
+  test('an unreadable relationships part warns the same way in both engines', () => {
+    const parts = wasm.unzip_docx(fixture) as Record<string, Uint8Array>;
+    const damaged = wasm.rezip_docx({ ...parts, 'word/_rels/header1.xml.rels': new TextEncoder().encode('<Relationships><not closed') });
+    const output = native.parse_docx_s4(damaged);
+    expect(output).toBe(wasm.parse_docx_s4(damaged));
+    expect((JSON.parse(output) as { projection: { warnings?: string[] } }).projection.warnings?.[0]).toContain('word/_rels/header1.xml.rels');
+    expect((JSON.parse(native.parse_docx_s4(fixture)) as { projection: Record<string, unknown> }).projection).not.toHaveProperty('warnings');
+  });
+
   test('free functions preserve ZIP shapes, parse JSON, exports and sanitization', () => {
     const expected = wasm.unzip_docx(fixture) as Record<string, Uint8Array>;
     const actual = native.unzip_docx(fixture) as Record<string, Uint8Array>;
@@ -903,6 +1131,28 @@ describe('docx native engine parity', () => {
     }
   });
 
+  test('prime_save_seed_states_slice answers each slice as wasm does', () => {
+    const expected = new wasm.EditSession(63);
+    const actual = new native.EditSession(63);
+    try {
+      expected.seed_from_docx(fixture, 'opening');
+      actual.seed_from_docx(fixture, 'opening');
+      for (const [paragraphs, inflated, bytes] of [[0, 0, 1], [1_000, 64 * 1024 * 1024, 1], [1_000, 64 * 1024 * 1024, 1]]) {
+        expect(actual.prime_save_seed_states_slice(paragraphs, inflated, bytes))
+          .toBe(expected.prime_save_seed_states_slice(paragraphs, inflated, bytes));
+      }
+      let answer = 1;
+      for (let slice = 0; slice < 10_000 && answer === 1; slice += 1) {
+        answer = expected.prime_save_seed_states_slice(1_000, 64 * 1024 * 1024, 64);
+        expect(actual.prime_save_seed_states_slice(1_000, 64 * 1024 * 1024, 64)).toBe(answer);
+      }
+      expect(read(actual)).toEqual(read(expected));
+    } finally {
+      actual.free();
+      expected.free();
+    }
+  });
+
   test('RunInheritance resolves the same attributes and formatting', () => {
     const expectedSession = new wasm.EditSession(71);
     const actualSession = new native.EditSession(71);
@@ -974,4 +1224,228 @@ describe('docx native engine parity', () => {
     }
     expectThrownParity(() => wasmFontPreflight(invalid), () => nativePreflight(invalid));
   });
+});
+
+test('native and wasm track and resolve character formatting with the same optional author arguments', () => {
+  for (const engine of [wasm, native]) {
+    for (const accept of [true, false]) {
+      const session = new engine.EditSession(9303);
+      try {
+        session.open_docx(fixture, true, 'format-tracking');
+        const id = paragraphId(session);
+        session.toggle_mark('body', id, 0, id, 6, '{"type":"bold"}', 'Writer', '2026-10-01T12:00:00Z');
+        session.format_range('body', id, 1, id, 5, '{"italic":true}', 'Writer', '2026-10-01T12:00:00Z');
+        session.clear_formatting('body', id, 2, id, 4, 'Writer', '2026-10-01T12:00:00Z');
+        const revisions = JSON.parse(session.list_revisions());
+        expect(revisions).toEqual(expect.arrayContaining([expect.objectContaining({ kind: 'rPrChange', author: 'Writer' })]));
+        for (const revisionId of new Set(revisions.map((revision: { revisionId: string }) => revision.revisionId))) {
+          const target = JSON.stringify({ revisionId });
+          if (accept) session.accept_change(target);
+          else session.reject_change(target);
+        }
+        expect(JSON.parse(session.list_revisions())).toEqual([]);
+        const context = JSON.parse(session.selection_context('body', id, 0, id, 1));
+        expect(context.bold).toBe(accept);
+        session.set_hyperlink('body', id, 0, id, 6, '{"href":"#target"}', 'Writer', '2026-10-01T12:00:00Z');
+        expect(JSON.parse(session.list_revisions()).length).toBeGreaterThan(0);
+      } finally {
+        session.free();
+      }
+    }
+  }
+});
+
+test('native and wasm mark the same table row headers in the display list', () => {
+  const encoder = new TextEncoder();
+  const w = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+  const cell = (text: string) => `<w:tc><w:tcPr><w:tcW w:w="1500" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:tc>`;
+  const row = (texts: string[], header = false) => `<w:tr>${header ? '<w:trPr><w:tblHeader/></w:trPr>' : ''}${texts.map(cell).join('')}</w:tr>`;
+  const bytes = wasm.rezip_docx({
+    '[Content_Types].xml': encoder.encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'),
+    '_rels/.rels': encoder.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'),
+    'word/document.xml': encoder.encode(`<w:document xmlns:w="${w}"><w:body><w:tbl><w:tblPr><w:tblLook w:val="04A0" w:firstRow="1" w:firstColumn="1"/></w:tblPr><w:tblGrid><w:gridCol w:w="1500"/><w:gridCol w:w="1500"/></w:tblGrid>${row(['Region', 'Q1'], true)}${row(['North', '12'])}</w:tbl><w:p/><w:sectPr/></w:body></w:document>`),
+  });
+  type Cell = { row: number; col: number; isHeader?: boolean; isRowHeader?: boolean; headerIds?: string[] };
+  const run = (engine: Engine) => {
+    const session = new engine.EditSession(77);
+    try {
+      session.open_docx(bytes, true);
+      const font = session.register_measure_font(fontBytes);
+      const fontChains = { 'calibri|0|0': [font], 'calibri|1|0': [font] };
+      const layout = session.layout_document_with_regions_json(JSON.stringify({
+        bodyStory: 'body',
+        regions: { sections: [{ sectionId: 'main', properties: {
+          pageWidth: 12240, pageHeight: 15840, marginTop: 1440, marginRight: 1440, marginBottom: 1440, marginLeft: 1440,
+        } }] },
+        measurement: { fontChains, defaults: { fontSize: 11, fontFamily: 'Calibri' }, authoritativeShaping: true },
+        renderEnv: { themeColors: (JSON.parse(session.materialize_docx() ?? '{}') as {
+          document?: { package?: { theme?: { colorScheme?: Record<string, string> } } };
+        }).document?.package?.theme?.colorScheme ?? {} },
+      }));
+      const list = JSON.parse(session.build_display_list_json(JSON.stringify({ ...JSON.parse(layout), fontChains }))) as {
+        pages: { primitives: { kind: string; cell?: Cell }[] }[];
+      };
+      const cells = new Map<string, Omit<Cell, 'headerIds'> & { headerIds: number }>();
+      for (const primitive of list.pages.flatMap((page) => page.primitives)) {
+        const ref = primitive.cell;
+        if (!ref || cells.has(`${ref.row}:${ref.col}`)) continue;
+        cells.set(`${ref.row}:${ref.col}`, {
+          row: ref.row, col: ref.col, isHeader: ref.isHeader, isRowHeader: ref.isRowHeader, headerIds: ref.headerIds?.length ?? 0,
+        });
+      }
+      return [...cells.values()].sort((a, b) => a.row - b.row || a.col - b.col);
+    } finally {
+      session.free();
+    }
+  };
+  const nativeCells = run(native);
+  expect(nativeCells).toEqual([
+    { row: 0, col: 0, isHeader: true, isRowHeader: undefined, headerIds: 0 },
+    { row: 0, col: 1, isHeader: true, isRowHeader: undefined, headerIds: 0 },
+    { row: 1, col: 0, isHeader: undefined, isRowHeader: true, headerIds: 0 },
+    { row: 1, col: 1, isHeader: undefined, isRowHeader: undefined, headerIds: 2 },
+  ]);
+  expect(nativeCells).toEqual(run(wasm));
+});
+
+test('native and wasm mark the same list markers as numbered', () => {
+  const encoder = new TextEncoder();
+  const w = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+  const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const level = (format: string, text: string) =>
+    `<w:lvl w:ilvl="0"><w:start w:val="3"/><w:numFmt w:val="${format}"/><w:lvlText w:val="${text}"/><w:lvlJc w:val="left"/></w:lvl>`;
+  const item = (num: number, text: string) =>
+    `<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="${num}"/></w:numPr></w:pPr><w:r><w:t>${text}</w:t></w:r></w:p>`;
+  const bytes = wasm.rezip_docx({
+    '[Content_Types].xml': encoder.encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/></Types>'),
+    '_rels/.rels': encoder.encode(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/officeDocument" Target="word/document.xml"/></Relationships>`),
+    'word/_rels/document.xml.rels': encoder.encode(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/numbering" Target="numbering.xml"/></Relationships>`),
+    'word/numbering.xml': encoder.encode(`<w:numbering xmlns:w="${w}"><w:abstractNum w:abstractNumId="0">${level('decimal', 'Part %1.')}</w:abstractNum><w:abstractNum w:abstractNumId="1">${level('bullet', 'q')}</w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num><w:num w:numId="2"><w:abstractNumId w:val="1"/></w:num></w:numbering>`),
+    'word/document.xml': encoder.encode(`<w:document xmlns:w="${w}"><w:body>${item(1, 'Alpha')}${item(2, 'Beta')}<w:sectPr/></w:body></w:document>`),
+  });
+  const run = (engine: Engine) => {
+    const session = new engine.EditSession(79);
+    try {
+      session.open_docx(bytes, true);
+      const font = session.register_measure_font(fontBytes);
+      const fontChains = { 'calibri|0|0': [font], 'calibri|1|0': [font] };
+      const layout = session.layout_document_with_regions_json(JSON.stringify({
+        bodyStory: 'body',
+        regions: { sections: [{ sectionId: 'main', properties: {
+          pageWidth: 12240, pageHeight: 15840, marginTop: 1440, marginRight: 1440, marginBottom: 1440, marginLeft: 1440,
+        } }] },
+        measurement: { fontChains, defaults: { fontSize: 11, fontFamily: 'Calibri' }, authoritativeShaping: true },
+        renderEnv: { themeColors: (JSON.parse(session.materialize_docx() ?? '{}') as {
+          document?: { package?: { theme?: { colorScheme?: Record<string, string> } } };
+        }).document?.package?.theme?.colorScheme ?? {} },
+      }));
+      const list = JSON.parse(session.build_display_list_json(JSON.stringify({ ...JSON.parse(layout), fontChains }))) as {
+        pages: { primitives: { listMarker?: boolean; listMarkerNumbered?: boolean; text?: string }[] }[];
+      };
+      const markers = list.pages.flatMap((page) => page.primitives).filter((primitive) => primitive.listMarker);
+      return {
+        numbered: markers.filter((marker) => marker.listMarkerNumbered).map((marker) => marker.text).join(''),
+        hidden: markers.filter((marker) => !marker.listMarkerNumbered).map((marker) => marker.text).join(''),
+      };
+    } finally {
+      session.free();
+    }
+  };
+  const markers = run(native);
+  expect(markers.numbered.trim()).toBe('Part 3.');
+  expect(markers.hidden.trim()).not.toBe('');
+  expect(run(wasm)).toEqual(markers);
+});
+
+test('broken packages open or fail the same on native and wasm, and a failure reads as damaged', () => {
+  const encoder = new TextEncoder();
+  const w = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+  const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const types = encoder.encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
+  const rels = encoder.encode(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/officeDocument" Target="word/document.xml"/></Relationships>`);
+  const document = encoder.encode(`<w:document xmlns:w="${w}"><w:body><w:p/><w:sectPr/></w:body></w:document>`);
+  const good = { '[Content_Types].xml': types, '_rels/.rels': rels, 'word/document.xml': document };
+  const without = (name: keyof typeof good) => Object.fromEntries(Object.entries(good).filter(([part]) => part !== name));
+  const zipped = wasm.rezip_docx(good);
+  const cases: [string, Uint8Array][] = [
+    ['not a zip', encoder.encode('this is not a zip file')],
+    ['a truncated zip', zipped.slice(0, zipped.length >> 1)],
+    ['no content types', wasm.rezip_docx(without('[Content_Types].xml'))],
+    ['no package relationships', wasm.rezip_docx(without('_rels/.rels'))],
+    ['no main part', wasm.rezip_docx(without('word/document.xml'))],
+    ['a main part that is not XML', wasm.rezip_docx({ ...good, 'word/document.xml': encoder.encode('<w:document') })],
+    ['a main part of another kind', wasm.rezip_docx({ ...good, 'word/document.xml': encoder.encode('<other/>') })],
+  ];
+  const failure = (engine: Engine, bytes: Uint8Array) => {
+    const session = new engine.EditSession(80);
+    try {
+      session.open_docx(bytes, true);
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    } finally {
+      session.free();
+    }
+  };
+  const outcomes = cases.map(([name, bytes]) => {
+    const message = failure(native, bytes);
+    return {
+      name, sameOnWasm: failure(wasm, bytes) === message,
+      kind: message === null ? 'opens' : openFailureKind(message),
+    };
+  });
+  expect(outcomes).toEqual(cases.map(([name]) => ({
+    name, sameOnWasm: true, kind: name === 'no content types' || name === 'no package relationships' ? 'opens' : 'damaged',
+  })));
+});
+
+test('native and wasm carry the same chart data in the display list', () => {
+  const encoder = new TextEncoder();
+  const w = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+  const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const drawing = '<w:drawing xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">'
+    + '<wp:inline><wp:extent cx="2743200" cy="1828800"/><wp:docPr id="1" name="Chart 1"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">'
+    + '<c:chart r:id="rIdChart"/></a:graphicData></a:graphic></wp:inline></w:drawing>';
+  const chart = '<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><c:chart><c:plotArea>'
+    + '<c:barChart><c:barDir val="col"/><c:grouping val="clustered"/><c:ser><c:idx val="0"/><c:order val="0"/><c:tx><c:v>Sales</c:v></c:tx>'
+    + '<c:cat><c:strRef><c:strCache><c:ptCount val="3"/><c:pt idx="0"><c:v>A</c:v></c:pt><c:pt idx="1"><c:v>B</c:v></c:pt><c:pt idx="2"><c:v>C</c:v></c:pt></c:strCache></c:strRef></c:cat>'
+    + '<c:val><c:numRef><c:numCache><c:formatCode>0.0</c:formatCode><c:ptCount val="3"/><c:pt idx="0"><c:v>1</c:v></c:pt><c:pt idx="2"><c:v>3</c:v></c:pt></c:numCache></c:numRef></c:val>'
+    + '</c:ser><c:axId val="1"/><c:axId val="2"/></c:barChart><c:catAx><c:axId val="1"/><c:scaling/><c:axPos val="b"/><c:crossAx val="2"/></c:catAx>'
+    + '<c:valAx><c:axId val="2"/><c:scaling/><c:axPos val="l"/><c:crossAx val="1"/></c:valAx></c:plotArea></c:chart></c:chartSpace>';
+  const bytes = wasm.rezip_docx({
+    '[Content_Types].xml': encoder.encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/></Types>'),
+    '_rels/.rels': encoder.encode(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/officeDocument" Target="word/document.xml"/></Relationships>`),
+    'word/_rels/document.xml.rels': encoder.encode(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdChart" Type="${rel}/chart" Target="charts/chart1.xml"/></Relationships>`),
+    'word/document.xml': encoder.encode(`<w:document xmlns:w="${w}" xmlns:r="${rel}"><w:body><w:p><w:r>${drawing}</w:r></w:p><w:sectPr/></w:body></w:document>`),
+    'word/charts/chart1.xml': encoder.encode(chart),
+  });
+  const run = (engine: Engine) => {
+    const session = new engine.EditSession(78);
+    try {
+      session.open_docx(bytes, true);
+      const font = session.register_measure_font(fontBytes);
+      const fontChains = { 'calibri|0|0': [font], 'calibri|1|0': [font] };
+      const layout = session.layout_document_with_regions_json(JSON.stringify({
+        bodyStory: 'body',
+        regions: { sections: [{ sectionId: 'main', properties: {
+          pageWidth: 12240, pageHeight: 15840, marginTop: 1440, marginRight: 1440, marginBottom: 1440, marginLeft: 1440,
+        } }] },
+        measurement: { fontChains, defaults: { fontSize: 11, fontFamily: 'Calibri' }, authoritativeShaping: true },
+        renderEnv: { themeColors: (JSON.parse(session.materialize_docx() ?? '{}') as {
+          document?: { package?: { theme?: { colorScheme?: Record<string, string> } } };
+        }).document?.package?.theme?.colorScheme ?? {} },
+      }));
+      const list = JSON.parse(session.build_display_list_json(JSON.stringify({ ...JSON.parse(layout), fontChains }))) as {
+        pages: { primitives: { chart?: { label: string; data?: unknown } }[] }[];
+      };
+      const charted = list.pages.flatMap((page) => page.primitives).filter((primitive) => primitive.chart);
+      expect(charted.length).toBeGreaterThan(1);
+      expect(charted.filter((primitive) => primitive.chart!.data !== undefined)).toHaveLength(1);
+      expect(charted[0]!.chart!.data).toEqual({ categories: ['A', 'B', 'C'], series: [{ name: 'Sales', values: ['1.0', null, '3.0'] }] });
+      return charted[0]!.chart;
+    } finally {
+      session.free();
+    }
+  };
+  expect(run(native)).toEqual(run(wasm));
 });

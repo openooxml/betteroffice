@@ -488,7 +488,9 @@
         "pageUp": "PagSu",
         "pageDown": "PagGiù",
         "ctrl": "Ctrl",
-        "del": "Canc"
+        "del": "Canc",
+        "shift": "Maiusc",
+        "alt": "Alt"
       }
     },
     "objectGeometry": {
@@ -528,6 +530,7 @@
     "paragraphMarkInserted": "Interruzione di paragrafo inserita",
     "paragraphMarkDeleted": "Interruzione di paragrafo eliminata",
     "paragraphPropertiesChanged": "Proprietà del paragrafo modificate",
+    "runPropertiesChanged": "Formattazione del testo modificata",
     "rowInserted": "Riga inserita",
     "rowDeleted": "Riga eliminata",
     "rowPropertiesChanged": "Proprietà della riga modificate",
@@ -584,6 +587,8 @@
     "noDocumentLoaded": "Nessun documento caricato",
     "failedToLoad": "Impossibile aprire questo documento",
     "failedToLoadDescription": "Il file potrebbe essere danneggiato o usa qualcosa che questo editor non è ancora in grado di leggere.",
+    "failedToLoadDamaged": "Il file è danneggiato o non è un documento Word completo.",
+    "failedToLoadUnsupported": "Questo documento usa qualcosa che questo editor non sa ancora leggere.",
     "editorUnavailable": "Impossibile caricare l'editor",
     "editorUnavailableDescription": "Controlla la connessione, quindi ricarica la pagina.",
     "reloadPage": "Ricarica pagina",
@@ -724,6 +729,7 @@
     "failedToParse": "Impossibile analizzare il documento",
     "linkRemoved": "Collegamento rimosso",
     "linkCopied": "Collegamento copiato negli Appunti",
+    "pasteFailed": "Impossibile completare l’operazione Incolla. Non è stato modificato nulla.",
     "failedToSave": "Impossibile salvare il documento",
     "documentInput": "Immissione documento",
     "documentPreview": "Anteprima documento",
@@ -795,6 +801,8 @@
     "pageLabel": "Pagina {number}",
     "headerLabel": "Intestazione pagina",
     "footerLabel": "Piè di pagina",
+    "chartNoData": "Nessun dato",
+    "pictureName": "Immagine",
     "selected": "Selezionato",
     "selectionCleared": "Selezione annullata",
     "commentedText": "Testo commentato",

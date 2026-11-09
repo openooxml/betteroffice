@@ -156,6 +156,7 @@ export function createWorkerXlsxCommandBinding(
     return {
       status: current.status(),
       readOnly: current.readOnly(),
+      allowHostProposals: current.allowHostProposals?.(),
       collaborative: current.collaborative(),
       selection,
       canUndo: read?.canUndo ?? false,

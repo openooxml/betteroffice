@@ -1039,11 +1039,15 @@ pub struct RunProperties {
     pub italic: Option<bool>,
     pub underline: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strike: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caps: Option<TextCaps>,
     pub font_family: Option<String>,
     pub color: Option<ColorValue>,
     pub language: Option<String>,
     pub hyperlink_relationship_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hyperlink_action: Option<String>,
     /// `a:rPr/a:effectLst`: the shadow PowerPoint draws behind the glyphs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effects: Option<ShapeEffects>,

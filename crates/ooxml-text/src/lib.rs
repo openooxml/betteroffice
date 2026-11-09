@@ -63,7 +63,13 @@ pub mod shape;
 pub mod word_fonts;
 pub mod word_metrics;
 
+#[cfg(all(target_arch = "wasm32", feature = "base-latin"))]
+compile_error!("Web consumers must load base Latin faces from font assets");
+
 pub use auto_space::{AUTO_SPACE_EM, AutoSpace};
+#[cfg(feature = "base-latin")]
+pub use base_latin::face as base_latin_face;
+pub const BASE_LATIN_FAMILY: &str = "BetterOffice Base Latin";
 pub use bidi::{
     BaseDirection, BidiParagraph, BidiRun, bidi_paragraphs, level_is_rtl, visual_order_for_levels,
 };
@@ -72,15 +78,17 @@ pub use caps::{
 };
 pub use echo::{EchoGlyphSet, echo_glyph_set};
 pub use font_store::{
-    FontError, FontId, FontMetrics, FontStore, RequestedLineMetrics, covered_character,
+    FontError, FontId, FontMetrics, FontStore, OutlineUpdateError, RequestedLineMetrics,
+    covered_character,
 };
 pub use line_break::{
     BreakOpportunity, break_allowed_between, break_opportunities, presentation_break_opportunities,
 };
 pub use measure::{
-    FontChains, FontSlotUse, MeasureError, MeasureInput, MeasureRequest, ParagraphExtentOut,
-    TypesetRowOut, font_slot_use, measure_paragraph, measure_paragraph_json,
-    measure_paragraph_typed, min_content_width_typed,
+    FontChains, FontSlotUse, GlyphRunHead, GlyphRunWriter, MeasureError, MeasureInput,
+    MeasureRequest, MeasuredGlyph, MeasuredGlyphRun, ParagraphExtentOut, TypesetRowOut,
+    font_slot_characters, font_slot_use, measure_paragraph, measure_paragraph_json,
+    measure_paragraph_typed, min_content_width_typed, pack_glyph_runs, unpack_glyph_runs,
 };
 pub use ooxml_drawingml::symbol_font;
 pub use outline::{GlyphOutline, PathCmd};

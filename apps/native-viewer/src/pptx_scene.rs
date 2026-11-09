@@ -1294,6 +1294,7 @@ mod tests {
                         label: String::new(),
                         primitives: vec![text],
                         transform: Transform::default(),
+                        data: None,
                     }
                 } else {
                     text
@@ -1345,6 +1346,7 @@ mod tests {
                     label,
                     primitives,
                     transform,
+                    grid: None,
                 }
             } else {
                 Primitive::Chart {
@@ -1358,6 +1360,7 @@ mod tests {
                     label,
                     primitives,
                     transform,
+                    data: None,
                 }
             }
         };
@@ -1401,6 +1404,7 @@ mod tests {
                 label: String::new(),
                 primitives: Vec::new(),
                 transform: Transform::default(),
+                grid: None,
             }],
             ..source
         };
@@ -1540,6 +1544,8 @@ mod tests {
                 shadow: None,
                 transform,
             }],
+            alt_text: Default::default(),
+            title_shape: None,
         };
         let fonts = PptxFonts {
             vello: HashMap::new(),
@@ -1647,6 +1653,8 @@ mod tests {
                 shadow: None,
                 transform: Transform::default(),
             }],
+            alt_text: Default::default(),
+            title_shape: None,
         };
         let fonts = PptxFonts {
             vello: HashMap::new(),

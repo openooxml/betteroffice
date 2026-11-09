@@ -488,7 +488,9 @@
         "pageUp": "Page Up",
         "pageDown": "Page Down",
         "ctrl": "Ctrl",
-        "del": "Del"
+        "del": "Del",
+        "shift": "Shift",
+        "alt": "Alt"
       }
     },
     "objectGeometry": {
@@ -528,6 +530,7 @@
     "paragraphMarkInserted": "Вставлено розрив абзацу",
     "paragraphMarkDeleted": "Видалено розрив абзацу",
     "paragraphPropertiesChanged": "Змінено властивості абзацу",
+    "runPropertiesChanged": "Змінено форматування тексту",
     "rowInserted": "Вставлено рядок",
     "rowDeleted": "Видалено рядок",
     "rowPropertiesChanged": "Змінено властивості рядка",
@@ -584,6 +587,8 @@
     "noDocumentLoaded": "Документ не завантажено",
     "failedToLoad": "Не вдалося відкрити цей документ",
     "failedToLoadDescription": "Можливо, файл пошкоджено або він містить елементи, які цей редактор ще не вміє читати.",
+    "failedToLoadDamaged": "Файл пошкоджено або це не повний документ Word.",
+    "failedToLoadUnsupported": "У цьому документі є те, що цей редактор поки не вміє читати.",
     "editorUnavailable": "Не вдалося завантажити редактор",
     "editorUnavailableDescription": "Перевірте підключення та перезавантажте сторінку.",
     "reloadPage": "Перезавантажити сторінку",
@@ -724,6 +729,7 @@
     "failedToParse": "Не вдалося проаналізувати документ",
     "linkRemoved": "Посилання видалено",
     "linkCopied": "Посилання скопійовано в буфер обміну",
+    "pasteFailed": "Не вдалося завершити вставлення. Нічого не змінено.",
     "failedToSave": "Не вдалося зберегти документ",
     "documentInput": "Введення документа",
     "documentPreview": "Попередній перегляд документа",
@@ -795,6 +801,8 @@
     "pageLabel": "Сторінка {number}",
     "headerLabel": "Верхній колонтитул сторінки",
     "footerLabel": "Нижній колонтитул сторінки",
+    "chartNoData": "Немає даних",
+    "pictureName": "Рисунок",
     "selected": "Вибрано",
     "selectionCleared": "Виділення знято",
     "commentedText": "Коментований текст",

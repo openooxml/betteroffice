@@ -985,6 +985,7 @@ pub struct WorkbookSnapshotBuilder {
     source: Option<SourceBuilder>,
     source_received_bytes: usize,
     restored: Option<Workbook>,
+    projection_valid: bool,
     graph: Option<SnapshotGraphBuilder>,
     anchor_sheet: usize,
     anchor_chart: usize,
@@ -1001,8 +1002,8 @@ pub struct WorkbookSnapshotBuilder {
     unevaluated: Unevaluated,
 }
 
-/// the restored session's re-derivation of the cells an uncomputable call
-/// leaves unevaluated, a step per advance like every other phase.
+/// the restored session's re-derivation of the cells an uncomputable or
+/// unknown call leaves unevaluated, a step per advance like every other phase.
 enum Unevaluated {
     /// looking through defined names, then each sheet's cells after the last
     /// one looked at, for a formula that may call an uncomputable function.
@@ -1036,6 +1037,7 @@ impl WorkbookSnapshotBuilder {
             source: None,
             source_received_bytes: 0,
             restored: None,
+            projection_valid: false,
             graph: None,
             anchor_sheet: 0,
             anchor_chart: 0,
@@ -1923,6 +1925,9 @@ impl WorkbookSnapshotBuilder {
             workbook.adopt_derived_unevaluated();
             self.unevaluated = Unevaluated::Done;
         }
+        workbook
+            .authority
+            .set_snapshot_projection_valid(self.projection_valid);
         self.ready = Some(HydratedWorkbook {
             workbook: self
                 .restored
@@ -1965,7 +1970,7 @@ impl WorkbookSnapshotBuilder {
             .take()
             .ok_or_else(|| error("snapshot authority builder is missing"))?
             .finish_drained()?;
-        authority.set_snapshot_projection_valid(projection_valid);
+        self.projection_valid = projection_valid;
         let model_builder = self
             .model
             .take()

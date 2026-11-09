@@ -1,7 +1,8 @@
 use betteroffice_xlsx::{
-    CalculationOptions, CellRef, CellValue, ChartAnchor, DrawCmd, MAX_PIXMAP_DIM,
-    MAX_PIXMAP_PIXELS, Op, RenderOptions, SheetId, Viewport, Workbook,
+    CalculationOptions, CellRef, CellValue, ChartAnchor, DrawCmd, Op, SheetId, Viewport, Workbook,
 };
+#[cfg(feature = "raster")]
+use betteroffice_xlsx::{MAX_PIXMAP_DIM, MAX_PIXMAP_PIXELS, RenderOptions};
 
 const FIXTURE: &[u8] = include_bytes!("../../../packages/xlsx/test-fixtures/charts.xlsx");
 const UNSUPPORTED: &[u8] =
@@ -45,6 +46,7 @@ fn capped_frames_clip_charts_and_their_hits() {
     );
 }
 
+#[cfg(feature = "raster")]
 #[test]
 fn fixture_covers_anchor_families_display_list_and_raster() {
     let workbook = Workbook::open_for_read(FIXTURE).unwrap();
@@ -99,6 +101,7 @@ fn fixture_covers_anchor_families_display_list_and_raster() {
     assert!(png.bytes.starts_with(&[0x89, b'P', b'N', b'G']));
 }
 
+#[cfg(feature = "raster")]
 #[test]
 fn stacked_chart_renders_beside_a_refused_chart() {
     let mut parts = ooxml_opc::unzip_parts(UNSUPPORTED).unwrap();
@@ -298,6 +301,7 @@ fn three_d_charts_draw_as_their_flat_families() {
     }
 }
 
+#[cfg(feature = "raster")]
 fn decode_rgba(bytes: &[u8]) -> Vec<[u8; 3]> {
     let mut reader = png::Decoder::new(std::io::Cursor::new(bytes))
         .read_info()
@@ -339,6 +343,7 @@ fn showcase_with_chart_at_row(from_row: u32) -> Vec<u8> {
 }
 
 /// A chart anchored below the data still grows the default render to take it in.
+#[cfg(feature = "raster")]
 #[test]
 fn a_reachable_chart_grows_the_default_render() {
     let workbook = Workbook::open_for_read(SHOWCASE).unwrap();
@@ -363,6 +368,7 @@ fn a_reachable_chart_grows_the_default_render() {
 
 /// Where a chart sits may not decide whether a legal sheet renders at all: one
 /// parked far below the data is out of frame, and the data still comes out.
+#[cfg(feature = "raster")]
 #[test]
 fn a_chart_parked_far_below_the_data_leaves_the_sheet_renderable() {
     for row in [800, 1_000, 60_000] {
@@ -505,6 +511,7 @@ fn a_malformed_drawing_part_drops_every_chart_and_keeps_the_sheet() {
             value: "Quarter".to_owned()
         })
     );
+    #[cfg(feature = "raster")]
     assert!(
         workbook
             .render_sheet(

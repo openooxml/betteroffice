@@ -1,0 +1,32 @@
+[package]
+name = "betteroffice-ooxml-raster"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = ["crates-io"]
+description = "Shared tiny-skia helpers for OOXML raster backends."
+readme = "README.md"
+keywords = ["ooxml", "raster", "rendering", "png"]
+categories = ["rendering", "graphics"]
+
+[lib]
+name = "ooxml_raster"
+
+[features]
+svg = ["dep:image", "dep:resvg", "dep:simplecss", "dep:svgtypes"]
+downscale = ["dep:image", "dep:jpeg-decoder"]
+
+[dependencies]
+tiny-skia = "0.12"
+png = "0.18"
+ooxml-drawingml.workspace = true
+ooxml-text.workspace = true
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"], optional = true }
+resvg = { version = "0.48", default-features = false, features = ["text", "raster-images"], optional = true }
+simplecss = { version = "=0.2.2", optional = true }
+svgtypes = { version = "=0.16.1", optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+jpeg-decoder = { version = "=0.3.2", default-features = false, optional = true }

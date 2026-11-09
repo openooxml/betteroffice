@@ -80,7 +80,8 @@ impl Workbook {
                 | Op::SetChartAnchor { .. }
                 | Op::SetDefinedName { .. }
                 | Op::DeleteDefinedName { .. }
-                | Op::SetDefinedNames { .. } => {}
+                | Op::SetDefinedNames { .. }
+                | Op::SetTables { .. } => {}
                 Op::InsertRows { sheet, .. }
                 | Op::DeleteRows { sheet, .. }
                 | Op::InsertCols { sheet, .. }

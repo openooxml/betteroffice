@@ -47,9 +47,9 @@ pub use structured::{
 };
 pub use types::{
     CalculationOptions, CalculationResult, CellAddress, CellEdit, CellInput, EditProfile,
-    EditStage, HistoryState, MutationResult, NumberFormatKind, ProposalAcceptance,
-    ProposalEditInput, ProposalRequest, RenderOptions, RenderedPng, SelectionFormatting, SheetInfo,
-    TextSearchMatch, UnevaluatedCell, UpdateEvent, UpdateOrigin,
+    EditStage, HistoryState, MutationResult, NumberFormatKind, PngTarget, ProposalAcceptance,
+    ProposalEditInput, ProposalRequest, RenderOptions, RenderedPng, SaveWarning, SaveWarningCode,
+    SelectionFormatting, SheetInfo, TextSearchMatch, UnevaluatedCell, UpdateEvent, UpdateOrigin,
 };
 #[doc(hidden)]
 pub use workbook::PeerHydration;

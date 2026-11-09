@@ -488,7 +488,9 @@
         "pageUp": "Page Up",
         "pageDown": "Page Down",
         "ctrl": "Ctrl",
-        "del": "Del"
+        "del": "Del",
+        "shift": "Shift",
+        "alt": "Alt"
       }
     },
     "objectGeometry": {
@@ -528,6 +530,7 @@
     "paragraphMarkInserted": "段落記号が挿入されました",
     "paragraphMarkDeleted": "段落記号が削除されました",
     "paragraphPropertiesChanged": "段落のプロパティが変更されました",
+    "runPropertiesChanged": "テキストの書式が変更されました",
     "rowInserted": "行が挿入されました",
     "rowDeleted": "行が削除されました",
     "rowPropertiesChanged": "行のプロパティが変更されました",
@@ -584,6 +587,8 @@
     "noDocumentLoaded": "ドキュメントが読み込まれていません",
     "failedToLoad": "このドキュメントを開けませんでした",
     "failedToLoadDescription": "ファイルが破損しているか、このエディターでまだ読み取れないものが使われている可能性があります。",
+    "failedToLoadDamaged": "ファイルが破損しているか、完全な Word 文書ではありません。",
+    "failedToLoadUnsupported": "この文書には、このエディターでまだ読み取れない内容が含まれています。",
     "editorUnavailable": "エディターを読み込めませんでした",
     "editorUnavailableDescription": "接続を確認してから、ページを再読み込みしてください。",
     "reloadPage": "ページの再読み込み",
@@ -724,6 +729,7 @@
     "failedToParse": "ドキュメントを解析できませんでした",
     "linkRemoved": "リンクが削除されました",
     "linkCopied": "リンクがクリップボードにコピーされました",
+    "pasteFailed": "貼り付けを完了できませんでした。何も変更されていません。",
     "failedToSave": "ドキュメントを保存できませんでした",
     "documentInput": "ドキュメント入力",
     "documentPreview": "ドキュメントのプレビュー",
@@ -795,6 +801,8 @@
     "pageLabel": "{number} ページ",
     "headerLabel": "ページ ヘッダー",
     "footerLabel": "ページ フッター",
+    "chartNoData": "データなし",
+    "pictureName": "図",
     "selected": "選択中",
     "selectionCleared": "選択が解除されました",
     "commentedText": "コメント付きテキスト",

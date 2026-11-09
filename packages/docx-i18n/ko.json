@@ -488,7 +488,9 @@
         "pageUp": "Page Up",
         "pageDown": "Page Down",
         "ctrl": "Ctrl",
-        "del": "Del"
+        "del": "Del",
+        "shift": "Shift",
+        "alt": "Alt"
       }
     },
     "objectGeometry": {
@@ -528,6 +530,7 @@
     "paragraphMarkInserted": "단락 나누기 삽입됨",
     "paragraphMarkDeleted": "단락 나누기 삭제됨",
     "paragraphPropertiesChanged": "단락 속성 변경됨",
+    "runPropertiesChanged": "텍스트 서식 변경됨",
     "rowInserted": "행 삽입됨",
     "rowDeleted": "행 삭제됨",
     "rowPropertiesChanged": "행 속성 변경됨",
@@ -584,6 +587,8 @@
     "noDocumentLoaded": "불러온 문서가 없습니다",
     "failedToLoad": "이 문서를 열 수 없습니다",
     "failedToLoadDescription": "파일이 손상되었거나 이 편집기에서 아직 읽을 수 없는 내용이 포함되어 있을 수 있습니다.",
+    "failedToLoadDamaged": "파일이 손상되었거나 완전한 Word 문서가 아닙니다.",
+    "failedToLoadUnsupported": "이 문서에는 이 편집기가 아직 읽을 수 없는 내용이 있습니다.",
     "editorUnavailable": "편집기를 불러올 수 없습니다",
     "editorUnavailableDescription": "연결을 확인한 후 페이지를 새로 고치세요.",
     "reloadPage": "페이지 새로 고침",
@@ -724,6 +729,7 @@
     "failedToParse": "문서를 분석하지 못했습니다",
     "linkRemoved": "링크가 제거되었습니다",
     "linkCopied": "링크가 클립보드에 복사되었습니다",
+    "pasteFailed": "붙여넣기를 완료할 수 없습니다. 변경된 내용이 없습니다.",
     "failedToSave": "문서를 저장하지 못했습니다",
     "documentInput": "문서 입력",
     "documentPreview": "문서 미리 보기",
@@ -795,6 +801,8 @@
     "pageLabel": "{number}페이지",
     "headerLabel": "페이지 머리글",
     "footerLabel": "페이지 바닥글",
+    "chartNoData": "데이터 없음",
+    "pictureName": "그림",
     "selected": "선택됨",
     "selectionCleared": "선택이 취소되었습니다",
     "commentedText": "메모가 있는 텍스트",

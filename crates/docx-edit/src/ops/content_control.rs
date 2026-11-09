@@ -107,7 +107,10 @@ pub(crate) fn formatting(attrs: &HashMap<String, Any>) -> Vec<(String, Any)> {
     let mut formatting: Vec<(String, Any)> = attrs
         .iter()
         .filter(|(key, value)| {
-            !matches!(key.as_str(), crate::INS | crate::DEL) && **value != Any::Null
+            !matches!(
+                key.as_str(),
+                crate::INS | crate::DEL | crate::format::RPR_CHANGE
+            ) && **value != Any::Null
         })
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();

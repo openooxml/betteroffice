@@ -8,7 +8,7 @@ import type { Document, Endnote, Footnote, HeaderFooter, Section } from '../type
 import { editorSaveKeys } from './editorSaveKeys';
 import type { YrsSession } from './index';
 import { dirtyProjectionStory } from './dirtyProjectionStories';
-import { captureSessionSave, writeSessionSave, type DocxSessionSave } from './saveYrsDocx';
+import { captureSessionSave, writeSessionSave, type DocxSavedDocument, type DocxSessionSave } from './saveYrsDocx';
 import { sessionSourcePackage } from './sessionInternals';
 import { ownProjectedParagraphs, yrsToDocument } from './yrsToDocument';
 
@@ -27,6 +27,9 @@ export interface EditorSaveRecord {
   full: boolean;
   /** The bytes the last save wrote from the source package. */
   saved?: ArrayBuffer;
+  /** Paragraphs the last save wrote as their source bytes, see `DocxSavedDocument.keptUnchanged`. */
+  keptUnchanged?: DocxSavedDocument['keptUnchanged'];
+  structureDropped?: DocxSavedDocument['structureDropped'];
 }
 
 const records = new WeakMap<YrsSession, EditorSaveRecord>();
@@ -160,7 +163,9 @@ async function writeEditorDocument(
     (original !== saves.saved && !sameBytes(original, source.buffer))
   ) {
     saves.full = true;
-    const { bytes } = await writeSessionSave(session, document, capture, original, {}, () => false, false, () => false, yieldSave);
+    const { bytes, keptUnchanged, structureDropped } = await writeSessionSave(session, document, capture, original, {}, () => false, false, () => false, yieldSave);
+    saves.keptUnchanged = keptUnchanged;
+    saves.structureDropped = structureDropped;
     return bytes.buffer as ArrayBuffer;
   }
   const commentsChanged = keys.comments !== source.keys.comments;
@@ -170,7 +175,7 @@ async function writeEditorDocument(
   const patches = (part: string): boolean =>
     (!commentsChanged || part !== 'word/comments.xml') &&
     (!injectedMarkers || (bodyPart !== undefined && part !== bodyPart));
-  const { bytes } = await writeSessionSave(
+  const { bytes, keptUnchanged, structureDropped } = await writeSessionSave(
     session,
     document,
     capture,
@@ -183,7 +188,22 @@ async function writeEditorDocument(
   );
   const saved = bytes.buffer as ArrayBuffer;
   saves.saved = saved;
+  saves.keptUnchanged = keptUnchanged;
+  saves.structureDropped = structureDropped;
   return saved;
+}
+
+/**
+ * Paragraphs the session's last editor save wrote as their source bytes although their run
+ * formatting changed, because writing them would have dropped structure; absent when none were.
+ */
+export function editorSaveKeptUnchanged(session: YrsSession): DocxSavedDocument['keptUnchanged'] {
+  return records.get(session)?.keptUnchanged;
+}
+
+/** Story parts the session's last editor save wrote whole with less structure, see `DocxSavedDocument.structureDropped`. */
+export function editorSaveStructureDropped(session: YrsSession): DocxSavedDocument['structureDropped'] {
+  return records.get(session)?.structureDropped;
 }
 
 function sameBytes(a: ArrayBuffer, b: ArrayBuffer): boolean {

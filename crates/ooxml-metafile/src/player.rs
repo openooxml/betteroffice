@@ -6,7 +6,9 @@
 //! cannot reproduce as an omission instead of refusing.
 
 use std::cell::Cell;
-use std::collections::BTreeMap;
+use std::collections::hash_map::Entry;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::hash::{BuildHasher, DefaultHasher, Hash, Hasher, RandomState};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -73,7 +75,49 @@ impl SharedBudget {
         self.exceeded.set(exceeded);
         !exceeded
     }
+
+    /// Gives back pixels whose bitmaps were dropped.
+    pub(crate) fn refund(&self, pixels: u64) {
+        self.give_back(crate::ReplayBudget { work: 0, pixels });
+    }
+
+    /// Gives back the pixels a dropped pass held, paying for their decoding
+    /// in work instead, so passes that are set aside stay bounded.
+    pub(crate) fn release(&self, pixels: u64) -> bool {
+        self.refund(pixels);
+        self.spend(repeat_work(pixels) as u64, 0)
+    }
+
+    /// Gives back work and pixels a dropped pass spent.
+    pub(crate) fn give_back(&self, spent: crate::ReplayBudget) {
+        let remaining = self.remaining.get();
+        self.remaining.set(crate::ReplayBudget {
+            work: remaining.work.saturating_add(spent.work),
+            pixels: remaining.pixels.saturating_add(spent.pixels),
+        });
+    }
+
+    /// What was spent since `before`.
+    pub(crate) fn spent_since(&self, before: crate::ReplayBudget) -> crate::ReplayBudget {
+        let remaining = self.remaining.get();
+        crate::ReplayBudget {
+            work: before.work.saturating_sub(remaining.work),
+            pixels: before.pixels.saturating_sub(remaining.pixels),
+        }
+    }
 }
+
+/// A cropped GDI bitmap, its offset in the source rectangle, and whether it
+/// fills its whole destination.
+pub(crate) type CroppedBlit = (Arc<Bitmap>, (f64, f64), bool);
+
+/// Work a repeated source spends to decode again: its pixels are not charged
+/// twice, so the decode is paid in work instead.
+pub(crate) fn repeat_work(pixels: u64) -> usize {
+    usize::try_from(pixels / REPEAT_PIXELS_PER_WORK).unwrap_or(usize::MAX)
+}
+
+const REPEAT_PIXELS_PER_WORK: u64 = 16;
 
 pub(crate) type Xform = [f64; 6];
 
@@ -245,6 +289,27 @@ impl Combine {
     }
 }
 
+/// Bitmaps a replay built, kept so an equal source or bitmap is built and
+/// charged once.
+#[derive(Default)]
+pub(crate) struct BitmapCache {
+    /// Bitmaps kept so far, by content hash, so an equal one is shared.
+    pub bitmaps: HashMap<u64, Vec<Arc<Bitmap>>>,
+    /// Bitmap sources seen so far, by a 128-bit keyed hash, to their ids.
+    /// Sources are not kept, so two that collide count as one: a chance
+    /// collision has odds of about 2^-128 per pair, and one that is crafted
+    /// can only swap or drop a bitmap within this metafile.
+    pub sources: HashMap<u128, usize>,
+    /// The keys of that hash, taken from the standard library's hash map keys.
+    pub keys: [RandomState; 2],
+    /// GDI bitmaps already cropped, by source id and how they were cropped.
+    pub blits: HashMap<(usize, [u64; 7]), CroppedBlit>,
+    /// EMF+ images already built, by source id.
+    pub plus_images: HashMap<usize, Arc<Bitmap>>,
+    /// Sources that failed to decode, so a repeat is not decoded again.
+    pub failed_sources: HashSet<usize>,
+}
+
 pub(crate) struct Player<const FULL: bool> {
     pub dc: Dc,
     pub saved: Vec<Dc>,
@@ -272,6 +337,7 @@ pub(crate) struct Player<const FULL: bool> {
     pub omissions: BTreeMap<&'static str, usize>,
     pub text_chars: usize,
     pub bitmap_pixels: u64,
+    pub cache: BitmapCache,
     pub budget: Option<Rc<SharedBudget>>,
     pub refusal: Option<String>,
     /// How many metafiles enclose this one.
@@ -311,6 +377,7 @@ impl<const FULL: bool> Player<FULL> {
             omissions: BTreeMap::new(),
             text_chars: 0,
             bitmap_pixels: 0,
+            cache: BitmapCache::default(),
             budget: None,
             refusal: None,
             depth: 0,
@@ -342,6 +409,65 @@ impl<const FULL: bool> Player<FULL> {
             return self.refuse("the metafile draws more than the replay limits");
         }
         Some(())
+    }
+
+    /// The id of a bitmap source, and whether an equal one came before. A
+    /// repeat whose result is not cached may decode past the pixel budget, as
+    /// one bitmap at a time, and is charged only if its pixels match no kept
+    /// bitmap.
+    pub(crate) fn source_id(&mut self, parts: &[&[u8]]) -> (usize, bool) {
+        let half = |keys: &RandomState, domain: u8| {
+            let mut hasher = keys.build_hasher();
+            hasher.write_u8(domain);
+            hasher.write_usize(parts.len());
+            for part in parts {
+                hasher.write_usize(part.len());
+                hasher.write(part);
+            }
+            hasher.finish()
+        };
+        let [low_keys, high_keys] = &self.cache.keys;
+        let key = (u128::from(half(high_keys, 1)) << 64) | u128::from(half(low_keys, 0));
+        let next = self.cache.sources.len();
+        match self.cache.sources.entry(key) {
+            Entry::Occupied(entry) => (*entry.get(), true),
+            Entry::Vacant(entry) => (*entry.insert(next), false),
+        }
+    }
+
+    /// Keeps `bitmap`, or returns an equal one already kept; `charged` is
+    /// what it cost so far, refunded when an equal one is reused, and
+    /// `uncharged` what it still owes when it is kept.
+    pub(crate) fn share_bitmap(
+        &mut self,
+        bitmap: Bitmap,
+        charged: u64,
+        uncharged: u64,
+    ) -> Option<Arc<Bitmap>> {
+        let mut hasher = DefaultHasher::new();
+        bitmap.hash(&mut hasher);
+        let key = hasher.finish();
+        if let Some(equal) = self
+            .cache
+            .bitmaps
+            .get(&key)
+            .and_then(|kept| kept.iter().find(|kept| ***kept == bitmap))
+        {
+            let equal = Arc::clone(equal);
+            self.bitmap_pixels = self.bitmap_pixels.saturating_sub(charged);
+            if FULL && let Some(budget) = &self.budget {
+                budget.refund(charged);
+            }
+            return Some(equal);
+        }
+        self.charge(0, uncharged)?;
+        let bitmap = Arc::new(bitmap);
+        self.cache
+            .bitmaps
+            .entry(key)
+            .or_default()
+            .push(Arc::clone(&bitmap));
+        Some(bitmap)
     }
 
     /// Spends commands and pixels built outside `push`.

@@ -1,3 +1,5 @@
+use std::collections::{BTreeSet, HashMap};
+
 use serde::{Deserialize, Serialize};
 use xlsx_model::{ChartAnchor, ChartEdit, SheetId};
 use xlsx_ops::Op;
@@ -111,35 +113,111 @@ impl Workbook {
             .facts()
             .chart_part_bytes(&chart.part)
             .ok_or_else(missing)?;
-        let read = match &chart.raw_xml {
-            Some(xml) => xlsx_parse::chart_references(xml.as_bytes())?,
-            None => xlsx_parse::chart_references(bytes)?,
+        Ok(xlsx_parse::chart_bytes(bytes, chart, model, owner)?)
+    }
+
+    /// Refuses a batch that leaves a chart part where a save could not write
+    /// it back: a reference reshaped around a multi-level or unmodelled cache
+    /// that cannot be rebuilt, or a part two sheets anchor that the batch
+    /// would give two sets of references. Every part the batch changed is
+    /// patched exactly as the save will. What decides that refusal is the
+    /// references and the sheets they name, not what the cells read, so the
+    /// recalculation after the batch cannot change it, short of cell text no
+    /// XML can carry. `inverse` is the batch's inverse, which records
+    /// a `SetCharts` for every sheet whose charts it changed, so a batch that
+    /// changes none costs nothing here.
+    /// The chart parts a save keeps as authored because the workbook holds a
+    /// reference for them that no `c:f` can carry, decided as the save decides
+    /// it, once per part.
+    pub(super) fn chart_save_warnings(&self) -> Vec<crate::SaveWarning> {
+        let Some(package) = self.source_package.as_ref() else {
+            return Vec::new();
         };
-        if read == chart.refs || chart.raw_xml.is_some() {
-            return Ok(xlsx_parse::chart_bytes(
-                bytes,
-                chart,
-                model,
-                owner,
-                (model, owner),
-            )?);
+        let facts = package.facts();
+        let mut warned = BTreeSet::new();
+        let mut warnings = Vec::new();
+        for sheet in &self.model.sheets {
+            for chart in &sheet.charts {
+                if warned.contains(chart.part.as_str())
+                    || chart
+                        .refs
+                        .iter()
+                        .all(|reference| xml_writable(&reference.formula))
+                {
+                    continue;
+                }
+                let Some(source) = facts.chart_part_bytes(&chart.part) else {
+                    continue;
+                };
+                if let Err(error) = xlsx_parse::chart_bytes(source, chart, &self.model, &sheet.name)
+                    && xlsx_parse::is_unwritable_chart_reference(&error)
+                {
+                    warned.insert(chart.part.as_str());
+                    warnings.push(crate::SaveWarning {
+                        code: crate::SaveWarningCode::UnwritableReference,
+                        part: chart.part.clone(),
+                        element: Some("chart".to_owned()),
+                        sheet: Some(sheet.name.clone()),
+                        message: format!(
+                            "{} on sheet {} was kept as the file wrote it: the workbook holds a chart reference with a character XML cannot carry",
+                            chart.part, sheet.name
+                        ),
+                    });
+                }
+            }
         }
-        let opened = package.materialize()?;
-        let original_owner = self
-            .model
-            .sheets
-            .iter()
-            .position(|sheet| sheet.name == owner)
-            .and_then(|index| self.preserved.origins.get(index).copied().flatten())
-            .and_then(|origin| opened.source_sheet_name(origin))
-            .unwrap_or(owner);
-        Ok(xlsx_parse::chart_bytes(
-            bytes,
-            chart,
-            model,
-            owner,
-            (opened.original_workbook(), original_owner),
-        )?)
+        warnings
+    }
+
+    pub(super) fn ensure_charts_follow(
+        &self,
+        preview: &xlsx_model::Workbook,
+        inverse: &[Op],
+    ) -> Result<()> {
+        let Some(package) = self.source_package.as_ref() else {
+            return Ok(());
+        };
+        if !inverse.iter().any(|op| matches!(op, Op::SetCharts { .. })) {
+            return Ok(());
+        }
+        #[cfg(test)]
+        CHART_CHECKS.set(CHART_CHECKS.get() + 1);
+        let changed = changed_chart_parts(&self.model, preview);
+        let mut claims: HashMap<&str, Vec<(&xlsx_model::SheetChart, &str)>> = HashMap::new();
+        for sheet in &preview.sheets {
+            for chart in &sheet.charts {
+                if changed.contains(chart.part.as_str()) {
+                    claims
+                        .entry(chart.part.as_str())
+                        .or_default()
+                        .push((chart, sheet.name.as_str()));
+                }
+            }
+        }
+        for part in changed {
+            let outcome = package.facts().chart_part_bytes(part).map(|bytes| {
+                xlsx_parse::agreed_chart_bytes(
+                    bytes,
+                    part,
+                    claims.get(part).map_or(&[][..], Vec::as_slice),
+                    preview,
+                )
+            });
+            match outcome {
+                Some(Ok(_)) => {}
+                Some(Err(error)) if xlsx_parse::is_unwritable_chart_reference(&error) => {
+                    return Err(Error::InvalidOperation(
+                        "chart reference contains a character xml cannot carry".to_string(),
+                    ));
+                }
+                _ => {
+                    return Err(Error::InvalidOperation(format!(
+                        "{part} references cells this edit would move, and it cannot be rewritten"
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn edit_charts(
@@ -270,12 +348,121 @@ impl Workbook {
             None,
         )?;
         let update = self.commit_prepared(prepared)?;
-        self.proposals.clear();
         self.recalculate_scope(CalculationScope::Kept, &[], options);
         self.publish(update);
         Ok(MutationResult {
             applied: true,
             ..MutationResult::default()
         })
+    }
+}
+
+/// The chart parts of `after` some chart of which reads references, or holds
+/// an edit, that no chart of the same part in `before` does: the parts a save
+/// would patch differently. Linear in the charts of both.
+pub(super) fn changed_chart_parts<'a>(
+    before: &xlsx_model::Workbook,
+    after: &'a xlsx_model::Workbook,
+) -> BTreeSet<&'a str> {
+    let mut held: HashMap<&str, Vec<&xlsx_model::SheetChart>> = HashMap::new();
+    for chart in before.sheets.iter().flat_map(|sheet| &sheet.charts) {
+        held.entry(chart.part.as_str()).or_default().push(chart);
+    }
+    after
+        .sheets
+        .iter()
+        .flat_map(|sheet| &sheet.charts)
+        .filter(|chart| {
+            !held.get(chart.part.as_str()).is_some_and(|charts| {
+                charts
+                    .iter()
+                    .any(|kept| kept.refs == chart.refs && kept.raw_xml == chart.raw_xml)
+            })
+        })
+        .map(|chart| chart.part.as_str())
+        .collect()
+}
+
+#[cfg(test)]
+thread_local! {
+    static CHART_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn chart_check_count() -> usize {
+    CHART_CHECKS.get()
+}
+
+/// Whether every character is one xml 1.0 can carry in element content.
+fn xml_writable(value: &str) -> bool {
+    value.chars().all(|character| {
+        matches!(character, '\t' | '\n' | '\r')
+            || (character >= ' ' && character != '\u{fffe}' && character != '\u{ffff}')
+    })
+}
+
+#[cfg(test)]
+mod reference_tests {
+    use super::Workbook;
+
+    include!("../../tests/fixtures/chart_control_book.rs");
+
+    fn chart_part(bytes: &[u8]) -> Vec<u8> {
+        ooxml_opc::unzip_parts(bytes)
+            .unwrap()
+            .into_iter()
+            .find(|(path, _)| path == CHART)
+            .map(|(_, bytes)| bytes)
+            .unwrap()
+    }
+
+    /// Whatever door a rewritten reference xml cannot carry comes through, a
+    /// peer state, a snapshot, a checkpoint or one not yet known, the save
+    /// keeps the chart part as authored instead of failing or writing invalid
+    /// xml, and says so with one warning naming the part.
+    #[test]
+    fn a_save_keeps_the_chart_as_authored_whatever_installed_such_a_reference() {
+        let source = book();
+        for installed in ["'A\u{1}B'!$B$3:$B$5", "Data!$B$2\u{0}"] {
+            let mut workbook = Workbook::open(&source).unwrap();
+            workbook.model.sheets[0].charts[0].refs[0].formula = installed.to_owned();
+            let (saved, warnings) = workbook
+                .save_with_warnings()
+                .unwrap_or_else(|error| panic!("{installed:?}: {error}"));
+            assert_eq!(chart_part(&saved), chart_part(&source), "{installed:?}");
+            assert_eq!(warnings.len(), 1, "{installed:?}: {warnings:?}");
+            assert_eq!(
+                warnings[0].code,
+                crate::SaveWarningCode::UnwritableReference
+            );
+            assert_eq!(warnings[0].part, CHART);
+            assert_eq!(warnings[0].element.as_deref(), Some("chart"));
+            assert_eq!(warnings[0].sheet.as_deref(), Some("A\u{1}B"));
+            assert!(warnings[0].message.contains("character XML cannot carry"));
+            assert_eq!(workbook.save_warnings(), warnings);
+        }
+    }
+    /// An honest workbook never warns: not as opened, and not after an edit
+    /// refreshes the cache of a chart whose authored reference holds such a
+    /// character.
+    #[test]
+    fn an_honest_save_carries_no_warning() {
+        let source = book();
+        let mut workbook = Workbook::open(&source).unwrap();
+        assert_eq!(workbook.save_with_warnings().unwrap().1, []);
+        workbook
+            .apply_ops(
+                vec![xlsx_ops::Op::SetCell {
+                    sheet: xlsx_model::SheetId(0),
+                    at: xlsx_model::CellRef::parse_a1("B3").unwrap(),
+                    cell: xlsx_ops::CellState {
+                        value: xlsx_model::CellValue::Number { value: 5.0 },
+                        ..Default::default()
+                    },
+                }],
+                crate::CalculationOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(workbook.save_warnings(), []);
     }
 }

@@ -135,7 +135,14 @@
       "unsupportedCommand": "Henüz desteklenmiyor.",
       "invalidArguments": "Bu değer geçerli değil.",
       "inputFailed": "Bundan önceki hücre girişi kaydedilemedi.",
+      "editUnsupported": "Bu düzenleme burada uygulanamıyor. Çalışma kitabı değişmedi.",
+      "editUnsupportedChart": "Bu düzenleme uygulanamıyor: bir grafik, düzenlemenin taşıyacağı hücreleri kullanıyor. Çalışma kitabı değişmedi.",
+      "editUnsupportedTable": "Bu düzenleme uygulanamıyor: bir tablo, düzenlemenin taşıyacağı hücreleri kullanıyor. Çalışma kitabı değişmedi.",
+      "editUnsupportedPivot": "Bu düzenleme uygulanamıyor: bir pivot tablo, düzenlemenin taşıyacağı hücreleri kullanıyor. Çalışma kitabı değişmedi.",
       "sheetProtected": "Bu hücre korumalı bir sayfada.",
+      "hostRefused": "Bu düzenlemeye izin verilmiyor.",
+      "tooManyToCheck": "Eklentilerin denetlemesi için çok fazla hücre var (sınır {limit}).",
+      "hostStarting": "Düzenleyici hâlâ başlatılıyor. Birazdan yeniden deneyin.",
       "documentReplaced": "Başka bir çalışma kitabı açıldı.",
       "targetChanged": "Seçim değişti.",
       "gestureActive": "Önce grafiği taşımayı bitirin.",
@@ -146,8 +153,31 @@
       "permissionDenied": "Ana uygulama bu eklentinin bu komutu kullanmasına izin vermedi.",
       "unsupportedPolicy": "Eklentiler bu komutu henüz çalıştıramaz. Bunun yerine bir düzenleme toplu işlemi kullanın.",
       "pluginUnavailable": "Eklenti artık etkin değil.",
-      "aborted": "Eklenti eylemi komut çalışmadan önce iptal edildi."
-    }
+      "aborted": "Eklenti eylemi komut çalışmadan önce iptal edildi.",
+      "clipboardUnavailable": "Bu tarayıcı menüden yapıştırmaya izin vermiyor. Klavye kısayolunu kullanın.",
+      "lastSheet": "Bir çalışma kitabında en az bir sayfa olmalıdır.",
+      "sheetAtEdge": "Sayfa daha fazla taşınamaz.",
+      "sheetNameInvalid": "Sayfa adları 1 ile 31 karakter arasında ve benzersiz olmalı, : \\ / ? * [ ] içeremez.",
+      "clipboardDenied": "Tarayıcı panoya erişime izin vermedi."
+    },
+    "cut": "Kes",
+    "copy": "Kopyala",
+    "paste": "Yapıştır",
+    "pastePlainText": "Düz metin olarak yapıştır",
+    "clearContents": "İçeriği temizle",
+    "insert": "Ekle",
+    "delete": "Sil",
+    "insertRowsAbove": "Üste satır ekle",
+    "insertRowsBelow": "Alta satır ekle",
+    "insertColumnsLeft": "Sola sütun ekle",
+    "insertColumnsRight": "Sağa sütun ekle",
+    "deleteRows": "Satırları sil",
+    "deleteColumns": "Sütunları sil",
+    "insertSheet": "Sayfa ekle",
+    "deleteSheet": "Sayfayı sil",
+    "renameSheet": "Yeniden adlandır",
+    "moveSheetLeft": "Sola taşı",
+    "moveSheetRight": "Sağa taşı"
   },
   "editor": {
     "appLabel": "E-tablo düzenleyicisi",
@@ -162,7 +192,11 @@
     "showDetails": "Ayrıntıları göster",
     "openPrompt": "XLSX dosyası aç",
     "sheetTabsLabel": "Sayfalar",
-    "clearExceedsLimit": "Temizleme hücre sınırını aşıyor."
+    "clearExceedsLimit": "Temizleme hücre sınırını aşıyor.",
+    "cellMenuLabel": "Hücre menüsü",
+    "sheetTabMenuLabel": "Sayfa sekmesi menüsü",
+    "renameSheetLabel": "Sayfayı yeniden adlandır",
+    "sheetNamePrefix": "Çalışma Sayfası"
   },
   "presence": {
     "label": "Katkıda Bulunanlar",
@@ -178,6 +212,7 @@
     "accept": "Kabul Et",
     "reject": "Reddet",
     "forceApply": "Zorla uygula",
+    "forceBlockedReason": "Yapısal bir değişiklikten sonra bu öneri uygulanamaz.",
     "staleWarning": "Önerildiğinden bu yana değişen hücreler: {cells}"
   },
   "a11y": {
@@ -187,12 +222,27 @@
     "cellLabel": "{address}, {value}",
     "cellLabelSelected": "{address}, {value}, seçili",
     "emptyCellLabel": "{address}, boş",
-    "emptyCellLabelSelected": "{address}, boş, seçili"
+    "emptyCellLabelSelected": "{address}, boş, seçili",
+    "hasFormula": "{label}, formül içeriyor",
+    "rangeSelected": "{start} ile {end} arası seçildi, {rows} satır x {columns} sütun",
+    "sheetActivated": "{name}, sayfa {index} / {count}",
+    "cellInputLabel": "{address} hücresini düzenle",
+    "gridRoleDescription": "çalışma sayfası"
   },
   "plugins": {
     "toolbarGroup": "Eklentiler",
     "panelTabs": "Eklenti panelleri",
     "collapsePanel": "{title} daralt",
-    "expandPanel": "{title} genişlet"
+    "expandPanel": "{title} genişlet",
+    "rowGutter": "Eklenti satır işaretleri"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "del": "Del",
+    "escape": "Esc",
+    "pageUp": "Page Up",
+    "pageDown": "Page Down"
   }
 }

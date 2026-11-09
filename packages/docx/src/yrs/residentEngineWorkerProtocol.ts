@@ -123,6 +123,7 @@ export type DocxDocumentRead =
   | { kind: 'validateEdits'; request: DocxEditRequest }
   | { kind: 'contentControlHandles' }
   | { kind: 'partSnapshot' }
+  | { kind: 'fontOutlinesInstalled' }
   | { kind: 'properties'; target: ResidentPropertyTarget }
   | { kind: 'sectionProperties' }
   | { kind: 'exportStructuredWithPages'; options: DocxPageExportOptions; currentRequest: string; workerFonts?: boolean }
@@ -176,6 +177,8 @@ export interface DocxDocumentReadValues {
   validateEdits: DocxValidationResult;
   contentControlHandles: ResidentControlSnapshot;
   partSnapshot: { metadata: ResidentPartMetadata; geometry: ResidentPartGeometry[]; frameEpoch: number | null; layoutRevision: number };
+  /** Settles once every outline requested so far is installed; counts installs that arrived after their frame painted. */
+  fontOutlinesInstalled: { lateInstalls: number };
   properties: ResidentPropertySnapshot | null;
   sectionProperties: ResidentSectionSnapshot;
   exportStructuredWithPages: string;
@@ -420,7 +423,7 @@ export type DocxEngineWorkerResponse = (
       commandFrame?: { session: string; incarnation: number; epoch: number; frame: DocxCommandFrame };
       fontEnvironmentEvent?: DocxFontEnvironmentEvent & { session: string; incarnation: number; epoch: number };
       /** An applied edit may need fonts the host's last font requirements lacked; sent once until the host asks again. */
-      fontRequirementsHint?: { session: string; incarnation: number; epoch: number };
+      fontRequirementsHint?: { session: string; incarnation: number; epoch: number; wholeFaces?: true };
       fontEnvironment?: DocxFontEnvironmentSnapshot;
       checkpoint?: Checkpoint;
       frame?: ArrayBuffer;

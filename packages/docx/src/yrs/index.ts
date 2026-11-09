@@ -1,5 +1,6 @@
 import type { SectionInfo, SectionPropertyPatch, SectionStartKind } from './sections';
 export { DocxSectionError } from './sections';
+export { SuggestedFormattingOverContainerError } from './formattingError';
 export type { SectionInfo, SectionPropertyPatch, SectionStartKind } from './sections';
 /**
  * Typed facade over the Rust yrs editing core (`crates/docx-edit`).
@@ -21,6 +22,7 @@ import type { RetainedLayoutMeta } from './layoutMeta';
 import type { ResidentEngineWorkerFontSync } from './residentEngineWorkerProtocol';
 import type { Document, ParagraphFormatting, Table, TextFormatting } from '../types/document';
 import type { CompatibilityFlags } from '../docx/settingsParser';
+import type { CellMargins } from '../types/formatting';
 import type { Theme } from '../types/drawingml';
 import type {
   DocxParagraphAnchor,
@@ -81,6 +83,9 @@ import type {
 } from './pagedExport';
 import { preparedDigests, randomClientId, wrapSession } from './yrsSessionFacade';
 export { decodeDocxHostJson } from './yrsSessionFacade';
+import type { DocxPngOptions, DocxPngTarget } from '../layout/render/png';
+export { PngExportError, type PngExportCode } from '../../../../shared/office-session/pngExportError';
+export type { DocxPngFontFace, DocxPngOptions, DocxPngTarget } from '../layout/render/png';
 
 /** @internal */
 export type {
@@ -198,6 +203,8 @@ export {
   captureSessionSave,
   saveYrsDocx,
   writeSessionSave,
+  type DocxDroppedStructure,
+  type DocxKeptParagraph,
   type DocxSavedDocument,
   type DocxCommentSaveIdentity,
   type DocxCommentSaveBaseline,
@@ -214,6 +221,8 @@ export {
   hostSaveMetadata,
   mergeDocxHostMetadata,
   proposalProjectionStories,
+  editorSaveKeptUnchanged,
+  editorSaveStructureDropped,
   saveEditorDocument,
   serialWorkerSaves,
   type EditorSaveRecord,
@@ -292,6 +301,12 @@ export type YrsTextColor =
   | { rgb: string; themeColor?: never }
   | { rgb?: never; themeColor: string };
 
+export interface YrsLanguagePatch {
+  lang?: string | null;
+  eastAsia?: string | null;
+  bidi?: string | null;
+}
+
 /**
  * Set-valued inline formatting for {@link YrsSession.formatRange}. Omitted
  * fields are left unchanged; `null` clears a field. Boolean `false` also
@@ -307,6 +322,7 @@ export interface YrsInlineFormatDelta {
   /** Font size in points; Rust writes both OOXML half-point size fields. */
   fontSize?: number | null;
   fontFamily?: { ascii: string; hAnsi?: string } | null;
+  language?: YrsLanguagePatch | null;
   /** Passive run properties not covered by the typed fields. `null` clears. */
   other?: Readonly<Record<string, unknown | null>>;
 }
@@ -621,6 +637,10 @@ export type YrsRawOp =
 /** Host context for {@link YrsSession.yrsBlocksForStory} (theme + list numbering). */
 export interface YrsRenderEnv {
   compatibilityFlags?: Partial<CompatibilityFlags>;
+  /** `w:tblCellMar` of the document's table styles that set one, by style id. */
+  tableStyleCellMargins?: Record<string, CellMargins>;
+  /** The document's default table style id. */
+  defaultTableStyleId?: string;
   tocStyleIds?: string[];
   paragraphSpacingLinePx?: number;
   /** Section document-grid snap pitch in px (w:docGrid). The engine derives this from sections; hosts may omit it. */
@@ -632,6 +652,8 @@ export interface YrsRenderEnv {
   hyperlinkStyleFontSizes?: Record<string, number>;
   /** The docDefaults font size in pt. */
   docDefaultFontSize?: number;
+  /** The docDefaults run language, which runs that name none inherit. */
+  docDefaultLanguage?: { latin?: string; eastAsia?: string; bidi?: string };
   /** Theme color name → hex (`accent1` → `4472C4`), for theme-color resolution. */
   themeColors?: Record<string, string>;
   fontTheme?: Theme;
@@ -681,6 +703,24 @@ export interface YrsCommentInfo {
  * every tracked change overlapping the range resolves, no id filtering).
  */
 export type YrsChangeTarget = { revisionId: string } | YrsStoryRange;
+
+/**
+ * Why formatting through a table or a block content control kept a paragraph unchanged: saving it
+ * rewritten would drop content of its source, such as a text box, a page break or a nested field.
+ */
+export type YrsKeptReason =
+  | 'alternateContent'
+  | 'break'
+  | 'contentControl'
+  | 'field'
+  | 'hyperlinkMarker'
+  | 'unreadable';
+
+/** Receipt of {@link YrsSession.toggleMark}, {@link YrsSession.formatRange} and {@link YrsSession.clearFormatting}. */
+export interface YrsFormatReceipt {
+  /** The table-cell and content-control paragraphs left unchanged, counted by reason; empty when none were. */
+  keptUnchanged: Partial<Record<YrsKeptReason, number>>;
+}
 
 /** Receipt of {@link YrsSession.acceptChange} / {@link YrsSession.rejectChange}. */
 export interface YrsResolveReceipt {
@@ -862,7 +902,7 @@ export interface YrsSelectionContext {
 }
 
 /**
- * One tracked insertion, deletion, or paragraph-mark revision read from yrs.
+ * One pending tracked change read from yrs.
  *
  * @public
  */
@@ -876,6 +916,7 @@ export interface YrsRevisionInfo {
     | 'pPrIns'
     | 'pPrDel'
     | 'pPrChange'
+    | 'rPrChange'
     | 'trIns'
     | 'trDel'
     | 'tableIns'
@@ -972,13 +1013,14 @@ export interface YrsTablePropertiesPatch {
   width?: number | null;
   widthType?: string | null;
   justification?: 'left' | 'center' | 'right' | null;
+  tableLayout?: 'fixed' | 'autofit' | null;
 }
 
 /** Undo grouping for tracked local transactions. */
 export type YrsUndoCaptureMode = 'auto' | 'manual';
 
 /** Outcome of a target-resolving helper edit. @internal */
-export type YrsTargetEditResult = { ok: true; version: string } | DocxEditRefusal;
+export type YrsTargetEditResult = { ok: true; version: string; keptUnchanged?: Partial<Record<YrsKeptReason, number>> } | DocxEditRefusal;
 
 /** Accepted-view texts around a selection; U+FFFC stands for each inline atom. @internal */
 export interface YrsSelectionText {
@@ -1037,6 +1079,8 @@ export interface YrsSession extends CollaborationReplica {
 
   /** Register raw sfnt bytes in the session's measurement/display font store. */
   registerFont(bytes: Uint8Array): number;
+  /** Replaces a registered font's outlines with a face whose other tables are unchanged; throws, leaving it as it was, for other bytes. */
+  updateFontOutlines(fontId: number, bytes: Uint8Array): void;
   /**
    * Register a measurement view of `base` carrying the vertical metrics Word
    * measures `family` with, for a face the host substituted; `base` when the
@@ -1345,6 +1389,8 @@ export interface YrsSession extends CollaborationReplica {
   /** Sets one authored grid-column width in twips. */
   setColumnWidth(at: YrsCellLoc, widthTwips: number): YrsTableReceipt;
   /** Sets the table-wide preferred width in twips. */
+  /** Sets the height and `w:hRule` of the row holding `at`. */
+  setRowHeight(at: YrsCellLoc, heightTwips: number, rule: 'atLeast' | 'exact'): YrsTableReceipt;
   setTableWidth(table: YrsTableLoc, widthTwips: number): YrsTableReceipt;
   setTableProperties(table: YrsTableLoc, patch: YrsTablePropertiesPatch): YrsTableReceipt;
   /** Inserts paragraph-break-free text. Suggesting mode mints a revision. */
@@ -1369,13 +1415,13 @@ export interface YrsSession extends CollaborationReplica {
    * carries it, otherwise adds it. Adding superscript clears subscript and
    * vice versa.
    */
-  toggleMark(range: YrsStoryRange, mark: YrsRunMark): void;
+  toggleMark(range: YrsStoryRange, mark: YrsRunMark, suggesting?: YrsAuthor): YrsFormatReceipt;
   /** Applies set-valued direct formatting; omitted fields are kept and `null` fields clear. */
-  formatRange(range: YrsStoryRange, delta: YrsInlineFormatDelta): void;
+  formatRange(range: YrsStoryRange, delta: YrsInlineFormatDelta, suggesting?: YrsAuthor): YrsFormatReceipt;
   /** Sets or clears the protected hyperlink attribute over a non-empty range. */
-  setHyperlink(range: YrsStoryRange, hyperlink: YrsHyperlinkAttrs | null): void;
+  setHyperlink(range: YrsStoryRange, hyperlink: YrsHyperlinkAttrs | null, suggesting?: YrsAuthor): void;
   /** Clears direct formatting while retaining hyperlinks and tracked-change stamps. */
-  clearFormatting(range: YrsStoryRange): void;
+  clearFormatting(range: YrsStoryRange, suggesting?: YrsAuthor): YrsFormatReceipt;
   /** Applies a paragraph style id to every paragraph intersecting the range. */
   applyParagraphStyle(range: YrsStoryRange, styleId: string, suggesting?: YrsAuthor): void;
   /** Applies tri-state paragraph properties to every paragraph intersecting the range. */
@@ -1567,6 +1613,10 @@ export interface YrsSession extends CollaborationReplica {
    * failures are returned; malformed requests throw.
    */
   applyEdits(request: DocxEditRequest): DocxEditResult;
+  /** Sets style or document-default proofing language slots. */
+  setStyleLanguage(styleId: string | null, slots: YrsLanguagePatch): boolean;
+  styleLanguages(): Record<string, YrsLanguagePatch>;
+  patchStyleLanguagesXml(source: string): string;
   /** Resolves a text target and formats it in one call. @internal */
   formatTextTarget(target: DocxTextTarget, delta: YrsInlineFormatDelta): YrsTargetEditResult;
   /** Resolves a text target and anchors side-map comment `id` over it in one call. @internal */
@@ -1673,6 +1723,15 @@ export interface YrsSession extends CollaborationReplica {
     options?: DocxContentControlsOptions
   ): DocxContentControlsResult;
 
+  /**
+   * Draws a page as PNG bytes with the editor's layout and painter, on a replica
+   * of this session's state. Rejects with `PngExportError` rather than paint a
+   * substitute font; where no canvas exists names `@betteroffice/docx-native`.
+   */
+  renderPng(target: DocxPngTarget, options?: DocxPngOptions): Promise<Uint8Array>;
+  /** The native engine's rasterizer; the wasm engine has none. @internal */
+  renderPngTarget?(displayListJson: string, targetJson: string, optionsJson: string): Uint8Array;
+
   /** Drops the observer and frees the wasm-side replica. Idempotent. */
   destroy(): void;
 }
@@ -1695,7 +1754,7 @@ export async function createYrsSession(options?: CreateYrsSessionOptions): Promi
   const clientId = requireUnreservedClientId(options?.clientId ?? randomClientId());
   const wasm = await import('./wasm/index');
   await wasm.preloadEditWasm();
-  return wrapSession(wasm.createEditSession(clientId), clientId);
+  return wrapSession(wasm.createEditSession(clientId), clientId, undefined, () => import('./renderPng'));
 }
 export type { DocxEngineWorkerSourceOpened } from './residentSourceWorkerClient';
 export { decodeFontFace } from '../wasm/fontDecoder';

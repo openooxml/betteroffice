@@ -2491,6 +2491,68 @@ fn snapshot_rebuilt_package_identity() {
 }
 
 #[test]
+fn snapshot_range_format_and_set_cell_first_edits_use_fast_paths() {
+    let bytes = source(false, false);
+    for budget in budgets() {
+        let source = worker(&bytes);
+        for kind in 0..3 {
+            let mut fast = hydrate(&source, budget);
+            let mut oracle = hydrate(&source, budget);
+            assert!(fast.authority.snapshot_projection_valid().unwrap());
+            assert!(oracle.authority.snapshot_projection_valid().unwrap());
+            let (fast_events, _fast_subscription) = observe(&fast);
+            let (oracle_events, _oracle_subscription) = observe(&oracle);
+            let apply = |workbook: &mut Workbook| match kind {
+                0 => workbook.edit_cell(SheetId(0), CellRef::new(0, 0), "8", context()),
+                1 => workbook.patch_range_style(
+                    SheetId(0),
+                    CellRange::parse_a1("A1:B2").unwrap(),
+                    crate::StylePatch {
+                        bold: Some(true),
+                        fill_color: Some("#123456".into()),
+                        ..crate::StylePatch::default()
+                    },
+                    context(),
+                ),
+                _ => workbook.set_range_number_format(
+                    SheetId(0),
+                    CellRange::parse_a1("B2").unwrap(),
+                    xlsx_ops::NumberFormatMutation::Currency,
+                    context(),
+                ),
+            };
+            let cells = crate::authority::fast_set_cell_count();
+            let formats = crate::authority::fast_range_format_count();
+            let materializations = crate::authority::full_materializations();
+            let hydrations = crate::authority::local_hydrations();
+            let result = apply(&mut fast).unwrap();
+            assert!(result.applied);
+            assert_eq!(
+                crate::authority::fast_set_cell_count() - cells,
+                usize::from(kind == 0)
+            );
+            assert_eq!(
+                crate::authority::fast_range_format_count() - formats,
+                usize::from(kind != 0)
+            );
+            assert_eq!(crate::authority::full_materializations(), materializations);
+            assert_eq!(crate::authority::local_hydrations(), hydrations);
+            let expected =
+                crate::authority::with_full_materialization(|| apply(&mut oracle)).unwrap();
+            assert_eq!(result, expected);
+            assert_events(&fast_events, &oracle_events);
+            assert_eq!(fast.model(), oracle.model());
+            assert_eq!(
+                fast.authority.encode_state_as_update_v1(),
+                oracle.authority.encode_state_as_update_v1()
+            );
+            assert_eq!(fast.sheet_info().unwrap(), oracle.sheet_info().unwrap());
+            assert_edited_identity(&fast, &oracle);
+        }
+    }
+}
+
+#[test]
 fn snapshot_next_edit_identity() {
     let bytes = source(false, false);
     for budget in budgets() {

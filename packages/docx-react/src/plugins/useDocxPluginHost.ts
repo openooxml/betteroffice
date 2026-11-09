@@ -78,6 +78,8 @@ export interface UseDocxPluginHostOptions extends DocxEditorPluginProps {
   readOnly: boolean;
   viewerSelection?: boolean;
   commands: DocxCommandController;
+  /** Changes with the host's shortcut map, so contributed chords follow it. */
+  shortcutsKey?: string;
   /** The authoritative session once a document is ready, else null. */
   session: YrsSession | null;
   /** Changes whenever a new document load starts. */
@@ -248,7 +250,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   useEffect(() => {
     host.syncCommands();
     return host.subscribe(() => host.syncCommands());
-  }, [host]);
+  }, [host, options.shortcutsKey]);
 
   const activations = useSyncExternalStore(host.subscribe, host.activations, () => NO_ACTIVATIONS);
   const reservationsPayload = usePluginReservations(host, managed ? activations : NO_ACTIVATIONS);

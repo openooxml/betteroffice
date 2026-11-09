@@ -220,6 +220,25 @@ impl MediaTable {
         }
     }
 
+    /// The bytes a raster backend draws the `index`th part from: the metafile
+    /// itself where the display copy is its SVG conversion, so the backend
+    /// replays it under its own bounds; otherwise [`MediaTable::bytes`].
+    #[doc(hidden)]
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn raster_bytes(&self, index: usize) -> Result<Cow<'_, [u8]>, String> {
+        let part = self
+            .parts
+            .get(index)
+            .ok_or_else(|| format!("no media part {index}"))?;
+        if part.display.is_some() {
+            let source = self.package.read(part.position)?;
+            if is_metafile_signature(&source) {
+                return Ok(Cow::Owned(source));
+            }
+        }
+        self.bytes(index)
+    }
+
     /// The length of [`MediaTable::data_url`] for the `index`th part, from its
     /// transcode or declared size, without reading the part.
     pub fn data_url_len(&self, index: usize) -> Option<usize> {
@@ -543,6 +562,16 @@ pub fn resolve_image_data(
 }
 
 /// Whether [`display_form`] replaces a part whose bytes start with `prefix`.
+/// An EMF header record, or a WMF file with or without its placeable header.
+#[cfg(not(target_arch = "wasm32"))]
+fn is_metafile_signature(bytes: &[u8]) -> bool {
+    let emf = bytes.len() >= 44 && bytes[..4] == [1, 0, 0, 0] && &bytes[40..44] == b" EMF";
+    let placeable = bytes.starts_with(&[0xd7, 0xcd, 0xc6, 0x9a]);
+    let standard =
+        bytes.len() >= 4 && matches!(bytes[0], 1 | 2) && bytes[1] == 0 && bytes[2..4] == [9, 0];
+    emf || placeable || standard
+}
+
 fn transcodes(prefix: &[u8], mime_type: &str) -> bool {
     #[cfg(feature = "tiff")]
     if is_tiff(prefix) {

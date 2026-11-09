@@ -14,6 +14,7 @@
  * 4. Selection changes → compute rects → update overlay
  */
 
+import type { DocxClipboardFragment } from '@betteroffice/docx/yrs';
 import React, { useEffect, useRef, useState, useCallback, useMemo, forwardRef, memo } from 'react';
 import type { CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
@@ -46,6 +47,7 @@ import {
 } from './overlays/CanvasParagraphFlashOverlay';
 
 // Layout engine
+import { documentRenderEnv } from '@betteroffice/docx/editor';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import {
   computeAnchorPositionsFromYrs,
@@ -117,6 +119,7 @@ import { useSelectionOverlay } from './hooks/useSelectionOverlay';
 import { useImageInteractions } from './hooks/useImageInteractions';
 import { usePagedScrollApi, type RevealPositionOutcome } from './hooks/usePagedScrollApi';
 import { usePagesPointer } from './hooks/usePagesPointer';
+import { useMirrorBookmarkFollower } from './mirrorLinkRoute';
 import {
   usePagedEditorCommandBridge,
   usePagedEditorRefApi,
@@ -167,6 +170,8 @@ import type { DocxSelectionInfo } from '../DocxEditor';
 import { readAt } from './internals/viewerReads';
 
 export { DEFAULT_PAGE_WIDTH };
+
+const MIN_TABLE_ROW_TWIPS = 15;
 
 function yrsDeltaForTextFormatting(formatting: TextFormatting | undefined): YrsInlineFormatDelta {
   if (!formatting) return {};
@@ -420,6 +425,10 @@ export interface PagedEditorRef {
   deleteSelection(): void;
   /** Select the full active Yrs story. */
   selectAll(): void;
+  /** Paste rich content where the selection allows it, else `plain`, through the Yrs input path. */
+  pasteContent(plain: string, fragment: DocxClipboardFragment | null): void;
+  /** Write the selection to the clipboard through the input's copy path. */
+  copySelection(cut: boolean): boolean;
   /** A viewer session's selected text, read from the document worker; null elsewhere. */
   readSelectedText(): Promise<string> | null;
   /** Get the current display-position selection. */
@@ -647,16 +656,9 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
 
     const proposalPreview = useRevisionPreview(yrsCore.session);
     const yrsRenderEnv = useMemo<YrsRenderEnv>(() => {
-      const themeColors: Record<string, string> = {};
-      for (const [name, value] of Object.entries(_theme?.colorScheme ?? {})) {
-        if (typeof value === 'string') themeColors[name] = value;
-      }
       return {
-        themeColors,
-        defaultTabStopTwips: document?.package.settings?.defaultTabStop ?? null,
-        numericIds: {},
+        ...documentRenderEnv(document, _theme?.colorScheme ?? {}),
         showHiddenText,
-        mediaTokens: true,
         ...(proposalPreview.revisionPreview
           ? { revisionPreview: proposalPreview.revisionPreview }
           : {}),
@@ -1399,6 +1401,22 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             ) {
               return false;
             }
+          } else if (command.type === 'tableRowHeight') {
+            const table = positionProjection.tableAtStart(command.pmStart);
+            if (!table || command.deltaTwips === 0) return false;
+            const rows = session.tablePayload(table.story, table.tableIndex)?.rows as
+              | Array<{ trPr?: { height?: unknown } }>
+              | undefined;
+            const stored = rows?.[command.row]?.trPr?.height;
+            const base = Math.max(command.paintedTwips, typeof stored === 'number' ? stored : 0);
+            session.beginUndoCapture();
+            session.addUndoBoundary();
+            session.setRowHeight(
+              { story: table.story, tableIndex: table.tableIndex, row: command.row, column: 0 },
+              Math.max(MIN_TABLE_ROW_TWIPS, base + command.deltaTwips),
+              'atLeast'
+            );
+            session.addUndoBoundary();
           } else if (command.type === 'tableColumnWidths') {
             if (command.widths.length === 0) return false;
             const table = positionProjection.tableAtStart(command.pmStart);
@@ -1643,6 +1661,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       clearTableInsertTimer,
       hideTableInsertButton,
       getPositionFromMouse,
+      followBookmark,
     } = usePagesPointer({
       pagesContainerRef,
       yrsInputRef,
@@ -1678,6 +1697,12 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       setIsFocused,
       scrollToPositionImpl,
     });
+    const followBookmarkFromMirror = useCallback((name: string) => {
+      bumpInputEpoch();
+      yrsInputRef.current?.focus();
+      followBookmark(name);
+    }, [bumpInputEpoch, followBookmark, yrsInputRef]);
+    useMirrorBookmarkFollower(followBookmarkFromMirror);
 
     /**
      * Handle focus on container - redirect to hidden input.
@@ -2247,6 +2272,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             readOnly={(readOnly && !holdInput) || (!!partEdit && activeYrsRootStory === 'body')}
             holdInput={holdInput}
             inputScope={inputScope}
+            themeColors={yrsRenderEnv.themeColors}
             replicaReadyRef={yrsCore.experimentalWorkerOpen ? yrsCore.replicaReadyRef : undefined}
             inputEpoch={inputEpoch}
             applyPendingSelection={applyPendingSelection}

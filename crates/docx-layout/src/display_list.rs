@@ -79,12 +79,13 @@
 //! host with a single number type.
 
 use crate::fmath;
+use crate::utf16_index::RunTexts;
 use ooxml_drawingml::GeometryPathCommand;
 use ooxml_drawingml::chart::{
     PlotAxis, PlotAxisKind, PlotAxisRange, PlotAxisTitles, PlotChart, PlotChartText,
     PlotDataLabels, PlotGroup, PlotLegend, PlotLine, PlotMarker, PlotMarkerSymbol, PlotOp,
     PlotPoint, PlotRect, PlotSeries, PlotSink, PlotTextAlign, PlotTextStyle, blank_numbers,
-    chart_aria_label, fallback_label_width, plot_chart_into,
+    chart_aria_label, chart_data, chart_plots_no_points, fallback_label_width, plot_chart_into,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -211,6 +212,11 @@ pub struct NoteRegion {
     pub y: Option<Number>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub height: Option<Number>,
+    /// Left edge of the column the region paints in; absent, the page's text area.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x: Option<Number>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<Number>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub columns: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -224,6 +230,10 @@ pub struct NoteRegion {
     /// Emitted only for notes that carry anchor or label data.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<NoteRegionNote>,
+    /// Notes this region continues from an earlier page: their opening, label and backlink
+    /// belong to the page that shows it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub continued_note_ids: Vec<i64>,
 }
 
 /// Backlink metadata for one note region entry.
@@ -288,6 +298,12 @@ pub enum Primitive {
 pub struct CanvasTextCluster {
     pub text: String,
     pub offset: Number,
+    #[serde(
+        rename = "sourceRange",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub source_range: Option<std::ops::Range<usize>>,
 }
 
 /// Everything a primitive carries about the document content it came from:
@@ -354,6 +370,9 @@ pub struct DocAttrs {
     /// paragraph. The mirror uses this to expose the stable list-marker class.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub list_marker: Option<bool>,
+    /// The marker is a number or label a reader needs, not a bullet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub list_marker_numbered: Option<bool>,
     /// Pending tracked-change paint for the synthetic numbering glyph.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub list_marker_revision: Option<RevisionKind>,
@@ -387,7 +406,7 @@ pub struct DocAttrs {
     pub inline_sdt_widget: Option<Box<InlineSdtWidgetAttrs>>,
     /// accessibility summary for primitives that compose one chart block.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chart: Option<ChartA11yAttrs>,
+    pub chart: Option<Box<ChartA11yAttrs>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logical_order: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -621,6 +640,10 @@ pub struct ChartA11yAttrs {
     /// The placed chart box every primitive of the chart paints inside.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frame: Option<Box<ContentFrame>>,
+    /// The plotted values as text, with no categories or series when the
+    /// chart caches no points; carried by the chart's first primitive only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<Box<ooxml_drawingml::chart::ChartData>>,
 }
 
 /// The grid position of the cell a primitive paints inside.
@@ -644,6 +667,12 @@ pub struct TableCellRef {
     pub cell_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_header: Option<bool>,
+    /// The cell heads its row: the table has header rows and asks for
+    /// first-column formatting, and the cell starts in grid column 0 without
+    /// continuing a vertical merge. Like a column header, it names no other
+    /// header.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_row_header: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repeated_header: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -735,6 +764,8 @@ pub enum RevisionKind {
     Ins,
     #[serde(rename = "del")]
     Del,
+    #[serde(rename = "format")]
+    Format,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -794,6 +825,10 @@ pub struct TextRunPrimitive {
     pub paint_clip: Option<ClipRect>,
     /// CSS font shorthand.
     pub font: String,
+    /// Script faces its paragraph needs, as the layout's font collection resolves them.
+    #[allow(clippy::box_collection)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scripts: Option<Box<Vec<String>>>,
     pub color: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub letter_spacing: Option<Number>,
@@ -1893,6 +1928,8 @@ struct RunFormattingIn {
     #[serde(default)]
     change_revision_id: Option<i64>,
     #[serde(default)]
+    format_change: Option<Revision>,
+    #[serde(default)]
     hyperlink: Option<HyperlinkIn>,
     #[serde(default)]
     inline_sdt_widget: Option<InlineSdtWidgetAttrs>,
@@ -2164,6 +2201,8 @@ pub(crate) struct ParaAttrsIn {
     /// Pre-computed list marker text.
     #[serde(default)]
     list_marker: Option<String>,
+    #[serde(default)]
+    list_is_bullet: Option<bool>,
     /// w:vanish on the numbering level rPr — a hidden marker reserves no slot
     #[serde(default)]
     list_marker_hidden: Option<bool>,
@@ -2289,6 +2328,9 @@ pub(crate) struct TableBlockIn {
     pub(crate) floating: Option<FloatingTablePositionIn>,
     #[serde(default)]
     gridlines: Option<bool>,
+    /// The table's own `w:tblLook` asks for first-column formatting.
+    #[serde(default)]
+    first_column: Option<bool>,
 }
 
 pub(crate) type FloatingTablePositionIn = crate::types::FloatingTablePosition;
@@ -2334,6 +2376,8 @@ struct TableCellIn {
     no_wrap: Option<bool>,
     #[serde(default)]
     tracked_marker: Option<CellMarkerIn>,
+    #[serde(default)]
+    merge_continuation: Option<bool>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -3182,6 +3226,12 @@ struct NoteAreaIn {
     separator: Option<NoteItemIn>,
     #[serde(default)]
     notes: Vec<NoteItemIn>,
+    #[serde(default)]
+    continuation: Option<bool>,
+    #[serde(default)]
+    x: Option<f64>,
+    #[serde(default)]
+    width: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -3202,6 +3252,31 @@ struct NoteItemIn {
     /// formatted reference label (display number / custom mark); file-derived
     #[serde(default)]
     display_label: Option<String>,
+    #[serde(default)]
+    block_start: Option<usize>,
+    #[serde(default)]
+    line_start: Option<usize>,
+    #[serde(default)]
+    block_end: Option<usize>,
+    #[serde(default)]
+    line_end: Option<usize>,
+}
+
+impl NoteItemIn {
+    fn window(&self) -> Option<crate::types::NoteWindow> {
+        crate::types::NoteWindow::from_parts(
+            self.block_start,
+            self.line_start,
+            self.block_end,
+            self.line_end,
+        )
+    }
+
+    /// Whether the item shows the note's opening, where its label and backlink are.
+    fn shows_start(&self) -> bool {
+        self.window()
+            .is_none_or(|window| window.block_start == 0 && window.line_start == 0)
+    }
 }
 
 #[derive(Deserialize, Default, Clone, Copy)]
@@ -3740,19 +3815,102 @@ fn row_parent_revision_id(row: &TableRowIn) -> Option<i64> {
 }
 
 /// Returns CSS font shorthand for a run.
+#[allow(clippy::box_collection)]
+fn boxed_scripts(scripts: &[String]) -> Option<Box<Vec<String>>> {
+    (!scripts.is_empty()).then(|| Box::new(scripts.to_vec()))
+}
+
+fn paragraph_scripts(runs: &[RunIn]) -> Vec<String> {
+    ooxml_text::paragraph_scripts_with_languages(
+        runs.iter().filter_map(|run| match run {
+            RunIn::Text(text) => Some((
+                text.text.as_str(),
+                text.fmt
+                    .language
+                    .as_ref()
+                    .and_then(|language| language.east_asia.as_deref()),
+            )),
+            _ => None,
+        }),
+        false,
+    )
+}
+
 fn css_font(fmt: &RunFormattingIn) -> String {
+    styled_css_font(
+        fmt,
+        fmt.font_family.as_deref().unwrap_or(DEFAULT_FONT_FAMILY),
+        fmt.bold == Some(true),
+        fmt.italic == Some(true),
+    )
+}
+
+fn styled_css_font(fmt: &RunFormattingIn, family: &str, bold: bool, italic: bool) -> String {
     let size = px(effective_font_px_of(fmt));
-    let weight = if fmt.bold == Some(true) { 700 } else { 400 };
-    let family = fmt.font_family.as_deref().unwrap_or(DEFAULT_FONT_FAMILY);
+    let weight = if bold { 700 } else { 400 };
     let variant = if fmt.small_caps == Some(true) {
         "small-caps "
     } else {
         ""
     };
-    if fmt.italic == Some(true) {
+    if italic {
         format!("italic {variant}{weight} {size}px {family}, sans-serif")
     } else {
         format!("{variant}{weight} {size}px {family}, sans-serif")
+    }
+}
+
+fn resolved_css_font(shape: Option<&ShapeFonts<'_>>, text: &str, fmt: &RunFormattingIn) -> String {
+    let Some(shape) = shape else {
+        return css_font(fmt);
+    };
+    let bold = fmt.bold == Some(true);
+    let italic = fmt.italic == Some(true);
+    let family = fmt.font_family.as_deref().unwrap_or(DEFAULT_FONT_FAMILY);
+    let Some(chain) = shape.chain_for(family, bold, italic) else {
+        return css_font(fmt);
+    };
+    #[cfg(not(feature = "base-latin"))]
+    if !chain
+        .ids
+        .iter()
+        .any(|&id| shape.store.backstop_style(id).is_some())
+    {
+        return css_font(fmt);
+    }
+    if chain.ids.iter().any(|&id| shape.store.metrics(id).is_err()) {
+        return css_font(fmt);
+    }
+    let Some(fonts): Option<Vec<_>> = text
+        .chars()
+        .map(|ch| chain.resolve_with_style(shape.store, ch, bold, italic, family))
+        .collect()
+    else {
+        return css_font(fmt);
+    };
+    if let Some(&font) = fonts.first()
+        && fonts.iter().all(|&id| id == font)
+        && !text.chars().any(ooxml_text::font_store::base_latin_alias)
+        && let Some((bold, italic)) = shape.store.backstop_style(font)
+    {
+        return styled_css_font(fmt, ooxml_text::BASE_LATIN_FAMILY, bold, italic);
+    }
+    let css = css_font(fmt);
+    if fonts
+        .iter()
+        .any(|&id| shape.store.backstop_style(id).is_some())
+    {
+        if !ooxml_text::font_store::symbol_family(family)
+            && text.chars().any(ooxml_text::font_store::base_latin_alias)
+        {
+            return css;
+        }
+        css.replace(
+            ", sans-serif",
+            &format!(", {}, sans-serif", ooxml_text::BASE_LATIN_FAMILY),
+        )
+    } else {
+        css
     }
 }
 
@@ -3948,6 +4106,7 @@ fn emit_text_watermark(prims: &mut Vec<Primitive>, wm: &TextWatermarkIn, page: &
         width: px(width),
         paint_clip: None,
         font,
+        scripts: None,
         color: wm.color.clone().unwrap_or_else(|| "#C0C0C0".to_string()),
         letter_spacing: None,
         word_spacing: None,
@@ -4170,35 +4329,11 @@ struct ResolvedSegment<'a> {
     pm_end: Option<i64>,
 }
 
-fn utf16_len(text: &str) -> usize {
-    text.encode_utf16().count()
-}
-
-/// Slice using UTF-16 offsets. Start/end are snapped to
-/// scalar boundaries so malformed hand-authored envelopes cannot split a
-/// surrogate pair; authoritative cluster metadata already lands on grapheme
-/// boundaries and therefore passes through unchanged.
-fn slice_utf16(text: &str, start: usize, end: usize) -> String {
-    slice_utf16_with_total(text, utf16_len(text), start, end)
-}
-
-/// [`slice_utf16`] with the text's utf16 length precomputed, so per-line run
-/// slicing measures each run once instead of once per bound.
-fn slice_utf16_with_total(text: &str, total: usize, start: usize, end: usize) -> String {
-    let start = start.min(total);
-    let end = end.max(start).min(total);
-    let mut units = 0usize;
-    text.chars()
-        .filter_map(|ch| {
-            let next = units + ch.len_utf16();
-            let keep = units >= start && next <= end;
-            units = next;
-            keep.then_some(ch)
-        })
-        .collect()
-}
-
-fn resolve_line_segments<'a>(runs: &'a [RunIn], line: &LineIn) -> Vec<ResolvedSegment<'a>> {
+fn resolve_line_segments<'a>(
+    runs: &'a [RunIn],
+    line: &LineIn,
+    texts: &RunTexts<'a>,
+) -> Vec<ResolvedSegment<'a>> {
     #[cfg(any(test, feature = "test-support"))]
     crate::work_counters::resolved_line();
     let mut out = Vec::new();
@@ -4208,7 +4343,8 @@ fn resolve_line_segments<'a>(runs: &'a [RunIn], line: &LineIn) -> Vec<ResolvedSe
         };
         match run {
             RunIn::Text(t) => {
-                let total = utf16_len(&t.text);
+                let index = texts.get(run_index, &t.text);
+                let total = index.len();
                 let start = if run_index == line.head_run {
                     line.head_char.min(total)
                 } else {
@@ -4220,7 +4356,7 @@ fn resolve_line_segments<'a>(runs: &'a [RunIn], line: &LineIn) -> Vec<ResolvedSe
                     total
                 };
                 let end = end.max(start);
-                let text = slice_utf16_with_total(&t.text, total, start, end);
+                let text = index.whole_scalars(start, end).to_string();
                 // an unsliced run keeps its own document span; a boundary slice
                 // shifts the positions to match (text runs are 1 position per char)
                 let (pm_start, pm_end) = if start == 0 && end == total {
@@ -4559,15 +4695,19 @@ type FontResolver =
 struct ShapeFontChain {
     ids: Vec<ooxml_text::FontId>,
     coverage_only: bool,
+    symbols_shape: bool,
     resolve: FontResolver,
 }
 
 impl ShapeFontChain {
-    fn new(ids: Vec<ooxml_text::FontId>, coverage_only: bool) -> Self {
+    fn new(ids: Vec<ooxml_text::FontId>, coverage_only: bool, symbols_shape: bool) -> Self {
         Self {
             ids,
             coverage_only,
-            resolve: if coverage_only {
+            symbols_shape,
+            resolve: if coverage_only && symbols_shape {
+                Self::resolve_covered_or_symbol
+            } else if coverage_only {
                 Self::resolve_covered
             } else {
                 Self::resolve_with_fallback
@@ -4593,6 +4733,67 @@ impl ShapeFontChain {
         }
         store.resolve(chain, ch)
     }
+
+    fn resolve_covered_or_symbol(
+        store: &ooxml_text::FontStore,
+        chain: &[ooxml_text::FontId],
+        ch: char,
+    ) -> Option<ooxml_text::FontId> {
+        if ooxml_text::measure::symbol_character(ch) {
+            return Self::resolve_with_fallback(store, chain, ch);
+        }
+        Self::resolve_covered(store, chain, ch)
+    }
+
+    fn resolve_with_style(
+        &self,
+        store: &ooxml_text::FontStore,
+        ch: char,
+        bold: bool,
+        italic: bool,
+        family: &str,
+    ) -> Option<ooxml_text::FontId> {
+        if ooxml_text::font_store::base_latin_alias(ch) {
+            return store
+                .resolve_with_family(&self.ids, ch, bold, italic, family)
+                .filter(|&id| {
+                    !self.coverage_only
+                        || (self.symbols_shape && ooxml_text::measure::symbol_character(ch))
+                        || ooxml_text::covered_character(store, id, ch)
+                            .ok()
+                            .flatten()
+                            .is_some()
+                });
+        }
+        #[cfg(not(feature = "base-latin"))]
+        {
+            (self.resolve)(store, &self.ids, ch)
+        }
+        #[cfg(feature = "base-latin")]
+        {
+            let resolved = (self.resolve)(store, &self.ids, ch);
+            if resolved.is_some_and(|id| {
+                ooxml_text::covered_character(store, id, ch)
+                    .ok()
+                    .flatten()
+                    .is_some()
+                    || (self.coverage_only && !ooxml_text::measure::needs_glyph(ch))
+                    || (self.symbols_shape && ooxml_text::measure::symbol_character(ch))
+            }) {
+                return resolved;
+            }
+            store
+                .resolve_with_style(&self.ids, ch, bold, italic)
+                .filter(|&id| {
+                    !self.coverage_only
+                        || (self.symbols_shape && ooxml_text::measure::symbol_character(ch))
+                        || ooxml_text::covered_character(store, id, ch)
+                            .ok()
+                            .flatten()
+                            .is_some()
+                })
+        }
+    }
 }
 
 impl<'a> ShapeFonts<'a> {
@@ -4612,6 +4813,9 @@ impl<'a> ShapeFonts<'a> {
             .flatten()
             .copied()
             .collect();
+        let symbols_shape = input
+            .font_chains
+            .contains_key("@betteroffice/fonts/coverage-symbols");
         let chains = input
             .font_chains
             .iter()
@@ -4623,6 +4827,7 @@ impl<'a> ShapeFonts<'a> {
                             .map(|&id| ooxml_text::FontId::from_u32(id))
                             .collect(),
                         ids.last().is_some_and(|id| coverage_only.contains(id)),
+                        symbols_shape,
                     ),
                 )
             })
@@ -4861,11 +5066,21 @@ fn text_canvas_clusters(
     let font = *chain.ids.first()?;
     let coverage_only = chain.coverage_only;
     fonts.store.family_widths(font).ok()??;
-    let text = if fmt.all_caps == Some(true) {
-        text.to_uppercase()
-    } else {
-        text.to_owned()
-    };
+    let mut painted = String::new();
+    let mut source_ranges = Vec::new();
+    for (start, ch) in text.char_indices() {
+        let end = start + ch.len_utf8();
+        let transformed = if fmt.all_caps == Some(true) {
+            ch.to_uppercase().collect::<String>()
+        } else {
+            ch.to_string()
+        };
+        for painted_ch in transformed.chars() {
+            source_ranges.push((painted.len(), start..end));
+            painted.push(painted_ch);
+        }
+    }
+    let text = painted;
     if text.chars().any(|ch| {
         ooxml_text::covered_character(fonts.store, font, ch)
             .ok()
@@ -4906,10 +5121,6 @@ fn text_canvas_clusters(
         .copied()
         .chain(std::iter::once(text.len()))
         .collect();
-    let breaks: std::collections::HashSet<_> = ooxml_text::break_opportunities(&text)
-        .into_iter()
-        .map(|boundary| boundary.byte_index)
-        .collect();
     let horizontal = fmt.horizontal_scale.unwrap_or(100.0) / 100.0;
     let mut pen = 0.0;
     let mut clusters = Vec::new();
@@ -4917,10 +5128,15 @@ fn text_canvas_clusters(
         let index = bounds.binary_search(&start).ok()?;
         let end = *bounds.get(index + 1)?;
         let cluster = text.get(start..end)?;
+        let source_start = source_ranges.partition_point(|(offset, _)| *offset <= start) - 1;
+        let source_end = source_ranges.partition_point(|(offset, _)| *offset < end) - 1;
         clusters.push(CanvasTextCluster {
             text: text_paint_override(Some(fonts), cluster, fmt)
                 .unwrap_or_else(|| cluster.to_owned()),
             offset: px(pen),
+            source_range: Some(
+                source_ranges[source_start].1.start..source_ranges[source_end].1.end,
+            ),
         });
         pen += if fmt.small_caps == Some(true) {
             painted_text_width(
@@ -4938,9 +5154,7 @@ fn text_canvas_clusters(
         if horizontal > 0.0 {
             pen +=
                 word_spacing * cluster.chars().filter(|&ch| ch == ' ').count() as f64 / horizontal;
-            if end < text.len() && !breaks.contains(&end) {
-                pen += fmt.letter_spacing.unwrap_or(0.0) / horizontal;
-            }
+            pen += fmt.letter_spacing.unwrap_or(0.0) * cluster.chars().count() as f64 / horizontal;
             if !ooxml_text::level_is_rtl(bidi_level)
                 && let (Some(left), Some(right)) =
                     (cluster.chars().next_back(), text[end..].chars().next())
@@ -5133,8 +5347,69 @@ fn emit_note_item(
 ) -> f64 {
     let start = prims.len();
     let mut cursor = 0.0;
-    for (block, measure) in note.blocks.iter().zip(&note.measures) {
+    let window = note.window();
+    for (index, (block, measure)) in note.blocks.iter().zip(&note.measures).enumerate() {
+        let count = match measure {
+            MeasureIn::Paragraph(measure) => measure.lines.len(),
+            _ => 1,
+        };
+        let Some(lines) = crate::types::note_window_lines(window.as_ref(), index, count) else {
+            continue;
+        };
+        if window.is_some() && lines.is_empty() && count > 0 {
+            continue;
+        }
         match (block, measure) {
+            (BlockIn::Paragraph(block), MeasureIn::Paragraph(measure)) if window.is_some() => {
+                if lines.start == 0 {
+                    cursor += block
+                        .attrs
+                        .as_ref()
+                        .and_then(|attrs| attrs.spacing)
+                        .and_then(|spacing| spacing.before)
+                        .unwrap_or(0.0);
+                }
+                let shown: f64 = measure.lines[lines.clone()]
+                    .iter()
+                    .map(|line| line.line_height)
+                    .sum();
+                let fragment = ParagraphFragmentIn {
+                    horizontal_frame: None,
+                    block_id: block.id.clone(),
+                    x,
+                    y: y + cursor,
+                    width,
+                    height: shown,
+                    from_line: lines.start,
+                    to_line: lines.end,
+                    pm_start: block.pm_start,
+                    pm_end: block.pm_end,
+                    carried_from_prev: (lines.start > 0).then_some(true),
+                    carried_to_next: (lines.end < count).then_some(true),
+                };
+                emit_paragraph_fragment(
+                    prims,
+                    &fragment,
+                    block,
+                    measure,
+                    ctx,
+                    x,
+                    y + cursor,
+                    None,
+                    None,
+                    true,
+                    true,
+                );
+                cursor += shown;
+                if lines.end == count {
+                    cursor += measure.total_height
+                        - measure
+                            .lines
+                            .iter()
+                            .map(|line| line.line_height)
+                            .sum::<f64>();
+                }
+            }
             (BlockIn::Paragraph(block), MeasureIn::Paragraph(measure)) => {
                 let before = block
                     .attrs
@@ -5281,13 +5556,15 @@ fn emit_note_item(
 
 fn emit_note_regions(page: &PageIn, ctx: &RenderCtx<'_>) -> Vec<NoteRegion> {
     let margins = page.body_margins.as_ref().unwrap_or(&page.margins);
-    let content_width = (page.size.w - page.margins.left - page.margins.right).max(1.0);
+    let page_width = (page.size.w - page.margins.left - page.margins.right).max(1.0);
     let mut regions = Vec::with_capacity(page.note_areas.len());
     for area in &page.note_areas {
         let kind = area.kind.as_deref().unwrap_or("footnote");
         let y = area
             .y
             .unwrap_or(page.size.h - margins.bottom - area.height.unwrap_or(0.0));
+        let left = area.x.unwrap_or(page.margins.left);
+        let content_width = area.width.unwrap_or(page_width).max(1.0);
         let columns = area.columns.unwrap_or(1).max(1) as usize;
         let column_width =
             ((content_width - (columns - 1) as f64 * NOTE_COLUMN_GAP_PX) / columns as f64).max(1.0);
@@ -5301,16 +5578,21 @@ fn emit_note_regions(page: &PageIn, ctx: &RenderCtx<'_>) -> Vec<NoteRegion> {
                 &mut separator_primitives,
                 separator,
                 kind,
-                page.margins.left,
+                left,
                 y,
                 content_width,
                 ctx,
             );
         } else {
+            let length = if area.continuation == Some(true) {
+                content_width
+            } else {
+                content_width / 3.0
+            };
             separator_primitives.push(Primitive::Line(LinePrimitive {
-                x1: px(page.margins.left),
+                x1: px(left),
                 y1: px(y),
-                x2: px(page.margins.left + content_width / 3.0),
+                x2: px(left + length),
                 y2: px(y),
                 stroke_width: px(1.0),
                 color: "#000000".to_string(),
@@ -5327,7 +5609,7 @@ fn emit_note_regions(page: &PageIn, ctx: &RenderCtx<'_>) -> Vec<NoteRegion> {
         let mut primitives = Vec::new();
         let partitions = note_partitions(&area.notes, columns);
         for (column, notes) in partitions.into_iter().enumerate() {
-            let x = page.margins.left + column as f64 * (column_width + NOTE_COLUMN_GAP_PX);
+            let x = left + column as f64 * (column_width + NOTE_COLUMN_GAP_PX);
             let mut cursor = y + area
                 .separator
                 .as_ref()
@@ -5342,6 +5624,8 @@ fn emit_note_regions(page: &PageIn, ctx: &RenderCtx<'_>) -> Vec<NoteRegion> {
             section_id: area.section_id.clone(),
             y: area.y.map(px),
             height: area.height.map(px),
+            x: area.x.map(px),
+            width: area.width.map(px),
             columns: area.columns,
             separator_primitives,
             primitives,
@@ -5351,9 +5635,10 @@ fn emit_note_regions(page: &PageIn, ctx: &RenderCtx<'_>) -> Vec<NoteRegion> {
                 .notes
                 .iter()
                 .filter(|note| {
-                    note.anchor_doc_start.is_some()
-                        || note.anchor_doc_end.is_some()
-                        || note.display_label.is_some()
+                    note.shows_start()
+                        && (note.anchor_doc_start.is_some()
+                            || note.anchor_doc_end.is_some()
+                            || note.display_label.is_some())
                 })
                 .map(|note| NoteRegionNote {
                     id: note.id,
@@ -5361,6 +5646,12 @@ fn emit_note_regions(page: &PageIn, ctx: &RenderCtx<'_>) -> Vec<NoteRegion> {
                     anchor_doc_end: note.anchor_doc_end,
                     label: capped_string(note.display_label.as_deref(), MAX_NOTE_LABEL_CHARS),
                 })
+                .collect(),
+            continued_note_ids: area
+                .notes
+                .iter()
+                .filter(|note| !note.shows_start())
+                .filter_map(|note| note.id)
                 .collect(),
         });
     }
@@ -6456,6 +6747,8 @@ pub(crate) fn emit_paragraph_fragment(
 
     let mut line_top = origin_y;
     let mut last_line: Option<LinePaintMetrics> = None;
+    let scripts = paragraph_scripts(&block.runs);
+    let texts = RunTexts::new(block.runs.len());
     for idx in frag.from_line..frag.to_line.min(total_lines) {
         let line = &measure.lines[idx];
         // lead skip reserves vertical space above the line (float push-down)
@@ -6487,6 +6780,8 @@ pub(crate) fn emit_paragraph_fragment(
             },
             &block_ref,
             ctx,
+            &scripts,
+            &texts,
         );
         for primitive in &mut prims[line_stamp_from..] {
             if let Some(attrs) = doc_attrs_mut(primitive) {
@@ -6512,7 +6807,8 @@ pub(crate) fn emit_paragraph_fragment(
             baseline_y: px(line.baseline),
             width: px(PARAGRAPH_MARK_GLYPH_WIDTH),
             paint_clip: None,
-            font: css_font(&RunFormattingIn::default()),
+            font: resolved_css_font(ctx.shape, "¶", &RunFormattingIn::default()),
+            scripts: None,
             color: structural_color(rev.kind).to_string(),
             letter_spacing: None,
             word_spacing: None,
@@ -6628,6 +6924,7 @@ fn authoritative_line_items<'a>(
     ctx: &RenderCtx<'_>,
     default_level: u8,
     leading_inline_box: bool,
+    texts: &RunTexts<'a>,
 ) -> Option<Vec<LinePaintItem<'a>>> {
     let mut slices: Vec<(usize, usize, usize, f64, u8, u64, Option<u64>)> = Vec::new();
     if !line.bidi_slices.is_empty() {
@@ -6690,7 +6987,10 @@ fn authoritative_line_items<'a>(
         let run = block.runs.get(run_index)?;
         match run {
             RunIn::Text(text) => {
-                let visible = slice_utf16(&text.text, start, end);
+                let visible = texts
+                    .get(run_index, &text.text)
+                    .whole_scalars(start, end)
+                    .to_string();
                 out.push(LinePaintItem::Text(LineTextItem {
                     text: visible,
                     fmt: &text.fmt,
@@ -6800,16 +7100,19 @@ pub(crate) fn line_text_insets(
 /// their resolved widths (tabs/images exact, text distributed over the measured
 /// line width), decorations ride with their run in paint order (highlight and
 /// comment tint behind the glyphs, underline/strike after).
-fn emit_line(
+#[allow(clippy::too_many_arguments)]
+fn emit_line<'a>(
     prims: &mut Vec<Primitive>,
-    block: &ParagraphBlockIn,
+    block: &'a ParagraphBlockIn,
     line: &LineIn,
     geom: LineGeom,
     block_ref: &BlockRef,
     ctx: &RenderCtx<'_>,
+    scripts: &[String],
+    texts: &RunTexts<'a>,
 ) -> Option<LinePaintMetrics> {
     let echo_start = prims.len();
-    let segments = resolve_line_segments(&block.runs, line);
+    let segments = resolve_line_segments(&block.runs, line, texts);
     let attrs = block.attrs.as_ref();
     let auto_space = ooxml_text::AutoSpace::from_options(
         attrs.and_then(|attrs| attrs.auto_space_de),
@@ -6820,8 +7123,14 @@ fn emit_line(
         && attrs
             .and_then(|attrs| attrs.leading_inline_box.as_ref())
             .is_some();
-    let authoritative_items =
-        authoritative_line_items(block, line, ctx, default_bidi_level, leading_inline_box);
+    let authoritative_items = authoritative_line_items(
+        block,
+        line,
+        ctx,
+        default_bidi_level,
+        leading_inline_box,
+        texts,
+    );
     let authoritative_active = authoritative_items.is_some();
     let authoritative_width = authoritative_items
         .as_ref()
@@ -6973,44 +7282,78 @@ fn emit_line(
         let color = match marker_revision {
             Some(RevisionKind::Ins) => REVISION_INS_COLOR,
             Some(RevisionKind::Del) => REVISION_DEL_COLOR,
-            None => attrs
+            None | Some(RevisionKind::Format) => attrs
                 .and_then(|attrs| attrs.list_marker_color.as_deref())
                 .unwrap_or("#000000"),
         };
         let mut marker_attrs = block_ref.attrs();
         marker_attrs.list_marker = Some(true);
+        marker_attrs.list_marker_numbered = (attrs.and_then(|attrs| attrs.list_is_bullet)
+            != Some(true)
+            && marker.chars().any(char::is_alphanumeric)
+            && !attrs
+                .and_then(|attrs| attrs.list_marker_font_family.as_deref())
+                .is_some_and(|family| ooxml_text::SymbolFont::named(family).is_some()))
+        .then_some(true);
         marker_attrs.list_marker_revision = marker_revision;
-        prims.push(Primitive::Text(TextRunPrimitive {
-            text: marker.to_owned(),
-            paint_text: text_paint_override(ctx.shape, marker, &marker_format).map(Box::new),
-            x: px(marker_x),
-            baseline_y: px(baseline),
-            width: px(slot_width),
-            paint_clip: None,
-            font: css_font(&marker_format),
-            color: color.to_owned(),
-            letter_spacing: None,
-            word_spacing: None,
-            rtl: geom.is_rtl.then_some(true),
-            opacity: None,
-            rotation_deg: None,
-            horizontal_scale: horizontal_scale_of(&marker_format),
-            substitute_scale: text_substitute_scale(
-                ctx.shape,
-                marker,
-                &marker_format,
-                base_bidi_level(geom.is_rtl),
-                false,
-            ),
-            all_caps: false,
-            small_caps: false,
-            hidden: false,
-            text_shadow: None,
-            text_outline: false,
-            emphasis_mark: None,
-            text_effect: None,
-            attrs: marker_attrs,
-        }));
+        let shaped = !geom.is_rtl
+            && bidi_char_levels(marker, base_bidi_direction(false))
+                .iter()
+                .all(|level| level % 2 == 0)
+            && ctx.shape.is_some_and(|shape| {
+                try_emit_glyph_runs(
+                    prims,
+                    shape,
+                    marker,
+                    &marker_format,
+                    None,
+                    None,
+                    marker_x,
+                    baseline,
+                    &None,
+                    0,
+                    None,
+                    None,
+                    &marker_attrs,
+                    color,
+                    &None,
+                    ooxml_text::AutoSpace::from_options(Some(false), Some(false)),
+                )
+            });
+        if !shaped {
+            prims.push(Primitive::Text(TextRunPrimitive {
+                text: marker.to_owned(),
+                paint_text: text_paint_override(ctx.shape, marker, &marker_format).map(Box::new),
+                x: px(marker_x),
+                baseline_y: px(baseline),
+                width: px(slot_width),
+                paint_clip: None,
+                font: resolved_css_font(ctx.shape, marker, &marker_format),
+                scripts: boxed_scripts(scripts),
+                color: color.to_owned(),
+                letter_spacing: None,
+                word_spacing: None,
+                rtl: geom.is_rtl.then_some(true),
+                opacity: None,
+                rotation_deg: None,
+                horizontal_scale: horizontal_scale_of(&marker_format),
+                substitute_scale: text_substitute_scale(
+                    ctx.shape,
+                    marker,
+                    &marker_format,
+                    base_bidi_level(geom.is_rtl),
+                    false,
+                ),
+                all_caps: false,
+                small_caps: false,
+                hidden: false,
+                text_shadow: None,
+                text_outline: false,
+                emphasis_mark: None,
+                text_effect: None,
+                attrs: marker_attrs,
+            }));
+        }
     }
 
     // Distribute justification slack across U+0020 clusters.
@@ -7029,8 +7372,13 @@ fn emit_line(
             if let Some(items) = &authoritative_items {
                 space_count = items
                     .iter()
-                    .filter(|item| matches!(item, LinePaintItem::Text(text) if text.text == " "))
-                    .count();
+                    .map(|item| match item {
+                        LinePaintItem::Text(text) => {
+                            text.text.chars().filter(|&ch| ch == ' ').count()
+                        }
+                        _ => 0,
+                    })
+                    .sum();
             } else {
                 for seg in &segments {
                     let text = match seg.run {
@@ -7223,8 +7571,9 @@ fn emit_line(
                     0.0
                 } else {
                     item.width
-                        + if item.exact_advance && item.text == " " {
+                        + if item.exact_advance {
                             word_space_extra
+                                * item.text.chars().filter(|&ch| ch == ' ').count() as f64
                         } else {
                             0.0
                         }
@@ -7251,6 +7600,7 @@ fn emit_line(
                     ctx.shape,
                     auto_space,
                     item.field,
+                    scripts,
                 );
                 if item.pm_start.is_some() {
                     emitted_positioned_text = true;
@@ -7486,6 +7836,7 @@ fn emit_line(
                 width: px(0.0),
                 paint_clip: None,
                 font: css_font(&RunFormattingIn::default()),
+                scripts: None,
                 color: "#000000".to_string(),
                 letter_spacing: None,
                 word_spacing: None,
@@ -7602,6 +7953,12 @@ fn emit_tab_leader(
             base_bidi_level(fmt.rtl == Some(true)),
             false,
         );
+        let font = resolved_css_font(shape, &text, &fmt);
+        let leader_font = if font == css_font(&fmt) {
+            measured.font.clone()
+        } else {
+            Some(font.clone())
+        };
         let mut attrs = block_ref.attrs();
         attrs.doc_start = tab.pm_start;
         attrs.doc_end = tab.pm_end;
@@ -7616,7 +7973,7 @@ fn emit_tab_leader(
             baseline_y: Some(px(baseline)),
             advance: Some(px(advance)),
             width: Some(px(width)),
-            font: measured.font.clone(),
+            font: leader_font,
             font_id: None,
             size: measured.font_size.map(|size| px(size * 96.0 / 72.0)),
             color: Some(run_color(&fmt)),
@@ -7629,7 +7986,8 @@ fn emit_tab_leader(
             baseline_y: px(baseline),
             width: px(width),
             paint_clip: None,
-            font: css_font(&fmt),
+            font,
+            scripts: None,
             color: run_color(&fmt),
             letter_spacing: None,
             word_spacing: None,
@@ -7751,6 +8109,7 @@ fn emit_text_segment(
     shape: Option<&ShapeFonts<'_>>,
     auto_space: ooxml_text::AutoSpace,
     field: Option<&FieldRunIn>,
+    scripts: &[String],
 ) {
     let font_px = effective_font_px_of(fmt);
     let paint_baseline = baseline_y_of(fmt, baseline);
@@ -7780,19 +8139,28 @@ fn emit_text_segment(
     attrs.doc_start = pm_start;
     attrs.doc_end = pm_end;
     attrs.comment_ids = comment_ids.clone();
-    attrs.revision = revision.map(Box::new);
+    attrs.revision = revision.or_else(|| fmt.format_change.clone()).map(Box::new);
     attrs.href = hyperlink_href(fmt);
     attrs.inline_sdt_widget = fmt.inline_sdt_widget.clone().map(Box::new);
     attrs.logical_order = logical_order.or(fmt.logical_order);
     attrs.bidi_level = exact_advance.then_some(bidi_level).or(fmt.bidi_level);
     attrs.lang = fmt.language.as_ref().and_then(|language| {
-        if ooxml_text::level_is_rtl(bidi_level) {
+        let slots = ooxml_text::font_slot_use(
+            text,
+            fmt.complex_script == Some(true),
+            fmt.font_slots
+                .as_ref()
+                .and_then(|slots| slots.hint.as_deref()),
+        );
+        if ooxml_text::level_is_rtl(bidi_level) || slots.complex_script {
             language.bidi.clone().or_else(|| language.latin.clone())
-        } else {
+        } else if slots.east_asia {
             language
                 .east_asia
                 .clone()
                 .or_else(|| language.latin.clone())
+        } else {
+            language.latin.clone()
         }
     });
     if let Some(link) = &fmt.hyperlink {
@@ -7943,7 +8311,8 @@ fn emit_text_segment(
             baseline_y: px(paint_baseline),
             width: px(width),
             paint_clip,
-            font: css_font(fmt),
+            font: resolved_css_font(shape, text, fmt),
+            scripts: boxed_scripts(scripts),
             color: color.clone(),
             letter_spacing: fmt.letter_spacing.map(px),
             word_spacing,
@@ -8000,6 +8369,21 @@ fn emit_text_segment(
             dashed: false,
             dotted: true,
             attrs: attrs.clone(),
+        }));
+    }
+    if let Some(change) = &fmt.format_change {
+        let mut cue_attrs = attrs.clone();
+        cue_attrs.revision = Some(Box::new(change.clone()));
+        prims.push(Primitive::Decoration(DecorationPrimitive {
+            deco: DecoKind::Underline,
+            x: px(x),
+            y: px(paint_baseline + (font_px * 0.3).round()),
+            w: px(width),
+            h: px(1.0),
+            color: "#6a1b9a".to_owned(),
+            dashed: false,
+            dotted: true,
+            attrs: cue_attrs,
         }));
     }
     // Deletions strike through in the revision colour.
@@ -8066,11 +8450,15 @@ fn try_emit_glyph_runs(
     let Some(chain) = shape_fonts.chain_for(family, bold, italic) else {
         return false;
     };
-    if chain.ids.is_empty() {
+    if chain.ids.is_empty()
+        || chain
+            .ids
+            .iter()
+            .any(|&id| shape_fonts.store.metrics(id).is_err())
+    {
         return false;
     }
-    let resolve = chain.resolve;
-    let chain = chain.ids.as_slice();
+    let resolve = |ch| chain.resolve_with_style(shape_fonts.store, ch, bold, italic, family);
     let echo_font_route = fmt.complex_script != Some(true)
         && fmt.font_slots.as_ref().is_none_or(|slots| {
             slots.ascii == slots.h_ansi
@@ -8085,6 +8473,7 @@ fn try_emit_glyph_runs(
     let size_px = effective_font_px_of(fmt);
     let features = kern_features_of(fmt, size_px);
     let ws_px = word_spacing.as_ref().map(num_f64).unwrap_or(0.0);
+    let letter_spacing = fmt.letter_spacing.unwrap_or(0.0);
     let direction = shape_direction_for_level(bidi_level);
     let rtl = if direction == ooxml_text::ShapeDirection::Rtl {
         Some(true)
@@ -8098,7 +8487,7 @@ fn try_emit_glyph_runs(
     let mut first_font: Option<ooxml_text::FontId> = None;
     let mut uniform = true;
     for ch in text.chars() {
-        match resolve(shape_fonts.store, chain, ch) {
+        match resolve(ch) {
             Some(font) => match first_font {
                 None => first_font = Some(font),
                 Some(first) if font != first => uniform = false,
@@ -8133,7 +8522,7 @@ fn try_emit_glyph_runs(
         let chars: Vec<char> = text.chars().collect();
         let mut fonts: Vec<ooxml_text::FontId> = Vec::with_capacity(chars.len());
         for &ch in &chars {
-            match resolve(shape_fonts.store, chain, ch) {
+            match resolve(ch) {
                 Some(font) => fonts.push(font),
                 None => return false,
             }
@@ -8215,7 +8604,6 @@ fn try_emit_glyph_runs(
             Err(_) => return false,
         };
 
-        let sub_bytes = sub_text.as_bytes();
         let auto_gaps: Vec<(usize, f64)> = if auto_space_active {
             let mut gaps = Vec::new();
             let mut chars = sub_text.char_indices().peekable();
@@ -8234,21 +8622,34 @@ fn try_emit_glyph_runs(
         } else {
             Vec::new()
         };
+        let has_extra_advance = letter_spacing != 0.0 || ws_px != 0.0 || !auto_gaps.is_empty();
+        let cluster_bounds = if has_extra_advance {
+            let mut bounds: Vec<usize> =
+                glyphs.iter().map(|glyph| glyph.cluster as usize).collect();
+            bounds.sort_unstable();
+            bounds.dedup();
+            bounds.push(sub_text.len());
+            bounds
+        } else {
+            Vec::new()
+        };
         let mut placed: Vec<PlacedGlyph> = Vec::with_capacity(glyphs.len());
         for (index, g) in glyphs.iter().enumerate() {
-            // Fold the justified U+0020 stretch into the glyph advance.
             let mut advance = g.x_advance as f64;
-            if ws_px != 0.0 && sub_bytes.get(g.cluster as usize) == Some(&b' ') {
-                advance += ws_px;
-            }
-            if !auto_gaps.is_empty() {
-                let cluster_end = glyphs
+            if has_extra_advance
+                && glyphs
                     .get(index + 1)
-                    .map(|next| next.cluster as usize)
-                    .unwrap_or(sub_bytes.len());
+                    .is_none_or(|next| next.cluster != g.cluster)
+            {
+                let start = g.cluster as usize;
+                let boundary = cluster_bounds.binary_search(&start).unwrap();
+                let end = cluster_bounds[boundary + 1];
+                let cluster = &sub_text[start..end];
+                advance += letter_spacing * cluster.chars().count() as f64;
+                advance += ws_px * cluster.chars().filter(|&ch| ch == ' ').count() as f64;
                 advance += auto_gaps
                     .iter()
-                    .filter(|(offset, _)| *offset >= g.cluster as usize && *offset < cluster_end)
+                    .filter(|(offset, _)| *offset >= start && *offset < end)
                     .map(|(_, extra)| extra)
                     .sum::<f64>();
             }
@@ -8277,7 +8678,12 @@ fn try_emit_glyph_runs(
         // the resolved CSS face for the canvas fillText safety net (glyph
         // outlines unavailable) — same shorthand the TextRunPrimitive would
         // carry, so the fallback keeps family/weight/style
-        sub_attrs.fallback_font = Some(css_font(fmt));
+        sub_attrs.fallback_font = Some(match shape_fonts.store.backstop_style(font) {
+            Some((bold, italic)) => {
+                styled_css_font(fmt, ooxml_text::BASE_LATIN_FAMILY, bold, italic)
+            }
+            None => css_font(fmt),
+        });
         sub_attrs.modern_effects = fmt.modern_effects.clone().map(Box::new);
 
         local.push(Primitive::GlyphRun(GlyphRunPrimitive {
@@ -8292,7 +8698,7 @@ fn try_emit_glyph_runs(
                 right: 0.0,
                 kern: features.is_empty(),
                 kerning: fmt.kerning_min_pt.unwrap_or(0.0),
-                primary_font: echo_font_route && chain.first() == Some(&font),
+                primary_font: echo_font_route && chain.ids.first() == Some(&font),
                 letter_spacing: fmt.letter_spacing.unwrap_or(0.0),
                 position: fmt.position_px.unwrap_or(0.0),
                 scale: fmt.horizontal_scale.unwrap_or(100.0),
@@ -9855,6 +10261,7 @@ fn plot_series_from<'a>(
         smooth: series.smooth,
         labels,
         line: None,
+        value_format: series.value_format.as_deref(),
     }
 }
 
@@ -9895,15 +10302,16 @@ fn emit_chart_fragment(prims: &mut Vec<Primitive>, frag: &ChartFragmentIn, block
     } else {
         block.height
     };
-    attrs.chart = Some(ChartA11yAttrs {
+    attrs.chart = Some(Box::new(ChartA11yAttrs {
         label: chart_aria_label(&chart),
+        data: None,
         frame: Some(Box::new(ContentFrame {
             x: Some(px(frag.x)),
             y: Some(px(frag.y)),
             w: Some(px(width)),
             h: Some(px(height)),
         })),
-    });
+    }));
     attrs.aria_label = block.chart.title.clone();
     attrs.aria_description = block.chart.description.clone();
     attrs.decorative = block.chart.decorative.filter(|decorative| *decorative);
@@ -9921,6 +10329,19 @@ fn emit_chart_fragment(prims: &mut Vec<Primitive>, frag: &ChartFragmentIn, block
             attrs: &attrs,
         },
     );
+    if let Some(data) = chart_data(&chart)
+        .or_else(|| chart_plots_no_points(&chart).then(ooxml_drawingml::chart::ChartData::default))
+        && let Some(first) = prims[stamp_from..]
+            .iter_mut()
+            .filter_map(|primitive| {
+                crate::session::primitive_attrs_mut(primitive)
+                    .chart
+                    .as_mut()
+            })
+            .next()
+    {
+        first.data = Some(Box::new(data));
+    }
     stamp_sdt_range(&mut prims[stamp_from..], &block.sdt_groups, false);
 }
 
@@ -9969,6 +10390,7 @@ impl PlotSink for PrimitiveSink<'_> {
                     letter_spacing: (font.letter_spacing_px != 0.0)
                         .then(|| px(font.letter_spacing_px)),
                     font: font.css(),
+                    scripts: None,
                     color,
                     word_spacing: None,
                     rtl: None,
@@ -10747,23 +11169,39 @@ pub(crate) fn emit_table_fragment(
         // itself so consumers know it is a re-paint.
         let is_header = p.g.row_index < semantic_header_count
             || block.rows[p.g.row_index].is_header == Some(true);
+        let row_headers = semantic_header_count > 0 && block.first_column == Some(true);
+        let is_row_header = row_headers
+            && !is_header
+            && p.g.column_index == 0
+            && cell.merge_continuation != Some(true);
         let cell_id = format!("{table_id}-r{}-c{}", p.g.row_index, p.g.column_index);
-        let header_ids = if is_header {
+        let header_ids = if is_header || is_row_header {
             Vec::new()
         } else {
-            (0..semantic_header_count)
-                .filter_map(|header_row| {
-                    grid.iter()
-                        .find(|cell| {
-                            cell.row_index == header_row
-                                && p.g.column_index >= cell.column_index
-                                && p.g.column_index < cell.column_index + cell.col_span
-                        })
-                        .map(|cell| {
-                            format!("{table_id}-r{}-c{}", cell.row_index, cell.column_index)
-                        })
+            let column_headers = (0..semantic_header_count).filter_map(|header_row| {
+                grid.iter()
+                    .find(|cell| {
+                        cell.row_index == header_row
+                            && p.g.column_index >= cell.column_index
+                            && p.g.column_index < cell.column_index + cell.col_span
+                    })
+                    .map(|cell| format!("{table_id}-r{}-c{}", cell.row_index, cell.column_index))
+            });
+            let row_header = (row_headers && !is_row_header)
+                .then(|| {
+                    grid.iter().find(|cell| {
+                        cell.column_index == 0
+                            && cell.row_index >= semantic_header_count
+                            && block.rows[cell.row_index].is_header != Some(true)
+                            && block.rows[cell.row_index].cells[cell.cell_index].merge_continuation
+                                != Some(true)
+                            && p.g.row_index >= cell.row_index
+                            && p.g.row_index < cell.row_index + cell.row_span
+                    })
                 })
-                .collect()
+                .flatten()
+                .map(|cell| format!("{table_id}-r{}-c{}", cell.row_index, cell.column_index));
+            column_headers.chain(row_header).collect()
         };
         let cell_ref = TableCellRef {
             row: p.g.row_index as u64,
@@ -10773,6 +11211,7 @@ pub(crate) fn emit_table_fragment(
             continuation: if p.selectable { None } else { Some(true) },
             cell_id: Some(cell_id),
             is_header: is_header.then_some(true),
+            is_row_header: is_row_header.then_some(true),
             repeated_header: (carried && p.g.row_index < header_row_count).then_some(true),
             no_wrap: cell.no_wrap.filter(|value| *value),
             header_ids,
@@ -11178,6 +11617,7 @@ pub(crate) fn emit_table_fragment(
                     continuation: None,
                     cell_id: Some(format!("{table_id}-r{}-c{}", g.row_index, g.column_index)),
                     is_header: None,
+                    is_row_header: None,
                     repeated_header: None,
                     no_wrap: None,
                     header_ids: Vec::new(),
@@ -13985,6 +14425,127 @@ fn normalize_integral_json_numbers(value: &mut Value) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn shared_offsets_resolve_every_line_exactly_as_a_fresh_scan() {
+        use super::*;
+        use crate::utf16_index::generated::{Rng, lines, runs};
+
+        fn old_slice(text: &str, start: usize, end: usize) -> String {
+            let total = text.encode_utf16().count();
+            let start = start.min(total);
+            let end = end.max(start).min(total);
+            let mut units = 0usize;
+            text.chars()
+                .filter_map(|ch| {
+                    let next = units + ch.len_utf16();
+                    let keep = units >= start && next <= end;
+                    units = next;
+                    keep.then_some(ch)
+                })
+                .collect()
+        }
+
+        fn old_resolve(
+            runs: &[RunIn],
+            line: &LineIn,
+        ) -> Vec<(usize, String, Option<i64>, Option<i64>)> {
+            let mut out = Vec::new();
+            for run_index in line.head_run..=line.tail_run {
+                let Some(RunIn::Text(t)) = runs.get(run_index) else {
+                    continue;
+                };
+                let total = t.text.encode_utf16().count();
+                let start = if run_index == line.head_run {
+                    line.head_char.min(total)
+                } else {
+                    0
+                };
+                let end = if run_index == line.tail_run {
+                    line.tail_char.min(total)
+                } else {
+                    total
+                };
+                let end = end.max(start);
+                let (pm_start, pm_end) = if start == 0 && end == total {
+                    (t.pm_start, t.pm_end.or(t.pm_start.map(|p| p + end as i64)))
+                } else {
+                    match t.pm_start {
+                        Some(p) => (Some(p + start as i64), Some(p + end as i64)),
+                        None => (None, None),
+                    }
+                };
+                out.push((run_index, old_slice(&t.text, start, end), pm_start, pm_end));
+            }
+            out
+        }
+
+        let mut rng = Rng::new(0xfeed);
+        for _ in 0..1500 {
+            let runs: Vec<RunIn> = runs(&mut rng)
+                .into_iter()
+                .map(|run| serde_json::from_value(run).unwrap())
+                .collect();
+            let units: Vec<usize> = runs
+                .iter()
+                .map(|run| match run {
+                    RunIn::Text(text) => text.text.encode_utf16().count(),
+                    _ => 0,
+                })
+                .collect();
+            let texts = RunTexts::new(runs.len());
+            for (head_run, head_char, tail_run, tail_char) in lines(&mut rng, &units) {
+                let line: LineIn = serde_json::from_value(serde_json::json!({
+                    "headRun": head_run, "headChar": head_char, "tailRun": tail_run, "tailChar": tail_char,
+                }))
+                .unwrap();
+                let actual: Vec<_> = resolve_line_segments(&runs, &line, &texts)
+                    .into_iter()
+                    .filter_map(|segment| {
+                        let index = runs.iter().position(|run| std::ptr::eq(run, segment.run))?;
+                        matches!(segment.run, RunIn::Text(_))
+                            .then(|| (index, segment.text, segment.pm_start, segment.pm_end))
+                    })
+                    .collect();
+                assert_eq!(
+                    actual,
+                    old_resolve(&runs, &line),
+                    "line {head_run}:{head_char}..{tail_run}:{tail_char}"
+                );
+                for (run_index, run) in runs.iter().enumerate() {
+                    if let RunIn::Text(text) = run {
+                        for (start, end) in [
+                            (head_char, tail_char),
+                            (tail_char, head_char + 5),
+                            (0, tail_char),
+                        ] {
+                            assert_eq!(
+                                texts.get(run_index, &text.text).whole_scalars(start, end),
+                                old_slice(&text.text, start, end)
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn paragraph_scripts_take_kana_and_hangul_context_across_runs() {
+        let runs = |texts: &[&str]| -> Vec<RunIn> {
+            texts
+                .iter()
+                .map(|text| {
+                    serde_json::from_value(serde_json::json!({"kind": "text", "text": text}))
+                        .unwrap()
+                })
+                .collect()
+        };
+        assert_eq!(paragraph_scripts(&runs(&["骨", "かな"])), ["cjk-jp"]);
+        assert_eq!(paragraph_scripts(&runs(&["骨", "한국"])), ["cjk-kr"]);
+        assert_eq!(paragraph_scripts(&runs(&["骨"])), ["cjk-sc"]);
+        assert!(paragraph_scripts(&runs(&["Latin"])).is_empty());
+    }
     use super::*;
 
     #[test]
@@ -14022,7 +14583,7 @@ mod tests {
                 );
             }
             let unknown = ooxml_text::FontId::from_u32(u32::MAX);
-            let chain = ShapeFontChain::new(vec![unknown, first, last], true);
+            let chain = ShapeFontChain::new(vec![unknown, first, last], true, false);
             assert_eq!((chain.resolve)(&store, &chain.ids, ch), Some(first));
         }
         let fonts = ShapeFonts {
@@ -14156,6 +14717,36 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    #[cfg(feature = "base-latin")]
+    fn browser_text_uses_the_resolved_backstop_family_and_style() {
+        let store = ooxml_text::FontStore::new();
+        let shape = ShapeFonts {
+            store: &store,
+            chains: HashMap::from([(
+                "calibri|1|0".to_owned(),
+                ShapeFontChain::new(
+                    vec![ooxml_text::FontId::base_latin(true, false)],
+                    false,
+                    false,
+                ),
+            )]),
+            coverage_only: false,
+        };
+        let fmt = RunFormattingIn {
+            bold: Some(true),
+            emphasis_mark: Some("dot".to_owned()),
+            ..Default::default()
+        };
+        assert!(text_primitive_requires_browser_path(&fmt));
+        let latin = resolved_css_font(Some(&shape), "Latin", &fmt);
+        assert!(latin.contains(ooxml_text::BASE_LATIN_FAMILY));
+        assert!(latin.starts_with("700 "));
+        let greek = resolved_css_font(Some(&shape), "Ω", &fmt);
+        assert!(greek.contains(ooxml_text::BASE_LATIN_FAMILY));
+        assert!(greek.starts_with("400 "));
     }
 
     /// Every retained primitive carries its attributes inline, so rarely set
@@ -15907,6 +16498,7 @@ mod tests {
             .expect("synthetic list marker");
         assert_eq!(marker["text"], "1.");
         assert_eq!(marker["listMarkerRevision"], "ins");
+        assert_eq!(marker["listMarkerNumbered"], true);
         assert_eq!(marker["color"], REVISION_INS_COLOR);
         assert!(marker["font"].as_str().unwrap().contains("Aptos"));
         assert!(marker["font"].as_str().unwrap().contains("700"));
@@ -15921,6 +16513,27 @@ mod tests {
             .find(|primitive| primitive["listMarker"] == true)
             .unwrap();
         assert_eq!(marker["color"], "#FF0000");
+
+        for (bullet, text, font) in [
+            (Value::Bool(true), "q", "Aptos"),
+            (Value::Null, "\u{2022}", "Aptos"),
+            (Value::Null, "q", "Wingdings"),
+            (Value::Null, "c", "Webdings"),
+        ] {
+            input["measured"][0]["block"]["attrs"]["listIsBullet"] = bullet;
+            input["measured"][0]["block"]["attrs"]["listMarker"] = Value::from(text);
+            input["measured"][0]["block"]["attrs"]["listMarkerFontFamily"] = Value::from(font);
+            let output: Value =
+                serde_json::from_str(&build_display_list_json(&input.to_string()).unwrap())
+                    .unwrap();
+            let marker = output["pages"][0]["primitives"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|primitive| primitive["listMarker"] == true)
+                .unwrap();
+            assert!(marker.get("listMarkerNumbered").is_none(), "{text}");
+        }
     }
 
     /// Marker overrun extends its slot and shifts only the first line's text.
@@ -17692,15 +18305,16 @@ mod tests {
     #[test]
     fn rotated_cell_content_turns_the_chart_frame_with_its_primitives() {
         let attrs = DocAttrs {
-            chart: Some(ChartA11yAttrs {
+            chart: Some(Box::new(ChartA11yAttrs {
                 label: "Chart".to_owned(),
+                data: None,
                 frame: Some(Box::new(ContentFrame {
                     x: Some(px(10.0)),
                     y: Some(px(20.0)),
                     w: Some(px(40.0)),
                     h: Some(px(30.0)),
                 })),
-            }),
+            })),
             ..DocAttrs::default()
         };
         let mut prims = vec![

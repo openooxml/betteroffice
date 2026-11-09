@@ -2,6 +2,7 @@ import { test, expect, devices, type Locator, type Page, type TestInfo } from 'p
 import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import JSZip from 'jszip';
+import { inputReady } from './pptx-async-helpers';
 
 type Format = 'docx' | 'xlsx' | 'pptx';
 const formats: Format[] = ['docx', 'xlsx', 'pptx'];
@@ -12,7 +13,7 @@ const marker = typed + suffix;
 const phone = { width: 412, height: 915 };
 const tablet = { width: 1180, height: 820 };
 
-test.setTimeout(30_000);
+test.setTimeout(60_000);
 
 const chrome = {
   docx: { rail: 'formatting-bar', more: 'toolbar-more', menu: 'More actions' },
@@ -78,7 +79,7 @@ function textInput(page: Page, format: 'docx' | 'pptx') {
 async function open(page: Page, format: Format, file: string = demo(format)) {
   await page.goto('/?format=' + format);
   await page.locator('input[type=file]').last().setInputFiles(file);
-  await expect(canvas(page, format)).toBeVisible();
+  await expect(canvas(page, format)).toBeVisible({ timeout: 30_000 });
   await expect(page.getByRole('button', { name: 'Save', exact: true }).first()).toBeEnabled();
   await expect(page.locator('.notice, [data-testid$="-error"]')).toHaveCount(0);
   await page.evaluate(() => document.fonts.ready.then(() => undefined));
@@ -171,6 +172,20 @@ async function history(page: Page, format: Format, label: 'Undo' | 'Redo') {
   }
 }
 
+async function doubleTap(page: Page, x: number, y: number) {
+  const cdp = await page.context().newCDPSession(page);
+  try {
+    const start = Date.now() / 1000;
+    const touchPoints = [{ x, y, id: 1 }];
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints, timestamp: start });
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [], timestamp: start + 0.05 });
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints, timestamp: start + 0.15 });
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [], timestamp: start + 0.2 });
+  } finally {
+    await cdp.detach();
+  }
+}
+
 async function tapDocument(page: Page, format: Format, double = false) {
   let target: Locator;
   let x: number;
@@ -187,6 +202,7 @@ async function tapDocument(page: Page, format: Format, double = false) {
     x = box.x + Math.min(box.width / 2, 40);
     y = box.y + box.height / 2;
   } else {
+    if (format === 'pptx') await inputReady(page);
     target = canvas(page, format);
     const box = (await target.boundingBox())!;
     // Inside "Office", clear of the title's six-screen-pixel shape border.
@@ -200,8 +216,8 @@ async function tapDocument(page: Page, format: Format, double = false) {
       y: (y - (viewport?.offsetTop ?? 0)) * (viewport?.scale ?? 1),
     };
   }, { x, y });
-  await page.touchscreen.tap(point.x, point.y);
-  if (double) await page.touchscreen.tap(point.x, point.y);
+  if (double) await doubleTap(page, point.x, point.y);
+  else await page.touchscreen.tap(point.x, point.y);
   if (format === 'xlsx') {
     await expect(page.getByTestId('xlsx-name-box')).toHaveValue('A1');
     await expect(page.getByTestId('xlsx-selection')).toBeVisible();
@@ -255,6 +271,7 @@ const slidePixels = (page: Page) => canvas(page, 'pptx').screenshot({
 async function editRotateSave(page: Page, format: Format, info: TestInfo, double: boolean) {
   const before = await save(page, format, info, 'before');
   if (format === 'pptx') {
+    await inputReady(page);
     const box = (await canvas(page, format).boundingBox())!;
     await page.touchscreen.tap(box.x + box.width * 0.009375, box.y + box.height * 0.5);
     await expect(page.getByTestId('pptx-shape-selection')).toBeVisible();

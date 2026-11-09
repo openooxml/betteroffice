@@ -40,7 +40,7 @@ import type { Document } from '../types/document';
 import { shipsWasmAsset } from '../wasm/assetEdit';
 import { editWasmModule } from './wasm/index';
 import { fontBytes, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
-import { createSessionWorker } from '#session-worker';
+import { createSessionWorker } from './sessionWorker';
 
 /** @internal */
 export interface ResidentProposalReply

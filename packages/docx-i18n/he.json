@@ -488,7 +488,9 @@
         "pageUp": "Page Up",
         "pageDown": "Page Down",
         "ctrl": "Ctrl",
-        "del": "Del"
+        "del": "Del",
+        "shift": "Shift",
+        "alt": "Alt"
       }
     },
     "objectGeometry": {
@@ -528,6 +530,7 @@
     "paragraphMarkInserted": "סימן פסקה שנוסף",
     "paragraphMarkDeleted": "סימן פסקה שנמחק",
     "paragraphPropertiesChanged": "מאפייני פסקה שהשתנו",
+    "runPropertiesChanged": "עיצוב טקסט שהשתנה",
     "rowInserted": "שורה שנוספה",
     "rowDeleted": "שורה שנמחקה",
     "rowPropertiesChanged": "מאפייני שורה שהשתנו",
@@ -584,6 +587,8 @@
     "noDocumentLoaded": "לא נטען מסמך",
     "failedToLoad": "טעינת המסמך נכשלה",
     "failedToLoadDescription": "ייתכן שהקובץ פגום, או שהוא משתמש במשהו שעורך זה עדיין אינו יכול לקרוא.",
+    "failedToLoadDamaged": "הקובץ פגום או שאינו מסמך Word שלם.",
+    "failedToLoadUnsupported": "מסמך זה משתמש במשהו שהעורך הזה עדיין לא יודע לקרוא.",
     "editorUnavailable": "טעינת העורך נכשלה",
     "editorUnavailableDescription": "בדוק את החיבור, ולאחר מכן טען מחדש את העמוד.",
     "reloadPage": "טען מחדש את העמוד",
@@ -724,6 +729,7 @@
     "failedToParse": "שגיאה בפתיחת המסמך",
     "linkRemoved": "הקישור הוסר",
     "linkCopied": "הקישור הועתק ללוח",
+    "pasteFailed": "לא ניתן היה להשלים את ההדבקה. לא שונה דבר.",
     "failedToSave": "שגיאה בשמירת המסמך",
     "documentInput": "קלט מסמך",
     "documentPreview": "תצוגה מקדימה של המסמך",
@@ -795,6 +801,8 @@
     "pageLabel": "עמוד {number}",
     "headerLabel": "כותרת עליונה של העמוד",
     "footerLabel": "כותרת תחתונה של העמוד",
+    "chartNoData": "אין נתונים",
+    "pictureName": "תמונה",
     "selected": "נבחר",
     "selectionCleared": "הבחירה נוקתה",
     "commentedText": "טקסט עם הערה",

@@ -1,6 +1,6 @@
 import { expect, mock, spyOn, test } from 'bun:test';
 import { createPeerlessShellController, LEGACY_SYNC_API_PROP } from './shellController';
-import { createPeerlessViewStore } from './viewStore';
+import { createPeerlessViewStore, type PeerlessViewSnapshot } from './viewStore';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
 import { PLAIN_CONTEXT } from '../../../commands/testing';
 import { admitIntent, createInputAdmission } from './inputAdmission';
@@ -23,6 +23,116 @@ function fixture(presentedThroughSeq = 0) {
   const controller = createPeerlessShellController({ read: read as never, focus() {}, zoom: 1 });
   return { controller, binding, viewStore, flush, read };
 }
+
+function shellFixture() {
+  const base = fixture();
+  const identity = base.viewStore.getSnapshot().identity;
+  let view: PeerlessViewSnapshot = { ...base.viewStore.getSnapshot(), geometry: {
+    identity, documentVersion: '0', coversThroughSeq: 0, frameEpoch: 1, layoutRevision: 1,
+    layoutEpoch: 1, documentWidth: 600, layoutProvisional: false, reservations: { version: '0', key: '1' },
+    pages: [{ page: { pageId: '1', pageIndex: 0 }, bounds: { x: 0, y: 0, width: 600, height: 800 },
+      transform: [1, 0, 0, 1, 0, 0], displayPage: { pageIndex: 0, width: 600, height: 800, primitives: [] } }],
+    caret: null, selectionFocus: null, selectionRects: [], parts: [],
+    objects: { version: '0', frameEpoch: 1, layoutRevision: 1, objects: [], selection: [], unbuiltPages: [] },
+  } };
+  const listeners = new Set<() => void>();
+  const binding = { ...base.binding, viewStore: { ...base.viewStore, getSnapshot: () => view,
+    subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; } } };
+  base.controller.attach(binding);
+  return { ...base, binding, present(next: PeerlessViewSnapshot) { view = next; for (const listener of listeners) listener(); } };
+}
+
+test('shell snapshots retain paint-only frames while full subscribers see every newest view', () => {
+  const { controller, present } = shellFixture();
+  const shell = controller.getShellSnapshot();
+  const frames: PeerlessViewSnapshot[] = [];
+  const remove = controller.subscribe(() => { frames.push(controller.getSnapshot().view!); });
+  const shellListener = mock(() => {});
+  const refresh = spyOn(controller.commands, 'refresh');
+  const removeShell = controller.subscribeShell(shellListener);
+  for (let index = 0; index < 40; index++) {
+    const view = structuredClone(controller.getSnapshot().view!);
+    view.geometry!.frameEpoch++;
+    view.geometry!.objects!.frameEpoch++;
+    view.geometry!.pages[0]!.displayPage!.sectionIndex = index;
+    present(view);
+    expect(controller.getSnapshot().view).toBe(view);
+    expect(controller.getShellSnapshot()).toBe(shell);
+    expect(controller.getSnapshot().view!.geometry!.pages[0]!.displayPage!.sectionIndex).toBe(index);
+  }
+  expect(frames).toHaveLength(40);
+  expect(new Set(frames).size).toBe(40);
+  expect(shellListener).not.toHaveBeenCalled();
+  expect(refresh).not.toHaveBeenCalled();
+  remove(); removeShell();
+  present({ ...controller.getSnapshot().view!, version: 1 });
+  expect(frames).toHaveLength(40);
+  expect(shellListener).not.toHaveBeenCalled();
+  refresh.mockRestore();
+});
+
+const shellChanges: [string, (view: PeerlessViewSnapshot) => void][] = [
+  ['identity session', view => { view.identity.session = 'replacement'; }],
+  ['identity incarnation', view => { view.identity.incarnation++; }],
+  ['identity epoch', view => { view.identity.epoch++; }],
+  ['version', view => { view.version++; }],
+  ['throughSeq', view => { view.throughSeq++; }],
+  ['versionSinceSeq', view => { view.versionSinceSeq = 1; }],
+  ['presentedThroughSeq', view => { view.presentedThroughSeq++; }],
+  ['workerSelection', view => { view.workerSelection = { anchor: { story: 'body', paraId: 'p', offset: 0 }, focus: { story: 'body', paraId: 'p', offset: 1 } }; }],
+  ['anchors', view => { view.anchors = { anchor: Uint8Array.of(1), focus: Uint8Array.of(2) }; }],
+  ['editState', view => { view.editState!.canUndo = false; }],
+  ['provisionalCaret', view => { view.provisionalCaret = { source: 'click', throughSeq: 1, pageIndex: 0, rect: { x: 1, y: 2, width: 1, height: 12 } }; }],
+  ['geometry', view => { view.geometry = null; }],
+  ['documentVersion', view => { view.geometry!.documentVersion = '1'; }],
+  ['geometry identity', view => { view.geometry!.identity = { ...view.identity, epoch: 2 }; }],
+  ['coversThroughSeq', view => { view.geometry!.coversThroughSeq++; }],
+  ['layoutRevision', view => { view.geometry!.layoutRevision++; }],
+  ['layoutEpoch', view => { view.geometry!.layoutEpoch!++; }],
+  ['documentWidth', view => { view.geometry!.documentWidth!++; }],
+  ['layoutProvisional', view => { view.geometry!.layoutProvisional = true; }],
+  ['reservations', view => { view.geometry!.reservations!.key = '2'; }],
+  ['caret', view => { view.geometry!.caret = { x: 1, y: 2, width: 1, height: 12 }; }],
+  ['selectionFocus', view => { view.geometry!.selectionFocus = { x: 1, y: 2, width: 1, height: 12 }; }],
+  ['selectionRects', view => { view.geometry!.selectionRects = [{ x: 1, y: 2, width: 10, height: 12 }]; }],
+  ['parts', view => { view.geometry!.parts = [{ kind: 'header', story: 'hf:1', pageIndex: 0, pageId: '1', x: 0, y: 0, width: 600, height: 20 }]; }],
+  ['objects', view => { view.geometry!.objects!.unbuiltPages.push(0); }],
+  ['page count', view => { view.geometry!.pages = []; }],
+  ['page identity', view => { view.geometry!.pages[0]!.page.pageId = '2'; }],
+  ['page index', view => { view.geometry!.pages[0]!.page.pageIndex = 1; }],
+  ...(['x', 'y', 'width', 'height'] as const).map((key): [string, (view: PeerlessViewSnapshot) => void] =>
+    [`page bounds ${key}`, view => { view.geometry!.pages[0]!.bounds[key]++; }]),
+  ['page transform', view => { view.geometry!.pages = view.geometry!.pages.map(page => ({ ...page, transform: [2, 0, 0, 2, 0, 0] as const })); }],
+];
+
+for (const [name, change] of shellChanges) {
+  test(`shell snapshots change for ${name}`, () => {
+    const { controller, present } = shellFixture();
+    const previous = controller.getShellSnapshot();
+    const listener = mock(() => {});
+    controller.subscribeShell(listener);
+    const next = structuredClone(controller.getSnapshot().view!);
+    change(next);
+    present(next);
+    expect(controller.getShellSnapshot()).not.toBe(previous);
+    expect(listener).toHaveBeenCalledTimes(1);
+  });
+}
+
+test('shell snapshots change for status, preview, painted preview, error, mode and document replacement', () => {
+  const { controller, binding } = shellFixture();
+  let previous = controller.getShellSnapshot();
+  const changed = () => { expect(controller.getShellSnapshot()).not.toBe(previous); previous = controller.getShellSnapshot(); };
+  controller.opening('first'); changed();
+  const preview = { frame: new ArrayBuffer(0), documentPreview: true } as never;
+  controller.preview(preview); changed();
+  controller.previewPresented(preview); changed();
+  controller.failOpening(new Error('open failed')); changed();
+  controller.update({ read: async () => ({} as never), focus() {}, zoom: 1, mode: 'viewing' }); changed();
+  controller.attach(binding); changed();
+  controller.opening('second'); changed();
+  controller.attach(binding); changed();
+});
 
 test('font selection prepares measurement before formatting and rejects replacement', async () => {
   const { controller, binding, viewStore } = fixture();

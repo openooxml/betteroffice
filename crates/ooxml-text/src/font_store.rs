@@ -1,8 +1,11 @@
 //! Font registry over raw font bytes.
 
-use std::cell::RefCell;
-use std::collections::HashMap;
+use std::borrow::Cow;
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::ops::Deref;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use skrifa::raw::TableProvider;
@@ -20,6 +23,8 @@ const MAX_SHAPE_CACHE_GLYPHS: usize = 1_000_000;
 const MAX_CHAR_CACHE_ENTRIES: usize = 8_192;
 
 const MAX_CACHED_SHAPE_FEATURES: usize = 64;
+const BASE_LATIN_ID_START: u32 = u32::MAX - 4;
+const MAX_BASE_LATIN_MISSES: usize = 4_096;
 /// Bytes from each end of a font that key the identical-bytes lookup; the
 /// table directory up front carries every table's checksum.
 const FACE_KEY_SPAN: usize = 4 * 1024;
@@ -114,6 +119,24 @@ struct CharEntry {
 pub struct FontId(pub(crate) u32);
 
 impl FontId {
+    /// Reserved handle for an always-available backstop face.
+    pub const fn base_latin(bold: bool, italic: bool) -> Self {
+        Self(BASE_LATIN_ID_START + bold as u32 * 2 + italic as u32)
+    }
+
+    /// Style of a reserved backstop handle.
+    pub fn base_latin_style(self) -> Option<(bool, bool)> {
+        #[cfg(feature = "base-latin")]
+        {
+            self.0
+                .checked_sub(BASE_LATIN_ID_START)
+                .filter(|&style| style < 4)
+                .map(|style| (style & 2 != 0, style & 1 != 0))
+        }
+        #[cfg(not(feature = "base-latin"))]
+        None
+    }
+
     /// Raw index value, for serialization into display-list primitives.
     pub fn to_u32(self) -> u32 {
         self.0
@@ -128,6 +151,30 @@ impl FontId {
         FontId(raw)
     }
 }
+
+/// Why [`FontStore::update_outlines`] refused new bytes for a face.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OutlineUpdateError {
+    /// The [`FontId`] does not belong to this store.
+    UnknownFont,
+    /// The new bytes are not a parseable sfnt font.
+    Parse(String),
+    /// A table other than `CFF ` (or `head`'s checksum adjustment) differs,
+    /// so shaping, metrics or layout could change.
+    TablesDiffer,
+}
+
+impl std::fmt::Display for OutlineUpdateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownFont => f.write_str("unknown font id"),
+            Self::Parse(message) => write!(f, "font parse error: {message}"),
+            Self::TablesDiffer => f.write_str("new outlines change a table other than CFF"),
+        }
+    }
+}
+
+impl std::error::Error for OutlineUpdateError {}
 
 /// Errors produced when registering or querying fonts.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -226,25 +273,51 @@ impl FontMetrics {
 }
 
 struct FontEntry {
+    backstop_style: OnceLock<Option<(bool, bool)>>,
     /// Entry owning the bytes, for a metrics-only view of another face;
     /// `None` when this entry owns its own.
     bytes_of: Option<usize>,
     // Declared before `data` so the borrowing parser views drop first.
     //
     // SAFETY invariants for the `'static` lifetimes below: both views borrow
-    // `data`'s heap allocation. `data` is a `Box<[u8]>` that is never
-    // reassigned, never mutated, and dropped only when the whole entry drops
-    // (entries are never removed individually — the store only grows or drops
-    // wholesale). Moving `FontEntry` (e.g. a `Vec` realloc) moves the box
-    // pointer, not the heap bytes, so the views stay valid.
+    // `data`'s allocation. `data` is static bytes or an owned Vec that is never
+    // mutated in place and dropped only when the whole entry drops (entries are
+    // never removed individually — the store only grows or drops wholesale) or
+    // when `FontStore::update_outlines` replaces it, which takes `&mut FontStore`
+    // and drops `face` before `data`. Moving `FontEntry` (e.g. a `Vec` realloc)
+    // moves the Vec pointer, not the heap bytes, so the views stay valid.
     face: Option<Box<rustybuzz::Face<'static>>>,
-    data: Box<[u8]>,
+    data: Cow<'static, [u8]>,
     metrics: FontMetrics,
     /// Horizontal multiplier for fallback advances, offsets and outlines.
     advance_scale: f32,
     widths: Option<&'static FamilyMetrics>,
+}
+
+struct RegisteredFontEntry {
+    entry: FontEntry,
     char_cache: RefCell<HashMap<char, CharEntry>>,
 }
+
+impl Deref for RegisteredFontEntry {
+    type Target = FontEntry;
+
+    fn deref(&self) -> &Self::Target {
+        &self.entry
+    }
+}
+
+impl From<FontEntry> for RegisteredFontEntry {
+    fn from(entry: FontEntry) -> Self {
+        Self {
+            entry,
+            char_cache: RefCell::new(HashMap::new()),
+        }
+    }
+}
+
+#[cfg(feature = "base-latin")]
+static BASE_LATIN_ENTRIES: [OnceLock<FontEntry>; 4] = [const { OnceLock::new() }; 4];
 
 /// Registry of fonts, keyed by [`FontId`], parsed from raw bytes.
 ///
@@ -252,10 +325,15 @@ struct FontEntry {
 /// Registering bytes it already holds adds an alias sharing them.
 pub struct FontStore {
     id: u64,
-    fonts: Vec<FontEntry>,
+    outline_revision: u64,
+    fonts: Vec<RegisteredFontEntry>,
     faces: HashMap<u64, Vec<usize>>,
     face_count: usize,
     shape_cache: RefCell<ShapeCache>,
+    missing_base_latin: RefCell<HashSet<u64>>,
+    new_base_latin_miss: Cell<bool>,
+    #[cfg(feature = "base-latin")]
+    base_latin_char_cache: [RefCell<HashMap<char, CharEntry>>; 4],
 }
 
 static NEXT_FONT_STORE_ID: AtomicU64 = AtomicU64::new(0);
@@ -279,6 +357,56 @@ pub fn covered_character(
     Ok(None)
 }
 
+pub fn base_latin_alias(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{f0b7}' | '\u{f0a7}' | '\u{f06f}' | '\u{f0d8}' | '\u{f0fc}' | '\u{f076}' | '\u{f0a8}'
+    )
+}
+
+pub const BASE_LATIN_RANGES: [(u32, u32); 7] = [
+    (0x20, 0x24f),
+    (0x370, 0x4ff),
+    (0x2000, 0x206f),
+    (0x20a0, 0x20cf),
+    (0x2190, 0x22ff),
+    (0x25a0, 0x27bf),
+    (0xfb00, 0xfb06),
+];
+pub const BASE_LATIN_ALIASES: [char; 7] = [
+    '\u{f06f}', '\u{f076}', '\u{f0a7}', '\u{f0a8}', '\u{f0b7}', '\u{f0d8}', '\u{f0fc}',
+];
+
+pub fn base_latin_character_index(ch: char) -> Option<usize> {
+    let point = ch as u32;
+    let mut offset = 0;
+    for (start, end) in BASE_LATIN_RANGES {
+        if (start..=end).contains(&point) {
+            return Some((offset + point - start) as usize);
+        }
+        offset += end - start + 1;
+    }
+    BASE_LATIN_ALIASES
+        .iter()
+        .position(|&alias| alias == ch)
+        .map(|index| offset as usize + index)
+}
+
+pub fn symbol_family(family: &str) -> bool {
+    let family = family.trim();
+    family.eq_ignore_ascii_case("Symbol")
+        || family
+            .get(..9)
+            .is_some_and(|name| name.eq_ignore_ascii_case("Wingdings"))
+            && matches!(&family[9..], "" | " 2" | " 3")
+}
+
+fn miss_key(chain: &[FontId], family: &str, bold: bool, italic: bool, ch: char) -> u64 {
+    let mut hasher = std::hash::DefaultHasher::new();
+    (chain, family, bold, italic, ch).hash(&mut hasher);
+    hasher.finish()
+}
+
 impl Default for FontStore {
     fn default() -> Self {
         Self::new()
@@ -289,10 +417,15 @@ impl FontStore {
     pub fn new() -> Self {
         Self {
             id: NEXT_FONT_STORE_ID.fetch_add(1, Ordering::Relaxed),
+            outline_revision: 0,
             fonts: Vec::new(),
             faces: HashMap::new(),
             face_count: 0,
             shape_cache: RefCell::default(),
+            missing_base_latin: RefCell::default(),
+            new_base_latin_miss: Cell::new(false),
+            #[cfg(feature = "base-latin")]
+            base_latin_char_cache: std::array::from_fn(|_| RefCell::new(HashMap::new())),
         }
     }
 
@@ -301,6 +434,13 @@ impl FontStore {
     /// this value instead of silently reusing another store's outlines.
     pub fn id(&self) -> u64 {
         self.id
+    }
+
+    /// Advances on every [`FontStore::update_outlines`]: outline caches keyed by
+    /// [`FontId`] drop what they hold when it changes. Metrics and shaping never
+    /// change with it.
+    pub fn outline_revision(&self) -> u64 {
+        self.outline_revision
     }
 
     /// How many fonts the store holds. Fonts are only ever added, so a store with the same id
@@ -338,6 +478,15 @@ impl FontStore {
         }
     }
 
+    /// [`FontStore::register`] for bytes held either way, copied only when
+    /// borrowed and the store does not already hold them.
+    pub fn register_cow(&mut self, bytes: std::borrow::Cow<'_, [u8]>) -> Result<FontId, FontError> {
+        match bytes {
+            std::borrow::Cow::Borrowed(bytes) => self.register_slice(bytes),
+            std::borrow::Cow::Owned(bytes) => self.register(bytes),
+        }
+    }
+
     /// [`FontStore::register`] for borrowed bytes, copied only when the store
     /// does not already hold them.
     pub fn register_slice(&mut self, bytes: &[u8]) -> Result<FontId, FontError> {
@@ -350,20 +499,35 @@ impl FontStore {
     fn register_alias(&mut self, owner: FontId) -> FontId {
         let metrics = self.fonts[owner.0 as usize].metrics;
         let id = FontId(self.fonts.len() as u32);
-        self.fonts.push(FontEntry {
-            bytes_of: Some(owner.0 as usize),
-            face: None,
-            data: Box::default(),
-            metrics,
-            advance_scale: 1.0,
-            widths: None,
-            char_cache: RefCell::new(HashMap::new()),
-        });
+        self.fonts.push(
+            FontEntry {
+                backstop_style: OnceLock::new(),
+                bytes_of: Some(owner.0 as usize),
+                face: None,
+                data: Cow::Borrowed(&[]),
+                metrics,
+                advance_scale: 1.0,
+                widths: None,
+            }
+            .into(),
+        );
         id
     }
 
     fn register_face(&mut self, bytes: Vec<u8>) -> Result<FontId, FontError> {
-        let font = FontRef::new(&bytes).map_err(|e| FontError::Parse(e.to_string()))?;
+        let entry = Self::parse_entry(Cow::Owned(bytes))?;
+        let index = self.fonts.len();
+        self.faces
+            .entry(face_key(&entry.data))
+            .or_default()
+            .push(index);
+        self.face_count += 1;
+        self.fonts.push(entry.into());
+        Ok(FontId(index as u32))
+    }
+
+    fn parse_entry(data: Cow<'static, [u8]>) -> Result<FontEntry, FontError> {
+        let font = FontRef::new(&data).map_err(|e| FontError::Parse(e.to_string()))?;
 
         let head = font.head().map_err(|_| FontError::MissingTable("head"))?;
         let hhea = font.hhea().map_err(|_| FontError::MissingTable("hhea"))?;
@@ -384,7 +548,6 @@ impl FontStore {
             os2_code_page_range1: os2.ul_code_page_range_1().unwrap_or(0),
         };
 
-        let data: Box<[u8]> = bytes.into_boxed_slice();
         // SAFETY: see the `FontEntry` field invariants — the view borrows
         // `data`'s heap allocation, which outlives it and never moves.
         let pinned: &'static [u8] =
@@ -393,19 +556,15 @@ impl FontStore {
         // shaping then reports the parse failure per call, as before.
         let face = rustybuzz::Face::from_slice(pinned, 0).map(Box::new);
 
-        let index = self.fonts.len();
-        self.faces.entry(face_key(&data)).or_default().push(index);
-        self.face_count += 1;
-        self.fonts.push(FontEntry {
+        Ok(FontEntry {
+            backstop_style: OnceLock::new(),
             bytes_of: None,
             face,
             data,
             metrics,
             advance_scale: 1.0,
             widths: None,
-            char_cache: RefCell::new(HashMap::new()),
-        });
-        Ok(FontId(index as u32))
+        })
     }
 
     /// A measurement view of `base` carrying `requested`'s line metrics and
@@ -436,13 +595,15 @@ impl FontStore {
         let selection = entry.metrics.os2_fs_selection;
         let family = family.trim().to_lowercase();
         let family = crate::word_fonts::requested_family_name(&family);
-        let table = family_metrics(family, selection & (1 << 5) != 0, selection & 1 != 0);
-        let requested = crate::word_fonts::requested_line_metrics(family).map(|mut requested| {
-            if table.is_some() {
-                requested.advance_scale = 1.0;
-            }
-            requested
-        });
+        let bold = selection & (1 << 5) != 0;
+        let table = family_metrics(family, bold, selection & 1 != 0);
+        let requested =
+            crate::word_fonts::requested_line_metrics_styled(family, bold).map(|mut requested| {
+                if table.is_some() {
+                    requested.advance_scale = 1.0;
+                }
+                requested
+            });
         let widths = table.filter(|metrics| !runs_at_own_widths(self, owner, metrics));
         if requested.is_none() && widths.is_none() {
             return Ok(base);
@@ -492,15 +653,18 @@ impl FontStore {
         }
 
         let id = FontId(self.fonts.len() as u32);
-        self.fonts.push(FontEntry {
-            bytes_of: Some(owner),
-            face: None,
-            data: Box::default(),
-            metrics,
-            advance_scale,
-            widths,
-            char_cache: RefCell::new(HashMap::new()),
-        });
+        self.fonts.push(
+            FontEntry {
+                backstop_style: OnceLock::new(),
+                bytes_of: Some(owner),
+                face: None,
+                data: Cow::Borrowed(&[]),
+                metrics,
+                advance_scale,
+                widths,
+            }
+            .into(),
+        );
         Ok(id)
     }
 
@@ -564,7 +728,7 @@ impl FontStore {
             .fonts
             .get_mut(id.0 as usize)
             .ok_or(FontError::UnknownFont)?;
-        entry.metrics = metrics;
+        entry.entry.metrics = metrics;
         Ok(())
     }
 
@@ -589,10 +753,78 @@ impl FontStore {
         .collect())
     }
 
+    /// Replaces the outlines of the face holding `id`'s bytes with `bytes`,
+    /// a face whose every table except `CFF ` is byte-identical (`head` may
+    /// differ only in its checksum adjustment), such as a sliced face
+    /// reassembled with more outline chunks. Every id sharing those bytes
+    /// (aliases and measurement views) draws the new outlines; ids, metrics,
+    /// cmap and shaping caches stay, since layout tables are unchanged.
+    pub fn update_outlines(
+        &mut self,
+        id: FontId,
+        bytes: Vec<u8>,
+    ) -> Result<(), OutlineUpdateError> {
+        let owner = self
+            .fonts
+            .get(id.0 as usize)
+            .ok_or(OutlineUpdateError::UnknownFont)?
+            .bytes_of
+            .unwrap_or(id.0 as usize);
+        let current = &self
+            .fonts
+            .get(owner)
+            .ok_or(OutlineUpdateError::UnknownFont)?
+            .data;
+        if !same_layout_tables(current, &bytes)? {
+            return Err(OutlineUpdateError::TablesDiffer);
+        }
+        let old_key = face_key(current);
+        let new_key = face_key(&bytes);
+        // SAFETY: see the `FontEntry` field invariants; the old face is
+        // dropped before the bytes it borrows, and moving the Vec into the
+        // entry keeps its heap allocation.
+        let pinned: &'static [u8] =
+            unsafe { std::slice::from_raw_parts(bytes.as_ptr(), bytes.len()) };
+        let face = rustybuzz::Face::from_slice(pinned, 0).map(Box::new);
+        let entry = &mut self.fonts[owner].entry;
+        entry.face = None;
+        entry.data = Cow::Owned(bytes);
+        entry.face = face;
+        if let Some(indices) = self.faces.get_mut(&old_key) {
+            indices.retain(|&index| index != owner);
+            if indices.is_empty() {
+                self.faces.remove(&old_key);
+            }
+        }
+        self.faces.entry(new_key).or_default().push(owner);
+        self.outline_revision += 1;
+        Ok(())
+    }
+
     /// The registered face owning this id's unscaled font bytes.
     pub fn byte_owner(&self, id: FontId) -> Result<FontId, FontError> {
         let entry = self.entry(id)?;
         Ok(FontId(entry.bytes_of.unwrap_or(id.0 as usize) as u32))
+    }
+
+    /// The first registration that measures and paints exactly as `id` does:
+    /// the same bytes, metrics and widths. Registering a font or its substitute
+    /// view again yields a new id for one face, and this names that face
+    /// whatever the host's registration history. Base Latin ids name themselves.
+    pub fn canonical_face(&self, id: FontId) -> FontId {
+        let Some(target) = self.fonts.get(id.0 as usize) else {
+            return id;
+        };
+        let owner = target.bytes_of.unwrap_or(id.0 as usize);
+        let widths = |entry: &FontEntry| entry.widths.map(std::ptr::from_ref);
+        let mut fonts = self.fonts.iter().enumerate();
+        let first = fonts.find(|(index, entry)| {
+            entry.bytes_of.unwrap_or(*index) == owner
+                && entry.metrics == target.metrics
+                && entry.advance_scale == target.advance_scale
+                && widths(entry) == widths(target)
+        });
+        first.map_or(id, |(index, _)| FontId(index as u32))
     }
 
     /// Parsed shaping face memoized at registration. `None` when rustybuzz
@@ -635,8 +867,17 @@ impl FontStore {
 
     /// Memoized cmap (+advance) lookup for one character of one font.
     fn char_entry(&self, id: FontId, ch: char) -> Result<CharEntry, FontError> {
+        let id = self.byte_owner(id)?;
         let entry = self.byte_entry(id)?;
-        if let Some(cached) = entry.char_cache.borrow().get(&ch) {
+        #[cfg(feature = "base-latin")]
+        let cache = if id.base_latin_style().is_some() {
+            &self.base_latin_char_cache[(id.0 - BASE_LATIN_ID_START) as usize]
+        } else {
+            &self.fonts[id.0 as usize].char_cache
+        };
+        #[cfg(not(feature = "base-latin"))]
+        let cache = &self.fonts[id.0 as usize].char_cache;
+        if let Some(cached) = cache.borrow().get(&ch) {
             return Ok(*cached);
         }
         let font = Self::font_ref(entry);
@@ -652,7 +893,7 @@ impl FontStore {
             mapped: mapped.map(|g| g.to_u32() as u16),
             advance,
         };
-        let mut cache = entry.char_cache.borrow_mut();
+        let mut cache = cache.borrow_mut();
         if cache.len() >= MAX_CHAR_CACHE_ENTRIES {
             cache.clear();
         }
@@ -695,15 +936,130 @@ impl FontStore {
             .find(|&id| covered_character(self, id, ch).ok().flatten().is_some())
     }
 
+    /// Resolves a chain with the requested style for its implicit backstop.
+    pub fn resolve_with_style(
+        &self,
+        chain: &[FontId],
+        ch: char,
+        bold: bool,
+        italic: bool,
+    ) -> Option<FontId> {
+        self.resolve_with_family(chain, ch, bold, italic, "")
+    }
+
+    pub fn backstop_style(&self, id: FontId) -> Option<(bool, bool)> {
+        #[cfg(feature = "base-latin")]
+        if let Some(style) = id.base_latin_style() {
+            return Some(style);
+        }
+        let entry = self.byte_entry(id).ok()?;
+        *entry.backstop_style.get_or_init(|| {
+            Self::font_ref(entry)
+                .localized_strings(skrifa::string::StringId::FAMILY_NAME)
+                .any(|name| name.to_string() == crate::BASE_LATIN_FAMILY)
+                .then_some((
+                    entry.metrics.os2_fs_selection & (1 << 5) != 0,
+                    entry.metrics.os2_fs_selection & 1 != 0,
+                ))
+        })
+    }
+
+    pub fn resolve_with_family(
+        &self,
+        chain: &[FontId],
+        ch: char,
+        bold: bool,
+        italic: bool,
+        family: &str,
+    ) -> Option<FontId> {
+        self.resolve_with_family_tracking(chain, ch, bold, italic, family, false)
+    }
+
+    pub fn take_base_latin_miss(&self) -> bool {
+        self.new_base_latin_miss.replace(false)
+    }
+
+    pub fn resolve_with_family_tracking(
+        &self,
+        chain: &[FontId],
+        ch: char,
+        bold: bool,
+        italic: bool,
+        family: &str,
+        track: bool,
+    ) -> Option<FontId> {
+        if chain.is_empty() {
+            return None;
+        }
+        if base_latin_alias(ch) && !symbol_family(family) {
+            let allowed = |id: FontId| self.backstop_style(id).is_none();
+            return chain
+                .iter()
+                .copied()
+                .find(|&id| allowed(id) && covered_character(self, id, ch).ok().flatten().is_some())
+                .or_else(|| chain.iter().rev().copied().find(|&id| allowed(id)));
+        }
+        let resolved = self.resolve(chain, ch);
+        #[cfg(feature = "base-latin")]
+        let resolved = resolved.or_else(|| {
+            [
+                FontId::base_latin(bold, italic),
+                FontId::base_latin(false, false),
+            ]
+            .into_iter()
+            .find(|&id| covered_character(self, id, ch).ok().flatten().is_some())
+        });
+        #[cfg(not(feature = "base-latin"))]
+        let _ = (bold, italic);
+        if track && resolved.is_none() {
+            self.record_base_latin_miss(chain, ch, bold, italic, family);
+        }
+        resolved.or_else(|| chain.last().copied())
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn record_base_latin_miss(
+        &self,
+        chain: &[FontId],
+        ch: char,
+        bold: bool,
+        italic: bool,
+        family: &str,
+    ) {
+        if !(base_latin_character_index(ch).is_some() && crate::measure::needs_glyph(ch)) {
+            return;
+        }
+        let mut missing = self.missing_base_latin.borrow_mut();
+        if missing.len() >= MAX_BASE_LATIN_MISSES {
+            missing.clear();
+        }
+        if missing.insert(miss_key(chain, family, bold, italic, ch)) {
+            self.new_base_latin_miss.set(true);
+        }
+    }
+
     fn entry(&self, id: FontId) -> Result<&FontEntry, FontError> {
-        self.fonts.get(id.0 as usize).ok_or(FontError::UnknownFont)
+        #[cfg(feature = "base-latin")]
+        if let Some((bold, italic)) = id.base_latin_style() {
+            return Ok(
+                BASE_LATIN_ENTRIES[(id.0 - BASE_LATIN_ID_START) as usize].get_or_init(|| {
+                    Self::parse_entry(Cow::Borrowed(base_latin::face(bold, italic)))
+                        .expect("embedded backstop face is valid")
+                }),
+            );
+        }
+        self.fonts
+            .get(id.0 as usize)
+            .map(|entry| &entry.entry)
+            .ok_or(FontError::UnknownFont)
     }
 
     /// Entry holding `id`'s bytes: itself, or the face a measurement view
     /// stands in for.
     fn byte_entry(&self, id: FontId) -> Result<&FontEntry, FontError> {
         match self.entry(id)?.bytes_of {
-            Some(base) => self.fonts.get(base).ok_or(FontError::UnknownFont),
+            Some(base) => self.entry(FontId(base as u32)),
             None => self.entry(id),
         }
     }
@@ -712,6 +1068,51 @@ impl FontStore {
     fn font_ref(entry: &FontEntry) -> FontRef<'_> {
         FontRef::new(&entry.data).expect("bytes validated at register()")
     }
+}
+
+fn sfnt_tables(
+    bytes: &[u8],
+) -> Result<std::collections::BTreeMap<[u8; 4], &[u8]>, OutlineUpdateError> {
+    let parse = || OutlineUpdateError::Parse("truncated sfnt table directory".to_owned());
+    let count = usize::from(u16::from_be_bytes(
+        bytes
+            .get(4..6)
+            .ok_or_else(parse)?
+            .try_into()
+            .map_err(|_| parse())?,
+    ));
+    let mut tables = std::collections::BTreeMap::new();
+    for index in 0..count {
+        let record = bytes
+            .get(12 + index * 16..28 + index * 16)
+            .ok_or_else(parse)?;
+        let offset = u32::from_be_bytes(record[8..12].try_into().map_err(|_| parse())?) as usize;
+        let length = u32::from_be_bytes(record[12..16].try_into().map_err(|_| parse())?) as usize;
+        let end = offset.checked_add(length).ok_or_else(parse)?;
+        let tag: [u8; 4] = record[..4].try_into().map_err(|_| parse())?;
+        tables.insert(tag, bytes.get(offset..end).ok_or_else(parse)?);
+    }
+    Ok(tables)
+}
+
+/// Whether two faces differ at most in `CFF ` and `head`'s checksum adjustment.
+fn same_layout_tables(current: &[u8], next: &[u8]) -> Result<bool, OutlineUpdateError> {
+    FontRef::new(next).map_err(|error| OutlineUpdateError::Parse(error.to_string()))?;
+    let (current, next) = (sfnt_tables(current)?, sfnt_tables(next)?);
+    if current.keys().ne(next.keys()) || !current.contains_key(b"CFF ") {
+        return Ok(false);
+    }
+    Ok(current.iter().all(|(tag, table)| match tag {
+        b"CFF " => true,
+        b"head" => {
+            let other = next[tag];
+            table.len() == other.len()
+                && table.len() >= 12
+                && table[..8] == other[..8]
+                && table[12..] == other[12..]
+        }
+        _ => *table == next[tag],
+    }))
 }
 
 fn face_key(bytes: &[u8]) -> u64 {
@@ -728,6 +1129,27 @@ mod tests {
     use crate::shape::ShapedGlyph;
 
     const LIBERATION_SANS: &[u8] = include_bytes!("../tests/fonts/LiberationSans-Regular.ttf");
+
+    #[test]
+    fn base_latin_miss_history_stays_bounded() {
+        let store = FontStore::new();
+        for index in 0..MAX_BASE_LATIN_MISSES * 2 {
+            store.record_base_latin_miss(
+                &[FontId(0)],
+                'A',
+                false,
+                false,
+                &format!("family {index}"),
+            );
+            assert!(store.missing_base_latin.borrow().len() <= MAX_BASE_LATIN_MISSES);
+        }
+        assert!(store.take_base_latin_miss());
+        store.record_base_latin_miss(&[FontId(0)], 'A', false, false, "family 0");
+        store.record_base_latin_miss(&[FontId(0)], 'A', false, false, "family 0");
+        assert!(store.take_base_latin_miss());
+        store.record_base_latin_miss(&[FontId(0)], 'A', false, false, "family 0");
+        assert!(!store.take_base_latin_miss());
+    }
 
     fn key(text: String) -> ShapeCacheKey {
         ShapeCacheKey {
@@ -822,6 +1244,19 @@ mod tests {
     }
 
     #[test]
+    fn owned_and_borrowed_bytes_share_one_face() {
+        let mut store = FontStore::default();
+        let owned = store
+            .register_cow(std::borrow::Cow::Owned(LIBERATION_SANS.to_vec()))
+            .unwrap();
+        let borrowed = store
+            .register_cow(std::borrow::Cow::Borrowed(LIBERATION_SANS))
+            .unwrap();
+        assert_ne!(owned, borrowed);
+        assert_eq!(store.face_count(), 1);
+    }
+
+    #[test]
     fn different_bytes_register_as_their_own_faces() {
         let mut store = FontStore::new();
         let first = store.register_slice(LIBERATION_SANS).unwrap();
@@ -846,6 +1281,28 @@ mod tests {
         let view = store.register_named_substitute(alias, "Calibri").unwrap();
         assert_eq!(store.byte_owner(view).unwrap(), owner);
         assert_eq!(store.face_count(), 1);
+    }
+
+    #[test]
+    fn repeated_registrations_name_their_first_and_distinct_views_stay_distinct() {
+        let mut store = FontStore::new();
+        let owner = store.register_slice(LIBERATION_SANS).unwrap();
+        let view = store
+            .register_named_substitute(owner, "Arial Narrow")
+            .unwrap();
+        let alias = store.register_slice(LIBERATION_SANS).unwrap();
+        let repeat = store
+            .register_named_substitute(alias, "Arial Narrow")
+            .unwrap();
+        let other = store.register_named_substitute(alias, "MS Mincho").unwrap();
+        assert_eq!(store.font_count(), 5);
+        assert_eq!(store.canonical_face(owner), owner);
+        assert_eq!(store.canonical_face(alias), owner);
+        assert_eq!(store.canonical_face(view), view);
+        assert_eq!(store.canonical_face(repeat), view);
+        assert_eq!(store.canonical_face(other), other);
+        let unknown = FontId::from_u32(u32::MAX);
+        assert_eq!(store.canonical_face(unknown), unknown);
     }
 
     #[test]

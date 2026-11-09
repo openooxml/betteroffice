@@ -105,6 +105,16 @@ impl From<EngineError> for JsValue {
                 value.into()
             }
             EngineErrorKind::Message => JsValue::from_str(&error.message),
+            EngineErrorKind::SuggestedFormattingOverContainer => {
+                let value = js_sys::Error::new(&error.message);
+                value.set_name("SuggestedFormattingOverContainerError");
+                let _ = js_sys::Reflect::set(
+                    &value,
+                    &JsValue::from_str("code"),
+                    &JsValue::from_str("suggested-formatting-over-container"),
+                );
+                value.into()
+            }
         }
     }
 }
@@ -257,7 +267,8 @@ impl EditSession {
     /// Registers raw sfnt bytes in this session's resident measurement store
     /// and returns the font id that measurement and display inputs reference.
     /// Errors on bytes the font parser rejects.
-    pub fn register_measure_font(&self, bytes: &[u8]) -> Result<u32, JsValue> {
+    #[wasm_bindgen(js_name = register_measure_font)]
+    pub fn register_owned_measure_font(&self, bytes: Vec<u8>) -> Result<u32, JsValue> {
         self.core
             .register_measure_font(bytes)
             .map_err(JsValue::from)
@@ -265,6 +276,19 @@ impl EditSession {
 
     pub fn decode_font(&self, bytes: &[u8]) -> Result<Vec<u8>, JsValue> {
         self.core.decode_font(bytes).map_err(JsValue::from)
+    }
+
+    /// Replaces the outlines of measurement font `font_id` with `bytes`, a face
+    /// whose every table but `CFF ` is unchanged. Errors, leaving the font as
+    /// it was, for other bytes.
+    pub fn update_measure_font_outlines(&self, font_id: u32, bytes: &[u8]) -> Result<(), JsValue> {
+        self.core
+            .update_measure_font_outlines(font_id, bytes)
+            .map_err(JsValue::from)
+    }
+
+    pub fn take_base_latin_miss(&self) -> bool {
+        self.core.take_base_latin_miss()
     }
 
     /// Registers a measurement view of `base` carrying the vertical metrics
@@ -1243,6 +1267,29 @@ impl EditSession {
             .map_err(JsValue::from)
     }
 
+    /// Current style and document-default language overrides as JSON.
+    pub fn style_languages_json(&self) -> String {
+        self.core.style_languages_json()
+    }
+
+    /// Sets language slots; no style ID selects document defaults. Null clears a slot.
+    pub fn set_style_language(
+        &self,
+        style_id: Option<String>,
+        slots_json: &str,
+    ) -> Result<bool, JsValue> {
+        self.core
+            .set_style_language(style_id.as_deref(), slots_json)
+            .map_err(JsValue::from)
+    }
+
+    /// Patches styles XML with the session's language overrides.
+    pub fn patch_style_languages_xml(&self, source: &str) -> Result<String, JsValue> {
+        self.core
+            .patch_style_languages_xml(source)
+            .map_err(JsValue::from)
+    }
+
     pub fn list_sections_json(&self) -> Result<String, JsValue> {
         self.core.list_sections_json().map_err(JsValue::from)
     }
@@ -1477,6 +1524,20 @@ impl EditSession {
             .map_err(JsValue::from)
     }
 
+    /// Sets the height, in twips, and the `w:hRule` of the row holding the cell
+    /// `at_json` ([`CellLoc`]) names. Always a plain local edit. Errors unless
+    /// `height_twips` is finite and positive and `rule` is `atLeast` or `exact`.
+    pub fn set_row_height(
+        &self,
+        at_json: &str,
+        height_twips: f64,
+        rule: &str,
+    ) -> Result<String, JsValue> {
+        self.core
+            .set_row_height(at_json, height_twips, rule)
+            .map_err(JsValue::from)
+    }
+
     /// Sets the preferred width, in twips, of the table `table_json`
     /// ([`TableLocator`]) names. Always a plain local edit. Errors unless
     /// `width_twips` is finite and positive.
@@ -1653,9 +1714,9 @@ impl EditSession {
     /// {"type":"fontFamily"|"color","value":string} |
     /// {"type":"fontSize","value":number}`. The six boolean types TOGGLE —
     /// they turn on unless the whole range already carries the mark — while
-    /// font family, size and color SET. Formatting is always a plain local
-    /// edit, never a tracked change, so there is no receipt. Errors on an
-    /// unknown `"type"` or a missing/mistyped `"value"`.
+    /// font family, size and color SET. Errors on an
+    /// unknown `"type"` or a missing/mistyped `"value"`. Returns
+    /// `{"keptUnchanged": {reason: count}}`, as `format_range` does.
     #[allow(clippy::too_many_arguments)]
     pub fn toggle_mark(
         &self,
@@ -1665,7 +1726,9 @@ impl EditSession {
         end_para: &str,
         end_offset: u32,
         mark_json: &str,
-    ) -> Result<(), JsValue> {
+        author_name: Option<String>,
+        author_date: Option<String>,
+    ) -> Result<String, JsValue> {
         self.core
             .toggle_mark(
                 story,
@@ -1674,6 +1737,8 @@ impl EditSession {
                 end_para,
                 end_offset,
                 mark_json,
+                author_name,
+                author_date,
             )
             .map_err(JsValue::from)
     }
@@ -1697,8 +1762,10 @@ impl EditSession {
     ///
     /// `false` clears `bold`, `italic`, `underline` and `strike`. `color`
     /// takes exactly one of `rgb` or `themeColor`. `other` writes arbitrary
-    /// run attributes, with `null` removing one. Always a plain local edit, so
-    /// there is no receipt. Errors when a key carries a type not listed here.
+    /// run attributes, with `null` removing one. Errors on invalid types.
+    /// Returns `{"keptUnchanged": {reason: count}}`, the table-cell and
+    /// content-control paragraphs left unchanged because saving them
+    /// rewritten would lose content of their source.
     #[allow(clippy::too_many_arguments)]
     pub fn format_range(
         &self,
@@ -1708,7 +1775,9 @@ impl EditSession {
         end_para: &str,
         end_offset: u32,
         delta_json: &str,
-    ) -> Result<(), JsValue> {
+        author_name: Option<String>,
+        author_date: Option<String>,
+    ) -> Result<String, JsValue> {
         self.core
             .format_range(
                 story,
@@ -1717,6 +1786,8 @@ impl EditSession {
                 end_para,
                 end_offset,
                 delta_json,
+                author_name,
+                author_date,
             )
             .map_err(JsValue::from)
     }
@@ -1735,6 +1806,8 @@ impl EditSession {
         end_para: &str,
         end_offset: u32,
         hyperlink_json: &str,
+        author_name: Option<String>,
+        author_date: Option<String>,
     ) -> Result<(), JsValue> {
         self.core
             .set_hyperlink(
@@ -1744,13 +1817,16 @@ impl EditSession {
                 end_para,
                 end_offset,
                 hyperlink_json,
+                author_name,
+                author_date,
             )
             .map_err(JsValue::from)
     }
 
     /// Clears every direct run-formatting attribute over `[start, end)`.
     /// Protected attributes — hyperlinks and tracked-change stamps — survive,
-    /// as do paragraph properties.
+    /// as do paragraph properties. Returns `{"keptUnchanged": {reason: count}}`
+    /// as [`Self::format_range`] does.
     #[allow(clippy::too_many_arguments)]
     pub fn clear_formatting(
         &self,
@@ -1759,9 +1835,19 @@ impl EditSession {
         start_offset: u32,
         end_para: &str,
         end_offset: u32,
-    ) -> Result<(), JsValue> {
+        author_name: Option<String>,
+        author_date: Option<String>,
+    ) -> Result<String, JsValue> {
         self.core
-            .clear_formatting(story, start_para, start_offset, end_para, end_offset)
+            .clear_formatting(
+                story,
+                start_para,
+                start_offset,
+                end_para,
+                end_offset,
+                author_name,
+                author_date,
+            )
             .map_err(JsValue::from)
     }
 
@@ -2467,7 +2553,7 @@ impl EditSession {
     /// `[{"revisionId","author","date","kind","story","preview",
     /// "range":{"story","start":{"paraId","offset"},"end":{…}}}, …]`. `kind`
     /// is one of `"insertion"`, `"deletion"`, `"pPrIns"`, `"pPrDel"`,
-    /// `"pPrChange"`, `"trIns"`, `"trDel"`, `"tableIns"` or `"tableDel"`.
+    /// `"pPrChange"`, `"rPrChange"`, `"trIns"`, `"trDel"`, `"tableIns"` or `"tableDel"`.
     /// `preview` holds the first few characters of the affected text, and is
     /// empty for every structural kind, which covers no text.
     pub fn list_revisions(&self) -> Result<String, JsValue> {
@@ -2704,6 +2790,18 @@ impl EditSession {
         self.core.prime_save_seed_states(paragraphs, inflated)
     }
 
+    /// One slice of [`Self::prime_save_seed_states`], digesting about `max_bytes` bytes of the
+    /// stories: 0 once the states are known, 1 when more slices are needed, 2 when declined.
+    pub fn prime_save_seed_states_slice(
+        &self,
+        paragraphs: u32,
+        inflated: u32,
+        max_bytes: u32,
+    ) -> u32 {
+        self.core
+            .prime_save_seed_states_slice(paragraphs, inflated, max_bytes)
+    }
+
     /// The paragraph IDs a save applies, as the package writer's
     /// `paragraphIds` request field: `{"assignments":[{"part","ordinal",
     /// "paraId"}],"patchedParts":[{"part","paraIds":[[ordinal,"ID"]]}]}`,
@@ -2787,6 +2885,15 @@ pub fn render_docx_markdown_with_pages_json(
     options: &str,
 ) -> Result<String, JsValue> {
     crate::session::free::render_docx_markdown_with_pages_json(content, options).map_err(js_err)
+}
+
+#[cfg(test)]
+impl EditSession {
+    fn register_measure_font(&self, bytes: &[u8]) -> Result<u32, JsValue> {
+        self.core
+            .register_measure_font(bytes)
+            .map_err(JsValue::from)
+    }
 }
 
 #[cfg(test)]
@@ -3032,7 +3139,16 @@ mod tests {
         crate::STORY_INDEX_UNITS_BUILT.with(|built| assert!(built.get() <= 3));
         assert_targeted(false);
         session
-            .format_range("body", &para_id, 0, &para_id, 1, r#"{"bold":true}"#)
+            .format_range(
+                "body",
+                &para_id,
+                0,
+                &para_id,
+                1,
+                r#"{"bold":true}"#,
+                None,
+                None,
+            )
             .unwrap();
         assert_targeted(true);
         crate::STORY_INDEX_UNITS_BUILT.with(|built| built.set(0));
@@ -3108,7 +3224,16 @@ mod tests {
             .unwrap();
         assert_targeted();
         session
-            .format_range("body", &para_id, 0, &para_id, 1, r#"{"bold":true}"#)
+            .format_range(
+                "body",
+                &para_id,
+                0,
+                &para_id,
+                1,
+                r#"{"bold":true}"#,
+                None,
+                None,
+            )
             .unwrap();
         crate::TABLE_MEMBERSHIP_STORIES_SCANNED.with(|scanned| scanned.set(0));
         let context = read_context("body", &para_id);

@@ -488,7 +488,9 @@
         "pageUp": "Page Up",
         "pageDown": "Page Down",
         "ctrl": "Ctrl",
-        "del": "Del"
+        "del": "Del",
+        "shift": "Shift",
+        "alt": "Alt"
       }
     },
     "objectGeometry": {
@@ -528,6 +530,7 @@
     "paragraphMarkInserted": "Inserted paragraph break",
     "paragraphMarkDeleted": "Deleted paragraph break",
     "paragraphPropertiesChanged": "Changed paragraph properties",
+    "runPropertiesChanged": "Changed text formatting",
     "rowInserted": "Inserted row",
     "rowDeleted": "Deleted row",
     "rowPropertiesChanged": "Changed row properties",
@@ -584,6 +587,8 @@
     "noDocumentLoaded": "No document loaded",
     "failedToLoad": "Couldn't open this document",
     "failedToLoadDescription": "The file may be damaged, or it uses something this editor can't read yet.",
+    "failedToLoadDamaged": "The file is damaged or isn't a complete Word document.",
+    "failedToLoadUnsupported": "This document uses something this editor can't read yet.",
     "editorUnavailable": "The editor couldn't load",
     "editorUnavailableDescription": "Check your connection, then reload the page.",
     "reloadPage": "Reload page",
@@ -724,6 +729,7 @@
     "failedToParse": "Failed to parse document",
     "linkRemoved": "Link removed",
     "linkCopied": "Link copied to clipboard",
+    "pasteFailed": "The paste could not be completed. Nothing was changed.",
     "failedToSave": "Failed to save document",
     "documentInput": "Document input",
     "documentPreview": "Document preview",
@@ -795,6 +801,8 @@
     "pageLabel": "Page {number}",
     "headerLabel": "Page header",
     "footerLabel": "Page footer",
+    "chartNoData": "No data",
+    "pictureName": "Picture",
     "selected": "Selected",
     "selectionCleared": "Selection cleared",
     "commentedText": "Commented text",

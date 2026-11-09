@@ -9,11 +9,7 @@
   "imports": {
     "#session-worker": {
       "node": "./dist/sessionWorker.node.mjs",
-      "default": "./dist/sessionWorker.browser.mjs"
-    },
-    "#session-scope": {
-      "node": "./dist/sessionScope.node.mjs",
-      "default": "./dist/sessionScope.browser.mjs"
+      "default": "./dist/sessionWorker.missing.mjs"
     }
   },
   "exports": {
@@ -261,7 +257,10 @@
       "x86_64-apple-darwin",
       "aarch64-unknown-linux-gnu",
       "x86_64-unknown-linux-gnu",
-      "x86_64-pc-windows-msvc"
+      "x86_64-pc-windows-msvc",
+      "x86_64-unknown-linux-musl",
+      "aarch64-unknown-linux-musl",
+      "aarch64-pc-windows-msvc"
     ]
   },
   "engines": {

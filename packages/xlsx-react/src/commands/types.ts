@@ -64,6 +64,26 @@ export interface XlsxCommandArgs {
   /** `force` applies a proposal whose cells changed since it was staged. */
   proposalAccept: { proposalId: string; force?: boolean };
   proposalReject: { proposalId: string };
+  cut: null;
+  copy: null;
+  /** Pastes values and formats from the clipboard. */
+  paste: null;
+  /** Pastes only the clipboard's text. */
+  pastePlainText: null;
+  /** Clears the values of the selected cells, keeping their formats. */
+  clearContents: null;
+  /** Inserts as many rows as the selection spans. */
+  insertRows: { position: 'above' | 'below' };
+  /** Inserts as many columns as the selection spans. */
+  insertColumns: { position: 'left' | 'right' };
+  deleteRows: null;
+  deleteColumns: null;
+  /** Inserts a sheet before the active one. */
+  insertSheet: null;
+  deleteSheet: null;
+  /** `null` opens the active sheet's name for editing. */
+  renameSheet: { name: string } | null;
+  moveSheet: { direction: 'left' | 'right' };
 }
 
 /** @experimental */
@@ -133,6 +153,19 @@ export interface XlsxCommandValues {
   proposalsPanel: number;
   proposalAccept: null;
   proposalReject: null;
+  cut: null;
+  copy: null;
+  paste: null;
+  pastePlainText: null;
+  clearContents: null;
+  insertRows: null;
+  insertColumns: null;
+  deleteRows: null;
+  deleteColumns: null;
+  insertSheet: null;
+  deleteSheet: null;
+  renameSheet: null;
+  moveSheet: null;
 }
 
 /**
@@ -161,7 +194,11 @@ export type XlsxCommandDisabledCode =
   | 'invalid-arguments'
   | 'permission-denied'
   | 'unsupported-policy'
-  | 'plugin-unavailable';
+  | 'plugin-unavailable'
+  | 'clipboard-unavailable'
+  | 'last-sheet'
+  | 'sheet-at-edge'
+  | 'sheet-name-invalid';
 
 /**
  * Why an executed command did not complete.
@@ -170,12 +207,15 @@ export type XlsxCommandDisabledCode =
 export type XlsxCommandFailureCode =
   | XlsxCommandDisabledCode
   | 'input-failed'
+  | 'edit-unsupported'
   | 'sheet-protected'
+  | 'host-refused'
   | 'document-replaced'
   | 'target-changed'
   | 'gesture-active'
   | 'proposal-stale'
   | 'render-failed'
+  | 'clipboard-denied'
   | 'command-failed'
   | 'aborted';
 

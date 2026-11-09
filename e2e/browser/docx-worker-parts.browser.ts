@@ -59,7 +59,7 @@ test('worker empty headers open once, save, close and remove through part chrome
 
 test('worker note clicks edit the second native story in a shared note area', async ({ page }, info) => {
   await open(page, true);
-  const note = page.locator('.layout-note[data-note-id="2"] .layout-run[data-doc-start="5"]').first();
+  const note = page.locator('.layout-note[data-note-id="2"] .layout-run[data-doc-start]').last();
   await expect(note).toBeAttached();
   await note.evaluate(node => node.scrollIntoView({ block: 'center' }));
   const box = (await note.boundingBox())!;

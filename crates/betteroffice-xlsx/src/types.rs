@@ -75,24 +75,27 @@ pub struct CalculationResult {
     pub budget_exhausted: bool,
     /// formula cells the engine could not compute, in address order. snapshots
     /// and recovery checkpoints do not carry the list: a restored session
-    /// re-derives it from its formulas, which show the uncomputable calls and
-    /// their readers but not the engine's other gaps until a recalculation
-    /// evaluates them again.
+    /// re-derives it from its formulas, which show the uncomputable and unknown
+    /// calls and their readers but not the engine's other gaps until a
+    /// recalculation evaluates them again.
     #[serde(default)]
     pub unevaluated_cells: Vec<UnevaluatedCell>,
 }
 
 /// a formula cell the engine could not compute, because it calls a function
-/// no offline engine can (`WEBSERVICE`, `RTD`, a `CUBE` function, an add-in)
-/// or reads a cell that does, or meets another gap of the engine, whose
-/// readers recalculate from the value it keeps. it keeps the value excel saved,
-/// or stays blank when the file saved none, unless only an engine gap was
-/// involved, which shows its error; excel recalculates it on open.
+/// no offline engine can (`WEBSERVICE`, `RTD`, a `CUBE` function, an add-in),
+/// one the engine does not know (a VBA function, a named lambda, a typo: it
+/// cannot tell these apart) or reads a cell that does, or meets another gap of
+/// the engine, whose readers recalculate from the value it keeps. it keeps the
+/// value excel saved. when the file saved none, an uncomputable function
+/// leaves it blank, an unknown one shows the engine's answer (`#NAME?`, or what
+/// a handler made of it) and a gap alone shows its error. excel recalculates
+/// it on open.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnevaluatedCell {
     pub address: CellAddress,
-    /// the uncomputable functions involved, sorted; empty when only gaps of
-    /// this engine were.
+    /// the uncomputable and unknown functions involved, sorted; empty when
+    /// only gaps of this engine were.
     pub functions: Vec<String>,
 }
 
@@ -113,6 +116,39 @@ pub struct EditProfile {
     pub apply_ms: f64,
     pub recalc_ms: f64,
     pub result_ms: f64,
+}
+
+/// Why a save wrote a part differently from what the workbook holds. A stable
+/// code to match on; new codes may be added, so treat an unknown one as a
+/// generic warning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum SaveWarningCode {
+    /// The workbook holds a reference with a character xml 1.0 cannot carry,
+    /// which the part cannot be written with, so it was kept as authored.
+    UnwritableReference,
+    /// The part holds a formula, kept as the file wrote it, that does not read
+    /// as text a sheet rename can rewrite, so it was kept unrenamed.
+    UnrewritableFormula,
+}
+
+/// A part a save wrote differently from what the workbook holds, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct SaveWarning {
+    pub code: SaveWarningCode,
+    /// The package part, such as `xl/charts/chart1.xml`.
+    pub part: String,
+    /// What inside the part, such as `chart`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub element: Option<String>,
+    /// The sheet the part belongs to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sheet: Option<String>,
+    /// A sentence for people; not stable, match on `code`.
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -200,6 +236,22 @@ pub struct ProposalRequest {
 pub struct ProposalAcceptance {
     pub proposal_id: String,
     pub mutation: MutationResult,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PngTarget {
+    Viewport {
+        sheet: SheetId,
+        viewport: crate::Viewport,
+    },
+    Range {
+        sheet: SheetId,
+        range: CellRange,
+    },
+    /// The sheet's used range at render time.
+    UsedRange {
+        sheet: SheetId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

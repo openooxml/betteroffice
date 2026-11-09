@@ -11,11 +11,10 @@ const sourceSessionWorker: Plugin = {
   name: 'source-session-worker',
   enforce: 'pre',
   resolveId(source, importer) {
-    const variant = source === '#session-worker' ? 'sessionWorker' : source === '#session-scope' ? 'sessionScope' : undefined;
-    if (!variant || !importer) return null;
+    if (source !== '#session-worker' || !importer) return null;
     const format = /\/packages\/(docx|pptx|xlsx)\/src\//.exec(importer)?.[1];
     if (!format) return null;
-    return resolve(root, 'packages', format, 'src', format === 'docx' ? 'yrs' : 'session', `${variant}.browser.ts`);
+    return resolve(root, 'packages', format, 'src', format === 'docx' ? 'yrs' : 'session', 'sessionWorker.missing.ts');
   },
 };
 
@@ -76,6 +75,10 @@ export default defineConfig({
       {
         find: /^@betteroffice\/pptx-i18n$/,
         replacement: resolve(root, 'packages/pptx-i18n/src/index.ts'),
+      },
+      {
+        find: /^@betteroffice\/pptx-i18n\/(editor|proposals)$/,
+        replacement: resolve(root, 'packages/pptx-i18n/src/$1.ts'),
       },
       { find: /^@betteroffice\/pptx$/, replacement: resolve(root, 'packages/pptx/src/index.ts') },
       { find: /^@betteroffice\/pptx\/(.*)$/, replacement: resolve(root, 'packages/pptx/src/$1') },

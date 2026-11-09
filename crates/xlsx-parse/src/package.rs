@@ -10,8 +10,8 @@ use xlsx_model::{CellRef, SheetId, Workbook};
 use crate::read::{SharedStringCells, SourceCellFacts};
 use crate::reference::UnpatchableReference;
 use crate::xml::{
-    attr, collect_text, find_part, local_name, next_event, reader, resolve_part_path, utf8_bom_len,
-    xml_err,
+    attr, collect_text, find_part, local_name, next_event, reader, resolve_part_path,
+    text_attribute, utf8_bom_len, xml_err,
 };
 use crate::{MAX_DEPTH, ParseError};
 
@@ -244,6 +244,19 @@ impl PreservedPackage {
         self.unpatchable_references
             .first()
             .map(UnpatchableReference::part)
+    }
+
+    /// The formulas this package keeps as the file wrote them (data
+    /// validations and extension formulas) that cannot follow the sheet
+    /// renames `wb` holds since the package was read, sheets mapped by
+    /// `origins`.
+    #[doc(hidden)]
+    pub fn fragments_not_following_renames(
+        &self,
+        wb: &Workbook,
+        origins: &[Option<usize>],
+    ) -> Vec<crate::write::PreservedFragmentFailure> {
+        crate::write::preserved_fragment_failures(wb, self, origins)
     }
 
     /// Returns a preserved part that renaming, dropping or reordering `sheet`
@@ -766,7 +779,7 @@ impl XmlTemplate {
                     }
                     let mut root = BytesStart::new(self.root_name.as_str());
                     for value in &values {
-                        root.push_attribute((value.name.as_str(), value.value.as_str()));
+                        root.push_attribute(text_attribute(&value.name, &value.value));
                     }
                     writer.write_event(Event::Start(root)).map_err(xml_err)?;
                     break;
@@ -1281,7 +1294,7 @@ impl XmlTemplate {
                     }
                     let mut root = BytesStart::new(self.root_name.as_str());
                     for attribute in &attributes {
-                        root.push_attribute((attribute.name.as_str(), attribute.value.as_str()));
+                        root.push_attribute(text_attribute(&attribute.name, &attribute.value));
                     }
                     let mut writer = Writer::new(Vec::new());
                     writer.write_event(Event::Start(root)).map_err(xml_err)?;
