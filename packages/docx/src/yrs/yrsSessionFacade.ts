@@ -1,3 +1,4 @@
+import type { PngUnavailablePicture } from '../../../../shared/office-session/pngExportError';
 import { DocxSectionError, type SectionInfo } from './sections';
 import { formattingFailure } from './formattingError';
 import { PARAGRAPH_PATCH_WRITER_VERSION, paragraphPatchWriterVersionWire } from '../docx/parseWasm';
@@ -1747,6 +1748,9 @@ export function wrapSession(
     renderPngTarget: (displayListJson, targetJson, optionsJson) =>
       (session as unknown as { renderPngTarget(list: string, target: string, options: string): Uint8Array })
         .renderPngTarget(displayListJson, targetJson, optionsJson),
+    renderPngTargetReport: (displayListJson, targetJson, optionsJson) =>
+      (session as unknown as { renderPngTargetReport(list: string, target: string, options: string): { png: Uint8Array; pictures: PngUnavailablePicture[] } })
+        .renderPngTargetReport(displayListJson, targetJson, optionsJson),
     renderPng: async (target, options) => {
       if (destroyed) throw new Error('YrsSession is destroyed');
       if (!pngExporter) {

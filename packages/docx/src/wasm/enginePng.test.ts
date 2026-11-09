@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import type { PngDiagnostic } from '../../../../shared/office-session/pngExportError';
 import type { DisplayList, DisplayPage } from '../layout/render/displayList';
 import { engineKind, renderPng, type DocxPngEngine } from './enginePng';
 
 const page = (primitives: unknown[], size = { width: 200, height: 100 }) => ({ pageIndex: 0, ...size, primitives }) as unknown as DisplayPage;
-const picture = { kind: 'image', x: 0, y: 0, width: 10, height: 10, relId: 'media:logo' };
+const picture = { kind: 'image', x: 0, y: 0, w: 10, h: 10, relId: 'media:logo' };
 const glyphs = { kind: 'glyphRun', x: 0, y: 0, fontId: 1, size: 12, color: '#000000', text: 'A', glyphs: [{ id: 5, x: 0, y: 0, advance: 6 }] };
 const svg = new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg"/>');
 
@@ -18,7 +19,7 @@ let restore: (() => void) | undefined;
 afterEach(() => { restore?.(); restore = undefined; });
 
 function stub(canvas = true, context = true) {
-  const calls = { sizes: [] as number[][], encoded: 0, backgrounds: [] as unknown[] };
+  const calls = { sizes: [] as number[][], encoded: 0, backgrounds: [] as unknown[], fills: [] as unknown[] };
   class Canvas {
     constructor(public width: number, public height: number) { calls.sizes.push([width, height]); }
     getContext() {
@@ -26,6 +27,7 @@ function stub(canvas = true, context = true) {
       return new Proxy({} as Record<string, unknown>, {
         get(target, property) {
           if (property === 'fillRect') return () => { calls.backgrounds.push(target.fillStyle); };
+          if (property === 'fill') return () => { calls.fills.push(target.fillStyle); };
           if (property === 'measureText') return (text: string) => ({ width: text.length });
           return property in target ? target[property as string] : () => undefined;
         },
@@ -50,12 +52,31 @@ describe.skipIf(engineKind === 'native')('canvas renderPng', () => {
     expect(calls.backgrounds[0]).toBe('#ffffff');
   });
 
-  test('an SVG picture where only a document can decode it rejects instead of leaving it out', async () => {
+  test('an SVG picture only a document can decode paints a placeholder and is reported', async () => {
     const calls = stub();
-    await expect(renderPng(engine(page([picture])), {})).rejects.toMatchObject({
-      name: 'PngExportError', code: 'canvas-unavailable', message: expect.stringContaining('@betteroffice/docx-native'),
-    });
-    expect(calls.encoded).toBe(0);
+    const diagnostics: PngDiagnostic[] = [];
+    expect(new TextDecoder().decode(await renderPng(engine(page([picture])), { onDiagnostic: (diagnostic) => diagnostics.push(diagnostic) }))).toBe('png');
+    expect(calls.encoded).toBe(1);
+    expect(calls.fills).toEqual(['rgb(242, 242, 242)']);
+    expect(diagnostics).toEqual([{ code: 'picture-unavailable', pictures: [{ id: 'media:logo', reason: 'unsupported' }] }]);
+  });
+
+  test('a picture whose part cannot be read paints a placeholder, reported as missing; a data URL is named by its header', async () => {
+    const calls = stub();
+    const diagnostics: PngDiagnostic[] = [];
+    const data = { ...picture, relId: 'data:image/svg+xml;base64,PHN2Zy8+' };
+    await renderPng(engine(page([picture, data]), { media: () => null }), { onDiagnostic: (diagnostic) => diagnostics.push(diagnostic) });
+    expect(calls.fills).toEqual(['rgb(242, 242, 242)', 'rgb(242, 242, 242)']);
+    expect(diagnostics).toEqual([{ code: 'picture-unavailable', pictures: [
+      { id: 'media:logo', reason: 'missing' }, { id: 'data:image/svg+xml;base64', reason: 'unsupported' },
+    ] }]);
+  });
+
+  test('a page whose pictures all draw reports nothing', async () => {
+    stub();
+    const diagnostics: PngDiagnostic[] = [];
+    await renderPng(engine(page([])), { onDiagnostic: (diagnostic) => diagnostics.push(diagnostic) });
+    expect(diagnostics).toEqual([]);
   });
 
   test('a glyph whose outline fails rejects instead of painting browser text', async () => {

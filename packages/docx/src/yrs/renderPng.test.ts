@@ -5,6 +5,7 @@ import { engineKind } from '../wasm/enginePng';
 import { preloadEditWasm } from '../wasm/edit';
 import { preloadOpcWasm } from '../wasm/opc';
 import { createYrsSession, type YrsSession } from './index';
+import type { PngDiagnostic } from '../../../../shared/office-session/pngExportError';
 import fixture from '../../../../crates/docx-edit/tests/fixtures/behind_objects.json';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
 
@@ -87,9 +88,10 @@ describe('YrsSession.renderPng', () => {
     const session = await createYrsSession();
     try {
       session.openDocx(new Uint8Array(rezipPartsToArrayBuffer(parts)), true);
-      const exported = session.renderPng({ page: 0 });
-      if (native) await exported;
-      else expect(await exported.then(() => undefined, (error: { code?: string }) => error.code)).toBe('canvas-unavailable');
+      const diagnostics: PngDiagnostic[] = [];
+      await session.renderPng({ page: 0 }, { onDiagnostic: (diagnostic) => diagnostics.push(diagnostic) });
+      if (native) expect(diagnostics).toEqual([]);
+      else expect(diagnostics).toEqual([{ code: 'picture-unavailable', pictures: [{ id: expect.any(String), reason: 'unsupported' }] }]);
     } finally { session.destroy(); }
   });
 

@@ -1,5 +1,5 @@
 import { fontUnavailable, pagePngRequest, type DocxPngOptions } from '../../../packages/docx/src/layout/render/png';
-import { PngExportError } from '../../../shared/office-session/pngExportError';
+import { PngExportError, type PngUnavailablePicture } from '../../../shared/office-session/pngExportError';
 import type { DocxPngEngine } from '../../../packages/docx/src/wasm/enginePng';
 
 export type { DocxPngEngine } from '../../../packages/docx/src/wasm/enginePng';
@@ -7,7 +7,7 @@ export type { DocxPngEngine } from '../../../packages/docx/src/wasm/enginePng';
 export const engineKind: 'wasm' | 'native' = 'native';
 
 interface NativeSession {
-  renderPngTarget(displayListJson: string, targetJson: string, optionsJson: string): Uint8Array;
+  renderPngTargetReport(displayListJson: string, targetJson: string, optionsJson: string): { png: Uint8Array; pictures: PngUnavailablePicture[] };
 }
 
 /**
@@ -15,22 +15,24 @@ interface NativeSession {
  * thread, with the faces and media of the session that laid it out. Scale and
  * size are checked as on the canvas engine, so both reject alike.
  */
-export async function renderPng(engine: DocxPngEngine, options: Pick<DocxPngOptions, 'scale' | 'signal'>): Promise<Uint8Array> {
+export async function renderPng(engine: DocxPngEngine, options: Pick<DocxPngOptions, 'scale' | 'signal' | 'onDiagnostic'>): Promise<Uint8Array> {
   const { scale } = pagePngRequest(engine.page, options);
   options.signal?.throwIfAborted();
-  let bytes: Uint8Array;
+  let report: ReturnType<NativeSession['renderPngTargetReport']>;
   try {
-    bytes = (engine.session as NativeSession).renderPngTarget(
+    report = (engine.session as NativeSession).renderPngTargetReport(
       JSON.stringify({ ...engine.displayList, fontChains: engine.fontChains, pages: [engine.page] }), '{"page":0}', JSON.stringify({ scale }));
   } catch (error) {
     const message = error instanceof Error ? error.message : '';
     if (message.startsWith('png-font-unavailable: ')) throw fontUnavailable(message.slice(22));
     if (message.startsWith('png-too-large: ')) throw new PngExportError('canvas-too-large', message.slice(15));
-    if (message.startsWith('png-picture-unavailable: ')) throw new PngExportError('picture-unavailable', message.slice(25));
     throw error;
   }
   options.signal?.throwIfAborted();
-  return bytes;
+  if (report.pictures.length) {
+    options.onDiagnostic?.({ code: 'picture-unavailable', pictures: report.pictures.map((picture) => ({ ...picture })) });
+  }
+  return report.png;
 }
 
 export default renderPng;

@@ -147,13 +147,77 @@ impl<'a> RenderResources<'a> {
     }
 }
 
-/// A rendered page, the image references it left undrawn, and the effects this
-/// backend cannot draw yet, by kind (`text.textOutline`, `shape.effects`, ...),
-/// which it left out while drawing the rest of their primitive.
+/// Why a picture was replaced by a placeholder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PictureReason {
+    Missing,
+    Unsupported,
+    DecodeFailed,
+    Metafile,
+    TooLarge,
+    Budget,
+}
+
+impl PictureReason {
+    /// The stable report name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::Unsupported => "unsupported",
+            Self::DecodeFailed => "decode-failed",
+            Self::Metafile => "metafile",
+            Self::TooLarge => "too-large",
+            Self::Budget => "budget",
+        }
+    }
+}
+
+/// A picture reference replaced by a placeholder and any known limit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedPicture {
+    pub id: String,
+    pub reason: PictureReason,
+    pub limit: Option<u64>,
+    pub actual: Option<u64>,
+    pub unit: Option<&'static str>,
+}
+
+#[derive(Clone, Copy)]
+struct PictureFailure {
+    reason: PictureReason,
+    limit: Option<u64>,
+    actual: Option<u64>,
+    unit: Option<&'static str>,
+}
+
+impl PictureFailure {
+    fn new(reason: PictureReason) -> Self {
+        Self {
+            reason,
+            limit: None,
+            actual: None,
+            unit: None,
+        }
+    }
+
+    fn limited(reason: PictureReason, limit: u64, actual: u64, unit: &'static str) -> Self {
+        Self {
+            reason,
+            limit: Some(limit),
+            actual: Some(actual),
+            unit: Some(unit),
+        }
+    }
+}
+
+type ImageOutcome = Result<Arc<Pixmap>, PictureFailure>;
+
+/// A rendered page and the pictures and effects this backend could not draw.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderedPage {
     pub bytes: Vec<u8>,
     pub skipped_images: usize,
+    pub skipped_pictures: Vec<SkippedPicture>,
     pub skipped_effects: BTreeMap<String, usize>,
 }
 
@@ -221,6 +285,7 @@ pub fn render_page_cached_scaled(
     Ok(RenderedPage {
         bytes: encode_png(pixmap, width, height)?,
         skipped_images: renderer.scratch.images.skipped,
+        skipped_pictures: renderer.scratch.images.pictures,
         skipped_effects: renderer.scratch.skipped,
     })
 }
@@ -755,6 +820,7 @@ fn paint_shape<'k>(
         return Ok(());
     }
     let picture = picture_fill_source(shape, resources, scratch, scope);
+    let failed_picture = has_picture_fill(shape) && picture.is_none();
     let budget = &mut scratch.budget;
     let (shadow, undrawn) = shape_shadow(&shape.attrs.effects)?;
     for _ in 0..undrawn {
@@ -764,7 +830,7 @@ fn paint_shape<'k>(
     let path = build_shape_path(&shape.geometry_path)?;
     let visual = shape_transform(shape)?;
     let transform = transform.pre_concat(visual);
-    let fill = if picture.is_some() {
+    let fill = if picture.is_some() || failed_picture {
         None
     } else {
         shape_fill(shape, opacity)?
@@ -793,6 +859,14 @@ fn paint_shape<'k>(
         parts.push(Box::new(
             move |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>| {
                 paint_picture_fill(target, path, source, draws, opacity, transform, mask);
+            },
+        ));
+    }
+    if failed_picture {
+        let path = &path;
+        parts.push(Box::new(
+            move |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>| {
+                paint_picture_placeholder(target, path, Some(path), transform, mask, opacity);
             },
         ));
     }
@@ -856,8 +930,6 @@ fn has_picture_fill(shape: &ShapePrimitive) -> bool {
         == Some("picture")
 }
 
-/// A picture fill's decoded source. `None` leaves the shape to its solid fill,
-/// as the web backend does for a picture it cannot resolve.
 /// A picture fill's decoded raster and, for an SVG, the size it tiles at.
 type PictureSource = (Arc<Pixmap>, Option<(f32, f32)>);
 
@@ -876,11 +948,16 @@ fn picture_fill_source<'k>(
         .or_else(|| paint.get("pictureRelId"))
         .and_then(Value::as_str);
     let Some(source) = reference.and_then(|rel_id| image_source(rel_id, scope, resources)) else {
-        scratch.images.skipped += 1;
+        scratch.images.skip(
+            reference.unwrap_or_default(),
+            PictureFailure::new(PictureReason::Missing),
+        );
         return None;
     };
     let key = scratch.images.cache.key(&source);
-    let pixmap = scratch.images.resolve(source)?;
+    let pixmap = scratch
+        .images
+        .resolve(reference.unwrap_or_default(), source)?;
     let intrinsic = scratch.images.cache.intrinsic.get(&key).copied();
     Some((pixmap, intrinsic))
 }
@@ -1582,6 +1659,40 @@ fn build_shape_path(commands: &[ShapePathCommand]) -> Result<Path, String> {
         .ok_or_else(|| "shape path has no drawable commands".to_string())
 }
 
+const PLACEHOLDER_FILL: [u8; 4] = [242, 242, 242, 255];
+const PLACEHOLDER_BORDER: [u8; 4] = [191, 191, 191, 255];
+
+/// What a picture this backend cannot draw paints: a light box with a border, no text.
+fn paint_picture_placeholder(
+    pixmap: &mut Pixmap,
+    path: &Path,
+    border: Option<&Path>,
+    transform: Transform,
+    mask: Option<&Mask>,
+    opacity: f32,
+) {
+    let mut paint = Paint::default();
+    let [r, g, b, a] = PLACEHOLDER_FILL;
+    let mut fill = Color::from_rgba8(r, g, b, a);
+    fill.apply_opacity(opacity.clamp(0.0, 1.0));
+    paint.set_color(fill);
+    paint.anti_alias = true;
+    pixmap.fill_path(path, &paint, FillRule::Winding, transform, mask);
+    let [r, g, b, a] = PLACEHOLDER_BORDER;
+    let mut color = Color::from_rgba8(r, g, b, a);
+    color.apply_opacity(opacity.clamp(0.0, 1.0));
+    paint.set_color(color);
+    if let Some(border) = border {
+        let stroke = Stroke {
+            width: 1.0,
+            ..Stroke::default()
+        };
+        pixmap.stroke_path(border, &paint, &stroke, transform, mask);
+    } else {
+        pixmap.fill_path(path, &paint, FillRule::Winding, transform, mask);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn paint_image<'k>(
     pixmap: &mut Pixmap,
@@ -1599,20 +1710,78 @@ fn paint_image<'k>(
     if !image.attrs.effects.is_empty() {
         skip_effect(&mut scratch.skipped, "image.effects");
     }
-    let Some(source_bytes) = image_source(&image.rel_id, scope, resources) else {
-        scratch.images.skipped += 1;
-        return Ok(());
+    let decoded = match image_source(&image.rel_id, scope, resources) {
+        Some(source) => scratch.images.resolve(&image.rel_id, source),
+        None => {
+            scratch
+                .images
+                .skip(&image.rel_id, PictureFailure::new(PictureReason::Missing));
+            None
+        }
     };
-    let Some(decoded) = scratch.images.resolve(source_bytes) else {
-        return Ok(());
-    };
-    let source: &Pixmap = &decoded;
     let frame = image_frame(image)?;
     if frame.w == 0.0 || frame.h == 0.0 {
         return Ok(());
     }
     let visual = image_transform(image, frame)?;
     let image_transform = transform.pre_concat(visual);
+    let Some(decoded) = decoded else {
+        let rect = Rect::from_xywh(frame.x, frame.y, frame.w, frame.h)
+            .ok_or_else(|| "invalid image placeholder rectangle".to_string())?;
+        let ellipse = is_ellipse_image(image);
+        let path = if ellipse {
+            PathBuilder::from_oval(rect)
+                .ok_or_else(|| "invalid image placeholder ellipse".to_string())?
+        } else {
+            PathBuilder::from_rect(rect)
+        };
+        let border = Rect::from_xywh(frame.x + 0.5, frame.y + 0.5, frame.w - 1.0, frame.h - 1.0)
+            .and_then(|rect| {
+                if ellipse {
+                    PathBuilder::from_oval(rect)
+                } else {
+                    Some(PathBuilder::from_rect(rect))
+                }
+            });
+        let frame_mask = if ellipse {
+            scratch.budget.charge_masks(
+                scratch
+                    .masks
+                    .bytes
+                    .saturating_add(mask_bytes(pixmap.width(), pixmap.height())),
+            )?;
+            Some(ellipse_mask(pixmap, frame, image_transform, mask)?)
+        } else {
+            None
+        };
+        paint_picture_placeholder(
+            pixmap,
+            &path,
+            border.as_ref(),
+            image_transform,
+            frame_mask.as_ref().or(mask),
+            opacity,
+        );
+        paint_image_border(
+            pixmap,
+            image,
+            frame,
+            image_transform,
+            mask,
+            opacity,
+            &mut scratch.budget,
+        )?;
+        return paint_image_revision(
+            pixmap,
+            image,
+            frame,
+            image_transform,
+            mask,
+            opacity,
+            &mut scratch.budget,
+        );
+    };
+    let source: &Pixmap = &decoded;
     let crop = image.crop.as_ref();
     let source_width = source.width() as f32;
     let source_height = source.height() as f32;
@@ -1752,12 +1921,13 @@ struct ImageCharge {
     bytes_pre: u64,
     pixels: u64,
     bytes_post: u64,
+    work: u64,
 }
 
 /// What a decode learned about a source.
 enum Decode {
     Decoded(Pixmap),
-    Refused,
+    Refused(PictureReason),
     OverBudget,
 }
 
@@ -1775,6 +1945,7 @@ fn decoder_limits(declared_width: u32, declared_height: u32, max_alloc: u64) -> 
 /// A decoded image and what resolving it cost the page that decoded it.
 struct CachedImage {
     outcome: Option<Arc<Pixmap>>,
+    refusal: Option<PictureFailure>,
     charge: ImageCharge,
     weight: u64,
     stamp: u64,
@@ -1841,17 +2012,25 @@ impl ImageCache {
     }
 
     /// A cached outcome, renewed as the cache's most recently resolved.
-    fn get(&mut self, key: u64) -> Option<(Option<Arc<Pixmap>>, ImageCharge)> {
+    fn get(&mut self, key: u64) -> Option<(ImageOutcome, ImageCharge)> {
         let entry = self.entries.get_mut(&key)?;
         self.recency.remove(&(entry.stamp, key));
         self.clock += 1;
         entry.stamp = self.clock;
         self.recency.insert((self.clock, key), ());
-        Some((entry.outcome.clone(), entry.charge))
+        let outcome = match &entry.outcome {
+            Some(pixmap) => Ok(Arc::clone(pixmap)),
+            None => Err(entry.refusal?),
+        };
+        Some((outcome, entry.charge))
     }
 
     /// Caches one decode, evicting least-recently-resolved entries until under budget.
-    fn insert(&mut self, key: u64, outcome: Option<Arc<Pixmap>>, charge: ImageCharge) {
+    fn insert(&mut self, key: u64, result: ImageOutcome, charge: ImageCharge) {
+        let (outcome, refusal) = match result {
+            Ok(pixmap) => (Some(pixmap), None),
+            Err(refusal) => (None, Some(refusal)),
+        };
         let weight = outcome
             .as_ref()
             .map_or(0, |pixmap| pixmap.data().len() as u64)
@@ -1865,6 +2044,7 @@ impl ImageCache {
             key,
             CachedImage {
                 outcome,
+                refusal,
                 charge,
                 weight,
                 stamp: self.clock,
@@ -1890,13 +2070,15 @@ impl ImageCache {
 struct PageImages<'c> {
     cache: &'c mut ImageCache,
     fonts: Option<&'c FontStore>,
-    resolved: HashMap<u64, Option<Arc<Pixmap>>>,
+    resolved: HashMap<u64, ImageOutcome>,
     pixels: u64,
     bytes: u64,
     work: u64,
     replay: ooxml_metafile::ReplayBudget,
     intrinsic: Option<(f32, f32)>,
     skipped: usize,
+    pictures: Vec<SkippedPicture>,
+    refusal: Option<PictureFailure>,
 }
 
 impl<'c> PageImages<'c> {
@@ -1911,40 +2093,109 @@ impl<'c> PageImages<'c> {
             replay: ooxml_metafile::ReplayBudget::default(),
             intrinsic: None,
             skipped: 0,
+            pictures: Vec::new(),
+            refusal: None,
         }
     }
 
-    fn resolve(&mut self, source: ImageSource<'_, '_>) -> Option<Arc<Pixmap>> {
-        let key = self.cache.key(&source);
-        if let Some(outcome) = self.resolved.get(&key) {
-            self.skipped += usize::from(outcome.is_none());
-            return outcome.clone();
-        }
-        let outcome = match self.cache.get(key) {
-            Some((cached, charge)) if self.charge(charge) => cached,
-            Some(_) => None,
-            None => self.materialize(key, source),
+    fn skip(&mut self, id: &str, failure: PictureFailure) {
+        let id = if id.starts_with("data:") {
+            id.split_once(',').map_or(id, |(prefix, _)| prefix)
+        } else {
+            id
         };
-        self.resolved.insert(key, outcome.clone());
-        self.skipped += usize::from(outcome.is_none());
-        outcome
+        self.pictures.push(SkippedPicture {
+            id: id.to_owned(),
+            reason: failure.reason,
+            limit: failure.limit,
+            actual: failure.actual,
+            unit: failure.unit,
+        });
+        self.skipped += 1;
     }
 
-    /// Charges this page what the cached decode spent; `false` means this
-    /// page's budget is spent and nothing is written back.
+    fn resolve(&mut self, id: &str, source: ImageSource<'_, '_>) -> Option<Arc<Pixmap>> {
+        let key = self.cache.key(&source);
+        let outcome = if let Some(outcome) = self.resolved.get(&key) {
+            outcome.clone()
+        } else {
+            let outcome = match self.cache.get(key) {
+                Some((cached, charge)) if self.charge(charge) => cached,
+                Some(_) => Err(self
+                    .refusal
+                    .take()
+                    .unwrap_or_else(|| PictureFailure::new(PictureReason::Budget))),
+                None => self.materialize(key, source),
+            };
+            self.resolved.insert(key, outcome.clone());
+            outcome
+        };
+        match outcome {
+            Ok(pixmap) => Some(pixmap),
+            Err(failure) => {
+                self.skip(id, failure);
+                None
+            }
+        }
+    }
+
+    fn limit(
+        &mut self,
+        reason: PictureReason,
+        limit: u64,
+        actual: u64,
+        unit: &'static str,
+    ) -> Decode {
+        self.refusal = Some(PictureFailure::limited(reason, limit, actual, unit));
+        if reason == PictureReason::Budget {
+            Decode::OverBudget
+        } else {
+            Decode::Refused(reason)
+        }
+    }
+
+    /// Charges this page what the cached decode spent.
     fn charge(&mut self, charge: ImageCharge) -> bool {
         if self.bytes + charge.bytes_pre > MAX_PAGE_IMAGE_BYTES {
+            self.limit(
+                PictureReason::Budget,
+                MAX_PAGE_IMAGE_BYTES,
+                self.bytes + charge.bytes_pre,
+                "bytes",
+            );
             return false;
         }
         self.bytes += charge.bytes_pre;
         if self.pixels + charge.pixels > MAX_PAGE_IMAGE_PIXELS {
+            self.limit(
+                PictureReason::Budget,
+                MAX_PAGE_IMAGE_PIXELS,
+                self.pixels + charge.pixels,
+                "pixels",
+            );
             return false;
         }
         if self.bytes + charge.bytes_post > MAX_PAGE_IMAGE_BYTES {
+            self.limit(
+                PictureReason::Budget,
+                MAX_PAGE_IMAGE_BYTES,
+                self.bytes + charge.bytes_post,
+                "bytes",
+            );
+            return false;
+        }
+        if self.work + charge.work > MAX_PAGE_SVG_WORK {
+            self.limit(
+                PictureReason::Budget,
+                MAX_PAGE_SVG_WORK,
+                self.work + charge.work,
+                "work",
+            );
             return false;
         }
         self.pixels += charge.pixels;
         self.bytes += charge.bytes_post;
+        self.work += charge.work;
         true
     }
 
@@ -1953,22 +2204,40 @@ impl<'c> PageImages<'c> {
     /// expands it into a buffer. Only `Decoded` and `Refused` are cached: an
     /// over-budget refusal is this page's, and the next page spends its own
     /// budget to retry.
-    fn materialize(&mut self, key: u64, source: ImageSource<'_, '_>) -> Option<Arc<Pixmap>> {
+    fn materialize(&mut self, key: u64, source: ImageSource<'_, '_>) -> ImageOutcome {
+        self.refusal = None;
         let mut charge = ImageCharge::default();
         let decoded = match source {
             ImageSource::Registered(bytes) => self.decode(bytes, &mut charge),
             ImageSource::Data(payload) => {
-                let declared = payload.len() as u64 / 4 * 3;
+                let padding = payload
+                    .as_bytes()
+                    .iter()
+                    .rev()
+                    .take(2)
+                    .take_while(|byte| **byte == b'=')
+                    .count() as u64;
+                let declared = (payload.len() as u64 / 4 * 3).saturating_sub(padding);
                 if declared > MAX_DATA_URL_BYTES {
-                    Decode::Refused
+                    self.limit(
+                        PictureReason::TooLarge,
+                        MAX_DATA_URL_BYTES,
+                        declared,
+                        "bytes",
+                    )
                 } else if self.bytes + declared > MAX_PAGE_IMAGE_BYTES {
-                    Decode::OverBudget
+                    self.limit(
+                        PictureReason::Budget,
+                        MAX_PAGE_IMAGE_BYTES,
+                        self.bytes + declared,
+                        "bytes",
+                    )
                 } else {
                     self.bytes += declared;
                     charge.bytes_pre = declared;
                     match base64::engine::general_purpose::STANDARD.decode(payload) {
                         Ok(bytes) => self.decode(&bytes, &mut charge),
-                        Err(_) => Decode::Refused,
+                        Err(_) => Decode::Refused(PictureReason::DecodeFailed),
                     }
                 }
             }
@@ -1981,14 +2250,21 @@ impl<'c> PageImages<'c> {
         match decoded {
             Decode::Decoded(pixmap) => {
                 let pixmap = Arc::new(pixmap);
-                self.cache.insert(key, Some(pixmap.clone()), charge);
-                Some(pixmap)
+                self.cache.insert(key, Ok(pixmap.clone()), charge);
+                Ok(pixmap)
             }
-            Decode::Refused => {
-                self.cache.insert(key, None, charge);
-                None
+            Decode::Refused(reason) => {
+                let failure = self
+                    .refusal
+                    .take()
+                    .unwrap_or_else(|| PictureFailure::new(reason));
+                self.cache.insert(key, Err(failure), charge);
+                Err(failure)
             }
-            Decode::OverBudget => None,
+            Decode::OverBudget => Err(self
+                .refusal
+                .take()
+                .unwrap_or_else(|| PictureFailure::new(PictureReason::Budget))),
         }
     }
 
@@ -2001,9 +2277,10 @@ impl<'c> PageImages<'c> {
             .min(MAX_PAGE_IMAGE_BYTES.saturating_sub(self.bytes) / 8)
             .min(MAX_IMAGE_PIXELS);
         let work_left = MAX_PAGE_SVG_WORK.saturating_sub(self.work);
-        let parsed = if ooxml_metafile::is_metafile(bytes) {
+        let metafile = ooxml_metafile::is_metafile(bytes);
+        let parsed = if metafile {
             let Ok(markup) = ooxml_metafile::to_svg_with_budget(bytes, &mut self.replay) else {
-                return Decode::Refused;
+                return Decode::Refused(PictureReason::Metafile);
             };
             let fontdb = if svg::has_text_element(markup.markup.as_bytes()) {
                 self.fonts.map(|fonts| self.cache.fontdb_for(fonts))
@@ -2021,31 +2298,79 @@ impl<'c> PageImages<'c> {
             {
                 return Decode::OverBudget;
             }
-            Err(_) => return Decode::Refused,
+            Err(_) if metafile => return Decode::Refused(PictureReason::Metafile),
+            Err(svg::SvgRefusal::DocumentTooLarge) if bytes.len() > svg::MAX_SVG_BYTES => {
+                return self.limit(
+                    PictureReason::TooLarge,
+                    svg::MAX_SVG_BYTES as u64,
+                    bytes.len() as u64,
+                    "bytes",
+                );
+            }
+            Err(
+                svg::SvgRefusal::RasterTooLarge
+                | svg::SvgRefusal::RenderTooCostly
+                | svg::SvgRefusal::DocumentTooLarge
+                | svg::SvgRefusal::ExpansionTooLarge
+                | svg::SvgRefusal::TooDeeplyNested
+                | svg::SvgRefusal::TooManyLayers,
+            ) => return Decode::Refused(PictureReason::TooLarge),
+            Err(
+                svg::SvgRefusal::NotSvg | svg::SvgRefusal::Unparsable | svg::SvgRefusal::Panicked,
+            ) => return Decode::Refused(PictureReason::DecodeFailed),
+            Err(_) => return Decode::Refused(PictureReason::Unsupported),
         };
         let pixels = image.pixels();
         let cost = pixels.saturating_mul(8);
-        if pixels > MAX_IMAGE_PIXELS || cost > MAX_IMAGE_BYTES {
-            return Decode::Refused;
+        if pixels > MAX_IMAGE_PIXELS {
+            return self.limit(PictureReason::TooLarge, MAX_IMAGE_PIXELS, pixels, "pixels");
         }
-        if self.pixels + pixels > MAX_PAGE_IMAGE_PIXELS || self.bytes + cost > MAX_PAGE_IMAGE_BYTES
-        {
-            return Decode::OverBudget;
+        if cost > MAX_IMAGE_BYTES {
+            return self.limit(PictureReason::TooLarge, MAX_IMAGE_BYTES, cost, "bytes");
+        }
+        if self.pixels + pixels > MAX_PAGE_IMAGE_PIXELS {
+            return self.limit(
+                PictureReason::Budget,
+                MAX_PAGE_IMAGE_PIXELS,
+                self.pixels + pixels,
+                "pixels",
+            );
+        }
+        if self.bytes + cost > MAX_PAGE_IMAGE_BYTES {
+            return self.limit(
+                PictureReason::Budget,
+                MAX_PAGE_IMAGE_BYTES,
+                self.bytes + cost,
+                "bytes",
+            );
+        }
+        if self.work + image.work() > MAX_PAGE_SVG_WORK {
+            return self.limit(
+                PictureReason::Budget,
+                MAX_PAGE_SVG_WORK,
+                self.work + image.work(),
+                "work",
+            );
         }
         self.pixels += pixels;
         self.bytes += cost;
         self.work += image.work();
         charge.pixels = pixels;
         charge.bytes_post = cost;
+        charge.work = image.work();
         IMAGE_DECODE_COUNT.fetch_add(1, Ordering::Relaxed);
         let Ok((mut data, size)) = image.render() else {
-            return Decode::Refused;
+            return Decode::Refused(if metafile {
+                PictureReason::Metafile
+            } else {
+                PictureReason::DecodeFailed
+            });
         };
         ooxml_raster::premultiply_rgba(&mut data);
         self.intrinsic = Some(image.intrinsic());
         match Pixmap::from_vec(data, size) {
             Some(pixmap) => Decode::Decoded(pixmap),
-            None => Decode::Refused,
+            None => Decode::Refused(PictureReason::DecodeFailed),
         }
     }
 
@@ -2059,17 +2384,40 @@ impl<'c> PageImages<'c> {
         height: u32,
         charge: &mut ImageCharge,
     ) -> Decode {
+        let declared = u64::from(width) * u64::from(height);
+        if ooxml_raster::downscale::reduced_size(width, height, MAX_IMAGE_PIXELS).is_none()
+            || !(bytes.starts_with(&[0xff, 0xd8]) || bytes.starts_with(b"\x89PNG\r\n\x1a\n"))
+        {
+            return self.limit(
+                PictureReason::TooLarge,
+                MAX_IMAGE_PIXELS,
+                declared,
+                "pixels",
+            );
+        }
         let Some((pixels, cost)) =
             ooxml_raster::downscale::reduced_cost(bytes, width, height, MAX_IMAGE_PIXELS)
         else {
-            return Decode::Refused;
+            return Decode::Refused(PictureReason::DecodeFailed);
         };
         if cost > MAX_IMAGE_BYTES {
-            return Decode::Refused;
+            return self.limit(PictureReason::TooLarge, MAX_IMAGE_BYTES, cost, "bytes");
         }
-        if self.pixels + pixels > MAX_PAGE_IMAGE_PIXELS || self.bytes + cost > MAX_PAGE_IMAGE_BYTES
-        {
-            return Decode::OverBudget;
+        if self.pixels + pixels > MAX_PAGE_IMAGE_PIXELS {
+            return self.limit(
+                PictureReason::Budget,
+                MAX_PAGE_IMAGE_PIXELS,
+                self.pixels + pixels,
+                "pixels",
+            );
+        }
+        if self.bytes + cost > MAX_PAGE_IMAGE_BYTES {
+            return self.limit(
+                PictureReason::Budget,
+                MAX_PAGE_IMAGE_BYTES,
+                self.bytes + cost,
+                "bytes",
+            );
         }
         self.pixels += pixels;
         self.bytes += cost;
@@ -2079,12 +2427,12 @@ impl<'c> PageImages<'c> {
         let Some((mut data, width, height)) =
             ooxml_raster::downscale::decode_reduced(bytes, MAX_IMAGE_PIXELS)
         else {
-            return Decode::Refused;
+            return Decode::Refused(PictureReason::DecodeFailed);
         };
         ooxml_raster::premultiply_rgba(&mut data);
         match IntSize::from_wh(width, height).and_then(|size| Pixmap::from_vec(data, size)) {
             Some(pixmap) => Decode::Decoded(pixmap),
-            None => Decode::Refused,
+            None => Decode::Refused(PictureReason::DecodeFailed),
         }
     }
 
@@ -2096,6 +2444,14 @@ impl<'c> PageImages<'c> {
     fn decode(&mut self, bytes: &[u8], charge: &mut ImageCharge) -> Decode {
         use image::ImageDecoder as _;
 
+        if bytes.len() as u64 > MAX_IMAGE_BYTES {
+            return self.limit(
+                PictureReason::TooLarge,
+                MAX_IMAGE_BYTES,
+                bytes.len() as u64,
+                "bytes",
+            );
+        }
         if ooxml_metafile::is_metafile(bytes) || svg::looks_like_svg(bytes) {
             return self.decode_vector(bytes, charge);
         }
@@ -2105,15 +2461,25 @@ impl<'c> PageImages<'c> {
             .with_guessed_format()
             .ok()
         else {
-            return Decode::Refused;
+            return Decode::Refused(PictureReason::DecodeFailed);
         };
+        if reader.format().is_none() {
+            return Decode::Refused(PictureReason::Unsupported);
+        }
         if reader.format() == Some(image::ImageFormat::Tiff)
             && ooxml_drawingml::media::tiff_bounded_pixels(&bytes).is_none()
         {
-            return Decode::Refused;
+            return Decode::Refused(PictureReason::Unsupported);
         }
-        let Ok(mut decoder) = reader.into_decoder() else {
-            return Decode::Refused;
+        let mut decoder = match reader.into_decoder() {
+            Ok(decoder) => decoder,
+            Err(image::ImageError::Limits(_)) => {
+                return Decode::Refused(PictureReason::TooLarge);
+            }
+            Err(image::ImageError::Unsupported(_)) => {
+                return Decode::Refused(PictureReason::Unsupported);
+            }
+            Err(_) => return Decode::Refused(PictureReason::DecodeFailed),
         };
         let (declared_width, declared_height) = decoder.dimensions();
         let declared = u64::from(declared_width) * u64::from(declared_height);
@@ -2121,16 +2487,26 @@ impl<'c> PageImages<'c> {
             return self.decode_reduced(&bytes, declared_width, declared_height, charge);
         }
         if self.pixels + declared > MAX_PAGE_IMAGE_PIXELS {
-            return Decode::OverBudget;
+            return self.limit(
+                PictureReason::Budget,
+                MAX_PAGE_IMAGE_PIXELS,
+                self.pixels + declared,
+                "pixels",
+            );
         }
         let cost = decoder
             .total_bytes()
             .saturating_add(declared.saturating_mul(4));
         if cost > MAX_IMAGE_BYTES {
-            return Decode::Refused;
+            return self.limit(PictureReason::TooLarge, MAX_IMAGE_BYTES, cost, "bytes");
         }
         if self.bytes + cost > MAX_PAGE_IMAGE_BYTES {
-            return Decode::OverBudget;
+            return self.limit(
+                PictureReason::Budget,
+                MAX_PAGE_IMAGE_BYTES,
+                self.bytes + cost,
+                "bytes",
+            );
         }
         self.pixels += declared;
         self.bytes += cost;
@@ -2140,28 +2516,38 @@ impl<'c> PageImages<'c> {
         let image_left = MAX_IMAGE_BYTES.saturating_sub(cost);
         let page_left = MAX_PAGE_IMAGE_BYTES.saturating_sub(self.bytes);
         let limits = decoder_limits(declared_width, declared_height, image_left.min(page_left));
-        if decoder.set_limits(limits).is_err() {
-            return Decode::Refused;
+        if let Err(error) = decoder.set_limits(limits) {
+            return Decode::Refused(match error {
+                image::ImageError::Limits(_) => PictureReason::TooLarge,
+                _ => PictureReason::DecodeFailed,
+            });
         }
-        let Ok(orientation) = decoder.orientation() else {
-            return Decode::Refused;
+        let orientation = match decoder.orientation() {
+            Ok(orientation) => orientation,
+            Err(image::ImageError::Limits(_)) => {
+                return Decode::Refused(PictureReason::TooLarge);
+            }
+            Err(_) => return Decode::Refused(PictureReason::DecodeFailed),
         };
         let mut decoded = match image::DynamicImage::from_decoder(decoder) {
             Ok(decoded) => decoded,
             Err(image::ImageError::Limits(_)) if page_left < image_left => {
                 return Decode::OverBudget;
             }
-            Err(_) => return Decode::Refused,
+            Err(image::ImageError::Limits(_)) => {
+                return Decode::Refused(PictureReason::TooLarge);
+            }
+            Err(_) => return Decode::Refused(PictureReason::DecodeFailed),
         };
         decoded.apply_orientation(orientation);
         let Some(size) = IntSize::from_wh(decoded.width(), decoded.height()) else {
-            return Decode::Refused;
+            return Decode::Refused(PictureReason::DecodeFailed);
         };
         let mut data = decoded.into_rgba8().into_raw();
         ooxml_raster::premultiply_rgba(&mut data);
         match Pixmap::from_vec(data, size) {
             Some(pixmap) => Decode::Decoded(pixmap),
-            None => Decode::Refused,
+            None => Decode::Refused(PictureReason::DecodeFailed),
         }
     }
 }
@@ -3453,6 +3839,263 @@ fn ensure_keys(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn picture_scene(references: &[&str]) -> DisplayList {
+        let primitives: Vec<Value> = references
+            .iter()
+            .enumerate()
+            .map(|(index, reference)| {
+                json!({
+                    "kind": "image",
+                    "relId": reference,
+                    "x": 2 + index * 16,
+                    "y": 2,
+                    "w": 12,
+                    "h": 12
+                })
+            })
+            .collect();
+        serde_json::from_value(json!({
+            "pages": [{
+                "pageIndex": 0,
+                "width": references.len() * 16 + 4,
+                "height": 20,
+                "primitives": primitives
+            }]
+        }))
+        .expect("display list")
+    }
+
+    fn render_pictures(
+        scene: &DisplayList,
+        images: &ImageMap,
+        cache: &mut ImageCache,
+        scale: f32,
+    ) -> RenderedPage {
+        let fonts = FontStore::new();
+        let chains = FontChains::new();
+        let resources = RenderResources::new(&fonts, &chains, images);
+        render_page_cached_scaled(
+            scene,
+            0,
+            &resources,
+            &mut GlyphCache::default(),
+            cache,
+            scale,
+        )
+        .expect("render")
+    }
+
+    fn picture_pixel(bytes: &[u8], x: u32, y: u32) -> [u8; 4] {
+        let pixels = image::load_from_memory(bytes).expect("png").into_rgba8();
+        pixels.get_pixel(x, y).0
+    }
+
+    #[test]
+    fn missing_and_unknown_pictures_paint_scaled_placeholders_and_report_reasons() {
+        let scene = picture_scene(&["rIdMissing", "rIdGarbage"]);
+        let images = ImageMap::from([("rIdGarbage".to_owned(), b"not an image".to_vec())]);
+        let mut cache = ImageCache::default();
+        for scale in [1, 2] {
+            let rendered = render_pictures(&scene, &images, &mut cache, scale as f32);
+            assert_eq!(rendered.skipped_images, 2);
+            assert_eq!(rendered.skipped_images, rendered.skipped_pictures.len());
+            assert_eq!(
+                rendered.skipped_pictures,
+                vec![
+                    SkippedPicture {
+                        id: "rIdMissing".to_owned(),
+                        reason: PictureReason::Missing,
+                        limit: None,
+                        actual: None,
+                        unit: None,
+                    },
+                    SkippedPicture {
+                        id: "rIdGarbage".to_owned(),
+                        reason: PictureReason::Unsupported,
+                        limit: None,
+                        actual: None,
+                        unit: None,
+                    },
+                ],
+            );
+            for x in [2, 18] {
+                assert_eq!(
+                    picture_pixel(&rendered.bytes, (x + 6) * scale, 8 * scale),
+                    PLACEHOLDER_FILL,
+                );
+                assert_eq!(
+                    picture_pixel(&rendered.bytes, x * scale, 8 * scale),
+                    PLACEHOLDER_BORDER,
+                );
+                assert_eq!(
+                    picture_pixel(&rendered.bytes, (x - 1) * scale, 8 * scale),
+                    [255, 255, 255, 255],
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_missing_picture_fill_paints_a_placeholder_instead_of_its_solid_fill() {
+        for paint in [
+            json!({"kind": "picture", "pictureRelId": "rIdMissing"}),
+            json!({"kind": "picture"}),
+        ] {
+            let id = paint
+                .get("pictureRelId")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let scene: DisplayList = serde_json::from_value(json!({
+                "pages": [{
+                    "pageIndex": 0,
+                    "width": 20,
+                    "height": 20,
+                    "primitives": [{
+                        "kind": "shape",
+                        "x": 2,
+                        "y": 2,
+                        "w": 12,
+                        "h": 12,
+                        "geometryPath": [
+                            {"type": "move", "x": 2, "y": 2},
+                            {"type": "line", "x": 14, "y": 2},
+                            {"type": "line", "x": 14, "y": 14},
+                            {"type": "line", "x": 2, "y": 14},
+                            {"type": "close"}
+                        ],
+                        "fill": "#0000ff",
+                        "fillPaint": paint,
+                        "stroke": {"color": "#00ff00", "width": 2}
+                    }]
+                }]
+            }))
+            .expect("display list");
+            let rendered =
+                render_pictures(&scene, &ImageMap::new(), &mut ImageCache::default(), 1.0);
+            assert_eq!(picture_pixel(&rendered.bytes, 8, 8), PLACEHOLDER_FILL);
+            assert_eq!(picture_pixel(&rendered.bytes, 2, 8), [0, 255, 0, 255]);
+            assert_eq!(rendered.skipped_images, 1);
+            assert_eq!(rendered.skipped_pictures.len(), 1);
+            let picture = &rendered.skipped_pictures[0];
+            assert_eq!(picture.id, id);
+            assert_eq!(picture.reason, PictureReason::Missing);
+            assert_eq!(picture.limit, None);
+            assert_eq!(picture.actual, None);
+            assert_eq!(picture.unit, None);
+        }
+    }
+
+    #[test]
+    fn repeated_cached_refusals_keep_each_reference_and_hide_data_payloads() {
+        let scene = picture_scene(&[
+            "rIdFirst",
+            "rIdSecond",
+            "rIdFirst",
+            "rIdBrokenPng",
+            "data:image/png;base64,%%%%",
+            "data:image/jpeg;base64,%%%%",
+            "data:image/png,private-payload",
+        ]);
+        let images = ImageMap::from([
+            ("rIdFirst".to_owned(), b"not an image".to_vec()),
+            ("rIdSecond".to_owned(), b"not an image".to_vec()),
+            ("rIdBrokenPng".to_owned(), b"\x89PNG\r\n\x1a\n".to_vec()),
+        ]);
+        let mut cache = ImageCache::default();
+        let expected = [
+            ("rIdFirst", PictureReason::Unsupported),
+            ("rIdSecond", PictureReason::Unsupported),
+            ("rIdFirst", PictureReason::Unsupported),
+            ("rIdBrokenPng", PictureReason::DecodeFailed),
+            ("data:image/png;base64", PictureReason::DecodeFailed),
+            ("data:image/jpeg;base64", PictureReason::DecodeFailed),
+            ("data:image/png", PictureReason::Missing),
+        ];
+        for _ in 0..2 {
+            let rendered = render_pictures(&scene, &images, &mut cache, 1.0);
+            assert_eq!(rendered.skipped_images, expected.len());
+            assert_eq!(rendered.skipped_images, rendered.skipped_pictures.len());
+            for (picture, (id, reason)) in rendered.skipped_pictures.iter().zip(expected) {
+                assert_eq!(picture.id, id);
+                assert_eq!(picture.reason, reason);
+                assert_eq!(picture.limit, None);
+                assert_eq!(picture.actual, None);
+                assert_eq!(picture.unit, None);
+            }
+        }
+    }
+
+    #[test]
+    fn an_oversized_picture_keeps_its_pixel_limit_and_actual_size_in_the_cache() {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(concat!(
+                "iVBORw0KGgoAAAANSUhEUgAAnEAAAJxACAIAAADebplS",
+                "AAAAC0lEQVR4nGNgQAUAABAAATm9j2UAAAAASUVORK5CYII=",
+            ))
+            .expect("png header");
+        let images = ImageMap::from([
+            ("rIdHuge".to_owned(), bytes.clone()),
+            ("rIdHugeAgain".to_owned(), bytes),
+        ]);
+        let scene = picture_scene(&["rIdHuge", "rIdHugeAgain"]);
+        let mut cache = ImageCache::default();
+        for _ in 0..2 {
+            let rendered = render_pictures(&scene, &images, &mut cache, 1.0);
+            assert_eq!(rendered.skipped_images, 2);
+            assert_eq!(rendered.skipped_pictures.len(), 2);
+            for (picture, id) in rendered
+                .skipped_pictures
+                .iter()
+                .zip(["rIdHuge", "rIdHugeAgain"])
+            {
+                assert_eq!(picture.id, id);
+                assert_eq!(picture.reason, PictureReason::TooLarge);
+                assert_eq!(picture.limit, Some(MAX_IMAGE_PIXELS));
+                assert_eq!(picture.actual, Some(40_000 * 40_000));
+                assert!(picture.actual > picture.limit);
+                assert_eq!(picture.unit, Some("pixels"));
+            }
+        }
+    }
+
+    #[test]
+    fn a_cached_picture_reports_the_page_total_it_would_have_reached() {
+        let mut cache = ImageCache::default();
+        let source = b"cached picture";
+        let key = cache.key(&ImageSource::Registered(source));
+        cache.insert(
+            key,
+            Ok(Arc::new(Pixmap::new(1, 1).expect("picture"))),
+            ImageCharge {
+                pixels: 64,
+                bytes_post: 256,
+                ..ImageCharge::default()
+            },
+        );
+        let mut page = PageImages::new(&mut cache);
+        page.pixels = MAX_PAGE_IMAGE_PIXELS - 32;
+        for id in ["rIdFirst", "rIdSecond"] {
+            assert!(page.resolve(id, ImageSource::Registered(source)).is_none());
+        }
+        assert_eq!(page.skipped, page.pictures.len());
+        assert_eq!(page.skipped, 2);
+        for (picture, id) in page.pictures.iter().zip(["rIdFirst", "rIdSecond"]) {
+            assert_eq!(picture.id, id);
+            assert_eq!(picture.reason, PictureReason::Budget);
+            assert_eq!(picture.limit, Some(MAX_PAGE_IMAGE_PIXELS));
+            assert_eq!(picture.actual, Some(MAX_PAGE_IMAGE_PIXELS + 32));
+            assert_eq!(picture.unit, Some("pixels"));
+        }
+        let mut next = PageImages::new(&mut cache);
+        assert!(
+            next.resolve("rIdFirst", ImageSource::Registered(source))
+                .is_some()
+        );
+        assert!(next.pictures.is_empty());
+    }
 
     /// A 2x1 uncompressed 8-bit RGB TIFF with this compression tag.
     fn rgb_tiff(compression: u16) -> Vec<u8> {
@@ -3722,6 +4365,7 @@ mod tests {
                 key,
                 CachedImage {
                     outcome: None,
+                    refusal: Some(PictureFailure::new(PictureReason::Unsupported)),
                     charge: ImageCharge::default(),
                     weight,
                     stamp: cache.clock,
@@ -3761,13 +4405,20 @@ mod tests {
             bytes_pre: 100,
             pixels: 64,
             bytes_post: 1_000,
+            work: 10,
         };
         assert!(page.charge(charge));
         assert_eq!(page.bytes, 1_100);
         assert_eq!(page.pixels, 64);
+        assert_eq!(page.work, 10);
         let mut broke = PageImages::new(&mut cache);
         broke.bytes = MAX_PAGE_IMAGE_BYTES;
         assert!(!broke.charge(charge));
+        let failure = broke.refusal.expect("budget refusal");
+        assert_eq!(failure.reason, PictureReason::Budget);
+        assert_eq!(failure.limit, Some(MAX_PAGE_IMAGE_BYTES));
+        assert_eq!(failure.actual, Some(MAX_PAGE_IMAGE_BYTES + 100));
+        assert_eq!(failure.unit, Some("bytes"));
     }
 
     fn gif_bytes(width: u32, height: u32) -> Vec<u8> {
@@ -3790,9 +4441,13 @@ mod tests {
         let mut crowded = PageImages::new(&mut cache);
         crowded.pixels = MAX_PAGE_IMAGE_PIXELS - 16;
         crowded.bytes = MAX_PAGE_IMAGE_BYTES - 1024;
-        assert!(crowded.resolve(ImageSource::Registered(&gif)).is_none());
+        assert!(
+            crowded
+                .resolve("rIdGif", ImageSource::Registered(&gif))
+                .is_none()
+        );
         let pixmap = PageImages::new(&mut cache)
-            .resolve(ImageSource::Registered(&gif))
+            .resolve("rIdGif", ImageSource::Registered(&gif))
             .expect("a page with budget left decodes it");
         assert_eq!((pixmap.width(), pixmap.height()), (1, 1));
 

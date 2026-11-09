@@ -714,7 +714,7 @@ fn a_tile_grid_past_the_cap_stretches_the_picture_once() {
 }
 
 #[test]
-fn a_picture_fill_it_cannot_resolve_keeps_the_solid_fill_and_counts_it() {
+fn a_picture_fill_it_cannot_resolve_paints_a_placeholder_and_counts_it() {
     let (fonts, chains, images) = empty_resources();
     let resources = RenderResources::new(&fonts, &chains, &images);
     let scene = list(
@@ -726,7 +726,7 @@ fn a_picture_fill_it_cannot_resolve_keeps_the_solid_fill_and_counts_it() {
         )],
     );
     let rendered = render_page(&scene, 0, &resources).unwrap();
-    assert_eq!(pixel(&rendered.bytes, 14, 14), [0, 0, 255, 255]);
+    assert_eq!(pixel(&rendered.bytes, 14, 14), [242, 242, 242, 255]);
     assert_eq!(rendered.skipped_images, 1);
 }
 
@@ -1382,7 +1382,7 @@ fn an_image_past_the_pixel_budget_is_skipped_not_an_error() {
     for reference in [BOMB_40000_SQUARE, BOMB_9000_SQUARE] {
         let png = render_png(&image_list(reference), 0, &resources)
             .unwrap_or_else(|error| panic!("an oversized image failed the page: {error}"));
-        assert_eq!(pixel(&png, 10, 10), [255, 255, 255, 255]);
+        assert_eq!(pixel(&png, 10, 10), [242, 242, 242, 255]);
     }
 }
 
@@ -1444,7 +1444,7 @@ fn a_page_stops_decoding_once_its_pixel_budget_is_spent() {
     );
     let rendered = render_page(&list, 0, &resources).expect("render");
     assert_eq!(rendered.skipped_images, 3);
-    assert_eq!(pixel(&rendered.bytes, 10, 10), [255, 255, 255, 255]);
+    assert_eq!(pixel(&rendered.bytes, 10, 10), [242, 242, 242, 255]);
 }
 
 /// `ImageMap` shipped documented and keyed by bare relationship id, and a
@@ -1460,8 +1460,6 @@ fn a_legacy_unscoped_image_key_still_resolves_in_the_body() {
     assert_eq!(pixel(&rendered.bytes, 10, 10), [0x11, 0x66, 0xcc, 255]);
 }
 
-/// The legacy key is the body's alone. Reaching one from a header is the
-/// cross-part lookup scoping exists to prevent, so it stays a hole.
 #[test]
 fn a_legacy_unscoped_image_key_resolves_in_no_other_part() {
     let (fonts, chains) = (FontStore::new(), FontChains::new());
@@ -1487,7 +1485,7 @@ fn a_legacy_unscoped_image_key_resolves_in_no_other_part() {
     .expect("display list");
     let rendered = render_page(&scene, 0, &resources).expect("render");
     assert_eq!(rendered.skipped_images, 1);
-    assert_eq!(pixel(&rendered.bytes, 10, 10), [255, 255, 255, 255]);
+    assert_eq!(pixel(&rendered.bytes, 10, 10), [242, 242, 242, 255]);
 }
 
 /// Scoping runs both ways. A body relationship id that spells a header's
@@ -1503,11 +1501,9 @@ fn a_body_relationship_id_cannot_spell_another_parts_scoped_key() {
     let rendered =
         render_page(&image_list("hf:rId7\u{1f}rIdImage"), 0, &resources).expect("render");
     assert_eq!(rendered.skipped_images, 1);
-    assert_eq!(pixel(&rendered.bytes, 10, 10), [255, 255, 255, 255]);
+    assert_eq!(pixel(&rendered.bytes, 10, 10), [242, 242, 242, 255]);
 }
 
-/// A skipped reference leaves a hole in an otherwise successful page, so the
-/// count is the only thing a caller can log about it.
 #[test]
 fn a_render_reports_every_image_reference_it_skipped() {
     let (fonts, chains, images) = empty_resources();
@@ -1540,7 +1536,7 @@ fn undecodable_image_bytes_are_skipped_like_an_unresolvable_reference() {
     ] {
         let png = render_png(&image_list(reference), 0, &resources)
             .unwrap_or_else(|error| panic!("`{reference}` failed the page: {error}"));
-        assert_eq!(pixel(&png, 10, 10), [255, 255, 255, 255]);
+        assert_eq!(pixel(&png, 10, 10), [242, 242, 242, 255]);
     }
 }
 

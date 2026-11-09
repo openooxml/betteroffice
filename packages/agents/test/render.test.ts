@@ -155,6 +155,27 @@ test('skips oversized rasters and SVG before native image decoding', async () =>
   }
 });
 
+test('a picture no engine can draw previews as a placeholder with a warning', async () => {
+  const doc = await openDocx(await imageFixture(new Uint8Array([137, 80, 78, 71, 1, 2, 3, 4]), 'png', 'image/png'));
+  try {
+    const preview = await doc.render(1);
+    expect([...preview.png.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+    expect(preview.warnings).toContain('1 picture(s) could not be drawn; the preview shows a placeholder in their place.');
+  } finally { doc.close(); }
+});
+
+test('engine diagnostics become one warning line', async () => {
+  const doc = await openDocx(await fixture());
+  const png = new Uint8Array(await createCanvas(12, 7).encode('png'));
+  const render = spyOn(doc.session, 'renderPng').mockImplementation(async (_target, options) => {
+    options?.onDiagnostic?.({ code: 'picture-unavailable', pictures: [{ id: 'media:0', reason: 'metafile' }, { id: 'media:1', reason: 'budget', limit: 10, actual: 12, unit: 'pixels' }] });
+    return png;
+  });
+  try {
+    expect((await renderDocxPage(doc.session, 1)).warnings).toContain('2 picture(s) could not be drawn; the preview shows a placeholder in their place.');
+  } finally { render.mockRestore(); doc.close(); }
+});
+
 test('DOCX previews use the engine PNG where it can draw', async () => {
   const zip = await JSZip.loadAsync(await fixture());
   zip.file('word/document.xml', (await zip.file('word/document.xml')!.async('string')).replace('<w:br w:type="page"/>', ''));
@@ -165,7 +186,7 @@ test('DOCX previews use the engine PNG where it can draw', async () => {
   try {
     const preview = await renderDocxPage(doc.session, 1);
     expect(render).toHaveBeenCalledTimes(1);
-    expect(render).toHaveBeenCalledWith({ page: 0 });
+    expect(render).toHaveBeenCalledWith({ page: 0 }, { onDiagnostic: expect.any(Function) });
     expect(preview.png).toBe(png);
     expect(preview).toMatchObject({ page: 1, pageCount: 1, width: 12, height: 7 });
     expect(build).not.toHaveBeenCalled();
@@ -179,7 +200,7 @@ test('DOCX previews fall back to canvas when the engine cannot draw', async () =
   try {
     const preview = await renderDocxPage(doc.session, 1);
     expect(render).toHaveBeenCalledTimes(1);
-    expect(render).toHaveBeenCalledWith({ page: 0 });
+    expect(render).toHaveBeenCalledWith({ page: 0 }, { onDiagnostic: expect.any(Function) });
     expect(build).toHaveBeenCalled();
     expect([...preview.png.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
     expect(preview.pageCount).toBeGreaterThan(0);

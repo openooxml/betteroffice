@@ -1,4 +1,4 @@
-import { PngExportError } from '../../../../../shared/office-session/pngExportError';
+import { PngExportError, type PngDiagnostic } from '../../../../../shared/office-session/pngExportError';
 import type { BundledFontProvider } from '../measure';
 import type { DisplayPage } from './displayList';
 
@@ -22,6 +22,8 @@ export interface DocxPngOptions {
   fonts?: ReadonlyArray<DocxPngFontFace>;
   /** The provider the editor showing this document measures with, where it has one. */
   fontProvider?: BundledFontProvider;
+  /** Told, once per page, about pictures drawn as a placeholder because they could not be drawn. */
+  onDiagnostic?: (diagnostic: PngDiagnostic) => void;
 }
 
 /** Whether this runtime can paint and encode a PNG on a canvas: one with a 2d context, not only a document. */
@@ -33,10 +35,6 @@ export function canvasPngAvailable(): boolean {
 
 export function canvasUnavailable(): PngExportError {
   return new PngExportError('canvas-unavailable', 'PNG export needs a canvas, and this environment has none. Use @betteroffice/docx-native.');
-}
-
-export function pictureUnavailable(): PngExportError {
-  return new PngExportError('canvas-unavailable', 'This page has SVG or metafile pictures, which decode only with a document. Export from the page, or use @betteroffice/docx-native.');
 }
 
 export function fontUnavailable(detail: string): PngExportError {

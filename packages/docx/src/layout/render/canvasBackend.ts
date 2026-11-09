@@ -39,6 +39,27 @@ export interface DrawPageOptions {
   fontFamilies?: ReadonlyMap<string, string>;
   /** Told when a glyph run's outlines fail and it falls back to `fillText`. */
   onGlyphFallback?: (error: unknown) => void;
+  /** With it set, a picture that resolves to nothing paints a placeholder and is reported here, instead of being left out. */
+  onPictureUnavailable?: (relId: string) => void;
+}
+
+/** What a picture that cannot be drawn paints for PNG export: a light box with a border, no text. */
+const PLACEHOLDER_FILL = 'rgb(242, 242, 242)';
+const PLACEHOLDER_BORDER = 'rgb(191, 191, 191)';
+
+function paintPicturePlaceholder(ctx: CanvasRenderingContext2D, trace: () => void): void {
+  ctx.fillStyle = PLACEHOLDER_FILL;
+  trace();
+  ctx.fill();
+  ctx.save();
+  trace();
+  ctx.clip();
+  ctx.strokeStyle = PLACEHOLDER_BORDER;
+  ctx.lineWidth = 2;
+  ctx.setLineDash([]);
+  trace();
+  ctx.stroke();
+  ctx.restore();
 }
 
 /**
@@ -293,7 +314,7 @@ async function drawPrimitiveCore(
       drawLine(ctx, primitive);
       break;
     case 'shape':
-      await drawShape(ctx, primitive, options.resolveImage);
+      await drawShape(ctx, primitive, options.resolveImage, options.onPictureUnavailable);
       break;
     case 'decoration':
       if (primitive.style && primitive.style !== 'solid') {
@@ -333,7 +354,7 @@ async function drawPrimitiveCore(
       ctx.fillRect(primitive.x, primitive.y, primitive.w, primitive.h);
       break;
     case 'image':
-      await drawImagePrimitive(ctx, primitive, options.resolveImage);
+      await drawImagePrimitive(ctx, primitive, options.resolveImage, options.onPictureUnavailable);
       break;
     default:
       throw unknownPrimitiveError(primitive);
@@ -577,7 +598,8 @@ function drawLine(ctx: CanvasRenderingContext2D, line: LinePrimitive): void {
 async function drawShape(
   ctx: CanvasRenderingContext2D,
   shape: ShapePrimitive,
-  resolveImage: ImageResolver | undefined
+  resolveImage: ImageResolver | undefined,
+  onPictureUnavailable?: (relId: string) => void
 ): Promise<void> {
   const fillPaint = shape.fillPaint;
   const strokePaint = shape.strokePaint;
@@ -601,6 +623,12 @@ async function drawShape(
     const source = await resolveImage(pictureSource);
     if (source) {
       drawPictureShapeFill(ctx, shape, path, source);
+    } else if (onPictureUnavailable) {
+      onPictureUnavailable(pictureSource);
+      paintPicturePlaceholder(ctx, () => {
+        ctx.beginPath();
+        appendShapePath(ctx, shape.geometryPath);
+      });
     } else {
       // unresolvable picture: fall back to the legacy solid fill so the shape
       // is not invisible (matches the pre-picture-payload behavior baseline)
@@ -1352,15 +1380,16 @@ function strokeSegment(
 async function drawImagePrimitive(
   ctx: CanvasRenderingContext2D,
   image: ImagePrimitive,
-  resolveImage: ImageResolver | undefined
+  resolveImage: ImageResolver | undefined,
+  onPictureUnavailable?: (relId: string) => void
 ): Promise<void> {
   if (!resolveImage) return;
   const source = await resolveImage(image.relId);
-  if (!source) return;
+  if (!source && !onPictureUnavailable) return;
   const frame = imageContentFrame(image);
   ctx.save();
   multiplyGlobalAlpha(ctx, image.opacity);
-  const filter = imageFilter(image);
+  const filter = source ? imageFilter(image) : undefined;
   if (filter && 'filter' in ctx) {
     (ctx as CanvasRenderingContext2D & { filter: string }).filter = filter;
   }
@@ -1372,7 +1401,16 @@ async function drawImagePrimitive(
     if (image.flipH || image.flipV) ctx.scale(image.flipH ? -1 : 1, image.flipV ? -1 : 1);
     ctx.translate(-cx, -cy);
   }
-  if (image.shapeType === 'ellipse') {
+  if (!source) {
+    onPictureUnavailable?.(image.relId);
+    paintPicturePlaceholder(ctx, () => {
+      if (image.shapeType === 'ellipse') traceImageEllipse(ctx, frame);
+      else {
+        ctx.beginPath();
+        ctx.rect(frame.x, frame.y, frame.w, frame.h);
+      }
+    });
+  } else if (image.shapeType === 'ellipse') {
     ctx.save();
     traceImageEllipse(ctx, frame);
     ctx.clip();

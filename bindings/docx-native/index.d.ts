@@ -35,6 +35,7 @@ export declare class EditSession {
   reset_frame_base(): void
   build_display_list_json(input: string): string
   renderPngTarget(displayListJson: string, targetJson: string, optionsJson: string): Uint8Array
+  renderPngTargetReport(displayListJson: string, targetJson: string, optionsJson: string): PngTargetReport
   build_display_list_frame(input: string, expectedFrameEpoch: number): Uint8Array
   set_display_window(start: number, end: number): void
   set_display_retain_built_pages(retain: boolean): void
@@ -328,6 +329,19 @@ export declare function parse_docx_s8(data: Uint8Array): string
 export declare function parse_docx_s9(data: Uint8Array, optionsJson: string): string
 
 export declare function parse_relationships_xml(xml: Uint8Array, partPath: string): string
+
+export interface PngPictureReport {
+  id: string
+  reason: string
+  limit?: number
+  actual?: number
+  unit?: string
+}
+
+export interface PngTargetReport {
+  png: Uint8Array
+  pictures: Array<PngPictureReport>
+}
 
 export declare function range_rects_by_handle(handle: number, from: number, to: number): string
 

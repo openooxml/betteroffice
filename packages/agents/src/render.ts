@@ -6,16 +6,19 @@ import type { ResidentFontRequirement } from '@betteroffice/docx/layout';
 import { cleanupGuard } from './cleanup';
 import { DocumentToolError, type DocumentRenderer } from './types';
 
+const placeholderWarning = (count: number) => `${count} picture(s) could not be drawn; the preview shows a placeholder in their place.`;
+
 const previewWarning = 'Preview uses BetterOffice layout and bundled substitute fonts; compare with the target Office application when exact fidelity matters.';
 
 export const renderDocxPage: DocumentRenderer = async (session, pageNumber) => {
   try {
-    const png = await session.renderPng({ page: pageNumber - 1 });
+    let placeholders = 0;
+    const png = await session.renderPng({ page: pageNumber - 1 }, { onDiagnostic: (diagnostic) => { placeholders += diagnostic.pictures.length; } });
     const prepared = await layoutDocxPage(session);
     const release = cleanupGuard(prepared.dispose);
     try {
       const view = new DataView(png.buffer, png.byteOffset, png.byteLength);
-      return { png, page: pageNumber, pageCount: prepared.layout.pages.length, width: view.getUint32(16), height: view.getUint32(20), warnings: [previewWarning, ...(!prepared.notesConverged ? ['Footnote pagination did not converge.'] : [])] };
+      return { png, page: pageNumber, pageCount: prepared.layout.pages.length, width: view.getUint32(16), height: view.getUint32(20), warnings: [previewWarning, ...(!prepared.notesConverged ? ['Footnote pagination did not converge.'] : []), ...(placeholders ? [placeholderWarning(placeholders)] : [])] };
     } catch (error) { throw release.failed(error); } finally { release.run(); }
   } catch (error) {
     const code = (error as { code?: unknown } | null)?.code;
@@ -91,8 +94,10 @@ const renderDocxPageCanvas: DocumentRenderer = async (original, pageNumber) => {
       provider: (font, glyph) => session.outlineGlyphJson(font, glyph),
       createPath: () => new Path2D() as unknown as globalThis.Path2D,
     });
+    let placeholders = 0;
     await drawDisplayPage(canvas.getContext('2d') as unknown as CanvasRenderingContext2D, { ...page, background: page.background ?? '#ffffff' }, {
       glyphCache,
+      onPictureUnavailable: () => { placeholders++; },
       resolveImage: async (id) => {
         if (images.has(id)) return images.get(id) as unknown as CanvasImageSource | null;
         const relationship = document.package.relationships?.get(id);
@@ -116,6 +121,7 @@ const renderDocxPageCanvas: DocumentRenderer = async (original, pageNumber) => {
         } catch (error) { warnings.add(error instanceof DocumentToolError ? error.message : 'An embedded image could not be decoded.'); images.set(id, null); return null; }
       },
     });
+    if (placeholders) warnings.add(placeholderWarning(placeholders));
     return { png: await canvas.encode('png'), page: pageNumber, pageCount: display.pages.length, width: canvas.width, height: canvas.height, warnings: [...warnings] };
   } catch (error) { throw release.failed(error); } finally { release.run(); }
 };
