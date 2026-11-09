@@ -35,7 +35,7 @@ export declare class XlsxDocument {
   displayListProfiledJson(viewportJson: string): string
   chartAtPointJson(args: string): string
   moveChartJson(args: string): string
-  renderPngTarget(targetJson: string, optionsJson: string): Uint8Array
+  renderPngTarget(targetJson: string, optionsJson: string, fonts?: Array<PngFontFace> | undefined | null): Uint8Array
   sheetInfoJson(): string
   sheetCount(): number
   sheetInfoForJson(sheet: number): string
@@ -113,6 +113,14 @@ export declare function configureFontPacks(latin?: string | undefined | null, in
 export interface DecodedFontFace {
   font: Uint8Array
   payload?: Uint8Array
+}
+
+/** A face one PNG export paints with. */
+export interface PngFontFace {
+  family: string
+  bold?: boolean
+  italic?: boolean
+  bytes: Uint8Array
 }
 
 /** Decodes one font pack face using this engine's linked decoder. */

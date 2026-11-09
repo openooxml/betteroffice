@@ -101,6 +101,26 @@ impl RasterFonts {
             .map(|face| face.data.as_ref())
     }
 
+    /// Appends `other`'s faces for one font after this chain's, as far as the limits allow.
+    #[doc(hidden)]
+    pub fn extend_chain(&mut self, other: &RasterFonts, family: &str, bold: bool, italic: bool) {
+        for face in other.chain(family, bold, italic) {
+            if self
+                .register_shared_font(
+                    family,
+                    bold,
+                    italic,
+                    Arc::clone(&face.data),
+                    face.bold,
+                    face.italic,
+                )
+                .is_err()
+            {
+                break;
+            }
+        }
+    }
+
     fn chain(&self, family: &str, bold: bool, italic: bool) -> &[font::FontFace] {
         self.faces
             .get(&(family.trim().to_lowercase(), bold, italic))

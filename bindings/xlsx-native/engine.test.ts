@@ -126,6 +126,65 @@ function runScript(doc: EngineDocument) {
 }
 
 describe('xlsx native engine parity', () => {
+  describe('renderPng fonts option', () => {
+    const face = (name: string) => new Uint8Array(readFileSync(new URL(`../../crates/betteroffice-fonts/tests/fixtures/Synthetic-${name}.ttf`, import.meta.url)));
+    const regular = face('Regular');
+    const bold = face('Bold');
+    const view = { sheet: 0, viewport: { x: 0, y: 0, width: 300, height: 80 } };
+
+    async function openFixture() {
+      const main = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
+      const rels = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+      const zip = new JSZip();
+      zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>');
+      zip.file('_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rels}/officeDocument" Target="xl/workbook.xml"/></Relationships>`);
+      zip.file('xl/workbook.xml', `<workbook xmlns="${main}" xmlns:r="${rels}"><sheets><sheet name="Fonts" sheetId="1" r:id="rId1"/></sheets></workbook>`);
+      zip.file('xl/_rels/workbook.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rels}/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="${rels}/styles" Target="styles.xml"/></Relationships>`);
+      zip.file('xl/styles.xml', `<styleSheet xmlns="${main}"><fonts count="1"><font><sz val="24"/><name val="Calibri"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf/></cellStyleXfs><cellXfs count="1"><xf/></cellXfs></styleSheet>`);
+      zip.file('xl/worksheets/sheet1.xml', `<worksheet xmlns="${main}"><cols><col min="1" max="1" width="40" customWidth="1"/></cols><sheetData><row r="1" ht="40" customHeight="1"><c r="A1" t="inlineStr"><is><t>ABCABC</t></is></c></row></sheetData></worksheet>`);
+      const entry = await import('./dist/index.js') as typeof import('../../packages/xlsx/src/index');
+      await entry.initWasm();
+      return entry.openWorkbook(await zip.generateAsync({ type: 'uint8array' }));
+    }
+
+    test('paints with the supplied face, for that export only', async () => {
+      const workbook = await openFixture();
+      try {
+        const baseline = Buffer.from(await workbook.renderPng(view));
+        const withRegular = Buffer.from(await workbook.renderPng(view, { fonts: [{ family: 'Calibri', bytes: regular }] }));
+        const withBold = Buffer.from(await workbook.renderPng(view, { fonts: [{ family: ' calibri ', bytes: bold }] }));
+        expect(withRegular.equals(baseline)).toBe(false);
+        expect(withBold.equals(withRegular)).toBe(false);
+        expect(Buffer.from(await workbook.renderPng(view)).equals(baseline)).toBe(true);
+      } finally {
+        workbook.dispose();
+      }
+    });
+
+    test('a face for a family the sheet does not use changes nothing and is never loaded', async () => {
+      const workbook = await openFixture();
+      try {
+        const baseline = Buffer.from(await workbook.renderPng(view));
+        const rendered = await workbook.renderPng(view, { fonts: [{ family: 'Not Used', bytes: new Uint8Array([1, 2, 3]) }] });
+        expect(Buffer.from(rendered).equals(baseline)).toBe(true);
+      } finally {
+        workbook.dispose();
+      }
+    });
+
+    test('a supplied face that cannot paint rejects with font-unavailable', async () => {
+      const workbook = await openFixture();
+      try {
+        const error = await workbook.renderPng(view, { fonts: [{ family: 'Calibri', bytes: new Uint8Array([1, 2, 3]) }] }).catch((failure: unknown) => failure);
+        expect(error).toBeInstanceOf(Error);
+        expect((error as { code?: string }).code).toBe('font-unavailable');
+        expect((error as Error).message).toContain('Calibri');
+      } finally {
+        workbook.dispose();
+      }
+    });
+  });
+
   test('the package renders installed CJK and Devanagari faces without fetching', async () => {
     const main = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
     const rels = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';

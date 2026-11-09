@@ -1,13 +1,16 @@
 import type { XlsxPngEngine } from '../../../packages/xlsx/src/wasm/enginePng';
 import type { ResolvedPngTarget } from '../../../packages/xlsx/src/wasm/pngResolve';
-import type { XlsxPngOptions } from '../../../packages/xlsx/src/wasm/pngTarget';
+import type { XlsxFontFace, XlsxPngOptions } from '../../../packages/xlsx/src/wasm/pngTarget';
+import { fontUnavailable } from '../../../shared/office-session/pngFonts';
 
 export type { XlsxPngEngine } from '../../../packages/xlsx/src/wasm/enginePng';
 
 export const engineKind: 'wasm' | 'native' = 'native';
 
+const UNAVAILABLE = 'png-font-unavailable: ';
+
 interface NativePngDocument {
-  renderPngTarget(targetJson: string, optionsJson: string): Uint8Array;
+  renderPngTarget(targetJson: string, optionsJson: string, fonts?: ReadonlyArray<XlsxFontFace>): Uint8Array;
 }
 
 /**
@@ -19,10 +22,11 @@ export function renderPng(engine: XlsxPngEngine, target: ResolvedPngTarget, opti
   try {
     options.signal?.throwIfAborted();
     const doc = engine.doc as unknown as NativePngDocument;
-    const { signal: _signal, fonts: _fonts, ...native } = options;
-    return Promise.resolve(doc.renderPngTarget(JSON.stringify(target), JSON.stringify(native)));
+    const { signal: _signal, fonts, ...native } = options;
+    return Promise.resolve(doc.renderPngTarget(JSON.stringify(target), JSON.stringify(native), fonts));
   } catch (error) {
-    return Promise.reject(error);
+    const message = error instanceof Error ? error.message : '';
+    return Promise.reject(message.startsWith(UNAVAILABLE) ? fontUnavailable(message.slice(UNAVAILABLE.length), 'sheet') : error);
   }
 }
 
