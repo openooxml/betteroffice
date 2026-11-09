@@ -1,7 +1,7 @@
 //! A sheet rename rewrites the sheet name in conditional-format rule formulas,
 //! as Excel does and as it already does for cell formulas. Each formula follows
 //! its sheet, so swaps and chains land where Excel puts them, undo restores the
-//! text, references to a deleted sheet are kept as cell formulas keep them, and
+//! text, references to a deleted sheet become `#REF!` as in cell formulas, and
 //! a rename that would write a name xml cannot carry is refused up front.
 
 use betteroffice_xlsx::{CalculationOptions, Op, SheetId, Workbook};
@@ -193,10 +193,10 @@ fn a_chain_of_renames_then_undo_restores_the_text() {
     assert_eq!(part(&workbook.save().unwrap(), OTHER), part(&source, OTHER));
 }
 
-/// References to a deleted sheet are kept as cell formulas keep them, even
-/// when a new sheet then takes the deleted sheet's name.
+/// References to a deleted sheet become `#REF!`, so a new sheet that then
+/// takes the deleted sheet's name does not capture them.
 #[test]
-fn references_to_a_deleted_sheet_are_kept() {
+fn references_to_a_deleted_sheet_become_ref() {
     let source = book("Data", "Spare", "Data!$A$1&gt;0");
     let mut workbook = Workbook::open(&source).unwrap();
     apply(&mut workbook, Op::RemoveSheet { index: 0 }).unwrap();
@@ -208,7 +208,7 @@ fn references_to_a_deleted_sheet_are_kept() {
         },
     )
     .unwrap();
-    assert_eq!(saved_formulas(&workbook.save().unwrap()), ["Data!$A$1>0"]);
+    assert_eq!(saved_formulas(&workbook.save().unwrap()), ["#REF!>0"]);
 }
 
 /// A sheet's name inside a string literal, or a defined name spelled like the

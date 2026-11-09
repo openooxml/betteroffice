@@ -350,3 +350,256 @@ mod tests {
         );
     }
 }
+
+/// `Some(Some(text))` narrows the span onto the sheets that remain,
+/// `Some(None)` means nothing it covered survives, `None` means the removal
+/// does not touch it.
+pub fn narrowed_span(
+    qualifier: &Qualifier,
+    removed_name: &str,
+    order_before: &[String],
+) -> Option<Option<String>> {
+    let position = |name: &str| {
+        order_before
+            .iter()
+            .position(|sheet| sheet_names_equal(sheet, name))
+    };
+    let (Some(start), Some(end)) = (position(&qualifier.first), position(&qualifier.last)) else {
+        return (sheet_names_equal(&qualifier.first, removed_name)
+            || sheet_names_equal(&qualifier.last, removed_name))
+        .then_some(None);
+    };
+    let covered = &order_before[start.min(end)..=start.max(end)];
+    if !covered
+        .iter()
+        .any(|sheet| sheet_names_equal(sheet, removed_name))
+    {
+        return None;
+    }
+    let remaining = covered
+        .iter()
+        .filter(|sheet| !sheet_names_equal(sheet, removed_name))
+        .collect::<Vec<_>>();
+    let (Some(first), Some(last)) = (remaining.first(), remaining.last()) else {
+        return Some(None);
+    };
+    Some(Some(qualifier_token(first, last)))
+}
+
+/// The end of the address that follows a sheet qualifier's `!` at `start`: a
+/// cell, a range, whole rows or columns, a sheet-scoped name, or an error
+/// already standing in for one. A `:` joins only an address shaped like a
+/// cell, columns or rows; a name, a function call or another qualifier after
+/// it is a separate reference.
+fn reference_end(source: &str, start: usize) -> usize {
+    if source[start..].starts_with("#REF!") {
+        return start + "#REF!".len();
+    }
+    let run = |from: usize| {
+        from + source[from..]
+            .chars()
+            .take_while(|ch| ch.is_alphanumeric() || matches!(ch, '$' | '_' | '.' | '\\'))
+            .map(char::len_utf8)
+            .sum::<usize>()
+    };
+    let end = run(start);
+    if source[end..].starts_with(':') {
+        let further = run(end + 1);
+        let next = source[further..].trim_start();
+        if further > end + 1
+            && address_shape(&source[start..end]).is_some()
+            && address_shape(&source[start..end]) == address_shape(&source[end + 1..further])
+            && !next.starts_with([':', '!', '('])
+        {
+            return further;
+        }
+    }
+    end
+}
+
+/// What a range endpoint is: a cell, a column (up to XFD) or a row. A `:`
+/// joins only two endpoints of the same shape, as Excel reads a range, so
+/// `A1:Tax` is a cell and a name, while `A:Tax` is a range of columns.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AddressShape {
+    Cell,
+    Column,
+    Row,
+}
+
+fn address_shape(text: &str) -> Option<AddressShape> {
+    let bare = text.replace('$', "");
+    if bare.is_empty() {
+        return None;
+    }
+    if bare.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Some(AddressShape::Row);
+    }
+    if bare.len() <= 3 && bare.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+        let column = bare.bytes().fold(0_u32, |acc, byte| {
+            acc * 26 + u32::from(byte.to_ascii_uppercase() - b'A' + 1)
+        });
+        return (column <= 16_384).then_some(AddressShape::Column);
+    }
+    CellRef::parse_a1(&bare.to_ascii_uppercase())
+        .is_ok()
+        .then_some(AddressShape::Cell)
+}
+
+/// `source` with every reference to the sheet `removed_name` rewritten as
+/// Excel writes it when that sheet is deleted: a reference that named only
+/// that sheet becomes `#REF!`, its address included; a 3-D span whose
+/// endpoint is that sheet narrows onto the sheets that remain between its
+/// endpoints in `order_before`, or becomes `#REF!` when none remain, and a
+/// span the sheet only lies inside keeps its text. `None` when nothing
+/// changes. External references and strings are left alone.
+pub fn remove_sheet_references(
+    source: &str,
+    removed_name: &str,
+    order_before: &[String],
+) -> Option<String> {
+    remove_sheet_references_noting_spans(source, removed_name, order_before).map(|(text, _)| text)
+}
+
+/// [`remove_sheet_references`], also saying whether a 3-D span narrowed,
+/// which depends on the sheet order the removal is read against.
+pub fn remove_sheet_references_noting_spans(
+    source: &str,
+    removed_name: &str,
+    order_before: &[String],
+) -> Option<(String, bool)> {
+    let mut replacements: Vec<(core::ops::Range<usize>, String)> = Vec::new();
+    let mut narrowed = false;
+    for qualifier in sheet_qualifiers(source) {
+        if !qualifier.bound || qualifier.external {
+            continue;
+        }
+        let whole = || qualifier.span.start..reference_end(source, qualifier.span.end + 1);
+        if !qualifier.is_span() {
+            if sheet_names_equal(&qualifier.first, removed_name) {
+                replacements.push((whole(), "#REF!".to_owned()));
+            }
+            continue;
+        }
+        if !sheet_names_equal(&qualifier.first, removed_name)
+            && !sheet_names_equal(&qualifier.last, removed_name)
+        {
+            continue;
+        }
+        match narrowed_span(&qualifier, removed_name, order_before) {
+            Some(Some(token)) => {
+                narrowed = true;
+                replacements.push((qualifier.span.clone(), token));
+            }
+            Some(None) => replacements.push((whole(), "#REF!".to_owned())),
+            None => {}
+        }
+    }
+    if replacements.is_empty() {
+        return None;
+    }
+    let mut merged: Vec<(core::ops::Range<usize>, String)> = Vec::with_capacity(replacements.len());
+    for (span, replacement) in replacements {
+        match merged.last_mut() {
+            Some((last, text)) if span.start < last.end => {
+                last.end = last.end.max(span.end);
+                *text = "#REF!".to_owned();
+            }
+            _ => merged.push((span, replacement)),
+        }
+    }
+    let mut output = String::with_capacity(source.len());
+    let mut copied = 0;
+    for (span, replacement) in merged {
+        output.push_str(&source[copied..span.start]);
+        output.push_str(&replacement);
+        copied = span.end;
+    }
+    output.push_str(&source[copied..]);
+    Some((output, narrowed))
+}
+
+#[cfg(test)]
+mod removal_tests {
+    use super::remove_sheet_references;
+
+    fn sheets(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    #[test]
+    fn a_reference_to_the_deleted_sheet_becomes_ref_with_its_address() {
+        let order = sheets(&["Data", "Other"]);
+        for (source, removed) in [
+            ("Data!A1+1", "#REF!+1"),
+            ("SUM('Data'!$A$1:$B$5)*2", "SUM(#REF!)*2"),
+            ("Data!A:C", "#REF!"),
+            ("data!1:3", "#REF!"),
+            ("Data!Total", "#REF!"),
+            ("Data!#REF!", "#REF!"),
+        ] {
+            assert_eq!(
+                remove_sheet_references(source, "Data", &order).as_deref(),
+                Some(removed),
+                "{source}"
+            );
+        }
+        for (source, removed) in [
+            ("SUM(Data!A1:Data!B2)", "SUM(#REF!)"),
+            (
+                "SUM(Data!A1:INDEX(Data!A:A,2))",
+                "SUM(#REF!:INDEX(#REF!,2))",
+            ),
+            ("Data!Café*2", "#REF!*2"),
+            ("SUM(Data!A1:Total)", "SUM(#REF!:Total)"),
+            ("SUM(Data!A1:Tax)", "SUM(#REF!:Tax)"),
+            ("SUM(Data!A:Tax)", "SUM(#REF!)"),
+            ("SUM(Data!$A$1:$B$2)", "SUM(#REF!)"),
+            ("SUM(Data!1:3)", "SUM(#REF!)"),
+        ] {
+            assert_eq!(
+                remove_sheet_references(source, "Data", &order).as_deref(),
+                Some(removed),
+                "{source}"
+            );
+        }
+        for source in ["Other!A1", "\"Data!A1\"", "[1]Data!A1", "Data", "DataX!A1"] {
+            assert_eq!(
+                remove_sheet_references(source, "Data", &order),
+                None,
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_span_narrows_inward_or_becomes_ref_when_nothing_remains() {
+        let order = sheets(&["Jan", "Feb", "Mar", "Apr"]);
+        assert_eq!(
+            remove_sheet_references("SUM(Jan:Mar!A1)", "Jan", &order).as_deref(),
+            Some("SUM(Feb:Mar!A1)")
+        );
+        assert_eq!(
+            remove_sheet_references("SUM(Jan:Mar!A1)", "Mar", &order).as_deref(),
+            Some("SUM(Jan:Feb!A1)")
+        );
+        assert_eq!(
+            remove_sheet_references("SUM(Jan:Mar!A1)", "Feb", &order),
+            None
+        );
+        let months = sheets(&["Data", "Feb", "Mar"]);
+        assert_eq!(
+            remove_sheet_references("SUM(Data!A1:Feb:Mar!B2)", "Data", &months).as_deref(),
+            Some("SUM(#REF!:Feb:Mar!B2)")
+        );
+        assert_eq!(
+            remove_sheet_references("SUM(Data!A1:Data:Mar!B2)", "Data", &months).as_deref(),
+            Some("SUM(#REF!:Feb:Mar!B2)")
+        );
+        let alone = sheets(&["Jan", "Other"]);
+        assert_eq!(
+            remove_sheet_references("SUM(Jan:Jan!A1:B2)", "Jan", &alone).as_deref(),
+            Some("SUM(#REF!)")
+        );
+    }
+}

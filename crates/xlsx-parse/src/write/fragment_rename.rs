@@ -1,13 +1,17 @@
-//! A sheet rename in the formulas a worksheet keeps as the file wrote them:
-//! data validations, which the model does not hold, and the extension list,
-//! whose `xm:f` formulas back x14 data validations, x14 conditional formats
-//! and sparklines. Each source sheet's name maps to the current name of that
-//! same sheet, so the patch follows sheet identity, not rename history, and
-//! only formula text that names a renamed sheet changes.
+//! Sheet renames and deletions in the formulas a worksheet keeps as the file
+//! wrote them: data validations, which the model does not hold, and the
+//! extension list, whose `xm:f` formulas back x14 data validations, x14
+//! conditional formats and sparklines. Each source sheet's name maps to the
+//! current name of that same sheet, so the patch follows sheet identity, not
+//! rename history; a reference to a deleted source sheet becomes `#REF!`, or
+//! a 3-D span narrows, as Excel writes it. Only formula text that names an
+//! edited sheet changes.
 
 use quick_xml::Reader;
 use quick_xml::events::Event;
-use xlsx_model::sheet_qualifier::rename_sheets;
+use xlsx_model::sheet_qualifier::{
+    remove_sheet_references_noting_spans, rename_sheets, sheet_names_equal,
+};
 
 use crate::package::XmlTemplate;
 use crate::xml::{formula_text, resolve_entity};
@@ -41,6 +45,10 @@ pub enum FragmentFailureReason {
     UnwritableName,
     /// The fragment does not read as formulas this patch can rewrite.
     Unreadable,
+    /// A deleted sheet ends a 3-D span in the fragment, and sheets moved or
+    /// were added since the file was read, so the order the span narrows
+    /// against at deletion is not the file's.
+    OrderChanged,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,13 +57,53 @@ pub struct FragmentFailure {
     pub reason: FragmentFailureReason,
 }
 
-/// `template` with the sheets `renamed` maps renamed in its preserved
-/// formulas, or `None` when no formula names a renamed sheet.
+/// The sheet edits since the package was read that preserved formulas follow:
+/// the source sheets in their order in the file, those deleted since, and each
+/// kept source sheet's name in the file with its current name.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SheetEdits {
+    pub(crate) source_order: Vec<String>,
+    pub(crate) removed: Vec<String>,
+    pub(crate) renamed: Vec<(String, String)>,
+    /// The sheet order is no longer the file's: a kept source sheet moved, or
+    /// a sheet was added, either of which a 3-D span may now cover.
+    pub(crate) moved: bool,
+}
+
+impl SheetEdits {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.removed.is_empty() && self.renamed.is_empty()
+    }
+
+    /// `text` with the deletions applied first, each against the sheets the
+    /// ones before it left, then the renames; plus which renames it wrote.
+    /// `None` when a deletion would narrow a 3-D span after sheets moved,
+    /// since the order that span narrows against is no longer known.
+    fn apply(&self, text: &str) -> Option<(String, Vec<usize>)> {
+        let mut order = self.source_order.clone();
+        let mut current = text.to_owned();
+        for removed in &self.removed {
+            if let Some((next, narrowed)) =
+                remove_sheet_references_noting_spans(&current, removed, &order)
+            {
+                if narrowed && self.moved {
+                    return None;
+                }
+                current = next;
+            }
+            order.retain(|sheet| !sheet_names_equal(sheet, removed));
+        }
+        Some(rename_sheets(&current, &self.renamed))
+    }
+}
+
+/// `template` with `edits` applied to its preserved formulas, or `None` when
+/// no formula names an edited sheet.
 pub(crate) fn rename_preserved_fragments(
     template: &XmlTemplate,
-    renamed: &[(String, String)],
+    edits: &SheetEdits,
 ) -> Result<Option<XmlTemplate>, FragmentFailure> {
-    if renamed.is_empty() {
+    if edits.is_empty() {
         return Ok(None);
     }
     let mut patched = None;
@@ -68,36 +116,11 @@ pub(crate) fn rename_preserved_fragments(
         if !template.is_root_child_named(child, &child.local_name) {
             continue;
         }
-        if let Some(bytes) = rename_fragment(&child.bytes, in_extension, renamed)? {
+        if let Some(bytes) = rename_fragment(&child.bytes, in_extension, edits)? {
             patched.get_or_insert_with(|| template.clone()).children[index].bytes = bytes;
         }
     }
     Ok(patched)
-}
-
-/// The kind of the first preserved formula in `template` that names `sheet`,
-/// or the kind of a fragment that does not read, which may name it.
-pub(crate) fn fragment_naming_sheet(template: &XmlTemplate, sheet: &str) -> Option<FragmentKind> {
-    let probe = [(sheet.to_owned(), format!("{sheet} "))];
-    template.children.iter().find_map(|child| {
-        let in_extension = match child.local_name.as_str() {
-            "dataValidations" => false,
-            "extLst" => true,
-            _ => return None,
-        };
-        if !template.is_root_child_named(child, &child.local_name) {
-            return None;
-        }
-        match rename_fragment(&child.bytes, in_extension, &probe) {
-            Ok(None) => None,
-            Ok(Some(_)) => Some(if in_extension {
-                FragmentKind::Extension
-            } else {
-                FragmentKind::DataValidation
-            }),
-            Err(failure) => Some(failure.kind),
-        }
-    })
 }
 
 fn kind_of(stack: &[Vec<u8>], in_extension: bool) -> FragmentKind {
@@ -132,7 +155,7 @@ fn is_formula(name: &[u8], stack: &[Vec<u8>], in_extension: bool) -> bool {
 fn rename_fragment(
     bytes: &[u8],
     in_extension: bool,
-    renamed: &[(String, String)],
+    sheet_edits: &SheetEdits,
 ) -> Result<Option<Vec<u8>>, FragmentFailure> {
     let unreadable = |kind| FragmentFailure {
         kind,
@@ -195,9 +218,17 @@ fn rename_fragment(
                     return Err(unreadable(kind_of(&stack, in_extension)));
                 }
                 if let Some((content, value, kind)) = formula.take() {
-                    let (rewritten, used) = rename_sheets(&value, renamed);
+                    let Some((rewritten, used)) = sheet_edits.apply(&value) else {
+                        return Err(FragmentFailure {
+                            kind,
+                            reason: FragmentFailureReason::OrderChanged,
+                        });
+                    };
                     if rewritten != value {
-                        if used.iter().any(|&at| !xml_writable(&renamed[at].1)) {
+                        if used
+                            .iter()
+                            .any(|&at| !xml_writable(&sheet_edits.renamed[at].1))
+                        {
                             return Err(FragmentFailure {
                                 kind,
                                 reason: FragmentFailureReason::UnwritableName,
@@ -237,13 +268,16 @@ fn xml_writable(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{FragmentFailureReason, FragmentKind, rename_fragment};
+    use super::{FragmentFailureReason, FragmentKind, SheetEdits, rename_fragment};
 
-    fn renamed(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
-        pairs
-            .iter()
-            .map(|(old, new)| ((*old).to_owned(), (*new).to_owned()))
-            .collect()
+    fn renamed(pairs: &[(&str, &str)]) -> SheetEdits {
+        SheetEdits {
+            renamed: pairs
+                .iter()
+                .map(|(old, new)| ((*old).to_owned(), (*new).to_owned()))
+                .collect(),
+            ..SheetEdits::default()
+        }
     }
 
     fn patched(xml: &str, extension: bool, pairs: &[(&str, &str)]) -> Option<String> {
@@ -285,5 +319,48 @@ mod tests {
         let error =
             rename_fragment(broken.as_bytes(), false, &renamed(&[("Data", "New")])).unwrap_err();
         assert_eq!(error.reason, FragmentFailureReason::Unreadable);
+    }
+
+    #[test]
+    fn a_deleted_sheet_becomes_ref_and_a_span_narrows_before_renames_apply() {
+        let edits = SheetEdits {
+            source_order: ["Jan", "Feb", "Mar", "Data"].map(str::to_owned).to_vec(),
+            removed: vec!["Jan".to_owned(), "Data".to_owned()],
+            renamed: vec![("Feb".to_owned(), "February".to_owned())],
+            moved: false,
+        };
+        let xml = r#"<dataValidations><dataValidation><formula1>SUM(Jan:Mar!A1)+Data!$A$1:$A$5</formula1></dataValidation></dataValidations>"#;
+        let patched = String::from_utf8(
+            rename_fragment(xml.as_bytes(), false, &edits)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            patched,
+            xml.replace(
+                "SUM(Jan:Mar!A1)+Data!$A$1:$A$5",
+                "SUM(February:Mar!A1)+#REF!"
+            )
+        );
+    }
+
+    #[test]
+    fn a_span_a_deletion_would_narrow_after_sheets_moved_is_refused() {
+        let edits = SheetEdits {
+            source_order: ["Jan", "Feb", "Mar"].map(str::to_owned).to_vec(),
+            removed: vec!["Jan".to_owned()],
+            renamed: Vec::new(),
+            moved: true,
+        };
+        let span = r#"<dataValidations><dataValidation><formula1>SUM(Jan:Mar!A1)</formula1></dataValidation></dataValidations>"#;
+        let error = rename_fragment(span.as_bytes(), false, &edits).unwrap_err();
+        assert_eq!(error.reason, FragmentFailureReason::OrderChanged);
+        let single = r#"<dataValidations><dataValidation><formula1>Jan!A1</formula1></dataValidation></dataValidations>"#;
+        assert!(
+            rename_fragment(single.as_bytes(), false, &edits)
+                .unwrap()
+                .is_some()
+        );
     }
 }

@@ -1,13 +1,11 @@
-//! The guard that keeps a sheet rename from leaving preserved formulas behind:
-//! data validations and extension formulas the workbook keeps as the file
-//! wrote them, which the save renames by sheet identity. A rename they cannot
-//! follow is refused before anything changes.
+//! The guard that keeps a sheet rename or deletion from leaving preserved
+//! formulas behind: data validations and extension formulas the workbook keeps
+//! as the file wrote them, which the save rewrites by sheet identity. An edit
+//! they cannot follow is refused before anything changes.
 
 use xlsx_parse::{FragmentFailureReason, FragmentKind};
 
 use crate::{SaveWarning, SaveWarningCode};
-use xlsx_model::SheetId;
-use xlsx_model::sheet_qualifier::sheet_names_equal;
 
 use super::Workbook;
 use crate::{Error, Result};
@@ -48,6 +46,10 @@ impl Workbook {
                         SaveWarningCode::UnrewritableFormula,
                         "they do not read as formulas the rename can rewrite",
                     ),
+                    FragmentFailureReason::OrderChanged => (
+                        SaveWarningCode::UnrewritableFormula,
+                        "a deleted sheet ends a 3-D span in them, and sheets moved since the file was read",
+                    ),
                 };
                 SaveWarning {
                     code,
@@ -65,54 +67,11 @@ impl Workbook {
             .collect()
     }
 
-    /// Refuses renaming sheet `index` of `staged` when its name, compared as
-    /// sheet names are, is one a source sheet held, that source sheet is
-    /// gone, and a preserved formula names it. The formula binds to this
-    /// sheet by name, as cell formulas do, whether it took the name when it
-    /// was added or by a rename, but the save renames preserved formulas by
-    /// source sheet identity, which ties none of them to this sheet, so it
-    /// could not follow the rename.
-    pub(super) fn ensure_taken_name_rename_follows(
-        &self,
-        staged: &xlsx_model::Workbook,
-        origins: &[Option<usize>],
-        index: SheetId,
-    ) -> Result<()> {
-        let Some(package) = self.source_package.as_ref() else {
-            return Ok(());
-        };
-        let at = index.0 as usize;
-        let Some(sheet) = staged.sheets.get(at) else {
-            return Ok(());
-        };
-        let package = package.materialize()?;
-        let deleted_source_name = package
-            .source_sheet_names()
-            .enumerate()
-            .any(|(source, name)| {
-                sheet_names_equal(name, &sheet.name) && !origins.contains(&Some(source))
-            });
-        if !deleted_source_name {
-            return Ok(());
-        }
-        let Some((source, kind)) = package.fragment_naming_sheet(&sheet.name) else {
-            return Ok(());
-        };
-        let holder = origins
-            .iter()
-            .position(|origin| *origin == Some(source))
-            .and_then(|at| staged.sheets.get(at))
-            .map_or_else(|| sheet.name.clone(), |sheet| sheet.name.clone());
-        Err(Error::InvalidOperation(format!(
-            "the {} formulas on sheet '{holder}' name a deleted sheet whose name this sheet took, and cannot follow the sheet rename",
-            described(kind)
-        )))
-    }
-
-    /// Refuses `preview` when a sheet it renamed is named in a preserved
-    /// formula the save cannot rewrite: the new name holds a character xml
-    /// cannot carry, refused as cell formulas are, or the fragment does not
-    /// read as formulas the rename can follow.
+    /// Refuses `preview` when a sheet it renamed, removed, moved or added
+    /// leaves a preserved formula the save cannot rewrite: the new name holds
+    /// a character xml cannot carry, refused as cell formulas are, the
+    /// fragment does not read as formulas the rename can follow, or a span a
+    /// deleted sheet ended can no longer narrow against the file's order.
     pub(super) fn ensure_preserved_fragments_follow(
         &self,
         preview: &xlsx_model::Workbook,
@@ -128,9 +87,14 @@ impl Workbook {
             .zip(&self.model.sheets)
             .filter_map(|(origin, sheet)| Some(((*origin)?, sheet.name.as_str())))
             .collect::<std::collections::HashMap<_, _>>();
-        if preview.sheets.iter().zip(origins).all(|(sheet, origin)| {
-            origin.is_none_or(|origin| current.get(&origin) == Some(&sheet.name.as_str()))
-        }) {
+        let renamed = preview.sheets.iter().zip(origins).any(|(sheet, origin)| {
+            origin.is_some_and(|origin| current.get(&origin) != Some(&sheet.name.as_str()))
+        });
+        let removed = current
+            .keys()
+            .any(|origin| !origins.contains(&Some(*origin)));
+        let reordered = origins != self.preserved.origins.as_slice();
+        if !renamed && !removed && !reordered {
             return Ok(());
         }
         let package = package.materialize()?;
@@ -143,11 +107,14 @@ impl Workbook {
         };
         Err(match failure.failure.reason {
             FragmentFailureReason::UnwritableName => xlsx_ops::OpError::SheetNameNotWritable.into(),
-            FragmentFailureReason::Unreadable => Error::InvalidOperation(format!(
-                "the {} formulas on sheet '{}' cannot follow the sheet rename",
-                described(failure.failure.kind),
-                failure.sheet
-            )),
+            FragmentFailureReason::Unreadable | FragmentFailureReason::OrderChanged => {
+                Error::InvalidOperation(format!(
+                    "the {} formulas on sheet '{}' cannot follow the sheet {}",
+                    described(failure.failure.kind),
+                    failure.sheet,
+                    if renamed { "rename" } else { "removal" }
+                ))
+            }
         })
     }
 }

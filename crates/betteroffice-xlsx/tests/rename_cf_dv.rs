@@ -2,8 +2,8 @@
 //! data-validation formulas, classic and x14 forms alike, as Excel does and as
 //! it already does for cell formulas. Names map by sheet identity, so swaps and
 //! chains land where Excel puts them, undo restores the text, references to a
-//! deleted sheet are kept as cell formulas keep them, and a rename that would
-//! write a name xml cannot carry is refused up front.
+//! deleted sheet become `#REF!` as they do in cell formulas, and a rename that
+//! would write a name xml cannot carry is refused up front.
 
 use betteroffice_xlsx::{CalculationOptions, Op, SheetId, Workbook};
 
@@ -228,10 +228,10 @@ fn a_chain_of_renames_then_undo_restores_the_text() {
     assert_eq!(part(&workbook.save().unwrap(), OTHER), part(&source, OTHER));
 }
 
-/// References to a deleted sheet are kept as cell formulas keep them, even
-/// when a new sheet then takes the deleted sheet's name.
+/// References to a deleted sheet become `#REF!` as Excel writes them, so a
+/// new sheet that then takes the deleted sheet's name does not capture them.
 #[test]
-fn references_to_a_deleted_sheet_are_kept() {
+fn references_to_a_deleted_sheet_become_ref() {
     let source = book("Data", "Spare", "Data!$A$1&gt;0", "Data!$A$1:$A$5");
     let mut workbook = Workbook::open(&source).unwrap();
     apply(&mut workbook, Op::RemoveSheet { index: 0 }).unwrap();
@@ -245,12 +245,7 @@ fn references_to_a_deleted_sheet_are_kept() {
     .unwrap();
     assert_eq!(
         saved_formulas(&workbook.save().unwrap()),
-        [
-            "Data!$A$1>0",
-            "Data!$A$1:$A$5",
-            "Data!$A$1>0",
-            "Data!$A$1:$A$5"
-        ]
+        ["#REF!>0", "#REF!", "#REF!>0", "#REF!"]
     );
 }
 
@@ -382,38 +377,16 @@ fn a_batch_of_moves_and_compensating_renames_is_still_a_rename() {
     assert_eq!(workbook.model(), &before);
 }
 
-/// A sheet that took a deleted sheet's name holds the references that name
-/// it, as cell formulas do, but has no source identity for the save to
-/// follow, so renaming it while a preserved formula names it is refused.
+/// A sheet that takes a deleted sheet's name, when it is added or by a rename
+/// of its own and whatever the case, can be renamed freely: the references
+/// to the deleted sheet already became `#REF!`, so none follow it.
 #[test]
-fn renaming_a_sheet_that_took_a_deleted_sheets_name_is_refused_when_a_fragment_names_it() {
-    let source = book("Data", "Spare", "1", "Data!$A$1:$A$5");
-    let mut workbook = Workbook::open(&source).unwrap();
-    apply(&mut workbook, Op::RemoveSheet { index: 0 }).unwrap();
-    apply(
-        &mut workbook,
+fn a_sheet_that_took_a_deleted_sheets_name_renames_without_capturing_its_references() {
+    for take in [
         Op::AddSheet {
             index: 0,
             name: "Data".into(),
         },
-    )
-    .unwrap();
-    let before = workbook.model().clone();
-    let error = rename(&mut workbook, 0, "Z").unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        "the data validation formulas on sheet 'Other' name a deleted sheet whose name this sheet took, and cannot follow the sheet rename"
-    );
-    assert_eq!(workbook.model(), &before);
-}
-
-/// The taken-name refusal compares names as sheet names compare, ignoring
-/// case, and holds whether the sheet took the deleted sheet's name when it
-/// was added or by a rename of its own.
-#[test]
-fn a_taken_name_is_matched_ignoring_case_and_however_it_was_taken() {
-    let expected = "the data validation formulas on sheet 'Other' name a deleted sheet whose name this sheet took, and cannot follow the sheet rename";
-    for take in [
         Op::AddSheet {
             index: 0,
             name: "data".into(),
@@ -427,9 +400,8 @@ fn a_taken_name_is_matched_ignoring_case_and_however_it_was_taken() {
         let mut workbook = Workbook::open(&source).unwrap();
         apply(&mut workbook, Op::RemoveSheet { index: 0 }).unwrap();
         apply(&mut workbook, take.clone()).unwrap();
-        let before = workbook.model().clone();
-        let error = rename(&mut workbook, 0, "Z").unwrap_err();
-        assert_eq!(error.to_string(), expected, "{take:?}");
-        assert_eq!(workbook.model(), &before);
+        rename(&mut workbook, 0, "Z").unwrap_or_else(|error| panic!("{take:?}: {error}"));
+        let saved = saved_formulas(&workbook.save().unwrap());
+        assert_eq!(saved, ["1", "#REF!", "1", "#REF!"], "{take:?}");
     }
 }

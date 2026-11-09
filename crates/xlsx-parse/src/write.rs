@@ -681,13 +681,13 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
             (sheet.name.as_str(), axes)
         })
         .collect::<Vec<_>>();
-    let renamed = sheet_renames(wb, package, &claimed);
+    let edits = sheet_edits(wb, package, &claimed);
     for (index, (sheet, plan)) in wb.sheets.iter().zip(&sheets).enumerate() {
         let source = plan.origin.and_then(|origin| package.sheets.get(origin));
         let renamed_template = source
             .filter(|source| source.is_worksheet())
             .and_then(|source| {
-                fragment_rename::rename_preserved_fragments(&source.template, &renamed)
+                fragment_rename::rename_preserved_fragments(&source.template, &edits)
                     .ok()
                     .flatten()
             });
@@ -1350,25 +1350,41 @@ impl SheetIds {
 
 /// The source sheet each sheet keeps: the first in-range claim of a source
 /// index keeps it, later claims are new sheets.
-pub(crate) use fragment_rename::fragment_naming_sheet;
 pub use fragment_rename::{FragmentFailure, FragmentFailureReason, FragmentKind};
 
-/// Each kept source sheet's name in the file with the current name of that
-/// same sheet, for the sheets whose name changed: the map a rename patch of
-/// preserved formulas follows, by sheet identity rather than rename history.
-fn sheet_renames(
+/// The sheet edits preserved formulas follow, by sheet identity rather than
+/// edit history: the source sheets in file order, those no kept sheet claims,
+/// and each kept source sheet's name in the file with its current name when
+/// they differ.
+fn sheet_edits(
     wb: &Workbook,
     package: &PreservedPackage,
     claimed: &[Option<usize>],
-) -> Vec<(String, String)> {
-    wb.sheets
+) -> fragment_rename::SheetEdits {
+    let source = &package.original_workbook.sheets;
+    let kept = claimed
         .iter()
-        .zip(claimed)
-        .filter_map(|(sheet, origin)| {
-            let original = package.original_workbook.sheets.get((*origin)?)?;
-            (original.name != sheet.name).then(|| (original.name.clone(), sheet.name.clone()))
-        })
-        .collect()
+        .filter_map(|origin| *origin)
+        .collect::<Vec<_>>();
+    fragment_rename::SheetEdits {
+        moved: claimed.iter().any(Option::is_none) || kept.windows(2).any(|pair| pair[0] > pair[1]),
+        source_order: source.iter().map(|sheet| sheet.name.clone()).collect(),
+        removed: source
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !claimed.contains(&Some(*index)))
+            .map(|(_, sheet)| sheet.name.clone())
+            .collect(),
+        renamed: wb
+            .sheets
+            .iter()
+            .zip(claimed)
+            .filter_map(|(sheet, origin)| {
+                let original = source.get((*origin)?)?;
+                (original.name != sheet.name).then(|| (original.name.clone(), sheet.name.clone()))
+            })
+            .collect(),
+    }
 }
 
 /// A preserved formula fragment a save would keep as the file wrote it
@@ -1390,8 +1406,8 @@ pub(crate) fn preserved_fragment_failures(
     origins: &[Option<usize>],
 ) -> Vec<PreservedFragmentFailure> {
     let claimed = claimed_origins(package, origins);
-    let renamed = sheet_renames(wb, package, &claimed);
-    if renamed.is_empty() {
+    let edits = sheet_edits(wb, package, &claimed);
+    if edits.is_empty() {
         return Vec::new();
     }
     wb.sheets
@@ -1402,7 +1418,7 @@ pub(crate) fn preserved_fragment_failures(
             if !source.is_worksheet() {
                 return None;
             }
-            fragment_rename::rename_preserved_fragments(&source.template, &renamed)
+            fragment_rename::rename_preserved_fragments(&source.template, &edits)
                 .err()
                 .map(|failure| PreservedFragmentFailure {
                     sheet: sheet.name.clone(),
