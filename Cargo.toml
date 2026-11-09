@@ -77,9 +77,6 @@ strip = "symbols"
 [profile.release.package.betteroffice-docx-layout]
 opt-level = 3
 
-[profile.release.package.betteroffice-docx-parse]
-opt-level = 3
-
 [profile.release.package.betteroffice-ooxml-font-preflight]
 opt-level = "z"
 
