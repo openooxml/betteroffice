@@ -119,7 +119,9 @@ end run
                                             width_px=image.width, height_px=image.height))
             if page_bounds:
                 record['capture_profile'] = dict(kind='office-page-bounds', pages=page_bounds)
-            record.update(status='ok', pages=len(document), fonts=sorted(fonts), pdf_metadata=pdf_metadata(document))
+            exports = (record.get('capture_profile') or {}).get('office_pdf_metadata')
+            record.update(status='ok', pages=len(document), fonts=sorted(fonts),
+                          pdf_metadata=exports[0] if exports else pdf_metadata(document))
         shutil.copy2(pdf, args.out / 'reference.pdf')
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError, OSError) as error:
         record['error'] = getattr(error, 'stderr', None) or str(error)

@@ -12,9 +12,11 @@ RASTERIZER = f"pypdfium2 {version('pypdfium2')}"
 
 def load_pdf(path):
     try:
-        return pdfium.PdfDocument(str(path))
+        document = pdfium.PdfDocument(str(path))
     except pdfium.PdfiumError as error:
         raise ValueError(f'{path}: unreadable PDF ({error})') from error
+    document.init_forms()
+    return document
 
 
 @contextmanager
