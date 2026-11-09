@@ -67,11 +67,17 @@ fn a_state_holding_a_run_scale_of_0_lays_out_at_full_width() {
     drawn_runs(&display, &mut runs);
     let text: String = runs.iter().filter_map(|run| run["text"].as_str()).collect();
     assert_eq!(text, "Scaled", "{runs:?}");
+    let glyphs: Vec<&Value> = runs
+        .iter()
+        .flat_map(|run| run["glyphs"].as_array().into_iter().flatten())
+        .collect();
+    assert_eq!(glyphs.len(), 6, "{runs:?}");
+    let advance: f64 = glyphs
+        .iter()
+        .map(|glyph| glyph["advance"].as_f64().unwrap())
+        .sum();
+    assert!(advance > 0.0, "{runs:?}");
     for run in runs {
         assert_eq!(run.get("horizontalScale"), None, "{run}");
-        assert!(
-            run["width"].as_f64().is_none_or(|width| width > 0.0),
-            "{run}"
-        );
     }
 }
