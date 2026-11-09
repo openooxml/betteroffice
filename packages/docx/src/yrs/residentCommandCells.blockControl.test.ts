@@ -96,6 +96,8 @@ async function appliesAndUndoes(kind: string, payload: Record<string, unknown>, 
   expect(tableJson(arm)).toBe(before);
   expect(arm.engine.paragraphs(storyOf(arm, 'B'))[0]!.text).toBe('B');
   expect(arm.engine.paragraphs(storyOf(arm, 'C'))[0]!.text).toBe('C');
+  expect(execute(arm, command(arm, 'redo', {})).status).toBe('applied');
+  changed(arm);
 }
 
 const rows = (arm: Arm) => (arm.engine.tablePayload('body', 0) as unknown as { rows: { cells: { tcPr?: Record<string, unknown> }[] }[] }).rows;
@@ -121,5 +123,22 @@ test('shading_from_inside_a_block_control_shades_its_cell_only_and_undoes', asyn
   await appliesAndUndoes('setTableCellShading', { color: 'FF0000' }, (arm) => {
     const shaded = rows(arm).map((row) => row.cells.map((cell) => cell.tcPr?.backgroundColor === 'FF0000'));
     expect(shaded).toEqual([[false, true], [false, false]]);
+  });
+}, TIMEOUT);
+
+test('deleting_a_column_from_inside_a_block_control_takes_that_column_and_undoes', async () => {
+  await appliesAndUndoes('deleteTableColumn', {}, (arm) => {
+    expect(rows(arm).map((row) => row.cells.length)).toEqual([1, 1]);
+    const texts = arm.engine.geometryReader.storyIds().flatMap((id) => arm.engine.paragraphs(id).map((paragraph) => paragraph.text));
+    expect(texts).toContain('A');
+    expect(texts).not.toContain('B');
+    expect(texts).not.toContain('D');
+  });
+}, TIMEOUT);
+
+test('deleting_a_table_from_inside_a_block_control_removes_it_and_undoes', async () => {
+  await appliesAndUndoes('deleteTable', {}, (arm) => {
+    expect(arm.engine.tablePayload('body', 0)).toBeNull();
+    expect(arm.engine.paragraphs('body').map((paragraph) => paragraph.text)).toContain('After');
   });
 }, TIMEOUT);

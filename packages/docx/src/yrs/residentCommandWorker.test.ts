@@ -3735,6 +3735,32 @@ function cellObjects(response: { frame?: DocxCommandFrame | null }) {
   return response.frame!.payload.geometry!.objects.filter((object) => object.kind === 'cell');
 }
 
+test('merging cells across a block control keeps the control through save and reopen', async () => {
+  const text = (value: string) => `<w:p><w:r><w:t>${value}</w:t></w:r></w:p>`;
+  const bodyXml = '<w:p/><w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>' +
+    `<w:tr><w:tc>${text('A')}</w:tc><w:tc><w:sdt><w:sdtPr><w:id w:val="9"/><w:tag w:val="keep"/></w:sdtPr><w:sdtContent>${text('B')}</w:sdtContent></w:sdt></w:tc></w:tr></w:tbl><w:p/>`;
+  const { client, engine } = await openWorker({ bodyXml });
+  let reopened: Awaited<ReturnType<typeof openWorker>> | undefined;
+  try {
+    const inside = cellPoint(engine, 'B');
+    expect(inside.story).toContain(':sdt');
+    expect((await client.edit(intent(1, 0, 'select', { selection: inside.selection }))).outcomes[0]?.status).toBe('noop');
+    const at = (column: number) => ({ story: 'body', tableIndex: 0, row: 0, column });
+    engine.setCellSelection({ anchor: at(0), head: at(1) });
+    expect((await client.edit(intent(2, 0, 'mergeTableCells', {}))).outcomes[0]?.status).toBe('applied');
+    const saved = await savedWorkerDocumentXml(client);
+    const control = /<w:sdt[ >][\s\S]*?<\/w:sdt>/.exec(saved)?.[0];
+    if (!control) throw new Error('Merge lost the block control');
+    expect(control).toContain('w:val="keep"');
+    expect(control).toContain('>B<');
+    expect(saved).toContain('>A<');
+    expect(saved.match(/<w:tc[ >]/g)).toHaveLength(1);
+    const body = /<w:body>([\s\S]*?)(?:<w:sectPr[\s\S]*)?<\/w:body>/.exec(saved)![1]!;
+    reopened = await openWorker({ bodyXml: body });
+    expect(cellPoint(reopened.engine, 'B').story).toContain(':sdt');
+  } finally { reopened?.client.destroy(); client.destroy(); }
+}, TIMEOUT);
+
 test('worker orders table structure commands with single version steps duplicates and refusals', async () => {
   const { client, engine, initial } = await openWorker({ bodyXml: TABLE_BODY });
   try {
