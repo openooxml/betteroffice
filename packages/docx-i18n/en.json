@@ -802,6 +802,7 @@
     "headerLabel": "Page header",
     "footerLabel": "Page footer",
     "chartNoData": "No data",
+    "pictureName": "Picture",
     "selected": "Selected",
     "selectionCleared": "Selection cleared",
     "commentedText": "Commented text",

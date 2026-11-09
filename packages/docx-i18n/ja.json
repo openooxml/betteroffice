@@ -802,6 +802,7 @@
     "headerLabel": "ページ ヘッダー",
     "footerLabel": "ページ フッター",
     "chartNoData": "データなし",
+    "pictureName": "図",
     "selected": "選択中",
     "selectionCleared": "選択が解除されました",
     "commentedText": "コメント付きテキスト",

@@ -802,6 +802,7 @@
     "headerLabel": "页眉",
     "footerLabel": "页脚",
     "chartNoData": "无数据",
+    "pictureName": "图片",
     "selected": "已选",
     "selectionCleared": "已清除选择",
     "commentedText": "带批注的文本",
