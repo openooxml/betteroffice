@@ -963,6 +963,8 @@ export interface PresentationSessionOpenOptions extends Omit<OpenPresentationOpt
     fonts?: readonly PresentationSessionFont[];
     fallbackFonts?: readonly PresentationSessionFont[];
     wasm?: ArrayBuffer | WebAssembly.Module;
+    /** @internal */
+    fontCdn?: import('@betteroffice/fonts').FontCdnConfiguration;
 }
 /**
  * Slide metadata without layout; indices are zero-based.

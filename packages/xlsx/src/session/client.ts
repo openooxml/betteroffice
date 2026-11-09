@@ -1,3 +1,4 @@
+import { fontCdnConfiguration } from '@betteroffice/fonts';
 import type { CollaborationPipeChannel } from '../../../../shared/collaboration-pipe/main';
 import type { XlsxPngOptions, XlsxPngTarget } from '../wasm/pngTarget';
 import { pipeOpBuffers, type PipeCommandPayload, type PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
@@ -165,6 +166,7 @@ function prepareOpen(bytes: Uint8Array | ArrayBuffer, options: OpenWorkbookSessi
     ? { nowSerial: localNowSerial(Date.now()), randSeed: globalThis.crypto.getRandomValues(new Uint32Array(1))[0] >>> 0 }
     : undefined);
   const input: WorkbookSessionOpenOptions & { retainPeerHydration?: boolean } = {
+    fontCdn: fontCdnConfiguration(),
     collaborative: options.collaborative,
     clientId: options.clientId,
     calculation: calculation ? { ...calculation } : undefined,

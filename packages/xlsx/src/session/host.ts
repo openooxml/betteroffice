@@ -373,6 +373,7 @@ export function createWorkbookSessionHost(
       if (checkpoint.epoch !== recovery.epoch || checkpoint.version !== recovery.revision ||
         checkpoint.throughSeq !== recovery.throughSeq) throw new TypeError('Workbook recovery envelope mismatch');
       if (isCollaborativeWorkbookRecovery(recovery.engine)) throw new Error('Recovery is unavailable for collaborative workbooks');
+      if (input.fontCdn) (await import('@betteroffice/fonts')).configureFontCdn(input.fontCdn);
       enginePng = input.png;
       await (options.initWasm ?? initWasm)(input.wasm, { png: input.png });
       if (disposed) throw new Error('Workbook session is disposed');
@@ -412,6 +413,7 @@ export function createWorkbookSessionHost(
       retainedHydration = retainPeerHydration;
       let wasm = input.wasm;
       if (retainPeerHydration && wasm instanceof ArrayBuffer) wasm = await WebAssembly.compile(wasm);
+      if (input.fontCdn) (await import('@betteroffice/fonts')).configureFontCdn(input.fontCdn);
       enginePng = input.png;
       await (options.initWasm ?? initWasm)(wasm, { png: input.png });
       wasm ??= options.wasmModule?.();

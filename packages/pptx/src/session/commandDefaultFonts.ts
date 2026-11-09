@@ -17,7 +17,12 @@ const sessionDecoder = sessionFontDecoder(async (bytes, options) => {
 });
 
 export const commandFontProvider = {
-  async load() { return (await import('@betteroffice/fonts')).createFontProvider(undefined, { decoder: sessionDecoder }); },
+  /** @internal */
+  async load(fontCdn?: import('@betteroffice/fonts').FontCdnConfiguration) {
+    const fonts = await import('@betteroffice/fonts');
+    if (fontCdn) fonts.configureFontCdn(fontCdn);
+    return fonts.createFontProvider(undefined, { decoder: sessionDecoder });
+  },
 };
 
 /**

@@ -1,3 +1,4 @@
+import { configureFontCdn } from '@betteroffice/fonts';
 import { expect, mock, test } from 'bun:test';
 import { isClientMessage, type ClientMessage } from '../../../../shared/office-session/protocol';
 import { createPptxWorkerSession } from './commandSession';
@@ -43,7 +44,7 @@ function heldWorker() {
     },
     terminate,
   } as unknown as Worker;
-  return { worker, terminate,
+  return { worker, terminate, calls,
     listenerCount: () => [...listeners.values()].reduce((count, active) => count + active.size, 0),
     waitFor(method: string) {
       if (calls.some((call) => call.method === method)) return Promise.resolve();
@@ -104,4 +105,19 @@ test('disposing before open settles ready and removes connection listeners', asy
     await session.dispose();
     process.off('unhandledRejection', unhandled);
   }
+});
+
+test('worker open forwards the configured CDN and explicit disable state', async () => {
+  try {
+    for (const baseUrl of ['https://worker-fonts.example/root/', false] as const) {
+      configureFontCdn({ baseUrl, timeoutMs: 5678 });
+      const endpoint = heldWorker();
+      const session = createPptxWorkerSession(new Uint8Array(), { worker: () => endpoint.worker });
+      try {
+        await session.ready;
+        const open = endpoint.calls.find((call) => call.method === 'openCommandEditor')!;
+        expect((open.args[1] as PresentationCommandOpenOptions).fontCdn).toEqual({ baseUrl, timeoutMs: 5678 });
+      } finally { await session.dispose(); }
+    }
+  } finally { configureFontCdn({ baseUrl: false }); }
 });

@@ -1178,7 +1178,7 @@ export interface PresentationCommandReadResult extends PresentationCommandAck {
 }
 export type PresentationCommandMethods = FontDecoderMethods & {
     /** Starts fetching the regular coverage face of each script (`cjk-jp`, `cjk-kr`, `cjk-sc`, `cjk-tc`) before the editor opens. */
-    prefetchCoverageFonts(scripts: string[], sliced?: boolean): void;
+    prefetchCoverageFonts(scripts: string[], sliced?: boolean, fontCdn?: import('@betteroffice/fonts').FontCdnConfiguration): void;
     /** A sliced face with `text` loaded, unless the caller's revision `have` is still current; null for other families. */
     readCoverageFont(family: string, text: string, have: number | null): SlicedFontRead | null;
     /** The complete sliced faces, for paints that do not prepare their text. */
@@ -1543,6 +1543,8 @@ export interface PresentationSessionOpenOptions extends Omit<OpenPresentationOpt
     fonts?: readonly PresentationSessionFont[];
     fallbackFonts?: readonly PresentationSessionFont[];
     wasm?: ArrayBuffer | WebAssembly.Module;
+    /** @internal */
+    fontCdn?: import('@betteroffice/fonts').FontCdnConfiguration;
 }
 /**
  * Slide metadata without layout; indices are zero-based.

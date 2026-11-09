@@ -1485,6 +1485,8 @@ export type WorkbookWireFrame = Omit<WorkbookFrame, 'displayList'> & {
  */
 export interface WorkbookSessionOpenOptions extends OpenWorkbookOptions {
     wasm?: ArrayBuffer | WebAssembly.Module;
+    /** @internal */
+    fontCdn?: import('@betteroffice/fonts').FontCdnConfiguration;
     png?: boolean;
     initialViewport?: WorkbookInitialPaintRequest;
     includeEditState?: boolean;
@@ -1559,7 +1561,7 @@ export interface WorkbookSessionEvents {
 export type WorkbookSessionMethods = FontDecoderMethods & {
     open(bytes: ArrayBuffer, options?: WorkbookSessionOpenOptions): WorkbookSessionOpenReply;
     /** Checkpoints are only restorable by the same engine version and codec. */
-    openRecovery(checkpoint: Checkpoint, options?: Pick<WorkbookSessionOpenOptions, 'wasm' | 'png'>): WorkbookSessionOpenReply;
+    openRecovery(checkpoint: Checkpoint, options?: Pick<WorkbookSessionOpenOptions, 'wasm' | 'png' | 'fontCdn'>): WorkbookSessionOpenReply;
     version(): string;
     collaborationStateVector(): Uint8Array;
     collaborationStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array;

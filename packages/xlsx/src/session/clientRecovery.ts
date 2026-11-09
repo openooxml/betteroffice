@@ -1,3 +1,4 @@
+import { fontCdnConfiguration } from '@betteroffice/fonts';
 import { createSessionClient } from '../../../../shared/office-session/client';
 import type { Checkpoint } from '../../../../shared/office-session/commands/types';
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
@@ -63,9 +64,10 @@ export async function createWorkbookRecoverySession(
   try {
     if (options.collaborative) throw new Error('Recovery is unavailable for collaborative workbooks');
     const wasm = options.wasm instanceof ArrayBuffer ? options.wasm.slice(0) : options.wasm;
+    const fontCdn = fontCdnConfiguration();
     const opened = checkpoint
-      ? await client.call.openRecovery({ ...checkpoint, state: checkpoint.state.slice() }, { wasm, png: options.png })
-      : await client.call.open(bytes.slice().buffer, { collaborative: options.collaborative,
+      ? await client.call.openRecovery({ ...checkpoint, state: checkpoint.state.slice() }, { wasm, png: options.png, fontCdn })
+      : await client.call.open(bytes.slice().buffer, { fontCdn, collaborative: options.collaborative,
         clientId: options.clientId, calculation: options.calculation, wasm, png: options.png,
         initialViewport: options.initialViewport, includeEditState: true, recoveryVersion: version });
     const context: WorkbookCommandContext | undefined = opened.commandContext;

@@ -141,6 +141,7 @@ export function createPresentationSessionHost(
     async open(_, bytes, input = {}) {
       if (disposed) throw new Error('Presentation session is disposed');
       if (handle || editor) throw new Error('Presentation session is already open');
+      if (input.fontCdn) (await import('@betteroffice/fonts')).configureFontCdn(input.fontCdn);
       await (options.initWasm ?? initWasm)(input.wasm);
       if (disposed) throw new Error('Presentation session is disposed');
       const opened = openPresentation(new Uint8Array(bytes), {
@@ -243,6 +244,7 @@ export function createPresentationSessionHost(
     async beginEditor(_, bytes, input) {
       if (disposed) throw new Error('Presentation session is disposed');
       if (handle || editor) throw new Error('Presentation session is already open');
+      if (input.fontCdn) (await import('@betteroffice/fonts')).configureFontCdn(input.fontCdn);
       editor = true;
       const module = await (options.initEditorWasm ?? initializePresentationEditorWasm)(input.wasm);
       if (disposed) throw new Error('Presentation session is disposed');

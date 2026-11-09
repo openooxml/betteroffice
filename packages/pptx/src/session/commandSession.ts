@@ -1,3 +1,4 @@
+import { fontCdnConfiguration } from '@betteroffice/fonts';
 import { attachPptxWorkerRender, pptxWorkerRenderClients } from '../../../../shared/office-session/render/pptxWorkerRender';
 import { presentationCollaborationPipes } from './commandCollaboration';
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
@@ -68,6 +69,7 @@ export function createPptxWorkerSession(
   if (cacheUrl && !wasm && preparedWorker) requestWasmCompile(transport);
   else if (cacheUrl && !wasm) stopEngineFetch = supplyWasmFetch(transport, new URL(cacheUrl));
   const input = {
+    fontCdn: fontCdnConfiguration(),
     session: crypto.randomUUID(), incarnation: crypto.randomUUID(),
     clientId: options.collaboration?.clientId ?? options.clientId, collaboration: options.collaboration != null,
     fonts: options.fonts, fallbackFonts: options.fallbackFonts,

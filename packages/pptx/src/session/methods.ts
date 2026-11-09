@@ -50,6 +50,8 @@ export interface PresentationSessionOpenOptions
   fonts?: readonly PresentationSessionFont[];
   fallbackFonts?: readonly PresentationSessionFont[];
   wasm?: ArrayBuffer | WebAssembly.Module;
+  /** @internal */
+  fontCdn?: import('@betteroffice/fonts').FontCdnConfiguration;
 }
 
 /**
