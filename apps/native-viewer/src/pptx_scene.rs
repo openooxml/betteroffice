@@ -217,13 +217,22 @@ struct PptxImages {
     assets: HashMap<String, PptxImage>,
 }
 
+fn load_media(bytes: &[u8]) -> Result<image::DynamicImage, String> {
+    if image::guess_format(bytes).ok() == Some(image::ImageFormat::Tiff)
+        && ooxml_drawingml::media::tiff_bounded_pixels(bytes).is_none()
+    {
+        return Err("unsupported TIFF encoding".to_owned());
+    }
+    image::load_from_memory(bytes).map_err(|error| error.to_string())
+}
+
 impl PptxImages {
     fn load(package: &PptxPackage) -> Self {
         let assets = package
             .media
             .iter()
             .map(|part| {
-                let image = image::load_from_memory(&part.bytes)
+                let image = load_media(&part.bytes)
                     .map(|image| {
                         let rgba = image.into_rgba8();
                         let (width, height) = rgba.dimensions();
@@ -1149,6 +1158,52 @@ fn positive(value: f32, label: &str) -> Result<f32, String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A 2x1 TIFF whose strip is a real JPEG of those pixels.
+    fn jpeg_tiff() -> Vec<u8> {
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+            .encode(
+                &[255, 0, 0, 0, 255, 0],
+                2,
+                1,
+                image::ExtendedColorType::Rgb8,
+            )
+            .unwrap();
+        let entries: [(u16, u16, u32, u32); 9] = [
+            (256, 3, 1, 2),
+            (257, 3, 1, 1),
+            (258, 3, 3, 122),
+            (259, 3, 1, 7),
+            (262, 3, 1, 2),
+            (273, 4, 1, 128),
+            (277, 3, 1, 3),
+            (278, 3, 1, 1),
+            (279, 4, 1, jpeg.len() as u32),
+        ];
+        let mut tiff = b"II*\0\x08\0\0\0".to_vec();
+        tiff.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        for (tag, kind, count, value) in entries {
+            tiff.extend_from_slice(&tag.to_le_bytes());
+            tiff.extend_from_slice(&kind.to_le_bytes());
+            tiff.extend_from_slice(&count.to_le_bytes());
+            tiff.extend_from_slice(&value.to_le_bytes());
+        }
+        tiff.extend_from_slice(&0u32.to_le_bytes());
+        for _ in 0..3 {
+            tiff.extend_from_slice(&8u16.to_le_bytes());
+        }
+        tiff.extend_from_slice(&jpeg);
+        tiff
+    }
+
+    #[test]
+    fn a_tiff_whose_decode_its_size_does_not_bound_is_not_loaded() {
+        let tiff = jpeg_tiff();
+        assert!(image::load_from_memory(&tiff).is_ok());
+        assert!(load_media(&tiff).is_err());
+    }
+
     use super::*;
 
     #[test]

@@ -15,6 +15,7 @@ docx = [
     "dep:docx-layout",
     "dep:docx-parse",
     "dep:docx-raster",
+    "dep:ooxml-drawingml",
     "dep:ooxml-opc",
     "dep:ooxml-text",
 ]
@@ -46,7 +47,7 @@ docx-raster = { package = "betteroffice-docx-raster", path = "../../crates/docx-
 futures-util = { version = "=0.3.33", features = ["sink"] }
 getrandom = "=0.4.3"
 image = { version = "=0.25.10", default-features = false, features = ["bmp", "gif", "jpeg", "png", "tiff", "webp"] }
-ooxml-drawingml = { package = "betteroffice-drawingml", path = "../../crates/ooxml-drawingml", optional = true }
+ooxml-drawingml = { package = "betteroffice-drawingml", path = "../../crates/ooxml-drawingml", optional = true, features = ["tiff"] }
 ooxml-opc = { package = "betteroffice-opc", path = "../../crates/ooxml-opc", default-features = false, optional = true }
 ooxml-text = { package = "betteroffice-ooxml-text", path = "../../crates/ooxml-text", optional = true }
 pollster = "=0.4.0"
