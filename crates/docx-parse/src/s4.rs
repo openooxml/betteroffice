@@ -95,7 +95,7 @@ pub fn parse_docx_s4_projection(data: &[u8]) -> Result<S4Projection, ParseError>
             continue;
         };
         let owner_path = relationship_path_for_part(path);
-        let relationships = if unreadable.contains(&owner_path) {
+        let relationships = if unreadable.contains(&owner_path.to_ascii_lowercase()) {
             None
         } else {
             relationship_parts
@@ -158,7 +158,7 @@ fn read_relationship_parts(
                 read.warnings.push(format!(
                     "{path} could not be read, so its part's references were left unresolved."
                 ));
-                read.unreadable.insert(path.clone());
+                read.unreadable.insert(path.to_ascii_lowercase());
             }
         }
     }
@@ -491,6 +491,20 @@ mod tests {
             "{}",
             header_image(&projection)
         );
+    }
+
+    #[test]
+    fn an_unreadable_relationships_part_named_in_another_case_borrows_nothing_either() {
+        let bytes = package(None, DOCUMENT_RELS);
+        let mut parts = ooxml_opc::unzip_parts(&bytes).unwrap();
+        parts.push((
+            "word/_rels/Header1.xml.RELS".to_owned(),
+            b"<Relationships><not closed".to_vec(),
+        ));
+        let projection =
+            parse_docx_s4_projection(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+        assert_eq!(projection.warnings.len(), 1);
+        assert!(header_image(&projection)["src"].is_null());
     }
 
     #[test]
