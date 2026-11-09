@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { createCanvas, loadImage } from '@napi-rs/canvas';
 import { engines } from '#agents-engines';
 import type { DisplayList } from '@betteroffice/docx/layout/render';
+import type { YrsSession } from '@betteroffice/docx/yrs';
 import JSZip from 'jszip';
 import { openDocx, type DocumentRenderer } from '../src';
 import { renderDocxPage } from '../src/render';
@@ -12,21 +13,31 @@ const configureDefaultFonts = async (options: Parameters<typeof import('@bettero
 
 afterEach(() => configureDefaultFonts({}));
 
-/** Records the frames of the private sessions a preview lays out on. */
-const frameBuilds = async () => {
+let restoreYrs: (() => void) | undefined;
+afterEach(() => { restoreYrs?.(); restoreYrs = undefined; });
+
+/** Runs `install` on each private session a preview lays out on. */
+const onPreviewSession = async (install: (session: YrsSession) => void) => {
   const { module } = await engines.load('docx');
   const { yrs } = module;
-  const calls = mock((input: string, frame: Uint8Array) => { void input; return frame; });
   (module as { yrs: typeof yrs }).yrs = {
     ...yrs,
     createYrsSession: async (...args: Parameters<typeof yrs.createYrsSession>) => {
       const session = await yrs.createYrsSession(...args);
-      const original = session.buildDisplayListFrame;
-      session.buildDisplayListFrame = (input, epoch) => calls(input, original(input, epoch));
+      install(session);
       return session;
     },
   };
-  return Object.assign(calls, { mockRestore() { (module as { yrs: typeof yrs }).yrs = yrs; } });
+  restoreYrs = () => { (module as { yrs: typeof yrs }).yrs = yrs; };
+};
+
+const frameBuilds = async () => {
+  const calls = mock((input: string, frame: Uint8Array) => { void input; return frame; });
+  await onPreviewSession((session) => {
+    const original = session.buildDisplayListFrame;
+    session.buildDisplayListFrame = (input, epoch) => calls(input, original(input, epoch));
+  });
+  return calls;
 };
 
 const frameDisplay = async (frame: Uint8Array): Promise<DisplayList> => {
@@ -67,7 +78,11 @@ for (const embedded of [false, true]) {
     const module = { createFontProvider: () => ({ resolve }) };
     await configureDefaultFonts(embedded ? { load: async () => module } : { fonts: module });
     const doc = await openDocx(await zip.generateAsync({ type: 'uint8array' }), { renderer: canvasRenderer });
-    const register = spyOn(doc.session, 'registerFont');
+    const register = mock((bytes: Uint8Array) => { void bytes; });
+    await onPreviewSession((session) => {
+      const original = session.registerFont;
+      session.registerFont = (...args: Parameters<typeof original>) => { register(args[0] as Uint8Array); return original(...args); };
+    });
     try {
       const rendered = await canvasRenderer(doc.session, 1);
       expect([...rendered.png.slice(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
