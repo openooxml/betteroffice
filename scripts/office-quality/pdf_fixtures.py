@@ -28,3 +28,23 @@ def pdf_bytes(pages, info=None):
         output += b'%010d 00000 n \n' % offsets[index]
     output += f'trailer\n<< /Size {number + 1} /Root 1 0 R{info_reference} >>\nstartxref\n{xref}\n%%EOF\n'.encode()
     return bytes(output)
+
+
+def form_pdf_bytes():
+    appearance = b'0 g 0 0 200 100 re f'
+    objects = {
+        1: b'<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [4 0 R] >> >>',
+        2: b'<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+        3: b'<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [4 0 R] >>',
+        4: b'<< /Type /Annot /Subtype /Widget /FT /Tx /T (field) /F 4 /Rect [100 100 300 200] /P 3 0 R /AP << /N 5 0 R >> >>',
+        5: b'<< /Type /XObject /Subtype /Form /BBox [0 0 200 100] /Length %d >>\nstream\n' % len(appearance) + appearance + b'\nendstream',
+    }
+    output = bytearray(b'%PDF-1.7\n')
+    offsets = {}
+    for index in sorted(objects):
+        offsets[index] = len(output)
+        output += b'%d 0 obj\n' % index + objects[index] + b'\nendobj\n'
+    xref = len(output)
+    output += b'xref\n0 6\n0000000000 65535 f \n' + b''.join(b'%010d 00000 n \n' % offsets[index] for index in range(1, 6))
+    output += f'trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n'.encode()
+    return bytes(output)

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pypdfium2 as pdfium
 
-from pdf_fixtures import pdf_bytes
+from pdf_fixtures import form_pdf_bytes, pdf_bytes
 from raster import RASTERIZER, merge_pdfs, open_pdf, page_fonts, page_size_pt, pdf_metadata, render_page
 
 
@@ -51,6 +51,15 @@ class RasterTests(unittest.TestCase):
             with open_pdf(root / 'merged.pdf') as document:
                 self.assertEqual(len(document), 2)
                 self.assertEqual(page_size_pt(document, 1), (842, 595))
+
+    def test_form_field_appearances_are_drawn(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'form.pdf'
+            path.write_bytes(form_pdf_bytes())
+            with open_pdf(path) as pdf:
+                image = render_page(pdf, 0, 72).convert('L')
+            self.assertEqual(image.getpixel((200, 642)), 0)
+            self.assertEqual(image.getpixel((50, 50)), 255)
 
 
 if __name__ == '__main__':
