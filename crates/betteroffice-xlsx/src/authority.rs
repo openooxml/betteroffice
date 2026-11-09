@@ -3835,6 +3835,7 @@ pub(crate) fn is_structural_op(op: &Op) -> bool {
             | Op::SetDefinedName { .. }
             | Op::DeleteDefinedName { .. }
             | Op::SetDefinedNames { .. }
+            | Op::SetTables { .. }
     )
 }
 
@@ -4879,6 +4880,7 @@ fn requires_full_semantic_sync(op: &Op) -> bool {
             | Op::MoveSheet { .. }
             | Op::RenameSheet { .. }
             | Op::RestoreSheet { .. }
+            | Op::SetTables { .. }
     )
 }
 
@@ -4923,6 +4925,7 @@ fn targeted_sheet_keys(
                 targets.push(None);
             }
             Op::SetDefinedNames { .. }
+            | Op::SetTables { .. }
             | Op::SetDefinedName { .. }
             | Op::DeleteDefinedName { .. } => targets.push(None),
             op => {
@@ -5001,7 +5004,8 @@ fn op_sheet(op: &Op) -> Option<SheetId> {
         | Op::MoveSheet { .. }
         | Op::SetDefinedName { .. }
         | Op::DeleteDefinedName { .. }
-        | Op::SetDefinedNames { .. } => None,
+        | Op::SetDefinedNames { .. }
+        | Op::SetTables { .. } => None,
     }
 }
 

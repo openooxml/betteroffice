@@ -3575,6 +3575,7 @@ impl Workbook {
                 Op::SetCharts { .. }
                 | Op::SetChartAnchor { .. }
                 | Op::SetDefinedNames { .. }
+                | Op::SetTables { .. }
                 | Op::AddConditionalFormat { .. }
                 | Op::RemoveConditionalFormat { .. }
                 | Op::SetConditionalFormats { .. }
@@ -4461,6 +4462,7 @@ fn worksheet_edit_target(op: &Op) -> Option<SheetId> {
         | Op::RenameSheet { .. }
         | Op::RestoreSheet { .. }
         | Op::SetDefinedNames { .. }
+        | Op::SetTables { .. }
         | Op::SetDefinedName { .. }
         | Op::DeleteDefinedName { .. } => None,
     }
@@ -4711,6 +4713,7 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
         Op::SetDefinedName { .. } | Op::DeleteDefinedName { .. } => {}
         Op::RestoreSheet { .. }
         | Op::SetDefinedNames { .. }
+        | Op::SetTables { .. }
         | Op::SetCharts { .. }
         | Op::SetConditionalFormats { .. }
         | Op::RestoreAutoFilter { .. }
@@ -5846,6 +5849,7 @@ impl CalculationScope {
             | Op::SetRowVisibility { .. }
             | Op::RestoreRowDimension { .. } => Self::Full,
             Op::SetDefinedNames { .. }
+            | Op::SetTables { .. }
             | Op::SetDefinedName { .. }
             | Op::DeleteDefinedName { .. }
             | Op::AddSheet { .. }

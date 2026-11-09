@@ -6472,7 +6472,7 @@
   {
     "op": "applyOps",
     "result": {
-      "error": "bad ops: unknown variant `bogus`, expected one of `setCell`, `insertRows`, `deleteRows`, `insertCols`, `deleteCols`, `setColWidth`, `setColVisibility`, `restoreColDimension`, `setRowHeight`, `setRowVisibility`, `restoreRowDimension`, `setFreezePane`, `setHyperlinks`, `setHyperlink`, `removeHyperlink`, `setAutoFilter`, `restoreAutoFilter`, `addConditionalFormat`, `removeConditionalFormat`, `setConditionalFormats`, `restoreColStyles`, `restoreRowStyles`, `setCharts`, `setChartAnchor`, `mergeCells`, `unmergeCells`, `patchRangeStyle`, `setRangeNumberFormat`, `applyRangeFormat`, `addSheet`, `removeSheet`, `moveSheet`, `renameSheet`, `setDefinedName`, `deleteDefinedName`, `setDefinedNames`, `restoreSheet` at line 1 column 33"
+      "error": "bad ops: unknown variant `bogus`, expected one of `setCell`, `insertRows`, `deleteRows`, `insertCols`, `deleteCols`, `setColWidth`, `setColVisibility`, `restoreColDimension`, `setRowHeight`, `setRowVisibility`, `restoreRowDimension`, `setFreezePane`, `setHyperlinks`, `setHyperlink`, `removeHyperlink`, `setAutoFilter`, `restoreAutoFilter`, `addConditionalFormat`, `removeConditionalFormat`, `setConditionalFormats`, `restoreColStyles`, `restoreRowStyles`, `setCharts`, `setChartAnchor`, `mergeCells`, `unmergeCells`, `patchRangeStyle`, `setRangeNumberFormat`, `applyRangeFormat`, `addSheet`, `removeSheet`, `moveSheet`, `renameSheet`, `setDefinedName`, `deleteDefinedName`, `setDefinedNames`, `restoreSheet`, `setTables` at line 1 column 33"
     }
   },
   {

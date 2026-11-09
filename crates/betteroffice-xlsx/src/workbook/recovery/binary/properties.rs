@@ -5,7 +5,7 @@ use xlsx_model::{
     Alignment, AnchorCell, AnchorEditAs, AnchorExtent, AnchorPos, AutoFilter, Border, BorderEdge,
     BorderStyle, ChartRef, ChartRefKind, ColStyle, Color, ConditionalFormatRule,
     ConditionalFormatting, DefinedName, DifferentialFormat, Fill, Font, HAlign, PatternType,
-    Protection, VAlign,
+    Protection, Table, VAlign,
 };
 
 use super::*;
@@ -467,6 +467,17 @@ fn defined_name() -> S<DefinedName> {
     })
 }
 
+fn table() -> S<Table> {
+    record!(Table {
+        name: text(),
+        sheet: sheet(),
+        range: range(),
+        header_rows: any::<u32>(),
+        totals_rows: any::<u32>(),
+        columns: prop::collection::vec(text(), 0..3)
+    })
+}
+
 fn op(tag: u8) -> S<Op> {
     match tag {
         0 => operation!(SetCell {
@@ -658,12 +669,15 @@ fn op(tag: u8) -> S<Op> {
             name: text(),
             formulas: prop::collection::vec((sheet(), at(), cell()), 0..4)
         }),
+        37 => operation!(SetTables {
+            tables: prop::collection::vec(table(), 0..3)
+        }),
         _ => unreachable!(),
     }
 }
 
 fn all_ops() -> S<Vec<Op>> {
-    (0..37).fold(Just(Vec::new()).boxed(), |ops, tag| {
+    (0..38).fold(Just(Vec::new()).boxed(), |ops, tag| {
         (ops, op(tag))
             .prop_map(|(mut ops, op)| {
                 ops.push(op);
@@ -674,7 +688,7 @@ fn all_ops() -> S<Vec<Op>> {
 }
 
 fn any_op() -> S<Op> {
-    (0u8..37).prop_flat_map(op).boxed()
+    (0u8..38).prop_flat_map(op).boxed()
 }
 
 fn history() -> S<Vec<Vec<Op>>> {
