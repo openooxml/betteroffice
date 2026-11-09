@@ -9179,9 +9179,18 @@ fn field_metadata(f: &FieldRunIn) -> FieldMetadata {
 }
 
 fn border_visible(b: &BorderEdgeIn) -> bool {
-    !matches!(b.style.as_deref(), Some("none") | Some("nil"))
-        && !matches!(b.ooxml_style.as_deref(), Some("none") | Some("nil"))
-        && b.width.unwrap_or(1.0) > 0.0
+    border_paints(b.style.as_deref(), b.ooxml_style.as_deref(), b.width)
+}
+
+/// Whether a border with this style, OOXML style and width paints a line.
+pub(crate) fn border_paints(
+    style: Option<&str>,
+    ooxml_style: Option<&str>,
+    width: Option<f64>,
+) -> bool {
+    !matches!(style, Some("none") | Some("nil"))
+        && !matches!(ooxml_style, Some("none") | Some("nil"))
+        && width.unwrap_or(1.0) > 0.0
 }
 
 fn border_number(b: &BorderEdgeIn) -> u8 {

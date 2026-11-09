@@ -253,3 +253,27 @@ fn a_merge_starting_in_a_hidden_row_restarts_at_the_next_visible_row() {
     let (measure, _) = render(starting);
     assert_eq!(measure["rows"].as_array().unwrap().len(), 3);
 }
+
+#[test]
+fn a_nested_table_that_paints_keeps_its_hidden_row() {
+    let nested = |cell: Value| {
+        serde_json::from_value::<LayoutBlock>(json!({
+            "kind": "table", "id": "nested", "columnWidths": [60],
+            "rows": [{"id": "n0", "cells": [cell]}]
+        }))
+        .unwrap()
+    };
+    let none = json!({"style": "none", "width": 0});
+    let empty = json!({"id": "nc", "blocks": [],
+        "borders": {"top": none, "right": none, "bottom": none, "left": none}});
+    let mut shaded = empty.clone();
+    shaded["background"] = json!("#FF0000");
+    let mut bordered = empty.clone();
+    bordered["borders"]["left"] = json!({"style": "single", "width": 1});
+    for (cell, kept) in [(shaded, 3), (bordered, 3), (empty, 2)] {
+        let mut table = three_rows(Some(true));
+        table.rows[1].cells[0].blocks = vec![nested(cell)];
+        drop_hidden_rows(&mut table);
+        assert_eq!(table.rows.len(), kept);
+    }
+}

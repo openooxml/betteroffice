@@ -32,7 +32,7 @@ pub use ooxml_drawingml::normalize_table_column_widths;
 use serde::Serialize;
 
 use crate::cell_layout::table_compat_leading_shift;
-use crate::types::{LayoutBlock, Run, TableBlock, TableRow};
+use crate::types::{LayoutBlock, Run, TableBlock, TableCell, TableRow};
 
 /// Twips per inch.
 const TWIPS_PER_INCH: f64 = 1440.0;
@@ -218,12 +218,33 @@ fn block_shows_content(block: &LayoutBlock) -> bool {
                         .is_some_and(|marker| !marker.is_empty())
             })
         }
-        LayoutBlock::Table(table) => table.rows.iter().any(row_shows_content),
+        LayoutBlock::Table(table) => table
+            .rows
+            .iter()
+            .any(|row| row_shows_content(row) || row.cells.iter().any(cell_paints)),
         LayoutBlock::SectionBreak(_) | LayoutBlock::PageBreak(_) | LayoutBlock::ColumnBreak(_) => {
             false
         }
         _ => true,
     }
+}
+
+/// A nested cell paints shading or a border line even with no content, by the
+/// same tests the display list applies.
+fn cell_paints(cell: &TableCell) -> bool {
+    cell.background.is_some()
+        || cell.borders.as_ref().is_some_and(|borders| {
+            [&borders.top, &borders.right, &borders.bottom, &borders.left]
+                .into_iter()
+                .flatten()
+                .any(|border| {
+                    crate::display_list::border_paints(
+                        border.style.as_deref(),
+                        border.ooxml_style.as_deref(),
+                        border.width,
+                    )
+                })
+        })
 }
 
 /// Total grid columns: the furthest column any cell reaches, and every row's

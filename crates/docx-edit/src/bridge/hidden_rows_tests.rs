@@ -335,3 +335,31 @@ fn a_hidden_row_holding_only_an_empty_field_is_removed() {
         3
     );
 }
+
+fn row_with_nested_table(tbl_pr: &str, tc_pr: &str) -> String {
+    format!(
+        r#"<w:tr>{HIDDEN}<w:tc><w:tcPr><w:tcW w:w="4680" w:type="dxa"/></w:tcPr><w:p><w:r>{VANISH}<w:t>Hidden</w:t></w:r></w:p><w:tbl><w:tblPr><w:tblW w:w="2000" w:type="dxa"/>{tbl_pr}</w:tblPr><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/>{tc_pr}</w:tcPr><w:p/></w:tc></w:tr></w:tbl><w:p/></w:tc></w:tr>"#
+    )
+}
+
+#[test]
+fn a_hidden_row_keeps_a_nested_table_that_paints() {
+    let rows_of = |nested: String| render(&[row("Alpha", ""), nested, row("Charlie", "")], false);
+    let count = |rendered: Rendered| {
+        rendered.table.unwrap()["block"]["rows"]
+            .as_array()
+            .unwrap()
+            .len()
+    };
+    let shaded = row_with_nested_table(
+        "",
+        r#"<w:shd w:val="clear" w:color="auto" w:fill="FF0000"/>"#,
+    );
+    assert_eq!(count(rows_of(shaded)), 3);
+    let bordered = row_with_nested_table(
+        r#"<w:tblBorders><w:top w:val="single" w:sz="4" w:space="0" w:color="000000"/><w:left w:val="single" w:sz="4" w:space="0" w:color="000000"/><w:bottom w:val="single" w:sz="4" w:space="0" w:color="000000"/><w:right w:val="single" w:sz="4" w:space="0" w:color="000000"/></w:tblBorders>"#,
+        "",
+    );
+    assert_eq!(count(rows_of(bordered)), 3);
+    assert_eq!(count(rows_of(row_with_nested_table("", ""))), 2);
+}
