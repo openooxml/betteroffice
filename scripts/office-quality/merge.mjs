@@ -12,6 +12,7 @@ import {
 import { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { FORMATS, aggregateReport, renderSection } from './readme.mjs';
+import { privateMode } from './private-step.mjs';
 import { validatePlan as validateFidelityPlan } from './plan.mjs';
 import { validateComparison } from './results.mjs';
 import { digest, docxShards, mergeDocxBenchmarks } from './docx-benchmark.mjs';
@@ -261,7 +262,7 @@ export async function mergeFromPaths({
       JSON.parse(await readFile(resolve(parts, `roundtrip-report-${format}-${shard}`, 'report.json'), 'utf8'))));
     report = mergeRoundtrips(plan, report, benchmarks, digest(planBytes));
   }
-  const section = renderSection(report);
+  const section = renderSection(report, { privateCorpus: privateMode() });
   const aggregate = aggregateReport(report);
   const failures = { schema_version: 1, commit: report.commit, clusters: failureClusters(report) };
   await emptyOutput(output);
