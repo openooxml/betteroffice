@@ -106,6 +106,61 @@ fn text_pieces<'a>(node: &'a Node, out: &mut Vec<&'a str>) {
     }
 }
 
+fn has_inherited_styles(node: &Node) -> bool {
+    let style = match node.name {
+        "s:row" if flag(node.attr("customFormat")) => node.attr("s"),
+        "s:col" => node.attr("style"),
+        _ => None,
+    };
+    style
+        .and_then(|value| value.parse::<u32>().ok())
+        .is_some_and(|style| style != 0)
+        || node.children.iter().any(has_inherited_styles)
+}
+
+fn cell_is_stored(cell: &Node, inherited_styles: bool) -> Option<bool> {
+    let value = cell
+        .children
+        .iter()
+        .rev()
+        .find(|node| node.name == "s:v")
+        .map(|node| node.text.as_str());
+    let has_value = match cell.attr("t") {
+        Some("s") => {
+            if value
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .is_some()
+            {
+                None
+            } else {
+                Some(false)
+            }
+        }
+        Some("inlineStr") => Some(cell.child("s:is").is_some()),
+        Some("str" | "b" | "e") => Some(true),
+        _ => match value.filter(|value| !value.trim().is_empty()) {
+            Some(value) => {
+                value.trim().parse::<f64>().ok()?;
+                Some(true)
+            }
+            None => Some(false),
+        },
+    };
+    if has_value == Some(true)
+        || cell
+            .attr("s")
+            .and_then(|style| style.parse::<u32>().ok())
+            .is_some()
+        || cell.child("s:f").is_some()
+    {
+        Some(true)
+    } else if inherited_styles {
+        None
+    } else {
+        has_value
+    }
+}
+
 fn unescape(source: &str) -> String {
     let bytes = source.as_bytes();
     let mut output = String::with_capacity(source.len());
@@ -415,6 +470,7 @@ pub fn xlsx_font_preflight(bytes: &[u8]) -> Result<FontPreflight, PreflightError
             }
         }
     }
+    let inherited_styles = has_inherited_styles(&sheet);
     let mut candidates = BTreeMap::new();
     let mut hidden_rows = [false; OPENING_VIEWPORT_ROWS as usize];
     if let Some(data) = sheet.child("s:sheetData") {
@@ -446,16 +502,22 @@ pub fn xlsx_font_preflight(bytes: &[u8]) -> Result<FontPreflight, PreflightError
                 if r >= OPENING_VIEWPORT_ROWS || c >= OPENING_VIEWPORT_COLUMNS {
                     continue;
                 }
-                if cell.attr("s").is_none()
+                if candidates.contains_key(&(r, c)) {
+                    match cell_is_stored(cell, inherited_styles) {
+                        Some(true) => {}
+                        Some(false) => continue,
+                        None => {
+                            complete = false;
+                            continue;
+                        }
+                    }
+                } else if cell.attr("s").is_none()
                     && cell.child("s:f").is_none()
                     && cell.attr("t").is_none_or(|kind| kind == "n")
                     && cell
                         .child("s:v")
                         .is_none_or(|node| node.text.trim().is_empty())
                 {
-                    if candidates.contains_key(&(r, c)) {
-                        complete = false;
-                    }
                     continue;
                 }
                 candidates.insert((r, c), cell);

@@ -79,6 +79,30 @@ fn alternate_content_cells_follow_worksheet_read_order() {
 }
 
 #[test]
+fn alternate_content_default_cell_keeps_earlier_value() {
+    let cells = alternate(
+        r#"<c r="A1" s="1"><v>1</v></c>"#,
+        r#"<c r="A1" t="inlineStr"/>"#,
+    );
+    let sheet = worksheet(&format!(r#"<row r="1">{cells}</row>"#), "");
+    let result = xlsx_font_preflight(&fixture(&sheet, STYLES, None, &[], false)).unwrap();
+    assert!(result.complete);
+    assert_eq!(keys(&result), [("Styled", true, true)]);
+}
+
+#[test]
+fn alternate_content_stored_cell_replaces_earlier_value() {
+    let cells = alternate(
+        r#"<c r="A1" s="1"><v>1</v></c>"#,
+        r#"<c r="A1" t="inlineStr"><is><t>Text</t></is></c>"#,
+    );
+    let sheet = worksheet(&format!(r#"<row r="1">{cells}</row>"#), "");
+    let result = xlsx_font_preflight(&fixture(&sheet, STYLES, None, &[], false)).unwrap();
+    assert!(result.complete);
+    assert_eq!(keys(&result), [("Base", false, false)]);
+}
+
+#[test]
 fn alternate_content_rows_follow_worksheet_read_order() {
     let rows = alternate(
         r#"<row r="1"><c r="A1" s="2"><v>1</v></c></row>"#,
