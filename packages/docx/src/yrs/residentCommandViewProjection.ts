@@ -55,13 +55,15 @@ const revised = (values: Record<string, unknown> | undefined, keys: readonly str
  * A paragraph's accepted-view text and whether it holds inline atoms, read from its own segments
  * without building the story's view. Undefined wherever tracked changes touch it or the mark
  * before it (they can join paragraphs or hide text), or its id is not unique: the caller then
- * reads the story.
+ * reads the story. An engine without segment reads also reads the story.
  */
 export function readEchoParagraph(
   engine: Pick<DocxWorkerCommandEngine, 'geometryReader' | 'paragraphUnit' | 'paragraphSegments'>,
   story: string,
   paraId: string
 ): { text: string; hasAtoms: boolean } | undefined {
+  if (typeof engine.geometryReader.paragraphIdCount !== 'function' || typeof engine.paragraphUnit !== 'function' ||
+    typeof engine.paragraphSegments !== 'function') return undefined;
   if (engine.geometryReader.paragraphIdCount(story, paraId) !== 1) return undefined;
   const unit = engine.paragraphUnit(story, paraId);
   if (unit < 0) return undefined;
