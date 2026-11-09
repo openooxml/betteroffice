@@ -95,8 +95,19 @@ const alignment = definePptxPlugin<ProbeState>({
       (entry) => entry.slideId === geometry.layout.slideId
     )?.shapeId;
     const shape = shapeId ? geometry.getShapeRect(shapeId) : null;
+    const selected = context.snapshot.selection;
+    const target = selected?.target;
+    const anchors = selected && target?.kind === 'text' ? [
+      { name: 'selection', answer: geometry.getAnchorGeometry({ kind: 'selection' }) },
+      { name: 'range', answer: geometry.getAnchorGeometry({ kind: 'range', version: geometry.layout.version,
+        slideId: selected.slideId, shapeId: target.shapeId, storyId: target.storyId, anchor: target.anchor, focus: target.focus }) },
+    ] : [];
+
     return (
       <>
+        {anchors.map(({ name, answer }) => answer.ok && <div key={name} data-probe-anchor={name}
+          style={{ position: 'absolute', left: answer.anchor.x, top: answer.anchor.y,
+            width: Math.max(1, answer.anchor.width), height: answer.anchor.height }} />)}
         {slide && (
           <input
             data-testid="overlay-input"

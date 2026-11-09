@@ -7,6 +7,9 @@ type ProbeAnchorResult =
   | { ok: true; rects: readonly ProbeRect[]; anchor: ProbeRect; pageRect: ProbeRect; version: string; layoutId: string }
   | { ok: false; failure: { code: string; message: string } };
 
+type ProbeTarget = { kind: 'selection' } | { kind: 'range'; version: string; slideId: string;
+  shapeId: string; storyId: string; anchor: number; focus: number };
+
 interface Probe {
   editor: {
     commands: { execute(id: string, args: unknown): Promise<unknown> };
@@ -27,7 +30,9 @@ interface Probe {
   navigation: unknown;
   selection: { target: { kind: string } } | null;
   geometry: {
-    getAnchorGeometry(target: { kind: 'selection' }): ProbeAnchorResult;
+    layout: { zoom: number; version: string; width: number; height: number };
+    getAnchorGeometry(target: ProbeTarget): ProbeAnchorResult;
+    readAnchorGeometries(targets: ProbeTarget[]): Promise<ProbeAnchorResult[]>;
     getShapeRect(shapeId: string): ProbeRect | null;
   } | null;
   marks: number;
@@ -145,6 +150,101 @@ test('pptx: overlays land on the presented slide at every zoom and while scrolle
   await expect.poll(() => misalignment(page), { timeout: 30_000 }).toBeLessThan(1.5);
   await zoom(page, 'fit');
   await expect.poll(() => misalignment(page), { timeout: 30_000 }).toBeLessThan(1.5);
+});
+
+test('selection and range anchors follow stage scrolling at every zoom', async ({ page }) => {
+  await page.setViewportSize({ width: 1100, height: 760 });
+  await open(page, engine);
+  const story = await pinnedEvaluate(page, async () => {
+    const content = await (window as unknown as { __probe: Probe }).__probe.editor!.readContent();
+    return { version: content.version, ...content.stories.find(candidate =>
+      candidate.slideId === content.slides[0].id && candidate.text.length > 4)! };
+  });
+  for (const [anchor, focus] of [[1, 4], [4, 1], [2, 2]]) {
+    let baseline: { rects: ProbeRect[]; anchor: ProbeRect } | undefined;
+    for (const scale of [0.5, 1, 2] as const) {
+      await zoom(page, scale);
+      await expect(page.locator(`[data-probe-slide][data-zoom="${scale}"]`)).toBeAttached();
+      expect(await pinnedEvaluate(page, async ({ story, anchor, focus }) =>
+        await (window as unknown as { __probe: Probe }).__probe.editor!.selectText({
+          slide: 1, shapeId: story.shapeId, storyId: story.storyId, start: anchor, end: focus,
+        }), { story, anchor, focus })).toBe(true);
+      await expect(page.locator('[data-probe-anchor="selection"]')).toBeAttached();
+      const read = () => pinnedEvaluate(page, async ({ story, anchor, focus }) => {
+        const geometry = (window as unknown as { __probe: Probe }).__probe.geometry;
+        if (!geometry) return null;
+        const targets: ProbeTarget[] = [{ kind: 'selection' }, { kind: 'range', version: story.version,
+          slideId: story.slideId, shapeId: story.shapeId, storyId: story.storyId, anchor, focus }];
+        const answers = targets.map(target => geometry.getAnchorGeometry(target));
+        const batch = await geometry.readAnchorGeometries(targets);
+        const canvas = document.querySelector('[data-testid="pptx-slide-canvas"]')!.getBoundingClientRect();
+        const layer = document.querySelector<HTMLElement>('[data-testid="plugin-overlays"]')!;
+        const layerRect = layer.getBoundingClientRect();
+        const origin = { x: canvas.left - layerRect.left - layer.clientLeft + layer.scrollLeft,
+          y: canvas.top - layerRect.top - layer.clientTop + layer.scrollTop };
+        const normalize = (rect: ProbeRect) => ({ x: (rect.x - origin.x) * geometry.layout.width / canvas.width,
+          y: (rect.y - origin.y) * geometry.layout.height / canvas.height,
+          width: rect.width * geometry.layout.width / canvas.width,
+          height: rect.height * geometry.layout.height / canvas.height });
+        const markers = ['selection', 'range'].map(name => {
+          const marker = document.querySelector(`[data-probe-anchor="${name}"]`)!.getBoundingClientRect();
+          return { x: marker.x, y: marker.y, width: marker.width, height: marker.height };
+        });
+        return { answers, batch, markers, canvas: { x: canvas.x, y: canvas.y },
+          normalized: answers[0].ok ? { rects: answers[0].rects.map(normalize), anchor: normalize(answers[0].anchor) } : null };
+      }, { story, anchor, focus });
+      await expect.poll(async () => (await read())?.answers.every(answer => answer.ok)).toBe(true);
+      await page.getByRole('application').evaluate(async stage => {
+        stage.style.overflow = 'auto';
+        const spacer = document.createElement('div');
+        spacer.dataset.anchorScrollSpacer = 'true';
+        spacer.style.position = 'absolute';
+        spacer.style.left = `${stage.clientWidth + 600}px`;
+        spacer.style.top = `${stage.clientHeight + 600}px`;
+        spacer.style.width = '1px';
+        spacer.style.height = '1px';
+        stage.append(spacer);
+        stage.scrollTo(0, 0);
+        await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      });
+      const before = (await read())!;
+      expect(before.batch).toEqual(before.answers);
+      expect(before.answers[0]).toEqual(before.answers[1]);
+      expect(before.normalized!.rects.length).toBe(anchor === focus ? 0 : 1);
+      if (!baseline) baseline = before.normalized!;
+      for (const key of ['x', 'y', 'width', 'height'] as const) {
+        expect(before.normalized!.anchor[key]).toBeCloseTo(baseline.anchor[key], 3);
+      }
+      const scrolled = await page.getByRole('application').evaluate(stage => {
+        stage.style.overflow = 'auto';
+        stage.scrollLeft = 120;
+        stage.scrollTop = 80;
+        return { x: stage.scrollLeft, y: stage.scrollTop };
+      });
+      expect(scrolled.x).toBeGreaterThan(0);
+      expect(scrolled.y).toBeGreaterThan(0);
+      await expect.poll(async () => {
+        const after = await read();
+        return after ? Math.abs(after.markers[0].x - before.markers[0].x + scrolled.x) +
+          Math.abs(after.markers[0].y - before.markers[0].y + scrolled.y) : 999;
+      }).toBeLessThan(1.5);
+      const after = (await read())!;
+      expect(after.batch).toEqual(after.answers);
+      expect(after.answers[0]).toEqual(after.answers[1]);
+      for (const key of ['x', 'y', 'width', 'height'] as const) {
+        expect(after.normalized!.anchor[key]).toBeCloseTo(baseline.anchor[key], 3);
+      }
+      expect(after.normalized!.rects).toEqual(before.normalized!.rects);
+      for (let index = 0; index < 2; index++) {
+        expect(after.markers[index].x - before.markers[index].x).toBeCloseTo(after.canvas.x - before.canvas.x, 1);
+        expect(after.markers[index].y - before.markers[index].y).toBeCloseTo(after.canvas.y - before.canvas.y, 1);
+      }
+      await page.getByRole('application').evaluate(stage => {
+        stage.scrollTo(0, 0);
+        stage.querySelector('[data-anchor-scroll-spacer]')!.remove();
+      });
+    }
+  }
 });
 
 test('pptx: overlays leave the pointer to the slide beneath them', async ({ page }) => {

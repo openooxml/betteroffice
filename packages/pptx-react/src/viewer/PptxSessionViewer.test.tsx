@@ -717,3 +717,19 @@ it('failed fonts warn once per file across rerenders', async () => {
     else Reflect.deleteProperty(globalThis, 'FontFace');
   }
 });
+
+test('read-only and slideshow retain editor anchors while the viewer has no plugin host (viewer)', async () => {
+  const { viewer } = session();
+  open(viewer);
+  let api: PptxWorkerViewerApi | undefined;
+  const view = render(<PptxEditor legacySyncApi file={file} fonts={[]} readOnly experimentalWorkerOpen
+    onReady={value => { api = value; }} />);
+  await waitFor(() => expect(api).toBeDefined());
+  expect(api!.handle).toBeNull();
+  expect(view.queryByTestId('plugin-overlays')).toBeNull();
+  expect(view.queryByTestId('plugin-dock-left')).toBeNull();
+  expect(view.queryByTestId('plugin-dock-right')).toBeNull();
+  expect(view.queryByTestId('plugin-dock-bottom')).toBeNull();
+  expect('geometry' in api!).toBe(false);
+  expect(api!.selectText({ slide: 1, shapeId: 'shape', storyId: 'story', start: 0, end: 0 })).toBe(false);
+});
