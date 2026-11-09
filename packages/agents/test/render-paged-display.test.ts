@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from 'bun:test';
 import { engines } from '#agents-engines';
 import JSZip from 'jszip';
-import { openDocx, type DocumentRenderer } from '../src';
+import { openDocx } from '../src';
 import { renderDocxPage } from '../src/render';
 import { fixture } from './fixture';
 
@@ -63,17 +63,33 @@ test('a page built alone matches the whole-document list, footer fields and note
   } finally { whole.session.destroy(); paged.session.destroy(); }
 });
 
-test('rendering on the canvas path never fetches kernel inputs', async () => {
-  let fetched = -1;
-  const renderer: DocumentRenderer = async (session, page) => {
-    const render = spyOn(session, 'renderPng').mockRejectedValue(Object.assign(new Error('canvas unavailable'), { code: 'canvas-unavailable' }));
-    const fetchKernel = spyOn(session, 'retainedKernelInputsJson');
-    try { return await renderDocxPage(session, page); }
-    finally { fetched = fetchKernel.mock.calls.length; render.mockRestore(); }
+test('the canvas path fetches no kernel inputs and leaves the caller session as it was', async () => {
+  const { module } = await engines.load('docx');
+  const { yrs } = module;
+  let kernelFetches = 0;
+  (module as { yrs: typeof yrs }).yrs = {
+    ...yrs,
+    createYrsSession: async (...args: Parameters<typeof yrs.createYrsSession>) => {
+      const session = await yrs.createYrsSession(...args);
+      const fetch = session.retainedKernelInputsJson;
+      session.retainedKernelInputsJson = (revision) => { kernelFetches++; return fetch(revision); };
+      return session;
+    },
   };
-  const doc = await openDocx(await fieldsAndNotes(), { renderer });
+  const doc = await openDocx(await fieldsAndNotes());
+  const render = spyOn(doc.session, 'renderPng').mockRejectedValue(Object.assign(new Error('canvas unavailable'), { code: 'canvas-unavailable' }));
+  const touched = (['setDisplayWindow', 'setDisplayRetainBuiltPages', 'buildDisplayListFrame', 'buildDisplayPagesFrame', 'layoutDocumentWithRegionsRetainedJson'] as const)
+    .map(name => spyOn(doc.session, name));
   try {
-    expect((await doc.render(2)).pageCount).toBeGreaterThan(2);
-    expect(fetched).toBe(0);
-  } finally { doc.close(); }
+    expect((await renderDocxPage(doc.session, 2)).pageCount).toBeGreaterThan(2);
+    expect(kernelFetches).toBe(0);
+    for (const spy of touched) expect(spy).not.toHaveBeenCalled();
+    await expect(renderDocxPage(doc.session, 100_000)).rejects.toMatchObject({ code: 'PAGE_OUT_OF_RANGE' });
+    for (const spy of touched) expect(spy).not.toHaveBeenCalled();
+  } finally {
+    (module as { yrs: typeof yrs }).yrs = yrs;
+    for (const spy of touched) spy.mockRestore();
+    render.mockRestore();
+    doc.close();
+  }
 });

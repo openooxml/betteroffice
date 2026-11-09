@@ -29,20 +29,22 @@ export const renderDocxPage: DocumentRenderer = async (session, pageNumber) => {
   }
 };
 
+/** Lays out a private copy, so a caller's session keeps its layout and display state. */
 async function layoutDocxPage(original: YrsSession) {
   const { module } = await engines.load('docx');
-  let session = original;
-  const sourceDocument = session.materializeDocx();
+  const sourceDocument = original.materializeDocx();
   if (!sourceDocument) throw new DocumentToolError('UNSUPPORTED', 'Rendering requires a session opened from DOCX bytes.');
-  if (!module.yrs.sessionSourcePackage(session) && sourceDocument.originalBuffer) {
-    session = await module.yrs.createYrsSession();
-    try {
+  const session = await module.yrs.createYrsSession();
+  try {
+    if (sourceDocument.originalBuffer) {
       const bytes = new Uint8Array(sourceDocument.originalBuffer);
       const host = session.openDocx(bytes, false);
       session.bootstrapPeer(original.encodeState(), original.encodePeerMetadata(), bytes, host);
-    } catch (error) { throw cleanupGuard(() => session.destroy()).failed(error); }
-  }
-  const dispose = () => { if (session !== original) session.destroy(); };
+    } else {
+      session.loadState(original.encodeState());
+    }
+  } catch (error) { throw cleanupGuard(() => session.destroy()).failed(error); }
+  const dispose = () => session.destroy();
   try {
     const document = session.materializeDocx()!;
     const bundled = module.layout.hasConfiguredFontSource()
