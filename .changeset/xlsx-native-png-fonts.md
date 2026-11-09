@@ -1,4 +1,5 @@
 ---
+'@betteroffice/xlsx': patch
 '@betteroffice/xlsx-native': patch
 ---
 

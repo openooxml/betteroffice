@@ -97,7 +97,9 @@ a tab name; `range` is an A1 string, `{ kind: 'a1', a1 }`, zero-based `{ kind: '
 for the sheet's used range at call time.
 Options are `{ scale, maxWidth, maxHeight, signal, fonts }`. The editor's painter draws on a canvas. Without
 `fonts`, it loads the bundled faces `@betteroffice/xlsx-native` draws the sheet's fonts with, so both engines
-match. The call rejects with `PngExportError` rather than paint a substitute font. Without a canvas, it rejects with
+match, and rejects if one fails to load. A `fonts` list, even an empty one, replaces the bundled faces: a family it
+does not cover is painted with the engine's built-in substitute, whose pixels differ between the canvas and native
+engines. A supplied face that fails to load rejects with `PngExportError` code `font-unavailable`. Without a canvas, it rejects with
 code `canvas-unavailable`; use `@betteroffice/xlsx-native` for PNG export in that environment.
 `isPngExportAvailable()` reports whether PNG export can run.
 
