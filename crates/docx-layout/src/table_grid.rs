@@ -211,11 +211,13 @@ fn block_shows_content(block: &LayoutBlock) -> bool {
                 }
                 _ => true,
             }) || paragraph.attrs.as_ref().is_some_and(|attrs| {
-                attrs.list_marker_hidden != Some(true)
-                    && attrs
-                        .list_marker
-                        .as_deref()
-                        .is_some_and(|marker| !marker.is_empty())
+                attrs.shading.is_some()
+                    || attrs.borders.is_some()
+                    || (attrs.list_marker_hidden != Some(true)
+                        && attrs
+                            .list_marker
+                            .as_deref()
+                            .is_some_and(|marker| !marker.is_empty()))
             })
         }
         LayoutBlock::Table(table) => table

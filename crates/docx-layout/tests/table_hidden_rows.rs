@@ -277,3 +277,24 @@ fn a_nested_table_that_paints_keeps_its_hidden_row() {
         assert_eq!(table.rows.len(), kept);
     }
 }
+
+#[test]
+fn an_empty_paragraph_that_paints_keeps_its_hidden_row() {
+    let paragraph = |attrs: Value| {
+        serde_json::from_value::<LayoutBlock>(json!({
+            "kind": "paragraph", "id": "p", "runs": [], "attrs": attrs
+        }))
+        .unwrap()
+    };
+    let border = json!({"style": "single", "width": 1});
+    for (attrs, kept) in [
+        (json!({"shading": "#FF0000"}), 3),
+        (json!({"borders": {"top": border}}), 3),
+        (json!({}), 2),
+    ] {
+        let mut table = three_rows(Some(true));
+        table.rows[1].cells[0].blocks = vec![paragraph(attrs)];
+        drop_hidden_rows(&mut table);
+        assert_eq!(table.rows.len(), kept);
+    }
+}
