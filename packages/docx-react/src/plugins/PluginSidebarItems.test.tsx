@@ -39,6 +39,7 @@ function harness(items: () => DocxPluginSidebarItem<unknown>[]) {
   const activation = {
     pluginId: 'acme',
     key: 'acme#1',
+    activation: {},
     plugin: { getSidebarItems: items },
     context: {},
   } as unknown as DocxPluginActivation;

@@ -591,7 +591,7 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
     } finally {
       release();
     }
-    const toolbarButton = within(view.container).getByRole('button', { name: 'Gesture bold', exact: true });
+    const toolbarButton = within(view.container).getByRole('button', { name: 'Gesture bold' });
     const releaseToolbar = trackPluginGestures(toolbarButton.closest<HTMLElement>('[data-plugin-activation]')!, trusted, currentEvent);
     try {
       fireEvent.click(toolbarButton);
