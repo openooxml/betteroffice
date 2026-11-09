@@ -39,7 +39,7 @@ on:
         required: false
         type: boolean
       publish_readme:
-        description: "Private corpus run: commit this run's aggregate-only section to the README (the owner's decision)"
+        description: "Private corpus run: commit this run's aggregate-only section to the README"
         default: false
         required: false
         type: boolean

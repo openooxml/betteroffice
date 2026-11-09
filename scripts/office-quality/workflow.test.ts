@@ -387,7 +387,7 @@ test('the pin step refuses private runs on another branch or commit', async () =
 const AGGREGATE_ONLY = '${{ runner.temp }}/fidelity-report/section.md\n${{ runner.temp }}/fidelity-report/aggregate.json\n';
 test('a private run commits the README only when publish_readme asks for it', () => {
   expect(workflow.on.workflow_dispatch.inputs.publish_readme).toEqual({
-    description: "Private corpus run: commit this run's aggregate-only section to the README (the owner's decision)",
+    description: "Private corpus run: commit this run's aggregate-only section to the README",
     default: false, required: false, type: 'boolean',
   });
   const guard = prepare.steps.find((step: any) => step.name === 'Keep README publishing to private runs');
