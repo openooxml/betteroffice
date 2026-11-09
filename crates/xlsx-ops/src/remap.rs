@@ -10,7 +10,7 @@ use xlsx_calc::parser::Expr;
 use xlsx_calc::{ColumnRange, RowRange, parse_formula};
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS, col_to_letters};
 use xlsx_model::sheet_qualifier::{
-    ParsedSheetToken, Qualifier, is_function_call, next_char_len, parse_sheet_token,
+    ParsedSheetToken, is_function_call, narrowed_span, next_char_len, parse_sheet_token,
     qualifier_token, quoted_endpoints, sheet_names_equal, sheet_qualifiers, skip_string,
 };
 use xlsx_model::workbook::{MAX_DEFINED_NAME_BYTES, defined_names_bytes};
@@ -732,6 +732,11 @@ fn rewrite_component_for_removal(
             }
             continue;
         }
+        if !sheet_names_equal(&qualifier.first, removed_name)
+            && !sheet_names_equal(&qualifier.last, removed_name)
+        {
+            continue;
+        }
         match narrowed_span(&qualifier, removed_name, order_before) {
             Some(Some(replacement)) => replacements.push((qualifier.span, replacement)),
             Some(None) => return ComponentRemoval::Collapsed,
@@ -750,41 +755,6 @@ fn rewrite_component_for_removal(
     }
     out.push_str(&component[copied..]);
     ComponentRemoval::Rewritten(out)
-}
-
-/// `Some(Some(text))` narrows the span onto the sheets that remain,
-/// `Some(None)` means nothing it covered survives, `None` means the removal
-/// does not touch it.
-fn narrowed_span(
-    qualifier: &Qualifier,
-    removed_name: &str,
-    order_before: &[String],
-) -> Option<Option<String>> {
-    let position = |name: &str| {
-        order_before
-            .iter()
-            .position(|sheet| sheet_names_equal(sheet, name))
-    };
-    let (Some(start), Some(end)) = (position(&qualifier.first), position(&qualifier.last)) else {
-        return (sheet_names_equal(&qualifier.first, removed_name)
-            || sheet_names_equal(&qualifier.last, removed_name))
-        .then_some(None);
-    };
-    let covered = &order_before[start.min(end)..=start.max(end)];
-    if !covered
-        .iter()
-        .any(|sheet| sheet_names_equal(sheet, removed_name))
-    {
-        return None;
-    }
-    let remaining = covered
-        .iter()
-        .filter(|sheet| !sheet_names_equal(sheet, removed_name))
-        .collect::<Vec<_>>();
-    let (Some(first), Some(last)) = (remaining.first(), remaining.last()) else {
-        return Some(None);
-    };
-    Some(Some(qualifier_token(first, last)))
 }
 
 /// What the defined-name rewriter made of one formula.
@@ -1853,6 +1823,38 @@ pub(crate) fn rename_sheet_references(
     Ok(restores)
 }
 
+/// The cell formulas on every sheet but `removed` that `lost` rewrites for
+/// that sheet's deletion: the sheet's index before the removal, the cell, the
+/// new formula and the cell as it was. Nothing changes here.
+pub(crate) fn removed_sheet_cell_edits(
+    wb: &Workbook,
+    removed: usize,
+    lost: &dyn Fn(&str) -> Option<String>,
+) -> Result<Vec<(usize, CellRef, String, CellState)>, OpError> {
+    let mut edits = Vec::new();
+    for (index, sheet) in wb.sheets.iter().enumerate() {
+        if index == removed {
+            continue;
+        }
+        for (cell, stored) in sheet.iter_cells() {
+            let Some(source) = &stored.formula else {
+                continue;
+            };
+            let Some(rewritten) = lost(source) else {
+                continue;
+            };
+            if rewritten.len() > MAX_FORMULA_BYTES {
+                return Err(OpError::FormulaNotRewritable {
+                    sheet: SheetId(index as u32),
+                    cell,
+                });
+            }
+            edits.push((index, cell, rewritten, CellState::from(stored)));
+        }
+    }
+    Ok(edits)
+}
+
 /// Every sheet's conditional formats as a rename of `old_name` to `new_name`
 /// leaves them: each rule formula naming the sheet rewritten as
 /// [`rename_sheet_references`] rewrites cell formulas, and a rule kept as the
@@ -1864,18 +1866,42 @@ pub(crate) fn renamed_conditional_formats(
     old_name: &str,
     new_name: &str,
 ) -> Result<Vec<(SheetId, Vec<ConditionalFormatting>)>, OpError> {
+    rewritten_conditional_formats(
+        wb,
+        None,
+        &|formula| {
+            writable_rename(
+                formula,
+                new_name,
+                rename_formula_sheet(formula, old_name, new_name),
+            )
+        },
+        &|text| rename_formula_sheet(text, old_name, new_name),
+    )
+}
+
+/// Every sheet's conditional formats, but `skip`'s, with each rule formula
+/// put through `rewrite`, and a rule kept as the file wrote it patched in
+/// place with `patch` applied to its formula text, which has to agree with
+/// the rule's formulas. Only sheets with a changed formula are listed, by
+/// their index in `wb`. Nothing changes here.
+pub(crate) fn rewritten_conditional_formats(
+    wb: &Workbook,
+    skip: Option<usize>,
+    rewrite: &dyn Fn(&str) -> Result<String, OpError>,
+    patch: &dyn Fn(&str) -> String,
+) -> Result<Vec<(SheetId, Vec<ConditionalFormatting>)>, OpError> {
     let mut planned = Vec::new();
     for (index, sheet) in wb.sheets.iter().enumerate() {
+        if skip == Some(index) {
+            continue;
+        }
         let mut formats = sheet.conditional_formats.clone();
         let mut changed = false;
         for rule in formats.iter_mut().flat_map(|group| group.rules.iter_mut()) {
             let mut renamed = Vec::with_capacity(rule.formulas.len());
             for formula in &rule.formulas {
-                let rewritten = writable_rename(
-                    formula,
-                    new_name,
-                    rename_formula_sheet(formula, old_name, new_name),
-                )?;
+                let rewritten = rewrite(formula)?;
                 if rewritten.len() > MAX_FORMULA_BYTES {
                     return Err(unrewritable_rule(rule, &sheet.name));
                 }
@@ -1885,7 +1911,7 @@ pub(crate) fn renamed_conditional_formats(
                 continue;
             }
             if let Some(raw) = &rule.raw_xml {
-                match rename_conditional_format_xml(raw, old_name, new_name) {
+                match rewrite_conditional_format_xml(raw, patch) {
                     Some((xml, authored)) if authored == rule.formulas => {
                         rule.raw_xml = Some(xml);
                     }
@@ -1923,18 +1949,17 @@ fn char_references(escaped: &str, also: &[char]) -> String {
 
 fn unrewritable_rule(rule: &ConditionalFormatRule, sheet: &str) -> OpError {
     OpError::InvalidConditionalFormat(format!(
-        "conditional format {} on sheet '{sheet}' cannot be rewritten for the rename",
+        "conditional format {} on sheet '{sheet}' cannot be rewritten for this sheet edit",
         rule.id
     ))
 }
 
-/// `raw`, a `cfRule` as the file wrote it, with the sheet named in each
-/// `formula` element and each `cfvo` formula renamed, plus the formula text
-/// it held before, in document order. `None` when the fragment does not read.
-fn rename_conditional_format_xml(
+/// `raw`, a `cfRule` as the file wrote it, with `patch` applied to the text of
+/// each `formula` element and each `cfvo` formula, plus the formula text it
+/// held before, in document order. `None` when the fragment does not read.
+fn rewrite_conditional_format_xml(
     raw: &str,
-    old_name: &str,
-    new_name: &str,
+    patch: &dyn Fn(&str) -> String,
 ) -> Option<(String, Vec<String>)> {
     use quick_xml::escape::{escape, partial_escape};
     use quick_xml::{Reader, events::Event};
@@ -1982,7 +2007,7 @@ fn rename_conditional_format_xml(
             }
             Event::End(element) if element.local_name().as_ref() == b"formula" => {
                 let (content, text) = formula.take()?;
-                let renamed = rename_formula_sheet(&text, old_name, new_name);
+                let renamed = patch(&text);
                 if renamed != text {
                     edits.push((
                         content..start,
@@ -2018,7 +2043,7 @@ fn rename_conditional_format_xml(
                     }
                 }
                 if is_formula && let Some((span, text)) = value {
-                    let renamed = rename_formula_sheet(&text, old_name, new_name);
+                    let renamed = patch(&text);
                     if renamed != text {
                         edits.push((
                             span,
@@ -4065,5 +4090,21 @@ mod tests {
                 Some(format!("B{}+{row}", row + 3)).as_deref()
             );
         }
+    }
+
+    /// A chart reference over a 3-D span keeps its text when a sheet inside
+    /// the span is deleted, quoting included, and narrows only when an
+    /// endpoint is the deleted sheet.
+    #[test]
+    fn a_chart_span_keeps_its_text_when_a_sheet_inside_it_is_deleted() {
+        let order = ["Jan", "Feb", "Mar"].map(str::to_owned).to_vec();
+        assert_eq!(
+            super::drop_removed_sheet("'Jan:Mar'!$A$1", "Feb", &order),
+            None
+        );
+        assert_eq!(
+            super::drop_removed_sheet("'Jan:Mar'!$A$1", "Jan", &order).as_deref(),
+            Some("Feb:Mar!$A$1")
+        );
     }
 }

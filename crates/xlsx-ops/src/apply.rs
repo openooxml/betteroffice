@@ -1871,8 +1871,60 @@ fn remove_sheet(wb: &mut Workbook, index: usize) -> Result<InvertedOp, OpError> 
         .iter()
         .map(|sheet| sheet.name.clone())
         .collect::<Vec<_>>();
+    let removed_name = wb.sheets[index].name.clone();
+    let lost = |text: &str| {
+        xlsx_model::sheet_qualifier::remove_sheet_references(text, &removed_name, &order_before)
+    };
+    let cell_edits = crate::remap::removed_sheet_cell_edits(wb, index, &lost)?;
+    let formats = crate::remap::rewritten_conditional_formats(
+        wb,
+        Some(index),
+        &|formula| Ok(lost(formula).unwrap_or_else(|| formula.to_owned())),
+        &|text| lost(text).unwrap_or_else(|| text.to_owned()),
+    )?;
+    let previous_names = wb.defined_names.clone();
+    let mut names = previous_names.clone();
+    names.retain(|defined| defined.local_sheet.map(|sheet| sheet.0 as usize) != Some(index));
+    for defined in &mut names {
+        if let Some(sheet) = defined.local_sheet
+            && sheet.0 as usize > index
+        {
+            defined.local_sheet = Some(SheetId(sheet.0 - 1));
+        }
+        if let Some(formula) = lost(&defined.formula) {
+            defined.formula = formula;
+        }
+    }
+    if defined_names_bytes(&names) > MAX_DEFINED_NAME_BYTES {
+        return Err(OpError::TooManyDefinedNames);
+    }
     let removed = wb.sheets.remove(index);
-    let previous_defined_names = drop_defined_name_scopes(wb, index);
+    wb.defined_names = names;
+    let previous_defined_names = (previous_names != wb.defined_names).then_some(previous_names);
+    let after = |before: usize| SheetId((if before > index { before - 1 } else { before }) as u32);
+    let mut reference_restores = Vec::new();
+    for (before, at, formula, previous) in cell_edits {
+        let sheet = wb.sheet_mut(after(before)).expect("a remaining sheet");
+        if let Some(mut cell) = sheet.cell(at).cloned() {
+            cell.formula = Some(formula);
+            sheet.set_cell(at, cell);
+        }
+        reference_restores.push(Op::SetCell {
+            sheet: SheetId(before as u32),
+            at,
+            cell: previous,
+        });
+    }
+    for (SheetId(before), formats) in formats {
+        let sheet = wb
+            .sheet_mut(after(before as usize))
+            .expect("a remaining sheet");
+        let previous = std::mem::replace(&mut sheet.conditional_formats, formats);
+        reference_restores.push(Op::SetConditionalFormats {
+            sheet: SheetId(before),
+            formats: previous,
+        });
+    }
     let chart_restores = strand_chart_refs(wb, &removed.name, &order_before)
         .into_iter()
         .map(|restore| rebase_chart_restore(restore, index))
@@ -1947,10 +1999,17 @@ fn remove_sheet(wb: &mut Workbook, index: usize) -> Result<InvertedOp, OpError> 
             charts: removed.charts,
         });
     }
+    if !removed.conditional_formats.is_empty() {
+        inv.push(Op::SetConditionalFormats {
+            sheet,
+            formats: removed.conditional_formats,
+        });
+    }
     if let Some(defined_names) = previous_defined_names {
         inv.push(Op::SetDefinedNames { defined_names });
     }
     inv.extend(chart_restores);
+    inv.extend(reference_restores);
     Ok(InvertedOp(inv))
 }
 
@@ -1977,22 +2036,6 @@ fn shift_defined_name_scopes(wb: &mut Workbook, index: usize) {
             defined.local_sheet = Some(SheetId(sheet.0 + 1));
         }
     }
-}
-
-/// Drops names scoped to a removed sheet and narrows the scopes above it,
-/// returning the prior list when it changed.
-fn drop_defined_name_scopes(wb: &mut Workbook, index: usize) -> Option<Vec<DefinedName>> {
-    let previous = wb.defined_names.clone();
-    wb.defined_names
-        .retain(|defined| defined.local_sheet.map(|sheet| sheet.0 as usize) != Some(index));
-    for defined in &mut wb.defined_names {
-        if let Some(sheet) = defined.local_sheet
-            && sheet.0 as usize > index
-        {
-            defined.local_sheet = Some(SheetId(sheet.0 - 1));
-        }
-    }
-    (previous != wb.defined_names).then_some(previous)
 }
 
 const CELL_IS_OPERATORS: &[&str] = &[
