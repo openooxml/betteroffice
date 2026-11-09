@@ -5,6 +5,7 @@ import { cellPosition, commentBody, commentRanges, commentRoot, commentText, con
 import { createDocxBatchSchema, type DocxAgentBatch, type DocxAgentEdit, type DocxEditOutcome } from './docx-schema';
 import { compareDocxStructure, docxModelCounts, type DocxModelCounts } from './docx-structure';
 import { editLimit } from './edit-limits';
+import { cleanupGuard } from './cleanup';
 import {
   DocumentToolError,
   TrackedRevisionConflictError,
@@ -568,6 +569,7 @@ export class DocxAgentDocument {
       throw new DocumentToolError('INVALID_ARGUMENT', 'Tracked acceptance requires an ISO date.');
     }
     const draft = await this.fork();
+    const release = cleanupGuard(() => draft.destroy());
     try {
       this.checkPending(held);
       const vector = draft.encodeStateVector();
@@ -578,7 +580,7 @@ export class DocxAgentDocument {
       finally { this.session.addUndoBoundary(); }
       held.value.status = 'accepted';
       return { id, status: 'accepted' as const, tracked: options.tracked ?? false, changes: held.value.changes.length };
-    } finally { draft.destroy(); }
+    } catch (error) { throw release.failed(error); } finally { release.run(); }
   }
 
   async accept(id: string, options: { tracked?: boolean; date?: string } = {}) {
@@ -637,12 +639,13 @@ export class DocxAgentDocument {
     integer(page, 1, 100_000, 'page');
     if (!this.options.renderer) throw new DocumentToolError('UNSUPPORTED', 'No renderer configured. Supply a DocumentRenderer or use the MCP server.');
     const draft = await this.fork();
+    const release = cleanupGuard(() => draft.destroy());
     try {
       if (held) this.checkPending(held);
       if (this.attached) this.projectProposals(draft, held);
       else if (held) this.apply(draft, held);
       return await this.options.renderer(draft, page);
-    } finally { draft.destroy(); }
+    } catch (error) { throw release.failed(error); } finally { release.run(); }
   }
 
   async export(proposalId?: string): Promise<Uint8Array> {
@@ -666,6 +669,7 @@ export class DocxAgentDocument {
   private async exportBytes(proposalId?: string, updateModifiedDate = true, inspect?: (draft: YrsSession) => void): Promise<Uint8Array> {
     const held = proposalId ? this.pending(proposalId) : undefined;
     const draft = await this.fork();
+    const release = cleanupGuard(() => draft.destroy());
     try {
       if (held) this.checkPending(held);
       if (this.attached) this.projectProposals(draft, held);
@@ -711,9 +715,9 @@ export class DocxAgentDocument {
       }
       return bytes;
     } catch (error) {
-      if (error instanceof engines.get('docx').module.yrs.DocxSectionError) throw new DocumentToolError('UNSUPPORTED', error.message);
-      throw error;
-    } finally { draft.destroy(); }
+      if (error instanceof engines.get('docx').module.yrs.DocxSectionError) throw release.failed(new DocumentToolError('UNSUPPORTED', error.message));
+      throw release.failed(error);
+    } finally { release.run(); }
   }
 
   async verify(proposalId?: string, options: { structure?: boolean } = {}) {
@@ -721,6 +725,7 @@ export class DocxAgentDocument {
     let after: DocxModelCounts | undefined;
     const bytes = await this.exportBytes(proposalId, true, structure ? draft => { after = docxModelCounts(draft); } : undefined);
     const reopened = await openDocx(bytes);
+    const release = cleanupGuard(() => reopened.close());
     try {
       const kept = this.lastKeptUnchanged;
       const dropped = this.lastStructureDropped;
@@ -731,7 +736,7 @@ export class DocxAgentDocument {
       this.sourceCounts ??= await sourceModelCounts(original);
       const report = await compareDocxStructure(original, bytes, this.sourceCounts, after);
       return { reopened: true, bytes: bytes.length, paragraphs, checks: ['save', 'reopen', 'structure'], structure: report, unchecked: ['visual fidelity', 'semantic correctness'], structureDropped: dropped, keptUnchanged: kept };
-    } finally { reopened.close(); }
+    } catch (error) { throw release.failed(error); } finally { release.run(); }
   }
 
   close() {
@@ -886,7 +891,7 @@ export class DocxAgentDocument {
         draft.loadState(state);
       }
       return draft;
-    } catch (error) { draft.destroy(); throw error; }
+    } catch (error) { throw cleanupGuard(() => draft.destroy()).failed(error); }
   }
 
   private runRevision(p: Paragraph) {
@@ -1308,6 +1313,7 @@ export class DocxAgentDocument {
       for (const [index, edit] of edits.entries()) { failed = index; steps.push(await this.plan(edit)); }
       failed = undefined;
       const draft = await this.fork();
+      const release = cleanupGuard(() => draft.destroy());
       try {
         if (this.epoch !== version) throw new DocumentToolError('STALE_VERSION', 'The document changed while the batch started. Read the version again.');
         const vector = draft.encodeStateVector();
@@ -1383,7 +1389,7 @@ export class DocxAgentDocument {
           this.commentSaveBaselineVersion = undefined;
         }
         return outcomes;
-      } finally { draft.destroy(); }
+      } catch (error) { throw release.failed(error); } finally { release.run(); }
     } catch (error) {
       const failure = error instanceof DocumentToolError ? error : new DocumentToolError('INVALID_EDIT', error instanceof Error ? error.message : String(error));
       throw new DocumentToolError(failure.code, `${failure.message} No batch edits were applied.`, { ...failure.details, ...(failed === undefined ? {} : { failedIndex: failed }) });
@@ -1639,16 +1645,17 @@ export async function openDocx(bytes: Uint8Array, options: DocumentOptions = {})
   try {
     session.seedFromDocx(bytes);
     return new DocxAgentDocument(session, options, true);
-  } catch (error) { session.destroy(); throw error; }
+  } catch (error) { throw cleanupGuard(() => session.destroy()).failed(error); }
 }
 
 async function sourceModelCounts(bytes: Uint8Array): Promise<DocxModelCounts> {
   const { module } = await engines.load('docx');
   const session = await module.yrs.createYrsSession();
+  const release = cleanupGuard(() => session.destroy());
   try {
     session.seedFromDocx(bytes);
     return docxModelCounts(session);
-  } finally { session.destroy(); }
+  } catch (error) { throw release.failed(error); } finally { release.run(); }
 }
 
 export function attachDocx(session: YrsSession, options: DocumentOptions = {}): DocxAgentDocument {

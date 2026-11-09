@@ -70,7 +70,10 @@ export function createPngExporter(session: YrsSession) {
       const { layout } = computeLayout({ document, pageGap: 0, session: copy, renderEnv, measurement });
       const displayList = await buildRustDisplayList({ ...getLayoutKernelInputs(layout)!, layout, fontChains: measurement.fontChains }, copy);
       return { copy, displayList, fontChains: measurement.fontChains ?? {} };
-    } catch (error) { copy.destroy(); throw error; }
+    } catch (error) {
+      try { copy.destroy(); } catch { /* the layout failure is the one to report */ }
+      throw error;
+    }
   }
 
   function current(fonts: Held['fonts'], fontProvider: Held['fontProvider']): Held {
