@@ -33,11 +33,15 @@ struct Marks {
 }
 
 impl Marks {
-    fn admit(&self, written: &Marks) -> bool {
+    /// `breaks` is false for a part where some page or column break sits outside a paragraph's
+    /// own runs: the editing model may keep such a break with another paragraph, so counts per
+    /// paragraph cannot decide there.
+    fn admit(&self, written: &Marks, breaks: bool) -> bool {
         self.comments == written.comments
             && self.permissions == written.permissions
-            && self.page_breaks == written.page_breaks
-            && self.column_breaks == written.column_breaks
+            && (!breaks
+                || (self.page_breaks == written.page_breaks
+                    && self.column_breaks == written.column_breaks))
             && self.footnote_refs >= written.footnote_refs
             && self.endnote_refs >= written.endnote_refs
             && written
@@ -69,6 +73,60 @@ pub(crate) const POSITIONED: [&str; 19] = [
     "w:annotationRef",
     "m:oMath",
 ];
+
+/// Whether every page or column break in `xml` is a `w:br` directly in a paragraph's own run,
+/// whatever wraps the paragraph. A break under any other element, prefix or namespace binding
+/// is one the per-paragraph break counts do not see.
+fn breaks_on_own_runs(xml: &str) -> Option<bool> {
+    let local = |name: &str| name.rsplit(':').next().unwrap_or(name).to_owned();
+    let mut open: Vec<&str> = Vec::new();
+    for tag in tags(xml)? {
+        if tag.end {
+            open.pop();
+            continue;
+        }
+        if local(tag.name) == "br" {
+            let typed = tag.attributes.iter().any(|(key, range)| {
+                local(key) == "type"
+                    && unescaped(xml, range.clone())
+                        .is_some_and(|value| value == "page" || value == "column")
+            });
+            let own = tag.name == "w:br"
+                && open.ends_with(&["w:p", "w:r"])
+                && !open.iter().any(|name| name.starts_with("mc:"));
+            if typed && !own {
+                return Some(false);
+            }
+        }
+        if !tag.empty {
+            open.push(tag.name);
+        }
+    }
+    Some(true)
+}
+
+/// Whether the per-paragraph break counts decide for a part: every break of its source and of
+/// every paragraph written for it sits in a paragraph's own run.
+fn breaks_decide<'a>(
+    source: &str,
+    recorded: &'a RecordedParagraphs,
+    inserted: &[(S13SpliceAnchor, &'a str)],
+) -> Option<bool> {
+    if !breaks_on_own_runs(source)? {
+        return Some(false);
+    }
+    for xml in recorded
+        .written
+        .values()
+        .map(String::as_str)
+        .chain(inserted.iter().map(|(_, xml)| *xml))
+    {
+        if !breaks_on_own_runs(xml)? {
+            return Some(false);
+        }
+    }
+    Some(true)
+}
 
 fn marks(xml: &str) -> Option<Marks> {
     let mut marks = Marks::default();
@@ -1612,6 +1670,7 @@ fn splice_story_part_inner(
     if outside_source != outside_written {
         return None;
     }
+    let breaks = breaks_decide(source, recorded, &inserted)?;
     let mut replaced = BTreeSet::new();
     let mut ranged = BTreeSet::new();
     for (&ordinal, xml) in written {
@@ -1622,11 +1681,12 @@ fn splice_story_part_inner(
         }
         let paragraph = &source[spans[&ordinal].clone()];
         let wanted = marks(xml)?;
-        if marks(paragraph)?.admit(&wanted) {
+        if marks(paragraph)?.admit(&wanted, breaks) {
             continue;
         }
-        let rangeable = changed_comment_ranges(paragraph, xml)
-            .is_some_and(|patched| marks(&patched).is_some_and(|marks| marks.admit(&wanted)));
+        let rangeable = changed_comment_ranges(paragraph, xml).is_some_and(|patched| {
+            marks(&patched).is_some_and(|marks| marks.admit(&wanted, breaks))
+        });
         if rangeable {
             ranged.insert(ordinal);
         } else {
@@ -2114,13 +2174,14 @@ pub(crate) fn replace_story_part(
         let xml = replacement_xml(&scopes, span.start, serialized, xml)?;
         edits.push((span, rank, xml));
     }
+    let breaks = breaks_decide(&source, recorded, &inserted)?;
     for (&ordinal, xml) in &recorded.written {
         if rows.removed.contains(&ordinal) {
             continue;
         }
         let range = span(ordinal)?;
         let paragraph = &source[range.clone()];
-        if changed.contains(&ordinal) || !marks(paragraph)?.admit(&marks(xml)?) {
+        if changed.contains(&ordinal) || !marks(paragraph)?.admit(&marks(xml)?, breaks) {
             let xml = if let Some(patched) = patched.get(&ordinal) {
                 let id = assignments
                     .get(&ordinal)
@@ -2239,6 +2300,7 @@ pub(crate) fn splice_source_direct(
         end = span.end;
     }
     let source_markers = marker_counts(source)?;
+    let breaks = breaks_decide(source, recorded, &inserted)?;
     for (&ordinal, xml) in &recorded.written {
         let paragraph = patched
             .get(&ordinal)
@@ -2261,7 +2323,7 @@ pub(crate) fn splice_source_direct(
         }
         retained.comments.clear();
         written.comments.clear();
-        if !retained.admit(&written) {
+        if !retained.admit(&written, breaks) {
             return None;
         }
     }
@@ -4255,6 +4317,103 @@ mod tests {
         assert_eq!(
             splice(&nested, &[(0, unmodelled)], &[]),
             Some(nested.clone())
+        );
+    }
+
+    #[test]
+    fn finds_page_and_column_breaks_outside_a_paragraphs_own_runs() {
+        for own in [
+            "<w:p><w:r><w:t>a</w:t><w:br w:type=\"page\"/></w:r></w:p>",
+            "<w:p><w:r><w:br w:type=\"page\"></w:br></w:r></w:p>",
+            "<w:p><w:r><w:br w:type='column'/></w:r></w:p>",
+            "<w:p><!-- <w:hyperlink> --><?pi <w:sdt>?><w:r><w:br w:type=\"column\"/></w:r></w:p>",
+            "<w:p><w:hyperlink><w:r><w:br/><w:br w:type=\"textWrapping\"/></w:r></w:hyperlink></w:p>",
+            "<w:p><w:r><w:pict><w:txbxContent><w:p><w:r><w:br w:type=\"page\"/></w:r></w:p></w:txbxContent></w:pict></w:r></w:p>",
+        ] {
+            assert_eq!(breaks_on_own_runs(own), Some(true), "{own}");
+        }
+        for wrapper in [
+            ("<w:hyperlink w:anchor=\"x\">", "</w:hyperlink>"),
+            ("<w:smartTag w:element=\"x\">", "</w:smartTag>"),
+            ("<w:customXml w:element=\"x\">", "</w:customXml>"),
+            ("<w:sdt><w:sdtContent>", "</w:sdtContent></w:sdt>"),
+            ("<w:ins w:id=\"1\">", "</w:ins>"),
+            ("<w:del w:id=\"1\">", "</w:del>"),
+            ("<w:fldSimple w:instr=\" PAGE \">", "</w:fldSimple>"),
+            ("<w:dir w:val=\"rtl\">", "</w:dir>"),
+            (
+                "<mc:AlternateContent><mc:Choice Requires=\"w14\">",
+                "</mc:Choice></mc:AlternateContent>",
+            ),
+        ] {
+            for brk in ["<w:br w:type=\"page\"/>", "<w:br w:type=\"page\"></w:br>"] {
+                let xml = format!("<w:p>{}<w:r>{brk}</w:r>{}</w:p>", wrapper.0, wrapper.1);
+                assert_eq!(breaks_on_own_runs(&xml), Some(false), "{xml}");
+            }
+        }
+        for stray in [
+            "<w:p><w:r><mc:AlternateContent><mc:Fallback><w:pict><w:txbxContent><w:p><w:r><w:br w:type=\"page\"/></w:r></w:p></w:txbxContent></w:pict></mc:Fallback></mc:AlternateContent></w:r></w:p>",
+            "<x:p><x:r><x:br x:type=\"page\"/></x:r></x:p>",
+            "<p><r><br type=\"column\"/></r></p>",
+            "<w:body><w:br w:type=\"page\"/></w:body>",
+        ] {
+            assert_eq!(breaks_on_own_runs(stray), Some(false), "{stray}");
+        }
+    }
+
+    #[test]
+    fn a_part_with_a_break_outside_own_runs_keeps_unchanged_paragraphs_without_counting_breaks() {
+        let wrappers: [(&str, &str); 7] = [
+            ("<w:hyperlink w:anchor=\"x\">", "</w:hyperlink>"),
+            ("<w:smartTag w:element=\"x\">", "</w:smartTag>"),
+            ("<w:customXml w:element=\"x\">", "</w:customXml>"),
+            ("<w:sdt><w:sdtContent>", "</w:sdtContent></w:sdt>"),
+            (
+                "<w:ins w:id=\"9\" w:author=\"A\" w:date=\"2026-01-01T00:00:00Z\">",
+                "</w:ins>",
+            ),
+            ("<w:fldSimple w:instr=\" PAGE \">", "</w:fldSimple>"),
+            ("<w:hyperlink w:anchor=\"y\">", "</w:hyperlink>"),
+        ];
+        let edited = "<w:p w14:paraId=\"0000000A\"><w:r><w:t>ax</w:t></w:r></w:p>";
+        let next = "<w:p w14:paraId=\"0000000C\"><w:r><w:t>n</w:t></w:r></w:p>";
+        let handed =
+            "<w:p w14:paraId=\"0000000C\"><w:r><w:br w:type=\"page\"/><w:t>n</w:t></w:r></w:p>";
+        for (index, (open, close)) in wrappers.into_iter().enumerate() {
+            let brk = if index == 6 {
+                "<w:br w:type=\"page\"></w:br>"
+            } else {
+                "<w:br w:type=\"page\"/>"
+            };
+            let wrapped = |inner: &str| {
+                format!(
+                    "<w:p w14:paraId=\"0000000B\">{open}<w:r>{inner}<w:t>b</w:t></w:r>{close}</w:p>"
+                )
+            };
+            let kept = wrapped(brk);
+            let source = format!(
+                "{ROOT}<w:body><w:p w14:paraId=\"0000000A\"><w:r><w:t>a</w:t></w:r></w:p>{kept}{next}</w:body></w:document>"
+            );
+            let projected = wrapped("");
+            let spliced = splice(&source, &[(0, edited), (1, &projected), (2, handed)], &[0])
+                .unwrap_or_else(|| panic!("{open}: no splice"));
+            assert_eq!(
+                spliced,
+                source.replace(
+                    "<w:p w14:paraId=\"0000000A\"><w:r><w:t>a</w:t></w:r></w:p>",
+                    edited
+                ),
+                "{open}"
+            );
+        }
+        let own = format!(
+            "{ROOT}<w:body><w:p w14:paraId=\"0000000A\"><w:r><w:t>a</w:t></w:r></w:p><w:p w14:paraId=\"0000000B\"><w:r><w:t>b</w:t><w:br w:type=\"page\"/></w:r></w:p>{next}</w:body></w:document>"
+        );
+        let typed = "<w:p w14:paraId=\"0000000B\"><w:r><w:t>b</w:t></w:r></w:p>";
+        let spliced = splice(&own, &[(0, edited), (1, typed), (2, handed)], &[0]).unwrap();
+        assert!(
+            spliced.contains(typed) && spliced.contains(handed),
+            "{spliced}"
         );
     }
 

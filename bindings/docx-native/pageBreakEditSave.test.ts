@@ -213,24 +213,62 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
   test(`${engine}: an untouched paragraph with a nested page break keeps it when another paragraph is edited`, async () => {
     const failures: string[] = [];
     for (const [name, inner] of Object.entries(NESTED)) {
-      const source = `<w:p w14:paraId="72000001">${inner}</w:p>`;
-      const bytes = await docx(L + source + N);
-      const session = await yrs.createYrsSession();
-      try {
-        session.openDocx(bytes, true);
-        session.insertText({ story: 'body', ...at(session, 2, 1) }, 'x');
-        const live = blockBreaks(session, 'page');
-        const { xml } = await savedXml(yrs, session);
-        const written = (xml.match(/w:type="page"/g) ?? []).length;
-        if (live !== 1 || written !== live) failures.push(`${name}: saved ${written} page breaks, live ${live}, the source 1`);
-        if (!xml.includes(source)) failures.push(`${name}: rewrote the untouched paragraph`);
-      } catch (error) {
-        failures.push(`${name}: threw ${error instanceof Error ? error.message : String(error)}`);
-      } finally {
-        session.destroy();
+      for (const [edited, index] of [['the previous paragraph', 0], ['the next paragraph', 2]] as const) {
+        const source = `<w:p w14:paraId="72000001">${inner}</w:p>`;
+        const bytes = await docx(L + source + N);
+        const session = await yrs.createYrsSession();
+        try {
+          session.openDocx(bytes, true);
+          session.insertText({ story: 'body', ...at(session, index, 1) }, 'x');
+          const live = blockBreaks(session, 'page');
+          const { xml } = await savedXml(yrs, session);
+          const written = (xml.match(/w:type="page"/g) ?? []).length;
+          if (live !== 1 || written !== live) failures.push(`${name}, edit in ${edited}: saved ${written} page breaks, live ${live}, the source 1`);
+          if (!xml.includes(source)) failures.push(`${name}, edit in ${edited}: rewrote the untouched paragraph`);
+          if (index === 0 && !xml.includes(N)) failures.push(`${name}, edit in ${edited}: rewrote the paragraph after the break`);
+        } catch (error) {
+          failures.push(`${name}, edit in ${edited}: threw ${error instanceof Error ? error.message : String(error)}`);
+        } finally {
+          session.destroy();
+        }
       }
     }
     expect(failures).toEqual([]);
+  });
+
+  test(`${engine}: untouched paragraphs around a table keep their page break when another paragraph is edited`, async () => {
+    const broken = `<w:p w14:paraId="72000001"><w:r><w:t>A</w:t>${brk('page')}</w:r></w:p>`;
+    const table = `<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr><w:p w14:paraId="72000011">${text('M')}</w:p></w:tc></w:tr></w:tbl>`;
+    const session = await yrs.createYrsSession();
+    try {
+      session.openDocx(await docx(L + broken + table + N), true);
+      session.insertText({ story: 'body', ...at(session, 0, 1) }, 'x');
+      const { xml } = await savedXml(yrs, session);
+      expect([blockBreaks(session, 'page'), (xml.match(/w:type="page"/g) ?? []).length]).toEqual([1, 1]);
+      expect(xml).toContain(broken + table + N);
+    } finally {
+      session.destroy();
+    }
+  });
+
+  test(`${engine}: a part that binds the WordprocessingML namespace to another prefix saves its page break once`, async () => {
+    const zip = new JSZip();
+    const types = await (await JSZip.loadAsync(await docx(''))).file('[Content_Types].xml')!.async('string');
+    const rels = await (await JSZip.loadAsync(await docx(''))).file('_rels/.rels')!.async('string');
+    zip.file('[Content_Types].xml', types);
+    zip.file('_rels/.rels', rels);
+    const run = (value: string) => `<v:r><v:t xml:space="preserve">${value}</v:t></v:r>`;
+    zip.file('word/document.xml', `<v:document xmlns:v="${W}"><v:body><v:p>${run('L')}</v:p><v:p><v:r><v:t>A</v:t><v:br v:type="page"/></v:r></v:p><v:p>${run('N')}</v:p><v:sectPr/></v:body></v:document>`);
+    const session = await yrs.createYrsSession();
+    try {
+      session.openDocx(await zip.generateAsync({ type: 'uint8array' }), true);
+      session.insertText({ story: 'body', ...at(session, 0, 1) }, 'x');
+      const live = blockBreaks(session, 'page');
+      const { xml } = await savedXml(yrs, session);
+      expect([live, (xml.match(/:type="page"/g) ?? []).length]).toEqual([1, 1]);
+    } finally {
+      session.destroy();
+    }
   });
 
   test(`${engine}: a text edit and a section break save beside a content control that starts with a page break`, async () => {
