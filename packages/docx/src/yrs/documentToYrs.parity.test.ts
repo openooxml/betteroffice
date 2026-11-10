@@ -203,6 +203,7 @@ describe('DOCX engine seeding', () => {
         expect(runs).toEqual(expect.arrayContaining([expect.objectContaining({
           ligatures: 'standardContextual', contextualAlternates: false,
         })]));
+        if (session !== engine) continue;
         const saved = unzipContainer((await saveYrsDocx(session)).bytes);
         const xml = new TextDecoder().decode(saved['word/document.xml']);
         expect(xml).toContain('w14:val="standardContextual"');

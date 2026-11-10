@@ -36,6 +36,7 @@ export interface TypographySession {
 export interface TypographyEngine {
   EditSession: new (client: number) => TypographySession;
   rezip_docx(parts: Record<string, Uint8Array>): Uint8Array;
+  decodeFontFace(bytes: Uint8Array, codec: string): { font: Uint8Array };
 }
 
 export interface TypographyResult {
@@ -112,9 +113,12 @@ export async function inspectTypographyTable(input: {
         '_rels/.rels': encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'),
         'word/document.xml': encode(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p>${row.rtl ? '<w:pPr><w:bidi/></w:pPr>' : ''}<w:r><w:rPr>${properties}</w:rPr><w:t>${row.text}</w:t></w:r></w:p><w:sectPr/></w:body></w:document>`),
       }), true);
-      const fontIds = Object.fromEntries(Object.entries(input.fonts).map(([name, bytes]) => [
-        name, session.register_measure_font(session.decode_font(new Uint8Array(bytes))),
-      ]));
+      const fontIds = Object.fromEntries(Object.entries(input.fonts).map(([name, bytes]) => {
+        const raw = new Uint8Array(bytes);
+        const zstd = raw[0] === 0x28 && raw[1] === 0xb5 && raw[2] === 0x2f && raw[3] === 0xfd;
+        const face = zstd ? engine.decodeFontFace(raw, 'zstd').font : raw;
+        return [name, session.register_measure_font(session.decode_font(face))];
+      }));
       const fontChains = { [`${row.family.toLowerCase()}|0|0`]: [fontIds[row.font]] };
       const blocks = JSON.parse(session.yrs_blocks_for_story('body', '{}'));
       const block = blocks.find((block: { kind: string }) => block.kind === 'paragraph');
