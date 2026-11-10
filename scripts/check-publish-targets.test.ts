@@ -1,8 +1,10 @@
-import { describe, expect, test } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import { afterEach, describe, expect, test } from 'bun:test';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { checkCrates, checkNpm } from './check-publish-targets.mjs';
-import { publishedCrates, publishedPackageVersions } from './published-packages.mjs';
+import { checkCrates, checkNpm, siblingReferences, verifyPublished } from './check-publish-targets.mjs';
+import { publishedCrates, publishedPackageVersions, workspaceEntries } from './published-packages.mjs';
 import { RUST_PUBLISH_CRATES } from './rust-crates.mjs';
 
 const script = fileURLToPath(new URL('./check-publish-targets.mjs', import.meta.url));
@@ -10,7 +12,31 @@ const releaseWorkflow = fileURLToPath(new URL('../.github/workflows/release.yml'
 
 const release = Bun.YAML.parse(readFileSync(releaseWorkflow, 'utf8')) as any;
 const packages = publishedPackageVersions();
+const workspaceVersions = new Map(workspaceEntries().map(({ manifest }) => [manifest.name, manifest.version]));
 const crates = RUST_PUBLISH_CRATES.map((crate) => crate.name);
+const fixtureDirectories: string[] = [];
+const fonts = { name: '@betteroffice/fonts', version: '1.2.3' };
+const latin = { name: '@betteroffice/fonts-latin', version: '1.2.3' };
+
+afterEach(() => {
+  for (const directory of fixtureDirectories.splice(0)) rmSync(directory, { recursive: true, force: true });
+});
+
+function workspaceFixture(manifests: Array<{ name: string; version: string; [key: string]: unknown }>) {
+  const root = mkdtempSync(join(tmpdir(), 'publish-targets-'));
+  fixtureDirectories.push(root);
+  return manifests.map((manifest) => {
+    const directory = join(root, manifest.name.split('/').pop()!);
+    mkdirSync(join(directory, 'src'), { recursive: true });
+    return { directory, manifest };
+  });
+}
+
+function fontWorkspaces(field = 'dependencies', range = 'workspace:*') {
+  return workspaceFixture([{ ...fonts, [field]: { [latin.name]: range } }, latin]);
+}
+
+type RegistryResponder = (name: string, request: Request) => Response | Promise<Response>;
 
 function notFound() {
   return new Response('{"error":"Not found"}', { status: 404 });
@@ -20,20 +46,26 @@ function versions(...published: string[]) {
   return Response.json({ versions: Object.fromEntries(published.map((v) => [v, {}])) });
 }
 
-function registry(respond: (name: string) => Response | Promise<Response>) {
+function registry(respond: RegistryResponder) {
   const server = Bun.serve({
     port: 0,
     hostname: '127.0.0.1',
-    fetch: (request) => respond(decodeURIComponent(new URL(request.url).pathname.slice(1)))
+    fetch: (request) => respond(decodeURIComponent(new URL(request.url).pathname.slice(1)), request)
   });
   return { server, origin: `http://127.0.0.1:${server.port}` };
 }
 
 /** Runs a guard in this process against a fake registry, collecting what it prints. */
 async function check(
-  mode: '--npm' | '--crates',
-  respond: (name: string) => Response | Promise<Response>,
-  options: { timeoutMs?: number; bootstrap?: boolean } = {}
+  mode: '--npm' | '--crates' | '--verify-published',
+  respond: RegistryResponder,
+  options: {
+    timeoutMs?: number;
+    bootstrap?: boolean;
+    packages?: typeof packages;
+    workspaces?: ReturnType<typeof workspaceEntries>;
+    maxWaitMs?: number;
+  } = {}
 ) {
   const { server, origin } = registry(respond);
   const stdout: string[] = [];
@@ -41,10 +73,16 @@ async function check(
   const out = { log: (line: string) => stdout.push(line), error: (line: string) => stderr.push(line) };
   try {
     const started = performance.now();
+    const npmOptions = {
+      registry: origin, out, timeoutMs: options.timeoutMs,
+      packages: options.packages, workspaces: options.workspaces
+    };
     const status =
       mode === '--npm'
-        ? await checkNpm({ registry: origin, out, timeoutMs: options.timeoutMs })
-        : await checkCrates({ registry: origin, out, timeoutMs: options.timeoutMs, bootstrap: options.bootstrap ?? false });
+        ? await checkNpm(npmOptions)
+        : mode === '--verify-published'
+          ? await verifyPublished({ ...npmOptions, cdnBase: origin, maxWaitMs: options.maxWaitMs })
+          : await checkCrates({ registry: origin, out, timeoutMs: options.timeoutMs, bootstrap: options.bootstrap ?? false });
     return { status, stdout: stdout.join('\n'), stderr: stderr.join('\n'), elapsed: performance.now() - started };
   } finally {
     server.stop(true);
@@ -56,7 +94,7 @@ const SPAWN_BUDGET_MS = 30_000;
 // Bun.spawnSync would block the loop this fake registry answers on.
 async function guard(
   mode: string,
-  respond: (name: string) => Response | Promise<Response>,
+  respond: RegistryResponder,
   env: object = {}
 ) {
   const { server, origin } = registry(respond);
@@ -70,6 +108,7 @@ async function guard(
         CRATES_IO_BOOTSTRAP_TOKEN: '',
         NPM_REGISTRY_URL: origin,
         CRATES_REGISTRY_URL: origin,
+        CDN_BASE_URL: origin,
         ...env
       }
     });
@@ -98,7 +137,7 @@ function flaky(respond: (name: string, call: number) => Response | Promise<Respo
 }
 
 function published(name: string) {
-  return versions(packages.find((entry) => entry.name === name)!.version);
+  return versions(workspaceVersions.get(name)!);
 }
 
 describe('npm publish targets', () => {
@@ -110,15 +149,17 @@ describe('npm publish targets', () => {
 
   test('a package that exists at its release version passes', async () => {
     const result = await check('--npm', (name) => {
-      const found = packages.find((entry) => entry.name === name);
-      return found ? versions(found.version) : notFound();
+      const version = workspaceVersions.get(name);
+      return version ? versions(version) : notFound();
     });
     expect(result.status).toBe(0);
     expect(result.stdout).toContain(`${packages[0]!.name}@${packages[0]!.version} is on npm.`);
   });
 
   test('a package that exists at an older version passes: that is a normal publish', async () => {
-    const result = await check('--npm', () => versions('0.0.0'));
+    const result = await check('--npm', (name) =>
+      packages.some((entry) => entry.name === name) ? versions('0.0.0') : published(name)
+    );
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('is a new version of a package on npm.');
     expect(result.stderr).toBe('');
@@ -128,12 +169,240 @@ describe('npm publish targets', () => {
     const missing = packages[0]!.name;
     const result = await check('--npm', (name) => {
       if (name === missing) return notFound();
-      const found = packages.find((entry) => entry.name === name);
-      return versions(found!.version);
+      return published(name);
     });
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(`${missing} is not on npm.`);
     expect(result.stderr).toContain('Initial npm release of a new package');
+  });
+});
+
+describe('workspace dependency versions', () => {
+  for (const field of ['dependencies', 'peerDependencies', 'optionalDependencies']) {
+    test.each([
+      ['workspace:*', latin.version],
+      ['workspace:^0', `^${latin.version}`]
+    ])(`rejects an unavailable %s version in ${field}`, async (range, resolved) => {
+      const result = await check('--npm', () => versions('0.0.0'), {
+        packages: [fonts], workspaces: fontWorkspaces(field, range)
+      });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        `${fonts.name}@${fonts.version} depends on ${latin.name}@${resolved}, which is neither in this release nor on npm`
+      );
+    });
+  }
+
+  test('accepts a dependency version in the release even when npm only has an older version', async () => {
+    const result = await check('--npm', () => versions('0.0.0'), {
+      packages: [fonts, latin], workspaces: fontWorkspaces()
+    });
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+  });
+
+  test.each([
+    ['workspace:*', latin.version],
+    ['workspace:^0', '1.2.4'],
+    ['workspace:^', '1.3.0'],
+    ['workspace:~', '1.2.4'],
+    ['workspace:1.2.3', latin.version],
+    ['^1.0.0', '1.3.0'],
+    ['>=1.2.0 <2.0.0', '1.4.0'],
+    ['^0.1.0 || ~1.2.0', '1.2.4']
+  ])('accepts %s when npm has a matching version', async (range, version) => {
+    const result = await check('--npm', (name) => versions(name === latin.name ? version : '0.0.0'), {
+      packages: [fonts], workspaces: fontWorkspaces('dependencies', range)
+    });
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+  });
+
+  test('rejects a release dependency whose version does not satisfy a plain range', async () => {
+    const result = await check('--npm', () => versions('0.0.0'), {
+      packages: [fonts, latin], workspaces: fontWorkspaces('dependencies', '^2.0.0')
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`depends on ${latin.name}@^2.0.0`);
+  });
+
+  test('still rejects an unclaimed sibling name included in the release', async () => {
+    const result = await check('--npm', (name) => name === latin.name ? notFound() : versions('0.0.0'), {
+      packages: [fonts, latin], workspaces: fontWorkspaces()
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`${latin.name} is not on npm.`);
+    expect(result.stderr).toContain('Initial npm release of a new package');
+  });
+
+  test('ignores development dependencies and dependencies outside this workspace', async () => {
+    const workspaces = workspaceFixture([
+      { ...fonts, dependencies: { external: '^1' }, devDependencies: { [latin.name]: 'workspace:*' } },
+      latin
+    ]);
+    const result = await check('--npm', () => versions('0.0.0'), { packages: [fonts], workspaces });
+    expect(result.status).toBe(0);
+  });
+});
+
+describe('sibling package references', () => {
+  test('finds all three real cdn.ts sibling imports with their source lines', () => {
+    const references = siblingReferences(packages.filter(({ name }) => name === fonts.name));
+    const cdn = references.filter(({ file }) => file === 'packages/fonts/src/cdn.ts');
+    expect(cdn.map(({ name, line }) => [name, line])).toEqual([
+      ['@betteroffice/fonts-cjk', 2], [latin.name, 3], ['@betteroffice/fonts-intl', 4]
+    ]);
+    for (const reference of cdn) {
+      expect(reference.dependent).toBe(fonts.name);
+      expect(reference.version).toBe(packages.find(({ name }) => name === reference.name)!.version);
+    }
+  });
+
+  test('scans all source extensions and dynamic imports while excluding tests and non-code references', () => {
+    const workspaces = workspaceFixture([fonts, latin]);
+    for (const extension of ['ts', 'tsx', 'js', 'mjs']) {
+      writeFileSync(join(workspaces[0]!.directory, 'src', `index.${extension}`), [
+        '// import { version } from "../../fonts-latin/package.json";',
+        '/* from "../../fonts-latin/package.json" */',
+        '`from "../../fonts-latin/package.json"`;',
+        "import { version } from '../../fonts-latin/package.json';",
+        'const sibling = import(/* sibling */ "../../fonts-latin/package.json");',
+        'import "../../fonts-latin/package.json";',
+        'import { version as own } from "../package.json";',
+        'const pattern = /from "..\\/..\\/fonts-latin\\/package.json"/;',
+        'const dynamic = import(`../../fonts-latin/package.json`);'
+      ].join('\n'));
+      writeFileSync(join(workspaces[0]!.directory, 'src', `index.test.${extension}`),
+        'import "../../fonts-latin/package.json";');
+    }
+    mkdirSync(join(workspaces[0]!.directory, 'src', 'nested'));
+    writeFileSync(join(workspaces[0]!.directory, 'src', 'nested', 'index.ts'),
+      'const sibling = import("../../../fonts-latin/package.json");');
+    writeFileSync(join(workspaces[0]!.directory, 'build.mjs'), 'import "../fonts-latin/package.json";');
+    writeFileSync(join(workspaces[0]!.directory, 'src', 'view.tsx'),
+      'const view = <span>from "../../fonts-latin/package.json"</span>;');
+    const references = siblingReferences([fonts], workspaces);
+    expect(references).toHaveLength(17);
+    expect(references.filter(({ file }) => !file.endsWith('nested/index.ts')).map(({ line }) => line))
+      .toEqual([4, 5, 6, 9, 4, 5, 6, 9, 4, 5, 6, 9, 4, 5, 6, 9]);
+    expect(references.every(({ name, version }) => name === latin.name && version === latin.version)).toBe(true);
+  });
+
+  test.each(['release', 'npm'])('accepts an exact sibling reference available in %s', async (available) => {
+    const workspaces = workspaceFixture([fonts, latin]);
+    writeFileSync(join(workspaces[0]!.directory, 'src', 'index.ts'),
+      'const sibling = import("../../fonts-latin/package.json");');
+    const result = await check('--npm', (name) =>
+      versions(available === 'npm' && name === latin.name ? latin.version : '0.0.0'), {
+      packages: available === 'release' ? [fonts, latin] : [fonts], workspaces
+    });
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+  });
+
+  test('rejects a sibling reference when the release contains a different version', async () => {
+    const workspaces = workspaceFixture([fonts, latin]);
+    writeFileSync(join(workspaces[0]!.directory, 'src', 'index.ts'),
+      'import { version } from "../../fonts-latin/package.json";');
+    const result = await check('--npm', () => versions('0.0.0'), {
+      packages: [fonts, { ...latin, version: '1.2.4' }], workspaces
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`builds references to ${latin.name}@${latin.version}`);
+  });
+
+  test('rejects the real fonts references when fonts-latin is outside the release and absent at its version', async () => {
+    const result = await check('--npm', (name) => name === latin.name ? versions('0.0.0') : published(name), {
+      packages: packages.filter(({ name }) => name === fonts.name)
+    });
+    const version = packages.find(({ name }) => name === latin.name)!.version;
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      `${fonts.name} builds references to ${latin.name}@${version} (packages/fonts/src/cdn.ts:3), which is neither in this release nor on npm`
+    );
+  });
+
+  test('rejects sibling references independently of declared dependencies', async () => {
+    const workspaces = workspaceFixture([fonts, latin]);
+    writeFileSync(join(workspaces[0]!.directory, 'src', 'index.ts'),
+      'import { version } from "../../fonts-latin/package.json";');
+    const result = await check('--npm', () => versions('0.0.0'), { packages: [fonts], workspaces });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`builds references to ${latin.name}@${latin.version}`);
+    expect(result.stderr).not.toContain('depends on');
+  });
+
+  test('rejects current manifests minus fonts-latin when npm only has 0.0.0 of latin and intl', async () => {
+    const result = await check('--npm', (name) =>
+      [latin.name, '@betteroffice/fonts-intl'].includes(name) ? versions('0.0.0') : published(name), {
+      packages: packages.filter(({ name }) => name !== latin.name)
+    });
+    const version = packages.find(({ name }) => name === latin.name)!.version;
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`${fonts.name}@${version} depends on ${latin.name}@${version}`);
+    expect(result.stderr).toContain(`${fonts.name} builds references to ${latin.name}@${version}`);
+  });
+});
+
+describe('published npm and CDN targets', () => {
+  test('reports every missing npm version using version-specific GETs', async () => {
+    const requested: string[] = [];
+    const result = await check('--verify-published', (name, request) => {
+      if (request.method === 'HEAD') return new Response(null);
+      requested.push(name);
+      return name === `${latin.name}/${latin.version}` ? notFound() : Response.json(fonts);
+    }, { packages: [fonts, latin], workspaces: workspaceFixture([fonts, latin]), maxWaitMs: 500 });
+    expect(result.status).toBe(1);
+    expect(requested).toContain(`${fonts.name}/${fonts.version}`);
+    expect(requested).toContain(`${latin.name}/${latin.version}`);
+    expect(result.stderr).toBe(`${latin.name}@${latin.version} is not on npm after publishing.`);
+  });
+
+  test('retries CDN HEAD 404s until the package and its sibling references propagate', async () => {
+    const workspaces = workspaceFixture([fonts, latin]);
+    writeFileSync(join(workspaces[0]!.directory, 'src', 'index.ts'), [
+      'import { version } from "../../fonts-latin/package.json";',
+      'const again = import("../../fonts-latin/package.json");'
+    ].join('\n'));
+    const heads = new Map<string, number>();
+    const result = await check('--verify-published', (name, request) => {
+      if (request.method === 'GET') return Response.json(fonts);
+      expect(request.method).toBe('HEAD');
+      const call = (heads.get(name) ?? 0) + 1;
+      heads.set(name, call);
+      return call === 1 ? notFound() : new Response(null);
+    }, { packages: [fonts], workspaces, maxWaitMs: 2_000 });
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+    expect([...heads.entries()].sort()).toEqual([
+      [`${latin.name}@${latin.version}/package.json`, 2],
+      [`${fonts.name}@${fonts.version}/package.json`, 2]
+    ].sort());
+    expect(result.elapsed).toBeGreaterThanOrEqual(200);
+  });
+
+  test('names CDN versions that stay missing within a shared retry budget', async () => {
+    const result = await check('--verify-published', (_name, request) =>
+      request.method === 'HEAD' ? notFound() : Response.json(fonts), {
+      packages: [fonts, latin], workspaces: workspaceFixture([fonts, latin]), maxWaitMs: 500
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`${fonts.name}@${fonts.version} is not on the CDN after publishing.`);
+    expect(result.stderr).toContain(`${latin.name}@${latin.version} is not on the CDN after publishing.`);
+    expect(result.elapsed).toBeLessThan(2_000);
+  });
+
+  test('retries npm version propagation and Retry-After responses', async () => {
+    let calls = 0;
+    const result = await check('--verify-published', (_name, request) => {
+      if (request.method === 'HEAD') return new Response(null);
+      calls++;
+      if (calls === 1) return notFound();
+      if (calls === 2) return new Response(null, { status: 429, headers: { 'Retry-After': '0' } });
+      return Response.json(fonts);
+    }, { packages: [fonts], workspaces: workspaceFixture([fonts]), maxWaitMs: 2_000 });
+    expect(result.status).toBe(0);
+    expect(calls).toBe(3);
   });
 });
 
@@ -178,15 +447,23 @@ describe('release wiring', () => {
     step.run?.includes('check-publish-targets.mjs')
   );
 
-  test('both guards run only on the publish path', () => {
+  test('each guard runs only on its publish path', () => {
     expect(guards.map((step: any) => step.run.trim())).toEqual([
       'node scripts/check-publish-targets.mjs --crates',
-      'node scripts/check-publish-targets.mjs --npm'
+      'node scripts/check-publish-targets.mjs --npm',
+      'node scripts/check-publish-targets.mjs --verify-published'
     ]);
     expect(guards.map((step: any) => step.if)).toEqual([
       "steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_CRATES != 'true'",
-      "steps.pending.outputs.publishing == 'true'"
+      "steps.pending.outputs.publishing == 'true'",
+      "always() && steps.pending.outputs.publishing == 'true'"
     ]);
+  });
+
+  test('npm and CDN verification runs after publishing and before deployment', () => {
+    const verify = steps.indexOf('Verify npm and CDN publish targets');
+    expect(verify).toBeGreaterThan(steps.indexOf('Release PR or publish'));
+    expect(verify).toBeLessThan(steps.indexOf('Trigger deploy'));
   });
 
   test('both registries are checked before the first upload of either', () => {
@@ -315,5 +592,17 @@ describe('the mode argument', () => {
     const result = await guard('--npm', (name) => (name === missing ? notFound() : published(name)));
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(`${missing} is not on npm.`);
+  }, SPAWN_BUDGET_MS);
+
+  test('--verify-published uses the registry and CDN environment overrides', async () => {
+    const gets: string[] = [];
+    const heads: string[] = [];
+    const result = await guard('--verify-published', (name, request) => {
+      (request.method === 'HEAD' ? heads : gets).push(name);
+      return request.method === 'HEAD' ? new Response(null) : Response.json({});
+    });
+    expect(result.status).toBe(0);
+    expect(gets.sort()).toEqual(packages.map(({ name, version }) => `${name}/${version}`).sort());
+    expect(heads.sort()).toEqual(packages.map(({ name, version }) => `${name}@${version}/package.json`).sort());
   }, SPAWN_BUDGET_MS);
 });
