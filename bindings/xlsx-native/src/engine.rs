@@ -600,7 +600,7 @@ impl XlsxDocument {
         let faces: Option<Vec<_>> = fonts.as_ref().map(|fonts| {
             fonts
                 .iter()
-                .map(|face| betteroffice_xlsx::PngFontFace {
+                .map(|face| betteroffice_xlsx_engine::PngFontFace {
                     family: &face.family,
                     bold: face.bold.unwrap_or(false),
                     italic: face.italic.unwrap_or(false),
