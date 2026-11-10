@@ -571,6 +571,7 @@ export async function writeSessionSave(
   splices: (part: string) => boolean = patches,
   yieldSave?: () => Promise<void>
 ): Promise<DocxSavedDocument> {
+  refuseUnavailableTables(session);
   if (yieldSave) await yieldSave();
   engineProgress();
   const output = withoutSyntheticParagraphs(document, capture.identities);
@@ -742,7 +743,6 @@ export async function saveYrsDocx(
   session: YrsSession,
   options: DocxSaveOptions = {}
 ): Promise<DocxSavedDocument> {
-  refuseUnavailableTables(session);
   let base = session.materializeDocx();
   if (!base?.originalBuffer) {
     throw new Error('saveYrsDocx requires a session opened from DOCX bytes');

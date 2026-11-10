@@ -1,5 +1,4 @@
 import { headerFooterStory } from './sessionInternals';
-import { isUnavailableTablePayload } from './tableUnavailable';
 import type { YrsCellLoc, YrsLoc, YrsSession, YrsStorySegment } from './index';
 import type { PointPosition } from '../plugin-api';
 import {
@@ -549,6 +548,11 @@ export class YrsPositionProjection {
       ...(unavailable ? { unavailable: true as const } : {}),
     };
   }
+}
+
+/** Whether a table embed's payload lacks its properties, grid or rows. @internal */
+export function isUnavailableTablePayload(payload: Record<string, unknown>): boolean {
+  return !('tblPr' in payload && 'grid' in payload && 'rows' in payload);
 }
 
 function asObject(value: unknown): Record<string, unknown> {

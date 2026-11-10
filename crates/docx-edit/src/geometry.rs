@@ -6,7 +6,8 @@ use yrs::{Any, Map, MapRef, Out, ReadTxn, Text, Transact};
 
 use crate::bridge::inline_sdt_size;
 use crate::{
-    EditingDoc, KIND_KEY, PARA_ID, STORIES, is_identity_key, is_pilcrow, map_string, story_ref,
+    EditingDoc, KIND_KEY, PARA_ID, STORIES, TableLocator, is_identity_key, is_pilcrow, map_string,
+    story_ref,
 };
 
 #[derive(Debug, PartialEq, Serialize)]
@@ -73,11 +74,31 @@ impl EditingDoc {
     pub fn geometry_position_outline(&self, root: &str) -> GeometryRead<GeometryPositionOutline> {
         let txn = self.doc.transact();
         let mut outline = BTreeMap::new();
-        match build_story(&txn, &mut outline, root, 0, 0) {
+        match build_story(&txn, &mut outline, root, 0, 0, &mut Scan::default()) {
             Ok(_) => GeometryRead::Value(outline),
             Err(()) => GeometryRead::Sentinel(GeometrySentinel::Legacy),
         }
     }
+
+    /// The unavailable tables the outline walk meets from `root`: through the cells of complete
+    /// tables and block controls' stories, as the editor's position projection walks. A story the
+    /// walk names but cannot find reads as empty here. `Err` when the walk cannot finish.
+    pub(crate) fn unavailable_tables_under(&self, root: &str) -> Result<Vec<TableLocator>, ()> {
+        let txn = self.doc.transact();
+        let mut scan = Scan {
+            active: true,
+            found: Vec::new(),
+        };
+        build_story(&txn, &mut BTreeMap::new(), root, 0, 0, &mut scan)?;
+        Ok(scan.found)
+    }
+}
+
+/// What a scanning outline walk collects: the unavailable tables it meets.
+#[derive(Default)]
+struct Scan {
+    active: bool,
+    found: Vec<TableLocator>,
 
     pub fn owned_revision_ranges(&self, ids: &[String]) -> GeometryRead<Vec<OwnedRevisionRange>> {
         let txn = self.doc.transact();
@@ -111,6 +132,7 @@ fn build_story<T: ReadTxn>(
     story_id: &str,
     content_start: u64,
     depth: usize,
+    scan: &mut Scan,
 ) -> Result<u64, ()> {
     if let Some(existing) = outline.get(story_id) {
         return Ok(existing.size);
@@ -118,7 +140,11 @@ fn build_story<T: ReadTxn>(
     if depth > 256 || content_start > MAX_POSITION {
         return Err(());
     }
-    let story = story_ref(txn, story_id).map_err(|_| ())?;
+    let story = match story_ref(txn, story_id) {
+        Ok(story) => story,
+        Err(_) if scan.active => return Ok(0),
+        Err(_) => return Err(()),
+    };
     outline.insert(
         story_id.to_owned(),
         GeometryStoryOutline {
@@ -166,6 +192,7 @@ fn build_story<T: ReadTxn>(
                         table_index,
                         content_start + cursor,
                         depth,
+                        scan,
                     )?;
                     table_index += 1;
                     paragraph_start = cursor;
@@ -176,9 +203,14 @@ fn build_story<T: ReadTxn>(
                         plain_value(&map, txn, "story").as_ref(),
                         format!("{story_id}:sdt0"),
                     )?;
-                    cursor +=
-                        build_story(txn, outline, &child, content_start + cursor + 1, depth + 1)?
-                            + 2;
+                    cursor += build_story(
+                        txn,
+                        outline,
+                        &child,
+                        content_start + cursor + 1,
+                        depth + 1,
+                        scan,
+                    )? + 2;
                     paragraph_start = cursor;
                     leading += 1;
                 }
@@ -219,6 +251,7 @@ fn build_story<T: ReadTxn>(
     Ok(size)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_table<T: ReadTxn>(
     txn: &T,
     outline: &mut GeometryPositionOutline,
@@ -227,11 +260,16 @@ fn build_table<T: ReadTxn>(
     table_index: usize,
     start: u64,
     depth: usize,
+    scan: &mut Scan,
 ) -> Result<u64, ()> {
     if start > MAX_POSITION {
         return Err(());
     }
     if crate::unavailable_tables::is_unavailable(map, txn) {
+        if scan.active {
+            scan.found
+                .push(TableLocator::new(story_id, table_index as u32));
+        }
         return Ok(2);
     }
     let rows = plain_value(map, txn, "rows");
@@ -262,7 +300,7 @@ fn build_table<T: ReadTxn>(
                 format!("{story_id}:t{table_index}:r{row_index}c{cell_index}"),
             )?;
             let child_start = start + 3 + table_size + row_size;
-            row_size += build_story(txn, outline, &child, child_start, depth + 1)? + 2;
+            row_size += build_story(txn, outline, &child, child_start, depth + 1, scan)? + 2;
             if row_size > MAX_POSITION {
                 return Err(());
             }

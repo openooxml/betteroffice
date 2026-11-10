@@ -3,14 +3,12 @@
 //! crossing order can leave every entry deleted. Such a table lays out as nothing, takes no table
 //! operation and blocks saving until its last undo is redone or the table is deleted.
 
-use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::Ordering;
 
-use yrs::types::text::YChange;
 use yrs::types::{Delta, EntryChange, Event, Events};
-use yrs::{Any, Map, MapRef, Out, ReadTxn, Text, TextRef, Transact, TransactionMut};
+use yrs::{Map, MapRef, Out, ReadTxn, Transact, TransactionMut};
 
-use crate::{EditingDoc, KIND_KEY, STORIES, TableLocator, map_string};
+use crate::{EditingDoc, STORIES, TableLocator};
 
 /// The refusal text of a table operation or save over an unavailable table.
 pub const TABLE_UNAVAILABLE: &str = "a table is unavailable after a concurrent undo: redo on the collaborator who undid, or delete the table";
@@ -42,84 +40,23 @@ pub(crate) fn may_have_left_unavailable(txn: &TransactionMut, events: &Events) -
     })
 }
 
-/// Whether `id` names a table cell's story: a `t{n}` segment followed by an `r{n}c{n}` one.
-fn is_cell_story(id: &str) -> bool {
-    let digits = |text: &str| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
-    let parts: Vec<&str> = id.split(':').collect();
-    parts.windows(2).any(|pair| {
-        pair[0].strip_prefix('t').is_some_and(digits)
-            && pair[1]
-                .strip_prefix('r')
-                .and_then(|rest| rest.split_once('c'))
-                .is_some_and(|(row, column)| {
-                    digits(row) && digits(column.split('~').next().unwrap_or(""))
-                })
-    })
-}
-
-/// The cell stories a complete table payload's rows name, defaulted as the projection does.
-fn named_cells(rows: &Any, story: &str, table_index: u32) -> Vec<String> {
-    let Any::Array(rows) = rows else {
-        return Vec::new();
-    };
-    let mut named = Vec::new();
-    for (row_index, row) in rows.iter().enumerate() {
-        let Any::Map(row) = row else { continue };
-        let Some(Any::Array(cells)) = row.get("cells") else {
-            continue;
-        };
-        for (cell_index, cell) in cells.iter().enumerate() {
-            let Any::Map(cell) = cell else { continue };
-            named.push(match cell.get("story") {
-                Some(Any::String(id)) => id.to_string(),
-                _ => format!("{story}:t{table_index}:r{row_index}c{cell_index}"),
-            });
-        }
-    }
-    named
-}
-
 impl EditingDoc {
-    /// Every unavailable table a reader can reach, by story and ordinal: tables in the root
-    /// stories and in the cells of complete tables, at any depth. A cell story no complete table
-    /// names any more (its table was deleted while unavailable) is out of reach and never counts.
-    pub(crate) fn unavailable_tables(&self) -> Vec<TableLocator> {
-        let txn = self.yrs_doc().transact();
-        let Some(stories) = txn.get_map(STORIES) else {
-            return Vec::new();
+    /// Every unavailable table a reader can reach, by story and ordinal: the geometry outline
+    /// walk (the editor projection's walk) from each root story, through the cells of complete
+    /// tables and block controls' stories. A story only an unavailable or deleted table named is
+    /// out of reach and never counts. `None` when a walk cannot finish.
+    pub(crate) fn unavailable_tables(&self) -> Option<Vec<TableLocator>> {
+        let roots: Vec<String> = {
+            let txn = self.yrs_doc().transact();
+            let stories = txn.get_map(STORIES)?;
+            crate::live_stories(&stories, &txn)
+                .map(|(id, _)| id.to_owned())
+                .filter(|id| crate::structured::source::story_root(id) == id.as_str())
+                .collect()
         };
-        let live: BTreeMap<String, TextRef> = crate::live_stories(&stories, &txn)
-            .filter_map(|(id, value)| match value {
-                Out::YText(text) => Some((id.to_owned(), text)),
-                _ => None,
-            })
-            .collect();
-        let mut queue: Vec<String> = live.keys().filter(|id| !is_cell_story(id)).cloned().collect();
-        let mut reached: HashSet<String> = queue.iter().cloned().collect();
         let mut found = Vec::new();
-        while let Some(id) = queue.pop() {
-            let Some(story) = live.get(&id) else {
-                continue;
-            };
-            let mut ordinal = 0u32;
-            for diff in story.diff(&txn, YChange::identity) {
-                let Out::YMap(map) = &diff.insert else {
-                    continue;
-                };
-                if map_string(map, &txn, KIND_KEY).as_deref() != Some("table") {
-                    continue;
-                }
-                if is_unavailable(map, &txn) {
-                    found.push(TableLocator::new(id.clone(), ordinal));
-                } else if let Some(Out::Any(rows)) = map.get(&txn, "rows") {
-                    for cell in named_cells(&rows, &id, ordinal) {
-                        if live.contains_key(&cell) && reached.insert(cell.clone()) {
-                            queue.push(cell);
-                        }
-                    }
-                }
-                ordinal += 1;
-            }
+        for root in roots {
+            found.extend(self.unavailable_tables_under(&root).ok()?);
         }
         found.sort_by(|left, right| {
             (left.story.as_str(), left.table_index).cmp(&(right.story.as_str(), right.table_index))
@@ -128,7 +65,7 @@ impl EditingDoc {
             self.unavailable_tables_dirty
                 .store(false, Ordering::Relaxed);
         }
-        found
+        Some(found)
     }
 
     /// [`EditingDoc::unavailable_tables`], scanning only after a commit that may have changed
@@ -137,12 +74,14 @@ impl EditingDoc {
         if !self.unavailable_tables_dirty.load(Ordering::Relaxed) {
             return Vec::new();
         }
-        self.unavailable_tables()
+        self.unavailable_tables().unwrap_or_default()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use yrs::{Text, Transact};
+
     use crate::{CellLoc, EditCtx, EditingDoc, Position, TableLocator};
 
     fn ctx() -> EditCtx {
@@ -165,7 +104,8 @@ mod tests {
         origin
             .insert_table(&ctx(), Position::new("body", 0), 1, 2)
             .unwrap();
-        assert!(origin.unavailable_tables().is_empty());
+        let none = Some(Vec::new());
+        assert_eq!(origin.unavailable_tables(), none);
         let state = origin.encode_state_as_update_v1();
         let open = |client| {
             let doc = EditingDoc::new(client);
@@ -179,26 +119,72 @@ mod tests {
         a.insert_row(&ctx(), &cell, true).unwrap();
         exchange(&a, &b);
         b.set_column_width(&ctx(), &cell, 2000.0).unwrap();
-        assert!(a.unavailable_tables().is_empty());
-        assert!(b.unavailable_tables().is_empty());
+        assert_eq!(a.unavailable_tables(), none);
+        assert_eq!(b.unavailable_tables(), none);
         assert!(undo_a.undo());
         exchange(&a, &b);
         assert!(undo_b.undo());
         exchange(&a, &b);
-        let expected = vec![TableLocator::new("body", 0)];
+        let expected = Some(vec![TableLocator::new("body", 0)]);
         assert_eq!(a.unavailable_tables(), expected);
         assert_eq!(b.unavailable_tables(), expected);
+        assert_eq!(a.noticed_unavailable_tables(), expected.clone().unwrap());
         let late = open(70);
         late.apply_update_v1(&a.encode_state_as_update_v1())
             .unwrap();
         assert_eq!(late.unavailable_tables(), expected);
         assert!(undo_b.redo());
         exchange(&a, &b);
-        assert!(a.unavailable_tables().is_empty());
-        assert!(b.unavailable_tables().is_empty());
+        assert_eq!(a.unavailable_tables(), none);
+        assert_eq!(b.unavailable_tables(), none);
         assert!(
             !a.unavailable_tables_dirty
                 .load(std::sync::atomic::Ordering::Relaxed)
         );
+    }
+
+    #[test]
+    fn a_table_in_a_cell_counts_only_while_its_parent_table_is_complete() {
+        let doc = EditingDoc::new(71);
+        doc.create_story("body", "Hello", "Normal", "left")
+            .unwrap();
+        let outer = doc
+            .insert_table(&ctx(), Position::new("body", 0), 1, 1)
+            .unwrap();
+        let cell = outer.created_story_ids[0].clone();
+        doc.insert_table(&ctx(), Position::new(&cell, 0), 1, 1)
+            .unwrap();
+        let strip = |story: &str| {
+            let mut txn = doc.yrs_doc().transact_mut();
+            let text = crate::story_ref(&txn, story).unwrap();
+            let table = text
+                .diff(&txn, yrs::types::text::YChange::identity)
+                .into_iter()
+                .find_map(|diff| match diff.insert {
+                    yrs::Out::YMap(map) => (crate::map_string(&map, &txn, crate::KIND_KEY)
+                        .as_deref()
+                        == Some("table"))
+                    .then_some(map),
+                    _ => None,
+                })
+                .unwrap();
+            for key in super::PAYLOAD_KEYS {
+                yrs::Map::remove(&table, &mut txn, key);
+            }
+        };
+        strip(&cell);
+        assert_eq!(
+            doc.unavailable_tables(),
+            Some(vec![TableLocator::new(cell.clone(), 0)])
+        );
+        strip("body");
+        assert_eq!(
+            doc.unavailable_tables(),
+            Some(vec![TableLocator::new("body", 0)]),
+            "the inner table is out of reach once its parent lost its rows"
+        );
+        doc.delete_table(&ctx(), &TableLocator::new("body", 0))
+            .unwrap();
+        assert_eq!(doc.unavailable_tables(), Some(Vec::new()));
     }
 }

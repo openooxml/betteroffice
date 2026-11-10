@@ -149,6 +149,7 @@ async function writeEditorDocument(
   record?: EditorSaveRecord,
   yieldSave?: () => Promise<void>
 ): Promise<ArrayBuffer> {
+  if (session) refuseUnavailableTables(session);
   const original = document.originalBuffer;
   if (!original) return createDocx(document);
   if (!session || !capture) return repackDocx(document);
@@ -268,7 +269,6 @@ export async function saveEditorDocument(
   record?: EditorSaveRecord,
   yieldSave?: () => Promise<void>
 ): Promise<ArrayBuffer> {
-  refuseUnavailableTables(session);
   if (yieldSave) await yieldSave();
   let identities: DocxSessionSave['identities'] | undefined;
   if (yieldSave && projected.originalBuffer) {

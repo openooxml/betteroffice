@@ -1728,3 +1728,69 @@ test('native and wasm refuse table operations on a table that crossing undos emp
     a.free();
   }
 });
+
+test('native and wasm find a table crossing undos emptied in a header, a footnote and a cell content control alike', () => {
+  const encoder = new TextEncoder();
+  const office = 'application/vnd.openxmlformats-officedocument.wordprocessingml';
+  const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const ns = `xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="${rel}"`;
+  const paragraph = (text: string) => `<w:p><w:r><w:t>${text}</w:t></w:r></w:p>`;
+  const cell = (content: string) => `<w:tc><w:tcPr><w:tcW w:w="2340" w:type="dxa"/></w:tcPr>${content}</w:tc>`;
+  const table = (...cells: string[]) => `<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid>${cells.map(() => '<w:gridCol w:w="2340"/>').join('')}</w:tblGrid><w:tr>${cells.join('')}</w:tr></w:tbl>`;
+  const plain = (name: string) => table(cell(paragraph(`${name} one`)), cell(paragraph(`${name} two`)));
+  const control = `<w:sdt><w:sdtPr><w:alias w:val="Box"/></w:sdtPr><w:sdtContent>${plain('Control')}${paragraph('In control')}</w:sdtContent></w:sdt>`;
+  const bytes = wasm.rezip_docx({
+    '[Content_Types].xml': encoder.encode(`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="${office}.document.main+xml"/><Override PartName="/word/header1.xml" ContentType="${office}.header+xml"/><Override PartName="/word/footnotes.xml" ContentType="${office}.footnotes+xml"/></Types>`),
+    '_rels/.rels': encoder.encode(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/officeDocument" Target="word/document.xml"/></Relationships>`),
+    'word/_rels/document.xml.rels': encoder.encode(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdH1" Type="${rel}/header" Target="header1.xml"/><Relationship Id="rIdF1" Type="${rel}/footnotes" Target="footnotes.xml"/></Relationships>`),
+    'word/header1.xml': encoder.encode(`<w:hdr ${ns}>${plain('Header')}${paragraph('Header text')}</w:hdr>`),
+    'word/footnotes.xml': encoder.encode(`<w:footnotes ${ns}><w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote><w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote><w:footnote w:id="1">${plain('Note')}${paragraph('Note text')}</w:footnote></w:footnotes>`),
+    'word/document.xml': encoder.encode(`<w:document ${ns}><w:body><w:p><w:r><w:t>Before</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r></w:p>${table(cell(`${control}${paragraph('In cell')}`), cell(paragraph('Body two')))}${paragraph('After')}<w:sectPr><w:headerReference w:type="default" r:id="rIdH1"/></w:sectPr></w:body></w:document>`),
+  });
+  const probe = new wasm.EditSession(60);
+  let stories: string[];
+  try {
+    probe.open_docx(bytes, true, 'opening');
+    stories = probe.story_ids().filter((story) => probe.table_payload(story, 0) !== undefined && probe.table_payload(story, 0) !== null);
+  } finally {
+    probe.free();
+  }
+  expect(stories).toContain('body');
+  expect(stories.some((story) => story.includes(':sdt'))).toBe(true);
+  expect(stories.some((story) => story.startsWith('hf:'))).toBe(true);
+  expect(stories.some((story) => story.startsWith('fn:'))).toBe(true);
+  for (const story of stories) {
+    const at = JSON.stringify({ story, tableIndex: 0, row: 0, column: 0 });
+    const a = new wasm.EditSession(61);
+    const b = new wasm.EditSession(62);
+    const expected = new wasm.EditSession(70);
+    const actual = new native.EditSession(70);
+    try {
+      a.open_docx(bytes, true, 'opening');
+      a.track_undo();
+      b.open_docx(bytes, false, 'opening');
+      b.apply_update(a.encode_state());
+      b.track_undo();
+      a.insert_row(at, true);
+      b.apply_update(a.encode_state());
+      b.set_column_width(at, 2000);
+      expect(a.undo()).toBe(true);
+      b.apply_update(a.encode_state());
+      a.apply_update(b.encode_state());
+      expect(b.undo()).toBe(true);
+      a.apply_update(b.encode_state());
+      for (const session of [expected, actual]) {
+        session.open_docx(bytes, false, 'opening');
+        session.apply_update(a.encode_state());
+      }
+      const found = JSON.parse(expected.unavailable_tables()) as Array<{ story: string; tableIndex: number }>;
+      expect(found, story).toContainEqual({ story, tableIndex: 0 });
+      expect(actual.unavailable_tables()).toBe(expected.unavailable_tables());
+    } finally {
+      actual.free();
+      expected.free();
+      b.free();
+      a.free();
+    }
+  }
+});
