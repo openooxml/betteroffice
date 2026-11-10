@@ -288,7 +288,8 @@ fn canvas_caret_stops(
 /// Greek or Cyrillic cluster of several graphemes, such as an "ffi" ligature,
 /// Word splits the cluster's advance evenly between them; a base letter with
 /// its combining marks stays one grapheme and gains no stop. A run with fewer
-/// document positions than text units, such as a field result, keeps its edges.
+/// document positions than text units, such as a field result, has only its
+/// two outer edges, so its start and end never collapse onto an inner cluster.
 fn glyph_caret_stops(
     text: &str,
     glyphs: &[crate::display_list::PlacedGlyph],
@@ -313,6 +314,31 @@ fn glyph_caret_stops(
         })
         .collect();
     let utf16_len = text.encode_utf16().count() as i64;
+    if doc_end - doc_start < utf16_len && !clusters.is_empty() {
+        let left = clusters
+            .iter()
+            .map(|(_, left, _)| *left)
+            .fold(f64::INFINITY, f64::min);
+        let right = clusters
+            .iter()
+            .map(|(_, _, right)| *right)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let (left_position, right_position) = if rtl {
+            (doc_end, doc_start)
+        } else {
+            (doc_start, doc_end)
+        };
+        return vec![
+            CaretStop {
+                x: left,
+                position: left_position,
+            },
+            CaretStop {
+                x: right,
+                position: right_position,
+            },
+        ];
+    }
     let one_position_per_unit = doc_end - doc_start == utf16_len;
     let mut stops = Vec::with_capacity(clusters.len() * 2);
     // clusters are byte-ordered and contiguous (each ends where the next
@@ -3780,24 +3806,39 @@ mod tests {
     }
 
     #[test]
-    fn a_ligature_in_a_field_result_keeps_the_field_edges() {
-        let mut glyphs = office_glyphs();
-        for glyph in glyphs.as_array_mut().unwrap() {
-            glyph["cluster"] = 0.into();
+    fn a_field_result_keeps_its_outer_edges() {
+        let single_cluster = || {
+            let mut glyphs = office_glyphs();
+            for glyph in glyphs.as_array_mut().unwrap() {
+                glyph["cluster"] = 0.into();
+            }
+            glyphs
+        };
+        for (glyphs, rtl) in [
+            (office_glyphs(), false),
+            (single_cluster(), false),
+            (office_glyphs(), true),
+        ] {
+            let mut field = ligature_run("office", 10, glyphs);
+            field["docEnd"] = 11.into();
+            field["rtl"] = rtl.into();
+            let dl = page(serde_json::Value::Null, vec![field]);
+            let rects = range_rects(&dl, 10, 11);
+            assert_eq!(rects.len(), 1, "rtl={rtl}");
+            assert!((rects[0].x - 100.0).abs() < 0.01, "rtl={rtl} {rects:?}");
+            assert!((rects[0].width - 60.0).abs() < 0.01, "rtl={rtl} {rects:?}");
+            let (start_x, end_x) = if rtl { (158.0, 102.0) } else { (102.0, 158.0) };
+            assert_eq!(hit_test(&dl, 0, start_x, 195.0), Some(10), "rtl={rtl}");
+            assert_eq!(hit_test(&dl, 0, end_x, 195.0), Some(11), "rtl={rtl}");
         }
-        let mut field = ligature_run("office", 10, glyphs);
-        field["docEnd"] = 11.into();
-        let dl = page(serde_json::Value::Null, vec![field]);
-        let rects = range_rects(&dl, 10, 11);
-        assert_eq!(rects.len(), 1);
-        assert!((rects[0].x - 100.0).abs() < 0.01, "{rects:?}");
-        assert!((rects[0].width - 60.0).abs() < 0.01, "{rects:?}");
-        assert_eq!(hit_test(&dl, 0, 158.0, 195.0), Some(11));
     }
 
     #[test]
     fn a_ligature_splits_its_advance_evenly_between_its_characters() {
-        let dl = page(serde_json::Value::Null, vec![ligature_run("office", 10, office_glyphs())]);
+        let dl = page(
+            serde_json::Value::Null,
+            vec![ligature_run("office", 10, office_glyphs())],
+        );
         for (position, x) in [(11, 110.0), (12, 120.0), (13, 130.0), (14, 140.0)] {
             assert!(
                 (caret_rect(&dl, position).unwrap().x - x).abs() < 0.01,
