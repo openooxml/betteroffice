@@ -796,32 +796,35 @@ impl<'a> Scan<'a> {
             .or_else(|| style.and_then(|style| style.look.clone()))
             .unwrap_or_default();
         let rows = wrapped_children(node, "w:tr");
-        let columns = node
-            .child("w:tblGrid")
-            .map(|grid| {
-                grid.children
-                    .iter()
-                    .filter(|node| node.name == "w:gridCol")
-                    .count()
-            })
-            .filter(|&count| count > 0)
-            .unwrap_or_else(|| {
-                rows.iter()
-                    .map(|row| {
-                        wrapped_children(row, "w:tc")
-                            .into_iter()
-                            .map(|cell| {
-                                number(
-                                    cell.path(&["w:tcPr"])
-                                        .and_then(|node| node.val("w:gridSpan")),
-                                )
-                                .unwrap_or(1)
-                            })
-                            .fold(0usize, usize::saturating_add)
+        let grid = node.child("w:tblGrid").map_or(0, |grid| {
+            grid.children
+                .iter()
+                .filter(|node| node.name == "w:gridCol")
+                .count()
+        });
+        let columns = rows
+            .iter()
+            .map(|row| {
+                let omitted = ["w:gridBefore", "w:gridAfter"]
+                    .into_iter()
+                    .map(|name| {
+                        number(row.path(&["w:trPr"]).and_then(|node| node.val(name))).unwrap_or(0)
                     })
-                    .max()
-                    .unwrap_or(0)
-            });
+                    .fold(0usize, usize::saturating_add);
+                wrapped_children(row, "w:tc")
+                    .into_iter()
+                    .map(|cell| {
+                        number(
+                            cell.path(&["w:tcPr"])
+                                .and_then(|node| node.val("w:gridSpan")),
+                        )
+                        .unwrap_or(1)
+                    })
+                    .fold(omitted, usize::saturating_add)
+            })
+            .max()
+            .unwrap_or(0)
+            .max(grid);
         for (row_index, row) in rows.iter().enumerate() {
             if self.collector.limited {
                 break;

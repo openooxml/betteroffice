@@ -317,3 +317,27 @@ fn duplicate_style_id_takes_the_default_flag_of_the_last_definition() {
     ]);
     assert_parity(&bytes, "Base");
 }
+
+#[test]
+fn table_without_a_grid_counts_grid_before_in_its_columns() {
+    let bytes = package(&[
+        (
+            "word/document.xml",
+            document(
+                r#"<w:tbl><w:tblPr><w:tblStyle w:val="T"/><w:tblLook w:val="0180"/></w:tblPr><w:tr><w:trPr><w:gridBefore w:val="1"/></w:trPr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/>"#,
+            ),
+        ),
+        (
+            "word/_rels/document.xml.rels",
+            rels(&[("styles", "styles.xml")]),
+        ),
+        (
+            "word/styles.xml",
+            styles(
+                "Base",
+                r#"<w:style w:type="table" w:styleId="T"><w:tblStylePr w:type="lastCol"><w:rPr><w:rFonts w:ascii="LastColFont" w:hAnsi="LastColFont"/></w:rPr></w:tblStylePr></w:style>"#,
+            ),
+        ),
+    ]);
+    assert_parity(&bytes, "LastColFont");
+}
