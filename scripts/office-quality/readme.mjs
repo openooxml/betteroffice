@@ -115,7 +115,10 @@ function timingNote(sequential, versions, short) {
       `BetterOffice at ${short} ${summary.channels.commit.successful}`,
       `LibreOffice ${summary.channels.libreoffice.successful}`,
     ].join(', ');
-    return `${format.toUpperCase()} ${summary.common} of ${summary.total} sampled (timed per engine: ${engines})`;
+    const unsettled = summary.notes_not_converged
+      ? `, ${summary.notes_not_converged} of them with notes whose layout did not converge, timed as the product renders them`
+      : '';
+    return `${format.toUpperCase()} ${summary.common} of ${summary.total} sampled (timed per engine: ${engines}${unsettled})`;
   }).join('; ');
   return `Times: mean per document over a seeded sample of up to ${size} documents per format. A document counts only when every engine timed it in every round: ${timed}. They run one after another on one machine per format with the engine order rotated per document, ${rounds} rounds, each after a warm-up. Every run is a fresh process, so process start is included. DOCX and PPTX time a first-page render, XLSX a full recalculation and save.`;
 }
@@ -348,6 +351,7 @@ export function aggregateReport(report) {
       const { summary } = sequential;
       entry.timing = {
         method: sequential.method, sample: summary.total, timed_by_every_engine: summary.common, rounds: sequential.rounds,
+        notes_not_converged: summary.notes_not_converged ?? 0,
         processors: sequential.runner.processors,
         channels: Object.fromEntries(Object.entries(summary.channels).map(([channel, value]) => [channel, {
           successful: value.successful, mean_ms: meanMs(value.mean_ms), median_ms: meanMs(value.median_ms),

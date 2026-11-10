@@ -25,7 +25,7 @@ const part = (input: any, format: string, timings = (_: any, index: number) => (
     libreoffice_version: '26.2.3.2', builds: { published: { source_sha: published }, commit: { source_sha: source } } },
   runner: { processors: 4 },
   samples: timingSamples(input, format).map((entry: any, index: number) =>
-    ({ id: entry.id, source_sha256: entry.metadata.source.sha256, timings: timings(entry, index) })),
+    ({ id: entry.id, source_sha256: entry.metadata.source.sha256, notes_not_converged: false, timings: timings(entry, index) })),
 });
 
 test('the sample is seeded, capped, independent of corpus order, and XLSX takes only workbooks with a calculation reference', () => {
@@ -101,6 +101,7 @@ test('the merge refuses reports that do not match the plan, the method or the re
     (p: any) => p[0].samples[0].timings.commit = { status: 'failed', error: 'x', elapsed_ms: [1, 1, 1] },
     (p: any) => p[0].samples[0].timings.commit = { status: 'failed', error: ' ' },
     (p: any) => delete p[0].samples[0].timings.libreoffice,
+    (p: any) => delete p[0].samples[0].notes_not_converged,
   ]) {
     const changed = parts();
     mutate(changed);
@@ -133,4 +134,17 @@ test('the paired ratio interval is reproducible and brackets the estimate', () =
   expect(first!.ci95[0]).toBeLessThan(first!.geometric_mean);
   expect(first!.geometric_mean).toBeLessThan(first!.ci95[1]);
   expect(pairedRatio([], [], 'seed')).toBeNull();
+});
+
+test('documents whose note layout did not converge are timed and counted, not dropped', () => {
+  const input = plan({ docx: 4 });
+  const part0 = part(input, 'docx', (_: any, index: number) => ({
+    published: ok(10, 10, 10), commit: index === 3 ? { status: 'failed', error: 'round 1: x' } : ok(10, 10, 10), libreoffice: ok(40, 40, 40),
+  }));
+  part0.samples[0].notes_not_converged = true;
+  part0.samples[1].notes_not_converged = true;
+  part0.samples[3].notes_not_converged = true;
+  const summary = mergeTiming(input, {}, [part0], hash).timing_benchmark.docx.summary;
+  expect(summary.common).toBe(3);
+  expect(summary.notes_not_converged).toBe(2);
 });

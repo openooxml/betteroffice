@@ -48,9 +48,7 @@ fn run() -> Result<()> {
     let layout: Value = serde_json::from_str(
         &engine.layout_document_with_regions_retained_json(&request.to_string())?,
     )?;
-    if layout["notesConverged"].as_bool() == Some(false) {
-        return Err("note layout did not converge".into());
-    }
+    let notes_converged = layout["notesConverged"].as_bool().unwrap_or(true);
     engine.build_display_list_frame(&json!({"fontChains": fonts.ids}).to_string(), 0)?;
     let images = ImageMap::new();
     let resources = RenderResources::new(&fonts.store, &fonts.chains, &images);
@@ -73,7 +71,7 @@ fn run() -> Result<()> {
     println!(
         "{}",
         json!({
-            "schema_version": 1, "status": "ok", "pages": pages, "page": 1, "dpi": 96,
+            "schema_version": 1, "status": "ok", "pages": pages, "notes_converged": notes_converged, "page": 1, "dpi": 96,
             "width": width, "height": height, "skipped_images": rendered.skipped_images,
             "source_sha256": format!("{:x}", Sha256::digest(&bytes)),
             "png_sha256": format!("{:x}", Sha256::digest(&rendered.bytes))

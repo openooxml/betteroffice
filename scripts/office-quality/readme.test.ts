@@ -361,3 +361,13 @@ test('private runs show time rows only from the sequential timing job, as the me
   expect(timing.ratio_to_libreoffice.commit).toEqual({ geometric_mean: 0.5, ci95: [0.4, 0.6] });
   expect(JSON.stringify(timing)).not.toContain('w1');
 });
+
+test('the timing note states how many timed documents had notes whose layout did not converge', () => {
+  const input = xlsxReport();
+  const docx = timed({ published: 300, commit: 200, libreoffice: 500 });
+  docx.summary = { ...docx.summary, format: 'docx', notes_not_converged: 1 } as any;
+  input.timing_benchmark = { docx };
+  const shown = renderSection(input, { privateCorpus: true });
+  expect(shown).toContain(`DOCX 2 of 2 sampled (timed per engine: BetterOffice 0.1.0 2, BetterOffice at ${commit.slice(0, 8)} 2, LibreOffice 2, 1 of them with notes whose layout did not converge, timed as the product renders them)`);
+  expect(aggregateReport(input).formats.docx.timing.notes_not_converged).toBe(1);
+});
