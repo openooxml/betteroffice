@@ -308,14 +308,14 @@ impl<F: PartialEq> ConvergenceInput<'_, F> {
         {
             return None;
         }
+        // A block's placement can depend on the block before it (a section
+        // mark on the page break ahead of it), so that block must be unchanged too.
+        let from = checkpoint.block_index.saturating_sub(1);
         let suffix_matches = match self.dirty {
             Some(dirty) => dirty
                 .last()
                 .is_none_or(|&last| last < checkpoint.block_index),
-            None => {
-                self.previous_fingerprints.get(checkpoint.block_index..)
-                    == self.next_fingerprints.get(checkpoint.block_index..)
-            }
+            None => self.previous_fingerprints.get(from..) == self.next_fingerprints.get(from..),
         };
         if !suffix_matches && !self.skippable {
             return None;
@@ -822,8 +822,14 @@ pub fn layout_document_incremental_ranges<F: PartialEq>(
                 .zip(next_fingerprints)
                 .enumerate()
                 .filter(|(_, (previous, next))| previous != next)
-                .map(|(index, _)| index)
-                .collect()
+                .flat_map(|(index, _)| [index, index + 1])
+                .filter(|&index| index < next_fingerprints.len())
+                .fold(Vec::new(), |mut dirty, index| {
+                    if dirty.last() != Some(&index) {
+                        dirty.push(index);
+                    }
+                    dirty
+                })
         });
     // Clean stretches between dirty blocks are skipped only where a page start
     // alone decides what follows: one column throughout, no reserved note space,
@@ -2697,6 +2703,184 @@ mod pagination_rule_tests {
             },
         }))
         .unwrap()
+    }
+
+    fn layout_fingerprints(input: &Input) -> Vec<String> {
+        input
+            .measured
+            .iter()
+            .map(|measured| serde_json::to_string(measured).unwrap())
+            .collect()
+    }
+
+    fn page_fragments(layout: &Layout) -> Vec<Vec<String>> {
+        layout
+            .pages
+            .iter()
+            .map(|page| {
+                page.fragments
+                    .iter()
+                    .map(|fragment| serde_json::to_string(fragment).unwrap())
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Lays `before` out, edits it into `after`, and places `after` both
+    /// incrementally from the retained layout and afresh.
+    fn incremental_matches_full(
+        name: &str,
+        before: Vec<serde_json::Value>,
+        after: Vec<serde_json::Value>,
+    ) {
+        let previous_fingerprints = layout_fingerprints(&input(before.clone()));
+        let next_fingerprints = layout_fingerprints(&input(after.clone()));
+        let mut previous_input = input(before);
+        let previous = layout_document_checkpointed(&mut previous_input).unwrap();
+        let mut next_input = input(after.clone());
+        let Some(dirty) = previous_fingerprints
+            .iter()
+            .zip(&next_fingerprints)
+            .position(|(previous, next)| previous != next)
+        else {
+            return;
+        };
+        let mut previous_layout = previous.layout;
+        let incremental = layout_document_incremental(
+            &mut next_input,
+            &mut previous_layout,
+            &previous.checkpoints,
+            &previous_fingerprints,
+            &next_fingerprints,
+            dirty,
+        )
+        .unwrap();
+        let full = layout_document_checkpointed(&mut input(after)).unwrap();
+        assert_eq!(
+            page_fragments(&incremental.layout),
+            page_fragments(&full.layout),
+            "{name}: incremental placement differs from a fresh one"
+        );
+    }
+
+    fn section_mark_fixture(ineligible: bool) -> Vec<serde_json::Value> {
+        let mut page_break = json!({"kind": "pageBreak", "id": "break"});
+        if ineligible {
+            page_break["sectionMarkIneligible"] = json!(true);
+        }
+        let mut blocks = vec![
+            paragraph(0, 4, 20.0, json!({})),
+            json!({"block": page_break, "measure": {"kind": "pageBreak"}}),
+            json!({
+                "block": {"kind": "paragraph", "id": 1, "runs": [], "attrs": {}},
+                "measure": {"kind": "paragraph", "lines": [], "totalHeight": 0},
+            }),
+            json!({"block": {"kind": "sectionBreak", "id": 2, "type": "nextPage"},
+                   "measure": {"kind": "sectionBreak"}}),
+        ];
+        blocks.extend((3..9).map(|id| paragraph(id, 2, 20.0, json!({}))));
+        blocks
+    }
+
+    #[test]
+    fn a_page_break_flag_change_repaginates_the_section_mark_after_it() {
+        for (before, after) in [(true, false), (false, true)] {
+            incremental_matches_full(
+                &format!("flag {before} to {after}"),
+                section_mark_fixture(before),
+                section_mark_fixture(after),
+            );
+        }
+    }
+
+    #[test]
+    fn incremental_placement_equals_a_fresh_one_for_a_change_at_any_block() {
+        let contextual = |id: u32, style: &str| {
+            paragraph(
+                id,
+                2,
+                20.0,
+                json!({"styleId": style, "contextualSpacing": true,
+                       "spacing": {"before": 10, "after": 10}}),
+            )
+        };
+        let float = json!({
+            "block": {"kind": "shape", "id": "float", "shapeType": "rect", "width": 50, "height": 40,
+                      "geometryPath": [], "children": [], "wrapType": "square",
+                      "position": {"horizontal": {"relativeTo": "column", "posOffset": 0},
+                                   "vertical": {"relativeTo": "paragraph", "posOffset": 0}}},
+            "measure": {"kind": "shape", "width": 50, "height": 40},
+        });
+        let fixtures: Vec<(&str, Vec<serde_json::Value>)> = vec![
+            (
+                "section mark after a page break",
+                section_mark_fixture(true),
+            ),
+            (
+                "contextual spacing",
+                (0..12).map(|id| contextual(id, "Body")).collect(),
+            ),
+            (
+                "keep with next",
+                (0..12)
+                    .map(|id| paragraph(id, 2, 20.0, json!({"keepNext": id % 3 == 1})))
+                    .collect(),
+            ),
+            ("float before a paragraph", {
+                let mut blocks: Vec<_> =
+                    (0..4).map(|id| paragraph(id, 2, 20.0, json!({}))).collect();
+                blocks.push(float);
+                blocks.extend((4..10).map(|id| paragraph(id, 2, 20.0, json!({}))));
+                blocks
+            }),
+        ];
+        let changes: [(&str, fn(&mut serde_json::Value)); 5] = [
+            ("taller lines", |block| {
+                if let Some(lines) = block["measure"]["lines"].as_array_mut() {
+                    for line in lines {
+                        line["lineHeight"] = json!(31.0);
+                    }
+                }
+            }),
+            ("page break flag", |block| {
+                if block["block"]["kind"] == "pageBreak" {
+                    let flag = block["block"]["sectionMarkIneligible"] == true;
+                    block["block"]["sectionMarkIneligible"] = json!(!flag);
+                }
+            }),
+            ("keep with next", |block| {
+                if block["block"]["kind"] == "paragraph" {
+                    let keep = block["block"]["attrs"]["keepNext"] == true;
+                    block["block"]["attrs"]["keepNext"] = json!(!keep);
+                }
+            }),
+            ("style", |block| {
+                if block["block"]["kind"] == "paragraph" {
+                    block["block"]["attrs"]["styleId"] = json!("Other");
+                }
+            }),
+            ("float position", |block| {
+                if block["block"]["kind"] == "shape" {
+                    block["block"]["position"]["vertical"]["posOffset"] = json!(25);
+                }
+            }),
+        ];
+        for (fixture, blocks) in &fixtures {
+            for index in 0..blocks.len() {
+                for (change, apply) in &changes {
+                    let mut after = blocks.clone();
+                    apply(&mut after[index]);
+                    if after == *blocks {
+                        continue;
+                    }
+                    incremental_matches_full(
+                        &format!("{fixture}: {change} at {index}"),
+                        blocks.clone(),
+                        after,
+                    );
+                }
+            }
+        }
     }
 
     fn counted_keep_layout(mut value: Input, reference: bool) -> (Vec<u8>, usize) {
