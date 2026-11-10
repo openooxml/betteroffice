@@ -2111,7 +2111,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 [[package]]
 name = "yrs"
 version = "0.27.3"
-source = "git+https://github.com/openooxml/y-crdt.git?rev=e785c00611ebce79ece115defa25295982cac165#e785c00611ebce79ece115defa25295982cac165"
+source = "git+https://github.com/openooxml/y-crdt.git?rev=5349f4e11ec46a5ad842f08415b315cb6d5c53af#5349f4e11ec46a5ad842f08415b315cb6d5c53af"
 dependencies = [
  "arc-swap",
  "async-lock",
