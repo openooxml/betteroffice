@@ -1485,7 +1485,8 @@ mod tests {
                 value: serde_json::json!("standardContextual"),
             },
         };
-        let saved = run_properties(source, &[delta], &Attrs::new(), &Attrs::new()).unwrap();
+        let saved = run_properties(source, &[delta], &Attrs::new(), &Attrs::new())
+            .unwrap_or_else(|_| panic!("typography patch applies"));
         assert!(saved.contains(r#"<w14:glow w14:rad="12700"/>"#));
         assert!(saved.contains(r#"<w14:cntxtAlts w14:val="false"/>"#));
         assert!(saved.find("w14:glow").unwrap() < saved.find("w14:ligatures").unwrap());
@@ -1498,7 +1499,8 @@ mod tests {
                 value: serde_json::json!("en-US"),
             },
         };
-        let saved = run_properties(&saved, &[language], &Attrs::new(), &Attrs::new()).unwrap();
+        let saved = run_properties(&saved, &[language], &Attrs::new(), &Attrs::new())
+            .unwrap_or_else(|_| panic!("language patch applies"));
         assert!(saved.find("w:lang").unwrap() < saved.find("w14:glow").unwrap());
     }
 

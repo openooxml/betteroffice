@@ -7178,7 +7178,7 @@ fn attach_measured_glyphs<'a>(
                 .is_some_and(|value| value != "none");
         item.text.chars().any(ooxml_text::is_joining_or_indic)
             || (optional
-                && ooxml_text::word_typography_mask(item.text)
+                && ooxml_text::word_typography_mask(&item.text)
                     .into_iter()
                     .any(|enabled| enabled))
     };
