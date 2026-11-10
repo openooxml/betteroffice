@@ -433,7 +433,16 @@ impl DocUndoManager {
                 .unwrap()
                 .clone()
                 .unwrap_or_default();
-            for (story, hidden) in visibility.lock().unwrap().iter() {
+            let visibility = visibility.lock().unwrap();
+            let named_by_live_tables = if visibility.iter().any(|(_, hidden)| *hidden) {
+                live_table_cells(&txn)
+            } else {
+                HashSet::new()
+            };
+            for (story, hidden) in visibility.iter() {
+                if *hidden && named_by_live_tables.contains(story) {
+                    continue;
+                }
                 if *hidden {
                     removed.insert(&mut txn, story.as_str(), true);
                     lock(&self.changed_stories).push(story.clone());
@@ -451,6 +460,7 @@ impl DocUndoManager {
                     lock(&self.changed_stories).push(story.clone());
                 }
             }
+            drop(visibility);
             drop(txn);
             let stack = if undoing {
                 self.inner.redo_stack()
@@ -728,6 +738,24 @@ fn comment_boundaries(txn: &impl ReadTxn) -> AnchorBoundaries {
         }
     }
     boundaries
+}
+
+/// Cell stories that a table embedded in a live story names.
+fn live_table_cells(txn: &impl ReadTxn) -> HashSet<String> {
+    let mut named = HashSet::new();
+    for (_, value) in crate::live_stories(&stories_root(txn), txn) {
+        let Out::YText(text) = value else {
+            continue;
+        };
+        for diff in text.diff(txn, YChange::identity) {
+            if let Out::YMap(map) = diff.insert
+                && let Some(Out::Any(rows)) = map.get(txn, "rows")
+            {
+                collect_row_stories(&rows, &mut named);
+            }
+        }
+    }
+    named
 }
 
 fn stories_root(txn: &impl ReadTxn) -> yrs::MapRef {
