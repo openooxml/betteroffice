@@ -108,6 +108,12 @@ async function reference({ id, format, metadata }) {
   };
 }
 
+function publishedFontsVersion() {
+  if (!/^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(plan.fonts_version ?? ''))
+    throw new Error('The plan does not record the published @betteroffice/fonts version');
+  return plan.fonts_version;
+}
+
 async function packageRoot(name, version) {
   const directory = resolve(output, 'packages', name.replace('@betteroffice/', ''));
   await mkdir(directory, { recursive: true });
@@ -206,6 +212,9 @@ for (const format of selectedFormats) {
           ),
         }
       : {}),
+    ...(format === 'docx'
+      ? {}
+      : { QUALITY_FONTS_ROOT: await packageRoot('@betteroffice/fonts', publishedFontsVersion()) }),
   };
   for (const channel of ['published', 'commit']) {
     const server = await viewer({

@@ -34,14 +34,15 @@ function validateSample(sample) {
   validateReferenceMetadata(sample.metadata, sample.id);
 }
 
-export function createPlan({ source_sha, commit, versions, react_version, samples, docx_published_source_sha, xlsx_published_source_sha, pptx_published_source_sha }) {
+export function createPlan({ source_sha, commit, versions, react_version, fonts_version, samples, docx_published_source_sha, xlsx_published_source_sha, pptx_published_source_sha }) {
   if (!isSha(source_sha) || !isSha(commit))
     throw new Error('Invalid fidelity plan revision');
   if (
     !versions ||
     !FORMATS.every((format) => isVersion(versions[format])) ||
     Object.keys(versions).length !== FORMATS.length ||
-    !isVersion(react_version)
+    !isVersion(react_version) ||
+    (fonts_version !== undefined && !isVersion(fonts_version))
   )
     throw new Error('Invalid fidelity plan versions');
   if (!Array.isArray(samples) || !samples.length || samples.length > MAX_SAMPLES)
@@ -67,6 +68,7 @@ export function createPlan({ source_sha, commit, versions, react_version, sample
     commit,
     versions,
     react_version,
+    ...(fonts_version === undefined ? {} : { fonts_version }),
     formats,
     samples,
     ...(docx_published_source_sha === undefined ? {} : { docx_published_source_sha }),
@@ -140,6 +142,7 @@ export async function preparePlan(environment, dependencies) {
     command('git', ['log', '-1', '--format=%H', '--', '.', ':!README.md']),
     ...FORMATS.map((format) => registry(`@betteroffice/${format}`)),
     registry('@betteroffice/docx-react'),
+    registry('@betteroffice/fonts'),
   ]);
   return createPlan({
     source_sha: source_sha.trim(),
@@ -147,7 +150,8 @@ export async function preparePlan(environment, dependencies) {
     versions: Object.fromEntries(
       FORMATS.map((format, index) => [format, published[index].version])
     ),
-    react_version: published.at(-1).version,
+    react_version: published.at(-2).version,
+    fonts_version: published.at(-1).version,
     samples,
     ...(samples.some((sample) => sample.format === 'docx')
       ? { docx_published_source_sha: published[0].gitHead ?? 'missing' }
