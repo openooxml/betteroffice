@@ -4729,6 +4729,24 @@ mod tests {
             assert_eq!(saved.matches("w:type=\"page\"").count(), 1, "{saved}");
         }
         assert!(spliced > 0);
+        for properties in [
+            "<w:pPr><w:pStyle w:val=\"Heading1\"/><w:rPr><w:b/><w:color w:val=\"FF0000\"/></w:rPr></w:pPr>",
+            "<w:pPr><mc:AlternateContent><mc:Choice Requires=\"w14\"><w:jc w:val=\"center\"/></mc:Choice><mc:Fallback><w:jc w:val=\"left\"/></mc:Fallback></mc:AlternateContent><w:spacing w:after=\"0\"/></w:pPr>",
+            "<w:pPr/>",
+        ] {
+            let next =
+                format!("<w:p w14:paraId=\"0000000B\">{properties}<w:r><w:t>b</w:t></w:r></w:p>");
+            let projected = format!(
+                "<w:p w14:paraId=\"0000000B\">{properties}<w:r><w:br w:type=\"page\"/><w:t>b</w:t></w:r></w:p>"
+            );
+            let expected = format!(
+                "<w:p w14:paraId=\"0000000B\">{properties}<w:r><w:br w:type=\"page\"/></w:r><w:r><w:t>b</w:t></w:r></w:p>"
+            );
+            let saved =
+                splice(&source_of(&next), &[(0, edited), (1, &projected)], &[0]).expect(properties);
+            assert!(saved.contains(&expected), "{properties}: {saved}");
+            assert_eq!(saved.matches("w:type=\"page\"").count(), 1, "{properties}");
+        }
         let empty = "<w:p w14:paraId=\"0000000B\"/>";
         let marked = "<w:p w14:paraId=\"0000000B\"><w:bookmarkStart w:id=\"1\" w:name=\"m\"/><w:r><w:t>b</w:t></w:r><w:bookmarkEnd w:id=\"1\"/></w:p>";
         let plain = "<w:p w14:paraId=\"0000000B\"><w:r><w:t>b</w:t></w:r></w:p>";
