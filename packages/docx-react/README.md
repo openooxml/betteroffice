@@ -143,11 +143,11 @@ version-checked operations. See [DOCX edit batches](https://docs.betteroffice.de
 and [paragraph anchors](https://docs.betteroffice.dev/docs/javascript#docx-paragraph-anchors)
 for target addressing, persisted identities, and refusals.
 
-Granted mutating built-in commands require `document: "write"` and a call while a trusted
-`click`, `keydown`, or `pointerup` in that plugin's own UI is being handled, including its
-contributed toolbar buttons. Calls made by that handler, and microtasks it schedules,
-qualify; event notifications (`onEvent`) never do. Timers, later unrelated events, awaits that outlive dispatch,
-synthetic events, and gestures outside that plugin's UI refuse with `unsupported-policy`.
+Granted mutating built-in commands require `document: "write"`. A trusted `click`, `keydown`,
+or `pointerup` in the plugin's own UI, including its contributed toolbar buttons, admits
+that plugin's mutating calls until the event finishes dispatching, including the handler
+and microtasks queued before it settles, whichever of the plugin's code paths makes them.
+Another plugin's calls and calls after the window closes refuse with `unsupported-policy`.
 
 ## Structured export and content controls
 

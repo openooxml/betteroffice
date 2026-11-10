@@ -399,7 +399,7 @@ describe('PptxEditor plugins', () => {
     expect((await read(api())).version).toBe(reread.version);
   });
 
-  test('locale-change onEvent never qualifies, including another activation; the handler qualifies', async () => {
+  test('locale-change admits the owner handler and onEvent but refuses another granted plugin', async () => {
     let host!: pluginHosts.PptxPluginHost;
     const createHost = pluginHosts.createPptxPluginHost;
     const capture = spyOn(pluginHosts, 'createPptxPluginHost').mockImplementation((access) => {
@@ -464,7 +464,7 @@ describe('PptxEditor plugins', () => {
       fireEvent.click(button);
       Object.defineProperty(dispatching!, 'eventPhase', { value: Event.BUBBLING_PHASE });
       await until(() => delivered.length === 1 && other.length === 1);
-      expect(delivered[0]).toMatchObject({ ok: false, failure: { code: 'unsupported-policy' } });
+      expect(delivered[0]).toMatchObject({ ok: true, status: 'executed' });
       expect(other[0]).toMatchObject({ ok: false, failure: { code: 'unsupported-policy' } });
       expect(await own).toMatchObject({ ok: true, status: 'executed' });
       expect(gestures).toEqual([true]);

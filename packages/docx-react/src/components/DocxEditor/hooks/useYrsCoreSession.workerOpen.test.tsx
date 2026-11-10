@@ -1655,7 +1655,6 @@ async function openingPluginMetadataFallback() {
   const invocation: PluginInvocation<DocxPluginSnapshot> = {
     pluginId: 'acme.review',
     activation: {},
-    eventDelivered: false,
     snapshot: {} as DocxPluginSnapshot,
     signal: controller.signal,
     lifetimeSignal: lifetime.signal,
@@ -9459,7 +9458,6 @@ async function openingPluginFallback() {
   const invocation: PluginInvocation<DocxPluginSnapshot> = {
     pluginId: 'acme.review',
     activation: {},
-    eventDelivered: false,
     snapshot: {} as DocxPluginSnapshot,
     signal: controller.signal,
     lifetimeSignal: lifetime.signal,

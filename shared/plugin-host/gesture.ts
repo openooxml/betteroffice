@@ -16,12 +16,8 @@ export function pluginActivationId(activation: object): string {
   return id;
 }
 
-export function gestureFor(
-  activationId: string,
-  invocation?: { readonly eventDelivered: boolean }
-): boolean {
-  return !invocation?.eventDelivered && current?.activationId === activationId &&
-    current.event.eventPhase !== Event.NONE &&
+export function gestureFor(activationId: string): boolean {
+  return current?.activationId === activationId && current.event.eventPhase !== Event.NONE &&
     current.currentEvent() === current.event;
 }
 

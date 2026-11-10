@@ -2376,7 +2376,7 @@ describe('DocxEditor plugins (peer-less engine)', () => {
 
 describe('DocxEditor plugins (in-thread engine)', () => {
   for (const producer of ['focus-change', 'viewport-change'] as const) {
-    test(`${producer} onEvent never qualifies; the handler's mutation qualifies, including nested documentChanged`, async () => {
+    test(`${producer} admits the owner's handler, onEvent and nested document-change mutations`, async () => {
       let host!: pluginHosts.DocxPluginHost;
       let access!: pluginHosts.DocxPluginHostAccess;
       const createHost = pluginHosts.createDocxPluginHost;
@@ -2388,8 +2388,10 @@ describe('DocxEditor plugins (in-thread engine)', () => {
       let dispatching: Event | undefined;
       let activationId = '';
       let armed = false;
+      let nestedArmed = false;
       let own!: Promise<DocxPluginCommandResult>;
       const delivered: unknown[] = [];
+      const nested: unknown[] = [];
       const gestures: boolean[] = [];
       let focusDocument = () => {};
       const plugin = defineDocxPlugin({
@@ -2403,10 +2405,15 @@ describe('DocxEditor plugins (in-thread engine)', () => {
           }}>Bold</button>
         ) },
         onEvent(context, event) {
-          if (!armed || event.type !== producer) return;
-          armed = false;
-          gestures.push(gestureFor(activationId));
-          void context.commands.execute('bold', null).then((result) => delivered.push(result));
+          if (armed && event.type === producer) {
+            armed = false;
+            nestedArmed = true;
+            gestures.push(gestureFor(activationId));
+            void context.commands.execute('bold', null).then((result) => delivered.push(result));
+          } else if (nestedArmed && event.type === 'document-change') {
+            nestedArmed = false;
+            void context.commands.execute('bold', null).then((result) => nested.push(result));
+          }
         },
       });
       let mounted!: Awaited<ReturnType<typeof mount>>;
@@ -2440,8 +2447,9 @@ describe('DocxEditor plugins (in-thread engine)', () => {
           await own;
           await host.notificationsIdle();
         });
-        await until(() => delivered.length === 1);
-        expect(delivered[0]).toMatchObject({ ok: false, failure: { code: 'unsupported-policy' } });
+        await until(() => delivered.length === 1 && nested.length === 1);
+        expect(delivered[0]).toMatchObject({ ok: true, status: 'executed' });
+        expect(nested[0]).toMatchObject({ ok: true, status: 'executed' });
         expect(await own).toMatchObject({ ok: true, status: 'executed' });
         expect(gestures).toEqual([true]);
       } finally {

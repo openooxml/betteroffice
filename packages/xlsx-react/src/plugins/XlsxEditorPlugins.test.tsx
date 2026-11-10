@@ -1127,7 +1127,7 @@ describe('XlsxEditor plugins', () => {
     expect(input(api(), 2, 1)).toBe('100');
   });
 
-  editorTest('proposal-change onEvent never qualifies; the handler and its microtask qualify', async () => {
+  editorTest('proposal-change admits owner handler, microtask and nested onEvent mutations only inside its window', async () => {
     let host!: pluginHosts.XlsxPluginHost;
     const createHost = pluginHosts.createXlsxPluginHost;
     const capture = spyOn(pluginHosts, 'createXlsxPluginHost').mockImplementation((access) => {
@@ -1137,8 +1137,10 @@ describe('XlsxEditor plugins', () => {
     let dispatching: Event | undefined;
     let activationId = '';
     let armed = false;
+    let notification = 0;
     const own: unknown[] = [];
     const delivered: unknown[] = [];
+    const nested: unknown[] = [];
     const gestures: boolean[] = [];
     const plugin = defineXlsxPlugin({
       id: 'event-gesture', createState: () => null,
@@ -1154,10 +1156,14 @@ describe('XlsxEditor plugins', () => {
         }}>Bold</button>
       ) },
       onEvent(context, event) {
-        if (!armed || event.type !== 'proposal-change') return;
-        armed = false;
-        gestures.push(gestureFor(activationId));
-        void context.commands.execute('bold', null).then((result) => delivered.push(result));
+        if (armed && event.type === 'proposal-change') {
+          armed = false;
+          gestures.push(gestureFor(activationId));
+          void context.commands.execute('bold', null).then((result) => delivered.push(result));
+          host.localeChanged(`gesture-${++notification}`);
+        } else if (notification > 0 && event.type === 'locale-change') {
+          void context.commands.execute('bold', null).then((result) => nested.push(result));
+        }
       },
     });
     let mounted!: Awaited<ReturnType<typeof mount>>;
@@ -1177,27 +1183,40 @@ describe('XlsxEditor plugins', () => {
     try {
       fireEvent.click(button);
       Object.defineProperty(dispatching!, 'eventPhase', { value: Event.BUBBLING_PHASE });
-      await until(() => delivered.length === 1 && own.length === 2);
-      expect(delivered[0]).toMatchObject({ ok: false, failure: { code: 'unsupported-policy' } });
+      await until(() => delivered.length === 1 && nested.length === 1 && own.length === 2);
+      expect(delivered[0]).toMatchObject({ ok: true, status: 'executed' });
+      expect(nested[0]).toMatchObject({ ok: true, status: 'executed' });
       expect(own).toEqual([
         expect.objectContaining({ ok: true, status: 'executed' }),
         expect.objectContaining({ ok: true, status: 'executed' }),
       ]);
       expect(gestures).toEqual([true]);
+      dispatching = undefined;
+      armed = true;
+      host.proposalsChanged('outside-proposals');
+      await host.notificationsIdle();
+      await until(() => delivered.length === 2 && nested.length === 2);
+      expect(delivered[1]).toMatchObject({ ok: false, failure: { code: 'unsupported-policy' } });
+      expect(nested[1]).toMatchObject({ ok: false, failure: { code: 'unsupported-policy' } });
+      expect(gestures).toEqual([true, false]);
     } finally {
       release();
     }
   });
 
-  editorTest('a handler invocation that awaits past dispatch cannot mutate', async () => {
+  editorTest('the owner handler is admitted during dispatch but its later await and timer are refused', async () => {
     let dispatching: Event | undefined;
     let resume!: () => void;
     const gate = new Promise<void>((resolve) => { resume = resolve; });
     const results: unknown[] = [];
+    const timers: unknown[] = [];
     const plugin = defineXlsxPlugin({
       id: 'await-gesture', createState: () => null,
       panel: { title: 'Await', placement: 'left', render: ({ context }) => (
         <button type="button" data-testid="await-gesture" onClick={async () => {
+          setTimeout(() => {
+            void context.commands.execute('bold', null).then((result) => timers.push(result));
+          }, 0);
           results.push(await context.commands.execute('bold', null));
           await gate;
           results.push(await context.commands.execute('bold', null));
@@ -1214,8 +1233,9 @@ describe('XlsxEditor plugins', () => {
       fireEvent.click(button);
       await until(() => results.length === 1);
       resume();
-      await until(() => results.length === 2);
+      await until(() => results.length === 2 && timers.length === 1);
       expect(results[1]).toMatchObject({ ok: false, failure: { code: 'unsupported-policy' } });
+      expect(timers[0]).toMatchObject({ ok: false, failure: { code: 'unsupported-policy' } });
       expect(results[0]).toMatchObject({ ok: true, status: 'executed' });
     } finally {
       resume();

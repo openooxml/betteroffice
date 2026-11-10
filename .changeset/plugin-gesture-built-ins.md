@@ -7,4 +7,4 @@
 '@betteroffice/pptx-i18n': patch
 ---
 
-Allows granted mutating built-in commands during trusted events in a plugin's own UI with `commands` and `document: 'write'` grants. Calls by that handler and microtasks it schedules qualify; event notifications (`onEvent`) and calls outside dispatch refuse with `unsupported-policy`.
+With opt-in grants, a trusted gesture in a plugin's own UI admits its mutating built-ins through dispatch and microtasks queued before it settles, across its code paths. Other plugins and later calls refuse with `unsupported-policy`.
