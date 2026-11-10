@@ -2816,7 +2816,7 @@ fn plan_format<T: ReadTxn>(
     let invalid_here = |message: String| invalid(message, &requested);
     let (clear, cleared) = match clear {
         Some(value) => {
-            let (clear, names) = crate::format::parse_clear_marks(value).map_err(&invalid_here)?;
+            let (clear, names) = crate::format::parse_clear_marks(value).map_err(invalid_here)?;
             (Some(clear), names)
         }
         None => (None, Vec::new()),
@@ -2831,7 +2831,7 @@ fn plan_format<T: ReadTxn>(
                     "mark {both:?} is both set and cleared"
                 )));
             }
-            crate::format::text_marks_overlay(marks).map_err(&invalid_here)?
+            crate::format::text_marks_overlay(marks).map_err(invalid_here)?
         }
         None => Vec::new(),
     };
