@@ -234,6 +234,16 @@ for (const marker of ['numbered', 'bullet'] as const) {
   });
 }
 
+test('without paragraph ids, focus handed from an unbuilt list item ends on the item at its remembered place', async () => {
+  const view = mount(true, [[undefined, 'First paragraph'], [undefined, 'List item']]);
+  await focusUnbuilt(view, 1);
+  await view.to('full', shell());
+  await view.to('full', page([['p1', 'First paragraph'], ['p2', 'List item', undefined, 'numbered'], ['p3', 'Third paragraph']]));
+  const item = blockOf(view, 'p2');
+  expect(item?.textContent?.trim()).not.toBe('List item');
+  expect(document.activeElement).toBe(item);
+});
+
 test('focus handed from an unbuilt paragraph lands on it after its text was edited', async () => {
   const view = mount(true, [['A', 'First paragraph'], ['B', TEXT]]);
   await focusUnbuilt(view, 1);
