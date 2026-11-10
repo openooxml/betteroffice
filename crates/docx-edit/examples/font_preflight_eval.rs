@@ -14,6 +14,22 @@ struct Face {
     scripts: Vec<String>,
 }
 
+fn integral_numbers(value: &mut Value) {
+    match value {
+        Value::Number(number) => {
+            if let Some(float) = number.as_f64().filter(|_| number.is_f64())
+                && float.fract() == 0.0
+                && float.abs() < 9.0e15
+            {
+                *value = json!(float as i64);
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(integral_numbers),
+        Value::Object(fields) => fields.values_mut().for_each(integral_numbers),
+        _ => {}
+    }
+}
+
 fn engine_faces(bytes: &[u8]) -> Result<Vec<Face>, String> {
     let engine = EngineSession::new(1);
     seed_from_docx(engine.doc(), bytes)?;
@@ -51,12 +67,13 @@ fn engine_faces(bytes: &[u8]) -> Result<Vec<Face>, String> {
         &mut docx_parse::xml::ParseBudget::new(&limits),
     )
     .map_err(|error| error.to_string())?;
-    let request = json!({
+    let mut request = json!({
         "bodyStory": "body",
         "regions": {"sections": sections, "settings": settings},
         "notes": {"contents": notes},
         "renderEnv": {},
     });
+    integral_numbers(&mut request);
     let requirements = engine.layout_font_requirements_json(&request.to_string())?;
     serde_json::from_str(&requirements).map_err(|error| error.to_string())
 }
