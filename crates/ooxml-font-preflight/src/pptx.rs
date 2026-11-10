@@ -722,7 +722,13 @@ pub fn pptx_font_preflight(
         || layout.as_ref().is_some_and(|(_, node)| has_table(node))
         || master.as_ref().is_some_and(|(_, node)| has_table(node))
     {
-        parts.related(&rels, "tableStyles", &mut complete)?
+        if rels.iter().any(|rel| rel.kind == "tableStyles") {
+            parts.related(&rels, "tableStyles", &mut complete)?
+        } else {
+            parts
+                .part("ppt/tableStyles.xml", &mut complete)?
+                .map(|root| ("ppt/tableStyles.xml".to_owned(), root))
+        }
     } else {
         None
     };

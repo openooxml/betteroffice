@@ -697,3 +697,36 @@ fn font_budget_returns_partial_results() {
     assert!(!result.complete);
     assert_eq!(result.faces.len(), 512);
 }
+
+#[test]
+fn table_styles_load_the_conventional_part_without_a_relationship() {
+    let cell = |text| {
+        format!(
+            "<a:tc><a:txBody><a:lstStyle/>{}</a:txBody></a:tc>",
+            run("+mn-lt", text)
+        )
+    };
+    let table = format!(
+        r#"<p:graphicFrame><a:graphic><a:graphicData><a:tbl><a:tblPr firstRow="1"><a:tableStyleId>table</a:tableStyleId></a:tblPr><a:tblGrid><a:gridCol/></a:tblGrid><a:tr>{}</a:tr><a:tr>{}</a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame>"#,
+        cell("Header"),
+        cell("Value")
+    );
+    let slide = part("sld", &table, "");
+    let presentation_rels = rels(&[
+        ("first", "slide", "slides/one.xml"),
+        ("second", "slide", "slides/two.xml"),
+    ]);
+    let result = pptx_font_preflight(
+        &fixture(
+            &slide,
+            &part("sldLayout", "", ""),
+            &part("sldMaster", "", ""),
+            &[("ppt/_rels/presentation.xml.rels", &presentation_rels)],
+            false,
+        ),
+        0,
+    )
+    .unwrap();
+    assert!(result.complete);
+    assert_eq!(keys(&result), [("Body", false, true), ("Body", true, true)]);
+}
