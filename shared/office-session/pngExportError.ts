@@ -14,6 +14,7 @@ export type PngPictureUnavailableReason = 'missing' | 'unsupported' | 'decode-fa
 
 /** A picture a PNG export drew as a placeholder. `limit` and `actual` say by how much a size or budget limit was passed. */
 export interface PngUnavailablePicture {
+  /** The engine's reference for the picture; empty for one whose relationship has no part, which has nothing to name it by. */
   id: string;
   reason: PngPictureUnavailableReason;
   limit?: number;
@@ -34,8 +35,11 @@ export interface PngDiagnostic {
  */
 export const DEFAULT_STRICT_PICTURES = false;
 
+/** How the `strictPictures` rejection names a picture whose `id` is empty. */
+export const UNNAMED_PICTURE = 'a picture with no part';
+
 /** The rejection `strictPictures` asks for, naming each picture that could not be drawn. */
 export function strictPicturesError(pictures: readonly PngUnavailablePicture[]): PngExportError {
-  const named = pictures.map((picture) => `${picture.id} (${picture.reason})`).join(', ');
+  const named = pictures.map((picture) => `${picture.id || UNNAMED_PICTURE} (${picture.reason})`).join(', ');
   return new PngExportError('picture-unavailable', `${pictures.length} picture(s) on this page could not be drawn: ${named}`);
 }

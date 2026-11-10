@@ -22,21 +22,24 @@ export interface ReportedDiagnostic { code: string; pictures: ReportedPicture[] 
 /** One export: the PNG's digest, or the rejection; with every `onDiagnostic` call it made. */
 export type PictureResult = ({ png: string } | { code?: string; message: string }) & { diagnostics: ReportedDiagnostic[] };
 
+/** How a strict rejection names a picture with no part; the diagnostic gives it an empty id. */
+export const UNNAMED = 'a picture with no part';
+
 /** The behaviour every engine must show for the cases above. */
 export const PICTURE_OUTCOMES: ({ rule: string } & (
   | { differs: [string, string] }
   | { equals: [string, string] }
-  | { reports: { case: string; reasons: string[] } }
-  | { rejects: { case: string; code: string; reason: string; named: string } }
+  | { reports: { case: string; reasons: string[]; unnamed?: true } }
+  | { rejects: { case: string; code: string; reason: string; named: string; unnamed?: true } }
 ))[] = [
   { rule: 'a picture that draws is on the page', differs: ['drawn', 'no picture'] },
   { rule: 'a picture that draws is not reported', reports: { case: 'drawn', reasons: [] } },
   { rule: 'a missing picture leaves a placeholder on the page', differs: ['missing', 'no picture'] },
-  { rule: 'a missing picture is reported as missing', reports: { case: 'missing', reasons: ['missing'] } },
+  { rule: 'a picture whose part is missing is reported unnamed, as missing', reports: { case: 'missing', reasons: ['missing'], unnamed: true } },
   { rule: 'a picture the decoder refuses leaves a placeholder on the page', differs: ['corrupt', 'no picture'] },
   { rule: 'a picture the decoder refuses is reported as decode-failed', reports: { case: 'corrupt', reasons: ['decode-failed'] } },
   { rule: 'strictPictures leaves a page whose pictures draw as it is', equals: ['drawn strict', 'drawn'] },
-  { rule: 'strictPictures rejects a missing picture, naming it, with no PNG and no diagnostic', rejects: { case: 'missing strict', code: 'picture-unavailable', reason: 'missing', named: 'missing' } },
+  { rule: 'strictPictures rejects a picture whose part is missing with the unnamed wording, no PNG and no diagnostic', rejects: { case: 'missing strict', code: 'picture-unavailable', reason: 'missing', named: 'missing', unnamed: true } },
   { rule: 'strictPictures rejects a refused picture, naming it, with no PNG and no diagnostic', rejects: { case: 'corrupt strict', code: 'picture-unavailable', reason: 'decode-failed', named: 'corrupt' } },
 ];
 
@@ -51,24 +54,25 @@ export function pictureOutcomeFailures(results: Record<string, PictureResult>): 
   };
   for (const outcome of PICTURE_OUTCOMES) {
     if ('rejects' in outcome) {
-      const { case: name, code, reason, named } = outcome.rejects;
+      const { case: name, code, reason, named, unnamed } = outcome.rejects;
       const result = results[name];
       const id = reportedIds(results[named]);
+      const label = unnamed ? `${UNNAMED} (${reason})` : `${id[0]} (${reason})`;
       if (!result || 'png' in result) failures.push(`${outcome.rule}: "${name}" rendered`);
-      else if (result.code !== code || id.length !== 1 || !result.message.includes(`${id[0]} (${reason})`)) {
+      else if (result.code !== code || id.length !== 1 || (id[0] === '') !== Boolean(unnamed) || !result.message.includes(label)) {
         failures.push(`${outcome.rule}: "${name}" rejected with ${result.code ?? 'no code'}: ${result.message}, where "${named}" reported ${JSON.stringify(id)}`);
       } else if (result.diagnostics.length) failures.push(`${outcome.rule}: "${name}" also reported ${JSON.stringify(result.diagnostics)}`);
       continue;
     }
     if ('reports' in outcome) {
-      const { case: name, reasons } = outcome.reports;
+      const { case: name, reasons, unnamed } = outcome.reports;
       if (png(name, outcome.rule) === undefined) continue;
       const diagnostics = results[name]!.diagnostics;
       const reported = diagnostics.flatMap((diagnostic) => diagnostic.pictures);
       const expected = reasons.length ? 1 : 0;
       if (diagnostics.length !== expected || diagnostics.some((diagnostic) => diagnostic.code !== 'picture-unavailable')
         || JSON.stringify(reported.map((picture) => picture.reason).sort()) !== JSON.stringify([...reasons].sort())
-        || reported.some((picture) => !picture.id)) {
+        || reported.some((picture) => (picture.id === '') !== Boolean(unnamed))) {
         failures.push(`${outcome.rule}: "${name}" reported ${JSON.stringify(diagnostics)}`);
       }
       continue;
