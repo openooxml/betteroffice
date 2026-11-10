@@ -176,7 +176,7 @@ test('while the page is an empty shell, focus waits on the named page and then l
   expect(root?.querySelector('[role="paragraph"], p')).toBeNull();
   expect(document.activeElement).toBe(root);
   expect(root?.getAttribute('role')).toBe('document');
-  expect(root?.getAttribute('aria-label')).toBe('a11y.pageLabel');
+  expect(root?.getAttribute('aria-label')).toBe('Page 2');
   await view.to('full', page());
   expect(mirrorRoot(view)).toBe(root);
   expect(document.activeElement).toBe(view.fullBlock());
