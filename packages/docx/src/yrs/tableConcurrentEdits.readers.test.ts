@@ -443,3 +443,34 @@ test('every write entry point aimed at a missing cell works or refuses cleanly, 
   }
   console.log(`WRITE-SURFACE ${JSON.stringify(outcomes)}`);
 }, 120_000);
+
+test('the first write into a removed cell that a live table still names holds only the new text, on both peers and after save and reopen', async () => {
+  const a = await open(10_300);
+  const b = await peerOf(a, 10_301);
+  const story = (a.tablePayload('body', 0) as { rows: { cells: { story: string }[] }[] }).rows[0]!.cells[1]!.story;
+  expect(cellText(a, story)).toBe('B');
+  a.deleteStory(story);
+  sync(a, b);
+  a.insertRow(at(0, 0), 'below');
+  expect(a.undo()).toBe(true);
+  sync(a, b);
+  for (const peer of [a, b]) {
+    expect(peer.storyIds()).not.toContain(story);
+    expect(peer.paragraphs(story).map((paragraph) => paragraph.text)).toEqual(['']);
+    expectReadable(peer);
+  }
+  typeInto(b, story, 'new');
+  sync(a, b);
+  for (const peer of [a, b]) {
+    expect(peer.paragraphs(story).map((paragraph) => paragraph.text)).toEqual(['new']);
+    expect(peer.storyIds().filter((id) => id === story)).toEqual([story]);
+  }
+  expectConverged([a, b]);
+  const saved = (await saveYrsDocx(a, { updateModifiedDate: false })).bytes;
+  const reopened = await createYrsSession({ clientId: 10_302 });
+  sessions.push(reopened);
+  reopened.openDocx(saved, true);
+  const texts = reopened.storyIds().filter((id) => id.includes(':t')).map((id) => cellText(reopened, id) ?? '');
+  expect(texts.some((text) => text === 'new')).toBe(true);
+  expect(texts.some((text) => text.includes('B'))).toBe(false);
+});
