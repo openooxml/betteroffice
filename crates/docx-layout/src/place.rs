@@ -2777,23 +2777,25 @@ mod pagination_rule_tests {
         let mut previous_input = input(before);
         let previous = layout_document_checkpointed(&mut previous_input).unwrap();
         let mut next_input = input(after.clone());
-        let Some(dirty) = previous_fingerprints
+        let dirty = previous_fingerprints
             .iter()
             .zip(&next_fingerprints)
-            .position(|(previous, next)| previous != next)
-        else {
-            return None;
-        };
-        // A changed section break also changes the section it closes, so the
-        // caller restarts at that section's start, as the editor engine does.
-        let dirty = if after[dirty]["block"]["kind"] == "sectionBreak" {
-            after[..dirty]
-                .iter()
-                .rposition(|block| block["block"]["kind"] == "sectionBreak")
-                .map_or(0, |index| index + 1)
-        } else {
-            dirty
-        };
+            .position(|(previous, next)| previous != next)?;
+        // Callers restart at the start of the section a changed section break
+        // closes, from the break that opens it, as the editor engine does.
+        let dirty = (dirty..after.len())
+            .find(|&index| {
+                after[index]["block"]["kind"] == "sectionBreak"
+                    && previous_fingerprints.get(index) != next_fingerprints.get(index)
+            })
+            .map_or(dirty, |changed| {
+                dirty.min(
+                    after[..changed]
+                        .iter()
+                        .rposition(|block| block["block"]["kind"] == "sectionBreak")
+                        .unwrap_or(0),
+                )
+            });
         let mut previous_layout = previous.layout;
         let incremental = layout_document_incremental(
             &mut next_input,
@@ -3036,6 +3038,15 @@ mod pagination_rule_tests {
                     .map(|id| paragraph(id, 2, 20.0, json!({"keepNext": id % 4 != 3})))
                     .collect(),
             ),
+            ("a hoisted shape opening a page", {
+                let mut blocks = Vec::new();
+                for id in 0..6 {
+                    blocks.push(paragraph(id, 5, 20.0, json!({})));
+                    blocks.push(hoisted_shape(&format!("opening-{id}"), "paragraph"));
+                }
+                blocks.push(paragraph(6, 2, 20.0, json!({})));
+                blocks
+            }),
             ("hoisted shapes", {
                 let mut blocks = Vec::new();
                 for id in 0..10 {

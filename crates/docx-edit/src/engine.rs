@@ -18481,6 +18481,65 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
     }
 
     #[test]
+    fn a_changed_section_break_restarts_placement_at_the_start_of_its_section() {
+        let paragraph = |id: u32| {
+            serde_json::from_value::<MeasuredBlock>(serde_json::json!({
+                "block": {"kind": "paragraph", "id": id, "runs": [], "attrs": {}},
+                "measure": {"kind": "paragraph", "lines": [], "totalHeight": 0},
+            }))
+            .unwrap()
+        };
+        let section = |id: &str, kind: &str, margins: bool| {
+            let mut block = serde_json::json!({"kind": "sectionBreak", "id": id, "type": kind});
+            if margins {
+                block["margins"] =
+                    serde_json::json!({"top": 10, "right": 10, "bottom": 10, "left": 10});
+            }
+            serde_json::from_value::<MeasuredBlock>(
+                serde_json::json!({"block": block, "measure": {"kind": "sectionBreak"}}),
+            )
+            .unwrap()
+        };
+        for (opening, closing, margins) in [
+            ("nextPage", "nextPage", true),
+            ("continuous", "continuous", true),
+            ("nextPage", "continuous", false),
+        ] {
+            let measured = vec![
+                paragraph(0),
+                section("a", opening, true),
+                paragraph(1),
+                paragraph(2),
+                paragraph(3),
+                section("b", closing, margins),
+                paragraph(4),
+            ];
+            let previous: Vec<Fingerprint> = (0..measured.len() as u128).collect();
+            let mut next = previous.clone();
+            next[5] += 100;
+            assert_eq!(
+                section_start_of_first_changed_break(&measured, &previous, &next, 5),
+                1
+            );
+            next[3] += 100;
+            assert_eq!(
+                section_start_of_first_changed_break(&measured, &previous, &next, 3),
+                1
+            );
+            assert_eq!(
+                section_start_of_first_changed_break(&measured, &previous, &next, 0),
+                0
+            );
+            let mut text_only = previous.clone();
+            text_only[3] += 100;
+            assert_eq!(
+                section_start_of_first_changed_break(&measured, &previous, &text_only, 3),
+                3
+            );
+        }
+    }
+
+    #[test]
     fn a_retained_layout_repaginates_like_a_replica_after_an_edit_before_a_page_break() {
         let fonts = docx_layout::MeasureFonts::default();
         let _scope = fonts.enter();
