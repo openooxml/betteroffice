@@ -408,6 +408,7 @@ fn step(operation: EditOperation) -> EditStep {
 
 fn replace(target: TextTarget, text: &str) -> EditStep {
     step(EditOperation::ReplaceText {
+        runs: None,
         target,
         text: text.to_owned(),
     })
@@ -415,6 +416,7 @@ fn replace(target: TextTarget, text: &str) -> EditStep {
 
 fn insert(target: TextTarget, at: TargetEdge, text: &str) -> EditStep {
     step(EditOperation::InsertText {
+        runs: None,
         target,
         at,
         text: text.to_owned(),
@@ -427,6 +429,7 @@ fn delete(target: TextTarget) -> EditStep {
 
 fn new_paragraph(text: &str, style: Option<&str>) -> ParagraphInput {
     ParagraphInput {
+        runs: None,
         text: text.to_owned(),
         style_id: style.map(str::to_owned),
     }
@@ -949,6 +952,7 @@ fn one_undo_step_between_typing_in_both_capture_modes() {
             vec![
                 replace(search("Delta", "00000004"), "Omega"),
                 step(EditOperation::ReplaceText {
+                    runs: None,
                     target: TextTarget::Paragraph(para("hf:rIdHeader", "0000E001")),
                     text: "New header".to_owned(),
                 }),

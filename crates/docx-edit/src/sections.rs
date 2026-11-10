@@ -124,6 +124,7 @@ impl EditingDoc {
                 .styled_paragraph(None)?;
             Some(crate::ops::paragraph::ParagraphRecord {
                 text: String::new(),
+                runs: Vec::new(),
                 properties: styled.properties,
                 run: styled.run,
             })
