@@ -145,7 +145,8 @@ selection. Superseded retained contexts or unavailable layouts return `layout-un
 before the no-selection check, which returns `missing-target`. Mapping and display-range
 reads may be `pending`; `readAnchorGeometries` waits up to two seconds for selection
 targets, then answers `layout-unavailable`. A mixed call resolves when its slowest target
-does. Collapsed selections return a caret anchor and empty `rects`.
+does. Collapsed selections return a caret anchor and empty `rects`. In the read-only
+viewer, header and footer selections return `unsupported`; body selections still return geometry.
 
 ## Edit batches and paragraph anchors
 

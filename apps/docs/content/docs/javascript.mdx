@@ -189,6 +189,7 @@ Geometry is `pending` while selection mapping or the display range is read.
 `layout-unavailable`; a mixed call resolves when its slowest target does.
 Selection anchors are live-only; use a range target to keep a position.
 Header and footer selections use their story's geometry; stories without geometry support return `unsupported`.
+In the read-only viewer, header and footer selections return `unsupported`; body selections still return geometry.
 
 **Focus and locale.** `snapshot.focused` is true while focus is inside the
 editor's document surface; docked panels, toolbar controls, and host chrome are
