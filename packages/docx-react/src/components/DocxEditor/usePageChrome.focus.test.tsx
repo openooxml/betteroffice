@@ -122,3 +122,27 @@ test('a rebuilt page whose focused paragraph is gone restores neither focus nor 
   expect(view.host(0).contains(document.activeElement)).toBe(false);
   expect(getSelection()!.toString()).toBe('');
 });
+
+test('a rebuilt page restores the selection the user made last inside it, not an earlier one', () => {
+  const view = mount([first]);
+  select([view.block(0, 'p2'), 0], [view.block(0, 'p2'), 6]);
+  select([view.block(0, 'p1'), 6], [view.block(0, 'p1'), 15]);
+  expect(getSelection()!.toString()).toBe('paragraph');
+  view.update([edited]);
+  const selection = getSelection()!;
+  expect(selection.toString()).toBe('paragraph');
+  expect(view.block(0, 'p1').contains(selection.anchorNode)).toBe(true);
+});
+
+test('a rebuilt page leaves a selection whose text survived as it was', () => {
+  const view = mount([first]);
+  const p1 = view.block(0, 'p1');
+  select([p1, 0], [p1, 5]);
+  const { anchorNode, focusNode } = getSelection()!;
+  view.update([edited]);
+  const selection = getSelection()!;
+  expect(view.block(0, 'p1')).toBe(p1);
+  expect(selection.anchorNode).toBe(anchorNode);
+  expect(selection.focusNode).toBe(focusNode);
+  expect(selection.toString()).toBe('First');
+});

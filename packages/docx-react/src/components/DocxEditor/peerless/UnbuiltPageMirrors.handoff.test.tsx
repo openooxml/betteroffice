@@ -47,11 +47,11 @@ function page(): DisplayPage {
 type Phase = 'unbuilt' | 'text' | 'full';
 type Mirrors = ReturnType<typeof useUnbuiltPageMirrors>;
 
-function Harness({ phase, displayPage, expose }: { phase: Phase; displayPage: DisplayPage; expose(mirrors: Mirrors): void }) {
+function Harness({ phase, displayPage, expose, fullMirror = true }: { phase: Phase; displayPage: DisplayPage; expose(mirrors: Mirrors): void; fullMirror?: boolean }) {
   const column = useRef<HTMLDivElement>(null);
   const mirrors = useUnbuiltPageMirrors({
     binding: {} as PeerlessEditSessionBinding, geometry: null, mountedPages: [], center: 1, enabled: true,
-    navigate: () => {}, column, t,
+    navigate: () => {}, column, t, fullMirror,
   });
   expose(mirrors);
   return <div ref={column}><div data-docx-pages-host="">
@@ -61,19 +61,21 @@ function Harness({ phase, displayPage, expose }: { phase: Phase; displayPage: Di
   </div></div>;
 }
 
-function mount() {
+function mount(fullMirror = true) {
   const displayPage = page();
   let mirrors!: Mirrors;
   const expose = (value: Mirrors) => { mirrors = value; };
-  const view = render(<Harness phase="unbuilt" displayPage={displayPage} expose={expose} />);
+  const view = render(<Harness phase="unbuilt" displayPage={displayPage} expose={expose} fullMirror={fullMirror} />);
   const to = async (phase: Phase) => {
-    view.rerender(<Harness phase={phase} displayPage={displayPage} expose={expose} />);
+    view.rerender(<Harness phase={phase} displayPage={displayPage} expose={expose} fullMirror={fullMirror} />);
     await settle();
   };
   const section = () => view.container.querySelector<HTMLElement>('[data-docx-unbuilt-page="1"]')!;
+  const textBlock = () => Array.from(view.container.querySelectorAll<HTMLElement>('[data-page-index="1"] .canvas-page-mirror [role="paragraph"], [data-page-index="1"] .canvas-page-mirror p'))
+    .find((element) => element.textContent?.trim() === TEXT) ?? null;
   const fullBlock = () =>
     view.container.querySelector<HTMLElement>('[data-page-index="1"] .canvas-page-mirror [data-block-id="p2"]');
-  return { ...view, to, section, fullBlock, remember: (...args: Parameters<Mirrors['remember']>) => mirrors.remember(...args) };
+  return { ...view, to, section, fullBlock, textBlock, remember: (...args: Parameters<Mirrors['remember']>) => mirrors.remember(...args) };
 }
 
 test('focus handed from an unbuilt paragraph lands in the full mirror, not in its text stand-in', async () => {
@@ -105,4 +107,16 @@ test('a selection handed from an unbuilt paragraph lands in the full mirror, not
   const selection = getSelection()!;
   expect(selection.toString()).toBe(TEXT);
   expect(block!.contains(selection.anchorNode)).toBe(true);
+});
+
+test('with text page mirrors, focus handed from an unbuilt paragraph lands in the text mirror', async () => {
+  const view = mount(false);
+  const paragraph = view.section().querySelector('p')!;
+  await act(async () => { paragraph.focus(); });
+  await view.to('text');
+  await idle();
+  await settle();
+  const block = view.textBlock();
+  expect(block).not.toBeNull();
+  expect(document.activeElement).toBe(block);
 });
