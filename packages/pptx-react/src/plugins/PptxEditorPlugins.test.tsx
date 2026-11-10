@@ -1046,13 +1046,17 @@ describe('PptxEditor plugins', () => {
     let text!: TextBoxPrimitive;
     const open = spyOn(pptx, 'openPresentation').mockImplementation((bytes, options) => {
       const handle = originalOpen(bytes, options);
+      const slide = handle.snapshot().slides[0];
+      const shape = slide.shapes.find((candidate) => candidate.textStories.some(
+        (story) => handle.story(story.id).length > 10
+      ))!;
+      const story = shape.textStories.find((candidate) => handle.story(candidate.id).length > 10)!;
       const originalLayout = handle.layoutSlide.bind(handle);
       const layout = spyOn(handle, 'layoutSlide').mockImplementation((index) => {
         const frame = originalLayout(index);
         if (index !== 0) return frame;
         const source = frame.primitives.find((primitive): primitive is TextBoxPrimitive =>
-          primitive.kind === 'textBox' && primitive.paragraphs.flatMap((paragraph) => paragraph.runs)
-            .map((run) => run.text).join('').length >= 10)!;
+          primitive.kind === 'textBox' && primitive.shapeId === shape.id && primitive.storyId === story.id)!;
         text = { ...source, x: 100, y: 50, w: 400, h: 80, transform: undefined,
           lines: [0, 5].map((start, row) => ({
             x: 120, y: 60 + row * 20, width: 50, height: 20, baseline: 75 + row * 20,
@@ -1074,12 +1078,21 @@ describe('PptxEditor plugins', () => {
       const probe = recorder();
       const { api, view } = await mount({ plugins: [probe.plugin], showToolbar: false });
       await waitFor(() => expect(last(probe.contexts)?.geometry).toBeTruthy());
+      const content = await read(api());
+      const story = content.stories.find((candidate) => candidate.slideId === content.slides[0].id &&
+        candidate.shapeId === text.shapeId && candidate.storyId === text.storyId)!;
+      expect(story.text.length).toBeGreaterThanOrEqual(10);
       await act(async () => {
-        expect(api().selectText({ slide: 1, shapeId: text.shapeId!, storyId: text.storyId!, start: 1, end: 1 })).toBe(true);
+        expect(await last(probe.contexts).navigation.selectText({
+          slideId: story.slideId, shapeId: story.shapeId, storyId: story.storyId, anchor: 1, focus: 1,
+        }, { expectVersion: content.version, focus: true })).toEqual({ ok: true });
       });
       const stage = view.getByRole('application');
       await act(async () => { fireEvent.keyDown(stage, { key: 'End' }); });
-      await waitFor(() => expect(last(probe.contexts).snapshot.selection?.target).toMatchObject({ anchor: 5, focus: 5 }));
+      await waitFor(() => {
+        expect(last(probe.contexts).snapshot.selection?.target).toMatchObject({ anchor: 5, focus: 5 });
+        expect(last(probe.contexts).geometry).toBeTruthy();
+      });
       let retained!: PptxPluginContext<State>;
       await act(async () => { await last(probe.contexts).run((context) => { retained = context; }); });
       const geometry = retained.geometry!;
@@ -1099,9 +1112,6 @@ describe('PptxEditor plugins', () => {
         fireEvent.pointerDown(canvas, { isPrimary: true, button: 0, pointerId: 7,
           clientX: 120 * 640 / frame.width, clientY: 90 * 360 / frame.height });
       });
-      expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({
-        ok: false, failure: { code: 'layout-unavailable' },
-      });
       let fresh!: PptxPluginContext<State>;
       await act(async () => { await retained.run((context) => { fresh = context; }); });
       expect(fresh.snapshot.selection).toEqual(retained.snapshot.selection);
@@ -1115,6 +1125,9 @@ describe('PptxEditor plugins', () => {
         slideId: retained.snapshot.selection!.slideId, shapeId: text.shapeId!, storyId: text.storyId!, anchor: 5, focus: 5 }))
         .toEqual(fresh.geometry!.getAnchorGeometry({ kind: 'selection' }));
       expect(events()).toHaveLength(count);
+      expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({
+        ok: false, failure: { code: 'layout-unavailable' },
+      });
     } finally {
       cleanup();
       for (const restore of restorers.reverse()) restore();
