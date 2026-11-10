@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { applyFrameDelta, decodeFrameDelta } from '../../packages/docx/src/layout/render/frameDelta';
+import type { DisplayPage, DisplayPrimitive, GlyphRunPrimitive } from '../../packages/docx/src/layout/render/displayList';
 import { assertTypographyTable, inspectTypographyTable, typographyRows } from '../../e2e/fixtures/docx-typography';
 import initWasm, * as wasm from '../../packages/docx/src/wasm/generated/edit/docx_edit.js';
 import initPreflight, { font_preflight as wasmFontPreflight } from '../../packages/docx/src/wasm/generated/preflight/docx_preflight.js';
@@ -231,6 +232,115 @@ describe('docx native engine parity', () => {
       expected.free();
     }
   });
+
+  test('optional ligatures follow the run in every story kind, in both engines', () => {
+    const encoder = new TextEncoder();
+    const carlito = new Uint8Array(readFileSync(new URL('../../packages/fonts/assets/Carlito-Regular.ttf', import.meta.url)));
+    const text = 'office fifty';
+    const officeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml';
+    const relType = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+    const ns = [
+      'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"',
+      `xmlns:r="${relType}"`,
+      'xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"',
+      'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"',
+      'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"',
+      'xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"',
+      'xmlns:v="urn:schemas-microsoft-com:vml"',
+      'xmlns:o="urn:schemas-microsoft-com:office:office"',
+    ].join(' ');
+    const paragraph = (ask: boolean) => `<w:p><w:r><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:cs="Calibri"/>${ask ? '<w14:ligatures w14:val="standard"/>' : ''}</w:rPr><w:t xml:space="preserve">${text}</w:t></w:r></w:p>`;
+    const notes = (kind: string) => (story: string) => `<w:${kind}s ${ns}><w:${kind} w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:${kind}><w:${kind} w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:${kind}><w:${kind} w:id="1">${story}</w:${kind}></w:${kind}s>`;
+    const noteBody = (kind: string) => () => `<w:p><w:r><w:t>Body</w:t></w:r><w:r><w:${kind}Reference w:id="1"/></w:r></w:p>`;
+    const noteArea = (kind: string) => (page: DisplayPage) =>
+      (page.noteAreas ?? []).filter((area) => (area.kind ?? 'footnote') === kind).flatMap((area) => area.primitives ?? []);
+    type Story = {
+      kind: string;
+      body: (story: string) => string;
+      part?: { name: string; type: string; xml: (story: string) => string };
+      region: (page: DisplayPage) => readonly DisplayPrimitive[];
+    };
+    const stories: Story[] = [
+      { kind: 'body', body: (story) => story, region: (page) => page.primitives },
+      { kind: 'header', body: () => '<w:p/>', part: { name: 'header1.xml', type: 'header', xml: (story) => `<w:hdr ${ns}>${story}</w:hdr>` }, region: (page) => page.header?.primitives ?? [] },
+      { kind: 'footer', body: () => '<w:p/>', part: { name: 'footer1.xml', type: 'footer', xml: (story) => `<w:ftr ${ns}>${story}</w:ftr>` }, region: (page) => page.footer?.primitives ?? [] },
+      { kind: 'footnote', body: noteBody('footnote'), part: { name: 'footnotes.xml', type: 'footnotes', xml: notes('footnote') }, region: noteArea('footnote') },
+      { kind: 'endnote', body: noteBody('endnote'), part: { name: 'endnotes.xml', type: 'endnotes', xml: notes('endnote') }, region: noteArea('endnote') },
+      {
+        kind: 'DrawingML text box',
+        body: (story) => `<w:p><w:r><w:drawing><wp:inline><wp:extent cx="2286000" cy="914400"/><wp:docPr id="1" name="Box"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:prstGeom prst="rect"/></wps:spPr><wps:txbx><w:txbxContent>${story}</w:txbxContent></wps:txbx><wps:bodyPr lIns="0" tIns="0" rIns="0" bIns="0"/></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`,
+        region: (page) => page.primitives,
+      },
+      {
+        kind: 'VML text box',
+        body: (story) => `<w:p><w:r><w:pict><v:shape id="Box" style="position:absolute;margin-left:36pt;margin-top:36pt;width:180pt;height:60pt;z-index:1;mso-position-horizontal-relative:page;mso-position-vertical-relative:page" filled="f" stroked="f"><v:textbox inset="0,0,0,0"><w:txbxContent>${story}</w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p>`,
+        region: (page) => page.primitives,
+      },
+    ];
+    const glyphRuns = (primitives: readonly DisplayPrimitive[]): GlyphRunPrimitive[] => primitives.flatMap((primitive) =>
+      primitive.kind === 'glyphRun' ? [primitive] : glyphRuns((primitive as { primitives?: DisplayPrimitive[] }).primitives ?? []));
+    const shaped = (engine: Engine, story: Story, ask: boolean) => {
+      const part = story.part;
+      const band = part && ['header', 'footer'].includes(part.type) ? part.type : undefined;
+      const note = part && !band ? part.type.slice(0, -1) : undefined;
+      const bytes = wasm.rezip_docx({
+        '[Content_Types].xml': encoder.encode(`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="${officeType}.document.main+xml"/>${part ? `<Override PartName="/word/${part.name}" ContentType="${officeType}.${part.type}+xml"/>` : ''}</Types>`),
+        '_rels/.rels': encoder.encode(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${relType}/officeDocument" Target="word/document.xml"/></Relationships>`),
+        'word/_rels/document.xml.rels': encoder.encode(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${part ? `<Relationship Id="rIdStory" Type="${relType}/${part.type}" Target="${part.name}"/>` : ''}</Relationships>`),
+        ...(part ? { [`word/${part.name}`]: encoder.encode(part.xml(paragraph(ask))) } : {}),
+        'word/document.xml': encoder.encode(`<w:document ${ns}><w:body>${story.body(paragraph(ask))}<w:sectPr>${band ? `<w:${band}Reference w:type="default" r:id="rIdStory"/>` : ''}<w:pgSz w:w="4320" w:h="2880"/><w:pgMar w:top="600" w:right="300" w:bottom="600" w:left="300" w:header="150" w:footer="150" w:gutter="0"/></w:sectPr></w:body></w:document>`),
+      });
+      const session = new engine.EditSession(37);
+      try {
+        session.open_docx(bytes, true, 'opening');
+        const font = session.register_measure_font(carlito);
+        const request = {
+          bodyStory: 'body',
+          regions: { sections: [{
+            sectionId: 'main',
+            properties: {
+              pageWidth: 4320, pageHeight: 2880,
+              marginTop: 600, marginRight: 300, marginBottom: 600, marginLeft: 300,
+              headerDistance: 150, footerDistance: 150,
+              ...(band ? { [`${band}References`]: [{ type: 'default', rId: 'rIdStory' }] } : {}),
+            },
+          }] },
+          ...(note ? { notes: { contents: [{ id: 1, noteKind: note, height: 0 }] } } : {}),
+          measurement: {
+            fontChains: { 'calibri|0|0': [font] } as Record<string, number[]>,
+            defaults: { fontSize: 11, fontFamily: 'Calibri' },
+            authoritativeShaping: true,
+          },
+          renderEnv: {},
+        };
+        const requirements = JSON.parse(session.layout_font_requirements_json(JSON.stringify(request))) as { key: string }[];
+        for (const requirement of requirements) request.measurement.fontChains[requirement.key] = [font];
+        session.layout_document_with_regions_json(JSON.stringify(request));
+        const frame = session.build_display_list_frame(JSON.stringify({ fontChains: request.measurement.fontChains }), 0);
+        const page = applyFrameDelta(null, decodeFrameDelta(frame)).pages[0]!.page;
+        const runs = glyphRuns(story.region(page)).filter((run) => run.text.trim() !== '' && text.includes(run.text));
+        return {
+          text: runs.map((run) => run.text).join(''),
+          glyphs: runs.reduce((sum, run) => sum + run.glyphs.length, 0),
+          fontFeatures: runs.map((run) => run.fontFeatures ?? []),
+        };
+      } finally {
+        session.free();
+      }
+    };
+    const measure = (engine: Engine) =>
+      stories.map((story) => ({ kind: story.kind, asked: shaped(engine, story, true), plain: shaped(engine, story, false) }));
+    const expected = measure(wasm);
+    expect(measure(native)).toEqual(expected);
+    for (const { kind, asked, plain } of expected) {
+      expect({ kind, asked: asked.text.replace(/\s/g, ''), plain: plain.text.replace(/\s/g, '') })
+        .toEqual({ kind, asked: 'officefifty', plain: 'officefifty' });
+      expect({ kind, glyphs: plain.glyphs }).toEqual({ kind, glyphs: [...plain.text].length });
+      expect({ kind, fewer: asked.glyphs < plain.glyphs }).toEqual({ kind, fewer: true });
+      expect({ kind, asked: asked.fontFeatures.flat().includes('liga'), plain: plain.fontFeatures.flat().includes('liga') })
+        .toEqual({ kind, asked: true, plain: false });
+    }
+  }, 30_000);
 
   test.each([
     ['Arabic', 'مرحبا', 'بالعالم', true, () => new Uint8Array(readFileSync(new URL('../../packages/fonts/assets/NotoNaskhArabic-Regular.ttf', import.meta.url)))],
