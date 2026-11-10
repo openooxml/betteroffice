@@ -187,8 +187,12 @@ fn band_glyphs(band: &str, ask: bool) -> BandPaint {
     let output = engine
         .layout_document_with_regions_json(&request.to_string())
         .unwrap();
-    let display: Value =
-        serde_json::from_str(&engine.build_display_list_json(&output).unwrap()).unwrap();
+    let mut display_input: Value = serde_json::from_str(&output).unwrap();
+    display_input["fontChains"] = request["measurement"]["fontChains"].clone();
+    let display_json = engine
+        .build_display_list_json(&display_input.to_string())
+        .unwrap();
+    let display: Value = serde_json::from_str(&display_json).unwrap();
     let page = &display["pages"][0];
     let primitives = page[band]["primitives"].as_array().unwrap_or_else(|| {
         let keys: Vec<_> = page
@@ -264,12 +268,16 @@ fn header_and_footer_runs_ligate_only_when_asked() {
             "{band}: an asking run paints with liga: {:?}",
             asked.ligated
         );
-        if let (Some(plain_glyphs), Some(asked_glyphs)) = (plain.glyphs, asked.glyphs) {
-            assert_eq!(plain_glyphs, plain.text.chars().count(), "{band}");
-            assert!(
-                asked_glyphs < plain_glyphs,
-                "{band}: {asked_glyphs} vs {plain_glyphs}"
-            );
-        }
+        let plain_glyphs = plain
+            .glyphs
+            .unwrap_or_else(|| panic!("{band}: a band without a request paints glyph runs"));
+        let asked_glyphs = asked
+            .glyphs
+            .unwrap_or_else(|| panic!("{band}: an asking band paints glyph runs"));
+        assert_eq!(plain_glyphs, plain.text.chars().count(), "{band}");
+        assert!(
+            asked_glyphs < plain_glyphs,
+            "{band}: {asked_glyphs} vs {plain_glyphs}"
+        );
     }
 }
