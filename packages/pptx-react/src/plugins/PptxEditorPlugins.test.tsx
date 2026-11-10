@@ -1011,9 +1011,7 @@ describe('PptxEditor plugins', () => {
       expect(last(contexts).snapshot.layout!.id).toBe(context.snapshot.layout!.id);
       expect(last(contexts).geometry!.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: true, rects: [] });
       const retained = geometry.getAnchorGeometry({ kind: 'selection' });
-      expect(retained.ok).toBe(true);
-      if (!retained.ok) throw new Error(retained.failure.message);
-      expect(retained.rects).toEqual(answer.rects);
+      expect(retained).toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
       expect(context.snapshot.selection?.target).toMatchObject({ kind: 'text', anchor: 3, focus: 1 });
       await act(async () => {
         expect(await last(contexts).navigation.selectText({

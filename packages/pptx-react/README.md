@@ -131,9 +131,12 @@ and toolbar controls are outside. Locale is the canonical `i18n._lang`, defaulti
 
 `geometry.getAnchorGeometry(target)` accepts a `PptxGeometryTarget`: `selection`, or `range`
 with `version`, `slideId`, `shapeId`, `storyId`, `anchor`, and `focus` in UTF-16 story offsets.
+Selection anchors are live-only: a retained context whose selection has changed, including direction,
+returns `layout-unavailable`; use a range target to keep a position.
 Its `PptxAnchorGeometryResult` returns line rectangles, a focus-end anchor (a caret with
 empty `rects` when collapsed), and the slide's `pageRect` in overlay pixels, plus `version`
 and `layoutId`. Failures are `stale-version`, `missing-target`, or `layout-unavailable`.
+Checks run in order: layout first, then version, then target, so `layout-unavailable` overrides the other failures.
 Shape and slide selections return their bounds. `readAnchorGeometries(targets)` returns
 the same answers in order as a promise, without pending results. Both APIs are experimental.
 

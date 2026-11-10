@@ -210,6 +210,13 @@ export function createPptxPluginHost(access: PptxPluginHostAccess | PptxPluginVi
       scopedCommandStore(controller(), scopeFor(invocation))
     );
     const geometry = access.geometry(invocation.snapshot.selection);
+    const getAnchorGeometry: PptxPluginGeometry['getAnchorGeometry'] = (target) => {
+      if (!geometry || invocation.refusal() || target.kind === 'selection' &&
+        JSON.stringify(invocation.snapshot.selection) !== JSON.stringify(state.selection)) {
+        return { ok: false, failure: { code: 'layout-unavailable', message: 'The plugin context is no longer current.' } };
+      }
+      return geometry.getAnchorGeometry(target);
+    };
     return {
       pluginId,
       snapshot: invocation.snapshot,
@@ -221,7 +228,15 @@ export function createPptxPluginHost(access: PptxPluginHostAccess | PptxPluginVi
       read: clients.read,
       commands: clients.commands,
       edits: clients.edits,
-      geometry: geometry && invocation.snapshot.layout?.id === geometry.layout.id ? geometry : null,
+      geometry: geometry && invocation.snapshot.layout?.id === geometry.layout.id ? {
+        layout: geometry.layout,
+        get viewport() { return geometry.viewport; },
+        getAnchorGeometry,
+        readAnchorGeometries: (targets) => Promise.resolve(targets.map(getAnchorGeometry)),
+        toOverlayRect: geometry.toOverlayRect,
+        getShapeRect: geometry.getShapeRect,
+        getPositionAtPoint: geometry.getPositionAtPoint,
+      } : null,
       navigation: clients.navigation,
       setState: (next, atVersion) => invocation.setState(next, atVersion),
       onCleanup: (cleanup) => invocation.onCleanup(cleanup),

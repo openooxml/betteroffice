@@ -521,8 +521,11 @@ hit-tests client coordinates with `version` and `layoutId`.
 `{ kind: "selection" }` or `{ kind: "range", version, slideId, shapeId, storyId, anchor, focus }`,
 using UTF-16 story offsets. Its `PptxAnchorGeometryResult` returns `rects` per line,
 a focus-end `anchor`, the slide's `pageRect` in overlay pixels, `version`, and `layoutId`.
+Selection anchors are live-only: a retained context whose selection has changed, including direction,
+returns `layout-unavailable`; use a range target to keep a position.
 Collapsed text has empty `rects` and a caret anchor; shape and slide selections use their bounds.
 Failures are `stale-version`, `missing-target`, or `layout-unavailable`.
+Checks run in order: layout first, then version, then target, so `layout-unavailable` overrides the other failures.
 `geometry.readAnchorGeometries(targets)` wraps the same synchronous answers in a promise,
 in target order, without pending results. Both methods are experimental.
 The layer sits below selection handles and proposal controls and ignores the pointer

@@ -170,6 +170,7 @@ export type PptxPluginPointPosition = PptxPointPosition & { version: string; lay
 
 /** @experimental The plugin API may change in minor releases. */
 export type PptxGeometryTarget =
+  /** Selection anchors are live-only; use a range target to keep a position. */
   | { kind: 'selection' }
   | {
       kind: 'range';
