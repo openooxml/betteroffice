@@ -120,12 +120,15 @@ Plugins read `snapshot.focused` and `snapshot.locale`, and receive
 and toolbar controls are outside. Locale is the canonical `i18n._lang`, defaulting to `en`.
 `layout.viewport` remains the grid viewport in sheet pixels.
 
-`selection-settle` reports the current selection and its source after a 350 ms quiet
-window; `snapshot.selectionSettled` is false while it changes. These experimental
-signals are on for installed plugins. `geometry.getAnchorGeometry({ kind: "selection" })`
-anchors to the selection. Offscreen cells return `layout-unavailable`, and charts
-return `missing-target`. `readAnchorGeometries` returns the same answers in a promise.
-In-cell editing anchors to the cell.
+`selection-settle` reports the current selection after a minimum quiet window of
+350 ms; engines may wait up to 1.5 seconds longer for paint. Sources are `pointer`,
+`touch` and `keyboard`; programmatic changes use `keyboard`. `snapshot.selectionSettled`
+is false while the selection changes. These experimental signals are on for installed
+plugins. `geometry.getAnchorGeometry({ kind: "selection" })` anchors to the live
+selection. Superseded retained contexts or unpainted layouts return `layout-unavailable`
+before the missing-selection check. Charts and absent selections return `missing-target`;
+cells on another sheet or offscreen return `layout-unavailable`. `readAnchorGeometries`
+returns the same answers in a promise. In-cell editing anchors to the cell.
 
 ## Structured export
 

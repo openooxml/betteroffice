@@ -1180,11 +1180,18 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
         );
       },
     });
-    const { ref, view } = await mount({ plugins: [plugin] });
+    const { ref, view, rerender } = await mount({ plugins: [plugin] });
     const marker = () => view.container.querySelector<HTMLElement>('[data-testid="layout-marker"]');
     await until(() => marker() !== null);
     const { version, paragraph } = await firstParagraph(ref);
     expect(marker()!.dataset).toMatchObject({ version, snapshot: version });
+    await settle(400);
+    geometries.length = 0;
+    for (let render = 0; render < 3; render += 1) {
+      await act(async () => rerender({ plugins: [plugin] }));
+    }
+    expect(geometries.length).toBeGreaterThanOrEqual(3);
+    expect(new Set(geometries).size).toBe(1);
     const unit = { x: 0, y: 0, width: 1, height: 1 };
     const retained = geometries.at(-1)!;
     expect(retained.toOverlayRect(unit)).not.toBeNull();
@@ -3193,7 +3200,7 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
         expect(h.deliveries.slice(start).filter(delivery => delivery.event.type === 'selection-settle')).toEqual([]);
         await h.quiet(1);
         const delivered = h.deliveries.slice(start);
-        expect(h.settleNotifications).toHaveLength(h.deliveries.filter(delivery => delivery.event.type === 'selection-change').length);
+        expect(h.settleNotifications.length).toBeGreaterThanOrEqual(h.deliveries.filter(delivery => delivery.event.type === 'selection-change').length);
         const expected: MatrixSelectionDelivery[] = [];
         for (const delivery of delivered) {
           if (delivery.event.type !== 'selection-change') continue;
@@ -3297,6 +3304,58 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
         expect((await h.readAnchor())[0]).toMatchObject({ ok: true });
       } finally { stop(); }
     } finally { h.dispose(); }
+  });
+
+  if (engine === 'DP') test('a settle refused while admission is busy fires once admission drains', async () => {
+    const h = await matrixEditor(engine, documentBytes(), undefined, true);
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const session = h.binding()!.session;
+    const submit = session.submit;
+    let acknowledgementHeld = false;
+    const delay = spyOn(session, 'submit').mockImplementation((...args) => {
+      if (args[0] !== 'undo') return submit(...args);
+      acknowledgementHeld = true;
+      const heldNoopTicket: ReturnType<typeof submit> = {
+        id: -1, seq: undefined,
+        ack: held.then(() => ({ status: 'noop' as const })),
+        presented: Promise.resolve('dropped'),
+      };
+      return heldNoopTicket;
+    });
+    let pending: ReturnType<NonNullable<ReturnType<typeof h.controller>>['submit']> | undefined;
+    try {
+      await h.selection('body', h.first.paraId, 1);
+      await h.selectionLayout();
+      await h.quiet();
+      h.reset();
+      const previous = h.context().snapshot.selection.displayRange!.from;
+      await h.keyboardCaretMove('body', h.first.paraId, 1);
+      await h.selectionLayout();
+      const moved = h.context().snapshot.selection;
+      const movedAt = Date.now();
+      expect(moved.displayRange).toMatchObject({ story: 'body', from: previous + 1, to: previous + 1 });
+      expect(h.binding()!.admission.getSnapshot().originalUnackedIntents).toBe(0);
+      await act(async () => { pending = h.controller()!.submit({ kind: 'undo', payload: {} }); });
+      await until(() => acknowledgementHeld);
+      await h.quiet(700);
+      expect(Date.now() - movedAt).toBeGreaterThanOrEqual(350);
+      expect(h.binding()!.admission.getSnapshot().originalUnackedIntents).toBeGreaterThan(0);
+      expect(h.settles).toHaveLength(0);
+      expect(h.context().snapshot.selectionSettled).toBe(false);
+      await act(async () => { release(); expect(await pending).toMatchObject({ ok: true, status: 'noop' }); });
+      expect(h.binding()!.admission.getSnapshot()).toMatchObject({ originalUnackedIntents: 0, pendingInputs: 0 });
+      await h.selectionLayout();
+      expect(h.settles).toHaveLength(1);
+      const settled = h.settles[0]!.context.snapshot.selection;
+      expect(settled).toEqual(h.context().snapshot.selection);
+      expect(settled.displayRange).toMatchObject({ from: moved.displayRange!.from, to: moved.displayRange!.to });
+      expect(h.events.filter(event => event.type === 'selection-settle')).toMatchObject([{ source: 'keyboard', selection: settled }]);
+      await act(async () => h.host.markSelectionDirty('refresh'));
+      await h.quiet(700);
+      expect(h.settles).toHaveLength(1);
+      expect(h.context().snapshot.selectionSettled).toBe(true);
+    } finally { release(); delay.mockRestore(); await pending; h.dispose(); }
   });
 
   if (engine === 'DP') test('T1: a rejected selection mapping ends waiting and settles once', async () => {

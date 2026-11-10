@@ -1,5 +1,6 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
+import * as pluginRuntime from '../../../../shared/plugin-host/runtime';
 import type { ResidentProposalReply, YrsSession } from '@betteroffice/docx/yrs';
 import { selectionClock } from '../../../../e2e/browser/plugin-host/selection-clock';
 import { createSelectionSettle } from '../../../../shared/plugin-host/selectionSettle';
@@ -709,6 +710,117 @@ for (const marks of [['remote', 'remote'], ['remote', undefined], [undefined, 'r
   });
 }
 
+for (const marks of [['remote', 'seed'], ['seed', 'remote']] as const) {
+  test(`remote and seed marks ${JSON.stringify(marks)} coalesce without a local revision or settle`, async () => {
+    const ownsDom = !GlobalRegistrator.isRegistered;
+    if (ownsDom) GlobalRegistrator.register();
+    const clock = selectionClock();
+    const h = queuedSelectionHost();
+    const machine = createSelectionSettle({ root: () => null,
+      onUnsettle: () => h.host.selectionUnsettled(),
+      onSettle: source => h.host.selectionSettled(source),
+      onResettle: source => h.host.selectionSettled(source),
+    });
+    const publish = h.host.selectionChanged;
+    h.host.selectionChanged = (selection, identity, publication) => {
+      const key = publish(selection, identity, publication);
+      if (h.keys.length) machine.notifySelectionChange(h.keys.at(-1)!);
+      return key;
+    };
+    try {
+      h.host.markSelectionDirty();
+      await h.host.notificationsIdle();
+      await clock.tick(350);
+      await h.host.notificationsIdle();
+      const key = h.keys.at(-1);
+      h.events.length = 0;
+      h.causes.length = 0;
+      h.host.markSelectionDirty(marks[0]);
+      h.move(9);
+      h.host.markSelectionDirty(marks[1]);
+      await h.host.notificationsIdle();
+      expect(h.causes).toEqual(['remote']);
+      expect(h.keys.at(-1)).toBe(key);
+      expect(h.events.filter(event => event.type === 'selection-change')).toHaveLength(1);
+      expect(h.host.activations()[0]!.context.snapshot.selectionSettled).toBe(true);
+      await clock.tick(700);
+      await h.host.notificationsIdle();
+      expect(h.events.filter(event => event.type === 'selection-settle')).toEqual([]);
+    } finally {
+      machine.dispose();
+      h.host.close('unmounted');
+      clock.restore();
+      if (ownsDom) await GlobalRegistrator.unregister();
+    }
+  });
+}
+
+for (const read of ['snapshot', 'guard'] as const) {
+  test(`${read} flushes a reentrant layout and selection without nested snapshots or duplicate events`, async () => {
+    const createRuntime = pluginRuntime.createPluginRuntime;
+    let snapshots = 0;
+    let depth = 0;
+    let maxDepth = 0;
+    let armSnapshot = false;
+    let mark = () => {};
+    const capture = spyOn(pluginRuntime, 'createPluginRuntime').mockImplementation(options =>
+      createRuntime({ ...options, snapshot(pluginId, generation) {
+        snapshots += 1;
+        depth += 1;
+        maxDepth = Math.max(maxDepth, depth);
+        try {
+          if (armSnapshot) { armSnapshot = false; mark(); }
+          return options.snapshot(pluginId, generation);
+        } finally { depth -= 1; }
+      } }));
+    const frame = { ...layout(0), id: 'reentrant-layout' };
+    let pulls = 0;
+    const observed: Array<{ layout: DocxPluginLayout | null; selection: DocxPluginSelection }> = [];
+    const h = setup(undefined, undefined, undefined, { readSelection() {
+      pulls += 1;
+      h.host.layoutChanged(frame);
+      return { selection: { formatting: null,
+        displayRange: { story: 'body', from: 8, to: 8, layoutId: frame.id } }, identity: 'caret-8' };
+    } });
+    const plugin = defineDocxPlugin({ id: 'reentrant', createState: () => null,
+      onEvent(context, event) {
+        h.events.push(event);
+        if (event.type === 'selection-change' || event.type === 'layout-change') {
+          observed.push({ layout: context.snapshot.layout, selection: context.snapshot.selection });
+        }
+      } });
+    try {
+      h.host.setPlugins([plugin]);
+      h.host.openWorker('v1');
+      await h.host.notificationsIdle();
+      h.events.length = 0;
+      snapshots = 0;
+      maxDepth = 0;
+      mark = () => h.host.markSelectionDirty();
+      if (read === 'snapshot') {
+        armSnapshot = true;
+        h.host.focusChanged(true);
+      } else {
+        mark();
+        h.host.guard(plugin.id, 'command', context => {
+          observed.push({ layout: context.snapshot.layout, selection: context.snapshot.selection });
+        }, undefined);
+      }
+      await h.host.notificationsIdle();
+      expect(pulls).toBe(1);
+      expect(snapshots).toBeGreaterThan(0);
+      expect(maxDepth).toBe(1);
+      expect(observed.length).toBeGreaterThanOrEqual(2);
+      for (const snapshot of observed) {
+        expect(snapshot.layout).toEqual(frame);
+        expect(snapshot.selection.displayRange).toEqual({ story: 'body', from: 8, to: 8, layoutId: frame.id });
+      }
+      expect(h.events.filter(event => event.type === 'layout-change')).toHaveLength(1);
+      expect(h.events.filter(event => event.type === 'selection-change')).toHaveLength(1);
+    } finally { h.host.close('unmounted'); capture.mockRestore(); }
+  });
+}
+
 test('remote and local callers coalesce intermediate formatting into one complete local publication and settle', async () => {
   const ownsDom = !GlobalRegistrator.isRegistered;
   if (ownsDom) GlobalRegistrator.register();
@@ -862,6 +974,8 @@ test('worker mapping publishes the complete caret payload once and retains a loc
     selection: { formatting: null, displayRange: { story: 'body', from: 8, to: 8, layoutId: 'layout' } },
   }]);
   expect(h.keys).toHaveLength(1);
+  h.host.selectionSettled('keyboard');
+  await h.host.notificationsIdle();
   h.host.markSelectionDirty();
   await h.host.notificationsIdle();
   expect(h.events.filter(event => event.type === 'selection-change')).toHaveLength(1);

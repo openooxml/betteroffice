@@ -136,12 +136,16 @@ and toolbar controls are outside. Locale is the canonical `i18n._lang`, defaulti
 `geometry.viewport` is the visible document area in overlay-layer pixels;
 `viewport-change` reports scroll, resize, or zoom changes, with `null` when no layout is shown.
 
-`selection-settle` reports the current selection and its source after a 350 ms quiet
-window; `snapshot.selectionSettled` is false while it changes. These experimental
-signals are on for installed plugins. `geometry.getAnchorGeometry({ kind: "selection" })`
-anchors to the live selection. Mapping and display-range reads may be `pending`;
-`readAnchorGeometries` waits up to two seconds, then returns `layout-unavailable`.
-Collapsed selections return a caret anchor and empty `rects`.
+`selection-settle` reports the current selection after a minimum quiet window of
+350 ms; engines may wait longer for input or layout. Sources are `pointer`, `touch`
+and `keyboard`; programmatic changes use `keyboard`. `snapshot.selectionSettled`
+is false while the selection changes. These experimental signals are on for installed
+plugins. `geometry.getAnchorGeometry({ kind: "selection" })` anchors to the live
+selection. Superseded retained contexts or unavailable layouts return `layout-unavailable`
+before the no-selection check, which returns `missing-target`. Mapping and display-range
+reads may be `pending`; `readAnchorGeometries` waits up to two seconds for selection
+targets, then answers `layout-unavailable`. A mixed call resolves when its slowest target
+does. Collapsed selections return a caret anchor and empty `rects`.
 
 ## Edit batches and paragraph anchors
 

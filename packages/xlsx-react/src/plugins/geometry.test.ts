@@ -10,6 +10,7 @@ import {
   pluginLayout,
   visibleGridRange,
   type PaintedGrid,
+  type ProposalGeometrySnapshot,
 } from './geometry';
 
 function element(left: number, top: number, width = 0, height = 0): HTMLElement {
@@ -365,6 +366,51 @@ for (const peerless of [false, true]) test(`selection anchors follow ranges and 
   expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
 });
 
+
+for (const peerless of [false, true]) test(`selection failure precedence ignores proposal reads (${peerless ? 'peerless' : 'in-thread'})`, async () => {
+  const frame = painted();
+  const layout = pluginLayout(frame, 'v1')!;
+  let current = true;
+  let reads = 0;
+  let selection: import('./types').XlsxPluginSelection = null;
+  let proposalState: 'failed' | 'ready' | 'pending' = 'failed';
+  const proposals = (): ProposalGeometrySnapshot | null => {
+    reads += 1;
+    if (proposalState === 'failed') throw new Error('Proposals unavailable');
+    return proposalState === 'pending' ? null : { proposals: [], sheetIndex: 0, previewVersion: 3 };
+  };
+  const geometry = peerless
+    ? createPeerlessPluginGeometry(layout, frame, element(0, 0), element(0, 0),
+        () => ({ version: current ? 'v1' : 'v2', painted: frame }), proposals, undefined, () => selection)
+    : createPluginGeometry(layout, frame, element(0, 0), element(0, 0), () => current,
+        proposals, undefined, () => selection);
+  const check = async (code: string, expectedReads = 0) => {
+    expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: false, failure: { code } });
+    expect(await geometry.readAnchorGeometries([{ kind: 'selection' }])).toMatchObject([{ ok: false, failure: { code } }]);
+    expect(reads).toBe(expectedReads);
+  };
+  await check('missing-target');
+  selection = { sheetId: 'sheet:1', sheetIndex: 1, chartId: 'chart', cells: null };
+  await check('missing-target');
+  selection = { ...selection, chartId: null, cells: { anchor: { row: 0, col: 0 }, focus: { row: 0, col: 0 } } };
+  await check('layout-unavailable');
+  selection.sheetId = frame.sheetId;
+  selection.cells = { anchor: { row: 900, col: 900 }, focus: { row: 901, col: 901 } };
+  await check('layout-unavailable');
+  current = false;
+  selection = null;
+  await check('layout-unavailable');
+  current = true;
+  selection = { sheetId: frame.sheetId, sheetIndex: 0, chartId: null,
+    cells: { anchor: { row: 0, col: 0 }, focus: { row: 0, col: 0 } } };
+  proposalState = 'ready';
+  expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: true, previewVersion: 3 });
+  expect(await geometry.readAnchorGeometries([{ kind: 'selection' }])).toMatchObject([{ ok: true, previewVersion: 3 }]);
+  proposalState = 'pending';
+  await check('layout-unavailable', 4);
+  proposalState = 'failed';
+  await check('read-failed', 6);
+});
 
 for (const engine of ['XI', 'XL', 'XP'] as const) test(`F: ${engine} selection mapping-pending is unreachable`, async () => {
   const frame = painted();

@@ -39,7 +39,7 @@ import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
 import type { DocxPointPosition } from '../components/DocxEditor/types';
 import * as proposalPreview from './proposalPreview';
 import type { DocxProposalSnapshot } from './proposalPreview';
-import type { DocxAnchorGeometryResult, DocxGeometryTarget } from './types';
+import type { DocxAnchorGeometryResult, DocxGeometryTarget, DocxPluginGeometry } from './types';
 
 afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
@@ -88,6 +88,27 @@ function queries(): DisplayListQueries {
     pageBounds: () => ({ pageIndex: 0, x: 0, y: 0, ...PAGE }),
   } as unknown as DisplayListQueries;
 }
+
+test('scoped geometry caches each context while keeping its selection checks live', async () => {
+  const answer: DocxAnchorGeometryResult = { ok: true, version: 'v1', previewVersion: 0,
+    layoutId: 'layout', rects: [], anchor: null, pageRect: null };
+  const geometry = { getAnchorGeometry: () => answer, readAnchorGeometries: async () => [answer] } as unknown as DocxPluginGeometry;
+  const first = {};
+  const second = {};
+  let current = first;
+  let reads = 0;
+  const scoped = scopePluginGeometry(geometry, 'plugin', () => current === first, () => { reads += 1; }, first);
+  expect(scopePluginGeometry(geometry, 'plugin', () => current === first, () => { reads += 2; }, first)).toBe(scoped);
+  expect(scoped.getAnchorGeometry({ kind: 'selection' })).toEqual(answer);
+  expect(reads).toBe(2);
+  current = second;
+  const latest = scopePluginGeometry(geometry, 'plugin', () => current === second, undefined, second);
+  expect(latest).not.toBe(scoped);
+  expect(scoped.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
+  expect(await scoped.readAnchorGeometries([{ kind: 'selection' }])).toMatchObject([{ ok: false, failure: { code: 'layout-unavailable' } }]);
+  expect(latest.getAnchorGeometry({ kind: 'selection' })).toEqual(answer);
+  expect(await latest.readAnchorGeometries([{ kind: 'selection' }])).toEqual([answer]);
+});
 
 describe('reservation geometry', () => {
   test('a header reservation reports every built repeated page and waits for pending matches', () => {

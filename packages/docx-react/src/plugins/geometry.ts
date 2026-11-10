@@ -116,64 +116,84 @@ const reservationReaders = new WeakMap<DocxPluginGeometry, ReservationReader>();
 export function registerReservationReader(geometry: DocxPluginGeometry, reader: ReservationReader): void {
   reservationReaders.set(geometry, reader);
 }
-const scopedGeometries = new WeakMap<DocxPluginGeometry, Map<string, DocxPluginGeometry>>();
+type ScopedGeometry = {
+  geometry: DocxPluginGeometry;
+  checks: { selectionCurrent?: () => boolean; beforeRead?: () => void };
+};
+const scopedGeometries = new WeakMap<DocxPluginGeometry, Map<string, {
+  shared?: ScopedGeometry;
+  contexts: WeakMap<object, ScopedGeometry>;
+}>>();
 
 /** `geometry` as plugin `pluginId` reads it: its `reservation` targets name its own reservations. */
 export function scopePluginGeometry(
   geometry: DocxPluginGeometry,
   pluginId: string,
   selectionCurrent?: () => boolean,
-  beforeRead?: () => void
+  beforeRead?: () => void,
+  context?: object
 ): DocxPluginGeometry {
   let byPlugin = scopedGeometries.get(geometry);
   if (!byPlugin) {
     byPlugin = new Map();
     scopedGeometries.set(geometry, byPlugin);
   }
-  let scoped = selectionCurrent || beforeRead ? undefined : byPlugin.get(pluginId);
-  if (!scoped) {
-    const superseded = () => anchorFailure('layout-unavailable', 'The plugin selection is no longer current');
-    const reservation = (target: DocxGeometryTarget) => {
-      beforeRead?.();
-      if (target.kind === 'selection' && selectionCurrent && !selectionCurrent()) return superseded();
-      if (target.kind !== 'reservation') return geometry.getAnchorGeometry(target);
-      const reader = reservationReaders.get(geometry);
-      return reader
-        ? reader.get(pluginId, target.id)
-        : anchorFailure('unsupported', 'This layout reports no reservations');
-    };
-    scoped = {
-      get layout() {
-        return geometry.layout;
-      },
-      get viewport() {
-        return geometry.viewport;
-      },
-      get dom() {
-        return geometry.dom;
-      },
-      toOverlayRect: (rect) => geometry.toOverlayRect(rect),
-      getPositionAtPoint: (clientX, clientY) => geometry.getPositionAtPoint(clientX, clientY),
-      readPositionAtPoint: (clientX, clientY) => geometry.readPositionAtPoint(clientX, clientY),
-      readAnchorGeometries: async (targets) => {
-        beforeRead?.();
-        if (selectionCurrent && !selectionCurrent() && targets.every((target) => target.kind === 'selection')) {
-          return targets.map(superseded);
-        }
-        const reader = reservationReaders.get(geometry);
-        const answers = await (!targets.some((target) => target.kind === 'reservation')
-          ? geometry.readAnchorGeometries(targets)
-          : reader?.read ? reader.read(pluginId, targets) : targets.map(reservation));
-        beforeRead?.();
-        return answers.map((answer, index) => targets[index]!.kind === 'selection' &&
-          selectionCurrent && !selectionCurrent() ? superseded() : answer);
-      },
-      getPageRect: (pageIndex) => geometry.getPageRect(pageIndex),
-      isPageBuilt: (pageIndex) => geometry.isPageBuilt(pageIndex),
-      getAnchorGeometry: reservation,
-    };
-    if (!selectionCurrent && !beforeRead) byPlugin.set(pluginId, scoped);
+  let cache = byPlugin.get(pluginId);
+  if (!cache) {
+    cache = { contexts: new WeakMap() };
+    byPlugin.set(pluginId, cache);
   }
+  const key = context ?? selectionCurrent;
+  const cached = key ? cache.contexts.get(key) : cache.shared;
+  if (cached) {
+    cached.checks.selectionCurrent = selectionCurrent;
+    cached.checks.beforeRead = beforeRead;
+    return cached.geometry;
+  }
+  const checks = { selectionCurrent, beforeRead };
+  const superseded = () => anchorFailure('layout-unavailable', 'The plugin selection is no longer current');
+  const reservation = (target: DocxGeometryTarget) => {
+    checks.beforeRead?.();
+    if (target.kind === 'selection' && checks.selectionCurrent && !checks.selectionCurrent()) return superseded();
+    if (target.kind !== 'reservation') return geometry.getAnchorGeometry(target);
+    const reader = reservationReaders.get(geometry);
+    return reader
+      ? reader.get(pluginId, target.id)
+      : anchorFailure('unsupported', 'This layout reports no reservations');
+  };
+  const scoped: DocxPluginGeometry = {
+    get layout() {
+      return geometry.layout;
+    },
+    get viewport() {
+      return geometry.viewport;
+    },
+    get dom() {
+      return geometry.dom;
+    },
+    toOverlayRect: (rect) => geometry.toOverlayRect(rect),
+    getPositionAtPoint: (clientX, clientY) => geometry.getPositionAtPoint(clientX, clientY),
+    readPositionAtPoint: (clientX, clientY) => geometry.readPositionAtPoint(clientX, clientY),
+    readAnchorGeometries: async (targets) => {
+      checks.beforeRead?.();
+      if (checks.selectionCurrent && !checks.selectionCurrent() && targets.every((target) => target.kind === 'selection')) {
+        return targets.map(superseded);
+      }
+      const reader = reservationReaders.get(geometry);
+      const answers = await (!targets.some((target) => target.kind === 'reservation')
+        ? geometry.readAnchorGeometries(targets)
+        : reader?.read ? reader.read(pluginId, targets) : targets.map(reservation));
+      checks.beforeRead?.();
+      return answers.map((answer, index) => targets[index]!.kind === 'selection' &&
+        checks.selectionCurrent && !checks.selectionCurrent() ? superseded() : answer);
+    },
+    getPageRect: (pageIndex) => geometry.getPageRect(pageIndex),
+    isPageBuilt: (pageIndex) => geometry.isPageBuilt(pageIndex),
+    getAnchorGeometry: reservation,
+  };
+  const entry = { geometry: scoped, checks };
+  if (key) cache.contexts.set(key, entry);
+  else cache.shared = entry;
   return scoped;
 }
 
@@ -941,7 +961,8 @@ export function createPluginGeometry(
           const story = selectionStory();
           if (story === null) return anchorFailure('missing-target', 'No selection is available');
           if (anchorDisplayRoot(story) === null) return anchorFailure('unsupported', 'The range has no display position');
-          return anchorFailure('pending', 'The selection display range is being read');
+          return { ok: false as const, failure: { code: 'pending' as const,
+            message: 'The selection display range is being read' } };
         }
         if (range.layoutId !== layout.id) return unavailable();
         const from = Math.min(range.from, range.to);

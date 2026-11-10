@@ -290,7 +290,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       geometry:
         geometry && sameLayout(invocation.snapshot.layout, geometry.layout)
           ? scopePluginGeometry(geometry, pluginId, () => !invocation.refusal() &&
-              selection === selectionIdentity, flushSelection)
+              selection === selectionIdentity, flushSelection, invocation.snapshot)
           : null,
       navigation: clients.navigation,
       setState: (next, atVersion) => invocation.setState(next, atVersion),
@@ -595,7 +595,8 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       if (!installed || !generation || !access.readSelection) return;
       if (cause !== 'refresh') {
         if (deferredSelectionCause) {
-          if (deferredSelectionCause.cause !== cause) deferredSelectionCause.cause = undefined;
+          deferredSelectionCause.cause = deferredSelectionCause.cause === undefined || cause === undefined
+            ? undefined : deferredSelectionCause.cause === 'remote' || cause === 'remote' ? 'remote' : 'seed';
         } else deferredSelectionCause = { cause };
       }
       if (pendingSelection) {
@@ -639,6 +640,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
         if (moved || resolvedMoved || stateChanged) { invalidateSettle(); runtime.touch(); }
       } else if (!selectionChanged && !emittedMoved) {
         if (moved || resolvedMoved || stateChanged) { invalidateSettle(); runtime.touch(); }
+        if (!state.selectionSettled) access.selectionPublished?.(settleKey);
       } else {
         const generation = runtime.generation();
         if (generation) {

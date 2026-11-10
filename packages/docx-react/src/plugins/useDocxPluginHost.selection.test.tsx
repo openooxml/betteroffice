@@ -11,7 +11,7 @@ import type { ViewerSelectionChange } from '../components/DocxEditor/internals/v
 import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
 import type { SelectionState } from '../components/DocxEditor/types';
 import { defineDocxPlugin } from './defineDocxPlugin';
-import type { DocxPluginContext, DocxPluginSelection } from './types';
+import type { DocxPluginContext, DocxPluginError, DocxPluginSelection } from './types';
 import { useDocxPluginHost } from './useDocxPluginHost';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -66,7 +66,9 @@ async function setup(viewerSelection: boolean, initialRange: { from: number; to:
       if (event.type === 'selection-settle') settledSelections.push(event.selection);
     },
   });
+  const errors: DocxPluginError[] = [];
   const options = {
+    onPluginError: (error: DocxPluginError) => errors.push(error),
     plugins: [plugin], pagedEditorRef: { current: editor },
     writeModeRef: { current: 'viewing' as const }, mode: 'viewing' as const,
     readOnly: true, viewerSelection, commands: createDocxCommandController(),
@@ -92,12 +94,33 @@ async function setup(viewerSelection: boolean, initialRange: { from: number; to:
     return yrsSelectionState(currentYrsToolbarSelection(session, createYrsInputPositionMap(currentStory,
       session.paragraphs(currentStory).map(paragraph => ({ paraId: paragraph.paraId, length: paragraph.text.length }))))!);
   };
-  return { result, rerender, unmount, options, subscribers, formatting, events, settledSelections, propSelections, subscribedSelections, session,
+  return { result, rerender, unmount, options, errors, subscribers, formatting, events, settledSelections, propSelections, subscribedSelections, session,
     selectRange,
     setDisplayRange: (next: typeof range) => { range = next; },
     setRange: (next: typeof range) => { range = next; if (next) selectRange(next); },
     shellReads: () => shellReads };
 }
+
+test('a paragraph removed at flush time clears selection without blaming the plugin', async () => {
+  const view = await setup(false, { from: 1, to: 3 }, 'body');
+  const locate = view.session.locateParagraph;
+  const removed = view.session.selection()!.head.paraId;
+  try {
+    view.session.locateParagraph = (story, paraId) => {
+      if (paraId === removed) throw new Error('Paragraph no longer exists');
+      return locate(story, paraId);
+    };
+    await act(async () => {
+      const context = view.result.current.host.activations[0]!.context;
+      view.result.current.host.publishSelection();
+      await context.run(() => {});
+    });
+    expect(view.errors).toEqual([]);
+    expect(view.result.current.host.activations).toHaveLength(1);
+    expect(view.result.current.host.activations[0]!.context.snapshot.selection).toEqual({ formatting: null, displayRange: null });
+    expect(view.events.at(-1)).toEqual({ formatting: null, displayRange: null });
+  } finally { view.session.locateParagraph = locate; }
+});
 
 for (const mappedBeforeDeadline of [true, false]) {
   test(`editor selection settles with its current display range (mapped before deadline: ${mappedBeforeDeadline})`, async () => {

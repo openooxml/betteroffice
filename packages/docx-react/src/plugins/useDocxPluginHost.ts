@@ -342,7 +342,15 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
     }
     const editor = latest.current.pagedEditorRef.current;
     const session = editor?.getYrsSession() ?? latest.current.session;
-    const live = readSelection(session);
+    let live = readSelection(session);
+    let anchor = 0;
+    let focus = 0;
+    if (live && session) {
+      try {
+        anchor = session.locateParagraph(live.anchor.story, live.anchor.paraId).start + live.anchor.offset;
+        focus = session.locateParagraph(live.head.story, live.head.paraId).start + live.head.offset;
+      } catch { live = null; }
+    }
     const published = selectionPublicationRef.current;
     if (live && cause === 'seed' && published !== null && published.owner === session &&
       published.generation === host.generation() && published.cleared) {
@@ -374,10 +382,6 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
         live && range && layout ? { story: live.head.story, from: range.from, to: range.to, layoutId: layout.id } : null,
     };
     const encoded = live ? session?.encodeSelection?.() : null;
-    const offset = (point: NonNullable<typeof live>['anchor']) =>
-      session!.locateParagraph(point.story, point.paraId).start + point.offset;
-    const anchor = live ? offset(live.anchor) : 0;
-    const focus = live ? offset(live.head) : 0;
     const direction = Math.sign(focus - anchor);
     const collapsed = !!live && live.anchor.story === live.head.story &&
       live.anchor.paraId === live.head.paraId && live.anchor.offset === live.head.offset;
