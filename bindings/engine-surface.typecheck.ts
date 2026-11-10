@@ -29,7 +29,10 @@ export type XlsxEngineDiffers = Same<Mismatched<typeof WasmXlsxEngine, typeof Na
 export type XlsxEngineMissing = Same<Missing<typeof WasmXlsxEngine, typeof NativeXlsxEngine>>;
 export type XlsxEnginePngDiffers = Same<Mismatched<typeof WasmXlsxEnginePng, typeof NativeXlsxEnginePng>>;
 export type XlsxEnginePngMissing = Same<Missing<typeof WasmXlsxEnginePng, typeof NativeXlsxEnginePng>>;
-export type PptxEngineDiffers = Same<Mismatched<typeof WasmPptxEngine, typeof NativePptxEngine>>;
+/** Declared differently on purpose, pending: listed in bindings/native-extras.ts typeAllowances. */
+type PptxEnginePending = 'metafileSvgBindings';
+export type PptxEngineDiffers = Same<Exclude<Mismatched<typeof WasmPptxEngine, typeof NativePptxEngine>, PptxEnginePending>>;
+export type PptxEnginePendingStale = Same<Exclude<PptxEnginePending, Mismatched<typeof WasmPptxEngine, typeof NativePptxEngine>>>;
 export type PptxEngineMissing = Same<Missing<typeof WasmPptxEngine, typeof NativePptxEngine>>;
 export type PptxEnginePngDiffers = Same<Mismatched<typeof WasmPptxEnginePng, typeof NativePptxEnginePng>>;
 export type PptxEnginePngMissing = Same<Missing<typeof WasmPptxEnginePng, typeof NativePptxEnginePng>>;

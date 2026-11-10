@@ -126,3 +126,10 @@ export function engineAllowances(format: Format): Allowances {
     internals: { wasm: wasmInternals(format, 'engine'), native: {} },
   };
 }
+
+/** Engine module exports whose declared type differs on purpose, per wasm engine module; checked by engine-surface.typecheck.ts. */
+export const typeAllowances: Record<string, Record<string, Extra>> = {
+  'packages/pptx/src/wasm/engine.ts': {
+    metafileSvgBindings: { reason: 'rejects on native: the native engine converts metafiles itself, so there are no converter bindings', pending: 'item 11' },
+  },
+};

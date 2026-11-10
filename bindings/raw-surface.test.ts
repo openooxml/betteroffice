@@ -19,7 +19,7 @@ import {
   type RuntimeSurface,
   type SurfaceStats,
 } from '../scripts/raw-engine-surface';
-import { arityAllowances, engineAllowances, rawAllowances } from './native-extras';
+import { arityAllowances, engineAllowances, rawAllowances, typeAllowances } from './native-extras';
 
 const root = join(import.meta.dir, '..');
 const require = createRequire(import.meta.url);
@@ -71,6 +71,7 @@ describe('native and wasm engine surfaces', () => {
         for (const key of Object.keys(totals) as (keyof SurfaceStats)[]) totals[key] += report.stats[key];
         const arity = compareArity(jsArity(await import(join(root, engine))), jsArity(await import(join(root, shim))), arityAllow[engine] ?? {});
         totals.pending += Object.keys(arityAllow[engine] ?? {}).length;
+        totals.pending += Object.keys(typeAllowances[engine] ?? {}).length;
         problems.push(...[...report.problems, ...arity].map((problem) => `${engine}: ${problem}`));
       }
       const pairs = new Set((NATIVE_ENGINES[format] as readonly { engine: string }[]).map(({ engine }) => engine));
@@ -87,6 +88,13 @@ describe('native and wasm engine surfaces', () => {
     const checked = [...typecheck.matchAll(/from '\.\.\/(packages\/[^']+)';/g)].map((match) => `${match[1]}.ts`).sort();
     const engines = Object.values(NATIVE_ENGINES).flatMap((pairs) => (pairs as readonly { engine: string }[]).map(({ engine }) => engine)).sort();
     expect(checked).toEqual(engines);
+    const pending = Object.fromEntries([...typecheck.matchAll(/type (\w+)Pending = ([^;]+);/g)]
+      .map((match) => [match[1], match[2].split('|').map((name) => name.trim().replace(/'/g, '')).sort()]));
+    const expected = Object.fromEntries(Object.entries(typeAllowances).map(([engine, names]) => {
+      const [, format, module] = /^packages\/(\w+)\/src\/wasm\/(\w+)\.ts$/.exec(engine)!;
+      return [`${format[0].toUpperCase()}${format.slice(1)}${module[0].toUpperCase()}${module.slice(1)}`, Object.keys(names).sort()];
+    }));
+    expect(pending).toEqual(expected);
     const result = spawnSync('bunx', ['tsc', '-p', join(import.meta.dir, 'engine-surface.tsconfig.json')], { encoding: 'utf8', cwd: root });
     expect(`${result.stdout}${result.stderr}`.trim()).toBe('');
     expect(result.status).toBe(0);
