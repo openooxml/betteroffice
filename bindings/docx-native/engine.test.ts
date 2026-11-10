@@ -299,12 +299,8 @@ describe('docx native engine parity', () => {
           regions: { sections: [{
             sectionId: 'main',
             ...(band ? { headerFooterRefs: { [`${band}Default`]: 'rIdStory' } } : {}),
-            properties: {
-              pageWidth: 4320, pageHeight: 2880,
-              marginTop: 600, marginRight: 300, marginBottom: 600, marginLeft: 300,
-              headerDistance: 150, footerDistance: 150,
-              ...(band ? { [`${band}References`]: [{ type: 'default', rId: 'rIdStory' }] } : {}),
-            },
+            pageSize: { w: 288, h: 192 },
+            margins: { top: 40, right: 20, bottom: 40, left: 20, header: 10, footer: 10 },
           }] },
           ...(note ? { notes: { contents: [{ id: 1, noteKind: note, height: 0 }] } } : {}),
           measurement: {
