@@ -799,6 +799,8 @@
   },
   "a11y": {
     "pageLabel": "Trang {number}",
+    "unbuiltPagesNotMirrored": "Các trang từ {from} đến {to} chưa có trong chế độ xem đọc.",
+    "goToPage": "Đi đến trang {number}",
     "headerLabel": "Đầu trang",
     "footerLabel": "Chân trang",
     "chartNoData": "Không có dữ liệu",

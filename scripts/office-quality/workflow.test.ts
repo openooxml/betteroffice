@@ -506,3 +506,21 @@ test('a private run bounds its concurrent benchmark jobs by max_parallel; public
   for (const name of ['measure', 'docx-benchmark', 'xlsx-benchmark', 'pptx-benchmark', 'xlsx-fidelity', 'roundtrip-a', 'roundtrip-b', 'timing'])
     expect({ name, cap: workflow.jobs[name].strategy['max-parallel'] }).toEqual({ name, cap: `\${{ fromJSON(needs.prepare.outputs.parallel)['${name}'] }}` });
 });
+
+test('the reconciler fails on a channel that scored nothing, and the summary leads with scored counts even when it fails', () => {
+  const reconcile = publish.steps.find((step: any) => step.name === 'Reconcile the format reports');
+  expect(reconcile.env.QUALITY_REQUIRE_COVERAGE).toBe('true');
+  expect(reconcile.env.QUALITY_COVERAGE).toBe('${{ runner.temp }}/coverage.md');
+  expect(reconcile.run).toBe('node scripts/office-quality/private-step.mjs merge -- node scripts/office-quality/merge.mjs');
+  const summary = publish.steps[publish.steps.indexOf(reconcile) + 1];
+  expect(summary.name).toBe('Summarise scored documents and the generated section');
+  expect(summary.if).toBe('always()');
+  expect(summary.run.indexOf('coverage.md')).toBeLessThan(summary.run.indexOf('section.md'));
+});
+
+test('planning states which font package each channel renders with', () => {
+  const plan = prepare.steps.find((step: any) => step.id === 'plan').run;
+  expect(plan).toContain("published channel: @betteroffice/fonts@${version}, ${plan.fonts_basis?.[format] === 'release-commit' ? 'the fonts release from the same release commit as' : 'the latest fonts release published before'} @betteroffice/${format}@${plan.versions[format]}");
+  expect(plan).toContain('commit channel: the font packages of this checkout');
+  expect(plan).toContain('### Font sources');
+});

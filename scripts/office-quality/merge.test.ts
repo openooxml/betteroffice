@@ -421,3 +421,40 @@ test('writes failure clusters with their documents beside the report', async () 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('a channel that scored no document of a format fails the merge, naming the format, channel and failed stages', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'fidelity-merge-'));
+  try {
+    const paths = await writeFixture(root);
+    const coveragePath = join(root, 'coverage.md');
+    await expect(mergeFromPaths({ planPath: paths.plan, parts: paths.parts, output: paths.output, coveragePath, requireCoverage: true } as any))
+      .rejects.toThrow('PPTX published: 0 of 1 scored (failed: capture 1)');
+    expect(await Bun.file(join(paths.output, 'section.md')).exists()).toBe(false);
+    const coverage = await readFile(coveragePath, 'utf8');
+    expect(coverage).toContain('- DOCX published: 2 of 2 scored');
+    expect(coverage).toContain('- DOCX commit: 2 of 2 scored');
+    expect(coverage).toContain('- PPTX commit: 1 of 1 scored');
+    expect(coverage).toContain('- PPTX published: 0 of 1 scored (failed: capture 1)');
+    for (const leak of ['docx-a', 'docx-b', 'pptx-c', 'capture stopped']) expect(coverage.includes(leak) && leak).toBe(false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a partial loss is reported in the coverage lines and does not fail the merge', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'fidelity-merge-'));
+  try {
+    const paths = await writeFixture(root);
+    const report = JSON.parse(await readFile(join(paths.parts, 'visual-fidelity-report-docx-0', 'report.json'), 'utf8'));
+    report.samples[0].comparisons[1] = { channel: 'commit', renderer_source_commit: commit, status: 'failed', stage: 'compare', error: 'compare stopped' };
+    await writeFile(join(paths.parts, 'visual-fidelity-report-docx-0', 'report.json'), JSON.stringify(report));
+    const coveragePath = join(root, 'coverage.md');
+    const { coverage } = await import('./merge.mjs');
+    const merged = await mergeFromPaths({ planPath: paths.plan, parts: paths.parts, output: paths.output, coveragePath } as any);
+    expect((coverage as any)(merged).find((row: any) => row.format === 'docx' && row.channel === 'commit'))
+      .toEqual({ format: 'docx', channel: 'commit', scored: 1, total: 2, stages: { compare: 1 } });
+    expect(await readFile(coveragePath, 'utf8')).toContain('- DOCX commit: 1 of 2 scored (failed: compare 1)');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

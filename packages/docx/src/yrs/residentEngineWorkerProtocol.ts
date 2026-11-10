@@ -166,6 +166,7 @@ export type DocxDocumentRead =
   | { kind: 'bookmarkPosition'; story: string; name: string; expectVersion: string }
   | { kind: 'sidebar'; commentIds: string[]; expectVersion: string }
   | { kind: 'headings'; expectVersion: string }
+  | { kind: 'pageTexts'; pages: number[]; expectFrameEpoch?: number; expectLayoutRevision?: number }
   | { kind: 'adjacentRevision'; selection: DocxCommandSelection | null; direction: 'next' | 'previous' };
 
 /** @internal */
@@ -215,6 +216,7 @@ export interface DocxDocumentReadValues {
   bookmarkPosition: number | null;
   sidebar: DocxSidebarRead | null;
   headings: DocxOutlineHeading[] | null;
+  pageTexts: { pages: { pageIndex: number; paragraphs: { text: string; level?: number; inTable?: true }[] }[]; frameEpoch: number; layoutRevision: number } | null;
   adjacentRevision: { revisionId: string } | null;
 }
 
