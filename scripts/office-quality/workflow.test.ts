@@ -87,6 +87,7 @@ test('every measure shard has its own artifacts, and the reconciler collects the
     ['visual-fidelity-renders-*', '${{ runner.temp }}/fidelity-parts', "inputs.publish_renders && inputs.corpus_origin == ''"],
     ['docx-benchmark-report-*', '${{ runner.temp }}/fidelity-parts', expect.any(String)],
     ['xlsx-benchmark-report-*', '${{ runner.temp }}/fidelity-parts', expect.any(String)],
+    ['pptx-benchmark-report-*', '${{ runner.temp }}/fidelity-parts', expect.any(String)],
     ['xlsx-fidelity-report-*', '${{ runner.temp }}/fidelity-parts', expect.any(String)],
     ['roundtrip-report-*', '${{ runner.temp }}/fidelity-parts', expect.any(String)],
   ]);
@@ -208,7 +209,7 @@ test('a custom corpus origin never publishes renders, and a dispatch asking for 
 const steps = Object.entries<any>(workflow.jobs).flatMap(([job, definition]) =>
   (definition.steps ?? []).map((step: any) => ({ job, step })));
 const CORPUS_FREE = new Set(['build-native.mjs', 'build-format.mjs', 'build-roundtrip.mjs', 'native-fonts.ts',
-  'install-libreoffice.sh', 'asset-cache.mjs', 'publish-renders.mjs', 'private-store.mjs']);
+  'install-libreoffice.sh', 'asset-cache.mjs', 'publish-renders.mjs', 'private-store.mjs', 'shards.mjs']);
 const BINARY_ARTIFACTS = /^(docx-native-\$\{\{ matrix\.channel \}\}|docx-native-fonts|xlsx-native-\$\{\{ matrix\.channel \}\}|pptx-native-\$\{\{ matrix\.channel \}\}|roundtrip-native-\$\{\{ matrix\.format \}\}-\$\{\{ matrix\.channel \}\})$/;
 const README = "${{ (!inputs.private_corpus && !inputs.report_only && inputs.corpus_origin == '' && inputs.samples == '' && inputs.collection == 'office-quality') || (inputs.private_corpus && inputs.publish_readme && !inputs.report_only) }}";
 const PRIVATE_OFF = /(^|&& |^\$\{\{ )!inputs\.private_corpus( &&|$| \}\}$)/;
@@ -470,11 +471,20 @@ test('the roundtrip matrices cover every file of a corpus-sized plan for all thr
   expect(CHANNELS).toEqual(['published', 'commit', 'libreoffice']);
 });
 
-test('planning prints every benchmark job shard count and longest planned shard against the timeout', () => {
+test('planning prints every benchmark job shard count and planned minutes against the timeout', () => {
   const plan = prepare.steps.find((step: any) => step.id === 'plan').run;
   expect(plan).toContain('benchmarkShardPlan(plan)');
   expect(plan).toContain('GITHUB_STEP_SUMMARY');
   expect(plan).toContain('pptx-shards=${JSON.stringify(pptxShards(plan).map((_, index) => index))}');
   for (const name of ['docx-benchmark', 'xlsx-benchmark', 'pptx-benchmark', 'xlsx-fidelity'])
     expect({ name, timeout: workflow.jobs[name]['timeout-minutes'] }).toEqual({ name, timeout: JOB_TIMEOUT_MINUTES });
+});
+
+test('every benchmark job prints its wall time next to its planned work, even when a step fails', () => {
+  for (const name of ['docx-benchmark', 'xlsx-benchmark', 'pptx-benchmark', 'xlsx-fidelity']) {
+    const steps = workflow.jobs[name].steps;
+    expect(steps[1]).toEqual({ name: 'Record the job start', run: 'echo "QUALITY_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"' });
+    expect(steps.at(-1)).toEqual({ name: 'Compare the wall time with the planned work', if: 'always()',
+      env: { QUALITY_PLAN: '${{ runner.temp }}/fidelity-plan/plan.json' }, run: `node scripts/office-quality/shards.mjs wall ${name} "\${{ matrix.shard }}"` });
+  }
 });

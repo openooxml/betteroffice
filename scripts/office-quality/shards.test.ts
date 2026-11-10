@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { expect, test } from 'bun:test';
-import { JOB_TIMEOUT_MINUTES, SHARD_BUDGET_SECONDS, benchmarkShardPlan, budgetShards, shardSeconds } from './shards.mjs';
+import { JOB_TIMEOUT_MINUTES, SHARD_BUDGET_SECONDS, benchmarkShardPlan, budgetShards, shardSeconds, wallTimeLine } from './shards.mjs';
 import { docxShards } from './docx-benchmark.mjs';
 import { pptxShards } from './pptx-benchmark.mjs';
 import { xlsxFidelityShards } from './xlsx-fidelity.mjs';
@@ -31,10 +31,7 @@ test('the public collection gets exactly the shards it got before budgets', () =
   expect(xlsxFidelityShards(plan)).toEqual(fixedShards(of('xlsx'), 4, pages));
   const calculated = of('xlsx').filter((entry: any) => entry.metadata.calculation);
   expect(xlsxShards(plan)).toEqual(fixedShards(calculated, 4, (entry) => entry.metadata.calculation.result_cells));
-  expect(pptxShards(plan)).toEqual([of('pptx').map((entry: any) => entry.id).sort((a: string, b: string) => {
-    const weight = (id: string) => pages(of('pptx').find((entry: any) => entry.id === id));
-    return weight(b) - weight(a) || a.localeCompare(b);
-  })]);
+  expect(pptxShards(plan)).toEqual([of('pptx').map((entry: any) => entry.id)]);
   expect([docxShards(plan).length, pptxShards(plan).length, xlsxFidelityShards(plan).length, xlsxShards(plan).length]).toEqual([4, 1, 4, 4]);
 });
 
@@ -55,7 +52,7 @@ test('a corpus-sized plan splits every benchmark job inside the budget and cover
   for (const shard of budgetShards('xlsx-benchmark', calculated)) expect(shard.seconds).toBeLessThanOrEqual(SHARD_BUDGET_SECONDS);
   const lines = benchmarkShardPlan({ samples });
   expect(lines).toHaveLength(4);
-  for (const line of lines) expect(line).toContain(`job timeout ${JOB_TIMEOUT_MINUTES} min`);
+  for (const line of lines) expect(line).toContain(`job timeout ${JOB_TIMEOUT_MINUTES})`);
   expect(lines.join('\n')).not.toMatch(/\b[dpx]\d+\b/);
   expect(SHARD_BUDGET_SECONDS).toBeLessThan(JOB_TIMEOUT_MINUTES * 60 * 0.75);
 });
@@ -74,4 +71,20 @@ test('the shard count grows until the heaviest shard fits, never beyond one docu
   expect(budgetShards('pptx-benchmark', samples, seconds * 2)).toHaveLength(3);
   expect(budgetShards('pptx-benchmark', samples, seconds)).toHaveLength(6);
   expect(budgetShards('pptx-benchmark', samples, seconds * 6)).toHaveLength(1);
+});
+
+test('twice the slides per deck gives about twice the PPTX shards, each kept in collection order', () => {
+  const decks = (slides: number) => ({ formats: ['pptx'], samples: Array.from({ length: 656 }, (_, index) => sample(`p${String(index).padStart(3, '0')}`, 'pptx', slides)) });
+  const single = pptxShards(decks(19));
+  const double = pptxShards(decks(38));
+  expect(double.length / single.length).toBeGreaterThan(1.6);
+  expect(double.length / single.length).toBeLessThan(2.4);
+  for (const shard of double) expect(shard).toEqual([...shard].sort());
+});
+
+test('the wall-time line names the shard, its planned minutes and the actual minutes, and no document', () => {
+  const plan = { samples: [sample('deck-a', 'pptx', 14), sample('deck-b', 'pptx', 26)] };
+  const line = wallTimeLine('pptx-benchmark', plan, 0, 1000, 1000 + 15 * 60);
+  expect(line).toBe('pptx-benchmark shard 0: planned 1.2 min of work, job wall time 15.0 min (job timeout 90 min)');
+  expect(() => wallTimeLine('pptx-benchmark', plan, 3, 0, 1)).toThrow('No pptx-benchmark shard 3');
 });

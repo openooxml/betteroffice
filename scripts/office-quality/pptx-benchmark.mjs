@@ -12,7 +12,9 @@ import { budgetShards } from './shards.mjs';
 export const METHOD = 'pptx-cli-slide1-v1';
 
 export function pptxShards(plan) {
-  return budgetShards('pptx-benchmark', plan.samples.filter(sample => sample.format === 'pptx')).map(shard => shard.samples);
+  const samples = plan.samples.filter(sample => sample.format === 'pptx');
+  const order = new Map(samples.map((sample, index) => [sample.id, index]));
+  return budgetShards('pptx-benchmark', samples).map(shard => [...shard.samples].sort((a, b) => order.get(a) - order.get(b)));
 }
 
 function mergePart(plan, part, planHash, expected) {

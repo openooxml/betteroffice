@@ -515,6 +515,9 @@ jobs:
             exit 1
           fi
 
+      - name: Record the job start
+        run: echo "QUALITY_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.prepare.outputs.source-sha }}
@@ -627,6 +630,12 @@ jobs:
           fi
           cd "$RUNNER_TEMP" && node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put --optional logs-docx-benchmark-${{ matrix.shard }} private-logs
 
+      - name: Compare the wall time with the planned work
+        if: always()
+        env:
+          QUALITY_PLAN: ${{ runner.temp }}/fidelity-plan/plan.json
+        run: node scripts/office-quality/shards.mjs wall docx-benchmark "${{ matrix.shard }}"
+
   xlsx-native-build:
     needs: prepare
     if: needs.prepare.outputs.xlsx-shards != '[]'
@@ -689,6 +698,9 @@ jobs:
             echo "::error::Runner image $ImageVersion differs from the planned $PLANNED_IMAGE; re-run the failed jobs, or the whole run once that image is no longer served"
             exit 1
           fi
+
+      - name: Record the job start
+        run: echo "QUALITY_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -773,6 +785,12 @@ jobs:
           fi
           cd "$RUNNER_TEMP" && node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put --optional logs-xlsx-benchmark-${{ matrix.shard }} private-logs
 
+      - name: Compare the wall time with the planned work
+        if: always()
+        env:
+          QUALITY_PLAN: ${{ runner.temp }}/fidelity-plan/plan.json
+        run: node scripts/office-quality/shards.mjs wall xlsx-benchmark "${{ matrix.shard }}"
+
   pptx-native-build:
     needs: prepare
     if: contains(fromJSON(needs.prepare.outputs.formats), 'pptx')
@@ -835,6 +853,9 @@ jobs:
             echo "::error::Runner image $ImageVersion differs from the planned $PLANNED_IMAGE; re-run the failed jobs, or the whole run once that image is no longer served"
             exit 1
           fi
+
+      - name: Record the job start
+        run: echo "QUALITY_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -927,6 +948,12 @@ jobs:
           fi
           cd "$RUNNER_TEMP" && node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put --optional logs-pptx-benchmark-${{ matrix.shard }} private-logs
 
+      - name: Compare the wall time with the planned work
+        if: always()
+        env:
+          QUALITY_PLAN: ${{ runner.temp }}/fidelity-plan/plan.json
+        run: node scripts/office-quality/shards.mjs wall pptx-benchmark "${{ matrix.shard }}"
+
   xlsx-fidelity:
     needs: prepare
     if: contains(fromJSON(needs.prepare.outputs.formats), 'xlsx')
@@ -948,6 +975,9 @@ jobs:
             echo "::error::Runner image $ImageVersion differs from the planned $PLANNED_IMAGE; re-run the failed jobs, or the whole run once that image is no longer served"
             exit 1
           fi
+
+      - name: Record the job start
+        run: echo "QUALITY_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -1028,6 +1058,12 @@ jobs:
             node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put --optional xlsx-fidelity-diagnostics-${{ matrix.shard }} report.json ./*/libreoffice ./*/lo-comparison/score.json
           fi
           cd "$RUNNER_TEMP" && node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put --optional logs-xlsx-fidelity-${{ matrix.shard }} private-logs
+
+      - name: Compare the wall time with the planned work
+        if: always()
+        env:
+          QUALITY_PLAN: ${{ runner.temp }}/fidelity-plan/plan.json
+        run: node scripts/office-quality/shards.mjs wall xlsx-fidelity "${{ matrix.shard }}"
 
   roundtrip-build:
     needs: prepare

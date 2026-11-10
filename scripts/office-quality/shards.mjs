@@ -1,11 +1,15 @@
+import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+
 export const JOB_TIMEOUT_MINUTES = 90;
 export const SHARD_BUDGET_SECONDS = 60 * 60;
 
 export const SHARD_COST = {
   'docx-benchmark': { sample: 10, page: 0.6 },
-  'pptx-benchmark': { sample: 12, page: 0.8 },
+  'pptx-benchmark': { sample: 6, page: 1.5 },
   'xlsx-fidelity': { sample: 1, page: 1.5 },
-  'xlsx-benchmark': { sample: 4, cell: 0.002 },
+  'xlsx-benchmark': { sample: 4, cell: 0.005 },
 };
 
 const BASE_SHARDS = { 'docx-benchmark': 4, 'pptx-benchmark': 1, 'xlsx-fidelity': 4, 'xlsx-benchmark': 4 };
@@ -60,11 +64,34 @@ const JOB_SAMPLES = {
   'xlsx-benchmark': (sample) => sample.format === 'xlsx' && sample.metadata.calculation?.status === 'ok',
 };
 
+export function jobShards(job, plan, budget = SHARD_BUDGET_SECONDS) {
+  const selected = JOB_SAMPLES[job];
+  if (!selected) throw new Error(`Unknown benchmark job ${job}`);
+  return budgetShards(job, plan.samples.filter(selected), budget);
+}
+
+const minutes = (seconds) => (seconds / 60).toFixed(1);
+
 export function benchmarkShardPlan(plan, budget = SHARD_BUDGET_SECONDS) {
-  return Object.entries(JOB_SAMPLES).flatMap(([job, selected]) => {
-    const shards = budgetShards(job, plan.samples.filter(selected), budget);
+  return Object.keys(JOB_SAMPLES).flatMap((job) => {
+    const shards = jobShards(job, plan, budget);
     if (!shards.length) return [];
-    const longest = Math.max(...shards.map((shard) => Math.round(shard.seconds)));
-    return [`${job}: ${shards.length} shard${shards.length === 1 ? '' : 's'}, longest planned at ${longest} s (budget ${budget} s, job timeout ${JOB_TIMEOUT_MINUTES} min)`];
+    return [`${job}: ${shards.length} shard${shards.length === 1 ? '' : 's'}, planned minutes per shard ${shards.map((shard) => minutes(shard.seconds)).join(', ')} (budget ${minutes(budget)}, job timeout ${JOB_TIMEOUT_MINUTES})`];
   });
+}
+
+export function wallTimeLine(job, plan, shard, startedSeconds, nowSeconds) {
+  const planned = jobShards(job, plan)[shard];
+  if (!planned) throw new Error(`No ${job} shard ${shard}`);
+  const actual = nowSeconds - startedSeconds;
+  return `${job} shard ${shard}: planned ${minutes(planned.seconds)} min of work, job wall time ${minutes(actual)} min (job timeout ${JOB_TIMEOUT_MINUTES} min)`;
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  const [command, job, shard] = process.argv.slice(2);
+  const { QUALITY_PLAN, QUALITY_JOB_STARTED } = process.env;
+  if (command !== 'wall' || !QUALITY_PLAN || !/^\d+$/.test(shard ?? '') || !/^\d+$/.test(QUALITY_JOB_STARTED ?? ''))
+    throw new Error('usage: QUALITY_PLAN=plan.json QUALITY_JOB_STARTED=<epoch s> shards.mjs wall <job> <shard>');
+  const plan = JSON.parse(await readFile(resolve(QUALITY_PLAN), 'utf8'));
+  console.log(wallTimeLine(job, plan, Number(shard), Number(QUALITY_JOB_STARTED), Math.floor(Date.now() / 1000)));
 }
