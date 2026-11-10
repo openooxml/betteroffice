@@ -241,30 +241,53 @@ impl PreservedPackage {
         &self.unpatchable_references
     }
 
-    /// A drawing of the source sheet `sheet` that a row or column `shift` would leave where a
-    /// save cannot place it, with the sheet's rows and columns where `axes` says they are now.
+    /// What a row or column `shift` on the source sheet `sheet` does to the pictures and shapes
+    /// of its drawings, with the sheet's rows and columns where `axes` says they are now: `Err`
+    /// names a drawing a save could not place, `Ok(true)` says something moves.
     #[doc(hidden)]
-    pub fn drawing_blocking_shift(
+    pub fn drawings_after_shift(
         &self,
         sheet: usize,
         axes: Option<&crate::SheetAxes>,
         shift: crate::GridShift,
-    ) -> Option<&str> {
+    ) -> Result<bool, &str> {
+        let mut moves = false;
+        for drawing in self.sheet_drawings().get(sheet).into_iter().flatten() {
+            match crate::drawing_anchors::verdict(drawing, axes, shift) {
+                crate::drawing_anchors::Verdict::Refused => return Err(drawing.part.as_str()),
+                crate::drawing_anchors::Verdict::Moves => moves = true,
+                crate::drawing_anchors::Verdict::Still => {}
+            }
+        }
+        Ok(moves)
+    }
+
+    /// The first drawing of the source sheet `sheet` that holds pictures or shapes.
+    #[doc(hidden)]
+    pub fn drawing_part(&self, sheet: usize) -> Option<&str> {
         self.sheet_drawings()
             .get(sheet)?
-            .iter()
-            .find(|drawing| crate::drawing_anchors::blocks(drawing, axes, shift))
+            .first()
             .map(|drawing| drawing.part.as_str())
     }
 
     pub(crate) fn sheet_drawings(&self) -> &[Vec<crate::drawing_anchors::SheetDrawing>] {
         self.drawing_anchors.get_or_init(|| {
-            self.sheets
+            let mut drawings = self
+                .sheets
                 .iter()
                 .map(|sheet| {
                     crate::drawing_anchors::sheet_drawing_anchors(&self.parts, &sheet.path)
                 })
-                .collect()
+                .collect::<Vec<_>>();
+            let mut owners: HashMap<String, usize> = HashMap::new();
+            for drawing in drawings.iter().flatten() {
+                *owners.entry(drawing.part.clone()).or_default() += 1;
+            }
+            for drawing in drawings.iter_mut().flatten() {
+                drawing.shared = owners.get(&drawing.part).is_some_and(|owners| *owners > 1);
+            }
+            drawings
         })
     }
 

@@ -20,6 +20,20 @@ pub(crate) struct SheetDrawing {
     /// The anchors no chart claims, in document order; `None` when the part holds markup this
     /// module cannot place, which then refuses every row or column edit on the sheet.
     pub(crate) anchors: Option<Vec<ChartAnchor>>,
+    /// Whether another source sheet relates to the same part, so moving it for one sheet would
+    /// move it on the other too.
+    pub(crate) shared: bool,
+}
+
+/// What a row or column edit does to a sheet's drawings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Verdict {
+    /// Nothing the drawings hold moves.
+    Still,
+    /// Some anchor moves, and a save can place it.
+    Moves,
+    /// A save could not place some anchor where the edit leaves it.
+    Refused,
 }
 
 /// A row or column insert or delete, in current coordinates.
@@ -42,6 +56,7 @@ pub(crate) fn sheet_drawing_anchors(
         return vec![SheetDrawing {
             part: crate::chart::relationship_part_path(sheet_path),
             anchors: None,
+            shared: false,
         }];
     };
     drawings
@@ -49,6 +64,7 @@ pub(crate) fn sheet_drawing_anchors(
         .map(|(part, bytes)| SheetDrawing {
             anchors: unclaimed_anchors(bytes).ok(),
             part,
+            shared: false,
         })
         .filter(|drawing| {
             drawing
@@ -142,14 +158,87 @@ fn translate(index: u32, from: u32, moved: u32, limit: u32) -> Option<u32> {
         .then_some(target as u32)
 }
 
-/// Whether `shift` would leave one of `drawing`'s anchors where a save cannot place it, on a sheet
-/// whose source rows and columns sit where `axes` says. Refused: a part that cannot be read; a
-/// sheet without axes; a cell anchor that does not move with cells, at or after the edit; an
-/// object wholly inside deleted rows or columns, or a one-cell anchor whose cell is deleted; and a
-/// corner the edit would push off the grid.
-pub(crate) fn blocks(drawing: &SheetDrawing, axes: Option<&SheetAxes>, shift: GridShift) -> bool {
-    let (Some(anchors), Some(axes)) = (&drawing.anchors, axes) else {
-        return true;
+/// The anchor's place after one grid edit, by the rules chart anchors follow one op at a time:
+/// an index at or after an insert moves along, an index inside a delete moves to its start, and
+/// one after it moves back. `None` when an insert would push a corner off the grid.
+fn shifted(anchor: &ChartAnchor, shift: GridShift) -> Option<ChartAnchor> {
+    let limit = if shift.rows { MAX_ROWS } else { MAX_COLS };
+    let index = |index: u32| {
+        if shift.inserting {
+            if index >= shift.at {
+                index
+                    .checked_add(shift.count)
+                    .filter(|moved| *moved < limit)
+            } else {
+                Some(index)
+            }
+        } else if index >= shift.at.saturating_add(shift.count) {
+            Some(index - shift.count)
+        } else {
+            Some(index.min(shift.at))
+        }
+    };
+    let cell = |cell: AnchorCell| {
+        let mut moved = cell;
+        if shift.rows {
+            moved.row = index(cell.row)?;
+        } else {
+            moved.col = index(cell.col)?;
+        }
+        Some(moved)
+    };
+    Some(match *anchor {
+        ChartAnchor::Absolute { .. }
+        | ChartAnchor::TwoCell {
+            edit_as: AnchorEditAs::Absolute,
+            ..
+        } => *anchor,
+        ChartAnchor::OneCell { from, extent } => ChartAnchor::OneCell {
+            from: cell(from)?,
+            extent,
+        },
+        ChartAnchor::TwoCell {
+            from,
+            to,
+            edit_as: AnchorEditAs::TwoCell,
+        } => ChartAnchor::TwoCell {
+            from: cell(from)?,
+            to: cell(to)?,
+            edit_as: AnchorEditAs::TwoCell,
+        },
+        ChartAnchor::TwoCell {
+            from,
+            to,
+            edit_as: AnchorEditAs::OneCell,
+        } => {
+            let moved = cell(from)?;
+            ChartAnchor::TwoCell {
+                from: moved,
+                to: AnchorCell {
+                    col: translate(to.col, from.col, moved.col, MAX_COLS)?,
+                    row: translate(to.row, from.row, moved.row, MAX_ROWS)?,
+                    ..to
+                },
+                edit_as: AnchorEditAs::OneCell,
+            }
+        }
+    })
+}
+
+/// What `shift` does to `drawing` on a sheet whose source rows and columns sit where `axes` says.
+/// Refused: a part that cannot be read, or that another sheet shares; a sheet without axes; a
+/// cell anchor that does not move with cells, at or after the edit; an object wholly inside
+/// deleted rows or columns, or a one-cell anchor whose cell is deleted; a corner pushed off the
+/// grid; and an edit after which the save, mapping source corners through the composed axes,
+/// would place an anchor anywhere but where the op-by-op rules put it. That last check keeps
+/// every accepted sequence of edits saving exactly as the op-by-op rules move it.
+pub(crate) fn verdict(
+    drawing: &SheetDrawing,
+    axes: Option<&SheetAxes>,
+    shift: GridShift,
+) -> Verdict {
+    let (Some(anchors), Some(axes), false) = (&drawing.anchors, axes, drawing.shared) else {
+        return Verdict::Refused;
     };
     let mut after = axes.clone();
     let map = if shift.rows {
@@ -162,12 +251,25 @@ pub(crate) fn blocks(drawing: &SheetDrawing, axes: Option<&SheetAxes>, shift: Gr
     } else {
         map.delete(shift.at, shift.count);
     }
-    anchors.iter().any(|anchor| {
+    let mut verdict = Verdict::Still;
+    for anchor in anchors {
         let Some(current) = followed(anchor, axes) else {
-            return true;
+            return Verdict::Refused;
         };
-        refused(&current, shift) || followed(anchor, &after).is_none()
-    })
+        if refused(&current, shift) {
+            return Verdict::Refused;
+        }
+        let Some(moved) = shifted(&current, shift) else {
+            return Verdict::Refused;
+        };
+        if followed(anchor, &after) != Some(moved) {
+            return Verdict::Refused;
+        }
+        if moved != current {
+            verdict = Verdict::Moves;
+        }
+    }
+    verdict
 }
 
 fn refused(current: &ChartAnchor, shift: GridShift) -> bool {
@@ -212,6 +314,7 @@ mod tests {
         SheetDrawing {
             part: "xl/drawings/drawing1.xml".into(),
             anchors: Some(anchors),
+            shared: false,
         }
     }
 
@@ -221,6 +324,14 @@ mod tests {
             at,
             count,
             inserting,
+        }
+    }
+
+    fn apply(axes: &mut SheetAxes, shift: GridShift) {
+        if shift.inserting {
+            axes.rows.insert(shift.at, shift.count);
+        } else {
+            axes.rows.delete(shift.at, shift.count);
         }
     }
 
@@ -251,37 +362,134 @@ mod tests {
     }
 
     #[test]
-    fn refusals_follow_the_current_position() {
+    fn an_anchor_that_does_not_move_with_cells_refuses_edits_at_or_before_its_end() {
         let mut axes = SheetAxes::default();
-        axes.rows.insert(0, 10);
+        axes.rows.insert(20, 5);
         let pinned = drawing(vec![two((1, 4), (3, 8), AnchorEditAs::Absolute)]);
-        assert!(blocks(&pinned, Some(&axes), rows(9, 1, true)));
-        assert!(blocks(&pinned, Some(&axes), rows(18, 1, true)));
-        assert!(!blocks(&pinned, Some(&axes), rows(19, 1, true)));
-        let moving = drawing(vec![two((1, 4), (3, 6), AnchorEditAs::TwoCell)]);
-        assert!(blocks(&moving, Some(&axes), rows(14, 3, false)));
-        assert!(!blocks(&moving, Some(&axes), rows(14, 2, false)));
-        assert!(!blocks(&moving, Some(&axes), rows(4, 3, false)));
-        assert!(blocks(&moving, None, rows(30, 1, true)));
-        let unreadable = SheetDrawing {
-            part: "xl/drawings/drawing1.xml".into(),
-            anchors: None,
-        };
-        assert!(blocks(&unreadable, Some(&axes), rows(30, 1, true)));
+        assert_eq!(
+            verdict(&pinned, Some(&axes), rows(3, 1, true)),
+            Verdict::Refused
+        );
+        assert_eq!(
+            verdict(&pinned, Some(&axes), rows(8, 1, false)),
+            Verdict::Refused
+        );
+        assert_eq!(
+            verdict(&pinned, Some(&axes), rows(9, 1, true)),
+            Verdict::Still
+        );
     }
 
     #[test]
-    fn an_insert_that_would_push_a_corner_off_the_grid_blocks() {
+    fn refusals_follow_the_current_position() {
+        let mut axes = SheetAxes::default();
+        axes.rows.insert(0, 10);
+        let moving = drawing(vec![two((1, 4), (3, 6), AnchorEditAs::TwoCell)]);
+        assert_eq!(
+            verdict(&moving, Some(&axes), rows(14, 3, false)),
+            Verdict::Refused
+        );
+        assert_eq!(
+            verdict(&moving, Some(&axes), rows(14, 2, false)),
+            Verdict::Moves
+        );
+        assert_eq!(
+            verdict(&moving, Some(&axes), rows(4, 3, false)),
+            Verdict::Moves
+        );
+        assert_eq!(
+            verdict(&moving, Some(&axes), rows(30, 1, true)),
+            Verdict::Still
+        );
+        assert_eq!(verdict(&moving, None, rows(30, 1, true)), Verdict::Refused);
+        let unreadable = SheetDrawing {
+            anchors: None,
+            ..drawing(Vec::new())
+        };
+        assert_eq!(
+            verdict(&unreadable, Some(&axes), rows(30, 1, true)),
+            Verdict::Refused
+        );
+        let shared = SheetDrawing {
+            shared: true,
+            ..moving
+        };
+        assert_eq!(
+            verdict(&shared, Some(&axes), rows(30, 1, true)),
+            Verdict::Refused
+        );
+    }
+
+    #[test]
+    fn an_insert_that_would_push_a_corner_off_the_grid_refuses() {
         let edge = drawing(vec![two(
             (1, MAX_ROWS - 3),
             (3, MAX_ROWS - 1),
             AnchorEditAs::TwoCell,
         )]);
-        assert!(blocks(&edge, Some(&SheetAxes::default()), rows(0, 1, true)));
-        assert!(!blocks(
-            &edge,
-            Some(&SheetAxes::default()),
-            rows(0, 1, false)
-        ));
+        let axes = SheetAxes::default();
+        assert_eq!(
+            verdict(&edge, Some(&axes), rows(0, 1, true)),
+            Verdict::Refused
+        );
+        assert_eq!(
+            verdict(&edge, Some(&axes), rows(0, 1, false)),
+            Verdict::Moves
+        );
+    }
+
+    /// A delete that takes rows an earlier insert placed after a corner it also deletes: op by op
+    /// the corner lands on the deletion point, while the composed axes would put it on the next
+    /// source row. The edit is refused rather than saved anywhere else.
+    #[test]
+    fn a_sequence_the_composed_axes_cannot_reproduce_refuses() {
+        let picture = drawing(vec![two((1, 4), (3, 8), AnchorEditAs::TwoCell)]);
+        let mut axes = SheetAxes::default();
+        let insert = rows(5, 3, true);
+        assert_eq!(verdict(&picture, Some(&axes), insert), Verdict::Moves);
+        apply(&mut axes, insert);
+        assert_eq!(
+            verdict(&picture, Some(&axes), rows(3, 3, false)),
+            Verdict::Refused
+        );
+    }
+
+    /// The other order is reproducible: a corner pulled to the deletion point and then pushed by
+    /// an insert at that point sits on the next source row both ways.
+    #[test]
+    fn every_accepted_sequence_saves_where_the_op_by_op_rules_put_it() {
+        let anchors = vec![
+            two((1, 4), (3, 8), AnchorEditAs::TwoCell),
+            two((5, 4), (7, 8), AnchorEditAs::OneCell),
+            ChartAnchor::OneCell {
+                from: cell(2, 12),
+                extent: Default::default(),
+            },
+        ];
+        let picture = drawing(anchors.clone());
+        let sequences = [
+            vec![rows(3, 3, false), rows(3, 2, true)],
+            vec![rows(0, 2, true), rows(5, 2, false), rows(4, 1, true)],
+            vec![rows(10, 4, true), rows(2, 1, false), rows(7, 2, false)],
+            vec![rows(6, 1, false), rows(6, 1, false), rows(6, 3, true)],
+        ];
+        for sequence in sequences {
+            let mut axes = SheetAxes::default();
+            let mut op_by_op = anchors.clone();
+            for shift in &sequence {
+                if verdict(&picture, Some(&axes), *shift) == Verdict::Refused {
+                    break;
+                }
+                apply(&mut axes, *shift);
+                for anchor in &mut op_by_op {
+                    *anchor = shifted(anchor, *shift).unwrap();
+                }
+                let composed = anchors
+                    .iter()
+                    .map(|anchor| followed(anchor, &axes).unwrap())
+                    .collect::<Vec<_>>();
+                assert_eq!(composed, op_by_op, "{sequence:?}");
+            }
+        }
     }
 }

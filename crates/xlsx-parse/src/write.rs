@@ -1018,24 +1018,24 @@ fn followed_drawings<'a>(
     origins: &[Option<usize>],
     sheet_axes: &'a [Option<SheetAxes>],
 ) -> Result<BTreeMap<&'a str, &'a SheetAxes>, ParseError> {
-    let mut followed: BTreeMap<&str, &SheetAxes> = BTreeMap::new();
-    for (origin, axes) in origins.iter().zip(sheet_axes) {
-        let (Some(origin), Some(axes)) = (origin, axes) else {
+    let mut owners: BTreeMap<&str, Option<&SheetAxes>> = BTreeMap::new();
+    for (index, origin) in origins.iter().enumerate() {
+        let Some(origin) = origin else {
             continue;
         };
-        if axes.is_identity() {
-            continue;
-        }
+        let axes = sheet_axes
+            .get(index)
+            .and_then(Option::as_ref)
+            .filter(|axes| !axes.is_identity());
         for drawing in package.sheet_drawings().get(*origin).into_iter().flatten() {
-            if drawing.anchors.is_none() {
+            if axes.is_some() && drawing.anchors.is_none() {
                 return Err(ParseError::UnsupportedEdit(format!(
                     "{} cannot follow the row and column edits on its sheet",
                     drawing.part
                 )));
             }
-            if followed
-                .insert(drawing.part.as_str(), axes)
-                .is_some_and(|other| other != axes)
+            if let Some(other) = owners.insert(drawing.part.as_str(), axes)
+                && other != axes
             {
                 return Err(ParseError::UnsupportedEdit(format!(
                     "{} is drawn on two sheets whose rows and columns moved differently",
@@ -1044,7 +1044,10 @@ fn followed_drawings<'a>(
             }
         }
     }
-    Ok(followed)
+    Ok(owners
+        .into_iter()
+        .filter_map(|(part, axes)| Some((part, axes?)))
+        .collect())
 }
 
 fn refreshed_chart_bytes(

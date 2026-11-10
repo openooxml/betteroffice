@@ -2540,6 +2540,7 @@ impl Workbook {
         let mut preview = self.model.clone();
         let mut origins = self.preserved.origins.clone();
         let mut axes = self.preserved.axes.clone();
+        let mut drawings_move = false;
         let mut names = self.sheet_names();
         let defined = DefinedFunctionNames::new(&preview.defined_names);
         let mut batch = xlsx_ops::InPlaceBatch::new(&mut preview);
@@ -2555,7 +2556,7 @@ impl Workbook {
                 self.ensure_worksheet_sheet_in(staged, &origins, sheet)?;
             }
             self.ensure_references_stay_valid(&names, op)?;
-            self.ensure_drawings_follow(&origins, &axes, op)?;
+            drawings_move |= self.ensure_drawings_follow(&origins, &axes, op)?;
             validate_op(staged, op)?;
             validate_insert_capacity(staged, op)?;
             batch.apply(op)?;
@@ -2615,7 +2616,7 @@ impl Workbook {
         let proposals_changed = self
             .rebased_proposals(&ops)
             .is_some_and(|proposals| proposals != self.proposals.list());
-        if preview == self.model && !proposals_changed {
+        if preview == self.model && !proposals_changed && !drawings_move {
             return Ok(MutationResult::default());
         }
         mark(EditStage::Validated);
@@ -3618,24 +3619,25 @@ impl Workbook {
 
     /// Refuses a row or column edit that would leave a picture or shape of the sheet's source
     /// drawing where a save cannot place it, with the sheet's rows and columns where `axes` puts
-    /// them at this op of the batch.
+    /// them at this op of the batch, and says whether one moves. A drawing two current sheets
+    /// share, through a copied sheet, cannot move for one of them alone.
     fn ensure_drawings_follow(
         &self,
         origins: &[Option<usize>],
         axes: &[Option<xlsx_parse::SheetAxes>],
         op: &Op,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let (sheet, rows, at, count, inserting) = match *op {
             Op::InsertRows { sheet, at, count } => (sheet, true, at, count, true),
             Op::DeleteRows { sheet, at, count } => (sheet, true, at, count, false),
             Op::InsertCols { sheet, at, count } => (sheet, false, at, count, true),
             Op::DeleteCols { sheet, at, count } => (sheet, false, at, count, false),
-            _ => return Ok(()),
+            _ => return Ok(false),
         };
         let (Some(Some(origin)), Some(slot)) =
             (origins.get(sheet.0 as usize), self.source_package.as_ref())
         else {
-            return Ok(());
+            return Ok(false);
         };
         let shift = xlsx_parse::GridShift {
             rows,
@@ -3643,15 +3645,22 @@ impl Workbook {
             count,
             inserting,
         };
+        let package = slot.materialize()?;
         let sheet_axes = axes.get(sheet.0 as usize).and_then(Option::as_ref);
-        match slot
-            .materialize()?
-            .drawing_blocking_shift(*origin, sheet_axes, shift)
-        {
-            Some(part) => Err(Error::InvalidOperation(format!(
+        let copied = origins
+            .iter()
+            .filter(|other| **other == Some(*origin))
+            .count()
+            > 1;
+        let refused = |part: &str| {
+            Error::InvalidOperation(format!(
                 "{part} references cells this edit would move, and it cannot be rewritten"
-            ))),
-            None => Ok(()),
+            ))
+        };
+        match package.drawings_after_shift(*origin, sheet_axes, shift) {
+            Err(part) => Err(refused(part)),
+            Ok(true) if copied => Err(refused(package.drawing_part(*origin).unwrap_or_default())),
+            Ok(moves) => Ok(moves),
         }
     }
 

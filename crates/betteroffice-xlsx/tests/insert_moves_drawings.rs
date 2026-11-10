@@ -331,3 +331,107 @@ fn successive_edits_compose() {
         source_drawing(&two_cell(None, (2, 6), (4, 10), 2))
     );
 }
+
+/// `package(anchors)` with a second sheet relating to the same drawing part.
+fn shared_package(anchors: &str) -> Vec<u8> {
+    let mut parts = ooxml_opc::unzip_parts(&package(anchors)).unwrap();
+    for (name, bytes) in &mut parts {
+        let text = String::from_utf8(std::mem::take(bytes)).unwrap_or_default();
+        *bytes = match name.as_str() {
+            "xl/workbook.xml" => text.replace(
+                "</sheets>",
+                r#"<sheet name="Copy" sheetId="2" r:id="rId2"/></sheets>"#,
+            ),
+            "xl/_rels/workbook.xml.rels" => text.replace(
+                "</Relationships>",
+                &format!(
+                    r#"<Relationship Id="rId2" Type="{DOC_RELS}/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#
+                ),
+            ),
+            "[Content_Types].xml" => text.replace(
+                "</Types>",
+                r#"<Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#,
+            ),
+            _ => text,
+        }
+        .into_bytes();
+        if name == "xl/media/image1.png" {
+            *bytes = vec![0x89, b'P', b'N', b'G', 0, 1, 2, 3];
+        }
+    }
+    let sheet = parts
+        .iter()
+        .find(|(name, _)| name == "xl/worksheets/sheet1.xml")
+        .unwrap()
+        .1
+        .clone();
+    let rels = parts
+        .iter()
+        .find(|(name, _)| name == "xl/worksheets/_rels/sheet1.xml.rels")
+        .unwrap()
+        .1
+        .clone();
+    parts.push(("xl/worksheets/sheet2.xml".to_owned(), sheet));
+    parts.push(("xl/worksheets/_rels/sheet2.xml.rels".to_owned(), rels));
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn a_drawing_two_sheets_share_refuses_an_edit_on_either() {
+    let anchors = two_cell(None, (1, 4), (3, 8), 2);
+    let source = shared_package(&anchors);
+    for sheet in [0, 1] {
+        let mut workbook = Workbook::open(&source).unwrap();
+        let error = workbook
+            .apply_ops(
+                vec![Op::InsertRows {
+                    sheet: SheetId(sheet),
+                    at: 2,
+                    count: 1,
+                }],
+                options(),
+            )
+            .unwrap_err();
+        assert_eq!(error.to_string(), REFUSAL, "sheet {sheet}");
+        assert_eq!(drawing_xml(&workbook.save().unwrap()), drawing_xml(&source));
+    }
+}
+
+/// Op by op the corner lands on the deletion point; a save mapping source rows through the
+/// composed edits would put it on the next source row instead, so the delete is refused.
+#[test]
+fn a_delete_after_an_insert_that_the_save_could_not_reproduce_refuses() {
+    let anchors = two_cell(None, (1, 4), (3, 8), 2);
+    let mut workbook = Workbook::open(&package(&anchors)).unwrap();
+    workbook
+        .apply_ops(vec![insert_rows(5, 3)], options())
+        .unwrap();
+    let error = workbook
+        .apply_ops(vec![delete_rows(3, 3)], options())
+        .unwrap_err();
+    assert_eq!(error.to_string(), REFUSAL);
+    assert_eq!(
+        drawing_xml(&workbook.save().unwrap()),
+        source_drawing(&two_cell(None, (1, 4), (3, 11), 2))
+    );
+}
+
+#[test]
+fn an_insert_that_only_moves_a_picture_is_kept_and_undone() {
+    let anchors = two_cell(None, (4, 1), (6, 3), 2);
+    let mut workbook = Workbook::open(&package(&anchors)).unwrap();
+    let before = workbook.model().clone();
+    workbook
+        .apply_ops(vec![insert_cols(3, 2)], options())
+        .unwrap();
+    assert_eq!(workbook.model(), &before);
+    assert_eq!(
+        drawing_xml(&workbook.save().unwrap()),
+        source_drawing(&two_cell(None, (6, 1), (8, 3), 2))
+    );
+    workbook.undo(options()).unwrap();
+    assert_eq!(
+        drawing_xml(&workbook.save().unwrap()),
+        source_drawing(&anchors)
+    );
+}
