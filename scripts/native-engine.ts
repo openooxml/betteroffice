@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 const root = fileURLToPath(new URL('..', import.meta.url));
 
 type NativeEngine = { engine: string; native: string };
-type NativeAsset = { asset: string; native: string };
+type NativeAsset = { asset: string; native: string; preload?: boolean };
 
 /** The engine modules each wasm package links, and their native replacements. */
 export const NATIVE_ENGINES = {
@@ -31,11 +31,11 @@ export const NATIVE_ENGINES = {
 /** The wasm asset modules each -native package build replaces. */
 export const NATIVE_ASSETS = {
   xlsx: [
-    { asset: 'packages/xlsx/src/wasm/asset.ts', native: 'bindings/xlsx-native/js/asset.ts' },
+    { asset: 'packages/xlsx/src/wasm/asset.ts', native: 'bindings/xlsx-native/js/asset.ts', preload: false },
     { asset: 'packages/xlsx/src/wasm/assetPreflight.ts', native: 'bindings/xlsx-native/js/assetPreflight.ts' },
   ],
   pptx: [
-    { asset: 'packages/pptx/src/wasm/asset.ts', native: 'bindings/pptx-native/js/asset.ts' },
+    { asset: 'packages/pptx/src/wasm/asset.ts', native: 'bindings/pptx-native/js/asset.ts', preload: false },
     { asset: 'packages/pptx/src/wasm/assetPreflight.ts', native: 'bindings/pptx-native/js/assetPreflight.ts' },
   ],
   docx: [
@@ -91,7 +91,8 @@ const aliases = new Map(
     .map(({ engine, native }) => [resolve(root, engine), resolve(root, native)])
 );
 const preloadAssets = new Map(
-  Object.values(NATIVE_ASSETS).flatMap((value) => Array.isArray(value) ? modules<NativeAsset>(value) : [])
+  Object.values(NATIVE_ASSETS).flatMap((value) => modules<NativeAsset>(value))
+    .filter(({ preload }) => preload !== false)
     .map(({ asset, native }) => [resolve(root, asset), resolve(root, native)])
 );
 
