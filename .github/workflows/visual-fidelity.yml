@@ -196,6 +196,13 @@ jobs:
           const shardPlan = benchmarkShardPlan(plan).join('\n');
           console.log(shardPlan);
           await appendFile(process.env.GITHUB_STEP_SUMMARY, `### Benchmark shards\n\n${shardPlan.replace(/^/gm, '- ')}\n`);
+          const fontSources = [
+            ...Object.entries(plan.published_fonts ?? {}).map(([format, version]) =>
+              `${format.toUpperCase()} published channel: @betteroffice/fonts@${version}, ${plan.fonts_basis?.[format] === 'release-commit' ? 'the fonts release from the same release commit as' : 'the latest fonts release published before'} @betteroffice/${format}@${plan.versions[format]}`),
+            'commit channel: the font packages of this checkout',
+          ];
+          console.log(fontSources.join('\n'));
+          await appendFile(process.env.GITHUB_STEP_SUMMARY, `### Font sources\n\n${fontSources.map((line) => `- ${line}`).join('\n')}\n`);
           const parallel = parallelPlan(plan, { privateRun: process.env.QUALITY_PRIVATE === 'true', total: Number(process.env.MAX_PARALLEL) });
           await appendFile(process.env.GITHUB_OUTPUT, `parallel=${JSON.stringify(parallel)}\n`);
           if (process.env.QUALITY_PRIVATE === 'true') {

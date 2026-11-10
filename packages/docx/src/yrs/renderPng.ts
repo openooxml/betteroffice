@@ -54,6 +54,7 @@ export function createPngExporter(session: YrsSession) {
       const host = copy.openDocx(bytes, false, { mediaTokens: true });
       copy.bootstrapPeer(state, metadata, bytes, host, { mediaTokens: true });
       if (media) copy.loadMediaSources(media);
+      copy.rebuildMediaSources();
       const document = copy.materializeDocx();
       if (!document) throw new Error('renderPng needs a session opened from DOCX bytes');
       const bundled = fontProvider ?? (engineKind === 'native' ? await resolveCompleteFontProvider() : undefined);
