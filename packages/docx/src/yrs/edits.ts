@@ -87,8 +87,9 @@ export interface DocxEditSuggestion {
 
 /**
  * Character formatting for one inserted run, written over the formatting plain text gets at the
- * same place; an absent key keeps that formatting. `false`, `'none'`, `'noStrike'` and `'baseline'`
- * turn the mark off, also where a paragraph or character style turns it on. An unknown key or
+ * same place; an absent key keeps that formatting. `false`, underline `'none'` and `'noStrike'`
+ * turn the mark off, also where a paragraph or character style turns it on. Removing a
+ * superscript, subscript or highlight while inserting is not available yet. An unknown key or
  * unsupported value refuses the step.
  */
 export interface DocxTextMarks {
@@ -98,10 +99,10 @@ export interface DocxTextMarks {
   underline?: boolean | string;
   /** `true` is `sngStrike`. */
   strike?: boolean | 'sngStrike' | 'dblStrike' | 'noStrike';
-  verticalAlign?: 'superscript' | 'subscript' | 'baseline';
+  verticalAlign?: 'superscript' | 'subscript';
   /** Six hex digits (`RRGGBB`) or a theme colour such as `accent1`. */
   color?: string | { themeColor: string };
-  /** One of Word's 16 highlight colour names, or `none`. */
+  /** One of Word's 16 highlight colour names, such as `yellow` or `darkBlue`. */
   highlight?: string;
   /** 1 to 1638, in half-point steps. */
   fontSizePt?: number;

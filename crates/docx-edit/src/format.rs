@@ -627,9 +627,17 @@ pub(crate) fn text_marks_overlay(
             }
             "verticalAlign" => {
                 vertical = match value.as_str() {
-                    Some(align @ ("superscript" | "subscript" | "baseline")) => Some(align),
+                    Some(align @ ("superscript" | "subscript")) => Some(align),
+                    Some("baseline") => {
+                        return Err(
+                            "mark \"verticalAlign\" \"baseline\" is not supported yet".to_owned()
+                        );
+                    }
                     _ => {
-                        return Err("mark \"verticalAlign\" must be \"superscript\", \"subscript\" or \"baseline\"".to_owned());
+                        return Err(
+                            "mark \"verticalAlign\" must be \"superscript\" or \"subscript\""
+                                .to_owned(),
+                        );
                     }
                 }
             }
@@ -655,7 +663,9 @@ pub(crate) fn text_marks_overlay(
             }
             "highlight" => {
                 delta.highlight = match value.as_str() {
-                    Some("none") => Patch::Clear,
+                    Some("none") => {
+                        return Err("mark \"highlight\" \"none\" is not supported yet".to_owned());
+                    }
                     Some(name) if HIGHLIGHT_NAMES.contains(&name) => Patch::Set(name.to_owned()),
                     _ => {
                         return Err(

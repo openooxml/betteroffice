@@ -349,6 +349,12 @@ fn refused_runs_and_marks_leave_the_document_untouched() {
         marked(json!({"underline": "zigzag"})),
         marked(json!({"strike": "double"})),
         marked(json!({"verticalAlign": "up"})),
+        marked(json!({"verticalAlign": "baseline"})),
+        marked(json!({"highlight": "none"})),
+        json!({"op": "insertText", "target": paragraph("00000005"), "at": "end",
+            "runs": [{"text": "a", "marks": {"verticalAlign": "baseline"}}]}),
+        json!({"op": "insertText", "target": paragraph("00000006"), "at": "end",
+            "runs": [{"text": "a", "marks": {"highlight": "none"}}]}),
         marked(json!({"fontSizePt": 0.5})),
         marked(json!({"fontSizePt": 10.25})),
         marked(json!({"fontFamily": ""})),
@@ -515,55 +521,6 @@ fn false_turns_a_mark_off_whether_it_is_direct_or_from_a_style() {
         assert!(active(&marks(&doc, " kept"), "bold"), "{id}");
         assert!(!active(&marks(&doc, " off"), "bold"), "{id}");
     }
-}
-
-#[test]
-fn a_new_paragraph_refuses_to_reset_what_its_style_supplies() {
-    let paragraphs = |style: &str, marks: Value| {
-        json!({"op": "insertParagraphs", "target": paragraph("00000001"), "at": "end",
-            "paragraphs": [{"styleId": style, "runs": [{"text": "a", "marks": marks}]}]})
-    };
-    for (style, marks, mark) in [
-        (
-            "Raised",
-            json!({"verticalAlign": "baseline"}),
-            "verticalAlign",
-        ),
-        ("Marked", json!({"highlight": "none"}), "highlight"),
-    ] {
-        let doc = open();
-        let before = doc.encode_state_as_update_v1();
-        let refusal = refuse(&doc, json!([paragraphs(style, marks.clone())]));
-        assert_eq!(
-            refusal.failure.code,
-            EditFailureCode::Unsupported,
-            "{style}"
-        );
-        assert_eq!(refusal.failure.step_index, Some(0), "{style}");
-        assert!(
-            refusal.failure.message.contains(mark),
-            "{}",
-            refusal.failure.message
-        );
-        assert_eq!(doc.encode_state_as_update_v1(), before, "{style}");
-    }
-    let doc = open();
-    apply(
-        &doc,
-        &UndoSession::new(),
-        json!([
-            paragraphs("Raised", json!({"verticalAlign": "subscript"})),
-            {"op": "insertText", "target": paragraph("00000005"), "at": "end",
-                "runs": [{"text": " flat", "marks": {"verticalAlign": "baseline"}}]},
-            {"op": "insertText", "target": paragraph("00000006"), "at": "end",
-                "runs": [{"text": " clear", "marks": {"highlight": "none"}}]}
-        ]),
-    );
-    assert!(active(&marks(&doc, "Up"), "superscript"));
-    let flat = marks(&doc, " flat");
-    assert!(!active(&flat, "superscript") && !active(&flat, "subscript"));
-    assert!(active(&marks(&doc, "Lit"), "highlight"));
-    assert!(!active(&marks(&doc, " clear"), "highlight"));
 }
 
 #[test]

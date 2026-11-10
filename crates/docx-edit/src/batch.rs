@@ -10,7 +10,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use serde::de::Error as _;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use yrs::updates::decoder::Decode;
 use yrs::{ReadTxn, StateVector, Text, Transact, TransactionMut, Update};
@@ -179,8 +179,8 @@ pub struct TextRun {
 
 /// One new paragraph; without `style_id` it takes the anchor paragraph's style. It carries
 /// exactly one of `text` and `runs`.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(remote = "Self", rename_all = "camelCase", deny_unknown_fields)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ParagraphInput {
     #[serde(default)]
     pub text: String,
@@ -190,14 +190,8 @@ pub struct ParagraphInput {
     pub style_id: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(
-    remote = "Self",
-    tag = "op",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase",
-    deny_unknown_fields
-)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "op", rename_all = "camelCase", rename_all_fields = "camelCase")]
 #[non_exhaustive]
 pub enum EditOperation {
     /// Carries exactly one of `text` and `runs`.
@@ -303,13 +297,7 @@ impl<'de> Deserialize<'de> for ParagraphInput {
         if let Some(object) = value.as_object() {
             text_xor_runs(object, "a paragraph").map_err(D::Error::custom)?;
         }
-        Self::deserialize(value).map_err(D::Error::custom)
-    }
-}
-
-impl Serialize for ParagraphInput {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        Self::serialize(self, serializer)
+        wire::ParagraphInputDef::deserialize(value).map_err(D::Error::custom)
     }
 }
 
@@ -324,13 +312,88 @@ impl<'de> Deserialize<'de> for EditOperation {
         {
             text_xor_runs(object, "a text step").map_err(D::Error::custom)?;
         }
-        Self::deserialize(value).map_err(D::Error::custom)
+        wire::EditOperationDef::deserialize(value).map_err(D::Error::custom)
     }
 }
 
-impl Serialize for EditOperation {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        Self::serialize(self, serializer)
+/// The derived wire formats, private so that only the checked [`Deserialize`] impls reach them.
+mod wire {
+    use serde::Deserialize;
+    use serde_json::Value;
+
+    use super::{
+        ContentControlSelector, EditOperation, ParagraphInput, ParagraphTarget, TargetEdge,
+        TextRun, TextTarget,
+    };
+
+    #[derive(Deserialize)]
+    #[serde(
+        remote = "ParagraphInput",
+        rename_all = "camelCase",
+        deny_unknown_fields
+    )]
+    pub(super) struct ParagraphInputDef {
+        #[serde(default)]
+        text: String,
+        #[serde(default)]
+        runs: Option<Vec<TextRun>>,
+        #[serde(default)]
+        style_id: Option<String>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(
+        remote = "EditOperation",
+        tag = "op",
+        rename_all = "camelCase",
+        rename_all_fields = "camelCase",
+        deny_unknown_fields
+    )]
+    pub(super) enum EditOperationDef {
+        InsertText {
+            target: TextTarget,
+            at: TargetEdge,
+            #[serde(default)]
+            text: String,
+            #[serde(default)]
+            runs: Option<Vec<TextRun>>,
+        },
+        ReplaceText {
+            target: TextTarget,
+            #[serde(default)]
+            text: String,
+            #[serde(default)]
+            runs: Option<Vec<TextRun>>,
+        },
+        DeleteText {
+            target: TextTarget,
+        },
+        InsertParagraphs {
+            target: ParagraphTarget,
+            at: TargetEdge,
+            paragraphs: Vec<ParagraphInput>,
+        },
+        DeleteParagraphs {
+            story: String,
+            first_para_id: String,
+            last_para_id: String,
+        },
+        SetParagraphStyle {
+            target: ParagraphTarget,
+            style_id: String,
+        },
+        InsertSectionBreakAfter {
+            target: ParagraphTarget,
+            kind: String,
+        },
+        SetSectionProperties {
+            section: String,
+            properties: Value,
+        },
+        SetContentControlText {
+            target: ContentControlSelector,
+            text: String,
+        },
     }
 }
 
@@ -1488,37 +1551,6 @@ fn plan_insert_paragraphs<T: ReadTxn>(
             return Err(unsupported(
                 format!(
                     "{named} defines list numbering, which v1 batches do not apply; {NUMBERING_FOLLOW_UP}"
-                ),
-                &requested,
-            ));
-        }
-        let supplied = |keys: &[&str]| {
-            styled
-                .run
-                .iter()
-                .any(|(key, value)| keys.contains(&key.as_str()) && *value != yrs::Any::Null)
-        };
-        if let Some(mark) = runs.iter().find_map(|run| {
-            let resets = |keys: &[&str]| {
-                run.overlay
-                    .iter()
-                    .any(|(key, _)| keys.contains(&key.as_str()))
-                    && run.overlay.iter().all(|(key, value)| {
-                        !keys.contains(&key.as_str()) || *value == yrs::Any::Null
-                    })
-            };
-            let vertical = ["superscript", "subscript"];
-            if resets(&vertical) && supplied(&vertical) {
-                Some("verticalAlign")
-            } else if resets(&["highlight"]) && supplied(&["highlight"]) {
-                Some("highlight")
-            } else {
-                None
-            }
-        }) {
-            return Err(unsupported(
-                format!(
-                    "the paragraph style supplies {mark}; resetting it in a new paragraph is not saved yet"
                 ),
                 &requested,
             ));
