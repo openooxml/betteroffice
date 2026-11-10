@@ -619,6 +619,17 @@ impl Session {
         target_json: &str,
         options_json: &str,
     ) -> Result<Vec<u8>, String> {
+        self.render_png_target_with_faces(target_json, options_json, None)
+    }
+
+    /// [`Self::render_png_target`]. `Some` paints with those faces alone, for this export only.
+    #[cfg(feature = "raster")]
+    pub fn render_png_target_with_faces(
+        &self,
+        target_json: &str,
+        options_json: &str,
+        faces: Option<&[betteroffice_xlsx::PngFontFace<'_>]>,
+    ) -> Result<Vec<u8>, String> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct ViewportTarget {
@@ -681,7 +692,7 @@ impl Session {
         {
             return self
                 .workbook
-                .render_sheet(sheet(*index)?, &options)
+                .render_sheet_with_faces(sheet(*index)?, &options, faces)
                 .map(|rendered| rendered.bytes)
                 .map_err(|error| error.to_string());
         }
@@ -701,7 +712,7 @@ impl Session {
             },
         };
         self.workbook
-            .render_png(target, &options)
+            .render_png_with_faces(target, &options, faces)
             .map(|rendered| rendered.bytes)
             .map_err(|error| error.to_string())
     }

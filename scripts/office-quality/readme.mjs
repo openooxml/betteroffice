@@ -104,12 +104,23 @@ function recalcNote(calculation, benchmark, version, short) {
     missing ? ` ${count(missing)} further ${missing === 1 ? 'workbook has' : 'workbooks have'} no Excel calculation reference and ${missing === 1 ? 'is' : 'are'} not counted.` : ''}`;
 }
 
-function timingNote(sequential) {
+function timingNote(sequential, versions, short) {
   const formats = FORMATS.filter((format) => sequential[format]);
   if (!formats.length) return '';
   const { sample_size: size, rounds } = sequential[formats[0]];
-  const timed = formats.map((format) => `${format.toUpperCase()} ${sequential[format].summary.common}`).join(', ');
-  return `Times: mean per document over a seeded sample of up to ${size} documents per format (timed by every engine: ${timed}), run one after another on one machine per format with the engine order rotated per document, ${rounds} rounds, each after a warm-up. Every run is a fresh process, so process start is included. DOCX and PPTX time a first-page render, XLSX a full recalculation and save.`;
+  const timed = formats.map((format) => {
+    const { summary } = sequential[format];
+    const engines = [
+      `BetterOffice ${versions[format]} ${summary.channels.published.successful}`,
+      `BetterOffice at ${short} ${summary.channels.commit.successful}`,
+      `LibreOffice ${summary.channels.libreoffice.successful}`,
+    ].join(', ');
+    const unsettled = summary.notes_not_converged
+      ? `, ${summary.notes_not_converged} of them with notes whose layout did not converge, timed as the product renders them`
+      : '';
+    return `${format.toUpperCase()} ${summary.common} of ${summary.total} sampled (timed per engine: ${engines}${unsettled})`;
+  }).join('; ');
+  return `Times: mean per document over a seeded sample of up to ${size} documents per format. A document counts only when every engine timed it in every round: ${timed}. They run one after another on one machine per format with the engine order rotated per document, ${rounds} rounds, each after a warm-up. Every run is a fresh process, so process start is included. DOCX and PPTX time a first-page render, XLSX a full recalculation and save.`;
 }
 
 function picture(url, alt) {
@@ -254,7 +265,7 @@ export function renderSection(report, { privateCorpus = false } = {}) {
   const notes = {
     corpus: corpusNote(report.corpus),
     recalc: calculation ? recalcNote(calculation, report.xlsx_benchmark, versionOf('xlsx'), short) : '',
-    timing: privateCorpus ? timingNote(sequential) : '',
+    timing: privateCorpus ? timingNote(sequential, report.versions, short) : '',
   };
   const note = (text) => (text ? `\n\n${text}` : '');
   return `${BEGIN}
@@ -340,6 +351,7 @@ export function aggregateReport(report) {
       const { summary } = sequential;
       entry.timing = {
         method: sequential.method, sample: summary.total, timed_by_every_engine: summary.common, rounds: sequential.rounds,
+        notes_not_converged: summary.notes_not_converged ?? 0,
         processors: sequential.runner.processors,
         channels: Object.fromEntries(Object.entries(summary.channels).map(([channel, value]) => [channel, {
           successful: value.successful, mean_ms: meanMs(value.mean_ms), median_ms: meanMs(value.median_ms),
