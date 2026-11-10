@@ -130,21 +130,19 @@ fn migrating_and_attaching_reads_each_story_once_and_builds_snapshots_once() {
             work.live_snapshots,
         )
     };
-    for (stories, work) in &runs {
-        assert!(*stories >= STORY_COUNTS[0], "{runs:?}");
-        assert!(work.story_reads >= *stories, "{runs:?}");
-        assert!(work.story_reads <= *stories * 2 + 16, "{runs:?}");
-        assert!(work.replayed_reads <= *stories * 2 + 16, "{runs:?}");
-        assert_eq!(once(work), once(&runs[0].1), "{runs:?}");
-    }
-    for step in runs.windows(2) {
-        let ((_, small_work), (_, large_work)) = (&step[0], &step[1]);
-        assert!(
-            large_work.story_reads <= small_work.story_reads * 4 + 16,
+    let base = |copies: usize, reads: usize| reads.checked_sub(copies);
+    let (_, first) = &runs[0];
+    for (copies, (_, work)) in STORY_COUNTS.into_iter().zip(&runs) {
+        assert_eq!(once(work), once(first), "{runs:?}");
+        assert!(base(copies, work.story_reads).is_some(), "{runs:?}");
+        assert_eq!(
+            base(copies, work.story_reads),
+            base(STORY_COUNTS[0], first.story_reads),
             "{runs:?}"
         );
-        assert!(
-            large_work.replayed_reads <= small_work.replayed_reads * 4 + 16,
+        assert_eq!(
+            base(copies, work.replayed_reads),
+            base(STORY_COUNTS[0], first.replayed_reads),
             "{runs:?}"
         );
     }
