@@ -891,6 +891,35 @@ describe('PptxEditor plugins', () => {
     expect(thumbnails[1].getAttribute('aria-current')).toBe('page');
   });
 
+  test('host selectText accepts backward ranges and preserves their direction', async () => {
+    const { plugin, contexts, log } = recorder();
+    const { api } = await mount({ plugins: [plugin] });
+    await until(() => log.includes('load:loaded'));
+    const content = await read(api());
+    const slide = content.slides[0];
+    const story = content.stories.find(
+      (candidate) => candidate.slideId === slide.id && candidate.text.length >= 4
+    )!;
+    expect(story.text.length).toBeGreaterThanOrEqual(4);
+
+    await act(async () => {
+      const accepted = api().selectText({
+        slide: 1,
+        shapeId: story.shapeId,
+        storyId: story.storyId,
+        start: 4,
+        end: 1,
+      });
+      expect(accepted).toBe(true);
+    });
+    await until(() => last(contexts).snapshot.selection?.target.kind === 'text');
+    expect(last(contexts).snapshot.selection).toEqual({
+      slideId: slide.id,
+      slide: 1,
+      target: { kind: 'text', shapeId: story.shapeId, storyId: story.storyId, anchor: 4, focus: 1 },
+    });
+  });
+
   test('a load hook that applies a batch every run loads once, then sees its change', async () => {
     const outcomes: (PptxEditResult | PptxPluginRefusal)[] = [];
     const seen: string[] = [];

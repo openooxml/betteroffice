@@ -807,7 +807,7 @@ export function PptxEditorContent({
         !Number.isInteger(target.start) ||
         !Number.isInteger(target.end) ||
         target.start < 0 ||
-        target.end < target.start
+        target.end < 0
       ) {
         return false;
       }
@@ -816,7 +816,7 @@ export function PptxEditorContent({
       if (!shape?.textStories.some((story) => story.id === target.storyId)) return false;
       try {
         const story = handle.story(target.storyId);
-        if (target.end > story.length) return false;
+        if (target.start > story.length || target.end > story.length) return false;
         if (!showSlide(target.slide - 1, false)) return false;
         setSelection({
           shapeId: target.shapeId,

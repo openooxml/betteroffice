@@ -1,12 +1,72 @@
 import { expect, mock, spyOn, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import { act, render, waitFor } from '@testing-library/react';
 import type { AsyncCollaborationReplica } from '@betteroffice/pptx';
-import { open } from './worker/peerlessTestHarness';
+import { open, story } from './worker/peerlessTestHarness';
 import { peerlessSessionOpener } from './worker/usePeerlessPresentation';
 import { PptxEditor } from './PptxEditor';
 import * as publicApi from './index';
 import type { PptxAsyncEditorApi } from './worker/createPeerlessEditorApi';
+import type { PptxPluginContext } from './plugins/types';
+
+test('selectText results and selection direction match between in-thread and peerless editors', async () => {
+  let context: PptxPluginContext<null> | undefined;
+  const plugin = publicApi.definePptxPlugin({
+    id: 'select-text-parity',
+    createState: () => null,
+    initialize(next) { context = next; },
+    onEvent(next) { context = next; },
+  });
+  const direction = () => {
+    const target = context?.snapshot.selection?.target;
+    return target?.kind === 'text' ? { anchor: target.anchor, focus: target.focus } : null;
+  };
+  const worker = await open({ plugins: [plugin] });
+  const target = await story(worker.api);
+  expect(target.text.length).toBeGreaterThanOrEqual(4);
+  const outside = target.text.length + 1;
+  const collapsed = { anchor: 2, focus: 2 };
+  const cases = [
+    { start: 1, end: 4, accepted: true, selection: { anchor: 1, focus: 4 } },
+    { start: 4, end: 1, accepted: true, selection: { anchor: 4, focus: 1 } },
+    { start: 2, end: 2, accepted: true, selection: collapsed },
+    { start: -1, end: 1, accepted: false, selection: collapsed },
+    { start: 1, end: -1, accepted: false, selection: collapsed },
+    { start: outside, end: 1, accepted: false, selection: collapsed },
+    { start: 1, end: outside, accepted: false, selection: collapsed },
+    { start: 1.5, end: 4, accepted: false, selection: collapsed },
+    { start: 1, end: 4.5, accepted: false, selection: collapsed },
+  ];
+  const exercise = async (api: PptxAsyncEditorApi) => {
+    const current = await story(api);
+    expect(current.text).toBe(target.text);
+    const results = [];
+    for (const { start, end, accepted, selection } of cases) {
+      let result!: boolean;
+      await act(async () => {
+        result = await api.selectText({ slide: 1, shapeId: current.shapeId, storyId: current.storyId, start, end });
+      });
+      expect(result).toBe(accepted);
+      await waitFor(() => expect(direction()).toEqual(selection));
+      results.push({ accepted: result, selection: direction() });
+    }
+    return results;
+  };
+
+  const workerResults = await exercise(worker.api);
+  worker.view.unmount();
+  context = undefined;
+  const font = await readFile(fileURLToPath(new URL('../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url)));
+  let api: PptxAsyncEditorApi | undefined;
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  const inThread = render(<PptxEditor file={worker.bytes} fonts={[{ family: 'Liberation Sans', bytes: new Uint8Array(font) }]}
+    experimentalWorkerOpen={false} plugins={[plugin]} onReady={(ready) => { api = ready; }} />);
+  try {
+    await waitFor(() => expect(api).toBeDefined(), { timeout: 15_000 });
+    expect(await exercise(api!)).toEqual(workerResults);
+  } finally { inThread.unmount(); warn.mockRestore(); }
+}, 30_000);
 
 for (const inThread of [false, true]) {
   for (const snapshot of [false, true]) {
