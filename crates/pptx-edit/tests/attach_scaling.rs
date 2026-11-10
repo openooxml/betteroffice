@@ -1,7 +1,7 @@
 use pptx_edit::test_counters::{self, AttachWork};
 use pptx_edit::{DeckSession, EditCtx};
 use yrs::updates::decoder::Decode;
-use yrs::{Doc, Map, StateVector, Transact, Update};
+use yrs::{Doc, Map, ReadTxn, StateVector, Transact, Update};
 
 const DEFAULTS_SOURCE: &[u8] = include_bytes!("fixtures/deck-schema-v2.1-defaults.pptx");
 const DEFAULTS_SLIDE: &str = "ppt/slides/slide1.xml";
@@ -139,7 +139,13 @@ fn migrating_and_attaching_reads_each_story_once_and_builds_snapshots_once() {
     }
     for step in runs.windows(2) {
         let ((_, small_work), (_, large_work)) = (&step[0], &step[1]);
-        assert!(large_work.story_reads <= small_work.story_reads * 4 + 16, "{runs:?}");
-        assert!(large_work.replayed_reads <= small_work.replayed_reads * 4 + 16, "{runs:?}");
+        assert!(
+            large_work.story_reads <= small_work.story_reads * 4 + 16,
+            "{runs:?}"
+        );
+        assert!(
+            large_work.replayed_reads <= small_work.replayed_reads * 4 + 16,
+            "{runs:?}"
+        );
     }
 }
