@@ -2745,7 +2745,11 @@ mod pagination_rule_tests {
         incremental_matches_full_with(name, before, after, |_| {});
     }
 
-    fn section_break(id: &str, kind: &str, margins: Option<(u32, u32)>) -> serde_json::Value {
+    fn margined_section_break(
+        id: &str,
+        kind: &str,
+        margins: Option<(u32, u32)>,
+    ) -> serde_json::Value {
         let mut block = json!({"kind": "sectionBreak", "id": id, "type": kind});
         if let Some((top, side)) = margins {
             block["margins"] = json!({"top": top, "right": side, "bottom": 10, "left": side});
@@ -2924,9 +2928,9 @@ mod pagination_rule_tests {
         ] {
             let blocks = |side: u32| {
                 let mut blocks = vec![paragraph(0, 5, 20.0, json!({}))];
-                blocks.push(section_break("a", first, Some((10, side))));
+                blocks.push(margined_section_break("a", first, Some((10, side))));
                 blocks.push(paragraph(1, 5, 20.0, json!({})));
-                blocks.push(section_break("b", second, None));
+                blocks.push(margined_section_break("b", second, None));
                 blocks.extend((2..6).map(|id| paragraph(id, 5, 20.0, json!({}))));
                 blocks
             };
@@ -2943,10 +2947,10 @@ mod pagination_rule_tests {
     fn a_closing_break_turning_continuous_reframes_its_own_section() {
         let blocks = |kind: &str| {
             let mut blocks = vec![paragraph(0, 2, 20.0, json!({}))];
-            blocks.push(section_break("a", "nextPage", Some((10, 10))));
+            blocks.push(margined_section_break("a", "nextPage", Some((10, 10))));
             blocks.push(paragraph(1, 5, 20.0, json!({"pageBreakBefore": true})));
             blocks.extend((2..8).map(|id| paragraph(id, 5, 20.0, json!({}))));
-            blocks.push(section_break("b", kind, Some((10, 20))));
+            blocks.push(margined_section_break("b", kind, Some((10, 20))));
             blocks.extend((8..10).map(|id| paragraph(id, 5, 20.0, json!({}))));
             blocks
         };
@@ -2964,7 +2968,7 @@ mod pagination_rule_tests {
     fn a_top_margin_change_on_a_short_first_section_still_converges_in_the_next() {
         let blocks = |top: u32| {
             let mut blocks = vec![paragraph(0, 2, 20.0, json!({}))];
-            blocks.push(section_break("a", "continuous", Some((top, 10))));
+            blocks.push(margined_section_break("a", "continuous", Some((top, 10))));
             blocks.push(paragraph(1, 5, 20.0, json!({"pageBreakBefore": true})));
             blocks.extend((2..40).map(|id| paragraph(id, 5, 20.0, json!({}))));
             blocks
