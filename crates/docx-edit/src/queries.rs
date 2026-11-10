@@ -685,12 +685,8 @@ impl EditingDoc {
         let anchor = anchors
             .first()
             .ok_or_else(|| OpError::UnknownComment(comment_id.to_owned()))?;
-        let txn = self.yrs_doc().transact();
-        let story = story_ref(&txn, &anchor.story)?;
-        Ok(LocRange {
-            start: loc_of_global(&anchor.story, &story, &txn, anchor.start)?,
-            end: loc_of_global(&anchor.story, &story, &txn, anchor.end)?,
-        })
+        let range = crate::StoryRange::new(anchor.story.clone(), anchor.start, anchor.end);
+        self.loc_range_of(&range)
     }
 
     /// Every comment in the side map, with best-effort resolved anchor ranges.
@@ -715,7 +711,14 @@ impl EditingDoc {
                     anchors
                         .into_iter()
                         .filter_map(|anchor| {
-                            let story = crate::story_text(&txn, &anchor.story)?;
+                            let Some(story) = crate::story_text(&txn, &anchor.story) else {
+                                let para = crate::empty_cells::empty_cell_para_key(&anchor.story);
+                                let empty = crate::empty_cells::is_empty_cell(&txn, &anchor.story);
+                                return empty.then(|| LocRange {
+                                    start: Loc::new(anchor.story.clone(), para.clone(), 0),
+                                    end: Loc::new(anchor.story, para, 0),
+                                });
+                            };
                             Some(LocRange {
                                 start: loc_of_global(&anchor.story, &story, &txn, anchor.start)
                                     .ok()?,

@@ -1059,7 +1059,16 @@ fn covering<'a>(anchors: &'a [CellAnchor], row: usize, column: usize) -> Option<
 }
 
 fn table_at<T: ReadTxn>(txn: &T, locator: &TableLocator) -> OpResult<(TextRef, MapRef, u32)> {
-    let story = story_ref(txn, &locator.story).map_err(OpError::from)?;
+    let story = match story_ref(txn, &locator.story) {
+        Ok(story) => story,
+        Err(crate::EditError::CellHasNoStory(_)) => {
+            return Err(OpError::UnknownTable {
+                story: locator.story.clone(),
+                table_index: locator.table_index,
+            });
+        }
+        Err(error) => return Err(error.into()),
+    };
     let mut offset = 0u32;
     let mut table_index = 0u32;
     for diff in story.diff(txn, YChange::identity) {

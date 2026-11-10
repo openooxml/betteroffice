@@ -534,6 +534,14 @@ mod tests {
         let doc = EditingDoc::new(84001);
         story(
             &doc,
+            "a",
+            json!([
+                {"kind": "table", "rows": []}, {"text": "😀"}, {"kind": "pilcrow", "paraId": "ap"}
+            ]),
+        );
+        story(&doc, "b", json!([{ "kind": "pilcrow", "paraId": "bp" }]));
+        story(
+            &doc,
             "body",
             json!([
                 {"kind": "table", "rows": [
@@ -542,14 +550,6 @@ mod tests {
                 ]}, {"text": "Z"}, {"kind": "pilcrow", "paraId": "p"}
             ]),
         );
-        story(
-            &doc,
-            "a",
-            json!([
-                {"kind": "table", "rows": []}, {"text": "😀"}, {"kind": "pilcrow", "paraId": "ap"}
-            ]),
-        );
-        story(&doc, "b", json!([{ "kind": "pilcrow", "paraId": "bp" }]));
         story(&doc, "body:t0:r1c0", json!([]));
         assert_eq!(
             outline(&doc),

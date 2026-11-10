@@ -1444,6 +1444,7 @@ impl EditingDoc {
         if story_id_taken(&stories, &txn, &story_id) {
             return Err(EditError::StoryExists(story_id));
         }
+        empty_cells::refuse_write(&txn, &story_id)?;
         let story = insert_story(&mut txn, &stories, story_id);
         if !initial_text.is_empty() {
             story.insert_with_attributes(&mut txn, 0, initial_text, insertion_attrs(None, None));
@@ -1479,6 +1480,7 @@ impl EditingDoc {
         if story_id_taken(&stories, &txn, &story_id) {
             return Err(OpError::StoryExists(story_id));
         }
+        empty_cells::refuse_write(&txn, &story_id)?;
         let story = insert_story(&mut txn, &stories, story_id);
         let mut deltas = Vec::with_capacity(paragraphs.len() * 2);
         let mut para_ids = Vec::with_capacity(paragraphs.len());
@@ -1742,7 +1744,17 @@ impl EditingDoc {
         anchors
             .into_iter()
             .map(|anchor| {
-                story_ref(&txn, &anchor.story)?;
+                match story_ref(&txn, &anchor.story) {
+                    Ok(_) => {}
+                    Err(EditError::CellHasNoStory(_)) => {
+                        return Ok(ResolvedCommentAnchor {
+                            story: anchor.story,
+                            start: 0,
+                            end: 0,
+                        });
+                    }
+                    Err(error) => return Err(error),
+                }
                 let start = sticky_offset(&anchor.start, &txn).ok_or_else(|| {
                     EditError::InvalidComment("start anchor no longer resolves".into())
                 })?;

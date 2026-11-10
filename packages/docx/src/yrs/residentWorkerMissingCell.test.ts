@@ -72,7 +72,7 @@ function stateBytes(session: { encodeStateVector(): Uint8Array; encodeStateAsUpd
 }
 
 /** The host replica of a document whose live table names a missing cell, laid out for the worker. */
-async function danglingHost(base: number): Promise<{ main: YrsSession; story: string }> {
+async function danglingHost(base: number, order: 'synced' | 'concurrent'): Promise<{ main: YrsSession; story: string }> {
   const a = await createYrsSession({ clientId: base + 1 });
   sessions.push(a);
   a.openDocx(docx(), true);
@@ -85,7 +85,7 @@ async function danglingHost(base: number): Promise<{ main: YrsSession; story: st
   a.splitCell(at(0, 1), 1, 2);
   sync(a, b);
   b.insertRow(at(0, 0), 'below');
-  sync(a, b);
+  if (order === 'synced') sync(a, b);
   expect(a.undo()).toBe(true);
   sync(a, b);
   const main = await createYrsSession({ clientId: base + 3 });
@@ -99,8 +99,8 @@ async function danglingHost(base: number): Promise<{ main: YrsSession; story: st
   return { main, story: story! };
 }
 
-test('typing and Backspace in a missing cell through the resident worker are not applied, fail nothing and leave the worker usable', async () => {
-  const { main, story } = await danglingHost(12_000);
+for (const [index, order] of (['synced', 'concurrent'] as const).entries()) test(`${order}: typing and Backspace in a missing cell through the resident worker are not applied, fail nothing and leave the worker usable`, async () => {
+  const { main, story } = await danglingHost(12_000 + index * 10, order);
   const errors = spyOn(console, 'error');
   try {
     const worker = startWorker();

@@ -815,6 +815,11 @@ pub(crate) fn lower_recorded(
     ),
     BridgeError,
 > {
+    if crate::empty_cells::is_empty_cell(&doc.yrs_doc().transact(), story) {
+        local.block(true);
+        let cell = crate::empty_cells::EmptyCell::new(story);
+        return lower_recorded(cell.doc(), story, env, local, false);
+    }
     let mut preview = (record && story == "body").then(PreviewUnits::default);
     let mut revealable = Some(Vec::new());
     let (blocks, map) = yrs_doc_to_mapped_layout_blocks_inner(

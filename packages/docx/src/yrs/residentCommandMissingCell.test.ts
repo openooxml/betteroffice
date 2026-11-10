@@ -90,6 +90,7 @@ async function danglingState(base: number, order: 'synced' | 'concurrent'): Prom
 async function openOn(base: number, order: 'synced' | 'concurrent') {
   const { state, story } = await danglingState(base, order);
   const arm = await openCommandEngine([], { bytes: docx(), checkpoint: state, clientId: base + 5 });
+  expect(arm.engine.geometryReader.storyIds()).not.toContain(story);
   return { arm, story, paraId: arm.engine.paragraphs(story)[0]!.paraId };
 }
 
@@ -177,9 +178,9 @@ const KEYS: Array<{ name: string; intent: (base: { session: string; incarnation:
   },
 ];
 
-for (const [index, key] of KEYS.entries()) {
-  test(`${key.name} with the caret in a missing cell takes the refused-command path: no rejection, no unhandled error, state unchanged`, async () => {
-    const { arm, story, paraId } = await openOn(11_100 + index * 10, 'synced');
+for (const [orderIndex, order] of (['synced', 'concurrent'] as const).entries()) for (const [index, key] of KEYS.entries()) {
+  test(`${order}: ${key.name} with the caret in a missing cell takes the refused-command path: no rejection, no unhandled error, state unchanged`, async () => {
+    const { arm, story, paraId } = await openOn(11_100 + orderIndex * 100 + index * 10, order);
     const init = {
       session: 'd1-worker', incarnation: 1, epoch: 1, readOnly: false,
       fonts: [], layoutInput: '{}', layoutWithRegions: true, layoutRevision: 1, extras: '{}',

@@ -348,6 +348,22 @@ fn assert_writes_refused(doc: &EditingDoc, row: u32, column: u32, cell: &str) {
         "split_cell_grid",
     );
     assert_refused(doc.delete_story(cell), cell, "delete_story");
+    assert_refused(
+        doc.create_story(cell, "x", "Normal", "left"),
+        cell,
+        "create_story",
+    );
+    assert_refused(
+        doc.create_story_with_paragraph_id(cell, "p", "x", "Normal", "left"),
+        cell,
+        "create_story_with_paragraph_id",
+    );
+    let seed = SeedParagraph {
+        text: "x".to_owned(),
+        p_style: "Normal".to_owned(),
+        alignment: "left".to_owned(),
+    };
+    assert_refused(doc.seed_story(cell, &[seed]), cell, "seed_story");
 
     let collapsed = || StoryRange::new(cell, 0, 0);
     assert_refused(
@@ -505,5 +521,75 @@ fn a_redo_or_removing_the_row_or_table_makes_the_state_whole() {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn resident_lowering_and_font_requirements_read_the_cell_as_one_empty_paragraph() {
+    let (splitter, _peer, _undo) = dangling_state(true);
+    let (_, _, cell) = dangling(&splitter).remove(0);
+    let engine = EngineSession::new(73);
+    engine
+        .doc()
+        .apply_update_v1(&splitter.encode_state_as_update_v1())
+        .unwrap();
+    let before = state(engine.doc());
+    let count = engine
+        .with_lowered_story(&cell, &RenderEnv::default(), |blocks| blocks.len())
+        .unwrap();
+    assert_eq!(count, 1);
+    let lowered = engine
+        .lower_story_json(&cell, &RenderEnv::default())
+        .unwrap();
+    let lowered: serde_json::Value = serde_json::from_str(&lowered).unwrap();
+    assert_eq!(lowered.as_array().map(Vec::len), Some(1), "{lowered}");
+    let request = json!({"bodyStory": cell, "renderEnv": {}}).to_string();
+    engine.layout_font_requirements_json(&request).unwrap();
+    assert_eq!(state(engine.doc()), before);
+}
+
+#[test]
+fn a_comment_anchored_in_the_cell_before_the_undo_resolves_to_its_empty_paragraph() {
+    let origin = origin();
+    let splitter = replica(&origin, LEFT);
+    let peer = replica(&origin, RIGHT);
+    let mut undo = splitter.undo_manager();
+    splitter
+        .split_cell_grid(&ctx(), &CellLoc::new("body", 0, 0, 1), Some(1), Some(2))
+        .unwrap();
+    exchange(&splitter, &peer);
+    let (_, _, cell) = named_cells(&peer)
+        .into_iter()
+        .find(|(row, column, _)| (*row, *column) == (0, 2))
+        .unwrap();
+    let range = StoryRange::new(cell.as_str(), 0, 1);
+    let comment = peer
+        .add_comment(&[range], "Ada", DATE, Any::from("note"))
+        .unwrap();
+    peer.insert_row(&ctx(), &CellLoc::new("body", 0, 0, 0), true)
+        .unwrap();
+    exchange(&splitter, &peer);
+    assert!(undo.undo());
+    exchange(&splitter, &peer);
+    let key = format!("{cell}#p0");
+    let at = Loc::new(cell.as_str(), key.as_str(), 0);
+    let empty = LocRange {
+        start: at.clone(),
+        end: at,
+    };
+    for doc in [&splitter, &peer] {
+        assert!(dangling(doc).iter().any(|(_, _, story)| *story == cell));
+        let before = state(doc);
+        let expected = ResolvedCommentAnchor {
+            story: cell.clone(),
+            start: 0,
+            end: 0,
+        };
+        assert_eq!(doc.resolve_comment(&comment).unwrap(), [expected]);
+        assert_eq!(doc.find_comment_range(&comment).unwrap(), empty);
+        let listed = doc.list_comments().unwrap();
+        let info = listed.iter().find(|info| info.id == comment).unwrap();
+        assert_eq!(info.ranges, [empty.clone()]);
+        assert_eq!(state(doc), before);
     }
 }

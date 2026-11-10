@@ -6131,11 +6131,6 @@ impl EngineSession {
 
     /// Serializes resident lowered blocks.
     pub fn lower_story_json(&self, story: &str, env: &RenderEnv) -> Result<String, BridgeError> {
-        if crate::empty_cells::is_empty_cell(&self.doc.yrs_doc().transact(), story) {
-            let blocks = crate::bridge::yrs_doc_to_layout_blocks(&self.doc, story, env)?;
-            let json = serde_json::to_string(&blocks);
-            return Ok(json.expect("LayoutBlock serialization is infallible after lowering"));
-        }
         self.with_resident_story(story, env, |_| ())?;
         let mut render = self.render.borrow_mut();
         let lowered = render
