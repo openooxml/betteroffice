@@ -11,5 +11,5 @@ beforeAll(async () => {
 
 describeDisposeTable(engine.engineKind, engine, [
   { name: 'XlsxDocument', engineClass: engine.XlsxDocument, make: () => engine.XlsxDocument.open(workbook), use: (document) => (document as engine.XlsxDocument).documentVersion() },
-  { name: 'XlsxSnapshotBuilder', engineClass: engine.XlsxSnapshotBuilder, make: () => new engine.XlsxSnapshotBuilder(), use: (builder) => (builder as engine.XlsxSnapshotBuilder).advance(1, 1) },
+  { name: 'XlsxSnapshotBuilder', engineClass: engine.XlsxSnapshotBuilder, make: () => new engine.XlsxSnapshotBuilder(), use: (builder) => (builder as engine.XlsxSnapshotBuilder).advance(1, 2 ** 30) },
 ]);
