@@ -67,7 +67,8 @@ export function memoryPressureLevel(
   const warning = Math.min(budget.warningBytes ?? stats.limitBytes * 0.75, critical);
   const nativeCritical = budget.criticalBytes ?? Infinity;
   const nativeWarning = Math.min(budget.warningBytes ?? Infinity, nativeCritical);
-  let level: DocxMemoryPressureLevel = 'normal';
+  if (0 >= critical) return 'critical';
+  let level: DocxMemoryPressureLevel = 0 >= warning ? 'warning' : 'normal';
   for (const module of [...stats.main, ...(stats.worker ?? [])]) {
     const held = heldBytes(module);
     const [warningAt, criticalAt] = module.native ? [nativeWarning, nativeCritical] : [warning, critical];
