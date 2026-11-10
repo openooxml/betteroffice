@@ -77,6 +77,9 @@ impl EditingDoc {
         {
             return Ok(false);
         }
+        for id in &required {
+            crate::empty_cells::refuse_write(&txn, id).map_err(|error| error.to_string())?;
+        }
         let stories = txn
             .get_map(crate::STORIES)
             .expect("stories root is declared");

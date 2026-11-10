@@ -45,6 +45,7 @@ impl EditingDoc {
         let stories = txn
             .get_map(crate::STORIES)
             .expect("stories root is declared");
+        let mut required = Vec::new();
         for kind in ["headers", "footers"] {
             for entry in value
                 .get(kind)
@@ -57,24 +58,29 @@ impl EditingDoc {
                         .iter()
                         .find_map(|(alias, canonical)| (alias == id).then_some(canonical.as_str()))
                         .unwrap_or(id);
-                    let story_id = format!("hf:{canonical}");
-                    if !crate::story_id_taken(&stories, &txn, &story_id) {
-                        let story = crate::insert_story(&mut txn, &stories, story_id);
-                        let pilcrow = story.insert_embed_with_attributes(
-                            &mut txn,
-                            0,
-                            MapPrelim::default(),
-                            crate::insertion_attrs(None, None),
-                        );
-                        crate::write_pilcrow_properties(
-                            &pilcrow,
-                            &mut txn,
-                            &self.next_id(),
-                            "Normal",
-                            "left",
-                        );
-                    }
+                    required.push(format!("hf:{canonical}"));
                 }
+            }
+        }
+        for story_id in &required {
+            crate::empty_cells::refuse_write(&txn, story_id).map_err(|error| error.to_string())?;
+        }
+        for story_id in required {
+            if !crate::story_id_taken(&stories, &txn, &story_id) {
+                let story = crate::insert_story(&mut txn, &stories, story_id);
+                let pilcrow = story.insert_embed_with_attributes(
+                    &mut txn,
+                    0,
+                    MapPrelim::default(),
+                    crate::insertion_attrs(None, None),
+                );
+                crate::write_pilcrow_properties(
+                    &pilcrow,
+                    &mut txn,
+                    &self.next_id(),
+                    "Normal",
+                    "left",
+                );
             }
         }
         properties.insert(&mut txn, key, json);

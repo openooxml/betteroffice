@@ -628,3 +628,66 @@ fn table_edits_after_the_undo_never_reuse_the_id_of_the_cell_without_its_story()
         }
     }
 }
+
+/// The split, row and undo sequence of [`dangling_state`] in a header's table: the header cell
+/// that the undo left without its story.
+fn header_cell_without_story(synced: bool) -> (EditingDoc, EditingDoc, String) {
+    const HEADER: &str = "hf:rId7";
+    let origin = EditingDoc::new(100);
+    origin
+        .create_story("body", "Hello", "Normal", "left")
+        .unwrap();
+    origin
+        .create_story(HEADER, "Header", "Normal", "left")
+        .unwrap();
+    origin
+        .insert_table(&ctx(), Position::new(HEADER, 0), 1, 2)
+        .unwrap();
+    let splitter = replica(&origin, LEFT);
+    let peer = replica(&origin, RIGHT);
+    let mut undo = splitter.undo_manager();
+    splitter
+        .split_cell_grid(&ctx(), &CellLoc::new(HEADER, 0, 0, 1), Some(1), Some(2))
+        .unwrap();
+    exchange(&splitter, &peer);
+    peer.insert_row(&ctx(), &CellLoc::new(HEADER, 0, 0, 0), true)
+        .unwrap();
+    if synced {
+        exchange(&splitter, &peer);
+    }
+    assert!(undo.undo());
+    exchange(&splitter, &peer);
+    let payload = splitter
+        .table_payload(&TableLocator::new(HEADER, 0))
+        .unwrap();
+    let rows = serde_json::to_value(&payload["rows"]).unwrap();
+    let cell = rows[0]["cells"][2]["story"].as_str().unwrap().to_owned();
+    assert!(!listed(&splitter, &cell), "{cell}");
+    assert_eq!(splitter.paragraphs(&cell).unwrap()[0].text, "");
+    (splitter, peer, cell)
+}
+
+#[test]
+fn metadata_setters_never_create_a_header_cell_without_its_story() {
+    for synced in [true, false] {
+        let (left, right, cell) = header_cell_without_story(synced);
+        let part = cell.strip_prefix("hf:").unwrap();
+        let property = json!({"headers": [[part, {}]]}).to_string();
+        let metadata = json!({"body": {}, "headers": [[part, {}]]}).to_string();
+        for doc in [&left, &right] {
+            let before = state(doc);
+            assert_refused(
+                doc.set_document_property(&ctx(), "metadata", &property),
+                &cell,
+                "set_document_property",
+            );
+            assert_refused(
+                doc.set_part_metadata(&ctx(), &metadata, &[]),
+                &cell,
+                "set_part_metadata",
+            );
+            assert_eq!(state(doc), before, "synced={synced}");
+            assert!(!listed(doc, &cell));
+        }
+    }
+}

@@ -553,19 +553,41 @@ const CELL_TEXT_FORMAT_REFUSED = false;
 
 const otherCell = (): YrsTableRange => ({ anchor: at(0, 0), head: at(0, 0) });
 
-const CELL_PROPERTY_WRITES: Array<[string, boolean, (s: YrsSession, range: YrsTableRange) => unknown]> = [
-  ['setCellShading', false, (s, range) => s.setCellShading(range, 'FF0000')],
-  ['setCellBorders', false, (s, range) => s.setCellBorders(range, CELL_BORDERS)],
-  ['setCellTextFormat', CELL_TEXT_FORMAT_REFUSED, (s, range) => s.setCellTextFormat(range, CELL_TEXT_FORMAT)],
+type CellProperties = Record<string, unknown> | undefined;
+
+/** Name, whether it is refused on the missing cell, the write, and whether its change shows in a cell's `tcPr`. */
+const CELL_PROPERTY_WRITES: Array<[string, boolean, (s: YrsSession, range: YrsTableRange) => unknown, (tcPr: CellProperties) => boolean]> = [
+  ['setCellShading', false, (s, range) => s.setCellShading(range, 'FF0000'), (tcPr) => tcPr?.backgroundColor === 'FF0000'],
+  [
+    'setCellBorders', false, (s, range) => s.setCellBorders(range, CELL_BORDERS),
+    (tcPr) => (tcPr?.borders as { top?: { style?: string } } | undefined)?.top?.style === 'single',
+  ],
+  [
+    'setCellTextFormat', CELL_TEXT_FORMAT_REFUSED, (s, range) => s.setCellTextFormat(range, CELL_TEXT_FORMAT),
+    (tcPr) => JSON.stringify(tcPr?.margins ?? null).includes('240'),
+  ],
 ];
+
+/** The `tcPr` the body table's payload holds for the cell named `story`. */
+function cellProperties(session: YrsSession, story: string): CellProperties {
+  const payload = session.tablePayload('body', 0) as { rows?: { cells?: { story?: string; tcPr?: Record<string, unknown> }[] }[] } | null;
+  for (const row of payload?.rows ?? []) {
+    const found = (row.cells ?? []).find((entry) => entry.story === story);
+    if (found) return found.tcPr;
+  }
+  throw new Error(`no cell names ${story}`);
+}
 
 for (const order of ['synced', 'concurrent'] as const) {
   test(`${order}: cell property writes on the missing cell, alone and in a range, follow the contract and apply on other cells`, async () => {
     let base = order === 'synced' ? 10_800 : 33_000;
-    for (const [name, refused, write] of CELL_PROPERTY_WRITES) {
+    for (const [name, refused, write, landed] of CELL_PROPERTY_WRITES) {
       for (const scope of ['the cell', 'a range including it', 'another cell'] as const) {
         const room = await danglingRoom(base, 2, order);
         base += 10;
+        const first = tableCellIds(room.b)[0]!;
+        expect(first).not.toBe(room.story);
+        for (const peer of room.peers) expect([landed(cellProperties(peer, room.story)), landed(cellProperties(peer, first))]).toEqual([false, false]);
         const range = scope === 'the cell' ? only(room.b, room.story) : scope === 'another cell' ? otherCell() : fromFirst(room.b, room.story);
         const before = room.peers.map(stateBytes);
         let error: unknown;
@@ -580,7 +602,11 @@ for (const order of ['synced', 'concurrent'] as const) {
         } else {
           expect(outcome).toBe(`${label}: applied`);
         }
+        const onMissing = !expectRefusal && scope !== 'another cell';
+        const onFirst = !expectRefusal && scope !== 'the cell';
         for (const peer of room.peers) {
+          expect({ label, missing: landed(cellProperties(peer, room.story)), first: landed(cellProperties(peer, first)) })
+            .toEqual({ label, missing: onMissing, first: onFirst });
           expect(danglingCells(peer)).toContain(room.story);
           expectReadable(peer);
         }
@@ -638,6 +664,8 @@ for (const order of ['synced', 'concurrent'] as const) {
       const loc = firstParagraph(peer, target!);
       peer.setSelection(loc, loc);
     }
+    const saved = b.encodeSelection();
+    expect(saved).not.toBeNull();
     b.insertRow(at(0, 0), 'below');
     if (order === 'synced') syncAll(peers);
     expect(a.undo()).toBe(true);
@@ -655,6 +683,13 @@ for (const order of ['synced', 'concurrent'] as const) {
       expectReadable(peer);
     }
     expectConverged(peers);
+    for (const replica of [peers[2]!, lateJoiner(a, base + 4)]) {
+      const before = stateBytes(replica);
+      let restored: ReturnType<YrsSession['resolveSelection']> = null;
+      expect(() => { restored = replica.resolveSelection(saved!); }).not.toThrow();
+      expect(restored).toMatchObject({ anchor: caret, head: caret });
+      expect(stateBytes(replica) === before).toBe(true);
+    }
   }, 60_000);
 
   test(`${order}: loadStories with a fresh story and then the missing cell is refused as a whole`, async () => {
