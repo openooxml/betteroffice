@@ -94,6 +94,8 @@ test('engine cell location is null or equal to the projection after every step o
       let remoteSteps = 0;
       let reseeds = 0;
       let keyMoves = 0;
+      let rebuildSameKey = 0;
+      const lastBuildKey = new Map<string, string>();
       const syncToPeer = () => peer?.applyUpdate(local.encodeStateAsUpdate(peer.encodeStateVector()));
       const syncFromPeer = () => peer && local.applyUpdate(peer.encodeStateAsUpdate(local.encodeStateVector()));
       const answer = (target: DocxWorkerCommandEngine, story: string): unknown => {
@@ -179,7 +181,14 @@ test('engine cell location is null or equal to the projection after every step o
           const read = (local as { cellLocation?: (story: string) => unknown }).cellLocation;
           const fast = typeof read === 'function' ? read(story) ?? null : null;
           const projected = answer(legacy, story);
+          const counts = (selection as { cellLocationCacheCounts?: () => { built: number } }).cellLocationCacheCounts;
+          const builtBefore = counts?.().built ?? 0;
           const live = answer(local, story);
+          if ((counts?.().built ?? 0) > builtBefore) {
+            const root = selection.rootOf(story);
+            if (lastBuildKey.get(root) === currentKey) { rebuildSameKey++; if (rebuildSameKey <= 3) console.log(`REBUILD-SAME-KEY seed=${seed} step=${step} root=${root} key=${currentKey} story=${story}`); }
+            lastBuildKey.set(root, currentKey);
+          }
           if (fast) answered++;
           const bad = (fast !== null && JSON.stringify(fast) !== JSON.stringify(projected)) || (projected === null && fast !== null) ||
             JSON.stringify(live) !== JSON.stringify(projected);
@@ -227,7 +236,7 @@ test('engine cell location is null or equal to the projection after every step o
         if (remote) syncFromPeer();
         check(step, remote ? `remote:${op}` : op);
       }
-      report.push(`INVARIANT seed=${seed} roots=${new Set([...seen].map(selection.rootOf)).size} steps=${STEPS} remote=${remoteSteps} reseeds=${reseeds} keyMovesWithinChecks=${keyMoves} applied=${applied} refused=${refused} storiesSeen=${seen.size} checks=${checks} engineAnswered=${answered} ops=${JSON.stringify(ops)}`);
+      report.push(`INVARIANT seed=${seed} roots=${new Set([...seen].map(selection.rootOf)).size} steps=${STEPS} remote=${remoteSteps} reseeds=${reseeds} keyMovesWithinChecks=${keyMoves} rebuildsSameKey=${rebuildSameKey} applied=${applied} refused=${refused} storiesSeen=${seen.size} checks=${checks} engineAnswered=${answered} ops=${JSON.stringify(ops)}`);
       closeCommandEngines();
     }
     (selection as { setCellLocationShadowCheck?: (on: boolean) => void }).setCellLocationShadowCheck?.(false);
