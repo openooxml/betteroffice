@@ -34,10 +34,12 @@ afterEach(() => mock.restore());
 async function render(options: Parameters<typeof import('./enginePng').renderPng>[2]) {
   const { renderPng } = await import('./enginePng');
   await renderPng({} as XlsxPngEngine, {} as ResolvedPngTarget, options);
-  return painted.at(-1) as { fonts: unknown; fallbacks?: unknown };
+  return painted[painted.length - 1] as { fonts: unknown; fallbacks?: unknown };
 }
 
-describe('wasm PNG fonts option', () => {
+const nativeEngine = (globalThis as Record<symbol, unknown>)[Symbol.for('betteroffice.testEngine')] === 'native';
+
+describe.skipIf(nativeEngine)('wasm PNG fonts option', () => {
   test('an absent list paints with the bundled faces', async () => {
     const options = await render({});
     expect(loaded).toBe(1);
