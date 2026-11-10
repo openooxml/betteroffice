@@ -110,6 +110,8 @@ async function guard(
         NPM_REGISTRY_URL: origin,
         CRATES_REGISTRY_URL: origin,
         CDN_BASE_URL: origin,
+        GITHUB_ACTIONS: '',
+        GITHUB_STEP_SUMMARY: '',
         ...env
       }
     });
@@ -494,6 +496,28 @@ describe('release wiring', () => {
     expect(verify).toBeLessThan(steps.indexOf('Trigger deploy'));
   });
 
+  test('a verification miss reports without gating deploy, native or Python publishing', () => {
+    const step = (name: string) => release.jobs.release.steps.find((s: any) => s.name === name);
+    const verify = step('Verify npm and CDN publish targets');
+    expect(verify['continue-on-error']).toBe(true);
+    expect(verify.id).toBeUndefined();
+  });
+
+  test('a failed publish still gates deploy, native and Python publishing', () => {
+    const publish = release.jobs.release.steps.find((s: any) => s.name === 'Release PR or publish');
+    expect(publish['continue-on-error']).toBeUndefined();
+    const deploy = release.jobs.release.steps.find((s: any) => s.name === 'Trigger deploy');
+    expect(deploy.if).toBe("steps.changesets.outputs.published == 'true'");
+    expect(release.jobs['native-npm'].needs).toBe('release');
+    expect(release.jobs['native-npm'].if).toBe(
+      "needs.release.result == 'success' && needs.release.outputs.publishing == 'true' && vars.RELEASE_SKIP_NATIVE != 'true'"
+    );
+    expect(release.jobs['python-bindings'].needs).toBe('release');
+    expect(release.jobs['python-bindings'].if).toBe(
+      "needs.release.result == 'success' && needs.release.outputs.publishing == 'true' && vars.RELEASE_SKIP_PYTHON != 'true'"
+    );
+  });
+
   test('both registries are checked before the first upload of either', () => {
     const publishes = ['Publish Rust crates', 'Release PR or publish'].map((step) =>
       steps.indexOf(step)
@@ -632,6 +656,24 @@ describe('the mode argument', () => {
     expect(result.status).toBe(0);
     expect(gets.sort()).toEqual(packages.map(({ name, version }) => `${name}/${version}`).sort());
     expect(heads.sort()).toEqual(packages.map(({ name, version }) => `${name}@${version}/package.json`).sort());
+  }, SPAWN_BUDGET_MS);
+
+  test('--verify-published on GitHub Actions annotates and summarizes what is missing', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'publish-summary-'));
+    fixtureDirectories.push(directory);
+    const summary = join(directory, 'summary.md');
+    const { name, version } = packages[0]!;
+    const result = await guard('--verify-published', (path, request) =>
+      request.method === 'HEAD'
+        ? new Response(null)
+        : path === `${name}/${version}` ? new Response(null, { status: 403 }) : Response.json({}),
+    { GITHUB_ACTIONS: 'true', GITHUB_STEP_SUMMARY: summary });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`::error title=Release incomplete::${name}@${version} is not on npm after publishing`);
+    const written = readFileSync(summary, 'utf8');
+    expect(written).toContain('### Release incomplete');
+    expect(written).toContain(`- \`${name}@${version}\` on npm`);
+    expect(written).not.toContain('on the CDN');
   }, SPAWN_BUDGET_MS);
 });
 

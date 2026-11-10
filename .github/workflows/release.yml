@@ -150,9 +150,11 @@ jobs:
           # above authorizes the exchange and signs provenance.
           NPM_CONFIG_PROVENANCE: "true"
 
-      # Also after a failed publish: it names what the set is missing.
+      # Also after a failed publish: it names what the set is missing. Reports
+      # only: deploy and the native and Python jobs still run after a miss.
       - name: Verify npm and CDN publish targets
         if: "always() && steps.pending.outputs.publishing == 'true'"
+        continue-on-error: true
         run: node scripts/check-publish-targets.mjs --verify-published
 
       # GITHUB_TOKEN releases don't fire `on: release`, so dispatch directly.

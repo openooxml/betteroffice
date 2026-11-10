@@ -5,7 +5,7 @@
 // publish` attempts every unpublished package in parallel, tags the ones that
 // worked, and only then throws — leaving live dependents pointing at a name
 // that 404s. This runs first and names what has to be bootstrapped by hand.
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readdirSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -273,7 +273,9 @@ export async function verifyPublished({
   timeoutMs = REQUEST_TIMEOUT_MS,
   maxWaitMs = VERIFY_WAIT_MS,
   packages = publishedPackageVersions(),
-  workspaces = workspaceEntries()
+  workspaces = workspaceEntries(),
+  annotate = false,
+  summary
 } = {}) {
   const cdnPackages = new Map();
   for (const { name, version } of [...packages, ...siblingReferences(packages, workspaces)]) {
@@ -299,7 +301,24 @@ export async function verifyPublished({
     if (found) out.log(message);
     else out.error(message);
   }
-  return results.some(({ found }) => !found) ? 1 : 0;
+  const missing = results.filter(({ found }) => !found);
+  if (missing.length === 0) return 0;
+  if (annotate) {
+    for (const { name, version, service } of missing) {
+      out.error(`::error title=Release incomplete::${name}@${version} is not on ${service} after publishing`);
+    }
+  }
+  if (summary) {
+    appendFileSync(summary, [
+      '### Release incomplete',
+      '',
+      'These versions were not found after publishing. If the publish step succeeded, the registry or CDN is still propagating: check them again later. If it failed, publish what is missing (RELEASING.md); native packages and the deploy are dispatched with publish-native.yml and deploy.yml.',
+      '',
+      ...missing.map(({ name, version, service }) => `- \`${name}@${version}\` on ${service}`),
+      ''
+    ].join('\n'));
+  }
+  return 1;
 }
 
 const BUMP_ORDER = { none: 0, patch: 1, minor: 2, major: 3 };
@@ -377,5 +396,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     console.error('check-publish-targets.mjs: expected exactly one of --npm, --crates, --verify-published or --plan');
     process.exit(2);
   }
-  process.exit(await modes[mode]());
+  const options = mode === '--verify-published'
+    ? { annotate: process.env.GITHUB_ACTIONS === 'true', summary: process.env.GITHUB_STEP_SUMMARY || undefined }
+    : undefined;
+  process.exit(await modes[mode](options));
 }
