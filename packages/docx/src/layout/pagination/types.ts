@@ -628,6 +628,8 @@ export type TableRow = {
    * marked rows whose cells show nothing; marked rows with visible content stay.
    */
   hidden?: boolean;
+  /** The source row held only vanished runs when read; a hidden row without this is never left out. */
+  hiddenContentOnly?: boolean;
   /** Leading omitted grid columns (`w:gridBefore`). Undefined = 0. */
   gridBefore?: number;
   /** Trailing omitted grid columns (`w:gridAfter`). Undefined = 0. */

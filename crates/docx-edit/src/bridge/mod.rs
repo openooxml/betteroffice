@@ -2440,6 +2440,9 @@ fn lower_table<T: ReadTxn>(
             hidden: row_formatting
                 .and_then(|value| map_bool(value, "hidden"))
                 .filter(|value| *value),
+            hidden_content_only: row_formatting
+                .and_then(|value| map_bool(value, "hiddenContentOnly"))
+                .filter(|value| *value),
             source_row: None,
             grid_before,
             grid_after,

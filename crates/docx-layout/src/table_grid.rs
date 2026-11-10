@@ -131,58 +131,50 @@ pub fn resolve_cell_grid(table_block: &TableBlock) -> Vec<ResolvedGridCell> {
     out
 }
 
-/// Removes rows marked `w:hidden` (§17.4.20) whose cells show nothing once
-/// hidden text is gone, as Word does when hidden text is not shown: they take
-/// no height, paint nothing and leave the borders of the rows around them as
-/// if they were never there. The mark only hides the end-of-row mark, so a
-/// marked row with visible content stays. A vertical merge shrinks by the
-/// rows it loses; one that starts in a removed row restarts at its first
-/// remaining row. A table left with no rows takes no space.
+/// Removes rows marked `w:hidden` (§17.4.20) that held only vanished runs when
+/// read and still show nothing, as Word does when hidden text is not shown:
+/// they take no height, paint nothing and leave the borders of the rows around
+/// them as if they were never there. The mark only hides the end-of-row mark,
+/// so a marked row with visible content stays, as does one that starts a
+/// vertical merge continuing into a row that stays. A merge through a removed
+/// row shrinks by it. A table left with no rows takes no space.
 pub fn drop_hidden_rows(table: &mut TableBlock) {
-    let hidden: Vec<bool> = table
+    let mut dropped: Vec<bool> = table
         .rows
         .iter()
-        .map(|row| row.hidden == Some(true) && !row_shows_content(row))
+        .map(|row| {
+            row.hidden == Some(true)
+                && row.hidden_content_only == Some(true)
+                && !row_shows_content(row)
+        })
         .collect();
-    if !hidden.contains(&true) {
+    if !dropped.contains(&true) {
         return;
     }
     let grid = resolve_cell_grid(table);
-    let mut restarted = Vec::new();
-    for cell in grid.iter().filter(|cell| cell.row_span > 1) {
-        let end = (cell.row_index + cell.row_span).min(hidden.len());
-        let mut visible = (cell.row_index..end).filter(|row| !hidden[*row]);
-        let first = visible.next();
-        let span = Some((1 + visible.count()) as f64);
-        let source = &mut table.rows[cell.row_index].cells[cell.cell_index];
-        if !hidden[cell.row_index] {
-            source.row_span = span;
-        } else if let Some(first) = first {
-            let mut moved = source.clone();
-            moved.row_span = span;
-            restarted.push((first, cell.column_index, moved));
+    // spans only reach down, so walking up settles each row once
+    for cell in grid.iter().rev().filter(|cell| cell.row_span > 1) {
+        let end = (cell.row_index + cell.row_span).min(dropped.len());
+        if (cell.row_index + 1..end).any(|row| !dropped[row]) {
+            dropped[cell.row_index] = false;
         }
     }
-    restarted.sort_by_key(|(row, column, _)| (*row, *column));
-    let mut inserted = 0;
-    let mut previous_row = None;
-    for (row, column, cell) in restarted {
-        if previous_row != Some(row) {
-            previous_row = Some(row);
-            inserted = 0;
-        }
-        let before = grid
-            .iter()
-            .filter(|other| other.row_index == row && other.column_index < column)
-            .count();
-        table.rows[row].cells.insert(before + inserted, cell);
-        inserted += 1;
+    if !dropped.contains(&true) {
+        return;
+    }
+    for cell in grid
+        .iter()
+        .filter(|cell| cell.row_span > 1 && !dropped[cell.row_index])
+    {
+        let end = (cell.row_index + cell.row_span).min(dropped.len());
+        let kept = (cell.row_index..end).filter(|row| !dropped[*row]).count();
+        table.rows[cell.row_index].cells[cell.cell_index].row_span = Some(kept as f64);
     }
     let mut index = 0;
     table.rows.retain_mut(|row| {
         index += 1;
         row.source_row.get_or_insert(index as u64 - 1);
-        !hidden[index - 1]
+        !dropped[index - 1]
     });
 }
 

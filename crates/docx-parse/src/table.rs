@@ -362,6 +362,38 @@ pub fn parse_document_table_properties(element: Option<&XmlElement>) -> Option<T
     (formatting != TableFormatting::default()).then_some(formatting)
 }
 
+/// Whether a `w:tr` holds nothing Word shows once hidden text is off: every run
+/// has a direct `w:vanish`, and nothing paints outside a run. Read from the
+/// source because later stages can lose field results, form controls and inline
+/// controls. A run hidden only through its style doesn't count, so its row stays.
+pub fn row_is_hidden_content_only(row: &XmlElement) -> bool {
+    let mut pending: Vec<_> = row.child_elements().map(|child| (child, false)).collect();
+    while let Some((element, in_run)) = pending.pop() {
+        let is_run = element.matches_name("w", "r");
+        let vanished = || {
+            element
+                .child("w", "rPr")
+                .and_then(|properties| properties.child("w", "vanish"))
+                .is_some_and(|vanish| vanish.parse_boolean("w"))
+        };
+        let shows = match element.local_name() {
+            "tbl" => true,
+            "pPr" => element.child("w", "shd").is_some() || element.child("w", "pBdr").is_some(),
+            "drawing" | "pict" | "object" | "ffData" | "oMath" | "oMathPara" => !in_run,
+            _ => is_run && !vanished(),
+        };
+        if shows {
+            return false;
+        }
+        pending.extend(
+            element
+                .child_elements()
+                .map(|child| (child, in_run || is_run)),
+        );
+    }
+    true
+}
+
 pub fn parse_document_table_row_properties(
     element: Option<&XmlElement>,
 ) -> Option<TableRowFormatting> {

@@ -28,6 +28,7 @@ fn three_rows(hidden: Option<bool>) -> TableBlock {
     let mut middle = row("r1", "#ff0000", 4.0);
     if let Some(hidden) = hidden {
         middle["hidden"] = json!(hidden);
+        middle["hiddenContentOnly"] = json!(hidden);
     }
     table(vec![
         row("r0", "#00aa00", 24.0),
@@ -156,6 +157,7 @@ fn a_fully_hidden_table_has_no_rows_height_or_primitives() {
     let mut hidden = table(vec![row("r0", "#ff0000", 24.0), row("r1", "#ff0000", 4.0)]);
     for row in &mut hidden.rows {
         row.hidden = Some(true);
+        row.hidden_content_only = Some(true);
     }
     drop_hidden_rows(&mut hidden);
     assert!(hidden.rows.is_empty());
@@ -185,6 +187,7 @@ fn merge_table(origin_row: usize) -> TableBlock {
             let mut row = json!({"id": format!("r{index}"), "height": 20, "cells": cells});
             if index == 1 {
                 row["hidden"] = json!(true);
+                row["hiddenContentOnly"] = json!(true);
             }
             row
         })
@@ -239,19 +242,50 @@ fn a_merge_through_a_hidden_row_loses_only_that_row() {
 }
 
 #[test]
-fn a_merge_starting_in_a_hidden_row_restarts_at_the_next_visible_row() {
+fn a_hidden_row_starting_a_merge_into_a_kept_row_stays() {
     let mut starting = merge_table(1);
+    let before = starting.clone();
     drop_hidden_rows(&mut starting);
-    assert_eq!(
-        ids(&starting),
-        vec![
-            vec![("\"a0\"".to_owned(), None), ("\"b0\"".to_owned(), None)],
-            vec![("\"m\"".to_owned(), Some(2.0)), ("\"b2\"".to_owned(), None)],
-            vec![("\"b3\"".to_owned(), None)],
+    assert_eq!(starting, before);
+}
+
+fn chain_table(lower_cells: Value, last_cells: Value) -> TableBlock {
+    let hidden_row = |id: &str, cells: Value| json!({"id": id, "height": 20, "hidden": true, "hiddenContentOnly": true, "cells": cells});
+    serde_json::from_value(json!({
+        "kind": "table", "id": "table", "layoutMode": "fixed", "columnWidths": [60, 60],
+        "rows": [
+            {"id": "r0", "height": 20, "cells": [merged_cell("a0", None), merged_cell("b0", None)]},
+            hidden_row("r1", json!([merged_cell("m", Some(2.0)), merged_cell("b1", None)])),
+            hidden_row("r2", lower_cells),
+            {"id": "r3", "height": 20, "cells": last_cells}
         ]
+    }))
+    .unwrap()
+}
+
+#[test]
+fn a_merge_inside_removed_rows_goes_with_them_but_a_chain_into_a_kept_row_stays() {
+    let mut inside = chain_table(
+        json!([merged_cell("b2", None)]),
+        json!([merged_cell("a3", None), merged_cell("b3", None)]),
     );
-    let (measure, _) = render(starting);
-    assert_eq!(measure["rows"].as_array().unwrap().len(), 3);
+    drop_hidden_rows(&mut inside);
+    assert_eq!(inside.rows.len(), 2);
+
+    let mut chained = chain_table(
+        json!([merged_cell("n", Some(2.0))]),
+        json!([merged_cell("a3", None)]),
+    );
+    drop_hidden_rows(&mut chained);
+    assert_eq!(chained.rows.len(), 4);
+}
+
+#[test]
+fn a_hidden_row_without_the_source_flag_stays() {
+    let mut table = three_rows(Some(true));
+    table.rows[1].hidden_content_only = None;
+    drop_hidden_rows(&mut table);
+    assert_eq!(table.rows.len(), 3);
 }
 
 #[test]

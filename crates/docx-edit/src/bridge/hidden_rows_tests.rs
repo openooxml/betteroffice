@@ -238,14 +238,15 @@ fn a_fully_hidden_table_takes_no_space_and_paints_nothing() {
     assert!(last_text_y(&shown.primitives) > last_text_y(&hidden.primitives));
 }
 
+fn merged(text: &str, merge: &str, tr_pr: &str) -> String {
+    let r_pr = if tr_pr == HIDDEN { VANISH } else { "" };
+    format!(
+        r#"<w:tr>{tr_pr}<w:tc><w:tcPr><w:tcW w:w="2340" w:type="dxa"/><w:vMerge{merge}/></w:tcPr><w:p><w:r>{r_pr}<w:t>{text}</w:t></w:r></w:p></w:tc><w:tc><w:tcPr><w:tcW w:w="2340" w:type="dxa"/></w:tcPr><w:p><w:r>{r_pr}<w:t>Side{text}</w:t></w:r></w:p></w:tc></w:tr>"#
+    )
+}
+
 #[test]
 fn a_merge_across_a_hidden_row_spans_only_the_visible_rows() {
-    let merged = |text: &str, merge: &str, tr_pr: &str| {
-        let r_pr = if tr_pr == HIDDEN { VANISH } else { "" };
-        format!(
-            r#"<w:tr>{tr_pr}<w:tc><w:tcPr><w:tcW w:w="2340" w:type="dxa"/><w:vMerge{merge}/></w:tcPr><w:p><w:r>{r_pr}<w:t>{text}</w:t></w:r></w:p></w:tc><w:tc><w:tcPr><w:tcW w:w="2340" w:type="dxa"/></w:tcPr><w:p><w:r>{r_pr}<w:t>Side{text}</w:t></w:r></w:p></w:tc></w:tr>"#
-        )
-    };
     let through = render(
         &[
             merged("Alpha", r#" w:val="restart""#, ""),
@@ -258,21 +259,6 @@ fn a_merge_across_a_hidden_row_spans_only_the_visible_rows() {
     assert_eq!(rows.as_array().unwrap().len(), 2);
     assert_eq!(rows[0]["cells"][0]["rowSpan"], json!(2.0));
     assert_eq!(rows[1]["cells"].as_array().unwrap().len(), 1);
-
-    let starting = render(
-        &[
-            merged("Alpha", "", ""),
-            merged("Bravo", r#" w:val="restart""#, HIDDEN),
-            merged("", "", ""),
-        ],
-        false,
-    );
-    let rows = starting.table.unwrap()["block"]["rows"].clone();
-    assert_eq!(rows.as_array().unwrap().len(), 2);
-    assert_eq!(rows[1]["cells"].as_array().unwrap().len(), 2);
-    assert_eq!(rows[1]["cells"][0]["rowSpan"], json!(1.0));
-    assert!(!painted(&starting.primitives, "Bravo"));
-    assert!(painted(&starting.primitives, "SideAlpha"));
 }
 
 fn cell_rows(primitives: &[Value]) -> Vec<u64> {
@@ -316,24 +302,85 @@ fn cells_after_a_removed_row_keep_their_source_row_index() {
     );
 }
 
-#[test]
-fn a_hidden_row_holding_only_an_empty_field_is_removed() {
-    let field = r#"<w:tr><w:trPr><w:hidden/></w:trPr><w:tc><w:tcPr><w:tcW w:w="4680" w:type="dxa"/></w:tcPr><w:p><w:fldSimple w:instr=" DATE "><w:r><w:t/></w:r></w:fldSimple></w:p></w:tc></w:tr>"#;
-    let rows = [row("Alpha", ""), field.to_owned(), row("Charlie", "")];
-    let hidden = render(&rows, false);
-    let table = hidden.table.unwrap();
-    assert_eq!(table["block"]["rows"].as_array().unwrap().len(), 2);
-    assert_eq!(cell_rows(&hidden.primitives), vec![0, 2]);
+fn kept_rows(hidden: String) -> usize {
+    render(&[row("Alpha", ""), hidden, row("Charlie", "")], false)
+        .table
+        .unwrap()["block"]["rows"]
+        .as_array()
+        .unwrap()
+        .len()
+}
 
-    let filled = field.replace("<w:t/>", "<w:t>9 November 2026</w:t>");
-    let kept = render(&[row("Alpha", ""), filled, row("Charlie", "")], false);
+#[test]
+fn a_hidden_row_holding_only_a_vanished_empty_field_is_removed() {
+    let field = |r_pr: &str, result: &str| {
+        row_with_run(
+            &format!(r#"<w:fldSimple w:instr=" DATE "><w:r>{r_pr}{result}</w:r></w:fldSimple>"#),
+            HIDDEN,
+        )
+    };
+    let rows = [
+        row("Alpha", ""),
+        field(VANISH, "<w:t/>"),
+        row("Charlie", ""),
+    ];
+    let hidden = render(&rows, false);
     assert_eq!(
-        kept.table.unwrap()["block"]["rows"]
+        hidden.table.unwrap()["block"]["rows"]
             .as_array()
             .unwrap()
             .len(),
-        3
+        2
     );
+    assert_eq!(cell_rows(&hidden.primitives), vec![0, 2]);
+    assert_eq!(kept_rows(field("", "<w:t/>")), 3);
+    assert_eq!(kept_rows(field("", "<w:t>9 November 2026</w:t>")), 3);
+}
+
+#[test]
+fn a_hidden_row_keeps_a_field_mixing_vanished_and_visible_runs() {
+    let run = format!(
+        r#"<w:fldSimple w:instr=" DATE "><w:r>{VANISH}<w:t>Hidden</w:t></w:r><w:r><w:t>Shown</w:t></w:r></w:fldSimple>"#
+    );
+    assert_eq!(kept_rows(row_with_run(&run, HIDDEN)), 3);
+}
+
+#[test]
+fn a_hidden_row_keeps_a_visible_form_checkbox_without_a_cached_result() {
+    let run = r#"<w:r><w:fldChar w:fldCharType="begin"><w:ffData><w:name w:val="Check1"/><w:enabled/><w:calcOnExit w:val="0"/><w:checkBox><w:sizeAuto/><w:default w:val="0"/></w:checkBox></w:ffData></w:fldChar></w:r><w:r><w:instrText xml:space="preserve"> FORMCHECKBOX </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#;
+    assert_eq!(kept_rows(row_with_run(run, HIDDEN)), 3);
+}
+
+#[test]
+fn a_hidden_row_keeps_an_inline_control_holding_a_drawing() {
+    let run = r#"<w:sdt><w:sdtContent><w:r><w:drawing xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wp:inline><wp:extent cx="914400" cy="457200"/><wp:docPr id="7" name="Shape"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:spPr><a:prstGeom prst="rect"/><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></wps:spPr><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:sdtContent></w:sdt>"#;
+    assert_eq!(kept_rows(row_with_run(run, HIDDEN)), 3);
+}
+
+#[test]
+fn a_hidden_row_of_vanished_complex_field_runs_is_removed() {
+    let run = format!(
+        r#"<w:r>{VANISH}<w:fldChar w:fldCharType="begin"/></w:r><w:r>{VANISH}<w:instrText xml:space="preserve"> REF Target </w:instrText></w:r><w:r>{VANISH}<w:fldChar w:fldCharType="separate"/></w:r><w:r>{VANISH}<w:t>Result</w:t></w:r><w:r>{VANISH}<w:fldChar w:fldCharType="end"/></w:r>"#
+    );
+    assert_eq!(kept_rows(row_with_run(&run, HIDDEN)), 2);
+}
+
+#[test]
+fn a_hidden_row_starting_a_merge_into_a_visible_row_stays() {
+    let rendered = render(
+        &[
+            merged("Alpha", "", ""),
+            merged("Bravo", r#" w:val="restart""#, HIDDEN),
+            merged("", "", ""),
+        ],
+        false,
+    );
+    let table = rendered.table.unwrap();
+    let rows = table["block"]["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[1]["hidden"], json!(true));
+    assert_eq!(rows[1]["cells"][0]["rowSpan"], json!(2.0));
+    assert!(rows[2].get("sourceRow").is_none());
 }
 
 fn row_with_nested_table(tbl_pr: &str, tc_pr: &str) -> String {
@@ -343,7 +390,7 @@ fn row_with_nested_table(tbl_pr: &str, tc_pr: &str) -> String {
 }
 
 #[test]
-fn a_hidden_row_keeps_a_nested_table_that_paints() {
+fn a_hidden_row_keeps_a_nested_table() {
     let rows_of = |nested: String| render(&[row("Alpha", ""), nested, row("Charlie", "")], false);
     let count = |rendered: Rendered| {
         rendered.table.unwrap()["block"]["rows"]
@@ -361,5 +408,5 @@ fn a_hidden_row_keeps_a_nested_table_that_paints() {
         "",
     );
     assert_eq!(count(rows_of(bordered)), 3);
-    assert_eq!(count(rows_of(row_with_nested_table("", ""))), 2);
+    assert_eq!(count(rows_of(row_with_nested_table("", ""))), 3);
 }
