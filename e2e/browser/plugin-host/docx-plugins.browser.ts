@@ -280,6 +280,37 @@ test('plugin toolbar commands work by pointer, shortcut and the keyboard overflo
   await expect.poll(marks).toBe(3);
 });
 
+test('the gesture wrapper adds no box around a sidebar card and keeps its size and scrolling', async ({ page }) => {
+  await open(page);
+  await expect(page.getByTestId('probe-card')).toBeVisible();
+  const layout = await page.getByTestId('probe-card').evaluate((button) => {
+    const wrapper = button.closest<HTMLElement>('[data-plugin-activation]')!;
+    const slot = wrapper.parentElement!;
+    const card = wrapper.firstElementChild as HTMLElement;
+    card.style.width = '100%';
+    card.style.boxSizing = 'border-box';
+    card.style.maxHeight = '40px';
+    card.style.overflow = 'auto';
+    const tall = document.createElement('div');
+    tall.style.height = '400px';
+    card.appendChild(tall);
+    card.scrollTop = 120;
+    return {
+      display: getComputedStyle(wrapper).display,
+      boxes: wrapper.getClientRects().length,
+      cardWidth: card.getBoundingClientRect().width,
+      slotWidth: slot.getBoundingClientRect().width,
+      cardHeight: card.getBoundingClientRect().height,
+      scrollTop: card.scrollTop,
+    };
+  });
+  expect(layout.display).toBe('contents');
+  expect(layout.boxes).toBe(0);
+  expect(layout.cardWidth).toBeCloseTo(layout.slotWidth, 1);
+  expect(layout.cardHeight).toBeLessThanOrEqual(40);
+  expect(layout.scrollTop).toBe(120);
+});
+
 test('sidebar cards make room for comments and start afresh after replacement', async ({
   page,
 }) => {
