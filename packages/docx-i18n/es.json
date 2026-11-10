@@ -799,6 +799,8 @@
   },
   "a11y": {
     "pageLabel": "Página {number}",
+    "unbuiltPagesNotMirrored": "Las páginas {from} a {to} aún no están en la vista de lectura.",
+    "goToPage": "Ir a la página {number}",
     "headerLabel": "Encabezado de página",
     "footerLabel": "Pie de página",
     "chartNoData": "Sin datos",
