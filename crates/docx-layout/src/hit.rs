@@ -3806,6 +3806,159 @@ mod tests {
     }
 
     #[test]
+    fn caret_stops_for_every_run_shape() {
+        let glyph = |x: f64, cluster: u32, advance: f64| {
+            serde_json::json!({"id": 1, "x": x, "y": 200, "cluster": cluster, "advance": advance})
+        };
+        let one = |advance: f64| vec![glyph(100.0, 0, advance)];
+        let office = || {
+            vec![
+                glyph(100.0, 0, 10.0),
+                glyph(110.0, 1, 30.0),
+                glyph(140.0, 4, 10.0),
+                glyph(150.0, 5, 10.0),
+            ]
+        };
+        type Case<'a> = (&'a str, &'a str, i64, i64, Vec<serde_json::Value>, bool, Vec<(f64, i64)>);
+        let cases: Vec<Case> = vec![
+            (
+                "plain",
+                "ab",
+                10,
+                12,
+                vec![glyph(100.0, 0, 10.0), glyph(110.0, 1, 10.0)],
+                false,
+                vec![(100.0, 10), (110.0, 11), (120.0, 12)],
+            ),
+            (
+                "ligature",
+                "fi",
+                10,
+                12,
+                one(20.0),
+                false,
+                vec![(100.0, 10), (110.0, 11), (120.0, 12)],
+            ),
+            (
+                "ligature rtl",
+                "fi",
+                10,
+                12,
+                one(20.0),
+                true,
+                vec![(100.0, 12), (110.0, 11), (120.0, 10)],
+            ),
+            (
+                "cyrillic",
+                "\u{444}\u{438}",
+                10,
+                12,
+                one(20.0),
+                false,
+                vec![(100.0, 10), (110.0, 11), (120.0, 12)],
+            ),
+            (
+                "field",
+                "office",
+                10,
+                11,
+                office(),
+                false,
+                vec![(100.0, 10), (160.0, 11)],
+            ),
+            (
+                "field one cluster",
+                "office",
+                10,
+                11,
+                one(60.0),
+                false,
+                vec![(100.0, 10), (160.0, 11)],
+            ),
+            (
+                "field rtl",
+                "office",
+                10,
+                11,
+                office(),
+                true,
+                vec![(100.0, 11), (160.0, 10)],
+            ),
+            (
+                "joining",
+                "\u{644}\u{627}",
+                10,
+                12,
+                one(20.0),
+                true,
+                vec![(100.0, 12), (120.0, 10)],
+            ),
+            (
+                "combining mark",
+                "e\u{301}",
+                10,
+                12,
+                one(20.0),
+                false,
+                vec![(100.0, 10), (120.0, 12)],
+            ),
+            (
+                "emoji",
+                "\u{1F469}\u{200D}\u{1F4BB}",
+                10,
+                15,
+                one(20.0),
+                false,
+                vec![(100.0, 10), (120.0, 15)],
+            ),
+            (
+                "tab",
+                "\t",
+                10,
+                11,
+                one(36.0),
+                false,
+                vec![(100.0, 10), (136.0, 11)],
+            ),
+            (
+                "zero width",
+                " ",
+                10,
+                10,
+                one(5.0),
+                false,
+                vec![(100.0, 10), (105.0, 10)],
+            ),
+            (
+                "expanded",
+                "fi",
+                10,
+                13,
+                one(20.0),
+                false,
+                vec![(100.0, 10), (120.0, 13)],
+            ),
+        ];
+        for (name, text, doc_start, doc_end, glyphs, rtl, expected) in cases {
+            let glyphs: Vec<crate::display_list::PlacedGlyph> =
+                serde_json::from_value(serde_json::Value::Array(glyphs)).unwrap();
+            let stops: Vec<(i64, i64)> = glyph_caret_stops(text, &glyphs, rtl, doc_start, doc_end)
+                .iter()
+                .map(|stop| ((stop.x * 1000.0).round() as i64, stop.position))
+                .collect();
+            let expected: Vec<(i64, i64)> = expected
+                .iter()
+                .map(|(x, position)| ((x * 1000.0).round() as i64, *position))
+                .collect();
+            assert_eq!(stops, expected, "{name}");
+        }
+        let mut link = ligature_run("office", 10, office_glyphs());
+        link["href"] = "https://example.com".into();
+        let dl = page(serde_json::Value::Null, vec![link]);
+        assert!((caret_rect(&dl, 12).unwrap().x - 120.0).abs() < 0.01);
+    }
+
+    #[test]
     fn a_field_result_keeps_its_outer_edges() {
         let single_cluster = || {
             let mut glyphs = office_glyphs();

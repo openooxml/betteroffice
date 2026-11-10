@@ -4,4 +4,4 @@
 "@betteroffice/rust-crates": patch
 ---
 
-Text in Word documents no longer forms ligatures such as fi and ti unless the document asks for them, matching Word. Contextual alternates also follow the document's formatting. Inside a formed ligature, the caret and selection now land between its letters.
+Word documents no longer form ligatures such as fi unless the document asks for them, matching Word; contextual alternates follow the document too. The caret and selection land between a ligature's letters, and selecting a field result covers all of it.
