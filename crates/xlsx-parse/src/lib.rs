@@ -34,7 +34,9 @@ pub use chart::{
 };
 #[cfg(feature = "test-counters")]
 pub use chart::{chart_counters, chart_save_counters, reset_chart_counters};
-pub use drawing_anchors::GridShift;
+pub use drawing_anchors::{
+    GridShift, relationship_part_of, sheet_drawing_targets, sheet_drawings_may_move,
+};
 pub use facts_codec::{PackageFactsBuilder, PackageFactsEncoder, SNAPSHOT_RECORD_MAX_BYTES};
 pub use formula::translate_formula;
 pub use future_functions::{

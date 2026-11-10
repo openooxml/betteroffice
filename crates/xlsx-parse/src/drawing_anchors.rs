@@ -75,6 +75,39 @@ pub(crate) fn sheet_drawing_anchors(
         .collect()
 }
 
+/// The relationship part of the part at `path`, as a save looks it up.
+#[doc(hidden)]
+pub fn relationship_part_of(path: &str) -> String {
+    crate::chart::relationship_part_path(path)
+}
+
+/// The drawing parts the sheet at `sheet_path` relates to, from its relationship part's bytes,
+/// read the way a save reads them; `None` when the part cannot be read.
+#[doc(hidden)]
+pub fn sheet_drawing_targets(rels: &[u8], sheet_path: &str) -> Option<Vec<String>> {
+    crate::chart::sheet_drawing_paths(rels, sheet_path).ok()
+}
+
+/// Whether a row or column edit on the sheet at `sheet_path` could have to move or refuse
+/// anything its drawings hold, judged from `parts` alone, which must carry the sheet's
+/// relationship part (when it has one) and every drawing part it names. A drawing holding only
+/// chart frames needs nothing; one holding pictures or shapes, or markup this module cannot
+/// read, or a named part missing from `parts`, does.
+#[doc(hidden)]
+pub fn sheet_drawings_may_move(parts: &[(String, Vec<u8>)], sheet_path: &str) -> bool {
+    let rels_path = crate::chart::relationship_part_path(sheet_path);
+    let Some(rels) = crate::xml::find_part(parts, &rels_path) else {
+        return false;
+    };
+    let Some(targets) = sheet_drawing_targets(rels, sheet_path) else {
+        return true;
+    };
+    targets
+        .iter()
+        .any(|target| crate::xml::find_part(parts, target).is_none())
+        || !sheet_drawing_anchors(parts, sheet_path).is_empty()
+}
+
 /// Every anchor of a drawing part that no chart claims. Any child of the drawing that is not an
 /// anchor (an `mc:AlternateContent` wrapper, say) is markup that may name cells, so it makes the
 /// part unreadable rather than being left where it was.

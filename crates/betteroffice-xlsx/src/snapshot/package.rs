@@ -64,9 +64,11 @@ impl PackageSlot {
         .map_err(|failure| SnapshotError::new(failure.to_string()))
     }
 
-    /// Whether the source sheet `sheet` may relate to a drawing. A deferred package answers
-    /// from that sheet's relationship part alone, so a row or column edit on a sheet without
-    /// drawings does not rebuild it.
+    /// Whether a row or column edit on the source sheet `sheet` may have to move or refuse a
+    /// picture or shape. A deferred package answers without being rebuilt: it inflates only the
+    /// sheet's relationship part and the drawing parts it names, and reads them with the parsers
+    /// a save uses, so a drawing holding only charts leaves it deferred. Anything those parts
+    /// cannot settle answers yes, which rebuilds the package and lets the full check decide.
     pub(crate) fn sheet_may_hold_drawing(&self, sheet: usize) -> bool {
         let Self::Deferred {
             source,
@@ -82,19 +84,33 @@ impl PackageSlot {
         let Some(path) = PackageFactsView::from_facts(facts).source_sheet_part(sheet) else {
             return true;
         };
-        let path = path.trim_start_matches('/');
-        let rels = match path.rsplit_once('/') {
-            Some((directory, name)) => format!("{directory}/_rels/{name}.rels"),
-            None => format!("_rels/{path}.rels"),
+        let rels = xlsx_parse::relationship_part_of(path);
+        let rels = rels.trim_start_matches('/');
+        let inflate = |keep: &dyn Fn(&str) -> bool| {
+            ooxml_opc::unzip_parts_where(source.as_bytes(), u64::MAX, keep)
         };
-        match ooxml_opc::unzip_parts_where(source.as_bytes(), u64::MAX, |name| name == rels) {
-            Ok(parts) => parts.iter().any(|(_, bytes)| {
-                bytes
-                    .windows(b"/drawing\"".len())
-                    .any(|window| window == b"/drawing\"" || window == b"/drawing'")
-            }),
-            Err(_) => true,
+        let Ok(mut parts) = inflate(&|name| name.trim_start_matches('/') == rels) else {
+            return true;
+        };
+        let Some((_, rels_bytes)) = parts.first() else {
+            return false;
+        };
+        let Some(targets) = xlsx_parse::sheet_drawing_targets(rels_bytes, path) else {
+            return true;
+        };
+        if targets.is_empty() {
+            return false;
         }
+        match inflate(&|name| {
+            let name = name.trim_start_matches('/');
+            targets
+                .iter()
+                .any(|target| target.trim_start_matches('/') == name)
+        }) {
+            Ok(drawings) => parts.extend(drawings),
+            Err(_) => return true,
+        }
+        xlsx_parse::sheet_drawings_may_move(&parts, path)
     }
 
     pub(crate) fn materialize(&self) -> Result<&PreservedPackage> {
@@ -460,5 +476,89 @@ Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart"
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<PackageSlot>();
         assert_send_sync::<Workbook>();
+    }
+
+    /// A sheet whose relationship names its drawing through a character reference: the parser a
+    /// save uses still finds the drawing, so a deferred package is rebuilt and the edit judged
+    /// as it would be on an open one.
+    fn escaped_drawing_source() -> Vec<u8> {
+        let mut model = xlsx_model::Workbook::default();
+        let mut sheet = Sheet::new("Data");
+        for row in 0..12 {
+            sheet.set_cell(
+                CellRef::new(row, 0),
+                Cell {
+                    value: CellValue::Number { value: 1.0 },
+                    formula: None,
+                    style: None,
+                },
+            );
+        }
+        model.sheets = vec![sheet];
+        let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+        let worksheet = parts
+            .iter_mut()
+            .find(|(path, _)| path == "xl/worksheets/sheet1.xml")
+            .unwrap();
+        worksheet.1 = String::from_utf8(std::mem::take(&mut worksheet.1))
+            .unwrap()
+            .replace(
+                "</worksheet>",
+                r#"<drawing xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="draw"/></worksheet>"#,
+            )
+            .into_bytes();
+        parts.extend([
+            (
+                "xl/worksheets/_rels/sheet1.xml.rels".to_owned(),
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="draw" Target="../drawings/drawing1.xml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/draw&#x69;ng"/></Relationships>"#
+                    .to_vec(),
+            ),
+            (
+                "xl/drawings/drawing1.xml".to_owned(),
+                br#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"><xdr:twoCellAnchor><xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>4</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>3</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>6</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="2" name="Box"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr/></xdr:sp><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>"#
+                    .to_vec(),
+            ),
+        ]);
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    }
+
+    #[test]
+    fn an_escaped_drawing_relationship_is_judged_like_any_other_on_a_deferred_package() {
+        let bytes = escaped_drawing_source();
+        let mut workbook = Workbook::open(&bytes).unwrap();
+        workbook.defer_source_package_for_test().unwrap();
+        let error = workbook
+            .apply_ops(
+                vec![Op::DeleteRows {
+                    sheet: SheetId(0),
+                    at: 3,
+                    count: 5,
+                }],
+                CalculationOptions::default(),
+            )
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("xl/drawings/drawing1.xml"),
+            "{error}"
+        );
+        workbook
+            .apply_ops(
+                vec![Op::InsertRows {
+                    sheet: SheetId(0),
+                    at: 0,
+                    count: 2,
+                }],
+                CalculationOptions::default(),
+            )
+            .unwrap();
+        let saved = workbook.save().unwrap();
+        let drawing = ooxml_opc::unzip_parts(&saved)
+            .unwrap()
+            .into_iter()
+            .find(|(path, _)| path == "xl/drawings/drawing1.xml")
+            .map(|(_, bytes)| String::from_utf8(bytes).unwrap())
+            .unwrap();
+        assert!(drawing.contains("<xdr:row>6</xdr:row>"), "{drawing}");
+        assert!(drawing.contains("<xdr:row>8</xdr:row>"), "{drawing}");
     }
 }

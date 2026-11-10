@@ -689,21 +689,32 @@ pub(crate) fn sheet_drawings<'a>(
     let Some(rels) = find_part(parts, &relationship_part_path(sheet_path)) else {
         return Ok(Vec::new());
     };
-    let sheet_dir = directory_of(sheet_path);
     let mut drawings: Vec<(String, &[u8])> = Vec::new();
-    for (_, _, target) in parse_relationships(rels)?
-        .iter()
-        .filter(|(_, kind, _)| type_is(kind, TYPE_DRAWING))
-    {
-        let path = resolve_part_path(sheet_dir, target);
-        if drawings.iter().any(|(walked, _)| *walked == path) {
-            continue;
-        }
+    for path in sheet_drawing_paths(rels, sheet_path)? {
         if let Some(bytes) = find_part(parts, &path) {
             drawings.push((path, bytes));
         }
     }
     Ok(drawings)
+}
+
+/// The drawing parts a sheet's relationship part names, each once, resolved against the sheet.
+pub(crate) fn sheet_drawing_paths(
+    rels: &[u8],
+    sheet_path: &str,
+) -> Result<Vec<String>, ParseError> {
+    let sheet_dir = directory_of(sheet_path);
+    let mut paths: Vec<String> = Vec::new();
+    for (_, _, target) in parse_relationships(rels)?
+        .iter()
+        .filter(|(_, kind, _)| type_is(kind, TYPE_DRAWING))
+    {
+        let path = resolve_part_path(sheet_dir, target);
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    Ok(paths)
 }
 
 struct DrawingAnchor {
