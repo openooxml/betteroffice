@@ -52,6 +52,11 @@ import {
 
 type FontModule = typeof import('./commandDefaultFonts');
 
+/** @internal */
+const DEFAULT_FONT_MAX_ATTEMPTS = 3;
+/** @internal */
+const DEFAULT_FONT_RETRY_DELAYS_MS = [2000, 8000];
+
 const MIN_FONT_SIZE_PT = 1;
 const MAX_FONT_SIZE_PT = 4000;
 const PIPE_OPTION_KEYS = new Set(['maxFrameBytes', 'maxMessagesPerFrame', 'user']);
@@ -146,11 +151,16 @@ export function registerPresentationCommandHandlers(
   let defaultFonts: ReturnType<typeof createCommandDefaultFonts> | undefined;
   let creatingDefaultFonts: Promise<ReturnType<typeof createCommandDefaultFonts> | undefined> | undefined;
   let cancelDefaultFontImport: (() => void) | undefined;
+  let defaultFontImportAttempts = 0;
+  let defaultFontImportRetryAt = 0;
   let gatingFonts = false;
   const gatedDefaultFonts: DefaultFontLanding[] = [];
   let fontProvider: ReturnType<FontModule['commandFontProvider']['load']> | undefined;
   let fontCdn: FontCdnConfiguration | undefined;
-  const sessionFontProvider = (fonts: FontModule) => () => (fontProvider ??= fonts.commandFontProvider.load(fontCdn));
+  const sessionFontProvider = (fonts: FontModule) => () => (fontProvider ??= fonts.commandFontProvider.load(fontCdn).catch((error) => {
+    fontProvider = undefined;
+    throw error;
+  }));
   let requestedFonts: ((slideId?: string) => RequestedFontFace[]) | undefined;
   const suppliedFonts: { family: string }[] = [];
   let fontTimer: ReturnType<typeof setTimeout> | undefined;
@@ -241,6 +251,8 @@ export function registerPresentationCommandHandlers(
   function hasDefaultFonts(slideId?: string): boolean {
     if (disposed || !requestedFonts) return false;
     if (defaultFonts) return defaultFonts.hasPending(slideId);
+    if (!creatingDefaultFonts && (defaultFontImportAttempts >= DEFAULT_FONT_MAX_ATTEMPTS ||
+      Date.now() < defaultFontImportRetryAt)) return false;
     try {
       return requestedFonts(slideId).some((face) => face.scripts?.length || !suppliedFonts.some((font) =>
         font.family.trim().toLowerCase() === face.family.trim().toLowerCase()));
@@ -251,25 +263,20 @@ export function registerPresentationCommandHandlers(
     if (!hasDefaultFonts(slideId)) return [];
     if (defaultFonts) return defaultFonts.load(slideId);
     creatingDefaultFonts ??= new Promise<ReturnType<typeof createCommandDefaultFonts> | undefined>((resolve) => {
+      defaultFontImportAttempts++;
       let finished = false;
       const finish = (fonts?: ReturnType<typeof createCommandDefaultFonts>) => {
         if (finished) return;
         finished = true;
         clearTimeout(timer);
         cancelDefaultFontImport = undefined;
-        if (!fonts) {
-          requestedFonts = undefined;
-          if (fontTimer !== undefined) clearTimeout(fontTimer);
-          fontTimer = undefined;
-          fontSlides.clear();
-          collectDeckFonts = false;
-        }
         resolve(fonts);
       };
       const timer = setTimeout(() => finish(), 5000);
       cancelDefaultFontImport = () => finish();
-      void commandDefaultFontModule.load().then((fonts) => {
-        if (finished || disposed || !requestedFonts) { finish(); return; }
+      void Promise.resolve().then(() => commandDefaultFontModule.load()).then((fonts) => {
+        if (disposed || !requestedFonts) { finish(); return; }
+        const late = finished;
         defaultFonts = fonts.createCommandDefaultFonts(suppliedFonts, requestedFonts,
           (face) => {
             const font = { ...face, bytes: new Uint8Array(face.bytes) };
@@ -296,7 +303,13 @@ export function registerPresentationCommandHandlers(
           }, options.installDefaultFonts, () => presentationEnableBrowserCoverageFallback(presentation()),
           sessionFontProvider(fonts), slicedFonts);
         finish(defaultFonts);
-      }).catch(() => finish());
+        creatingDefaultFonts = undefined;
+        if (late) loadDefaultFonts();
+      }).catch(() => {
+        defaultFontImportRetryAt = Date.now() + (DEFAULT_FONT_RETRY_DELAYS_MS[defaultFontImportAttempts - 1] ?? Infinity);
+        creatingDefaultFonts = undefined;
+        finish();
+      });
     });
     return creatingDefaultFonts.then((fonts) => fonts?.load(slideId) ?? []);
   }

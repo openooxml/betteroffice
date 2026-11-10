@@ -442,6 +442,7 @@ fn projected_read_ranges_and_search_edits_are_refused_without_mutation() {
             let request = request(
                 &doc,
                 EditOperation::ReplaceText {
+                    runs: None,
                     target,
                     text: "X".into(),
                 },

@@ -33,7 +33,7 @@ async function loadHarness() {
   const provider = fontProvider(async (face) => new TextEncoder().encode(face.file).buffer);
   const modules: Record<string, unknown> = {
     jszip: JSZip,
-    '../../packages/fonts/src/cdn': { createFontProvider: () => provider },
+    'virtual:office-quality-fonts': { ...manifest, createFontProvider: () => provider },
     '../../packages/fonts/src/manifest': manifest,
     '../../packages/fonts/src/scripts': { SCRIPT_PATTERNS },
     './xlsx-styles': { normalFontIndex },

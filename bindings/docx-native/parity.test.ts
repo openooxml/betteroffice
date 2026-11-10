@@ -8,6 +8,7 @@ import * as nativeYrs from '@betteroffice/docx-native/yrs';
 import { NATIVE_ENTRIES } from '../../scripts/native-engine';
 import { expectSavedPartsEqual } from '../native-parity';
 import { documentFixture, exercisePackage } from './package-script';
+import { MARKED_RUN_CASES, SNIPPET_STEP, editSaveReopen, textRunFixture } from '../../packages/docx/src/yrs/__fixtures__/textRuns';
 
 for (const [entry, source] of Object.entries(NATIVE_ENTRIES.docx)) {
   test(`matches the wasm source exports at ${entry}`, async () => {
@@ -165,4 +166,42 @@ test('structured exports and content controls match through the package API', as
     expect(await nativeCore.findDocxContentControls(bytes, query)).toEqual(await wasmCore.findDocxContentControls(bytes, query));
     expect(await nativeCore.fontPreflight(bytes)).toEqual(await wasmCore.fontPreflight(bytes));
   }
+});
+
+test('formatted text runs apply, save and reopen the same through native and wasm', async () => {
+  const steps: wasmYrs.DocxEditStep[] = [
+    SNIPPET_STEP,
+    {
+      op: 'insertText',
+      target: { kind: 'paragraph', story: 'body', paraId: '00000003' },
+      at: 'end',
+      runs: MARKED_RUN_CASES.map(({ marks }, index) => ({ text: ` M${index}`, marks })),
+    },
+    {
+      op: 'insertParagraphs',
+      target: { story: 'body', paraId: '00000002' },
+      at: 'end',
+      paragraphs: [{ styleId: 'Heading1', runs: [{ text: 'Head', marks: { italic: true } }, { text: ' plain' }] }],
+    },
+  ];
+  const actual = await editSaveReopen(nativeYrs as unknown as typeof wasmYrs, steps);
+  const expected = await editSaveReopen(wasmYrs, steps);
+  expect(actual.result.ok && actual.result.receipts).toEqual(expected.result.ok && expected.result.receipts);
+  expect(actual.segments).toEqual(expected.segments);
+  expect(actual.reopened).toEqual(expected.reopened);
+  await expectSavedPartsEqual(actual.bytes, expected.bytes);
+
+  const refusals = await Promise.all([nativeYrs, wasmYrs].map(async (api) => {
+    const session = await api.createYrsSession({ clientId: 61 });
+    try {
+      session.seedFromDocx(await textRunFixture());
+      const result = session.applyEdits({
+        expectVersion: session.version(),
+        steps: [{ op: 'insertText', target: { kind: 'paragraph', story: 'body', paraId: '00000001' }, at: 'end', runs: [{ text: 'a', marks: { fontSizePt: 0.5 } }] }],
+      });
+      return result.ok ? result : result.failure;
+    } finally { session.destroy(); }
+  }));
+  expect(refusals[0]).toMatchObject({ code: 'invalid-step', stepIndex: 0 });
+  expect(refusals[0]).toEqual(refusals[1]);
 });

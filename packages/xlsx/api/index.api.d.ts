@@ -1146,6 +1146,8 @@ export type { XlsxDefinedNameOp, XlsxDefinedName, XlsxDefinedNamesRequest, XlsxD
 export type { ChartInfo, ChartSeriesInfo, ChartEdit, ChartMutation, ChartSeriesName } from './charts';
 export { fontPackDiagnostics } from './fontPackDiagnostics';
 export type { FontPackDiagnostic } from './fontPackDiagnostics';
+export { fontPreflight, preloadPreflightWasm } from './wasm/preflight';
+export type { FontPreflight, FontPreflightFace } from './wasm/preflight';
 
 // ---- render/canvas2d.d.ts ----
 /**
@@ -2969,6 +2971,34 @@ export declare function copyDecodedFace(face: {
     payload?: Uint8Array;
 }): FontDecodeResult;
 
+// ---- shared/office-session/fontPreflight.d.ts ----
+export type PreflightWasmInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
+/** @experimental */
+export interface FontPreflightFace {
+    family: string;
+    bold: boolean;
+    italic: boolean;
+    scripts: string[];
+}
+/** @experimental */
+export interface FontPreflight {
+    faces: FontPreflightFace[];
+    /** False when some font rules could not be resolved. */
+    complete: boolean;
+}
+/** @internal */
+export declare function createPreflightState(options: {
+    assetUrl: () => URL;
+    engineKind: 'wasm' | 'native';
+    initAsync: (input: {
+        module_or_path: PreflightWasmInput;
+    }) => Promise<unknown>;
+}): {
+    status(): "idle" | "loading" | "ready";
+    memory(): WebAssembly.Memory | undefined;
+    preload(input?: PreflightWasmInput): Promise<void>;
+};
+
 // ---- shared/office-session/host.d.ts ----
 import { type TaskExecutor } from './scheduler';
 import type { SessionTransport } from './transport';
@@ -4442,6 +4472,19 @@ export interface XlsxPngOptions {
      */
     fonts?: ReadonlyArray<XlsxFontFace>;
 }
+
+// ---- wasm/preflight.d.ts ----
+import { type FontPreflight, type PreflightWasmInput } from '../../../../shared/office-session/fontPreflight';
+export type { FontPreflight, FontPreflightFace } from '../../../../shared/office-session/fontPreflight';
+export declare const preflightWasmState: {
+    status(): "idle" | "loading" | "ready";
+    memory(): WebAssembly.Memory | undefined;
+    preload(input?: PreflightWasmInput): Promise<void>;
+};
+/** @experimental Load the font preflight wasm on demand. Idempotent. */
+export declare function preloadPreflightWasm(input?: PreflightWasmInput): Promise<void>;
+/** @experimental Font faces for the active sheet's A1:T50 region, without opening the engine. */
+export declare function fontPreflight(bytes: Uint8Array): Promise<FontPreflight>;
 
 // ---- workerSession.d.ts ----
 /** @experimental */
