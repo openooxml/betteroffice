@@ -2958,6 +2958,22 @@ mod pagination_rule_tests {
                 blocks.extend((4..10).map(|id| paragraph(id, 2, 20.0, json!({}))));
                 blocks
             }),
+            (
+                "keep chains across page starts",
+                (0..16)
+                    .map(|id| paragraph(id, 2, 20.0, json!({"keepNext": id % 4 != 3})))
+                    .collect(),
+            ),
+            ("hoisted shapes", {
+                let mut blocks = Vec::new();
+                for id in 0..10 {
+                    if id % 3 == 1 {
+                        blocks.push(hoisted_shape(&format!("shape-{id}"), "paragraph"));
+                    }
+                    blocks.push(paragraph(id, 2, 20.0, json!({})));
+                }
+                blocks
+            }),
             ("continuous sections", {
                 let section = |id: u32| {
                     json!({
