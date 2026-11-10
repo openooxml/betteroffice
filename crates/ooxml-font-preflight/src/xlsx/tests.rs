@@ -54,6 +54,48 @@ fn alternate(choice: &str, fallback: &str) -> String {
 }
 
 #[test]
+fn package_main_relationship_is_ignored() {
+    let package_rels = format!(
+        r#"<Relationships><Relationship Id="main" Type="{R}/officeDocument" Target="xl/other.xml"/></Relationships>"#
+    );
+    let workbook = format!(
+        r#"<workbook xmlns="{S}" xmlns:r="{R}"><sheets><sheet name="Real" sheetId="1" r:id="real"/></sheets></workbook>"#
+    );
+    let main_rels = format!(
+        r#"<Relationships><Relationship Id="real" Type="{R}/worksheet" Target="worksheets/real.xml"/></Relationships>"#
+    );
+    let bytes = zip(
+        &[
+            ("_rels/.rels", package_rels.as_bytes()),
+            ("xl/other.xml", workbook.as_bytes()),
+            ("xl/_rels/other.xml.rels", main_rels.as_bytes()),
+        ],
+        false,
+    );
+    assert_eq!(
+        xlsx_font_preflight(&bytes).unwrap_err(),
+        PreflightError::MissingPart
+    );
+    let sheet = worksheet(r#"<row r="1"><c r="A1"><v>1</v></c></row>"#, "");
+    let real = worksheet(r#"<row r="1"><c r="A1" s="1"><v>1</v></c></row>"#, "");
+    let bytes = fixture(
+        &sheet,
+        STYLES,
+        None,
+        &[
+            ("_rels/.rels", &package_rels),
+            ("xl/other.xml", &workbook),
+            ("xl/_rels/other.xml.rels", &main_rels),
+            ("xl/worksheets/real.xml", &real),
+        ],
+        false,
+    );
+    let result = xlsx_font_preflight(&bytes).unwrap();
+    assert!(result.complete);
+    assert_eq!(keys(&result), [("Base", false, false)]);
+}
+
+#[test]
 fn alternate_content_cells_follow_worksheet_read_order() {
     let first = r#"<c r="A1" s="2"><v>1</v></c>"#;
     let last = r#"<c r="A1" s="1"><v>2</v></c>"#;
@@ -275,6 +317,36 @@ fn cached_theme_scheme_name_matches_the_painter() {
 }
 
 #[test]
+fn theme_font_without_a_cached_name_is_incomplete() {
+    let workbook = format!(
+        r#"<workbook xmlns="{S}"><sheets><sheet name="Sheet" sheetId="1"/></sheets></workbook>"#
+    );
+    let rels = format!(
+        r#"<Relationships><Relationship Id="theme" Type="{R}/theme" Target="theme/one.xml"/></Relationships>"#
+    );
+    let sheet = worksheet(r#"<row r="1"><c r="A1"><v>1</v></c></row>"#, "");
+    let theme = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:fontScheme><a:minorFont><a:latin typeface="Theme"/></a:minorFont></a:fontScheme></a:themeElements></a:theme>"#;
+    let scan = |font: &str| {
+        let styles = STYLES.replace("<name val=\"Base\"/>", font);
+        xlsx_font_preflight(&zip(
+            &[
+                ("xl/workbook.xml", workbook.as_bytes()),
+                ("xl/_rels/workbook.xml.rels", rels.as_bytes()),
+                ("xl/worksheets/sheet1.xml", sheet.as_bytes()),
+                ("xl/styles.xml", styles.as_bytes()),
+                ("xl/theme/one.xml", theme.as_bytes()),
+            ],
+            false,
+        ))
+        .unwrap()
+    };
+    assert!(!scan("<scheme val=\"minor\"/>").complete);
+    let cached = scan("<name val=\"Cached\"/><scheme val=\"minor\"/>");
+    assert!(cached.complete);
+    assert_eq!(keys(&cached), [("Cached", false, false)]);
+}
+
+#[test]
 fn apply_font_false_and_missing_font_fall_back_without_bold() {
     let sheet = worksheet(r#"<row r="1"><c r="A1" s="3"><v>1</v></c></row>"#, "");
     let result = xlsx_font_preflight(&fixture(&sheet, STYLES, None, &[], false)).unwrap();
@@ -450,21 +522,114 @@ fn styles_fall_back_to_the_canonical_part_without_a_relationship() {
 }
 
 #[test]
+fn shared_strings_fall_back_to_the_canonical_part_without_a_relationship() {
+    let workbook = format!(
+        r#"<workbook xmlns="{S}"><sheets><sheet name="Sheet" sheetId="1"/></sheets></workbook>"#
+    );
+    let sheet = worksheet(r#"<row r="1"><c r="A1" t="s"><v>0</v></c></row>"#, "");
+    let strings = format!(r#"<sst xmlns="{S}"><si><t>漢</t></si></sst>"#);
+    let bytes = zip(
+        &[
+            ("xl/workbook.xml", workbook.as_bytes()),
+            ("xl/worksheets/sheet1.xml", sheet.as_bytes()),
+            ("xl/styles.xml", STYLES.as_bytes()),
+            ("xl/sharedStrings.xml", strings.as_bytes()),
+        ],
+        false,
+    );
+    let result = xlsx_font_preflight(&bytes).unwrap();
+    assert!(result.complete);
+    assert_eq!(keys(&result), [("Base", false, false)]);
+    assert_eq!(result.faces[0].scripts, ["cjk-sc"]);
+}
+
+#[test]
 fn sheet_drawings_are_incomplete() {
     let tail = format!(r#"<drawing xmlns:r="{R}" r:id="drawing"/>"#);
     let sheet = worksheet(r#"<row r="1"><c r="A1"><v>1</v></c></row>"#, &tail);
-    let result = xlsx_font_preflight(&fixture(&sheet, STYLES, None, &[], false)).unwrap();
+    let rels = format!(
+        r#"<Relationships><Relationship Id="drawing" Type="{R}/drawing" Target="../drawings/one.xml"/></Relationships>"#
+    );
+    let bytes = fixture(
+        &sheet,
+        STYLES,
+        None,
+        &[
+            ("xl/worksheets/_rels/active.xml.rels", &rels),
+            (
+                "xl/drawings/one.xml",
+                r#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"/>"#,
+            ),
+        ],
+        false,
+    );
+    let result = xlsx_font_preflight(&bytes).unwrap();
     assert_eq!(keys(&result), [("Base", false, false)]);
     assert!(!result.complete);
 }
 
 #[test]
+fn chart_relationship_in_a_sheet_drawing_is_incomplete() {
+    let tail = format!(r#"<drawing xmlns:r="{R}" r:id="drawing"/>"#);
+    let sheet = worksheet(r#"<row r="1"><c r="A1"><v>1</v></c></row>"#, &tail);
+    let sheet_rels = format!(
+        r#"<Relationships><Relationship Id="drawing" Type="{R}/drawing" Target="../drawings/one.xml"/></Relationships>"#
+    );
+    let drawing_rels = format!(
+        r#"<Relationships><Relationship Id="chart" Type="{R}/chart" Target="../charts/one.xml"/></Relationships>"#
+    );
+    let drawing = format!(
+        r#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="{R}"><xdr:twoCellAnchor><xdr:graphicFrame><a:graphic><a:graphicData><c:chart r:id="chart"/></a:graphicData></a:graphic></xdr:graphicFrame></xdr:twoCellAnchor></xdr:wsDr>"#
+    );
+    let bytes = fixture(
+        &sheet,
+        STYLES,
+        None,
+        &[
+            ("xl/worksheets/_rels/active.xml.rels", &sheet_rels),
+            ("xl/drawings/one.xml", &drawing),
+            ("xl/drawings/_rels/one.xml.rels", &drawing_rels),
+            (
+                "xl/charts/one.xml",
+                r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"/>"#,
+            ),
+        ],
+        false,
+    );
+    assert!(!xlsx_font_preflight(&bytes).unwrap().complete);
+}
+
+#[test]
+fn hyperlink_relationship_is_incomplete() {
+    let tail =
+        format!(r#"<hyperlinks xmlns:r="{R}"><hyperlink ref="A1" r:id="link"/></hyperlinks>"#);
+    let sheet = worksheet(r#"<row r="1"><c r="A1"><v>1</v></c></row>"#, &tail);
+    let rels = format!(
+        r#"<Relationships><Relationship Id="link" Type="{R}/hyperlink" Target="https://example.com" TargetMode="External"/></Relationships>"#
+    );
+    let bytes = fixture(
+        &sheet,
+        STYLES,
+        None,
+        &[("xl/worksheets/_rels/active.xml.rels", &rels)],
+        false,
+    );
+    assert!(!xlsx_font_preflight(&bytes).unwrap().complete);
+}
+
+#[test]
 fn active_chartsheet_never_reads_a_worksheet_by_position() {
+    for kind in ["chartsheet", "dialogsheet"] {
+        active_non_worksheet_is_incomplete(kind);
+    }
+}
+
+fn active_non_worksheet_is_incomplete(kind: &str) {
     let workbook = format!(
         r#"<workbook xmlns="{S}" xmlns:r="{R}"><sheets><sheet name="Chart" sheetId="1" r:id="chart"/><sheet name="Data" sheetId="2" r:id="data"/></sheets></workbook>"#
     );
     let rels = format!(
-        r#"<Relationships><Relationship Id="chart" Type="{R}/chartsheet" Target="chartsheets/sheet1.xml"/><Relationship Id="data" Type="{R}/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="styles" Type="{R}/styles" Target="styles.xml"/></Relationships>"#
+        r#"<Relationships><Relationship Id="chart" Type="{R}/{kind}" Target="chartsheets/sheet1.xml"/><Relationship Id="data" Type="{R}/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="styles" Type="{R}/styles" Target="styles.xml"/></Relationships>"#
     );
     let data = worksheet(r#"<row r="1"><c r="A1"><v>1</v></c></row>"#, "");
     let bytes = zip(
@@ -477,7 +642,7 @@ fn active_chartsheet_never_reads_a_worksheet_by_position() {
         ],
         false,
     );
-    assert!(!xlsx_font_preflight(&bytes).unwrap().complete);
+    assert!(!xlsx_font_preflight(&bytes).unwrap().complete, "{kind}");
 }
 
 #[test]

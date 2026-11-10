@@ -82,7 +82,7 @@ fn has(faces: &[(String, bool, bool)], family: &str) -> bool {
         .any(|(name, bold, italic)| name.eq_ignore_ascii_case(family) && !bold && !italic)
 }
 
-fn assert_parity(bytes: &[u8], wanted: &str) {
+fn assert_parity(bytes: &[u8], wanted: &str) -> ooxml_font_preflight::FontPreflight {
     let engine = engine_faces(bytes);
     assert!(
         has(&engine, wanted),
@@ -110,6 +110,7 @@ fn assert_parity(bytes: &[u8], wanted: &str) {
         has(&answered, wanted),
         "preflight does not name {wanted}: {answered:?}"
     );
+    preflight
 }
 
 fn rels(entries: &[(&str, &str)]) -> String {
@@ -186,7 +187,7 @@ fn notes_at_the_conventional_path_without_a_relationship() {
             ("word/styles.xml", styles("Base", "")),
             (path, xml),
         ]);
-        assert_parity(&bytes, family);
+        assert!(assert_parity(&bytes, family).complete);
     }
 }
 
@@ -214,7 +215,7 @@ fn main_part_named_by_the_package_relationship() {
         ),
         ("word/styles.xml", styles("Base", "")),
     ]);
-    assert_parity(&bytes, "MissingFont");
+    assert!(!assert_parity(&bytes, "MissingFont").complete);
 }
 
 #[test]
@@ -265,7 +266,7 @@ fn duplicate_numbering_ids_take_the_last_definition() {
                 format!(r#"<w:numbering xmlns:w="{W}">{definitions}</w:numbering>"#),
             ),
         ]);
-        assert_parity(&bytes, wanted);
+        assert!(assert_parity(&bytes, wanted).complete);
     }
 }
 
@@ -296,7 +297,7 @@ fn duplicate_theme_script_fonts_take_the_last_entry() {
             ),
         ),
     ]);
-    assert_parity(&bytes, "SecondFont");
+    assert!(assert_parity(&bytes, "SecondFont").complete);
 }
 
 #[test]
@@ -315,7 +316,7 @@ fn duplicate_style_id_takes_the_default_flag_of_the_last_definition() {
             ),
         ),
     ]);
-    assert_parity(&bytes, "Base");
+    assert!(assert_parity(&bytes, "Base").complete);
 }
 
 #[test]

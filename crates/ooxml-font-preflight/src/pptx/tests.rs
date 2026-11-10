@@ -3,6 +3,8 @@ use crate::test_support::zip;
 
 const P: &str = "http://schemas.openxmlformats.org/presentationml/2006/main";
 const A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+const D: &str = "http://schemas.openxmlformats.org/drawingml/2006/diagram";
+const DSP: &str = "http://schemas.microsoft.com/office/drawing/2008/diagram";
 const R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 const MC: &str = "http://schemas.openxmlformats.org/markup-compatibility/2006";
 
@@ -107,6 +109,94 @@ fn keys(result: &FontPreflight) -> Vec<(&str, bool, bool)> {
         .iter()
         .map(|face| (face.family.as_str(), face.bold, face.italic))
         .collect()
+}
+
+#[test]
+fn presentation_default_text_style_names_a_face() {
+    let slide = part(
+        "sld",
+        &shape("", "<a:p><a:r><a:t>Text</a:t></a:r></a:p>"),
+        "",
+    );
+    let bytes = fixture(
+        &slide,
+        &part("sldLayout", "", ""),
+        &part("sldMaster", "", ""),
+        &[],
+        false,
+    );
+    let result = pptx_font_preflight(&bytes, 0).unwrap();
+    assert!(result.complete);
+    assert_eq!(keys(&result), [("Default", false, false)]);
+}
+
+#[test]
+fn chart_relationship_is_incomplete() {
+    let slide = part(
+        "sld",
+        r#"<p:graphicFrame><a:graphic><a:graphicData><c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="chart"/></a:graphicData></a:graphic></p:graphicFrame>"#,
+        "",
+    );
+    let slide_rels = rels(&[
+        ("layout", "slideLayout", "../slideLayouts/one.xml"),
+        ("chart", "chart", "../charts/one.xml"),
+    ]);
+    let bytes = fixture(
+        &slide,
+        &part("sldLayout", "", ""),
+        &part("sldMaster", "", ""),
+        &[
+            ("ppt/slides/_rels/one.xml.rels", &slide_rels),
+            (
+                "ppt/charts/one.xml",
+                r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"/>"#,
+            ),
+        ],
+        false,
+    );
+    assert!(!pptx_font_preflight(&bytes, 0).unwrap().complete);
+}
+
+#[test]
+fn diagram_relationships_are_incomplete() {
+    let data = format!(r#"<d:dataModel xmlns:d="{D}"/>"#);
+    for (kind, root, namespace) in [
+        ("diagramData", "dataModel", D),
+        ("diagramDrawing", "drawing", DSP),
+        ("diagramLayout", "layoutDef", D),
+    ] {
+        let data_id = if kind == "diagramData" {
+            "input"
+        } else {
+            "data"
+        };
+        let graphic = format!(
+            r#"<p:graphicFrame><a:graphic><a:graphicData><d:relIds xmlns:d="{D}" r:dm="{data_id}" r:lo="input"/></a:graphicData></a:graphic></p:graphicFrame>"#
+        );
+        let slide = part("sld", &graphic, "");
+        let slide_rels = rels(&[
+            ("layoutPart", "slideLayout", "../slideLayouts/one.xml"),
+            ("data", "diagramData", "../diagrams/data.xml"),
+            ("input", kind, "../diagrams/input.xml"),
+        ])
+        .replace(
+            &format!("{R}/diagramDrawing"),
+            "http://schemas.microsoft.com/office/2007/relationships/diagramDrawing",
+        );
+        let input = format!(r#"<d:{root} xmlns:d="{namespace}"/>"#);
+        let bytes = fixture(
+            &slide,
+            &part("sldLayout", "", ""),
+            &part("sldMaster", "", ""),
+            &[
+                ("ppt/slides/_rels/one.xml.rels", &slide_rels),
+                ("ppt/diagrams/input.xml", &input),
+                ("ppt/diagrams/data.xml", &data),
+            ],
+            false,
+        );
+        assert!(!pptx_font_preflight(&bytes, 0).unwrap().complete, "{kind}");
+    }
 }
 
 #[test]
