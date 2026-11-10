@@ -5,7 +5,7 @@ use xlsx_model::Workbook as WorkbookModel;
 use xlsx_ops::Op;
 
 use super::{
-    PreservedStateHistory, StagedApply, Workbook, WorkbookMode, authority_error,
+    DeferredChange, PreservedStateHistory, StagedApply, Workbook, WorkbookMode, authority_error,
     retain_array_formulas, retain_formula_caches, validate_collaboration_size,
     validate_collaboration_state,
 };
@@ -33,13 +33,17 @@ pub(super) struct PreparedCommit {
 enum PreparedAuthority {
     Staged(Box<StagedLocalUpdate>),
     RangeFormat(Box<RangeFormatSync>),
+    /// Nothing staged: the change is logged for the deferred authority on adoption.
+    Deferred {
+        origin: SyncOrigin,
+    },
 }
 
 impl PreparedCommit {
     pub(super) fn update(&self) -> Option<&[u8]> {
         match &self.authority {
             PreparedAuthority::Staged(authority) => Some(&authority.update),
-            PreparedAuthority::RangeFormat(_) => None,
+            PreparedAuthority::RangeFormat(_) | PreparedAuthority::Deferred { .. } => None,
         }
     }
 }
@@ -54,6 +58,15 @@ impl Workbook {
         history: CommitHistory,
         baseline: Option<&[u8]>,
     ) -> Result<PreparedCommit> {
+        if baseline.is_none() && self.defers_staging() {
+            return Ok(PreparedCommit {
+                ops,
+                model: staged.model,
+                inverse: staged.inverse,
+                authority: PreparedAuthority::Deferred { origin },
+                history,
+            });
+        }
         if !self.is_collaborative()
             && baseline.is_none()
             && let Some(authority) = self.authority()?.prepare_range_format_sync(&ops, origin)
@@ -132,16 +145,43 @@ impl Workbook {
             (true, false) => LocalHistory::SheetOrder,
             (false, _) => LocalHistory::None,
         };
-        let built = self.authority.get_mut()?;
         let update = match authority {
-            PreparedAuthority::Staged(authority) => {
-                built.adopt_local_update(*authority, local_history)
+            PreparedAuthority::Deferred { origin } => {
+                let deferred = match (
+                    self.authority.built.get(),
+                    self.authority.deferred.as_deref_mut(),
+                ) {
+                    (None, Some(deferred)) => deferred,
+                    _ => {
+                        return Err(crate::Error::CollaborativeState(
+                            "prepared deferred commit is stale: the authority was built since"
+                                .into(),
+                        ));
+                    }
+                };
+                let styles = deferred.shared_styles(&model.styles);
+                deferred.changes.push(DeferredChange::Commit {
+                    ops: ops.clone(),
+                    origin,
+                    styles,
+                    history: local_history,
+                });
+                None
             }
-            PreparedAuthority::RangeFormat(authority) => {
-                built.commit_range_format_sync(*authority, local_history)
-            }
+            PreparedAuthority::Staged(authority) => self
+                .authority
+                .get_mut()?
+                .adopt_local_update(*authority, local_history)
+                .map_err(authority_error)?,
+            PreparedAuthority::RangeFormat(authority) => self
+                .authority
+                .get_mut()?
+                .commit_range_format_sync(*authority, local_history)
+                .map_err(authority_error)?,
+        };
+        if self.authority.built.get().is_some() {
+            self.authority.deferred = None;
         }
-        .map_err(authority_error)?;
         self.install_model_with_ops(model, &ops)?;
         self.adopt_rebased_proposals(rebased);
         if let Some(structure) = new_structure {
