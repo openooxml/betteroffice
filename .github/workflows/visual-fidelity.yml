@@ -142,7 +142,7 @@ jobs:
         id: runner
         run: echo "image=$ImageVersion" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "24"
 
@@ -259,7 +259,7 @@ jobs:
         with:
           bun-version: "1.4.3"
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "24"
 
@@ -394,7 +394,7 @@ jobs:
           path: .source/native-source
           persist-credentials: false
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "24"
 
@@ -539,7 +539,7 @@ jobs:
           name: docx-native-fonts
           path: ${{ runner.temp }}/native-fonts
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "24"
 
@@ -639,7 +639,7 @@ jobs:
           ref: ${{ matrix.channel == 'published' && needs.prepare.outputs.xlsx-published-source || needs.prepare.outputs.source-sha }}
           path: .source/native-source
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "24"
       - uses: dtolnay/rust-toolchain@stable
@@ -705,7 +705,7 @@ jobs:
         with:
           name: xlsx-native-commit
           path: ${{ runner.temp }}/native/commit
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "24"
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
@@ -785,7 +785,7 @@ jobs:
           ref: ${{ matrix.channel == 'published' && needs.prepare.outputs.pptx-published-source || needs.prepare.outputs.source-sha }}
           path: .source/native-source
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "24"
       - uses: dtolnay/rust-toolchain@stable
@@ -847,7 +847,7 @@ jobs:
         with:
           name: pptx-native-commit
           path: ${{ runner.temp }}/native/commit
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "24"
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
@@ -951,7 +951,7 @@ jobs:
         if: inputs.private_corpus
         env: *private-read
         run: node scripts/office-quality/private-store.mjs get visual-fidelity-plan "$RUNNER_TEMP/fidelity-plan"
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "24"
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
@@ -1035,7 +1035,7 @@ jobs:
           ref: ${{ matrix.source }}
           path: .source/roundtrip-source
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "24"
       - uses: dtolnay/rust-toolchain@stable
@@ -1101,7 +1101,7 @@ jobs:
         with:
           name: roundtrip-native-${{ matrix.format }}-commit
           path: ${{ runner.temp }}/roundtrip-native/commit
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "24"
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
@@ -1226,7 +1226,7 @@ jobs:
           name: ${{ matrix.format }}-native-commit
           path: ${{ runner.temp }}/native/commit
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "24"
 
@@ -1302,7 +1302,7 @@ jobs:
           SOURCE_SHA: ${{ needs.prepare.outputs.source-sha }}
         run: test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "24"
 
