@@ -1,4 +1,5 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { budgetShards } from './shards.mjs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { fetchAsset } from './asset-cache.mjs';
@@ -11,16 +12,7 @@ import { corpusOrigin } from './samples.mjs';
 export const METHOD = 'xlsx-libreoffice-print-ranges-v1';
 
 export function xlsxFidelityShards(plan) {
-  const samples = plan.samples.filter(sample => sample.format === 'xlsx');
-  const shards = Array.from({ length: Math.min(4, samples.length) }, () => []);
-  const weights = shards.map(() => 0);
-  for (const sample of [...samples].sort((a, b) =>
-    b.metadata.reference.pages - a.metadata.reference.pages || a.id.localeCompare(b.id))) {
-    const index = weights.indexOf(Math.min(...weights));
-    shards[index].push(sample.id);
-    weights[index] += sample.metadata.reference.pages;
-  }
-  return shards;
+  return budgetShards('xlsx-fidelity', plan.samples.filter(sample => sample.format === 'xlsx')).map(shard => shard.samples);
 }
 
 export function mergeXlsxFidelity(plan, report, parts, planHash) {

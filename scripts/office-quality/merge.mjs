@@ -18,7 +18,7 @@ import { validateComparison } from './results.mjs';
 import { digest, docxShards, mergeDocxBenchmarks } from './docx-benchmark.mjs';
 import { mergeXlsxFidelity, xlsxFidelityShards } from './xlsx-fidelity.mjs';
 import { mergeRoundtrips, roundtripShards } from './roundtrip.mjs';
-import { mergePptxBenchmark } from './pptx-benchmark.mjs';
+import { mergePptxBenchmark, pptxShards } from './pptx-benchmark.mjs';
 import { mergeXlsxBenchmarks, xlsxShards } from './xlsx-benchmark.mjs';
 import { combineShardReports, measureShards } from './measure-shards.mjs';
 import { failureClusters } from './failures.mjs';
@@ -246,8 +246,9 @@ export async function mergeFromPaths({
     report = mergeDocxBenchmarks(plan, report, benchmarks, digest(planBytes));
   }
   if (requirePptxBenchmark && plan.formats.includes('pptx')) {
-    const benchmark = JSON.parse(await readFile(resolve(parts, 'pptx-benchmark-report', 'report.json'), 'utf8'));
-    report = mergePptxBenchmark(plan, report, benchmark, digest(planBytes));
+    const benchmarks = await Promise.all(pptxShards(plan).map(async (_, shard) =>
+      JSON.parse(await readFile(resolve(parts, `pptx-benchmark-report-${shard}`, 'report.json'), 'utf8'))));
+    report = mergePptxBenchmark(plan, report, benchmarks, digest(planBytes));
   }
   if (requireXlsxBenchmark && xlsxShards(plan).length) {
     const benchmarks = await Promise.all(xlsxShards(plan).map(async (_, shard) =>

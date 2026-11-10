@@ -74,7 +74,7 @@ use xlsx_render::{
 #[cfg(feature = "raster")]
 use crate::RenderedPng;
 use crate::authority::{
-    AuthorityError, FILTER_DATABASE_NAME, HistoryUpdate, MAX_STATE_VECTOR_ENTRIES,
+    AuthorityError, FILTER_DATABASE_NAME, HistoryUpdate, LocalHistory, MAX_STATE_VECTOR_ENTRIES,
     SnapshotAdoption, StagedLocalUpdate, StagedUpdate, SyncOrigin, WorkbookAuthority,
     WorkbookStructure, is_collaborative_local_layout_op, is_structural_op,
     validate_hyperlink_edit_baseline,
@@ -512,6 +512,74 @@ struct AuthoritySlot {
 struct DeferredAuthority {
     legacy_dimensions: Vec<xlsx_parse::LegacySheetDimensions>,
     legacy_styles: Option<Stylesheet>,
+    /// Committed changes the authority has not seen, replayed in order when it is built.
+    changes: Vec<DeferredChange>,
+    styles: Option<Arc<Stylesheet>>,
+}
+
+/// A change committed while the authority was deferred, with what staging it would have taken.
+enum DeferredChange {
+    Commit {
+        ops: Vec<Op>,
+        origin: SyncOrigin,
+        styles: Arc<Stylesheet>,
+        history: LocalHistory,
+    },
+    Apply {
+        ops: Vec<Op>,
+        origin: SyncOrigin,
+        styles: Arc<Stylesheet>,
+    },
+}
+
+impl DeferredAuthority {
+    fn shared_styles(&mut self, styles: &Stylesheet) -> Arc<Stylesheet> {
+        match &self.styles {
+            Some(last) if last.same_state(styles) => Arc::clone(last),
+            _ => {
+                let styles = Arc::new(styles.clone());
+                self.styles = Some(Arc::clone(&styles));
+                styles
+            }
+        }
+    }
+
+    /// Stages each change exactly as the commit that made it would have.
+    fn replay(&self, authority: &mut WorkbookAuthority) -> Result<()> {
+        for change in &self.changes {
+            match change {
+                DeferredChange::Commit {
+                    ops,
+                    origin,
+                    styles,
+                    history,
+                } => {
+                    if let Some(sync) = authority.prepare_range_format_sync(ops, *origin) {
+                        authority
+                            .commit_range_format_sync(sync, *history)
+                            .map_err(authority_error)?;
+                    } else {
+                        let staged = authority
+                            .stage_standalone_ops_v1(ops, *origin, styles, None)
+                            .map_err(authority_error)?;
+                        authority
+                            .adopt_local_update(staged, *history)
+                            .map_err(authority_error)?;
+                    }
+                }
+                DeferredChange::Apply {
+                    ops,
+                    origin,
+                    styles,
+                } => {
+                    authority
+                        .apply_ops_with_update(ops, *origin, styles, false)
+                        .map_err(authority_error)?;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl AuthoritySlot {
@@ -899,6 +967,8 @@ impl Workbook {
                 deferred: Some(Box::new(DeferredAuthority {
                     legacy_dimensions: legacy_dimensions.to_vec(),
                     legacy_styles: legacy_styles.0.cloned(),
+                    changes: Vec::new(),
+                    styles: None,
                 })),
             };
             (slot, model, None)
@@ -1038,7 +1108,7 @@ impl Workbook {
         else {
             return Err(missing_authority());
         };
-        let (authority, _, _) = WorkbookAuthority::from_source_with_projection(
+        let (mut authority, _, _) = WorkbookAuthority::from_source_with_projection(
             package.materialize()?.original_workbook(),
             None,
             &deferred.legacy_dimensions,
@@ -1046,7 +1116,31 @@ impl Workbook {
             &[],
         )
         .map_err(authority_error)?;
+        deferred.replay(&mut authority)?;
         Ok(self.authority.built.get_or_init(|| authority))
+    }
+
+    /// Whether a standalone commit leaves the authority unbuilt and logs the change instead:
+    /// only while nothing observes the updates the authority would encode.
+    fn defers_staging(&self) -> bool {
+        self.authority.built.get().is_none()
+            && self.authority.deferred.is_some()
+            && !self.has_update_consumers()
+    }
+
+    fn defer_apply(&mut self, ops: &[Op], origin: SyncOrigin) -> Result<()> {
+        let deferred = self
+            .authority
+            .deferred
+            .as_deref_mut()
+            .ok_or_else(missing_authority)?;
+        let styles = deferred.shared_styles(&self.model.styles);
+        deferred.changes.push(DeferredChange::Apply {
+            ops: ops.to_vec(),
+            origin,
+            styles,
+        });
+        Ok(())
     }
 
     fn ensure_authority(&mut self) -> Result<()> {
@@ -2607,13 +2701,17 @@ impl Workbook {
         let reached = reached_sheets(&ops);
         let before = (scope != CalculationScope::Full)
             .then(|| CalculationInputs::of(&self.model, &reached).into_owned());
-        let consumers = self.has_update_consumers();
-        self.ensure_authority()?;
-        let update = self
-            .authority
-            .get_mut()?
-            .apply_ops_with_update(&ops, SyncOrigin::Undo, &self.model.styles, consumers)
-            .map_err(authority_error)?;
+        let update = if self.defers_staging() {
+            self.defer_apply(&ops, SyncOrigin::Undo)?;
+            None
+        } else {
+            let consumers = self.has_update_consumers();
+            self.ensure_authority()?;
+            self.authority
+                .get_mut()?
+                .apply_ops_with_update(&ops, SyncOrigin::Undo, &self.model.styles, consumers)
+                .map_err(authority_error)?
+        };
         let prior_styles = self.pre_edit_cell_styles(&ops);
         let delta = self.geometry_delta(&ops);
         let rebased = self.rebased_proposals(&ops);
@@ -2667,13 +2765,17 @@ impl Workbook {
         let reached = reached_sheets(&ops);
         let before = (scope != CalculationScope::Full)
             .then(|| CalculationInputs::of(&self.model, &reached).into_owned());
-        let consumers = self.has_update_consumers();
-        self.ensure_authority()?;
-        let update = self
-            .authority
-            .get_mut()?
-            .apply_ops_with_update(&ops, SyncOrigin::Redo, &self.model.styles, consumers)
-            .map_err(authority_error)?;
+        let update = if self.defers_staging() {
+            self.defer_apply(&ops, SyncOrigin::Redo)?;
+            None
+        } else {
+            let consumers = self.has_update_consumers();
+            self.ensure_authority()?;
+            self.authority
+                .get_mut()?
+                .apply_ops_with_update(&ops, SyncOrigin::Redo, &self.model.styles, consumers)
+                .map_err(authority_error)?
+        };
         let prior_styles = self.pre_edit_cell_styles(&ops);
         let delta = self.geometry_delta(&ops);
         let rebased = self.rebased_proposals(&ops);
@@ -3568,13 +3670,17 @@ impl Workbook {
             self.update_sheet_info_cache(ops, &prior_styles);
             Some(staged.update)
         } else {
-            let consumers = self.has_update_consumers();
-            self.ensure_authority()?;
-            let update = self
-                .authority
-                .get_mut()?
-                .apply_ops_with_update(ops, SyncOrigin::User, &self.model.styles, consumers)
-                .map_err(authority_error)?;
+            let update = if self.defers_staging() {
+                self.defer_apply(ops, SyncOrigin::User)?;
+                None
+            } else {
+                let consumers = self.has_update_consumers();
+                self.ensure_authority()?;
+                self.authority
+                    .get_mut()?
+                    .apply_ops_with_update(ops, SyncOrigin::User, &self.model.styles, consumers)
+                    .map_err(authority_error)?
+            };
             let transaction = Transaction::new(ops.to_vec(), Provenance::User);
             self.apply_model_history(|undo, model| undo.commit(model, &transaction))?;
             self.bump_model_epoch();
@@ -7120,5 +7226,12 @@ impl Workbook {
 
     pub(crate) fn authority_is_built_for_test(&self) -> bool {
         self.authority.built.get().is_some()
+    }
+
+    pub(crate) fn deferred_changes_for_test(&self) -> usize {
+        self.authority
+            .deferred
+            .as_ref()
+            .map_or(0, |deferred| deferred.changes.len())
     }
 }
