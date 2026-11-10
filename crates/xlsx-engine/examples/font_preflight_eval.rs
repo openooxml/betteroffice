@@ -66,7 +66,7 @@ fn engine_faces(bytes: &[u8]) -> Result<Value, String> {
     .map_err(|_| "invalid display list")?;
     let mut faces = std::collections::BTreeMap::new();
     for command in display["commands"].as_array().into_iter().flatten() {
-        if command["op"] != "text" || command["chart"] == true {
+        if command["op"] != "text" {
             continue;
         }
         let Some(family) = command["fontFamily"]
