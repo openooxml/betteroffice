@@ -74,9 +74,6 @@ pub struct PageFlowGeometry {
     pub footnote_reserved_heights: Option<Arc<std::collections::BTreeMap<String, f64>>>,
     /// Whether this page opened a column region that placement balances.
     pub balanced_region: bool,
-    /// Whether the continuous section in force frames its text horizontally,
-    /// which depends on the sections before it.
-    pub continuous_horizontal_frame: bool,
 }
 
 /// Current state of a page being laid out.
@@ -522,7 +519,6 @@ impl Paginator {
         paginator.displayed_parity_offset = geometry.continued_parity_offset;
         paginator.section_page_float_bands = geometry.section_page_float_bands.clone();
         paginator.balanced_page = geometry.balanced_region.then_some(0);
-        paginator.continuous_horizontal_frame = geometry.continuous_horizontal_frame;
         Ok(paginator)
     }
 
@@ -604,7 +600,6 @@ impl Paginator {
                 .states
                 .last()
                 .is_some_and(|state| self.balanced_page == Some(state.page_index)),
-            continuous_horizontal_frame: self.continuous_horizontal_frame,
         }
     }
 

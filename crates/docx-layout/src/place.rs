@@ -101,6 +101,9 @@ struct ConvergenceInput<'a, F: PartialEq> {
     dirty: Option<&'a [usize]>,
     /// Whether placement may skip the clean pages between dirty blocks.
     skippable: bool,
+    /// Per section, whether a changed section break before it reaches it through
+    /// continuous breaks, which can change how the section frames its text.
+    reframed: &'a [bool],
     keep_with_next: &'a crate::keep_together::KeepWithNextScan,
     measured: &'a [MeasuredBlock],
     previous_pages: &'a [crate::types::Page],
@@ -300,6 +303,11 @@ impl<F: PartialEq> ConvergenceInput<'_, F> {
         // A lead skip's drop depends on the floats right before its paragraph,
         // which a retained suffix would not re-check.
         if checkpoint.block_index <= self.dirty_index
+            || self
+                .reframed
+                .get(checkpoint.section_index)
+                .copied()
+                .unwrap_or(false)
             || self
                 .measured
                 .get(checkpoint.block_index..)
@@ -861,6 +869,21 @@ pub fn layout_document_incremental_ranges<F: PartialEq>(
             .skip(1)
             .any(|&index| matches!(input.measured[index].block, LayoutBlock::SectionBreak(_)));
 
+    let changed_break = |section: usize| {
+        plan.break_indices.get(section).is_some_and(|&index| {
+            changed
+                .as_ref()
+                .is_none_or(|changed| changed.binary_search(&index).is_ok())
+        })
+    };
+    let reframed = (0..plan.section_configs.len()).fold(Vec::new(), |mut reframed, section| {
+        let reaches = section > 0
+            && break_type_after_section(&plan, section - 1) == Some(SectionBreakType::Continuous)
+            && (changed_break(section - 1) || reframed[section - 1]);
+        reframed.push(reaches);
+        reframed
+    });
+
     // Place each dirty stretch in turn without touching the retained pages, so
     // a failure leaves the caller's layout as it was.
     let mut segments: Vec<(usize, Vec<crate::types::Page>, Option<Convergence>)> = Vec::new();
@@ -923,6 +946,7 @@ pub fn layout_document_incremental_ranges<F: PartialEq>(
             dirty_index: segment_dirty,
             dirty: dirty.as_deref(),
             skippable,
+            reframed: &reframed,
             keep_with_next: &plan.keep_with_next,
             measured: &input.measured,
             previous_pages: &previous_layout.pages,
@@ -2934,8 +2958,26 @@ mod pagination_rule_tests {
                 blocks.extend((4..10).map(|id| paragraph(id, 2, 20.0, json!({}))));
                 blocks
             }),
+            ("continuous sections", {
+                let section = |id: u32| {
+                    json!({
+                        "block": {"kind": "sectionBreak", "id": format!("section-{id}"),
+                                  "type": "continuous",
+                                  "margins": {"top": 10, "right": 10, "bottom": 10, "left": 10}},
+                        "measure": {"kind": "sectionBreak"},
+                    })
+                };
+                let mut blocks = Vec::new();
+                for id in 0..9 {
+                    blocks.push(paragraph(id, 3, 20.0, json!({})));
+                    if id % 3 == 2 {
+                        blocks.push(section(id));
+                    }
+                }
+                blocks
+            }),
         ];
-        let changes: [(&str, fn(&mut serde_json::Value)); 5] = [
+        let changes: [(&str, fn(&mut serde_json::Value)); 6] = [
             ("taller lines", |block| {
                 if let Some(lines) = block["measure"]["lines"].as_array_mut() {
                     for line in lines {
@@ -2960,6 +3002,12 @@ mod pagination_rule_tests {
                     block["block"]["attrs"]["styleId"] = json!("Other");
                 }
             }),
+            ("section margins", |block| {
+                if block["block"]["kind"] == "sectionBreak" {
+                    block["block"]["margins"] =
+                        json!({"top": 10, "right": 25, "bottom": 10, "left": 25});
+                }
+            }),
             ("float position", |block| {
                 if block["block"]["kind"] == "shape" {
                     block["block"]["position"]["vertical"]["posOffset"] = json!(25);
@@ -2974,10 +3022,17 @@ mod pagination_rule_tests {
                     if after == *blocks {
                         continue;
                     }
-                    incremental_matches_full(
+                    incremental_matches_full_with(
                         &format!("{fixture}: {change} at {index}"),
                         blocks.clone(),
                         after,
+                        if *fixture == "continuous sections" {
+                            |input| {
+                                input.options.body_break_type = Some(SectionBreakType::Continuous)
+                            }
+                        } else {
+                            |_| {}
+                        },
                     );
                 }
             }
