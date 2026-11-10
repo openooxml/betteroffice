@@ -49,6 +49,7 @@ describe('formatted runs in host edits', () => {
   test('each mark saves its run property and survives a reopen and second save', async () => {
     for (const { marks, saved, off = [] } of MARKED_RUN_CASES) {
       const { xml, resavedXml } = await editSaveReopen(yrs, [insert('00000001', [{ text: ' Z', marks }])]);
+      if (marks.strike === 'dblStrike') console.log(`dblStrike saved rPr: ${savedRunProperties(xml, ' Z')}`);
       for (const document of [xml, resavedXml]) {
         const properties = savedRunProperties(document, ' Z');
         for (const [name, attributes] of saved) {
