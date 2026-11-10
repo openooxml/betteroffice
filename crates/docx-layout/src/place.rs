@@ -815,22 +815,28 @@ pub fn layout_document_incremental_ranges<F: PartialEq>(
             && resumable(checkpoint, &input.measured, &previous_layout.pages)
     });
     let resume_page = resume.map_or(0, |resume| resume.page_index);
-    let dirty: Option<Vec<usize>> =
-        (previous_fingerprints.len() == next_fingerprints.len()).then(|| {
+    let changed: Option<Vec<usize>> = (previous_fingerprints.len() == next_fingerprints.len())
+        .then(|| {
             previous_fingerprints
                 .iter()
                 .zip(next_fingerprints)
                 .enumerate()
                 .filter(|(_, (previous, next))| previous != next)
-                .flat_map(|(index, _)| [index, index + 1])
-                .filter(|&index| index < next_fingerprints.len())
-                .fold(Vec::new(), |mut dirty, index| {
-                    if dirty.last() != Some(&index) {
-                        dirty.push(index);
-                    }
-                    dirty
-                })
+                .map(|(index, _)| index)
+                .collect()
         });
+    let dirty: Option<Vec<usize>> = changed.as_ref().map(|changed| {
+        changed
+            .iter()
+            .flat_map(|&index| [index, index + 1])
+            .filter(|&index| index < next_fingerprints.len())
+            .fold(Vec::new(), |mut dirty, index| {
+                if dirty.last() != Some(&index) {
+                    dirty.push(index);
+                }
+                dirty
+            })
+    });
     // Clean stretches between dirty blocks are skipped only where a page start
     // alone decides what follows: one column throughout, no reserved note space,
     // and no later section break that changed.
@@ -849,7 +855,7 @@ pub fn layout_document_incremental_ranges<F: PartialEq>(
             .footnote_reserved_heights
             .as_ref()
             .is_none_or(|heights| heights.is_empty())
-        && !dirty
+        && !changed
             .iter()
             .flatten()
             .skip(1)
@@ -2733,6 +2739,20 @@ mod pagination_rule_tests {
         before: Vec<serde_json::Value>,
         after: Vec<serde_json::Value>,
     ) {
+        incremental_matches_full_with(name, before, after, |_| {});
+    }
+
+    fn incremental_matches_full_with(
+        name: &str,
+        before: Vec<serde_json::Value>,
+        after: Vec<serde_json::Value>,
+        adjust: fn(&mut Input),
+    ) {
+        let input = |measured| {
+            let mut value = input(measured);
+            adjust(&mut value);
+            value
+        };
         let previous_fingerprints = layout_fingerprints(&input(before.clone()));
         let next_fingerprints = layout_fingerprints(&input(after.clone()));
         let mut previous_input = input(before);
@@ -2780,6 +2800,87 @@ mod pagination_rule_tests {
         ];
         blocks.extend((3..9).map(|id| paragraph(id, 2, 20.0, json!({}))));
         blocks
+    }
+
+    #[test]
+    fn a_margin_change_two_sections_back_reframes_a_continuous_section() {
+        let section = |margin: u32| {
+            json!({
+                "block": {"kind": "sectionBreak", "id": "section", "type": "continuous",
+                          "margins": {"top": 10, "right": margin, "bottom": 10, "left": margin}},
+                "measure": {"kind": "sectionBreak"},
+            })
+        };
+        let blocks = |margin| {
+            vec![
+                paragraph(0, 5, 20.0, json!({})),
+                section(margin),
+                paragraph(1, 5, 20.0, json!({})),
+                paragraph(2, 5, 20.0, json!({})),
+            ]
+        };
+        incremental_matches_full_with("margins 10 to 20", blocks(10), blocks(20), |input| {
+            input.options.body_break_type = Some(SectionBreakType::Continuous);
+        });
+    }
+
+    #[test]
+    fn an_unchanged_section_break_after_an_edit_keeps_the_pages_between_edits_skipped() {
+        let blocks = |edited: bool| -> Vec<serde_json::Value> {
+            (0..100)
+                .map(|id| {
+                    if id == 2 {
+                        json!({"block": {"kind": "sectionBreak", "id": 2, "type": "nextPage"},
+                               "measure": {"kind": "sectionBreak"}})
+                    } else {
+                        let attrs = if edited && (id == 1 || id == 98) {
+                            json!({"keepLines": false})
+                        } else {
+                            json!({})
+                        };
+                        paragraph(id, 5, 20.0, attrs)
+                    }
+                })
+                .collect()
+        };
+        let fingerprints = |blocks: &[serde_json::Value]| -> Vec<String> {
+            blocks.iter().map(|block| block.to_string()).collect()
+        };
+        let before = blocks(false);
+        let after = blocks(true);
+        let mut previous_input = input(before.clone());
+        let previous = layout_document_checkpointed(&mut previous_input).unwrap();
+        let mut previous_layout = previous.layout;
+        let incremental = layout_document_incremental(
+            &mut input(after.clone()),
+            &mut previous_layout,
+            &previous.checkpoints,
+            &fingerprints(&before),
+            &fingerprints(&after),
+            1,
+        )
+        .unwrap();
+        let full = layout_document_checkpointed(&mut input(after)).unwrap();
+        assert_eq!(
+            page_fragments(&incremental.layout),
+            page_fragments(&full.layout)
+        );
+        assert!(
+            incremental.placed_blocks < 20,
+            "{}",
+            incremental.placed_blocks
+        );
+    }
+
+    #[test]
+    fn an_edit_that_adds_a_block_after_a_changed_page_break_matches_a_fresh_layout() {
+        let mut after = section_mark_fixture(false);
+        after.push(paragraph(20, 2, 20.0, json!({})));
+        incremental_matches_full(
+            "flag flip and an added block",
+            section_mark_fixture(true),
+            after,
+        );
     }
 
     #[test]
