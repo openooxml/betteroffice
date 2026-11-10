@@ -68,6 +68,7 @@ test('engine cell location is null or equal to the projection after every step o
     const report: string[] = [];
     const violations: string[] = [];
     const kinds: Record<string, number> = {};
+    let firstThrowLogged = -1;
     const RAW_OPS = new Set(['detachControl', 'detachTable', 'moveTable', 'shareCell', 'reattachControl']);
     const familyTotals: Record<string, { violations: number; projectionThrows: number; peerMissingSteps: number; invalidSeeds: number; peerSkipped: number; reused: number; built: number }> = {};
     const cacheCounts = () => (selection as { cellLocationCacheCounts?: () => { built: number; reused: number } }).cellLocationCacheCounts?.() ?? { built: 0, reused: 0 };
@@ -102,6 +103,7 @@ test('engine cell location is null or equal to the projection after every step o
       let remoteSteps = 0;
       let reseeds = 0;
       let keyMoves = 0;
+      const history: string[] = [];
       let rebuildSameKey = 0;
       const lastBuildKey = new Map<string, string>();
       const syncToPeer = () => peer?.applyUpdate(local.encodeStateAsUpdate(peer.encodeStateVector()));
@@ -198,7 +200,13 @@ test('engine cell location is null or equal to the projection after every step o
             lastBuildKey.set(root, currentKey);
           }
           if (fast) answered++;
-          if (typeof projected === 'string' && projected.startsWith('throw:')) totals.projectionThrows++;
+          if (typeof projected === 'string' && projected.startsWith('throw:')) {
+            totals.projectionThrows++;
+            if (family === 'valid' && firstThrowLogged !== seed) {
+              firstThrowLogged = seed;
+              console.log(`VALID-FIRST-THROW seed=${seed} step=${step} op=${op} story=${story} ${projected} history=${history.slice(-8).join(' > ')}`);
+            }
+          }
           const bad = (fast !== null && JSON.stringify(fast) !== JSON.stringify(projected)) || (projected === null && fast !== null) ||
             JSON.stringify(live) !== JSON.stringify(projected);
           if (bad) {
@@ -254,7 +262,7 @@ test('engine cell location is null or equal to the projection after every step o
         if (remote) { syncToPeer(); remoteSteps++; }
         try {
           const result = steps[op]!();
-          if (result === undefined || result === false) refused++; else { applied++; ops[op] = (ops[op] ?? 0) + 1; }
+          if (result === undefined || result === false) refused++; else { applied++; ops[op] = (ops[op] ?? 0) + 1; history.push(`${step}:${remote ? 'remote:' : ''}${op}`); }
         } catch (error) {
           if (isEngineTrap(error)) throw error;
           refused++;
