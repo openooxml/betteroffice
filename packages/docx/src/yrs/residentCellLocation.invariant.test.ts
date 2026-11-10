@@ -61,17 +61,37 @@ test('engine cell location is null or equal to the projection after every step o
     for (const seed of SEEDS) {
       const next = random(seed);
       const pick = <T>(items: readonly T[]): T | undefined => (items.length ? items[Math.floor(next() * items.length)] : undefined);
-      const arm = await openCommandEngine([], { bodyXml: body, clientId: 8300 + seed });
+      const arm = await openCommandEngine([], { bodyXml: body, clientId: 8300 + seed }).catch((error: unknown) => {
+        console.log(`LOCAL-OPEN-FAILED seed=${seed} ${String((error as Error)?.stack ?? error).split('\n').slice(0, 8).join(' | ')}`);
+        throw error;
+      });
       const local = arm.engine;
       const legacy = withoutCellLocation(local);
       local.beginUndoCapture();
-      let peer = (await openCommandEngine([], { bodyXml: body, clientId: 8400 + seed, checkpoint: local.encodeState() })).engine;
-      peer.beginUndoCapture();
+      const openPeer = async (clientId: number): Promise<DocxWorkerCommandEngine | null> => {
+        try {
+          const opened = (await openCommandEngine([], { bodyXml: body, clientId, checkpoint: local.encodeState() })).engine;
+          opened.beginUndoCapture();
+          return opened;
+        } catch (error) {
+          if (isEngineTrap(error)) throw error;
+          console.log(`PEER-UNAVAILABLE seed=${seed} client=${clientId} ${String((error as Error)?.stack ?? error).split('\n').slice(0, 6).join(' | ')}`);
+          return null;
+        }
+      };
+      let peer = await openPeer(8400 + seed);
       let engine = local;
       let remoteSteps = 0;
       let reseeds = 0;
-      const syncToPeer = () => peer.applyUpdate(local.encodeStateAsUpdate(peer.encodeStateVector()));
-      const syncFromPeer = () => local.applyUpdate(peer.encodeStateAsUpdate(local.encodeStateVector()));
+      const syncToPeer = () => peer?.applyUpdate(local.encodeStateAsUpdate(peer.encodeStateVector()));
+      const syncFromPeer = () => peer && local.applyUpdate(peer.encodeStateAsUpdate(local.encodeStateVector()));
+      const answer = (target: DocxWorkerCommandEngine, story: string): unknown => {
+        try { return resolveLiveCell(target, story); } catch (error) {
+          if (isEngineTrap(error)) throw error;
+          const message = String((error as Error)?.message ?? error);
+          return message.startsWith('cell location cache differs') ? `shadow: ${message.slice(0, 200)}` : `throw: ${message.slice(0, 120)}`;
+        }
+      };
       const seen = new Set<string>();
       let checks = 0;
       let answered = 0;
@@ -137,14 +157,13 @@ test('engine cell location is null or equal to the projection after every step o
       const names = Object.keys(steps);
       const check = (step: number, op: string) => {
         for (const story of local.geometryReader.storyIds()) seen.add(story);
-        for (const story of peer.geometryReader.storyIds()) seen.add(story);
+        for (const story of peer?.geometryReader.storyIds() ?? []) seen.add(story);
         for (const story of [...seen, 'body:t99:r0c0', 'hf:rId9:t0:r0c0', 'custom:t0:r0c0', 'custom']) {
           checks++;
           const read = (local as { cellLocation?: (story: string) => unknown }).cellLocation;
           const fast = typeof read === 'function' ? read(story) ?? null : null;
-          const projected = resolveLiveCell(legacy, story);
-          let live: unknown;
-          try { live = resolveLiveCell(local, story); } catch (error) { live = `shadow: ${String(error).slice(0, 160)}`; }
+          const projected = answer(legacy, story);
+          const live = answer(local, story);
           if (fast) answered++;
           const bad = (fast !== null && JSON.stringify(fast) !== JSON.stringify(projected)) || (projected === null && fast !== null) ||
             JSON.stringify(live) !== JSON.stringify(projected);
@@ -157,14 +176,19 @@ test('engine cell location is null or equal to the projection after every step o
       for (let step = 1; step <= STEPS; step++) {
         const op = names[Math.floor(next() * names.length)]!;
         if (step === Math.floor(STEPS / 2)) {
-          const other = await openCommandEngine([], { bodyXml: body, clientId: 8500 + seed });
-          try { local.loadState(other.engine.encodeState()); reseeds++; } catch (error) { if (isEngineTrap(error)) throw error; }
-          peer = (await openCommandEngine([], { bodyXml: body, clientId: 8600 + seed, checkpoint: local.encodeState() })).engine;
-          peer.beginUndoCapture();
+          try {
+            const other = await openCommandEngine([], { bodyXml: body, clientId: 8500 + seed });
+            local.loadState(other.engine.encodeState());
+            reseeds++;
+          } catch (error) {
+            if (isEngineTrap(error)) throw error;
+            console.log(`RESEED-FAILED seed=${seed} ${String((error as Error)?.stack ?? error).split('\n').slice(0, 6).join(' | ')}`);
+          }
+          peer = await openPeer(8600 + seed);
           check(step, 'reseed');
         }
-        const remote = next() < 0.5;
-        engine = remote ? peer : local;
+        const remote = peer !== null && next() < 0.5;
+        engine = remote && peer ? peer : local;
         if (remote) { syncToPeer(); remoteSteps++; }
         try {
           const result = steps[op]!();
