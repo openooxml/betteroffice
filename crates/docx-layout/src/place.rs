@@ -101,9 +101,6 @@ struct ConvergenceInput<'a, F: PartialEq> {
     dirty: Option<&'a [usize]>,
     /// Whether placement may skip the clean pages between dirty blocks.
     skippable: bool,
-    /// Per section, whether a changed section break before it reaches it through
-    /// continuous breaks, which can change how the section frames its text.
-    reframed: &'a [bool],
     keep_with_next: &'a crate::keep_together::KeepWithNextScan,
     measured: &'a [MeasuredBlock],
     previous_pages: &'a [crate::types::Page],
@@ -303,11 +300,6 @@ impl<F: PartialEq> ConvergenceInput<'_, F> {
         // A lead skip's drop depends on the floats right before its paragraph,
         // which a retained suffix would not re-check.
         if checkpoint.block_index <= self.dirty_index
-            || self
-                .reframed
-                .get(checkpoint.section_index)
-                .copied()
-                .unwrap_or(false)
             || self
                 .measured
                 .get(checkpoint.block_index..)
@@ -869,21 +861,6 @@ pub fn layout_document_incremental_ranges<F: PartialEq>(
             .skip(1)
             .any(|&index| matches!(input.measured[index].block, LayoutBlock::SectionBreak(_)));
 
-    let changed_break = |section: usize| {
-        plan.break_indices.get(section).is_some_and(|&index| {
-            changed
-                .as_ref()
-                .is_none_or(|changed| changed.binary_search(&index).is_ok())
-        })
-    };
-    let reframed = (0..plan.section_configs.len()).fold(Vec::new(), |mut reframed, section| {
-        let reaches = section > 0
-            && break_type_after_section(&plan, section - 1) == Some(SectionBreakType::Continuous)
-            && (changed_break(section - 1) || reframed[section - 1]);
-        reframed.push(reaches);
-        reframed
-    });
-
     // Place each dirty stretch in turn without touching the retained pages, so
     // a failure leaves the caller's layout as it was.
     let mut segments: Vec<(usize, Vec<crate::types::Page>, Option<Convergence>)> = Vec::new();
@@ -946,7 +923,6 @@ pub fn layout_document_incremental_ranges<F: PartialEq>(
             dirty_index: segment_dirty,
             dirty: dirty.as_deref(),
             skippable,
-            reframed: &reframed,
             keep_with_next: &plan.keep_with_next,
             measured: &input.measured,
             previous_pages: &previous_layout.pages,
@@ -2766,12 +2742,24 @@ mod pagination_rule_tests {
         incremental_matches_full_with(name, before, after, |_| {});
     }
 
+    fn section_break(id: &str, kind: &str, margins: Option<(u32, u32)>) -> serde_json::Value {
+        let mut block = json!({"kind": "sectionBreak", "id": id, "type": kind});
+        if let Some((top, side)) = margins {
+            block["margins"] = json!({"top": top, "right": side, "bottom": 10, "left": side});
+        }
+        json!({"block": block, "measure": {"kind": "sectionBreak"}})
+    }
+
+    fn continuous_body(input: &mut Input) {
+        input.options.body_break_type = Some(SectionBreakType::Continuous);
+    }
+
     fn incremental_matches_full_with(
         name: &str,
         before: Vec<serde_json::Value>,
         after: Vec<serde_json::Value>,
         adjust: fn(&mut Input),
-    ) {
+    ) -> Option<usize> {
         let input = |measured| {
             let mut value = input(measured);
             adjust(&mut value);
@@ -2787,7 +2775,17 @@ mod pagination_rule_tests {
             .zip(&next_fingerprints)
             .position(|(previous, next)| previous != next)
         else {
-            return;
+            return None;
+        };
+        // A changed section break also changes the section it closes, so the
+        // caller restarts at that section's start, as the editor engine does.
+        let dirty = if after[dirty]["block"]["kind"] == "sectionBreak" {
+            after[..dirty]
+                .iter()
+                .rposition(|block| block["block"]["kind"] == "sectionBreak")
+                .map_or(0, |index| index + 1)
+        } else {
+            dirty
         };
         let mut previous_layout = previous.layout;
         let incremental = layout_document_incremental(
@@ -2805,6 +2803,7 @@ mod pagination_rule_tests {
             page_fragments(&full.layout),
             "{name}: incremental placement differs from a fresh one"
         );
+        Some(incremental.placed_blocks)
     }
 
     fn section_mark_fixture(ineligible: bool) -> Vec<serde_json::Value> {
@@ -2905,6 +2904,67 @@ mod pagination_rule_tests {
             section_mark_fixture(true),
             after,
         );
+    }
+
+    #[test]
+    fn a_margin_change_inherited_across_a_next_page_break_reframes_a_later_continuous_section() {
+        for (first, second) in [
+            ("nextPage", "continuous"),
+            ("continuous", "nextPage"),
+            ("nextPage", "nextPage"),
+            ("continuous", "continuous"),
+        ] {
+            let blocks = |side: u32| {
+                let mut blocks = vec![paragraph(0, 5, 20.0, json!({}))];
+                blocks.push(section_break("a", first, Some((10, side))));
+                blocks.push(paragraph(1, 5, 20.0, json!({})));
+                blocks.push(section_break("b", second, None));
+                blocks.extend((2..6).map(|id| paragraph(id, 5, 20.0, json!({}))));
+                blocks
+            };
+            incremental_matches_full_with(
+                &format!("{first} then {second}"),
+                blocks(10),
+                blocks(20),
+                continuous_body,
+            );
+        }
+    }
+
+    #[test]
+    fn a_closing_break_turning_continuous_reframes_its_own_section() {
+        let blocks = |kind: &str| {
+            let mut blocks = vec![paragraph(0, 2, 20.0, json!({}))];
+            blocks.push(section_break("a", "nextPage", Some((10, 10))));
+            blocks.push(paragraph(1, 5, 20.0, json!({"pageBreakBefore": true})));
+            blocks.extend((2..8).map(|id| paragraph(id, 5, 20.0, json!({}))));
+            blocks.push(section_break("b", kind, Some((10, 20))));
+            blocks.extend((8..10).map(|id| paragraph(id, 5, 20.0, json!({}))));
+            blocks
+        };
+        for (before, after) in [("nextPage", "continuous"), ("continuous", "nextPage")] {
+            incremental_matches_full_with(
+                &format!("{before} to {after}"),
+                blocks(before),
+                blocks(after),
+                continuous_body,
+            );
+        }
+    }
+
+    #[test]
+    fn a_top_margin_change_on_a_short_first_section_still_converges_in_the_next() {
+        let blocks = |top: u32| {
+            let mut blocks = vec![paragraph(0, 2, 20.0, json!({}))];
+            blocks.push(section_break("a", "continuous", Some((top, 10))));
+            blocks.push(paragraph(1, 5, 20.0, json!({"pageBreakBefore": true})));
+            blocks.extend((2..40).map(|id| paragraph(id, 5, 20.0, json!({}))));
+            blocks
+        };
+        let placed =
+            incremental_matches_full_with("top margin", blocks(10), blocks(15), continuous_body)
+                .unwrap();
+        assert!(placed < 10, "placed {placed} of 41 blocks");
     }
 
     #[test]
