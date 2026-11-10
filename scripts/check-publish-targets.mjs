@@ -302,6 +302,42 @@ export async function verifyPublished({
   return results.some(({ found }) => !found) ? 1 : 0;
 }
 
+const BUMP_ORDER = { none: 0, patch: 1, minor: 2, major: 3 };
+
+/** Major bumps in a changesets release plan that no changeset asked for, each with the peer range that forced it. */
+export function unaskedMajors(plan, workspaces = workspaceEntries()) {
+  const asked = new Map();
+  for (const changeset of plan.changesets) {
+    for (const { name, type } of changeset.releases) {
+      if (BUMP_ORDER[type] > BUMP_ORDER[asked.get(name) ?? 'none']) asked.set(name, type);
+    }
+  }
+  const releases = new Map(plan.releases.map((release) => [release.name, release]));
+  const manifests = new Map(workspaces.map(({ manifest }) => [manifest.name, manifest]));
+  const unasked = plan.releases.filter(({ name, type }) => type === 'major' && asked.get(name) !== 'major');
+  return unasked.map(({ name, oldVersion, newVersion }) => {
+    const causes = [];
+    for (const [dependency, range] of Object.entries(manifests.get(name)?.peerDependencies ?? {})) {
+      const release = releases.get(dependency);
+      if (!release || release.type === 'none' || release.type === 'patch') continue;
+      const resolved = dependencyRange(range, release.oldVersion);
+      if (!satisfies(release.newVersion, resolved)) {
+        causes.push(`peer ${dependency}@${range} does not cover its next version ${release.newVersion}`);
+      }
+    }
+    return { name, oldVersion, newVersion, causes };
+  });
+}
+
+export async function checkPlan({ out = console, plan, workspaces = workspaceEntries() } = {}) {
+  const resolved = plan ?? await createRequire(require.resolve('@changesets/cli'))('@changesets/get-release-plan').default(ROOT);
+  const majors = unaskedMajors(resolved, workspaces);
+  for (const { name, oldVersion, newVersion, causes } of majors) {
+    out.error(`${name} ${oldVersion} -> ${newVersion} is a major bump no changeset asked for${causes.length ? `: ${causes.join('; ')}` : ' (raised with its fixed group)'}`);
+  }
+  return majors.length ? 1 : 0;
+}
+
 export async function checkCrates({
   registry = CRATES_REGISTRY,
   out = console,
@@ -330,9 +366,9 @@ export async function checkCrates({
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const [mode, ...rest] = process.argv.slice(2);
-  const modes = { '--npm': checkNpm, '--crates': checkCrates, '--verify-published': verifyPublished };
+  const modes = { '--npm': checkNpm, '--crates': checkCrates, '--verify-published': verifyPublished, '--plan': checkPlan };
   if (rest.length > 0 || !Object.hasOwn(modes, mode)) {
-    console.error('check-publish-targets.mjs: expected exactly one of --npm or --crates or --verify-published');
+    console.error('check-publish-targets.mjs: expected exactly one of --npm, --crates, --verify-published or --plan');
     process.exit(2);
   }
   process.exit(await modes[mode]());

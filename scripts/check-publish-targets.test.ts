@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { checkCrates, checkNpm, nativeReleaseVersions, siblingReferences, verifyPublished } from './check-publish-targets.mjs';
+import { checkCrates, checkNpm, checkPlan, nativeReleaseVersions, unaskedMajors, siblingReferences, verifyPublished } from './check-publish-targets.mjs';
 import { publishedCrates, publishedPackageVersions, workspaceEntries } from './published-packages.mjs';
 import { RUST_PUBLISH_CRATES } from './rust-crates.mjs';
 
@@ -468,11 +468,13 @@ describe('release wiring', () => {
     expect(guards.map((step: any) => step.run.trim())).toEqual([
       'node scripts/check-publish-targets.mjs --crates',
       'node scripts/check-publish-targets.mjs --npm',
+      'node scripts/check-publish-targets.mjs --plan',
       'node scripts/check-publish-targets.mjs --verify-published'
     ]);
     expect(guards.map((step: any) => step.if)).toEqual([
       "steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_CRATES != 'true'",
       "steps.pending.outputs.publishing == 'true'",
+      "steps.pending.outputs.publishing != 'true'",
       "always() && steps.pending.outputs.publishing == 'true'"
     ]);
   });
@@ -622,4 +624,41 @@ describe('the mode argument', () => {
     expect(gets.sort()).toEqual(packages.map(({ name, version }) => `${name}/${version}`).sort());
     expect(heads.sort()).toEqual(packages.map(({ name, version }) => `${name}@${version}/package.json`).sort());
   }, SPAWN_BUDGET_MS);
+});
+
+describe('release plan', () => {
+  const fixture = (peer: string) => [
+    { directory: '/fixture/fonts', manifest: { name: '@betteroffice/fonts', version: '0.4.2', peerDependencies: { '@betteroffice/fonts-cjk': peer } } },
+    { directory: '/fixture/fonts-cjk', manifest: { name: '@betteroffice/fonts-cjk', version: '0.4.2' } }
+  ];
+  const plan = (type: 'minor' | 'major') => ({
+    changesets: [{ id: 'a', summary: '', releases: [{ name: '@betteroffice/fonts-cjk', type: 'minor' }, { name: '@betteroffice/fonts', type: 'minor' }] }],
+    releases: [
+      { name: '@betteroffice/fonts', type, oldVersion: '0.4.2', newVersion: type === 'major' ? '1.0.0' : '0.5.0', changesets: ['a'] },
+      { name: '@betteroffice/fonts-cjk', type, oldVersion: '0.4.2', newVersion: type === 'major' ? '1.0.0' : '0.5.0', changesets: ['a'] }
+    ],
+    preState: undefined
+  });
+
+  test('a major bump no changeset asked for is named with the peer range that forced it', async () => {
+    const majors = unaskedMajors(plan('major'), fixture('workspace:*'));
+    expect(majors.map(({ name }) => name)).toEqual(['@betteroffice/fonts', '@betteroffice/fonts-cjk']);
+    expect(majors[0]!.causes).toEqual(['peer @betteroffice/fonts-cjk@workspace:* does not cover its next version 1.0.0']);
+    expect(majors[1]!.causes).toEqual([]);
+    const lines: string[] = [];
+    expect(await checkPlan({ plan: plan('major'), workspaces: fixture('workspace:*'), out: { log: () => {}, error: (line: string) => lines.push(line) } })).toBe(1);
+    expect(lines[0]).toContain('@betteroffice/fonts 0.4.2 -> 1.0.0 is a major bump no changeset asked for: peer @betteroffice/fonts-cjk@workspace:*');
+    expect(lines[1]).toContain('(raised with its fixed group)');
+  });
+
+  test('minor bumps inside a caret peer range pass', async () => {
+    expect(unaskedMajors(plan('minor'), fixture('workspace:^0'))).toEqual([]);
+  });
+
+  test('the pending changesets in this repository plan no unrequested major bump', async () => {
+    const lines: string[] = [];
+    const status = await checkPlan({ out: { log: () => {}, error: (line: string) => lines.push(line) } });
+    expect(lines).toEqual([]);
+    expect(status).toBe(0);
+  });
 });

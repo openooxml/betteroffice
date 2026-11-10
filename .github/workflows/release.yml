@@ -114,6 +114,12 @@ jobs:
         if: steps.pending.outputs.publishing == 'true'
         run: node scripts/check-publish-targets.mjs --npm
 
+      # A peer range a bump leaves turns its dependents major, and a fixed group
+      # carries that to every member: refuse a release PR nobody asked to be major.
+      - name: Check the release plan for unrequested major bumps
+        if: steps.pending.outputs.publishing != 'true'
+        run: node scripts/check-publish-targets.mjs --plan
+
       - name: Publish Rust crates
         if: steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_CRATES != 'true'
         env:
