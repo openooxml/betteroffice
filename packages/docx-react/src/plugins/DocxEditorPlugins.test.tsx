@@ -12,7 +12,7 @@ if (ownsDom) GlobalRegistrator.register();
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import { configureDefaultFonts } from '@betteroffice/docx/layout';
 import type { AsyncReplicaAdapter, CollaborationReplica } from '@betteroffice/docx/collaboration';
-import { encodeUpdate } from '@betteroffice/docx/collaboration/protocol';
+import { encodeSyncStep2, encodeUpdate } from '@betteroffice/docx/collaboration/protocol';
 import {
   createYrsSession,
   takePreloadedResidentEngineWorker,
@@ -46,6 +46,7 @@ import {
   type DocxPluginError,
   type DocxPluginEvent,
   type DocxPluginGeometry,
+  type DocxPluginSelection,
   type DocxAnchorGeometryResult,
   type DocxAnchorRect,
   type DocxGeometryTarget,
@@ -2617,6 +2618,12 @@ describe('DocxEditor plugins (worker engine)', () => {
 
 
 type MatrixEngine = 'DI' | 'DL' | 'DP' | 'DV';
+type MatrixSelectionPublication = { resolvedKey: string; cause?: 'remote' | 'seed' };
+type MatrixSelectionDelivery = {
+  event: Extract<DocxPluginEvent, { type: 'selection-change' | 'selection-settle' }>;
+  publication: MatrixSelectionPublication;
+  at: number;
+};
 
 function expectSelectionRange(
   selected: DocxAnchorGeometryResult,
@@ -2647,8 +2654,8 @@ function expectSelectionRange(
   expect(selectedAnchor).toEqual({ ...expectedCaret!, pageIndex: rangeAnchor.pageIndex });
 }
 
-async function matrixDocument() {
-  const zip = await JSZip.loadAsync(documentBytes());
+async function matrixDocument(buffer = documentBytes()) {
+  const zip = await JSZip.loadAsync(buffer);
   const w = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
   const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
   let content = await zip.file('[Content_Types].xml')!.async('string');
@@ -2680,9 +2687,17 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
   const restoreClock = () => { if ('restore' in clock) clock.restore(); };
   const events: DocxPluginEvent[] = [];
   const settles: Array<{ context: DocxPluginContext<null>; anchor: DocxAnchorGeometryResult | null; at: number }> = [];
+  const deliveries: MatrixSelectionDelivery[] = [];
+  const publications = new WeakMap<DocxPluginSelection, MatrixSelectionPublication>();
+  let publication: MatrixSelectionPublication = { resolvedKey: 'null' };
   const plugin = defineDocxPlugin({ id: 'matrix', createState: () => null,
     onEvent(context, event) {
       events.push(event);
+      if (event.type === 'selection-change' || event.type === 'selection-settle') {
+        const observed = event.type === 'selection-change' ? publications.get(event.selection) : publication;
+        expect(observed).toBeDefined();
+        deliveries.push({ event, publication: observed!, at: Date.now() });
+      }
       if (event.type === 'selection-settle') settles.push({ context, at: Date.now(),
         anchor: context.geometry?.getAnchorGeometry({ kind: 'selection' }) ?? null });
     } });
@@ -2693,17 +2708,32 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
   let replica: CollaborationReplica | null = null;
   let hookBinding: ReturnType<typeof docxBindings.useDocxPluginHost> | null = null;
   let openBand: ReturnType<typeof headerFooterEditing.useHeaderFooterEditing>['handleHeaderFooterDoubleClick'] | undefined;
+  let closeBand: ReturnType<typeof headerFooterEditing.useHeaderFooterEditing>['handleBodyClick'] | undefined;
   let openNote: pagePointers.UsePagesPointerOptions['onNoteClick'];
+  let restoreClearedSelection: (() => void) | undefined;
   const restores: Array<() => void> = [];
   const useBinding = docxBindings.useDocxPluginHost;
   const captureBinding = spyOn(docxBindings, 'useDocxPluginHost').mockImplementation((options) => { hookBinding = useBinding(options); return hookBinding; });
   const useParts = headerFooterEditing.useHeaderFooterEditing;
-  const captureParts = spyOn(headerFooterEditing, 'useHeaderFooterEditing').mockImplementation((options) => { const parts = useParts(options); openBand = parts.handleHeaderFooterDoubleClick; return parts; });
+  const captureParts = spyOn(headerFooterEditing, 'useHeaderFooterEditing').mockImplementation((options) => {
+    const parts = useParts(options);
+    openBand = parts.handleHeaderFooterDoubleClick;
+    closeBand = parts.handleBodyClick;
+    return parts;
+  });
   const usePointer = pagePointers.usePagesPointer;
   const capturePointer = spyOn(pagePointers, 'usePagesPointer').mockImplementation((options) => { openNote = options.onNoteClick; return usePointer(options); });
   const createHost = pluginHosts.createDocxPluginHost;
   const captureHost = spyOn(pluginHosts, 'createDocxPluginHost').mockImplementation((...args) => {
-    host = createHost(...args); return host;
+    host = createHost(...args);
+    const publish = host.selectionChanged;
+    host.selectionChanged = (selection, identity, source) => {
+      publication = { resolvedKey: typeof identity === 'object' ? identity.resolvedKey : identity ?? JSON.stringify(selection),
+        cause: source?.cause };
+      publications.set(selection, publication);
+      return publish(selection, identity, source);
+    };
+    return host;
   });
   const createGeometry = workerPluginGeometry.createWorkerPluginGeometry;
   const captureGeometry = spyOn(workerPluginGeometry, 'createWorkerPluginGeometry').mockImplementation((controller, ...args) => {
@@ -2745,6 +2775,8 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
     const context = () => host.activations()[0]!.context as DocxPluginContext<null>;
     const selection = async (story: string, paraId: string, anchor: number, head = anchor, waitForMapping = true) => {
       await act(async () => {
+        restoreClearedSelection?.();
+        restoreClearedSelection = undefined;
         if (controller) {
           const result = await controller.submit({ kind: 'select', payload: { selection: {
             anchor: { story, paraId, offset: anchor }, focus: { story, paraId, offset: head },
@@ -2792,7 +2824,7 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
       });
       await host.notificationsIdle();
     };
-    const reset = () => { events.length = 0; settles.length = 0; };
+    const reset = () => { events.length = 0; settles.length = 0; deliveries.length = 0; };
     const anchor = () => context().geometry!.getAnchorGeometry({ kind: 'selection' });
     const readAnchor = () => context().geometry!.readAnchorGeometries([{ kind: 'selection' }]);
     const input = () => {
@@ -2804,7 +2836,8 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
     };
     const first = (await firstParagraph(mounted.ref)).paragraph;
     reset();
-    return { ...mounted, host, plugin, events, settles, first, context, selection, selectionLayout, quiet, reset, anchor, readAnchor, clock, input,
+    return { ...mounted, host, plugin, events, settles, deliveries, first, context, selection, selectionLayout, quiet, reset, anchor, readAnchor, clock, input,
+      publication: () => publication,
       controller: () => controller,
       session: () => mounted.ref.current!.getEditorRef()!.getYrsSession()!,
       binding: () => binding,
@@ -2814,9 +2847,12 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
         const peer = await createYrsSession({ clientId: 67771 });
         try {
           const access = engine === 'DP' ? (transport as AsyncReplicaAdapter).async : transport;
-          peer.applyUpdate(await access.encodeStateAsUpdate());
+          peer.openDocx(new Uint8Array(buffer), false);
+          peer.loadState(await access.encodeStateAsUpdate());
+          const vector = await access.encodeStateVector();
+          const sync = encodeSyncStep2(peer.encodeStateAsUpdate(vector)).slice().buffer;
           edit(peer);
-          const update = peer.encodeStateAsUpdate(await access.encodeStateVector());
+          const update = peer.encodeStateAsUpdate(vector);
           await act(async () => {
             if (path === 'pipe') {
               expect(binding).not.toBeNull();
@@ -2824,7 +2860,8 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
               const ticket = binding!.session.submit('collabPipe', { provider: 84711, ops: [
                 { op: 'create', seq: 1, options: {} }, { op: 'connect', seq: 2 },
                 { op: 'event', seq: 3, event: { type: 'open' } },
-                { op: 'event', seq: 4, event: { type: 'message', data } },
+                { op: 'event', seq: 4, event: { type: 'message', data: sync } },
+                { op: 'event', seq: 5, event: { type: 'message', data } },
               ] }, { lane: 'collab', fence: true });
               expect(await ticket.ack).toMatchObject({ status: 'applied' });
             } else if (path === 'chunks') {
@@ -2850,6 +2887,10 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
           else { expect(openBand).toBeDefined(); openBand!(kind, kind === 'header' ? 3 : 1); }
         });
       },
+      async closeStory() {
+        if (controller) await selection('body', first.paraId, 0);
+        else await act(async () => { expect(closeBand).toBeDefined(); closeBand!(); });
+      },
       async clearSelection() {
         await act(async () => {
           if (binding) {
@@ -2861,7 +2902,8 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
             const selected = spyOn(this.session(), 'selection').mockReturnValue(null);
             const encoded = spyOn(this.session(), 'encodeSelection').mockReturnValue(null);
             const range = spyOn(mounted.ref.current!.getEditorRef()!, 'getSelectionRange').mockReturnValue(null);
-            restores.push(() => { selected.mockRestore(); encoded.mockRestore(); range.mockRestore(); });
+            restoreClearedSelection = () => { selected.mockRestore(); encoded.mockRestore(); range.mockRestore(); };
+            restores.push(() => restoreClearedSelection?.());
             mounted.ref.current!.getEditorRef()!.syncYrsInputState(false);
             hookBinding!.publishSelection();
           }
@@ -2875,6 +2917,86 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
 }
 
 for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${engine}`, () => {
+  test('H2: every changed local publication settles exactly once across mixed stories and remote edits', async () => {
+    const bytes = await storyAnchorsDocx();
+    const source = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+    const h = await matrixEditor(engine, await matrixDocument(source), undefined, true);
+    try {
+      await h.selection('body', h.first.paraId, 1, 3);
+      await h.selectionLayout();
+      await h.quiet();
+      let previous = h.publication().resolvedKey;
+      h.reset();
+      const actions: Array<() => Promise<void>> = [
+        () => h.selection('body', h.first.paraId, 2, 4),
+        () => h.selection('body', h.first.paraId, 2, 4),
+        () => h.remote(peer => peer.insertText({ story: 'body', paraId: h.first.paraId, offset: 0 }, 'remote ')),
+        () => h.selection('body', h.first.paraId, 2, 4),
+        () => h.openStory('hf:rIdH1'),
+        () => h.selection('hf:rIdH1', '10000001', 1, 3),
+        () => h.selection('hf:rIdH1:t0:r0c0', '10000002', 1, 4),
+        () => h.openStory('hf:rIdF1'),
+        () => h.selection('hf:rIdF1', '10000021', 1, 3),
+        () => h.clearSelection(),
+        () => h.selection('hf:rIdF1', '10000021', 1, 3),
+        () => h.openStory('fn:1'),
+        () => h.selection('fn:1', '60000001', 1, 3),
+        () => h.selection('fn:1', '60000001', 4, 6),
+        () => h.openStory('en:1'),
+        () => h.selection('en:1', '70000001', 1, 3),
+        () => h.closeStory(),
+        () => h.selection('body:t0:r0c0', '00000002', 1, 4),
+        () => h.remote(peer => peer.insertText({ story: 'body', paraId: h.first.paraId, offset: 0 }, 'after '), engine === 'DP' ? 'pipe' : 'chunks'),
+        () => h.selection('body', h.first.paraId, 1, 3),
+        () => h.clearSelection(),
+        () => h.selection('body', h.first.paraId, 1, 3),
+      ];
+      let localChanges = 0;
+      let remoteChanges = 0;
+      for (const action of actions) {
+        const start = h.deliveries.length;
+        await action();
+        const [positions, exists] = JSON.parse(h.publication().resolvedKey) as [unknown[] | null, boolean];
+        const firstPosition = positions?.[0];
+        const story = Array.isArray(firstPosition) ? firstPosition[0] : firstPosition;
+        if (exists && typeof story === 'string' && (story.startsWith('body') || story.startsWith('hf:'))) {
+          await h.selectionLayout();
+        }
+        await h.host.notificationsIdle();
+        await h.quiet(349);
+        expect(h.deliveries.slice(start).filter(delivery => delivery.event.type === 'selection-settle')).toEqual([]);
+        await h.quiet(1);
+        const delivered = h.deliveries.slice(start);
+        const expected: MatrixSelectionDelivery[] = [];
+        for (const delivery of delivered) {
+          if (delivery.event.type !== 'selection-change') continue;
+          if (delivery.publication.resolvedKey !== previous) {
+            if (delivery.publication.cause === 'remote') remoteChanges += 1;
+            else if (delivery.publication.cause !== 'seed') {
+              expected.push(delivery);
+              localChanges += 1;
+            }
+          }
+          previous = delivery.publication.resolvedKey;
+        }
+        const settled = delivered.filter(delivery => delivery.event.type === 'selection-settle');
+        expect(settled.map(delivery => delivery.publication.resolvedKey))
+          .toEqual(expected.map(delivery => delivery.publication.resolvedKey));
+        for (const [index, delivery] of settled.entries()) {
+          const change = expected[index]!;
+          expect(delivery.at - change.at).toBeGreaterThanOrEqual(350);
+          const latest = delivered.filter(candidate => candidate.event.type === 'selection-change' &&
+            candidate.publication.resolvedKey === delivery.publication.resolvedKey).at(-1)!;
+          expect(delivery.event.selection).toEqual(latest.event.selection);
+        }
+        await h.quiet(700);
+        expect(h.deliveries.slice(start).filter(delivery => delivery.event.type === 'selection-settle')).toHaveLength(expected.length);
+      }
+      expect(localChanges).toBeGreaterThanOrEqual(16);
+      expect(remoteChanges).toBeGreaterThanOrEqual(1);
+    } finally { h.dispose(); }
+  });
+
   test('a no-op local undo keeps the selection settled without a second settle', async () => {
     const h = await matrixEditor(engine, documentBytes(), undefined, true);
     try {
@@ -3060,7 +3182,11 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
       await h.selectionLayout();
       await h.quiet();
       h.reset();
-      await h.remote(peer => peer.deleteStory('hf:rIdH1'), path);
+      await h.remote(peer => {
+        expect(peer.hasStory('hf:rIdH1')).toBe(true);
+        expect(peer.paragraphs('hf:rIdH1').map(paragraph => paragraph.paraId)).toContain('10000001');
+        peer.deleteStory('hf:rIdH1');
+      }, path);
       await h.quiet();
       expect(h.settles).toHaveLength(1);
       expect(h.context().snapshot.selectionSettled).toBe(true);
@@ -3147,7 +3273,7 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
       if (family === 'story switch') await h.openStory('hf:rIdH1');
       else await act(async () => {
         const controller = h.controller();
-        const editor = h.ref.current!.getEditorRef();
+        const editor = controller ? null : h.ref.current!.getEditorRef();
         if (family === 'typing') {
           fireEvent.keyDown(h.input(), { key: 'x' });
           await insertText();
@@ -3156,6 +3282,10 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
         } else if (family === 'pointer') {
           const target = h.view.container.querySelector<HTMLElement>('[data-page-index="0"] canvas, canvas[data-page-index="0"]')!;
           expect(target).not.toBeNull();
+          const root = h.view.container.querySelector<HTMLElement>(controller ? '[data-docx-worker-editor]' : '.paged-editor');
+          expect(root).not.toBeNull();
+          const pointerTarget = controller ? target : root!;
+          expect(root!.contains(pointerTarget)).toBe(true);
           const pages = target.closest<HTMLElement>('[data-docx-pages-host]');
           if (pages) Object.defineProperties(pages, {
             setPointerCapture: { configurable: true, value() {} },
@@ -3167,10 +3297,10 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
           if (!anchor.ok) throw new Error('Pointer target is unavailable');
           const point = { pointerId: 1, pointerType: 'mouse', button: 0, buttons: 1,
             clientX: anchor.anchor.x, clientY: anchor.anchor.y + anchor.anchor.height / 2, detail: 1 };
-          fireEvent.pointerDown(target, point);
+          fireEvent.pointerDown(pointerTarget, point);
           if (!controller) fireEvent.mouseDown(target, point);
           fireEvent.mouseUp(document, { ...point, buttons: 0 });
-          fireEvent.pointerUp(target, { ...point, buttons: 0 });
+          fireEvent.pointerUp(pointerTarget, { ...point, buttons: 0 });
         } else if (family === 'host setSelection') {
           if (controller) expect(await controller.submit({ kind: 'select', payload: { selection: {
             anchor: { story: 'body', paraId: h.first.paraId, offset: 4 },

@@ -98,6 +98,42 @@ test('touch release retains its source through a delayed selection push', () => 
   expect(h.sources).toEqual(['touch']);
 }));
 
+test('a selection bump while waiting keeps the last pointer action as its source', () => clocked((h) => {
+  h.ready(false);
+  h.down();
+  h.machine.notifySelectionChange('pointer');
+  h.up();
+  h.tick(350);
+  h.machine.notifySelectionChange('published-pointer');
+  h.ready(true);
+  h.tick(349);
+  expect(h.sources).toEqual([]);
+  h.tick(1);
+  expect(h.sources).toEqual(['pointer']);
+}));
+
+test('the last local action in the window supplies the settle source', () => clocked((h) => {
+  h.down();
+  h.machine.notifySelectionChange('pointer');
+  h.up();
+  h.tick(200);
+  h.root.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'ArrowRight' }));
+  h.machine.notifySelectionChange('keyboard');
+  h.tick(350);
+  expect(h.sources).toEqual(['keyboard']);
+  h.root.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'ArrowRight' }));
+  h.machine.notifySelectionChange('keyboard-again');
+  h.tick(200);
+  h.down('touch');
+  h.machine.notifySelectionChange('touch');
+  h.up();
+  h.tick(350);
+  expect(h.sources).toEqual(['keyboard', 'touch']);
+  h.machine.notifySelectionChange('programmatic');
+  h.tick(350);
+  expect(h.sources).toEqual(['keyboard', 'touch', 'keyboard']);
+}));
+
 test('settling the same selection again restores the state without another event', () => clocked((h) => {
   h.machine.notifySelectionChange('same');
   h.tick(350);

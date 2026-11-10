@@ -4,18 +4,24 @@ export type YrsSelectionCause = 'remote' | 'seed';
 
 interface Publication {
   version: string;
+  selection: string;
   cause: YrsSelectionCause | undefined;
 }
 
 const publications = new WeakMap<object, Publication>();
 const scopes = new WeakMap<object, { cause: YrsSelectionCause | undefined }>();
-const listeners = new WeakMap<object, Set<(cause: YrsSelectionCause | undefined) => void>>();
+
+function selectionKey(selection: ReturnType<YrsSession['selection']>): string {
+  const point = (loc: NonNullable<typeof selection>['anchor']) => [loc.story, loc.paraId, loc.offset];
+  return JSON.stringify(selection ? [point(selection.anchor), point(selection.head)] : null);
+}
 
 export function yrsSelectionCause(session: YrsSession): YrsSelectionCause | undefined {
   const scope = scopes.get(session);
   if (scope) return scope.cause;
   const publication = publications.get(session);
-  return publication?.version === session.version() ? publication.cause : undefined;
+  return publication?.version === session.version() && publication.selection === selectionKey(session.selection())
+    ? publication.cause : undefined;
 }
 
 export function withYrsSelectionCause<T>(session: YrsSession, cause: YrsSelectionCause | undefined, run: () => T): T {
@@ -28,14 +34,7 @@ export function withYrsSelectionCause<T>(session: YrsSession, cause: YrsSelectio
   }
 }
 
-export function notifyYrsSelection(session: YrsSession, cause = scopes.get(session)?.cause): void {
-  publications.set(session, { version: session.version(), cause });
-  for (const listener of listeners.get(session) ?? []) listener(cause);
-}
-
-export function subscribeYrsSelection(session: YrsSession, listener: (cause: YrsSelectionCause | undefined) => void): () => void {
-  const subscribed = listeners.get(session) ?? new Set<(cause: YrsSelectionCause | undefined) => void>();
-  listeners.set(session, subscribed);
-  subscribed.add(listener);
-  return () => { subscribed.delete(listener); };
+export function recordYrsSelectionCause(session: YrsSession, cause = scopes.get(session)?.cause,
+  selection = session.selection()): void {
+  publications.set(session, { version: session.version(), selection: selectionKey(selection), cause });
 }

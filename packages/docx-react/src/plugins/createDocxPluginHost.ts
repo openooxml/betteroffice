@@ -30,7 +30,7 @@ import {
 } from './createPluginClients';
 import { definitionProblem, pluginDefinition } from './defineDocxPlugin';
 import { scopePluginGeometry } from './geometry';
-import type { DocxSelectionIdentity } from './selectionIdentity';
+import { createDocxSelectionObserver, type DocxSelectionIdentity } from './selectionIdentity';
 import { observeProposals, proposalSnapshot, type DocxProposalSnapshot } from './proposalPreview';
 import type {
   DocxPlugin,
@@ -56,6 +56,7 @@ export type DocxPluginActivation = RuntimeActivation<Definition, Context>;
 /** The editor as the plugin host reaches it; members are read at call time. */
 export interface DocxPluginHostAccess extends DocxPluginEditorAccess {
   translate(key: TranslationKey): string;
+  selectionPublished?(key: string): void;
   /** Geometry of the layout that shows the current version, or null. */
   geometry(): DocxPluginGeometry | null;
   /** Calls `listener` when geometry answers change within one layout, so plugin views read them again. */
@@ -75,7 +76,8 @@ export interface DocxPluginHost {
   generation(): string | null;
   version(): string;
   previewVersion(): number;
-  selectionChanged(selection: DocxPluginSelection, identity?: string | DocxSelectionIdentity): string;
+  selectionChanged(selection: DocxPluginSelection, identity?: string | DocxSelectionIdentity,
+    publication?: { owner: object; cause?: 'remote' | 'seed' }): string;
   selectionUnsettled(generation?: string | null): void;
   selectionSettled(source: 'pointer' | 'touch' | 'keyboard', generation?: string | null): void;
   focusChanged(focused: boolean): void;
@@ -155,6 +157,7 @@ function sameLayout(a: DocxPluginLayout | null, b: DocxPluginLayout | null): boo
 }
 
 export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHost {
+  let observeSelection = createDocxSelectionObserver();
   let reporter: ((error: DocxPluginError) => void) | undefined;
   let session: YrsSession | null = null;
   let workerProposalKey: string | null = null;
@@ -463,6 +466,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
 
     open(next) {
       closeSession();
+      observeSelection = createDocxSelectionObserver();
       session = next;
       state.version = readSessionVersion(next) ?? '';
       state.previewVersion = proposalSnapshot(next)?.previewVersion ?? 0;
@@ -492,6 +496,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
 
     openWorker(version) {
       closeSession();
+      observeSelection = createDocxSelectionObserver();
       workerProposalKey = null;
       state.version = version;
       state.previewVersion = 0;
@@ -542,10 +547,14 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
     version: () => state.version,
     previewVersion: () => state.previewVersion,
 
-    selectionChanged(selection, identity = JSON.stringify(selection)) {
+    selectionChanged(selection, identity = JSON.stringify(selection), publication) {
+      if (publication && typeof identity !== 'string') {
+        identity = observeSelection(publication.owner, identity, publication.cause);
+      }
       const sticky = typeof identity === 'string' ? identity : identity.stickyKey;
       const moved = sticky !== selectionIdentity;
       const resolved = typeof identity === 'string' ? identity : identity.resolvedKey;
+      const resolvedMoved = resolved !== resolvedSelection;
       const settleKey = typeof identity === 'string' ? identity : identity.settleKey;
       if (settleKey === selectionSettleKey &&
         resolved !== resolvedSelection && state.selectionSettled && settledSelection !== null && settleDelivered) {
@@ -554,15 +563,17 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       selectionIdentity = sticky;
       resolvedSelection = resolved;
       selectionSettleKey = settleKey;
-      if (JSON.stringify(selection) === JSON.stringify(state.selection)) {
-        if (moved) { invalidateSettle(); runtime.touch(); }
-        return sticky;
-      }
+      const selectionChanged = JSON.stringify(selection) !== JSON.stringify(state.selection);
       state.selection = selection;
-      const generation = runtime.generation();
-      if (generation) {
-        notify({ type: 'selection-change', generation, version: state.version, selection });
+      if (!selectionChanged && !resolvedMoved) {
+        if (moved) { invalidateSettle(); runtime.touch(); }
+      } else {
+        const generation = runtime.generation();
+        if (generation) {
+          notify({ type: 'selection-change', generation, version: state.version, selection });
+        }
       }
+      access.selectionPublished?.(settleKey);
       return sticky;
     },
 

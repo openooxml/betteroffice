@@ -2038,6 +2038,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
     canvasHostRef: canvasRenderer.canvasHostRef,
     overlayTarget: pluginOverlayTarget,
     selectionChangeSubscribersRef,
+    subscribeSelection: (listener) => commandBridgeRef.current?.subscribe(listener),
     i18n,
     onRenderedDomContextReady,
   });

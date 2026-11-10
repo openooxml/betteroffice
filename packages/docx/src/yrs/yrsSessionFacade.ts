@@ -69,7 +69,7 @@ import type {
 } from './edits';
 import type { DocxParagraphHeading } from './readTypes';
 import { editSessionUpdateEvents } from './updateEvents';
-import { notifyYrsSelection, withYrsSelectionCause } from './selectionChanges';
+import { recordYrsSelectionCause, withYrsSelectionCause } from './selectionChanges';
 import { createProposalRegistry, type DocxProposalSession } from './proposals';
 import type { DocxContentControlsResult } from './contentControls';
 import type {
@@ -331,7 +331,7 @@ export function wrapSession(
       while (!destroyed && pendingUpdates.length > 0) {
         const event = pendingUpdates.shift();
         if (!event) break;
-        notifyYrsSelection(facade, event.origin === 'remote' ? 'remote' : undefined);
+        recordYrsSelectionCause(facade, event.origin === 'remote' ? 'remote' : undefined);
         for (const [id, listener] of [...listeners]) {
           if (destroyed) return;
           if (listeners.get(id) !== listener) continue;
@@ -368,7 +368,7 @@ export function wrapSession(
       if (wasmCallDepth === 0) {
         hub.drain();
         flushUpdates();
-        if (!destroyed) notifyYrsSelection(facade);
+        if (!destroyed) recordYrsSelectionCause(facade);
       }
     }
   };
@@ -949,7 +949,7 @@ export function wrapSession(
         anchor: { ...anchor },
         head: { ...head },
       };
-      notifyYrsSelection(facade);
+      recordYrsSelectionCause(facade, undefined, cachedSelection);
     },
     selection: () => {
       if (cachedSelection !== undefined) return cloneSelection(cachedSelection);
@@ -969,7 +969,7 @@ export function wrapSession(
     setCellSelection: (range) => {
       session.set_cell_selection(JSON.stringify(range));
       cachedSelection = undefined;
-      notifyYrsSelection(facade);
+      recordYrsSelectionCause(facade);
     },
     cellSelection: () => JSON.parse(session.cell_selection()) as YrsTableRange | null,
     beginUndoCapture: ensureUndo,
@@ -1708,7 +1708,7 @@ export function wrapSession(
     mirrorWorkerDocument: (mirror) => withYrsSelectionCause(facade, 'remote', () => {
       workerDocumentVersion = mirror?.version ?? null;
       proposals.mirror(mirror);
-      notifyYrsSelection(facade);
+      recordYrsSelectionCause(facade);
     }),
     workerDocumentMirrored: () => workerDocumentVersion !== null,
     onProposalChange: (listener) => {

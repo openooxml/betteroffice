@@ -47,6 +47,7 @@ export function createSelectionSettle({
       settledKey = key;
       onSettle(source);
     }
+    source = 'keyboard';
   };
   const schedule = () => {
     clear();
@@ -96,7 +97,6 @@ export function createSelectionSettle({
       key = next;
       onUnsettle();
       if (!pointerDown) {
-        if (timer === null || (source !== 'pointer' && source !== 'touch')) source = 'keyboard';
         schedule();
       }
     },

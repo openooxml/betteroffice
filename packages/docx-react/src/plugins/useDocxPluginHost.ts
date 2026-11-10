@@ -25,7 +25,6 @@ import {
   anchorDisplayRoot,
   anchorFailure,
   resolveReservations,
-  subscribeYrsSelection,
   yrsSelectionCause,
   type AnchorGeometryTarget,
   type DocxReservationsPayload,
@@ -63,7 +62,7 @@ import {
 import { resolveParagraph } from './createPluginClients';
 import { createPluginGeometry, pluginLayout, readPluginPositionAtPoint, visibleViewport } from './geometry';
 import { managedSidebarItems } from './PluginSidebarItems';
-import { createDocxSelectionObserver, docxSelectionIdentity } from './selectionIdentity';
+import { docxSelectionIdentity } from './selectionIdentity';
 import { usePluginReservations } from './reservations';
 import { currentPreviewKey } from './proposalPreview';
 import type {
@@ -104,6 +103,7 @@ export interface UseDocxPluginHostOptions extends DocxEditorPluginProps {
   canvasHostRef: React.RefObject<HTMLDivElement | null>;
   overlayTarget: HTMLElement | null;
   selectionChangeSubscribersRef: React.RefObject<Set<(state: SelectionState | null) => void>>;
+  subscribeSelection?(listener: () => void): (() => void) | undefined;
   i18n: Translations | undefined;
   onRenderedDomContextReady: ((context: RenderedDomContext) => void) | undefined;
 }
@@ -180,6 +180,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
 
   const [host] = useState<DocxPluginHost>(() =>
     createDocxPluginHost({
+      selectionPublished: (key) => settleRef.current?.notifySelectionChange(key),
       pagedEditorRef: options.pagedEditorRef,
       writeMode: () => latest.current.writeModeRef.current ?? 'viewing',
       viewer: () => latest.current.viewerDocumentRead !== undefined,
@@ -207,8 +208,6 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   );
 
   const selectionRef = useRef<DocxPluginSelection>({ formatting: null, displayRange: null });
-  const selectionIdentityRef = useRef(docxSelectionIdentity(0, null, null, false));
-  const observeSelection = useRef(createDocxSelectionObserver());
   const settleRef = useRef<ReturnType<typeof createSelectionSettle> | null>(null);
   const managed = (options.plugins?.length ?? 0) > 0;
   const locale = resolvedLocale(options.locale ?? options.i18n?._lang);
@@ -329,10 +328,10 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
       const range = selection.displayRange;
       const identity = range
         ? [range.story, range.from, range.to, viewerSelectionRef.current?.head ?? range.to] : null;
-      selectionIdentityRef.current = { settleKey: JSON.stringify(identity), stickyKey: JSON.stringify(identity),
+      const selectionIdentity = { settleKey: JSON.stringify(identity), stickyKey: JSON.stringify(identity),
         resolvedKey: JSON.stringify(identity) };
       selectionRef.current = selection;
-      host.selectionChanged(selection, selectionIdentityRef.current);
+      host.selectionChanged(selection, selectionIdentity);
       return selection;
     }
     const editor = latest.current.pagedEditorRef.current;
@@ -353,19 +352,18 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
     const direction = Math.sign(focus - anchor);
     const collapsed = !!live && live.anchor.story === live.head.story &&
       live.anchor.paraId === live.head.paraId && live.anchor.offset === live.head.offset;
-    selectionIdentityRef.current = observeSelection.current(session ?? host, docxSelectionIdentity(0, encoded
+    const identity = docxSelectionIdentity(0, encoded
       ? [encoded.story, Array.from(encoded.anchor), Array.from(encoded.head), direction] : null,
-      live ? [live.anchor.story, anchor, live.head.story, focus, direction] : null, collapsed),
-      session ? yrsSelectionCause(session) : undefined);
+      live ? [live.anchor.story, anchor, live.head.story, focus, direction] : null, collapsed);
     selectionRef.current = selection;
-    host.selectionChanged(selection, selectionIdentityRef.current);
+    host.selectionChanged(selection, identity, { owner: session ?? host,
+      cause: session ? yrsSelectionCause(session) : undefined });
     return selection;
   }, [host]);
 
   const publishSelection = useCallback(() => {
     if (!latest.current.plugins?.length) return;
     refreshSelection();
-    settleRef.current?.notifySelectionChange(selectionIdentityRef.current.settleKey);
   }, [host, refreshSelection]);
 
   useEffect(() => {
@@ -381,7 +379,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
       },
       canSettle: () => {
         if (!generation || host.generation() !== generation) return false;
-        const selection = refreshSelection();
+        const selection = selectionRef.current;
         if (selection.displayRange !== null || latest.current.viewerSelection === true) return true;
         const sticky = readSelection(latest.current.pagedEditorRef.current?.getYrsSession() ?? latest.current.session);
         return !sticky || anchorDisplayRoot(sticky.head.story) === null;
@@ -396,7 +394,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
 
   useEffect(() => {
     if (!managed || !options.session) return;
-    return subscribeYrsSelection(options.session, () => publishSelection());
+    return latest.current.subscribeSelection?.(() => publishSelection());
   }, [managed, options.session, publishSelection]);
 
   const publishViewerSelection = useCallback((selection: ViewerSelectionChange) => {

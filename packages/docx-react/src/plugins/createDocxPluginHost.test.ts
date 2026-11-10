@@ -3,7 +3,7 @@ import type { ResidentProposalReply, YrsSession } from '@betteroffice/docx/yrs';
 import { registerWorkerProposalAuthority } from '../components/DocxEditor/internals/workerProposalAuthority';
 import { createDocxPluginHost, type DocxPluginHostAccess } from './createDocxPluginHost';
 import { defineDocxPlugin } from './defineDocxPlugin';
-import { createDocxSelectionObserver, docxSelectionIdentity } from './selectionIdentity';
+import { docxSelectionIdentity } from './selectionIdentity';
 import type { DocxProposalSnapshot } from './proposalPreview';
 import type { DocxAnchorGeometryResult, DocxPluginEvent, DocxPluginGeometry, DocxPluginLayout } from './types';
 
@@ -59,7 +59,8 @@ function stubGeometry() {
 
 function setup(
   geometry: () => DocxPluginGeometry | null = () => null,
-  subscribeGeometry?: DocxPluginHostAccess['subscribeGeometry']
+  subscribeGeometry?: DocxPluginHostAccess['subscribeGeometry'],
+  selectionPublished?: DocxPluginHostAccess['selectionPublished']
 ) {
   const events: DocxPluginEvent[] = [];
   const host = createDocxPluginHost({
@@ -70,6 +71,7 @@ function setup(
     subscribeLayout: () => () => {},
     geometry,
     subscribeGeometry,
+    selectionPublished,
     translate: (key) => key,
   });
   const plugin = defineDocxPlugin({
@@ -616,17 +618,46 @@ test('a superseded generation receives no queued signals', async () => {
 });
 
 
+test('every resolved publication is observed before notifying the settle machine', async () => {
+  const keys: string[] = [];
+  const { host, plugin, events } = setup(undefined, undefined, key => keys.push(key));
+  host.setPlugins([plugin]);
+  host.openWorker('v1');
+  const empty = { formatting: null, displayRange: null };
+  const publish = (offset: number | null, cause?: 'remote' | 'seed') => host.selectionChanged(empty,
+    docxSelectionIdentity(0, offset === null ? null : ['sticky-a', 'sticky-b'],
+      offset === null ? null : ['fn:1', offset, offset + 2], false), { owner: host, cause });
+  publish(1);
+  publish(1);
+  publish(4, 'remote');
+  publish(1);
+  publish(null);
+  publish(1);
+  publish(2, 'seed');
+  publish(3);
+  expect(keys).toHaveLength(8);
+  expect(keys[1]).toBe(keys[0]);
+  expect(keys[2]).toBe(keys[0]);
+  expect(keys[3]).not.toBe(keys[2]);
+  expect(keys[4]).not.toBe(keys[3]);
+  expect(keys[5]).not.toBe(keys[4]);
+  expect(keys[6]).toBe(keys[5]);
+  expect(keys[7]).not.toBe(keys[6]);
+  await host.notificationsIdle();
+  expect(events.filter(event => event.type === 'selection-change')).toHaveLength(1);
+  host.close('unmounted');
+});
+
 test.each(['remote', 'seed'] as const)('silent %s movement rebases dedupe before a local return to the last settled position', async (cause) => {
   const { host } = setup();
   const events: DocxPluginEvent[] = [];
   host.setPlugins([defineDocxPlugin({ id: 'remote-return', createState: () => null,
     onEvent(_context, event) { events.push(event); } })]);
   host.openWorker('v1');
-  const observe = createDocxSelectionObserver();
   const publish = (offset: number, remote = false) => {
-    const identity = observe(host, docxSelectionIdentity(0, ['sticky-a', 'sticky-b'], [offset, offset + 2], false),
-      remote ? cause : undefined);
-    host.selectionChanged({ formatting: null, displayRange: { story: 'body', from: offset, to: offset + 2, layoutId: 'layout' } }, identity);
+    const identity = docxSelectionIdentity(0, ['sticky-a', 'sticky-b'], [offset, offset + 2], false);
+    host.selectionChanged({ formatting: null, displayRange: { story: 'body', from: offset, to: offset + 2, layoutId: 'layout' } },
+      identity, { owner: host, cause: remote ? cause : undefined });
   };
   publish(1);
   host.selectionUnsettled();
