@@ -121,6 +121,40 @@ function cellText(session: YrsSession, story: string): string | null {
   try { return session.paragraphs(story).map((p) => p.text).join('\n'); } catch { return null; }
 }
 
+const FONT = resolve(import.meta.dir, '../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf');
+const REGION_REQUEST = JSON.stringify({
+  bodyStory: 'body', regions: { sections: [{ sectionId: 'main', properties: {} }] },
+  measurement: { defaults: { fontSize: 11, fontFamily: 'Liberation Sans' } }, renderEnv: {},
+});
+
+function render(session: YrsSession) {
+  const row: Record<string, unknown> = {};
+  try {
+    const layout = JSON.parse(session.layoutDocumentWithRegionsRetainedJson(REGION_REQUEST)) as { pages?: unknown[] };
+    row.layout = `ok pages=${Array.isArray(layout.pages) ? layout.pages.length : '?'}`;
+  } catch (error) { row.layout = `throws: ${message(error)}`; }
+  try { row.frame = `ok ${session.buildDisplayListFrame('{}', 0).length} bytes`; } catch (error) { row.frame = `throws: ${message(error)}`; }
+  try { createYrsPositionProjection(session, 'body'); row.cellLookup = 'ok'; } catch (error) { row.cellLookup = `throws: ${message(error)}`; }
+  return row;
+}
+
+test('severity probe: layout and display in the dangling state on every peer', async () => {
+  const a = await open(9761);
+  const b = await peerOf(a, 9762);
+  const c = await peerOf(a, 9763);
+  for (const peer of [a, b, c]) peer.registerFont(new Uint8Array(readFileSync(FONT)));
+  const before = { a: render(a), b: render(b), c: render(c) };
+  a.splitCell(at(0, 1), 1, 2);
+  syncAll([a, b, c]);
+  b.insertRow(at(0, 0), 'below');
+  syncAll([a, b, c]);
+  a.undo();
+  syncAll([a, b, c]);
+  const after = { a: render(a), b: render(b), c: render(c), dangling: danglingCells(a) };
+  console.log(`SEVERITY-PROBE ${JSON.stringify({ before, after })}`);
+  expect(after.dangling.length).toBeGreaterThan(0);
+});
+
 test('two peers: undoing a split deletes the text the other collaborator typed into the new cell (fact probe)', async () => {
   const a = await open(9751);
   const b = await peerOf(a, 9752);
