@@ -1477,12 +1477,29 @@ fn insert_rows(
             s.row_styles.insert(row, style);
         }
     }
+    let overflow = drop_dimensions_past_grid(
+        &mut s.row_heights,
+        &mut s.hidden_row_heights,
+        at,
+        count,
+        MAX_ROWS,
+    );
     shift_row_heights_up(s, at, count);
     remap_merges_keep(s, op);
     remap_hyperlinks(s, op);
     let auto_filter_restore = remap_auto_filter(s, sheet, op);
 
     let mut inv = vec![Op::DeleteRows { sheet, at, count }];
+    inv.extend(
+        overflow
+            .into_iter()
+            .map(|(row, height, hidden_height)| Op::RestoreRowDimension {
+                sheet,
+                row,
+                height,
+                hidden_height,
+            }),
+    );
     if !old_row_styles.is_empty() {
         inv.push(Op::RestoreRowStyles {
             sheet,
@@ -1598,13 +1615,39 @@ fn insert_cols(
     let old_hyperlinks = s.hyperlinks.clone();
     let old_col_styles = s.col_styles.clone();
     let dropped = shift_cells(s, op);
+    let within_run = run_around(&s.col_widths, &s.hidden_col_widths, at);
+    let overflow = drop_dimensions_past_grid(
+        &mut s.col_widths,
+        &mut s.hidden_col_widths,
+        at,
+        count,
+        MAX_COLS,
+    );
     shift_col_widths_up(s, at, count);
+    if let Some((width, hidden)) = within_run {
+        for col in at..at.saturating_add(count).min(MAX_COLS) {
+            s.col_widths.insert(col, width);
+            if let Some(hidden) = hidden {
+                s.hidden_col_widths.insert(col, hidden);
+            }
+        }
+    }
     shift_col_styles_up(s, at, count);
     remap_merges_keep(s, op);
     remap_hyperlinks(s, op);
     let auto_filter_restore = remap_auto_filter(s, sheet, op);
 
     let mut inv = vec![Op::DeleteCols { sheet, at, count }];
+    inv.extend(
+        overflow
+            .into_iter()
+            .map(|(col, width, hidden_width)| Op::RestoreColDimension {
+                sheet,
+                col,
+                width,
+                hidden_width,
+            }),
+    );
     if !old_col_styles.is_empty() {
         inv.push(Op::RestoreColStyles {
             sheet,
@@ -1696,6 +1739,40 @@ fn delete_cols(
 /// address was dropped, for the inverse.
 fn shift_cells(s: &mut Sheet, op: &Op) -> Vec<(CellRef, Cell)> {
     s.remap_cells(|at| remap_ref(at, op))
+}
+
+/// The size of the run an insert at `at` lands inside: the entries either side of it, when they are
+/// equal. Columns inserted there take it, so a run (a whole-sheet one included) stays whole.
+fn run_around(
+    sizes: &BTreeMap<u32, f64>,
+    hidden: &BTreeMap<u32, f64>,
+    at: u32,
+) -> Option<(f64, Option<f64>)> {
+    let before = at.checked_sub(1)?;
+    let size = *sizes.get(&before)?;
+    let hidden_size = hidden.get(&before).copied();
+    (sizes.get(&at) == Some(&size) && hidden.get(&at).copied() == hidden_size)
+        .then_some((size, hidden_size))
+}
+
+/// The sizes an insert would push past the grid's last row or column: formatting only, so they are
+/// dropped, as Excel drops them, and returned for the inverse to restore.
+fn drop_dimensions_past_grid(
+    sizes: &mut BTreeMap<u32, f64>,
+    hidden: &mut BTreeMap<u32, f64>,
+    at: u32,
+    count: u32,
+    max: u32,
+) -> Vec<(u32, Option<f64>, Option<f64>)> {
+    let from = at.max(max.saturating_sub(count));
+    let keys = sizes
+        .range(from..)
+        .chain(hidden.range(from..))
+        .map(|(&key, _)| key)
+        .collect::<std::collections::BTreeSet<_>>();
+    keys.into_iter()
+        .map(|key| (key, sizes.remove(&key), hidden.remove(&key)))
+        .collect()
 }
 
 fn shift_row_heights_up(s: &mut Sheet, at: RowId, count: u32) {
