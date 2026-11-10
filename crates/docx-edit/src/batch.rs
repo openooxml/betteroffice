@@ -795,6 +795,7 @@ enum Effect {
         set: Vec<(String, yrs::Any)>,
         clear: Option<crate::format::ClearMarks>,
         paragraph_style: Option<String>,
+        source: Option<std::sync::Arc<SourceMetadata>>,
         para_id: String,
         skip: bool,
         ctx: EditCtx,
@@ -2887,6 +2888,7 @@ fn plan_format<T: ReadTxn>(
             set,
             clear,
             paragraph_style: paragraph.mark.style_id(),
+            source: views.doc().source_metadata(),
             para_id: paragraph.para_id.clone(),
             skip: on_unsupported == OnUnsupported::Skip,
             ctx,
@@ -2956,6 +2958,7 @@ fn execute(stage: &EditingDoc, steps: &[Planned]) -> EditResult<Vec<Option<Execu
                 set,
                 clear,
                 paragraph_style,
+                source,
                 para_id,
                 skip,
                 ctx,
@@ -2966,6 +2969,7 @@ fn execute(stage: &EditingDoc, steps: &[Planned]) -> EditResult<Vec<Option<Execu
                     set,
                     clear.as_ref(),
                     paragraph_style.as_deref(),
+                    source.as_deref(),
                 ) {
                     Ok((revision_ids, kept)) if kept.is_empty() => Executed {
                         revision_ids,

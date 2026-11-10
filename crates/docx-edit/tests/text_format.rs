@@ -39,7 +39,7 @@ fn package(body: &str) -> Vec<u8> {
 
 /// `00000001` plain, `00000002` directly bold, `00000003` a bold Heading1, `00000004` a run in the
 /// bold character style `Strong`, `00000005` text around a line break, `00000007` a table cell
-/// paragraph holding a page break, `00000009` a centred Heading1 run with direct bold-off, colour,
+/// paragraph holding field characters inside a hyperlink, `00000009` a centred Heading1 run with direct bold-off, colour,
 /// size and font, and `0000000A` an italic hyperlink.
 fn open() -> EditingDoc {
     let body = concat!(
@@ -49,7 +49,7 @@ fn open() -> EditingDoc {
         r#"<w:p w14:paraId="00000004"><w:r><w:rPr><w:rStyle w:val="Strong"/></w:rPr><w:t>Strong run</w:t></w:r></w:p>"#,
         r#"<w:p w14:paraId="00000005"><w:r><w:t>Line one</w:t></w:r><w:r><w:br/></w:r><w:r><w:t>line two</w:t></w:r></w:p>"#,
         r#"<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="2400" w:type="dxa"/></w:tcPr>"#,
-        r#"<w:p w14:paraId="00000007"><w:r><w:t>Cell</w:t></w:r><w:r><w:br w:type="page"/></w:r><w:r><w:t>after</w:t></w:r></w:p>"#,
+        r#"<w:p w14:paraId="00000007"><w:r><w:t>Cell </w:t></w:r><w:hyperlink w:anchor="Target"><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:hyperlink></w:p>"#,
         r#"</w:tc></w:tr></w:tbl>"#,
         r#"<w:p w14:paraId="00000008"><w:r><w:t>Last</w:t></w:r></w:p>"#,
         r#"<w:p w14:paraId="00000009"><w:pPr><w:pStyle w:val="Heading1"/><w:jc w:val="center"/></w:pPr><w:r><w:rPr><w:b w:val="0"/><w:color w:val="C00000"/><w:sz w:val="20"/><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr><w:t>Styled off</w:t></w:r></w:p>"#,
@@ -315,7 +315,7 @@ fn kept_unchanged_paragraphs_refuse_by_default_and_are_listed_when_skipped() {
     );
     let receipts = serde_json::to_value(&applied.receipts).unwrap();
     assert_eq!(receipts[1]["changed"], false);
-    assert_eq!(receipts[1]["skipped"][0]["reason"], "break");
+    assert_eq!(receipts[1]["skipped"][0]["reason"], "field");
     assert!(receipts[1]["skipped"][0]["paraId"].is_string());
     assert!(receipts[0].get("skipped").is_none());
     assert!(active(&marks(&doc, "Plain text"), "bold"));

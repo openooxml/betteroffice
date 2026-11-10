@@ -1328,9 +1328,9 @@ impl EditingDoc {
     }
 
     /// The attributes that return each run of `start..end` of `story_id` to what its styles give,
-    /// as seeding gives a run without direct formatting: the paragraph style `paragraph_style`
-    /// and, unless `clear` is [`ClearMarks::All`], the run's own character style. Keys no style
-    /// supplies are removed.
+    /// as seeding gives a run without direct formatting under `source`'s styles: the paragraph
+    /// style `paragraph_style` and, unless `clear` is [`ClearMarks::All`], the run's own character
+    /// style. Keys no style supplies are removed.
     pub(crate) fn style_reset_pieces<T: ReadTxn>(
         &self,
         txn: &T,
@@ -1339,8 +1339,8 @@ impl EditingDoc {
         (start, end): (u32, u32),
         clear: &ClearMarks,
         paragraph_style: Option<&str>,
+        source: Option<&crate::seed::SourceMetadata>,
     ) -> OpResult<Vec<(u32, u32, Attrs)>> {
-        let source = self.source_metadata();
         let mut pieces = Vec::new();
         for chunk in crate::ops::snapshot_range(story, txn, start, end) {
             let (from, to) = (chunk.start.max(start), chunk.end().min(end));
@@ -1351,7 +1351,7 @@ impl EditingDoc {
                 ClearMarks::All => None,
                 ClearMarks::Keys(_) => chunk.attrs.get("runStyle").cloned(),
             };
-            let base: BTreeMap<String, Any> = match &source {
+            let base: BTreeMap<String, Any> = match source {
                 Some(source) => source
                     .seeded_run_attrs(story_id, paragraph_style, run_style.as_ref())
                     .map_err(OpError::InvalidFormatValue)?
@@ -1380,6 +1380,86 @@ impl EditingDoc {
         Ok(pieces)
     }
 
+    /// [`Self::format_range_keeping`] that first returns `clear` to what the styles give, paragraph
+    /// by paragraph, as a `formatText` step's `clear` does. Tracked changes are formatted as the
+    /// editor formats them.
+    pub(crate) fn format_range_to_styles_keeping(
+        &self,
+        ctx: &EditCtx,
+        mut range: StoryRange,
+        clear: &ClearMarks,
+        delta: &InlineFormatDelta,
+    ) -> OpResult<(Receipt, KeptUnchanged)> {
+        let len = range_len(&range)?;
+        if len == 0 {
+            return Err(OpError::EmptyRange);
+        }
+        let set = delta.to_attrs()?;
+        let mut txn = self.transact_for(ctx);
+        let story = story_ref(&txn, &range.story)?;
+        crate::check_range(&story, &txn, range.start, len)?;
+        (range.start, range.end) =
+            crate::ops::code_point_range(&story, &txn, range.start, range.end);
+        if ctx.is_suggesting() && refuses_suggestion(&story, &txn, range.start, range.end) {
+            return Err(OpError::SuggestedFormattingOverContainer);
+        }
+        let mut paragraphs = Vec::new();
+        let mut from = range.start;
+        for chunk in crate::ops::snapshot_range(&story, &txn, range.start, story.len(&txn)) {
+            if let crate::ops::ChunkKind::Pilcrow(mark) = &chunk.kind {
+                let to = chunk.start.min(range.end);
+                if from < to {
+                    paragraphs.push((from, to, crate::map_string(mark, &txn, "pStyle")));
+                }
+                from = chunk.end();
+                if from >= range.end {
+                    break;
+                }
+            }
+        }
+        let source = self.source_metadata();
+        let mut pieces = Vec::new();
+        for (start, end, paragraph_style) in paragraphs {
+            pieces.extend(self.style_reset_pieces(
+                &txn,
+                &story,
+                &range.story,
+                (start, end),
+                clear,
+                paragraph_style.as_deref(),
+                source.as_deref(),
+            )?);
+        }
+        let mut keeper = Keeper::new(self);
+        let mut revision_ids: Vec<String> = Vec::new();
+        for (start, end, mut attrs) in pieces {
+            attrs.extend(set.iter().map(|(key, value)| (key.clone(), value.clone())));
+            let piece = StoryRange::new(range.story.as_str(), start, end);
+            for id in self.apply_run_format_through(
+                &mut txn,
+                ctx,
+                &story,
+                &piece,
+                Some(&attrs),
+                &mut keeper,
+            )? {
+                if !revision_ids.contains(&id) {
+                    revision_ids.push(id);
+                }
+            }
+        }
+        let loc_range =
+            crate::op::loc_range_in_txn(&range.story, &story, &txn, range.start, range.end)?;
+        Ok((
+            Receipt {
+                range: Some(loc_range),
+                revision_ids,
+                ..Receipt::default()
+            },
+            keeper.kept,
+        ))
+    }
+
     /// A host `formatText` over one non-empty range in one transaction: `clear` returns the
     /// named marks to the styles, then `set` writes its attributes. Returns the revision ids and
     /// the paragraphs kept unchanged because saving them rewritten would lose content.
@@ -1390,6 +1470,7 @@ impl EditingDoc {
         set: &[(String, Any)],
         clear: Option<&ClearMarks>,
         paragraph_style: Option<&str>,
+        source: Option<&crate::seed::SourceMetadata>,
     ) -> OpResult<(Vec<String>, KeptUnchanged)> {
         let len = range_len(&range)?;
         if len == 0 {
@@ -1415,6 +1496,7 @@ impl EditingDoc {
                 (range.start, range.end),
                 clear,
                 paragraph_style,
+                source,
             )?,
             None => vec![(range.start, range.end, Attrs::new())],
         };

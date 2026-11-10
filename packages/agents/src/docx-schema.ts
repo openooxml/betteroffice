@@ -15,6 +15,9 @@ const sectionProperties = {
 };
 const languageTag = z.string().max(35).regex(/^[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8})*$/).nullable().optional().describe('BCP-47 language tag; null clears, omitted keeps.');
 const mark = z.boolean().optional().describe('true sets, false clears, omitted keeps.');
+const TEXT_MARKS = ['bold', 'italic', 'underline', 'strike', 'verticalAlign', 'color', 'highlight', 'fontSizePt', 'fontFamily'] as const;
+const THEME_COLORS = ['dark1', 'light1', 'dark2', 'light2', 'accent1', 'accent2', 'accent3', 'accent4', 'accent5', 'accent6', 'hyperlink', 'followedHyperlink', 'background1', 'text1', 'background2', 'text2'] as const;
+const HIGHLIGHT_COLORS = ['black', 'blue', 'cyan', 'green', 'magenta', 'red', 'yellow', 'white', 'darkBlue', 'darkCyan', 'darkGreen', 'darkMagenta', 'darkRed', 'darkYellow', 'darkGray', 'lightGray'] as const;
 
 export const docxEditSchema = z.discriminatedUnion('op', [
   z.object({ op: z.literal('set_runs'), paragraph: ref, revision: z.number().int().nonnegative(), runs: z.array(z.object({ run: ref, text }).strict()).min(1) }).strict(),
@@ -22,7 +25,16 @@ export const docxEditSchema = z.discriminatedUnion('op', [
   z.object({ op: z.literal('set_section'), section: z.number().int().positive(), ...sectionProperties }).strict(),
   z.object({ op: z.literal('set_paragraph_style'), paragraph: ref, style }).strict(),
   z.object({ op: z.literal('set_language'), paragraph: ref.optional(), match: ref.optional().describe('Match ID from office_grep.'), style: style.optional().describe('Paragraph or character style ID or name defined in the document.'), defaults: z.literal(true).optional(), lang: languageTag, eastAsia: languageTag, bidi: languageTag }).strict(),
-  z.object({ op: z.literal('format_text'), match: ref.describe('Match ID from office_grep.'), bold: mark, italic: mark, underline: mark }).strict(),
+  z.object({
+    op: z.literal('format_text'), match: ref.describe('Match ID from office_grep.'), bold: mark, italic: mark, underline: mark,
+    strike: z.union([z.boolean(), z.enum(['sngStrike', 'dblStrike', 'noStrike'])]).optional().describe('true or sngStrike single, dblStrike double, false or noStrike off; omitted keeps.'),
+    verticalAlign: z.enum(['superscript', 'subscript']).optional(),
+    color: z.union([z.string().regex(/^[0-9A-Fa-f]{6}$/u), z.object({ themeColor: z.enum(THEME_COLORS) }).strict()]).optional().describe('RRGGBB or a theme colour.'),
+    highlight: z.enum(HIGHLIGHT_COLORS).optional(),
+    fontSizePt: z.number().min(1).max(1638).multipleOf(0.5).optional(),
+    fontFamily: z.string().min(1).max(255).optional(),
+    clear: z.union([z.literal('all'), z.array(z.enum(TEXT_MARKS)).min(1)]).optional().describe('Marks returned to what the paragraph and character styles give before the others apply; all also removes the character style.'),
+  }).strict(),
   z.object({
     op: z.literal('add_comment'), match: ref.describe('Match ID from office_grep.'), author: z.string().min(1).max(200),
     text: text.min(1).describe('Plain text; each line becomes a comment paragraph.'), date: dateSchema.optional().describe('ISO timestamp or YYYY-MM-DD (midnight UTC); defaults to now.'),
