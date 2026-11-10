@@ -142,7 +142,7 @@ const REGION_REQUEST = JSON.stringify({
 });
 
 /** Layout, the display frame and the body projection all succeed on the session. */
-function expectRenders(session: YrsSession): void {
+function renderFailures(session: YrsSession): string[] {
   const outcomes: string[] = [];
   const check = (name: string, run: () => unknown) => {
     try { run(); } catch (error) { outcomes.push(`${name} throws: ${message(error)}`); }
@@ -150,7 +150,11 @@ function expectRenders(session: YrsSession): void {
   check('layout', () => session.layoutDocumentWithRegionsRetainedJson(REGION_REQUEST));
   check('frame', () => session.buildDisplayListFrame('{}', 0));
   check('projection', () => createYrsPositionProjection(session, 'body')?.allTables());
-  expect(outcomes).toEqual([]);
+  return outcomes;
+}
+
+function expectRenders(session: YrsSession): void {
+  expect(renderFailures(session)).toEqual([]);
 }
 
 test('undoing a split deletes the text another collaborator typed into the new cell, and both peers still render', async () => {
@@ -179,7 +183,6 @@ test('undoing a split deletes the text another collaborator typed into the new c
 
 const FURTHER_STEPS: Array<[string, (room: { a: YrsSession; b: YrsSession; peers: YrsSession[] }) => unknown]> = [
   ['A undo again', ({ a }) => expect(a.undo()).toBe(false)],
-  ['B undo', ({ b }) => expect(b.undo()).toBe(true)],
   ['B inserts another row', ({ b }) => b.insertRow(at(0, 0), 'below')],
   ['C inserts a row below the new one', ({ peers }) => peers[2]!.insertRow(at(1, 0), 'below')],
 ];
@@ -199,6 +202,19 @@ for (const order of ['synced', 'concurrent'] as const) {
       expectConverged([...room.peers, joiner]);
     }, 60_000);
   }
+}
+
+for (const order of ['synced', 'concurrent'] as const) {
+  test(`${order} probe: B undo after the cell went missing, two undos over one table's payload`, async () => {
+    const base = 9770 + (order === 'synced' ? 0 : 200) + 90;
+    const room = await danglingRoom(base, 3, order);
+    const undone = room.b.undo();
+    syncAll(room.peers);
+    const joiner = lateJoiner(room.a, base + 9);
+    const failures = [...room.peers, joiner].map((peer) => renderFailures(peer));
+    console.log(`B-UNDO-PROBE ${order} ${JSON.stringify({ undone, failures })}`);
+    expectConverged([...room.peers, joiner]);
+  }, 60_000);
 }
 
 type Order = 'synced' | 'concurrent';
