@@ -1,8 +1,8 @@
 pub mod document;
 pub mod session;
 
-pub use document::{Document, Host, SnapshotBuilder, display_list_cell_limit};
 pub use betteroffice_xlsx::PngFontFace;
+pub use document::{Document, Host, SnapshotBuilder, display_list_cell_limit};
 pub use session::Session;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -25,7 +25,7 @@ export function renderPng(engine: XlsxPngEngine, target: ResolvedPngTarget, opti
     const { signal: _signal, fonts, ...native } = options;
     return Promise.resolve(doc.renderPngTarget(JSON.stringify(target), JSON.stringify(native), fonts));
   } catch (error) {
-    const message = error instanceof Error ? error.message : '';
+    const message = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
     return Promise.reject(message.startsWith(UNAVAILABLE) ? fontUnavailable(message.slice(UNAVAILABLE.length), 'sheet') : error);
   }
 }

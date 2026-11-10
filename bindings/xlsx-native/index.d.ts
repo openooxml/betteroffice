@@ -115,14 +115,6 @@ export interface DecodedFontFace {
   payload?: Uint8Array
 }
 
-/** A face one PNG export paints with. */
-export interface PngFontFace {
-  family: string
-  bold?: boolean
-  italic?: boolean
-  bytes: Uint8Array
-}
-
 /** Decodes one font pack face using this engine's linked decoder. */
 export declare function decodeFontFace(bytes: Uint8Array, codec: string, dict?: Uint8Array | null, maxOutput?: number | null): DecodedFontFace
 
@@ -139,6 +131,14 @@ export declare function exportXlsxStructuredJson(bytes: Uint8Array, options: str
 
 /** Internal: the installed font packs `configureFontPacks` left out, and why, as JSON. */
 export declare function fontPackDiagnosticsJson(): string
+
+/** A face one PNG export paints with. */
+export interface PngFontFace {
+  family: string
+  bold?: boolean
+  italic?: boolean
+  bytes: Uint8Array
+}
 
 export declare function renderXlsxMarkdownJson(content: string, options: string): string
 

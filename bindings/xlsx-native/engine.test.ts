@@ -130,7 +130,7 @@ describe('xlsx native engine parity', () => {
     const face = (name: string) => new Uint8Array(readFileSync(new URL(`../../crates/betteroffice-fonts/tests/fixtures/Synthetic-${name}.ttf`, import.meta.url)));
     const regular = face('Regular');
     const bold = face('Bold');
-    const view = { sheet: 0, viewport: { x: 0, y: 0, width: 300, height: 80 } };
+    const view = { sheet: 0, viewport: { x: 0, y: 0, width: 300, height: 150 } };
 
     async function openFixture() {
       const main = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
