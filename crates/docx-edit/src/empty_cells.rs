@@ -129,7 +129,12 @@ impl EditingDoc {
     /// Creates the story of an empty cell with its one empty paragraph, under the `system`
     /// origin so it is never an undo step of its own. Returns whether it created one; a story
     /// that exists, or a cell no live table names, is left alone.
-    pub(crate) fn ensure_cell_story(&self, story_id: &str) -> bool {
+    ///
+    /// A cell that a table of a live story names while its own story is missing or removed reads
+    /// as one empty paragraph, but the write methods of this type take existing stories only and
+    /// answer such a cell with an unknown-story error. Call this first to write into it; the
+    /// session write methods do so themselves.
+    pub fn ensure_cell_story(&self, story_id: &str) -> bool {
         if self.empty_cell(story_id).is_none() {
             return false;
         }
