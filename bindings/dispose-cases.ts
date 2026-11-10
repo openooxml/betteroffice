@@ -68,8 +68,18 @@ export function describeDisposeTable(engineKind: 'wasm' | 'native', engine: Reco
       test(`${entry.name}: ${second} after ${first} on ${engineKind}: ${SECOND_RELEASE[engineKind]}`, () => {
         const handle = entry.make();
         release(handle, first);
-        if (SECOND_RELEASE[engineKind] === 'throws') expect(() => release(handle, second)).toThrow(Error);
-        else expect(() => release(handle, second)).not.toThrow();
+        if (SECOND_RELEASE[engineKind] === 'throws') {
+          let caught: unknown;
+          try {
+            release(handle, second);
+          } catch (error) {
+            caught = error;
+          }
+          expect(caught).toBeInstanceOf(Error);
+          expect(caught).not.toBeInstanceOf(TypeError);
+        } else {
+          expect(() => release(handle, second)).not.toThrow();
+        }
         expect(() => entry.use(handle)).toThrow(Error);
       });
     }
