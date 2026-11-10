@@ -41,17 +41,17 @@ test('a docx PNG follows the picture outcome table shared with the native engine
       for (const [index, { name, strictPictures }] of cases.entries()) {
         const bytes = new Uint8Array(await (await fetch(`/__case/${index}`)).arrayBuffer());
         const session = await docx.createYrsSession();
-        const pictures: { id: string; reason: string }[] = [];
+        const diagnostics: { code: string; pictures: { id: string; reason: string }[] }[] = [];
         try {
           session.openDocx(bytes, true);
           const png: Uint8Array = await session.renderPng({ page: 0 }, {
             strictPictures,
-            onDiagnostic: (diagnostic: { pictures: { id: string; reason: string }[] }) => pictures.push(...diagnostic.pictures.map(({ id, reason }) => ({ id, reason }))),
+            onDiagnostic: ({ code, pictures }: { code: string; pictures: { id: string; reason: string }[] }) => diagnostics.push({ code, pictures: pictures.map(({ id, reason }) => ({ id, reason })) }),
           });
           const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new Uint8Array(png)));
-          out[name] = { png: Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join(''), pictures };
+          out[name] = { png: Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join(''), diagnostics };
         } catch (error) {
-          out[name] = { code: (error as { code?: string }).code, message: String((error as Error).message), pictures };
+          out[name] = { code: (error as { code?: string }).code, message: String((error as Error).message), diagnostics };
         } finally { session.destroy(); }
       }
       return out;

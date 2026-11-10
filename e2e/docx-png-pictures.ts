@@ -16,15 +16,18 @@ export const PICTURE_CASES: { name: string; part: PicturePart; strictPictures?: 
 /** A picture as the diagnostics name it. */
 export interface ReportedPicture { id: string; reason: string }
 
-/** One export: the PNG's digest, or the rejection; with every picture `onDiagnostic` reported. */
-export type PictureResult = ({ png: string } | { code?: string; message: string }) & { pictures: ReportedPicture[] };
+/** One `onDiagnostic` call, as the runner received it. */
+export interface ReportedDiagnostic { code: string; pictures: ReportedPicture[] }
+
+/** One export: the PNG's digest, or the rejection; with every `onDiagnostic` call it made. */
+export type PictureResult = ({ png: string } | { code?: string; message: string }) & { diagnostics: ReportedDiagnostic[] };
 
 /** The behaviour every engine must show for the cases above. */
 export const PICTURE_OUTCOMES: ({ rule: string } & (
   | { differs: [string, string] }
   | { equals: [string, string] }
   | { reports: { case: string; reasons: string[] } }
-  | { rejects: { case: string; code: string; reason: string } }
+  | { rejects: { case: string; code: string; reason: string; named: string } }
 ))[] = [
   { rule: 'a picture that draws is on the page', differs: ['drawn', 'no picture'] },
   { rule: 'a picture that draws is not reported', reports: { case: 'drawn', reasons: [] } },
@@ -33,8 +36,8 @@ export const PICTURE_OUTCOMES: ({ rule: string } & (
   { rule: 'a picture the decoder refuses leaves a placeholder on the page', differs: ['corrupt', 'no picture'] },
   { rule: 'a picture the decoder refuses is reported as decode-failed', reports: { case: 'corrupt', reasons: ['decode-failed'] } },
   { rule: 'strictPictures leaves a page whose pictures draw as it is', equals: ['drawn strict', 'drawn'] },
-  { rule: 'strictPictures rejects a missing picture, naming it, with no PNG and no diagnostic', rejects: { case: 'missing strict', code: 'picture-unavailable', reason: 'missing' } },
-  { rule: 'strictPictures rejects a refused picture, naming it, with no PNG and no diagnostic', rejects: { case: 'corrupt strict', code: 'picture-unavailable', reason: 'decode-failed' } },
+  { rule: 'strictPictures rejects a missing picture, naming it, with no PNG and no diagnostic', rejects: { case: 'missing strict', code: 'picture-unavailable', reason: 'missing', named: 'missing' } },
+  { rule: 'strictPictures rejects a refused picture, naming it, with no PNG and no diagnostic', rejects: { case: 'corrupt strict', code: 'picture-unavailable', reason: 'decode-failed', named: 'corrupt' } },
 ];
 
 /** The rules of `PICTURE_OUTCOMES` the results break, one line each; empty when every rule holds. */
@@ -48,18 +51,25 @@ export function pictureOutcomeFailures(results: Record<string, PictureResult>): 
   };
   for (const outcome of PICTURE_OUTCOMES) {
     if ('rejects' in outcome) {
-      const result = results[outcome.rejects.case];
-      if (!result || 'png' in result) failures.push(`${outcome.rule}: "${outcome.rejects.case}" rendered`);
-      else if (result.code !== outcome.rejects.code || !result.message.includes(`(${outcome.rejects.reason})`)) {
-        failures.push(`${outcome.rule}: "${outcome.rejects.case}" rejected with ${result.code ?? 'no code'}: ${result.message}`);
-      } else if (result.pictures.length) failures.push(`${outcome.rule}: "${outcome.rejects.case}" also reported ${JSON.stringify(result.pictures)}`);
+      const { case: name, code, reason, named } = outcome.rejects;
+      const result = results[name];
+      const id = reportedIds(results[named]);
+      if (!result || 'png' in result) failures.push(`${outcome.rule}: "${name}" rendered`);
+      else if (result.code !== code || id.length !== 1 || !result.message.includes(`${id[0]} (${reason})`)) {
+        failures.push(`${outcome.rule}: "${name}" rejected with ${result.code ?? 'no code'}: ${result.message}, where "${named}" reported ${JSON.stringify(id)}`);
+      } else if (result.diagnostics.length) failures.push(`${outcome.rule}: "${name}" also reported ${JSON.stringify(result.diagnostics)}`);
       continue;
     }
     if ('reports' in outcome) {
-      if (png(outcome.reports.case, outcome.rule) === undefined) continue;
-      const reasons = results[outcome.reports.case]!.pictures.map((picture) => picture.reason).sort();
-      if (JSON.stringify(reasons) !== JSON.stringify([...outcome.reports.reasons].sort())) {
-        failures.push(`${outcome.rule}: "${outcome.reports.case}" reported ${JSON.stringify(reasons)}`);
+      const { case: name, reasons } = outcome.reports;
+      if (png(name, outcome.rule) === undefined) continue;
+      const diagnostics = results[name]!.diagnostics;
+      const reported = diagnostics.flatMap((diagnostic) => diagnostic.pictures);
+      const expected = reasons.length ? 1 : 0;
+      if (diagnostics.length !== expected || diagnostics.some((diagnostic) => diagnostic.code !== 'picture-unavailable')
+        || JSON.stringify(reported.map((picture) => picture.reason).sort()) !== JSON.stringify([...reasons].sort())
+        || reported.some((picture) => !picture.id)) {
+        failures.push(`${outcome.rule}: "${name}" reported ${JSON.stringify(diagnostics)}`);
       }
       continue;
     }
@@ -71,6 +81,11 @@ export function pictureOutcomeFailures(results: Record<string, PictureResult>): 
     if ('equals' in outcome && first !== second) failures.push(`${outcome.rule}: "${a}" and "${b}" differ`);
   }
   return failures;
+}
+
+/** The ids a lenient export reported, in order. */
+function reportedIds(result: PictureResult | undefined): string[] {
+  return result ? result.diagnostics.flatMap((diagnostic) => diagnostic.pictures.map((picture) => picture.id)) : [];
 }
 
 /** A 4 by 4 opaque red PNG. */
@@ -87,6 +102,6 @@ export async function pictureDocument(part: PicturePart): Promise<Uint8Array> {
   zip.file('word/_rels/document.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${part === 'none' ? '' : `<Relationship Id="rIdImage" Type="${rel}/image" Target="media/image.png"/>`}</Relationships>`);
   zip.file('word/document.xml', `<w:document xmlns:w="${w}" xmlns:r="${rel}"><w:body><w:p><w:r><w:t>Pictures</w:t></w:r></w:p>${picture}</w:body></w:document>`);
   if (part === 'drawn') zip.file('word/media/image.png', RED_PNG, { base64: true });
-  if (part === 'corrupt') zip.file('word/media/image.png', new Uint8Array([137, 80, 78, 71, 1, 2, 3, 4]));
+  if (part === 'corrupt') zip.file('word/media/image.png', new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13]));
   return zip.generateAsync({ type: 'uint8array' });
 }
