@@ -205,23 +205,3 @@ test('formatted text runs apply, save and reopen the same through native and was
   expect(refusals[0]).toMatchObject({ code: 'invalid-step', stepIndex: 0 });
   expect(refusals[0]).toEqual(refusals[1]);
 });
-
-test('clearing formatting to the styles matches through native and wasm', async () => {
-  const exercise = async (api: typeof wasmYrs) => {
-    const session = await api.createYrsSession({ clientId: 63 });
-    try {
-      session.seedFromDocx(await textRunFixture());
-      for (const [paraId, length] of [['00000003', 5], ['00000004', 10]] as const) {
-        session.formatRange({ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: length } }, { clear: 'all', italic: true });
-      }
-      const saved = await api.saveYrsDocx(session, { updateModifiedDate: false });
-      return { bytes: saved.bytes, segments: session.storySegments('body') };
-    } finally { session.destroy(); }
-  };
-  const actual = await exercise(nativeYrs as unknown as typeof wasmYrs);
-  const expected = await exercise(wasmYrs);
-  expect(actual.segments).toEqual(expected.segments);
-  const title = actual.segments.find((segment) => segment.kind === 'text' && segment.text === 'Title');
-  expect(title?.kind === 'text' && Boolean(title.attributes.bold) && Boolean(title.attributes.italic)).toBe(true);
-  await expectSavedPartsEqual(actual.bytes, expected.bytes);
-});

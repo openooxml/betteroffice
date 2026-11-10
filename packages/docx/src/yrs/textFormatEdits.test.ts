@@ -66,32 +66,4 @@ describe('formatText clear', () => {
     expect(holdsProperty(properties, 'w:color', { 'w:val': 'C00000' })).toBe(true);
     expect(properties ?? '').not.toContain('<w:b/>');
   });
-
-  test('formatRange clear refuses a range across paragraphs and changes nothing', async () => {
-    const session = await yrs.createYrsSession({ clientId: 73 });
-    try {
-      session.seedFromDocx(await textRunFixture());
-      const before = session.encodeState();
-      const ranges = [
-        { story: 'body', start: { paraId: '00000002', offset: 0 }, end: { paraId: '00000003', offset: 5 } },
-        { story: 'body', start: { paraId: '00000002', offset: 10 }, end: { paraId: '00000003', offset: 3 } },
-      ];
-      for (const across of ranges) {
-        let code: unknown;
-        try {
-          session.formatRange(across, { clear: ['bold'] });
-        } catch (error) {
-          code = (error as { code?: unknown }).code;
-        }
-        expect(code, JSON.stringify(across)).toBe('clear-across-paragraphs');
-      }
-      expect(session.encodeState()).toEqual(before);
-      const within = { story: 'body', start: { paraId: '00000003', offset: 0 }, end: { paraId: '00000003', offset: 5 } };
-      session.formatRange(within, { clear: 'all', italic: true });
-      const title = session.storySegments('body').find((entry) => entry.kind === 'text' && entry.text === 'Title');
-      expect(title?.kind === 'text' && Boolean(title.attributes.bold) && Boolean(title.attributes.italic)).toBe(true);
-    } finally {
-      session.destroy();
-    }
-  });
 });

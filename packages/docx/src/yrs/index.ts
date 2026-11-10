@@ -48,7 +48,6 @@ import type {
   DocxReadParagraphsResult,
   DocxReadStoriesRequest,
   DocxReadStoriesResult,
-  DocxTextMarkName,
   DocxTextTarget,
   DocxValidationResult,
 } from './edits';
@@ -326,18 +325,6 @@ export interface YrsInlineFormatDelta {
   language?: YrsLanguagePatch | null;
   /** Passive run properties not covered by the typed fields. `null` clears. */
   other?: Readonly<Record<string, unknown | null>>;
-  /**
-   * Returns the named marks to what the styles give before the other fields apply, as a
-   * `formatText` step's `clear` does: each cleared key takes the paragraph style's and the run's
-   * character style's value, and is removed where no style supplies it. `'all'` clears every
-   * character formatting mark and also removes the character style; the paragraph style stays.
-   * With `clear`, the range must lie within one paragraph; otherwise the call throws an error whose
-   * `code` is `clear-across-paragraphs` and changes nothing.
-   *
-   * @example
-   * session.formatRange(range, { clear: ['bold', 'fontSizePt'], italic: true });
-   */
-  clear?: readonly DocxTextMarkName[] | 'all';
 }
 
 export interface YrsHyperlinkAttrs {

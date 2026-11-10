@@ -34,19 +34,6 @@ async function format(doc: DocxAgentDocument, query: string, marks: Record<strin
   return doc.edit({ version: doc.list().version, edits: [{ op: 'format_text', match, ...marks }] });
 }
 
-test('format_text clear on a heading run keeps the heading bold', async () => {
-  const doc = await open(await fixture('<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:rPr><w:i/><w:color w:val="C00000"/></w:rPr><w:t>Heading</w:t></w:r></w:p>'));
-  await format(doc, 'Heading', { clear: 'all' });
-  expect(Boolean(segment(doc, 'Heading').bold)).toBe(true);
-  expect(Boolean(segment(doc, 'Heading').italic)).toBe(false);
-  const properties = await runProperties(doc, 'Heading');
-  expect(properties).not.toContain('<w:b');
-  expect(properties).not.toContain('<w:i');
-  expect(properties).not.toContain('C00000');
-  const reopened = await open(await doc.export());
-  expect(Boolean(segment(reopened, 'Heading').bold)).toBe(true);
-});
-
 test('format_text around a tracked insertion behaves as on main: no match spans it, a neighbouring match formats as the editor does', async () => {
   const body = '<w:p><w:r><w:t xml:space="preserve">Before </w:t></w:r><w:ins w:id="7" w:author="Ann" w:date="2026-01-01T00:00:00Z"><w:r><w:t>inserted</w:t></w:r></w:ins><w:r><w:t xml:space="preserve"> after</w:t></w:r></w:p>';
   const tool = await open(await fixture(body));

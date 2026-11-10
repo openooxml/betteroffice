@@ -535,35 +535,6 @@ test('plain forward deletes remove retained tracked text at the original caret',
   expectCaret(result, { story: 'body', paraId: id, offset: 0 });
 }, TIMEOUT);
 
-test('format range clear applies in the worker and an invalid clear is refused', async () => {
-  const arm = await openCommandEngine(['abc']);
-  const id = arm.engine.paragraphs('body')[0]!.paraId;
-  const all = selection(id, 0, 3);
-  expect(execute(arm, command(arm, 'formatRange', { selection: all, delta: { bold: true, italic: true } })).status).toBe('applied');
-  expect(execute(arm, command(arm, 'formatRange', { selection: all, delta: { clear: ['bold'] } })).status).toBe('applied');
-  expect(arm.engine.selectionContext(storyRange(all))).toMatchObject({ bold: false, italic: true });
-  const before = snapshot(arm);
-  for (const clear of ['some', [], ['size']]) {
-    expect(execute(arm, command(arm, 'formatRange', { selection: all, delta: { clear } as never }))).toMatchObject({
-      status: 'refused', reason: 'invalid-formatting',
-    });
-  }
-  expect(snapshot(arm)).toEqual(before);
-
-  const two = await openCommandEngine(['abc', 'def']);
-  const [first, second] = two.engine.paragraphs('body').map((paragraph) => paragraph.paraId);
-  const across = { anchor: { story: 'body', paraId: first!, offset: 1 }, focus: { story: 'body', paraId: second!, offset: 2 } };
-  const unchanged = snapshot(two);
-  for (const intent of [
-    command(two, 'formatRange', { selection: across, delta: { clear: 'all' } }),
-    command(two, 'formatRange', { selection: selection(first!, 1), delta: { clear: ['bold'] } }),
-  ]) {
-    expect(execute(two, intent)).toMatchObject({ status: 'refused', reason: 'invalid-formatting' });
-    expect(snapshot(two)).toEqual(unchanged);
-  }
-  expect(execute(two, command(two, 'formatRange', { selection: selection(first!, 0, 3), delta: { bold: true } })).status).toBe('applied');
-}, TIMEOUT);
-
 test('d1a_formatting_and_stored_marks_apply_in_worker', async () => {
   const arm = await openCommandEngine(['abc']);
   const id = arm.engine.paragraphs('body')[0]!.paraId;

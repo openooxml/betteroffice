@@ -15,7 +15,6 @@ const sectionProperties = {
 };
 const languageTag = z.string().max(35).regex(/^[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8})*$/).nullable().optional().describe('BCP-47 language tag; null clears, omitted keeps.');
 const mark = z.boolean().optional().describe('true sets, false clears, omitted keeps.');
-const TEXT_MARKS = ['bold', 'italic', 'underline', 'strike', 'verticalAlign', 'color', 'highlight', 'fontSizePt', 'fontFamily'] as const;
 const THEME_COLORS = ['dark1', 'light1', 'dark2', 'light2', 'accent1', 'accent2', 'accent3', 'accent4', 'accent5', 'accent6', 'hyperlink', 'followedHyperlink', 'background1', 'text1', 'background2', 'text2'] as const;
 const HIGHLIGHT_COLORS = ['black', 'blue', 'cyan', 'green', 'magenta', 'red', 'yellow', 'white', 'darkBlue', 'darkCyan', 'darkGreen', 'darkMagenta', 'darkRed', 'darkYellow', 'darkGray', 'lightGray'] as const;
 
@@ -33,7 +32,6 @@ export const docxEditSchema = z.discriminatedUnion('op', [
     highlight: z.enum(HIGHLIGHT_COLORS).optional(),
     fontSizePt: z.number().min(1).max(1638).multipleOf(0.5).optional(),
     fontFamily: z.string().min(1).max(255).optional(),
-    clear: z.union([z.literal('all'), z.array(z.enum(TEXT_MARKS)).min(1)]).optional().describe('Marks returned to what the paragraph and character styles give before the others apply; all also removes the character style.'),
   }).strict(),
   z.object({
     op: z.literal('add_comment'), match: ref.describe('Match ID from office_grep.'), author: z.string().min(1).max(200),

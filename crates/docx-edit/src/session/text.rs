@@ -282,24 +282,12 @@ impl EditSessionCore {
         let ctx = edit_ctx(author_name, author_date)?;
         let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
-        let mut value: serde_json::Value =
-            serde_json::from_str(delta_json).map_err(EngineError::message)?;
-        let clear = value
-            .as_object_mut()
-            .and_then(|object| object.remove("clear"));
-        let delta = parse_inline_format_delta(&value.to_string())?;
-        let range = StoryRange::new(story, start, end);
-        let doc = self.engine.doc();
-        match clear {
-            Some(clear) => {
-                let (clear, _) =
-                    crate::format::parse_clear_marks(&clear).map_err(EngineError::message)?;
-                doc.format_range_to_styles_keeping(&ctx, range, &clear, &delta)
-            }
-            None => doc.format_range_keeping(&ctx, range, &delta),
-        }
-        .map(|(_, kept)| kept_json(&kept))
-        .map_err(EngineError::from)
+        let delta = parse_inline_format_delta(delta_json)?;
+        self.engine
+            .doc()
+            .format_range_keeping(&ctx, StoryRange::new(story, start, end), &delta)
+            .map(|(_, kept)| kept_json(&kept))
+            .map_err(EngineError::from)
     }
 
     pub fn set_hyperlink(

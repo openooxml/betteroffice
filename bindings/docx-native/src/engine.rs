@@ -301,12 +301,6 @@ fn map_error(env: Env, error: EngineError) -> Error {
                 exception.set_named_property("code", "suggested-formatting-over-container")?;
                 env.throw(exception)
             }
-            EngineErrorKind::ClearAcrossParagraphs => {
-                let mut exception = env.create_error(Error::from_reason(error.message.clone()))?;
-                exception.set_named_property("name", "ClearAcrossParagraphsError")?;
-                exception.set_named_property("code", "clear-across-paragraphs")?;
-                env.throw(exception)
-            }
         }
     })();
     match result {

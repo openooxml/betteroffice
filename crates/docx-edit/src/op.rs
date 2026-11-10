@@ -42,8 +42,6 @@ pub enum OpError {
     NoParagraphBefore(ParagraphId),
     OverlapsTrackedChange,
     SuggestedFormattingOverContainer,
-    /// A clear back to the styles over a range that is not within one paragraph.
-    ClearAcrossParagraphs,
     /// Operation targets nested story content.
     NotTopLevel,
     LockedSdt,
@@ -103,12 +101,6 @@ impl fmt::Display for OpError {
                 f,
                 "suggested character formatting cannot include fields or inline content controls"
             ),
-            Self::ClearAcrossParagraphs => {
-                write!(
-                    f,
-                    "clearing formatting to the styles needs a range within one paragraph"
-                )
-            }
             Self::NotTopLevel => write!(f, "the target is not top-level content of its story"),
             Self::LockedSdt => write!(f, "the target is inside a locked content control"),
             Self::TextContainsBreak => {

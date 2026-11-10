@@ -115,16 +115,6 @@ impl From<EngineError> for JsValue {
                 );
                 value.into()
             }
-            EngineErrorKind::ClearAcrossParagraphs => {
-                let value = js_sys::Error::new(&error.message);
-                value.set_name("ClearAcrossParagraphsError");
-                let _ = js_sys::Reflect::set(
-                    &value,
-                    &JsValue::from_str("code"),
-                    &JsValue::from_str("clear-across-paragraphs"),
-                );
-                value.into()
-            }
         }
     }
 }

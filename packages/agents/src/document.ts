@@ -1524,7 +1524,7 @@ export class DocxAgentDocument {
       const delta = edit.op === 'set_language'
         ? { language: { lang: edit.lang, eastAsia: edit.eastAsia, bidi: edit.bidi } }
         : formatTextDelta(edit);
-      if (Object.values(delta).every(value => value === undefined)) throw new DocumentToolError('INVALID_ARGUMENT', 'format_text needs a mark or clear.');
+      if (Object.values(delta).every(value => value === undefined)) throw new DocumentToolError('INVALID_ARGUMENT', 'format_text needs a mark.');
       return draft => {
         requireParagraph(draft, p);
         const { keptUnchanged } = draft.formatRange(range, delta);
@@ -1662,7 +1662,7 @@ export function attachDocx(session: YrsSession, options: DocumentOptions = {}): 
   return new DocxAgentDocument(session, options);
 }
 
-/** The session formatting delta a `format_text` edit writes; `clear` returns marks to the styles first. */
+/** The session formatting delta a `format_text` edit writes. */
 function formatTextDelta(edit: Extract<DocxAgentEdit, { op: 'format_text' }>): YrsInlineFormatDelta {
   const strike = edit.strike === undefined ? undefined
     : edit.strike === 'dblStrike' ? { double: true }
@@ -1675,6 +1675,5 @@ function formatTextDelta(edit: Extract<DocxAgentEdit, { op: 'format_text' }>): Y
     fontFamily: edit.fontFamily === undefined ? undefined : { ascii: edit.fontFamily, hAnsi: edit.fontFamily },
     other: edit.verticalAlign === undefined ? undefined
       : { superscript: edit.verticalAlign === 'superscript' ? true : null, subscript: edit.verticalAlign === 'subscript' ? true : null },
-    clear: edit.clear,
   };
 }
