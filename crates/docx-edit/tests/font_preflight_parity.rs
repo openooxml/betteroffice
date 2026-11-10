@@ -189,3 +189,30 @@ fn notes_at_the_conventional_path_without_a_relationship() {
         assert_parity(&bytes, family);
     }
 }
+
+#[test]
+fn main_part_named_by_the_package_relationship() {
+    let bytes = package(&[
+        (
+            "_rels/.rels",
+            rels(&[("officeDocument", "word/document2.xml")]),
+        ),
+        (
+            "word/document2.xml",
+            document(
+                r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="MissingFont" w:hAnsi="MissingFont"/></w:rPr><w:t>Real</w:t></w:r></w:p>"#,
+            ),
+        ),
+        (
+            "word/_rels/document2.xml.rels",
+            rels(&[("styles", "styles.xml")]),
+        ),
+        ("word/document.xml", document(&plain("Decoy"))),
+        (
+            "word/_rels/document.xml.rels",
+            rels(&[("styles", "styles.xml")]),
+        ),
+        ("word/styles.xml", styles("Base", "")),
+    ]);
+    assert_parity(&bytes, "MissingFont");
+}

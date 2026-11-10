@@ -271,14 +271,31 @@ pub fn docx_font_preflight(bytes: &[u8]) -> Result<FontPreflight, PreflightError
         nodes: xml::MAX_NODES,
     };
     let mut complete = true;
+    let package = parts.part("_rels/.rels", &mut complete)?;
+    let package = relationships_from(package.as_ref(), "", &mut complete);
+    let mut main = package.iter().filter(|rel| rel.kind == "officeDocument");
+    let document_path = main
+        .next()
+        .map_or("word/document.xml", |rel| rel.target.as_str());
+    if main.next().is_some() || document_path != "word/document.xml" {
+        complete = false;
+    }
     let document = parts
-        .part("word/document.xml", &mut complete)?
+        .part(document_path, &mut complete)?
         .ok_or(PreflightError::MissingDocument)?;
     if document.name != "w:document" || document.child("w:body").is_none() {
         return Err(PreflightError::Xml);
     }
-    let rels = parts.part("word/_rels/document.xml.rels", &mut complete)?;
-    let mut rels = relationships_from(rels.as_ref(), "word", &mut complete);
+    let (directory, name) = document_path
+        .rsplit_once('/')
+        .unwrap_or(("", document_path));
+    let rels_path = if directory.is_empty() {
+        format!("_rels/{name}.rels")
+    } else {
+        format!("{directory}/_rels/{name}.rels")
+    };
+    let rels = parts.part(&rels_path, &mut complete)?;
+    let mut rels = relationships_from(rels.as_ref(), directory, &mut complete);
     let explicit = rels.len();
     for kind in ["footnotes", "endnotes"] {
         if !rels.iter().any(|rel| rel.kind == kind) {
