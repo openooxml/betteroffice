@@ -262,7 +262,10 @@ function readerRows(session: YrsSession): Record<string, string> {
       if (paragraphs.length !== 1 || paragraphs[0]!.text !== '') throw new Error(JSON.stringify(paragraphs));
     });
     check(`${story} hasStory`, () => { if (!session.hasStory(story)) throw new Error('hasStory is false'); });
-    check(`${story} boundaryDelete`, () => tableBoundaryDeleteTarget(session, firstParagraph(session, story), 'backward'));
+    check(`${story} boundaryDelete`, () => tableBoundaryDeleteTarget({
+      paragraphSpans: (id) => session.paragraphSpans(id),
+      paragraphSegments: (id, indices) => session.storySegmentUnits(id, indices),
+    }, firstParagraph(session, story), 'backward'));
     check(`${story} sticky`, () => {
       const loc = session.resolveStickyPosition(session.encodeStickyPosition(firstParagraph(session, story)));
       if (loc?.story !== story || loc.offset !== 0) throw new Error(JSON.stringify(loc));
