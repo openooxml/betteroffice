@@ -73,7 +73,7 @@ export const UnbuiltMirrorSection = memo(function UnbuiltMirrorSection({ page, v
   previous.page.bounds.x === next.page.bounds.x && previous.page.bounds.y === next.page.bounds.y &&
   previous.page.bounds.width === next.page.bounds.width && previous.page.bounds.height === next.page.bounds.height);
 
-export function useUnbuiltPageMirrors({ binding, geometry, center, enabled, read, blocked, navigate, column, t, mountedPages }: {
+export function useUnbuiltPageMirrors({ binding, geometry, center, enabled, read, blocked, navigate, column, t, mountedPages, fullMirror = true }: {
   binding: PeerlessEditSessionBinding;
   geometry: PeerlessFrameGeometry | null;
   mountedPages: readonly Page[];
@@ -84,6 +84,8 @@ export function useUnbuiltPageMirrors({ binding, geometry, center, enabled, read
   navigate(number: number): void;
   column: RefObject<HTMLDivElement | null>;
   t: TFunction;
+  /** Visible pages build the full mirror; false when they keep the text mirror. */
+  fullMirror?: boolean;
 }) {
   const [snapshot, setSnapshot] = useState<UnbuiltMirrorSnapshot<HTMLElement>>({ sections: [], ranges: [], nodeCount: 0 });
   const latest = useRef({ read, blocked, navigate });
@@ -200,7 +202,8 @@ export function useUnbuiltPageMirrors({ binding, geometry, center, enabled, read
       }
       const mirrorHost = host.querySelector<HTMLElement>(`[data-page-index="${wanted.pageIndex}"] .canvas-page-mirror`);
       const root = mirrorHost?.firstElementChild as HTMLElement | null;
-      if (!root || !root.childNodes.length || geometry?.pages.find(({ page }) => page.pageIndex === wanted.pageIndex)?.displayPage?.unbuilt) {
+      const ready = fullMirror ? mirrorHost?.dataset.pageChrome === 'chrome' : mirrorHost?.dataset.pageChrome !== undefined;
+      if (!root || !root.childNodes.length || !ready || geometry?.pages.find(({ page }) => page.pageIndex === wanted.pageIndex)?.displayPage?.unbuilt) {
         if (wanted.selection) return false;
         const target = mirrorHost ?? host;
         parked.current = target;

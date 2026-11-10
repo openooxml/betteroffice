@@ -178,20 +178,98 @@ const stopKey = (stop: HTMLElement): string | null => {
   return [stop.tagName, stop.getAttribute('href'), stop.id, stop.textContent].join('\u0000');
 };
 
+const BLOCK = '[data-block-id]';
+
+/** A place in the text of a mirror block, by block id, which of the blocks with that id, and text offset. */
+interface BlockPoint {
+  id: string;
+  nth: number;
+  offset: number;
+}
+
+const blocksWithId = (host: HTMLElement, id: string): HTMLElement[] =>
+  Array.from(host.querySelectorAll<HTMLElement>(BLOCK)).filter((block) => block.dataset.blockId === id);
+
+function blockPoint(host: HTMLElement, node: Node | null, offset: number): BlockPoint | null {
+  const element = node instanceof Element ? node : node?.parentElement;
+  const block = element?.closest<HTMLElement>(BLOCK);
+  if (!node || !block || !host.contains(block)) return null;
+  const range = host.ownerDocument.createRange();
+  range.selectNodeContents(block);
+  range.setEnd(node, offset);
+  const id = block.dataset.blockId!;
+  return { id, nth: blocksWithId(host, id).indexOf(block), offset: range.toString().length };
+}
+
+const blockAt = (host: HTMLElement, point: BlockPoint): HTMLElement | null =>
+  blocksWithId(host, point.id)[point.nth] ?? null;
+
+function textPoint(block: HTMLElement, offset: number): [Node, number] {
+  const walker = block.ownerDocument.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+  let seen = 0;
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const length = node.textContent?.length ?? 0;
+    if (offset <= seen + length) return [node, offset - seen];
+    seen += length;
+  }
+  return [block, block.childNodes.length];
+}
+
+/** Focuses a mirror block that is not a tab stop; it stops being focusable once it loses focus. */
+function focusBlock(block: HTMLElement): void {
+  if (!block.hasAttribute('tabindex')) {
+    block.tabIndex = -1;
+    block.addEventListener('blur', () => {
+      if (block.getAttribute('tabindex') === '-1') block.removeAttribute('tabindex');
+    }, { once: true });
+  }
+  block.focus({ preventScroll: true });
+}
+
 /**
  * Runs `change` on `host`'s content. When it loses the focused stop, focus
  * returns to that stop if it survived, else moves to the same stop in the new
- * content, or to the stop at the same place when that one is gone. Returns
- * what `change` returns.
+ * content, or to the stop at the same place when that one is gone. A focused
+ * mirror block that is not a stop, and a selection that lay wholly in `host`,
+ * return to the same block and text offset when that block still exists.
+ * Focus and selection elsewhere are left alone. Returns what `change` returns.
  */
 function changeKeepingFocus(host: HTMLElement, change: () => boolean): boolean {
-  const focused = host.ownerDocument.activeElement;
-  const stops = focused instanceof HTMLElement && host.contains(focused) ? tabStops(host) : [];
+  const doc = host.ownerDocument;
+  const focused = doc.activeElement;
+  const inside = focused instanceof HTMLElement && host.contains(focused) && focused !== host;
+  const stops = inside ? tabStops(host) : [];
   const at = stops.indexOf(focused as HTMLElement);
   const key = at >= 0 ? stopKey(stops[at]!) : null;
   const nth = stops.slice(0, at).filter((stop) => stopKey(stop) === key).length;
+  const focusedBlock = inside && at < 0 && focused.matches(BLOCK) ? blockPoint(host, focused, 0) : null;
+  const selection = doc.getSelection();
+  const before = selection && selection.rangeCount === 1 && host.contains(selection.anchorNode) &&
+    host.contains(selection.focusNode)
+    ? {
+      anchorNode: selection.anchorNode, anchorOffset: selection.anchorOffset,
+      focusNode: selection.focusNode, focusOffset: selection.focusOffset,
+      anchor: blockPoint(host, selection.anchorNode, selection.anchorOffset),
+      focus: blockPoint(host, selection.focusNode, selection.focusOffset),
+    }
+    : null;
   if (!change()) return false;
-  if (at < 0 || host.ownerDocument.activeElement === focused) return true;
+  const active = doc.activeElement;
+  if (focusedBlock && active !== focused && (!active || active === doc.body || host.contains(active))) {
+    const block = blockAt(host, focusedBlock);
+    if (block) focusBlock(block);
+  }
+  if (before?.anchor && before.focus && selection) {
+    const kept = selection.rangeCount === 1 && host.contains(before.anchorNode) && host.contains(before.focusNode) &&
+      selection.anchorNode === before.anchorNode && selection.anchorOffset === before.anchorOffset &&
+      selection.focusNode === before.focusNode && selection.focusOffset === before.focusOffset;
+    const anchor = kept ? null : blockAt(host, before.anchor);
+    const extent = kept ? null : blockAt(host, before.focus);
+    if (anchor && extent) {
+      selection.setBaseAndExtent(...textPoint(anchor, before.anchor.offset), ...textPoint(extent, before.focus.offset));
+    }
+  }
+  if (at < 0 || doc.activeElement === focused) return true;
   const rebuilt = tabStops(host);
   if (rebuilt.includes(focused as HTMLElement)) {
     (focused as HTMLElement).focus({ preventScroll: true });
@@ -267,6 +345,7 @@ export function usePageChrome(
       changeKeepingFocus(host, () => update(chrome, page, t));
     // Keep the previous chrome connected until its replacement is ready.
     if (!updated) replaceKeepingFocus(host, make(page, t));
+    host.dataset.pageChrome = 'chrome';
     builtForRef.current = {
       kind: 'chrome',
       page,
@@ -282,11 +361,13 @@ export function usePageChrome(
     const { page, urgentRevision, t, fallback } = latest.current;
     if (!fallback) {
       if (builtForRef.current) replaceKeepingFocus(host, null);
+      delete host.dataset.pageChrome;
       builtForRef.current = null;
       return;
     }
     const chrome = shows('chrome') ? (host.firstElementChild as HTMLElement | null) : null;
     replaceKeepingFocus(host, fallback(page, t, chrome));
+    host.dataset.pageChrome = 'fallback';
     builtForRef.current = {
       kind: 'fallback',
       page,

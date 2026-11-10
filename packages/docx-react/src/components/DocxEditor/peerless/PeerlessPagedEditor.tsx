@@ -403,7 +403,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     (page.pageIndex >= displayWindow[0] && page.pageIndex < displayWindow[1])), [pages, caretPage, displayWindow]);
   const unbuiltMirrors = useUnbuiltPageMirrors({ binding, geometry, center: mirrorCurrentPage,
     enabled: unbuiltPageMirror === 'text', read: readPageTexts, blocked: mirrorReadBlocked,
-    navigate: mirrorNavigate, column, t, mountedPages: visiblePages });
+    navigate: mirrorNavigate, column, t, mountedPages: visiblePages, fullMirror: pageMirror !== 'text' });
   const warmed = useRef(new WeakSet<NonNullable<ReturnType<typeof pageQueries.get>>>());
   const lastInput = useRef(Number.NEGATIVE_INFINITY);
   const lastDocumentChange = useRef(Number.NEGATIVE_INFINITY);
