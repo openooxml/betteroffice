@@ -383,3 +383,60 @@ test('placing a caret in a missing cell and reading it writes nothing; a restore
   expect(b.selection()).toMatchObject({ anchor: { story, offset: 0 } });
   expect(cellText(b, story!)).toBe('later');
 });
+
+function cellOf(session: YrsSession, story: string): YrsCellLoc {
+  const payload = session.tablePayload('body', 0) as { rows?: { cells?: { story?: string }[] }[] } | null;
+  for (const [row, value] of (payload?.rows ?? []).entries()) {
+    const column = (value.cells ?? []).findIndex((cell) => cell.story === story);
+    if (column >= 0) return at(row, column);
+  }
+  throw new Error(`no cell names ${story}`);
+}
+
+const collapsed = (loc: YrsLoc) => ({ story: loc.story, start: { paraId: loc.paraId, offset: 0 }, end: { paraId: loc.paraId, offset: 0 } });
+
+/** Every write entry point a user or host can aim at one cell. */
+const WRITES: Array<[string, (session: YrsSession, story: string) => unknown]> = [
+  ['insertText', (s, story) => s.insertText(firstParagraph(s, story), 'typed')],
+  ['replaceRange', (s, story) => s.replaceRange(collapsed(firstParagraph(s, story)), 'pasted')],
+  ['deleteRange at start', (s, story) => s.deleteRange(collapsed(firstParagraph(s, story)))],
+  ['mergeParagraphs (backspace at start)', (s, story) => s.mergeParagraphs(story, firstParagraph(s, story).paraId)],
+  ['insertLineBreak', (s, story) => s.insertLineBreak(firstParagraph(s, story))],
+  ['splitParagraph', (s, story) => s.splitParagraph(firstParagraph(s, story))],
+  ['toggleMark', (s, story) => s.toggleMark(collapsed(firstParagraph(s, story)), { type: 'bold' })],
+  ['applyParagraphStyle', (s, story) => s.applyParagraphStyle(collapsed(firstParagraph(s, story)), 'Heading1')],
+  ['setHyperlink', (s, story) => s.setHyperlink(collapsed(firstParagraph(s, story)), { href: 'https://example.com' })],
+  ['insertTable', (s, story) => s.insertTable(firstParagraph(s, story), 1, 1)],
+  ['insertPageBreak', (s, story) => s.insertPageBreak(firstParagraph(s, story))],
+  ['addComment', (s, story) => s.addComment([collapsed(firstParagraph(s, story))], 'Reviewer', '2026-01-01T00:00:00Z', 'note')],
+  ['mergeCells with a neighbour', (s, story) => { const cell = cellOf(s, story); return s.mergeCells({ anchor: { ...cell, column: Math.max(0, cell.column - 1) }, head: cell }); }],
+  ['splitCell', (s, story) => s.splitCell(cellOf(s, story), 1, 2)],
+  ['deleteRow', (s, story) => { const cell = cellOf(s, story); return s.deleteRow({ anchor: cell, head: cell }); }],
+  ['deleteColumn', (s, story) => { const cell = cellOf(s, story); return s.deleteColumn({ anchor: cell, head: cell }); }],
+  ['deleteTable', (s) => s.deleteTable({ story: 'body', tableIndex: 0 })],
+  ['host batch insertParagraphs', (s, story) => s.applyEdits({
+    expectVersion: s.version(),
+    steps: [{ op: 'insertParagraphs', target: { story, paraId: firstParagraph(s, story).paraId }, at: 'end', paragraphs: [{ text: 'from host' }] }],
+  })],
+];
+
+test('every write entry point aimed at a missing cell works or refuses cleanly, and the room stays readable and converges', async () => {
+  const outcomes: Record<string, string> = {};
+  let base = 10_000;
+  for (const [name, write] of WRITES) {
+    const { a, b, peers } = await danglingRoom(base, 2, 'synced');
+    base += 10;
+    const [story] = danglingCells(b);
+    expect(story).toBeDefined();
+    const before = Array.from(b.encodeStateVector());
+    const outcome = attempt(name, () => write(b, story!));
+    const wrote = JSON.stringify(Array.from(b.encodeStateVector())) !== JSON.stringify(before);
+    outcomes[name] = `${outcome}${wrote ? ' (wrote)' : ''}`;
+    expect(outcome).not.toMatch(/unreachable|panicked|RuntimeError/);
+    if (outcome.includes(' throws: ') && wrote) expect(b.paragraphs(story!).map((paragraph) => paragraph.text)).toEqual(['']);
+    syncAll(peers);
+    for (const peer of [a, b]) expectReadable(peer);
+    expectConverged(peers);
+  }
+  console.log(`WRITE-SURFACE ${JSON.stringify(outcomes)}`);
+}, 120_000);

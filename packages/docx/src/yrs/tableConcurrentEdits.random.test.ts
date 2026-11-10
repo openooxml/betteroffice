@@ -318,6 +318,8 @@ test('no live table names a hidden or missing cell story after any step of rando
     for (const line of violations.slice(0, 12)) console.log(`VIOLATION ${line}`);
     expect(violations).toEqual([]);
     expect(familyTotals.valid!.peerMissingSteps).toBe(0);
+    console.log(`PROJECTION-THROWS ${JSON.stringify(Object.fromEntries(Object.entries(familyTotals).map(([family, totals]) => [family, totals.projectionThrows])))}`);
+    expect(familyTotals.valid!.projectionThrows).toBe(0);
     console.log(`DANGLING-VALID-SEEDS ${JSON.stringify([...danglingSeeds])}`);
     expect([...danglingSeeds].filter((seed) => !KNOWN_UNFIXED_VALID_SEEDS.has(seed))).toEqual([]);
   })();
