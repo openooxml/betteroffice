@@ -799,6 +799,8 @@
   },
   "a11y": {
     "pageLabel": "Страница {number}",
+    "unbuiltPagesNotMirrored": "Страницы с {from} по {to} пока не включены в режим чтения.",
+    "goToPage": "Перейти к странице {number}",
     "headerLabel": "Верхний колонтитул страницы",
     "footerLabel": "Нижний колонтитул страницы",
     "chartNoData": "Нет данных",

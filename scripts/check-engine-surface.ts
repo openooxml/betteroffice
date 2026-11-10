@@ -57,6 +57,18 @@ export const FORMATS: Record<string, FormatConfig> = {
     classes: [],
     pending: [],
   },
+  "pptx-preflight": {
+    wasm: "packages/pptx/src/wasm/generated/preflight/pptx_preflight.d.ts",
+    native: "bindings/pptx-native/index.d.ts",
+    classes: [],
+    pending: [],
+  },
+  "xlsx-preflight": {
+    wasm: "packages/xlsx/src/wasm/generated/preflight/xlsx_preflight.d.ts",
+    native: "bindings/xlsx-native/index.d.ts",
+    classes: [],
+    pending: [],
+  },
   "docx-preflight": {
     wasm: "packages/docx/src/wasm/generated/preflight/docx_preflight.d.ts",
     native: "bindings/docx-native/index.d.ts",

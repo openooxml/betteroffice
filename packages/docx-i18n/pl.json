@@ -799,6 +799,8 @@
   },
   "a11y": {
     "pageLabel": "Strona {number}",
+    "unbuiltPagesNotMirrored": "Strony od {from} do {to} nie są jeszcze dostępne w widoku do czytania.",
+    "goToPage": "Przejdź do strony {number}",
     "headerLabel": "Nagłówek strony",
     "footerLabel": "Stopka strony",
     "chartNoData": "Brak danych",

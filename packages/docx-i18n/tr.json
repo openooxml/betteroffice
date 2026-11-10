@@ -799,6 +799,8 @@
   },
   "a11y": {
     "pageLabel": "Sayfa {number}",
+    "unbuiltPagesNotMirrored": "{from} ile {to} arasındaki sayfalar henüz okuma görünümünde değil.",
+    "goToPage": "{number}. sayfaya git",
     "headerLabel": "Sayfa üst bilgisi",
     "footerLabel": "Sayfa alt bilgisi",
     "chartNoData": "Veri yok",

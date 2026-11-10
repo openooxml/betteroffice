@@ -799,6 +799,8 @@
   },
   "a11y": {
     "pageLabel": "Seite {number}",
+    "unbuiltPagesNotMirrored": "Die Seiten {from} bis {to} sind noch nicht in der Leseansicht.",
+    "goToPage": "Zu Seite {number} gehen",
     "headerLabel": "Kopfzeile",
     "footerLabel": "Fußzeile",
     "chartNoData": "Keine Daten",

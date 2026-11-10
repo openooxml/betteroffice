@@ -799,6 +799,8 @@
   },
   "a11y": {
     "pageLabel": "Pagina {number}",
+    "unbuiltPagesNotMirrored": "Pagina’s {from} tot en met {to} staan nog niet in de leesweergave.",
+    "goToPage": "Ga naar pagina {number}",
     "headerLabel": "Paginakoptekst",
     "footerLabel": "Paginavoettekst",
     "chartNoData": "Geen gegevens",

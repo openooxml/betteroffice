@@ -4,6 +4,7 @@ import type { AddressInfo } from 'node:net';
 import { readFile } from 'node:fs/promises';
 import { extname, resolve, sep } from 'node:path';
 import JSZip from 'jszip';
+import { PNG_BROKEN_FACE, PNG_FONT_CASES, PNG_FONT_FACES, PNG_FONT_TARGET, pngFontOutcomeFailures, pngFontsWorkbook, type PngFontResult } from '../xlsx-png-fonts';
 
 const root = resolve(import.meta.dirname, '../..');
 const types: Record<string, string> = { '.js': 'text/javascript', '.mjs': 'text/javascript', '.wasm': 'application/wasm', '.json': 'application/json' };
@@ -31,8 +32,7 @@ async function workbook(): Promise<Buffer> {
 
 interface Export { width: number; height: number; redAtB2: boolean; inkInA1: number; ink: string; error?: string }
 
-async function exports(page: Page): Promise<Record<string, Export>> {
-  const doc = await workbook();
+async function served<T>(page: Page, fixtures: Record<string, Buffer>, run: () => Promise<T>): Promise<T> {
   const server = createServer(async (request, response) => {
     const path = new URL(request.url ?? '/', 'http://x').pathname;
     try {
@@ -40,8 +40,8 @@ async function exports(page: Page): Promise<Record<string, Export>> {
         return response.writeHead(200, { 'content-type': 'text/html' })
           .end(`<!doctype html><title>png</title><script type="importmap">${JSON.stringify({ imports })}</script>`);
       }
-      if (path === '/__fixture/doc') return response.writeHead(200).end(doc);
-      if (path === '/__fixture/font') return response.writeHead(200).end(await readFile(resolve(root, 'packages/fonts/assets/ComicRelief-Regular.ttf')));
+      const fixture = fixtures[path];
+      if (fixture) return response.writeHead(200).end(fixture);
       const fonts = /^\/npm\/@betteroffice\/([a-z-]+)\/((?:dist|assets)\/.+)$/.exec(path);
       if (fonts) {
         const directory = resolve(root, 'packages', fonts[1]);
@@ -63,8 +63,16 @@ async function exports(page: Page): Promise<Record<string, Export>> {
   await new Promise((ready) => server.once('listening', ready));
   try {
     await page.goto(`http://127.0.0.1:${(server.address() as AddressInfo).port}/`);
-    return await evaluate(page);
+    return await run();
   } finally { server.close(); }
+}
+
+async function exports(page: Page): Promise<Record<string, Export>> {
+  const fixtures = {
+    '/__fixture/doc': await workbook(),
+    '/__fixture/font': await readFile(resolve(root, 'packages/fonts/assets/ComicRelief-Regular.ttf')),
+  };
+  return served(page, fixtures, () => evaluate(page));
 }
 
 function evaluate(page: Page): Promise<Record<string, Export>> {
@@ -128,4 +136,33 @@ test('an xlsx range exports through the canvas, in the page and in a worker sess
   }
   expect(result['worker range']).toEqual(result['thread range']);
   expect(result['thread range with a supplied face'].ink, 'the supplied face, not the runtime font, paints A1').not.toBe(result['thread range'].ink);
+});
+
+test('an xlsx PNG follows the supplied-fonts outcome table shared with the native engine', async ({ page }) => {
+  const fixtures: Record<string, Buffer> = { '/__fixture/fonts-doc': Buffer.from(await pngFontsWorkbook()) };
+  for (const [name, path] of Object.entries(PNG_FONT_FACES)) fixtures[`/__fixture/face/${name}`] = await readFile(resolve(root, path));
+  const results = await served(page, fixtures, () => page.evaluate(async ({ cases, target, broken }) => {
+    const xlsx = await import(`${location.origin}/__xlsx/index.js`);
+    await xlsx.initWasm();
+    const handle = xlsx.openWorkbook(new Uint8Array(await (await fetch('/__fixture/fonts-doc')).arrayBuffer()));
+    const face = async (name: string) => name === 'broken'
+      ? new Uint8Array(broken)
+      : new Uint8Array(await (await fetch(`/__fixture/face/${name}`)).arrayBuffer());
+    const out: Record<string, { png: string } | { code?: string; message: string }> = {};
+    try {
+      for (const { name, fonts } of cases) {
+        try {
+          const options = fonts ? { fonts: await Promise.all(fonts.map(async ({ family, face: faceName }) => ({ family, bytes: await face(faceName) }))) } : {};
+          const png: Uint8Array = await handle.renderPng(target, options);
+          let binary = '';
+          for (const byte of png) binary += String.fromCharCode(byte);
+          out[name] = { png: btoa(binary) };
+        } catch (error) {
+          out[name] = { code: (error as { code?: string }).code, message: error instanceof Error ? error.message : String(error) };
+        }
+      }
+    } finally { handle.dispose(); }
+    return out;
+  }, { cases: PNG_FONT_CASES, target: PNG_FONT_TARGET, broken: PNG_BROKEN_FACE }));
+  expect(pngFontOutcomeFailures(results as Record<string, PngFontResult>)).toEqual([]);
 });

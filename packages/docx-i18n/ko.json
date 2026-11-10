@@ -799,6 +799,8 @@
   },
   "a11y": {
     "pageLabel": "{number}페이지",
+    "unbuiltPagesNotMirrored": "{from}페이지부터 {to}페이지까지는 아직 읽기 보기에 포함되지 않았습니다.",
+    "goToPage": "{number}페이지로 이동",
     "headerLabel": "페이지 머리글",
     "footerLabel": "페이지 바닥글",
     "chartNoData": "데이터 없음",

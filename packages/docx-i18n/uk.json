@@ -799,6 +799,8 @@
   },
   "a11y": {
     "pageLabel": "Сторінка {number}",
+    "unbuiltPagesNotMirrored": "Сторінки від {from} до {to} ще не включені до режиму читання.",
+    "goToPage": "Перейти до сторінки {number}",
     "headerLabel": "Верхній колонтитул сторінки",
     "footerLabel": "Нижній колонтитул сторінки",
     "chartNoData": "Немає даних",

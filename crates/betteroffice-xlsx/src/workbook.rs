@@ -3314,6 +3314,17 @@ impl Workbook {
         target: crate::PngTarget,
         options: &RenderOptions,
     ) -> Result<RenderedPng> {
+        self.render_png_with_faces(target, options, None)
+    }
+
+    /// [`Self::render_png`]. `Some` paints with those faces alone, for this export only; `None` resolves bundled faces.
+    #[cfg(feature = "raster")]
+    pub fn render_png_with_faces(
+        &self,
+        target: crate::PngTarget,
+        options: &RenderOptions,
+        faces: Option<&[crate::PngFontFace<'_>]>,
+    ) -> Result<RenderedPng> {
         if !(options.scale.is_finite() && options.scale > 0.0) {
             return Err(Error::InvalidScale(options.scale));
         }
@@ -3337,21 +3348,23 @@ impl Workbook {
                 } else {
                     scaled(display_list, options.scale)
                 };
-                self.rasterize_display_list(&display_list, width, height)
+                self.rasterize_display_list(&display_list, width, height, faces)
             }
-            crate::PngTarget::Range { sheet, range } => self.render_sheet(
+            crate::PngTarget::Range { sheet, range } => self.render_sheet_with_faces(
                 sheet,
                 &RenderOptions {
                     range: Some(range),
                     ..options.clone()
                 },
+                faces,
             ),
-            crate::PngTarget::UsedRange { sheet } => self.render_sheet(
+            crate::PngTarget::UsedRange { sheet } => self.render_sheet_with_faces(
                 sheet,
                 &RenderOptions {
                     range: None,
                     ..options.clone()
                 },
+                faces,
             ),
         }
     }
@@ -3362,15 +3375,29 @@ impl Workbook {
         display_list: &DisplayList,
         width: u32,
         height: u32,
+        faces: Option<&[crate::PngFontFace<'_>]>,
     ) -> Result<RenderedPng> {
         #[cfg(feature = "fonts")]
-        let bytes = {
-            let fonts = self.raster_fonts(display_list)?;
-            xlsx_raster::render_png_with_fonts(display_list, fonts.fonts())
-                .map_err(Error::Raster)?
-        };
+        let bytes = match faces {
+            Some(faces) => xlsx_raster::render_png_with_fonts(
+                display_list,
+                &crate::font::supplied_fonts(display_list, faces)?,
+            ),
+            None => {
+                let fonts = self.raster_fonts(display_list)?;
+                xlsx_raster::render_png_with_fonts(display_list, fonts.fonts())
+            }
+        }
+        .map_err(Error::Raster)?;
         #[cfg(not(feature = "fonts"))]
-        let bytes = xlsx_raster::render_png(display_list).map_err(Error::Raster)?;
+        let bytes = {
+            if let Some(face) = faces.and_then(<[_]>::first) {
+                return Err(Error::FontUnavailable {
+                    family: face.family.to_owned(),
+                });
+            }
+            xlsx_raster::render_png(display_list).map_err(Error::Raster)?
+        };
         Ok(RenderedPng {
             bytes,
             width,
@@ -3396,8 +3423,19 @@ impl Workbook {
 
     #[cfg(feature = "raster")]
     pub fn render_sheet(&self, sheet: SheetId, options: &RenderOptions) -> Result<RenderedPng> {
+        self.render_sheet_with_faces(sheet, options, None)
+    }
+
+    /// [`Self::render_sheet`], with `faces` as in [`Self::render_png_with_faces`].
+    #[cfg(feature = "raster")]
+    pub fn render_sheet_with_faces(
+        &self,
+        sheet: SheetId,
+        options: &RenderOptions,
+        faces: Option<&[crate::PngFontFace<'_>]>,
+    ) -> Result<RenderedPng> {
         let (display_list, width, height) = self.range_png_display_list_for(sheet, options)?;
-        self.rasterize_display_list(&display_list, width, height)
+        self.rasterize_display_list(&display_list, width, height, faces)
     }
 
     #[doc(hidden)]
@@ -5000,10 +5038,6 @@ fn validate_insert_capacity(model: &WorkbookModel, op: &Op) -> Result<()> {
             let loses_cells = sheet
                 .iter_cells()
                 .any(|(cell, _)| cell.row >= at && cell.row >= cutoff);
-            let loses_heights = sheet
-                .row_heights
-                .keys()
-                .any(|&row| row >= at && row >= cutoff);
             let loses_merges = sheet
                 .merges
                 .iter()
@@ -5012,7 +5046,7 @@ fn validate_insert_capacity(model: &WorkbookModel, op: &Op) -> Result<()> {
                 .hyperlinks
                 .iter()
                 .any(|link| link.range.end.row >= at && link.range.end.row >= cutoff);
-            if loses_cells || loses_heights || loses_merges || loses_hyperlinks {
+            if loses_cells || loses_merges || loses_hyperlinks {
                 return Err(Error::InvalidOperation(
                     "row insertion would discard content at the sheet boundary".to_string(),
                 ));
@@ -5027,10 +5061,6 @@ fn validate_insert_capacity(model: &WorkbookModel, op: &Op) -> Result<()> {
             let loses_cells = sheet
                 .iter_cells()
                 .any(|(cell, _)| cell.col >= at && cell.col >= cutoff);
-            let loses_widths = sheet
-                .col_widths
-                .keys()
-                .any(|&col| col >= at && col >= cutoff);
             let loses_merges = sheet
                 .merges
                 .iter()
@@ -5039,7 +5069,7 @@ fn validate_insert_capacity(model: &WorkbookModel, op: &Op) -> Result<()> {
                 .hyperlinks
                 .iter()
                 .any(|link| link.range.end.col >= at && link.range.end.col >= cutoff);
-            if loses_cells || loses_widths || loses_merges || loses_hyperlinks {
+            if loses_cells || loses_merges || loses_hyperlinks {
                 return Err(Error::InvalidOperation(
                     "column insertion would discard content at the sheet boundary".to_string(),
                 ));

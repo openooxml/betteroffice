@@ -1322,6 +1322,101 @@ test('native and wasm mark the same table row headers in the display list', () =
   expect(nativeCells).toEqual(run(wasm));
 });
 
+test('native and wasm read the same page text, cutting paragraphs and tables where the page does', () => {
+  const encoder = new TextEncoder();
+  const w = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+  const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const long = Array.from({ length: 3000 }, (_, index) => `w${index}`).join(' ');
+  const tall = Array.from({ length: 1500 }, (_, index) => `t${index}`).join(' ');
+  const row = (index: number) => `<w:tr>${index === 0 ? '<w:trPr><w:tblHeader/></w:trPr>' : ''}<w:tc><w:p><w:r><w:t>R${index}</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>V${index}</w:t></w:r></w:p></w:tc></w:tr>`;
+  const field = (code: string) => `<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> ${code} </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>`;
+  const body = '<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Chapter one</w:t></w:r></w:p>'
+    + `<w:p><w:r><w:t>${long}</w:t></w:r></w:p>`
+    + `<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="4000"/><w:gridCol w:w="4000"/></w:tblGrid>${Array.from({ length: 60 }, (_, index) => row(index)).join('')}</w:tbl>`
+    + `<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="8000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>${tall}</w:t></w:r></w:p></w:tc></w:tr></w:tbl>`
+    + `<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="4000"/><w:gridCol w:w="4000"/></w:tblGrid>${[
+      '<w:tr><w:tc><w:tcPr><w:gridSpan w:val="2"/></w:tcPr><w:p><w:r><w:t>Merged across</w:t></w:r></w:p></w:tc></w:tr>',
+      '<w:tr><w:trPr><w:hidden/></w:trPr><w:tc><w:p><w:r><w:rPr><w:vanish/></w:rPr><w:t>Hidden row</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:rPr><w:vanish/></w:rPr><w:t>Hidden cell</w:t></w:r></w:p></w:tc></w:tr>',
+      '<w:tr><w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr><w:p><w:r><w:t>Merged down</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Side one</w:t></w:r></w:p></w:tc></w:tr>',
+      '<w:tr><w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p/></w:tc><w:tc><w:p><w:r><w:t>Side two</w:t></w:r></w:p><w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Nested</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/></w:tc></w:tr>',
+    ].join('')}</w:tbl>`
+    + '<w:p><w:r><w:t>Visible</w:t></w:r><w:r><w:rPr><w:vanish/></w:rPr><w:t>Hiddenword</w:t></w:r></w:p>'
+    + '<w:p><w:r><w:t>Kept</w:t></w:r><w:del w:id="1" w:author="a" w:date="2020-01-01T00:00:00Z"><w:r><w:delText>Struck</w:delText></w:r></w:del></w:p>'
+    + '<w:p><w:r><w:t>Note here</w:t></w:r><w:r><w:footnoteReference w:id="2"/></w:r></w:p>'
+    + `<w:p><w:r><w:t xml:space="preserve">Of </w:t></w:r>${field('NUMPAGES')}</w:p>`
+    + '<w:p><w:r><w:t>After the table</w:t></w:r></w:p>'
+    + '<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>'
+    + '<w:p w14:paraId="0A0B0C0D"><w:pPr><w:outlineLvl w:val="1"/></w:pPr><w:r><w:t>Section two</w:t></w:r></w:p>';
+  const bytes = wasm.rezip_docx({
+    '[Content_Types].xml': encoder.encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/></Types>'),
+    'word/_rels/document.xml.rels': encoder.encode(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/footnotes" Target="footnotes.xml"/></Relationships>`),
+    'word/footnotes.xml': encoder.encode(`<w:footnotes xmlns:w="${w}"><w:footnote w:id="2"><w:p><w:r><w:footnoteRef/></w:r><w:r><w:t>Note text</w:t></w:r></w:p></w:footnote></w:footnotes>`),
+    '_rels/.rels': encoder.encode(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/officeDocument" Target="word/document.xml"/></Relationships>`),
+    'word/document.xml': encoder.encode(`<w:document xmlns:w="${w}" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>${body}<w:sectPr/></w:body></w:document>`),
+  });
+  type PageText = { pageIndex: number; paragraphs: { text: string; level?: number; inTable?: boolean }[] };
+  const run = (engine: Engine, columns: object = {}, paint = false) => {
+    const session = new engine.EditSession(79);
+    try {
+      session.open_docx(bytes, true);
+      const font = session.register_measure_font(fontBytes);
+      const fontChains = { 'calibri|0|0': [font], 'calibri|1|0': [font] };
+      const layout = session.layout_document_with_regions_json(JSON.stringify({
+        bodyStory: 'body',
+        regions: { sections: [{ sectionId: 'main', properties: {
+          pageWidth: 12240, pageHeight: 15840, marginTop: 1440, marginRight: 1440, marginBottom: 1440, marginLeft: 1440, ...columns,
+        } }] },
+        measurement: { fontChains, defaults: { fontSize: 11, fontFamily: 'Calibri' }, authoritativeShaping: true },
+        renderEnv: { themeColors: {} },
+      }));
+      const list = paint ? JSON.parse(session.build_display_list_json(JSON.stringify({ ...JSON.parse(layout), fontChains }))) as {
+        pages: { primitives: { text?: string }[] }[];
+      } : { pages: [] };
+      return {
+        pages: JSON.parse(session.page_texts_json(Uint32Array.from({ length: 200 }, (_, index) => index))) as PageText[],
+        painted: list.pages.map((page) => page.primitives.map(({ text }) => text ?? '').join('').replace(/\s+/g, '')),
+      };
+    } finally {
+      session.free();
+    }
+  };
+  const { pages, painted } = run(native, {}, true);
+  expect(pages.length).toBeGreaterThanOrEqual(3);
+  expect(pages.map(({ pageIndex }) => pageIndex)).toEqual(pages.map((_, index) => index));
+  expect(pages[0]!.paragraphs[0]).toEqual({ text: 'Chapter one', level: 0 });
+  const plain = pages.flatMap(({ paragraphs }) => paragraphs.filter(({ inTable, level }) => !inTable && level === undefined));
+  const pieces = plain.filter(({ text }) => text.startsWith('w') || /\bw\d+/.test(text)).map(({ text }) => text);
+  expect(pieces.length).toBeGreaterThanOrEqual(2);
+  expect(pieces.join('').replace(/\s+/g, ' ').trim()).toBe(long);
+  const cells = pages.flatMap(({ pageIndex, paragraphs }) => paragraphs.filter(({ inTable }) => inTable).map(({ text }) => [pageIndex, text] as const));
+  const expectedCells = [...Array.from({ length: 60 }, (_, index) => [`R${index}`, `V${index}`]).flat(), tall, 'Merged across', 'Merged down', 'Side one', 'Side two', 'Nested'];
+  expect(cells.map(([, text]) => text)).toEqual(expectedCells);
+  expect(pages.flatMap(({ paragraphs }) => paragraphs).filter(({ text }) => /Hidden (row|cell)/.test(text))).toEqual([]);
+  expect(new Set(cells.map(([pageIndex]) => pageIndex)).size).toBeGreaterThanOrEqual(2);
+  const pageField = pages.flatMap(({ pageIndex, paragraphs }) => paragraphs.filter(({ text }) => /^\d+$/.test(text)).map(({ text }) => [pageIndex, text]));
+  expect(pageField).toEqual([[pageField[0]![0], String(Number(pageField[0]![0]) + 1)]]);
+  expect(Number(pageField[0]![0])).toBeGreaterThan(0);
+  expect(plain.filter(({ text }) => !/^\d+$/.test(text)).at(-1)?.text).toBe('After the table');
+  expect(pages.at(-1)!.paragraphs.at(-1)).toEqual({ text: 'Section two', level: 1 });
+  expect(run(wasm).pages).toEqual(pages);
+  for (const { pageIndex, paragraphs } of pages) {
+    for (const { text, inTable } of paragraphs) {
+      if (!inTable) expect(painted[pageIndex]).toContain(text.replace(/\s+/g, ''));
+    }
+  }
+  const everything = pages.flatMap(({ paragraphs }) => paragraphs.map(({ text }) => text)).join('\n');
+  expect(everything).not.toContain('Hiddenword');
+  expect(painted.join('')).not.toContain('Hiddenword');
+  expect(everything.includes('Struck')).toBe(painted.join('').includes('Struck'));
+  expect(everything).toContain(`Of ${pages.length}`);
+
+  const twoColumns = { columnCount: 2, columnSpace: 720 };
+  const columned = run(native, twoColumns).pages;
+  const columnedCells = columned.flatMap(({ paragraphs }) => paragraphs.filter(({ inTable }) => inTable).map(({ text }) => text));
+  expect(columnedCells).toEqual(expectedCells);
+  expect(run(wasm, twoColumns).pages).toEqual(columned);
+}, 30_000);
+
 test('native and wasm mark the same list markers as numbered', () => {
   const encoder = new TextEncoder();
   const w = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
@@ -1513,4 +1608,52 @@ test('native and wasm leave hidden table rows out of the display list unless hid
   expect(shown.text).toBe('AlphaBravoCharlieDeltaEchoTail');
   expect(shown.borders).toBeGreaterThan(hidden.borders);
   expect(shown).toEqual(run(wasm, true));
+});
+
+test('a footnote document lays out natively from its forwarded parse model', () => {
+  const encoder = new TextEncoder();
+  const ns = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+  const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const office = 'application/vnd.openxmlformats-officedocument.wordprocessingml';
+  const bytes = wasm.rezip_docx({
+    '[Content_Types].xml': encoder.encode(`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="${office}.document.main+xml"/><Override PartName="/word/footnotes.xml" ContentType="${office}.footnotes+xml"/><Override PartName="/word/settings.xml" ContentType="${office}.settings+xml"/></Types>`),
+    '_rels/.rels': encoder.encode(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/officeDocument" Target="word/document.xml"/></Relationships>`),
+    'word/_rels/document.xml.rels': encoder.encode(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdFn" Type="${rel}/footnotes" Target="footnotes.xml"/><Relationship Id="rIdSet" Type="${rel}/settings" Target="settings.xml"/></Relationships>`),
+    'word/document.xml': encoder.encode(`<w:document ${ns}><w:body><w:p><w:r><w:t>Body</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r></w:p><w:sectPr><w:footnotePr><w:numStart w:val="8"/></w:footnotePr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>`),
+    'word/footnotes.xml': encoder.encode(`<w:footnotes ${ns}><w:footnote w:id="1"><w:p><w:r><w:t>Footnote</w:t></w:r></w:p></w:footnote></w:footnotes>`),
+    'word/settings.xml': encoder.encode(`<w:settings ${ns}><w:footnotePr><w:numStart w:val="1"/></w:footnotePr></w:settings>`),
+  });
+  type Section = { id?: string; properties: unknown };
+  type Note = { id: number; noteType?: string };
+  const pkg = JSON.parse(native.parse_docx_s9(bytes, '{}')).document.package as {
+    document: { sections?: Section[]; finalSectionProperties?: unknown };
+    footnotes?: Note[];
+    settings?: unknown;
+  };
+  const sections: object[] = (pkg.document.sections ?? []).map((section) => ({ sectionId: section.id, properties: section.properties }));
+  sections.push({ properties: pkg.document.finalSectionProperties });
+  const contents = (pkg.footnotes ?? [])
+    .filter((note) => !note.noteType || note.noteType === 'normal')
+    .map((note) => ({ id: note.id, noteKind: 'footnote', height: 0 }));
+  expect(contents.map((note) => note.id)).toEqual([1]);
+  const request: Record<string, unknown> = {
+    bodyStory: 'body', renderEnv: {}, options: { pageGap: 24 },
+    regions: { sections, settings: pkg.settings }, notes: { contents },
+  };
+  expect(JSON.stringify(request)).toContain('"numStart":8');
+  expect(JSON.stringify(request)).not.toMatch(/"(id|numStart)":\d+\.0\b/);
+  const session = new native.EditSession(43);
+  try {
+    session.seed_from_docx(bytes, 'opening');
+    const font = session.register_measure_font(fontBytes);
+    const requirements = JSON.parse(session.layout_font_requirements_json(JSON.stringify(request))) as { key: string }[];
+    request.measurement = {
+      fontChains: Object.fromEntries(requirements.map((requirement) => [requirement.key, [font]])),
+      defaults: { fontSize: 11, fontFamily: 'Calibri' },
+      authoritativeShaping: true,
+    };
+    expect(typeof session.layout_document_with_regions_retained_json(JSON.stringify(request))).toBe('string');
+  } finally {
+    session.free();
+  }
 });

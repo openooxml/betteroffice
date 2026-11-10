@@ -422,24 +422,20 @@ mod coverage_regressions {
         renderer.set_browser_coverage_fallback(true);
         let measure = |count| {
             let text = "Aह".repeat(count);
-            (0..3)
-                .map(|_| {
-                    let start = std::time::Instant::now();
-                    let pieces = split(&renderer, &text);
-                    let elapsed = start.elapsed();
-                    assert_eq!(pieces.len(), count * 2);
-                    for (index, piece) in pieces.iter().enumerate() {
-                        assert_eq!(piece.start, 7 + index as u32);
-                        assert_eq!(piece.text, if index % 2 == 0 { "A" } else { "ह" });
-                    }
-                    elapsed
-                })
-                .min()
-                .unwrap()
+            let before = BROWSER_COVERAGE_LOOKUPS.with(std::cell::Cell::get);
+            let pieces = split(&renderer, &text);
+            let lookups = BROWSER_COVERAGE_LOOKUPS.with(std::cell::Cell::get) - before;
+            assert_eq!(pieces.len(), count * 2);
+            for (index, piece) in pieces.iter().enumerate() {
+                assert_eq!(piece.start, 7 + index as u32);
+                assert_eq!(piece.text, if index % 2 == 0 { "A" } else { "ह" });
+            }
+            lookups
         };
         let small = measure(2_000);
         let large = measure(20_000);
-        assert!(large <= small * 30 + std::time::Duration::from_millis(10));
+        assert!(small >= 2_000, "{small} coverage lookups for 2,000 pairs");
+        assert!(large <= small * 10 + 16, "{small} lookups for 2,000 pairs, {large} for 20,000");
     }
 
     #[test]

@@ -799,6 +799,8 @@
   },
   "a11y": {
     "pageLabel": "עמוד {number}",
+    "unbuiltPagesNotMirrored": "העמודים {from} עד {to} עדיין אינם בתצוגת הקריאה.",
+    "goToPage": "מעבר לעמוד {number}",
     "headerLabel": "כותרת עליונה של העמוד",
     "footerLabel": "כותרת תחתונה של העמוד",
     "chartNoData": "אין נתונים",
