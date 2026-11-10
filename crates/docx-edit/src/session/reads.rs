@@ -215,6 +215,13 @@ impl EditSessionCore {
         json!({ "revision": revision, "stories": stories }).to_string()
     }
 
+    /// `[{"story","tableIndex"}]`: the tables that lost their payload to a concurrent undo.
+    /// Internal: the worker reads it for its diagnostic.
+    pub fn unavailable_tables(&self) -> String {
+        serde_json::to_string(&self.engine.doc().unavailable_tables())
+            .unwrap_or_else(|_| "[]".to_owned())
+    }
+
     /// Every story id in the document, sorted so the order is stable across
     /// replicas.
     pub fn story_ids(&self) -> Vec<String> {

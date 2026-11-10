@@ -177,6 +177,8 @@ export type ResidentEngineSession = Pick<
   /** Moves an inline embed in one transaction. Internal: concurrent moves would duplicate it, so collaboration never reaches it. */
   moveEmbed(at: YrsLoc, to: YrsLoc): YrsReplaceReceipt;
   setUndoInputTime(span: readonly [first: number, last: number] | null): void;
+  /** `[{story, tableIndex}]` JSON of the tables a concurrent undo left without their payload. Internal. */
+  unavailableTables(): string;
   splitSection(at: YrsLoc, properties: SectionProperties, start: NonNullable<SectionProperties['sectionStart']>): YrsLoc;
   /**
    * Display ranges of the paragraphs, tables and block controls of `root` that `ranges` touch.
@@ -944,6 +946,7 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
         session.find_content_controls_json(JSON.stringify(query), JSON.stringify(options))
       ) as DocxContentControlsResult,
     storiesChangedSince,
+    unavailableTables: () => session.unavailable_tables(),
     decodeFont: bytes => session.decode_font(bytes),
     takeBaseLatinMiss: () => session.take_base_latin_miss(),
     openSourceDocx: (bytes, options) => {

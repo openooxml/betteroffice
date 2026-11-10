@@ -1,4 +1,5 @@
 import { headerFooterStory } from './sessionInternals';
+import { isUnavailableTablePayload } from './tableUnavailable';
 import type { YrsCellLoc, YrsLoc, YrsSession, YrsStorySegment } from './index';
 import type { PointPosition } from '../plugin-api';
 import {
@@ -93,6 +94,8 @@ export interface YrsProjectedTable extends YrsProjectedNode {
   widthsTwips: number[];
   rowCount: number;
   cells: YrsProjectedCell[];
+  /** The table lost its properties, grid or rows to a concurrent undo: no cells, no caret stop. */
+  unavailable?: true;
 }
 
 /** @internal */
@@ -214,6 +217,7 @@ export class YrsPositionProjection {
   tableAtPosition(position: number): YrsProjectedTable | null {
     let result: YrsProjectedTable | null = null;
     for (const table of this.tables) {
+      if (table.unavailable) continue;
       if (position < table.start || position > table.start + table.nodeSize) continue;
       if (!result || table.nodeSize < result.nodeSize) result = table;
     }
@@ -541,6 +545,7 @@ export class YrsPositionProjection {
         : [],
       rowCount: rows.length,
       cells,
+      ...(isUnavailableTablePayload(segment.payload) ? { unavailable: true as const } : {}),
     };
   }
 }

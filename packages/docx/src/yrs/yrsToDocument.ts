@@ -67,6 +67,7 @@ import type {
   SectionProperties,
 } from '../types/document';
 import type { YrsRunInheritance, YrsSession, YrsTableInheritance } from './index';
+import { isUnavailableTablePayload, tableUnavailableError } from './tableUnavailable';
 
 type Attrs = Record<string, unknown>;
 
@@ -4188,6 +4189,7 @@ class SaveContext {
       }
 
       if (segment.embedKind === 'table') {
+        if (isUnavailableTablePayload(segment.payload)) throw tableUnavailableError();
         const payload = segment.payload as TablePayload;
         this.prepareTable(payload, storyId);
         const inputs = [segment.attributes, payload] as const;

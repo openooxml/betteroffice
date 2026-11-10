@@ -1657,3 +1657,74 @@ test('a footnote document lays out natively from its forwarded parse model', () 
     session.free();
   }
 });
+
+test('native and wasm refuse table operations on a table that crossing undos emptied with the same coded error', () => {
+  const encoder = new TextEncoder();
+  const paragraph = (text: string) => `<w:p><w:r><w:t>${text}</w:t></w:r></w:p>`;
+  const cell = (text: string) => `<w:tc><w:tcPr><w:tcW w:w="2340" w:type="dxa"/></w:tcPr>${paragraph(text)}</w:tc>`;
+  const bytes = wasm.rezip_docx({
+    '[Content_Types].xml': encoder.encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'),
+    '_rels/.rels': encoder.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'),
+    'word/document.xml': encoder.encode(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${paragraph('Before')}<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="2340"/><w:gridCol w:w="2340"/></w:tblGrid><w:tr>${cell('A')}${cell('B')}</w:tr></w:tbl>${paragraph('After')}<w:sectPr/></w:body></w:document>`),
+  });
+  const at = (row: number, column: number) => JSON.stringify({ story: 'body', tableIndex: 0, row, column });
+  const a = new wasm.EditSession(61);
+  const b = new wasm.EditSession(62);
+  const expected = new wasm.EditSession(70);
+  const actual = new native.EditSession(70);
+  try {
+    a.open_docx(bytes, true, 'opening');
+    a.track_undo();
+    b.open_docx(bytes, false, 'opening');
+    b.apply_update(a.encode_state());
+    b.track_undo();
+    a.insert_row(at(0, 0), true);
+    b.apply_update(a.encode_state());
+    b.set_column_width(at(0, 0), 2000);
+    expect(a.undo()).toBe(true);
+    b.apply_update(a.encode_state());
+    a.apply_update(b.encode_state());
+    expect(b.undo()).toBe(true);
+    a.apply_update(b.encode_state());
+    const update = a.encode_state();
+    for (const session of [expected, actual]) {
+      session.open_docx(bytes, false, 'opening');
+      session.apply_update(update);
+    }
+    const payload = JSON.parse(expected.table_payload('body', 0)!) as Record<string, unknown>;
+    expect(['tblPr', 'grid', 'rows'].filter((key) => key in payload)).toEqual([]);
+    expect(JSON.parse(actual.unavailable_tables())).toEqual([{ story: 'body', tableIndex: 0 }]);
+    expect(actual.unavailable_tables()).toBe(expected.unavailable_tables());
+
+    const range = (anchor: string, head = anchor) => JSON.stringify({ anchor: JSON.parse(anchor), head: JSON.parse(head) });
+    const ops: Array<[string, (session: Session) => unknown]> = [
+      ['insert_row', (session) => session.insert_row(at(0, 0), true)],
+      ['insert_column', (session) => session.insert_column(at(0, 0), true)],
+      ['delete_row', (session) => session.delete_row(range(at(0, 0)))],
+      ['set_cell_shading', (session) => session.set_cell_shading(range(at(0, 0)), 'FF0000')],
+      ['set_column_width', (session) => session.set_column_width(at(0, 0), 3000)],
+      ['split_cell', (session) => session.split_cell(at(0, 0), 2, undefined)],
+      ['merge_cells', (session) => session.merge_cells(range(at(0, 0), at(0, 1)))],
+    ];
+    for (const [name, op] of ops) {
+      const before = { expected: expected.encode_state(), actual: actual.encode_state() };
+      const thrown = expectThrownParity(() => op(expected), () => op(actual as unknown as Session));
+      expect(thrown, name).toBeInstanceOf(Error);
+      expect((thrown as Error).name, name).toBe('TableUnavailableError');
+      expect((thrown as Error & { code?: string }).code, name).toBe('table-unavailable');
+      expect(expected.encode_state(), name).toEqual(before.expected);
+      expect(actual.encode_state(), name).toEqual(before.actual);
+    }
+
+    for (const session of [expected, actual as unknown as Session]) {
+      session.delete_table(JSON.stringify({ story: 'body', tableIndex: 0 }));
+      expect(session.unavailable_tables()).toBe('[]');
+    }
+    expect(actual.story_ids()).toEqual(expected.story_ids());
+  } finally {
+    actual.free();
+    expected.free();
+    b.free();
+    a.free();
+  }
+});

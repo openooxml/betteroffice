@@ -128,6 +128,7 @@ mod sticky_positions;
 mod stories;
 pub mod structured;
 mod target;
+mod unavailable_tables;
 mod undo;
 mod update_chunks;
 
@@ -703,6 +704,8 @@ pub struct EditingDoc {
     seen: identity::SeenCell,
     scan_cache: identity::ScanCache,
     story_revisions: Arc<Mutex<StoryRevisions>>,
+    /// Set when a commit may have left a table unavailable; cleared by a scan that finds none.
+    unavailable_tables_dirty: Arc<AtomicBool>,
     remote_deletions: remote_cleanup::RemoteDeletions,
     keeps_deleted: Arc<AtomicBool>,
     commit_hooks: Rc<RefCell<CommitHooks>>,
@@ -761,11 +764,16 @@ impl EditingDoc {
             .expect("a fresh doc accepts an update observer");
         let story_revisions = Arc::new(Mutex::new(StoryRevisions::default()));
         let save_story_states = Arc::new(Mutex::new(identity::StoryStateCache::default()));
+        let unavailable_tables_dirty = Arc::new(AtomicBool::new(true));
+        let dirty = Arc::clone(&unavailable_tables_dirty);
         let stamped = Arc::clone(&story_revisions);
         let cached = Arc::clone(&save_story_states);
         let story_revision_sub = doc
             .get_or_insert_map(STORIES)
             .observe_deep(move |txn, events| {
+                if unavailable_tables::may_have_left_unavailable(txn, events) {
+                    dirty.store(true, Ordering::Relaxed);
+                }
                 stamped.lock().unwrap().stamp(txn, events);
                 identity::StoryStateCache::evict_root_changes(&cached, txn, events);
             });
@@ -813,6 +821,7 @@ impl EditingDoc {
             seen,
             scan_cache: identity::ScanCache::default(),
             story_revisions,
+            unavailable_tables_dirty,
             remote_deletions: remote_cleanup::RemoteDeletions::default(),
             keeps_deleted,
             commit_hooks,

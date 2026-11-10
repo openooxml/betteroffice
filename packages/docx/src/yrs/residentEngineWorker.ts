@@ -1,6 +1,7 @@
 /// <reference lib="webworker" />
 
 import { isEngineTrap } from '../../../../shared/office-session/trap';
+import { tableUnavailableError } from './tableUnavailable';
 import { resolveReservations, validReservationsPayload, type DocxResolvedReservations } from './reservations';
 import { readParsedToolbarMetadata, readResidentToolbarMetadata, type DocxToolbarMetadata } from './residentToolbarMetadata';
 import { readResidentRangeHighlights } from './residentRangeHighlights';
@@ -4203,6 +4204,26 @@ function scheduleSaveWarmup(): void {
   }, delay);
 }
 
+/** The session whose unavailable tables were last reported, until none is unavailable. */
+let unavailableTablesWarned: ResidentEngineSession | null = null;
+
+/** Warns once each time the session enters a state where a concurrent undo left a table without its payload. */
+function noteUnavailableTables(owner: ResidentEngineSession): void {
+  let tables: unknown[];
+  try {
+    tables = JSON.parse(owner.unavailableTables()) as unknown[];
+  } catch {
+    return;
+  }
+  if (tables.length === 0) {
+    if (unavailableTablesWarned === owner) unavailableTablesWarned = null;
+    return;
+  }
+  if (unavailableTablesWarned === owner) return;
+  unavailableTablesWarned = owner;
+  console.warn(`table-unavailable: ${tableUnavailableError().message}`, tables);
+}
+
 function reply(
   response: DocxEngineWorkerResponse,
   transfer: Transferable[] = [],
@@ -4211,6 +4232,7 @@ function reply(
   // A trap the raster painted past fails the request that would succeed, and
   // every request waiting on it, through the paths that answer failures.
   if (trap && response.ok) throw trap;
+  if (response.ok && session) noteUnavailableTables(session);
   const drained = collaboration?.drain();
   const { transfer: piped = [], ...collabUpdates } = drained ?? {};
   scope.postMessage({ ...response, ...(drained ? { collabUpdates: { ...collabUpdates,

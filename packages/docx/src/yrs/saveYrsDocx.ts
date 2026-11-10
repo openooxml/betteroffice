@@ -19,6 +19,7 @@ import { resolveCommentMedia } from './hostMedia';
 import { editorSaveKeys, noteSeparatorKeys } from './editorSaveKeys';
 import { savedCommentIds } from './residentCommentProjection';
 import { sessionMaterializedSource, sessionSourceNoteSeparators, sessionSourcePackage } from './sessionInternals';
+import { refuseUnavailableTables } from './tableUnavailable';
 import type {
   DocxParagraphIdentitySnapshot,
   DocxParagraphSavePlan,
@@ -741,6 +742,7 @@ export async function saveYrsDocx(
   session: YrsSession,
   options: DocxSaveOptions = {}
 ): Promise<DocxSavedDocument> {
+  refuseUnavailableTables(session);
   let base = session.materializeDocx();
   if (!base?.originalBuffer) {
     throw new Error('saveYrsDocx requires a session opened from DOCX bytes');

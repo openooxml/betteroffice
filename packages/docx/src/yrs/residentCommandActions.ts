@@ -1,5 +1,6 @@
 import { isEngineTrap } from '../../../../shared/office-session/trap';
 import { applyCommandBatch, commandBatchRequest } from './residentCommandBatches';
+import { isTableUnavailableRefusal } from './tableUnavailable';
 import { createProposalRegistry } from './proposals';
 import { applyReviewCommand, grantedHostProposal, preflightReviewCommand, reviewCommandKeys, type ReviewCommand } from './residentReviewCommands';
 import { planResidentListChanges } from './residentCommandLists';
@@ -913,12 +914,20 @@ export function applyDocxCommand(
   environment?: DocxCommandHooksEnvironment
 ): DocxCommandApplyResult {
   const { inputTime, lastInputTime } = prepared.command;
-  if (inputTime === undefined) return applyPreparedDocxCommand(engine, state, prepared, context, environment);
-  engine.setUndoInputTime([inputTime, lastInputTime ?? inputTime]);
+  const version = engine.proposalEngine.version();
   try {
-    return applyPreparedDocxCommand(engine, state, prepared, context, environment);
-  } finally {
-    engine.setUndoInputTime(null);
+    if (inputTime === undefined) return applyPreparedDocxCommand(engine, state, prepared, context, environment);
+    engine.setUndoInputTime([inputTime, lastInputTime ?? inputTime]);
+    try {
+      return applyPreparedDocxCommand(engine, state, prepared, context, environment);
+    } finally {
+      engine.setUndoInputTime(null);
+    }
+  } catch (error) {
+    if (!isTableUnavailableRefusal(error) || engine.proposalEngine.version() !== version) throw error;
+    const corrected = state.selection ? readCommandSelection(engine, state) : null;
+    return { status: 'refused', reason: 'table-unavailable', selection: corrected?.ok ? corrected.selection : null,
+      editState: projectDocxEditState(engine, state, corrected) };
   }
 }
 

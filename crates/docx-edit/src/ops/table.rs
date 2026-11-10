@@ -302,6 +302,9 @@ fn shared_any<T: ReadTxn>(map: &MapRef, txn: &T, key: &str) -> OpResult<Any> {
 }
 
 fn read_table<T: ReadTxn>(map: &MapRef, txn: &T) -> OpResult<TableData> {
+    if crate::unavailable_tables::is_unavailable(map, txn) {
+        return Err(OpError::TableUnavailable);
+    }
     let tbl_pr = any_map(&shared_any(map, txn, "tblPr")?, "tblPr")?;
     let grid = any_array(&shared_any(map, txn, "grid")?, "grid")?;
     let row_values = any_array(&shared_any(map, txn, "rows")?, "rows")?;
@@ -1682,6 +1685,9 @@ pub(crate) fn resolve_table_row_revisions(
 
     let mut removed_tables = 0;
     for (table_offset, table_index, table) in tables.into_iter().rev() {
+        if crate::unavailable_tables::is_unavailable(&table, txn) {
+            continue;
+        }
         let mut data = read_table(&table, txn)?;
         let mut remove = Vec::new();
         let mut changed = false;
@@ -2500,6 +2506,10 @@ impl EditingDoc {
     pub fn delete_table(&self, ctx: &EditCtx, locator: &TableLocator) -> OpResult<TableReceipt> {
         let mut txn = self.transact_for(ctx);
         let (parent_story, table, table_story_index) = table_at(&txn, locator)?;
+        if crate::unavailable_tables::is_unavailable(&table, &txn) {
+            parent_story.remove_range(&mut txn, table_story_index, 1);
+            return receipt(locator.clone(), None, Vec::new(), Vec::new(), Vec::new());
+        }
         let data = read_table(&table, &txn)?;
         delete_table_in_txn(&mut txn, locator, &parent_story, table_story_index, &data)
     }

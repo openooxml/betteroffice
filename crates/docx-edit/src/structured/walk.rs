@@ -2203,6 +2203,21 @@ impl<'a> Exporter<'a> {
                     story: ctx.story.clone(),
                     table_index: index,
                 });
+                if crate::unavailable_tables::is_unavailable(map, txn) {
+                    self.note(
+                        DiagnosticCode::UnsupportedContent,
+                        Severity::Error,
+                        Some(anchor.clone()),
+                        crate::unavailable_tables::TABLE_UNAVAILABLE,
+                    );
+                    return Some(Block {
+                        id: String::new(),
+                        anchor,
+                        content: BlockKind::Unsupported {
+                            element: "w:tbl".to_owned(),
+                        },
+                    });
+                }
                 if ins || del {
                     return Some(self.unreconstructed(
                         anchor,

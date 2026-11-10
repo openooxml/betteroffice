@@ -10,6 +10,7 @@ import type { YrsSession } from './index';
 import { dirtyProjectionStory } from './dirtyProjectionStories';
 import { captureSessionSave, writeSessionSave, type DocxSavedDocument, type DocxSessionSave } from './saveYrsDocx';
 import { sessionSourcePackage } from './sessionInternals';
+import { refuseUnavailableTables } from './tableUnavailable';
 import { ownProjectedParagraphs, yrsToDocument } from './yrsToDocument';
 
 export {
@@ -267,6 +268,7 @@ export async function saveEditorDocument(
   record?: EditorSaveRecord,
   yieldSave?: () => Promise<void>
 ): Promise<ArrayBuffer> {
+  refuseUnavailableTables(session);
   if (yieldSave) await yieldSave();
   let identities: DocxSessionSave['identities'] | undefined;
   if (yieldSave && projected.originalBuffer) {
