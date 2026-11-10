@@ -19,7 +19,7 @@ test-hooks = []
 [dependencies]
 mimalloc = { version = "0.1.52", optional = true, default-features = false, features = ["v2", "local_dynamic_tls"] }
 betteroffice-fonts = { path = "../../crates/betteroffice-fonts" }
-ooxml-font-preflight = { package = "betteroffice-ooxml-font-preflight", path = "../../crates/ooxml-font-preflight" }
+ooxml-font-preflight = { package = "betteroffice-ooxml-font-preflight", path = "../../crates/ooxml-font-preflight", default-features = false, features = ["docx"] }
 docx-engine = { package = "betteroffice-docx-engine", path = "../../crates/docx-engine" }
 docx-layout = { package = "betteroffice-docx-layout", path = "../../crates/docx-layout" }
 docx-raster = { package = "betteroffice-docx-raster", path = "../../crates/docx-raster", default-features = false }
