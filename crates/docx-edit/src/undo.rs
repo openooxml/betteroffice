@@ -434,13 +434,9 @@ impl DocUndoManager {
                 .clone()
                 .unwrap_or_default();
             let visibility = visibility.lock().unwrap();
-            let named_by_live_tables = if visibility.iter().any(|(_, hidden)| *hidden) {
-                live_table_cells(&txn)
-            } else {
-                HashSet::new()
-            };
+            let kept_visible = stories_named_after_hiding(&txn, &visibility);
             for (story, hidden) in visibility.iter() {
-                if *hidden && named_by_live_tables.contains(story) {
+                if *hidden && kept_visible.contains(story) {
                     continue;
                 }
                 if *hidden {
@@ -740,10 +736,43 @@ fn comment_boundaries(txn: &impl ReadTxn) -> AnchorBoundaries {
     boundaries
 }
 
-/// Cell stories that a table embedded in a live story names.
-fn live_table_cells(txn: &impl ReadTxn) -> HashSet<String> {
+/// The stories among those `visibility` would hide that a table still names once the pass is
+/// done: a table counts only while the story embedding it stays live, so hiding a parent also
+/// lets the cells of its nested tables go.
+fn stories_named_after_hiding(
+    txn: &impl ReadTxn,
+    visibility: &[(String, bool)],
+) -> HashSet<String> {
+    let mut hiding: HashSet<String> = visibility
+        .iter()
+        .filter(|(_, hidden)| *hidden)
+        .map(|(story, _)| story.clone())
+        .collect();
+    let mut kept = HashSet::new();
+    loop {
+        let named = live_table_cells(txn, &hiding);
+        let newly_kept: Vec<String> = hiding
+            .iter()
+            .filter(|story| named.contains(*story))
+            .cloned()
+            .collect();
+        if newly_kept.is_empty() {
+            return kept;
+        }
+        for story in newly_kept {
+            hiding.remove(&story);
+            kept.insert(story);
+        }
+    }
+}
+
+/// Cell stories that a table embedded in a live story outside `excluded` names.
+fn live_table_cells(txn: &impl ReadTxn, excluded: &HashSet<String>) -> HashSet<String> {
     let mut named = HashSet::new();
-    for (_, value) in crate::live_stories(&stories_root(txn), txn) {
+    for (story, value) in crate::live_stories(&stories_root(txn), txn) {
+        if excluded.contains(story) {
+            continue;
+        }
         let Out::YText(text) = value else {
             continue;
         };

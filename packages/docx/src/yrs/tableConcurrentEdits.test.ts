@@ -19,26 +19,26 @@ const body = paragraph('Before') +
   `<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="2340"/><w:gridCol w:w="2340"/></w:tblGrid><w:tr>${cell('A')}${cell('B')}</w:tr></w:tbl>` +
   paragraph('After');
 
-function docx(): Uint8Array {
+function docx(content = body): Uint8Array {
   const parts: PartsMap = new Map();
   parts.set('[Content_Types].xml', toBytes('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'));
   parts.set('_rels/.rels', toBytes('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdPkg1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'));
-  parts.set('word/document.xml', toBytes(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>`));
+  parts.set('word/document.xml', toBytes(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${content}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>`));
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
-async function open(clientId: number): Promise<YrsSession> {
+async function open(clientId: number, content = body): Promise<YrsSession> {
   const session = await createYrsSession({ clientId });
   sessions.push(session);
-  session.openDocx(docx(), true);
+  session.openDocx(docx(content), true);
   session.beginUndoCapture();
   return session;
 }
 
-async function peerOf(source: YrsSession, clientId: number): Promise<YrsSession> {
+async function peerOf(source: YrsSession, clientId: number, content = body): Promise<YrsSession> {
   const peer = await createYrsSession({ clientId });
   sessions.push(peer);
-  peer.openDocx(docx(), false);
+  peer.openDocx(docx(content), false);
   peer.loadState(source.encodeState());
   peer.beginUndoCapture();
   return peer;
@@ -168,6 +168,30 @@ test('two peers: re-splitting after the other peer removed the first split cell 
   expect({ a: danglingCells(a), b: danglingCells(b) }).toEqual({ a: [], b: [] });
   expectConverged([a, b]);
   await expectSound(a, 9713);
+});
+
+test('two peers: redo after undoing a concurrently deleted table hides the nested cells again', async () => {
+  const inner = `<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="1000"/></w:tblGrid><w:tr>${cell('X')}</w:tr></w:tbl>`;
+  const nested = paragraph('Before') +
+    `<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2340"/><w:gridCol w:w="2340"/></w:tblGrid><w:tr>${cell('A')}<w:tc><w:tcPr/>${inner}${paragraph('')}</w:tc></w:tr></w:tbl>` +
+    paragraph('After');
+  const a = await open(9741, nested);
+  const b = await peerOf(a, 9742, nested);
+  const nestedCells = a.storyIds().filter((story) => /^body:t0:r0c\d+:t0:r0c0$/.test(story));
+  expect(nestedCells.length).toBe(1);
+  a.deleteTable({ story: 'body', tableIndex: 0 });
+  b.deleteTable({ story: 'body', tableIndex: 0 });
+  sync(a, b);
+  expect(a.undo()).toBe(true);
+  sync(a, b);
+  expect(a.redo()).toBe(true);
+  sync(a, b);
+  for (const peer of [a, b]) {
+    expect(danglingCells(peer)).toEqual([]);
+    for (const story of nestedCells) expect(peer.storyIds()).not.toContain(story);
+  }
+  expectConverged([a, b]);
+  await expectSound(a, 9743);
 });
 
 for (const [name, steps] of [
