@@ -4,4 +4,4 @@
 '@betteroffice/rust-crates': patch
 ---
 
-Fixes collaborative table editing where undoing a split after another collaborator changed the same table, or splitting again after they removed the new cell, left every cell lookup failing until a reload.
+Fixes collaborative table editing where splitting a cell again after a collaborator removed the previous split cell made the new cell invisible, and where redoing a shared table deletion left nested cells visible.
