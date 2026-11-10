@@ -421,6 +421,8 @@ fn pick_face<'a>(faces: &'a [Value], family: &str, bold: bool, italic: bool) -> 
         .ok_or_else(|| format!("no bundled font for {family}").into())
 }
 
+// The parser carries note ids, note numbering starts and chapter styles as floats while the
+// layout request types them as integers; a JavaScript host writes them as integers already.
 fn whole_numbers_as_integers(value: &mut Value) {
     match value {
         Value::Number(number) if number.is_f64() => {
