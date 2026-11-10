@@ -7,7 +7,10 @@ import {
   useState,
   useSyncExternalStore,
 } from 'react';
+import type { RefObject } from 'react';
 import type { PresentationHandle, SlideDisplayList } from '@betteroffice/pptx';
+import { resolvedLocale } from '../i18n/LocaleContext';
+import { trackFocus } from '../../../../shared/plugin-host/focusTracker';
 import type { TFunction } from '@betteroffice/pptx-i18n';
 import type { PptxCommandController } from '../commands/createPptxCommandStore';
 import { subscribeShortcuts } from '../commands/shortcutTable';
@@ -29,6 +32,8 @@ export interface PresentedCanvas extends PresentedSlide {
 }
 
 export interface UsePptxPluginHostOptions extends PptxEditorPluginProps {
+  locale?: string;
+  focusRoot?: RefObject<HTMLElement | null>;
   /** Stable; its members read the editor at call time. */
   access: PptxPluginEditorAccess;
   commands: PptxCommandController;
@@ -70,6 +75,13 @@ export function usePptxPluginHost(options: UsePptxPluginHostOptions): PptxPlugin
   );
 
   const managed = (options.plugins?.length ?? 0) > 0;
+  const locale = resolvedLocale(options.locale);
+  useLayoutEffect(() => { host.localeChanged(locale); }, [host, locale]);
+  useLayoutEffect(() => {
+    if (!managed) return;
+    return trackFocus(() => latest.current.focusRoot?.current ? [latest.current.focusRoot.current] : [],
+      (focused) => host.focusChanged(focused));
+  }, [host, managed]);
 
   useLayoutEffect(() => {
     host.setReporter(options.onPluginError);
@@ -141,13 +153,17 @@ export function usePptxPluginHost(options: UsePptxPluginHostOptions): PptxPlugin
     const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(bump);
     observer?.observe(canvas);
     observer?.observe(layer);
+    if (options.focusRoot?.current) observer?.observe(options.focusRoot.current);
     window.addEventListener('resize', bump);
+    const stage = options.focusRoot?.current;
+    stage?.addEventListener('scroll', bump, { passive: true, capture: true });
     return () => {
       if (frame) cancelAnimationFrame(frame);
       observer?.disconnect();
       window.removeEventListener('resize', bump);
+      stage?.removeEventListener('scroll', bump, true);
     };
-  }, [managed, canvas, layer]);
+  }, [managed, canvas, layer, options.focusRoot]);
 
   const version = useSyncExternalStore(host.subscribe, host.version, host.version);
   const layout = useMemo(
@@ -167,7 +183,8 @@ export function usePptxPluginHost(options: UsePptxPluginHostOptions): PptxPlugin
               host.layoutId() === layout.id &&
               presentedRef.current === presented &&
               presented.canvas.isConnected,
-            (frame, clientX, clientY) => latest.current.pointAt(frame, clientX, clientY)
+            (frame, clientX, clientY) => latest.current.pointAt(frame, clientX, clientY),
+            options.focusRoot?.current ?? layer
           )
         : null,
     // `moved` rebuilds the geometry when its elements move without a new frame.

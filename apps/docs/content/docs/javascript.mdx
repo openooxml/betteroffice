@@ -171,6 +171,18 @@ once with the reason. Plugins are matched by `id` and `revision`, so new array
 identities and reordering keep their state; React StrictMode's double setup
 creates two distinct activations.
 
+**Focus and locale.** `snapshot.focused` is true while focus is inside the
+editor's document surface; docked panels, toolbar controls, and host chrome are
+outside. `focus-change` carries `focused`. `snapshot.locale`
+contains the canonical `i18n._lang` (`en` by default); `locale-change` carries
+`locale`. The load snapshot includes both fields. These signals are on by default
+for installed plugins.
+
+`geometry.viewport` is the scroller's visible client box intersected with the
+editor root, in overlay-layer pixels. Its `y` changes as the pages scroll.
+`viewport-change` carries the new rectangle on scroll, resize, or zoom, or `null`
+when no layout is shown.
+
 **Stale results.** `setState(next, atVersion)` returns `false` for a superseded
 or ended context or when the document is no longer at `atVersion`, which
 defaults to the version the context was created at. Use `context.run(action)` in
@@ -478,6 +490,17 @@ type); unavailable facts are `null`. These fields are optional for older engines
 Slides also include `headerFooter` with visible slide footer, slide number and date
 placeholder text; `layout.headerFooter` reports stored layout or master settings, which do not gate those placeholders.
 
+**Focus and locale.** `snapshot.focused` is true while focus is inside the
+editor's document surface; docked panels, toolbar controls, and host chrome are
+outside. `focus-change` carries `focused`. `snapshot.locale`
+contains the canonical `i18n._lang` (`en` by default); `locale-change` carries
+`locale`. The load snapshot includes both fields. These signals are on by default
+for installed plugins.
+
+`geometry.viewport` is the visible slide stage in overlay-layer pixels.
+`viewport-change` carries the new rectangle on scroll, resize, or zoom, or `null`
+when no layout is shown.
+
 **Selection and navigation.** `snapshot.selection` names the current slide
 (session `slideId` and one-based `slide`) and a slide, shape or text target;
 text keeps its `anchor`/`focus` direction. `navigation.goToSlide`,
@@ -634,7 +657,10 @@ const review = defineXlsxPlugin<{ sheets: number }>({
 `initialize` and one `load` event per workbook (repeated when a change the hook
 did not make arrives first, and stopped after ten runs), then coalesced
 `document-change`, `selection-change`, `mode-change` (with `readOnly`),
-`layout-change` and `grants-change` events. `document-change` comes from the
+`layout-change`, `proposal-change` and `grants-change` events. `proposal-change`
+carries `generation`, `version` and `previewVersion` when host proposals or
+their stale-decision state change, including committed edits while proposals
+remain. `document-change` comes from the
 workbook's committed versions after recalculation, so typing, commands, batches
 (a plugin's own included), undo, redo and remote updates each produce one, and
 refusals or no-ops none. Replacing the workbook, removing the plugin, changing its `revision`,
@@ -687,6 +713,15 @@ to its plugin only, and only while its current set still has that item. A throw,
 that is too long or more than 10,000 items ends the plugin with the
 `row-decorations` phase.
 
+**Focus and locale.** `snapshot.focused` is true while focus is inside the
+editor's document surface; docked panels, toolbar controls, and host chrome are
+outside. `focus-change` carries `focused`. `snapshot.locale`
+contains the canonical `i18n._lang` (`en` by default); `locale-change` carries
+`locale`. The load snapshot includes both fields. These signals are on by default
+for installed plugins.
+
+`layout.viewport` remains the visible grid in sheet pixels.
+
 **Selection and navigation.** `snapshot.selection` names the active sheet
 (session `sheetId` and zero-based `sheetIndex`), the selected cells with their
 `anchor`/`focus` direction and a selected chart's id.
@@ -706,6 +741,15 @@ zoom and sheet switch. `geometry.getCellRect({ sheetId, row, col })` and
 `getRangeRect({ sheetId, range })` return pixels of the overlay layer, zoomed
 and clipped to the visible grid, frozen panes included; a cell scrolled out of
 view returns null, and merged areas are addressed as ranges.
+`geometry.getAnchorGeometry({ kind: 'proposal', id })` returns visible proposal
+cell `rects`, their bounding `anchor` and the grid's `pageRect` in overlay
+pixels, alongside `version`, `previewVersion` and `layoutId`. XLSX does not expose
+`layout.previewVersion`; use the event's or anchor result's `previewVersion` to
+track proposal state. Anchor failures carry `{ code, message }`: `unknown-proposal`
+for an unregistered id, `missing-target` for no visible cells on this sheet,
+`pending` while proposals refresh, `read-failed` when they cannot be read, and
+`layout-unavailable` for a superseded context or unpainted layout. The result
+type also allows `stale-version`, `ambiguous-target` and `unsupported`.
 `getPositionAtPoint(clientX, clientY)` hit-tests client coordinates through the
 editor's own hit test and returns the editor's `{ sheet, row, col }` with the
 layout's `sheetId`, `version` and `layoutId`, or null outside the grid, over a

@@ -217,6 +217,7 @@ export {
   deriveDisplayListSelectedCellRects,
   deriveDisplayListTableFragments,
   deriveDisplayListTableFragmentsOnPages,
+  displayListTableFragmentEndsTable,
   type DisplayListTableInsertHoverHit,
   type DisplayListTableInsertHoverInput,
   type DisplayListSelectedCellRect,

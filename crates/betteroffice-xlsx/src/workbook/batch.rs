@@ -966,7 +966,7 @@ impl Workbook {
         if ops.is_empty() {
             return unchanged(steps);
         }
-        let baseline = self.authority.encode_state_as_update_v1();
+        let baseline = self.authority()?.encode_state_as_update_v1();
         if baseline.len() > MAX_STAGING_BYTES {
             return refuse(failure(
                 EditFailureCode::LimitExceeded,
@@ -1047,7 +1047,7 @@ impl Workbook {
             Err(error) => return Err(error),
         };
         if !self
-            .authority
+            .authority()?
             .rehearse_local_update(
                 &baseline,
                 prepared.update().expect("batch commits stage an update"),

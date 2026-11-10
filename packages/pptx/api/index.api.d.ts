@@ -923,6 +923,7 @@ export declare function createPresentationEditorSession(bytes: Uint8Array | Arra
 
 // ---- session/methods.d.ts ----
 import type { MethodPolicies, SessionState } from '../../../../shared/office-session';
+import type { FontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import type { PptxEditRequest, PptxEditResult, PptxFindRequest, PptxFindResult, PptxReadRequest, PptxReadResult, PptxValidationResult } from '../edits';
 import type { SlideDisplayList } from '../types';
 import type { OpenPresentationOptions } from '../wasm/loader';
@@ -963,6 +964,8 @@ export interface PresentationSessionOpenOptions extends Omit<OpenPresentationOpt
     fonts?: readonly PresentationSessionFont[];
     fallbackFonts?: readonly PresentationSessionFont[];
     wasm?: ArrayBuffer | WebAssembly.Module;
+    /** @internal */
+    fontCdn?: FontCdnConfiguration;
 }
 /**
  * Slide metadata without layout; indices are zero-based.
@@ -1647,6 +1650,17 @@ export interface SessionClient<M extends SessionMethods, E extends SessionEvents
 }
 /** Creates a typed client over an existing transport. */
 export declare function createSessionClient<M extends SessionMethods, E extends SessionEvents>(transport: SessionTransport, options: SessionClientOptions<M>): SessionClient<M, E>;
+
+// ---- shared/office-session/fontCdn.d.ts ----
+/** @internal */
+export interface FontCdnConfiguration {
+    baseUrl: string | false;
+    timeoutMs: number;
+}
+/** @internal */
+export declare function getFontCdnConfiguration(): FontCdnConfiguration | undefined;
+/** @internal */
+export declare function setFontCdnConfiguration(configuration: FontCdnConfiguration | undefined): void;
 
 // ---- shared/office-session/fontDecoder.d.ts ----
 export type FontDecoder = (bytes: ArrayBuffer | Uint8Array, options: {

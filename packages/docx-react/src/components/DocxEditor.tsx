@@ -161,6 +161,7 @@ import { TrackedChangesReview } from './sidebar/TrackedChangesReview';
 import { useCanvasReviewGeometry } from './sidebar/canvasReviewGeometry';
 import type { ReactSidebarItem } from '../plugin-api/types';
 import type { DocxEditorPluginProps } from '../plugins/types';
+import { resolvedLocale } from '../i18n/LocaleContext';
 import { useDocxPluginHost } from '../plugins/useDocxPluginHost';
 import { PluginOverlays } from '../plugins/PluginOverlays';
 import { PluginDock } from '../plugins/PluginPanels';
@@ -2013,6 +2014,10 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
       ? yrsCore.session
       : null;
   const pluginHost = useDocxPluginHost({
+    locale: resolvedLocale(i18n?._lang),
+    focusRoot: () => editorContentRef.current?.querySelector('.paged-editor') ?? null,
+    scrollContainerRef,
+    editorRootRef: containerRef,
     shortcutsKey: shortcuts === undefined ? undefined : JSON.stringify(shortcuts),
     experimentalWorkerOpen: workerOpen,
     plugins,

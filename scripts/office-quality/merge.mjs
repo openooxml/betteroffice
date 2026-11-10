@@ -11,17 +11,18 @@ import {
 } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { FORMATS, aggregateReport, renderSection } from './readme.mjs';
+import { FORMATS, aggregateReport, corpusSummary, renderSection } from './readme.mjs';
 import { privateMode } from './private-step.mjs';
 import { validatePlan as validateFidelityPlan } from './plan.mjs';
 import { validateComparison } from './results.mjs';
 import { digest, docxShards, mergeDocxBenchmarks } from './docx-benchmark.mjs';
 import { mergeXlsxFidelity, xlsxFidelityShards } from './xlsx-fidelity.mjs';
 import { mergeRoundtrips, roundtripShards } from './roundtrip.mjs';
-import { mergePptxBenchmark } from './pptx-benchmark.mjs';
+import { mergePptxBenchmark, pptxShards } from './pptx-benchmark.mjs';
 import { mergeXlsxBenchmarks, xlsxShards } from './xlsx-benchmark.mjs';
 import { combineShardReports, measureShards } from './measure-shards.mjs';
 import { failureClusters } from './failures.mjs';
+import { mergeTiming, timingFormats } from './timing.mjs';
 
 function fail(message) {
   throw new Error(`Invalid fidelity merge: ${message}`);
@@ -215,6 +216,7 @@ export async function mergeFromPaths({
   requireXlsxBenchmark = false,
   requireXlsxFidelity = false,
   requireRoundtrip = false,
+  requireTiming = false,
 }) {
   const planBytes = await readFile(planPath);
   const plan = normalizePlan(JSON.parse(planBytes));
@@ -244,8 +246,9 @@ export async function mergeFromPaths({
     report = mergeDocxBenchmarks(plan, report, benchmarks, digest(planBytes));
   }
   if (requirePptxBenchmark && plan.formats.includes('pptx')) {
-    const benchmark = JSON.parse(await readFile(resolve(parts, 'pptx-benchmark-report', 'report.json'), 'utf8'));
-    report = mergePptxBenchmark(plan, report, benchmark, digest(planBytes));
+    const benchmarks = await Promise.all(pptxShards(plan).map(async (_, shard) =>
+      JSON.parse(await readFile(resolve(parts, `pptx-benchmark-report-${shard}`, 'report.json'), 'utf8'))));
+    report = mergePptxBenchmark(plan, report, benchmarks, digest(planBytes));
   }
   if (requireXlsxBenchmark && xlsxShards(plan).length) {
     const benchmarks = await Promise.all(xlsxShards(plan).map(async (_, shard) =>
@@ -262,6 +265,12 @@ export async function mergeFromPaths({
       JSON.parse(await readFile(resolve(parts, `roundtrip-report-${format}-${shard}`, 'report.json'), 'utf8'))));
     report = mergeRoundtrips(plan, report, benchmarks, digest(planBytes));
   }
+  if (requireTiming) {
+    const benchmarks = await Promise.all(timingFormats(plan).map(async (format) =>
+      JSON.parse(await readFile(resolve(parts, `timing-report-${format}`, 'report.json'), 'utf8'))));
+    report = mergeTiming(plan, report, benchmarks, digest(planBytes));
+  }
+  report = { ...report, corpus: corpusSummary(plan) };
   const section = renderSection(report, { privateCorpus: privateMode() });
   const aggregate = aggregateReport(report);
   const failures = { schema_version: 1, commit: report.commit, clusters: failureClusters(report) };
@@ -297,5 +306,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     requireXlsxBenchmark: process.env.QUALITY_REQUIRE_XLSX_BENCHMARK === 'true',
     requireXlsxFidelity: process.env.QUALITY_REQUIRE_XLSX_FIDELITY === 'true',
     requireRoundtrip: process.env.QUALITY_REQUIRE_ROUNDTRIP === 'true',
+    requireTiming: process.env.QUALITY_REQUIRE_TIMING === 'true',
   });
 }

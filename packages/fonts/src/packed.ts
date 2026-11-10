@@ -70,7 +70,7 @@ async function loadFace(
   face: BundledFontFace,
   manifest: PackManifest,
   resolveUrl: (face: BundledFontFace) => Promise<URL>,
-  timeoutMs?: number,
+  timeoutMs?: number | ((url: URL) => number | undefined),
   wasmUrl?: URL,
   runtime?: { decoder?: FontDecoder; /** @internal Entries this call creates are dropped once settled; concurrent requests still share one decode. */ retain?: boolean },
 ): Promise<DecodedFace> {
@@ -81,9 +81,10 @@ async function loadFace(
     engineCaches.set(decoder, cache);
   }
   const url = await resolveUrl(face);
+  const requestTimeoutMs = typeof timeoutMs === 'function' ? timeoutMs(url) : timeoutMs;
   const entry = manifest.faces.find((entry) => entry.file === face.file);
   if (entry === undefined) throw new Error(`Unknown bundled font asset: ${face.file}`);
-  const key = `${manifest.pack}|${manifest.version}|${url.href}|${entry.codec}|${entry.dict}|${entry.encodedLength}|${face.byteLength}|${entry.sha256}|${timeoutMs ?? ''}|${wasmUrl?.href ?? ''}`;
+  const key = `${manifest.pack}|${manifest.version}|${url.href}|${entry.codec}|${entry.dict}|${entry.encodedLength}|${face.byteLength}|${entry.sha256}|${requestTimeoutMs ?? ''}|${wasmUrl?.href ?? ''}`;
   let pending = cache.get(key);
   if (pending === undefined) {
     pending = (async () => {
@@ -94,7 +95,7 @@ async function loadFace(
         throw new Error(`Missing bundled font dictionary for ${face.file}`);
       }
       const [encoded, prerequisite] = await Promise.all([
-        readFontBytes(face.file, url, timeoutMs),
+        readFontBytes(face.file, url, requestTimeoutMs),
         regular === undefined ? undefined : loadFace(
           { ...face, file: regular.file, byteLength: regular.byteLength },
           manifest, resolveUrl, timeoutMs, wasmUrl, runtime,
@@ -137,7 +138,8 @@ function intact(decoded: DecodedFace, face: BundledFontFace): boolean {
   return decoded.font.byteLength === face.byteLength && decoded.payload?.byteLength !== 0;
 }
 
-function packFor(face: BundledFontFace): PackManifest {
+/** @internal */
+export function packFor(face: BundledFontFace): PackManifest {
   return isBaseLatinFont(face.file) ? baseLatin : isLatinFont(face.file) ? latin : isCjkFont(face.file) ? cjk : intl;
 }
 
@@ -160,7 +162,7 @@ export function sliceRefOf(file: string): SliceRef | undefined {
 export async function loadPackedFontBytes(
   face: BundledFontFace,
   resolveUrl: (face: BundledFontFace) => Promise<URL>,
-  timeoutMs?: number,
+  timeoutMs?: number | ((url: URL) => number | undefined),
   wasmUrl?: URL,
   manifest: PackManifest = packFor(face),
   runtime?: { decoder?: FontDecoder; /** @internal Entries this call creates are dropped once settled; concurrent requests still share one decode. */ retain?: boolean },

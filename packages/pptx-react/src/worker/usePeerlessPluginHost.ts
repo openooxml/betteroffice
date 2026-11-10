@@ -1,3 +1,4 @@
+import { trackFocus } from '../../../../shared/plugin-host/focusTracker';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { RefObject } from 'react';
 import type { DeckSnapshot, ShapeSnapshot } from '@betteroffice/pptx';
@@ -8,8 +9,9 @@ import { subscribeShortcuts } from '../commands/shortcutTable';
 import type { PptxCommandStore } from '../commands/types';
 import { createPptxPluginHost } from '../plugins/createPptxPluginHost';
 import type { PptxEditorPluginProps, PptxPluginGeometry, PptxPluginSelection } from '../plugins/types';
-import { EMU_PER_PIXEL, slideRectToOverlay } from '../plugins/geometry';
+import { EMU_PER_PIXEL, slideRectToOverlay, slideViewport } from '../plugins/geometry';
 import { useTranslation } from '../i18n';
+import { resolvedLocale } from '../i18n/LocaleContext';
 import type { PeerlessPresentation } from './usePeerlessPresentation';
 import { peerlessPositionAtPoint, type PptxAsyncEditorApi } from './createPeerlessEditorApi';
 import { peerlessPluginClients } from './peerlessPluginClients';
@@ -17,8 +19,8 @@ import { peerlessPluginDocument } from './peerlessPluginDocument';
 
 export function usePeerlessPluginHost(run: PeerlessPresentation | null, commands: PptxCommandStore,
   canvas: RefObject<HTMLCanvasElement | null>, api: RefObject<PptxAsyncEditorApi | null>,
-  props: PptxEditorPluginProps & { readOnly?: boolean }, reviewing: boolean) {
-  const { t } = useTranslation();
+  props: PptxEditorPluginProps & { readOnly?: boolean }, reviewing: boolean, stage: RefObject<HTMLDivElement | null>) {
+  const { t, lang } = useTranslation();
   const latest = useRef({ commands, t, reviewing });
   latest.current = { commands, t, reviewing };
   const geometry = useRef<PptxPluginGeometry | null>(null);
@@ -34,6 +36,12 @@ export function usePeerlessPluginHost(run: PeerlessPresentation | null, commands
       (intent) => current.document.dispatch(invocation, intent));
   }), [api]);
 
+  const locale = resolvedLocale(lang);
+  useLayoutEffect(() => { host.localeChanged(locale); }, [host, locale]);
+  useLayoutEffect(() => {
+    if (!managed) return;
+    return trackFocus(() => stage.current ? [stage.current] : [], (focused) => host.focusChanged(focused));
+  }, [host, managed, stage]);
   useLayoutEffect(() => { host.setReporter(props.onPluginError); host.setGrants(props.pluginGrants); });
   useLayoutEffect(() => { host.modeChanged(Boolean(props.readOnly || run?.failure)); }, [host, props.readOnly, run?.failure]);
   useLayoutEffect(() => { host.setPlugins(props.plugins); }, [host, props.plugins]);
@@ -95,6 +103,7 @@ export function usePeerlessPluginHost(run: PeerlessPresentation | null, commands
     const indexed = indexGeometry(displayList);
     return {
       layout,
+      get viewport() { return slideViewport(stage.current ?? layer, layer); },
       toOverlayRect: (input) => {
         const rect = input?.rect;
         if (!rect || ![rect.x, rect.y, rect.width, rect.height].every(Number.isFinite)) return null;
@@ -124,7 +133,7 @@ export function usePeerlessPluginHost(run: PeerlessPresentation | null, commands
         return hit ? { ...hit, version: frame.version, layoutId: layout.id } : null;
       },
     };
-  }, [host, managed, reviewing, run, confirmed, fit, canvas, layer, shapes]);
+  }, [host, managed, reviewing, run, confirmed, fit, canvas, layer, shapes, stage]);
   geometry.current = presentedGeometry;
   useLayoutEffect(() => {
     host.layoutChanged(presentedGeometry?.layout ?? null);
@@ -149,9 +158,12 @@ export function usePeerlessPluginHost(run: PeerlessPresentation | null, commands
     };
     const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(moved);
     observer?.observe(surface); observer?.observe(layer);
+    if (stage.current) observer?.observe(stage.current);
+    const viewport = stage.current;
+    viewport?.addEventListener('scroll', moved, { passive: true });
     window.addEventListener('resize', moved);
-    return () => { if (frame) cancelAnimationFrame(frame); observer?.disconnect(); window.removeEventListener('resize', moved); };
-  }, [host, managed, canvas, layer]);
+    return () => { if (frame) cancelAnimationFrame(frame); observer?.disconnect(); window.removeEventListener('resize', moved); viewport?.removeEventListener('scroll', moved); };
+  }, [host, managed, canvas, layer, stage]);
   const activations = useSyncExternalStore(host.subscribe, host.activations, host.activations);
   return { host, activations, layerRef, managed };
 }

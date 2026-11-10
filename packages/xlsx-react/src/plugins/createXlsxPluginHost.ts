@@ -86,6 +86,8 @@ export interface XlsxPluginHost {
   generation(): string | null;
   version(): string;
   selectionChanged(selection: XlsxPluginSelection): void;
+  focusChanged(focused: boolean): void;
+  localeChanged(locale: string): void;
   modeChanged(readOnly: boolean): void;
   proposalsChanged(signature: string): void;
   previewVersion(): number;
@@ -217,6 +219,8 @@ export function createXlsxPluginHost(
   const state = {
     version: '',
     readOnly: false,
+    focused: false,
+    locale: 'en',
     selection: null as XlsxPluginSelection,
     layout: null as XlsxPluginLayout | null,
     proposals: JSON.stringify({ proposals: [], staleFor: {}, version: null }),
@@ -318,6 +322,8 @@ export function createXlsxPluginHost(
     generation,
     version: state.version,
     readOnly: state.readOnly,
+    focused: state.focused,
+    locale: state.locale,
     grant: runtime.grant(pluginId) as XlsxPluginGrant,
     selection: state.selection,
     layout: state.layout,
@@ -569,6 +575,20 @@ export function createXlsxPluginHost(
       if (generation) {
         notify({ type: 'selection-change', generation, version: state.version, selection });
       }
+    },
+
+    focusChanged(focused) {
+      if (focused === state.focused) return;
+      state.focused = focused;
+      const generation = runtime.generation();
+      if (generation) notify({ type: 'focus-change', generation, focused });
+    },
+
+    localeChanged(locale) {
+      if (locale === state.locale) return;
+      state.locale = locale;
+      const generation = runtime.generation();
+      if (generation) notify({ type: 'locale-change', generation, locale });
     },
 
     modeChanged(readOnly) {
