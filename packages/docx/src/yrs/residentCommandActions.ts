@@ -1,5 +1,6 @@
 import { isEngineTrap } from '../../../../shared/office-session/trap';
 import { applyCommandBatch, commandBatchRequest } from './residentCommandBatches';
+import { isCellHasNoStoryRefusal } from './cellRefusal';
 import { createProposalRegistry } from './proposals';
 import { applyReviewCommand, grantedHostProposal, preflightReviewCommand, reviewCommandKeys, type ReviewCommand } from './residentReviewCommands';
 import { planResidentListChanges } from './residentCommandLists';
@@ -924,16 +925,11 @@ export function applyDocxCommand(
     }
   } catch (error) {
     // The engine refuses a write into a table cell that has no story before it mutates anything.
-    if (!cellHasNoStory(error) || engine.proposalEngine.version() !== version) throw error;
+    if (!isCellHasNoStoryRefusal(error) || engine.proposalEngine.version() !== version) throw error;
     const corrected = state.selection ? readCommandSelection(engine, state) : null;
     return { status: 'refused', reason: 'unsupported', selection: corrected?.ok ? corrected.selection : null,
       editState: projectDocxEditState(engine, state, corrected) };
   }
-}
-
-function cellHasNoStory(error: unknown): boolean {
-  const message = typeof error === 'string' ? error : error instanceof Error ? error.message : '';
-  return message.includes('has no story');
 }
 
 function applyPreparedDocxCommand(

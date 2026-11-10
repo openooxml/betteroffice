@@ -39,6 +39,7 @@ import {
   canUseResidentEngineWorker,
   residentCaretSnapshotForFrame,
   ResidentEngineWorkerClient,
+  isCellHasNoStoryRefusal,
   type DocxDocumentRead,
   ResidentWorkerFailureError,
   preloadResidentEngineWorker,
@@ -138,13 +139,6 @@ const holdsWorkerProposals = (session: YrsSession): boolean =>
   registeredWorkerProposalAuthority(session)?.holdsWorkerState() === true;
 const holdsCommittedWorkerProposals = (session: YrsSession): boolean =>
   registeredWorkerProposalAuthority(session)?.holdsCommittedWorkerState() === true;
-
-/** Resident input the engine declined before its edit transaction: the caller takes the structural path. */
-const residentInputDeclined = (error: unknown): boolean =>
-  error instanceof Error &&
-  (error.message.includes('resident input state is not ready') ||
-    // A write into a table cell with no story is refused before the engine changes anything.
-    error.message.includes('has no story'));
 
 export type OpenInWorker = (
   session: YrsSession,
@@ -1326,6 +1320,7 @@ export function useRustDisplayList(
         setWorkerPresentationActive(false);
         let encoded: Uint8Array;
         let deletedUnits: number | undefined;
+        const version = readSessionVersion(hostEngine);
         suppressWorkerInvalidationRef.current += 1;
         try {
           if (pending.kind === 'insert') {
@@ -1336,7 +1331,9 @@ export function useRustDisplayList(
           }
         } catch (error) {
           suppressWorkerInvalidationRef.current -= 1;
-          if (residentInputDeclined(error)) return null;
+          if (error instanceof Error && error.message.includes('resident input state is not ready')) return null;
+          // A write into a table cell with no story is refused before the engine changes anything.
+          if (version !== null && isCellHasNoStoryRefusal(error) && readSessionVersion(hostEngine) === version) return null;
           throw error;
         }
         suppressWorkerInvalidationRef.current -= 1;
@@ -1559,7 +1556,7 @@ export function useRustDisplayList(
         // caller use the structural compatibility path for unsupported
         // paragraphs (inline media/float-dependent measurement, non-body
         // stories, or a frame that has not established resident state).
-        if (residentInputDeclined(nextError)) return null;
+        if (nextError.message.includes('resident input state is not ready')) return null;
         console.error('[CanvasRenderer] Worker input failed', nextError);
         // An input to a document another load replaced fails nothing of the new one.
         if (!dropped()) {

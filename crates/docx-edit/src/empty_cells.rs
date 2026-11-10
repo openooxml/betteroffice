@@ -3,6 +3,8 @@
 //! [`crate::EditError::CellHasNoStory`]. Reads never write: they answer from a scratch document
 //! holding exactly that paragraph.
 
+use std::collections::HashSet;
+
 use yrs::types::text::YChange;
 use yrs::{Any, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextRef, Transact};
 
@@ -55,6 +57,45 @@ pub(crate) fn naming_table<T: ReadTxn>(
         }
     }
     None
+}
+
+/// Every cell story id a table of a live story names, present or not: ids a new cell must not
+/// take.
+pub(crate) fn named_cell_ids<T: ReadTxn>(txn: &T) -> HashSet<String> {
+    let mut named = HashSet::new();
+    let Some(stories) = txn.get_map(STORIES) else {
+        return named;
+    };
+    for (_, value) in crate::live_stories(&stories, txn) {
+        let Out::YText(story) = value else {
+            continue;
+        };
+        for diff in story.diff(txn, YChange::identity) {
+            let Out::YMap(map) = &diff.insert else {
+                continue;
+            };
+            if map_string(map, txn, KIND_KEY).as_deref() != Some("table") {
+                continue;
+            }
+            let Some(Out::Any(Any::Array(rows))) = map.get(txn, "rows") else {
+                continue;
+            };
+            for row in rows.iter() {
+                let Any::Map(row) = row else { continue };
+                let Some(Any::Array(cells)) = row.get("cells") else {
+                    continue;
+                };
+                for cell in cells.iter() {
+                    if let Any::Map(cell) = cell
+                        && let Some(Any::String(story)) = cell.get("story")
+                    {
+                        named.insert(story.to_string());
+                    }
+                }
+            }
+        }
+    }
+    named
 }
 
 /// Whether a table of a live story names `story_id` as a cell.

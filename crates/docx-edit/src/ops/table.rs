@@ -1212,7 +1212,8 @@ fn table_base(locator: &TableLocator) -> String {
 
 /// Story ids without the `~{client}` suffix of an edit-born cell, so a slot is fresh only when
 /// no replica's cell holds it, live or removed: a removed id keeps its tombstone, and a cell
-/// minted under it again would be born removed.
+/// minted under it again would be born removed. Ids a live table names count too, present or not,
+/// so a new cell never takes the id of a cell that lost its story.
 fn story_ids<T: ReadTxn>(txn: &T) -> HashSet<String> {
     let mut ids: HashSet<String> = txn
         .get_map(STORIES)
@@ -1230,6 +1231,11 @@ fn story_ids<T: ReadTxn>(txn: &T) -> HashSet<String> {
                 .map(|(id, _)| bare_story_id(id).to_owned()),
         );
     }
+    ids.extend(
+        crate::empty_cells::named_cell_ids(txn)
+            .iter()
+            .map(|id| bare_story_id(id).to_owned()),
+    );
     ids
 }
 
@@ -2291,7 +2297,6 @@ impl EditingDoc {
                     story: String::new(),
                 });
             let story_id = fresh_cell_story(&mut used, &base, row_slot, column, self.client_id());
-            let para_id = create_cell_story(self, &mut txn, &mut ids, &story_id)?;
             let mut cell = reset_cell_spans(template);
             cell.story = story_id.clone();
             inserted_anchors.push(CellAnchor {
@@ -2303,7 +2308,6 @@ impl EditingDoc {
                 cell,
             });
             created.push(story_id);
-            new_para_ids.push(para_id);
         }
 
         data.rows.insert(
@@ -2316,6 +2320,10 @@ impl EditingDoc {
         cell_anchors.extend(inserted_anchors);
         data.rows = reconstruct_rows(data.rows, cell_anchors)?;
         ensure_grid(&mut data, columns);
+        anchors(&data)?;
+        for story_id in &created {
+            new_para_ids.push(create_cell_story(self, &mut txn, &mut ids, story_id)?);
+        }
         write_table(&mut txn, &table, &data);
         let mut receipt = receipt(locator, Some(&data), created, Vec::new(), new_para_ids)?;
         receipt.revision_ids = revision_id.into_iter().collect();
@@ -2382,7 +2390,6 @@ impl EditingDoc {
                     story: String::new(),
                 });
             let story_id = fresh_cell_story(&mut used, &base, row, column_slot, self.client_id());
-            let para_id = create_cell_story(self, &mut txn, &mut ids, &story_id)?;
             let mut cell = reset_cell_spans(template);
             cell.story = story_id.clone();
             inserted.push(CellAnchor {
@@ -2394,7 +2401,6 @@ impl EditingDoc {
                 cell,
             });
             created.push(story_id);
-            new_para_ids.push(para_id);
         }
         cell_anchors.extend(inserted);
         data.rows = reconstruct_rows(data.rows, cell_anchors)?;
@@ -2405,6 +2411,10 @@ impl EditingDoc {
             data.grid[0].clone()
         };
         data.grid.insert(boundary, inserted_width);
+        anchors(&data)?;
+        for story_id in &created {
+            new_para_ids.push(create_cell_story(self, &mut txn, &mut ids, story_id)?);
+        }
         write_table(&mut txn, &table, &data);
         receipt(locator, Some(&data), created, Vec::new(), new_para_ids)
     }
@@ -2701,7 +2711,6 @@ impl EditingDoc {
                     continue;
                 }
                 let story_id = fresh_cell_story(&mut used, &base, row, column, self.client_id());
-                let para_id = create_cell_story(self, &mut txn, &mut ids, &story_id)?;
                 let mut cell = reset_cell_spans(target.cell.clone());
                 cell.story = story_id.clone();
                 next_anchors.push(CellAnchor {
@@ -2713,7 +2722,6 @@ impl EditingDoc {
                     cell,
                 });
                 created.push(story_id);
-                new_para_ids.push(para_id);
             }
         }
 
@@ -2749,6 +2757,10 @@ impl EditingDoc {
         data.grid
             .splice(target.column..target_column_end, replacement);
         data.rows = reconstruct_rows(data.rows, next_anchors)?;
+        anchors(&data)?;
+        for story_id in &created {
+            new_para_ids.push(create_cell_story(self, &mut txn, &mut ids, story_id)?);
+        }
         write_table(&mut txn, &table, &data);
         receipt(locator, Some(&data), created, Vec::new(), new_para_ids)
     }

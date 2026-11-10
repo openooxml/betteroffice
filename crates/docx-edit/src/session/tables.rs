@@ -122,7 +122,7 @@ impl EditSessionCore {
             .engine
             .doc()
             .merge_cells(&EditCtx::local("", ""), &range)
-            .map_err(EngineError::message)?;
+            .map_err(EngineError::from)?;
         serde_json::to_string(&receipt).map_err(EngineError::message)
     }
 
@@ -137,7 +137,7 @@ impl EditSessionCore {
             .engine
             .doc()
             .split_cell_grid(&EditCtx::local("", ""), &at, rows, columns)
-            .map_err(EngineError::message)?;
+            .map_err(EngineError::from)?;
         serde_json::to_string(&receipt).map_err(EngineError::message)
     }
 

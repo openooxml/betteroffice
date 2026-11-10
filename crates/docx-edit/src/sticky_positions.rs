@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use yrs::branch::{Branch, BranchPtr};
 use yrs::updates::decoder::Decode;
-use yrs::{Assoc, IndexedSequence, Offset, ReadTxn, StickyIndex, TextRef, Transact};
+use yrs::{Assoc, IndexedSequence, Offset, Out, ReadTxn, StickyIndex, TextRef, Transact};
 
 use crate::{EditError, EditingDoc, story_text};
 
@@ -20,6 +20,21 @@ fn at_naming_table<T: ReadTxn>(txn: &T, story: &str, offset: &Offset) -> bool {
         index == offset.index && branch_of(parent) == offset.branch
     })
     .is_some()
+}
+
+/// Whether `offset` lies in the text of a live story.
+fn in_live_story<T: ReadTxn>(txn: &T, offset: &Offset) -> bool {
+    let Some(stories) = txn.get_map(crate::STORIES) else {
+        return false;
+    };
+    for (_, value) in crate::live_stories(&stories, txn) {
+        if let Out::YText(text) = value
+            && branch_of(&text) == offset.branch
+        {
+            return true;
+        }
+    }
+    false
 }
 
 pub(crate) fn sticky_index<T: ReadTxn>(
@@ -94,7 +109,8 @@ impl EditingDoc {
 
     /// The offset of `position` in `story`. A position at the embed of a live table that names
     /// `story` as a cell is offset 0 of that cell: the caret of a cell without its story sits
-    /// there. Any other position outside `story` is refused.
+    /// there, and so is a position into the cell's former text or one that no longer resolves.
+    /// A position in another live story is refused.
     pub(crate) fn cached_sticky_offset(
         &self,
         story: &str,
@@ -110,8 +126,10 @@ impl EditingDoc {
             }
             return match sticky_offset(position, &txn) {
                 Some(offset) if at_naming_table(&txn, story, &offset) => Ok(Some(0)),
-                Some(_) => Err("selection sticky index belongs to another story".to_owned()),
-                None => Ok(None),
+                Some(offset) if in_live_story(&txn, &offset) => {
+                    Err("selection sticky index belongs to another story".to_owned())
+                }
+                _ => Ok(Some(0)),
             };
         };
         let mut cache = self.sticky_positions.lock().unwrap();

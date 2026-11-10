@@ -506,8 +506,10 @@ fn invalid_resident_frame_epoch_matches_shim_error_before_mutation() {
 }
 
 /// A session whose body table names cell (0, 2) while its story is missing: one replica split
-/// a cell, another inserted a row, the first undid its split.
-fn missing_cell_session() -> (EditSessionCore, String) {
+/// a cell, another inserted a row, the first undid its split, after the row reached it when
+/// `synced`. With `select_early` the session placed its caret in that cell while it still had
+/// its story.
+fn missing_cell_session(synced: bool, select_early: bool) -> (EditSessionCore, String) {
     let ctx = crate::EditCtx::local("Ada", "2026-11-10T00:00:00Z");
     let origin = crate::EditingDoc::new(100);
     origin
@@ -534,12 +536,29 @@ fn missing_cell_session() -> (EditSessionCore, String) {
         .split_cell_grid(&ctx, &crate::CellLoc::new("body", 0, 0, 1), Some(1), Some(2))
         .unwrap();
     exchange();
+    let session = core(93);
+    if select_early {
+        session
+            .apply_update(&splitter.encode_state_as_update_v1())
+            .unwrap();
+        let payload = session
+            .engine
+            .doc()
+            .table_payload(&crate::TableLocator::new("body", 0))
+            .unwrap();
+        let rows = serde_json::to_value(&payload["rows"]).unwrap();
+        let cell = rows[0]["cells"][2]["story"].as_str().unwrap().to_owned();
+        let paragraphs = session.engine.doc().paragraphs(&cell).unwrap();
+        let para = paragraphs[0].para_id.clone();
+        session.set_selection(&cell, &para, 0, &para, 0).unwrap();
+    }
     peer.insert_row(&ctx, &crate::CellLoc::new("body", 0, 0, 0), true)
         .unwrap();
-    exchange();
+    if synced {
+        exchange();
+    }
     assert!(undo.undo());
     exchange();
-    let session = core(93);
     session
         .apply_update(&splitter.encode_state_as_update_v1())
         .unwrap();
@@ -556,7 +575,13 @@ fn missing_cell_session() -> (EditSessionCore, String) {
 
 #[test]
 fn every_write_aimed_at_a_cell_without_its_story_is_refused_before_its_argument_checks() {
-    let (session, cell) = missing_cell_session();
+    for synced in [true, false] {
+        refuses_every_write(synced);
+    }
+}
+
+fn refuses_every_write(synced: bool) {
+    let (session, cell) = missing_cell_session(synced, false);
     let key = format!("{cell}#p0");
     let collapsed = serde_json::json!([{
         "story": cell, "startPara": key, "startOffset": 0, "endPara": key, "endOffset": 0,
@@ -647,9 +672,100 @@ fn every_write_aimed_at_a_cell_without_its_story_is_refused_before_its_argument_
     for (what, result) in results {
         let error = result.expect_err(what);
         assert!(error.message.contains("has no story"), "{what}: {error}");
+        assert_eq!(error.kind, EngineErrorKind::CellHasNoStory, "{what}");
     }
     assert_eq!(
         (session.encode_state_vector(), session.encode_state()),
         before
+    );
+}
+
+#[test]
+fn a_caret_placed_before_the_cell_lost_its_story_reads_at_its_empty_paragraph() {
+    for synced in [true, false] {
+        let (session, cell) = missing_cell_session(synced, true);
+        let before = (session.encode_state_vector(), session.encode_state());
+        let selection: Value = serde_json::from_str(&session.selection().unwrap()).unwrap();
+        for end in ["anchor", "head"] {
+            assert_eq!(selection[end]["story"], cell.as_str(), "synced={synced}");
+            assert_eq!(selection[end]["paraId"], format!("{cell}#p0"));
+            assert_eq!(selection[end]["offset"], 0);
+        }
+        assert_eq!(
+            (session.encode_state_vector(), session.encode_state()),
+            before
+        );
+    }
+}
+
+#[test]
+fn loading_stories_that_include_a_cell_without_its_story_seeds_none_of_them() {
+    for synced in [true, false] {
+        let (session, cell) = missing_cell_session(synced, false);
+        let before = (session.encode_state_vector(), session.encode_state());
+        let request = serde_json::json!([
+            {"storyId": "fresh", "paragraphs": [{"text": "first"}]},
+            {"storyId": cell, "paragraphs": [{"text": "second"}]},
+        ])
+        .to_string();
+        let error = session.load_json(&request).unwrap_err();
+        assert_eq!(error.kind, EngineErrorKind::CellHasNoStory, "{error}");
+        assert!(!session.story_ids().contains(&"fresh".to_owned()));
+        assert_eq!(
+            (session.encode_state_vector(), session.encode_state()),
+            before
+        );
+    }
+}
+
+#[test]
+fn resident_input_and_delete_in_a_cell_without_its_story_refuse_with_its_kind() {
+    for synced in [true, false] {
+        let (session, cell) = missing_cell_session(synced, true);
+        let key = format!("{cell}#p0");
+        let before = (session.encode_state_vector(), session.encode_state());
+        let results: Vec<(&str, Result<(), super::EngineError>)> = vec![
+            ("apply_input", session.apply_input("x", 0.0).map(drop)),
+            (
+                "apply_input_profiled",
+                session.apply_input_profiled("x", 0.0).map(drop),
+            ),
+            (
+                "apply_delete",
+                session.apply_delete("backward", 0.0, 1).map(drop),
+            ),
+            (
+                "apply_delete_profiled",
+                session.apply_delete_profiled("forward", 0.0, 1).map(drop),
+            ),
+            (
+                "edit_text_resident",
+                session
+                    .edit_text_resident(&cell, &key, 0, &key, 0, Some("x".to_owned()))
+                    .map(drop),
+            ),
+        ];
+        for (what, result) in results {
+            let error = result.expect_err(what);
+            assert_eq!(error.kind, EngineErrorKind::CellHasNoStory, "{what}");
+        }
+        assert_eq!(
+            (session.encode_state_vector(), session.encode_state()),
+            before
+        );
+    }
+}
+
+#[test]
+fn a_cell_refusal_keeps_its_kind_through_a_plain_message() {
+    let refusal = crate::OpError::CellHasNoStory("body:t0:r0c2~7".to_owned());
+    assert_eq!(
+        super::EngineError::message(refusal).kind,
+        EngineErrorKind::CellHasNoStory
+    );
+    let missing = crate::EditError::StoryNotFound("table cell \"x\" has no story".to_owned());
+    assert_eq!(
+        super::EngineError::message(missing).kind,
+        EngineErrorKind::Message
     );
 }

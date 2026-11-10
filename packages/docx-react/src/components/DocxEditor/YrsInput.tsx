@@ -17,6 +17,7 @@ import { createPortal } from 'react-dom';
 import {
   applyClipboardFragment,
   clipboardFragmentIsTextOnly,
+  isCellHasNoStoryRefusal,
   sameYrsSelection,
   tableBoundaryDeleteTarget,
   type YrsAuthor,
@@ -50,7 +51,7 @@ import { InputOperationQueue } from './inputOperationQueue';
 import { awaitWorkerOpenReplica, requestWorkerOpenReplicaReadiness } from './internals/workerOpenReplica';
 import { requestQueuedOpeningInput } from './internals/queuedOpeningInput';
 import { scrollIntoViewDelta, scrollViewport } from './internals/viewportBand';
-import { sourceVersionOf } from './internals/layoutProvenance';
+import { readSessionVersion, sourceVersionOf } from './internals/layoutProvenance';
 import { DocxCommandAdmissionError } from '../../commands/createDocxCommandStore';
 import { paragraphVerticalMove, VerticalCaretGoal } from './verticalCaretGoal';
 import {
@@ -294,6 +295,20 @@ function toRange(selection: YrsSelection, map: YrsInputPositionMap): YrsStoryRan
   };
 }
 
+/** Runs `operation`; the engine's refusal of a write into a table cell with no story is dropped when nothing was written. */
+function declineCellRefusal(session: YrsSession | null, operation: () => void | Promise<void>): void | Promise<void> {
+  const version = readSessionVersion(session);
+  const decline = (error: unknown): void => {
+    if (version === null || !isCellHasNoStoryRefusal(error) || readSessionVersion(session) !== version) throw error;
+  };
+  try {
+    const result = operation();
+    return result instanceof Promise ? result.catch(decline) : result;
+  } catch (error) {
+    decline(error);
+  }
+}
+
 /** The body or a table cell or control story laid out with it: resident input can apply there. */
 function isBodyFlowStory(story: string): boolean {
   return story === 'body' || story.startsWith('body:');
@@ -399,8 +414,6 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     queuedSessionRef.current = session;
     const queue = new InputOperationQueue(
       (error) => {
-        // A write into a table cell with no story is refused before the engine changes anything.
-        if (error instanceof Error && error.message.includes('has no story')) return;
         console.error('[YrsInput] queued input operation failed', error);
       },
       (pending) => {
@@ -531,10 +544,11 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       openingInput = kind === 'mutation'
     ): void => {
       sealInputBatches();
+      const declining = (waited: boolean) => declineCellRefusal(session, () => operation(waited));
       const replay = heldReplayBatchRef.current;
       if (replay) {
         try {
-          replay.operations.push(Promise.resolve(operation(false)));
+          replay.operations.push(Promise.resolve(declining(false)));
         } catch (error) {
           replay.operations.push(Promise.reject(error));
         }
@@ -557,7 +571,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         const apply = () => {
           if (!isCurrentInput(admitted, queue)) return onDropped?.();
           if (replicaReadyRef?.current !== false) replicaInputRef.current.applyPendingSelection?.();
-          return operation(false);
+          return declining(false);
         };
         queue?.enqueue(() => pendingSelectionsRef.current.length > 0
           ? preparePendingSelections(admitted, queue).then(apply)
@@ -588,7 +602,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         if (pendingSelectionsRef.current.length > 0) await preparePendingSelections(admitted, queue);
         if (!isCurrentInput(admitted, queue)) return onDropped?.();
         replicaInputRef.current.applyPendingSelection?.();
-        await operation(true);
+        await declining(true);
         if (scrolled && isCurrentInput(admitted, queue)) {
           quietSelectionRef.current = admitted?.selection() ?? null;
         }

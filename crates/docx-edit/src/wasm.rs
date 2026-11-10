@@ -115,6 +115,16 @@ impl From<EngineError> for JsValue {
                 );
                 value.into()
             }
+            EngineErrorKind::CellHasNoStory => {
+                let value = js_sys::Error::new(&error.message);
+                value.set_name("CellHasNoStoryError");
+                let _ = js_sys::Reflect::set(
+                    &value,
+                    &JsValue::from_str("code"),
+                    &JsValue::from_str("cell-has-no-story"),
+                );
+                value.into()
+            }
         }
     }
 }

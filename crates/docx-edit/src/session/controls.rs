@@ -232,7 +232,7 @@ impl EditSessionCore {
         self.engine
             .doc()
             .set_paragraph_attr(para_id, key, value)
-            .map_err(EngineError::message)
+            .map_err(EngineError::from)
     }
 
     fn select_embed_story(&self, embed_id: &str) -> EngineResult<()> {

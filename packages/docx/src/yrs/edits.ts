@@ -155,7 +155,7 @@ export type DocxEditFailureCode =
   | 'invalid-step'
   | 'limit-exceeded';
 
-/** Why a `setContentControlText` step was refused, beside its failure code. */
+/** Why a step was refused, beside its failure code: a `setContentControlText` step, or a step aimed at a table cell that has no story. */
 export type DocxEditFailureReason =
   | 'missing-control'
   | 'missing-tag'
@@ -173,7 +173,8 @@ export type DocxEditFailureReason =
   | 'provenance-unavailable'
   | 'unsupported-story'
   | 'multiline-not-allowed'
-  | 'invalid-text';
+  | 'invalid-text'
+  | 'cell-has-no-story';
 
 export type DocxEditFailure = OperationFailure<DocxEditFailureCode, DocxEditTarget> & {
   reason?: DocxEditFailureReason;

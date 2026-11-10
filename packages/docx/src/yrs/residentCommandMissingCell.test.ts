@@ -157,6 +157,40 @@ for (const [index, order] of (['synced', 'concurrent'] as const).entries()) {
   }, 60_000);
 }
 
+for (const [index, order] of (['synced', 'concurrent'] as const).entries()) {
+  test(`${order}: an editor caret placed in the new cell before it went missing reads at the start of its empty paragraph, with toolbar state, and writes nothing`, async () => {
+    const base = 11_300 + index * 10;
+    const a = await createYrsSession({ clientId: base + 1 });
+    sessions.push(a);
+    a.openDocx(docx(), true);
+    a.beginUndoCapture();
+    const b = await createYrsSession({ clientId: base + 2 });
+    sessions.push(b);
+    b.openDocx(docx(), false);
+    b.loadState(a.encodeState());
+    b.beginUndoCapture();
+    a.splitCell(at(0, 1), 1, 2);
+    sync(a, b);
+    const story = a.storyIds().find((id) => id.includes(`~${base + 1}`));
+    expect(story).toBeDefined();
+    const arm = await openCommandEngine([], { bytes: docx(), checkpoint: a.encodeState(), clientId: base + 5 });
+    const paraId = arm.engine.paragraphs(story!)[0]!.paraId;
+    expect(execute(arm, command(arm, 'select', { selection: selection(paraId, 0, 0, story!) })).status).toBe('noop');
+    b.insertRow(at(0, 0), 'below');
+    if (order === 'synced') sync(a, b);
+    expect(a.undo()).toBe(true);
+    sync(a, b);
+    arm.engine.applyUpdate(a.encodeStateAsUpdate(arm.engine.encodeStateVector()));
+    expect(arm.engine.geometryReader.storyIds()).not.toContain(story!);
+    const before = stateBytes(arm);
+    const caret = { story: story!, paraId: `${story!}#p0`, offset: 0 };
+    expect(arm.engine.selection()).toMatchObject({ anchor: caret, head: caret });
+    projectDocxEditState(arm.engine, arm.state);
+    arm.engine.selectionContext({ story: story!, start: { paraId: caret.paraId, offset: 0 }, end: { paraId: caret.paraId, offset: 0 } });
+    expect(stateBytes(arm) === before).toBe(true);
+  }, 60_000);
+}
+
 async function send(host: DocxCommandHost, intent: DocxCommandIntent): Promise<CommandOutcome | undefined> {
   host.policy(intent);
   const reply = await host.handler(undefined, intent);

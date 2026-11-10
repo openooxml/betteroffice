@@ -112,7 +112,7 @@ pub(crate) fn loc_index(
 /// Refuses a write into a table cell that a live table names while its story is missing or
 /// removed, before the write checks its other arguments.
 pub(crate) fn writable_story(doc: &EditingDoc, story: &str) -> EngineResult<()> {
-    doc.refuse_cell_write(story).map_err(EngineError::message)
+    doc.refuse_cell_write(story).map_err(EngineError::from)
 }
 
 pub(crate) fn comment_ranges(doc: &EditingDoc, ranges_json: &str) -> EngineResult<Vec<StoryRange>> {

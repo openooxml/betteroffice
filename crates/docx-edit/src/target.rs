@@ -17,7 +17,8 @@ use serde::{Deserialize, Serialize};
 use yrs::{Any, Map, MapRef, Out, ReadTxn, Transact};
 
 use crate::batch::{
-    DocumentVersion, EditFailure, EditFailureCode, EditRefusal, EditTarget, failure, refusal,
+    DocumentVersion, EditFailure, EditFailureCode, EditRefusal, EditTarget, cell_has_no_story,
+    failure, refusal,
 };
 use crate::content_controls::Inventory;
 use crate::format::InlineFormatDelta;
@@ -1415,11 +1416,7 @@ impl<'a, T: ReadTxn> Views<'a, T> {
         target: &EditTarget,
     ) -> Result<(), EditFailure> {
         if crate::empty_cells::is_empty_cell(self.txn, story) {
-            return Err(failure(
-                EditFailureCode::Unsupported,
-                crate::EditError::CellHasNoStory(story.to_owned()).to_string(),
-                Some(target.clone()),
-            ));
+            return Err(cell_has_no_story(story, Some(target.clone())));
         }
         let ownership = self.ownership();
         let chain = ownership
@@ -1847,14 +1844,8 @@ impl EditingDoc {
         if !crate::empty_cells::is_empty_cell(&self.yrs_doc().transact(), story) {
             return Ok(());
         }
-        Err(refusal(
-            self.version(),
-            failure(
-                EditFailureCode::Unsupported,
-                crate::EditError::CellHasNoStory(story.to_owned()).to_string(),
-                Some(EditTarget::from(target.clone())),
-            ),
-        ))
+        let target = EditTarget::from(target.clone());
+        Err(refusal(self.version(), cell_has_no_story(story, Some(target))))
     }
 
     fn writable(&self, story: &str, target: &TextTarget) -> Result<(), EditRefusal> {

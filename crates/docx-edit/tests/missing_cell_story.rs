@@ -438,6 +438,10 @@ fn assert_writes_refused(doc: &EditingDoc, row: u32, column: u32, cell: &str) {
         .unwrap()
         .expect_err("a batch step into the cell is refused");
     assert_eq!(refusal.failure.code, EditFailureCode::Unsupported);
+    assert_eq!(
+        refusal.failure.reason,
+        Some(EditFailureReason::CellHasNoStory)
+    );
     assert!(
         refusal.failure.message.contains("has no story"),
         "{}",
@@ -591,5 +595,36 @@ fn a_comment_anchored_in_the_cell_before_the_undo_resolves_to_its_empty_paragrap
         let info = listed.iter().find(|info| info.id == comment).unwrap();
         assert_eq!(info.ranges, [empty.clone()]);
         assert_eq!(state(doc), before);
+    }
+}
+
+#[test]
+fn table_edits_after_the_undo_never_reuse_the_id_of_the_cell_without_its_story() {
+    for synced in [true, false] {
+        let (left, right, _undo) = dangling_state(synced);
+        let missing = dangling(&left);
+        let (_, _, cell) = missing[0].clone();
+        let at = |column| CellLoc::new("body", 0, 0, column);
+        let split = left
+            .split_cell_grid(&ctx(), &at(0), Some(1), Some(2))
+            .unwrap();
+        assert!(!split.created_story_ids.contains(&cell), "synced={synced}");
+        left.merge_cells(&ctx(), &TableRange::new(at(0), at(1)))
+            .unwrap();
+        left.insert_row(&ctx(), &at(0), true).unwrap();
+        left.insert_column(&ctx(), &at(0), true).unwrap();
+        left.split_cell_grid(&ctx(), &at(0), Some(1), Some(2))
+            .unwrap();
+        exchange(&left, &right);
+        for doc in [&left, &right] {
+            let named: Vec<String> = named_cells(doc)
+                .into_iter()
+                .map(|(_, _, story)| story)
+                .collect();
+            let unique: std::collections::HashSet<&String> = named.iter().collect();
+            assert_eq!(unique.len(), named.len(), "{named:?}");
+            assert_eq!(dangling(doc).len(), missing.len(), "synced={synced}");
+            assert_reads_empty(doc, &cell);
+        }
     }
 }
