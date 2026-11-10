@@ -213,3 +213,70 @@ test('three peers: the undo after a remote table rewrite converges on every peer
   await expectSound(c, 9734);
 });
 
+
+async function frozenRoom(base: number) {
+  const a = await open(base + 1);
+  const b = await peerOf(a, base + 2);
+  const c = await peerOf(a, base + 3);
+  for (const peer of [a, b, c]) peer.registerFont(new Uint8Array(readFileSync(FONT)));
+  a.splitCell(at(0, 1), 1, 2);
+  syncAll([a, b, c]);
+  b.insertRow(at(0, 0), 'below');
+  syncAll([a, b, c]);
+  a.undo();
+  syncAll([a, b, c]);
+  return { a, b, c };
+}
+
+function attempt(label: string, run: () => unknown): string {
+  try { const value = run(); return `${label} ok${value === undefined ? '' : ` ${JSON.stringify(value).slice(0, 80)}`}`; } catch (error) { return `${label} throws: ${message(error)}`; }
+}
+
+test('permanence probe: a late joiner and un-freeze attempts in the dangling state', async () => {
+  const rows: Record<string, unknown> = {};
+  {
+    const { a } = await frozenRoom(9770);
+    const d = await createYrsSession({ clientId: 9779 });
+    sessions.push(d);
+    const steps: string[] = [];
+    steps.push(attempt('open', () => { d.openDocx(docx(), false); d.loadState(a.encodeState()); d.beginUndoCapture(); }));
+    d.registerFont(new Uint8Array(readFileSync(FONT)));
+    steps.push(`dangling ${JSON.stringify(danglingCells(d))}`);
+    const first = render(d);
+    steps.push(`first ${JSON.stringify(first)}`);
+    steps.push(attempt('editBody', () => { const [p] = d.paragraphs('body'); d.insertText({ story: 'body', paraId: p!.paraId, offset: 0 }, 'D'); }));
+    steps.push(`afterEdit ${JSON.stringify(render(d))}`);
+    try {
+      const saved = (await saveYrsDocx(d, { updateModifiedDate: false })).bytes;
+      const reopened = await createYrsSession({ clientId: 9778 });
+      sessions.push(reopened);
+      reopened.openDocx(saved, true);
+      reopened.registerFont(new Uint8Array(readFileSync(FONT)));
+      steps.push(`save ok ${saved.length} bytes; reopened dangling ${JSON.stringify(danglingCells(reopened))} ${JSON.stringify(render(reopened))}`);
+    } catch (error) { steps.push(`save throws: ${message(error)}`); }
+    const fresh = await createYrsSession({ clientId: 9777 });
+    sessions.push(fresh);
+    steps.push(attempt('openFromStateOnly', () => { fresh.loadState(a.encodeState()); }));
+    fresh.registerFont(new Uint8Array(readFileSync(FONT)));
+    steps.push(`stateOnly ${JSON.stringify(render(fresh))}`);
+    rows.lateJoiner = steps;
+  }
+  const unfreeze: Array<[string, (room: { a: YrsSession; b: YrsSession; c: YrsSession }) => unknown]> = [
+    ['A undo again', ({ a }) => a.undo()],
+    ['A redo', ({ a }) => a.redo()],
+    ['B undo', ({ b }) => b.undo()],
+    ['B deleteTable', ({ b }) => b.deleteTable({ story: 'body', tableIndex: 0 })],
+    ['B insertRow again', ({ b }) => b.insertRow(at(0, 0), 'below')],
+    ['C insertRow', ({ c }) => c.insertRow(at(1, 0), 'below')],
+  ];
+  let base = 9780;
+  for (const [label, run] of unfreeze) {
+    const room = await frozenRoom(base);
+    base += 10;
+    const step = attempt(label, () => run(room));
+    syncAll([room.a, room.b, room.c]);
+    rows[label] = { step, a: render(room.a), b: render(room.b), c: render(room.c), dangling: danglingCells(room.a) };
+  }
+  console.log(`PERMANENCE-PROBE ${JSON.stringify(rows)}`);
+  expect(Object.keys(rows).length).toBe(unfreeze.length + 1);
+}, 120_000);
