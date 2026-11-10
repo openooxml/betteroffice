@@ -25,8 +25,8 @@ test('Word typography matches measurement and canvas fallback capabilities', asy
       if (!directory || !relative) return response.writeHead(404).end();
       const file = resolve(directory, relative);
       if (!file.startsWith(directory + sep)) return response.writeHead(404).end();
-      response.writeHead(200, { 'content-type': types[extname(file)] ?? 'application/octet-stream' })
-        .end(await readFile(file));
+      const body = await readFile(file);
+      response.writeHead(200, { 'content-type': types[extname(file)] ?? 'application/octet-stream' }).end(body);
     } catch { response.writeHead(404).end(); }
   }).listen(0, '127.0.0.1');
   await new Promise(ready => server.once('listening', ready));
