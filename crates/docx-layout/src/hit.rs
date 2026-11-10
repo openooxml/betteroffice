@@ -368,8 +368,7 @@ fn glyph_caret_stops(
             x: right,
             position: if rtl { start_position } else { end_position },
         });
-        if !one_position_per_unit
-            || ooxml_text::word_typography_mask(cluster_text).contains(&false)
+        if !one_position_per_unit || ooxml_text::word_typography_mask(cluster_text).contains(&false)
         {
             continue;
         }
@@ -3807,9 +3806,7 @@ mod tests {
 
     #[test]
     fn caret_stops_for_every_run_shape() {
-        let glyph = |x: f64, cluster: u32, advance: f64| {
-            serde_json::json!({"id": 1, "x": x, "y": 200, "cluster": cluster, "advance": advance})
-        };
+        let glyph = |x: f64, cluster: u32, advance: f64| serde_json::json!({"id": 1, "x": x, "y": 200, "cluster": cluster, "advance": advance});
         let one = |advance: f64| vec![glyph(100.0, 0, advance)];
         let office = || {
             vec![
@@ -3819,7 +3816,15 @@ mod tests {
                 glyph(150.0, 5, 10.0),
             ]
         };
-        type Case<'a> = (&'a str, &'a str, i64, i64, Vec<serde_json::Value>, bool, Vec<(f64, i64)>);
+        type Case<'a> = (
+            &'a str,
+            &'a str,
+            i64,
+            i64,
+            Vec<serde_json::Value>,
+            bool,
+            Vec<(f64, i64)>,
+        );
         let cases: Vec<Case> = vec![
             (
                 "plain",
