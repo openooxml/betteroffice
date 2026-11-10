@@ -57,7 +57,7 @@ export function pictureOutcomeFailures(results: Record<string, PictureResult>): 
       const { case: name, code, reason, named, unnamed } = outcome.rejects;
       const result = results[name];
       const id = reportedIds(results[named]);
-      const label = unnamed ? `${UNNAMED} (${reason})` : `${id[0]} (${reason})`;
+      const label = `1 picture on this page could not be drawn: ${unnamed ? UNNAMED : id[0]} (${reason})`;
       if (!result || 'png' in result) failures.push(`${outcome.rule}: "${name}" rendered`);
       else if (result.code !== code || id.length !== 1 || (id[0] === '') !== Boolean(unnamed) || !result.message.includes(label)) {
         failures.push(`${outcome.rule}: "${name}" rejected with ${result.code ?? 'no code'}: ${result.message}, where "${named}" reported ${JSON.stringify(id)}`);

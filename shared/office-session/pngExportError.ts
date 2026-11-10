@@ -41,5 +41,5 @@ export const UNNAMED_PICTURE = 'a picture with no part';
 /** The rejection `strictPictures` asks for, naming each picture that could not be drawn. */
 export function strictPicturesError(pictures: readonly PngUnavailablePicture[]): PngExportError {
   const named = pictures.map((picture) => `${picture.id || UNNAMED_PICTURE} (${picture.reason})`).join(', ');
-  return new PngExportError('picture-unavailable', `${pictures.length} picture(s) on this page could not be drawn: ${named}`);
+  return new PngExportError('picture-unavailable', `${pictures.length === 1 ? '1 picture' : `${pictures.length} pictures`} on this page could not be drawn: ${named}`);
 }
