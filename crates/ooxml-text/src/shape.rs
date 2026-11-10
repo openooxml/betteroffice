@@ -48,6 +48,13 @@ pub enum ShapeDirection {
     Rtl,
 }
 
+/// The logical text on either side of a shaped range.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ShapeContext<'a> {
+    pub before: &'a str,
+    pub after: &'a str,
+}
+
 /// Whether `character` is a Unicode nonspacing mark.
 pub fn is_nonspacing_mark(character: char) -> bool {
     unicode_bidi::bidi_class(character) == unicode_bidi::BidiClass::NSM
@@ -97,6 +104,32 @@ pub fn shape_with_properties(
     direction: ShapeDirection,
     language: Option<&str>,
 ) -> Result<Vec<ShapedGlyph>, FontError> {
+    shape_in_context(
+        store,
+        font,
+        text,
+        size,
+        features,
+        direction,
+        language,
+        ShapeContext::default(),
+    )
+}
+
+/// Shape with [`shape_with_properties`], letting joining at the edges see the
+/// text around `text`. Context selects joining forms only: it forms no
+/// ligature and places no mark across the edge.
+#[allow(clippy::too_many_arguments)]
+pub fn shape_in_context(
+    store: &FontStore,
+    font: FontId,
+    text: &str,
+    size: f32,
+    features: &[ShapeFeature],
+    direction: ShapeDirection,
+    language: Option<&str>,
+    context: ShapeContext<'_>,
+) -> Result<Vec<ShapedGlyph>, FontError> {
     let cache_key = (text.len() <= MAX_CACHED_SHAPE_TEXT_BYTES).then(|| ShapeCacheKey {
         font,
         text: text.to_owned(),
@@ -115,6 +148,8 @@ pub fn shape_with_properties(
         language: language
             .filter(|tag| tag.len() <= 128)
             .map(ToOwned::to_owned),
+        before: context.before.to_owned(),
+        after: context.after.to_owned(),
     });
     if let Some(glyphs) = cache_key.as_ref().and_then(|key| store.cached_shape(key)) {
         return Ok(glyphs);
@@ -143,6 +178,9 @@ pub fn shape_with_properties(
             );
         }
     }
+    // Adding text resets the post-context, so this follows it.
+    buffer.set_pre_context(context.before);
+    buffer.set_post_context(context.after);
     match direction {
         ShapeDirection::Auto => {}
         ShapeDirection::Ltr => buffer.set_direction(rustybuzz::Direction::LeftToRight),

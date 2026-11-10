@@ -85,18 +85,31 @@ export function slideRectToOverlay(
   };
 }
 
+export function slideViewport(stage: HTMLElement, layer: HTMLElement): PptxPluginRect {
+  const bounds = stage.getBoundingClientRect();
+  const overlay = layer.getBoundingClientRect();
+  return {
+    x: bounds.left + stage.clientLeft - overlay.left - layer.clientLeft + layer.scrollLeft,
+    y: bounds.top + stage.clientTop - overlay.top - layer.clientTop + layer.scrollTop,
+    width: stage.clientWidth,
+    height: stage.clientHeight,
+  };
+}
+
 export function createPluginGeometry(
   layout: PptxPluginLayout,
   presented: PresentedSlide,
   canvas: Element,
   layer: HTMLElement,
   current: () => boolean,
-  pointAt: (frame: SlideDisplayList, clientX: number, clientY: number) => PptxPointPosition | null
+  pointAt: (frame: SlideDisplayList, clientX: number, clientY: number) => PptxPointPosition | null,
+  stage: HTMLElement = layer
 ): PptxPluginGeometry {
   const toOverlay = (rect: PptxPluginRect) =>
     current() ? slideRectToOverlay(canvas, layer, presented.frame, rect) : null;
   return {
     layout,
+    get viewport() { return slideViewport(stage, layer); },
     toOverlayRect(input) {
       const rect = input?.rect;
       if (!finiteRect(rect)) return null;

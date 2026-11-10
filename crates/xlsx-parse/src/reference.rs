@@ -163,10 +163,12 @@ pub(crate) fn unpatchable_references(
         // decided it cannot trust, so here it stops being a function of any
         // reader: every part names everything. Nothing can drop out of a set
         // that is the whole package, whatever a future reader does with it.
-        parts
+        let mut references = parts
             .iter()
             .map(|(path, _)| bound(path.clone(), None, workbook))
-            .collect()
+            .collect::<Vec<_>>();
+        references.sort_by_key(|reference| !bears_references_by_place(&reference.part));
+        references
     } else {
         // A package holding nothing reference-bearing has nothing to strand,
         // and gets the veto it always got: none.
@@ -195,17 +197,24 @@ pub(crate) fn unpatchable_references(
 /// vetoes more, and reading it this loosely is what stops a decoy attribute
 /// from hiding a real part behind a reader that takes the first match.
 fn package_bears_references(parts: &[(String, Vec<u8>)]) -> bool {
-    const DIRECTORIES: [&str; 3] = ["xl/pivottables/", "xl/pivotcache/", "xl/charts/"];
-    if parts.iter().any(|(path, _)| {
-        let key = part_key(path);
-        DIRECTORIES.iter().any(|prefix| key.starts_with(prefix))
-    }) {
+    if parts
+        .iter()
+        .any(|(path, _)| bears_references_by_place(path))
+    {
         return true;
     }
     let Some(bytes) = find_part(parts, "[Content_Types].xml") else {
         return false;
     };
     parse_tree(bytes).is_ok_and(|root| names_a_reference_bearing_type(&root, 0))
+}
+
+/// Whether a part sits where charts and pivots are kept. Such parts come
+/// first among the whole-package references, so a refusal names one of them.
+fn bears_references_by_place(path: &str) -> bool {
+    const DIRECTORIES: [&str; 3] = ["xl/pivottables/", "xl/pivotcache/", "xl/charts/"];
+    let key = part_key(path);
+    DIRECTORIES.iter().any(|prefix| key.starts_with(prefix))
 }
 
 fn names_a_reference_bearing_type(element: &Element, depth: usize) -> bool {

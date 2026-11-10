@@ -1165,6 +1165,13 @@ fn reset_cell_spans(mut cell: CellData) -> CellData {
 /// `w:tr` attributes (`w14:paraId`, `w:rsid*`).
 pub(crate) fn fresh_row_properties(mut tr_pr: HashMap<String, Any>) -> HashMap<String, Any> {
     tr_pr.remove("_extraAttributes");
+    if let Some(Any::Map(original)) = tr_pr.get("_originalFormatting")
+        && original.contains_key("hiddenContentOnly")
+    {
+        let mut original = original.as_ref().clone();
+        original.remove("hiddenContentOnly");
+        tr_pr.insert("_originalFormatting".to_owned(), Any::Map(original.into()));
+    }
     tr_pr
 }
 

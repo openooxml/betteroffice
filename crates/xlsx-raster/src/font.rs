@@ -1,10 +1,11 @@
-//! embedded font stack: shapes (rustybuzz) and rasterizes single-line text runs
-//! with a bundled carlito regular (metric-compatible with calibri). deterministic.
+//! embedded font stack: shapes and rasterizes single-line text runs with a
+//! bundled carlito regular (metric-compatible with calibri). deterministic.
 
-use std::sync::LazyLock;
+use std::cell::RefCell;
 
-use rustybuzz::ttf_parser::{self, OutlineBuilder};
-use tiny_skia::{Color, FillRule, Paint, Path, PathBuilder, Pixmap, Rect, Transform};
+use ooxml_raster::{CachedGlyph, GlyphCache};
+use ooxml_text::{FontId, FontStore, ShapedGlyph};
+use tiny_skia::{Color, FillRule, Paint, Pixmap, Rect, Transform};
 
 use unicode_segmentation::UnicodeSegmentation;
 use xlsx_render::{Align, NumberFormatLayout, Rect as DlRect, TextValign};
@@ -17,9 +18,105 @@ const ITALIC_SHEAR: f32 = 0.21;
 
 const FONT_BYTES: &[u8] = include_bytes!("../assets/Carlito-Regular.ttf");
 
-static FACE: LazyLock<rustybuzz::Face<'static>> = LazyLock::new(|| {
-    rustybuzz::Face::from_slice(FONT_BYTES, 0).expect("embedded carlito is a valid font")
-});
+/// A face's metrics as rustybuzz reads them, taken once when the face is
+/// registered: units per em, ascender, descender, and the underline and
+/// strikeout position and thickness when the font has them.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FaceInfo {
+    upem: i32,
+    ascender: i16,
+    descender: i16,
+    underline: Option<(i16, i16)>,
+    strikeout: Option<(i16, i16)>,
+}
+
+impl FaceInfo {
+    pub(crate) fn read(bytes: &[u8]) -> Option<Self> {
+        let face = rustybuzz::Face::from_slice(bytes, 0)?;
+        Some(Self {
+            upem: face.units_per_em(),
+            ascender: face.ascender(),
+            descender: face.descender(),
+            underline: face
+                .underline_metrics()
+                .map(|metrics| (metrics.position, metrics.thickness)),
+            strikeout: face
+                .strikeout_metrics()
+                .map(|metrics| (metrics.position, metrics.thickness)),
+        })
+    }
+}
+
+/// A face a run draws with: its id in a font store, its metrics, and the
+/// glyph cache its outlines go through, which is bound to that store.
+#[derive(Clone, Copy)]
+pub(crate) struct RunFace<'a> {
+    pub(crate) store: &'a FontStore,
+    pub(crate) id: FontId,
+    pub(crate) info: FaceInfo,
+    pub(crate) cache: &'a RefCell<GlyphCache>,
+}
+
+impl RunFace<'_> {
+    fn units_per_em(&self) -> i32 {
+        self.info.upem
+    }
+
+    fn ascender(&self) -> i16 {
+        self.info.ascender
+    }
+
+    fn descender(&self) -> i16 {
+        self.info.descender
+    }
+
+    fn underline_metrics(&self) -> Option<(i16, i16)> {
+        self.info.underline
+    }
+
+    fn strikeout_metrics(&self) -> Option<(i16, i16)> {
+        self.info.strikeout
+    }
+}
+
+thread_local! {
+    static EMBEDDED: EmbeddedFont = EmbeddedFont::new();
+}
+
+/// The bundled carlito in a store of its own, one per thread.
+struct EmbeddedFont {
+    store: FontStore,
+    id: FontId,
+    info: FaceInfo,
+    cache: RefCell<GlyphCache>,
+}
+
+impl EmbeddedFont {
+    fn new() -> Self {
+        let mut store = FontStore::new();
+        let id = store
+            .register_slice(FONT_BYTES)
+            .expect("embedded carlito is a valid font");
+        Self {
+            store,
+            id,
+            info: FaceInfo::read(FONT_BYTES).expect("embedded carlito is a valid font"),
+            cache: RefCell::new(GlyphCache::default()),
+        }
+    }
+}
+
+/// Runs `paint` with the embedded carlito.
+pub(crate) fn with_embedded<R>(paint: impl FnOnce(RunFace<'_>) -> R) -> R {
+    EMBEDDED.with(|font| {
+        paint(RunFace {
+            store: &font.store,
+            id: font.id,
+            info: font.info,
+            cache: &font.cache,
+        })
+    })
+}
 
 const PX_PER_PT: f32 = 96.0 / 72.0;
 pub const STACKED_LINE_HEIGHT_RATIO: f32 = 1.2;
@@ -35,11 +132,12 @@ fn rotated_available_length(cell: &DlRect, deg: f32, font_size_pt: f32) -> f32 {
 
 /// advance width in px of `text` at `font_size_pt` with the embedded font.
 pub fn measure_text(text: &str, font_size_pt: f32) -> f32 {
-    let face = &*FACE;
-    let scale = font_size_pt * PX_PER_PT / face.units_per_em() as f32;
-    let glyphs = shape(face, text);
-    let total: i32 = glyphs.glyph_positions().iter().map(|p| p.x_advance).sum();
-    total as f32 * scale
+    with_embedded(|face| {
+        let scale = font_size_pt * PX_PER_PT / face.units_per_em() as f32;
+        let glyphs = shape(face, text);
+        let total = total_advance(&glyphs);
+        total as f32 * scale
+    })
 }
 #[cfg(not(feature = "fonts"))]
 /// a single-line text run; `x`/`y` are the align anchor and alphabetic baseline.
@@ -64,12 +162,15 @@ pub fn paint_text(pixmap: &mut Pixmap, run: &TextRun) {
     if run.clip.w <= 0.0 || run.clip.h <= 0.0 {
         return;
     }
+    with_embedded(|face| paint_text_with_face(pixmap, run, face));
+}
 
-    let face = &*FACE;
+#[cfg(not(feature = "fonts"))]
+fn paint_text_with_face(pixmap: &mut Pixmap, run: &TextRun, face: RunFace<'_>) {
     let scale = run.font_size_pt * PX_PER_PT / face.units_per_em() as f32;
     let glyphs = shape(face, run.text);
 
-    let total: i32 = glyphs.glyph_positions().iter().map(|p| p.x_advance).sum();
+    let total = total_advance(&glyphs);
     let pen = match run.align {
         Align::Left => run.x,
         Align::Center => run.x - total as f32 * scale / 2.0,
@@ -129,8 +230,8 @@ pub fn paint_text(pixmap: &mut Pixmap, run: &TextRun) {
 #[allow(clippy::too_many_arguments)]
 fn paint_run(
     target: &mut Pixmap,
-    face: &rustybuzz::Face<'_>,
-    glyphs: &rustybuzz::GlyphBuffer,
+    face: RunFace<'_>,
+    glyphs: &[ShapedGlyph],
     pen: f32,
     run: &TextRun,
     scale: f32,
@@ -149,7 +250,7 @@ fn paint_run(
 #[allow(clippy::too_many_arguments)]
 fn paint_highlight(
     target: &mut Pixmap,
-    face: &rustybuzz::Face<'_>,
+    face: RunFace<'_>,
     run: &TextRun,
     pen: f32,
     run_width: f32,
@@ -179,8 +280,8 @@ fn paint_highlight(
 #[allow(clippy::too_many_arguments)]
 fn paint_glyphs(
     pixmap: &mut Pixmap,
-    face: &rustybuzz::Face<'_>,
-    glyphs: &rustybuzz::GlyphBuffer,
+    face: RunFace<'_>,
+    glyphs: &[ShapedGlyph],
     start_pen: f32,
     baseline: f32,
     scale: f32,
@@ -192,26 +293,27 @@ fn paint_glyphs(
 ) {
     let shear = if italic { ITALIC_SHEAR * scale } else { 0.0 };
     let mut pen = start_pen;
-    for (info, pos) in glyphs.glyph_infos().iter().zip(glyphs.glyph_positions()) {
-        if let Some(path) = glyph_path(face, info.glyph_id as u16) {
+    let mut cache = face.cache.borrow_mut();
+    for pos in glyphs {
+        if let Some(path) = glyph_path(face, &mut cache, pos.glyph_id) {
             // outlines are y-up in font units; -scale flips into y-down pixel space.
-            let tx = pen + pos.x_offset as f32 * scale - ox;
-            let ty = baseline - pos.y_offset as f32 * scale - oy;
+            let tx = pen + pos.x_offset * scale - ox;
+            let ty = baseline - pos.y_offset * scale - oy;
             let transform = Transform::from_row(scale, 0.0, shear, -scale, tx, ty);
-            pixmap.fill_path(&path, paint, FillRule::Winding, transform, None);
+            pixmap.fill_path(path, paint, FillRule::Winding, transform, None);
             if bold {
                 let embolden = transform.post_translate(BOLD_OFFSET_PX, 0.0);
-                pixmap.fill_path(&path, paint, FillRule::Winding, embolden, None);
+                pixmap.fill_path(path, paint, FillRule::Winding, embolden, None);
             }
         }
-        pen += pos.x_advance as f32 * scale;
+        pen += pos.x_advance * scale;
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn paint_decorations(
     target: &mut Pixmap,
-    face: &rustybuzz::Face<'_>,
+    face: RunFace<'_>,
     run: &TextRun,
     pen: f32,
     run_width: f32,
@@ -233,20 +335,20 @@ fn paint_decorations(
     };
     if run.underline {
         let m = face.underline_metrics();
-        let pos = m.map(|m| m.position as f32).unwrap_or(-0.1 * em);
-        let thick = m.map(|m| m.thickness as f32).unwrap_or(0.05 * em);
+        let pos = m.map(|m| m.0 as f32).unwrap_or(-0.1 * em);
+        let thick = m.map(|m| m.1 as f32).unwrap_or(0.05 * em);
         bar(pos, thick);
     }
     if run.strike {
         let m = face.strikeout_metrics();
-        let pos = m.map(|m| m.position as f32).unwrap_or(0.26 * em);
-        let thick = m.map(|m| m.thickness as f32).unwrap_or(0.05 * em);
+        let pos = m.map(|m| m.0 as f32).unwrap_or(0.26 * em);
+        let thick = m.map(|m| m.1 as f32).unwrap_or(0.05 * em);
         bar(pos, thick);
     }
     if run.dashed_underline {
         let m = face.underline_metrics();
-        let pos = m.map(|m| m.position as f32).unwrap_or(-0.1 * em);
-        let thick = m.map(|m| m.thickness as f32).unwrap_or(0.05 * em);
+        let pos = m.map(|m| m.0 as f32).unwrap_or(-0.1 * em);
+        let thick = m.map(|m| m.1 as f32).unwrap_or(0.05 * em);
         let h = (thick * scale).max(0.5);
         let y = run.y - pos * scale - oy - h / 2.0;
         let dash = 3.0_f32.max(h * 2.0);
@@ -273,7 +375,21 @@ pub fn paint_rotated_text(
     if run.clip.w <= 0.0 || run.clip.h <= 0.0 || cell.w <= 0.0 || cell.h <= 0.0 {
         return;
     }
-    let face = &*FACE;
+    with_embedded(|face| {
+        paint_rotated_text_with_face(pixmap, run, deg, cell, valign, number_format, face)
+    });
+}
+
+#[cfg(not(feature = "fonts"))]
+fn paint_rotated_text_with_face(
+    pixmap: &mut Pixmap,
+    run: &TextRun,
+    deg: f32,
+    cell: &DlRect,
+    valign: TextValign,
+    number_format: Option<&NumberFormatLayout>,
+    face: RunFace<'_>,
+) {
     let scale = run.font_size_pt * PX_PER_PT / face.units_per_em() as f32;
     let (segments, run_width) = match number_format {
         Some(layout) => {
@@ -359,13 +475,14 @@ pub fn paint_rotated_text(
     } else {
         0.0
     };
+    let mut cache = face.cache.borrow_mut();
     for (segment, segment_offset) in &segments {
         let glyphs = shape(face, segment);
         let mut pen = 0.0_f32;
-        for (info, pos) in glyphs.glyph_infos().iter().zip(glyphs.glyph_positions()) {
-            if let Some(path) = glyph_path(face, info.glyph_id as u16) {
-                let tx0 = segment_offset + pen + pos.x_offset as f32 * scale - run_width / 2.0;
-                let ty0 = -pos.y_offset as f32 * scale - center_y_local;
+        for pos in &glyphs {
+            if let Some(path) = glyph_path(face, &mut cache, pos.glyph_id) {
+                let tx0 = segment_offset + pen + pos.x_offset * scale - run_width / 2.0;
+                let ty0 = -pos.y_offset * scale - center_y_local;
                 let e = cos * tx0 - sin * ty0 + cx - ox;
                 let f = sin * tx0 + cos * ty0 + cy - oy;
                 let transform = Transform::from_row(
@@ -376,7 +493,7 @@ pub fn paint_rotated_text(
                     e,
                     f,
                 );
-                scratch.fill_path(&path, &paint, FillRule::Winding, transform, None);
+                scratch.fill_path(path, &paint, FillRule::Winding, transform, None);
                 if run.bold {
                     let bold = Transform::from_row(
                         cos * scale,
@@ -386,12 +503,13 @@ pub fn paint_rotated_text(
                         e + cos * BOLD_OFFSET_PX,
                         f + sin * BOLD_OFFSET_PX,
                     );
-                    scratch.fill_path(&path, &paint, FillRule::Winding, bold, None);
+                    scratch.fill_path(path, &paint, FillRule::Winding, bold, None);
                 }
             }
-            pen += pos.x_advance as f32 * scale;
+            pen += pos.x_advance * scale;
         }
     }
+    drop(cache);
     if run.underline || run.strike || run.dashed_underline {
         let em = face.units_per_em() as f32;
         let mut bar = |center_up: f32, thickness: f32| {
@@ -405,15 +523,15 @@ pub fn paint_rotated_text(
         if run.underline || run.dashed_underline {
             let m = face.underline_metrics();
             bar(
-                m.map(|m| m.position as f32).unwrap_or(-0.1 * em),
-                m.map(|m| m.thickness as f32).unwrap_or(0.05 * em),
+                m.map(|m| m.0 as f32).unwrap_or(-0.1 * em),
+                m.map(|m| m.1 as f32).unwrap_or(0.05 * em),
             );
         }
         if run.strike {
             let m = face.strikeout_metrics();
             bar(
-                m.map(|m| m.position as f32).unwrap_or(0.26 * em),
-                m.map(|m| m.thickness as f32).unwrap_or(0.05 * em),
+                m.map(|m| m.0 as f32).unwrap_or(0.26 * em),
+                m.map(|m| m.1 as f32).unwrap_or(0.05 * em),
             );
         }
     }
@@ -475,44 +593,34 @@ pub fn paint_stacked_text(pixmap: &mut Pixmap, run: &TextRun, cell: &DlRect, val
     }
 }
 
-fn shape<'a>(face: &rustybuzz::Face<'a>, text: &str) -> rustybuzz::GlyphBuffer {
-    let mut buffer = rustybuzz::UnicodeBuffer::new();
-    buffer.push_str(text);
-    rustybuzz::shape(face, &[], buffer)
+/// `text` shaped at the face's units per em, so advances and offsets come
+/// back as exact font units.
+pub(crate) fn shape(face: RunFace<'_>, text: &str) -> Vec<ShapedGlyph> {
+    ooxml_text::shape(face.store, face.id, text, face.units_per_em() as f32, &[])
+        .unwrap_or_default()
 }
 
-fn glyph_path(face: &ttf_parser::Face, glyph_id: u16) -> Option<Path> {
-    let mut builder = PathCollector {
-        pb: PathBuilder::new(),
-    };
-    face.outline_glyph(ttf_parser::GlyphId(glyph_id), &mut builder)?;
-    builder.pb.finish()
+/// The summed advances of `glyphs`, in font units, added as integers.
+pub(crate) fn total_advance(glyphs: &[ShapedGlyph]) -> i32 {
+    glyphs.iter().map(|glyph| glyph.x_advance as i32).sum()
 }
 
-struct PathCollector {
-    pb: PathBuilder,
-}
-
-impl OutlineBuilder for PathCollector {
-    fn move_to(&mut self, x: f32, y: f32) {
-        self.pb.move_to(x, y);
-    }
-
-    fn line_to(&mut self, x: f32, y: f32) {
-        self.pb.line_to(x, y);
-    }
-
-    fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
-        self.pb.quad_to(x1, y1, x, y);
-    }
-
-    fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
-        self.pb.cubic_to(x1, y1, x2, y2, x, y);
-    }
-
-    fn close(&mut self) {
-        self.pb.close();
-    }
+/// The outline of `glyph_id`, built once per face and kept in the cache.
+pub(crate) fn glyph_path<'a>(
+    face: RunFace<'_>,
+    cache: &'a mut GlyphCache,
+    glyph_id: u32,
+) -> Option<&'a tiny_skia::Path> {
+    let CachedGlyph { path, .. } = cache
+        .lookup(
+            face.store,
+            face.id,
+            glyph_id,
+            || u16::try_from(glyph_id).map_err(|error| error.to_string()),
+            |cmds| Ok(ooxml_raster::outline_path(cmds)),
+        )
+        .ok()?;
+    path.as_ref()
 }
 
 #[cfg(test)]
@@ -536,11 +644,115 @@ mod tests {
     fn wider_text_measures_wider() {
         assert!(measure_text("mmmm", 11.0) > measure_text("ii", 11.0));
     }
+
+    const TEXTS: [&str; 9] = [
+        "",
+        "Hello, world!",
+        "   ",
+        "AV To ffi office",
+        "e\u{301} A\u{30a}",
+        "مرحبا بالعالم",
+        "אבג 123",
+        "中文",
+        "1,234.50 $ (12%)",
+    ];
+    const SIZES: [f32; 8] = [-11.0, -0.0, 0.0, 1.0, 8.5, 11.0, 22.0, 72.0];
+
+    fn rustybuzz_width(face: &rustybuzz::Face<'_>, text: &str, size: f32) -> f32 {
+        let mut buffer = rustybuzz::UnicodeBuffer::new();
+        buffer.push_str(text);
+        let glyphs = rustybuzz::shape(face, &[], buffer);
+        let total: i32 = glyphs.glyph_positions().iter().map(|p| p.x_advance).sum();
+        total as f32 * (size * PX_PER_PT / face.units_per_em() as f32)
+    }
+
+    /// The shared stack measures exactly what rustybuzz did, bit for bit,
+    /// including a run long enough to overflow an f32 sum of font units.
+    #[test]
+    fn measure_text_matches_rustybuzz() {
+        let face = rustybuzz::Face::from_slice(FONT_BYTES, 0).unwrap();
+        let long = "a".repeat(32_767);
+        for text in TEXTS.iter().copied().chain(std::iter::once(long.as_str())) {
+            for size in SIZES {
+                assert_eq!(
+                    measure_text(text, size).to_bits(),
+                    rustybuzz_width(&face, text, size).to_bits(),
+                    "{text:?} at {size}pt"
+                );
+            }
+        }
+    }
+
+    /// The metrics taken at registration are the font's own.
+    #[test]
+    fn face_info_matches_the_font() {
+        let face = rustybuzz::Face::from_slice(FONT_BYTES, 0).unwrap();
+        with_embedded(|font| {
+            assert_eq!(font.units_per_em(), face.units_per_em());
+            assert_eq!(font.ascender(), face.ascender());
+            assert_eq!(font.descender(), face.descender());
+            assert_eq!(
+                font.underline_metrics(),
+                face.underline_metrics().map(|m| (m.position, m.thickness))
+            );
+            assert_eq!(
+                font.strikeout_metrics(),
+                face.strikeout_metrics().map(|m| (m.position, m.thickness))
+            );
+        });
+    }
+
+    /// A glyph's outline is built once and then served from the cache.
+    #[test]
+    fn glyph_outlines_are_cached() {
+        with_embedded(|font| {
+            let glyphs = shape(font, "aa");
+            let mut cache = font.cache.borrow_mut();
+            let first = glyph_path(font, &mut cache, glyphs[0].glyph_id).cloned();
+            let again = glyph_path(font, &mut cache, glyphs[1].glyph_id).cloned();
+            assert!(first.is_some());
+            assert_eq!(first, again);
+        });
+    }
+
+    /// Through a registered face, the bundled-font path measures what
+    /// rustybuzz did on the same bytes.
+    #[cfg(feature = "fonts")]
+    #[test]
+    fn measure_with_registered_faces_matches_rustybuzz() {
+        let mut fonts = crate::RasterFonts::default();
+        fonts
+            .register_font("Carlito", false, false, FONT_BYTES.to_vec(), false, false)
+            .unwrap();
+        let face = rustybuzz::Face::from_slice(FONT_BYTES, 0).unwrap();
+        let (faces, stack) = fonts.chain_with_stack("Carlito", false, false);
+        for text in [
+            "Hello, world!",
+            "AV To ffi office",
+            "e\u{301} A\u{30a}",
+            "1,234.50 $ (12%)",
+        ] {
+            let mut buffer = rustybuzz::UnicodeBuffer::new();
+            buffer.push_str(text);
+            let glyphs = rustybuzz::shape(&face, &[], buffer);
+            let total: i32 = glyphs.glyph_positions().iter().map(|p| p.x_advance).sum();
+            for size in SIZES {
+                let expected = total as f32 * size * PX_PER_PT / face.units_per_em() as f32;
+                assert_eq!(
+                    measure_text_with_fonts(faces, stack, text, size).to_bits(),
+                    expected.to_bits(),
+                    "{text:?} at {size}pt"
+                );
+            }
+        }
+    }
 }
 
 #[cfg(feature = "fonts")]
 #[path = "font_native.rs"]
 mod native;
+#[cfg(feature = "fonts")]
+pub use native::FontStack;
 #[cfg(feature = "fonts")]
 pub(crate) use native::{FontFace, measure_text_with_fonts};
 #[cfg(feature = "fonts")]

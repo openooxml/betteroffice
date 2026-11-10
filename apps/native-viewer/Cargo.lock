@@ -236,6 +236,7 @@ version = "0.5.1"
 dependencies = [
  "base64 0.22.1",
  "betteroffice-docx-layout",
+ "betteroffice-drawingml",
  "betteroffice-metafile",
  "betteroffice-ooxml-raster",
  "betteroffice-ooxml-text",
@@ -487,6 +488,7 @@ name = "betteroffice-xlsx-raster"
 version = "0.5.1"
 dependencies = [
  "betteroffice-ooxml-raster",
+ "betteroffice-ooxml-text",
  "betteroffice-xlsx-render",
  "libm",
  "rustybuzz",
@@ -4215,6 +4217,7 @@ dependencies = [
 [[package]]
 name = "yrs"
 version = "0.27.3"
+source = "git+https://github.com/openooxml/y-crdt.git?rev=5349f4e11ec46a5ad842f08415b315cb6d5c53af#5349f4e11ec46a5ad842f08415b315cb6d5c53af"
 dependencies = [
  "arc-swap",
  "async-lock",

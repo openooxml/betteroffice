@@ -92,6 +92,60 @@ fn paragraph_texts(session: &EditSessionCore) -> Vec<String> {
 }
 
 #[test]
+fn an_empty_read_answers_with_the_version_of_a_full_read() {
+    fn read(
+        session: &EditSessionCore,
+        story: Option<&str>,
+        para_ids: Option<Vec<String>>,
+    ) -> Result<crate::ReadParagraphsResponse, crate::EditRefusal> {
+        session
+            .engine
+            .doc()
+            .read_paragraphs(&ReadParagraphsRequest {
+                story: story.map(str::to_owned),
+                para_ids,
+                view: EditTextView::Accepted,
+            })
+    }
+    let same = |session: &EditSessionCore| {
+        let empty = read(session, None, Some(Vec::new())).unwrap();
+        let full = read(session, None, None).unwrap();
+        assert_eq!(empty.version, full.version);
+        assert!(empty.paragraphs.is_empty());
+        assert!(!full.paragraphs.is_empty());
+        full.version
+    };
+    let session = core(1);
+    let seeded: Value = serde_json::from_str(&session.load_json(BODY).unwrap()).unwrap();
+    let para_id = seeded["body"][0].as_str().unwrap().to_owned();
+    session.track_undo();
+    let opened = same(&session);
+    session
+        .insert_text("body", &para_id, 5, "!", None, None)
+        .unwrap();
+    let edited = same(&session);
+    assert_ne!(edited, opened);
+    assert!(session.undo());
+    let undone = same(&session);
+    assert_ne!(undone, edited);
+    let remote = core(2);
+    let doc = session.engine.doc();
+    remote
+        .engine
+        .doc()
+        .apply_update_v1(&doc.encode_state_as_update_v1())
+        .unwrap();
+    remote
+        .insert_text("body", &para_id, 0, "r", None, None)
+        .unwrap();
+    doc.apply_update_v1(&remote.engine.doc().encode_state_as_update_v1())
+        .unwrap();
+    assert_ne!(same(&session), undone);
+    assert!(read(&session, Some("missing"), Some(Vec::new())).is_err());
+    assert!(read(&session, Some("missing"), None).is_err());
+}
+
+#[test]
 fn text_edits_marks_and_raw_ops_run_without_wasm() {
     let session = core(1);
     let seeded: Value = serde_json::from_str(&session.load_json(BODY).unwrap()).unwrap();
@@ -268,6 +322,62 @@ fn unknown_selection_story_matches_shim_error() {
         .unwrap_err();
     assert_eq!(error.kind, EngineErrorKind::Message);
     assert_eq!(error.message, "story \"missing\" was not found");
+}
+
+#[test]
+fn a_resident_frame_paints_an_arabic_word_from_its_measured_glyphs() {
+    let session = core(1);
+    session
+        .load_json(r#"[{"storyId":"body","paragraphs":[{"text":"مرحبا بالعالم"}]}]"#)
+        .unwrap();
+    let font = session
+        .register_measure_font(include_bytes!(
+            "../../../../packages/fonts/assets/NotoNaskhArabic-Regular.ttf"
+        ))
+        .unwrap();
+    let request = serde_json::json!({
+        "bodyStory": "body",
+        "regions": {"sections": [{
+            "sectionId": "main",
+            "properties": {
+                "pageWidth": 4320,
+                "pageHeight": 2880,
+                "marginTop": 300,
+                "marginRight": 300,
+                "marginBottom": 300,
+                "marginLeft": 300
+            }
+        }]},
+        "measurement": {
+            "fontChains": {"calibri|0|0": [font]},
+            "defaults": {"fontSize": 11, "fontFamily": "Calibri"},
+            "authoritativeShaping": true
+        },
+        "renderEnv": {}
+    });
+    session
+        .layout_document_with_regions_json(&request.to_string())
+        .unwrap();
+    session
+        .build_display_list_frame(
+            &serde_json::json!({"fontChains": {"calibri|0|0": [font]}}).to_string(),
+            0.0,
+        )
+        .unwrap();
+    let texts = session
+        .engine
+        .with_display_list(|list| {
+            list.pages[0]
+                .primitives
+                .iter()
+                .filter_map(|primitive| match primitive {
+                    docx_layout::display_list::Primitive::GlyphRun(run) => Some(run.text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap();
+    assert_eq!(texts, ["مرحبا بالعالم"]);
 }
 
 #[test]

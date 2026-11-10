@@ -15,7 +15,7 @@
  */
 
 import type { DocxClipboardFragment } from '@betteroffice/docx/yrs';
-import React, { useEffect, useRef, useState, useCallback, useMemo, forwardRef, memo } from 'react';
+import React, { useEffect, useRef, useState, useCallback, useMemo, useId, forwardRef, memo } from 'react';
 import type { CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 
@@ -627,6 +627,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       canvasOverlayTarget = null,
       commandBridgeRef,
     } = props;
+    const inputId = useId();
     const viewerDocumentRead = viewerDocumentReadProp;
     const yrsStyleResolver = useMemo(() => (styles ? createStyleResolver(styles) : null), [styles]);
 
@@ -2247,6 +2248,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       <div
         ref={containerRef}
         className={`oox-root paged-editor ${className ?? ''}`}
+        data-docx-input={inputId}
         style={{ ...containerStyles, ...style, display: 'contents' }}
         tabIndex={0}
         onFocus={handleContainerFocus}
@@ -2257,6 +2259,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         {/* Hidden textarea input surface that writes directly to yrs. */}
         {viewerDocumentRead ? (
           <ViewerInput
+            id={inputId}
             ref={yrsInputRef}
             read={viewerDocumentRead}
             story={activeYrsRootStory}
@@ -2267,6 +2270,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           />
         ) : (
           <YrsInput
+            id={inputId}
             ref={yrsInputRef}
             enabled
             readOnly={(readOnly && !holdInput) || (!!partEdit && activeYrsRootStory === 'body')}

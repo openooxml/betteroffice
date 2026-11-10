@@ -86,6 +86,9 @@ import type { PeerlessPropertyIntent } from './inputEvents';
 import { useWorkerCollaboration } from './useWorkerCollaboration';
 import { geometryMatchesDocument, type PeerlessFrameGeometry, type PeerlessViewIdentity } from './viewStore';
 import { useTranslation } from '../../../i18n';
+import { resolvedLocale } from '../../../i18n/LocaleContext';
+import { visibleViewport } from '../../../plugins/geometry';
+import { trackFocus } from '../../../../../../shared/plugin-host/focusTracker';
 
 const PREVIEW_CUT = { blocks: 200, paragraphBudget: 256 };
 const SIDEBAR_EDGE = 16;
@@ -313,7 +316,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const [geometryRevision, redrawGeometry] = useState(0);
   const sentReservationsRef = useRef<() => DocxReservationsPayload | null>(() => null);
   const [pluginGeometry] = useState(() => createWorkerPluginGeometry(controller, () => host.current, () => overlayRef.current, () => redrawGeometry(value => value + 1),
-    (target, focus, expectVersion) => navigation.revealParagraph(target.paraId, target.story, focus, expectVersion), () => sentReservationsRef.current()));
+    (target, focus, expectVersion) => navigation.revealParagraph(target.paraId, target.story, focus, expectVersion), () => sentReservationsRef.current(),
+    (overlay) => visibleViewport(scroller.current ?? overlay, container.current ?? overlay, overlay)));
   const [displayWindow, setDisplayWindow] = useState<readonly [number, number]>([0, 3]);
   const showWindow = useCallback((next: readonly [number, number]) =>
     setDisplayWindow((current) => current[0] === next[0] && current[1] === next[1] ? current : next), []);
@@ -335,6 +339,16 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     workerNavigation: pluginGeometry.navigation,
     workerRefusal: (error) => workerReadRefusal(controller, error),
   }));
+  const locale = resolvedLocale(props.i18n?._lang);
+  useLayoutEffect(() => { pluginHost.localeChanged(locale); }, [pluginHost, locale]);
+  const managedPlugins = Boolean(props.plugins?.length);
+  useLayoutEffect(() => {
+    if (!managedPlugins) return;
+    return trackFocus(() => {
+      const surface = host.current?.querySelector('[data-docx-worker-editor]');
+      return surface ? [surface] : [];
+    }, (focused) => pluginHost.focusChanged(focused));
+  }, [pluginHost, managedPlugins]);
   const activations = useSyncExternalStore(pluginHost.subscribe, pluginHost.activations, pluginHost.activations);
   const reservations = usePluginReservations(pluginHost, activations);
   const reservationsRef = useRef<{ payload: DocxReservationsPayload | null; sent: boolean; source: DocxReservationsPayload | string | null;
@@ -373,6 +387,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       if (layout && pluginGeometry.geometry()) props.onRenderedDomContextReady?.(pluginGeometry.geometry()!.dom);
       pluginHost.selectionChanged({ formatting: toolbar ? yrsSelectionState({ context: toolbar, startParagraphIndex: -1, endParagraphIndex: -1 }) : null, displayRange: pluginGeometry.displaySelection() });
       if (layout) pluginHost.geometryPresented(layout);
+      pluginHost.geometryChanged();
       pluginHost.syncCommands();
     } else { pluginHost.close('document-replaced'); setExpandedSidebarItem(null); }
   }, [shellState, documentReady, pluginHost, props.mode, effectiveReadOnly, pluginGeometry, overlayLayer, geometryRevision, displayWindow]);

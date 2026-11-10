@@ -9,13 +9,13 @@ import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-import fitz
 import numpy
 import PIL
 import skimage
 from PIL import Image, ImageStat
 
 from compare import Pages, compare
+from raster import RASTERIZER, open_pdf, render_page
 
 CHANNELS = ['published', 'commit', 'libreoffice']
 
@@ -101,12 +101,11 @@ def libreoffice_fidelity(sample, root, soffice, version):
         execute(lo_command(soffice, root / 'profile-fidelity', actual, root / f'source.{format}',
                            'pdf:impress_pdf_Export' if format == 'pptx' else 'pdf:writer_pdf_Export'), timeout=600, log=actual / 'convert.log')
         adjustments = []
-        with fitz.open(actual / 'source.pdf') as pdf:
+        with open_pdf(actual / 'source.pdf') as pdf:
             if not len(pdf):
                 raise ValueError('LibreOffice produced no pages')
-            for index, page in enumerate(pdf):
-                pixmap = page.get_pixmap(dpi=150, alpha=False)
-                image = Image.frombytes('RGB', (pixmap.width, pixmap.height), pixmap.samples)
+            for index in range(len(pdf)):
+                image = render_page(pdf, index, 150)
                 reference = root / 'reference' / f'page_{index + 1:04d}.png'
                 if reference.exists():
                     with Image.open(reference) as expected:
@@ -116,7 +115,7 @@ def libreoffice_fidelity(sample, root, soffice, version):
                 image.save(actual / f'page_{index + 1:04d}.png')
             write_json(actual / 'result.json', dict(status='ok', sha256=sample['metadata']['source']['sha256'],
                        dpi=150, pages=len(pdf), engine='LibreOffice ' + version,
-                       rasterizer='PyMuPDF ' + fitz.VersionBind, edge_adjustments=adjustments))
+                       rasterizer=RASTERIZER, edge_adjustments=adjustments))
         stage = 'compare'
         def progress(page, total):
             if page % 10 == 0 or page == total:
@@ -141,9 +140,9 @@ def validate_png(path, size, require_ink):
                     grayscale_variance=variance)
 
 
-def measure_sample(sample, root, binaries, manifest, soffice, trials, offset=0):
+def measure_sample(sample, root, binaries, manifest, soffice, trials, offset=0, directory='timing'):
     format = sample.get('format', 'docx')
-    output = root / 'timing'
+    output = root / directory
     output.mkdir()
     with Image.open(root / 'reference/page_0001.png') as reference:
         size = tuple(round(value * 96 / 150) for value in reference.size)
@@ -211,7 +210,7 @@ def main():
                                      os=platform.system(), architecture=platform.machine(),
                                      image_os=os.environ.get('ImageOS', 'local'),
                                      image_version=os.environ.get('ImageVersion', 'local'),
-                                     python=platform.python_version(), pymupdf=fitz.VersionBind,
+                                     python=platform.python_version(), rasterizer=RASTERIZER,
                                      numpy=numpy.__version__, pillow=PIL.__version__, skimage=skimage.__version__,
                                      font_policy='bundled-fontconfig' if platform.system() == 'Linux' else 'system-fonts')),
                   runner=dict(name=os.environ.get('RUNNER_NAME', platform.node()),

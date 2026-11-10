@@ -55,7 +55,7 @@ import type { WorkerEditorApiBridge } from './createWorkerEditorApi';
 import { useLegacySessionWorkbook, EditableWorkbookSession, type EditableSessionWorkbookProps } from './useEditableSessionWorkbook';
 import type { WorkerPaintRequest, WorkerPaintResult } from './WorkerPaintSource';
 import { WorkerPaintSource } from './WorkerPaintSource';
-import { A11yGridCell } from '../components/A11yGridCell';
+import { A11yGridTable } from '../components/A11yGridCell';
 
 const BRAND = '#217346';
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -119,7 +119,7 @@ function revealAxis(position: number, size: number, frozen: boolean, scroll: num
 }
 
 export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
-  const { t } = useTranslation();
+  const { t, lang } = useTranslation();
   const rootRef = useRef<HTMLDivElement>(null);
   usePluginGestures(rootRef);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -713,7 +713,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     return sheetId === undefined ? null : { sheetId, sheetIndex: active,
       cells: selection, chartId: selectedChart?.id ?? null };
   }, [run, active, selection, selectedChart]);
-  const pluginHost = useXlsxPluginHost({ ...props, access: pluginAccess, commands, editGate: false,
+  const pluginHost = useXlsxPluginHost({ locale: lang, focusRoot: scrollRef, ...props, access: pluginAccess, commands, editGate: false,
     readOnly: props.readOnly ?? false, handle: run?.ready && !run.failure ? run.peer : null,
     selection: pluginSelection, proposals, staleFor, proposalsPending: () => coordinator.pending, canvasRef, t,
     positionAtPoint: (clientX, clientY) => {
@@ -1851,13 +1851,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
             {renderDock('right')}
           </div>
           {a11yGrid && <>
-            <div style={visuallyHidden} role="grid" aria-label={a11yGrid.label}>
-              <div role="row"><span role="columnheader" />{a11yGrid.columnHeaders.map((header) =>
-                <span key={header.col} role="columnheader">{header.label}</span>)}</div>
-              {a11yGrid.rows.map((row) => <div key={row.row} role="row"><span role="rowheader">{row.header}</span>
-                {row.cells.map((cell) => <A11yGridCell key={cell.col} cell={cell} onFollowLink={followLink} />)}
-              </div>)}
-            </div>
+            <A11yGridTable grid={a11yGrid} style={visuallyHidden} onFollowLink={followLink} />
             {a11yGrid.charts.map((chart, index) => <div key={`${index}:${chart.label}`} style={visuallyHidden} role="img" aria-label={chart.label} />)}
           </>}
           {refusal && <div data-testid="xlsx-input-refusal" role="alert" style={{ position: 'relative', zIndex: 1 }}>{refusal}</div>}

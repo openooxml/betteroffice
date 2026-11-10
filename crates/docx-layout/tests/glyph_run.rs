@@ -326,6 +326,7 @@ fn browser_text_run_with_chain(
             let line = line.as_object_mut().unwrap();
             line.remove("bidiSlices");
             line.remove("clusterAdvances");
+            line.remove("glyphRuns");
         }
     }
     input["measured"][0]["measure"] = measure;
@@ -1347,6 +1348,7 @@ fn tracking_list(
             let line = line.as_object_mut().unwrap();
             line.remove("clusterAdvances");
             line.remove("bidiSlices");
+            line.remove("glyphRuns");
             if !reconcile {
                 line.remove("runAdvances");
             }

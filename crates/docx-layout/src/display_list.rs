@@ -373,6 +373,9 @@ pub struct DocAttrs {
     /// The marker is a number or label a reader needs, not a bullet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub list_marker_numbered: Option<bool>,
+    /// The marker is a visible bullet, whatever its stored character.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub list_marker_bullet: Option<bool>,
     /// Pending tracked-change paint for the synthetic numbering glyph.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub list_marker_revision: Option<RevisionKind>,
@@ -1875,6 +1878,9 @@ struct RunFormattingIn {
     /// points
     #[serde(default)]
     font_size: Option<f64>,
+    /// points; `w:szCs`, the size of complex-script characters
+    #[serde(default)]
+    font_size_cs: Option<f64>,
     #[serde(default)]
     letter_spacing: Option<f64>,
     #[serde(default)]
@@ -2333,6 +2339,36 @@ pub(crate) struct TableBlockIn {
     first_column: Option<bool>,
 }
 
+/// Cell refs, ids and revisions name rows by their index in the source table,
+/// so editors keep addressing the right row when hidden rows were removed.
+impl TableBlockIn {
+    fn source_row(&self, row: usize) -> u64 {
+        self.rows
+            .get(row)
+            .and_then(|value| value.source_row)
+            .unwrap_or(row as u64)
+    }
+
+    /// One past the source index of the row before `end`.
+    fn source_row_end(&self, end: usize) -> u64 {
+        end.checked_sub(1)
+            .map_or(0, |last| self.source_row(last) + 1)
+    }
+
+    fn source_span(&self, row: usize, span: usize) -> u64 {
+        if self
+            .rows
+            .get(row)
+            .is_none_or(|value| value.source_row.is_none())
+        {
+            return span as u64;
+        }
+        let end = (row + span.max(1)).min(self.rows.len());
+        self.source_row_end(end)
+            .saturating_sub(self.source_row(row))
+    }
+}
+
 pub(crate) type FloatingTablePositionIn = crate::types::FloatingTablePosition;
 
 #[derive(Deserialize)]
@@ -2340,6 +2376,8 @@ pub(crate) type FloatingTablePositionIn = crate::types::FloatingTablePosition;
 pub(crate) struct TableRowIn {
     #[serde(default)]
     cells: Vec<TableCellIn>,
+    #[serde(default)]
+    source_row: Option<u64>,
     #[serde(default)]
     grid_before: Option<u64>,
     #[serde(default)]
@@ -3030,6 +3068,9 @@ pub(crate) struct LineIn {
     cluster_advances: Vec<TypesetClusterAdvanceIn>,
     #[serde(default)]
     bidi_slices: Vec<TypesetBidiSliceIn>,
+    /// The packed glyphs measurement shaped this line with.
+    #[serde(default)]
+    glyph_runs: Option<String>,
 }
 
 #[derive(Deserialize, Clone, Default)]
@@ -3782,7 +3823,7 @@ fn whole_table_revision(block: &TableBlockIn) -> Option<StructuralRevision> {
     None
 }
 
-fn row_structural_revision(row: &TableRowIn, row_index: usize) -> Option<StructuralRevision> {
+fn row_structural_revision(row: &TableRowIn, row_index: u64) -> Option<StructuralRevision> {
     row.tracked_del
         .as_ref()
         .map(|info| {
@@ -3790,7 +3831,7 @@ fn row_structural_revision(row: &TableRowIn, row_index: usize) -> Option<Structu
                 info,
                 StructuralRevisionScope::Row,
                 StructuralRevisionKind::Del,
-                Some(row_index as u64),
+                Some(row_index),
                 None,
             )
         })
@@ -3800,7 +3841,7 @@ fn row_structural_revision(row: &TableRowIn, row_index: usize) -> Option<Structu
                     info,
                     StructuralRevisionScope::Row,
                     StructuralRevisionKind::Ins,
-                    Some(row_index as u64),
+                    Some(row_index),
                     None,
                 )
             })
@@ -4424,6 +4465,27 @@ struct LineTextItem<'a> {
     /// source field run when this item paints a field result — carries the
     /// inert a11y identity (type/instruction) onto the emitted primitives
     field: Option<&'a FieldRunIn>,
+    /// Source text run, whose measured glyphs this item may paint.
+    run_index: Option<usize>,
+    measured: Option<MeasuredSlice>,
+}
+
+/// The glyphs measurement shaped a paint item with, in visual order.
+struct MeasuredSlice {
+    font: ooxml_text::FontId,
+    size_px: f64,
+    glyphs: Vec<ooxml_text::MeasuredGlyph>,
+    clusters: Vec<MeasuredCluster>,
+}
+
+/// One cluster of a [`MeasuredSlice`], owning `glyphs` up to `glyph_end`.
+struct MeasuredCluster {
+    glyph_end: usize,
+    width: f64,
+    spaces: usize,
+    /// Byte offset of the cluster in the item's text.
+    byte: u32,
+    logical_order: Option<u64>,
 }
 
 enum LinePaintItem<'a> {
@@ -4550,6 +4612,8 @@ fn push_bidi_text_items<'a>(
             logical_order: fmt.logical_order,
             exact_advance: false,
             field,
+            run_index: None,
+            measured: None,
         }));
         return;
     }
@@ -4613,6 +4677,8 @@ fn push_bidi_text_items<'a>(
             logical_order: fmt.logical_order,
             exact_advance: false,
             field,
+            run_index: None,
+            measured: None,
         }));
         start = end;
     }
@@ -7003,6 +7069,8 @@ fn authoritative_line_items<'a>(
                     logical_order: logical_order.or(text.fmt.logical_order),
                     exact_advance: true,
                     field: None,
+                    run_index: Some(run_index),
+                    measured: None,
                 }));
             }
             RunIn::Field(field) => {
@@ -7023,6 +7091,8 @@ fn authoritative_line_items<'a>(
                     logical_order: logical_order.or(field.fmt.logical_order),
                     exact_advance: true,
                     field: Some(field),
+                    run_index: None,
+                    measured: None,
                 }));
             }
             RunIn::Tab(tab) => out.push(LinePaintItem::Tab {
@@ -7054,6 +7124,213 @@ fn authoritative_line_items<'a>(
         }
     }
     Some(out)
+}
+
+/// Hands the line's measured glyphs to the text items of joining and Indic
+/// scripts, which reshaping cluster by cluster would break apart. Consecutive
+/// clusters of one glyph run become one item. Other text keeps its items and
+/// their reshape, as does text with no glyph run: a field, a dropped run, an
+/// older payload, or a format that paints through the browser.
+fn attach_measured_glyphs<'a>(
+    items: Vec<LinePaintItem<'a>>,
+    block: &'a ParagraphBlockIn,
+    line: &LineIn,
+    ctx: &RenderCtx<'_>,
+    texts: &RunTexts<'a>,
+) -> Vec<LinePaintItem<'a>> {
+    let (Some(packed), Some(shape)) = (line.glyph_runs.as_deref(), ctx.shape) else {
+        return items;
+    };
+    let in_context =
+        |item: &LineTextItem<'_>| item.text.chars().any(ooxml_text::is_joining_or_indic);
+    if !items
+        .iter()
+        .any(|item| matches!(item, LinePaintItem::Text(item) if in_context(item)))
+    {
+        return items;
+    }
+    let Some(runs) = ooxml_text::unpack_glyph_runs(packed) else {
+        return items;
+    };
+    let mut out = Vec::with_capacity(items.len());
+    let mut items = items.into_iter().peekable();
+    while let Some(item) = items.next() {
+        let LinePaintItem::Text(first) = item else {
+            out.push(item);
+            continue;
+        };
+        let glyph_run = first
+            .run_index
+            .filter(|_| !text_primitive_requires_browser_path(first.fmt))
+            .and_then(|run_index| {
+                runs.iter().find(|run| {
+                    run.head.run_index as usize == run_index
+                        && run.head.bidi_level == first.level
+                        && (run.head.start_char as usize..run.head.end_char as usize)
+                            .contains(&first.source_start)
+                })
+            })
+            .filter(|run| {
+                shape
+                    .store
+                    .metrics(ooxml_text::FontId::from_u32(run.head.font_id))
+                    .is_ok()
+            });
+        let Some(glyph_run) = glyph_run else {
+            out.push(LinePaintItem::Text(first));
+            continue;
+        };
+        let rtl = ooxml_text::level_is_rtl(first.level);
+        let mut group = vec![first];
+        while let Some(LinePaintItem::Text(next)) = items.peek()
+            && group.last().is_some_and(|previous| {
+                next.run_index == previous.run_index
+                    && next.level == previous.level
+                    && next.source_start >= glyph_run.head.start_char as usize
+                    && next.source_end <= glyph_run.head.end_char as usize
+                    && if rtl {
+                        next.source_end == previous.source_start
+                    } else {
+                        next.source_start == previous.source_end
+                    }
+            })
+        {
+            if let Some(LinePaintItem::Text(next)) = items.next() {
+                group.push(next);
+            }
+        }
+        if !group.iter().any(in_context) {
+            out.extend(group.into_iter().map(LinePaintItem::Text));
+        } else if group[0]
+            .fmt
+            .horizontal_scale
+            .is_some_and(|scale| scale != 100.0)
+        {
+            // The renderer scales a primitive about its left edge, so positions
+            // inside a merged one would scale twice. A cluster stays its own
+            // primitive at its measured x, with the measured glyphs.
+            out.extend(group.into_iter().map(|mut item| {
+                item.measured = measured_slice(std::slice::from_ref(&item), &item.text, glyph_run);
+                LinePaintItem::Text(item)
+            }));
+        } else {
+            out.extend(merge_measured_items(group, block, glyph_run, texts));
+        }
+    }
+    out
+}
+
+/// One item for `group`, consecutive clusters in visual order, or the group
+/// unchanged when the glyph run does not line up with it.
+fn merge_measured_items<'a>(
+    group: Vec<LineTextItem<'a>>,
+    block: &'a ParagraphBlockIn,
+    glyph_run: &ooxml_text::MeasuredGlyphRun,
+    texts: &RunTexts<'a>,
+) -> Vec<LinePaintItem<'a>> {
+    let start = group
+        .iter()
+        .map(|item| item.source_start)
+        .min()
+        .unwrap_or(0);
+    let end = group.iter().map(|item| item.source_end).max().unwrap_or(0);
+    let merged = group[0]
+        .run_index
+        .and_then(|run_index| match block.runs.get(run_index)? {
+            RunIn::Text(run) => {
+                let text = texts.get(run_index, &run.text).whole_scalars(start, end);
+                let measured = measured_slice(&group, text, glyph_run)?;
+                Some(LineTextItem {
+                    text: text.to_string(),
+                    fmt: group[0].fmt,
+                    pm_start: run.pm_start.map(|pos| pos + start as i64),
+                    pm_end: run.pm_start.map(|pos| pos + end as i64).or(run.pm_end),
+                    width: group.iter().map(|item| item.width).sum(),
+                    level: group[0].level,
+                    source_start: start,
+                    source_end: end,
+                    logical_order: group.iter().filter_map(|item| item.logical_order).min(),
+                    exact_advance: true,
+                    field: None,
+                    run_index: Some(run_index),
+                    measured: Some(measured),
+                })
+            }
+            _ => None,
+        });
+    match merged {
+        Some(item) => vec![LinePaintItem::Text(item)],
+        None => group.into_iter().map(LinePaintItem::Text).collect(),
+    }
+}
+
+/// The glyphs of `items`, consecutive clusters in visual order whose logical
+/// text is `text`. `None` unless every cluster starts where its glyphs say and
+/// every glyph in range lands in a cluster.
+fn measured_slice(
+    items: &[LineTextItem<'_>],
+    text: &str,
+    glyph_run: &ooxml_text::MeasuredGlyphRun,
+) -> Option<MeasuredSlice> {
+    let first = items.first()?;
+    let start = items.iter().map(|item| item.source_start).min()?;
+    let end = items.iter().map(|item| item.source_end).max()?;
+    let glyphs: Vec<ooxml_text::MeasuredGlyph> = glyph_run
+        .glyphs
+        .iter()
+        .filter(|glyph| (start..end).contains(&(glyph.cluster as usize)))
+        .copied()
+        .collect();
+    let rtl = ooxml_text::level_is_rtl(first.level);
+    let mut byte = if rtl { text.len() } else { 0 };
+    let mut glyph_end = 0;
+    let mut clusters = Vec::with_capacity(items.len());
+    for item in items {
+        let cluster_byte = if rtl {
+            byte = byte.checked_sub(item.text.len())?;
+            byte
+        } else {
+            byte += item.text.len();
+            byte - item.text.len()
+        };
+        while glyphs
+            .get(glyph_end)
+            .is_some_and(|glyph| glyph.cluster as usize == item.source_start)
+        {
+            glyph_end += 1;
+        }
+        clusters.push(MeasuredCluster {
+            glyph_end,
+            width: item.width,
+            spaces: item.text.chars().filter(|&ch| ch == ' ').count(),
+            byte: u32::try_from(cluster_byte).ok()?,
+            logical_order: item.logical_order,
+        });
+    }
+    let complex = ooxml_text::font_slot_use(
+        text,
+        first.fmt.complex_script == Some(true),
+        first
+            .fmt
+            .font_slots
+            .as_ref()
+            .and_then(|slots| slots.hint.as_deref()),
+    )
+    .complex_script;
+    // Segments split where sizes differ, so one slice has one size.
+    let points = first
+        .fmt
+        .font_size_cs
+        .filter(|_| complex)
+        .or(first.fmt.font_size)
+        .unwrap_or(DEFAULT_FONT_PT);
+    (!glyphs.is_empty() && glyph_end == glyphs.len() && byte == if rtl { 0 } else { text.len() })
+        .then_some(MeasuredSlice {
+            font: ooxml_text::FontId::from_u32(glyph_run.head.font_id),
+            size_px: points * 96.0 / 72.0 * script_scale_of(first.fmt),
+            glyphs,
+            clusters,
+        })
 }
 
 pub(crate) fn line_text_insets(
@@ -7288,13 +7565,18 @@ fn emit_line<'a>(
         };
         let mut marker_attrs = block_ref.attrs();
         marker_attrs.list_marker = Some(true);
-        marker_attrs.list_marker_numbered = (attrs.and_then(|attrs| attrs.list_is_bullet)
-            != Some(true)
+        let list_is_bullet = attrs.and_then(|attrs| attrs.list_is_bullet);
+        let symbol_face = attrs
+            .and_then(|attrs| attrs.list_marker_font_family.as_deref())
+            .is_some_and(|family| ooxml_text::SymbolFont::named(family).is_some());
+        let numbered = list_is_bullet != Some(true)
             && marker.chars().any(char::is_alphanumeric)
-            && !attrs
-                .and_then(|attrs| attrs.list_marker_font_family.as_deref())
-                .is_some_and(|family| ooxml_text::SymbolFont::named(family).is_some()))
-        .then_some(true);
+            && !symbol_face;
+        marker_attrs.list_marker_numbered = numbered.then_some(true);
+        marker_attrs.list_marker_bullet = (!numbered
+            && marker.chars().any(|c| !c.is_whitespace())
+            && !(list_is_bullet == Some(false) && symbol_face))
+            .then_some(true);
         marker_attrs.list_marker_revision = marker_revision;
         let shaped = !geom.is_rtl
             && bidi_char_levels(marker, base_bidi_direction(false))
@@ -7414,7 +7696,13 @@ fn emit_line<'a>(
     }
     let line_levels = bidi_char_levels(&line_text, bidi_base);
     let mut level_cursor = 0usize;
-    let mut logical_items: Vec<LinePaintItem<'_>> = authoritative_items.unwrap_or_default();
+    let mut logical_items = attach_measured_glyphs(
+        authoritative_items.unwrap_or_default(),
+        block,
+        line,
+        ctx,
+        texts,
+    );
 
     if logical_items.is_empty() {
         for seg in &segments {
@@ -7593,6 +7881,9 @@ fn emit_line<'a>(
                     item.source_start,
                     item.source_end,
                     item.exact_advance,
+                    item.measured
+                        .as_ref()
+                        .map(|slice| (slice, word_space_extra)),
                     line.synthetic_fallback,
                     geom.line_top,
                     line_bottom,
@@ -8102,6 +8393,7 @@ fn emit_text_segment(
     source_start: usize,
     source_end: usize,
     exact_advance: bool,
+    measured: Option<(&MeasuredSlice, f64)>,
     synthetic_fallback: bool,
     line_top: f64,
     line_bottom: f64,
@@ -8269,8 +8561,26 @@ fn emit_text_segment(
         h: None,
     });
     // Unresolved or failed shaping falls back to a text primitive.
-    let emitted_glyphs = match shape {
-        Some(sf) => try_emit_glyph_runs(
+    let emitted_glyphs = match (shape, measured) {
+        (Some(sf), Some((slice, word_space_extra))) => {
+            emit_measured_glyph_run(
+                prims,
+                sf.store,
+                slice,
+                word_space_extra,
+                text,
+                fmt,
+                x,
+                paint_baseline,
+                &word_spacing,
+                bidi_level,
+                &attrs,
+                &color,
+                &paint_clip,
+            );
+            true
+        }
+        (Some(sf), None) => try_emit_glyph_runs(
             prims,
             sf,
             text,
@@ -8288,7 +8598,7 @@ fn emit_text_segment(
             &paint_clip,
             auto_space,
         ),
-        None => false,
+        (None, _) => false,
     };
     if !emitted_glyphs {
         let mut text_attrs = attrs.clone();
@@ -8402,6 +8712,126 @@ fn emit_text_segment(
     }
 }
 
+/// Paints a slice from the glyphs measurement shaped it with. A cluster paints
+/// the width layout gave it: its glyphs keep their measured advances and the last
+/// one takes the difference, which is the letter spacing, auto-space and
+/// justification those advances exclude. Under `w:w` the measured advances are
+/// scaled and the renderer scales the primitive again, so they are unscaled here,
+/// as reshaped glyphs are.
+#[allow(clippy::too_many_arguments)]
+fn emit_measured_glyph_run(
+    prims: &mut Vec<Primitive>,
+    store: &ooxml_text::FontStore,
+    slice: &MeasuredSlice,
+    word_space_extra: f64,
+    text: &str,
+    fmt: &RunFormattingIn,
+    x: f64,
+    baseline: f64,
+    word_spacing: &Option<Number>,
+    bidi_level: u8,
+    attrs: &DocAttrs,
+    color: &str,
+    paint_clip: &Option<ClipRect>,
+) {
+    let scale = fmt.horizontal_scale.map_or(1.0, |scale| scale / 100.0);
+    let mut placed: Vec<PlacedGlyph> = Vec::with_capacity(slice.glyphs.len());
+    let mut cluster_x = x;
+    let mut glyph_start = 0;
+    for cluster in &slice.clusters {
+        let target = cluster.width + word_space_extra * cluster.spaces as f64;
+        let glyphs = &slice.glyphs[glyph_start..cluster.glyph_end];
+        let mut pen = 0.0;
+        for (index, glyph) in glyphs.iter().enumerate() {
+            let advance = f64::from(glyph.advance) / scale;
+            placed.push(PlacedGlyph {
+                id: glyph.id,
+                x: round3(cluster_x + pen + f64::from(glyph.dx) / scale),
+                y: round3(baseline - f64::from(glyph.dy)),
+                cluster: cluster.byte,
+                advance: round3(if index + 1 == glyphs.len() {
+                    target - pen
+                } else {
+                    advance
+                }),
+                logical_order: cluster.logical_order,
+                bidi_level: Some(bidi_level),
+            });
+            pen += advance;
+        }
+        if glyphs.is_empty()
+            && let Some(previous) = placed.last_mut()
+        {
+            previous.advance = round3(previous.advance + target);
+        }
+        glyph_start = cluster.glyph_end;
+        cluster_x += target;
+    }
+    prims.push(Primitive::GlyphRun(glyph_run_primitive(
+        store,
+        slice.font,
+        slice.size_px,
+        text.to_string(),
+        placed,
+        None,
+        fmt,
+        color,
+        word_spacing,
+        bidi_level,
+        attrs.clone(),
+        paint_clip,
+    )));
+}
+
+/// A glyph run of `font` carrying `fmt`'s paint state.
+#[allow(clippy::too_many_arguments)]
+fn glyph_run_primitive(
+    store: &ooxml_text::FontStore,
+    font: ooxml_text::FontId,
+    size_px: f64,
+    text: String,
+    glyphs: Vec<PlacedGlyph>,
+    echo: Option<EchoRunFacts>,
+    fmt: &RunFormattingIn,
+    color: &str,
+    word_spacing: &Option<Number>,
+    bidi_level: u8,
+    mut attrs: DocAttrs,
+    paint_clip: &Option<ClipRect>,
+) -> GlyphRunPrimitive {
+    // the resolved CSS face for the canvas fillText safety net (glyph
+    // outlines unavailable) — same shorthand the TextRunPrimitive would
+    // carry, so the fallback keeps family/weight/style
+    attrs.fallback_font = Some(match store.backstop_style(font) {
+        Some((bold, italic)) => styled_css_font(fmt, ooxml_text::BASE_LATIN_FAMILY, bold, italic),
+        None => css_font(fmt),
+    });
+    attrs.modern_effects = fmt.modern_effects.clone().map(Box::new);
+    GlyphRunPrimitive {
+        font_id: font.to_u32(),
+        size: round3(size_px),
+        color: color.to_string(),
+        paint_text: glyph_paint_text(store, font, &text).map(Box::new),
+        text,
+        glyphs,
+        echo,
+        paint_clip: paint_clip.clone(),
+        word_spacing: word_spacing.clone(),
+        rtl: ooxml_text::level_is_rtl(bidi_level).then_some(true),
+        opacity: None,
+        rotation_deg: None,
+        horizontal_scale: horizontal_scale_of(fmt),
+        all_caps: fmt.all_caps == Some(true),
+        small_caps: fmt.small_caps == Some(true),
+        hidden: fmt.hidden == Some(true),
+        text_shadow: text_shadow_of(fmt),
+        text_outline: fmt.text_outline == Some(true),
+        emphasis_mark: fmt.emphasis_mark.clone(),
+        text_effect: fmt.text_effect.clone(),
+        attrs,
+    }
+}
+
 /// Shape one styled text slice into [`GlyphRunPrimitive`]s and push them, or
 /// return `false` to signal the caller to emit a [`TextRunPrimitive`]
 /// instead. Returns `false` (touching nothing) when the run has no text, its
@@ -8475,11 +8905,6 @@ fn try_emit_glyph_runs(
     let ws_px = word_spacing.as_ref().map(num_f64).unwrap_or(0.0);
     let letter_spacing = fmt.letter_spacing.unwrap_or(0.0);
     let direction = shape_direction_for_level(bidi_level);
-    let rtl = if direction == ooxml_text::ShapeDirection::Rtl {
-        Some(true)
-    } else {
-        None
-    };
 
     // resolve each char to a font (chain head fallback per ooxml-text). A run
     // covered by a single font — the overwhelmingly common case — is detected
@@ -8592,13 +9017,14 @@ fn try_emit_glyph_runs(
             segments[range_index].utf16_end,
         );
         let is_last = range_index + 1 == segment_count;
-        let glyphs = match ooxml_text::shape_with_direction(
+        let glyphs = match ooxml_text::shape::shape_with_properties(
             shape_fonts.store,
             font,
             &sub_text,
             size_px as f32,
             &features,
             direction,
+            attrs.lang.as_deref(),
         ) {
             Ok(g) => g,
             Err(_) => return false,
@@ -8675,52 +9101,33 @@ fn try_emit_glyph_runs(
         } else {
             pm_start.map(|p| p + sub_end_utf16 as i64)
         };
-        // the resolved CSS face for the canvas fillText safety net (glyph
-        // outlines unavailable) — same shorthand the TextRunPrimitive would
-        // carry, so the fallback keeps family/weight/style
-        sub_attrs.fallback_font = Some(match shape_fonts.store.backstop_style(font) {
-            Some((bold, italic)) => {
-                styled_css_font(fmt, ooxml_text::BASE_LATIN_FAMILY, bold, italic)
-            }
-            None => css_font(fmt),
+        let echo = (!sub_text.chars().any(ooxml_text::is_joining_or_indic)).then(|| EchoRunFacts {
+            x: 0.0,
+            right: 0.0,
+            kern: features.is_empty(),
+            kerning: fmt.kerning_min_pt.unwrap_or(0.0),
+            primary_font: echo_font_route && chain.ids.first() == Some(&font),
+            letter_spacing: fmt.letter_spacing.unwrap_or(0.0),
+            position: fmt.position_px.unwrap_or(0.0),
+            scale: fmt.horizontal_scale.unwrap_or(100.0),
+            can_empty: false,
+            stretch: None,
+            center_width: None,
         });
-        sub_attrs.modern_effects = fmt.modern_effects.clone().map(Box::new);
-
-        local.push(Primitive::GlyphRun(GlyphRunPrimitive {
-            font_id: font.to_u32(),
-            size: round3(size_px),
-            color: color.to_string(),
-            paint_text: glyph_paint_text(shape_fonts.store, font, &sub_text).map(Box::new),
-            text: sub_text,
-            glyphs: placed,
-            echo: Some(EchoRunFacts {
-                x: 0.0,
-                right: 0.0,
-                kern: features.is_empty(),
-                kerning: fmt.kerning_min_pt.unwrap_or(0.0),
-                primary_font: echo_font_route && chain.ids.first() == Some(&font),
-                letter_spacing: fmt.letter_spacing.unwrap_or(0.0),
-                position: fmt.position_px.unwrap_or(0.0),
-                scale: fmt.horizontal_scale.unwrap_or(100.0),
-                can_empty: false,
-                stretch: None,
-                center_width: None,
-            }),
-            paint_clip: paint_clip.clone(),
-            word_spacing: word_spacing.clone(),
-            rtl,
-            opacity: None,
-            rotation_deg: None,
-            horizontal_scale: horizontal_scale_of(fmt),
-            all_caps: fmt.all_caps == Some(true),
-            small_caps: fmt.small_caps == Some(true),
-            hidden: fmt.hidden == Some(true),
-            text_shadow: text_shadow_of(fmt),
-            text_outline: fmt.text_outline == Some(true),
-            emphasis_mark: fmt.emphasis_mark.clone(),
-            text_effect: fmt.text_effect.clone(),
-            attrs: sub_attrs,
-        }));
+        local.push(Primitive::GlyphRun(glyph_run_primitive(
+            shape_fonts.store,
+            font,
+            size_px,
+            sub_text,
+            placed,
+            echo,
+            fmt,
+            color,
+            word_spacing,
+            bidi_level,
+            sub_attrs,
+            paint_clip,
+        )));
     }
 
     if let Some(target) = exact_width
@@ -8772,9 +9179,18 @@ fn field_metadata(f: &FieldRunIn) -> FieldMetadata {
 }
 
 fn border_visible(b: &BorderEdgeIn) -> bool {
-    !matches!(b.style.as_deref(), Some("none") | Some("nil"))
-        && !matches!(b.ooxml_style.as_deref(), Some("none") | Some("nil"))
-        && b.width.unwrap_or(1.0) > 0.0
+    border_paints(b.style.as_deref(), b.ooxml_style.as_deref(), b.width)
+}
+
+/// Whether a border with this style, OOXML style and width paints a line.
+pub(crate) fn border_paints(
+    style: Option<&str>,
+    ooxml_style: Option<&str>,
+    width: Option<f64>,
+) -> bool {
+    !matches!(style, Some("none") | Some("nil"))
+        && !matches!(ooxml_style, Some("none") | Some("nil"))
+        && width.unwrap_or(1.0) > 0.0
 }
 
 fn border_number(b: &BorderEdgeIn) -> u8 {
@@ -10728,9 +11144,9 @@ fn table_metadata(
 ) -> TableMetadata {
     TableMetadata {
         table_id: table_id.to_string(),
-        row_start: frag.row_start as u64,
-        row_end: frag.row_end as u64,
-        row_count: block.rows.len() as u64,
+        row_start: block.source_row(frag.row_start),
+        row_end: block.source_row_end(frag.row_end),
+        row_count: block.source_row_end(block.rows.len()),
         column_count: measure.column_widths.len() as u64,
         header_row_count: (header_row_count > 0).then_some(header_row_count as u64),
         caption: block.caption.clone(),
@@ -11121,7 +11537,7 @@ pub(crate) fn emit_table_fragment(
             let Some(row) = block.rows.get(vr.row_index) else {
                 continue;
             };
-            let Some(rev) = row_structural_revision(row, vr.row_index) else {
+            let Some(rev) = row_structural_revision(row, block.source_row(vr.row_index)) else {
                 continue;
             };
             let full_top = frag.y + vr.frag_y;
@@ -11174,7 +11590,11 @@ pub(crate) fn emit_table_fragment(
             && !is_header
             && p.g.column_index == 0
             && cell.merge_continuation != Some(true);
-        let cell_id = format!("{table_id}-r{}-c{}", p.g.row_index, p.g.column_index);
+        let cell_id = format!(
+            "{table_id}-r{}-c{}",
+            block.source_row(p.g.row_index),
+            p.g.column_index
+        );
         let header_ids = if is_header || is_row_header {
             Vec::new()
         } else {
@@ -11185,7 +11605,13 @@ pub(crate) fn emit_table_fragment(
                             && p.g.column_index >= cell.column_index
                             && p.g.column_index < cell.column_index + cell.col_span
                     })
-                    .map(|cell| format!("{table_id}-r{}-c{}", cell.row_index, cell.column_index))
+                    .map(|cell| {
+                        format!(
+                            "{table_id}-r{}-c{}",
+                            block.source_row(cell.row_index),
+                            cell.column_index
+                        )
+                    })
             });
             let row_header = (row_headers && !is_row_header)
                 .then(|| {
@@ -11200,13 +11626,19 @@ pub(crate) fn emit_table_fragment(
                     })
                 })
                 .flatten()
-                .map(|cell| format!("{table_id}-r{}-c{}", cell.row_index, cell.column_index));
+                .map(|cell| {
+                    format!(
+                        "{table_id}-r{}-c{}",
+                        block.source_row(cell.row_index),
+                        cell.column_index
+                    )
+                });
             column_headers.chain(row_header).collect()
         };
         let cell_ref = TableCellRef {
-            row: p.g.row_index as u64,
+            row: block.source_row(p.g.row_index),
             col: p.g.column_index as u64,
-            row_span: p.g.row_span as u64,
+            row_span: block.source_span(p.g.row_index, p.g.row_span),
             col_span: p.g.col_span as u64,
             continuation: if p.selectable { None } else { Some(true) },
             cell_id: Some(cell_id),
@@ -11272,7 +11704,7 @@ pub(crate) fn emit_table_fragment(
                     &marker.info,
                     StructuralRevisionScope::Cell,
                     marker.kind,
-                    Some(p.g.row_index as u64),
+                    Some(block.source_row(p.g.row_index)),
                     Some(p.g.column_index as u64),
                 );
                 let mut attrs = block_ref.attrs();
@@ -11556,7 +11988,11 @@ pub(crate) fn emit_table_fragment(
                 &block_ref,
             );
         }
-        let clip_id = format!("clip-{table_id}-r{}-c{}", p.g.row_index, p.g.column_index);
+        let clip_id = format!(
+            "clip-{table_id}-r{}-c{}",
+            block.source_row(p.g.row_index),
+            p.g.column_index
+        );
         for (index, primitive) in prims.iter_mut().enumerate().skip(cell_stamp_from) {
             if windowed_lines
                 && index >= content_stamp_from
@@ -11610,12 +12046,16 @@ pub(crate) fn emit_table_fragment(
             // band at the fragment edge (borderOwner stays Fragment)
             let line_attrs = DocAttrs {
                 cell: Some(Box::new(TableCellRef {
-                    row: g.row_index as u64,
+                    row: block.source_row(g.row_index),
                     col: g.column_index as u64,
-                    row_span: g.row_span as u64,
+                    row_span: block.source_span(g.row_index, g.row_span),
                     col_span: g.col_span as u64,
                     continuation: None,
-                    cell_id: Some(format!("{table_id}-r{}-c{}", g.row_index, g.column_index)),
+                    cell_id: Some(format!(
+                        "{table_id}-r{}-c{}",
+                        block.source_row(g.row_index),
+                        g.column_index
+                    )),
                     is_header: None,
                     is_row_header: None,
                     repeated_header: None,
@@ -16499,6 +16939,7 @@ mod tests {
         assert_eq!(marker["text"], "1.");
         assert_eq!(marker["listMarkerRevision"], "ins");
         assert_eq!(marker["listMarkerNumbered"], true);
+        assert!(marker.get("listMarkerBullet").is_none());
         assert_eq!(marker["color"], REVISION_INS_COLOR);
         assert!(marker["font"].as_str().unwrap().contains("Aptos"));
         assert!(marker["font"].as_str().unwrap().contains("700"));
@@ -16533,7 +16974,22 @@ mod tests {
                 .find(|primitive| primitive["listMarker"] == true)
                 .unwrap();
             assert!(marker.get("listMarkerNumbered").is_none(), "{text}");
+            assert_eq!(marker["listMarkerBullet"], true, "{text}");
         }
+
+        input["measured"][0]["block"]["attrs"]["listIsBullet"] = Value::Bool(false);
+        input["measured"][0]["block"]["attrs"]["listMarker"] = Value::from("1.");
+        input["measured"][0]["block"]["attrs"]["listMarkerFontFamily"] = Value::from("Symbol");
+        let output: Value =
+            serde_json::from_str(&build_display_list_json(&input.to_string()).unwrap()).unwrap();
+        let marker = output["pages"][0]["primitives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|primitive| primitive["listMarker"] == true)
+            .unwrap();
+        assert!(marker.get("listMarkerNumbered").is_none());
+        assert!(marker.get("listMarkerBullet").is_none());
     }
 
     /// Marker overrun extends its slot and shifts only the first line's text.

@@ -78,6 +78,8 @@ async function misalignment(page: Page): Promise<number> {
   });
 }
 
+type ProbeEvent = { type: string; focused?: boolean; viewport?: { x: number; y: number; width: number; height: number } | null };
+
 for (const engine of ['legacy', 'worker'] as const) {
   test.describe(`pptx plugins (${engine})`, () => {
     test.beforeEach(async ({ page }) => {
@@ -124,6 +126,38 @@ test('pptx: a plugin panel gesture admits a granted built-in mutation', async ({
     ok: false, failure: { code: 'unsupported-policy' },
   });
   expect(await state()).toEqual(after);
+});
+
+test('document focus excludes the plugin panel', async ({ page }) => {
+  await open(page, engine);
+  const events = () => page.evaluate(() =>
+    (window as unknown as { __probe: { events: ProbeEvent[] } }).__probe.events
+      .filter((event) => event.type === 'focus-change'));
+  await page.getByTestId('probe-input').click();
+  await page.evaluate(() => {
+    (window as unknown as { __probe: { events: ProbeEvent[] } }).__probe.events = [];
+  });
+  await page.getByTestId('pptx-slide-canvas').click({ position: { x: 100, y: 100 } });
+  await expect.poll(async () => (await events()).at(-1)?.focused).toBe(true);
+  await page.getByTestId('probe-input').click();
+  await expect.poll(async () => (await events()).at(-1)?.focused).toBe(false);
+  expect((await events()).map((event) => event.focused)).toEqual([true, false]);
+});
+
+test('resizing the page changes the viewport', async ({ page }) => {
+  await open(page, engine);
+  const viewport = () => page.evaluate(() =>
+    (window as unknown as { __probe: { events: ProbeEvent[] } }).__probe.events
+      .filter((event) => event.type === 'viewport-change' && event.viewport !== null).at(-1));
+  await expect.poll(viewport).toMatchObject({ type: 'viewport-change' });
+  const before = (await viewport())!;
+  if (before.type !== 'viewport-change') throw new Error('Missing viewport');
+  const size = page.viewportSize()!;
+  await page.setViewportSize({ width: size.width - 140, height: size.height - 80 });
+  await expect.poll(async () => {
+    const next = await viewport();
+    return next?.type === 'viewport-change' ? next.viewport : null;
+  }).not.toEqual(before.viewport);
 });
 
 test('pptx: overlays land on the presented slide at every zoom and while scrolled', async ({

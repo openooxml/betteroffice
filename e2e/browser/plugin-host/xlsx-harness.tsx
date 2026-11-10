@@ -8,6 +8,7 @@ import {
   type XlsxAsyncEditorApi,
   type XlsxEditorApi,
   type XlsxPluginContext,
+  type XlsxPluginEvent,
   type XlsxPluginNavigationResult,
   type XlsxPluginSelection,
 } from '@betteroffice/xlsx-react';
@@ -18,6 +19,7 @@ type ProbeContext = XlsxPluginContext<null>;
 interface ProbeWindow {
   mutation: unknown;
   runMutation(): Promise<unknown>;
+  events: XlsxPluginEvent[];
   editor: XlsxEditorApi | XlsxAsyncEditorApi | null;
   /** Runs `action` in the probe plugin's context, the same on either engine. */
   act<T>(action: (context: ProbeContext) => Promise<T>): Promise<T>;
@@ -30,6 +32,7 @@ interface ProbeWindow {
 const workerOnly = new URLSearchParams(location.search).get('engine') === 'worker';
 let pluginContext: ProbeContext | null = null;
 const probe: ProbeWindow = {
+  events: [],
   editor: null,
   mutation: null,
   runMutation: async () => null,
@@ -95,6 +98,7 @@ const alignment = defineXlsxPlugin<null>({
     pluginContext = context;
   },
   onEvent(_context, event) {
+    probe.events.push(event);
     if (event.type === 'selection-change') probe.selection = event.selection;
   },
   panel: { title: 'Probe', placement: 'right', render: ProbePanel },

@@ -662,7 +662,8 @@ impl Workbook {
                 ),
         )?;
         limit.check(states.estimated_bytes())?;
-        let (client_id, _, next_sheet_id) = self.authority.snapshot_identity();
+        let built = self.authority()?;
+        let (client_id, _, next_sheet_id) = built.snapshot_identity();
         let header = RecoveryHeader {
             edited_since_open: self.edited_since_open,
             recalculated_since_open: self.recalculated_since_open,
@@ -680,7 +681,7 @@ impl Workbook {
             client_id,
             next_sheet_id,
         };
-        let projection = self.authority.materialize().map_err(authority_error)?;
+        let projection = built.materialize().map_err(authority_error)?;
         pulse();
         let calculation = RecoveryCalculation::capture(&self.model, projection)?;
         pulse();
@@ -695,7 +696,7 @@ impl Workbook {
             axes: capture_axes(&self.preserved.axes)?,
             history: history.map(|(preserved_undo, preserved_redo)| RecoveryHistory {
                 undo: self.undo.clone(),
-                sheet_order: self.authority.recovery_sheet_order_history(),
+                sheet_order: built.recovery_sheet_order_history(),
                 preserved_undo,
                 preserved_redo,
             }),
@@ -706,7 +707,7 @@ impl Workbook {
         let metadata = metadata.into_bytes();
         drop(checkpoint);
         pulse();
-        let authority = self.authority.recovery_state_parts().map_err(invalid)?;
+        let authority = built.recovery_state_parts().map_err(invalid)?;
         pulse();
         let authority_len = authority.iter().map(Vec::len).sum();
         limit.take(authority_len)?;
@@ -833,10 +834,16 @@ impl Workbook {
         validate_chart_source(&model, workbook.source_package.is_some())?;
         workbook.graph = Some(DepGraph::build(&model));
         workbook.model = model;
-        workbook.authority = authority;
+        workbook.authority = AuthoritySlot::built(authority);
         if checkpoint.collaborative {
             workbook.mode = WorkbookMode::Collaborative {
-                structure: Box::new(workbook.authority.structure().map_err(authority_error)?),
+                structure: Box::new(
+                    workbook
+                        .authority
+                        .get()?
+                        .structure()
+                        .map_err(authority_error)?,
+                ),
             };
         } else if !pending_remote_updates.is_empty() {
             return Err(invalid("Standalone recovery has remote updates"));
@@ -846,6 +853,7 @@ impl Workbook {
             workbook.validate_pending_remote_update(update)?;
             workbook
                 .authority
+                .get()?
                 .stage_updates_v1(&[update], None)
                 .map_err(authority_error)?;
             workbook.pending_remote_updates.push(update.to_vec());
@@ -881,6 +889,7 @@ impl Workbook {
             }
             workbook
                 .authority
+                .get_mut()?
                 .restore_recovery_sheet_order_history(
                     history.sheet_order,
                     history.undo.undo_depth(),
@@ -1241,8 +1250,12 @@ mod tests {
             assert_eq!(restored.model, live.model);
             assert_eq!(restored.sheet_info().unwrap(), live.sheet_info().unwrap());
             assert_eq!(
-                restored.authority.structure().unwrap().sheet_keys,
-                live.authority.structure().unwrap().sheet_keys
+                restored
+                    .authority_for_test()
+                    .structure()
+                    .unwrap()
+                    .sheet_keys,
+                live.authority_for_test().structure().unwrap().sheet_keys
             );
             assert_eq!(restored.history_state(), live.history_state());
             assert_eq!(encoded(&restored.undo), encoded(&live.undo));
@@ -1379,16 +1392,24 @@ mod tests {
             })
         );
         assert_eq!(restored.proposals(), workbook.proposals());
-        let original_identity = workbook.authority.snapshot_identity();
+        let original_identity = workbook.authority_for_test().snapshot_identity();
         let captured_ids = workbook.sheet_info().unwrap().sheet_ids;
-        let captured_keys = workbook.authority.structure().unwrap().sheet_keys;
+        let captured_keys = workbook
+            .authority_for_test()
+            .structure()
+            .unwrap()
+            .sheet_keys;
         assert_eq!(captured_ids, vec!["sheet:0", "sheet:1"]);
         assert_eq!(restored.sheet_info().unwrap().sheet_ids, captured_ids);
         assert_eq!(
-            restored.authority.structure().unwrap().sheet_keys,
+            restored
+                .authority_for_test()
+                .structure()
+                .unwrap()
+                .sheet_keys,
             captured_keys
         );
-        let restored_identity = restored.authority.snapshot_identity();
+        let restored_identity = restored.authority_for_test().snapshot_identity();
         assert_ne!(restored_identity.0, original_identity.0);
         assert_ne!(restored_identity.1, original_identity.1);
         assert_eq!(restored_identity.2, original_identity.2);
@@ -1415,7 +1436,11 @@ mod tests {
         assert_eq!(restored.sheet_info().unwrap().sheet_ids, expected_ids);
         assert!(!captured_ids.contains(&expected_ids[2]));
         assert_eq!(&expected_ids[..2], captured_ids.as_slice());
-        let restored_keys = restored.authority.structure().unwrap().sheet_keys;
+        let restored_keys = restored
+            .authority_for_test()
+            .structure()
+            .unwrap()
+            .sheet_keys;
         let minted = restored_keys[2]
             .strip_prefix(&format!("replica:{}:", restored_identity.0))
             .unwrap();
@@ -1456,8 +1481,8 @@ mod tests {
             Workbook::restore_recovery_checkpoint(&bytes).unwrap();
         assert!(restored.is_collaborative());
         assert_ne!(restored.client_id(), 71);
-        let original_identity = workbook.authority.snapshot_identity();
-        let restored_identity = restored.authority.snapshot_identity();
+        let original_identity = workbook.authority_for_test().snapshot_identity();
+        let restored_identity = restored.authority_for_test().snapshot_identity();
         assert_ne!(restored_identity.0, original_identity.0);
         assert_ne!(restored_identity.1, original_identity.1);
         assert_eq!(restored_identity.2, original_identity.2);
@@ -1737,7 +1762,7 @@ mod tests {
                     .unwrap()
                     .facts()
                     .unpatchable_reference_part(),
-                Some("xl/workbook.xml")
+                Some("xl/charts/chart1.xml")
             );
             let failure = book
                 .apply_ops(
@@ -1751,7 +1776,7 @@ mod tests {
                 .unwrap_err();
             assert_eq!(
                 failure.to_string(),
-                "xl/workbook.xml references cells this edit would move, and it cannot be rewritten"
+                "xl/charts/chart1.xml references cells this edit would move, and it cannot be rewritten"
             );
             assert_eq!(book.save().unwrap(), saved);
         }
@@ -1775,7 +1800,10 @@ mod tests {
         assert!(!metadata.collaborative);
         assert_eq!(
             reader.bytes().unwrap(),
-            workbook.authority.encode_recovery_state().unwrap()
+            workbook
+                .authority_for_test()
+                .encode_recovery_state()
+                .unwrap()
         );
         assert_eq!(read_state_table(&mut reader).unwrap().len(), 1);
         assert_eq!(
@@ -2021,9 +2049,14 @@ mod tests {
             let mut payload = Writer::new();
             payload.bytes(&serde_json::to_vec(&metadata).unwrap());
             let authority = if codec < 6 {
-                workbook.authority.encode_released_recovery_state()
+                workbook
+                    .authority_for_test()
+                    .encode_released_recovery_state()
             } else {
-                workbook.authority.encode_recovery_state().unwrap()
+                workbook
+                    .authority_for_test()
+                    .encode_recovery_state()
+                    .unwrap()
             };
             payload.bytes(&authority);
             if codec == 7 {

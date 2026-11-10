@@ -7168,6 +7168,102 @@ fn refuses_everything_for_a_chart_no_sheet_claims() {
     );
 }
 
+/// A chart reading another workbook (`[1]Report!…`, quoted or not) or
+/// carrying series text as a literal names no sheet of this workbook through
+/// those references; it is fenced off only from what it names here.
+#[test]
+fn an_external_area_or_a_literal_in_a_chart_names_no_sheet_here() {
+    for values in ["[1]Report!$B$2:$B$4", "'[1]Report two'!$B$2:$B$4"] {
+        let parts = unrebuildable_chart_package(charted_package(), values);
+        let parsed = parse_workbook_with_package(&parts).unwrap();
+        let package = &parsed.package;
+        assert_eq!(
+            package.unpatchable_reference_part(),
+            Some("xl/charts/chart1.xml"),
+            "{values}"
+        );
+        assert!(package.reference_naming_sheet("Data").is_some(), "{values}");
+        assert_eq!(package.reference_naming_sheet("Report"), None, "{values}");
+        assert_eq!(package.reference_naming_sheet("Nowhere"), None, "{values}");
+    }
+
+    let parts = unrebuildable_chart_package(charted_package(), "[1]Report!$B$2:$B$4");
+    let chart = String::from_utf8(
+        parts
+            .iter()
+            .find(|(name, _)| name == "xl/charts/chart1.xml")
+            .unwrap()
+            .1
+            .clone(),
+    )
+    .unwrap()
+    .replace("<c:f>Data!$B$1</c:f>", "<c:f>\"Series\"</c:f>");
+    let mut parts = parts;
+    set_part(&mut parts, "xl/charts/chart1.xml", chart.as_bytes());
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    assert!(parsed.package.reference_naming_sheet("Data").is_some());
+    assert_eq!(parsed.package.reference_naming_sheet("Report"), None);
+}
+
+/// The 2012 chart extensions' ranges, such as the full range behind a
+/// filtered series, are references of their own: they fence off the sheet
+/// they name, not every sheet. `Sheet!#REF!` names its sheet and no cell.
+#[test]
+fn extension_ranges_and_lost_areas_name_only_their_sheets() {
+    let chart = String::from_utf8(CHART.to_vec()).unwrap().replace(
+        "</c:ser>",
+        r#"<c:extLst><c:ext uri="{02D57815-91ED-43cb-92C2-25804820EDAC}" xmlns:c15="http://schemas.microsoft.com/office/drawing/2012/chart"><c15:fullRef><c15:sqref>Report!$C$1:$C$9</c15:sqref></c15:fullRef></c:ext></c:extLst></c:ser>"#,
+    );
+    let mut parts = charted_package();
+    set_part(&mut parts, "xl/charts/chart1.xml", chart.as_bytes());
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let package = &parsed.package;
+    assert_eq!(
+        package.unpatchable_reference_part(),
+        Some("xl/charts/chart1.xml")
+    );
+    assert!(package.reference_naming_sheet("Report").is_some());
+    assert!(package.reference_naming_sheet("Data").is_some());
+    assert_eq!(package.reference_naming_sheet("Nowhere"), None);
+    assert!(package.reference_moved_by_rows("Report", 0).is_some());
+    assert_eq!(package.reference_moved_by_rows("Report", 9), None);
+
+    let parts = unrebuildable_chart_package(charted_package(), "Report!#REF!");
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    assert!(parsed.package.reference_naming_sheet("Report").is_some());
+    assert_eq!(parsed.package.reference_naming_sheet("Nowhere"), None);
+}
+
+/// A pivot chart still names everything: its source is a pivot table, not a
+/// range this crate reads.
+#[test]
+fn a_pivot_chart_still_names_everything() {
+    let chart = String::from_utf8(CHART.to_vec()).unwrap().replace(
+        "<c:chart>",
+        "<c:pivotSource><c:name>[Book.xlsx]Report!PivotTable1</c:name><c:fmtId val=\"0\"/></c:pivotSource><c:chart>",
+    );
+    let mut parts = charted_package();
+    set_part(&mut parts, "xl/charts/chart1.xml", chart.as_bytes());
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    assert!(parsed.package.reference_naming_sheet("Nowhere").is_some());
+}
+
+/// When the package's own metadata cannot be trusted every part names
+/// everything, and the refusal names a part where charts and pivots are
+/// kept rather than the typing part or the workbook.
+#[test]
+fn an_untrusted_package_refuses_naming_a_chart_part() {
+    let parts = charted_package()
+        .into_iter()
+        .filter(|(path, _)| path != "[Content_Types].xml")
+        .collect::<Vec<_>>();
+    let parsed = parse_workbook_with_package(&parts).expect("the workbook still opens");
+    assert_eq!(
+        parsed.package.reference_naming_sheet("Nowhere"),
+        Some("xl/charts/chart1.xml")
+    );
+}
+
 /// The chart plots `Data` but hangs off the chartsheet, so nothing it names
 /// moves when that chartsheet goes. Dropping it is allowed, and the save takes
 /// the chart's whole part graph with it rather than leaving it behind.

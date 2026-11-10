@@ -321,6 +321,77 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
     strict = false,
     buffer: ArrayBuffer = documentBytes()
   ) => mountEditor(props, strict, buffer, experimentalWorkerOpen);
+
+  test('plugins receive the resolved locale and one event when it changes', async () => {
+    const contexts: DocxPluginContext<null>[] = [];
+    const events: DocxPluginEvent[] = [];
+    const plugin = defineDocxPlugin({ id: 'locale', createState: () => null,
+      onEvent(context, event) { contexts.push(context); events.push(event); } });
+    const { rerender } = await mount({ plugins: [plugin], i18n: { _lang: 'de' } });
+    await until(() => events.some((event) => event.type === 'load'));
+    expect(contexts[0]!.snapshot.locale).toBe('de');
+    expect(events.filter((event) => event.type === 'locale-change')).toEqual([]);
+    rerender({ plugins: [plugin], i18n: { _lang: 'fr' } });
+    await until(() => events.some((event) => event.type === 'locale-change'));
+    expect(events.filter((event) => event.type === 'locale-change')).toEqual([
+      { type: 'locale-change', generation: contexts.at(-1)!.snapshot.generation, locale: 'fr' },
+    ]);
+    expect(contexts.at(-1)!.snapshot.locale).toBe('fr');
+    rerender({ plugins: [plugin], i18n: { _lang: 'fr' } });
+    await settle();
+    expect(events.filter((event) => event.type === 'locale-change')).toHaveLength(1);
+  });
+
+  test('plugin locales are canonical and equivalent tags do not notify twice', async () => {
+    const contexts: DocxPluginContext<null>[] = [];
+    const events: DocxPluginEvent[] = [];
+    const plugin = defineDocxPlugin({ id: 'canonical-locale', createState: () => null,
+      onEvent(context, event) { contexts.push(context); events.push(event); } });
+    const { rerender } = await mount({ plugins: [plugin], i18n: { _lang: 'DE-de' } });
+    await until(() => events.some((event) => event.type === 'load'));
+    expect(contexts[0]!.snapshot.locale).toBe('de-DE');
+    rerender({ plugins: [plugin], i18n: { _lang: 'de-DE' } });
+    await settle();
+    expect(events.filter((event) => event.type === 'locale-change')).toEqual([]);
+    rerender({ plugins: [plugin], i18n: { _lang: 'invalid_tag' } });
+    await until(() => events.some((event) => event.type === 'locale-change'));
+    expect(events.filter((event) => event.type === 'locale-change')).toEqual([
+      { type: 'locale-change', generation: contexts.at(-1)!.snapshot.generation, locale: 'en' },
+    ]);
+    expect(contexts.at(-1)!.snapshot.locale).toBe('en');
+  });
+
+  for (const readOnly of [false, true]) {
+    test(`the portaled document input belongs to the focus roots (readOnly=${readOnly})`, async () => {
+      const events: DocxPluginEvent[] = [];
+      const snapshots: boolean[] = [];
+      const plugin = defineDocxPlugin({ id: 'focus-input', createState: () => null,
+        panel: { title: 'Focus', placement: 'right', render: () => <input data-testid="focus-panel" /> },
+        onEvent(context, event) {
+          if (event.type === 'focus-change') {
+            events.push(event);
+            snapshots.push(context.snapshot.focused);
+          }
+        } });
+      const { ref, view } = await mount({ plugins: [plugin], readOnly });
+      const surface = view.container.querySelector('.paged-editor')!;
+      const input = document.getElementById(surface.getAttribute('data-docx-input')!);
+      expect(input).toBeInstanceOf(HTMLTextAreaElement);
+      expect(surface.contains(input)).toBe(false);
+      const panel = view.getByTestId('focus-panel');
+      await act(async () => { panel.focus(); });
+      await settle();
+      events.length = 0;
+      snapshots.length = 0;
+      await act(async () => { ref.current!.focus(); });
+      expect(document.activeElement).toBe(input);
+      await until(() => events.some((event) => event.type === 'focus-change' && event.focused));
+      await act(async () => { panel.focus(); });
+      await until(() => events.some((event) => event.type === 'focus-change' && !event.focused));
+      expect(snapshots).toEqual([true, false]);
+    });
+  }
+
   const selectFirstWord = async (ref: React.RefObject<DocxEditorRef | null>) => {
     if (experimentalWorkerOpen === false) return selectInThreadFirstWord(ref);
     const { paragraph } = await firstParagraph(ref);
@@ -2162,6 +2233,26 @@ describe('DocxEditor plugins (peer-less engine)', () => {
     return { ref, view };
   };
 
+  test('the default worker receives the locale and one change after rerender', async () => {
+    const contexts: DocxPluginContext<null>[] = [];
+    const events: DocxPluginEvent[] = [];
+    const plugin = defineDocxPlugin({ id: 'locale', createState: () => null,
+      onEvent(context, event) { contexts.push(context); events.push(event); } });
+    const buffer = documentBytes();
+    const ref = createRef<DocxEditorRef>();
+    const element = (locale: string) => <DocxEditor ref={ref} documentBuffer={buffer} plugins={[plugin]} i18n={{ _lang: locale }} />;
+    const view = render(element('DE-de'));
+    await until(() => events.some((event) => event.type === 'load'));
+    expect(contexts[0]!.snapshot.locale).toBe('de-DE');
+    view.rerender(element('fr'));
+    await until(() => events.some((event) => event.type === 'locale-change'));
+    expect(events.filter((event) => event.type === 'locale-change')).toEqual([
+      { type: 'locale-change', generation: contexts.at(-1)!.snapshot.generation, locale: 'fr' },
+    ]);
+    expect(contexts.at(-1)!.snapshot.locale).toBe('fr');
+    await act(async () => { await ref.current!.whenLayoutComplete({ timeoutMs: 3000 }); });
+  });
+
   test('a load hook that applies a batch every run loads once and keeps its state', () =>
     loadHookAppliesOnce(mount));
 
@@ -2433,3 +2524,4 @@ describe('DocxEditor plugins (worker engine)', () => {
     }
   });
 });
+

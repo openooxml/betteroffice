@@ -540,11 +540,13 @@ impl<'b> Painter<'_, 'b> {
     fn decode(&mut self, asset_id: &str) -> Option<(Pixmap, (f32, f32))> {
         use image::ImageDecoder as _;
         let bytes = self.images.get(asset_id)?;
-        let decoder = image::ImageReader::new(Cursor::new(bytes))
+        let reader = image::ImageReader::new(Cursor::new(bytes))
             .with_guessed_format()
-            .ok()?
-            .into_decoder()
             .ok()?;
+        if reader.format() == Some(image::ImageFormat::Tiff) {
+            return None;
+        }
+        let decoder = reader.into_decoder().ok()?;
         let (declared_width, declared_height) = decoder.dimensions();
         let declared = u64::from(declared_width) * u64::from(declared_height);
         if declared == 0 || declared > MAX_IMAGE_PIXELS {
@@ -867,6 +869,36 @@ mod tests {
             transform: Affine::identity(),
         });
         let page = render_list(None, &list, &HashMap::new(), 1.0).unwrap();
+        assert_eq!(page.skipped_images, 1);
+    }
+
+    #[test]
+    fn a_tiff_is_skipped_even_when_the_image_crate_can_open_it() {
+        use image::ImageEncoder as _;
+        let mut data = Vec::new();
+        image::codecs::tiff::TiffEncoder::new(Cursor::new(&mut data))
+            .write_image(
+                &[255, 0, 0, 0, 255, 0],
+                2,
+                1,
+                image::ExtendedColorType::Rgb8,
+            )
+            .unwrap();
+        assert!(image::load_from_memory(&data).is_ok());
+        let mut list = empty_list(4.0, 4.0);
+        list.primitives.push(Primitive::Image {
+            id: "tiff".into(),
+            z_order: 0,
+            asset_id: "a".into(),
+            x: 0.0,
+            y: 0.0,
+            width: 2.0,
+            height: 1.0,
+            transform: Affine::identity(),
+        });
+        let mut images: HashMap<&str, &[u8]> = HashMap::new();
+        images.insert("a", &data);
+        let page = render_list(None, &list, &images, 1.0).unwrap();
         assert_eq!(page.skipped_images, 1);
     }
 

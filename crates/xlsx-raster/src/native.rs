@@ -9,6 +9,8 @@ const MAX_FONT_REGISTRATIONS: usize = 4_096;
 pub struct RasterFonts {
     faces: HashMap<(String, bool, bool), Vec<font::FontFace>>,
     data: Vec<Arc<[u8]>>,
+    registered: Vec<(ooxml_text::FontId, font::FaceInfo)>,
+    stack: font::FontStack,
     registrations: usize,
 }
 
@@ -54,26 +56,34 @@ impl RasterFonts {
                 "more than {MAX_FONT_REGISTRATIONS} font registrations"
             ));
         }
-        let data = if let Some(known) = self
+        let known = self
             .data
             .iter()
-            .find(|known| Arc::ptr_eq(known, &data) || known.as_ref() == data.as_ref())
-        {
-            Arc::clone(known)
+            .position(|known| Arc::ptr_eq(known, &data) || known.as_ref() == data.as_ref());
+        let (data, (id, info)) = if let Some(index) = known {
+            (Arc::clone(&self.data[index]), self.registered[index])
         } else {
             if self.data.len() >= MAX_FONT_FACES {
                 return Err(format!("more than {MAX_FONT_FACES} font faces"));
             }
-            if rustybuzz::Face::from_slice(&data, 0).is_none() {
+            let Some(info) = font::FaceInfo::read(&data) else {
                 return Err("invalid raster font".into());
-            }
+            };
+            let id = self
+                .stack
+                .store
+                .register_shared(Arc::clone(&data))
+                .map_err(|_| "invalid raster font".to_string())?;
             self.data.push(Arc::clone(&data));
-            data
+            self.registered.push((id, info));
+            (data, (id, info))
         };
         self.faces.entry(key).or_default().push(font::FontFace {
             data,
             bold: face_bold,
             italic: face_italic,
+            id,
+            info,
         });
         self.registrations += 1;
         Ok(())
@@ -99,6 +109,16 @@ impl RasterFonts {
         self.chain(family, bold, italic)
             .first()
             .map(|face| face.data.as_ref())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn chain_with_stack(
+        &self,
+        family: &str,
+        bold: bool,
+        italic: bool,
+    ) -> (&[font::FontFace], &font::FontStack) {
+        (self.chain(family, bold, italic), &self.stack)
     }
 
     fn chain(&self, family: &str, bold: bool, italic: bool) -> &[font::FontFace] {
@@ -338,6 +358,7 @@ pub fn render_png_with_fonts(dl: &DisplayList, fonts: &RasterFonts) -> Result<Ve
                     highlight: highlight.as_deref().map(parse_color).transpose()?,
                     dashed_underline: *dashed_underline,
                     faces: fonts.chain(font_family.as_deref().unwrap_or("Calibri"), *bold, *italic),
+                    stack: &fonts.stack,
                 };
                 if *stacked {
                     let cell = rotation_box.as_ref().unwrap_or(clip);
@@ -362,7 +383,9 @@ pub fn render_png_with_fonts(dl: &DisplayList, fonts: &RasterFonts) -> Result<Ve
                         text,
                         layout,
                         *align,
-                        |literal| font::measure_text_with_fonts(run.faces, literal, *font_size),
+                        |literal| {
+                            font::measure_text_with_fonts(run.faces, run.stack, literal, *font_size)
+                        },
                         |literal, x| {
                             font::paint_text(
                                 &mut pixmap,
@@ -377,7 +400,7 @@ pub fn render_png_with_fonts(dl: &DisplayList, fonts: &RasterFonts) -> Result<Ve
                     );
                 } else if let Some(wrap) = wrap {
                     let lines = xlsx_render::wrap::wrap_lines(text, wrap.width, |line| {
-                        font::measure_text_with_fonts(run.faces, line, *font_size)
+                        font::measure_text_with_fonts(run.faces, run.stack, line, *font_size)
                     });
                     for (index, line) in lines.iter().enumerate() {
                         font::paint_text(

@@ -386,7 +386,7 @@ export function PptxEditorContent({
   backend?: (changed: () => void) => EditablePresentation;
   onWorkerReady?: (api: PptxWorkerEditorApi) => void;
 }) {
-  const { t } = useTranslation();
+  const { t, lang } = useTranslation();
   const decodeImageError = t('errors.decodeSlideImage');
   const collaborationClientId = collaboration?.clientId ?? clientId;
   const collaborationInitialUpdate = collaboration?.initialUpdate;
@@ -946,7 +946,7 @@ export function PptxEditorContent({
     }
     return { ...on, target: { kind: 'slide' } };
   }, [model, selection, shapeSelection]);
-  const pluginHost = usePptxPluginHost({
+  const pluginHost = usePptxPluginHost({ locale: lang, focusRoot: stageRef,
     plugins,
     pluginGrants,
     onPluginError,

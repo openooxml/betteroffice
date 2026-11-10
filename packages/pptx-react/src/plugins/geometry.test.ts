@@ -10,6 +10,7 @@ import {
   EMU_PER_PIXEL,
   pluginLayout,
   slideRectToOverlay,
+  slideViewport,
   type PresentedSlide,
 } from './geometry';
 
@@ -217,4 +218,12 @@ describe('overlay coordinates', () => {
     ).toBeNull();
     expect(geometry.getPositionAtPoint(10, 10)).toBeNull();
   });
+});
+
+test('viewport measures the stage client box relative to the overlay and follows scrolling', () => {
+  const stage = element(box(100, 60, 804, 604), { clientLeft: 2, clientTop: 2, clientWidth: 780, clientHeight: 580 });
+  const layer = element(box(140, -20, 1280, 720), { clientLeft: 1, clientTop: 1, scrollLeft: 4, scrollTop: 6 });
+  expect(slideViewport(stage, layer)).toEqual({ x: -35, y: 87, width: 780, height: 580 });
+  layer.getBoundingClientRect = () => box(140, -100, 1280, 720);
+  expect(slideViewport(stage, layer)).toEqual({ x: -35, y: 167, width: 780, height: 580 });
 });

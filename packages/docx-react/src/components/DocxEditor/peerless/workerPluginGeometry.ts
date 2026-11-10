@@ -1,7 +1,7 @@
 import { createDisplayListQueries, effectiveZoom, loadRustDisplayListQueryEngine, type DisplayListQueries, type DisplayListRect } from '@betteroffice/docx/layout/render';
 import { createRenderedDomContext, type DisplayListPageProjector } from '@betteroffice/docx/plugin-api/RenderedDomContext';
 import { anchorFailure, type DocxReservationsPayload, type ProposalGeometryTarget } from '@betteroffice/docx/yrs';
-import { hiddenBoundary, overlayProjector, pageBuilt, pageRectOf, placeDrawing, placeRepeated, placeReservation, registerReservationReader, toOverlayRect, unbuiltPagesOf } from '../../../plugins/geometry';
+import { hiddenBoundary, visibleViewport, overlayProjector, pageBuilt, pageRectOf, placeDrawing, placeRepeated, placeReservation, registerReservationReader, toOverlayRect, unbuiltPagesOf } from '../../../plugins/geometry';
 import type { DocxAnchorGeometryResult, DocxAnchorRect, DocxGeometryTarget, DocxPluginGeometry, DocxPluginRect, DocxPluginLayout, DocxPluginNavigation, DocxPluginRefusal, DocxPluginSelection } from '../../../plugins/types';
 import { pluginRefusal } from '../../../plugins/createPluginClients';
 import { DocxEditorNotReadyError, WorkerReadSupersededError, type createPeerlessShellController } from './shellController';
@@ -24,7 +24,7 @@ export function workerReadRefusal(controller: Pick<ReturnType<typeof createPeerl
 
 /** Reservation boxes answer from the frame carrying their owner's set. */
 export function createWorkerPluginGeometry(controller: ReturnType<typeof createPeerlessShellController>, pages: () => HTMLElement | null, layer: () => HTMLElement | null, changed: () => void,
-  navigate?: (target: { story: string; paraId: string }, focus: boolean, expectVersion: string) => Promise<boolean>, reservations: () => DocxReservationsPayload | null = () => null) {
+  navigate?: (target: { story: string; paraId: string }, focus: boolean, expectVersion: string) => Promise<boolean>, reservations: () => DocxReservationsPayload | null = () => null, viewport?: (layer: HTMLElement) => DocxPluginRect) {
   type Read = Exclude<DocxGeometryTarget, { kind: 'proposal' | 'reservation' }>;
   type ReadAll = (targets: readonly DocxGeometryTarget[], retry: boolean, owner?: string) => Promise<DocxAnchorGeometryResult[]>;
   let current: { frame: PeerlessFrameGeometry; version: number; pixelRatio: number; layout: DocxPluginLayout; geometry: DocxPluginGeometry; queries: DisplayListQueries; reservations: DocxReservationsPayload | null;
@@ -230,6 +230,7 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
     };
     const geometry: DocxPluginGeometry = {
       layout, dom,
+      get viewport() { return viewport?.(overlay) ?? visibleViewport(overlay, overlay, overlay); },
       toOverlayRect: rect => current?.geometry === geometry ? toOverlayRect(container, overlay, zoom, rect) : null,
       getPositionAtPoint: () => null,
       async readPositionAtPoint(x, y) {

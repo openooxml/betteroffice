@@ -89,6 +89,8 @@ async function misalignment(page: Page): Promise<number> {
   });
 }
 
+type ProbeEvent = { type: string; focused?: boolean; viewport?: { x: number; y: number; width: number; height: number } | null };
+
 for (const engine of ['legacy', 'worker'] as const) {
   test.describe(`xlsx plugins (${engine})`, () => {
     test.afterEach(async ({ page }) => {
@@ -125,6 +127,22 @@ test('xlsx: a plugin panel gesture admits a granted built-in mutation', async ({
     ok: false, failure: { code: 'unsupported-policy' },
   });
   expect(await state()).toEqual(after);
+});
+
+test('document focus excludes the plugin panel', async ({ page }) => {
+  await open(page, engine);
+  const events = () => page.evaluate(() =>
+    (window as unknown as { __probe: { events: ProbeEvent[] } }).__probe.events
+      .filter((event) => event.type === 'focus-change'));
+  await page.getByTestId('probe-input').click();
+  await page.evaluate(() => {
+    (window as unknown as { __probe: { events: ProbeEvent[] } }).__probe.events = [];
+  });
+  await page.getByTestId('xlsx-scroll').locator('canvas').first().click({ position: { x: 100, y: 100 } });
+  await expect.poll(async () => (await events()).at(-1)?.focused).toBe(true);
+  await page.getByTestId('probe-input').click();
+  await expect.poll(async () => (await events()).at(-1)?.focused).toBe(false);
+  expect((await events()).map((event) => event.focused)).toEqual([true, false]);
 });
 
 test('xlsx: overlays land on the painted cells at every zoom, scrolled and in frozen panes', async ({

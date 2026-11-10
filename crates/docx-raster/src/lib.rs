@@ -1319,7 +1319,7 @@ fn gradient_paint(
                 Transform::identity(),
             )
         }
-        "radial" => {
+        "radial" | "rectangular" | "path" => {
             let center = Point::from_xy(x + w / 2.0, y + h / 2.0);
             RadialGradient::new(
                 center,
@@ -2101,11 +2101,18 @@ impl<'c> PageImages<'c> {
         }
 
         let bytes = ooxml_raster::png_with_end(bytes);
-        let Some(mut decoder) = image::ImageReader::new(Cursor::new(bytes.as_ref()))
+        let Some(reader) = image::ImageReader::new(Cursor::new(bytes.as_ref()))
             .with_guessed_format()
             .ok()
-            .and_then(|reader| reader.into_decoder().ok())
         else {
+            return Decode::Refused;
+        };
+        if reader.format() == Some(image::ImageFormat::Tiff)
+            && ooxml_drawingml::media::tiff_bounded_pixels(&bytes).is_none()
+        {
+            return Decode::Refused;
+        }
+        let Ok(mut decoder) = reader.into_decoder() else {
             return Decode::Refused;
         };
         let (declared_width, declared_height) = decoder.dimensions();
@@ -3446,6 +3453,90 @@ fn ensure_keys(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A 2x1 uncompressed 8-bit RGB TIFF with this compression tag.
+    fn rgb_tiff(compression: u16) -> Vec<u8> {
+        let entries: [(u16, u16, u32, u32); 9] = [
+            (256, 3, 1, 2),
+            (257, 3, 1, 1),
+            (258, 3, 3, 122),
+            (259, 3, 1, u32::from(compression)),
+            (262, 3, 1, 2),
+            (273, 4, 1, 128),
+            (277, 3, 1, 3),
+            (278, 3, 1, 1),
+            (279, 4, 1, 6),
+        ];
+        let mut tiff = b"II*\0\x08\0\0\0".to_vec();
+        tiff.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        for (tag, kind, count, value) in entries {
+            tiff.extend_from_slice(&tag.to_le_bytes());
+            tiff.extend_from_slice(&kind.to_le_bytes());
+            tiff.extend_from_slice(&count.to_le_bytes());
+            tiff.extend_from_slice(&value.to_le_bytes());
+        }
+        tiff.extend_from_slice(&0u32.to_le_bytes());
+        for _ in 0..3 {
+            tiff.extend_from_slice(&8u16.to_le_bytes());
+        }
+        tiff.extend_from_slice(&[0; 6]);
+        tiff
+    }
+
+    /// A 2x1 TIFF whose strip is a real JPEG of those pixels.
+    fn jpeg_tiff() -> Vec<u8> {
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+            .encode(
+                &[255, 0, 0, 0, 255, 0],
+                2,
+                1,
+                image::ExtendedColorType::Rgb8,
+            )
+            .unwrap();
+        let entries: [(u16, u16, u32, u32); 9] = [
+            (256, 3, 1, 2),
+            (257, 3, 1, 1),
+            (258, 3, 3, 122),
+            (259, 3, 1, 7),
+            (262, 3, 1, 2),
+            (273, 4, 1, 128),
+            (277, 3, 1, 3),
+            (278, 3, 1, 1),
+            (279, 4, 1, jpeg.len() as u32),
+        ];
+        let mut tiff = b"II*\0\x08\0\0\0".to_vec();
+        tiff.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        for (tag, kind, count, value) in entries {
+            tiff.extend_from_slice(&tag.to_le_bytes());
+            tiff.extend_from_slice(&kind.to_le_bytes());
+            tiff.extend_from_slice(&count.to_le_bytes());
+            tiff.extend_from_slice(&value.to_le_bytes());
+        }
+        tiff.extend_from_slice(&0u32.to_le_bytes());
+        for _ in 0..3 {
+            tiff.extend_from_slice(&8u16.to_le_bytes());
+        }
+        tiff.extend_from_slice(&jpeg);
+        tiff
+    }
+
+    /// Proves the decoder would draw it, so a refusal comes from the check.
+    fn opens_without_the_check(tiff: &[u8]) -> bool {
+        image::ImageReader::new(Cursor::new(tiff))
+            .with_guessed_format()
+            .unwrap()
+            .decode()
+            .is_ok()
+    }
+
+    #[test]
+    fn a_tiff_whose_decode_its_size_does_not_bound_is_refused_before_opening() {
+        assert_eq!(decoded_size(&rgb_tiff(1)), Some((2, 1)));
+        let tiff = jpeg_tiff();
+        assert!(opens_without_the_check(&tiff));
+        assert_eq!(decoded_size(&tiff), None);
+    }
 
     fn decoded_size(bytes: &[u8]) -> Option<(u32, u32)> {
         let mut cache = ImageCache::default();

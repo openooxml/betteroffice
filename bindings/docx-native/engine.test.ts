@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { beforeAll, describe, expect, spyOn, test } from 'bun:test';
+import { applyFrameDelta, decodeFrameDelta } from '../../packages/docx/src/layout/render/frameDelta';
 import initWasm, * as wasm from '../../packages/docx/src/wasm/generated/edit/docx_edit.js';
 import initPreflight, { font_preflight as wasmFontPreflight } from '../../packages/docx/src/wasm/generated/preflight/docx_preflight.js';
 
@@ -218,16 +219,19 @@ describe('docx native engine parity', () => {
     }
   });
 
-  test('measured glyph runs of an Arabic paragraph match in both engines', () => {
+  test.each([
+    ['Arabic', 'مرحبا', 'بالعالم', true, () => new Uint8Array(readFileSync(new URL('../../packages/fonts/assets/NotoNaskhArabic-Regular.ttf', import.meta.url)))],
+    ['Devanagari', 'नमस्ते', 'क्षत्रिय', false, () => wasm.decodeFontFace(new Uint8Array(readFileSync(new URL('../../packages/fonts-intl/assets/NotoSansDevanagari-Regular.ttf.zst', import.meta.url))), 'zstd').font],
+  ] as const)('measured glyph runs of a %s paragraph match in both engines', (_script, first, second, rtl, scriptFont) => {
     const encoder = new TextEncoder();
     const main = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
-    const words = Array.from({ length: 12 }, () => 'مرحبا بالعالم').join(' ');
+    const words = Array.from({ length: 12 }, () => `${first} ${second}`).join(' ');
     const bytes = wasm.rezip_docx({
       '[Content_Types].xml': encoder.encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'),
       '_rels/.rels': encoder.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'),
-      'word/document.xml': encoder.encode(`<w:document ${main}><w:body><w:p><w:pPr><w:bidi/></w:pPr><w:r><w:rPr><w:rtl/></w:rPr><w:t xml:space="preserve">${words}</w:t></w:r><w:r><w:t xml:space="preserve"> Latin tail</w:t></w:r></w:p><w:sectPr/></w:body></w:document>`),
+      'word/document.xml': encoder.encode(`<w:document ${main}><w:body><w:p>${rtl ? '<w:pPr><w:bidi/></w:pPr>' : ''}<w:r>${rtl ? '<w:rPr><w:rtl/></w:rPr>' : ''}<w:t xml:space="preserve">${words}</w:t></w:r><w:r><w:t xml:space="preserve"> Latin tail</w:t></w:r></w:p><w:sectPr/></w:body></w:document>`),
     });
-    const naskhBytes = new Uint8Array(readFileSync(new URL('../../packages/fonts/assets/NotoNaskhArabic-Regular.ttf', import.meta.url)));
+    const scriptBytes = scriptFont();
     const expected = new wasm.EditSession(31);
     const actual = new native.EditSession(31);
     try {
@@ -235,8 +239,8 @@ describe('docx native engine parity', () => {
       actual.open_docx(bytes, true, 'opening');
       const latin = expected.register_measure_font(fontBytes);
       expect(actual.register_measure_font(fontBytes)).toBe(latin);
-      const naskh = expected.register_measure_font(naskhBytes);
-      expect(actual.register_measure_font(naskhBytes)).toBe(naskh);
+      const script = expected.register_measure_font(scriptBytes);
+      expect(actual.register_measure_font(scriptBytes)).toBe(script);
       const request = {
         bodyStory: 'body',
         regions: { sections: [{
@@ -254,10 +258,11 @@ describe('docx native engine parity', () => {
         renderEnv: {},
       };
       const requirements = JSON.parse(expected.layout_font_requirements_json(JSON.stringify(request))) as { key: string }[];
-      for (const requirement of requirements) request.measurement.fontChains[requirement.key] = [latin, naskh];
+      for (const requirement of requirements) request.measurement.fontChains[requirement.key] = [latin, script];
       const input = JSON.stringify(request);
       const layout = actual.layout_document_with_regions_json(input);
-      expect(layout).toBe(expected.layout_document_with_regions_json(input));
+      const expectedLayout = expected.layout_document_with_regions_json(input);
+      expect(layout).toBe(expectedLayout);
       const glyphRuns = (value: unknown): string[] => {
         if (Array.isArray(value)) return value.flatMap(glyphRuns);
         if (value === null || typeof value !== 'object') return [];
@@ -267,9 +272,18 @@ describe('docx native engine parity', () => {
       };
       const lines = glyphRuns(JSON.parse(layout));
       expect(lines.length).toBeGreaterThan(1);
-      expect(lines).toEqual(glyphRuns(JSON.parse(expected.layout_document_with_regions_json(input))));
+      expect(lines).toEqual(glyphRuns(JSON.parse(expectedLayout)));
       const display = actual.build_display_list_json(layout);
       expect(display).toBe(expected.build_display_list_json(layout));
+      // Only the font-aware frame build shapes; the JSON build above has no font store.
+      const extras = JSON.stringify({ fontChains: request.measurement.fontChains });
+      const frame = actual.build_display_list_frame(extras, 0);
+      expect(frame).toEqual(expected.build_display_list_frame(extras, 0));
+      const painted = applyFrameDelta(null, decodeFrameDelta(frame)).pages
+        .flatMap((page) => page.page.primitives)
+        .flatMap((primitive) => (primitive.kind === 'glyphRun' ? [primitive.text] : []));
+      expect(painted).toContain(first);
+      expect(painted).toContain(second);
     } finally {
       actual.free();
       expected.free();
@@ -1340,12 +1354,13 @@ test('native and wasm mark the same list markers as numbered', () => {
         }).document?.package?.theme?.colorScheme ?? {} },
       }));
       const list = JSON.parse(session.build_display_list_json(JSON.stringify({ ...JSON.parse(layout), fontChains }))) as {
-        pages: { primitives: { listMarker?: boolean; listMarkerNumbered?: boolean; text?: string }[] }[];
+        pages: { primitives: { listMarker?: boolean; listMarkerNumbered?: boolean; listMarkerBullet?: boolean; text?: string }[] }[];
       };
       const markers = list.pages.flatMap((page) => page.primitives).filter((primitive) => primitive.listMarker);
       return {
         numbered: markers.filter((marker) => marker.listMarkerNumbered).map((marker) => marker.text).join(''),
-        hidden: markers.filter((marker) => !marker.listMarkerNumbered).map((marker) => marker.text).join(''),
+        bullets: markers.filter((marker) => marker.listMarkerBullet).map((marker) => marker.text).join(''),
+        neither: markers.filter((marker) => !marker.listMarkerNumbered && !marker.listMarkerBullet).length,
       };
     } finally {
       session.free();
@@ -1353,7 +1368,8 @@ test('native and wasm mark the same list markers as numbered', () => {
   };
   const markers = run(native);
   expect(markers.numbered.trim()).toBe('Part 3.');
-  expect(markers.hidden.trim()).not.toBe('');
+  expect(markers.bullets.trim()).not.toBe('');
+  expect(markers.neither).toBe(0);
   expect(run(wasm)).toEqual(markers);
 });
 
@@ -1448,4 +1464,53 @@ test('native and wasm carry the same chart data in the display list', () => {
     }
   };
   expect(run(native)).toEqual(run(wasm));
+});
+
+test('native and wasm leave hidden table rows out of the display list unless hidden text is shown', () => {
+  const encoder = new TextEncoder();
+  const w = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+  const border = 'w:val="single" w:sz="24" w:space="0" w:color="000000"';
+  const row = (text: string, hidden: boolean) => `<w:tr>${hidden ? '<w:trPr><w:hidden/></w:trPr>' : ''}<w:tc><w:tcPr><w:tcW w:w="3000" w:type="dxa"/></w:tcPr><w:p><w:r>${hidden ? '<w:rPr><w:vanish/></w:rPr>' : ''}<w:t>${text}</w:t></w:r></w:p></w:tc></w:tr>`;
+  const table = (rows: string) => `<w:tbl><w:tblPr><w:tblW w:w="3000" w:type="dxa"/><w:tblBorders><w:top ${border}/><w:bottom ${border}/><w:insideH ${border}/></w:tblBorders></w:tblPr><w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid>${rows}</w:tbl>`;
+  const bytes = wasm.rezip_docx({
+    '[Content_Types].xml': encoder.encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'),
+    '_rels/.rels': encoder.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'),
+    'word/document.xml': encoder.encode(`<w:document xmlns:w="${w}"><w:body>${table(row('Alpha', false) + row('Bravo', true) + row('Charlie', false))}<w:p/>${table(row('Delta', true) + row('Echo', true))}<w:p><w:r><w:t>Tail</w:t></w:r></w:p><w:sectPr/></w:body></w:document>`),
+  });
+  type Primitive = { kind: string; text?: string; role?: string; y1?: number; cell?: { row: number } };
+  const run = (engine: Engine, showHiddenText: boolean) => {
+    const session = new engine.EditSession(79);
+    try {
+      session.open_docx(bytes, true);
+      const font = session.register_measure_font(fontBytes);
+      const fontChains = { 'calibri|0|0': [font], 'calibri|1|0': [font] };
+      const layout = session.layout_document_with_regions_json(JSON.stringify({
+        bodyStory: 'body',
+        regions: { sections: [{ sectionId: 'main', properties: {
+          pageWidth: 12240, pageHeight: 15840, marginTop: 1440, marginRight: 1440, marginBottom: 1440, marginLeft: 1440,
+        } }] },
+        measurement: { fontChains, defaults: { fontSize: 11, fontFamily: 'Calibri' }, authoritativeShaping: true },
+        renderEnv: { showHiddenText },
+      }));
+      const list = JSON.parse(session.build_display_list_json(JSON.stringify({ ...JSON.parse(layout), fontChains }))) as {
+        pages: { primitives: Primitive[] }[];
+      };
+      const primitives = list.pages.flatMap((page) => page.primitives);
+      return {
+        text: primitives.map((p) => p.text ?? '').join('').replace(/\s/g, ''),
+        rows: [...new Set(primitives.flatMap((p) => (p.cell ? [p.cell.row] : [])))].sort(),
+        borders: primitives.filter((p) => p.role === 'table-border').length,
+      };
+    } finally {
+      session.free();
+    }
+  };
+  const hidden = run(native, false);
+  expect(hidden.text).toBe('AlphaCharlieTail');
+  expect(hidden.rows).toEqual([0, 2]);
+  expect(hidden).toEqual(run(wasm, false));
+  const shown = run(native, true);
+  expect(shown.text).toBe('AlphaBravoCharlieDeltaEchoTail');
+  expect(shown.borders).toBeGreaterThan(hidden.borders);
+  expect(shown).toEqual(run(wasm, true));
 });
