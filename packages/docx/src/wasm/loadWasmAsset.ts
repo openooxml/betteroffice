@@ -109,6 +109,8 @@ export interface WasmModuleMemory extends Partial<WasmHeapStats> {
    */
   bufferBytes: number;
   maximumBytes?: number;
+  /** Listed by a native engine, which has no linear memory and no 4 GiB limit. */
+  native?: true;
 }
 
 /** The address space of a wasm32 memory: 4 GiB. */
@@ -130,7 +132,7 @@ export function wasmModuleMemories(): WasmModuleMemory[] {
     const memory = module.memory();
     if (!memory) {
       const heap = module.nativeReady?.() ? module.heap?.() : undefined;
-      if (heap) out.push({ label: module.label, bufferBytes: heap.peakBytes, ...heap });
+      if (heap) out.push({ label: module.label, bufferBytes: heap.peakBytes, native: true, ...heap });
       continue;
     }
     const maximumBytes = memoryMaximumBytes(memory);

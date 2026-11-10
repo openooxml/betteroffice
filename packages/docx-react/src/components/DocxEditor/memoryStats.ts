@@ -21,7 +21,11 @@ export interface DocxMemoryStats {
  */
 export type DocxMemoryPressureLevel = 'normal' | 'warning' | 'critical';
 
-/** How much wasm memory the editor may use. */
+/**
+ * How much memory the editor may use. A native engine has no 4 GiB limit:
+ * its heap is held only against the thresholds set here, and without them it
+ * reports no pressure.
+ */
 export interface DocxMemoryBudget {
   /** Pressure is `warning` from here. Default: 75% of the 4 GiB limit. */
   warningBytes?: number;
@@ -30,7 +34,7 @@ export interface DocxMemoryBudget {
   /**
    * The most the resident worker's editing core may allocate at once, applied
    * when a worker starts. An allocation past it fails as if the memory were
-   * full. Default: no limit short of 4 GiB.
+   * full. Default: no limit short of 4 GiB. A native engine does not enforce it yet.
    */
   workerLimitBytes?: number;
 }
@@ -61,13 +65,16 @@ export function memoryPressureLevel(
 ): DocxMemoryPressureLevel {
   const critical = budget.criticalBytes ?? stats.limitBytes * 0.9;
   const warning = Math.min(budget.warningBytes ?? stats.limitBytes * 0.75, critical);
-  let held = 0;
+  const nativeCritical = budget.criticalBytes ?? Infinity;
+  const nativeWarning = Math.min(budget.warningBytes ?? Infinity, nativeCritical);
+  let level: DocxMemoryPressureLevel = 'normal';
   for (const module of [...stats.main, ...(stats.worker ?? [])]) {
-    held = Math.max(held, heldBytes(module));
+    const held = heldBytes(module);
+    const [warningAt, criticalAt] = module.native ? [nativeWarning, nativeCritical] : [warning, critical];
+    if (held >= criticalAt) return 'critical';
+    if (held >= warningAt) level = 'warning';
   }
-  if (held >= critical) return 'critical';
-  if (held >= warning) return 'warning';
-  return 'normal';
+  return level;
 }
 
 /**

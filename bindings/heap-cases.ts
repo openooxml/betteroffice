@@ -17,6 +17,7 @@ export interface HeapMemoryEntry {
   liveBytes?: number;
   peakBytes?: number;
   failedAllocationBytes?: number;
+  native?: true;
 }
 
 /**
@@ -93,8 +94,10 @@ export function describeHeapTable<T>(
     if (engineKind === 'native') {
       expect(bufferBytes).toBe(peakBytes!);
       expect(maximumBytes).toBeUndefined();
+      expect(listed!.native).toBe(true);
     } else {
       expect(bufferBytes).toBeGreaterThanOrEqual(liveBytes!);
+      expect(listed!.native).toBeUndefined();
     }
   });
 

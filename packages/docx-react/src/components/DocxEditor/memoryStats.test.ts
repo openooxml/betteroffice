@@ -45,6 +45,23 @@ test('allocated bytes count, not the grown buffer, when the allocator reports th
   );
 });
 
+const nativeEdit = (liveBytes: number): WasmModuleMemory => ({ ...edit(liveBytes), native: true });
+
+test('a native engine reports no pressure without a budget: the 4 GiB limit is wasm only', () => {
+  expect(memoryPressureLevel(stats([nativeEdit(3.9 * GIB)]))).toBe('normal');
+  expect(memoryPressureLevel(stats(null, [nativeEdit(16 * GIB)]))).toBe('normal');
+  expect(memoryPressureLevel(stats([nativeEdit(16 * GIB)], [edit(3.1 * GIB)]))).toBe('warning');
+});
+
+test('a native engine follows the budget it is given', () => {
+  const budget = { warningBytes: 1 * GIB, criticalBytes: 2 * GIB };
+  expect(memoryPressureLevel(stats([nativeEdit(0.5 * GIB)]), budget)).toBe('normal');
+  expect(memoryPressureLevel(stats([nativeEdit(1.5 * GIB)]), budget)).toBe('warning');
+  expect(memoryPressureLevel(stats([nativeEdit(2.5 * GIB)]), budget)).toBe('critical');
+  expect(memoryPressureLevel(stats([nativeEdit(1.5 * GIB)]), { criticalBytes: 1 * GIB })).toBe('critical');
+  expect(memoryPressureLevel(stats([nativeEdit(0.5 * GIB)]), { criticalBytes: 1 * GIB })).toBe('normal');
+});
+
 test('a budget moves the levels', () => {
   const budget = { warningBytes: 1 * GIB, criticalBytes: 2 * GIB };
   expect(memoryPressureLevel(stats([edit(1.5 * GIB)]), budget)).toBe('warning');
