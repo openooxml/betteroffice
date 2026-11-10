@@ -18,12 +18,15 @@ const W_NAMESPACE: &str = "http://schemas.openxmlformats.org/wordprocessingml/20
 
 /// What the XML written for an unchanged paragraph must agree on with its source XML for the
 /// source to stand in for it: the same comment markers in order, at the same text offsets, the
-/// same permission markers, and no revision or note ID the source lacks. Source IDs the written XML lacks are kept, as are
+/// same permission markers, the same number of page and column breaks, and no revision or note
+/// ID the source lacks. Source IDs the written XML lacks are kept, as are
 /// relationship IDs: the save keeps every source relationship.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Marks {
     comments: Vec<(String, String, usize)>,
     permissions: Vec<(String, String)>,
+    page_breaks: usize,
+    column_breaks: usize,
     footnote_refs: usize,
     endnote_refs: usize,
     ids: BTreeMap<(&'static str, String), usize>,
@@ -33,6 +36,8 @@ impl Marks {
     fn admit(&self, written: &Marks) -> bool {
         self.comments == written.comments
             && self.permissions == written.permissions
+            && self.page_breaks == written.page_breaks
+            && self.column_breaks == written.column_breaks
             && self.footnote_refs >= written.footnote_refs
             && self.endnote_refs >= written.endnote_refs
             && written
@@ -92,6 +97,17 @@ fn marks(xml: &str) -> Option<Marks> {
         }
         if in_properties == 0 && POSITIONED.contains(&tag.name) {
             offset += 1;
+        }
+        if in_properties == 0 && tag.name == "w:br" {
+            match attribute(&tag, "w:type")
+                .and_then(|range| unescaped(xml, range))
+                .as_deref()
+            {
+                Some("page") => marks.page_breaks += 1,
+                Some("column") => marks.column_breaks += 1,
+                _ => {}
+            }
+            continue;
         }
         let id = || {
             attribute(&tag, "w:id")
@@ -4188,6 +4204,43 @@ mod tests {
         assert!(splice(&source, &[(0, moved)], &[]).is_some_and(|xml| xml.contains(moved)));
         let same = "<w:p w14:paraId=\"0000000A\"><w:commentRangeStart w:id=\"1\"/><w:r><w:t>a</w:t><w:t>b</w:t></w:r><w:commentRangeEnd w:id=\"1\"/></w:p>";
         assert_eq!(splice(&source, &[(0, same)], &[]), Some(source.clone()));
+    }
+
+    #[test]
+    fn rewrites_an_unchanged_paragraph_that_gains_or_loses_a_page_or_column_break() {
+        let source = format!(
+            "{ROOT}<w:body><w:p w14:paraId=\"0000000A\"><w:r><w:t>a</w:t></w:r></w:p><w:p w14:paraId=\"0000000B\"><w:r><w:t>b</w:t></w:r></w:p></w:body></w:document>"
+        );
+        for kind in ["page", "column"] {
+            let gained = format!(
+                "<w:p w14:paraId=\"0000000B\"><w:r><w:br w:type=\"{kind}\"/><w:t>b</w:t></w:r></w:p>"
+            );
+            let edited = "<w:p w14:paraId=\"0000000A\"><w:r><w:t>ax</w:t></w:r></w:p>";
+            let spliced = splice(&source, &[(0, edited), (1, &gained)], &[0]).unwrap();
+            assert!(spliced.contains(&gained), "{kind}: {spliced}");
+            assert!(spliced.contains(edited));
+        }
+        let with_break = format!(
+            "{ROOT}<w:body><w:p w14:paraId=\"0000000A\"><w:r><w:t>a</w:t><w:br w:type=\"page\"/></w:r></w:p></w:body></w:document>"
+        );
+        let lost = "<w:p w14:paraId=\"0000000A\"><w:r><w:t>a</w:t></w:r></w:p>";
+        assert!(splice(&with_break, &[(0, lost)], &[]).is_some_and(|xml| xml.contains(lost)));
+        let moved =
+            "<w:p w14:paraId=\"0000000A\"><w:r><w:br w:type=\"page\"/><w:t>a</w:t></w:r></w:p>";
+        assert_eq!(
+            splice(&with_break, &[(0, moved)], &[]),
+            Some(with_break.clone())
+        );
+        let rendered = "<w:p w14:paraId=\"0000000A\"><w:r><w:t>a</w:t></w:r><w:r><w:br w:type=\"page\"/><w:lastRenderedPageBreak/></w:r></w:p>";
+        assert_eq!(
+            splice(&with_break, &[(0, rendered)], &[]),
+            Some(with_break.clone())
+        );
+        let line = "<w:p w14:paraId=\"0000000A\"><w:r><w:t>a</w:t><w:br/><w:br w:type=\"textWrapping\"/><w:br w:type=\"page\"/></w:r></w:p>";
+        assert_eq!(
+            splice(&with_break, &[(0, line)], &[]),
+            Some(with_break.clone())
+        );
     }
 
     #[test]
