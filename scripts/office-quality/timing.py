@@ -51,7 +51,7 @@ def main():
     samples = job['samples']
     for sample in samples:
         verify(sample, root / sample['id'], format)
-    rows = [dict(id=sample['id'], source_sha256=sample['metadata']['source']['sha256'],
+    rows = [dict(id=sample['id'], source_sha256=sample['metadata']['source']['sha256'], notes_not_converged=False,
                  timings={channel: dict(status='ok', elapsed_ms=[]) for channel in CHANNELS}) for sample in samples]
     report = dict(schema_version=1, plan_sha256=job['plan_sha256'], format=format, samples=rows,
                   benchmark=dict(method=job['method'], rounds=job['rounds'], seed=job['seed'], sample_size=job['sample_size'],
@@ -74,6 +74,8 @@ def main():
                     row['timings'][channel] = dict(status='failed', error=f"round {turn + 1}: {result.get('error', 'no timing')}")
                 else:
                     current['elapsed_ms'].append(result['elapsed_ms'][0])
+                    if result.get('native', {}).get('notes_converged') is False:
+                        row['notes_not_converged'] = True
         write_json(root / 'report.json', report)
     complete = sum(all(row['timings'][channel]['status'] == 'ok' for channel in CHANNELS) for row in rows)
     print(f'{format.upper()} timing: {complete}/{len(rows)} documents timed by every engine in every round', flush=True)

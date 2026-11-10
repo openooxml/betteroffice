@@ -1,4 +1,5 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { budgetShards } from './shards.mjs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { fetchAsset } from './asset-cache.mjs';
@@ -17,18 +18,12 @@ export function calculationSamples(plan) {
 
 export function xlsxShards(plan) {
   const samples = calculationSamples(plan);
-  const shards = Array.from({ length: Math.min(4, samples.length) }, () => []);
-  const weights = shards.map(() => 0);
-  for (const sample of [...samples].sort((a, b) =>
-    b.metadata.calculation.result_cells - a.metadata.calculation.result_cells || a.id.localeCompare(b.id))) {
+  for (const sample of samples) {
     const size = sample.metadata.calculation.result_cells;
     if (!Number.isSafeInteger(size) || size < 1 || size > 250000)
       throw new Error('Invalid calculation reference size');
-    const index = weights.indexOf(Math.min(...weights));
-    shards[index].push(sample.id);
-    weights[index] += size;
   }
-  return shards;
+  return budgetShards('xlsx-benchmark', samples).map(shard => shard.samples);
 }
 
 function validateResult(result, total) {

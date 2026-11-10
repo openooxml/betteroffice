@@ -133,7 +133,8 @@ export function summarizeTiming(format, samples) {
     }];
   }));
   const ratio = (channel) => pairedRatio(perDocument(channel, median), perDocument('libreoffice', median), `${SEED}\0${format}\0${channel}`);
-  return { format, total: samples.length, common: common.length, channels,
+  return { format, total: samples.length, common: common.length,
+    notes_not_converged: common.filter((sample) => sample.notes_not_converged === true).length, channels,
     ratio_to_libreoffice: { published: ratio('published'), commit: ratio('commit') } };
 }
 
@@ -167,6 +168,7 @@ export function mergeTiming(plan, report, parts, planHash) {
       if (row?.id !== sample.id || row.source_sha256 !== sample.metadata.source.sha256 ||
           Object.keys(row.timings ?? {}).length !== CHANNELS.length)
         fail(`unexpected ${format} sample`);
+      if (typeof row.notes_not_converged !== 'boolean') fail(`unexpected ${format} sample`);
       for (const channel of CHANNELS) validateChannel(row.timings[channel]);
     });
     result[format] = { ...config, runner: part.runner, summary: summarizeTiming(format, part.samples), samples: part.samples };

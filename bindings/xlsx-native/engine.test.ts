@@ -9,6 +9,7 @@ import JSZip from 'jszip';
 import initWasm, { XlsxDocument as WasmDocument, XlsxSnapshotBuilder as WasmSnapshotBuilder, decodeFontFace as wasmDecodeFontFace, displayListCellLimit as wasmDisplayListCellLimit } from '../../packages/xlsx/src/wasm/generated/xlsx_wasm.js';
 import { expectFontFace, fontCases, fontErrorCases } from '../font-fixtures';
 import { cappedExtent } from '../../packages/xlsx/src/wasm/pngResolve';
+import { PNG_BROKEN_FACE, PNG_FONT_CASES, PNG_FONT_FACES, PNG_FONT_TARGET, pngFontOutcomeFailures, pngFontsWorkbook, type PngFontFaceName, type PngFontResult } from '../../e2e/xlsx-png-fonts';
 
 const native = require('./index.js');
 
@@ -126,6 +127,31 @@ function runScript(doc: EngineDocument) {
 }
 
 describe('xlsx native engine parity', () => {
+  describe('renderPng fonts option', () => {
+    test('follows the outcome table shared with the browser engine', async () => {
+      const entry = await import('./dist/index.js') as typeof import('../../packages/xlsx/src/index');
+      await entry.initWasm();
+      const workbook = entry.openWorkbook(await pngFontsWorkbook());
+      const face = (name: PngFontFaceName) => name === 'broken'
+        ? new Uint8Array(PNG_BROKEN_FACE)
+        : new Uint8Array(readFileSync(new URL(`../../${PNG_FONT_FACES[name]}`, import.meta.url)));
+      const results: Record<string, PngFontResult> = {};
+      try {
+        for (const { name, fonts } of PNG_FONT_CASES) {
+          try {
+            const options = fonts ? { fonts: fonts.map(({ family, face: faceName }) => ({ family, bytes: face(faceName) })) } : {};
+            results[name] = { png: Buffer.from(await workbook.renderPng(PNG_FONT_TARGET, options)).toString('base64') };
+          } catch (error) {
+            results[name] = { code: (error as { code?: string }).code, message: error instanceof Error ? error.message : String(error) };
+          }
+        }
+      } finally {
+        workbook.dispose();
+      }
+      expect(pngFontOutcomeFailures(results)).toEqual([]);
+    });
+  });
+
   test('the package renders installed CJK and Devanagari faces without fetching', async () => {
     const main = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
     const rels = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
