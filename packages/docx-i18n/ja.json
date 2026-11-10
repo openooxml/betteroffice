@@ -799,6 +799,8 @@
   },
   "a11y": {
     "pageLabel": "{number} ページ",
+    "unbuiltPagesNotMirrored": "{from} ページから {to} ページはまだ閲覧ビューに含まれていません。",
+    "goToPage": "{number} ページに移動",
     "headerLabel": "ページ ヘッダー",
     "footerLabel": "ページ フッター",
     "chartNoData": "データなし",
