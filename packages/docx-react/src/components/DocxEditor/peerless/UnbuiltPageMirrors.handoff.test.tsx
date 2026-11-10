@@ -35,19 +35,26 @@ const settle = () => act(async () => { await new Promise<void>((resolve) => setT
 
 const TEXT = 'Second paragraph';
 
-function page(blocks: string[][] = [['p1', 'First paragraph'], ['p2', TEXT]]): DisplayPage {
-  const primitives = blocks.map(([blockKey, text], index): DisplayPrimitive => ({
-    kind: 'text', text, x: 10, baselineY: 20 + index * 20, width: 80, font: '12px Arial', color: '#000',
-    blockKey, docStart: 1010 + index * 100, docEnd: 1010 + index * 100 + text!.length,
-    fragmentDocStart: 1009 + index * 100, fragmentDocEnd: 1011 + index * 100 + text!.length,
-  } as DisplayPrimitive));
+type Block = [blockKey: string, text: string, paraId?: string, marker?: 'numbered' | 'bullet'];
+
+function page(blocks: Block[] = [['p1', 'First paragraph'], ['p2', TEXT]]): DisplayPage {
+  const primitives = blocks.flatMap(([blockKey, text, paraId, marker], index): DisplayPrimitive[] => {
+    const at = { baselineY: 20 + index * 20, font: '12px Arial', color: '#000', blockKey, paraId,
+      fragmentDocStart: 1009 + index * 100, fragmentDocEnd: 1011 + index * 100 + text.length };
+    const body = { ...at, kind: 'text', text, x: 30, width: 60, docStart: 1010 + index * 100, docEnd: 1010 + index * 100 + text.length } as DisplayPrimitive;
+    if (!marker) return [body];
+    return [{ ...at, kind: 'text', text: marker === 'numbered' ? '1.' : '•', x: 10, width: 10, listMarker: true,
+      listMarkerNumbered: marker === 'numbered', listMarkerBullet: marker === 'bullet' } as DisplayPrimitive, body];
+  });
   return { pageIndex: 1, width: 100, height: 100, positionSpan: [1009, 1300], primitives } as DisplayPage;
 }
+
+type Unbuilt = [paraId: string | undefined, text: string][];
 
 type Phase = 'unbuilt' | 'text' | 'full';
 type Mirrors = ReturnType<typeof useUnbuiltPageMirrors>;
 
-function Harness({ phase, displayPage, expose, fullMirror = true }: { phase: Phase; displayPage: DisplayPage; expose(mirrors: Mirrors): void; fullMirror?: boolean }) {
+function Harness({ phase, displayPage, expose, fullMirror = true, unbuilt }: { phase: Phase; displayPage: DisplayPage; expose(mirrors: Mirrors): void; fullMirror?: boolean; unbuilt: Unbuilt }) {
   const column = useRef<HTMLDivElement>(null);
   const mirrors = useUnbuiltPageMirrors({
     binding: {} as PeerlessEditSessionBinding, geometry: null, mountedPages: [], center: 1, enabled: true,
@@ -56,19 +63,19 @@ function Harness({ phase, displayPage, expose, fullMirror = true }: { phase: Pha
   expose(mirrors);
   return <div ref={column}><div data-docx-pages-host="">
     {phase === 'unbuilt'
-      ? <section data-docx-unbuilt-page="1"><p tabIndex={-1}>{TEXT}</p></section>
+      ? <section data-docx-unbuilt-page="1">{unbuilt.map(([paraId, text], index) => <p key={index} tabIndex={-1} data-para-id={paraId}>{text}</p>)}</section>
       : <div data-page-index="1"><CanvasPageMirror page={displayPage} active={phase === 'full'} /></div>}
   </div></div>;
 }
 
-function mount(fullMirror = true) {
+function mount(fullMirror = true, unbuilt: Unbuilt = [[undefined, TEXT]]) {
   let displayPage = page();
   let mirrors!: Mirrors;
   const expose = (value: Mirrors) => { mirrors = value; };
-  const view = render(<Harness phase="unbuilt" displayPage={displayPage} expose={expose} fullMirror={fullMirror} />);
+  const view = render(<Harness phase="unbuilt" displayPage={displayPage} expose={expose} fullMirror={fullMirror} unbuilt={unbuilt} />);
   const to = async (phase: Phase, next: DisplayPage = displayPage) => {
     displayPage = next;
-    view.rerender(<Harness phase={phase} displayPage={displayPage} expose={expose} fullMirror={fullMirror} />);
+    view.rerender(<Harness phase={phase} displayPage={displayPage} expose={expose} fullMirror={fullMirror} unbuilt={unbuilt} />);
     await settle();
   };
   const section = () => view.container.querySelector<HTMLElement>('[data-docx-unbuilt-page="1"]')!;
@@ -122,9 +129,13 @@ test('with text page mirrors, focus handed from an unbuilt paragraph lands in th
   expect(document.activeElement).toBe(block);
 });
 
-const shell = () => page([['p1', 'First paragraph']]);
+const shell = (): DisplayPage => ({ ...page([]), unbuilt: true });
 const mirrorRoot = (view: ReturnType<typeof mount>) =>
   view.container.querySelector<HTMLElement>('[data-page-index="1"] .canvas-page-mirror')!.firstElementChild;
+const blockOf = (view: ReturnType<typeof mount>, key: string) =>
+  view.container.querySelector<HTMLElement>(`[data-page-index="1"] .canvas-page-mirror [data-block-id="${key}"]`);
+const focusUnbuilt = (view: ReturnType<typeof mount>, index: number) =>
+  act(async () => { view.section().querySelectorAll<HTMLElement>('p')[index]!.focus(); });
 
 test('focus handed to a page whose full mirror fills in place waits for the paragraph', async () => {
   const view = mount();
@@ -156,17 +167,90 @@ test('a selection handed to a page whose full mirror fills in place waits for th
   expect(block!.contains(selection.anchorNode)).toBe(true);
 });
 
-test('focus handed to a page whose full mirror starts as an empty shell waits for the paragraph', async () => {
+test('while the page is an empty shell, focus waits on the named page and then lands on the paragraph', async () => {
   const view = mount();
-  const paragraph = view.section().querySelector('p')!;
-  await act(async () => { paragraph.focus(); });
-  await view.to('full', page([]));
+  await focusUnbuilt(view, 0);
+  await view.to('full', shell());
   const root = mirrorRoot(view);
   expect(root?.childNodes.length).toBeGreaterThan(0);
   expect(root?.querySelector('[role="paragraph"], p')).toBeNull();
+  expect(document.activeElement).toBe(root);
+  expect(root?.getAttribute('role')).toBe('document');
+  expect(root?.getAttribute('aria-label')).toBe('a11y.pageLabel');
   await view.to('full', page());
   expect(mirrorRoot(view)).toBe(root);
-  const block = view.fullBlock();
-  expect(block?.textContent).toBe(TEXT);
-  expect(document.activeElement).toBe(block);
+  expect(document.activeElement).toBe(view.fullBlock());
+});
+
+test('a hand-off to a page built without paragraphs ends on the page and is not taken back', async () => {
+  const view = mount();
+  await focusUnbuilt(view, 0);
+  await view.to('full', page([]));
+  const root = mirrorRoot(view);
+  expect(document.activeElement).toBe(root);
+  await view.to('full', page());
+  expect(view.fullBlock()).not.toBeNull();
+  expect(document.activeElement).toBe(root);
+});
+
+test('a paragraph that left the page ends the hand-off at its remembered place, not where it reappears', async () => {
+  const view = mount(true, [['A', 'First paragraph'], ['B', 'Moved paragraph'], ['C', 'Third paragraph']]);
+  await focusUnbuilt(view, 1);
+  await view.to('full', shell());
+  await view.to('full', page([['p1', 'First paragraph', 'A'], ['p3', 'Third paragraph', 'C']]));
+  expect(document.activeElement).toBe(blockOf(view, 'p3'));
+  await view.to('full', page([['p1', 'First paragraph', 'A'], ['p2', 'Moved paragraph', 'B'], ['p3', 'Third paragraph', 'C']]));
+  expect(document.activeElement?.getAttribute('data-block-id')).toBe('p3');
+});
+
+test('a selection whose paragraph left the page ends on the paragraph at its remembered place', async () => {
+  const view = mount(true, [['A', 'First paragraph'], ['B', 'Moved paragraph']]);
+  const section = view.section();
+  view.remember(section, section.querySelectorAll('p')[1]!, true);
+  await view.to('full', shell());
+  await view.to('full', page([['p1', 'First paragraph', 'A'], ['p3', 'Third paragraph', 'C']]));
+  const selection = getSelection()!;
+  expect(selection.toString()).toBe('Third paragraph');
+  expect(blockOf(view, 'p3')!.contains(selection.anchorNode)).toBe(true);
+});
+
+test('of two paragraphs with the same text, the hand-off lands on the one at the remembered place', async () => {
+  const view = mount(true, [[undefined, 'Same text'], [undefined, 'Same text']]);
+  await focusUnbuilt(view, 1);
+  await view.to('full', shell());
+  await view.to('full', page([['p1', 'Same text'], ['p2', 'Same text']]));
+  expect(document.activeElement).toBe(blockOf(view, 'p2'));
+});
+
+for (const marker of ['numbered', 'bullet'] as const) {
+  test(`focus handed from an unbuilt ${marker} list item lands on that item`, async () => {
+    const view = mount(true, [['A', 'First paragraph'], ['B', 'List item']]);
+    await focusUnbuilt(view, 1);
+    await view.to('full', shell());
+    await view.to('full', page([['p0', 'Inserted paragraph', 'Z'], ['p1', 'First paragraph', 'A'], ['p2', 'List item', 'B', marker]]));
+    const item = blockOf(view, 'p2');
+    expect(item?.textContent?.trim()).not.toBe('List item');
+    expect(document.activeElement).toBe(item);
+  });
+}
+
+test('focus handed from an unbuilt paragraph lands on it after its text was edited', async () => {
+  const view = mount(true, [['A', 'First paragraph'], ['B', TEXT]]);
+  await focusUnbuilt(view, 1);
+  await view.to('full', shell());
+  await view.to('full', page([['p0', 'Inserted paragraph', 'Z'], ['p1', 'First paragraph', 'A'], ['p2', `${TEXT}, edited`, 'B']]));
+  expect(document.activeElement).toBe(blockOf(view, 'p2'));
+});
+
+test('focus moved elsewhere while a hand-off waits drops it', async () => {
+  const view = mount();
+  await focusUnbuilt(view, 0);
+  await view.to('full', shell());
+  const outside = document.createElement('button');
+  document.body.appendChild(outside);
+  await act(async () => { outside.focus(); });
+  await view.to('full', page());
+  expect(view.fullBlock()).not.toBeNull();
+  expect(document.activeElement).toBe(outside);
+  outside.remove();
 });

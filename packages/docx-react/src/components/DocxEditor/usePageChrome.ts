@@ -290,6 +290,12 @@ function replaceKeepingFocus(host: HTMLElement, next: HTMLElement | null): void 
   });
 }
 
+/** Marks which built page revision `host` shows; an unbuilt page's chrome is an empty shell and carries no mark. */
+function markBuiltFrom(host: HTMLElement, page: DisplayPage): void {
+  if (page.unbuilt) delete host.dataset.pageChromeBuilt;
+  else host.dataset.pageChromeBuilt = String(displayPageRevision(page));
+}
+
 /** Builds one page's mirror or overlay into `hostRef`, and rebuilds it with the page. */
 export function usePageChrome(
   hostRef: RefObject<HTMLDivElement | null>,
@@ -346,6 +352,7 @@ export function usePageChrome(
     // Keep the previous chrome connected until its replacement is ready.
     if (!updated) replaceKeepingFocus(host, make(page, t));
     host.dataset.pageChrome = 'chrome';
+    markBuiltFrom(host, page);
     builtForRef.current = {
       kind: 'chrome',
       page,
@@ -362,12 +369,14 @@ export function usePageChrome(
     if (!fallback) {
       if (builtForRef.current) replaceKeepingFocus(host, null);
       delete host.dataset.pageChrome;
+      delete host.dataset.pageChromeBuilt;
       builtForRef.current = null;
       return;
     }
     const chrome = shows('chrome') ? (host.firstElementChild as HTMLElement | null) : null;
     replaceKeepingFocus(host, fallback(page, t, chrome));
     host.dataset.pageChrome = 'fallback';
+    markBuiltFrom(host, page);
     builtForRef.current = {
       kind: 'fallback',
       page,
@@ -402,6 +411,7 @@ export function usePageChrome(
     if (!active) {
       if (shows('fallback')) {
         builtForRef.current!.page = page;
+        markBuiltFrom(host, page);
         return;
       }
       // Leaving the window frees the chrome at once unless held; a first fallback waits.

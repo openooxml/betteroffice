@@ -216,7 +216,7 @@ export interface DocxDocumentReadValues {
   bookmarkPosition: number | null;
   sidebar: DocxSidebarRead | null;
   headings: DocxOutlineHeading[] | null;
-  pageTexts: { pages: { pageIndex: number; paragraphs: { text: string; level?: number; inTable?: true }[] }[]; frameEpoch: number; layoutRevision: number } | null;
+  pageTexts: { pages: { pageIndex: number; paragraphs: { text: string; paraId?: string; level?: number; inTable?: true }[] }[]; frameEpoch: number; layoutRevision: number } | null;
   adjacentRevision: { revisionId: string } | null;
 }
 
