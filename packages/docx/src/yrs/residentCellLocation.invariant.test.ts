@@ -68,6 +68,12 @@ test('engine cell location is null or equal to the projection after every step o
     const report: string[] = [];
     const violations: string[] = [];
     const kinds: Record<string, number> = {};
+    const RAW_OPS = new Set(['detachControl', 'detachTable', 'moveTable', 'shareCell', 'reattachControl']);
+    const familyTotals: Record<string, { violations: number; projectionThrows: number; peerMissingSteps: number; invalidSeeds: number; peerSkipped: number; reused: number; built: number }> = {};
+    const cacheCounts = () => (selection as { cellLocationCacheCounts?: () => { built: number; reused: number } }).cellLocationCacheCounts?.() ?? { built: 0, reused: 0 };
+    for (const family of ['valid', 'adversarial'] as const) {
+    const totals = familyTotals[family] = { violations: 0, projectionThrows: 0, peerMissingSteps: 0, invalidSeeds: 0, peerSkipped: 0, reused: 0, built: 0 };
+    const familyStart = cacheCounts();
     for (const seed of SEEDS) {
       const next = random(seed);
       const pick = <T>(items: readonly T[]): T | undefined => (items.length ? items[Math.floor(next() * items.length)] : undefined);
@@ -75,8 +81,10 @@ test('engine cell location is null or equal to the projection after every step o
         console.log(`LOCAL-OPEN-FAILED seed=${seed} ${String((error as Error)?.stack ?? error).split('\n').slice(0, 8).join(' | ')}`);
         throw error;
       });
-      const local = arm.engine;
-      const legacy = withoutCellLocation(local);
+      let local = arm.engine;
+      let legacy = withoutCellLocation(local);
+      let invalidFrom: number | null = null;
+      const projectionThrows = () => { try { createYrsPositionProjection(local.geometryReader, 'body'); return false; } catch (error) { if (isEngineTrap(error)) throw error; return true; } };
       local.beginUndoCapture();
       const openPeer = async (clientId: number): Promise<DocxWorkerCommandEngine | null> => {
         try {
@@ -167,7 +175,7 @@ test('engine cell location is null or equal to the projection after every step o
         undo: () => engine.undo(),
         redo: () => engine.redo(),
       };
-      const names = Object.keys(steps);
+      const names = Object.keys(steps).filter((name) => family === 'adversarial' || !RAW_OPS.has(name));
       const check = (step: number, op: string) => {
         for (const story of local.geometryReader.storyIds()) seen.add(story);
         for (const story of peer?.geometryReader.storyIds() ?? []) seen.add(story);
@@ -190,9 +198,11 @@ test('engine cell location is null or equal to the projection after every step o
             lastBuildKey.set(root, currentKey);
           }
           if (fast) answered++;
+          if (typeof projected === 'string' && projected.startsWith('throw:')) totals.projectionThrows++;
           const bad = (fast !== null && JSON.stringify(fast) !== JSON.stringify(projected)) || (projected === null && fast !== null) ||
             JSON.stringify(live) !== JSON.stringify(projected);
           if (bad) {
+            totals.violations++;
             const located = (value: unknown) => value !== null && typeof value === 'object';
             const kind = typeof live === 'string' && live.startsWith('shadow:') ? 'stale-cache'
               : fast !== null && projected === null ? 'engine-answers-unreachable'
@@ -200,28 +210,45 @@ test('engine cell location is null or equal to the projection after every step o
               : fast === null && located(projected) && live === null ? 'engine-misses-cell'
               : fast !== null && projected !== null ? 'engine-differs'
               : 'resolved-differs';
-            kinds[kind] = (kinds[kind] ?? 0) + 1;
-            if (!kinds[`first:${kind}`]) { kinds[`first:${kind}`] = 1; console.log(`FIRST ${kind} seed=${seed} step=${step} op=${op} story=${story} engine=${JSON.stringify(fast)} projection=${JSON.stringify(projected)} resolved=${JSON.stringify(live)}`); }
+            kinds[`${family}:${kind}`] = (kinds[`${family}:${kind}`] ?? 0) + 1;
+            if (!kinds[`first:${family}:${kind}`]) { kinds[`first:${family}:${kind}`] = 1; console.log(`FIRST ${family}:${kind} seed=${seed} step=${step} op=${op} story=${story} engine=${JSON.stringify(fast)} projection=${JSON.stringify(projected)} resolved=${JSON.stringify(live)}`); }
           }
           if (bad && violations.length < 40) {
-            violations.push(`seed=${seed} step=${step} op=${op} story=${story} engine=${JSON.stringify(fast)} projection=${JSON.stringify(projected)} resolved=${JSON.stringify(live)}`);
+            violations.push(`${family} seed=${seed} step=${step} op=${op} story=${story} engine=${JSON.stringify(fast)} projection=${JSON.stringify(projected)} resolved=${JSON.stringify(live)}`);
           }
         }
       };
       check(0, 'open');
       for (let step = 1; step <= STEPS; step++) {
         const op = names[Math.floor(next() * names.length)]!;
-        if (step === Math.floor(STEPS / 2)) {
-          try {
-            local.openDocx(await packageBytes(body), undefined, `reseed-${seed}`);
-            reseeds++;
-          } catch (error) {
-            if (isEngineTrap(error)) throw error;
-            console.log(`RESEED-FAILED seed=${seed} ${String((error as Error)?.stack ?? error).split('\n').slice(0, 6).join(' | ')}`);
-          }
-          peer = await openPeer(8600 + seed);
-          check(step, 'reseed');
+        if (invalidFrom === null && family === 'adversarial' && projectionThrows()) {
+          invalidFrom = step;
+          totals.invalidSeeds++;
+          console.log(`INVALID-RAW-STATE ${family} seed=${seed} from step ${step}`);
         }
+        if (step === Math.floor(STEPS / 2)) {
+          if (invalidFrom !== null) {
+            totals.peerSkipped++;
+            peer = null;
+            console.log(`PEER-SKIPPED ${family} seed=${seed} step=${step}: invalid raw state since step ${invalidFrom}`);
+          } else {
+            try {
+              const state = local.encodeState();
+              const fresh = (await openCommandEngine(['Seed'], { clientId: 8500 + seed })).engine;
+              fresh.openSourceDocx(await packageBytes(body), { state });
+              local = fresh;
+              legacy = withoutCellLocation(local);
+              local.beginUndoCapture();
+              reseeds++;
+            } catch (error) {
+              if (isEngineTrap(error)) throw error;
+              console.log(`RESEED-FAILED ${family} seed=${seed} ${String((error as Error)?.stack ?? error).split('\n').slice(0, 6).join(' | ')}`);
+            }
+            peer = await openPeer(8600 + seed);
+          }
+          check(step, 'replace-document');
+        }
+        if (family === 'valid' && peer === null) totals.peerMissingSteps++;
         const remote = peer !== null && next() < 0.5;
         engine = remote && peer ? peer : local;
         if (remote) { syncToPeer(); remoteSteps++; }
@@ -236,8 +263,12 @@ test('engine cell location is null or equal to the projection after every step o
         if (remote) syncFromPeer();
         check(step, remote ? `remote:${op}` : op);
       }
-      report.push(`INVARIANT seed=${seed} roots=${new Set([...seen].map(selection.rootOf)).size} steps=${STEPS} remote=${remoteSteps} reseeds=${reseeds} keyMovesWithinChecks=${keyMoves} rebuildsSameKey=${rebuildSameKey} applied=${applied} refused=${refused} storiesSeen=${seen.size} checks=${checks} engineAnswered=${answered} ops=${JSON.stringify(ops)}`);
+      report.push(`INVARIANT ${family} seed=${seed} invalidFrom=${invalidFrom ?? 'none'} roots=${new Set([...seen].map(selection.rootOf)).size} steps=${STEPS} remote=${remoteSteps} reseeds=${reseeds} keyMovesWithinChecks=${keyMoves} rebuildsSameKey=${rebuildSameKey} applied=${applied} refused=${refused} storiesSeen=${seen.size} checks=${checks} engineAnswered=${answered} ops=${JSON.stringify(ops)}`);
       closeCommandEngines();
+    }
+    const familyEnd = cacheCounts();
+    totals.reused = familyEnd.reused - familyStart.reused;
+    totals.built = familyEnd.built - familyStart.built;
     }
     (selection as { setCellLocationShadowCheck?: (on: boolean) => void }).setCellLocationShadowCheck?.(false);
     const counts = (selection as { cellLocationCacheCounts?: () => unknown }).cellLocationCacheCounts?.();
@@ -245,7 +276,13 @@ test('engine cell location is null or equal to the projection after every step o
     for (const line of report) console.log(line);
     const total = Object.entries(kinds).filter(([key]) => !key.startsWith('first:')).reduce((sum, [, n]) => sum + n, 0);
     console.log(`INVARIANT-VIOLATIONS ${total} kinds=${JSON.stringify(Object.fromEntries(Object.entries(kinds).filter(([key]) => !key.startsWith('first:'))))}`);
+    for (const [family, totals] of Object.entries(familyTotals)) {
+      const rate = totals.reused + totals.built ? (totals.reused / (totals.reused + totals.built)).toFixed(3) : 'n/a';
+      console.log(`INVARIANT-FAMILY ${family} ${JSON.stringify(totals)} reuseRate=${rate}`);
+    }
     for (const line of violations.slice(0, 12)) console.log(`VIOLATION ${line}`);
     expect(violations).toEqual([]);
+    expect(familyTotals.valid!.projectionThrows).toBe(0);
+    expect(familyTotals.valid!.peerMissingSteps).toBe(0);
   })();
 }, 600_000);
