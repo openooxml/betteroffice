@@ -501,6 +501,7 @@ fn attribute(local: &[u8]) -> Option<&'static str> {
         b"t" => "t",
         b"fontId" => "fontId",
         b"applyFont" => "applyFont",
+        b"applyNumberFormat" => "applyNumberFormat",
         b"numFmtId" => "numFmtId",
         b"formatCode" => "formatCode",
         b"min" => "min",

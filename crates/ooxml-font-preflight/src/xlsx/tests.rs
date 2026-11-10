@@ -479,3 +479,31 @@ fn active_chartsheet_never_reads_a_worksheet_by_position() {
     );
     assert!(!xlsx_font_preflight(&bytes).unwrap().complete);
 }
+
+#[test]
+fn hidden_number_formats_resolve_like_the_engine() {
+    for (formats, xf) in [
+        (
+            r#"<numFmt numFmtId="164" formatCode=";;;"/>"#,
+            r#"<xf fontId="1" numFmtId="164" applyNumberFormat="0"/>"#,
+        ),
+        (
+            r#"<numFmt numFmtId="100" formatCode=";;;"/>"#,
+            r#"<xf fontId="1" numFmtId="100"/>"#,
+        ),
+        (
+            r#"<numFmt numFmtId="165" formatCode="@"/><numFmt numFmtId="165" formatCode=";;;"/>"#,
+            r#"<xf fontId="1" numFmtId="165"/>"#,
+        ),
+    ] {
+        let styles = format!(
+            r#"<styleSheet xmlns="{S}"><numFmts>{formats}</numFmts><fonts><font><name val="Base"/></font><font><name val="Styled"/><b/><i/></font></fonts><cellXfs><xf fontId="0"/>{xf}</cellXfs></styleSheet>"#
+        );
+        let sheet = worksheet(
+            r#"<row r="1"><c r="A1" s="1" t="inlineStr"><is><t>shown</t></is></c></row>"#,
+            "",
+        );
+        let result = xlsx_font_preflight(&fixture(&sheet, &styles, None, &[], false)).unwrap();
+        assert_eq!(keys(&result), [("Styled", true, true)], "{formats} {xf}");
+    }
+}

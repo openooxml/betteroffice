@@ -262,7 +262,8 @@ impl Styles {
             if let Some(id) = number(node, "numFmtId", complete) {
                 result
                     .custom_formats
-                    .insert(id, node.attr("formatCode").unwrap_or_default().to_owned());
+                    .entry(id)
+                    .or_insert_with(|| node.attr("formatCode").unwrap_or_default().to_owned());
             }
         }
         for (index, node) in root
@@ -284,9 +285,16 @@ impl Styles {
                     None
                 },
             );
-            result
-                .format_ids
-                .push(number(node, "numFmtId", complete).unwrap_or(0));
+            result.format_ids.push(
+                if node
+                    .attr("applyNumberFormat")
+                    .is_none_or(|value| flag(Some(value)))
+                {
+                    number(node, "numFmtId", complete).unwrap_or(0)
+                } else {
+                    0
+                },
+            );
         }
         result
     }
@@ -574,6 +582,7 @@ pub fn xlsx_font_preflight(bytes: &[u8]) -> Result<FontPreflight, PreflightError
         if let Some(code) = styles
             .format_ids
             .get(style)
+            .filter(|id| **id >= 164)
             .and_then(|id| styles.custom_formats.get(id))
         {
             if code == ";;;" {
