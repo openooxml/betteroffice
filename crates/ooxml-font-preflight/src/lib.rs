@@ -366,7 +366,9 @@ pub fn docx_font_preflight(bytes: &[u8]) -> Result<FontPreflight, PreflightError
     } else {
         None
     };
-    let numbering = numbering.as_ref().map(Numbering::new);
+    let numbering = numbering
+        .as_ref()
+        .map(|root| Numbering::new(root, &mut complete));
     let mut collector = Collector::default();
     let mut stories = Map::new();
     stories.insert("body".to_owned(), &document);

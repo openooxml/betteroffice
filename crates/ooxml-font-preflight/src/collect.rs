@@ -302,7 +302,13 @@ pub(crate) struct Numbering<'a> {
 }
 
 impl<'a> Numbering<'a> {
-    pub(crate) fn new(root: &'a Node) -> Self {
+    pub(crate) fn new(root: &'a Node, complete: &mut bool) -> Self {
+        let canonical = |id: &str| {
+            id == "0"
+                || (!id.is_empty()
+                    && !id.starts_with('0')
+                    && id.bytes().all(|byte| byte.is_ascii_digit()))
+        };
         let mut numbering = Self {
             instances: BTreeMap::new(),
             abstracts: Vec::new(),
@@ -320,6 +326,11 @@ impl<'a> Numbering<'a> {
                     let Some(id) = node.attr("numId") else {
                         continue;
                     };
+                    if !canonical(id)
+                        || node.val("w:abstractNumId").is_some_and(|id| !canonical(id))
+                    {
+                        *complete = false;
+                    }
                     let mut overrides = BTreeMap::new();
                     for child in &node.children {
                         if child.name == "w:lvlOverride"
@@ -356,16 +367,19 @@ impl<'a> Numbering<'a> {
                         style_link: node.val("w:numStyleLink"),
                     });
                     let id = node.attr("abstractNumId");
+                    if !id.is_some_and(canonical) {
+                        *complete = false;
+                    }
                     if let Some(id) = id {
                         numbering.by_id.insert(id, index);
                     }
-                    match id.and_then(|id| positions.get(id).copied()) {
-                        Some(position) => order[position] = index,
-                        None => {
-                            if let Some(id) = id {
+                    if let Some(id) = id {
+                        match positions.get(id).copied() {
+                            Some(position) => order[position] = index,
+                            None => {
                                 positions.insert(id, order.len());
+                                order.push(index);
                             }
-                            order.push(index);
                         }
                     }
                     links.push(node.val("w:styleLink"));

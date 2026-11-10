@@ -342,3 +342,35 @@ fn table_without_a_grid_counts_grid_before_in_its_columns() {
     ]);
     assert_parity(&bytes, "LastColFont");
 }
+
+#[test]
+fn numbering_style_links_skip_definitions_without_an_id() {
+    let level = |family: &str| {
+        format!(
+            r#"<w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val="*"/><w:rPr><w:rFonts w:ascii="{family}" w:hAnsi="{family}"/></w:rPr></w:lvl>"#
+        )
+    };
+    let definitions = format!(
+        r#"<w:abstractNum w:abstractNumId="0"><w:numStyleLink w:val="S"/></w:abstractNum><w:abstractNum><w:styleLink w:val="S"/>{}</w:abstractNum><w:abstractNum w:abstractNumId="2"><w:styleLink w:val="S"/>{}</w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>"#,
+        level("FontA"),
+        level("FontB")
+    );
+    let bytes = package(&[
+        (
+            "word/document.xml",
+            document(
+                r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>Item</w:t></w:r></w:p>"#,
+            ),
+        ),
+        (
+            "word/_rels/document.xml.rels",
+            rels(&[("styles", "styles.xml"), ("numbering", "numbering.xml")]),
+        ),
+        ("word/styles.xml", styles("Base", "")),
+        (
+            "word/numbering.xml",
+            format!(r#"<w:numbering xmlns:w="{W}">{definitions}</w:numbering>"#),
+        ),
+    ]);
+    assert_parity(&bytes, "FontB");
+}
