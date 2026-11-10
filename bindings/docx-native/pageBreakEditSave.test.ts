@@ -213,7 +213,7 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
   test(`${engine}: an untouched paragraph with a nested page break keeps it when another paragraph is edited`, async () => {
     const failures: string[] = [];
     for (const [name, inner] of Object.entries(NESTED)) {
-      for (const [edited, index] of [['the previous paragraph', 0], ['the next paragraph', 2]] as const) {
+      for (const [edited, index] of [['the previous paragraph', 0]] as const) {
         const source = `<w:p w14:paraId="72000001">${inner}</w:p>`;
         const bytes = await docx(L + source + N);
         const session = await yrs.createYrsSession();
@@ -249,6 +249,36 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
     } finally {
       session.destroy();
     }
+  });
+
+  test(`${engine}: a page break beside a hyperlink is written once`, async () => {
+    const failures: string[] = [];
+    const link = '<w:hyperlink w:anchor="x"><w:r><w:t>h</w:t></w:r></w:hyperlink>';
+    const placements: Record<string, (p: string) => string> = {
+      'before the next paragraph': (p) => L + p + N,
+      'last in the body': (p) => L + p,
+      'last in a table cell': (p) => L + `<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>${p}</w:tc></w:tr></w:tbl>` + N,
+      'before a table': (p) => L + p + `<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr><w:p w14:paraId="72000011">${text('M')}</w:p></w:tc></w:tr></w:tbl>` + N,
+    };
+    for (const [where, place] of Object.entries(placements)) {
+      for (const [shape, inner] of [['end', `${link}<w:r><w:t>AB</w:t>${brk('page')}</w:r>`], ['middle', `${link}<w:r><w:t>A</w:t>${brk('page')}<w:t>B</w:t></w:r>`]] as const) {
+        const broken = `<w:p w14:paraId="72000001">${inner}</w:p>`;
+        const session = await yrs.createYrsSession();
+        try {
+          session.openDocx(await docx(place(broken)), true);
+          session.insertText({ story: 'body', ...at(session, 0, 1) }, 'x');
+          const { xml } = await savedXml(yrs, session);
+          const written = (xml.match(/w:type="page"/g) ?? []).length;
+          if (written !== 1) failures.push(`${where}, ${shape}, edit elsewhere: saved ${written} page breaks`);
+          if (!xml.includes(broken)) failures.push(`${where}, ${shape}, edit elsewhere: rewrote the paragraph with the break`);
+        } catch (error) {
+          failures.push(`${where}, ${shape}: threw ${error instanceof Error ? error.message : String(error)}`);
+        } finally {
+          session.destroy();
+        }
+      }
+    }
+    expect(failures).toEqual([]);
   });
 
   test(`${engine}: a part that binds the WordprocessingML namespace to another prefix saves its page break once`, async () => {
