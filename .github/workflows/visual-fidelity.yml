@@ -43,6 +43,11 @@ on:
         default: false
         required: false
         type: boolean
+      max_parallel:
+        description: "Private corpus run: most benchmark jobs held at once, leaving the rest of the plan's concurrent jobs to pull request CI"
+        default: 12
+        required: false
+        type: number
 
 permissions:
   contents: read
@@ -79,6 +84,7 @@ jobs:
       xlsx-published-source: ${{ steps.plan.outputs.xlsx-published-source }}
       pptx-shards: ${{ steps.plan.outputs.pptx-shards }}
       timing-formats: ${{ steps.plan.outputs.timing-formats }}
+      parallel: ${{ steps.plan.outputs.parallel }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -150,6 +156,7 @@ jobs:
       - name: Freeze the corpus and package versions
         id: plan
         env:
+          MAX_PARALLEL: ${{ inputs.max_parallel }}
           QUALITY_SAMPLES: ${{ inputs.samples }}
           QUALITY_COLLECTION: ${{ inputs.collection }}
           QUALITY_OUTPUT: ${{ runner.temp }}/fidelity-plan
@@ -168,6 +175,7 @@ jobs:
           import { timingFormats } from './scripts/office-quality/timing.mjs';
           import { pptxShards } from './scripts/office-quality/pptx-benchmark.mjs';
           import { benchmarkShardPlan } from './scripts/office-quality/shards.mjs';
+          import { parallelPlan, parallelSummary } from './scripts/office-quality/parallel.mjs';
           const plan = JSON.parse(await readFile(`${process.env.QUALITY_OUTPUT}/plan.json`, 'utf8'));
           const builds = plan.formats.flatMap(format => ['published', 'commit'].map(channel =>
             ({ format, channel, source: channel === 'commit' ? plan.source_sha : plan[`${format}_published_source_sha`] })));
@@ -188,6 +196,20 @@ jobs:
           const shardPlan = benchmarkShardPlan(plan).join('\n');
           console.log(shardPlan);
           await appendFile(process.env.GITHUB_STEP_SUMMARY, `### Benchmark shards\n\n${shardPlan.replace(/^/gm, '- ')}\n`);
+          const fontSources = [
+            ...Object.entries(plan.published_fonts ?? {}).map(([format, version]) =>
+              `${format.toUpperCase()} published channel: @betteroffice/fonts@${version}, ${plan.fonts_basis?.[format] === 'release-commit' ? 'the fonts release from the same release commit as' : 'the latest fonts release published before'} @betteroffice/${format}@${plan.versions[format]}`),
+            'commit channel: the font packages of this checkout',
+          ];
+          console.log(fontSources.join('\n'));
+          await appendFile(process.env.GITHUB_STEP_SUMMARY, `### Font sources\n\n${fontSources.map((line) => `- ${line}`).join('\n')}\n`);
+          const parallel = parallelPlan(plan, { privateRun: process.env.QUALITY_PRIVATE === 'true', total: Number(process.env.MAX_PARALLEL) });
+          await appendFile(process.env.GITHUB_OUTPUT, `parallel=${JSON.stringify(parallel)}\n`);
+          if (process.env.QUALITY_PRIVATE === 'true') {
+            const lines = parallelSummary(plan, parallel).join('\n');
+            console.log(lines);
+            await appendFile(process.env.GITHUB_STEP_SUMMARY, `### Concurrent benchmark jobs (at most ${process.env.MAX_PARALLEL})\n\n${lines.replace(/^/gm, '- ')}\n`);
+          }
           JS
 
       - if: ${{ !inputs.private_corpus }}
@@ -220,6 +242,7 @@ jobs:
     timeout-minutes: 90
     strategy:
       fail-fast: false
+      max-parallel: ${{ fromJSON(needs.prepare.outputs.parallel)['measure'] }}
       matrix:
         include: ${{ fromJSON(needs.prepare.outputs.measure-shards) }}
     steps:
@@ -503,6 +526,7 @@ jobs:
       SOFFICE: /opt/libreoffice26.2/program/soffice
     strategy:
       fail-fast: false
+      max-parallel: ${{ fromJSON(needs.prepare.outputs.parallel)['docx-benchmark'] }}
       matrix:
         shard: ${{ fromJSON(needs.prepare.outputs.docx-shards) }}
     steps:
@@ -687,6 +711,7 @@ jobs:
       SOFFICE: /opt/libreoffice26.2/program/soffice
     strategy:
       fail-fast: false
+      max-parallel: ${{ fromJSON(needs.prepare.outputs.parallel)['xlsx-benchmark'] }}
       matrix:
         shard: ${{ fromJSON(needs.prepare.outputs.xlsx-shards) }}
     steps:
@@ -842,6 +867,7 @@ jobs:
       SOFFICE: /opt/libreoffice26.2/program/soffice
     strategy:
       fail-fast: false
+      max-parallel: ${{ fromJSON(needs.prepare.outputs.parallel)['pptx-benchmark'] }}
       matrix:
         shard: ${{ fromJSON(needs.prepare.outputs.pptx-shards) }}
     steps:
@@ -964,6 +990,7 @@ jobs:
       SOFFICE: /opt/libreoffice26.2/program/soffice
     strategy:
       fail-fast: false
+      max-parallel: ${{ fromJSON(needs.prepare.outputs.parallel)['xlsx-fidelity'] }}
       matrix:
         shard: ${{ fromJSON(needs.prepare.outputs.xlsx-fidelity-shards) }}
     steps:
@@ -1115,6 +1142,7 @@ jobs:
       LO_PYTHON: /opt/libreoffice26.2/program/python
     strategy:
       fail-fast: false
+      max-parallel: ${{ fromJSON(needs.prepare.outputs.parallel)['roundtrip-a'] }}
       matrix:
         include: ${{ fromJSON(needs.prepare.outputs.roundtrip-shards-a) }}
     steps: &roundtrip-steps
@@ -1226,6 +1254,7 @@ jobs:
     env: *roundtrip-env
     strategy:
       fail-fast: false
+      max-parallel: ${{ fromJSON(needs.prepare.outputs.parallel)['roundtrip-b'] }}
       matrix:
         include: ${{ fromJSON(needs.prepare.outputs.roundtrip-shards-b) }}
     steps: *roundtrip-steps
@@ -1242,6 +1271,7 @@ jobs:
       SOFFICE: /opt/libreoffice26.2/program/soffice
     strategy:
       fail-fast: false
+      max-parallel: ${{ fromJSON(needs.prepare.outputs.parallel)['timing'] }}
       matrix:
         format: ${{ fromJSON(needs.prepare.outputs.timing-formats) }}
     steps:
@@ -1433,9 +1463,15 @@ jobs:
           QUALITY_REQUIRE_XLSX_FIDELITY: 'true'
           QUALITY_REQUIRE_ROUNDTRIP: 'true'
           QUALITY_REQUIRE_TIMING: ${{ inputs.private_corpus }}
+          QUALITY_COVERAGE: ${{ runner.temp }}/coverage.md
+          QUALITY_REQUIRE_COVERAGE: 'true'
+        run: node scripts/office-quality/private-step.mjs merge -- node scripts/office-quality/merge.mjs
+
+      - name: Summarise scored documents and the generated section
+        if: always()
         run: |
-          node scripts/office-quality/private-step.mjs merge -- node scripts/office-quality/merge.mjs
-          cat "${QUALITY_OUTPUT}/section.md" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f "$RUNNER_TEMP/coverage.md" ]; then cat "$RUNNER_TEMP/coverage.md" >> "$GITHUB_STEP_SUMMARY"; fi
+          if [ -f "$RUNNER_TEMP/fidelity-report/section.md" ]; then cat "$RUNNER_TEMP/fidelity-report/section.md" >> "$GITHUB_STEP_SUMMARY"; fi
 
       - if: ${{ !inputs.private_corpus }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a

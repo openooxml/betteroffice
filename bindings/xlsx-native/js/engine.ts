@@ -1,6 +1,7 @@
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { warnFontPackDiagnostics, type FontPackDiagnostic } from '../../../shared/fontPackDiagnostics';
+import { installDispose } from '../../../shared/nativeDispose';
 import type * as Wasm from '../../../packages/xlsx/src/wasm/generated/xlsx_wasm.js';
 
 export type { InitInput } from '../../../packages/xlsx/src/wasm/generated/xlsx_wasm.js';
@@ -24,6 +25,7 @@ type NativeFontLoader = {
 
 const require = createRequire(import.meta.url);
 const binding = require('../index.js') as Engine & NativeFontLoader;
+installDispose(binding.XlsxDocument, binding.XlsxSnapshotBuilder);
 
 function packDirectory(pack: 'latin' | 'intl' | 'cjk'): string | undefined {
   try {

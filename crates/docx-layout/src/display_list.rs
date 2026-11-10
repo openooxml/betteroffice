@@ -2339,6 +2339,36 @@ pub(crate) struct TableBlockIn {
     first_column: Option<bool>,
 }
 
+/// Cell refs, ids and revisions name rows by their index in the source table,
+/// so editors keep addressing the right row when hidden rows were removed.
+impl TableBlockIn {
+    fn source_row(&self, row: usize) -> u64 {
+        self.rows
+            .get(row)
+            .and_then(|value| value.source_row)
+            .unwrap_or(row as u64)
+    }
+
+    /// One past the source index of the row before `end`.
+    fn source_row_end(&self, end: usize) -> u64 {
+        end.checked_sub(1)
+            .map_or(0, |last| self.source_row(last) + 1)
+    }
+
+    fn source_span(&self, row: usize, span: usize) -> u64 {
+        if self
+            .rows
+            .get(row)
+            .is_none_or(|value| value.source_row.is_none())
+        {
+            return span as u64;
+        }
+        let end = (row + span.max(1)).min(self.rows.len());
+        self.source_row_end(end)
+            .saturating_sub(self.source_row(row))
+    }
+}
+
 pub(crate) type FloatingTablePositionIn = crate::types::FloatingTablePosition;
 
 #[derive(Deserialize)]
@@ -2346,6 +2376,8 @@ pub(crate) type FloatingTablePositionIn = crate::types::FloatingTablePosition;
 pub(crate) struct TableRowIn {
     #[serde(default)]
     cells: Vec<TableCellIn>,
+    #[serde(default)]
+    source_row: Option<u64>,
     #[serde(default)]
     grid_before: Option<u64>,
     #[serde(default)]
@@ -3791,7 +3823,7 @@ fn whole_table_revision(block: &TableBlockIn) -> Option<StructuralRevision> {
     None
 }
 
-fn row_structural_revision(row: &TableRowIn, row_index: usize) -> Option<StructuralRevision> {
+fn row_structural_revision(row: &TableRowIn, row_index: u64) -> Option<StructuralRevision> {
     row.tracked_del
         .as_ref()
         .map(|info| {
@@ -3799,7 +3831,7 @@ fn row_structural_revision(row: &TableRowIn, row_index: usize) -> Option<Structu
                 info,
                 StructuralRevisionScope::Row,
                 StructuralRevisionKind::Del,
-                Some(row_index as u64),
+                Some(row_index),
                 None,
             )
         })
@@ -3809,7 +3841,7 @@ fn row_structural_revision(row: &TableRowIn, row_index: usize) -> Option<Structu
                     info,
                     StructuralRevisionScope::Row,
                     StructuralRevisionKind::Ins,
-                    Some(row_index as u64),
+                    Some(row_index),
                     None,
                 )
             })
@@ -9147,9 +9179,18 @@ fn field_metadata(f: &FieldRunIn) -> FieldMetadata {
 }
 
 fn border_visible(b: &BorderEdgeIn) -> bool {
-    !matches!(b.style.as_deref(), Some("none") | Some("nil"))
-        && !matches!(b.ooxml_style.as_deref(), Some("none") | Some("nil"))
-        && b.width.unwrap_or(1.0) > 0.0
+    border_paints(b.style.as_deref(), b.ooxml_style.as_deref(), b.width)
+}
+
+/// Whether a border with this style, OOXML style and width paints a line.
+pub(crate) fn border_paints(
+    style: Option<&str>,
+    ooxml_style: Option<&str>,
+    width: Option<f64>,
+) -> bool {
+    !matches!(style, Some("none") | Some("nil"))
+        && !matches!(ooxml_style, Some("none") | Some("nil"))
+        && width.unwrap_or(1.0) > 0.0
 }
 
 fn border_number(b: &BorderEdgeIn) -> u8 {
@@ -11103,9 +11144,9 @@ fn table_metadata(
 ) -> TableMetadata {
     TableMetadata {
         table_id: table_id.to_string(),
-        row_start: frag.row_start as u64,
-        row_end: frag.row_end as u64,
-        row_count: block.rows.len() as u64,
+        row_start: block.source_row(frag.row_start),
+        row_end: block.source_row_end(frag.row_end),
+        row_count: block.source_row_end(block.rows.len()),
         column_count: measure.column_widths.len() as u64,
         header_row_count: (header_row_count > 0).then_some(header_row_count as u64),
         caption: block.caption.clone(),
@@ -11496,7 +11537,7 @@ pub(crate) fn emit_table_fragment(
             let Some(row) = block.rows.get(vr.row_index) else {
                 continue;
             };
-            let Some(rev) = row_structural_revision(row, vr.row_index) else {
+            let Some(rev) = row_structural_revision(row, block.source_row(vr.row_index)) else {
                 continue;
             };
             let full_top = frag.y + vr.frag_y;
@@ -11549,7 +11590,11 @@ pub(crate) fn emit_table_fragment(
             && !is_header
             && p.g.column_index == 0
             && cell.merge_continuation != Some(true);
-        let cell_id = format!("{table_id}-r{}-c{}", p.g.row_index, p.g.column_index);
+        let cell_id = format!(
+            "{table_id}-r{}-c{}",
+            block.source_row(p.g.row_index),
+            p.g.column_index
+        );
         let header_ids = if is_header || is_row_header {
             Vec::new()
         } else {
@@ -11560,7 +11605,13 @@ pub(crate) fn emit_table_fragment(
                             && p.g.column_index >= cell.column_index
                             && p.g.column_index < cell.column_index + cell.col_span
                     })
-                    .map(|cell| format!("{table_id}-r{}-c{}", cell.row_index, cell.column_index))
+                    .map(|cell| {
+                        format!(
+                            "{table_id}-r{}-c{}",
+                            block.source_row(cell.row_index),
+                            cell.column_index
+                        )
+                    })
             });
             let row_header = (row_headers && !is_row_header)
                 .then(|| {
@@ -11575,13 +11626,19 @@ pub(crate) fn emit_table_fragment(
                     })
                 })
                 .flatten()
-                .map(|cell| format!("{table_id}-r{}-c{}", cell.row_index, cell.column_index));
+                .map(|cell| {
+                    format!(
+                        "{table_id}-r{}-c{}",
+                        block.source_row(cell.row_index),
+                        cell.column_index
+                    )
+                });
             column_headers.chain(row_header).collect()
         };
         let cell_ref = TableCellRef {
-            row: p.g.row_index as u64,
+            row: block.source_row(p.g.row_index),
             col: p.g.column_index as u64,
-            row_span: p.g.row_span as u64,
+            row_span: block.source_span(p.g.row_index, p.g.row_span),
             col_span: p.g.col_span as u64,
             continuation: if p.selectable { None } else { Some(true) },
             cell_id: Some(cell_id),
@@ -11647,7 +11704,7 @@ pub(crate) fn emit_table_fragment(
                     &marker.info,
                     StructuralRevisionScope::Cell,
                     marker.kind,
-                    Some(p.g.row_index as u64),
+                    Some(block.source_row(p.g.row_index)),
                     Some(p.g.column_index as u64),
                 );
                 let mut attrs = block_ref.attrs();
@@ -11931,7 +11988,11 @@ pub(crate) fn emit_table_fragment(
                 &block_ref,
             );
         }
-        let clip_id = format!("clip-{table_id}-r{}-c{}", p.g.row_index, p.g.column_index);
+        let clip_id = format!(
+            "clip-{table_id}-r{}-c{}",
+            block.source_row(p.g.row_index),
+            p.g.column_index
+        );
         for (index, primitive) in prims.iter_mut().enumerate().skip(cell_stamp_from) {
             if windowed_lines
                 && index >= content_stamp_from
@@ -11985,12 +12046,16 @@ pub(crate) fn emit_table_fragment(
             // band at the fragment edge (borderOwner stays Fragment)
             let line_attrs = DocAttrs {
                 cell: Some(Box::new(TableCellRef {
-                    row: g.row_index as u64,
+                    row: block.source_row(g.row_index),
                     col: g.column_index as u64,
-                    row_span: g.row_span as u64,
+                    row_span: block.source_span(g.row_index, g.row_span),
                     col_span: g.col_span as u64,
                     continuation: None,
-                    cell_id: Some(format!("{table_id}-r{}-c{}", g.row_index, g.column_index)),
+                    cell_id: Some(format!(
+                        "{table_id}-r{}-c{}",
+                        block.source_row(g.row_index),
+                        g.column_index
+                    )),
                     is_header: None,
                     is_row_header: None,
                     repeated_header: None,
@@ -13565,7 +13630,7 @@ fn prune_resident_display_measured(resident: &mut ResidentDisplayInput, list: &D
 }
 
 /// The affected pages' source blocks by canonical key, first occurrence winning.
-fn source_blocks_by_key<'a, 'b>(
+pub(crate) fn source_blocks_by_key<'a, 'b>(
     pagination: &'a crate::types::Input,
     pages: impl IntoIterator<Item = &'b crate::types::Page>,
 ) -> HashMap<Cow<'a, str>, &'a crate::types::MeasuredBlock> {
@@ -14596,7 +14661,7 @@ fn resident_block_key(block: &crate::types::LayoutBlock) -> Option<Cow<'_, str>>
 }
 
 /// Borrows pagination fragment ids with the resident display key text.
-fn resident_fragment_block_key(fragment: &crate::types::Fragment) -> Cow<'_, str> {
+pub(crate) fn resident_fragment_block_key(fragment: &crate::types::Fragment) -> Cow<'_, str> {
     use crate::types::Fragment;
     let id = match fragment {
         Fragment::Paragraph(value) => &value.block_id,
@@ -14612,7 +14677,7 @@ fn resident_fragment_block_key(fragment: &crate::types::Fragment) -> Cow<'_, str
 
 /// [`block_key`] of `id` once transcoded, which reads an integral number back
 /// as an integer.
-fn resident_block_id_key(id: &crate::types::BlockId) -> Cow<'_, str> {
+pub(crate) fn resident_block_id_key(id: &crate::types::BlockId) -> Cow<'_, str> {
     match id {
         crate::types::BlockId::Str(value) => Cow::Borrowed(value),
         crate::types::BlockId::Num(value)

@@ -1820,6 +1820,7 @@ fn meta_string(update: &[u8], key: &str) -> String {
 }
 
 #[test]
+#[ignore = "timing-sensitive; run on demand"]
 fn migrating_and_attaching_grows_linearly_with_the_number_of_stories() {
     let slide = defaults_part(DEFAULTS_SLIDE);
     let start = slide

@@ -225,6 +225,8 @@ export type ResidentEngineSession = Pick<
   /** @internal */
   proposalEngine: DocxProposalSession & Pick<YrsSession, 'validateEdits'>;
   /** @internal */
+  pageTextsJson(pages: Uint32Array): string;
+  /** @internal */
   geometryReader: ProposalGeometryReader & DocxSidebarReader;
   /** @internal The segments of the story's paragraphs at `indices`, each ending with its pilcrow. */
   paragraphSegments(story: string, indices: readonly number[]): YrsStorySegment[][];
@@ -742,6 +744,7 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
       return changed;
     },
     proposalEngine,
+    pageTextsJson: (pages) => session.page_texts_json(pages),
     geometryReader,
     paragraphs: geometryReader.paragraphs,
     storySegments: (story) => geometryStory(story).segments,

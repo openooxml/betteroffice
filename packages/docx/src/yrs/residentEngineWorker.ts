@@ -2527,6 +2527,13 @@ async function handle(request: ScheduledRequest): Promise<void> {
       case 'headings':
         value = readOutlineHeadings(session.geometryReader, request.read.expectVersion);
         break;
+      case 'pageTexts':
+        value = !retainedFrame || retainedLayoutVersion !== engine.version() ||
+          (request.read.expectFrameEpoch !== undefined && request.read.expectFrameEpoch !== retainedFrame.frameEpoch) ||
+          (request.read.expectLayoutRevision !== undefined && request.read.expectLayoutRevision !== layoutRevision)
+          ? null : { pages: JSON.parse(session.pageTextsJson(Uint32Array.from(request.read.pages))),
+            frameEpoch: retainedFrame.frameEpoch, layoutRevision };
+        break;
       case 'adjacentRevision':
         value = readAdjacentRevision(session.geometryReader, request.read.selection, request.read.direction,
           new Set(proposals?.snapshot().proposals.flatMap((proposal) => proposal.revisionIds)));

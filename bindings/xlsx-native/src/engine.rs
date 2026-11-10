@@ -10,6 +10,19 @@ use napi::{Env, Error, JsValue, Result, Status, Unknown, ValueType};
 use napi_derive::napi;
 use xlsx_engine::{Document, EngineError, ErrorKind, Host, SnapshotBuilder};
 
+#[napi(catch_unwind, js_name = "font_preflight")]
+pub fn font_preflight(env: Env, bytes: Uint8Array) -> Result<String> {
+    ooxml_font_preflight::xlsx_font_preflight(&bytes)
+        .map(|result| result.to_json())
+        .map_err(|error| {
+            let message = error.to_string();
+            match env.throw(&message) {
+                Ok(()) => Error::new(Status::PendingException, message),
+                Err(error) => error,
+            }
+        })
+}
+
 /// Internal, called by the package loader.
 #[napi(catch_unwind, js_name = "configureFontPacks")]
 pub fn configure_font_packs(
@@ -259,6 +272,15 @@ fn map_error(env: Env, error: EngineError) -> Error {
         Ok(()) => Error::new(Status::PendingException, error.message),
         Err(error) => error,
     }
+}
+
+/// A face one PNG export paints with.
+#[napi(object)]
+pub struct PngFontFace {
+    pub family: String,
+    pub bold: Option<bool>,
+    pub italic: Option<bool>,
+    pub bytes: Uint8Array,
 }
 
 #[napi]
@@ -585,10 +607,22 @@ impl XlsxDocument {
         env: Env,
         target_json: String,
         options_json: String,
+        fonts: Option<Vec<PngFontFace>>,
     ) -> Result<Uint8Array> {
         let _call = EngineCall::new(env);
+        let faces: Option<Vec<_>> = fonts.as_ref().map(|fonts| {
+            fonts
+                .iter()
+                .map(|face| xlsx_engine::PngFontFace {
+                    family: &face.family,
+                    bold: face.bold.unwrap_or(false),
+                    italic: face.italic.unwrap_or(false),
+                    bytes: &face.bytes,
+                })
+                .collect()
+        });
         self.document(env)?
-            .render_png_target(&target_json, &options_json)
+            .render_png_target_with_faces(&target_json, &options_json, faces.as_deref())
             .map_err(|error| map_error(env, error))
             .and_then(|bytes| byte_result(env, bytes))
     }

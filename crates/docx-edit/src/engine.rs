@@ -2467,6 +2467,8 @@ pub struct EngineSession {
     partial_document: Cell<bool>,
     /// Resident text edits re-lower only their paragraph when eligible.
     local_lowering: Cell<bool>,
+    /// Body heading levels by paragraph id, for the document version they were read at.
+    page_text_headings: RefCell<Option<(crate::DocumentVersion, Rc<HashMap<String, u8>>)>>,
     #[cfg(test)]
     preview_refresh: Cell<bool>,
 }
@@ -5048,6 +5050,7 @@ impl EngineSession {
             font_fingerprints: RefCell::new(HashMap::new()),
             partial_document: Cell::new(false),
             local_lowering: Cell::new(false),
+            page_text_headings: RefCell::new(None),
             #[cfg(test)]
             preview_refresh: Cell::new(true),
         }
@@ -11728,6 +11731,83 @@ impl EngineSession {
         self.encode_display_pages_frame(&built, expected_frame_epoch)
     }
 
+    /// The text each of `pages` shows in the retained layout, built or not, as
+    /// `[{"pageIndex","paragraphs":[{"text","level"?,"inTable"?}]}]`: body
+    /// paragraphs cut where the page cuts them, a body heading carrying its
+    /// zero-based outline level, and the rows of tables the page places, cell
+    /// by cell. A row split across pages reads on the page where it starts,
+    /// and header rows a table repeats on later pages read only once. Text
+    /// boxes, shapes, headers, footers and notes are not read.
+    pub fn page_texts_json(&self, pages: &[usize]) -> Result<String, String> {
+        let headings = self.page_text_headings()?;
+        let source = self.doc().source_metadata();
+        let pagination = self.pagination.borrow();
+        let input = pagination
+            .input
+            .as_ref()
+            .ok_or_else(|| "resident pagination input is not built".to_owned())?;
+        let layout = pagination
+            .layout
+            .as_ref()
+            .ok_or_else(|| "resident layout is not built".to_owned())?;
+        let texts: Vec<serde_json::Value> =
+            docx_layout::page_text::layout_page_texts(input, layout, pages)
+                .into_iter()
+                .map(|page| {
+                    let paragraphs: Vec<serde_json::Value> = page
+                        .paragraphs
+                        .into_iter()
+                        .map(|paragraph| {
+                            let mut value = serde_json::json!({ "text": paragraph.text });
+                            if paragraph.in_table {
+                                value["inTable"] = serde_json::Value::Bool(true);
+                            } else if let Some(level) = paragraph
+                                .para_id
+                                .as_ref()
+                                .and_then(|id| headings.get(id).copied())
+                                .or_else(|| match paragraph.para_id {
+                                    Some(_) => None,
+                                    None => crate::heading::resolve_heading(
+                                        &crate::heading::OutlineInputs {
+                                            effective: None,
+                                            direct: None,
+                                            style_id: paragraph.style_id.as_deref(),
+                                        },
+                                        source.as_deref(),
+                                    )
+                                    .map(|heading| heading.outline_level),
+                                })
+                            {
+                                value["level"] = serde_json::Value::from(level);
+                            }
+                            value
+                        })
+                        .collect();
+                    serde_json::json!({ "pageIndex": page.page_index, "paragraphs": paragraphs })
+                })
+                .collect();
+        serde_json::to_string(&texts).map_err(|error| error.to_string())
+    }
+
+    fn page_text_headings(&self) -> Result<Rc<HashMap<String, u8>>, String> {
+        let version = self.doc().version();
+        if let Some((read_at, headings)) = &*self.page_text_headings.borrow()
+            && *read_at == version
+        {
+            return Ok(Rc::clone(headings));
+        }
+        let headings: Rc<HashMap<String, u8>> = Rc::new(
+            self.doc()
+                .paragraph_headings("body")
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .map(|(para_id, heading)| (para_id, heading.outline_level))
+                .collect(),
+        );
+        *self.page_text_headings.borrow_mut() = Some((version, Rc::clone(&headings)));
+        Ok(headings)
+    }
+
     /// Release display pages; an empty result means the request was superseded.
     pub fn release_display_pages_frame(
         &self,
@@ -12523,6 +12603,9 @@ mod font_dependency_tests;
 
 #[cfg(test)]
 mod trailing_page_break_tests;
+
+#[cfg(test)]
+mod whole_number_request_tests;
 
 #[cfg(test)]
 mod tests {
@@ -18478,6 +18561,207 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
     #[test]
     fn resident_local_lowering_patch_applies_with_floats() {
         local_lowering_measurement_reuse(true);
+    }
+
+    #[test]
+    fn a_changed_section_break_restarts_placement_at_the_start_of_its_section() {
+        let paragraph = |id: u32| {
+            serde_json::from_value::<MeasuredBlock>(serde_json::json!({
+                "block": {"kind": "paragraph", "id": id, "runs": [], "attrs": {}},
+                "measure": {"kind": "paragraph", "lines": [], "totalHeight": 0},
+            }))
+            .unwrap()
+        };
+        let section = |id: &str, kind: &str, margins: bool| {
+            let mut block = serde_json::json!({"kind": "sectionBreak", "id": id, "type": kind});
+            if margins {
+                block["margins"] =
+                    serde_json::json!({"top": 10, "right": 10, "bottom": 10, "left": 10});
+            }
+            serde_json::from_value::<MeasuredBlock>(
+                serde_json::json!({"block": block, "measure": {"kind": "sectionBreak"}}),
+            )
+            .unwrap()
+        };
+        for (opening, closing, margins) in [
+            ("nextPage", "nextPage", true),
+            ("continuous", "continuous", true),
+            ("nextPage", "continuous", false),
+        ] {
+            let measured = vec![
+                paragraph(0),
+                section("a", opening, true),
+                paragraph(1),
+                paragraph(2),
+                paragraph(3),
+                section("b", closing, margins),
+                paragraph(4),
+            ];
+            let previous: Vec<Fingerprint> = (0..measured.len() as u128).collect();
+            let mut next = previous.clone();
+            next[5] += 100;
+            assert_eq!(
+                section_start_of_first_changed_break(&measured, &previous, &next, 5),
+                1
+            );
+            next[3] += 100;
+            assert_eq!(
+                section_start_of_first_changed_break(&measured, &previous, &next, 3),
+                1
+            );
+            assert_eq!(
+                section_start_of_first_changed_break(&measured, &previous, &next, 0),
+                0
+            );
+            let mut text_only = previous.clone();
+            text_only[3] += 100;
+            assert_eq!(
+                section_start_of_first_changed_break(&measured, &previous, &text_only, 3),
+                3
+            );
+        }
+    }
+
+    #[test]
+    fn a_retained_layout_repaginates_like_a_replica_after_an_edit_before_a_page_break() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font(lowering_pages::FONT).unwrap();
+        let geometry = r#"<w:sectPr><w:pgSz w:w="7200" w:h="4320"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/></w:sectPr>"#;
+        let body = format!(
+            r#"<w:p w14:paraId="10000001"><w:r><w:t xml:space="preserve">   </w:t><w:br w:type="page"/></w:r></w:p><w:p w14:paraId="10000002"><w:pPr>{geometry}</w:pPr></w:p><w:p w14:paraId="10000003"><w:r><w:t>B</w:t></w:r></w:p>{geometry}"#
+        );
+        let bytes = lowering_pages::with_body(&body);
+        let without_notes = {
+            let mut parts = ooxml_opc::unzip_parts(&bytes).unwrap();
+            for (name, part) in &mut parts {
+                let root = match name.as_str() {
+                    "word/footnotes.xml" => "footnotes",
+                    "word/endnotes.xml" => "endnotes",
+                    _ => continue,
+                };
+                *part = format!(
+                    r#"<w:{root} xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>"#
+                )
+                .into_bytes();
+            }
+            ooxml_opc::rezip_parts(&parts).unwrap()
+        };
+        let pages = |session: &EngineSession, request: &str| {
+            let output: serde_json::Value =
+                serde_json::from_str(&session.layout_document_with_regions_json(request).unwrap())
+                    .unwrap();
+            output["layout"]["pages"].as_array().unwrap().len()
+        };
+        let insert = || {
+            vec![crate::RawOp::Insert {
+                index: 0,
+                text: "x".to_owned(),
+                attrs: Default::default(),
+            }]
+        };
+        for (path, stored, bytes) in [
+            ("remote", false, &bytes),
+            ("remote", false, &without_notes),
+            ("remote", true, &bytes),
+            ("raw", true, &bytes),
+            ("agents", true, &bytes),
+            ("undo", true, &bytes),
+        ] {
+            for local in [false, true] {
+                let host = EngineSession::new(9672);
+                host.set_local_lowering(local);
+                crate::seed_from_docx(host.doc(), bytes).unwrap();
+                if stored {
+                    host.doc()
+                        .apply_raw_ops(
+                            "body",
+                            vec![crate::RawOp::SetEmbedAttr {
+                                index: 4,
+                                key: "sectionMarkIneligible".to_owned(),
+                                value: Any::Bool(true),
+                            }],
+                            &crate::EditCtx::local("", ""),
+                        )
+                        .unwrap();
+                }
+                let request = lowering_pages::region_request(&host, bytes, font).to_string();
+                let before = pages(&host, &request);
+                let mut undo = host.doc().undo_manager();
+                match path {
+                    "remote" => {
+                        let peer = EngineSession::new(9673);
+                        peer.doc()
+                            .apply_update_v1(&host.doc().encode_state_as_update_v1())
+                            .unwrap();
+                        peer.doc()
+                            .apply_raw_ops("body", insert(), &crate::EditCtx::local("", ""))
+                            .unwrap();
+                        host.doc()
+                            .apply_update_v1(&peer.doc().encode_state_as_update_v1())
+                            .unwrap();
+                    }
+                    "agents" => {
+                        let paragraph = host.doc().paragraphs("body").unwrap()[0].para_id.clone();
+                        let request = crate::EditRequest {
+                            expect_version: host.doc().version(),
+                            source: Default::default(),
+                            history: Default::default(),
+                            steps: vec![crate::EditStep::new(crate::EditOperation::InsertText {
+                                target: crate::TextTarget::Range(crate::TextRange {
+                                    story: "body".to_owned(),
+                                    start: crate::TextPosition {
+                                        para_id: paragraph.to_string(),
+                                        offset: 0,
+                                    },
+                                    end: crate::TextPosition {
+                                        para_id: paragraph.to_string(),
+                                        offset: 0,
+                                    },
+                                    view: Default::default(),
+                                }),
+                                at: crate::TargetEdge::Start,
+                                text: "x".to_owned(),
+                            })],
+                        };
+                        host.doc()
+                            .apply_edits(&request, &crate::UndoSession::new())
+                            .unwrap()
+                            .unwrap();
+                    }
+                    _ => {
+                        host.doc()
+                            .apply_raw_ops("body", insert(), &crate::EditCtx::local("", ""))
+                            .unwrap();
+                    }
+                }
+                let replica_pages = |host: &EngineSession| {
+                    let replica = EngineSession::new(9674);
+                    replica
+                        .doc()
+                        .apply_update_v1(&host.doc().encode_state_as_update_v1())
+                        .unwrap();
+                    pages(&replica, &request)
+                };
+                let case = format!(
+                    "{path}, stored mark {stored}, notes emptied {}, local lowering {local}",
+                    bytes.len() == without_notes.len()
+                );
+                assert_eq!(before, 3, "{case}");
+                let typed = pages(&host, &request);
+                assert_eq!(
+                    (typed, replica_pages(&host)),
+                    (2, 2),
+                    "{case}: after typing"
+                );
+                assert_eq!(pages(&host, &request), 2, "{case}: a second request");
+                if path == "undo" {
+                    assert!(undo.undo());
+                    let undone = pages(&host, &request);
+                    assert_eq!((undone, replica_pages(&host)), (3, 3), "{case}: after undo");
+                }
+            }
+        }
     }
 
     #[test]
