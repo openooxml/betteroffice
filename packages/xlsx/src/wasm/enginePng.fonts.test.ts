@@ -39,6 +39,8 @@ async function render(options: Parameters<typeof import('./enginePng').renderPng
 
 const nativeEngine = (globalThis as Record<symbol, unknown>)[Symbol.for('betteroffice.testEngine')] === 'native';
 
+// Checks the canvas engine's own calls (bundled-face loading, faces handed to the painter); the native engine renders
+// through its binding instead, and bindings/xlsx-native/engine.test.ts checks the same outcomes there.
 describe.skipIf(nativeEngine)('wasm PNG fonts option', () => {
   test('an absent list paints with the bundled faces', async () => {
     const options = await render({});
