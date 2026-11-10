@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use crate::map::Map;
@@ -319,6 +320,7 @@ impl Styles {
             root.path(&["w:docDefaults", "w:rPrDefault", "w:rPr"]),
             theme,
         );
+        let mut defaults = BTreeMap::new();
         for (index, node) in root
             .children
             .iter()
@@ -333,16 +335,10 @@ impl Styles {
                 continue;
             };
             let kind = node.attr("type").unwrap_or("paragraph");
-            if node.attr("default").and_then(on_off) == Some(true)
-                && result
-                    .defaults_by_type
-                    .get(kind)
-                    .is_none_or(|current| id < current.as_str())
-            {
-                result
-                    .defaults_by_type
-                    .insert(kind.to_owned(), id.to_owned());
-            }
+            defaults.insert(
+                id,
+                (kind, node.attr("default").and_then(on_off) == Some(true)),
+            );
             let mut conditionals = Map::new();
             for conditional in node
                 .children
@@ -389,6 +385,13 @@ impl Styles {
                     based_on: node.val("w:basedOn").map(str::to_owned),
                 },
             );
+        }
+        for (id, (kind, default)) in defaults {
+            if default && !result.defaults_by_type.contains_key(kind) {
+                result
+                    .defaults_by_type
+                    .insert(kind.to_owned(), id.to_owned());
+            }
         }
         if result.map.contains_key("Normal") && !result.defaults_by_type.contains_key("paragraph") {
             result

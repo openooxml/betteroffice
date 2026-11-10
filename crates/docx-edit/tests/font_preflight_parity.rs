@@ -298,3 +298,22 @@ fn duplicate_theme_script_fonts_take_the_last_entry() {
     ]);
     assert_parity(&bytes, "SecondFont");
 }
+
+#[test]
+fn duplicate_style_id_takes_the_default_flag_of_the_last_definition() {
+    let bytes = package(&[
+        ("word/document.xml", document(&plain("Text"))),
+        (
+            "word/_rels/document.xml.rels",
+            rels(&[("styles", "styles.xml")]),
+        ),
+        (
+            "word/styles.xml",
+            styles(
+                "Base",
+                r#"<w:style w:type="paragraph" w:default="1" w:styleId="A"><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="A"><w:rPr><w:rFonts w:ascii="Courier" w:hAnsi="Courier"/></w:rPr></w:style>"#,
+            ),
+        ),
+    ]);
+    assert_parity(&bytes, "Base");
+}
