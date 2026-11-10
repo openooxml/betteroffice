@@ -1,4 +1,7 @@
-use super::{EngineSession, lowering_fixture::{NS, Package}};
+use super::{
+    EngineSession,
+    lowering_fixture::{NS, Package},
+};
 use crate::seed_from_docx;
 use serde_json::{Value, json};
 
@@ -58,16 +61,19 @@ fn forwarded_request(bytes: &[u8]) -> Value {
         .map(|section| json!({"sectionId": section.id, "properties": section.properties}))
         .collect();
     sections.push(json!({"properties": package.document.final_section_properties}));
-    let contents: Vec<Value> = [(&package.footnotes, "footnote"), (&package.endnotes, "endnote")]
-        .into_iter()
-        .flat_map(|(notes, kind)| {
-            notes
-                .iter()
-                .flatten()
-                .filter(|note| note.note_type.is_empty() || note.note_type == "normal")
-                .map(move |note| json!({"id": note.id, "noteKind": kind, "height": 0}))
-        })
-        .collect();
+    let contents: Vec<Value> = [
+        (&package.footnotes, "footnote"),
+        (&package.endnotes, "endnote"),
+    ]
+    .into_iter()
+    .flat_map(|(notes, kind)| {
+        notes
+            .iter()
+            .flatten()
+            .filter(|note| note.note_type.is_empty() || note.note_type == "normal")
+            .map(move |note| json!({"id": note.id, "noteKind": kind, "height": 0}))
+    })
+    .collect();
     json!({
         "bodyStory": "body",
         "renderEnv": {},
@@ -82,7 +88,12 @@ fn a_forwarded_parse_model_lays_out_with_its_whole_number_floats() {
     let bytes = notes_document();
     let mut request = forwarded_request(&bytes);
     let text = request.to_string();
-    for float in [r#""id":1.0"#, r#""numStart":8.0"#, r#""numStart":2.0"#, r#""numStart":1.0"#] {
+    for float in [
+        r#""id":1.0"#,
+        r#""numStart":8.0"#,
+        r#""numStart":2.0"#,
+        r#""numStart":1.0"#,
+    ] {
         assert!(text.contains(float), "{float} missing from {text}");
     }
     docx_layout::clear_measure_fonts();
@@ -93,7 +104,12 @@ fn a_forwarded_parse_model_lays_out_with_its_whole_number_floats() {
         serde_json::from_str(&engine.layout_font_requirements_json(&text).unwrap()).unwrap();
     let chains: serde_json::Map<String, Value> = requirements
         .iter()
-        .map(|requirement| (requirement["key"].as_str().unwrap().to_owned(), json!([font])))
+        .map(|requirement| {
+            (
+                requirement["key"].as_str().unwrap().to_owned(),
+                json!([font]),
+            )
+        })
         .collect();
     request["measurement"] = json!({
         "fontChains": chains,
@@ -117,5 +133,8 @@ fn a_fractional_note_number_is_rejected_naming_the_field() {
     let error = engine
         .layout_font_requirements_json(&request.to_string())
         .unwrap_err();
-    assert!(error.contains("numStart must be an integer, got 1.5"), "{error}");
+    assert!(
+        error.contains("numStart must be an integer, got 1.5"),
+        "{error}"
+    );
 }

@@ -119,14 +119,23 @@ pub(crate) fn required<'de, T: WholeNumber, D: Deserializer<'de>>(
     deserializer: D,
     field: &'static str,
 ) -> Result<T, D::Error> {
-    T::deserialize_typed(deserializer, Whole { field, kind: PhantomData })
+    T::deserialize_typed(
+        deserializer,
+        Whole {
+            field,
+            kind: PhantomData,
+        },
+    )
 }
 
 pub(crate) fn optional<'de, T: WholeNumber, D: Deserializer<'de>>(
     deserializer: D,
     field: &'static str,
 ) -> Result<Option<T>, D::Error> {
-    deserializer.deserialize_option(OptionalWhole(Whole { field, kind: PhantomData }))
+    deserializer.deserialize_option(OptionalWhole(Whole {
+        field,
+        kind: PhantomData,
+    }))
 }
 
 macro_rules! whole_fields {
@@ -172,7 +181,9 @@ mod tests {
     }
 
     fn signed(json: &str) -> Result<i64, String> {
-        serde_json::from_str::<Signed>(json).map(|value| value.id).map_err(|error| error.to_string())
+        serde_json::from_str::<Signed>(json)
+            .map(|value| value.id)
+            .map_err(|error| error.to_string())
     }
 
     fn unsigned(json: &str) -> Result<Option<u64>, String> {
@@ -197,9 +208,17 @@ mod tests {
             let error = signed(json).unwrap_err();
             assert!(error.contains("note id must be an integer"), "{error}");
         }
-        for json in [r#"{"columns":-1.0}"#, r#"{"columns":-1}"#, r#"{"columns":0.5}"#, r#"{"columns":1e30}"#] {
+        for json in [
+            r#"{"columns":-1.0}"#,
+            r#"{"columns":-1}"#,
+            r#"{"columns":0.5}"#,
+            r#"{"columns":1e30}"#,
+        ] {
             let error = unsigned(json).unwrap_err();
-            assert!(error.contains("footnoteColumns must be a nonnegative integer"), "{error}");
+            assert!(
+                error.contains("footnoteColumns must be a nonnegative integer"),
+                "{error}"
+            );
         }
         assert!(signed(r#"{"id":"1"}"#).is_err());
     }
@@ -208,7 +227,16 @@ mod tests {
     fn every_js_safe_integer_reads_the_same_as_integer_and_as_whole_float() {
         const MAX_SAFE: i64 = (1 << 53) - 1;
         let mut state = 0x9e37_79b9_7f4a_7c15_u64;
-        let mut samples = vec![0, 1, -1, MAX_SAFE, -MAX_SAFE, MAX_SAFE - 1, 1 << 31, -(1 << 31)];
+        let mut samples = vec![
+            0,
+            1,
+            -1,
+            MAX_SAFE,
+            -MAX_SAFE,
+            MAX_SAFE - 1,
+            1 << 31,
+            -(1 << 31),
+        ];
         for _ in 0..10_000 {
             state ^= state << 13;
             state ^= state >> 7;
@@ -218,7 +246,13 @@ mod tests {
         for value in samples {
             assert_eq!(signed(&format!(r#"{{"id":{value}}}"#)), Ok(value));
             assert_eq!(signed(&format!(r#"{{"id":{value}.0}}"#)), Ok(value));
-            assert_eq!(signed(&format!(r#"{{"id":{}}}"#, serde_json::to_string(&(value as f64)).unwrap())), Ok(value));
+            assert_eq!(
+                signed(&format!(
+                    r#"{{"id":{}}}"#,
+                    serde_json::to_string(&(value as f64)).unwrap()
+                )),
+                Ok(value)
+            );
             if value >= 0 {
                 let expected = Ok(Some(value as u64));
                 assert_eq!(unsigned(&format!(r#"{{"columns":{value}}}"#)), expected);
@@ -244,13 +278,22 @@ mod tests {
     #[test]
     fn flattened_fields_read_whole_floats_and_integers() {
         let read = |json: &str| {
-            serde_json::from_str::<Flattened>(json).map(|value| (value.inner.grid_before, value.inner.id))
+            serde_json::from_str::<Flattened>(json)
+                .map(|value| (value.inner.grid_before, value.inner.id))
         };
-        assert_eq!(read(r#"{"grid_before":2.0,"id":3.0}"#).unwrap(), (Some(2), 3));
+        assert_eq!(
+            read(r#"{"grid_before":2.0,"id":3.0}"#).unwrap(),
+            (Some(2), 3)
+        );
         assert_eq!(read(r#"{"grid_before":2,"id":-3}"#).unwrap(), (Some(2), -3));
         assert_eq!(read(r#"{"id":3}"#).unwrap(), (None, 3));
-        let error = read(r#"{"grid_before":2.5,"id":3}"#).unwrap_err().to_string();
-        assert!(error.contains("gridBefore must be a nonnegative integer, got 2.5"), "{error}");
+        let error = read(r#"{"grid_before":2.5,"id":3}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("gridBefore must be a nonnegative integer, got 2.5"),
+            "{error}"
+        );
     }
 
     struct Binary(Option<i64>);
@@ -258,19 +301,31 @@ mod tests {
     impl<'de> serde::Deserializer<'de> for Binary {
         type Error = serde::de::value::Error;
 
-        fn deserialize_any<V: serde::de::Visitor<'de>>(self, _: V) -> Result<V::Value, Self::Error> {
+        fn deserialize_any<V: serde::de::Visitor<'de>>(
+            self,
+            _: V,
+        ) -> Result<V::Value, Self::Error> {
             Err(serde::de::Error::custom("deserialize_any is not supported"))
         }
 
-        fn deserialize_i64<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        fn deserialize_i64<V: serde::de::Visitor<'de>>(
+            self,
+            visitor: V,
+        ) -> Result<V::Value, Self::Error> {
             visitor.visit_i64(self.0.expect("a value"))
         }
 
-        fn deserialize_u64<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        fn deserialize_u64<V: serde::de::Visitor<'de>>(
+            self,
+            visitor: V,
+        ) -> Result<V::Value, Self::Error> {
             visitor.visit_u64(self.0.expect("a value") as u64)
         }
 
-        fn deserialize_option<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        fn deserialize_option<V: serde::de::Visitor<'de>>(
+            self,
+            visitor: V,
+        ) -> Result<V::Value, Self::Error> {
             match self.0 {
                 None => visitor.visit_none(),
                 Some(_) => visitor.visit_some(self),
