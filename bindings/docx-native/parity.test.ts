@@ -212,8 +212,7 @@ test('clearing formatting to the styles matches through native and wasm', async 
     try {
       session.seedFromDocx(await textRunFixture());
       for (const [paraId, length] of [['00000003', 5], ['00000004', 10]] as const) {
-        const delta = { clearToStyles: 'all', italic: true } as wasmYrs.YrsInlineFormatDelta;
-        session.formatRange({ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: length } }, delta);
+        session.formatRange({ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: length } }, { clear: 'all', italic: true });
       }
       const saved = await api.saveYrsDocx(session, { updateModifiedDate: false });
       return { bytes: saved.bytes, segments: session.storySegments('body') };

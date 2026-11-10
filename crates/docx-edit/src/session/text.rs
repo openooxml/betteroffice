@@ -286,7 +286,7 @@ impl EditSessionCore {
             serde_json::from_str(delta_json).map_err(EngineError::message)?;
         let clear = value
             .as_object_mut()
-            .and_then(|object| object.remove("clearToStyles"));
+            .and_then(|object| object.remove("clear"));
         let delta = parse_inline_format_delta(&value.to_string())?;
         let range = StoryRange::new(story, start, end);
         let doc = self.engine.doc();
