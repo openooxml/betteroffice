@@ -120,6 +120,18 @@ Plugins read `snapshot.focused` and `snapshot.locale`, and receive
 and toolbar controls are outside. Locale is the canonical `i18n._lang`, defaulting to `en`.
 `layout.viewport` remains the grid viewport in sheet pixels.
 
+`proposal-change` carries `generation`, `version` and `previewVersion` when host
+proposals or their stale-decision state change, including committed edits while
+proposals remain. `geometry.getAnchorGeometry({ kind: 'proposal', id })` returns
+visible cell `rects`, their bounding `anchor` and the grid's `pageRect` in overlay
+pixels, alongside `version`, `previewVersion` and `layoutId`. XLSX does not expose
+`layout.previewVersion`; use the event's or anchor result's value for proposal state.
+Failures carry `{ code, message }`: `unknown-proposal` for an unregistered id,
+`missing-target` for no visible cells, `pending` while proposals refresh,
+`read-failed` when they cannot be read, and `layout-unavailable` for a superseded
+context or unpainted layout. The result type also allows `stale-version`,
+`ambiguous-target` and `unsupported`.
+
 `selection-settle` reports the current selection after a minimum quiet window of
 350 ms; engines may wait up to 1.5 seconds longer for paint. Sources are `pointer`,
 `touch` and `keyboard`; programmatic changes use `keyboard`. `snapshot.selectionSettled`

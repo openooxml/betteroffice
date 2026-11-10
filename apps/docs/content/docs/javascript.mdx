@@ -695,7 +695,10 @@ order through a promise.
 `initialize` and one `load` event per workbook (repeated when a change the hook
 did not make arrives first, and stopped after ten runs), then coalesced
 `document-change`, `selection-change`, `mode-change` (with `readOnly`),
-`layout-change` and `grants-change` events. `document-change` comes from the
+`layout-change`, `proposal-change` and `grants-change` events. `proposal-change`
+carries `generation`, `version` and `previewVersion` when host proposals or
+their stale-decision state change, including committed edits while proposals
+remain. `document-change` comes from the
 workbook's committed versions after recalculation, so typing, commands, batches
 (a plugin's own included), undo, redo and remote updates each produce one, and
 refusals or no-ops none. Replacing the workbook, removing the plugin, changing its `revision`,
@@ -776,6 +779,15 @@ zoom and sheet switch. `geometry.getCellRect({ sheetId, row, col })` and
 `getRangeRect({ sheetId, range })` return pixels of the overlay layer, zoomed
 and clipped to the visible grid, frozen panes included; a cell scrolled out of
 view returns null, and merged areas are addressed as ranges.
+`geometry.getAnchorGeometry({ kind: 'proposal', id })` returns visible proposal
+cell `rects`, their bounding `anchor` and the grid's `pageRect` in overlay
+pixels, alongside `version`, `previewVersion` and `layoutId`. XLSX does not expose
+`layout.previewVersion`; use the event's or anchor result's `previewVersion` to
+track proposal state. Anchor failures carry `{ code, message }`: `unknown-proposal`
+for an unregistered id, `missing-target` for no visible cells on this sheet,
+`pending` while proposals refresh, `read-failed` when they cannot be read, and
+`layout-unavailable` for a superseded context or unpainted layout. The result
+type also allows `stale-version`, `ambiguous-target` and `unsupported`.
 `getPositionAtPoint(clientX, clientY)` hit-tests client coordinates through the
 editor's own hit test and returns the editor's `{ sheet, row, col }` with the
 layout's `sheetId`, `version` and `layoutId`, or null outside the grid, over a

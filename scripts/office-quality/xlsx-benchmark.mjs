@@ -1,4 +1,5 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { budgetShards } from './shards.mjs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { fetchAsset } from './asset-cache.mjs';
@@ -17,18 +18,12 @@ export function calculationSamples(plan) {
 
 export function xlsxShards(plan) {
   const samples = calculationSamples(plan);
-  const shards = Array.from({ length: Math.min(4, samples.length) }, () => []);
-  const weights = shards.map(() => 0);
-  for (const sample of [...samples].sort((a, b) =>
-    b.metadata.calculation.result_cells - a.metadata.calculation.result_cells || a.id.localeCompare(b.id))) {
+  for (const sample of samples) {
     const size = sample.metadata.calculation.result_cells;
     if (!Number.isSafeInteger(size) || size < 1 || size > 250000)
       throw new Error('Invalid calculation reference size');
-    const index = weights.indexOf(Math.min(...weights));
-    shards[index].push(sample.id);
-    weights[index] += size;
   }
-  return shards;
+  return budgetShards('xlsx-benchmark', samples).map(shard => shard.samples);
 }
 
 function validateResult(result, total) {
@@ -62,6 +57,8 @@ export function calculationSummary(samples) {
     channels: Object.fromEntries(CHANNELS.map(channel => [channel, {
       correct: rows.reduce((sum, row) => sum + row.calculations[channel].correct, 0),
       total: rows.reduce((sum, row) => sum + row.calculations[channel].total, 0),
+      fully_matching: rows.filter(row => row.calculations[channel].status === 'ok' &&
+        row.calculations[channel].correct === row.calculations[channel].total).length,
       mean_ms: common.length ? common.reduce((sum, row) =>
         sum + row.calculations[channel].elapsed_ms.reduce((a, b) => a + b, 0) / TRIALS, 0) / common.length : null,
     }])),
