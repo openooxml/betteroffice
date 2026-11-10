@@ -8797,10 +8797,11 @@ fn undo_restores_defined_names_dropped_by_a_sheet_removal() {
     assert_eq!(workbook.model().defined_names, before);
 }
 
-/// v1 leaves preserved sheet fragments at their original geometry after an
-/// axis edit; the file must still open, even though the ranges have drifted.
+/// v1 leaves the preserved sheet fragments it does not model at their original
+/// geometry after an axis edit, and the file must still open even though those
+/// ranges have drifted; drawings follow the edit.
 #[test]
-fn row_insertion_preserves_unmodeled_ranges_and_anchors_without_corruption() {
+fn row_insertion_preserves_unmodeled_ranges_and_moves_anchors_without_corruption() {
     let original = preservation_fixture();
     let before = package_map(&original);
     let mut workbook = Workbook::open(&original).unwrap();
@@ -8820,10 +8821,17 @@ fn row_insertion_preserves_unmodeled_ranges_and_anchors_without_corruption() {
     assert!(worksheet.contains(r#"<autoFilter ref="A2:B3""#));
     assert!(worksheet.contains(r#"<dataValidation type="whole" sqref="B2""#));
     assert!(worksheet.contains(r#"<conditionalFormatting sqref="B2""#));
-    assert_eq!(
-        after["xl/drawings/drawing1.xml"],
-        before["xl/drawings/drawing1.xml"]
-    );
+    let moved = String::from_utf8(before["xl/drawings/drawing1.xml"].clone())
+        .unwrap()
+        .replace(
+            "<xdr:row>0</xdr:row></xdr:from>",
+            "<xdr:row>1</xdr:row></xdr:from>",
+        )
+        .replace(
+            "<xdr:row>2</xdr:row></xdr:to>",
+            "<xdr:row>3</xdr:row></xdr:to>",
+        );
+    assert_eq!(after["xl/drawings/drawing1.xml"], moved.into_bytes());
     Workbook::open(&saved).unwrap();
 }
 

@@ -307,6 +307,7 @@ fn undo_restores_the_source_drawing_and_redo_moves_it_again() {
         .apply_ops(vec![insert_rows(2, 2)], options())
         .unwrap();
     let moved = drawing_xml(&workbook.save().unwrap());
+    assert_ne!(moved, source_drawing(&anchors));
     workbook.undo(options()).unwrap();
     assert_eq!(
         drawing_xml(&workbook.save().unwrap()),

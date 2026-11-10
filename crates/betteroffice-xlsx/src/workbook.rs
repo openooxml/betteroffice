@@ -3645,6 +3645,9 @@ impl Workbook {
             count,
             inserting,
         };
+        if !slot.sheet_may_hold_drawing(*origin) {
+            return Ok(false);
+        }
         let package = slot.materialize()?;
         let sheet_axes = axes.get(sheet.0 as usize).and_then(Option::as_ref);
         let copied = origins

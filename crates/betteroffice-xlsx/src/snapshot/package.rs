@@ -64,6 +64,39 @@ impl PackageSlot {
         .map_err(|failure| SnapshotError::new(failure.to_string()))
     }
 
+    /// Whether the source sheet `sheet` may relate to a drawing. A deferred package answers
+    /// from that sheet's relationship part alone, so a row or column edit on a sheet without
+    /// drawings does not rebuild it.
+    pub(crate) fn sheet_may_hold_drawing(&self, sheet: usize) -> bool {
+        let Self::Deferred {
+            source,
+            facts,
+            rebuilt,
+        } = self
+        else {
+            return true;
+        };
+        if rebuilt.get().is_some() {
+            return true;
+        }
+        let Some(path) = PackageFactsView::from_facts(facts).source_sheet_part(sheet) else {
+            return true;
+        };
+        let path = path.trim_start_matches('/');
+        let rels = match path.rsplit_once('/') {
+            Some((directory, name)) => format!("{directory}/_rels/{name}.rels"),
+            None => format!("_rels/{path}.rels"),
+        };
+        match ooxml_opc::unzip_parts_where(source.as_bytes(), u64::MAX, |name| name == rels) {
+            Ok(parts) => parts.iter().any(|(_, bytes)| {
+                bytes
+                    .windows(b"/drawing\"".len())
+                    .any(|window| window == b"/drawing\"" || window == b"/drawing'")
+            }),
+            Err(_) => true,
+        }
+    }
+
     pub(crate) fn materialize(&self) -> Result<&PreservedPackage> {
         match self {
             Self::Present(package) => Ok(package),
