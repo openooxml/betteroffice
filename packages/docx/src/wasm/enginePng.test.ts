@@ -65,6 +65,17 @@ describe.skipIf(engineKind === 'native')('canvas renderPng', () => {
     expect(diagnostics).toEqual([{ code: 'picture-unavailable', pictures: [{ id: 'media:0', reason: 'unsupported' }] }]);
   });
 
+  test('strictPictures rejects a page with a picture it cannot draw, naming it, and reports nothing', async () => {
+    const calls = stub();
+    const diagnostics: PngDiagnostic[] = [];
+    const rejected = await renderPng(engine(page([picture])), { strictPictures: true, onDiagnostic: (diagnostic) => diagnostics.push(diagnostic) })
+      .then(() => undefined, (error: { code?: string; message?: string }) => error);
+    expect(rejected?.code).toBe('picture-unavailable');
+    expect(rejected?.message).toContain('media:0 (unsupported)');
+    expect(calls.encoded).toBe(0);
+    expect(diagnostics).toEqual([]);
+  });
+
   test('a picture whose part cannot be read paints a placeholder, reported as missing; a data URL is named by its header', async () => {
     const calls = stub();
     const diagnostics: PngDiagnostic[] = [];

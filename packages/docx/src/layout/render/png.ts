@@ -24,6 +24,11 @@ export interface DocxPngOptions {
   fontProvider?: BundledFontProvider;
   /** Told, once per page, about pictures drawn as a placeholder because they could not be drawn. */
   onDiagnostic?: (diagnostic: PngDiagnostic) => void;
+  /**
+   * Reject with `picture-unavailable` instead of drawing a placeholder when a
+   * picture cannot be drawn, for pipelines that must not ship one. Off by default.
+   */
+  strictPictures?: boolean;
 }
 
 /** Whether this runtime can paint and encode a PNG on a canvas: one with a 2d context, not only a document. */

@@ -95,6 +95,26 @@ describe('YrsSession.renderPng', () => {
     } finally { session.destroy(); }
   });
 
+  test('a picture whose part is missing exports with a placeholder and a diagnostic, and strictPictures rejects it, on every engine', async () => {
+    stubBrowser();
+    const image = fixture.image.replace('IMAGE_RANK', '0').replace('IMAGE_BEHIND', '0');
+    const parts: PartsMap = new Map([
+      ['[Content_Types].xml', toBytes('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/x-emf"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')],
+      ['_rels/.rels', toBytes('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>')],
+      ['word/_rels/document.xml.rels', toBytes('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image.png"/></Relationships>')],
+      ['word/document.xml', toBytes(`<w:document ${fixture.namespaces}><w:body>${image}${fixture.body}</w:body></w:document>`)],
+    ]);
+    const session = await createYrsSession();
+    try {
+      session.openDocx(new Uint8Array(rezipPartsToArrayBuffer(parts)), true);
+      const diagnostics: PngDiagnostic[] = [];
+      await session.renderPng({ page: 0 }, { onDiagnostic: (diagnostic) => diagnostics.push(diagnostic) });
+      expect(diagnostics).toEqual([{ code: 'picture-unavailable', pictures: [{ id: expect.any(String), reason: 'missing' }] }]);
+      const strict = await session.renderPng({ page: 0 }, { strictPictures: true }).then(() => undefined, (error: { code?: string }) => error.code);
+      expect(strict).toBe('picture-unavailable');
+    } finally { session.destroy(); }
+  });
+
   test('sizes a page by scale and lays out once per version, leaving the session as it was', async () => {
     const calls = stubBrowser();
     const session = await opened();

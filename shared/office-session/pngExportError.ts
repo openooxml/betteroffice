@@ -26,3 +26,16 @@ export interface PngDiagnostic {
   code: 'picture-unavailable';
   pictures: PngUnavailablePicture[];
 }
+
+/**
+ * Whether a PNG export rejects instead of drawing a placeholder when a picture
+ * cannot be drawn, when the caller does not say: every format's
+ * `strictPictures` defaults to this.
+ */
+export const DEFAULT_STRICT_PICTURES = false;
+
+/** The rejection `strictPictures` asks for, naming each picture that could not be drawn. */
+export function strictPicturesError(pictures: readonly PngUnavailablePicture[]): PngExportError {
+  const named = pictures.map((picture) => `${picture.id} (${picture.reason})`).join(', ');
+  return new PngExportError('picture-unavailable', `${pictures.length} picture(s) on this page could not be drawn: ${named}`);
+}

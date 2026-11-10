@@ -4,4 +4,4 @@
 '@betteroffice/agents': minor
 ---
 
-DOCX PNG export draws a placeholder for a picture it cannot draw instead of failing the page or leaving it out. The new `onDiagnostic` option reports each such picture and why. Agent page previews add a warning.
+DOCX PNG export draws a placeholder for a picture it cannot draw instead of rejecting the page; `onDiagnostic` reports each one and why. Pass `strictPictures: true` to keep rejecting. Agent page previews add a warning.

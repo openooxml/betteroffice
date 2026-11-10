@@ -2,7 +2,7 @@ import { GlyphCache } from '../layout/render/glyphCache';
 import { createCanvasImageResolver } from '../layout/render/canvasImageResolver';
 import { rasterizeDisplayPageToBackBuffer, type PageCanvasBuffer } from '../layout/render/canvasBackend';
 import { canvasPngAvailable, canvasUnavailable, fontUnavailable, pagePngRequest, type DocxPngOptions } from '../layout/render/png';
-import type { PngPictureUnavailableReason, PngUnavailablePicture } from '../../../../shared/office-session/pngExportError';
+import { DEFAULT_STRICT_PICTURES, strictPicturesError, type PngPictureUnavailableReason, type PngUnavailablePicture } from '../../../../shared/office-session/pngExportError';
 import type { DisplayList, DisplayPage } from '../layout/render/displayList';
 
 /** What an engine needs to draw one page, from the session that laid it out. */
@@ -29,7 +29,7 @@ function metafilePlaceholder(source: { bytes: Uint8Array; mimeType: string } | n
 }
 
 /** Paints one page with the editor's canvas backend and encodes it. */
-export async function renderPng(engine: DocxPngEngine, options: Pick<DocxPngOptions, 'scale' | 'signal' | 'onDiagnostic'>): Promise<Uint8Array> {
+export async function renderPng(engine: DocxPngEngine, options: Pick<DocxPngOptions, 'scale' | 'signal' | 'onDiagnostic' | 'strictPictures'>): Promise<Uint8Array> {
   const { width, height, scale } = pagePngRequest(engine.page, options);
   if (!canvasPngAvailable()) throw canvasUnavailable();
   options.signal?.throwIfAborted();
@@ -57,6 +57,7 @@ export async function renderPng(engine: DocxPngEngine, options: Pick<DocxPngOpti
     onPictureUnavailable: (id) => { pictures.push({ id: pictureId(id), reason: reasons.get(id) ?? 'missing' }); },
   }, scale);
   if (refused) throw refused;
+  if (pictures.length && (options.strictPictures ?? DEFAULT_STRICT_PICTURES)) throw strictPicturesError(pictures);
   options.signal?.throwIfAborted();
   const png = new Uint8Array(await (await encode(canvas)).arrayBuffer());
   if (pictures.length) options.onDiagnostic?.({ code: 'picture-unavailable', pictures });

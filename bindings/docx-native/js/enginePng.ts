@@ -1,5 +1,5 @@
 import { fontUnavailable, pagePngRequest, type DocxPngOptions } from '../../../packages/docx/src/layout/render/png';
-import { PngExportError, type PngUnavailablePicture } from '../../../shared/office-session/pngExportError';
+import { DEFAULT_STRICT_PICTURES, PngExportError, strictPicturesError, type PngUnavailablePicture } from '../../../shared/office-session/pngExportError';
 import type { DocxPngEngine } from '../../../packages/docx/src/wasm/enginePng';
 
 export type { DocxPngEngine } from '../../../packages/docx/src/wasm/enginePng';
@@ -15,7 +15,7 @@ interface NativeSession {
  * thread, with the faces and media of the session that laid it out. Scale and
  * size are checked as on the canvas engine, so both reject alike.
  */
-export async function renderPng(engine: DocxPngEngine, options: Pick<DocxPngOptions, 'scale' | 'signal' | 'onDiagnostic'>): Promise<Uint8Array> {
+export async function renderPng(engine: DocxPngEngine, options: Pick<DocxPngOptions, 'scale' | 'signal' | 'onDiagnostic' | 'strictPictures'>): Promise<Uint8Array> {
   const { scale } = pagePngRequest(engine.page, options);
   options.signal?.throwIfAborted();
   let report: ReturnType<NativeSession['renderPngTargetReport']>;
@@ -29,6 +29,7 @@ export async function renderPng(engine: DocxPngEngine, options: Pick<DocxPngOpti
     throw error;
   }
   options.signal?.throwIfAborted();
+  if (report.pictures.length && (options.strictPictures ?? DEFAULT_STRICT_PICTURES)) throw strictPicturesError(report.pictures);
   if (report.pictures.length) {
     options.onDiagnostic?.({ code: 'picture-unavailable', pictures: report.pictures.map((picture) => ({ ...picture })) });
   }
