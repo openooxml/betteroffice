@@ -5,8 +5,8 @@
 //! names no existing test. The scan is partial: it sees only string literals
 //! of the forms `relationships/<kind>`, `"/<kind>"` and `"ppt|xl|word/<path>.xml"`
 //! without digits, in the listed crates. Rows below marked "by hand" are
-//! inputs it cannot see. `NotPainted` and `Superset` are engine-side claims
-//! checked by review, not by a test.
+//! inputs it cannot see. `NotPainted` is an engine-side claim checked by
+//! review, not by a test.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Answer {
@@ -18,8 +18,6 @@ pub(crate) enum Answer {
     Refused,
     /// The engine reads it but draws no text with document faces on the opening view.
     NotPainted,
-    /// The engine reads it only to drop requested faces, so preflight lists a superset.
-    Superset,
     /// No test shows preflight's answer for it yet.
     Unverified,
 }
