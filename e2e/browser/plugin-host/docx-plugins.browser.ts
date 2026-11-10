@@ -105,6 +105,76 @@ test('double-click settles once, preserves the word and anchors to its painted b
     rect.x + rect.width >= painted.x + painted.width - 1.5 && rect.y + rect.height >= painted.y + painted.height - 1.5)).toBe(true);
 });
 
+test('an in-thread range anchor matches the painted word from open through settle and relayout', async ({ page }) => {
+  await open(page);
+  const word = await operate(page, async () => {
+    const probe = (window as unknown as { __probe: DocxProbe & { events: ProbeEvent[] } }).__probe;
+    const editor = (window as unknown as LooseProbe).__probe.editor;
+    const read = await probe.editor.readParagraphs({ story: 'body', view: 'accepted' });
+    if (!read.ok) throw new Error('Paragraph read failed');
+    const paragraph = read.paragraphs.find(value => /[A-Za-z]{3,}/.test(value.text))!;
+    const match = /[A-Za-z]{3,}/.exec(paragraph.text)!;
+    const target = { kind: 'range', version: read.version,
+      range: { story: 'body', view: 'accepted', start: { paraId: paragraph.paraId, offset: match.index },
+        end: { paraId: paragraph.paraId, offset: match.index + match[0].length } } };
+    const sample = async (label: string) => {
+      const [result] = await probe.geometry.readAnchorGeometries([target]);
+      if (!result?.ok || !result.rects[0]) throw new Error(`${label}: word has no painted box`);
+      const { layoutId, version } = result as typeof result & { layoutId: string; version: string };
+      return { label, rect: result.rects[0], layoutId, version,
+        layoutEvents: probe.events.filter(event => event.type === 'layout-change').length };
+    };
+    const t0 = await sample('t0-open');
+    await document.fonts.ready;
+    await editor.whenLayoutComplete({ timeoutMs: 60_000 });
+    const t1 = await sample('t1-settled');
+    for (const zoom of [1.5, 1]) {
+      editor.setZoom(zoom);
+      await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      await editor.whenLayoutComplete({ timeoutMs: 60_000 });
+    }
+    const t2 = await sample('t2-relayout');
+    return { text: match[0], reads: [t0, t1, t2] };
+  });
+  const point = await page.evaluate(rect => {
+    const layer = document.querySelector('[data-testid="plugin-overlays"]')!.getBoundingClientRect();
+    return { x: layer.left + rect.x, y: layer.top + rect.y + rect.height / 2, width: rect.width };
+  }, word.reads[2]!.rect);
+  await page.mouse.move(point.x + 0.1, point.y);
+  await page.mouse.down();
+  await page.mouse.move(point.x + point.width - 0.1, point.y, { steps: 8 });
+  await page.mouse.up();
+  const selected = await operate(page, async () => {
+    const { editor } = (window as unknown as { __probe: DocxProbe }).__probe;
+    await editor.flushPendingInput();
+    return (await editor.readSelectionInfo())?.selectedText;
+  });
+  const highlight = page.locator('[data-testid^="selection-rect-"], [data-docx-worker-editor] div[aria-hidden="true"][style*="rgba(59, 130, 246, 0.25)"]').first();
+  await highlight.waitFor({ state: 'visible' });
+  const painted = await highlight.evaluate(element => {
+    const rect = element.getBoundingClientRect();
+    const layer = document.querySelector('[data-testid="plugin-overlays"]')!.getBoundingClientRect();
+    return { x: rect.left - layer.left, y: rect.top - layer.top, width: rect.width, height: rect.height };
+  });
+  const coordinates = ['x', 'y', 'width', 'height'] as const;
+  const distance = (a: ProbeRect, b: ProbeRect) => Math.max(...coordinates.map(key => Math.abs(a[key] - b[key])));
+  expect(distance(word.reads[0]!.rect, painted), JSON.stringify(word.reads)).toBeLessThanOrEqual(1);
+  expect(selected).toBe(word.text);
+  for (const read of word.reads.slice(1)) {
+    expect(distance(read.rect, painted), read.label).toBeLessThanOrEqual(1);
+  }
+  for (let index = 1; index < word.reads.length; index += 1) {
+    const previous = word.reads[index - 1]!;
+    const next = word.reads[index]!;
+    expect(distance(previous.rect, next.rect), `${previous.label} -> ${next.label}`).toBeLessThanOrEqual(1);
+    if (coordinates.some(key => previous.rect[key] !== next.rect[key])) {
+      expect(next.layoutId !== previous.layoutId || next.version !== previous.version,
+        JSON.stringify({ previous, next })).toBe(true);
+      expect(next.layoutEvents, JSON.stringify({ previous, next })).toBeGreaterThan(previous.layoutEvents);
+    }
+  }
+});
+
 test('T22: triple click then shift-arrow each settle once with current selection geometry', async ({ page }) => {
   await page.addInitScript({ content: `window.__selectionClock = (${selectionClock.toString()})();` });
   await open(page);

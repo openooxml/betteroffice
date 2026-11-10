@@ -362,10 +362,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
     const inputStory = inputId ? focusRoot!.ownerDocument.getElementById(inputId)?.getAttribute('data-yrs-story') : null;
     const inputCurrent = !inputStory || inputStory === root;
     let range = live && inputCurrent ? editor?.getSelectionRange() ?? null : null;
-    const layout = pluginLayout(latest.current.queries, host.version(), latest.current.zoom, {
-      key: currentPreviewKey(session), previewVersion: host.previewVersion(),
-    });
-    host.layoutChanged(layout);
+    const layout = layoutRef.current;
     if (!range && live && session && root && (!inputCurrent || root.startsWith('hf:')) &&
       layout && layout.pageCount > 0) {
       const projection = createYrsPositionProjection(session, root);
@@ -677,9 +674,10 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
     return onPresented(() => host.geometryChanged());
   }, [host, holding]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     host.layoutChanged(currentLayout);
     publishSelection();
+    host.flushSelection();
   }, [host, currentLayout, publishSelection]);
 
   useLayoutEffect(() => {
