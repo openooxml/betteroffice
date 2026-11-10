@@ -375,10 +375,7 @@ pub fn xlsx_font_preflight(bytes: &[u8]) -> Result<FontPreflight, PreflightError
     let path = match rels.iter().find(|rel| Some(rel.id.as_str()) == id) {
         Some(rel) if rel.kind == "worksheet" => rel.target.as_str(),
         Some(_) => return Ok(Faces::default().finish(false)),
-        None => {
-            complete = false;
-            &fallback_path
-        }
+        None => &fallback_path,
     };
     let mut sheet = parts
         .part(path, &mut complete)?
