@@ -40,7 +40,7 @@ import {
   type PptxPluginRefusal,
 } from '../index';
 
-const { act, cleanup, fireEvent, render, within } = await import('@testing-library/react');
+const { act, cleanup, fireEvent, render, waitFor, within } = await import('@testing-library/react');
 
 const MOD = isMacPlatform() ? { metaKey: true } : { ctrlKey: true };
 
@@ -960,7 +960,7 @@ describe('PptxEditor plugins', () => {
 
   test('a plugin reads selection anchor geometry after selecting text', async () => {
     const canvases = fakeContexts();
-    const bounds = spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(
+    const bounds = spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(
       () => ({ left: 0, top: 0, width: 640, height: 360, x: 0, y: 0, right: 640, bottom: 360 } as DOMRect)
     );
     try {
@@ -976,8 +976,8 @@ describe('PptxEditor plugins', () => {
           }
         },
       });
-      const { api } = await mount({ plugins: [plugin] });
-      await until(() => contexts.some((context) => context.geometry !== null));
+      const { api, view } = await mount({ plugins: [plugin] });
+      await waitFor(() => expect(last(contexts)?.geometry).toBeTruthy());
       const content = await read(api());
       const story = content.stories.find((candidate) => candidate.slideId === content.slides[0].id && candidate.text.length > 3)!;
       await act(async () => {
@@ -985,7 +985,7 @@ describe('PptxEditor plugins', () => {
           slideId: story.slideId, shapeId: story.shapeId, storyId: story.storyId, anchor: 3, focus: 1,
         }, { expectVersion: content.version })).toEqual({ ok: true });
       });
-      await until(() => answers.some((answer) => answer.ok));
+      await waitFor(() => expect(answers.some((answer) => answer.ok)).toBe(true));
       const context = last(contexts);
       const geometry = context.geometry!;
       const answer = geometry.getAnchorGeometry({ kind: 'selection' });
@@ -1000,20 +1000,33 @@ describe('PptxEditor plugins', () => {
       }));
       expect(await geometry.readAnchorGeometries([{ kind: 'selection' }])).toEqual([answer]);
       await act(async () => {
-        expect(await last(contexts).navigation.selectText({
-          slideId: story.slideId, shapeId: story.shapeId, storyId: story.storyId, anchor: 2, focus: 2,
-        }, { expectVersion: content.version })).toEqual({ ok: true });
+        fireEvent.keyDown(view.getByRole('application'), { key: 'ArrowRight' });
       });
-      await until(() => {
+      await waitFor(() => {
         const selection = last(contexts).snapshot.selection?.target;
-        return selection?.kind === 'text' && selection.anchor === 2 && selection.focus === 2 && last(contexts).geometry !== null;
+        expect(selection).toMatchObject({ kind: 'text', anchor: 2, focus: 2 });
+        expect(last(contexts).geometry).not.toBeNull();
       });
+      expect(last(contexts).snapshot.layout!.id).toBe(context.snapshot.layout!.id);
       expect(last(contexts).geometry!.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: true, rects: [] });
       const retained = geometry.getAnchorGeometry({ kind: 'selection' });
       expect(retained.ok).toBe(true);
       if (!retained.ok) throw new Error(retained.failure.message);
       expect(retained.rects).toEqual(answer.rects);
       expect(context.snapshot.selection?.target).toMatchObject({ kind: 'text', anchor: 3, focus: 1 });
+      await act(async () => {
+        expect(await last(contexts).navigation.selectText({
+          slideId: story.slideId, shapeId: story.shapeId, storyId: story.storyId, anchor: 2, focus: 2,
+        }, { expectVersion: content.version })).toEqual({ ok: true });
+      });
+      await waitFor(() => {
+        expect(last(contexts).geometry?.getAnchorGeometry({ kind: 'selection' }))
+          .toMatchObject({ ok: true, rects: [] });
+        expect(last(contexts).snapshot.layout!.id).not.toBe(context.snapshot.layout!.id);
+      });
+      expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({
+        ok: false, failure: { code: 'layout-unavailable' },
+      });
     } finally {
       bounds.mockRestore();
       canvases.restore();

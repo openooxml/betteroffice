@@ -486,7 +486,7 @@ function geometryProbe(client: FakeCommandClient) {
     id, shapes: [{ id: 'box', children: [], textStories: [] }],
   })) } as unknown as DeckSnapshot;
   Object.assign(client, { access: async () => deck });
-  const bounds = spyOn(Element.prototype, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 960, 540));
+  const bounds = spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 960, 540));
   restorers.push(() => bounds.mockRestore());
   const contexts: PptxPluginContext<null>[] = [];
   const plugin = definePptxPlugin<null>({

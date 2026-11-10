@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
 import * as pptx from '@betteroffice/pptx';
 import type { SlidePrimitive, TextBoxPrimitive } from '@betteroffice/pptx';
-import { decodeCommandDisplayList } from '@betteroffice/pptx/worker';
+import { decodeCommandDisplayList, transformedRect } from '@betteroffice/pptx/worker';
 import { PptxEditor, type PptxAsyncEditorProps, type PptxEditorApi, type PptxInThreadEditorProps,
   type PptxWorkerViewerProps } from '../PptxEditor';
 import { PPTX_COMMAND_IDS } from '../commands/descriptors';
@@ -40,7 +40,7 @@ function paintGate(engine: Engine) {
     const paint = pptx.paintSlide;
     const spy = spyOn(pptx, 'paintSlide').mockImplementation(async (...args) => {
       const gate = held;
-      if (gate) { entered = true; await gate.promise; }
+      if (gate && args[0].canvas.dataset.testid === 'pptx-slide-canvas') { entered = true; await gate.promise; }
       return paint(...args);
     });
     restores.push(() => spy.mockRestore());
@@ -50,7 +50,7 @@ function paintGate(engine: Engine) {
         async beforeCommit(current) {
           await options.beforeCommit?.(current);
           const gate = held;
-          if (gate) { entered = true; await gate.promise; }
+          if (gate && options.onCommit) { entered = true; await gate.promise; }
         },
       }));
     restores.push(() => spy.mockRestore());
@@ -169,6 +169,7 @@ for (const engine of ['IN', 'PL'] as const) describe(`plugin anchor matrix (${en
     await waitFor(() => expect(probe.context()?.geometry).toBeTruthy());
     const read = await content(value);
     const story = read.stories[0]!;
+    await selectText(probe, read, story);
     for (const scale of [0.5, 1.5, 2]) {
       await act(async () => { expect(await value.api().commands.execute('zoom', { scale })).toMatchObject({ ok: true }); });
       await waitFor(() => expect(probe.context().geometry?.layout.zoom).toBe(scale));
@@ -321,6 +322,7 @@ for (const engine of ['IN', 'PL'] as const) describe(`plugin anchor matrix (${en
     finally { off(); remote.dispose(); }
     for (const transition of ['remote', 'edit', 'undo', 'redo', 'replacement'] as const) {
       const retained = probe.context().geometry!;
+      const retainedContext = probe.context();
       const values = targets(read, story);
       const generation = probe.context().snapshot.generation;
       const previousApi = value.api();
@@ -338,20 +340,23 @@ for (const engine of ['IN', 'PL'] as const) describe(`plugin anchor matrix (${en
         else operation = api.commands.execute(transition, null);
       });
       await gate.pending();
-      await waitFor(() => expect(probe.context().geometry).toBeNull());
+      if (transition === 'replacement') {
+        expect(retainedContext.lifetimeSignal.aborted).toBe(true);
+        expect(value.view.queryByTestId('anchor-matrix')).toBeNull();
+      } else await waitFor(() => expect(probe.context().geometry).toBeNull());
       await parity(retained, values, values.map(() => 'layout-unavailable'));
       await act(async () => { gate.release(); await operation; });
-      await waitFor(() => expect(probe.context().geometry).toBeTruthy());
       if (transition === 'replacement') {
-        expect(probe.context().snapshot.generation).not.toBe(generation);
+        await waitFor(() => expect(probe.context().snapshot.generation).not.toBe(generation));
         await waitFor(() => expect(value.api()).not.toBe(previousApi));
       }
+      await waitFor(() => expect(probe.context().geometry).toBeTruthy());
       const next = await content(value);
       if (transition !== 'replacement') {
         expect(next.version).not.toBe(read.version);
         const old = values[1]!;
         expect(probe.context().geometry!.getAnchorGeometry(old)).toMatchObject({ ok: false, failure: { code: 'stale-version' } });
-      }
+      } else await selectText(probe, next, next.stories[0]!);
       await parity(probe.context().geometry!, targets(next, next.stories[0]!), normalCodes);
       read = next;
     }
@@ -395,10 +400,16 @@ for (const engine of ['IN', 'PL'] as const) describe(`plugin anchor matrix (${en
     const stories = read.stories.filter(story => story.shapeId === table.id && story.text.length > 0);
     expect(stories.length).toBeGreaterThan(1);
     const frame = value.client ? decodeCommandDisplayList(value.client.state.frame!) : (api as PptxEditorApi).handle.layoutSlide(0);
-    const cells = (primitives: SlidePrimitive[]): TextBoxPrimitive[] => primitives.flatMap(primitive =>
-      primitive.kind === 'textBox' ? [primitive] : primitive.kind === 'table' || primitive.kind === 'chart' ? cells(primitive.primitives) : []);
+    const cells = (primitives: SlidePrimitive[], parents: SlidePrimitive[] = []):
+      { box: TextBoxPrimitive; transforms: SlidePrimitive[] }[] => primitives.flatMap(primitive => {
+        const transforms = [...parents, primitive];
+        return primitive.kind === 'textBox' ? [{ box: primitive, transforms }]
+          : primitive.kind === 'table' || primitive.kind === 'chart' ? cells(primitive.primitives, transforms) : [];
+      });
     for (const story of stories.slice(0, 2)) {
-      const box = cells(frame.primitives).find(box => box.shapeId === table.id && box.storyId === story.storyId)!;
+      const cell = cells(frame.primitives).find(({ box }) => box.shapeId === table.id && box.storyId === story.storyId)!;
+      expect(cell).toBeDefined();
+      const { box, transforms } = cell;
       expect(box).toBeDefined();
       const line = box.lines[0]!;
       const left = line.caretStops.find(stop => stop.position === 0)!.x;
@@ -412,8 +423,9 @@ for (const engine of ['IN', 'PL'] as const) describe(`plugin anchor matrix (${en
         expect(answer.anchor.height).toBeGreaterThan(0);
         expect(answer.anchor.width).toBeGreaterThan(0);
         expect(answer.rects.length).toBe(anchor === focus ? 0 : 1);
-        const expected = geometry.toOverlayRect({ space: 'slide-px', rect: { x: Math.min(left, right), y: line.y,
-          width: anchor === focus ? 1 : Math.abs(right - left), height: line.height } });
+        const expected = geometry.toOverlayRect({ space: 'slide-px', rect: transformedRect(transforms, {
+          x: Math.min(left, right), y: line.y,
+          width: anchor === focus ? 1 : Math.abs(right - left), height: line.height }) });
         expect(answer.anchor).toEqual(expected);
         if (anchor !== focus) expect(answer.rects).toEqual([expected]);
         expect(geometry.getAnchorGeometry({ kind: 'selection' })).toEqual(answer);
@@ -448,8 +460,8 @@ for (const engine of ['IN', 'PL'] as const) describe(`plugin anchor matrix (${en
     expect(line.x).toBeGreaterThan(0);
     expect(line.y).toBeGreaterThan(0);
     const geometry = probe.context().geometry!;
-    const expected = geometry.toOverlayRect({ space: 'slide-px', rect: {
-      x: line.caretStops[0]?.x ?? line.x, y: line.y, width: 1, height: line.height } });
+    const expected = geometry.toOverlayRect({ space: 'slide-px', rect: transformedRect([text], {
+      x: line.caretStops[0]?.x ?? line.x, y: line.y, width: 1, height: line.height }) });
     expect(expected).not.toBeNull();
     const answer = geometry.getAnchorGeometry({ kind: 'selection' });
     expect(answer).toMatchObject({ ok: true, rects: [], anchor: expected });

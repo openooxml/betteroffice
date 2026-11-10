@@ -718,7 +718,7 @@ it('failed fonts warn once per file across rerenders', async () => {
   }
 });
 
-test('read-only and slideshow retain editor anchors while the viewer has no plugin host (viewer)', async () => {
+it('read-only and slideshow retain editor anchors while the viewer has no plugin host (viewer)', async () => {
   const { viewer } = session();
   open(viewer);
   let api: PptxWorkerViewerApi | undefined;
