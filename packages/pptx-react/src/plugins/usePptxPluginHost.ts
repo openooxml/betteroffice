@@ -21,7 +21,7 @@ import {
   type PptxPluginActivation,
   type PptxPluginHost,
 } from './createPptxPluginHost';
-import { createPluginGeometry, pluginLayout, type PresentedSlide } from './geometry';
+import { createPluginGeometry, pluginLayout, type PresentedSlide, type SelectionCaret } from './geometry';
 import type { PptxEditorPluginProps, PptxPluginGeometry, PptxPluginSelection } from './types';
 
 const NO_ACTIVATIONS: readonly PptxPluginActivation[] = Object.freeze([]);
@@ -65,13 +65,13 @@ export interface PptxPluginHostBinding {
 export function usePptxPluginHost(options: UsePptxPluginHostOptions): PptxPluginHostBinding {
   const latest = useRef(options);
   latest.current = options;
-  const geometryRef = useRef<((selection: PptxPluginSelection) => PptxPluginGeometry) | null>(null);
+  const geometryRef = useRef<((selection: PptxPluginSelection, caretHint?: SelectionCaret) => PptxPluginGeometry) | null>(null);
 
   const [host] = useState(() =>
     createPptxPluginHost({
       ...options.access,
       translate: (key) => latest.current.t(key),
-      geometry: (selection = null) => geometryRef.current?.(selection) ?? null,
+      geometry: (selection = null, caretHint) => geometryRef.current?.(selection, caretHint) ?? null,
     })
   );
 
@@ -121,8 +121,8 @@ export function usePptxPluginHost(options: UsePptxPluginHostOptions): PptxPlugin
   const activations = useSyncExternalStore(host.subscribe, host.activations, () => NO_ACTIVATIONS);
 
   useEffect(() => {
-    if (managed) host.selectionChanged(options.selection);
-  }, [host, managed, options.selection]);
+    if (managed) host.selectionChanged(options.selection, { focusLine: options.textSelection?.focusLine });
+  }, [host, managed, options.selection, options.textSelection?.focusLine]);
 
   const presentedRef = useRef<PresentedCanvas | null>(null);
   const [presented, setPresented] = useState<PresentedCanvas | null>(null);
@@ -175,7 +175,7 @@ export function usePptxPluginHost(options: UsePptxPluginHostOptions): PptxPlugin
   const geometry = useMemo(
     () =>
       layout && presented && layer
-        ? (selection: PptxPluginSelection) => createPluginGeometry(
+        ? (selection: PptxPluginSelection, caretHint?: SelectionCaret) => createPluginGeometry(
             layout,
             presented,
             presented.canvas,
@@ -188,12 +188,12 @@ export function usePptxPluginHost(options: UsePptxPluginHostOptions): PptxPlugin
             (frame, clientX, clientY) => latest.current.pointAt(frame, clientX, clientY),
             options.focusRoot?.current ?? layer,
             () => selection,
-            { focusLine: latest.current.textSelection?.focusLine }
+            caretHint
           )
         : null,
     // `moved` rebuilds the geometry when its elements move without a new frame.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [host, layout, presented, layer, moved, options.textSelection?.focusLine]
+    [host, layout, presented, layer, moved]
   );
   geometryRef.current = geometry;
 

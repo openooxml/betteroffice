@@ -24,7 +24,7 @@ import type {
 } from '@betteroffice/pptx/worker';
 import { PptxEditor, pptxPeerlessEditorLoader } from '../PptxEditor';
 import { definePptxPlugin } from '../plugins/definePptxPlugin';
-import type { PptxGeometryTarget, PptxPluginContext, PptxPluginGeometry } from '../plugins/types';
+import type { PptxGeometryTarget, PptxPluginContext, PptxPluginEvent, PptxPluginGeometry } from '../plugins/types';
 import type { PptxAsyncEditorApi } from './createPeerlessEditorApi';
 import type { PeerlessConfirmedFrame, PeerlessViewSnapshot } from './peerlessViewStore';
 import { peerlessPainterFactories, peerlessSessionOpener, type PeerlessPresentation } from './usePeerlessPresentation';
@@ -489,14 +489,15 @@ function geometryProbe(client: FakeCommandClient) {
   const bounds = spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 960, 540));
   restorers.push(() => bounds.mockRestore());
   const contexts: PptxPluginContext<null>[] = [];
+  const events: PptxPluginEvent[] = [];
   const plugin = definePptxPlugin<null>({
     id: 'geometry-probe', createState: () => null,
-    onEvent(context) { contexts.push(context); },
+    onEvent(context, event) { contexts.push(context); events.push(event); },
   });
-  return { plugin, contexts, context: () => contexts[contexts.length - 1] };
+  return { plugin, contexts, events, context: () => contexts[contexts.length - 1] };
 }
 
-test('peerless selection anchor follows the upstream caret after End on a wrapped line', async () => {
+function wrappedGeometrySession() {
   const value = session();
   const list = JSON.parse(new TextDecoder().decode(value.client.state.frame.displayList)) as SlideDisplayList;
   const box = list.primitives[0] as TextBoxPrimitive;
@@ -508,6 +509,11 @@ test('peerless selection anchor follows the upstream caret after End on a wrappe
   ];
   value.client.state.frame = { ...value.client.state.frame,
     displayList: new TextEncoder().encode(JSON.stringify(list)).buffer };
+  return value;
+}
+
+test('peerless selection anchor follows the upstream caret after End on a wrapped line', async () => {
+  const value = wrappedGeometrySession();
   const probe = geometryProbe(value.client);
   const view = render(<PptxEditor fonts={[]} file={file} showToolbar={false}
     plugins={[probe.plugin]} />);
@@ -530,6 +536,61 @@ test('peerless selection anchor follows the upstream caret after End on a wrappe
       space: 'slide-px', rect: { x: 20, y: 60, width: 1, height: 20 },
     }),
   });
+});
+
+test('retained peerless selection anchors refuse a same-offset wrap-line change after End', async () => {
+  const value = wrappedGeometrySession();
+  value.client.state.selection = { ...selection, anchor: 2, focus: 2 };
+  const probe = geometryProbe(value.client);
+  const view = render(<PptxEditor fonts={[]} file={file} showToolbar={false} plugins={[probe.plugin]} />);
+  await waitFor(() => expect(probe.context()?.geometry).toBeTruthy());
+  const input = view.container.querySelector('textarea');
+  if (!input) throw new Error('Expected text input');
+  await act(async () => { input.focus(); fireEvent.keyDown(input, { key: 'Home' }); });
+  let retained!: PptxPluginContext<null>;
+  await act(async () => { await probe.context().run((context) => { retained = context; }); });
+  const geometry = retained.geometry!;
+  const before = geometry.getAnchorGeometry({ kind: 'selection' });
+  expect(before).toMatchObject({ ok: true, rects: [], anchor: geometry.toOverlayRect({
+    space: 'slide-px', rect: { x: 20, y: 60, width: 1, height: 20 },
+  }) });
+  const events = () => probe.events.filter((event) => event.type === 'selection-change');
+  const count = events().length;
+  await act(async () => { fireEvent.keyDown(input, { key: 'Home' }); });
+  expect(geometry.getAnchorGeometry({ kind: 'selection' })).toEqual(before);
+  expect(events()).toHaveLength(count);
+  await act(async () => { fireEvent.keyDown(input, { key: 'ArrowLeft' }); });
+  await waitFor(() => expect(value.client.state.selection).toMatchObject({ anchor: 1, focus: 1 }));
+  await act(async () => { fireEvent.keyDown(input, { key: 'End' }); });
+  await waitFor(() => expect(value.client.state.selection).toMatchObject({ anchor: 2, focus: 2, affinity: 'upstream' }));
+  expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({
+    ok: false, failure: { code: 'layout-unavailable' },
+  });
+  let fresh!: PptxPluginContext<null>;
+  await act(async () => { await retained.run((context) => { fresh = context; }); });
+  expect(fresh.snapshot.selection).toEqual(retained.snapshot.selection);
+  expect(fresh.geometry?.layout.id).toBe(geometry.layout.id);
+  expect(fresh.geometry?.getAnchorGeometry({ kind: 'selection' })).toMatchObject({
+    ok: true, rects: [], anchor: geometry.toOverlayRect({
+      space: 'slide-px', rect: { x: 40, y: 40, width: 1, height: 20 },
+    }),
+  });
+  const range = { kind: 'range', version: geometry.layout.version,
+    slideId: 'slide', shapeId: 'box', storyId: 'story', anchor: 2, focus: 2 } as const;
+  expect(geometry.getAnchorGeometry(range)).toEqual(before);
+  const beforeHintMove = events().length;
+  await act(async () => {
+    expect(await fresh.navigation.selectText({ slideId: 'slide', shapeId: 'box', storyId: 'story', anchor: 2, focus: 2 },
+      { expectVersion: geometry.layout.version })).toEqual({ ok: true });
+  });
+  expect(fresh.geometry!.getAnchorGeometry({ kind: 'selection' })).toMatchObject({
+    ok: false, failure: { code: 'layout-unavailable' },
+  });
+  let downstream!: PptxPluginContext<null>;
+  await act(async () => { await retained.run((context) => { downstream = context; }); });
+  expect(downstream.geometry?.getAnchorGeometry({ kind: 'selection' })).toEqual(before);
+  expect(geometry.getAnchorGeometry(range)).toEqual(before);
+  expect(events()).toHaveLength(beforeHintMove);
 });
 
 test('peerless prerender presentation invalidates retained geometry until the confirmed frame paints', async () => {
