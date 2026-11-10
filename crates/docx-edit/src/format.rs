@@ -1380,9 +1380,9 @@ impl EditingDoc {
         Ok(pieces)
     }
 
-    /// [`Self::format_range_keeping`] that first returns `clear` to what the styles give, paragraph
-    /// by paragraph, as a `formatText` step's `clear` does. Tracked changes are formatted as the
-    /// editor formats them.
+    /// [`Self::format_range_keeping`] that first returns `clear` to what the styles give, as a
+    /// `formatText` step's `clear` does, over a range within one paragraph. Tracked changes are
+    /// formatted as the editor formats them.
     pub(crate) fn format_range_to_styles_keeping(
         &self,
         ctx: &EditCtx,
@@ -1416,6 +1416,12 @@ impl EditingDoc {
                     break;
                 }
             }
+        }
+        let (_, children) = block_free_spans(&story, &txn, range.start, range.end, false);
+        if paragraphs.len() != 1 || !children.is_empty() {
+            return Err(OpError::InvalidFormatValue(
+                "clear needs a range within one paragraph".to_owned(),
+            ));
         }
         let source = self.source_metadata();
         let mut pieces = Vec::new();
