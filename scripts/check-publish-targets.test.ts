@@ -206,7 +206,8 @@ describe('workspace dependency versions', () => {
   for (const field of ['dependencies', 'peerDependencies', 'optionalDependencies']) {
     test.each([
       ['workspace:*', latin.version],
-      ['workspace:^0', `^${latin.version}`]
+      ['workspace:^', `^${latin.version}`],
+      ['workspace:~', `~${latin.version}`]
     ])(`rejects an unavailable %s version in ${field}`, async (range, resolved) => {
       const result = await check('--npm', () => versions('0.0.0'), {
         packages: [fonts], workspaces: fontWorkspaces(field, range)
@@ -228,7 +229,7 @@ describe('workspace dependency versions', () => {
 
   test.each([
     ['workspace:*', latin.version],
-    ['workspace:^0', '1.2.4'],
+    ['workspace:^0', '0.9.0'],
     ['workspace:^', '1.3.0'],
     ['workspace:~', '1.2.4'],
     ['workspace:1.2.3', latin.version],
