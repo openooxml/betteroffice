@@ -407,7 +407,10 @@ pub fn xlsx_font_preflight(bytes: &[u8]) -> Result<FontPreflight, PreflightError
     {
         complete = false;
     }
-    if sheet.child("s:conditionalFormatting").is_some() || sheet.child("s:hyperlinks").is_some() {
+    if ["s:conditionalFormatting", "s:hyperlinks", "s:drawing"]
+        .into_iter()
+        .any(|name| sheet.child(name).is_some())
+    {
         complete = false;
     }
     let mut hidden_columns = [false; OPENING_VIEWPORT_COLUMNS as usize];

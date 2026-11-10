@@ -448,3 +448,12 @@ fn styles_fall_back_to_the_canonical_part_without_a_relationship() {
     assert!(result.complete);
     assert_eq!(keys(&result), [("Base", false, false)]);
 }
+
+#[test]
+fn sheet_drawings_are_incomplete() {
+    let tail = format!(r#"<drawing xmlns:r="{R}" r:id="drawing"/>"#);
+    let sheet = worksheet(r#"<row r="1"><c r="A1"><v>1</v></c></row>"#, &tail);
+    let result = xlsx_font_preflight(&fixture(&sheet, STYLES, None, &[], false)).unwrap();
+    assert_eq!(keys(&result), [("Base", false, false)]);
+    assert!(!result.complete);
+}
