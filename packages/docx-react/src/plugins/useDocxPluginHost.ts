@@ -626,7 +626,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
         if (!range) return null;
         if (latest.current.viewerSelection || latest.current.viewerDocumentRead) {
           const head = viewerSelectionRef.current?.head;
-          return typeof head === 'number' ? { ...range, focus: head } : range;
+          return { ...range, viewer: true, ...(typeof head === 'number' ? { focus: head } : {}) };
         }
         const editor = latest.current.pagedEditorRef.current;
         const head = readSelection(editor?.getYrsSession())?.head;

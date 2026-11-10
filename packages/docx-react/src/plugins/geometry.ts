@@ -678,7 +678,7 @@ export function createPluginGeometry(
   readPoint?: (clientX: number, clientY: number) => Promise<DocxPointPosition | null>,
   complete: () => boolean = () => false,
   viewport: () => DocxPluginRect = () => visibleViewport(layer, layer, layer),
-  selection: () => (NonNullable<DocxPluginSelection['displayRange']> & { focus?: number }) | null = () => null,
+  selection: () => (NonNullable<DocxPluginSelection['displayRange']> & { focus?: number; viewer?: boolean }) | null = () => null,
   subscribeSelection?: (listener: () => void) => () => void,
   selectionStory: () => string | null = () => access()?.session.selection()?.head.story ?? null
 ): DocxPluginGeometry {
@@ -971,6 +971,7 @@ export function createPluginGeometry(
         const root = anchorDisplayRoot(range.story);
         if (root === null) return anchorFailure('unsupported', 'The range has no display position');
         if (root !== 'body') {
+          if (range.viewer) return anchorFailure('unsupported', 'The range has no display position');
           const live = access();
           const sticky = live?.session.selection();
           if (!live || !sticky || anchorDisplayRoot(sticky.anchor.story) !== root ||

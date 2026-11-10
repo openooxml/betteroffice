@@ -1,9 +1,10 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, expect, test } from 'bun:test';
+import { afterAll, afterEach, expect, mock, test } from 'bun:test';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
+import { createRenderedDomContext } from '@betteroffice/docx/plugin-api/RenderedDomContext';
 import type { DocxProposalSnapshot, DocxDocumentRead, ResidentEngineWorkerClient, YrsSession } from '@betteroffice/docx/yrs';
 import { createDocxCommandController } from '../commands/createDocxCommandStore';
-import { stampWorkerFrameVersion } from '../components/DocxEditor/internals/layoutProvenance';
+import { markPresented, stampSourceVersion, stampWorkerFrameVersion } from '../components/DocxEditor/internals/layoutProvenance';
 import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
 import { defineDocxPlugin } from './defineDocxPlugin';
 import { useDocxPluginHost, type UseDocxPluginHostOptions } from './useDocxPluginHost';
@@ -31,13 +32,15 @@ function queries(version: string, y = 20): DisplayListQueries {
 function setup(read: ResidentEngineWorkerClient['documentRead']) {
   let snapshot: DocxProposalSnapshot = { version: 'A', previewVersion: 0, proposals: [] };
   let update = () => {};
+  const selection = mock(() => { throw new Error('viewer selection read'); });
+  const getYrsSession = mock(() => { throw new Error('viewer session access'); });
   const session = {
     version: () => snapshot.version,
     getProposals: () => snapshot,
     onUpdate: (listener: () => void) => { update = listener; return () => {}; },
     onProposalChange: () => () => {},
     paragraphs: () => { throw new Error('viewer paragraph read'); },
-    selection: () => { throw new Error('viewer selection read'); },
+    selection,
   } as unknown as YrsSession;
   const pages = document.createElement('div');
   const canvas = document.createElement('canvas');
@@ -48,7 +51,7 @@ function setup(read: ResidentEngineWorkerClient['documentRead']) {
   elements.push(pages, target);
   pages.getBoundingClientRect = canvas.getBoundingClientRect = target.getBoundingClientRect = () => new DOMRect(0, 0, 100, 200);
   const editor = {
-    getYrsSession: () => { throw new Error('viewer session access'); },
+    getYrsSession,
     getLayout: () => null,
     getSelectionRange: () => null,
     hasPendingInput: () => false,
@@ -69,9 +72,56 @@ function setup(read: ResidentEngineWorkerClient['documentRead']) {
   };
   return {
     options,
+    pages,
+    target,
+    selection,
+    getYrsSession,
     changeVersion(version: string) { snapshot = { ...snapshot, version }; update(); },
   };
 }
+
+test.each(['viewerSelection', 'viewerDocumentRead'] as const)('%s selection anchors reject header ranges without session access and preserve body geometry', async (viewerMode) => {
+  const read = (async () => { throw new Error('Unexpected worker read'); }) as ResidentEngineWorkerClient['documentRead'];
+  const view = setup(read);
+  view.options.viewerSelection = viewerMode === 'viewerSelection';
+  view.options.viewerDocumentRead = viewerMode === 'viewerDocumentRead' ? read : undefined;
+  view.options.plugins = [defineDocxPlugin({ id: 'test.viewer-selection-anchor', createState: () => null })];
+  const source = view.options.queries!;
+  stampSourceVersion(source, 'A');
+  source.pageBounds = () => ({ pageIndex: 0, x: 0, y: 0, width: 100, height: 200 });
+  source.rangeRects = (from, to) => [{ pageIndex: 0, x: from, y: 20, width: to - from, height: 12 }];
+  source.hitTestRegions = () => null;
+  const { result } = renderHook(useDocxPluginHost, { initialProps: view.options });
+  await act(async () => {
+    result.current.overlayLayerRef(view.target);
+    result.current.onRenderedDomContext(createRenderedDomContext(view.pages, 1), source);
+    markPresented(view.pages, source.displayList);
+  });
+  await waitFor(() => expect(result.current.activations[0]?.context.geometry).toBeTruthy());
+  const layoutId = result.current.activations[0]!.context.geometry!.layout.id;
+  const header = { story: 'hf:header', from: 2, to: 8, layoutId };
+  await act(async () => result.current.publishViewerSelection({ head: 2, displayRange: header, isMultiParagraph: false }));
+  const headerContext = result.current.activations[0]!.context;
+  expect(headerContext.snapshot.selection.displayRange).toEqual(header);
+  const unsupported = { ok: false, failure: { code: 'unsupported', message: 'The range has no display position' } };
+  expect(headerContext.geometry!.getAnchorGeometry({ kind: 'selection' })).toEqual(unsupported);
+  expect(await headerContext.geometry!.readAnchorGeometries([{ kind: 'selection' }])).toEqual([unsupported]);
+  expect(view.getYrsSession).not.toHaveBeenCalled();
+  expect(view.selection).not.toHaveBeenCalled();
+  const body = { ...header, story: 'body' };
+  await act(async () => result.current.publishViewerSelection({ head: 2, displayRange: body, isMultiParagraph: false }));
+  const bodyContext = result.current.activations[0]!.context;
+  expect(bodyContext.snapshot.selection.displayRange).toEqual(body);
+  const expected = {
+    ok: true, version: 'A', layoutId,
+    rects: [{ pageIndex: 0, x: 2, y: 20, width: 6, height: 12 }],
+    anchor: { pageIndex: 0, x: 2, y: 20, width: 0, height: 12 },
+  };
+  expect(bodyContext.geometry!.getAnchorGeometry({ kind: 'selection' })).toMatchObject(expected);
+  expect(await bodyContext.geometry!.readAnchorGeometries([{ kind: 'selection' }])).toMatchObject([expected]);
+  expect(view.getYrsSession).not.toHaveBeenCalled();
+  expect(view.selection).not.toHaveBeenCalled();
+});
 
 test('managed viewer cards cache worker targets and reproject without accessing a session', async () => {
   const requests: DocxDocumentRead[] = [];
