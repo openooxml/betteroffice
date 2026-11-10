@@ -67,7 +67,7 @@ import type {
   SectionProperties,
 } from '../types/document';
 import type { YrsRunInheritance, YrsSession, YrsTableInheritance } from './index';
-import { isUnavailableTablePayload, refuseUnavailableTables, tableUnavailableError } from './tableUnavailable';
+import { isUnavailableTablePayload, markGated, refuseUnavailableTables, tableUnavailableError } from './tableUnavailable';
 
 type Attrs = Record<string, unknown>;
 
@@ -4365,7 +4365,9 @@ function projectDocument(
   let context: SaveContext | undefined;
   try {
     context = new SaveContext(session, base, options.commentIds, revisionIds);
-    return projectStories(context, session, base, options);
+    const projected = projectStories(context, session, base, options);
+    markGated(session, projected);
+    return projected;
   } finally {
     context?.dispose();
     projectedMedia = previous;

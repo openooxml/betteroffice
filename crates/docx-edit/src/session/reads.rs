@@ -223,6 +223,14 @@ impl EditSessionCore {
             .unwrap_or_else(|_| "[]".to_owned())
     }
 
+    /// `[{"story","tableIndex"}]` from a full walk of `roots_json` (a JSON array of root story
+    /// ids), or `null` when a walk cannot finish. Internal: the save gate's scan.
+    pub fn unavailable_tables_from(&self, roots_json: &str) -> EngineResult<String> {
+        let roots: Vec<String> = serde_json::from_str(roots_json).map_err(EngineError::message)?;
+        serde_json::to_string(&self.engine.doc().unavailable_tables_from(&roots))
+            .map_err(EngineError::message)
+    }
+
     /// Every story id in the document, sorted so the order is stable across
     /// replicas.
     pub fn story_ids(&self) -> Vec<String> {

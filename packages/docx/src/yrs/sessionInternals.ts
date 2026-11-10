@@ -1,7 +1,7 @@
 /** Engine operations the package runs on sessions it creates itself; not public API. */
 
 import type { editorSaveKeys, noteSeparatorKeys } from './editorSaveKeys';
-import type { YrsSession } from './index';
+import type { YrsSession, YrsTableLoc } from './index';
 import type { Document } from '../types/document';
 
 export interface YrsSessionInternals {
@@ -19,6 +19,8 @@ export interface YrsSessionInternals {
   finishComparedDocx(bytes: Uint8Array): string;
   /** The final comparison result when saving failed; bridge JSON. */
   failComparedDocx(message: string): string;
+  /** The engine's walk from `roots` for tables a concurrent undo emptied; `null` when it cannot finish. */
+  unavailableTablesFrom(roots: readonly string[]): YrsTableLoc[] | null;
 }
 
 const registry = new WeakMap<object, YrsSessionInternals>();
@@ -39,6 +41,17 @@ export function sessionSourceNoteSeparators(
   session: YrsSession
 ): ReturnType<typeof noteSeparatorKeys> | null {
   return registry.get(session)?.sourceNoteSeparators() ?? null;
+}
+
+/**
+ * The engine's walk from `roots` for tables a concurrent undo emptied: `undefined` when the
+ * session has no registered engine, `null` when the walk cannot finish. @internal
+ */
+export function sessionUnavailableTablesFrom(
+  session: object,
+  roots: readonly string[]
+): YrsTableLoc[] | null | undefined {
+  return registry.get(session)?.unavailableTablesFrom(roots);
 }
 
 export function registerSessionInternals(session: object, internals: YrsSessionInternals): void {

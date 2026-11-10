@@ -10,7 +10,7 @@ import type { YrsSession } from './index';
 import { dirtyProjectionStory } from './dirtyProjectionStories';
 import { captureSessionSave, writeSessionSave, type DocxSavedDocument, type DocxSessionSave } from './saveYrsDocx';
 import { sessionSourcePackage } from './sessionInternals';
-import { refuseUnavailableTables } from './tableUnavailable';
+import { carryGate, refuseUnavailableTables } from './tableUnavailable';
 import { ownProjectedParagraphs, yrsToDocument } from './yrsToDocument';
 
 export {
@@ -230,6 +230,7 @@ function withSavedComments(document: Document, session: YrsSession, comments: Co
     ...document,
     package: { ...document.package, document: { ...document.package.document, comments } },
   };
+  carryGate(document, base);
   const storyIds = new Set<string>();
   for (const comment of comments) {
     try {
@@ -248,13 +249,15 @@ function withSavedComments(document: Document, session: YrsSession, comments: Co
     : base;
   if (!comments.some((comment) => comment.parentId != null)) return saved;
   const body = saved.package.document;
-  return {
+  const owned: Document = {
     ...saved,
     package: {
       ...saved.package,
       document: { ...body, content: ownProjectedParagraphs(body.content) },
     },
   };
+  carryGate(saved, owned);
+  return owned;
 }
 
 /**

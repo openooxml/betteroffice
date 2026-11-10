@@ -2627,6 +2627,15 @@ impl EditSession {
         self.core.unavailable_tables()
     }
 
+    /// `[{"story","tableIndex"}]` from a full walk of the roots in `roots_json`, or `null` when
+    /// a walk cannot finish.
+    /// @internal
+    pub fn unavailable_tables_from(&self, roots_json: &str) -> Result<String, JsValue> {
+        self.core
+            .unavailable_tables_from(roots_json)
+            .map_err(JsValue::from)
+    }
+
     /// Story length in UTF-16 units, every embed (pilcrows included) counting
     /// as one. Errors on an unknown story.
     pub fn story_len(&self, story: &str) -> Result<u32, JsValue> {

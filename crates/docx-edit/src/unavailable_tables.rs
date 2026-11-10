@@ -64,17 +64,26 @@ impl EditingDoc {
             })
             .map(|info| info.story)
             .collect();
-        let mut found = Vec::new();
-        for root in roots {
-            found.extend(self.unavailable_tables_under(&root).ok()?);
-        }
-        found.sort_by(|left, right| {
-            (left.story.as_str(), left.table_index).cmp(&(right.story.as_str(), right.table_index))
-        });
+        let found = self.unavailable_tables_from(&roots)?;
         if found.is_empty() {
             self.unavailable_tables_dirty
                 .store(false, Ordering::Relaxed);
         }
+        Some(found)
+    }
+
+    /// The unavailable tables the geometry outline walk meets from `roots`, by story and ordinal,
+    /// in story then ordinal order. A root the document lacks reads as empty. `None` when a walk
+    /// cannot finish.
+    pub(crate) fn unavailable_tables_from(&self, roots: &[String]) -> Option<Vec<TableLocator>> {
+        let mut found = Vec::new();
+        for root in roots {
+            found.extend(self.unavailable_tables_under(root).ok()?);
+        }
+        found.sort_by(|left, right| {
+            (left.story.as_str(), left.table_index).cmp(&(right.story.as_str(), right.table_index))
+        });
+        found.dedup();
         Some(found)
     }
 

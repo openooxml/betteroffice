@@ -10,7 +10,7 @@ import type { YrsCellLoc, YrsSession } from './index';
 const real = await import('./tableUnavailable');
 mock.module('./tableUnavailable', () => ({
   ...real,
-  hasUnavailableTable: () => false,
+  unavailableTables: () => [],
   refuseUnavailableTables: () => {},
 }));
 const gate = await import('./tableUnavailable');
@@ -68,7 +68,7 @@ test('with the save gate switched off, converting an incomplete table still refu
   exchange(a, b);
 
   const base = a.materializeDocx()!;
-  expect(gate.hasUnavailableTable(a, base)).toBe(false);
+  expect(gate.unavailableTables(a, base)).toEqual([]);
   expect(() => gate.refuseUnavailableTables(a, base)).not.toThrow();
 
   let converted: unknown = 'not converted';
