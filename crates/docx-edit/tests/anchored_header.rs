@@ -157,7 +157,7 @@ fn band_document(band: &str, ask: bool) -> Vec<u8> {
     .unwrap()
 }
 
-fn band_glyphs(band: &str, ask: bool) -> (String, usize) {
+fn band_glyphs(band: &str, ask: bool) -> BandPaint {
     docx_layout::clear_measure_fonts();
     let font = docx_layout::register_measure_font(CARLITO).unwrap();
     let engine = EngineSession::new(73004);
@@ -197,37 +197,79 @@ fn band_glyphs(band: &str, ask: bool) -> (String, usize) {
             .unwrap_or_default();
         panic!("no {band} band; page keys {keys:?}; request {request}")
     });
-    let runs: Vec<&Value> = primitives
+    let painted: Vec<&Value> = primitives
         .iter()
-        .filter(|primitive| primitive["kind"] == "glyphRun")
+        .filter(|primitive| matches!(primitive["kind"].as_str(), Some("text" | "glyphRun")))
         .collect();
-    let text: String = runs.iter().filter_map(|run| run["text"].as_str()).collect();
-    let glyphs = runs
-        .iter()
-        .map(|run| run["glyphs"].as_array().map_or(0, Vec::len))
-        .sum();
     let kinds: Vec<_> = primitives
         .iter()
         .filter_map(|primitive| primitive["kind"].as_str())
+        .collect();
+    let text: String = painted
+        .iter()
+        .filter_map(|primitive| primitive["text"].as_str())
         .collect();
     assert_eq!(
         text.split_whitespace().collect::<String>(),
         "officefifty",
         "{band} ask={ask} primitive kinds {kinds:?}"
     );
-    (text, glyphs)
+    let ligated = painted
+        .iter()
+        .filter(|primitive| {
+            primitive["text"]
+                .as_str()
+                .is_some_and(|t| !t.trim().is_empty())
+        })
+        .map(|primitive| {
+            primitive["fontFeatures"]
+                .as_array()
+                .is_some_and(|features| features.iter().any(|feature| feature == "liga"))
+        })
+        .collect();
+    let glyphs = painted
+        .iter()
+        .all(|primitive| primitive["kind"] == "glyphRun")
+        .then(|| {
+            painted
+                .iter()
+                .map(|run| run["glyphs"].as_array().map_or(0, Vec::len))
+                .sum()
+        });
+    BandPaint {
+        text,
+        ligated,
+        glyphs,
+    }
+}
+
+struct BandPaint {
+    text: String,
+    ligated: Vec<bool>,
+    glyphs: Option<usize>,
 }
 
 #[test]
 fn header_and_footer_runs_ligate_only_when_asked() {
     for band in ["header", "footer"] {
-        let (plain_text, plain) = band_glyphs(band, false);
-        let (_, asked) = band_glyphs(band, true);
-        assert_eq!(
-            plain,
-            plain_text.chars().count(),
-            "{band}: a run that does not ask keeps one glyph per letter"
+        let plain = band_glyphs(band, false);
+        let asked = band_glyphs(band, true);
+        assert!(
+            plain.ligated.iter().all(|on| !on),
+            "{band}: a run that does not ask paints without liga: {:?}",
+            plain.ligated
         );
-        assert!(asked < plain, "{band}: asked {asked} vs plain {plain}");
+        assert!(
+            !asked.ligated.is_empty() && asked.ligated.iter().all(|on| *on),
+            "{band}: an asking run paints with liga: {:?}",
+            asked.ligated
+        );
+        if let (Some(plain_glyphs), Some(asked_glyphs)) = (plain.glyphs, asked.glyphs) {
+            assert_eq!(plain_glyphs, plain.text.chars().count(), "{band}");
+            assert!(
+                asked_glyphs < plain_glyphs,
+                "{band}: {asked_glyphs} vs {plain_glyphs}"
+            );
+        }
     }
 }
