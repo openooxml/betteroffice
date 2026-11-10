@@ -35,8 +35,8 @@ const settle = () => act(async () => { await new Promise<void>((resolve) => setT
 
 const TEXT = 'Second paragraph';
 
-function page(): DisplayPage {
-  const primitives = [['p1', 'First paragraph'], ['p2', TEXT]].map(([blockKey, text], index): DisplayPrimitive => ({
+function page(blocks: string[][] = [['p1', 'First paragraph'], ['p2', TEXT]]): DisplayPage {
+  const primitives = blocks.map(([blockKey, text], index): DisplayPrimitive => ({
     kind: 'text', text, x: 10, baselineY: 20 + index * 20, width: 80, font: '12px Arial', color: '#000',
     blockKey, docStart: 1010 + index * 100, docEnd: 1010 + index * 100 + text!.length,
     fragmentDocStart: 1009 + index * 100, fragmentDocEnd: 1011 + index * 100 + text!.length,
@@ -62,11 +62,12 @@ function Harness({ phase, displayPage, expose, fullMirror = true }: { phase: Pha
 }
 
 function mount(fullMirror = true) {
-  const displayPage = page();
+  let displayPage = page();
   let mirrors!: Mirrors;
   const expose = (value: Mirrors) => { mirrors = value; };
   const view = render(<Harness phase="unbuilt" displayPage={displayPage} expose={expose} fullMirror={fullMirror} />);
-  const to = async (phase: Phase) => {
+  const to = async (phase: Phase, next: DisplayPage = displayPage) => {
+    displayPage = next;
     view.rerender(<Harness phase={phase} displayPage={displayPage} expose={expose} fullMirror={fullMirror} />);
     await settle();
   };
@@ -119,4 +120,38 @@ test('with text page mirrors, focus handed from an unbuilt paragraph lands in th
   const block = view.textBlock();
   expect(block).not.toBeNull();
   expect(document.activeElement).toBe(block);
+});
+
+const shell = () => page([['p1', 'First paragraph']]);
+const mirrorRoot = (view: ReturnType<typeof mount>) =>
+  view.container.querySelector<HTMLElement>('[data-page-index="1"] .canvas-page-mirror')!.firstElementChild;
+
+test('focus handed to a page whose full mirror fills in place waits for the paragraph', async () => {
+  const view = mount();
+  const paragraph = view.section().querySelector('p')!;
+  await act(async () => { paragraph.focus(); });
+  await view.to('full', shell());
+  const root = mirrorRoot(view);
+  expect(root).not.toBeNull();
+  expect(view.fullBlock()).toBeNull();
+  await view.to('full', page());
+  expect(mirrorRoot(view)).toBe(root);
+  const block = view.fullBlock();
+  expect(block?.textContent).toBe(TEXT);
+  expect(document.activeElement).toBe(block);
+});
+
+test('a selection handed to a page whose full mirror fills in place waits for the paragraph', async () => {
+  const view = mount();
+  const section = view.section();
+  view.remember(section, section.querySelector('p')!, true);
+  await view.to('full', shell());
+  const root = mirrorRoot(view);
+  expect(root).not.toBeNull();
+  await view.to('full', page());
+  expect(mirrorRoot(view)).toBe(root);
+  const block = view.fullBlock();
+  const selection = getSelection()!;
+  expect(selection.toString()).toBe(TEXT);
+  expect(block!.contains(selection.anchorNode)).toBe(true);
 });

@@ -203,26 +203,27 @@ export function useUnbuiltPageMirrors({ binding, geometry, center, enabled, read
       const mirrorHost = host.querySelector<HTMLElement>(`[data-page-index="${wanted.pageIndex}"] .canvas-page-mirror`);
       const root = mirrorHost?.firstElementChild as HTMLElement | null;
       const ready = fullMirror ? mirrorHost?.dataset.pageChrome === 'chrome' : mirrorHost?.dataset.pageChrome !== undefined;
-      if (!root || !root.childNodes.length || !ready || geometry?.pages.find(({ page }) => page.pageIndex === wanted.pageIndex)?.displayPage?.unbuilt) {
+      const paragraphs = root && ready ? Array.from(root.querySelectorAll<HTMLElement>('[role="paragraph"], p'))
+        .map((element) => ({ element, text: normalize(element.textContent) })).filter(({ text }) => text) : [];
+      // A page shell shows the mirror root before its paragraphs fill it in place: wait for the paragraph itself.
+      const block = paragraphs.slice(Math.max(0, wanted.ordinal)).find(({ text }) => text === wanted.text)
+        ?? paragraphs.find(({ text }) => text === wanted.text);
+      if (!block || geometry?.pages.find(({ page }) => page.pageIndex === wanted.pageIndex)?.displayPage?.unbuilt) {
         if (wanted.selection) return false;
         const target = mirrorHost ?? host;
         parked.current = target;
         focusMirrorBlock(target, focusCleanups.current);
         return false;
       }
-      const paragraphs = Array.from(root.querySelectorAll<HTMLElement>('[role="paragraph"], p'))
-        .map((element) => ({ element, text: normalize(element.textContent) })).filter(({ text }) => text);
-      const block = paragraphs.slice(Math.max(0, wanted.ordinal)).find(({ text }) => text === wanted.text)
-        ?? paragraphs.find(({ text }) => text === wanted.text);
       if (wanted.selection) {
         const selection = host.ownerDocument.getSelection();
-        if (block && selection) {
+        if (selection) {
           const range = host.ownerDocument.createRange();
           range.selectNodeContents(block.element);
           selection.removeAllRanges();
           selection.addRange(range);
         }
-      } else focusMirrorBlock(block?.element ?? root, focusCleanups.current);
+      } else focusMirrorBlock(block.element, focusCleanups.current);
       focused.current = null;
       parked.current = null;
       return true;
