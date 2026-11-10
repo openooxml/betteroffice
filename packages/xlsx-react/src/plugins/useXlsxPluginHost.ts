@@ -123,7 +123,7 @@ export function useXlsxPluginHost(options: UseXlsxPluginHostOptions): XlsxPlugin
   useEffect(() => {
     if (!managed || !options.handle) return;
     let generation = host.generation();
-    const settled = (source: 'pointer' | 'touch' | 'keyboard' | 'api') => host.selectionSettled(source, generation);
+    const settled = (source: 'pointer' | 'touch' | 'keyboard') => host.selectionSettled(source, generation);
     const machine = createSelectionSettle({
       root: () => latest.current.focusRoot?.current ?? null,
       onUnsettle: () => { generation = host.generation(); host.selectionUnsettled(generation); },
@@ -240,8 +240,8 @@ export function useXlsxPluginHost(options: UseXlsxPluginHostOptions): XlsxPlugin
   useEffect(() => {
     if (managed) {
       selectionRef.current = options.selection;
-      host.selectionChanged(options.selection);
-      settleRef.current?.notifySelectionChange(JSON.stringify(options.selection));
+      const identity = host.selectionChanged(options.selection);
+      settleRef.current?.notifySelectionChange(identity);
     }
   }, [host, managed, options.handle, options.selection]);
 

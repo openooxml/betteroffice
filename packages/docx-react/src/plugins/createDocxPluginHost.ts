@@ -74,9 +74,9 @@ export interface DocxPluginHost {
   generation(): string | null;
   version(): string;
   previewVersion(): number;
-  selectionChanged(selection: DocxPluginSelection): void;
+  selectionChanged(selection: DocxPluginSelection, identity?: string): string;
   selectionUnsettled(generation?: string | null): void;
-  selectionSettled(source: 'pointer' | 'touch' | 'keyboard' | 'api', generation?: string | null): void;
+  selectionSettled(source: 'pointer' | 'touch' | 'keyboard', generation?: string | null): void;
   focusChanged(focused: boolean): void;
   localeChanged(locale: string): void;
   modeChanged(mode: EditorMode, readOnly: boolean): void;
@@ -162,8 +162,15 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
   let detachGeometry: (() => void) | null = null;
   let installed = false;
   let generations = 0;
+  let selectionIdentity = 'null';
+  const selectionIdentities = new WeakMap<DocxPluginSnapshot, string>();
   let settledSelection: string | null = null;
   let settleEvent: Extract<DocxPluginEvent, { type: 'selection-settle' }> | null = null;
+  let settleDelivered = false;
+  const invalidateSettle = () => {
+    if (settleEvent && !settleDelivered) settledSelection = null;
+    settleEvent = null;
+  };
   let viewport: DocxPluginRect | null = null;
   let commandSignature: string | null = null;
   const state = {
@@ -229,7 +236,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       scopedCommandStore(controller(), scopeFor(invocation))
     );
     const geometry = access.geometry();
-    const selection = JSON.stringify(invocation.snapshot.selection);
+    const selection = selectionIdentities.get(invocation.snapshot);
     return {
       pluginId,
       snapshot: invocation.snapshot,
@@ -244,7 +251,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       geometry:
         geometry && sameLayout(invocation.snapshot.layout, geometry.layout)
           ? scopePluginGeometry(geometry, pluginId, () => !invocation.refusal() &&
-              selection === JSON.stringify(state.selection))
+              selection === selectionIdentity)
           : null,
       navigation: clients.navigation,
       setState: (next, atVersion) => invocation.setState(next, atVersion),
@@ -266,18 +273,22 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
     DocxPluginErrorPhase
   >({
     context: (invocation) => createContext(invocation),
-    snapshot: (pluginId, generation) => ({
-      generation,
-      version: state.version,
-      mode: state.mode,
-      readOnly: state.readOnly,
-      focused: state.focused,
-      locale: state.locale,
-      grant: runtime.grant(pluginId) as DocxPluginGrant,
-      selection: state.selection,
-      selectionSettled: state.selectionSettled,
-      layout: state.layout,
-    }),
+    snapshot: (pluginId, generation) => {
+      const snapshot: DocxPluginSnapshot = {
+        generation,
+        version: state.version,
+        mode: state.mode,
+        readOnly: state.readOnly,
+        focused: state.focused,
+        locale: state.locale,
+        grant: runtime.grant(pluginId) as DocxPluginGrant,
+        selection: state.selection,
+        selectionSettled: state.selectionSettled,
+        layout: state.layout,
+      };
+      selectionIdentities.set(snapshot, selectionIdentity);
+      return snapshot;
+    },
     currentVersion: () => runtime.generation() === null ? null : session ? readSessionVersion(session) : state.version,
     loadEvent: (snapshot, reason) => ({
       type: 'load',
@@ -290,10 +301,17 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       generation: snapshot.generation,
       grant: grant as DocxPluginGrant,
     }),
-    eventCurrent: (event, snapshot) => event.type !== 'selection-settle' ||
-      (event === settleEvent && event.version === snapshot.version &&
-        settledSelection === `${snapshot.version}|${JSON.stringify(snapshot.selection)}` &&
-        JSON.stringify(event.selection) === JSON.stringify(snapshot.selection)),
+    eventCurrent: (event, snapshot) => {
+      if (event.type !== 'selection-settle') return true;
+      const current = event === settleEvent && event.version === snapshot.version &&
+        settledSelection === selectionIdentities.get(snapshot) &&
+        JSON.stringify(event.selection) === JSON.stringify(snapshot.selection);
+      if (event === settleEvent) {
+        if (current) settleDelivered = true;
+        else invalidateSettle();
+      }
+      return current;
+    },
     validate: definitionProblem,
     report,
   });
@@ -303,7 +321,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
   };
 
   const notify = (event: DocxPluginEvent): void => {
-    if (event.type === 'selection-change' || event.type === 'document-change') settleEvent = null;
+    if (event.type === 'selection-change' || event.type === 'document-change') invalidateSettle();
     runtime.notify(event);
   };
   const notifyViewport = (): void => {
@@ -445,6 +463,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       state.previewVersion = proposalSnapshot(next)?.previewVersion ?? 0;
       state.layout = null;
       state.selectionSettled = true;
+      selectionIdentity = 'null';
       settledSelection = null;
       settleEvent = null;
       state.selection = EMPTY_SELECTION;
@@ -471,6 +490,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       state.previewVersion = 0;
       state.layout = null;
       state.selectionSettled = true;
+      selectionIdentity = 'null';
       settledSelection = null;
       settleEvent = null;
       state.selection = EMPTY_SELECTION;
@@ -513,19 +533,25 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
     version: () => state.version,
     previewVersion: () => state.previewVersion,
 
-    selectionChanged(selection) {
-      if (JSON.stringify(selection) === JSON.stringify(state.selection)) return;
+    selectionChanged(selection, identity = JSON.stringify(selection)) {
+      const moved = identity !== selectionIdentity;
+      selectionIdentity = identity;
+      if (JSON.stringify(selection) === JSON.stringify(state.selection)) {
+        if (moved) { invalidateSettle(); runtime.touch(); }
+        return identity;
+      }
       state.selection = selection;
       const generation = runtime.generation();
       if (generation) {
         notify({ type: 'selection-change', generation, version: state.version, selection });
       }
+      return identity;
     },
 
     selectionUnsettled(expected = runtime.generation()) {
       if (!expected || runtime.generation() !== expected || !state.selectionSettled) return;
       state.selectionSettled = false;
-      settleEvent = null;
+      invalidateSettle();
       runtime.touch();
     },
 
@@ -533,14 +559,15 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       if (!expected || runtime.generation() !== expected) return;
       const changed = !state.selectionSettled;
       state.selectionSettled = true;
-      const key = `${state.version}|${JSON.stringify(state.selection)}`;
+      const key = selectionIdentity;
       if (key === settledSelection) {
         if (changed) runtime.touch();
         return;
       }
       settledSelection = key;
+      settleDelivered = false;
       settleEvent = { type: 'selection-settle', generation: expected, version: state.version,
-        selection: state.selection, source };
+        selection: structuredClone(state.selection), source };
       notify(settleEvent);
     },
 

@@ -347,7 +347,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   useEffect(() => {
     if (!managedPlugins || !documentReady) return;
     let generation = pluginHost.generation();
-    const settled = (source: 'pointer' | 'touch' | 'keyboard' | 'api') => pluginHost.selectionSettled(source, generation);
+    const settled = (source: 'pointer' | 'touch' | 'keyboard') => pluginHost.selectionSettled(source, generation);
     const machine = createSelectionSettle({
       root: () => host.current?.querySelector('[data-docx-worker-editor]') ?? null,
       canSettle: pluginGeometry.selectionMapped,
@@ -403,8 +403,9 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       const toolbar = shellState.view?.editState?.toolbar;
       if (layout && pluginGeometry.geometry()) props.onRenderedDomContextReady?.(pluginGeometry.geometry()!.dom);
       const selection = { formatting: toolbar ? yrsSelectionState({ context: toolbar, startParagraphIndex: -1, endParagraphIndex: -1 }) : null, displayRange: pluginGeometry.displaySelection() };
-      pluginHost.selectionChanged(selection);
-      settleRef.current?.notifySelectionChange(`${workerDocumentVersion(shellState.view)}|${JSON.stringify(shellState.view?.workerSelection ?? null)}`);
+      const identity = pluginGeometry.selectionIdentity();
+      pluginHost.selectionChanged(selection, identity);
+      settleRef.current?.notifySelectionChange(identity);
       if (layout) pluginHost.geometryPresented(layout);
       pluginHost.geometryChanged();
       pluginHost.syncCommands();

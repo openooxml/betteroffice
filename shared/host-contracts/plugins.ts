@@ -135,5 +135,5 @@ export interface PluginSelectionSettleEvent<Selection> {
   generation: string;
   version: string;
   selection: Selection;
-  source: 'pointer' | 'touch' | 'keyboard' | 'api';
+  source: 'pointer' | 'touch' | 'keyboard';
 }

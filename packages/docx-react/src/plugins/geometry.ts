@@ -67,6 +67,7 @@ export async function readPluginPositionAtPoint(
 
 const layoutIds = new WeakMap<DisplayListQueries, string>();
 let nextLayoutId = 0;
+export const SELECTION_ANCHOR_WAIT_MS = 2000;
 
 export function layoutIdOf(queries: DisplayListQueries): string {
   let id = layoutIds.get(queries);
@@ -653,7 +654,9 @@ export function createPluginGeometry(
   readPoint?: (clientX: number, clientY: number) => Promise<DocxPointPosition | null>,
   complete: () => boolean = () => false,
   viewport: () => DocxPluginRect = () => visibleViewport(layer, layer, layer),
-  selection: () => (NonNullable<DocxPluginSelection['displayRange']> & { focus?: number }) | null = () => null
+  selection: () => (NonNullable<DocxPluginSelection['displayRange']> & { focus?: number }) | null = () => null,
+  subscribeSelection?: (listener: () => void) => () => void,
+  selectionStory: () => string | null = () => access()?.session.selection()?.head.story ?? null
 ): DocxPluginGeometry {
   const shown = () => dom.zoom === layout.zoom && current();
   const projector = createCanvasHostProjector(dom.pagesContainer, queries, dom.zoom);
@@ -887,7 +890,32 @@ export function createPluginGeometry(
           )
         : null,
     isPageBuilt: (pageIndex) => drawable() && pageBuilt(queries, pageIndex),
-    readAnchorGeometries: async (targets) => targets.map((target) => created.getAnchorGeometry(target)),
+    readAnchorGeometries: async (targets) => {
+      const read = () => targets.map((target) => created.getAnchorGeometry(target));
+      const pending = (answer: DocxAnchorGeometryResult, index: number) => targets[index]!.kind === 'selection' &&
+        !answer.ok && answer.failure.code === 'pending';
+      const answers = read();
+      if (!answers.some(pending)) return answers;
+      return new Promise<DocxAnchorGeometryResult[]>((resolve) => {
+        let detach = () => {};
+        let poll: ReturnType<typeof setTimeout> | undefined;
+        const finish = (results: DocxAnchorGeometryResult[]) => {
+          clearTimeout(timer);
+          clearTimeout(poll);
+          detach();
+          resolve(results);
+        };
+        const check = () => {
+          const results = read();
+          if (!results.some(pending)) finish(results);
+          else if (!subscribeSelection) poll = setTimeout(check, 50);
+        };
+        const timer = setTimeout(() => finish(read().map((answer, index) =>
+          pending(answer, index) ? unavailable() : answer)), SELECTION_ANCHOR_WAIT_MS);
+        detach = subscribeSelection?.(check) ?? detach;
+        check();
+      });
+    },
     getPositionAtPoint(clientX, clientY) {
       if (!shown()) return null;
       const position = resolve(dom.getPositionAtPoint?.(clientX, clientY) ?? null);
@@ -905,7 +933,12 @@ export function createPluginGeometry(
       if (target.kind === 'selection') {
         if (!shown()) return unavailable();
         const range = selection();
-        if (!range) return anchorFailure('missing-target', 'No selection is available');
+        if (!range) {
+          const story = selectionStory();
+          if (story === null) return anchorFailure('missing-target', 'No selection is available');
+          if (anchorDisplayRoot(story) === null) return anchorFailure('unsupported', 'The range has no display position');
+          return anchorFailure('pending', 'The selection display range is being read');
+        }
         if (range.layoutId !== layout.id) return unavailable();
         const from = Math.min(range.from, range.to);
         const to = Math.max(range.from, range.to);

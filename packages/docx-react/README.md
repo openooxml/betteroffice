@@ -139,7 +139,8 @@ and toolbar controls are outside. Locale is the canonical `i18n._lang`, defaulti
 `selection-settle` reports the current selection and its source after a 350 ms quiet
 window; `snapshot.selectionSettled` is false while it changes. These experimental
 signals are on for installed plugins. `geometry.getAnchorGeometry({ kind: "selection" })`
-anchors to the selection. Worker reads may be `pending`; `readAnchorGeometries` waits.
+anchors to the live selection. Mapping and display-range reads may be `pending`;
+`readAnchorGeometries` waits up to two seconds, then returns `layout-unavailable`.
 Collapsed selections return a caret anchor and empty `rects`.
 
 ## Edit batches and paragraph anchors

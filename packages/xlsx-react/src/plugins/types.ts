@@ -143,7 +143,7 @@ export interface XlsxPluginCellPosition extends XlsxPointPosition {
 
 export type XlsxGeometryTarget =
   | { kind: 'proposal'; id: string }
-  /** @experimental The selected cell ranges in this layout. */
+  /** @experimental Selection anchors are live-only; use a range target to keep a position. */
   | { kind: 'selection' };
 
 export type XlsxAnchorGeometryResult =

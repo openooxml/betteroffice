@@ -196,6 +196,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   );
 
   const selectionRef = useRef<DocxPluginSelection>({ formatting: null, displayRange: null });
+  const selectionIdentityRef = useRef('null');
   const settleRef = useRef<ReturnType<typeof createSelectionSettle> | null>(null);
   const managed = (options.plugins?.length ?? 0) > 0;
   const locale = resolvedLocale(options.locale ?? options.i18n?._lang);
@@ -311,43 +312,43 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   reservationsRef.current = { resolved: reservations, payload: reservationSets };
 
   const refreshSelection = useCallback((): DocxPluginSelection => {
-    if (latest.current.viewerSelection) {
+    if (latest.current.viewerSelection || latest.current.viewerDocumentRead) {
       const selection = { formatting: null, displayRange: viewerSelectionRef.current?.displayRange ?? null };
+      const range = selection.displayRange;
+      selectionIdentityRef.current = JSON.stringify(range
+        ? [range.story, range.from, range.to, viewerSelectionRef.current?.head ?? range.to] : null);
       selectionRef.current = selection;
-      host.selectionChanged(selection);
+      host.selectionChanged(selection, selectionIdentityRef.current);
       return selection;
     }
     const editor = latest.current.pagedEditorRef.current;
+    const session = editor?.getYrsSession() ?? latest.current.session;
     const range = editor?.getSelectionRange() ?? null;
     const layout = layoutRef.current;
-    const story = latest.current.viewerDocumentRead
-      ? 'body'
-      : editor?.getYrsSession()?.selection()?.head.story ?? 'body';
+    const story = session?.selection()?.head.story ?? 'body';
     const selection = {
       formatting: formattingRef.current,
       displayRange:
         range && layout ? { story, from: range.from, to: range.to, layoutId: layout.id } : null,
     };
+    const encoded = session?.encodeSelection?.();
+    selectionIdentityRef.current = JSON.stringify(encoded
+      ? [encoded.story, Array.from(encoded.anchor), Array.from(encoded.head)] : null);
     selectionRef.current = selection;
-    host.selectionChanged(selection);
+    host.selectionChanged(selection, selectionIdentityRef.current);
     return selection;
   }, [host]);
 
   const publishSelection = useCallback(() => {
     if (!latest.current.plugins?.length) return;
-    const selection = refreshSelection();
-    const key = latest.current.viewerSelection || latest.current.viewerDocumentRead
-      ? JSON.stringify(selection)
-      : JSON.stringify([host.version(),
-        (latest.current.pagedEditorRef.current?.getYrsSession() ?? latest.current.session)?.selection() ?? null,
-        selection.formatting]);
-    settleRef.current?.notifySelectionChange(key);
+    refreshSelection();
+    settleRef.current?.notifySelectionChange(selectionIdentityRef.current);
   }, [host, refreshSelection]);
 
   useEffect(() => {
     if (!managed || !options.session) return;
     let generation = host.generation();
-    const settled = (source: 'pointer' | 'touch' | 'keyboard' | 'api') => host.selectionSettled(source, generation);
+    const settled = (source: 'pointer' | 'touch' | 'keyboard') => host.selectionSettled(source, generation);
     const machine = createSelectionSettle({
       root: () => latest.current.focusRoot?.() ?? null,
       isEditorTarget: (target) => {
@@ -372,11 +373,8 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   const publishViewerSelection = useCallback((selection: ViewerSelectionChange) => {
     viewerSelectionRef.current = selection;
     if (!latest.current.plugins?.length) return;
-    const current = { formatting: null, displayRange: selection.displayRange };
-    selectionRef.current = current;
-    host.selectionChanged(current);
-    settleRef.current?.notifySelectionChange(JSON.stringify(current));
-  }, [host]);
+    publishSelection();
+  }, [publishSelection]);
 
   useEffect(() => {
     if (!managed) return;
@@ -568,7 +566,10 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
         return range && head?.story === range.story && typeof focus === 'number' &&
           focus >= Math.min(range.from, range.to) && focus <= Math.max(range.from, range.to)
           ? { ...range, focus } : range;
-      }
+      },
+      host.subscribe,
+      () => latest.current.viewerSelection || latest.current.viewerDocumentRead ? null
+        : (latest.current.pagedEditorRef.current?.getYrsSession() ?? latest.current.session)?.selection()?.head.story ?? null
     );
     const resolveAnchor = created.getAnchorGeometry;
     created.getAnchorGeometry = (target) => {

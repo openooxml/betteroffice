@@ -27,7 +27,6 @@ export function createSelectionSettle({
   const document = rootOf()?.ownerDocument ?? globalThis.document;
   let active = true;
   let pointerDown = false;
-  let typing = false;
   let waiting = false;
   let source: Source = 'keyboard';
   let key: string | undefined;
@@ -61,7 +60,6 @@ export function createSelectionSettle({
   const down = (event: PointerEvent) => {
     if (!inside(event.target)) return;
     pointerDown = true;
-    typing = false;
     waiting = false;
     source = event.pointerType === 'touch' ? 'touch' : 'pointer';
     clear();
@@ -74,15 +72,20 @@ export function createSelectionSettle({
   };
   const keydown = (event: KeyboardEvent) => {
     if (!inside(event.target)) return;
-    typing = isTypingKey(event);
     source = 'keyboard';
+    if (isTypingKey(event) && (timer !== null || waiting)) schedule();
   };
+  const window = document.defaultView;
   document.addEventListener('pointerdown', down, true);
   document.addEventListener('pointerup', up, true);
   document.addEventListener('pointercancel', up, true);
+  window?.addEventListener('pointerup', up, true);
+  window?.addEventListener('pointercancel', up, true);
+  window?.addEventListener('blur', up);
+  document.addEventListener('lostpointercapture', up, true);
   document.addEventListener('keydown', keydown, true);
   return {
-    notifySelectionChange(next: string, apiInFlight = false) {
+    notifySelectionChange(next: string) {
       if (!active) return;
       if (next === key) {
         if (waiting) settle();
@@ -92,11 +95,9 @@ export function createSelectionSettle({
       key = next;
       onUnsettle();
       if (!pointerDown) {
-        if (apiInFlight) source = 'api';
-        else if (timer === null || (source !== 'pointer' && source !== 'touch')) source = 'keyboard';
-        if (!typing || timer === null) schedule();
+        if (timer === null || (source !== 'pointer' && source !== 'touch')) source = 'keyboard';
+        schedule();
       }
-      typing = false;
     },
     dispose() {
       active = false;
@@ -104,6 +105,10 @@ export function createSelectionSettle({
       document.removeEventListener('pointerdown', down, true);
       document.removeEventListener('pointerup', up, true);
       document.removeEventListener('pointercancel', up, true);
+      window?.removeEventListener('pointerup', up, true);
+      window?.removeEventListener('pointercancel', up, true);
+      window?.removeEventListener('blur', up);
+      document.removeEventListener('lostpointercapture', up, true);
       document.removeEventListener('keydown', keydown, true);
     },
   };
