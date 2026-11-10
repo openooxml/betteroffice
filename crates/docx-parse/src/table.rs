@@ -379,6 +379,7 @@ pub fn row_is_hidden_content_only(row: &XmlElement) -> bool {
         let shows = match element.local_name() {
             "tbl" => true,
             "pPr" => element.child("w", "shd").is_some() || element.child("w", "pBdr").is_some(),
+            "altChunk" | "contentPart" | "control" => true,
             "drawing" | "pict" | "object" | "ffData" | "oMath" | "oMathPara" => !in_run,
             _ => is_run && !vanished(),
         };
@@ -850,6 +851,22 @@ mod tests {
         let row: TableRow = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(row.extra_attributes, None);
         assert_eq!(serde_json::to_value(row).unwrap(), value);
+    }
+
+    #[test]
+    fn imported_content_is_never_hidden_content() {
+        let hidden = r#"<w:p><w:r><w:rPr><w:vanish/></w:rPr><w:t>Hidden</w:t></w:r></w:p>"#;
+        assert!(row_is_hidden_content_only(&root(&format!(
+            "<w:tr><w:tc>{hidden}</w:tc></w:tr>"
+        ))));
+        for imported in [
+            r#"<w:altChunk r:id="chunk"/>"#,
+            r#"<w:contentPart r:id="ink"/>"#,
+            r#"<w:control r:id="activeX"/>"#,
+        ] {
+            let row = format!("<w:tr><w:tc>{imported}{hidden}</w:tc></w:tr>");
+            assert!(!row_is_hidden_content_only(&root(&row)), "{imported}");
+        }
     }
 
     #[test]
