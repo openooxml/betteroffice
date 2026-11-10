@@ -31,23 +31,23 @@ export const PLAIN_EQUIVALENT_STEPS: ReadonlyArray<{ name: string; text: DocxEdi
   },
   {
     name: `new paragraph after ${context} text`,
-    text: { op: 'insertParagraphs', target: paragraph(paraId), at: 'end', paragraphs: [{ text: 'New' }] },
-    runs: { op: 'insertParagraphs', target: paragraph(paraId), at: 'end', paragraphs: [{ runs: [{ text: 'New' }] }] },
+    text: { op: 'insertParagraphs', target: { story: 'body', paraId }, at: 'end', paragraphs: [{ text: 'New' }] },
+    runs: { op: 'insertParagraphs', target: { story: 'body', paraId }, at: 'end', paragraphs: [{ runs: [{ text: 'New' }] }] },
   },
 ]);
 
-/** One marked run, the run properties its saved `w:rPr` must hold, and those it must not. */
+/** One marked run, the run properties its saved `w:rPr` must hold, and those that must be absent or explicitly off. */
 export const MARKED_RUN_CASES: ReadonlyArray<{
   marks: DocxTextMarks;
   saved: ReadonlyArray<[string, Record<string, string>]>;
-  absent?: readonly string[];
+  off?: readonly string[];
 }> = [
   { marks: { bold: true }, saved: [['w:b', {}]] },
   { marks: { italic: true }, saved: [['w:i', {}]] },
   { marks: { underline: true }, saved: [['w:u', { 'w:val': 'single' }]] },
   { marks: { underline: 'double' }, saved: [['w:u', { 'w:val': 'double' }]] },
   { marks: { strike: true }, saved: [['w:strike', {}]] },
-  { marks: { strike: 'dblStrike' }, saved: [['w:dstrike', {}]], absent: ['w:strike'] },
+  { marks: { strike: 'dblStrike' }, saved: [['w:dstrike', {}]], off: ['w:strike'] },
   { marks: { verticalAlign: 'superscript' }, saved: [['w:vertAlign', { 'w:val': 'superscript' }]] },
   { marks: { verticalAlign: 'subscript' }, saved: [['w:vertAlign', { 'w:val': 'subscript' }]] },
   { marks: { color: 'C00000' }, saved: [['w:color', { 'w:val': 'C00000' }]] },
@@ -113,4 +113,11 @@ export async function editSaveReopen(api: typeof Yrs, steps: readonly DocxEditSt
     session.destroy();
     reopened.destroy();
   }
+}
+
+/** Whether `properties` turns `name` on: the element is present without an off `w:val`. */
+export function turnsOn(properties: string | null, name: string): boolean {
+  return [...(properties ?? '').matchAll(new RegExp(`<${name}(\\s[^>]*)?/>`, 'g'))].some(([, found = '']) =>
+    !/w:val="(0|false|off)"/.test(found)
+  );
 }

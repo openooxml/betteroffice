@@ -58,6 +58,10 @@ fn paragraph(id: &str) -> Value {
     json!({"kind": "paragraph", "story": "body", "paraId": id})
 }
 
+fn anchor(id: &str) -> Value {
+    json!({"story": "body", "paraId": id})
+}
+
 fn found(text: &str, id: &str) -> Value {
     json!({"kind": "search", "text": text, "view": "accepted",
         "within": {"kind": "paragraph", "story": "body", "paraId": id}})
@@ -174,7 +178,10 @@ fn several_formatted_runs_and_another_step_are_one_undo_step() {
         ]),
     );
     assert!(applied.applied);
-    assert_eq!(text_of(&doc), "Plain text B1 I2 P3Bold wordsHeading");
+    assert_eq!(
+        text_of(&doc),
+        "Plain text B1 I2 P3Bold wordsHeadingStrong runUpLit"
+    );
     let bold = marks(&doc, "B1");
     assert!(active(&bold, "bold") && !active(&bold, "italic"));
     let italic = marks(&doc, "I2");
@@ -358,7 +365,7 @@ fn refused_runs_and_marks_leave_the_document_untouched() {
         marked(json!({"fontSizePt": 0.5})),
         marked(json!({"fontSizePt": 10.25})),
         marked(json!({"fontFamily": ""})),
-        json!({"op": "insertParagraphs", "target": paragraph("00000001"), "at": "end",
+        json!({"op": "insertParagraphs", "target": anchor("00000001"), "at": "end",
             "paragraphs": [{"runs": [{"text": "a", "marks": {"size": 12}}]}]}),
     ];
     for case in cases {
@@ -380,9 +387,9 @@ fn a_step_takes_exactly_one_of_text_and_runs() {
         json!({"op": "insertText", "target": paragraph("00000001"), "at": "end", "text": "a", "runs": [{"text": "a"}]}),
         json!({"op": "insertText", "target": paragraph("00000001"), "at": "end"}),
         json!({"op": "replaceText", "target": found("Plain", "00000001"), "runs": null}),
-        json!({"op": "insertParagraphs", "target": paragraph("00000001"), "at": "end",
+        json!({"op": "insertParagraphs", "target": anchor("00000001"), "at": "end",
             "paragraphs": [{"text": "a", "runs": [{"text": "a"}]}]}),
-        json!({"op": "insertParagraphs", "target": paragraph("00000001"), "at": "end",
+        json!({"op": "insertParagraphs", "target": anchor("00000001"), "at": "end",
             "paragraphs": [{"styleId": "Normal"}]}),
         json!({"op": "insertText", "target": paragraph("00000001"), "at": "end",
             "runs": [{"text": "a", "bold": true}]}),
@@ -444,14 +451,14 @@ fn new_paragraph_runs_overlay_the_paragraph_style() {
     apply(
         &plain,
         &UndoSession::new(),
-        json!([{"op": "insertParagraphs", "target": paragraph("00000001"), "at": "end",
+        json!([{"op": "insertParagraphs", "target": anchor("00000001"), "at": "end",
             "paragraphs": [{"text": "Head plain", "styleId": "Heading1"}]}]),
     );
     let runs = open();
     apply(
         &runs,
         &UndoSession::new(),
-        json!([{"op": "insertParagraphs", "target": paragraph("00000001"), "at": "end",
+        json!([{"op": "insertParagraphs", "target": anchor("00000001"), "at": "end",
         "paragraphs": [{"styleId": "Heading1", "runs": [
             {"text": "Head", "marks": {"italic": true}},
             {"text": " plain"}

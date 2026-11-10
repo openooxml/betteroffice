@@ -8,6 +8,7 @@ import {
   editSaveReopen,
   holdsProperty,
   savedRunProperties,
+  turnsOn,
   textRunFixture,
 } from './__fixtures__/textRuns';
 import { SAVE_PATHS, setupStructuralSaves } from './structuralSaveTestSupport';
@@ -46,14 +47,14 @@ describe('formatted runs in host edits', () => {
   }
 
   test('each mark saves its run property and survives a reopen and second save', async () => {
-    for (const { marks, saved, absent = [] } of MARKED_RUN_CASES) {
+    for (const { marks, saved, off = [] } of MARKED_RUN_CASES) {
       const { xml, resavedXml } = await editSaveReopen(yrs, [insert('00000001', [{ text: ' Z', marks }])]);
       for (const document of [xml, resavedXml]) {
         const properties = savedRunProperties(document, ' Z');
         for (const [name, attributes] of saved) {
           expect(holdsProperty(properties, name, attributes), `${JSON.stringify(marks)} ${name}`).toBe(true);
         }
-        for (const name of absent) expect(holdsProperty(properties, name, {}), name).toBe(false);
+        for (const name of off) expect(turnsOn(properties, name), `${name} in ${properties}`).toBe(false);
       }
     }
   });
