@@ -105,69 +105,18 @@ fn breaks_on_own_runs(xml: &str) -> Option<bool> {
     Some(true)
 }
 
-/// Whether `paragraph` holds only what the editing model can place a page or column break
-/// among when it writes the paragraph back: runs of text, comment references and such breaks,
-/// beside comment ranges and bookmarks.
-fn places_breaks(paragraph: &str) -> Option<bool> {
-    let mut open: Vec<&str> = Vec::new();
-    for tag in tags(paragraph)? {
-        if tag.end {
-            open.pop();
-            continue;
-        }
-        let allowed = match open.as_slice() {
-            ["w:p"] => matches!(
-                tag.name,
-                "w:pPr"
-                    | "w:r"
-                    | "w:commentRangeStart"
-                    | "w:commentRangeEnd"
-                    | "w:bookmarkStart"
-                    | "w:bookmarkEnd"
-            ),
-            ["w:p", "w:r"] => {
-                matches!(tag.name, "w:rPr" | "w:t" | "w:commentReference")
-                    || (tag.name == "w:br"
-                        && attribute(&tag, "w:type")
-                            .and_then(|range| unescaped(paragraph, range))
-                            .is_some_and(|kind| kind == "page" || kind == "column"))
-            }
-            _ => true,
-        };
-        if !allowed {
-            return Some(false);
-        }
-        if !tag.empty {
-            open.push(tag.name);
-        }
-    }
-    Some(true)
-}
-
-/// How a story part's page and column breaks take part in keeping source paragraphs.
-struct BreakPlan {
-    /// Whether an unchanged paragraph must hold as many breaks in its own runs as written.
-    decide: bool,
-    /// Changed paragraphs written from the model instead of their precise patch, because the
-    /// patch keeps a break the session removed.
-    unpatched: BTreeSet<u32>,
-}
-
-/// Decides per part whether break counts can tell a removed or arrived break from one the
-/// model writes elsewhere. They cannot when a break sits outside a paragraph's own runs, when
-/// a patch drops a break the model holds, or when one paragraph loses a break while another
-/// gains one; the part then keeps source paragraphs exactly as without the comparison. A lost
-/// break counts as removed only in a paragraph the model can place breaks in.
-fn break_plan(
+/// Whether per-paragraph break counts decide which unchanged paragraphs keep their source bytes
+/// in a story part. They do only when the part's breaks all sit in paragraphs' own runs and
+/// no paragraph's written bytes hold fewer such breaks than its source or its patch: the
+/// model can drop a break it does not place, so a loss is never taken as a removal. Then an
+/// unchanged paragraph that gained a break is rewritten; otherwise the part keeps source
+/// paragraphs exactly as without the comparison.
+fn breaks_decide(
     source: &str,
     recorded: &RecordedParagraphs,
     part: &S13SplicedPart,
     patched: &BTreeMap<u32, String>,
-) -> Option<BreakPlan> {
-    let off = BreakPlan {
-        decide: false,
-        unpatched: BTreeSet::new(),
-    };
+) -> Option<bool> {
     let inserted = placed(recorded, &part.inserted)?;
     if !breaks_on_own_runs(source)?
         || recorded
@@ -180,68 +129,37 @@ fn break_plan(
             .collect::<Option<Vec<_>>>()?
             .contains(&false)
     {
-        return Some(off);
+        return Some(false);
     }
     let breaks = |xml: &str| marks(xml).map(|marks| (marks.page_breaks, marks.column_breaks));
     let changed: BTreeSet<u32> = part.changed.iter().copied().collect();
     let format_only: BTreeSet<u32> = part.format_only.iter().copied().collect();
     let occurrences = paragraph_occurrences(source)?;
-    let mut losers = false;
-    let mut gainers = false;
-    let mut unpatched = BTreeSet::new();
     for (&ordinal, xml) in &recorded.written {
         let occurrence = occurrences
             .get(ordinal as usize)
             .filter(|occurrence| occurrence.ordinal == ordinal)?;
         let paragraph = &source[paragraph_span(source, occurrence)?];
         let projected = breaks(xml)?;
-        let held = breaks(paragraph)?;
-        let edited = changed.contains(&ordinal);
-        let written = if edited {
+        let kept = if changed.contains(&ordinal) {
             let candidate = patched.get(&ordinal).map_or(xml.as_str(), String::as_str);
             if format_only.contains(&ordinal) && !dropped_structure(paragraph, candidate).is_empty()
             {
-                if held != projected {
-                    return Some(off);
-                }
+                breaks(paragraph)?
+            } else if let Some(patch) = patched.get(&ordinal) {
+                breaks(patch)?
+            } else {
                 continue;
             }
-            match patched.get(&ordinal) {
-                Some(patch) => breaks(patch)?,
-                None => {
-                    gainers |= projected.0 > held.0 || projected.1 > held.1;
-                    continue;
-                }
-            }
         } else {
-            held
+            breaks(paragraph)?
         };
-        if written.0 < projected.0 || written.1 < projected.1 {
-            if edited {
-                return Some(off);
-            }
-            gainers = true;
-        }
-        if written.0 > projected.0 || written.1 > projected.1 {
-            if !places_breaks(paragraph)? {
-                return Some(off);
-            }
-            losers = true;
-            if edited {
-                unpatched.insert(ordinal);
-            }
+        let lost = kept.0 > projected.0 || kept.1 > projected.1;
+        if lost || (changed.contains(&ordinal) && kept != projected) {
+            return Some(false);
         }
     }
-    for (_, xml) in &inserted {
-        gainers |= breaks(xml)? != (0, 0);
-    }
-    if losers && gainers {
-        return Some(off);
-    }
-    Some(BreakPlan {
-        decide: true,
-        unpatched,
-    })
+    Some(true)
 }
 
 fn marks(xml: &str) -> Option<Marks> {
@@ -1712,19 +1630,7 @@ fn splice_story_part_inner(
     }) {
         return None;
     }
-    let plan = break_plan(source, recorded, part, patched)?;
-    let kept_patches: BTreeMap<u32, String>;
-    let patched = if plan.unpatched.is_empty() {
-        patched
-    } else {
-        kept_patches = patched
-            .iter()
-            .filter(|(ordinal, _)| !plan.unpatched.contains(ordinal))
-            .map(|(&ordinal, xml)| (ordinal, xml.clone()))
-            .collect();
-        &kept_patches
-    };
-    let breaks = plan.decide;
+    let breaks = breaks_decide(source, recorded, part, patched)?;
     let planned: BTreeSet<u32> = part.changed.iter().copied().collect();
     let mut patched_recording;
     let recorded = if patched.is_empty() {
@@ -2271,19 +2177,7 @@ pub(crate) fn replace_story_part(
     {
         return None;
     }
-    let plan = break_plan(source, recorded, part, patched)?;
-    let kept_patches: BTreeMap<u32, String>;
-    let patched = if plan.unpatched.is_empty() {
-        patched
-    } else {
-        kept_patches = patched
-            .iter()
-            .filter(|(ordinal, _)| !plan.unpatched.contains(ordinal))
-            .map(|(&ordinal, xml)| (ordinal, xml.clone()))
-            .collect();
-        &kept_patches
-    };
-    let breaks = plan.decide;
+    let breaks = breaks_decide(source, recorded, part, patched)?;
     let source_assignments = assignments
         .iter()
         .filter(|(ordinal, _)| !changed.contains(*ordinal) || !patched.contains_key(*ordinal))
@@ -2440,11 +2334,7 @@ pub(crate) fn splice_source_direct(
         end = span.end;
     }
     let source_markers = marker_counts(source)?;
-    let plan = break_plan(source, recorded, part, patched)?;
-    if !plan.unpatched.is_empty() {
-        return None;
-    }
-    let breaks = plan.decide;
+    let breaks = breaks_decide(source, recorded, part, patched)?;
     for (&ordinal, xml) in &recorded.written {
         let paragraph = patched
             .get(&ordinal)
@@ -4420,7 +4310,7 @@ mod tests {
     }
 
     #[test]
-    fn rewrites_an_unchanged_paragraph_that_gains_or_loses_a_page_or_column_break() {
+    fn rewrites_an_unchanged_paragraph_that_gains_a_page_or_column_break() {
         let source = format!(
             "{ROOT}<w:body><w:p w14:paraId=\"0000000A\"><w:r><w:t>a</w:t></w:r></w:p><w:p w14:paraId=\"0000000B\"><w:r><w:t>b</w:t></w:r></w:p></w:body></w:document>"
         );
@@ -4437,7 +4327,10 @@ mod tests {
             "{ROOT}<w:body><w:p w14:paraId=\"0000000A\"><w:r><w:t>a</w:t><w:br w:type=\"page\"/></w:r></w:p></w:body></w:document>"
         );
         let lost = "<w:p w14:paraId=\"0000000A\"><w:r><w:t>a</w:t></w:r></w:p>";
-        assert!(splice(&with_break, &[(0, lost)], &[]).is_some_and(|xml| xml.contains(lost)));
+        assert_eq!(
+            splice(&with_break, &[(0, lost)], &[]),
+            Some(with_break.clone())
+        );
         let moved =
             "<w:p w14:paraId=\"0000000A\"><w:r><w:br w:type=\"page\"/><w:t>a</w:t></w:r></w:p>";
         assert_eq!(
@@ -4636,6 +4529,7 @@ mod tests {
         let projected = "<w:p w14:paraId=\"0000000B\"><w:hyperlink w:anchor=\"x\"><w:r><w:t>h</w:t></w:r></w:hyperlink><w:r><w:t>AxB</w:t></w:r></w:p>";
         let handed =
             "<w:p w14:paraId=\"0000000C\"><w:r><w:br w:type=\"page\"/><w:t>n</w:t></w:r></w:p>";
+        let mut spliced = 0;
         for (path, saved) in splice_paths(
             &source,
             &[(0, projected), (1, handed)],
@@ -4647,6 +4541,7 @@ mod tests {
         .enumerate()
         {
             let Some(saved) = saved else { continue };
+            spliced += 1;
             assert_eq!(
                 saved.matches("w:type=\"page\"").count(),
                 1,
@@ -4657,23 +4552,26 @@ mod tests {
                 "path {path}: {saved}"
             );
         }
+        assert!(spliced > 0);
     }
 
     #[test]
-    fn a_patch_that_keeps_a_removed_break_gives_way_to_the_model() {
+    fn a_patch_that_keeps_a_break_the_model_lost_keeps_the_part_as_before() {
         let source = format!(
             "{ROOT}<w:body><w:p w14:paraId=\"0000000B\"><w:r><w:t>AC</w:t><w:br w:type=\"page\"/></w:r></w:p><w:p w14:paraId=\"0000000C\"><w:r><w:t>N</w:t></w:r></w:p></w:body></w:document>"
         );
         let patch = "<w:p w14:paraId=\"0000000B\"><w:r><w:t>AC</w:t><w:br w:type=\"page\"/><w:t>N</w:t></w:r></w:p>";
         let projected = "<w:p w14:paraId=\"0000000B\"><w:r><w:t>ACN</w:t></w:r></w:p>";
-        let [spliced, replaced, direct] =
-            splice_paths(&source, &[(0, projected)], &[0], &[1], &[(0, patch)]);
-        assert_eq!(direct, None);
-        for saved in [spliced, replaced] {
-            let saved = saved.expect("saved");
-            assert_eq!(saved.matches("w:type=\"page\"").count(), 0, "{saved}");
-            assert!(saved.contains(projected), "{saved}");
+        let mut spliced = 0;
+        for (path, saved) in splice_paths(&source, &[(0, projected)], &[0], &[1], &[(0, patch)])
+            .into_iter()
+            .enumerate()
+        {
+            let Some(saved) = saved else { continue };
+            spliced += 1;
+            assert!(saved.contains(patch), "path {path}: {saved}");
         }
+        assert!(spliced > 0);
     }
 
     #[test]
@@ -4686,30 +4584,6 @@ mod tests {
         let dropped = "<w:p w14:paraId=\"0000000B\"><w:hyperlink w:anchor=\"x\"><w:r><w:t>h</w:t></w:r></w:hyperlink><w:r><w:t>A</w:t></w:r></w:p>";
         let saved = splice(&source, &[(0, edited), (1, dropped)], &[0]).expect("saved");
         assert!(saved.contains(kept), "{saved}");
-        for (placeable, paragraph) in [
-            (
-                true,
-                "<w:p><w:pPr><w:jc w:val=\"center\"/></w:pPr><w:bookmarkStart w:id=\"1\" w:name=\"b\"/><w:r><w:rPr><w:b/></w:rPr><w:t>a</w:t><w:br w:type=\"page\"/><w:commentReference w:id=\"2\"/></w:r><w:bookmarkEnd w:id=\"1\"/></w:p>",
-            ),
-            (
-                false,
-                "<w:p><w:r><w:tab/><w:br w:type=\"page\"/></w:r></w:p>",
-            ),
-            (
-                false,
-                "<w:p><w:r><w:br/><w:br w:type=\"page\"/></w:r></w:p>",
-            ),
-            (
-                false,
-                "<w:p><w:proofErr w:type=\"spellStart\"/><w:r><w:br w:type=\"page\"/></w:r></w:p>",
-            ),
-            (
-                false,
-                "<w:p><w:fldSimple w:instr=\" PAGE \"/><w:r><w:br w:type=\"page\"/></w:r></w:p>",
-            ),
-        ] {
-            assert_eq!(places_breaks(paragraph), Some(placeable), "{paragraph}");
-        }
     }
 
     #[test]
