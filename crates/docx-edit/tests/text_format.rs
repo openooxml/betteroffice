@@ -38,8 +38,9 @@ fn package(body: &str) -> Vec<u8> {
 }
 
 /// `00000001` plain, `00000002` directly bold, `00000003` a bold Heading1, `00000004` a run in the
-/// bold character style `Strong`, `00000005` text around a line break, and `00000007` a table
-/// cell paragraph holding a page break.
+/// bold character style `Strong`, `00000005` text around a line break, `00000007` a table cell
+/// paragraph holding a page break, `00000009` a centred Heading1 run with direct bold-off, colour,
+/// size and font, and `0000000A` an italic hyperlink.
 fn open() -> EditingDoc {
     let body = concat!(
         r#"<w:p w14:paraId="00000001"><w:r><w:t>Plain text</w:t></w:r></w:p>"#,
@@ -51,6 +52,8 @@ fn open() -> EditingDoc {
         r#"<w:p w14:paraId="00000007"><w:r><w:t>Cell</w:t></w:r><w:r><w:br w:type="page"/></w:r><w:r><w:t>after</w:t></w:r></w:p>"#,
         r#"</w:tc></w:tr></w:tbl>"#,
         r#"<w:p w14:paraId="00000008"><w:r><w:t>Last</w:t></w:r></w:p>"#,
+        r#"<w:p w14:paraId="00000009"><w:pPr><w:pStyle w:val="Heading1"/><w:jc w:val="center"/></w:pPr><w:r><w:rPr><w:b w:val="0"/><w:color w:val="C00000"/><w:sz w:val="20"/><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr><w:t>Styled off</w:t></w:r></w:p>"#,
+        r#"<w:p w14:paraId="0000000A"><w:hyperlink w:anchor="Target"><w:r><w:rPr><w:i/></w:rPr><w:t>Linked</w:t></w:r></w:hyperlink></w:p>"#,
     );
     let doc = EditingDoc::new(7101);
     seed_from_docx(&doc, &package(body)).unwrap();
@@ -445,4 +448,132 @@ fn a_peer_converges_on_formatted_text() {
     peer.apply_update_v1(&doc.encode_diff_v1(&known).unwrap())
         .unwrap();
     assert_eq!(segments(&peer, "body"), segments(&doc, "body"));
+}
+
+#[test]
+fn clearing_returns_toggle_and_value_marks_to_the_heading_style() {
+    let doc = open();
+    let styled = open();
+    apply(
+        &doc,
+        &UndoSession::new(),
+        json!([format(
+            paragraph("00000009"),
+            json!({"clear": ["bold", "color", "fontSizePt", "fontFamily"]})
+        )]),
+    );
+    let cleared = marks(&doc, "Styled off");
+    let title = marks(&styled, "Title");
+    for key in [
+        "bold",
+        "fontSize",
+        "textColor",
+        "color",
+        "fontFamily",
+        "rFonts",
+    ] {
+        assert_eq!(cleared.get(key), title.get(key), "{key}");
+    }
+    assert!(active(&cleared, "bold"));
+}
+
+#[test]
+fn undo_restores_the_direct_formatting_a_clear_removed() {
+    let doc = open();
+    let undo = UndoSession::new();
+    let before = segments(&doc, "body");
+    apply(
+        &doc,
+        &undo,
+        json!([
+            format(paragraph("00000009"), json!({"clear": "all"})),
+            format(paragraph("00000002"), json!({"clear": ["bold"]})),
+        ]),
+    );
+    assert_ne!(segments(&doc, "body"), before);
+    assert!(undo.undo());
+    assert!(!undo.can_undo());
+    assert_eq!(segments(&doc, "body"), before);
+}
+
+#[test]
+fn clear_all_leaves_links_and_paragraph_properties_alone() {
+    let doc = open();
+    let pilcrows = |doc: &EditingDoc| -> Vec<StorySegment> {
+        segments(doc, "body")
+            .into_iter()
+            .filter(|segment| matches!(segment.content, SegmentContent::Pilcrow(_)))
+            .collect()
+    };
+    let paragraphs = pilcrows(&doc);
+    let link = marks(&doc, "Linked").get("hyperlink").cloned();
+    apply(
+        &doc,
+        &UndoSession::new(),
+        json!([
+            format(paragraph("00000009"), json!({"clear": "all"})),
+            format(paragraph("0000000A"), json!({"clear": "all"})),
+        ]),
+    );
+    assert_eq!(pilcrows(&doc), paragraphs);
+    let linked = marks(&doc, "Linked");
+    assert!(link.is_some());
+    assert_eq!(linked.get("hyperlink").cloned(), link);
+    assert!(!active(&linked, "italic"));
+}
+
+#[test]
+fn a_suggested_clear_is_one_tracked_formatting_change() {
+    let doc = open();
+    let applied = apply(
+        &doc,
+        &UndoSession::new(),
+        json!([format(
+            paragraph("00000002"),
+            json!({
+                "clear": ["bold"],
+                "suggest": {"author": "Ann", "date": "2026-11-10T12:00:00Z"}
+            })
+        )]),
+    );
+    assert_eq!(applied.receipts[0].revision_ids.len(), 1);
+    let cleared = marks(&doc, "Bold words");
+    assert!(!active(&cleared, "bold") && active(&cleared, "rPrChange"));
+}
+
+#[test]
+fn peers_clearing_overlapping_ranges_converge() {
+    let left = open();
+    let right = EditingDoc::new(7103);
+    right
+        .apply_update_v1(&left.encode_state_as_update_v1())
+        .unwrap();
+    let range = |start: u32, end: u32| {
+        json!({"kind": "range", "story": "body", "view": "accepted",
+            "start": {"paraId": "00000002", "offset": start}, "end": {"paraId": "00000002", "offset": end}})
+    };
+    let (left_known, right_known) = (
+        left.encode_state_vector_v1(),
+        right.encode_state_vector_v1(),
+    );
+    apply(
+        &left,
+        &UndoSession::new(),
+        json!([format(range(0, 6), json!({"clear": ["bold"]}))]),
+    );
+    apply(
+        &right,
+        &UndoSession::new(),
+        json!([format(
+            range(3, 10),
+            json!({"clear": "all", "set": {"italic": true}})
+        )]),
+    );
+    let (to_right, to_left) = (
+        left.encode_diff_v1(&right_known).unwrap(),
+        right.encode_diff_v1(&left_known).unwrap(),
+    );
+    right.apply_update_v1(&to_right).unwrap();
+    left.apply_update_v1(&to_left).unwrap();
+    assert_eq!(segments(&left, "body"), segments(&right, "body"));
 }

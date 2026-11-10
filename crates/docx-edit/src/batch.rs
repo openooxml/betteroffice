@@ -245,6 +245,36 @@ pub enum EditOperation {
         target: ContentControlSelector,
         text: String,
     },
+    /// Returns the `clear` marks to what the styles give, then writes the `set` marks, over a
+    /// non-empty range of one paragraph.
+    FormatText {
+        target: TextTarget,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        set: Option<serde_json::Map<String, Value>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        clear: Option<Value>,
+        #[serde(default)]
+        on_unsupported: OnUnsupported,
+    },
+}
+
+/// What a `formatText` step does with a paragraph whose rewrite would lose content.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OnUnsupported {
+    /// Refuse the step.
+    #[default]
+    Refuse,
+    /// Leave the paragraph as it is and list it in the receipt.
+    Skip,
+}
+
+/// A paragraph a step left as it is, and why.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkippedParagraph {
+    pub para_id: String,
+    pub reason: String,
 }
 
 /// One batch step; on the wire the operation's fields sit beside `expect` and `suggest`.
@@ -322,8 +352,8 @@ mod wire {
     use serde_json::Value;
 
     use super::{
-        ContentControlSelector, EditOperation, ParagraphInput, ParagraphTarget, TargetEdge,
-        TextRun, TextTarget,
+        ContentControlSelector, EditOperation, OnUnsupported, ParagraphInput, ParagraphTarget,
+        TargetEdge, TextRun, TextTarget,
     };
 
     #[derive(Deserialize)]
@@ -393,6 +423,15 @@ mod wire {
         SetContentControlText {
             target: ContentControlSelector,
             text: String,
+        },
+        FormatText {
+            target: TextTarget,
+            #[serde(default)]
+            set: Option<serde_json::Map<String, Value>>,
+            #[serde(default)]
+            clear: Option<Value>,
+            #[serde(default)]
+            on_unsupported: OnUnsupported,
         },
     }
 }
@@ -664,6 +703,9 @@ pub struct EditReceipt {
     pub revision_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control: Option<ResolvedControl>,
+    /// Paragraphs a `formatText` step with `onUnsupported: skip` left as they are.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<SkippedParagraph>,
 }
 
 /// What one step would do, resolved against the validated state. It reserves nothing.
@@ -747,6 +789,16 @@ enum Effect {
     Style(StylePlan),
     Control(ControlFill),
     Section(crate::sections::SectionPlan),
+    Format {
+        start: u32,
+        end: u32,
+        set: Vec<(String, yrs::Any)>,
+        clear: Option<crate::format::ClearMarks>,
+        paragraph_style: Option<String>,
+        para_id: String,
+        skip: bool,
+        ctx: EditCtx,
+    },
 }
 
 impl Effect {
@@ -758,7 +810,7 @@ impl Effect {
             | Self::Delete { start, .. }
             | Self::Rich { start, .. }
             | Self::RemoveParagraphs { start, .. } => Some(*start),
-            Self::Style(_) | Self::Control(_) | Self::Section(_) => None,
+            Self::Style(_) | Self::Control(_) | Self::Section(_) | Self::Format { .. } => None,
         }
     }
 }
@@ -2733,8 +2785,123 @@ fn plan_step<T: ReadTxn>(
         EditOperation::SetContentControlText { target, text } => {
             return plan_control(views, source, index, step, target, text);
         }
+        EditOperation::FormatText {
+            target,
+            set,
+            clear,
+            on_unsupported,
+        } => plan_format(
+            views,
+            index,
+            step,
+            target,
+            (set.as_ref(), clear.as_ref()),
+            *on_unsupported,
+        ),
     }?;
     Ok(vec![planned])
+}
+
+/// A `formatText` step: a non-empty range of one paragraph, its marks checked up front.
+fn plan_format<T: ReadTxn>(
+    views: &mut Views<'_, T>,
+    index: u32,
+    step: &EditStep,
+    target: &TextTarget,
+    (set, clear): (Option<&serde_json::Map<String, Value>>, Option<&Value>),
+    on_unsupported: OnUnsupported,
+) -> Result<Planned, EditFailure> {
+    let requested = EditTarget::from(target.clone());
+    let invalid_here = |message: String| invalid(message, &requested);
+    let (clear, cleared) = match clear {
+        Some(value) => {
+            let (clear, names) = crate::format::parse_clear_marks(value).map_err(&invalid_here)?;
+            (Some(clear), names)
+        }
+        None => (None, Vec::new()),
+    };
+    let set = match set {
+        Some(marks) if marks.is_empty() => {
+            return Err(invalid_here("set must name at least one mark".to_owned()));
+        }
+        Some(marks) => {
+            if let Some(both) = marks.keys().find(|mark| cleared.contains(mark)) {
+                return Err(invalid_here(format!(
+                    "mark {both:?} is both set and cleared"
+                )));
+            }
+            crate::format::text_marks_overlay(marks).map_err(&invalid_here)?
+        }
+        None => Vec::new(),
+    };
+    if set.is_empty() && clear.is_none() {
+        return Err(invalid_here("formatText needs set or clear".to_owned()));
+    }
+    let selection = views.text(target)?;
+    guard(&step.expect, &selection.text(), &requested)?;
+    let story = selection.view.story.clone();
+    views.check_story_writable(&story, &requested)?;
+    if selection.view.structurally_revised(selection.paragraph) {
+        return Err(revision_conflict(
+            "the paragraph has a pending paragraph-mark revision",
+            &requested,
+        ));
+    }
+    let paragraph = selection.paragraph();
+    if paragraph.run_revisions {
+        return Err(revision_conflict(
+            "the paragraph's runs carry tracked formatting changes",
+            &requested,
+        ));
+    }
+    let ctx = edit_ctx(&step.suggest, &requested)?;
+    let (start, end) = (selection.start, selection.end);
+    if start == end {
+        return Err(invalid_here(
+            "formatText needs a non-empty range".to_owned(),
+        ));
+    }
+    let (raw_start, raw_end) = (paragraph.raw_at(start), paragraph.raw_after(end));
+    if raw_end - raw_start != end - start {
+        return Err(revision_conflict(
+            "the range bridges hidden tracked content",
+            &requested,
+        ));
+    }
+    if paragraph.has_stamped_in(start, end) {
+        return Err(revision_conflict(
+            "the range overlaps a tracked change",
+            &requested,
+        ));
+    }
+    Ok(Planned {
+        index,
+        story,
+        target: EditTarget::Range(selection.range()),
+        claims: vec![Claim::Span(raw_start, raw_end)],
+        touched: vec![paragraph.para_id.clone()],
+        exclusive: false,
+        effect: Some(Effect::Format {
+            start: raw_start,
+            end: raw_end,
+            set,
+            clear,
+            paragraph_style: paragraph.mark.style_id(),
+            para_id: paragraph.para_id.clone(),
+            skip: on_unsupported == OnUnsupported::Skip,
+            ctx,
+        }),
+        shape: Shape::Raw {
+            start: raw_start,
+            len: raw_end - raw_start,
+        },
+        removed: Vec::new(),
+        new_paragraph_count: 0,
+        suggest: step.suggest.is_some(),
+        control: None,
+        also_changes: None,
+        companion: false,
+    })
 }
 
 /// One executed step: the story-length change and what the operation minted.
@@ -2743,6 +2910,9 @@ struct Executed {
     delta: i64,
     new_ids: Vec<String>,
     revision_ids: Vec<String>,
+    skipped: Vec<SkippedParagraph>,
+    /// A policy refusal found while executing; the whole batch refuses with it.
+    refused: Option<EditFailure>,
     /// Units between a replacement's start and the text it inserted.
     inserted_offset: u32,
 }
@@ -2779,6 +2949,70 @@ fn execute(stage: &EditingDoc, steps: &[Planned]) -> EditResult<Vec<Option<Execu
                     new_ids,
                     ..Executed::default()
                 });
+            }
+            Some(Effect::Format {
+                start,
+                end,
+                set,
+                clear,
+                paragraph_style,
+                para_id,
+                skip,
+                ctx,
+            }) => {
+                let outcome = match stage.format_for_batch(
+                    ctx,
+                    StoryRange::new(planned.story.as_str(), *start, *end),
+                    set,
+                    clear.as_ref(),
+                    paragraph_style.as_deref(),
+                ) {
+                    Ok((revision_ids, kept)) if kept.is_empty() => Executed {
+                        revision_ids,
+                        ..Executed::default()
+                    },
+                    Ok((_, kept)) => {
+                        let reasons: Vec<&str> = kept.keys().map(|reason| reason.as_str()).collect();
+                        if *skip {
+                            Executed {
+                                skipped: reasons
+                                    .iter()
+                                    .map(|reason| SkippedParagraph {
+                                        para_id: para_id.clone(),
+                                        reason: (*reason).to_owned(),
+                                    })
+                                    .collect(),
+                                ..Executed::default()
+                            }
+                        } else {
+                            Executed {
+                                refused: Some(
+                                    unsupported(
+                                        format!(
+                                            "saving paragraph {para_id} rewritten would lose content ({}); pass onUnsupported: \"skip\" to leave it as it is",
+                                            reasons.join(", ")
+                                        ),
+                                        &planned.target,
+                                    )
+                                    .at(planned.index),
+                                ),
+                                ..Executed::default()
+                            }
+                        }
+                    }
+                    Err(crate::OpError::SuggestedFormattingOverContainer) => Executed {
+                        refused: Some(
+                            unsupported(
+                                "suggested formatting cannot cross a field, a content control or a field result",
+                                &planned.target,
+                            )
+                            .at(planned.index),
+                        ),
+                        ..Executed::default()
+                    },
+                    Err(error) => return Err(staging_error(planned.index, error)),
+                };
+                executed[slot] = Some(outcome);
             }
             _ => {}
         }
@@ -2839,7 +3073,10 @@ fn execute(stage: &EditingDoc, steps: &[Planned]) -> EditResult<Vec<Option<Execu
                     .remove_paragraph_records(story, *start, *end)
                     .map_err(fail)?;
             }
-            Some(Effect::Style(_) | Effect::Control(_) | Effect::Section(_)) | None => continue,
+            Some(
+                Effect::Style(_) | Effect::Control(_) | Effect::Section(_) | Effect::Format { .. },
+            )
+            | None => continue,
         }
         outcome.delta = i64::from(stage.story_len(story)?) - i64::from(before);
         executed[slot] = Some(outcome);
@@ -2871,7 +3108,11 @@ fn changed_stories(steps: &[Planned], executed: &[Option<Executed>]) -> Vec<Stri
     steps
         .iter()
         .zip(executed)
-        .filter(|(_, outcome)| outcome.is_some())
+        .filter(|(_, outcome)| {
+            outcome
+                .as_ref()
+                .is_some_and(|outcome| outcome.skipped.is_empty())
+        })
         .flat_map(|(planned, _)| {
             std::iter::once(planned.story.clone()).chain(planned.also_changes.clone())
         })
@@ -3017,7 +3258,10 @@ fn receipts<T: ReadTxn>(
             };
             EditReceipt {
                 step_index: planned.index,
-                changed: outcome.is_some() || companion_changes.contains(&planned.index),
+                changed: outcome
+                    .as_ref()
+                    .is_some_and(|outcome| outcome.skipped.is_empty())
+                    || companion_changes.contains(&planned.index),
                 range,
                 new_paragraphs: outcome
                     .as_ref()
@@ -3031,6 +3275,9 @@ fn receipts<T: ReadTxn>(
                     .as_ref()
                     .map_or_else(Vec::new, |outcome| outcome.revision_ids.clone()),
                 control: planned.control.clone(),
+                skipped: outcome
+                    .as_ref()
+                    .map_or_else(Vec::new, |outcome| outcome.skipped.clone()),
             }
         })
         .collect()
@@ -3384,6 +3631,13 @@ impl EditingDoc {
     fn stage(&self, plan: &Plan, base: Base) -> EditResult<Result<Staged, EditRefusal>> {
         let stage = self.fork(&base.update)?;
         let executed = execute(&stage, &plan.steps)?;
+        if let Some(failure) = executed
+            .iter()
+            .flatten()
+            .find_map(|outcome| outcome.refused.clone())
+        {
+            return Ok(Err(refusal(plan.base_version.clone(), failure)));
+        }
         let changed_stories = changed_stories(&plan.steps, &executed);
         if let Err(failure) = validate_stage(&stage, &executed, &changed_stories) {
             return Ok(Err(refusal(plan.base_version.clone(), failure)));

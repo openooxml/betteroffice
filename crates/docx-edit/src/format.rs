@@ -728,6 +728,52 @@ pub(crate) fn text_marks_overlay(
     Ok(overlay)
 }
 
+/// The run attributes a host mark name stands for.
+fn mark_attr_keys(mark: &str) -> Option<&'static [&'static str]> {
+    Some(match mark {
+        "bold" => &["bold"],
+        "italic" => &["italic"],
+        "underline" => &["underline"],
+        "strike" => &["strike", "doubleStrike"],
+        "verticalAlign" => &["superscript", "subscript", "vertAlign"],
+        "color" => &["textColor", "color"],
+        "highlight" => &["highlight"],
+        "fontSizePt" => &["fontSize", "fontSizeCs", "sz"],
+        "fontFamily" => &["fontFamily", "rFonts"],
+        _ => return None,
+    })
+}
+
+/// What a host `clear` returns to the styles: every character formatting attribute, or the
+/// attributes of the named marks.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ClearMarks {
+    All,
+    Keys(Vec<&'static str>),
+}
+
+/// Parses a host `clear`: `"all"` or a non-empty list of mark names, returned with the names.
+pub(crate) fn parse_clear_marks(value: &Value) -> Result<(ClearMarks, Vec<String>), String> {
+    match value {
+        Value::String(all) if all == "all" => Ok((ClearMarks::All, Vec::new())),
+        Value::Array(names) if !names.is_empty() => {
+            let mut keys = Vec::new();
+            let mut marks = Vec::new();
+            for name in names {
+                let name = name
+                    .as_str()
+                    .ok_or_else(|| "clear lists mark names".to_owned())?;
+                let attrs = mark_attr_keys(name)
+                    .ok_or_else(|| format!("unknown mark {name:?} in clear"))?;
+                keys.extend_from_slice(attrs);
+                marks.push(name.to_owned());
+            }
+            Ok((ClearMarks::Keys(keys), marks))
+        }
+        _ => Err("clear must be \"all\" or a non-empty list of mark names".to_owned()),
+    }
+}
+
 /// Formatting policy for [`EditingDoc::insert_text`].
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum FormatPolicy {
@@ -1279,6 +1325,118 @@ impl EditingDoc {
             ..Receipt::default()
         };
         Ok((receipt, keeper.kept))
+    }
+
+    /// The attributes that return each run of `start..end` of `story_id` to what its styles give,
+    /// as seeding gives a run without direct formatting: the paragraph style `paragraph_style`
+    /// and, unless `clear` is [`ClearMarks::All`], the run's own character style. Keys no style
+    /// supplies are removed.
+    pub(crate) fn style_reset_pieces<T: ReadTxn>(
+        &self,
+        txn: &T,
+        story: &TextRef,
+        story_id: &str,
+        (start, end): (u32, u32),
+        clear: &ClearMarks,
+        paragraph_style: Option<&str>,
+    ) -> OpResult<Vec<(u32, u32, Attrs)>> {
+        let source = self.source_metadata();
+        let mut pieces = Vec::new();
+        for chunk in crate::ops::snapshot_range(story, txn, start, end) {
+            let (from, to) = (chunk.start.max(start), chunk.end().min(end));
+            if from >= to {
+                continue;
+            }
+            let run_style = match clear {
+                ClearMarks::All => None,
+                ClearMarks::Keys(_) => chunk.attrs.get("runStyle").cloned(),
+            };
+            let base: BTreeMap<String, Any> = match &source {
+                Some(source) => source
+                    .seeded_run_attrs(story_id, paragraph_style, run_style.as_ref())
+                    .map_err(OpError::InvalidFormatValue)?
+                    .into_iter()
+                    .collect(),
+                None => BTreeMap::new(),
+            };
+            let keys: Vec<&str> = match clear {
+                ClearMarks::Keys(keys) => keys.clone(),
+                ClearMarks::All => FORMATTING_ATTRS
+                    .iter()
+                    .copied()
+                    .chain(base.keys().map(String::as_str))
+                    .filter(|key| !PROTECTED_ATTRS.contains(key))
+                    .collect(),
+            };
+            let attrs: Attrs = keys
+                .into_iter()
+                .map(|key| (Arc::from(key), base.get(key).cloned().unwrap_or(Any::Null)))
+                .collect();
+            match pieces.last_mut() {
+                Some((_, last_end, last)) if *last_end == from && *last == attrs => *last_end = to,
+                _ => pieces.push((from, to, attrs)),
+            }
+        }
+        Ok(pieces)
+    }
+
+    /// A host `formatText` over one non-empty range in one transaction: `clear` returns the
+    /// named marks to the styles, then `set` writes its attributes. Returns the revision ids and
+    /// the paragraphs kept unchanged because saving them rewritten would lose content.
+    pub(crate) fn format_for_batch(
+        &self,
+        ctx: &EditCtx,
+        mut range: StoryRange,
+        set: &[(String, Any)],
+        clear: Option<&ClearMarks>,
+        paragraph_style: Option<&str>,
+    ) -> OpResult<(Vec<String>, KeptUnchanged)> {
+        let len = range_len(&range)?;
+        if len == 0 {
+            return Err(OpError::EmptyRange);
+        }
+        let mut txn = self.transact_for(ctx);
+        let story = story_ref(&txn, &range.story)?;
+        crate::check_range(&story, &txn, range.start, len)?;
+        (range.start, range.end) =
+            crate::ops::code_point_range(&story, &txn, range.start, range.end);
+        if ctx.is_suggesting() && refuses_suggestion(&story, &txn, range.start, range.end) {
+            return Err(OpError::SuggestedFormattingOverContainer);
+        }
+        let set: Attrs = set
+            .iter()
+            .map(|(key, value)| (Arc::from(key.as_str()), value.clone()))
+            .collect();
+        let pieces = match clear {
+            Some(clear) => self.style_reset_pieces(
+                &txn,
+                &story,
+                &range.story,
+                (range.start, range.end),
+                clear,
+                paragraph_style,
+            )?,
+            None => vec![(range.start, range.end, Attrs::new())],
+        };
+        let mut keeper = Keeper::new(self);
+        let mut revision_ids: Vec<String> = Vec::new();
+        for (start, end, mut attrs) in pieces {
+            attrs.extend(set.iter().map(|(key, value)| (key.clone(), value.clone())));
+            let piece = StoryRange::new(range.story.as_str(), start, end);
+            for id in self.apply_run_format_through(
+                &mut txn,
+                ctx,
+                &story,
+                &piece,
+                Some(&attrs),
+                &mut keeper,
+            )? {
+                if !revision_ids.contains(&id) {
+                    revision_ids.push(id);
+                }
+            }
+        }
+        Ok((revision_ids, keeper.kept))
     }
 
     /// Sets or clears the protected hyperlink attribute over one non-empty
