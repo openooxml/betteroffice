@@ -2933,8 +2933,8 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
         });
         await h.selectionLayout();
         await until(() => h.context().snapshot.layout?.zoom === 1.25);
-        await h.quiet(700);
         expect(h.context().snapshot.layout!.id).not.toBe(layout);
+        await h.quiet(700);
         expect(h.events.some(event => event.type === 'layout-change')).toBe(true);
         expect(states.length).toBeGreaterThan(0);
         expect(states).not.toContain(false);
@@ -3460,6 +3460,12 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
       await h.selection('body', '00000001', 7, 8);
       await h.selectionLayout();
       await h.quiet();
+      if (engine === 'DI' && kind === 'shape') {
+        expect(h.context().geometry!.isPageBuilt(0)).toBe(true);
+        const [text] = await h.context().geometry!.readAnchorGeometries([{ kind: 'range', version: h.context().snapshot.version,
+          range: { story: 'body', start: { paraId: '00000001', offset: 0 }, end: { paraId: '00000001', offset: 6 }, view: 'accepted' } }]);
+        expect(text).toMatchObject({ ok: true });
+      }
       expect(h.settles).toHaveLength(1);
       expect(Object.keys(h.context().snapshot.selection).sort()).toEqual(['displayRange', 'formatting']);
       const selected = (await h.readAnchor())[0]!;

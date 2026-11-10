@@ -962,7 +962,12 @@ export function createPluginGeometry(
           : endOf({ from, to });
         const anchor = caret ? { ...caret, width: 0 } : null;
         if (rects.some((rect) => pendingPage(rect.pageIndex)) || (anchor && pendingPage(anchor.pageIndex))) return unavailable();
-        return respond(rects, anchor, unbuiltPagesOf(queries, [{ from, to }]));
+        const unbuiltPages = unbuiltPagesOf(queries, [{ from, to }]);
+        if (from !== to && rects.length === 0 && !anchor && selectionStory() !== null && complete() && unbuiltPages.length === 0 &&
+          !queries.displayList?.pages.some(({ unbuilt, positionSpan }) => unbuilt && !positionSpan)) {
+          return anchorFailure('missing-target', 'The selection has no rendered text range');
+        }
+        return respond(rects, anchor, unbuiltPages);
       }
       return target.kind === 'reservation'
         ? anchorFailure('unsupported', 'Reservations are read through a plugin context')

@@ -1437,6 +1437,49 @@ test('selection anchors project the displayed range, caret and missing selection
   expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
 });
 
+test('a session shape selection without a text range is missing only once its layout is complete and built', () => {
+  const pages = document.createElement('div');
+  const layer = document.createElement('div');
+  const canvas = document.createElement('canvas');
+  canvas.dataset.pageIndex = '0';
+  pages.append(canvas);
+  place(pages, rectAt(0, 0, PAGE.width, PAGE.height));
+  place(canvas, rectAt(0, 0, PAGE.width, PAGE.height));
+  place(layer, rectAt(0, 0, PAGE.width, PAGE.height));
+  let span: [number, number] | undefined = [0, 20];
+  const page = { ...PAGE, primitives: [], unbuilt: false, get positionSpan() { return span; } };
+  const source = { ...queries(), displayList: { pages: [page] }, rangeRects: () => [],
+    anchorRect: () => null, hitTestRegions: () => null } as unknown as DisplayListQueries;
+  const dom = createRenderedDomContext(pages, 1, { displayListQueries: source,
+    projector: createCanvasHostProjector(pages, source, 1) });
+  const layout = { id: 'shape-selection', version: 'v1', previewVersion: 0, zoom: 1, pageCount: 1 };
+  const selection = { story: 'body', from: 7, to: 8, layoutId: layout.id };
+  let complete = true;
+  let shown = true;
+  let story: string | null = 'body';
+  const geometry = createPluginGeometry(layout, dom, layer, () => shown, () => null, source,
+    () => null, undefined, undefined, () => complete, undefined, () => selection, undefined, () => story);
+  const answer = () => geometry.getAnchorGeometry({ kind: 'selection' });
+  expect(answer()).toMatchObject({ ok: false, failure: { code: 'missing-target' } });
+  complete = false;
+  expect(answer()).toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
+  complete = true;
+  page.unbuilt = true;
+  expect(answer()).toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
+  span = undefined;
+  expect(answer()).toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
+  page.unbuilt = false;
+  shown = false;
+  expect(answer()).toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
+  shown = true;
+  selection.layoutId = 'old';
+  expect(answer()).toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
+  selection.layoutId = layout.id;
+  expect(answer()).toMatchObject({ ok: false, failure: { code: 'missing-target' } });
+  story = null;
+  expect(answer()).toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
+});
+
 test.each(['header', 'footer'] as const)('%s selection geometry follows its story and focus without reading body geometry', async (region) => {
   const pages = document.createElement('div');
   const layer = document.createElement('div');
