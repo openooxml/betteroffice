@@ -13,6 +13,7 @@ import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import { configureDefaultFonts } from '@betteroffice/docx/layout';
 import type { AsyncReplicaAdapter, CollaborationReplica } from '@betteroffice/docx/collaboration';
 import { encodeSyncStep2, encodeUpdate } from '@betteroffice/docx/collaboration/protocol';
+import { createResidentEngineSession } from '@betteroffice/docx/yrs/residentEngineSession';
 import {
   createYrsSession,
   takePreloadedResidentEngineWorker,
@@ -2673,6 +2674,30 @@ async function matrixDocument(buffer = documentBytes()) {
   return zip.generateAsync({ type: 'arraybuffer' });
 }
 
+async function removeRemoteHeader(peer: YrsSession, buffer: ArrayBuffer) {
+  const remote = await createResidentEngineSession(undefined, 67772);
+  try {
+    remote.openSourceDocx(new Uint8Array(buffer), { state: peer.encodeState() });
+    expect(remote.geometryReader.hasStory('hf:rIdH1')).toBe(true);
+    const document = remote.partDocument();
+    const headers = new Map(document.package.headers);
+    headers.delete('rIdH1');
+    const relationships = new Map(document.package.relationships);
+    relationships.delete('rIdH1');
+    const strip = (properties: NonNullable<typeof document.package.document.finalSectionProperties>) => ({
+      ...properties, headerReferences: properties.headerReferences?.filter(ref => ref.rId !== 'rIdH1'),
+    });
+    expect(remote.setPartDocument({ ...document, package: { ...document.package, headers, relationships,
+      document: { ...document.package.document,
+        sections: document.package.document.sections?.map(section => ({ ...section, properties: strip(section.properties) })),
+        finalSectionProperties: strip(document.package.document.finalSectionProperties ?? {}),
+      },
+    } }, ['hf:rIdH1'])).toBe(true);
+    peer.applyUpdate(remote.encodeStateAsUpdate(peer.encodeStateVector()));
+    expect(peer.hasStory('hf:rIdH1')).toBe(false);
+  } finally { remote.destroy(); }
+}
+
 async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapping?: { reject(): boolean; rejected(): void }, controlledClock = false) {
   const canvasContext = spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => new Proxy({} as Record<string, unknown>, {
     get(target, key) {
@@ -2788,7 +2813,6 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
           expect(session.hasStory(story)).toBe(true);
           session.setSelection({ story, paraId, offset: anchor }, { story, paraId, offset: head });
           editor.syncYrsInputState(false);
-          hookBinding!.publishSelection();
         }
       });
       await host.notificationsIdle();
@@ -2799,6 +2823,8 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
       await host.notificationsIdle();
     };
     const selectionLayout = async () => {
+      expect(mounted.view.container.isConnected).toBe(true);
+      expect(mounted.ref.current).not.toBeNull();
       await act(async () => {
         await mounted.ref.current!.flushPendingInput();
       });
@@ -2841,7 +2867,7 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
       controller: () => controller,
       session: () => mounted.ref.current!.getEditorRef()!.getYrsSession()!,
       binding: () => binding,
-      async remote(edit: (session: YrsSession) => void, path: 'update' | 'chunks' | 'pipe' = 'update') {
+      async remote(edit: (session: YrsSession) => void | Promise<void>, path: 'update' | 'chunks' | 'pipe' = 'update') {
         const transport: CollaborationReplica = engine === 'DI' ? this.session() : replica!;
         expect(transport).not.toBeNull();
         const peer = await createYrsSession({ clientId: 67771 });
@@ -2851,7 +2877,7 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
           peer.loadState(await access.encodeStateAsUpdate());
           const vector = await access.encodeStateVector();
           const sync = encodeSyncStep2(peer.encodeStateAsUpdate(vector)).slice().buffer;
-          edit(peer);
+          await edit(peer);
           const update = peer.encodeStateAsUpdate(vector);
           await act(async () => {
             if (path === 'pipe') {
@@ -2917,6 +2943,48 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
 }
 
 for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${engine}`, () => {
+  for (const [location, story, paraId] of [
+    ['body', 'body', '00000001'],
+    ['header', 'hf:rIdH1', '10000001'],
+    ['body table cell', 'body:t0:r0c0', '00000002'],
+    ['header table cell', 'hf:rIdH1:t0:r0c0', '10000002'],
+  ] as const) test(`a caret move in uniformly formatted ${location} text delivers selection-change to the plugin`, async () => {
+    const bytes = await storyAnchorsDocx();
+    const h = await matrixEditor(engine, bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer, undefined, true);
+    try {
+      if (story.startsWith('hf:')) await h.openStory('hf:rIdH1');
+      await h.selection(story, paraId, 1);
+      await h.selectionLayout();
+      await h.quiet();
+      const previous = h.context().snapshot.selection;
+      const root = story.startsWith('hf:') ? 'hf:rIdH1' : 'body';
+      const input = h.controller() ? h.input()
+        : h.view.container.querySelector<HTMLTextAreaElement>(`textarea[data-yrs-story="${root}"]`);
+      expect(input).toBeInstanceOf(HTMLTextAreaElement);
+      h.reset();
+      await act(async () => {
+        input!.focus();
+        fireEvent.keyDown(input!, { key: 'ArrowRight' });
+        await h.ref.current!.flushPendingInput();
+      });
+      if (h.controller()) expect(h.controller()!.getSnapshot().view!.workerSelection!.focus).toMatchObject({ story, paraId, offset: 2 });
+      else expect(h.session().selection()!.head).toMatchObject({ story, paraId, offset: 2 });
+      await h.selectionLayout();
+      await h.host.notificationsIdle();
+      const changes = h.deliveries.filter(delivery => delivery.event.type === 'selection-change');
+      expect(changes.length).toBeGreaterThan(0);
+      expect(changes.at(-1)!.event.selection).toMatchObject({
+        formatting: previous.formatting,
+        displayRange: { story },
+      });
+      const range = changes.at(-1)!.event.selection.displayRange!;
+      expect(range.from).toBe(range.to);
+      expect(range.from).not.toBe(previous.displayRange!.from);
+      expect(changes.at(-1)!.event.selection).toEqual(h.context().snapshot.selection);
+      expect(h.events.filter(event => event.type === 'selection-settle')).toEqual([]);
+    } finally { h.dispose(); }
+  }, 15_000);
+
   test('H2: every changed local publication settles exactly once across mixed stories and remote edits', async () => {
     const bytes = await storyAnchorsDocx();
     const source = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
@@ -2954,6 +3022,8 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
       let localChanges = 0;
       let remoteChanges = 0;
       for (const action of actions) {
+        expect(h.view.container.isConnected).toBe(true);
+        expect(h.ref.current).not.toBeNull();
         const start = h.deliveries.length;
         await action();
         const [positions, exists] = JSON.parse(h.publication().resolvedKey) as [unknown[] | null, boolean];
@@ -2995,7 +3065,7 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
       expect(localChanges).toBeGreaterThanOrEqual(16);
       expect(remoteChanges).toBeGreaterThanOrEqual(1);
     } finally { h.dispose(); }
-  });
+  }, 30_000);
 
   test('a no-op local undo keeps the selection settled without a second settle', async () => {
     const h = await matrixEditor(engine, documentBytes(), undefined, true);
@@ -3175,17 +3245,18 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
 
   for (const path of remotePaths) test(`${path}: removing the selected story settles once`, async () => {
     const bytes = await storyAnchorsDocx();
-    const h = await matrixEditor(engine, bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer, undefined, true);
+    const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+    const h = await matrixEditor(engine, buffer, undefined, true);
     try {
       await h.openStory('hf:rIdH1');
       await h.selection('hf:rIdH1', '10000001', 1, 3);
       await h.selectionLayout();
       await h.quiet();
       h.reset();
-      await h.remote(peer => {
+      await h.remote(async peer => {
         expect(peer.hasStory('hf:rIdH1')).toBe(true);
         expect(peer.paragraphs('hf:rIdH1').map(paragraph => paragraph.paraId)).toContain('10000001');
-        peer.deleteStory('hf:rIdH1');
+        await removeRemoteHeader(peer, buffer);
       }, path);
       await h.quiet();
       expect(h.settles).toHaveLength(1);
@@ -3659,7 +3730,7 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
   });
 
   if (engine !== 'DL') test('T23: continuous typing longer than the window settles once after the last key', async () => {
-    const h = await matrixEditor(engine);
+    const h = await matrixEditor(engine, documentBytes(), undefined, true);
     try {
       await h.selection('body', h.first.paraId, 0);
       await h.quiet();
@@ -3678,12 +3749,17 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
         expect(h.settles).toHaveLength(0);
       }
       expect(h.settles).toHaveLength(0);
-      await until(() => h.settles.length > 0);
+      await h.selectionLayout();
+      await h.quiet(249);
+      expect(h.settles).toHaveLength(0);
+      await h.quiet(1);
       expect(h.settles).toHaveLength(1);
       expect(h.settles[0]!.at - lastKeyAt).toBeGreaterThanOrEqual(350);
       expect(h.context().snapshot.selectionSettled).toBe(true);
+      await h.quiet(700);
+      expect(h.settles).toHaveLength(1);
     } finally { h.dispose(); }
-  });
+  }, 15_000);
 });
 
 

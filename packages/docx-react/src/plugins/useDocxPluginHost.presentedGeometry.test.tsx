@@ -172,11 +172,14 @@ test('geometry that arrives after its layout was presented reaches plugins in on
 
 test('geometry that exists before its layout is presented adds no layout change', async () => {
   const view = setup();
+  await act(async () => { await view.result.current.host.notificationsIdle(); });
+  expect(view.events).toEqual([false]);
   await act(async () => {
     view.attachLayer();
     view.emitDom();
   });
   await frames(3);
+  expect(view.events).toEqual([false]);
   await act(async () => view.present());
   await frames(3);
   expect(view.events).toEqual([false, true]);

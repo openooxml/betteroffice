@@ -1,7 +1,8 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, test } from 'bun:test';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
-import type { YrsSession } from '@betteroffice/docx/yrs';
+import { createYrsSession, type YrsSession } from '@betteroffice/docx/yrs';
+import { selectionClock } from '../../../../e2e/browser/plugin-host/selection-clock';
 import { createDocxCommandController } from '../commands/createDocxCommandStore';
 import { useSelectionTracker } from '../components/DocxEditor/hooks/useSelectionTracker';
 import { stampRevisionPreviewKey, stampSourceVersion } from '../components/DocxEditor/internals/layoutProvenance';
@@ -15,7 +16,11 @@ import { useDocxPluginHost } from './useDocxPluginHost';
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 const { act, cleanup, renderHook, waitFor } = await import('@testing-library/react');
-afterEach(cleanup);
+const sessions: YrsSession[] = [];
+afterEach(() => {
+  cleanup();
+  for (const session of sessions.splice(0)) session.destroy();
+});
 afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
@@ -23,23 +28,21 @@ afterAll(async () => {
 async function setup(viewerSelection: boolean, initialRange: { from: number; to: number } | null = { from: 5, to: 9 }, story = 'hf:stale') {
   let shellReads = 0;
   let range = initialRange;
-  const session = {
-    version: () => 'v1',
-    getProposals: () => ({ version: 'v1', previewVersion: 0, proposals: [] }),
-    onUpdate: () => () => {},
-    onProposalChange: () => () => {},
-    selection: () => {
-      shellReads += 1;
-      return { anchor: { story, paraId: '00000001', offset: 0 }, head: { story, paraId: '00000001', offset: 0 } };
-    },
-    locateParagraph: () => ({ start: 0 }),
-  } as unknown as YrsSession;
+  const session = await createYrsSession();
+  sessions.push(session);
+  const [paraId] = session.loadStories([{ storyId: story, paragraphs: [{ text: 'Uniform text for selection' }] }])[story]!;
+  const selectRange = (next: { from: number; to: number }) => session.setSelection(
+    { story, paraId: paraId!, offset: next.from }, { story, paraId: paraId!, offset: next.to }
+  );
+  selectRange(initialRange ?? { from: 0, to: 0 });
+  const readSelection = session.selection;
+  session.selection = () => { shellReads += 1; return readSelection(); };
   const queries = {
     displayList: { pages: [] },
     sourceState: () => ({ status: 'ready' }),
     pageCount: () => 0,
   } as unknown as DisplayListQueries;
-  stampSourceVersion(queries, 'v1');
+  stampSourceVersion(queries, session.version());
   stampRevisionPreviewKey(queries, '');
   const editor = {
     getYrsSession: () => session,
@@ -83,31 +86,43 @@ async function setup(viewerSelection: boolean, initialRange: { from: number; to:
   });
   await waitFor(() => expect(result.current.host.activations[0]?.context.snapshot.layout).toBeTruthy());
   return { result, rerender, events, settledSelections, propSelections, subscribedSelections,
-    setRange: (next: typeof range) => { range = next; },
+    selectRange,
+    setRange: (next: typeof range) => { range = next; if (next) selectRange(next); },
     shellReads: () => shellReads };
 }
 
 for (const mappedBeforeDeadline of [true, false]) {
   test(`editor selection settles with its current display range (mapped before deadline: ${mappedBeforeDeadline})`, async () => {
-    const view = await setup(false, null);
-    const range = { from: 5, to: 9 };
-    if (mappedBeforeDeadline) view.setRange(range);
-    await act(async () => { await new Promise((done) => setTimeout(done, 400)); });
-    if (!mappedBeforeDeadline) {
+    const clock = selectionClock();
+    try {
+      const view = await setup(false, null);
+      const range = { from: 5, to: 9 };
+      await act(async () => {
+        view.selectRange(range);
+        if (mappedBeforeDeadline) view.setRange(range);
+        view.result.current.host.publishSelection();
+      });
+      await act(async () => { await clock.tick(349); });
       expect(view.settledSelections).toEqual([]);
-      expect(view.result.current.host.activations[0]!.context.snapshot.selectionSettled).toBe(false);
-      view.setRange(range);
+      await act(async () => { await clock.tick(1); });
+      if (!mappedBeforeDeadline) {
+        expect(view.settledSelections).toEqual([]);
+        expect(view.result.current.host.activations[0]!.context.snapshot.selectionSettled).toBe(false);
+        await act(async () => {
+          view.setRange(range);
+          view.result.current.host.publishSelection();
+        });
+      }
+      expect(view.settledSelections).toEqual([{
+        formatting: null,
+        displayRange: { story: 'hf:stale', ...range,
+          layoutId: view.result.current.host.activations[0]!.context.snapshot.layout!.id },
+      }]);
+      expect(view.result.current.host.activations[0]!.context.snapshot.selectionSettled).toBe(true);
       await act(async () => view.result.current.host.publishSelection());
-    }
-    expect(view.settledSelections).toEqual([{
-      formatting: null,
-      displayRange: { story: 'hf:stale', ...range,
-        layoutId: view.result.current.host.activations[0]!.context.snapshot.layout!.id },
-    }]);
-    expect(view.result.current.host.activations[0]!.context.snapshot.selectionSettled).toBe(true);
-    await act(async () => view.result.current.host.publishSelection());
-    await act(async () => { await new Promise((done) => setTimeout(done, 400)); });
-    expect(view.settledSelections).toHaveLength(1);
+      await act(async () => { await clock.tick(400); });
+      expect(view.settledSelections).toHaveLength(1);
+    } finally { cleanup(); clock.restore(); }
   });
 }
 

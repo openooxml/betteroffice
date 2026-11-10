@@ -953,7 +953,13 @@ export function wrapSession(
     },
     selection: () => {
       if (cachedSelection !== undefined) return cloneSelection(cachedSelection);
-      cachedSelection = JSON.parse(session.selection()) as YrsSelection | null;
+      try {
+        cachedSelection = JSON.parse(session.selection()) as YrsSelection | null;
+      } catch (error) {
+        const encoded = decodeEncodedSelection(session.encoded_selection());
+        if (!encoded || session.has_story(encoded.story)) throw error;
+        cachedSelection = null;
+      }
       return cloneSelection(cachedSelection);
     },
     encodeSelection: () => decodeEncodedSelection(session.encoded_selection()),

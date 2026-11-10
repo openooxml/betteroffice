@@ -10,6 +10,7 @@ interface Publication {
 
 const publications = new WeakMap<object, Publication>();
 const scopes = new WeakMap<object, { cause: YrsSelectionCause | undefined }>();
+const listeners = new WeakMap<object, Set<() => void>>();
 
 function selectionKey(selection: ReturnType<YrsSession['selection']>): string {
   const point = (loc: NonNullable<typeof selection>['anchor']) => [loc.story, loc.paraId, loc.offset];
@@ -36,5 +37,17 @@ export function withYrsSelectionCause<T>(session: YrsSession, cause: YrsSelectio
 
 export function recordYrsSelectionCause(session: YrsSession, cause = scopes.get(session)?.cause,
   selection = session.selection()): void {
-  publications.set(session, { version: session.version(), selection: selectionKey(selection), cause });
+  const key = selectionKey(selection);
+  const previous = publications.get(session);
+  publications.set(session, { version: session.version(), selection: key, cause });
+  if (previous?.selection !== key) {
+    for (const listener of listeners.get(session) ?? []) listener();
+  }
+}
+
+export function subscribeYrsSelection(session: YrsSession, listener: () => void): () => void {
+  const subscribed = listeners.get(session) ?? new Set<() => void>();
+  listeners.set(session, subscribed);
+  subscribed.add(listener);
+  return () => { subscribed.delete(listener); };
 }

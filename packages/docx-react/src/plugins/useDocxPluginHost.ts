@@ -25,6 +25,7 @@ import {
   anchorDisplayRoot,
   anchorFailure,
   resolveReservations,
+  subscribeYrsSelection,
   yrsSelectionCause,
   type AnchorGeometryTarget,
   type DocxReservationsPayload,
@@ -103,7 +104,6 @@ export interface UseDocxPluginHostOptions extends DocxEditorPluginProps {
   canvasHostRef: React.RefObject<HTMLDivElement | null>;
   overlayTarget: HTMLElement | null;
   selectionChangeSubscribersRef: React.RefObject<Set<(state: SelectionState | null) => void>>;
-  subscribeSelection?(listener: () => void): (() => void) | undefined;
   i18n: Translations | undefined;
   onRenderedDomContextReady: ((context: RenderedDomContext) => void) | undefined;
 }
@@ -394,7 +394,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
 
   useEffect(() => {
     if (!managed || !options.session) return;
-    return latest.current.subscribeSelection?.(() => publishSelection());
+    return subscribeYrsSelection(options.session, publishSelection);
   }, [managed, options.session, publishSelection]);
 
   const publishViewerSelection = useCallback((selection: ViewerSelectionChange) => {
