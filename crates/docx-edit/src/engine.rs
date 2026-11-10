@@ -12525,6 +12525,9 @@ mod font_dependency_tests;
 mod trailing_page_break_tests;
 
 #[cfg(test)]
+mod whole_number_request_tests;
+
+#[cfg(test)]
 mod tests {
     use super::trigger_routing_tests::{OpenSwitch, PreviewSwitch};
     use super::*;
