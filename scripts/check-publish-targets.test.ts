@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { checkCrates, checkNpm, siblingReferences, verifyPublished } from './check-publish-targets.mjs';
+import { checkCrates, checkNpm, nativeReleaseVersions, siblingReferences, verifyPublished } from './check-publish-targets.mjs';
 import { publishedCrates, publishedPackageVersions, workspaceEntries } from './published-packages.mjs';
 import { RUST_PUBLISH_CRATES } from './rust-crates.mjs';
 
@@ -64,6 +64,7 @@ async function check(
     bootstrap?: boolean;
     packages?: typeof packages;
     workspaces?: ReturnType<typeof workspaceEntries>;
+    later?: { name: string; version: string }[];
     maxWaitMs?: number;
   } = {}
 ) {
@@ -75,7 +76,7 @@ async function check(
     const started = performance.now();
     const npmOptions = {
       registry: origin, out, timeoutMs: options.timeoutMs,
-      packages: options.packages, workspaces: options.workspaces
+      packages: options.packages, workspaces: options.workspaces, later: options.later
     };
     const status =
       mode === '--npm'
@@ -178,6 +179,22 @@ describe('npm publish targets', () => {
 });
 
 describe('workspace dependency versions', () => {
+  test('dependencies on native roots the release publishes later pass before those roots are on npm', async () => {
+    const natives = nativeReleaseVersions();
+    expect(natives.map(({ name }) => name).sort()).toEqual([
+      '@betteroffice/docx-native', '@betteroffice/pptx-native', '@betteroffice/xlsx-native'
+    ]);
+    const older = (name: string) =>
+      packages.some((entry) => entry.name === name) || natives.some((entry) => entry.name === name)
+        ? versions('0.0.0') : published(name);
+    const result = await check('--npm', older);
+    expect(result.stderr).toBe('');
+    expect(result.status).toBe(0);
+    const without = await check('--npm', older, { later: [] });
+    expect(without.status).toBe(1);
+    expect(without.stderr).toContain('@betteroffice/agents@');
+  });
+
   for (const field of ['dependencies', 'peerDependencies', 'optionalDependencies']) {
     test.each([
       ['workspace:*', latin.version],

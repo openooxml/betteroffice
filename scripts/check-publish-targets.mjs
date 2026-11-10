@@ -11,6 +11,7 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 import { publishedPackageVersions, workspaceEntries } from './published-packages.mjs';
+import { NATIVE_PACKAGES } from './native-bindings.mjs';
 import { RUST_PUBLISH_CRATES } from './rust-crates.mjs';
 
 const require = createRequire(import.meta.url);
@@ -113,6 +114,14 @@ export async function auditNpmPackages(packages, registry = NPM_REGISTRY, timeou
   return auditPackages(packages, npmPackages(registry, timeoutMs));
 }
 
+/** The native roots the release's native job publishes after this one, at their manifest versions. */
+export function nativeReleaseVersions(workspaces = workspaceEntries()) {
+  const roots = new Set(NATIVE_PACKAGES.map((path) => resolve(ROOT, path)));
+  return workspaces
+    .filter(({ directory }) => roots.has(resolve(directory)))
+    .map(({ manifest }) => ({ name: manifest.name, version: manifest.version }));
+}
+
 function releaseEntries(packages, workspaces) {
   const byName = new Map(workspaces.map((entry) => [entry.manifest.name, entry]));
   return packages.map(({ name, version }) => {
@@ -199,7 +208,8 @@ export async function checkNpm({
   out = console,
   timeoutMs = REQUEST_TIMEOUT_MS,
   packages = publishedPackageVersions(),
-  workspaces = workspaceEntries()
+  workspaces = workspaceEntries(),
+  later = nativeReleaseVersions(workspaces)
 } = {}) {
   const fetchPackage = npmPackages(registry, timeoutMs);
   const audit = await auditPackages(packages, fetchPackage);
@@ -218,7 +228,7 @@ export async function checkNpm({
     out.error('Publish each by hand first: RELEASING.md, "Initial npm release of a new package".');
   }
 
-  const releaseVersions = new Map(packages.map(({ name, version }) => [name, version]));
+  const releaseVersions = new Map([...later, ...packages].map(({ name, version }) => [name, version]));
   const available = async (name, range, exact = false) => {
     const matches = (version) => exact ? version === range : satisfies(version, range);
     const version = releaseVersions.get(name);
