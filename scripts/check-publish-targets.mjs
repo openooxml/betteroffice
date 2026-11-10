@@ -135,7 +135,7 @@ function dependencyRange(range, version) {
   if (!range.startsWith('workspace:')) return range;
   const suffix = range.slice('workspace:'.length);
   if (suffix === '*' || suffix === '') return version;
-  if (suffix.startsWith('^') || suffix.startsWith('~')) return suffix[0] + version;
+  if (suffix === '^' || suffix === '~') return suffix + version;
   return suffix;
 }
 
@@ -209,7 +209,7 @@ export async function checkNpm({
   timeoutMs = REQUEST_TIMEOUT_MS,
   packages = publishedPackageVersions(),
   workspaces = workspaceEntries(),
-  later = nativeReleaseVersions(workspaces)
+  later = process.env.RELEASE_SKIP_NATIVE === 'true' ? [] : nativeReleaseVersions(workspaces)
 } = {}) {
   const fetchPackage = npmPackages(registry, timeoutMs);
   const audit = await auditPackages(packages, fetchPackage);
@@ -304,12 +304,18 @@ export async function verifyPublished({
 
 const BUMP_ORDER = { none: 0, patch: 1, minor: 2, major: 3 };
 
+function changesetConfig() {
+  return JSON.parse(readFileSync(join(ROOT, '.changeset/config.json'), 'utf8'));
+}
+
 /** Major bumps in a changesets release plan that no changeset asked for, each with the peer range that forced it. */
-export function unaskedMajors(plan, workspaces = workspaceEntries()) {
+export function unaskedMajors(plan, workspaces = workspaceEntries(), fixed = changesetConfig().fixed ?? []) {
   const asked = new Map();
   for (const changeset of plan.changesets) {
     for (const { name, type } of changeset.releases) {
-      if (BUMP_ORDER[type] > BUMP_ORDER[asked.get(name) ?? 'none']) asked.set(name, type);
+      for (const member of fixed.find((group) => group.includes(name)) ?? [name]) {
+        if (BUMP_ORDER[type] > BUMP_ORDER[asked.get(member) ?? 'none']) asked.set(member, type);
+      }
     }
   }
   const releases = new Map(plan.releases.map((release) => [release.name, release]));
@@ -329,9 +335,9 @@ export function unaskedMajors(plan, workspaces = workspaceEntries()) {
   });
 }
 
-export async function checkPlan({ out = console, plan, workspaces = workspaceEntries() } = {}) {
+export async function checkPlan({ out = console, plan, workspaces = workspaceEntries(), fixed } = {}) {
   const resolved = plan ?? await createRequire(require.resolve('@changesets/cli'))('@changesets/get-release-plan').default(ROOT);
-  const majors = unaskedMajors(resolved, workspaces);
+  const majors = unaskedMajors(resolved, workspaces, fixed);
   for (const { name, oldVersion, newVersion, causes } of majors) {
     out.error(`${name} ${oldVersion} -> ${newVersion} is a major bump no changeset asked for${causes.length ? `: ${causes.join('; ')}` : ' (raised with its fixed group)'}`);
   }

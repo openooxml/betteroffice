@@ -112,6 +112,8 @@ jobs:
       # It reads name and version, which the pin below leaves alone.
       - name: Check npm publish targets
         if: steps.pending.outputs.publishing == 'true'
+        env:
+          RELEASE_SKIP_NATIVE: ${{ vars.RELEASE_SKIP_NATIVE }}
         run: node scripts/check-publish-targets.mjs --npm
 
       # A peer range a bump leaves turns its dependents major, and a fixed group

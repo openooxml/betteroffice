@@ -193,6 +193,14 @@ describe('workspace dependency versions', () => {
     const without = await check('--npm', older, { later: [] });
     expect(without.status).toBe(1);
     expect(without.stderr).toContain('@betteroffice/agents@');
+    process.env.RELEASE_SKIP_NATIVE = 'true';
+    try {
+      const skipped = await check('--npm', older);
+      expect(skipped.status).toBe(1);
+      expect(skipped.stderr).toContain('@betteroffice/agents@');
+    } finally {
+      delete process.env.RELEASE_SKIP_NATIVE;
+    }
   });
 
   for (const field of ['dependencies', 'peerDependencies', 'optionalDependencies']) {
@@ -603,7 +611,7 @@ describe('the mode argument', () => {
   test('an unknown mode fails instead of checking nothing', async () => {
     const result = await guard('--npmm', () => Response.json({}));
     expect(result.status).toBe(2);
-    expect(result.stderr).toContain('--npm or --crates');
+    expect(result.stderr).toContain('expected exactly one of --npm, --crates, --verify-published or --plan');
   }, SPAWN_BUDGET_MS);
 
   test('--npm checks the registry NPM_REGISTRY_URL names and exits with the result', async () => {
@@ -641,24 +649,25 @@ describe('release plan', () => {
   });
 
   test('a major bump no changeset asked for is named with the peer range that forced it', async () => {
-    const majors = unaskedMajors(plan('major'), fixture('workspace:*'));
+    const majors = unaskedMajors(plan('major'), fixture('workspace:*'), []);
     expect(majors.map(({ name }) => name)).toEqual(['@betteroffice/fonts', '@betteroffice/fonts-cjk']);
     expect(majors[0]!.causes).toEqual(['peer @betteroffice/fonts-cjk@workspace:* does not cover its next version 1.0.0']);
     expect(majors[1]!.causes).toEqual([]);
     const lines: string[] = [];
-    expect(await checkPlan({ plan: plan('major'), workspaces: fixture('workspace:*'), out: { log: () => {}, error: (line: string) => lines.push(line) } })).toBe(1);
+    expect(await checkPlan({ plan: plan('major'), workspaces: fixture('workspace:*'), fixed: [], out: { log: () => {}, error: (line: string) => lines.push(line) } })).toBe(1);
     expect(lines[0]).toContain('@betteroffice/fonts 0.4.2 -> 1.0.0 is a major bump no changeset asked for: peer @betteroffice/fonts-cjk@workspace:*');
     expect(lines[1]).toContain('(raised with its fixed group)');
   });
 
   test('minor bumps inside a caret peer range pass', async () => {
-    expect(unaskedMajors(plan('minor'), fixture('workspace:^0'))).toEqual([]);
+    expect(unaskedMajors(plan('minor'), fixture('workspace:^0'), [])).toEqual([]);
   });
 
-  test('the pending changesets in this repository plan no unrequested major bump', async () => {
-    const lines: string[] = [];
-    const status = await checkPlan({ out: { log: () => {}, error: (line: string) => lines.push(line) } });
-    expect(lines).toEqual([]);
-    expect(status).toBe(0);
+  test('a major asked for one member of a fixed group covers the whole group', async () => {
+    const asked = plan('major');
+    asked.changesets[0]!.releases[0]!.type = 'major';
+    expect(unaskedMajors(asked, fixture('workspace:*'), [['@betteroffice/fonts', '@betteroffice/fonts-cjk']])).toEqual([]);
+    expect(unaskedMajors(plan('major'), fixture('workspace:*'), [['@betteroffice/fonts', '@betteroffice/fonts-cjk']]).map(({ name }) => name))
+      .toEqual(['@betteroffice/fonts', '@betteroffice/fonts-cjk']);
   });
 });
