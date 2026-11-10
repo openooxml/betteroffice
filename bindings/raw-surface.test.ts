@@ -38,6 +38,9 @@ type Format = keyof typeof GLUE;
 const RAW_NATIVE = Object.fromEntries((Object.keys(GLUE) as Format[])
   .map((format) => [format, discover(require(join(root, `bindings/${format}-native/index.js`)))])) as Record<Format, RuntimeSurface>;
 
+const ENGINE_INSTALLED = Object.entries(RAW_NATIVE)
+  .flatMap(([format, surface]) => [...surface.keys()].filter((path) => path.endsWith('.prototype.[Symbol.dispose]')).map((path) => `${format} ${path}`));
+
 function declared(paths: readonly string[]): { surface: Surface; problems: string[] } {
   return mergeDeclarations(paths.map((path) => [path, parseSurface(readFileSync(join(root, path), 'utf8'), { paramNames: true })]));
 }
@@ -47,8 +50,15 @@ async function surfaceOf(module: string): Promise<RuntimeSurface> {
 }
 
 describe('native and wasm engine surfaces', () => {
+  test('the native bindings are read before any engine module installs members on them', () => {
+    if (ENGINE_INSTALLED.length > 0) {
+      throw new Error(`this file must run in its own process: another test loaded the native packages first (${ENGINE_INSTALLED.join(', ')})`);
+    }
+  });
+
   for (const format of Object.keys(GLUE) as Format[]) {
     test(`${format}: raw binding matches the wasm-bindgen glue`, async () => {
+      if (ENGINE_INSTALLED.length > 0) return;
       const parts: [string, RuntimeSurface][] = [];
       for (const module of GLUE[format]) parts.push([module, await surfaceOf(`${module}.js`)]);
       const { surface: wasm, problems: runtimeMerge } = mergeSurfaces(parts);
