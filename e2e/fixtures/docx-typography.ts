@@ -52,7 +52,9 @@ export async function inspectTypographyTable(input: {
   fonts: Record<string, number[]>;
 }): Promise<TypographyResult[]> {
   const imported = input.engine ? undefined : await import(input.moduleUrl!);
-  if (imported) await imported.default();
+  if (imported) {
+    await imported.default({ module_or_path: input.moduleUrl!.replace(/\.js$/, '_bg.wasm') });
+  }
   const engine: TypographyEngine = input.engine ?? imported;
   const encoder = new TextEncoder();
   const encode = (text: string) => encoder.encode(text);
