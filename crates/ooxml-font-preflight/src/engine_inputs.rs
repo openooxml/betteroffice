@@ -1,6 +1,10 @@
 //! Every part and relationship type the engines' loaders name, and how
 //! preflight answers it. `scripts/font-preflight-inputs.test.ts` scans the
 //! engine crates and fails when a loader names one this table does not list.
+//! The scan sees only string literals: a relationship type ending in
+//! `relationships/<kind>` or `"/<kind>"`, and a part path `"ppt|xl|word/....xml"`.
+//! Paths a loader builds with `format!` are invisible to it and listed by hand
+//! below, each with the place that builds it.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Answer {
@@ -41,12 +45,18 @@ pub(crate) const PPTX: &[(&str, Answer)] = &[
     ("authors", NotPainted),
     ("ppt/authors.xml", NotPainted),
     ("ppt/commentAuthors.xml", NotPainted),
+    // Built by format! in pptx-parse comments.rs; not seen by the scan.
+    ("ppt/comments/comment{n}.xml", NotPainted),
+    ("ppt/comments/modernComment{n}.xml", NotPainted),
 ];
 
 pub(crate) const XLSX: &[(&str, Answer)] = &[
     ("officeDocument", Refused),
     ("xl/workbook.xml", Modelled),
     ("worksheet", Modelled),
+    // The positional fallback, built by format! in xlsx-parse package.rs and
+    // read.rs; not seen by the scan. Preflight falls back the same way.
+    ("xl/worksheets/sheet{n}.xml", Modelled),
     ("styles", Modelled),
     ("xl/styles.xml", Modelled),
     ("sharedStrings", Modelled),

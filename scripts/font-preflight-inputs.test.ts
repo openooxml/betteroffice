@@ -3,6 +3,11 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+// Guards crates/ooxml-font-preflight/src/engine_inputs.rs. A loader input is
+// seen only as a string literal in a non-test engine source: a relationship
+// type ending in `relationships/<kind>` or `"/<kind>"`, or a part path
+// `"ppt|xl|word/<path>.xml"`. Code after the first `#[cfg(test)]` line of a file
+// is skipped. Paths built with format! are not seen; the table lists them by hand.
 const root = fileURLToPath(new URL('../', import.meta.url));
 
 const ENGINE_CRATES = {
