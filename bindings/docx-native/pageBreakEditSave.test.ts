@@ -54,12 +54,24 @@ const EDITS: Record<string, Edit> = {
   'remove the text past the break': (s, a) => { s.deleteRange({ story: 'body', start: at(s, 1, 1), end: at(s, 1, 2) }, a); },
   'delete the break paragraph': (s, a) => { s.deleteRange({ story: 'body', start: at(s, 0, 1), end: at(s, 1, length(s, 1)) }, a); },
   'Delete at the end of the break paragraph': (s, a) => { s.deleteRange({ story: 'body', start: at(s, 1, length(s, 1)), end: at(s, 2, 0) }, a); },
+  'select from the break paragraph start into the next paragraph': (s, a) => { s.deleteRange({ story: 'body', start: at(s, 1, 0), end: at(s, 2, 1) }, a); },
+  'select from the break paragraph end into the next paragraph': (s, a) => { s.deleteRange({ story: 'body', start: at(s, 1, length(s, 1)), end: at(s, 2, 1) }, a); },
+  'remove the break through the raw story API': (s) => { s.applyRawOps('body', [{ op: 'delete', index: breakIndex(s), len: 1 }]); },
   'split at the end of the break paragraph': (s, a) => { s.splitParagraph({ story: 'body', ...at(s, 1, length(s, 1)) }, a); },
   'merge with the next paragraph': (s, a) => { s.mergeParagraphs('body', ids(s)[1]!, a); },
   'type before the break': (s, a) => { s.insertText({ story: 'body', ...at(s, 1, 1) }, 'x', a); },
   'Enter at the end of the previous paragraph': (s, a) => { s.splitParagraph({ story: 'body', ...at(s, 0, 1) }, a); },
   'join the next paragraph': (s, a) => { s.deleteRange({ story: 'body', start: at(s, 1, length(s, 1)), end: at(s, 2, 0) }, a); },
 };
+
+function breakIndex(session: Session): number {
+  let index = 0;
+  for (const segment of session.storySegments('body')) {
+    if (segment.kind === 'embed' && (segment.embedKind === 'pageBreak' || segment.embedKind === 'columnBreak')) return index;
+    index += segment.kind === 'text' ? segment.text.length : 1;
+  }
+  throw new Error('no break in the story');
+}
 
 const MODES = ['plain', 'undo and redo', 'tracked', 'remote peer'] as const;
 type Mode = typeof MODES[number];
@@ -73,6 +85,9 @@ const ROWS: Array<[string, string, boolean]> = [
     [shape, 'remove the text past the break', true],
     [shape, 'split at the end of the break paragraph', true],
     [shape, 'delete the break paragraph', false],
+    [shape, 'select from the break paragraph start into the next paragraph', true],
+    [shape, 'select from the break paragraph end into the next paragraph', true],
+    [shape, 'remove the break through the raw story API', true],
     [shape, 'merge with the next paragraph', true],
     [shape, 'type before the break', true],
   ]),
@@ -83,6 +98,12 @@ const ROWS: Array<[string, string, boolean]> = [
   ['end', 'Delete at the end of the break paragraph', true],
   ['end', 'type before the break', true],
   ['end', 'delete the break paragraph', false],
+  ['end', 'select from the break paragraph start into the next paragraph', true],
+  ['end', 'select from the break paragraph end into the next paragraph', true],
+  ['end', 'remove the break through the raw story API', true],
+  ['own paragraph', 'select from the break paragraph start into the next paragraph', true],
+  ['own paragraph', 'select from the break paragraph end into the next paragraph', true],
+  ['own paragraph', 'remove the break through the raw story API', true],
   ['own paragraph', 'join with the previous paragraph', false],
   ['own paragraph', 'merge the previous paragraph', false],
   ['own paragraph', 'delete from the previous paragraph into the break paragraph', false],
