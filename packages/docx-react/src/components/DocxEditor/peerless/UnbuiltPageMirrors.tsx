@@ -89,8 +89,8 @@ export function useUnbuiltPageMirrors({ binding, geometry, center, enabled, read
   fullMirror?: boolean;
 }) {
   const [snapshot, setSnapshot] = useState<UnbuiltMirrorSnapshot<HTMLElement>>({ sections: [], ranges: [], nodeCount: 0 });
-  const latest = useRef({ read, blocked, navigate, geometry });
-  latest.current = { read, blocked, navigate, geometry };
+  const latest = useRef({ read, blocked, navigate, geometry, mountedPages });
+  latest.current = { read, blocked, navigate, geometry, mountedPages };
   const focused = useRef<FocusedBlock | null>(null);
   const parked = useRef<HTMLElement | null>(null);
   const focusCleanups = useRef(new Set<() => void>());
@@ -203,11 +203,15 @@ export function useUnbuiltPageMirrors({ binding, geometry, center, enabled, read
       }
       const mirrorHost = host.querySelector<HTMLElement>(`[data-page-index="${wanted.pageIndex}"] .canvas-page-mirror`);
       const root = mirrorHost?.firstElementChild as HTMLElement | null;
-      const ready = fullMirror ? mirrorHost?.dataset.pageChrome === 'chrome' : mirrorHost?.dataset.pageChrome !== undefined;
+      const entry = latest.current.geometry?.pages.find(({ page }) => page.pageIndex === wanted.pageIndex);
+      const mounted = !entry || latest.current.mountedPages.some(({ page }) => page.pageId === entry.page.pageId);
+      const chrome = mirrorHost?.dataset.pageChrome;
+      // A mounted page's text stand-in is replaced by its full mirror; a page outside the window keeps it.
+      const ready = chrome === 'chrome' || (chrome === 'fallback' && (!fullMirror || !mounted));
       const paragraphs = root && ready ? Array.from(root.querySelectorAll<HTMLElement>('[role="paragraph"], p'))
         .map((element) => ({ element, text: normalize(element.textContent) })).filter(({ text }) => text) : [];
       // The page mirror is first built from the unbuilt page, an empty shell, and filled in place once the page is built.
-      const shown = latest.current.geometry?.pages.find(({ page }) => page.pageIndex === wanted.pageIndex)?.displayPage;
+      const shown = entry?.displayPage;
       const builtFrom = ready ? mirrorHost?.dataset.pageChromeBuilt : undefined;
       const filled = builtFrom !== undefined && (!shown || (!shown.unbuilt && builtFrom === String(displayPageRevision(shown))));
       const block = (wanted.paraId ? paragraphs.find(({ element }) => element.dataset.paraId === wanted.paraId) : undefined)

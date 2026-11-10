@@ -1730,20 +1730,20 @@ test('paragraph handover prefers a text match at or after its non-blank ordinal'
   });
 });
 
-test('paragraph handover falls back to the built mirror root when no text matches', async () => {
+test('paragraph handover falls back to the first built paragraph when nothing matches and its place is past the end', async () => {
   const editor = await unbuiltMirrorEditor('text', ['Different paragraph']);
   act(() => editor.getByText('Unbuilt paragraph 16').focus());
   editor.present(frame(2, 0));
   await editor.fill();
   await waitForMirror(() => {
-    const root = editor.container.querySelector('[data-page-index="15"] .canvas-page-mirror')?.firstElementChild;
-    expect(document.activeElement).toBe(root!);
-    expect(root?.getAttribute('role')).toBe('document');
+    const blocks = editor.container.querySelectorAll('[data-page-index="15"] .canvas-page-mirror [role="paragraph"]');
+    expect(blocks).toHaveLength(1);
+    expect(document.activeElement).toBe(blocks[0]!);
   });
-  const root = document.activeElement!;
-  expect(root.getAttribute('tabindex')).toBe('-1');
+  const block = document.activeElement!;
+  expect(block.getAttribute('tabindex')).toBe('-1');
   act(() => editor.textarea.focus());
-  expect(root.hasAttribute('tabindex')).toBe(false);
+  expect(block.hasAttribute('tabindex')).toBe(false);
 });
 
 test('activating an unbuilt paragraph navigates to its page', async () => {

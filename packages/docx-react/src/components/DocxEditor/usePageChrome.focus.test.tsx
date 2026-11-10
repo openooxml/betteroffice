@@ -120,7 +120,8 @@ test('a rebuilt page whose focused paragraph is gone restores neither focus nor 
   view.update([{ p1: 'First paragraph' }]);
   expect(view.host(0).querySelector('[data-block-id="p2"]')).toBeNull();
   expect(view.host(0).contains(document.activeElement)).toBe(false);
-  expect(getSelection()!.toString()).toBe('');
+  expect(view.host(0).contains(getSelection()!.anchorNode)).toBe(false);
+  expect(view.host(0).contains(getSelection()!.focusNode)).toBe(false);
 });
 
 test('a rebuilt page restores the selection the user made last inside it, not an earlier one', () => {
