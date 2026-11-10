@@ -62,3 +62,21 @@ for (const format of ['pptx', 'xlsx', 'vsdx']) {
     });
   }
 }
+
+test('the published channel loads fonts from the release package, the commit channel from this checkout', async () => {
+  for (const [publishedFonts, expected, absent] of [
+    [true, "from '@betteroffice/fonts/cdn'", 'packages/fonts/src/cdn.ts'],
+    [false, 'packages/fonts/src/cdn.ts', "'@betteroffice/fonts/cdn'"],
+  ] as const) {
+    const plugin: any = (qualityRendererPlugin as any)('pptx', { publishedFonts });
+    const id = plugin.resolveId('virtual:office-quality-fonts');
+    expect(typeof id).toBe('string');
+    const source = String(plugin.load(id));
+    expect(source).toContain(expected);
+    expect(source).not.toContain(absent);
+    for (const name of ['createFontProvider', 'resolveMetricCompatFace', 'resolveLastResortFace', 'maxDigitWidth'])
+      expect(source).toContain(name);
+  }
+  const renderer: any = (qualityRendererPlugin as any)('xlsx');
+  expect(String(renderer.load(renderer.resolveId('virtual:office-quality-renderer')))).toBe("export * from '@betteroffice/xlsx';");
+});
