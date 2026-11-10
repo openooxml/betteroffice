@@ -15,6 +15,8 @@ import type { AsyncReplicaAdapter, CollaborationReplica } from '@betteroffice/do
 import { encodeSyncStep2, encodeUpdate } from '@betteroffice/docx/collaboration/protocol';
 import { createResidentEngineSession } from '@betteroffice/docx/yrs/residentEngineSession';
 import {
+  createYrsInputPositionMap,
+  createYrsPositionProjection,
   createYrsSession,
   takePreloadedResidentEngineWorker,
   withYrsSelectionCause,
@@ -57,6 +59,8 @@ import * as pluginHosts from './createDocxPluginHost';
 import * as workerPluginGeometry from '../components/DocxEditor/peerless/workerPluginGeometry';
 import * as shellControllers from '../components/DocxEditor/peerless/shellController';
 import * as pagePointers from '../components/DocxEditor/hooks/usePagesPointer';
+import { yrsSelectionState } from '../components/DocxEditor/hooks/useSelectionTracker';
+import { currentYrsToolbarSelection, withStoredYrsFormatting } from '../components/DocxEditor/yrsToolbar';
 import * as docxBindings from './useDocxPluginHost';
 import { selectionClock, selectionWindow } from '../../../../e2e/browser/plugin-host/selection-clock';
 import { storyAnchorsDocx } from './__fixtures__/storyAnchorsDocx';
@@ -354,10 +358,13 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
     test.each(['header', 'footer'] as const)('caret moves in uniformly formatted %s text settle independently of toolbar updates', async (part) => {
       const events: DocxPluginEvent[] = [];
       let context: DocxPluginContext<null> | undefined;
+      let geometry: DocxPluginGeometry | null = null;
+      let painted = false;
       const onSelectionChange = mock(() => {});
       const plugin = defineDocxPlugin({ id: 'part-settle', createState: () => null,
         initialize(next) { context = next; },
-        onEvent(next, event) { context = next; events.push(event); } });
+        onEvent(next, event) { context = next; events.push(event); },
+        overlay(props) { geometry = props.geometry; return null; } });
       const original = headerFooterEditing.useHeaderFooterEditing;
       let open: ReturnType<typeof original>['handleHeaderFooterDoubleClick'] | undefined;
       const editing = spyOn(headerFooterEditing, 'useHeaderFooterEditing').mockImplementation((options) => {
@@ -365,9 +372,23 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
         open = result.handleHeaderFooterDoubleClick;
         return result;
       });
+      const canvasContext = spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => new Proxy({} as Record<string, unknown>, {
+        get(target, key) {
+          if (key === 'measureText') return () => ({ width: 0 });
+          if (key === 'createImageData') return (width: number, height: number) => ({ width, height, data: new Uint8ClampedArray(width * height * 4) });
+          return key in target ? target[key as string] : () => {};
+        },
+        set(target, key, value) { target[key as string] = value; return true; },
+      }) as unknown as CanvasRenderingContext2D);
+      const bounds = spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 800, 1000));
       const clock = selectionClock();
       try {
-        const { ref } = await mount({ plugins: [plugin], onSelectionChange });
+        const { ref } = await mount({ plugins: [plugin], onSelectionChange, onFirstPagePainted: () => { painted = true; } });
+        await until(() => {
+          const shown = geometry as DocxPluginGeometry | null;
+          return painted && shown !== null && shown.layout.version === ref.current!.getEditorRef()!.getYrsSession()!.version() &&
+            shown.dom.pagesContainer.isConnected;
+        });
         await act(async () => { open!(part, 1); });
         await until(() => document.activeElement instanceof HTMLTextAreaElement &&
           ref.current!.getEditorRef()!.getYrsSession()!.selection()!.head.story.startsWith('hf:'));
@@ -383,25 +404,49 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
         expect(context!.snapshot.selectionSettled).toBe(true);
         const story = ref.current!.getEditorRef()!.getYrsSession()!.selection()!.head.story;
         expect(story.startsWith('hf:')).toBe(true);
+        await until(() => context?.snapshot.layout?.version === ref.current!.getEditorRef()!.getYrsSession()!.version() &&
+          context.geometry?.layout.id === context.snapshot.layout?.id);
+        await act(async () => { await context!.run(next => { context = next; }); });
+        const presentedLayout = context!.snapshot.layout;
+        expect(presentedLayout).not.toBeNull();
+        expect(presentedLayout!.version).toBe(ref.current!.getEditorRef()!.getYrsSession()!.version());
+        const previousSelection = context!.snapshot.selection;
+        expect(previousSelection.displayRange).toMatchObject({ story, layoutId: presentedLayout!.id });
         events.length = 0;
         onSelectionChange.mockClear();
-        const previousSelection = JSON.stringify(context!.snapshot.selection);
         await act(async () => { fireEvent.keyDown(input, { key: 'ArrowRight' }); await ref.current!.flushPendingInput(); });
         expect(ref.current!.getEditorRef()!.getYrsSession()!.selection()!.head).toMatchObject({ story, offset: 3 });
         expect(onSelectionChange).not.toHaveBeenCalled();
-        await until(() => JSON.stringify(context!.snapshot.selection) !== previousSelection);
+        await until(() => context!.snapshot.selectionSettled === false);
+        await act(async () => { await context!.run(next => { context = next; }); });
+        expect(context!.snapshot.layout).toEqual(presentedLayout);
+        expect(events.filter((event) => event.type === 'selection-change')).toHaveLength(1);
+        const session = ref.current!.getEditorRef()!.getYrsSession()!;
+        const live = session.selection()!;
+        const projection = createYrsPositionProjection(session, story)!;
+        const anchor = projection.positionForLoc(live.anchor)!;
+        const focus = projection.positionForLoc(live.head)!;
+        expect(anchor).not.toBeNull();
+        expect(focus).not.toBeNull();
+        const range = { from: Math.min(anchor, focus), to: Math.max(anchor, focus) };
+        const currentSelection = { formatting: previousSelection.formatting,
+          displayRange: { story, ...range, layoutId: context!.snapshot.layout!.id } };
+        expect(context!.snapshot.selection).toEqual(currentSelection);
         expect(context!.snapshot.selectionSettled).toBe(false);
         expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(0);
         await act(async () => { await clock.tick(400); });
         expect(events.filter((event) => event.type === 'selection-settle')).toMatchObject([
-          { source: 'keyboard', selection: { displayRange: { story, from: 3, to: 3 } } },
+          { source: 'keyboard', selection: currentSelection },
         ]);
         expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
         expect(context!.snapshot.selectionSettled).toBe(true);
         await act(async () => { await clock.tick(400); });
         expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
-      } finally { editing.mockRestore(); clock.restore(); }
-    });
+      } finally {
+        editing.mockRestore(); clock.restore();
+        bounds.mockRestore(); canvasContext.mockRestore();
+      }
+    }, 15_000);
   }
 
   test('plugins receive the resolved locale and one event when it changes', async () => {
@@ -2713,9 +2758,13 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
   const events: DocxPluginEvent[] = [];
   const settles: Array<{ context: DocxPluginContext<null>; anchor: DocxAnchorGeometryResult | null; at: number }> = [];
   const deliveries: MatrixSelectionDelivery[] = [];
+  const settleNotifications: string[] = [];
+  const commandSelections: DocxPluginSelection[] = [];
   const publications = new WeakMap<DocxPluginSelection, MatrixSelectionPublication>();
   let publication: MatrixSelectionPublication = { resolvedKey: 'null' };
   const plugin = defineDocxPlugin({ id: 'matrix', createState: () => null,
+    commands: [{ id: 'inspect', label: 'Inspect selection', mutatesDocument: false,
+      execute(context) { commandSelections.push(context.snapshot.selection); return { ok: true, status: 'executed' }; } }],
     onEvent(context, event) {
       events.push(event);
       if (event.type === 'selection-change' || event.type === 'selection-settle') {
@@ -2750,7 +2799,11 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
   const capturePointer = spyOn(pagePointers, 'usePagesPointer').mockImplementation((options) => { openNote = options.onNoteClick; return usePointer(options); });
   const createHost = pluginHosts.createDocxPluginHost;
   const captureHost = spyOn(pluginHosts, 'createDocxPluginHost').mockImplementation((...args) => {
-    host = createHost(...args);
+    const access = args[0];
+    host = createHost({ ...access, selectionPublished(key) {
+      settleNotifications.push(key);
+      access.selectionPublished?.(key);
+    } });
     const publish = host.selectionChanged;
     host.selectionChanged = (selection, identity, source) => {
       publication = { resolvedKey: typeof identity === 'object' ? identity.resolvedKey : identity ?? JSON.stringify(selection),
@@ -2822,7 +2875,7 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
       await act(async () => { await clock.tick(ms); });
       await host.notificationsIdle();
     };
-    const selectionLayout = async () => {
+    const selectionLayout = async (allowUnprojected = false) => {
       expect(mounted.view.container.isConnected).toBe(true);
       expect(mounted.ref.current).not.toBeNull();
       await act(async () => {
@@ -2830,6 +2883,15 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
       });
       await mounted.ref.current!.whenLayoutComplete({ timeoutMs: 3000 });
       await act(async () => {});
+      if (allowUnprojected && !controller) {
+        const editor = mounted.ref.current!.getEditorRef();
+        const story = editor?.getYrsSession()?.selection()?.head.story;
+        if (story && !(story === 'body' || story.startsWith('body:')) && editor!.getSelectionRange() === null) {
+          await host.notificationsIdle();
+          expect(context().snapshot.selection.displayRange).toBeNull();
+          return;
+        }
+      }
       await new Promise<void>(resolve => {
         const ready = () => {
           const current = context();
@@ -2850,19 +2912,52 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
       });
       await host.notificationsIdle();
     };
-    const reset = () => { events.length = 0; settles.length = 0; deliveries.length = 0; };
+    const reset = () => { events.length = 0; settles.length = 0; deliveries.length = 0; settleNotifications.length = 0; };
     const anchor = () => context().geometry!.getAnchorGeometry({ kind: 'selection' });
     const readAnchor = () => context().geometry!.readAnchorGeometries([{ kind: 'selection' }]);
-    const input = () => {
+    const input = (root?: string) => {
       const surface = mounted.view.container.querySelector('[data-docx-input]');
       const id = surface?.getAttribute('data-docx-input');
-      const element = id ? document.getElementById(id) : mounted.view.container.querySelector('textarea');
+      const element = root ? document.querySelector(`textarea[data-yrs-story="${root}"]`)
+        : id ? document.getElementById(id) : mounted.view.container.querySelector('textarea');
       expect(element).toBeInstanceOf(HTMLTextAreaElement);
       return element as HTMLTextAreaElement;
     };
+    const keyboardCaretMove = async (story: string, paraId: string, offset: number) => {
+      const root = story.startsWith('hf:') ? story.split(':').slice(0, 2).join(':') : 'body';
+      const target = input(controller ? undefined : root);
+      const before = publication.resolvedKey;
+      await act(async () => {
+        target.focus();
+        fireEvent.keyDown(target, { key: 'ArrowRight' });
+        await mounted.ref.current!.flushPendingInput();
+      });
+      if (controller) expect(controller.getSnapshot().view!.workerSelection!.focus).toMatchObject({ story, paraId, offset: offset + 1 });
+      else expect(mounted.ref.current!.getEditorRef()!.getYrsSession()!.selection()!.head).toMatchObject({ story, paraId, offset: offset + 1 });
+      await host.notificationsIdle();
+      expect(publication.resolvedKey).not.toBe(before);
+    };
     const first = (await firstParagraph(mounted.ref)).paragraph;
     reset();
-    return { ...mounted, host, plugin, events, settles, deliveries, first, context, selection, selectionLayout, quiet, reset, anchor, readAnchor, clock, input,
+    const expectedSelection = (): DocxPluginSelection => {
+      const view = controller?.getSnapshot().view;
+      if (controller) return {
+        formatting: view?.workerSelection && view.editState?.toolbar
+          ? yrsSelectionState({ context: view.editState.toolbar, startParagraphIndex: -1, endParagraphIndex: -1 }) : null,
+        displayRange: view?.workerSelection ? workerGeometry!.displaySelection() : null,
+      };
+      const editor = mounted.ref.current!.getEditorRef()!;
+      const session = editor.getYrsSession()!;
+      const story = session.selection()?.head.story;
+      if (!story) return { formatting: null, displayRange: null };
+      const map = createYrsInputPositionMap(story, session.paragraphs(story)
+        .map(paragraph => ({ paraId: paragraph.paraId, length: paragraph.text.length })));
+      const toolbar = currentYrsToolbarSelection(session, map)!;
+      const range = editor.getSelectionRange();
+      return { formatting: yrsSelectionState(withStoredYrsFormatting(toolbar, editor.getYrsStoredFormatting())),
+        displayRange: range ? { story, ...range, layoutId: context().snapshot.layout!.id } : null };
+    };
+    return { ...mounted, host, plugin, events, settles, deliveries, settleNotifications, commandSelections, expectedSelection, first, context, selection, selectionLayout, quiet, reset, anchor, readAnchor, clock, input, keyboardCaretMove,
       publication: () => publication,
       controller: () => controller,
       session: () => mounted.ref.current!.getEditorRef()!.getYrsSession()!,
@@ -2936,6 +3031,19 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
         });
         await host.notificationsIdle();
       },
+      async reseedSelection() {
+        expect(controller).toBeNull();
+        await act(async () => {
+          restoreClearedSelection?.();
+          restoreClearedSelection = undefined;
+          const session = this.session();
+          withYrsSelectionCause(session, 'seed', () => session.setSelection({ story: 'body', paraId: first.paraId, offset: 0 }));
+          mounted.ref.current!.getEditorRef()!.getSelectionRange();
+          hookBinding!.publishSelection();
+          hookBinding!.publishSelection();
+        });
+        await host.notificationsIdle();
+      },
       dispose() { try { mounted.view.unmount(); for (const restore of restores) restore(); canvasContext.mockRestore(); bounds.mockRestore(); } finally { restoreClock(); } },
     };
   } catch (error) { try { cleanup(); canvasContext.mockRestore(); bounds.mockRestore(); } finally { restoreClock(); } throw error; }
@@ -2952,14 +3060,31 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
     const bytes = await storyAnchorsDocx();
     const h = await matrixEditor(engine, bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer, undefined, true);
     try {
-      if (story.startsWith('hf:')) await h.openStory('hf:rIdH1');
+      if (story.startsWith('hf:')) {
+        await h.openStory('hf:rIdH1');
+        await h.selectionLayout();
+        await h.host.notificationsIdle();
+        const entering = h.deliveries.filter(delivery => delivery.event.type === 'selection-change');
+        expect(entering).toHaveLength(1);
+        expect(entering[0]!.event.selection).toEqual(h.expectedSelection());
+        expect(entering[0]!.event.selection.formatting).not.toBeNull();
+        expect(entering[0]!.event.selection.displayRange?.story).toBe('hf:rIdH1');
+        await h.quiet();
+        h.reset();
+      }
       await h.selection(story, paraId, 1);
       await h.selectionLayout();
+      await h.host.notificationsIdle();
+      const entering = h.deliveries.filter(delivery => delivery.event.type === 'selection-change');
+      expect(entering).toHaveLength(1);
+      expect(entering[0]!.event.selection).toEqual(h.expectedSelection());
+      expect(entering[0]!.event.selection.formatting).not.toBeNull();
       await h.quiet();
       const previous = h.context().snapshot.selection;
+      const previousPublication = h.publication().resolvedKey;
       const root = story.startsWith('hf:') ? 'hf:rIdH1' : 'body';
       const input = h.controller() ? h.input()
-        : h.view.container.querySelector<HTMLTextAreaElement>(`textarea[data-yrs-story="${root}"]`);
+        : document.querySelector<HTMLTextAreaElement>(`textarea[data-yrs-story="${root}"]`);
       expect(input).toBeInstanceOf(HTMLTextAreaElement);
       h.reset();
       await act(async () => {
@@ -2972,11 +3097,11 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
       await h.selectionLayout();
       await h.host.notificationsIdle();
       const changes = h.deliveries.filter(delivery => delivery.event.type === 'selection-change');
-      expect(changes.length).toBeGreaterThan(0);
-      expect(changes.at(-1)!.event.selection).toMatchObject({
-        formatting: previous.formatting,
-        displayRange: { story },
-      });
+      expect(changes).toHaveLength(1);
+      expect(changes[0]!.event.selection).toEqual(h.expectedSelection());
+      expect(changes[0]!.event.selection.formatting).toEqual(previous.formatting);
+      expect(changes[0]!.event.selection.displayRange!.story).toBe(story);
+      expect(changes.at(-1)!.publication.resolvedKey).not.toBe(previousPublication);
       const range = changes.at(-1)!.event.selection.displayRange!;
       expect(range.from).toBe(range.to);
       expect(range.from).not.toBe(previous.displayRange!.from);
@@ -2984,6 +3109,26 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
       expect(h.events.filter(event => event.type === 'selection-settle')).toEqual([]);
     } finally { h.dispose(); }
   }, 15_000);
+
+  if (engine !== 'DP') test('a plugin command invoked synchronously after host setSelection sees the new selection', async () => {
+    const h = await matrixEditor(engine, documentBytes(), undefined, true);
+    try {
+      await h.selection('body', h.first.paraId, 1);
+      await h.selectionLayout();
+      await h.quiet();
+      h.reset();
+      const previous = h.context().snapshot.selection;
+      await act(async () => {
+        h.session().setSelection({ story: 'body', paraId: h.first.paraId, offset: 3 });
+        const result = await h.ref.current!.commands.execute('plugin:matrix/inspect', null);
+        expect(result).toMatchObject({ ok: true });
+      });
+      expect(h.commandSelections).toEqual([h.expectedSelection()]);
+      expect(h.commandSelections[0]!.displayRange).not.toEqual(previous.displayRange);
+      await h.host.notificationsIdle();
+      expect(h.events.filter(event => event.type === 'selection-change')).toHaveLength(1);
+    } finally { h.dispose(); }
+  });
 
   test('H2: every changed local publication settles exactly once across mixed stories and remote edits', async () => {
     const bytes = await storyAnchorsDocx();
@@ -2995,12 +3140,21 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
       await h.quiet();
       let previous = h.publication().resolvedKey;
       h.reset();
+      const keyboardPublications: string[] = [];
+      const keyboard = (story: string, paraId: string) => async () => {
+        await h.keyboardCaretMove(story, paraId, 1);
+        keyboardPublications.push(h.publication().resolvedKey);
+      };
       const actions: Array<() => Promise<void>> = [
+        () => h.selection('body', h.first.paraId, 1),
+        keyboard('body', h.first.paraId),
         () => h.selection('body', h.first.paraId, 2, 4),
         () => h.selection('body', h.first.paraId, 2, 4),
         () => h.remote(peer => peer.insertText({ story: 'body', paraId: h.first.paraId, offset: 0 }, 'remote ')),
         () => h.selection('body', h.first.paraId, 2, 4),
         () => h.openStory('hf:rIdH1'),
+        () => h.selection('hf:rIdH1', '10000001', 1),
+        keyboard('hf:rIdH1', '10000001'),
         () => h.selection('hf:rIdH1', '10000001', 1, 3),
         () => h.selection('hf:rIdH1:t0:r0c0', '10000002', 1, 4),
         () => h.openStory('hf:rIdF1'),
@@ -3013,6 +3167,8 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
         () => h.openStory('en:1'),
         () => h.selection('en:1', '70000001', 1, 3),
         () => h.closeStory(),
+        () => h.selection('body:t0:r0c0', '00000002', 1),
+        keyboard('body:t0:r0c0', '00000002'),
         () => h.selection('body:t0:r0c0', '00000002', 1, 4),
         () => h.remote(peer => peer.insertText({ story: 'body', paraId: h.first.paraId, offset: 0 }, 'after '), engine === 'DP' ? 'pipe' : 'chunks'),
         () => h.selection('body', h.first.paraId, 1, 3),
@@ -3030,13 +3186,14 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
         const firstPosition = positions?.[0];
         const story = Array.isArray(firstPosition) ? firstPosition[0] : firstPosition;
         if (exists && typeof story === 'string' && (story.startsWith('body') || story.startsWith('hf:'))) {
-          await h.selectionLayout();
+          await h.selectionLayout(true);
         }
         await h.host.notificationsIdle();
         await h.quiet(349);
         expect(h.deliveries.slice(start).filter(delivery => delivery.event.type === 'selection-settle')).toEqual([]);
         await h.quiet(1);
         const delivered = h.deliveries.slice(start);
+        expect(h.settleNotifications).toHaveLength(h.deliveries.filter(delivery => delivery.event.type === 'selection-change').length);
         const expected: MatrixSelectionDelivery[] = [];
         for (const delivery of delivered) {
           if (delivery.event.type !== 'selection-change') continue;
@@ -3064,6 +3221,11 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
       }
       expect(localChanges).toBeGreaterThanOrEqual(16);
       expect(remoteChanges).toBeGreaterThanOrEqual(1);
+      expect(keyboardPublications).toHaveLength(3);
+      for (const key of keyboardPublications) {
+        expect(h.deliveries.filter(delivery => delivery.event.type === 'selection-settle' &&
+          delivery.publication.resolvedKey === key)).toHaveLength(1);
+      }
     } finally { h.dispose(); }
   }, 30_000);
 
@@ -3713,20 +3875,34 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
     } finally { h.dispose(); }
   });
 
-  if (engine !== 'DL') test('T17: clearing the selection settles once with missing-target', async () => {
-    const h = await matrixEditor(engine);
+  test(`T17: clearing the selection${engine === 'DP' ? '' : ' followed by a seed reseed'} settles once with missing-target`, async () => {
+    const h = await matrixEditor(engine, documentBytes(), undefined, true);
     try {
       await h.selection('body', h.first.paraId, 0, 3);
       await h.quiet();
       h.reset();
       await h.clearSelection();
-      await h.quiet();
+      if (engine !== 'DP') {
+        await h.reseedSelection();
+        expect(h.session().selection()!.head).toMatchObject({ story: 'body', paraId: h.first.paraId, offset: 0 });
+      }
+      const changes = h.events.filter(event => event.type === 'selection-change');
+      expect(changes).toHaveLength(1);
+      expect(changes[0]!.selection).toEqual({ formatting: null, displayRange: null });
+      expect(h.context().snapshot.selection).toEqual({ formatting: null, displayRange: null });
+      await h.quiet(349);
+      expect(h.settles).toHaveLength(0);
+      await h.quiet(1);
       expect(h.settles).toHaveLength(1);
+      expect(h.settles[0]!.context.snapshot.selection).toEqual({ formatting: null, displayRange: null });
       expect(h.settles[0]!.anchor).toMatchObject({ ok: false, failure: { code: 'missing-target' } });
       expect(await h.readAnchor()).toMatchObject([{ ok: false, failure: { code: 'missing-target' } }]);
       await h.quiet(700);
       expect(h.settles).toHaveLength(1);
-    } finally { h.dispose(); }
+      expect(h.events.filter(event => event.type === 'selection-change')).toHaveLength(1);
+    } finally {
+      h.dispose();
+    }
   });
 
   if (engine !== 'DL') test('T23: continuous typing longer than the window settles once after the last key', async () => {

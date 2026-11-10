@@ -122,17 +122,19 @@ const scopedGeometries = new WeakMap<DocxPluginGeometry, Map<string, DocxPluginG
 export function scopePluginGeometry(
   geometry: DocxPluginGeometry,
   pluginId: string,
-  selectionCurrent?: () => boolean
+  selectionCurrent?: () => boolean,
+  beforeRead?: () => void
 ): DocxPluginGeometry {
   let byPlugin = scopedGeometries.get(geometry);
   if (!byPlugin) {
     byPlugin = new Map();
     scopedGeometries.set(geometry, byPlugin);
   }
-  let scoped = selectionCurrent ? undefined : byPlugin.get(pluginId);
+  let scoped = selectionCurrent || beforeRead ? undefined : byPlugin.get(pluginId);
   if (!scoped) {
     const superseded = () => anchorFailure('layout-unavailable', 'The plugin selection is no longer current');
     const reservation = (target: DocxGeometryTarget) => {
+      beforeRead?.();
       if (target.kind === 'selection' && selectionCurrent && !selectionCurrent()) return superseded();
       if (target.kind !== 'reservation') return geometry.getAnchorGeometry(target);
       const reader = reservationReaders.get(geometry);
@@ -154,6 +156,7 @@ export function scopePluginGeometry(
       getPositionAtPoint: (clientX, clientY) => geometry.getPositionAtPoint(clientX, clientY),
       readPositionAtPoint: (clientX, clientY) => geometry.readPositionAtPoint(clientX, clientY),
       readAnchorGeometries: async (targets) => {
+        beforeRead?.();
         if (selectionCurrent && !selectionCurrent() && targets.every((target) => target.kind === 'selection')) {
           return targets.map(superseded);
         }
@@ -161,6 +164,7 @@ export function scopePluginGeometry(
         const answers = await (!targets.some((target) => target.kind === 'reservation')
           ? geometry.readAnchorGeometries(targets)
           : reader?.read ? reader.read(pluginId, targets) : targets.map(reservation));
+        beforeRead?.();
         return answers.map((answer, index) => targets[index]!.kind === 'selection' &&
           selectionCurrent && !selectionCurrent() ? superseded() : answer);
       },
@@ -168,7 +172,7 @@ export function scopePluginGeometry(
       isPageBuilt: (pageIndex) => geometry.isPageBuilt(pageIndex),
       getAnchorGeometry: reservation,
     };
-    if (!selectionCurrent) byPlugin.set(pluginId, scoped);
+    if (!selectionCurrent && !beforeRead) byPlugin.set(pluginId, scoped);
   }
   return scoped;
 }

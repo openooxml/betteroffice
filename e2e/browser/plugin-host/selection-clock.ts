@@ -31,6 +31,7 @@ export function selectionClock() {
   return {
     holdWaits() { holdWaits = true; },
     async tick(ms: number) {
+      for (let turn = 0; turn < 40; turn++) await Promise.resolve();
       const end = now + ms;
       for (;;) {
         const next = [...timers].filter(([, timer]) => timer.at <= end)

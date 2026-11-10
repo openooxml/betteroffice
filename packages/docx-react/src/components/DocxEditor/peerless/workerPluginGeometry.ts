@@ -25,7 +25,7 @@ export function workerReadRefusal(controller: Pick<ReturnType<typeof createPeerl
 
 /** Reservation boxes answer from the frame carrying their owner's set. */
 export function createWorkerPluginGeometry(controller: ReturnType<typeof createPeerlessShellController>, pages: () => HTMLElement | null, layer: () => HTMLElement | null, changed: () => void,
-  navigate?: (target: { story: string; paraId: string }, focus: boolean, expectVersion: string) => Promise<boolean>, reservations: () => DocxReservationsPayload | null = () => null, viewport?: (layer: HTMLElement) => DocxPluginRect) {
+  navigate?: (target: { story: string; paraId: string }, focus: boolean, expectVersion: string) => Promise<boolean>, reservations: () => DocxReservationsPayload | null = () => null, viewport?: (layer: HTMLElement) => DocxPluginRect, beforeRead?: () => void) {
   type Read = Exclude<DocxGeometryTarget, { kind: 'proposal' | 'reservation' | 'selection' }>;
   type ReadAll = (targets: readonly DocxGeometryTarget[], retry: boolean, owner?: string, deadline?: number) => Promise<DocxAnchorGeometryResult[]>;
   let current: { frame: PeerlessFrameGeometry; version: number; pixelRatio: number; layout: DocxPluginLayout; geometry: DocxPluginGeometry; queries: DisplayListQueries; reservations: DocxReservationsPayload | null;
@@ -251,6 +251,7 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
       return item.kind === 'hide' ? { hide: item.anchor } : { result: placeReservation(repeatedOf(measured), owner, id) };
     };
     const answer = (target: DocxGeometryTarget, request: boolean, measured = measure(), owner?: string, hide = false): DocxAnchorGeometryResult => {
+      beforeRead?.();
       if (target.kind === 'reservation') {
         if (owner === undefined) return anchorFailure('unsupported', 'Reservations are read through a plugin context');
         const item = reserved(owner, target.id, measured);
@@ -333,6 +334,7 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
     };
     /** Answers `targets` once their reads land, on the layout then current, until the document is replaced. */
     const readAll: ReadAll = async (targets, retry, owner, deadline = Date.now() + SELECTION_ANCHOR_WAIT_MS) => {
+      beforeRead?.();
       const sameDocument = () => !!current && sameView(current.frame.identity, frame.identity);
       if (!sameDocument()) return targets.map(unavailable);
       const selection = selectionIdentity().stickyKey;
@@ -413,7 +415,7 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
   return {
     update,
     clear,
-    displaySelection: () => displaySelection,
+    displaySelection: () => { void requestSelection(); return displaySelection; },
     selectionIdentity,
     selectionMapped: () => {
       const selection = controller.getSnapshot().view?.workerSelection;

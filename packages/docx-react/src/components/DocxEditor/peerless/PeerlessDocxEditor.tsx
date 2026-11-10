@@ -319,17 +319,32 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const sentReservationsRef = useRef<() => DocxReservationsPayload | null>(() => null);
   const [pluginGeometry] = useState(() => createWorkerPluginGeometry(controller, () => host.current, () => overlayRef.current, () => redrawGeometry(value => value + 1),
     (target, focus, expectVersion) => navigation.revealParagraph(target.paraId, target.story, focus, expectVersion), () => sentReservationsRef.current(),
-    (overlay) => visibleViewport(scroller.current ?? overlay, container.current ?? overlay, overlay)));
+    (overlay) => visibleViewport(scroller.current ?? overlay, container.current ?? overlay, overlay), () => pluginHost.flushSelection()));
   const [displayWindow, setDisplayWindow] = useState<readonly [number, number]>([0, 3]);
   const showWindow = useCallback((next: readonly [number, number]) =>
     setDisplayWindow((current) => current[0] === next[0] && current[1] === next[1] ? current : next), []);
   useLayoutEffect(() => { pluginGeometry.setDisplayWindow(displayWindow); }, [pluginGeometry, displayWindow]);
   const setPluginLayer = useCallback((element: HTMLDivElement | null) => { overlayRef.current = element; setOverlayLayer(element); }, []);
   const [pluginHost] = useState<DocxPluginHost>(() => createDocxPluginHost({
+    readSelection: () => {
+      const view = controller.getSnapshot().view;
+      const toolbar = view?.workerSelection ? view.editState?.toolbar : null;
+      pluginHost.layoutChanged(pluginGeometry.layout());
+      return { selection: {
+        formatting: toolbar ? yrsSelectionState({ context: toolbar, startParagraphIndex: -1, endParagraphIndex: -1 }) : null,
+        displayRange: view?.workerSelection ? pluginGeometry.displaySelection() : null,
+      }, identity: pluginGeometry.selectionIdentity(), owner: active.current?.binding.session ?? controller,
+      ready: pluginGeometry.selectionMapped() };
+    },
+    selectionCause: () => controller.getSnapshot().view?.selectionCause,
     selectionPublished: (key) => settleRef.current?.notifySelectionChange(key),
     pagedEditorRef: { current: null }, writeMode: () => controller.environment().readOnly ? 'viewing' : controller.environment().mode,
     commands: () => controller.commands, layout: () => ({ queries: null, complete: false, failed: false }),
-    subscribeLayout: controller.subscribe, geometry: pluginGeometry.geometry, subscribeGeometry: pluginGeometry.subscribe, translate: (key) => controller.environment().translate(key),
+    subscribeLayout: controller.subscribe, geometry: pluginGeometry.geometry,
+    subscribeGeometry: listener => pluginGeometry.subscribe(() => {
+      pluginHost.markSelectionDirty('refresh');
+      listener();
+    }), translate: (key) => controller.environment().translate(key),
     workerRead: {
       version: async () => { const result = await controller.ref.readParagraphs({ view: 'accepted', paraIds: [] });
         return 'version' in result ? { ok: true, version: result.version } : result; },
@@ -347,14 +362,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const managedPlugins = Boolean(props.plugins?.length);
   const settleRef = useRef<ReturnType<typeof createSelectionSettle> | null>(null);
   const publishPluginSelection = useCallback(() => {
-    const toolbar = controller.getSnapshot().view?.editState?.toolbar;
-    const selection = { formatting: toolbar ? yrsSelectionState({ context: toolbar, startParagraphIndex: -1, endParagraphIndex: -1 }) : null,
-      displayRange: pluginGeometry.displaySelection() };
-    const view = controller.getSnapshot().view;
-    pluginHost.selectionChanged(selection, pluginGeometry.selectionIdentity(), {
-      owner: active.current?.binding.session ?? controller, cause: view?.selectionCause,
-    });
-  }, [controller, pluginGeometry, pluginHost]);
+    pluginHost.markSelectionDirty('refresh');
+  }, [pluginHost]);
   useEffect(() => {
     if (!managedPlugins || !documentReady) return;
     let generation = pluginHost.generation();
@@ -375,7 +384,13 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     settleRef.current = machine;
     const session = active.current?.binding.session;
     const unsubscribe = session ? subscribeSelectionActivity(session, () => publishPluginSelection()) : undefined;
-    const unsubscribeView = controller.subscribe(() => publishPluginSelection());
+    let resolved = pluginGeometry.selectionIdentity().resolvedKey;
+    const unsubscribeView = controller.subscribe(() => {
+      const next = pluginGeometry.selectionIdentity().resolvedKey;
+      const moved = next !== resolved;
+      resolved = next;
+      pluginHost.markSelectionDirty(moved ? controller.getSnapshot().view?.selectionCause : 'refresh');
+    });
     return () => { unsubscribe?.(); unsubscribeView(); machine.dispose(); settleRef.current = null; };
   }, [controller, pluginHost, pluginGeometry, publishPluginSelection, managedPlugins, documentReady, shellState.view?.identity.session,
     shellState.view?.identity.incarnation, shellState.view?.identity.epoch]);

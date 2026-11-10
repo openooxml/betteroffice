@@ -446,7 +446,8 @@ export function createPluginRuntime<
         if (!event) break;
         if (!activation.registration.plugin.onEvent) continue;
         const outcome = await hook(activation, 'event', channelOf(event), (context, invocation) => {
-          if (options.eventCurrent && !options.eventCurrent(event as Event, invocation.snapshot)) return;
+          const current = !options.eventCurrent || options.eventCurrent(event as Event, invocation.snapshot);
+          if (!current) return;
           return activation.registration.plugin.onEvent?.(context, event as Event);
         });
         if (outcome === 'ended') break;
