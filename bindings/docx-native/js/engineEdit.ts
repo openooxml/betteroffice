@@ -1,6 +1,7 @@
 import { createRequire } from 'node:module';
 import type * as Wasm from '../../../packages/docx/src/wasm/generated/edit/docx_edit.js';
 import { warnFontPackDiagnostics } from '../../../shared/fontPackDiagnostics';
+import { installDispose } from '../../../shared/nativeDispose';
 
 export type { DecodedFontFace, InitInput, InitOutput, SyncInitInput } from '../../../packages/docx/src/wasm/generated/edit/docx_edit.js';
 
@@ -67,6 +68,7 @@ type Engine = Pick<
 >;
 
 const binding = createRequire(import.meta.url)('../index.js') as Engine;
+installDispose(binding.EditSession, binding.RetainedLayoutMeta, binding.RunInheritance);
 
 export const EditSession = binding.EditSession;
 export type EditSession = Wasm.EditSession;

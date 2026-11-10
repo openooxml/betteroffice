@@ -1,6 +1,7 @@
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { warnFontPackDiagnostics, type FontPackDiagnostic } from '../../../shared/fontPackDiagnostics';
+import { installDispose } from '../../../shared/nativeDispose';
 import type * as Wasm from '../../../packages/pptx/src/wasm/generated/pptx_wasm.js';
 
 export type { InitInput } from '../../../packages/pptx/src/wasm/generated/pptx_wasm.js';
@@ -26,6 +27,7 @@ type NativeFontLoader = {
 
 const require = createRequire(import.meta.url);
 const binding = require('../index.js') as Engine & NativeFontLoader;
+installDispose(binding.PptxDocument, binding.PptxRenderer);
 
 function packDirectory(pack: 'latin' | 'intl' | 'cjk'): string | undefined {
   try {
