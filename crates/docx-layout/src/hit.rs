@@ -284,9 +284,10 @@ fn canvas_caret_stops(
 }
 
 /// Caret stops taken from shaped cluster bounds, so reordered clusters land on
-/// real boundaries rather than an even split across the run. Inside one
-/// cluster of several characters outside joining and Indic scripts, such as an
-/// "fi" ligature, Word splits the cluster's advance evenly between them.
+/// real boundaries rather than an even split across the run. Inside one Latin,
+/// Greek or Cyrillic cluster of several graphemes, such as an "ffi" ligature,
+/// Word splits the cluster's advance evenly between them; a base letter with
+/// its combining marks stays one grapheme and gains no stop.
 fn glyph_caret_stops(
     text: &str,
     glyphs: &[crate::display_list::PlacedGlyph],
@@ -339,7 +340,7 @@ fn glyph_caret_stops(
             x: right,
             position: if rtl { start_position } else { end_position },
         });
-        if cluster_text.chars().any(ooxml_text::is_joining_or_indic) {
+        if ooxml_text::word_typography_mask(cluster_text).contains(&false) {
             continue;
         }
         let graphemes: Vec<&str> = cluster_text.graphemes(true).collect();
@@ -3800,16 +3801,26 @@ mod tests {
     }
 
     #[test]
-    fn a_ligature_of_a_joining_script_keeps_its_edges() {
-        let dl = page(
-            serde_json::Value::Null,
-            vec![ligature_run(
-                "\u{644}\u{627}",
-                10,
-                serde_json::json!([{"id": 1, "x": 100, "y": 200, "cluster": 0, "advance": 20}]),
-            )],
-        );
-        assert!((caret_rect(&dl, 11).unwrap().x - 100.0).abs() < 0.01);
-        assert_eq!(hit_test(&dl, 0, 109.0, 195.0), Some(10));
+    fn joining_mark_and_emoji_clusters_keep_only_their_edges() {
+        for text in ["\u{644}\u{627}", "e\u{301}", "\u{1F469}\u{200D}\u{1F4BB}"] {
+            let end = 10 + text.encode_utf16().count() as i64;
+            let dl = page(
+                serde_json::Value::Null,
+                vec![ligature_run(
+                    text,
+                    10,
+                    serde_json::json!([{"id": 1, "x": 100, "y": 200, "cluster": 0, "advance": 20}]),
+                )],
+            );
+            for position in 11..end {
+                let x = caret_rect(&dl, position).unwrap().x;
+                assert!(
+                    (x - 100.0).abs() < 0.01 || (x - 120.0).abs() < 0.01,
+                    "{text:?} {position}: {x}"
+                );
+            }
+            assert_eq!(hit_test(&dl, 0, 109.0, 195.0), Some(10), "{text:?}");
+            assert_eq!(hit_test(&dl, 0, 111.0, 195.0), Some(end), "{text:?}");
+        }
     }
 }
