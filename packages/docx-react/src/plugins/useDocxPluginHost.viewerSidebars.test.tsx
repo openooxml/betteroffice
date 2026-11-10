@@ -103,7 +103,7 @@ test.each(['viewerSelection', 'viewerDocumentRead'] as const)('%s selection anch
   await act(async () => result.current.publishViewerSelection({ head: 2, displayRange: header, isMultiParagraph: false }));
   const headerContext = result.current.activations[0]!.context;
   expect(headerContext.snapshot.selection.displayRange).toEqual(header);
-  const unsupported = { ok: false, failure: { code: 'unsupported', message: 'The range has no display position' } };
+  const unsupported = { ok: false, failure: { code: 'unsupported', message: 'The range has no display position' } } as const;
   expect(headerContext.geometry!.getAnchorGeometry({ kind: 'selection' })).toEqual(unsupported);
   expect(await headerContext.geometry!.readAnchorGeometries([{ kind: 'selection' }])).toEqual([unsupported]);
   expect(view.getYrsSession).not.toHaveBeenCalled();
