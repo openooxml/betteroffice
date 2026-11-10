@@ -521,6 +521,15 @@ impl EditSession {
             .map_err(JsValue::from)
     }
 
+    /// The text each of `pages` shows in the retained layout, built or not, as
+    /// `[{"pageIndex","paragraphs":[{"text","level"?,"inTable"?}]}]`: body
+    /// paragraphs cut where the page cuts them, headings with their zero-based
+    /// outline level, and the rows of tables the page places, cell by cell.
+    /// Header rows a table repeats on later pages read only once.
+    pub fn page_texts_json(&self, pages: Vec<u32>) -> Result<String, JsValue> {
+        self.core.page_texts_json(pages).map_err(JsValue::from)
+    }
+
     /// Release display pages; an empty result means the request was superseded.
     pub fn release_display_pages_frame(
         &self,
