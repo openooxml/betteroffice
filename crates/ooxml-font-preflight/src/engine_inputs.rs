@@ -252,7 +252,7 @@ pub(crate) const DOCX: &[(&str, Answer, &[&str])] = &[
         Modelled,
         &["notes_at_the_conventional_path_without_a_relationship"],
     ),
-    // Also the owner of embedded font parts, registered as available faces.
+    // It also holds the embedded font parts, registered as available faces.
     ("fontTable", Unverified, &[]),
     ("word/fontTable.xml", Unverified, &[]),
     ("font", Unverified, &[]),
