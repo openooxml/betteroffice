@@ -54,7 +54,7 @@ def main():
     rows = [dict(id=sample['id'], source_sha256=sample['metadata']['source']['sha256'],
                  timings={channel: dict(status='ok', elapsed_ms=[]) for channel in CHANNELS}) for sample in samples]
     report = dict(schema_version=1, plan_sha256=job['plan_sha256'], format=format, samples=rows,
-                  benchmark=dict(method=job['method'], rounds=job['rounds'], seed=job['seed'], sample_size=len(samples),
+                  benchmark=dict(method=job['method'], rounds=job['rounds'], seed=job['seed'], sample_size=job['sample_size'],
                                  published_version=job['published_version'], libreoffice_version=version,
                                  libreoffice_build=version_text.strip(), fonts_sha256=fonts_hash, builds=builds,
                                  order='sequential; engine order rotates per document and round; one warm-up per round'),

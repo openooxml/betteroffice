@@ -69,7 +69,7 @@ export async function stageTiming(planPath, format, output, cacheDir) {
       console.log(`${format.toUpperCase()} timing: staged ${completed}/${tasks.length} verified assets`);
   });
   await writeFile(resolve(output, 'job.json'), JSON.stringify({
-    plan_sha256: digest(bytes), format, samples, method: METHOD, rounds: ROUNDS, seed: SEED,
+    plan_sha256: digest(bytes), format, samples, method: METHOD, rounds: ROUNDS, seed: SEED, sample_size: SAMPLE_SIZE,
     source_sha: plan.source_sha, published_source_sha: publishedSource(plan, format),
     published_version: plan.versions[format],
   }, null, 2) + '\n');
@@ -154,8 +154,12 @@ export function mergeTiming(plan, report, parts, planHash) {
         !Number.isInteger(part.runner?.processors) || part.runner.processors < 1)
       fail(`invalid ${format} identity`);
     const office = format === 'xlsx' ? report.xlsx_benchmark : report[`${format}_benchmark`];
-    if (office && office.libreoffice_version !== config.libreoffice_version)
+    if (office && (office.libreoffice_version !== config.libreoffice_version ||
+        office.libreoffice_build !== config.libreoffice_build))
       fail(`${format} LibreOffice version differs from the report`);
+    if (office && ['published', 'commit'].some((channel) =>
+      JSON.stringify(office.builds?.[channel]) !== JSON.stringify(config.builds[channel])))
+      fail(`${format} native builds differ from the report`);
     const expected = timingSamples(plan, format);
     if (!Array.isArray(part.samples) || part.samples.length !== expected.length) fail(`missing ${format} samples`);
     part.samples.forEach((row, index) => {

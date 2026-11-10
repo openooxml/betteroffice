@@ -106,8 +106,23 @@ test('the merge refuses reports that do not match the plan, the method or the re
     mutate(changed);
     expect(() => mergeTiming(input, {}, changed, hash)).toThrow('Invalid timing benchmark');
   }
-  expect(() => mergeTiming(input, { docx_benchmark: { libreoffice_version: '25.8.1.1' } }, parts(), hash))
+  const office = (change: any = {}) => ({ libreoffice_version: '26.2.3.2', libreoffice_build: 'LibreOffice 26.2.3.2',
+    builds: { published: { source_sha: published }, commit: { source_sha: source } }, ...change });
+  const built = () => parts().map((entry: any) => ({ ...entry, benchmark: { ...entry.benchmark, libreoffice_build: 'LibreOffice 26.2.3.2' } }));
+  expect(Object.keys(mergeTiming(input, { docx_benchmark: office(), xlsx_benchmark: office() }, built(), hash).timing_benchmark)).toEqual(['docx', 'xlsx']);
+  expect(() => mergeTiming(input, { docx_benchmark: office({ libreoffice_version: '25.8.1.1' }) }, built(), hash))
     .toThrow('LibreOffice version differs');
+  expect(() => mergeTiming(input, { docx_benchmark: office({ libreoffice_build: 'LibreOffice 26.2.3.2 other' }) }, built(), hash))
+    .toThrow('LibreOffice version differs');
+  expect(() => mergeTiming(input, { xlsx_benchmark: office({ builds: { published: { source_sha: published },
+    commit: { source_sha: source, binary_sha256: hash } } }) }, built(), hash)).toThrow('native builds differ');
+});
+
+test('a format with fewer documents than the cap still reconciles', () => {
+  const input = plan({ pptx: 7 });
+  const merged = mergeTiming(input, {}, [part(input, 'pptx')], hash);
+  expect(merged.timing_benchmark.pptx.sample_size).toBe(SAMPLE_SIZE);
+  expect(merged.timing_benchmark.pptx.summary.total).toBe(7);
 });
 
 test('the paired ratio interval is reproducible and brackets the estimate', () => {
