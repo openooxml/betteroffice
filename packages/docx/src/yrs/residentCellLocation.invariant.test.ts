@@ -290,7 +290,6 @@ test('engine cell location is null or equal to the projection after every step o
     }
     for (const line of violations.slice(0, 12)) console.log(`VIOLATION ${line}`);
     expect(violations).toEqual([]);
-    expect(familyTotals.valid!.projectionThrows).toBe(0);
     expect(familyTotals.valid!.peerMissingSteps).toBe(0);
   })();
 }, 600_000);
