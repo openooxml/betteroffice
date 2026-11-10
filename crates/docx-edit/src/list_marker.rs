@@ -73,7 +73,7 @@ pub(crate) fn numbering_level(value: f64) -> Option<usize> {
 /// start share one list, so a second instance continues the first one's numbers: Word's "Restart
 /// numbering" writes a new instance with a `w:startOverride` precisely because a plain second
 /// instance would continue. An instance overriding a start begins a list of its own, at that
-/// start. Levels begin at `w:start` (1 when absent) and restart as `w:lvlRestart` says.
+/// start. Levels begin at `w:start` (0 when absent) and restart as `w:lvlRestart` says.
 struct List {
     key: String,
     /// Per level: its start and the `w:lvlRestart` value.
@@ -101,7 +101,7 @@ impl List {
                 .and_then(|value| value.start_override)
                 .or(definition.start)
                 .filter(|start| start.is_finite())
-                .map_or(1, |start| start.clamp(0.0, MAX_START as f64) as i64);
+                .map_or(0, |start| start.clamp(0.0, MAX_START as f64) as i64);
             *entry = (start, definition.lvl_restart);
         }
         Some(Self { key, levels })
@@ -188,7 +188,11 @@ pub(crate) fn renders_format(format: &str) -> bool {
 
 /// `value` written in `format`, in space bounded by the value's digits.
 fn format_list_counter(value: i64, format: Option<&str>) -> Result<String, Unrenderable> {
-    if value <= 0 {
+    let zero_capable = matches!(
+        format,
+        None | Some("decimal" | "decimalZero" | "decimalZero3" | "decimalZero4" | "decimalZero5")
+    );
+    if value < 0 || (value == 0 && !zero_capable) {
         return Ok(String::new());
     }
     Ok(match format {
@@ -512,6 +516,72 @@ mod tests {
             ),
             ["1.", "2.", "1.", "2.", "3.", "20."],
             "a start override also wins over a whole level override"
+        );
+    }
+
+    #[test]
+    fn a_level_without_a_start_counts_from_zero() {
+        let numbering = definitions(
+            r#"<w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>"#,
+            concat!(
+                r#"<w:num w:numId="1"><w:abstractNumId w:val="4"/></w:num>"#,
+                r#"<w:num w:numId="2"><w:abstractNumId w:val="4"/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="3"/></w:lvlOverride></w:num>"#
+            ),
+        );
+        let mut state = ListState::new(Some(numbering));
+        assert_eq!(
+            markers(
+                &mut state,
+                &[
+                    paragraph(1.0, 0.0, "%1."),
+                    paragraph(1.0, 0.0, "%1."),
+                    paragraph(2.0, 0.0, "%1."),
+                ]
+            ),
+            ["0.", "1.", "3."]
+        );
+    }
+
+    #[test]
+    fn a_level_override_without_a_start_override_still_counts_from_zero() {
+        let numbering = definitions(
+            r#"<w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>"#,
+            r#"<w:num w:numId="1"><w:abstractNumId w:val="4"/><w:lvlOverride w:ilvl="0"/></w:num>"#,
+        );
+        let mut state = ListState::new(Some(numbering));
+        assert_eq!(
+            markers(
+                &mut state,
+                &[paragraph(1.0, 0.0, "%1."), paragraph(1.0, 0.0, "%1.")]
+            ),
+            ["0.", "1."]
+        );
+    }
+
+    #[test]
+    fn a_style_linked_level_without_a_start_counts_from_zero() {
+        let xml = concat!(
+            r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">"#,
+            r#"<w:abstractNum w:abstractNumId="4"><w:styleLink w:val="Linked"/><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl></w:abstractNum>"#,
+            r#"<w:abstractNum w:abstractNumId="5"><w:numStyleLink w:val="Linked"/></w:abstractNum>"#,
+            r#"<w:num w:numId="1"><w:abstractNumId w:val="5"/></w:num></w:numbering>"#
+        );
+        let limits = docx_parse::ParseLimits::default();
+        let numbering = Arc::new(
+            docx_parse::numbering::parse_numbering(
+                Some(xml.as_bytes()),
+                "word/numbering.xml",
+                &mut docx_parse::ParseBudget::new(&limits),
+            )
+            .unwrap(),
+        );
+        let mut state = ListState::new(Some(numbering));
+        assert_eq!(
+            markers(
+                &mut state,
+                &[paragraph(1.0, 0.0, "%1."), paragraph(1.0, 0.0, "%1.")]
+            ),
+            ["0.", "1."]
         );
     }
 

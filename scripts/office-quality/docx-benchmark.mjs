@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { budgetShards } from './shards.mjs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -14,16 +15,7 @@ export const METHOD = 'docx-cli-page1-v1';
 export const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
 export function docxShards(plan) {
-  const samples = plan.samples.filter((sample) => sample.format === 'docx');
-  const shards = Array.from({ length: Math.min(4, samples.length) }, () => []);
-  const weights = shards.map(() => 0);
-  for (const sample of [...samples].sort((a, b) =>
-    b.metadata.reference.pages - a.metadata.reference.pages || a.id.localeCompare(b.id))) {
-    const index = weights.indexOf(Math.min(...weights));
-    shards[index].push(sample.id);
-    weights[index] += sample.metadata.reference.pages;
-  }
-  return shards;
+  return budgetShards('docx-benchmark', plan.samples.filter((sample) => sample.format === 'docx')).map((shard) => shard.samples);
 }
 
 function fail(message) {
