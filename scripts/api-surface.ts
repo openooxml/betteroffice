@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-// usage: bun scripts/api-surface.ts --write <xlsx|pptx> | bun scripts/api-surface.ts --check <xlsx|pptx>
+// usage: bun scripts/api-surface.ts --write <xlsx|pptx|docx> | bun scripts/api-surface.ts --check <xlsx|pptx|docx|xlsx-native|pptx-native>
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -12,6 +12,8 @@ interface FormatConfig {
   entries: Record<string, string>;
   /** Declarations of the -native package built from these sources: checked against the wasm package's snapshots. */
   native?: "xlsx" | "pptx";
+  /** The package's tsconfig to read compiler options from, when not tsconfig.json. */
+  tsconfig?: string;
 }
 
 interface DeclarationOptions {
@@ -40,6 +42,31 @@ export const FORMATS: Record<string, FormatConfig> = {
       "./collaboration": "src/collaboration/index.ts",
     },
   },
+};
+
+/**
+ * Every sub-path a package exports, mapped to the source its declarations come
+ * from: the `types` file `./dist/<path>.d.mts` is built from `src/<path>.ts`.
+ */
+export function entriesFromExports(packageDirAbs: string): Record<string, string> {
+  const manifest = JSON.parse(readFileSync(join(packageDirAbs, "package.json"), "utf8")) as {
+    exports: Record<string, string | { types?: string }>;
+  };
+  const entries: Record<string, string> = {};
+  for (const [entry, target] of Object.entries(manifest.exports)) {
+    const types = typeof target === "string" ? target : target.types;
+    const match = types?.match(/^\.\/dist\/(.+)\.d\.m?ts$/);
+    if (!match) throw new Error(`${entry}: no ./dist/<path>.d.mts types file to map to its source`);
+    entries[entry] = `src/${match[1]}.ts`;
+  }
+  return entries;
+}
+
+FORMATS.docx = {
+  packageDir: "packages/docx",
+  packageName: "@betteroffice/docx",
+  entries: entriesFromExports(join(import.meta.dir, "..", "packages/docx")),
+  tsconfig: "tsconfig.api.json",
 };
 
 FORMATS["xlsx-native"] = { ...FORMATS.xlsx, native: "xlsx" };
@@ -162,7 +189,7 @@ function emitDeclarations(config: FormatConfig, root: string) {
   const packageDirAbs = resolve(root, config.packageDir);
   const ts = loadTypeScript(packageDirAbs);
   const entryFiles = Object.values(config.entries).map((entry) => join(packageDirAbs, entry));
-  const configPath = ts.findConfigFile(packageDirAbs, ts.sys.fileExists, "tsconfig.json");
+  const configPath = ts.findConfigFile(packageDirAbs, ts.sys.fileExists, config.tsconfig ?? "tsconfig.json");
   let packageOptions = {};
   if (configPath) {
     const loaded = ts.readConfigFile(configPath, ts.sys.readFile);

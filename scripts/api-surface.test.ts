@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { buildSnapshot, generateSnapshotsForPackage, reachableFiles } from "./api-surface";
+import { buildSnapshot, entriesFromExports, FORMATS, generateSnapshotsForPackage, reachableFiles } from "./api-surface";
 
 describe("api-surface", () => {
   test("includes transitive declaration inputs and resolves JS specifiers, indexes and package paths", () => {
@@ -81,5 +81,27 @@ describe("api-surface", () => {
     expect(reachableFiles("index.d.ts", files)).toEqual(["a.d.ts", "index.d.ts", "z.d.ts"]);
     expect(buildSnapshot("@test/fixture", ".", "index.d.ts", files))
       .toBe(buildSnapshot("@test/fixture", ".", "index.d.ts", new Map([...files].reverse())));
+  });
+
+  test("docx checks every sub-path its package exports, from the source tsup builds it from", () => {
+    const docx = join(import.meta.dir, "..", "packages/docx");
+    const manifest = JSON.parse(readFileSync(join(docx, "package.json"), "utf8")) as { exports: Record<string, unknown> };
+    const tsup = readFileSync(join(docx, "tsup.config.ts"), "utf8");
+    expect(Object.keys(FORMATS.docx.entries).sort()).toEqual(Object.keys(manifest.exports).sort());
+    for (const source of Object.values(FORMATS.docx.entries)) {
+      expect(existsSync(join(docx, source))).toBe(true);
+      const built = source.replace(/^src\//, "").replace(/\.ts$/, "");
+      expect(tsup).toMatch(new RegExp(`['"]?${built.replace(/[/.]/g, "\\$&")}['"]?: '${source.replace(/[/.]/g, "\\$&")}'`));
+    }
+  });
+
+  test("an export without a dist types file fails clearly", () => {
+    const dir = mkdtempSync(join(tmpdir(), "api-surface-exports-"));
+    try {
+      writeFileSync(join(dir, "package.json"), JSON.stringify({ exports: { ".": "./dist/index.d.mts", "./x": { import: "./x.mjs" } } }));
+      expect(() => entriesFromExports(dir)).toThrow("./x: no ./dist/<path>.d.mts types file to map to its source");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
