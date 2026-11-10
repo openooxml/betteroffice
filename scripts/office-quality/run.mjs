@@ -9,7 +9,7 @@ import { validateReferenceMetadata } from './reference.mjs';
 import { download } from './download.mjs';
 import { fetchAsset, resolveAssetCacheDir } from './asset-cache.mjs';
 import { corpusOrigin } from './samples.mjs';
-import { preparePlan, selectPlanSamples, validatePlan } from './plan.mjs';
+import { preparePlan, registryLoaders, selectPlanSamples, validatePlan } from './plan.mjs';
 import { measureShard } from './measure-shards.mjs';
 
 const execute = promisify(execFile);
@@ -44,20 +44,11 @@ async function command(program, args, options = {}) {
   return result.stdout;
 }
 
-async function registry(name) {
-  return JSON.parse(
-    await download(
-      `https://registry.npmjs.org/${encodeURIComponent(name)}/latest`,
-      2 * 1024 * 1024
-    )
-  );
-}
-
 async function checkoutPlan() {
   const file = process.env.QUALITY_PLAN?.trim();
   const plan = file
     ? validatePlan(JSON.parse(await readFile(resolve(file), 'utf8')))
-    : await preparePlan(process.env, { download, command, registry });
+    : await preparePlan(process.env, { download, command, ...registryLoaders(download) });
   const [sourceSha, commit] = await Promise.all([
     command('git', ['rev-parse', 'HEAD']),
     command('git', ['log', '-1', '--format=%H', '--', '.', ':!README.md']),
@@ -249,6 +240,9 @@ for (const format of selectedFormats) {
                 env: {
                   ...process.env,
                   QUALITY_CAPTURE_CONFIG: JSON.stringify(sample.capture_profile),
+                  ...(channel === 'published' && format !== 'docx'
+                    ? { QUALITY_PUBLISHED_FONTS: publishedFontsVersion(format) }
+                    : {}),
                   QUALITY_ENGINE_LABEL:
                     channel === 'published'
                       ? `@betteroffice/${format}@${plan.versions[format]}${

@@ -34,7 +34,7 @@ function validateSample(sample) {
   validateReferenceMetadata(sample.metadata, sample.id);
 }
 
-export function createPlan({ source_sha, commit, versions, react_version, published_fonts, samples, docx_published_source_sha, xlsx_published_source_sha, pptx_published_source_sha }) {
+export function createPlan({ source_sha, commit, versions, react_version, published_fonts, fonts_basis, samples, docx_published_source_sha, xlsx_published_source_sha, pptx_published_source_sha }) {
   if (!isSha(source_sha) || !isSha(commit))
     throw new Error('Invalid fidelity plan revision');
   if (
@@ -43,7 +43,9 @@ export function createPlan({ source_sha, commit, versions, react_version, publis
     Object.keys(versions).length !== FORMATS.length ||
     !isVersion(react_version) ||
     (published_fonts !== undefined && (typeof published_fonts !== 'object' || published_fonts === null ||
-      !Object.entries(published_fonts).every(([format, version]) => FONT_FORMATS.includes(format) && isVersion(version))))
+      !Object.entries(published_fonts).every(([format, version]) => FONT_FORMATS.includes(format) && isVersion(version)))) ||
+    (fonts_basis !== undefined && (typeof fonts_basis !== 'object' || fonts_basis === null ||
+      !Object.entries(fonts_basis).every(([format, basis]) => published_fonts?.[format] && ['release-commit', 'latest-before-release'].includes(basis))))
   )
     throw new Error('Invalid fidelity plan versions');
   if (!Array.isArray(samples) || !samples.length || samples.length > MAX_SAMPLES)
@@ -70,6 +72,7 @@ export function createPlan({ source_sha, commit, versions, react_version, publis
     versions,
     react_version,
     ...(published_fonts === undefined ? {} : { published_fonts }),
+    ...(fonts_basis === undefined ? {} : { fonts_basis }),
     formats,
     samples,
     ...(docx_published_source_sha === undefined ? {} : { docx_published_source_sha }),
@@ -122,17 +125,49 @@ export async function mapPool(values, limit, task) {
 
 export const FONT_FORMATS = ['pptx', 'xlsx'];
 
+const STABLE = /^\d+\.\d+\.\d+$/;
+const released = (version) => STABLE.test(version) && version !== '0.0.0';
+const semverOrder = (left, right) => {
+  const a = left.split('.').map(Number);
+  const b = right.split('.').map(Number);
+  return a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+};
+
 export function releasedFonts(fonts, releases) {
-  const result = {};
+  const versions = Object.entries(fonts?.versions ?? {});
+  const fonts_basis = {};
+  const published_fonts = {};
   for (const [format, release] of Object.entries(releases)) {
-    const matches = Object.entries(fonts?.versions ?? {})
-      .filter(([, manifest]) => /^[a-f0-9]{40}$/.test(release?.gitHead ?? '') && manifest?.gitHead === release.gitHead)
+    const label = `@betteroffice/${format}@${release?.version}`;
+    const sameCommit = versions
+      .filter(([version, manifest]) => released(version) && /^[a-f0-9]{40}$/.test(release?.gitHead ?? '') && manifest?.gitHead === release.gitHead)
       .map(([version]) => version);
-    if (matches.length !== 1)
-      throw new Error(`Expected one @betteroffice/fonts release from the release commit of @betteroffice/${format}@${release?.version}, found ${matches.length}`);
-    result[format] = matches[0];
+    if (sameCommit.length > 1)
+      throw new Error(`Expected at most one @betteroffice/fonts release from the release commit of ${label}, found ${sameCommit.length}`);
+    if (sameCommit.length === 1) {
+      published_fonts[format] = sameCommit[0];
+      fonts_basis[format] = 'release-commit';
+      continue;
+    }
+    const releasedAt = Date.parse(release?.time ?? '');
+    const earlier = versions
+      .map(([version]) => version)
+      .filter((version) => released(version) && Date.parse(fonts?.time?.[version] ?? '') < releasedAt)
+      .sort(semverOrder);
+    if (!Number.isFinite(releasedAt) || !earlier.length)
+      throw new Error(`No @betteroffice/fonts release from the release commit of ${label} or published before it`);
+    published_fonts[format] = earlier.at(-1);
+    fonts_basis[format] = 'latest-before-release';
   }
-  return result;
+  return { published_fonts, fonts_basis };
+}
+
+export function registryLoaders(download) {
+  const fetchJson = async (url, maximum) => JSON.parse(await download(url, maximum));
+  return {
+    registry: (name) => fetchJson(`https://registry.npmjs.org/${encodeURIComponent(name)}/latest`, 2 * 1024 * 1024),
+    packument: (name) => fetchJson(`https://registry.npmjs.org/${encodeURIComponent(name)}`, 32 * 1024 * 1024),
+  };
 }
 
 export async function preparePlan(environment, dependencies) {
@@ -161,9 +196,12 @@ export async function preparePlan(environment, dependencies) {
     registry('@betteroffice/docx-react'),
   ]);
   const fontFormats = FONT_FORMATS.filter((format) => samples.some((sample) => sample.format === format));
-  const published_fonts = fontFormats.length
-    ? releasedFonts(await packument('@betteroffice/fonts'), Object.fromEntries(fontFormats.map((format) =>
-        [format, published[FORMATS.indexOf(format)]])))
+  const fontsChoice = fontFormats.length
+    ? releasedFonts(await packument('@betteroffice/fonts'), Object.fromEntries(await Promise.all(fontFormats.map(async (format) => {
+        const release = published[FORMATS.indexOf(format)];
+        const document = await packument(`@betteroffice/${format}`);
+        return [format, { ...release, time: document?.time?.[release.version] }];
+      }))))
     : undefined;
   return createPlan({
     source_sha: source_sha.trim(),
@@ -172,7 +210,7 @@ export async function preparePlan(environment, dependencies) {
       FORMATS.map((format, index) => [format, published[index].version])
     ),
     react_version: published.at(-1).version,
-    ...(published_fonts ? { published_fonts } : {}),
+    ...(fontsChoice ? fontsChoice : {}),
     samples,
     ...(samples.some((sample) => sample.format === 'docx')
       ? { docx_published_source_sha: published[0].gitHead ?? 'missing' }
@@ -202,16 +240,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     if (result.stderr) process.stderr.write(result.stderr);
     return result.stdout;
   };
-  const registry = async (name) =>
-    JSON.parse(
-      await download(
-        `https://registry.npmjs.org/${encodeURIComponent(name)}/latest`,
-        2 * 1024 * 1024
-      )
-    );
-  const packument = async (name) =>
-    JSON.parse(await download(`https://registry.npmjs.org/${encodeURIComponent(name)}`, 32 * 1024 * 1024));
-  const plan = await preparePlan(process.env, { download, command, registry, packument });
+  const plan = await preparePlan(process.env, { download, command, ...registryLoaders(download) });
   const path = await writePlan(
     process.env.QUALITY_OUTPUT ?? '.source/office-quality/plan',
     plan
