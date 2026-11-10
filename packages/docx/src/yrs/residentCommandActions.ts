@@ -125,8 +125,11 @@ function validDelta(value: unknown): value is YrsInlineFormatDelta {
     highlight: nullable(string), fontSize: nullable(positive),
     fontFamily: nullable((entry) => fields(entry, { ascii: string, hAnsi: string }) && object(entry) && string(entry.ascii)),
     other: (entry) => object(entry) && json(entry) && Object.keys(entry).every((key) => !PROTECTED_MARKS.has(key)),
+    clear: (entry) => entry === 'all' || (Array.isArray(entry) && entry.length > 0 && entry.every(TEXT_MARK)),
   });
 }
+
+const TEXT_MARK = oneOf('bold', 'italic', 'underline', 'strike', 'verticalAlign', 'color', 'highlight', 'fontSizePt', 'fontFamily');
 
 function validBorders(value: unknown): boolean {
   if (!object(value)) return false;
