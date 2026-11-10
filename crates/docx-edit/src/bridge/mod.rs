@@ -59,6 +59,8 @@ use crate::sticky_positions::sticky_offset;
 
 pub(crate) mod group_pictures;
 mod group_transforms;
+#[cfg(test)]
+mod hidden_rows_tests;
 pub(crate) mod local;
 pub(crate) mod preview;
 pub mod reservations;
@@ -1187,9 +1189,13 @@ fn walk_story_chunks<T: ReadTxn>(
                     revealable,
                     local,
                 )?;
-                if !hidden {
+                let rows_shown = !lowered.rows.is_empty();
+                if rows_shown && !hidden {
                     blocks.push(LayoutBlock::Table(lowered));
-                } else if !previewed_out && let Some(revealed) = revealable {
+                } else if rows_shown
+                    && !previewed_out
+                    && let Some(revealed) = revealable
+                {
                     revealed.push(LayoutBlock::Table(lowered));
                 }
                 story_index += 1;
@@ -2431,6 +2437,13 @@ fn lower_table<T: ReadTxn>(
             cant_split: row_formatting
                 .and_then(|value| map_bool(value, "cantSplit"))
                 .filter(|value| *value),
+            hidden: row_formatting
+                .and_then(|value| map_bool(value, "hidden"))
+                .filter(|value| *value),
+            hidden_content_only: row_formatting
+                .and_then(|value| map_bool(value, "hiddenContentOnly"))
+                .filter(|value| *value),
+            source_row: None,
             grid_before,
             grid_after,
             width_before: grid_before
@@ -2483,35 +2496,36 @@ fn lower_table<T: ReadTxn>(
         (twips > 0.0).then(|| twips_to_pixels(twips))
     };
 
-    Ok((
-        TableBlock {
-            sdt_groups: None,
-            id: BlockId::Str(table_id),
-            rows,
-            column_widths: (!column_widths.is_empty()).then_some(column_widths),
-            grid_widths: None,
-            width: map_number(tbl_pr, "width"),
-            width_type: map_string(tbl_pr, "widthType"),
-            preferred_width: None,
-            layout_mode: None,
-            table_layout: Some(layout_mode.unwrap_or_else(|| "autofit".to_owned())),
-            width_algorithm: None,
-            style_cascade: None,
-            background: None,
-            justification: map_string(tbl_pr, "justification"),
-            bidi: (map_bool(tbl_pr, "bidi") == Some(true)).then_some(true),
-            indent,
-            floating,
-            compatibility_mode,
-            cell_margin_left: table_margin("left"),
-            cell_margin_right: table_margin("right"),
-            gridlines: env.show_table_gridlines.then_some(true),
-            first_column: table_look_first_column(tbl_pr).then_some(true),
-            pm_start: Some(pm_start as f64),
-            pm_end: Some((pm_start + node_size) as f64),
-        },
-        node_size,
-    ))
+    let mut block = TableBlock {
+        sdt_groups: None,
+        id: BlockId::Str(table_id),
+        rows,
+        column_widths: (!column_widths.is_empty()).then_some(column_widths),
+        grid_widths: None,
+        width: map_number(tbl_pr, "width"),
+        width_type: map_string(tbl_pr, "widthType"),
+        preferred_width: None,
+        layout_mode: None,
+        table_layout: Some(layout_mode.unwrap_or_else(|| "autofit".to_owned())),
+        width_algorithm: None,
+        style_cascade: None,
+        background: None,
+        justification: map_string(tbl_pr, "justification"),
+        bidi: (map_bool(tbl_pr, "bidi") == Some(true)).then_some(true),
+        indent,
+        floating,
+        compatibility_mode,
+        cell_margin_left: table_margin("left"),
+        cell_margin_right: table_margin("right"),
+        gridlines: env.show_table_gridlines.then_some(true),
+        first_column: table_look_first_column(tbl_pr).then_some(true),
+        pm_start: Some(pm_start as f64),
+        pm_end: Some((pm_start + node_size) as f64),
+    };
+    if !env.show_hidden_text {
+        docx_layout::table_grid::drop_hidden_rows(&mut block);
+    }
+    Ok((block, node_size))
 }
 
 /// The table's own `w:tblLook` asks for first-column formatting, by its

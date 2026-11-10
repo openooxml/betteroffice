@@ -625,6 +625,13 @@ export type TableRow = {
    * page rather than splitting its content.
    */
   cantSplit?: boolean;
+  /**
+   * `w:hidden` (§17.4.20). With hidden text not shown, the engine leaves out
+   * marked rows whose cells show nothing; marked rows with visible content stay.
+   */
+  hidden?: boolean;
+  /** The source row held only vanished runs when read; a hidden row without this is never left out. */
+  hiddenContentOnly?: boolean;
   /** Leading omitted grid columns (`w:gridBefore`). Undefined = 0. */
   gridBefore?: number;
   /** Trailing omitted grid columns (`w:gridAfter`). Undefined = 0. */

@@ -892,6 +892,21 @@ pub struct TableRow {
     pub is_header: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cant_split: Option<bool>,
+    /// `w:trPr/w:hidden` (§17.4.20). Layout draws such a row as usual; a view
+    /// that hides hidden text removes it first with
+    /// [`crate::table_grid::drop_hidden_rows`] when none of its cells shows
+    /// anything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden: Option<bool>,
+    /// The source row held only vanished runs when the document was read. A
+    /// hidden row without this mark is never removed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden_content_only: Option<bool>,
+    /// The row's index in the source table, set on every row kept when hidden
+    /// rows were removed; display cell refs report it instead of the layout
+    /// index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_row: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grid_before: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
