@@ -3,4 +3,4 @@
 '@betteroffice/docx-native': patch
 '@betteroffice/rust-crates': minor
 ---
-A session that stays open now repaginates like a freshly opened one after an edit next to a page break, including edits that arrive from a collaborator, an agent or undo.
+An open session now repaginates like a freshly opened one after edits next to a page break or to a continuous section's margins. `PageFlowGeometry` can no longer be built with a struct literal outside docx-layout.
