@@ -17,8 +17,10 @@ export const PNG_FONT_TARGET = { sheet: 0, viewport: { x: 0, y: 0, width: 300, h
 export const PNG_FONT_CASES: { name: string; fonts?: { family: string; face: PngFontFaceName }[] }[] = [
   { name: 'absent' },
   { name: 'empty', fonts: [] },
+  { name: 'absent after empty' },
   { name: 'regular', fonts: [{ family: 'Calibri', face: 'regular' }] },
   { name: 'bold', fonts: [{ family: 'Calibri', face: 'bold' }] },
+  { name: 'absent after supplied faces' },
   { name: 'uncovered', fonts: [{ family: 'Not On The Sheet', face: 'broken' }] },
   { name: 'broken', fonts: [{ family: 'Calibri', face: 'broken' }] },
   { name: 'absent again' },
@@ -34,7 +36,9 @@ export const PNG_FONT_OUTCOMES: ({ rule: string } & (
   { rule: 'the supplied face decides what is painted', differs: ['regular', 'bold'] },
   { rule: 'an explicit empty list replaces the bundled faces', differs: ['empty', 'absent'] },
   { rule: 'a family the list does not cover is painted as with an empty list', equals: ['uncovered', 'empty'] },
-  { rule: 'supplied faces apply to their own export only', equals: ['absent again', 'absent'] },
+  { rule: 'an empty list applies to its own export only', equals: ['absent after empty', 'absent'] },
+  { rule: 'supplied faces apply to their own export only', equals: ['absent after supplied faces', 'absent'] },
+  { rule: 'a rejected export leaves later exports unchanged', equals: ['absent again', 'absent'] },
   { rule: 'a supplied face that cannot paint rejects naming the family', rejects: { case: 'broken', code: 'font-unavailable', family: 'Calibri' } },
 ];
 
