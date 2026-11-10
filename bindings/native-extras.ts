@@ -94,10 +94,12 @@ const PANIC_HOOK_FORMATS: Record<Format, { wasm: boolean; native: boolean }> = {
   docx: { wasm: true, native: true },
 };
 
-/** Engine module functions whose parameter count differs: native init takes no input. */
-export function arityAllowances(format: Format): Record<string, Extra> {
+/** Engine module functions whose parameter count differs, per wasm engine module: native init takes no input. */
+export function arityAllowances(format: Format): Record<string, Record<string, Extra>> {
   const ignored: Extra = { reason: 'native init ignores the wasm module input', pending: 'item 3' };
-  return format === 'docx' ? { default: ignored, initSync: ignored } : { default: ignored };
+  if (format !== 'docx') return { [`packages/${format}/src/wasm/engine.ts`]: { default: ignored } };
+  return Object.fromEntries(['Edit', 'Parse', 'Query', 'Opc', 'Preflight']
+    .map((name) => [`packages/docx/src/wasm/engine${name}.ts`, { default: ignored, initSync: ignored }]));
 }
 
 /** Allowances for the raw compare: wasm-bindgen glue against the napi binding. */

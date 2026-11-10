@@ -6,9 +6,12 @@ import {
   compareRuntime,
   discover,
   jsArity,
+  mergeDeclarations,
   mergeSurfaces,
   normalizeParamName,
+  scopeAllowances,
   summaryLine,
+  unreached,
   type Allowances,
 } from './raw-engine-surface';
 
@@ -204,5 +207,28 @@ describe('engine module arity', () => {
     const same = jsArity({ default(input?: unknown) { return input; } });
     expect(compareArity(same, same, { default: { reason: 'init input ignored natively', pending: 'item 3' } }))
       .toEqual(['default: declared arity difference no longer exists; remove the stale entry']);
+  });
+});
+
+describe('merging and scoping', () => {
+  test('a name declared differently by two merged modules is named', () => {
+    const { problems } = mergeDeclarations([
+      ['edit', parseSurface('export function close_display_list(handle: number): void;')],
+      ['query', parseSurface('export function close_display_list(handle: number, all: boolean): void;')],
+    ]);
+    expect(problems).toEqual(['close_display_list: declared differently in edit and query']);
+  });
+
+  test('allowances are scoped to the pair that exports them, and an entry no pair reaches is stale', () => {
+    const allow = none();
+    allow.nativeOnly['Doc.prototype.renderPngTarget'] = { reason: 'native raster entry point', backs: 'renderPng' };
+    allow.nativeOnly['Gone.prototype.x'] = { reason: 'stale', backs: 'x' };
+    const reached = new Set<string>();
+    const pngPair = scopeAllowances(allow, discover({ renderPng() {} }), discover({ renderPng() {} }), reached);
+    expect(Object.keys(pngPair.nativeOnly)).toEqual([]);
+    const native = discover(nativeModule((proto) => { proto.renderPngTarget = () => new Uint8Array(); }));
+    const editPair = scopeAllowances(allow, discover(wasmModule()), native, reached);
+    expect(compareRuntime(discover(wasmModule()), native, editPair).problems).toEqual([]);
+    expect(unreached(allow, reached)).toEqual(['Gone.prototype.x: allowed but not exported by any engine module; remove the stale entry']);
   });
 });

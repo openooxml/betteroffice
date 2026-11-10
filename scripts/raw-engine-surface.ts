@@ -297,3 +297,55 @@ export function compareArity(wasm: Map<string, number>, native: Map<string, numb
   }
   return problems;
 }
+
+/** Merges the declarations of several modules; a name declared twice must be declared alike. */
+export function mergeDeclarations(parts: readonly [string, Surface][]): { surface: Surface; problems: string[] } {
+  const surface: Surface = { classes: new Map(), functions: new Map() };
+  const problems: string[] = [];
+  const origin = new Map<string, string>();
+  const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+  for (const [module, part] of parts) {
+    for (const [name, member] of part.functions) {
+      const seen = surface.functions.get(name);
+      if (seen && !same(seen, member)) problems.push(`${name}: declared differently in ${origin.get(name)} and ${module}`);
+      if (!seen) {
+        surface.functions.set(name, member);
+        origin.set(name, module);
+      }
+    }
+    for (const [name, members] of part.classes) {
+      const seen = surface.classes.get(name);
+      if (seen && !same([...seen].sort(), [...members].sort())) problems.push(`${name}: class declared differently in ${origin.get(name)} and ${module}`);
+      if (!seen) {
+        surface.classes.set(name, members);
+        origin.set(name, module);
+      }
+    }
+  }
+  return { surface, problems };
+}
+
+/** The allowances that concern one module pair: entries whose export is on either side. */
+export function scopeAllowances(allow: Allowances, wasm: RuntimeSurface, native: RuntimeSurface, reached: Set<string>): Allowances {
+  const keep = <T>(entries: Record<string, T>, ...surfaces: RuntimeSurface[]) => Object.fromEntries(
+    Object.entries(entries).filter(([path]) => {
+      const inScope = surfaces.some((surface) => surface.has(owner(path)));
+      if (inScope) reached.add(path);
+      return inScope;
+    }),
+  );
+  return {
+    nativeOnly: keep(allow.nativeOnly, wasm, native),
+    wasmOnly: keep(allow.wasmOnly, wasm, native),
+    internals: { wasm: keep(allow.internals.wasm, wasm), native: keep(allow.internals.native, native) },
+  };
+}
+
+/** Every allowance must concern at least one module pair, or it is stale. */
+export function unreached(allow: Allowances, reached: Set<string>): string[] {
+  const all = [
+    ...Object.keys(allow.nativeOnly), ...Object.keys(allow.wasmOnly),
+    ...Object.keys(allow.internals.wasm), ...Object.keys(allow.internals.native),
+  ];
+  return all.filter((path) => !reached.has(path)).map((path) => `${path}: allowed but not exported by any engine module; remove the stale entry`);
+}

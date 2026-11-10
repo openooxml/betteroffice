@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
@@ -10,9 +11,13 @@ import {
   compareRuntime,
   discover,
   jsArity,
+  mergeDeclarations,
   mergeSurfaces,
+  scopeAllowances,
   summaryLine,
+  unreached,
   type RuntimeSurface,
+  type SurfaceStats,
 } from '../scripts/raw-engine-surface';
 import { arityAllowances, engineAllowances, rawAllowances } from './native-extras';
 
@@ -29,56 +34,61 @@ const GLUE = {
 
 type Format = keyof typeof GLUE;
 
-function declared(paths: readonly string[]): Surface {
-  const merged: Surface = { classes: new Map(), functions: new Map() };
-  for (const path of paths) {
-    const surface = parseSurface(readFileSync(join(root, path), 'utf8'), { paramNames: true });
-    for (const [name, members] of surface.classes) merged.classes.set(name, members);
-    for (const [name, member] of surface.functions) merged.functions.set(name, member);
-  }
-  return merged;
+function declared(paths: readonly string[]): { surface: Surface; problems: string[] } {
+  return mergeDeclarations(paths.map((path) => [path, parseSurface(readFileSync(join(root, path), 'utf8'), { paramNames: true })]));
 }
 
-async function merged(modules: readonly string[]): Promise<RuntimeSurface> {
-  const parts: [string, RuntimeSurface][] = [];
-  for (const module of modules) parts.push([module, discover(await import(join(root, module)))]);
-  const { surface, problems } = mergeSurfaces(parts);
-  expect(problems).toEqual([]);
-  return surface;
+async function surfaceOf(module: string): Promise<RuntimeSurface> {
+  return discover(await import(join(root, module)));
 }
 
 describe('native and wasm engine surfaces', () => {
   for (const format of Object.keys(GLUE) as Format[]) {
     test(`${format}: raw binding matches the wasm-bindgen glue`, async () => {
-      const wasm = await merged(GLUE[format].map((module) => `${module}.js`));
+      const parts: [string, RuntimeSurface][] = [];
+      for (const module of GLUE[format]) parts.push([module, await surfaceOf(`${module}.js`)]);
+      const { surface: wasm, problems: runtimeMerge } = mergeSurfaces(parts);
       const native = discover(require(join(root, `bindings/${format}-native/index.js`)));
       const allow = rawAllowances(format);
       const report = compareRuntime(wasm, native, allow);
-      const declarations = compareDeclarations(
-        wasm,
-        native,
-        declared(GLUE[format].map((module) => `${module}.d.ts`)),
-        declared([`bindings/${format}-native/index.d.ts`]),
-        allow,
-      );
+      const wasmDeclared = declared(GLUE[format].map((module) => `${module}.d.ts`));
+      const nativeDeclared = declared([`bindings/${format}-native/index.d.ts`]);
+      const declarations = compareDeclarations(wasm, native, wasmDeclared.surface, nativeDeclared.surface, allow);
       console.log(`raw ${summaryLine(format, report.stats)}`);
-      expect([...report.problems, ...declarations]).toEqual([]);
+      expect([...runtimeMerge, ...wasmDeclared.problems, ...report.problems, ...declarations]).toEqual([]);
     });
 
-    test(`${format}: native engine modules match the wasm engine modules`, async () => {
-      const pairs = NATIVE_ENGINES[format] as readonly { engine: string; native: string }[];
-      const wasm = await merged(pairs.map(({ engine }) => engine));
-      const native = await merged(pairs.map(({ native }) => native));
-      const report = compareRuntime(wasm, native, engineAllowances(format));
-      const arity = new Map<string, number>();
-      const nativeArity = new Map<string, number>();
-      for (const { engine, native: shim } of pairs) {
-        for (const [name, length] of jsArity(await import(join(root, engine)))) arity.set(name, length);
-        for (const [name, length] of jsArity(await import(join(root, shim)))) nativeArity.set(name, length);
+    test(`${format}: each native engine module matches its wasm engine module`, async () => {
+      const allow = engineAllowances(format);
+      const arityAllow = arityAllowances(format);
+      const reached = new Set<string>();
+      const totals: SurfaceStats = { classes: 0, compared: 0, equal: 0, extras: 0, pending: 0 };
+      const problems: string[] = [];
+      for (const { engine, native: shim } of NATIVE_ENGINES[format] as readonly { engine: string; native: string }[]) {
+        const wasm = await surfaceOf(engine);
+        const native = await surfaceOf(shim);
+        const report = compareRuntime(wasm, native, scopeAllowances(allow, wasm, native, reached));
+        for (const key of Object.keys(totals) as (keyof SurfaceStats)[]) totals[key] += report.stats[key];
+        const arity = compareArity(jsArity(await import(join(root, engine))), jsArity(await import(join(root, shim))), arityAllow[engine] ?? {});
+        totals.pending += Object.keys(arityAllow[engine] ?? {}).length;
+        problems.push(...[...report.problems, ...arity].map((problem) => `${engine}: ${problem}`));
       }
-      const arityPending = Object.keys(arityAllowances(format)).length;
-      console.log(`engine ${summaryLine(format, { ...report.stats, pending: report.stats.pending + arityPending })}`);
-      expect([...report.problems, ...compareArity(arity, nativeArity, arityAllowances(format))]).toEqual([]);
+      const pairs = new Set((NATIVE_ENGINES[format] as readonly { engine: string }[]).map(({ engine }) => engine));
+      for (const engine of Object.keys(arityAllow)) {
+        if (!pairs.has(engine)) problems.push(`${engine}: arity allowance for a module that is not an engine module`);
+      }
+      console.log(`engine ${summaryLine(format, totals)}`);
+      expect([...problems, ...unreached(allow, reached)]).toEqual([]);
     });
   }
+
+  test('each native engine module declares the types of its wasm engine module', () => {
+    const typecheck = readFileSync(join(import.meta.dir, 'engine-surface.typecheck.ts'), 'utf8');
+    const checked = [...typecheck.matchAll(/from '\.\.\/(packages\/[^']+)';/g)].map((match) => `${match[1]}.ts`).sort();
+    const engines = Object.values(NATIVE_ENGINES).flatMap((pairs) => (pairs as readonly { engine: string }[]).map(({ engine }) => engine)).sort();
+    expect(checked).toEqual(engines);
+    const result = spawnSync('bunx', ['tsc', '-p', join(import.meta.dir, 'engine-surface.tsconfig.json')], { encoding: 'utf8', cwd: root });
+    expect(`${result.stdout}${result.stderr}`.trim()).toBe('');
+    expect(result.status).toBe(0);
+  }, 180_000);
 });
