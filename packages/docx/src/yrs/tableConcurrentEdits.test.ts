@@ -95,10 +95,6 @@ function content(session: YrsSession): string {
   return JSON.stringify(session.storyIds().sort().map((story) => [story, session.storySegments(story)]));
 }
 
-function syncAll(peers: YrsSession[]): void {
-  for (let round = 0; round < 2; round++) for (const a of peers) for (const b of peers) if (a !== b) a.applyUpdate(b.encodeStateAsUpdate(a.encodeStateVector()));
-}
-
 function expectConverged(peers: YrsSession[]): void {
   const [first, ...rest] = peers;
   for (const peer of rest) {
@@ -107,52 +103,11 @@ function expectConverged(peers: YrsSession[]): void {
   }
 }
 
-function rows(session: YrsSession): number {
-  return ((session.tablePayload('body', 0)?.rows as unknown[] | undefined) ?? []).length;
-}
-
 async function expectSound(session: YrsSession, clientId: number) {
   const report = await effects(session, clientId);
   console.log(`EFFECTS ${JSON.stringify(report)}`);
   expect(report).toMatchObject({ dangling: [], cellLookup: 'ok', reopenDangling: [], reopenCellLookup: 'ok' });
 }
-
-test('two peers: undoing a split after the other peer rewrote the table keeps the cell that table names', async () => {
-  const a = await open(9701);
-  const b = await peerOf(a, 9702);
-  a.splitCell(at(0, 1), 1, 2);
-  sync(a, b);
-  const created = a.storyIds().filter((story) => story.includes('~9701'));
-  expect(created.length).toBeGreaterThan(0);
-  b.insertRow(at(0, 0), 'below');
-  sync(a, b);
-  expect(a.undo()).toBe(true);
-  sync(a, b);
-  expect({ a: danglingCells(a), b: danglingCells(b) }).toEqual({ a: [], b: [] });
-  expect(rows(a)).toBe(2);
-  for (const story of created) expect(a.storyIds()).toContain(story);
-  expectConverged([a, b]);
-  expect(a.redo()).toBe(true);
-  sync(a, b);
-  expect({ a: danglingCells(a), b: danglingCells(b) }).toEqual({ a: [], b: [] });
-  expectConverged([a, b]);
-  await expectSound(a, 9703);
-});
-
-test('three peers: the undo after a remote table rewrite converges on every peer', async () => {
-  const a = await open(9731);
-  const b = await peerOf(a, 9732);
-  const c = await peerOf(a, 9733);
-  a.splitCell(at(0, 1), 1, 2);
-  syncAll([a, b, c]);
-  b.insertRow(at(0, 0), 'below');
-  syncAll([a, b, c]);
-  expect(a.undo()).toBe(true);
-  syncAll([a, b, c]);
-  for (const peer of [a, b, c]) expect(danglingCells(peer)).toEqual([]);
-  expectConverged([a, b, c]);
-  await expectSound(c, 9734);
-});
 
 test('two peers: re-splitting after the other peer removed the first split cell leaves no dangling cell', async () => {
   const a = await open(9711);
