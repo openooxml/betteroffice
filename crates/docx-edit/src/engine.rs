@@ -18708,6 +18708,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                             source: Default::default(),
                             history: Default::default(),
                             steps: vec![crate::EditStep::new(crate::EditOperation::InsertText {
+                                runs: None,
                                 target: crate::TextTarget::Range(crate::TextRange {
                                     story: "body".to_owned(),
                                     start: crate::TextPosition {
