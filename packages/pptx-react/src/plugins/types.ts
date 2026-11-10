@@ -15,9 +15,12 @@ import type {
   PluginError,
   PluginErrorPhase,
   PluginFailureCode,
+  PluginFocusChangeEvent,
   PluginGrant,
   PluginLoadReason,
+  PluginLocaleChangeEvent,
   PluginRefusal,
+  PluginViewportChangeEvent,
 } from '../../../../shared/host-contracts/plugins';
 import type {
   PptxCommandArgs,
@@ -148,6 +151,10 @@ export type PptxPluginSelection = {
 } | null;
 
 export interface PptxPluginSnapshot {
+  /** @experimental Focus inside the document surface. */
+  focused: boolean;
+  /** @experimental The editor's resolved locale tag. */
+  locale: string;
   /** The open presentation; changes when a presentation replaces it. */
   generation: string;
   version: string;
@@ -166,6 +173,8 @@ export type PptxPluginPointPosition = PptxPointPosition & { version: string; lay
  * layer; every method returns null once its layout is no longer presented.
  */
 export interface PptxPluginGeometry {
+  /** @experimental The visible document area in overlay-layer pixels. */
+  viewport: PptxPluginRect;
   layout: PptxPluginLayout;
   /**
    * Converts a slide rectangle into overlay pixels: `slide-emu` in EMU from the slide's top left
@@ -222,8 +231,20 @@ export interface PptxPluginNavigation {
   ): Promise<PptxPluginNavigationResult>;
 }
 
+/** @experimental The plugin API may change in minor releases. */
+export type PptxPluginFocusChangeEvent = PluginFocusChangeEvent;
+
+/** @experimental The plugin API may change in minor releases. */
+export type PptxPluginLocaleChangeEvent = PluginLocaleChangeEvent;
+
+/** @experimental The plugin API may change in minor releases. */
+export type PptxPluginViewportChangeEvent = PluginViewportChangeEvent<PptxPluginRect>;
+
 /** Lifecycle notifications describe current state; several changes may arrive as one. */
 export type PptxPluginEvent =
+  | PptxPluginFocusChangeEvent
+  | PptxPluginLocaleChangeEvent
+  | PptxPluginViewportChangeEvent
   | { type: 'load'; generation: string; version: string; reason: PluginLoadReason }
   | { type: 'document-change'; generation: string; version: string }
   | {

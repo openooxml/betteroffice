@@ -6,6 +6,7 @@ import {
   defineDocxPlugin,
   type DocxEditorRef,
   type DocxPluginContext,
+  type DocxPluginEvent,
   type DocxPluginGeometry,
   type DocxPluginSidebarItem,
 } from '@betteroffice/docx-react';
@@ -21,6 +22,7 @@ interface ProbeState {
 type ProbeContext = DocxPluginContext<ProbeState>;
 
 interface ProbeWindow {
+  events: DocxPluginEvent[];
   editor: DocxEditorRef | null;
   geometry: DocxPluginGeometry | null;
   navigation: unknown;
@@ -33,6 +35,7 @@ const repeatedHeader = new URLSearchParams(location.search).get('doc') === 'repe
 const fileProp = new URLSearchParams(location.search).get('prop') === 'file';
 
 const probe: ProbeWindow = {
+  events: [],
   editor: null,
   geometry: null,
   navigation: null,
@@ -185,6 +188,7 @@ const alignment = defineDocxPlugin<ProbeState>({
   id: 'probe.alignment',
   createState: () => ({ version: null, paragraphs: [] }),
   async onEvent(context, event) {
+    probe.events.push(event);
     if (event.type === 'load' || event.type === 'document-change') await refresh(context);
   },
   panel: { title: 'Probe', placement: 'right', render: ProbePanel },
