@@ -443,6 +443,25 @@ const headerFooterSheets = [
 ];
 
 describe('peer-less plugins', () => {
+  test('worker plugins receive the locale and one change after rerender', async () => {
+    const host = pluginWorker();
+    const contexts: XlsxPluginContext<null>[] = [];
+    const events: XlsxPluginEvent[] = [];
+    const plugin = defineXlsxPlugin({ id: 'locale', createState: () => null,
+      onEvent(context, event) { contexts.push(context); events.push(event); } });
+    try {
+      const view = await host.mount({ plugins: [plugin], i18n: { _lang: 'DE-de' } });
+      await until(() => events.some((event) => event.type === 'load'));
+      expect(contexts[0]!.snapshot.locale).toBe('de-DE');
+      view.rerender({ i18n: { _lang: 'fr' } });
+      await until(() => events.some((event) => event.type === 'locale-change'));
+      expect(events.filter((event) => event.type === 'locale-change')).toEqual([
+        { type: 'locale-change', generation: last(contexts).snapshot.generation, locale: 'fr' },
+      ]);
+      expect(last(contexts).snapshot.locale).toBe('fr');
+    } finally { host.restore(); }
+  });
+
   test('plugin reads preserve header footer facts through the worker route', async () => {
     const workbook = openWorkbook(await headerFooterFixture());
     const host = pluginWorker();
@@ -2788,4 +2807,43 @@ describe('XlsxEditor plugin adapters', () => {
     await until(() => last(contexts) !== retained && last(contexts).geometry !== null);
     expect(last(contexts).geometry!.getPositionAtPoint!(...point)).toMatchObject({ row, col });
   });
+});
+
+test('plugins receive the resolved locale and one event when it changes', async () => {
+  const contexts: XlsxPluginContext<null>[] = [];
+  const events: XlsxPluginEvent[] = [];
+  const plugin = defineXlsxPlugin({ id: 'locale', createState: () => null,
+    onEvent(context, event) { contexts.push(context); events.push(event); } });
+  const { rerender } = await mount({ plugins: [plugin], i18n: { _lang: 'de' } });
+  await until(() => events.some((event) => event.type === 'load'));
+  expect(contexts[0]!.snapshot.locale).toBe('de');
+  expect(events.filter((event) => event.type === 'locale-change')).toEqual([]);
+  rerender({ plugins: [plugin], i18n: { _lang: 'fr' } });
+  await until(() => events.some((event) => event.type === 'locale-change'));
+  expect(events.filter((event) => event.type === 'locale-change')).toEqual([
+    { type: 'locale-change', generation: last(contexts).snapshot.generation, locale: 'fr' },
+  ]);
+  expect(last(contexts).snapshot.locale).toBe('fr');
+  rerender({ plugins: [plugin], i18n: { _lang: 'fr' } });
+  await settle();
+  expect(events.filter((event) => event.type === 'locale-change')).toHaveLength(1);
+});
+
+test('plugin locales are canonical and equivalent tags do not notify twice', async () => {
+  const contexts: XlsxPluginContext<null>[] = [];
+  const events: XlsxPluginEvent[] = [];
+  const plugin = defineXlsxPlugin({ id: 'canonical-locale', createState: () => null,
+    onEvent(context, event) { contexts.push(context); events.push(event); } });
+  const { rerender } = await mount({ plugins: [plugin], i18n: { _lang: 'DE-de' } });
+  await until(() => events.some((event) => event.type === 'load'));
+  expect(contexts[0]!.snapshot.locale).toBe('de-DE');
+  rerender({ plugins: [plugin], i18n: { _lang: 'de-DE' } });
+  await settle();
+  expect(events.filter((event) => event.type === 'locale-change')).toEqual([]);
+  rerender({ plugins: [plugin], i18n: { _lang: 'invalid_tag' } });
+  await until(() => events.some((event) => event.type === 'locale-change'));
+  expect(events.filter((event) => event.type === 'locale-change')).toEqual([
+    { type: 'locale-change', generation: last(contexts).snapshot.generation, locale: 'en' },
+  ]);
+  expect(last(contexts).snapshot.locale).toBe('en');
 });

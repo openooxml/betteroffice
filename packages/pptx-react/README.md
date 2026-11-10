@@ -123,6 +123,12 @@ use `EditorToolbar` with `mode="commands"`.
 See [Host PPTX editor plugins](https://docs.betteroffice.dev/docs/javascript#host-pptx-editor-plugins)
 for panels, overlays, lifecycle, permissions, and error handling.
 
+Plugins read `snapshot.focused` and `snapshot.locale`, and receive
+`focus-change` and `locale-change`. Focus covers the document surface; docked panels
+and toolbar controls are outside. Locale is the canonical `i18n._lang`, defaulting to `en`.
+`geometry.viewport` is the visible document area in overlay-layer pixels;
+`viewport-change` reports scroll, resize, or zoom changes, with `null` when no layout is shown.
+
 ## Version-checked edit batches
 
 `readContent`, `findText`, `validateEdits`, and `applyEdits` on the editor API return promises and run

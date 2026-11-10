@@ -282,7 +282,7 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
     });
     return () => { current = false; api.current = null; if (typeof cleanup === 'function') cleanup(); };
   }, [presentation, focus, commands]);
-  const plugins = usePeerlessPluginHost(presentation, commands, canvas, api, props, review.diff);
+  const plugins = usePeerlessPluginHost(presentation, commands, canvas, api, props, review.diff, stage);
   useEffect(() => {
     const collaboration = props.collaboration;
     if (!presentation?.current || failure || !collaboration?.onReplica) return;

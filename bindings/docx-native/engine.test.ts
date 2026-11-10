@@ -1354,12 +1354,13 @@ test('native and wasm mark the same list markers as numbered', () => {
         }).document?.package?.theme?.colorScheme ?? {} },
       }));
       const list = JSON.parse(session.build_display_list_json(JSON.stringify({ ...JSON.parse(layout), fontChains }))) as {
-        pages: { primitives: { listMarker?: boolean; listMarkerNumbered?: boolean; text?: string }[] }[];
+        pages: { primitives: { listMarker?: boolean; listMarkerNumbered?: boolean; listMarkerBullet?: boolean; text?: string }[] }[];
       };
       const markers = list.pages.flatMap((page) => page.primitives).filter((primitive) => primitive.listMarker);
       return {
         numbered: markers.filter((marker) => marker.listMarkerNumbered).map((marker) => marker.text).join(''),
-        hidden: markers.filter((marker) => !marker.listMarkerNumbered).map((marker) => marker.text).join(''),
+        bullets: markers.filter((marker) => marker.listMarkerBullet).map((marker) => marker.text).join(''),
+        neither: markers.filter((marker) => !marker.listMarkerNumbered && !marker.listMarkerBullet).length,
       };
     } finally {
       session.free();
@@ -1367,7 +1368,8 @@ test('native and wasm mark the same list markers as numbered', () => {
   };
   const markers = run(native);
   expect(markers.numbered.trim()).toBe('Part 3.');
-  expect(markers.hidden.trim()).not.toBe('');
+  expect(markers.bullets.trim()).not.toBe('');
+  expect(markers.neither).toBe(0);
   expect(run(wasm)).toEqual(markers);
 });
 

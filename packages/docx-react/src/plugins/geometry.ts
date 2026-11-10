@@ -139,6 +139,9 @@ export function scopePluginGeometry(
       get layout() {
         return geometry.layout;
       },
+      get viewport() {
+        return geometry.viewport;
+      },
       get dom() {
         return geometry.dom;
       },
@@ -192,6 +195,24 @@ export function overlayProjector(
     width: rect.width * scale,
     height: rect.height * scale,
   });
+}
+
+export function visibleViewport(scroller: HTMLElement, root: Element, layer: HTMLElement): DocxPluginRect {
+  const box = scroller.getBoundingClientRect();
+  const bounds = root.getBoundingClientRect();
+  const overlay = layer.getBoundingClientRect();
+  const zoom = effectiveZoom(scroller);
+  const scale = effectiveZoom(layer);
+  const left = Math.max(box.left + scroller.clientLeft * zoom, bounds.left);
+  const top = Math.max(box.top + scroller.clientTop * zoom, bounds.top);
+  const right = Math.min(box.left + (scroller.clientLeft + scroller.clientWidth) * zoom, bounds.right);
+  const bottom = Math.min(box.top + (scroller.clientTop + scroller.clientHeight) * zoom, bounds.bottom);
+  return {
+    x: (left - overlay.left) / scale - layer.clientLeft + layer.scrollLeft,
+    y: (top - overlay.top) / scale - layer.clientTop + layer.scrollTop,
+    width: Math.max(0, right - left) / scale,
+    height: Math.max(0, bottom - top) / scale,
+  };
 }
 
 export interface AnchorGeometryAccess {
@@ -617,7 +638,8 @@ export function createPluginGeometry(
   access: (reservation?: boolean) => AnchorGeometryAccess | null,
   held: () => boolean = () => false,
   readPoint?: (clientX: number, clientY: number) => Promise<DocxPointPosition | null>,
-  complete: () => boolean = () => false
+  complete: () => boolean = () => false,
+  viewport: () => DocxPluginRect = () => visibleViewport(layer, layer, layer)
 ): DocxPluginGeometry {
   const shown = () => dom.zoom === layout.zoom && current();
   const projector = createCanvasHostProjector(dom.pagesContainer, queries, dom.zoom);
@@ -838,6 +860,7 @@ export function createPluginGeometry(
   const drawable = () => shown() || (dom.zoom === layout.zoom && held());
   const created: DocxPluginGeometry = {
     layout,
+    get viewport() { return viewport(); },
     dom,
     toOverlayRect: (rect) =>
       drawable() ? toOverlayRect(dom.pagesContainer, layer, dom.zoom, rect) : null,

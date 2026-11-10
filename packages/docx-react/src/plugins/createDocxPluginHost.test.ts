@@ -460,3 +460,103 @@ test('notification idle waits for running handlers and every queued event', asyn
   host.close('unmounted');
   await host.notificationsIdle();
 });
+
+test('focus and locale are deduplicated in snapshots and events', async () => {
+  const { host } = setup();
+  const open = () => host.openWorker('v1');
+  const events: DocxPluginEvent[] = [];
+  host.localeChanged('de');
+  host.setPlugins([defineDocxPlugin({ id: 'signals', createState: () => null,
+    onEvent(_context, event) {
+      events.push(event);
+    } })]);
+  open();
+  await settle();
+  expect(host.activations()[0]!.context.snapshot).toMatchObject({ focused: false, locale: 'de' });
+  expect(events.map((event) => event.type)).toEqual(['load']);
+  host.focusChanged(true);
+  host.focusChanged(true);
+  host.localeChanged('fr');
+  host.localeChanged('fr');
+  await settle();
+  expect(events.filter((event) => event.type === 'focus-change')).toEqual([
+    { type: 'focus-change', generation: host.generation()!, focused: true },
+  ]);
+  expect(events.filter((event) => event.type === 'locale-change')).toEqual([
+    { type: 'locale-change', generation: host.generation()!, locale: 'fr' },
+  ]);
+  expect(host.activations()[0]!.context.snapshot).toMatchObject({ focused: true, locale: 'fr' });
+  host.close('unmounted');
+});
+
+test('viewport changes compare values and clear when layout disappears', async () => {
+  let geometry: DocxPluginGeometry | null = null;
+  const { host } = setup(() => geometry);
+  const open = () => host.openWorker('v1');
+  const events: DocxPluginEvent[] = [];
+  host.setPlugins([defineDocxPlugin({ id: 'viewport', createState: () => null,
+    onEvent(_context, event) { events.push(event); } })]);
+  open();
+  await settle();
+  const layout: DocxPluginLayout = { id: 'layout', version: 'v1', previewVersion: 0, zoom: 1, pageCount: 1 };
+  const rect = { x: 0, y: 0, width: 600, height: 400 };
+  geometry = { layout, viewport: rect } as DocxPluginGeometry;
+  host.layoutChanged(layout);
+  host.geometryChanged();
+  await settle();
+  events.length = 0;
+  host.geometryChanged();
+  geometry.viewport = { ...rect };
+  host.geometryChanged();
+  await settle();
+  expect(events).toEqual([]);
+  geometry.viewport.y = 80;
+  host.geometryChanged();
+  host.geometryChanged();
+  await settle();
+  expect(events).toEqual([{ type: 'viewport-change', generation: host.generation()!,
+    viewport: { ...rect, y: 80 } }]);
+  host.layoutChanged(null);
+  host.geometryChanged();
+  await settle();
+  expect(events.at(-1)).toEqual({ type: 'viewport-change', generation: host.generation()!, viewport: null });
+  expect(events.filter((event) => event.type === 'viewport-change')).toHaveLength(2);
+  host.close('unmounted');
+});
+
+test('a superseded generation receives no queued signals', async () => {
+  let geometry: DocxPluginGeometry | null = null;
+  const { host } = setup(() => geometry);
+  const open = () => host.openWorker('v1');
+  const events: DocxPluginEvent[] = [];
+  let release!: () => void;
+  const pending = new Promise<void>((done) => { release = done; });
+  let first = true;
+  let signal: AbortSignal | undefined;
+  host.setPlugins([defineDocxPlugin({ id: 'superseded', createState: () => null,
+    initialize(context) {
+      if (!first) return;
+      first = false;
+      signal = context.lifetimeSignal;
+      return pending;
+    },
+    onEvent(_context, event) { events.push(event); } })]);
+  open();
+  const superseded = host.generation();
+  host.focusChanged(true);
+  host.localeChanged('de');
+  const layout: DocxPluginLayout = { id: 'layout', version: 'v1', previewVersion: 0, zoom: 1, pageCount: 1 };
+  geometry = { layout, viewport: { x: 0, y: 0, width: 600, height: 400 } } as DocxPluginGeometry;
+  host.layoutChanged(layout);
+  host.geometryChanged();
+  open();
+  release();
+  await settle();
+  expect(signal?.aborted).toBe(true);
+  expect(events.some((event) => event.generation === superseded)).toBe(false);
+  expect(host.activations()[0]!.context.snapshot).toMatchObject({ focused: true, locale: 'de' });
+  host.focusChanged(false);
+  await settle();
+  expect(events.at(-1)).toEqual({ type: 'focus-change', generation: host.generation()!, focused: false });
+  host.close('unmounted');
+});

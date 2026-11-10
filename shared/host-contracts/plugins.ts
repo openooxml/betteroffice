@@ -107,3 +107,24 @@ export interface PluginGrantsChangeEvent<Grant> {
   generation: string;
   grant: Grant;
 }
+
+/** @experimental The plugin API may change in minor releases. */
+export interface PluginFocusChangeEvent {
+  type: 'focus-change';
+  generation: string;
+  focused: boolean;
+}
+
+/** @experimental The plugin API may change in minor releases. */
+export interface PluginLocaleChangeEvent {
+  type: 'locale-change';
+  generation: string;
+  locale: string;
+}
+
+/** @experimental The plugin API may change in minor releases. */
+export interface PluginViewportChangeEvent<Rect> {
+  type: 'viewport-change';
+  generation: string;
+  viewport: Rect | null;
+}

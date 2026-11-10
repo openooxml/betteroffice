@@ -340,14 +340,14 @@ impl Lockstep {
             self.step
         );
         assert_eq!(
-            self.fast.authority.encode_state_vector_v1(),
-            self.oracle.authority.encode_state_vector_v1(),
+            self.fast.authority_for_test().encode_state_vector_v1(),
+            self.oracle.authority_for_test().encode_state_vector_v1(),
             "vector at step {}",
             self.step
         );
         assert_eq!(
-            self.fast.authority.encode_state_as_update_v1(),
-            self.oracle.authority.encode_state_as_update_v1(),
+            self.fast.authority_for_test().encode_state_as_update_v1(),
+            self.oracle.authority_for_test().encode_state_as_update_v1(),
             "state at step {}",
             self.step
         );
@@ -1222,8 +1222,8 @@ fn run_seeded_range_format_sequence(sequence: u32, check_fast_path: bool) -> [bo
             .unwrap_or_else(|error| panic!("seed {seed:#x}, step {step}, {edit:?}: {error}"));
             if check_fast_path && edit.requires_projection_refresh() {
                 assert_eq!(
-                    pair.fast.authority.materialize().unwrap(),
-                    pair.oracle.authority.materialize().unwrap()
+                    pair.fast.authority_for_test().materialize().unwrap(),
+                    pair.oracle.authority_for_test().materialize().unwrap()
                 );
             }
         }
@@ -1301,8 +1301,8 @@ fn invalid_range_format_leaves_state_and_history_unchanged() {
             ..StylePatch::default()
         },
     ] {
-        pair.fast.authority.materialize().unwrap();
-        pair.oracle.authority.materialize().unwrap();
+        pair.fast.authority_for_test().materialize().unwrap();
+        pair.oracle.authority_for_test().materialize().unwrap();
         assert!(
             pair.step(true, |workbook| {
                 workbook.patch_range_style(

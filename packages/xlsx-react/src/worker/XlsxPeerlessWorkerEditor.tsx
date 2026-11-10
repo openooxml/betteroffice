@@ -197,7 +197,7 @@ function guardEntries(entries: readonly OverflowMenuEntry[], ready: () => boolea
 }
 
 export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
-  const { t } = useTranslation();
+  const { t, lang } = useTranslation();
   const [cellClipboard] = useState(() => new CellClipboard());
   const rootRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -588,7 +588,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   }));
   const pluginIdentity = pluginAccess.identity();
   const pluginSelection = pluginIdentity ? pluginAccess.selection!(pluginIdentity) : null;
-  const pluginHost = useXlsxPluginHost({ ...props, access: pluginAccess, commands,
+  const pluginHost = useXlsxPluginHost({ locale: lang, focusRoot: scrollRef, ...props, access: pluginAccess, commands,
     createClients: createPeerlessPluginClients, createGeometry: createPeerlessPluginGeometry,
     readOnly: props.readOnly ?? false, handle: pluginIdentity, selection: pluginSelection, proposals, staleFor,
     proposalsPending: () => coordinator.pending || proposalsPending.current !== null, canvasRef, t,

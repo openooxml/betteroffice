@@ -38,6 +38,11 @@ on:
         default: false
         required: false
         type: boolean
+      publish_readme:
+        description: "Private corpus run: commit this run's aggregate-only section to the README"
+        default: false
+        required: false
+        type: boolean
 
 permissions:
   contents: read
@@ -112,6 +117,12 @@ jobs:
         if: inputs.report_only && inputs.publish_renders
         run: |
           echo "::error::A report-only run cannot publish renders. Re-run with publish_renders off."
+          exit 1
+
+      - name: Keep README publishing to private runs
+        if: inputs.publish_readme && (!inputs.private_corpus || inputs.report_only)
+        run: |
+          echo "::error::publish_readme is for private corpus runs that are not report-only"
           exit 1
 
       - name: Keep private runs aggregate-only
@@ -1326,7 +1337,7 @@ jobs:
         run: bun scripts/office-quality/publish-renders.mjs
 
       - name: Replace the generated README section
-        if: ${{ !inputs.private_corpus && !inputs.report_only && inputs.corpus_origin == '' && inputs.samples == '' && inputs.collection == 'office-quality' }}
+        if: ${{ (!inputs.private_corpus && !inputs.report_only && inputs.corpus_origin == '' && inputs.samples == '' && inputs.collection == 'office-quality') || (inputs.private_corpus && inputs.publish_readme && !inputs.report_only) }}
         run: |
           python3 - <<'PY'
           import os
@@ -1349,7 +1360,7 @@ jobs:
 
       - name: Detect a changed report
         id: changed
-        if: ${{ !inputs.private_corpus && !inputs.report_only && inputs.corpus_origin == '' && inputs.samples == '' && inputs.collection == 'office-quality' }}
+        if: ${{ (!inputs.private_corpus && !inputs.report_only && inputs.corpus_origin == '' && inputs.samples == '' && inputs.collection == 'office-quality') || (inputs.private_corpus && inputs.publish_readme && !inputs.report_only) }}
         run: |
           if git diff --quiet -- README.md; then
             echo "value=false" >> "$GITHUB_OUTPUT"
