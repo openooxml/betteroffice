@@ -416,3 +416,15 @@ test('regular sliced with a whole substitute for bold: the family is sliced, and
   } finally { fonts.dispose(); sliced.dispose(); }
 });
 
+test('a worker provider applies its session CDN snapshot before creating loaders', async () => {
+  const create = spyOn(fonts, 'createFontProvider');
+  restorers.push(() => create.mockRestore());
+  const configured = { baseUrl: 'https://worker-provider.example/', timeoutMs: 4321 };
+  try {
+    await commandFontProvider.load(configured);
+    expect(fonts.fontCdnConfiguration()).toEqual(configured);
+    await commandFontProvider.load({ baseUrl: false, timeoutMs: 30_000 });
+    expect(fonts.fontCdnConfiguration().baseUrl).toBe(false);
+    expect(create).toHaveBeenCalledTimes(2);
+  } finally { fonts.configureFontCdn({ baseUrl: false }); }
+});
