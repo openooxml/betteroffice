@@ -85,15 +85,46 @@ export interface DocxEditSuggestion {
   date: string;
 }
 
-/** One new paragraph; without `styleId` it takes the anchor paragraph's style. */
-export interface DocxParagraphInput {
-  text: string;
-  styleId?: string;
+/**
+ * Character formatting for one inserted run, written over the formatting plain text gets at the
+ * same place. `false`, `'none'` and `'baseline'` remove the run's own value, so the paragraph or
+ * character style shows through. An unknown key or unsupported value refuses the step.
+ */
+export interface DocxTextMarks {
+  bold?: boolean;
+  italic?: boolean;
+  /** `true` is `single`; otherwise a `w:u` value such as `double` or `wave`. */
+  underline?: boolean | string;
+  /** `true` is `sngStrike`. */
+  strike?: boolean | 'sngStrike' | 'dblStrike' | 'noStrike';
+  verticalAlign?: 'superscript' | 'subscript' | 'baseline';
+  /** Six hex digits (`RRGGBB`) or a theme colour such as `accent1`. */
+  color?: string | { themeColor: string };
+  /** One of Word's 16 highlight colour names, or `none`. */
+  highlight?: string;
+  /** 1 to 1638, in half-point steps. */
+  fontSizePt?: number;
+  fontFamily?: string;
 }
 
+/** One run of inserted text. */
+export interface DocxTextRun {
+  /** Non-empty; no paragraph or line breaks. */
+  text: string;
+  marks?: DocxTextMarks;
+}
+
+/** Plain text, or a non-empty list of formatted runs: exactly one of the two. */
+export type DocxTextContent =
+  | { text: string; runs?: never }
+  | { runs: readonly DocxTextRun[]; text?: never };
+
+/** One new paragraph; without `styleId` it takes the anchor paragraph's style. */
+export type DocxParagraphInput = DocxTextContent & { styleId?: string };
+
 export type DocxEditOperation =
-  | { op: 'insertText'; target: DocxTextTarget; at: 'start' | 'end'; text: string }
-  | { op: 'replaceText'; target: DocxTextTarget; text: string }
+  | ({ op: 'insertText'; target: DocxTextTarget; at: 'start' | 'end' } & DocxTextContent)
+  | ({ op: 'replaceText'; target: DocxTextTarget } & DocxTextContent)
   | { op: 'deleteText'; target: DocxTextTarget }
   | {
       op: 'insertParagraphs';
