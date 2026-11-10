@@ -480,7 +480,10 @@ impl SlideRenderer {
             cluster
                 .chars()
                 .filter(|character| needs_visible_glyph(*character))
-                .all(|character| self.browser_covers(candidate.id, character).unwrap_or(false))
+                .all(|character| {
+                    self.browser_covers(candidate.id, character)
+                        .unwrap_or(false)
+                })
         };
         let covering = || {
             self.coverage_candidates(face)
