@@ -17,6 +17,7 @@ export interface FontPreflight {
   complete: boolean;
 }
 
+/** @internal */
 export function createPreflightState(options: {
   assetUrl: () => URL;
   engineKind: 'wasm' | 'native';
