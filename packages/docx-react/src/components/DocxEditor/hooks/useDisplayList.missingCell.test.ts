@@ -109,7 +109,7 @@ async function danglingHost(base: number, order: 'synced' | 'concurrent'): Promi
 for (const [index, order] of (['synced', 'concurrent'] as const).entries()) {
   test(`${order}: typing in a real missing cell through the hook and a real worker is declined without an error, a fallback or a new worker`, async () => {
     const { host, story } = await danglingHost(9300 + index * 10, order);
-    const inputs = JSON.parse(host.layoutDocumentWithRegionsJson(LAYOUT)) as { layout: Layout };
+    const inputs = JSON.parse(host.layoutDocumentWithRegionsJson(LAYOUT));
     let created = 0;
     globalThis.Worker = class {
       constructor() {
@@ -122,7 +122,7 @@ for (const [index, order] of (['synced', 'concurrent'] as const).entries()) {
       const overrides = { getInputs: () => inputs };
       const { result, unmount } = renderHook(
         ({ layout }) => useRustDisplayList(layout, overrides, undefined, undefined, host),
-        { initialProps: { layout: inputs.layout } }
+        { initialProps: { layout: inputs.layout as Layout } }
       );
       await waitFor(() => {
         if (result.current.error) throw result.current.error;

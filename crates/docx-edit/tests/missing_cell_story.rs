@@ -590,7 +590,7 @@ fn a_comment_anchored_in_the_cell_before_the_undo_resolves_to_its_empty_paragrap
         assert_eq!(doc.find_comment_range(&comment).unwrap(), empty);
         let listed = doc.list_comments().unwrap();
         let info = listed.iter().find(|info| info.id == comment).unwrap();
-        assert_eq!(info.ranges, [empty.clone()]);
+        assert_eq!(info.ranges, std::slice::from_ref(&empty));
         assert_eq!(state(doc), before);
     }
 }
