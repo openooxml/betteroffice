@@ -1391,7 +1391,10 @@ export class DocxAgentDocument {
         return outcomes;
       } catch (error) { throw release.failed(error); } finally { release.run(); }
     } catch (error) {
-      const failure = error instanceof DocumentToolError ? error : new DocumentToolError('INVALID_EDIT', error instanceof Error ? error.message : String(error));
+      const failure = error instanceof DocumentToolError ? error
+        : error instanceof Error && (error as Error & { code?: unknown }).code === 'table-unavailable'
+          ? new DocumentToolError('TABLE_UNAVAILABLE', error.message)
+          : new DocumentToolError('INVALID_EDIT', error instanceof Error ? error.message : String(error));
       throw new DocumentToolError(failure.code, `${failure.message} No batch edits were applied.`, { ...failure.details, ...(failed === undefined ? {} : { failedIndex: failed }) });
     }
   }

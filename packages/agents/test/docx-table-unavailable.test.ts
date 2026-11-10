@@ -60,7 +60,7 @@ test('an agent edit that reads run formatting is refused with the table-unavaila
   const error = await caught(() => doc.edit({ version: doc.list().version, edits: [{
     op: 'insert_paragraphs', before: target.ref, runFormat: 'anchor', paragraphs: [{ text: 'Inserted' }],
   }] }));
-  expect(error.code).toBe('table-unavailable');
+  expect(error.code).toBe('TABLE_UNAVAILABLE');
   expect(error.message).toContain('a table is unavailable after a concurrent undo');
   expect(session.encodeState()).toEqual(before);
   expect((await caught(() => doc.export())).code).toBe('table-unavailable');

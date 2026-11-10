@@ -233,6 +233,7 @@ export declare class EditSession {
   stories_changed_since(since: number): string
   story_checksum(story: string): string
   story_ids(): string[]
+  unavailable_tables(): string
   story_len(story: string): number
   story_paragraph_ids(story: string): string
   story_segment_unit_digests(story: string): string

@@ -156,8 +156,7 @@ mod tests {
     #[test]
     fn a_table_in_a_cell_counts_only_while_its_parent_table_is_complete() {
         let doc = EditingDoc::new(71);
-        doc.create_story("body", "Hello", "Normal", "left")
-            .unwrap();
+        doc.create_story("body", "Hello", "Normal", "left").unwrap();
         let outer = doc
             .insert_table(&ctx(), Position::new("body", 0), 1, 1)
             .unwrap();
@@ -171,10 +170,10 @@ mod tests {
                 .diff(&txn, yrs::types::text::YChange::identity)
                 .into_iter()
                 .find_map(|diff| match diff.insert {
-                    yrs::Out::YMap(map) => (crate::map_string(&map, &txn, crate::KIND_KEY)
-                        .as_deref()
-                        == Some("table"))
-                    .then_some(map),
+                    yrs::Out::YMap(map) => {
+                        (crate::map_string(&map, &txn, crate::KIND_KEY).as_deref() == Some("table"))
+                            .then_some(map)
+                    }
                     _ => None,
                 })
                 .unwrap();

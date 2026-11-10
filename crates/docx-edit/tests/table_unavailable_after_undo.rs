@@ -157,11 +157,18 @@ fn crossing_undos_leave_a_table_every_replica_and_a_late_joiner_lay_out_without(
         let run = run(case, false);
         let late = joined(&run.a.doc().encode_state_as_update_v1(), 70);
         for (name, engine) in [("A", &run.a), ("B", &run.b), ("late", &late)] {
-            assert_eq!(keys(engine), [false; 3], "{case} {name}: the table lost its payload");
+            assert_eq!(
+                keys(engine),
+                [false; 3],
+                "{case} {name}: the table lost its payload"
+            );
             let text = laid_out_text(engine, &run.request);
             assert!(text.contains("Before the table"), "{case} {name}");
             assert!(text.contains("After the table"), "{case} {name}");
-            assert!(!text.contains("First cell"), "{case} {name}: the table is skipped");
+            assert!(
+                !text.contains("First cell"),
+                "{case} {name}: the table is skipped"
+            );
             let blocks =
                 yrs_doc_to_layout_blocks(engine.doc(), "body", &RenderEnv::default()).unwrap();
             let paragraphs: Vec<_> = blocks
@@ -194,7 +201,9 @@ fn table_operations_on_an_unavailable_table_refuse_with_a_coded_error_and_change
                 let error = result.unwrap_err();
                 assert_eq!(format!("{error:?}"), "TableUnavailable", "{case} {name}");
                 assert!(
-                    error.to_string().starts_with("a table is unavailable after a concurrent undo"),
+                    error
+                        .to_string()
+                        .starts_with("a table is unavailable after a concurrent undo"),
                     "{case} {name}: {error}"
                 );
                 assert_eq!(
@@ -204,11 +213,7 @@ fn table_operations_on_an_unavailable_table_refuse_with_a_coded_error_and_change
                 );
             }
         }
-        let refused = run
-            .a
-            .doc()
-            .insert_row(&ctx(), &at(0, 0), true)
-            .unwrap_err();
+        let refused = run.a.doc().insert_row(&ctx(), &at(0, 0), true).unwrap_err();
         let coded: docx_edit::session::EngineError = refused.clone().into();
         assert_eq!(format!("{:?}", coded.kind), "TableUnavailable");
         let by_text = docx_edit::session::EngineError::message(refused);
@@ -242,11 +247,19 @@ fn the_second_undoer_redo_restores_the_table_and_the_first_undoer_redo_does_not(
         let mut run = run(case, false);
         run.undo_a.redo();
         exchange(&run.a, &run.b);
-        assert_eq!(keys(&run.a), [false; 3], "{case}: A's redo leaves it unavailable");
+        assert_eq!(
+            keys(&run.a),
+            [false; 3],
+            "{case}: A's redo leaves it unavailable"
+        );
         run.undo_b.redo();
         exchange(&run.a, &run.b);
         for (name, engine) in [("A", &run.a), ("B", &run.b)] {
-            assert_eq!(keys(engine), [true; 3], "{case} {name}: B's redo restores it");
+            assert_eq!(
+                keys(engine),
+                [true; 3],
+                "{case} {name}: B's redo restores it"
+            );
             assert!(laid_out_text(engine, &run.request).contains("First cell"));
             engine.doc().insert_row(&ctx(), &at(0, 0), true).unwrap();
         }
@@ -304,9 +317,8 @@ fn a_table_that_lost_only_its_properties_takes_two_units_in_layout_and_geometry_
     let b = joined(&state, 62);
     let mut undo_a = a.doc().undo_manager();
     let mut undo_b = b.doc().undo_manager();
-    let patch = |key: &str, value: yrs::Any| {
-        std::collections::HashMap::from([(key.to_owned(), value)])
-    };
+    let patch =
+        |key: &str, value: yrs::Any| std::collections::HashMap::from([(key.to_owned(), value)]);
     a.doc()
         .set_table_properties(&ctx(), &table(), &patch("width", yrs::Any::from(4000.0)))
         .unwrap();
@@ -323,7 +335,11 @@ fn a_table_that_lost_only_its_properties_takes_two_units_in_layout_and_geometry_
     assert!(undo_b.undo());
     exchange(&a, &b);
     for (name, engine) in [("A", &a), ("B", &b)] {
-        assert_eq!(keys(engine), [false, true, true], "{name}: only tblPr is gone");
+        assert_eq!(
+            keys(engine),
+            [false, true, true],
+            "{name}: only tblPr is gone"
+        );
         let text = laid_out_text(engine, &request);
         assert!(
             text.contains("After the table") && !text.contains("First cell"),

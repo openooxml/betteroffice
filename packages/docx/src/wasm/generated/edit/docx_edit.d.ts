@@ -1393,6 +1393,11 @@ export class EditSession {
      */
     track_undo(): void;
     /**
+     * `[{"story","tableIndex"}]`: the tables that lost their payload to a concurrent undo.
+     * @internal
+     */
+    unavailable_tables(): string;
+    /**
      * Current undo grouping policy.
      */
     undo_capture_mode(): string;
@@ -2032,6 +2037,7 @@ export interface InitOutput {
     readonly editsession_take_base_latin_miss: (a: number) => number;
     readonly editsession_toggle_mark: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number, number, number];
     readonly editsession_track_undo: (a: number) => void;
+    readonly editsession_unavailable_tables: (a: number) => [number, number];
     readonly editsession_undo: (a: number) => number;
     readonly editsession_undo_capture_mode: (a: number) => [number, number];
     readonly editsession_update_comment_metadata_json: (a: number, b: number, c: number, d: number, e: number) => [number, number];
