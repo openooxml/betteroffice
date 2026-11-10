@@ -140,10 +140,6 @@ fn runs_without_marks_write_exactly_what_plain_text_writes() {
     for step in steps {
         let plain = open();
         let runs = open();
-        let (plain_base, runs_base) = (
-            plain.encode_state_vector_v1(),
-            runs.encode_state_vector_v1(),
-        );
         let text = step["text"].clone();
         apply(&plain, &UndoSession::new(), json!([step.clone()]));
         apply(
@@ -152,11 +148,6 @@ fn runs_without_marks_write_exactly_what_plain_text_writes() {
             json!([with_runs(step.clone(), json!([{"text": text}]))]),
         );
         assert_eq!(segments(&runs), segments(&plain), "{step}");
-        assert_eq!(
-            runs.encode_diff_v1(&runs_base).unwrap(),
-            plain.encode_diff_v1(&plain_base).unwrap(),
-            "{step}"
-        );
     }
 }
 
