@@ -10,7 +10,13 @@ import * as publicApi from './index';
 import type { PptxAsyncEditorApi } from './worker/createPeerlessEditorApi';
 import type { PptxPluginContext } from './plugins/types';
 
-test('selectText results and selection direction match between in-thread and peerless editors', async () => {
+test('selectText results and selection direction match between in-thread and peerless editors',
+  () => selectTextParity(false), 30_000);
+
+test('plugin navigation selectText results and selection direction match between in-thread and peerless editors',
+  () => selectTextParity(true), 30_000);
+
+async function selectTextParity(viaPlugin: boolean) {
   let context: PptxPluginContext<null> | undefined;
   const plugin = publicApi.definePptxPlugin({
     id: 'select-text-parity',
@@ -25,30 +31,74 @@ test('selectText results and selection direction match between in-thread and pee
   const worker = await open({ plugins: [plugin] });
   const target = await story(worker.api);
   expect(target.text.length).toBeGreaterThanOrEqual(4);
-  const outside = target.text.length + 1;
+  const insertion = 4;
+  const inserted = '😀';
+  const text = target.text.slice(0, insertion) + inserted + target.text.slice(insertion);
+  const last = text.length;
+  const outside = last + 1;
+  const split = insertion + 1;
   const collapsed = { anchor: 2, focus: 2 };
   const cases = [
     { start: 1, end: 4, accepted: true, selection: { anchor: 1, focus: 4 } },
     { start: 4, end: 1, accepted: true, selection: { anchor: 4, focus: 1 } },
     { start: 2, end: 2, accepted: true, selection: collapsed },
-    { start: -1, end: 1, accepted: false, selection: collapsed },
-    { start: 1, end: -1, accepted: false, selection: collapsed },
-    { start: outside, end: 1, accepted: false, selection: collapsed },
-    { start: 1, end: outside, accepted: false, selection: collapsed },
-    { start: 1.5, end: 4, accepted: false, selection: collapsed },
-    { start: 1, end: 4.5, accepted: false, selection: collapsed },
+    { start: last, end: last, accepted: true, selection: { anchor: last, focus: last } },
+    { start: last, end: 1, accepted: true, selection: { anchor: last, focus: 1 } },
+    { start: 1, end: last, accepted: true, selection: { anchor: 1, focus: last } },
+    { start: -1, end: 1, accepted: false },
+    { start: 1, end: -1, accepted: false },
+    { start: outside, end: 1, accepted: false },
+    { start: 1, end: outside, accepted: false },
+    { start: outside, end: outside, accepted: false },
+    { start: 1.5, end: 4, accepted: false },
+    { start: 1, end: 4.5, accepted: false },
+    { start: split, end: 1, accepted: false },
+    { start: 1, end: split, accepted: false },
+    { start: split, end: split, accepted: false },
   ];
   const exercise = async (api: PptxAsyncEditorApi) => {
     const current = await story(api);
     expect(current.text).toBe(target.text);
+    await act(async () => {
+      expect(await api.applyEdits({
+        expectVersion: await api.version(),
+        steps: [{ op: 'insertText', at: 'start', text: inserted, target: {
+          kind: 'range', slideId: current.slideId, shapeId: current.shapeId, storyId: current.storyId,
+          start: insertion, end: insertion,
+        } }],
+      })).toMatchObject({ ok: true, applied: true });
+    });
+    expect((await story(api)).text).toBe(text);
+    await waitFor(() => expect(context).toBeDefined());
+    const select = async (start: number, end: number): Promise<boolean> => {
+      if (!viaPlugin) {
+        return api.selectText({ slide: 1, shapeId: current.shapeId, storyId: current.storyId, start, end });
+      }
+      const result = await context!.navigation.selectText({
+        slideId: current.slideId, shapeId: current.shapeId, storyId: current.storyId, anchor: start, focus: end,
+      }, { expectVersion: await api.version() });
+      return result.ok;
+    };
+    const offsets = [0];
+    for (const character of text) offsets.push(offsets[offsets.length - 1]! + character.length);
+    let refused = 0;
     const results = [];
-    for (const { start, end, accepted, selection } of cases) {
+    for (const { start, end, accepted, selection: selected } of cases) {
+      const selection = selected ?? { anchor: 0, focus: offsets[++refused]! };
+      const expected = {
+        slideId: current.slideId, slide: 1,
+        target: { kind: 'text', shapeId: current.shapeId, storyId: current.storyId, ...selection },
+      };
+      if (!accepted) {
+        await act(async () => { expect(await select(selection.anchor, selection.focus)).toBe(true); });
+        await waitFor(() => expect(context?.snapshot.selection).toEqual(expected));
+      }
       let result!: boolean;
       await act(async () => {
-        result = await api.selectText({ slide: 1, shapeId: current.shapeId, storyId: current.storyId, start, end });
+        result = await select(start, end);
       });
       expect(result).toBe(accepted);
-      await waitFor(() => expect(direction()).toEqual(selection));
+      await waitFor(() => expect(context?.snapshot.selection).toEqual(expected));
       results.push({ accepted: result, selection: direction() });
     }
     return results;
@@ -66,7 +116,7 @@ test('selectText results and selection direction match between in-thread and pee
     await waitFor(() => expect(api).toBeDefined(), { timeout: 15_000 });
     expect(await exercise(api!)).toEqual(workerResults);
   } finally { inThread.unmount(); warn.mockRestore(); }
-}, 30_000);
+}
 
 for (const inThread of [false, true]) {
   for (const snapshot of [false, true]) {

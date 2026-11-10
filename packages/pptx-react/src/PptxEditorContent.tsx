@@ -803,11 +803,7 @@ export function PptxEditorContent({
       if (
         !handle ||
         !current ||
-        !Number.isInteger(target.slide) ||
-        !Number.isInteger(target.start) ||
-        !Number.isInteger(target.end) ||
-        target.start < 0 ||
-        target.end < 0
+        !Number.isInteger(target.slide)
       ) {
         return false;
       }
@@ -815,8 +811,8 @@ export function PptxEditorContent({
       const shape = slide ? findShape(slide.shapes, target.shapeId) : null;
       if (!shape?.textStories.some((story) => story.id === target.storyId)) return false;
       try {
-        const story = handle.story(target.storyId);
-        if (target.start > story.length || target.end > story.length) return false;
+        const text = storyText(handle.story(target.storyId));
+        if (!validTextOffset(text, target.start) || !validTextOffset(text, target.end)) return false;
         if (!showSlide(target.slide - 1, false)) return false;
         setSelection({
           shapeId: target.shapeId,
@@ -903,11 +899,8 @@ export function PptxEditorContent({
         return 'missing-target';
       }
       const { anchor, focus: head } = target;
-      if (!Number.isInteger(anchor) || !Number.isInteger(head) || anchor < 0 || head < 0) {
-        return 'missing-target';
-      }
-      const length = handle.story(target.storyId).length;
-      if (anchor > length || head > length) return 'missing-target';
+      const text = storyText(handle.story(target.storyId));
+      if (!validTextOffset(text, anchor) || !validTextOffset(text, head)) return 'missing-target';
       if (reviewingRef.current) return 'unsupported';
       if (!showSlide(located.index, false)) return 'layout-unavailable';
       setSelection({ shapeId: shape.id, storyId: target.storyId, anchor, focus: head });
@@ -3427,6 +3420,13 @@ function storyText(story: StorySnapshot): string {
   return story.paragraphs
     .map((paragraph) => paragraph.runs.map((run) => run.text).join(''))
     .join('\n');
+}
+
+function validTextOffset(text: string, offset: number): boolean {
+  return Number.isSafeInteger(offset) && offset >= 0 && offset <= text.length &&
+    !(offset > 0 && offset < text.length && text.charCodeAt(offset - 1) >= 0xd800 &&
+      text.charCodeAt(offset - 1) <= 0xdbff && text.charCodeAt(offset) >= 0xdc00 &&
+      text.charCodeAt(offset) <= 0xdfff);
 }
 
 function formatStory(
