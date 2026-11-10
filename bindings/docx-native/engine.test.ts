@@ -335,8 +335,77 @@ describe('docx native engine parity', () => {
     }
   }, 30_000);
 
+  test('a formed ligature splits hit and highlight geometry evenly between its letters, in both engines', () => {
+    const encoder = new TextEncoder();
+    const carlito = new Uint8Array(readFileSync(new URL('../../packages/fonts/assets/Carlito-Regular.ttf', import.meta.url)));
+    const officeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml';
+    const bytes = wasm.rezip_docx({
+      '[Content_Types].xml': encoder.encode(`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="${officeType}.document.main+xml"/></Types>`),
+      '_rels/.rels': encoder.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'),
+      'word/document.xml': encoder.encode('<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p><w:r><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:cs="Calibri"/><w14:ligatures w14:val="standard"/></w:rPr><w:t xml:space="preserve">office fifty</w:t></w:r></w:p><w:sectPr><w:pgSz w:w="4320" w:h="2880"/><w:pgMar w:top="600" w:right="300" w:bottom="600" w:left="300" w:header="150" w:footer="150" w:gutter="0"/></w:sectPr></w:body></w:document>'),
+    });
+    const geometry = (engine: Engine) => {
+      const session = new engine.EditSession(41);
+      try {
+        session.open_docx(bytes, true, 'opening');
+        const font = session.register_measure_font(carlito);
+        const request = {
+          bodyStory: 'body',
+          regions: { sections: [{
+            sectionId: 'main',
+            pageSize: { w: 288, h: 192 },
+            margins: { top: 40, right: 20, bottom: 40, left: 20, header: 10, footer: 10 },
+          }] },
+          measurement: {
+            fontChains: { 'calibri|0|0': [font] } as Record<string, number[]>,
+            defaults: { fontSize: 11, fontFamily: 'Calibri' },
+            authoritativeShaping: true,
+          },
+          renderEnv: {},
+        };
+        const requirements = JSON.parse(session.layout_font_requirements_json(JSON.stringify(request))) as { key: string }[];
+        for (const requirement of requirements) request.measurement.fontChains[requirement.key] = [font];
+        session.layout_document_with_regions_json(JSON.stringify(request));
+        const frame = session.build_display_list_frame(JSON.stringify({ fontChains: request.measurement.fontChains }), 0);
+        const page = applyFrameDelta(null, decodeFrameDelta(frame)).pages[0]!.page;
+        const ligatures = page.primitives.flatMap((primitive) => {
+          if (primitive.kind !== 'glyphRun') return [];
+          const run = primitive as GlyphRunPrimitive & { docStart: number };
+          return run.glyphs.flatMap((glyph, index) => {
+            const end = run.glyphs[index + 1]?.cluster ?? run.text.length;
+            const letters = end - glyph.cluster;
+            return letters > 1 ? [{ start: run.docStart + glyph.cluster, letters, x: glyph.x, advance: glyph.advance, y: glyph.y }] : [];
+          });
+        });
+        return ligatures.map((ligature) => {
+          const share = ligature.advance / ligature.letters;
+          const letters = Array.from({ length: ligature.letters }, (_, index) => {
+            const position = ligature.start + index;
+            const [rect] = JSON.parse(session.display_range_rects_json(position, position + 1)) as { x: number; width: number }[];
+            const hit = JSON.parse(session.display_hit_test_regions_json(0, ligature.x + share * (index + 0.75), ligature.y - 3)) as { pos: number };
+            return { position, x: rect!.x, width: rect!.width, hit: hit.pos };
+          });
+          return { ...ligature, share, letters };
+        });
+      } finally {
+        session.free();
+      }
+    };
+    const expected = geometry(wasm);
+    expect(geometry(native)).toEqual(expected);
+    expect(expected.length).toBeGreaterThan(0);
+    for (const ligature of expected) {
+      expect(ligature.share).toBeGreaterThan(1);
+      for (const [index, letter] of ligature.letters.entries()) {
+        expect(letter.x).toBeCloseTo(ligature.x + ligature.share * index, 3);
+        expect(letter.width).toBeCloseTo(ligature.share, 3);
+        expect(letter.hit).toBe(letter.position + 1);
+      }
+    }
+  }, 30_000);
+
   test.each([
-    ['Arabic', 'مرحبا', 'بالعالم', true, () => new Uint8Array(readFileSync(new URL('../../packages/fonts/assets/NotoNaskhArabic-Regular.ttf', import.meta.url)))],
+    ['Arabic','مرحبا', 'بالعالم', true, () => new Uint8Array(readFileSync(new URL('../../packages/fonts/assets/NotoNaskhArabic-Regular.ttf', import.meta.url)))],
     ['Devanagari', 'नमस्ते', 'क्षत्रिय', false, () => wasm.decodeFontFace(new Uint8Array(readFileSync(new URL('../../packages/fonts-intl/assets/NotoSansDevanagari-Regular.ttf.zst', import.meta.url))), 'zstd').font],
   ] as const)('measured glyph runs of a %s paragraph match in both engines', (_script, first, second, rtl, scriptFont) => {
     const encoder = new TextEncoder();
