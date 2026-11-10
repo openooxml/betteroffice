@@ -1336,6 +1336,7 @@ test('native and wasm read the same page text, cutting paragraphs and tables whe
     + `<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="8000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>${tall}</w:t></w:r></w:p></w:tc></w:tr></w:tbl>`
     + `<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="4000"/><w:gridCol w:w="4000"/></w:tblGrid>${[
       '<w:tr><w:tc><w:tcPr><w:gridSpan w:val="2"/></w:tcPr><w:p><w:r><w:t>Merged across</w:t></w:r></w:p></w:tc></w:tr>',
+      '<w:tr><w:trPr><w:hidden/></w:trPr><w:tc><w:p><w:r><w:rPr><w:vanish/></w:rPr><w:t>Hidden row</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:rPr><w:vanish/></w:rPr><w:t>Hidden cell</w:t></w:r></w:p></w:tc></w:tr>',
       '<w:tr><w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr><w:p><w:r><w:t>Merged down</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Side one</w:t></w:r></w:p></w:tc></w:tr>',
       '<w:tr><w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p/></w:tc><w:tc><w:p><w:r><w:t>Side two</w:t></w:r></w:p><w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Nested</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/></w:tc></w:tr>',
     ].join('')}</w:tbl>`
@@ -1390,6 +1391,7 @@ test('native and wasm read the same page text, cutting paragraphs and tables whe
   const cells = pages.flatMap(({ pageIndex, paragraphs }) => paragraphs.filter(({ inTable }) => inTable).map(({ text }) => [pageIndex, text] as const));
   const expectedCells = [...Array.from({ length: 60 }, (_, index) => [`R${index}`, `V${index}`]).flat(), tall, 'Merged across', 'Merged down', 'Side one', 'Side two', 'Nested'];
   expect(cells.map(([, text]) => text)).toEqual(expectedCells);
+  expect(pages.flatMap(({ paragraphs }) => paragraphs).filter(({ text }) => /Hidden (row|cell)/.test(text))).toEqual([]);
   expect(new Set(cells.map(([pageIndex]) => pageIndex)).size).toBeGreaterThanOrEqual(2);
   const pageField = pages.flatMap(({ pageIndex, paragraphs }) => paragraphs.filter(({ text }) => /^\d+$/.test(text)).map(({ text }) => [pageIndex, text]));
   expect(pageField).toEqual([[pageField[0]![0], String(Number(pageField[0]![0]) + 1)]]);
