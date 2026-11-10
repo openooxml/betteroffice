@@ -112,18 +112,24 @@ fn leading_breaks(paragraph: &str) -> Option<Vec<&'static str>> {
     let mut open: Vec<&str> = Vec::new();
     let mut skip = 0usize;
     for tag in tags(paragraph)? {
-        if tag.end {
-            open.pop();
-            skip = skip.saturating_sub(1);
+        if skip > 0 {
+            if tag.end {
+                skip -= 1;
+            } else if !tag.empty {
+                skip += 1;
+            }
             continue;
         }
-        if skip > 0 {
-            skip += usize::from(!tag.empty);
+        if tag.end {
+            open.pop();
             continue;
         }
         match (open.as_slice(), tag.name) {
             ([], "w:p") | (["w:p"], "w:r") => {}
-            (["w:p"], "w:pPr") | (["w:p", "w:r"], "w:rPr") => skip = usize::from(!tag.empty),
+            (["w:p"], "w:pPr") | (["w:p", "w:r"], "w:rPr") => {
+                skip = usize::from(!tag.empty);
+                continue;
+            }
             (["w:p", "w:r"], "w:br") => {
                 match attribute(&tag, "w:type")
                     .and_then(|range| unescaped(paragraph, range))
@@ -4702,7 +4708,7 @@ mod tests {
             )
         };
         let vertical = "<w:p w14:paraId=\"0000000B\"><w:pPr><w:textDirection w:val=\"tbRl\"/></w:pPr><w:r><w:t>b</w:t></w:r></w:p>";
-        let gained = "<w:p w14:paraId=\"0000000B\"><w:r><w:br w:type=\"page\"/><w:br w:type=\"column\"/><w:t>b</w:t></w:r></w:p>";
+        let gained = "<w:p w14:paraId=\"0000000B\"><w:pPr><w:rPr><w:b/></w:rPr></w:pPr><w:r><w:br w:type=\"page\"/><w:br w:type=\"column\"/><w:t>b</w:t></w:r></w:p>";
         let expected = vertical.replace(
             "</w:pPr>",
             "</w:pPr><w:r><w:br w:type=\"page\"/></w:r><w:r><w:br w:type=\"column\"/></w:r>",
