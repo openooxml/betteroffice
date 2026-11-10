@@ -122,6 +122,7 @@ test('freezes canonical metadata and every package version in one plan', async (
         version: name.endsWith('docx-react') ? '4.5.6' : '1.2.3',
         gitHead: 'd'.repeat(40),
       }),
+      packument: async () => ({ versions: { '1.0.0': { gitHead: 'd'.repeat(40) }, '2.0.0': { gitHead: 'e'.repeat(40) } } }),
       poolSize: 2,
     }
   );
@@ -129,7 +130,7 @@ test('freezes canonical metadata and every package version in one plan', async (
   expect(plan.commit).toBe('c'.repeat(40));
   expect(plan.versions).toEqual({ docx: '1.2.3', pptx: '1.2.3', xlsx: '1.2.3' });
   expect(plan.react_version).toBe('4.5.6');
-  expect(plan.fonts_version).toBe('1.2.3');
+  expect(plan.published_fonts).toEqual({ pptx: '1.0.0' });
   expect(plan.docx_published_source_sha).toBe('d'.repeat(40));
   expect(plan.pptx_published_source_sha).toBe('d'.repeat(40));
   expect(plan.samples.map((sample) => sample.id)).toEqual([
@@ -138,8 +139,9 @@ test('freezes canonical metadata and every package version in one plan', async (
   ]);
 });
 
-test('the published fonts package version is frozen in the plan, and an unresolvable one stops planning', async () => {
-  const dependencies = (registry: (name: string) => Promise<any>) => ({
+test('the published channel uses the fonts release from the published format release commit, not the latest fonts', async () => {
+  const release = 'a'.repeat(40);
+  const dependencies = (versions: Record<string, { gitHead: string }>) => ({
     download: async (url: string) => {
       if (url.endsWith('/collections/office-quality.json'))
         return JSON.stringify({ schema_version: 1, id: 'office-quality', samples: ['pptarena-001-original'] });
@@ -147,17 +149,18 @@ test('the published fonts package version is frozen in the plan, and an unresolv
       throw new Error(`Unexpected URL: ${url}`);
     },
     command: async (_program: string, args: string[]) => (args[0] === 'rev-parse' ? `${hash}\n` : `${'c'.repeat(40)}\n`),
-    registry,
+    registry: async (name: string) => ({ version: name.endsWith('docx-react') ? '4.5.6' : '0.5.1', gitHead: release }),
+    packument: async () => ({ 'dist-tags': { latest: '0.9.0' }, versions }),
     poolSize: 1,
   });
-  const plan = await preparePlan({}, dependencies(async (name: string) => ({
-    version: name === '@betteroffice/fonts' ? '7.8.9' : name.endsWith('docx-react') ? '4.5.6' : '1.2.3',
-    gitHead: 'd'.repeat(40),
-  })) as any);
-  expect(plan.fonts_version).toBe('7.8.9');
-  expect(plan.react_version).toBe('4.5.6');
-  await expect(preparePlan({}, dependencies(async (name: string) => {
-    if (name === '@betteroffice/fonts') throw new Error('404 Not Found');
-    return { version: name.endsWith('docx-react') ? '4.5.6' : '1.2.3', gitHead: 'd'.repeat(40) };
-  }) as any)).rejects.toThrow('404 Not Found');
+  const plan = await preparePlan({}, dependencies({
+    '0.4.1': { gitHead: 'b'.repeat(40) },
+    '0.4.2': { gitHead: release },
+    '0.9.0': { gitHead: 'f'.repeat(40) },
+  }) as any);
+  expect(plan.published_fonts).toEqual({ pptx: '0.4.2' });
+  await expect(preparePlan({}, dependencies({ '0.9.0': { gitHead: 'f'.repeat(40) } }) as any))
+    .rejects.toThrow('Expected one @betteroffice/fonts release from the release commit of @betteroffice/pptx@0.5.1, found 0');
+  await expect(preparePlan({}, dependencies({ '0.4.2': { gitHead: release }, '0.4.3': { gitHead: release } }) as any))
+    .rejects.toThrow('found 2');
 });

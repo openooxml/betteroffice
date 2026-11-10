@@ -520,6 +520,7 @@ test('the reconciler fails on a channel that scored nothing, and the summary lea
 
 test('planning states which font package each channel renders with', () => {
   const plan = prepare.steps.find((step: any) => step.id === 'plan').run;
-  expect(plan).toContain('published channel @betteroffice/fonts@${plan.fonts_version}');
+  expect(plan).toContain('published channel: @betteroffice/fonts@${version}, the fonts release from the same release commit as @betteroffice/${format}@${plan.versions[format]}');
+  expect(plan).toContain('commit channel: the font packages of this checkout');
   expect(plan).toContain('### Font sources');
 });

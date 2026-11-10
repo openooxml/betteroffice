@@ -108,10 +108,11 @@ async function reference({ id, format, metadata }) {
   };
 }
 
-function publishedFontsVersion() {
-  if (!/^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(plan.fonts_version ?? ''))
-    throw new Error('The plan does not record the published @betteroffice/fonts version');
-  return plan.fonts_version;
+function publishedFontsVersion(format) {
+  const version = plan.published_fonts?.[format];
+  if (!/^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(version ?? ''))
+    throw new Error(`The plan does not record the @betteroffice/fonts release of published ${format}`);
+  return version;
 }
 
 async function packageRoot(name, version) {
@@ -214,7 +215,7 @@ for (const format of selectedFormats) {
       : {}),
     ...(format === 'docx'
       ? {}
-      : { QUALITY_FONTS_ROOT: await packageRoot('@betteroffice/fonts', publishedFontsVersion()) }),
+      : { QUALITY_FONTS_ROOT: await packageRoot('@betteroffice/fonts', publishedFontsVersion(format)) }),
   };
   for (const channel of ['published', 'commit']) {
     const server = await viewer({

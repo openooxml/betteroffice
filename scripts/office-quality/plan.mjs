@@ -34,7 +34,7 @@ function validateSample(sample) {
   validateReferenceMetadata(sample.metadata, sample.id);
 }
 
-export function createPlan({ source_sha, commit, versions, react_version, fonts_version, samples, docx_published_source_sha, xlsx_published_source_sha, pptx_published_source_sha }) {
+export function createPlan({ source_sha, commit, versions, react_version, published_fonts, samples, docx_published_source_sha, xlsx_published_source_sha, pptx_published_source_sha }) {
   if (!isSha(source_sha) || !isSha(commit))
     throw new Error('Invalid fidelity plan revision');
   if (
@@ -42,7 +42,8 @@ export function createPlan({ source_sha, commit, versions, react_version, fonts_
     !FORMATS.every((format) => isVersion(versions[format])) ||
     Object.keys(versions).length !== FORMATS.length ||
     !isVersion(react_version) ||
-    (fonts_version !== undefined && !isVersion(fonts_version))
+    (published_fonts !== undefined && (typeof published_fonts !== 'object' || published_fonts === null ||
+      !Object.entries(published_fonts).every(([format, version]) => FONT_FORMATS.includes(format) && isVersion(version))))
   )
     throw new Error('Invalid fidelity plan versions');
   if (!Array.isArray(samples) || !samples.length || samples.length > MAX_SAMPLES)
@@ -68,7 +69,7 @@ export function createPlan({ source_sha, commit, versions, react_version, fonts_
     commit,
     versions,
     react_version,
-    ...(fonts_version === undefined ? {} : { fonts_version }),
+    ...(published_fonts === undefined ? {} : { published_fonts }),
     formats,
     samples,
     ...(docx_published_source_sha === undefined ? {} : { docx_published_source_sha }),
@@ -119,11 +120,27 @@ export async function mapPool(values, limit, task) {
   return results;
 }
 
+export const FONT_FORMATS = ['pptx', 'xlsx'];
+
+export function releasedFonts(fonts, releases) {
+  const result = {};
+  for (const [format, release] of Object.entries(releases)) {
+    const matches = Object.entries(fonts?.versions ?? {})
+      .filter(([, manifest]) => /^[a-f0-9]{40}$/.test(release?.gitHead ?? '') && manifest?.gitHead === release.gitHead)
+      .map(([version]) => version);
+    if (matches.length !== 1)
+      throw new Error(`Expected one @betteroffice/fonts release from the release commit of @betteroffice/${format}@${release?.version}, found ${matches.length}`);
+    result[format] = matches[0];
+  }
+  return result;
+}
+
 export async function preparePlan(environment, dependencies) {
   const {
     download: downloadMetadata,
     command,
     registry,
+    packument,
     poolSize = METADATA_POOL_SIZE,
   } = dependencies;
   const origin = corpusOrigin(environment);
@@ -142,16 +159,20 @@ export async function preparePlan(environment, dependencies) {
     command('git', ['log', '-1', '--format=%H', '--', '.', ':!README.md']),
     ...FORMATS.map((format) => registry(`@betteroffice/${format}`)),
     registry('@betteroffice/docx-react'),
-    registry('@betteroffice/fonts'),
   ]);
+  const fontFormats = FONT_FORMATS.filter((format) => samples.some((sample) => sample.format === format));
+  const published_fonts = fontFormats.length
+    ? releasedFonts(await packument('@betteroffice/fonts'), Object.fromEntries(fontFormats.map((format) =>
+        [format, published[FORMATS.indexOf(format)]])))
+    : undefined;
   return createPlan({
     source_sha: source_sha.trim(),
     commit: commit.trim(),
     versions: Object.fromEntries(
       FORMATS.map((format, index) => [format, published[index].version])
     ),
-    react_version: published.at(-2).version,
-    fonts_version: published.at(-1).version,
+    react_version: published.at(-1).version,
+    ...(published_fonts ? { published_fonts } : {}),
     samples,
     ...(samples.some((sample) => sample.format === 'docx')
       ? { docx_published_source_sha: published[0].gitHead ?? 'missing' }
@@ -188,7 +209,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
         2 * 1024 * 1024
       )
     );
-  const plan = await preparePlan(process.env, { download, command, registry });
+  const packument = async (name) =>
+    JSON.parse(await download(`https://registry.npmjs.org/${encodeURIComponent(name)}`, 32 * 1024 * 1024));
+  const plan = await preparePlan(process.env, { download, command, registry, packument });
   const path = await writePlan(
     process.env.QUALITY_OUTPUT ?? '.source/office-quality/plan',
     plan
