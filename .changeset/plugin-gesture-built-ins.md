@@ -7,4 +7,4 @@
 '@betteroffice/pptx-i18n': patch
 ---
 
-With opt-in grants, a trusted gesture in a plugin's own UI admits its mutating built-ins through dispatch and microtasks queued before it settles, across its code paths. Other plugins and later calls refuse with `unsupported-policy`.
+Granted mutating built-ins now run from a trusted gesture in the plugin's own UI until that event's dispatch and queued microtasks finish; other plugins and later calls refuse with `unsupported-policy`. Plugin panels, overlays and sidebar cards sit in a `display: contents` wrapper.
