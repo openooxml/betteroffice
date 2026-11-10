@@ -278,7 +278,17 @@ pub fn docx_font_preflight(bytes: &[u8]) -> Result<FontPreflight, PreflightError
         return Err(PreflightError::Xml);
     }
     let rels = parts.part("word/_rels/document.xml.rels", &mut complete)?;
-    let rels = relationships_from(rels.as_ref(), "word", &mut complete);
+    let mut rels = relationships_from(rels.as_ref(), "word", &mut complete);
+    let explicit = rels.len();
+    for kind in ["footnotes", "endnotes"] {
+        if !rels.iter().any(|rel| rel.kind == kind) {
+            rels.push(Relationship {
+                id: String::new(),
+                kind: kind.to_owned(),
+                target: format!("word/{kind}.xml"),
+            });
+        }
+    }
     let target = |kind, default: &str| {
         rels.iter()
             .find(|rel| rel.kind == kind)
@@ -311,7 +321,7 @@ pub fn docx_font_preflight(bytes: &[u8]) -> Result<FontPreflight, PreflightError
     references(&document, &mut header_footer, &mut notes, &mut complete);
     let mut visited = BTreeSet::new();
     let mut loaded = BTreeSet::new();
-    for rel in &rels {
+    for (index, rel) in rels.iter().enumerate() {
         if (matches!(rel.kind.as_str(), "header" | "footer") && header_footer.contains(&rel.id))
             || matches!(rel.kind.as_str(), "footnotes" | "endnotes")
         {
@@ -321,7 +331,7 @@ pub fn docx_font_preflight(bytes: &[u8]) -> Result<FontPreflight, PreflightError
             if let Some(root) = parts.part(&rel.target, &mut complete)? {
                 loaded.insert(rel.target.clone());
                 related.push((rel, root));
-            } else {
+            } else if index < explicit {
                 complete = false;
             }
         }

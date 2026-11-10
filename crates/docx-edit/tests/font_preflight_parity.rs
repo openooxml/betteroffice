@@ -1,0 +1,191 @@
+use docx_edit::{EngineSession, StoryInfoKind, seed_from_docx};
+use serde_json::{Value, json};
+
+const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+const REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+
+fn integral_numbers(value: &mut Value) {
+    match value {
+        Value::Number(number) => {
+            if let Some(float) = number.as_f64().filter(|_| number.is_f64())
+                && float.fract() == 0.0
+                && float.abs() < 9.0e15
+            {
+                *value = json!(float as i64);
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(integral_numbers),
+        Value::Object(fields) => fields.values_mut().for_each(integral_numbers),
+        _ => {}
+    }
+}
+
+fn engine_faces(bytes: &[u8]) -> Vec<(String, bool, bool)> {
+    let engine = EngineSession::new(1);
+    seed_from_docx(engine.doc(), bytes).unwrap();
+    let sections: Vec<_> = engine
+        .doc()
+        .list_sections()
+        .unwrap()
+        .into_iter()
+        .map(|section| {
+            json!({"sectionId": section.closing_paragraph_id, "properties": section.authored})
+        })
+        .collect();
+    let mut notes = Vec::new();
+    for story in engine.doc().list_stories().stories {
+        let (prefix, kind) = match story.kind {
+            StoryInfoKind::Footnote => ("fn:", "footnote"),
+            StoryInfoKind::Endnote => ("en:", "endnote"),
+            _ => continue,
+        };
+        let id: i64 = story.story.strip_prefix(prefix).unwrap().parse().unwrap();
+        notes.push(json!({"id": id, "noteKind": kind, "height": 0}));
+    }
+    let parts =
+        ooxml_opc::unzip_parts_where(bytes, u64::MAX, |name| name == "word/settings.xml").unwrap();
+    let limits = docx_parse::xml::ParseLimits::default();
+    let settings = docx_parse::parse_settings(
+        parts.first().map(|(_, bytes)| bytes.as_slice()),
+        "word/settings.xml",
+        &mut docx_parse::xml::ParseBudget::new(&limits),
+    )
+    .unwrap();
+    let mut request = json!({
+        "bodyStory": "body",
+        "regions": {"sections": sections, "settings": settings},
+        "notes": {"contents": notes},
+        "renderEnv": {},
+    });
+    integral_numbers(&mut request);
+    let requirements: Vec<Value> = serde_json::from_str(
+        &engine
+            .layout_font_requirements_json(&request.to_string())
+            .unwrap(),
+    )
+    .unwrap();
+    requirements
+        .iter()
+        .map(|face| {
+            (
+                face["family"].as_str().unwrap().to_owned(),
+                face["bold"].as_bool().unwrap(),
+                face["italic"].as_bool().unwrap(),
+            )
+        })
+        .collect()
+}
+
+fn has(faces: &[(String, bool, bool)], family: &str) -> bool {
+    faces
+        .iter()
+        .any(|(name, bold, italic)| name.eq_ignore_ascii_case(family) && !bold && !italic)
+}
+
+fn assert_parity(bytes: &[u8], wanted: &str) {
+    let engine = engine_faces(bytes);
+    assert!(
+        has(&engine, wanted),
+        "engine does not request {wanted}: {engine:?}"
+    );
+    let preflight = ooxml_font_preflight::docx_font_preflight(bytes).unwrap();
+    let answered: Vec<_> = preflight
+        .faces
+        .iter()
+        .map(|face| (face.family.clone(), face.bold, face.italic))
+        .collect();
+    if preflight.complete {
+        for (family, bold, italic) in &engine {
+            assert!(
+                answered
+                    .iter()
+                    .any(|(name, b, i)| name.eq_ignore_ascii_case(family)
+                        && b == bold
+                        && i == italic),
+                "complete preflight misses ({family}, {bold}, {italic}) the engine requests: {answered:?}"
+            );
+        }
+    }
+    assert!(
+        has(&answered, wanted),
+        "preflight does not name {wanted}: {answered:?}"
+    );
+}
+
+fn rels(entries: &[(&str, &str)]) -> String {
+    let body: String = entries
+        .iter()
+        .enumerate()
+        .map(|(index, (kind, target))| {
+            format!(r#"<Relationship Id="rId{index}" Type="{REL}/{kind}" Target="{target}"/>"#)
+        })
+        .collect();
+    format!(
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{body}</Relationships>"#
+    )
+}
+
+fn document(body: &str) -> String {
+    format!(r#"<w:document xmlns:w="{W}" xmlns:r="{REL}"><w:body>{body}</w:body></w:document>"#)
+}
+
+fn styles(defaults: &str, body: &str) -> String {
+    format!(
+        r#"<w:styles xmlns:w="{W}"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="{defaults}" w:hAnsi="{defaults}"/></w:rPr></w:rPrDefault></w:docDefaults>{body}</w:styles>"#
+    )
+}
+
+fn package(parts: &[(&str, String)]) -> Vec<u8> {
+    let mut entries = vec![(
+        "[Content_Types].xml".to_owned(),
+        br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/></Types>"#.to_vec(),
+    )];
+    if !parts.iter().any(|(name, _)| *name == "_rels/.rels") {
+        entries.push((
+            "_rels/.rels".to_owned(),
+            rels(&[("officeDocument", "word/document.xml")]).into_bytes(),
+        ));
+    }
+    entries.extend(
+        parts
+            .iter()
+            .map(|(name, xml)| ((*name).to_owned(), xml.as_bytes().to_vec())),
+    );
+    ooxml_opc::rezip_parts(&entries).unwrap()
+}
+
+fn plain(text: &str) -> String {
+    format!("<w:p><w:r><w:t>{text}</w:t></w:r></w:p>")
+}
+
+#[test]
+fn notes_at_the_conventional_path_without_a_relationship() {
+    let notes = |root: &str, item: &str, family: &str| {
+        format!(
+            r#"<w:{root} xmlns:w="{W}"><w:{item} w:id="-1" w:type="separator"><w:p/></w:{item}><w:{item} w:id="0" w:type="continuationSeparator"><w:p/></w:{item}><w:{item} w:id="1"><w:p><w:r><w:rPr><w:rFonts w:ascii="{family}" w:hAnsi="{family}"/></w:rPr><w:t>Note</w:t></w:r></w:p></w:{item}></w:{root}>"#
+        )
+    };
+    for (path, xml, family) in [
+        (
+            "word/footnotes.xml",
+            notes("footnotes", "footnote", "NoteFont"),
+            "NoteFont",
+        ),
+        (
+            "word/endnotes.xml",
+            notes("endnotes", "endnote", "EndFont"),
+            "EndFont",
+        ),
+    ] {
+        let bytes = package(&[
+            ("word/document.xml", document(&plain("Body"))),
+            (
+                "word/_rels/document.xml.rels",
+                rels(&[("styles", "styles.xml")]),
+            ),
+            ("word/styles.xml", styles("Base", "")),
+            (path, xml),
+        ]);
+        assert_parity(&bytes, family);
+    }
+}
