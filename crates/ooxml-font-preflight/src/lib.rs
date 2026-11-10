@@ -482,6 +482,8 @@ pub fn font_preflight(bytes: &[u8]) -> Result<String, JsValue> {
 }
 
 #[cfg(test)]
+mod engine_inputs;
+#[cfg(test)]
 mod test_support;
 #[cfg(all(test, feature = "docx"))]
 mod tests;
