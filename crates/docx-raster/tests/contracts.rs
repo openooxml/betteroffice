@@ -171,6 +171,70 @@ fn glyph_id_scene(font_id: u32, glyph_id: u32) -> DisplayList {
 
 /// A glyph id past the outline range, so the page fails before the cache holds
 /// anything.
+fn gradient_scene(kind: &str) -> DisplayList {
+    list(
+        40.0,
+        40.0,
+        vec![json!({
+            "kind": "shape",
+            "x": 0,
+            "y": 0,
+            "w": 40,
+            "h": 40,
+            "geometryPath": [
+                {"type":"move","x":0,"y":0},
+                {"type":"line","x":40,"y":0},
+                {"type":"line","x":40,"y":40},
+                {"type":"line","x":0,"y":40},
+                {"type":"close"}
+            ],
+            "fillPaint": {
+                "kind": "gradient",
+                "gradientType": kind,
+                "stops": [
+                    {"position":0,"color":"#ff0000"},
+                    {"position":1,"color":"#0000ff"}
+                ]
+            }
+        })],
+    )
+}
+
+fn assert_paints_like_radial(kind: &str) {
+    let (fonts, chains, images) = empty_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let radial = render_page(&gradient_scene("radial"), 0, &resources).expect("radial");
+    let page = render_page(&gradient_scene(kind), 0, &resources).expect(kind);
+    assert_eq!(page.bytes, radial.bytes, "{kind}");
+    let pixels = image::load_from_memory(&page.bytes)
+        .expect("png")
+        .into_rgba8();
+    let centre = pixels.get_pixel(20, 20).0;
+    assert!(centre[0] > 240 && centre[2] < 16, "centre {centre:?}");
+    assert_eq!(pixels.get_pixel(0, 0).0, [0, 0, 255, 255]);
+}
+
+#[test]
+fn a_rectangular_gradient_paints_like_a_radial_gradient() {
+    assert_paints_like_radial("rectangular");
+}
+
+#[test]
+fn a_path_gradient_paints_like_a_radial_gradient() {
+    assert_paints_like_radial("path");
+}
+
+#[test]
+fn an_unknown_gradient_kind_still_fails_the_page() {
+    let (fonts, chains, images) = empty_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let error = render_page(&gradient_scene("conic"), 0, &resources).expect_err("unknown kind");
+    assert!(
+        error.contains("unsupported gradient type: conic"),
+        "{error}"
+    );
+}
+
 fn missing_glyph_scene() -> DisplayList {
     list(
         60.0,

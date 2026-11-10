@@ -44,6 +44,7 @@ export declare class EditSession {
   direct_batches_applied(): number
   set_windowed_incremental_builds(enabled: boolean): void
   build_display_pages_frame(pages: Uint32Array, expectedFrameEpoch: number): Uint8Array
+  page_texts_json(pages: Uint32Array): string
   release_display_pages_frame(pages: Uint32Array, expectedFrameEpoch: number): Uint8Array
   resident_caret_snapshot_json(): string
   apply_input(text: string, expectedFrameEpoch: number): Uint8Array

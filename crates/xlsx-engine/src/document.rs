@@ -346,8 +346,19 @@ impl Document {
         target_json: &str,
         options_json: &str,
     ) -> Result<Vec<u8>, EngineError> {
+        self.render_png_target_with_faces(target_json, options_json, None)
+    }
+
+    /// [`Self::render_png_target`]. `Some` paints with those faces alone, for this export only.
+    #[cfg(feature = "raster")]
+    pub fn render_png_target_with_faces(
+        &self,
+        target_json: &str,
+        options_json: &str,
+        faces: Option<&[betteroffice_xlsx::PngFontFace<'_>]>,
+    ) -> Result<Vec<u8>, EngineError> {
         self.session
-            .render_png_target(target_json, options_json)
+            .render_png_target_with_faces(target_json, options_json, faces)
             .map_err(message)
     }
 

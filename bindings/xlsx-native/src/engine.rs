@@ -261,6 +261,15 @@ fn map_error(env: Env, error: EngineError) -> Error {
     }
 }
 
+/// A face one PNG export paints with.
+#[napi(object)]
+pub struct PngFontFace {
+    pub family: String,
+    pub bold: Option<bool>,
+    pub italic: Option<bool>,
+    pub bytes: Uint8Array,
+}
+
 #[napi]
 pub struct XlsxDocument {
     inner: Option<Document>,
@@ -585,10 +594,22 @@ impl XlsxDocument {
         env: Env,
         target_json: String,
         options_json: String,
+        fonts: Option<Vec<PngFontFace>>,
     ) -> Result<Uint8Array> {
         let _call = EngineCall::new(env);
+        let faces: Option<Vec<_>> = fonts.as_ref().map(|fonts| {
+            fonts
+                .iter()
+                .map(|face| xlsx_engine::PngFontFace {
+                    family: &face.family,
+                    bold: face.bold.unwrap_or(false),
+                    italic: face.italic.unwrap_or(false),
+                    bytes: &face.bytes,
+                })
+                .collect()
+        });
         self.document(env)?
-            .render_png_target(&target_json, &options_json)
+            .render_png_target_with_faces(&target_json, &options_json, faces.as_deref())
             .map_err(|error| map_error(env, error))
             .and_then(|bytes| byte_result(env, bytes))
     }

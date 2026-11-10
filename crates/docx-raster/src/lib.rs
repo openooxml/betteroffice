@@ -1403,7 +1403,7 @@ fn gradient_paint(
                 Transform::identity(),
             )
         }
-        "radial" => {
+        "radial" | "rectangular" | "path" => {
             let center = Point::from_xy(x + w / 2.0, y + h / 2.0);
             RadialGradient::new(
                 center,

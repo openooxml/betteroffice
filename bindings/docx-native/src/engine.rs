@@ -1044,6 +1044,14 @@ impl EditSession {
             .and_then(|bytes| byte_result(env, bytes))
     }
 
+    #[napi(catch_unwind, js_name = "page_texts_json")]
+    pub fn page_texts_json(&self, env: Env, pages: Uint32Array) -> Result<String> {
+        let _call = EngineCall::new(env);
+        self.document(env)?
+            .page_texts_json(pages.to_vec())
+            .map_err(|error| map_error(env, error))
+    }
+
     #[napi(catch_unwind, js_name = "release_display_pages_frame")]
     pub fn release_display_pages_frame(
         &self,

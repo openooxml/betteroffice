@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, test } from 'bun:test';
+import { JOB_TIMEOUT_MINUTES } from './shards.mjs';
 import { CHANNELS, ENGINE_TIMEOUT, HELPER_TIMEOUT, PARALLELISM, SHARD_SIZE, ROUNDTRIP_MATRICES, MAX_MATRIX_JOBS, roundtripMatrices, roundtripShards } from './roundtrip.mjs';
 
 const workflow = Bun.YAML.parse(
@@ -25,6 +26,7 @@ test('one frozen plan feeds independent format jobs at the same source revision'
     .toContain('measure-shards=${JSON.stringify(measureMatrix(plan))}');
   expect(measure.strategy).toEqual({
     'fail-fast': false,
+    'max-parallel': "${{ fromJSON(needs.prepare.outputs.parallel)['measure'] }}",
     matrix: { include: '${{ fromJSON(needs.prepare.outputs.measure-shards) }}' },
   });
   const checkout = measure.steps.find((step: any) => step.uses?.startsWith('actions/checkout@'));
@@ -86,6 +88,7 @@ test('every measure shard has its own artifacts, and the reconciler collects the
     ['visual-fidelity-renders-*', '${{ runner.temp }}/fidelity-parts', "inputs.publish_renders && inputs.corpus_origin == ''"],
     ['docx-benchmark-report-*', '${{ runner.temp }}/fidelity-parts', expect.any(String)],
     ['xlsx-benchmark-report-*', '${{ runner.temp }}/fidelity-parts', expect.any(String)],
+    ['pptx-benchmark-report-*', '${{ runner.temp }}/fidelity-parts', expect.any(String)],
     ['xlsx-fidelity-report-*', '${{ runner.temp }}/fidelity-parts', expect.any(String)],
     ['roundtrip-report-*', '${{ runner.temp }}/fidelity-parts', expect.any(String)],
   ]);
@@ -121,6 +124,13 @@ test('XLSX calculation and PPTX LibreOffice run independently and gate publicati
   expect(xlsx.needs).toEqual(['prepare', 'xlsx-native-build']);
   expect(xlsx.strategy.matrix.shard).toBe('${{ fromJSON(needs.prepare.outputs.xlsx-shards) }}');
   expect(pptx.needs).toEqual(['prepare', 'pptx-native-build']);
+  expect(pptx.strategy).toEqual({ 'fail-fast': false, 'max-parallel': "${{ fromJSON(needs.prepare.outputs.parallel)['pptx-benchmark'] }}",
+    matrix: { shard: '${{ fromJSON(needs.prepare.outputs.pptx-shards) }}' } });
+  expect(prepare.outputs['pptx-shards']).toBe('${{ steps.plan.outputs.pptx-shards }}');
+  expect(pptx.steps.find((step: any) => String(step.run ?? '').includes('pptx-benchmark.mjs')).env.QUALITY_SHARD).toBe('${{ matrix.shard }}');
+  expect(pptx.steps.filter((step: any) => step.uses?.startsWith('actions/upload-artifact@')).map((step: any) => step.with.name))
+    .toEqual(['pptx-benchmark-report-${{ matrix.shard }}', 'pptx-benchmark-diagnostics-${{ matrix.shard }}']);
+  expect(publish.steps.find((step: any) => step.with?.pattern === 'pptx-benchmark-report-*')).toBeDefined();
   expect(workflow.jobs['pptx-native-build'].steps[1].with.ref).toContain('needs.prepare.outputs.pptx-published-source');
   expect(pptx.steps.find((step: any) => step.run?.includes('pptx_benchmark.py')).env.QUALITY_NATIVE).toBe('${{ runner.temp }}/native');
   expect(publish.if).toContain("needs.xlsx-benchmark.result == 'success'");
@@ -154,7 +164,8 @@ test('native parse/edit/save probes run independently and gate the final report'
     const probe = workflow.jobs[`roundtrip-${half}`];
     expect(prepare.outputs[`roundtrip-shards-${half}`]).toBe(`\${{ steps.plan.outputs.roundtrip-shards-${half} }}`);
     expect(probe.needs).toEqual(['prepare', 'roundtrip-build']);
-    expect(probe.strategy).toEqual({'fail-fast': false, matrix: {include: `\${{ fromJSON(needs.prepare.outputs.roundtrip-shards-${half}) }}`}});
+    expect(probe.strategy).toEqual({'fail-fast': false, 'max-parallel': `\${{ fromJSON(needs.prepare.outputs.parallel)['roundtrip-${half}'] }}`,
+      matrix: {include: `\${{ fromJSON(needs.prepare.outputs.roundtrip-shards-${half}) }}`}});
     expect(probe.env.LO_PYTHON).toBe('/opt/libreoffice26.2/program/python');
     expect(probe.steps.some((step: any) => step.run?.includes('install-libreoffice.sh'))).toBe(true);
     return probe;
@@ -201,7 +212,7 @@ test('a custom corpus origin never publishes renders, and a dispatch asking for 
 const steps = Object.entries<any>(workflow.jobs).flatMap(([job, definition]) =>
   (definition.steps ?? []).map((step: any) => ({ job, step })));
 const CORPUS_FREE = new Set(['build-native.mjs', 'build-format.mjs', 'build-roundtrip.mjs', 'native-fonts.ts',
-  'install-libreoffice.sh', 'asset-cache.mjs', 'publish-renders.mjs', 'private-store.mjs']);
+  'install-libreoffice.sh', 'asset-cache.mjs', 'publish-renders.mjs', 'private-store.mjs', 'shards.mjs']);
 const BINARY_ARTIFACTS = /^(docx-native-\$\{\{ matrix\.channel \}\}|docx-native-fonts|xlsx-native-\$\{\{ matrix\.channel \}\}|pptx-native-\$\{\{ matrix\.channel \}\}|roundtrip-native-\$\{\{ matrix\.format \}\}-\$\{\{ matrix\.channel \}\})$/;
 const README = "${{ (!inputs.private_corpus && !inputs.report_only && inputs.corpus_origin == '' && inputs.samples == '' && inputs.collection == 'office-quality') || (inputs.private_corpus && inputs.publish_readme && !inputs.report_only) }}";
 const PRIVATE_OFF = /(^|&& |^\$\{\{ )!inputs\.private_corpus( &&|$| \}\}$)/;
@@ -431,7 +442,8 @@ test('private runs time a seeded sample per format, sequentially on one runner e
   expect(timing.if).toStartWith('!cancelled()');
   expect(prepare.outputs['timing-formats']).toBe('${{ steps.plan.outputs.timing-formats }}');
   expect(prepare.steps.find((step: any) => step.id === 'plan').run).toContain('timing-formats=${JSON.stringify(timingFormats(plan))}');
-  expect(timing.strategy).toEqual({ 'fail-fast': false, matrix: { format: '${{ fromJSON(needs.prepare.outputs.timing-formats) }}' } });
+  expect(timing.strategy).toEqual({ 'fail-fast': false, 'max-parallel': "${{ fromJSON(needs.prepare.outputs.parallel)['timing'] }}",
+    matrix: { format: '${{ fromJSON(needs.prepare.outputs.timing-formats) }}' } });
   const downloads = timing.steps.filter((step: any) => step.uses?.startsWith('actions/download-artifact@')).map((step: any) => step.with.name);
   expect(downloads).toEqual(['${{ matrix.format }}-native-published', '${{ matrix.format }}-native-commit']);
   const measured = timing.steps.find((step: any) => String(step.run ?? '').includes('timing.py'));
@@ -461,4 +473,47 @@ test('the roundtrip matrices cover every file of a corpus-sized plan for all thr
     expect(jobs.sort()).toEqual(shards.map(({ format, shard }: any) => `${format}/${shard}`).sort());
   }
   expect(CHANNELS).toEqual(['published', 'commit', 'libreoffice']);
+});
+
+test('planning prints every benchmark job shard count and planned minutes against the timeout', () => {
+  const plan = prepare.steps.find((step: any) => step.id === 'plan').run;
+  expect(plan).toContain('benchmarkShardPlan(plan)');
+  expect(plan).toContain('GITHUB_STEP_SUMMARY');
+  expect(plan).toContain('pptx-shards=${JSON.stringify(pptxShards(plan).map((_, index) => index))}');
+  for (const name of ['docx-benchmark', 'xlsx-benchmark', 'pptx-benchmark', 'xlsx-fidelity'])
+    expect({ name, timeout: workflow.jobs[name]['timeout-minutes'] }).toEqual({ name, timeout: JOB_TIMEOUT_MINUTES });
+});
+
+test('every benchmark job prints its wall time next to its planned work, even when a step fails', () => {
+  for (const name of ['docx-benchmark', 'xlsx-benchmark', 'pptx-benchmark', 'xlsx-fidelity']) {
+    const steps = workflow.jobs[name].steps;
+    expect(steps[1]).toEqual({ name: 'Record the job start', run: 'echo "QUALITY_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"' });
+    expect(steps.at(-1)).toEqual({ name: 'Compare the wall time with the planned work', if: 'always()',
+      env: { QUALITY_PLAN: '${{ runner.temp }}/fidelity-plan/plan.json' }, run: `node scripts/office-quality/shards.mjs wall ${name} "\${{ matrix.shard }}"` });
+  }
+});
+
+test('a private run bounds its concurrent benchmark jobs by max_parallel; public runs are unbounded', () => {
+  expect(workflow.on.workflow_dispatch.inputs.max_parallel).toEqual({
+    description: "Private corpus run: most benchmark jobs held at once, leaving the rest of the plan's concurrent jobs to pull request CI",
+    default: 12, required: false, type: 'number',
+  });
+  const plan = prepare.steps.find((step: any) => step.id === 'plan');
+  expect(plan.env.MAX_PARALLEL).toBe('${{ inputs.max_parallel }}');
+  expect(plan.run).toContain("parallelPlan(plan, { privateRun: process.env.QUALITY_PRIVATE === 'true', total: Number(process.env.MAX_PARALLEL) })");
+  expect(plan.run).toContain('parallelSummary(plan, parallel)');
+  expect(prepare.outputs.parallel).toBe('${{ steps.plan.outputs.parallel }}');
+  for (const name of ['measure', 'docx-benchmark', 'xlsx-benchmark', 'pptx-benchmark', 'xlsx-fidelity', 'roundtrip-a', 'roundtrip-b', 'timing'])
+    expect({ name, cap: workflow.jobs[name].strategy['max-parallel'] }).toEqual({ name, cap: `\${{ fromJSON(needs.prepare.outputs.parallel)['${name}'] }}` });
+});
+
+test('the reconciler fails on a channel that scored nothing, and the summary leads with scored counts even when it fails', () => {
+  const reconcile = publish.steps.find((step: any) => step.name === 'Reconcile the format reports');
+  expect(reconcile.env.QUALITY_REQUIRE_COVERAGE).toBe('true');
+  expect(reconcile.env.QUALITY_COVERAGE).toBe('${{ runner.temp }}/coverage.md');
+  expect(reconcile.run).toBe('node scripts/office-quality/private-step.mjs merge -- node scripts/office-quality/merge.mjs');
+  const summary = publish.steps[publish.steps.indexOf(reconcile) + 1];
+  expect(summary.name).toBe('Summarise scored documents and the generated section');
+  expect(summary.if).toBe('always()');
+  expect(summary.run.indexOf('coverage.md')).toBeLessThan(summary.run.indexOf('section.md'));
 });

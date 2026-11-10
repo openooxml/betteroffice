@@ -818,6 +818,18 @@ struct CurrencyMemo {
     symbols: Vec<char>,
 }
 
+impl Stylesheet {
+    /// `==` plus the state `==` leaves out; only the memos are ignored.
+    pub fn same_state(&self, other: &Self) -> bool {
+        self == other
+            && self.saved_plain == other.saved_plain
+            && self.bound_plain == other.bound_plain
+            && self.xfs_with_extra_xml == other.xfs_with_extra_xml
+            && self.exact_style_indices == other.exact_style_indices
+            && self.released_xfs == other.released_xfs
+    }
+}
+
 impl PartialEq for Stylesheet {
     fn eq(&self, other: &Self) -> bool {
         self.fonts == other.fonts

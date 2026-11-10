@@ -64,6 +64,36 @@ fn edits() -> Vec<Vec<Op>> {
     ]
 }
 
+fn batch(workbook: &mut Workbook) {
+    let request = serde_json::json!({
+        "expectVersion": workbook.version(),
+        "steps": [{
+            "op": "setCellInputs",
+            "target": { "sheetId": "sheet:0", "range": { "kind": "a1", "a1": "C3:D3" } },
+            "inputs": [["5", "=C3*2"]],
+        }],
+    });
+    let applied: serde_json::Value =
+        serde_json::from_str(&workbook.apply_edits_json(&request.to_string()).unwrap()).unwrap();
+    assert_eq!(applied["ok"], true, "{applied}");
+}
+
+fn edit_session(workbook: &mut Workbook) {
+    let options = CalculationOptions::default();
+    workbook
+        .edit_cell(SheetId(0), CellRef::new(0, 0), "41", options)
+        .unwrap();
+    for ops in edits() {
+        workbook.apply_ops(ops, options).unwrap();
+    }
+    workbook.undo(options).unwrap();
+    workbook.undo(options).unwrap();
+    workbook.redo(options).unwrap();
+    workbook
+        .edit_cell(SheetId(0), CellRef::new(5, 1), "=A1+1", options)
+        .unwrap();
+}
+
 fn assert_same(label: &str, deferred: &Workbook, eager: &Workbook) {
     assert_eq!(deferred.model(), eager.model(), "{label}");
     assert_eq!(deferred.save().unwrap(), eager.save().unwrap(), "{label}");
@@ -135,22 +165,68 @@ fn a_deferred_authority_matches_an_eager_open() {
 }
 
 #[test]
+fn edits_without_an_observer_leave_the_authority_unbuilt() {
+    for (label, bytes) in sources() {
+        let mut deferred = open_deferred(&bytes);
+        edit_session(&mut deferred);
+        assert!(!deferred.authority_is_built_for_test(), "{label}");
+        assert_eq!(deferred.deferred_changes_for_test(), 8, "{label}");
+        deferred.save().unwrap();
+        assert!(!deferred.authority_is_built_for_test(), "{label}");
+    }
+}
+
+#[test]
 fn edits_on_a_deferred_authority_match_an_eager_open() {
+    for (label, bytes) in sources() {
+        let mut deferred = open_deferred(&bytes);
+        let mut eager = open_eager(&bytes);
+        edit_session(&mut deferred);
+        edit_session(&mut eager);
+        assert!(!deferred.authority_is_built_for_test(), "{label}");
+        assert_same(&label, &deferred, &eager);
+    }
+}
+
+#[test]
+fn a_batch_after_deferred_edits_stages_on_the_replayed_state() {
+    for (label, bytes) in sources() {
+        let mut deferred = open_deferred(&bytes);
+        let mut eager = open_eager(&bytes);
+        for workbook in [&mut deferred, &mut eager] {
+            edit_session(workbook);
+            batch(workbook);
+        }
+        assert!(deferred.authority_is_built_for_test(), "{label}");
+        assert_eq!(deferred.deferred_changes_for_test(), 0, "{label}");
+        assert_same(&label, &deferred, &eager);
+    }
+}
+
+#[test]
+fn an_observer_after_deferred_edits_gets_the_replayed_state() {
     let options = CalculationOptions::default();
     for (label, bytes) in sources() {
         let mut deferred = open_deferred(&bytes);
         let mut eager = open_eager(&bytes);
         for workbook in [&mut deferred, &mut eager] {
-            workbook
-                .edit_cell(SheetId(0), CellRef::new(0, 0), "41", options)
-                .unwrap();
-            for ops in edits() {
-                workbook.apply_ops(ops, options).unwrap();
-            }
-            workbook.undo(options).unwrap();
-            workbook.undo(options).unwrap();
-            workbook.redo(options).unwrap();
+            edit_session(workbook);
         }
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&events);
+        let _subscription = deferred
+            .observe_update_v1(move |event| seen.lock().unwrap().push(event.update.len()))
+            .unwrap();
+        for workbook in [&mut deferred, &mut eager] {
+            workbook
+                .edit_cell(SheetId(0), CellRef::new(7, 0), "8", options)
+                .unwrap();
+        }
+        assert!(deferred.authority_is_built_for_test(), "{label}");
+        assert_eq!(deferred.deferred_changes_for_test(), 0, "{label}");
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1, "{label}");
+        assert!(events[0] > 0, "{label}");
         assert_same(&label, &deferred, &eager);
     }
 }

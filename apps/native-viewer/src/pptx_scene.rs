@@ -8,9 +8,7 @@ use betteroffice_pptx::{
 use ooxml_drawingml::GeometryPathCommand;
 use serde_json::{Value, json};
 use vello::kurbo::{Affine, BezPath, Rect, Shape, Stroke};
-use vello::peniko::{
-    Blob, Color, Fill, FontData, Gradient, ImageAlphaType, ImageBrush, ImageData, ImageFormat,
-};
+use vello::peniko::{Blob, Color, Fill, FontData, Gradient, ImageBrush, ImageData};
 use vello::{Glyph, Scene};
 
 use crate::scene_shared::{PageScene, SkipStats, color, draw_transformed_placeholder, with_dashes};
@@ -217,33 +215,18 @@ struct PptxImages {
     assets: HashMap<String, PptxImage>,
 }
 
-fn load_media(bytes: &[u8]) -> Result<image::DynamicImage, String> {
-    if image::guess_format(bytes).ok() == Some(image::ImageFormat::Tiff)
-        && ooxml_drawingml::media::tiff_bounded_pixels(bytes).is_none()
-    {
-        return Err("unsupported TIFF encoding".to_owned());
-    }
-    image::load_from_memory(bytes).map_err(|error| error.to_string())
-}
+/// Decoded RGBA every picture of one deck may hold together, charged in
+/// archive order; the viewer decodes them all when the deck opens.
+const MAX_DECK_IMAGE_BYTES: u64 = 1 << 30;
 
 impl PptxImages {
     fn load(package: &PptxPackage) -> Self {
+        let mut budget = MAX_DECK_IMAGE_BYTES;
         let assets = package
             .media
             .iter()
             .map(|part| {
-                let image = load_media(&part.bytes)
-                    .map(|image| {
-                        let rgba = image.into_rgba8();
-                        let (width, height) = rgba.dimensions();
-                        ImageData {
-                            data: Blob::from(rgba.into_raw()),
-                            format: ImageFormat::Rgba8,
-                            alpha_type: ImageAlphaType::Alpha,
-                            width,
-                            height,
-                        }
-                    })
+                let image = crate::picture_decode::decode_bounded(&part.bytes, false, &mut budget)
                     .map(PptxImage::Decoded)
                     .unwrap_or_else(|error| {
                         PptxImage::Failed(format!(
@@ -1201,10 +1184,57 @@ mod tests {
     fn a_tiff_whose_decode_its_size_does_not_bound_is_not_loaded() {
         let tiff = jpeg_tiff();
         assert!(image::load_from_memory(&tiff).is_ok());
-        assert!(load_media(&tiff).is_err());
+        assert!(crate::picture_decode::decode_bounded(&tiff, false, &mut unlimited()).is_err());
+    }
+
+    fn unlimited() -> u64 {
+        u64::MAX
+    }
+
+    fn png(width: u32, height: u32) -> Vec<u8> {
+        use image::ImageEncoder as _;
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(
+                &vec![0; (width * height) as usize],
+                width,
+                height,
+                image::ExtendedColorType::L8,
+            )
+            .unwrap();
+        png
+    }
+
+    #[test]
+    fn a_picture_past_the_raster_size_limit_is_not_decoded() {
+        const { assert!(8192 * 4096 == crate::picture_decode::MAX_IMAGE_PIXELS) };
+        let error =
+            crate::picture_decode::decode_bounded(&png(8192, 4097), false, &mut unlimited())
+                .err()
+                .unwrap();
+        assert!(error.contains("size limit"), "{error}");
+        let small =
+            crate::picture_decode::decode_bounded(&png(3, 2), false, &mut unlimited()).unwrap();
+        assert_eq!((small.width, small.height), (3, 2));
+    }
+
+    #[test]
+    fn pictures_past_the_deck_budget_are_not_decoded() {
+        let picture = png(16, 16);
+        let mut budget = 2 * 16 * 16 * 4;
+        for _ in 0..2 {
+            assert!(crate::picture_decode::decode_bounded(&picture, false, &mut budget).is_ok());
+        }
+        assert_eq!(budget, 0);
+        let error = crate::picture_decode::decode_bounded(&picture, false, &mut budget)
+            .err()
+            .unwrap();
+        assert!(error.contains("budget"), "{error}");
+        const { assert!(MAX_DECK_IMAGE_BYTES == 1 << 30) };
     }
 
     use super::*;
+    use vello::peniko::{ImageAlphaType, ImageFormat};
 
     #[test]
     fn stroke_joins_match_canvas_and_raster() {
