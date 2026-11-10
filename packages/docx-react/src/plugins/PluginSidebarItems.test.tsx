@@ -97,9 +97,10 @@ describe('managed sidebar items', () => {
     expect(card().dataset).toMatchObject({ id: 'note', clicks: '1' });
 
     view.rerender(sidebar({ ...activation, context: { ...activation.context } }, false));
-    expect(card().parentElement!.style.visibility).toBe('hidden');
+    const slot = () => card().closest<HTMLElement>('[data-plugin-activation]')!.parentElement!;
+    expect(slot().style.visibility).toBe('hidden');
     view.rerender(sidebar({ ...activation, context: { ...activation.context } }));
-    expect(card().parentElement!.style.visibility).toBe('');
+    expect(slot().style.visibility).toBe('');
     expect(card().dataset.clicks).toBe('1');
 
     id = 'other';
