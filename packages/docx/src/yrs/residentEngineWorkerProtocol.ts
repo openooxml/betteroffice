@@ -123,6 +123,7 @@ export type DocxDocumentRead =
   | { kind: 'validateEdits'; request: DocxEditRequest }
   | { kind: 'contentControlHandles' }
   | { kind: 'partSnapshot' }
+  | { kind: 'fontOutlinesInstalled' }
   | { kind: 'properties'; target: ResidentPropertyTarget }
   | { kind: 'sectionProperties' }
   | { kind: 'exportStructuredWithPages'; options: DocxPageExportOptions; currentRequest: string; workerFonts?: boolean }
@@ -165,6 +166,7 @@ export type DocxDocumentRead =
   | { kind: 'bookmarkPosition'; story: string; name: string; expectVersion: string }
   | { kind: 'sidebar'; commentIds: string[]; expectVersion: string }
   | { kind: 'headings'; expectVersion: string }
+  | { kind: 'pageTexts'; pages: number[]; expectFrameEpoch?: number; expectLayoutRevision?: number }
   | { kind: 'adjacentRevision'; selection: DocxCommandSelection | null; direction: 'next' | 'previous' };
 
 /** @internal */
@@ -176,6 +178,8 @@ export interface DocxDocumentReadValues {
   validateEdits: DocxValidationResult;
   contentControlHandles: ResidentControlSnapshot;
   partSnapshot: { metadata: ResidentPartMetadata; geometry: ResidentPartGeometry[]; frameEpoch: number | null; layoutRevision: number };
+  /** Settles once every outline requested so far is installed; counts installs that arrived after their frame painted. */
+  fontOutlinesInstalled: { lateInstalls: number };
   properties: ResidentPropertySnapshot | null;
   sectionProperties: ResidentSectionSnapshot;
   exportStructuredWithPages: string;
@@ -212,6 +216,7 @@ export interface DocxDocumentReadValues {
   bookmarkPosition: number | null;
   sidebar: DocxSidebarRead | null;
   headings: DocxOutlineHeading[] | null;
+  pageTexts: { pages: { pageIndex: number; paragraphs: { text: string; level?: number; inTable?: true }[] }[]; frameEpoch: number; layoutRevision: number } | null;
   adjacentRevision: { revisionId: string } | null;
 }
 
@@ -420,7 +425,7 @@ export type DocxEngineWorkerResponse = (
       commandFrame?: { session: string; incarnation: number; epoch: number; frame: DocxCommandFrame };
       fontEnvironmentEvent?: DocxFontEnvironmentEvent & { session: string; incarnation: number; epoch: number };
       /** An applied edit may need fonts the host's last font requirements lacked; sent once until the host asks again. */
-      fontRequirementsHint?: { session: string; incarnation: number; epoch: number };
+      fontRequirementsHint?: { session: string; incarnation: number; epoch: number; wholeFaces?: true };
       fontEnvironment?: DocxFontEnvironmentSnapshot;
       checkpoint?: Checkpoint;
       frame?: ArrayBuffer;

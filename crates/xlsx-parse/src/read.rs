@@ -324,12 +324,12 @@ fn parse_workbook_xml(data: &[u8]) -> Result<WorkbookMeta, ParseError> {
                     );
                 }
                 b"sheet" if sheets_depth.is_some_and(|sheets| depth == sheets + 1) => {
-                    let name = attr(&e, b"name")?.unwrap_or_default();
+                    let name = unescape_name(&attr(&e, b"name")?.unwrap_or_default());
                     let rid = attr(&e, b"id")?;
                     sheets.push(SheetEntry { name, rid });
                 }
                 b"definedName" => {
-                    let name = attr(&e, b"name")?.unwrap_or_default();
+                    let name = unescape_name(&attr(&e, b"name")?.unwrap_or_default());
                     let local_sheet = attr(&e, b"localSheetId")?
                         .and_then(|value| value.parse::<u32>().ok())
                         .map(SheetId);
@@ -596,21 +596,46 @@ fn collect_string_item(
     let target = *depth;
     let mut out = String::new();
     let mut runs = false;
+    let mut text: Option<(usize, String)> = None;
     loop {
         match next_event(reader, buf, depth)? {
-            Event::Start(e) if *depth == target + 1 && local_name(&e) == b"r" => runs = true,
-            Event::Text(t) => out.push_str(&t.decode().map_err(xml_err)?),
-            Event::CData(t) => out.push_str(&t.decode().map_err(xml_err)?),
+            Event::Start(e) => {
+                if *depth == target + 1 && local_name(&e) == b"r" {
+                    runs = true;
+                }
+                if text.is_none() && local_name(&e) == b"t" {
+                    text = Some((*depth, String::new()));
+                }
+            }
+            Event::Text(t) => {
+                push_item_text(&mut text, &mut out, &t.xml10_content().map_err(xml_err)?)
+            }
+            Event::CData(t) => {
+                push_item_text(&mut text, &mut out, &t.xml10_content().map_err(xml_err)?)
+            }
             Event::GeneralRef(r) => {
                 let name = r.decode().map_err(xml_err)?;
-                out.push_str(&resolve_entity(&name)?);
+                push_item_text(&mut text, &mut out, &resolve_entity(&name)?);
             }
             Event::End(_) if *depth < target => break,
+            Event::End(_) => {
+                if let Some((_, value)) = text.take_if(|(opened, _)| *depth < *opened) {
+                    out.push_str(&unescape_name(&value));
+                }
+            }
             Event::Eof => return Err(ParseError::Malformed("unexpected eof in text".into())),
             _ => {}
         }
     }
     Ok((out, runs))
+}
+
+/// Text of the open `<t>`, decoded once the element ends, or item text outside one.
+fn push_item_text(text: &mut Option<(usize, String)>, out: &mut String, value: &str) {
+    match text {
+        Some((_, pending)) => pending.push_str(value),
+        None => out.push_str(value),
+    }
 }
 
 /// What a source worksheet's cells said that the model does not keep.
@@ -931,13 +956,13 @@ fn parse_conditional_formats(
                 formula
                     .as_mut()
                     .unwrap()
-                    .push_str(&t.decode().map_err(xml_err)?);
+                    .push_str(&t.xml10_content().map_err(xml_err)?);
             }
             Event::CData(t) if formula.is_some() => {
                 formula
                     .as_mut()
                     .unwrap()
-                    .push_str(&t.decode().map_err(xml_err)?);
+                    .push_str(&t.xml10_content().map_err(xml_err)?);
             }
             Event::GeneralRef(r) if formula.is_some() => {
                 let name = r.decode().map_err(xml_err)?;
@@ -1187,7 +1212,7 @@ fn finalize_cell(
             None => CellValue::Empty,
         },
         Some("str") => CellValue::Text {
-            value: c.value_text.unwrap_or_default(),
+            value: unescape_name(&c.value_text.unwrap_or_default()),
         },
         Some("b") => CellValue::Bool {
             value: c.value_text.as_deref() == Some("1"),

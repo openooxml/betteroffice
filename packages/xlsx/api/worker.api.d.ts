@@ -188,6 +188,13 @@ export interface XlsxDefinedNamesResult {
     items: XlsxDefinedName[];
     total: number;
     nextOffset: number | null;
+    /**
+     * Present while the whole table is over the engine's size limit, which
+     * collaborators can reach together. Adding to it is refused, deleting always
+     * works, and it still saves, but BetterOffice reopens such a file only once
+     * the table is back under the limit.
+     */
+    overLimit?: true;
 }
 
 // ---- display-list/types.d.ts ----
@@ -649,9 +656,21 @@ export interface XlsxRangeRead {
     /** Row-major. */
     cells: XlsxCellRead[][];
 }
+/**
+ * A formula cell the engine could not compute: it keeps Excel's saved value.
+ * When the file saved none, an uncomputable function leaves it blank, an
+ * unknown function shows what the engine answered (`#NAME?`, or what a handler
+ * like `IFERROR` made of it), and an engine gap alone shows its error.
+ */
+export interface XlsxUnevaluatedCell extends XlsxCellAddress {
+    /** Functions involved, sorted: uncomputable ones (`WEBSERVICE`, `RTD`, an add-in) and names the engine does not know (a VBA function, a typo); empty when only engine gaps were. */
+    functions: string[];
+}
 export interface XlsxReadCalculation {
     cycleCells: XlsxCellAddress[];
     limitedCells: XlsxCellAddress[];
+    /** Formula cells the engine could not compute; omitted by cores built before the list. */
+    unevaluatedCells?: XlsxUnevaluatedCell[];
     /** Whether a list stopped at 10,000 cells. */
     truncated: boolean;
 }
@@ -910,6 +929,9 @@ export type XlsxExportResult<T> = {
 } | OperationRefusal<XlsxExportFailure>;
 export type { XlsxHeaderFooterText, XlsxHeaderFooterPair, XlsxSheetHeaderFooter } from './edits';
 
+// ---- saveWarnings.d.ts ----
+export type { SaveResult, SaveWarning, SaveWarningCode } from '../../../shared/office-session/saveWarnings';
+
 // ---- selection/types.d.ts ----
 /**
  * Pure selection types. Plain data only — no DOM, no framework — so the model
@@ -1014,10 +1036,12 @@ export interface SelectionMerges {
 export declare function localNowSerial(ms: number): number;
 
 // ---- session/client.d.ts ----
+import type { XlsxPngOptions, XlsxPngTarget } from '../wasm/pngTarget';
 import { type PipeCommandPayload } from '../../../../shared/collaboration-pipe/protocol';
 import type { AwarenessCursor } from '../collaboration/types';
 import { type SessionTransport } from '../../../../shared/office-session/transport';
 import { SessionFailure, type Promisified } from '../../../../shared/office-session/types';
+import { type SaveResult } from '../../../../shared/office-session/saveWarnings';
 import { type OpenWorkbookOptions, type Viewport, type WorkbookHandle } from '../wasm/loader';
 import { type WorkbookFrame, type WorkbookFrameOptions, type WorkbookInitialPaint, type WorkbookSessionEvents, type WorkbookSessionMethods, type WorkbookSessionOpenOptions, type WorkbookSessionState } from './methods';
 import type { CommandBasis, CommandIdentity, CommandStatus, WorkbookAck, WorkbookCommand, WorkbookCommandFrame, WorkbookCommandSelection, WorkbookEditState } from './commandProtocol';
@@ -1061,13 +1085,9 @@ export interface WorkbookSession {
     onAck(listener: (ack: WorkbookAck) => void): () => void;
     markPresented(frame: WorkbookCommandFrame | Pick<WorkbookCommandFrame, 'session' | 'incarnation' | 'coversThroughSeq'>): boolean;
     whenPresented(seq: number): Promise<void>;
-    readonly call: Promisified<Omit<WorkbookSessionMethods, 'open' | 'openRecovery' | 'dispose' | 'frame' | 'command' | 'edit' | 'checkpoint' | 'commandFrame' | 'decodeFontFace' | 'renderPng' | 'renderRangePng' | 'printDisplayList'>> & {
+    readonly call: Promisified<Omit<WorkbookSessionMethods, 'open' | 'openRecovery' | 'dispose' | 'frame' | 'command' | 'edit' | 'checkpoint' | 'commandFrame' | 'decodeFontFace' | 'renderPng' | 'printDisplayList'>> & {
         decodeFontFace: FontDecoder;
-        renderPng(viewport: Viewport, options?: WorkbookFrameOptions): Promise<Uint8Array>;
-        renderRangePng(options?: {
-            range?: string;
-            scale?: number;
-        }, frameOptions?: WorkbookFrameOptions): Promise<Uint8Array>;
+        renderPng(target: XlsxPngTarget, options?: XlsxPngOptions): Promise<Uint8Array>;
         printDisplayList(...args: Parameters<WorkbookHandle['printDisplayList']>): Promise<ReturnType<WorkbookHandle['printDisplayList']>>;
         command(command: WorkbookCommand): Promise<WorkbookAck>;
         /**
@@ -1076,7 +1096,10 @@ export interface WorkbookSession {
          */
         frame(viewport: Viewport, options?: WorkbookFrameOptions): Promise<WorkbookFrame>;
     };
+    /** saved bytes; each save warning is also emitted as a Node process warning on this thread. */
     save(): Promise<Uint8Array>;
+    /** saved bytes with a warning for every part the save wrote differently from what the workbook holds. */
+    saveWithWarnings(): Promise<SaveResult>;
     on<K extends keyof WorkbookSessionEvents>(name: K, listener: (payload: WorkbookSessionEvents[K]) => void): () => void;
     onFailure(listener: (failure: SessionFailure) => void): () => void;
     readonly failure: SessionFailure | undefined;
@@ -1226,6 +1249,7 @@ export type WorkbookCommandPayload<K extends WorkbookCommandKind> = K extends Wo
     updates?: Uint8Array[];
 } : {
     readOnly: boolean;
+    allowHostProposals?: boolean;
 };
 export interface WorkbookCommandFrameRequest {
     sheet: number;
@@ -1390,17 +1414,22 @@ export {};
 
 // ---- session/methods.d.ts ----
 import type { FontDecoderMethods } from '../../../../shared/office-session/fontDecoder';
+import type { FontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
+import type { SaveWarning } from '../../../../shared/office-session/saveWarnings';
 import type { XlsxDefinedNamesRequest, XlsxDefinedNamesResult } from '../definedNames';
 import type { PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
 import type { MethodPolicies, SessionState } from '../../../../shared/office-session';
 import type { Direction, SelectionData } from '../selection/types';
 import type { DisplayList, Rect } from '../display-list/types';
+import type { XlsxPngFont, XlsxPngOptions, XlsxPngTarget } from '../wasm/pngTarget';
+/** PNG options a session call carries; an abort signal stays on the caller's side. */
+export type WorkbookPngOptions = Omit<XlsxPngOptions, 'signal'>;
 import type { AwarenessPeer, CollaborationUpdateOrigin } from '../collaboration/types';
 import type { XlsxExportOptions, XlsxExportResult, XlsxMarkdownContent, XlsxMarkdownOptions, XlsxStructuredContent } from '../exports';
 import type { WorkbookCommand, WorkbookCommandContext, WorkbookCommandFrame, WorkbookCommandSelection, WorkbookCommandWireFrame, WorkbookEditState, WorkbookWireAck, WorkbookSharedCommand, WorkbookSharedWireAck, WorkbookCommandFrameRequest } from './commandProtocol';
 import type { Checkpoint, FrameEnvelope } from '../../../../shared/office-session/commands/types';
 import type { XlsxEditRequest, XlsxEditResult, XlsxFindRequest, XlsxFindResult, XlsxReadRequest, XlsxReadResult, XlsxValidationResult } from '../edits';
-import type { CalculationStatus, CapturedFormat, CellEdit, CellPosition, MergedRange, OpenWorkbookOptions, PrintMetrics, SheetInfo, Viewport } from '../wasm/loader';
+import type { CalculationStatus, CapturedFormat, CellEdit, CellPoint, CellPosition, MergedRange, OpenWorkbookOptions, PrintMetrics, SheetInfo, Viewport } from '../wasm/loader';
 /** @internal */
 export interface WorkbookCollaborationPipeReply {
     collabPipe?: PipeOutputBatch<AwarenessPeer>[];
@@ -1457,6 +1486,8 @@ export type WorkbookWireFrame = Omit<WorkbookFrame, 'displayList'> & {
  */
 export interface WorkbookSessionOpenOptions extends OpenWorkbookOptions {
     wasm?: ArrayBuffer | WebAssembly.Module;
+    /** @internal */
+    fontCdn?: FontCdnConfiguration;
     png?: boolean;
     initialViewport?: WorkbookInitialPaintRequest;
     includeEditState?: boolean;
@@ -1531,7 +1562,7 @@ export interface WorkbookSessionEvents {
 export type WorkbookSessionMethods = FontDecoderMethods & {
     open(bytes: ArrayBuffer, options?: WorkbookSessionOpenOptions): WorkbookSessionOpenReply;
     /** Checkpoints are only restorable by the same engine version and codec. */
-    openRecovery(checkpoint: Checkpoint, options?: Pick<WorkbookSessionOpenOptions, 'wasm' | 'png'>): WorkbookSessionOpenReply;
+    openRecovery(checkpoint: Checkpoint, options?: Pick<WorkbookSessionOpenOptions, 'wasm' | 'png' | 'fontCdn'>): WorkbookSessionOpenReply;
     version(): string;
     collaborationStateVector(): Uint8Array;
     collaborationStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array;
@@ -1549,19 +1580,36 @@ export type WorkbookSessionMethods = FontDecoderMethods & {
     sheetView(sheet: number): WorkbookSheetView;
     cellGeometry(sheet: number, row: number, col: number): WorkbookCellGeometry;
     cellInputs(sheet: number, range: string): WorkbookCellInputs;
+    /** @internal Formulas, without their `=`, moved between cells as a paste moves them. */
+    translateFormulas(items: readonly {
+        formula: string;
+        from: CellPoint;
+        to: CellPoint;
+    }[]): ({
+        ok: true;
+        formula: string;
+    } | {
+        ok: false;
+        error: string;
+    })[];
     selectionData(sheet: number, row: number, col: number, direction?: Direction | 'usedRange' | 'rowEnd' | 'merge'): SelectionData;
     captureFormat(sheet: number, range: string): CapturedFormat;
     sheets(): WorkbookSheetSummary[];
     calculationStatus(): CalculationStatus;
-    renderPng(viewport: Viewport, options?: WorkbookFrameOptions): ArrayBuffer;
-    renderRangePng(options?: {
-        range?: string;
-        scale?: number;
-    }, frameOptions?: WorkbookFrameOptions): ArrayBuffer;
+    renderPng(target: XlsxPngTarget, options?: WorkbookPngOptions): ArrayBuffer;
+    /**
+     * The fonts `renderPng` would paint for the same target. The editors use it to forward the faces they paint with; not public until every format has it.
+     * @internal
+     */
+    renderPngFonts(target: XlsxPngTarget, options?: WorkbookPngOptions): XlsxPngFont[];
     exportStructured(options?: XlsxExportOptions): XlsxExportResult<XlsxStructuredContent>;
     exportMarkdown(options?: XlsxExportOptions, markdownOptions?: XlsxMarkdownOptions): XlsxExportResult<XlsxMarkdownContent>;
     printDisplayList(sheet: number, range: string, metrics: PrintMetrics, gridlines: boolean): ArrayBuffer;
     save(): ArrayBuffer;
+    saveWithWarnings(): {
+        bytes: ArrayBuffer;
+        warnings: SaveWarning[];
+    };
     dispose(): void;
 };
 export declare const WORKBOOK_SESSION_METHODS: {
@@ -1584,16 +1632,18 @@ export declare const WORKBOOK_SESSION_METHODS: {
     sheetView: true;
     cellGeometry: true;
     cellInputs: true;
+    translateFormulas: true;
     selectionData: true;
     captureFormat: true;
     sheets: true;
     calculationStatus: true;
     renderPng: true;
-    renderRangePng: true;
+    renderPngFonts: true;
     exportStructured: true;
     exportMarkdown: true;
     printDisplayList: true;
     save: true;
+    saveWithWarnings: true;
     dispose: true;
 };
 export declare const WORKBOOK_SESSION_POLICIES: MethodPolicies<WorkbookSessionMethods>;
@@ -2037,6 +2087,16 @@ import { type HostMessage } from './protocol';
 import type { SessionTransport } from './transport';
 import { SessionFailure, type Promisified, type SessionEvents, type SessionMethods } from './types';
 export declare const OFFICE_SESSION_SILENCE_MS = 60000;
+/**
+ * Starts fetching the worker's engine on this side while the worker boots, so the download overlaps the worker's own
+ * startup, and hands the response body over once the worker accepts it (no wasm on this thread). The body goes as a
+ * transferred stream, or as bytes where streams cannot be transferred. A worker from before this handoff never
+ * accepts: it compiles on its own and the body is cancelled when it advertises its module. The worker keeps its own
+ * path off http(s) and without fetch, and after a failed fetch, so it reports the same errors as before. Returns an
+ * abort for a session disposed mid-download.
+ * @internal
+ */
+export declare function supplyWasmFetch(transport: SessionTransport, url: URL): () => void;
 export declare function requestWasmCompile(transport: SessionTransport): void;
 export interface SessionClientOptions<M extends SessionMethods> {
     methods: {
@@ -2582,6 +2642,17 @@ export declare function isCommandAck(value: unknown): value is CommandAck<unknow
 /** @internal Identifies the unknown-outcome reply error and its preserved sequence. */
 export declare function isCommandOutcomeUnknownError(value: unknown): value is CommandOutcomeUnknownError;
 
+// ---- shared/office-session/fontCdn.d.ts ----
+/** @internal */
+export interface FontCdnConfiguration {
+    baseUrl: string | false;
+    timeoutMs: number;
+}
+/** @internal */
+export declare function getFontCdnConfiguration(): FontCdnConfiguration | undefined;
+/** @internal */
+export declare function setFontCdnConfiguration(configuration: FontCdnConfiguration | undefined): void;
+
 // ---- shared/office-session/fontDecoder.d.ts ----
 export type FontDecoder = (bytes: ArrayBuffer | Uint8Array, options: {
     codec: string;
@@ -2632,11 +2703,24 @@ export * from './client';
 export * from './host';
 export * from './scheduler';
 
+// ---- shared/office-session/pngExportError.d.ts ----
+export type PngExportCode = 'canvas-unavailable' | 'canvas-too-large' | 'font-unavailable' | 'picture-unavailable';
+export declare class PngExportError extends Error {
+    readonly code: PngExportCode;
+    constructor(code: PngExportCode, message: string);
+}
+
 // ---- shared/office-session/protocol.d.ts ----
 import type { SessionFailureCode } from './types';
 export type ClientMessage = {
     protocol: 1;
     kind: 'wasm-compile';
+    /** The client is fetching the engine and will send it: wait for it instead of fetching. */
+    pending?: true;
+    /** The engine's response body, fetched by the client; the worker compiles it as it streams. */
+    stream?: ReadableStream<Uint8Array>;
+    /** The engine's bytes, where the stream could not be transferred; the worker compiles them. */
+    bytes?: ArrayBuffer;
 } | {
     protocol: 1;
     kind: 'call';
@@ -2653,7 +2737,12 @@ export interface ReplyError {
     code?: string;
     refusal?: unknown;
 }
-export type HostMessage = {
+export type HostMessage = 
+/** The worker waits for the engine body the client announced as pending; old workers never send it. */
+{
+    protocol: 1;
+    kind: 'wasm-accept';
+} | {
     protocol: 1;
     kind: 'wasm-module';
     url: string;
@@ -2711,6 +2800,38 @@ export declare function hasOwn(value: object, key: PropertyKey): boolean;
 export declare function isClientMessage(value: unknown): value is ClientMessage;
 export declare function isHostMessage(value: unknown): value is HostMessage;
 export {};
+
+// ---- shared/office-session/saveWarnings.d.ts ----
+/**
+ * `unwritable-reference`: the document holds a reference with a character XML 1.0 cannot carry, which the
+ * part cannot be written with, so the save kept the part as the file wrote it. `unrewritable-formula`: the part
+ * holds a formula, kept as the file wrote it, that a sheet rename could not rewrite, so it was kept unrenamed.
+ * New codes may be added; handle a code you do not know as a generic warning.
+ */
+export type SaveWarningCode = 'unwritable-reference' | 'unrewritable-formula';
+/** A part a save wrote differently from what the document holds, and why. */
+export interface SaveWarning {
+    /** Stable, to match on. */
+    code: SaveWarningCode;
+    /** The package part, such as `xl/charts/chart1.xml`. */
+    part: string;
+    /** What inside the part, such as `chart`. */
+    element?: string;
+    /** The sheet the part belongs to, in a workbook. */
+    sheet?: string;
+    /** A sentence for people; not stable, match on `code`. */
+    message: string;
+}
+/** The saved bytes and the warnings the save carries; `warnings` is empty on an ordinary save. */
+export interface SaveResult {
+    bytes: Uint8Array;
+    warnings: SaveWarning[];
+}
+/**
+ * Emits each warning as a Node process warning with code `BETTEROFFICE_SAVE_WARNING`, so server hosts can
+ * filter it. Does nothing outside Node.
+ */
+export declare function warnSaveWarnings(warnings: readonly SaveWarning[]): void;
 
 // ---- shared/office-session/scheduler.d.ts ----
 export type SchedulerLane = 'input' | 'collab' | 'interactive' | 'background';
@@ -2990,17 +3111,15 @@ export class XlsxDocument {
      */
     rejectProposalJson(args: string): string;
     /**
-     * render the current sheet viewport to png bytes (raster feature only).
-     */
-    renderPng(viewport_json: string): Uint8Array;
-    /**
-     * render an a1 range (default: used range) at an optional scale to png.
-     */
-    renderRangePng(args: string): Uint8Array;
-    /**
      * serialize the current workbook back to `.xlsx` bytes.
      */
     saveBytes(): Uint8Array;
+    /**
+     * The warnings a save of the workbook as it is now carries, as a JSON
+     * array of `{ code, part, element?, sheet?, message }`; `[]` on an
+     * ordinary save.
+     */
+    saveWarningsJson(): string;
     searchTextJson(args: string): string;
     selectionDataJson(args: string): string;
     selectionFormattingJson(args: string): string;
@@ -3020,6 +3139,10 @@ export class XlsxDocument {
      * Start queuing origin-prefixed Yrs update events for polling.
      */
     startUpdateObservation(): void;
+    /**
+     * @internal
+     */
+    translateFormulasJson(args: string): string;
     /**
      * undo the last transaction; returns `{"applied":bool,"sheetInfo":{...}}`.
      */
@@ -3150,9 +3273,8 @@ export interface InitOutput {
     readonly xlsxdocument_recoveryCheckpoint: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_redoJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_rejectProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
-    readonly xlsxdocument_renderPng: (a: number, b: number, c: number) => [number, number, number, number];
-    readonly xlsxdocument_renderRangePng: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_saveBytes: (a: number) => [number, number, number, number];
+    readonly xlsxdocument_saveWarningsJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_searchTextJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_selectionDataJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_selectionFormattingJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -3163,6 +3285,7 @@ export interface InitOutput {
     readonly xlsxdocument_sheetInfoForJson: (a: number, b: number) => [number, number, number, number];
     readonly xlsxdocument_sheetInfoJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_startUpdateObservation: (a: number) => [number, number];
+    readonly xlsxdocument_translateFormulasJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_undoJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_validateEditsJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_version: () => [number, number];
@@ -3208,7 +3331,10 @@ import type { XlsxDefinedNamesRequest, XlsxDefinedNamesResult } from '../defined
 import type { Direction, SelectionData } from '../selection/types';
 import type { InitInput } from './generated/xlsx_wasm.js';
 import { type FontDecoder } from '../../../../shared/office-session/fontDecoder';
+import { type SaveResult } from '../../../../shared/office-session/saveWarnings';
 export declare const decodeFontFace: FontDecoder;
+import type { XlsxPngFont, XlsxPngOptions, XlsxPngTarget } from './pngTarget';
+export type { XlsxFontFace, XlsxPngFont, XlsxPngOptions, XlsxPngTarget, XlsxRangeAddress, XlsxSheetRef } from './pngTarget';
 import type { CollaborationReplica, CollaborationUpdateOrigin } from '../collaboration/types';
 import type { ChartRegion, DisplayList, Rect } from '../display-list/types';
 import type { XlsxCellAddress, XlsxEditRequest, XlsxEditResult, XlsxFindRequest, XlsxFindResult, XlsxReadRequest, XlsxReadResult, XlsxValidationResult } from '../edits';
@@ -3295,6 +3421,20 @@ export interface CalculationStatus {
     limitedCells: string[];
     /** The last recalculation ran out of its budget; the cells it could not evaluate keep their saved values. */
     budgetExhausted?: boolean;
+    /** Formula cells the engine could not compute, at most 10,000; omitted by cores built before the list. */
+    unevaluatedCells?: UnevaluatedCellStatus[];
+}
+/**
+ * A formula cell the engine could not compute: it keeps Excel's saved value.
+ * When the file saved none, an uncomputable function leaves it blank, an
+ * unknown function shows what the engine answered (`#NAME?`, or what a handler
+ * like `IFERROR` made of it), and an engine gap alone shows its error.
+ */
+export interface UnevaluatedCellStatus {
+    /** The cell, qualified by its sheet when that is not the active one. */
+    address: string;
+    /** Functions involved, sorted: uncomputable ones (`WEBSERVICE`, `RTD`, an add-in) and names the engine does not know (a VBA function, a typo); empty when only engine gaps were. */
+    functions: string[];
 }
 export type NumberFormat = 'automatic' | 'plainText' | 'number' | 'percent' | 'scientific' | 'currency' | 'date' | 'time' | 'custom';
 export type BorderPreset = 'all' | 'inner' | 'horizontal' | 'vertical' | 'outer' | 'left' | 'top' | 'right' | 'bottom' | 'none';
@@ -3539,6 +3679,7 @@ export interface ProposalCell {
     a1: string;
     oldText: string;
     newText: string;
+    stale?: boolean;
 }
 /**
  * A pending, un-applied set of cell changes an agent has staged for human
@@ -3550,6 +3691,12 @@ export interface Proposal {
     agentId: string;
     note: string | null;
     cells: ProposalCell[];
+    /**
+     * A1 addresses of the cells whose target moved, the same strings as
+     * {@link StaleProposalError.cells}. A changed dependency only shows at accept.
+     */
+    staleTargets?: string[];
+    forceBlocked?: boolean;
 }
 /** A drifted proposal cell: its sheet index and catalog id beside the coordinates. */
 export interface StaleProposalTarget extends XlsxCellAddress {
@@ -3665,22 +3812,27 @@ export interface WorkbookHandle extends CollaborationReplica {
     visibleMergedRanges(sheet: number, viewport: Viewport): MergedRange[];
     historyState(): HistoryState;
     /**
-     * render the current sheet viewport to png bytes via the native raster
-     * backend — the same display list the canvas paints, rasterized server-side.
-     * throws if the embedded wasm was built without png export (the `raster`
-     * cargo feature); guard with {@link isPngExportAvailable}.
+     * Draws a viewport or a cell range of a sheet as PNG bytes, with the
+     * editor's painter on a canvas. Rejects with `PngExportError` rather than
+     * paint a substitute font, and where no canvas exists names
+     * `@betteroffice/xlsx-native`.
      */
-    renderPng(viewport: Viewport): Uint8Array;
+    renderPng(target: XlsxPngTarget, options?: XlsxPngOptions): Promise<Uint8Array>;
     /**
-     * render an a1 range (default: the used range) at an optional scale to png.
-     * dimensions are capped wasm-side; same availability guard as renderPng.
+     * The fonts `renderPng` would paint for the same target. The editors use it to forward the faces they paint with; not public until every format has it.
+     * @internal
      */
-    renderRangePng(opts?: {
-        range?: string;
-        scale?: number;
-    }): Uint8Array;
-    /** serialize the workbook back to .xlsx bytes. */
+    renderPngFonts(target: XlsxPngTarget, options?: XlsxPngOptions): XlsxPngFont[];
+    /**
+     * serialize the workbook back to .xlsx bytes. each save warning is also emitted as a Node process
+     * warning with code `BETTEROFFICE_SAVE_WARNING`; {@link WorkbookHandle.saveWithWarnings} returns them.
+     */
     save(): Uint8Array;
+    /**
+     * serialize the workbook back to .xlsx bytes, with a warning for every part the save wrote differently
+     * from what the workbook holds; none on an ordinary save.
+     */
+    saveWithWarnings(): SaveResult;
     /**
      * stage an agent's proposed edits for human review without applying them.
      * returns the {@link Proposal} with per-cell formatted before/after previews.
@@ -3690,6 +3842,11 @@ export interface WorkbookHandle extends CollaborationReplica {
     propose(agentId: string, note: string | null, edits: ProposalEdit[]): Proposal;
     /** every pending proposal, oldest first. empty when none or unsupported. */
     listProposals(): Proposal[];
+    /** The pending state or the last decision made through this handle. */
+    getProposalStatus(id: string): 'pending' | 'accepted' | 'rejected' | undefined;
+    isProposalStale(id: string): boolean;
+    /** Observe proposals created or decided through this handle. */
+    onProposalChange(listener: (proposals: Proposal[]) => void): () => void;
     /**
      * apply a pending proposal as one undo step and recalc dependents. throws
      * {@link StaleProposalError} when the base changed since it was staged and
@@ -3736,6 +3893,10 @@ export interface WorkbookHandle extends CollaborationReplica {
 export declare function workbookDisplayListJson(handle: WorkbookHandle, viewport: Viewport, sheet?: number): string;
 export type WasmInitInput = InitInput | Promise<InitInput>;
 export interface WasmInitOptions {
+    /**
+     * `false` loads the smaller core without peer snapshots or standalone
+     * {@link renderXlsxMarkdown}; `exportMarkdown` on a workbook still works.
+     */
     png?: boolean;
 }
 /** Initialize the workbook engine. Concurrent calls share the same attempt. */
@@ -3755,9 +3916,8 @@ export declare function getDisplayListCellLimit(): number;
  */
 export declare function isWasmAvailable(): boolean;
 /**
- * Whether the embedded wasm core was built with png export (the `raster` cargo
- * feature). The wasm-bindgen method only exists on the class when compiled in,
- * so chrome can disable an export control instead of calling and catching.
+ * Whether `renderPng` can draw here through a canvas or the native engine.
+ * Callers can disable an export control instead of calling and catching.
  */
 export declare function isPngExportAvailable(): boolean;
 /**
@@ -3790,6 +3950,21 @@ export declare function workbookPeerHydration(handle: WorkbookHandle): string;
 export declare function adoptWorkbookPeerVersion(handle: WorkbookHandle, version: string): void;
 export declare function openWorkbookPeer(bytes: Uint8Array, options: OpenWorkbookOptions, hydration: string): WorkbookHandle;
 /**
+ * @internal Formulas, without their `=`, moved from one cell to another as a paste moves them, by
+ * the engine of `handle`; per item the moved formula, or why a paste would refuse it.
+ */
+export declare function translateFormulasOn(handle: WorkbookHandle, items: readonly {
+    formula: string;
+    from: CellPoint;
+    to: CellPoint;
+}[]): ({
+    ok: true;
+    formula: string;
+} | {
+    ok: false;
+    error: string;
+})[];
+/**
  * Exports `.xlsx` bytes as read, initializing the core if needed. Formula results are the
  * stored ones: nothing is recalculated and no clock is read, so the same bytes and options
  * always give the same content. Unreadable bytes and unusable options reject.
@@ -3803,6 +3978,73 @@ export declare function renderXlsxMarkdown(content: XlsxStructuredContent, optio
  * The crate version string, for asserting wasm/js parity.
  */
 export declare function wasmVersion(): string;
+
+// ---- wasm/pngTarget.d.ts ----
+import type { Viewport } from './loader';
+/** A sheet by zero-based index or by tab name. */
+export type XlsxSheetRef = number | string;
+/** A cell range as an A1 string, an A1 object, or zero-based row and column corners. */
+export type XlsxRangeAddress = string | {
+    kind: 'a1';
+    a1: string;
+} | {
+    kind: 'rowCol';
+    start: {
+        row: number;
+        col: number;
+    };
+    end: {
+        row: number;
+        col: number;
+    };
+};
+/**
+ * What `renderPng` draws: a viewport of a sheet, or a cell range of it.
+ * `range: 'used'` draws the sheet's used range as the engine finds it at call time.
+ */
+export type XlsxPngTarget = {
+    sheet: number | string;
+    viewport: Viewport;
+} | {
+    sheet: number | string;
+    range: XlsxRangeAddress | 'used';
+};
+/** A font face an export paints with, the same shape as `VsdxFontFace`. */
+export interface XlsxFontFace {
+    family: string;
+    bold?: boolean;
+    italic?: boolean;
+    bytes: Uint8Array;
+}
+/**
+ * A family and style a PNG export paints, for callers that supply faces.
+ * @internal
+ */
+export interface XlsxPngFont {
+    family: string;
+    bold: boolean;
+    italic: boolean;
+}
+export interface XlsxPngOptions {
+    /** Device pixels per sheet pixel. Defaults to 1. */
+    scale?: number;
+    /** Largest PNG width in pixels; a wider target is cut at its right edge. */
+    maxWidth?: number;
+    /** Largest PNG height in pixels; a taller target is cut at its bottom edge. */
+    maxHeight?: number;
+    signal?: AbortSignal;
+    /**
+     * Faces to paint the sheet's fonts with, matched by family and style. Each
+     * export installs them under private names and drops them afterwards; one
+     * that fails to load rejects with `PngExportError` `font-unavailable`. The
+     * editors pass the faces they paint with. Without this option the export
+     * loads the bundled faces `@betteroffice/xlsx-native` draws the sheet's fonts
+     * with, and rejects if one fails to load. A list, even an empty one, replaces
+     * them: a family it does not cover is painted with the engine's built-in
+     * substitute.
+     */
+    fonts?: ReadonlyArray<XlsxFontFace>;
+}
 
 // ---- worker.d.ts ----
 export * from './workerSession';
@@ -3838,6 +4080,10 @@ export { workbookSessionRecovery, WorkbookRecoveryReplayError } from './session/
 export type { WorkbookSessionRecovery } from './session/clientRecovery';
 export { createWorkbookEditSession } from './session/editSession';
 export { WorkbookPngUnavailableError } from './session/methods';
+export { PngExportError } from '../../../shared/office-session/pngExportError';
+export type { PngExportCode } from '../../../shared/office-session/pngExportError';
+export type { SaveResult, SaveWarning, SaveWarningCode } from './saveWarnings';
+export type { XlsxFontFace, XlsxPngFont, XlsxPngOptions, XlsxPngTarget, XlsxRangeAddress, XlsxSheetRef } from './wasm/pngTarget';
 export type { WorkbookEditSession } from './session/editSession';
 /** @experimental */
-export type { WorkbookCellGeometry, WorkbookCellInputs, WorkbookFrame, WorkbookFrameOptions, WorkbookInitialPaint, WorkbookInitialPaintRequest, WorkbookSessionOpenReply, WorkbookSessionEvents, WorkbookSessionMethods, WorkbookSessionOpenOptions, WorkbookSessionState, WorkbookSheetSummary, WorkbookSheetView, } from './session/methods';
+export type { WorkbookCellGeometry, WorkbookCellInputs, WorkbookFrame, WorkbookFrameOptions, WorkbookInitialPaint, WorkbookInitialPaintRequest, WorkbookSessionOpenReply, WorkbookSessionEvents, WorkbookSessionMethods, WorkbookSessionOpenOptions, WorkbookSessionState, WorkbookSheetSummary, WorkbookSheetView, WorkbookPngOptions, } from './session/methods';

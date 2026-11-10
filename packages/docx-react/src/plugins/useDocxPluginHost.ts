@@ -29,6 +29,8 @@ import {
   type ResidentEngineWorkerClient,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
+import { trackFocus } from '../../../../shared/plugin-host/focusTracker';
+import { resolvedLocale } from '../i18n/LocaleContext';
 import type { DocxCommandController } from '../commands/createDocxCommandStore';
 import type { EditorMode } from '../components/DocxEditor/internals/editing-modes';
 import {
@@ -54,7 +56,7 @@ import {
   type DocxPluginHost,
 } from './createDocxPluginHost';
 import { resolveParagraph } from './createPluginClients';
-import { createPluginGeometry, pluginLayout, readPluginPositionAtPoint } from './geometry';
+import { createPluginGeometry, pluginLayout, readPluginPositionAtPoint, visibleViewport } from './geometry';
 import { managedSidebarItems } from './PluginSidebarItems';
 import { usePluginReservations } from './reservations';
 import { currentPreviewKey } from './proposalPreview';
@@ -70,6 +72,10 @@ const NO_ACTIVATIONS: readonly DocxPluginActivation[] = Object.freeze([]);
 type RenderedDom = { context: RenderedDomContext; queries: DisplayListQueries };
 
 export interface UseDocxPluginHostOptions extends DocxEditorPluginProps {
+  locale?: string;
+  focusRoot?: () => Element | null;
+  scrollContainerRef?: React.RefObject<HTMLElement | null>;
+  editorRootRef?: React.RefObject<HTMLElement | null>;
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
   experimentalWorkerOpen?: boolean;
   writeModeRef: React.RefObject<EditorMode>;
@@ -78,6 +84,8 @@ export interface UseDocxPluginHostOptions extends DocxEditorPluginProps {
   readOnly: boolean;
   viewerSelection?: boolean;
   commands: DocxCommandController;
+  /** Changes with the host's shortcut map, so contributed chords follow it. */
+  shortcutsKey?: string;
   /** The authoritative session once a document is ready, else null. */
   session: YrsSession | null;
   /** Changes whenever a new document load starts. */
@@ -184,6 +192,18 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   );
 
   const managed = (options.plugins?.length ?? 0) > 0;
+  const locale = resolvedLocale(options.locale ?? options.i18n?._lang);
+  useLayoutEffect(() => { host.localeChanged(locale); }, [host, locale]);
+  useLayoutEffect(() => {
+    if (!managed) return;
+    return trackFocus(() => {
+      const root = latest.current.focusRoot?.();
+      if (!root) return [];
+      const inputId = root.getAttribute('data-docx-input');
+      const input = inputId ? root.ownerDocument.getElementById(inputId) : null;
+      return input ? [root, input] : [root];
+    }, (focused) => host.focusChanged(focused));
+  }, [host, managed]);
 
   useLayoutEffect(() => {
     for (const listener of layoutListeners.current) listener();
@@ -248,7 +268,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   useEffect(() => {
     host.syncCommands();
     return host.subscribe(() => host.syncCommands());
-  }, [host]);
+  }, [host, options.shortcutsKey]);
 
   const activations = useSyncExternalStore(host.subscribe, host.activations, () => NO_ACTIVATIONS);
   const reservationsPayload = usePluginReservations(host, managed ? activations : NO_ACTIVATIONS);
@@ -346,6 +366,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   useEffect(() => {
     const pages = options.canvasHostRef.current;
     const target = options.overlayTarget;
+    const scroller = options.scrollContainerRef?.current;
     if (!managed || !pages || !target) return;
     let frame = 0;
     const bump = () => {
@@ -359,14 +380,17 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
     observer?.observe(pages);
     observer?.observe(target);
     pages.addEventListener('transitionend', bump);
+    scroller?.addEventListener('scroll', bump, { passive: true });
+    if (scroller) observer?.observe(scroller);
     window.addEventListener('resize', bump);
     return () => {
       if (frame) cancelAnimationFrame(frame);
       observer?.disconnect();
       pages.removeEventListener('transitionend', bump);
+      scroller?.removeEventListener('scroll', bump);
       window.removeEventListener('resize', bump);
     };
-  }, [managed, options.canvasHostRef, options.overlayTarget, options.queries]);
+  }, [managed, options.canvasHostRef, options.overlayTarget, options.queries, options.scrollContainerRef]);
 
   const version = useSyncExternalStore(host.subscribe, host.version, host.version);
   const previewVersion = useSyncExternalStore(
@@ -479,7 +503,9 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
       (clientX, clientY) => readPluginPositionAtPoint(
         latest.current.pagedEditorRef, clientX, clientY, latest.current.experimentalWorkerOpen === true
       ),
-      () => layoutComplete(latest.current.pagedEditorRef.current, dom.queries)
+      () => layoutComplete(latest.current.pagedEditorRef.current, dom.queries),
+      () => visibleViewport(latest.current.scrollContainerRef?.current ?? layer,
+        latest.current.editorRootRef?.current ?? layer, layer)
     );
     const resolveAnchor = created.getAnchorGeometry;
     created.getAnchorGeometry = (target) => {

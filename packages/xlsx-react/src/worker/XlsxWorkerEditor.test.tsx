@@ -25,7 +25,7 @@ import * as peerlessInput from '../commands/peerlessWorkerInputCoordinator';
 import type { PeerlessWorkerCommand } from '../commands/peerlessWorkerInputCoordinator';
 import type { XlsxCommandStore } from '../commands/types';
 import { defineXlsxPlugin } from '../plugins/defineXlsxPlugin';
-import type { XlsxPluginContext, XlsxPluginSelection } from '../plugins/types';
+import type { XlsxPluginContext, XlsxPluginGeometry, XlsxPluginSelection } from '../plugins/types';
 import { workbookSessionOpener } from '../viewer/useSessionWorkbook';
 import { defaultFontPainterModule } from '../useDefaultFonts';
 import { XlsxWorkerEditorCollaborationError, type XlsxWorkerEditorApi } from './createWorkerEditorApi';
@@ -214,6 +214,7 @@ function harness(realFacade = false, normalizeInput = false) {
     state: { format: 'xlsx', stage: 'ready', version: 0, dirty: false, activeSheet: 0,
       sheets: [{ id: 'sheet:0', index: 0, name: 'First' }, { id: 'sheet:1', index: 1, name: 'Second' }] },
     call: sessionMethods as unknown as WorkbookSession['call'], save: sessionSave,
+    saveWithWarnings: mock(async () => ({ bytes: new Uint8Array([0]), warnings: [] })),
     on: () => () => {},
     onFailure(listener) {
       failureListeners.add(listener);
@@ -484,7 +485,8 @@ function peerlessHarness(toolbarCommands = false, workerCommands = false, defaul
     }),
     onAck: (listener) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
     on: () => () => {}, onFailure: (listener) => { failures.add(listener); return () => { failures.delete(listener); }; },
-    save: mock(async () => new Uint8Array([8, 9])), dispose: mock(async () => {}),
+    save: mock(async () => new Uint8Array([8, 9])),
+    saveWithWarnings: mock(async () => ({ bytes: new Uint8Array([8, 9]), warnings: [] })), dispose: mock(async () => {}),
     markPresented: mock((paint) => {
       presentedThroughSeq = Math.max(presentedThroughSeq, paint.coversThroughSeq);
       for (const pending of presentations.splice(0)) {
@@ -585,9 +587,10 @@ function peerlessHarness(toolbarCommands = false, workerCommands = false, defaul
       } } : {}),
     });
   };
-  const replace = (view: ReturnType<typeof render>, replacement = new Uint8Array([4])) => view.rerender(
+  const replace = (view: ReturnType<typeof render>, replacement = new Uint8Array([4]),
+    hostProps: Partial<Omit<XlsxAsyncEditorProps, 'file'>> = {}) => view.rerender(
     <Profiler id="peerless" onRender={renderCount}>
-      <XlsxWorkerEditor backend="peerless" file={replacement} toolbar={<Chrome />} onReady={ready} />
+      <XlsxWorkerEditor backend="peerless" file={replacement} toolbar={<Chrome />} onReady={ready} {...hostProps} />
     </Profiler>);
   const asyncEditor = (props: Partial<XlsxAsyncEditorProps> = {}) => (
     <XlsxEditor file={file} toolbar={<Chrome />} {...props} />
@@ -2001,7 +2004,7 @@ describe('XlsxEditor async API', () => {
     await expect(host.replica.async.encodeStateVector()).resolves.toEqual(Uint8Array.of(1));
   });
 
-  for (const route of ['renderPng', 'renderRangePng', 'exportStructured', 'exportMarkdown', 'printDisplayList', 'exportPng'] as const) {
+  for (const route of ['renderPng', 'renderPngRange', 'exportStructured', 'exportMarkdown', 'printDisplayList', 'exportPng'] as const) {
     for (const status of ['applied', 'refused'] as const) {
       it(`exports acknowledged composition and preserves input refusals (${route}, ${status})`, async () => {
         const host = peerlessHarness(true);
@@ -2013,7 +2016,6 @@ describe('XlsxEditor async API', () => {
         };
         const sheet = { sheetId: 'sheet:0', index: 0, name: 'First' };
         const renderPng = mock<WorkbookSession['call']['renderPng']>(async () => new TextEncoder().encode(read()));
-        const renderRangePng = mock<WorkbookSession['call']['renderRangePng']>(async () => new TextEncoder().encode(read()));
         const exportStructured = mock<WorkbookSession['call']['exportStructured']>(async () => {
           const value = read();
           return { ok: true, version: 'v1', content: {
@@ -2038,7 +2040,8 @@ describe('XlsxEditor async API', () => {
           commands: [{ op: 'text', text: read(), x: 8, y: 18, fontSize: 11, color: '#000000' }],
         }));
         Object.assign(host.session, { pngExport: true });
-        Object.assign(host.session.call, { renderPng, renderRangePng, exportStructured, exportMarkdown, printDisplayList });
+        const renderPngFonts = mock<WorkbookSession['call']['renderPngFonts']>(async () => []);
+        Object.assign(host.session.call, { renderPng, renderPngFonts, exportStructured, exportMarkdown, printDisplayList });
         for (const name of ['createObjectURL', 'revokeObjectURL'] as const) {
           const descriptor = Object.getOwnPropertyDescriptor(URL, name);
           Object.defineProperty(URL, name, { configurable: true, value: () => 'blob:png' });
@@ -2061,8 +2064,8 @@ describe('XlsxEditor async API', () => {
         fireEvent.change(input, { target: { value: 'composed' } });
         const invoke = (): Promise<unknown> => {
           switch (route) {
-            case 'renderPng': return api.renderPng({ x: 0, y: 0, width: 120, height: 48 });
-            case 'renderRangePng': return api.renderRangePng({ range: 'A1' });
+            case 'renderPng': return api.renderPng({ sheet: 0, viewport: { x: 0, y: 0, width: 120, height: 48 } });
+            case 'renderPngRange': return api.renderPng({ sheet: 0, range: 'A1' });
             case 'exportStructured': return api.exportStructured();
             case 'exportMarkdown': return api.exportMarkdown();
             case 'printDisplayList': return api.printDisplayList(0, 'A1', {
@@ -2089,7 +2092,7 @@ describe('XlsxEditor async API', () => {
         } else {
           expect(values).toEqual(['composed']);
           const result = await exporting;
-          if (route === 'renderPng' || route === 'renderRangePng') expect(new TextDecoder().decode(result as Uint8Array)).toBe('composed');
+          if (route === 'renderPng' || route === 'renderPngRange') expect(new TextDecoder().decode(result as Uint8Array)).toBe('composed');
           else if (route === 'exportStructured') expect(result).toMatchObject({ content: { sheets: [{ cells: [{ displayText: 'composed' }] }] } });
           else if (route === 'exportMarkdown') expect(result).toMatchObject({ content: { markdown: 'composed' } });
           else if (route === 'printDisplayList') expect(result).toMatchObject({ commands: [{ text: 'composed' }] });
@@ -2104,8 +2107,7 @@ describe('XlsxEditor async API', () => {
   it('opens the worker lean, downloads viewport PNG and resolves the export API', async () => {
     const host = peerlessHarness(true);
     const png = Uint8Array.of(137, 80, 78, 71, 13, 10, 26, 10);
-    const renderPng = mock(async (_viewport: xlsx.Viewport, _options?: { sheet?: number }) => png);
-    const renderRangePng = mock(async (_range?: { range?: string; scale?: number }, _options?: { sheet?: number }) => png);
+    const renderPng = mock(async (_target: xlsx.XlsxPngTarget, _options?: xlsx.XlsxPngOptions) => png);
     const structured: xlsx.XlsxExportResult<xlsx.XlsxStructuredContent> = { ok: true, version: 'v1', content: {
       schemaVersion: 1, anchorScope: 'session', dateSystem: '1900', truncated: false,
       calculation: { policy: 'asStored', freshness: 'unverified' },
@@ -2120,7 +2122,8 @@ describe('XlsxEditor async API', () => {
     const list: DisplayList = { width: 120, height: 48, commands: [] };
     const printDisplayList = mock(async (_sheet: number, _range: string, _metrics: xlsx.PrintMetrics, _gridlines: boolean) => list);
     Object.assign(host.session, { pngExport: true });
-    Object.assign(host.session.call, { renderPng, renderRangePng, exportStructured, exportMarkdown, printDisplayList });
+    const renderPngFonts = mock(async (_target: xlsx.XlsxPngTarget, _options?: xlsx.XlsxPngOptions) => [] as xlsx.XlsxPngFont[]);
+    Object.assign(host.session.call, { renderPng, renderPngFonts, exportStructured, exportMarkdown, printDisplayList });
     const createUrl = mock((_blob: Blob) => 'blob:png');
     const revokeUrl = mock((_url: string) => {});
     for (const [name, value] of [['createObjectURL', createUrl], ['revokeObjectURL', revokeUrl]] as const) {
@@ -2145,7 +2148,8 @@ describe('XlsxEditor async API', () => {
     expect(api.commands.getState('exportPng').enabled).toBe(true);
     await act(async () => fireEvent.click(view.getByTestId('xlsx-export-png')));
     await waitFor(() => expect(downloads).toEqual([{ name: 'Report.png', href: 'blob:png' }]));
-    expect(renderPng).toHaveBeenCalledWith({ x: 0, y: 0, width: 800, height: 600 }, { sheet: 0 });
+    expect(renderPng.mock.calls[0]).toEqual([{ sheet: 0, viewport: { x: 0, y: 0, width: 800, height: 600 } }, {}]);
+    expect(renderPngFonts.mock.calls[0]![0]).toEqual({ sheet: 0, viewport: { x: 0, y: 0, width: 800, height: 600 } });
     const blob = createUrl.mock.calls[0]![0];
     expect(blob.type).toBe('image/png');
     expect(new Uint8Array(await blob.arrayBuffer())).toEqual(png);
@@ -2154,13 +2158,13 @@ describe('XlsxEditor async API', () => {
     const options = { scope: [{ sheet: 1, range: 'A1:B2' }], maxCells: 2 };
     const metrics = { dpi: 144, maxDigitWidth: 9, defaultRowHeightPt: 18,
       fontSizePt: 12, fontFamily: 'Arial', fontAscent: 12, fontDescent: 4 };
-    await expect(api.renderPng(viewport)).resolves.toEqual(png);
-    await expect(api.renderRangePng({ range: 'A1:B2', scale: 2 })).resolves.toEqual(png);
+    await expect(api.renderPng({ sheet: 0, viewport })).resolves.toEqual(png);
+    expect(renderPng.mock.lastCall).toEqual([{ sheet: 0, viewport }, {}]);
+    await expect(api.renderPng({ sheet: 'First', range: 'A1:B2' }, { scale: 2 })).resolves.toEqual(png);
     await expect(api.exportStructured(options)).resolves.toEqual(structured);
     await expect(api.exportMarkdown(options, { maxRows: 1 })).resolves.toEqual(markdown);
     await expect(api.printDisplayList(1, 'A1:B2', metrics, false)).resolves.toEqual(list);
-    expect(renderPng).toHaveBeenLastCalledWith(viewport, { sheet: 0 });
-    expect(renderRangePng).toHaveBeenCalledWith({ range: 'A1:B2', scale: 2 }, { sheet: 0 });
+    expect(renderPng.mock.lastCall).toEqual([{ sheet: 'First', range: 'A1:B2' }, { scale: 2 }]);
     expect(exportStructured).toHaveBeenCalledWith(options);
     expect(exportMarkdown).toHaveBeenCalledWith(options, { maxRows: 1 });
     expect(printDisplayList).toHaveBeenCalledWith(1, 'A1:B2', metrics, false);
@@ -2758,6 +2762,66 @@ describe('peerless editor chunk failures', () => {
 });
 
 describe('peerless workbook worker editor', () => {
+  it('follows the worker to a surviving sheet when a remote update removes the active sheet', async () => {
+    const host = collaborativePeerlessHarness();
+    const ready = mock((_api: XlsxAsyncEditorApi) => {});
+    const view = render(host.asyncEditor({ collaboration: { clientId: 101 }, onReady: ready }));
+    await opened();
+    await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+    await act(async () => { fireEvent.click(view.getByRole('tab', { name: 'Second' })); });
+    const switched = host.sent[host.sent.length - 1]!;
+    if (switched.kind !== 'setActiveSheet') throw new Error('Expected a sheet tab command');
+    expect(switched.payload.args).toEqual([1]);
+    await act(async () => host.ack(switched, { selection: switched.payload.selection, paint: true }));
+    expect(view.getByRole('tab', { name: 'Second' }).getAttribute('aria-selected')).toBe('true');
+    let merging!: Promise<unknown>;
+    await act(async () => { merging = ready.mock.calls[0]![0].collaboration!.applyUpdate(new TextEncoder().encode('remote')); });
+    const updateIndex = host.sent.length - 1;
+    const update = host.sent[updateIndex]!;
+    expect(update.kind).toBe('applyUpdate');
+    const seen = { sheetView: host.sheetView.mock.calls.length, cellGeometry: host.cellGeometry.mock.calls.length,
+      cellInputs: host.cellInputs.mock.calls.length, frame: host.frame.mock.calls.length };
+    await act(async () => host.push({ throughSeq: update.seq, version: 'v9',
+      statuses: [{ seq: update.seq, status: 'applied', committed: true, result: { remoteUpdate: true, proposals: [] } }],
+      editState: { activeSheet: 0, sheets: [{ id: 'sheet:0', index: 0, name: 'First' }] } }));
+    await merging;
+    await advance();
+    expect(view.queryByRole('tab', { name: 'Second' })).toBeNull();
+    expect(view.getByRole('tab', { name: 'First' }).getAttribute('aria-selected')).toBe('true');
+    expect(host.sent.slice(updateIndex + 1).filter((command) => command.kind === 'setActiveSheet'))
+      .toEqual([expect.objectContaining({ payload: expect.objectContaining({ args: [0] }) })]);
+    expect(host.sent.slice(updateIndex + 1).filter((command) => (command.frame?.sheet ?? 0) !== 0)).toEqual([]);
+    expect(host.sheetView.mock.calls.slice(seen.sheetView).filter(([sheet]) => sheet !== 0)).toEqual([]);
+    expect(host.cellGeometry.mock.calls.slice(seen.cellGeometry).filter(([sheet]) => sheet !== 0)).toEqual([]);
+    expect(host.cellInputs.mock.calls.slice(seen.cellInputs).filter(([sheet]) => sheet !== 0)).toEqual([]);
+    expect(host.frame.mock.calls.slice(seen.frame).filter(([, options]) => (options?.sheet ?? 0) !== 0)).toEqual([]);
+  });
+
+  it('keeps the active sheet by id when a remote update inserts a sheet before it', async () => {
+    const host = collaborativePeerlessHarness();
+    const ready = mock((_api: XlsxAsyncEditorApi) => {});
+    const view = render(host.asyncEditor({ collaboration: { clientId: 101 }, onReady: ready }));
+    await opened();
+    await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+    await act(async () => { fireEvent.click(view.getByRole('tab', { name: 'Second' })); });
+    const switched = host.sent[host.sent.length - 1]!;
+    if (switched.kind !== 'setActiveSheet') throw new Error('Expected a sheet tab command');
+    await act(async () => host.ack(switched, { selection: switched.payload.selection, paint: true }));
+    let merging!: Promise<unknown>;
+    await act(async () => { merging = ready.mock.calls[0]![0].collaboration!.applyUpdate(new TextEncoder().encode('remote')); });
+    const updateIndex = host.sent.length - 1;
+    const update = host.sent[updateIndex]!;
+    await act(async () => host.push({ throughSeq: update.seq, version: 'v9',
+      statuses: [{ seq: update.seq, status: 'applied', committed: true, result: { remoteUpdate: true, proposals: [] } }],
+      editState: { activeSheet: 2, sheets: [{ id: 'sheet:9', index: 0, name: 'Inserted' },
+        { id: 'sheet:0', index: 1, name: 'First' }, { id: 'sheet:1', index: 2, name: 'Second' }] } }));
+    await merging;
+    await advance();
+    expect(view.getByRole('tab', { name: 'Second' }).getAttribute('aria-selected')).toBe('true');
+    expect(host.sent.slice(updateIndex + 1).filter((command) => command.kind === 'setActiveSheet')).toEqual([]);
+    expect(host.sent.slice(updateIndex + 1).filter((command) => command.frame && command.frame.sheet !== 2)).toEqual([]);
+  });
+
   it('bounds visible Enter commits with unchanged formatting and geometry', async () => {
     const formattingRenders = mock(() => {});
     const formulaRenders = mock(() => {});
@@ -3241,6 +3305,70 @@ describe('peerless workbook worker editor', () => {
     });
   }
 
+  const neighborPrefetched = async (neighborDelay = 0) => {
+    const host = peerlessHarness();
+    const sample = await host.frame({ x: 0, y: 0, width: 800, height: 600 });
+    host.frame.mockClear();
+    host.frame.mockImplementation(async (viewport, options) => {
+      if (options?.sheet === 1 && neighborDelay) await new Promise((resolve) => setTimeout(resolve, neighborDelay));
+      return {
+        ...sample, viewport, sheet: options?.sheet ?? 0,
+        displayList: { ...sample.displayList, commands: options?.sheet === 1 ? [...sample.displayList.commands,
+          { op: 'text' as const, text: 'second-sheet', x: 200, y: 66, fontSize: 11, color: '#000000' }]
+          : sample.displayList.commands },
+      };
+    });
+    const view = await host.mount();
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1500)); });
+    expect(host.frame.mock.calls.some(([, options]) => options?.sheet === 1)).toBe(true);
+    const settled = host.frame.mock.calls.length;
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 600)); });
+    expect(host.frame.mock.calls.length).toBe(settled);
+    const canvas = () => view.container.querySelector('canvas')!;
+    return { host, view, canvas };
+  };
+
+  it('a sheet tab switch paints the prefetched neighbor frame before the worker replies', async () => {
+    const { host, view, canvas } = await neighborPrefetched();
+    const frames = host.frame.mock.calls.length;
+    await act(async () => fireEvent.click(view.getByRole('tab', { name: 'Second' })));
+    expect(canvas().dataset).toMatchObject({ paintedSheet: '1', provisional: 'true' });
+    const command = host.sent[host.sent.length - 1];
+    if (command.kind !== 'setActiveSheet') throw new Error('Expected a sheet tab command');
+    expect(canvas().dataset.commandCoverage).not.toBe(String(command.seq));
+    await act(async () => host.ack(command, { selection: command.payload.selection, paint: true }));
+    await advance();
+    expect(canvas().dataset).toMatchObject({ paintedSheet: '1', provisional: 'false' });
+    expect(canvas().dataset.commandCoverage).toBe(String(command.seq));
+    expect(host.frame.mock.calls.length).toBeGreaterThanOrEqual(frames);
+  });
+
+  it('a neighbor too slow to prepare is neither painted provisionally nor prepared again', async () => {
+    const { host, view, canvas } = await neighborPrefetched(60);
+    const neighborCalls = () => host.frame.mock.calls.filter(([, options]) => options?.sheet === 1).length;
+    expect(neighborCalls()).toBe(1);
+    await act(async () => host.push({ throughSeq: 0, version: 'v1', statuses: [], editState: { canUndo: false } }));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1000)); });
+    expect(neighborCalls()).toBe(1);
+    await act(async () => fireEvent.click(view.getByRole('tab', { name: 'Second' })));
+    expect(canvas().dataset.provisional).not.toBe('true');
+  });
+
+  it('a proposal change drops the prefetched neighbor frame', async () => {
+    const { host, view, canvas } = await neighborPrefetched();
+    await act(async () => host.push({ throughSeq: 0, version: 'v1',
+      statuses: [{ seq: 0, status: 'applied', committed: false, result: { remoteUpdate: true, proposals: [] } }] }));
+    await act(async () => fireEvent.click(view.getByRole('tab', { name: 'Second' })));
+    expect(canvas().dataset.provisional).not.toBe('true');
+  });
+
+  it('a neighbor frame prefetched before an edit is not painted after it', async () => {
+    const { host, view, canvas } = await neighborPrefetched();
+    await act(async () => host.push({ throughSeq: 0, version: 'v2', statuses: [] }));
+    await act(async () => fireEvent.click(view.getByRole('tab', { name: 'Second' })));
+    expect(canvas().dataset.provisional).not.toBe('true');
+  });
+
   it('cross-sheet hyperlinks reveal their target even when the initial sheet view arrives later', async () => {
     const host = peerlessHarness();
     const frame = await host.frame({ x: 0, y: 0, width: 800, height: 600 }, { sheet: 0 });
@@ -3497,6 +3625,41 @@ describe('peerless workbook worker editor', () => {
     expect(host.sent[host.sent.length - 1]).toMatchObject({ kind: 'editCells', payload: {
       args: [0, [{ row: 1, col: 0, input: 'initial' }]],
     } });
+  });
+
+  it('read-only host proposals use ordered worker commands and leave other writes disabled', async () => {
+    const host = peerlessHarness();
+    const available = spyOn(xlsx, 'isProposalsAvailable').mockReturnValue(true);
+    restorers.push(() => available.mockRestore());
+    let api!: XlsxAsyncEditorApi;
+    const view = await host.mount(undefined, true, { allowHostProposals: true,
+      onReady(ready) { api = ready; host.ready(); } });
+    expect(await host.commandAt(0)).toMatchObject({ kind: 'setReadOnly',
+      payload: { readOnly: true, allowHostProposals: true } });
+    await act(async () => host.ack(host.sent[0]));
+    const proposal = { id: 'host-review', agentId: 'Host agent', note: 'Review this cell',
+      cells: [{ sheet: 0, row: 0, col: 0, a1: 'A1', oldText: 'initial', newText: '7' }] };
+    const proposed = api.proposeChanges!({ agentId: 'Host agent', note: proposal.note,
+      edits: [{ sheet: 0, row: 0, col: 0, input: '7' }] });
+    expect(await host.commandAt(1)).toMatchObject({ kind: 'propose' });
+    await act(async () => host.ack(host.sent[1], { result: proposal }));
+    await expect(proposed).resolves.toEqual({ ok: true, proposal });
+    expect(await host.commandAt(2)).toMatchObject({ kind: 'applyOps',
+      payload: { toolbar: { id: 'refreshProposals' } } });
+    await act(async () => host.ack(host.sent[2], { result: { proposals: [proposal] } }));
+    await act(async () => { await host.commands().execute('proposalsPanel', { open: true }); });
+    await host.commandAt(3);
+    await act(async () => host.ack(host.sent[3], { result: { proposals: [proposal] } }));
+    expect(view.getByText('Review this cell')).toBeDefined();
+    expect(await host.commands().execute('bold', null)).toMatchObject({ ok: false, failure: { code: 'read-only' } });
+    const accepted = host.commands().execute('proposalAccept', { proposalId: proposal.id });
+    expect(await host.commandAt(4)).toMatchObject({ kind: 'acceptProposal', payload: { args: [proposal.id, {}] } });
+    await act(async () => host.ack(host.sent[4], { result: { applied: true }, paint: true }));
+    await expect(accepted).resolves.toMatchObject({ ok: true });
+    await host.commandAt(5);
+    await act(async () => host.ack(host.sent[5], { result: { proposals: [] } }));
+    expect(view.queryByText('Review this cell')).toBeNull();
+    expect(host.session.editState.readOnly).toBe(true);
   });
 
   it('read-only proposal panel loads proposals through a worker read command', async () => {
@@ -3795,6 +3958,31 @@ describe('peerless workbook worker editor', () => {
     fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Enter' });
     expect(host.sent[1]).toMatchObject({ kind: 'editCell', payload: { args: [0, 250, 0, 'z'] } });
     expect(view.queryByTestId('xlsx-cell-editor')).toBeNull();
+  });
+
+  it('answers plugin point queries through the peerless hit test and refuses them after replacement', async () => {
+    const host = peerlessHarness();
+    host.charts.push({ id: 'chart', label: 'Chart', movable: true, rect: { x: 192, y: 48, w: 96, h: 48 },
+      clip: { x: 192, y: 48, w: 96, h: 48 } });
+    const contexts: XlsxPluginContext<null>[] = [];
+    const plugins = [defineXlsxPlugin({ id: 'point', createState: () => null, onEvent(context) { contexts.push(context); } })];
+    const view = await host.mount(undefined, false, { plugins });
+    const canvas = view.container.querySelector('canvas')!;
+    canvas.getBoundingClientRect = () => new DOMRect(40, 60, 800, 600);
+    const geometry = () => contexts.reduce<XlsxPluginGeometry | null>((found, context) => context.geometry ?? found, null);
+    await waitFor(() => expect(geometry()?.getPositionAtPoint?.(40 + 144, 60 + 36)).toEqual({ sheet: 0, sheetId: 'sheet:0',
+      row: 1, col: 1, version: geometry()!.layout.version, layoutId: geometry()!.layout.id }));
+    const retained = geometry()!;
+    expect(retained.getPositionAtPoint!(40 + 240, 60 + 72)).toBeNull();
+    expect(retained.getPositionAtPoint!(39, 96)).toBeNull();
+    expect(retained.getPositionAtPoint!(40 + 100, 60 + 600)).toBeNull();
+    expect(retained.getPositionAtPoint!(Number.POSITIVE_INFINITY, 96)).toBeNull();
+    host.open.mockResolvedValueOnce({ ...host.session, commandIdentity: { session: 'replacement', incarnation: 'worker' } });
+    await act(async () => host.replace(view, new Uint8Array([4]), { plugins }));
+    expect(retained.getPositionAtPoint!(40 + 144, 60 + 36)).toBeNull();
+    await opened();
+    await waitFor(() => expect(host.ready).toHaveBeenCalledTimes(2));
+    expect(retained.getPositionAtPoint!(40 + 144, 60 + 36)).toBeNull();
   });
 
   it('replacement cancels retained chart nudges even with the same chart id', async () => {
@@ -4619,6 +4807,30 @@ describe('workbook worker editor', () => {
     await act(async () => { view.rerender(<XlsxEditor legacySyncApi file={file.slice()} experimentalWorkerOpen onReady={onReady} />); });
     expect(apis[0].getPositionAtPoint(40 + 144 * 1.5, 60 + 36 * 1.5)).toBeNull();
     await expect(apis[0].flushPendingInput()).rejects.toThrow('replaced');
+  });
+
+  it('answers plugin point queries through the worker hit test and refuses them after replacement', async () => {
+    harness();
+    const apis: XlsxWorkerEditorApi[] = [];
+    const onReady = (api: XlsxWorkerEditorApi) => { apis.push(api); };
+    const contexts: XlsxPluginContext<null>[] = [];
+    const plugins = [defineXlsxPlugin({ id: 'point', createState: () => null, onEvent(context) { contexts.push(context); } })];
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen plugins={plugins} onReady={onReady} />);
+    await opened();
+    await advance();
+    const canvas = view.container.querySelector('canvas')!;
+    canvas.getBoundingClientRect = () => new DOMRect(40, 60, 1200, 900);
+    const geometry = () => contexts.reduce<XlsxPluginGeometry | null>((found, context) => context.geometry ?? found, null);
+    const point = [40 + 144 * 1.5, 60 + 36 * 1.5] as const;
+    await waitFor(() => expect(geometry()?.getPositionAtPoint?.(...point)).toEqual({ ...apis[0].getPositionAtPoint(...point)!,
+      sheetId: geometry()!.layout.sheetId, version: geometry()!.layout.version, layoutId: geometry()!.layout.id }));
+    const retained = geometry()!;
+    expect(retained.getPositionAtPoint!(...point)).toMatchObject({ sheet: 0, row: 1, col: 1 });
+    expect(retained.getPositionAtPoint!(39, 70)).toBeNull();
+    expect(retained.getPositionAtPoint!(Number.NaN, 70)).toBeNull();
+    await act(async () => { view.rerender(<XlsxEditor legacySyncApi file={file.slice()} experimentalWorkerOpen plugins={plugins} onReady={onReady} />); });
+    expect(apis[0].getPositionAtPoint(...point)).toBeNull();
+    expect(retained.getPositionAtPoint!(...point)).toBeNull();
   });
 
   it('clears a Ctrl+A sheet selection through its used cells', async () => {

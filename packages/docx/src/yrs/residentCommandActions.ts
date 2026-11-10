@@ -1,3 +1,4 @@
+import { isEngineTrap } from '../../../../shared/office-session/trap';
 import { applyCommandBatch, commandBatchRequest } from './residentCommandBatches';
 import { createProposalRegistry } from './proposals';
 import { applyReviewCommand, grantedHostProposal, preflightReviewCommand, reviewCommandKeys, type ReviewCommand } from './residentReviewCommands';
@@ -43,8 +44,28 @@ import type {
 } from './residentCommandProtocol';
 
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u;
-const PROTECTED_MARKS = new Set(['ins', 'del', 'hyperlink']);
+const PROTECTED_MARKS = new Set(['ins', 'del', 'hyperlink', 'rPrChange']);
 const IDENTITY_KEYS = new Set(['paraId', '_kind', 'ooxmlParaId', 'sourceParaId', 'paraOrigin']);
+
+function formattingRangeContainsContainer(engine: DocxWorkerCommandEngine, range: YrsStoryRange): boolean {
+  if (collapsed(range)) return false;
+  const spans = engine.geometryReader.paragraphSpans(range.story);
+  const first = spans.findIndex(span => span.paraId === range.start.paraId);
+  const last = spans.findIndex(span => span.paraId === range.end.paraId);
+  const indices = Array.from({ length: last - first + 1 }, (_, index) => first + index);
+  return engine.paragraphSegments(range.story, indices).some((segments, index) => {
+    const start = index === 0 ? range.start.offset : 0;
+    const end = index === indices.length - 1 ? range.end.offset : Infinity;
+    let offset = 0;
+    return segments.some(segment => {
+      const at = offset;
+      offset += segment.kind === 'text' ? segment.text.length : 1;
+      return Math.min(offset, end) > Math.max(at, start) &&
+        (Object.hasOwn(segment.attributes, 'fieldResult') || segment.kind === 'embed' &&
+          (segment.embedKind === 'sdt' || segment.embedKind === 'field' && segment.payload.modelKind === 'field'));
+    });
+  });
+}
 
 function object(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value) &&
@@ -90,6 +111,8 @@ const nullable = (validate: (value: unknown) => boolean) => (value: unknown) => 
 const boolean = (value: unknown) => typeof value === 'boolean';
 const number = (value: unknown) => typeof value === 'number' && Number.isFinite(value);
 const positive = (value: unknown) => number(value) && (value as number) > 0 && Number.isFinite((value as number) * 2);
+const MIN_COLUMN_TWIPS = 300;
+const MIN_ROW_TWIPS = 15;
 const oneOf = (...values: string[]) => (value: unknown) => typeof value === 'string' && values.includes(value);
 
 function validDelta(value: unknown): value is YrsInlineFormatDelta {
@@ -204,7 +227,7 @@ const DOCX_COMMAND_POLICIES = {
   collabPipe: { keys: ['provider', 'ops'], exact: true, session: 'collaboration', origin: 'remote',
     payload: (payload) => validPipePayload(payload, MAX_FRAME_BYTES, PIPE_SHAPE) },
   applyEdits: { keys: ['request', 'suggesting'], exact: true },
-  setFontEnvironment: { keys: ['faces', 'chains', 'families'], exact: true },
+  setFontEnvironment: { keys: ['faces', 'chains', 'families', 'progressive'], exact: true },
   setContentControlValue: { keys: [] }, addRepeatingItem: { keys: [] }, removeRepeatingItem: { keys: [] },
   openPart: { keys: [] }, ensurePart: { keys: [] }, removePart: { keys: [] },
   setHyperlink: { keys: [] }, setObjectProperties: { keys: [] }, setSectionProperties: { keys: [] },
@@ -219,7 +242,7 @@ const DOCX_COMMAND_POLICIES = {
   deleteTableRow: { keys: [] }, deleteTableColumn: { keys: [] }, deleteTable: { keys: [] },
   mergeTableCells: { keys: [] }, splitTableCell: { keys: ['rows', 'columns'] }, setTableCellShading: { keys: ['color'] },
   setTableBorders: { keys: ['borders'] }, setTableProperties: { keys: ['op', 'patch', 'expectVersion'] },
-  resizeObject: { keys: ['handle', 'widthEmu', 'heightEmu', 'widthTwips', 'hOffsetEmu', 'vOffsetEmu', 'expectVersion'], exact: true },
+  resizeObject: { keys: ['handle', 'widthEmu', 'heightEmu', 'widthTwips', 'columnEdge', 'deltaTwips', 'paintedRowTwips', 'rowDeltaTwips', 'hOffsetEmu', 'vOffsetEmu', 'expectVersion'], exact: true },
   moveObject: { keys: ['handle', 'hOffsetEmu', 'vOffsetEmu', 'expectVersion'], exact: true },
   moveEmbed: { keys: ['handle', 'expectVersion', 'drop', 'suggesting'], exact: true },
   undo: { keys: [], exact: true }, redo: { keys: [], exact: true },
@@ -294,7 +317,13 @@ function validCommandIntent(
       break;
     case 'resizeObject': case 'moveObject':
       if (!string(payload.handle) || !string(payload.expectVersion) || (command.kind === 'resizeObject'
-        ? payload.widthTwips !== undefined
+        ? payload.paintedRowTwips !== undefined || payload.rowDeltaTwips !== undefined
+          ? !Number.isSafeInteger(payload.paintedRowTwips) || Number(payload.paintedRowTwips) < 0 || !Number.isSafeInteger(payload.rowDeltaTwips) ||
+            payload.columnEdge !== undefined || payload.deltaTwips !== undefined || payload.widthTwips !== undefined || payload.widthEmu !== undefined || payload.heightEmu !== undefined || payload.hOffsetEmu !== undefined || payload.vOffsetEmu !== undefined
+          : payload.columnEdge !== undefined || payload.deltaTwips !== undefined
+          ? !Number.isSafeInteger(payload.columnEdge) || Number(payload.columnEdge) < 1 || !Number.isSafeInteger(payload.deltaTwips) ||
+            payload.widthTwips !== undefined || payload.widthEmu !== undefined || payload.heightEmu !== undefined || payload.hOffsetEmu !== undefined || payload.vOffsetEmu !== undefined
+          : payload.widthTwips !== undefined
           ? !positive(payload.widthTwips) || payload.widthEmu !== undefined || payload.heightEmu !== undefined || payload.hOffsetEmu !== undefined || payload.vOffsetEmu !== undefined
           : !positive(payload.widthEmu) || !positive(payload.heightEmu) ||
             ((payload.hOffsetEmu !== undefined || payload.vOffsetEmu !== undefined) && (!number(payload.hOffsetEmu) || !number(payload.vOffsetEmu)))
@@ -649,9 +678,10 @@ export function preflightDocxCommand(
     if (command.payload.expectVersion !== engine.proposalEngine.version()) return refuse('stale-version');
     const target = resolveResidentObject(engine, command.payload.handle);
     if (!target) return refuse('stale-object');
-    if (target.kind === 'cell' && command.kind === 'resizeObject' && 'widthTwips' in command.payload) {
+    const cellResize = command.kind === 'resizeObject' && ('widthTwips' in command.payload || 'columnEdge' in command.payload || 'rowDeltaTwips' in command.payload);
+    if (target.kind === 'cell' && cellResize) {
       if (!target.cell) return refuse('stale-object');
-    } else if (target.kind !== 'image' || (command.kind === 'resizeObject' && 'widthTwips' in command.payload)) return refuse('unsupported-object');
+    } else if (target.kind !== 'image' || cellResize) return refuse('unsupported-object');
     return { status: 'ready', prepared: { command: structuredClone(command), selection: state.selection, range: null } };
   }
   if (command.kind === 'undo' || command.kind === 'redo') {
@@ -717,6 +747,9 @@ export function preflightDocxCommand(
   }
   if (readOnly) return refuse('read-only');
   if (breakRefusedWhileSuggesting(command.kind, 'suggesting' in command.payload && command.payload.suggesting !== undefined)) return refuse('unsupported-suggesting');
+  if (['toggleMark', 'toggleStrike', 'formatRange', 'formatSelection', 'clearFormatting'].includes(command.kind) &&
+    'suggesting' in command.payload && command.payload.suggesting !== undefined &&
+    formattingRangeContainsContainer(engine, resolved.range)) return refuse('unsupported-suggesting');
   if (command.kind === 'insertPageBreak' || command.kind === 'insertSectionBreak') {
     if (resolved.range.story !== 'body') return refuse('invalid-selection');
     const index = engine.geometryReader.paragraphSpans('body').findIndex(span => span.paraId === resolved.range.start.paraId);
@@ -789,7 +822,7 @@ function writeCellSelection(engine: DocxWorkerCommandEngine, cells: PreparedDocx
     if (cells) engine.setCellSelection(cells);
     else engine.clearCellSelection();
   } catch (error) {
-    if (error instanceof WebAssembly.RuntimeError) throw error;
+    if (isEngineTrap(error)) throw error;
   }
 }
 
@@ -942,7 +975,7 @@ function applyPreparedDocxCommand(
         }
       }
     } catch (error) {
-      if (error instanceof WebAssembly.RuntimeError || engine.proposalEngine.version() !== before) throw error;
+      if (isEngineTrap(error) || engine.proposalEngine.version() !== before) throw error;
       return { ...result('noop'), status: 'refused', reason: typeof error === 'string' ? error : error instanceof Error ? error.message : 'invalid-control-value' };
     } finally { engine.addUndoBoundary(); }
     return result(engine.proposalEngine.version() !== before ? 'applied' : 'noop');
@@ -1011,6 +1044,39 @@ function applyPreparedDocxCommand(
       if (!at.cell) return { ...result('noop'), status: 'refused', reason: 'stale-object' };
       engine.addUndoBoundary();
       engine.setColumnWidth(at.cell, command.payload.widthTwips);
+      engine.addUndoBoundary();
+      return result(engine.proposalEngine.version() === version ? 'noop' : 'applied');
+    }
+    if (command.kind === 'resizeObject' && 'rowDeltaTwips' in command.payload) {
+      if (!at.cell) return { ...result('noop'), status: 'refused', reason: 'stale-object' };
+      const payload = engine.tablePayload(at.cell.story, at.cell.tableIndex) as { rows?: Array<{ trPr?: { height?: unknown } }> } | null;
+      const stored = payload?.rows?.[at.cell.row]?.trPr?.height;
+      const base = Math.max(command.payload.paintedRowTwips, positive(stored) ? stored as number : 0);
+      const height = Math.max(MIN_ROW_TWIPS, base + command.payload.rowDeltaTwips);
+      if (command.payload.rowDeltaTwips === 0 || height === stored) return result('noop');
+      engine.addUndoBoundary();
+      engine.setRowHeight(at.cell, height, 'atLeast');
+      engine.addUndoBoundary();
+      return result(engine.proposalEngine.version() === version ? 'noop' : 'applied');
+    }
+    if (command.kind === 'resizeObject' && 'columnEdge' in command.payload) {
+      if (!at.cell) return { ...result('noop'), status: 'refused', reason: 'stale-object' };
+      const payload = engine.tablePayload(at.cell.story, at.cell.tableIndex) as { grid?: unknown } | null;
+      const grid = Array.isArray(payload?.grid) ? payload.grid : [];
+      const edge = command.payload.columnEdge;
+      if (edge > grid.length || !grid.every(positive)) return { ...result('noop'), status: 'refused', reason: 'unsupported-object' };
+      const left = grid[edge - 1] as number;
+      const right = grid[edge] as number | undefined;
+      const delta = Math.round(Math.min(Math.max(command.payload.deltaTwips, Math.min(0, MIN_COLUMN_TWIPS - left)),
+        right === undefined ? Infinity : Math.max(0, right - MIN_COLUMN_TWIPS)));
+      if (delta === 0) return result('noop');
+      engine.addUndoBoundary();
+      engine.setColumnWidth({ ...at.cell, column: edge - 1 }, left + delta);
+      if (right !== undefined) engine.setColumnWidth({ ...at.cell, column: edge }, right - delta);
+      const table = { story: at.cell.story, tableIndex: at.cell.tableIndex };
+      const total = (grid as number[]).reduce((sum, width) => sum + width, 0) + delta;
+      engine.setTableProperties(table, right === undefined
+        ? { tableLayout: 'fixed', width: Math.round(total), widthType: 'dxa' } : { tableLayout: 'fixed' });
       engine.addUndoBoundary();
       return result(engine.proposalEngine.version() === version ? 'noop' : 'applied');
     }
@@ -1274,15 +1340,15 @@ function applyPreparedDocxCommand(
         { caret, repair: () => repairCommandSelection(engine, state) });
       break;
     }
-    case 'toggleStrike': engine.formatRange(range, { strike: engine.selectionContext(range).strike !== true }); break;
+    case 'toggleStrike': engine.formatRange(range, { strike: engine.selectionContext(range).strike !== true }, command.payload.suggesting); break;
     case 'pasteFragment': {
       state.storedMarks = null;
       caret(applyClipboardFragment(engine, range, command.payload.fragment, command.payload.suggesting));
       break;
     }
-    case 'toggleMark': engine.toggleMark(range, command.payload.mark); break;
-    case 'formatSelection': case 'formatRange': engine.formatRange(range, command.payload.delta); break;
-    case 'clearFormatting': engine.clearFormatting(range); break;
+    case 'toggleMark': engine.toggleMark(range, command.payload.mark, command.payload.suggesting); break;
+    case 'formatSelection': case 'formatRange': engine.formatRange(range, command.payload.delta, command.payload.suggesting); break;
+    case 'clearFormatting': engine.clearFormatting(range, command.payload.suggesting); break;
     case 'setParagraphAttrs': engine.setParagraphAttrs(range, paragraphAttrs(command.payload.attrs), command.payload.suggesting); break;
     case 'applyParagraphStyle': engine.applyParagraphStyle(range, command.payload.styleId, command.payload.suggesting); break;
   }

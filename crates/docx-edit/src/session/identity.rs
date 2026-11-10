@@ -151,6 +151,25 @@ impl EditSessionCore {
         doc.prime_save_seed_states(paragraphs, inflated)
     }
 
+    /// One slice of [`Self::prime_save_seed_states`], digesting about `max_bytes` bytes of the
+    /// stories: 0 once the states are known, 1 when more slices are needed, 2 when declined.
+    pub fn prime_save_seed_states_slice(
+        &self,
+        paragraphs: u32,
+        inflated: u32,
+        max_bytes: u32,
+    ) -> u32 {
+        match self
+            .engine
+            .doc()
+            .prime_save_seed_states_slice(paragraphs, inflated, max_bytes)
+        {
+            crate::identity::PrimeSlice::Known => 0,
+            crate::identity::PrimeSlice::Pending => 1,
+            crate::identity::PrimeSlice::Declined => 2,
+        }
+    }
+
     /// The paragraph IDs a save applies, as the package writer's
     /// `paragraphIds` request field: `{"assignments":[{"part","ordinal",
     /// "paraId"}],"patchedParts":[{"part","paraIds":[[ordinal,"ID"]]}]}`,
@@ -186,6 +205,7 @@ impl EditSessionCore {
                         "paragraphPatches": part.paragraph_patches,
                         "legacyParagraphs": part.legacy_paragraphs,
                         "tablePatches": part.table_patches,
+                        "formatOnly": part.format_only,
                         "inserted": part
                             .inserted
                             .iter()
@@ -198,6 +218,16 @@ impl EditSessionCore {
                     })
                 })
                 .collect::<Vec<_>>(),
+            "touchedParts": plan.touched_parts.iter().map(|(part, touched)| json!({
+                "part": part,
+                "touched": touched,
+            })).collect::<Vec<_>>(),
+            "wholeParts": plan.whole_parts.iter().map(|part| json!({
+                "part": part.part,
+                "sha256": part.sha256,
+                "paragraphs": part.paragraphs,
+                "changed": part.changed,
+            })).collect::<Vec<_>>(),
             "sectionSplicedParts": plan.section_spliced_parts.iter().map(|part| json!({
                 "part": part.part,
                 "sha256": part.sha256,
@@ -205,6 +235,7 @@ impl EditSessionCore {
                 "changed": part.changed,
                 "sectionOnly": part.section_only,
                 "tablePatches": part.table_patches,
+                "formatOnly": part.format_only,
                 "inserted": part.inserted.iter().map(|anchor| match anchor {
                     SpliceAnchor::Before(ordinal) => json!({ "before": ordinal }),
                     SpliceAnchor::After(ordinal) => json!({ "after": ordinal }),

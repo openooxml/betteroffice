@@ -172,6 +172,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
+name = "betteroffice-base-latin"
+version = "0.5.1"
+
+[[package]]
 name = "betteroffice-docx-edit"
 version = "0.5.1"
 dependencies = [
@@ -224,7 +228,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror 2.0.20",
- "wasm-bindgen",
 ]
 
 [[package]]
@@ -233,9 +236,11 @@ version = "0.5.1"
 dependencies = [
  "base64 0.22.1",
  "betteroffice-docx-layout",
+ "betteroffice-drawingml",
+ "betteroffice-metafile",
+ "betteroffice-ooxml-raster",
  "betteroffice-ooxml-text",
  "image",
- "png",
  "serde_json",
  "tiny-skia 0.12.0",
 ]
@@ -249,6 +254,8 @@ dependencies = [
  "indexmap",
  "libm",
  "serde",
+ "tiff",
+ "weezl",
 ]
 
 [[package]]
@@ -275,6 +282,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "betteroffice-base-latin",
  "betteroffice-docx-edit",
  "betteroffice-docx-layout",
  "betteroffice-docx-parse",
@@ -311,9 +319,25 @@ name = "betteroffice-ooxml-diff"
 version = "0.5.1"
 
 [[package]]
+name = "betteroffice-ooxml-raster"
+version = "0.5.1"
+dependencies = [
+ "betteroffice-drawingml",
+ "betteroffice-ooxml-text",
+ "image",
+ "jpeg-decoder",
+ "png",
+ "resvg",
+ "simplecss",
+ "svgtypes",
+ "tiny-skia 0.12.0",
+]
+
+[[package]]
 name = "betteroffice-ooxml-text"
 version = "0.5.1"
 dependencies = [
+ "betteroffice-base-latin",
  "betteroffice-drawingml",
  "rustybuzz",
  "serde",
@@ -378,15 +402,13 @@ version = "0.5.1"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-metafile",
+ "betteroffice-ooxml-raster",
  "betteroffice-ooxml-text",
  "betteroffice-pptx-edit",
  "betteroffice-pptx-render",
  "image",
- "png",
- "resvg",
- "simplecss",
- "svgtypes",
  "tiny-skia 0.12.0",
+ "unicode-properties",
 ]
 
 [[package]]
@@ -465,9 +487,10 @@ dependencies = [
 name = "betteroffice-xlsx-raster"
 version = "0.5.1"
 dependencies = [
+ "betteroffice-ooxml-raster",
+ "betteroffice-ooxml-text",
  "betteroffice-xlsx-render",
  "libm",
- "png",
  "rustybuzz",
  "tiny-skia 0.12.0",
  "unicode-segmentation",
@@ -943,7 +966,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1611,6 +1634,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "jpeg-decoder"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00810f1d8b74be64b13dbf3db89ac67740615d6c891f0e7b6179326533011a07"
+
+[[package]]
 name = "js-sys"
 version = "0.3.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1829,6 +1858,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ee6cda3051665f1fb8d9e08fc35c96d5a244fb1be711a03b71118828afc9a873"
 dependencies = [
  "jni-sys 0.3.1",
+]
+
+[[package]]
+name = "nix"
+version = "0.31.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
+dependencies = [
+ "bitflags 2.13.1",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
 ]
 
 [[package]]
@@ -2559,7 +2600,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3214,9 +3255,9 @@ checksum = "86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2"
 
 [[package]]
 name = "typed-path"
-version = "0.12.3"
+version = "0.12.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e28f89b80c87b8fb0cf04ab448d5dd0dd0ade2f8891bae878de66a75a28600e"
+checksum = "54ec2755506471f54baf5e4bb5499d8e510cc1caf271270e778a736bd2d7336c"
 
 [[package]]
 name = "typenum"
@@ -3793,7 +3834,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4176,6 +4217,7 @@ dependencies = [
 [[package]]
 name = "yrs"
 version = "0.27.3"
+source = "git+https://github.com/openooxml/y-crdt.git?rev=5349f4e11ec46a5ad842f08415b315cb6d5c53af#5349f4e11ec46a5ad842f08415b315cb6d5c53af"
 dependencies = [
  "arc-swap",
  "async-lock",
@@ -4271,14 +4313,15 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "8.6.0"
+version = "9.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d04a6b5381502aa6087c94c669499eb1602eb9c5e8198e534de571f7154809b"
+checksum = "6e04976da629d3b04204ba8105b396a193af8ad2583b2c79bfb3ab8af580a11e"
 dependencies = [
  "crc32fast",
  "flate2",
  "indexmap",
  "memchr",
+ "nix",
  "typed-path",
 ]
 

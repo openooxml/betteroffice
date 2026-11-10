@@ -26,12 +26,15 @@ use yrs::undo::{Options as UndoOptions, StackItem, UndoManager};
 use yrs::updates::decoder::{Decode, Decoder, DecoderV1};
 use yrs::updates::encoder::{Encode, Encoder, EncoderV1};
 use yrs::{
-    Any, Array, ArrayRef, BranchID, Doc, ID, Map, MapPrelim, MapRef, Options, Origin, Out, ReadTxn,
-    StateVector, Transact, TransactionMut, Update, WriteTxn,
+    Any, Array, ArrayRef, Assoc, BranchID, Doc, ID, IndexedSequence, Map, MapPrelim, MapRef,
+    Options, Origin, Out, ReadTxn, StateVector, Transact, TransactionMut, Update, WriteTxn,
 };
 
+mod auto_filters;
 #[cfg(test)]
 mod cascade_composition_tests;
+mod conditional_formats;
+mod defined_names;
 #[cfg(test)]
 mod fingerprint_composition_tests;
 #[cfg(test)]
@@ -42,6 +45,16 @@ mod merges;
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod snapshot;
 pub(crate) mod snapshot_validation;
+use auto_filters::{
+    project_filter_names, stored_auto_filter, sync_auto_filter, validate_stored_auto_filter,
+};
+use conditional_formats::{
+    RULE_PREFIX, RuleIds, RuleOverlay, baseline_conditional_formats, sync_conditional_formats,
+};
+pub(crate) use defined_names::FILTER_DATABASE_NAME;
+use defined_names::{
+    NameOverlay, dormant_names, same_except_filter_names, scoped_name_keys, sync_defined_names,
+};
 use fingerprints::Fingerprints;
 pub(crate) use hyperlinks::validate_hyperlink_edit_baseline;
 use hyperlinks::{
@@ -55,6 +68,9 @@ use merges::{
 
 const META: &str = "xlsx";
 const CELL_FORMATS: &str = "xlsx:cell-formats";
+/// Edits over the source's name table. Optional: a document nobody edited a name
+/// in has no such root, and an older replica refuses one that does.
+const DEFINED_NAMES: &str = "xlsx:defined-names";
 const SHEET_ORDER: &str = "xlsx:sheet-order";
 const SHEETS: &str = "xlsx:sheets";
 const MIN_SUPPORTED_SCHEMA_VERSION: i64 = 3;
@@ -64,7 +80,16 @@ const MIN_SUPPORTED_SCHEMA_VERSION: i64 = 3;
 const FREEZE_PANE_SCHEMA_VERSION: i64 = 4;
 const HYPERLINK_SCHEMA_VERSION: i64 = 5;
 const CHARTS_SCHEMA_VERSION: i64 = 6;
-const SCHEMA_VERSION: i64 = 6;
+const SHEET_APPEND_SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = SHEET_APPEND_SCHEMA_VERSION;
+/// The newest schema a fingerprint can tell apart. Schema 7 changed nothing a
+/// fingerprint hashes, so a state at it pairs with the same base as one at 6.
+const FINGERPRINT_SCHEMA_VERSION: i64 = CHARTS_SCHEMA_VERSION;
+/// What a seed writes first. Its later writes keep the identifiers a schema 6
+/// bootstrap gave them, so such a replica receives the current version as the
+/// one struct it lacks and refuses, instead of treating the two seeds as equal.
+const SEED_SCHEMA_VERSION: i64 = CHARTS_SCHEMA_VERSION;
+const APPENDED_SHEET_PREFIX: &str = "replica:";
 const BASE_FINGERPRINT: &str = "baseFingerprint";
 const STRUCTURE_GENERATION: &str = "structureGeneration";
 const CHARTS: &str = "charts";
@@ -94,13 +119,41 @@ const MAX_UPDATE_DELETE_RANGES: usize = 1_000_000;
 /// workbook can hold is three orders of magnitude smaller.
 const MAX_CELL_FORMAT_BYTES: usize = 64 * 1024;
 const UNDO_CAPTURE_TIMEOUT_MS: u64 = 500;
+const MAX_SHEET_NAME_CHARS: usize = 31;
 pub(crate) const MAX_STATE_VECTOR_ENTRIES: u32 = 65_536;
 
 #[cfg(test)]
 thread_local! {
     static FORCE_FULL_MATERIALIZATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static FAST_SET_CELL_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static FAST_RANGE_FORMAT_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static FULL_MATERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static LOCAL_HYDRATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static FINGERPRINT_PASSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static FORCE_FULL_STACK_UNDO: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static PARTIAL_STACK_UNDOS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Runs `f` with every undo step on the manager's stack, as undo was before
+/// steps above a sheet removal went first on their own.
+#[cfg(test)]
+pub(crate) fn with_full_stack_undo<T>(f: impl FnOnce() -> T) -> T {
+    struct Reset(bool);
+
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            FORCE_FULL_STACK_UNDO.set(self.0);
+        }
+    }
+
+    let _reset = Reset(FORCE_FULL_STACK_UNDO.replace(true));
+    f()
+}
+
+/// Undos run with only the steps above a sheet removal on the manager's stack.
+#[cfg(test)]
+pub(crate) fn partial_stack_undos() -> usize {
+    PARTIAL_STACK_UNDOS.get()
 }
 
 /// Full passes over every cell made to fingerprint a workbook base.
@@ -133,6 +186,21 @@ pub(crate) fn fast_set_cell_count() -> usize {
     FAST_SET_CELL_COUNT.get()
 }
 
+#[cfg(test)]
+pub(crate) fn fast_range_format_count() -> usize {
+    FAST_RANGE_FORMAT_COUNT.get()
+}
+
+#[cfg(test)]
+pub(crate) fn full_materializations() -> usize {
+    FULL_MATERIALIZATIONS.get()
+}
+
+#[cfg(test)]
+pub(crate) fn local_hydrations() -> usize {
+    LOCAL_HYDRATIONS.get()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SyncOrigin {
     User,
@@ -154,6 +222,9 @@ impl SyncOrigin {
 
 #[derive(Debug)]
 pub(crate) enum AuthorityError {
+    /// An undo that would delete an appended sheet holding structs its step
+    /// did not insert. Only that step has left the undo stack.
+    UndoRefused,
     ClientIdConflict(u64),
     InvalidStateVector(String),
     InvalidUpdate(String),
@@ -305,14 +376,15 @@ impl WorkbookBase {
         }
         for released in base
             .fingerprints
-            .remove(&SCHEMA_VERSION)
+            .remove(&FINGERPRINT_SCHEMA_VERSION)
             .unwrap_or_default()
         {
             if !accepted.contains(&released) {
                 accepted.push(released);
             }
         }
-        base.fingerprints.insert(SCHEMA_VERSION, accepted);
+        base.fingerprints
+            .insert(FINGERPRINT_SCHEMA_VERSION, accepted);
         base.fingerprint = fingerprint;
         base.bootstrap_client_id = bootstrap_client_id;
         base.styles = model.styles.clone();
@@ -346,11 +418,11 @@ impl WorkbookBase {
             for reading in std::iter::once(current).chain(current.legacy()) {
                 let (fingerprint, _) = fingerprint_model_with_row_domain_oracle(
                     model,
-                    SCHEMA_VERSION,
+                    FINGERPRINT_SCHEMA_VERSION,
                     true,
                     include_col_styles,
                     include_row_styles,
-                    fingerprint_domain(SCHEMA_VERSION, reading),
+                    fingerprint_domain(FINGERPRINT_SCHEMA_VERSION, reading),
                 )?;
                 accepted.push(fingerprint);
             }
@@ -389,9 +461,9 @@ impl WorkbookBase {
         legacy_styles: Option<&Stylesheet>,
     ) -> Result<Self, String> {
         let (fingerprint, bootstrap_client_id) =
-            fingerprint_model_for_schema_oracle(model, SCHEMA_VERSION)?;
+            fingerprint_model_for_schema_oracle(model, FINGERPRINT_SCHEMA_VERSION)?;
         let mut fingerprints = BTreeMap::new();
-        for version in MIN_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION {
+        for version in MIN_SUPPORTED_SCHEMA_VERSION..=FINGERPRINT_SCHEMA_VERSION {
             let (version_fingerprint, _) = fingerprint_model_for_schema_oracle(model, version)?;
             fingerprints.insert(version, vec![version_fingerprint]);
         }
@@ -401,7 +473,7 @@ impl WorkbookBase {
                 version_3.push(defined_names_v3);
             }
         }
-        for version in MIN_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION {
+        for version in MIN_SUPPORTED_SCHEMA_VERSION..=FINGERPRINT_SCHEMA_VERSION {
             let (without_col_styles, _) =
                 fingerprint_model_with_schema_oracle(model, version, version >= 4, false)?;
             let (without_row_styles, _) = fingerprint_model_with_row_styles_oracle(
@@ -419,7 +491,7 @@ impl WorkbookBase {
             }
         }
         if let Some(legacy) = model_with_legacy_dimensions(model, legacy_dimensions) {
-            for version in MIN_SUPPORTED_SCHEMA_VERSION..SCHEMA_VERSION {
+            for version in MIN_SUPPORTED_SCHEMA_VERSION..FINGERPRINT_SCHEMA_VERSION {
                 let (legacy_fingerprint, _) =
                     fingerprint_model_for_schema_oracle(&legacy, version)?;
                 let (without_col_styles, _) =
@@ -509,7 +581,8 @@ impl WorkbookBase {
     }
 
     fn accepts_fingerprint(&self, version: i64, fingerprint: &str) -> bool {
-        self.fingerprints.accepts(version, fingerprint)
+        self.fingerprints
+            .accepts(version.min(FINGERPRINT_SCHEMA_VERSION), fingerprint)
     }
 
     fn workbook(&self) -> WorkbookModel {
@@ -586,12 +659,19 @@ impl ChartIdentity {
 pub(crate) struct WorkbookStructure {
     generation: i64,
     pub(crate) sheet_keys: Vec<String>,
+    /// The names the document stores, which two appended sheets may share. The
+    /// model holds what each projects to.
     sheet_names: Vec<String>,
     freeze_panes: Vec<Option<FreezePane>>,
     hyperlinks: Vec<Vec<Hyperlink>>,
     baseline_hyperlinks: BTreeMap<String, Vec<Hyperlink>>,
     conditional_formats: Vec<Vec<ConditionalFormatting>>,
+    baseline_conditional_formats: BTreeMap<String, Vec<ConditionalFormatting>>,
     auto_filters: Vec<Option<xlsx_model::AutoFilter>>,
+    /// Whether a sheet, shown or not, stores a filter no operation can have
+    /// written over its source. Filters are the one per-sheet value a replica
+    /// may change and still have to refuse by what it holds.
+    foreign_auto_filter: bool,
     charts: Vec<Vec<ChartIdentity>>,
     merges: Vec<Vec<CellRange>>,
     baseline_merges: BTreeMap<String, Vec<CellRange>>,
@@ -599,28 +679,56 @@ pub(crate) struct WorkbookStructure {
 }
 
 impl WorkbookStructure {
-    /// Permit sheet-local layout changes while keeping structural identities pinned.
-    pub(crate) fn same_except_local_layout(&self, other: &Self) -> bool {
-        self.generation == other.generation
-            && self.sheet_keys == other.sheet_keys
-            && self.sheet_names == other.sheet_names
-            && self.baseline_hyperlinks == other.baseline_hyperlinks
-            && self.conditional_formats == other.conditional_formats
-            && self.auto_filters == other.auto_filters
-            && self.charts == other.charts
-            && self.baseline_merges == other.baseline_merges
-            && self.shared_types == other.shared_types
+    /// Whether a collaborating replica may move from this structure to `next`.
+    /// Sheet-local layout is free, sheets may join or leave the appended tail,
+    /// and every other structural identity stays pinned.
+    pub(crate) fn allows_transition(&self, next: &Self) -> bool {
+        self.allows_change(next) && self.keeps_shared_types(next)
     }
 
-    pub(crate) fn snapshot_same_except_local_layout(&self, other: &Self) -> bool {
-        self.generation == other.generation
-            && self.sheet_keys == other.sheet_keys
-            && self.sheet_names == other.sheet_names
-            && self.baseline_hyperlinks == other.baseline_hyperlinks
-            && self.conditional_formats == other.conditional_formats
-            && self.auto_filters == other.auto_filters
-            && self.charts == other.charts
-            && self.baseline_merges == other.baseline_merges
+    /// [`Self::allows_transition`] for a snapshot, whose shared types belong to
+    /// the bootstrap it was seeded from.
+    pub(crate) fn allows_snapshot_transition(&self, next: &Self) -> bool {
+        self.allows_change(next)
+    }
+
+    fn allows_change(&self, next: &Self) -> bool {
+        self.generation == next.generation
+            && !next.foreign_auto_filter
+            && appended_tail_changed_alone(&self.sheet_keys, &next.sheet_keys)
+            && next.sheet_keys.iter().enumerate().all(|(at, key)| {
+                match self.sheet_keys.iter().position(|known| known == key) {
+                    Some(before) => {
+                        self.sheet_names[before] == next.sheet_names[at]
+                            && self.charts[before] == next.charts[at]
+                    }
+                    None => next.charts[at].is_empty(),
+                }
+            })
+            && keeps_every_sheet(&self.baseline_hyperlinks, &next.baseline_hyperlinks)
+            && keeps_every_sheet(&self.baseline_merges, &next.baseline_merges)
+            && keeps_every_sheet(
+                &self.baseline_conditional_formats,
+                &next.baseline_conditional_formats,
+            )
+            && next
+                .baseline_conditional_formats
+                .iter()
+                .all(|(key, rules)| rules.is_empty() || !key.starts_with(APPENDED_SHEET_PREFIX))
+    }
+
+    /// Undoing and redoing an add replaces the appended sheet's map under the
+    /// same key, so only the other sheets keep their branches.
+    fn keeps_shared_types(&self, next: &Self) -> bool {
+        fn pinned(
+            structure: &WorkbookStructure,
+        ) -> impl Iterator<Item = (&String, &SheetSharedTypes)> {
+            structure
+                .shared_types
+                .iter()
+                .filter(|(key, _)| !key.starts_with(APPENDED_SHEET_PREFIX))
+        }
+        pinned(self).eq(pinned(next))
     }
 
     /// Whether two structures describe the same workbook, disregarding the Yrs
@@ -633,11 +741,83 @@ impl WorkbookStructure {
             && self.hyperlinks == other.hyperlinks
             && self.baseline_hyperlinks == other.baseline_hyperlinks
             && self.conditional_formats == other.conditional_formats
+            && self.baseline_conditional_formats == other.baseline_conditional_formats
             && self.auto_filters == other.auto_filters
+            && self.foreign_auto_filter == other.foreign_auto_filter
             && self.charts == other.charts
             && self.merges == other.merges
             && self.baseline_merges == other.baseline_merges
     }
+}
+
+/// Whether the sheet orders differ only past their common start, in sheets a
+/// replica appended, with the sheets both hold still in the same order. Two
+/// appends land next to each other in either order, and undoing one closes the
+/// gap, so a retained appended sheet may shift but never passes another.
+fn appended_tail_changed_alone(before: &[String], after: &[String]) -> bool {
+    let start = before
+        .iter()
+        .zip(after)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let (before, after) = (&before[start..], &after[start..]);
+    let retained = |keys: &[String], other: &[String]| {
+        keys.iter()
+            .filter(|key| other.contains(key))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    before
+        .iter()
+        .chain(after)
+        .all(|key| key.starts_with(APPENDED_SHEET_PREFIX))
+        && retained(before, after) == retained(after, before)
+}
+
+/// Whether a per-sheet baseline held on both sides is unchanged and any sheet
+/// only one side holds is an appended one.
+fn keeps_every_sheet<T: PartialEq>(
+    before: &BTreeMap<String, T>,
+    after: &BTreeMap<String, T>,
+) -> bool {
+    before.iter().all(|(key, value)| match after.get(key) {
+        Some(next) => value == next,
+        None => key.starts_with(APPENDED_SHEET_PREFIX),
+    }) && after
+        .keys()
+        .all(|key| before.contains_key(key) || key.starts_with(APPENDED_SHEET_PREFIX))
+}
+
+/// Two replicas can append sheets under one name before either sees the other,
+/// and a document holding that has to read the same everywhere: the earliest
+/// sheet in the shared order keeps the name and each later one takes the lowest
+/// free `Name (2)`, which a sheet's own stored name is never displaced by.
+fn project_unique_sheet_names(sheets: &mut [Sheet]) {
+    let mut taken = HashSet::with_capacity(sheets.len());
+    let duplicates = sheets
+        .iter()
+        .enumerate()
+        .filter(|(_, sheet)| !taken.insert(sheet.name.to_lowercase()))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    for index in duplicates {
+        let mut ordinal = 2_usize;
+        let name = loop {
+            let name = numbered_sheet_name(&sheets[index].name, ordinal);
+            if taken.insert(name.to_lowercase()) {
+                break name;
+            }
+            ordinal += 1;
+        };
+        sheets[index].name = name;
+    }
+}
+
+fn numbered_sheet_name(name: &str, ordinal: usize) -> String {
+    let suffix = format!(" ({ordinal})");
+    let room = MAX_SHEET_NAME_CHARS.saturating_sub(suffix.chars().count());
+    let stem = name.chars().take(room).collect::<String>();
+    format!("{stem}{suffix}")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -661,6 +841,7 @@ pub(crate) enum SnapshotAdoption {
 
 pub(crate) struct StagedUpdate {
     pub(crate) commit_update: Vec<u8>,
+    pub(crate) dormant_names: Vec<DefinedName>,
     pub(crate) effective: bool,
     pub(crate) model: WorkbookModel,
     pub(crate) pending: bool,
@@ -697,6 +878,24 @@ pub(crate) enum LocalHistory {
     None,
 }
 
+/// One appended sheet's own structs: its entries in the sheet order and its
+/// map, which an undo removing the sheet deletes.
+struct AppendedSheetItems {
+    key: String,
+    order_entries: Vec<ID>,
+    map: Option<ID>,
+}
+
+impl AppendedSheetItems {
+    fn removed_by(&self, step: &StackItem<()>) -> bool {
+        let inserted = step.insertions();
+        self.order_entries
+            .iter()
+            .all(|entry| inserted.contains(entry))
+            || self.map.is_some_and(|map| inserted.contains(&map))
+    }
+}
+
 pub(crate) struct AuthorityCheckpoint {
     state: Vec<u8>,
     undo_stack: Vec<StackItem<()>>,
@@ -731,7 +930,20 @@ enum HistoryAction {
 thread_local! {
     pub(crate) static SNAPSHOT_VECTOR_ENCODINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SCHEMA_SIX_KEY_VALIDATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static SCHEMA_SIX_SEED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     pub(crate) static LOCAL_UPDATE_ENCODINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn with_schema_six_seed<T>(body: impl FnOnce() -> T) -> T {
+    struct Reset(bool);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            SCHEMA_SIX_SEED.set(self.0);
+        }
+    }
+    let _reset = Reset(SCHEMA_SIX_SEED.replace(true));
+    body()
 }
 
 #[cfg(test)]
@@ -749,12 +961,17 @@ fn with_schema_six_key_validation<T>(body: impl FnOnce() -> T) -> T {
 pub(crate) struct WorkbookAuthority {
     doc: Doc,
     projection_valid: Arc<AtomicBool>,
+    /// Authored styles needing a synthesized plain xf; `u64::MAX` means unknown.
+    plain_style_cells: AtomicU64,
     snapshot_revision: Arc<AtomicU64>,
     base: Arc<WorkbookBase>,
     history: SheetOrderHistory,
     next_sheet_id: u64,
     undo_stack: Vec<StackItem<()>>,
     redo_stack: Vec<StackItem<()>>,
+    /// A standalone table follows its edits in the base, so only a shared
+    /// document derives filter names and holds incoming filters to the source.
+    collaborative: bool,
 }
 
 struct SetCellSync {
@@ -765,6 +982,17 @@ struct SetCellSync {
     sheet: Sheet,
     at: CellRef,
     formatted: bool,
+    plain_style_cells: Option<u64>,
+}
+
+pub(crate) struct RangeFormatSync {
+    revision: u64,
+    cell_formats: MapRef,
+    formats: Vec<(String, String)>,
+    styles: MapRef,
+    cells: Vec<(String, Option<Any>)>,
+    sheet_order: SheetOrderEntry,
+    plain_style_cells: u64,
 }
 
 impl WorkbookAuthority {
@@ -889,6 +1117,7 @@ impl WorkbookAuthority {
         client_id: u64,
         next_sheet_id: u64,
         row_styles: bool,
+        collaborative: bool,
     ) -> crate::snapshot::SnapshotResult<Self> {
         use crate::snapshot::SnapshotError;
         use crate::snapshot::wire::Reader;
@@ -955,7 +1184,8 @@ impl WorkbookAuthority {
                 "Recovery authority has unresolved Yrs state",
             ));
         }
-        let authority = Self::hydrated(doc, Arc::new(base), next_sheet_id);
+        let mut authority = Self::hydrated(doc, Arc::new(base), next_sheet_id);
+        authority.collaborative = collaborative;
         authority.strict_materialize().map_err(SnapshotError::new)?;
         Ok(authority)
     }
@@ -966,12 +1196,22 @@ impl WorkbookAuthority {
         Self {
             doc,
             projection_valid,
+            plain_style_cells: AtomicU64::new(u64::MAX),
             snapshot_revision,
             base,
             history: SheetOrderHistory::default(),
             next_sheet_id,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            collaborative: false,
+        }
+    }
+
+    /// A replica of this one's document kind and base over `doc`.
+    fn hydrated_alike(&self, doc: Doc) -> Self {
+        Self {
+            collaborative: self.collaborative,
+            ..Self::hydrated(doc, self.base.clone(), self.next_sheet_id)
         }
     }
 
@@ -1070,7 +1310,8 @@ impl WorkbookAuthority {
             hydrate_local_doc(&doc, &update).map_err(AuthorityError::InvalidState)?;
             xlsx_model::progress::pulse();
         }
-        let authority = Self::hydrated(doc, Arc::new(base), 0);
+        let mut authority = Self::hydrated(doc, Arc::new(base), 0);
+        authority.collaborative = client_id.is_some();
         xlsx_model::open_timing! {
             drop(timing_hydrate);
             let _timing_projection = xlsx_model::open_timing::span("authority_projection");
@@ -1083,6 +1324,42 @@ impl WorkbookAuthority {
 
     pub(crate) fn client_id(&self) -> u64 {
         self.doc.client_id().get()
+    }
+
+    /// The name table every replica opened, which a collaborative edit leaves
+    /// alone.
+    pub(crate) fn source_defined_names(&self) -> &[DefinedName] {
+        &self.base.defined_names
+    }
+
+    /// The filter the source holds for the sheet at `index`. Appended sheets
+    /// follow every source sheet, so past those there is none.
+    pub(crate) fn source_auto_filter(&self, index: usize) -> Option<&xlsx_model::AutoFilter> {
+        self.base.auto_filters.get(index)?.as_ref()
+    }
+
+    /// What a sheet's rules read as with no overlay.
+    fn baseline_rules<T: ReadTxn>(
+        &self,
+        sheet: &MapRef,
+        txn: &T,
+        key: &str,
+    ) -> Result<Vec<ConditionalFormatting>, String> {
+        let fallback = base_sheet_index(key)
+            .and_then(|base| self.base.conditional_formats.get(base))
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        baseline_conditional_formats(sheet, txn, fallback)
+    }
+
+    /// The names stored under a scope none of `keys` is. Each carries a sheet index
+    /// past the table's, one apiece: nothing shows them, and any of them shows with
+    /// no further check once its sheet arrives.
+    pub(crate) fn dormant_defined_names(
+        &self,
+        keys: &[String],
+    ) -> Result<Vec<DefinedName>, AuthorityError> {
+        dormant_names(&self.doc.transact(), keys).map_err(AuthorityError::InvalidState)
     }
 
     pub(crate) fn inherit_xf_xml_markers(&mut self, source: &Stylesheet) {
@@ -1124,7 +1401,52 @@ impl WorkbookAuthority {
     }
 
     pub(crate) fn set_snapshot_projection_valid(&mut self, valid: bool) {
+        if valid
+            && (!self.projection_valid.load(Ordering::Relaxed)
+                || self.plain_style_cells.load(Ordering::Relaxed) == u64::MAX)
+        {
+            let count = self.count_plain_style_cells().unwrap_or(u64::MAX);
+            self.plain_style_cells.store(count, Ordering::Relaxed);
+        } else if !valid {
+            self.plain_style_cells.store(u64::MAX, Ordering::Relaxed);
+        }
         self.projection_valid.store(valid, Ordering::Relaxed);
+    }
+
+    fn count_plain_style_cells(&self) -> Result<u64, String> {
+        let txn = self.doc.transact();
+        let cell_formats = txn
+            .get_map(CELL_FORMATS)
+            .ok_or_else(|| "missing cell format catalog".to_string())?;
+        let (_, indices) = materialize_cell_formats(&cell_formats, &txn, &self.base.styles)?;
+        let order = txn
+            .get_array(SHEET_ORDER)
+            .ok_or_else(|| "missing sheet order".to_string())?;
+        let sheets = txn
+            .get_map(SHEETS)
+            .ok_or_else(|| "missing sheet map".to_string())?;
+        let mut count = 0u64;
+        for key in sheet_keys(&order, &txn)? {
+            let sheet = sheets
+                .get(&txn, &key)
+                .and_then(|value| value.cast::<MapRef>().ok())
+                .ok_or_else(|| format!("missing sheet {key}"))?;
+            let styles = nested_map(&sheet, &txn, STYLES)?;
+            for (key, value) in styles.iter(&txn) {
+                let style = value
+                    .cast::<String>()
+                    .map_err(|_| format!("cell style {key} is not a string"))?;
+                let index = indices
+                    .get(&style)
+                    .ok_or_else(|| format!("cell style {key} references an unknown format"))?;
+                if index.is_none() {
+                    count = count
+                        .checked_add(1)
+                        .ok_or_else(|| "plain style cell count is too large".to_string())?;
+                }
+            }
+        }
+        Ok(count)
     }
 
     #[cfg(test)]
@@ -1141,6 +1463,7 @@ impl WorkbookAuthority {
         self.doc = doc;
         self.snapshot_revision.fetch_add(1, Ordering::Relaxed);
         self.projection_valid = observe_projection(&self.doc, self.snapshot_revision.clone());
+        self.plain_style_cells.store(u64::MAX, Ordering::Relaxed);
     }
 
     #[cfg(test)]
@@ -1204,7 +1527,8 @@ impl WorkbookAuthority {
         encode_update: bool,
         collaborative: bool,
     ) -> Result<Option<Vec<u8>>, AuthorityError> {
-        let state_vector = encode_update.then(|| self.doc.transact().state_vector());
+        let state_vector =
+            encode_update.then(|| (self.doc.transact().state_vector(), self.snapshot_revision()));
         if let Some(prepared) = self.prepare_set_cell_sync(ops, styles)
             && let Ok((keys, history)) =
                 self.plan_sheet_keys(&prepared.keys, ops, prepared.keys.len(), origin)
@@ -1228,12 +1552,30 @@ impl WorkbookAuthority {
             }
             drop(txn);
             self.apply_history(history);
+            if let Some(count) = prepared.plain_style_cells {
+                self.plain_style_cells.store(count, Ordering::Relaxed);
+            }
             self.projection_valid.store(true, Ordering::Relaxed);
             #[cfg(test)]
             FAST_SET_CELL_COUNT.set(FAST_SET_CELL_COUNT.get() + 1);
             return Ok(self.encode_ops_update(state_vector));
         }
         let mut model = self.materialize()?;
+        let plain_cell_baseline = if let [Op::SetCell { sheet, at, .. }] = ops {
+            let was_plain = model
+                .sheet(*sheet)
+                .and_then(|sheet| sheet.cell(*at))
+                .and_then(|cell| cell.style)
+                .map(|index| style_needs_plain(&model.styles, index, &self.base.styles))
+                .transpose()
+                .map_err(AuthorityError::InvalidState)?
+                .unwrap_or(false);
+            self.plain_style_cells
+                .load(Ordering::Relaxed)
+                .checked_sub(u64::from(was_plain))
+        } else {
+            None
+        };
         model.styles.bind_plain_xf();
         let ops =
             remap_styles(ops, styles, &mut model.styles).map_err(AuthorityError::InvalidState)?;
@@ -1251,19 +1593,32 @@ impl WorkbookAuthority {
                 _ => None,
             })
             .collect::<HashMap<_, _>>();
+        let mut batch = xlsx_ops::InPlaceBatch::without_inverse(&mut model);
         for op in ops {
-            xlsx_ops::apply_in_place(&mut model, op).map_err(|error| {
+            batch.apply(op).map_err(|error| {
                 AuthorityError::InvalidState(format!(
                     "cannot apply local operation to authored state: {error}"
                 ))
             })?;
         }
-        if self.base.defined_names != model.defined_names {
+        if !collaborative && self.base.defined_names != model.defined_names {
             Arc::make_mut(&mut self.base).defined_names = model.defined_names.clone();
         }
         if self.base.tables != model.tables {
             Arc::make_mut(&mut self.base).tables = model.tables.clone();
         }
+        let plain_style_cells =
+            if let (Some(count), [Op::SetCell { cell, .. }]) = (plain_cell_baseline, ops) {
+                let is_plain = cell
+                    .style
+                    .map(|index| style_needs_plain(&model.styles, index, &self.base.styles))
+                    .transpose()
+                    .map_err(AuthorityError::InvalidState)?
+                    .unwrap_or(false);
+                count.checked_add(u64::from(is_plain))
+            } else {
+                None
+            };
         self.sync_model(&model, ops, origin, &authored_styles, collaborative)
             .map_err(AuthorityError::InvalidState)?;
         if let [Op::SetCell { at, cell, .. }] = ops
@@ -1271,17 +1626,21 @@ impl WorkbookAuthority {
             && at.col < MAX_COLS
             && !matches!(cell.value, CellValue::Number { value } if !value.is_finite())
         {
+            self.plain_style_cells
+                .store(plain_style_cells.unwrap_or(u64::MAX), Ordering::Relaxed);
             self.projection_valid.store(true, Ordering::Relaxed);
         }
         Ok(self.encode_ops_update(state_vector))
     }
 
-    fn encode_ops_update(&self, state_vector: Option<StateVector>) -> Option<Vec<u8>> {
-        let state_vector = state_vector?;
+    /// A diff always carries the document's whole delete set, which the seed
+    /// makes non-empty, so only the revision says whether anything happened.
+    fn encode_ops_update(&self, before: Option<(StateVector, u64)>) -> Option<Vec<u8>> {
+        let (state_vector, revision) = before?;
         #[cfg(test)]
         LOCAL_UPDATE_ENCODINGS.set(LOCAL_UPDATE_ENCODINGS.get() + 1);
         let update = self.doc.transact().encode_diff_v1(&state_vector);
-        (update.as_slice() != Update::EMPTY_V1).then_some(update)
+        (self.snapshot_revision() != revision).then_some(update)
     }
 
     fn prepare_set_cell_sync(&self, ops: &[Op], source: &Stylesheet) -> Option<SetCellSync> {
@@ -1292,7 +1651,9 @@ impl WorkbookAuthority {
         let [Op::SetCell { sheet, at, cell }] = ops else {
             return None;
         };
+        let count = self.plain_style_cells.load(Ordering::Relaxed);
         if !self.projection_valid.load(Ordering::Relaxed)
+            || count == u64::MAX
             || at.row >= MAX_ROWS
             || at.col >= MAX_COLS
             || matches!(cell.value, CellValue::Number { value } if !value.is_finite())
@@ -1303,8 +1664,9 @@ impl WorkbookAuthority {
         }
         let txn = self.doc.transact();
         let cell_formats = txn.get_map(CELL_FORMATS)?;
-        let (mut styles, _) =
+        let (mut styles, indices) =
             materialize_cell_formats(&cell_formats, &txn, &self.base.styles).ok()?;
+        let plain = (count != 0).then(|| styles.plain_xf());
         styles.bind_plain_xf();
         let order = txn.get_array(SHEET_ORDER)?;
         let keys = sheet_keys(&order, &txn).ok()?;
@@ -1325,20 +1687,36 @@ impl WorkbookAuthority {
             Some(value) => Some(value.cast::<String>().ok()?),
             None => None,
         };
+        let current_style = match authored_style.as_ref() {
+            Some(key) => Some((*indices.get(key)?).or(plain)?),
+            None => None,
+        };
         let remapped = remap_styles(ops, source, &mut styles).ok()?;
         let Op::SetCell { cell, .. } = &remapped[0] else {
             return None;
         };
         cell_format_entry(&CellFormat::default()).ok()?;
         for index in 0..styles.cell_xfs.len() {
-            cell_format_entry(&styles.cell_format(Some(u32::try_from(index).ok()?))).ok()?;
+            style_entry(&styles, u32::try_from(index).ok()?).ok()?;
         }
-        let style = cell
-            .style
-            .map(|style| style_key(&styles, style))
-            .transpose()
-            .ok()?;
-        let formatted = style != authored_style;
+        let formatted = cell.style != current_style;
+        let was_plain = authored_style
+            .as_ref()
+            .is_some_and(|key| indices.get(key) == Some(&None));
+        let is_plain = if formatted {
+            cell.style
+                .map(|index| style_needs_plain(&styles, index, &self.base.styles))
+                .transpose()
+                .ok()?
+                .unwrap_or(false)
+        } else {
+            was_plain
+        };
+        let plain_style_cells = Some(
+            count
+                .checked_sub(u64::from(was_plain))?
+                .checked_add(u64::from(is_plain))?,
+        );
         let mut target = Sheet::default();
         target.set_cell(*at, cell.clone().into());
         Some(SetCellSync {
@@ -1349,7 +1727,176 @@ impl WorkbookAuthority {
             sheet: target,
             at: *at,
             formatted,
+            plain_style_cells,
         })
+    }
+
+    pub(crate) fn prepare_range_format_sync(
+        &self,
+        ops: &[Op],
+        origin: SyncOrigin,
+    ) -> Option<RangeFormatSync> {
+        #[cfg(test)]
+        if force_full_materialization() {
+            return None;
+        }
+        let [op] = ops else {
+            return None;
+        };
+        let (sheet, range) = match op {
+            Op::PatchRangeStyle { sheet, range, .. }
+            | Op::SetRangeNumberFormat { sheet, range, .. } => (*sheet, *range),
+            _ => return None,
+        };
+        let plain_style_cells = self.plain_style_cells.load(Ordering::Relaxed);
+        if !matches!(origin, SyncOrigin::User | SyncOrigin::Agent)
+            || !self.projection_valid.load(Ordering::Relaxed)
+            || plain_style_cells == u64::MAX
+            || self.schema_version().ok()? != SCHEMA_VERSION
+            || !self.has_current_base_fingerprint()
+            || range.start.row > range.end.row
+            || range.start.col > range.end.col
+            || range.end.row >= MAX_ROWS
+            || range.end.col >= MAX_COLS
+            || (u64::from(range.end.row - range.start.row) + 1)
+                * (u64::from(range.end.col - range.start.col) + 1)
+                > crate::workbook::MAX_RANGE_CELLS
+        {
+            return None;
+        }
+        let txn = self.doc.transact();
+        let cell_formats = txn.get_map(CELL_FORMATS)?;
+        let (mut stylesheet, indices) =
+            materialize_cell_formats(&cell_formats, &txn, &self.base.styles).ok()?;
+        let plain = (plain_style_cells != 0).then(|| stylesheet.plain_xf());
+        stylesheet.bind_plain_xf();
+        let order = txn.get_array(SHEET_ORDER)?;
+        let keys = sheet_keys(&order, &txn).ok()?;
+        self.validate_sync_state(&keys, &keys).ok()?;
+        let key = keys.get(sheet.0 as usize)?;
+        let sheets = txn.get_map(SHEETS)?;
+        let sheet_map = sheets.get(&txn, key)?.cast::<MapRef>().ok()?;
+        let contents = nested_map(&sheet_map, &txn, CONTENTS).ok()?;
+        let styles = nested_map(&sheet_map, &txn, STYLES).ok()?;
+        let mut target = Sheet::default();
+        if let Some(base) = base_sheet_index(key) {
+            target.col_styles = self.base.col_styles.get(base).cloned().unwrap_or_default();
+            target.row_styles = self.base.row_styles.get(base).cloned().unwrap_or_default();
+        }
+        materialize_style_defaults(&mut target, &sheet_map, &txn).ok()?;
+        let mut previous_plain = 0;
+        for row in range.start.row..=range.end.row {
+            for col in range.start.col..=range.end.col {
+                let at = CellRef::new(row, col);
+                let key = cell_key(at);
+                let mut cell = match contents.get(&txn, &key) {
+                    Some(Out::Any(value)) => Some(content_from_any(&value).ok()?),
+                    Some(_) => return None,
+                    None => None,
+                };
+                if let Some(value) = styles.get(&txn, &key) {
+                    let key = value.cast::<String>().ok()?;
+                    let index = *indices.get(&key)?;
+                    let style = match index {
+                        Some(index) => index,
+                        None => {
+                            previous_plain += 1;
+                            plain?
+                        }
+                    };
+                    cell.get_or_insert_default().style = Some(style);
+                }
+                if let Some(cell) = cell {
+                    target.set_cell(at, cell);
+                }
+            }
+        }
+        let mut model = WorkbookModel {
+            styles: stylesheet,
+            sheets: vec![target],
+            ..WorkbookModel::default()
+        };
+        let mut op = op.clone();
+        match &mut op {
+            Op::PatchRangeStyle { sheet, .. } | Op::SetRangeNumberFormat { sheet, .. } => {
+                *sheet = SheetId(0);
+            }
+            _ => return None,
+        }
+        xlsx_ops::apply_in_place(&mut model, &op).ok()?;
+        let mut formats = vec![cell_format_entry(&CellFormat::default()).ok()?];
+        for index in 0..model.styles.cell_xfs.len() {
+            let index = u32::try_from(index).ok()?;
+            formats.push(style_entry(&model.styles, index).ok()?);
+        }
+        let mut catalog = read_cell_format_catalog(&cell_formats, &txn).ok()?;
+        for (key, payload) in &formats {
+            catalog.insert(key.clone(), decode_cell_format_entry(key, payload).ok()?);
+        }
+        let (_, next_indices) = materialize_cell_format_catalog(catalog, &self.base.styles).ok()?;
+        let mut cells = Vec::new();
+        let mut next_plain = 0;
+        for row in range.start.row..=range.end.row {
+            for col in range.start.col..=range.end.col {
+                let at = CellRef::new(row, col);
+                let index = model.sheets[0].cell(at).and_then(|cell| cell.style);
+                let style = index
+                    .map(|index| style_key(&model.styles, index))
+                    .transpose()
+                    .ok()?;
+                if style
+                    .as_ref()
+                    .is_some_and(|key| next_indices.get(key) == Some(&None))
+                {
+                    next_plain += 1;
+                }
+                cells.push((cell_key(at), style.map(Any::from)));
+            }
+        }
+        Some(RangeFormatSync {
+            revision: self.snapshot_revision.load(Ordering::Relaxed),
+            cell_formats,
+            formats,
+            styles,
+            cells,
+            sheet_order: SheetOrderEntry {
+                before: keys.clone(),
+                after: keys,
+            },
+            plain_style_cells: plain_style_cells
+                .checked_sub(previous_plain)?
+                .checked_add(next_plain)?,
+        })
+    }
+
+    pub(crate) fn commit_range_format_sync(
+        &mut self,
+        prepared: RangeFormatSync,
+        history: LocalHistory,
+    ) -> Result<Option<Vec<u8>>, AuthorityError> {
+        if self.snapshot_revision.load(Ordering::Relaxed) != prepared.revision {
+            return Err(AuthorityError::InvalidState(
+                "prepared range format baseline changed".into(),
+            ));
+        }
+        let before = (self.doc.transact().state_vector(), self.snapshot_revision());
+        let mut txn = self.doc.transact_mut_with(UNTRACKED_ORIGIN);
+        for (key, payload) in prepared.formats {
+            prepared.cell_formats.try_update(&mut txn, key, payload);
+        }
+        for (key, style) in prepared.cells {
+            sync_optional(&prepared.styles, &mut txn, &key, style);
+        }
+        drop(txn);
+        if history == LocalHistory::SheetOrder {
+            self.apply_history(HistoryAction::Push(prepared.sheet_order));
+        }
+        self.plain_style_cells
+            .store(prepared.plain_style_cells, Ordering::Relaxed);
+        self.projection_valid.store(true, Ordering::Relaxed);
+        #[cfg(test)]
+        FAST_RANGE_FORMAT_COUNT.set(FAST_RANGE_FORMAT_COUNT.get() + 1);
+        Ok(self.encode_ops_update(Some(before)))
     }
 
     pub(crate) fn encode_state_vector_v1(&self) -> Vec<u8> {
@@ -1413,7 +1960,7 @@ impl WorkbookAuthority {
         if hydrate_doc(&doc, update).is_err() {
             return SnapshotAdoption::NotApplicable;
         }
-        let mut candidate = Self::hydrated(doc, self.base.clone(), self.next_sheet_id);
+        let mut candidate = self.hydrated_alike(doc);
         if !candidate.is_whole_document() {
             return SnapshotAdoption::NotApplicable;
         }
@@ -1605,7 +2152,7 @@ impl WorkbookAuthority {
         if hydrate_doc(&doc, update).is_err() {
             return false;
         }
-        let candidate = Self::hydrated(doc, self.base.clone(), self.next_sheet_id);
+        let candidate = self.hydrated_alike(doc);
         candidate.is_whole_document()
             && !candidate
                 .doc
@@ -1629,15 +2176,34 @@ impl WorkbookAuthority {
             .collect()
     }
 
-    /// True while the replica still holds nothing but its own bootstrap.
+    /// True while the replica still holds nothing but its own bootstrap, whose
+    /// one deletion is the seed version the schema marker replaced.
     fn is_pristine(&self) -> bool {
         let txn = self.doc.transact();
         let state_vector = txn.state_vector();
-        state_vector.len() == 1
-            && state_vector
+        if state_vector.len() != 1
+            || !state_vector
                 .iter()
                 .all(|(client, _)| client.get() == self.base.bootstrap_client_id)
-            && txn.snapshot().delete_set.is_empty()
+        {
+            return false;
+        }
+        let deleted = txn.snapshot().delete_set;
+        if deleted.is_empty() {
+            return true;
+        }
+        let Some(catalog) = txn.get_map(CELL_FORMATS) else {
+            return false;
+        };
+        let seed_version = ID::new(
+            ClientID::new(self.base.bootstrap_client_id),
+            catalog.len(&txn) + 1,
+        );
+        deleted.len() == 1
+            && deleted.contains(&seed_version)
+            && deleted
+                .iter()
+                .all(|(_, ranges)| ranges.len() == 1 && ranges.iter().all(|range| range.len() == 1))
     }
 
     /// True when the document stands on its own rather than being the tail of
@@ -1645,7 +2211,7 @@ impl WorkbookAuthority {
     /// nor the metadata a whole workbook carries.
     fn is_whole_document(&self) -> bool {
         let txn = self.doc.transact();
-        if require_root_keys(&txn, &[CELL_FORMATS, META, SHEET_ORDER, SHEETS]).is_err() {
+        if require_root_keys(&txn).is_err() {
             return false;
         }
         txn.get_map(META).is_some_and(|meta| {
@@ -1705,7 +2271,7 @@ impl WorkbookAuthority {
             None => (false, apply_remote(&staged_doc, incoming)?),
         };
 
-        let staged = Self::hydrated(staged_doc, self.base.clone(), self.next_sheet_id);
+        let staged = self.hydrated_alike(staged_doc);
         let pending = held_back || has_pending(&staged.doc);
         if let Err(error) = staged.upgrade_schema_from(Some(&self.doc))
             && !pending
@@ -1730,8 +2296,10 @@ impl WorkbookAuthority {
                     effective
                 };
                 if effective {
+                    let dormant_names = staged.dormant_defined_names(&structure.sheet_keys)?;
                     return Ok(StagedUpdate {
                         commit_update: integrated.clone(),
+                        dormant_names,
                         effective: true,
                         model,
                         pending: true,
@@ -1750,6 +2318,7 @@ impl WorkbookAuthority {
             };
             return Ok(StagedUpdate {
                 commit_update: Update::EMPTY_V1.to_vec(),
+                dormant_names: Vec::new(),
                 effective: false,
                 model: current_model,
                 pending: true,
@@ -1768,8 +2337,10 @@ impl WorkbookAuthority {
                 .map_err(AuthorityError::InvalidState)?;
             model != current_model || structure != current_structure
         };
+        let dormant_names = staged.dormant_defined_names(&structure.sheet_keys)?;
         Ok(StagedUpdate {
             commit_update: integrated.clone(),
+            dormant_names,
             effective,
             model,
             pending,
@@ -1844,7 +2415,13 @@ impl WorkbookAuthority {
     ) -> Result<StagedLocalUpdate, AuthorityError> {
         let staged_doc = Doc::with_client_id(self.client_id());
         hydrate_local_doc(&staged_doc, baseline).map_err(AuthorityError::InvalidState)?;
-        let mut staged = Self::hydrated(staged_doc, self.base.clone(), self.next_sheet_id);
+        let mut staged = self.hydrated_alike(staged_doc);
+        if projection_valid {
+            staged.plain_style_cells.store(
+                self.plain_style_cells.load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+        }
         staged
             .projection_valid
             .store(projection_valid, Ordering::Relaxed);
@@ -2027,23 +2604,26 @@ impl WorkbookAuthority {
     /// Moves the document and both stacks. Every failure here leaves that half
     /// done, so the caller holds a checkpoint and puts it back — one checkpoint
     /// for the whole step rather than one here and another there, since this
-    /// runs on a keystroke and each costs a copy of the document.
+    /// runs on a keystroke and each costs a copy of the document. A refused
+    /// undo is decided before its step moves anything, and the step only leaves
+    /// the stack.
     fn apply_history_change(
         &mut self,
         redo: bool,
     ) -> Result<Option<HistoryUpdate>, AuthorityError> {
-        let state_vector = self.doc.transact().state_vector();
-        let mut undo =
-            build_undo_manager(&self.doc, self.undo_stack.clone(), self.redo_stack.clone())
-                .map_err(AuthorityError::InvalidState)?;
-        let applied = if redo {
-            undo.redo_blocking()
+        let removal = if redo {
+            None
         } else {
-            undo.undo_blocking()
+            self.newest_sheet_removal()
+                .map_err(AuthorityError::InvalidState)?
         };
-        self.undo_stack = undo.undo_stack().to_vec();
-        self.redo_stack = undo.redo_stack().to_vec();
-        drop(undo);
+        #[cfg(test)]
+        let removal = removal.filter(|_| !FORCE_FULL_STACK_UNDO.get());
+        let state_vector = self.doc.transact().state_vector();
+        let applied = match removal {
+            Some((index, keys)) => self.undo_through_removal(index, &keys)?,
+            None => self.step_history(redo)?,
+        };
         if !applied {
             return Ok(None);
         }
@@ -2056,6 +2636,179 @@ impl WorkbookAuthority {
             structure,
             update,
         }))
+    }
+
+    fn step_history(&mut self, redo: bool) -> Result<bool, AuthorityError> {
+        let mut undo =
+            build_undo_manager(&self.doc, self.undo_stack.clone(), self.redo_stack.clone())
+                .map_err(AuthorityError::InvalidState)?;
+        let applied = if redo {
+            undo.redo_blocking()
+        } else {
+            undo.undo_blocking()
+        };
+        self.undo_stack = undo.undo_stack().to_vec();
+        self.redo_stack = undo.redo_stack().to_vec();
+        Ok(applied)
+    }
+
+    /// The newest undo step that removes appended sheets, with their keys.
+    fn newest_sheet_removal(&self) -> Result<Option<(usize, Vec<String>)>, String> {
+        let appended = self.appended_sheet_items()?;
+        if appended.is_empty() {
+            return Ok(None);
+        }
+        Ok(self
+            .undo_stack
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, step)| {
+                let removed = appended
+                    .iter()
+                    .filter(|sheet| sheet.removed_by(step))
+                    .map(|sheet| sheet.key.clone())
+                    .collect::<Vec<_>>();
+                (!removed.is_empty()).then_some((index, removed))
+            }))
+    }
+
+    /// Undoes through the step at `index`, which removes the appended sheets
+    /// under `keys`. The steps newer than it go first, and the undo manager
+    /// reaches it only when none of them has anything left to undo. Only then
+    /// is the step checked: undo runs newest first, so this replica's later
+    /// edits in those sheets are gone by then, and anything else they hold came
+    /// from another replica or from an edit kept out of history. Such a step is
+    /// refused and dropped before anything of it is applied.
+    ///
+    /// The newer steps undo with only themselves on the manager's stack. This
+    /// assumes yrs reads the rest of the stack only through `s1.is_deleted` in
+    /// the map-entry walk of `Item::redo`: the older steps would matter there
+    /// only through values they deleted that lie past a value a newer step
+    /// restores, and a value an older step deleted was written before any
+    /// newer step ran. `partial_stack_undo_matches_the_full_stack` pins it, so
+    /// a yrs change that breaks the assumption fails there.
+    fn undo_through_removal(
+        &mut self,
+        index: usize,
+        keys: &[String],
+    ) -> Result<bool, AuthorityError> {
+        let mut older = self.undo_stack.drain(..=index).collect::<Vec<_>>();
+        #[cfg(test)]
+        if !self.undo_stack.is_empty() {
+            PARTIAL_STACK_UNDOS.set(PARTIAL_STACK_UNDOS.get() + 1);
+        }
+        if !self.undo_stack.is_empty() && self.step_history(false)? {
+            older.append(&mut self.undo_stack);
+            self.undo_stack = older;
+            return Ok(true);
+        }
+        let keys = keys.iter().map(String::as_str).collect::<Vec<_>>();
+        let held = older
+            .last()
+            .map(|step| self.holds_content_beyond(step, &keys))
+            .transpose();
+        match held {
+            Ok(Some(true)) => {
+                older.pop();
+                self.undo_stack = older;
+                Err(AuthorityError::UndoRefused)
+            }
+            Ok(_) => {
+                self.undo_stack = older;
+                self.step_history(false)
+            }
+            Err(error) => {
+                self.undo_stack = older;
+                Err(AuthorityError::InvalidState(error))
+            }
+        }
+    }
+
+    fn appended_sheet_items(&self) -> Result<Vec<AppendedSheetItems>, String> {
+        let txn = self.doc.transact();
+        let order = txn
+            .get_array(SHEET_ORDER)
+            .ok_or_else(|| "missing sheet order".to_string())?;
+        let sheets = txn
+            .get_map(SHEETS)
+            .ok_or_else(|| "missing sheet map".to_string())?;
+        let mut appended: Vec<AppendedSheetItems> = Vec::new();
+        for (index, key) in sheet_keys(&order, &txn)?.into_iter().enumerate() {
+            if !key.starts_with(APPENDED_SHEET_PREFIX) {
+                continue;
+            }
+            let entry = u32::try_from(index)
+                .ok()
+                .and_then(|index| order.sticky_index(&txn, index, Assoc::After))
+                .and_then(|position| position.id().copied())
+                .ok_or_else(|| format!("sheet order entry {index} has no identifier"))?;
+            if let Some(sheet) = appended.iter_mut().find(|sheet| sheet.key == key) {
+                sheet.order_entries.push(entry);
+                continue;
+            }
+            let map = match sheets.get(&txn, &key) {
+                Some(Out::YMap(map)) => match map.as_ref().id() {
+                    BranchID::Nested(id) => Some(id),
+                    BranchID::Root(_) => None,
+                },
+                _ => None,
+            };
+            appended.push(AppendedSheetItems {
+                key,
+                order_entries: vec![entry],
+                map,
+            });
+        }
+        Ok(appended)
+    }
+
+    /// Whether the sheets under `keys` hold a live struct `step` did not
+    /// insert. Deleting a sheet's map deletes everything live beneath it, so
+    /// doing that to a copy of the document lists those structs without
+    /// touching this one. A name scoped to one of the sheets lives outside its
+    /// map and goes the same way. A sheet setting that holds what an empty sheet
+    /// holds carries nothing to lose, and undoing a later change to it writes
+    /// the step's own value back as a new struct, so those settings are left out.
+    fn holds_content_beyond(&self, step: &StackItem<()>, keys: &[&str]) -> Result<bool, String> {
+        let probe = Doc::new();
+        let state = decode_local_update_v1(&self.encode_state_as_update_v1())?;
+        probe
+            .transact_mut_with(HYDRATE_ORIGIN)
+            .apply_update(state)
+            .map_err(|error| error.to_string())?;
+        let mut txn = probe.transact_mut_with(UNTRACKED_ORIGIN);
+        let sheets = txn
+            .get_map(SHEETS)
+            .ok_or_else(|| "missing sheet map".to_string())?;
+        for key in keys {
+            let Some(Out::YMap(sheet)) = sheets.get(&txn, key) else {
+                continue;
+            };
+            let empty = sheet
+                .iter(&txn)
+                .filter(|(setting, value)| match value {
+                    Out::Any(value) => empty_sheet_setting(setting).as_ref() == Some(value),
+                    _ => false,
+                })
+                .map(|(setting, _)| setting.to_string())
+                .collect::<Vec<_>>();
+            for setting in empty {
+                sheet.remove(&mut txn, &setting);
+            }
+        }
+        drop(txn);
+        let mut txn = probe.transact_mut_with(UNTRACKED_ORIGIN);
+        for key in keys {
+            sheets.remove(&mut txn, key);
+        }
+        if let Some(names) = txn.get_map(DEFINED_NAMES) {
+            for key in scoped_name_keys(&names, &txn, keys) {
+                names.remove(&mut txn, &key);
+            }
+        }
+        let held = txn.delete_set().diff(step.insertions());
+        Ok(held.iter().any(|(_, ranges)| !ranges.is_empty()))
     }
 
     /// Rebuilds the document from a checkpoint. The GUID is carried over
@@ -2076,6 +2829,7 @@ impl WorkbookAuthority {
         self.doc = doc;
         self.snapshot_revision.fetch_add(1, Ordering::Relaxed);
         self.projection_valid = observe_projection(&self.doc, self.snapshot_revision.clone());
+        self.plain_style_cells.store(u64::MAX, Ordering::Relaxed);
         self.undo_stack = undo_stack;
         self.redo_stack = redo_stack;
         Ok(())
@@ -2214,9 +2968,11 @@ impl WorkbookAuthority {
         &self,
         strict: bool,
     ) -> Result<(WorkbookModel, WorkbookStructure), String> {
+        #[cfg(test)]
+        FULL_MATERIALIZATIONS.set(FULL_MATERIALIZATIONS.get() + 1);
         let txn = self.doc.transact();
         if strict {
-            require_root_keys(&txn, &[CELL_FORMATS, META, SHEET_ORDER, SHEETS])?;
+            require_root_keys(&txn)?;
         }
         let meta = txn
             .get_map(META)
@@ -2259,6 +3015,8 @@ impl WorkbookAuthority {
         let mut model = self.base.workbook();
         model.styles = styles;
         let mut plain = None;
+        let mut plain_style_cells = 0;
+        let mut foreign_auto_filter = false;
         let expected_sheet_keys = sheet_schema_keys(version);
         let optional_sheet_keys = sheet_schema_optional_keys(version);
         for key in keys.iter() {
@@ -2313,11 +3071,14 @@ impl WorkbookAuthority {
             let hidden_dimensions = base_sheet
                 .and_then(|base| self.base.hidden_dimensions.get(base))
                 .unwrap_or(&EMPTY_HIDDEN_DIMENSIONS);
-            model.sheets.push(materialize_sheet(
+            let sheet = materialize_sheet(
                 &sheet_map,
                 &txn,
                 &style_indices,
-                &mut || *plain.get_or_insert_with(|| model.styles.plain_xf()),
+                &mut || {
+                    plain_style_cells += 1;
+                    *plain.get_or_insert_with(|| model.styles.plain_xf())
+                },
                 version,
                 SheetFallbacks {
                     freeze_pane,
@@ -2330,9 +3091,23 @@ impl WorkbookAuthority {
                     conditional_formats,
                     auto_filter,
                 },
-            )?);
+            )?;
+            foreign_auto_filter |= strict
+                && self.collaborative
+                && validate_stored_auto_filter(sheet.auto_filter.as_ref(), auto_filter).is_err();
+            model.sheets.push(sheet);
         }
         project_shared_frame_anchors(&mut model.sheets);
+        let sheet_names = model
+            .sheets
+            .iter()
+            .map(|sheet| sheet.name.clone())
+            .collect();
+        project_unique_sheet_names(&mut model.sheets);
+        NameOverlay::read(&txn)?.apply(&mut model.defined_names, &keys)?;
+        if self.collaborative {
+            project_filter_names(&mut model, &keys, &self.base)?;
+        }
         let active = keys.iter().cloned().collect::<BTreeSet<_>>();
         let all_keys = sheets
             .keys(&txn)
@@ -2341,6 +3116,7 @@ impl WorkbookAuthority {
         let mut shared_types = BTreeMap::new();
         let mut baseline_hyperlinks = BTreeMap::new();
         let mut baseline_merges = BTreeMap::new();
+        let mut baseline_rules = BTreeMap::new();
         for key in all_keys {
             let sheet_map = sheets
                 .get(&txn, &key)
@@ -2355,7 +3131,7 @@ impl WorkbookAuthority {
                     optional_sheet_keys,
                     &format!("inactive sheet {key}"),
                 )?;
-                materialize_sheet(
+                let sheet = materialize_sheet(
                     &sheet_map,
                     &txn,
                     &style_indices,
@@ -2363,6 +3139,8 @@ impl WorkbookAuthority {
                     version,
                     SheetFallbacks::default(),
                 )?;
+                foreign_auto_filter |= self.collaborative
+                    && validate_stored_auto_filter(sheet.auto_filter.as_ref(), None).is_err();
             }
             let Some(Out::Any(baseline)) = sheet_map.get(&txn, MERGES) else {
                 return Err(format!("sheet {key} is missing merges"));
@@ -2377,16 +3155,13 @@ impl WorkbookAuthority {
             };
             baseline_hyperlinks.insert(key.clone(), link_baseline);
             baseline_merges.insert(key.clone(), merges_from_any(&baseline)?);
+            baseline_rules.insert(key.clone(), self.baseline_rules(&sheet_map, &txn, &key)?);
             shared_types.insert(key, sheet_shared_types(&sheet_map, &txn)?);
         }
         let structure = WorkbookStructure {
             generation,
             sheet_keys: keys,
-            sheet_names: model
-                .sheets
-                .iter()
-                .map(|sheet| sheet.name.clone())
-                .collect(),
+            sheet_names,
             freeze_panes: model.sheets.iter().map(|sheet| sheet.freeze_pane).collect(),
             hyperlinks: model
                 .sheets
@@ -2399,11 +3174,13 @@ impl WorkbookAuthority {
                 .iter()
                 .map(|sheet| sheet.conditional_formats.clone())
                 .collect(),
+            baseline_conditional_formats: baseline_rules,
             auto_filters: model
                 .sheets
                 .iter()
                 .map(|sheet| sheet.auto_filter.clone())
                 .collect(),
+            foreign_auto_filter,
             charts: model
                 .sheets
                 .iter()
@@ -2417,6 +3194,8 @@ impl WorkbookAuthority {
             baseline_merges,
             shared_types,
         };
+        self.plain_style_cells
+            .store(plain_style_cells, Ordering::Relaxed);
         self.projection_valid.store(true, Ordering::Relaxed);
         Ok((model, structure))
     }
@@ -2437,26 +3216,40 @@ impl WorkbookAuthority {
 
         let topology_changed = current_keys != keys;
         // a SetCell after AddSheet targets the post-insert index, so its
-        // pre-batch baseline lookup would read the wrong sheet.
+        // pre-batch baseline lookup would read the wrong sheet. A collaborative
+        // append moves no sheet, and a full write would fold every sheet's
+        // merge and hyperlink edits into the baselines peers build on.
         let full_sync = ops.iter().any(requires_full_semantic_sync)
-            || (ops.iter().any(|op| matches!(op, Op::AddSheet { .. }))
-                && ops.iter().any(|op| matches!(op, Op::SetCell { .. })))
-            || (ops
-                .iter()
-                .any(|op| matches!(op, Op::AddSheet { .. } | Op::RemoveSheet { .. }))
-                && ops.iter().any(|op| {
-                    matches!(
-                        op,
-                        Op::MergeCells { .. }
-                            | Op::UnmergeCells { .. }
-                            | Op::SetHyperlink { .. }
-                            | Op::RemoveHyperlink { .. }
-                    )
-                }));
+            || (!collaborative
+                && (ops.iter().any(|op| matches!(op, Op::SetChartAnchor { .. }))
+                    || (ops.iter().any(|op| matches!(op, Op::AddSheet { .. }))
+                        && ops.iter().any(|op| matches!(op, Op::SetCell { .. })))
+                    || (ops
+                        .iter()
+                        .any(|op| matches!(op, Op::AddSheet { .. } | Op::RemoveSheet { .. }))
+                        && ops.iter().any(|op| {
+                            matches!(
+                                op,
+                                Op::MergeCells { .. }
+                                    | Op::UnmergeCells { .. }
+                                    | Op::SetHyperlink { .. }
+                                    | Op::RemoveHyperlink { .. }
+                            )
+                        }))));
         let structure_delta = i64::try_from(
             ops.iter()
                 .filter(|op| {
                     is_structural_op(op)
+                        && !(collaborative
+                            && matches!(
+                                op,
+                                Op::AddSheet { .. }
+                                    | Op::SetDefinedName { .. }
+                                    | Op::DeleteDefinedName { .. }
+                                    | Op::AddConditionalFormat { .. }
+                                    | Op::RemoveConditionalFormat { .. }
+                                    | Op::SetAutoFilter { .. }
+                            ))
                         && (!is_collaborative_local_layout_op(op)
                             || (!collaborative
                                 && matches!(
@@ -2477,7 +3270,9 @@ impl WorkbookAuthority {
         let mut freeze_panes = HashSet::new();
         let mut merges = HashSet::new();
         let mut hyperlinks = HashSet::new();
-        let mut conditional_formats = HashSet::new();
+        let mut conditional_formats = BTreeSet::new();
+        let mut auto_filters = BTreeSet::new();
+        let mut chart_anchors = BTreeSet::new();
         if !full_sync {
             let targets = targeted_sheet_keys(&current_keys, &keys, ops)?;
             for (op, target) in ops.iter().zip(targets) {
@@ -2517,12 +3312,16 @@ impl WorkbookAuthority {
                     (
                         Op::AddConditionalFormat { .. }
                         | Op::RemoveConditionalFormat { .. }
-                        | Op::SetConditionalFormats { .. }
-                        | Op::SetAutoFilter { .. }
-                        | Op::RestoreAutoFilter { .. },
+                        | Op::SetConditionalFormats { .. },
                         Some(key),
                     ) => {
                         conditional_formats.insert(key);
+                    }
+                    (Op::SetAutoFilter { .. } | Op::RestoreAutoFilter { .. }, Some(key)) => {
+                        auto_filters.insert(key);
+                    }
+                    (Op::SetChartAnchor { frame, .. }, Some(key)) => {
+                        chart_anchors.insert((key, frame.clone()));
                     }
                     (
                         Op::PatchRangeStyle { range, .. }
@@ -2542,6 +3341,13 @@ impl WorkbookAuthority {
                 }
             }
         }
+        let names_before = if collaborative {
+            let mut names = self.base.defined_names.clone();
+            NameOverlay::read(&self.doc.transact())?.apply(&mut names, &current_keys)?;
+            Some(names).filter(|names| !same_except_filter_names(names, &model.defined_names))
+        } else {
+            None
+        };
         let current_key_set = current_keys
             .iter()
             .map(String::as_str)
@@ -2561,12 +3367,34 @@ impl WorkbookAuthority {
             && freeze_panes.is_empty()
             && merges.is_empty()
             && hyperlinks.is_empty()
+            && chart_anchors.is_empty()
             && conditional_formats.is_empty()
+            && auto_filters.is_empty()
+            && names_before.is_none()
         {
             self.apply_history(history);
             return Ok(());
         }
 
+        let stored_names = self.stored_sheet_names(&current_keys)?;
+        let mut projected = stored_names
+            .iter()
+            .map(|name| Sheet::new(name.clone()))
+            .collect::<Vec<_>>();
+        project_unique_sheet_names(&mut projected);
+        let name_to_store = |key: &str, sheet: &Sheet| -> String {
+            match current_keys.iter().position(|known| known == key) {
+                Some(index) if projected[index].name == sheet.name => stored_names[index].clone(),
+                _ => sheet.name.clone(),
+            }
+        };
+        let client = self.client_id();
+        let clock = self
+            .doc
+            .transact()
+            .state_vector()
+            .get(&ClientID::new(client));
+        let mut rule_ids = RuleIds::new(client, clock);
         let mut txn = self.doc.transact_mut_with(origin.as_str());
         let cell_formats = txn
             .get_map(CELL_FORMATS)
@@ -2590,16 +3418,40 @@ impl WorkbookAuthority {
         if topology_changed {
             patch_sheet_order(&order, &mut txn, &current_keys, &keys)?;
         }
+        if let Some(before) = &names_before {
+            sync_defined_names(
+                &mut txn,
+                &self.base.defined_names,
+                (before, &current_keys),
+                (&model.defined_names, &keys),
+            )?;
+        }
         if full_sync {
             for (key, sheet) in keys.iter().zip(&model.sheets) {
                 let sheet_map = sheet_map_for_sync(&sheets, &mut txn, key)?;
-                sync_sheet(&sheet_map, &mut txn, sheet, &model.styles)?;
+                let name = name_to_store(key, sheet);
+                sync_sheet(
+                    &sheet_map,
+                    &mut txn,
+                    sheet,
+                    &name,
+                    &model.styles,
+                    collaborative,
+                )?;
             }
         } else {
             for (key, sheet) in keys.iter().zip(&model.sheets) {
                 if newly_active.contains(key) {
                     let sheet_map = sheet_map_for_sync(&sheets, &mut txn, key)?;
-                    sync_sheet(&sheet_map, &mut txn, sheet, &model.styles)?;
+                    let name = name_to_store(key, sheet);
+                    sync_sheet(
+                        &sheet_map,
+                        &mut txn,
+                        sheet,
+                        &name,
+                        &model.styles,
+                        collaborative,
+                    )?;
                 }
             }
             let order_cells = |targets: HashSet<(String, CellRef)>| {
@@ -2708,20 +3560,77 @@ impl WorkbookAuthority {
                     sheet_parts_by_key(&sheets, &txn, &keys, model, &key)?;
                 sync_hyperlinks(&sheet_map, &mut txn, sheet_model, collaborative)?;
             }
-            for key in conditional_formats {
+            if collaborative {
+                for key in conditional_formats {
+                    let (sheet_map, sheet_model) =
+                        sheet_parts_by_key(&sheets, &txn, &keys, model, &key)?;
+                    let fallback = base_sheet_index(&key)
+                        .and_then(|base| self.base.conditional_formats.get(base))
+                        .map(Vec::as_slice)
+                        .unwrap_or_default();
+                    sync_conditional_formats(
+                        &mut txn,
+                        &sheet_map,
+                        sheet_model,
+                        fallback,
+                        &mut rule_ids,
+                    )?;
+                }
+                for key in auto_filters {
+                    let (sheet_map, sheet_model) =
+                        sheet_parts_by_key(&sheets, &txn, &keys, model, &key)?;
+                    let fallback = base_sheet_index(&key)
+                        .and_then(|base| self.base.auto_filters.get(base))
+                        .and_then(Option::as_ref);
+                    sync_auto_filter(&mut txn, &sheet_map, sheet_model, fallback)?;
+                }
+            } else {
+                for key in conditional_formats.union(&auto_filters) {
+                    let (sheet_map, sheet_model) =
+                        sheet_parts_by_key(&sheets, &txn, &keys, model, key)?;
+                    let json = serde_json::to_string(&sheet_model.conditional_formats).map_err(
+                        |error| format!("cannot encode sheet conditional formats: {error}"),
+                    )?;
+                    sheet_map.try_update(&mut txn, CONDITIONAL_FORMATS, json);
+                    let json = serde_json::to_string(&sheet_model.auto_filter)
+                        .map_err(|error| format!("cannot encode sheet auto filter: {error}"))?;
+                    sheet_map.try_update(&mut txn, AUTO_FILTER, json);
+                }
+            }
+            for (key, frame) in chart_anchors {
                 let (sheet_map, sheet_model) =
                     sheet_parts_by_key(&sheets, &txn, &keys, model, &key)?;
-                let json = serde_json::to_string(&sheet_model.conditional_formats)
-                    .map_err(|error| format!("cannot encode sheet conditional formats: {error}"))?;
-                sheet_map.try_update(&mut txn, CONDITIONAL_FORMATS, json);
-                let json = serde_json::to_string(&sheet_model.auto_filter)
-                    .map_err(|error| format!("cannot encode sheet auto filter: {error}"))?;
-                sheet_map.try_update(&mut txn, AUTO_FILTER, json);
+                let fallback = base_sheet_index(&key)
+                    .and_then(|base| self.base.charts.get(base))
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                sync_chart_anchor(&sheet_map, &mut txn, sheet_model, &frame, fallback)?;
             }
         }
         drop(txn);
         self.apply_history(history);
         Ok(())
+    }
+
+    /// The names `keys` store, which the model shows projected when two
+    /// appended sheets share one. A write that leaves a sheet's projected name
+    /// as it was keeps the stored one, so no replica turns a projection into a
+    /// rename.
+    fn stored_sheet_names(&self, keys: &[String]) -> Result<Vec<String>, String> {
+        let txn = self.doc.transact();
+        let sheets = txn
+            .get_map(SHEETS)
+            .ok_or_else(|| "missing sheet map".to_string())?;
+        keys.iter()
+            .map(|key| {
+                sheets
+                    .get(&txn, key)
+                    .and_then(|sheet| sheet.cast::<MapRef>().ok())
+                    .and_then(|sheet| sheet.get(&txn, NAME))
+                    .and_then(|name| name.cast::<String>().ok())
+                    .ok_or_else(|| format!("sheet {key} has no stored name"))
+            })
+            .collect()
     }
 
     fn current_sheet_keys(&self) -> Result<Vec<String>, String> {
@@ -2854,8 +3763,23 @@ impl WorkbookAuthority {
         }
     }
 
+    /// The key carries this client's clock before the batch writes anything.
+    /// Every batch that mints one writes at least the key itself, so the next
+    /// batch reads a later clock, and a replica that reopens under the same
+    /// client id resumes from the clock its own earlier structs reached. The
+    /// counter only separates sheets one batch adds. No key repeats, even one
+    /// whose sheet an undo deleted.
     fn allocate_sheet_key(&mut self) -> String {
-        let key = format!("replica:{}:{}", self.client_id(), self.next_sheet_id);
+        let clock = self
+            .doc
+            .transact()
+            .state_vector()
+            .get(&ClientID::new(self.client_id()));
+        let key = format!(
+            "{APPENDED_SHEET_PREFIX}{}:{clock}:{}",
+            self.client_id(),
+            self.next_sheet_id
+        );
         self.next_sheet_id += 1;
         key
     }
@@ -2911,6 +3835,7 @@ pub(crate) fn is_structural_op(op: &Op) -> bool {
             | Op::SetDefinedName { .. }
             | Op::DeleteDefinedName { .. }
             | Op::SetDefinedNames { .. }
+            | Op::SetTables { .. }
     )
 }
 
@@ -2978,7 +3903,7 @@ fn seed_in_chunks(
     }
     let meta = txn.get_or_insert_map(META);
     meta.insert(&mut txn, BASE_FINGERPRINT, base.fingerprint.as_str());
-    meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION);
+    meta.insert(&mut txn, "schemaVersion", SEED_SCHEMA_VERSION);
     meta.insert(&mut txn, STRUCTURE_GENERATION, 0_i64);
     let order = txn.get_or_insert_array(SHEET_ORDER);
     order.insert_range(&mut txn, 0, keys.iter().cloned());
@@ -2992,7 +3917,7 @@ fn seed_in_chunks(
     let mut room = chunk;
     for (key, sheet) in keys.iter().zip(&model.sheets) {
         let sheet_map = sheets.insert(&mut txn, key.as_str(), MapPrelim::default());
-        let maps = sync_sheet_frame(&sheet_map, &mut txn, sheet)?;
+        let maps = sync_sheet_frame(&sheet_map, &mut txn, sheet, &sheet.name, false)?;
         for (part, map) in maps.iter().enumerate() {
             let entries: Box<dyn Iterator<Item = (String, Any)> + '_> = match part {
                 0 => Box::new(number_entries(&sheet.col_widths)),
@@ -3014,6 +3939,13 @@ fn seed_in_chunks(
             }
         }
     }
+    #[cfg(test)]
+    let marked = !SCHEMA_SIX_SEED.get();
+    #[cfg(not(test))]
+    let marked = true;
+    if marked {
+        meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION);
+    }
     let update = txn.encode_update_v1();
     drop(txn);
     flush(update)
@@ -3027,6 +3959,8 @@ fn hydrate_doc(doc: &Doc, update: &[u8]) -> Result<(), String> {
 }
 
 fn hydrate_local_doc(doc: &Doc, update: &[u8]) -> Result<(), String> {
+    #[cfg(test)]
+    LOCAL_HYDRATIONS.set(LOCAL_HYDRATIONS.get() + 1);
     let update = decode_local_update_v1(update)?;
     doc.transact_mut_with(HYDRATE_ORIGIN)
         .apply_update(update)
@@ -3115,6 +4049,17 @@ fn build_undo_manager(
     let sheets = txn
         .get_map(SHEETS)
         .ok_or_else(|| "missing sheet map".to_string())?;
+    let order = txn
+        .get_array(SHEET_ORDER)
+        .ok_or_else(|| "missing sheet order".to_string())?;
+    drop(txn);
+    // A root hydrated from an update has no type until one is asked for, and an
+    // untyped root raises no change event, so the manager would never see a
+    // sheet join or leave it.
+    let mut txn = doc.transact_mut_with(HYDRATE_ORIGIN);
+    txn.get_or_insert_map(SHEETS);
+    txn.get_or_insert_array(SHEET_ORDER);
+    let names = txn.get_or_insert_map(DEFINED_NAMES);
     drop(txn);
     let options = UndoOptions {
         capture_timeout_millis: UNDO_CAPTURE_TIMEOUT_MS,
@@ -3126,6 +4071,8 @@ fn build_undo_manager(
     };
     let mut undo = UndoManager::with_options(options);
     undo.expand_scope(doc, &sheets);
+    undo.expand_scope(doc, &order);
+    undo.expand_scope(doc, &names);
     Ok(undo)
 }
 
@@ -3929,11 +4876,11 @@ fn requires_full_semantic_sync(op: &Op) -> bool {
             | Op::RestoreColStyles { .. }
             | Op::RestoreRowStyles { .. }
             | Op::SetCharts { .. }
-            | Op::SetChartAnchor { .. }
             | Op::RemoveSheet { .. }
             | Op::MoveSheet { .. }
             | Op::RenameSheet { .. }
             | Op::RestoreSheet { .. }
+            | Op::SetTables { .. }
     )
 }
 
@@ -3978,6 +4925,7 @@ fn targeted_sheet_keys(
                 targets.push(None);
             }
             Op::SetDefinedNames { .. }
+            | Op::SetTables { .. }
             | Op::SetDefinedName { .. }
             | Op::DeleteDefinedName { .. } => targets.push(None),
             op => {
@@ -4056,7 +5004,8 @@ fn op_sheet(op: &Op) -> Option<SheetId> {
         | Op::MoveSheet { .. }
         | Op::SetDefinedName { .. }
         | Op::DeleteDefinedName { .. }
-        | Op::SetDefinedNames { .. } => None,
+        | Op::SetDefinedNames { .. }
+        | Op::SetTables { .. } => None,
     }
 }
 
@@ -4137,18 +5086,25 @@ fn sync_sheet(
     sheet_map: &MapRef,
     txn: &mut TransactionMut<'_>,
     sheet: &Sheet,
+    name: &str,
     stylesheet: &Stylesheet,
+    collaborative: bool,
 ) -> Result<(), String> {
-    sync_sheet_with_style_key(sheet_map, txn, sheet, |style| style_key(stylesheet, style))
+    sync_sheet_with_style_key(sheet_map, txn, sheet, name, collaborative, |style| {
+        style_key(stylesheet, style)
+    })
 }
 
 fn sync_sheet_with_style_key(
     sheet_map: &MapRef,
     txn: &mut TransactionMut<'_>,
     sheet: &Sheet,
+    name: &str,
+    collaborative: bool,
     style_key: impl Fn(u32) -> Result<String, String>,
 ) -> Result<(), String> {
-    let [col_widths, contents, row_heights, styles] = sync_sheet_frame(sheet_map, txn, sheet)?;
+    let [col_widths, contents, row_heights, styles] =
+        sync_sheet_frame(sheet_map, txn, sheet, name, collaborative)?;
     sync_numbers(&col_widths, txn, &sheet.col_widths);
     sync_map(&contents, txn, desired_contents(sheet));
     sync_numbers(&row_heights, txn, &sheet.row_heights);
@@ -4157,11 +5113,16 @@ fn sync_sheet_with_style_key(
 }
 
 /// Writes every key of a sheet but its per-cell entries, and returns the maps
-/// those go in: column widths, contents, row heights and styles.
+/// those go in: column widths, contents, row heights and styles. Under
+/// `collaborative`, rules and filters keep to their own writes, because storing
+/// the projection would fold rules into the baseline and overwrite a filter a
+/// peer set at the same time.
 fn sync_sheet_frame(
     sheet_map: &MapRef,
     txn: &mut TransactionMut<'_>,
     sheet: &Sheet,
+    name: &str,
+    collaborative: bool,
 ) -> Result<[MapRef; 4], String> {
     let col_widths: MapRef = sheet_map.get_or_init(txn, COL_WIDTHS);
     let contents: MapRef = sheet_map.get_or_init(txn, CONTENTS);
@@ -4190,12 +5151,16 @@ fn sync_sheet_frame(
         .map_err(|error| format!("cannot encode sheet hyperlinks: {error}"))?;
     sheet_map.try_update(txn, HYPERLINKS, hyperlinks);
     clear_hyperlink_edits(sheet_map, txn);
-    if sheet.auto_filter.is_some() || sheet_map.get(txn, AUTO_FILTER).is_some() {
+    if !collaborative && (sheet.auto_filter.is_some() || sheet_map.get(txn, AUTO_FILTER).is_some())
+    {
         let json = serde_json::to_string(&sheet.auto_filter)
             .map_err(|error| format!("cannot encode sheet auto filter: {error}"))?;
         sheet_map.try_update(txn, AUTO_FILTER, json);
     }
-    if !sheet.conditional_formats.is_empty() || sheet_map.get(txn, CONDITIONAL_FORMATS).is_some() {
+    if !collaborative
+        && (!sheet.conditional_formats.is_empty()
+            || sheet_map.get(txn, CONDITIONAL_FORMATS).is_some())
+    {
         let conditional_formats = serde_json::to_string(&sheet.conditional_formats)
             .map_err(|error| format!("cannot encode sheet conditional formats: {error}"))?;
         sheet_map.try_update(txn, CONDITIONAL_FORMATS, conditional_formats);
@@ -4205,7 +5170,7 @@ fn sync_sheet_frame(
     sheet_map.try_update(txn, CHARTS, charts);
     sheet_map.try_update(txn, MERGES, merges_to_any(&sheet.merges));
     clear_merge_edits(sheet_map, txn);
-    sheet_map.try_update(txn, NAME, sheet.name.as_str());
+    sheet_map.try_update(txn, NAME, name);
     let row_heights: MapRef = sheet_map.get_or_init(txn, ROW_HEIGHTS);
     let styles: MapRef = sheet_map.get_or_init(txn, STYLES);
     Ok([col_widths, contents, row_heights, styles])
@@ -4248,6 +5213,32 @@ fn sync_map(map: &MapRef, txn: &mut TransactionMut<'_>, desired: BTreeMap<String
     for (key, value) in desired {
         map.try_update(txn, key, value);
     }
+}
+
+/// Repins one frame in a sheet's stored chart state. The model's other anchors
+/// can be projections of another sheet's, so only this frame takes its value.
+fn sync_chart_anchor(
+    sheet_map: &MapRef,
+    txn: &mut TransactionMut<'_>,
+    sheet: &Sheet,
+    frame: &str,
+    fallback: &[SheetChart],
+) -> Result<(), String> {
+    let mut stored = match sheet_map.get(txn, CHARTS) {
+        Some(Out::Any(Any::String(json))) => decode_charts(&json)?,
+        Some(_) => return Err("sheet charts are not a string".to_string()),
+        None => fallback.to_vec(),
+    };
+    let moved = sheet.charts.iter().find(|chart| chart.frame_id() == frame);
+    let held = stored.iter_mut().find(|chart| chart.frame_id() == frame);
+    let (Some(moved), Some(held)) = (moved, held) else {
+        return Err(format!("sheet does not store chart {frame}"));
+    };
+    held.anchor = moved.anchor;
+    let charts = serde_json::to_string(&stored)
+        .map_err(|error| format!("cannot encode sheet charts: {error}"))?;
+    sheet_map.try_update(txn, CHARTS, charts);
+    Ok(())
 }
 
 fn sync_authored_cell(
@@ -4315,23 +5306,40 @@ fn materialize_cell_formats<T: ReadTxn>(
     txn: &T,
     base: &Stylesheet,
 ) -> Result<(Stylesheet, BTreeMap<String, Option<u32>>), String> {
+    materialize_cell_format_catalog(read_cell_format_catalog(map, txn)?, base)
+}
+
+fn decode_cell_format_entry(key: &str, payload: &str) -> Result<StoredCellFormat, String> {
+    if payload.len() > MAX_CELL_FORMAT_BYTES {
+        return Err(format!("cell format {key} exceeds its size limit"));
+    }
+    let stored = serde_json::from_str::<StoredCellFormat>(payload)
+        .map_err(|error| format!("invalid cell format {key}: {error}"))?;
+    let (expected, canonical) = stored_format_entry(&stored)?;
+    if key != expected || payload != canonical {
+        return Err(format!("cell format {key} is not canonical"));
+    }
+    Ok(stored)
+}
+
+fn read_cell_format_catalog<T: ReadTxn>(
+    map: &MapRef,
+    txn: &T,
+) -> Result<BTreeMap<String, StoredCellFormat>, String> {
     let mut catalog = BTreeMap::new();
     for (key, value) in map.iter(txn) {
         let Out::Any(Any::String(payload)) = value else {
             return Err(format!("cell format {key} is not a string"));
         };
-        if payload.len() > MAX_CELL_FORMAT_BYTES {
-            return Err(format!("cell format {key} exceeds its size limit"));
-        }
-        let stored = serde_json::from_str::<StoredCellFormat>(&payload)
-            .map_err(|error| format!("invalid cell format {key}: {error}"))?;
-        let (expected, canonical) = stored_format_entry(&stored)?;
-        if key != expected || *payload != canonical {
-            return Err(format!("cell format {key} is not canonical"));
-        }
-        catalog.insert(key.to_string(), stored);
+        catalog.insert(key.to_string(), decode_cell_format_entry(key, &payload)?);
     }
+    Ok(catalog)
+}
 
+fn materialize_cell_format_catalog(
+    catalog: BTreeMap<String, StoredCellFormat>,
+    base: &Stylesheet,
+) -> Result<(Stylesheet, BTreeMap<String, Option<u32>>), String> {
     let mut styles = base.clone();
     styles.preserve_style_identity();
     let mut known = BTreeMap::new();
@@ -4481,6 +5489,27 @@ fn style_key(stylesheet: &Stylesheet, style: u32) -> Result<String, String> {
         return Err(format!("cell style index {style} is out of range"));
     }
     style_entry(stylesheet, style).map(|(key, _)| key)
+}
+
+fn style_needs_plain(
+    stylesheet: &Stylesheet,
+    index: u32,
+    base: &Stylesheet,
+) -> Result<bool, String> {
+    let key = style_key(stylesheet, index)?;
+    if stylesheet.format_source(index).1.is_some()
+        || stylesheet.cell_format(Some(index)) != CellFormat::default()
+    {
+        return Ok(false);
+    }
+    for index in 0..base.cell_xfs.len() {
+        let index =
+            u32::try_from(index).map_err(|_| "cell format table is too large".to_string())?;
+        if style_key(base, index)? == key {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn style_entry(stylesheet: &Stylesheet, index: u32) -> Result<(String, String), String> {
@@ -4763,7 +5792,7 @@ fn materialize_sheet<T: ReadTxn>(
         MAX_ROWS,
         "row height",
     )?;
-    if version < SCHEMA_VERSION {
+    if version < CHARTS_SCHEMA_VERSION {
         for (&at, &size) in &fallbacks.hidden_dimensions.col_widths {
             sheet.col_widths.entry(at).or_insert(size);
         }
@@ -4776,6 +5805,7 @@ fn materialize_sheet<T: ReadTxn>(
     sheet.row_styles = fallbacks.row_styles.clone();
     materialize_style_defaults(&mut sheet, sheet_map, txn)?;
     sheet.freeze_pane = match (version, sheet_map.get(txn, FREEZE_PANE)) {
+        (CHARTS_SCHEMA_VERSION.., None) => fallbacks.freeze_pane,
         (FREEZE_PANE_SCHEMA_VERSION.., Some(Out::Any(value))) => freeze_pane_from_any(&value)?,
         (FREEZE_PANE_SCHEMA_VERSION.., _) => {
             return Err("sheet is missing freeze pane".to_string());
@@ -4795,18 +5825,10 @@ fn materialize_sheet<T: ReadTxn>(
         _ => fallbacks.hyperlinks.to_vec(),
     };
     sheet.hyperlinks = project_hyperlinks(baseline_hyperlinks, sheet_map, txn)?;
-    sheet.auto_filter = match sheet_map.get(txn, AUTO_FILTER) {
-        Some(Out::Any(Any::String(json))) => serde_json::from_str(&json)
-            .map_err(|error| format!("sheet auto filter is invalid: {error}"))?,
-        Some(_) => return Err("sheet auto filter is not a string".to_string()),
-        None => fallbacks.auto_filter.cloned(),
-    };
-    sheet.conditional_formats = match sheet_map.get(txn, CONDITIONAL_FORMATS) {
-        Some(Out::Any(Any::String(json))) => serde_json::from_str(&json)
-            .map_err(|error| format!("sheet conditional formats are invalid: {error}"))?,
-        Some(_) => return Err("sheet conditional formats are not a string".to_string()),
-        None => fallbacks.conditional_formats.to_vec(),
-    };
+    sheet.auto_filter = stored_auto_filter(sheet_map, txn, fallbacks.auto_filter)?;
+    sheet.conditional_formats = RuleOverlay::read(sheet_map, txn)?.apply(
+        baseline_conditional_formats(sheet_map, txn, fallbacks.conditional_formats)?,
+    )?;
     sheet.charts = match (version, sheet_map.get(txn, CHARTS)) {
         (CHARTS_SCHEMA_VERSION.., Some(Out::Any(Any::String(json)))) => decode_charts(&json)?,
         (CHARTS_SCHEMA_VERSION.., Some(_)) => {
@@ -4951,7 +5973,6 @@ fn sheet_schema_keys(version: i64) -> &'static [&'static str] {
     const V6: &[&str] = &[
         COL_WIDTHS,
         CONTENTS,
-        FREEZE_PANE,
         HYPERLINKS,
         MERGES,
         NAME,
@@ -4966,14 +5987,16 @@ fn sheet_schema_keys(version: i64) -> &'static [&'static str] {
     }
 }
 
-/// Chart state is the one sheet key two replicas can assign at once, because
-/// repinning a chart is an ordinary edit. Undoing the assignment that won
-/// deletes the key outright, so it reads as absent and falls back to what the
-/// source package holds rather than failing the whole workbook.
+/// Chart state and the freeze pane are the sheet keys two replicas can assign
+/// at once, because repinning a chart and freezing panes are ordinary edits.
+/// Undoing the assignment that won deletes the key outright, so it reads as
+/// absent and falls back to what the source package holds rather than failing
+/// the whole workbook.
 fn sheet_schema_optional_keys(version: i64) -> &'static [&'static str] {
     const NONE: &[&str] = &[];
     const V6: &[&str] = &[
         CHARTS,
+        FREEZE_PANE,
         ROW_STYLES,
         COL_STYLES,
         CONDITIONAL_FORMATS,
@@ -4986,14 +6009,16 @@ fn sheet_schema_optional_keys(version: i64) -> &'static [&'static str] {
     }
 }
 
-fn require_root_keys<T: ReadTxn>(txn: &T, expected: &[&str]) -> Result<(), String> {
-    let actual = txn
+/// A root exists only once it has items, so the optional one may be absent.
+fn require_root_keys<T: ReadTxn>(txn: &T) -> Result<(), String> {
+    let mut actual = txn
         .root_refs()
         .map(|(key, _)| key.to_string())
         .collect::<BTreeSet<_>>();
-    let expected = expected
-        .iter()
-        .map(|key| (*key).to_string())
+    actual.remove(DEFINED_NAMES);
+    let expected = [CELL_FORMATS, META, SHEET_ORDER, SHEETS]
+        .into_iter()
+        .map(str::to_string)
         .collect::<BTreeSet<_>>();
     if actual == expected {
         Ok(())
@@ -5062,10 +6087,14 @@ fn require_sheet_keys<T: ReadTxn>(
         if key.starts_with(MERGE_PREFIX) {
             insert_merge_edit(&mut edits, key, &value)?;
         } else if key.starts_with(HYPERLINK_PREFIX) {
-            if version < SCHEMA_VERSION {
+            if version < CHARTS_SCHEMA_VERSION {
                 return Err(format!("{label} keys do not match the schema"));
             }
             insert_hyperlink_edit(&mut hyperlinks, key, &value)?;
+        } else if key.starts_with(RULE_PREFIX) {
+            if version < CHARTS_SCHEMA_VERSION {
+                return Err(format!("{label} keys do not match the schema"));
+            }
         } else if !expected.contains(&key) && !optional.contains(&key) {
             return Err(format!("{label} keys do not match the schema"));
         }
@@ -5235,6 +6264,18 @@ fn merges_to_any(merges: &[CellRange]) -> Any {
             })
             .collect::<Vec<_>>(),
     ))
+}
+
+/// What a sheet setting holds on a sheet without that feature.
+fn empty_sheet_setting(setting: &str) -> Option<Any> {
+    match setting {
+        FREEZE_PANE => Some(freeze_pane_to_any(None)),
+        MERGES => Some(merges_to_any(&[])),
+        ROW_STYLES | COL_STYLES => Some(Any::Array(Arc::from(Vec::new()))),
+        HYPERLINKS | CHARTS | CONDITIONAL_FORMATS => Some(Any::from("[]")),
+        AUTO_FILTER => Some(Any::from("null")),
+        _ => None,
+    }
 }
 
 fn freeze_pane_to_any(pane: Option<FreezePane>) -> Any {
@@ -5779,7 +6820,9 @@ impl<'a> FingerprintBuilder<'a> {
         };
         let mut fingerprints =
             self.accepted_fingerprints(styles.without_xf_facets(), legacy_styles)?;
-        let released = fingerprints.remove(&SCHEMA_VERSION).unwrap_or_default();
+        let released = fingerprints
+            .remove(&FINGERPRINT_SCHEMA_VERSION)
+            .unwrap_or_default();
         let mut accepted = self.current_fingerprints(current_styles, legacy_styles)?;
         if current_styles.as_written {
             for reading in [styles, current_styles.without_xf_facets()] {
@@ -5795,7 +6838,7 @@ impl<'a> FingerprintBuilder<'a> {
                 accepted.push(fingerprint);
             }
         }
-        fingerprints.insert(SCHEMA_VERSION, accepted);
+        fingerprints.insert(FINGERPRINT_SCHEMA_VERSION, accepted);
         Ok(fingerprints)
     }
 
@@ -5826,7 +6869,7 @@ impl<'a> FingerprintBuilder<'a> {
     }
 
     fn current(&mut self, styles: FingerprintStyles<'a>) -> Result<(String, u64), String> {
-        self.hash(styles, SCHEMA_VERSION, true, true, true, false)
+        self.hash(styles, FINGERPRINT_SCHEMA_VERSION, true, true, true, false)
     }
 
     fn fingerprint(
@@ -5947,7 +6990,14 @@ impl<'a> FingerprintBuilder<'a> {
         let mut accepted = Vec::new();
         let mut readings = Vec::new();
         for (columns, rows) in [(true, true), (false, false), (true, false)] {
-            let (current, _) = self.hash(styles, SCHEMA_VERSION, true, columns, rows, false)?;
+            let (current, _) = self.hash(
+                styles,
+                FINGERPRINT_SCHEMA_VERSION,
+                true,
+                columns,
+                rows,
+                false,
+            )?;
             if !accepted.contains(&current) {
                 accepted.push(current);
             }
@@ -5956,8 +7006,13 @@ impl<'a> FingerprintBuilder<'a> {
                 .with_defaults(defaults)
                 .legacy()
             {
-                let (fingerprint, _) =
-                    self.hash_as(styles, SCHEMA_VERSION, true, (columns, rows, false), legacy)?;
+                let (fingerprint, _) = self.hash_as(
+                    styles,
+                    FINGERPRINT_SCHEMA_VERSION,
+                    true,
+                    (columns, rows, false),
+                    legacy,
+                )?;
                 if !accepted.contains(&fingerprint) {
                     accepted.push(fingerprint);
                 }
@@ -5993,14 +7048,14 @@ impl<'a> FingerprintBuilder<'a> {
         legacy_styles: Option<&'a Stylesheet>,
     ) -> Result<BTreeMap<i64, Vec<String>>, String> {
         let mut fingerprints = BTreeMap::new();
-        for version in MIN_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION {
+        for version in MIN_SUPPORTED_SCHEMA_VERSION..=FINGERPRINT_SCHEMA_VERSION {
             let (fingerprint, _) =
                 self.fingerprint(styles, version, version >= 4, true, true, false)?;
             fingerprints.insert(version, vec![fingerprint]);
         }
         let (defined_names_v3, _) = self.fingerprint(styles, 3, true, true, true, false)?;
         append_fingerprint(&mut fingerprints, 3, defined_names_v3);
-        for version in MIN_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION {
+        for version in MIN_SUPPORTED_SCHEMA_VERSION..=FINGERPRINT_SCHEMA_VERSION {
             let (without_col_styles, _) =
                 self.fingerprint(styles, version, version >= 4, false, false, false)?;
             append_fingerprint(&mut fingerprints, version, without_col_styles);
@@ -6009,7 +7064,7 @@ impl<'a> FingerprintBuilder<'a> {
             append_fingerprint(&mut fingerprints, version, without_row_styles);
         }
         if !self.legacy_dimensions.is_empty() {
-            for version in MIN_SUPPORTED_SCHEMA_VERSION..SCHEMA_VERSION {
+            for version in MIN_SUPPORTED_SCHEMA_VERSION..FINGERPRINT_SCHEMA_VERSION {
                 let (legacy_fingerprint, _) =
                     self.fingerprint(styles, version, version >= 4, true, true, true)?;
                 let (without_col_styles, _) =
@@ -6350,7 +7405,8 @@ impl WorkbookAuthority {
             },
         };
         hydrate_local_doc(&doc, &bootstrap_update).map_err(AuthorityError::InvalidState)?;
-        let authority = Self::hydrated(doc, Arc::new(base), 0);
+        let mut authority = Self::hydrated(doc, Arc::new(base), 0);
+        authority.collaborative = client_id.is_some();
         authority
             .materialize_internal_oracle(true)
             .map_err(AuthorityError::InvalidState)?;
@@ -6375,7 +7431,7 @@ impl WorkbookAuthority {
     ) -> Result<(WorkbookModel, WorkbookStructure), String> {
         let txn = self.doc.transact();
         if strict {
-            require_root_keys(&txn, &[CELL_FORMATS, META, SHEET_ORDER, SHEETS])?;
+            require_root_keys(&txn)?;
         }
         let meta = txn
             .get_map(META)
@@ -6418,6 +7474,7 @@ impl WorkbookAuthority {
         let mut model = self.base.workbook();
         model.styles = styles;
         let mut plain = None;
+        let mut plain_style_cells = 0;
         let expected_sheet_keys = sheet_schema_keys(version);
         let optional_sheet_keys = sheet_schema_optional_keys(version);
         for key in keys.iter() {
@@ -6475,7 +7532,10 @@ impl WorkbookAuthority {
                 &sheet_map,
                 &txn,
                 &style_indices,
-                &mut || *plain.get_or_insert_with(|| model.styles.plain_xf()),
+                &mut || {
+                    plain_style_cells += 1;
+                    *plain.get_or_insert_with(|| model.styles.plain_xf())
+                },
                 version,
                 SheetFallbacks {
                     freeze_pane,
@@ -6491,6 +7551,16 @@ impl WorkbookAuthority {
             )?);
         }
         project_shared_frame_anchors(&mut model.sheets);
+        let sheet_names = model
+            .sheets
+            .iter()
+            .map(|sheet| sheet.name.clone())
+            .collect();
+        project_unique_sheet_names(&mut model.sheets);
+        NameOverlay::read(&txn)?.apply(&mut model.defined_names, &keys)?;
+        if self.collaborative {
+            project_filter_names(&mut model, &keys, &self.base)?;
+        }
         let active = keys.iter().cloned().collect::<BTreeSet<_>>();
         let all_keys = sheets
             .keys(&txn)
@@ -6499,6 +7569,7 @@ impl WorkbookAuthority {
         let mut shared_types = BTreeMap::new();
         let mut baseline_hyperlinks = BTreeMap::new();
         let mut baseline_merges = BTreeMap::new();
+        let mut baseline_rules = BTreeMap::new();
         for key in all_keys {
             let sheet_map = sheets
                 .get(&txn, &key)
@@ -6534,16 +7605,13 @@ impl WorkbookAuthority {
             };
             baseline_hyperlinks.insert(key.clone(), link_baseline);
             baseline_merges.insert(key.clone(), merges_from_any(&baseline)?);
+            baseline_rules.insert(key.clone(), self.baseline_rules(&sheet_map, &txn, &key)?);
             shared_types.insert(key, sheet_shared_types(&sheet_map, &txn)?);
         }
         let structure = WorkbookStructure {
             generation,
             sheet_keys: keys,
-            sheet_names: model
-                .sheets
-                .iter()
-                .map(|sheet| sheet.name.clone())
-                .collect(),
+            sheet_names,
             freeze_panes: model.sheets.iter().map(|sheet| sheet.freeze_pane).collect(),
             hyperlinks: model
                 .sheets
@@ -6556,11 +7624,13 @@ impl WorkbookAuthority {
                 .iter()
                 .map(|sheet| sheet.conditional_formats.clone())
                 .collect(),
+            baseline_conditional_formats: baseline_rules,
             auto_filters: model
                 .sheets
                 .iter()
                 .map(|sheet| sheet.auto_filter.clone())
                 .collect(),
+            foreign_auto_filter: false,
             charts: model
                 .sheets
                 .iter()
@@ -6574,6 +7644,8 @@ impl WorkbookAuthority {
             baseline_merges,
             shared_types,
         };
+        self.plain_style_cells
+            .store(plain_style_cells, Ordering::Relaxed);
         self.projection_valid.store(true, Ordering::Relaxed);
         Ok((model, structure))
     }
@@ -6632,7 +7704,7 @@ fn materialize_sheet_oracle<T: ReadTxn>(
         MAX_ROWS,
         "row height",
     )?;
-    if version < SCHEMA_VERSION {
+    if version < CHARTS_SCHEMA_VERSION {
         for (&at, &size) in &fallbacks.hidden_dimensions.col_widths {
             sheet.col_widths.entry(at).or_insert(size);
         }
@@ -6645,6 +7717,7 @@ fn materialize_sheet_oracle<T: ReadTxn>(
     sheet.row_styles = fallbacks.row_styles.clone();
     materialize_style_defaults(&mut sheet, sheet_map, txn)?;
     sheet.freeze_pane = match (version, sheet_map.get(txn, FREEZE_PANE)) {
+        (CHARTS_SCHEMA_VERSION.., None) => fallbacks.freeze_pane,
         (FREEZE_PANE_SCHEMA_VERSION.., Some(Out::Any(value))) => freeze_pane_from_any(&value)?,
         (FREEZE_PANE_SCHEMA_VERSION.., _) => {
             return Err("sheet is missing freeze pane".to_string());
@@ -6663,18 +7736,10 @@ fn materialize_sheet_oracle<T: ReadTxn>(
         }
         _ => fallbacks.hyperlinks.to_vec(),
     };
-    sheet.auto_filter = match sheet_map.get(txn, AUTO_FILTER) {
-        Some(Out::Any(Any::String(json))) => serde_json::from_str(&json)
-            .map_err(|error| format!("sheet auto filter is invalid: {error}"))?,
-        Some(_) => return Err("sheet auto filter is not a string".to_string()),
-        None => fallbacks.auto_filter.cloned(),
-    };
-    sheet.conditional_formats = match sheet_map.get(txn, CONDITIONAL_FORMATS) {
-        Some(Out::Any(Any::String(json))) => serde_json::from_str(&json)
-            .map_err(|error| format!("sheet conditional formats are invalid: {error}"))?,
-        Some(_) => return Err("sheet conditional formats are not a string".to_string()),
-        None => fallbacks.conditional_formats.to_vec(),
-    };
+    sheet.auto_filter = stored_auto_filter(sheet_map, txn, fallbacks.auto_filter)?;
+    sheet.conditional_formats = RuleOverlay::read(sheet_map, txn)?.apply(
+        baseline_conditional_formats(sheet_map, txn, fallbacks.conditional_formats)?,
+    )?;
     sheet.charts = match (version, sheet_map.get(txn, CHARTS)) {
         (CHARTS_SCHEMA_VERSION.., Some(Out::Any(Any::String(json)))) => decode_charts(&json)?,
         (CHARTS_SCHEMA_VERSION.., Some(_)) => {
@@ -6741,12 +7806,12 @@ fn fingerprint_model_with_row_styles_oracle(
 fn fingerprint_model_current_oracle(model: &WorkbookModel) -> Result<(String, u64), String> {
     fingerprint_model_with_row_domain_oracle(
         model,
-        SCHEMA_VERSION,
+        FINGERPRINT_SCHEMA_VERSION,
         true,
         true,
         has_style_defaults(model),
         fingerprint_domain(
-            SCHEMA_VERSION,
+            FINGERPRINT_SCHEMA_VERSION,
             FingerprintReading::of(true, !released_styles(&model.styles))
                 .with_defaults(has_style_defaults(model)),
         ),
@@ -7195,7 +8260,15 @@ mod tests {
             .unwrap();
         assert!(sheet.get(&txn, CONDITIONAL_FORMATS).is_some());
         model.sheets[0].conditional_formats.clear();
-        sync_sheet(&sheet, &mut txn, &model.sheets[0], &model.styles).unwrap();
+        sync_sheet(
+            &sheet,
+            &mut txn,
+            &model.sheets[0],
+            &model.sheets[0].name,
+            &model.styles,
+            false,
+        )
+        .unwrap();
         assert!(
             matches!(sheet.get(&txn, CONDITIONAL_FORMATS), Some(Out::Any(Any::String(value))) if value.as_ref() == "[]")
         );
@@ -7230,6 +8303,7 @@ mod tests {
             105,
             0,
             true,
+            false,
         )
         .unwrap();
         assert_eq!(recovered.materialize().unwrap(), model);
@@ -7464,7 +8538,7 @@ mod tests {
         let expected = WorkbookBase::from_model(&released).unwrap();
         assert_ne!(actual.fingerprint, expected.fingerprint);
         assert_ne!(actual.bootstrap_client_id, expected.bootstrap_client_id);
-        let current = &actual.fingerprints[&SCHEMA_VERSION];
+        let current = &actual.fingerprints[&FINGERPRINT_SCHEMA_VERSION];
         assert!(current.contains(&actual.fingerprint));
         assert_eq!(
             released_readings(&actual.fingerprints),
@@ -7636,7 +8710,7 @@ mod tests {
         assert_eq!(actual.fingerprint, expected.fingerprint);
         let (current, _) = fingerprint_model_current_oracle(&model).unwrap();
         assert_eq!(actual.fingerprint, current);
-        for version in MIN_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION {
+        for version in MIN_SUPPORTED_SCHEMA_VERSION..=FINGERPRINT_SCHEMA_VERSION {
             for reading in [&before_facets, &held_back] {
                 let (fingerprint, _) = fingerprint_model_for_schema(reading, version).unwrap();
                 assert!(
@@ -7905,6 +8979,207 @@ mod tests {
     }
 
     #[test]
+    fn range_format_unknown_plain_count_requires_materialization() {
+        let model = rich_model();
+        let mut fast = WorkbookAuthority::from_model_with_client_id(&model, 73).unwrap();
+        let mut oracle = WorkbookAuthority::from_model_with_client_id(&model, 73).unwrap();
+        fast.plain_style_cells.store(u64::MAX, Ordering::Relaxed);
+        let count = fast_set_cell_count();
+        let op = Op::SetCell {
+            sheet: SheetId(0),
+            at: CellRef::new(1, 2),
+            cell: CellState {
+                value: CellValue::Number { value: 1.0 },
+                ..CellState::default()
+            },
+        };
+        let update = fast
+            .apply_ops(std::slice::from_ref(&op), SyncOrigin::User, &model.styles)
+            .unwrap();
+        let expected =
+            with_full_materialization(|| oracle.apply_ops(&[op], SyncOrigin::User, &model.styles))
+                .unwrap();
+        assert_eq!(update, expected);
+        assert_eq!(fast_set_cell_count(), count);
+        assert_ne!(fast.plain_style_cells.load(Ordering::Relaxed), u64::MAX);
+        assert_eq!(
+            fast.plain_style_cells.load(Ordering::Relaxed),
+            oracle.plain_style_cells.load(Ordering::Relaxed)
+        );
+        assert_eq!(
+            fast.encode_state_as_update_v1(),
+            oracle.encode_state_as_update_v1()
+        );
+        let op = Op::SetCell {
+            sheet: SheetId(0),
+            at: CellRef::new(1, 2),
+            cell: CellState {
+                value: CellValue::Number { value: 2.0 },
+                ..CellState::default()
+            },
+        };
+        assert_singleton_lockstep(
+            &mut fast,
+            &mut oracle,
+            &[op],
+            SyncOrigin::User,
+            &model.styles,
+        )
+        .unwrap();
+        assert_eq!(fast_set_cell_count(), count + 1);
+    }
+
+    #[test]
+    fn range_format_snapshot_projection_restores_plain_style_count() {
+        let mut model = rich_model();
+        model.styles.fonts.push(xlsx_model::Font {
+            bold: true,
+            ..xlsx_model::Font::default()
+        });
+        model.styles.cell_xfs[0].font = Some(0);
+        let mut source = WorkbookAuthority::from_model_with_client_id(&model, 73).unwrap();
+        let plain = cell_format_entry(&CellFormat::default()).unwrap().0;
+        {
+            let mut txn = source.doc.transact_mut();
+            let sheet = txn
+                .get_map(SHEETS)
+                .unwrap()
+                .get(&txn, "sheet:0")
+                .unwrap()
+                .cast::<MapRef>()
+                .unwrap();
+            let styles = nested_map(&sheet, &txn, STYLES).unwrap();
+            styles.insert(&mut txn, "0:0", plain.clone());
+            styles.insert(&mut txn, "9:9", plain);
+        }
+        source.materialize().unwrap();
+        assert_eq!(source.plain_style_cells.load(Ordering::Relaxed), 2);
+        let doc = Doc::with_client_id(source.client_id());
+        hydrate_local_doc(&doc, &source.encode_state_as_update_v1()).unwrap();
+        let mut restored = WorkbookAuthority::hydrated(doc, source.base.clone(), 0);
+        let materializations = full_materializations();
+        let hydrations = local_hydrations();
+        restored.set_snapshot_projection_valid(true);
+        assert_eq!(restored.plain_style_cells.load(Ordering::Relaxed), 2);
+        assert_eq!(full_materializations(), materializations);
+        assert_eq!(local_hydrations(), hydrations);
+        let count = fast_set_cell_count();
+        assert_singleton_lockstep(
+            &mut restored,
+            &mut source,
+            &[Op::SetCell {
+                sheet: SheetId(0),
+                at: CellRef::new(0, 2),
+                cell: CellState {
+                    value: CellValue::Number { value: 1.0 },
+                    ..CellState::default()
+                },
+            }],
+            SyncOrigin::User,
+            &model.styles,
+        )
+        .unwrap();
+        assert_eq!(fast_set_cell_count(), count + 1);
+    }
+
+    #[test]
+    fn range_format_sync_preserves_synthesized_plain_formats() {
+        let mut model = rich_model();
+        model.styles.fonts.push(xlsx_model::Font {
+            bold: true,
+            ..xlsx_model::Font::default()
+        });
+        model.styles.cell_xfs[0].font = Some(0);
+        let mut fast = WorkbookAuthority::from_model_with_client_id(&model, 73).unwrap();
+        let mut oracle = WorkbookAuthority::from_model_with_client_id(&model, 73).unwrap();
+        let plain = cell_format_entry(&CellFormat::default()).unwrap().0;
+        for authority in [&fast, &oracle] {
+            let mut txn = authority.doc.transact_mut();
+            let sheets = txn.get_map(SHEETS).unwrap();
+            let sheet = sheets
+                .get(&txn, "sheet:0")
+                .unwrap()
+                .cast::<MapRef>()
+                .unwrap();
+            let styles = nested_map(&sheet, &txn, STYLES).unwrap();
+            styles.insert(&mut txn, "9:9", plain.clone());
+            styles.insert(&mut txn, "0:0", plain.clone());
+        }
+        fast.materialize().unwrap();
+        oracle.materialize().unwrap();
+        let count = fast_range_format_count();
+        for op in [
+            Op::SetRangeNumberFormat {
+                sheet: SheetId(0),
+                range: CellRange::parse_a1("B2:C3").unwrap(),
+                format: xlsx_ops::NumberFormatMutation::Currency,
+            },
+            Op::PatchRangeStyle {
+                sheet: SheetId(0),
+                range: CellRange::parse_a1("A1:C3").unwrap(),
+                patch: xlsx_ops::StylePatch {
+                    bold: Some(false),
+                    ..xlsx_ops::StylePatch::default()
+                },
+            },
+            Op::SetRangeNumberFormat {
+                sheet: SheetId(0),
+                range: CellRange::parse_a1("A1:J10").unwrap(),
+                format: xlsx_ops::NumberFormatMutation::Automatic,
+            },
+        ] {
+            let ops = [op];
+            let prepared = fast
+                .prepare_range_format_sync(&ops, SyncOrigin::User)
+                .unwrap();
+            let update = fast
+                .commit_range_format_sync(prepared, LocalHistory::SheetOrder)
+                .unwrap();
+            let staged = with_full_materialization(|| {
+                oracle.stage_standalone_ops_v1(&ops, SyncOrigin::User, &model.styles, None)
+            })
+            .unwrap();
+            let expected = oracle
+                .adopt_local_update(staged, LocalHistory::SheetOrder)
+                .unwrap();
+            assert_eq!(update, expected);
+            assert_eq!(
+                fast.encode_state_as_update_v1(),
+                oracle.encode_state_as_update_v1()
+            );
+            assert!(fast.projection_valid.load(Ordering::Relaxed));
+            assert!(!oracle.projection_valid.load(Ordering::Relaxed));
+            oracle.materialize().unwrap();
+            assert_eq!(
+                fast.plain_style_cells.load(Ordering::Relaxed),
+                oracle.plain_style_cells.load(Ordering::Relaxed)
+            );
+            let followup = Op::SetCell {
+                sheet: SheetId(0),
+                at: CellRef::new(11, 10),
+                cell: CellState {
+                    value: CellValue::Number {
+                        value: fast.history.undo.len() as f64,
+                    },
+                    ..CellState::default()
+                },
+            };
+            assert_singleton_lockstep(
+                &mut fast,
+                &mut oracle,
+                &[followup],
+                SyncOrigin::User,
+                &model.styles,
+            )
+            .unwrap();
+        }
+        assert_eq!(fast_range_format_count(), count + 3);
+        assert_eq!(fast.materialize().unwrap(), oracle.materialize().unwrap());
+        assert_eq!(fast.history.undo, oracle.history.undo);
+        assert_eq!(fast.history.redo, oracle.history.redo);
+    }
+
+    #[test]
     fn singleton_set_cell_legacy_schema_matches_full_materialization() {
         let model = rich_model();
         for version in MIN_SUPPORTED_SCHEMA_VERSION..SCHEMA_VERSION {
@@ -7996,7 +9271,7 @@ mod tests {
             xf: 1,
         }];
         let base = WorkbookBase::from_model(&model).unwrap();
-        for version in MIN_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION {
+        for version in MIN_SUPPORTED_SCHEMA_VERSION..=FINGERPRINT_SCHEMA_VERSION {
             let (pre_change, _) =
                 fingerprint_model_with_schema(&model, version, version >= 4, false).unwrap();
             assert!(
@@ -8005,9 +9280,10 @@ mod tests {
                  column styles were read"
             );
         }
-        let (current, _) = fingerprint_model_for_schema(&model, SCHEMA_VERSION).unwrap();
+        let (current, _) =
+            fingerprint_model_for_schema(&model, FINGERPRINT_SCHEMA_VERSION).unwrap();
         let (without, _) =
-            fingerprint_model_with_schema(&model, SCHEMA_VERSION, true, false).unwrap();
+            fingerprint_model_with_schema(&model, FINGERPRINT_SCHEMA_VERSION, true, false).unwrap();
         assert_ne!(
             current, without,
             "two workbooks differing only in their column styles must not share a fingerprint"
@@ -8015,9 +9291,10 @@ mod tests {
 
         let mut plain = rich_model();
         plain.sheets[0].col_styles.clear();
-        let (plain_current, _) = fingerprint_model_for_schema(&plain, SCHEMA_VERSION).unwrap();
+        let (plain_current, _) =
+            fingerprint_model_for_schema(&plain, FINGERPRINT_SCHEMA_VERSION).unwrap();
         let (plain_without, _) =
-            fingerprint_model_with_schema(&plain, SCHEMA_VERSION, true, false).unwrap();
+            fingerprint_model_with_schema(&plain, FINGERPRINT_SCHEMA_VERSION, true, false).unwrap();
         assert_eq!(
             plain_current, plain_without,
             "a workbook declaring no column style keeps the fingerprint it always had"
@@ -8036,7 +9313,7 @@ mod tests {
         let base = WorkbookBase::from_model(&model).unwrap();
         let mut columns_only = model.clone();
         columns_only.sheets[0].row_styles.clear();
-        for version in MIN_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION {
+        for version in MIN_SUPPORTED_SCHEMA_VERSION..=FINGERPRINT_SCHEMA_VERSION {
             let (released, _) = fingerprint_model_with_row_styles_oracle(
                 &columns_only,
                 version,
@@ -8053,7 +9330,7 @@ mod tests {
         let (current, _) = fingerprint_model_current_oracle(&model).unwrap();
         let (released, _) = fingerprint_model_with_row_styles_oracle(
             &columns_only,
-            SCHEMA_VERSION,
+            FINGERPRINT_SCHEMA_VERSION,
             true,
             true,
             false,
@@ -8078,10 +9355,15 @@ mod tests {
         rows.sheets[0].row_styles = BTreeMap::from([(4, 1)]);
         for model in [&columns, &rows] {
             let base = WorkbookBase::from_model(model).unwrap();
-            let (released, released_client) =
-                fingerprint_model_with_row_styles_oracle(model, SCHEMA_VERSION, true, true, false)
-                    .unwrap();
-            assert!(base.fingerprints[&SCHEMA_VERSION].contains(&released));
+            let (released, released_client) = fingerprint_model_with_row_styles_oracle(
+                model,
+                FINGERPRINT_SCHEMA_VERSION,
+                true,
+                true,
+                false,
+            )
+            .unwrap();
+            assert!(base.fingerprints[&FINGERPRINT_SCHEMA_VERSION].contains(&released));
             assert_ne!(
                 base.fingerprint, released,
                 "a state that may carry row and column defaults must not pass for a released one"
@@ -8090,13 +9372,18 @@ mod tests {
         }
         let plain = rich_model();
         let base = WorkbookBase::from_model(&plain).unwrap();
-        let (released, released_client) =
-            fingerprint_model_with_row_styles_oracle(&plain, SCHEMA_VERSION, true, true, false)
-                .unwrap();
+        let (released, released_client) = fingerprint_model_with_row_styles_oracle(
+            &plain,
+            FINGERPRINT_SCHEMA_VERSION,
+            true,
+            true,
+            false,
+        )
+        .unwrap();
         let (current, current_client) = fingerprint_model_current_oracle(&plain).unwrap();
         assert_eq!(base.fingerprint, current);
         assert_eq!(base.bootstrap_client_id, current_client);
-        assert!(base.fingerprints[&SCHEMA_VERSION].contains(&released));
+        assert!(base.fingerprints[&FINGERPRINT_SCHEMA_VERSION].contains(&released));
         assert_ne!(base.fingerprint, released);
         assert_ne!(base.bootstrap_client_id, released_client);
     }
@@ -8593,6 +9880,322 @@ mod tests {
     }
 
     #[test]
+    fn an_absent_freeze_pane_reads_as_the_source_pane() {
+        const { assert!(FREEZE_PANE_SCHEMA_VERSION < CHARTS_SCHEMA_VERSION) };
+
+        for pane in [
+            None,
+            Some(FreezePane::new(2, 1, CellRef::parse_a1("B3").unwrap())),
+        ] {
+            let mut sheet = Sheet::new("Data");
+            sheet.freeze_pane = pane;
+            let mut model = WorkbookModel::default();
+            model.sheets.push(sheet);
+            let authority = WorkbookAuthority::from_model_with_client_id(&model, 141).unwrap();
+            let (stored, _) = authority.strict_materialize().unwrap();
+            {
+                let mut txn = authority.doc.transact_mut_with("test:freeze-pane-gate");
+                let sheets = txn.get_map(SHEETS).unwrap();
+                let sheet = sheets
+                    .get(&txn, "sheet:0")
+                    .and_then(|value| value.cast::<MapRef>().ok())
+                    .unwrap();
+                sheet.remove(&mut txn, FREEZE_PANE);
+            }
+
+            let (projected, _) = authority
+                .strict_materialize()
+                .expect("an absent freeze pane must read as absent, not as a broken workbook");
+            assert_eq!(projected, stored);
+            assert_eq!(projected.sheets[0].freeze_pane, pane);
+            let (oracle, _) = authority.materialize_internal_oracle(true).unwrap();
+            assert_eq!(oracle, stored);
+            assert_eq!(
+                fingerprint_model_with_schema(&projected, SCHEMA_VERSION, true, true).unwrap(),
+                fingerprint_model_with_schema(&stored, SCHEMA_VERSION, true, true).unwrap(),
+            );
+
+            snapshot_validation::validate_for_test(&authority, projected.clone()).unwrap();
+            let mut elsewhere = projected;
+            elsewhere.sheets[0].freeze_pane =
+                Some(FreezePane::new(9, 0, CellRef::parse_a1("A10").unwrap()));
+            assert!(snapshot_validation::validate_for_test(&authority, elsewhere).is_err());
+        }
+    }
+
+    #[test]
+    fn a_stored_freeze_pane_must_match_the_snapshot_model() {
+        let mut model = WorkbookModel::default();
+        model.sheets.push(Sheet::new("Data"));
+        let authority = WorkbookAuthority::from_model_with_client_id(&model, 142).unwrap();
+        let stored = Some(FreezePane::new(2, 1, CellRef::parse_a1("B3").unwrap()));
+        {
+            let mut txn = authority.doc.transact_mut_with("test:freeze-pane-gate");
+            let sheets = txn.get_map(SHEETS).unwrap();
+            let sheet = sheets
+                .get(&txn, "sheet:0")
+                .and_then(|value| value.cast::<MapRef>().ok())
+                .unwrap();
+            sheet.try_update(&mut txn, FREEZE_PANE, freeze_pane_to_any(stored));
+        }
+        let (projected, _) = authority.strict_materialize().unwrap();
+        assert_eq!(projected.sheets[0].freeze_pane, stored);
+        snapshot_validation::validate_for_test(&authority, projected).unwrap();
+        assert!(snapshot_validation::validate_for_test(&authority, model).is_err());
+    }
+
+    #[test]
+    fn the_freeze_pane_is_required_before_the_chart_schema_only() {
+        for version in FREEZE_PANE_SCHEMA_VERSION..CHARTS_SCHEMA_VERSION {
+            assert!(sheet_schema_keys(version).contains(&FREEZE_PANE));
+            assert!(!sheet_schema_optional_keys(version).contains(&FREEZE_PANE));
+        }
+        for version in CHARTS_SCHEMA_VERSION..=SCHEMA_VERSION {
+            assert!(!sheet_schema_keys(version).contains(&FREEZE_PANE));
+            assert!(sheet_schema_optional_keys(version).contains(&FREEZE_PANE));
+        }
+    }
+
+    fn schema_six_replica(model: &WorkbookModel, base: &WorkbookBase) -> Doc {
+        let bootstrap = Doc::with_client_id(base.bootstrap_client_id);
+        let keys = (0..model.sheets.len())
+            .map(|index| format!("sheet:{index}"))
+            .collect::<Vec<_>>();
+        with_schema_six_seed(|| seed(&bootstrap, base, model, &keys).unwrap());
+        let replica = Doc::with_client_id(302);
+        let update = bootstrap
+            .transact()
+            .encode_state_as_update_v1(&StateVector::default());
+        hydrate_doc(&replica, &update).unwrap();
+        replica
+    }
+
+    fn doc_schema_version(doc: &Doc) -> i64 {
+        let txn = doc.transact();
+        txn.get_map(META)
+            .and_then(|meta| meta.get(&txn, "schemaVersion"))
+            .and_then(|value| value.cast::<i64>().ok())
+            .unwrap()
+    }
+
+    #[test]
+    fn a_schema_six_replica_receives_the_marker_in_its_first_exchange() {
+        let model = rich_model();
+        let current = WorkbookAuthority::from_model_with_client_id(&model, 301).unwrap();
+        let previous = schema_six_replica(&model, &current.base);
+        assert_eq!(doc_schema_version(&previous), 6);
+        assert_eq!(current.schema_version().unwrap(), SCHEMA_VERSION);
+        let known = previous.transact().state_vector();
+        let diff = current.doc.transact().encode_diff_v1(&known);
+        assert!(diff.len() < 64);
+        hydrate_doc(&previous, &diff).unwrap();
+        assert_eq!(doc_schema_version(&previous), SCHEMA_VERSION);
+        assert_eq!(
+            previous.transact().state_vector(),
+            current.doc.transact().state_vector()
+        );
+    }
+
+    #[test]
+    fn a_schema_six_room_upgrades_without_changing_the_workbook() {
+        let model = rich_model();
+        let current = WorkbookAuthority::from_model_with_client_id(&model, 301).unwrap();
+        let (before, _) = current.strict_materialize().unwrap();
+        let room = schema_six_replica(&model, &current.base);
+        let state = room
+            .transact()
+            .encode_state_as_update_v1(&StateVector::default());
+        let staged = current.stage_updates_v1(&[&state], None).unwrap();
+        assert_eq!(staged.model, before);
+        current
+            .apply_staged_update_v1(&staged.commit_update)
+            .unwrap();
+        assert_eq!(current.schema_version().unwrap(), SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn a_bootstrap_stays_pristine_through_its_own_marker_and_no_further() {
+        let model = rich_model();
+        let authority = WorkbookAuthority::from_model_with_client_id(&model, 301).unwrap();
+        assert!(authority.is_pristine());
+        let peer = WorkbookAuthority::from_model_with_client_id(&model, 303).unwrap();
+        let known = peer.doc.transact().state_vector();
+        let (contents, key) = {
+            let txn = peer.doc.transact();
+            let sheet = txn
+                .get_map(SHEETS)
+                .and_then(|sheets| sheets.get(&txn, "sheet:0"))
+                .and_then(|sheet| sheet.cast::<MapRef>().ok())
+                .unwrap();
+            let contents = nested_map(&sheet, &txn, CONTENTS).unwrap();
+            let key = contents.keys(&txn).next().unwrap().to_string();
+            (contents, key)
+        };
+        contents.remove(&mut peer.doc.transact_mut(), &key);
+        let deletion = peer.doc.transact().encode_diff_v1(&known);
+        authority.apply_staged_update_v1(&deletion).unwrap();
+        assert!(!authority.is_pristine());
+    }
+
+    #[test]
+    fn the_seed_deletes_exactly_the_version_at_the_clock_is_pristine_expects() {
+        let mut blank = WorkbookModel::default();
+        blank.sheets.push(Sheet::new("Blank"));
+        let mut several = rich_model();
+        several.sheets.push(Sheet::new("Third"));
+        several.sheets.push(Sheet::new("Fourth"));
+        for (label, model) in [
+            ("blank", blank),
+            ("rich", rich_model()),
+            ("several", several),
+        ] {
+            for chunk in [SEED_CHUNK, 1] {
+                let (authority, ..) = WorkbookAuthority::from_source_with_seed_chunk(
+                    &model,
+                    Some(301),
+                    &[],
+                    None,
+                    &[],
+                    chunk,
+                )
+                .unwrap();
+                assert!(authority.is_pristine(), "{label} chunk {chunk}");
+                let txn = authority.doc.transact();
+                let deleted = txn.snapshot().delete_set;
+                let catalog = txn.get_map(CELL_FORMATS).unwrap().len(&txn);
+                let client = ClientID::new(authority.base.bootstrap_client_id);
+                assert_eq!(deleted.len(), 1, "{label} chunk {chunk}");
+                let ranges = deleted
+                    .iter()
+                    .flat_map(|(_, ranges)| ranges.iter().cloned().collect::<Vec<_>>())
+                    .collect::<Vec<_>>();
+                assert_eq!(ranges.len(), 1, "{label} chunk {chunk}");
+                assert_eq!(ranges[0], catalog + 1..catalog + 2, "{label} chunk {chunk}");
+                assert!(deleted.contains(&ID::new(client, catalog + 1)));
+            }
+        }
+    }
+
+    fn appended(structure: &WorkbookStructure, key: &str, name: &str) -> WorkbookStructure {
+        let mut next = structure.clone();
+        next.sheet_keys.push(key.to_string());
+        next.sheet_names.push(name.to_string());
+        next.freeze_panes.push(None);
+        next.hyperlinks.push(Vec::new());
+        next.conditional_formats.push(Vec::new());
+        next.auto_filters.push(None);
+        next.charts.push(Vec::new());
+        next.merges.push(Vec::new());
+        next.baseline_hyperlinks.insert(key.to_string(), Vec::new());
+        next.baseline_merges.insert(key.to_string(), Vec::new());
+        next.baseline_conditional_formats
+            .insert(key.to_string(), Vec::new());
+        next
+    }
+
+    #[test]
+    fn the_transition_policy_frees_only_the_appended_tail() {
+        let mut model = WorkbookModel::default();
+        model.sheets.push(Sheet::new("First"));
+        model.sheets.push(Sheet::new("Second"));
+        let authority = WorkbookAuthority::from_model_with_client_id(&model, 301).unwrap();
+        let (_, frozen) = authority.strict_materialize().unwrap();
+        assert!(frozen.allows_transition(&frozen));
+
+        let one = appended(&frozen, "replica:7:0", "Third");
+        let two = appended(&one, "replica:8:0", "Fourth");
+        assert!(frozen.allows_transition(&one));
+        assert!(one.allows_transition(&frozen));
+        assert!(one.allows_transition(&two));
+        assert!(two.allows_transition(&one));
+
+        let mut crossed = two.clone();
+        crossed.sheet_keys.swap(2, 3);
+        crossed.sheet_names.swap(2, 3);
+        assert!(!two.allows_transition(&crossed));
+
+        let mut bumped = one.clone();
+        bumped.generation += 1;
+        assert!(!frozen.allows_transition(&bumped));
+
+        let mut renamed = one.clone();
+        renamed.sheet_names[2] = "Elsewhere".to_string();
+        assert!(!one.allows_transition(&renamed));
+        let mut renamed = one.clone();
+        renamed.sheet_names[0] = "Elsewhere".to_string();
+        assert!(!one.allows_transition(&renamed));
+
+        let mut early = frozen.clone();
+        early.sheet_keys.insert(0, "replica:7:0".to_string());
+        early.sheet_names.insert(0, "Zeroth".to_string());
+        early.conditional_formats.insert(0, Vec::new());
+        early.auto_filters.insert(0, None);
+        early.charts.insert(0, Vec::new());
+        assert!(!frozen.allows_transition(&early));
+
+        let mut removed = frozen.clone();
+        removed.sheet_keys.pop();
+        removed.sheet_names.pop();
+        removed.conditional_formats.pop();
+        removed.auto_filters.pop();
+        removed.charts.pop();
+        assert!(!frozen.allows_transition(&removed));
+
+        let mut filtered = one.clone();
+        filtered.conditional_formats[0] = vec![ConditionalFormatting::default()];
+        filtered.conditional_formats[2] = vec![ConditionalFormatting::default()];
+        filtered.auto_filters[0] = Some(xlsx_model::AutoFilter {
+            range: CellRange::parse_a1("A1:B2").unwrap(),
+            raw_xml: None,
+            source_count: 1,
+            filter_columns: Vec::new(),
+            has_sort_state: false,
+        });
+        filtered.auto_filters[2] = filtered.auto_filters[0].clone();
+        assert!(frozen.allows_transition(&filtered));
+        assert!(filtered.allows_transition(&frozen));
+
+        for key in ["sheet:0", "replica:7:0"] {
+            let mut folded = one.clone();
+            folded
+                .baseline_conditional_formats
+                .insert(key.to_string(), vec![ConditionalFormatting::default()]);
+            assert!(!one.allows_transition(&folded), "{key}");
+            assert!(!folded.describes_same_workbook(&one), "{key}");
+        }
+        let mut dormant = frozen.clone();
+        dormant.baseline_conditional_formats.insert(
+            "replica:9:0".to_string(),
+            vec![ConditionalFormatting::default()],
+        );
+        assert!(!frozen.allows_transition(&dormant));
+
+        let mut baseline = one.clone();
+        baseline.baseline_merges.insert(
+            "sheet:0".to_string(),
+            vec![CellRange::parse_a1("A1:B2").unwrap()],
+        );
+        assert!(!one.allows_transition(&baseline));
+    }
+
+    #[test]
+    fn a_projected_sheet_name_stays_valid_and_unique() {
+        let mut sheets = ["Sheet4", "sheet4", "Sheet4 (2)", "Other", "SHEET4"]
+            .map(Sheet::new)
+            .to_vec();
+        project_unique_sheet_names(&mut sheets);
+        assert_eq!(
+            sheets.iter().map(|sheet| &sheet.name).collect::<Vec<_>>(),
+            ["Sheet4", "sheet4 (3)", "Sheet4 (2)", "Other", "SHEET4 (4)"]
+        );
+        let long = "x".repeat(MAX_SHEET_NAME_CHARS);
+        let mut sheets = vec![Sheet::new(long.clone()), Sheet::new(long)];
+        project_unique_sheet_names(&mut sheets);
+        assert_eq!(sheets[1].name, format!("{} (2)", "x".repeat(27)));
+        assert_eq!(sheets[1].name.chars().count(), MAX_SHEET_NAME_CHARS);
+    }
+
+    #[test]
     fn unknown_schema_version_reports_supported_range() {
         let model = rich_model();
         let authority = WorkbookAuthority::from_model_with_client_id(&model, 110).unwrap();
@@ -8606,7 +10209,7 @@ mod tests {
         };
         assert_eq!(
             error,
-            "unsupported schema version 7; supported versions are 3 through 6"
+            "unsupported schema version 8; supported versions are 3 through 7"
         );
     }
 
@@ -8731,7 +10334,7 @@ mod tests {
             let mut authority = WorkbookAuthority::from_model_with_client_id(&model, 119).unwrap();
             let mut oracle =
                 WorkbookAuthority::from_source_oracle(&model, Some(119), &[], None, &[]).unwrap();
-            assert_eq!(authority.schema_version().unwrap(), 6);
+            assert_eq!(authority.schema_version().unwrap(), SCHEMA_VERSION);
             assert_eq!(authority.base.fingerprint, oracle.base.fingerprint);
             assert_eq!(
                 authority.base.bootstrap_client_id,
@@ -8747,7 +10350,7 @@ mod tests {
                 panic!("schema six snapshot refused")
             };
             assert_eq!(resumed.encode_state_as_update_v1(), state);
-            assert_eq!(resumed.schema_version().unwrap(), 6);
+            assert_eq!(resumed.schema_version().unwrap(), SCHEMA_VERSION);
             let ops = [Op::SetCell {
                 sheet: SheetId(0),
                 at: CellRef::new(20, 0),
@@ -8782,7 +10385,7 @@ mod tests {
                             .all(|key| !key.starts_with("merge:") && key != "mergeEdits")
                     );
                 }
-                assert_eq!(current.schema_version().unwrap(), 6);
+                assert_eq!(current.schema_version().unwrap(), SCHEMA_VERSION);
             }
             assert_eq!(
                 authority.encode_state_as_update_v1(),
@@ -9297,7 +10900,7 @@ mod tests {
             let mut authority = WorkbookAuthority::from_model_with_client_id(&model, 229).unwrap();
             let mut oracle =
                 WorkbookAuthority::from_source_oracle(&model, Some(229), &[], None, &[]).unwrap();
-            assert_eq!(authority.schema_version().unwrap(), 6);
+            assert_eq!(authority.schema_version().unwrap(), SCHEMA_VERSION);
             assert_eq!(authority.base.fingerprint, oracle.base.fingerprint);
             assert_eq!(
                 authority.base.bootstrap_client_id,
@@ -9313,7 +10916,7 @@ mod tests {
                 panic!("schema six snapshot refused")
             };
             assert_eq!(resumed.encode_state_as_update_v1(), state);
-            assert_eq!(resumed.schema_version().unwrap(), 6);
+            assert_eq!(resumed.schema_version().unwrap(), SCHEMA_VERSION);
             let ops = [Op::SetCell {
                 sheet: SheetId(0),
                 at: CellRef::new(20, 0),
@@ -9348,7 +10951,7 @@ mod tests {
                             .all(|key| !key.starts_with("hyperlink:") && key != "hyperlinkEdits")
                     );
                 }
-                assert_eq!(current.schema_version().unwrap(), 6);
+                assert_eq!(current.schema_version().unwrap(), SCHEMA_VERSION);
             }
             assert_eq!(
                 authority.encode_state_as_update_v1(),
@@ -9429,7 +11032,7 @@ mod tests {
 
     #[test]
     fn legacy_snapshots_refuse_hyperlink_keys_in_both_validators() {
-        for version in MIN_SUPPORTED_SCHEMA_VERSION..SCHEMA_VERSION {
+        for version in MIN_SUPPORTED_SCHEMA_VERSION..CHARTS_SCHEMA_VERSION {
             let mut model = WorkbookModel::default();
             model.sheets.push(Sheet::new("Data"));
             let source = WorkbookAuthority::from_model_with_client_id(&model, 261).unwrap();
@@ -10066,7 +11669,7 @@ mod tests {
         let staged = target
             .stage_updates_v1(&[&source.encode_diff_v1(&vector).unwrap()], None)
             .unwrap();
-        assert!(!staged.structure.same_except_local_layout(&frozen));
+        assert!(!frozen.allows_transition(&staged.structure));
         assert_eq!(target.materialize().unwrap(), model);
     }
 
@@ -10313,7 +11916,7 @@ mod tests {
         let staged = target
             .stage_updates_v1(&[&source.encode_diff_v1(&vector).unwrap()], None)
             .unwrap();
-        assert!(!staged.structure.same_except_local_layout(&frozen));
+        assert!(!frozen.allows_transition(&staged.structure));
         assert_eq!(target.materialize().unwrap(), model);
     }
 
@@ -10618,6 +12221,88 @@ mod tests {
         let _ = merged;
     }
 
+    /// One drawing anchor held by two sheets reads as the first sheet's value,
+    /// so a model carries projections of what later sheets store. Moving another
+    /// frame must keep the stored value, or the projection turns into a write.
+    #[test]
+    fn collaborative_chart_move_keeps_a_projected_anchor_out_of_the_store() {
+        let mut shared = sliding_chart("Report");
+        let mut second = shared.charts[0].clone();
+        second.anchor_index = 1;
+        shared.charts.push(second);
+        let mut model = WorkbookModel::default();
+        model.sheets.push(shared.clone());
+        shared.name = "Mirror".to_owned();
+        model.sheets.push(shared);
+        let mut authority = WorkbookAuthority::from_model_with_client_id(&model, 71).unwrap();
+        let frozen = authority.structure().unwrap();
+
+        let stored_charts = |authority: &WorkbookAuthority, key: &str| {
+            let txn = authority.doc.transact();
+            let sheet = txn
+                .get_map(SHEETS)
+                .unwrap()
+                .get(&txn, key)
+                .and_then(|value| value.cast::<MapRef>().ok())
+                .unwrap();
+            match sheet.get(&txn, CHARTS) {
+                Some(Out::Any(Any::String(json))) => decode_charts(&json).unwrap(),
+                other => panic!("sheet {key} has no chart state: {other:?}"),
+            }
+        };
+
+        let mut hidden = stored_charts(&authority, "sheet:1");
+        hidden[0].anchor = slid_anchor(3);
+        let peer = Doc::with_client_id(72);
+        hydrate_doc(&peer, &authority.encode_state_as_update_v1()).unwrap();
+        let before = peer.transact().state_vector();
+        {
+            let mut txn = peer.transact_mut_with("test:peer-charts");
+            let sheets = txn.get_map(SHEETS).unwrap();
+            let sheet = sheets
+                .get(&txn, "sheet:1")
+                .and_then(|value| value.cast::<MapRef>().ok())
+                .unwrap();
+            sheet.try_update(&mut txn, CHARTS, serde_json::to_string(&hidden).unwrap());
+        }
+        let update = peer.transact().encode_diff_v1(&before);
+        let staged = authority.stage_updates_v1(&[&update], None).unwrap();
+        assert_eq!(staged.structure, frozen);
+        authority
+            .apply_staged_update_v1(&staged.commit_update)
+            .unwrap();
+        let projected = authority.materialize().unwrap();
+        assert_eq!(
+            projected.sheets[1].charts[0].anchor, projected.sheets[0].charts[0].anchor,
+            "the first sheet decides what a shared frame shows"
+        );
+        assert_ne!(projected.sheets[1].charts[0].anchor, slid_anchor(3));
+
+        let frame = projected.sheets[0].charts[1].frame_id();
+        let from = projected.sheets[0].charts[1].anchor;
+        let ops = [SheetId(0), SheetId(1)].map(|sheet| Op::SetChartAnchor {
+            sheet,
+            frame: frame.clone(),
+            part: "xl/charts/chart1.xml".to_owned(),
+            from,
+            to: slid_anchor(5),
+        });
+        let local = authority
+            .stage_local_ops_v1(&ops, SyncOrigin::User, &Stylesheet::default())
+            .unwrap();
+        authority
+            .apply_local_update_v1(&local.update, SyncOrigin::User)
+            .unwrap();
+
+        let stored = stored_charts(&authority, "sheet:1");
+        assert_eq!(stored[0].anchor, slid_anchor(3));
+        assert_eq!(stored[1].anchor, slid_anchor(5));
+        assert_eq!(
+            stored_charts(&authority, "sheet:0")[1].anchor,
+            slid_anchor(5)
+        );
+    }
+
     fn tall_sheet(name: &str, rows: u32) -> Sheet {
         let mut sheet = Sheet::new(name);
         for row in 0..rows {
@@ -10687,18 +12372,24 @@ mod tests {
             }
             let meta = txn.get_or_insert_map(META);
             meta.insert(&mut txn, BASE_FINGERPRINT, base.fingerprint.as_str());
-            meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION);
+            meta.insert(&mut txn, "schemaVersion", SEED_SCHEMA_VERSION);
             meta.insert(&mut txn, STRUCTURE_GENERATION, 0_i64);
             let order = txn.get_or_insert_array(SHEET_ORDER);
             order.insert_range(&mut txn, 0, keys.iter().cloned());
             let sheets = txn.get_or_insert_map(SHEETS);
             for (key, sheet) in keys.iter().zip(&model.sheets) {
                 let sheet_map = sheets.insert(&mut txn, key.as_str(), MapPrelim::default());
-                sync_sheet_with_style_key(&sheet_map, &mut txn, sheet, |style| {
-                    Ok(style_keys[style as usize].clone())
-                })
+                sync_sheet_with_style_key(
+                    &sheet_map,
+                    &mut txn,
+                    sheet,
+                    &sheet.name,
+                    false,
+                    |style| Ok(style_keys[style as usize].clone()),
+                )
                 .unwrap();
             }
+            meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION);
         }
         doc.transact()
             .encode_state_as_update_v1(&StateVector::default())

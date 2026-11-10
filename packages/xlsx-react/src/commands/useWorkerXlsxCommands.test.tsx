@@ -600,7 +600,8 @@ describe('worker XLSX commands', () => {
     expect(await store.execute('merge', { value: 'all' })).toMatchObject({ ok: false, failure: { code: 'multiple-cells-required' } });
     view.selection = { anchor: { row: 0, col: 0 }, focus: { row: 2, col: 1 } };
     state.collaborative = true;
-    expect(await store.execute('merge', { value: 'all' })).toMatchObject({ ok: false, failure: { code: 'collaboration-unsupported' } });
+    expect(await store.execute('merge', { value: 'all' })).toMatchObject({ ok: true });
+    expect(edits.applyOps).toHaveBeenCalledTimes(1);
     state.collaborative = false;
     expect(await store.execute('fontSize', { points: 0 })).toMatchObject({ ok: false, failure: { code: 'invalid-arguments' } });
     state.canUndo = false;

@@ -1,5 +1,7 @@
 /** Text and IME input surface backed by sticky session positions. */
 
+import { isKeyReleasedFromInput, takeClipboardGesture } from '../../../../../shared/keyboard/nativeGesture';
+import type { DocxClipboardFragment } from '@betteroffice/docx/yrs';
 import React, {
   forwardRef,
   memo,
@@ -14,6 +16,7 @@ import type { CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import {
   applyClipboardFragment,
+  clipboardFragmentIsTextOnly,
   sameYrsSelection,
   tableBoundaryDeleteTarget,
   type YrsAuthor,
@@ -57,6 +60,7 @@ import {
 import { useTranslation } from '../../i18n';
 
 const READER_SCROLL = ['wheel', 'touchmove'] as const;
+const READER_SCROLL_KEYS = new Set(['PageDown', 'PageUp', ' ', 'ArrowDown', 'ArrowUp', 'Home', 'End']);
 
 export interface YrsDisplaySelection {
   anchor: number;
@@ -92,6 +96,10 @@ export interface YrsInputRef {
   storedFormatting(): YrsStoredFormatting | null;
   insertText(text: string): void;
   deleteSelection(): void;
+  /** Pastes `fragment` when the target can take it, else `plain`. */
+  pasteContent?(plain: string, fragment: DocxClipboardFragment | null): void;
+  /** Writes the selection to the clipboard through the input's own copy path. */
+  copySelection?(cut: boolean): boolean;
   selectAll(): void;
   /** The selection's plain text, for an input whose document lives in the worker. */
   readSelectedText?(): Promise<string> | null;
@@ -115,10 +123,13 @@ export interface YrsStoredFormatting {
 }
 
 export interface YrsInputProps {
+  id?: string;
   enabled: boolean;
   readOnly: boolean;
   holdInput?: boolean;
   inputScope?: number;
+  /** Theme slot to hex, which a copy resolves theme colours with. */
+  themeColors?: Readonly<Record<string, string>>;
   replicaReadyRef?: React.RefObject<boolean>;
   /** Advances on input that supersedes input still waiting for the replica. */
   inputEpoch?: () => number;
@@ -290,9 +301,11 @@ function isBodyFlowStory(story: string): boolean {
 
 const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInput(
   {
+    id,
     enabled,
     readOnly,
     holdInput = false,
+    themeColors,
     inputScope,
     replicaReadyRef,
     inputEpoch,
@@ -418,6 +431,32 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   // remote insert above the caret while sticky locs do not, so comparing locs is
   // what keeps a viewer's viewport still during someone else's edit.
   const lastCaretScrollSelectionRef = useRef<YrsSelection | null | undefined>(undefined);
+  const scrolledBeforeFirstCaretRef = useRef(false);
+  const viewMovedBeforeFirstCaretRef = useRef(false);
+  const defaultCaretRef = useRef<YrsSelection | null>(null);
+  useLayoutEffect(() => {
+    const inside = (target: EventTarget | null) => {
+      const host = canvasHostRef?.current;
+      return !!host && target instanceof Node && (target.contains(host) || host.contains(target));
+    };
+    const onIntent = (event: Event) => {
+      if (event.type === 'keydown' && !READER_SCROLL_KEYS.has((event as KeyboardEvent).key)) return;
+      if (event.type === 'keydown' && event.target instanceof HTMLTextAreaElement) return;
+      if (inside(event.target) || event.target === document.body || event.target === document.documentElement) {
+        scrolledBeforeFirstCaretRef.current = true;
+      }
+    };
+    const onScroll = (event: Event) => {
+      if (inside(event.target)) viewMovedBeforeFirstCaretRef.current = true;
+    };
+    const types = [...READER_SCROLL, 'pointerdown', 'keydown'] as const;
+    for (const type of types) document.addEventListener(type, onIntent, { capture: true, passive: true });
+    document.addEventListener('scroll', onScroll, { capture: true, passive: true });
+    return () => {
+      for (const type of types) document.removeEventListener(type, onIntent, true);
+      document.removeEventListener('scroll', onScroll, true);
+    };
+  }, [canvasHostRef]);
   // A selection the input shows without scrolling to it: a default caret, a replayed gesture.
   const quietSelectionRef = useRef<YrsSelection | null>(null);
   displayListQueriesRef.current = displayListQueries;
@@ -572,6 +611,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   );
 
   const advanceInteractionEpoch = useCallback((): void => {
+    defaultCaretRef.current = null;
     inputOperationQueueRef.current?.advanceInteractionEpoch();
   }, []);
 
@@ -612,6 +652,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     if (!first) return null;
     const loc = { story, paraId: first.paraId, offset: 0 };
     session.setSelection(loc);
+    defaultCaretRef.current = { anchor: loc, head: loc };
     return { anchor: loc, head: loc };
   }, [inputPositionMap, readSelection, session, story]);
 
@@ -650,6 +691,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   const setSelection = useCallback(
     (anchor: YrsLoc, head: YrsLoc = anchor, emit = true): void => {
       if (!session) return;
+      defaultCaretRef.current = null;
       session.setSelection(anchor, head);
       if (emit) {
         if (!readOnly) requestLocalCaretReveal();
@@ -666,6 +708,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       residentCaretReady = false,
       dirtyStories?: string | readonly string[]
     ): void => {
+      defaultCaretRef.current = null;
       verticalCaretGoalRef.current.reset();
       if (residentLayoutReady) requestLocalCaretReveal();
       if (!composingRef.current && textareaRef.current) textareaRef.current.value = '';
@@ -1285,6 +1328,14 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     });
   }, [enqueueInputOperation, ensureSelection, holdOperation, inputPositionMap, readOnly, session, setSelection, story]);
 
+  const hasTextRange = useCallback((): boolean => {
+    const current = ensureSelection();
+    const map = current ? inputPositionMap(current.anchor.story) : null;
+    if (!current || !map) return false;
+    const range = toRange(current, map);
+    return range.start.paraId !== range.end.paraId || range.start.offset !== range.end.offset;
+  }, [ensureSelection, inputPositionMap]);
+
   const deleteSelection = useCallback(
     (queued = false, cut?: CutCopy): void => {
       if (holdOperation({ kind: 'delete-selection', cut })) return;
@@ -1556,11 +1607,12 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     const result: CutCopy = { written: false };
     const copied = session;
     let written: Promise<void>;
-    const hasFragment = !session.isDisplayOnly() && !!yrsClipboardSlice(session).fragment;
+    const hasFragment = !session.isDisplayOnly() && !!yrsClipboardSlice(session, themeColors).fragment;
     const slice = new Promise<ReturnType<typeof yrsClipboardSlice>>((resolve, reject) => {
       const apply = (source: YrsSession): void | Promise<void> => {
         try {
-          const captured = yrsClipboardSlice(source);
+          if (cut && source.cellSelection()) throw new Error('A cut over table cells is unavailable');
+          const captured = yrsClipboardSlice(source, themeColors);
           if (captured.text) resolve(captured);
           else reject(new Error('Nothing is selected to copy'));
         } catch (error) {
@@ -1589,7 +1641,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       : text.then((blob) => blob.text()).then((value) => clipboard.writeText(value));
     written = write.then(() => { result.written = true; }, () => {});
     return result;
-  }, [enqueueInputOperation, holdInput, holdOperation, readOnly, replicaReadyRef, session]);
+  }, [enqueueInputOperation, holdInput, holdOperation, readOnly, replicaReadyRef, session, themeColors]);
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>): void => {
@@ -1597,6 +1649,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         discardedCompositionRef.current = false;
       }
       if (event.nativeEvent.isComposing || composingRef.current) return;
+      if (isKeyReleasedFromInput(event.nativeEvent)) return;
       const mod = event.metaKey || event.ctrlKey;
       const key = event.key.toLowerCase();
       if (mod && key === 'a') {
@@ -1605,6 +1658,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       } else if (mod && key === 'c' && !event.shiftKey && !event.altKey) {
         if (copyAfterReplica()) event.preventDefault();
         else primeCopy();
+      } else if (mod && key === 'x' && !event.shiftKey && !event.altKey) {
+        if (!readOnly) primeCopy();
       } else if (event.key === 'Enter') {
         event.preventDefault();
         splitParagraph();
@@ -1727,27 +1782,45 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     [insertText]
   );
 
+  const copyWrittenRef = useRef(false);
   const handleCopy = useCallback(
     (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
-      const slice = session ? yrsClipboardSlice(session) : null;
+      if (takeClipboardGesture(event.currentTarget) === 'ignore') {
+        event.preventDefault();
+        return;
+      }
+      const slice = session ? yrsClipboardSlice(session, themeColors) : null;
       const text = primedCopyRef.current ?? slice?.text ?? (session ? yrsSelectionPlainText(session) : '');
       primedCopyRef.current = null;
-      if (!text) return;
+      if (!text && !slice?.fragment) return;
       event.preventDefault();
+      copyWrittenRef.current = true;
       event.clipboardData.setData('text/plain', text);
       if (slice?.fragment) {
         event.clipboardData.setData('text/html', clipboardFragmentHtml(slice.fragment));
       }
     },
-    [session]
+    [session, themeColors]
   );
 
-  const handlePaste = useCallback(
-    (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+  const writeCutEvent = useCallback(
+    (event: React.ClipboardEvent<HTMLTextAreaElement>): boolean => {
+      const slice = session ? yrsClipboardSlice(session, themeColors) : null;
+      const text = primedCopyRef.current ?? slice?.text ?? '';
+      primedCopyRef.current = null;
+      if (!text) return false;
       event.preventDefault();
-      const plain = event.clipboardData.getData('text/plain');
-      const fragment = parseClipboardHtml(event.clipboardData.getData('text/html') ?? '');
-      if (fragment && session && !readOnly && !isSuggesting && !holdInput) {
+      event.clipboardData.setData('text/plain', text);
+      if (slice?.fragment) event.clipboardData.setData('text/html', clipboardFragmentHtml(slice.fragment));
+      return true;
+    },
+    [session, themeColors]
+  );
+
+  const pasteContent = useCallback(
+    (plain: string, fragment: DocxClipboardFragment | null) => {
+      const textOnly = !!fragment && clipboardFragmentIsTextOnly(fragment);
+      if (fragment && session && !readOnly && (!isSuggesting || textOnly) && !holdInput) {
         verticalCaretGoalRef.current.reset();
         dispatchCaretInput();
         enqueueInputOperation(() => {
@@ -1756,7 +1829,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           const map = current ? inputPositionMap(current.anchor.story) : null;
           if (!current || !map) return;
           const range = toRange(current, map);
-          if (!isBodyFlowStory(range.story)) {
+          if (!textOnly && !isBodyFlowStory(range.story)) {
             insertText(plain);
             return;
           }
@@ -1784,14 +1857,37 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     [dispatchCaretInput, enqueueInputOperation, ensureSelection, finishMutation, holdInput, inputPositionMap, insertText, isCurrentInput, isSuggesting, readOnly, session, suggestingAuthor]
   );
 
+  const handlePaste = useCallback(
+    (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+      event.preventDefault();
+      const gesture = takeClipboardGesture(event.currentTarget);
+      if (gesture === 'ignore') return;
+      const html = gesture === 'plain' ? '' : event.clipboardData.getData('text/html');
+      pasteContent(event.clipboardData.getData('text/plain'), parseClipboardHtml(html ?? ''));
+    },
+    [pasteContent]
+  );
+
   const handleCut = useCallback(
     (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
-      if (readOnly || (!holdInput && replicaReadyRef?.current !== false)) return;
-      event.preventDefault();
+      if (takeClipboardGesture(event.currentTarget) === 'ignore') {
+        event.preventDefault();
+        return;
+      }
+      if (readOnly) return;
       const copied = copyAfterReplica(true);
-      if (copied) deleteSelection(true, copied);
+      if (copied) {
+        event.preventDefault();
+        deleteSelection(true, copied);
+        return;
+      }
+      if (holdInput || replicaReadyRef?.current === false || session?.cellSelection() || !hasTextRange()) {
+        event.preventDefault();
+        return;
+      }
+      if (writeCutEvent(event)) deleteSelection();
     },
-    [copyAfterReplica, deleteSelection, holdInput, readOnly, replicaReadyRef]
+    [copyAfterReplica, deleteSelection, hasTextRange, holdInput, readOnly, replicaReadyRef, session, writeCutEvent]
   );
 
   const hasHeldInput = useCallback(
@@ -2019,6 +2115,22 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       storedFormatting,
       insertText,
       deleteSelection,
+      pasteContent,
+      copySelection(cut) {
+        if (cut && (session?.cellSelection() || !hasTextRange())) return false;
+        const copied = copyAfterReplica(cut);
+        if (copied) {
+          if (cut) deleteSelection(true, copied);
+          return true;
+        }
+        textareaRef.current?.focus();
+        primeCopy();
+        copyWrittenRef.current = false;
+        document.execCommand('copy');
+        if (!copyWrittenRef.current) return false;
+        if (cut) deleteSelection();
+        return true;
+      },
       selectAll() {
         advanceInteractionEpoch();
         selectAll();
@@ -2027,6 +2139,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     [
       advanceInteractionEpoch,
       applyStoredFormatting,
+      copyAfterReplica,
       displayPositionToLoc,
       displaySelection,
       ensureSelection,
@@ -2037,6 +2150,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       isCurrentInput,
       queueSelection,
       deleteSelection,
+      hasTextRange,
+      pasteContent,
+      primeCopy,
       runAfterPendingInput,
       selectAll,
       session,
@@ -2133,14 +2249,22 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     const stickySelection = session?.selection() ?? null;
     const previousStickySelection = lastCaretScrollSelectionRef.current;
     lastCaretScrollSelectionRef.current = stickySelection;
+    textareaRef.current?.setAttribute('data-caret-placed', '');
     const quiet = quietSelectionRef.current;
     quietSelectionRef.current = null;
     const selectionIsQuiet = quiet && stickySelection && sameYrsSelection(quiet, stickySelection);
-    const selectionChanged =
-      (previousStickySelection === undefined ||
-        !sameYrsSelection(previousStickySelection, stickySelection)) &&
-      !selectionIsQuiet;
     const scroller = findVerticalScrollParentOrRoot(host);
+    const defaultCaretAfterScroll =
+      previousStickySelection === undefined &&
+      viewMovedBeforeFirstCaretRef.current &&
+      !!stickySelection &&
+      !!defaultCaretRef.current &&
+      sameYrsSelection(defaultCaretRef.current, stickySelection);
+    const selectionChanged =
+      (previousStickySelection === undefined
+        ? !scrolledBeforeFirstCaretRef.current
+        : !sameYrsSelection(previousStickySelection, stickySelection)) &&
+      !selectionIsQuiet;
     const pendingReveal = pendingLocalCaretRevealRef.current;
     const freshCommit = layoutCommit === undefined || revealedLayoutCommitRef.current !== layoutCommit;
     if (sourceVersionOf(displayListQueries) === layoutCommitVersion) revealedLayoutCommitRef.current = layoutCommit;
@@ -2154,9 +2278,11 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     pendingLocalCaretRevealRef.current = null;
     if (
       selection.anchor === selection.head &&
+      !defaultCaretAfterScroll &&
       shouldScrollCaretIntoView(caretRevealOrigin, selectionChanged, readOnly)
     ) {
       const delta = scrollIntoViewDelta(scrollViewport(scroller), nextTop, nextTop + nextHeight, 24);
+      if (delta !== 0) console.log('F76REVEAL ' + JSON.stringify({ t: Math.round(performance.now()), delta, from: scroller.scrollTop, origin: caretRevealOrigin, selectionChanged, first: previousStickySelection === undefined, intent: scrolledBeforeFirstCaretRef.current, freshCommit, layoutUpdateOrigin, pending: !!pendingReveal }));
       if (delta !== 0) scroller.scrollTop += delta;
     }
   }, [
@@ -2179,6 +2305,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   if (!enabled) return null;
   const textarea = (
     <textarea
+      id={id}
       ref={textareaRef}
       // Preserve the editor focus-target contract while the implementation is
       // yrs-owned. This is only a compatibility class on the hidden textarea;

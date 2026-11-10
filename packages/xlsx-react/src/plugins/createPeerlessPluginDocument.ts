@@ -4,7 +4,7 @@ import { PeerlessWorkerCommandRefusal, type PeerlessWorkerInputCoordinator } fro
 import type { PeerlessWorkbookSession } from '../worker/usePeerlessSessionWorkbook';
 import { pluginRefusal, unlessAborted, type XlsxAdmission } from './createPluginClients';
 import type { XlsxPluginDocumentAccess } from './createPluginDocumentAccess';
-import { createPluginGeometry, type PaintedGrid } from './geometry';
+import { createPluginGeometry, type EditorPointQuery, type PaintedGrid, type ProposalGeometrySnapshot } from './geometry';
 import type { XlsxPluginGeometry, XlsxPluginLayout, XlsxPluginRefusal, XlsxPluginSelection } from './types';
 
 interface PeerlessPluginOptions {
@@ -149,10 +149,12 @@ export function createPeerlessPluginDocument(options: PeerlessPluginOptions): Xl
 
 export function createPeerlessPluginGeometry(
   layout: XlsxPluginLayout, painted: PaintedGrid, canvas: Element, layer: HTMLElement,
-  current: () => { version: string | null; painted: PaintedGrid | null }
+  current: () => { version: string | null; painted: PaintedGrid | null },
+  proposals?: () => ProposalGeometrySnapshot | null,
+  pointAt?: EditorPointQuery
 ): XlsxPluginGeometry {
   return createPluginGeometry(layout, painted, canvas, layer, () => {
     const projection = current();
     return projection.version === layout.version && projection.painted === painted;
-  });
+  }, proposals, pointAt);
 }

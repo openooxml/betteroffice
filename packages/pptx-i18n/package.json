@@ -9,87 +9,123 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.mts",
-      "import": "./dist/index.mjs"
+      "import": "./dist/index.mjs",
+      "default": "./dist/index.mjs"
+    },
+    "./editor": {
+      "types": "./dist/editor.d.mts",
+      "import": "./dist/editor.mjs",
+      "default": "./dist/editor.mjs"
+    },
+    "./proposals": {
+      "types": "./dist/proposals.d.mts",
+      "import": "./dist/proposals.mjs",
+      "default": "./dist/proposals.mjs"
+    },
+    "./menus": {
+      "types": "./dist/menus.d.mts",
+      "import": "./dist/menus.mjs",
+      "default": "./dist/menus.mjs"
     },
     "./en": {
       "types": "./dist/en.d.mts",
-      "import": "./dist/en.mjs"
+      "import": "./dist/en.mjs",
+      "default": "./dist/en.mjs"
     },
     "./ar": {
       "types": "./dist/ar.d.mts",
-      "import": "./dist/ar.mjs"
+      "import": "./dist/ar.mjs",
+      "default": "./dist/ar.mjs"
     },
     "./de": {
       "types": "./dist/de.d.mts",
-      "import": "./dist/de.mjs"
+      "import": "./dist/de.mjs",
+      "default": "./dist/de.mjs"
     },
     "./es": {
       "types": "./dist/es.d.mts",
-      "import": "./dist/es.mjs"
+      "import": "./dist/es.mjs",
+      "default": "./dist/es.mjs"
     },
     "./fr": {
       "types": "./dist/fr.d.mts",
-      "import": "./dist/fr.mjs"
+      "import": "./dist/fr.mjs",
+      "default": "./dist/fr.mjs"
     },
     "./he": {
       "types": "./dist/he.d.mts",
-      "import": "./dist/he.mjs"
+      "import": "./dist/he.mjs",
+      "default": "./dist/he.mjs"
     },
     "./hi": {
       "types": "./dist/hi.d.mts",
-      "import": "./dist/hi.mjs"
+      "import": "./dist/hi.mjs",
+      "default": "./dist/hi.mjs"
     },
     "./id": {
       "types": "./dist/id.d.mts",
-      "import": "./dist/id.mjs"
+      "import": "./dist/id.mjs",
+      "default": "./dist/id.mjs"
     },
     "./it": {
       "types": "./dist/it.d.mts",
-      "import": "./dist/it.mjs"
+      "import": "./dist/it.mjs",
+      "default": "./dist/it.mjs"
     },
     "./ja": {
       "types": "./dist/ja.d.mts",
-      "import": "./dist/ja.mjs"
+      "import": "./dist/ja.mjs",
+      "default": "./dist/ja.mjs"
     },
     "./ko": {
       "types": "./dist/ko.d.mts",
-      "import": "./dist/ko.mjs"
+      "import": "./dist/ko.mjs",
+      "default": "./dist/ko.mjs"
     },
     "./nl": {
       "types": "./dist/nl.d.mts",
-      "import": "./dist/nl.mjs"
+      "import": "./dist/nl.mjs",
+      "default": "./dist/nl.mjs"
     },
     "./pl": {
       "types": "./dist/pl.d.mts",
-      "import": "./dist/pl.mjs"
+      "import": "./dist/pl.mjs",
+      "default": "./dist/pl.mjs"
     },
     "./pt-BR": {
       "types": "./dist/pt-BR.d.mts",
-      "import": "./dist/pt-BR.mjs"
+      "import": "./dist/pt-BR.mjs",
+      "default": "./dist/pt-BR.mjs"
     },
     "./ru": {
       "types": "./dist/ru.d.mts",
-      "import": "./dist/ru.mjs"
+      "import": "./dist/ru.mjs",
+      "default": "./dist/ru.mjs"
     },
     "./tr": {
       "types": "./dist/tr.d.mts",
-      "import": "./dist/tr.mjs"
+      "import": "./dist/tr.mjs",
+      "default": "./dist/tr.mjs"
     },
     "./uk": {
       "types": "./dist/uk.d.mts",
-      "import": "./dist/uk.mjs"
+      "import": "./dist/uk.mjs",
+      "default": "./dist/uk.mjs"
     },
     "./vi": {
       "types": "./dist/vi.d.mts",
-      "import": "./dist/vi.mjs"
+      "import": "./dist/vi.mjs",
+      "default": "./dist/vi.mjs"
     },
     "./zh-CN": {
       "types": "./dist/zh-CN.d.mts",
-      "import": "./dist/zh-CN.mjs"
+      "import": "./dist/zh-CN.mjs",
+      "default": "./dist/zh-CN.mjs"
     },
     "./zh-TW": {
       "types": "./dist/zh-TW.d.mts",
-      "import": "./dist/zh-TW.mjs"
+      "import": "./dist/zh-TW.mjs",
+      "default": "./dist/zh-TW.mjs"
     },
     "./package.json": "./package.json"
   },

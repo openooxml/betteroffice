@@ -37,6 +37,8 @@ export interface DrawPageOptions {
   glyphCache?: GlyphCache;
   /** The CSS family each document font family paints browser text with, where they differ. */
   fontFamilies?: ReadonlyMap<string, string>;
+  /** Told when a glyph run's outlines fail and it falls back to `fillText`. */
+  onGlyphFallback?: (error: unknown) => void;
 }
 
 /**
@@ -350,7 +352,8 @@ export function drawGlyphRunPrimitive(
     families?.size && primitive.fallbackFont
       ? { ...primitive, fallbackFont: withFontFamilies(primitive.fallbackFont, families) }
       : primitive,
-    options.glyphCache
+    options.glyphCache,
+    options.onGlyphFallback
   );
 }
 
@@ -452,7 +455,8 @@ function warnSyntheticPaintClipOnce(): void {
 function drawGlyphRun(
   ctx: CanvasRenderingContext2D,
   run: GlyphRunPrimitive,
-  cache: GlyphCache | undefined
+  cache: GlyphCache | undefined,
+  onFallback?: (error: unknown) => void
 ): void {
   const rect = glyphRunRect(run);
   let wrapped = beginTextVisualState(
@@ -520,6 +524,7 @@ function drawGlyphRun(
       return;
     } catch (error) {
       warnGlyphFallbackOnce(error);
+      onFallback?.(error);
       // fall through to the fillText safety net below
     }
   }

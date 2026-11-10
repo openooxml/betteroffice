@@ -1,9 +1,20 @@
-import { beforeAll, expect, spyOn, test } from 'bun:test';
+import { afterEach, beforeAll, beforeEach, expect, spyOn, test } from 'bun:test';
+import JSZip from 'jszip';
 import { resolve } from 'node:path';
 import { sessionWasmFactory } from '../../../../shared/office-session/testing/wasmWorker';
+import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
+import { configureFontCdn } from '@betteroffice/fonts';
 
 type Client = typeof import('./fontWorker');
 let factory: Awaited<ReturnType<typeof sessionWasmFactory<Client>>>;
+
+const restorers: (() => void)[] = [];
+beforeEach(() => {
+  const previous = getFontCdnConfiguration();
+  setFontCdnConfiguration(undefined);
+  restorers.push(() => setFontCdnConfiguration(previous));
+});
+afterEach(() => { for (const restore of restorers.splice(0).reverse()) restore(); });
 
 beforeAll(async () => {
   factory = await sessionWasmFactory<Client>(resolve(import.meta.dir, 'fontWorker.ts'),
@@ -14,7 +25,9 @@ test('preparation decodes before open and hands the same worker to its editor', 
   const h = factory();
   const source = new Uint8Array([1, 2, 3]);
   const prepared = h.client.preparePresentationFontDecoder(source);
-  expect(h.client.preparePresentationFontDecoder(source)).toBe(prepared);
+  const again = h.client.preparePresentationFontDecoder(source);
+  expect(again).not.toBe(prepared);
+  again.release();
   try {
     const backing = new Uint8Array([99, 0, 1, 0, 0, 99]);
     const result = await prepared.decoder(backing.subarray(1, 5), { codec: 'zstd' });
@@ -104,4 +117,141 @@ test('font preparation can load past 60 seconds and still decode on the retained
     timeout.mockRestore();
     clear.mockRestore();
   }
+});
+
+async function kanaDeck(): Promise<Uint8Array> {
+  const zip = new JSZip();
+  zip.file('ppt/presentation.xml', '<p:presentation><p:sldIdLst><p:sldId id="256" r:id="rId1"/><p:sldId id="257" r:id="rId2"/></p:sldIdLst></p:presentation>');
+  zip.file('ppt/_rels/presentation.xml.rels', '<Relationships><Relationship Id="rId1" Target="slides/slide1.xml"/>' +
+    '<Relationship Id="rId2" Target="slides/slide2.xml"/></Relationships>');
+  zip.file('ppt/slides/slide1.xml', '<p:sld><a:p><a:r><a:rPr/><a:t>Latin</a:t></a:r></a:p></p:sld>');
+  zip.file('ppt/slides/slide2.xml', '<p:sld><a:p><a:r><a:rPr/><a:t>かな</a:t></a:r></a:p></p:sld>');
+  return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
+}
+
+const prefetches = (h: ReturnType<typeof factory>) => h.workers[0]!.requests
+  .filter(message => message.kind === 'call' && message.method === 'prefetchCoverageFonts')
+  .map(message => message as { id: number; args: unknown[] });
+
+test('preparation starts the opening slide coverage faces on the prepared worker', async () => {
+  const h = factory();
+  const source = await kanaDeck();
+  const prepared = h.client.preparePresentationFontDecoder(source, { activeSlideIndex: 1 });
+  try {
+    for (let tick = 0; tick < 200 && !prefetches(h).length; tick++) await new Promise(resolve => setTimeout(resolve, 5));
+    expect(prefetches(h).map(message => message.args)).toEqual([[['cjk-jp']]]);
+  } finally { prepared.release(); }
+});
+
+test('coverage prefetch forwards configured CDN and explicit disable state', async () => {
+  for (const baseUrl of ['https://prefetch-fonts.example/root/', false] as const) {
+    configureFontCdn({ baseUrl, timeoutMs: 6789 });
+    const h = factory();
+    const prepared = h.client.preparePresentationFontDecoder(await kanaDeck(), { activeSlideIndex: 1 });
+    try {
+      for (let tick = 0; tick < 200 && !prefetches(h).length; tick++) await new Promise(resolve => setTimeout(resolve, 5));
+      expect(prefetches(h).map(message => message.args)).toEqual([[['cjk-jp'], false, { baseUrl, timeoutMs: 6789 }]]);
+    } finally { prepared.release(); }
+  }
+});
+
+test('preparation skips the coverage prefetch without default fonts or coverage text', async () => {
+  for (const [options, label] of [[{ activeSlideIndex: 1, defaultFonts: false }, 'off'], [{}, 'latin']] as const) {
+    const h = factory();
+    const prepared = h.client.preparePresentationFontDecoder(await kanaDeck(), options);
+    try {
+      await new Promise(resolve => setTimeout(resolve, 100));
+      expect({ label, prefetches: prefetches(h) }).toEqual({ label, prefetches: [] });
+    } finally { prepared.release(); }
+  }
+});
+
+test('a coverage prefetch in flight cannot answer the adopting client', async () => {
+  const h = factory();
+  const source = await kanaDeck();
+  const prepared = h.client.preparePresentationFontDecoder(source, { activeSlideIndex: 1 });
+  try {
+    for (let tick = 0; tick < 200 && !prefetches(h).length; tick++) await new Promise(resolve => setTimeout(resolve, 5));
+    const { id } = prefetches(h)[0]!;
+    expect(Number.isSafeInteger(id)).toBe(true);
+    expect(id).toBeGreaterThan(2 ** 32);
+    const decoded = await prepared.decoder(new Uint8Array([0, 1, 0, 0]), { codec: 'zstd' });
+    expect(new Uint8Array(decoded.font)).toEqual(new Uint8Array([0, 1, 0, 0]));
+    const decode = h.workers[0]!.requests.find(message => message.kind === 'call' && message.method === 'decodeFontFace') as { id: number };
+    expect(decode.id).toBe(1);
+    expect(h.client.takePresentationFontWorker(source) as unknown).toBe(h.workers[0]);
+  } finally { prepared.release(); h.workers[0]?.terminate(); }
+});
+
+test('two editors preparing one file share a worker until both release it', async () => {
+  const h = factory();
+  const source = new Uint8Array([4, 5, 6]);
+  const first = h.client.preparePresentationFontDecoder(source);
+  const second = h.client.preparePresentationFontDecoder(source);
+  try {
+    expect(h.workers).toHaveLength(1);
+    const pending = second.decoder(new Uint8Array([0, 1, 0, 0]), { codec: 'zstd' });
+    first.release();
+    expect(h.workers[0]!.terminated).toBe(false);
+    expect(new Uint8Array((await pending).font)).toEqual(new Uint8Array([0, 1, 0, 0]));
+    await expect(first.decoder(new Uint8Array([0, 1, 0, 0]), { codec: 'zstd' })).rejects.toThrow('released');
+    second.release();
+    expect(h.workers[0]!.terminated).toBe(true);
+  } finally { first.release(); second.release(); h.workers[0]?.terminate(); }
+});
+
+test('a session adopts a shared worker only once the other editor has released it', async () => {
+  const h = factory();
+  const source = new Uint8Array([7, 8, 9]);
+  const first = h.client.preparePresentationFontDecoder(source);
+  const second = h.client.preparePresentationFontDecoder(source);
+  try {
+    expect(h.client.takePresentationFontWorker(source)).toBeUndefined();
+    expect(new Uint8Array((await second.decoder(new Uint8Array([0, 1, 0, 0]), { codec: 'zstd' })).font))
+      .toEqual(new Uint8Array([0, 1, 0, 0]));
+    first.release();
+    expect(h.client.takePresentationFontWorker(source) as unknown).toBe(h.workers[0]);
+    expect(h.workers[0]!.terminated).toBe(false);
+  } finally { first.release(); second.release(); h.workers[0]?.terminate(); }
+});
+
+test('a collected handle with a decode in flight does not stop the worker for a handle prepared after it', async () => {
+  const cleanups: Array<{ held: unknown; token: object; cleanup: (held: unknown) => void }> = [];
+  class FakeRegistry {
+    constructor(private readonly cleanup: (held: unknown) => void) {}
+    register(_target: object, held: unknown, token: object) { cleanups.push({ held, token, cleanup: this.cleanup }); }
+    unregister(token: object) {
+      const index = cleanups.findIndex(entry => entry.token === token);
+      if (index >= 0) cleanups.splice(index, 1);
+      return index >= 0;
+    }
+  }
+  const scope = globalThis as unknown as { FinalizationRegistry: unknown };
+  const original = scope.FinalizationRegistry;
+  scope.FinalizationRegistry = FakeRegistry;
+  restorers.push(() => { scope.FinalizationRegistry = original; });
+  const collecting = await sessionWasmFactory<Client>(resolve(import.meta.dir, 'fontWorker.ts'),
+    resolve(import.meta.dir, 'commandSessionWasmTestWorker.ts'));
+  const h = collecting();
+  const releaseCompile = h.holdCompile();
+  const source = new Uint8Array([3, 1, 4]);
+  const first = h.client.preparePresentationFontDecoder(source);
+  const pending = first.decoder(new Uint8Array([0, 1, 0, 0]), { codec: 'zstd' });
+  let next: ReturnType<typeof h.client.preparePresentationFontDecoder> | undefined;
+  try {
+    expect(cleanups).toHaveLength(1);
+    const entry = cleanups[0]!;
+    entry.cleanup(entry.held);
+    expect(h.workers[0]!.terminated).toBe(false);
+    next = h.client.preparePresentationFontDecoder(source);
+    expect(h.workers).toHaveLength(1);
+    releaseCompile();
+    expect(new Uint8Array((await pending).font)).toEqual(new Uint8Array([0, 1, 0, 0]));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(h.workers[0]!.terminated).toBe(false);
+    expect(new Uint8Array((await next.decoder(new Uint8Array([0, 1, 0, 0]), { codec: 'zstd' })).font))
+      .toEqual(new Uint8Array([0, 1, 0, 0]));
+    next.release();
+    expect(h.workers[0]!.terminated).toBe(true);
+  } finally { next?.release(); releaseCompile(); h.workers[0]?.terminate(); }
 });

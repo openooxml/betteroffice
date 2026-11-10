@@ -72,6 +72,11 @@ export interface DisplayListTableFragment {
   originExact: boolean;
   /** per anchor-row content bands, ascending by `rowIndex` */
   rowBands: TableRowBand[];
+  /**
+   * One past the last source row the table paints (`table.rowCount`), when the
+   * display list stamps it. Rows hidden from view are absent from `rowBands`.
+   */
+  rowCount?: number;
 }
 
 /** Resolve an in-cell doc position to its enclosing table's stable key, or null. */
@@ -102,6 +107,8 @@ export interface DisplayListSelectedCellRect {
   w: number;
   h: number;
   exact: boolean;
+  /** This box is a header row's copy on a continuation page. */
+  repeatedHeader?: boolean;
   region: 'body' | 'header' | 'footer';
   rId?: string;
 }
@@ -253,6 +260,7 @@ interface FragmentAccum {
   exactClipLeftX: number[];
   exactClipBottomY: number[];
   rows: Map<number, { top: number; bottom: number }>;
+  rowCount?: number;
 }
 
 /** Derive every body table fragment's handle geometry for one page. */
@@ -294,6 +302,8 @@ function fragmentsForPage(
       accums.set(tableKey, a);
     }
     if (docStartSample < a.docStartSample) a.docStartSample = docStartSample;
+    const owner = p.table?.tableId ? identities.get(p.table.tableId) : undefined;
+    if (p.table?.rowCount !== undefined && owner?.tableKey === tableKey) a.rowCount = p.table.rowCount;
     a.contentMinX = Math.min(a.contentMinX, geometry.x);
     a.contentMinY = Math.min(a.contentMinY, geometry.y);
     a.contentMaxX = Math.max(a.contentMaxX, geometry.x + geometry.w);
@@ -377,9 +387,23 @@ function fragmentsForPage(
       bottomY,
       originExact: hasExactLeft,
       rowBands,
+      ...(a.rowCount !== undefined ? { rowCount: a.rowCount } : {}),
     });
   }
   return out;
+}
+
+/**
+ * Whether the fragment paints the table's last row, so edge handles belong on
+ * it. `modelRowCount` is the table's row count in the document; the display
+ * list's own count wins, since it leaves out trailing rows hidden from view.
+ */
+export function displayListTableFragmentEndsTable(
+  fragment: Pick<DisplayListTableFragment, 'rowBands' | 'rowCount'>,
+  modelRowCount: number
+): boolean {
+  const bands = fragment.rowBands;
+  return bands.length > 0 && bands[bands.length - 1].rowIndex === (fragment.rowCount ?? modelRowCount) - 1;
 }
 
 /**
@@ -478,6 +502,7 @@ interface CellGridAccum {
   maxX: number;
   maxY: number;
   exactClip?: GeoRect;
+  repeatedHeader?: boolean;
 }
 
 interface TableGridAccum {
@@ -511,8 +536,10 @@ function upsertCellGrid(
     existing.rowSpan = Math.max(existing.rowSpan, cell.rowSpan);
     existing.colSpan = Math.max(existing.colSpan, cell.colSpan);
     if (exactClip) existing.exactClip = exactClip;
+    if (cell.repeatedHeader) existing.repeatedHeader = true;
   } else {
     a.cells.set(key, {
+      repeatedHeader: cell.repeatedHeader,
       row: cell.row,
       col: cell.col,
       rowSpan: cell.rowSpan,
@@ -753,6 +780,7 @@ export function deriveDisplayListSelectedCellRects(
           w: Math.max(1, right - x),
           h: Math.max(1, bottom - y),
           exact,
+          ...(contentCell?.repeatedHeader ? { repeatedHeader: true } : {}),
           region: regionPrims.kind,
           rId: regionPrims.rId,
         });

@@ -849,4 +849,25 @@ describe('DOCX engine seeding', () => {
       existingRoom.destroy();
     }
   });
+
+  it('seeds imported run property changes into the same reviewable attributes', async () => {
+    const bytes = sequencePackage('<w:p><w:r><w:rPr><w:i/><w:rPrChange w:id="17" w:author="Writer"><w:rPr><w:b/></w:rPr></w:rPrChange></w:rPr><w:t>text</w:t></w:r></w:p>');
+    const parsed = await parseDocx(bytes.buffer);
+    const projected = await createYrsSession({ clientId: 47031 });
+    const engine = await createYrsSession({ clientId: 47031 });
+    try {
+      documentToYrs(projected, parsed, { generation: 'format-parity' });
+      engine.seedFromDocx(bytes, { generation: 'format-parity' });
+      expectEquivalentStories(engine, projected);
+      expect(engine.listRevisions()).toEqual(projected.listRevisions());
+      expect(engine.listRevisions()[0]).toMatchObject({ kind: 'rPrChange', author: 'Writer' });
+      for (const session of [engine, projected]) session.rejectChange({ revisionId: '17' });
+      expectEquivalentStories(engine, projected);
+      expect(engine.listRevisions()).toEqual([]);
+    } finally {
+      engine.destroy();
+      projected.destroy();
+    }
+  });
+
 });

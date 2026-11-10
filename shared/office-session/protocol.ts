@@ -1,7 +1,15 @@
 import type { SessionFailureCode } from './types';
 
 export type ClientMessage =
-  | { protocol: 1; kind: 'wasm-compile' }
+  | {
+      protocol: 1; kind: 'wasm-compile';
+      /** The client is fetching the engine and will send it: wait for it instead of fetching. */
+      pending?: true;
+      /** The engine's response body, fetched by the client; the worker compiles it as it streams. */
+      stream?: ReadableStream<Uint8Array>;
+      /** The engine's bytes, where the stream could not be transferred; the worker compiles them. */
+      bytes?: ArrayBuffer;
+    }
   | { protocol: 1; kind: 'call'; id: number; method: string; args: unknown[] }
   | { protocol: 1; kind: 'dispose' };
 
@@ -13,6 +21,8 @@ export interface ReplyError {
 }
 
 export type HostMessage =
+  /** The worker waits for the engine body the client announced as pending; old workers never send it. */
+  | { protocol: 1; kind: 'wasm-accept' }
   | { protocol: 1; kind: 'wasm-module'; url: string; module: WebAssembly.Module;
       hydration?: string; version?: string; sequence?: number }
   | { protocol: 1; kind: 'reply'; id: number; ok: true; value: unknown }
@@ -68,7 +78,15 @@ function requestId(value: unknown): boolean {
 
 export function isClientMessage(value: unknown): value is ClientMessage {
   if (!record(value) || value.protocol !== 1) return false;
-  return value.kind === 'wasm-compile' || value.kind === 'dispose' || (
+  if (value.kind === 'wasm-compile') {
+    if (value.pending !== undefined && value.pending !== true) return false;
+    if (value.bytes !== undefined && !(value.bytes instanceof ArrayBuffer)) return false;
+    if (value.stream === undefined) return true;
+    try {
+      return Object.prototype.toString.call(value.stream) === '[object ReadableStream]';
+    } catch { return false; }
+  }
+  return value.kind === 'dispose' || (
     value.kind === 'call' && requestId(value.id) &&
     typeof value.method === 'string' && Array.isArray(value.args)
   );
@@ -77,6 +95,8 @@ export function isClientMessage(value: unknown): value is ClientMessage {
 export function isHostMessage(value: unknown): value is HostMessage {
   if (!record(value) || value.protocol !== 1) return false;
   switch (value.kind) {
+    case 'wasm-accept':
+      return true;
     case 'wasm-module':
       try {
         return typeof value.url === 'string' &&

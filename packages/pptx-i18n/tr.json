@@ -52,6 +52,7 @@
     "decreaseFontSize": "Yazı tipi boyutunu küçült",
     "increaseFontSize": "Yazı tipi boyutunu büyüt",
     "underline": "Altı Çizili",
+    "strikethrough": "Üstü Çizili",
     "more": "Diğer",
     "fillColor": "Dolgu Rengi",
     "noFill": "Dolgu Yok",
@@ -91,6 +92,12 @@
     "fallbackTitle": "Slayt {number}",
     "canvasLabel": "{total} slayttan {current}. slayt",
     "canvasLabelWithSelection": "{total} slayttan {current}. slayt; seçili nesne {name}"
+  },
+  "a11y": {
+    "chartNoData": "Veri yok",
+    "slideWithTitle": "{total} slayttan {current}. slayt: {title}",
+    "objectSelected": "{name} seçildi",
+    "editingText": "{name} düzenleniyor"
   },
   "editor": {
     "appLabel": "Sunu slayt düzenleyicisi",
@@ -156,6 +163,17 @@
     "stalePreview": "Bu önizleme güncellenmiş slaydı kullanıyor. Uygulama, değişen hedeflerin üzerine yazacak.",
     "geometry": "Konum ve boyut (x, y, genişlik, yükseklik)",
     "geometryValues": "{before} → {after} pt",
+    "layoutChanged": "Düzen değiştirildi",
+    "backgroundChanged": "Arka plan değiştirildi",
+    "rowInserted": "Satır eklendi",
+    "rowDeleted": "Satır silindi",
+    "columnInserted": "Sütun eklendi",
+    "columnDeleted": "Sütun silindi",
+    "broughtToFront": "En öne getirildi",
+    "sentToBack": "En arkaya gönderildi",
+    "broughtForward": "Bir katman öne getirildi",
+    "sentBackward": "Bir katman arkaya gönderildi",
+    "zOrderChanged": "Yığılma sırası değiştirildi",
     "appearance": "Görünüm veya metin biçimlendirmesi değişti",
     "changedAgain": "Hedef yine değişti. Uygulamadan önce yenilenen önizlemeyi inceleyin.",
     "canvasTitle": "Bu slayttaki değişiklikler",
@@ -168,7 +186,14 @@
     "canvasStale": "Hedefler değişti. Uygulamadan önce güncellenmiş önizlemeyi incelemek için İnceleme ayrıntılarını açın.",
     "previousPosition": "Önceki",
     "proposedPosition": "Önerilen",
-    "loadingDiff": "Değişiklikler yükleniyor…"
+    "loadingDiff": "Değişiklikler yükleniyor…",
+    "slideStrip": null,
+    "previewSlide": null,
+    "insertedShape": null,
+    "deletedShape": null,
+    "insertedSlide": null,
+    "deletedSlide": null,
+    "movedFrom": null
   },
   "commands": {
     "moreControls": "Diğer denetimler",
@@ -212,8 +237,25 @@
       "permissionDenied": "Ana uygulama bu eklentinin bu komutu kullanmasına izin vermedi.",
       "unsupportedPolicy": "Eklentiler bu komutu henüz çalıştıramaz. Bunun yerine bir düzenleme toplu işlemi kullanın.",
       "pluginUnavailable": "Eklenti artık etkin değil.",
-      "aborted": "Eklenti eylemi komut çalışmadan önce iptal edildi."
-    }
+      "aborted": "Eklenti eylemi komut çalışmadan önce iptal edildi.",
+      "clipboardUnavailable": "Pano erişimi kullanılamıyor veya reddedildi.",
+      "tableRequired": "Önce imleci bir tablo hücresine yerleştirin.",
+      "lastSlide": "Son slayt silinemez."
+    },
+    "cut": "Kes",
+    "copy": "Kopyala",
+    "paste": "Yapıştır",
+    "pastePlainText": "Düz metin olarak yapıştır",
+    "insert": "Ekle",
+    "delete": "Sil",
+    "deleteTable": "Tabloyu Sil",
+    "duplicateSlide": "Slaydı çoğalt",
+    "insertRowsAbove": "Üste satır ekle",
+    "insertRowsBelow": "Alta satır ekle",
+    "insertColumnsLeft": "Sola sütun ekle",
+    "insertColumnsRight": "Sağa sütun ekle",
+    "deleteRows": "Satırları sil",
+    "deleteColumns": "Sütunları sil"
   },
   "plugins": {
     "toolbarGroup": "Eklentiler",
@@ -225,5 +267,20 @@
     "label": "Katkıda Bulunanlar",
     "moreCollaborators": "{count, plural, one {# katkıda bulunan daha} other {# katkıda bulunan daha}}",
     "moreSelections": "+{count, plural, one {# seçim} other {# seçim}}"
+  },
+  "contextMenu": {
+    "text": "Metin menüsü",
+    "shape": "Şekil menüsü",
+    "table": "Tablo menüsü",
+    "slide": "Slayt menüsü"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "delete": "Del",
+    "escape": "Esc",
+    "pageup": "Page Up",
+    "pagedown": "Page Down"
   }
 }

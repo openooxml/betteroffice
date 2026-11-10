@@ -135,7 +135,14 @@
       "unsupportedCommand": "غير مدعوم بعد.",
       "invalidArguments": "هذه القيمة غير صالحة.",
       "inputFailed": "تعذر حفظ إدخال الخلية قبل هذا.",
+      "editUnsupported": "لا يمكن تطبيق هذا التعديل هنا. لم يتغير المصنف.",
+      "editUnsupportedChart": "لا يمكن تطبيق هذا التعديل: يستخدم مخطط خلايا سينقلها التعديل. لم يتغير المصنف.",
+      "editUnsupportedTable": "لا يمكن تطبيق هذا التعديل: يستخدم جدول خلايا سينقلها التعديل. لم يتغير المصنف.",
+      "editUnsupportedPivot": "لا يمكن تطبيق هذا التعديل: يستخدم جدول محوري خلايا سينقلها التعديل. لم يتغير المصنف.",
       "sheetProtected": "هذه الخلية في ورقة محمية.",
+      "hostRefused": "هذا التعديل غير مسموح به.",
+      "tooManyToCheck": "عدد الخلايا كبير جدًا بحيث لا يمكن للإضافات التحقق منها (الحد {limit}).",
+      "hostStarting": "لا يزال المحرر قيد التشغيل. حاول مرة أخرى بعد قليل.",
       "documentReplaced": "تم فتح مصنف آخر.",
       "targetChanged": "تغيّر التحديد.",
       "gestureActive": "أنهِ نقل المخطط أولًا.",
@@ -146,8 +153,31 @@
       "permissionDenied": "لم يسمح التطبيق المضيف لهذا المكون الإضافي باستخدام هذا الأمر.",
       "unsupportedPolicy": "لا تستطيع المكونات الإضافية تشغيل هذا الأمر بعد. استخدم دفعة تحرير بدلًا من ذلك.",
       "pluginUnavailable": "لم يعد المكون الإضافي نشطًا.",
-      "aborted": "تم إلغاء إجراء المكون الإضافي قبل تشغيل الأمر."
-    }
+      "aborted": "تم إلغاء إجراء المكون الإضافي قبل تشغيل الأمر.",
+      "clipboardUnavailable": "لا يسمح هذا المتصفح باللصق من قائمة. استخدم اختصار لوحة المفاتيح.",
+      "lastSheet": "يحتاج المصنف إلى ورقة واحدة على الأقل.",
+      "sheetAtEdge": "لا يمكن نقل الورقة أبعد من ذلك.",
+      "sheetNameInvalid": "يجب أن يتكون اسم الورقة من 1 إلى 31 حرفًا وأن يكون فريدًا ولا يحتوي على : \\ / ? * [ ].",
+      "clipboardDenied": "لم يسمح المتصفح بالوصول إلى الحافظة."
+    },
+    "cut": "قص",
+    "copy": "نسخ",
+    "paste": "لصق",
+    "pastePlainText": "لصق كنص عادي",
+    "clearContents": "مسح المحتويات",
+    "insert": "إدراج",
+    "delete": "حذف",
+    "insertRowsAbove": "إدراج صفوف أعلاه",
+    "insertRowsBelow": "إدراج صفوف أسفله",
+    "insertColumnsLeft": "إدراج أعمدة إلى اليسار",
+    "insertColumnsRight": "إدراج أعمدة إلى اليمين",
+    "deleteRows": "حذف الصفوف",
+    "deleteColumns": "حذف الأعمدة",
+    "insertSheet": "إدراج ورقة",
+    "deleteSheet": "حذف الورقة",
+    "renameSheet": "إعادة تسمية",
+    "moveSheetLeft": "نقل إلى اليسار",
+    "moveSheetRight": "نقل إلى اليمين"
   },
   "editor": {
     "appLabel": "محرر جدول البيانات",
@@ -162,7 +192,11 @@
     "showDetails": "إظهار التفاصيل",
     "openPrompt": "فتح ملف XLSX",
     "sheetTabsLabel": "الأوراق",
-    "clearExceedsLimit": "المسح يتجاوز حد الخلايا"
+    "clearExceedsLimit": "المسح يتجاوز حد الخلايا",
+    "cellMenuLabel": "قائمة الخلية",
+    "sheetTabMenuLabel": "قائمة علامة تبويب الورقة",
+    "renameSheetLabel": "إعادة تسمية الورقة",
+    "sheetNamePrefix": "ورقة عمل"
   },
   "presence": {
     "label": "المتعاونون",
@@ -178,6 +212,7 @@
     "accept": "قبول",
     "reject": "رفض",
     "forceApply": "فرض التطبيق",
+    "forceBlockedReason": "لا يمكن تطبيق هذا الاقتراح بعد تغيير بنية الجدول.",
     "staleWarning": "تغيّرت الخلايا منذ الاقتراح: {cells}"
   },
   "a11y": {
@@ -187,12 +222,27 @@
     "cellLabel": "{address}، {value}",
     "cellLabelSelected": "{address}، {value}، تم التحديد",
     "emptyCellLabel": "{address}، فارغة",
-    "emptyCellLabelSelected": "{address}، فارغة، تم التحديد"
+    "emptyCellLabelSelected": "{address}، فارغة، تم التحديد",
+    "hasFormula": "{label}، تحتوي على صيغة",
+    "rangeSelected": "تم تحديد {start} إلى {end}، {rows, plural, zero {# صفوف} one {صف واحد} two {صفان} few {# صفوف} many {# صفًا} other {# صف}} × {columns, plural, zero {# أعمدة} one {عمود واحد} two {عمودان} few {# أعمدة} many {# عمودًا} other {# عمود}}",
+    "sheetActivated": "{name}، ورقة عمل {index} من {count}",
+    "cellInputLabel": "تحرير الخلية {address}",
+    "gridRoleDescription": "ورقة عمل"
   },
   "plugins": {
     "toolbarGroup": "المكونات الإضافية",
     "panelTabs": "لوحات المكونات الإضافية",
     "collapsePanel": "طي {title}",
-    "expandPanel": "توسيع {title}"
+    "expandPanel": "توسيع {title}",
+    "rowGutter": "علامات صفوف المكونات الإضافية"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "del": "Del",
+    "escape": "Esc",
+    "pageUp": "Page Up",
+    "pageDown": "Page Down"
   }
 }

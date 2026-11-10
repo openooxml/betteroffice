@@ -11,14 +11,18 @@ import {
 } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { FORMATS, renderSection } from './readme.mjs';
+import { FORMATS, aggregateReport, corpusSummary, renderSection } from './readme.mjs';
+import { privateMode } from './private-step.mjs';
 import { validatePlan as validateFidelityPlan } from './plan.mjs';
 import { validateComparison } from './results.mjs';
 import { digest, docxShards, mergeDocxBenchmarks } from './docx-benchmark.mjs';
 import { mergeXlsxFidelity, xlsxFidelityShards } from './xlsx-fidelity.mjs';
 import { mergeRoundtrips, roundtripShards } from './roundtrip.mjs';
-import { mergePptxBenchmark } from './pptx-benchmark.mjs';
+import { mergePptxBenchmark, pptxShards } from './pptx-benchmark.mjs';
 import { mergeXlsxBenchmarks, xlsxShards } from './xlsx-benchmark.mjs';
+import { combineShardReports, measureShards } from './measure-shards.mjs';
+import { failureClusters } from './failures.mjs';
+import { mergeTiming, timingFormats } from './timing.mjs';
 
 function fail(message) {
   throw new Error(`Invalid fidelity merge: ${message}`);
@@ -87,6 +91,38 @@ function normalizePlan(input) {
       source_sha256: sample.metadata.source.sha256,
     })),
   };
+}
+
+const COVERAGE_CHANNELS = ['published', 'commit', 'libreoffice'];
+
+export function coverage(report) {
+  const rows = [];
+  for (const format of FORMATS) {
+    const samples = report.samples.filter((sample) => sample.format === format);
+    for (const channel of COVERAGE_CHANNELS) {
+      const results = samples.map((sample) => sample.comparisons.find((result) => result.channel === channel)).filter(Boolean);
+      if (!results.length) continue;
+      const stages = {};
+      for (const result of results)
+        if (result.status === 'failed') stages[result.stage ?? 'unknown'] = (stages[result.stage ?? 'unknown'] ?? 0) + 1;
+      rows.push({ format, channel, scored: results.filter((result) => result.status !== 'failed').length, total: samples.length, stages });
+    }
+  }
+  return rows;
+}
+
+const describe = ({ format, channel, scored, total, stages }) => {
+  const failed = Object.entries(stages).map(([stage, count]) => `${stage} ${count}`).join(', ');
+  return `${format.toUpperCase()} ${channel}: ${scored} of ${total} scored${failed ? ` (failed: ${failed})` : ''}`;
+};
+
+export function coverageMarkdown(rows) {
+  return `### Scored documents per format and channel\n\n${rows.map((row) => `- ${describe(row)}`).join('\n')}\n\n`;
+}
+
+export function assertCoverage(rows) {
+  const empty = rows.filter((row) => row.total > 0 && row.scored === 0);
+  if (empty.length) fail(`a channel scored no document: ${empty.map(describe).join('; ')}`);
 }
 
 export function mergeReports(planInput, reportInputs) {
@@ -167,7 +203,10 @@ async function directory(path, label) {
 }
 
 async function copyRenders(plan, report, parts, stage) {
+  const artifacts = new Map(measureShards(plan).flatMap(({ format, shard, samples }) =>
+    samples.map((id) => [id, `visual-fidelity-renders-${format}-${shard}`])));
   for (const sample of report.samples) {
+    const artifact = artifacts.get(sample.id);
     const comparison = sample.comparisons.find(
       (result) =>
         result.channel === 'commit' && result.renderer_source_commit === plan.commit
@@ -175,21 +214,10 @@ async function copyRenders(plan, report, parts, stage) {
     if (comparison.status === 'failed') continue;
     if (!Number.isInteger(comparison.actual_pages) || comparison.actual_pages < 1)
       continue;
-    const root = resolve(
-      parts,
-      `visual-fidelity-renders-${sample.format}`,
-      sample.id,
-      'commit'
-    );
+    const root = resolve(parts, artifact, sample.id, 'commit');
     const destination = resolve(stage, sample.id, 'commit');
-    await directory(
-      resolve(parts, `visual-fidelity-renders-${sample.format}`),
-      `${sample.format} render artifact`
-    );
-    await directory(
-      resolve(parts, `visual-fidelity-renders-${sample.format}`, sample.id),
-      `${sample.id} render directory`
-    );
+    await directory(resolve(parts, artifact), `${artifact} render artifact`);
+    await directory(resolve(parts, artifact, sample.id), `${sample.id} render directory`);
     await directory(root, `${sample.id} commit render directory`);
     await mkdir(destination, { recursive: true });
     for (let page = 1; page <= comparison.actual_pages; page += 1) {
@@ -220,17 +248,28 @@ export async function mergeFromPaths({
   requireXlsxBenchmark = false,
   requireXlsxFidelity = false,
   requireRoundtrip = false,
+  requireTiming = false,
+  coveragePath = null,
+  requireCoverage = false,
 }) {
   const planBytes = await readFile(planPath);
   const plan = normalizePlan(JSON.parse(planBytes));
   await directory(resolve(parts), 'QUALITY_PARTS');
+  const shards = measureShards(plan);
   const reports = await Promise.all(
     plan.formats.map(async (format) => {
-      const path = resolve(parts, `visual-fidelity-report-${format}`, 'report.json');
+      const shardReports = await Promise.all(shards.filter((entry) => entry.format === format).map(async ({ shard }) => {
+        const path = resolve(parts, `visual-fidelity-report-${format}-${shard}`, 'report.json');
+        try {
+          return JSON.parse(await readFile(path, 'utf8'));
+        } catch {
+          fail(`missing or invalid ${format} report for shard ${shard}`);
+        }
+      }));
       try {
-        return JSON.parse(await readFile(path, 'utf8'));
-      } catch {
-        fail(`missing or invalid ${format} report`);
+        return combineShardReports(plan, format, shardReports);
+      } catch (error) {
+        fail(error.message);
       }
     })
   );
@@ -241,8 +280,9 @@ export async function mergeFromPaths({
     report = mergeDocxBenchmarks(plan, report, benchmarks, digest(planBytes));
   }
   if (requirePptxBenchmark && plan.formats.includes('pptx')) {
-    const benchmark = JSON.parse(await readFile(resolve(parts, 'pptx-benchmark-report', 'report.json'), 'utf8'));
-    report = mergePptxBenchmark(plan, report, benchmark, digest(planBytes));
+    const benchmarks = await Promise.all(pptxShards(plan).map(async (_, shard) =>
+      JSON.parse(await readFile(resolve(parts, `pptx-benchmark-report-${shard}`, 'report.json'), 'utf8'))));
+    report = mergePptxBenchmark(plan, report, benchmarks, digest(planBytes));
   }
   if (requireXlsxBenchmark && xlsxShards(plan).length) {
     const benchmarks = await Promise.all(xlsxShards(plan).map(async (_, shard) =>
@@ -259,7 +299,18 @@ export async function mergeFromPaths({
       JSON.parse(await readFile(resolve(parts, `roundtrip-report-${format}-${shard}`, 'report.json'), 'utf8'))));
     report = mergeRoundtrips(plan, report, benchmarks, digest(planBytes));
   }
-  const section = renderSection(report);
+  if (requireTiming) {
+    const benchmarks = await Promise.all(timingFormats(plan).map(async (format) =>
+      JSON.parse(await readFile(resolve(parts, `timing-report-${format}`, 'report.json'), 'utf8'))));
+    report = mergeTiming(plan, report, benchmarks, digest(planBytes));
+  }
+  report = { ...report, corpus: corpusSummary(plan) };
+  const rows = coverage(report);
+  if (coveragePath) await writeFile(coveragePath, coverageMarkdown(rows));
+  if (requireCoverage) assertCoverage(rows);
+  const section = renderSection(report, { privateCorpus: privateMode() });
+  const aggregate = aggregateReport(report);
+  const failures = { schema_version: 1, commit: report.commit, clusters: failureClusters(report) };
   await emptyOutput(output);
   await mkdir(dirname(output), { recursive: true });
   const stage = await mkdtemp(join(dirname(output), `.${basename(output)}-`));
@@ -267,6 +318,8 @@ export async function mergeFromPaths({
     if (requireRenders) await copyRenders(plan, report, resolve(parts), stage);
     await writeFile(join(stage, 'report.json'), JSON.stringify(report, null, 2) + '\n');
     await writeFile(join(stage, 'section.md'), section);
+    await writeFile(join(stage, 'aggregate.json'), JSON.stringify(aggregate, null, 2) + '\n');
+    await writeFile(join(stage, 'failures.json'), JSON.stringify(failures, null, 2) + '\n');
     await rename(stage, output);
   } catch (error) {
     await rm(stage, { recursive: true, force: true });
@@ -290,5 +343,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     requireXlsxBenchmark: process.env.QUALITY_REQUIRE_XLSX_BENCHMARK === 'true',
     requireXlsxFidelity: process.env.QUALITY_REQUIRE_XLSX_FIDELITY === 'true',
     requireRoundtrip: process.env.QUALITY_REQUIRE_ROUNDTRIP === 'true',
+    requireTiming: process.env.QUALITY_REQUIRE_TIMING === 'true',
+    coveragePath: process.env.QUALITY_COVERAGE ? resolve(process.env.QUALITY_COVERAGE) : null,
+    requireCoverage: process.env.QUALITY_REQUIRE_COVERAGE === 'true',
   });
 }

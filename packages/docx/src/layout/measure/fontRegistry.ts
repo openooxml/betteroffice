@@ -1,4 +1,21 @@
-/** Builds deterministic embedded, bundled, script, and last-resort font chains. */
+/** Where a sliced face's files are, as `@betteroffice/fonts` loaders carry it; opaque to the registry. */
+export type SliceLocation = object;
+
+/** What the registry uses of a face `@betteroffice/fonts/progressive` opens. */
+export interface ProgressiveFontFace {
+  bytes(): ArrayBuffer;
+}
+
+import { baseLatinAlias, baseLatinCandidate, coverageFromBits, symbolFamily, wordsCoverage, type FontCoverage } from './fontCoverage';
+
+async function parsedCoverage(data: Uint8Array): Promise<FontCoverage | undefined> {
+  try {
+    const words = (await import('./cmapCoverage')).fontCoverageWords(data);
+    return words && wordsCoverage(words);
+  } catch {
+    return undefined;
+  }
+}
 
 /** A lazy face loader with measurement and fallback options. */
 export type BundledFontLoader = (() => Promise<ArrayBuffer>) & {
@@ -6,6 +23,12 @@ export type BundledFontLoader = (() => Promise<ArrayBuffer>) & {
   measureAs?: string;
   /** Only stands in for a primary face that failed to load. */
   onlyIfPrimaryFails?: boolean;
+  /** Locates a sliced face whose outlines load as they are needed. */
+  slices?: SliceLocation;
+  /** @internal Precomputed base Latin coverage bits of the face. */
+  coverage?: string;
+  /** @internal The face's decoded bytes, shared with the font cache: read them, never change or transfer them. */
+  readOnlyBytes?: () => Promise<ArrayBuffer>;
 };
 
 /** Byte sink of the wasm text engine (`crates/docx-text` FontStore). */
@@ -14,7 +37,7 @@ export interface TextEngineFontSink {
    * Register raw sfnt bytes with the engine; returns its font id.
    * Throws on unparseable bytes.
    */
-  registerFont(bytes: Uint8Array): number;
+  registerFont(bytes: Uint8Array, face?: { family: string; bold: boolean; italic: boolean }): number;
   /**
    * Register a measurement view of `id` carrying the vertical metrics and
    * advance pitch Word measures `family` with, and return its id — the
@@ -45,6 +68,8 @@ export type FontScript = 'cjk-sc' | 'cjk-tc' | 'cjk-jp' | 'cjk-kr' | 'arabic' | 
  * @public
  */
 export interface BundledFontProvider {
+  /** @internal */
+  resolveBaseLatin?(bold: boolean, italic: boolean): BundledFontLoader | undefined;
   /** Resolve a Word family to bundled metric-compatible face byte loaders, or undefined. */
   resolve(family: string, bold: boolean, italic: boolean): BundledFontLoader | undefined;
   /** Like {@link BundledFontProvider.resolve}, but also accepts bundled family names such as `"Gelasio"`, and leaves missing styles for browser synthesis. */
@@ -58,12 +83,14 @@ export interface BundledFontProvider {
    * contract as {@link BundledFontProvider.resolve}; providers without
    * script faces simply omit the method. These faces are coverage fallbacks
    * first, metric approximations second — CJK metric compatibility is much
-   * weaker than the Carlito/Calibri class of substitutes.
+   * weaker than the Carlito/Calibri class of substitutes. `family` is the
+   * family the text requests, which can select a closer face of the script.
    */
   resolveScriptFallback?(
     script: FontScript,
     bold: boolean,
-    italic: boolean
+    italic: boolean,
+    family?: string
   ): (() => Promise<ArrayBuffer>) | undefined;
   /** Coverage for characters absent from a bundled substitute. */
   resolveGlyphFallback?(
@@ -131,6 +158,10 @@ function chainKey(family: string, bold: boolean, italic: boolean): string {
   return `${familyKey(family)}|${bold ? 1 : 0}|${italic ? 1 : 0}`;
 }
 
+function scriptKey(script: FontScript, family: string | undefined): string {
+  return family === undefined ? script : `${script}|${familyKey(family)}`;
+}
+
 /** A provider or async factory; `undefined` means no bundled bytes. @public */
 export type BundledFontProviderSource =
   | BundledFontProvider
@@ -168,6 +199,12 @@ function evictFailedPromise<K, V>(
 }
 
 export class TextMeasureFontRegistry {
+  private coverage = new Map<number, FontCoverage>();
+  /** Ids whose coverage is a known lower bound, with the loader that yields their exact coverage. */
+  private inexact = new Map<number, () => Promise<FontCoverage | undefined>>();
+  private baseLatinResults = new Map<string, { ids: number[]; characters: Set<string>; earlier: string; failed?: Set<string> }>();
+  private readonly baseLatinSource: BundledFontProviderSource | undefined;
+  private baseLatinLoaders = new WeakMap<BundledFontLoader, BundledFontLoader>();
   private readonly sink: TextEngineFontSink;
   private readonly bundledSource: BundledFontProviderSource | undefined;
   private bundledPromise: Promise<BundledFontProvider | undefined> | undefined;
@@ -176,6 +213,7 @@ export class TextMeasureFontRegistry {
 
   /** Normalized family → embedded faces of the current document. */
   private facesByFamily = new Map<string, EmbeddedFaceInput[]>();
+  private appFacesByFamily = new Map<string, EmbeddedFaceInput[]>();
   /**
    * Per-face registration memo, keyed by face object identity so re-feeding
    * the same faces (or sharing one face across several chains) never
@@ -198,9 +236,9 @@ export class TextMeasureFontRegistry {
    */
   private bufferIds = new WeakMap<ArrayBuffer, Promise<number>>();
   private loaderIds = new WeakMap<() => Promise<ArrayBuffer>, Promise<number>>();
-  private scriptIds = new Map<FontScript, Promise<ScriptResolution>>();
-  /** Settled per-script results for the synchronous view. */
-  private scriptResults = new Map<FontScript, ScriptResolution>();
+  private scriptIds = new Map<string, Promise<ScriptResolution>>();
+  /** Settled per-script, per-requested-family results for the synchronous view. */
+  private scriptResults = new Map<string, ScriptResolution>();
   /** Chain memo — concurrent `getFontIdChain` calls share one resolution. */
   private chains = new Map<string, Promise<ChainResolution>>();
   /** Settled chains for the synchronous view. */
@@ -208,9 +246,25 @@ export class TextMeasureFontRegistry {
   /** Bumped on invalidation so stale in-flight resolutions can't repopulate caches. */
   private generation = 0;
 
-  constructor(sink: TextEngineFontSink, opts?: { bundled?: BundledFontProviderSource }) {
+  /** Script-fallback faces registered from their skeleton and core, by font id. */
+  private progressiveIds = new Map<number, ProgressiveFontFace>();
+  private readonly progressive?: (slices: SliceLocation) => Promise<ProgressiveFontFace>;
+
+  /** `progressive` opens sliced faces, which register from their skeleton and core. */
+  constructor(sink: TextEngineFontSink, opts?: {
+    bundled?: BundledFontProviderSource;
+    baseLatin?: BundledFontProviderSource;
+    progressive?: (slices: SliceLocation) => Promise<ProgressiveFontFace>;
+  }) {
     this.sink = sink;
     this.bundledSource = opts?.bundled;
+    this.baseLatinSource = opts?.baseLatin;
+    this.progressive = opts?.progressive;
+  }
+
+  /** The sliced faces registered from their skeleton and core, by font id. */
+  progressiveFaces(): ReadonlyMap<number, ProgressiveFontFace> {
+    return this.progressiveIds;
   }
 
   /** Shares in-flight resolution but evicts misses for retry. */
@@ -237,14 +291,18 @@ export class TextMeasureFontRegistry {
    * by object identity keep their registration. Script-fallback
    * registrations are document-independent and survive.
    */
-  setEmbeddedFaces(faces: EmbeddedFaceInput[]): void {
+  setEmbeddedFaces(faces: EmbeddedFaceInput[], appFaces: EmbeddedFaceInput[] = []): void {
+    this.baseLatinResults.clear();
     this.generation++;
     this.facesByFamily = new Map();
-    for (const face of faces) {
-      const key = familyKey(face.family);
-      const list = this.facesByFamily.get(key);
-      if (list) list.push(face);
-      else this.facesByFamily.set(key, [face]);
+    this.appFacesByFamily = new Map();
+    for (const [source, byFamily] of [[faces, this.facesByFamily], [appFaces, this.appFacesByFamily]] as const) {
+      for (const face of source) {
+        const key = familyKey(face.family);
+        const list = byFamily.get(key);
+        if (list) list.push(face);
+        else byFamily.set(key, [face]);
+      }
     }
     this.chains = new Map();
     this.chainResults = new Map();
@@ -296,10 +354,90 @@ export class TextMeasureFontRegistry {
     return resolution?.ids;
   }
 
+  coverageOf(id: number): FontCoverage | undefined {
+    return this.coverage.get(id);
+  }
+
+  /** Characters the base Latin tier settled for `key`, without those whose face failed to load. */
+  settledBaseLatinCharacters(key: string): Set<string> {
+    const result = this.baseLatinResults.get(key);
+    return new Set([...(result?.characters ?? [])].filter(character => !result?.failed?.has(character)));
+  }
+
+  getCachedBaseLatinIds(
+    family: string,
+    bold: boolean,
+    italic: boolean,
+    characters?: readonly string[],
+    earlier?: readonly number[],
+    key = chainKey(family, bold, italic),
+  ): readonly number[] | undefined {
+    if (earlier?.length === 0 || earlier?.some(id => !this.coverage.has(id))) return [];
+    const result = this.baseLatinResults.get(key);
+    if (characters?.length) {
+      if (result && earlier !== undefined && result.earlier !== earlier.join(',')) return undefined;
+      const ids = [...(earlier ?? []), ...(result?.ids ?? [])];
+      for (const character of characters) {
+        if (result?.characters.has(character)) continue;
+        if (baseLatinCandidate(character, false) && (!baseLatinAlias(character) || symbolFamily(family)) &&
+          !ids.some(id => this.coverage.get(id)?.(character))) return undefined;
+        result?.characters.add(character);
+      }
+    }
+    return result?.ids ?? [];
+  }
+
+  async prepareBaseLatin(
+    family: string,
+    bold: boolean,
+    italic: boolean,
+    characters: readonly string[],
+    earlier: readonly number[],
+    key = chainKey(family, bold, italic),
+  ): Promise<boolean> {
+    const generation = this.generation;
+    const aliases = symbolFamily(family);
+    const uncovered = () => earlier.length === 0 || earlier.some(id => !this.coverage.has(id)) ? [] : characters.filter((character) =>
+      baseLatinCandidate(character, false) && (!baseLatinAlias(character) || aliases) &&
+      !earlier.some((id) => this.coverage.get(id)?.(character)));
+    let missing = uncovered();
+    if (missing.length > 0 && earlier.some((id) => this.inexact.has(id))) {
+      await Promise.all(earlier.map((id) => this.exactCoverage(id)));
+      missing = uncovered();
+    }
+    const ids: number[] = [];
+    let failed: Set<string> | undefined;
+    if (missing.length > 0) {
+      try {
+        const { loadBaseLatinFaces } = await import('./baseLatinFaces');
+        await loadBaseLatinFaces({
+          bold, italic, missing, ids,
+          provider: async () => {
+            const provider = await this.bundled();
+            if (provider?.resolveBaseLatin) return provider;
+            const source = this.baseLatinSource;
+            return typeof source === 'function' ? source() : source;
+          },
+          wrapped: this.baseLatinLoaders,
+          register: (loader, face) => this.registerLoader(loader, face),
+          coverage: (id) => this.coverage.get(id),
+          candidate: baseLatinCandidate,
+        });
+      } catch {
+        failed = new Set(missing);
+        this.warnFailure(`[fontRegistry] base Latin face for "${family}" failed to load; falling back`);
+      }
+    }
+    if (generation !== this.generation) return false;
+    const previous = this.baseLatinResults.get(key)?.ids ?? [];
+    this.baseLatinResults.set(key, { ids, characters: new Set(characters), earlier: earlier.join(','), failed });
+    return previous.length !== ids.length || previous.some((id, index) => ids[index] !== id);
+  }
+
   /** Resolves unique script fallbacks in order; stable misses cache and failures retry. */
-  getScriptFallbackIds(scripts: FontScript[]): Promise<number[]> {
+  getScriptFallbackIds(scripts: FontScript[], family?: string): Promise<number[]> {
     const unique = [...new Set(scripts)];
-    return Promise.all(unique.map((script) => this.resolveScript(script))).then((resolutions) => {
+    return Promise.all(unique.map((script) => this.resolveScript(script, family))).then((resolutions) => {
       const out: number[] = [];
       for (const { id } of resolutions) {
         if (id !== null && !out.includes(id)) out.push(id);
@@ -311,22 +449,24 @@ export class TextMeasureFontRegistry {
   /** Synchronous settled view; retryable results are evicted after one pass. */
   getCachedScriptFallbackIds(
     scripts: FontScript[],
-    consumeRetryable = true
+    consumeRetryable = true,
+    family?: string
   ): readonly number[] | undefined {
     const results = this.scriptResults;
-    const resolutions: Array<[FontScript, ScriptResolution]> = [];
+    const resolutions: Array<[string, ScriptResolution]> = [];
     for (const script of scripts) {
-      const resolution = results.get(script);
+      const key = scriptKey(script, family);
+      const resolution = results.get(key);
       if (!resolution) return undefined;
-      resolutions.push([script, resolution]);
+      resolutions.push([key, resolution]);
     }
     const out: number[] = [];
-    for (const [script, resolution] of resolutions) {
+    for (const [key, resolution] of resolutions) {
       const { id } = resolution;
       if (id !== null && !out.includes(id)) out.push(id);
       if (consumeRetryable && resolution.retryable) {
         queueMicrotask(() => {
-          if (results.get(script) === resolution) results.delete(script);
+          if (results.get(key) === resolution) results.delete(key);
         });
       }
     }
@@ -341,6 +481,10 @@ export class TextMeasureFontRegistry {
    * document changes.
    */
   clear(): void {
+    this.coverage.clear();
+    this.inexact.clear();
+    this.baseLatinResults.clear();
+    this.baseLatinLoaders = new WeakMap();
     this.generation++;
     this.bundledPromise = undefined;
     this.faceIds = new WeakMap();
@@ -348,6 +492,7 @@ export class TextMeasureFontRegistry {
     this.lastResortIds = new Map();
     this.bufferIds = new WeakMap();
     this.loaderIds = new WeakMap();
+    this.progressiveIds = new Map();
     this.scriptIds = new Map();
     this.scriptResults = new Map();
     this.chains = new Map();
@@ -369,11 +514,13 @@ export class TextMeasureFontRegistry {
     const ids: number[] = [];
     let retryable = false;
 
-    const face = this.pickEmbeddedFace(family, bold, italic);
-    if (face) {
-      const id = await this.registerFace(face);
-      if (id !== null) ids.push(id);
-      else retryable = true;
+    for (const byFamily of [this.facesByFamily, this.appFacesByFamily]) {
+      const face = this.pickEmbeddedFace(family, bold, italic, byFamily);
+      if (face) {
+        const id = await this.registerFace(face);
+        if (id !== null && !ids.includes(id)) ids.push(id);
+        else if (id === null) retryable = true;
+      }
     }
 
     const bundled = await this.bundled();
@@ -472,9 +619,10 @@ export class TextMeasureFontRegistry {
   private pickEmbeddedFace(
     family: string,
     bold: boolean,
-    italic: boolean
+    italic: boolean,
+    byFamily: ReadonlyMap<string, EmbeddedFaceInput[]>,
   ): EmbeddedFaceInput | undefined {
-    const faces = this.facesByFamily.get(familyKey(family));
+    const faces = byFamily.get(familyKey(family));
     if (!faces) return undefined;
     const weight = bold ? 'bold' : 'normal';
     const style = italic ? 'italic' : 'normal';
@@ -494,7 +642,12 @@ export class TextMeasureFontRegistry {
     const substitute = this.sink.registerSubstituteFont;
     if (!substitute) return base;
     try {
-      return substitute.call(this.sink, base, family);
+      const id = substitute.call(this.sink, base, family);
+      const coverage = this.coverage.get(base);
+      if (coverage) this.coverage.set(id, coverage);
+      const exact = this.inexact.get(base);
+      if (exact) this.inexact.set(id, exact);
+      return id;
     } catch (error) {
       this.warnFailure(
         `[fontRegistry] measurement view of the substitute for "${family}" failed; ` +
@@ -506,22 +659,82 @@ export class TextMeasureFontRegistry {
   }
 
   /** Register raw bytes exactly once per buffer identity (see `bufferIds`). */
-  private registerBuffer(bytes: ArrayBuffer): Promise<number> {
+  private registerBuffer(
+    bytes: ArrayBuffer,
+    face?: { family: string; bold: boolean; italic: boolean },
+    known?: BundledFontLoader,
+  ): Promise<number> {
     let pending = this.bufferIds.get(bytes);
     if (!pending) {
       const ids = this.bufferIds;
-      pending = Promise.resolve().then(() => this.sink.registerFont(new Uint8Array(bytes)));
+      pending = Promise.resolve().then(async () => {
+        const data = new Uint8Array(bytes);
+        const id = face ? this.sink.registerFont(data, face) : this.sink.registerFont(data);
+        const bits = known?.coverage;
+        const coverage = bits === undefined ? await parsedCoverage(data) : coverageFromBits(bits);
+        if (coverage) {
+          this.coverage.set(id, coverage);
+          if (bits !== undefined) {
+            let exact: Promise<FontCoverage | undefined> | undefined;
+            this.inexact.set(id, () => (exact ??= (known!.readOnlyBytes ?? known!)().then((bytes) => parsedCoverage(new Uint8Array(bytes)))));
+          }
+        }
+        return id;
+      });
       evictFailedPromise(ids, bytes, pending, () => false);
       ids.set(bytes, pending);
     }
     return pending;
   }
 
-  private registerLoader(loader: () => Promise<ArrayBuffer>): Promise<number> {
+  /** Replaces a known lower bound by the face's exact coverage. */
+  private async exactCoverage(id: number): Promise<void> {
+    const exact = this.inexact.get(id);
+    if (!exact) return;
+    let coverage: FontCoverage | undefined;
+    try { coverage = await exact(); } catch {}
+    if (this.inexact.get(id) !== exact) return;
+    this.inexact.delete(id);
+    if (coverage) this.coverage.set(id, coverage);
+  }
+
+  /** Registers a sliced face's skeleton and core when progressive loading is on, else the whole face. */
+  private registerFaceLoader(loader: BundledFontLoader, label: string): Promise<number> {
+    const open = this.progressive;
+    const slices = loader.slices;
+    if (open === undefined || slices === undefined) return this.registerLoader(loader);
     let pending = this.loaderIds.get(loader);
     if (!pending) {
       const ids = this.loaderIds;
-      pending = Promise.resolve().then(() => loader()).then((bytes) => this.registerBuffer(bytes));
+      const generation = this.generation;
+      pending = (async () => {
+        let face: ProgressiveFontFace;
+        try {
+          face = await open(slices);
+        } catch (error) {
+          this.warnFailure(
+            `[fontRegistry] sliced face for "${label}" failed to open; loading it whole: ` +
+              `${error instanceof Error ? error.message : String(error)}`
+          );
+          return this.registerBuffer(await (loader.readOnlyBytes ?? loader)(), undefined, loader);
+        }
+        const known = loader.coverage === undefined ? undefined
+          : Object.assign(async () => face.bytes(), { coverage: loader.coverage });
+        const id = await this.registerBuffer(face.bytes(), undefined, known);
+        if (generation === this.generation) this.progressiveIds.set(id, face);
+        return id;
+      })();
+      evictFailedPromise(ids, loader, pending, () => false);
+      ids.set(loader, pending);
+    }
+    return pending;
+  }
+
+  private registerLoader(loader: BundledFontLoader, face?: { family: string; bold: boolean; italic: boolean }): Promise<number> {
+    let pending = this.loaderIds.get(loader);
+    if (!pending) {
+      const ids = this.loaderIds;
+      pending = Promise.resolve().then(() => (loader.readOnlyBytes ?? loader)()).then((bytes) => this.registerBuffer(bytes, face, loader));
       evictFailedPromise(ids, loader, pending, () => false);
       ids.set(loader, pending);
     }
@@ -563,7 +776,7 @@ export class TextMeasureFontRegistry {
       const ids = this.bundledIds;
       pending = (async () => {
         try {
-          const base = await this.registerLoader(loader);
+          const base = await this.registerFaceLoader(loader, family);
           return this.measuredAs(base, loader.measureAs ?? family);
         } catch (error) {
           this.warnFailure(
@@ -608,8 +821,9 @@ export class TextMeasureFontRegistry {
     return pending;
   }
 
-  private resolveScript(script: FontScript): Promise<ScriptResolution> {
-    let pending = this.scriptIds.get(script);
+  private resolveScript(script: FontScript, family: string | undefined): Promise<ScriptResolution> {
+    const key = scriptKey(script, family);
+    let pending = this.scriptIds.get(key);
     if (!pending) {
       const ids = this.scriptIds;
       const results = this.scriptResults;
@@ -620,7 +834,9 @@ export class TextMeasureFontRegistry {
         if (bundled === undefined && typeof this.bundledSource === 'function') retryable = true;
         let loader: (() => Promise<ArrayBuffer>) | undefined;
         try {
-          loader = bundled?.resolveScriptFallback?.(script, false, false);
+          loader = family === undefined
+            ? bundled?.resolveScriptFallback?.(script, false, false)
+            : bundled?.resolveScriptFallback?.(script, false, false, family);
         } catch (error) {
           retryable = true;
           this.warnFailure(
@@ -630,7 +846,7 @@ export class TextMeasureFontRegistry {
         }
         if (loader) {
           try {
-            id = await this.registerLoader(loader);
+            id = await this.registerFaceLoader(loader, script);
           } catch (error) {
             retryable = true;
             this.warnFailure(
@@ -640,11 +856,11 @@ export class TextMeasureFontRegistry {
           }
         }
         const resolution = { id, retryable };
-        results.set(script, resolution);
+        results.set(key, resolution);
         return resolution;
       })();
-      evictFailedPromise(ids, script, pending, (resolution) => resolution.retryable);
-      ids.set(script, pending);
+      evictFailedPromise(ids, key, pending, (resolution) => resolution.retryable);
+      ids.set(key, pending);
     }
     return pending;
   }

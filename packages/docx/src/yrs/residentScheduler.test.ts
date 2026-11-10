@@ -269,6 +269,45 @@ test('idle holds wake by timer and new input postpones the next slice', async ()
   expect(host.timerCount).toBe(0);
 });
 
+test('cancel drops held background tasks and their idle timer, keeping the rest', async () => {
+  const host = fakeHost();
+  const ran: string[] = [];
+  const cancelled: string[] = [];
+  host.scheduler.submit({ lane: 'input', userInput: true, holdsIdleTasks: true, run: () => {} });
+  for (const [kind, idleAfterInputMs] of [['prime', 300], ['other', 500]] as const) {
+    host.scheduler.schedule({
+      kind, version: 0, generation: 0, idleAfterInputMs,
+      cancel: () => { cancelled.push(kind); },
+      run: () => { ran.push(kind); return 'done'; },
+    });
+  }
+  await host.flush();
+  expect(host.timerCount).toBe(1);
+  host.scheduler.cancel((task) => task.kind === 'prime');
+  expect(cancelled).toEqual(['prime']);
+  expect(host.scheduler.pending().background).toBe(1);
+  expect(host.timerCount).toBe(1);
+  host.advance(300);
+  await host.flush();
+  expect(ran).toEqual([]);
+  host.advance(200);
+  await host.flush();
+  expect(ran).toEqual(['other']);
+  host.scheduler.cancel(() => true);
+  expect(host.timerCount).toBe(0);
+});
+
+test('cancel removes the idle timer of the last held task', async () => {
+  const host = fakeHost();
+  host.scheduler.submit({ lane: 'input', userInput: true, holdsIdleTasks: true, run: () => {} });
+  host.scheduler.schedule({ kind: 'prime', version: 0, generation: 0, idleAfterInputMs: 300, run: () => 'done' });
+  await host.flush();
+  expect(host.timerCount).toBe(1);
+  host.scheduler.cancel((task) => task.kind === 'prime');
+  expect(host.timerCount).toBe(0);
+  expect(host.scheduler.pending().background).toBe(0);
+});
+
 test('input that does not hold idle tasks selects the input budget without postponing them', async () => {
   const host = fakeHost();
   const budgets: number[] = [];

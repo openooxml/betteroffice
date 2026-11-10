@@ -10,15 +10,24 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
     },
     "./package.json": "./package.json",
     "./cdn": {
       "types": "./dist/cdn.d.ts",
-      "import": "./dist/cdn.js"
+      "import": "./dist/cdn.js",
+      "default": "./dist/cdn.js"
+    },
+    "./progressive": {
+      "types": "./dist/progressive.d.ts",
+      "import": "./dist/progressive.js",
+      "default": "./dist/progressive.js"
     }
   },
   "files": [
+    "assets/BetterOfficeBaseLatin-*.ttf.zst",
+    "assets/base-latin.json",
     "dist",
     "LICENSE",
     "LICENSES",
@@ -31,7 +40,7 @@
     "export:catalog": "bun scripts/export-catalog.ts"
   },
   "peerDependencies": {
-    "@betteroffice/fonts-cjk": "workspace:*",
+    "@betteroffice/fonts-cjk": "workspace:^0",
     "@betteroffice/fonts-intl": "workspace:^0"
   },
   "peerDependenciesMeta": {

@@ -74,6 +74,7 @@ function session() {
     cellInputs: mock(async (sheet: number, range: string) => ({
       sheet, version: 'v1', cells: [[{ a1: range, input: '=SUM(B1:C1)', isFormula: true }]],
     })),
+    translateFormulas: mock<WorkbookSession['call']['translateFormulas']>(async () => { throw new Error('Unexpected formula move'); }),
     version: mock(async () => 'v1'),
     collaborationStateVector: mock<WorkbookSession['call']['collaborationStateVector']>(async () => new Uint8Array()),
     collaborationStateAsUpdate: mock<WorkbookSession['call']['collaborationStateAsUpdate']>(async () => new Uint8Array()),
@@ -88,17 +89,19 @@ function session() {
     validateEdits: mock(async (): Promise<xlsx.XlsxValidationResult> => { throw new Error('Unexpected mutation'); }),
     applyEdits: mock(async (): Promise<xlsx.XlsxEditResult> => { throw new Error('Unexpected mutation'); }),
     renderPng: mock<WorkbookSession['call']['renderPng']>(async () => { throw new Error('Unexpected export'); }),
-    renderRangePng: mock<WorkbookSession['call']['renderRangePng']>(async () => { throw new Error('Unexpected export'); }),
+    renderPngFonts: mock<WorkbookSession['call']['renderPngFonts']>(async () => { throw new Error('Unexpected export'); }),
     exportStructured: mock<WorkbookSession['call']['exportStructured']>(async () => { throw new Error('Unexpected export'); }),
     exportMarkdown: mock<WorkbookSession['call']['exportMarkdown']>(async () => { throw new Error('Unexpected export'); }),
     printDisplayList: mock<WorkbookSession['call']['printDisplayList']>(async () => { throw new Error('Unexpected export'); }),
     sheets: async () => sheets, calculationStatus: async () => ({ limitedCells: [] }),
     save: async () => new Uint8Array([8, 9]).buffer,
+    saveWithWarnings: async () => ({ bytes: new Uint8Array([8, 9]).buffer, warnings: [] }),
   };
   const viewer: WorkbookSession = {
     ...testSessionCommands(),
     state: { format: 'xlsx', stage: 'ready', version: 0, dirty: false, sheets, activeSheet: 0 },
-    call, save: mock(async () => new Uint8Array([8, 9])), on: () => () => {},
+    call, save: mock(async () => new Uint8Array([8, 9])),
+    saveWithWarnings: mock(async () => ({ bytes: new Uint8Array([8, 9]), warnings: [] })), on: () => () => {},
     onFailure: (listener) => { failure = listener; return () => { failure = undefined; }; },
     failure: undefined, dispose: mock(async () => {}),
   };

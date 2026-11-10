@@ -1,20 +1,12 @@
-import type { Viewport, WorkbookHandle } from './loader';
+import type { PngRunFont } from '../../../../shared/office-session/pngFonts';
+import type { WorkbookHandle } from './loader';
+import type { XlsxPngOptions, XlsxPngTarget } from './pngTarget';
 
-export const pngDisplayListReaders = new WeakMap<WorkbookHandle, {
-  viewport(viewport: Viewport): string;
-  range(options?: { range?: string; scale?: number }): string;
-}>();
+/** The families and styles a canvas export of a target paints, for callers that supply faces. */
+export const pngFontReaders = new WeakMap<WorkbookHandle, (target: XlsxPngTarget, options: XlsxPngOptions) => PngRunFont[]>();
 
-export function workbookPngDisplayListJson(handle: WorkbookHandle, viewport: Viewport): string {
-  const read = pngDisplayListReaders.get(handle);
-  if (!read) throw new Error('Workbook display list is unavailable');
-  return read.viewport(viewport);
-}
-
-export function workbookRangePngDisplayListJson(
-  handle: WorkbookHandle, options?: { range?: string; scale?: number }
-): string {
-  const read = pngDisplayListReaders.get(handle);
-  if (!read) throw new Error('Workbook display list is unavailable');
-  return read.range(options);
+export function workbookPngFonts(handle: WorkbookHandle, target: XlsxPngTarget, options: XlsxPngOptions = {}): PngRunFont[] {
+  const read = pngFontReaders.get(handle);
+  if (!read) throw new Error('Workbook PNG fonts are unavailable');
+  return read(target, options);
 }

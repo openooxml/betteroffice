@@ -52,6 +52,7 @@
     "decreaseFontSize": "إنقاص حجم الخط",
     "increaseFontSize": "زيادة حجم الخط",
     "underline": "تسطير",
+    "strikethrough": "يتوسطه خط",
     "more": "المزيد",
     "fillColor": "لون التعبئة",
     "noFill": "بلا تعبئة",
@@ -91,6 +92,12 @@
     "fallbackTitle": "الشريحة {number}",
     "canvasLabel": "الشريحة {current} من {total}",
     "canvasLabelWithSelection": "الشريحة {current} من {total}؛ الكائن المحدد {name}"
+  },
+  "a11y": {
+    "chartNoData": "لا توجد بيانات",
+    "slideWithTitle": "الشريحة {current} من {total}: {title}",
+    "objectSelected": "تم تحديد {name}",
+    "editingText": "جارٍ تحرير {name}"
   },
   "editor": {
     "appLabel": "محرر شرائح العرض التقديمي",
@@ -156,6 +163,17 @@
     "stalePreview": "تستخدم هذه المعاينة الشريحة المحدّثة. سيؤدي التطبيق إلى تجاوز الأهداف المتغيّرة.",
     "geometry": "الموضع والحجم (x، y، العرض، الارتفاع)",
     "geometryValues": "{before} → {after} pt",
+    "layoutChanged": "تم تغيير التخطيط",
+    "backgroundChanged": "تم تغيير الخلفية",
+    "rowInserted": "تم إدراج صف",
+    "rowDeleted": "تم حذف صف",
+    "columnInserted": "تم إدراج عمود",
+    "columnDeleted": "تم حذف عمود",
+    "broughtToFront": "إحضار إلى المقدمة",
+    "sentToBack": "إرسال إلى الخلف",
+    "broughtForward": "تقديم مستوى واحد",
+    "sentBackward": "إرجاع مستوى واحد",
+    "zOrderChanged": "تم تغيير ترتيب التراكب",
     "appearance": "تغيّر المظهر أو تنسيق النص",
     "changedAgain": "تغيّر الهدف مرة أخرى. راجع المعاينة المحدّثة قبل التطبيق.",
     "canvasTitle": "التغييرات على هذه الشريحة",
@@ -168,7 +186,14 @@
     "canvasStale": "تغيّرت الأهداف. افتح تفاصيل المراجعة لفحص المعاينة المحدّثة قبل التطبيق.",
     "previousPosition": "السابق",
     "proposedPosition": "المقترح",
-    "loadingDiff": "جارٍ تحميل التغييرات…"
+    "loadingDiff": "جارٍ تحميل التغييرات…",
+    "slideStrip": null,
+    "previewSlide": null,
+    "insertedShape": null,
+    "deletedShape": null,
+    "insertedSlide": null,
+    "deletedSlide": null,
+    "movedFrom": null
   },
   "commands": {
     "moreControls": "المزيد من عناصر التحكم",
@@ -212,8 +237,25 @@
       "permissionDenied": "لم يسمح التطبيق المضيف لهذا المكون الإضافي باستخدام هذا الأمر.",
       "unsupportedPolicy": "لا تستطيع المكونات الإضافية تشغيل هذا الأمر بعد. استخدم دفعة تحرير بدلًا من ذلك.",
       "pluginUnavailable": "لم يعد المكون الإضافي نشطًا.",
-      "aborted": "تم إلغاء إجراء المكون الإضافي قبل تشغيل الأمر."
-    }
+      "aborted": "تم إلغاء إجراء المكون الإضافي قبل تشغيل الأمر.",
+      "clipboardUnavailable": "الوصول إلى الحافظة غير متاح أو تم رفضه.",
+      "tableRequired": "ضع المؤشر في خلية جدول أولاً.",
+      "lastSlide": "لا يمكن حذف الشريحة الأخيرة."
+    },
+    "cut": "قص",
+    "copy": "نسخ",
+    "paste": "لصق",
+    "pastePlainText": "لصق كنص عادي",
+    "insert": "إدراج",
+    "delete": "حذف",
+    "deleteTable": "حذف جدول",
+    "duplicateSlide": "تكرار الشريحة",
+    "insertRowsAbove": "إدراج صفوف لأعلى",
+    "insertRowsBelow": "إدراج صفوف لأسفل",
+    "insertColumnsLeft": "إدراج أعمدة إلى اليسار",
+    "insertColumnsRight": "إدراج أعمدة إلى اليمين",
+    "deleteRows": "حذف صفوف",
+    "deleteColumns": "حذف أعمدة"
   },
   "plugins": {
     "toolbarGroup": "المكونات الإضافية",
@@ -225,5 +267,20 @@
     "label": "المتعاونون",
     "moreCollaborators": "{count, plural, zero {لا متعاونين آخرين} one {متعاون إضافي واحد} two {متعاونان إضافيان} few {# متعاونين إضافيين} many {# متعاونًا إضافيًا} other {# متعاون إضافي}}",
     "moreSelections": "+{count, plural, zero {لا تحديدات إضافية} one {تحديد إضافي واحد} two {تحديدان إضافيان} few {# تحديدات إضافية} many {# تحديدًا إضافيًا} other {# تحديد إضافي}}"
+  },
+  "contextMenu": {
+    "text": "قائمة النص",
+    "shape": "قائمة الشكل",
+    "table": "قائمة الجدول",
+    "slide": "قائمة الشريحة"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "delete": "Del",
+    "escape": "Esc",
+    "pageup": "Page Up",
+    "pagedown": "Page Down"
   }
 }

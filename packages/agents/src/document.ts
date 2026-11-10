@@ -1,11 +1,19 @@
-import { DocxSectionError, createYrsSession, saveYrsDocx, type DocxCommentSaveBaseline, type DocxCommentSaveIdentity, type DocxParagraphTarget, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
+import { engines } from '#agents-engines';
+import type { DocxDroppedStructure, DocxKeptParagraph, DocxCommentSaveBaseline, DocxCommentSaveIdentity, DocxParagraphTarget, DocxProposalInput, DocxProposalRecord, DocxProposalSnapshot, DocxProposalResult, DocxProposalStateRequest, YrsSession, YrsStorySegment } from '@betteroffice/docx/yrs';
 import { readCommentPart, readSavedCommentIdentities, verifyCommentOutput, type CommentSource } from './comment-output';
-import { cellPosition, commentBody, commentRanges, commentRoot, commentText, continueList, deleteParagraph, deleteTableRow, hostEdit, insertParagraphsBefore, insertParagraphsWithAnchorFormat, insertSectionBreak, replaceCommentText, setSection, insertTableRow, lineText, listLevel, mergeCells, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
-import { docxBatchSchema, type DocxAgentBatch, type DocxAgentEdit, type DocxEditOutcome } from './docx-schema';
+import { cellPosition, commentBody, commentRanges, commentRoot, commentText, continueList, deleteParagraph, deleteTableRow, formatParagraph, hostEdit, insertParagraphsBefore, insertParagraphsWithAnchorFormat, insertSectionBreak, replaceCommentText, setSection, insertTableRow, lineText, listLevel, mergeCells, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
+import { createDocxBatchSchema, type DocxAgentBatch, type DocxAgentEdit, type DocxEditOutcome } from './docx-schema';
+import { compareDocxStructure, docxModelCounts, type DocxModelCounts } from './docx-structure';
+import { editLimit } from './edit-limits';
+import { cleanupGuard } from './cleanup';
 import {
   DocumentToolError,
+  TrackedRevisionConflictError,
+  AcceptDateUnsupportedError,
+  ProposalDecidedInEditorError,
   unknownMatchError,
   type DocumentOptions,
+  type DocxRunPage,
   type ExactTextEdit,
   type GrepMatch,
   type GrepOptions,
@@ -79,6 +87,9 @@ type EditStep = (draft: YrsSession) => { result: Omit<DocxEditOutcome, 'index' |
 interface HeldProposal {
   value: Proposal;
   targets: Map<string, { story: string; paraId: string; fingerprint: string }>;
+  engine: DocxProposalRecord[];
+  registered: Set<string>;
+  editorDecisions: Map<string, 'accepted' | 'rejected'>;
 }
 
 const MAX_TEXT = 16_000;
@@ -129,20 +140,34 @@ function visibleFormatting(attributes: Record<string, unknown>): Record<string, 
   return formatting;
 }
 
+function fixedRunKind(run: TextRun): string | undefined {
+  return run.kind ?? (run.protected || run.formatting.hyperlink ? 'protected' : undefined);
+}
+
 function literal(query: string, caseSensitive: boolean): RegExp {
   return new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), caseSensitive ? 'gu' : 'giu');
 }
 
 export class DocxAgentDocument {
   readonly name: string;
+  private get attached() { return !this.ownsSession; }
+  private get proposalPeer() { return this.attached ? this.options.editPeer : undefined; }
   private epoch = 0;
   private indexedEpoch = -1;
+  private proposalOperation?: { request?: DocxProposalStateRequest; withdrawal?: readonly string[]; withdrawalSnapshot?: DocxProposalSnapshot; snapshots: DocxProposalSnapshot[] };
+  private proposalSnapshot?: DocxProposalSnapshot;
+  private readonly ownStateVersions = new Map<string, Set<number>>();
+  private readonly ownWithdrawals = new Set<string>();
+  private readonly editorDecisionRevisions = new Map<string, number>();
   private paragraphs: Paragraph[] = [];
   private readonly identities = new Map<string, Paragraph>();
+  private readonly runRevisions = new Map<string, { fingerprint: string; revision: number }>();
   private readonly proposals = new Map<string, HeldProposal>();
   private readonly matches = new Map<string, Omit<ExactTextEdit, 'newText'>>();
   private readonly cursors = new Map<string, { epoch: number; signature: string; paragraph: number; offset: number }>();
   private readonly unsubscribe: () => void;
+  private readonly unsubscribeProposals: () => void;
+  private readonly proposalPrefix = crypto.randomUUID();
   private nextRef = 1;
   private nextProposal = 1;
   private nextCursor = 1;
@@ -157,14 +182,18 @@ export class DocxAgentDocument {
   private commentSaveBaseline?: DocxCommentSaveBaseline;
   private commentSaveBaselineVersion?: number;
   private readonly textEditedComments = new Set<string>();
+  private readonly maxEdits: number;
+  private sourceCounts?: DocxModelCounts;
 
   constructor(
     readonly session: YrsSession,
     private readonly options: DocumentOptions = {},
     private readonly ownsSession = false,
   ) {
+    this.maxEdits = editLimit(options.maxEdits);
     this.name = options.name ?? 'document.docx';
     this.unsubscribe = session.onUpdate(() => { this.epoch++; });
+    this.unsubscribeProposals = this.attached ? session.onProposalChange(snapshot => this.observeProposals(snapshot)) : () => {};
   }
 
   overview(options: { offset?: number; limit?: number } = {}) {
@@ -313,18 +342,61 @@ export class DocxAgentDocument {
     };
   }
 
-  /** Applies 1–32 direct edits on a fork, then commits them as one undo step; any failure applies none. */
+  readRuns(options: { story?: string; offset?: number; limit?: number; maxChars?: number } = {}): DocxRunPage {
+    this.index();
+    this.checkStory(options.story);
+    const offset = integer(options.offset ?? 0, 0, Number.MAX_SAFE_INTEGER, 'offset');
+    const limit = integer(options.limit ?? 50, 1, 200, 'limit');
+    const maxChars = integer(options.maxChars ?? 32000, 1, Number.MAX_SAFE_INTEGER, 'maxChars');
+    const entries = this.paragraphs.filter(p => !options.story || p.story === options.story);
+    const paragraphs: DocxRunPage['paragraphs'] = [];
+    const formats: DocxRunPage['formats'] = {};
+    const keys = new Map<string, string>();
+    let size = 0;
+    for (const p of entries.slice(offset, offset + limit)) {
+      if (paragraphs.length && size + p.text.length > maxChars) break;
+      const runs = p.runs.map((run, index) => {
+        const id = `${p.ref}.${index + 1}`;
+        const kind = fixedRunKind(run);
+        if (kind) return { id, kind };
+        const text = p.text.slice(run.start, run.end);
+        if (!Object.keys(run.formatting).length) return { id, text };
+        const signature = JSON.stringify(Object.entries(run.formatting).sort(([a], [b]) => a.localeCompare(b)));
+        let f = keys.get(signature);
+        if (!f) {
+          f = `f${keys.size + 1}`;
+          keys.set(signature, f);
+          formats[f] = structuredClone(run.formatting);
+        }
+        return { id, text, f };
+      });
+      paragraphs.push({ ref: p.ref, revision: this.runRevision(p), text: p.text, runs });
+      size += p.text.length;
+    }
+    const next = offset + paragraphs.length;
+    return { version: this.epoch, paragraphs, formats, nextOffset: next < entries.length ? next : null, total: entries.length };
+  }
+
   async edit(input: DocxAgentBatch) {
     this.index();
     if (Array.isArray(input?.edits) && input.edits.some(edit => edit?.op === 'delete_comment')
       && input.edits.some(edit => ['add_comment', 'reply_comment', 'resolve_comment', 'replace_comment_text'].includes(edit?.op))) {
       throw new DocumentToolError('INVALID_ARGUMENT', 'delete_comment cannot be combined with other comment operations in one batch; run it in its own docx_edit call.');
     }
-    const parsed = docxBatchSchema.safeParse(input);
-    if (!parsed.success) throw new DocumentToolError('INVALID_ARGUMENT', 'Use the docx_edit schema: version and 1–32 edits.', { issues: parsed.error.issues.map(issue => ({ path: issue.path, message: issue.message })) });
+    const parsed = createDocxBatchSchema(this.maxEdits).safeParse(input);
+    if (!parsed.success) throw new DocumentToolError('INVALID_ARGUMENT', `Use the docx_edit schema: version and 1-${this.maxEdits} edits.`, { issues: parsed.error.issues.map(issue => ({ path: issue.path, message: issue.message })) });
     const { version, edits } = parsed.data;
     if (version !== this.epoch) throw new DocumentToolError('STALE_VERSION', 'The document changed. Read office_outline or office_grep again and copy its version.');
-    if (JSON.stringify(edits).length > 64_000) throw new DocumentToolError('EDIT_LIMIT', 'A batch holds at most 64000 characters of input. Split it.');
+    const maxChars = Math.max(64_000, 1000 * this.maxEdits);
+    if (JSON.stringify(edits).length > maxChars) throw new DocumentToolError('EDIT_LIMIT', `A batch holds at most ${maxChars} characters of input. Split it.`);
+    const paragraphs = new Set<string>();
+    for (const edit of edits) if (edit.op === 'set_runs') {
+      if (paragraphs.has(edit.paragraph)) throw new DocumentToolError('INVALID_ARGUMENT', 'Use one set_runs operation per paragraph in a batch.');
+      paragraphs.add(edit.paragraph);
+    }
+    for (const edit of edits) if ('match' in edit && edit.match !== undefined && paragraphs.has(this.matches.get(edit.match)?.ref ?? '')) {
+      throw new DocumentToolError('INVALID_ARGUMENT', 'set_runs moves text offsets, so a match in the same paragraph needs its own batch. Run grep again after set_runs.');
+    }
     const outcomes = await this.commit(version, edits);
     this.index();
     return {
@@ -336,15 +408,18 @@ export class DocxAgentDocument {
     };
   }
 
-  propose(input: { author: string; note?: string; edits: TextEdit[] }): Proposal {
+  private prepareChanges(input: { author: string; note?: string; edits: TextEdit[] }): HeldProposal {
     this.index();
-    if (!input.author || input.author.length > 200 || (input.note?.length ?? 0) > 2000 || !Array.isArray(input.edits) || input.edits.length < 1 || input.edits.length > 32) {
-      throw new DocumentToolError('INVALID_ARGUMENT', 'Supply an author (1–200 characters), note (up to 2000), and 1–32 edits.');
+    if (!input.author || input.author.length > 200 || (input.note?.length ?? 0) > 2000 || !Array.isArray(input.edits) || input.edits.length < 1 || input.edits.length > this.maxEdits) {
+      throw new DocumentToolError('INVALID_ARGUMENT', `Supply an author (1-200 characters), note (up to 2000), and 1-${this.maxEdits} edits.`);
     }
     if (this.proposals.size >= 64) {
       const closed = [...this.proposals].find(([, held]) => held.value.status !== 'pending');
-      if (closed) this.proposals.delete(closed[0]);
-      else throw new DocumentToolError('PROPOSAL_LIMIT', 'Reject or discard a pending proposal before staging more than 64.');
+      if (closed) {
+        this.checkEditorDecision(closed[1]);
+        this.forgetProposalOwnership(closed[1]);
+        this.proposals.delete(closed[0]);
+      } else throw new DocumentToolError('PROPOSAL_LIMIT', 'Reject or discard a pending proposal before staging more than 64.');
     }
     const changes: ProposalChange[] = [];
     const targets: HeldProposal['targets'] = new Map();
@@ -382,6 +457,10 @@ export class DocxAgentDocument {
       if (!boundary(p.text, start) || !boundary(p.text, end)) throw new DocumentToolError('INVALID_RANGE', 'Text ranges must not split a Unicode character.');
       if (edit.oldText === edit.newText) throw new DocumentToolError('NO_CHANGE', 'oldText and newText are identical.');
       if (p.runs.some(run => run.protected && (run.start < end && run.end > start || start === end && run.start <= start && start < run.end))) {
+        if (this.attached) {
+          const conflicts = this.revisionConflicts([{ ...this.reference(p), start, oldText: edit.oldText, newText: edit.newText }]);
+          if (conflicts.length) throw new TrackedRevisionConflictError(conflicts);
+        }
         throw new DocumentToolError('PROTECTED_CONTENT', 'This range contains an embed or an existing tracked change. Choose an ordinary text range.');
       }
       if (changes.some(change => change.ref === p.ref && start <= change.start + change.oldText.length && end >= change.start)) {
@@ -391,8 +470,87 @@ export class DocxAgentDocument {
       targets.set(p.ref, { story: p.story, paraId: p.paraId, fingerprint: p.fingerprint });
     }
     const value: Proposal = { id: `proposal${this.nextProposal++}`, author: input.author, note: input.note ?? '', status: 'pending', changes, staleRefs: [] };
-    this.proposals.set(value.id, { value, targets });
-    return structuredClone(value);
+    return { value, targets, engine: [], registered: new Set(), editorDecisions: new Map() };
+  }
+
+  propose(input: { author: string; note?: string; edits: TextEdit[] }): Proposal {
+    if (!this.attached) {
+      const held = this.prepareChanges(input);
+      this.proposals.set(held.value.id, held);
+      return structuredClone(held.value);
+    }
+    if (this.proposalPeer) throw new DocumentToolError('UNSUPPORTED', 'Use proposeAsync with a DOCX editor edit peer.');
+    const plan = this.prepareProposal(input);
+    try {
+      const snapshot = this.proposalResult(this.session.proposeChanges({ expectVersion: plan.version, expectPreviewVersion: plan.previewVersion, proposals: plan.proposals }), plan.held.value.changes);
+      return this.recordProposal(plan, snapshot);
+    } catch (error) {
+      this.forgetProposalOwnership(plan.held);
+      this.proposals.delete(plan.held.value.id);
+      throw error;
+    }
+  }
+
+  async proposeAsync(input: { author: string; note?: string; edits: TextEdit[] }): Promise<Proposal> {
+    if (!this.proposalPeer) return this.propose(input);
+    const plan = this.prepareProposal(input);
+    try {
+      const result = await this.proposalPeer.proposeChanges({ expectVersion: plan.version, expectPreviewVersion: plan.previewVersion, proposals: plan.proposals });
+      this.synchronizeProposals(this.session.getProposals());
+      const snapshot = this.proposalResult(result, plan.held.value.changes);
+      const value = this.recordProposal(plan, snapshot);
+      if (!plan.held.editorDecisions.size) this.checkDecisionReferences(plan.references, plan.held);
+      return value;
+    } catch (error) {
+      if (!plan.held.editorDecisions.size && plan.held.registered.size) {
+        const current = this.proposalSnapshot ?? this.session.getProposals();
+        const ids = [...plan.held.registered];
+        this.proposalOperation = { withdrawal: ids, withdrawalSnapshot: current, snapshots: [] };
+        try {
+          const result = await this.proposalPeer.withdrawProposals({ expectVersion: current.version, expectPreviewVersion: current.previewVersion, ids });
+          this.finishProposalOperation(result);
+        } finally { if (this.proposalOperation) this.finishProposalOperation(); }
+        this.checkEditorDecision(plan.held);
+      }
+      if (!plan.held.editorDecisions.size && !plan.held.registered.size) {
+        this.forgetProposalOwnership(plan.held);
+        this.proposals.delete(plan.held.value.id);
+      }
+      throw error;
+    }
+  }
+
+  private prepareProposal(input: { author: string; note?: string; edits: TextEdit[] }) {
+    const held = this.prepareChanges(input);
+    const { value, targets } = held;
+    const changes = value.changes;
+    const references = this.captureReferences();
+    const sessionId = this.session.paragraphIdentities().sessionId;
+    const date = new Date().toISOString().replace(/\.\d+Z$/, 'Z');
+    const proposals = changes.map(trimChange).map((change, index): DocxProposalInput => {
+      const { story, paraId } = targets.get(change.ref)!;
+      const paragraph = { kind: 'session' as const, sessionId, story, paraId };
+      const id = `${this.proposalPrefix}:${value.id}:${index}`;
+      const suggest = { author: input.author, date };
+      const offset = this.acceptedOffset(story, paraId, change.start);
+      if (!change.oldText) return { id, paragraph, suggest, op: 'insertText', at: { offset }, text: change.newText };
+      return { id, paragraph, suggest, op: 'replaceText', at: { offset }, search: change.oldText, replaceWith: change.newText };
+    });
+    held.engine = proposals.map((proposal, index): DocxProposalRecord => {
+      const target = targets.get(changes[index].ref)!;
+      return { id: proposal.id, state: 'proposed', paragraph: { kind: 'session', sessionId, story: target.story, paraId: target.paraId }, revisionIds: [], changed: false };
+    });
+    this.proposals.set(value.id, held);
+    const snapshot = this.proposalSnapshot ?? this.session.getProposals();
+    return { held, proposals, references, version: snapshot.version, previewVersion: snapshot.previewVersion };
+  }
+
+  private recordProposal(plan: { held: HeldProposal; proposals: DocxProposalInput[]; references: ReturnType<DocxAgentDocument['captureReferences']> }, snapshot: DocxProposalSnapshot): Proposal {
+    this.synchronizeProposals(snapshot);
+    this.synchronizeProposals(this.session.getProposals());
+    this.epoch++;
+    this.preserveReferences(plan.references, snapshot.version);
+    return structuredClone(plan.held.value);
   }
 
   review(id: string): Proposal {
@@ -402,15 +560,16 @@ export class DocxAgentDocument {
 
   listProposals() {
     this.index();
-    return [...this.proposals.values()].map(({ value }) => ({ id: value.id, author: value.author, note: value.note.slice(0, 120), status: value.status, changes: value.changes.length }));
+    return [...this.proposals.values()].map(({ value }) => ({ id: value.id, author: value.author, note: value.note.slice(0, 120), status: value.status, changes: value.changes.length, ...(value.records && { records: structuredClone(value.records) }) }));
   }
 
-  async accept(id: string, options: { tracked?: boolean; date?: string } = {}) {
+  private async acceptHeadless(id: string, options: { tracked?: boolean; date?: string } = {}) {
     const held = this.pending(id);
     if (options.tracked && options.date !== undefined && !Number.isFinite(Date.parse(options.date))) {
       throw new DocumentToolError('INVALID_ARGUMENT', 'Tracked acceptance requires an ISO date.');
     }
     const draft = await this.fork();
+    const release = cleanupGuard(() => draft.destroy());
     try {
       this.checkPending(held);
       const vector = draft.encodeStateVector();
@@ -421,51 +580,127 @@ export class DocxAgentDocument {
       finally { this.session.addUndoBoundary(); }
       held.value.status = 'accepted';
       return { id, status: 'accepted' as const, tracked: options.tracked ?? false, changes: held.value.changes.length };
-    } finally { draft.destroy(); }
+    } catch (error) { throw release.failed(error); } finally { release.run(); }
+  }
+
+  async accept(id: string, options: { tracked?: boolean; date?: string } = {}) {
+    if (!this.attached) return this.acceptHeadless(id, options);
+    const held = this.proposal(id);
+    this.checkEditorDecision(held);
+    if (options.date !== undefined) throw new AcceptDateUnsupportedError();
+    this.checkPending(held);
+    await Promise.resolve();
+    this.synchronizeProposals(this.session.getProposals());
+    this.checkEditorDecision(held);
+    this.checkPending(held);
+    this.session.addUndoBoundary();
+    try { await this.decideProposalAsync(held, 'accepted', options.tracked ?? false); }
+    finally { this.session.addUndoBoundary(); }
+    return { id, status: this.settledStatus(held), tracked: options.tracked ?? false, changes: held.value.changes.length };
   }
 
   reject(id: string) {
     const held = this.proposal(id);
+    this.checkEditorDecision(held);
     if (held.value.status !== 'pending') throw new DocumentToolError('PROPOSAL_CLOSED', `Proposal is ${held.value.status}.`);
-    held.value.status = 'rejected';
-    return { id, status: 'rejected' as const };
+    if (this.attached) this.decideProposal(held, 'rejected');
+    else held.value.status = 'rejected';
+    return { id, status: this.attached ? this.settledStatus(held) : 'rejected' as const };
+  }
+
+  async rejectAsync(id: string) {
+    if (!this.proposalPeer) return this.reject(id);
+    const held = this.proposal(id);
+    this.checkEditorDecision(held);
+    if (held.value.status !== 'pending') throw new DocumentToolError('PROPOSAL_CLOSED', `Proposal is ${held.value.status}.`);
+    await this.decideProposalAsync(held, 'rejected');
+    return { id, status: this.settledStatus(held) };
+  }
+
+  async discardAsync(id: string) {
+    if (!this.proposalPeer) return this.discard(id);
+    const held = this.proposal(id);
+    this.checkEditorDecision(held);
+    if (held.value.status === 'pending') await this.decideProposalAsync(held, 'rejected');
+    this.forgetProposalOwnership(held);
+    this.proposals.delete(id);
   }
 
   discard(id: string) {
-    this.proposal(id);
+    const held = this.proposal(id);
+    this.checkEditorDecision(held);
+    if (this.attached && held.value.status === 'pending') this.decideProposal(held, 'rejected');
+    this.forgetProposalOwnership(held);
     this.proposals.delete(id);
   }
 
   async render(page = 1, proposalId?: string) {
+    const held = proposalId ? this.pending(proposalId) : undefined;
     integer(page, 1, 100_000, 'page');
     if (!this.options.renderer) throw new DocumentToolError('UNSUPPORTED', 'No renderer configured. Supply a DocumentRenderer or use the MCP server.');
-    const held = proposalId ? this.pending(proposalId) : undefined;
     const draft = await this.fork();
+    const release = cleanupGuard(() => draft.destroy());
     try {
-      if (held) { this.checkPending(held); this.apply(draft, held); }
+      if (held) this.checkPending(held);
+      if (this.attached) this.projectProposals(draft, held);
+      else if (held) this.apply(draft, held);
       return await this.options.renderer(draft, page);
-    } finally { draft.destroy(); }
+    } catch (error) { throw release.failed(error); } finally { release.run(); }
   }
 
   async export(proposalId?: string): Promise<Uint8Array> {
     return this.exportBytes(proposalId);
   }
 
-  private async exportBytes(proposalId?: string, updateModifiedDate = true): Promise<Uint8Array> {
+  /** Paragraphs the last export wrote as their source bytes, see `DocxSavedDocument.keptUnchanged`. */
+  exportKeptUnchanged() {
+    return this.lastKeptUnchanged;
+  }
+
+  private lastKeptUnchanged: { structure: number; paragraphs: Array<DocxKeptParagraph & { ref?: string }> } | undefined;
+
+  /** Story parts the last export wrote whole with less structure, see `DocxSavedDocument.structureDropped`. */
+  exportStructureDropped() {
+    return this.lastStructureDropped;
+  }
+
+  private lastStructureDropped: Array<Omit<DocxDroppedStructure, 'paragraphs'> & { paragraphs: Array<DocxDroppedStructure['paragraphs'][number] & { ref?: string }> }> | undefined;
+
+  private async exportBytes(proposalId?: string, updateModifiedDate = true, inspect?: (draft: YrsSession) => void): Promise<Uint8Array> {
     const held = proposalId ? this.pending(proposalId) : undefined;
     const draft = await this.fork();
+    const release = cleanupGuard(() => draft.destroy());
     try {
-      if (held) { this.checkPending(held); this.apply(draft, held); }
+      if (held) this.checkPending(held);
+      if (this.attached) this.projectProposals(draft, held);
+      else if (held) this.apply(draft, held);
+      inspect?.(draft);
       if (!draft.materializeDocx()?.originalBuffer) throw new DocumentToolError('UNSUPPORTED', 'Export requires a session opened from DOCX bytes.');
       const version = this.epoch;
       const comments = draft.listComments();
       const baseline = this.commentSaveBaseline && JSON.stringify(comments) === JSON.stringify(this.commentSaveBaseline.comments)
         ? this.commentSaveBaseline : undefined;
-      const bytes = (await saveYrsDocx(draft, { updateModifiedDate,
+      const saved = await engines.get('docx').module.yrs.saveYrsDocx(draft, { updateModifiedDate,
         commentIdentities: this.deletedComments.size ? this.commentSaveIdentities : undefined,
         commentBaseline: baseline,
         commentDeletion: !!baseline && !held && this.commentSaveBaselineVersion === version,
-      })).bytes;
+      });
+      const bytes = saved.bytes;
+      const refs = new Map([...this.identities.values()].map(paragraph => [paragraph.paraId, paragraph.ref]));
+      this.lastKeptUnchanged = saved.keptUnchanged && {
+        ...saved.keptUnchanged,
+        paragraphs: saved.keptUnchanged.paragraphs.map(paragraph => ({
+          ...paragraph,
+          ...(paragraph.paraId && refs.has(paragraph.paraId) ? { ref: refs.get(paragraph.paraId) } : {}),
+        })),
+      };
+      this.lastStructureDropped = saved.structureDropped?.map(part => ({
+        ...part,
+        paragraphs: part.paragraphs.map(paragraph => ({
+          ...paragraph,
+          ...(refs.has(paragraph.paraId) ? { ref: refs.get(paragraph.paraId) } : {}),
+        })),
+      }));
       const seeded = new Set((draft.materializeDocx()?.package.document.comments ?? []).map(comment => String(comment.id)));
       if (this.deletedComments.size && comments.some(comment => !seeded.has(comment.id))) {
         const source = await this.checkCommentPart(true);
@@ -480,27 +715,42 @@ export class DocxAgentDocument {
       }
       return bytes;
     } catch (error) {
-      if (error instanceof DocxSectionError) throw new DocumentToolError('UNSUPPORTED', error.message);
-      throw error;
-    } finally { draft.destroy(); }
+      if (error instanceof engines.get('docx').module.yrs.DocxSectionError) throw release.failed(new DocumentToolError('UNSUPPORTED', error.message));
+      throw release.failed(error);
+    } finally { release.run(); }
   }
 
-  async verify(proposalId?: string) {
-    const bytes = await this.export(proposalId);
+  async verify(proposalId?: string, options: { structure?: boolean } = {}) {
+    const structure = options.structure ?? true;
+    let after: DocxModelCounts | undefined;
+    const bytes = await this.exportBytes(proposalId, true, structure ? draft => { after = docxModelCounts(draft); } : undefined);
     const reopened = await openDocx(bytes);
+    const release = cleanupGuard(() => reopened.close());
     try {
-      return { reopened: true, bytes: bytes.length, paragraphs: reopened.overview().paragraphs, checks: ['save', 'reopen'], unchecked: ['visual fidelity', 'semantic correctness'] };
-    } finally { reopened.close(); }
+      const kept = this.lastKeptUnchanged;
+      const dropped = this.lastStructureDropped;
+      const paragraphs = reopened.overview().paragraphs;
+      const source = this.session.materializeDocx()?.originalBuffer;
+      if (!structure || !source || !after) return { reopened: true, bytes: bytes.length, paragraphs, checks: ['save', 'reopen'], unchecked: ['visual fidelity', 'semantic correctness', ...(structure ? [] : ['structure'])], structureDropped: dropped, keptUnchanged: kept };
+      const original = new Uint8Array(source);
+      this.sourceCounts ??= await sourceModelCounts(original);
+      const report = await compareDocxStructure(original, bytes, this.sourceCounts, after);
+      return { reopened: true, bytes: bytes.length, paragraphs, checks: ['save', 'reopen', 'structure'], structure: report, unchecked: ['visual fidelity', 'semantic correctness'], structureDropped: dropped, keptUnchanged: kept };
+    } catch (error) { throw release.failed(error); } finally { release.run(); }
   }
 
   close() {
     if (this.closed) return;
     this.closed = true;
     this.unsubscribe();
+    this.unsubscribeProposals();
     this.proposals.clear();
+    this.ownStateVersions.clear();
+    this.ownWithdrawals.clear();
     this.cursors.clear();
     this.matches.clear();
     this.identities.clear();
+    this.runRevisions.clear();
     this.paragraphs = [];
     if (this.ownsSession) this.session.destroy();
   }
@@ -508,11 +758,16 @@ export class DocxAgentDocument {
   private index() {
     if (this.closed) throw new DocumentToolError('CLOSED', 'This document is closed. Open it again.');
     if (this.indexedEpoch === this.epoch) return;
+    let snapshot = this.attached ? this.session.getProposals() : undefined;
+    if (snapshot) {
+      this.synchronizeProposals(snapshot);
+      snapshot = this.proposalSnapshot ?? snapshot;
+    }
     const paragraphs: Paragraph[] = [];
     const active = new Set<string>();
     const cells = new Map<string, TableCellPosition>();
     const stories = this.session.storyIds();
-    const segmentsByStory = new Map(stories.map(story => [story, this.session.storySegments(story)]));
+    const segmentsByStory = new Map(stories.map(story => [story, this.attached ? this.projectSegments(this.session.storySegments(story), snapshot!) : this.session.storySegments(story)]));
     for (const [story, segments] of segmentsByStory) {
       for (const [cell, position] of tableCells(story, segments)) cells.set(cell, cellPosition(position));
     }
@@ -545,7 +800,8 @@ export class DocxAgentDocument {
           const key = JSON.stringify([story, segment.paraId]);
           active.add(key);
           const previous = this.identities.get(key);
-          const fingerprint = JSON.stringify(segments);
+          const decisionRevision = this.editorDecisionRevisions.get(key);
+          const fingerprint = JSON.stringify(segments) + (decisionRevision === undefined ? '' : `:${decisionRevision}`);
           const level = listLevel(segment.properties);
           const p: Paragraph = {
             ref: previous?.ref ?? `p${this.nextRef++}`,
@@ -559,9 +815,13 @@ export class DocxAgentDocument {
           paragraphs.push(p);
           text = ''; runs = []; segments = [];
         } else {
-          const value = segment.kind === 'text' ? segment.text : '\ufffc';
-          runs.push({ start: text.length, end: text.length + value.length, formatting: visibleFormatting(segment.attributes), protected: segment.kind === 'embed' || !!segment.attributes.ins || !!segment.attributes.del });
-          text += value;
+          const values = segment.kind === 'text' ? segment.text.split(/([\t\r\n\v\f])/u).filter(Boolean) : ['\ufffc'];
+          for (const value of values) {
+            const kind = segment.kind === 'embed' ? segment.embedKind : value === '\t' ? 'tab' : /^[\r\n\v\f]$/u.test(value) ? 'break' : undefined;
+            runs.push({ start: text.length, end: text.length + value.length, formatting: visibleFormatting(segment.attributes), protected: segment.kind === 'embed' || !!segment.attributes.ins || !!segment.attributes.del,
+              ...(kind && { kind }) });
+            text += value;
+          }
         }
       }
     }
@@ -588,6 +848,7 @@ export class DocxAgentDocument {
 
   private proposal(id: string): HeldProposal {
     this.index();
+    if (this.attached) this.synchronizeProposals(this.session.getProposals());
     const held = this.proposals.get(id);
     if (!held) throw new DocumentToolError('UNKNOWN_PROPOSAL', 'Proposal missing. Stage a proposal first.', { id });
     return held;
@@ -600,6 +861,7 @@ export class DocxAgentDocument {
   }
 
   private checkPending(held: HeldProposal) {
+    this.checkEditorDecision(held);
     if (held.value.status !== 'pending') throw new DocumentToolError('PROPOSAL_CLOSED', `Proposal is ${held.value.status}. Stage a new proposal.`);
     const stale = this.staleRefs(held);
     if (stale.length) this.stale(stale);
@@ -616,7 +878,8 @@ export class DocxAgentDocument {
 
   private async fork(clientId?: number): Promise<YrsSession> {
     this.index();
-    const draft = await createYrsSession({ clientId });
+    const { module } = await engines.load('docx');
+    const draft = await module.yrs.createYrsSession({ clientId });
     try {
       const source = this.session.materializeDocx()?.originalBuffer;
       const state = this.session.encodeState();
@@ -628,7 +891,410 @@ export class DocxAgentDocument {
         draft.loadState(state);
       }
       return draft;
-    } catch (error) { draft.destroy(); throw error; }
+    } catch (error) { throw cleanupGuard(() => draft.destroy()).failed(error); }
+  }
+
+  private runRevision(p: Paragraph) {
+    const key = JSON.stringify([p.story, p.paraId]);
+    const held = this.runRevisions.get(key);
+    if (!held) { this.runRevisions.set(key, { fingerprint: p.fingerprint, revision: p.revision }); return p.revision; }
+    if (held.fingerprint !== p.fingerprint) { held.fingerprint = p.fingerprint; held.revision++; }
+    return held.revision;
+  }
+
+  private captureReferences() {
+    this.index();
+    return { epoch: this.indexedEpoch, paragraphs: this.paragraphs.map(p => ({ ...p })), decisions: new Map(this.editorDecisionRevisions) };
+  }
+
+  private preserveReferences(before: ReturnType<DocxAgentDocument['captureReferences']>, version: string, changes: ProposalChange[] = []) {
+    if (this.session.version() !== version) return;
+    this.index();
+    const touched = new Set(before.paragraphs.filter(previous => {
+      const key = JSON.stringify([previous.story, previous.paraId]);
+      return before.decisions.get(key) !== this.editorDecisionRevisions.get(key);
+    }).map(previous => previous.ref));
+    if (before.paragraphs.length !== this.paragraphs.length || before.paragraphs.some(previous => {
+      if (touched.has(previous.ref)) return false;
+      const current = this.paragraphs.find(p => p.ref === previous.ref);
+      const edits = changes.filter(change => change.ref === previous.ref).sort((a, b) => b.start - a.start);
+      let expected = previous.text;
+      for (const edit of edits) expected = expected.slice(0, edit.start) + edit.newText + expected.slice(edit.start + edit.oldText.length);
+      return !current || current.text !== expected || (!edits.length && current.fingerprint !== previous.fingerprint);
+    })) return;
+    const shift = (ref: string, offset: number, right = false, afterInsertion = right) => {
+      let delta = 0;
+      for (const change of changes.filter(change => change.ref === ref).sort((a, b) => a.start - b.start)) {
+        if (offset < change.start) break;
+        if (offset === change.start) return offset + delta + (!change.oldText && afterInsertion ? change.newText.length : 0);
+        if (offset < change.start + change.oldText.length) return change.start + delta + (right ? change.newText.length : 0);
+        delta += change.newText.length - change.oldText.length;
+      }
+      return offset + delta;
+    };
+    for (const p of this.paragraphs) {
+      const previous = before.paragraphs.find(entry => entry.ref === p.ref);
+      if (!previous || touched.has(p.ref)) continue;
+      p.revision = previous.revision;
+      for (const match of this.matches.values()) {
+        if (match.ref !== p.ref || match.revision !== previous.revision || match.start === undefined) continue;
+        if (previous.text.slice(match.start, match.start + match.oldText.length) !== match.oldText) continue;
+        const start = shift(p.ref, match.start, true);
+        const end = shift(p.ref, match.start + match.oldText.length, true, false);
+        match.start = start;
+        match.oldText = p.text.slice(start, end);
+      }
+      for (const held of this.proposals.values()) {
+        const target = held.targets.get(p.ref);
+        if (target?.fingerprint !== previous.fingerprint) continue;
+        target.fingerprint = p.fingerprint;
+        if (held.value.status === 'pending') for (const change of held.value.changes) {
+          if (change.ref === p.ref) change.start = shift(p.ref, change.start);
+        }
+      }
+    }
+    if (touched.size) return;
+    for (const cursor of this.cursors.values()) {
+      if (cursor.epoch !== before.epoch) continue;
+      const paragraph = before.paragraphs[cursor.paragraph];
+      if (paragraph) cursor.offset = shift(paragraph.ref, cursor.offset);
+      cursor.epoch = this.epoch;
+    }
+  }
+
+  private revisionConflicts(changes: ProposalChange[]) {
+    const snapshot = this.proposalSnapshot ?? this.session.getProposals();
+    return this.session.listRevisions().flatMap(revision => {
+      const paragraphs = this.paragraphs.filter(p => p.story === revision.story);
+      const first = paragraphs.findIndex(p => p.paraId === revision.range.start.paraId);
+      const last = paragraphs.findIndex(p => p.paraId === revision.range.end.paraId);
+      if (first < 0 || last < 0) return [];
+      const project = (paragraph: Paragraph, offset: number) => {
+        let segments: YrsStorySegment[] = [];
+        for (const segment of this.session.storySegments(revision.story)) {
+          if (segment.kind === 'pilcrow') {
+            if (segment.paraId === paragraph.paraId) break;
+            segments = [];
+          } else segments.push(segment);
+        }
+        let raw = 0, visible = 0;
+        for (const segment of segments) {
+          const length = segment.kind === 'text' ? segment.text.length : 1;
+          const shown = this.projectSegments([segment], snapshot).length > 0;
+          if (offset <= raw + length) return visible + (shown ? Math.max(0, offset - raw) : 0);
+          raw += length;
+          if (shown) visible += length;
+        }
+        return visible;
+      };
+      const conflicting = changes.some(change => {
+        const index = paragraphs.findIndex(p => p.ref === change.ref);
+        if (revision.kind === 'pPrChange' && index === last + 1 && change.start === 0) return true;
+        if (index < first || index > last) return false;
+        if (revision.kind.startsWith('pPr')) return true;
+        const paragraph = paragraphs[index]!;
+        const start = index === first ? project(paragraph, revision.range.start.offset) : 0;
+        const end = index === last ? project(paragraph, revision.range.end.offset) : paragraph.text.length;
+        return change.start <= end && change.start + change.oldText.length >= start;
+      });
+      if (!conflicting) return [];
+      return [{ revisionId: revision.revisionId, author: revision.author, kind: revision.kind, range: revision.range, ref: paragraphs[first]!.ref }];
+    });
+  }
+
+  private proposalResult(result: DocxProposalResult, changes?: ProposalChange[]): DocxProposalSnapshot {
+    if (!result.ok && result.failure.code === 'tracked-revision-conflict') {
+      const affected = changes ?? [...this.proposals.values()].filter(held => held.value.status === 'pending').flatMap(held => held.value.changes);
+      const conflicts = this.revisionConflicts(affected);
+      if (conflicts.length) throw new TrackedRevisionConflictError(conflicts);
+      throw new DocumentToolError('PROTECTED_CONTENT', result.failure.message, result.failure);
+    }
+    if (!result.ok) throw new DocumentToolError((result.failure.code === 'stale-version' || result.failure.code === 'stale-preview') ? 'STALE_TARGET' : result.failure.code, result.failure.message, result.failure);
+    return result.snapshot;
+  }
+
+  private synchronizeProposals(snapshot: DocxProposalSnapshot) {
+    if (this.proposalOperation) {
+      this.proposalOperation.snapshots.push(snapshot);
+      return;
+    }
+    const previous = this.proposalSnapshot;
+    if (previous && (snapshot.previewVersion < previous.previewVersion
+      || (snapshot.revision ?? 0) < (previous.revision ?? 0))) return;
+    this.proposalSnapshot = snapshot;
+    const records = new Map(snapshot.proposals.map(record => [record.id, record]));
+    const withdrawn = new Map((snapshot.withdrawn ?? []).map(record => [record.id, record]));
+    const touched = new Set<string>();
+    for (const held of this.proposals.values()) {
+      held.engine = held.engine.map(record => {
+        const next = records.get(record.id);
+        const removed = withdrawn.get(record.id);
+        if (!next && !removed && !held.registered.has(record.id)) return record;
+        const current = next ?? removed ?? { ...record, state: record.state === 'proposed' ? 'rejected' as const : record.state };
+        const stateVersion = current.stateVersion ?? snapshot.previewVersion;
+        const changed = current.state !== record.state || (current.stateVersion ?? 0) > (record.stateVersion ?? 0)
+          || (!next && held.registered.has(record.id));
+        const own = next ? this.ownStateVersions.get(record.id)?.has(stateVersion) : this.ownWithdrawals.has(record.id);
+        if (changed && !own) {
+          const state = current.state === 'proposed' ? current.decisionState : current.state;
+          if (state) held.editorDecisions.set(record.id, state);
+          touched.add(JSON.stringify([record.paragraph.story, record.paragraph.paraId]));
+        }
+        if (next) held.registered.add(record.id);
+        else held.registered.delete(record.id);
+        return current;
+      });
+      held.value.records = held.engine.map(({ id, state }) => ({ id, state }));
+      held.value.status = held.engine.some(record => record.state === 'proposed') ? 'pending' : this.settledStatus(held);
+      if (!held.registered.size) this.forgetProposalOwnership(held);
+    }
+    for (const key of touched) this.editorDecisionRevisions.set(key, (this.editorDecisionRevisions.get(key) ?? 0) + 1);
+    if (touched.size) this.indexedEpoch = -1;
+  }
+
+  private finishProposalOperation(result?: DocxProposalResult) {
+    const operation = this.proposalOperation!;
+    this.proposalOperation = undefined;
+    if (result?.ok) {
+      for (const change of operation.request?.changes ?? []) {
+        const versions = this.ownStateVersions.get(change.id) ?? new Set<number>();
+        versions.add(operation.request!.expectPreviewVersion + 1);
+        this.ownStateVersions.set(change.id, versions);
+      }
+      const before = operation.withdrawalSnapshot;
+      const withdrawn = result.withdrawnIds ?? (before?.revision !== undefined && result.snapshot.revision === before.revision + 1
+        ? before.proposals.filter(record => !result.snapshot.proposals.some(next => next.id === record.id)).map(record => record.id) : []);
+      for (const id of withdrawn) {
+        if (operation.withdrawal?.includes(id)) this.ownWithdrawals.add(id);
+      }
+    }
+    for (const snapshot of operation.snapshots) this.synchronizeProposals(snapshot);
+    if (result?.ok) this.synchronizeProposals(result.snapshot);
+    this.synchronizeProposals(this.session.getProposals());
+    if (result?.ok) for (const change of operation.request?.changes ?? []) {
+      if (change.state === 'proposed') this.ownStateVersions.delete(change.id);
+    }
+    for (const versions of this.ownStateVersions.values()) {
+      for (const version of versions) {
+        if (versions.size <= 256) break;
+        versions.delete(version);
+      }
+    }
+    for (const entries of [this.ownStateVersions, this.ownWithdrawals]) {
+      for (const id of entries.keys()) {
+        if (entries.size <= 256) break;
+        entries.delete(id);
+      }
+    }
+  }
+
+  private forgetProposalOwnership(held: HeldProposal) {
+    for (const { id } of held.engine) {
+      this.ownStateVersions.delete(id);
+      this.ownWithdrawals.delete(id);
+    }
+  }
+
+  private checkEditorDecision(held: HeldProposal) {
+    if (this.attached) this.synchronizeProposals(this.session.getProposals());
+    if (held.editorDecisions.size) throw new ProposalDecidedInEditorError([...held.editorDecisions].map(([id, state]) => ({ id, state })));
+  }
+
+  private checkDecisionReferences(before: ReturnType<DocxAgentDocument['captureReferences']>, held: HeldProposal) {
+    this.checkEditorDecision(held);
+    const stale = [...held.targets].filter(([, target]) => {
+      const key = JSON.stringify([target.story, target.paraId]);
+      return before.decisions.get(key) !== this.editorDecisionRevisions.get(key);
+    }).map(([ref]) => ref);
+    if (stale.length) this.stale(stale);
+  }
+
+  private settledStatus(held: HeldProposal) {
+    return held.engine.some(record => record.state === 'accepted') ? 'accepted' as const : 'rejected' as const;
+  }
+
+  private observeProposals(snapshot: DocxProposalSnapshot) {
+    this.synchronizeProposals(snapshot);
+    this.epoch++;
+  }
+
+  private proposalDecision(held: HeldProposal, state: 'accepted' | 'rejected') {
+    this.synchronizeProposals(this.session.getProposals());
+    this.checkEditorDecision(held);
+    const snapshot = this.proposalSnapshot ?? this.session.getProposals();
+    const ids = new Set(held.engine.map(record => record.id));
+    if ([...ids].some(id => !snapshot.proposals.some(record => record.id === id))) {
+      throw new DocumentToolError('STALE_TARGET', 'Proposal records are missing from the current snapshot. Read fresh targets.', { id: held.value.id });
+    }
+    const changes = snapshot.proposals.filter(record => ids.has(record.id) && record.state === 'proposed').map(record => ({ id: record.id, state }));
+    return { snapshot, changes, request: { expectVersion: snapshot.version, expectPreviewVersion: snapshot.previewVersion, changes } };
+  }
+
+  private proposalRollback(held: HeldProposal, decision: ReturnType<DocxAgentDocument['proposalDecision']>, decided: DocxProposalSnapshot) {
+    this.synchronizeProposals(this.session.getProposals());
+    const current = this.proposalSnapshot ?? this.session.getProposals();
+    return { expectVersion: current.version, expectPreviewVersion: current.previewVersion,
+      changes: decision.snapshot.proposals.filter(record => !held.editorDecisions.has(record.id)
+        && decision.changes.some(change => change.id === record.id && current.proposals.some(existing => existing.id === record.id
+          && existing.state === change.state && existing.stateVersion === decided.proposals.find(value => value.id === record.id)?.stateVersion)))
+        .map(({ id, state }) => ({ id, state })),
+    };
+  }
+
+  private decideProposal(held: HeldProposal, state: 'accepted' | 'rejected', keepRevisions = false) {
+    this.checkEditorDecision(held);
+    if (this.proposalPeer) throw new DocumentToolError('UNSUPPORTED', 'Use rejectAsync or discardAsync with a DOCX editor edit peer.');
+    const before = this.captureReferences();
+    const decision = this.proposalDecision(held, state);
+    let decided: DocxProposalSnapshot | undefined;
+    let settled: DocxProposalSnapshot | undefined;
+    try {
+      this.proposalOperation = { request: decision.request, snapshots: [] };
+      const result = this.session.setProposalStates(decision.request);
+      this.finishProposalOperation(result);
+      decided = result.ok ? result.snapshot : undefined;
+      this.checkEditorDecision(held);
+      decided = this.proposalResult(result, held.value.changes);
+      this.checkDecisionReferences(before, held);
+      const ids = held.engine.map(record => record.id);
+      this.proposalOperation = { withdrawal: ids, withdrawalSnapshot: decided, snapshots: [] };
+      const withdrawal = this.session.withdrawProposals({ ids, expectVersion: decided.version, expectPreviewVersion: decided.previewVersion, keepRevisions });
+      this.finishProposalOperation(withdrawal);
+      settled = this.proposalResult(withdrawal, held.value.changes);
+      this.preserveReferences(before, settled.version, this.agentDecisionChanges(held, state, keepRevisions));
+      this.checkDecisionReferences(before, held);
+    } catch (error) {
+      if (this.proposalOperation) this.finishProposalOperation();
+      if (settled) {
+        if (error instanceof DocumentToolError) throw new DocumentToolError(error.code, `The agent decision applied. ${error.message}`, { ...error.details, applied: true, id: held.value.id, status: this.settledStatus(held) });
+        throw error;
+      }
+      if (decided) {
+        const rollback = this.proposalRollback(held, decision, decided);
+        if (rollback.changes.length) {
+          this.proposalOperation = { request: rollback, snapshots: [] };
+          try { this.finishProposalOperation(this.session.setProposalStates(rollback)); }
+          catch { if (this.proposalOperation) this.finishProposalOperation(); }
+          finally { if (this.proposalOperation) this.finishProposalOperation(); }
+        }
+      }
+      this.checkEditorDecision(held);
+      throw error;
+    }
+  }
+
+  private async decideProposalAsync(held: HeldProposal, state: 'accepted' | 'rejected', keepRevisions = false) {
+    this.checkEditorDecision(held);
+    const peer = this.proposalPeer;
+    if (!peer) return this.decideProposal(held, state, keepRevisions);
+    const before = this.captureReferences();
+    const decision = this.proposalDecision(held, state);
+    let decided: DocxProposalSnapshot | undefined;
+    let settled: DocxProposalSnapshot | undefined;
+    try {
+      this.proposalOperation = { request: decision.request, snapshots: [] };
+      const result = await peer.setProposalStates(decision.request);
+      this.finishProposalOperation(result);
+      decided = result.ok ? result.snapshot : undefined;
+      this.checkEditorDecision(held);
+      decided = this.proposalResult(result, held.value.changes);
+      this.checkDecisionReferences(before, held);
+      const ids = held.engine.map(record => record.id);
+      this.proposalOperation = { withdrawal: ids, withdrawalSnapshot: decided, snapshots: [] };
+      const withdrawal = await peer.withdrawProposals({ ids, expectVersion: decided.version, expectPreviewVersion: decided.previewVersion, keepRevisions });
+      this.finishProposalOperation(withdrawal);
+      settled = this.proposalResult(withdrawal, held.value.changes);
+      this.preserveReferences(before, settled.version, this.agentDecisionChanges(held, state, keepRevisions));
+      this.checkDecisionReferences(before, held);
+    } catch (error) {
+      if (this.proposalOperation) this.finishProposalOperation();
+      if (settled) {
+        if (error instanceof DocumentToolError) throw new DocumentToolError(error.code, `The agent decision applied. ${error.message}`, { ...error.details, applied: true, id: held.value.id, status: this.settledStatus(held) });
+        throw error;
+      }
+      if (decided) {
+        const rollback = this.proposalRollback(held, decision, decided);
+        if (rollback.changes.length) {
+          this.proposalOperation = { request: rollback, snapshots: [] };
+          try { this.finishProposalOperation(await peer.setProposalStates(rollback)); }
+          catch { if (this.proposalOperation) this.finishProposalOperation(); }
+          finally { if (this.proposalOperation) this.finishProposalOperation(); }
+        }
+      }
+      this.checkEditorDecision(held);
+      throw error;
+    }
+  }
+
+  private agentDecisionChanges(held: HeldProposal, state: 'accepted' | 'rejected', keepRevisions: boolean) {
+    return state === 'rejected' ? [] : held.value.changes.map(trimChange).map(change => ({ ...change, newText: keepRevisions ? change.oldText + change.newText : change.newText }));
+  }
+
+  private previewDecisions(snapshot: DocxProposalSnapshot) {
+    const owned = new Set([...this.proposals.values()].flatMap(held => held.engine.map(record => record.id)));
+    const decisions = new Map<string, 'accepted' | 'rejected'>();
+    for (const record of snapshot.proposals) {
+      const state = record.state === 'proposed' ? owned.has(record.id) ? 'rejected' : undefined : record.state;
+      if (state) for (const id of record.revisionIds) decisions.set(id, state);
+    }
+    return decisions;
+  }
+
+  private projectSegments(segments: YrsStorySegment[], snapshot: DocxProposalSnapshot): YrsStorySegment[] {
+    const decisions = this.previewDecisions(snapshot);
+    const projected: YrsStorySegment[] = [];
+    for (const segment of segments) {
+      const attributes = { ...segment.attributes };
+      let hidden = false;
+      for (const kind of ['ins', 'del'] as const) {
+        const stamp = attributes[kind] as { revisionId?: string; id?: string } | undefined;
+        const decision = stamp && decisions.get(stamp.revisionId ?? stamp.id ?? '');
+        if (!decision) continue;
+        hidden ||= kind === 'ins' ? decision === 'rejected' : decision === 'accepted';
+        delete attributes[kind];
+      }
+      if (hidden) continue;
+      const previous = projected.at(-1);
+      if (previous?.kind === 'text' && segment.kind === 'text' && JSON.stringify(previous.attributes) === JSON.stringify(attributes)) previous.text += segment.text;
+      else projected.push({ ...segment, attributes });
+    }
+    return projected;
+  }
+
+  private acceptedOffset(story: string, paraId: string, offset: number) {
+    const decisions = this.previewDecisions(this.proposalSnapshot ?? this.session.getProposals());
+    let paragraph: YrsStorySegment[] = [];
+    for (const segment of this.session.storySegments(story)) {
+      if (segment.kind !== 'pilcrow') { paragraph.push(segment); continue; }
+      if (segment.paraId !== paraId) { paragraph = []; continue; }
+      let visible = 0;
+      let accepted = 0;
+      let leading = true;
+      for (const run of paragraph) {
+        const length = run.kind === 'text' ? run.text.length : 1;
+        const stamp = (run.attributes.ins ?? run.attributes.del) as { revisionId?: string; id?: string } | undefined;
+        const decision = stamp && decisions.get(stamp.revisionId ?? stamp.id ?? '');
+        const shown = decision === undefined || (run.attributes.ins ? decision === 'accepted' : decision === 'rejected');
+        const block = leading && run.kind === 'embed' && BLOCK_EMBEDS.has(run.embedKind);
+        const inAccepted = !block && !run.attributes.del;
+        if (!block) leading = false;
+        if (shown && visible + length >= offset) return accepted + (inAccepted ? offset - visible : 0);
+        if (shown) visible += length;
+        if (inAccepted) accepted += length;
+      }
+      return accepted;
+    }
+    throw new DocumentToolError('STALE_TARGET', 'Target paragraph changed. Read fresh targets.');
+  }
+
+  private projectProposals(draft: YrsSession, selected?: HeldProposal) {
+    const snapshot = this.proposalSnapshot ?? this.session.getProposals();
+    const decisions = this.previewDecisions(snapshot);
+    if (selected) for (const record of selected.engine.filter(record => record.state === 'proposed')) for (const id of record.revisionIds) decisions.set(id, 'accepted');
+    for (const [revisionId, state] of decisions) {
+      if (state === 'accepted') draft.acceptChange({ revisionId });
+      else draft.rejectChange({ revisionId });
+    }
   }
 
   private apply(draft: YrsSession, held: HeldProposal, author?: { name: string; date: string }) {
@@ -647,6 +1313,7 @@ export class DocxAgentDocument {
       for (const [index, edit] of edits.entries()) { failed = index; steps.push(await this.plan(edit)); }
       failed = undefined;
       const draft = await this.fork();
+      const release = cleanupGuard(() => draft.destroy());
       try {
         if (this.epoch !== version) throw new DocumentToolError('STALE_VERSION', 'The document changed while the batch started. Read the version again.');
         const vector = draft.encodeStateVector();
@@ -683,17 +1350,17 @@ export class DocxAgentDocument {
                 const kept = await this.fork(draft.clientId);
                 try {
                   for (const [index, step] of steps.entries()) if (edits[index].op !== 'delete_comment') step(kept);
-                  baseline = (await saveYrsDocx(kept, { updateModifiedDate: false, commentIdentities: identities,
+                  baseline = (await engines.get('docx').module.yrs.saveYrsDocx(kept, { updateModifiedDate: false, commentIdentities: identities,
                     commentBaseline: { bytes: baseline, comments: previous },
                   })).bytes;
                 } finally { kept.destroy(); }
               }
-              saved = (await saveYrsDocx(draft, { updateModifiedDate: false, commentIdentities: identities,
+              saved = (await engines.get('docx').module.yrs.saveYrsDocx(draft, { updateModifiedDate: false, commentIdentities: identities,
                 commentBaseline: { bytes: baseline, comments: previous }, commentDeletion: true,
               })).bytes;
               commentBaseline = { bytes: saved, comments };
             } else {
-              saved = (await saveYrsDocx(draft, identities ? { commentIdentities: identities } : undefined)).bytes;
+              saved = (await engines.get('docx').module.yrs.saveYrsDocx(draft, identities ? { commentIdentities: identities } : undefined)).bytes;
               resetCommentBaseline = true;
             }
             await verifyCommentOutput(source, saved, comments.filter(comment => !seeded.has(comment.id)).length,
@@ -722,7 +1389,7 @@ export class DocxAgentDocument {
           this.commentSaveBaselineVersion = undefined;
         }
         return outcomes;
-      } finally { draft.destroy(); }
+      } catch (error) { throw release.failed(error); } finally { release.run(); }
     } catch (error) {
       const failure = error instanceof DocumentToolError ? error : new DocumentToolError('INVALID_EDIT', error instanceof Error ? error.message : String(error));
       throw new DocumentToolError(failure.code, `${failure.message} No batch edits were applied.`, { ...failure.details, ...(failed === undefined ? {} : { failedIndex: failed }) });
@@ -730,6 +1397,27 @@ export class DocxAgentDocument {
   }
 
   private async plan(edit: DocxAgentEdit): Promise<EditStep> {
+    if (edit.op === 'set_runs') {
+      const p = this.get(edit.paragraph);
+      if (this.runRevision(p) !== edit.revision) throw new DocumentToolError('STALE_TARGET', 'The paragraph changed. Read its runs again.', { refs: [p.ref] });
+      if (new Set(edit.runs.map(run => run.run)).size !== edit.runs.length) throw new DocumentToolError('INVALID_ARGUMENT', 'Run IDs must be unique within set_runs.');
+      const ids = new Map(p.runs.map((run, index) => [`${p.ref}.${index + 1}`, run]));
+      const replacements = edit.runs.map(({ run: id, text }) => {
+        const run = ids.get(id);
+        if (!run) throw new DocumentToolError('UNKNOWN_REF', 'Unknown run ID. Copy IDs from docx_read_runs for this paragraph.', { run: id });
+        if (fixedRunKind(run)) throw new DocumentToolError('PROTECTED_RUN', 'Fixed tokens cannot be changed.', { run: id });
+        lineText(text);
+        return { start: this.acceptedOffset(p.story, p.paraId, run.start), end: this.acceptedOffset(p.story, p.paraId, run.end), oldText: p.text.slice(run.start, run.end), text };
+      }).sort((a, b) => b.start - a.start);
+      return draft => {
+        requireParagraph(draft, p);
+        for (const run of replacements) {
+          if (run.oldText === run.text) continue;
+          hostEdit(draft, { op: 'replaceText', target: { kind: 'range', story: p.story, start: { paraId: p.paraId, offset: run.start }, end: { paraId: p.paraId, offset: run.end }, view: 'accepted' }, text: run.text, expect: { text: run.oldText } });
+        }
+        return { result: { ref: p.ref } };
+      };
+    }
     if (edit.op === 'delete_comment') {
       await this.checkCommentPart(true);
       return draft => {
@@ -793,9 +1481,28 @@ export class DocxAgentDocument {
         return { result: { comment: commentId, parentId: root.id, done: false } };
       };
     }
-    if (edit.op === 'format_text' || edit.op === 'add_comment') {
-      const held = this.matches.get(edit.match);
-      if (!held) throw unknownMatchError(edit.match, 'm1', /^m\d+$/u, 'Match expired or belongs to another document. Run grep again and copy its match ID.');
+    if (edit.op === 'set_language' && edit.match === undefined) {
+      const slots = { lang: edit.lang, eastAsia: edit.eastAsia, bidi: edit.bidi };
+      if (edit.style !== undefined || edit.defaults) {
+        if (edit.defaults && !this.session.materializeDocx()?.package.styles) {
+          throw new DocumentToolError('UNSUPPORTED', 'The styles part word/styles.xml is missing; document-default language cannot be changed.');
+        }
+        const styleId = edit.style !== undefined ? resolveStyle(this.languageStyles(), edit.style) : null;
+        return draft => {
+          draft.setStyleLanguage(styleId, slots);
+          return { result: styleId === null ? {} : { style: styleId } };
+        };
+      }
+      const p = this.get(edit.paragraph!);
+      return draft => {
+        requireParagraph(draft, p);
+        const keptUnchanged = formatParagraph(draft, p, { language: slots });
+        return { result: { ref: p.ref, ...(Object.keys(keptUnchanged).length > 0 ? { keptUnchanged } : {}) } };
+      };
+    }
+    if (edit.op === 'format_text' || edit.op === 'add_comment' || edit.op === 'set_language') {
+      const held = this.matches.get(edit.match!);
+      if (!held) throw unknownMatchError(edit.match!, 'm1', /^m\d+$/u, 'Match expired or belongs to another document. Run grep again and copy its match ID.');
       const p = this.get(held.ref);
       if (p.revision !== held.revision) throw new DocumentToolError('STALE_TARGET', 'The matched paragraph changed. Grep again and use a fresh match ID.', { refs: [p.ref] });
       const start = held.start ?? 0;
@@ -814,12 +1521,14 @@ export class DocxAgentDocument {
           return { result: { ref: p.ref, start, end, comment: draft.addComment([range], edit.author, date, body).commentId } };
         };
       }
-      const delta = { bold: edit.bold, italic: edit.italic, underline: edit.underline };
+      const delta = edit.op === 'set_language'
+        ? { language: { lang: edit.lang, eastAsia: edit.eastAsia, bidi: edit.bidi } }
+        : { bold: edit.bold, italic: edit.italic, underline: edit.underline };
       if (Object.values(delta).every(value => value === undefined)) throw new DocumentToolError('INVALID_ARGUMENT', 'format_text needs bold, italic or underline.');
       return draft => {
         requireParagraph(draft, p);
-        draft.formatRange(range, delta);
-        return { result: { ref: p.ref, start, end } };
+        const { keptUnchanged } = draft.formatRange(range, delta);
+        return { result: { ref: p.ref, start, end, ...(Object.keys(keptUnchanged).length > 0 ? { keptUnchanged } : {}) } };
       };
     }
     const p = this.get(edit.op === 'insert_paragraphs' ? (edit.before ?? edit.after)! : edit.op === 'set_paragraph_style' || edit.op === 'delete_paragraph' ? edit.paragraph : edit.op === 'merge_cells' ? edit.from : edit.row);
@@ -917,6 +1626,12 @@ export class DocxAgentDocument {
     return this.commentPackageBaseline.bytes;
   }
 
+  private languageStyles(): ParagraphStyle[] {
+    return (this.session.materializeDocx()?.package.styles?.styles ?? [])
+      .filter(style => style.type === 'paragraph' || style.type === 'character')
+      .map(style => ({ id: style.styleId, name: style.name, isDefault: !!style.default }));
+  }
+
   private styles(): ParagraphStyle[] {
     return this.paragraphStyles ??= (this.session.materializeDocx()?.package.styles?.styles ?? [])
       .filter(style => style.type === 'paragraph')
@@ -925,11 +1640,22 @@ export class DocxAgentDocument {
 }
 
 export async function openDocx(bytes: Uint8Array, options: DocumentOptions = {}): Promise<DocxAgentDocument> {
-  const session = await createYrsSession();
+  const { module } = await engines.load('docx');
+  const session = await module.yrs.createYrsSession();
   try {
     session.seedFromDocx(bytes);
     return new DocxAgentDocument(session, options, true);
-  } catch (error) { session.destroy(); throw error; }
+  } catch (error) { throw cleanupGuard(() => session.destroy()).failed(error); }
+}
+
+async function sourceModelCounts(bytes: Uint8Array): Promise<DocxModelCounts> {
+  const { module } = await engines.load('docx');
+  const session = await module.yrs.createYrsSession();
+  const release = cleanupGuard(() => session.destroy());
+  try {
+    session.seedFromDocx(bytes);
+    return docxModelCounts(session);
+  } catch (error) { throw release.failed(error); } finally { release.run(); }
 }
 
 export function attachDocx(session: YrsSession, options: DocumentOptions = {}): DocxAgentDocument {

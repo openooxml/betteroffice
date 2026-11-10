@@ -8,7 +8,8 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { createPlan } from './plan.mjs';
 import { writeCachedAsset } from './asset-cache.mjs';
-import { mergeRoundtrips, METHOD, roundtripSummary, roundtripShards, SHARD_SIZE, PARALLELISM, ENGINE_TIMEOUT, HELPER_TIMEOUT } from './roundtrip.mjs';
+import { mergeRoundtrips, METHOD, roundtripSummary, roundtripShards, roundtripMatrices, SHARD_SIZE, PARALLELISM, ENGINE_TIMEOUT, HELPER_TIMEOUT, MAX_MATRIX_JOBS, ROUNDTRIP_MATRICES } from './roundtrip.mjs';
+import { MAX_SAMPLES } from './samples.mjs';
 import { renderSection } from './readme.mjs';
 
 const hash = 'a'.repeat(64);
@@ -81,6 +82,46 @@ test('LibreOffice parse/preservation is measured and stale results are rejected'
 });
 
 
+const corpus = (counts:Record<string, number>) => ({...plan(), samples:Object.entries(counts).flatMap(([format, count]) =>
+  Array.from({length:count}, (_, i) => ({...samples[0],format,id:`${format}-file-${i}`})))});
+
+test('the largest plans split into matrices that each fit one workflow matrix', () => {
+  for (const counts of [{docx:2000, pptx:1000, xlsx:3000}, {docx:2667, pptx:2667, xlsx:2666}, {docx:MAX_SAMPLES, pptx:0, xlsx:0}]) {
+    const input = corpus(counts);
+    const matrices = roundtripMatrices(input);
+    expect(matrices.length).toBe(ROUNDTRIP_MATRICES);
+    expect(matrices.every(matrix => matrix.length <= MAX_MATRIX_JOBS)).toBe(true);
+    expect(matrices.flat()).toEqual(roundtripShards(input).map(({format, shard}) => ({format, shard})));
+    expect(Math.abs(matrices[0].length - matrices[1].length)).toBeLessThanOrEqual(1);
+  }
+  expect(roundtripMatrices(corpus({docx:2667, pptx:2667, xlsx:2666})).map(matrix => matrix.length)).toEqual([251, 250]);
+});
+
+test('small plans leave the second matrix empty and oversized plans fail before any matrix expands', () => {
+  expect(roundtripMatrices(corpus({docx:1}))).toEqual([[{format:'docx', shard:0}], []]);
+  expect(roundtripMatrices(plan()).map(matrix => matrix.length)).toEqual([2, 1]);
+  const fits = corpus({docx:ROUNDTRIP_MATRICES * MAX_MATRIX_JOBS * SHARD_SIZE});
+  expect(roundtripMatrices(fits).map(matrix => matrix.length)).toEqual([MAX_MATRIX_JOBS, MAX_MATRIX_JOBS]);
+  const over = corpus({docx:ROUNDTRIP_MATRICES * MAX_MATRIX_JOBS * SHARD_SIZE + 1});
+  expect(roundtripShards(over).length).toBe(ROUNDTRIP_MATRICES * MAX_MATRIX_JOBS + 1);
+  expect(() => roundtripMatrices(over)).toThrow(`at most ${ROUNDTRIP_MATRICES * MAX_MATRIX_JOBS}`);
+});
+
+test('the reconciler takes the reports of both matrices as one complete set', () => {
+  const input = corpus({docx:200 * SHARD_SIZE, pptx:40 * SHARD_SIZE + 3, xlsx:60 * SHARD_SIZE});
+  const byFormat = Object.fromEntries(parts().map(part => [part.format, part]));
+  const shards = new Map(roundtripShards(input).map(shard => [`${shard.format}/${shard.shard}`, shard.ids]));
+  const [first, second] = roundtripMatrices(input);
+  expect(first.length).toBeGreaterThan(MAX_MATRIX_JOBS / 2);
+  expect(second.length).toBeGreaterThan(0);
+  const reports = [...first, ...second].map(({format, shard}) => ({...byFormat[format], shard,
+    samples:shards.get(`${format}/${shard}`)!.map(id => ({...structuredClone(byFormat[format].samples[0]), id}))}));
+  const merged = mergeRoundtrips(input, input, reports, hash);
+  expect(merged.samples.length).toBe(input.samples.length);
+  expect(roundtripSummary(merged.samples, 'pptx').commit.total).toBe(40 * SHARD_SIZE + 3);
+  expect(() => mergeRoundtrips(input, input, reports.slice(0, first.length), hash)).toThrow();
+});
+
 test('even 1000 files fit bounded shards and leave time for setup and artifact upload', () => {
   const many = {...plan(), samples:Array.from({length:1000}, (_, i) => ({...samples[0],id:`file-${i}`}))};
   const shards = roundtripShards(many);
@@ -119,7 +160,7 @@ test('the CLI accepts a string shard from Actions and stages only that shard fro
     const planPath = join(root,'plan.json');
     await writeFile(planPath,JSON.stringify(fixture));
     await writeCachedAsset(join(root,'cache'),source,bytes);
-    await promisify(execFile)('node',[fileURLToPath(new URL('./roundtrip.mjs',import.meta.url))],{env:{...process.env,
+    await promisify(execFile)('node',[fileURLToPath(new URL('./roundtrip.mjs',import.meta.url))],{env:{...process.env,QUALITY_CORPUS_ORIGIN:'',
       QUALITY_PLAN:planPath,QUALITY_FORMAT:'docx',QUALITY_SHARD:'0',QUALITY_OUTPUT:join(root,'output'),QUALITY_ASSET_CACHE:join(root,'cache'),
     }});
     const job = JSON.parse(await readFile(join(root,'output/job.json'),'utf8'));
@@ -129,4 +170,4 @@ test('the CLI accepts a string shard from Actions and stages only that shard fro
   } finally {
     await rm(root,{recursive:true,force:true});
   }
-});
+}, 30_000);

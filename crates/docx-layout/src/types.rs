@@ -247,6 +247,8 @@ pub struct RunFormatting {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub change_revision_id: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format_change: Option<crate::display_list::Revision>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logical_order: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bidi_level: Option<u8>,
@@ -303,7 +305,11 @@ pub struct ImageRunPosition {
     pub use_simple_pos: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub simple_pos: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::whole_number::relative_height"
+    )]
     pub relative_height: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub behind_doc: Option<bool>,
@@ -754,7 +760,11 @@ pub struct SdtGroup {
     pub bound: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repeating_item: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::whole_number::control_id"
+    )]
     pub control_id: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pos: Option<i64>,
@@ -867,6 +877,10 @@ pub struct TableCell {
     pub no_wrap: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tracked_marker: Option<Value>,
+    /// The source cell continues a vertical merge (`w:vMerge` without
+    /// `restart`), even where layout gives it a slot of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_continuation: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -882,9 +896,32 @@ pub struct TableRow {
     pub is_header: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cant_split: Option<bool>,
+    /// `w:trPr/w:hidden` (§17.4.20). Layout draws such a row as usual; a view
+    /// that hides hidden text removes it first with
+    /// [`crate::table_grid::drop_hidden_rows`] when none of its cells shows
+    /// anything.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden: Option<bool>,
+    /// The source row held only vanished runs when the document was read. A
+    /// hidden row without this mark is never removed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden_content_only: Option<bool>,
+    /// The row's index in the source table, set on every row kept when hidden
+    /// rows were removed; display cell refs report it instead of the layout
+    /// index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_row: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::whole_number::grid_before"
+    )]
     pub grid_before: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::whole_number::grid_after"
+    )]
     pub grid_after: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub width_before: Option<PreferredWidth>,
@@ -975,6 +1012,10 @@ pub struct TableBlock {
     /// Report the cell edges without a visible border as view-only guides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gridlines: Option<bool>,
+    /// The table's own `w:tblLook` asks for first-column formatting; with
+    /// header rows, the cells of grid column 0 head their rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_column: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pm_start: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -994,7 +1035,11 @@ pub struct ImageAnchor {
     pub behind_doc: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<ImageRunPosition>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::whole_number::relative_height"
+    )]
     pub relative_height: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_overlap: Option<bool>,
@@ -1095,7 +1140,11 @@ pub struct ShapeBlock {
     pub wrap_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wrap_text: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::whole_number::relative_height"
+    )]
     pub relative_height: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub behind_doc: Option<bool>,
@@ -1130,7 +1179,11 @@ pub struct ChartBlock {
     pub wrap_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wrap_text: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::whole_number::relative_height"
+    )]
     pub relative_height: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub behind_doc: Option<bool>,
@@ -1207,6 +1260,10 @@ pub struct ReservedBlock {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub width: Option<f64>,
     pub height: f64,
+    /// Extra height taken when the block opens a page or column, for a mark that only a
+    /// continued flow shows there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_lead: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1529,11 +1586,13 @@ impl PartialEq for ReservedBlock {
             reservation: _,
             width: _,
             height: _,
+            page_lead: _,
         } = other;
         self.id == other.id
             && self.reservation == other.reservation
             && self.width == other.width
             && self.height == other.height
+            && self.page_lead == other.page_lead
     }
 }
 
@@ -1613,6 +1672,7 @@ impl PartialEq for TableBlock {
             cell_margin_left: _,
             cell_margin_right: _,
             gridlines: _,
+            first_column: _,
             pm_start: _,
             pm_end: _,
         } = other;
@@ -1637,6 +1697,7 @@ impl PartialEq for TableBlock {
             && self.cell_margin_left == other.cell_margin_left
             && self.cell_margin_right == other.cell_margin_right
             && self.gridlines == other.gridlines
+            && self.first_column == other.first_column
     }
 }
 
@@ -1964,6 +2025,10 @@ pub struct TypesetRow {
     pub cluster_advances: Option<Vec<TypesetClusterAdvance>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bidi_slices: Option<Vec<TypesetBidiSlice>>,
+    /// The glyph runs measurement shaped the line with, in visual order, as
+    /// [`ooxml_text::pack_glyph_runs`] packs them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub glyph_runs: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -2118,7 +2183,11 @@ pub struct SectionPageMargins {
     pub first: Option<PageMargins>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub even: Option<PageMargins>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::whole_number::page_restart"
+    )]
     pub restart: Option<u64>,
 }
 
@@ -2673,6 +2742,92 @@ pub struct NoteLayoutItemContract {
     pub anchor_doc_end: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_mark_follows: Option<bool>,
+    /// First block of the note this page shows; the window fields are absent when the page
+    /// shows the whole note.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_start: Option<usize>,
+    /// First line of `block_start` shown; a block other than a paragraph counts as one line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_start: Option<usize>,
+    /// Last block shown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_end: Option<usize>,
+    /// End of the lines shown of `block_end`, exclusive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_end: Option<usize>,
+}
+
+/// The part of a note one page shows: blocks `block_start..=block_end`, from line `line_start`
+/// of the first to line `line_end` (exclusive) of the last.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NoteWindow {
+    pub block_start: usize,
+    pub line_start: usize,
+    pub block_end: usize,
+    pub line_end: usize,
+}
+
+impl NoteWindow {
+    pub fn of(item: &NoteLayoutItemContract) -> Option<Self> {
+        Self::from_parts(
+            item.block_start,
+            item.line_start,
+            item.block_end,
+            item.line_end,
+        )
+    }
+
+    pub fn from_parts(
+        block_start: Option<usize>,
+        line_start: Option<usize>,
+        block_end: Option<usize>,
+        line_end: Option<usize>,
+    ) -> Option<Self> {
+        if block_start.is_none()
+            && line_start.is_none()
+            && block_end.is_none()
+            && line_end.is_none()
+        {
+            return None;
+        }
+        Some(Self {
+            block_start: block_start.unwrap_or(0),
+            line_start: line_start.unwrap_or(0),
+            block_end: block_end.unwrap_or(usize::MAX),
+            line_end: line_end.unwrap_or(usize::MAX),
+        })
+    }
+
+    /// The lines of block `index`, which has `lines` of them, inside the window, or `None`
+    /// when the block lies outside it.
+    pub fn lines(&self, index: usize, lines: usize) -> Option<std::ops::Range<usize>> {
+        if index < self.block_start || index > self.block_end {
+            return None;
+        }
+        let start = if index == self.block_start {
+            self.line_start.min(lines)
+        } else {
+            0
+        };
+        let end = if index == self.block_end {
+            self.line_end.min(lines)
+        } else {
+            lines
+        };
+        Some(start..end.max(start))
+    }
+}
+
+/// The lines of block `index` a note item shows: all of them without a window.
+pub fn note_window_lines(
+    window: Option<&NoteWindow>,
+    index: usize,
+    lines: usize,
+) -> Option<std::ops::Range<usize>> {
+    match window {
+        Some(window) => window.lines(index, lines),
+        None => Some(0..lines),
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2696,6 +2851,15 @@ pub struct NoteAreaContract {
     pub separator: Option<NoteLayoutItemContract>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<Vec<NoteLayoutItemContract>>,
+    /// The area continues notes from the previous page, under a continuation separator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<bool>,
+    /// Left edge of the column the area paints in; absent, the page's text area.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x: Option<f64>,
+    /// Width of that column; absent, the page's text area.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3066,6 +3230,7 @@ mod contract_tests {
         assert!(row.run_advances.is_none());
         assert!(row.cluster_advances.is_none());
         assert!(row.bidi_slices.is_none());
+        assert!(row.glyph_runs.is_none());
     }
 
     #[test]

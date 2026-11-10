@@ -17,8 +17,10 @@ import type {
   PluginError,
   PluginErrorPhase,
   PluginFailureCode,
+  PluginFocusChangeEvent,
   PluginGrant,
   PluginLoadReason,
+  PluginLocaleChangeEvent,
   PluginRefusal,
 } from '../../../../shared/host-contracts/plugins';
 import type {
@@ -32,6 +34,7 @@ import type {
   XlsxPluginCommandResult,
   XlsxPluginCommandState,
 } from '../commands/types';
+import type { XlsxPointPosition } from '../XlsxEditor.types';
 
 export type {
   MaybePromise,
@@ -125,8 +128,11 @@ export interface XlsxPluginLayout {
   viewport: { x: number; y: number; width: number; height: number };
 }
 
-/** A cell under the pointer, with the layout it was resolved against. */
-export interface XlsxPluginCellPosition {
+/**
+ * A cell under the pointer, with the layout it was resolved against. `sheet`, `row` and `col`
+ * are what the editor's `getPositionAtPoint` answers for the same point; `sheetId` names that sheet.
+ */
+export interface XlsxPluginCellPosition extends XlsxPointPosition {
   sheetId: string;
   row: number;
   col: number;
@@ -134,18 +140,44 @@ export interface XlsxPluginCellPosition {
   layoutId: string;
 }
 
+export type XlsxGeometryTarget = { kind: 'proposal'; id: string };
+
+export type XlsxAnchorGeometryResult =
+  | {
+      ok: true;
+      version: string;
+      previewVersion: number;
+      layoutId: string;
+      rects: readonly XlsxPluginRect[];
+      anchor: XlsxPluginRect;
+      pageRect: XlsxPluginRect;
+    }
+  | {
+      ok: false;
+      failure: {
+        code: XlsxPluginNavigationFailureCode | 'unknown-proposal' | 'pending' | 'read-failed';
+        message: string;
+      };
+    };
+
 /**
  * Geometry of the painted grid. Rectangles are in pixels of the overlay layer, already zoomed
- * and clipped to the visible grid; every method returns null once its layout is no longer
- * painted, and for cells scrolled out of view or on another sheet.
+ * and clipped to the visible grid. Cell and range queries return null for unpainted layouts
+ * and cells outside the visible sheet; anchor queries return a typed failure.
  */
 export interface XlsxPluginGeometry {
   layout: XlsxPluginLayout;
+  getAnchorGeometry(target: XlsxGeometryTarget): XlsxAnchorGeometryResult;
   /** One grid cell, without merge expansion; zero-based `row` and `col`. */
   getCellRect(target: { sheetId: string; row: number; col: number }): XlsxPluginRect | null;
   /** The visible part of an inclusive range, such as a merged area. */
   getRangeRect(target: { sheetId: string; range: CellRange }): XlsxPluginRect | null;
-  /** Client-coordinate hit testing; null until the editor exposes it. */
+  /**
+   * The cell under client coordinates, through the editor's own hit test; selection and focus
+   * stay where they are. It answers null outside the painted grid, over a chart, for non-finite
+   * coordinates, once this layout is no longer painted or its workbook was replaced, and wherever
+   * that hit test answers null. The member itself is null on hosts without a grid hit test.
+   */
   getPositionAtPoint: ((clientX: number, clientY: number) => XlsxPluginCellPosition | null) | null;
 }
 
@@ -161,6 +193,10 @@ export type XlsxPluginSelection = {
 } | null;
 
 export interface XlsxPluginSnapshot {
+  /** @experimental Focus inside the document surface. */
+  focused: boolean;
+  /** @experimental The editor's resolved locale tag. */
+  locale: string;
   /** The open workbook; changes when a workbook replaces it. */
   generation: string;
   version: string;
@@ -213,10 +249,19 @@ export interface XlsxPluginNavigation {
   ): Promise<XlsxPluginNavigationResult>;
 }
 
+/** @experimental The plugin API may change in minor releases. */
+export type XlsxPluginFocusChangeEvent = PluginFocusChangeEvent;
+
+/** @experimental The plugin API may change in minor releases. */
+export type XlsxPluginLocaleChangeEvent = PluginLocaleChangeEvent;
+
 /** Lifecycle notifications describe current state; several changes may arrive as one. */
 export type XlsxPluginEvent =
+  | XlsxPluginFocusChangeEvent
+  | XlsxPluginLocaleChangeEvent
   | { type: 'load'; generation: string; version: string; reason: PluginLoadReason }
   | { type: 'document-change'; generation: string; version: string }
+  | { type: 'proposal-change'; generation: string; version: string; previewVersion: number }
   | {
       type: 'selection-change';
       generation: string;
@@ -225,7 +270,13 @@ export type XlsxPluginEvent =
     }
   | { type: 'mode-change'; generation: string; readOnly: boolean }
   | { type: 'layout-change'; generation: string; layout: XlsxPluginLayout | null }
-  | { type: 'grants-change'; generation: string; grant: XlsxPluginGrant };
+  | { type: 'grants-change'; generation: string; grant: XlsxPluginGrant }
+  /**
+   * A row marker was clicked or pressed; sent only to the plugin that owns it.
+   *
+   * @experimental The plugin API may change in minor releases.
+   */
+  | { type: 'row-decoration-activate'; generation: string; id: string; sheetId: string; row: number };
 
 /**
  * What a hook, renderer or action receives. Clients refuse once it is superseded or ended.
@@ -283,8 +334,43 @@ export interface XlsxPluginCommand<S> {
 }
 
 /**
- * A plugin. `createState`, renderers and command `getState` must be pure; `initialize`,
- * `onEvent`, command `execute` and `context.run` are managed effects.
+ * A cell as the edit gate sees it; zero-based `row` and `col`.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
+export type XlsxPluginCellRef = { sheetId: string; row: number; col: number };
+
+/**
+ * A cell write before it is made: `input` is the text the cell gets, empty for a clear. A pasted
+ * formula arrives moved to its cell; `cut` asks the cells a cut clears.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
+export type XlsxPluginCellCommit = XlsxPluginCellRef & {
+  input: string;
+  kind: 'value' | 'formula' | 'clear';
+  source: 'cell-editor' | 'formula-bar' | 'clear-key' | 'paste' | 'cut';
+};
+
+/** @experimental The plugin API may change in minor releases. */
+export type XlsxPluginCommitDecision =
+  | { action: 'accept' }
+  | { action: 'replace'; input: string }
+  | { action: 'refuse'; message?: string };
+
+/**
+ * What the edit gate hooks receive: reads only, since they run synchronously and must not mutate.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
+export type XlsxPluginEditGateContext<S> = Pick<
+  XlsxPluginContext<S>,
+  'pluginId' | 'snapshot' | 'state' | 'read'
+>;
+
+/**
+ * A plugin. `createState`, renderers, command `getState`, `cellEditable` and `beforeCellCommit`
+ * must be pure; `initialize`, `onEvent`, command `execute` and `context.run` are managed effects.
  *
  * @experimental The plugin API may change in minor releases.
  */
@@ -300,7 +386,59 @@ export interface XlsxPluginDefinition<S> {
   commands?: readonly XlsxPluginCommand<S>[];
   /** Local command ids, in display order. */
   toolbar?: readonly string[];
+  /**
+   * Sync. False makes the cell read-only for typing, clearing, pasting and cutting; any plugin
+   * returning false wins.
+   *
+   * @experimental The plugin API may change in minor releases.
+   */
+  cellEditable?(context: XlsxPluginEditGateContext<S>, cell: XlsxPluginCellRef): boolean;
+  /**
+   * Sync. Sees each cell a typed commit, clear, paste or cut changes before it is written; a
+   * refusal refuses the whole gesture. Return `{ action: 'accept' }`,
+   * `{ action: 'replace', input: string }` (the next plugin sees the replaced input) or
+   * `{ action: 'refuse', message?: string }`. Any refusal wins.
+   *
+   * @experimental The plugin API may change in minor releases.
+   */
+  beforeCellCommit?(
+    context: XlsxPluginEditGateContext<S>,
+    commit: XlsxPluginCellCommit
+  ): XlsxPluginCommitDecision;
+  /**
+   * Sync and pure. Row markers for the gutter, evaluated on load, after `setState` and after a
+   * document change. A throw or a malformed set ends the plugin with the `row-decorations` phase.
+   *
+   * @experimental The plugin API may change in minor releases.
+   */
+  rowDecorations?(context: XlsxPluginContext<S>): XlsxPluginRowDecorations | null;
 }
+
+/**
+ * A marker in the row gutter. `row` is zero-based; `id` is unique within the plugin; `text`
+ * applies to badges only, at most 4 characters.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
+export type XlsxPluginRowDecoration = {
+  id: string;
+  sheetId: string;
+  row: number;
+  kind: 'badge' | 'dot';
+  text?: string;
+  tone?: 'neutral' | 'info' | 'success' | 'warning' | 'danger';
+  tooltip?: string;
+};
+
+/**
+ * Row markers computed at a document `version`; shown only while the workbook is at it.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
+export type XlsxPluginRowDecorations = {
+  version: string;
+  items: readonly XlsxPluginRowDecoration[];
+};
 
 declare const xlsxPluginBrand: unique symbol;
 
@@ -315,7 +453,7 @@ export interface XlsxPlugin {
   readonly [xlsxPluginBrand]: true;
 }
 
-export type XlsxPluginErrorPhase = PluginErrorPhase;
+export type XlsxPluginErrorPhase = PluginErrorPhase | 'edit-gate' | 'row-decorations';
 
 /**
  * A plugin failure; the failing activation has already been stopped and cleaned up.

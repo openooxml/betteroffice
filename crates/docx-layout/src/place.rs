@@ -44,7 +44,7 @@ use crate::paragraph_spacing::{
     apply_contextual_spacing_measured, get_spacing_after, get_spacing_before,
 };
 use crate::prescan::{LayoutPlan, SectionLayoutConfig, default_columns, prescan};
-use crate::resolve_lines::{ResolvedLine, ResolvedSegment, resolve_line_segments, utf16_len};
+use crate::resolve_lines::{ResolvedLine, ResolvedSegment, resolve_line_segments_in, utf16_len};
 use crate::section_breaks::resolve_page_margins;
 use crate::types::{
     BlockExtent, BlockId, ChartBlock, ChartExtent, ChartFragment, Fragment, ImageBlock,
@@ -53,6 +53,7 @@ use crate::types::{
     SectionBreakType, ShapeBlock, ShapeExtent, ShapeFragment, Size, TextBoxBlock, TextBoxExtent,
     TextBoxFragment,
 };
+use crate::utf16_index::RunTexts;
 
 /// Default page size (US Letter in pixels at 96 DPI).
 const DEFAULT_PAGE_SIZE: Size = Size {
@@ -152,6 +153,118 @@ fn pristine_paragraph_start(
                         LayoutBlock::PageBreak(_) | LayoutBlock::ColumnBreak(_)
                     )
                 }))
+}
+
+/// Paragraph-relative shapes placed ahead of the paragraph that anchors them.
+struct HoistedRun {
+    page_index: usize,
+    shapes: Vec<(usize, usize)>,
+}
+
+fn is_paragraph_relative(shape: &ShapeBlock) -> bool {
+    shape
+        .position
+        .as_ref()
+        .and_then(|position| position.vertical.as_ref())
+        .and_then(|vertical| vertical.relative_to.as_deref())
+        == Some("paragraph")
+}
+
+fn follows_authored_break(preceding: &[MeasuredBlock]) -> bool {
+    preceding
+        .iter()
+        .rev()
+        .find(|measured| {
+            !matches!(&measured.block, LayoutBlock::Shape(shape) if shape.position.is_some())
+        })
+        .is_some_and(|measured| {
+            matches!(
+                measured.block,
+                LayoutBlock::PageBreak(_)
+                    | LayoutBlock::ColumnBreak(_)
+                    | LayoutBlock::SectionBreak(_)
+            )
+        })
+}
+
+/// Whether a paragraph leaves the page only because its first line has no room.
+fn first_line_overflows(measured: &MeasuredBlock, paginator: &mut Paginator) -> bool {
+    let (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(measure)) =
+        (&measured.block, &measured.measure)
+    else {
+        return false;
+    };
+    if measure.lines.is_empty()
+        || crate::break_policy::breaks_before_block(&measured.block).is_some()
+        || measure
+            .lines
+            .iter()
+            .any(|line| line.float_skip_before.is_some_and(|skip| skip > 0.0))
+    {
+        return false;
+    }
+    let state_idx = paginator.get_current();
+    let leading = paginator
+        .leading_spacing(get_spacing_before(block))
+        .max(paginator.state(state_idx).deferred_spacing);
+    let first_line = &measure.lines[0];
+    !paginator.fits_on_current_page(
+        first_line.line_height + leading,
+        trailing_leading(block, first_line),
+    )
+}
+
+/// Moves a hoisted run onto the page its paragraph landed on, ahead of the
+/// paragraph. A paragraph placed in several fragments keeps its run behind.
+fn relocate_hoisted_run(
+    run: &HoistedRun,
+    measured: &[MeasuredBlock],
+    paginator: &mut Paginator,
+    paragraph_start: (usize, usize),
+    placed_fragments: usize,
+) {
+    let (page_index, paragraph_index) = paragraph_start;
+    let state_idx = paginator.get_current();
+    if page_index <= run.page_index
+        || placed_fragments != 1
+        || paginator.state(state_idx).page_index != page_index
+        || paginator.pages[run.page_index].fragments.len() <= run.shapes.len()
+    {
+        return;
+    }
+    let Some(Fragment::Paragraph(paragraph)) =
+        paginator.pages[page_index].fragments.get(paragraph_index)
+    else {
+        return;
+    };
+    let flow_y = paragraph.y;
+    for &(block_index, fragment_index) in run.shapes.iter().rev() {
+        let fragment = paginator.pages[run.page_index]
+            .fragments
+            .remove(fragment_index);
+        paginator.pages[page_index]
+            .fragments
+            .insert(paragraph_index, fragment);
+        let (LayoutBlock::Shape(block), BlockExtent::Shape(measure)) =
+            (&measured[block_index].block, &measured[block_index].measure)
+        else {
+            continue;
+        };
+        let (x, y) = resolve_object_position_at(
+            block.position.as_ref(),
+            measure.width,
+            measure.height,
+            paginator,
+            flow_y,
+        );
+        let column_x = paginator.get_column_x(paginator.state(state_idx).column_index);
+        if let Fragment::Shape(shape) = &mut paginator.pages[page_index].fragments[paragraph_index]
+        {
+            shape.x = x;
+            shape.y = y;
+            shape.wrap_offset_x = Some(x - column_x);
+        }
+    }
 }
 
 fn is_floating_drawing(block: &LayoutBlock) -> bool {
@@ -702,8 +815,8 @@ pub fn layout_document_incremental_ranges<F: PartialEq>(
             && resumable(checkpoint, &input.measured, &previous_layout.pages)
     });
     let resume_page = resume.map_or(0, |resume| resume.page_index);
-    let dirty: Option<Vec<usize>> =
-        (previous_fingerprints.len() == next_fingerprints.len()).then(|| {
+    let changed: Option<Vec<usize>> = (previous_fingerprints.len() == next_fingerprints.len())
+        .then(|| {
             previous_fingerprints
                 .iter()
                 .zip(next_fingerprints)
@@ -712,6 +825,21 @@ pub fn layout_document_incremental_ranges<F: PartialEq>(
                 .map(|(index, _)| index)
                 .collect()
         });
+    // A block's placement can depend on the block before it (a section mark on
+    // the page break ahead of it), so the block after each changed one is dirty
+    // too. With a changed block count no retained suffix lines up at all.
+    let dirty: Option<Vec<usize>> = changed.as_ref().map(|changed| {
+        changed
+            .iter()
+            .flat_map(|&index| [index, index + 1])
+            .filter(|&index| index < next_fingerprints.len())
+            .fold(Vec::new(), |mut dirty, index| {
+                if dirty.last() != Some(&index) {
+                    dirty.push(index);
+                }
+                dirty
+            })
+    });
     // Clean stretches between dirty blocks are skipped only where a page start
     // alone decides what follows: one column throughout, no reserved note space,
     // and no later section break that changed.
@@ -730,7 +858,7 @@ pub fn layout_document_incremental_ranges<F: PartialEq>(
             .footnote_reserved_heights
             .as_ref()
             .is_none_or(|heights| heights.is_empty())
-        && !dirty
+        && !changed
             .iter()
             .flatten()
             .skip(1)
@@ -1040,6 +1168,7 @@ fn place<F: PartialEq>(
     }
 
     let mut keep_run: Option<KeepRun<'_>> = None;
+    let mut hoisted_run: Option<HoistedRun> = None;
     for (i, mb) in measured.iter().enumerate().skip(start_index) {
         crate::progress::tick();
         let section_mark = plan.section_marks[i];
@@ -1065,6 +1194,18 @@ fn place<F: PartialEq>(
             checkpointed_page = Some(page_index);
             checkpoints.push(checkpoint);
         }
+        let anchor_run = match &mb.block {
+            LayoutBlock::Paragraph(_) => hoisted_run.take(),
+            LayoutBlock::Shape(shape) if shape.position.is_some() => None,
+            _ => {
+                hoisted_run = None;
+                None
+            }
+        };
+        let page_before_keep = anchor_run.is_some().then(|| {
+            let state_idx = paginator.get_current();
+            paginator.state(state_idx).page_index
+        });
         let fragments_before = paginator.page_fragment_counts();
         // pageBreakBefore, or a hard page-break run, forces a fresh page and
         // keeps the paragraph's space-before net of the previous space-after
@@ -1174,6 +1315,12 @@ fn place<F: PartialEq>(
             }
         }
 
+        let anchors_follow = !section_mark
+            && page_before_keep.is_some_and(|page| {
+                let state_idx = paginator.get_current();
+                paginator.state(state_idx).page_index == page
+            })
+            && first_line_overflows(mb, paginator);
         match &mb.block {
             LayoutBlock::Paragraph(block) => {
                 let BlockExtent::Paragraph(measure) = &mb.measure else {
@@ -1226,6 +1373,20 @@ fn place<F: PartialEq>(
                     ));
                 };
                 layout_shape(block, measure, paginator);
+                if is_paragraph_relative(block) && !follows_authored_break(&measured[..i]) {
+                    let state_idx = paginator.get_current();
+                    let page_index = paginator.state(state_idx).page_index;
+                    let fragment_index = paginator.pages[page_index].fragments.len() - 1;
+                    let run = hoisted_run.get_or_insert_with(|| HoistedRun {
+                        page_index,
+                        shapes: Vec::new(),
+                    });
+                    if run.page_index != page_index {
+                        run.page_index = page_index;
+                        run.shapes.clear();
+                    }
+                    run.shapes.push((i, fragment_index));
+                }
             }
 
             LayoutBlock::Chart(block) => {
@@ -1347,7 +1508,21 @@ fn place<F: PartialEq>(
                 let before = fragments_before.get(page).copied().unwrap_or(0);
                 (*count > before).then_some((page, before))
             });
+        if anchors_follow
+            && let Some(run) = &anchor_run
+            && let Some(paragraph_start) = first_changed_page
+        {
+            let placed_fragments: usize = fragments_after
+                .iter()
+                .enumerate()
+                .map(|(page, count)| {
+                    count.saturating_sub(fragments_before.get(page).copied().unwrap_or(0))
+                })
+                .sum();
+            relocate_hoisted_run(run, measured, paginator, paragraph_start, placed_fragments);
+        }
         if let Some((page_index, 0)) = first_changed_page
+            && anchor_run.is_none()
             && checkpointed_page != Some(page_index)
             && (!matches!(mb.block, LayoutBlock::Paragraph(_))
                 || fragments_after[page_index] == 1
@@ -1686,13 +1861,14 @@ fn build_resolved_lines(
     from_line: usize,
     to_line: usize,
 ) -> Vec<ResolvedLine> {
+    let texts = RunTexts::new(block.runs.len());
     let mut resolved = Vec::new();
     for line_index in from_line..to_line {
         let Some(line) = measure.lines.get(line_index) else {
             continue;
         };
         resolved.push(ResolvedLine {
-            segments: resolve_line_segments(&block.runs, line),
+            segments: resolve_line_segments_in(&block.runs, line, &texts),
         });
     }
     resolved
@@ -2194,9 +2370,17 @@ fn layout_image(block: &ImageBlock, measure: &ImageExtent, paginator: &mut Pagin
 /// Places reserved space like an inline image block, clipped to the column it
 /// lands in.
 fn layout_reserved(block: &ReservedBlock, measure: &ImageExtent, paginator: &mut Paginator) {
-    let state_idx = paginator.ensure_fits(measure.height);
+    let mut state_idx = paginator.ensure_fits(measure.height);
+    let mut height = measure.height;
+    if let Some(lead) = block.page_lead.filter(|lead| *lead > 0.0) {
+        let state = paginator.state(state_idx);
+        if state.pen_y <= state.content_top {
+            height += lead;
+            state_idx = paginator.ensure_fits(height);
+        }
+    }
     let column_index = paginator.state(state_idx).column_index;
-    let height = measure.height.min(paginator.get_column_capacity()).max(0.0);
+    let height = height.min(paginator.get_column_capacity()).max(0.0);
     let fragment = Fragment::Reserved(ReservedFragment {
         block_id: block.id.clone(),
         x: paginator.get_column_x(column_index),
@@ -2314,6 +2498,18 @@ fn resolve_object_position(
     paginator: &mut Paginator,
 ) -> (f64, f64) {
     let state_idx = paginator.get_current();
+    let flow_y = paginator.state(state_idx).pen_y;
+    resolve_object_position_at(position, width, height, paginator, flow_y)
+}
+
+fn resolve_object_position_at(
+    position: Option<&ImageRunPosition>,
+    width: f64,
+    height: f64,
+    paginator: &mut Paginator,
+    flow_y: f64,
+) -> (f64, f64) {
+    let state_idx = paginator.get_current();
     let state = paginator.state(state_idx);
     let page = &paginator.pages[state.page_index];
     let margins = page.body_anchor_margins.as_ref().unwrap_or(&page.margins);
@@ -2330,9 +2526,9 @@ fn resolve_object_position(
             margin_top: margins.top,
             margin_bottom: margins.bottom,
             flow_x: column_x,
-            flow_y: state.pen_y,
+            flow_y,
             flow_width: paginator.column_width(),
-            flow_height: state.content_limit - state.pen_y,
+            flow_height: state.content_limit - flow_y,
             odd_page: page.number % 2 == 1,
         },
     )
@@ -2516,6 +2712,448 @@ mod pagination_rule_tests {
             },
         }))
         .unwrap()
+    }
+
+    fn layout_fingerprints(input: &Input) -> Vec<String> {
+        input
+            .measured
+            .iter()
+            .map(|measured| serde_json::to_string(measured).unwrap())
+            .collect()
+    }
+
+    fn page_fragments(layout: &Layout) -> Vec<Vec<String>> {
+        layout
+            .pages
+            .iter()
+            .map(|page| {
+                page.fragments
+                    .iter()
+                    .map(|fragment| serde_json::to_string(fragment).unwrap())
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Lays `before` out, edits it into `after`, and places `after` both
+    /// incrementally from the retained layout and afresh.
+    fn incremental_matches_full(
+        name: &str,
+        before: Vec<serde_json::Value>,
+        after: Vec<serde_json::Value>,
+    ) {
+        incremental_matches_full_with(name, before, after, |_| {});
+    }
+
+    fn margined_section_break(
+        id: &str,
+        kind: &str,
+        margins: Option<(u32, u32)>,
+    ) -> serde_json::Value {
+        let mut block = json!({"kind": "sectionBreak", "id": id, "type": kind});
+        if let Some((top, side)) = margins {
+            block["margins"] = json!({"top": top, "right": side, "bottom": 10, "left": side});
+        }
+        json!({"block": block, "measure": {"kind": "sectionBreak"}})
+    }
+
+    fn continuous_body(input: &mut Input) {
+        input.options.body_break_type = Some(SectionBreakType::Continuous);
+    }
+
+    fn incremental_matches_full_with(
+        name: &str,
+        before: Vec<serde_json::Value>,
+        after: Vec<serde_json::Value>,
+        adjust: fn(&mut Input),
+    ) -> Option<usize> {
+        let input = |measured| {
+            let mut value = input(measured);
+            adjust(&mut value);
+            value
+        };
+        let previous_fingerprints = layout_fingerprints(&input(before.clone()));
+        let next_fingerprints = layout_fingerprints(&input(after.clone()));
+        let mut previous_input = input(before);
+        let previous = layout_document_checkpointed(&mut previous_input).unwrap();
+        let mut next_input = input(after.clone());
+        let dirty = previous_fingerprints
+            .iter()
+            .zip(&next_fingerprints)
+            .position(|(previous, next)| previous != next)?;
+        // Callers restart at the start of the section a changed section break
+        // closes, from the break that opens it, as the editor engine does.
+        let dirty = (dirty..after.len())
+            .find(|&index| {
+                after[index]["block"]["kind"] == "sectionBreak"
+                    && previous_fingerprints.get(index) != next_fingerprints.get(index)
+            })
+            .map_or(dirty, |changed| {
+                dirty.min(
+                    after[..changed]
+                        .iter()
+                        .rposition(|block| block["block"]["kind"] == "sectionBreak")
+                        .unwrap_or(0),
+                )
+            });
+        let mut previous_layout = previous.layout;
+        let incremental = layout_document_incremental(
+            &mut next_input,
+            &mut previous_layout,
+            &previous.checkpoints,
+            &previous_fingerprints,
+            &next_fingerprints,
+            dirty,
+        )
+        .unwrap();
+        let full = layout_document_checkpointed(&mut input(after)).unwrap();
+        assert_eq!(
+            page_fragments(&incremental.layout),
+            page_fragments(&full.layout),
+            "{name}: incremental placement differs from a fresh one"
+        );
+        assert_eq!(
+            serde_json::to_string(&incremental.layout).unwrap(),
+            serde_json::to_string(&full.layout).unwrap(),
+            "{name}: incremental layout differs from a fresh one outside the fragments"
+        );
+        Some(incremental.placed_blocks)
+    }
+
+    fn section_mark_fixture(ineligible: bool) -> Vec<serde_json::Value> {
+        let mut page_break = json!({"kind": "pageBreak", "id": "break"});
+        if ineligible {
+            page_break["sectionMarkIneligible"] = json!(true);
+        }
+        let mut blocks = vec![
+            paragraph(0, 4, 20.0, json!({})),
+            json!({"block": page_break, "measure": {"kind": "pageBreak"}}),
+            json!({
+                "block": {"kind": "paragraph", "id": 1, "runs": [], "attrs": {}},
+                "measure": {"kind": "paragraph", "lines": [], "totalHeight": 0},
+            }),
+            json!({"block": {"kind": "sectionBreak", "id": 2, "type": "nextPage"},
+                   "measure": {"kind": "sectionBreak"}}),
+        ];
+        blocks.extend((3..9).map(|id| paragraph(id, 2, 20.0, json!({}))));
+        blocks
+    }
+
+    #[test]
+    fn a_margin_change_two_sections_back_reframes_a_continuous_section() {
+        let section = |margin: u32| {
+            json!({
+                "block": {"kind": "sectionBreak", "id": "section", "type": "continuous",
+                          "margins": {"top": 10, "right": margin, "bottom": 10, "left": margin}},
+                "measure": {"kind": "sectionBreak"},
+            })
+        };
+        let blocks = |margin| {
+            vec![
+                paragraph(0, 5, 20.0, json!({})),
+                section(margin),
+                paragraph(1, 5, 20.0, json!({})),
+                paragraph(2, 5, 20.0, json!({})),
+            ]
+        };
+        incremental_matches_full_with("margins 10 to 20", blocks(10), blocks(20), |input| {
+            input.options.body_break_type = Some(SectionBreakType::Continuous);
+        });
+    }
+
+    #[test]
+    fn an_unchanged_section_break_after_an_edit_keeps_the_pages_between_edits_skipped() {
+        let blocks = |edited: bool| -> Vec<serde_json::Value> {
+            (0..100)
+                .map(|id| {
+                    if id == 2 {
+                        json!({"block": {"kind": "sectionBreak", "id": 2, "type": "nextPage"},
+                               "measure": {"kind": "sectionBreak"}})
+                    } else {
+                        let attrs = if edited && (id == 1 || id == 98) {
+                            json!({"keepLines": false})
+                        } else {
+                            json!({})
+                        };
+                        paragraph(id, 5, 20.0, attrs)
+                    }
+                })
+                .collect()
+        };
+        let fingerprints = |blocks: &[serde_json::Value]| -> Vec<String> {
+            blocks.iter().map(|block| block.to_string()).collect()
+        };
+        let before = blocks(false);
+        let after = blocks(true);
+        let mut previous_input = input(before.clone());
+        let previous = layout_document_checkpointed(&mut previous_input).unwrap();
+        let mut previous_layout = previous.layout;
+        let incremental = layout_document_incremental(
+            &mut input(after.clone()),
+            &mut previous_layout,
+            &previous.checkpoints,
+            &fingerprints(&before),
+            &fingerprints(&after),
+            1,
+        )
+        .unwrap();
+        let full = layout_document_checkpointed(&mut input(after)).unwrap();
+        assert_eq!(
+            page_fragments(&incremental.layout),
+            page_fragments(&full.layout)
+        );
+        assert!(
+            incremental.placed_blocks < 20,
+            "{}",
+            incremental.placed_blocks
+        );
+    }
+
+    #[test]
+    fn an_edit_that_adds_a_block_after_a_changed_page_break_matches_a_fresh_layout() {
+        let mut after = section_mark_fixture(false);
+        after.push(paragraph(20, 2, 20.0, json!({})));
+        incremental_matches_full(
+            "flag flip and an added block",
+            section_mark_fixture(true),
+            after,
+        );
+    }
+
+    #[test]
+    fn a_margin_change_inherited_across_a_next_page_break_reframes_a_later_continuous_section() {
+        for (first, second) in [
+            ("nextPage", "continuous"),
+            ("continuous", "nextPage"),
+            ("nextPage", "nextPage"),
+            ("continuous", "continuous"),
+        ] {
+            let blocks = |side: u32| {
+                let mut blocks = vec![paragraph(0, 5, 20.0, json!({}))];
+                blocks.push(margined_section_break("a", first, Some((10, side))));
+                blocks.push(paragraph(1, 5, 20.0, json!({})));
+                blocks.push(margined_section_break("b", second, None));
+                blocks.extend((2..6).map(|id| paragraph(id, 5, 20.0, json!({}))));
+                blocks
+            };
+            incremental_matches_full_with(
+                &format!("{first} then {second}"),
+                blocks(10),
+                blocks(20),
+                continuous_body,
+            );
+        }
+    }
+
+    #[test]
+    fn a_closing_break_turning_continuous_reframes_its_own_section() {
+        let blocks = |kind: &str| {
+            let mut blocks = vec![paragraph(0, 2, 20.0, json!({}))];
+            blocks.push(margined_section_break("a", "nextPage", Some((10, 10))));
+            blocks.push(paragraph(1, 5, 20.0, json!({"pageBreakBefore": true})));
+            blocks.extend((2..8).map(|id| paragraph(id, 5, 20.0, json!({}))));
+            blocks.push(margined_section_break("b", kind, Some((10, 20))));
+            blocks.extend((8..10).map(|id| paragraph(id, 5, 20.0, json!({}))));
+            blocks
+        };
+        for (before, after) in [("nextPage", "continuous"), ("continuous", "nextPage")] {
+            incremental_matches_full_with(
+                &format!("{before} to {after}"),
+                blocks(before),
+                blocks(after),
+                continuous_body,
+            );
+        }
+    }
+
+    #[test]
+    fn a_top_margin_change_on_a_short_first_section_still_converges_in_the_next() {
+        let blocks = |top: u32| {
+            let mut blocks = vec![paragraph(0, 2, 20.0, json!({}))];
+            blocks.push(margined_section_break("a", "continuous", Some((top, 10))));
+            blocks.push(paragraph(1, 5, 20.0, json!({"pageBreakBefore": true})));
+            blocks.extend((2..40).map(|id| paragraph(id, 5, 20.0, json!({}))));
+            blocks
+        };
+        let placed =
+            incremental_matches_full_with("top margin", blocks(10), blocks(15), continuous_body)
+                .unwrap();
+        assert!(placed < 10, "placed {placed} of 41 blocks");
+    }
+
+    #[test]
+    fn a_margin_change_on_a_continuous_section_reframes_the_pages_after_an_authored_break() {
+        let blocks = |side: u32| {
+            vec![
+                paragraph(0, 2, 20.0, json!({})),
+                margined_section_break("a", "continuous", Some((10, side))),
+                paragraph(1, 2, 20.0, json!({"pageBreakBefore": true})),
+                paragraph(2, 2, 20.0, json!({"pageBreakBefore": true})),
+            ]
+        };
+        incremental_matches_full_with(
+            "side margins 10 to 20",
+            blocks(10),
+            blocks(20),
+            continuous_body,
+        );
+    }
+
+    #[test]
+    fn a_page_break_flag_change_repaginates_the_section_mark_after_it() {
+        for (before, after) in [(true, false), (false, true)] {
+            incremental_matches_full(
+                &format!("flag {before} to {after}"),
+                section_mark_fixture(before),
+                section_mark_fixture(after),
+            );
+        }
+    }
+
+    #[test]
+    fn incremental_placement_equals_a_fresh_one_for_a_change_at_any_block() {
+        let contextual = |id: u32, style: &str| {
+            paragraph(
+                id,
+                2,
+                20.0,
+                json!({"styleId": style, "contextualSpacing": true,
+                       "spacing": {"before": 10, "after": 10}}),
+            )
+        };
+        let float = json!({
+            "block": {"kind": "shape", "id": "float", "shapeType": "rect", "width": 50, "height": 40,
+                      "geometryPath": [], "children": [], "wrapType": "square",
+                      "position": {"horizontal": {"relativeTo": "column", "posOffset": 0},
+                                   "vertical": {"relativeTo": "paragraph", "posOffset": 0}}},
+            "measure": {"kind": "shape", "width": 50, "height": 40},
+        });
+        let fixtures: Vec<(&str, Vec<serde_json::Value>)> = vec![
+            (
+                "section mark after a page break",
+                section_mark_fixture(true),
+            ),
+            (
+                "contextual spacing",
+                (0..12).map(|id| contextual(id, "Body")).collect(),
+            ),
+            (
+                "keep with next",
+                (0..12)
+                    .map(|id| paragraph(id, 2, 20.0, json!({"keepNext": id % 3 == 1})))
+                    .collect(),
+            ),
+            ("float before a paragraph", {
+                let mut blocks: Vec<_> =
+                    (0..4).map(|id| paragraph(id, 2, 20.0, json!({}))).collect();
+                blocks.push(float);
+                blocks.extend((4..10).map(|id| paragraph(id, 2, 20.0, json!({}))));
+                blocks
+            }),
+            (
+                "keep chains across page starts",
+                (0..16)
+                    .map(|id| paragraph(id, 2, 20.0, json!({"keepNext": id % 4 != 3})))
+                    .collect(),
+            ),
+            ("a hoisted shape opening a page", {
+                let mut blocks = Vec::new();
+                for id in 0..6 {
+                    blocks.push(paragraph(id, 5, 20.0, json!({})));
+                    blocks.push(hoisted_shape(&format!("opening-{id}"), "paragraph"));
+                }
+                blocks.push(paragraph(6, 2, 20.0, json!({})));
+                blocks
+            }),
+            ("hoisted shapes", {
+                let mut blocks = Vec::new();
+                for id in 0..10 {
+                    if id % 3 == 1 {
+                        blocks.push(hoisted_shape(&format!("shape-{id}"), "paragraph"));
+                    }
+                    blocks.push(paragraph(id, 2, 20.0, json!({})));
+                }
+                blocks
+            }),
+            ("continuous sections", {
+                let section = |id: u32| {
+                    json!({
+                        "block": {"kind": "sectionBreak", "id": format!("section-{id}"),
+                                  "type": "continuous",
+                                  "margins": {"top": 10, "right": 10, "bottom": 10, "left": 10}},
+                        "measure": {"kind": "sectionBreak"},
+                    })
+                };
+                let mut blocks = Vec::new();
+                for id in 0..9 {
+                    blocks.push(paragraph(id, 3, 20.0, json!({})));
+                    if id % 3 == 2 {
+                        blocks.push(section(id));
+                    }
+                }
+                blocks
+            }),
+        ];
+        let changes: [(&str, fn(&mut serde_json::Value)); 6] = [
+            ("taller lines", |block| {
+                if let Some(lines) = block["measure"]["lines"].as_array_mut() {
+                    for line in lines {
+                        line["lineHeight"] = json!(31.0);
+                    }
+                }
+            }),
+            ("page break flag", |block| {
+                if block["block"]["kind"] == "pageBreak" {
+                    let flag = block["block"]["sectionMarkIneligible"] == true;
+                    block["block"]["sectionMarkIneligible"] = json!(!flag);
+                }
+            }),
+            ("keep with next", |block| {
+                if block["block"]["kind"] == "paragraph" {
+                    let keep = block["block"]["attrs"]["keepNext"] == true;
+                    block["block"]["attrs"]["keepNext"] = json!(!keep);
+                }
+            }),
+            ("style", |block| {
+                if block["block"]["kind"] == "paragraph" {
+                    block["block"]["attrs"]["styleId"] = json!("Other");
+                }
+            }),
+            ("section margins", |block| {
+                if block["block"]["kind"] == "sectionBreak" {
+                    block["block"]["margins"] =
+                        json!({"top": 10, "right": 25, "bottom": 10, "left": 25});
+                }
+            }),
+            ("float position", |block| {
+                if block["block"]["kind"] == "shape" {
+                    block["block"]["position"]["vertical"]["posOffset"] = json!(25);
+                }
+            }),
+        ];
+        for (fixture, blocks) in &fixtures {
+            for index in 0..blocks.len() {
+                for (change, apply) in &changes {
+                    let mut after = blocks.clone();
+                    apply(&mut after[index]);
+                    if after == *blocks {
+                        continue;
+                    }
+                    incremental_matches_full_with(
+                        &format!("{fixture}: {change} at {index}"),
+                        blocks.clone(),
+                        after,
+                        if *fixture == "continuous sections" {
+                            |input| {
+                                input.options.body_break_type = Some(SectionBreakType::Continuous)
+                            }
+                        } else {
+                            |_| {}
+                        },
+                    );
+                }
+            }
+        }
     }
 
     fn counted_keep_layout(mut value: Input, reference: bool) -> (Vec<u8>, usize) {
@@ -3745,6 +4383,345 @@ mod pagination_rule_tests {
         };
         assert_eq!((shape.y, moved.y, moved.height), (50.0, 40.0, 50.0));
         assert_eq!(moved.y + 30.0, shape.y + shape.height);
+    }
+
+    fn hoisted_shape(id: &str, relative_to: &str) -> serde_json::Value {
+        json!({
+            "block": {
+                "kind": "shape", "id": id, "shapeType": "rect",
+                "width": 50, "height": 40, "geometryPath": [], "children": [],
+                "wrapType": "inFront",
+                "position": {
+                    "horizontal": {"relativeTo": "page", "posOffset": 30},
+                    "vertical": {"relativeTo": relative_to, "posOffset": 5}
+                }
+            },
+            "measure": {"kind": "shape", "width": 50, "height": 40}
+        })
+    }
+
+    fn shape_pages(layout: &Layout, id: &str) -> Vec<usize> {
+        let id = serde_json::to_value(id).unwrap();
+        layout
+            .pages
+            .iter()
+            .enumerate()
+            .filter(|(_, page)| {
+                page.fragments.iter().any(|fragment| {
+                    matches!(fragment, Fragment::Shape(shape)
+                        if serde_json::to_value(&shape.block_id).unwrap() == id)
+                })
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    #[test]
+    fn paragraph_relative_shapes_follow_a_paragraph_whose_first_line_overflows() {
+        let mut value = input(vec![
+            paragraph(0, 4, 20.0, json!({})),
+            hoisted_shape("a", "paragraph"),
+            hoisted_shape("b", "paragraph"),
+            paragraph(1, 1, 30.0, json!({})),
+        ]);
+        let layout = layout_document(&mut value).unwrap();
+        assert_eq!(layout.pages.len(), 2);
+        assert_eq!(layout.pages[0].fragments.len(), 1);
+        let kinds: Vec<_> = layout.pages[1]
+            .fragments
+            .iter()
+            .map(|fragment| match fragment {
+                Fragment::Shape(shape) => {
+                    assert_eq!((shape.x, shape.y), (30.0, 15.0));
+                    serde_json::to_string(&shape.block_id).unwrap()
+                }
+                Fragment::Paragraph(_) => "paragraph".to_owned(),
+                _ => panic!("unexpected fragment"),
+            })
+            .collect();
+        assert_eq!(kinds, ["\"a\"", "\"b\"", "paragraph"]);
+    }
+
+    #[test]
+    fn a_relocated_shape_measures_from_a_paragraph_pushed_below_a_float_band() {
+        let mut value = input(vec![
+            paragraph(0, 3, 20.0, json!({})),
+            hoisted_shape("a", "paragraph"),
+            paragraph(1, 1, 35.0, json!({"spacing": {"before": 20}})),
+        ]);
+        value.options.section_page_float_bands =
+            serde_json::from_value(json!([{"default": [{"top": 40, "bottom": 47}]}])).unwrap();
+        let layout = layout_document(&mut value).unwrap();
+        let [Fragment::Shape(shape), Fragment::Paragraph(paragraph)] =
+            &layout.pages[1].fragments[..]
+        else {
+            panic!(
+                "shape then paragraph expected on the second page: {}",
+                serde_json::to_string(&layout.pages).unwrap()
+            )
+        };
+        assert_eq!(paragraph.y, 47.0);
+        assert_eq!(shape.y, 52.0);
+    }
+
+    #[test]
+    fn hoisted_shapes_stay_behind_unless_the_first_line_is_what_overflows() {
+        let float_skip = json!({
+            "block": {
+                "kind": "paragraph", "id": 1,
+                "runs": [{ "kind": "text", "text": "x", "fmt": {} }], "attrs": {},
+            },
+            "measure": {
+                "kind": "paragraph",
+                "lines": [{
+                    "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 1, "width": 10.0,
+                    "ascent": 8.0, "descent": 2.0, "lineHeight": 30.0, "floatSkipBefore": 50.0
+                }],
+                "totalHeight": 80.0,
+            },
+        });
+        for (name, shape_kind, anchor) in [
+            (
+                "page break before",
+                "paragraph",
+                paragraph(1, 1, 30.0, json!({"pageBreakBefore": true})),
+            ),
+            (
+                "first line fits",
+                "paragraph",
+                paragraph(1, 3, 15.0, json!({"keepLines": true})),
+            ),
+            ("float skip", "paragraph", float_skip),
+            ("page relative", "page", paragraph(1, 1, 30.0, json!({}))),
+            ("spans pages", "paragraph", paragraph(1, 8, 30.0, json!({}))),
+        ] {
+            let mut value = input(vec![
+                paragraph(0, 4, 20.0, json!({})),
+                hoisted_shape("a", shape_kind),
+                anchor,
+            ]);
+            let layout = layout_document(&mut value).unwrap();
+            assert!(layout.pages.len() > 1, "{name}");
+            assert_eq!(shape_pages(&layout, "a"), [0], "{name}");
+        }
+    }
+
+    #[test]
+    fn a_shape_stays_behind_a_paragraph_split_across_columns_of_the_next_page() {
+        let mut value = input(vec![
+            paragraph(0, 9, 20.0, json!({})),
+            hoisted_shape("a", "paragraph"),
+            paragraph(1, 6, 30.0, json!({})),
+        ]);
+        value.options.columns = serde_json::from_value(json!({"count": 2, "gap": 0})).unwrap();
+        let layout = layout_document(&mut value).unwrap();
+        assert_eq!(layout.pages.len(), 2);
+        assert_eq!(shape_pages(&layout, "a"), [0]);
+    }
+
+    fn anchor_lines(lines: serde_json::Value, attrs: serde_json::Value) -> serde_json::Value {
+        let total: f64 = lines
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|line| {
+                line["lineHeight"].as_f64().unwrap()
+                    + line["floatSkipBefore"].as_f64().unwrap_or(0.0)
+            })
+            .sum();
+        json!({
+            "block": {
+                "kind": "paragraph", "id": 1,
+                "runs": [{ "kind": "text", "text": "x", "fmt": {} }], "attrs": attrs,
+            },
+            "measure": { "kind": "paragraph", "lines": lines, "totalHeight": total },
+        })
+    }
+
+    fn led_line(height: f64) -> serde_json::Value {
+        json!({
+            "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 1, "width": 10,
+            "ascent": 16.0, "descent": 4.0, "lineHeight": height,
+        })
+    }
+
+    #[test]
+    fn a_shape_stays_behind_a_kept_paragraph_whose_first_line_fits_without_its_leading() {
+        let mut value = input(vec![
+            paragraph(0, 3, 25.0, json!({})),
+            hoisted_shape("a", "paragraph"),
+            anchor_lines(
+                json!([led_line(30.0), led_line(30.0), led_line(30.0)]),
+                json!({"keepLines": true}),
+            ),
+        ]);
+        let layout = layout_document(&mut value).unwrap();
+        assert_eq!(layout.pages.len(), 2);
+        assert_eq!(shape_pages(&layout, "a"), [0]);
+    }
+
+    #[test]
+    fn a_shape_lands_on_its_paragraphs_page_around_a_float_band() {
+        for (bottom, expected_page) in [(90, 0), (100, 1), (110, 0)] {
+            let mut value = input(vec![
+                paragraph(0, 2, 25.0, json!({})),
+                hoisted_shape("a", "paragraph"),
+                anchor_lines(json!([led_line(30.0)]), json!({})),
+            ]);
+            value.options.section_page_float_bands =
+                serde_json::from_value(json!([{"default": [{"top": 85, "bottom": bottom}]}]))
+                    .unwrap();
+            let layout = layout_document(&mut value).unwrap();
+            let paragraph_page = layout
+                .pages
+                .iter()
+                .position(|page| {
+                    page.fragments.iter().any(|fragment| {
+                        matches!(fragment, Fragment::Paragraph(paragraph)
+                            if serde_json::to_value(&paragraph.block_id).unwrap() == json!(1.0))
+                    })
+                })
+                .unwrap();
+            assert_eq!(paragraph_page, expected_page, "band bottom {bottom}");
+            assert_eq!(
+                shape_pages(&layout, "a"),
+                [paragraph_page],
+                "band bottom {bottom}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_first_line_that_fits_below_a_float_band_keeps_the_shape_behind() {
+        let mut value = input(vec![
+            paragraph(0, 2, 25.0, json!({})),
+            hoisted_shape("a", "paragraph"),
+            anchor_lines(json!([led_line(30.0)]), json!({"keepNext": true})),
+            paragraph(2, 1, 30.0, json!({})),
+        ]);
+        value.options.section_page_float_bands =
+            serde_json::from_value(json!([{"default": [{"top": 85, "bottom": 90}]}])).unwrap();
+        let layout = layout_document(&mut value).unwrap();
+        assert_eq!(layout.pages.len(), 2);
+        assert_eq!(shape_pages(&layout, "a"), [0]);
+    }
+
+    #[test]
+    fn a_shape_stays_behind_when_keep_with_next_moves_an_oversized_first_line() {
+        let mut value = input(vec![
+            hoisted_shape("p", "page"),
+            hoisted_shape("a", "paragraph"),
+            paragraph(
+                1,
+                1,
+                20.0,
+                json!({"keepNext": true, "spacing": {"before": 100}}),
+            ),
+            paragraph(2, 1, 20.0, json!({})),
+        ]);
+        let layout = layout_document(&mut value).unwrap();
+        assert_eq!(layout.pages.len(), 2);
+        assert_eq!(shape_pages(&layout, "a"), [0]);
+    }
+
+    #[test]
+    fn a_float_skip_on_a_later_line_keeps_the_shape_behind() {
+        let mut skipped = line(30.0);
+        skipped["floatSkipBefore"] = json!(5.0);
+        let mut value = input(vec![
+            paragraph(0, 4, 20.0, json!({})),
+            hoisted_shape("a", "paragraph"),
+            anchor_lines(json!([line(30.0), skipped]), json!({})),
+        ]);
+        let layout = layout_document(&mut value).unwrap();
+        assert_eq!(layout.pages.len(), 2);
+        assert_eq!(shape_pages(&layout, "a"), [0]);
+    }
+
+    #[test]
+    fn a_shape_stays_behind_a_keep_with_next_group_whose_first_line_fits() {
+        let mut value = input(vec![
+            paragraph(0, 4, 20.0, json!({})),
+            hoisted_shape("a", "paragraph"),
+            paragraph(1, 1, 15.0, json!({"keepNext": true})),
+            paragraph(2, 1, 30.0, json!({})),
+        ]);
+        let layout = layout_document(&mut value).unwrap();
+        assert_eq!(layout.pages.len(), 2);
+        assert_eq!(layout.pages[1].fragments.len(), 2);
+        assert_eq!(shape_pages(&layout, "a"), [0]);
+    }
+
+    #[test]
+    fn a_shape_after_a_continuous_section_break_stays_with_the_text_above_it() {
+        let mut value = input(vec![
+            paragraph(0, 4, 20.0, json!({})),
+            json!({
+                "block": {"kind": "sectionBreak", "id": 9, "type": "continuous"},
+                "measure": {"kind": "sectionBreak"}
+            }),
+            hoisted_shape("a", "paragraph"),
+            paragraph(1, 1, 30.0, json!({})),
+        ]);
+        value.options.body_break_type = Some(SectionBreakType::Continuous);
+        let layout = layout_document(&mut value).unwrap();
+        assert_eq!(layout.pages.len(), 2);
+        assert_eq!(shape_pages(&layout, "a"), [0]);
+    }
+
+    #[test]
+    fn incremental_layout_matches_full_around_a_relocated_shape() {
+        let document = |anchor: serde_json::Value, tail_height: f64| -> Vec<serde_json::Value> {
+            let mut blocks = vec![
+                paragraph(0, 4, 20.0, json!({})),
+                hoisted_shape("a", "paragraph"),
+                anchor,
+            ];
+            blocks.extend((2..12).map(|id| paragraph(id, 1, tail_height, json!({}))));
+            blocks
+        };
+        let moved = || paragraph(1, 1, 30.0, json!({}));
+        let kept = || paragraph(1, 3, 15.0, json!({"keepLines": true}));
+        let mut tail_edit = document(moved(), 20.0);
+        tail_edit[8] = paragraph(7, 1, 35.0, json!({}));
+        for (before, after, dirty) in [
+            (document(moved(), 20.0), tail_edit, 8),
+            (document(moved(), 20.0), document(kept(), 20.0), 2),
+            (document(kept(), 20.0), document(moved(), 20.0), 2),
+        ] {
+            let mut previous_input = input(before);
+            let previous = layout_document_checkpointed(&mut previous_input).unwrap();
+            assert!(
+                previous
+                    .checkpoints
+                    .iter()
+                    .all(|checkpoint| checkpoint.block_index != 2)
+            );
+            let previous_fingerprints = vec![1_u64; after.len()];
+            let mut next_fingerprints = previous_fingerprints.clone();
+            next_fingerprints[dirty] = 2;
+            let mut previous_layout = previous.layout;
+            let mut incremental_input = input(after.clone());
+            let incremental = layout_document_incremental(
+                &mut incremental_input,
+                &mut previous_layout,
+                &previous.checkpoints,
+                &previous_fingerprints,
+                &next_fingerprints,
+                dirty,
+            )
+            .unwrap();
+            let mut full_input = input(after);
+            let full = layout_document_checkpointed(&mut full_input).unwrap();
+            assert_eq!(
+                serde_json::to_string(&incremental.layout).unwrap(),
+                serde_json::to_string(&full.layout).unwrap()
+            );
+            if dirty == 8 {
+                assert!(incremental.placed_blocks < full.placed_blocks);
+                assert_eq!(shape_pages(&incremental.layout, "a"), [1]);
+            }
+        }
     }
 
     #[test]

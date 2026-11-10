@@ -3,6 +3,11 @@
 //! The output references nothing outside itself: no scripts, no styles, no
 //! external URLs, and bitmaps only as embedded PNG or JPEG `data:` URLs.
 
+#[cfg(target_arch = "wasm32")]
+#[used]
+#[unsafe(link_section = "betteroffice.metafile.svg")]
+static SVG_WRITER: [u8; 1] = [1];
+
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::rc::Rc;

@@ -74,6 +74,9 @@ pub struct PageFlowGeometry {
     pub footnote_reserved_heights: Option<Arc<std::collections::BTreeMap<String, f64>>>,
     /// Whether this page opened a column region that placement balances.
     pub balanced_region: bool,
+    /// Whether the continuous section in force frames its text horizontally,
+    /// which depends on the sections before it.
+    pub(crate) continuous_horizontal_frame: bool,
 }
 
 /// Current state of a page being laid out.
@@ -349,6 +352,15 @@ pub struct Paginator {
     resumed_pending: Option<(Option<Size>, Option<PageMargins>, Option<ColumnLayout>)>,
 }
 
+fn fit_request(height: f64, trailing: f64) -> (f64, f64) {
+    let height = if height.is_finite() && height > 0.0 {
+        height
+    } else {
+        0.0
+    };
+    (height, trailing.max(0.0).min(height))
+}
+
 impl Paginator {
     /// Constructs a paginator with the initial section geometry.
     pub fn new(
@@ -510,6 +522,7 @@ impl Paginator {
         paginator.displayed_parity_offset = geometry.continued_parity_offset;
         paginator.section_page_float_bands = geometry.section_page_float_bands.clone();
         paginator.balanced_page = geometry.balanced_region.then_some(0);
+        paginator.continuous_horizontal_frame = geometry.continuous_horizontal_frame;
         Ok(paginator)
     }
 
@@ -591,6 +604,7 @@ impl Paginator {
                 .states
                 .last()
                 .is_some_and(|state| self.balanced_page == Some(state.page_index)),
+            continuous_horizontal_frame: self.continuous_horizontal_frame,
         }
     }
 
@@ -1149,13 +1163,7 @@ impl Paginator {
 
     pub(crate) fn ensure_fits_with_trailing(&mut self, height: f64, trailing: f64) -> usize {
         let mut idx = self.get_current();
-        let safe_height = if height.is_finite() && height > 0.0 {
-            height
-        } else {
-            0.0
-        };
-
-        let trailing = trailing.max(0.0).min(safe_height);
+        let (safe_height, trailing) = fit_request(height, trailing);
         while !self.fits_with_trailing(safe_height, trailing, idx) {
             // oversized-fragment guard, re-checked per iteration because a
             // queued continuous-section geometry can change page capacity
@@ -1175,6 +1183,15 @@ impl Paginator {
         }
 
         idx
+    }
+
+    /// Whether [`Self::ensure_fits_with_trailing`] would stay on this page.
+    pub(crate) fn fits_on_current_page(&mut self, height: f64, trailing: f64) -> bool {
+        let idx = self.get_current();
+        let (safe_height, trailing) = fit_request(height, trailing);
+        self.fits_with_trailing(safe_height, trailing, idx)
+            || (safe_height <= self.get_column_capacity_with_trailing(trailing)
+                && self.clear_float_bands(idx, safe_height, trailing).1)
     }
 
     /// Places a fragment at the cursor, collapsing adjacent spacing, and
@@ -1628,6 +1645,26 @@ mod tests {
             equal_width: None,
             separator: None,
             columns: None,
+        }
+    }
+
+    #[test]
+    fn a_resumed_checkpoint_keeps_the_continuous_section_frame() {
+        for (frame, started) in [(true, true), (true, false), (false, true)] {
+            let mut paginator = Paginator::new(
+                Size { w: 600.0, h: 600.0 },
+                margins(60.0, 80.0),
+                columns(),
+                None,
+            )
+            .unwrap();
+            paginator.continuous_horizontal_frame = frame;
+            paginator.section_started = started;
+            let geometry = paginator.snapshot_geometry();
+            let resumed = Paginator::resume_in_section(&geometry, 1, 0, None).unwrap();
+            assert_eq!(resumed.continuous_horizontal_frame, frame);
+            assert_eq!(resumed.section_started, started);
+            assert_eq!(resumed.snapshot_geometry(), geometry);
         }
     }
 

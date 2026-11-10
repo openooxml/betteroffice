@@ -135,7 +135,14 @@
       "unsupportedCommand": "尚不支持。",
       "invalidArguments": "此值无效。",
       "inputFailed": "之前的单元格输入无法保存。",
+      "editUnsupported": "无法在此处应用此编辑。工作簿未更改。",
+      "editUnsupportedChart": "无法应用此编辑：图表使用了此编辑会移动的单元格。工作簿未更改。",
+      "editUnsupportedTable": "无法应用此编辑：表格使用了此编辑会移动的单元格。工作簿未更改。",
+      "editUnsupportedPivot": "无法应用此编辑：数据透视表使用了此编辑会移动的单元格。工作簿未更改。",
       "sheetProtected": "此单元格位于受保护的工作表上。",
+      "hostRefused": "不允许此编辑。",
+      "tooManyToCheck": "单元格过多，插件无法检查（上限 {limit}）。",
+      "hostStarting": "编辑器仍在启动。请稍后再试。",
       "documentReplaced": "已打开另一个工作簿。",
       "targetChanged": "选择已更改。",
       "gestureActive": "请先完成图表移动。",
@@ -146,8 +153,31 @@
       "permissionDenied": "宿主应用未允许此插件使用此命令。",
       "unsupportedPolicy": "插件尚不能运行此命令，请改用编辑批处理。",
       "pluginUnavailable": "插件已不再处于活动状态。",
-      "aborted": "插件操作在命令运行前已取消。"
-    }
+      "aborted": "插件操作在命令运行前已取消。",
+      "clipboardUnavailable": "此浏览器不允许从菜单粘贴。请使用键盘快捷键。",
+      "lastSheet": "工作簿至少需要一个工作表。",
+      "sheetAtEdge": "无法再移动此工作表。",
+      "sheetNameInvalid": "工作表名称需为 1 到 31 个字符，不能重复，且不能包含 : \\ / ? * [ ]。",
+      "clipboardDenied": "浏览器不允许访问剪贴板。"
+    },
+    "cut": "剪切",
+    "copy": "复制",
+    "paste": "粘贴",
+    "pastePlainText": "粘贴为纯文本",
+    "clearContents": "清除内容",
+    "insert": "插入",
+    "delete": "删除",
+    "insertRowsAbove": "在上方插入行",
+    "insertRowsBelow": "在下方插入行",
+    "insertColumnsLeft": "在左侧插入列",
+    "insertColumnsRight": "在右侧插入列",
+    "deleteRows": "删除行",
+    "deleteColumns": "删除列",
+    "insertSheet": "插入工作表",
+    "deleteSheet": "删除工作表",
+    "renameSheet": "重命名",
+    "moveSheetLeft": "左移",
+    "moveSheetRight": "右移"
   },
   "editor": {
     "appLabel": "电子表格编辑器",
@@ -162,7 +192,11 @@
     "showDetails": "显示详细信息",
     "openPrompt": "打开 XLSX 文件",
     "sheetTabsLabel": "工作表",
-    "clearExceedsLimit": "清除操作超出单元格上限"
+    "clearExceedsLimit": "清除操作超出单元格上限",
+    "cellMenuLabel": "单元格菜单",
+    "sheetTabMenuLabel": "工作表标签菜单",
+    "renameSheetLabel": "重命名工作表",
+    "sheetNamePrefix": "工作表"
   },
   "presence": {
     "label": "协作者",
@@ -178,6 +212,7 @@
     "accept": "接受",
     "reject": "拒绝",
     "forceApply": "强制应用",
+    "forceBlockedReason": "结构更改后无法应用此提议。",
     "staleWarning": "提议后已更改的单元格: {cells}"
   },
   "a11y": {
@@ -187,12 +222,27 @@
     "cellLabel": "{address}, {value}",
     "cellLabelSelected": "{address}, {value}, 已选",
     "emptyCellLabel": "{address}, 空",
-    "emptyCellLabelSelected": "{address}, 空, 已选"
+    "emptyCellLabelSelected": "{address}, 空, 已选",
+    "hasFormula": "{label}，包含公式",
+    "rangeSelected": "已选择 {start} 到 {end}，{rows} 行 × {columns} 列",
+    "sheetActivated": "{name}，第 {index} 个工作表，共 {count} 个",
+    "cellInputLabel": "编辑单元格 {address}",
+    "gridRoleDescription": "工作表"
   },
   "plugins": {
     "toolbarGroup": "插件",
     "panelTabs": "插件面板",
     "collapsePanel": "折叠{title}",
-    "expandPanel": "展开{title}"
+    "expandPanel": "展开{title}",
+    "rowGutter": "插件行标记"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "del": "Del",
+    "escape": "Esc",
+    "pageUp": "Page Up",
+    "pageDown": "Page Down"
   }
 }

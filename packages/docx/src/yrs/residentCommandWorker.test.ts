@@ -552,6 +552,113 @@ test('the worker and a main-thread session lay out one reservation set identical
   }
 }, TIMEOUT);
 
+for (const twips of [40, -20]) {
+  test(`main-thread and worker carets hits and selections follow glyphs with ${twips} twips spacing`, async () => {
+    const { createDisplayListQueries } = await import('../layout/render/displayListQueries');
+    const { loadRustDisplayListQueryEngine } = await import('../layout/render/rustDisplayList');
+    const bodyXml = '<w:p w14:paraId="00000001"><w:r><w:rPr>' +
+      '<w:rFonts w:ascii="Liberation Sans" w:hAnsi="Liberation Sans"/><w:sz w:val="24"/>' +
+      `<w:spacing w:val="${twips}"/></w:rPr><w:t>WimA</w:t></w:r>` +
+      '<w:r><w:rPr><w:rFonts w:ascii="Liberation Sans" w:hAnsi="Liberation Sans"/>' +
+      '<w:sz w:val="24"/></w:rPr><w:t>BC</w:t></w:r></w:p>';
+    const { client, engine, init, initial, point } = await openWorker({ bodyXml });
+    const host = await createYrsSession({ clientId: 8302 });
+    try {
+      const queryEngine = await loadRustDisplayListQueryEngine();
+      host.seedFromDocx(syntheticDocument(false, false, false, bodyXml));
+      const font = host.registerFont(new Uint8Array(readFileSync(resolve(
+        process.cwd(), 'crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'
+      ))));
+      const request = JSON.parse(init.layoutInput);
+      request.measurement.fontChains = { 'liberation sans|0|0': [font] };
+      host.layoutDocumentWithRegionsRetainedJson(JSON.stringify(request));
+      const main = applyFrameDeltaOwned(null, decodeFrameDelta(host.buildDisplayListFrame(JSON.stringify({
+        fontChains: { 'liberation sans|0|0': [font] },
+      }), 0)));
+      const worker = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
+      let commandFrame = initial.frame;
+      let seq = 0;
+      for (const [mode, frame, source] of [
+        ['main-thread', main, queryEngine], ['main-thread retained', main, host],
+        ['worker/resident', worker, queryEngine],
+      ] as const) {
+        const queries = createDisplayListQueries(frame.displayList, source);
+        try {
+          const runs = frame.displayList.pages[0]!.primitives.filter(run => run.kind === 'glyphRun');
+          expect(runs.map(run => run.text).join('')).toBe('WimABC');
+          const origins = new Map(runs.flatMap(run => run.glyphs.map(glyph =>
+            [run.docStart! + glyph.cluster, glyph.x] as const)));
+          expect(origins.size).toBe(6);
+          const start = Math.min(...origins.keys());
+          const baseline = runs[0]!.glyphs[0]!.y;
+          const spaced = runs.find(run => run.docStart === start)!;
+          const unspaced = runs.find(run => run.docStart === start + 4)!;
+          expect(Math.abs(spaced.echo!.letterSpacing! - twips / 15)).toBeLessThan(0.001);
+          expect(unspaced.echo?.letterSpacing ?? 0).toBe(0);
+          for (let offset = 0; offset <= 4; offset += 1) {
+            const position = start + offset;
+            const x = origins.get(position)!;
+            const caret = queries.caretRect(position);
+            expect(caret).not.toBeNull();
+            expect(Math.abs(caret!.x - x)).toBeLessThan(0.01);
+            if (mode === 'worker/resident') {
+              const at = { ...point, offset };
+              const selected = await editWithFrame(client, intent(++seq, 0, 'select', {
+                selection: { anchor: at, focus: at },
+              }));
+              commandFrame = selected.frame!;
+              expect(commandFrame.payload.caret.caretRect).not.toBeNull();
+              expect(Math.abs(commandFrame.payload.caret.caretRect!.x - x)).toBeLessThan(0.01);
+            }
+            if (offset < 4) {
+              const next = origins.get(position + 1)!;
+              const midpoint = (x + next) / 2;
+              for (const [hitX, expected] of [
+                [x, offset], [midpoint - 0.05, offset], [midpoint + 0.05, offset + 1],
+              ] as const) {
+                expect(queries.hitTestRegions(0, hitX, baseline)?.pos).toBe(start + expected);
+                if (mode === 'worker/resident') {
+                  const clicked = await editWithFrame(client, intent(++seq, 0, 'selectPoint', {
+                    page: { pageId: frame.pages[0]!.pageId.toString(), pageIndex: 0 }, x: hitX, y: baseline,
+                    layoutRevision: commandFrame.payload.layoutRevision, frameEpoch: commandFrame.revision,
+                    clickCount: 1, modifiers: { shift: false, alt: false, ctrl: false, meta: false },
+                  }));
+                  commandFrame = clicked.frame!;
+                  expect(engine.selection()!.head.offset).toBe(expected);
+                  expect(Math.abs(commandFrame.payload.caret.caretRect!.x - origins.get(start + expected)!))
+                    .toBeLessThan(0.01);
+                }
+              }
+            }
+          }
+          const last = runs.flatMap(run => run.glyphs.map(glyph =>
+            ({ position: run.docStart! + glyph.cluster, glyph })))
+            .find(entry => entry.position === start + 3)!.glyph;
+          expect(last.advance).toBeDefined();
+          expect(Math.abs(last.x + last.advance! - origins.get(start + 4)!)).toBeLessThan(0.01);
+          const rects = queries.rangeRects(start, start + 4);
+          expect(rects).toHaveLength(1);
+          expect(Math.abs(rects[0]!.x - origins.get(start)!)).toBeLessThan(0.01);
+          expect(Math.abs(rects[0]!.x + rects[0]!.width - origins.get(start + 4)!)).toBeLessThan(0.01);
+          if (mode === 'worker/resident') {
+            expect(engine.storyRangeRects('body', '', [[start, start + 4]])).toEqual([rects]);
+            const selected = await editWithFrame(client, intent(++seq, 0, 'select', {
+              selection: { anchor: { ...point, offset: 0 }, focus: { ...point, offset: 4 } },
+            }));
+            const frameRects = selected.frame!.payload.selectionRects!;
+            expect(frameRects).toHaveLength(1);
+            expect(Math.abs(frameRects[0]!.x - origins.get(start)!)).toBeLessThan(0.01);
+            expect(Math.abs(frameRects[0]!.x + frameRects[0]!.width - origins.get(start + 4)!)).toBeLessThan(0.01);
+          }
+        } finally { queries.dispose(); }
+      }
+    } finally {
+      host.destroy();
+      client.destroy();
+    }
+  }, TIMEOUT);
+}
+
 function expectFrameRegions(frame: RetainedFrame, headerText: string, footerText: string): void {
   expect(frameText(frame)).toBe('Seed');
   expect(frame.displayList.pages.length).toBeGreaterThan(0);
@@ -635,6 +742,20 @@ test('d1a_real_worker_init_insert_delete_acknowledge_current_layout_and_state', 
     expect(layouts).toHaveBeenCalledTimes(2);
   } finally {
     layouts.mockRestore();
+    client.destroy();
+  }
+}, TIMEOUT);
+
+test('worker scheduler turns go through the turn channel the worker was given', async () => {
+  const { client, worker, engine } = await openWorker();
+  try {
+    const before = worker.turnPosts;
+    const version = engine.proposalEngine.version();
+    const reads = await Promise.all([0, 1, 2].map(() =>
+      client.documentReadAt({ kind: 'rangeHighlights', ranges: [], expectVersion: version }, version)));
+    expect(reads.map(read => read.status)).toEqual(['ok', 'ok', 'ok']);
+    expect(worker.turnPosts).toBeGreaterThan(before);
+  } finally {
     client.destroy();
   }
 }, TIMEOUT);
@@ -2139,6 +2260,152 @@ test('worker cell and text handles survive input and resize the issued cell colu
   } finally { client.destroy(); }
 }, TIMEOUT);
 
+const THREE_COLUMNS = '<w:p w14:paraId="00000001"><w:r><w:t>Seed</w:t></w:r></w:p>' +
+  '<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="1440"/><w:gridCol w:w="1440"/><w:gridCol w:w="1440"/></w:tblGrid>' +
+  '<w:tr>' + ['A', 'B', 'C'].map(text => `<w:tc><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:tc>`).join('') + '</w:tr></w:tbl>';
+
+test('worker column edge drags move one border in one undo step and clamp at the minimum width', async () => {
+  const { client, engine, initial } = await openWorker({ bodyXml: THREE_COLUMNS });
+  try {
+    const cells = initial.frame.payload.geometry!.objects.filter(object => object.kind === 'cell');
+    cells.forEach((cell, column) => expect(cell.cell).toMatchObject({ table: 'body#0', row: 0, column, rowspan: 1, colspan: 1, columns: 3 }));
+    const version = (response: { frame?: { payload: { documentVersion?: string } } | null }) => response.frame!.payload.documentVersion!;
+    const drag = (seq: number, base: number, expectVersion: string, columnEdge: number, deltaTwips: number) =>
+      client.edit(intent(seq, base, 'resizeObject', { handle: cells[0]!.handle, expectVersion, columnEdge, deltaTwips }));
+    const first = await drag(1, 0, initial.frame.payload.documentVersion!, 1, 600);
+    expect(first.outcomes[0]?.status).toBe('applied');
+    expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [2040, 840, 1440]);
+    expect((engine.tablePayload('body', 0) as { tblPr: Record<string, unknown> }).tblPr).toMatchObject({ tableLayout: 'fixed' });
+    expect((engine.tablePayload('body', 0) as { tblPr: Record<string, unknown> }).tblPr.width ?? null).toBeNull();
+    const clamped = await drag(2, 1, version(first), 2, 5000);
+    expect(clamped.outcomes[0]?.status).toBe('applied');
+    expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [2040, 1980, 300]);
+    const pinned = await drag(3, 2, version(clamped), 3, -5000);
+    expect(pinned.outcomes[0]?.status).toBe('noop');
+    const widened = await drag(4, 2, version(clamped), 3, 900);
+    expect(widened.outcomes[0]?.status).toBe('applied');
+    expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [2040, 1980, 1200]);
+    expect((engine.tablePayload('body', 0) as { tblPr: Record<string, unknown> }).tblPr).toMatchObject({ tableLayout: 'fixed', width: 5220, widthType: 'dxa' });
+    const undone = await client.edit(intent(5, 3, 'undo', {}));
+    expect(undone.outcomes[0]?.status).toBe('applied');
+    expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [2040, 1980, 300]);
+    expect((engine.tablePayload('body', 0) as { tblPr: Record<string, unknown> }).tblPr.width ?? null).toBeNull();
+    expect((await client.edit(intent(6, 4, 'undo', {}))).outcomes[0]?.status).toBe('applied');
+    expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [2040, 840, 1440]);
+    expect((await client.edit(intent(7, 5, 'undo', {}))).outcomes[0]?.status).toBe('applied');
+    expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [1440, 1440, 1440]);
+    expect((engine.tablePayload('body', 0) as { tblPr: Record<string, unknown> }).tblPr.tableLayout ?? null).toBeNull();
+    expect((await client.edit(intent(8, 6, 'redo', {}))).outcomes[0]?.status).toBe('applied');
+    expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [2040, 840, 1440]);
+    const current = engine.proposalEngine.version();
+    expect((await drag(9, 5, current, 4, 100)).outcomes[0]).toMatchObject({ status: 'refused', reason: 'unsupported-object' });
+    for (const [index, payload] of [{ columnEdge: 0, deltaTwips: 100 }, { columnEdge: 1, deltaTwips: 1.5 }, { columnEdge: 1 },
+      { columnEdge: 1, deltaTwips: 100, widthTwips: 2000 }].entries()) {
+      expect((await client.edit(intent(10 + index, 5, 'resizeObject', { handle: cells[0]!.handle, expectVersion: current, ...payload } as never))).outcomes[0])
+        .toMatchObject({ status: 'refused', reason: 'invalid-payload' });
+    }
+    expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [2040, 840, 1440]);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker column edge drags converge with a concurrent edit in a cell of the same table', async () => {
+  const { client, engine, initial } = await openWorker({ bodyXml: THREE_COLUMNS });
+  const remote = await createResidentEngineSession(undefined, 8302);
+  try {
+    remote.loadState(engine.encodeState());
+    const cell = initial.frame.payload.geometry!.objects.find(object => object.kind === 'cell')!;
+    const remoteVector = remote.encodeStateVector();
+    const story = 'body:t0:r0c1';
+    remote.insertText({ story, paraId: remote.geometryReader.paragraphSpans(story)[0]!.paraId, offset: 1 }, '+');
+    const resized = await client.edit(intent(1, 0, 'resizeObject', {
+      handle: cell.handle, expectVersion: initial.frame.payload.documentVersion!, columnEdge: 1, deltaTwips: 600,
+    }));
+    expect(resized.outcomes[0]?.status).toBe('applied');
+    const localVector = engine.encodeStateVector();
+    engine.applyUpdate(remote.encodeStateAsUpdate(localVector));
+    remote.applyUpdate(engine.encodeStateAsUpdate(remoteVector));
+    for (const peer of [engine, remote]) {
+      expect(peer.tablePayload('body', 0)).toHaveProperty('grid', [2040, 840, 1440]);
+      expect(peer.paragraphs(story)[0]?.text).toBe('B+');
+    }
+  } finally {
+    remote.destroy();
+    client.destroy();
+  }
+}, TIMEOUT);
+
+test('a cell holding only a block control has a working object handle', async () => {
+  const cellXml = (content: string) => `<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>${content}</w:tc>`;
+  const text = (value: string) => `<w:p><w:r><w:t>${value}</w:t></w:r></w:p>`;
+  const bodyXml = '<w:p/><w:tbl><w:tblPr><w:tblLayout w:type="fixed"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>' +
+    `<w:tr>${cellXml(text('A'))}${cellXml(`<w:sdt><w:sdtPr><w:id w:val="9"/></w:sdtPr><w:sdtContent>${text('B')}</w:sdtContent></w:sdt>`)}</w:tr></w:tbl><w:p/>`;
+  const { client, engine, initial } = await openWorker({ bodyXml });
+  try {
+    const cell = initial.frame.payload.geometry!.objects.find(object => object.kind === 'cell' && object.story === 'body:t0:r0c1');
+    if (!cell) throw new Error('Control-only cell has no object');
+    const resized = await client.edit(intent(1, 0, 'resizeObject', {
+      handle: cell.handle, expectVersion: initial.frame.payload.documentVersion!, columnEdge: 1, deltaTwips: 200,
+    }));
+    expect(resized.outcomes[0]?.status).toBe('applied');
+    expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [2200, 1800]);
+    expect(engine.paragraphs('body:t0:r0c1:sdt0')[0]?.text).toBe('B');
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker row border drags set an at-least height in one undo step and never start below the stored height', async () => {
+  const { client, engine, initial } = await openWorker({ bodyXml: THREE_COLUMNS });
+  try {
+    const cell = initial.frame.payload.geometry!.objects.find(object => object.kind === 'cell')!;
+    const trPr = () => (engine.tablePayload('body', 0) as { rows: { trPr: Record<string, unknown> }[] }).rows[0]!.trPr;
+    const drag = (seq: number, paintedRowTwips: number, rowDeltaTwips: number) => client.edit(intent(seq, seq - 1, 'resizeObject', {
+      handle: cell.handle, expectVersion: engine.proposalEngine.version(), paintedRowTwips, rowDeltaTwips,
+    }));
+    expect((await drag(1, 300, 450)).outcomes[0]?.status).toBe('applied');
+    expect(trPr()).toMatchObject({ height: 750, heightRule: 'atLeast' });
+    expect((await drag(2, 100, 150)).outcomes[0]?.status).toBe('applied');
+    expect(trPr()).toMatchObject({ height: 900, heightRule: 'atLeast' });
+    expect((await drag(3, 900, 0)).outcomes[0]?.status).toBe('noop');
+    expect((await client.edit(intent(4, 3, 'undo', {}))).outcomes[0]?.status).toBe('applied');
+    expect(trPr()).toMatchObject({ height: 750 });
+    expect((await client.edit(intent(5, 4, 'undo', {}))).outcomes[0]?.status).toBe('applied');
+    expect(trPr().height ?? null).toBeNull();
+    expect(trPr().heightRule ?? null).toBeNull();
+    expect((await drag(6, 300, -5000)).outcomes[0]?.status).toBe('applied');
+    expect(trPr()).toMatchObject({ height: 15, heightRule: 'atLeast' });
+    const current = engine.proposalEngine.version();
+    for (const [index, payload] of [{ paintedRowTwips: 300 }, { rowDeltaTwips: 100 }, { paintedRowTwips: -1, rowDeltaTwips: 100 },
+      { paintedRowTwips: 300, rowDeltaTwips: 1.5 }, { paintedRowTwips: 300, rowDeltaTwips: 100, columnEdge: 1, deltaTwips: 100 },
+      { paintedRowTwips: 300, rowDeltaTwips: 100, widthTwips: 2000 }].entries()) {
+      expect((await client.edit(intent(7 + index, 6, 'resizeObject', { handle: cell.handle, expectVersion: current, ...payload } as never))).outcomes[0])
+        .toMatchObject({ status: 'refused', reason: 'invalid-payload' });
+    }
+    expect(trPr()).toMatchObject({ height: 15 });
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker row border drags follow their cell when a peer inserts a row above', async () => {
+  const { client, engine, initial } = await openWorker({ bodyXml: THREE_COLUMNS });
+  const remote = await createResidentEngineSession(undefined, 8302);
+  try {
+    remote.loadState(engine.encodeState());
+    const cell = initial.frame.payload.geometry!.objects.find(object => object.kind === 'cell')!;
+    const vector = engine.encodeStateVector();
+    remote.insertRow({ story: 'body', tableIndex: 0, row: 0, column: 0 }, 'above');
+    engine.applyUpdate(remote.encodeStateAsUpdate(vector));
+    const resized = await client.edit(intent(1, 0, 'resizeObject', {
+      handle: cell.handle, expectVersion: engine.proposalEngine.version(), paintedRowTwips: 300, rowDeltaTwips: 450,
+    }));
+    expect(resized.outcomes[0]?.status).toBe('applied');
+    const rows = (engine.tablePayload('body', 0) as { rows: { trPr: Record<string, unknown> }[] }).rows;
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.trPr.height ?? null).toBeNull();
+    expect(rows[1]!.trPr).toMatchObject({ height: 750, heightRule: 'atLeast' });
+  } finally {
+    remote.destroy();
+    client.destroy();
+  }
+}, TIMEOUT);
+
 for (const kind of ['insertPageBreak', 'insertSectionBreak'] as const) {
   test(`worker safety refuses ${kind} in a cell before mutation and keeps commands usable`, async () => {
     const { client, engine, point } = await openWorker({ bodyXml: '<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="1440"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/>', prepare(engine) {
@@ -3468,6 +3735,32 @@ function cellObjects(response: { frame?: DocxCommandFrame | null }) {
   return response.frame!.payload.geometry!.objects.filter((object) => object.kind === 'cell');
 }
 
+test('merging cells across a block control keeps the control through save and reopen', async () => {
+  const text = (value: string) => `<w:p><w:r><w:t>${value}</w:t></w:r></w:p>`;
+  const bodyXml = '<w:p/><w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>' +
+    `<w:tr><w:tc>${text('A')}</w:tc><w:tc><w:sdt><w:sdtPr><w:id w:val="9"/><w:tag w:val="keep"/></w:sdtPr><w:sdtContent>${text('B')}</w:sdtContent></w:sdt></w:tc></w:tr></w:tbl><w:p/>`;
+  const { client, engine } = await openWorker({ bodyXml });
+  let reopened: Awaited<ReturnType<typeof openWorker>> | undefined;
+  try {
+    const inside = cellPoint(engine, 'B');
+    expect(inside.story).toContain(':sdt');
+    expect((await client.edit(intent(1, 0, 'select', { selection: inside.selection }))).outcomes[0]?.status).toBe('noop');
+    const at = (column: number) => ({ story: 'body', tableIndex: 0, row: 0, column });
+    engine.setCellSelection({ anchor: at(0), head: at(1) });
+    expect((await client.edit(intent(2, 0, 'mergeTableCells', {}))).outcomes[0]?.status).toBe('applied');
+    const saved = await savedWorkerDocumentXml(client);
+    const control = /<w:sdt[ >][\s\S]*?<\/w:sdt>/.exec(saved)?.[0];
+    if (!control) throw new Error('Merge lost the block control');
+    expect(control).toContain('w:val="keep"');
+    expect(control).toContain('>B<');
+    expect(saved).toContain('>A<');
+    expect(saved.match(/<w:tc[ >]/g)).toHaveLength(1);
+    const body = /<w:body>([\s\S]*?)(?:<w:sectPr[\s\S]*)?<\/w:body>/.exec(saved)![1]!;
+    reopened = await openWorker({ bodyXml: body });
+    expect(cellPoint(reopened.engine, 'B').story).toContain(':sdt');
+  } finally { reopened?.client.destroy(); client.destroy(); }
+}, TIMEOUT);
+
 test('worker orders table structure commands with single version steps duplicates and refusals', async () => {
   const { client, engine, initial } = await openWorker({ bodyXml: TABLE_BODY });
   try {
@@ -3851,6 +4144,63 @@ test('worker geometry exposes picture rotation for resize admission', async () =
   } });
   try {
     expect(initial.frame.payload.geometry!.objects.find(object => object.kind === 'image')).toMatchObject({ rotation: 90 });
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('typing a character used elsewhere still hints when its run chain lacks coverage', async () => {
+  const { worker, client, engine } = await openWorker({ bodyXml:
+    '<w:p w14:paraId="00000001"><w:r><w:t>A</w:t></w:r></w:p>' +
+    '<w:p w14:paraId="00000002"><w:r><w:rPr><w:rFonts w:ascii="Subset" w:hAnsi="Subset"/></w:rPr><w:t>א</w:t></w:r></w:p>',
+  });
+  const hints: unknown[] = [];
+  const receive = worker.onmessage!;
+  worker.onmessage = event => {
+    if (event.data.ok && event.data.fontRequirementsHint) hints.push(event.data.fontRequirementsHint);
+    receive(event);
+  };
+  try {
+    const data = (path: string) => new Uint8Array(readFileSync(resolve(process.cwd(), path)));
+    await client.edit(intent(1, 0, 'setFontEnvironment', {
+      faces: [
+        { family: 'Liberation Sans', data: data('crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf') },
+        { family: 'Subset', data: data('packages/fonts/assets/NotoSansHebrew-Regular.ttf') },
+      ], chains: { 'liberation sans|0|0': [0], 'subset|0|0': [1] }, families: ['Liberation Sans', 'Subset'],
+    }));
+    await client.fontRequirements(LAYOUT);
+    const at = { story: 'body', paraId: engine.paragraphs('body')[1]!.paraId, offset: 1 };
+    await client.edit(intent(2, 0, 'select', { selection: { anchor: at, focus: at } }));
+    expect(hints).toEqual([]);
+    await client.edit(intent(3, 0, 'insertText', { text: 'A' }));
+    expect(hints).toEqual([{ session: 'd1-command-worker', incarnation: 1, epoch: 1 }]);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+for (const coverage of [false, true]) test(`typing a character late in a paragraph that starts with an uncovered emoji hints when its run chain lacks it${coverage ? ' (coverage-only chain)' : ''}`, async () => {
+  const text = `\u{1F600}${'\u05d0'.repeat(300)}`;
+  const { worker, client, engine } = await openWorker({ bodyXml:
+    '<w:p w14:paraId="00000001"><w:r><w:t>A</w:t></w:r></w:p>' +
+    `<w:p w14:paraId="00000002"><w:r><w:rPr><w:rFonts w:ascii="Subset" w:hAnsi="Subset"/></w:rPr><w:t>${text}</w:t></w:r></w:p>`,
+  });
+  const hints: unknown[] = [];
+  const receive = worker.onmessage!;
+  worker.onmessage = event => {
+    if (event.data.ok && event.data.fontRequirementsHint) hints.push(event.data.fontRequirementsHint);
+    receive(event);
+  };
+  try {
+    const data = (path: string) => new Uint8Array(readFileSync(resolve(process.cwd(), path)));
+    await client.edit(intent(1, 0, 'setFontEnvironment', {
+      faces: [
+        { family: 'Liberation Sans', data: data('crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf') },
+        { family: 'Subset', data: data('packages/fonts/assets/NotoSansHebrew-Regular.ttf') },
+      ], chains: { 'liberation sans|0|0': [0], 'subset|0|0': [1], ...(coverage ? { '@betteroffice/fonts/coverage': [1] } : {}) }, families: ['Liberation Sans', 'Subset'],
+    }));
+    await client.fontRequirements(LAYOUT);
+    const at = { story: 'body', paraId: engine.paragraphs('body')[1]!.paraId, offset: [...text].reduce((n, c) => n + c.length, 0) };
+    await client.edit(intent(2, 0, 'select', { selection: { anchor: at, focus: at } }));
+    expect(hints).toEqual([]);
+    await client.edit(intent(3, 0, 'insertText', { text: '\u03a9' }));
+    expect(hints).toEqual([{ session: 'd1-command-worker', incarnation: 1, epoch: 1 }]);
   } finally { client.destroy(); }
 }, TIMEOUT);
 

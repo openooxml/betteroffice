@@ -1,3 +1,5 @@
+use std::cell::{Cell, RefCell};
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
@@ -32,7 +34,7 @@ use pptx_parse::{
     BlipEffect, Bullet, BulletColor, BulletFont, BulletSize, ChartPart, ChartSpace,
     CustomGeometryPath, GraphicFrameData, LineSpacing, MediaPart, ParagraphProperties, Picture,
     PictureCrop, PictureFill, Placeholder, PptxPackage, RunProperties, ShapeNode, ShapeTransform,
-    Slide, SlideLayout, SlideMaster, Table, TableCell, TextAutofit, TextBody, TextCaps,
+    Slide, SlideLayout, SlideMaster, Table, TableCell, TargetMode, TextAutofit, TextBody, TextCaps,
     TextOverflow, builtin_table_style, effective_color_map,
 };
 use serde::{Deserialize, Serialize};
@@ -44,8 +46,9 @@ use crate::chart::{ChartFrame, ChartText, chart_primitive};
 use crate::fmath;
 use crate::{
     CONTRACT_VERSION, CaretStop, GradientStop, GradientType, ImageCrop, ImageEffect, ImageTile,
-    Paint, PositionedGlyph, PositionedTextLine, PositionedTextRun, Primitive, Shadow, Stroke,
-    StrokeEnd, SurfaceDisplayList, TextAlign, TextAnchor, TextParagraph, TextRun, Transform,
+    Paint, PositionedGlyph, PositionedTextLine, PositionedTextRun, Primitive, Shadow, ShapeAltText,
+    Stroke, StrokeEnd, SurfaceDisplayList, TableGrid, TableGridCell, TableHeader, TextAlign,
+    TextAnchor, TextLanguage, TextLink, TextLinkTarget, TextParagraph, TextRun, Transform,
 };
 use ooxml_metafile::{MetafileDrawing, decode as decode_metafile, is_metafile};
 
@@ -73,6 +76,14 @@ const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_TEXT_LINES: usize = 100_000;
 const MAX_TEXT_PARAGRAPHS: usize = 20_000;
 const MAX_TEXT_RUNS: usize = 100_000;
+/// Maximum external href length retained for accessibility, in UTF-16 units.
+const MAX_LINK_HREF_UTF16: usize = 8_192;
+const MAX_LINK_RELATIONSHIP_ID_BYTES: usize = 256;
+const MAX_LINK_SPANS: usize = 1_024;
+const MAX_LINK_HREF_BYTES: usize = 256 * 1024;
+/// Public corpus peaks near 119 linked runs and relationships per part, a few hundred
+/// per display list; this leaves over 100x headroom.
+const MAX_LINK_WORK: usize = 65_536;
 /// Source paragraphs a joined story paragraph takes its languages from.
 const MAX_LANGUAGE_SOURCES: usize = 64;
 /// Larger edited shapes save unfitted, as when no fonts are registered.
@@ -258,26 +269,27 @@ impl SlideRenderer {
         true
     }
 
-    pub fn register_font(
+    pub fn register_font<'a>(
         &mut self,
         family: &str,
         bold: bool,
         italic: bool,
-        bytes: &[u8],
+        bytes: impl Into<std::borrow::Cow<'a, [u8]>>,
     ) -> Result<u32, RenderError> {
+        let bytes = bytes.into();
         if bytes.len() > MAX_FONT_BYTES {
             return Err(RenderError::ResourceLimit(format!(
                 "font exceeds {MAX_FONT_BYTES} bytes"
             )));
         }
-        self.check_font_budget(bytes)?;
+        self.check_font_budget(&bytes)?;
         let family = family.trim();
         if family.is_empty() {
             return Err(RenderError::Font("font family is empty".to_owned()));
         }
         let id = self
             .fonts
-            .register_slice(bytes)
+            .register_cow(bytes)
             .map_err(|error| RenderError::Font(error.to_string()))?;
         let requested = normalize_family(family);
         let metrics = family_metrics(&requested, bold, italic);
@@ -319,26 +331,27 @@ impl SlideRenderer {
     /// Registers a face drawn only where a run's own face has no glyph, the way
     /// PowerPoint reaches for a script's font when the named one cannot draw a
     /// character. The first registered face that covers a character draws it.
-    pub fn register_fallback_font(
+    pub fn register_fallback_font<'a>(
         &mut self,
         family: &str,
         bold: bool,
         italic: bool,
-        bytes: &[u8],
+        bytes: impl Into<std::borrow::Cow<'a, [u8]>>,
     ) -> Result<u32, RenderError> {
+        let bytes = bytes.into();
         if bytes.len() > MAX_FONT_BYTES {
             return Err(RenderError::ResourceLimit(format!(
                 "font exceeds {MAX_FONT_BYTES} bytes"
             )));
         }
-        self.check_font_budget(bytes)?;
+        self.check_font_budget(&bytes)?;
         let family = family.trim();
         if family.is_empty() {
             return Err(RenderError::Font("font family is empty".to_owned()));
         }
         let id = self
             .fonts
-            .register_slice(bytes)
+            .register_cow(bytes)
             .map_err(|error| RenderError::Font(error.to_string()))?;
         self.coverage_faces.push((
             bold,
@@ -579,6 +592,11 @@ impl SlideRenderer {
         self.layout_resolved(
             package,
             deck_slide,
+            &deck
+                .slides
+                .iter()
+                .map(|slide| slide.source_part_path.clone())
+                .collect::<Vec<_>>(),
             deck.width_emu,
             deck.height_emu,
             slide_index,
@@ -596,6 +614,7 @@ impl SlideRenderer {
         self.layout_resolved(
             package,
             &scope.slide,
+            &scope.slide_part_paths,
             scope.width_emu,
             scope.height_emu,
             scope.index,
@@ -654,7 +673,7 @@ impl SlideRenderer {
                 requests: &mut requests,
                 shape_count: 0,
             };
-            for (shape, stable_id) in inherited_shapes(parsed_slide, layout, master) {
+            for (shape, stable_id, _) in inherited_shapes(parsed_slide, layout, master) {
                 walker.parsed_shape(shape, &stable_id, Space::root())?;
             }
             for shape in &scope.slide.shapes {
@@ -664,10 +683,12 @@ impl SlideRenderer {
         Ok(requests.faces)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn layout_resolved(
         &self,
         package: &PptxPackage,
         deck_slide: &SlideSnapshot,
+        slide_part_paths: &[Option<String>],
         width_emu: i64,
         height_emu: i64,
         slide_index: usize,
@@ -755,6 +776,7 @@ impl SlideRenderer {
         let height = slide_extent_px(height_emu);
         let mut builder = LayoutBuilder {
             renderer: self,
+            slide_part_paths,
             package,
             theme,
             format_scheme,
@@ -765,12 +787,16 @@ impl SlideRenderer {
             parsed_slide,
             shape_filter,
             primitives: Vec::new(),
+            alt_text: BTreeMap::new(),
+            alt_scope: AltScope::default(),
+            title_shape: None,
             hit_regions: Vec::new(),
             autofit: HashMap::new(),
             substitutions: SubstitutionLog::default(),
             shape_count: 0,
             line_count: 0,
             chart_budget: MAX_CHART_PRIMITIVES,
+            link_budget: LinkBudget::default(),
             metafile_budget: MAX_METAFILE_PRIMITIVES,
             metafile_bytes: 32 * 1024 * 1024,
             metafiles: HashMap::new(),
@@ -820,8 +846,8 @@ impl SlideRenderer {
             });
         }
         if shape_filter.is_none() {
-            for (shape, stable_id) in inherited_shapes(parsed_slide, layout, master) {
-                builder.render_parsed_shape(shape, &stable_id, root_space, false)?;
+            for (shape, stable_id, part) in inherited_shapes(parsed_slide, layout, master) {
+                builder.render_parsed_shape(shape, &stable_id, root_space, false, part)?;
             }
         }
         for shape in &deck_slide.shapes {
@@ -834,6 +860,8 @@ impl SlideRenderer {
                 height,
                 background,
                 primitives: builder.primitives,
+                alt_text: builder.alt_text,
+                title_shape: builder.title_shape,
             },
             font_substitutions: builder.substitutions.entries,
             hit_regions: builder.hit_regions,
@@ -867,6 +895,11 @@ impl SlideRenderer {
                     .layout_resolved(
                         session.package(),
                         slide,
+                        &snapshot
+                            .slides
+                            .iter()
+                            .map(|slide| slide.source_part_path.clone())
+                            .collect::<Vec<_>>(),
                         snapshot.width_emu,
                         snapshot.height_emu,
                         index,
@@ -1184,7 +1217,7 @@ fn inherited_shapes<'a>(
     slide: Option<&Slide>,
     layout: Option<&'a SlideLayout>,
     master: Option<&'a SlideMaster>,
-) -> impl Iterator<Item = (&'a ShapeNode, String)> {
+) -> impl Iterator<Item = (&'a ShapeNode, String, &'a str)> {
     let show_layout = slide.is_none_or(|slide| slide.show_master_shapes);
     let show_master = show_layout && layout.is_none_or(|layout| layout.show_master_shapes);
     let master_shapes = master
@@ -1196,7 +1229,13 @@ fn inherited_shapes<'a>(
                 .iter()
                 .enumerate()
                 .filter(|(_, shape)| node_placeholder(shape).is_none())
-                .map(move |(index, shape)| (shape, format!("master:{}:{index}", master.part_path)))
+                .map(move |(index, shape)| {
+                    (
+                        shape,
+                        format!("master:{}:{index}", master.part_path),
+                        master.part_path.as_str(),
+                    )
+                })
         });
     let layout_shapes = layout
         .filter(|_| show_layout)
@@ -1207,9 +1246,22 @@ fn inherited_shapes<'a>(
                 .iter()
                 .enumerate()
                 .filter(|(_, shape)| node_placeholder(shape).is_none())
-                .map(move |(index, shape)| (shape, format!("layout:{}:{index}", layout.part_path)))
+                .map(move |(index, shape)| {
+                    (
+                        shape,
+                        format!("layout:{}:{index}", layout.part_path),
+                        layout.part_path.as_str(),
+                    )
+                })
         });
     master_shapes.chain(layout_shapes)
+}
+
+/// The alternative text a group passes down to the shapes inside it.
+#[derive(Clone, Default)]
+struct AltScope {
+    group: Option<String>,
+    decorative: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1642,6 +1694,7 @@ impl FontRequestWalker<'_, '_> {
                 scope.slide_number,
                 scope.theme,
                 true,
+                None,
             );
             self.requests.content(scope.theme, &content, cascade)?;
         }
@@ -1677,7 +1730,7 @@ impl FontRequestWalker<'_, '_> {
         }
         if let Some(body) = node_text(shape) {
             let scope = self.scope;
-            let content = content_from_body(stable_id, body, scope.theme, scope.slide_number);
+            let content = content_from_body(stable_id, body, scope.theme, scope.slide_number, None);
             self.requests.content(
                 scope.theme,
                 &content,
@@ -1733,12 +1786,14 @@ impl FontRequestWalker<'_, '_> {
                                 scope.slide_number,
                                 scope.theme,
                                 true,
+                                None,
                             ),
                             None => content_from_body(
                                 &format!("{shape_id}:table:{row_index}:{column}"),
                                 &cell.text,
                                 scope.theme,
                                 scope.slide_number,
+                                None,
                             ),
                         };
                         let style = table_style.cell(
@@ -1822,6 +1877,7 @@ impl FontRequestWalker<'_, '_> {
 
 struct LayoutBuilder<'a> {
     renderer: &'a SlideRenderer,
+    slide_part_paths: &'a [Option<String>],
     package: &'a PptxPackage,
     theme: &'a Theme,
     format_scheme: &'a ThemeFormatScheme,
@@ -1832,12 +1888,16 @@ struct LayoutBuilder<'a> {
     parsed_slide: Option<&'a Slide>,
     shape_filter: Option<&'a HashSet<String>>,
     primitives: Vec<Primitive>,
+    alt_text: BTreeMap<String, ShapeAltText>,
+    alt_scope: AltScope,
+    title_shape: Option<String>,
     hit_regions: Vec<HitRegion>,
     autofit: HashMap<String, TextAutofit>,
     substitutions: SubstitutionLog,
     shape_count: usize,
     line_count: usize,
     chart_budget: usize,
+    link_budget: LinkBudget<'a>,
     metafile_budget: usize,
     metafile_bytes: usize,
     metafiles: HashMap<&'a str, Option<Arc<MetafileDrawing>>>,
@@ -1855,6 +1915,15 @@ struct LayoutBuilder<'a> {
 }
 
 impl<'a> LayoutBuilder<'a> {
+    fn link_scope<'b>(&'b self, part: Option<&'b str>) -> Option<TextLinkScope<'a, 'b>> {
+        part.map(|part| TextLinkScope {
+            package: self.package,
+            slides: self.slide_part_paths,
+            part,
+            budget: &self.link_budget,
+        })
+    }
+
     fn text_scope(&self) -> TextScope<'a> {
         TextScope {
             package: self.package,
@@ -1927,6 +1996,43 @@ impl<'a> LayoutBuilder<'a> {
         Ok(())
     }
 
+    /// Records a shape's alternative text and returns the scope its children
+    /// inherit if it is a group.
+    fn note_alt_text(
+        &mut self,
+        id: &str,
+        title: Option<&str>,
+        description: Option<&str>,
+        decorative: bool,
+    ) -> AltScope {
+        let text = |value: Option<&str>| {
+            value
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        };
+        let entry = ShapeAltText {
+            title: text(title),
+            description: text(description),
+            decorative: decorative || self.alt_scope.decorative,
+            group: self.alt_scope.group.clone(),
+            primitive: None,
+        };
+        let described = entry.title.is_some() || entry.description.is_some();
+        let scope = AltScope {
+            group: if described {
+                Some(id.to_owned())
+            } else {
+                entry.group.clone()
+            },
+            decorative: entry.decorative,
+        };
+        if entry != ShapeAltText::default() {
+            self.alt_text.insert(id.to_owned(), entry);
+        }
+        scope
+    }
+
     fn render_snapshot_shape(
         &mut self,
         shape: &ShapeSnapshot,
@@ -1942,8 +2048,42 @@ impl<'a> LayoutBuilder<'a> {
         if shape.hidden {
             return Ok(());
         }
+        let nodes = self.text_scope().snapshot_nodes(shape);
+        // A session stored before shapes carried alternative text still has its source.
+        let source = nodes[0].map(node_base);
+        let alt_scope = self.note_alt_text(
+            &shape.id,
+            shape
+                .title
+                .as_deref()
+                .or(source.and_then(|base| base.title.as_deref())),
+            shape
+                .description
+                .as_deref()
+                .or(source.and_then(|base| base.description.as_deref())),
+            shape.decorative || source.is_some_and(|base| base.decorative),
+        );
+        let title = shape
+            .placeholder
+            .as_ref()
+            .and_then(|placeholder| placeholder.placeholder_type.as_deref())
+            .is_some_and(|kind| matches!(kind, "title" | "ctrTitle"));
+        if title && self.title_shape.is_none() {
+            self.title_shape = Some(shape.id.clone());
+        }
+        let outer = std::mem::replace(&mut self.alt_scope, alt_scope);
+        let rendered = self.render_visible_snapshot_shape(shape, space, nodes);
+        self.alt_scope = outer;
+        rendered
+    }
+
+    fn render_visible_snapshot_shape(
+        &mut self,
+        shape: &ShapeSnapshot,
+        space: Space,
+        [original, layout_node, master_node]: [Option<&'a ShapeNode>; 3],
+    ) -> Result<(), RenderError> {
         let text_scope = self.text_scope();
-        let [original, layout_node, master_node] = text_scope.snapshot_nodes(shape);
         let resolved = resolved_transform_value(shape, original, layout_node, master_node);
         let rect = space.map_transform(&resolved);
         if shape.kind == ShapeKind::Group {
@@ -2091,6 +2231,7 @@ impl<'a> LayoutBuilder<'a> {
                         space,
                         shape.graphic.as_ref(),
                         &shape.text_stories,
+                        self.parsed_slide.map(|slide| slide.part_path.as_str()),
                     )?;
                 }
                 ShapeKind::Group => unreachable!(),
@@ -2111,6 +2252,7 @@ impl<'a> LayoutBuilder<'a> {
                         self.slide_number,
                         self.theme,
                         false,
+                        self.link_scope(self.parsed_slide.map(|slide| slide.part_path.as_str())),
                     );
                     content.refit_autofit =
                         matches!(body_cascade.autofit(), Some(TextAutofit::Normal { .. }))
@@ -2153,11 +2295,36 @@ impl<'a> LayoutBuilder<'a> {
         stable_id: &str,
         space: Space,
         fit_text: bool,
+        source_part: &str,
     ) -> Result<(), RenderError> {
         self.charge_shape()?;
         if node_base(shape).hidden {
             return Ok(());
         }
+        let alt_scope = {
+            let base = node_base(shape);
+            self.note_alt_text(
+                stable_id,
+                base.title.as_deref(),
+                base.description.as_deref(),
+                base.decorative,
+            )
+        };
+        let outer = std::mem::replace(&mut self.alt_scope, alt_scope);
+        let rendered =
+            self.render_visible_parsed_shape(shape, stable_id, space, fit_text, source_part);
+        self.alt_scope = outer;
+        rendered
+    }
+
+    fn render_visible_parsed_shape(
+        &mut self,
+        shape: &ShapeNode,
+        stable_id: &str,
+        space: Space,
+        fit_text: bool,
+        source_part: &str,
+    ) -> Result<(), RenderError> {
         if let ShapeNode::Group(group) = shape {
             let rect = space.map_transform(&group.base.transform);
             let child_space = space.for_group(rect, &group.base.transform);
@@ -2167,6 +2334,7 @@ impl<'a> LayoutBuilder<'a> {
                     &format!("{stable_id}:{index}"),
                     child_space,
                     fit_text,
+                    source_part,
                 )?;
             }
             return Ok(());
@@ -2295,12 +2463,19 @@ impl<'a> LayoutBuilder<'a> {
                     space,
                     Some(&value.data),
                     &[],
+                    Some(source_part),
                 )?;
             }
             ShapeNode::Group(_) => unreachable!(),
         }
         let text_hit = if let Some(body) = node_text(shape) {
-            let content = content_from_body(stable_id, body, self.theme, self.slide_number);
+            let content = content_from_body(
+                stable_id,
+                body,
+                self.theme,
+                self.slide_number,
+                self.link_scope(Some(source_part)),
+            );
             self.render_text_box(
                 base.id,
                 stable_id,
@@ -2350,6 +2525,7 @@ impl<'a> LayoutBuilder<'a> {
         shadow: Option<Shadow>,
     ) {
         let separate_outline = mask.outline_path.is_some();
+        let first = self.primitives.len();
         let metafile = !mask.empty
             && effects.is_empty()
             && self.push_metafile(
@@ -2361,6 +2537,12 @@ impl<'a> LayoutBuilder<'a> {
                 crop,
                 &mask,
             );
+        if self.primitives.len() > first {
+            self.alt_text
+                .entry(shape_id.to_owned())
+                .or_default()
+                .primitive = u32::try_from(first).ok();
+        }
         if !mask.empty && !metafile {
             let (crop, destination) = crop
                 .map(image_crop)
@@ -2728,6 +2910,7 @@ impl<'a> LayoutBuilder<'a> {
         frame_space: Space,
         graphic: Option<&GraphicFrameData>,
         stories: &[StorySnapshot],
+        source_part: Option<&str>,
     ) -> Result<(), RenderError> {
         if let Some(space) = self.chart_space(graphic) {
             let frame = ChartFrame {
@@ -2803,6 +2986,7 @@ impl<'a> LayoutBuilder<'a> {
                 frame_space,
                 table,
                 stories,
+                source_part,
             );
         }
         if let Some(GraphicFrameData::Diagram {
@@ -2832,6 +3016,7 @@ impl<'a> LayoutBuilder<'a> {
                     &format!("{shape_id}:{index}"),
                     space,
                     drawing.synthesis_extent.is_some(),
+                    part_path,
                 )?;
             }
             return Ok(());
@@ -2863,6 +3048,7 @@ impl<'a> LayoutBuilder<'a> {
         space: Space,
         table: &Table,
         stories: &[StorySnapshot],
+        source_part: Option<&str>,
     ) -> Result<(), RenderError> {
         let row_count = table.rows.len();
         let column_count = table.grid.len().max(
@@ -2910,12 +3096,14 @@ impl<'a> LayoutBuilder<'a> {
                         self.slide_number,
                         self.theme,
                         false,
+                        self.link_scope(source_part),
                     ),
                     None => content_from_body(
                         &format!("{shape_id}:table:{row_index}:{column}"),
                         &cell.text,
                         self.theme,
                         self.slide_number,
+                        self.link_scope(source_part),
                     ),
                 };
                 let position = TableCellPosition {
@@ -3002,7 +3190,10 @@ impl<'a> LayoutBuilder<'a> {
                 }
             }
         }
+        let properties = &table.properties;
+        let mut cells = Vec::with_capacity(plans.len());
         for plan in &plans {
+            let first = self.primitives.len() - start;
             let _ = self.render_text_box(
                 object_id,
                 shape_id,
@@ -3013,6 +3204,21 @@ impl<'a> LayoutBuilder<'a> {
                 plan.content.clone(),
                 cell_cascade(plan.text, &plan.inherited),
             )?;
+            let header = if properties.first_row && plan.row == 0 {
+                Some(TableHeader::Column)
+            } else if properties.first_col && plan.column == 0 {
+                Some(TableHeader::Row)
+            } else {
+                None
+            };
+            cells.push(TableGridCell {
+                row: plan.row as u32,
+                column: plan.column as u32,
+                row_span: plan.row_span as u32,
+                column_span: plan.span as u32,
+                header,
+                primitives: [first as u32, (self.primitives.len() - start) as u32],
+            });
         }
         let primitives = self.primitives.split_off(start);
         self.primitives.push(Primitive::Table {
@@ -3032,6 +3238,11 @@ impl<'a> LayoutBuilder<'a> {
             label: format!("Table, {row_count} rows, {column_count} columns"),
             primitives,
             transform,
+            grid: Some(TableGrid {
+                rows: row_count as u32,
+                columns: column_count as u32,
+                cells,
+            }),
         });
         Ok(())
     }
@@ -3258,6 +3469,8 @@ impl<'a> LayoutBuilder<'a> {
             .map(|paragraph| TextParagraph {
                 align: Some(paragraph.align),
                 level: paragraph.level,
+                languages: paragraph.languages.clone(),
+                links: paragraph.links.clone(),
                 runs: paragraph
                     .runs
                     .iter()
@@ -3797,6 +4010,400 @@ struct ContentParagraph {
     runs: Vec<ContentRun>,
     /// `a:endParaRPr/@lang` of the source paragraph.
     end_language: Option<String>,
+    mirror_languages: MirrorLanguages,
+    links: Vec<TextLink>,
+}
+
+#[derive(Default)]
+struct LinkBudget<'a> {
+    work: Cell<usize>,
+    spans: Cell<usize>,
+    href_bytes: Cell<usize>,
+    exhausted: Cell<bool>,
+    parts: RefCell<HashMap<usize, PartLinks<'a>>>,
+}
+
+#[derive(Default)]
+struct PartLinks<'a> {
+    by_id: HashMap<&'a str, usize>,
+    resolved: HashMap<(usize, bool), ResolvedLink>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResolvedLink {
+    None,
+    Url(usize),
+    Slide(u32),
+}
+
+impl LinkBudget<'_> {
+    fn charge_work(&self, work: usize) -> bool {
+        if self.exhausted.get() {
+            return false;
+        }
+        if work > MAX_LINK_WORK - self.work.get() {
+            self.exhausted.set(true);
+            return false;
+        }
+        self.work.set(self.work.get() + work);
+        true
+    }
+
+    fn charge(&self, href_bytes: usize) -> bool {
+        if self.exhausted.get() {
+            return false;
+        }
+        if self.spans.get() >= MAX_LINK_SPANS
+            || href_bytes > MAX_LINK_HREF_BYTES - self.href_bytes.get()
+        {
+            self.exhausted.set(true);
+            return false;
+        }
+        self.spans.set(self.spans.get() + 1);
+        self.href_bytes.set(self.href_bytes.get() + href_bytes);
+        self.exhausted.set(
+            self.spans.get() == MAX_LINK_SPANS || self.href_bytes.get() == MAX_LINK_HREF_BYTES,
+        );
+        true
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TextLinkTargetRef<'a> {
+    Url(&'a str),
+    Slide(u32),
+    Jump(&'static str),
+}
+
+impl TextLinkTargetRef<'_> {
+    /// External href comparisons are bounded by `MAX_LINK_HREF_UTF16`.
+    fn matches(self, target: &TextLinkTarget) -> bool {
+        match (self, target) {
+            (Self::Url(href), TextLinkTarget::Url { href: previous }) => href == previous.as_str(),
+            (Self::Slide(index), TextLinkTarget::Slide { index: previous }) => index == *previous,
+            (Self::Jump(jump), TextLinkTarget::Jump { jump: previous }) => {
+                jump == previous.as_str()
+            }
+            _ => false,
+        }
+    }
+
+    fn href_bytes(self) -> usize {
+        match self {
+            Self::Url(href) => href.len(),
+            _ => 0,
+        }
+    }
+
+    fn into_owned(self) -> TextLinkTarget {
+        match self {
+            Self::Url(href) => TextLinkTarget::Url {
+                href: href.to_owned(),
+            },
+            Self::Slide(index) => TextLinkTarget::Slide { index },
+            Self::Jump(jump) => TextLinkTarget::Jump {
+                jump: jump.to_owned(),
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct TextLinkScope<'a, 'b> {
+    package: &'a PptxPackage,
+    slides: &'a [Option<String>],
+    part: &'b str,
+    budget: &'b LinkBudget<'a>,
+}
+
+impl<'a> TextLinkScope<'a, '_> {
+    fn target(
+        &self,
+        properties: &RunProperties,
+    ) -> Option<(TextLinkTargetRef<'a>, Option<ResolvedLink>)> {
+        if self.budget.exhausted.get()
+            || (properties.hyperlink_relationship_id.is_none()
+                && properties.hyperlink_action.is_none())
+            || !self.budget.charge_work(1)
+        {
+            return None;
+        }
+        let action = properties.hyperlink_action.as_deref().unwrap_or("");
+        if let Some(jump) = action.strip_prefix("ppaction://hlinkshowjump?jump=") {
+            let jump = match jump {
+                "nextslide" => "next",
+                "previousslide" => "previous",
+                "firstslide" => "first",
+                "lastslide" => "last",
+                _ => return None,
+            };
+            return Some((TextLinkTargetRef::Jump(jump), None));
+        }
+        if !action.is_empty() && action != "ppaction://hlinksldjump" {
+            return None;
+        }
+        let id = properties.hyperlink_relationship_id.as_deref()?;
+        if id.len() > MAX_LINK_RELATIONSHIP_ID_BYTES || id.trim().is_empty() {
+            return None;
+        }
+        let slide_jump = action == "ppaction://hlinksldjump";
+        let relationships = self.package.relationships.get(self.part)?;
+        let mut parts = self.budget.parts.borrow_mut();
+        let part = match parts.entry(relationships.as_ptr() as usize) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                if !self.budget.charge_work(relationships.len()) {
+                    return None;
+                }
+                let mut part = PartLinks::default();
+                for (index, relationship) in relationships.iter().enumerate() {
+                    if relationship.id.len() <= MAX_LINK_RELATIONSHIP_ID_BYTES {
+                        part.by_id.entry(relationship.id.as_str()).or_insert(index);
+                    }
+                }
+                entry.insert(part)
+            }
+        };
+        let index = *part.by_id.get(id)?;
+        let resolved = match part.resolved.entry((index, slide_jump)) {
+            Entry::Occupied(entry) => *entry.get(),
+            Entry::Vacant(entry) => {
+                let relationship = &relationships[index];
+                if !self
+                    .budget
+                    .charge_work(1 + relationship.target.len() / 4096)
+                {
+                    return None;
+                }
+                let resolved = match relationship.target_mode {
+                    TargetMode::External if !slide_jump => {
+                        let href = relationship.target.as_str();
+                        if href.len() > 3 * MAX_LINK_HREF_UTF16
+                            || href.encode_utf16().take(MAX_LINK_HREF_UTF16 + 1).count()
+                                > MAX_LINK_HREF_UTF16
+                            || href.trim().is_empty()
+                        {
+                            ResolvedLink::None
+                        } else {
+                            ResolvedLink::Url(index)
+                        }
+                    }
+                    TargetMode::Internal if relationship.has_type("/slide") || slide_jump => {
+                        if relationship.target.trim().is_empty() {
+                            ResolvedLink::None
+                        } else if let Some(index) =
+                            relationship.resolved_target.as_deref().and_then(|path| {
+                                self.slides
+                                    .iter()
+                                    .position(|part| part.as_deref() == Some(path))
+                            })
+                        {
+                            u32::try_from(index).map_or(ResolvedLink::None, ResolvedLink::Slide)
+                        } else {
+                            ResolvedLink::None
+                        }
+                    }
+                    _ => ResolvedLink::None,
+                };
+                entry.insert(resolved);
+                resolved
+            }
+        };
+        match resolved {
+            ResolvedLink::None => None,
+            ResolvedLink::Url(index) => Some((
+                TextLinkTargetRef::Url(&relationships[index].target),
+                Some(resolved),
+            )),
+            ResolvedLink::Slide(index) => Some((TextLinkTargetRef::Slide(index), Some(resolved))),
+        }
+    }
+}
+
+fn source_links(
+    source: &pptx_parse::TextParagraph,
+    slide_number: i64,
+    scope: Option<TextLinkScope<'_, '_>>,
+) -> Vec<TextLink> {
+    let Some(scope) = scope else {
+        return Vec::new();
+    };
+    let mut links: Vec<TextLink> = Vec::new();
+    if scope.budget.exhausted.get() {
+        return links;
+    }
+    let mut offset = 0;
+    let mut last_resolved = None;
+    for run in &source.runs {
+        if scope.budget.exhausted.get() {
+            break;
+        }
+        let start = offset;
+        offset += if run.field_type.as_deref() == Some("slidenum") {
+            utf16_len(&slide_number.to_string())
+        } else {
+            utf16_len(&run.text)
+        };
+        let Some((target, resolved)) = scope.target(&run.properties) else {
+            continue;
+        };
+        if start == offset {
+            continue;
+        }
+        if !scope.budget.charge_work(1) {
+            break;
+        }
+        if let Some(previous) = links.last_mut()
+            && previous.end == start
+            && ((resolved.is_some() && resolved == last_resolved)
+                || target.matches(&previous.target))
+        {
+            previous.end = offset;
+        } else {
+            if !scope.budget.charge(target.href_bytes()) {
+                break;
+            }
+            links.push(TextLink {
+                start,
+                end: offset,
+                target: target.into_owned(),
+            });
+        }
+        last_resolved = resolved;
+    }
+    links
+}
+
+#[derive(Clone)]
+enum MirrorLanguages {
+    Exact(Vec<(u32, Option<String>)>),
+    Uniform(Option<String>),
+    Unknown,
+}
+
+fn known_language(language: Option<&str>) -> Option<&str> {
+    language
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty() && !tag.eq_ignore_ascii_case("x-none"))
+}
+
+fn source_language<'a>(
+    run: &'a pptx_parse::TextRun,
+    paragraph: &'a pptx_parse::TextParagraph,
+) -> Option<&'a str> {
+    known_language(run.properties.language.as_deref()).or_else(|| {
+        known_language(
+            paragraph
+                .end_properties
+                .as_ref()
+                .and_then(|properties| properties.language.as_deref()),
+        )
+    })
+}
+
+fn source_language_runs(source: &pptx_parse::TextParagraph, slide_number: i64) -> MirrorLanguages {
+    MirrorLanguages::Exact(
+        source
+            .runs
+            .iter()
+            .map(|run| {
+                let length = if run.field_type.as_deref() == Some("slidenum") {
+                    utf16_len(&slide_number.to_string())
+                } else {
+                    utf16_len(&run.text)
+                };
+                (length, source_language(run, source).map(str::to_owned))
+            })
+            .collect(),
+    )
+}
+
+fn mirror_languages(
+    sources: &[&pptx_parse::TextParagraph],
+    live: &[&str],
+    slide_number: i64,
+) -> MirrorLanguages {
+    if let [source] = sources
+        && same_text(live, &source.runs)
+    {
+        return source_language_runs(source, slide_number);
+    }
+    if sources.is_empty() {
+        return MirrorLanguages::Unknown;
+    }
+    let mut language = None;
+    let mut unmarked = false;
+    for source in sources {
+        if source.runs.is_empty()
+            && let Some(tag) = known_language(
+                source
+                    .end_properties
+                    .as_ref()
+                    .and_then(|properties| properties.language.as_deref()),
+            )
+        {
+            if language.is_some_and(|previous| previous != tag) {
+                return MirrorLanguages::Unknown;
+            }
+            language = Some(tag);
+        }
+        for run in &source.runs {
+            let Some(tag) = source_language(run, source) else {
+                unmarked |= !run.text.is_empty();
+                continue;
+            };
+            if language.is_some_and(|previous| previous != tag) {
+                return MirrorLanguages::Unknown;
+            }
+            language = Some(tag);
+        }
+    }
+    if unmarked && language.is_some() {
+        return MirrorLanguages::Unknown;
+    }
+    MirrorLanguages::Uniform(language.map(str::to_owned))
+}
+
+fn resolved_languages(
+    source: &MirrorLanguages,
+    length: u32,
+    default_language: Option<&str>,
+) -> Vec<TextLanguage> {
+    let mut languages: Vec<TextLanguage> = Vec::new();
+    let mut offset = 0;
+    let mut append = |length: u32, language: Option<&str>| {
+        let start = offset;
+        offset += length;
+        let Some(lang) = known_language(language).or_else(|| known_language(default_language))
+        else {
+            return;
+        };
+        if start == offset {
+            return;
+        }
+        if let Some(previous) = languages.last_mut()
+            && previous.end == start
+            && previous.lang == lang
+        {
+            previous.end = offset;
+            return;
+        }
+        languages.push(TextLanguage {
+            start,
+            end: offset,
+            lang: lang.to_owned(),
+        });
+    };
+    match source {
+        MirrorLanguages::Exact(runs) => {
+            for (length, language) in runs {
+                append(*length, language.as_deref());
+            }
+        }
+        MirrorLanguages::Uniform(language) => append(length, language.as_deref()),
+        MirrorLanguages::Unknown => {}
+    }
+    languages
 }
 
 #[derive(Clone)]
@@ -3831,14 +4438,13 @@ fn sourced_neighbours<'a>(
     out
 }
 
-/// Live story content; `with_languages` attaches the source languages that only font
-/// requests read, so layout skips that work.
 fn content_from_story(
     story: &StorySnapshot,
     source: Option<&TextBody>,
     slide_number: i64,
     theme: &Theme,
     with_languages: bool,
+    links: Option<TextLinkScope<'_, '_>>,
 ) -> TextContent {
     TextContent {
         story_id: story.id.clone(),
@@ -3869,25 +4475,45 @@ fn content_from_story(
                     let insertions = source_para
                         .map(|source| slide_number_insertions(source, &live))
                         .unwrap_or_default();
-                    let sources: Vec<&pptx_parse::TextParagraph> = if !with_languages {
-                        Vec::new()
-                    } else if paragraph.source_paragraphs.len() > 1 {
-                        paragraph
-                            .source_paragraphs
-                            .iter()
-                            .take(MAX_LANGUAGE_SOURCES)
-                            .filter_map(|joined| {
-                                source
-                                    .and_then(|body| source_paragraph(body, &story.id, &joined.id))
-                            })
-                            .collect()
-                    } else if source_para.is_some() {
-                        source_para.into_iter().collect()
+                    let sources: Vec<&pptx_parse::TextParagraph> =
+                        if paragraph.source_paragraphs.len() > 1
+                            || (source_para.is_none() && !paragraph.source_paragraphs.is_empty())
+                        {
+                            paragraph
+                                .source_paragraphs
+                                .iter()
+                                .take(MAX_LANGUAGE_SOURCES)
+                                .filter_map(|joined| {
+                                    source.and_then(|body| {
+                                        source_paragraph(body, &story.id, &joined.id)
+                                    })
+                                })
+                                .collect()
+                        } else {
+                            source_para.into_iter().collect()
+                        };
+                    let mirror_languages = if with_languages
+                        || paragraph.source_paragraphs.len() > MAX_LANGUAGE_SOURCES
+                        || (paragraph.source_paragraphs.len() > 1
+                            && sources.len() != paragraph.source_paragraphs.len())
+                    {
+                        MirrorLanguages::Unknown
                     } else {
-                        neighbours[index].iter().flatten().copied().collect()
+                        mirror_languages(&sources, &live, slide_number)
                     };
                     let mut live_languages = if with_languages {
-                        live_run_languages(&sources, &live)
+                        if paragraph.source_paragraphs.len() > 1 || source_para.is_some() {
+                            live_run_languages(&sources, &live)
+                        } else {
+                            live_run_languages(
+                                &neighbours[index]
+                                    .iter()
+                                    .flatten()
+                                    .copied()
+                                    .collect::<Vec<_>>(),
+                                &live,
+                            )
+                        }
                     } else {
                         Vec::new()
                     }
@@ -3951,6 +4577,16 @@ fn content_from_story(
                         insertion_index += 1;
                     }
                     ContentParagraph {
+                        links: match sources.as_slice() {
+                            [source]
+                                if paragraph.source_paragraphs.len() <= 1
+                                    && same_text(&live, &source.runs) =>
+                            {
+                                source_links(source, slide_number, links)
+                            }
+                            _ => Vec::new(),
+                        },
+                        mirror_languages,
                         alignment: paragraph.alignment.clone(),
                         level: paragraph.level,
                         bullet: paragraph
@@ -3981,6 +4617,7 @@ fn content_from_body(
     body: &TextBody,
     theme: &Theme,
     slide_number: i64,
+    links: Option<TextLinkScope<'_, '_>>,
 ) -> TextContent {
     TextContent {
         story_id: format!("inherited:{story_id}"),
@@ -3989,6 +4626,8 @@ fn content_from_body(
             .paragraphs
             .iter()
             .map(|paragraph| ContentParagraph {
+                mirror_languages: source_language_runs(paragraph, slide_number),
+                links: source_links(paragraph, slide_number, links),
                 alignment: paragraph.properties.alignment.clone(),
                 level: paragraph.properties.level,
                 bullet: paragraph.properties.bullet.clone(),
@@ -4039,6 +4678,8 @@ struct ResolvedParagraph {
     /// `a:pPr/@rtl`: margins, indent, bullet and run order mirror.
     rtl: bool,
     runs: Vec<ResolvedRun>,
+    languages: Vec<TextLanguage>,
+    links: Vec<TextLink>,
 }
 
 struct ResolvedRun {
@@ -4063,6 +4704,7 @@ struct ResolvedStyle {
     bold: bool,
     italic: bool,
     underline: bool,
+    strike: Option<String>,
     color: String,
     caps: TextCaps,
 }
@@ -4160,6 +4802,7 @@ fn resolve_content(
             .as_ref()
             .and_then(|value| value.language.as_deref());
         let mut runs = Vec::with_capacity(paragraph.runs.len().max(1));
+        let paragraph_start = story_offset;
         for run in &paragraph.runs {
             let style = resolve_style(
                 renderer,
@@ -4170,8 +4813,19 @@ fn resolve_content(
             )?;
             let start = story_offset;
             story_offset = story_offset.saturating_add(utf16_len(&run.text));
+            let requested =
+                resolve_font_request(theme, &run.style, properties.default_run.as_ref()).family;
+            let drawn = ooxml_text::SymbolFont::named(&requested)
+                .and_then(|font| font.display_text(&run.text))
+                .map(|symbol| symbol.text);
             let mut cased = Vec::new();
-            push_cased_runs(&mut cased, &run.text, start, language, style);
+            push_cased_runs(
+                &mut cased,
+                drawn.as_deref().unwrap_or(&run.text),
+                start,
+                language,
+                style,
+            );
             if properties.rtl == Some(true) {
                 let mut directed = Vec::new();
                 for run in cased {
@@ -4227,6 +4881,12 @@ fn resolve_content(
             })
             .transpose()?;
         paragraphs.push(ResolvedParagraph {
+            links: paragraph.links.clone(),
+            languages: resolved_languages(
+                &paragraph.mirror_languages,
+                story_offset - paragraph_start,
+                language,
+            ),
             align: parse_align(alignment),
             justify: is_full_justification(alignment),
             level: paragraph.level,
@@ -4417,7 +5077,7 @@ fn resolve_bullet_style(
         let emulated = ooxml_text::SymbolFont::named(&family).is_some_and(|font| {
             written_marker
                 .chars()
-                .all(|character| font.substitute(character).is_some())
+                .all(|character| font.shape(character).is_some())
         });
         let mut ignored = SubstitutionLog::default();
         let log = if emulated {
@@ -4512,6 +5172,11 @@ fn resolve_style(
             .as_deref()
             .or_else(|| fallback.and_then(|value| value.underline.as_deref()))
             .is_some_and(|value| value != "none"),
+        strike: direct
+            .strike
+            .clone()
+            .or_else(|| fallback.and_then(|value| value.strike.clone()))
+            .filter(|strike| matches!(strike.as_str(), "sngStrike" | "dblStrike")),
         color,
         caps: direct
             .caps
@@ -4704,9 +5369,11 @@ fn chart_text_primitive(
                     bold,
                     italic,
                     underline: false,
+                    strike: None,
                     color: text.color.to_owned(),
                     letter_spacing_px: tracking,
                     baseline_offset_px: 0.0,
+                    kerning: true,
                     glyphs,
                 }
             },
@@ -4725,6 +5392,8 @@ fn chart_text_primitive(
         h: line_box.height(),
         anchor: TextAnchor::Top,
         paragraphs: vec![TextParagraph {
+            languages: Vec::new(),
+            links: Vec::new(),
             align: Some(align),
             level: 0,
             runs: vec![TextRun {
@@ -4884,6 +5553,8 @@ fn text_layout_key(
             bullet_style,
             rtl,
             runs,
+            languages: _,
+            links: _,
         } = paragraph;
         key.push(match align {
             TextAlign::Left => 0,
@@ -4985,6 +5656,7 @@ fn key_style(key: &mut Vec<u8>, style: &ResolvedStyle) {
         bold,
         italic,
         underline,
+        strike,
         color,
         caps,
     } = style;
@@ -5004,6 +5676,7 @@ fn key_style(key: &mut Vec<u8>, style: &ResolvedStyle) {
     key.push(u8::from(*bold));
     key.push(u8::from(*italic));
     key.push(u8::from(*underline));
+    key_opt_str(key, strike);
     key_str(key, color);
     key.push(match caps {
         TextCaps::None => 0,
@@ -5481,6 +6154,8 @@ fn prepend_bullet(
     }
     let bullet_x = (x + paragraph.indent_px).max(x - paragraph.margin_left_px.max(0.0));
     let marker = ResolvedParagraph {
+        languages: Vec::new(),
+        links: Vec::new(),
         align: paragraph.align,
         justify: false,
         level: paragraph.level,
@@ -5932,7 +6607,13 @@ fn positioned_runs(
                     && run.bold == cluster.style.bold
                     && run.italic == cluster.style.italic
                     && run.underline == cluster.style.underline
+                    && run.strike == cluster.style.strike
                     && run.color == cluster.style.color
+                    && run.kerning
+                        == kerned(
+                            cluster.style.kern_pt,
+                            autofit_size_pt(cluster.style.font_size_pt, scale),
+                        )
             });
         if !append {
             run_direction = None;
@@ -5951,9 +6632,14 @@ fn positioned_runs(
                 bold: cluster.style.bold,
                 italic: cluster.style.italic,
                 underline: cluster.style.underline,
+                strike: cluster.style.strike.clone(),
                 color: cluster.style.color.clone(),
                 letter_spacing_px: cluster.tracking,
                 baseline_offset_px,
+                kerning: kerned(
+                    cluster.style.kern_pt,
+                    autofit_size_pt(cluster.style.font_size_pt, scale),
+                ),
                 glyphs: Vec::new(),
             });
         }
@@ -6640,6 +7326,7 @@ fn style_from_properties(properties: &RunProperties, theme: &Theme) -> TextStyle
             .underline
             .clone()
             .or_else(|| linked.then(|| "sng".to_owned())),
+        strike: properties.strike.clone(),
         spacing_pt: properties.spacing_pt,
         baseline_pct: properties.baseline_pct,
         kern_pt: properties.kern_pt,
@@ -7524,6 +8211,684 @@ mod tests {
         include_bytes!("../../../packages/fonts/assets/LiberationSans-Italic.ttf");
     const BOLD_ITALIC_FONT: &[u8] =
         include_bytes!("../../../packages/fonts/assets/LiberationSans-BoldItalic.ttf");
+
+    #[test]
+    fn diagram_frames_share_borrowed_relationship_indexes() {
+        let mut package = PptxPackage::default();
+        let path = "ppt/diagrams/drawing1.xml";
+        package.relationships.insert(
+            path.to_owned(),
+            (0..50_000)
+                .map(|index| pptx_parse::Relationship {
+                    id: format!("link{index}"),
+                    relationship_type: "/hyperlink".to_owned(),
+                    target: "https://example.test".to_owned(),
+                    target_mode: TargetMode::External,
+                    resolved_target: None,
+                })
+                .collect(),
+        );
+        let frames: Vec<_> = (0..1_000)
+            .map(|_| GraphicFrameData::Diagram {
+                relationship_ids: Vec::new(),
+                drawing_part_path: Some(path.to_owned()),
+            })
+            .collect();
+        let properties = RunProperties {
+            hyperlink_relationship_id: Some("link0".to_owned()),
+            ..RunProperties::default()
+        };
+        let budget = LinkBudget::default();
+        for frame in &frames {
+            let GraphicFrameData::Diagram {
+                drawing_part_path: Some(path),
+                ..
+            } = frame
+            else {
+                unreachable!()
+            };
+            let scope = TextLinkScope {
+                package: &package,
+                slides: &[],
+                part: path,
+                budget: &budget,
+            };
+            assert!(matches!(
+                scope.target(&properties),
+                Some((TextLinkTargetRef::Url("https://example.test"), _))
+            ));
+        }
+        assert_eq!(budget.work.get(), 51_001);
+        let parts = budget.parts.borrow();
+        assert_eq!(parts.len(), 1);
+        let relationships = &package.relationships[path];
+        let index = &parts[&(relationships.as_ptr() as usize)];
+        assert_eq!(index.by_id.len(), 50_000);
+        assert_eq!(index.resolved.len(), 1);
+        let (id, _) = index.by_id.get_key_value("link0").unwrap();
+        assert_eq!(id.as_ptr(), relationships[0].id.as_ptr());
+    }
+
+    #[test]
+    fn link_work_is_admitted_before_index_builds_and_span_merges() {
+        let mut package = PptxPackage::default();
+        let path = "ppt/slides/slide1.xml";
+        package.relationships.insert(
+            path.to_owned(),
+            vec![
+                pptx_parse::Relationship {
+                    id: "link".to_owned(),
+                    relationship_type: "/hyperlink".to_owned(),
+                    target: "https://example.test".to_owned(),
+                    target_mode: TargetMode::External,
+                    resolved_target: None,
+                };
+                MAX_LINK_WORK
+            ],
+        );
+        let budget = LinkBudget::default();
+        let scope = TextLinkScope {
+            package: &package,
+            slides: &[],
+            part: path,
+            budget: &budget,
+        };
+        assert!(
+            scope
+                .target(&RunProperties {
+                    hyperlink_relationship_id: Some("link".to_owned()),
+                    ..RunProperties::default()
+                })
+                .is_none()
+        );
+        assert!(budget.parts.borrow().is_empty());
+        assert_eq!(budget.work.get(), 1);
+        assert!(budget.exhausted.get());
+
+        let budget = LinkBudget::default();
+        assert!(budget.charge_work(MAX_LINK_WORK - 5));
+        let scope = TextLinkScope {
+            budget: &budget,
+            ..scope
+        };
+        let source = pptx_parse::TextParagraph {
+            runs: vec![
+                pptx_parse::TextRun {
+                    text: "x".to_owned(),
+                    properties: RunProperties {
+                        hyperlink_action: Some(
+                            "ppaction://hlinkshowjump?jump=nextslide".to_owned()
+                        ),
+                        ..RunProperties::default()
+                    },
+                    field_id: None,
+                    field_type: None,
+                    line_break: false,
+                };
+                3
+            ],
+            ..pptx_parse::TextParagraph::default()
+        };
+        let links = source_links(&source, 1, Some(scope));
+        assert_eq!(
+            links,
+            [TextLink {
+                start: 0,
+                end: 2,
+                target: TextLinkTarget::Jump {
+                    jump: "next".to_owned()
+                },
+            }]
+        );
+        assert_eq!(budget.work.get(), MAX_LINK_WORK);
+        assert!(budget.exhausted.get());
+    }
+
+    fn link_relationship(
+        id: String,
+        target: String,
+        target_mode: TargetMode,
+    ) -> pptx_parse::Relationship {
+        pptx_parse::Relationship {
+            id,
+            relationship_type: "/hyperlink".to_owned(),
+            target,
+            target_mode,
+            resolved_target: None,
+        }
+    }
+
+    fn external_link(id: &str, target: &str) -> pptx_parse::Relationship {
+        link_relationship(id.to_owned(), target.to_owned(), TargetMode::External)
+    }
+
+    fn linked_run(text: &str, id: &str) -> pptx_parse::TextRun {
+        pptx_parse::TextRun {
+            text: text.to_owned(),
+            properties: RunProperties {
+                hyperlink_relationship_id: Some(id.to_owned()),
+                ..RunProperties::default()
+            },
+            field_id: None,
+            field_type: None,
+            line_break: false,
+        }
+    }
+
+    fn link_paragraph(runs: Vec<pptx_parse::TextRun>) -> pptx_parse::TextParagraph {
+        pptx_parse::TextParagraph {
+            runs,
+            ..pptx_parse::TextParagraph::default()
+        }
+    }
+
+    fn link_package(part: &str, relationships: Vec<pptx_parse::Relationship>) -> PptxPackage {
+        let mut package = PptxPackage::default();
+        package.relationships.insert(part.to_owned(), relationships);
+        package
+    }
+
+    fn link_scope<'a>(
+        package: &'a PptxPackage,
+        budget: &'a LinkBudget<'a>,
+        part: &'a str,
+        slides: &'a [Option<String>],
+    ) -> TextLinkScope<'a, 'a> {
+        TextLinkScope {
+            package,
+            slides,
+            part,
+            budget,
+        }
+    }
+
+    fn link_href_bytes(links: &[TextLink]) -> usize {
+        links
+            .iter()
+            .map(|link| match &link.target {
+                TextLinkTarget::Url { href } => href.len(),
+                _ => 0,
+            })
+            .sum()
+    }
+
+    fn url_target(href: &str) -> TextLinkTarget {
+        TextLinkTarget::Url {
+            href: href.to_owned(),
+        }
+    }
+
+    #[test]
+    fn padded_megabyte_target_charges_bounded_work_for_100k_runs() {
+        let part = "ppt/slides/slide1.xml";
+        let href = format!("https://example.test/{}", " ".repeat(1024 * 1024));
+        let package = link_package(part, vec![external_link("link", &href)]);
+        let source = link_paragraph((0..100_000).map(|_| linked_run("x", "link")).collect());
+        let budget = LinkBudget::default();
+        let links = source_links(&source, 1, Some(link_scope(&package, &budget, part, &[])));
+        assert!(links.is_empty());
+        assert_eq!(source.runs.len(), 100_000);
+        assert!(source.runs.iter().all(|run| run.text == "x"));
+        assert_eq!(budget.work.get(), MAX_LINK_WORK);
+        assert!(budget.exhausted.get());
+        assert_eq!(budget.spans.get(), 0);
+        assert_eq!(budget.href_bytes.get(), 0);
+        let parts = budget.parts.borrow();
+        assert_eq!(parts.len(), 1);
+        let index = &parts[&(package.relationships[part].as_ptr() as usize)];
+        assert_eq!(index.by_id.len(), 1);
+        assert_eq!(index.resolved.len(), 1);
+    }
+
+    #[test]
+    fn distinct_missing_ids_charge_bounded_work_for_100k_runs() {
+        let part = "ppt/slides/slide1.xml";
+        let package = link_package(part, vec![external_link("present", "https://example.test")]);
+        let source = link_paragraph(
+            (0..100_000)
+                .map(|index| linked_run("x", &format!("missing{index}")))
+                .collect(),
+        );
+        let budget = LinkBudget::default();
+        let links = source_links(&source, 1, Some(link_scope(&package, &budget, part, &[])));
+        assert!(links.is_empty());
+        assert_eq!(source.runs.len(), 100_000);
+        assert!(source.runs.iter().all(|run| run.text == "x"));
+        assert_eq!(budget.work.get(), MAX_LINK_WORK);
+        assert!(budget.exhausted.get());
+        assert_eq!(budget.spans.get(), 0);
+        assert_eq!(budget.href_bytes.get(), 0);
+        let parts = budget.parts.borrow();
+        assert_eq!(parts.len(), 1);
+        let index = &parts[&(package.relationships[part].as_ptr() as usize)];
+        assert_eq!(index.by_id.len(), 1);
+        assert!(index.resolved.is_empty());
+    }
+
+    #[test]
+    fn link_work_exhaustion_keeps_earlier_links_and_drops_later_ones_at_scale() {
+        let part = "ppt/slides/slide1.xml";
+        let package = link_package(part, vec![external_link("link", "https://example.test")]);
+        let budget = LinkBudget::default();
+        let scope = link_scope(&package, &budget, part, &[]);
+        let early = source_links(
+            &link_paragraph(vec![linked_run("Early", "link")]),
+            1,
+            Some(scope),
+        );
+        let missing = source_links(
+            &link_paragraph((0..65_536).map(|_| linked_run("x", "missing")).collect()),
+            1,
+            Some(scope),
+        );
+        let later = source_links(
+            &link_paragraph(vec![linked_run("Later", "link")]),
+            1,
+            Some(scope),
+        );
+        assert_eq!(
+            early,
+            [TextLink {
+                start: 0,
+                end: 5,
+                target: url_target("https://example.test"),
+            }]
+        );
+        assert!(missing.is_empty());
+        assert!(later.is_empty());
+        assert_eq!(budget.work.get(), MAX_LINK_WORK);
+        assert!(budget.exhausted.get());
+        assert_eq!(budget.spans.get(), 1);
+        assert_eq!(budget.href_bytes.get(), "https://example.test".len());
+    }
+
+    #[test]
+    fn a_slide_just_under_the_link_work_budget_keeps_every_link_at_scale() {
+        let part = "ppt/slides/slide1.xml";
+        let count = 8;
+        let unused = 65_536 - 1 - (1 + 4 * count);
+        let mut relationships: Vec<_> = (0..unused)
+            .map(|index| external_link(&format!("unused{index}"), "https://example.test"))
+            .collect();
+        let mut runs = Vec::new();
+        let mut expected = Vec::new();
+        for index in 0..count {
+            let href = format!("https://example.test/{index}");
+            relationships.push(external_link(&format!("link{index}"), &href));
+            runs.push(linked_run("x", &format!("link{index}")));
+            expected.push(TextLink {
+                start: index,
+                end: index + 1,
+                target: url_target(&href),
+            });
+        }
+        let package = link_package(part, relationships);
+        let budget = LinkBudget::default();
+        let links = source_links(
+            &link_paragraph(runs),
+            1,
+            Some(link_scope(&package, &budget, part, &[])),
+        );
+        assert_eq!(links, expected);
+        assert_eq!(budget.work.get(), MAX_LINK_WORK - 2);
+        assert!(!budget.exhausted.get());
+        assert_eq!(budget.spans.get(), count as usize);
+        assert_eq!(budget.href_bytes.get(), link_href_bytes(&expected));
+    }
+
+    #[test]
+    fn alternating_maximum_hrefs_stop_at_the_href_byte_budget_at_scale() {
+        let part = "ppt/slides/slide1.xml";
+        let prefix = "https://example.test/";
+        let href_a = format!("{prefix}{}a", "x".repeat(8_192 - prefix.len() - 1));
+        let href_b = format!("{prefix}{}b", "x".repeat(8_192 - prefix.len() - 1));
+        assert_eq!(href_a.encode_utf16().count(), 8_192);
+        let package = link_package(
+            part,
+            vec![external_link("a", &href_a), external_link("b", &href_b)],
+        );
+        let source = link_paragraph(
+            (0..4_096)
+                .map(|index| linked_run("x", if index % 2 == 0 { "a" } else { "b" }))
+                .collect(),
+        );
+        let budget = LinkBudget::default();
+        let links = source_links(&source, 1, Some(link_scope(&package, &budget, part, &[])));
+        assert_eq!(links.len(), 32);
+        assert_eq!(links[0].target, url_target(&href_a));
+        assert_eq!(links[1].target, url_target(&href_b));
+        assert_eq!((links[31].start, links[31].end), (31, 32));
+        assert_eq!(budget.spans.get(), 32);
+        assert_eq!(budget.href_bytes.get(), MAX_LINK_HREF_BYTES);
+        assert_eq!(link_href_bytes(&links), MAX_LINK_HREF_BYTES);
+        let relationships = 2;
+        let lookups = 32;
+        let validation = 2 * (1 + href_a.len() / 4096);
+        let pushes = 32;
+        let expected = relationships + lookups + validation + pushes;
+        assert_eq!(budget.work.get(), expected);
+        assert!(budget.exhausted.get());
+        assert_eq!(source.runs.len(), 4_096);
+    }
+
+    #[test]
+    fn multibyte_maximum_hrefs_are_charged_by_byte_and_later_spans_are_omitted_at_scale() {
+        let part = "ppt/slides/slide1.xml";
+        let prefix = "https://example.test/";
+        let href_a = format!("{prefix}{}a", "é".repeat(8_192 - prefix.len() - 1));
+        let href_b = format!("{prefix}{}b", "é".repeat(8_192 - prefix.len() - 1));
+        assert_eq!(href_a.encode_utf16().count(), 8_192);
+        let package = link_package(
+            part,
+            vec![
+                external_link("a", &href_a),
+                external_link("b", &href_b),
+                external_link("short", "https://example.test"),
+            ],
+        );
+        let budget = LinkBudget::default();
+        let scope = link_scope(&package, &budget, part, &[]);
+        let source = link_paragraph(
+            (0..256)
+                .map(|index| linked_run("x", if index % 2 == 0 { "a" } else { "b" }))
+                .collect(),
+        );
+        let links = source_links(&source, 1, Some(scope));
+        let retained = MAX_LINK_HREF_BYTES / href_a.len();
+        assert_eq!(retained, 16);
+        assert_eq!(links.len(), retained);
+        assert_eq!(budget.spans.get(), retained);
+        assert_eq!(budget.href_bytes.get(), retained * href_a.len());
+        assert_eq!(link_href_bytes(&links), retained * href_a.len());
+        assert!(budget.href_bytes.get() <= MAX_LINK_HREF_BYTES);
+        assert!(budget.exhausted.get());
+        let later = source_links(
+            &link_paragraph(vec![linked_run("Later", "short")]),
+            1,
+            Some(scope),
+        );
+        assert!(later.is_empty());
+        assert_eq!(source.runs.len(), 256);
+    }
+
+    #[test]
+    fn distinct_links_keep_at_most_1024_spans_at_scale() {
+        let part = "ppt/slides/slide1.xml";
+        let relationships: Vec<_> = (0..1_025)
+            .map(|index| {
+                external_link(
+                    &format!("link{index}"),
+                    &format!("https://example.test/{index}"),
+                )
+            })
+            .collect();
+        let package = link_package(part, relationships);
+        let runs: Vec<_> = (0..1_025)
+            .map(|index| linked_run("x", &format!("link{index}")))
+            .collect();
+        let budget = LinkBudget::default();
+        let scope = link_scope(&package, &budget, part, &[]);
+        let first = source_links(&link_paragraph(runs[..512].to_vec()), 1, Some(scope));
+        let second = source_links(&link_paragraph(runs[512..].to_vec()), 1, Some(scope));
+        assert_eq!(first.len(), 512);
+        assert_eq!(second.len(), 512);
+        assert_eq!(second.last().unwrap().end, 512);
+        assert_eq!(
+            second.last().unwrap().target,
+            url_target("https://example.test/1023")
+        );
+        assert_eq!(budget.spans.get(), MAX_LINK_SPANS);
+        let expected_bytes: usize = (0..1_024)
+            .map(|index| format!("https://example.test/{index}").len())
+            .sum();
+        assert_eq!(budget.href_bytes.get(), expected_bytes);
+        assert!(budget.exhausted.get());
+    }
+
+    #[test]
+    fn adjacent_runs_to_one_target_charge_one_span_at_scale() {
+        let part = "ppt/slides/slide1.xml";
+        let prefix = "https://example.test/";
+        let href = format!("{prefix}{}", "x".repeat(8_192 - prefix.len()));
+        let package = link_package(part, vec![external_link("link", &href)]);
+        let source = link_paragraph((0..4_096).map(|_| linked_run("x", "link")).collect());
+        let budget = LinkBudget::default();
+        let links = source_links(&source, 1, Some(link_scope(&package, &budget, part, &[])));
+        assert_eq!(
+            links,
+            [TextLink {
+                start: 0,
+                end: 4_096,
+                target: url_target(&href),
+            }]
+        );
+        assert_eq!(budget.spans.get(), 1);
+        assert_eq!(budget.href_bytes.get(), href.len());
+        assert_eq!(link_href_bytes(&links), href.len());
+        let relationships = 1;
+        let lookups = 4_096;
+        let validation = 1 + href.len() / 4096;
+        let merges = 4_096;
+        let expected = relationships + lookups + validation + merges;
+        assert_eq!(budget.work.get(), expected);
+        assert!(!budget.exhausted.get());
+    }
+
+    #[test]
+    fn oversize_hrefs_keep_no_links_at_scale() {
+        let part = "ppt/slides/slide1.xml";
+        let prefix = "https://example.test/";
+        for href in [
+            format!("{prefix}{}", "x".repeat(8_193 - prefix.len())),
+            format!("{prefix}{}", "x".repeat(1024 * 1024 - prefix.len())),
+            format!("{prefix}{}", "😀".repeat(4_096)),
+        ] {
+            assert!(href.encode_utf16().count() > MAX_LINK_HREF_UTF16);
+            let package = link_package(part, vec![external_link("link", &href)]);
+            let source = link_paragraph(vec![linked_run("Read more", "link")]);
+            let budget = LinkBudget::default();
+            let links = source_links(&source, 1, Some(link_scope(&package, &budget, part, &[])));
+            assert!(links.is_empty());
+            assert_eq!(source.runs[0].text, "Read more");
+            assert_eq!(budget.spans.get(), 0);
+            assert_eq!(budget.href_bytes.get(), 0);
+            let parts = budget.parts.borrow();
+            let index = &parts[&(package.relationships[part].as_ptr() as usize)];
+            assert_eq!(index.resolved.len(), 1);
+        }
+    }
+
+    #[test]
+    fn relationship_ids_over_256_bytes_are_omitted_at_the_boundary() {
+        let part = "ppt/slides/slide1.xml";
+        for length in [256, 257] {
+            let id = "r".repeat(length);
+            let package = link_package(part, vec![external_link(&id, "https://example.test")]);
+            let source = link_paragraph(vec![linked_run("Read", &id)]);
+            let budget = LinkBudget::default();
+            let links = source_links(&source, 1, Some(link_scope(&package, &budget, part, &[])));
+            if length == 256 {
+                assert_eq!(
+                    links,
+                    [TextLink {
+                        start: 0,
+                        end: 4,
+                        target: url_target("https://example.test"),
+                    }]
+                );
+                assert_eq!(budget.work.get(), 4);
+                assert_eq!(budget.spans.get(), 1);
+            } else {
+                assert!(links.is_empty());
+                assert_eq!(budget.work.get(), 1);
+                assert_eq!(budget.spans.get(), 0);
+                assert!(budget.parts.borrow().is_empty());
+            }
+            assert_eq!(source.runs[0].text, "Read");
+        }
+    }
+
+    #[test]
+    fn duplicate_relationship_ids_keep_the_first_target_at_scale() {
+        let part = "ppt/slides/slide1.xml";
+        let package = link_package(
+            part,
+            vec![
+                external_link("link", "https://example.test/first"),
+                external_link("link", "https://example.test/second"),
+            ],
+        );
+        let source = link_paragraph(vec![linked_run("Read", "link")]);
+        let budget = LinkBudget::default();
+        let links = source_links(&source, 1, Some(link_scope(&package, &budget, part, &[])));
+        assert_eq!(
+            links,
+            [TextLink {
+                start: 0,
+                end: 4,
+                target: url_target("https://example.test/first"),
+            }]
+        );
+        let parts = budget.parts.borrow();
+        let index = &parts[&(package.relationships[part].as_ptr() as usize)];
+        assert_eq!(index.by_id.len(), 1);
+        assert_eq!(index.by_id["link"], 0);
+        assert_eq!(index.resolved.len(), 1);
+    }
+
+    #[test]
+    fn slide_jump_actions_use_a_separate_resolution_cache_entry_at_scale() {
+        let part = "ppt/slides/slide1.xml";
+        let mut relationship = link_relationship(
+            "link".to_owned(),
+            "slide3.xml".to_owned(),
+            TargetMode::Internal,
+        );
+        relationship.relationship_type = "/hyperlink".to_owned();
+        relationship.resolved_target = Some("ppt/slides/slide3.xml".to_owned());
+        let package = link_package(part, vec![relationship]);
+        let slides = vec![
+            Some("ppt/slides/slide1.xml".to_owned()),
+            Some("ppt/slides/slide2.xml".to_owned()),
+            Some("ppt/slides/slide3.xml".to_owned()),
+        ];
+        let jump_run = pptx_parse::TextRun {
+            text: "Jump".to_owned(),
+            properties: RunProperties {
+                hyperlink_relationship_id: Some("link".to_owned()),
+                hyperlink_action: Some("ppaction://hlinksldjump".to_owned()),
+                ..RunProperties::default()
+            },
+            field_id: None,
+            field_type: None,
+            line_break: false,
+        };
+        let source = link_paragraph(vec![linked_run("Plain", "link"), jump_run]);
+        let budget = LinkBudget::default();
+        let links = source_links(
+            &source,
+            1,
+            Some(link_scope(&package, &budget, part, &slides)),
+        );
+        assert_eq!(
+            links,
+            [TextLink {
+                start: 5,
+                end: 9,
+                target: TextLinkTarget::Slide { index: 2 },
+            }]
+        );
+        let parts = budget.parts.borrow();
+        let index = &parts[&(package.relationships[part].as_ptr() as usize)];
+        assert_eq!(index.by_id.len(), 1);
+        assert_eq!(index.resolved.len(), 2);
+    }
+
+    #[test]
+    fn shared_budget_bounds_combined_slide_and_diagram_work_at_scale() {
+        let slide_part = "ppt/slides/slide1.xml";
+        let diagram_part = "ppt/diagrams/drawing1.xml";
+        let padded = format!("https://example.test/{}", " ".repeat(1024 * 1024));
+        let mut package = PptxPackage::default();
+        let mut slide_relationships = vec![
+            external_link("early", "https://example.test/early"),
+            external_link("padded", &padded),
+        ];
+        slide_relationships.extend(
+            (0..16_384)
+                .map(|index| external_link(&format!("unused{index}"), "https://example.test")),
+        );
+        package
+            .relationships
+            .insert(slide_part.to_owned(), slide_relationships);
+        let mut diagram_relationships = vec![external_link("padded", &padded)];
+        diagram_relationships.extend(
+            (0..16_384)
+                .map(|index| external_link(&format!("unused{index}"), "https://example.test")),
+        );
+        package
+            .relationships
+            .insert(diagram_part.to_owned(), diagram_relationships);
+        let budget = LinkBudget::default();
+        let slide_scope = link_scope(&package, &budget, slide_part, &[]);
+        let early = source_links(
+            &link_paragraph(vec![linked_run("Early", "early")]),
+            1,
+            Some(slide_scope),
+        );
+        let missing = source_links(
+            &link_paragraph(
+                (0..32_000)
+                    .map(|index| linked_run("x", &format!("missing{index}")))
+                    .collect(),
+            ),
+            1,
+            Some(slide_scope),
+        );
+        let padded_links = source_links(
+            &link_paragraph(vec![linked_run("Padded", "padded")]),
+            1,
+            Some(slide_scope),
+        );
+        let diagram_scope = link_scope(&package, &budget, diagram_part, &[]);
+        let diagram = link_paragraph(vec![linked_run("Diagram", "padded")]);
+        let mut diagram_links = Vec::new();
+        for _ in 0..1_000 {
+            diagram_links.extend(source_links(&diagram, 1, Some(diagram_scope)));
+        }
+        let after = source_links(
+            &link_paragraph(vec![linked_run("After", "early")]),
+            1,
+            Some(slide_scope),
+        );
+        assert_eq!(
+            early,
+            [TextLink {
+                start: 0,
+                end: 5,
+                target: url_target("https://example.test/early"),
+            }]
+        );
+        assert!(missing.is_empty());
+        assert!(padded_links.is_empty());
+        assert!(diagram_links.is_empty());
+        assert!(after.is_empty());
+        assert_eq!(budget.work.get(), MAX_LINK_WORK);
+        assert!(budget.exhausted.get());
+        assert_eq!(budget.spans.get(), 1);
+        assert_eq!(budget.href_bytes.get(), "https://example.test/early".len());
+        let parts = budget.parts.borrow();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(
+            parts[&(package.relationships[slide_part].as_ptr() as usize)]
+                .by_id
+                .len(),
+            16_386
+        );
+        let diagram_index = &parts[&(package.relationships[diagram_part].as_ptr() as usize)];
+        assert_eq!(diagram_index.by_id.len(), 16_385);
+        assert_eq!(diagram_index.resolved.len(), 1);
+    }
 
     #[test]
     fn a_slide_extent_matches_the_page_powerpoint_exports() {
@@ -8627,6 +9992,8 @@ mod tests {
             .resolve_face("Arial", false, false, &mut SubstitutionLog::default())
             .unwrap();
         ResolvedParagraph {
+            languages: Vec::new(),
+            links: Vec::new(),
             align: parse_align(Some(alignment)),
             justify: is_full_justification(Some(alignment)),
             level: 0,
@@ -8656,6 +10023,7 @@ mod tests {
                     bold: false,
                     italic: false,
                     underline: false,
+                    strike: None,
                     color: "#000000".to_owned(),
                     caps: TextCaps::None,
                 },
@@ -8895,10 +10263,11 @@ mod tests {
             bold: false,
             italic: false,
             underline: false,
+            strike: None,
             color: "#000000".to_owned(),
             caps: TextCaps::None,
         };
-        let mut variants = vec![style.clone(); 7];
+        let mut variants = vec![style.clone(); 10];
         variants[0].color = "#A99A72".to_owned();
         variants[1].bold = true;
         variants[2].italic = true;
@@ -8908,8 +10277,18 @@ mod tests {
         variants[6].face = renderer
             .resolve_face("Arial", true, false, &mut SubstitutionLog::default())
             .unwrap();
+        variants[7].strike = Some("sngStrike".to_owned());
+        variants[8].strike = Some("dblStrike".to_owned());
+        variants[9].strike = Some("noStrike".to_owned());
         for changed in variants {
+            let mut original_key = Vec::new();
+            let mut changed_key = Vec::new();
+            key_style(&mut original_key, &style);
+            key_style(&mut changed_key, &changed);
+            assert_ne!(original_key, changed_key);
             let paragraph = ResolvedParagraph {
+                languages: Vec::new(),
+                links: Vec::new(),
                 align: TextAlign::Left,
                 justify: false,
                 level: 0,
@@ -8960,6 +10339,7 @@ mod tests {
                     assert_eq!(actual.bold, expected.style.bold);
                     assert_eq!(actual.italic, expected.style.italic);
                     assert_eq!(actual.underline, expected.style.underline);
+                    assert_eq!(actual.strike, expected.style.strike);
                     assert_eq!(actual.font_id, expected.style.face.id.to_u32());
                     assert_eq!(actual.font_family, expected.style.family);
                     assert_eq!(
@@ -8987,12 +10367,15 @@ mod tests {
             bold: false,
             italic: false,
             underline: true,
+            strike: None,
             color: "#A99A72".to_owned(),
             caps: TextCaps::None,
         };
         let paragraph = |parts: &[&str]| {
             let mut start = 0;
             ResolvedParagraph {
+                languages: Vec::new(),
+                links: Vec::new(),
                 align: TextAlign::Justify,
                 justify: true,
                 level: 0,
@@ -9066,11 +10449,14 @@ mod tests {
             bold: false,
             italic: false,
             underline: false,
+            strike: None,
             color: "#000000".to_owned(),
             caps: TextCaps::None,
         };
         let stack = |text: &str| {
             let paragraph = ResolvedParagraph {
+                languages: Vec::new(),
+                links: Vec::new(),
                 align: TextAlign::Left,
                 justify: false,
                 level: 0,
@@ -9284,11 +10670,11 @@ mod tests {
         };
         for index in 0..MAX_FONTS {
             renderer
-                .register_font(&format!("Face {index}"), false, false, &face(index))
+                .register_font(&format!("Face {index}"), false, false, face(index))
                 .unwrap();
         }
         let error = renderer
-            .register_font("Overflow", false, false, &face(MAX_FONTS))
+            .register_font("Overflow", false, false, face(MAX_FONTS))
             .unwrap_err();
         assert!(
             matches!(&error, RenderError::ResourceLimit(message) if message == "more than 256 font faces"),
@@ -9300,10 +10686,10 @@ mod tests {
                 .contains_key(&(normalize_family("Overflow"), false, false))
         );
         renderer
-            .register_fallback_font("Overflow", false, false, &face(7))
+            .register_fallback_font("Overflow", false, false, face(7))
             .unwrap();
         renderer
-            .register_font("Face 3", true, false, &face(3))
+            .register_font("Face 3", true, false, face(3))
             .unwrap();
         assert_eq!(renderer.fonts().face_count(), MAX_FONTS);
     }
@@ -10426,6 +11812,8 @@ mod tests {
                 height: 400.0,
                 background: None,
                 primitives: Vec::new(),
+                alt_text: BTreeMap::new(),
+                title_shape: None,
             },
             font_substitutions: Vec::new(),
             autofit: HashMap::new(),
@@ -10478,6 +11866,8 @@ mod tests {
                 height: 400.0,
                 background: None,
                 primitives: Vec::new(),
+                alt_text: BTreeMap::new(),
+                title_shape: None,
             },
             font_substitutions: Vec::new(),
             autofit: HashMap::new(),
@@ -10570,6 +11960,8 @@ mod tests {
                 height: 400.0,
                 background: None,
                 primitives: Vec::new(),
+                alt_text: BTreeMap::new(),
+                title_shape: None,
             },
             font_substitutions: Vec::new(),
             autofit: HashMap::new(),
@@ -12219,6 +13611,11 @@ mod tests {
             .layout_resolved(
                 session.package(),
                 &snapshot.slides[0],
+                &snapshot
+                    .slides
+                    .iter()
+                    .map(|slide| slide.source_part_path.clone())
+                    .collect::<Vec<_>>(),
                 snapshot.width_emu,
                 snapshot.height_emu,
                 0,
@@ -14076,7 +15473,7 @@ mod tests {
         include_drawing_rel: bool,
     ) -> Vec<u8> {
         let mut parts = ooxml_opc::unzip_parts(FIXTURE).unwrap();
-        let frame = r#"<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="901" name="SmartArt Diagram"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x="914400" y="914400"/><a:ext cx="3657600" cy="1828800"/></p:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/diagram"><dgm:relIds xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" r:dm="rIdData1" r:lo="rIdLayout1" r:qs="" r:cs=""/></a:graphicData></a:graphic></p:graphicFrame>"#;
+        let frame = r#"<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="901" name="SmartArt Diagram" descr="Reporting lines"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x="914400" y="914400"/><a:ext cx="3657600" cy="1828800"/></p:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/diagram"><dgm:relIds xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" r:dm="rIdData1" r:lo="rIdLayout1" r:qs="" r:cs=""/></a:graphicData></a:graphic></p:graphicFrame>"#;
         let mut rels = String::from(
             r#"<Relationship Id="rIdData1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramData" Target="../diagrams/data1.xml"/>"#,
         );
@@ -14120,6 +15517,38 @@ mod tests {
             r#"<dgm:dataModel xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><dgm:ptLst><dgm:pt modelId="p1"><dgm:t><a:p><a:r><a:t>{text}</a:t></a:r></a:p></dgm:t></dgm:pt></dgm:ptLst></dgm:dataModel>"#
         );
         smartart_test_deck(Some(data.as_bytes()), None, false)
+    }
+
+    #[test]
+    fn smartart_shapes_stay_under_their_frames_alternative_text() {
+        let deck = synthesized_smartart_deck("Reporting");
+        let session = DeckSession::open(&deck, 8_035).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let frame = snapshot.slides[0]
+            .shapes
+            .iter()
+            .find(|shape| shape.name == "SmartArt Diagram")
+            .unwrap();
+        let alt_text = renderer()
+            .layout_slide(session.package(), &snapshot, 0)
+            .unwrap()
+            .display_list
+            .alt_text;
+        assert_eq!(
+            alt_text[&frame.id].description.as_deref(),
+            Some("Reporting lines")
+        );
+        let prefix = format!("{}:", frame.id);
+        let members: Vec<_> = alt_text
+            .iter()
+            .filter(|(id, _)| id.starts_with(&prefix))
+            .collect();
+        assert!(!members.is_empty());
+        assert!(
+            members
+                .iter()
+                .all(|(_, entry)| entry.group.as_deref() == Some(frame.id.as_str()))
+        );
     }
 
     #[test]

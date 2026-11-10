@@ -1539,6 +1539,13 @@ impl EditingDoc {
     ) -> Result<ReadParagraphsResponse, EditRefusal> {
         let story_id = request.story.as_deref().unwrap_or("body");
         let (version, paragraphs) = self.read_scope(|views| {
+            // Hosts read no paragraphs of the body to get the version, on every document read.
+            if story_id == "body"
+                && request.para_ids.as_ref().is_some_and(Vec::is_empty)
+                && story_ref(views.txn(), story_id).is_ok()
+            {
+                return Ok(Vec::new());
+            }
             read_story(
                 views,
                 story_id,
@@ -1726,19 +1733,36 @@ impl EditingDoc {
         &self,
         target: &TextTarget,
         delta: &InlineFormatDelta,
-    ) -> OpResult<Result<(), EditRefusal>> {
+    ) -> OpResult<Result<crate::KeptUnchanged, EditRefusal>> {
         let span = match self.resolve_text_span(target) {
             Ok(span) => span,
             Err(refusal) => return Ok(Err(refusal)),
         };
-        let Some(span) = span else {
-            return Ok(Ok(()));
+        let paragraph = match target {
+            TextTarget::Paragraph(paragraph) => Some(paragraph),
+            _ => None,
         };
-        if let Err(refusal) = self.writable(&span.story, target) {
+        let story = span
+            .as_ref()
+            .map(|span| span.story.as_str())
+            .or_else(|| paragraph.map(|paragraph| paragraph.story.as_str()));
+        if let Some(story) = story
+            && let Err(refusal) = self.writable(story, target)
+        {
             return Ok(Err(refusal));
         }
-        self.format_range(&EditCtx::local(String::new(), String::new()), span, delta)?;
-        Ok(Ok(()))
+        let attrs = delta.to_attrs()?;
+        let ctx = EditCtx::local("", "");
+        let kept = match span {
+            Some(span) => self.format_range_keeping(&ctx, span, delta)?.1,
+            None => crate::KeptUnchanged::new(),
+        };
+        if let Some(paragraph) = paragraph
+            && let Some(language) = attrs.get("language")
+        {
+            self.set_paragraph_language(&ctx, paragraph, language)?;
+        }
+        Ok(Ok(kept))
     }
 
     /// Resolves `target` and anchors side-map comment `id` over it in one call.

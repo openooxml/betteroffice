@@ -303,7 +303,7 @@ export interface DocxCommandPayloads {
   openPart: DocxPartTarget;
   ensurePart: DocxPartTarget;
   removePart: DocxPartTarget;
-  setHyperlink: { selection: DocxCommandSelection; hyperlink: YrsHyperlinkAttrs | null; displayText?: string; expectVersion: string };
+  setHyperlink: DocxSelectionIntent & { selection: DocxCommandSelection; hyperlink: YrsHyperlinkAttrs | null; displayText?: string; expectVersion: string };
   setObjectProperties: { handle: string; patch: Record<string, unknown>; expectVersion: string };
   setSectionProperties: { section: string; patch: Partial<SectionProperties>; expectVersion: string };
   setNoteProperties: { section: string; footnotePr: FootnoteProperties; endnotePr: EndnoteProperties; expectVersion: string };
@@ -331,7 +331,11 @@ export interface DocxCommandPayloads {
   insertPageBreak: DocxSelectionIntent;
   insertSectionBreak: DocxSelectionIntent & { type: 'nextPage' | 'continuous' | 'oddPage' | 'evenPage' };
   resizeObject: { handle: string; expectVersion: string } &
-    ({ widthEmu: number; heightEmu: number; hOffsetEmu?: number; vOffsetEmu?: number } | { widthTwips: number });
+    ({ widthEmu: number; heightEmu: number; hOffsetEmu?: number; vOffsetEmu?: number } | { widthTwips: number } |
+      /** Moves the right edge of grid column `columnEdge - 1` by `deltaTwips`; the next column, if any, gives up the same width. */
+      { columnEdge: number; deltaTwips: number } |
+      /** Drags the bottom border of the row holding the cell `handle` names, from `paintedRowTwips` or the row's stored height if taller. */
+      { paintedRowTwips: number; rowDeltaTwips: number });
   moveObject: { handle: string; hOffsetEmu: number; vOffsetEmu: number; expectVersion: string };
   /** Moves the inline picture `handle` names to the text position under `drop`, as one undo step. */
   moveEmbed: { handle: string; expectVersion: string; drop: DocxSelectionPointIntent; suggesting?: YrsAuthor };
@@ -456,6 +460,8 @@ export interface DocxCommandInitRequest {
   selection?: DocxCommandSelection | null;
   fonts: YrsResidentFontRegistration[];
   fontRegistrationSlots?: boolean | { fontChains: Record<string, number[]> };
+  /** Slots registered from a sliced face's skeleton and core, whose outlines the worker loads before painting. */
+  progressiveFonts?: readonly import('./residentProgressiveFonts').ProgressiveFontSpec[];
   layoutInput: string;
   layoutWithRegions: boolean;
   layoutRevision: number;

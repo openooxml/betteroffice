@@ -1,5 +1,7 @@
 import { test, expect, type Page } from 'playwright/test';
 
+type ProbeEvent = { type: string; focused?: boolean; viewport?: { x: number; y: number; width: number; height: number } | null };
+
 let peerless = false;
 
 async function open(page: Page) {
@@ -43,6 +45,38 @@ async function offsets(page: Page) {
 for (const mode of ['hybrid', 'peerless'] as const) {
   test.describe(mode, () => {
     test.beforeEach(() => { peerless = mode === 'peerless'; });
+test('document focus excludes the plugin panel', async ({ page }) => {
+  await open(page);
+  const events = () => page.evaluate(() =>
+    (window as unknown as { __probe: { events: ProbeEvent[] } }).__probe.events
+      .filter((event) => event.type === 'focus-change'));
+  await page.getByTestId('probe-input').click();
+  await page.evaluate(() => {
+    (window as unknown as { __probe: { events: ProbeEvent[] } }).__probe.events = [];
+  });
+  await page.locator('canvas[data-page-index="0"]').click({ position: { x: 100, y: 100 } });
+  await expect.poll(async () => (await events()).at(-1)?.focused).toBe(true);
+  await page.getByTestId('probe-input').click();
+  await expect.poll(async () => (await events()).at(-1)?.focused).toBe(false);
+  expect((await events()).map((event) => event.focused)).toEqual([true, false]);
+});
+
+test('scrolling moves the viewport in overlay pixels', async ({ page }) => {
+  await open(page);
+  const viewport = () => page.evaluate(() =>
+    (window as unknown as { __probe: { events: ProbeEvent[] } }).__probe.events
+      .filter((event) => event.type === 'viewport-change' && event.viewport !== null).at(-1));
+  await expect.poll(viewport).toMatchObject({ type: 'viewport-change' });
+  const before = (await viewport())!;
+  if (before.type !== 'viewport-change') throw new Error('Missing viewport');
+  const scroller = page.locator('.docx-editor__scroll-container');
+  await scroller.evaluate((element) => element.scrollBy(0, 180));
+  await expect.poll(async () => {
+    const next = await viewport();
+    return next?.type === 'viewport-change' ? next.viewport?.y : null;
+  }).toBeGreaterThan(before.viewport!.y);
+});
+
 test('managed overlays land on the rendered pages at every zoom', async ({ page }) => {
   await open(page);
   await expect(page.getByTestId('probe-card')).toBeVisible();
@@ -403,7 +437,7 @@ test('a drop point on page 2 resolves like a caret click and inserts there at ev
     await second.scrollIntoViewIfNeeded();
     await expect(second).toBeInViewport();
     const query = await operate(page, async (worker) => {
-      const { editor, geometry } = (window as unknown as LooseProbe).__probe;
+      const { editor } = (window as unknown as LooseProbe).__probe;
       const surface = document.querySelector('canvas[data-page-index="1"]')!;
       const canvas = surface.getBoundingClientRect();
       const session = worker ? null : editor.getEditorRef().getYrsSession();
@@ -425,7 +459,10 @@ test('a drop point on page 2 resolves like a caret click and inserts there at ev
       return {
         found,
         loc: found && (worker ? { paraId: found.hit.target.start.paraId, offset: found.hit.target.start.offset } : editor.getEditorRef().displayPositionToYrsLoc(found.hit)),
-        plugin: found && (worker ? await geometry.readPositionAtPoint(found.x, found.y) : geometry.getPositionAtPoint(found.x, found.y)),
+        plugin: found && await (async () => {
+          const current = (window as unknown as LooseProbe).__probe.geometry;
+          return worker ? current.readPositionAtPoint(found!.x, found!.y) : current.getPositionAtPoint(found!.x, found!.y);
+        })(),
         outside: worker ? await editor.readPositionAtPoint(canvas.left - 12, canvas.top + canvas.height / 2) : editor.getPositionAtPoint(canvas.left - 12, canvas.top + canvas.height / 2),
         unchanged:
           JSON.stringify(worker ? await editor.readSelectionInfo() : session!.selection()) === selection && document.activeElement === active,

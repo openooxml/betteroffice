@@ -343,3 +343,51 @@ test('measurement forwards the document compatibility mode and defaults to 12', 
     );
   }
 });
+
+test('the shared read of an implicit script fallback passes the same presence check as its copy', async () => {
+  const latin = Uint8Array.of(1, 2).buffer;
+  const wrong = Uint8Array.of(3, 4, 5).buffer;
+  const fallback = Object.assign(async () => wrong.slice(0), { readOnlyBytes: async () => wrong });
+  const provider = { ...providerFor(latin), resolveScriptFallback: () => fallback };
+  const create = spyOn(fontManager, 'createFontProvider').mockReturnValue(provider);
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  const registered: Uint8Array[] = [];
+  try {
+    const source = createRustMeasureSource({ engine: { registerFont: (bytes) => registered.push(bytes) - 1, clearFonts() {} } });
+    const requirement: ResidentFontRequirement = { ...regular, scripts: ['cjk-jp'] };
+    await source.prepareFontRequirements([requirement]);
+    expect(registered.map((bytes) => [...bytes])).toEqual([[1, 2]]);
+  } finally { create.mockRestore(); warn.mockRestore(); }
+});
+
+test('Simplified and Traditional Arabic runs chain Noto Naskh Arabic as their Arabic fallback', async () => {
+  const registered: Uint8Array[] = [];
+  const source = createRustMeasureSource({
+    bundled: fontManager.createFontProvider(),
+    engine: { registerFont: (bytes) => registered.push(bytes) - 1, clearFonts() {} },
+  });
+  const runs: Array<{ family: string; bold: boolean }> = [
+    { family: 'Simplified Arabic', bold: false },
+    { family: 'Simplified Arabic', bold: true },
+    { family: 'Traditional Arabic', bold: false },
+    { family: 'Arial', bold: false },
+    { family: 'Times New Roman', bold: true },
+  ];
+  const requirements = runs.map(({ family, bold }): ResidentFontRequirement => ({
+    key: `${family.toLowerCase()}|${Number(bold)}|0`, family, bold, italic: false, scripts: ['arabic'],
+  }));
+  await source.prepareFontRequirements(requirements);
+  const chains = source.measurementConfigForRequirements(requirements)!.fontChains;
+  const naskh = fontManager.BUNDLED_FONTS.find((face) => face.family === 'Noto Naskh Arabic')!.byteLength;
+  const sans = fontManager.BUNDLED_FONTS.filter((face) => face.family === 'Noto Sans Arabic').map((face) => face.byteLength);
+  for (const requirement of requirements) {
+    const lengths = chains[requirement.key]!.map((id) => registered[id]!.byteLength);
+    if (requirement.family.endsWith('Arabic')) {
+      expect(lengths).toContain(naskh);
+      for (const face of sans) expect(lengths).not.toContain(face);
+    } else {
+      expect(lengths).not.toContain(naskh);
+      expect(sans.some((face) => lengths.includes(face))).toBe(true);
+    }
+  }
+});

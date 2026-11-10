@@ -5,7 +5,7 @@ import { createPresentationCollaborationPipe, presentationCollaborationPipes } f
 import { createSessionClient } from '../../../../shared/office-session/client';
 import type { SessionTransport } from '../../../../shared/office-session/transport';
 import { SessionFailure } from '../../../../shared/office-session/types';
-import { createWorkerEditSession } from '../../../../shared/office-session/commands/session';
+import { createWorkerEditSession, sessionUnacknowledged } from '../../../../shared/office-session/commands/session';
 import type { CommandTicket } from '../../../../shared/office-session/commands/types';
 import type { PptxFontFace } from '../types';
 import type { DefaultFontInstallation, DefaultFontInstallRequest, DefaultFontPayload } from '../../../../shared/pptxDefaultFonts';
@@ -27,6 +27,7 @@ import {
   type PresentationCommandOpenResult,
   type PresentationCommandOutcome,
   type PresentationCommandRefusalReason,
+  type PresentationPendingIntent,
 } from './commandProtocol';
 
 type CommandFont = Omit<PptxFontFace, 'bytes'> & { bytes: Uint8Array | ArrayBuffer };
@@ -293,13 +294,14 @@ async function createCommandClient(
   const identity = { session: state.session, incarnation: state.incarnation };
   const unack = rpc.on('ack', install);
   const unfonts = rpc.on('defaultFonts', (ack) => {
-    if (ack.defaultFonts?.length) install(ack, true);
+    install(ack, true);
   });
   const unpipe = rpc.on('collaborationPipe', receivePipe);
   const unfailure = rpc.onFailure(fail);
   const fence = (seq = sentThroughSeq) => ({ ...identity, seq });
   type SharedPayload = { intent: PresentationCommandIntent; basis: PresentationCommandBasis };
   const replies = new Map<number, PresentationCommandAck>();
+  const unacknowledged = new Map<number, PresentationPendingIntent>();
   const tickets = new Map<number, CommandTicket>();
   let latestSharedAck = sharedInitial;
   const editSession = sharedInitial && adapter ? createWorkerEditSession<
@@ -386,6 +388,13 @@ async function createCommandClient(
   const client: PresentationCommandClient = {
     get state() { return state; },
     takeRecoveryUpdate() { const update = recoveryUpdate; recoveryUpdate = undefined; return update; },
+    pendingIntents() {
+      if (editSession) {
+        return sessionUnacknowledged<SharedPayload>(editSession).map((envelope) => ({ seq: envelope.seq, intent: envelope.payload.intent,
+          ...(envelope.afterSeq === undefined ? {} : { afterSeq: envelope.afterSeq }) }));
+      }
+      return [...unacknowledged.values()].sort((a, b) => a.seq - b.seq);
+    },
     dispatch(intent, basis) {
       const error = unavailable();
       if (error) return Promise.reject(error);
@@ -394,6 +403,7 @@ async function createCommandClient(
       const seq = ++sentThroughSeq;
       const reference = 'at' in intent.payload ? intent.payload.at : undefined;
       const predecessor = reference?.source === 'afterSeq' ? reference.seq : undefined;
+      unacknowledged.set(seq, { seq, intent, ...(predecessor === undefined ? {} : { afterSeq: predecessor }) });
       const envelope: PresentationCommandEnvelope = { ...identity, seq,
         basis: basis ?? { epoch: state.epoch, version: state.version },
         ...(predecessor === undefined ? {} : { afterSeq: predecessor }), ...intent };
@@ -401,7 +411,7 @@ async function createCommandClient(
       const reply = bytes ? rpc.callWithTransfer('command', [{ ...envelope, payload: { ...envelope.payload, bytes } } as PresentationCommandEnvelope], [bytes])
         : intent.kind === 'collabPipe' ? rpc.callWithTransfer('command', [envelope], pipeOpBuffers(intent.payload.ops))
         : rpc.call.command(envelope);
-      return reply.then(install, (error: unknown) => reject(error, seq));
+      return reply.then((ack) => { unacknowledged.delete(seq); return install(ack); }, (error: unknown) => reject(error, seq));
     },
     async flush(seq) {
       const error = unavailable();
@@ -420,6 +430,21 @@ async function createCommandClient(
         return new Uint8Array(result.bytes);
       } catch (error) { return reject(error, position.seq); }
     },
+    async renderPng(target, options = {}) {
+      const error = unavailable();
+      if (error) throw error;
+      if (editSession) await editSession.flush();
+      const { signal, ...wire } = options;
+      signal?.throwIfAborted();
+      const position = fence();
+      try {
+        const bytes = new Uint8Array(await rpc.call.renderCommandPng(position, structuredClone(target), structuredClone(wire)));
+        signal?.throwIfAborted();
+        return bytes;
+      } catch (error) { return reject(error, position.seq); }
+    },
+    readCoverageFont: (family, text, have) => rpc.call.readCoverageFont(family, text, have),
+    wholeCoverageFonts: (have) => rpc.call.wholeCoverageFonts(have),
     async access(method, ...args) {
       const error = unavailable();
       if (error) throw error;

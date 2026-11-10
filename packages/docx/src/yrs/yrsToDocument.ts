@@ -6,6 +6,7 @@ import { sectionPropertiesEqual } from './sections';
 import { resolveThemeFont } from '../utils/fontResolver';
 import { mergeFontFamily } from '../utils/fontFamilyMerge';
 import { engineProgressTick } from '../utils/engineProgress';
+import { serializeRun } from '../docx/serializer';
 import { headerFooterAliasOf, markHeaderFooterAlias } from '../docx/headerFooterAliasProjection';
 import { markRevisionInfo } from '../docx/sessionRevisionIds';
 import { headerFooterStory, sessionSourcePackage } from './sessionInternals';
@@ -113,6 +114,7 @@ interface TextItem {
   kind: 'text';
   text: string;
   attributes: Attrs;
+  sourceRun?: { index: number; previous: number; changed: boolean };
 }
 
 interface EmbedItem {
@@ -460,6 +462,8 @@ function attrsToTextFormatting(attributes: Attrs): TextFormatting {
   const modern = asObject(attributes.modernTextEffects);
   if (modern?.effects) formatting.modernEffects = modern.effects as TextFormatting['modernEffects'];
 
+  if (attributes.language !== undefined) formatting.language = liveLanguage(undefined, attributes.language);
+
   const runStyle = asObject(attributes.runStyle);
   const styleId = asString(runStyle?.styleId);
   if (styleId) formatting.styleId = styleId;
@@ -472,6 +476,19 @@ type RunFormatter = (attributes: Attrs) => TextFormatting;
 
 const directFormatting: RunFormatter = (attributes) =>
   attrsToTextFormatting(formattingAttrs(attributes));
+
+function liveLanguage(source: TextFormatting['language'], live: unknown): TextFormatting['language'] {
+  const patch = asObject(live);
+  if (!patch) return source;
+  const result = { ...source };
+  for (const slot of ['latin', 'eastAsia', 'bidi'] as const) {
+    const key = slot === 'latin' && patch.latin === undefined ? 'val' : slot;
+    if (patch[key] === undefined) continue;
+    if (patch[key] === null) delete result[slot];
+    else result[slot] = asString(patch[key]);
+  }
+  return Object.values(result).some(value => value !== undefined) ? result : undefined;
+}
 
 const ON_OFF_RUN_PROPERTIES = new Set<string>([
   'bold', 'italic', 'allCaps', 'smallCaps', 'strike', 'doubleStrike',
@@ -513,7 +530,7 @@ function relativeFormatting(attributes: Attrs, inherited: TextFormatting, theme?
   const formatting = directFormatting(attributes);
   const result: Attrs = {};
   for (const key of new Set([...Object.keys(formatting), ...Object.keys(inherited)])) {
-    if (key === 'fontFamily') continue;
+    if (key === 'fontFamily' || key === 'language') continue;
     if ((key === 'boldCs' || key === 'italicCs') && typeof attributes[key] !== 'boolean') continue;
     const value = formatting[key as keyof TextFormatting];
     if (sameJson(value, inherited[key as keyof TextFormatting])) continue;
@@ -533,11 +550,13 @@ function relativeFormatting(attributes: Attrs, inherited: TextFormatting, theme?
     const value = source?.[key];
     if (value === undefined) continue;
     const live = ON_OFF_RUN_PROPERTIES.has(key) ? formatting[key] ?? false : formatting[key];
-    // Runs hold no live language, so text keeps the language of the source run it maps to.
-    if (key === 'language' || sameJson(value, live) ||
+    if ((key === 'language' && attributes.language === undefined) || sameJson(value, live) ||
       ((key === 'boldCs' || key === 'italicCs') && attributes[key] === undefined)) {
       result[key] = value;
     }
+  }
+  if (attributes.language !== undefined) {
+    result.language = liveLanguage(source?.language as TextFormatting['language'], attributes.language);
   }
   return result as TextFormatting;
 }
@@ -598,9 +617,29 @@ function createTextRun(text: string, attributes: Attrs, format: RunFormatter): R
   const formatting = format(attributes);
   return {
     type: 'run',
+    ...runPropertyChanges(attributes, format),
     formatting: Object.keys(formatting).length > 0 ? formatting : undefined,
     content: runContentForText(text, () => directFormatting(attributes)),
   };
+}
+
+function runPropertyChanges(attributes: Attrs, format: RunFormatter): Pick<Run, 'propertyChanges'> {
+  if (!Array.isArray(attributes.rPrChange) || attributes.rPrChange.length === 0) return {};
+  const changes = attributes.rPrChange.map((raw) => {
+    const change = asObject(raw);
+    if (!change) return raw;
+    const previous = asObject(change.previousAttributes);
+    const info = asObject(change.info);
+    const generated = typeof info?.id === 'string' && !Number.isFinite(Number(info.id));
+    return {
+      type: 'runPropertyChange',
+      ...change,
+      ...(previous && generated ? { previousFormatting: format({
+        ...previous, _sourceRunFormatting: attributes._sourceRunFormatting,
+      }) } : {}),
+    };
+  });
+  return { propertyChanges: propertyChanges(changes) as Run['propertyChanges'] };
 }
 
 function appendTextRun(target: Run, source: Run): void {
@@ -975,7 +1014,7 @@ function replayedRunProperties(payload: Attrs, attributes: Attrs, format: RunFor
   }
   return {
     formatting: formatting as TextFormatting,
-    ...(Array.isArray(source.propertyChanges) ? { propertyChanges: source.propertyChanges as Run['propertyChanges'] } : {}),
+    ...runPropertyChanges(attributes, format),
   };
 }
 
@@ -1197,6 +1236,15 @@ function ordinaryContentForItem(
   recovery: ChartRecovery,
   format: RunFormatter
 ): ParagraphContent | null {
+  const content = inlineContentForItem(item, recovery, format);
+  return content?.type === 'run' ? { ...content, ...runPropertyChanges(item.attributes, format) } : content;
+}
+
+function inlineContentForItem(
+  item: InlineItem,
+  recovery: ChartRecovery,
+  format: RunFormatter
+): ParagraphContent | null {
   if (item.kind === 'text') return createTextRun(item.text, item.attributes, format);
   switch (item.embedKind) {
     case 'break':
@@ -1243,6 +1291,7 @@ function tabRun(attributes: Attrs, format: RunFormatter): Run {
   const formatting = format(attributes);
   return {
     type: 'run',
+    ...runPropertyChanges(attributes, format),
     content: [{ type: 'tab' }],
     ...(Object.keys(formatting).length > 0 ? { formatting } : {}),
   };
@@ -1268,9 +1317,13 @@ function trackedContentForItem(item: InlineItem, info: TrackedChangeInfo, inCont
   else child = { type: 'run', content: [] };
 
   if (item.kind === 'embed' && item.embedKind === 'chart' && child.type === 'run' && child.content.length === 0) return null;
+  if (child.type === 'run') Object.assign(child, runPropertyChanges(item.attributes, format));
   const hyperlink = createHyperlink(item.attributes);
   if (hyperlink && (child.type === 'run' || child.type === 'mathEquation' || child.type === 'inlineSdt' || child.type === 'simpleField' || child.type === 'complexField')) {
-    if (child.type === 'run') hyperlink.children.push(child);
+    if (child.type === 'run') {
+    Object.assign(child, runPropertyChanges(item.attributes, format));
+    hyperlink.children.push(child);
+  }
     else hyperlink.structuredChildren = [child];
     child = hyperlink;
   }
@@ -1429,12 +1482,15 @@ function buildParagraphContent(
   const content: ParagraphContent[] = [];
   let currentRun: Run | null = null;
   let currentFormattingKey: string | null = null;
+  let currentSource: TextItem['sourceRun'];
+  const formattingKeys = new Map<string, string>();
   let currentHyperlink: Hyperlink | null = null;
 
   const flushRun = (): void => {
     if (currentRun) content.push(currentRun);
     currentRun = null;
     currentFormattingKey = null;
+    currentSource = undefined;
   };
   const flushHyperlink = (): void => {
     if (currentHyperlink) content.push(currentHyperlink);
@@ -1496,14 +1552,32 @@ function buildParagraphContent(
 
     flushHyperlink();
     if (item.kind === 'text') {
-      const key = stableStringifyWithout(item.attributes, NON_FORMATTING_ATTRS);
       const nextRun = createTextRun(item.text, item.attributes, format);
-      if (currentRun && currentFormattingKey === key) appendTextRun(currentRun, nextRun);
-      else {
+      let key = stableStringifyWithout(item.attributes, NON_FORMATTING_ATTRS);
+      if (item.sourceRun?.changed) {
+        const formatting = stableStringify([nextRun.formatting, nextRun.propertyChanges]);
+        let written = formattingKeys.get(formatting);
+        if (written === undefined) {
+          written = serializeRun({ ...nextRun, content: [] });
+          formattingKeys.set(formatting, written);
+        }
+        key = written;
+      }
+      const source = item.sourceRun;
+      const sameSource = source?.index === currentSource?.index;
+      const changedNeighbours = source && currentSource && source.changed && currentSource.changed &&
+        source.previous === currentSource.index;
+      const plain = nextRun.content.every(child => child.type === 'text') &&
+        currentRun?.content.every(child => child.type === 'text');
+      const compatible = source ? plain && (sameSource || changedNeighbours) : !currentSource;
+      if (currentRun && currentFormattingKey === key && compatible) {
+        appendTextRun(currentRun, nextRun);
+      } else {
         flushRun();
         currentRun = nextRun;
         currentFormattingKey = key;
       }
+      currentSource = source;
       continue;
     }
 
@@ -1536,6 +1610,7 @@ function marksKeyToYrsAttrs(marksKey: string | undefined): Attrs | null {
     if (BOOLEAN_MARKS.has(name)) attrs[name] = true;
     else if (name === 'boldCs' || name === 'italicCs') attrs[name] = value.value;
     else if (name === 'highlight') attrs.highlight = value.color;
+    else if (name === 'rPrChange') attrs.rPrChange = value.changes;
     else if (name === 'insertion' || name === 'deletion') {
       attrs[name === 'insertion' ? 'ins' : 'del'] = dropNulls({
         id: value.revisionId,
@@ -2194,7 +2269,9 @@ function sourceTextMatches(original: string, current: string): SourceTextMatch[]
   return matches;
 }
 
-function preserveSourceRunFormatting(items: InlineItem[], sources: OriginalRunBoundary[]): InlineItem[] {
+function preserveSourceRunFormatting(
+  items: InlineItem[], sources: OriginalRunBoundary[], coalesce = false
+): InlineItem[] {
   if (sources.length === 0) {
     return items;
   }
@@ -2215,10 +2292,23 @@ function preserveSourceRunFormatting(items: InlineItem[], sources: OriginalRunBo
     return offset === sourceEnd ? liveEnd : current.length;
   };
   let sourceOffset = 0;
-  const spans = sources.map((source, index) => {
+  const mappedSources = sources.map((source, index) => {
     const start = mapped(sourceOffset);
     sourceOffset += source.text.length;
-    return { start, end: index + 1 === sources.length ? current.length : mapped(sourceOffset), formatting: source.formatting };
+    const end = index + 1 === sources.length ? current.length : mapped(sourceOffset);
+    return {
+      start, end, index, formatting: source.formatting,
+      changed: current.slice(start, end) !== source.text,
+    };
+  });
+  const spans = mappedSources.map((span, index) => {
+    let previous = index - 1;
+    while (previous >= 0) {
+      const skipped = mappedSources[previous]!;
+      if (skipped.end > skipped.start || !skipped.changed) break;
+      previous--;
+    }
+    return { ...span, previous };
   }).filter((span) => span.end > span.start);
   let offset = 0;
   return items.flatMap((item): InlineItem[] => {
@@ -2232,7 +2322,12 @@ function preserveSourceRunFormatting(items: InlineItem[], sources: OriginalRunBo
         .map((key) => [key, span!.formatting![key]]));
       const attributes = { ...item.attributes, _sourceRunFormatting: source };
       slices.push(item.kind === 'text'
-        ? { ...item, text: item.text.slice(item.text.length - (end - offset), item.text.length - (end - next)), attributes }
+        ? {
+          ...item, text: item.text.slice(item.text.length - (end - offset), item.text.length - (end - next)), attributes,
+          ...(coalesce && span ? { sourceRun: {
+            index: span.index, previous: span.previous, changed: span.changed,
+          } } : {}),
+        }
         : { ...item, attributes });
       offset = next;
     }
@@ -2291,6 +2386,13 @@ function paragraphFromStory(
       } : undefined,
     };
   }
+  if (properties.language !== undefined) {
+    const original = attrs._originalFormatting ?? {};
+    attrs._originalFormatting = { ...original, runProperties: {
+      ...original.runProperties,
+      language: liveLanguage(original.runProperties?.language, properties.language),
+    } };
+  }
   const sources = baseParagraph ? sourceRuns(baseParagraph.content)
     : Array.isArray(attrs._originalRunBoundaries) ? attrs._originalRunBoundaries as OriginalRunBoundary[]
       : attrs._originalFormatting?.runProperties ? [{
@@ -2300,7 +2402,12 @@ function paragraphFromStory(
           language: attrs._originalFormatting.runProperties.language,
         },
       }] : [];
-  let content = buildParagraphContent(preserveSourceRunFormatting(items, sources), recovery, format, revisionIds);
+  const coalesce = !!baseParagraph && baseParagraph.content.every(child =>
+    child.type === 'run' && child.content.every(entry => entry.type === 'text') && !child.propertyChanges?.length
+  ) && items.every(item => item.kind === 'text' &&
+    !item.attributes.hyperlink && !item.attributes.ins && !item.attributes.del && !item.attributes.rPrChange
+  ) && sources.map(source => source.text).join('') !== items.map(item => item.kind === 'text' ? item.text : '').join('');
+  let content = buildParagraphContent(preserveSourceRunFormatting(items, sources, coalesce), recovery, format, revisionIds);
   content = restoreOriginalRuns(
     content,
     items,
@@ -3792,7 +3899,6 @@ class SaveContext {
         mark: paragraph.formatting?.runProperties,
         matches: items.some(item => {
           const formatting = directFormatting(item.attributes);
-          // Seeded runs carry no language; a run that has one must agree with every slot the source run sets.
           const live = asObject(item.attributes.language);
           return sameJson(fontsKey(formatting.fontFamily), fontsKey(expected)) &&
             (!live || Object.entries(run.formatting?.language ?? {}).every(([slot, value]) => live[slot] === value));
@@ -3814,6 +3920,26 @@ class SaveContext {
       candidate = first;
     }
     const formatting = candidate.run;
+    if (properties.language === undefined) {
+      const inheritedLanguage = {
+        ...this.styles.resolveParagraphStyle(
+          typeof properties.pStyle === 'string' ? properties.pStyle : null,
+          undefined,
+          this.cellRuns.get(story)
+        ).runFormatting?.language,
+        ...asObject(asObject(properties.defaultTextFormatting)?.language),
+      };
+      for (const item of items) {
+        const live = asObject(item.attributes.language);
+        if (!live) continue;
+        const language = { ...live };
+        for (const slot of ['latin', 'eastAsia', 'bidi'] as const) {
+          if (formatting.language?.[slot] === undefined && typeof language[slot] === 'string' &&
+            language[slot] === inheritedLanguage?.[slot]) delete language[slot];
+        }
+        item.attributes = { ...item.attributes, language };
+      }
+    }
     const marks = asObject(original!.runProperties);
     const sourceMark = candidate.mark;
     return {

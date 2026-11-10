@@ -259,7 +259,7 @@ fn parse_doc_defaults(element: Option<&XmlElement>, theme: Option<&Theme>) -> Op
             theme,
         ),
     };
-    (value != DocDefaults::default()).then_some(value)
+    Some(value)
 }
 
 fn resolve_style_inheritance(
@@ -403,6 +403,17 @@ mod tests {
             &mut ParseBudget::new(&limits),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn an_empty_doc_defaults_element_is_present_but_a_missing_one_is_not() {
+        let empty = parse(
+            r#"<w:styles><w:docDefaults><w:rPrDefault/><w:pPrDefault/></w:docDefaults></w:styles>"#,
+        );
+        assert_eq!(empty.doc_defaults, Some(DocDefaults::default()));
+        let missing =
+            parse(r#"<w:styles><w:style w:type="paragraph" w:styleId="Title"/></w:styles>"#);
+        assert_eq!(missing.doc_defaults, None);
     }
 
     #[test]

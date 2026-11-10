@@ -130,6 +130,12 @@ Both the composition and plugin APIs can change in minor releases. For host pane
 sidebar items, lifecycle, and granted operations, see
 [host DOCX editor plugins](https://docs.betteroffice.dev/docs/javascript#host-docx-editor-plugins).
 
+Plugins read `snapshot.focused` and `snapshot.locale`, and receive
+`focus-change` and `locale-change`. Focus covers the document surface; docked panels
+and toolbar controls are outside. Locale is the canonical `i18n._lang`, defaulting to `en`.
+`geometry.viewport` is the visible document area in overlay-layer pixels;
+`viewport-change` reports scroll, resize, or zoom changes, with `null` when no layout is shown.
+
 ## Edit batches and paragraph anchors
 
 The ref's `readParagraphs`, `findText`, `validateEdits`, and `applyEdits` flush pending input before

@@ -1,11 +1,10 @@
 import { editCharts, listCharts, readChartText, type XlsxChartEdit, type XlsxChartTextRead } from './xlsx-charts';
-import {
-  initWasm, isPngExportAvailable, openWorkbook, type WorkbookHandle, type XlsxCellRead, type XlsxEditStep,
-} from '@betteroffice/xlsx';
+import type { WorkbookHandle, XlsxCellRead, XlsxEditStep } from '@betteroffice/xlsx';
+import { engines } from '#agents-engines';
 import type { WorkbookEditPeer } from '@betteroffice/xlsx/worker';
 import { DocumentToolError, type GrepOptions, type TextEdit } from './types';
 import { setAutoFilter, applyXlsxFormatting, editConditionalFormats, editXlsxDefinedNames, listXlsxDefinedNames, editXlsxGrid, editXlsxSheets, findXlsx, listConditionalFormats, readConditionalFormatFormula, outlineXlsx, previewXlsx, sortXlsx, writeXlsx, type XlsxProtectionOptions, type XlsxConditionalFormatEdit, type XlsxDefinedNameEdit, type XlsxFormatEdit, type XlsxGridEdit, type XlsxSheetEdit, type XlsxWriteEdit } from './xlsx-operations';
-import { initialize, integer, plainText, PrototypeDocument, textWindow, unwrap, type PrototypeOptions } from './prototype';
+import { initialize, integer, plainText, PrototypeDocument, textWindow, unwrap, type AgentProposal, type PrototypeOptions } from './prototype';
 
 export interface XlsxOptions extends PrototypeOptions { editPeer?: WorkbookEditPeer }
 
@@ -44,7 +43,7 @@ export class XlsxAgentWorkbook extends PrototypeDocument<CellChange, XlsxEditSte
   }
 
   static attach(handle: WorkbookHandle, options: XlsxOptions = {}) {
-    const attached = options.editPeer ? new Proxy(handle, { get: (target, key) => key === 'applyEdits' || key === 'applyOps' ? options.editPeer![key] : Reflect.get(target, key) }) : handle;
+    const attached = options.editPeer ? new Proxy(handle, { get: (target, key) => key === 'applyEdits' || key === 'applyOps' || key === 'propose' || key === 'acceptProposal' || key === 'rejectProposal' ? options.editPeer![key] : Reflect.get(target, key) }) : handle;
     return new XlsxAgentWorkbook(attached, options.name, false, options.editPeer);
   }
 
@@ -111,14 +110,15 @@ export class XlsxAgentWorkbook extends PrototypeDocument<CellChange, XlsxEditSte
   previewRange(options: { sheet: string; range: string; scale?: number }) { return previewXlsx(this, options); }
 
   static async open(bytes: Uint8Array, options: PrototypeOptions = {}) {
-    await initialize('xlsx', initWasm, options.wasm);
-    return new XlsxAgentWorkbook(openWorkbook(bytes), options.name);
+    const engine = await engines.load('xlsx');
+    await initialize('xlsx', engine.module.initWasm, options.wasm, engine.native);
+    return new XlsxAgentWorkbook(engine.module.openWorkbook(bytes), options.name);
   }
 
   overview() {
     this.alive();
     const read = unwrap(this.handle.readCells({ ranges: [] }));
-    return { name: this.name, format: this.format, version: read.version, sheets: read.sheets.length, capabilities: { grep: 'literal', proposals: 'cell inputs and formulas', render: isPngExportAvailable(), export: true, batchEdits: true, formatting: true, structure: true, sort: true, attachment: 'WorkbookHandle, including an editor edit peer' }, workflow: 'xlsx_outline lists stable sheet IDs and version; xlsx_read_range reads A1 ranges; write tools require that version and return changed cells. xlsx_preview renders a range. office_export saves a new file.' };
+    return { name: this.name, format: this.format, version: read.version, sheets: read.sheets.length, capabilities: { grep: 'literal', proposals: 'cell inputs and formulas', render: true, export: true, batchEdits: true, formatting: true, structure: true, sort: true, attachment: 'WorkbookHandle, including an editor edit peer' }, workflow: 'xlsx_outline lists stable sheet IDs and version; xlsx_read_range reads A1 ranges; write tools require that version and return changed cells. xlsx_preview renders a range. office_export saves a new file.' };
   }
 
   list(options: { offset?: number; limit?: number; story?: string; headingsOnly?: boolean } = {}) {
@@ -201,19 +201,59 @@ export class XlsxAgentWorkbook extends PrototypeDocument<CellChange, XlsxEditSte
     return this.stage(input, changes, steps, version);
   }
 
+  protected override createProposal(value: AgentProposal<CellChange>, _steps: XlsxEditStep[]) {
+    if (this.ownsHandle) return undefined;
+    return this.handle.propose(value.author, value.note || null, value.changes.map(change => {
+      const { start } = corners(change.a1);
+      return { sheet: this.resolveSheet(change.sheet).index, row: start.row, col: start.col, input: change.input };
+    })).id;
+  }
+  protected override proposalStatus(id: string) { return this.handle.getProposalStatus(id); }
+  protected override proposalStale(id: string, _steps: XlsxEditStep[]) {
+    return this.handle.isProposalStale(id);
+  }
+  protected override acceptProposal(id: string, steps: XlsxEditStep[]) {
+    try {
+      const version = this.currentVersion();
+      const result = this.handle.acceptProposal(id);
+      this.preserveSearchVersion(version);
+      for (const target of this.cells.values()) {
+        if (target.version !== version) continue;
+        const current = this.cellAt(target.sheet, target.a1);
+        target.before = current.before;
+        target.version = current.version;
+      }
+      const calculation = this.handle.calculationStatus();
+      return { applied: result.applied, version: this.currentVersion(), changedSheets: result.applied ? new Set(steps.map(step => step.target.sheetId)).size : 0, calculation: { changedCells: result.changed?.length ?? 0, cycleCells: 0, limitedCells: calculation.limitedCells.length, truncated: calculation.budgetExhausted ?? false } };
+    } catch (error) {
+      if ((this.ownsHandle && error instanceof engines.get('xlsx').module.StaleProposalError) || (!this.ownsHandle && error instanceof Error && error.name === 'StaleProposalError' && 'cells' in error && 'targets' in error)) throw new DocumentToolError('STALE_TARGET', 'Target cells changed. Read fresh cells and create a new proposal.', { cells: (error as { cells: unknown }).cells, targets: (error as { targets: unknown }).targets });
+      if ((error instanceof Error ? error.message : String(error)).startsWith('Stale proposal:')) throw new DocumentToolError('STALE_TARGET', 'Target cells changed. Read fresh cells and create a new proposal.');
+      throw error;
+    }
+  }
+  protected override rejectProposal(id: string) { this.handle.rejectProposal(id); }
+
+  protected override searchKey(hit: unknown) { return this.ownsHandle ? undefined : (hit as { ref: string }).ref; }
+
   protected currentVersion() { return this.handle.version(); }
   protected validate(steps: XlsxEditStep[], version: string) { unwrap(this.handle.validateEdits({ expectVersion: version, steps, source: 'agent' })); }
   protected apply(steps: XlsxEditStep[], version: string) {
     const result = unwrap(this.handle.applyEdits({ expectVersion: version, steps, source: 'agent' }));
     return { applied: result.applied, version: result.version, changedSheets: result.changedSheets.length, calculation: { changedCells: result.calculation.changed.length, cycleCells: result.calculation.cycleCells.length, limitedCells: result.calculation.limitedCells.length, truncated: result.calculation.truncated } };
   }
-  protected save(steps?: XlsxEditStep[]) {
+  protected async save(steps?: XlsxEditStep[]) {
     if (!steps) return this.handle.save();
-    const draft = openWorkbook(this.handle.save());
+    const engine = await engines.load('xlsx');
+    await initialize('xlsx', engine.module.initWasm, undefined, engine.native);
+    const draft = engine.module.openWorkbook(this.handle.save());
     try { unwrap(draft.applyEdits({ expectVersion: draft.version(), steps, source: 'agent' })); return draft.save(); }
     finally { draft.dispose(); }
   }
-  protected reopen(bytes: Uint8Array) { const reopened = openWorkbook(bytes); reopened.dispose(); }
+  protected async reopen(bytes: Uint8Array) {
+    const engine = await engines.load('xlsx');
+    await initialize('xlsx', engine.module.initWasm, undefined, engine.native);
+    const reopened = engine.module.openWorkbook(bytes); reopened.dispose();
+  }
   protected dispose() { this.cells.clear(); this.refs.clear(); if (this.ownsHandle) this.handle.dispose(); }
 
   private resolveNative(nativeId: string) { return this.catalog().find(sheet => sheet.nativeId === nativeId)!.sheetId; }

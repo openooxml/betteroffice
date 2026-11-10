@@ -488,7 +488,9 @@
         "pageUp": "Page Up",
         "pageDown": "Page Down",
         "ctrl": "Ctrl",
-        "del": "Del"
+        "del": "Del",
+        "shift": "Shift",
+        "alt": "Alt"
       }
     },
     "objectGeometry": {
@@ -528,6 +530,7 @@
     "paragraphMarkInserted": "Menyisipkan tanda paragraf",
     "paragraphMarkDeleted": "Menghapus tanda paragraf",
     "paragraphPropertiesChanged": "Mengubah properti paragraf",
+    "runPropertiesChanged": "Mengubah pemformatan teks",
     "rowInserted": "Menyisipkan baris",
     "rowDeleted": "Menghapus baris",
     "rowPropertiesChanged": "Mengubah properti baris",
@@ -584,6 +587,8 @@
     "noDocumentLoaded": "Belum ada dokumen yang dimuat",
     "failedToLoad": "Gagal Memuat Dokumen",
     "failedToLoadDescription": "Berkas mungkin rusak, atau menggunakan sesuatu yang belum dapat dibaca editor ini.",
+    "failedToLoadDamaged": "File rusak atau bukan dokumen Word yang lengkap.",
+    "failedToLoadUnsupported": "Dokumen ini menggunakan sesuatu yang belum dapat dibaca editor ini.",
     "editorUnavailable": "Editor tidak dapat dimuat",
     "editorUnavailableDescription": "Periksa koneksi Anda, lalu muat ulang halaman.",
     "reloadPage": "Muat ulang halaman",
@@ -724,6 +729,7 @@
     "failedToParse": "Gagal membaca dokumen",
     "linkRemoved": "Tautan dihapus",
     "linkCopied": "Tautan disalin ke papan klip",
+    "pasteFailed": "Tempel tidak dapat diselesaikan. Tidak ada yang diubah.",
     "failedToSave": "Gagal menyimpan dokumen",
     "documentInput": "Masukan dokumen",
     "documentPreview": "Pratinjau dokumen",
@@ -793,8 +799,13 @@
   },
   "a11y": {
     "pageLabel": "Halaman {number}",
+    "unbuiltPagesNotMirrored": "Halaman {from} hingga {to} belum ada dalam tampilan baca.",
+    "goToPage": "Buka halaman {number}",
     "headerLabel": "Header halaman",
     "footerLabel": "Footer halaman",
+    "chartNoData": "Tidak ada data",
+    "pictureName": "Gambar",
+    "bulletMarker": "butir",
     "selected": "Dipilih",
     "selectionCleared": "Pilihan dihapus",
     "commentedText": "Teks yang dikomentari",

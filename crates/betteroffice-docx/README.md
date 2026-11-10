@@ -49,26 +49,18 @@ controls needs an `EditingDoc` session.
 
 ## Rendering
 
-The opt-in `raster` feature adds native PNG rendering; the default build targets
-`wasm32-unknown-unknown`.
+PNG rendering is enabled by default. Set `default-features = false` to omit
+raster support, and enable font features separately if needed.
 
-```toml
-betteroffice-docx = { version = "0.5", features = ["raster"] }
-```
-
-`render_png` takes a `DisplayList`, which `layout` returns alongside the typed
-layout. `layout_input` is the measured projection the caller supplies.
+`render_png` lays out the current document and renders a zero-based page.
+`RenderOptions::default()` uses scale 1.0. Call `render_display_list_png` to
+render a display list returned by `layout` with unchanged dimensions.
 
 ```rust
-use betteroffice_docx::{Document, ImageScope};
+use betteroffice_docx::{Document, PngTarget, RenderOptions};
 
-let mut document = Document::open(&docx_bytes)?;
-document.register_font("Carlito", false, false, &font_bytes)?;
-document.register_image(ImageScope::Body, "rId9", &logo_bytes)?;
-
-let display_list = document.layout(layout_input)?.display_list;
-let rendered = document.render_png(&display_list, 0)?;
-// rendered.bytes, rendered.skipped_images
+let document = Document::open(&docx_bytes)?;
+let rendered = document.render_png(PngTarget { page: 0 }, &RenderOptions::default())?;
 ```
 
 Faces are capped at 256 and fonts at 32 MiB each, images at 256 and 32 MiB
@@ -114,7 +106,7 @@ resolves one face per family, DOCX resolves a chain.
 Most embedded media arrives on the display list as a `data:` URL that
 `docx-parse` already resolved against its owning part, and needs nothing
 further. `register_image` supplies bytes keyed by owning part and relationship
-ID. `render_png` reports unresolved references in `skipped_images`. Missing font
+ID. `render_png` reports unresolved references in `skipped_images` and, by kind, the effects it could not draw yet in `skipped_effects`. Missing font
 chains return an error.
 
 ## Editing and layout

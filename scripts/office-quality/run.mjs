@@ -8,13 +8,15 @@ import { measureSamples } from './results.mjs';
 import { validateReferenceMetadata } from './reference.mjs';
 import { download } from './download.mjs';
 import { fetchAsset, resolveAssetCacheDir } from './asset-cache.mjs';
-import { CORPUS_ORIGIN as corpus } from './samples.mjs';
-import { preparePlan, selectPlanSamples, validatePlan } from './plan.mjs';
+import { corpusOrigin } from './samples.mjs';
+import { preparePlan, registryLoaders, selectPlanSamples, validatePlan } from './plan.mjs';
+import { measureShard } from './measure-shards.mjs';
 
 const execute = promisify(execFile);
 const output = resolve(process.env.QUALITY_OUTPUT ?? '.source/office-quality/run');
 const assetCache = resolveAssetCacheDir(process.env);
 const python = process.env.QUALITY_PYTHON ?? 'python3';
+const corpus = corpusOrigin();
 if (
   (
     await command('git', [
@@ -42,20 +44,11 @@ async function command(program, args, options = {}) {
   return result.stdout;
 }
 
-async function registry(name) {
-  return JSON.parse(
-    await download(
-      `https://registry.npmjs.org/${encodeURIComponent(name)}/latest`,
-      2 * 1024 * 1024
-    )
-  );
-}
-
 async function checkoutPlan() {
   const file = process.env.QUALITY_PLAN?.trim();
   const plan = file
     ? validatePlan(JSON.parse(await readFile(resolve(file), 'utf8')))
-    : await preparePlan(process.env, { download, command, registry });
+    : await preparePlan(process.env, { download, command, ...registryLoaders(download) });
   const [sourceSha, commit] = await Promise.all([
     command('git', ['rev-parse', 'HEAD']),
     command('git', ['log', '-1', '--format=%H', '--', '.', ':!README.md']),
@@ -104,6 +97,13 @@ async function reference({ id, format, metadata }) {
     capture_profile: metadata.reference.capture_profile ?? null,
     comparisons: [],
   };
+}
+
+function publishedFontsVersion(format) {
+  const version = plan.published_fonts?.[format];
+  if (!/^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(version ?? ''))
+    throw new Error(`The plan does not record the @betteroffice/fonts release of published ${format}`);
+  return version;
 }
 
 async function packageRoot(name, version) {
@@ -178,10 +178,15 @@ async function viewer(overrides = {}) {
 
 const plan = await checkoutPlan();
 const requestedFormat = process.env.QUALITY_FORMAT?.trim() || null;
-const { formats: selectedFormats, samples: selectedPlanSamples } = selectPlanSamples(
+const { formats: selectedFormats, samples: formatSamples } = selectPlanSamples(
   plan,
   requestedFormat
 );
+const requestedShard = process.env.QUALITY_SHARD?.trim() || null;
+if (requestedShard !== null && (!requestedFormat || !/^(0|[1-9][0-9]{0,3})$/.test(requestedShard)))
+  throw new Error('QUALITY_SHARD needs QUALITY_FORMAT and a shard index');
+const shardIds = requestedShard === null ? null : new Set(measureShard(plan, requestedFormat, Number(requestedShard)).samples);
+const selectedPlanSamples = shardIds ? formatSamples.filter((sample) => shardIds.has(sample.id)) : formatSamples;
 const samples = [];
 for (const sample of selectedPlanSamples) samples.push(await reference(sample));
 for (const format of selectedFormats) {
@@ -199,6 +204,9 @@ for (const format of selectedFormats) {
           ),
         }
       : {}),
+    ...(format === 'docx'
+      ? {}
+      : { QUALITY_FONTS_ROOT: await packageRoot('@betteroffice/fonts', publishedFontsVersion(format)) }),
   };
   for (const channel of ['published', 'commit']) {
     const server = await viewer({
@@ -232,6 +240,9 @@ for (const format of selectedFormats) {
                 env: {
                   ...process.env,
                   QUALITY_CAPTURE_CONFIG: JSON.stringify(sample.capture_profile),
+                  ...(channel === 'published' && format !== 'docx'
+                    ? { QUALITY_PUBLISHED_FONTS: publishedFontsVersion(format) }
+                    : {}),
                   QUALITY_ENGINE_LABEL:
                     channel === 'published'
                       ? `@betteroffice/${format}@${plan.versions[format]}${
@@ -267,6 +278,7 @@ const report = {
   versions: plan.versions,
   react_version: plan.react_version,
   ...(requestedFormat ? { format: requestedFormat } : {}),
+  ...(requestedShard !== null ? { shard: Number(requestedShard) } : {}),
   samples: samples.map(({ source, directory, ...sample }) => sample),
 };
 await writeFile(resolve(output, 'report.json'), JSON.stringify(report, null, 2) + '\n');

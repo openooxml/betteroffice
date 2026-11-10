@@ -27,6 +27,33 @@ pub fn han_script_for_language(tag: &str) -> Option<&'static str> {
     Some(if traditional { "cjk-tc" } else { "cjk-sc" })
 }
 
+/// Whether `ch` belongs to a script whose glyphs depend on the characters around
+/// its cluster: cursive joining, or Indic-style syllables and reordering. Text in
+/// these scripts cannot be shaped cluster by cluster, nor echoed per character.
+pub fn is_joining_or_indic(ch: char) -> bool {
+    matches!(ch as u32,
+        // Arabic to Arabic Extended, including Syriac, NKo and Mandaic.
+        0x0600..=0x08ff
+        // Devanagari to Sinhala.
+        | 0x0900..=0x0dff
+        // Tibetan, Myanmar.
+        | 0x0f00..=0x109f
+        // Tagalog to Khmer, Mongolian, Limbu to Tai Tham.
+        | 0x1700..=0x18af | 0x1900..=0x1aaf
+        // Balinese to Lepcha.
+        | 0x1b00..=0x1c4f
+        // Syloti Nagri to Saurashtra, Kayah Li to Javanese, Cham, Meetei Mayek.
+        | 0xa800..=0xa8df | 0xa900..=0xa9df | 0xaa00..=0xaa7f | 0xaae0..=0xaaff | 0xabc0..=0xabff
+        // Arabic presentation forms.
+        | 0xfb50..=0xfdff | 0xfe70..=0xfefc
+        // Manichaean, Psalter Pahlavi, Hanifi Rohingya, Arabic Extended-C to Elymaic.
+        | 0x10ac0..=0x10aff | 0x10b80..=0x10baf | 0x10d00..=0x10d3f | 0x10ec0..=0x10fff
+        // Brahmi and the historic Indic scripts.
+        | 0x11000..=0x11fff
+        // Adlam.
+        | 0x1e900..=0x1e95f)
+}
+
 /// Script coverage buckets for paragraph text, preserving context across runs.
 pub fn paragraph_scripts_with_han_fallback<'a>(
     texts: impl IntoIterator<Item = &'a str>,

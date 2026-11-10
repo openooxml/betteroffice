@@ -1,5 +1,7 @@
 import json
 import math
+import struct
+import zlib
 from collections import UserDict
 from pathlib import Path
 from types import MappingProxyType
@@ -16,6 +18,7 @@ from betteroffice_docx import (
 )
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+LAYOUT_TESTS = Path(__file__).resolve().parents[3] / "crates" / "docx-layout" / "tests"
 
 
 def _page(width: int, height: int) -> DisplayList:
@@ -103,7 +106,7 @@ def test_rendering_uses_the_bundled_fonts_without_registration(
     minimal_bytes: bytes, layout_input: "dict[str, Any]"
 ) -> None:
     document = Document.open(minimal_bytes)
-    png = document.render_png(document.layout(layout_input).display_list, 0)
+    png = document.render_display_list_png(document.layout(layout_input).display_list, 0)
 
     assert png.bytes[:8] == PNG_MAGIC
     assert len(png) == len(png.bytes) > 1000
@@ -117,11 +120,11 @@ def test_rendering_text_needs_the_family_registered(
     display_list = document.layout(layout_input).display_list
 
     with pytest.raises(RenderError) as raised:
-        document.render_png(display_list, 0)
+        document.render_display_list_png(display_list, 0)
     assert "font chain" in str(raised.value)
 
     assert document.register_font("Calibri", font_bytes) == 0
-    png = document.render_png(display_list, 0)
+    png = document.render_display_list_png(display_list, 0)
 
     assert png.bytes[:8] == PNG_MAGIC
     assert len(png) == len(png.bytes) > 1000
@@ -136,7 +139,7 @@ def test_a_rendered_page_can_be_written(
 ) -> None:
     document = Document.open(minimal_bytes)
     document.register_font("Calibri", font_bytes)
-    png = document.render_png(document.layout(layout_input).display_list)
+    png = document.render_display_list_png(document.layout(layout_input).display_list)
 
     target = tmp_path / "page-0.png"
     png.write(target)
@@ -149,11 +152,11 @@ def test_rendering_refuses_a_missing_page_and_an_oversized_one(
     document = Document.open(minimal_bytes)
 
     with pytest.raises(RenderError) as missing:
-        document.render_png(_page(64, 32), 4)
+        document.render_display_list_png(_page(64, 32), 4)
     assert "out of range" in str(missing.value)
 
     with pytest.raises(RenderError) as oversized:
-        document.render_png(_page(MAX_PIXMAP_DIM + 1, 4), 0)
+        document.render_display_list_png(_page(MAX_PIXMAP_DIM + 1, 4), 0)
     assert str(MAX_PIXMAP_DIM) in str(oversized.value)
 
 
@@ -164,7 +167,7 @@ def test_rendering_rejects_invalid_page_indices(
     document = Document.open(minimal_bytes)
 
     with pytest.raises(IndexError) as invalid:
-        document.render_png(_page(64, 32), page)
+        document.render_display_list_png(_page(64, 32), page)
     assert "page index" in str(invalid.value)
 
 
@@ -175,7 +178,7 @@ def test_rendering_refuses_a_page_over_the_area_budget(minimal_bytes: bytes) -> 
     assert max(width, height) <= MAX_PIXMAP_DIM
 
     with pytest.raises(RenderError) as oversized:
-        document.render_png(_page(width, height), 0)
+        document.render_display_list_png(_page(width, height), 0)
     assert f"{MAX_PIXMAP_PIXELS}-pixel allocation cap" in str(oversized.value)
 
 
@@ -185,7 +188,7 @@ def test_concurrent_renders_are_consistent(minimal_bytes: bytes) -> None:
     document = Document.open(minimal_bytes)
     display_list = _page(64, 32)
     with ThreadPoolExecutor(max_workers=4) as pool:
-        results = list(pool.map(lambda _: document.render_png(display_list), range(8)))
+        results = list(pool.map(lambda _: document.render_display_list_png(display_list), range(8)))
 
     reference = results[0]
     assert all(png.bytes == reference.bytes for png in results)
@@ -229,10 +232,10 @@ def test_an_unresolved_image_is_skipped_rather_than_failing_the_page(
         )
     )
 
-    assert document.render_png(display_list, 0).skipped_images == 1
+    assert document.render_display_list_png(display_list, 0).skipped_images == 1
 
     document.register_image("rId9", _solid_png())
-    assert document.render_png(display_list, 0).skipped_images == 0
+    assert document.render_display_list_png(display_list, 0).skipped_images == 0
 
 
 def test_registering_a_font_validates_its_bytes(minimal_bytes: bytes) -> None:
@@ -253,3 +256,106 @@ def _solid_png() -> bytes:
         "470cc47100ae930ff1385e8c11000000"
         "0049454e44ae426082"
     )
+
+
+def test_page_targets_scale_and_validate_indexes(minimal_bytes, font_bytes):
+    document = Document.open(minimal_bytes)
+    document.register_font("Calibri", font_bytes)
+    first = document.render_png({"page": 0})
+    second = document.render_png({"page": 0}, scale=2.0)
+    def size(png):
+        return tuple(int.from_bytes(png.bytes[i:i + 4], "big") for i in (16, 20))
+
+    assert size(second) == tuple(value * 2 for value in size(first))
+    assert isinstance(first.bytes, bytes)
+    with pytest.raises(RenderError):
+        document.render_png({"page": 999})
+    with pytest.raises(RenderError):
+        document.render_png({"page": 0}, scale=0.0)
+
+
+@pytest.mark.parametrize("target", [None, 0, {}, {"page": -1}, {"page": True}, {"page": "0"}, {"slide": 0}, {"page": 0, "extra": 1}])
+def test_rejects_invalid_page_targets(minimal_bytes, target):
+    with pytest.raises(ValueError):
+        Document.open(minimal_bytes).render_png(target)
+
+
+def _png_rgb_pixels(png: bytes) -> list[tuple[int, int, int]]:
+    width, height, depth, color, compression, filtering, interlace = struct.unpack(
+        ">IIBBBBB", png[16:29]
+    )
+    assert depth == 8 and color in (2, 6)
+    assert (compression, filtering, interlace) == (0, 0, 0)
+    channels = 4 if color == 6 else 3
+    compressed = bytearray()
+    offset = 8
+    while offset < len(png):
+        length = struct.unpack(">I", png[offset:offset + 4])[0]
+        if png[offset + 4:offset + 8] == b"IDAT":
+            compressed.extend(png[offset + 8:offset + 8 + length])
+        offset += length + 12
+    data = zlib.decompress(compressed)
+    stride = width * channels
+    assert len(data) == (stride + 1) * height
+    previous = bytearray(stride)
+    pixels = []
+    for y in range(height):
+        start = y * (stride + 1)
+        filter_type = data[start]
+        assert 0 <= filter_type <= 4
+        row = bytearray(data[start + 1:start + 1 + stride])
+        for x in range(stride):
+            left = row[x - channels] if x >= channels else 0
+            above = previous[x]
+            upper_left = previous[x - channels] if x >= channels else 0
+            prediction = left + above - upper_left
+            paeth = min((left, above, upper_left), key=lambda value: abs(prediction - value))
+            predictor = (0, left, above, (left + above) // 2, paeth)[filter_type]
+            row[x] = (row[x] + predictor) & 255
+        pixels.extend(tuple(row[x:x + 3]) for x in range(0, stride, channels))
+        previous = row
+    return pixels
+
+
+def test_png_uses_the_document_theme_accent(font_bytes: bytes) -> None:
+    fixture = (
+        Path(__file__).resolve().parents[3]
+        / "crates/docx-edit/tests/fixtures/layout-request/theme-accent.docx"
+    )
+    document = Document.open(fixture.read_bytes())
+    document.register_font("Calibri", font_bytes)
+    document.register_font("Calibri", font_bytes, bold=True)
+    pixels = _png_rgb_pixels(document.render_png({"page": 0}).bytes)
+    assert any(r >= 243 and g <= 12 and b <= 12 for r, g, b in pixels)
+    assert not any(
+        abs(r - 0x44) <= 12 and abs(g - 0x72) <= 12 and abs(b - 0xC4) <= 12
+        for r, g, b in pixels
+    )
+
+
+def _with_table_row_grid(envelope: "dict[str, Any]", value: Any) -> "dict[str, Any]":
+    envelope = json.loads(json.dumps(envelope))
+    rows = [
+        row
+        for item in envelope["measured"]
+        if item["block"]["kind"] == "table"
+        for row in item["block"]["rows"]
+    ]
+    assert rows
+    for row in rows:
+        row["gridBefore"] = value
+        row["gridAfter"] = value
+    return envelope
+
+
+def test_layout_reads_whole_number_floats_from_a_parsed_model(minimal_bytes: bytes) -> None:
+    fixture = LAYOUT_TESTS / "fixtures" / "table-splits-with-repeated-header.input.json"
+    envelope = json.loads(fixture.read_text())
+    document = Document.open(minimal_bytes)
+
+    as_integer = document.layout(_with_table_row_grid(envelope, 0))
+    as_float = document.layout(_with_table_row_grid(envelope, 0.0))
+    assert as_float.json == as_integer.json
+
+    with pytest.raises(ValueError, match="gridBefore must be a nonnegative integer, got 0.5"):
+        document.layout(_with_table_row_grid(envelope, 0.5))

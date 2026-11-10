@@ -8,6 +8,108 @@ pub const MAX_IMAGE_PIXELS: u64 = 33_554_432;
 pub const MAX_IMAGE_BYTES: u64 = 268_435_456;
 pub const MAX_TIFF_BYTES: u64 = 32 * 1024 * 1024;
 
+/// Compressions a declared TIFF size bounds: none, CCITT, LZW, deflate and
+/// PackBits.
+const BOUNDED_TIFF_COMPRESSIONS: [u16; 8] = [1, 2, 3, 4, 5, 8, 32773, 32946];
+
+/// The most samples per pixel accepted, extra samples included.
+const MAX_TIFF_SAMPLES: u16 = 16;
+
+/// A TIFF's declared pixels, or `None` for one whose decode that size does not
+/// bound. Read without decoding any pixels.
+pub fn tiff_bounded_pixels(data: &[u8]) -> Option<u64> {
+    use tiff_crate::decoder::Decoder;
+    use tiff_crate::tags::Tag;
+
+    let mut decoder = Decoder::new(Cursor::new(data)).ok()?;
+    let (width, height) = decoder.dimensions().ok()?;
+    let compression = tag_u16(&mut decoder, Tag::Compression).ok()?.unwrap_or(1);
+    if !BOUNDED_TIFF_COMPRESSIONS.contains(&compression) {
+        return None;
+    }
+    let samples = tag_u16(&mut decoder, Tag::SamplesPerPixel)
+        .ok()?
+        .unwrap_or(1);
+    if samples > MAX_TIFF_SAMPLES {
+        return None;
+    }
+    let tile_width = decoder.find_tag_unsigned::<u64>(Tag::TileWidth).ok()?;
+    let tile_length = decoder.find_tag_unsigned::<u64>(Tag::TileLength).ok()?;
+    if tile_width.is_some() || tile_length.is_some() {
+        let bits = decoder
+            .find_tag_unsigned_vec::<u64>(Tag::BitsPerSample)
+            .ok()?
+            .unwrap_or_default();
+        let sample_bytes = bits.iter().copied().max().unwrap_or(1).div_ceil(8).max(1);
+        let tile_bytes = tile_width
+            .unwrap_or(1)
+            .saturating_mul(tile_length.unwrap_or(1))
+            .saturating_mul(u64::from(samples))
+            .saturating_mul(sample_bytes);
+        if tile_bytes > MAX_IMAGE_BYTES {
+            return None;
+        }
+    }
+    Some(u64::from(width) * u64::from(height))
+}
+
+/// CMYK with alpha, the most samples a pixel of any color it converts has.
+const MAX_TRANSCODED_SAMPLES: u16 = 5;
+
+/// Most bytes a PNG encode and its decode hold per pixel: the RGBA, the filtered
+/// stream, the zlib output and the PNG, then the decoded RGBA.
+const PNG_ROUND_TRIP_BYTES_PER_PIXEL: u64 = 16;
+
+/// The pixels and the most bytes [`decode_tiff_png`] and a decode of its PNG
+/// hold, read without decoding any pixels, or `None` for a TIFF whose decode
+/// that does not bound: tiles size their buffers by `TileWidth`, an embedded
+/// JPEG by its own header, rows by every encoded sample, extra ones included, and
+/// a palette by its `ColorMap` count.
+pub fn tiff_transcode_cost(data: &[u8]) -> Option<(u64, u64)> {
+    use tiff_crate::decoder::Decoder;
+    use tiff_crate::tags::Tag;
+
+    let mut decoder = Decoder::new(Cursor::new(data)).ok()?;
+    let (width, height) = decoder.dimensions().ok()?;
+    if decoder.find_tag(Tag::TileWidth).ok()?.is_some() {
+        return None;
+    }
+    let compression = tag_u16(&mut decoder, Tag::Compression).ok()?.unwrap_or(1);
+    if !matches!(compression, 1 | 5 | 8 | 32773 | 32946) {
+        return None;
+    }
+    let encoded_samples = tag_u16(&mut decoder, Tag::SamplesPerPixel)
+        .ok()?
+        .unwrap_or(1);
+    if encoded_samples > MAX_TRANSCODED_SAMPLES {
+        return None;
+    }
+    let pixels = u64::from(width) * u64::from(height);
+    let color = decoder.colortype().ok()?;
+    let sample_bytes = u64::from(color.bit_depth().div_ceil(8)).max(1);
+    let held = decoded_tiff_bytes(Some(color), pixels).max(
+        pixels
+            .saturating_mul(u64::from(encoded_samples))
+            .saturating_mul(sample_bytes),
+    );
+    let bytes = held
+        .saturating_mul(2)
+        .saturating_add(pixels.saturating_mul(PNG_ROUND_TRIP_BYTES_PER_PIXEL));
+    Some((pixels, bytes))
+}
+
+fn decoded_tiff_bytes(color: Option<tiff_crate::ColorType>, pixels: u64) -> u64 {
+    match color {
+        Some(color) => {
+            let sample_bytes = u64::from(color.bit_depth().div_ceil(8)).max(1);
+            pixels
+                .saturating_mul(u64::from(color.num_samples()))
+                .saturating_mul(sample_bytes)
+        }
+        None => pixels.saturating_mul(2),
+    }
+}
+
 pub fn decode_tiff_png(data: &[u8]) -> Result<Vec<u8>, String> {
     use tiff_crate::decoder::{Decoder, DecodingResult};
     use tiff_crate::tags::Tag;
@@ -15,6 +117,9 @@ pub fn decode_tiff_png(data: &[u8]) -> Result<Vec<u8>, String> {
     let source_bytes = data.len() as u64;
     if !image_fits_budget(0, 0, source_bytes) {
         return Err("TIFF image exceeds the browser decode budget".to_owned());
+    }
+    if tiff_bounded_pixels(data).is_none() {
+        return Err("unsupported TIFF encoding".to_owned());
     }
     let mut limits = tiff_crate::decoder::Limits::default();
     limits.decoding_buffer_size = MAX_IMAGE_BYTES as usize;
@@ -33,15 +138,7 @@ pub fn decode_tiff_png(data: &[u8]) -> Result<Vec<u8>, String> {
         Err(_) if photometric == 3 => None,
         Err(error) => return Err(error.to_string()),
     };
-    let decoded_bytes = match color {
-        Some(color) => {
-            let sample_bytes = u64::from(color.bit_depth().div_ceil(8)).max(1);
-            pixels
-                .saturating_mul(u64::from(color.num_samples()))
-                .saturating_mul(sample_bytes)
-        }
-        None => pixels.saturating_mul(2),
-    };
+    let decoded_bytes = decoded_tiff_bytes(color, pixels);
     if !image_fits_budget(
         pixels,
         decoded_bytes.saturating_add(pixels.saturating_mul(4)),
@@ -868,6 +965,114 @@ fn image_fits_budget(pixels: u64, decoded_bytes: u64, source_bytes: u64) -> bool
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    /// A 2x1 TIFF with these tags on top of an uncompressed 8-bit RGB one.
+    fn tagged_tiff(overrides: &[(u16, u16, u32, u32)]) -> Vec<u8> {
+        let mut entries: Vec<(u16, u16, u32, u32)> = vec![
+            (256, 3, 1, 2),
+            (257, 3, 1, 1),
+            (259, 3, 1, 1),
+            (262, 3, 1, 2),
+            (277, 3, 1, 3),
+            (278, 3, 1, 1),
+            (279, 4, 1, 6),
+        ];
+        for override_entry in overrides {
+            entries.retain(|entry| entry.0 != override_entry.0);
+            entries.push(*override_entry);
+        }
+        let samples = entries
+            .iter()
+            .find(|entry| entry.0 == 277)
+            .map_or(3, |entry| entry.3);
+        entries.push((258, 3, samples, 0));
+        entries.push((273, 4, 1, 0));
+        if samples > 3 {
+            entries.push((338, 3, samples - 3, 0));
+        }
+        entries.sort_by_key(|entry| entry.0);
+        let bits = 8 + 2 + entries.len() as u32 * 12 + 4;
+        let extras = bits + samples * 2;
+        let pixels = extras + (samples.saturating_sub(3)) * 2;
+        let mut tiff = b"II*\0\x08\0\0\0".to_vec();
+        tiff.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        for (tag, kind, count, value) in entries {
+            let value = match tag {
+                258 => bits,
+                273 => pixels,
+                338 => extras,
+                _ => value,
+            };
+            tiff.extend_from_slice(&tag.to_le_bytes());
+            tiff.extend_from_slice(&kind.to_le_bytes());
+            tiff.extend_from_slice(&count.to_le_bytes());
+            tiff.extend_from_slice(&value.to_le_bytes());
+        }
+        tiff.extend_from_slice(&0u32.to_le_bytes());
+        for _ in 0..samples {
+            tiff.extend_from_slice(&8u16.to_le_bytes());
+        }
+        for _ in 3..samples {
+            tiff.extend_from_slice(&0u16.to_le_bytes());
+        }
+        tiff.extend_from_slice(&[0; 6]);
+        tiff
+    }
+
+    #[test]
+    fn a_tiff_whose_size_bounds_its_decode_reports_its_pixels() {
+        assert_eq!(tiff_bounded_pixels(&tagged_tiff(&[])), Some(2));
+        assert!(decode_tiff_png(&tagged_tiff(&[])).is_ok());
+    }
+
+    #[test]
+    fn only_compressions_a_declared_size_bounds_are_accepted() {
+        for compression in [1, 2, 3, 4, 5, 8, 32773, 32946] {
+            let tiff = tagged_tiff(&[(259, 3, 1, compression)]);
+            assert_eq!(tiff_bounded_pixels(&tiff), Some(2), "{compression}");
+        }
+        for compression in [6, 7, 34712, 50000] {
+            let tiff = tagged_tiff(&[(259, 3, 1, compression)]);
+            assert_eq!(tiff_bounded_pixels(&tiff), None, "{compression}");
+            assert_eq!(
+                decode_tiff_png(&tiff).unwrap_err(),
+                "unsupported TIFF encoding",
+                "{compression}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tile_past_the_decode_budget_is_refused() {
+        let tile = |width: u32, length: u32| {
+            tiff_bounded_pixels(&tagged_tiff(&[(322, 4, 1, width), (323, 4, 1, length)]))
+        };
+        assert_eq!(tile(16, 16), Some(2));
+        assert_eq!(tile(8192, 8192), Some(2));
+        assert_eq!(tile(100_000_000, 1), None);
+        assert_eq!(tile(1 << 20, 1 << 20), None);
+    }
+
+    #[test]
+    fn a_tile_whose_bit_depth_is_stored_as_a_long_is_measured() {
+        let mut tiff = tagged_tiff(&[(277, 3, 1, 1), (322, 4, 1, 16), (323, 4, 1, 16)]);
+        let entry = 10 + 2 * 12;
+        assert_eq!(tiff[entry..entry + 2], 258u16.to_le_bytes());
+        tiff[entry + 2..entry + 4].copy_from_slice(&4u16.to_le_bytes());
+        tiff[entry + 4..entry + 8].copy_from_slice(&1u32.to_le_bytes());
+        tiff[entry + 8..entry + 12].copy_from_slice(&8u32.to_le_bytes());
+        assert_eq!(tiff_bounded_pixels(&tiff), Some(2));
+    }
+
+    #[test]
+    fn more_samples_than_any_real_picture_has_are_refused() {
+        assert_eq!(
+            tiff_bounded_pixels(&tagged_tiff(&[(277, 3, 1, 16)])),
+            Some(2)
+        );
+        assert_eq!(tiff_bounded_pixels(&tagged_tiff(&[(277, 3, 1, 17)])), None);
+    }
+
     use tiff_crate::encoder::{Compression, TiffEncoder, colortype};
 
     fn encode<Color>(
@@ -1098,10 +1303,11 @@ mod tests {
             let error = decode_tiff_png(&tiff).unwrap_err();
             assert!(error.contains("unsupported"), "unexpected error: {error}");
         }
-        // Dev builds enable the default codec set, so JPEG fails while parsing
-        // instead; the wasm build refuses it with the same plain error as above.
         let tiff = minimal_tiff(1, 1, 1, 7, 8, &[], &[0, 0]);
-        assert!(decode_tiff_png(&tiff).is_err());
+        assert_eq!(
+            decode_tiff_png(&tiff).unwrap_err(),
+            "unsupported TIFF encoding"
+        );
     }
 
     #[test]

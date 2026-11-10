@@ -16,6 +16,53 @@ pub fn references(expr: &Expr) -> Vec<(Option<String>, CellRange)> {
     out
 }
 
+/// whether a formula reads another workbook through a sheet or name qualifier
+/// that opens with a workbook index, as in `'[1]Other sheet'!C3`. the package
+/// carries none of that workbook's cells, so its cached result stands.
+pub fn reads_other_workbook(expr: &Expr) -> bool {
+    match expr {
+        Expr::Ref { sheet, .. }
+        | Expr::Range { sheet, .. }
+        | Expr::ColumnRange { sheet, .. }
+        | Expr::RowRange { sheet, .. }
+        | Expr::Name { scope: sheet, .. } => sheet.as_deref().is_some_and(names_other_workbook),
+        Expr::ArrayLiteral { values: args, .. } | Expr::FuncCall { args, .. } => {
+            args.iter().any(reads_other_workbook)
+        }
+        Expr::Unary { expr, .. } | Expr::Percent(expr) => reads_other_workbook(expr),
+        Expr::Binary { lhs, rhs, .. } => reads_other_workbook(lhs) || reads_other_workbook(rhs),
+        Expr::RangeJoin { start, end } => reads_other_workbook(start) || reads_other_workbook(end),
+        Expr::Number(_)
+        | Expr::Literal(_)
+        | Expr::Text(_)
+        | Expr::Bool(_)
+        | Expr::Error(_)
+        | Expr::TableRef { .. } => false,
+    }
+}
+
+/// whether a sheet or name qualifier opens with a workbook index, as `[1]Data` does.
+pub(crate) fn names_other_workbook(qualifier: &str) -> bool {
+    qualifier
+        .strip_prefix('[')
+        .is_some_and(|rest| workbook_index_len(rest).is_some())
+}
+
+/// whether formula text holds a workbook index (`[1]`) anywhere, for a
+/// definition the parser cannot read, such as `[1]Sheet1!$A$1`.
+pub(crate) fn mentions_workbook_index(source: &str) -> bool {
+    source
+        .split('[')
+        .skip(1)
+        .any(|rest| workbook_index_len(rest).is_some())
+}
+
+/// the digits of an index before its closing `]`.
+fn workbook_index_len(rest: &str) -> Option<usize> {
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    (digits > 0 && rest.as_bytes().get(digits) == Some(&b']')).then_some(digits)
+}
+
 /// true when argument `index` is read for where it sits, not what it holds,
 /// so it carries no data dependency: any reference under `ROW`/`COLUMN`/
 /// `ROWS`/`COLUMNS`/`AREAS`, and `OFFSET`'s anchor.
@@ -298,6 +345,30 @@ mod tests {
         );
         // a dynamic end cannot be bounded from the source alone
         assert_eq!(refs("SUM(B4:OFFSET(B4,0,C1))"), vec!["B4", "C1"]);
+    }
+
+    #[test]
+    fn finds_references_into_another_workbook() {
+        for src in [
+            "'[1]Other sheet'!C3",
+            "IFERROR('[1]Data'!A1:A4,0)",
+            "ISREF('[2]Data'!A:A)",
+            "1+-'[1]Data'!A1%",
+            "'[1]Book'!Rate*2",
+            "{1,2}+ROW('[3]Data'!B2)",
+            "A1:INDEX('[1]Data'!A1:A9,2)",
+        ] {
+            assert!(reads_other_workbook(&parse_formula(src).unwrap()), "{src}");
+        }
+        for src in [
+            "'Other sheet'!C3",
+            "'[x]Data'!A1",
+            "'[]Data'!A1",
+            "Table1[Col]",
+            "\"[1]Data\"",
+        ] {
+            assert!(!reads_other_workbook(&parse_formula(src).unwrap()), "{src}");
+        }
     }
 
     #[test]

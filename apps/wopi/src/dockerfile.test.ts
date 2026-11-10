@@ -57,6 +57,7 @@ const RUNTIME_ALLOWED = new Set([
   "/app/shared/collaboration-pipe",
   "/app/shared/media.ts",
   "/app/shared/office-session",
+  "/app/shared/safeHref.ts",
   "/manifests",
 ]);
 

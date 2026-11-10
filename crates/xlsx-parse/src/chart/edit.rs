@@ -1,3 +1,4 @@
+use crate::tree::escape_text;
 use xlsx_model::{ChartEdit, ChartRef, ChartSeriesName, SheetChart};
 pub use xlsx_model::{ChartMetadata, ChartSeriesInfo};
 
@@ -104,7 +105,8 @@ fn referenced_text(
             workbook.date_system,
         );
     }
-    descendant(element, NS_CHART, "v").map(Element::text_content)
+    descendant(element, NS_CHART, "v")
+        .map(|value| crate::read::unescape_name(&value.text_content()))
 }
 
 pub fn chart_metadata(
@@ -153,28 +155,77 @@ pub fn chart_metadata(
     })
 }
 
-/// `original` is the workbook and owner sheet name an unedited part's
-/// references were read against, so a moved reference whose cache cannot be
-/// rebuilt keeps it when its cells read what they did there.
+/// The bytes `part` takes for `chart` against `workbook`, refused exactly
+/// when a save of the same chart would be.
 pub fn chart_bytes(
     part: &[u8],
     chart: &SheetChart,
     workbook: &xlsx_model::Workbook,
     owner: &str,
-    original: (&xlsx_model::Workbook, &str),
 ) -> Result<Vec<u8>, ParseError> {
     let base = match &chart.raw_xml {
         Some(xml) => Part::decode(part)?.encode_text(xml),
         None => part.to_vec(),
     };
-    patch_chart_refs(
-        &base,
-        &chart.part,
-        &chart.refs,
-        workbook,
-        owner,
-        chart.raw_xml.is_none().then_some(original),
-    )
+    patch_chart_refs(&base, &chart.part, &chart.refs, workbook, owner)
+}
+
+/// The bytes a chart part takes once every sheet anchoring it has patched it,
+/// as `(chart, sheet)` claims in sheet order: what a save writes, refused
+/// exactly when a save would be. Claims writing different references into
+/// the part are refused, because one part cannot carry two charts. Claims
+/// writing the same references may still read different cells, where an
+/// unqualified reference resolves against each sheet; the part takes the
+/// first claim's patch, which is the only one rebuilt, so no other sheet's
+/// cells can keep the part from being written.
+pub fn agreed_chart_bytes(
+    part: &[u8],
+    path: &str,
+    claims: &[(&SheetChart, &str)],
+    workbook: &xlsx_model::Workbook,
+) -> Result<Option<Vec<u8>>, ParseError> {
+    let Some(&(first, owner)) = claims.first() else {
+        return Ok(None);
+    };
+    let bytes = chart_bytes(part, first, workbook, owner)?;
+    for &(chart, sheet) in &claims[1..] {
+        if (chart.refs != first.refs || chart.raw_xml != first.raw_xml)
+            && chart_bytes(part, chart, workbook, sheet)? != bytes
+        {
+            return Err(crate::write::conflicting_shared_part(path, owner, sheet));
+        }
+    }
+    Ok(Some(bytes))
+}
+
+/// The first drawing anchor two sheets place differently, as the drawing
+/// part, the anchor's index and the two sheets in sheet order. A drawing part
+/// holds each anchor once, so neither an edit nor a save may split one.
+pub fn conflicting_drawing_anchor(
+    workbook: &xlsx_model::Workbook,
+) -> Option<(&str, usize, &str, &str)> {
+    let mut claims = std::collections::HashMap::new();
+    for sheet in &workbook.sheets {
+        for chart in &sheet.charts {
+            match claims.entry((chart.drawing.as_str(), chart.anchor_index)) {
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert((chart.anchor, sheet.name.as_str()));
+                }
+                std::collections::hash_map::Entry::Occupied(slot) => {
+                    let (anchor, first) = *slot.get();
+                    if anchor != chart.anchor {
+                        return Some((
+                            chart.drawing.as_str(),
+                            chart.anchor_index,
+                            first,
+                            sheet.name.as_str(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 fn prefix(element: &Element) -> String {
@@ -332,12 +383,21 @@ fn set_title(part: &[u8], title: &Option<String>) -> Result<Vec<u8>, ParseError>
 }
 
 fn validate_text(text: &str, field: &str) -> Result<(), ParseError> {
-    if text.chars().count() > 32767 || escape_text(text).is_err() {
-        return Err(ParseError::UnsupportedEdit(format!(
-            "{field} must contain at most 32767 XML text characters"
-        )));
+    escape_text(text).map_err(|_| text_limit(field))?;
+    validate_length(text, field)
+}
+
+fn validate_length(text: &str, field: &str) -> Result<(), ParseError> {
+    if text.chars().count() > 32767 {
+        return Err(text_limit(field));
     }
     Ok(())
+}
+
+fn text_limit(field: &str) -> ParseError {
+    ParseError::UnsupportedEdit(format!(
+        "{field} must contain at most 32767 XML text characters"
+    ))
 }
 
 /// A sheet name a reference may carry unquoted: letters, digits, `_` and `.`,
@@ -536,8 +596,9 @@ fn cache_markup(
         span: None,
         format_code: existing
             .and_then(|item| child(item, "formatCode"))
-            .map(Element::text_content),
+            .map(|item| crate::read::unescape_name(&item.text_content())),
         unmodelled_content: false,
+        point_formats: false,
         authored_points: 0,
     };
     match regenerated_cache(
@@ -621,8 +682,8 @@ fn set_series(
         let content = if let Some(ChartSeriesName::Literal { text }) =
             name.as_ref().filter(|_| field == "name")
         {
-            validate_text(text, "name.text")?;
-            format!("<{p}v>{}</{p}v>", escape_text(text)?)
+            validate_length(text, "name.text")?;
+            format!("<{p}v>{}</{p}v>", cache_point_text(text))
         } else {
             let reference = if field == "name" {
                 match name.as_ref().unwrap() {

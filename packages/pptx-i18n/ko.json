@@ -52,6 +52,7 @@
     "decreaseFontSize": "글꼴 크기 줄이기",
     "increaseFontSize": "글꼴 크기 늘리기",
     "underline": "밑줄",
+    "strikethrough": "취소선",
     "more": "더 보기",
     "fillColor": "채우기 색",
     "noFill": "채우기 없음",
@@ -91,6 +92,12 @@
     "fallbackTitle": "슬라이드 {number}",
     "canvasLabel": "{total}개 중 {current}번째 슬라이드",
     "canvasLabelWithSelection": "{total}개 중 {current}번째 슬라이드, 선택한 개체 {name}"
+  },
+  "a11y": {
+    "chartNoData": "데이터 없음",
+    "slideWithTitle": "{total}개 중 {current}번째 슬라이드: {title}",
+    "objectSelected": "{name} 선택됨",
+    "editingText": "{name} 편집 중"
   },
   "editor": {
     "appLabel": "프레젠테이션 슬라이드 편집기",
@@ -156,6 +163,17 @@
     "stalePreview": "이 미리 보기는 업데이트된 슬라이드를 사용합니다. 적용하면 변경된 대상을 덮어씁니다.",
     "geometry": "위치 및 크기 (x, y, 너비, 높이)",
     "geometryValues": "{before} → {after} pt",
+    "layoutChanged": "레이아웃 변경됨",
+    "backgroundChanged": "배경 변경됨",
+    "rowInserted": "행 삽입됨",
+    "rowDeleted": "행 삭제됨",
+    "columnInserted": "열 삽입됨",
+    "columnDeleted": "열 삭제됨",
+    "broughtToFront": "맨 앞으로 이동",
+    "sentToBack": "맨 뒤로 이동",
+    "broughtForward": "한 단계 앞으로 이동",
+    "sentBackward": "한 단계 뒤로 이동",
+    "zOrderChanged": "쌓기 순서 변경됨",
     "appearance": "모양 또는 텍스트 서식이 변경됨",
     "changedAgain": "대상이 다시 변경되었습니다. 적용하기 전에 새로 고친 미리 보기를 검토하세요.",
     "canvasTitle": "이 슬라이드의 변경 내용",
@@ -168,7 +186,14 @@
     "canvasStale": "대상이 변경되었습니다. 적용하기 전에 검토 세부 정보를 열어 업데이트된 미리 보기를 확인하세요.",
     "previousPosition": "이전",
     "proposedPosition": "제안됨",
-    "loadingDiff": "변경 내용을 불러오는 중…"
+    "loadingDiff": "변경 내용을 불러오는 중…",
+    "slideStrip": null,
+    "previewSlide": null,
+    "insertedShape": null,
+    "deletedShape": null,
+    "insertedSlide": null,
+    "deletedSlide": null,
+    "movedFrom": null
   },
   "commands": {
     "moreControls": "컨트롤 더 보기",
@@ -212,8 +237,25 @@
       "permissionDenied": "호스트 애플리케이션이 이 추가 기능의 명령 사용을 허용하지 않았습니다.",
       "unsupportedPolicy": "추가 기능은 아직 이 명령을 실행할 수 없습니다. 대신 편집 배치를 사용하세요.",
       "pluginUnavailable": "추가 기능이 더 이상 활성화되어 있지 않습니다.",
-      "aborted": "명령이 실행되기 전에 추가 기능 작업이 취소되었습니다."
-    }
+      "aborted": "명령이 실행되기 전에 추가 기능 작업이 취소되었습니다.",
+      "clipboardUnavailable": "클립보드에 접근할 수 없거나 접근이 거부되었습니다.",
+      "tableRequired": "먼저 표의 셀에 커서를 놓으세요.",
+      "lastSlide": "마지막 슬라이드는 삭제할 수 없습니다."
+    },
+    "cut": "잘라내기",
+    "copy": "복사",
+    "paste": "붙여넣기",
+    "pastePlainText": "일반 텍스트로 붙여넣기",
+    "insert": "삽입",
+    "delete": "삭제",
+    "deleteTable": "표 삭제",
+    "duplicateSlide": "슬라이드 복제",
+    "insertRowsAbove": "위에 행 삽입",
+    "insertRowsBelow": "아래에 행 삽입",
+    "insertColumnsLeft": "왼쪽에 열 삽입",
+    "insertColumnsRight": "오른쪽에 열 삽입",
+    "deleteRows": "행 삭제",
+    "deleteColumns": "열 삭제"
   },
   "plugins": {
     "toolbarGroup": "추가 기능",
@@ -225,5 +267,20 @@
     "label": "공동 작업자",
     "moreCollaborators": "{count, plural, other {공동 작업자 #명 더}}",
     "moreSelections": "+{count, plural, other {#개의 선택}}"
+  },
+  "contextMenu": {
+    "text": "텍스트 메뉴",
+    "shape": "도형 메뉴",
+    "table": "표 메뉴",
+    "slide": "슬라이드 메뉴"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "delete": "Del",
+    "escape": "Esc",
+    "pageup": "Page Up",
+    "pagedown": "Page Down"
   }
 }

@@ -11,6 +11,7 @@ import {
 } from './commandProtocol';
 import { resolveWorkbookToolbar } from './commandToolbar';
 import { applyWorkbookReplayOp, workbookReplayRefused, type WorkbookReplayMethod, type WorkbookReplayOp } from './replay';
+import { isEngineTrap } from '../../../../shared/office-session/trap';
 
 const STATUS_CACHE_SIZE = 256;
 const FORMAT_TOKEN_CACHE_SIZE = 64;
@@ -193,7 +194,7 @@ function inputSteps(handle: WorkbookHandle, edits: { sheet: number; row: number;
 function captureCommandFormat(handle: WorkbookHandle, sheet: number, range: string) {
   try { return handle.captureFormat(sheet, range); }
   catch (error) {
-    if (error instanceof Error && !(error instanceof WebAssembly.RuntimeError) &&
+    if (error instanceof Error && !(isEngineTrap(error)) &&
       /^sheet \d+ is not an editable worksheet$/.test(error.message)) {
       throw new WorkbookCommandRefusal('unsupported');
     }
@@ -279,7 +280,7 @@ function resolveReplayOp(handle: WorkbookHandle, state: WorkbookCommandState, co
         else if (operation.type === 'moveSheet') operation.from = resolved.sheet;
         else if ('sheet' in operation) operation.sheet = resolved.sheet;
         else throw new WorkbookCommandRefusal('invalid-command');
-      } else if ('sheet' in operation || 'index' in operation || operation.type === 'moveSheet' || operation.type === 'setDefinedNames' || operation.type === 'restoreSheet') {
+      } else if ('sheet' in operation || 'index' in operation || typeof operation.scope === 'number' || operation.type === 'moveSheet' || operation.type === 'setDefinedNames' || operation.type === 'restoreSheet' || operation.type === 'setTables') {
         numericSheet();
         if (sheets.length !== state.sheetIds.length || sheets.some((id, index) => id !== state.sheetIds[index])) {
           throw new WorkbookCommandRefusal('stale-target');
@@ -383,16 +384,53 @@ function preflight(handle: WorkbookHandle, state: WorkbookCommandState, op: Work
   }
 }
 
+/**
+ * What a structural edit was refused to protect, as an editor names it to the user: a chart,
+ * a table, a pivot table, or anything else that names the cells the edit would move.
+ */
+export type WorkbookStructuralRefusalCause = 'chart' | 'table' | 'pivot' | 'other';
+
+/** The structural refusal result an `unsupported` status carries: the engine's message and its cause. */
+export interface WorkbookStructuralRefusalResult {
+  failure: { code: 'unsupported'; cause: WorkbookStructuralRefusalCause; message: string };
+}
+
+/** Reads the cause from a structural refusal the engine raised. */
+export function structuralRefusalCause(message: string): WorkbookStructuralRefusalCause {
+  if (/^(?:chart |anchor \d+ of )/.test(message) || message === 'range move cannot safely preserve charts') return 'chart';
+  if (message === 'range move cannot safely preserve Excel tables') return 'table';
+  const part = /^(.+?) references cells this (?:edit would move|move would relocate), and it cannot be rewritten$/
+    .exec(message)?.[1].toLowerCase().replace(/^\//, '');
+  if (!part) return 'other';
+  if (part.startsWith('xl/charts/') || part.startsWith('xl/drawings/')) return 'chart';
+  if (part.startsWith('xl/tables/')) return 'table';
+  if (part.startsWith('xl/pivottables/') || part.startsWith('xl/pivotcache/')) return 'pivot';
+  return 'other';
+}
+
+function structuralRefusal(message: string): WorkbookCommandRefusal {
+  const result: WorkbookStructuralRefusalResult = {
+    failure: { code: 'unsupported', cause: structuralRefusalCause(message), message },
+  };
+  return new WorkbookCommandRefusal('unsupported', result);
+}
+
 export function classifyRefusal(error: unknown, method?: WorkbookReplayMethod): WorkbookCommandRefusal | undefined {
   if (error instanceof WorkbookCommandRefusal) return error;
   if (method === 'acceptProposal' && error instanceof StaleProposalError) {
     return new WorkbookCommandRefusal('stale-proposal', { cells: error.cells, targets: error.targets });
   }
-  if (!(error instanceof Error) || error instanceof WebAssembly.RuntimeError) return undefined;
-  if (method === 'applyOps' && error.message === 'structural operations are unavailable in collaborative mode') {
+  if (!(error instanceof Error) || isEngineTrap(error)) return undefined;
+  if (method === 'applyOps' && (
+    error.message === 'structural operations are unavailable in collaborative mode' ||
+    error.message === 'collaborative sheets can only be added at the end of the workbook'
+  )) {
     return new WorkbookCommandRefusal('unsupported');
   }
   if (error.message === 'calculation context is unavailable for collaborative workbooks') {
+    return new WorkbookCommandRefusal('unsupported');
+  }
+  if (method === 'undo' && error.message === "undo would remove a sheet that holds collaborators' edits") {
     return new WorkbookCommandRefusal('unsupported');
   }
   if (['applyOps', 'patchRangeStyle', 'setNumberFormat', 'applyFormat', 'propose', 'acceptProposal'].includes(method ?? '') &&
@@ -411,12 +449,12 @@ export function classifyRefusal(error: unknown, method?: WorkbookReplayMethod): 
     /^chart .+ cannot change how it follows a grid edit$/.test(error.message) ||
     /^chart .+ cannot be resized: a one-cell extent is not written back$/.test(error.message) ||
     /^chart .+ cannot change its anchor kind$/.test(error.message)
-  )) return new WorkbookCommandRefusal('unsupported');
+  )) return structuralRefusal(error.message);
   if (method === 'moveRange' && (
     /^range move cannot safely preserve .+$/.test(error.message) ||
     /^.+ contains worksheet features a cell move cannot safely preserve$/.test(error.message) ||
     /^.+ references cells this move would relocate, and it cannot be rewritten$/.test(error.message)
-  )) return new WorkbookCommandRefusal('unsupported');
+  )) return structuralRefusal(error.message);
   if (method === 'applyOps' &&
     /^chart frame .+ does not hold the chart part and anchor this op was recorded against; its drawing has changed$/.test(error.message)) {
     return new WorkbookCommandRefusal('stale-target');
@@ -433,7 +471,8 @@ export function classifyRefusal(error: unknown, method?: WorkbookReplayMethod): 
   if (method === 'applyOps' && (
     /^the anchor of .+ would leave the sheet grid$/.test(error.message) ||
     /^defined name .+ has a formula above the length limit$/.test(error.message) ||
-    /^(?:chart reference exceeds the supported length|chart reference contains a character xml cannot carry)$/.test(error.message)
+    /^(?:chart reference exceeds the supported length|chart reference contains a character xml cannot carry|sheet name contains a character xml cannot carry, and the workbook references the sheet)$/.test(error.message) ||
+    /^the (?:data validation|extension data validation|extension conditional format|sparkline|extension) formulas on sheet .+ cannot follow the sheet (?:rename|removal)$/.test(error.message)
   )) return new WorkbookCommandRefusal('invalid-step');
   if ((method === 'applyOps' || method === 'moveChart') &&
     /^(?:anchor offset is out of range|anchor extent is not positive|anchor corners are inverted or coincident|anchor cell is outside the worksheet grid|anchor extends beyond the worksheet grid)$/.test(error.message)) {
@@ -471,6 +510,7 @@ export interface WorkbookCommandState {
   throughSeq: number;
   selection: WorkbookCommandSelection;
   readOnly: boolean;
+  allowHostProposals?: boolean;
   statuses: Map<number, CommandStatus>;
   pipeFrameBytes?: Map<number, number>;
   bases: Map<string, number>;
@@ -485,6 +525,7 @@ export interface WorkbookCommandState {
   publishedSelection?: string;
   sheetIds: string[];
   nextSheetId: number;
+  collaborative?: boolean;
   calculation: WorkbookCalculationContext | null;
   formats: Map<string, CapturedFormat>;
   historySelections: ({
@@ -548,6 +589,18 @@ export function projectEditState(handle: WorkbookHandle, state: WorkbookCommandS
   return Object.keys(changed).length > 0 ? changed : undefined;
 }
 
+/** Carries the command ids across a topology change, which a collaborative engine identifies by stable sheet keys. */
+function rebaseSheetIds(handle: WorkbookHandle, state: WorkbookCommandState, before: string[]): void {
+  const info = handle.sheetInfo();
+  if (info.sheetIds.length === before.length && info.sheetIds.every((id, index) => id === before[index])) return;
+  const commandIds = new Map(before.map((id, index) => [id, state.sheetIds[index]]));
+  state.sheetIds = info.sheetIds.map((id) => commandIds.get(id) ?? id);
+  state.sheetRevision += 1;
+  if (!state.sheetIds.includes(state.selection.sheetId)) {
+    state.selection = { sheetId: state.sheetIds[info.activeSheet], range: { kind: 'a1', a1: 'A1' } };
+  }
+}
+
 function applyIntent(handle: WorkbookHandle, state: WorkbookCommandState, command: WorkbookCommand,
   applyPipe?: (payload: PipeCommandPayload<AwarenessCursor>) => void): CommandStatus {
   validateWorkbookCommandPayload(command, state.pipeFrameBytes);
@@ -555,7 +608,9 @@ function applyIntent(handle: WorkbookHandle, state: WorkbookCommandState, comman
   if (command.kind === 'collabPipe') {
     if (!applyPipe) throw new WorkbookCommandRefusal('unsupported');
     const before = handle.version();
+    const engineSheets = handle.sheetInfo().sheetIds;
     applyPipe(command.payload);
+    rebaseSheetIds(handle, state, engineSheets);
     const limits = state.pipeFrameBytes ??= new Map();
     for (const op of command.payload.ops) {
       if (op.op === 'create') {
@@ -570,17 +625,19 @@ function applyIntent(handle: WorkbookHandle, state: WorkbookCommandState, comman
   }
   if (command.kind === 'applyUpdate') {
     const before = handle.version();
+    const engineSheets = handle.sheetInfo().sheetIds;
     let refusedUpdate = false;
     for (const update of [command.payload.update, ...command.payload.updates ?? []]) {
       const at = handle.version();
       try { handle.applyUpdate(update); }
       catch (error) {
-        if (!(error instanceof Error) || error instanceof WebAssembly.RuntimeError || handle.version() !== at) throw error;
+        if (!(error instanceof Error) || isEngineTrap(error) || handle.version() !== at) throw error;
         if (at === before) throw new WorkbookCommandRefusal('invalid-update');
         refusedUpdate = true;
         break;
       }
     }
+    rebaseSheetIds(handle, state, engineSheets);
     state.formattingDirty = state.mergesDirty = state.catalogDirty = true;
     return { seq: command.seq, status: handle.version() === before ? 'noop' : 'applied',
       committed: handle.version() !== before, result: { remoteUpdate: true, proposals: handle.listProposals(),
@@ -593,15 +650,19 @@ function applyIntent(handle: WorkbookHandle, state: WorkbookCommandState, comman
     return { seq: command.seq, status: changed ? 'applied' : 'noop', committed: false };
   }
   if (command.kind === 'setReadOnly') {
-    const changed = state.readOnly !== command.payload.readOnly;
+    const changed = state.readOnly !== command.payload.readOnly ||
+      Boolean(state.allowHostProposals) !== Boolean(command.payload.allowHostProposals);
     state.readOnly = command.payload.readOnly;
+    state.allowHostProposals = command.payload.allowHostProposals === true;
     return { seq: command.seq, status: changed ? 'applied' : 'noop', committed: false };
   }
   const refreshProposals = command.kind === 'applyOps' && 'toolbar' in command.payload &&
     command.payload.toolbar.id === 'refreshProposals';
   if (command.kind === 'setActiveSheet' && command.payload.expectVersion !== undefined &&
     command.payload.expectVersion !== handle.version()) throw new WorkbookCommandRefusal('stale-version');
-  if (state.readOnly && command.kind !== 'setActiveSheet' && !refreshProposals) throw new WorkbookCommandRefusal('read-only');
+  const hostProposal = state.allowHostProposals &&
+    (command.kind === 'propose' || command.kind === 'acceptProposal' || command.kind === 'rejectProposal');
+  if (state.readOnly && !hostProposal && command.kind !== 'setActiveSheet' && !refreshProposals) throw new WorkbookCommandRefusal('read-only');
   if (command.payload.selection) validateSelection(handle, state, command.payload.selection);
   if (refreshProposals) {
     return { seq: command.seq, status: 'applied', committed: false, result: { proposals: handle.listProposals() } };
@@ -629,6 +690,8 @@ function applyIntent(handle: WorkbookHandle, state: WorkbookCommandState, comman
   const history = handle.historyState();
   const beforeSelection = structuredClone(state.selection);
   const beforeSheetIds = [...state.sheetIds];
+  const engineSheets = state.collaborative && (op.method === 'undo' || op.method === 'redo' || op.method === 'applyOps' &&
+    op.args[0].some((value) => (value as { type: string }).type === 'addSheet')) ? handle.sheetInfo().sheetIds : undefined;
   let result: ReturnType<typeof applyWorkbookReplayOp>;
   try {
     if (op.calculation) handle.setCalculationContext(op.calculation);
@@ -639,7 +702,7 @@ function applyIntent(handle: WorkbookHandle, state: WorkbookCommandState, comman
       if (op.calculation) handle.setCalculationContext(state.calculation);
       throw refusal;
     }
-    throw new SessionFailure(error instanceof WebAssembly.RuntimeError ? 'trap' : 'crash',
+    throw new SessionFailure(isEngineTrap(error) ? 'trap' : 'crash',
       `Workbook command failed at sequence ${command.seq} (${command.kind})`,
       error instanceof Error ? error.message : String(error));
   }
@@ -654,7 +717,8 @@ function applyIntent(handle: WorkbookHandle, state: WorkbookCommandState, comman
   if (op.calculation) state.calculation = { ...op.calculation };
   const committed = handle.version() !== before;
   const afterHistory = handle.historyState();
-  if (committed && op.method === 'applyOps') {
+  if (committed && engineSheets) rebaseSheetIds(handle, state, engineSheets);
+  else if (committed && op.method === 'applyOps') {
     for (const value of op.args[0]) {
       const operation = value as { type: string; index: number; from: number; to: number };
       if (operation.type === 'addSheet') state.sheetIds.splice(operation.index, 0, `command-sheet:${state.nextSheetId++}`);
@@ -670,7 +734,7 @@ function applyIntent(handle: WorkbookHandle, state: WorkbookCommandState, comman
       const depth = op.method === 'undo' ? history.undoDepth : afterHistory.undoDepth;
       const anchor = state.historySelections[depth];
       if (anchor) {
-        state.sheetIds = [...(op.method === 'undo' ? anchor.beforeSheets : anchor.afterSheets)];
+        if (!engineSheets) state.sheetIds = [...(op.method === 'undo' ? anchor.beforeSheets : anchor.afterSheets)];
         state.selection = structuredClone(op.method === 'undo' ? anchor.before : anchor.after);
         const sheet = state.sheetIds.indexOf(state.selection.sheetId);
         if (sheet >= 0) handle.setActiveSheet(sheet);
@@ -762,7 +826,7 @@ export function applyWorkbookCommandIntent(
   } catch (error) {
     const refused = classifyRefusal(error);
     if (!refused) throw error instanceof SessionFailure ? error : new SessionFailure(
-      error instanceof WebAssembly.RuntimeError ? 'trap' : 'crash', 'Workbook command failed',
+      isEngineTrap(error) ? 'trap' : 'crash', 'Workbook command failed',
       error instanceof Error ? error.message : String(error));
     status = { seq: command.seq, status: 'refused', reason: refused.reason, committed: false,
       affectedSeqs: [command.seq], ...(refused.result === undefined ? {} : {
@@ -784,7 +848,7 @@ export function applyWorkbookCommandIntent(
   let editState: Partial<WorkbookEditState> | undefined;
   try { editState = projectEditState(handle, state); }
   catch (error) {
-    throw new SessionFailure(error instanceof WebAssembly.RuntimeError ? 'trap' : 'crash',
+    throw new SessionFailure(isEngineTrap(error) ? 'trap' : 'crash',
       'Workbook command state projection failed', error instanceof Error ? error.message : String(error));
   }
   return { throughSeq: command.seq, version, statuses: [status],

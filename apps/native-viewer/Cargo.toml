@@ -15,6 +15,7 @@ docx = [
     "dep:docx-layout",
     "dep:docx-parse",
     "dep:docx-raster",
+    "dep:ooxml-drawingml",
     "dep:ooxml-opc",
     "dep:ooxml-text",
 ]
@@ -32,6 +33,7 @@ pptx = [
 ]
 
 [dependencies]
+base-latin = { package = "betteroffice-base-latin", path = "../../crates/base-latin" }
 anyhow = "=1.0.104"
 base64 = { version = "=0.22.1", optional = true }
 betteroffice-pptx = { path = "../../crates/betteroffice-pptx", default-features = false, features = [
@@ -39,13 +41,13 @@ betteroffice-pptx = { path = "../../crates/betteroffice-pptx", default-features 
 ], optional = true }
 betteroffice-xlsx = { path = "../../crates/betteroffice-xlsx", default-features = false, optional = true }
 docx-edit = { package = "betteroffice-docx-edit", path = "../../crates/docx-edit", optional = true }
-docx-layout = { package = "betteroffice-docx-layout", path = "../../crates/docx-layout", optional = true }
+docx-layout = { package = "betteroffice-docx-layout", path = "../../crates/docx-layout", features = ["base-latin"], optional = true }
 docx-parse = { package = "betteroffice-docx-parse", path = "../../crates/docx-parse", default-features = false, optional = true }
 docx-raster = { package = "betteroffice-docx-raster", path = "../../crates/docx-raster", optional = true }
 futures-util = { version = "=0.3.33", features = ["sink"] }
 getrandom = "=0.4.3"
 image = { version = "=0.25.10", default-features = false, features = ["bmp", "gif", "jpeg", "png", "tiff", "webp"] }
-ooxml-drawingml = { package = "betteroffice-drawingml", path = "../../crates/ooxml-drawingml", optional = true }
+ooxml-drawingml = { package = "betteroffice-drawingml", path = "../../crates/ooxml-drawingml", optional = true, features = ["tiff"] }
 ooxml-opc = { package = "betteroffice-opc", path = "../../crates/ooxml-opc", default-features = false, optional = true }
 ooxml-text = { package = "betteroffice-ooxml-text", path = "../../crates/ooxml-text", optional = true }
 pollster = "=0.4.0"
@@ -69,4 +71,4 @@ objc2 = "=0.5.2"
 objc2-foundation = { version = "=0.2.2", features = ["NSArray", "NSURL"] }
 
 [patch.crates-io]
-yrs = { path = "vendor/yrs" }
+yrs = { git = "https://github.com/openooxml/y-crdt.git", rev = "5349f4e11ec46a5ad842f08415b315cb6d5c53af" }

@@ -8,6 +8,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use docx_layout::display_list::DisplayList;
+use docx_layout::endnote_flow::{
+    EndnoteFlow, attach_flowed_endnote_areas, flow_column_width, flow_endnotes, flow_target_page,
+    flows_with_body, remove_flowed, take_flowed_fragments,
+};
 use docx_layout::footnotes::{
     FOOTNOTE_COLUMN_GAP_PX, NoteKind, NoteSeparatorHeights, OrderedMap, apply_note_presentation,
     assign_note_presentations, attach_note_areas, build_note_presentations,
@@ -2117,6 +2121,9 @@ struct PaginationState {
     region_placements: Vec<RegionPlacementState>,
     block_fingerprints: Vec<Fingerprint>,
     measured_spacing: Vec<BlockSpacing>,
+    /// The flowed endnote blocks that end the last pass's arena, kept aside while the arena
+    /// holds the body alone.
+    flowed_tail: Option<FlowedTail>,
     options_fingerprint: u64,
     revision_preview_key: u64,
     /// The decisions [`Self::revision_preview_key`] identifies.
@@ -2141,7 +2148,112 @@ struct PaginationState {
     pagination_blocks_placed: u64,
 }
 
+#[derive(Debug)]
+struct FlowedTail {
+    body_len: usize,
+    /// Each flowed block with its fingerprint, at its index in the full arena, ascending.
+    blocks: Vec<(usize, MeasuredBlock, Fingerprint)>,
+    /// Each flowed block's fragment, at its page and its index among the page's fragments.
+    fragments: Vec<(usize, usize, Fragment)>,
+}
+
 impl PaginationState {
+    /// Takes the flowed endnote blocks out of the retained arena, so the next edit walks and
+    /// measures the body alone; [`Self::restore_flowed_tail`] puts them back before that edit
+    /// places, so placement still resumes from this pass.
+    fn retain_body_only(&mut self, flow: &EndnoteFlow) {
+        self.flowed_tail = None;
+        let Some(input) = self.input.as_mut().filter(|_| !flow.is_empty()) else {
+            return;
+        };
+        let len = input.measured.len();
+        if self.block_fingerprints.len() != len
+            || self.measured_spacing.len() != len
+            || flow.inserted().last().is_some_and(|&last| last >= len)
+        {
+            remove_flowed(&mut input.measured, flow.inserted());
+            remove_flowed(&mut self.block_fingerprints, flow.inserted());
+            remove_flowed(&mut self.measured_spacing, flow.inserted());
+            self.checkpoints.clear();
+            self.region_placements.clear();
+            return;
+        }
+        let mut blocks = Vec::with_capacity(flow.inserted().len());
+        for &index in flow.inserted().iter().rev() {
+            self.measured_spacing.remove(index);
+            blocks.push((
+                index,
+                input.measured.remove(index),
+                self.block_fingerprints.remove(index),
+            ));
+        }
+        blocks.reverse();
+        self.flowed_tail = Some(FlowedTail {
+            body_len: input.measured.len(),
+            blocks,
+            fragments: Vec::new(),
+        });
+    }
+
+    fn keep_flowed_fragments(&mut self, fragments: Vec<(usize, usize, Fragment)>) {
+        match self.flowed_tail.as_mut() {
+            Some(tail) => tail.fragments = fragments,
+            None if !fragments.is_empty() => {
+                self.checkpoints.clear();
+                self.region_placements.clear();
+            }
+            None => {}
+        }
+    }
+
+    /// Puts the blocks and fragments [`Self::retain_body_only`] took out back, so placement
+    /// compares the retained pass with one that flows endnotes too.
+    fn restore_flowed_tail(&mut self) {
+        let Some(tail) = self.flowed_tail.take() else {
+            return;
+        };
+        let restorable = self.input.as_ref().is_some_and(|input| {
+            input.measured.len() == tail.body_len
+                && self.block_fingerprints.len() == tail.body_len
+                && self.measured_spacing.len() == tail.body_len
+        }) && self.layout.as_ref().is_some_and(|layout| {
+            tail.fragments.iter().all(|(page, index, _)| {
+                layout
+                    .pages
+                    .get(*page)
+                    .is_some_and(|page| *index <= page.fragments.len() + tail.fragments.len())
+            })
+        });
+        if !restorable {
+            self.checkpoints.clear();
+            self.region_placements.clear();
+            return;
+        }
+        let input = self.input.as_mut().expect("restorable input");
+        let inserted: Vec<usize> = tail.blocks.iter().map(|(index, ..)| *index).collect();
+        for (index, block, fingerprint) in tail.blocks {
+            input.measured.insert(index, block);
+            self.block_fingerprints.insert(index, fingerprint);
+            self.measured_spacing.insert(index, BlockSpacing::None);
+        }
+        self.moved_blocks = std::mem::take(&mut self.moved_blocks)
+            .into_iter()
+            .map(|mut moved| {
+                for &index in &inserted {
+                    if index <= moved {
+                        moved += 1;
+                    }
+                }
+                moved
+            })
+            .collect();
+        let layout = self.layout.as_mut().expect("restorable layout");
+        for (page, index, fragment) in tail.fragments {
+            let fragments = &mut layout.pages[page].fragments;
+            fragments.insert(index.min(fragments.len()), fragment);
+        }
+    }
+
     fn set_font_dependencies(
         &mut self,
         dependencies: Vec<FontChainDependencies>,
@@ -2355,6 +2467,8 @@ pub struct EngineSession {
     partial_document: Cell<bool>,
     /// Resident text edits re-lower only their paragraph when eligible.
     local_lowering: Cell<bool>,
+    /// Body heading levels by paragraph id, for the document version they were read at.
+    page_text_headings: RefCell<Option<(crate::DocumentVersion, Rc<HashMap<String, u8>>)>>,
     #[cfg(test)]
     preview_refresh: Cell<bool>,
 }
@@ -2367,15 +2481,13 @@ impl Drop for RelayoutTriggerReset<'_> {
     }
 }
 
-/// The font requirements of `blocks` that `measurement` gives no chain of registered fonts, so
-/// they were measured with synthetic metrics.
 fn missing_font_chains<'a>(
     measurement: &serde_json::Value,
     blocks: impl IntoIterator<Item = &'a LayoutBlock>,
 ) -> Vec<String> {
     let chains = measurement.get("fontChains");
     let defaults = measurement.get("defaults").cloned().unwrap_or_default();
-    docx_layout::measure_blocks::collect_font_requirements(
+    docx_layout::measure_blocks::collect_measured_font_requirements(
         blocks,
         docx_layout::measure_blocks::default_font_family(&defaults),
     )
@@ -2391,6 +2503,15 @@ fn missing_font_chains<'a>(
                             .and_then(|id| u32::try_from(id).ok())
                             .and_then(|id| docx_layout::with_measure_face(id, |_, _| ()))
                             .is_some()
+                    })
+                    && ids.iter().any(|id| {
+                        id.as_u64()
+                            .and_then(|id| u32::try_from(id).ok())
+                            .is_some_and(|id| {
+                                ooxml_text::FontId::from_u32(id)
+                                    .base_latin_style()
+                                    .is_none()
+                            })
                     })
             })
     })
@@ -2937,6 +3058,51 @@ fn section_start_of_first_changed_break(
         .rposition(|block| matches!(block.block, LayoutBlock::SectionBreak(_)))
         .unwrap_or(0);
     dirty.min(section_start)
+}
+
+/// Adds the flowing endnotes to every arena the note passes replay; each gets the same blocks.
+fn flow_endnotes_into<'a>(
+    inputs: impl Iterator<Item = &'a mut LayoutInput>,
+    layout: &Layout,
+    refs: &[docx_layout::footnotes::NoteRefLocation],
+    contents: &[docx_layout::footnotes::NoteContent],
+    separator_heights: &NoteSeparatorHeights,
+    regions: &DocumentRegions,
+) -> EndnoteFlow {
+    let mut flow = EndnoteFlow::default();
+    for input in inputs {
+        flow = flow_endnotes(
+            &mut input.measured,
+            &layout.pages,
+            refs,
+            contents,
+            separator_heights,
+            regions,
+        );
+    }
+    flow
+}
+
+fn insert_flowed_spacing(spacing: &mut Vec<BlockSpacing>, flow: &EndnoteFlow) {
+    for &index in flow.inserted() {
+        spacing.insert(index.min(spacing.len()), BlockSpacing::None);
+    }
+}
+
+/// Splices the flowed blocks' fingerprints into the body's, which keep any refinement.
+fn insert_flowed_fingerprints(
+    fingerprints: &mut Vec<Fingerprint>,
+    input: Option<&LayoutInput>,
+    flow: &EndnoteFlow,
+) -> Result<(), String> {
+    let Some(input) = input else {
+        return Ok(());
+    };
+    for &index in flow.inserted() {
+        let fingerprint = measured_fingerprint(&input.measured[index])?;
+        fingerprints.insert(index.min(fingerprints.len()), fingerprint);
+    }
+    Ok(())
 }
 
 fn measured_fingerprints(input: &LayoutInput) -> Result<Vec<Fingerprint>, String> {
@@ -4176,6 +4342,8 @@ fn placement_block_is_coupled(block: &LayoutBlock) -> bool {
 enum RegionPlacementPhase {
     Body,
     Shape(usize),
+    /// The body with flowed endnotes.
+    Notes,
 }
 
 const MAX_RETAINED_REGION_UNSHARED_PAGES: usize = 16;
@@ -4882,6 +5050,7 @@ impl EngineSession {
             font_fingerprints: RefCell::new(HashMap::new()),
             partial_document: Cell::new(false),
             local_lowering: Cell::new(false),
+            page_text_headings: RefCell::new(None),
             #[cfg(test)]
             preview_refresh: Cell::new(true),
         }
@@ -6584,8 +6753,10 @@ impl EngineSession {
         let default_family =
             docx_layout::measure_blocks::default_font_family(&measurement.defaults);
         let mut collector = docx_layout::measure_blocks::FontRequirementCollector::default();
+        collector.prefer_east_asian_language(render_env["docDefaultLanguage"]["eastAsia"].as_str());
+        let mut stable_markers = true;
         if cache_key.is_some() {
-            collector.collect_preview(
+            stable_markers &= collector.collect_preview(
                 input.measured.iter().map(|measured| &measured.block),
                 default_family,
             );
@@ -6633,11 +6804,12 @@ impl EngineSession {
                     && let Some(blocks) = self.lower_note_separator(name, &render_env)?
                 {
                     if cache_key.is_some() {
-                        collector.collect_preview(blocks.iter(), default_family);
+                        stable_markers &= collector.collect_preview(blocks.iter(), default_family);
                         if let Some(revealable) =
                             self.note_separator_revealable(name, &render_env)?
                         {
-                            collector.collect_preview(revealable.iter(), default_family);
+                            stable_markers &=
+                                collector.collect_preview(revealable.iter(), default_family);
                         }
                     } else {
                         collector.collect(blocks.iter(), default_family);
@@ -6667,12 +6839,14 @@ impl EngineSession {
                             content.display_label.as_deref().unwrap_or("1"),
                         );
                         if cache_key.is_some() {
-                            collector.collect_preview(blocks.iter(), default_family);
+                            stable_markers &=
+                                collector.collect_preview(blocks.iter(), default_family);
                         } else {
                             collector.collect(blocks.iter(), default_family);
                         }
                     } else if cache_key.is_some() {
-                        collector.collect_preview(blocks.iter().map(Rc::as_ref), default_family);
+                        stable_markers &= collector
+                            .collect_preview(blocks.iter().map(Rc::as_ref), default_family);
                     } else {
                         collector.collect(blocks.iter().map(Rc::as_ref), default_family);
                     }
@@ -6688,14 +6862,15 @@ impl EngineSession {
                             .expect("resident story exists after lowering")
                             .revealable_blocks,
                     );
-                    collector.collect_preview(revealable.iter(), default_family);
+                    stable_markers &= collector.collect_preview(revealable.iter(), default_family);
                 }
             }
         }
         let requirements = collector.finish();
-        let preview_superset_safe = requirements
-            .values()
-            .all(|requirement| requirement.scripts.is_empty());
+        let preview_superset_safe = stable_markers
+            && requirements
+                .values()
+                .all(|requirement| requirement.scripts.is_empty());
         if let Some((doc_epoch, request_fingerprint)) = cache_key
             && !preview_superset_safe
         {
@@ -7710,6 +7885,7 @@ impl EngineSession {
             }))
         .then(|| input.clone());
         let mut restamped_pages = Vec::new();
+        self.pagination.borrow_mut().restore_flowed_tail();
         let (mut initial_layout, mut arena) = if refs.is_empty() {
             self.layout_document_value_with_fingerprints(
                 input,
@@ -7764,6 +7940,25 @@ impl EngineSession {
                 input.options.note_separator_heights = Some(separator_heights.clone());
             }
         }
+        let arenas: Vec<&mut LayoutInput> = if provisional {
+            Vec::new()
+        } else {
+            base_input.iter_mut().chain(arena.iter_mut()).collect()
+        };
+        let flow = flow_endnotes_into(
+            arenas.into_iter(),
+            &initial_layout,
+            &refs,
+            &notes.contents,
+            &separator_heights,
+            &regions,
+        );
+        insert_flowed_spacing(&mut measured_spacing, &flow);
+        insert_flowed_fingerprints(
+            &mut block_fingerprints,
+            base_input.as_ref().or(arena.as_ref()),
+            &flow,
+        )?;
         let stabilized = stabilize_note_layout(
             |reserved| {
                 let mut copy;
@@ -7823,6 +8018,7 @@ impl EngineSession {
             self.pagination.borrow_mut().layout = Some(stabilized.layout);
         }
         let mut pagination = self.pagination.borrow_mut();
+        pagination.retain_body_only(&flow);
         let certified = exact_cut.filter(|cut| cut_exact_prefix(&mut pagination, cut.pages));
         let layout = pagination
             .layout
@@ -7846,6 +8042,8 @@ impl EngineSession {
             &separator_heights,
             &regions,
         );
+        attach_flowed_endnote_areas(layout, &flow, &notes.contents, &separator_heights);
+        let flowed_fragments = take_flowed_fragments(layout, &flow);
         let note_settlement = if notes_converged {
             NoteSettlement::Converged
         } else {
@@ -7885,6 +8083,7 @@ impl EngineSession {
             })
             .transpose()?;
         pagination.note_changed_pages = note_changed_pages;
+        pagination.keep_flowed_fragments(flowed_fragments);
         let page_count = certified.map_or(usize::MAX, |cut| cut.pages);
         restamped_pages.retain(|&page| page < page_count);
         if let Some(pages) = &mut pagination.restamped_pages {
@@ -8088,6 +8287,7 @@ impl EngineSession {
                 None,
             )?;
         }
+        self.pagination.borrow_mut().restore_flowed_tail();
         let previous_notes = note_page_keys(self.pagination.borrow().layout.as_ref());
         let previous_page_count = self
             .pagination
@@ -8179,6 +8379,30 @@ impl EngineSession {
                 input.options.note_separator_heights = Some(separator_heights.clone());
             }
         }
+        let arenas: Vec<&mut LayoutInput> = if provisional {
+            Vec::new()
+        } else {
+            base_input.iter_mut().chain(arena.iter_mut()).collect()
+        };
+        let flow = flow_endnotes_into(
+            arenas.into_iter(),
+            &initial_layout,
+            &refs,
+            &notes.contents,
+            &separator_heights,
+            &regions,
+        );
+        insert_flowed_spacing(&mut measured_spacing, &flow);
+        insert_flowed_fingerprints(
+            &mut block_fingerprints,
+            base_input.as_ref().or(arena.as_ref()),
+            &flow,
+        )?;
+        let note_phase = if flow.is_empty() {
+            RegionPlacementPhase::Body
+        } else {
+            RegionPlacementPhase::Notes
+        };
         let mut final_arena = None;
         let stabilized = stabilize_note_layout(
             |reserved| {
@@ -8218,7 +8442,7 @@ impl EngineSession {
                     place_region_pass(
                         pass,
                         &fingerprints,
-                        RegionPlacementPhase::Body,
+                        note_phase,
                         &mut placement_passes,
                         &self.pagination.borrow(),
                     )?
@@ -8242,7 +8466,9 @@ impl EngineSession {
             base_input.take()
         };
         drop(base_input);
-        placement_passes.previous.clear();
+        if flow.is_empty() {
+            placement_passes.previous.clear();
+        }
         let notes_converged = stabilized.converged;
         if let Some(mut final_input) = final_arena.or(plain_final_arena).or(arena) {
             final_input.options.footnote_reserved_heights =
@@ -8275,9 +8501,29 @@ impl EngineSession {
             } else {
                 let options = serde_json::to_value(&final_input.options)
                     .map_err(|error| error.to_string())?;
-                let pass = placement_passes.next.iter().rfind(|pass| {
-                    pass.phase == RegionPlacementPhase::Body && pass.options == options
-                });
+                let flowed_layout = if !flow.is_empty()
+                    && !placement_passes
+                        .next
+                        .iter()
+                        .any(|pass| pass.phase == note_phase && pass.options == options)
+                {
+                    let mut layout = place_region_pass(
+                        &mut final_input,
+                        &block_fingerprints,
+                        note_phase,
+                        &mut placement_passes,
+                        &self.pagination.borrow(),
+                    )
+                    .map_err(layout_error_message)?;
+                    apply_document_regions(&mut layout, &regions);
+                    Some(layout)
+                } else {
+                    None
+                };
+                let pass = placement_passes
+                    .next
+                    .iter()
+                    .rfind(|pass| pass.phase == note_phase && pass.options == options);
                 let deltas = self
                     .pagination
                     .borrow()
@@ -8295,7 +8541,7 @@ impl EngineSession {
                         cached_page_totals,
                         docx_layout::place::IncrementalLayout {
                             checkpointed: docx_layout::place::CheckpointedLayout {
-                                layout: stabilized.layout,
+                                layout: flowed_layout.unwrap_or(stabilized.layout),
                                 checkpoints: pass.checkpoints.clone(),
                                 placed_blocks: placement_passes.placed_blocks,
                                 rebuilt_page_start: pass.rebuilt_page_start,
@@ -8323,8 +8569,10 @@ impl EngineSession {
         } else {
             self.pagination.borrow_mut().layout = Some(stabilized.layout);
         }
+        placement_passes.previous.clear();
         let mut pagination = self.pagination.borrow_mut();
         pagination.region_placements = placement_passes.next;
+        pagination.retain_body_only(&flow);
         pagination.pagination_blocks_placed = pagination
             .pagination_blocks_placed
             .wrapping_add(placement_passes.placed_blocks as u64);
@@ -8366,6 +8614,7 @@ impl EngineSession {
             &separator_heights,
             &regions,
         );
+        attach_flowed_endnote_areas(layout, &flow, &notes.contents, &separator_heights);
         let note_settlement = if notes_converged {
             NoteSettlement::Converged
         } else {
@@ -8406,6 +8655,12 @@ impl EngineSession {
         if uses_region_path {
             compact_region_placements(&mut pagination)?;
         }
+        let flowed_fragments = pagination
+            .layout
+            .as_mut()
+            .map(|layout| take_flowed_fragments(layout, &flow))
+            .unwrap_or_default();
+        pagination.keep_flowed_fragments(flowed_fragments);
         pagination.note_changed_pages.extend(note_changed_pages);
         pagination.note_changed_pages.sort_unstable();
         pagination.note_changed_pages.dedup();
@@ -8787,15 +9042,23 @@ impl EngineSession {
             else {
                 continue;
             };
-            let Some(page) = layout.pages.iter().find(|page| page.number == page_number) else {
+            let Some(anchor) = layout.pages.iter().find(|page| page.number == page_number) else {
                 continue;
             };
-            let columns = regions.footnote_columns(page.region_section_index);
-            let content_width = page.size.w - page.margins.left - page.margins.right;
-            let width = ((content_width
-                - (columns.saturating_sub(1) as f64) * FOOTNOTE_COLUMN_GAP_PX)
-                / columns as f64)
-                .max(1.0);
+            let flowed = flows_with_body(content.note_kind, regions, anchor.region_section_index);
+            let page = flowed
+                .then(|| flow_target_page(&layout.pages, regions, anchor.region_section_index))
+                .flatten()
+                .unwrap_or(anchor);
+            let width = if flowed {
+                flow_column_width(page)
+            } else {
+                let columns = regions.footnote_columns(page.region_section_index);
+                let content_width = page.size.w - page.margins.left - page.margins.right;
+                ((content_width - (columns.saturating_sub(1) as f64) * FOOTNOTE_COLUMN_GAP_PX)
+                    / columns as f64)
+                    .max(1.0)
+            };
             let prefix = match content.note_kind {
                 docx_layout::footnotes::NoteKind::Footnote => "fn",
                 docx_layout::footnotes::NoteKind::Endnote => "en",
@@ -9437,6 +9700,7 @@ impl EngineSession {
         } = run;
         let mut pagination = self.pagination.borrow_mut();
         pagination.input = Some(input);
+        pagination.flowed_tail = None;
         pagination.measured_spacing = measured_spacing;
         pagination.moved_blocks.clear();
         if trigger.uses_region_path() {
@@ -11467,6 +11731,83 @@ impl EngineSession {
         self.encode_display_pages_frame(&built, expected_frame_epoch)
     }
 
+    /// The text each of `pages` shows in the retained layout, built or not, as
+    /// `[{"pageIndex","paragraphs":[{"text","level"?,"inTable"?}]}]`: body
+    /// paragraphs cut where the page cuts them, a body heading carrying its
+    /// zero-based outline level, and the rows of tables the page places, cell
+    /// by cell. A row split across pages reads on the page where it starts,
+    /// and header rows a table repeats on later pages read only once. Text
+    /// boxes, shapes, headers, footers and notes are not read.
+    pub fn page_texts_json(&self, pages: &[usize]) -> Result<String, String> {
+        let headings = self.page_text_headings()?;
+        let source = self.doc().source_metadata();
+        let pagination = self.pagination.borrow();
+        let input = pagination
+            .input
+            .as_ref()
+            .ok_or_else(|| "resident pagination input is not built".to_owned())?;
+        let layout = pagination
+            .layout
+            .as_ref()
+            .ok_or_else(|| "resident layout is not built".to_owned())?;
+        let texts: Vec<serde_json::Value> =
+            docx_layout::page_text::layout_page_texts(input, layout, pages)
+                .into_iter()
+                .map(|page| {
+                    let paragraphs: Vec<serde_json::Value> = page
+                        .paragraphs
+                        .into_iter()
+                        .map(|paragraph| {
+                            let mut value = serde_json::json!({ "text": paragraph.text });
+                            if paragraph.in_table {
+                                value["inTable"] = serde_json::Value::Bool(true);
+                            } else if let Some(level) = paragraph
+                                .para_id
+                                .as_ref()
+                                .and_then(|id| headings.get(id).copied())
+                                .or_else(|| match paragraph.para_id {
+                                    Some(_) => None,
+                                    None => crate::heading::resolve_heading(
+                                        &crate::heading::OutlineInputs {
+                                            effective: None,
+                                            direct: None,
+                                            style_id: paragraph.style_id.as_deref(),
+                                        },
+                                        source.as_deref(),
+                                    )
+                                    .map(|heading| heading.outline_level),
+                                })
+                            {
+                                value["level"] = serde_json::Value::from(level);
+                            }
+                            value
+                        })
+                        .collect();
+                    serde_json::json!({ "pageIndex": page.page_index, "paragraphs": paragraphs })
+                })
+                .collect();
+        serde_json::to_string(&texts).map_err(|error| error.to_string())
+    }
+
+    fn page_text_headings(&self) -> Result<Rc<HashMap<String, u8>>, String> {
+        let version = self.doc().version();
+        if let Some((read_at, headings)) = &*self.page_text_headings.borrow()
+            && *read_at == version
+        {
+            return Ok(Rc::clone(headings));
+        }
+        let headings: Rc<HashMap<String, u8>> = Rc::new(
+            self.doc()
+                .paragraph_headings("body")
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .map(|(para_id, heading)| (para_id, heading.outline_level))
+                .collect(),
+        );
+        *self.page_text_headings.borrow_mut() = Some((version, Rc::clone(&headings)));
+        Ok(headings)
+    }
+
     /// Release display pages; an empty result means the request was superseded.
     pub fn release_display_pages_frame(
         &self,
@@ -11794,7 +12135,7 @@ impl EngineSession {
     {
         docx_layout::with_private_measure_fonts(|| {
             for (index, bytes) in fonts.iter().enumerate() {
-                let id = docx_layout::register_measure_font_bytes(bytes)
+                let id = docx_layout::register_measure_font_bytes(*bytes)
                     .map_err(|error| format!("font {index}: {error}"))?;
                 if id as usize != index {
                     return Err(format!("font {index} was registered as font {id}"));
@@ -12262,6 +12603,9 @@ mod font_dependency_tests;
 
 #[cfg(test)]
 mod trailing_page_break_tests;
+
+#[cfg(test)]
+mod whole_number_request_tests;
 
 #[cfg(test)]
 mod tests {
@@ -18217,6 +18561,207 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
     #[test]
     fn resident_local_lowering_patch_applies_with_floats() {
         local_lowering_measurement_reuse(true);
+    }
+
+    #[test]
+    fn a_changed_section_break_restarts_placement_at_the_start_of_its_section() {
+        let paragraph = |id: u32| {
+            serde_json::from_value::<MeasuredBlock>(serde_json::json!({
+                "block": {"kind": "paragraph", "id": id, "runs": [], "attrs": {}},
+                "measure": {"kind": "paragraph", "lines": [], "totalHeight": 0},
+            }))
+            .unwrap()
+        };
+        let section = |id: &str, kind: &str, margins: bool| {
+            let mut block = serde_json::json!({"kind": "sectionBreak", "id": id, "type": kind});
+            if margins {
+                block["margins"] =
+                    serde_json::json!({"top": 10, "right": 10, "bottom": 10, "left": 10});
+            }
+            serde_json::from_value::<MeasuredBlock>(
+                serde_json::json!({"block": block, "measure": {"kind": "sectionBreak"}}),
+            )
+            .unwrap()
+        };
+        for (opening, closing, margins) in [
+            ("nextPage", "nextPage", true),
+            ("continuous", "continuous", true),
+            ("nextPage", "continuous", false),
+        ] {
+            let measured = vec![
+                paragraph(0),
+                section("a", opening, true),
+                paragraph(1),
+                paragraph(2),
+                paragraph(3),
+                section("b", closing, margins),
+                paragraph(4),
+            ];
+            let previous: Vec<Fingerprint> = (0..measured.len() as u128).collect();
+            let mut next = previous.clone();
+            next[5] += 100;
+            assert_eq!(
+                section_start_of_first_changed_break(&measured, &previous, &next, 5),
+                1
+            );
+            next[3] += 100;
+            assert_eq!(
+                section_start_of_first_changed_break(&measured, &previous, &next, 3),
+                1
+            );
+            assert_eq!(
+                section_start_of_first_changed_break(&measured, &previous, &next, 0),
+                0
+            );
+            let mut text_only = previous.clone();
+            text_only[3] += 100;
+            assert_eq!(
+                section_start_of_first_changed_break(&measured, &previous, &text_only, 3),
+                3
+            );
+        }
+    }
+
+    #[test]
+    fn a_retained_layout_repaginates_like_a_replica_after_an_edit_before_a_page_break() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font(lowering_pages::FONT).unwrap();
+        let geometry = r#"<w:sectPr><w:pgSz w:w="7200" w:h="4320"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/></w:sectPr>"#;
+        let body = format!(
+            r#"<w:p w14:paraId="10000001"><w:r><w:t xml:space="preserve">   </w:t><w:br w:type="page"/></w:r></w:p><w:p w14:paraId="10000002"><w:pPr>{geometry}</w:pPr></w:p><w:p w14:paraId="10000003"><w:r><w:t>B</w:t></w:r></w:p>{geometry}"#
+        );
+        let bytes = lowering_pages::with_body(&body);
+        let without_notes = {
+            let mut parts = ooxml_opc::unzip_parts(&bytes).unwrap();
+            for (name, part) in &mut parts {
+                let root = match name.as_str() {
+                    "word/footnotes.xml" => "footnotes",
+                    "word/endnotes.xml" => "endnotes",
+                    _ => continue,
+                };
+                *part = format!(
+                    r#"<w:{root} xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>"#
+                )
+                .into_bytes();
+            }
+            ooxml_opc::rezip_parts(&parts).unwrap()
+        };
+        let pages = |session: &EngineSession, request: &str| {
+            let output: serde_json::Value =
+                serde_json::from_str(&session.layout_document_with_regions_json(request).unwrap())
+                    .unwrap();
+            output["layout"]["pages"].as_array().unwrap().len()
+        };
+        let insert = || {
+            vec![crate::RawOp::Insert {
+                index: 0,
+                text: "x".to_owned(),
+                attrs: Default::default(),
+            }]
+        };
+        for (path, stored, bytes) in [
+            ("remote", false, &bytes),
+            ("remote", false, &without_notes),
+            ("remote", true, &bytes),
+            ("raw", true, &bytes),
+            ("agents", true, &bytes),
+            ("undo", true, &bytes),
+        ] {
+            for local in [false, true] {
+                let host = EngineSession::new(9672);
+                host.set_local_lowering(local);
+                crate::seed_from_docx(host.doc(), bytes).unwrap();
+                if stored {
+                    host.doc()
+                        .apply_raw_ops(
+                            "body",
+                            vec![crate::RawOp::SetEmbedAttr {
+                                index: 4,
+                                key: "sectionMarkIneligible".to_owned(),
+                                value: Any::Bool(true),
+                            }],
+                            &crate::EditCtx::local("", ""),
+                        )
+                        .unwrap();
+                }
+                let request = lowering_pages::region_request(&host, bytes, font).to_string();
+                let before = pages(&host, &request);
+                let mut undo = host.doc().undo_manager();
+                match path {
+                    "remote" => {
+                        let peer = EngineSession::new(9673);
+                        peer.doc()
+                            .apply_update_v1(&host.doc().encode_state_as_update_v1())
+                            .unwrap();
+                        peer.doc()
+                            .apply_raw_ops("body", insert(), &crate::EditCtx::local("", ""))
+                            .unwrap();
+                        host.doc()
+                            .apply_update_v1(&peer.doc().encode_state_as_update_v1())
+                            .unwrap();
+                    }
+                    "agents" => {
+                        let paragraph = host.doc().paragraphs("body").unwrap()[0].para_id.clone();
+                        let request = crate::EditRequest {
+                            expect_version: host.doc().version(),
+                            source: Default::default(),
+                            history: Default::default(),
+                            steps: vec![crate::EditStep::new(crate::EditOperation::InsertText {
+                                target: crate::TextTarget::Range(crate::TextRange {
+                                    story: "body".to_owned(),
+                                    start: crate::TextPosition {
+                                        para_id: paragraph.to_string(),
+                                        offset: 0,
+                                    },
+                                    end: crate::TextPosition {
+                                        para_id: paragraph.to_string(),
+                                        offset: 0,
+                                    },
+                                    view: Default::default(),
+                                }),
+                                at: crate::TargetEdge::Start,
+                                text: "x".to_owned(),
+                            })],
+                        };
+                        host.doc()
+                            .apply_edits(&request, &crate::UndoSession::new())
+                            .unwrap()
+                            .unwrap();
+                    }
+                    _ => {
+                        host.doc()
+                            .apply_raw_ops("body", insert(), &crate::EditCtx::local("", ""))
+                            .unwrap();
+                    }
+                }
+                let replica_pages = |host: &EngineSession| {
+                    let replica = EngineSession::new(9674);
+                    replica
+                        .doc()
+                        .apply_update_v1(&host.doc().encode_state_as_update_v1())
+                        .unwrap();
+                    pages(&replica, &request)
+                };
+                let case = format!(
+                    "{path}, stored mark {stored}, notes emptied {}, local lowering {local}",
+                    bytes.len() == without_notes.len()
+                );
+                assert_eq!(before, 3, "{case}");
+                let typed = pages(&host, &request);
+                assert_eq!(
+                    (typed, replica_pages(&host)),
+                    (2, 2),
+                    "{case}: after typing"
+                );
+                assert_eq!(pages(&host, &request), 2, "{case}: a second request");
+                if path == "undo" {
+                    assert!(undo.undo());
+                    let undone = pages(&host, &request);
+                    assert_eq!((undone, replica_pages(&host)), (3, 3), "{case}: after undo");
+                }
+            }
+        }
     }
 
     #[test]
@@ -25464,7 +26009,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             .unwrap();
         let requirements: Vec<serde_json::Value> = serde_json::from_str(&superset).unwrap();
         for requirement in exact {
-            assert!(requirements.contains(&serde_json::to_value(requirement).unwrap()));
+            assert_font_requirement_covered(&requirements, &requirement);
         }
     }
 
@@ -25492,24 +26037,128 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         )
         .unwrap();
         for requirement in &exact {
-            let candidate = superset
-                .iter()
-                .find(|candidate| candidate["key"] == requirement.key)
-                .unwrap_or_else(|| panic!("missing font requirement: {requirement:?}"));
-            assert_eq!(candidate["family"], requirement.family);
-            assert_eq!(candidate["bold"], requirement.bold);
-            assert_eq!(candidate["italic"], requirement.italic);
-            for script in &requirement.scripts {
-                assert!(
-                    candidate["scripts"]
-                        .as_array()
-                        .is_some_and(|scripts| scripts.iter().any(|value| value == script)),
-                    "missing script {script} for {}: {candidate}",
-                    requirement.key
-                );
-            }
+            assert_font_requirement_covered(&superset, requirement);
         }
         exact
+    }
+
+    fn assert_font_requirement_covered(
+        requirements: &[serde_json::Value],
+        requirement: &docx_layout::measure_blocks::FontRequirement,
+    ) {
+        let candidate = requirements
+            .iter()
+            .find(|candidate| candidate["key"] == requirement.key)
+            .unwrap_or_else(|| panic!("missing font requirement: {requirement:?}"));
+        assert_eq!(candidate["family"], requirement.family);
+        assert_eq!(candidate["bold"], requirement.bold);
+        assert_eq!(candidate["italic"], requirement.italic);
+        for script in &requirement.scripts {
+            assert!(
+                candidate["scripts"]
+                    .as_array()
+                    .is_some_and(|scripts| scripts.iter().any(|value| value == script)),
+                "missing script {script} for {}: {candidate}",
+                requirement.key
+            );
+        }
+        let bits = candidate["characterBits"].as_str().unwrap_or_default();
+        for ch in requirement.characters.iter() {
+            let index = ooxml_text::font_store::base_latin_character_index(ch).unwrap();
+            let start = index / 32 * 8;
+            let word = bits
+                .get(start..start + 8)
+                .map(|word| u32::from_str_radix(word, 16).unwrap())
+                .unwrap_or_default();
+            assert_ne!(
+                word & (1 << (index % 32)),
+                0,
+                "missing character {ch:?} for {}: {candidate}",
+                requirement.key
+            );
+        }
+    }
+
+    #[test]
+    fn preview_font_preflight_covers_renumbered_marker_characters() {
+        let engine = EngineSession::new(1373);
+        let item = |family| {
+            serde_json::json!({
+                "type": "paragraph",
+                "formatting": {"numPr": {"numId": 1, "ilvl": 0}},
+                "listRendering": {"marker": "%1.", "markerBold": true},
+                "content": [font_preflight_run("Item", family)]
+            })
+        };
+        let blocks = [
+            serde_json::json!({
+                "type": "table",
+                "rows": [{"type": "tableRow", "cells": [{
+                    "type": "tableCell", "content": [item("First")]
+                }]}]
+            }),
+            item("Second"),
+        ];
+        crate::seed::seed_blocks(engine.doc(), None, &[("body".to_owned(), &blocks)]).unwrap();
+        let deletion = engine
+            .doc()
+            .delete_range(
+                &crate::EditCtx::local("Ann", "2026-09-29T12:00:00Z").suggesting(),
+                crate::StoryRange::new("body", 0, 1),
+            )
+            .unwrap();
+        for (decision, marker) in [
+            (crate::bridge::RevisionPreview::Accepted, ".1"),
+            (crate::bridge::RevisionPreview::Rejected, ".2"),
+        ] {
+            let exact =
+                assert_preview_font_preflight_covers(&engine, &deletion.revision_ids[0], decision);
+            let requirement = exact
+                .iter()
+                .find(|requirement| requirement.key == "second|1|0")
+                .unwrap();
+            assert_eq!(requirement.characters.iter().collect::<String>(), marker);
+        }
+    }
+
+    #[test]
+    fn preview_font_preflight_keeps_characters_from_all_text_previews() {
+        let engine = EngineSession::new(1374);
+        let blocks = [serde_json::json!({
+            "type": "paragraph", "content": [font_preflight_run("AΩ", "Preview")]
+        })];
+        crate::seed::seed_blocks(engine.doc(), None, &[("body".to_owned(), &blocks)]).unwrap();
+        let deletion = engine
+            .doc()
+            .delete_range(
+                &crate::EditCtx::local("Ann", "2026-09-29T12:00:00Z").suggesting(),
+                crate::StoryRange::new("body", 0, 1),
+            )
+            .unwrap();
+        for (decision, characters) in [
+            (crate::bridge::RevisionPreview::Accepted, "Ω"),
+            (crate::bridge::RevisionPreview::Rejected, "AΩ"),
+        ] {
+            let exact =
+                assert_preview_font_preflight_covers(&engine, &deletion.revision_ids[0], decision);
+            let requirement = exact
+                .iter()
+                .find(|requirement| requirement.key == "preview|0|0")
+                .unwrap();
+            assert_eq!(
+                requirement.characters.iter().collect::<String>(),
+                characters
+            );
+            assert!(
+                engine
+                    .preview_font_requirements
+                    .borrow()
+                    .as_ref()
+                    .unwrap()
+                    .json
+                    .is_some()
+            );
+        }
     }
 
     #[test]
@@ -27051,6 +27700,105 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
     }
 
     #[test]
+    fn raw_docx_font_preflight_covers_styled_text_boxes_in_body_and_headers() {
+        let styles = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Default Box" w:hAnsi="Default Box" w:eastAsia="Default CJK"/><w:lang w:eastAsia="ko-KR"/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type="paragraph" w:styleId="Parent"><w:rPr><w:rFonts w:ascii="Paragraph Box" w:hAnsi="Paragraph Box" w:eastAsia="Paragraph CJK"/><w:b/><w:lang w:eastAsia="ja-JP"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Child"><w:basedOn w:val="Parent"/><w:rPr><w:i/></w:rPr></w:style><w:style w:type="character" w:styleId="AccentBase"><w:rPr><w:rFonts w:ascii="Character Box" w:hAnsi="Character Box" w:eastAsia="Character CJK"/><w:lang w:eastAsia="zh-TW"/></w:rPr></w:style><w:style w:type="character" w:styleId="Accent"><w:basedOn w:val="AccentBase"/><w:rPr><w:b/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="ThemeBox"><w:rPr><w:rFonts w:ascii="Cached Box" w:asciiTheme="minorAscii" w:hAnsi="Cached Box" w:hAnsiTheme="minorHAnsi" w:eastAsia="Cached CJK" w:eastAsiaTheme="minorEastAsia"/><w:lang w:eastAsia="ja-JP"/></w:rPr></w:style></w:styles>"#;
+        let content = r#"<w:p><w:pPr><w:pStyle w:val="Child"/></w:pPr><w:r><w:t>漢字</w:t></w:r></w:p><w:p><w:pPr><w:pStyle w:val="Child"/></w:pPr><w:r><w:rPr><w:rStyle w:val="Accent"/></w:rPr><w:t>漢字</w:t></w:r></w:p><w:p><w:pPr><w:pStyle w:val="Child"/></w:pPr><w:r><w:rPr><w:rStyle w:val="Accent"/><w:rFonts w:ascii="Direct Box" w:hAnsi="Direct Box" w:eastAsia="Direct CJK"/><w:b/><w:i w:val="0"/><w:lang w:eastAsia="zh-CN"/></w:rPr><w:t>漢字</w:t></w:r></w:p><w:p><w:r><w:t>漢字</w:t></w:r></w:p><w:p><w:pPr><w:pStyle w:val="ThemeBox"/></w:pPr><w:r><w:t>漢字</w:t></w:r></w:p>"#;
+        let theme = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:fontScheme><a:majorFont><a:latin typeface="Heading"/><a:ea typeface="Major CJK"/><a:cs typeface=""/></a:majorFont><a:minorFont><a:latin typeface="Theme Box"/><a:ea typeface="Theme CJK"/><a:cs typeface=""/></a:minorFont></a:fontScheme></a:themeElements></a:theme>"#;
+        for vml in [false, true] {
+            let boxed = if vml {
+                format!(
+                    r#"<w:p><w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml"><v:shape id="Box" style="position:absolute;width:216pt;height:108pt" filled="f" stroked="f"><v:textbox><w:txbxContent>{content}</w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p>"#
+                )
+            } else {
+                format!(
+                    r#"<w:p><w:r><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="margin"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="2743200" cy="1371600"/><wp:wrapNone/><wp:docPr id="1" name="Box"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2743200" cy="1371600"/></a:xfrm><a:prstGeom prst="rect"/></wps:spPr><wps:txbx><w:txbxContent>{content}</w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r></w:p>"#
+                )
+            };
+            for in_header in [false, true] {
+                let bytes = if in_header {
+                    crate::seed::fixture::Package::new(
+                        r#"<w:p/><w:sectPr><w:headerReference w:type="default" r:id="header"/></w:sectPr>"#,
+                    )
+                    .styles(styles)
+                    .part(
+                        "header1.xml",
+                        "header",
+                        "header",
+                        "header",
+                        &format!("<w:hdr {}>{boxed}</w:hdr>", crate::seed::fixture::NS),
+                    )
+                } else {
+                    crate::seed::fixture::Package::new(&boxed).styles(styles)
+                }
+                .part("theme/theme1.xml", "theme", "theme", "theme", theme)
+                .bytes();
+                let preflight = ooxml_font_preflight::docx_font_preflight(&bytes).unwrap();
+                let parsed = docx_parse::parse_docx_s9_wire(&bytes, Default::default())
+                    .unwrap()
+                    .document
+                    .package;
+                let request = crate::layout_request::region_layout_request(
+                    &serde_json::to_value(parsed).unwrap(),
+                    24.0,
+                );
+                let engine = EngineSession::new(1703);
+                crate::seed::seed_from_docx(engine.doc(), &bytes).unwrap();
+                let requirements: Vec<serde_json::Value> = serde_json::from_str(
+                    &engine
+                        .layout_font_requirements_json(&request.to_string())
+                        .unwrap(),
+                )
+                .unwrap();
+                for (family, bold, italic, script) in [
+                    ("Paragraph CJK", true, true, "cjk-jp"),
+                    ("Character CJK", false, true, "cjk-tc"),
+                    ("Direct CJK", true, false, "cjk-sc"),
+                    ("Default CJK", false, false, "cjk-kr"),
+                    ("Theme CJK", false, false, "cjk-jp"),
+                    ("Theme Box", false, false, "cjk-jp"),
+                ] {
+                    assert!(
+                        requirements.iter().any(|face| {
+                            face["family"] == family
+                                && face["bold"] == bold
+                                && face["italic"] == italic
+                                && face["scripts"] == serde_json::json!([script])
+                        }),
+                        "{family}, vml={vml}, header={in_header}: {requirements:?}"
+                    );
+                }
+                for requirement in requirements {
+                    let face = preflight
+                        .faces
+                        .iter()
+                        .find(|face| {
+                            face.family
+                                .eq_ignore_ascii_case(requirement["family"].as_str().unwrap())
+                                && face.bold == requirement["bold"].as_bool().unwrap()
+                                && face.italic == requirement["italic"].as_bool().unwrap()
+                        })
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "missing {requirement}, vml={vml}, header={in_header}: {:?}",
+                                preflight.faces
+                            )
+                        });
+                    let scripts: Vec<_> = requirement["scripts"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|script| script.as_str().unwrap())
+                        .collect();
+                    assert_eq!(
+                        face.scripts, scripts,
+                        "{requirement}, vml={vml}, header={in_header}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn raw_docx_font_preflight_matches_engine_cjk_faces_by_language() {
         let normal = |language: &str| {
             format!(
@@ -27113,11 +27861,15 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 ),
                 Some(&["cjk-jp"]),
             ),
-            (normal("ja-JP"), paragraph("", korean, "漢字"), None),
+            (
+                normal("ja-JP"),
+                paragraph("", korean, "漢字"),
+                Some(&["cjk-jp"]),
+            ),
             (
                 normal("ja-JP"),
                 paragraph("", r#"<w:rStyle w:val="Traditional"/>"#, "繁體"),
-                None,
+                Some(&["cjk-jp"]),
             ),
         ];
         for (styles, body, expected) in cases {
@@ -27623,10 +28375,12 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                     .iter()
                     .map(|note| note["height"].as_f64().unwrap())
                     .sum();
-                assert_eq!(
-                    page["footnoteReservedHeight"].as_f64().unwrap(),
-                    separator_height + note_height
-                );
+                let taken = if kind == "footnote" {
+                    &page["footnoteReservedHeight"]
+                } else {
+                    &area["height"]
+                };
+                assert_eq!(taken.as_f64().unwrap(), separator_height + note_height);
             }
         }
     }

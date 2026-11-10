@@ -13,7 +13,9 @@ import {
   type PptxCommandScope,
   type PptxPluginCommandBinding,
 } from '../commands/createPptxCommandStore';
-import { BUILT_IN_CHORDS, EDITING_CHORDS, normalizeChord } from '../commands/descriptors';
+import { isPluginCommandId, normalizeChord } from '../commands/descriptors';
+import { EDITING_CHORDS, inputKeepsChord } from '../commands/shortcutKeys';
+import { hostPluginChords, releasedChord, shortcutOwner } from '../commands/shortcutTable';
 import { commandReason } from '../commands/evaluate';
 import type {
   PptxCommandStore,
@@ -39,6 +41,7 @@ import type {
   PptxPluginGeometry,
   PptxPluginGrant,
   PptxPluginLayout,
+  PptxPluginRect,
   PptxPluginSelection,
   PptxPluginSnapshot,
 } from './types';
@@ -70,6 +73,8 @@ export interface PptxPluginHost {
   generation(): string | null;
   version(): string;
   selectionChanged(selection: PptxPluginSelection): void;
+  focusChanged(focused: boolean): void;
+  localeChanged(locale: string): void;
   modeChanged(readOnly: boolean): void;
   layoutChanged(layout: PptxPluginLayout | null): void;
   /**
@@ -145,10 +150,13 @@ export function createPptxPluginHost(access: PptxPluginHostAccess | PptxPluginVi
   let detachUpdates: (() => void) | null = null;
   let installed = false;
   let generations = 0;
+  let viewport: PptxPluginRect | null = null;
   let commandSignature: string | null = null;
   const state = {
     version: '',
     readOnly: false,
+    focused: false,
+    locale: 'en',
     selection: null as PptxPluginSelection,
     layout: null as PptxPluginLayout | null,
   };
@@ -238,6 +246,8 @@ export function createPptxPluginHost(access: PptxPluginHostAccess | PptxPluginVi
       generation,
       version: state.version,
       readOnly: state.readOnly,
+      focused: state.focused,
+      locale: state.locale,
       grant: runtime.grant(pluginId) as PptxPluginGrant,
       selection: state.selection,
       layout: state.layout,
@@ -259,6 +269,15 @@ export function createPptxPluginHost(access: PptxPluginHostAccess | PptxPluginVi
   });
 
   const notify = (event: PptxPluginEvent): void => runtime.notify(event);
+  const notifyViewport = (): void => {
+    const generation = runtime.generation();
+    const geometry = state.layout ? access.geometry() : null;
+    const next = geometry && sameLayout(geometry.layout, state.layout) ? geometry.viewport ?? null : null;
+    if (viewport === next || (viewport && next && viewport.x === next.x && viewport.y === next.y &&
+      viewport.width === next.width && viewport.height === next.height)) return;
+    viewport = next ? { ...next } : null;
+    if (generation) notify({ type: 'viewport-change', generation, viewport });
+  };
 
   const documentChanged = (): void => {
     const generation = runtime.generation();
@@ -269,6 +288,7 @@ export function createPptxPluginHost(access: PptxPluginHostAccess | PptxPluginVi
     if (state.layout && state.layout.version !== version) {
       state.layout = null;
       notify({ type: 'layout-change', generation, layout: null });
+      notifyViewport();
     }
   };
 
@@ -355,6 +375,7 @@ export function createPptxPluginHost(access: PptxPluginHostAccess | PptxPluginVi
       state.layout = null;
       state.selection = null;
       observe();
+      viewport = null;
       generations += 1;
       runtime.open(`presentation-${generations}`);
     },
@@ -377,6 +398,20 @@ export function createPptxPluginHost(access: PptxPluginHostAccess | PptxPluginVi
       }
     },
 
+    focusChanged(focused) {
+      if (focused === state.focused) return;
+      state.focused = focused;
+      const generation = runtime.generation();
+      if (generation) notify({ type: 'focus-change', generation, focused });
+    },
+
+    localeChanged(locale) {
+      if (locale === state.locale) return;
+      state.locale = locale;
+      const generation = runtime.generation();
+      if (generation) notify({ type: 'locale-change', generation, locale });
+    },
+
     modeChanged(readOnly) {
       if (readOnly === state.readOnly) return;
       state.readOnly = readOnly;
@@ -390,11 +425,15 @@ export function createPptxPluginHost(access: PptxPluginHostAccess | PptxPluginVi
       state.layout = layout;
       const generation = runtime.generation();
       if (generation) notify({ type: 'layout-change', generation, layout });
+      notifyViewport();
     },
 
     layoutId: () => (runtime.generation() === null ? null : state.layout?.id ?? null),
 
-    geometryChanged: () => runtime.touch(),
+    geometryChanged() {
+      notifyViewport();
+      runtime.touch();
+    },
 
     activations: () => runtime.activations(),
     subscribe: (listener) => runtime.subscribe(listener),
@@ -417,13 +456,24 @@ export function createPptxPluginHost(access: PptxPluginHostAccess | PptxPluginVi
         for (const command of definition.commands ?? []) {
           const id: PptxPluginCommandId = `plugin:${entry.pluginId}/${command.id}`;
           const shortcuts: { chord: string; args: null }[] = [];
-          for (const chord of command.shortcuts ?? []) {
+          const hostChords = hostPluginChords(commands, id);
+          for (const chord of hostChords ?? []) {
+            claimed.set(chord, id);
+            shortcuts.push({ chord, args: null });
+          }
+          for (const chord of hostChords ? [] : (command.shortcuts ?? [])) {
             const canonical = normalizeChord(chord)!;
-            const owner = BUILT_IN_CHORDS.has(canonical)
-              ? 'a built-in command'
-              : EDITING_CHORDS.has(canonical)
-                ? 'text editing'
-                : claimed.get(canonical);
+            const held = shortcutOwner(commands, canonical);
+            const editing = inputKeepsChord(canonical) ||
+              (EDITING_CHORDS.has(canonical) && !releasedChord(commands, canonical));
+            const owner =
+              held !== undefined && isPluginCommandId(held)
+                ? held
+                : editing
+                  ? 'text editing'
+                  : held !== undefined
+                    ? 'a built-in command'
+                    : claimed.get(canonical);
             if (!owner) {
               claimed.set(canonical, id);
               shortcuts.push({ chord, args: null });
@@ -455,6 +505,7 @@ export function createPptxPluginHost(access: PptxPluginHostAccess | PptxPluginVi
         for (const local of definition.toolbar ?? [])
           toolbar.push(`plugin:${entry.pluginId}/${local}`);
       }
+      parts.push(`shortcuts:${commands.shortcutRevision()}`);
       const signature = parts.join('|');
       if (signature === commandSignature) {
         commands.refresh();

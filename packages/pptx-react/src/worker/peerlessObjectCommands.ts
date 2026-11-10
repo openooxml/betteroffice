@@ -1,3 +1,4 @@
+import { ProposalPictureMediaTooLargeError } from '@betteroffice/pptx';
 import type { PresentationCommandAck, PresentationCommandMutation } from '@betteroffice/pptx/worker';
 import type { PptxCommandArgs } from '../commands/types';
 import type { PeerlessPresentation } from './usePeerlessPresentation';
@@ -5,6 +6,17 @@ import type { PeerlessPresentation } from './usePeerlessPresentation';
 export function invokePeerless(run: PeerlessPresentation, mutation: PresentationCommandMutation,
   options?: { reportRefusal?: boolean }): Promise<PresentationCommandAck> {
   run.require();
+  if (mutation.method === 'propose' && Array.isArray(mutation.args[2])) {
+    let totalBytes = 0;
+    for (const edit of mutation.args[2]) {
+      if (!edit || edit.type !== 'addPicture' || typeof edit.draft?.mediaBase64 !== 'string') continue;
+      let bytes: number;
+      try { bytes = atob(edit.draft.mediaBase64).length; }
+      catch { continue; }
+      totalBytes += bytes;
+    }
+    if (totalBytes > 8 * 1024 * 1024) throw new ProposalPictureMediaTooLargeError(totalBytes);
+  }
   return run.store.dispatch({ kind: 'invoke', payload: { ...mutation, inputTime: performance.now(), undoGroup: 'object' } }, options);
 }
 

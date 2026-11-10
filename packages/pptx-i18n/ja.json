@@ -52,6 +52,7 @@
     "decreaseFontSize": "フォント サイズを小さくする",
     "increaseFontSize": "フォント サイズを大きくする",
     "underline": "下線",
+    "strikethrough": "取り消し線",
     "more": "その他",
     "fillColor": "塗りつぶしの色",
     "noFill": "塗りつぶしなし",
@@ -91,6 +92,12 @@
     "fallbackTitle": "スライド {number}",
     "canvasLabel": "{total} 枚中 {current} 枚目のスライド",
     "canvasLabelWithSelection": "{total} 枚中 {current} 枚目のスライド、選択中のオブジェクト {name}"
+  },
+  "a11y": {
+    "chartNoData": "データなし",
+    "slideWithTitle": "{total} 枚中 {current} 枚目のスライド：{title}",
+    "objectSelected": "{name} を選択しました",
+    "editingText": "{name} を編集中"
   },
   "editor": {
     "appLabel": "プレゼンテーション スライド エディター",
@@ -156,6 +163,17 @@
     "stalePreview": "このプレビューは更新後のスライドを使用しています。適用すると変更された対象が上書きされます。",
     "geometry": "位置とサイズ（x, y, 幅, 高さ）",
     "geometryValues": "{before} → {after} pt",
+    "layoutChanged": "レイアウトを変更",
+    "backgroundChanged": "背景を変更",
+    "rowInserted": "行を挿入しました",
+    "rowDeleted": "行を削除しました",
+    "columnInserted": "列を挿入しました",
+    "columnDeleted": "列を削除しました",
+    "broughtToFront": "最前面へ移動",
+    "sentToBack": "最背面へ移動",
+    "broughtForward": "前面へ移動",
+    "sentBackward": "背面へ移動",
+    "zOrderChanged": "重なり順を変更",
     "appearance": "外観またはテキスト書式が変更されました",
     "changedAgain": "対象が再び変更されました。適用する前に更新されたプレビューを確認してください。",
     "canvasTitle": "このスライドの変更",
@@ -168,7 +186,14 @@
     "canvasStale": "対象が変更されました。適用する前に［確認の詳細］を開いて更新されたプレビューを確認してください。",
     "previousPosition": "変更前",
     "proposedPosition": "変更後",
-    "loadingDiff": "変更を読み込んでいます…"
+    "loadingDiff": "変更を読み込んでいます…",
+    "slideStrip": null,
+    "previewSlide": null,
+    "insertedShape": null,
+    "deletedShape": null,
+    "insertedSlide": null,
+    "deletedSlide": null,
+    "movedFrom": null
   },
   "commands": {
     "moreControls": "その他のコントロール",
@@ -212,8 +237,25 @@
       "permissionDenied": "ホスト アプリケーションがこのプラグインによるこのコマンドの使用を許可していません。",
       "unsupportedPolicy": "プラグインはまだこのコマンドを実行できません。代わりに編集バッチを使用してください。",
       "pluginUnavailable": "プラグインは現在アクティブではありません。",
-      "aborted": "コマンドが実行される前にプラグインの操作がキャンセルされました。"
-    }
+      "aborted": "コマンドが実行される前にプラグインの操作がキャンセルされました。",
+      "clipboardUnavailable": "クリップボードへのアクセスが利用できないか、拒否されました。",
+      "tableRequired": "先に表のセル内にカーソルを置いてください。",
+      "lastSlide": "最後のスライドは削除できません。"
+    },
+    "cut": "切り取り",
+    "copy": "コピー",
+    "paste": "貼り付け",
+    "pastePlainText": "書式なしテキストとして貼り付け",
+    "insert": "挿入",
+    "delete": "削除",
+    "deleteTable": "表の削除",
+    "duplicateSlide": "スライドの複製",
+    "insertRowsAbove": "上に行を挿入",
+    "insertRowsBelow": "下に行を挿入",
+    "insertColumnsLeft": "左に列を挿入",
+    "insertColumnsRight": "右に列を挿入",
+    "deleteRows": "行の削除",
+    "deleteColumns": "列の削除"
   },
   "plugins": {
     "toolbarGroup": "プラグイン",
@@ -225,5 +267,20 @@
     "label": "共同編集者",
     "moreCollaborators": "{count, plural, other {あと # 人の共同編集者}}",
     "moreSelections": "+{count, plural, other {# 件の選択}}"
+  },
+  "contextMenu": {
+    "text": "テキストメニュー",
+    "shape": "図形メニュー",
+    "table": "表メニュー",
+    "slide": "スライドメニュー"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "delete": "Del",
+    "escape": "Esc",
+    "pageup": "Page Up",
+    "pagedown": "Page Down"
   }
 }

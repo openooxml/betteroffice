@@ -1,3 +1,5 @@
+export type { BundledFontFace } from '@betteroffice/fonts';
+export type { PptxBundledFont } from './bundledFonts';
 export { PptxEditor, PptxWorkerEditorChunkLoadError } from './PptxEditor';
 export type { PptxAsyncEditorApi, PptxAsyncEditorAccess } from './worker/createPeerlessEditorApi';
 export type { PptxWorkerEditorApi } from './worker/createWorkerEditorApi';
@@ -55,6 +57,13 @@ export { LocaleProvider, useTranslation, type LocaleProviderProps } from './i18n
 
 export { PptxCommandProvider, type PptxCommandProviderProps } from './commands/PptxCommandProvider';
 export { PptxCommandAdmissionError, type PptxCommandAdmissionCode } from './commands/createPptxCommandStore';
+// Keyboard shortcuts a host can remap or disable
+export type {
+  PptxShortcutId,
+  PptxShortcuts,
+} from './commands/shortcuts';
+export type { ShortcutChord } from '../../../shared/keyboard/chords';
+export type { ResolvedShortcuts, ShortcutBinding, ShortcutIssue } from '../../../shared/keyboard/resolve';
 export {
   usePptxCommands,
   usePptxCommandState,
@@ -114,6 +123,8 @@ export type {
   PptxPluginError,
   PptxPluginErrorPhase,
   PptxPluginEvent,
+  PptxPluginFocusChangeEvent,
+  PptxPluginLocaleChangeEvent,
   PptxPluginFailureCode,
   PptxPluginGeometry,
   PptxPluginGrant,
@@ -129,6 +140,7 @@ export type {
   PptxPluginRefusal,
   PptxPluginSelection,
   PptxPluginSnapshot,
+  PptxPluginViewportChangeEvent,
 } from './plugins/types';
 
 export type { PptxExportList, SlideLayoutSnapshot, HeaderFooterSettings, SlideHeaderFooterText, SlideDateText, SlideHeaderFooter } from '@betteroffice/pptx';

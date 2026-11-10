@@ -135,7 +135,14 @@
       "unsupportedCommand": "尚不支援。",
       "invalidArguments": "此值無效。",
       "inputFailed": "先前的儲存格輸入無法儲存。",
+      "editUnsupported": "無法在此處套用此編輯。活頁簿未變更。",
+      "editUnsupportedChart": "無法套用此編輯：圖表使用了此編輯會移動的儲存格。活頁簿未變更。",
+      "editUnsupportedTable": "無法套用此編輯：表格使用了此編輯會移動的儲存格。活頁簿未變更。",
+      "editUnsupportedPivot": "無法套用此編輯：樞紐分析表使用了此編輯會移動的儲存格。活頁簿未變更。",
       "sheetProtected": "此儲存格位於受保護的工作表上。",
+      "hostRefused": "不允許此編輯。",
+      "tooManyToCheck": "儲存格過多，外掛程式無法檢查（上限 {limit}）。",
+      "hostStarting": "編輯器仍在啟動中。請稍後再試。",
       "documentReplaced": "已開啟另一本活頁簿。",
       "targetChanged": "選取範圍已變更。",
       "gestureActive": "請先完成圖表移動。",
@@ -146,8 +153,31 @@
       "permissionDenied": "主機應用程式尚未允許此外掛程式使用此命令。",
       "unsupportedPolicy": "外掛程式尚無法執行此命令。請改用編輯批次。",
       "pluginUnavailable": "外掛程式已不再作用中。",
-      "aborted": "外掛程式動作在命令執行前已取消。"
-    }
+      "aborted": "外掛程式動作在命令執行前已取消。",
+      "clipboardUnavailable": "此瀏覽器不允許從功能表貼上。請使用鍵盤快速鍵。",
+      "lastSheet": "活頁簿至少需要一個工作表。",
+      "sheetAtEdge": "無法再移動此工作表。",
+      "sheetNameInvalid": "工作表名稱需為 1 到 31 個字元、不能重複，且不能包含 : \\ / ? * [ ]。",
+      "clipboardDenied": "瀏覽器不允許存取剪貼簿。"
+    },
+    "cut": "剪下",
+    "copy": "複製",
+    "paste": "貼上",
+    "pastePlainText": "以純文字貼上",
+    "clearContents": "清除內容",
+    "insert": "插入",
+    "delete": "刪除",
+    "insertRowsAbove": "在上方插入列",
+    "insertRowsBelow": "在下方插入列",
+    "insertColumnsLeft": "在左側插入欄",
+    "insertColumnsRight": "在右側插入欄",
+    "deleteRows": "刪除列",
+    "deleteColumns": "刪除欄",
+    "insertSheet": "插入工作表",
+    "deleteSheet": "刪除工作表",
+    "renameSheet": "重新命名",
+    "moveSheetLeft": "向左移",
+    "moveSheetRight": "向右移"
   },
   "editor": {
     "appLabel": "試算表編輯器",
@@ -162,7 +192,11 @@
     "showDetails": "顯示詳細資料",
     "openPrompt": "開啟 XLSX 檔案",
     "sheetTabsLabel": "工作表",
-    "clearExceedsLimit": "清除超過儲存格限制"
+    "clearExceedsLimit": "清除超過儲存格限制",
+    "cellMenuLabel": "儲存格功能表",
+    "sheetTabMenuLabel": "工作表索引標籤功能表",
+    "renameSheetLabel": "重新命名工作表",
+    "sheetNamePrefix": "工作表"
   },
   "presence": {
     "label": "共同作業者",
@@ -178,6 +212,7 @@
     "accept": "接受",
     "reject": "拒絕",
     "forceApply": "強制套用",
+    "forceBlockedReason": "結構變更後無法套用此提案。",
     "staleWarning": "儲存格在提案後已變更：{cells}"
   },
   "a11y": {
@@ -187,12 +222,27 @@
     "cellLabel": "{address}，{value}",
     "cellLabelSelected": "{address}，{value}，已選取",
     "emptyCellLabel": "{address}，空白",
-    "emptyCellLabelSelected": "{address}，空白，已選取"
+    "emptyCellLabelSelected": "{address}，空白，已選取",
+    "hasFormula": "{label}，包含公式",
+    "rangeSelected": "已選取 {start} 到 {end}，{rows} 列 × {columns} 欄",
+    "sheetActivated": "{name}，第 {index} 個工作表，共 {count} 個",
+    "cellInputLabel": "編輯儲存格 {address}",
+    "gridRoleDescription": "工作表"
   },
   "plugins": {
     "toolbarGroup": "外掛程式",
     "panelTabs": "外掛程式面板",
     "collapsePanel": "收合 {title}",
-    "expandPanel": "展開 {title}"
+    "expandPanel": "展開 {title}",
+    "rowGutter": "外掛程式列標記"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "del": "Del",
+    "escape": "Esc",
+    "pageUp": "Page Up",
+    "pageDown": "Page Down"
   }
 }

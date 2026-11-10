@@ -6,7 +6,8 @@
 mod edit;
 pub(crate) use edit::quoted_sheet;
 pub use edit::{
-    ChartMetadata, ChartSeriesInfo, chart_bytes, chart_metadata, chart_references, edit_chart,
+    ChartMetadata, ChartSeriesInfo, agreed_chart_bytes, chart_bytes, chart_metadata,
+    chart_references, conflicting_drawing_anchor, edit_chart,
 };
 
 #[cfg(feature = "test-counters")]
@@ -28,10 +29,8 @@ use xlsx_model::{
 };
 
 use crate::package::PartContentType;
-use crate::tree::{
-    Edit, Element, Part, Replacement, escape_text, names_are_resolvable, parse_tree,
-};
-use crate::xml::{find_part, resolve_part_path};
+use crate::tree::{Edit, Element, Part, Replacement, names_are_resolvable, parse_tree};
+use crate::xml::{find_part, format_code_text, resolve_part_path, xstring_attribute_value};
 use crate::{MAX_CHART_ANCHORS, MAX_CHART_REFS, MAX_DEPTH, ParseError};
 
 /// relationship references inside a part (`r:id`).
@@ -44,6 +43,9 @@ pub(crate) const NS_PACKAGE_RELATIONSHIPS: &str =
 const NS_CHART: &str = "http://schemas.openxmlformats.org/drawingml/2006/chart";
 /// `cx:chartSpace`, whose reference syntax and caches are their own vocabulary.
 const NS_CHART_EX: &str = "http://schemas.microsoft.com/office/drawing/2014/chartex";
+/// The 2012 chart extensions, whose `f` and `sqref` hold more references: a
+/// data label range, the full range behind a filtered series.
+const NS_CHART_2012: &str = "http://schemas.microsoft.com/office/drawing/2012/chart";
 /// the worksheet drawing vocabulary that carries the anchors.
 pub(crate) const NS_SPREADSHEET_DRAWING: &str =
     "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing";
@@ -861,6 +863,10 @@ struct CacheSite {
     /// whether the cache carries content [`regenerated_cache`] does not
     /// re-emit, which it would therefore delete.
     unmodelled_content: bool,
+    /// whether a point carries its own `formatCode`, as Excel writes for a
+    /// point whose cell is formatted differently from the series, so a
+    /// rebuild writes one for every such point.
+    point_formats: bool,
     /// the points the file was authored with, so a rebuild that would empty a
     /// populated cache can be recognized and declined.
     authored_points: usize,
@@ -970,8 +976,11 @@ fn cache_site(reference: &Element) -> Option<CacheSite> {
         span: cache.splice_target(),
         format_code: cache
             .child("formatCode")
-            .map(|element| element.text_content()),
+            .map(|element| crate::read::unescape_name(&element.text_content())),
         unmodelled_content: !cache_is_fully_modelled(cache),
+        point_formats: cache
+            .child_elements()
+            .any(|child| child.is(NS_CHART, "pt") && child.attribute(None, "formatCode").is_some()),
         authored_points: cache
             .child_elements()
             .filter(|child| child.is(NS_CHART, "pt"))
@@ -980,17 +989,22 @@ fn cache_site(reference: &Element) -> Option<CacheSite> {
 }
 
 /// Whether every byte of a cache's content is something the regenerator can
-/// write back. `extLst` and a per-point `formatCode` are legal cache content
-/// this crate does not model, so a cache carrying either is left alone rather
-/// than rebuilt without it.
+/// write back. A numeric point's `formatCode` (`CT_NumVal`) is rebuilt from
+/// the number format of the cell it reads. `extLst`, and anything else, is
+/// legal cache content this crate does not model, so a cache carrying it is
+/// left alone rather than rebuilt without it.
 fn cache_is_fully_modelled(cache: &Element) -> bool {
+    let numeric = cache.local_name() == "numCache";
     cache.child_elements().all(|child| {
         child.namespace() == Some(NS_CHART)
             && match child.local_name() {
                 "formatCode" => child.attributes.is_empty(),
                 "ptCount" => child.attributes.iter().all(|value| value.name == "val"),
                 "pt" => {
-                    child.attributes.iter().all(|value| value.name == "idx")
+                    child
+                        .attributes
+                        .iter()
+                        .all(|value| value.name == "idx" || (numeric && value.name == "formatCode"))
                         && child
                             .child_elements()
                             .all(|value| value.is(NS_CHART, "v") && value.attributes.is_empty())
@@ -1019,22 +1033,33 @@ pub(crate) const MAX_CACHE_POINTS: u32 = 65_536;
 
 /// Write `refs` back into their `c:f` elements and regenerate the caches
 /// beside them from `workbook`, leaving every other byte alone. A cache that
-/// cannot be rebuilt is kept verbatim when its moved reference's cells read
-/// what the old cells read in `original`, since it still stands for them.
-/// Without `original`, for a part written by a chart edit against a workbook
-/// no longer at hand, it is kept when the moved reference keeps its shape, as
-/// a sheet rename or a row or column shift does.
+/// cannot be rebuilt is kept verbatim when its moved reference keeps its
+/// shape and still names cells of `workbook`, as a sheet rename or a row or
+/// column shift does: it then stands for the same cells it did before the
+/// move, as stale or as current as the cache of a reference that never moved.
 /// Refuses when the part no longer holds the references the model was built
-/// from, or when a moved reference's cells changed and its cache cannot be
-/// rebuilt, rather than leaving a reference pointing at one range while its
-/// cache still holds another's values.
+/// from, or when a moved reference changed shape or names no cells and its
+/// cache cannot be rebuilt, rather than leaving a reference pointing at one
+/// range while its cache still holds another's values.
+/// Why a chart reference cannot be written: it holds a character xml 1.0
+/// cannot carry, and `c:f` is plain text with no escape for one. Only a file
+/// that already wrote such a reference can hold it; an edit that would write
+/// it anew is refused with this reason, and a save keeps the part as authored.
+pub(crate) const UNWRITABLE_REFERENCE: &str =
+    "chart reference contains a character xml cannot carry";
+
+/// Whether `error` is a chart part refused for [`UNWRITABLE_REFERENCE`], which
+/// a save answers by keeping that part as authored.
+pub fn is_unwritable_chart_reference(error: &ParseError) -> bool {
+    matches!(error, ParseError::UnsupportedEdit(reason) if reason == UNWRITABLE_REFERENCE)
+}
+
 pub(crate) fn patch_chart_refs(
     part: &[u8],
     path: &str,
     refs: &[ChartRef],
     workbook: &xlsx_model::Workbook,
     owner: &str,
-    original: Option<(&xlsx_model::Workbook, &str)>,
 ) -> Result<Vec<u8>, ParseError> {
     let source = Part::decode(part)?;
     let sites = ref_sites(&source.tree()?)?;
@@ -1049,6 +1074,9 @@ pub(crate) fn patch_chart_refs(
     for (site, reference) in sites.iter().zip(refs) {
         if site.formula == reference.formula {
             continue;
+        }
+        if crate::tree::escape_text(&reference.formula).is_err() {
+            return Err(ParseError::UnsupportedEdit(UNWRITABLE_REFERENCE.into()));
         }
         let Some(span) = site.span.clone() else {
             return Err(ParseError::UnsupportedEdit(
@@ -1073,14 +1101,16 @@ pub(crate) fn patch_chart_refs(
         ) {
             Ok(markup) => markup,
             Err(_)
-                if match original {
-                    Some((original, original_owner)) => same_inputs(
-                        (&site.formula, original, original_owner),
-                        (&reference.formula, workbook, owner),
-                    ),
-                    None => reference_shape(&site.formula)
-                        .is_some_and(|shape| reference_shape(&reference.formula) == Some(shape)),
-                } =>
+                if reference_shape(&site.formula)
+                    .is_some_and(|shape| reference_shape(&reference.formula) == Some(shape))
+                    && reference_inputs(
+                        &reference.formula,
+                        workbook,
+                        owner,
+                        MAX_CACHE_POINTS as usize,
+                        ReferenceShape::Rectangular,
+                    )
+                    .is_ok() =>
             {
                 continue;
             }
@@ -1106,26 +1136,6 @@ fn reference_shape(formula: &str) -> Option<(u32, u32)> {
     split_qualifier(formula.trim())
         .and_then(|(_, area)| parse_area(area))
         .map(|(start, end)| (end.row - start.row + 1, end.col - start.col + 1))
-}
-
-/// Whether two references read the same values under the same number formats,
-/// each against its own workbook, so a cache authored for one stands for the
-/// other.
-fn same_inputs(
-    before: (&str, &xlsx_model::Workbook, &str),
-    after: (&str, &xlsx_model::Workbook, &str),
-) -> bool {
-    let limit = MAX_CACHE_POINTS as usize;
-    if reference_shape(before.0) != reference_shape(after.0) {
-        return false;
-    }
-    matches!(
-        (
-            reference_inputs(before.0, before.1, before.2, limit, ReferenceShape::Rectangular),
-            reference_inputs(after.0, after.1, after.2, limit, ReferenceShape::Rectangular),
-        ),
-        (Ok(before), Ok(after)) if before == after
-    )
 }
 
 /// What a rebuilt cache must be able to stand behind, and how many points the
@@ -1270,26 +1280,65 @@ fn regenerated_cache_inputs(
     }
     let prefix = &cache.prefix;
     let mut out = String::new();
-    if let Some(format_code) = format_override
+    let series_format = format_override
         .filter(|_| numeric)
-        .or(cache.format_code.as_deref())
-    {
+        .or(cache.format_code.as_deref());
+    if let Some(format_code) = series_format {
         out.push_str(&format!(
             "<{prefix}formatCode>{}</{prefix}formatCode>",
-            escape_text(format_code)?
+            format_code_text(format_code)
         ));
     }
+    let point_formats = numeric && cache.point_formats && fidelity == CacheFidelity::Persisted;
     out.push_str(&format!("<{prefix}ptCount val=\"{}\"/>", cells.len()));
-    for (index, text) in points.iter().enumerate() {
+    for (index, (text, (_, code))) in points.iter().zip(cells).enumerate() {
         let Some(text) = text else {
             continue;
         };
+        let format = if point_formats && *code != series_format.unwrap_or("General") {
+            format!(" formatCode=\"{}\"", xstring_attribute_value(code))
+        } else {
+            String::new()
+        };
         out.push_str(&format!(
-            "<{prefix}pt idx=\"{index}\"><{prefix}v>{}</{prefix}v></{prefix}pt>",
-            escape_text(text)?
+            "<{prefix}pt idx=\"{index}\"{format}><{prefix}v>{}</{prefix}v></{prefix}pt>",
+            cache_point_text(text)
         ));
     }
     Ok(out)
+}
+
+/// A cache point's `c:v` text, which never fails: the value is an
+/// `ST_Xstring`, so a character xml 1.0 cannot carry is written as `_xHHHH_`,
+/// the form Excel writes, an underscore that would start such an escape as
+/// `_x005F_`, and no cell text can keep a cache from being saved.
+pub(crate) fn cache_point_text(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = String::with_capacity(value.len());
+    for (index, ch) in value.char_indices() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '\r' => out.push_str("&#13;"),
+            '_' if bytes
+                .get(index + 1)
+                .is_some_and(|b| matches!(b, b'x' | b'X'))
+                && bytes.get(index + 6) == Some(&b'_')
+                && bytes
+                    .get(index + 2..index + 6)
+                    .is_some_and(|hex| hex.iter().all(u8::is_ascii_hexdigit)) =>
+            {
+                out.push_str("_x005F_");
+            }
+            '\t' | '\n' => out.push(ch),
+            _ if ch < ' ' || ch == '\u{fffe}' || ch == '\u{ffff}' => {
+                out.push_str(&format!("_x{:04X}_", ch as u32));
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 /// One cached point, or `None` for a cell a cache omits.
@@ -1685,22 +1734,35 @@ pub(crate) fn chart_reference_areas(
     owner: Option<&str>,
 ) -> Result<Option<Vec<(String, CellRef)>>, ParseError> {
     let root = parse_tree(part)?;
-    if !names_are_resolvable(&root) || unsupported_reference_form(&root, 0) {
+    if !names_are_resolvable(&root) || unreadable_reference_form(&root, 0) {
         return Ok(None);
     }
+    let mut formulas = ref_sites(&root)?
+        .into_iter()
+        .map(|site| site.formula)
+        .collect::<Vec<_>>();
+    extension_reference_texts(&root, 0, &mut formulas);
     let mut areas = Vec::new();
-    for site in ref_sites(&root)? {
-        let formula = site.formula.trim();
-        if formula.is_empty() || formula == ErrorValue::Ref.as_str() {
+    for formula in &formulas {
+        let formula = formula.trim();
+        if formula.is_empty()
+            || formula == ErrorValue::Ref.as_str()
+            || is_string_literal(formula)
+            || is_external_area(formula)
+        {
             continue;
         }
         let Some((qualifier, area)) = split_qualifier(formula) else {
             return Ok(None);
         };
-        let (Some(sheet), Some((_, end))) = (
-            qualifier.or_else(|| owner.map(str::to_owned)),
-            parse_area(area),
-        ) else {
+        let Some(sheet) = qualifier.or_else(|| owner.map(str::to_owned)) else {
+            return Ok(None);
+        };
+        if area == ErrorValue::Ref.as_str() {
+            areas.push((sheet, CellRef::new(0, 0)));
+            continue;
+        }
+        let Some((_, end)) = parse_area(area) else {
             return Ok(None);
         };
         areas.push((sheet, end));
@@ -1806,6 +1868,77 @@ fn chart_claims(element: &Element, depth: usize) -> usize {
 /// classic `c:chartSpace` whose references are all `c:f` is covered; ChartEx,
 /// pivot-sourced and externally-cached charts, and the `sqref` extension
 /// references filtered series carry, are not.
+/// [`unsupported_reference_form`] as the structural-edit guard reads it: the
+/// 2012 extensions' `f` and `sqref` are no reason to assume every cell named,
+/// since [`extension_reference_texts`] reads them as references of their own.
+/// Nothing rewrites them, so an edit moving what they name is still refused.
+fn unreadable_reference_form(element: &Element, depth: usize) -> bool {
+    if depth == 0 && !element.is(NS_CHART, "chartSpace") {
+        return true;
+    }
+    if depth > MAX_DEPTH {
+        return true;
+    }
+    let extension =
+        element.namespace() == Some(NS_CHART_2012) && matches!(element.local_name(), "f" | "sqref");
+    let unsupported = !extension
+        && (element.namespace() == Some(NS_CHART_EX)
+            || element.local_name() == "sqref"
+            || element.is(NS_CHART, "pivotSource")
+            || element.is(NS_CHART, "externalData")
+            || (element.local_name() == "f" && element.namespace() != Some(NS_CHART)));
+    unsupported
+        || element
+            .child_elements()
+            .any(|child| unreadable_reference_form(child, depth + 1))
+}
+
+/// The text of every 2012 extension `f` and `sqref`, each one reference.
+fn extension_reference_texts(element: &Element, depth: usize, out: &mut Vec<String>) {
+    if depth > MAX_DEPTH {
+        return;
+    }
+    if element.namespace() == Some(NS_CHART_2012) && matches!(element.local_name(), "f" | "sqref") {
+        out.push(element.text_content());
+        return;
+    }
+    for child in element.child_elements() {
+        extension_reference_texts(child, depth + 1, out);
+    }
+}
+
+/// `"text"`, a doubled quote escaping one: series text written as a literal,
+/// which names no cell.
+fn is_string_literal(formula: &str) -> bool {
+    formula.len() >= 2
+        && formula.starts_with('"')
+        && formula.ends_with('"')
+        && !formula[1..formula.len() - 1]
+            .replace("\"\"", "")
+            .contains('"')
+}
+
+/// `[1]Sheet!$A$1` or `'[1]Sheet name'!$A$1`: an area in another workbook,
+/// which names no sheet of this one.
+fn is_external_area(formula: &str) -> bool {
+    let (quoted, body) = match formula.strip_prefix('\'') {
+        Some(rest) => (true, rest),
+        None => (false, formula),
+    };
+    let Some((index, rest)) = body.strip_prefix('[').and_then(|body| body.split_once(']')) else {
+        return false;
+    };
+    if index.is_empty() || !index.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    let local = if quoted {
+        format!("'{rest}")
+    } else {
+        rest.to_owned()
+    };
+    matches!(split_qualifier(&local), Some((Some(_), area)) if parse_area(area).is_some())
+}
+
 fn unsupported_reference_form(element: &Element, depth: usize) -> bool {
     if depth == 0 && !element.is(NS_CHART, "chartSpace") {
         return true;

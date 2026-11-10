@@ -1,7 +1,7 @@
 {
   "fixture": "packages/xlsx/test-fixtures/sample.xlsx",
   "calculation": { "nowSerial": 45000.75, "randSeed": 42 },
-  "note": "All targets open recalculated with nowSerial; TS and Rust also set randSeed. Python has no seed, and the fixture and edits contain no volatile functions. Arguments such as <version:1> refer to first-seen result versions. Undo and redo record applied and sorted changed/limitedCells lists, using A1 on the active sheet and SheetName!A1 otherwise; historyState records the history flags and depths.",
+  "note": "All targets open recalculated with nowSerial; TS and Rust also set randSeed. Python has no seed, and the fixture and edits contain no volatile functions. Arguments such as <version:1> refer to first-seen result versions. Undo and redo record applied and sorted changed/limitedCells lists, using A1 on the active sheet and SheetName!A1 otherwise; historyState records the history flags and depths. save records the bytes and the warnings saveWithWarnings returns.",
   "steps": [
     { "op": "sheetNames", "args": {} },
     { "op": "version", "args": {} },
@@ -153,12 +153,11 @@
           },
           { "type": "setAutoFilter", "sheet": 0, "range": "A1:A3" }
         ]
-      },
-      "targets": ["ts", "rust"]
+      }
     },
-    { "op": "conditionalFormats", "args": { "sheet": 0 }, "targets": ["ts", "rust"] },
-    { "op": "sheetInfo", "args": {}, "targets": ["ts", "rust"] },
-    { "op": "version", "args": {}, "targets": ["ts", "rust"] },
+    { "op": "conditionalFormats", "args": { "sheet": 0 } },
+    { "op": "sheetInfo", "args": {} },
+    { "op": "version", "args": {} },
     {
       "op": "applyEdits",
       "args": {
@@ -171,10 +170,9 @@
             "formulas": [["SEQUENCE(2)"]]
           }
         ]
-      },
-      "targets": ["ts", "rust"]
+      }
     },
-    { "op": "cell", "args": { "sheet": 0, "row": 0, "col": 2 }, "targets": ["ts", "rust"] },
+    { "op": "cell", "args": { "sheet": 0, "row": 0, "col": 2 } },
     { "op": "cell", "args": { "sheet": 0, "row": 1, "col": 2 } },
     { "op": "cell", "args": { "sheet": 0, "row": 2, "col": 2 } },
     { "op": "calculationStatus", "args": {} },
@@ -184,6 +182,760 @@
     { "op": "searchText", "args": { "query": "Q", "options": { "limit": 2 } } },
     { "op": "rangeCells", "args": { "sheet": 0, "range": "A1:B2" } },
     { "op": "selectionFormatting", "args": { "sheet": 0, "range": "A1:B2" } },
-    { "op": "charts", "args": { "sheet": 0 } }
+    { "op": "charts", "args": { "sheet": 0 } },
+    {
+      "op": "editCharts",
+      "args": {
+        "edits": [
+          { "sheet": 0, "chart": 0, "action": "set_chart_title", "title": "Quarterly revenue" },
+          {
+            "sheet": 0,
+            "chart": 1,
+            "action": "set_series",
+            "series": 0,
+            "name": { "text": "Sales" }
+          }
+        ]
+      }
+    },
+    { "op": "charts", "args": { "sheet": 0 } },
+    { "op": "save", "args": {} },
+    {
+      "op": "moveChart",
+      "args": { "sheet": 0, "chart": "xl/drawings/drawing1.xml#0", "dx": 64, "dy": 20 }
+    },
+    { "op": "charts", "args": { "sheet": 0 } },
+    { "op": "save", "args": {} },
+    {
+      "op": "applyOps",
+      "args": {
+        "ops": [
+          {
+            "type": "setChartAnchor",
+            "sheet": 0,
+            "frame": "xl/drawings/drawing1.xml#1",
+            "part": "xl/charts/chart2.xml",
+            "from": {
+              "kind": "oneCell",
+              "from": { "col": 6, "colOff": 0, "row": 5, "rowOff": 0 },
+              "extent": { "cx": 4000000, "cy": 2500000 }
+            },
+            "to": {
+              "kind": "oneCell",
+              "from": { "col": 7, "colOff": 0, "row": 7, "rowOff": 0 },
+              "extent": { "cx": 4000000, "cy": 2500000 }
+            }
+          }
+        ]
+      }
+    },
+    { "op": "charts", "args": { "sheet": 0 } },
+    { "op": "save", "args": {} },
+    { "op": "applyOps", "args": { "ops": [{ "type": "addSheet", "index": 1, "name": "Notes" }] } },
+    {
+      "op": "applyOps",
+      "args": { "ops": [{ "type": "setCharts", "sheet": 1, "charts": [] }] },
+      "expectError": true
+    },
+    { "op": "sheetInfo", "args": {} },
+    { "op": "save", "args": {} },
+    { "op": "undo", "args": {} },
+    { "op": "sheetInfo", "args": {} },
+    { "op": "charts", "args": { "sheet": 0 } },
+    { "op": "save", "args": {} },
+    { "op": "redo", "args": {} },
+    { "op": "sheetInfo", "args": {} },
+    { "op": "save", "args": {} },
+    { "op": "historyState", "args": {} },
+    {
+      "op": "editCharts",
+      "args": { "edits": [{ "sheet": 0, "chart": 9, "action": "set_chart_title", "title": "x" }] },
+      "expectError": true
+    },
+    { "op": "editCharts", "args": { "edits": [] }, "expectError": true },
+    {
+      "op": "moveChart",
+      "args": { "sheet": 0, "chart": "xl/drawings/drawing1.xml#2", "dx": 10, "dy": 10 },
+      "expectError": true
+    },
+    {
+      "op": "applyOps",
+      "args": {
+        "ops": [
+          {
+            "type": "setChartAnchor",
+            "sheet": 0,
+            "frame": "xl/drawings/drawing1.xml#0",
+            "part": "xl/charts/chart1.xml",
+            "from": {
+              "kind": "twoCell",
+              "from": { "col": 1, "colOff": 95250, "row": 5, "rowOff": 95250 },
+              "to": { "col": 5, "colOff": 0, "row": 18, "rowOff": 0 },
+              "edit_as": "twoCell"
+            },
+            "to": {
+              "kind": "twoCell",
+              "from": { "col": 1, "colOff": 95250, "row": 5, "rowOff": 95250 },
+              "to": { "col": 5, "colOff": 0, "row": 18, "rowOff": 0 },
+              "edit_as": "twoCell"
+            }
+          }
+        ]
+      },
+      "expectError": true
+    },
+    { "op": "open", "args": { "fixture": "packages/xlsx/test-fixtures/sample.xlsx" } },
+    {
+      "op": "applyOps",
+      "args": {
+        "ops": [
+          { "type": "insertRows", "sheet": 0, "at": 2, "count": 2 },
+          { "type": "insertCols", "sheet": 0, "at": 1, "count": 1 }
+        ]
+      }
+    },
+    {
+      "op": "readCells",
+      "args": { "ranges": [{ "sheetId": "sheet:0", "range": { "kind": "a1", "a1": "A1:F7" } }] }
+    },
+    { "op": "sheetInfo", "args": {} },
+    { "op": "save", "args": {} },
+    {
+      "op": "applyOps",
+      "args": {
+        "ops": [
+          { "type": "deleteCols", "sheet": 0, "at": 1, "count": 1 },
+          { "type": "deleteRows", "sheet": 0, "at": 2, "count": 2 }
+        ]
+      }
+    },
+    {
+      "op": "readCells",
+      "args": { "ranges": [{ "sheetId": "sheet:0", "range": { "kind": "a1", "a1": "A1:E5" } }] }
+    },
+    { "op": "save", "args": {} },
+    {
+      "op": "applyOps",
+      "args": {
+        "ops": [
+          {
+            "type": "setCell",
+            "sheet": 0,
+            "at": { "row": 2, "col": 5 },
+            "cell": { "value": { "kind": "number", "value": 42 } }
+          },
+          {
+            "type": "setCell",
+            "sheet": 0,
+            "at": { "row": 3, "col": 5 },
+            "cell": { "formula": "F3*2" }
+          }
+        ]
+      }
+    },
+    {
+      "op": "readCells",
+      "args": { "ranges": [{ "sheetId": "sheet:0", "range": { "kind": "a1", "a1": "F3:F4" } }] }
+    },
+    { "op": "save", "args": {} },
+    {
+      "op": "applyOps",
+      "args": {
+        "ops": [
+          { "type": "setColWidth", "sheet": 0, "col": 1, "width": 20 },
+          { "type": "setColVisibility", "sheet": 0, "col": 2, "hidden": true },
+          { "type": "setRowHeight", "sheet": 0, "row": 1, "height": 30 },
+          { "type": "setRowVisibility", "sheet": 0, "row": 3, "hidden": true }
+        ]
+      }
+    },
+    { "op": "sheetInfo", "args": {} },
+    { "op": "save", "args": {} },
+    {
+      "op": "applyOps",
+      "args": {
+        "ops": [
+          {
+            "type": "setFreezePane",
+            "sheet": 0,
+            "pane": { "rows": 1, "cols": 1, "top_left": { "row": 1, "col": 1 } }
+          },
+          { "type": "setAutoFilter", "sheet": 0, "range": "A2:D10" }
+        ]
+      }
+    },
+    { "op": "sheetInfo", "args": {} },
+    { "op": "save", "args": {} },
+    {
+      "op": "applyOps",
+      "args": {
+        "ops": [
+          {
+            "type": "unmergeCells",
+            "sheet": 0,
+            "range": { "start": { "row": 0, "col": 0 }, "end": { "row": 0, "col": 3 } }
+          }
+        ]
+      }
+    },
+    {
+      "op": "readCells",
+      "args": { "ranges": [{ "sheetId": "sheet:0", "range": { "kind": "a1", "a1": "A1:D1" } }] }
+    },
+    { "op": "save", "args": {} },
+    {
+      "op": "applyOps",
+      "args": {
+        "ops": [
+          {
+            "type": "mergeCells",
+            "sheet": 0,
+            "range": { "start": { "row": 0, "col": 0 }, "end": { "row": 0, "col": 2 } }
+          },
+          { "type": "setAutoFilter", "sheet": 0, "range": null },
+          { "type": "setFreezePane", "sheet": 0, "pane": null }
+        ]
+      }
+    },
+    { "op": "sheetInfo", "args": {} },
+    { "op": "save", "args": {} },
+    { "op": "moveRange", "args": { "sheet": 0, "source": "B3:C4", "destination": "F3" } },
+    {
+      "op": "readCells",
+      "args": { "ranges": [{ "sheetId": "sheet:0", "range": { "kind": "a1", "a1": "A3:H4" } }] }
+    },
+    { "op": "save", "args": {} },
+    {
+      "op": "applyOps",
+      "args": {
+        "ops": [
+          {
+            "type": "setHyperlinks",
+            "sheet": 1,
+            "hyperlinks": [
+              {
+                "range": { "start": { "row": 0, "col": 0 }, "end": { "row": 0, "col": 0 } },
+                "external_target": "https://example.com/summary",
+                "location": null,
+                "tooltip": "Summary",
+                "display": null
+              }
+            ]
+          },
+          {
+            "type": "setHyperlink",
+            "sheet": 1,
+            "hyperlink": {
+              "range": { "start": { "row": 1, "col": 1 }, "end": { "row": 1, "col": 1 } },
+              "location": "Budget!A1"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "op": "exportStructured",
+      "args": {
+        "scope": [{ "sheet": 1, "range": "A1:B2" }],
+        "includeHiddenSheets": false,
+        "includeHiddenRows": false,
+        "includeHiddenColumns": false,
+        "includeDefinedNames": true,
+        "includeHiddenNames": false,
+        "maxCells": 100,
+        "maxBytes": 65536
+      }
+    },
+    { "op": "save", "args": {} },
+    {
+      "op": "applyOps",
+      "args": {
+        "ops": [
+          {
+            "type": "removeHyperlink",
+            "sheet": 1,
+            "range": { "start": { "row": 0, "col": 0 }, "end": { "row": 0, "col": 0 } }
+          }
+        ]
+      }
+    },
+    {
+      "op": "exportStructured",
+      "args": {
+        "scope": [{ "sheet": 1, "range": "A1:B2" }],
+        "includeHiddenSheets": false,
+        "includeHiddenRows": false,
+        "includeHiddenColumns": false,
+        "includeDefinedNames": true,
+        "includeHiddenNames": false,
+        "maxCells": 100,
+        "maxBytes": 65536
+      }
+    },
+    { "op": "save", "args": {} },
+    {
+      "op": "setHyperlink",
+      "args": {
+        "sheet": 0,
+        "hyperlink": {
+          "range": { "start": { "row": 2, "col": 1 }, "end": { "row": 2, "col": 1 } },
+          "externalTarget": "https://example.com/b3",
+          "tooltip": "Line"
+        }
+      }
+    },
+    {
+      "op": "exportStructured",
+      "args": {
+        "scope": [{ "sheet": 0, "range": "A1:D4" }],
+        "includeHiddenSheets": false,
+        "includeHiddenRows": false,
+        "includeHiddenColumns": false,
+        "includeDefinedNames": true,
+        "includeHiddenNames": false,
+        "maxCells": 100,
+        "maxBytes": 65536
+      }
+    },
+    { "op": "save", "args": {} },
+    {
+      "op": "removeHyperlink",
+      "args": { "sheet": 0, "range": { "start": { "row": 2, "col": 1 }, "end": { "row": 2, "col": 1 } } }
+    },
+    {
+      "op": "exportStructured",
+      "args": {
+        "scope": [{ "sheet": 0, "range": "A1:D4" }],
+        "includeHiddenSheets": false,
+        "includeHiddenRows": false,
+        "includeHiddenColumns": false,
+        "includeDefinedNames": true,
+        "includeHiddenNames": false,
+        "maxCells": 100,
+        "maxBytes": 65536
+      }
+    },
+    { "op": "save", "args": {} },
+    {
+      "op": "moveRange",
+      "args": { "sheet": 0, "source": "B3:C4", "destination": "F3" },
+      "expectError": true
+    },
+    {
+      "op": "applyOps",
+      "args": {
+        "ops": [
+          {
+            "type": "addConditionalFormat",
+            "sheet": 0,
+            "range": { "start": { "row": 4, "col": 1 }, "end": { "row": 9, "col": 1 } },
+            "kind": "cellIs",
+            "operator": "greaterThan",
+            "formulas": ["500"],
+            "format": { "fontColor": "#FF0000", "bold": true }
+          }
+        ]
+      }
+    },
+    { "op": "conditionalFormats", "args": { "sheet": 0 } },
+    { "op": "save", "args": {} },
+    {
+      "op": "applyOps",
+      "args": { "ops": [{ "type": "removeConditionalFormat", "sheet": 0, "id": "cf1" }] }
+    },
+    { "op": "conditionalFormats", "args": { "sheet": 0 } },
+    { "op": "save", "args": {} },
+    {
+      "op": "applyOps",
+      "args": {
+        "ops": [
+          {
+            "type": "setConditionalFormats",
+            "sheet": 2,
+            "formats": [
+              {
+                "sqref": "B2:B4",
+                "rules": [
+                  {
+                    "id": "cf7",
+                    "type": "cellIs",
+                    "operator": "lessThan",
+                    "formulas": ["1000"],
+                    "priority": 1,
+                    "format": { "fill": "#FFFF00" }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expectError": true
+    },
+    { "op": "conditionalFormats", "args": { "sheet": 2 } },
+    { "op": "save", "args": {} },
+    {
+      "op": "applyOps",
+      "args": { "ops": [{ "type": "setConditionalFormats", "sheet": 2, "formats": [] }] },
+      "expectError": true
+    },
+    { "op": "conditionalFormats", "args": { "sheet": 2 } },
+    { "op": "save", "args": {} },
+    {
+      "op": "applyOps",
+      "args": {
+        "ops": [
+          {
+            "type": "patchRangeStyle",
+            "sheet": 2,
+            "range": { "start": { "row": 1, "col": 0 }, "end": { "row": 1, "col": 1 } },
+            "patch": {
+              "bold": true,
+              "fillColor": "#FFCC00",
+              "horizontalAlignment": "center",
+              "border": { "preset": "outer", "style": "solid", "color": "#000000" }
+            }
+          },
+          {
+            "type": "setRangeNumberFormat",
+            "sheet": 2,
+            "range": { "start": { "row": 1, "col": 1 }, "end": { "row": 2, "col": 1 } },
+            "format": { "type": "custom", "pattern": "0.000" }
+          },
+          {
+            "type": "setRangeNumberFormat",
+            "sheet": 2,
+            "range": { "start": { "row": 1, "col": 3 }, "end": { "row": 2, "col": 3 } },
+            "format": { "type": "percent" }
+          }
+        ]
+      }
+    },
+    {
+      "op": "readCells",
+      "args": { "ranges": [{ "sheetId": "sheet:2", "range": { "kind": "a1", "a1": "A1:D4" } }] }
+    },
+    { "op": "selectionFormatting", "args": { "sheet": 2, "range": "A2:B2" } },
+    { "op": "save", "args": {} },
+    {
+      "op": "applyOps",
+      "args": {
+        "ops": [
+          {
+            "type": "applyRangeFormat",
+            "sheet": 2,
+            "range": { "start": { "row": 1, "col": 2 }, "end": { "row": 2, "col": 2 } },
+            "format": {
+              "rows": 1,
+              "columns": 1,
+              "formats": [
+                {
+                  "font": {
+                    "name": "Calibri",
+                    "size_pt": 12,
+                    "bold": true,
+                    "italic": false,
+                    "underline": false,
+                    "strike": false,
+                    "color": { "Rgb": "#1f4e79" }
+                  },
+                  "fill": { "Solid": { "Rgb": "#ddebf7" } },
+                  "border": {},
+                  "numberFormat": { "kind": "custom", "pattern": "0.0" },
+                  "alignment": { "h": "Right", "v": null, "wrap_text": false, "shrink_to_fit": false }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    { "op": "selectionFormatting", "args": { "sheet": 2, "range": "C2:C3" } },
+    {
+      "op": "readCells",
+      "args": { "ranges": [{ "sheetId": "sheet:2", "range": { "kind": "a1", "a1": "C2:C3" } }] }
+    },
+    { "op": "save", "args": {} },
+    { "op": "captureFormat", "args": { "sheet": 2, "range": "A1:B2" } },
+    {
+      "op": "applyFormat",
+      "args": {
+        "sheet": 2,
+        "range": "A6:B7",
+        "format": {
+          "rows": 1,
+          "columns": 1,
+          "formats": [
+            {
+              "font": {
+                "name": "Calibri",
+                "size_pt": 12,
+                "bold": true,
+                "italic": false,
+                "underline": false,
+                "strike": false,
+                "color": { "Rgb": "#1f4e79" }
+              },
+              "fill": { "Solid": { "Rgb": "#ddebf7" } },
+              "border": {},
+              "numberFormat": { "kind": "custom", "pattern": "0.0" },
+              "alignment": { "h": "Right", "v": null, "wrap_text": false, "shrink_to_fit": false }
+            }
+          ]
+        }
+      }
+    },
+    { "op": "selectionFormatting", "args": { "sheet": 2, "range": "A6:B7" } },
+    { "op": "save", "args": {} },
+    {
+      "op": "applyOps",
+      "args": {
+        "ops": [
+          {
+            "type": "setDefinedName",
+            "name": "Rate",
+            "refers_to": "Budget!$B$3",
+            "scope": null,
+            "hidden": null
+          },
+          {
+            "type": "setDefinedName",
+            "name": "Local",
+            "refers_to": "Summary!$B$2",
+            "scope": 1,
+            "hidden": true
+          }
+        ]
+      }
+    },
+    { "op": "listDefinedNames", "args": {} },
+    { "op": "save", "args": {} },
+    {
+      "op": "applyOps",
+      "args": { "ops": [{ "type": "deleteDefinedName", "name": "Local", "scope": 1 }] }
+    },
+    { "op": "listDefinedNames", "args": {} },
+    { "op": "save", "args": {} },
+    {
+      "op": "applyOps",
+      "args": {
+        "ops": [
+          {
+            "type": "setDefinedNames",
+            "defined_names": [{ "name": "Total", "formula": "Budget!$D$3", "local_sheet": null, "hidden": false }]
+          }
+        ]
+      },
+      "expectError": true
+    },
+    { "op": "listDefinedNames", "args": {} },
+    { "op": "save", "args": {} },
+    { "op": "applyOps", "args": { "ops": [{ "type": "addSheet", "index": 3, "name": "Added" }] } },
+    { "op": "sheetInfo", "args": {} },
+    { "op": "save", "args": {} },
+    {
+      "op": "applyOps",
+      "args": {
+        "ops": [
+          { "type": "renameSheet", "sheet": 3, "name": "Renamed" },
+          { "type": "moveSheet", "from": 3, "to": 0 }
+        ]
+      }
+    },
+    { "op": "sheetInfo", "args": {} },
+    {
+      "op": "readCells",
+      "args": { "ranges": [{ "sheetId": "sheet:1", "range": { "kind": "a1", "a1": "A1:D3" } }] }
+    },
+    { "op": "save", "args": {} },
+    { "op": "applyOps", "args": { "ops": [{ "type": "removeSheet", "index": 0 }] } },
+    { "op": "sheetInfo", "args": {} },
+    { "op": "save", "args": {} },
+    { "op": "undo", "args": {} },
+    { "op": "sheetInfo", "args": {} },
+    { "op": "save", "args": {} },
+    { "op": "undo", "args": {} },
+    { "op": "sheetInfo", "args": {} },
+    { "op": "save", "args": {} },
+    { "op": "redo", "args": {} },
+    { "op": "sheetInfo", "args": {} },
+    {
+      "op": "readCells",
+      "args": { "ranges": [{ "sheetId": "sheet:1", "range": { "kind": "a1", "a1": "A1:D3" } }] }
+    },
+    { "op": "save", "args": {} },
+    { "op": "historyState", "args": {} },
+    { "op": "version", "args": {} },
+    { "op": "applyOps", "args": { "ops": [{ "type": "bogus", "sheet": 0 }] }, "expectError": true },
+    {
+      "op": "applyOps",
+      "args": { "ops": [{ "type": "insertRows", "sheet": 0, "at": "x", "count": 1 }] },
+      "expectError": true
+    },
+    {
+      "op": "applyOps",
+      "args": { "ops": [{ "type": "setAutoFilter", "sheet": 0, "range": "A1:" }] },
+      "expectError": true
+    },
+    {
+      "op": "applyOps",
+      "args": { "ops": [{ "type": "insertRows", "sheet": 9, "at": 0, "count": 1 }] },
+      "expectError": true
+    },
+    {
+      "op": "applyOps",
+      "args": { "ops": [{ "type": "insertRows", "sheet": 0, "at": 0, "count": 2000000 }] },
+      "expectError": true
+    },
+    {
+      "op": "applyOps",
+      "args": { "ops": [{ "type": "removeSheet", "index": 7 }] },
+      "expectError": true
+    },
+    {
+      "op": "moveRange",
+      "args": { "sheet": 0, "source": "A1:", "destination": "F1" },
+      "expectError": true
+    },
+    {
+      "op": "moveRange",
+      "args": { "sheet": 0, "source": "A1:B2", "destination": "F" },
+      "expectError": true
+    },
+    {
+      "op": "moveRange",
+      "args": { "sheet": 9, "source": "A1:B2", "destination": "F1" },
+      "expectError": true
+    },
+    {
+      "op": "setHyperlink",
+      "args": {
+        "sheet": 9,
+        "hyperlink": {
+          "range": { "start": { "row": 0, "col": 0 }, "end": { "row": 0, "col": 0 } },
+          "location": "Budget!A1"
+        }
+      },
+      "expectError": true
+    },
+    {
+      "op": "removeHyperlink",
+      "args": { "sheet": 9, "range": { "start": { "row": 0, "col": 0 }, "end": { "row": 0, "col": 0 } } },
+      "expectError": true
+    },
+    { "op": "captureFormat", "args": { "sheet": 9, "range": "A1" }, "expectError": true },
+    { "op": "captureFormat", "args": { "sheet": 0, "range": "A1:" }, "expectError": true },
+    {
+      "op": "applyFormat",
+      "args": { "sheet": 0, "range": "A1", "format": { "rows": 2, "columns": 1, "formats": [] } },
+      "expectError": true
+    },
+    { "op": "version", "args": {} },
+    { "op": "historyState", "args": {} },
+    { "op": "save", "args": {} },
+    {
+      "op": "openCollaborative",
+      "args": { "fixture": "packages/xlsx/test-fixtures/sample.xlsx", "clientId": 7 }
+    },
+    {
+      "op": "applyOps",
+      "args": { "ops": [{ "type": "insertRows", "sheet": 0, "at": 2, "count": 1 }] },
+      "expectError": true
+    },
+    {
+      "op": "applyOps",
+      "args": { "ops": [{ "type": "addSheet", "index": 0, "name": "Added" }] },
+      "expectError": true
+    },
+    {
+      "op": "editCharts",
+      "args": { "edits": [{ "sheet": 0, "chart": 0, "action": "set_chart_title", "title": "x" }] },
+      "expectError": true
+    },
+    {
+      "op": "applyOps",
+      "args": { "ops": [{ "type": "setDefinedName", "name": "Shared", "refers_to": "1", "scope": null, "hidden": null }] }
+    },
+    { "op": "listDefinedNames", "args": { "scope": null } },
+    {
+      "op": "applyOps",
+      "args": { "ops": [{ "type": "deleteDefinedName", "name": "Shared", "scope": null }] }
+    },
+    { "op": "listDefinedNames", "args": { "scope": null } },
+    {
+      "op": "applyOps",
+      "args": { "ops": [{ "type": "setDefinedNames", "defined_names": [] }] },
+      "expectError": true
+    },
+    {
+      "op": "applyOps",
+      "args": {
+        "ops": [
+          {
+            "type": "setDefinedName",
+            "name": "_xlnm._FilterDatabase",
+            "refers_to": "Budget!$A$1:$B$2",
+            "scope": 0,
+            "hidden": true
+          }
+        ]
+      },
+      "expectError": true
+    },
+    { "op": "historyState", "args": {} },
+    {
+      "op": "applyOps",
+      "args": {
+        "ops": [
+          {
+            "type": "addConditionalFormat",
+            "sheet": 0,
+            "range": { "start": { "row": 0, "col": 0 }, "end": { "row": 2, "col": 0 } },
+            "kind": "cellIs",
+            "operator": "greaterThan",
+            "formulas": ["1"],
+            "format": { "bold": true }
+          }
+        ]
+      }
+    },
+    { "op": "conditionalFormats", "args": { "sheet": 0 } },
+    { "op": "removeNewestConditionalFormat", "args": { "sheet": 0 } },
+    { "op": "conditionalFormats", "args": { "sheet": 0 } },
+    { "op": "undo", "args": {} },
+    { "op": "conditionalFormats", "args": { "sheet": 0 } },
+    {
+      "op": "applyOps",
+      "args": { "ops": [{ "type": "setAutoFilter", "sheet": 0, "range": "A1:C5" }] }
+    },
+    { "op": "sheetInfo", "args": {} },
+    { "op": "listDefinedNames", "args": { "scope": 0 } },
+    {
+      "op": "applyOps",
+      "args": { "ops": [{ "type": "setAutoFilter", "sheet": 0, "range": null }] }
+    },
+    { "op": "sheetInfo", "args": {} },
+    { "op": "listDefinedNames", "args": { "scope": 0 } },
+    {
+      "op": "applyOps",
+      "args": { "ops": [{ "type": "setConditionalFormats", "sheet": 0, "formats": [] }] },
+      "expectError": true
+    },
+    { "op": "historyState", "args": {} },
+    {
+      "op": "applyOps",
+      "args": {
+        "ops": [
+          {
+            "type": "setRangeNumberFormat",
+            "sheet": 0,
+            "range": { "start": { "row": 0, "col": 1 }, "end": { "row": 0, "col": 1 } },
+            "format": { "type": "custom", "pattern": "0_x0041_\u0001\n0" }
+          }
+        ]
+      }
+    },
+    { "op": "selectionFormatting", "args": { "sheet": 0, "range": "B1:B1" } },
+    { "op": "save", "args": {} }
   ]
 }

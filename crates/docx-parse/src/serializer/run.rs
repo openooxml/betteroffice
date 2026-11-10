@@ -393,23 +393,63 @@ pub(crate) fn serialize_deleted_run(
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
     let xml = serialize_run(run, context)?;
-    if run.content.iter().any(|content| match content {
-        RunContent::Drawing { .. } => true,
-        RunContent::OpaqueDrawing { previews, .. } => !previews.is_empty(),
-        _ => false,
-    }) {
-        return Ok(xml);
+    let deleted = |text: &str| {
+        text.replace("<w:t>", "<w:delText>")
+            .replace("<w:t ", "<w:delText ")
+            .replace("<w:t/", "<w:delText/")
+            .replace("</w:t>", "</w:delText>")
+            .replace("<w:instrText>", "<w:delInstrText>")
+            .replace("<w:instrText ", "<w:delInstrText ")
+            .replace("<w:instrText/", "<w:delInstrText/")
+            .replace("</w:instrText>", "</w:delInstrText>")
+    };
+    let Some(drawings) = drawing_spans(&xml) else {
+        return Ok(deleted(&xml));
+    };
+    let mut output = String::with_capacity(xml.len() + 16);
+    let mut at = 0;
+    for span in drawings {
+        output.push_str(&deleted(&xml[at..span.start]));
+        output.push_str(&xml[span.clone()]);
+        at = span.end;
     }
-    Ok(xml
-        // Only `w:t` elements become `w:delText`.
-        .replace("<w:t>", "<w:delText>")
-        .replace("<w:t ", "<w:delText ")
-        .replace("<w:t/", "<w:delText/")
-        .replace("</w:t>", "</w:delText>")
-        .replace("<w:instrText>", "<w:delInstrText>")
-        .replace("<w:instrText ", "<w:delInstrText ")
-        .replace("<w:instrText/", "<w:delInstrText/")
-        .replace("</w:instrText>", "</w:delInstrText>"))
+    output.push_str(&deleted(&xml[at..]));
+    Ok(output)
+}
+
+/// The byte ranges of a serialized run's drawing children, whose own text is not the run's.
+fn drawing_spans(xml: &str) -> Option<Vec<std::ops::Range<usize>>> {
+    let mut spans = Vec::new();
+    let mut depth = 0usize;
+    let mut open = None;
+    for tag in crate::paragraph_identity::tags(xml)? {
+        let local = tag
+            .name
+            .rsplit_once(':')
+            .map_or(tag.name, |(_, local)| local);
+        let drawing = matches!(local, "drawing" | "pict" | "object" | "AlternateContent");
+        if tag.end {
+            depth = depth.checked_sub(1)?;
+            if depth == 1
+                && drawing
+                && let Some(start) = open.take()
+            {
+                spans.push(start..tag.range.end);
+            }
+            continue;
+        }
+        if depth == 1 && drawing {
+            if tag.empty {
+                spans.push(tag.range.clone());
+            } else {
+                open = Some(tag.range.start);
+            }
+        }
+        if !tag.empty {
+            depth += 1;
+        }
+    }
+    Some(spans)
 }
 
 fn serialize_run_properties(
@@ -723,6 +763,9 @@ pub fn serialize_shape_content(
     shape: &Shape,
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
+    if let Some(xml) = super::text_box::replay_group(shape, context)? {
+        return Ok(xml);
+    }
     if let Some(xml) = super::smart_art::replay(shape, context, false)? {
         return Ok(xml);
     }

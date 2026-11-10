@@ -247,9 +247,22 @@ export interface XlsxRangeRead {
   cells: XlsxCellRead[][];
 }
 
+/**
+ * A formula cell the engine could not compute: it keeps Excel's saved value.
+ * When the file saved none, an uncomputable function leaves it blank, an
+ * unknown function shows what the engine answered (`#NAME?`, or what a handler
+ * like `IFERROR` made of it), and an engine gap alone shows its error.
+ */
+export interface XlsxUnevaluatedCell extends XlsxCellAddress {
+  /** Functions involved, sorted: uncomputable ones (`WEBSERVICE`, `RTD`, an add-in) and names the engine does not know (a VBA function, a typo); empty when only engine gaps were. */
+  functions: string[];
+}
+
 export interface XlsxReadCalculation {
   cycleCells: XlsxCellAddress[];
   limitedCells: XlsxCellAddress[];
+  /** Formula cells the engine could not compute; omitted by cores built before the list. */
+  unevaluatedCells?: XlsxUnevaluatedCell[];
   /** Whether a list stopped at 10,000 cells. */
   truncated: boolean;
 }

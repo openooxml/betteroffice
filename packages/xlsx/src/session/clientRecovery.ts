@@ -1,8 +1,10 @@
+import { getFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { createSessionClient } from '../../../../shared/office-session/client';
 import type { Checkpoint } from '../../../../shared/office-session/commands/types';
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
-import { createSessionWorker } from '#session-worker';
+import { createSessionWorker } from './sessionWorker';
 import { SessionFailure } from '../../../../shared/office-session/types';
+import { warnSaveWarnings } from '../../../../shared/office-session/saveWarnings';
 import type { OpenWorkbookSessionOptions, WorkbookSession } from './client';
 import type { CommandStatus, WorkbookAck, WorkbookCommand, WorkbookCommandContext, WorkbookSharedCommand } from './commandProtocol';
 import { localNowSerial } from './calculationClock';
@@ -62,9 +64,11 @@ export async function createWorkbookRecoverySession(
   try {
     if (options.collaborative) throw new Error('Recovery is unavailable for collaborative workbooks');
     const wasm = options.wasm instanceof ArrayBuffer ? options.wasm.slice(0) : options.wasm;
+    const fontCdn = getFontCdnConfiguration();
+    const fontCdnOptions = fontCdn ? { fontCdn } : {};
     const opened = checkpoint
-      ? await client.call.openRecovery({ ...checkpoint, state: checkpoint.state.slice() }, { wasm, png: options.png })
-      : await client.call.open(bytes.slice().buffer, { collaborative: options.collaborative,
+      ? await client.call.openRecovery({ ...checkpoint, state: checkpoint.state.slice() }, { wasm, png: options.png, ...fontCdnOptions })
+      : await client.call.open(bytes.slice().buffer, { ...fontCdnOptions, collaborative: options.collaborative,
         clientId: options.clientId, calculation: options.calculation, wasm, png: options.png,
         initialViewport: options.initialViewport, includeEditState: true, recoveryVersion: version });
     const context: WorkbookCommandContext | undefined = opened.commandContext;
@@ -85,7 +89,11 @@ export async function createWorkbookRecoverySession(
         if (!outcome || reply.throughSeq < command.seq) throw new WorkbookRecoveryReplayError(command.seq, 'missing-outcome');
         return outcome.workbook ?? { ...outcome, status: outcome.status === 'duplicate' ? 'noop' : outcome.status };
       },
-      save: async () => new Uint8Array(await client.call.save()),
+      save: async () => {
+        const { bytes, warnings } = await client.call.saveWithWarnings();
+        warnSaveWarnings(warnings);
+        return new Uint8Array(bytes);
+      },
       dispose: () => client.dispose(),
     };
   } catch (error) {

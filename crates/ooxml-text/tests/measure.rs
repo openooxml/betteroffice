@@ -1009,7 +1009,6 @@ fn json_round_trip_uses_camel_case_contract_fields() {
     );
 }
 
-// Caps, horizontal scaling, and UTF-16 letter spacing affect widths.
 #[test]
 fn formatting_effects_on_widths() {
     // allCaps: 'a' measures as 'A'
@@ -1032,7 +1031,6 @@ fn formatting_effects_on_widths() {
     .unwrap();
     approx(v["lines"][0]["width"].as_f64().unwrap(), 2.0 * W0, "scaled");
 
-    // letterSpacing: n-1 gaps within the word
     let v = measure(
         json!([{ "kind": "text", "text": "00", "letterSpacing": 2.0 }]),
         200.0,
@@ -1040,7 +1038,7 @@ fn formatting_effects_on_widths() {
     .unwrap();
     approx(
         v["lines"][0]["width"].as_f64().unwrap(),
-        2.0 * W0 + 2.0,
+        2.0 * W0 + 4.0,
         "letterSpacing",
     );
 }

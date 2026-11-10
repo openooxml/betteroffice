@@ -102,6 +102,9 @@ pub(super) struct WalkPosition {
     pub(super) paragraph_pm_units: u32,
     pub(super) pm_cursor: u64,
     pub(super) at_block_boundary: bool,
+    /// No table, block content control or page or column break came since the last pilcrow:
+    /// a paragraph starting here starts its save unit.
+    pub(super) at_unit_boundary: bool,
     pub(super) section_margins: SectionMarginsTwips,
     pub(super) stories: u32,
     pub(super) paragraphs: u32,
@@ -120,6 +123,7 @@ impl WalkPosition {
             paragraph_pm_units: 0,
             pm_cursor: pm_base,
             at_block_boundary: true,
+            at_unit_boundary: true,
             section_margins: SectionMarginsTwips::default(),
             stories: map.story_count(),
             paragraphs: map.paragraph_count(),
@@ -637,6 +641,13 @@ impl UnitRecorder {
                     record_decision(value);
                 }
             }
+            if let Some(Any::Array(changes)) =
+                attribute(diff.attributes.as_deref(), crate::format::RPR_CHANGE)
+            {
+                for change in changes.iter() {
+                    record_decision(change);
+                }
+            }
         }
         if !window.mutated && (pilcrow || standalone) {
             let has_reads = READS.with(|reads| {
@@ -906,7 +917,7 @@ pub(crate) fn replay(
     current_map: &LoweringMap,
     local: &local::LocalLowering,
 ) -> Option<Vec<Replay>> {
-    if !replayable(units, local) {
+    if !local.matches_source(doc) || !replayable(units, local) {
         return None;
     }
     let txn = doc.yrs_doc().transact();
@@ -922,6 +933,7 @@ pub(crate) fn replay(
             .source_index()
             .map(|index| index.group_picture_sources())
             .unwrap_or_else(|| env.group_pictures.clone()),
+        shape_styles: super::shapes::ShapeStyles::new(doc),
         ..env.clone()
     };
     let env = &with_sources;
@@ -947,6 +959,7 @@ pub(crate) fn replay(
         let mut active_stories = BTreeSet::from(["body".to_owned()]);
         let mut replay_local = local::LocalLowering::new(local.enabled && !local.blocked);
         replay_local.source.clone_from(&local.source);
+        replay_local.shape_styles.clone_from(&local.shape_styles);
         if !env.hyperlink_style_font_sizes.is_empty() {
             replay_local.run_size_sources = run_size_provenance::Sources::new(doc);
         }

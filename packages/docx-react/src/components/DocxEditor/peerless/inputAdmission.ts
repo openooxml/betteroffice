@@ -4,7 +4,7 @@ import type {
   DocxCommandPayloads,
   DocxWorkerEditSession,
 } from '@betteroffice/docx/worker';
-import type { YrsAuthor } from '@betteroffice/docx/yrs';
+import type { DocxClipboardFragment, YrsAuthor } from '@betteroffice/docx/yrs';
 import type { PeerlessEchoIntent, PeerlessEchoPainter } from './echoPainter';
 import { hasImplicitVerticalGoal, type PeerlessInputIntent, type PeerlessProposalIntent, type PeerlessRevisionIntent, type PeerlessTextIntent } from './inputEvents';
 import type { PeerlessViewStore } from './viewStore';
@@ -525,6 +525,27 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
   return admission;
 }
 
+/**
+ * Submits a clipboard fragment paste and calls `onRefused` when the worker refuses it, so a paste
+ * that does not land is never silent.
+ * @internal
+ */
+export function submitPasteFragment(
+  admission: PeerlessInputAdmission,
+  fragment: DocxClipboardFragment,
+  options: PeerlessAdmissionOptions,
+  onRefused: () => void
+): void {
+  const watch = (result: PeerlessAdmissionResult): void => {
+    if (result.status === 'submitted') {
+      void result.ticket.ack.then((outcome) => { if (outcome.status === 'refused') onRefused(); }, () => {});
+    } else if (result.status === 'held') {
+      void result.released.then(watch, () => {});
+    }
+  };
+  watch(admitIntent(admission, { kind: 'pasteFragment', payload: { fragment } }, options));
+}
+
 /** @internal */
 export function admitIntent(
   _admission: PeerlessInputAdmission,
@@ -577,7 +598,7 @@ const SUGGESTED = {
   deleteTable: true, mergeTableCells: true, splitTableCell: true, setTableCellShading: true, setTableBorders: true, setTableProperties: true,
   selectTableCells: false,
   addComment: false, updateComment: false, removeComment: false, resizeObject: false, moveObject: false, moveEmbed: true,
-  setHyperlink: false, setObjectProperties: false, setSectionProperties: false, setNoteProperties: false, setWatermark: false,
+  setHyperlink: true, setObjectProperties: false, setSectionProperties: false, setNoteProperties: false, setWatermark: false,
   setSectionMargins: false, setTabStops: false, removeTabStop: false,
   setContentControlValue: false, addRepeatingItem: false, removeRepeatingItem: false,
   openPart: false, ensurePart: false, removePart: false,

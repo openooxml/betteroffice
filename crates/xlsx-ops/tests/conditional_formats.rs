@@ -156,10 +156,6 @@ fn bad_color_is_refused() {
 #[test]
 fn structural_refusals_leave_direct_and_batched_models_unchanged() {
     for op in [
-        Op::RenameSheet {
-            sheet: SheetId(1),
-            name: "Renamed".into(),
-        },
         Op::InsertRows {
             sheet: SheetId(0),
             at: 0,
@@ -213,4 +209,30 @@ fn structural_refusals_leave_direct_and_batched_models_unchanged() {
         );
         assert_eq!(wb, before);
     }
+}
+
+#[test]
+fn a_rename_rewrites_a_rule_formula_and_its_inverse_restores_it() {
+    let mut wb = wb();
+    wb.sheets.push(Sheet::new("Inputs"));
+    apply(
+        &mut wb,
+        &add("B2:D5", "expression", None, &["Inputs!$H$12>0"]),
+    )
+    .unwrap();
+    let before = wb.clone();
+    let inverse = apply(
+        &mut wb,
+        &Op::RenameSheet {
+            sheet: SheetId(1),
+            name: "New Inputs".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        wb.sheets[0].conditional_formats[0].rules[0].formulas,
+        ["'New Inputs'!$H$12>0"]
+    );
+    xlsx_ops::apply_ops(&mut wb, &inverse.0).unwrap();
+    assert_eq!(wb, before);
 }

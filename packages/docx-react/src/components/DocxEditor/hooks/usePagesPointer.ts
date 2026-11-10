@@ -126,6 +126,8 @@ export interface UsePagesPointerReturn {
   clearTableInsertTimer: () => void;
   hideTableInsertButton: () => void;
   getPositionFromMouse: (clientX: number, clientY: number) => number | null;
+  /** Moves the caret to bookmark `name` and scrolls to it, as following an internal link does. */
+  followBookmark: (name: string) => void;
 }
 
 function sameYrsTable(a: YrsCellLoc, b: YrsCellLoc): boolean {
@@ -436,6 +438,30 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
   );
 
   const focusInput = useCallback(() => yrsInputRef.current?.focus(), [yrsInputRef]);
+  const followBookmark = useCallback(
+    (name: string): void => {
+      const projection = viewerSelection ? null : getYrsPositionProjection(yrsRootStory);
+      if (projection) {
+        const targetPos = projection.bookmarkPosition(name);
+        if (targetPos != null) {
+          scrollToPositionImpl(targetPos);
+          setTextSelection(targetPos + 1);
+        }
+        return;
+      }
+      const epoch = inputEpochRef.current;
+      void resolveBookmarkPosition?.(name)
+        .then((targetPos) => {
+          if (targetPos == null || (viewerSelection && yrsInputRef.current?.isGestureCurrent
+            ? !yrsInputRef.current.isGestureCurrent(epoch)
+            : epoch !== inputEpochRef.current)) return;
+          scrollToPositionImpl(targetPos);
+          setTextSelection(targetPos + 1, targetPos + 1, viewerSelection ? epoch : undefined);
+        })
+        .catch(() => {});
+    },
+    [getYrsPositionProjection, resolveBookmarkPosition, scrollToPositionImpl, setTextSelection, viewerSelection, yrsInputRef, yrsRootStory]
+  );
   const prepareQueuedGestureRef = useRef<(gesture: QueuedGesture) => () => void>(() => () => {});
   prepareQueuedGestureRef.current = (gesture) => {
     const bodyHit = (point: QueuedGesture['anchor']) => {
@@ -1120,25 +1146,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
           if (linkPosition != null) setTextSelection(linkPosition, linkPosition,
             viewerSelection ? inputEpochRef.current : undefined);
           if (href.startsWith('#')) {
-            const bookmarkName = href.slice(1);
-            if (!projection) {
-              const epoch = inputEpochRef.current;
-              void resolveBookmarkPosition?.(bookmarkName)
-                .then((targetPos) => {
-                  if (targetPos == null || (viewerSelection && yrsInputRef.current?.isGestureCurrent
-                    ? !yrsInputRef.current.isGestureCurrent(epoch)
-                    : epoch !== inputEpochRef.current)) return;
-                  scrollToPositionImpl(targetPos);
-                  setTextSelection(targetPos + 1, targetPos + 1, viewerSelection ? epoch : undefined);
-                })
-                .catch(() => {});
-              return;
-            }
-            const targetPos = projection.bookmarkPosition(bookmarkName);
-            if (targetPos != null) {
-              scrollToPositionImpl(targetPos);
-              setTextSelection(targetPos + 1);
-            }
+            followBookmark(href.slice(1));
             return;
           }
           const selection = queuedGesture ? null : yrsInputRef.current?.displaySelection();
@@ -1211,6 +1219,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       clearPendingGesture,
       displayListQueries,
       focusInput,
+      followBookmark,
       getPositionFromMouse,
       getYrsPositionProjection,
       listenForOutsideInput,
@@ -1397,5 +1406,6 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     clearTableInsertTimer,
     hideTableInsertButton,
     getPositionFromMouse,
+    followBookmark,
   };
 }

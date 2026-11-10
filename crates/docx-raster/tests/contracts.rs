@@ -14,6 +14,25 @@ use serde_json::{Value, json};
 const FONT: &[u8] = include_bytes!("assets/Carlito-Regular.ttf");
 const LIBERATION: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
 
+#[path = "../../docx-layout/tests/fixtures/base_latin.rs"]
+mod base_latin;
+
+#[test]
+fn fontless_paragraph_rasterizes_with_ink() {
+    let (fonts, chains, images) = empty_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    for bold in [false, true] {
+        let scene = base_latin::measured_document(
+            &fonts,
+            &[ooxml_text::FontId::base_latin(bold, false).to_u32()],
+            "Latin Ελληνικά Кириллица ✓ ₹",
+            bold,
+        );
+        assert!(ink_bounds(&render_png(&scene, 0, &resources).unwrap()).is_some());
+    }
+    assert_eq!(fonts.font_count(), 0);
+}
+
 fn list(width: f64, height: f64, primitives: Vec<Value>) -> DisplayList {
     serde_json::from_value(json!({
         "pages": [{
@@ -152,6 +171,70 @@ fn glyph_id_scene(font_id: u32, glyph_id: u32) -> DisplayList {
 
 /// A glyph id past the outline range, so the page fails before the cache holds
 /// anything.
+fn gradient_scene(kind: &str) -> DisplayList {
+    list(
+        40.0,
+        40.0,
+        vec![json!({
+            "kind": "shape",
+            "x": 0,
+            "y": 0,
+            "w": 40,
+            "h": 40,
+            "geometryPath": [
+                {"type":"move","x":0,"y":0},
+                {"type":"line","x":40,"y":0},
+                {"type":"line","x":40,"y":40},
+                {"type":"line","x":0,"y":40},
+                {"type":"close"}
+            ],
+            "fillPaint": {
+                "kind": "gradient",
+                "gradientType": kind,
+                "stops": [
+                    {"position":0,"color":"#ff0000"},
+                    {"position":1,"color":"#0000ff"}
+                ]
+            }
+        })],
+    )
+}
+
+fn assert_paints_like_radial(kind: &str) {
+    let (fonts, chains, images) = empty_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let radial = render_page(&gradient_scene("radial"), 0, &resources).expect("radial");
+    let page = render_page(&gradient_scene(kind), 0, &resources).expect(kind);
+    assert_eq!(page.bytes, radial.bytes, "{kind}");
+    let pixels = image::load_from_memory(&page.bytes)
+        .expect("png")
+        .into_rgba8();
+    let centre = pixels.get_pixel(20, 20).0;
+    assert!(centre[0] > 240 && centre[2] < 16, "centre {centre:?}");
+    assert_eq!(pixels.get_pixel(0, 0).0, [0, 0, 255, 255]);
+}
+
+#[test]
+fn a_rectangular_gradient_paints_like_a_radial_gradient() {
+    assert_paints_like_radial("rectangular");
+}
+
+#[test]
+fn a_path_gradient_paints_like_a_radial_gradient() {
+    assert_paints_like_radial("path");
+}
+
+#[test]
+fn an_unknown_gradient_kind_still_fails_the_page() {
+    let (fonts, chains, images) = empty_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let error = render_page(&gradient_scene("conic"), 0, &resources).expect_err("unknown kind");
+    assert!(
+        error.contains("unsupported gradient type: conic"),
+        "{error}"
+    );
+}
+
 fn missing_glyph_scene() -> DisplayList {
     list(
         60.0,
@@ -535,6 +618,241 @@ fn unsupported_shape_paint_is_refused() {
     );
 }
 
+fn picture_shape(paint: serde_json::Value, fill: Option<&str>) -> serde_json::Value {
+    let mut shape = json!({
+        "kind":"shape",
+        "x":4,
+        "y":4,
+        "w":20,
+        "h":20,
+        "geometryPath":[
+            {"type":"move","x":4,"y":4},
+            {"type":"line","x":24,"y":4},
+            {"type":"line","x":24,"y":24},
+            {"type":"line","x":4,"y":24},
+            {"type":"close"}
+        ],
+        "fillPaint":paint,
+        "stroke":{"color":"#00ff00","width":2}
+    });
+    if let Some(fill) = fill {
+        shape["fill"] = json!(fill);
+    }
+    shape
+}
+
+fn picture_resources(images: &mut ImageMap) -> Vec<u8> {
+    let png = solid_png(2, 2);
+    images.insert("rIdPicture".to_string(), png.clone());
+    png
+}
+
+#[test]
+fn a_picture_fill_paints_its_picture_inside_the_shape_and_keeps_the_outline() {
+    let (fonts, chains, mut images) = empty_resources();
+    let source = picture_resources(&mut images);
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let scene = list(
+        30.0,
+        30.0,
+        vec![picture_shape(
+            json!({"kind":"picture","pictureRelId":"rIdPicture","pictureFillMode":"stretch"}),
+            None,
+        )],
+    );
+    let png = render_png(&scene, 0, &resources).unwrap();
+    assert_eq!(pixel(&png, 14, 14), pixel(&source, 0, 0));
+    assert_eq!(pixel(&png, 28, 28), [255, 255, 255, 255]);
+    assert_eq!(pixel(&png, 4, 14)[1], 255);
+    assert_ne!(pixel(&png, 4, 14), [255, 255, 255, 255]);
+}
+
+#[test]
+fn a_stretch_rectangle_keeps_a_picture_fill_inside_it() {
+    let (fonts, chains, mut images) = empty_resources();
+    let source = picture_resources(&mut images);
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let scene = list(
+        30.0,
+        30.0,
+        vec![picture_shape(
+            json!({"kind":"picture","pictureRelId":"rIdPicture","pictureFillMode":"stretch",
+                "pictureStretchRect":{"left":0.5,"top":0,"right":0,"bottom":0}}),
+            None,
+        )],
+    );
+    let png = render_png(&scene, 0, &resources).unwrap();
+    assert_eq!(pixel(&png, 20, 14), pixel(&source, 0, 0));
+    assert_eq!(pixel(&png, 9, 14), [255, 255, 255, 255]);
+}
+
+/// Four 8px quadrants, so a tile shows which way up and round it was drawn.
+fn quadrant_png() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut bytes, 16, 16);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("png header");
+        let mut pixels = Vec::new();
+        for y in 0..16 {
+            for x in 0..16 {
+                pixels.extend_from_slice(&QUADRANTS[usize::from(y >= 8)][usize::from(x >= 8)]);
+            }
+        }
+        writer.write_image_data(&pixels).expect("png pixels");
+    }
+    bytes
+}
+
+const QUADRANTS: [[[u8; 4]; 2]; 2] = [
+    [[255, 0, 0, 255], [0, 0, 255, 255]],
+    [[0, 255, 0, 255], [255, 255, 0, 255]],
+];
+
+fn tiled_scene(size: u32, tile: serde_json::Value) -> DisplayList {
+    let end = size + 4;
+    list(
+        f64::from(end + 8),
+        f64::from(end + 8),
+        vec![json!({
+            "kind":"shape",
+            "x":4,
+            "y":4,
+            "w":size,
+            "h":size,
+            "geometryPath":[
+                {"type":"move","x":4,"y":4},
+                {"type":"line","x":end,"y":4},
+                {"type":"line","x":end,"y":end},
+                {"type":"line","x":4,"y":end},
+                {"type":"close"}
+            ],
+            "fillPaint":{"kind":"picture","pictureRelId":"rIdPicture","pictureFillMode":"tile","pictureTile":tile}
+        })],
+    )
+}
+
+#[test]
+fn a_tiled_picture_fill_repeats_and_mirrors_alternate_tiles() {
+    let (fonts, chains, mut images) = empty_resources();
+    images.insert("rIdPicture".to_string(), quadrant_png());
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let columns = [(8, 0), (16, 1), (24, 0), (32, 1), (40, 0), (48, 1)];
+    let mirrored = [(8, 0), (16, 1), (24, 1), (32, 0), (40, 0), (48, 1)];
+    for (flip, across, down) in [
+        ("none", columns, columns),
+        ("x", mirrored, columns),
+        ("y", columns, mirrored),
+        ("xy", mirrored, mirrored),
+    ] {
+        let scene = tiled_scene(
+            48,
+            json!({"scaleX":1,"scaleY":1,"alignment":"tl","flip":flip}),
+        );
+        let png = render_png(&scene, 0, &resources).unwrap();
+        for (y, row) in down {
+            for (x, column) in across {
+                assert_eq!(
+                    pixel(&png, x, y),
+                    QUADRANTS[row][column],
+                    "{flip} at {x},{y}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_tile_grid_past_the_cap_stretches_the_picture_once() {
+    let (fonts, chains, mut images) = empty_resources();
+    images.insert("rIdPicture".to_string(), quadrant_png());
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let scene = tiled_scene(
+        100,
+        json!({"scaleX":0.01,"scaleY":0.01,"alignment":"tl","flip":"none"}),
+    );
+    let png = render_png(&scene, 0, &resources).unwrap();
+    assert_eq!(pixel(&png, 20, 20), QUADRANTS[0][0]);
+    assert_eq!(pixel(&png, 90, 90), QUADRANTS[1][1]);
+}
+
+#[test]
+fn a_picture_fill_it_cannot_resolve_keeps_the_solid_fill_and_counts_it() {
+    let (fonts, chains, images) = empty_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let scene = list(
+        30.0,
+        30.0,
+        vec![picture_shape(
+            json!({"kind":"picture","pictureRelId":"rIdMissing"}),
+            Some("#0000ff"),
+        )],
+    );
+    let rendered = render_page(&scene, 0, &resources).unwrap();
+    assert_eq!(pixel(&rendered.bytes, 14, 14), [0, 0, 255, 255]);
+    assert_eq!(rendered.skipped_images, 1);
+}
+
+#[test]
+fn a_png_that_ends_without_its_closing_chunk_paints() {
+    let (fonts, chains, mut images) = empty_resources();
+    let source = solid_png(2, 2);
+    let cut = source[..source.len() - 12].to_vec();
+    assert_eq!(&source[source.len() - 8..source.len() - 4], b"IEND");
+    images.insert("rIdPicture".to_string(), cut);
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let rendered = render_page(&image_list("rIdPicture"), 0, &resources).unwrap();
+    assert_eq!(rendered.skipped_images, 0);
+    assert_eq!(pixel(&rendered.bytes, 10, 10), pixel(&source, 0, 0));
+}
+
+fn ellipse_image_scene(extra: Value) -> DisplayList {
+    let mut image = json!({"kind":"image","relId":"rIdPicture","x":4,"y":4,"w":40,"h":40,"shapeType":"ellipse"});
+    for (key, value) in extra.as_object().expect("object") {
+        image[key] = value.clone();
+    }
+    list(48.0, 48.0, vec![image])
+}
+
+#[test]
+fn an_ellipse_image_paints_inside_its_ellipse() {
+    let (fonts, chains, mut images) = empty_resources();
+    let source = solid_png(2, 2);
+    images.insert("rIdPicture".to_string(), source.clone());
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let png = render_png(&ellipse_image_scene(json!({})), 0, &resources).unwrap();
+    assert_eq!(pixel(&png, 24, 24), pixel(&source, 0, 0));
+    assert_eq!(pixel(&png, 24, 7), pixel(&source, 0, 0));
+    assert_eq!(pixel(&png, 6, 6), [255, 255, 255, 255]);
+    assert_eq!(pixel(&png, 41, 41), [255, 255, 255, 255]);
+}
+
+#[test]
+fn an_ellipse_image_keeps_its_crop_inside_the_ellipse() {
+    let (fonts, chains, mut images) = empty_resources();
+    let source = solid_png(4, 4);
+    images.insert("rIdPicture".to_string(), source.clone());
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let scene =
+        ellipse_image_scene(json!({"crop":{"left":0.25,"top":0.25,"right":0.25,"bottom":0.25}}));
+    let png = render_png(&scene, 0, &resources).unwrap();
+    assert_eq!(pixel(&png, 24, 24), pixel(&source, 0, 0));
+    assert_eq!(pixel(&png, 6, 6), [255, 255, 255, 255]);
+}
+
+#[test]
+fn an_ellipse_image_border_follows_the_ellipse() {
+    let (fonts, chains, mut images) = empty_resources();
+    images.insert("rIdPicture".to_string(), solid_png(2, 2));
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let scene = ellipse_image_scene(json!({"border":{"width":2,"color":"#ff0000"}}));
+    let png = render_png(&scene, 0, &resources).unwrap();
+    assert_eq!(pixel(&png, 24, 4), [255, 0, 0, 255]);
+    assert_eq!(pixel(&png, 4, 4), [255, 255, 255, 255]);
+    assert_eq!(pixel(&png, 44, 44), [255, 255, 255, 255]);
+}
+
 #[test]
 fn invalid_page_and_page_selector_are_errors() {
     let (fonts, chains, images) = empty_resources();
@@ -551,31 +869,262 @@ fn invalid_page_and_page_selector_are_errors() {
     );
 }
 
+fn carlito_text(extra: Value) -> Value {
+    let mut run = json!({
+        "kind":"text",
+        "text":"Hex",
+        "x":4,
+        "baselineY":20,
+        "width":24,
+        "font":"400 16px Carlito, sans-serif",
+        "color":"#000000"
+    });
+    for (key, value) in extra.as_object().expect("fields") {
+        run[key] = value.clone();
+    }
+    run
+}
+
 #[test]
-fn small_caps_is_refused_instead_of_synthesized() {
-    let mut fonts = FontStore::new();
-    let font = fonts.register(FONT.to_vec()).expect("font");
-    let chains = FontChains::from([("carlito|0|0".to_string(), vec![font])]);
-    let images = ImageMap::new();
+fn small_caps_text_runs_are_synthesized_and_drawn() {
+    let (fonts, chains, images) = carlito_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let small = render_page(
+        &list(
+            60.0,
+            30.0,
+            vec![carlito_text(json!({"text":"abc","smallCaps":true}))],
+        ),
+        0,
+        &resources,
+    )
+    .expect("small caps");
+    let lower = render_page(
+        &list(60.0, 30.0, vec![carlito_text(json!({"text":"abc"}))]),
+        0,
+        &resources,
+    )
+    .expect("lowercase");
+    let upper = render_page(
+        &list(60.0, 30.0, vec![carlito_text(json!({"text":"ABC"}))]),
+        0,
+        &resources,
+    )
+    .expect("uppercase");
+    assert!(small.skipped_effects.is_empty());
+    let (small, lower, upper) = (
+        ink_bounds(&small.bytes).expect("small ink"),
+        ink_bounds(&lower.bytes).expect("lower ink"),
+        ink_bounds(&upper.bytes).expect("upper ink"),
+    );
+    assert!(
+        small.1 - small.0 < upper.1 - upper.0,
+        "small caps narrower than capitals"
+    );
+    assert!(
+        small.3 - small.2 < upper.3 - upper.2,
+        "small caps shorter than capitals"
+    );
+    assert_ne!(small, lower);
+}
+
+#[test]
+fn text_effects_this_backend_cannot_draw_are_counted_and_the_text_drawn() {
+    let (fonts, chains, images) = carlito_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let plain = render_page(
+        &list(40.0, 30.0, vec![carlito_text(json!({}))]),
+        0,
+        &resources,
+    )
+    .expect("plain");
+    let outlined = render_page(
+        &list(
+            40.0,
+            30.0,
+            vec![carlito_text(
+                json!({"textOutline":true,"emphasisMark":"dot"}),
+            )],
+        ),
+        0,
+        &resources,
+    )
+    .expect("outlined");
+    assert_eq!(outlined.bytes, plain.bytes);
+    assert_eq!(
+        outlined.skipped_effects,
+        std::collections::BTreeMap::from([
+            ("text.emphasisMark".to_string(), 1),
+            ("text.textOutline".to_string(), 1)
+        ])
+    );
+}
+
+#[test]
+fn glyph_runs_draw_the_glyphs_layout_shaped_whatever_their_casing() {
+    let (fonts, chains, images) = carlito_resources();
+    let font = chains["carlito|0|0"][0];
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let glyphs: Vec<Value> = shape(&fonts, font, "Hex", 16.0, &[])
+        .expect("shape")
+        .iter()
+        .scan(4.0_f32, |pen, glyph| {
+            let placed = json!({"id":glyph.glyph_id,"x":*pen,"y":20,"cluster":glyph.cluster,"advance":glyph.x_advance});
+            *pen += glyph.x_advance;
+            Some(placed)
+        })
+        .collect();
+    let run = |extra: Value| {
+        let mut run = json!({"kind":"glyphRun","fontId":font.to_u32(),"size":16,"color":"#000000","text":"Hex","glyphs":glyphs});
+        for (key, value) in extra.as_object().expect("fields") {
+            run[key] = value.clone();
+        }
+        list(40.0, 30.0, vec![run])
+    };
+    let plain = render_page(&run(json!({})), 0, &resources).expect("plain");
+    for casing in [json!({"allCaps":true}), json!({"smallCaps":true})] {
+        let page = render_page(&run(casing), 0, &resources).expect("cased");
+        assert_eq!(page.bytes, plain.bytes);
+        assert!(page.skipped_effects.is_empty());
+    }
+    let outlined = render_page(&run(json!({"textOutline":true})), 0, &resources).expect("outlined");
+    assert_eq!(outlined.bytes, plain.bytes);
+    assert_eq!(
+        outlined.skipped_effects,
+        std::collections::BTreeMap::from([("glyphRun.textOutline".to_string(), 1)])
+    );
+}
+
+#[test]
+fn a_text_shadow_is_drawn_below_and_right_of_the_text() {
+    let (fonts, chains, images) = carlito_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let plain = render_page(
+        &list(40.0, 30.0, vec![carlito_text(json!({}))]),
+        0,
+        &resources,
+    )
+    .expect("plain");
+    let shadowed = render_page(
+        &list(
+            40.0,
+            30.0,
+            vec![carlito_text(json!({"textShadow":"shadow"}))],
+        ),
+        0,
+        &resources,
+    )
+    .expect("shadowed");
+    assert!(shadowed.skipped_effects.is_empty());
+    let (left, right, top, bottom) = ink_bounds(&plain.bytes).expect("plain ink");
+    let mut grey = 0;
+    for y in top..=(bottom + 3).min(29) {
+        for x in left..=(right + 3).min(39) {
+            let (before, after) = (pixel(&plain.bytes, x, y), pixel(&shadowed.bytes, x, y));
+            if before == [255, 255, 255, 255] && after != before {
+                assert!(
+                    after[0] > 100,
+                    "the shadow is a light grey, not ink: {after:?}"
+                );
+                grey += 1;
+            }
+        }
+    }
+    assert!(grey > 0, "the shadow paints where the text leaves white");
+    let shadow_right = ink_bounds(&shadowed.bytes).expect("shadowed ink").1;
+    assert!(shadow_right > right, "the shadow extends right of the text");
+}
+
+#[test]
+fn a_text_shadow_neither_backend_draws_is_counted() {
+    let (fonts, chains, images) = carlito_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let plain = render_page(
+        &list(40.0, 30.0, vec![carlito_text(json!({}))]),
+        0,
+        &resources,
+    )
+    .expect("plain");
+    let embossed = render_page(
+        &list(
+            40.0,
+            30.0,
+            vec![carlito_text(json!({"textShadow":"emboss"}))],
+        ),
+        0,
+        &resources,
+    )
+    .expect("embossed");
+    assert_eq!(embossed.bytes, plain.bytes);
+    assert_eq!(
+        embossed.skipped_effects,
+        std::collections::BTreeMap::from([("text.textShadow".to_string(), 1)])
+    );
+}
+
+#[test]
+fn a_shape_shadow_with_an_unbounded_blur_still_renders() {
+    let (fonts, chains, images) = empty_resources();
     let resources = RenderResources::new(&fonts, &chains, &images);
     let scene = list(
-        30.0,
-        20.0,
+        40.0,
+        40.0,
         vec![json!({
-            "kind":"text",
-            "text":"abc",
-            "x":2,
-            "baselineY":15,
-            "width":20,
-            "font":"small-caps 400 12px Carlito, sans-serif",
-            "color":"#000000",
-            "smallCaps":true
+            "kind":"shape","x":4,"y":4,"w":20,"h":20,"fill":"#3366ff",
+            "geometryPath":[
+                {"type":"move","x":4,"y":4},{"type":"line","x":24,"y":4},
+                {"type":"line","x":24,"y":24},{"type":"close"}
+            ],
+            "effects":[{"kind":"glow","color":"#ff0000","blurRadius":1e20}]
         })],
     );
-    assert_eq!(
-        render_png(&scene, 0, &resources).unwrap_err(),
-        "unsupported text field: smallCaps"
+    assert!(
+        render_page(&scene, 0, &resources)
+            .expect("glow")
+            .skipped_effects
+            .is_empty()
     );
+}
+
+#[test]
+fn a_shape_shadow_is_drawn_and_other_shape_effects_are_counted() {
+    let (fonts, chains, images) = empty_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let shape = |effects: Value| {
+        list(
+            40.0,
+            40.0,
+            vec![json!({
+                "kind":"shape","x":4,"y":4,"w":20,"h":20,"fill":"#3366ff",
+                "geometryPath":[
+                    {"type":"move","x":4,"y":4},{"type":"line","x":24,"y":4},
+                    {"type":"line","x":24,"y":24},{"type":"line","x":4,"y":24},{"type":"close"}
+                ],
+                "effects": effects
+            })],
+        )
+    };
+    let plain = render_page(&shape(json!([])), 0, &resources).expect("plain");
+    let shadowed = render_page(
+        &shape(json!([
+            {"kind":"outerShadow","color":"#000000","blurRadius":2,"distance":6,"direction":45},
+            {"kind":"softEdge","radius":3}
+        ])),
+        0,
+        &resources,
+    )
+    .expect("shadowed shape");
+    assert_eq!(
+        shadowed.skipped_effects,
+        std::collections::BTreeMap::from([("shape.effects".to_string(), 1)])
+    );
+    assert_eq!(pixel(&plain.bytes, 28, 28), [255, 255, 255, 255]);
+    let below_right = pixel(&shadowed.bytes, 28, 28);
+    assert!(
+        below_right[0] < 255 && below_right[3] == 255,
+        "shadow below right: {below_right:?}"
+    );
+    assert_eq!(pixel(&shadowed.bytes, 14, 14), pixel(&plain.bytes, 14, 14));
 }
 
 #[test]
@@ -822,8 +1371,8 @@ fn a_shared_cache_does_not_spend_the_next_pages_budget_on_refusals() {
 }
 
 /// PNG headers declaring a bomb-sized surface, with an IDAT too short to
-/// decode. The declared extent is the only thing the budget may consult, so
-/// these skip on the cap and never on the truncated stream.
+/// decode. The larger is past what a reduced decode may read and skips on its
+/// header; the smaller reaches the reduced decode and skips on its stream.
 const BOMB_40000_SQUARE: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAnEAAAJxACAIAAADebplSAAAAC0lEQVR4nGNgQAUAABAAATm9j2UAAAAASUVORK5CYII=";
 const BOMB_9000_SQUARE: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAIygAACMoCAIAAADit+XtAAAAC0lEQVR4nGNgQAUAABAAATm9j2UAAAAASUVORK5CYII=";
 
@@ -1057,4 +1606,232 @@ fn undecodable_image_bytes_are_skipped_like_an_unresolvable_reference() {
             .unwrap_or_else(|error| panic!("`{reference}` failed the page: {error}"));
         assert_eq!(pixel(&png, 10, 10), [255, 255, 255, 255]);
     }
+}
+
+#[test]
+fn text_named_for_the_backstop_family_rasterizes_without_a_host_chain() {
+    let (fonts, chains, images) = empty_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    for font in [
+        format!("400 24px {}, sans-serif", ooxml_text::BASE_LATIN_FAMILY),
+        format!("700 24px {}, sans-serif", ooxml_text::BASE_LATIN_FAMILY),
+    ] {
+        let scene = list(
+            80.0,
+            40.0,
+            vec![json!({
+                "kind": "text",
+                "text": "1.",
+                "x": 4,
+                "baselineY": 30,
+                "width": 40,
+                "font": font,
+                "color": "#000000"
+            })],
+        );
+        assert!(ink_bounds(&render_png(&scene, 0, &resources).unwrap()).is_some());
+    }
+}
+
+#[test]
+fn a_leader_font_shorthand_resolves_its_family() {
+    let (fonts, chains, images) = empty_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let font = format!("400 24px {}, sans-serif", ooxml_text::BASE_LATIN_FAMILY);
+    let scene = list(
+        160.0,
+        48.0,
+        vec![json!({
+            "kind": "text",
+            "text": "Tab",
+            "x": 10,
+            "baselineY": 34,
+            "width": 130,
+            "font": font,
+            "color": "#000000",
+            "leaderGlyphs": {"glyph": ".", "count": 3, "advance": 10, "font": font}
+        })],
+    );
+    assert!(ink_bounds(&render_png(&scene, 0, &resources).unwrap()).is_some());
+}
+
+#[test]
+fn scale_transforms_geometry_and_clip_masks() {
+    let (fonts, chains, images) = empty_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let scene = list(
+        64.0,
+        32.0,
+        vec![json!({
+            "kind": "rect", "x": 4, "y": 4, "w": 20, "h": 16, "fill": "#000000",
+            "clipGroup": {"clip": {"x": 8, "y": 6, "w": 8, "h": 8}}
+        })],
+    );
+    let first = render_page(&scene, 0, &resources).unwrap();
+    let second = docx_raster::render_page_cached_scaled(
+        &scene,
+        0,
+        &resources,
+        &mut GlyphCache::default(),
+        &mut ImageCache::default(),
+        2.0,
+    )
+    .unwrap();
+    assert_eq!(ink_bounds(&first.bytes), Some((8, 15, 6, 13)));
+    assert_eq!(ink_bounds(&second.bytes), Some((16, 31, 12, 27)));
+    assert_eq!(
+        u32::from_be_bytes(second.bytes[16..20].try_into().unwrap()),
+        128
+    );
+    assert_eq!(
+        u32::from_be_bytes(second.bytes[20..24].try_into().unwrap()),
+        64
+    );
+}
+
+#[test]
+fn scale_transforms_text_paint_clips() {
+    let (fonts, chains, images) = carlito_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let scene = list(
+        80.0,
+        40.0,
+        vec![json!({
+            "kind": "text", "text": "@@@@@@@@@@", "x": 4, "baselineY": 31,
+            "width": 12, "font": "400 28px Carlito, sans-serif", "color": "#000000",
+            "paintClip": {"x": 8, "w": 8},
+            "clipGroup": {"clip": {"x": 0, "y": 0, "w": 80, "h": 40}}
+        })],
+    );
+    let second = docx_raster::render_page_cached_scaled(
+        &scene,
+        0,
+        &resources,
+        &mut GlyphCache::default(),
+        &mut ImageCache::default(),
+        2.0,
+    )
+    .unwrap();
+    let (left, right, _, _) = ink_bounds(&second.bytes).unwrap();
+    assert!(left >= 16);
+    assert!(right < 32);
+}
+
+#[test]
+fn scale_validates_surface_limits_before_painting() {
+    let (fonts, chains, images) = empty_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    for scene in [list(10_000.0, 1.0, vec![]), list(2049.0, 2049.0, vec![])] {
+        assert!(
+            docx_raster::render_page_cached_scaled(
+                &scene,
+                0,
+                &resources,
+                &mut GlyphCache::default(),
+                &mut ImageCache::default(),
+                2.0,
+            )
+            .is_err()
+        );
+    }
+    for scale in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+        assert!(
+            docx_raster::render_page_cached_scaled(
+                &list(64.0, 32.0, vec![]),
+                0,
+                &resources,
+                &mut GlyphCache::default(),
+                &mut ImageCache::default(),
+                scale,
+            )
+            .is_err()
+        );
+    }
+}
+
+fn vector_picture_scene() -> DisplayList {
+    list(
+        48.0,
+        48.0,
+        vec![json!({"kind":"image","relId":"rIdVector","x":4,"y":4,"w":40,"h":40})],
+    )
+}
+
+#[test]
+fn an_svg_picture_paints() {
+    let (fonts, chains, mut images) = empty_resources();
+    images.insert(
+        "rIdVector".to_string(),
+        br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="10" height="10" fill="#ff0000"/></svg>"##.to_vec(),
+    );
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let rendered = render_page(&vector_picture_scene(), 0, &resources).unwrap();
+    assert_eq!(rendered.skipped_images, 0);
+    assert_eq!(pixel(&rendered.bytes, 24, 24), [255, 0, 0, 255]);
+    assert_eq!(pixel(&rendered.bytes, 2, 2), [255, 255, 255, 255]);
+}
+
+#[test]
+fn emf_and_wmf_pictures_paint() {
+    for metafile in [
+        &include_bytes!("../../ooxml-metafile/tests/fixtures/shapes.emf")[..],
+        &include_bytes!("../../ooxml-metafile/tests/fixtures/shapes.wmf")[..],
+    ] {
+        let (fonts, chains, mut images) = empty_resources();
+        images.insert("rIdVector".to_string(), metafile.to_vec());
+        let resources = RenderResources::new(&fonts, &chains, &images);
+        let rendered = render_page(&vector_picture_scene(), 0, &resources).unwrap();
+        assert_eq!(rendered.skipped_images, 0);
+        let painted = (4..44)
+            .flat_map(|y| (4..44).map(move |x| (x, y)))
+            .filter(|&(x, y)| pixel(&rendered.bytes, x, y) != [255, 255, 255, 255])
+            .count();
+        assert!(painted > 40, "{painted} painted pixels");
+    }
+}
+
+#[test]
+fn a_picture_this_backend_cannot_decode_is_counted_as_skipped() {
+    let (fonts, chains, mut images) = empty_resources();
+    images.insert("rIdVector".to_string(), b"not a picture".to_vec());
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let rendered = render_page(&vector_picture_scene(), 0, &resources).unwrap();
+    assert_eq!(rendered.skipped_images, 1);
+}
+
+#[test]
+fn an_svg_past_the_picture_limits_is_refused() {
+    let (fonts, chains, mut images) = empty_resources();
+    images.insert(
+        "rIdVector".to_string(),
+        br##"<svg xmlns="http://www.w3.org/2000/svg" width="8191" height="8191" viewBox="0 0 8191 8191"><rect width="8191" height="8191" fill="#ff0000"/></svg>"##.to_vec(),
+    );
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let rendered = render_page(&vector_picture_scene(), 0, &resources).unwrap();
+    assert_eq!(rendered.skipped_images, 1);
+}
+
+#[test]
+fn an_svg_picture_fill_tiles_at_its_own_size() {
+    let (fonts, chains, mut images) = empty_resources();
+    images.insert(
+        "rIdPicture".to_string(),
+        br##"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 8 8"><rect width="4" height="8" fill="#ff0000"/><rect x="4" width="4" height="8" fill="#0000ff"/></svg>"##.to_vec(),
+    );
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let scene = list(
+        30.0,
+        30.0,
+        vec![picture_shape(
+            json!({"kind":"picture","pictureRelId":"rIdPicture","pictureFillMode":"tile","pictureTile":{"alignment":"tl"}}),
+            None,
+        )],
+    );
+    let png = render_png(&scene, 0, &resources).unwrap();
+    let red = pixel(&png, 6, 14);
+    let blue = pixel(&png, 10, 14);
+    let red_again = pixel(&png, 14, 14);
+    assert!(red[0] > 200 && red[2] < 80, "{red:?}");
+    assert!(blue[2] > 200 && blue[0] < 80, "{blue:?}");
+    assert!(red_again[0] > 200 && red_again[2] < 80, "{red_again:?}");
 }

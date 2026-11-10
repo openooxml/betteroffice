@@ -135,7 +135,14 @@
       "unsupportedCommand": "Belum didukung.",
       "invalidArguments": "Nilai ini tidak valid.",
       "inputFailed": "Entri sel sebelumnya tidak dapat disimpan.",
+      "editUnsupported": "Pengeditan ini tidak dapat diterapkan di sini. Buku kerja tidak berubah.",
+      "editUnsupportedChart": "Pengeditan ini tidak dapat diterapkan: sebuah bagan menggunakan sel yang akan dipindahkannya. Buku kerja tidak berubah.",
+      "editUnsupportedTable": "Pengeditan ini tidak dapat diterapkan: sebuah tabel menggunakan sel yang akan dipindahkannya. Buku kerja tidak berubah.",
+      "editUnsupportedPivot": "Pengeditan ini tidak dapat diterapkan: sebuah tabel pivot menggunakan sel yang akan dipindahkannya. Buku kerja tidak berubah.",
       "sheetProtected": "Sel ini berada di lembar yang dilindungi.",
+      "hostRefused": "Pengeditan ini tidak diizinkan.",
+      "tooManyToCheck": "Terlalu banyak sel untuk diperiksa plugin (batas {limit}).",
+      "hostStarting": "Editor masih dimulai. Coba lagi sebentar lagi.",
       "documentReplaced": "Buku kerja lain telah dibuka.",
       "targetChanged": "Pilihan telah berubah.",
       "gestureActive": "Selesaikan memindahkan bagan terlebih dahulu.",
@@ -146,8 +153,31 @@
       "permissionDenied": "Aplikasi host tidak mengizinkan plugin ini menggunakan perintah ini.",
       "unsupportedPolicy": "Plugin belum dapat menjalankan perintah ini. Gunakan batch edit sebagai gantinya.",
       "pluginUnavailable": "Plugin tidak lagi aktif.",
-      "aborted": "Tindakan plugin dibatalkan sebelum perintah dijalankan."
-    }
+      "aborted": "Tindakan plugin dibatalkan sebelum perintah dijalankan.",
+      "clipboardUnavailable": "Browser ini tidak mengizinkan menempel dari menu. Gunakan pintasan keyboard.",
+      "lastSheet": "Buku kerja memerlukan setidaknya satu lembar.",
+      "sheetAtEdge": "Lembar tidak dapat dipindahkan lebih jauh.",
+      "sheetNameInvalid": "Nama lembar harus 1 hingga 31 karakter, unik, dan tidak boleh berisi : \\ / ? * [ ].",
+      "clipboardDenied": "Browser tidak mengizinkan akses ke papan klip."
+    },
+    "cut": "Potong",
+    "copy": "Salin",
+    "paste": "Tempel",
+    "pastePlainText": "Tempel sebagai teks biasa",
+    "clearContents": "Hapus isi",
+    "insert": "Sisipkan",
+    "delete": "Hapus",
+    "insertRowsAbove": "Sisipkan baris di atas",
+    "insertRowsBelow": "Sisipkan baris di bawah",
+    "insertColumnsLeft": "Sisipkan kolom di kiri",
+    "insertColumnsRight": "Sisipkan kolom di kanan",
+    "deleteRows": "Hapus baris",
+    "deleteColumns": "Hapus kolom",
+    "insertSheet": "Sisipkan lembar",
+    "deleteSheet": "Hapus lembar",
+    "renameSheet": "Ganti nama",
+    "moveSheetLeft": "Pindahkan ke kiri",
+    "moveSheetRight": "Pindahkan ke kanan"
   },
   "editor": {
     "appLabel": "Editor spreadsheet",
@@ -162,7 +192,11 @@
     "showDetails": "Tampilkan detail",
     "openPrompt": "Buka berkas XLSX",
     "sheetTabsLabel": "Lembar",
-    "clearExceedsLimit": "Penghapusan melebihi batas sel"
+    "clearExceedsLimit": "Penghapusan melebihi batas sel",
+    "cellMenuLabel": "Menu sel",
+    "sheetTabMenuLabel": "Menu tab lembar",
+    "renameSheetLabel": "Ganti nama lembar",
+    "sheetNamePrefix": "Lembar"
   },
   "presence": {
     "label": "Kolaborator",
@@ -178,6 +212,7 @@
     "accept": "Terima",
     "reject": "Tolak",
     "forceApply": "Terapkan paksa",
+    "forceBlockedReason": "Usulan ini tidak dapat diterapkan setelah perubahan struktur.",
     "staleWarning": "Sel berubah sejak diusulkan: {cells}"
   },
   "a11y": {
@@ -187,12 +222,27 @@
     "cellLabel": "{address}, {value}",
     "cellLabelSelected": "{address}, {value}, dipilih",
     "emptyCellLabel": "{address}, kosong",
-    "emptyCellLabelSelected": "{address}, kosong, dipilih"
+    "emptyCellLabelSelected": "{address}, kosong, dipilih",
+    "hasFormula": "{label}, memiliki rumus",
+    "rangeSelected": "{start} sampai {end} dipilih, {rows} baris kali {columns} kolom",
+    "sheetActivated": "{name}, lembar {index} dari {count}",
+    "cellInputLabel": "Edit sel {address}",
+    "gridRoleDescription": "lembar kerja"
   },
   "plugins": {
     "toolbarGroup": "Plugin",
     "panelTabs": "Panel plugin",
     "collapsePanel": "Ciutkan {title}",
-    "expandPanel": "Luaskan {title}"
+    "expandPanel": "Luaskan {title}",
+    "rowGutter": "Penanda baris plugin"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "del": "Del",
+    "escape": "Esc",
+    "pageUp": "Page Up",
+    "pageDown": "Page Down"
   }
 }

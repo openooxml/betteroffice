@@ -41,6 +41,7 @@ pub enum OpError {
     CannotMergeFinalParagraph(ParagraphId),
     NoParagraphBefore(ParagraphId),
     OverlapsTrackedChange,
+    SuggestedFormattingOverContainer,
     /// Operation targets nested story content.
     NotTopLevel,
     LockedSdt,
@@ -96,6 +97,10 @@ impl fmt::Display for OpError {
                 write!(f, "paragraph {id:?} is the first paragraph of its story")
             }
             Self::OverlapsTrackedChange => write!(f, "the range overlaps a tracked change"),
+            Self::SuggestedFormattingOverContainer => write!(
+                f,
+                "suggested character formatting cannot include fields or inline content controls"
+            ),
             Self::NotTopLevel => write!(f, "the target is not top-level content of its story"),
             Self::LockedSdt => write!(f, "the target is inside a locked content control"),
             Self::TextContainsBreak => {

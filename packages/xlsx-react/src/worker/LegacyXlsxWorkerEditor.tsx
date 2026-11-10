@@ -21,7 +21,6 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { CSSProperties, KeyboardEvent, MouseEvent, SetStateAction, SyntheticEvent } from 'react';
 import { flushSync } from 'react-dom';
 import { createXlsxCommandController, XlsxCommandAdmissionError } from '../commands/createXlsxCommandStore';
-import { commandForEvent } from '../commands/descriptors';
 
 import type { InputDraft, InputSeal } from '../commands/inputCoordinator';
 import { inPluginChrome, pluginEventStore } from '../commands/pluginEvents';
@@ -42,16 +41,20 @@ import { useTranslation } from '../i18n';
 import type { XlsxPluginEditorAccess, XlsxRevealAlignment } from '../plugins/createPluginClients';
 
 import { PluginOverlays } from '../plugins/PluginOverlays';
+import { PluginRowGutter } from '../plugins/PluginRowGutter';
+import { ROW_GUTTER_WIDTH } from '../plugins/rowDecorations';
 import { frozenGridExtent } from '../plugins/geometry';
 import { PluginDock, useDockArea, type DockPlacement } from '../plugins/PluginPanels';
 import { useXlsxPluginHost } from '../plugins/useXlsxPluginHost';
 import { ProposalsPanel } from '../proposals/ProposalsPanel';
 import { cellInViewport, deriveLimits, expandRangeToMergedCells, extendScrollExtent, laidOutCellRect, nearestCellScroll, positionAtPoint, scaledRect } from '../viewer/sessionGeometry';
+import { cellEditorColors } from '../viewer/cellEditorColors';
 import type { WorkerEditorApiBridge } from './createWorkerEditorApi';
 
 import { useLegacySessionWorkbook, EditableWorkbookSession, type EditableSessionWorkbookProps } from './useEditableSessionWorkbook';
 import type { WorkerPaintRequest, WorkerPaintResult } from './WorkerPaintSource';
 import { WorkerPaintSource } from './WorkerPaintSource';
+import { A11yGridTable } from '../components/A11yGridCell';
 
 const BRAND = '#217346';
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -115,7 +118,7 @@ function revealAxis(position: number, size: number, frozen: boolean, scroll: num
 }
 
 export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
-  const { t } = useTranslation();
+  const { t, lang } = useTranslation();
   const rootRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -187,6 +190,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     getPositionAtPoint: (x, y) => apiBridgeRef.current?.getPositionAtPoint?.(x, y) ?? null,
     coordinator: () => coordinatorRef.current,
     readOnly: () => propsRef.current.readOnly ?? false,
+    allowHostProposals: () => propsRef.current.allowHostProposals ?? false,
     clearSelection: () => apiBridgeRef.current?.clearSelection(),
     focus,
     refreshProposals: () => apiBridgeRef.current?.refreshProposals(),
@@ -678,7 +682,8 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       if (!painted || painted.request.generation !== runRef.current?.generation) return null;
       return positionAtPoint(painted.displayList, painted.request.sheet, canvasRef.current, x, y);
     },
-    coordinator: () => coordinator, readOnly: () => propsRef.current.readOnly ?? false, focus,
+    coordinator: () => coordinator, readOnly: () => propsRef.current.readOnly ?? false,
+    allowHostProposals: () => propsRef.current.allowHostProposals ?? false, focus,
     clearSelection: () => {
       coordinator.settle(); setEditing(null); setFormulaDraft(null); setSelection(null); setSelectedChart(null);
       setCapturedFormat(null); commands.refresh();
@@ -706,9 +711,13 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     return sheetId === undefined ? null : { sheetId, sheetIndex: active,
       cells: selection, chartId: selectedChart?.id ?? null };
   }, [run, active, selection, selectedChart]);
-  const pluginHost = useXlsxPluginHost({ ...props, access: pluginAccess, commands,
+  const pluginHost = useXlsxPluginHost({ locale: lang, focusRoot: scrollRef, ...props, access: pluginAccess, commands, editGate: false,
     readOnly: props.readOnly ?? false, handle: run?.ready && !run.failure ? run.peer : null,
-    selection: pluginSelection, canvasRef, t });
+    selection: pluginSelection, proposals, staleFor, proposalsPending: () => coordinator.pending, canvasRef, t,
+    positionAtPoint: (clientX, clientY) => {
+      const owner = runRef.current;
+      return owner?.current && !owner.retiring && !owner.failure ? apiBridge.getPositionAtPoint?.(clientX, clientY) ?? null : null;
+    } });
   const presentGridRef = useRef(pluginHost.presentGrid);
   presentGridRef.current = pluginHost.presentGrid;
   const [dockAreaRef, dockArea] = useDockArea(pluginHost.managed);
@@ -765,6 +774,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
         const sheetId = run.session.state.sheets[request.sheet]?.id;
         presentGridRef.current(sheetId === undefined ? null : {
           frame: painted.displayList, zoom: request.zoom, viewport: request.viewport, version: painted.version, sheetId,
+          sheet: request.sheet,
         });
         for (const waiter of paintWaiters.current.slice()) {
           const covered = samePaint(painted, waiter.request, waiter.sequence);
@@ -1302,14 +1312,10 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     event.currentTarget.style.cursor = chart?.movable && acceptInput() ? 'move' : chart || hyperlink ? 'pointer' : 'default';
     event.currentTarget.title = chart ? '' : hyperlink?.tooltip ?? '';
   };
-  const onClick = (event: MouseEvent) => {
-    if (fromPlugin(event) || runRef.current?.failure) return;
-    const { cell } = point(event);
-    const start = clickStart.current;
-    clickStart.current = null;
+  const followLink = (row: number, col: number) => {
     const frame = sourceRef.current?.painted?.displayList;
-    if (!cell || !start || !frame || cell.row !== start.row || cell.col !== start.col) return;
-    const hyperlink = hyperlinkAtCell(frame, cell.row, cell.col);
+    if (!frame || !runRef.current || runRef.current.failure) return;
+    const hyperlink = hyperlinkAtCell(frame, row, col);
     if (!hyperlink) return;
     const href = safeExternalHyperlink(hyperlink);
     if (href) { window.open(href, '_blank', 'noopener,noreferrer'); return; }
@@ -1320,9 +1326,18 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     const sheet = sheets.findIndex((entry) => entry.name.toLowerCase() === destination.sheetName.toLowerCase());
     if (sheet >= 0) navigate(sheet, selectionAt(destination));
   };
+  const onClick = (event: MouseEvent) => {
+    if (fromPlugin(event) || runRef.current?.failure) return;
+    const { cell } = point(event);
+    const start = clickStart.current;
+    clickStart.current = null;
+    const frame = sourceRef.current?.painted?.displayList;
+    if (!cell || !start || !frame || cell.row !== start.row || cell.col !== start.col) return;
+    followLink(cell.row, cell.col);
+  };
   const onKeyDown = (event: KeyboardEvent) => {
     if (fromPlugin(event) || runRef.current?.failure || !viewRef.current || !selectionRef.current ||
-      editingRef.current || commandForEvent(event)) return;
+      editingRef.current || commands.claimsKey(event)) return;
     const mod = event.metaKey || event.ctrlKey;
     const chart = chartRef.current;
     if (chart) {
@@ -1346,13 +1361,11 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       }
       return;
     }
-    if (mod) {
-      const key = event.key.toLowerCase();
-      if (key === 'c' || key === 'x' || key === 'v') {
-        const kind = key === 'c' ? 'copy' : key === 'x' ? 'cut' : 'paste';
-        if (!deferNavigation(() => clipboard(kind))) clipboard(kind);
-        event.preventDefault(); return;
-      }
+    const pressed = commands.clipboardKey(event);
+    if (pressed) {
+      const kind = pressed === 'pastePlainText' ? 'paste' : pressed;
+      if (!deferNavigation(() => clipboard(kind))) clipboard(kind);
+      event.preventDefault(); return;
     }
     const request = selectionDataRequest(event);
     const key = { key: event.key, ctrlKey: event.ctrlKey, metaKey: event.metaKey, altKey: event.altKey, shiftKey: event.shiftKey };
@@ -1570,7 +1583,8 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     requestSave,
     peer: () => run?.peer ?? null, editPeer: () => run?.editPeer ?? null,
     status: () => run?.ready ? 'ready' : run && !run.failure || loading ? 'loading' : 'empty',
-    readOnly: () => propsRef.current.readOnly ?? false, collaborative: () => false,
+    readOnly: () => propsRef.current.readOnly ?? false,
+    allowHostProposals: () => propsRef.current.allowHostProposals ?? false, collaborative: () => false,
     mutation: () => mutationRef.current, generation: () => run?.generation ?? 0,
     view: () => ({ sheet: activeRef.current, selection: selectionRef.current, chartSelected: chartRef.current !== null,
       zoom: zoomRef.current, capturedFormat: capturedFormatRef.current, borderStyle: borderStyleRef.current,
@@ -1597,7 +1611,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     },
     afterPaint, focusGrid: focus, refuse: (reason) => setRefusal(reason.message),
   });
-  useCommandShortcuts(commands, rootRef);
+  useCommandShortcuts(commands, rootRef, props);
 
   useEffect(() => {
     if (!capturedFormat || !selection || !acceptInput() || dragging.current) return;
@@ -1729,6 +1743,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   const focusRect = grid && focused ? rangeRect(grid, focused) : null;
   const editRect = editing ? (grid && editing.sheet === painted?.request.sheet ?
     cellRect(grid, editing.row, editing.col) : null) ?? editorRectRef.current ?? { x: 0, y: 0, w: 96, h: 24 } : null;
+  const editColors = editRect ? cellEditorColors(editing?.sheet === painted?.request.sheet ? painted?.displayList : null, editRect) : null;
   const previewRect = previewDraft && grid && previewDraft.sheet === painted?.request.sheet ?
     rangeRect(grid, expandRangeToMergedCells({ top: previewDraft.row, left: previewDraft.col,
       bottom: previewDraft.row, right: previewDraft.col }, merged)) : null;
@@ -1751,7 +1766,8 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       {isProposalsAvailable() && <ToolbarCommandButton id="proposalsPanel" />}
     </div>
   </EditorToolbar>;
-  const toolbar = props.showToolbar === false ? null : props.toolbar === undefined ? props.readOnly ? null : defaultToolbar : props.toolbar;
+  const reviewToolbar = props.allowHostProposals && isProposalsAvailable() ? <ToolbarCommandButton id="proposalsPanel" /> : null;
+  const toolbar = props.showToolbar === false ? null : props.toolbar === undefined ? props.readOnly ? reviewToolbar : defaultToolbar : props.toolbar;
   const renderDock = (placement: DockPlacement) => pluginHost.managed ? <PluginDock host={pluginHost.host}
     placement={placement} activations={pluginHost.activations.filter((activation) => activation.plugin.panel?.placement === placement)}
     available={dockArea} /> : null;
@@ -1768,6 +1784,8 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
             <div style={{ position: 'relative', display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0, minHeight: 0 }}>
               {isProposalsAvailable() && proposalsPanelOpen && <ProposalsPanel proposals={proposals} staleFor={staleFor}
                 style={{ top: 4, right: 8, width: 'min(320px, calc(100% - 16px))', maxHeight: 'min(420px, calc(100% - 12px))' }} />}
+              {pluginHost.rowGutter && <PluginRowGutter host={pluginHost.host} index={pluginHost.rowGutter}
+                painted={pluginHost.painted} zoom={zoom} />}
               <div ref={scrollRef} data-testid="xlsx-scroll" tabIndex={0} onKeyDown={onKeyDown}
                 onMouseDown={onMouseDown} onMouseMove={onMouseMove} onClick={onClick}
                 onDoubleClick={(event) => {
@@ -1777,7 +1795,8 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
                   openEditor();
                 }}
                 onMouseLeave={(event) => { event.currentTarget.style.cursor = 'default'; event.currentTarget.title = ''; }}
-                style={{ position: 'relative', flex: 1, overflow: 'auto', minHeight: 0, outline: 'none' }}>
+                style={{ position: 'relative', flex: 1, overflow: 'auto', minHeight: 0, outline: 'none',
+                  ...(pluginHost.rowGutter ? { marginLeft: ROW_GUTTER_WIDTH * zoom } : {}) }}>
                 <div style={{ position: 'absolute', top: 0, left: 0, width: view ? view.contentWidth * zoom : '100%',
                   height: view ? view.contentHeight * zoom : '100%' }} />
                 <div style={{ position: 'sticky', top: 0, left: 0, width: 0, height: 0 }}>
@@ -1810,7 +1829,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
                       }}
                       onCompositionStart={() => startComposition('cell')} onCompositionEnd={(event) => endComposition(event.currentTarget.value)}
                       onKeyDown={(event) => {
-                        if (!commandForEvent(event)) event.stopPropagation();
+                        if (!commands.claimsKey(event)) event.stopPropagation();
                         if (event.nativeEvent.isComposing || event.keyCode === 229) return;
                         if (event.key === 'Enter') { commitDraft('cell', event.shiftKey ? 'up' : 'down'); event.preventDefault(); }
                         else if (event.key === 'Tab') { commitDraft('cell', event.shiftKey ? 'left' : 'right'); event.preventDefault(); }
@@ -1820,7 +1839,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
                         if (suppressBlur.current) { suppressBlur.current = false; return; }
                         commitDraft('cell');
                       }}
-                      style={{ ...outline(editRect, `2px solid ${BRAND}`, '#ffffff'), padding: '0 3px',
+                      style={{ ...outline(editRect, `2px solid ${BRAND}`, editColors?.background), color: editColors?.color, padding: '0 3px',
                         font: `${13 * paintedZoom}px system-ui, sans-serif`, pointerEvents: 'auto', outline: 'none' }} />}
                   </div>
                 </div>
@@ -1830,13 +1849,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
             {renderDock('right')}
           </div>
           {a11yGrid && <>
-            <div style={visuallyHidden} role="grid" aria-label={a11yGrid.label}>
-              <div role="row"><span role="columnheader" />{a11yGrid.columnHeaders.map((header) =>
-                <span key={header.col} role="columnheader">{header.label}</span>)}</div>
-              {a11yGrid.rows.map((row) => <div key={row.row} role="row"><span role="rowheader">{row.header}</span>
-                {row.cells.map((cell) => <span key={cell.col} role="gridcell" aria-selected={cell.selected}>{cell.label}</span>)}
-              </div>)}
-            </div>
+            <A11yGridTable grid={a11yGrid} style={visuallyHidden} onFollowLink={followLink} />
             {a11yGrid.charts.map((chart, index) => <div key={`${index}:${chart.label}`} style={visuallyHidden} role="img" aria-label={chart.label} />)}
           </>}
           {refusal && <div data-testid="xlsx-input-refusal" role="alert" style={{ position: 'relative', zIndex: 1 }}>{refusal}</div>}

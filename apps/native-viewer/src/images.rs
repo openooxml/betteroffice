@@ -1,6 +1,5 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::io::Cursor;
 
 use anyhow::Result;
 use base64::Engine as _;
@@ -8,11 +7,8 @@ use docx_parse::{
     RelationshipTarget, is_footer_relationship, is_header_relationship, is_image_relationship,
     parse_docx_relationship_parts, resolve_relationship_target,
 };
-use docx_raster::{
-    ImageMap, ImageScope, MAX_DATA_URL_BYTES, MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS, NoteKind,
-    scoped_image_key,
-};
-use vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
+use docx_raster::{ImageMap, ImageScope, MAX_DATA_URL_BYTES, NoteKind, scoped_image_key};
+use vello::peniko::ImageData;
 
 pub struct ImageRegistry {
     pub raw: ImageMap,
@@ -121,35 +117,8 @@ fn decode_data_url(source: &str) -> Option<ImageData> {
 }
 
 fn decode_image(bytes: &[u8]) -> Option<ImageData> {
-    use image::ImageDecoder as _;
-
-    let mut decoder = image::ImageReader::new(Cursor::new(bytes))
-        .with_guessed_format()
-        .ok()?
-        .into_decoder()
-        .ok()?;
-    let (declared_width, declared_height) = decoder.dimensions();
-    let declared = u64::from(declared_width) * u64::from(declared_height);
-    if declared > MAX_IMAGE_PIXELS
-        || decoder
-            .total_bytes()
-            .saturating_add(declared.saturating_mul(4))
-            > MAX_IMAGE_BYTES
-    {
-        return None;
-    }
-    let orientation = decoder.orientation().ok()?;
-    let mut image = image::DynamicImage::from_decoder(decoder).ok()?;
-    image.apply_orientation(orientation);
-    let rgba = image.into_rgba8();
-    let (width, height) = rgba.dimensions();
-    Some(ImageData {
-        data: Blob::from(rgba.into_raw()),
-        format: ImageFormat::Rgba8,
-        alpha_type: ImageAlphaType::Alpha,
-        width,
-        height,
-    })
+    let mut unlimited = u64::MAX;
+    crate::picture_decode::decode_bounded(bytes, true, &mut unlimited).ok()
 }
 
 fn relationship_owner(path: &str) -> Option<String> {
@@ -163,6 +132,52 @@ fn relationship_owner(path: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A 2x1 TIFF whose strip is a real JPEG of those pixels.
+    fn jpeg_tiff() -> Vec<u8> {
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+            .encode(
+                &[255, 0, 0, 0, 255, 0],
+                2,
+                1,
+                image::ExtendedColorType::Rgb8,
+            )
+            .unwrap();
+        let entries: [(u16, u16, u32, u32); 9] = [
+            (256, 3, 1, 2),
+            (257, 3, 1, 1),
+            (258, 3, 3, 122),
+            (259, 3, 1, 7),
+            (262, 3, 1, 2),
+            (273, 4, 1, 128),
+            (277, 3, 1, 3),
+            (278, 3, 1, 1),
+            (279, 4, 1, jpeg.len() as u32),
+        ];
+        let mut tiff = b"II*\0\x08\0\0\0".to_vec();
+        tiff.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        for (tag, kind, count, value) in entries {
+            tiff.extend_from_slice(&tag.to_le_bytes());
+            tiff.extend_from_slice(&kind.to_le_bytes());
+            tiff.extend_from_slice(&count.to_le_bytes());
+            tiff.extend_from_slice(&value.to_le_bytes());
+        }
+        tiff.extend_from_slice(&0u32.to_le_bytes());
+        for _ in 0..3 {
+            tiff.extend_from_slice(&8u16.to_le_bytes());
+        }
+        tiff.extend_from_slice(&jpeg);
+        tiff
+    }
+
+    #[test]
+    fn a_tiff_whose_decode_its_size_does_not_bound_is_not_loaded() {
+        let tiff = jpeg_tiff();
+        assert!(image::load_from_memory(&tiff).is_ok());
+        assert!(decode_image(&tiff).is_none());
+    }
+
     use super::*;
     use crate::test_fixtures;
 

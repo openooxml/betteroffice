@@ -94,6 +94,12 @@ export interface NoteRegion {
    * `noteIds`; undefined = legacy region without backlink data.
    */
   notes?: NoteRegionNote[];
+  /** Notes this region continues from an earlier page, which shows their opening. */
+  continuedNoteIds?: number[];
+  /** Left edge of the column the region paints in; undefined = the page's text area. */
+  x?: number;
+  /** Width of that column; undefined = the page's text area. */
+  width?: number;
 }
 
 /** Backlink metadata for one note in a NoteRegion. */
@@ -144,6 +150,9 @@ export interface TableCellRef {
   cellId?: string;
   /** Cell participates as a row/column header. */
   isHeader?: boolean;
+  /** Cell heads its row: the table has header rows and first-column
+   *  formatting, and the cell starts in grid column 0. */
+  isRowHeader?: boolean;
   /** Header cell was repeated on a continuation page. */
   repeatedHeader?: boolean;
   /** Word `w:noWrap` cell behavior. */
@@ -273,6 +282,15 @@ export interface ChartA11yAttrs {
   label: string;
   /** The placed chart box every primitive of the chart paints inside. */
   frame?: { x?: number; y?: number; w?: number; h?: number };
+  /** The plotted values as text, on the chart's first primitive only: one
+   *  row per category, one column per series; empty when the chart caches
+   *  no points. */
+  data?: ChartData;
+}
+
+export interface ChartData {
+  categories: string[];
+  series: { name?: string; values: (string | null)[] }[];
 }
 
 // attributes shared by primitives that map back to document content; replaces
@@ -335,9 +353,13 @@ export interface DocAttrs {
    * note's mirror element (W17 backlinks).
    */
   noteRef?: DisplayNoteRef;
-  revision?: { author: string; date: string; revisionId: string; kind: 'ins' | 'del' };
+  revision?: { author: string; date: string; revisionId: string; kind: 'ins' | 'del' | 'format' };
   /** Synthetic numbering glyph for the first line of a list paragraph. */
   listMarker?: boolean;
+  /** The marker is a number or label a reader needs, not a bullet. */
+  listMarkerNumbered?: boolean;
+  /** The marker is a visible bullet, whatever its stored character. */
+  listMarkerBullet?: boolean;
   /** Pending suggestion paint for a synthetic numbering glyph. */
   listMarkerRevision?: 'ins' | 'del';
   structuralRevision?: StructuralRevision;
@@ -385,6 +407,7 @@ export interface TextRunPrimitive extends DocAttrs {
   width: number; // measured advance of the whole run
   paintClip?: DisplayPaintClip;
   font: string;
+  scripts?: string[];
   color: string;
   letterSpacing?: number;
   // extra advance (px) added after each U+0020 space cluster — the canvas
@@ -402,7 +425,12 @@ export interface TextRunPrimitive extends DocAttrs {
   /** Canvas-only width ratio for substitute font bytes. Absent = 1. */
   substituteScale?: number;
   /** Browser text clusters at offsets from the run origin. */
-  canvasClusters?: Array<{ text: string; offset: number }>;
+  canvasClusters?: Array<{
+    text: string;
+    offset: number;
+    /** @internal Source byte range of the cluster, set when the painted text differs from the source. */
+    sourceRange?: { start: number; end: number };
+  }>;
   /** Render glyphs uppercase without changing the accessible source text. */
   allCaps?: boolean;
   /** Render lowercase glyphs as small uppercase. */

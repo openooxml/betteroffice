@@ -3,9 +3,9 @@
 use betteroffice_fonts::catalog::BundledFontFace;
 use betteroffice_fonts::{
     LastResortOffice, resolve_bundled_family_face, resolve_digit_advance,
-    resolve_glyph_fallback_face, resolve_last_resort_choice, resolve_last_resort_face,
-    resolve_light_variant_face, resolve_metric_compat_face, resolve_metric_compat_family,
-    resolve_script_fallback_face,
+    resolve_family_script_fallback_face, resolve_glyph_fallback_face, resolve_last_resort_choice,
+    resolve_last_resort_face, resolve_light_variant_face, resolve_metric_compat_face,
+    resolve_metric_compat_family, resolve_script_fallback_face,
 };
 use serde_json::{Value, json};
 
@@ -22,6 +22,13 @@ fn replays_typescript_resolution_cases() {
         let query = &case["query"];
         let bold = query["bold"].as_bool().unwrap();
         let italic = query["italic"].as_bool().unwrap();
+        if let (Some(family), Some(script)) = (query["family"].as_str(), query["script"].as_str()) {
+            let answer = json!({
+                "scriptFallbackFace": file(resolve_family_script_fallback_face(family, script, bold, italic)),
+            });
+            assert_eq!(answer, case["answer"], "{query}");
+            continue;
+        }
         if let Some(script) = query["script"].as_str() {
             assert!(char::from_u32(query["codePoint"].as_u64().unwrap() as u32).is_some());
             let answer = json!({
@@ -63,4 +70,40 @@ fn replays_typescript_resolution_cases() {
         assert_eq!(answer, case["answer"], "{query}");
     }
     assert!(resolve_script_fallback_face("unknown", false, false).is_none());
+}
+
+#[test]
+fn naskh_styled_families_fall_back_to_naskh_for_arabic_in_every_style() {
+    for family in [
+        "Simplified Arabic",
+        "Traditional Arabic",
+        " traditional ARABIC ",
+    ] {
+        for bold in [false, true] {
+            for italic in [false, true] {
+                assert_eq!(
+                    resolve_family_script_fallback_face(family, "arabic", bold, italic)
+                        .map(|face| face.file.as_str()),
+                    Some("NotoNaskhArabic-Regular.ttf.zst"),
+                    "{family} bold={bold} italic={italic}"
+                );
+            }
+        }
+        assert_eq!(
+            resolve_family_script_fallback_face(family, "hebrew", false, false)
+                .map(|face| face.file.as_str()),
+            Some("NotoSansHebrew-Regular.ttf.zst")
+        );
+    }
+    for (family, bold, file) in [
+        ("Arial", false, "NotoSansArabic-Regular.ttf.zst"),
+        ("Arial", true, "NotoSansArabic-Bold.ttf.zst"),
+        ("Times New Roman", false, "NotoSansArabic-Regular.ttf.zst"),
+    ] {
+        assert_eq!(
+            resolve_family_script_fallback_face(family, "arabic", bold, false)
+                .map(|face| face.file.as_str()),
+            Some(file)
+        );
+    }
 }

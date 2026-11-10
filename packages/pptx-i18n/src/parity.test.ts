@@ -4,6 +4,8 @@ import { basename, join, resolve } from 'node:path';
 import { readLocaleCodes } from '../locale-files';
 import { locales } from './index';
 import en from '../en.json';
+import proposalEn from '../proposals/en.json';
+import menuEn from '../menus/en.json';
 
 const packageDir = resolve(import.meta.dir, '..');
 const localeCodes = readLocaleCodes(packageDir);
@@ -33,7 +35,9 @@ function pluralCategories(text: string): string[][] {
   );
 }
 
-const enEntries = leafEntries(en);
+const fallbackKeys = new Set(['proposals.insertedShape', 'proposals.deletedShape', 'proposals.slideStrip', 'proposals.previewSlide', 'proposals.insertedSlide',
+  'proposals.deletedSlide', 'proposals.movedFrom']);
+const enEntries = [...leafEntries(en), ...leafEntries(proposalEn), ...leafEntries(menuEn)];
 const expectedKeys = new Set(enEntries.map(([key]) => key));
 const expectedPlaceholders = new Map(
   enEntries
@@ -61,6 +65,22 @@ test('locale files on disk match the exported locales', () => {
   expect(Object.keys(locales).sort()).toEqual(localeCodes);
 });
 
+test('package subpaths match the locale files and internal entry modules', () => {
+  const manifest = JSON.parse(readFileSync(join(packageDir, 'package.json'), 'utf8'));
+  const subpaths = Object.keys(manifest.exports)
+    .filter((entry) => entry !== '.' && entry !== './package.json')
+    .map((entry) => entry.slice(2))
+    .sort();
+  expect(subpaths).toEqual([...localeCodes, 'editor', 'proposals', 'menus'].sort());
+  for (const code of subpaths) {
+    expect(manifest.exports[`./${code}`]).toEqual({
+      types: `./dist/${code}.d.mts`,
+      import: `./dist/${code}.mjs`,
+      default: `./dist/${code}.mjs`,
+    });
+  }
+});
+
 for (const code of otherCodes) {
   const data = dataByCode.get(code);
 
@@ -72,13 +92,13 @@ for (const code of otherCodes) {
     const actual = new Set(leafEntries(data).map(([key]) => key));
     const missing = [...expectedKeys].filter((key) => !actual.has(key));
     const extra = [...actual].filter((key) => !expectedKeys.has(key));
-    expectNone(code, 'is missing keys that en.json has', missing);
-    expectNone(code, 'has keys that en.json does not have', extra);
+    expectNone(code, 'is missing keys that the English tables have', missing);
+    expectNone(code, 'has keys that the English tables do not have', extra);
   });
 
   test(`${code} translates every key`, () => {
     const untranslated = leafEntries(data)
-      .filter(([, text]) => typeof text !== 'string' || text.trim() === '')
+      .filter(([key, text]) => !(text === null && fallbackKeys.has(key)) && (typeof text !== 'string' || text.trim() === ''))
       .map(([key]) => key);
     expectNone(code, 'has untranslated keys', untranslated);
   });

@@ -18,8 +18,9 @@ name = "xlsx_raster"
 fonts = []
 
 [dependencies]
+ooxml-raster.workspace = true
+ooxml-text.workspace = true
 tiny-skia = "0.12"
-png = "0.18"
 rustybuzz = "0.20"
 unicode-segmentation = "1.12"
 xlsx-render.workspace = true

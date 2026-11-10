@@ -85,7 +85,7 @@ pub enum NoteKind {
 }
 
 impl NoteKind {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Footnote => "footnote",
             Self::Endnote => "endnote",
@@ -167,6 +167,7 @@ pub struct NoteAnchor {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NoteContent {
+    #[serde(deserialize_with = "crate::whole_number::note_id")]
     pub id: i64,
     #[serde(default)]
     pub note_kind: NoteKind,
@@ -360,7 +361,7 @@ fn append_unique(map: &mut OrderedMap<u32, Vec<i64>>, page_number: u32, map_id: 
     }
 }
 
-fn page_for_map_id<'a>(
+pub(crate) fn page_for_map_id<'a>(
     pages: &'a [Page],
     anchors: &OrderedMap<u32, Vec<i64>>,
     map_id: i64,
@@ -384,6 +385,13 @@ pub fn map_notes_to_pages(
         let Some(anchor_page) = page_for_map_id(pages, &anchors, map_id) else {
             continue;
         };
+        if crate::endnote_flow::flows_with_body(
+            reference.note_kind,
+            regions,
+            anchor_page.region_section_index,
+        ) {
+            continue;
+        }
         let properties = regions.note_properties(
             anchor_page.region_section_index,
             reference.note_kind.as_str(),
@@ -573,7 +581,7 @@ pub fn distribute_notes_into_columns<T: HasHeight>(items: Vec<T>, columns: u64) 
     result
 }
 
-fn content_map(contents: &[NoteContent]) -> OrderedMap<i64, &NoteContent> {
+pub(crate) fn content_map(contents: &[NoteContent]) -> OrderedMap<i64, &NoteContent> {
     contents
         .iter()
         .map(|content| (content.map_id(), content))
@@ -886,7 +894,7 @@ fn fragment_bottom(fragment: &Fragment) -> f64 {
     }
 }
 
-fn note_item(content: &NoteContent) -> NoteLayoutItemContract {
+pub(crate) fn note_item(content: &NoteContent) -> NoteLayoutItemContract {
     NoteLayoutItemContract {
         kind: Some(content.note_kind.as_str().to_owned()),
         id: Some(content.id),
@@ -929,6 +937,7 @@ fn note_item(content: &NoteContent) -> NoteLayoutItemContract {
             .and_then(|anchor| anchor.doc_end)
             .map(|value| value as i64),
         custom_mark_follows: content.custom_mark_follows,
+        ..Default::default()
     }
 }
 
@@ -1056,6 +1065,9 @@ pub fn attach_note_areas(
                     }
                 }),
                 notes: Some(group.iter().map(|content| note_item(content)).collect()),
+                continuation: None,
+                x: None,
+                width: None,
             });
         }
         if !areas.is_empty() {
@@ -1252,7 +1264,7 @@ mod tests {
     }
 
     #[test]
-    fn places_endnotes_at_document_end_without_id_collisions() {
+    fn leaves_document_end_endnotes_to_the_body_flow_without_id_collisions() {
         let pages = vec![
             page(1, 0, vec![paragraph_fragment(0.0, 20.0)]),
             page(2, 0, vec![paragraph_fragment(20.0, 40.0)]),
@@ -1276,7 +1288,7 @@ mod tests {
 
         let mapped = map_notes_to_pages(&pages, &refs, &DocumentRegions::default());
         assert_eq!(mapped.get(&1), Some(&vec![1]));
-        assert_eq!(mapped.get(&2), Some(&vec![-2]));
+        assert_eq!(mapped.get(&2), None);
     }
 
     #[test]

@@ -19,6 +19,7 @@ import {
   type DocxProposalSnapshot,
 } from './proposals';
 import { resolveNavigationTarget } from './proposalGeometry';
+import { fontRequirementCharacters, type ResidentFontRequirement } from '../layout/measure/rustMeasureSource';
 
 const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm');
 const FONT = resolve(
@@ -410,7 +411,7 @@ function paragraphTexts(session: YrsSession, view: 'accepted' | 'original'): str
   return read.paragraphs.map(({ text }) => text);
 }
 
-test('ASCII worker proposals carry verified font requirements and Unicode proposals invalidate them', async () => {
+test('ASCII worker proposals refresh character requirements and Unicode proposals invalidate them', async () => {
   const bytes = proposalDocument();
   const source = await createYrsSession({ clientId: 5111 });
   sessions.push(source);
@@ -435,13 +436,19 @@ test('ASCII worker proposals carry verified font requirements and Unicode propos
   let clientVersion = initial.mirror.version;
   const ascii = await propose('ascii', '00000001', 'Alpha', 'First');
   expect(ascii.result?.ok).toBe(true);
-  expect(ascii.fontRequirements).toEqual({ layoutInput: LAYOUT, requirementsJson });
-  expect(await client.fontRequirements(LAYOUT)).toBe(requirementsJson);
+  const updated = await client.fontRequirements(LAYOUT);
+  expect(ascii.fontRequirements).toEqual({ layoutInput: LAYOUT, requirementsJson: updated });
+  expect(updated).not.toBe(requirementsJson);
+  const previous = JSON.parse(requirementsJson) as ResidentFontRequirement[];
+  const requirements = JSON.parse(updated) as ResidentFontRequirement[];
+  expect(requirements.map(({ characterBits: _bits, ...requirement }) => requirement))
+    .toEqual(previous.map(({ characterBits: _bits, ...requirement }) => requirement));
+  expect(fontRequirementCharacters(requirements[0]!)).toEqual(expect.arrayContaining([...'First']));
   clientVersion = ascii.mirror.version;
   const unicode = await propose('unicode', '00000002', 'Beta', '漢字');
   expect(unicode.result?.ok).toBe(true);
   expect(unicode.fontRequirements).toBeUndefined();
-  expect(await client.fontRequirements(LAYOUT)).not.toBe(requirementsJson);
+  expect(await client.fontRequirements(LAYOUT)).not.toBe(updated);
   const decided = await client.proposal({ kind: 'setStates', request: {
     expectVersion: unicode.mirror.version,
     expectPreviewVersion: unicode.geometry.previewVersion,
@@ -683,6 +690,8 @@ test('worker registry operations match a direct registry and hand their records 
   expect(main.getProposals()).toEqual({
     version: main.version(),
     previewVersion: handoff.proposals.previewVersion,
+    ...(handoff.proposals.revision ? { revision: handoff.proposals.revision } : {}),
+    ...(handoff.proposals.withdrawn?.length ? { withdrawn: handoff.proposals.withdrawn } : {}),
     proposals: handoff.proposals.entries.map(({ record }) => record),
   });
   expect(main.proposeChanges({ expectVersion: 'stale', proposals: proposals.slice(1) }).ok).toBe(true);
@@ -789,6 +798,8 @@ test('worker withdrawal refuses a revision joined by typing with a foreign stamp
   expect(restored.getProposals()).toEqual({
     version: restored.version(),
     previewVersion: handoff.proposals.previewVersion,
+    ...(handoff.proposals.revision ? { revision: handoff.proposals.revision } : {}),
+    ...(handoff.proposals.withdrawn?.length ? { withdrawn: handoff.proposals.withdrawn } : {}),
     proposals: handoff.proposals.entries.map(({ record }) => record),
   });
   const restoredState = restored.encodeState();

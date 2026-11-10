@@ -92,6 +92,13 @@ configureDefaultFonts({ fonts, baseUrl: 'https://cdn.example.com/betteroffice-fo
   `dist/decoder/`, which bundlers emit next to the entry. When neither loads, decoding fails with
   `Font decoder wasm not found` and both URLs.
 
+## Checking installed packs
+
+`checkFontPacks()` lists installed add-on packages that cannot be used, such as a `@betteroffice/fonts-cjk` from
+another release or with missing files, each with the pack and the reason (`version-mismatch`, `missing-file`,
+`invalid-manifest`). Their faces are substituted as when the pack is not installed. Under Node the files are checked on
+disk; in a browser only the package's asset list is compared, since checking the files would fetch them.
+
 ## Bundlers
 
 With rollup, esbuild or a Vite build that inlines the package, mark the font packages as external
@@ -147,6 +154,8 @@ real italic face.
 
 Measurement never consults fonts installed on the machine: embedded document fonts come first, then
 the bundled substitutes, then a last-resort face, so a document measures the same everywhere.
+DOCX loads `BASE_LATIN_FAMILY` from package assets only for text those sources do not cover.
+Native raster consumers embed these faces.
 
 ## API
 
@@ -165,6 +174,7 @@ sources and other consumers:
 | `resolveDigitAdvance`, `maxDigitWidth` | Widest digit advance, recorded or measured. |
 | `loadBundledFontBytes(face, { baseUrl? })` | Fetches a face's bytes, cached per face and base URL. |
 | `registerBundledFontFace(face)` | Registers a face with the browser `FontFace` API; no-op outside the DOM. |
+| `ProgressiveFontFace`, `SliceLocation` (types) | A CJK face opened from its slices: layout tables complete at once, outlines loaded by glyph id (`ensureGlyphs`) or predicted from text (`prefetch`). A sliced face's loader carries an optional `slices` location, which `openSlicedFace` from `@betteroffice/fonts/progressive` opens. Calling the loader itself still returns the whole face. |
 
 ## Documentation
 

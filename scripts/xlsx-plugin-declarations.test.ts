@@ -43,6 +43,21 @@ export const review = defineXlsxPlugin<State>({
   id: 'acme.review',
   createState: () => ({ count: 0 }),
   async onEvent(context, event) {
+    const focused: boolean = context.snapshot.focused;
+    const locale: string = context.snapshot.locale;
+    void [focused, locale];
+    switch (event.type) {
+      case 'focus-change': {
+        const focused: boolean = event.focused;
+        void focused;
+        break;
+      }
+      case 'locale-change': {
+        const locale: string = event.locale;
+        void locale;
+        break;
+      }
+    }
     if (event.type === 'selection-change' && event.selection?.cells) {
       const result: XlsxPluginNavigationResult = await context.navigation.selectCells(
         { sheetId: event.selection.sheetId, selection: event.selection.cells },

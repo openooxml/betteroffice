@@ -848,6 +848,7 @@ fn criteria_indexes_cover_final_anchors_and_invalidate_on_writes() {
         },
         &budget,
         &mut changed,
+        None,
     )
     .unwrap();
     assert!(!budget.criteria_index_covers(SheetId(0), at));
@@ -1072,6 +1073,14 @@ fn criteria_index_spill_schedules_guard_before_later_readers() {
             cycle_cells: Vec::new(),
             limited_cells: Vec::new(),
             spilled: Vec::new(),
+            readers: Readers::new(&graph),
+            inherited: HashMap::new(),
+            answered_reads: HashMap::new(),
+            replaced: HashMap::new(),
+            rerun: Vec::new(),
+            early: HashMap::new(),
+            watching: false,
+            unwatched: Vec::new(),
         };
         let sheet = SheetId(0);
         let reader = CellRef::new(0, 1);
@@ -1421,6 +1430,7 @@ fn nth_match_final_anchor_index_invalidates_on_spill_write() {
         },
         &budget,
         &mut Vec::new(),
+        None,
     )
     .unwrap();
     assert!(!budget.criteria_index_covers(SheetId(0), at));

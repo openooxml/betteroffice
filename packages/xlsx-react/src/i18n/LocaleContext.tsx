@@ -11,6 +11,15 @@ export interface LocaleProviderProps {
   children: ReactNode;
 }
 
+export function resolvedLocale(lang: unknown): string {
+  if (typeof lang !== 'string') return 'en';
+  try {
+    return Intl.getCanonicalLocales(lang)[0] ?? 'en';
+  } catch {
+    return 'en';
+  }
+}
+
 export function LocaleProvider({ i18n, children }: LocaleProviderProps) {
   const lang = typeof i18n?._lang === 'string' ? i18n._lang : 'en';
   const merged = useMemo(
@@ -24,9 +33,9 @@ export function LocaleProvider({ i18n, children }: LocaleProviderProps) {
   );
 }
 
-export function useTranslation(): { t: TFunction } {
+export function useTranslation(): { t: TFunction; lang: string } {
   const strings = useContext(LocaleContext);
   const lang = useContext(LangContext);
   const t = useMemo(() => createT(strings, lang), [strings, lang]);
-  return { t };
+  return { t, lang };
 }

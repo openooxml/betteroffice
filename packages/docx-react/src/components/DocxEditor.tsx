@@ -66,6 +66,8 @@ import { useEditorEngineChoice, useDocxEditorRoute } from './DocxEditor/internal
 import { useDocxFileAliases } from './DocxEditor/internals/fileAliases';
 import { useOutlineSidebar } from './DocxEditor/hooks/useOutlineSidebar';
 import { useKeyboardShortcuts } from './DocxEditor/hooks/useKeyboardShortcuts';
+import type { DocxShortcuts } from '../commands/shortcuts';
+import type { ShortcutIssue } from '../../../../shared/keyboard/resolve';
 import { useFileIO } from './DocxEditor/hooks/useFileIO';
 import { usePageSetupControls } from './DocxEditor/hooks/usePageSetupControls';
 import { useWatermarkControls } from './DocxEditor/hooks/useWatermarkControls';
@@ -136,6 +138,7 @@ import { DocxEditorToolbar } from './DocxEditor/DocxEditorToolbar';
 import { DocxEditorPagedArea } from './DocxEditor/DocxEditorPagedArea';
 import { ContentControlWidgets } from './DocxEditor/ContentControlWidgets';
 import { CanvasPagedArea } from './DocxEditor/CanvasPagesView';
+import { MirrorLinkRouteContext, useMirrorLinkRoute } from './DocxEditor/mirrorLinkRoute';
 import { useCanvasRenderer } from './DocxEditor/hooks/useDisplayList';
 import { LazyPeerlessDocxEditor } from './DocxEditor/peerless/PeerlessDocxEditorLoader';
 import { LEGACY_SYNC_API_PROP, PeerlessSyncApiError } from './DocxEditor/peerless/contracts';
@@ -158,6 +161,7 @@ import { TrackedChangesReview } from './sidebar/TrackedChangesReview';
 import { useCanvasReviewGeometry } from './sidebar/canvasReviewGeometry';
 import type { ReactSidebarItem } from '../plugin-api/types';
 import type { DocxEditorPluginProps } from '../plugins/types';
+import { resolvedLocale } from '../i18n/LocaleContext';
 import { useDocxPluginHost } from '../plugins/useDocxPluginHost';
 import { PluginOverlays } from '../plugins/PluginOverlays';
 import { PluginDock } from '../plugins/PluginPanels';
@@ -192,6 +196,14 @@ import type { RenderedDomContext } from '../plugin-api/types';
 
 export type { DocxParagraphMatch } from '@betteroffice/docx/yrs';
 import type { DocxParagraphMatch } from '@betteroffice/docx/yrs';
+
+/** What a save reports beside its bytes. */
+export interface DocxEditorSaveInfo {
+  /** Paragraphs saved as they were, without their new formatting, so that no structure is lost. */
+  keptUnchanged?: { structure: number; paragraphs: unknown[] };
+  /** Parts written whole with less structure than their source, outside what the edits touched. */
+  structureDropped?: unknown[];
+}
 
 export interface DocxSelectionInfo {
   paraId: string | null;
@@ -233,8 +245,12 @@ export interface DocxEditorBaseProps extends DocxEditorPluginProps {
   experimentalPrewarm?: boolean;
   /** Pre-parsed document (alternative to documentBuffer) */
   document?: Document | null;
-  /** Callback when document is saved */
-  onSave?: (buffer: ArrayBuffer) => void;
+  /**
+   * Callback when document is saved. `info.keptUnchanged` counts paragraphs the save wrote as
+   * they were, without their new formatting, because writing it would have dropped a
+   * hyperlink, field or drawing; absent when none were.
+   */
+  onSave?: (buffer: ArrayBuffer, info?: DocxEditorSaveInfo) => void;
   /** Owns File > Save and Cmd/Ctrl+S; return true to continue the built-in save. */
   onSaveRequest?: () => boolean | void | Promise<boolean | void>;
   /** Whether Save also downloads a copy. Defaults to true. */
@@ -330,6 +346,14 @@ export interface DocxEditorBaseProps extends DocxEditorPluginProps {
    */
   pageMirror?: 'full' | 'text';
   /**
+   * Plain paragraphs for pages the worker-only editor has not built yet, without layout
+   * positions or headings. Tables read as paragraphs; notes, text boxes, headers, footers and
+   * list numbers or bullets are omitted. Beyond a reading window, a line names the page range with a Go to page
+   * control. Find in page matches no text outside that window. `pageMirror` covers built
+   * pages and replaces the section when a page is built. Default: `'text'`.
+   */
+  unbuiltPageMirror?: 'text' | 'off';
+  /**
    * Lets the ref's proposal methods run while the editor is read-only or viewing. Typing,
    * `applyEdits`, commands and plugin writes stay blocked. Default: false.
    */
@@ -341,6 +365,18 @@ export interface DocxEditorBaseProps extends DocxEditorPluginProps {
    * This lets the browser or host app handle native find/history shortcuts.
    */
   disableFindReplaceShortcuts?: boolean;
+  /**
+   * Remaps or disables keyboard shortcuts; menus, tooltips and the shortcuts dialog follow. An
+   * entry for `find` or `replace` wins over `disableFindReplaceShortcuts`.
+   * @experimental
+   */
+  shortcuts?: DocxShortcuts;
+  /**
+   * Reports each entry of `shortcuts` that was refused, and each default a host chord displaced.
+   * Without it, refusals are logged in development builds.
+   * @experimental
+   */
+  onShortcutIssue?: (issue: ShortcutIssue) => void;
   /** Custom toolbar actions */
   toolbarExtra?: ReactNode;
   /**
@@ -934,6 +970,8 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
     allowHostProposals = false,
     showHostProposalsInSidebar = false,
     disableFindReplaceShortcuts = false,
+    shortcuts,
+    onShortcutIssue,
     toolbarExtra,
     toolbar,
     className = '',
@@ -1028,6 +1066,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
   // PagedEditor ref declared early so comment management can read the live
   // Yrs session before the tracked-changes effect drives `setComments`.
   const pagedEditorRef = useRef<PagedEditorRef>(null);
+  const mirrorLinkRoute = useMirrorLinkRoute();
   const fontScope = useFontLoadScope(fonts);
 
   const {
@@ -1790,6 +1829,9 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
     containerRef,
     disableFindReplaceShortcuts,
     tableSelection,
+    shortcuts,
+    onShortcutIssue,
+    onError,
   });
 
   // Handle table insert from toolbar
@@ -1892,6 +1934,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
     contextMenuItems,
     handleContextMenuAction,
   } = useContextMenus({
+    commands: commandController.store,
     pagedEditorRef,
     focusActiveEditor,
     runTableAction: (action) => void commandController.store.execute('tableAction', action),
@@ -1979,6 +2022,11 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
       ? yrsCore.session
       : null;
   const pluginHost = useDocxPluginHost({
+    locale: resolvedLocale(i18n?._lang),
+    focusRoot: () => editorContentRef.current?.querySelector('.paged-editor') ?? null,
+    scrollContainerRef,
+    editorRootRef: containerRef,
+    shortcutsKey: shortcuts === undefined ? undefined : JSON.stringify(shortcuts),
     experimentalWorkerOpen: workerOpen,
     plugins,
     pluginGrants,
@@ -2730,6 +2778,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
         pagedArea={
           <TrackedChangesContext.Provider value={{ options: trackedChangesOptions, peers: reviewPeers, user: collaboration?.user,
             clientId: collaboration?.clientId, items: reviewSidebarItems, navigate: navigateReviewItem }}>
+          <MirrorLinkRouteContext.Provider value={mirrorLinkRoute}>
           <CanvasPagedArea
             renderer={canvasRenderer}
             a11y={{
@@ -2878,6 +2927,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
               heldGeometry={pluginHost.heldGeometry}
             />
           </CanvasPagedArea>
+          </MirrorLinkRouteContext.Provider>
           </TrackedChangesContext.Provider>
         }
         loadingIndicator={

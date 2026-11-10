@@ -6,7 +6,8 @@ import {
   xlsxCommandController,
   type XlsxPendingCommand,
 } from '../../commands/createXlsxCommandStore';
-import { commandLabelKey, commandShortcut, isPluginCommandId } from '../../commands/descriptors';
+import { commandLabelKey, isPluginCommandId } from '../../commands/descriptors';
+import { storeAriaShortcut, storeShortcutLabel } from '../../commands/shortcuts';
 import {
   isHexColor,
   MAX_FONT_POINTS,
@@ -227,7 +228,8 @@ function commandItem<K extends XlsxCommandId>(
     id: args === undefined ? id : `${id}:${JSON.stringify(args)}`,
     label: label ?? t(commandLabelKey(id, args)),
     icon: menuIconFor(id, args, t),
-    shortcut: commandShortcut(id, args) ?? undefined,
+    shortcut: storeShortcutLabel(store, id, t, args) ?? undefined,
+    ariaShortcut: storeAriaShortcut(store, id, args) ?? undefined,
     checked: toggle ? state.active : undefined,
     disabled: !state.enabled,
     description: reasonOf(state),
@@ -426,6 +428,7 @@ function PluginCommandButton({
       description={state.enabled ? undefined : state.disabledReason.message}
       title={name}
       shortcut={command.shortcut}
+      ariaShortcut={command.ariaShortcut}
       className={className}
       style={children ? undefined : { padding: '0 8px' }}
       onClick={() => void command.execute()}
@@ -456,6 +459,7 @@ function BuiltInCommandButton<K extends XlsxCommandId>(props: ToolbarCommandButt
       description={reasonOf(state)}
       title={name}
       shortcut={command.shortcut}
+      ariaShortcut={command.ariaShortcut}
       testId={testIdFor(id, args)}
       className={className}
       onClick={() => void command.execute()}

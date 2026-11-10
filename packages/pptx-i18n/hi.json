@@ -52,6 +52,7 @@
     "decreaseFontSize": "फ़ॉन्ट का आकार घटाएं",
     "increaseFontSize": "फ़ॉन्ट का आकार बढ़ाएं",
     "underline": "रेखांकित",
+    "strikethrough": "स्ट्राइकथ्रू",
     "more": "और",
     "fillColor": "भरण रंग",
     "noFill": "कोई भरण नहीं",
@@ -91,6 +92,12 @@
     "fallbackTitle": "स्लाइड {number}",
     "canvasLabel": "कुल {total} में से स्लाइड {current}",
     "canvasLabelWithSelection": "कुल {total} में से स्लाइड {current}; चयनित ऑब्जेक्ट {name}"
+  },
+  "a11y": {
+    "chartNoData": "कोई डेटा नहीं",
+    "slideWithTitle": "कुल {total} में से स्लाइड {current}: {title}",
+    "objectSelected": "{name} चयनित",
+    "editingText": "{name} संपादित किया जा रहा है"
   },
   "editor": {
     "appLabel": "प्रस्तुति स्लाइड संपादक",
@@ -156,6 +163,17 @@
     "stalePreview": "यह पूर्वावलोकन अद्यतन स्लाइड का उपयोग करता है। लागू करने पर बदले गए लक्ष्य ओवरराइट हो जाएंगे।",
     "geometry": "स्थिति और आकार (x, y, चौड़ाई, ऊंचाई)",
     "geometryValues": "{before} → {after} pt",
+    "layoutChanged": "लेआउट बदला गया",
+    "backgroundChanged": "पृष्ठभूमि बदली गई",
+    "rowInserted": "पंक्ति जोड़ी गई",
+    "rowDeleted": "पंक्ति हटाई गई",
+    "columnInserted": "स्तंभ जोड़ा गया",
+    "columnDeleted": "स्तंभ हटाया गया",
+    "broughtToFront": "सबसे आगे लाया गया",
+    "sentToBack": "सबसे पीछे भेजा गया",
+    "broughtForward": "एक स्तर आगे लाया गया",
+    "sentBackward": "एक स्तर पीछे भेजा गया",
+    "zOrderChanged": "परतों का क्रम बदला गया",
     "appearance": "रूप या टेक्स्ट प्रारूपण बदला गया",
     "changedAgain": "लक्ष्य फिर से बदल गया है। लागू करने से पहले ताज़ा पूर्वावलोकन की समीक्षा करें।",
     "canvasTitle": "इस स्लाइड पर बदलाव",
@@ -168,7 +186,14 @@
     "canvasStale": "लक्ष्य बदल गए हैं। लागू करने से पहले अद्यतन पूर्वावलोकन देखने के लिए समीक्षा विवरण खोलें।",
     "previousPosition": "पिछला",
     "proposedPosition": "प्रस्तावित",
-    "loadingDiff": "बदलाव लोड हो रहे हैं…"
+    "loadingDiff": "बदलाव लोड हो रहे हैं…",
+    "slideStrip": null,
+    "previewSlide": null,
+    "insertedShape": null,
+    "deletedShape": null,
+    "insertedSlide": null,
+    "deletedSlide": null,
+    "movedFrom": null
   },
   "commands": {
     "moreControls": "और नियंत्रण",
@@ -212,8 +237,25 @@
       "permissionDenied": "होस्ट एप्लिकेशन ने इस प्लगइन को यह कमांड उपयोग करने की अनुमति नहीं दी है।",
       "unsupportedPolicy": "प्लगइन अभी यह कमांड नहीं चला सकते। इसके बजाय संपादन बैच का उपयोग करें।",
       "pluginUnavailable": "प्लगइन अब सक्रिय नहीं है।",
-      "aborted": "कमांड चलने से पहले प्लगइन की कार्रवाई रद्द कर दी गई।"
-    }
+      "aborted": "कमांड चलने से पहले प्लगइन की कार्रवाई रद्द कर दी गई।",
+      "clipboardUnavailable": "क्लिपबोर्ड का ऐक्सेस उपलब्ध नहीं है या अनुमति नहीं मिली।",
+      "tableRequired": "पहले कर्सर को तालिका के किसी कक्ष में रखें।",
+      "lastSlide": "अंतिम स्लाइड हटाई नहीं जा सकती।"
+    },
+    "cut": "काटें",
+    "copy": "कॉपी करें",
+    "paste": "पेस्ट करें",
+    "pastePlainText": "सादे टेक्स्ट के रूप में पेस्ट करें",
+    "insert": "डालें",
+    "delete": "हटाएं",
+    "deleteTable": "तालिका हटाएं",
+    "duplicateSlide": "स्लाइड की प्रतिलिपि बनाएँ",
+    "insertRowsAbove": "ऊपर पंक्तियाँ सम्मिलित करें",
+    "insertRowsBelow": "नीचे पंक्तियाँ सम्मिलित करें",
+    "insertColumnsLeft": "बाईं ओर स्तंभ सम्मिलित करें",
+    "insertColumnsRight": "दाईं ओर स्तंभ सम्मिलित करें",
+    "deleteRows": "पंक्तियाँ हटाएँ",
+    "deleteColumns": "स्तंभ हटाएँ"
   },
   "plugins": {
     "toolbarGroup": "प्लगइन",
@@ -225,5 +267,20 @@
     "label": "सहयोगी",
     "moreCollaborators": "{count, plural, one {# और सहयोगी} other {# और सहयोगी}}",
     "moreSelections": "+{count, plural, one {# चयन} other {# चयन}}"
+  },
+  "contextMenu": {
+    "text": "पाठ मेनू",
+    "shape": "आकृति मेनू",
+    "table": "तालिका मेनू",
+    "slide": "स्लाइड मेनू"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "delete": "Del",
+    "escape": "Esc",
+    "pageup": "Page Up",
+    "pagedown": "Page Down"
   }
 }

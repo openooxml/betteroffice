@@ -5,3 +5,10 @@ resolver = "3"
 [profile.release]
 opt-level = 3
 lto = true
+
+[profile.hooks]
+inherits = "release"
+lto = false
+
+[patch.crates-io]
+yrs = { git = "https://github.com/openooxml/y-crdt.git", rev = "5349f4e11ec46a5ad842f08415b315cb6d5c53af" }

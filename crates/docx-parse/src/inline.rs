@@ -338,15 +338,15 @@ fn parse_run_property_changes(
 ) -> Option<Vec<RunPropertyChange>> {
     let changes: Vec<_> = r_pr?
         .children_named("w", "rPrChange")
-        .filter_map(|change| {
+        .map(|change| {
             let previous = parse_inline_run_properties(change.child("w", "rPr"), theme);
             let current = current.cloned();
-            (previous.is_some() || current.is_some()).then(|| RunPropertyChange {
+            RunPropertyChange {
                 node_type: RunPropertyChangeType::RunPropertyChange,
                 info: parse_property_change_info(change),
                 previous_formatting: previous,
                 current_formatting: current,
-            })
+            }
         })
         .collect();
     (!changes.is_empty()).then_some(changes)
@@ -2156,6 +2156,28 @@ pub(crate) fn instruction_run(run: &Run) -> Run {
     code
 }
 
+pub(crate) fn field_runs(node: &InlineNode) -> Vec<&Run> {
+    match node {
+        InlineNode::Run(run) => vec![run],
+        InlineNode::Hyperlink(link) => link
+            .children
+            .iter()
+            .filter_map(|child| match child {
+                InlineNode::Run(run) => Some(run),
+                _ => None,
+            })
+            .collect(),
+        InlineNode::SimpleField(field) => field.content.iter().collect(),
+        InlineNode::BookmarkStart(_)
+        | InlineNode::BookmarkEnd(_)
+        | InlineNode::ComplexField(_)
+        | InlineNode::InlineSdt(_)
+        | InlineNode::Math(_)
+        | InlineNode::RawXml(_)
+        | InlineNode::Tracked(_) => Vec::new(),
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct OpenComplexField {
     instruction: String,
@@ -2214,7 +2236,8 @@ impl OpenComplexField {
     /// A node inside an open field joins the field's structure in place; its
     /// runs flatten into the run-level view consumers read for text. Pushing
     /// it to the paragraph instead would reorder it before the field on save.
-    pub(crate) fn absorb(&mut self, node: InlineNode, runs: Vec<Run>) {
+    pub(crate) fn absorb(&mut self, node: InlineNode) {
+        let runs = field_runs(&node).into_iter().cloned();
         match self.mode {
             FieldMode::Code => {
                 self.code_runs.extend(runs);
@@ -2232,7 +2255,7 @@ impl OpenComplexField {
     pub(crate) fn absorb_instruction(&mut self, run: &Run) {
         let code = instruction_run(run);
         self.instruction_runs.push(code.clone());
-        self.absorb(InlineNode::Run(code.clone()), vec![code]);
+        self.absorb(InlineNode::Run(code));
     }
 
     pub(crate) fn absorb_nested(&mut self, field: ComplexField) {
@@ -2245,7 +2268,7 @@ impl OpenComplexField {
                 display_mode: tree.display_mode.clone(),
             });
         }
-        self.absorb(InlineNode::ComplexField(Box::new(field)), Vec::new());
+        self.absorb(InlineNode::ComplexField(Box::new(field)));
     }
 
     pub(crate) fn finish(mut self) -> ComplexField {
@@ -2340,7 +2363,7 @@ pub(crate) fn absorb_beyond_field_nesting(
             _ => {}
         }
     }
-    active.absorb(InlineNode::Run(run.clone()), vec![run]);
+    active.absorb(InlineNode::Run(run));
     Ok(None)
 }
 
@@ -2453,7 +2476,7 @@ fn parse_inline_container_at_depth(
                         active.switch_to_result();
                     }
                     if !has_begin && !has_separate && !has_end {
-                        active.absorb(InlineNode::Run(run.clone()), vec![run]);
+                        active.absorb(InlineNode::Run(run));
                     }
                     if has_end {
                         let completed = fields.pop().unwrap().finish();
@@ -2479,15 +2502,7 @@ fn parse_inline_container_at_depth(
                     depth + 1,
                 )?;
                 if let Some(active) = fields.last_mut() {
-                    let runs: Vec<Run> = hyperlink
-                        .children
-                        .iter()
-                        .filter_map(|node| match node {
-                            InlineNode::Run(run) => Some(run.clone()),
-                            _ => None,
-                        })
-                        .collect();
-                    active.absorb(InlineNode::Hyperlink(Box::new(hyperlink)), runs);
+                    active.absorb(InlineNode::Hyperlink(Box::new(hyperlink)));
                 } else {
                     output.push(InlineNode::Hyperlink(Box::new(hyperlink)));
                 }
@@ -2498,7 +2513,7 @@ fn parse_inline_container_at_depth(
                 }
                 let node = InlineNode::BookmarkStart(parse_bookmark_start(child));
                 match fields.last_mut() {
-                    Some(active) => active.absorb(node, Vec::new()),
+                    Some(active) => active.absorb(node),
                     None => output.push(node),
                 }
             }
@@ -2508,7 +2523,7 @@ fn parse_inline_container_at_depth(
                 }
                 let node = InlineNode::BookmarkEnd(parse_bookmark_end(child));
                 match fields.last_mut() {
-                    Some(active) => active.absorb(node, Vec::new()),
+                    Some(active) => active.absorb(node),
                     None => output.push(node),
                 }
             }
@@ -2524,8 +2539,7 @@ fn parse_inline_container_at_depth(
                     depth + 1,
                 )?;
                 if let Some(active) = fields.last_mut() {
-                    let runs = field.content.clone();
-                    active.absorb(InlineNode::SimpleField(Box::new(field)), runs);
+                    active.absorb(InlineNode::SimpleField(Box::new(field)));
                 } else {
                     output.push(InlineNode::SimpleField(Box::new(field)));
                 }

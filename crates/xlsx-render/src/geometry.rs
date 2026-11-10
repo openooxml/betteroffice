@@ -157,7 +157,7 @@ fn floor_pt(pt: f64) -> f64 {
 }
 
 /// the font `cellXfs[0]` resolves to: what a cell inheriting the normal style renders in.
-fn normal_font(styles: &Stylesheet) -> Option<&Font> {
+pub(crate) fn normal_font(styles: &Stylesheet) -> Option<&Font> {
     styles.font_for(0).or_else(|| styles.fonts.first())
 }
 

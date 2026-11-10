@@ -135,7 +135,14 @@
       "unsupportedCommand": "Aún no se admite.",
       "invalidArguments": "Este valor no es válido.",
       "inputFailed": "La entrada de celda anterior no se pudo guardar.",
+      "editUnsupported": "Esta edición no se puede aplicar aquí. El libro no ha cambiado.",
+      "editUnsupportedChart": "Esta edición no se puede aplicar: un gráfico usa celdas que movería. El libro no ha cambiado.",
+      "editUnsupportedTable": "Esta edición no se puede aplicar: una tabla usa celdas que movería. El libro no ha cambiado.",
+      "editUnsupportedPivot": "Esta edición no se puede aplicar: una tabla dinámica usa celdas que movería. El libro no ha cambiado.",
       "sheetProtected": "Esta celda está en una hoja protegida.",
+      "hostRefused": "Esta edición no está permitida.",
+      "tooManyToCheck": "Demasiadas celdas para que los complementos las comprueben (límite {limit}).",
+      "hostStarting": "El editor todavía se está iniciando. Inténtalo de nuevo en un momento.",
       "documentReplaced": "Se abrió otro libro.",
       "targetChanged": "La selección ha cambiado.",
       "gestureActive": "Termine primero de mover el gráfico.",
@@ -146,8 +153,31 @@
       "permissionDenied": "La aplicación host no ha permitido que este complemento use este comando.",
       "unsupportedPolicy": "Los complementos aún no pueden ejecutar este comando. Use en su lugar un lote de ediciones.",
       "pluginUnavailable": "El complemento ya no está activo.",
-      "aborted": "La acción del complemento se canceló antes de que se ejecutara el comando."
-    }
+      "aborted": "La acción del complemento se canceló antes de que se ejecutara el comando.",
+      "clipboardUnavailable": "Este navegador no permite pegar desde un menú. Use el método abreviado de teclado.",
+      "lastSheet": "Un libro necesita al menos una hoja.",
+      "sheetAtEdge": "La hoja no se puede mover más.",
+      "sheetNameInvalid": "Los nombres de hoja necesitan de 1 a 31 caracteres, deben ser únicos y no pueden contener : \\ / ? * [ ].",
+      "clipboardDenied": "El navegador no permitió el acceso al portapapeles."
+    },
+    "cut": "Cortar",
+    "copy": "Copiar",
+    "paste": "Pegar",
+    "pastePlainText": "Pegar como texto sin formato",
+    "clearContents": "Borrar contenido",
+    "insert": "Insertar",
+    "delete": "Eliminar",
+    "insertRowsAbove": "Insertar filas encima",
+    "insertRowsBelow": "Insertar filas debajo",
+    "insertColumnsLeft": "Insertar columnas a la izquierda",
+    "insertColumnsRight": "Insertar columnas a la derecha",
+    "deleteRows": "Eliminar filas",
+    "deleteColumns": "Eliminar columnas",
+    "insertSheet": "Insertar hoja",
+    "deleteSheet": "Eliminar hoja",
+    "renameSheet": "Cambiar nombre",
+    "moveSheetLeft": "Mover a la izquierda",
+    "moveSheetRight": "Mover a la derecha"
   },
   "editor": {
     "appLabel": "Editor de hojas de cálculo",
@@ -162,7 +192,11 @@
     "showDetails": "Mostrar detalles",
     "openPrompt": "Abrir un archivo XLSX",
     "sheetTabsLabel": "Hojas",
-    "clearExceedsLimit": "Borrar supera el límite de celdas."
+    "clearExceedsLimit": "Borrar supera el límite de celdas.",
+    "cellMenuLabel": "Menú de celda",
+    "sheetTabMenuLabel": "Menú de la pestaña de hoja",
+    "renameSheetLabel": "Cambiar nombre de la hoja",
+    "sheetNamePrefix": "Hoja"
   },
   "presence": {
     "label": "Colaboradores",
@@ -178,6 +212,7 @@
     "accept": "Aceptar",
     "reject": "Rechazar",
     "forceApply": "Forzar aplicación",
+    "forceBlockedReason": "Esta propuesta no se puede aplicar tras un cambio estructural.",
     "staleWarning": "Celdas modificadas desde la propuesta: {cells}"
   },
   "a11y": {
@@ -187,12 +222,27 @@
     "cellLabel": "{address}, {value}",
     "cellLabelSelected": "{address}, {value}, seleccionada",
     "emptyCellLabel": "{address}, vacía",
-    "emptyCellLabelSelected": "{address}, vacía, seleccionada"
+    "emptyCellLabelSelected": "{address}, vacía, seleccionada",
+    "hasFormula": "{label}, tiene fórmula",
+    "rangeSelected": "{start} a {end} seleccionado, {rows, plural, one {# fila} many {# filas} other {# filas}} por {columns, plural, one {# columna} many {# columnas} other {# columnas}}",
+    "sheetActivated": "{name}, hoja {index} de {count}",
+    "cellInputLabel": "Editar celda {address}",
+    "gridRoleDescription": "hoja de cálculo"
   },
   "plugins": {
     "toolbarGroup": "Complementos",
     "panelTabs": "Paneles de complementos",
     "collapsePanel": "Contraer {title}",
-    "expandPanel": "Expandir {title}"
+    "expandPanel": "Expandir {title}",
+    "rowGutter": "Marcadores de fila de complementos"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Mayús",
+    "del": "Supr",
+    "escape": "Esc",
+    "pageUp": "Re Pág",
+    "pageDown": "Av Pág"
   }
 }

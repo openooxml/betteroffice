@@ -488,7 +488,9 @@
         "pageUp": "Re Pág",
         "pageDown": "Av Pág",
         "ctrl": "Ctrl",
-        "del": "Supr"
+        "del": "Supr",
+        "shift": "Mayús",
+        "alt": "Alt"
       }
     },
     "objectGeometry": {
@@ -528,6 +530,7 @@
     "paragraphMarkInserted": "Salto de párrafo insertado",
     "paragraphMarkDeleted": "Salto de párrafo eliminado",
     "paragraphPropertiesChanged": "Propiedades del párrafo modificadas",
+    "runPropertiesChanged": "Formato del texto modificado",
     "rowInserted": "Fila insertada",
     "rowDeleted": "Fila eliminada",
     "rowPropertiesChanged": "Propiedades de la fila modificadas",
@@ -584,6 +587,8 @@
     "noDocumentLoaded": "No se ha cargado ningún documento",
     "failedToLoad": "No se pudo abrir este documento",
     "failedToLoadDescription": "Es posible que el archivo esté dañado o que use algo que este editor aún no puede leer.",
+    "failedToLoadDamaged": "El archivo está dañado o no es un documento de Word completo.",
+    "failedToLoadUnsupported": "Este documento usa algo que este editor aún no puede leer.",
     "editorUnavailable": "No se pudo cargar el editor",
     "editorUnavailableDescription": "Compruebe la conexión y vuelva a cargar la página.",
     "reloadPage": "Volver a cargar la página",
@@ -724,6 +729,7 @@
     "failedToParse": "No se pudo analizar el documento",
     "linkRemoved": "Vínculo quitado",
     "linkCopied": "Vínculo copiado en el portapapeles",
+    "pasteFailed": "No se pudo completar el pegado. No se ha cambiado nada.",
     "failedToSave": "No se pudo guardar el documento",
     "documentInput": "Entrada del documento",
     "documentPreview": "Vista previa del documento",
@@ -793,8 +799,13 @@
   },
   "a11y": {
     "pageLabel": "Página {number}",
+    "unbuiltPagesNotMirrored": "Las páginas {from} a {to} aún no están en la vista de lectura.",
+    "goToPage": "Ir a la página {number}",
     "headerLabel": "Encabezado de página",
     "footerLabel": "Pie de página",
+    "chartNoData": "Sin datos",
+    "pictureName": "Imagen",
+    "bulletMarker": "viñeta",
     "selected": "Seleccionado",
     "selectionCleared": "Selección borrada",
     "commentedText": "Texto comentado",

@@ -10,7 +10,13 @@ mod proposals;
 mod remap;
 mod undo;
 
-pub use apply::{InvertedOp, OpError, apply, apply_in_place, apply_ops, remap_ref};
+#[doc(hidden)]
+pub use apply::InPlaceBatch;
+pub use apply::{
+    InvertedOp, OpError, apply, apply_in_place, apply_ops, filter_database_formula, remap_ref,
+    validate_auto_filter_range, validate_conditional_format, validate_defined_name,
+    validate_defined_name_formula,
+};
 pub use conditional_formats::{
     ensure_conditional_formats_allow_edit, ensure_conditional_formats_allow_move,
 };
@@ -21,11 +27,11 @@ pub use formatting::{
 };
 pub use input::{
     ParsedInput, cell_state_for_input, cell_state_for_input_no_eval, cell_state_from_parsed,
-    parse_input, parse_input_with_context,
+    is_formula_source, parse_input, parse_input_with_context,
 };
 #[cfg(any(test, feature = "fuzzing"))]
 pub use op::OracleOp;
 pub use op::{CellState, Op, Provenance, Transaction};
 pub use proposals::{Proposal, ProposalGhost, ProposalSet, ProposedEdit};
-pub use remap::insertion_keeps_chart_anchor_on_grid;
+pub use remap::{ProposalSheets, insertion_keeps_chart_anchor_on_grid, remap_proposal_formula};
 pub use undo::UndoStack;

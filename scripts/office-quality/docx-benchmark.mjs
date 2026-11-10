@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { budgetShards } from './shards.mjs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -6,7 +7,7 @@ import { fetchAsset } from './asset-cache.mjs';
 import { download } from './download.mjs';
 import { mapPool, validatePlan } from './plan.mjs';
 import { validateComparison } from './results.mjs';
-import { CORPUS_ORIGIN } from './samples.mjs';
+import { corpusOrigin } from './samples.mjs';
 
 export const CHANNELS = ['published', 'commit', 'libreoffice'];
 export const TRIALS = 5;
@@ -14,16 +15,7 @@ export const METHOD = 'docx-cli-page1-v1';
 export const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
 export function docxShards(plan) {
-  const samples = plan.samples.filter((sample) => sample.format === 'docx');
-  const shards = Array.from({ length: Math.min(4, samples.length) }, () => []);
-  const weights = shards.map(() => 0);
-  for (const sample of [...samples].sort((a, b) =>
-    b.metadata.reference.pages - a.metadata.reference.pages || a.id.localeCompare(b.id))) {
-    const index = weights.indexOf(Math.min(...weights));
-    shards[index].push(sample.id);
-    weights[index] += sample.metadata.reference.pages;
-  }
-  return shards;
+  return budgetShards('docx-benchmark', plan.samples.filter((sample) => sample.format === 'docx')).map((shard) => shard.samples);
 }
 
 function fail(message) {
@@ -147,7 +139,7 @@ export async function stageDocx(planPath, shard, output, cacheDir) {
   }
   let completed = 0;
   await mapPool(tasks, 8, async ({ sample, asset, path, maximum }) => {
-    await writeFile(path, await fetchAsset(asset, sample.id, download, { cacheDir, origin: CORPUS_ORIGIN, maximum }));
+    await writeFile(path, await fetchAsset(asset, sample.id, download, { cacheDir, origin: corpusOrigin(), maximum }));
     if (++completed % 50 === 0 || completed === tasks.length)
       console.log(`DOCX shard ${shard}: staged ${completed}/${tasks.length} verified assets`);
   });

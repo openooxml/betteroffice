@@ -135,7 +135,14 @@
       "unsupportedCommand": "Ainda não compatível.",
       "invalidArguments": "Este valor não é válido.",
       "inputFailed": "Não foi possível salvar a entrada anterior da célula.",
+      "editUnsupported": "Esta edição não pode ser aplicada aqui. A pasta de trabalho não foi alterada.",
+      "editUnsupportedChart": "Esta edição não pode ser aplicada: um gráfico usa células que ela moveria. A pasta de trabalho não foi alterada.",
+      "editUnsupportedTable": "Esta edição não pode ser aplicada: uma tabela usa células que ela moveria. A pasta de trabalho não foi alterada.",
+      "editUnsupportedPivot": "Esta edição não pode ser aplicada: uma tabela dinâmica usa células que ela moveria. A pasta de trabalho não foi alterada.",
       "sheetProtected": "Esta célula está em uma planilha protegida.",
+      "hostRefused": "Esta edição não é permitida.",
+      "tooManyToCheck": "Células demais para os plug-ins verificarem (limite {limit}).",
+      "hostStarting": "O editor ainda está iniciando. Tente novamente em instantes.",
       "documentReplaced": "Outra pasta de trabalho foi aberta.",
       "targetChanged": "A seleção foi alterada.",
       "gestureActive": "Termine primeiro de mover o gráfico.",
@@ -146,8 +153,31 @@
       "permissionDenied": "O aplicativo host não permitiu que este plugin usasse este comando.",
       "unsupportedPolicy": "Os plugins ainda não podem executar este comando. Use um lote de edições.",
       "pluginUnavailable": "O plugin não está mais ativo.",
-      "aborted": "A ação do plugin foi cancelada antes de o comando ser executado."
-    }
+      "aborted": "A ação do plugin foi cancelada antes de o comando ser executado.",
+      "clipboardUnavailable": "Este navegador não permite colar a partir de um menu. Use o atalho de teclado.",
+      "lastSheet": "Uma pasta de trabalho precisa de pelo menos uma planilha.",
+      "sheetAtEdge": "A planilha não pode ser movida mais.",
+      "sheetNameInvalid": "Nomes de planilha precisam de 1 a 31 caracteres, devem ser únicos e não podem conter : \\ / ? * [ ].",
+      "clipboardDenied": "O navegador não permitiu o acesso à área de transferência."
+    },
+    "cut": "Recortar",
+    "copy": "Copiar",
+    "paste": "Colar",
+    "pastePlainText": "Colar como texto simples",
+    "clearContents": "Limpar conteúdo",
+    "insert": "Inserir",
+    "delete": "Excluir",
+    "insertRowsAbove": "Inserir linhas acima",
+    "insertRowsBelow": "Inserir linhas abaixo",
+    "insertColumnsLeft": "Inserir colunas à esquerda",
+    "insertColumnsRight": "Inserir colunas à direita",
+    "deleteRows": "Excluir linhas",
+    "deleteColumns": "Excluir colunas",
+    "insertSheet": "Inserir planilha",
+    "deleteSheet": "Excluir planilha",
+    "renameSheet": "Renomear",
+    "moveSheetLeft": "Mover para a esquerda",
+    "moveSheetRight": "Mover para a direita"
   },
   "editor": {
     "appLabel": "Editor de planilha",
@@ -162,7 +192,11 @@
     "showDetails": "Mostrar detalhes",
     "openPrompt": "Abrir um arquivo XLSX",
     "sheetTabsLabel": "Planilhas",
-    "clearExceedsLimit": "Limpar excede o limite de células."
+    "clearExceedsLimit": "Limpar excede o limite de células.",
+    "cellMenuLabel": "Menu da célula",
+    "sheetTabMenuLabel": "Menu da guia da planilha",
+    "renameSheetLabel": "Renomear planilha",
+    "sheetNamePrefix": "Planilha"
   },
   "presence": {
     "label": "Colaboradores",
@@ -178,6 +212,7 @@
     "accept": "Aceitar",
     "reject": "Rejeitar",
     "forceApply": "Forçar aplicação",
+    "forceBlockedReason": "Esta proposta não pode ser aplicada após uma alteração estrutural.",
     "staleWarning": "Células alteradas desde a proposta: {cells}"
   },
   "a11y": {
@@ -187,12 +222,27 @@
     "cellLabel": "{address}, {value}",
     "cellLabelSelected": "{address}, {value}, selecionado",
     "emptyCellLabel": "{address}, vazio",
-    "emptyCellLabelSelected": "{address}, vazio, selecionado"
+    "emptyCellLabelSelected": "{address}, vazio, selecionado",
+    "hasFormula": "{label}, tem fórmula",
+    "rangeSelected": "{start} a {end} selecionado, {rows, plural, one {# linha} many {# linhas} other {# linhas}} por {columns, plural, one {# coluna} many {# colunas} other {# colunas}}",
+    "sheetActivated": "{name}, planilha {index} de {count}",
+    "cellInputLabel": "Editar célula {address}",
+    "gridRoleDescription": "planilha"
   },
   "plugins": {
     "toolbarGroup": "Plugins",
     "panelTabs": "Painéis de plugins",
     "collapsePanel": "Recolher {title}",
-    "expandPanel": "Expandir {title}"
+    "expandPanel": "Expandir {title}",
+    "rowGutter": "Marcadores de linha de plugins"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "del": "Del",
+    "escape": "Esc",
+    "pageUp": "Page Up",
+    "pageDown": "Page Down"
   }
 }

@@ -1,5 +1,5 @@
-import { clipboardFragmentHasPictures } from '@betteroffice/docx/yrs';
-import type { DocxClipboardSlice, DocxCommandSelection, YrsSelectionText } from '@betteroffice/docx/yrs';
+import { clipboardFragmentHasPictures, clipboardFragmentIsTextOnly } from '@betteroffice/docx/yrs';
+import type { DocxClipboardFragment, DocxClipboardSlice, DocxCommandSelection, YrsSelectionText } from '@betteroffice/docx/yrs';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
 import { clipboardFragmentHtml } from '../internals/clipboardHtml';
 import { flushAdmittedInput } from './inputAdmission';
@@ -46,8 +46,9 @@ export async function readWorkerClipboardSlice(options: SelectionRead & {
 }
 
 export function isPasteFragmentAllowed(commands: {
-  getState(id: 'insertTable', args?: unknown): { enabled: boolean };
-}): boolean {
+  getState(id: 'insertTable' | 'bold', args?: unknown): { enabled: boolean };
+}, fragment?: DocxClipboardFragment): boolean {
+  if (fragment && clipboardFragmentIsTextOnly(fragment)) return commands.getState('bold').enabled === true;
   return commands.getState('insertTable', { rows: 1, columns: 1 }).enabled === true;
 }
 

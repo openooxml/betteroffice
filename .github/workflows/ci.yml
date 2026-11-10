@@ -16,13 +16,14 @@ concurrency:
 
 jobs:
   # The router fills the account's free GitHub-hosted runners first; a job that does not fit, or every job when
-  # the router cannot count, runs on a fresh kyora VM of the leanest class that fits. The router itself runs on
-  # kyora, so it never queues behind the GitHub-hosted limit it measures. The two shortest (Security audit, Native
-  # gate) stay GitHub-hosted. Fork pull requests stay GitHub-hosted, BO_CI_RUNNER pins every job to one label,
-  # BO_CI_SPILL=off keeps them on kyora, and BO_CI_GH_LIMIT/BO_CI_GH_RESERVE size the GitHub share.
+  # the router cannot count, runs on a fresh self-hosted runner of the leanest class that fits. The router itself
+  # runs GitHub-hosted, so it never queues behind the self-hosted job cap, and does not count itself as busy. The
+  # two shortest (Security audit, Native gate) stay GitHub-hosted. Fork pull requests stay GitHub-hosted,
+  # BO_CI_RUNNER pins every job to one label, BO_CI_SPILL=off keeps them self-hosted, and
+  # BO_CI_GH_LIMIT/BO_CI_GH_RESERVE size the GitHub share.
   route:
     name: Route runners
-    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || 'kyora-4x8' }}
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     permissions:
       actions: read
@@ -103,6 +104,20 @@ jobs:
       - name: Check changeset length
         run: bun scripts/check-changeset-length.ts
 
+      - name: Check embedded fonts
+        run: |
+          bun scripts/check-embedded-fonts.mjs
+          bun test scripts/check-embedded-fonts.test.ts
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Check reproducible base fonts
+        run: |
+          python3 -m pip install -r scripts/base-latin/requirements.txt
+          bash scripts/base-latin/check.sh
+
       - name: Check UI strings and locale parity
         run: bun test scripts/hardcoded-ui-strings.test.ts packages/docx-i18n packages/xlsx-i18n packages/pptx-i18n shared/i18n-glossary
 
@@ -133,6 +148,12 @@ jobs:
           BETTEROFFICE_REQUIRE_WASM: "1"
         run: bun test scripts/wasm-memory.test.ts
 
+      - name: Check exact JSON number parsing in every artifact
+        run: bun test scripts/serde-json-exact.test.ts
+
+      - name: Check Wasm artifacts carry no rasterizer and renderPng keeps one shape
+        run: bun test scripts/wasm-no-raster.test.ts scripts/render-png-shape.test.ts
+
       - name: Check demo assets
         run: |
           bun scripts/create-demo-deck.ts
@@ -144,10 +165,10 @@ jobs:
       - name: Check minimal Wasm features
         run: |
           cargo check -p xlsx-wasm --target wasm32-unknown-unknown --no-default-features
-          cargo check -p betteroffice-docx --target wasm32-unknown-unknown
+          cargo check -p betteroffice-docx --target wasm32-unknown-unknown --no-default-features --features fonts,fonts-latin,fonts-intl,fonts-cjk
           cargo check -p betteroffice-docx --target wasm32-unknown-unknown --no-default-features
-          cargo check -p betteroffice-docx --target wasm32-unknown-unknown --test fonts
-          cargo check -p betteroffice-pptx --target wasm32-unknown-unknown
+          cargo check -p betteroffice-docx --target wasm32-unknown-unknown --no-default-features --features fonts,fonts-latin,fonts-intl,fonts-cjk --test fonts
+          cargo check -p betteroffice-pptx --target wasm32-unknown-unknown --no-default-features --features fonts,fonts-latin,fonts-intl,fonts-cjk
           cargo check -p betteroffice-pptx --target wasm32-unknown-unknown --no-default-features
           cargo check -p betteroffice-xlsx --target wasm32-unknown-unknown
           cargo check -p betteroffice-xlsx --target wasm32-unknown-unknown --no-default-features --features raster
@@ -178,6 +199,13 @@ jobs:
 
       - name: Import every package entry in plain Node
         run: node scripts/check-node-import.mjs
+
+      - name: Resolve every package entry with webpack
+        run: node scripts/check-webpack-exports.mjs
+
+      - name: Build a webpack consumer app
+        timeout-minutes: 15
+        run: node scripts/next-webpack-consumer.mjs
 
   package-tests:
     name: Package tests (${{ matrix.shard }}/2)
@@ -335,6 +363,9 @@ jobs:
           cargo test -p betteroffice-pptx --all-features
           cargo test -p betteroffice-vsdx-edit --features wasm
           cargo test -p betteroffice-docx-edit --features wasm
+          cargo test -p betteroffice-docx-layout --no-default-features --test without_base_latin
+          cargo test -p betteroffice-docx-layout --features base-latin --test base_latin
+          cargo test -p betteroffice-docx-edit --features base-latin --test base_latin
           cargo test -p betteroffice-fonts --features build
           cargo test -p betteroffice-fonts --features manager
           cargo test -p betteroffice-fonts --features manager,fonts-latin,fonts-intl,fonts-cjk
@@ -489,6 +520,9 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Check the bundled Latin faces stay out of the native bindings
+        run: node scripts/native-feature-guard.mjs
+
       - name: Build wasm for parity
         run: |
           bun run --filter @betteroffice/xlsx build:wasm
@@ -540,8 +574,7 @@ jobs:
         run: |
           bun run build:docx-wasm
           bun run build:fonts
-          bun test --isolate --preload ./scripts/native-engine-preload.ts packages/xlsx scripts/parity/parity.test.ts scripts/native-engine.test.ts
-          bun test --isolate --preload ./scripts/native-engine-preload.ts packages/agents/test/cli-env.test.ts packages/agents/test/defined-names.test.ts packages/agents/test/xlsx-auto-filter.test.ts packages/agents/test/xlsx-charts.test.ts packages/agents/test/xlsx-conditional-formats.test.ts packages/agents/test/xlsx-mcp.test.ts packages/agents/test/xlsx-protected-writes.test.ts packages/agents/test/xlsx.test.ts
+          bun test --isolate --preload ./scripts/native-engine-preload.ts packages/xlsx packages/xlsx-react scripts/parity/parity.test.ts scripts/native-engine.test.ts
 
       - name: Check engine surface
         run: |
@@ -552,17 +585,20 @@ jobs:
           bun scripts/check-engine-surface.ts docx-query
           bun scripts/check-engine-surface.ts docx-opc
           bun scripts/check-engine-surface.ts docx-preflight
+          bun scripts/check-engine-surface.ts pptx-metafile
 
       - name: Test the pptx packages on the native engine
         run: |
-          bun test --isolate --preload ./scripts/native-engine-preload.ts packages/pptx/
-          bun test --isolate --preload ./scripts/native-engine-preload.ts packages/agents/test/pptx-mcp.test.ts packages/agents/test/pptx-render.test.ts packages/agents/test/pptx-table.test.ts packages/agents/test/pptx-text-fidelity.test.ts packages/agents/test/pptx.test.ts
+          bun test --isolate --preload ./scripts/native-engine-preload.ts packages/pptx/ packages/pptx-react/
 
       - name: Test the docx packages on the native engine
         run: bun test --isolate --preload ./scripts/native-engine-preload.ts packages/docx/ packages/docx-react/
 
+      - name: Test the agents package on the native engine
+        run: bun test --isolate --preload ./scripts/native-engine-preload.ts packages/agents/
+
       - name: Check native and wasm parity
-        run: bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts bindings/pptx-native/engine.test.ts bindings/docx-native/parity.test.ts bindings/docx-native/engine.test.ts
+        run: bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts bindings/pptx-native/engine.test.ts bindings/docx-native/parity.test.ts bindings/docx-native/engine.test.ts bindings/docx-native/png.test.ts bindings/pptx-native/png.test.ts
 
       - name: Check generated declarations
         run: git diff --exit-code -- 'bindings/*-native/index.d.ts'
@@ -575,7 +611,10 @@ jobs:
           (cd packages/docx && bun scripts/copy-assets.ts)
           node scripts/node-worker-sessions-smoke.mjs
           node scripts/node-worker-sessions-smoke.mjs --keep-alive
+          timeout 300 bun scripts/node-worker-sessions-smoke.mjs
+          timeout 300 deno run --no-config --node-modules-dir=manual --allow-read --allow-env --allow-ffi scripts/node-worker-sessions-smoke.mjs
           bun scripts/worker-bundling-smoke.mjs
+          node scripts/check-webpack-exports.mjs --node-import $(node scripts/native-bindings.mjs --paths)
           bun scripts/native-bindings-smoke.mjs
           smoke_dir=$(mktemp -d)
           trap 'rm -rf "$smoke_dir"' EXIT
@@ -588,3 +627,38 @@ jobs:
           done
           cp scripts/native-bindings-smoke.mjs "$smoke_dir/smoke.mjs"
           deno run --no-config --node-modules-dir=manual --allow-read --allow-env --allow-ffi "$smoke_dir/smoke.mjs" "$PWD"
+
+  native-hooks:
+    name: Native panic hooks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.3"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bindings
+          key: native-hooks
+
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: "24"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Test panics through the test hooks
+        env:
+          BETTEROFFICE_NATIVE_TEST_HOOKS: "1"
+          NODE_OPTIONS: --max-old-space-size=8192
+        run: |
+          for package in $(node scripts/native-bindings.mjs --paths); do
+            bunx napi build --cwd "$package" --platform --profile hooks --features test-hooks -- --locked
+            bun test "$package/panic.test.ts"
+          done

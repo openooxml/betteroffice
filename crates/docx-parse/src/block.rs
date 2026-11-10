@@ -12,7 +12,7 @@ use crate::inline::{
 use crate::media::MediaMap;
 use crate::numbering::NumberingMap;
 use crate::paragraph::{
-    DrawingContext, HexIdAllocator, Paragraph, ParagraphContent, parse_paragraph,
+    DrawingContext, HexIdAllocator, Paragraph, ParagraphContent, parse_paragraph_with_story_context,
 };
 use crate::relationships::RelationshipMap;
 use crate::shape::{RelativeRect, Shape, ShapeTextBody, ShapeTextBodyProperties};
@@ -24,8 +24,9 @@ use crate::table::{
     parse_document_table_row_properties, parse_table_cell_property_changes,
     parse_table_cell_structural_change, parse_table_grid, parse_table_property_changes,
     parse_table_row_property_changes, parse_table_row_structural_change,
+    row_is_hidden_content_only,
 };
-use crate::text_box::{get_text_box_content_element, parse_text_box};
+use crate::text_box::get_text_box_content_element;
 use crate::theme::Theme;
 use crate::xml::{ParseBudget, ParseError, XmlElement, XmlNode};
 
@@ -119,6 +120,12 @@ pub struct StoryParser<'a, 'limits> {
     pub part: &'a str,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct StoryContext {
+    pub in_header_footer: bool,
+    pub watermark_claimed_separately: bool,
+}
+
 pub const PREVIEW_MIN_BLOCKS: usize = 32;
 
 pub(crate) struct LegacyBodyCut {
@@ -161,6 +168,31 @@ impl LegacyBodyCut {
 }
 
 impl StoryParser<'_, '_> {
+    pub(crate) fn parse_header_footer_blocks(
+        &mut self,
+        parent: &XmlElement,
+        is_header: bool,
+    ) -> Result<Vec<BlockContent>, ParseError> {
+        self.parse_blocks_with_context(
+            parent,
+            0,
+            StoryContext {
+                in_header_footer: true,
+                watermark_claimed_separately: is_header,
+            },
+        )
+    }
+
+    fn parse_blocks_with_context(
+        &mut self,
+        parent: &XmlElement,
+        depth: usize,
+        context: StoryContext,
+    ) -> Result<Vec<BlockContent>, ParseError> {
+        self.parse_blocks_until_with_context(parent, depth, context, None, None, None, None)
+            .map(|(content, _, _)| content)
+    }
+
     pub fn parse_blocks(
         &mut self,
         parent: &XmlElement,
@@ -199,6 +231,31 @@ impl StoryParser<'_, '_> {
         parent: &XmlElement,
         depth: usize,
         in_header_footer: bool,
+        limit: Option<usize>,
+        read_limit: Option<usize>,
+        paragraph_budget: Option<usize>,
+        legacy_partial: Option<bool>,
+    ) -> Result<(Vec<BlockContent>, usize, bool), ParseError> {
+        self.parse_blocks_until_with_context(
+            parent,
+            depth,
+            StoryContext {
+                in_header_footer,
+                watermark_claimed_separately: in_header_footer,
+            },
+            limit,
+            read_limit,
+            paragraph_budget,
+            legacy_partial,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn parse_blocks_until_with_context(
+        &mut self,
+        parent: &XmlElement,
+        depth: usize,
+        context: StoryContext,
         limit: Option<usize>,
         read_limit: Option<usize>,
         paragraph_budget: Option<usize>,
@@ -294,7 +351,7 @@ impl StoryParser<'_, '_> {
                         charts: self.charts,
                         smart_art: &mut *self.smart_art,
                     };
-                    let mut paragraph = parse_paragraph(
+                    let mut paragraph = parse_paragraph_with_story_context(
                         child,
                         self.relationships,
                         self.theme,
@@ -305,22 +362,16 @@ impl StoryParser<'_, '_> {
                         self.budget,
                         self.ids,
                         Some(&mut drawing),
-                        in_header_footer,
+                        context,
                         depth,
                     )?;
                     self.enrich_paragraph_text_boxes(&mut paragraph, child, depth)?;
                     BlockContent::Paragraph(Arc::new(paragraph))
                 }
-                "tbl" => BlockContent::Table(Arc::new(self.parse_table(
-                    child,
-                    depth,
-                    in_header_footer,
-                )?)),
-                "sdt" => BlockContent::BlockSdt(Arc::new(self.parse_block_sdt(
-                    child,
-                    depth,
-                    in_header_footer,
-                )?)),
+                "tbl" => BlockContent::Table(Arc::new(self.parse_table(child, depth, context)?)),
+                "sdt" => {
+                    BlockContent::BlockSdt(Arc::new(self.parse_block_sdt(child, depth, context)?))
+                }
                 "oMath" | "oMathPara" => {
                     self.budget.charge_paragraph(self.part)?;
                     BlockContent::Paragraph(Arc::new(math_paragraph(child)))
@@ -380,12 +431,12 @@ impl StoryParser<'_, '_> {
         &mut self,
         element: &XmlElement,
         depth: usize,
-        in_header_footer: bool,
+        context: StoryContext,
     ) -> Result<BlockSdt, ParseError> {
         let next_depth = depth.saturating_add(1);
         self.budget.check_nesting_depth(next_depth, self.part)?;
         let nested = match element.child("w", "sdtContent") {
-            Some(container) => self.parse_blocks(container, next_depth, in_header_footer)?,
+            Some(container) => self.parse_blocks_with_context(container, next_depth, context)?,
             None => Vec::new(),
         };
         Ok(BlockSdt {
@@ -403,7 +454,7 @@ impl StoryParser<'_, '_> {
         &mut self,
         element: &XmlElement,
         depth: usize,
-        in_header_footer: bool,
+        context: StoryContext,
     ) -> Result<Table, ParseError> {
         self.budget.charge_table(self.part)?;
         let properties = element.child("w", "tblPr");
@@ -422,7 +473,7 @@ impl StoryParser<'_, '_> {
                 pending.push(bookmark_source(child));
             } else if child.matches_name("w", "tr") {
                 self.budget.charge_table_row(self.part)?;
-                let mut row = self.parse_table_row(child, depth, in_header_footer)?;
+                let mut row = self.parse_table_row(child, depth, context)?;
                 row.leading_bookmarks = take_bookmarks(&mut pending);
                 table.rows.push(row);
             }
@@ -436,10 +487,17 @@ impl StoryParser<'_, '_> {
         &mut self,
         element: &XmlElement,
         depth: usize,
-        in_header_footer: bool,
+        context: StoryContext,
     ) -> Result<TableRow, ParseError> {
         let properties = element.child("w", "trPr");
-        let formatting = parse_document_table_row_properties(properties);
+        let mut formatting = parse_document_table_row_properties(properties);
+        let property_changes = parse_table_row_property_changes(properties, formatting.as_ref());
+        if let Some(formatting) = formatting
+            .as_mut()
+            .filter(|value| value.hidden == Some(true))
+        {
+            formatting.hidden_content_only = row_is_hidden_content_only(element).then_some(true);
+        }
         let mut row = TableRow {
             node_type: "tableRow".to_owned(),
             extra_attributes: (!element.attributes.is_empty()).then(|| {
@@ -452,7 +510,7 @@ impl StoryParser<'_, '_> {
                     })
                     .collect()
             }),
-            property_changes: parse_table_row_property_changes(properties, formatting.as_ref()),
+            property_changes,
             structural_change: parse_table_row_structural_change(properties),
             formatting,
             cells: Vec::new(),
@@ -465,7 +523,7 @@ impl StoryParser<'_, '_> {
                 pending.push(bookmark_source(child));
             } else if child.matches_name("w", "tc") {
                 self.budget.charge_table_cell(self.part)?;
-                let mut cell = self.parse_table_cell(child, depth, in_header_footer)?;
+                let mut cell = self.parse_table_cell(child, depth, context)?;
                 cell.leading_bookmarks = take_bookmarks(&mut pending);
                 row.cells.push(cell);
             }
@@ -478,13 +536,13 @@ impl StoryParser<'_, '_> {
         &mut self,
         element: &XmlElement,
         depth: usize,
-        in_header_footer: bool,
+        context: StoryContext,
     ) -> Result<TableCell, ParseError> {
         let properties = element.child("w", "tcPr");
         let formatting = parse_document_table_cell_properties(properties);
         let cell_depth = depth.saturating_add(1);
         self.budget.check_nesting_depth(cell_depth, self.part)?;
-        let mut content = self.parse_blocks(element, cell_depth, in_header_footer)?;
+        let mut content = self.parse_blocks_with_context(element, cell_depth, context)?;
         if content.iter().all(is_bookmark_block) {
             self.budget.charge_block(self.part)?;
             self.budget.charge_paragraph(self.part)?;
@@ -506,6 +564,7 @@ impl StoryParser<'_, '_> {
         source: &XmlElement,
         depth: usize,
     ) -> Result<(), ParseError> {
+        let runs = self.budget.take_paragraph_runs();
         if paragraph.content.is_empty() {
             return Ok(());
         }
@@ -514,13 +573,23 @@ impl StoryParser<'_, '_> {
             .into_iter()
             .filter(|child| child.local_name() == "r")
         {
+            let target = runs.get(run_index).copied().flatten().unwrap_or(run_index);
             for child in run.child_elements() {
                 match child.local_name() {
                     "drawing" => {
-                        self.enrich_text_box_drawing(paragraph, child, child, run_index, depth)?
+                        self.enrich_text_box_drawing(paragraph, child, child, target, depth)?
                     }
                     "pict" => self.enrich_vml_text_box(paragraph, child, depth)?,
                     "AlternateContent" => {
+                        let shared = crate::text_box::shares_a_bookmarked_branch(child);
+                        if shared
+                            && holds_whole_alternate_content(
+                                paragraph,
+                                &crate::text_box::source_xml(child),
+                            )
+                        {
+                            continue;
+                        }
                         let branch = child
                             .child_elements()
                             .find(|branch| branch.local_name() == "Choice")
@@ -533,7 +602,11 @@ impl StoryParser<'_, '_> {
                             for item in branch.child_elements() {
                                 match item.local_name() {
                                     "drawing" => self.enrich_text_box_drawing(
-                                        paragraph, item, child, run_index, depth,
+                                        paragraph,
+                                        item,
+                                        if shared { item } else { child },
+                                        target,
+                                        depth,
                                     )?,
                                     "pict" => self.enrich_vml_text_box(paragraph, item, depth)?,
                                     _ => {}
@@ -557,7 +630,7 @@ impl StoryParser<'_, '_> {
         run_index: usize,
         depth: usize,
     ) -> Result<(), ParseError> {
-        let Some(text_box) = parse_text_box(drawing) else {
+        let Some(mut shape) = crate::text_box::text_box_shape(drawing, Vec::new()) else {
             return Ok(());
         };
         let content = if let Some(shape) = find_descendant_by_name(drawing, "wps:wsp", 0)
@@ -567,37 +640,7 @@ impl StoryParser<'_, '_> {
         } else {
             Vec::new()
         };
-        let mut shape = crate::shape::parse_shape_from_drawing(drawing).unwrap_or_else(|| {
-            let mut shape = Shape::empty("textBox".to_owned(), text_box.size);
-            shape.id = text_box.id;
-            shape.name = text_box.name;
-            shape.position = text_box.position;
-            shape.wrap = text_box.wrap;
-            shape.fill = text_box.fill;
-            shape.outline = text_box.outline;
-            shape
-        });
-        let body: Option<ShapeTextBodyProperties> = text_box.body_properties.map(Into::into);
-        shape.text_body = Some(ShapeTextBody {
-            vertical: body.as_ref().and_then(|body| {
-                body.vertical
-                    .as_deref()
-                    .filter(|value| *value != "horizontal")
-                    .map(|_| true)
-            }),
-            rotation: body.as_ref().and_then(|body| body.rotation),
-            anchor: body.as_ref().and_then(|body| body.anchor.clone()),
-            anchor_center: body.as_ref().and_then(|body| body.anchor_center),
-            auto_fit: body.as_ref().and_then(|body| body.auto_fit.clone()),
-            margins: text_box.margins.map(|margins| RelativeRect {
-                left: margins.left,
-                top: margins.top,
-                right: margins.right,
-                bottom: margins.bottom,
-            }),
-            content,
-        });
-        shape.text_body_properties = shape.text_body_properties.or(body);
+        shape.text_body.as_mut().unwrap().content = content;
         crate::text_box::capture_bookmark_source(&mut shape, source);
         let mut target = run_index;
         if target >= paragraph.content.len() {
@@ -722,6 +765,15 @@ impl StoryParser<'_, '_> {
 
 /// `parent`'s children in document order, descending through `w:customXml`
 /// and `w:smartTag` wrappers, and through `w:sdt`/`w:sdtContent` when `through_sdt`.
+fn holds_whole_alternate_content(paragraph: &Paragraph, xml: &str) -> bool {
+    paragraph.content.iter().any(|content| {
+        matches!(content, ParagraphContent::Inline(InlineNode::Run(run))
+            if run.content.iter().any(|item| matches!(item,
+                RunContent::OpaqueDrawing { kind, xml: whole, .. }
+                    if kind == "alternateContent" && whole == xml)))
+    })
+}
+
 pub(crate) fn transparent_children(parent: &XmlElement, through_sdt: bool) -> Vec<&XmlElement> {
     let mut children = Vec::new();
     visit_transparent_children(parent, through_sdt, &mut Vec::new(), &mut |_, child| {

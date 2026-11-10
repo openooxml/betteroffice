@@ -135,7 +135,14 @@
       "unsupportedCommand": "अभी समर्थित नहीं है।",
       "invalidArguments": "यह मान मान्य नहीं है।",
       "inputFailed": "इससे पहले की सेल प्रविष्टि सहेजी नहीं जा सकी।",
+      "editUnsupported": "यह संपादन यहाँ लागू नहीं किया जा सकता। कार्यपुस्तिका में कोई बदलाव नहीं हुआ।",
+      "editUnsupportedChart": "यह संपादन लागू नहीं किया जा सकता: एक चार्ट उन सेल का उपयोग करता है जिन्हें यह खिसका देगा। कार्यपुस्तिका में कोई बदलाव नहीं हुआ।",
+      "editUnsupportedTable": "यह संपादन लागू नहीं किया जा सकता: एक तालिका उन सेल का उपयोग करती है जिन्हें यह खिसका देगा। कार्यपुस्तिका में कोई बदलाव नहीं हुआ।",
+      "editUnsupportedPivot": "यह संपादन लागू नहीं किया जा सकता: एक पिवट तालिका उन सेल का उपयोग करती है जिन्हें यह खिसका देगा। कार्यपुस्तिका में कोई बदलाव नहीं हुआ।",
       "sheetProtected": "यह सेल एक सुरक्षित शीट पर है।",
+      "hostRefused": "यह संपादन अनुमत नहीं है।",
+      "tooManyToCheck": "प्लगइन के जाँचने के लिए बहुत अधिक सेल हैं (सीमा {limit})।",
+      "hostStarting": "एडिटर अभी शुरू हो रहा है। कुछ देर बाद फिर से कोशिश करें।",
       "documentReplaced": "दूसरी कार्यपुस्तिका खोली गई।",
       "targetChanged": "चयन बदल गया।",
       "gestureActive": "पहले चार्ट को ले जाना समाप्त करें।",
@@ -146,8 +153,31 @@
       "permissionDenied": "होस्ट एप्लिकेशन ने इस प्लगइन को यह कमांड उपयोग करने की अनुमति नहीं दी है।",
       "unsupportedPolicy": "प्लगइन अभी यह कमांड नहीं चला सकते। इसके बजाय संपादन बैच का उपयोग करें।",
       "pluginUnavailable": "प्लगइन अब सक्रिय नहीं है।",
-      "aborted": "कमांड चलने से पहले प्लगइन की कार्रवाई रद्द कर दी गई।"
-    }
+      "aborted": "कमांड चलने से पहले प्लगइन की कार्रवाई रद्द कर दी गई।",
+      "clipboardUnavailable": "यह ब्राउज़र मेनू से चिपकाने की अनुमति नहीं देता। कीबोर्ड शॉर्टकट का उपयोग करें।",
+      "lastSheet": "वर्कबुक में कम से कम एक शीट होनी चाहिए।",
+      "sheetAtEdge": "शीट को और आगे नहीं ले जाया जा सकता।",
+      "sheetNameInvalid": "शीट के नाम में 1 से 31 वर्ण होने चाहिए, वह अद्वितीय होना चाहिए और उसमें : \\ / ? * [ ] नहीं हो सकते।",
+      "clipboardDenied": "ब्राउज़र ने क्लिपबोर्ड तक पहुँच की अनुमति नहीं दी।"
+    },
+    "cut": "काटें",
+    "copy": "कॉपी करें",
+    "paste": "पेस्ट करें",
+    "pastePlainText": "सादे टेक्स्ट के रूप में पेस्ट करें",
+    "clearContents": "सामग्री साफ़ करें",
+    "insert": "डालें",
+    "delete": "हटाएं",
+    "insertRowsAbove": "ऊपर पंक्तियाँ डालें",
+    "insertRowsBelow": "नीचे पंक्तियाँ डालें",
+    "insertColumnsLeft": "बाईं ओर स्तंभ डालें",
+    "insertColumnsRight": "दाईं ओर स्तंभ डालें",
+    "deleteRows": "पंक्तियाँ हटाएं",
+    "deleteColumns": "स्तंभ हटाएं",
+    "insertSheet": "शीट डालें",
+    "deleteSheet": "शीट हटाएं",
+    "renameSheet": "नाम बदलें",
+    "moveSheetLeft": "बाईं ओर ले जाएँ",
+    "moveSheetRight": "दाईं ओर ले जाएँ"
   },
   "editor": {
     "appLabel": "स्प्रेडशीट संपादक",
@@ -162,7 +192,11 @@
     "showDetails": "विवरण दिखाएं",
     "openPrompt": "XLSX फ़ाइल खोलें",
     "sheetTabsLabel": "शीट",
-    "clearExceedsLimit": "साफ़ करना सेल सीमा से अधिक है"
+    "clearExceedsLimit": "साफ़ करना सेल सीमा से अधिक है",
+    "cellMenuLabel": "सेल मेनू",
+    "sheetTabMenuLabel": "शीट टैब मेनू",
+    "renameSheetLabel": "शीट का नाम बदलें",
+    "sheetNamePrefix": "शीट"
   },
   "presence": {
     "label": "सहयोगी",
@@ -178,6 +212,7 @@
     "accept": "स्वीकार करें",
     "reject": "अस्वीकार करें",
     "forceApply": "ज़बरदस्ती लागू करें",
+    "forceBlockedReason": "संरचनात्मक बदलाव के बाद यह प्रस्ताव लागू नहीं किया जा सकता।",
     "staleWarning": "प्रस्ताव के बाद से सेल बदल गए: {cells}"
   },
   "a11y": {
@@ -187,12 +222,27 @@
     "cellLabel": "{address}, {value}",
     "cellLabelSelected": "{address}, {value}, चयनित",
     "emptyCellLabel": "{address}, खाली",
-    "emptyCellLabelSelected": "{address}, खाली, चयनित"
+    "emptyCellLabelSelected": "{address}, खाली, चयनित",
+    "hasFormula": "{label}, सूत्र है",
+    "rangeSelected": "{start} से {end} चयनित, {rows, plural, one {# पंक्ति} other {# पंक्तियाँ}} × {columns, plural, one {# स्तंभ} other {# स्तंभ}}",
+    "sheetActivated": "{name}, शीट {count} में से {index}",
+    "cellInputLabel": "सेल {address} संपादित करें",
+    "gridRoleDescription": "वर्कशीट"
   },
   "plugins": {
     "toolbarGroup": "प्लगइन",
     "panelTabs": "प्लगइन पैनल",
     "collapsePanel": "{title} संक्षिप्त करें",
-    "expandPanel": "{title} विस्तृत करें"
+    "expandPanel": "{title} विस्तृत करें",
+    "rowGutter": "प्लगइन पंक्ति चिह्न"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "del": "Del",
+    "escape": "Esc",
+    "pageUp": "Page Up",
+    "pageDown": "Page Down"
   }
 }

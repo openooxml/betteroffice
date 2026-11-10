@@ -135,7 +135,14 @@
       "unsupportedCommand": "עדיין לא נתמך.",
       "invalidArguments": "ערך זה אינו תקין.",
       "inputFailed": "לא ניתן לשמור את הזנת התא שלפני כן.",
+      "editUnsupported": "לא ניתן להחיל כאן את העריכה הזו. חוברת העבודה לא השתנתה.",
+      "editUnsupportedChart": "לא ניתן להחיל את העריכה הזו: תרשים משתמש בתאים שהיא הייתה מזיזה. חוברת העבודה לא השתנתה.",
+      "editUnsupportedTable": "לא ניתן להחיל את העריכה הזו: טבלה משתמשת בתאים שהיא הייתה מזיזה. חוברת העבודה לא השתנתה.",
+      "editUnsupportedPivot": "לא ניתן להחיל את העריכה הזו: טבלת ציר משתמשת בתאים שהיא הייתה מזיזה. חוברת העבודה לא השתנתה.",
       "sheetProtected": "תא זה נמצא בגיליון מוגן.",
+      "hostRefused": "עריכה זו אינה מותרת.",
+      "tooManyToCheck": "יותר מדי תאים לבדיקה על ידי תוספים (מגבלה {limit}).",
+      "hostStarting": "העורך עדיין מופעל. נסו שוב בעוד רגע.",
       "documentReplaced": "נפתחה חוברת עבודה אחרת.",
       "targetChanged": "הבחירה השתנתה.",
       "gestureActive": "סיים תחילה להזיז את התרשים.",
@@ -146,8 +153,31 @@
       "permissionDenied": "היישום המארח לא התיר לתוסף זה להשתמש בפקודה זו.",
       "unsupportedPolicy": "תוספים עדיין לא יכולים להריץ פקודה זו. השתמש במקום זאת באצוות עריכה.",
       "pluginUnavailable": "התוסף אינו פעיל עוד.",
-      "aborted": "פעולת התוסף בוטלה לפני שהפקודה רצה."
-    }
+      "aborted": "פעולת התוסף בוטלה לפני שהפקודה רצה.",
+      "clipboardUnavailable": "דפדפן זה אינו מאפשר להדביק מתפריט. השתמש בקיצור המקשים.",
+      "lastSheet": "חוברת עבודה צריכה לפחות גיליון אחד.",
+      "sheetAtEdge": "לא ניתן להזיז את הגיליון יותר.",
+      "sheetNameInvalid": "שם גיליון צריך להכיל 1 עד 31 תווים, להיות ייחודי ולא להכיל : \\ / ? * [ ].",
+      "clipboardDenied": "הדפדפן לא התיר גישה ללוח."
+    },
+    "cut": "גזור",
+    "copy": "העתק",
+    "paste": "הדבק",
+    "pastePlainText": "הדבק כטקסט פשוט",
+    "clearContents": "נקה תוכן",
+    "insert": "הוסף",
+    "delete": "מחק",
+    "insertRowsAbove": "הוסף שורות מעל",
+    "insertRowsBelow": "הוסף שורות מתחת",
+    "insertColumnsLeft": "הוסף עמודות משמאל",
+    "insertColumnsRight": "הוסף עמודות מימין",
+    "deleteRows": "מחק שורות",
+    "deleteColumns": "מחק עמודות",
+    "insertSheet": "הוסף גיליון",
+    "deleteSheet": "מחק גיליון",
+    "renameSheet": "שנה שם",
+    "moveSheetLeft": "הזז שמאלה",
+    "moveSheetRight": "הזז ימינה"
   },
   "editor": {
     "appLabel": "עורך גיליונות אלקטרוניים",
@@ -162,7 +192,11 @@
     "showDetails": "הצג פרטים",
     "openPrompt": "פתח קובץ XLSX",
     "sheetTabsLabel": "גיליונות",
-    "clearExceedsLimit": "הניקוי חורג ממגבלת התאים"
+    "clearExceedsLimit": "הניקוי חורג ממגבלת התאים",
+    "cellMenuLabel": "תפריט תא",
+    "sheetTabMenuLabel": "תפריט לשונית הגיליון",
+    "renameSheetLabel": "שנה את שם הגיליון",
+    "sheetNamePrefix": "גיליון"
   },
   "presence": {
     "label": "משתפי פעולה",
@@ -178,6 +212,7 @@
     "accept": "קבל",
     "reject": "דחה",
     "forceApply": "החל בכפייה",
+    "forceBlockedReason": "לא ניתן להחיל הצעה זו לאחר שינוי מבני.",
     "staleWarning": "תאים השתנו מאז ההצעה: {cells}"
   },
   "a11y": {
@@ -187,12 +222,27 @@
     "cellLabel": "{address}, {value}",
     "cellLabelSelected": "{address}, {value}, נבחר",
     "emptyCellLabel": "{address}, ריק",
-    "emptyCellLabelSelected": "{address}, ריק, נבחר"
+    "emptyCellLabelSelected": "{address}, ריק, נבחר",
+    "hasFormula": "{label}, מכיל נוסחה",
+    "rangeSelected": "נבחר {start} עד {end}, {rows, plural, one {שורה אחת} two {שתי שורות} other {# שורות}} על {columns, plural, one {עמודה אחת} two {שתי עמודות} other {# עמודות}}",
+    "sheetActivated": "{name}, גיליון {index} מתוך {count}",
+    "cellInputLabel": "עריכת התא {address}",
+    "gridRoleDescription": "גיליון"
   },
   "plugins": {
     "toolbarGroup": "תוספים",
     "panelTabs": "חלוניות תוספים",
     "collapsePanel": "כווץ את {title}",
-    "expandPanel": "הרחב את {title}"
+    "expandPanel": "הרחב את {title}",
+    "rowGutter": "סימוני שורות של תוספים"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "del": "Del",
+    "escape": "Esc",
+    "pageUp": "Page Up",
+    "pageDown": "Page Down"
   }
 }

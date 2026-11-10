@@ -11,13 +11,22 @@ publish = false
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+default = ["mimalloc"]
+mimalloc = ["dep:mimalloc"]
+test-hooks = []
+
 [dependencies]
+mimalloc = { version = "0.1.52", optional = true, default-features = false, features = ["v2", "local_dynamic_tls"] }
 betteroffice-fonts = { path = "../../crates/betteroffice-fonts" }
 ooxml-font-preflight = { package = "betteroffice-ooxml-font-preflight", path = "../../crates/ooxml-font-preflight" }
 docx-engine = { package = "betteroffice-docx-engine", path = "../../crates/docx-engine" }
+docx-layout = { package = "betteroffice-docx-layout", path = "../../crates/docx-layout" }
+docx-raster = { package = "betteroffice-docx-raster", path = "../../crates/docx-raster", default-features = false }
 getrandom = "0.3"
 napi = { version = "3.12.4", features = ["napi8", "serde-json"] }
 napi-derive = "3.6.5"
+ooxml-text = { package = "betteroffice-ooxml-text", path = "../../crates/ooxml-text" }
 serde_json = "1"
 
 [build-dependencies]

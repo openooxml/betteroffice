@@ -1,4 +1,5 @@
 import { testScope } from './__fixtures__/testScope';
+import { hostProposalWorkbook } from '../__fixtures__/hostProposalWorkbook';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
@@ -442,6 +443,25 @@ const headerFooterSheets = [
 ];
 
 describe('peer-less plugins', () => {
+  test('worker plugins receive the locale and one change after rerender', async () => {
+    const host = pluginWorker();
+    const contexts: XlsxPluginContext<null>[] = [];
+    const events: XlsxPluginEvent[] = [];
+    const plugin = defineXlsxPlugin({ id: 'locale', createState: () => null,
+      onEvent(context, event) { contexts.push(context); events.push(event); } });
+    try {
+      const view = await host.mount({ plugins: [plugin], i18n: { _lang: 'DE-de' } });
+      await until(() => events.some((event) => event.type === 'load'));
+      expect(contexts[0]!.snapshot.locale).toBe('de-DE');
+      view.rerender({ i18n: { _lang: 'fr' } });
+      await until(() => events.some((event) => event.type === 'locale-change'));
+      expect(events.filter((event) => event.type === 'locale-change')).toEqual([
+        { type: 'locale-change', generation: last(contexts).snapshot.generation, locale: 'fr' },
+      ]);
+      expect(last(contexts).snapshot.locale).toBe('fr');
+    } finally { host.restore(); }
+  });
+
   test('plugin reads preserve header footer facts through the worker route', async () => {
     const workbook = openWorkbook(await headerFooterFixture());
     const host = pluginWorker();
@@ -1980,6 +2000,76 @@ describe('XlsxEditor plugin boundaries and races', () => {
     expect(marks).toEqual(['acme.review', 'acme.review']);
   });
 
+  editorTest('proposal events and anchors follow host review in a read-only editor', async () => {
+    const events: XlsxPluginEvent[] = [];
+    const contexts: XlsxPluginContext<null>[] = [];
+    const plugin = defineXlsxPlugin<null>({ id: 'acme.proposals', createState: () => null,
+      onEvent(context, event) { contexts.push(context); events.push(event); },
+      overlay: ({ context }) => { contexts.push(context); return null; } });
+    const { api, view } = await mount({ file: await hostProposalWorkbook(), plugins: [plugin],
+      readOnly: true, allowHostProposals: true });
+    const stage = async (value: string) => {
+      const result = await act(() => api().proposeChanges!({ agentId: 'Host agent',
+        edits: [{ sheet: 0, row: 2, col: 1, input: value }] }));
+      if (!result.ok) throw new Error(result.failure.message);
+      return result.proposal.id;
+    };
+    const first = await stage('123');
+    await until(() => last(contexts)?.geometry?.getAnchorGeometry({ kind: 'proposal', id: first }).ok === true);
+    const geometry = last(contexts).geometry!;
+    const cell = geometry.getCellRect({ sheetId: 'sheet:0', row: 2, col: 1 });
+    expect(geometry.getAnchorGeometry({ kind: 'proposal', id: first }))
+      .toMatchObject({ ok: true, rects: [cell], anchor: cell });
+    const scroll = view.getByTestId('xlsx-scroll');
+    scroll.scrollTop = 40;
+    fireEvent.scroll(scroll);
+    await until(() => last(contexts).geometry?.layout.viewport.y === 40);
+    expect(geometry.getAnchorGeometry({ kind: 'proposal', id: first }))
+      .toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
+    const scrolled = last(contexts).geometry!;
+    expect(scrolled.getAnchorGeometry({ kind: 'proposal', id: first }))
+      .toMatchObject({ ok: true, anchor: scrolled.getCellRect({ sheetId: 'sheet:0', row: 2, col: 1 }) });
+    await act(async () => { api().selectCells(1, selectionAt({ row: 2, col: 1 })); });
+    await until(() => last(contexts).geometry?.layout.sheetId === 'sheet:1');
+    expect(last(contexts).geometry!.getAnchorGeometry({ kind: 'proposal', id: first }))
+      .toMatchObject({ ok: false, failure: { code: 'missing-target' } });
+    await act(async () => { api().selectCells(0, selectionAt({ row: 2, col: 1 })); });
+    await until(() => last(contexts).geometry?.layout.sheetId === 'sheet:0');
+    expect(last(contexts).geometry!.getAnchorGeometry({ kind: 'proposal', id: first })).toMatchObject({ ok: true });
+    expect(events.filter((event) => event.type === 'proposal-change')).toHaveLength(1);
+    await act(() => api().commands.execute('proposalAccept', { proposalId: first }));
+    expect(input(api(), 2, 1)).toBe('123');
+    await until(() => events.filter((event) => event.type === 'proposal-change').length === 2);
+    const second = await stage('456');
+    await act(() => api().commands.execute('proposalReject', { proposalId: second }));
+    await until(() => events.filter((event) => event.type === 'proposal-change').length === 4);
+    expect(input(api(), 2, 1)).toBe('123');
+    expect(last(contexts).geometry?.getAnchorGeometry({ kind: 'proposal', id: second }))
+      .toMatchObject({ ok: false, failure: { code: 'unknown-proposal' } });
+  });
+
+  editorTest('proposal events report stale decisions and structural changes', async () => {
+    const events: XlsxPluginEvent[] = [];
+    const plugin = defineXlsxPlugin<null>({ id: 'acme.proposal-state', createState: () => null,
+      onEvent(_context, event) { events.push(event); } });
+    const { api } = await mount({ file: await hostProposalWorkbook(), plugins: [plugin],
+      readOnly: true, allowHostProposals: true });
+    const result = await act(() => api().proposeChanges!({ agentId: 'agent',
+      edits: [{ sheet: 0, row: 2, col: 1, input: '123' }] }));
+    if (!result.ok) throw new Error(result.failure.message);
+    await act(async () => { api().handle.editCell(0, 2, 1, 'changed'); api().refreshProposals(); });
+    const beforeStale = events.filter((event) => event.type === 'proposal-change').length;
+    const stale = await act(() => api().commands.execute('proposalAccept', { proposalId: result.proposal.id }));
+    expect(stale).toMatchObject({ ok: false, failure: { code: 'proposal-stale' } });
+    await until(() => events.filter((event) => event.type === 'proposal-change').length > beforeStale);
+    const beforeStructure = events.filter((event) => event.type === 'proposal-change').length;
+    await act(async () => {
+      api().handle.applyOps([{ type: 'insertRows', sheet: 0, at: 0, count: 1 }]);
+      api().refreshProposals();
+    });
+    await until(() => events.filter((event) => event.type === 'proposal-change').length > beforeStructure);
+  });
+
   editorTest('retained geometry refuses in the same step as a committed change or a new frame', async () => {
     let retained: XlsxPluginGeometry | null = null;
     const duringChange: unknown[] = [];
@@ -2579,4 +2669,181 @@ describe('XlsxEditor plugin adapters', () => {
       expect(cell(5, 1)!.width).toBeLessThan(merged.width);
     }
   });
+  editorTest('point queries answer the editor hit test across zoom, scale and scroll', async () => {
+    const contexts: XlsxPluginContext<null>[] = [];
+    const plugins = [
+      defineXlsxPlugin<null>({
+        id: 'acme.point',
+        createState: () => null,
+        onEvent(context) {
+          contexts.push(context);
+        },
+      }),
+    ];
+    const { api, ready, view, rerender } = await mount({ plugins, file: charted });
+    const geometry = () => last(contexts)?.geometry ?? null;
+    await until(() => geometry()?.layout.zoom === 1);
+    const canvas = view.container.querySelector('canvas')!;
+    const place = (scale: number) => {
+      canvas.getBoundingClientRect = () =>
+        new DOMRect(40, 60, VIEWPORT.width * scale, VIEWPORT.height * scale);
+    };
+    const query = (clientX: number, clientY: number) => {
+      const current = geometry()!;
+      const editor = api().getPositionAtPoint(clientX, clientY);
+      const position = current.getPositionAtPoint!(clientX, clientY);
+      expect(position).toEqual(
+        editor && {
+          ...editor,
+          sheetId: 'sheet:0',
+          version: current.layout.version,
+          layoutId: current.layout.id,
+        }
+      );
+      return position;
+    };
+    const probe = (zoom: number, scale: number) => {
+      const grid = api().handle.displayList(geometry()!.layout.viewport).grid!;
+      const row = grid.rowIndices?.[3] ?? grid.startRow + 3;
+      const col = grid.colIndices?.[0] ?? grid.startCol;
+      const rect = cellRect(grid, row, col)!;
+      const at = query(
+        40 + (rect.x + rect.w / 2) * zoom * scale,
+        60 + (rect.y + rect.h / 2) * zoom * scale
+      );
+      expect(at).toMatchObject({ sheet: 0, row, col });
+      return at!;
+    };
+
+    place(1);
+    const top = probe(1, 1);
+    const [chart] = api().handle.displayList(geometry()!.layout.viewport).charts!;
+    expect(query(40 + chart.clip.x + chart.clip.w / 2, 60 + chart.clip.y + chart.clip.h / 2)).toBeNull();
+    expect(query(39, 70)).toBeNull();
+    expect(query(Number.NaN, 70)).toBeNull();
+    expect(query(70, Number.POSITIVE_INFINITY)).toBeNull();
+    expect(query(40 + VIEWPORT.width, 70)).toBeNull();
+
+    const surface = view.getByTestId('xlsx-scroll');
+    surface.scrollTop = 200;
+    fireEvent.scroll(surface);
+    await until(() => geometry()?.layout.viewport.y === 200);
+    const scrolled = probe(1, 1);
+    expect(scrolled.row).toBeGreaterThan(top.row);
+    expect(scrolled.layoutId).not.toBe(top.layoutId);
+
+    for (const zoom of [1, 2]) {
+      if (zoom !== 1) {
+        await act(async () => {
+          await api().commands.execute('zoom', { scale: zoom });
+        });
+        await until(() => geometry()?.layout.zoom === zoom);
+      }
+      for (const scale of [1, 0.75, 1.5]) {
+        place(scale);
+        probe(zoom, scale);
+      }
+    }
+
+    place(1);
+    const retained = geometry()!;
+    const stale = api();
+    const grid = stale.handle.displayList(retained.layout.viewport).grid!;
+    const rect = cellRect(grid, grid.rowIndices?.[1] ?? grid.startRow + 1, 0)!;
+    const point = [40 + (rect.x + rect.w / 2) * 2, 60 + (rect.y + rect.h / 2) * 2] as const;
+    expect(retained.getPositionAtPoint!(...point)).not.toBeNull();
+    stale.handle.editCell(0, 0, 0, 'Direct');
+    expect(retained.getPositionAtPoint!(...point)).toBeNull();
+    await until(() => geometry()?.layout.version === stale.handle.version());
+    expect(query(...point)).not.toBeNull();
+
+    const painted = geometry()!;
+    rerender({ plugins, file: fixture.slice() });
+    await until(() => ready.length > 1);
+    expect(stale.getPositionAtPoint(...point)).toBeNull();
+    expect(painted.getPositionAtPoint!(...point)).toBeNull();
+    await until(() => geometry() !== null && geometry()!.layout.id !== painted.layout.id);
+    place(1);
+    expect(query(...point)).not.toBeNull();
+  });
+  editorTest('superseded contexts answer no geometry queries', async () => {
+    const contexts: XlsxPluginContext<null>[] = [];
+    const plugin = (revision: number) =>
+      defineXlsxPlugin<null>({
+        id: 'acme.point',
+        revision,
+        createState: () => null,
+        onEvent(context) {
+          contexts.push(context);
+        },
+      });
+    const { api, view, rerender } = await mount({ plugins: [plugin(1)], file: charted });
+    await until(() => last(contexts)?.geometry?.layout.zoom === 1);
+    const canvas = view.container.querySelector('canvas')!;
+    canvas.getBoundingClientRect = () => new DOMRect(40, 60, VIEWPORT.width, VIEWPORT.height);
+    const retained = last(contexts);
+    const geometry = retained.geometry!;
+    const grid = api().handle.displayList(geometry.layout.viewport).grid!;
+    const row = grid.rowIndices?.[3] ?? grid.startRow + 3;
+    const col = grid.colIndices?.[0] ?? grid.startCol;
+    const rect = cellRect(grid, row, col)!;
+    const point = [40 + rect.x + rect.w / 2, 60 + rect.y + rect.h / 2] as const;
+    const target = { sheetId: 'sheet:0', row, col };
+    const range = { sheetId: 'sheet:0', range: { top: row, left: col, bottom: row, right: col } };
+    expect(geometry.getPositionAtPoint!(...point)).toMatchObject({ row, col });
+    expect(geometry.getCellRect(target)).not.toBeNull();
+    expect(geometry.getRangeRect(range)).not.toBeNull();
+
+    const duringCleanup: unknown[] = [];
+    retained.onCleanup(() => {
+      duringCleanup.push([geometry.getPositionAtPoint!(...point), geometry.getCellRect(target)]);
+    });
+    rerender({ plugins: [plugin(2)], file: charted });
+    await until(() => retained.lifetimeSignal.aborted && duringCleanup.length === 1);
+    expect(duringCleanup).toEqual([[null, null]]);
+    expect(geometry.getPositionAtPoint!(...point)).toBeNull();
+    expect(geometry.getCellRect(target)).toBeNull();
+    expect(geometry.getRangeRect(range)).toBeNull();
+    await until(() => last(contexts) !== retained && last(contexts).geometry !== null);
+    expect(last(contexts).geometry!.getPositionAtPoint!(...point)).toMatchObject({ row, col });
+  });
+});
+
+test('plugins receive the resolved locale and one event when it changes', async () => {
+  const contexts: XlsxPluginContext<null>[] = [];
+  const events: XlsxPluginEvent[] = [];
+  const plugin = defineXlsxPlugin({ id: 'locale', createState: () => null,
+    onEvent(context, event) { contexts.push(context); events.push(event); } });
+  const { rerender } = await mount({ plugins: [plugin], i18n: { _lang: 'de' } });
+  await until(() => events.some((event) => event.type === 'load'));
+  expect(contexts[0]!.snapshot.locale).toBe('de');
+  expect(events.filter((event) => event.type === 'locale-change')).toEqual([]);
+  rerender({ plugins: [plugin], i18n: { _lang: 'fr' } });
+  await until(() => events.some((event) => event.type === 'locale-change'));
+  expect(events.filter((event) => event.type === 'locale-change')).toEqual([
+    { type: 'locale-change', generation: last(contexts).snapshot.generation, locale: 'fr' },
+  ]);
+  expect(last(contexts).snapshot.locale).toBe('fr');
+  rerender({ plugins: [plugin], i18n: { _lang: 'fr' } });
+  await settle();
+  expect(events.filter((event) => event.type === 'locale-change')).toHaveLength(1);
+});
+
+test('plugin locales are canonical and equivalent tags do not notify twice', async () => {
+  const contexts: XlsxPluginContext<null>[] = [];
+  const events: XlsxPluginEvent[] = [];
+  const plugin = defineXlsxPlugin({ id: 'canonical-locale', createState: () => null,
+    onEvent(context, event) { contexts.push(context); events.push(event); } });
+  const { rerender } = await mount({ plugins: [plugin], i18n: { _lang: 'DE-de' } });
+  await until(() => events.some((event) => event.type === 'load'));
+  expect(contexts[0]!.snapshot.locale).toBe('de-DE');
+  rerender({ plugins: [plugin], i18n: { _lang: 'de-DE' } });
+  await settle();
+  expect(events.filter((event) => event.type === 'locale-change')).toEqual([]);
+  rerender({ plugins: [plugin], i18n: { _lang: 'invalid_tag' } });
+  await until(() => events.some((event) => event.type === 'locale-change'));
+  expect(events.filter((event) => event.type === 'locale-change')).toEqual([
+    { type: 'locale-change', generation: last(contexts).snapshot.generation, locale: 'en' },
+  ]);
+  expect(last(contexts).snapshot.locale).toBe('en');
 });

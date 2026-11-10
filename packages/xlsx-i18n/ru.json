@@ -135,7 +135,14 @@
       "unsupportedCommand": "Пока не поддерживается.",
       "invalidArguments": "Это значение недопустимо.",
       "inputFailed": "Предыдущий ввод в ячейку не удалось сохранить.",
+      "editUnsupported": "Это изменение нельзя применить здесь. Книга не изменена.",
+      "editUnsupportedChart": "Это изменение нельзя применить: диаграмма использует ячейки, которые оно сдвинет. Книга не изменена.",
+      "editUnsupportedTable": "Это изменение нельзя применить: таблица использует ячейки, которые оно сдвинет. Книга не изменена.",
+      "editUnsupportedPivot": "Это изменение нельзя применить: сводная таблица использует ячейки, которые оно сдвинет. Книга не изменена.",
       "sheetProtected": "Эта ячейка находится на защищённом листе.",
+      "hostRefused": "Это изменение запрещено.",
+      "tooManyToCheck": "Слишком много ячеек для проверки плагинами (лимит {limit}).",
+      "hostStarting": "Редактор ещё запускается. Повторите попытку через мгновение.",
       "documentReplaced": "Была открыта другая книга.",
       "targetChanged": "Выделение изменилось.",
       "gestureActive": "Сначала завершите перемещение диаграммы.",
@@ -146,8 +153,31 @@
       "permissionDenied": "Главное приложение не разрешило этому плагину использовать эту команду.",
       "unsupportedPolicy": "Плагины пока не могут выполнять эту команду. Используйте вместо этого пакет изменений.",
       "pluginUnavailable": "Плагин больше не активен.",
-      "aborted": "Действие плагина было отменено до выполнения команды."
-    }
+      "aborted": "Действие плагина было отменено до выполнения команды.",
+      "clipboardUnavailable": "Этот браузер не позволяет вставлять из меню. Используйте сочетание клавиш.",
+      "lastSheet": "В книге должен быть хотя бы один лист.",
+      "sheetAtEdge": "Лист нельзя переместить дальше.",
+      "sheetNameInvalid": "Имя листа должно содержать от 1 до 31 символа, быть уникальным и не содержать : \\ / ? * [ ].",
+      "clipboardDenied": "Браузер не разрешил доступ к буферу обмена."
+    },
+    "cut": "Вырезать",
+    "copy": "Копировать",
+    "paste": "Вставить",
+    "pastePlainText": "Вставить как обычный текст",
+    "clearContents": "Очистить содержимое",
+    "insert": "Вставить",
+    "delete": "Удалить",
+    "insertRowsAbove": "Вставить строки выше",
+    "insertRowsBelow": "Вставить строки ниже",
+    "insertColumnsLeft": "Вставить столбцы слева",
+    "insertColumnsRight": "Вставить столбцы справа",
+    "deleteRows": "Удалить строки",
+    "deleteColumns": "Удалить столбцы",
+    "insertSheet": "Вставить лист",
+    "deleteSheet": "Удалить лист",
+    "renameSheet": "Переименовать",
+    "moveSheetLeft": "Переместить влево",
+    "moveSheetRight": "Переместить вправо"
   },
   "editor": {
     "appLabel": "Редактор электронных таблиц",
@@ -162,7 +192,11 @@
     "showDetails": "Показать сведения",
     "openPrompt": "Открыть файл XLSX",
     "sheetTabsLabel": "Листы",
-    "clearExceedsLimit": "Очистка превышает лимит ячеек."
+    "clearExceedsLimit": "Очистка превышает лимит ячеек.",
+    "cellMenuLabel": "Меню ячейки",
+    "sheetTabMenuLabel": "Меню ярлыка листа",
+    "renameSheetLabel": "Переименовать лист",
+    "sheetNamePrefix": "Лист"
   },
   "presence": {
     "label": "Соавторы",
@@ -178,6 +212,7 @@
     "accept": "Принять",
     "reject": "Отклонить",
     "forceApply": "Применить принудительно",
+    "forceBlockedReason": "Это предложение нельзя применить после изменения структуры.",
     "staleWarning": "Ячейки изменились с момента предложения: {cells}"
   },
   "a11y": {
@@ -187,12 +222,27 @@
     "cellLabel": "{address}, {value}",
     "cellLabelSelected": "{address}, {value}, выделено",
     "emptyCellLabel": "{address}, пусто",
-    "emptyCellLabelSelected": "{address}, пусто, выделено"
+    "emptyCellLabelSelected": "{address}, пусто, выделено",
+    "hasFormula": "{label}, содержит формулу",
+    "rangeSelected": "Выделено {start} – {end}, {rows, plural, one {# строка} few {# строки} many {# строк} other {# строки}} на {columns, plural, one {# столбец} few {# столбца} many {# столбцов} other {# столбца}}",
+    "sheetActivated": "{name}, лист {index} из {count}",
+    "cellInputLabel": "Изменить ячейку {address}",
+    "gridRoleDescription": "лист"
   },
   "plugins": {
     "toolbarGroup": "Плагины",
     "panelTabs": "Панели плагинов",
     "collapsePanel": "Свернуть: {title}",
-    "expandPanel": "Развернуть: {title}"
+    "expandPanel": "Развернуть: {title}",
+    "rowGutter": "Метки строк плагинов"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "del": "Del",
+    "escape": "Esc",
+    "pageUp": "Page Up",
+    "pageDown": "Page Down"
   }
 }

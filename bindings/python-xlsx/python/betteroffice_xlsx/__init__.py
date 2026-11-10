@@ -2,23 +2,27 @@
 
 from __future__ import annotations
 
+import dataclasses
 import datetime
 import json
 import math
 import numbers
 import os
-from typing import Any, Iterable, Iterator, Mapping, Union
+import warnings
+from typing import Any, TypedDict, Iterable, Iterator, Mapping, Union
 
 from ._betteroffice_xlsx import (
     decode_font_face,
     Calculation,
     CellError,
     CollaborativeStateError,
+    CollaborativeStructureError,
     History,
     InvalidUpdateError,
     MAX_COLLABORATION_BYTES,
     Mutation,
     NotCollaborativeError,
+    OperationError,
     Proposal,
     ProposedEdit,
     ParseError,
@@ -33,6 +37,7 @@ from ._betteroffice_xlsx import export_xlsx_markdown_json as _export_xlsx_markdo
 from ._betteroffice_xlsx import export_xlsx_structured_json as _export_xlsx_structured_json
 from ._betteroffice_xlsx import render_xlsx_markdown_json as _render_xlsx_markdown_json
 from .edits import (
+    RangeAddress,
     EditRequest,
     EditResult,
     EditStep,
@@ -42,6 +47,13 @@ from .edits import (
     ReadRequest,
     ReadResult,
     ValidationResult,
+)
+from .ops import (
+    CapturedFormat,
+    CellRange,
+    ChartMutation,
+    WorkbookHyperlink,
+    XlsxOp,
 )
 from .exports import (
     ExportOptions,
@@ -53,12 +65,63 @@ from .exports import (
     StructuredResult,
 )
 
+class Viewport(TypedDict):
+    x: float
+    y: float
+    width: float
+    height: float
+
+class ViewportTarget(TypedDict):
+    sheet: "int | str"
+    viewport: Viewport
+
+class PngRangeTarget(TypedDict):
+    """A required range: "used", an A1 string, or an address dictionary."""
+    sheet: "int | str"
+    range: "str | RangeAddress"
+
+
+@dataclasses.dataclass(frozen=True)
+class SaveWarning:
+    """A part a save wrote differently from what the workbook holds, and why.
+
+    `code` is stable to match on; `message` is for people."""
+
+    code: str
+    part: str
+    message: str
+    element: "str | None" = None
+    sheet: "str | None" = None
+
+
+@dataclasses.dataclass(frozen=True)
+class SaveResult:
+    """The saved bytes and the warnings the save carries."""
+
+    bytes: bytes
+    warnings: "list[SaveWarning]"
+
+
+def _warn_save(found: "list[SaveWarning]") -> None:
+    for warning in found:
+        warnings.warn(warning.message, RuntimeWarning, stacklevel=3)
+
+
 __all__ = [
+    "SaveResult",
+    "SaveWarning",
+    "Viewport",
+    "ViewportTarget",
+    "PngRangeTarget",
     "decode_font_face",
     "Calculation",
+    "CapturedFormat",
     "CellError",
+    "CellRange",
     "CellValue",
+    "ChartMutation",
     "CollaborativeStateError",
+    "CollaborativeStructureError",
     "EditRequest",
     "EditResult",
     "EditStep",
@@ -74,6 +137,7 @@ __all__ = [
     "MarkdownResult",
     "Mutation",
     "NotCollaborativeError",
+    "OperationError",
     "Proposal",
     "ProposedEdit",
     "ParseError",
@@ -90,7 +154,9 @@ __all__ = [
     "StructuredResult",
     "ValidationResult",
     "Workbook",
+    "WorkbookHyperlink",
     "XlsxError",
+    "XlsxOp",
     "__version__",
     "export_xlsx_markdown",
     "export_xlsx_structured",
@@ -133,18 +199,27 @@ class Sheet:
 
     def render_png(
         self,
+        target: ViewportTarget | PngRangeTarget,
+        *,
+        scale: float = 1.0,
+        max_width: "int | None" = None,
+        max_height: "int | None" = None,
+    ) -> Png:
+        return self._workbook.render_png(
+            target, scale=scale, max_width=max_width, max_height=max_height
+        )
+
+    def render_sheet(
+        self,
         *,
         scale: float = 1.0,
         range: "str | None" = None,
         max_width: "int | None" = None,
         max_height: "int | None" = None,
     ) -> Png:
-        return self._workbook.render_png(
-            self._index,
-            scale=scale,
-            range=range,
-            max_width=max_width,
-            max_height=max_height,
+        """Render this sheet to PNG, framing its used range when no range is given."""
+        return self._workbook.render_sheet(
+            self._index, scale=scale, range=range, max_width=max_width, max_height=max_height
         )
 
     def __repr__(self) -> str:
@@ -220,6 +295,19 @@ class Workbook:
 
     def render_png(
         self,
+        target: ViewportTarget | PngRangeTarget,
+        *,
+        scale: float = 1.0,
+        max_width: "int | None" = None,
+        max_height: "int | None" = None,
+    ) -> Png:
+        """Render a viewport or range of a sheet to PNG."""
+        return self._inner.render_png(
+            target, scale=scale, max_width=max_width, max_height=max_height
+        )
+
+    def render_sheet(
+        self,
         sheet: SheetKey,
         *,
         scale: float = 1.0,
@@ -227,22 +315,42 @@ class Workbook:
         max_width: "int | None" = None,
         max_height: "int | None" = None,
     ) -> Png:
-        """Render a sheet to PNG."""
-        return self._inner.render_png(
-            sheet,
-            scale=scale,
-            range=range,
-            max_width=max_width,
-            max_height=max_height,
+        """Render a sheet to PNG, framing its used range when no range is given."""
+        return self._inner.render_sheet(
+            sheet, scale=scale, range=range, max_width=max_width, max_height=max_height
         )
 
     def save(self) -> bytes:
-        """Serialize back to XLSX bytes."""
-        return self._inner.save()
+        """Serialize back to XLSX bytes. Each save warning is also raised as a
+        RuntimeWarning; `save_with_warnings` returns them instead."""
+        data = self._inner.save()
+        _warn_save(self._save_warnings())
+        return data
 
     def save_path(self, path: "str | os.PathLike[str]") -> None:
-        """Serialize to a filesystem path."""
+        """Serialize to a filesystem path, raising each save warning as a
+        RuntimeWarning."""
         self._inner.save_path(os.fspath(path))
+        _warn_save(self._save_warnings())
+
+    def save_with_warnings(self) -> "SaveResult":
+        """Serialize back to XLSX bytes, with a warning for every part the save
+        wrote differently from what the workbook holds; none on an ordinary
+        save."""
+        data = self._inner.save()
+        return SaveResult(bytes=data, warnings=self._save_warnings())
+
+    def _save_warnings(self) -> "list[SaveWarning]":
+        return [
+            SaveWarning(
+                code=entry["code"],
+                part=entry["part"],
+                message=entry["message"],
+                element=entry.get("element"),
+                sheet=entry.get("sheet"),
+            )
+            for entry in json.loads(self._inner._save_warnings_json())
+        ]
 
     @classmethod
     def open_collaborative(
@@ -332,6 +440,106 @@ class Workbook:
             now_serial=now_serial,
         )
 
+    def apply_ops(
+        self,
+        ops: "Iterable[XlsxOp]",
+        *,
+        now_serial: "float | None" = None,
+    ) -> Mutation:
+        """Apply raw edit ops (rows, columns, sheets, merges, names...) as one undo step.
+
+        Takes the op objects TypeScript's ``applyOps`` takes; see :mod:`betteroffice_xlsx.ops`.
+        An op that does not decode raises ``ValueError``, a missing sheet or cell
+        :class:`RangeError`, a refused op :class:`OperationError` (also a ``ValueError``), and a
+        structural op on a collaborative workbook :class:`CollaborativeStructureError`, each with
+        the message TypeScript throws.
+        """
+        return self._inner.apply_ops_json(_wire({"ops": list(ops)}), now_serial=now_serial)
+
+    def move_range(
+        self,
+        sheet: int,
+        source: str,
+        destination: str,
+        *,
+        now_serial: "float | None" = None,
+    ) -> Mutation:
+        """Move ``source`` (A1) so its top-left lands on ``destination``, rewriting references."""
+        return self._inner.move_range_json(
+            _wire({"sheet": sheet, "source": source, "destination": destination}),
+            now_serial=now_serial,
+        )
+
+    def set_hyperlink(
+        self,
+        sheet: int,
+        hyperlink: WorkbookHyperlink,
+        *,
+        now_serial: "float | None" = None,
+    ) -> Mutation:
+        """Link a range to ``externalTarget`` or an in-workbook ``location``."""
+        link = {"range": hyperlink["range"]} if "range" in hyperlink else {}
+        link.update(
+            external_target=hyperlink.get("externalTarget"),
+            location=hyperlink.get("location"),
+            tooltip=hyperlink.get("tooltip"),
+            display=hyperlink.get("display"),
+        )
+        op = {"type": "setHyperlink", "sheet": sheet, "hyperlink": link}
+        return self._inner.apply_ops_json(_wire({"ops": [op]}), now_serial=now_serial)
+
+    def remove_hyperlink(
+        self,
+        sheet: int,
+        range: CellRange,
+        *,
+        now_serial: "float | None" = None,
+    ) -> Mutation:
+        op = {"type": "removeHyperlink", "sheet": sheet, "range": range}
+        return self._inner.apply_ops_json(_wire({"ops": [op]}), now_serial=now_serial)
+
+    def edit_charts(
+        self,
+        edits: "Iterable[ChartMutation]",
+        *,
+        now_serial: "float | None" = None,
+    ) -> Mutation:
+        """Retitle charts or repoint their series, 1 to 32 edits as one undo step."""
+        return self._inner.edit_charts_json(_wire(list(edits)), now_serial=now_serial)
+
+    def move_chart(
+        self,
+        sheet: int,
+        chart: str,
+        dx: float,
+        dy: float,
+        *,
+        now_serial: "float | None" = None,
+    ) -> Mutation:
+        """Slide chart frame ``chart`` (a chart ``id``) by content pixels, clamped to the grid."""
+        return self._inner.move_chart_json(
+            _wire({"sheet": sheet, "chart": chart, "dx": dx, "dy": dy}),
+            now_serial=now_serial,
+        )
+
+    def capture_format(self, sheet: int, range: str) -> CapturedFormat:
+        """The formats of an A1 range, for :meth:`apply_format`."""
+        return json.loads(self._inner.capture_format_json(_wire({"sheet": sheet, "range": range})))
+
+    def apply_format(
+        self,
+        sheet: int,
+        range: str,
+        format: CapturedFormat,
+        *,
+        now_serial: "float | None" = None,
+    ) -> Mutation:
+        """Paint a captured format over an A1 range, tiling it."""
+        return self._inner.apply_format_json(
+            _wire({"sheet": sheet, "range": range, "format": format}),
+            now_serial=now_serial,
+        )
+
     def propose(
         self,
         agent_id: str,
@@ -350,6 +558,10 @@ class Workbook:
 
     def proposals(self) -> "list[Proposal]":
         return self._inner.proposals()
+
+    def list_proposals(self) -> "list[Proposal]":
+        """Alias of proposals, named as in the TypeScript API."""
+        return self.proposals()
 
     def accept_proposal(
         self,
@@ -647,6 +859,26 @@ def _export_options(
     if scope is not None:
         options["scope"] = list(scope)
     return json.dumps(options)
+
+
+def _wire(value: object) -> str:
+    """JSON as JavaScript's ``JSON.stringify`` writes it, so the engine reads what TypeScript sends.
+
+    Integral floats are written as integers; NaN and infinities raise ``ValueError``.
+    """
+    return json.dumps(
+        _js_numbers(value), separators=(",", ":"), ensure_ascii=False, allow_nan=False
+    )
+
+
+def _js_numbers(value: object) -> object:
+    if type(value) is float and value.is_integer() and abs(value) < 1e21:
+        return int(value)
+    if isinstance(value, dict):
+        return {key: _js_numbers(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_js_numbers(item) for item in value]
+    return value
 
 
 def _as_input(value: object) -> str:

@@ -52,6 +52,7 @@
     "decreaseFontSize": "Schriftgrad verkleinern",
     "increaseFontSize": "Schriftgrad vergrößern",
     "underline": "Unterstrichen",
+    "strikethrough": "Durchgestrichen",
     "more": "Mehr",
     "fillColor": "Füllfarbe",
     "noFill": "Keine Füllung",
@@ -91,6 +92,12 @@
     "fallbackTitle": "Folie {number}",
     "canvasLabel": "Folie {current} von {total}",
     "canvasLabelWithSelection": "Folie {current} von {total}; ausgewähltes Objekt {name}"
+  },
+  "a11y": {
+    "chartNoData": "Keine Daten",
+    "slideWithTitle": "Folie {current} von {total}: {title}",
+    "objectSelected": "{name} ausgewählt",
+    "editingText": "{name} wird bearbeitet"
   },
   "editor": {
     "appLabel": "Folieneditor für Präsentationen",
@@ -156,6 +163,17 @@
     "stalePreview": "Diese Vorschau verwendet die aktualisierte Folie. Beim Übernehmen werden die geänderten Ziele überschrieben.",
     "geometry": "Position und Größe (x, y, Breite, Höhe)",
     "geometryValues": "{before} → {after} pt",
+    "layoutChanged": "Layout geändert",
+    "backgroundChanged": "Hintergrund geändert",
+    "rowInserted": "Zeile eingefügt",
+    "rowDeleted": "Zeile gelöscht",
+    "columnInserted": "Spalte eingefügt",
+    "columnDeleted": "Spalte gelöscht",
+    "broughtToFront": "In den Vordergrund gebracht",
+    "sentToBack": "In den Hintergrund verschoben",
+    "broughtForward": "Eine Ebene nach vorne gebracht",
+    "sentBackward": "Eine Ebene nach hinten verschoben",
+    "zOrderChanged": "Stapelreihenfolge geändert",
     "appearance": "Darstellung oder Textformatierung geändert",
     "changedAgain": "Das Ziel hat sich erneut geändert. Prüfen Sie vor dem Übernehmen die aktualisierte Vorschau.",
     "canvasTitle": "Änderungen auf dieser Folie",
@@ -168,7 +186,14 @@
     "canvasStale": "Ziele haben sich geändert. Öffnen Sie die Details zur Überprüfung, um die aktualisierte Vorschau vor dem Übernehmen zu prüfen.",
     "previousPosition": "Vorher",
     "proposedPosition": "Vorgeschlagen",
-    "loadingDiff": "Änderungen werden geladen…"
+    "loadingDiff": "Änderungen werden geladen…",
+    "slideStrip": null,
+    "previewSlide": null,
+    "insertedShape": null,
+    "deletedShape": null,
+    "insertedSlide": null,
+    "deletedSlide": null,
+    "movedFrom": null
   },
   "commands": {
     "moreControls": "Weitere Steuerelemente",
@@ -212,8 +237,25 @@
       "permissionDenied": "Die Host-Anwendung hat diesem Plugin diesen Befehl nicht erlaubt.",
       "unsupportedPolicy": "Plugins können diesen Befehl noch nicht ausführen. Verwenden Sie stattdessen einen Bearbeitungsstapel.",
       "pluginUnavailable": "Das Plugin ist nicht mehr aktiv.",
-      "aborted": "Die Plugin-Aktion wurde abgebrochen, bevor der Befehl ausgeführt wurde."
-    }
+      "aborted": "Die Plugin-Aktion wurde abgebrochen, bevor der Befehl ausgeführt wurde.",
+      "clipboardUnavailable": "Der Zugriff auf die Zwischenablage ist nicht verfügbar oder wurde verweigert.",
+      "tableRequired": "Setzen Sie den Cursor zuerst in eine Tabellenzelle.",
+      "lastSlide": "Die letzte Folie kann nicht gelöscht werden."
+    },
+    "cut": "Ausschneiden",
+    "copy": "Kopieren",
+    "paste": "Einfügen",
+    "pastePlainText": "Als Nur-Text einfügen",
+    "insert": "Einfügen",
+    "delete": "Löschen",
+    "deleteTable": "Tabelle löschen",
+    "duplicateSlide": "Folie duplizieren",
+    "insertRowsAbove": "Zeilen oberhalb einfügen",
+    "insertRowsBelow": "Zeilen unterhalb einfügen",
+    "insertColumnsLeft": "Spalten links einfügen",
+    "insertColumnsRight": "Spalten rechts einfügen",
+    "deleteRows": "Zeilen löschen",
+    "deleteColumns": "Spalten löschen"
   },
   "plugins": {
     "toolbarGroup": "Plugins",
@@ -225,5 +267,20 @@
     "label": "Mitbearbeiter",
     "moreCollaborators": "{count, plural, one {# weiterer Mitbearbeiter} other {# weitere Mitbearbeiter}}",
     "moreSelections": "+{count, plural, one {# Auswahl} other {# Auswahlen}}"
+  },
+  "contextMenu": {
+    "text": "Textmenü",
+    "shape": "Formmenü",
+    "table": "Tabellenmenü",
+    "slide": "Folienmenü"
+  },
+  "keys": {
+    "ctrl": "Strg",
+    "alt": "Alt",
+    "shift": "Umschalt",
+    "delete": "Entf",
+    "escape": "Esc",
+    "pageup": "Bild auf",
+    "pagedown": "Bild ab"
   }
 }

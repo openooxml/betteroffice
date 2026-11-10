@@ -35,8 +35,7 @@ export declare class XlsxDocument {
   displayListProfiledJson(viewportJson: string): string
   chartAtPointJson(args: string): string
   moveChartJson(args: string): string
-  renderPng(viewportJson: string): Uint8Array
-  renderRangePng(args: string): Uint8Array
+  renderPngTarget(targetJson: string, optionsJson: string, fonts?: Array<PngFontFace> | undefined | null): Uint8Array
   sheetInfoJson(): string
   sheetCount(): number
   sheetInfoForJson(sheet: number): string
@@ -48,6 +47,8 @@ export declare class XlsxDocument {
   editCellJson(args: string): string
   editCellProfiledJson(args: string): string
   editCellsJson(args: string): string
+  /** @internal */
+  translateFormulasJson(args: string): string
   moveRangeJson(args: string): string
   applyOpsJson(transactionJson: string): string
   chartsJson(sheet: number): string
@@ -81,6 +82,12 @@ export declare class XlsxDocument {
   exportStructuredJson(options: string): string
   exportMarkdownJson(options: string, markdownOptions: string): string
   saveBytes(): Uint8Array
+  /**
+   * The warnings a save of the workbook as it is now carries, as a JSON
+   * array of `{ code, part, element?, sheet?, message }`; `[]` on an
+   * ordinary save.
+   */
+  saveWarningsJson(): string
   static open(bytes: Uint8Array): XlsxDocument
   static openWithCalculationJson(bytes: Uint8Array, context: string): XlsxDocument
   /** Checkpoints are only restorable by the same engine version and codec. */
@@ -100,6 +107,9 @@ export declare class XlsxSnapshotBuilder {
 
 export declare function allocationFailure(): number
 
+/** Internal, called by the package loader. */
+export declare function configureFontPacks(latin?: string | undefined | null, intl?: string | undefined | null, cjk?: string | undefined | null): boolean
+
 export interface DecodedFontFace {
   font: Uint8Array
   payload?: Uint8Array
@@ -110,10 +120,27 @@ export declare function decodeFontFace(bytes: Uint8Array, codec: string, dict?: 
 
 export declare function displayListCellLimit(): number
 
+/** @internal Test hook: the calling thread's live engine bytes. */
+export declare function engineHeapLiveBytes(): number
+
 export declare function engineVersion(): string
 
 export declare function exportXlsxMarkdownJson(bytes: Uint8Array, options: string, markdownOptions: string): string
 
 export declare function exportXlsxStructuredJson(bytes: Uint8Array, options: string): string
 
+/** Internal: the installed font packs `configureFontPacks` left out, and why, as JSON. */
+export declare function fontPackDiagnosticsJson(): string
+
+/** A face one PNG export paints with. */
+export interface PngFontFace {
+  family: string
+  bold?: boolean
+  italic?: boolean
+  bytes: Uint8Array
+}
+
 export declare function renderXlsxMarkdownJson(content: string, options: string): string
+
+/** @internal Test hook: sets the calling thread's engine memory budget in bytes; 0 restores the default. */
+export declare function setHeapLimit(bytes: number): void

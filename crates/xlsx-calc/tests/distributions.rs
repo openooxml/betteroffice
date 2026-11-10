@@ -120,6 +120,80 @@ fn approx_in(wb: &Workbook, src: &str, want: f64, tol: f64) {
     }
 }
 
+/// n! in decimal digits, an oracle independent of the engine's doubles: the
+/// standard library rounds the digits to the nearest double once.
+fn factorial_digits(n: u32) -> String {
+    let mut digits = vec![1u32];
+    for factor in 2..=n {
+        let mut carry = 0;
+        for digit in &mut digits {
+            let product = *digit * factor + carry;
+            *digit = product % 10;
+            carry = product / 10;
+        }
+        while carry > 0 {
+            digits.push(carry % 10);
+            carry /= 10;
+        }
+    }
+    digits
+        .iter()
+        .rev()
+        .map(|digit| char::from_digit(*digit, 10).unwrap())
+        .collect()
+}
+
+#[test]
+fn gamma_and_fact_are_exact_at_the_integers() {
+    let wb = workbook(&[]);
+    for k in 0..=170u32 {
+        let expected = n(factorial_digits(k).parse().unwrap());
+        assert_eq!(eval_in(&wb, &format!("GAMMA({})", k + 1)), expected, "{k}");
+        assert_eq!(eval_in(&wb, &format!("FACT({k})")), expected, "{k}");
+    }
+    assert_eq!(eval_in(&wb, "IFERROR(GAMMA(5),0)"), n(24.0));
+    assert_eq!(eval_in(&wb, "GAMMA(172)"), e(ErrorValue::Num));
+    assert_eq!(eval_in(&wb, "FACT(171)"), e(ErrorValue::Num));
+    assert_eq!(eval_in(&wb, "FACT(4.9)"), n(24.0));
+    for formula in ["FACT(28)", "FACT(28.5)"] {
+        assert_eq!(eval_in(&wb, formula), n(3.048_883_446_117_138_7e29));
+    }
+}
+
+#[test]
+fn gammaln_is_exact_at_the_integers() {
+    let wb = workbook(&[]);
+    for (z, expected) in [
+        (1, 0.0),
+        (2, 0.0),
+        (3, std::f64::consts::LN_2),
+        (5, 3.178_053_830_347_945_8),
+        (28, 64.557_538_627_006_34),
+        (171, 706.573_062_245_787_4),
+    ] {
+        assert_eq!(eval_in(&wb, &format!("GAMMALN({z})")), n(expected), "{z}");
+        let precise = format!("GAMMALN.PRECISE({z})");
+        assert_eq!(eval_in(&wb, &precise), n(expected), "{z}");
+    }
+}
+
+/// these share no code with GAMMA and hold to the exact closed forms at
+/// integer shapes as they stand.
+#[test]
+fn distributions_with_integer_shapes_match_their_closed_forms() {
+    let wb = workbook(&[]);
+    for (formula, expected) in [
+        ("GAMMA.DIST(2,3,1,TRUE)", 0.323_323_583_816_936_54),
+        ("GAMMA.DIST(2,3,1,FALSE)", 0.270_670_566_473_225_4),
+        ("GAMMA.DIST(3,4,1,TRUE)", 0.352_768_111_217_768_74),
+        ("BETA.DIST(0.5,2,3,TRUE)", 0.6875),
+        ("BETA.DIST(0.25,3,2,TRUE)", 0.050_781_25),
+        ("BETA.DIST(0.5,2,3,FALSE)", 1.5),
+    ] {
+        approx_in(&wb, formula, expected, 1e-14);
+    }
+}
+
 #[test]
 fn gamma_family() {
     approx("GAMMA(5)", 24.0);

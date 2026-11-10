@@ -135,7 +135,14 @@
       "unsupportedCommand": "Not supported yet.",
       "invalidArguments": "This value is not valid.",
       "inputFailed": "The cell entry before this could not be saved.",
+      "editUnsupported": "This edit can't be applied here. The workbook is unchanged.",
+      "editUnsupportedChart": "This edit can't be applied: a chart uses cells it would move. The workbook is unchanged.",
+      "editUnsupportedTable": "This edit can't be applied: a table uses cells it would move. The workbook is unchanged.",
+      "editUnsupportedPivot": "This edit can't be applied: a pivot table uses cells it would move. The workbook is unchanged.",
       "sheetProtected": "This cell is on a protected sheet.",
+      "hostRefused": "This edit is not allowed.",
+      "tooManyToCheck": "Too many cells for plugins to check (limit {limit}).",
+      "hostStarting": "The editor is still starting. Try again in a moment.",
       "documentReplaced": "Another workbook was opened.",
       "targetChanged": "The selection changed.",
       "gestureActive": "Finish moving the chart first.",
@@ -146,8 +153,31 @@
       "permissionDenied": "The host application has not allowed this plugin to use this command.",
       "unsupportedPolicy": "Plugins can't run this command yet. Use an edit batch instead.",
       "pluginUnavailable": "The plugin is no longer active.",
-      "aborted": "The plugin action was cancelled before the command ran."
-    }
+      "aborted": "The plugin action was cancelled before the command ran.",
+      "clipboardUnavailable": "This browser does not allow pasting from a menu. Use the keyboard shortcut.",
+      "lastSheet": "A workbook needs at least one sheet.",
+      "sheetAtEdge": "The sheet cannot move any further.",
+      "sheetNameInvalid": "Sheet names need 1 to 31 characters, must be unique and cannot contain : \\ / ? * [ ].",
+      "clipboardDenied": "The browser did not allow access to the clipboard."
+    },
+    "cut": "Cut",
+    "copy": "Copy",
+    "paste": "Paste",
+    "pastePlainText": "Paste as plain text",
+    "clearContents": "Clear contents",
+    "insert": "Insert",
+    "delete": "Delete",
+    "insertRowsAbove": "Insert rows above",
+    "insertRowsBelow": "Insert rows below",
+    "insertColumnsLeft": "Insert columns left",
+    "insertColumnsRight": "Insert columns right",
+    "deleteRows": "Delete rows",
+    "deleteColumns": "Delete columns",
+    "insertSheet": "Insert sheet",
+    "deleteSheet": "Delete sheet",
+    "renameSheet": "Rename",
+    "moveSheetLeft": "Move left",
+    "moveSheetRight": "Move right"
   },
   "editor": {
     "appLabel": "Spreadsheet editor",
@@ -162,7 +192,11 @@
     "showDetails": "Show details",
     "openPrompt": "Open an XLSX file",
     "sheetTabsLabel": "Sheets",
-    "clearExceedsLimit": "Clear exceeds the cell limit"
+    "clearExceedsLimit": "Clear exceeds the cell limit",
+    "cellMenuLabel": "Cell menu",
+    "sheetTabMenuLabel": "Sheet tab menu",
+    "renameSheetLabel": "Rename sheet",
+    "sheetNamePrefix": "Sheet"
   },
   "presence": {
     "label": "Collaborators",
@@ -178,6 +212,7 @@
     "accept": "Accept",
     "reject": "Reject",
     "forceApply": "Force apply",
+    "forceBlockedReason": "This proposal cannot be applied after a structural edit.",
     "staleWarning": "Cells changed since proposed: {cells}"
   },
   "a11y": {
@@ -187,12 +222,27 @@
     "cellLabel": "{address}, {value}",
     "cellLabelSelected": "{address}, {value}, selected",
     "emptyCellLabel": "{address}, empty",
-    "emptyCellLabelSelected": "{address}, empty, selected"
+    "emptyCellLabelSelected": "{address}, empty, selected",
+    "hasFormula": "{label}, has formula",
+    "rangeSelected": "{start} to {end} selected, {rows, plural, one {# row} other {# rows}} by {columns, plural, one {# column} other {# columns}}",
+    "sheetActivated": "{name}, sheet {index} of {count}",
+    "cellInputLabel": "Edit cell {address}",
+    "gridRoleDescription": "worksheet"
   },
   "plugins": {
     "toolbarGroup": "Plugins",
     "panelTabs": "Plugin panels",
     "collapsePanel": "Collapse {title}",
-    "expandPanel": "Expand {title}"
+    "expandPanel": "Expand {title}",
+    "rowGutter": "Plugin row markers"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "del": "Del",
+    "escape": "Esc",
+    "pageUp": "Page Up",
+    "pageDown": "Page Down"
   }
 }

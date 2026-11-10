@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::ops::Range;
+use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -36,7 +37,8 @@ struct Node<'a> {
     span: Range<usize>,
     close: usize,
     parent: Option<usize>,
-    bindings: BTreeMap<String, String>,
+    /// Shared with the parent unless this tag declares a namespace.
+    bindings: Rc<BTreeMap<String, String>>,
 }
 
 fn expanded<'a>(
@@ -56,6 +58,10 @@ fn expanded<'a>(
 fn nodes<'a>(xml: &'a str, inherited: &BTreeMap<String, String>) -> Option<Vec<Node<'a>>> {
     let mut result: Vec<Node<'a>> = Vec::new();
     let mut stack: Vec<usize> = Vec::new();
+    let mut root = inherited.clone();
+    root.entry("xml".to_owned())
+        .or_insert_with(|| "http://www.w3.org/XML/1998/namespace".to_owned());
+    let root = Rc::new(root);
     for tag in tags(xml)? {
         if tag.end {
             let node = &mut result[stack.pop()?];
@@ -68,16 +74,13 @@ fn nodes<'a>(xml: &'a str, inherited: &BTreeMap<String, String>) -> Option<Vec<N
         }
         let mut bindings = stack
             .last()
-            .map(|index| result[*index].bindings.clone())
-            .unwrap_or_else(|| inherited.clone());
-        bindings
-            .entry("xml".to_owned())
-            .or_insert_with(|| "http://www.w3.org/XML/1998/namespace".to_owned());
+            .map_or_else(|| root.clone(), |index| result[*index].bindings.clone());
         for (name, range) in &tag.attributes {
             if *name == "xmlns" {
-                bindings.insert(String::new(), unescaped(xml, range.clone())?);
+                Rc::make_mut(&mut bindings).insert(String::new(), unescaped(xml, range.clone())?);
             } else if let Some(prefix) = name.strip_prefix("xmlns:") {
-                bindings.insert(prefix.to_owned(), unescaped(xml, range.clone())?);
+                Rc::make_mut(&mut bindings)
+                    .insert(prefix.to_owned(), unescaped(xml, range.clone())?);
             }
         }
         let index = result.len();

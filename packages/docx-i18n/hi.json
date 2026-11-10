@@ -488,7 +488,9 @@
         "pageUp": "Page Up",
         "pageDown": "Page Down",
         "ctrl": "Ctrl",
-        "del": "Del"
+        "del": "Del",
+        "shift": "Shift",
+        "alt": "Alt"
       }
     },
     "objectGeometry": {
@@ -528,6 +530,7 @@
     "paragraphMarkInserted": "डाला गया पैराग्राफ़ विराम",
     "paragraphMarkDeleted": "हटाया गया पैराग्राफ़ विराम",
     "paragraphPropertiesChanged": "पैराग्राफ़ गुण बदले गए",
+    "runPropertiesChanged": "टेक्स्ट प्रारूपण बदला गया",
     "rowInserted": "डाली गई पंक्ति",
     "rowDeleted": "हटाई गई पंक्ति",
     "rowPropertiesChanged": "पंक्ति के गुण बदले गए",
@@ -584,6 +587,8 @@
     "noDocumentLoaded": "कोई दस्तावेज़ लोड नहीं हुआ",
     "failedToLoad": "दस्तावेज़ लोड करने में विफल",
     "failedToLoadDescription": "फ़ाइल क्षतिग्रस्त हो सकती है, या इसमें कुछ ऐसा है जिसे यह संपादक अभी पढ़ नहीं सकता।",
+    "failedToLoadDamaged": "फ़ाइल क्षतिग्रस्त है या पूरा Word दस्तावेज़ नहीं है।",
+    "failedToLoadUnsupported": "यह दस्तावेज़ कुछ ऐसा उपयोग करता है जिसे यह संपादक अभी नहीं पढ़ सकता।",
     "editorUnavailable": "संपादक लोड नहीं हो सका",
     "editorUnavailableDescription": "अपना कनेक्शन जांचें, फिर पेज को फिर से लोड करें।",
     "reloadPage": "पेज फिर से लोड करें",
@@ -724,6 +729,7 @@
     "failedToParse": "दस्तावेज़ का विश्लेषण करने में विफल",
     "linkRemoved": "लिंक हटा दिया गया",
     "linkCopied": "लिंक क्लिपबोर्ड पर कॉपी किया गया",
+    "pasteFailed": "चिपकाना पूरा नहीं हो सका। कुछ भी नहीं बदला गया।",
     "failedToSave": "दस्तावेज़ सहेजने में विफल",
     "documentInput": "दस्तावेज़ इनपुट",
     "documentPreview": "दस्तावेज़ पूर्वावलोकन",
@@ -793,8 +799,13 @@
   },
   "a11y": {
     "pageLabel": "पेज {number}",
+    "unbuiltPagesNotMirrored": "पृष्ठ {from} से {to} अभी पठन दृश्य में नहीं हैं।",
+    "goToPage": "पृष्ठ {number} पर जाएँ",
     "headerLabel": "पेज हेडर",
     "footerLabel": "पेज फ़ुटर",
+    "chartNoData": "कोई डेटा नहीं",
+    "pictureName": "चित्र",
+    "bulletMarker": "बुलेट",
     "selected": "चयनित",
     "selectionCleared": "चयन साफ़ किया गया",
     "commentedText": "टिप्पणी किया गया टेक्स्ट",

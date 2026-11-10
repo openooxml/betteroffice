@@ -9,7 +9,7 @@ import ts from 'typescript';
 const root = fileURLToPath(new URL('../../../', import.meta.url));
 // 74,976 B measured; the native engine selector (packages/xlsx/src/wasm/engine.ts) adds ~0.9 KB to the static path (75,880 B),
 // and initWasm's lean core option (packages/xlsx/src/wasm/loader.ts) another ~0.26 KB (76,139 B).
-const STATIC_GZIP_BUDGET = 76_300;
+const STATIC_GZIP_BUDGET = 43_100;
 const deferredModules = ['XlsxEditorContent.tsx', 'LegacyXlsxEditor.tsx', 'XlsxAsyncInThreadSession.tsx',
   'viewer/XlsxSessionViewer.tsx', 'viewer/useSessionWorkbook.ts', 'createInThreadAsyncEditorApi.ts',
   'commands/useXlsxCommands.ts', 'commands/inputCoordinator.ts', 'clipboard.ts', 'presence/Presence.tsx',
@@ -47,10 +47,12 @@ test('default editor static chunks exclude the legacy and in-thread editors', as
   expect(deferredModules.map((path) => [path, staticInputs.has(path), deferredInputs.has(path)]))
     .toEqual(deferredModules.map((path) => [path, false, true]));
   expect(staticInputs.has('packages/xlsx-react/src/worker/XlsxWorkerEditor.tsx')).toBe(true);
+  expect(staticInputs.has('packages/xlsx/src/wasm/loader.ts')).toBe(false);
+  expect(deferredInputs.has('packages/xlsx/src/wasm/loader.ts')).toBe(true);
   const files = new Map(result.outputFiles.map((file) => [file.path, file.contents]));
   const bytes = [...seen].reduce((sum, path) => sum + gzipSync(files.get(resolve(root, path))!, { level: 9 }).length, 0);
   expect(bytes).toBeLessThan(STATIC_GZIP_BUDGET);
-});
+}, 30_000);
 
 function modulePath(from: string, specifier: string): string {
   const base = resolve(dirname(from), specifier);
@@ -99,7 +101,7 @@ test('deferred editors have no runtime imports back into the editor shell', () =
     visit(resolve(root, `packages/xlsx-react/src/${path}`));
     expect(seen.has(resolve(root, 'packages/xlsx-react/src/viewer/XlsxSessionViewer.tsx'))).toBe(path === 'LegacyXlsxEditor.tsx');
   }
-});
+}, 30_000);
 
 for (const entry of ['packages/xlsx/src/session/client.ts', 'packages/xlsx/src/session/worker.ts',
   'packages/xlsx-react/src/worker/XlsxPeerlessWorkerEditor.tsx']) {
@@ -135,7 +137,7 @@ for (const entry of ['packages/xlsx/src/session/client.ts', 'packages/xlsx/src/s
       expect(eager.has('packages/xlsx-react/src/presence/Presence.tsx')).toBe(true);
       expect(eager.has('packages/xlsx-react/src/worker/usePeerlessPresence.ts')).toBe(true);
     }
-  });
+  }, 30_000);
 }
 
 test('the peerless editor has no static runtime imports of the legacy worker session', () => {

@@ -488,7 +488,9 @@
         "pageUp": "Page Up",
         "pageDown": "Page Down",
         "ctrl": "Ctrl",
-        "del": "Del"
+        "del": "Del",
+        "shift": "Shift",
+        "alt": "Alt"
       }
     },
     "objectGeometry": {
@@ -528,6 +530,7 @@
     "paragraphMarkInserted": "Quebra de parágrafo inserida",
     "paragraphMarkDeleted": "Quebra de parágrafo excluída",
     "paragraphPropertiesChanged": "Propriedades do parágrafo alteradas",
+    "runPropertiesChanged": "Formatação do texto alterada",
     "rowInserted": "Linha inserida",
     "rowDeleted": "Linha excluída",
     "rowPropertiesChanged": "Propriedades da linha alteradas",
@@ -584,6 +587,8 @@
     "noDocumentLoaded": "Nenhum documento carregado",
     "failedToLoad": "Falha ao carregar documento",
     "failedToLoadDescription": "O arquivo pode estar danificado ou usa algo que este editor ainda não consegue ler.",
+    "failedToLoadDamaged": "O arquivo está danificado ou não é um documento do Word completo.",
+    "failedToLoadUnsupported": "Este documento usa algo que este editor ainda não consegue ler.",
     "editorUnavailable": "O editor não pôde ser carregado",
     "editorUnavailableDescription": "Verifique sua conexão e recarregue a página.",
     "reloadPage": "Recarregar página",
@@ -724,6 +729,7 @@
     "failedToParse": "Falha ao analisar documento",
     "linkRemoved": "Link removido",
     "linkCopied": "Link copiado para a área de transferência",
+    "pasteFailed": "Não foi possível concluir a colagem. Nada foi alterado.",
     "failedToSave": "Falha ao salvar documento",
     "documentInput": "Entrada do documento",
     "documentPreview": "Visualização do documento",
@@ -793,8 +799,13 @@
   },
   "a11y": {
     "pageLabel": "Página {number}",
+    "unbuiltPagesNotMirrored": "As páginas de {from} a {to} ainda não estão na visualização de leitura.",
+    "goToPage": "Ir para a página {number}",
     "headerLabel": "Cabeçalho da página",
     "footerLabel": "Rodapé da página",
+    "chartNoData": "Sem dados",
+    "pictureName": "Imagem",
+    "bulletMarker": "marcador",
     "selected": "Selecionado",
     "selectionCleared": "Seleção limpa",
     "commentedText": "Texto comentado",

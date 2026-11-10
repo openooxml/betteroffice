@@ -874,6 +874,7 @@ fn writable_style(
     validate_style_values(
         style.font_family.as_deref(),
         style.underline.as_deref(),
+        style.strike.as_deref(),
         style.color.as_deref(),
         style.font_size_pt,
         style.spacing_pt,
@@ -890,18 +891,28 @@ fn writable_style(
 }
 
 /// Whether applying `patch` changes any text in `start..end`.
-fn patch_changes(story: &StorySnapshot, start: u32, end: u32, patch: &TextStylePatch) -> bool {
+fn patch_changes(
+    story: &StorySnapshot,
+    start: u32,
+    end: u32,
+    patch: &TextStylePatch,
+    inherited_strikes: &[bool],
+) -> bool {
     fn differs<T: PartialEq>(current: &Option<T>, patched: &Option<T>) -> bool {
         patched
             .as_ref()
             .is_some_and(|value| current.as_ref() != Some(value))
     }
     let mut offset = 0;
-    for paragraph in &story.paragraphs {
+    for (index, paragraph) in story.paragraphs.iter().enumerate() {
         for run in &paragraph.runs {
             let (from, to) = (offset, offset + units(&run.text) as u32);
             offset = to;
             let style = &run.style;
+            let strike_changed = match patch.strike.as_deref() {
+                Some("noStrike") if !inherited_strikes[index] => style.strike.is_some(),
+                _ => differs(&style.strike, &patch.strike),
+            };
             if from < end
                 && start < to
                 && (differs(&style.bold, &patch.bold)
@@ -910,6 +921,7 @@ fn patch_changes(story: &StorySnapshot, start: u32, end: u32, patch: &TextStyleP
                     || differs(&style.color, &patch.color)
                     || differs(&style.font_family, &patch.font_family)
                     || differs(&style.underline, &patch.underline)
+                    || strike_changed
                     || differs(&style.spacing_pt, &patch.spacing_pt)
                     || differs(&style.baseline_pct, &patch.baseline_pct))
             {
@@ -1039,6 +1051,7 @@ fn plan_format(
     validate_style_values(
         patch.font_family.as_deref(),
         patch.underline.as_deref(),
+        patch.strike.as_deref(),
         patch.color.as_deref(),
         patch.font_size_pt,
         patch.spacing_pt,
@@ -1059,14 +1072,18 @@ fn plan_format(
             ));
         }
     }
-    let effect =
-        (start < end && patch_changes(selection.view.story, start, end, patch)).then(|| {
-            Effect::Format {
-                start,
-                end,
-                patch: patch.clone(),
-            }
-        });
+    let inherited_strikes = if patch.strike.as_deref() == Some("noStrike") {
+        deck.inherited_strikes(&selection.view)
+    } else {
+        Vec::new()
+    };
+    let effect = (start < end
+        && patch_changes(selection.view.story, start, end, patch, &inherited_strikes))
+    .then(|| Effect::Format {
+        start,
+        end,
+        patch: patch.clone(),
+    });
     let claim = if start == end {
         Claim::Point(start)
     } else {

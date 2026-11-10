@@ -1,11 +1,12 @@
 export { paintSlide, sizeCanvasForSlide } from './render/canvas';
 export { decodePresentationImage, needsElementDecode, presentationImageBlob } from './render/image';
 export type { PresentationImageDecodeOptions } from './render/image';
-export { StaleProposalError } from './proposals';
-export type { Proposal, ProposalAcceptance, ProposalChange, ProposalDiffSlide, ProposalEdit, ProposalPreview, ProposalTextChange } from './proposals';
-export type { CanvasImageResolver, PaintSlideOptions, SlideCanvasLike } from './render/canvas';
-export { slideToPng } from './render/png';
-export type { SlideToPngOptions } from './render/png';
+export { ProposalPictureMediaTooLargeError, StaleProposalError } from './proposals';
+export type { Proposal, ProposalAcceptance, ProposalChange, ProposalDiffSlide, ProposalEdit, ProposalPreview, ProposalStripEntry, ProposalShapeChange, ProposalTextChange } from './proposals';
+export type { CanvasImageResolver, PaintFontCoverage, PaintSlideOptions, SlideCanvasLike } from './render/canvas';
+export { PngExportError } from '../../../shared/office-session/pngExportError';
+export type { PngExportCode } from '../../../shared/office-session/pngExportError';
+export type { PptxPngOptions, PptxPngTarget } from './wasm/pngOptions';
 export { CollaborationError, CollaborationProvider } from './collaboration';
 export type {
   CollaborationUser,
@@ -166,6 +167,14 @@ export type {
   ShapeStroke,
   ShapeStrokeReceipt,
   ShapeZOrderReceipt,
+  ShapeAltText,
+  TextLanguage,
+  TextLink,
+  TextLinkTarget,
+  TableGrid,
+  TableGridCell,
+  ChartData,
+  ChartDataSeries,
   SlideDisplayList,
   SlidePrimitive,
   SlideReceipt,
@@ -198,3 +207,5 @@ export { PptxPeerNotReadyError, PptxWorkerEditorDisposedError } from './session/
 export { openPresentationSession } from './session/client';
 /** @internal */
 export { createPptxWorkerEditorSession } from './session/editorSession';
+export { fontPackDiagnostics } from './fontPackDiagnostics';
+export type { FontPackDiagnostic } from './fontPackDiagnostics';

@@ -47,6 +47,15 @@ export type {
   TrackedChangesOptions,
 } from './components/sidebar/trackedChanges';
 
+// Keyboard shortcuts a host can remap or disable
+export type {
+  DocxShortcutId,
+  DocxShortcuts,
+  DocxShortcutVariantId,
+} from './commands/shortcuts';
+export type { ShortcutChord } from '../../../shared/keyboard/chords';
+export type { ResolvedShortcuts, ShortcutBinding, ShortcutIssue } from '../../../shared/keyboard/resolve';
+
 // Commands: one authority for built-in and host chrome
 export { DocxCommandProvider, type DocxCommandProviderProps } from './commands/DocxCommandProvider';
 export { DocxCommandAdmissionError, type DocxCommandAdmissionCode } from './commands/createDocxCommandStore';
@@ -127,6 +136,8 @@ export type {
   DocxPluginError,
   DocxPluginErrorPhase,
   DocxPluginEvent,
+  DocxPluginFocusChangeEvent,
+  DocxPluginLocaleChangeEvent,
   DocxPluginFailureCode,
   DocxPluginGeometry,
   DocxPluginGrant,
@@ -142,6 +153,7 @@ export type {
   DocxPluginSelection,
   DocxPluginSidebarItem,
   DocxPluginSnapshot,
+  DocxPluginViewportChangeEvent,
   DocxReservation,
   DocxReservationAnchor,
   DocxReservationParagraph,

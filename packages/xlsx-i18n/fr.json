@@ -135,7 +135,14 @@
       "unsupportedCommand": "Pas encore pris en charge.",
       "invalidArguments": "Cette valeur n’est pas valide.",
       "inputFailed": "La saisie de cellule précédente n’a pas pu être enregistrée.",
+      "editUnsupported": "Cette modification ne peut pas être appliquée ici. Le classeur n’a pas changé.",
+      "editUnsupportedChart": "Cette modification ne peut pas être appliquée : un graphique utilise des cellules qu’elle déplacerait. Le classeur n’a pas changé.",
+      "editUnsupportedTable": "Cette modification ne peut pas être appliquée : un tableau utilise des cellules qu’elle déplacerait. Le classeur n’a pas changé.",
+      "editUnsupportedPivot": "Cette modification ne peut pas être appliquée : un tableau croisé dynamique utilise des cellules qu’elle déplacerait. Le classeur n’a pas changé.",
       "sheetProtected": "Cette cellule se trouve sur une feuille protégée.",
+      "hostRefused": "Cette modification n’est pas autorisée.",
+      "tooManyToCheck": "Trop de cellules à vérifier pour les plugins (limite {limit}).",
+      "hostStarting": "L’éditeur est encore en cours de démarrage. Réessayez dans un instant.",
       "documentReplaced": "Un autre classeur a été ouvert.",
       "targetChanged": "La sélection a changé.",
       "gestureActive": "Terminez d’abord de déplacer le graphique.",
@@ -146,8 +153,31 @@
       "permissionDenied": "L'application hôte n'a pas autorisé ce plugin à utiliser cette commande.",
       "unsupportedPolicy": "Les plugins ne peuvent pas encore exécuter cette commande. Utilisez plutôt un lot de modifications.",
       "pluginUnavailable": "Le plugin n'est plus actif.",
-      "aborted": "L'action du plugin a été annulée avant l'exécution de la commande."
-    }
+      "aborted": "L'action du plugin a été annulée avant l'exécution de la commande.",
+      "clipboardUnavailable": "Ce navigateur ne permet pas de coller depuis un menu. Utilisez le raccourci clavier.",
+      "lastSheet": "Un classeur doit contenir au moins une feuille.",
+      "sheetAtEdge": "La feuille ne peut pas être déplacée plus loin.",
+      "sheetNameInvalid": "Les noms de feuille comptent 1 à 31 caractères, doivent être uniques et ne peuvent pas contenir : \\ / ? * [ ].",
+      "clipboardDenied": "Le navigateur n’a pas autorisé l’accès au presse-papiers."
+    },
+    "cut": "Couper",
+    "copy": "Copier",
+    "paste": "Coller",
+    "pastePlainText": "Coller en texte brut",
+    "clearContents": "Effacer le contenu",
+    "insert": "Insérer",
+    "delete": "Supprimer",
+    "insertRowsAbove": "Insérer des lignes au-dessus",
+    "insertRowsBelow": "Insérer des lignes en dessous",
+    "insertColumnsLeft": "Insérer des colonnes à gauche",
+    "insertColumnsRight": "Insérer des colonnes à droite",
+    "deleteRows": "Supprimer les lignes",
+    "deleteColumns": "Supprimer les colonnes",
+    "insertSheet": "Insérer une feuille",
+    "deleteSheet": "Supprimer la feuille",
+    "renameSheet": "Renommer",
+    "moveSheetLeft": "Déplacer vers la gauche",
+    "moveSheetRight": "Déplacer vers la droite"
   },
   "editor": {
     "appLabel": "Éditeur de feuilles de calcul",
@@ -162,7 +192,11 @@
     "showDetails": "Afficher les détails",
     "openPrompt": "Ouvrir un fichier XLSX",
     "sheetTabsLabel": "Feuilles",
-    "clearExceedsLimit": "L’effacement dépasse la limite de cellules."
+    "clearExceedsLimit": "L’effacement dépasse la limite de cellules.",
+    "cellMenuLabel": "Menu de la cellule",
+    "sheetTabMenuLabel": "Menu de l’onglet de feuille",
+    "renameSheetLabel": "Renommer la feuille",
+    "sheetNamePrefix": "Feuille"
   },
   "presence": {
     "label": "Collaborateurs",
@@ -178,6 +212,7 @@
     "accept": "Accepter",
     "reject": "Refuser",
     "forceApply": "Appliquer de force",
+    "forceBlockedReason": "Cette proposition ne peut pas être appliquée après une modification de la structure.",
     "staleWarning": "Cellules modifiées depuis la proposition : {cells}"
   },
   "a11y": {
@@ -187,12 +222,27 @@
     "cellLabel": "{address}, {value}",
     "cellLabelSelected": "{address}, {value}, sélectionnée",
     "emptyCellLabel": "{address}, vide",
-    "emptyCellLabelSelected": "{address}, vide, sélectionnée"
+    "emptyCellLabelSelected": "{address}, vide, sélectionnée",
+    "hasFormula": "{label}, contient une formule",
+    "rangeSelected": "{start} à {end} sélectionné, {rows, plural, one {# ligne} many {# lignes} other {# lignes}} sur {columns, plural, one {# colonne} many {# colonnes} other {# colonnes}}",
+    "sheetActivated": "{name}, feuille {index} sur {count}",
+    "cellInputLabel": "Modifier la cellule {address}",
+    "gridRoleDescription": "feuille de calcul"
   },
   "plugins": {
     "toolbarGroup": "Plugins",
     "panelTabs": "Panneaux des plugins",
     "collapsePanel": "Réduire {title}",
-    "expandPanel": "Développer {title}"
+    "expandPanel": "Développer {title}",
+    "rowGutter": "Marqueurs de ligne des plugins"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Maj",
+    "del": "Suppr",
+    "escape": "Échap",
+    "pageUp": "Page préc.",
+    "pageDown": "Page suiv."
   }
 }

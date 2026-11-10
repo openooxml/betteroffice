@@ -607,9 +607,13 @@ fn validate_fragment_table(
         return Err(invalid("table nesting exceeds eight levels"));
     }
     let object = fragment_object(value, "table")?;
+    // A copied table carries the compatibility mode of the document it came
+    // from. Word lays out the pasted table with the destination's mode, which
+    // a table without one takes from the layout environment.
     let tbl_pr = match object.get("tblPr") {
         Some(Value::Object(map)) => map
             .iter()
+            .filter(|(key, _)| key.as_str() != "compatibilityMode")
             .map(|(key, entry)| Ok((key.clone(), fragment_any(entry, "tblPr entry")?)))
             .collect::<OpResult<HashMap<String, Any>>>()?,
         _ => return Err(invalid("table tblPr must be an object")),
@@ -1161,6 +1165,13 @@ fn reset_cell_spans(mut cell: CellData) -> CellData {
 /// `w:tr` attributes (`w14:paraId`, `w:rsid*`).
 pub(crate) fn fresh_row_properties(mut tr_pr: HashMap<String, Any>) -> HashMap<String, Any> {
     tr_pr.remove("_extraAttributes");
+    if let Some(Any::Map(original)) = tr_pr.get("_originalFormatting")
+        && original.contains_key("hiddenContentOnly")
+    {
+        let mut original = original.as_ref().clone();
+        original.remove("hiddenContentOnly");
+        tr_pr.insert("_originalFormatting".to_owned(), Any::Map(original.into()));
+    }
     tr_pr
 }
 
@@ -2914,6 +2925,39 @@ impl EditingDoc {
         receipt(locator, Some(&data), Vec::new(), Vec::new(), Vec::new())
     }
 
+    /// Sets one row's height in twips and its `w:hRule`, `atLeast` or `exact`.
+    pub fn set_row_height(
+        &self,
+        ctx: &EditCtx,
+        at: &CellLoc,
+        height_twips: f64,
+        rule: &str,
+    ) -> OpResult<TableReceipt> {
+        if !height_twips.is_finite() || height_twips <= 0.0 {
+            return Err(OpError::InvalidFormatValue(
+                "row height must be a positive finite twip value".to_owned(),
+            ));
+        }
+        if !["atLeast", "exact"].contains(&rule) {
+            return Err(OpError::InvalidFormatValue(format!(
+                "invalid row height rule {rule}"
+            )));
+        }
+        let locator = at.table();
+        let mut txn = self.transact_for(ctx);
+        let (_, table, _) = table_at(&txn, &locator)?;
+        let mut data = read_table(&table, &txn)?;
+        let row = data
+            .rows
+            .get_mut(at.row as usize)
+            .ok_or_else(|| invalid(format!("row {} is outside the table", at.row)))?;
+        row.tr_pr
+            .insert("height".to_owned(), Any::Number(height_twips));
+        row.tr_pr.insert("heightRule".to_owned(), Any::from(rule));
+        write_table(&mut txn, &table, &data);
+        receipt(locator, Some(&data), Vec::new(), Vec::new(), Vec::new())
+    }
+
     /// Sets the table-wide preferred width in twips (`tblPr.widthType = dxa`).
     pub fn set_table_width(
         &self,
@@ -2962,6 +3006,10 @@ impl EditingDoc {
                 "justification" => {
                     matches!(value, Any::Null | Any::Undefined)
                         || matches!(value, Any::String(kind) if ["left", "center", "right"].contains(&&**kind))
+                }
+                "tableLayout" => {
+                    matches!(value, Any::Null | Any::Undefined)
+                        || matches!(value, Any::String(kind) if ["fixed", "autofit"].contains(&&**kind))
                 }
                 _ => false,
             };
@@ -3727,10 +3775,61 @@ mod tests {
             doc.set_table_properties(
                 &direct(),
                 &at,
-                &HashMap::from([("tableLayout".to_owned(), Any::from("fixed")),])
+                &HashMap::from([("tableLayout".to_owned(), Any::from("wide")),])
             )
             .is_err()
         );
+        assert!(
+            doc.set_table_properties(
+                &direct(),
+                &at,
+                &HashMap::from([("bidi".to_owned(), Any::from(true)),])
+            )
+            .is_err()
+        );
+        doc.set_table_properties(
+            &direct(),
+            &at,
+            &HashMap::from([("tableLayout".to_owned(), Any::from("fixed"))]),
+        )
+        .unwrap();
+        let (tbl_pr, _, _) = table_value(&doc);
+        assert_eq!(tbl_pr["tableLayout"], "fixed");
+    }
+
+    #[test]
+    fn set_row_height_sets_one_row_and_refuses_bad_input() {
+        let doc = seed_table();
+        doc.set_row_height(&direct(), &cell(0, 0), 720.0, "atLeast")
+            .unwrap();
+        let (_, _, rows) = table_value(&doc);
+        assert_eq!(rows[0]["trPr"]["height"].as_f64(), Some(720.0));
+        assert_eq!(rows[0]["trPr"]["heightRule"], "atLeast");
+        assert_eq!(rows[1]["trPr"]["height"].as_f64(), Some(360.0));
+        assert!(rows[1]["trPr"].get("heightRule").is_none());
+        doc.set_row_height(&direct(), &cell(0, 1), 400.0, "exact")
+            .unwrap();
+        let (_, _, rows) = table_value(&doc);
+        assert_eq!(rows[0]["trPr"]["height"].as_f64(), Some(400.0));
+        assert_eq!(rows[0]["trPr"]["heightRule"], "exact");
+        for (height, rule) in [
+            (0.0, "atLeast"),
+            (-1.0, "atLeast"),
+            (f64::NAN, "atLeast"),
+            (f64::INFINITY, "atLeast"),
+            (720.0, "auto"),
+        ] {
+            assert!(
+                doc.set_row_height(&direct(), &cell(0, 0), height, rule)
+                    .is_err()
+            );
+        }
+        assert!(
+            doc.set_row_height(&direct(), &cell(99, 0), 720.0, "atLeast")
+                .is_err()
+        );
+        let (_, _, rows) = table_value(&doc);
+        assert_eq!(rows[0]["trPr"]["height"].as_f64(), Some(400.0));
     }
 
     #[test]

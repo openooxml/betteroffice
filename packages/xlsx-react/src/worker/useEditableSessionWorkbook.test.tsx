@@ -39,7 +39,8 @@ function session(log: string[] = []) {
     ...testSessionCommands(),
     state: { format: 'xlsx', stage: 'ready', version: 0, dirty: false, sheets: [], activeSheet: 0 },
     call: {} as WorkbookSession['call'],
-    save: mock(async () => new Uint8Array([9])), on: () => () => {},
+    save: mock(async () => new Uint8Array([9])),
+    saveWithWarnings: mock(async () => ({ bytes: new Uint8Array([9]), warnings: [] })), on: () => () => {},
     onFailure: (next) => {
       listener = next;
       return () => { log.push('off'); listener = undefined; };

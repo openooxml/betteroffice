@@ -1,6 +1,6 @@
 import { afterEach, expect, mock, test } from 'bun:test';
 import * as fontManager from '@betteroffice/fonts';
-import { configureDefaultFonts, IMPLICIT_FONT_COVERAGE } from './defaultFontProvider';
+import { configureDefaultFonts, IMPLICIT_FONT_COVERAGE, resolveCompleteFontProvider, resolveDefaultFontProvider } from './defaultFontProvider';
 import { createRustMeasureSource } from './rustMeasureSource';
 import * as wasm from '../wasm';
 
@@ -124,4 +124,41 @@ test('implicit fonts keep Latin currency, tabs and default ignorables on the nat
   const primitives = paint(config.fontChains, 'Calibri', text);
   expect(primitives.length).toBeGreaterThan(0);
   expect(primitives.every((primitive: { kind: string }) => primitive.kind === 'glyphRun')).toBe(true);
+});
+
+test('stand-ins give an unknown family a chain and keep uncovered scripts on the no-provider path', async () => {
+  await wasm.preloadLayoutWasm();
+  const prepared = async (standIns: boolean) => {
+    const source = createRustMeasureSource({
+      engine: { registerFont: wasm.registerMeasureFont, registerSubstituteFont: wasm.registerSubstituteMeasureFont, clearFonts() {} },
+      standIns,
+    });
+    const requirements = [{ key: 'papyrus|0|0', family: 'Papyrus', bold: false, italic: false }];
+    await source.prepareFontRequirements(requirements);
+    return source.measurementConfigForRequirements(requirements)!.fontChains;
+  };
+  expect((await prepared(false))['papyrus|0|0']).toBeUndefined();
+  const chains = await prepared(true);
+  expect(chains['papyrus|0|0']?.length).toBeGreaterThan(0);
+  expect(chains[IMPLICIT_FONT_COVERAGE]?.length).toBeGreaterThan(0);
+  expect(measure(chains, 'Papyrus', 'Latin')).not.toBe('browser');
+  expect(measure(chains, 'Papyrus', '\u0928\u092e\u0938\u094d\u0924\u0947')).toBe('browser');
+});
+
+test('a configured base URL decides the complete provider', async () => {
+  configureDefaultFonts({ baseUrl: 'https://fonts.example/assets/' });
+  expect(await resolveCompleteFontProvider()).toBe(await resolveDefaultFontProvider());
+});
+
+test('stand-ins shape a symbol no face covers, and leave an unlisted writing system to the no-provider path', async () => {
+  await wasm.preloadLayoutWasm();
+  const source = createRustMeasureSource({
+    engine: { registerFont: wasm.registerMeasureFont, registerSubstituteFont: wasm.registerSubstituteMeasureFont, clearFonts() {} },
+    standIns: true,
+  });
+  const requirements = [{ key: 'symbol|0|0', family: 'Symbol', bold: false, italic: false }];
+  await source.prepareFontRequirements(requirements);
+  const chains = source.measurementConfigForRequirements(requirements)!.fontChains;
+  expect(measure(chains, 'Symbol', 'a\uf07fb')).not.toBe('browser');
+  expect(measure(chains, 'Symbol', '\u1403\u14c4')).toBe('browser');
 });

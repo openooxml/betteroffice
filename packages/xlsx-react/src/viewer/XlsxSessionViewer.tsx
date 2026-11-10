@@ -10,7 +10,6 @@ import type { CSSProperties, KeyboardEvent, MouseEvent } from 'react';
 import type { XlsxWorkerViewerProps } from '../XlsxEditor';
 import { createXlsxCommandController } from '../commands/createXlsxCommandStore';
 import type { XlsxCommandBinding } from '../commands/createXlsxCommandStore';
-import { commandForEvent } from '../commands/descriptors';
 import { DEFAULT_FONT_FAMILIES, DEFAULT_FONT_SIZES } from '../commands/evaluate';
 import type { XlsxCommandEnvironment } from '../commands/evaluate';
 import type { XlsxCommandArgs, XlsxCommandResult } from '../commands/types';
@@ -26,6 +25,7 @@ import { useSessionWorkbook } from './useSessionWorkbook';
 import type { ViewerSession, ViewerSurface } from './useSessionWorkbook';
 import { WorkbookFailure } from '../components/WorkbookFailure';
 import { useDefaultFonts } from '../useDefaultFonts';
+import { A11yGridTable } from '../components/A11yGridCell';
 
 const BRAND = '#217346';
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -285,7 +285,7 @@ export function XlsxSessionViewer(props: Omit<XlsxWorkerViewerProps, 'file'> & {
     return () => commands.detach(binding);
   }, [commands, binding]);
   useLayoutEffect(() => commands.refresh());
-  useCommandShortcuts(commands, rootRef);
+  useCommandShortcuts(commands, rootRef, props);
 
   const painted = run?.painted;
   const frame = painted?.frame.displayList;
@@ -364,12 +364,9 @@ export function XlsxSessionViewer(props: Omit<XlsxWorkerViewerProps, 'file'> & {
       run.setSelection(extendTo(run.selection, cell, limits()));
     }
   };
-  const onClick = (event: MouseEvent) => {
-    const { cell } = point(event);
-    const start = clickStart.current;
-    clickStart.current = null;
-    if (!run || !frame || !cell || !start || cell.row !== start.row || cell.col !== start.col) return;
-    const hyperlink = hyperlinkAtCell(frame, cell.row, cell.col);
+  const followLink = (row: number, col: number) => {
+    if (!run || !frame) return;
+    const hyperlink = hyperlinkAtCell(frame, row, col);
     if (!hyperlink) return;
     const href = safeExternalHyperlink(hyperlink);
     if (href) { window.open(href, '_blank', 'noopener,noreferrer'); return; }
@@ -378,6 +375,13 @@ export function XlsxSessionViewer(props: Omit<XlsxWorkerViewerProps, 'file'> & {
     if (!destination) return;
     const sheet = sheets.findIndex((sheet) => sheet.name.toLowerCase() === destination.sheetName.toLowerCase());
     if (sheet >= 0) void run.selectCellsAsync(sheet, selectionAt(destination));
+  };
+  const onClick = (event: MouseEvent) => {
+    const { cell } = point(event);
+    const start = clickStart.current;
+    clickStart.current = null;
+    if (!run || !frame || !cell || !start || cell.row !== start.row || cell.col !== start.col) return;
+    followLink(cell.row, cell.col);
   };
   const copy = async () => {
     if (!run?.current || !selection) return;
@@ -388,20 +392,18 @@ export function XlsxSessionViewer(props: Omit<XlsxWorkerViewerProps, 'file'> & {
   };
   const onKeyDown = (event: KeyboardEvent) => {
     const selection = run?.selection;
-    if (!run?.view || !selection || commandForEvent(event)) return;
+    if (!run?.view || !selection || commands.claimsKey(event)) return;
     if (selectedChart) {
       if (event.key === 'Escape') setSelectedChart(null);
       if (event.key === 'Escape' || event.key.startsWith('Arrow')) event.preventDefault();
       return;
     }
-    if (event.ctrlKey || event.metaKey) {
-      const key = event.key.toLowerCase();
-      if (key === 'c' || key === 'x') {
-        if (!run.selectionNavigation.defer(run.selectionContext(), () => { void copy(); })) void copy();
-        event.preventDefault(); return;
-      }
-      if (key === 'v') { event.preventDefault(); return; }
+    const clipboard = commands.clipboardKey(event);
+    if (clipboard === 'copy' || clipboard === 'cut') {
+      if (!run.selectionNavigation.defer(run.selectionContext(), () => { void copy(); })) void copy();
+      event.preventDefault(); return;
     }
+    if (clipboard) { event.preventDefault(); return; }
     const request = selectionDataRequest(event);
     const movement = selectionKeyReducer(selection, event, limits()).type === 'move';
     if (request || movement) {
@@ -496,14 +498,7 @@ export function XlsxSessionViewer(props: Omit<XlsxWorkerViewerProps, 'file'> & {
               </div>
             </div>
             {a11yGrid && <>
-              <div style={visuallyHidden} role="grid" aria-label={a11yGrid.label}>
-                <div role="row"><span role="columnheader" />{a11yGrid.columnHeaders.map((header) =>
-                  <span key={header.col} role="columnheader">{header.label}</span>)}</div>
-                {a11yGrid.rows.map((row) => <div key={row.row} role="row">
-                  <span role="rowheader">{row.header}</span>{row.cells.map((cell) =>
-                    <span key={cell.col} role="gridcell" aria-selected={cell.selected}>{cell.label}</span>)}
-                </div>)}
-              </div>
+              <A11yGridTable grid={a11yGrid} style={visuallyHidden} onFollowLink={followLink} />
               {a11yGrid.charts.map((chart, index) =>
                 <div key={`${index}:${chart.label}`} style={visuallyHidden} role="img" aria-label={chart.label} />)}
             </>}

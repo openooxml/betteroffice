@@ -5,6 +5,8 @@ import { StrictMode, useEffect, useState } from 'react';
 import type { XlsxInThreadEditorProps } from './XlsxEditor';
 import type { XlsxAsyncEditorApi } from './worker/createAsyncEditorApi';
 import { xlsxCommandController } from './commands/createXlsxCommandStore';
+import { defineXlsxPlugin } from './plugins/defineXlsxPlugin';
+import type { XlsxPluginError } from './plugins/types';
 import { LEGACY_SYNC_API } from './runtimeOptions';
 import { XlsxWorkerEditorChunkLoadError } from './worker/XlsxWorkerEditorChunkLoadError';
 import { MOUNTED } from './__fixtures__/mounted';
@@ -151,6 +153,74 @@ describe('XlsxEditor engine dispatch', () => {
     await waitFor(() => expect(remount.getByTestId('worker-editor').getAttribute('data-backend')).toBe('legacy'));
     expect(warn).toHaveBeenCalledTimes(1);
     expect(warn.mock.calls[0]?.[0]).toContain('removed in 0.6.0');
+  });
+
+  it('mounts the hybrid editor for a read-only workbook that allows host proposals', async () => {
+    const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen readOnly allowHostProposals file={file} />);
+    await waitFor(() => expect(view.getByTestId('worker-editor').getAttribute('data-read-only')).toBe('true'));
+    expect(view.queryByTestId('worker-viewer')).toBeNull();
+    view.rerender(<XlsxEditor legacySyncApi experimentalWorkerOpen readOnly file={file} />);
+    expect(view.getByTestId('worker-editor')).toBeDefined();
+  });
+
+  it('mounts the hybrid viewer for a read-only workbook without host proposals', async () => {
+    const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen readOnly file={file} />);
+    await waitFor(() => expect(view.getByTestId('worker-viewer')).toBeDefined());
+    expect(view.queryByTestId('worker-editor')).toBeNull();
+  });
+
+  it('reports each plugin once in the legacy read-only worker viewer', async () => {
+    const plugins = ['acme.first', 'acme.second'].map((id) => defineXlsxPlugin({ id, createState: () => null }));
+    const errors: XlsxPluginError[] = [];
+    const view = render(<StrictMode><XlsxEditor legacySyncApi experimentalWorkerOpen readOnly file={file}
+      plugins={plugins} onPluginError={(error) => { errors.push(error); }} /></StrictMode>);
+    await waitFor(() => expect(errors).toHaveLength(2));
+    expect(view.getByTestId('worker-viewer')).toBeDefined();
+    expect(view.queryByTestId('worker-editor')).toBeNull();
+    expect(errors).toMatchObject(plugins.map((plugin) => ({
+      pluginId: plugin.id, generation: null, phase: 'definition', error: { code: 'unsupported-policy' },
+    })));
+    await act(async () => {
+      view.rerender(<StrictMode><XlsxEditor legacySyncApi experimentalWorkerOpen readOnly file={file}
+        plugins={plugins} onPluginError={(error) => { errors.push(error); }} /></StrictMode>);
+    });
+    expect(errors).toHaveLength(2);
+  });
+
+  it('reports once when the host rerenders with a new plugins array from onPluginError', async () => {
+    const errors: XlsxPluginError[] = [];
+    function Host() {
+      const [, setCount] = useState(0);
+      return <XlsxEditor legacySyncApi experimentalWorkerOpen readOnly file={file}
+        plugins={[defineXlsxPlugin({ id: 'acme.inline', createState: () => null })]}
+        onPluginError={(error) => { errors.push(error); setCount((value) => value + 1); }} />;
+    }
+    render(<Host />);
+    await waitFor(() => expect(errors).toHaveLength(1));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+    expect(errors).toHaveLength(1);
+  });
+
+  it('logs unsupported legacy viewer plugins when onPluginError is absent', async () => {
+    const plugins = ['acme.first', 'acme.second'].map((id) => defineXlsxPlugin({ id, createState: () => null }));
+    const messages: unknown[][] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => { messages.push(args); };
+    try {
+      const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen readOnly file={file} plugins={plugins} />);
+      await waitFor(() => expect(messages).toHaveLength(2));
+      expect(view.getByTestId('worker-viewer')).toBeDefined();
+      expect(messages.map(([message]) => message)).toEqual(plugins.map((plugin) =>
+        `[XlsxEditor] plugin "${plugin.id}" failed (definition)`));
+      for (const [, error] of messages) expect(error).toMatchObject({ code: 'unsupported-policy' });
+      await act(async () => {
+        view.rerender(<XlsxEditor legacySyncApi experimentalWorkerOpen readOnly file={file} plugins={plugins} />);
+      });
+      expect(messages).toHaveLength(2);
+      view.unmount();
+    } finally {
+      console.error = originalError;
+    }
   });
 
   it('runs the in-thread engine for legacySyncApi without experimentalWorkerOpen', async () => {

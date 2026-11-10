@@ -119,20 +119,6 @@ their copyright notices. `LICENSES/OFL-Noto.txt` contains the OFL 1.1 text.
 
 ---
 
-## yrs (vendored copy for the macOS app)
-
-`apps/native-viewer/vendor/yrs` is the `yrs` 0.27.3 crate from crates.io
-(upstream https://github.com/y-crdt/y-crdt), byte-identical apart from three
-call sites that replace `from_utf8_unchecked` with checked decoding (see issue
-#224). `apps/native-viewer` substitutes it for the registry crate via
-`[patch.crates-io]`, so it is compiled into the macOS app only.
-
-Copyright (c) 2020 Bartosz Sypytkowski, Kevin Jahns.
-
-License: MIT (`apps/native-viewer/vendor/yrs/LICENSE`).
-
----
-
 ## Lucide icons (check, x)
 
 `packages/docx-react/src/components/sidebar/reviewIcons.tsx` inlines the SVG
@@ -234,3 +220,31 @@ License: MIT. The unmodified upstream licence is included under
 `packages/fonts/LICENSES/MIT-wuff.txt`, in the docx, pptx, xlsx and vsdx packages,
 in each native platform package and in each Python wheel, which link it through
 `betteroffice-fonts`.
+
+---
+
+## mimalloc
+
+The `@betteroffice/docx-native` and `@betteroffice/pptx-native` binaries
+statically link mimalloc 2.3.2 as their memory allocator,
+https://github.com/microsoft/mimalloc, through the `mimalloc` 0.1.52 and
+`libmimalloc-sys` 0.1.49 Rust crates, https://github.com/purpleprotocol/mimalloc_rust.
+
+Copyright (c) 2018-2025 Microsoft Corporation, Daan Leijen.
+Copyright 2019 Octavian Oncescu.
+
+License: MIT. Both unmodified upstream licences are included as
+`MIT-mimalloc.txt` in each docx-native and pptx-native platform package.
+
+---
+
+## Adobe Symbol Encoding to Unicode table
+
+`crates/ooxml-drawingml/src/adobe-symbol.txt` is the unmodified mapping table
+from https://www.unicode.org/Public/MAPPINGS/VENDORS/ADOBE/symbol.txt (table
+version 1.0, 2011 July 12), Copyright (c) 1991-2011 Unicode, Inc. It is compiled
+into every engine that draws text, and its notice stays attached in the file as
+its terms require: "Unicode, Inc. hereby grants the right to freely use the
+information supplied in this file in the creation of products supporting the
+Unicode Standard, and to make copies of this file in any form for internal or
+external distribution as long as this notice remains attached."

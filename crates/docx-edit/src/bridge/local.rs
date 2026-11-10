@@ -12,6 +12,7 @@ pub(crate) struct LocalLowering {
     pub(crate) deferred: bool,
     pub(crate) legacy: bool,
     pub(super) source: std::sync::Weak<crate::seed::SourceMetadata>,
+    pub(super) shape_styles: ShapeStyles,
     pub(super) source_font_scheme: Option<docx_parse::ThemeFontScheme>,
     pub(super) seeds: BTreeMap<String, ParagraphSeed>,
     pub(super) chunks: Option<Rc<SeedChunks>>,
@@ -212,7 +213,15 @@ fn unsafe_value(key: &str, value: &Any) -> bool {
     if matches!(value, Any::Null | Any::Undefined | Any::Bool(false)) {
         return false;
     }
-    [INS, DEL, "pPrIns", "pPrDel", "pPrChange"].contains(&key)
+    [
+        INS,
+        DEL,
+        "pPrIns",
+        "pPrDel",
+        "pPrChange",
+        crate::format::RPR_CHANGE,
+    ]
+    .contains(&key)
         || ["trPrChange", "tcPrChange"].contains(&key)
         || ["trackedIns", "trackedDel", "trIns", "trDel"].contains(&key)
         || ["hyperlink", "bookmarks", "comment", "cellMarker"].contains(&key)
@@ -674,6 +683,7 @@ impl LocalLowering {
         let source = doc.source_metadata();
         self.source
             .ptr_eq(&source.as_ref().map(Arc::downgrade).unwrap_or_default())
+            && self.shape_styles == ShapeStyles::new(doc)
             && self.source_font_scheme == source_font_theme(doc).map(|theme| theme.font_scheme)
     }
 

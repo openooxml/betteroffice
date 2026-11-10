@@ -202,6 +202,8 @@ pub struct TextFormatting {
     pub style_id: Option<String>,
 }
 
+const MAX_TEXT_SCALE: f64 = 600.0;
+
 pub fn parse_run_properties(
     r_pr: Option<&XmlElement>,
     theme: Option<&Theme>,
@@ -278,7 +280,7 @@ pub fn parse_run_properties(
     });
     value.spacing = numeric_child(r_pr, "spacing", "val");
     value.position = numeric_child(r_pr, "position", "val");
-    value.scale = numeric_child(r_pr, "w", "val");
+    value.scale = numeric_child(r_pr, "w", "val").and_then(text_scale);
     value.kerning = numeric_child(r_pr, "kern", "val");
     value.effect = string_child(r_pr, "effect", "val", true);
     value.emphasis_mark = string_child(r_pr, "em", "val", true);
@@ -972,6 +974,11 @@ pub struct TableRowFormatting {
     pub justification: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hidden: Option<bool>,
+    /// Computed from the row's XML on load, never written back: every run in a
+    /// `w:hidden` row carries its own `w:vanish` (see
+    /// [`crate::table::row_is_hidden_content_only`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden_content_only: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conditional_format: Option<ConditionalFormatStyle>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1329,6 +1336,13 @@ fn boolean_child(parent: &XmlElement, name: &str) -> Option<bool> {
         .map(|element| element.parse_boolean("w"))
 }
 
+/// A `w:w` percentage the renderers can use. The schema allows 1 to 600. Word
+/// draws a run with 0 at full width, so that and anything else not positive
+/// count as unset; past the maximum is held to it.
+pub fn text_scale(scale: f64) -> Option<f64> {
+    (scale > 0.0).then_some(scale.min(MAX_TEXT_SCALE))
+}
+
 fn numeric_child(parent: &XmlElement, child: &str, attribute: &str) -> Option<f64> {
     parent
         .child("w", child)
@@ -1508,6 +1522,23 @@ fn overlay<T: Clone>(target: &mut Option<T>, source: &Option<T>) {
 mod tests {
     use super::*;
     use crate::xml::{ParseBudget, ParseLimits, parse_xml};
+
+    #[test]
+    fn a_run_scale_the_schema_refuses_is_unset_or_held_to_the_maximum() {
+        for (value, expected) in [
+            ("0", None),
+            ("-5", None),
+            ("wide", None),
+            ("1", Some(1.0)),
+            ("50", Some(50.0)),
+            ("600", Some(600.0)),
+            ("601", Some(600.0)),
+        ] {
+            let element = root(&format!(r#"<w:rPr><w:w w:val="{value}"/></w:rPr>"#));
+            let formatting = parse_run_properties(Some(&element), None).unwrap_or_default();
+            assert_eq!(formatting.scale, expected, "w:w {value}");
+        }
+    }
 
     #[test]
     fn parses_case_insensitive_boolean_run_properties() {

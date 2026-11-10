@@ -838,7 +838,12 @@ fn parse_picture(
 ) -> Result<Picture, PptxError> {
     budget.charge_shape(part)?;
     let properties = element.child("spPr");
-    let blip_fill = element.child("blipFill");
+    let blip_fill = element.child("blipFill").or_else(|| {
+        element
+            .child("AlternateContent")
+            .and_then(alternate_content_branch)
+            .and_then(|branch| branch.child("blipFill"))
+    });
     let relationship_id = blip_fill
         .and_then(|value| value.child("blip"))
         .and_then(|blip| blip_relationship_id(blip, relationships))
@@ -2008,6 +2013,13 @@ fn parse_text_paragraph(
     })
 }
 
+pub fn text_paragraph_properties(xml: &str) -> Result<ParagraphProperties, PptxError> {
+    let limits = crate::xml::ParseLimits::default();
+    let mut budget = ParseBudget::new(&limits);
+    let paragraph = crate::xml::parse_xml(xml.as_bytes(), "paragraph", &mut budget)?;
+    Ok(parse_paragraph_properties(paragraph.child("pPr")))
+}
+
 pub(crate) fn parse_paragraph_properties(element: Option<&XmlElement>) -> ParagraphProperties {
     let Some(element) = element else {
         return ParagraphProperties::default();
@@ -2165,6 +2177,7 @@ pub(crate) fn parse_run_properties(element: Option<&XmlElement>) -> RunPropertie
         bold: element.attribute("b").map(parse_bool),
         italic: element.attribute("i").map(parse_bool),
         underline: element.attribute("u").map(str::to_owned),
+        strike: element.attribute("strike").map(str::to_owned),
         caps: element.attribute("cap").and_then(TextCaps::from_attribute),
         font_family: element
             .child("latin")
@@ -2182,6 +2195,10 @@ pub(crate) fn parse_run_properties(element: Option<&XmlElement>) -> RunPropertie
                     .attribute("r:id")
                     .or_else(|| value.attribute_local("id"))
             })
+            .map(str::to_owned),
+        hyperlink_action: element
+            .child("hlinkClick")
+            .and_then(|value| value.attribute("action"))
             .map(str::to_owned),
         effects: parse_effects(element),
     }
@@ -2545,6 +2562,46 @@ mod tests {
                 { "type": "alpha", "amount": 0.2 },
                 { "type": "luminance", "brightness": 0.0, "contrast": 0.0 }
             ])
+        );
+    }
+
+    #[test]
+    fn a_picture_fill_in_alternate_content_reads_the_branch_it_supports() {
+        let picture_of = |choice: &str| {
+            let xml = format!(
+                r#"<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:pic><p:nvPicPr><p:cNvPr id="7" name="Logo"/></p:nvPicPr><mc:AlternateContent><mc:Choice {choice}><p:blipFill><a:blip r:embed="rId3"/><a:stretch><a:fillRect/></a:stretch></p:blipFill></mc:Choice><mc:Fallback><p:blipFill><a:blip r:embed="rId4"/><a:stretch><a:fillRect/></a:stretch></p:blipFill></mc:Fallback></mc:AlternateContent><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="10" cy="10"/></a:xfrm></p:spPr></p:pic></p:spTree></p:cSld></p:sld>"#
+            );
+            let limits = ParseLimits::default();
+            let mut budget = ParseBudget::new(&limits);
+            let root = parse_xml(xml.as_bytes(), "ppt/slides/slide1.xml", &mut budget).unwrap();
+            let relationships = [
+                image_relationship("rId3", "image1.pdf"),
+                image_relationship("rId4", "image2.png"),
+            ];
+            let data = common_slide_data(
+                &root,
+                &relationships,
+                "ppt/slides/slide1.xml",
+                &mut budget,
+                ShapeElements::WithConnectors,
+            )
+            .unwrap();
+            let ShapeNode::Picture(picture) = &data.shapes[0] else {
+                panic!("expected picture");
+            };
+            picture.media_part_path.clone()
+        };
+        assert_eq!(
+            picture_of(r#"xmlns:ma="http://schemas.microsoft.com/office/mac/drawingml/2008/main" Requires="ma""#)
+                .as_deref(),
+            Some("ppt/media/image2.png")
+        );
+        assert_eq!(
+            picture_of(
+                r#"xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" Requires="a""#
+            )
+            .as_deref(),
+            Some("ppt/media/image1.pdf")
         );
     }
 

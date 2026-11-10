@@ -20,9 +20,11 @@
     "types": ["bun"],
     "paths": {
       "#session-worker": ["../pptx/src/session/sessionWorker.node.ts"],
-      "#session-scope": ["../pptx/src/session/sessionScope.node.ts"],
       "@betteroffice/pptx": ["../pptx/src/index.ts"],
       "@betteroffice/pptx-i18n": ["../pptx-i18n/src/index.ts"],
+      "@betteroffice/pptx-i18n/editor": ["../pptx-i18n/src/editor.ts"],
+      "@betteroffice/pptx-i18n/proposals": ["../pptx-i18n/src/proposals.ts"],
+      "@betteroffice/pptx-i18n/menus": ["../pptx-i18n/src/menus.ts"],
       "@betteroffice/pptx/*": ["../pptx/src/*"]
     }
   },

@@ -30,27 +30,31 @@
 import React, { useLayoutEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
+  deriveDisplayListSelectedCellRects,
   deriveDisplayListTableFragmentsOnPages,
+  displayListTableFragmentEndsTable,
   type DisplayListQueries,
 } from '@betteroffice/docx/layout/render';
 import { projectPageLocalRect } from '../internals/canvasProjection';
+import { tableRowEdges, type TableCellBox } from '../internals/tableRowEdges';
 import { observePageWindow } from './pageWindowObserver';
 import {
   buildRemotePresencePageMetrics,
   type RemotePresencePageWindow,
 } from './remotePresenceGeometry';
 import type { YrsEditorCommand } from '../yrsCommands';
-import type { YrsPositionProjection } from '../internals/yrsPositionProjection';
+import type { YrsPositionProjection, YrsProjectedTable } from '../internals/yrsPositionProjection';
 
 const HANDLE_THICKNESS = 6;
 const HANDLE_HALF = HANDLE_THICKNESS / 2;
 const TWIPS_PER_PIXEL = 15;
 const MIN_CELL_WIDTH_TWIPS = 300;
+const MIN_ROW_TWIPS = 15;
 
 /** page-local (px) geometry + commit params for one handle, before projection. */
 interface HandleSpec {
   id: string;
-  type: 'col' | 'right';
+  type: 'col' | 'right' | 'row';
   pageIndex: number;
   x: number;
   y: number;
@@ -62,6 +66,9 @@ interface HandleSpec {
   leftTwips?: number;
   rightTwips?: number;
   widthTwips?: number;
+  // row handles:
+  row?: number;
+  paintedTwips?: number;
 }
 
 interface ProjectedHandle {
@@ -71,12 +78,14 @@ interface ProjectedHandle {
   width: number;
   height: number;
   scaleX: number;
+  scaleY: number;
   targetZoom: number;
 }
 
 const HANDLE_CLASS: Record<HandleSpec['type'], string> = {
   col: 'layout-table-resize-handle',
   right: 'layout-table-edge-handle-right',
+  row: 'layout-table-row-resize-handle',
 };
 
 export interface CanvasTableResizeOverlayProps {
@@ -130,7 +139,7 @@ export function CanvasTableResizeOverlay({
     // enclosing table node's `before` position (a stable per-table key), cached
     // per doc position. The same map memoizes the table node (widths, rowCount).
     const keyCache = new Map<number, string | null>();
-    const tableAt = new Map<string, { pmStart: number; widthsTwips: number[]; rowCount: number }>();
+    const tableAt = new Map<string, Pick<YrsProjectedTable, 'cells'> & { pmStart: number; widthsTwips: number[]; rowCount: number }>();
     const tableKeyOf = (ds: number | undefined): string | null => {
       if (ds == null) return null;
       const cached = keyCache.get(ds);
@@ -142,6 +151,7 @@ export function CanvasTableResizeOverlay({
           pmStart: table.start,
           widthsTwips: table.widthsTwips,
           rowCount: table.rowCount,
+          cells: table.cells,
         });
       }
       keyCache.set(ds, key);
@@ -182,12 +192,8 @@ export function CanvasTableResizeOverlay({
         });
       }
 
-      const bands = frag.rowBands;
-
       // Edge handles only on the fragment that ends the table.
-      const lastRowIndex = rowCount - 1;
-      const endsTable = bands.length > 0 && bands[bands.length - 1].rowIndex === lastRowIndex;
-      if (endsTable) {
+      if (displayListTableFragmentEndsTable(frag, rowCount)) {
         out.push({
           id: `${frag.tableKey}-p${frag.pageIndex}-right`,
           type: 'right',
@@ -199,6 +205,44 @@ export function CanvasTableResizeOverlay({
           pmStart,
           colIdx: widthsPx.length - 1,
           widthTwips: widthsTwips[widthsTwips.length - 1],
+        });
+      }
+    }
+
+    const { displayList } = displayListQueries;
+    const windowPages = displayList.pages.slice(pageWindow.start, pageWindow.end + 1);
+    const cellBoxes = new Map<string, TableCellBox[]>();
+    for (const box of deriveDisplayListSelectedCellRects(
+      { ...displayList, pages: windowPages },
+      [...tableAt].flatMap(([tableKey, table]) => table.cells.map((cell) => ({
+        tableKey, row: cell.row, col: cell.column, rowSpan: cell.rowspan, colSpan: cell.colspan,
+      }))),
+      tableKeyOf
+    )) {
+      const key = `${box.tableKey}:${box.row}:${box.col}`;
+      if (!box.exact) continue;
+      const boxes = cellBoxes.get(key) ?? [];
+      boxes.push({ pageIndex: box.pageIndex, x: box.x, y: box.y, width: box.w, height: box.h, repeatedHeader: box.repeatedHeader });
+      cellBoxes.set(key, boxes);
+    }
+    const pageIndices = new Set(windowPages.map((page) => page.pageIndex));
+    for (const [tableKey, table] of tableAt) {
+      const cells = table.cells.map((cell) => ({
+        row: cell.row, rowspan: cell.rowspan, cell: null,
+        boxes: cellBoxes.get(`${tableKey}:${cell.row}:${cell.column}`) ?? [],
+      }));
+      for (const edge of tableRowEdges(cells, pageIndices)) {
+        out.push({
+          id: `${tableKey}-p${edge.pageIndex}-row${edge.row}`,
+          type: 'row',
+          pageIndex: edge.pageIndex,
+          x: edge.left,
+          y: edge.y - HANDLE_HALF,
+          w: Math.max(0, edge.right - edge.left),
+          h: HANDLE_THICKNESS,
+          pmStart: table.pmStart,
+          row: edge.row,
+          paintedTwips: Math.round(edge.paintedHeight * TWIPS_PER_PIXEL),
         });
       }
     }
@@ -234,6 +278,7 @@ export function CanvasTableResizeOverlay({
           width: p.width,
           height: p.height,
           scaleX: p.scaleX,
+          scaleY: p.scaleY,
           targetZoom: p.targetZoom,
         });
       }
@@ -256,18 +301,28 @@ export function CanvasTableResizeOverlay({
     if (readOnly) return;
     e.preventDefault();
     e.stopPropagation();
-    const { spec, scaleX, targetZoom } = ph;
+    const { spec, scaleX, scaleY, targetZoom } = ph;
     const handleEl = e.currentTarget as HTMLElement;
     handleEl.classList.add('dragging');
     const startClientX = e.clientX;
+    const startClientY = e.clientY;
     const origLeft = parseFloat(handleEl.style.left) || 0;
+    const origTop = parseFloat(handleEl.style.top) || 0;
 
     // Accumulated, min-clamped commit values (twips).
     let left = spec.leftTwips ?? 0;
     let right = spec.rightTwips ?? 0;
     let width = spec.widthTwips ?? 0;
+    let rowDelta = 0;
 
     const onMove = (me: MouseEvent) => {
+      if (spec.type === 'row') {
+        const deltaTarget = (me.clientY - startClientY) / targetZoom;
+        const deltaPx = scaleY > 0 ? deltaTarget / scaleY : 0;
+        rowDelta = Math.max(Math.round(deltaPx * TWIPS_PER_PIXEL), MIN_ROW_TWIPS - (spec.paintedTwips ?? 0));
+        handleEl.style.top = `${origTop + deltaTarget}px`;
+        return;
+      }
       const deltaTarget = (me.clientX - startClientX) / targetZoom;
       const deltaPx = scaleX > 0 ? deltaTarget / scaleX : 0;
       const deltaTwips = Math.round(deltaPx * TWIPS_PER_PIXEL);
@@ -288,7 +343,17 @@ export function CanvasTableResizeOverlay({
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
       handleEl.classList.remove('dragging');
-      if (spec.type === 'col') {
+      if (spec.type === 'row') {
+        if (rowDelta !== 0) {
+          applyYrsCommand({
+            type: 'tableRowHeight',
+            pmStart: spec.pmStart,
+            row: spec.row!,
+            paintedTwips: spec.paintedTwips ?? 0,
+            deltaTwips: rowDelta,
+          });
+        }
+      } else if (spec.type === 'col') {
         applyYrsCommand({
           type: 'tableColumnWidths',
           pmStart: spec.pmStart,
@@ -329,6 +394,7 @@ export function CanvasTableResizeOverlay({
           data-handle-type={ph.spec.type}
           data-table-doc-start={ph.spec.pmStart}
           data-column-index={ph.spec.colIdx}
+          data-row-index={ph.spec.row}
           onMouseDown={(e) => startDrag(ph, e)}
           style={{
             position: 'absolute',
@@ -336,7 +402,7 @@ export function CanvasTableResizeOverlay({
             top: ph.top,
             width: ph.width,
             height: ph.height,
-            cursor: 'col-resize',
+            cursor: ph.spec.type === 'row' ? 'row-resize' : 'col-resize',
             pointerEvents: 'auto',
             zIndex: 15,
           }}

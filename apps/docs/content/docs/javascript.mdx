@@ -171,6 +171,18 @@ once with the reason. Plugins are matched by `id` and `revision`, so new array
 identities and reordering keep their state; React StrictMode's double setup
 creates two distinct activations.
 
+**Focus and locale.** `snapshot.focused` is true while focus is inside the
+editor's document surface; docked panels, toolbar controls, and host chrome are
+outside. `focus-change` carries `focused`. `snapshot.locale`
+contains the canonical `i18n._lang` (`en` by default); `locale-change` carries
+`locale`. The load snapshot includes both fields. These signals are on by default
+for installed plugins.
+
+`geometry.viewport` is the scroller's visible client box intersected with the
+editor root, in overlay-layer pixels. Its `y` changes as the pages scroll.
+`viewport-change` carries the new rectangle on scroll, resize, or zoom, or `null`
+when no layout is shown.
+
 **Stale results.** `setState(next, atVersion)` returns `false` for a superseded
 or ended context or when the document is no longer at `atVersion`, which
 defaults to the version the context was created at. Use `context.run(action)` in
@@ -478,6 +490,17 @@ type); unavailable facts are `null`. These fields are optional for older engines
 Slides also include `headerFooter` with visible slide footer, slide number and date
 placeholder text; `layout.headerFooter` reports stored layout or master settings, which do not gate those placeholders.
 
+**Focus and locale.** `snapshot.focused` is true while focus is inside the
+editor's document surface; docked panels, toolbar controls, and host chrome are
+outside. `focus-change` carries `focused`. `snapshot.locale`
+contains the canonical `i18n._lang` (`en` by default); `locale-change` carries
+`locale`. The load snapshot includes both fields. These signals are on by default
+for installed plugins.
+
+`geometry.viewport` is the visible slide stage in overlay-layer pixels.
+`viewport-change` carries the new rectangle on scroll, resize, or zoom, or `null`
+when no layout is shown.
+
 **Selection and navigation.** `snapshot.selection` names the current slide
 (session `slideId` and one-based `slide`) and a slide, shape or text target;
 text keeps its `anchor`/`focus` direction. `navigation.goToSlide`,
@@ -634,7 +657,10 @@ const review = defineXlsxPlugin<{ sheets: number }>({
 `initialize` and one `load` event per workbook (repeated when a change the hook
 did not make arrives first, and stopped after ten runs), then coalesced
 `document-change`, `selection-change`, `mode-change` (with `readOnly`),
-`layout-change` and `grants-change` events. `document-change` comes from the
+`layout-change`, `proposal-change` and `grants-change` events. `proposal-change`
+carries `generation`, `version` and `previewVersion` when host proposals or
+their stale-decision state change, including committed edits while proposals
+remain. `document-change` comes from the
 workbook's committed versions after recalculation, so typing, commands, batches
 (a plugin's own included), undo, redo and remote updates each produce one, and
 refusals or no-ops none. Replacing the workbook, removing the plugin, changing its `revision`,
@@ -648,6 +674,53 @@ with it; plugin handlers run outside that queue. A contributed command's failure
 uses the plugin's own code, and a refused edit batch returned as-is reaches the
 caller unchanged.
 `readCells` returns `sheets[].visibility`, which is `unknown` when source sheet metadata is unavailable and the sheet was not added in this session.
+
+**Edit gate (experimental).** `cellEditable(context, { sheetId, row, col })`
+returning false keeps typing, F2, double-click, the formula bar, the clear key,
+paste and cut off that cell. `beforeCellCommit(context, commit)` sees each cell a
+typed commit, clear, paste or cut changes (`input`, `kind` of `value`, `formula`
+or `clear`, `source` of `cell-editor`, `formula-bar`, `clear-key`, `paste` or
+`cut`) and returns `{ action: "accept" }`, `{ action: "replace", input }` or
+`{ action: "refuse", message }`. Plugins run in installation order, replacements
+chain, and the first refusal leaves the cells unchanged, keeps an in-cell draft
+open and refuses pending work with `host-refused`. A clear or cut asks once per
+cell that holds content, a paste once per cell whose input it changes, with a
+copied formula already moved to that cell; a replaced input is written as given.
+Each is refused as a whole, a refused cut before the clipboard is written, and
+one that would ask about more than 50,000 cells is refused outright. Until every
+plugin that defines either hook has loaded the workbook or failed, these edits
+are refused with `host-refused` and a message that the editor is still starting.
+Both hooks are synchronous and get reads only; one that throws or returns
+something else ends that plugin and counts as accept. Where the editor refuses
+locked cells of protected sheets, it does so before plugins are asked. Fill,
+undo, agent, remote and edit-batch writes are not gated yet. The gate runs in the
+in-thread editor and the default worker editor. The legacy worker editor
+(`legacySyncApi` with `experimentalWorkerOpen`) cannot gate edits: a plugin that
+defines either hook is ended there with an `edit-gate` error.
+
+**Row decorations (experimental).** `rowDecorations(context)` returns null or
+`{ version, items }`, where each item is `{ id, sheetId, row, kind, text, tone,
+tooltip }`: a `badge` (with up to 4 characters of `text`) or a `dot`, in a
+`neutral`, `info`, `success`, `warning` or `danger` tone, on a zero-based row.
+The editor shows them in a 24 px row gutter (scaled with zoom) at the left of
+the grid while some plugin has items on the active sheet; the grid moves right
+by the gutter's width and plugin geometry follows it. A set shows only while the
+workbook is at its `version`; the hook runs again on load, after `setState` and
+after a document change. Each row shows two items in installation order, then a
+`+n` chip whose tooltip names up to 20 of the rest. Clicking an item or pressing
+Enter or Space on it sends `{ type: "row-decoration-activate", id, sheetId, row }`
+to its plugin only, and only while its current set still has that item. A throw, a duplicate id, a row out of range, an unknown kind or tone, text
+that is too long or more than 10,000 items ends the plugin with the
+`row-decorations` phase.
+
+**Focus and locale.** `snapshot.focused` is true while focus is inside the
+editor's document surface; docked panels, toolbar controls, and host chrome are
+outside. `focus-change` carries `focused`. `snapshot.locale`
+contains the canonical `i18n._lang` (`en` by default); `locale-change` carries
+`locale`. The load snapshot includes both fields. These signals are on by default
+for installed plugins.
+
+`layout.viewport` remains the visible grid in sheet pixels.
 
 **Selection and navigation.** `snapshot.selection` names the active sheet
 (session `sheetId` and zero-based `sheetIndex`), the selected cells with their
@@ -668,7 +741,19 @@ zoom and sheet switch. `geometry.getCellRect({ sheetId, row, col })` and
 `getRangeRect({ sheetId, range })` return pixels of the overlay layer, zoomed
 and clipped to the visible grid, frozen panes included; a cell scrolled out of
 view returns null, and merged areas are addressed as ranges.
-`getPositionAtPoint` is null until the editor exposes pointer queries. The
+`geometry.getAnchorGeometry({ kind: 'proposal', id })` returns visible proposal
+cell `rects`, their bounding `anchor` and the grid's `pageRect` in overlay
+pixels, alongside `version`, `previewVersion` and `layoutId`. XLSX does not expose
+`layout.previewVersion`; use the event's or anchor result's `previewVersion` to
+track proposal state. Anchor failures carry `{ code, message }`: `unknown-proposal`
+for an unregistered id, `missing-target` for no visible cells on this sheet,
+`pending` while proposals refresh, `read-failed` when they cannot be read, and
+`layout-unavailable` for a superseded context or unpainted layout. The result
+type also allows `stale-version`, `ambiguous-target` and `unsupported`.
+`getPositionAtPoint(clientX, clientY)` hit-tests client coordinates through the
+editor's own hit test and returns the editor's `{ sheet, row, col }` with the
+layout's `sheetId`, `version` and `layoutId`, or null outside the grid, over a
+chart, for non-finite input and once that layout or workbook is gone. The
 overlay layer sits on the grid below the editor's selection and cell editor and
 ignores the pointer unless an element sets `pointer-events: auto`. Panels dock
 left, right or bottom of the grid, above the sheet tabs, and become drawers in a
@@ -746,6 +831,10 @@ span that holds tables, controls, section breaks, opaque XML, fields' cached
 results, or comments and bookmarks crossing it refuses, as does a step after
 which saving would move an opaque XML block; a batch holds at most 128 steps,
 1,048,576 inserted UTF-16 units and 1,024 new paragraphs.
+
+`DocxProposalInput` replacements accept an optional `at: { offset }` in the
+paragraph's accepted UTF-16 text. It selects the exact range instead of
+`occurrence`, and `search` must match at that offset.
 
 ## Edit PPTX in version-checked batches
 
@@ -873,6 +962,10 @@ a protected sheet need its protection to allow formatting cells. The React edito
 and calls `onSave` without downloading. They commit pending drafts, nudges and
 pastes first, and reject with `XlsxCommandAdmissionError` when that input
 cannot be written or the workbook is replaced meanwhile.
+
+`WorkbookHandle.isProposalStale(id)` checks a pending proposal with the engine's
+acceptance guards, including cell styles and dependent previews. It leaves the
+live workbook, history and proposal unchanged; an unknown ID throws.
 
 ## Export DOCX as structured content
 
@@ -1144,7 +1237,7 @@ the version they were resolved at.
 | `@betteroffice/docx` | Framework-free DOCX core: OOXML parse and serialize, CRDT editing, version-checked atomic text, paragraph and content-control batches, content-control discovery, structured JSON and Markdown export with source anchors, text shaping, pagination, canvas rendering. Saving preserves untouched package parts. |
 | `@betteroffice/docx-react` | The DOCX editor and viewer as a React component: toolbar, paginated canvas, comments, tracked changes, a command store with composable toolbar parts, flushed version-checked edit batches and content-control discovery on its ref, and host-owned plugins with panels, overlays, sidebar items, lifecycle events, and explicitly granted commands and edit batches. |
 | `@betteroffice/docx-i18n` | UI locale strings and types for the DOCX React editor. |
-| `@betteroffice/xlsx` | Framework-free XLSX core: SpreadsheetML parse and serialize, formula recalculation, version-checked atomic cell batches, anchored JSON and Markdown export, grid display lists, hit-testing, PNG export, and reviewable agent proposals. |
+| `@betteroffice/xlsx` | Framework-free XLSX core: SpreadsheetML parse and serialize, formula recalculation, version-checked atomic cell batches, anchored JSON and Markdown export, grid display lists, hit-testing, canvas PNG export, and reviewable agent proposals. |
 | `@betteroffice/xlsx-react` | The spreadsheet editor and viewer as a React component, with a command store and composable toolbar parts, flushed reads, version-checked edit batches and `save()` on its `onReady` API, and host-owned plugins with panels, overlays, lifecycle events, and explicitly granted commands and edit batches. |
 | `@betteroffice/xlsx-i18n` | UI locale strings and types for the XLSX React editor. |
 | `@betteroffice/pptx` | Framework-free PPTX core: parsing, editing, version-checked atomic edit batches, structured JSON and Markdown export with anchors, masters and layouts, rendering, comments, collaboration, and saving. Untouched slides retain their source bytes. |

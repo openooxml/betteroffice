@@ -20,7 +20,9 @@ export declare class PptxDocument {
   adoptPeerIdentity(): void
   replayJson(envelope: string): string
   proposeJson(args: string): string
+  validateProposalJson(args: string): string
   listProposalsJson(): string
+  proposalSlideStripJson(id: string): string
   previewProposalJson(args: string): string
   acceptProposalJson(args: string): string
   rejectProposalJson(args: string): string
@@ -114,6 +116,10 @@ export declare class PptxRenderer {
   registerFallbackFont(family: string, bold: boolean, italic: boolean, bytes: Uint8Array): number
   saveBytes(document: PptxDocument): Uint8Array
   layoutSlideJson(document: PptxDocument, slideIndex: number): string
+  exportSlideJson(document: PptxDocument, slideIndex: number): string
+  /** Internal: registers the faces one slide needs from the installed font packs. */
+  registerDefaultFonts(document: PptxDocument, slideIndex: number): void
+  renderPngTarget(document: PptxDocument, targetJson: string, optionsJson: string): Uint8Array
   layoutSlideProfiledJson(document: PptxDocument, slideIndex: number): string
   hitTestJson(x: number, y: number): string
   setActiveSlide(document: PptxDocument, id: string, key: string): boolean
@@ -125,10 +131,14 @@ export declare class PptxRenderer {
   /** Requested faces with optional script coverage buckets, before layout. */
   requestedFontFacesJson(document: PptxDocument, slideId?: string | undefined | null): string
   layoutProposalSlideJson(document: PptxDocument, id: string, slideIndex: number): string
+  layoutProposalDiffSlideByIdJson(document: PptxDocument, id: string, slideId: string): string
   layoutProposalDiffSlideJson(document: PptxDocument, id: string, slideIndex: number): string
 }
 
 export declare function compileSlideJson(slideJson: string): string
+
+/** Internal, called by the package loader. */
+export declare function configureFontPacks(latin?: string | undefined | null, intl?: string | undefined | null, cjk?: string | undefined | null): boolean
 
 export interface DecodedFontFace {
   font: Uint8Array
@@ -145,6 +155,9 @@ export declare function engineVersion(): string
 export declare function exportPptxMarkdownJson(data: Uint8Array, options: string): string
 
 export declare function exportPptxStructuredJson(data: Uint8Array, options: string): string
+
+/** Internal: the installed font packs `configureFontPacks` left out, and why, as JSON. */
+export declare function fontPackDiagnosticsJson(): string
 
 export declare function parsePptxJson(data: Uint8Array): string
 
