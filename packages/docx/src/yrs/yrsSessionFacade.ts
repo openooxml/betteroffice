@@ -1714,7 +1714,6 @@ export function wrapSession(
     mirrorWorkerDocument: (mirror) => withYrsSelectionCause(facade, 'remote', () => {
       workerDocumentVersion = mirror?.version ?? null;
       proposals.mirror(mirror);
-      recordYrsSelectionCause(facade);
     }),
     workerDocumentMirrored: () => workerDocumentVersion !== null,
     onProposalChange: (listener) => {

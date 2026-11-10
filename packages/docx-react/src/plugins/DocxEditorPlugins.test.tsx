@@ -355,6 +355,27 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
     expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
   });
 
+  if (experimentalWorkerOpen === undefined) test('viewer open reads the main session selection at most once with plugins installed', async () => {
+    const reads: Array<{ mock: { calls: readonly unknown[] }; mockRestore(): void }> = [];
+    const create = yrs.createYrsSession;
+    const factory = spyOn(yrs, 'createYrsSession').mockImplementation(async (options) => {
+      const session = await create(options);
+      reads.push(spyOn(session, 'selection'));
+      return session;
+    });
+    const plugin = defineDocxPlugin({ id: 'viewer-open', createState: () => null });
+    try {
+      const { view } = await mount({ readOnly: true, allowHostProposals: true, plugins: [plugin] });
+      expect(view.container.querySelector('canvas[data-page-index="0"]')).not.toBeNull();
+      expect(reads.length).toBeGreaterThan(0);
+      expect(reads.reduce((count, read) => count + read.mock.calls.length, 0)).toBeLessThanOrEqual(1);
+    } finally {
+      cleanup();
+      factory.mockRestore();
+      for (const read of reads) read.mockRestore();
+    }
+  });
+
   if (experimentalWorkerOpen === false) {
     test.each(['header', 'footer'] as const)('caret moves in uniformly formatted %s text settle independently of toolbar updates', async (part) => {
       const events: DocxPluginEvent[] = [];
@@ -3058,6 +3079,64 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
   } catch (error) { try { cleanup(); canvasContext.mockRestore(); bounds.mockRestore(); } finally { restoreClock(); } throw error; }
   finally { captureHost.mockRestore(); captureController.mockRestore(); captureBinding.mockRestore(); captureParts.mockRestore(); capturePointer.mockRestore(); captureGeometry.mockRestore(); }
 }
+
+test('the in-thread engine settles a canvas double click as pointer, then shift-arrow as keyboard', async () => {
+  const bytes = await storyAnchorsDocx();
+  const h = await matrixEditor('DI', bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer, undefined, true);
+  try {
+    await h.selection('body', h.first.paraId, 1);
+    await h.selectionLayout();
+    await h.quiet();
+    h.reset();
+    const canvas = h.view.container.querySelector<HTMLCanvasElement>('canvas[data-page-index="0"]')!;
+    const root = h.view.container.querySelector('.paged-editor')!;
+    expect(canvas).not.toBeNull();
+    expect(root.contains(canvas)).toBe(false);
+    const anchor = h.anchor();
+    expect(anchor.ok).toBe(true);
+    if (!anchor.ok) throw new Error('Pointer target is unavailable');
+    const point = { pointerId: 1, pointerType: 'mouse', button: 0,
+      clientX: anchor.anchor.x, clientY: anchor.anchor.y + anchor.anchor.height / 2 };
+    await act(async () => {
+      for (const detail of [1, 2]) {
+        fireEvent.pointerDown(canvas, { ...point, detail, buttons: 1 });
+        fireEvent.mouseDown(canvas, { ...point, detail, buttons: 1 });
+        fireEvent.pointerUp(canvas, { ...point, detail, buttons: 0 });
+        fireEvent.mouseUp(canvas, { ...point, detail, buttons: 0 });
+        fireEvent.click(canvas, { ...point, detail });
+      }
+      fireEvent.doubleClick(canvas, { ...point, detail: 2 });
+    });
+    await h.selectionLayout();
+    const word = h.context().snapshot.selection;
+    await h.quiet(349);
+    expect(h.settles).toHaveLength(0);
+    await h.quiet(1);
+    const settled = h.events.filter(event => event.type === 'selection-settle');
+    expect(settled).toHaveLength(1);
+    expect(settled[0]!.source).toBe('pointer');
+    expect(h.session().selection()).toMatchObject({
+      anchor: { story: 'body', paraId: h.first.paraId, offset: 0 },
+      head: { story: 'body', paraId: h.first.paraId, offset: h.first.text.length },
+    });
+    expect(h.settles[0]!.anchor).toMatchObject({ ok: true });
+    h.reset();
+    await act(async () => { fireEvent.keyDown(h.input(), { key: 'ArrowLeft', shiftKey: true }); });
+    await h.selectionLayout();
+    const extended = h.context().snapshot.selection;
+    expect(extended.displayRange).toMatchObject({ ...word.displayRange, to: word.displayRange!.to - 1 });
+    await h.quiet(349);
+    expect(h.settles).toHaveLength(0);
+    await h.quiet(1);
+    expect(h.events.filter(event => event.type === 'selection-settle')).toMatchObject([
+      { source: 'keyboard', selection: extended },
+    ]);
+    expect(h.settles).toHaveLength(1);
+    expect(h.settles[0]!.anchor).toMatchObject({ ok: true });
+    await h.quiet(700);
+    expect(h.settles).toHaveLength(1);
+  } finally { h.dispose(); }
+});
 
 for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${engine}`, () => {
   for (const [location, story, paraId] of [
