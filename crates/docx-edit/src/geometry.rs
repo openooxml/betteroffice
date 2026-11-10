@@ -118,7 +118,15 @@ fn build_story<T: ReadTxn>(
     if depth > 256 || content_start > MAX_POSITION {
         return Err(());
     }
-    let story = story_ref(txn, story_id).map_err(|_| ())?;
+    let story = match story_ref(txn, story_id) {
+        Ok(story) => story,
+        Err(_) if crate::empty_cells::is_empty_cell(txn, story_id) => {
+            let cell = crate::empty_cells::EmptyCell::new(story_id);
+            let scratch = cell.doc().yrs_doc().transact();
+            return build_story(&scratch, outline, story_id, content_start, depth);
+        }
+        Err(_) => return Err(()),
+    };
     outline.insert(
         story_id.to_owned(),
         GeometryStoryOutline {

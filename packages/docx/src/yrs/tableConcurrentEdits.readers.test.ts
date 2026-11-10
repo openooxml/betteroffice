@@ -2,9 +2,13 @@ import { afterEach, beforeAll, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
+import { createYrsSidebarProjection } from '../layout/render/yrsSidebarProjection';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
 import { preloadEditWasm } from '../wasm/edit';
-import { createYrsSession, saveYrsDocx, type YrsCellLoc, type YrsSession } from './index';
+import { createYrsSession, saveYrsDocx, type YrsCellLoc, type YrsLoc, type YrsSession } from './index';
+import { readTableFragment } from './clipboardFragment';
+import { storyPlainText } from './storyPlainText';
+import { tableBoundaryDeleteTarget } from './tableBoundaryDelete';
 import { createYrsPositionProjection } from './yrsPositionProjection';
 
 const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm');
@@ -72,24 +76,6 @@ function danglingCells(session: YrsSession): string[] {
 
 const message = (error: unknown) => String((error as Error)?.message ?? error).slice(0, 160);
 
-async function effects(session: YrsSession, clientId: number) {
-  const report: Record<string, unknown> = { dangling: danglingCells(session) };
-  try { createYrsPositionProjection(session, 'body'); report.cellLookup = 'ok'; } catch (error) { report.cellLookup = `throws: ${message(error)}`; }
-  try { session.insertRow(at(0, 0), 'below'); report.tableCommand = 'ok'; } catch (error) { report.tableCommand = `throws: ${message(error)}`; }
-  try {
-    const saved = (await saveYrsDocx(session, { updateModifiedDate: false })).bytes;
-    report.save = `ok ${saved.length} bytes`;
-    const reopened = await createYrsSession({ clientId });
-    sessions.push(reopened);
-    reopened.openDocx(saved, true);
-    report.reopenDangling = danglingCells(reopened);
-    try { createYrsPositionProjection(reopened, 'body'); report.reopenCellLookup = 'ok'; } catch (error) { report.reopenCellLookup = `throws: ${message(error)}`; }
-  } catch (error) {
-    report.save = `throws: ${message(error)}`;
-  }
-  return report;
-}
-
 /** Every live story's segments, sorted by story: equal across converged replicas. */
 function content(session: YrsSession): string {
   return JSON.stringify(session.storyIds().sort().map((story) => [story, session.storySegments(story)]));
@@ -101,12 +87,6 @@ function expectConverged(peers: YrsSession[]): void {
     expect(content(peer)).toBe(content(first!));
     expect(Array.from(peer.encodeStateVector())).toEqual(Array.from(first!.encodeStateVector()));
   }
-}
-
-async function expectSound(session: YrsSession, clientId: number) {
-  const report = await effects(session, clientId);
-  console.log(`EFFECTS ${JSON.stringify(report)}`);
-  expect(report).toMatchObject({ dangling: [], cellLookup: 'ok', reopenDangling: [], reopenCellLookup: 'ok' });
 }
 
 function syncAll(peers: YrsSession[]): void {
@@ -176,44 +156,6 @@ test('two peers: undoing a split deletes the text the other collaborator typed i
   expect(before).toEqual({ a: 'typed by B', b: 'typed by B' });
 });
 
-test('two peers: undoing a split after the other peer rewrote the table keeps the cell that table names', async () => {
-  const a = await open(9701);
-  const b = await peerOf(a, 9702);
-  a.splitCell(at(0, 1), 1, 2);
-  sync(a, b);
-  const created = a.storyIds().filter((story) => story.includes('~9701'));
-  expect(created.length).toBeGreaterThan(0);
-  b.insertRow(at(0, 0), 'below');
-  sync(a, b);
-  expect(a.undo()).toBe(true);
-  sync(a, b);
-  expect({ a: danglingCells(a), b: danglingCells(b) }).toEqual({ a: [], b: [] });
-  expect(rows(a)).toBe(2);
-  for (const story of created) expect(a.storyIds()).toContain(story);
-  expectConverged([a, b]);
-  expect(a.redo()).toBe(true);
-  sync(a, b);
-  expect({ a: danglingCells(a), b: danglingCells(b) }).toEqual({ a: [], b: [] });
-  expectConverged([a, b]);
-  await expectSound(a, 9703);
-});
-
-test('three peers: the undo after a remote table rewrite converges on every peer', async () => {
-  const a = await open(9731);
-  const b = await peerOf(a, 9732);
-  const c = await peerOf(a, 9733);
-  a.splitCell(at(0, 1), 1, 2);
-  syncAll([a, b, c]);
-  b.insertRow(at(0, 0), 'below');
-  syncAll([a, b, c]);
-  expect(a.undo()).toBe(true);
-  syncAll([a, b, c]);
-  for (const peer of [a, b, c]) expect(danglingCells(peer)).toEqual([]);
-  expectConverged([a, b, c]);
-  await expectSound(c, 9734);
-});
-
-
 async function frozenRoom(base: number) {
   const a = await open(base + 1);
   const b = await peerOf(a, base + 2);
@@ -280,3 +222,164 @@ test('permanence probe: a late joiner and un-freeze attempts in the dangling sta
   console.log(`PERMANENCE-PROBE ${JSON.stringify(rows)}`);
   expect(Object.keys(rows).length).toBe(unfreeze.length + 1);
 }, 120_000);
+
+type Order = 'synced' | 'concurrent';
+
+async function danglingRoom(base: number, count: 2 | 3, order: Order) {
+  const a = await open(base + 1);
+  const peers = [a];
+  for (let index = 2; index <= count; index++) peers.push(await peerOf(a, base + index));
+  for (const peer of peers) peer.registerFont(new Uint8Array(readFileSync(FONT)));
+  const b = peers[1]!;
+  a.splitCell(at(0, 1), 1, 2);
+  syncAll(peers);
+  b.insertRow(at(0, 0), 'below');
+  if (order === 'synced') syncAll(peers);
+  expect(a.undo()).toBe(true);
+  syncAll(peers);
+  return { a, b, peers };
+}
+
+function firstParagraph(session: YrsSession, story: string): YrsLoc {
+  return { story, paraId: session.paragraphSpans(story)[0]!.paraId, offset: 0 };
+}
+
+/** Every reader of a table cell, run against the session; `ok` or the error each throws. */
+function readerRows(session: YrsSession): Record<string, string> {
+  const rows: Record<string, string> = {};
+  const check = (name: string, run: () => unknown) => {
+    try { run(); rows[name] = 'ok'; } catch (error) { rows[name] = `throws: ${message(error)}`; }
+  };
+  check('projection', () => createYrsPositionProjection(session, 'body'));
+  check('layout', () => session.layoutDocumentWithRegionsRetainedJson(REGION_REQUEST));
+  check('frame', () => session.buildDisplayListFrame('{}', 0));
+  check('plainText', () => storyPlainText(session, 'body'));
+  check('sidebar', () => createYrsSidebarProjection(session));
+  check('copyTable', () => readTableFragment(session, { story: 'body', tableIndex: 0 }));
+  for (const story of danglingCells(session)) {
+    check(`${story} paragraphs`, () => {
+      const paragraphs = session.paragraphs(story);
+      if (paragraphs.length !== 1 || paragraphs[0]!.text !== '') throw new Error(JSON.stringify(paragraphs));
+    });
+    check(`${story} hasStory`, () => { if (!session.hasStory(story)) throw new Error('hasStory is false'); });
+    check(`${story} boundaryDelete`, () => tableBoundaryDeleteTarget(session, firstParagraph(session, story), 'backward'));
+    check(`${story} sticky`, () => {
+      const loc = session.resolveStickyPosition(session.encodeStickyPosition(firstParagraph(session, story)));
+      if (loc?.story !== story || loc.offset !== 0) throw new Error(JSON.stringify(loc));
+    });
+  }
+  return rows;
+}
+
+function expectReadable(session: YrsSession): void {
+  for (const [reader, outcome] of Object.entries(readerRows(session))) expect(`${reader}: ${outcome}`).toBe(`${reader}: ok`);
+}
+
+function typeInto(session: YrsSession, story: string, text: string): void {
+  session.insertText(firstParagraph(session, story), text);
+}
+
+async function expectSavedSound(session: YrsSession, clientId: number): Promise<void> {
+  const saved = (await saveYrsDocx(session, { updateModifiedDate: false })).bytes;
+  const reopened = await createYrsSession({ clientId });
+  sessions.push(reopened);
+  reopened.openDocx(saved, true);
+  expect(danglingCells(reopened)).toEqual([]);
+  createYrsPositionProjection(reopened, 'body');
+}
+
+for (const order of ['synced', 'concurrent'] as const) {
+  for (const count of [2, 3] as const) {
+    test(`${count} peers, ${order}: a named-but-missing cell reads as one empty paragraph and typing into it converges`, async () => {
+      const { a, b, peers } = await danglingRoom(9800 + (order === 'synced' ? 0 : 50) + count * 10, count, order);
+      const missing = danglingCells(a);
+      console.log(`READERS ${order} ${count} ${JSON.stringify({ missing })}`);
+      if (order === 'synced') expect(missing.length).toBeGreaterThan(0);
+      for (const peer of peers) expectReadable(peer);
+      const before = Array.from(a.encodeStateVector());
+      for (const peer of peers) readerRows(peer);
+      expect(Array.from(a.encodeStateVector())).toEqual(before);
+      b.insertRow(at(0, 0), 'below');
+      syncAll(peers);
+      for (const peer of peers) expectReadable(peer);
+      for (const story of missing) {
+        typeInto(peers[peers.length - 1]!, story, `typed ${story}`);
+        syncAll(peers);
+        for (const peer of peers) expect(cellText(peer, story)).toBe(`typed ${story}`);
+      }
+      for (const peer of peers) expect(danglingCells(peer)).toEqual([]);
+      expectConverged(peers);
+      await expectSavedSound(a, 9899);
+    });
+  }
+}
+
+test('typing into a missing cell is one undo step: undo leaves an empty real cell and redo restores the text', async () => {
+  const { a, b } = await danglingRoom(9900, 2, 'synced');
+  const [story] = danglingCells(b);
+  expect(story).toBeDefined();
+  expect(rows(b)).toBe(2);
+  typeInto(b, story!, 'x');
+  sync(a, b);
+  expect(b.undo()).toBe(true);
+  sync(a, b);
+  for (const peer of [a, b]) {
+    expect(cellText(peer, story!)).toBe('');
+    expect(danglingCells(peer)).toEqual([]);
+    expectReadable(peer);
+  }
+  expect(rows(b)).toBe(2);
+  expect(b.redo()).toBe(true);
+  sync(a, b);
+  expect(cellText(a, story!)).toBe('x');
+  expect(b.undo()).toBe(true);
+  expect(b.undo()).toBe(true);
+  sync(a, b);
+  expect(rows(b)).toBe(1);
+  for (const peer of [a, b]) expectReadable(peer);
+  expectConverged([a, b]);
+});
+
+test('two collaborators type into the same missing cell before syncing: one creation is kept (named limit)', async () => {
+  const { a, b } = await danglingRoom(9920, 2, 'synced');
+  const [story] = danglingCells(a);
+  typeInto(a, story!, 'from A');
+  typeInto(b, story!, 'from B');
+  sync(a, b);
+  sync(a, b);
+  const text = cellText(a, story!);
+  console.log(`CONCURRENT-FIRST-WRITES ${JSON.stringify({ text, entries: a.storyIds().filter((id) => id === story).length })}`);
+  expect(['from A', 'from B']).toContain(text);
+  for (const peer of [a, b]) {
+    expect(danglingCells(peer)).toEqual([]);
+    expectReadable(peer);
+  }
+  expectConverged([a, b]);
+  typeInto(a, story!, 'next ');
+  sync(a, b);
+  expect(cellText(b, story!)).toBe(`next ${text}`);
+});
+
+test('placing a caret in a missing cell and reading it writes nothing; a restored caret resolves without writing', async () => {
+  const { a, b } = await danglingRoom(9940, 2, 'synced');
+  const [story] = danglingCells(b);
+  const before = Array.from(b.encodeStateVector());
+  const caret = firstParagraph(b, story!);
+  b.setSelection(caret, caret);
+  expect(b.selection()).toMatchObject({ anchor: { story, offset: 0 }, head: { story, offset: 0 } });
+  const sticky = b.encodeStickyPosition(caret);
+  expect(b.resolveStickyPosition(sticky)).toMatchObject({ story, offset: 0 });
+  expectReadable(b);
+  expect(Array.from(b.encodeStateVector())).toEqual(before);
+
+  const restored = await peerOf(b, 9949);
+  restored.setSelection(caret, caret);
+  expect(restored.selection()).toMatchObject({ anchor: { story, offset: 0 } });
+  expect(restored.resolveStickyPosition(sticky)).toMatchObject({ story, offset: 0 });
+  expect(Array.from(restored.encodeStateVector())).toEqual(before);
+
+  typeInto(a, story!, 'later');
+  sync(a, b);
+  expect(b.selection()).toMatchObject({ anchor: { story, offset: 0 } });
+  expect(cellText(b, story!)).toBe('later');
+});

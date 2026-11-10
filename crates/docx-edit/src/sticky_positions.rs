@@ -10,6 +10,10 @@ use crate::{EditingDoc, story_ref};
 
 const POSITIONS_PER_STORY: usize = 32;
 
+fn branch_of(text: &TextRef) -> BranchPtr {
+    BranchPtr::from(<TextRef as AsRef<Branch>>::as_ref(text))
+}
+
 pub(crate) fn sticky_index<T: ReadTxn>(
     text: &TextRef,
     txn: &T,
@@ -60,7 +64,15 @@ impl EditingDoc {
             .yrs_doc()
             .try_transact()
             .map_err(|error| error.to_string())?;
-        let text = story_ref(&txn, story).map_err(|error| error.to_string())?;
+        let text = match story_ref(&txn, story) {
+            Ok(text) => text,
+            Err(error) => {
+                return match crate::empty_cells::naming_table(&txn, story) {
+                    Some((parent, table)) => Ok(sticky_index(&parent, &txn, table, Assoc::After)),
+                    None => Err(error.to_string()),
+                };
+            }
+        };
         let mut cache = self.sticky_positions.lock().unwrap();
         let cache = cache.story(story, self.committed_epoch());
         let key = (index, assoc);
@@ -84,18 +96,34 @@ impl EditingDoc {
             .yrs_doc()
             .try_transact()
             .map_err(|error| error.to_string())?;
-        let text = story_ref(&txn, story).map_err(|error| error.to_string())?;
+        let text = match story_ref(&txn, story) {
+            Ok(text) => text,
+            Err(error) => {
+                let Some((parent, _)) = crate::empty_cells::naming_table(&txn, story) else {
+                    return Err(error.to_string());
+                };
+                return match sticky_offset(position, &txn) {
+                    Some(offset) if offset.branch == branch_of(&parent) => Ok(Some(0)),
+                    Some(_) => Err("selection sticky index belongs to another story".to_owned()),
+                    None => Ok(None),
+                };
+            }
+        };
         let mut cache = self.sticky_positions.lock().unwrap();
         let cache = cache.story(story, self.committed_epoch());
         if let Some(index) = cache.offsets.get(position) {
             return Ok(*index);
         }
         let offset = sticky_offset(position, &txn);
-        let expected = BranchPtr::from(<TextRef as AsRef<Branch>>::as_ref(&text));
-        if offset
-            .as_ref()
-            .is_some_and(|offset| offset.branch != expected)
+        let expected = branch_of(&text);
+        if let Some(offset) = offset.as_ref()
+            && offset.branch != expected
         {
+            let parent = crate::empty_cells::cell_parent(story)
+                .and_then(|parent| story_ref(&txn, parent).ok());
+            if parent.is_some_and(|parent| offset.branch == branch_of(&parent)) {
+                return Ok(Some(0));
+            }
             return Err("selection sticky index belongs to another story".to_owned());
         }
         let index = offset.map(|offset| offset.index);

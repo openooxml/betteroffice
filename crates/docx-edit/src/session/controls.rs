@@ -18,6 +18,7 @@ impl EditSessionCore {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> EngineResult<String> {
+        self.engine.doc().ensure_cell_story(story);
         let index = loc_index(self.engine.doc(), story, para_id, offset)?;
         let Any::Map(payload) = Any::from_json(payload_json).map_err(EngineError::message)? else {
             return Err(EngineError::message("insert_image expects a JSON object"));
@@ -153,6 +154,7 @@ impl EditSessionCore {
     }
 
     pub fn insert_page_break(&self, story: &str, para_id: &str, offset: u32) -> EngineResult<()> {
+        self.engine.doc().ensure_cell_story(story);
         let index = loc_index(self.engine.doc(), story, para_id, offset)?;
         let ctx = EditCtx::local(String::new(), String::new());
         self.engine
@@ -169,6 +171,7 @@ impl EditSessionCore {
         offset: u32,
         break_type: &str,
     ) -> EngineResult<()> {
+        self.engine.doc().ensure_cell_story(story);
         if !matches!(
             break_type,
             "nextPage" | "continuous" | "oddPage" | "evenPage"

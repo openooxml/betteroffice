@@ -2319,22 +2319,42 @@ fn lower_table<T: ReadTxn>(
                     format!("row {row_index} cell {cell_index} is missing story"),
                 )
             })?;
-            let (mut blocks, content_size) = lower_story(
-                txn,
-                &cell_story,
-                env,
-                cell_pm_start + 1,
-                active_stories,
-                list_state,
-                CellEdges {
-                    before: true,
-                    after: true,
-                },
-                map,
-                opaque_sequences,
-                revealable,
-                local,
-            )?;
+            let cell_edges = CellEdges {
+                before: true,
+                after: true,
+            };
+            let (mut blocks, content_size) = if crate::story_ref(txn, &cell_story).is_ok() {
+                lower_story(
+                    txn,
+                    &cell_story,
+                    env,
+                    cell_pm_start + 1,
+                    active_stories,
+                    list_state,
+                    cell_edges,
+                    map,
+                    opaque_sequences,
+                    revealable,
+                    local,
+                )?
+            } else {
+                local.block(true);
+                let cell = crate::empty_cells::EmptyCell::new(&cell_story);
+                let scratch = cell.doc().yrs_doc().transact();
+                lower_story(
+                    &scratch,
+                    &cell_story,
+                    env,
+                    cell_pm_start + 1,
+                    active_stories,
+                    list_state,
+                    cell_edges,
+                    map,
+                    opaque_sequences,
+                    revealable,
+                    local,
+                )?
+            };
 
             for block in &mut blocks {
                 if let LayoutBlock::Paragraph(paragraph) = block

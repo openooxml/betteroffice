@@ -202,10 +202,11 @@ impl EditSessionCore {
         serde_json::to_string(&matches).map_err(EngineError::message)
     }
 
-    /// Whether the document has a story with this id.
+    /// Whether the document has a story with this id, or a table of a live story names it as a
+    /// cell (a cell whose story is missing reads as one empty paragraph).
     pub fn has_story(&self, story: &str) -> bool {
         let txn = self.engine.doc().yrs_doc().transact();
-        crate::story_ref(&txn, story).is_ok()
+        crate::story_ref(&txn, story).is_ok() || crate::empty_cells::is_empty_cell(&txn, story)
     }
 
     /// `{"revision","stories":[…]}`: the current story revision and the sorted

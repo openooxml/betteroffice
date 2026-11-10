@@ -2552,7 +2552,10 @@ impl EditingDoc {
                 }
             }
         }
-        let destination = story_ref(&txn, &target.cell.story).map_err(OpError::from)?;
+        let destination = match story_ref(&txn, &target.cell.story) {
+            Ok(story) => story,
+            Err(_) => self.create_empty_cell(&mut txn, &target.cell.story),
+        };
         let mut deleted = Vec::new();
         let source_ids: HashSet<String> = selected
             .iter()
@@ -2563,7 +2566,9 @@ impl EditingDoc {
         let mut offsets = HashMap::new();
         let mut offset = destination.len(&txn);
         for source in selected.iter().skip(1) {
-            let source_story = story_ref(&txn, &source.cell.story).map_err(OpError::from)?;
+            let Ok(source_story) = story_ref(&txn, &source.cell.story) else {
+                continue;
+            };
             sources.push(snapshot_story(&source_story, &txn)?);
             offsets.insert(source.cell.story.clone(), offset);
             offset = offset
@@ -4837,5 +4842,137 @@ mod tests {
             ids.sort();
             ids
         }
+    }
+
+    fn named_cell_story(doc: &EditingDoc, column: usize) -> String {
+        let payload = doc.table_payload(&TableLocator::new("body", 0)).unwrap();
+        let Some(Any::Array(rows)) = payload.get("rows") else {
+            panic!("table rows");
+        };
+        let Any::Map(row) = &rows[0] else {
+            panic!("table row");
+        };
+        let Some(Any::Array(cells)) = row.get("cells") else {
+            panic!("row cells");
+        };
+        let Any::Map(cell) = &cells[column] else {
+            panic!("row cell");
+        };
+        let Some(Any::String(story)) = cell.get("story") else {
+            panic!("cell story");
+        };
+        story.to_string()
+    }
+
+    fn drop_cell_story(doc: &EditingDoc, story: &str, removed: bool) {
+        let mut txn = doc.yrs_doc().transact_mut();
+        if removed {
+            crate::mark_story_removed(&mut txn, story);
+        } else {
+            txn.get_map(STORIES).unwrap().remove(&mut txn, story);
+        }
+    }
+
+    fn entries(doc: &EditingDoc, story: &str) -> usize {
+        let txn = doc.yrs_doc().transact();
+        txn.get_map(STORIES)
+            .unwrap()
+            .iter(&txn)
+            .filter(|(id, _)| *id == story)
+            .count()
+    }
+
+    #[test]
+    fn a_named_cell_without_its_story_reads_as_one_empty_paragraph_until_an_edit_creates_it() {
+        for removed in [false, true] {
+            let doc = inserted(&direct(), 1, 2);
+            let story = named_cell_story(&doc, 1);
+            drop_cell_story(&doc, &story, removed);
+            let key = crate::empty_cells::empty_cell_para_key(&story);
+            let before = doc.encode_state_as_update_v1();
+            let paragraphs = doc.paragraphs(&story).unwrap();
+            assert_eq!(paragraphs.len(), 1, "removed={removed}");
+            assert_eq!(
+                (paragraphs[0].para_id.as_str(), paragraphs[0].text.as_str()),
+                (key.as_str(), "")
+            );
+            assert_eq!(doc.story_len(&story).unwrap(), 1);
+            assert_eq!(
+                doc.paragraph_index(&story).unwrap().para_span(&key),
+                Some((0, 0))
+            );
+            assert_eq!(doc.story_segment_units(&story).unwrap().len(), 1);
+            assert_eq!(doc.story_segment_units_at(&story, &[0]).unwrap().len(), 1);
+            let blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+            assert_eq!(serde_json::to_value(&blocks).unwrap()[0]["kind"], "table");
+            let sticky = doc
+                .cached_sticky_index(&story, 0, Assoc::After)
+                .unwrap()
+                .unwrap();
+            assert_eq!(doc.cached_sticky_offset(&story, &sticky).unwrap(), Some(0));
+            assert_eq!(doc.encode_state_as_update_v1(), before, "reads never write");
+
+            assert!(doc.ensure_cell_story(&story));
+            assert!(!doc.ensure_cell_story(&story));
+            assert_eq!(doc.cached_sticky_offset(&story, &sticky).unwrap(), Some(0));
+            doc.insert_text(
+                &direct(),
+                Position::new(story.as_str(), 0),
+                "x",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+            let paragraphs = doc.paragraphs(&story).unwrap();
+            assert_eq!(paragraphs.len(), 1);
+            assert_eq!(
+                (paragraphs[0].para_id.as_str(), paragraphs[0].text.as_str()),
+                (key.as_str(), "x")
+            );
+            assert_eq!(entries(&doc, &story), 1);
+            assert!(!crate::story_is_removed(&doc.yrs_doc().transact(), &story));
+        }
+    }
+
+    #[test]
+    fn a_story_no_live_table_names_stays_unknown_and_is_never_created() {
+        let doc = inserted(&direct(), 1, 2);
+        for story in [
+            "body:t0:r5c5",
+            "body:t3:r0c0",
+            "nobody:t0:r0c0",
+            "body:sdt0",
+        ] {
+            assert!(doc.paragraphs(story).is_err(), "{story}");
+            assert!(doc.story_len(story).is_err(), "{story}");
+            assert!(!doc.ensure_cell_story(story), "{story}");
+            assert_eq!(entries(&doc, story), 0);
+        }
+    }
+
+    #[test]
+    fn merging_cells_whose_stories_are_missing_keeps_the_others_text() {
+        let doc = inserted(&direct(), 1, 3);
+        let first = named_cell_story(&doc, 0);
+        let middle = named_cell_story(&doc, 1);
+        let last = named_cell_story(&doc, 2);
+        doc.insert_text(
+            &direct(),
+            Position::new(last.as_str(), 0),
+            "kept",
+            crate::FormatPolicy::Inherit,
+        )
+        .unwrap();
+        drop_cell_story(&doc, &first, false);
+        drop_cell_story(&doc, &middle, true);
+        doc.merge_cells(&direct(), &TableRange::new(cell(0, 0), cell(0, 2)))
+            .unwrap();
+        let text: Vec<String> = doc
+            .paragraphs(&first)
+            .unwrap()
+            .into_iter()
+            .map(|paragraph| paragraph.text)
+            .collect();
+        assert!(text.contains(&"kept".to_owned()), "{text:?}");
+        assert_eq!(entries(&doc, &first), 1);
     }
 }

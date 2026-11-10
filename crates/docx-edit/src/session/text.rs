@@ -30,6 +30,7 @@ impl EditSessionCore {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> EngineResult<String> {
+        self.engine.doc().ensure_cell_story(story);
         let at = loc_index(self.engine.doc(), story, para_id, offset)?;
         let ctx = edit_ctx(author_name, author_date)?;
         let doc = self.engine.doc();
@@ -83,6 +84,7 @@ impl EditSessionCore {
         end_offset: u32,
         text: Option<String>,
     ) -> EngineResult<String> {
+        self.engine.doc().ensure_cell_story(story);
         let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
         if text.is_some() && start != end {
@@ -166,6 +168,7 @@ impl EditSessionCore {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> EngineResult<String> {
+        self.engine.doc().ensure_cell_story(story);
         let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
         let ctx = edit_ctx(author_name, author_date)?;
@@ -185,6 +188,7 @@ impl EditSessionCore {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> EngineResult<String> {
+        self.engine.doc().ensure_cell_story(story);
         let at = loc_index(self.engine.doc(), story, para_id, offset)?;
         let ctx = edit_ctx(author_name, author_date)?;
         let receipt = self
@@ -203,6 +207,7 @@ impl EditSessionCore {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> EngineResult<String> {
+        self.engine.doc().ensure_cell_story(story);
         let at = loc_index(self.engine.doc(), story, para_id, offset)?;
         let receipt = if author_name.is_none() && author_date.is_none() {
             let receipt = self
@@ -256,6 +261,7 @@ impl EditSessionCore {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> EngineResult<String> {
+        self.engine.doc().ensure_cell_story(story);
         let ctx = edit_ctx(author_name, author_date)?;
         let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
@@ -279,6 +285,7 @@ impl EditSessionCore {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> EngineResult<String> {
+        self.engine.doc().ensure_cell_story(story);
         let ctx = edit_ctx(author_name, author_date)?;
         let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
@@ -301,6 +308,7 @@ impl EditSessionCore {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> EngineResult<()> {
+        self.engine.doc().ensure_cell_story(story);
         let ctx = edit_ctx(author_name, author_date)?;
         let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
@@ -376,6 +384,7 @@ impl EditSessionCore {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> EngineResult<()> {
+        self.engine.doc().ensure_cell_story(story);
         let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
         let selector = ParaSelector::Range(StoryRange::new(story, start, end));
@@ -412,6 +421,7 @@ impl EditSessionCore {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> EngineResult<()> {
+        self.engine.doc().ensure_cell_story(story);
         let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
         let selector = ParaSelector::Range(StoryRange::new(story, start, end));

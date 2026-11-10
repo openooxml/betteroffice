@@ -82,6 +82,7 @@ mod control_values;
 mod ctx;
 mod deterministic;
 mod document_properties;
+mod empty_cells;
 mod fingerprint;
 mod fmath;
 mod format;
@@ -957,8 +958,13 @@ impl EditingDoc {
         if let Some(index) = self.paragraph_indexes.lock().unwrap().get(story_id, epoch) {
             return Ok(index);
         }
-        self.build_story_indexes(story_id)
-            .map(|(_, paragraphs)| paragraphs)
+        match self.build_story_indexes(story_id) {
+            Ok((_, paragraphs)) => Ok(paragraphs),
+            Err(error) => match self.empty_cell(story_id) {
+                Some(cell) => cell.doc().paragraph_index(story_id),
+                None => Err(error),
+            },
+        }
     }
 
     fn build_story_indexes(
@@ -1739,8 +1745,11 @@ impl EditingDoc {
 
     pub fn story_len(&self, story_id: &str) -> EditResult<u32> {
         let txn = self.doc.transact();
-        let story = story_ref(&txn, story_id)?;
-        Ok(story.len(&txn))
+        match story_ref(&txn, story_id) {
+            Ok(story) => Ok(story.len(&txn)),
+            Err(_) if empty_cells::is_empty_cell(&txn, story_id) => Ok(1),
+            Err(error) => Err(error),
+        }
     }
 
     /// The current story revision, and the stories that changed after `since`
@@ -1772,9 +1781,15 @@ impl EditingDoc {
         story_id: &str,
         units: &[u32],
     ) -> Result<Vec<Vec<StorySegment>>, String> {
-        let index = self
-            .segment_index(story_id)
-            .map_err(|error| error.to_string())?;
+        let index = match self.segment_index(story_id) {
+            Ok(index) => index,
+            Err(error) => {
+                return match self.empty_cell(story_id) {
+                    Some(cell) => cell.doc().story_segment_units_at(story_id, units),
+                    None => Err(error.to_string()),
+                };
+            }
+        };
         let indexed = index.segment_units().expect("formatted index built");
         let txn = self.doc.transact();
         units
@@ -1804,7 +1819,15 @@ impl EditingDoc {
         txn: &T,
         story_id: &str,
     ) -> EditResult<Vec<StorySegment>> {
-        let story = story_ref(txn, story_id)?;
+        let story = match story_ref(txn, story_id) {
+            Ok(story) => story,
+            Err(_) if empty_cells::is_empty_cell(txn, story_id) => {
+                return empty_cells::EmptyCell::new(story_id)
+                    .doc()
+                    .story_segments(story_id);
+            }
+            Err(error) => return Err(error),
+        };
         Ok(story
             .diff(txn, YChange::identity)
             .into_iter()

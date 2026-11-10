@@ -16,6 +16,7 @@ impl EditSessionCore {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> EngineResult<String> {
+        self.engine.doc().ensure_cell_story(story);
         let index = loc_index(self.engine.doc(), story, para_id, offset)?;
         let ctx = edit_ctx(author_name, author_date)?;
         let receipt = self
@@ -35,6 +36,7 @@ impl EditSessionCore {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> EngineResult<String> {
+        self.engine.doc().ensure_cell_story(story);
         let index = loc_index(self.engine.doc(), story, para_id, offset)?;
         let ctx = edit_ctx(author_name, author_date)?;
         let fragment: Value = serde_json::from_str(fragment_json).map_err(EngineError::message)?;
