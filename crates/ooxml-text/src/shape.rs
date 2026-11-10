@@ -32,10 +32,37 @@ pub struct ShapedGlyph {
 
 /// An OpenType feature setting, e.g. `(*b"liga", 0)` to disable ligatures or
 /// `(*b"smcp", 1)` for small caps. Applied over the whole run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct ShapeFeature {
     pub tag: [u8; 4],
     pub value: u32,
+}
+
+impl From<ShapeFeature> for String {
+    fn from(feature: ShapeFeature) -> Self {
+        let tag = String::from_utf8_lossy(&feature.tag);
+        if feature.value == 1 {
+            tag.into_owned()
+        } else {
+            format!("{tag}={}", feature.value)
+        }
+    }
+}
+
+impl TryFrom<String> for ShapeFeature {
+    type Error = &'static str;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        let (tag, value) = value.split_once('=').unwrap_or((&value, "1"));
+        Ok(Self {
+            tag: tag
+                .as_bytes()
+                .try_into()
+                .map_err(|_| "expected four-byte tag")?,
+            value: value.parse().map_err(|_| "invalid feature value")?,
+        })
+    }
 }
 
 /// Direction to use when shaping a single bidi-level run.
@@ -114,6 +141,68 @@ pub fn shape_with_properties(
         language,
         ShapeContext::default(),
     )
+}
+
+/// Shapes Word's optional features only in Latin, Greek and Cyrillic text.
+pub fn shape_with_word_features(
+    store: &FontStore,
+    font: FontId,
+    text: &str,
+    size: f32,
+    features: &[ShapeFeature],
+    direction: ShapeDirection,
+    language: Option<&str>,
+) -> Result<Vec<ShapedGlyph>, FontError> {
+    if features.is_empty() {
+        return shape_with_properties(store, font, text, size, features, direction, language);
+    }
+    let mask = crate::word_metrics::word_typography_mask(text);
+    if mask.iter().all(|enabled| *enabled) {
+        return shape_with_properties(store, font, text, size, features, direction, language);
+    }
+    let unmodified: Vec<_> = features
+        .iter()
+        .copied()
+        .filter(|feature| {
+            !matches!(
+                &feature.tag,
+                b"liga" | b"clig" | b"hlig" | b"dlig" | b"calt"
+            )
+        })
+        .collect();
+    if mask.iter().all(|enabled| !*enabled) {
+        return shape_with_properties(store, font, text, size, &unmodified, direction, language);
+    }
+    let mut ranges: Vec<(std::ops::Range<usize>, bool)> = Vec::new();
+    for ((byte, ch), enabled) in text.char_indices().zip(mask) {
+        if let Some((range, previous)) = ranges.last_mut()
+            && *previous == enabled
+        {
+            range.end = byte + ch.len_utf8();
+        } else {
+            ranges.push((byte..byte + ch.len_utf8(), enabled));
+        }
+    }
+    if direction == ShapeDirection::Rtl {
+        ranges.reverse();
+    }
+    let mut result = Vec::new();
+    for (range, enabled) in ranges {
+        let mut glyphs = shape_with_properties(
+            store,
+            font,
+            &text[range.clone()],
+            size,
+            if enabled { features } else { &unmodified },
+            direction,
+            language,
+        )?;
+        for glyph in &mut glyphs {
+            glyph.cluster += range.start as u32;
+        }
+        result.extend(glyphs);
+    }
+    Ok(result)
 }
 
 /// Shape with [`shape_with_properties`], letting joining at the edges see the

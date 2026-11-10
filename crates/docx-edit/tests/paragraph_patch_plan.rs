@@ -30,12 +30,17 @@ fn open(content: &str) -> EditingDoc {
 }
 
 fn package(content: &str) -> Vec<u8> {
+    package_with_styles(content, None)
+}
+
+fn package_with_styles(content: &str, custom_styles: Option<&str>) -> Vec<u8> {
     let document = format!(
         r#"<w:document {NS}><w:body><w:p w14:paraId="00000001">{content}</w:p><w:sectPr><w:headerReference w:type="default" r:id="header"/></w:sectPr></w:body></w:document>"#
     );
     let styles = format!(
         r#"<w:styles {NS}><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Slant"><w:name w:val="Slant"/><w:rPr><w:i/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Strong"><w:name w:val="Strong"/><w:pPr><w:keepNext/></w:pPr><w:rPr><w:b/><w:sz w:val="32"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Right"><w:name w:val="Right"/><w:pPr><w:jc w:val="right"/></w:pPr></w:style></w:styles>"#
     );
+    let styles = custom_styles.map(str::to_owned).unwrap_or(styles);
     let header = format!(
         r#"<w:hdr {NS}><w:p w14:paraId="00000002"><w:r><w:t>abc</w:t></w:r></w:p></w:hdr>"#
     );
@@ -71,6 +76,110 @@ fn text(value: &str) -> String {
 
 fn ctx() -> EditCtx {
     EditCtx::local("", "2026-10-21T00:00:00Z")
+}
+
+#[test]
+fn optional_typography_survives_editing_and_inherited_typing() {
+    let properties =
+        r#"<w14:ligatures w14:val="standardContextual"/><w14:cntxtAlts w14:val="false"/>"#;
+    let styles = format!(
+        r#"<w:styles {NS}><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:rPr><w14:ligatures w14:val="historical"/><w14:cntxtAlts w14:val="1"/></w:rPr></w:style></w:styles>"#
+    );
+    let content = format!(
+        r#"<w:pPr><w:rPr>{properties}</w:rPr></w:pPr><w:r><w:rPr>{properties}</w:rPr><w:t>fi ti</w:t></w:r><w:r><w:rPr>{properties}</w:rPr><w:t>untouched</w:t></w:r>"#
+    );
+    let bytes = package_with_styles(&content, Some(&styles));
+    let doc = EditingDoc::new(718);
+    seed_from_docx(&doc, &bytes).unwrap();
+    replace(&doc, 3, 4, "f");
+    doc.insert_text(&ctx(), Position::new("body", 1), "i", FormatPolicy::Inherit)
+        .unwrap();
+    let blocks =
+        docx_edit::bridge::yrs_doc_to_layout_blocks(&doc, "body", &Default::default()).unwrap();
+    let docx_layout::types::LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
+        panic!("paragraph")
+    };
+    for run in &paragraph.runs {
+        if let docx_layout::types::Run::Text(run) = run {
+            assert_eq!(run.fmt.ligatures.as_deref(), Some("standardContextual"));
+            assert_eq!(run.fmt.contextual_alternates, Some(false));
+        }
+    }
+    let (saved, warnings) = save_paragraph_with_bytes(&doc, &bytes, |_| {});
+    assert!(saved.matches(properties).count() >= 3, "{saved}");
+    let limits = docx_parse::ParseLimits::default();
+    let xml = docx_parse::parse_xml(
+        saved.as_bytes(),
+        "word/document.xml",
+        &mut docx_parse::ParseBudget::new(&limits),
+    )
+    .unwrap();
+    assert_eq!(xml.root().unwrap().text_content(), "fii fiuntouched");
+    assert!(
+        !warnings.iter().any(|warning| warning.contains("legacy=1")),
+        "{warnings:?}"
+    );
+    let content = text("fi ti");
+    let plain = open(&content);
+    plain
+        .insert_text(&ctx(), Position::new("body", 1), "i", FormatPolicy::Inherit)
+        .unwrap();
+    let (saved, _) = save_paragraph(&plain, &content, |_| {});
+    assert!(!saved.contains("w14:ligatures"));
+    assert!(!saved.contains("w14:cntxtAlts"));
+}
+
+#[test]
+fn optional_typography_resolves_each_style_layer() {
+    for (p_style, r_style, direct, expected) in [
+        ("", "", "", "standard"),
+        ("Empty", "", "", "historical"),
+        ("Child", "", "", "contextual"),
+        ("Child", "CharChild", "", "discretionary"),
+        ("Child", "CharChild", "none", "none"),
+        ("Child", "CharChild", "invalid", "discretionary"),
+    ] {
+        let styles = format!(
+            r#"<w:styles {NS}><w:docDefaults><w:rPrDefault><w:rPr><w14:ligatures w14:val="historical"/><w14:cntxtAlts/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:rPr><w14:ligatures w14:val="standard"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Empty"/><w:style w:type="paragraph" w:styleId="Base"><w:rPr><w14:ligatures w14:val="contextual"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Child"><w:basedOn w:val="Base"/></w:style><w:style w:type="character" w:styleId="CharBase"><w:rPr><w14:ligatures w14:val="discretionary"/><w14:cntxtAlts w14:val="0"/></w:rPr></w:style><w:style w:type="character" w:styleId="CharChild"><w:basedOn w:val="CharBase"/></w:style></w:styles>"#
+        );
+        let paragraph_style = if p_style.is_empty() {
+            String::new()
+        } else {
+            format!(r#"<w:pPr><w:pStyle w:val="{p_style}"/></w:pPr>"#)
+        };
+        let character_style = if r_style.is_empty() {
+            String::new()
+        } else {
+            format!(r#"<w:rStyle w:val="{r_style}"/>"#)
+        };
+        let direct = if direct.is_empty() {
+            String::new()
+        } else {
+            format!(r#"<w14:ligatures w14:val="{direct}"/>"#)
+        };
+        let bytes = package_with_styles(
+            &format!(
+                r#"{paragraph_style}<w:r><w:rPr>{character_style}{direct}</w:rPr><w:t>fi ti</w:t></w:r>"#
+            ),
+            Some(&styles),
+        );
+        let doc = EditingDoc::new(719);
+        seed_from_docx(&doc, &bytes).unwrap();
+        let blocks =
+            docx_edit::bridge::yrs_doc_to_layout_blocks(&doc, "body", &Default::default()).unwrap();
+        let docx_layout::types::LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
+            panic!("paragraph")
+        };
+        let docx_layout::types::Run::Text(run) = &paragraph.runs[0] else {
+            panic!("text")
+        };
+        assert_eq!(
+            run.fmt.ligatures.as_deref(),
+            Some(expected),
+            "{p_style}, {r_style}"
+        );
+        assert_eq!(run.fmt.contextual_alternates, Some(r_style.is_empty()));
+    }
 }
 
 #[test]
@@ -154,7 +263,14 @@ fn save_paragraph(
     content: &str,
     edit_model: impl FnOnce(&mut serde_json::Value),
 ) -> (String, Vec<String>) {
-    let bytes = package(content);
+    save_paragraph_with_bytes(doc, &package(content), edit_model)
+}
+
+fn save_paragraph_with_bytes(
+    doc: &EditingDoc,
+    bytes: &[u8],
+    edit_model: impl FnOnce(&mut serde_json::Value),
+) -> (String, Vec<String>) {
     let plan = doc.paragraph_save_plan();
     let part = plan
         .spliced_parts
@@ -162,7 +278,7 @@ fn save_paragraph(
         .find(|part| part.part == "word/document.xml")
         .unwrap();
     let package = docx_parse::parse_docx_s9_wire(
-        &bytes,
+        bytes,
         docx_parse::S9ParseOptions {
             source_ordinals: true,
             ..Default::default()
@@ -188,7 +304,16 @@ fn save_paragraph(
         }]}
     }))
     .unwrap();
-    let (saved, warnings) = write_docx_s13_with_warnings(request, &bytes).unwrap();
+    let (saved, warnings) = write_docx_s13_with_warnings(request, bytes).unwrap();
+    let styles = |bytes: &[u8]| {
+        ooxml_opc::unzip_parts(bytes)
+            .unwrap()
+            .into_iter()
+            .find(|(path, _)| path == "word/styles.xml")
+            .unwrap()
+            .1
+    };
+    assert_eq!(styles(&saved), styles(bytes));
     let (_, xml) = ooxml_opc::unzip_parts(&saved)
         .unwrap()
         .into_iter()

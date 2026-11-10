@@ -282,6 +282,7 @@ dependencies = [
  "skrifa",
  "unicode-bidi",
  "unicode-linebreak",
+ "unicode-script",
 ]
 
 [[package]]

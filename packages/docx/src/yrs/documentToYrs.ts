@@ -308,6 +308,12 @@ function formattingToMarks(formatting: TextFormatting | undefined): MarkDescript
     });
   }
   if (formatting.emboss) add('emboss');
+  if (formatting.ligatures != null || formatting.contextualAlternates != null) {
+    add('typography', {
+      ligatures: formatting.ligatures ?? null,
+      contextualAlternates: formatting.contextualAlternates ?? null,
+    });
+  }
   if (formatting.imprint) add('imprint');
   if (formatting.shadow) add('textShadow');
   if (formatting.emphasisMark && formatting.emphasisMark !== 'none') {

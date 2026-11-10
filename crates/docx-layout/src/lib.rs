@@ -1083,6 +1083,7 @@ pub fn measure_paragraph_json_resident(input: &str) -> Result<String, String> {
         serde_json::from_str(input).map_err(|error| format!("invalid: parse: {error}"))?;
     let mut input: ooxml_text::measure::MeasureInput =
         serde_json::from_str(input).map_err(|error| format!("invalid: parse: {error}"))?;
+    apply_word_features(&mut input.block, &envelope["block"]);
     input.compat.space_shrink_limit =
         Some(docx_space_shrink_limit(&envelope["compat"], &input.block));
     let extent = with_measure_fonts(|store| {
@@ -1090,6 +1091,18 @@ pub fn measure_paragraph_json_resident(input: &str) -> Result<String, String> {
             .map_err(|error| error.to_string())
     })?;
     serde_json::to_string(&extent).map_err(|error| format!("invalid: serialize: {error}"))
+}
+
+fn apply_word_features(block: &mut ooxml_text::measure::BlockIn, source: &serde_json::Value) {
+    for (index, run) in block.runs.iter_mut().enumerate() {
+        if matches!(run.kind.as_str(), "text" | "tab" | "field") {
+            let source = &source["runs"][index];
+            run.word_features = ooxml_text::ligature_features(
+                source["ligatures"].as_str(),
+                source["contextualAlternates"].as_bool(),
+            );
+        }
+    }
 }
 
 pub(crate) fn docx_space_shrink_limit(

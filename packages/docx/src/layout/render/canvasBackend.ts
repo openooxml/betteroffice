@@ -405,12 +405,10 @@ function drawTextRun(ctx: CanvasRenderingContext2D, run: TextRunPrimitive): void
     if ('wordSpacing' in ctx) ctx.wordSpacing = '0px';
     for (const cluster of run.canvasClusters) {
       const x = run.x + cluster.offset;
-      if (!drawModernRunText(ctx, cluster.text, x, run.baselineY, run, rect)) {
-        drawCanvasTextWithEffects(ctx, cluster.text, x, run.baselineY, run);
-      }
+      drawRunText(ctx, cluster.text, x, run.baselineY, run, rect);
     }
-  } else if (!drawModernRunText(ctx, text, run.x, run.baselineY, run, rect)) {
-    drawCanvasTextWithEffects(ctx, text, run.x, run.baselineY, run);
+  } else {
+    drawRunText(ctx, text, run.x, run.baselineY, run, rect);
   }
   drawTextEmphasisMarks(ctx, text, run.x, run.baselineY, run.width, run);
   if (wrapped) ctx.restore();
@@ -547,10 +545,100 @@ function drawGlyphRunFallback(ctx: CanvasRenderingContext2D, run: GlyphRunPrimit
   ctx.direction = run.rtl ? 'rtl' : 'ltr';
   const paintText = run.paintText ?? run.text;
   const text = run.allCaps ? paintText.toUpperCase() : paintText;
-  if (!drawModernRunText(ctx, text, first.x, first.y, run, glyphRunRect(run))) {
-    drawCanvasTextWithEffects(ctx, text, first.x, first.y, run);
-  }
+  drawRunText(ctx, text, first.x, first.y, run, glyphRunRect(run));
   drawGlyphEmphasisMarks(ctx, run);
+}
+
+function drawRunText(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  x: number,
+  y: number,
+  run: TextRunPrimitive | GlyphRunPrimitive,
+  rect: GeoRect
+): void {
+  const paint = (text: string, x: number) => {
+    if (!drawModernRunText(ctx, text, x, y, run, rect)) {
+      drawCanvasTextWithEffects(ctx, text, x, y, run);
+    }
+  };
+  const enabled = new Set(
+    (run.fontFeatures ?? [])
+      .map(feature => feature.split('='))
+      .filter(([, value]) => Number(value ?? 1) !== 0)
+      .map(([tag]) => tag)
+  );
+  ctx.save();
+  try {
+    const kern = enabled.has('kern');
+    if ('fontKerning' in ctx) ctx.fontKerning = kern ? 'normal' : 'none';
+    if (!('textRendering' in ctx)
+      || ['liga', 'clig', 'hlig', 'dlig'].some(tag => enabled.has(tag))
+      || (kern && !speedPreservesKerning(ctx))) {
+      paint(text, x);
+      return;
+    }
+    drawWithoutLigatures(ctx, text, x, run.rtl, paint);
+  } finally {
+    ctx.restore();
+  }
+}
+
+function drawWithoutLigatures(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  x: number,
+  rtl: boolean | undefined,
+  paint: (text: string, x: number) => void
+): void {
+  const chars = [...text];
+  const strong = (ch: string) => !/[\p{Script=Common}\p{Script=Inherited}]/u.test(ch);
+  const eligible = (ch: string) => /[\p{Script=Latin}\p{Script=Greek}\p{Script=Cyrillic}]/u.test(ch);
+  let previous = chars.find(strong);
+  const spans: Array<{ text: string; disable: boolean }> = [];
+  for (const ch of chars) {
+    if (strong(ch)) previous = ch;
+    const disable = previous !== undefined && eligible(previous);
+    const last = spans.at(-1);
+    if (last?.disable === disable) last.text += ch;
+    else spans.push({ text: ch, disable });
+  }
+  if (!spans.some(span => span.disable)) {
+    paint(text, x);
+    return;
+  }
+  if (rtl) spans.reverse();
+  let pen = x;
+  for (const span of spans) {
+    ctx.save();
+    try {
+      if (span.disable) {
+        ctx.textRendering = 'optimizeSpeed';
+      }
+      paint(span.text, pen);
+      if (spans.length > 1) pen += ctx.measureText(span.text).width;
+    } finally {
+      ctx.restore();
+    }
+  }
+}
+
+function speedPreservesKerning(ctx: CanvasRenderingContext2D): boolean {
+  if (!('fontKerning' in ctx)) return false;
+  ctx.save();
+  try {
+    ctx.textRendering = 'auto';
+    ctx.fontKerning = 'normal';
+    const normal = ctx.measureText('AV').width;
+    ctx.fontKerning = 'none';
+    const separate = ctx.measureText('AV').width;
+    ctx.fontKerning = 'normal';
+    ctx.textRendering = 'optimizeSpeed';
+    const speed = ctx.measureText('AV').width;
+    return normal < separate && Math.abs(speed - normal) < 0.001;
+  } finally {
+    ctx.restore();
+  }
 }
 
 function drawLine(ctx: CanvasRenderingContext2D, line: LinePrimitive): void {

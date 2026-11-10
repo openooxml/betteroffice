@@ -100,5 +100,6 @@ pub use shape::{ShapeDirection, ShapeFeature, ShapedGlyph, shape, shape_with_dir
 pub use symbol_font::SymbolFont;
 pub use word_metrics::{
     CompatFlags, LineBox, LineSpacingRule, apply_spacing_rule, kern_enabled, kern_features,
-    line_is_justified, single_line_box, snap_line_box, snap_line_height, stretch_spaces,
+    ligature_features, line_is_justified, single_line_box, snap_line_box, snap_line_height,
+    stretch_spaces, word_typography_mask,
 };

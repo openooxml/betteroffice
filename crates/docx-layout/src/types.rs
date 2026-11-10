@@ -207,6 +207,10 @@ pub struct RunFormatting {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kerning_min_pt: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub ligatures: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contextual_alternates: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub imprint: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub emboss: Option<bool>,
@@ -2944,6 +2948,9 @@ pub struct PositionedGlyphContractMetadata {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DisplayTextContractMetadata {
+    /// Enabled optional switches; empty selects DOCX defaults.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub font_features: Vec<ooxml_text::ShapeFeature>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leader_glyphs: Option<LeaderGlyphContract>,
     /// Modern w14 text effects payload.

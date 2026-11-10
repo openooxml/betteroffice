@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 
+use crate::paragraph_identity::W14_NAMESPACE as W14;
 use crate::paragraph_patch::{AttrDeltaV1, Attrs, PatchErrorCode, SlotV1};
 use crate::serializer::xml_writer::{XmlWriter, escape_xml, int_attr};
 
@@ -49,6 +50,18 @@ pub(super) const RANK_R: &[&str] = &[
     "specVanish",
     "oMath",
     "rPrChange",
+    "glow",
+    "shadow14",
+    "reflection",
+    "textOutline",
+    "textFill",
+    "scene3d",
+    "props3d",
+    "ligatures",
+    "numForm",
+    "numSpacing",
+    "stylisticSets",
+    "cntxtAlts",
 ];
 pub(super) const RANK_P: &[&str] = &[
     "pStyle",
@@ -152,6 +165,10 @@ pub(super) fn restyle_run_deltas(
                     .any(|field| has(field)),
             },
             Some("textColor") => has("color"),
+            Some("typography") => match path.get(1).map(String::as_str) {
+                Some(field @ ("ligatures" | "contextualAlternates")) => has(field),
+                _ => has("ligatures") || has("contextualAlternates"),
+            },
             Some("strike" | "doubleStrike") => has("strike") || has("doubleStrike"),
             Some("superscript" | "subscript") => has("vertAlign"),
             Some("highlight") => has("highlight") || has("shading"),
@@ -221,6 +238,7 @@ pub(super) fn run_properties(
                 | "fontSize"
                 | "fontFamily"
                 | "characterSpacing"
+                | "typography"
                 | "superscript"
                 | "subscript"
                 | "allCaps"
@@ -274,7 +292,10 @@ pub(super) fn run_properties(
     }
     super::language::run_language(
         &output,
-        &BTreeMap::from([("w".to_owned(), WORD.to_owned())]),
+        &BTreeMap::from([
+            ("w".to_owned(), WORD.to_owned()),
+            ("w14".to_owned(), W14.to_owned()),
+        ]),
         &slots,
     )
 }
@@ -661,6 +682,47 @@ fn run_leaf(
             };
             set(changes, child, "w:val", number(value)?);
         }
+        "typography" if path.len() == 2 => {
+            let (child, value) = match path[1].as_str() {
+                "ligatures" => {
+                    let value = string(value)?;
+                    if value
+                        .as_deref()
+                        .is_some_and(|value| !crate::formatting::valid_ligatures(value))
+                    {
+                        return Err(unsupported(path));
+                    }
+                    ("ligatures", value)
+                }
+                "contextualAlternates" => {
+                    if value.is_some_and(|value| !value.is_boolean()) {
+                        return Err(unsupported(path));
+                    }
+                    (
+                        "cntxtAlts",
+                        value.map(|value| {
+                            let value = if value == &Value::Bool(true) {
+                                "1"
+                            } else {
+                                "0"
+                            };
+                            value.to_owned()
+                        }),
+                    )
+                }
+                _ => return Err(unsupported(path)),
+            };
+            if value.is_none() {
+                if attr_at(inherit, path).is_some() {
+                    let value = if child == "ligatures" { "none" } else { "0" };
+                    set(changes, child, "w14:val", Some(value.to_owned()));
+                } else {
+                    changes.children.entry(child).or_default().remove = true;
+                }
+            } else {
+                set(changes, child, "w14:val", value);
+            }
+        }
         "textColor" if path.len() == 2 => {
             let attr = match path[1].as_str() {
                 "rgb" => "w:val",
@@ -891,7 +953,13 @@ fn first_line(
 }
 
 fn property_xml(source: &str) -> Result<Xml, Failure> {
-    Xml::parse(source, &BTreeMap::from([("w".to_owned(), WORD.to_owned())]))
+    Xml::parse(
+        source,
+        &BTreeMap::from([
+            ("w".to_owned(), WORD.to_owned()),
+            ("w14".to_owned(), W14.to_owned()),
+        ]),
+    )
 }
 
 fn write_container(source: &str, name: &'static str, change: &Change) -> Result<String, Failure> {
@@ -946,14 +1014,25 @@ fn write_child(
     change: &Change,
 ) -> Result<String, Failure> {
     let xml = property_xml(source)?;
-    if let Some(at) = xml.child(0, child)? {
+    let extension = matches!(child, "ligatures" | "cntxtAlts");
+    let matching: Vec<_> = xml.nodes[0]
+        .children
+        .iter()
+        .copied()
+        .filter(|at| {
+            let node = &xml.nodes[*at];
+            node.local == child && node.namespace == if extension { W14 } else { WORD }
+        })
+        .collect();
+    if matching.len() > 1 {
+        return Err(conflict("duplicate run property"));
+    }
+    if let Some(at) = matching.first().copied() {
         let node = &xml.nodes[at];
         if change.remove {
-            if node
-                .attributes
-                .iter()
-                .any(|attribute| attribute.name != "w:val")
-                || !node.children.is_empty()
+            if node.attributes.iter().any(|attribute| {
+                !matches!(attribute.name.as_str(), "w:val" | "w14:val" | "xmlns:w14")
+            }) || !node.children.is_empty()
             {
                 return Err(conflict(format!("cannot remove opaque {child}")));
             }
@@ -1014,7 +1093,19 @@ fn write_child(
     {
         return Ok(source.to_owned());
     }
-    let fragment = if let Some(fragment) = sparse_fragment(parent, child, &change.attributes)? {
+    let fragment = if extension {
+        let mut writer = XmlWriter::with_capacity(128);
+        writer
+            .start_element(qualified(child)?)
+            .attribute("xmlns:w14", W14);
+        for (attr, value) in &change.attributes {
+            if let Some(value) = value {
+                writer.attribute(attr, value);
+            }
+        }
+        writer.end_element();
+        writer.finish()
+    } else if let Some(fragment) = sparse_fragment(parent, child, &change.attributes)? {
         fragment
     } else {
         let qualified = qualified(child)?;
@@ -1048,10 +1139,15 @@ fn write_child(
     let mut insertion = None;
     for &at in &root.children {
         let node = &xml.nodes[at];
-        if node.namespace != WORD {
+        if node.namespace != WORD && node.namespace != W14 {
             continue;
         }
-        if let Some(current) = rank(parent, &node.local) {
+        let local = if node.namespace == W14 && node.local == "shadow" {
+            "shadow14"
+        } else {
+            &node.local
+        };
+        if let Some(current) = rank(parent, local) {
             if previous.is_some_and(|previous| current <= previous) {
                 return Err(conflict("ambiguous property order"));
             }
@@ -1350,6 +1446,8 @@ fn qualified(child: &str) -> Result<&'static str, Failure> {
         "szCs" => "w:szCs",
         "w" => "w:w",
         "kern" => "w:kern",
+        "ligatures" => "w14:ligatures",
+        "cntxtAlts" => "w14:cntxtAlts",
         "position" => "w:position",
         "u" => "w:u",
         "highlight" => "w:highlight",
@@ -1376,6 +1474,33 @@ fn qualified(child: &str) -> Result<&'static str, Failure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typography_patches_keep_extension_order_and_opaque_effects() {
+        let source = r#"<w:rPr><w:b/><w14:glow w14:rad="12700"/><w14:numForm w14:val="lining"/><w14:cntxtAlts w14:val="false"/></w:rPr>"#;
+        let delta = AttrDeltaV1 {
+            path: vec!["typography".to_owned(), "ligatures".to_owned()],
+            before: SlotV1::Missing,
+            after: SlotV1::Present {
+                value: serde_json::json!("standardContextual"),
+            },
+        };
+        let saved = run_properties(source, &[delta], &Attrs::new(), &Attrs::new()).unwrap();
+        assert!(saved.contains(r#"<w14:glow w14:rad="12700"/>"#));
+        assert!(saved.contains(r#"<w14:cntxtAlts w14:val="false"/>"#));
+        assert!(saved.find("w14:glow").unwrap() < saved.find("w14:ligatures").unwrap());
+        assert!(saved.find("w14:ligatures").unwrap() < saved.find("w14:numForm").unwrap());
+        assert!(saved.find("w14:numForm").unwrap() < saved.find("w14:cntxtAlts").unwrap());
+        let language = AttrDeltaV1 {
+            path: vec!["language".to_owned(), "latin".to_owned()],
+            before: SlotV1::Missing,
+            after: SlotV1::Present {
+                value: serde_json::json!("en-US"),
+            },
+        };
+        let saved = run_properties(&saved, &[language], &Attrs::new(), &Attrs::new()).unwrap();
+        assert!(saved.find("w:lang").unwrap() < saved.find("w14:glow").unwrap());
+    }
 
     #[test]
     fn restyling_keeps_a_character_spacing_change_the_source_sets_directly() {

@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { applyFrameDelta, decodeFrameDelta } from '../../packages/docx/src/layout/render/frameDelta';
+import { assertTypographyTable, inspectTypographyTable, typographyRows } from '../../e2e/fixtures/docx-typography';
 import initWasm, * as wasm from '../../packages/docx/src/wasm/generated/edit/docx_edit.js';
 import initPreflight, { font_preflight as wasmFontPreflight } from '../../packages/docx/src/wasm/generated/preflight/docx_preflight.js';
 
@@ -82,6 +83,18 @@ function expectThrownParity(wasmCall: () => unknown, nativeCall: () => unknown):
 }
 
 describe('docx native engine parity', () => {
+  test('native and wasm measure and paint the same optional typography table', async () => {
+    const fonts = Object.fromEntries([
+      ['carlito', '../../packages/fonts/assets/Carlito-Regular.ttf'],
+      ['arabic', '../../packages/fonts/assets/NotoNaskhArabic-Regular.ttf'],
+      ['devanagari', '../../packages/fonts-intl/assets/NotoSansDevanagari-Regular.ttf.zst'],
+    ].map(([name, path]) => [name, [...readFileSync(new URL(path, import.meta.url))]]));
+    const expected = await inspectTypographyTable({ engine: wasm, rows: typographyRows, fonts });
+    const actual = await inspectTypographyTable({ engine: native, rows: typographyRows, fonts });
+    assertTypographyTable(expected);
+    assertTypographyTable(actual);
+    expect(actual).toEqual(expected);
+  }, 30_000);
   test('an empty docDefaults element leaves unstyled paragraphs without spacing in both engines', () => {
     const encoder = new TextEncoder();
     const bytes = wasm.rezip_docx({

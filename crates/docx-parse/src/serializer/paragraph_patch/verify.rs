@@ -248,6 +248,8 @@ fn run(direct: &Value, attrs: &Attrs, symbol: bool) -> Result<(), Failure> {
         ("position", "characterSpacing", "position"),
         ("scale", "characterSpacing", "scale"),
         ("kerning", "characterSpacing", "kerning"),
+        ("ligatures", "typography", "ligatures"),
+        ("contextualAlternates", "typography", "contextualAlternates"),
     ] {
         if let Some(value) = direct.get(source) {
             check(key, value, attrs.get(key).and_then(|v| v.get(field)))?;

@@ -460,6 +460,12 @@ function attrsToTextFormatting(attributes: Attrs): TextFormatting {
   }
 
   const modern = asObject(attributes.modernTextEffects);
+  const typography = asObject(attributes.typography);
+  const ligatures = asString(typography?.ligatures);
+  if (ligatures !== undefined) formatting.ligatures = ligatures;
+  if (typeof typography?.contextualAlternates === 'boolean') {
+    formatting.contextualAlternates = typography.contextualAlternates;
+  }
   if (modern?.effects) formatting.modernEffects = modern.effects as TextFormatting['modernEffects'];
 
   if (attributes.language !== undefined) formatting.language = liveLanguage(undefined, attributes.language);

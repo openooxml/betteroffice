@@ -116,6 +116,8 @@ fn eligible_painted_descent(block: &ParagraphBlock, line: &TypesetRow) -> Option
             position_px: None,
             horizontal_scale: _,
             kerning_min_pt: _,
+            ligatures: _,
+            contextual_alternates: _,
             imprint: None | Some(false),
             emboss: None | Some(false),
             text_shadow: None | Some(false),

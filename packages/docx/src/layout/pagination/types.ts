@@ -135,6 +135,8 @@ export type RunFormatting = {
    * threshold, the painter enables font-kerning: normal.
    */
   kerningMinPt?: number;
+  ligatures?: string;
+  contextualAlternates?: boolean;
   /** Engraved/imprint effect (OOXML w:imprint, §17.3.2.18). */
   imprint?: boolean;
   /** Embossed/raised effect (OOXML w:emboss, §17.3.2.13). */

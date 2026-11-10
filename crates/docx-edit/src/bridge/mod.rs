@@ -5189,6 +5189,10 @@ fn lower_run_formatting(attributes: Option<&Attrs>, env: &RenderEnv) -> RunForma
     lower_font_size(attributes, &mut result);
     lower_language(attributes, &mut result);
     lower_character_spacing(attributes, &mut result);
+    if let Some(Any::Map(map)) = attribute(attributes, "typography") {
+        result.ligatures = map_string(map, "ligatures");
+        result.contextual_alternates = map_bool(map, "contextualAlternates");
+    }
 
     result.superscript = mark_bool(attributes, "superscript");
     result.subscript = mark_bool(attributes, "subscript");

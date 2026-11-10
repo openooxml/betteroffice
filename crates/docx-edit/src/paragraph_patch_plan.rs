@@ -253,6 +253,7 @@ fn run_key(path: &[String]) -> bool {
         "fontSize" => Some(&["size", "sizeCs"]),
         "language" => Some(&["latin", "val", "eastAsia", "bidi"]),
         "characterSpacing" => Some(&["spacing", "position", "scale", "kerning"]),
+        "typography" => Some(&["ligatures", "contextualAlternates"]),
         "fontFamily" => Some(&[
             "ascii",
             "hAnsi",

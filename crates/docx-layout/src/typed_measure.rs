@@ -300,6 +300,8 @@ fn formatted_run(kind: &str, fmt: &RunFormatting) -> RunIn {
     out.small_caps = fmt.small_caps.unwrap_or(false);
     out.horizontal_scale = fmt.horizontal_scale.and_then(finite);
     out.kerning_min_pt = fmt.kerning_min_pt.and_then(finite);
+    out.word_features =
+        ooxml_text::ligature_features(fmt.ligatures.as_deref(), fmt.contextual_alternates);
     out.superscript = fmt.superscript.unwrap_or(false);
     out.subscript = fmt.subscript.unwrap_or(false);
     out.hidden = fmt.hidden.unwrap_or(false);
@@ -327,6 +329,7 @@ fn bare_run(kind: &str) -> RunIn {
         small_caps: false,
         horizontal_scale: None,
         kerning_min_pt: None,
+        word_features: Vec::new(),
         superscript: false,
         subscript: false,
         hidden: false,
@@ -506,6 +509,38 @@ mod parity_tests {
                 authoritative_shaping: true,
             },
         }
+    }
+
+    #[test]
+    fn docx_defaults_and_requested_ligatures_match_the_json_bridge() {
+        crate::clear_measure_fonts();
+        let font = crate::register_measure_font(include_bytes!(
+            "../../../packages/fonts/assets/Carlito-Regular.ttf"
+        ))
+        .unwrap();
+        let config = MeasurementConfig {
+            font_chains: BTreeMap::from([("calibri|0|0".to_owned(), vec![font])]),
+            defaults: json!({"fontFamily": "Calibri", "fontSize": 12}),
+            compat: json!({}),
+            authoritative_shaping: true,
+        };
+        let mut counts = Vec::new();
+        for setting in [None, Some("none"), Some("standardContextual")] {
+            let mut run = text_run("fi ti");
+            if let Run::Text(run) = &mut run {
+                run.fmt.ligatures = setting.map(str::to_owned);
+            }
+            let paragraph = paragraph(vec![run], None);
+            let typed = measure_paragraph(&paragraph, 624.0, &config, None, 0.0).unwrap();
+            let json = legacy_measure(&paragraph, 624.0, &config, None, 0.0).unwrap();
+            assert_eq!(typed, json);
+            let runs = ooxml_text::unpack_glyph_runs(typed.lines[0].glyph_runs.as_deref().unwrap())
+                .unwrap();
+            counts.push(runs.iter().map(|run| run.glyphs.len()).sum::<usize>());
+        }
+        assert_eq!(counts[0], 5);
+        assert_eq!(counts[1], counts[0]);
+        assert!(counts[2] < counts[0]);
     }
 
     #[test]
@@ -1362,6 +1397,12 @@ mod parity_tests {
         put(target, "smallCaps", maybe_bool(rng));
         put(target, "horizontalScale", maybe_num(rng));
         put(target, "kerningMinPt", maybe_num(rng));
+        put(
+            target,
+            "ligatures",
+            maybe_str(rng, &["none", "standardContextual", "all"]),
+        );
+        put(target, "contextualAlternates", maybe_bool(rng));
         put(target, "superscript", maybe_bool(rng));
         put(target, "subscript", maybe_bool(rng));
         put(target, "hidden", maybe_bool(rng));
@@ -1507,7 +1548,10 @@ mod parity_tests {
     fn legacy_block_in(paragraph: &ParagraphBlock) -> Option<ooxml_text::measure::BlockIn> {
         let envelope = json!({ "block": LayoutBlock::Paragraph(paragraph.clone()) }).to_string();
         let parsed: Value = serde_json::from_str(&envelope).ok()?;
-        serde_json::from_value(parsed.get("block")?.clone()).ok()
+        let source = parsed.get("block")?;
+        let mut block = serde_json::from_value(source.clone()).ok()?;
+        crate::apply_word_features(&mut block, source);
+        Some(block)
     }
 
     fn legacy_measure(

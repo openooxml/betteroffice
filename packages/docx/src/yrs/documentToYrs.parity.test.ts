@@ -184,6 +184,36 @@ function seedClocks(session: YrsSession): Map<bigint, bigint> {
 describe('DOCX engine seeding', () => {
   beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
+  it('seeds optional typography identically and saves inherited typing', async () => {
+    const properties = '<w14:ligatures w14:val="standardContextual"/><w14:cntxtAlts w14:val="false"/>';
+    const bytes = sequencePackage(`<w:p xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:r><w:rPr>${properties}</w:rPr><w:t>fi ti</w:t></w:r></w:p>`);
+    const parsed = await parseDocx(bytes.buffer, { preloadFonts: false });
+    const engine = await createYrsSession({ clientId: 47100 });
+    const projected = await createYrsSession({ clientId: 47100 });
+    try {
+      engine.seedFromDocx(bytes, { generation: 'typography' });
+      documentToYrs(projected, parsed, { generation: 'typography' });
+      expectEquivalentStories(engine, projected);
+      expect(engine.encodeState()).toEqual(projected.encodeState());
+      for (const session of [engine, projected]) {
+        const paragraph = session.paragraphs('body')[0]!;
+        session.insertText({ story: 'body', paraId: paragraph.paraId, offset: 1 }, 'i');
+        const blocks = session.yrsBlocksForStory('body', {}) as LayoutBlock[];
+        const runs = sequenceRuns(blocks).filter(run => run.kind === 'text');
+        expect(runs).toEqual(expect.arrayContaining([expect.objectContaining({
+          ligatures: 'standardContextual', contextualAlternates: false,
+        })]));
+        const saved = unzipContainer((await saveYrsDocx(session)).bytes);
+        const xml = new TextDecoder().decode(saved['word/document.xml']);
+        expect(xml).toContain('w14:val="standardContextual"');
+        expect(xml).toContain('w14:val="false"');
+      }
+    } finally {
+      engine.destroy();
+      projected.destroy();
+    }
+  });
+
   it('seeds nested SEQ names without adding them to plain fields', async () => {
     const sequence = (cached: string): ComplexField => ({
       type: 'complexField',

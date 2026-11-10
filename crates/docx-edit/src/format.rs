@@ -590,6 +590,7 @@ pub(crate) const FORMATTING_ATTRS: &[&str] = &[
     "rFonts",
     "sz",
     "characterSpacing",
+    "typography",
     "allCaps",
     "smallCaps",
     "emboss",

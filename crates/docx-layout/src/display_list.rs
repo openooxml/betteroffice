@@ -481,10 +481,59 @@ pub struct DocAttrs {
     /// from `RunFormatting.modernEffects`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modern_effects: Option<Box<Value>>,
+    /// Enabled switches relative to DOCX's optional typography defaults.
+    #[allow(clippy::box_collection)]
+    #[serde(default, skip_serializing_if = "font_features_empty")]
+    pub font_features: Option<Box<Vec<ooxml_text::ShapeFeature>>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub table: Option<Box<TableMetadata>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inline_shape_atom: Option<bool>,
+}
+
+#[allow(clippy::box_collection)]
+fn font_features_empty(features: &Option<Box<Vec<ooxml_text::ShapeFeature>>>) -> bool {
+    features.as_ref().is_none_or(|features| features.is_empty())
+}
+
+const DOCX_PAINT_SWITCHES: [[u8; 4]; 6] =
+    [*b"kern", *b"liga", *b"clig", *b"hlig", *b"dlig", *b"calt"];
+
+#[allow(clippy::box_collection)]
+fn primitive_features(
+    features: &[ooxml_text::ShapeFeature],
+) -> Option<Box<Vec<ooxml_text::ShapeFeature>>> {
+    let enabled: Vec<_> = DOCX_PAINT_SWITCHES
+        .into_iter()
+        .filter(|tag| {
+            let value = features.iter().rev().find(|feature| feature.tag == *tag);
+            match value {
+                Some(feature) => feature.value != 0,
+                None => tag == b"kern",
+            }
+        })
+        .map(|tag| ooxml_text::ShapeFeature { tag, value: 1 })
+        .collect();
+    (!enabled.is_empty()).then(|| Box::new(enabled))
+}
+
+/// Expands a primitive's enabled switches into DOCX shaping features.
+pub fn docx_paint_features(
+    listed: Option<&[ooxml_text::ShapeFeature]>,
+) -> Vec<ooxml_text::ShapeFeature> {
+    let listed = listed.unwrap_or_default();
+    DOCX_PAINT_SWITCHES
+        .into_iter()
+        .map(|tag| ooxml_text::ShapeFeature {
+            tag,
+            value: u32::from(
+                listed
+                    .iter()
+                    .any(|feature| feature.tag == tag && feature.value != 0),
+            ),
+        })
+        .filter(|feature| feature.value != 0 || !matches!(&feature.tag, b"hlig" | b"dlig"))
+        .collect()
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
@@ -1897,6 +1946,10 @@ struct RunFormattingIn {
     horizontal_scale: Option<f64>,
     #[serde(default)]
     kerning_min_pt: Option<f64>,
+    #[serde(default)]
+    ligatures: Option<String>,
+    #[serde(default)]
+    contextual_alternates: Option<bool>,
     #[serde(default)]
     imprint: Option<bool>,
     #[serde(default)]
@@ -3601,12 +3654,17 @@ fn effective_font_px_of(fmt: &RunFormattingIn) -> f64 {
 /// Paint-side twin of the measurement kerning gate: Word applies pair kerning
 /// only above a nonzero `w:kern` threshold, so an absent one shapes `kern=0`.
 fn kern_features_of(fmt: &RunFormattingIn, size_px: f64) -> Vec<ooxml_text::ShapeFeature> {
-    ooxml_text::kern_features(fmt.kerning_min_pt.is_some_and(|threshold| {
+    let mut features = ooxml_text::kern_features(fmt.kerning_min_pt.is_some_and(|threshold| {
         ooxml_text::kern_enabled(
             (size_px * 1.5).round() as u32,
             (threshold * 2.0).round() as u32,
         )
-    }))
+    }));
+    features.extend(ooxml_text::ligature_features(
+        fmt.ligatures.as_deref(),
+        fmt.contextual_alternates,
+    ));
+    features
 }
 
 fn fallback_scalar_count(text: &str, all_caps: Option<bool>) -> usize {
@@ -4957,7 +5015,7 @@ fn painted_text_width(
                 value: 1,
             });
         }
-        ooxml_text::shape::shape_with_properties(
+        ooxml_text::shape::shape_with_word_features(
             fonts.store,
             font,
             text,
@@ -5131,7 +5189,7 @@ fn text_canvas_clusters(
             language.east_asia.as_deref().or(language.latin.as_deref())
         }
     });
-    let glyphs = ooxml_text::shape::shape_with_properties(
+    let glyphs = ooxml_text::shape::shape_with_word_features(
         fonts.store,
         font,
         &text,
@@ -7095,10 +7153,12 @@ fn authoritative_line_items<'a>(
 }
 
 /// Hands the line's measured glyphs to the text items of joining and Indic
-/// scripts, which reshaping cluster by cluster would break apart. Consecutive
-/// clusters of one glyph run become one item. Other text keeps its items and
-/// their reshape, as does text with no glyph run: a field, a dropped run, an
-/// older payload, or a format that paints through the browser.
+/// scripts, and of Latin, Greek or Cyrillic text that asks for optional
+/// ligatures or contextual alternates, which reshaping cluster by cluster would
+/// break apart. Consecutive clusters of one glyph run become one item. Other
+/// text keeps its items and their reshape, as does text with no glyph run: a
+/// field, a dropped run, an older payload, or a format that paints through the
+/// browser.
 fn attach_measured_glyphs<'a>(
     items: Vec<LinePaintItem<'a>>,
     block: &'a ParagraphBlockIn,
@@ -7109,8 +7169,19 @@ fn attach_measured_glyphs<'a>(
     let (Some(packed), Some(shape)) = (line.glyph_runs.as_deref(), ctx.shape) else {
         return items;
     };
-    let in_context =
-        |item: &LineTextItem<'_>| item.text.chars().any(ooxml_text::is_joining_or_indic);
+    let in_context = |item: &LineTextItem<'_>| {
+        let optional = item.fmt.contextual_alternates == Some(true)
+            || item
+                .fmt
+                .ligatures
+                .as_deref()
+                .is_some_and(|value| value != "none");
+        item.text.chars().any(ooxml_text::is_joining_or_indic)
+            || (optional
+                && ooxml_text::word_typography_mask(item.text)
+                    .into_iter()
+                    .any(|enabled| enabled))
+    };
     if !items
         .iter()
         .any(|item| matches!(item, LinePaintItem::Text(item) if in_context(item)))
@@ -8571,6 +8642,8 @@ fn emit_text_segment(
     if !emitted_glyphs {
         let mut text_attrs = attrs.clone();
         text_attrs.modern_effects = fmt.modern_effects.clone().map(Box::new);
+        text_attrs.font_features =
+            primitive_features(&kern_features_of(fmt, effective_font_px_of(fmt)));
         text_attrs.canvas_clusters = text_canvas_clusters(
             shape,
             text,
@@ -8775,6 +8848,7 @@ fn glyph_run_primitive(
         None => css_font(fmt),
     });
     attrs.modern_effects = fmt.modern_effects.clone().map(Box::new);
+    attrs.font_features = primitive_features(&kern_features_of(fmt, size_px));
     GlyphRunPrimitive {
         font_id: font.to_u32(),
         size: round3(size_px),
@@ -8985,7 +9059,7 @@ fn try_emit_glyph_runs(
             segments[range_index].utf16_end,
         );
         let is_last = range_index + 1 == segment_count;
-        let glyphs = match ooxml_text::shape::shape_with_properties(
+        let glyphs = match ooxml_text::shape::shape_with_word_features(
             shape_fonts.store,
             font,
             &sub_text,
@@ -9072,7 +9146,9 @@ fn try_emit_glyph_runs(
         let echo = (!sub_text.chars().any(ooxml_text::is_joining_or_indic)).then(|| EchoRunFacts {
             x: 0.0,
             right: 0.0,
-            kern: features.is_empty(),
+            kern: !features
+                .iter()
+                .any(|feature| feature.tag == *b"kern" && feature.value == 0),
             kerning: fmt.kerning_min_pt.unwrap_or(0.0),
             primary_font: echo_font_route && chain.ids.first() == Some(&font),
             letter_spacing: fmt.letter_spacing.unwrap_or(0.0),
