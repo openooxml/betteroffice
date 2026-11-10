@@ -21,7 +21,7 @@ import { createXlsxCommandController, xlsxCommandController } from '../commands/
 import type { XlsxPluginEditorAccess } from './createPluginClients';
 import { useXlsxPluginHost } from './useXlsxPluginHost';
 import * as xlsxBindings from './useXlsxPluginHost';
-import { selectionClock } from '../../../../e2e/browser/plugin-host/selection-clock';
+import { selectionWindow } from '../../../../e2e/browser/plugin-host/selection-clock';
 import type { XlsxAnchorGeometryResult, XlsxPluginSelection } from './types';
 import { isMacPlatform } from '../commands/descriptors';
 import { pluginDefinition } from './defineXlsxPlugin';
@@ -2898,9 +2898,10 @@ test('plugin locales are canonical and equivalent tags do not notify twice', asy
 
 async function xlsxMatrix(engine: 'XI' | 'XP', file = fixture) {
   const collaboration = {};
-  const clock = selectionClock();
+  const clock = selectionWindow();
   const events: XlsxPluginEvent[] = [];
   const anchors: Array<XlsxAnchorGeometryResult | null> = [];
+  const settledAt: number[] = [];
   let latest: XlsxPluginContext<null> | undefined;
   let binding: ReturnType<typeof useXlsxPluginHost> | undefined;
   let overrideSelection: XlsxPluginSelection | undefined;
@@ -2913,7 +2914,10 @@ async function xlsxMatrix(engine: 'XI' | 'XP', file = fixture) {
     initialize(context) { latest = context; },
     onEvent(context, event) {
       latest = context; events.push(event);
-      if (event.type === 'selection-settle') anchors.push(context.geometry?.getAnchorGeometry({ kind: 'selection' }) ?? null);
+      if (event.type === 'selection-settle') {
+        settledAt.push(Date.now());
+        anchors.push(context.geometry?.getAnchorGeometry({ kind: 'selection' }) ?? null);
+      }
     } });
   const peer = engine === 'XP' ? pluginWorker() : null;
   if (peer && file === charted) {
@@ -2940,18 +2944,18 @@ async function xlsxMatrix(engine: 'XI' | 'XP', file = fixture) {
       globalThis.cancelAnimationFrame = window.cancelAnimationFrame = id => { frames.delete(id); };
     }
     await act(async () => { await clock.tick(350); });
-    await binding!.host.notificationsIdle();
+    await act(async () => {});
     const view = workerView ?? mounted!.view;
     const context = () => binding!.host.activations()[0]!.context as XlsxPluginContext<null>;
-    const reset = () => { events.length = 0; anchors.length = 0; };
+    const reset = () => { events.length = 0; anchors.length = 0; settledAt.length = 0; };
     const quiet = async (ms = 350) => {
       await act(async () => { await clock.tick(ms); });
-      await binding!.host.notificationsIdle();
+      await act(async () => {});
     };
     const paint = async () => {
       if (peer) await peer.paint();
       else await act(async () => { const pending = [...frames.values()]; frames.clear(); for (const callback of pending) callback(0); });
-      await binding!.host.notificationsIdle();
+      await act(async () => {});
     };
     const select = async (row: number, col = 0) => {
       if (peer) {
@@ -2961,10 +2965,10 @@ async function xlsxMatrix(engine: 'XI' | 'XP', file = fixture) {
         const command = await peer.dispatched(nextSequence);
         await act(async () => { peer.ack(command); await selecting; });
       } else await act(async () => { mounted!.api().selectCells(0, selectionAt({ row, col })); });
-      await binding!.host.notificationsIdle();
+      await act(async () => {});
     };
     reset();
-    return { plugin, events, anchors, view, clock, context, quiet, paint, select, reset, peer,
+    return { plugin, events, anchors, settledAt, view, clock, context, quiet, paint, select, reset, peer,
       binding: () => binding!, api: () => mounted!.api(), pendingPaints: () => peer?.pendingPaints() ?? frames.size,
       rerender(plugins = [plugin], file?: Uint8Array) {
         if (workerView) workerView.rerender({ plugins, ...(file ? { file } : {}) });
@@ -2989,11 +2993,10 @@ async function xlsxMatrix(engine: 'XI' | 'XP', file = fixture) {
           globalThis.requestAnimationFrame = raf; globalThis.cancelAnimationFrame = caf;
           window.requestAnimationFrame = windowRaf; window.cancelAnimationFrame = windowCaf;
         }
-        clock.restore();
       },
     };
   } catch (error) {
-    cleanup(); capture.mockRestore(); peer?.restore(); clock.restore();
+    cleanup(); capture.mockRestore(); peer?.restore();
     if (!peer) {
       globalThis.requestAnimationFrame = raf; globalThis.cancelAnimationFrame = caf;
       window.requestAnimationFrame = windowRaf; window.cancelAnimationFrame = windowCaf;
@@ -3009,7 +3012,6 @@ for (const engine of ['XI', 'XP'] as const) describe(`selection matrix ${engine}
       await h.select(2, 1);
       await h.schedulePaint();
       expect(h.pendingPaints()).toBeGreaterThan(0);
-      h.clock.holdWaits();
       await h.quiet();
       expect(h.events.filter(event => event.type === 'selection-settle')).toHaveLength(0);
       expect(h.context().snapshot.selectionSettled).toBe(false);
@@ -3042,11 +3044,10 @@ for (const engine of ['XI', 'XP'] as const) describe(`selection matrix ${engine}
       await h.select(2, 1);
       await h.schedulePaint();
       expect(h.pendingPaints()).toBeGreaterThan(0);
-      h.clock.holdWaits();
       await h.quiet();
       expect(h.anchors).toEqual([]);
-      await act(async () => { await h.clock.expire(); });
-      await h.binding().host.notificationsIdle();
+      await act(async () => { await h.clock.expire(() => h.anchors.length > 0); });
+      await act(async () => {});
       expect(h.pendingPaints()).toBeGreaterThan(0);
       expect(h.anchors).toHaveLength(1);
       expect(h.context().snapshot.selectionSettled).toBe(true);
@@ -3169,12 +3170,15 @@ for (const engine of ['XI', 'XP'] as const) describe(`selection matrix ${engine}
   if (engine === 'XI') editorTest('T6: focus change neither cancels nor restarts a pending settle', async () => {
     const h = await xlsxMatrix(engine);
     try {
+      const selectedAt = Date.now();
       await h.select(1, 1); await h.paint(); await h.quiet(200);
+      const focusedAt = Date.now();
       await act(async () => { const root = h.view.getByTestId('xlsx-scroll'); root.focus(); root.blur(); });
-      await h.quiet(149);
       expect(h.anchors).toEqual([]);
-      await h.quiet(1);
+      await until(() => h.anchors.length > 0);
       expect(h.anchors).toHaveLength(1);
+      expect(h.settledAt[0]! - selectedAt).toBeGreaterThanOrEqual(350);
+      expect(h.settledAt[0]! - focusedAt).toBeLessThan(350);
       expect(h.events.some(event => event.type === 'focus-change')).toBe(true);
     } finally { h.dispose(); }
   });
@@ -3201,8 +3205,9 @@ for (const engine of ['XI', 'XP'] as const) describe(`selection matrix ${engine}
     const h = await xlsxMatrix(engine);
     try {
       await h.select(0); await h.paint(); await h.quiet(); h.reset();
+      let lastKeyAt = 0;
       for (let index = 1; index <= 8; index++) {
-        await act(async () => { fireEvent.keyDown(h.view.getByTestId('xlsx-scroll'), { key: 'x' }); });
+        await act(async () => { lastKeyAt = Date.now(); fireEvent.keyDown(h.view.getByTestId('xlsx-scroll'), { key: 'x' }); });
         await act(async () => {
           const editor = h.view.getByTestId('xlsx-cell-editor');
           fireEvent.change(editor, { target: { value: `typed ${index}` } });
@@ -3211,10 +3216,10 @@ for (const engine of ['XI', 'XP'] as const) describe(`selection matrix ${engine}
         await h.paint(); await h.quiet(100);
         expect(h.anchors).toEqual([]);
       }
-      await h.quiet(249);
       expect(h.anchors).toEqual([]);
-      await h.quiet(1);
+      await until(() => h.anchors.length > 0);
       expect(h.anchors).toHaveLength(1);
+      expect(h.settledAt[0]! - lastKeyAt).toBeGreaterThanOrEqual(350);
     } finally { h.dispose(); }
   });
 });

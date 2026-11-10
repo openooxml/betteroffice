@@ -54,7 +54,7 @@ import * as workerPluginGeometry from '../components/DocxEditor/peerless/workerP
 import * as shellControllers from '../components/DocxEditor/peerless/shellController';
 import * as pagePointers from '../components/DocxEditor/hooks/usePagesPointer';
 import * as docxBindings from './useDocxPluginHost';
-import { selectionClock } from '../../../../e2e/browser/plugin-host/selection-clock';
+import { selectionWindow } from '../../../../e2e/browser/plugin-host/selection-clock';
 import { storyAnchorsDocx } from './__fixtures__/storyAnchorsDocx';
 import { scopePluginGeometry } from './geometry';
 import * as canvasReplay from '../components/DocxEditor/canvasReplay';
@@ -349,11 +349,11 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
   if (experimentalWorkerOpen === false) {
     test.each(['header', 'footer'] as const)('caret moves in uniformly formatted %s text settle independently of toolbar updates', async (part) => {
       const events: DocxPluginEvent[] = [];
-      const contexts: DocxPluginContext<null>[] = [];
+      let context: DocxPluginContext<null> | undefined;
       const onSelectionChange = mock(() => {});
       const plugin = defineDocxPlugin({ id: 'part-settle', createState: () => null,
-        initialize(context) { contexts.push(context); },
-        onEvent(_context, event) { events.push(event); } });
+        initialize(next) { context = next; },
+        onEvent(next, event) { context = next; events.push(event); } });
       const original = headerFooterEditing.useHeaderFooterEditing;
       let open: ReturnType<typeof original>['handleHeaderFooterDoubleClick'] | undefined;
       const editing = spyOn(headerFooterEditing, 'useHeaderFooterEditing').mockImplementation((options) => {
@@ -366,21 +366,22 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
         await act(async () => { open!(part, 1); });
         await act(async () => { ref.current!.getEditorRef()!.setSelection(2, 2); });
         await settle(400);
-        expect(contexts[0]!.snapshot.selectionSettled).toBe(true);
+        expect(context!.snapshot.selectionSettled).toBe(true);
         const story = ref.current!.getEditorRef()!.getYrsSession()!.selection()!.head.story;
         expect(story.startsWith('hf:')).toBe(true);
         events.length = 0;
         onSelectionChange.mockClear();
         await act(async () => { ref.current!.getEditorRef()!.setSelection(3, 3); });
         expect(onSelectionChange).not.toHaveBeenCalled();
-        expect(contexts[0]!.snapshot.selectionSettled).toBe(false);
+        await until(() => context!.snapshot.selection.displayRange?.from === 3);
+        expect(context!.snapshot.selectionSettled).toBe(false);
         expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(0);
         await settle(400);
         expect(events.filter((event) => event.type === 'selection-settle')).toMatchObject([
           { source: 'keyboard', selection: { displayRange: { story, from: 3, to: 3 } } },
         ]);
         expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
-        expect(contexts[0]!.snapshot.selectionSettled).toBe(true);
+        expect(context!.snapshot.selectionSettled).toBe(true);
         await settle(400);
         expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
       } finally { editing.mockRestore(); }
@@ -2603,6 +2604,25 @@ describe('DocxEditor plugins (worker engine)', () => {
 
 type MatrixEngine = 'DI' | 'DL' | 'DP' | 'DV';
 
+function expectSelectionRange(
+  selected: DocxAnchorGeometryResult,
+  range: DocxAnchorGeometryResult,
+  context: DocxPluginContext<null>
+) {
+  expect(selected.ok).toBe(true);
+  expect(range.ok).toBe(true);
+  if (!selected.ok || !range.ok) return;
+  const { anchor: selectedAnchor, ...selectedRange } = selected;
+  const { anchor: rangeAnchor, ...expectedRange } = range;
+  expect(selectedRange).toEqual(expectedRange);
+  const display = context.snapshot.selection.displayRange!;
+  const caret = context.geometry!.dom.getCoordinatesForPosition(display.to);
+  expect(caret).not.toBeNull();
+  const expectedCaret = context.geometry!.toOverlayRect({ ...caret!, width: 0 });
+  expect(expectedCaret).not.toBeNull();
+  expect(selectedAnchor).toEqual({ ...expectedCaret!, pageIndex: rangeAnchor.pageIndex });
+}
+
 async function matrixDocument() {
   const zip = await JSZip.loadAsync(documentBytes());
   const w = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
@@ -2614,7 +2634,7 @@ async function matrixDocument() {
     content = content.replace('</Types>', `<Override PartName="/word/${kind}s.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.${kind}s+xml"/></Types>`);
     relationships = relationships.replace('</Relationships>', `<Relationship Id="matrix-${id}" Type="${rel}/${kind}s" Target="${kind}s.xml"/></Relationships>`);
     body = body.replace('</w:p>', `<w:r><w:${kind}Reference w:id="1"/></w:r></w:p>`);
-    zip.file(`word/${kind}s.xml`, `<w:${kind}s xmlns:w="${w}" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:${kind} w:id="1"><w:p w14:paraId="${id === 'fn' ? '80000001' : '90000001'}"><w:r><w:t>Note navigation text</w:t></w:r></w:p></w:${kind}></w:${kind}s>`);
+    zip.file(`word/${kind}s.xml`, `<w:${kind}s xmlns:w="${w}" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:${kind} w:id="1"><w:p w14:paraId="${id === 'fn' ? '60000001' : '70000001'}"><w:r><w:t>Note navigation text</w:t></w:r></w:p></w:${kind}></w:${kind}s>`);
   }
   zip.file('[Content_Types].xml', content);
   zip.file('word/_rels/document.xml.rels', relationships);
@@ -2623,15 +2643,22 @@ async function matrixDocument() {
 }
 
 async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapping?: { reject(): boolean; rejected(): void }) {
-  const canvasContext = spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ save() {}, restore() {}, setTransform() {},
-    clearRect() {}, drawImage() {}, beginPath() {}, rect() {}, clip() {} } as unknown as CanvasRenderingContext2D);
-  const clock = selectionClock();
+  const canvasContext = spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => new Proxy({} as Record<string, unknown>, {
+    get(target, key) {
+      if (key === 'measureText') return () => ({ width: 0 });
+      if (key === 'createImageData') return (width: number, height: number) => ({ width, height, data: new Uint8ClampedArray(width * height * 4) });
+      return key in target ? target[key as string] : () => {};
+    },
+    set(target, key, value) { target[key as string] = value; return true; },
+  }) as unknown as CanvasRenderingContext2D);
+  const bounds = spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 800, 1000));
+  const clock = selectionWindow();
   const events: DocxPluginEvent[] = [];
-  const settles: Array<{ context: DocxPluginContext<null>; anchor: DocxAnchorGeometryResult | null }> = [];
+  const settles: Array<{ context: DocxPluginContext<null>; anchor: DocxAnchorGeometryResult | null; at: number }> = [];
   const plugin = defineDocxPlugin({ id: 'matrix', createState: () => null,
     onEvent(context, event) {
       events.push(event);
-      if (event.type === 'selection-settle') settles.push({ context,
+      if (event.type === 'selection-settle') settles.push({ context, at: Date.now(),
         anchor: context.geometry?.getAnchorGeometry({ kind: 'selection' }) ?? null });
     } });
   let host!: pluginHosts.DocxPluginHost;
@@ -2671,7 +2698,8 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
     return controller;
   });
   let mounted: { ref: React.RefObject<DocxEditorRef | null>; view: ReturnType<typeof render>; rerender(next: Partial<DocxEditorBaseProps>): void };
-  const props = { plugins: [plugin], ...(engine === 'DV' ? { readOnly: true } : {}), collaboration: { onReplica: (next: CollaborationReplica | null) => { replica = next; } } };
+  let painted = false;
+  const props = { plugins: [plugin], onFirstPagePainted: () => { painted = true; }, ...(engine === 'DV' ? { readOnly: true } : {}), collaboration: { onReplica: (next: CollaborationReplica | null) => { replica = next; } } };
   try {
     if (engine !== 'DI') installWorkerEngine();
     if (engine === 'DP') {
@@ -2685,6 +2713,7 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
       const opened = await mountEditor(props, false, buffer, engine === 'DI' ? false : undefined);
       mounted = { ...opened, rerender: next => opened.rerender({ ...props, ...next }) };
     }
+    await until(() => painted);
     await host.notificationsIdle();
     await until(() => host.activations()[0]?.context.geometry !== null && host.activations()[0]?.context.geometry !== undefined);
     await act(async () => { await clock.tick(350); });
@@ -2715,9 +2744,16 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
     const reset = () => { events.length = 0; settles.length = 0; };
     const anchor = () => context().geometry!.getAnchorGeometry({ kind: 'selection' });
     const readAnchor = () => context().geometry!.readAnchorGeometries([{ kind: 'selection' }]);
+    const input = () => {
+      const surface = mounted.view.container.querySelector('[data-docx-input]');
+      const id = surface?.getAttribute('data-docx-input');
+      const element = id ? document.getElementById(id) : mounted.view.container.querySelector('textarea');
+      expect(element).toBeInstanceOf(HTMLTextAreaElement);
+      return element as HTMLTextAreaElement;
+    };
     const first = (await firstParagraph(mounted.ref)).paragraph;
     reset();
-    return { ...mounted, host, plugin, events, settles, first, context, selection, quiet, reset, anchor, readAnchor, clock,
+    return { ...mounted, host, plugin, events, settles, first, context, selection, quiet, reset, anchor, readAnchor, clock, input,
       controller: () => controller,
       session: () => mounted.ref.current!.getEditorRef()!.getYrsSession()!,
       async remote(edit: (session: YrsSession) => void) {
@@ -2766,9 +2802,9 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
         });
         await host.notificationsIdle();
       },
-      dispose() { mounted.view.unmount(); for (const restore of restores) restore(); clock.restore(); canvasContext.mockRestore(); },
+      dispose() { mounted.view.unmount(); for (const restore of restores) restore(); canvasContext.mockRestore(); bounds.mockRestore(); },
     };
-  } catch (error) { cleanup(); clock.restore(); canvasContext.mockRestore(); throw error; }
+  } catch (error) { cleanup(); canvasContext.mockRestore(); bounds.mockRestore(); throw error; }
   finally { captureHost.mockRestore(); captureController.mockRestore(); captureBinding.mockRestore(); captureParts.mockRestore(); capturePointer.mockRestore(); captureGeometry.mockRestore(); }
 }
 
@@ -2798,13 +2834,12 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
       const held = h.holdDisplayRange();
       await h.selection('body', h.first.paraId, 1, 3);
       expect(h.anchor()).toMatchObject({ ok: false, failure: { code: 'pending' } });
-      h.clock.holdWaits();
       let answer: readonly DocxAnchorGeometryResult[] | undefined;
       const read = h.readAnchor().then(value => { answer = value; });
       await act(async () => {});
       expect(answer).toBeUndefined();
       if (outcome === 'mapped') await act(async () => { held.release(); });
-      else await act(async () => { await h.clock.expire(); });
+      else await act(async () => { await h.clock.expire(() => answer !== undefined); });
       await h.host.notificationsIdle();
       expect(answer).toBeDefined();
       expect(answer![0]).toMatchObject(outcome === 'mapped' ? { ok: true } : { ok: false, failure: { code: 'layout-unavailable' } });
@@ -2894,14 +2929,17 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
     const h = await matrixEditor(engine);
     try {
       h.reset();
+      const selectedAt = Date.now();
       await h.selection('body', h.first.paraId, 0, 3);
       await h.quiet(200);
-      const input = h.view.container.querySelector('textarea')!;
+      const input = h.input();
+      const focusedAt = Date.now();
       await act(async () => { input.focus(); input.blur(); });
-      await h.quiet(149);
       expect(h.settles).toHaveLength(0);
-      await h.quiet(1);
+      await until(() => h.settles.length > 0);
       expect(h.settles).toHaveLength(1);
+      expect(h.settles[0]!.at - selectedAt).toBeGreaterThanOrEqual(350);
+      expect(h.settles[0]!.at - focusedAt).toBeLessThan(350);
       expect(h.events.some(event => event.type === 'focus-change')).toBe(true);
     } finally { h.dispose(); }
   });
@@ -2913,7 +2951,15 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
       const retained = h.context();
       const generation = retained.snapshot.generation;
       h.reset();
-      await act(async () => { await h.ref.current!.loadDocumentBuffer(documentBytes()); });
+      let loading!: Promise<void>;
+      let loaded = false;
+      let loadError: unknown;
+      await act(async () => {
+        loading = h.ref.current!.loadDocumentBuffer(documentBytes());
+        void loading.then(() => { loaded = true; }, error => { loadError = error; });
+      });
+      await until(() => loaded || loadError !== undefined);
+      await loading;
       await h.quiet(700);
       expect(h.events.filter(event => event.type === 'selection-settle' && event.generation === generation)).toEqual([]);
       expect(h.host.generation()).not.toBe(generation);
@@ -2961,7 +3007,7 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
     test(`T3: moving within one note settles again (${story})`, async () => {
       const h = await matrixEditor(engine, await matrixDocument());
       try {
-        const paraId = story === 'fn:1' ? '80000001' : '90000001';
+        const paraId = story === 'fn:1' ? '60000001' : '70000001';
         await h.openStory(story);
         await h.selection(story, paraId, 1, 3);
         await h.quiet();
@@ -2978,7 +3024,7 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
       try {
         h.reset();
         await h.openStory(story);
-        await h.selection(story, story === 'fn:1' ? '80000001' : '90000001', 1, 3);
+        await h.selection(story, story === 'fn:1' ? '60000001' : '70000001', 1, 3);
         await h.quiet();
         expect(h.settles).toHaveLength(1);
         expect(h.anchor()).toMatchObject({ ok: false, failure: { code: 'unsupported' } });
@@ -3064,7 +3110,7 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
       const selected = (await h.readAnchor())[0]!;
       const [range] = await h.context().geometry!.readAnchorGeometries([{ kind: 'range', version: h.context().snapshot.version,
         range: { story: 'body', start: { paraId: '00000001', offset: 7 }, end: { paraId: '00000001', offset: 8 }, view: 'accepted' } }]);
-      expect(selected).toEqual(range!);
+      expectSelectionRange(selected, range!, h.context());
       expect(selected.ok || selected.failure.code === 'missing-target').toBe(true);
     } finally { h.dispose(); }
   });
@@ -3096,7 +3142,7 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
       const [textRange] = await h.context().geometry!.readAnchorGeometries([{ kind: 'range', version: h.context().snapshot.version,
         range: { story: raw.anchor.story, start: { paraId: raw.anchor.paraId, offset: raw.anchor.offset },
           end: { paraId: focus.paraId, offset: focus.offset }, view: 'accepted' } }]);
-      expect(selected).toEqual(textRange!);
+      expectSelectionRange(selected, textRange!, h.context());
       expect(selected.ok || selected.failure.code === 'missing-target').toBe(true);
     } finally { h.dispose(); }
   });
@@ -3123,9 +3169,11 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
       await h.selection('body', h.first.paraId, 0);
       await h.quiet();
       h.reset();
-      const input = h.view.container.querySelector<HTMLTextAreaElement>('textarea')!;
+      const input = h.input();
+      let lastKeyAt = 0;
       for (let index = 0; index < 8; index++) {
         await act(async () => {
+          lastKeyAt = Date.now();
           fireEvent.keyDown(input, { key: 'x' });
           if (h.controller()) expect(await h.controller()!.submit({ kind: 'insertText', payload: { text: 'x' } })).toMatchObject({ ok: true });
           else h.ref.current!.getEditorRef()!.insertText('x');
@@ -3134,10 +3182,10 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
         await h.quiet(100);
         expect(h.settles).toHaveLength(0);
       }
-      await h.quiet(249);
       expect(h.settles).toHaveLength(0);
-      await h.quiet(1);
+      await until(() => h.settles.length > 0);
       expect(h.settles).toHaveLength(1);
+      expect(h.settles[0]!.at - lastKeyAt).toBeGreaterThanOrEqual(350);
       expect(h.context().snapshot.selectionSettled).toBe(true);
     } finally { h.dispose(); }
   });

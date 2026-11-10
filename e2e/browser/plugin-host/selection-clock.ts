@@ -1,3 +1,14 @@
+export function selectionWindow() {
+  const tick = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+  return {
+    tick,
+    async expire(done: () => boolean) {
+      const deadline = performance.now() + 3000;
+      while (!done() && performance.now() < deadline) await tick(10);
+    },
+  };
+}
+
 export function selectionClock() {
   const timeout = globalThis.setTimeout;
   const cancel = globalThis.clearTimeout;

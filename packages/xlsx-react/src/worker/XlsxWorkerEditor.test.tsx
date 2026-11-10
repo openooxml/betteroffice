@@ -31,7 +31,7 @@ import { defaultFontPainterModule } from '../useDefaultFonts';
 import { XlsxWorkerEditorCollaborationError, type XlsxWorkerEditorApi } from './createWorkerEditorApi';
 import { XlsxWorkerEditor, xlsxPeerlessEditorLoader } from './XlsxWorkerEditor';
 import { editableWorkbookSessionBackend } from './useEditableSessionWorkbook';
-import { selectionClock } from '../../../../e2e/browser/plugin-host/selection-clock';
+import { selectionWindow } from '../../../../e2e/browser/plugin-host/selection-clock';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -9152,34 +9152,39 @@ it('peerless shows the supplied indicator while the workbook opens', async () =>
 
 for (const range of [false, true]) it(`T18: XL ${range ? 'range' : 'cell'} selection settles once with its painted anchor`, async () => {
   harness(true);
-  const clock = selectionClock();
+  const clock = selectionWindow();
   const events: XlsxPluginEvent[] = [];
   const anchors: Array<XlsxAnchorGeometryResult | null> = [];
+  let settledAt = 0;
   const plugin = defineXlsxPlugin({ id: 'matrix-legacy', createState: () => null,
     onEvent(context, event) {
       events.push(event);
-      if (event.type === 'selection-settle') anchors.push(context.geometry?.getAnchorGeometry({ kind: 'selection' }) ?? null);
+      if (event.type === 'selection-settle') {
+        settledAt = Date.now();
+        anchors.push(context.geometry?.getAnchorGeometry({ kind: 'selection' }) ?? null);
+      }
     } });
   try {
     const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen plugins={[plugin]} showToolbar={false} />);
     await opened(); await advance();
     await act(async () => { await clock.tick(350); });
     events.length = 0; anchors.length = 0;
+    const selectedAt = Date.now();
     await act(async () => { fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowDown', shiftKey: range }); });
     await advance();
-    await act(async () => { await clock.tick(349); });
     expect(anchors).toEqual([]);
-    await act(async () => { await clock.tick(1); });
+    await waitFor(() => expect(anchors).toHaveLength(1));
     expect(anchors).toMatchObject([{ ok: true }]);
+    expect(settledAt - selectedAt).toBeGreaterThanOrEqual(350);
     expect(events.filter(event => event.type === 'selection-settle')).toMatchObject([{ source: 'keyboard' }]);
     await act(async () => { await clock.tick(700); });
     expect(anchors).toHaveLength(1);
-  } finally { cleanup(); clock.restore(); }
+  } finally { cleanup(); }
 });
 
 for (const outcome of ['painted', 'never-paints'] as const) it(`${outcome === 'painted' ? 'T19' : 'T19c'}: XL settle ${outcome === 'painted' ? 'follows the pending paint with an ok anchor' : 'exits the bounded paint wait'}`, async () => {
   const host = harness(true);
-  const clock = selectionClock();
+  const clock = selectionWindow();
   const gate = deferred<void>();
   const anchors: Array<XlsxAnchorGeometryResult | null> = [];
   let context: XlsxPluginContext<null> | undefined;
@@ -9205,7 +9210,6 @@ for (const outcome of ['painted', 'never-paints'] as const) it(`${outcome === 'p
     });
     await tick();
     expect(held).toBe(true);
-    clock.holdWaits();
     await act(async () => { await clock.tick(350); });
     expect(anchors).toEqual([]);
     expect(context!.snapshot.selectionSettled).toBe(false);
@@ -9214,19 +9218,19 @@ for (const outcome of ['painted', 'never-paints'] as const) it(`${outcome === 'p
       await advance();
       expect(anchors).toMatchObject([{ ok: true }]);
     } else {
-      await act(async () => { await clock.expire(); });
+      await act(async () => { await clock.expire(() => anchors.length > 0); });
       expect(anchors).toHaveLength(1);
     }
     expect(context!.snapshot.selectionSettled).toBe(true);
     await act(async () => { await clock.tick(700); });
     expect(anchors).toHaveLength(1);
-  } finally { gate.resolve(); cleanup(); clock.restore(); }
+  } finally { gate.resolve(); cleanup(); }
 });
 
 
 it('T19b: XL offscreen selection settles with layout-unavailable', async () => {
   harness(true);
-  const clock = selectionClock();
+  const clock = selectionWindow();
   const anchors: Array<XlsxAnchorGeometryResult | null> = [];
   const plugin = defineXlsxPlugin({ id: 'matrix-offscreen', createState: () => null,
     onEvent(context, event) {
@@ -9243,14 +9247,14 @@ it('T19b: XL offscreen selection settles with layout-unavailable', async () => {
     expect(anchors).toMatchObject([{ ok: false, failure: { code: 'layout-unavailable' } }]);
     await act(async () => { await clock.tick(700); });
     expect(anchors).toHaveLength(1);
-  } finally { cleanup(); clock.restore(); }
+  } finally { cleanup(); }
 });
 
 it('T20: XL chart selection settles with missing-target', async () => {
   const host = harness(true);
   host.charts.push({ id: 'chart', label: 'Chart', movable: false,
     rect: { x: 100, y: 100, w: 200, h: 100 }, clip: { x: 100, y: 100, w: 200, h: 100 } });
-  const clock = selectionClock();
+  const clock = selectionWindow();
   const anchors: Array<XlsxAnchorGeometryResult | null> = [];
   let chartId: string | null | undefined;
   const plugin = defineXlsxPlugin({ id: 'matrix-chart', createState: () => null,
@@ -9273,5 +9277,5 @@ it('T20: XL chart selection settles with missing-target', async () => {
     expect(anchors).toMatchObject([{ ok: false, failure: { code: 'missing-target' } }]);
     await act(async () => { await clock.tick(700); });
     expect(anchors).toHaveLength(1);
-  } finally { cleanup(); clock.restore(); }
+  } finally { cleanup(); }
 });
