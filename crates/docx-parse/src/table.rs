@@ -362,6 +362,41 @@ pub fn parse_document_table_properties(element: Option<&XmlElement>) -> Option<T
     (formatting != TableFormatting::default()).then_some(formatting)
 }
 
+/// Whether a `w:tr` holds only known-inert structure and runs with a direct
+/// `w:vanish`. Anything else, including an element this list has never heard
+/// of, keeps the row. Read from the source because later stages can lose field
+/// results, form controls and imported content.
+pub fn row_is_hidden_content_only(row: &XmlElement) -> bool {
+    let mut pending: Vec<_> = row.child_elements().collect();
+    while let Some(element) = pending.pop() {
+        let name = element.local_name();
+        if element.namespace_prefix() != Some("w") {
+            return false;
+        }
+        match name {
+            "tblPrEx" | "trPr" | "tcPr" | "proofErr" | "bookmarkStart" | "bookmarkEnd"
+            | "commentRangeStart" | "commentRangeEnd" => {}
+            "tc" | "p" | "fldSimple" => pending.extend(element.child_elements()),
+            "pPr" => {
+                if element.child("w", "shd").is_some() || element.child("w", "pBdr").is_some() {
+                    return false;
+                }
+            }
+            "r" => {
+                let vanished = element
+                    .child("w", "rPr")
+                    .and_then(|properties| properties.child("w", "vanish"))
+                    .is_some_and(|vanish| vanish.parse_boolean("w"));
+                if !vanished {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
 pub fn parse_document_table_row_properties(
     element: Option<&XmlElement>,
 ) -> Option<TableRowFormatting> {
@@ -818,6 +853,24 @@ mod tests {
         let row: TableRow = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(row.extra_attributes, None);
         assert_eq!(serde_json::to_value(row).unwrap(), value);
+    }
+
+    #[test]
+    fn anything_not_known_inert_is_never_hidden_content() {
+        let hidden = r#"<w:p><w:r><w:rPr><w:vanish/></w:rPr><w:t>Hidden</w:t></w:r></w:p>"#;
+        assert!(row_is_hidden_content_only(&root(&format!(
+            "<w:tr><w:tc>{hidden}</w:tc></w:tr>"
+        ))));
+        for imported in [
+            r#"<w:altChunk r:id="chunk"/>"#,
+            r#"<w:contentPart r:id="ink"/>"#,
+            r#"<w:control r:id="activeX"/>"#,
+            r#"<w:futureElement/>"#,
+            r#"<x:unknown/>"#,
+        ] {
+            let row = format!("<w:tr><w:tc>{imported}{hidden}</w:tc></w:tr>");
+            assert!(!row_is_hidden_content_only(&root(&row)), "{imported}");
+        }
     }
 
     #[test]
