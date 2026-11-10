@@ -1,54 +1,70 @@
 import { measureShards } from './measure-shards.mjs';
 import { roundtripMatrices } from './roundtrip.mjs';
 import { jobShards } from './shards.mjs';
-import { timingFormats } from './timing.mjs';
+import { timingFormats, timingSamples } from './timing.mjs';
 
 export const UNBOUNDED = 256;
 export const DEFAULT_PRIVATE_PARALLEL = 12;
 const SETUP_MINUTES = { measure: 8, benchmark: 5, roundtrip: 5, timing: 10 };
-const TIMING_MINUTES = 60;
+const TIMING_MINUTES_PER_DOCUMENT = { docx: 0.2, pptx: 0.25, xlsx: 0.35 };
+const BENCHMARKS = ['docx-benchmark', 'xlsx-benchmark', 'pptx-benchmark', 'xlsx-fidelity'];
 
-export function matrixMinutes(plan) {
+export function matrixLoad(plan) {
   const measure = measureShards(plan);
-  const benchmark = (job) => jobShards(job, plan).reduce((sum, shard) => sum + shard.seconds / 60 + SETUP_MINUTES.benchmark, 0);
   const [roundtripA, roundtripB] = roundtripMatrices(plan);
-  return {
-    measure: measure.reduce((sum, shard) => sum + shard.seconds / 60 + SETUP_MINUTES.measure, 0),
-    'docx-benchmark': benchmark('docx-benchmark'),
-    'xlsx-benchmark': benchmark('xlsx-benchmark'),
-    'pptx-benchmark': benchmark('pptx-benchmark'),
-    'xlsx-fidelity': benchmark('xlsx-fidelity'),
-    'roundtrip-a': roundtripA.length * SETUP_MINUTES.roundtrip,
-    'roundtrip-b': roundtripB.length * SETUP_MINUTES.roundtrip,
-    timing: timingFormats(plan).length * (TIMING_MINUTES + SETUP_MINUTES.timing),
+  const formats = timingFormats(plan);
+  const load = {
+    measure: { jobs: measure.length, minutes: measure.reduce((sum, shard) => sum + shard.seconds / 60 + SETUP_MINUTES.measure, 0) },
   };
+  for (const job of BENCHMARKS) {
+    const shards = jobShards(job, plan);
+    load[job] = { jobs: shards.length, minutes: shards.reduce((sum, shard) => sum + shard.seconds / 60 + SETUP_MINUTES.benchmark, 0) };
+  }
+  load['roundtrip-a'] = { jobs: roundtripA.length, minutes: roundtripA.length * SETUP_MINUTES.roundtrip };
+  load['roundtrip-b'] = { jobs: roundtripB.length, minutes: roundtripB.length * SETUP_MINUTES.roundtrip };
+  load.timing = {
+    jobs: formats.length,
+    minutes: formats.reduce((sum, format) =>
+      sum + SETUP_MINUTES.timing + timingSamples(plan, format).length * TIMING_MINUTES_PER_DOCUMENT[format], 0),
+  };
+  return load;
 }
 
-export function parallelPlan(plan, { privateRun, total = DEFAULT_PRIVATE_PARALLEL }) {
-  const minutes = matrixMinutes(plan);
-  const names = Object.keys(minutes);
-  if (!privateRun) return Object.fromEntries(names.map((name) => [name, UNBOUNDED]));
+const runningMatrices = (load) => Object.keys(load).filter((name) => load[name].jobs > 0 && load[name].minutes > 0);
+
+export function allocate(load, total) {
   if (!Number.isSafeInteger(total) || total < 1) throw new Error('max_parallel must be a positive whole number');
-  const running = names.filter((name) => minutes[name] > 0);
+  const running = runningMatrices(load);
   if (total < running.length)
     throw new Error(`max_parallel ${total} is below the ${running.length} benchmark matrices this plan runs`);
-  const share = Object.fromEntries(names.map((name) => [name, 1]));
-  const sum = running.reduce((acc, name) => acc + minutes[name], 0);
-  const spare = total - running.length;
-  const exact = running.map((name) => ({ name, value: (spare * minutes[name]) / sum }));
-  for (const { name, value } of exact) share[name] += Math.floor(value);
-  let left = total - running.reduce((acc, name) => acc + share[name], 0);
-  for (const { name } of [...exact].sort((a, b) => (b.value % 1) - (a.value % 1) || a.name.localeCompare(b.name))) {
-    if (left <= 0) break;
-    share[name] += 1;
-    left -= 1;
+  const share = Object.fromEntries(Object.keys(load).map((name) => [name, 1]));
+  for (let left = total - running.length; left > 0; left -= 1) {
+    const open = running.filter((name) => share[name] < load[name].jobs);
+    if (!open.length) break;
+    const next = open.reduce((best, name) => {
+      const wall = load[name].minutes / share[name];
+      const bestWall = load[best].minutes / share[best];
+      return wall > bestWall || (wall === bestWall && name < best) ? name : best;
+    });
+    share[next] += 1;
   }
   return share;
 }
 
+export function parallelPlan(plan, { privateRun, total = DEFAULT_PRIVATE_PARALLEL }) {
+  const load = matrixLoad(plan);
+  if (!privateRun) return Object.fromEntries(Object.keys(load).map((name) => [name, UNBOUNDED]));
+  return allocate(load, total);
+}
+
+const hours = (minutes) => (minutes / 60).toFixed(1);
+
 export function parallelSummary(plan, share) {
-  const minutes = matrixMinutes(plan);
-  return Object.keys(share)
-    .filter((name) => minutes[name] > 0)
-    .map((name) => `${name}: at most ${share[name]} at once, ~${Math.round(minutes[name])} runner-minutes planned`);
+  const load = matrixLoad(plan);
+  const running = runningMatrices(load);
+  const lines = running.map((name) =>
+    `${name}: at most ${share[name]} at once for ${load[name].jobs} job${load[name].jobs === 1 ? '' : 's'}, ~${Math.round(load[name].minutes)} runner-minutes planned, about ${hours(load[name].minutes / share[name])} h wall`);
+  const wall = Math.max(0, ...running.map((name) => load[name].minutes / share[name]));
+  const jobs = running.reduce((sum, name) => sum + load[name].jobs, 0);
+  return [...lines, `projected wall of the benchmark matrices: about ${hours(wall)} h for ${jobs} jobs`];
 }
