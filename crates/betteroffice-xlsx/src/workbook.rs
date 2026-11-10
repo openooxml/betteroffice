@@ -3096,6 +3096,7 @@ impl Workbook {
                     range: Some(range),
                     ..options.clone()
                 },
+                faces,
             ),
             crate::PngTarget::UsedRange { sheet } => self.render_sheet(
                 sheet,
