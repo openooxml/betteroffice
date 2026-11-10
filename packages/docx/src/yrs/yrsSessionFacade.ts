@@ -858,6 +858,7 @@ export function wrapSession(
       return bytes && mimeType ? { bytes, mimeType } : null;
     },
     loadMediaSources: (json) => session.load_media_sources(json),
+    rebuildMediaSources: () => session.rebuild_media_sources(),
     loadNoteSeparators: (state) => session.load_note_separators(state),
     mediaDataUrl,
     mediaScope: () => mediaScope,
