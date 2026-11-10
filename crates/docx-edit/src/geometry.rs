@@ -120,7 +120,7 @@ fn build_story<T: ReadTxn>(
     }
     let story = match story_ref(txn, story_id) {
         Ok(story) => story,
-        Err(_) if crate::empty_cells::is_empty_cell(txn, story_id) => {
+        Err(crate::EditError::CellHasNoStory(_)) => {
             let cell = crate::empty_cells::EmptyCell::new(story_id);
             let scratch = cell.doc().yrs_doc().transact();
             return build_story(&scratch, outline, story_id, content_start, depth);

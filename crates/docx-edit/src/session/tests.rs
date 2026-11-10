@@ -504,3 +504,152 @@ fn invalid_resident_frame_epoch_matches_shim_error_before_mutation() {
     );
     assert_eq!(session.encode_state(), before);
 }
+
+/// A session whose body table names cell (0, 2) while its story is missing: one replica split
+/// a cell, another inserted a row, the first undid its split.
+fn missing_cell_session() -> (EditSessionCore, String) {
+    let ctx = crate::EditCtx::local("Ada", "2026-11-10T00:00:00Z");
+    let origin = crate::EditingDoc::new(100);
+    origin
+        .create_story("body", "Hello", "Normal", "left")
+        .unwrap();
+    origin
+        .insert_table(&ctx, crate::Position::new("body", 0), 1, 2)
+        .unwrap();
+    let state = origin.encode_state_as_update_v1();
+    let open = |client| {
+        let doc = crate::EditingDoc::new(client);
+        doc.apply_update_v1(&state).unwrap();
+        doc
+    };
+    let (splitter, peer) = (open(91), open(92));
+    let exchange = || {
+        let from_splitter = splitter.encode_state_as_update_v1();
+        let from_peer = peer.encode_state_as_update_v1();
+        peer.apply_update_v1(&from_splitter).unwrap();
+        splitter.apply_update_v1(&from_peer).unwrap();
+    };
+    let mut undo = splitter.undo_manager();
+    splitter
+        .split_cell_grid(&ctx, &crate::CellLoc::new("body", 0, 0, 1), Some(1), Some(2))
+        .unwrap();
+    exchange();
+    peer.insert_row(&ctx, &crate::CellLoc::new("body", 0, 0, 0), true)
+        .unwrap();
+    exchange();
+    assert!(undo.undo());
+    exchange();
+    let session = core(93);
+    session
+        .apply_update(&splitter.encode_state_as_update_v1())
+        .unwrap();
+    let payload = session
+        .engine
+        .doc()
+        .table_payload(&crate::TableLocator::new("body", 0))
+        .unwrap();
+    let rows = serde_json::to_value(&payload["rows"]).unwrap();
+    let cell = rows[0]["cells"][2]["story"].as_str().unwrap().to_owned();
+    assert!(!session.story_ids().contains(&cell), "{cell}");
+    (session, cell)
+}
+
+#[test]
+fn every_write_aimed_at_a_cell_without_its_story_is_refused_before_its_argument_checks() {
+    let (session, cell) = missing_cell_session();
+    let key = format!("{cell}#p0");
+    let collapsed = serde_json::json!([{
+        "story": cell, "startPara": key, "startOffset": 0, "endPara": key, "endOffset": 0,
+    }])
+    .to_string();
+    let before = (session.encode_state_vector(), session.encode_state());
+    let (c, k) = (cell.as_str(), key.as_str());
+    let results: Vec<(&str, Result<(), super::EngineError>)> = vec![
+        (
+            "insert_text with a break",
+            session.insert_text(c, k, 0, "a\nb", None, None).map(drop),
+        ),
+        (
+            "edit_text_resident",
+            session
+                .edit_text_resident(c, k, 0, k, 0, Some("x".to_owned()))
+                .map(drop),
+        ),
+        (
+            "edit_text_resident over a range",
+            session.edit_text_resident(c, k, 0, k, 0, None).map(drop),
+        ),
+        (
+            "collapsed delete_range",
+            session.delete_range(c, k, 0, k, 0, None, None).map(drop),
+        ),
+        (
+            "collapsed replace_range with no text",
+            session
+                .replace_range(c, k, 0, k, 0, "", None, None)
+                .map(drop),
+        ),
+        (
+            "collapsed toggle_mark",
+            session
+                .toggle_mark(c, k, 0, k, 0, r#"{"type":"bold"}"#, None, None)
+                .map(drop),
+        ),
+        (
+            "collapsed format_range",
+            session
+                .format_range(c, k, 0, k, 0, r#"{"bold":true}"#, None, None)
+                .map(drop),
+        ),
+        (
+            "collapsed set_hyperlink",
+            session
+                .set_hyperlink(c, k, 0, k, 0, r#"{"url":"x"}"#, None, None)
+                .map(drop),
+        ),
+        (
+            "collapsed clear_formatting",
+            session
+                .clear_formatting(c, k, 0, k, 0, None, None)
+                .map(drop),
+        ),
+        (
+            "merge_paragraphs on the last paragraph",
+            session.merge_paragraphs(c, k, None, None).map(drop),
+        ),
+        (
+            "insert_image with a malformed payload",
+            session
+                .insert_image(c, k, 0, "not json", None, None)
+                .map(drop),
+        ),
+        (
+            "insert_section_break",
+            session.insert_section_break(c, k, 0, "nextPage"),
+        ),
+        (
+            "insert_watermark",
+            session.insert_watermark(c, k, 0, r#"{"text":"DRAFT"}"#),
+        ),
+        ("insert_page_break", session.insert_page_break(c, k, 0)),
+        (
+            "collapsed add_comment",
+            session
+                .add_comment(&collapsed, "Ada", "2026-11-10T00:00:00Z", "\"note\"")
+                .map(drop),
+        ),
+        (
+            "collapsed set_comment_ranges",
+            session.set_comment_ranges("missing", &collapsed),
+        ),
+        ("apply_raw_ops", session.apply_raw_ops(c, "not json")),
+    ];
+    for (what, result) in results {
+        let error = result.expect_err(what);
+        assert!(error.message.contains("has no story"), "{what}: {error}");
+    }
+    assert_eq!(
+        (session.encode_state_vector(), session.encode_state()),
+        before
+    );
+}

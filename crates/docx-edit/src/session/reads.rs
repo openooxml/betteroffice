@@ -206,7 +206,10 @@ impl EditSessionCore {
     /// cell (a cell whose story is missing reads as one empty paragraph).
     pub fn has_story(&self, story: &str) -> bool {
         let txn = self.engine.doc().yrs_doc().transact();
-        crate::story_ref(&txn, story).is_ok() || crate::empty_cells::is_empty_cell(&txn, story)
+        matches!(
+            crate::story_ref(&txn, story),
+            Ok(_) | Err(crate::EditError::CellHasNoStory(_))
+        )
     }
 
     /// `{"revision","stories":[…]}`: the current story revision and the sorted

@@ -24,6 +24,7 @@ use crate::sticky_positions::sticky_offset;
 use crate::target::{EditTextView, StoryView, TextPosition, Views, drawing_from_payload};
 use crate::{
     COMMENTS, DEL, EditingDoc, INS, KIND_KEY, TextRange, decode_anchor, map_string, story_ref,
+    story_text,
 };
 
 /// Nesting levels of tables, block controls and field results the walk descends.
@@ -936,7 +937,7 @@ impl<'a> Exporter<'a> {
 
     fn story_units<T: ReadTxn>(views: &Views<'_, T>, story: &str) -> usize {
         let txn = views.txn();
-        story_ref(txn, story).map_or(0, |text| yrs::Text::len(&text, txn) as usize)
+        story_text(txn, story).map_or(0, |text| yrs::Text::len(&text, txn) as usize)
     }
 
     /// Stops the export before a story whose projection would outgrow the remaining budget.
@@ -1326,7 +1327,7 @@ impl<'a> Exporter<'a> {
                         .iter()
                         .filter_map(|anchor| decode_anchor(anchor).ok())
                         .filter_map(|anchor| {
-                            crate::story_ref(txn, &anchor.story).ok()?;
+                            story_text(txn, &anchor.story)?;
                             let start = sticky_offset(&anchor.start, txn)?.index;
                             let end = sticky_offset(&anchor.end, txn)?.index;
                             Some((anchor.story, start, end))
@@ -1499,7 +1500,7 @@ impl<'a> Exporter<'a> {
             }
         };
         let txn = views.txn();
-        let text = story_ref(txn, story).ok()?;
+        let text = story_text(txn, story)?;
         let chunks = views.doc().chunk_snapshot(story, &text, txn);
         let (cut, beyond) = if complete {
             (u32::MAX, None)
@@ -4211,7 +4212,7 @@ fn content_fingerprint<T: ReadTxn>(
         .collect();
     let mut units = 0usize;
     for id in &ids {
-        let text = story_ref(txn, id).ok()?;
+        let text = story_text(txn, id)?;
         units = units.saturating_add(yrs::Text::len(&text, txn) as usize);
     }
     if units > capacity {
@@ -4219,7 +4220,7 @@ fn content_fingerprint<T: ReadTxn>(
     }
     let mut stories = Vec::new();
     for id in ids {
-        let text = story_ref(txn, id).ok()?;
+        let text = story_text(txn, id)?;
         let chunks = views.doc().chunk_snapshot(id, &text, txn);
         let units: Vec<Value> = chunks
             .iter()

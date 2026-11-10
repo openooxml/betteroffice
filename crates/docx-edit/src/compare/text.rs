@@ -15,7 +15,7 @@ use super::options::Granularity;
 use crate::ops::ChunkKind;
 use crate::ops::text::RichRun;
 use crate::target::{AtomKind, ParagraphView, TextAtom};
-use crate::{DEL, EditingDoc, INS, story_ref};
+use crate::{DEL, EditingDoc, INS, story_text};
 
 /// A token of projected text; atoms compare by kind.
 #[derive(Clone, Debug)]
@@ -181,7 +181,7 @@ pub(crate) fn state_complex_script(
     runs: &ComplexScript,
 ) {
     let mut txn = doc.yrs_doc().transact_mut_with("system");
-    let Ok(text) = story_ref(&txn, story) else {
+    let Some(text) = story_text(&txn, story) else {
         return;
     };
     let mut offset = 0;
@@ -203,7 +203,7 @@ pub(crate) fn unit_attrs(
     paragraph: &ParagraphView,
 ) -> Vec<UnitAttrs> {
     let txn = doc.yrs_doc().transact();
-    let Ok(text) = story_ref(&txn, story) else {
+    let Some(text) = story_text(&txn, story) else {
         return Vec::new();
     };
     let chunks = doc.chunk_snapshot(story, &text, &txn);

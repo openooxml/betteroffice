@@ -136,7 +136,14 @@ fn visit_story(
     items: &mut impl StorySink,
 ) -> Result<(), OpError> {
     let txn = doc.yrs_doc().transact();
-    let story = story_ref(&txn, story_id)?;
+    let story = match story_ref(&txn, story_id) {
+        Ok(story) => story,
+        Err(crate::EditError::CellHasNoStory(_)) => {
+            let cell = crate::empty_cells::EmptyCell::new(story_id);
+            return visit_story(cell.doc(), story_id, items);
+        }
+        Err(error) => return Err(error.into()),
+    };
     let comment_groups = story_comment_groups(&txn, story_id);
     // The running UTF-16 story-unit index (every embed, pilcrows included, = 1),
     // used to test each scalar against the resolved comment intervals.

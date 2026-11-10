@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use super::args::{edit_ctx, loc_index, parse_any_object};
+use super::args::{edit_ctx, loc_index, parse_any_object, writable_story};
 use super::{EditSessionCore, EngineError, EngineResult};
 use crate::{CellLoc, EditCtx, EditingDoc, Position, TableLocator, TableRange};
 
@@ -16,7 +16,7 @@ impl EditSessionCore {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> EngineResult<String> {
-        self.engine.doc().ensure_cell_story(story);
+        writable_story(self.engine.doc(), story)?;
         let index = loc_index(self.engine.doc(), story, para_id, offset)?;
         let ctx = edit_ctx(author_name, author_date)?;
         let receipt = self
@@ -36,7 +36,7 @@ impl EditSessionCore {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> EngineResult<String> {
-        self.engine.doc().ensure_cell_story(story);
+        writable_story(self.engine.doc(), story)?;
         let index = loc_index(self.engine.doc(), story, para_id, offset)?;
         let ctx = edit_ctx(author_name, author_date)?;
         let fragment: Value = serde_json::from_str(fragment_json).map_err(EngineError::message)?;

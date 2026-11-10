@@ -208,7 +208,16 @@ impl EditingDoc {
             });
         }
         let txn = self.yrs_doc().transact();
-        let story = story_ref(&txn, &range.story)?;
+        let story = match story_ref(&txn, &range.story) {
+            Ok(story) => story,
+            Err(crate::EditError::CellHasNoStory(_)) => {
+                let cell = crate::empty_cells::EmptyCell::new(&range.story);
+                let mut info = cell.doc().selection_context(range)?;
+                info.in_table = true;
+                return Ok(info);
+            }
+            Err(error) => return Err(error.into()),
+        };
         let story_len = yrs::Text::len(&story, &txn);
         if range.end > story_len {
             return Err(OpError::OutOfBounds {

@@ -362,6 +362,7 @@ impl EditingDoc {
         policy: FormatPolicy,
         observe: impl FnOnce(&Attrs),
     ) -> OpResult<Receipt> {
+        self.refuse_cell_write(&at.story)?;
         validate_text(text)?;
         let mut txn = self.transact_for(ctx);
         self.insert_text_observed_in(&mut txn, ctx, at, text, policy, observe)
@@ -446,6 +447,7 @@ impl EditingDoc {
         range: StoryRange,
         observe: impl FnOnce(bool),
     ) -> OpResult<Receipt> {
+        self.refuse_cell_write(&range.story)?;
         let len = crate::format::range_len(&range)?;
         if len == 0 {
             return Err(OpError::EmptyRange);
@@ -534,6 +536,7 @@ impl EditingDoc {
         range: StoryRange,
         text: &str,
     ) -> OpResult<(Receipt, u32)> {
+        self.refuse_cell_write(&range.story)?;
         validate_text(text)?;
         let len = crate::format::range_len(&range)?;
         if len == 0 && text.is_empty() {
@@ -659,6 +662,7 @@ impl EditingDoc {
         range: StoryRange,
         runs: &[RichRun],
     ) -> OpResult<(Receipt, u32)> {
+        self.refuse_cell_write(&range.story)?;
         let mut txn = self.transact_for(ctx);
         self.replace_range_rich_placed_in(&mut txn, ctx, range, runs)
     }

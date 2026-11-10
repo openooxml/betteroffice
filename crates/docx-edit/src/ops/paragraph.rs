@@ -231,7 +231,7 @@ fn resolve_selector<T: ReadTxn>(txn: &T, selector: &ParaSelector) -> OpResult<Ve
             let target = all
                 .into_iter()
                 .find(|target| target.bounds.para_id == *id)
-                .ok_or_else(|| OpError::UnknownPara(id.clone()))?;
+                .ok_or_else(|| crate::empty_cells::unknown_paragraph(txn, id))?;
             Ok(vec![target])
         }
         ParaSelector::Many(ids) => {
@@ -243,7 +243,7 @@ fn resolve_selector<T: ReadTxn>(txn: &T, selector: &ParaSelector) -> OpResult<Ve
                 .map(|id| {
                     by_id
                         .remove(id)
-                        .ok_or_else(|| OpError::UnknownPara(id.clone()))
+                        .ok_or_else(|| crate::empty_cells::unknown_paragraph(txn, id))
                 })
                 .collect()
         }
@@ -263,7 +263,10 @@ fn resolve_selector<T: ReadTxn>(txn: &T, selector: &ParaSelector) -> OpResult<Ve
                 })
                 .collect();
             if targets.is_empty() {
-                return Err(OpError::UnknownStory(range.story.clone()));
+                return Err(match story_ref(txn, &range.story) {
+                    Err(error @ crate::EditError::CellHasNoStory(_)) => error.into(),
+                    _ => OpError::UnknownStory(range.story.clone()),
+                });
             }
             Ok(targets)
         }
@@ -537,7 +540,7 @@ impl EditingDoc {
         let index = targets
             .iter()
             .position(|target| target.bounds.para_id == para)
-            .ok_or_else(|| OpError::UnknownPara(para.to_owned()))?;
+            .ok_or_else(|| crate::empty_cells::unknown_paragraph(&txn, para))?;
         let boundary_index = match direction {
             MergeDirection::Forward => {
                 let is_last_in_story = targets

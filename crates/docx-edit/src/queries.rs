@@ -6,14 +6,15 @@ use std::sync::Arc;
 use unicode_segmentation::UnicodeSegmentation;
 use yrs::{Any, Map, Out, ReadTxn, Transact};
 
+use crate::empty_cells::EmptyCell;
 use crate::op::{Loc, LocRange, OpError, OpResult, global_of_loc, loc_of_global};
 use crate::ops::table::{
     TableRowChangeKind, push_table_row_changes, table_revision_stamps, table_row_changes,
 };
 use crate::ops::{Chunk, ChunkKind};
 use crate::{
-    BREAK_KIND, COMMENTS, DEL, EditingDoc, INS, KIND_KEY, PARA_ID, ParagraphId, RevisionId,
-    map_string, story_ref,
+    BREAK_KIND, COMMENTS, DEL, EditError, EditingDoc, INS, KIND_KEY, PARA_ID, ParagraphId,
+    RevisionId, map_string, story_ref,
 };
 
 /// A tracked change with its story-global `[start, end)`, before its paragraph
@@ -453,7 +454,15 @@ fn raw_changes<'a, T: ReadTxn>(
 impl EditingDoc {
     fn views_for_story(&self, story_id: &str, view: TextView) -> OpResult<Vec<ParaView>> {
         let txn = self.yrs_doc().transact();
-        let story = story_ref(&txn, story_id)?;
+        let story = match story_ref(&txn, story_id) {
+            Ok(story) => story,
+            Err(EditError::CellHasNoStory(_)) => {
+                return EmptyCell::new(story_id)
+                    .doc()
+                    .views_for_story(story_id, view);
+            }
+            Err(error) => return Err(error.into()),
+        };
         let chunks = self.chunk_snapshot(story_id, &story, &txn);
         Ok(para_views(&txn, view, &chunks))
     }
@@ -495,7 +504,15 @@ impl EditingDoc {
     /// Returns view text without paragraph-boundary text.
     pub fn text_between(&self, range: &LocRange, view: TextView) -> OpResult<String> {
         let txn = self.yrs_doc().transact();
-        let story = story_ref(&txn, &range.start.story)?;
+        let story = match story_ref(&txn, &range.start.story) {
+            Ok(story) => story,
+            Err(EditError::CellHasNoStory(_)) => {
+                return EmptyCell::new(&range.start.story)
+                    .doc()
+                    .text_between(range, view);
+            }
+            Err(error) => return Err(error.into()),
+        };
         let from = global_of_loc(&story, &txn, &range.start)?;
         let to = global_of_loc(&story, &txn, &range.end)?;
         if to < from {
@@ -622,7 +639,15 @@ impl EditingDoc {
     /// Returns vanilla-view slices around a selection.
     pub fn selection_info(&self, anchor: &Loc, head: &Loc) -> OpResult<SelectionInfo> {
         let txn = self.yrs_doc().transact();
-        let story = story_ref(&txn, &anchor.story)?;
+        let story = match story_ref(&txn, &anchor.story) {
+            Ok(story) => story,
+            Err(EditError::CellHasNoStory(_)) => {
+                return EmptyCell::new(&anchor.story)
+                    .doc()
+                    .selection_info(anchor, head);
+            }
+            Err(error) => return Err(error.into()),
+        };
         let a = global_of_loc(&story, &txn, anchor)?;
         let h = global_of_loc(&story, &txn, head)?;
         let (from, to) = (a.min(h), a.max(h));
@@ -690,7 +715,7 @@ impl EditingDoc {
                     anchors
                         .into_iter()
                         .filter_map(|anchor| {
-                            let story = story_ref(&txn, &anchor.story).ok()?;
+                            let story = crate::story_text(&txn, &anchor.story)?;
                             Some(LocRange {
                                 start: loc_of_global(&anchor.story, &story, &txn, anchor.start)
                                     .ok()?,
@@ -780,7 +805,11 @@ impl EditingDoc {
     /// [`Self::list_changes`] with each change's story-global `[start, end)`.
     pub(crate) fn story_changes(&self, story_id: &str) -> OpResult<Vec<(ChangeInfo, (u32, u32))>> {
         let txn = self.yrs_doc().transact();
-        let story = story_ref(&txn, story_id)?;
+        let story = match story_ref(&txn, story_id) {
+            Ok(story) => story,
+            Err(EditError::CellHasNoStory(_)) => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
         let raw = self.story_raw_changes(story_id, &story, &txn);
         if raw.is_empty() {
             return Ok(Vec::new());
@@ -830,7 +859,15 @@ impl EditingDoc {
         para_id: &str,
         offset: u32,
     ) -> OpResult<Vec<String>> {
-        let segments = self.segment_index(story_id)?;
+        let segments = match self.segment_index(story_id) {
+            Ok(segments) => segments,
+            Err(EditError::CellHasNoStory(_)) => {
+                return EmptyCell::new(story_id)
+                    .doc()
+                    .revision_ids_at(story_id, para_id, offset);
+            }
+            Err(error) => return Err(error.into()),
+        };
         let index = self.paragraph_index(story_id)?;
         let slot = index
             .para_slot(para_id)
@@ -968,7 +1005,15 @@ impl EditingDoc {
     /// story. Boundaries are computed on the Raw view (embeds are their own boundary).
     pub fn nav_boundary(&self, loc: &Loc, unit: NavUnit, direction: NavDirection) -> OpResult<Loc> {
         let txn = self.yrs_doc().transact();
-        let story = story_ref(&txn, &loc.story)?;
+        let story = match story_ref(&txn, &loc.story) {
+            Ok(story) => story,
+            Err(EditError::CellHasNoStory(_)) => {
+                return EmptyCell::new(&loc.story)
+                    .doc()
+                    .nav_boundary(loc, unit, direction);
+            }
+            Err(error) => return Err(error.into()),
+        };
         let views = para_views(
             &txn,
             TextView::Raw,

@@ -289,11 +289,11 @@ class InputFakeWorker {
       caret: { frameEpoch: 100, caretRect: null }, selection: null, layoutRevision: 1,
     } } as MessageEvent<DocxEngineWorkerResponse>);
   }
-  replyInputError(message: string): void {
+  replyInputError(message: string, residentUnavailable?: boolean): void {
     const input = [...this.posted].reverse().find((request) => request.type === 'applyInput');
     if (!input) throw new Error('worker never received an applyInput request');
     this.onmessage?.({ data: {
-      id: input.id, ok: false, error: message,
+      id: input.id, ok: false, error: message, ...(residentUnavailable ? { residentUnavailable } : {}),
     } } as MessageEvent<DocxEngineWorkerResponse>);
   }
   replyInputCorruptFrame(payload: Uint8Array): void {
@@ -531,6 +531,97 @@ test('surfaces an engine-level input rejection instead of falling back', async (
     expect(JSON.stringify(result.current.displayList ?? '')).not.toContain('QUACK');
     expect(worker!.terminated).toBe(false);
     expect(result.current.workerSurfacesActive).toBe(true);
+    unmount();
+  } finally {
+    errors.mockRestore();
+    native.free();
+  }
+});
+
+test('input into a table cell with no story is declined to the structural path without an error, a fallback or a new worker', async () => {
+  const native = createEditSession(9206);
+  native.create_story('body', 'Fallback text', 'Normal', 'left');
+  const inputs = JSON.parse(native.layout_document_with_regions_json(JSON.stringify({
+    bodyStory: 'body',
+    regions: { sections: [{ sectionId: 'main', properties: {} }] },
+    measurement: { defaults: { fontSize: 11, fontFamily: 'Calibri' } },
+    renderEnv: {},
+  })));
+  const frame = native.build_display_list_frame(JSON.stringify(inputs), 0);
+  new DataView(frame.buffer, frame.byteOffset, frame.byteLength).setBigUint64(32, 100n, true);
+  const paragraphs = JSON.parse(native.paragraphs('body')) as Array<{ paraId: string; text: string }>;
+  const para = paragraphs[0]!;
+  native.set_selection('body', para.paraId, para.text.length, para.paraId, para.text.length);
+  let worker: InputFakeWorker | null = null;
+  let created = 0;
+  class FakeWorker extends InputFakeWorker {
+    constructor() {
+      super(frame);
+      worker = this;
+      created += 1;
+    }
+  }
+  globalThis.Worker = FakeWorker as unknown as typeof Worker;
+  const hostInputs: string[] = [];
+  const engine = {
+    buildDisplayListJson: (input: string) => native.build_display_list_json(input),
+    resetFrameBase: () => native.reset_frame_base(),
+    buildDisplayListFrame: (input: string, epoch: number) =>
+      native.build_display_list_frame(input, epoch),
+    applyInput: (text: string) => {
+      hostInputs.push(text);
+      throw new Error('table cell "body:t0:r0c2~9" has no story');
+    },
+    residentCaretSnapshot: () => JSON.parse(native.resident_caret_snapshot_json()),
+    residentWorkerProbe: () => ({ layoutRevision: 1 }),
+    residentWorkerSnapshot: () => ({ state: new Uint8Array(), fonts: [], fontsRevision: 0 }),
+    encodeStateVector: () => new Uint8Array(),
+    onUpdate: () => () => {},
+    selection: () => JSON.parse(native.selection()) as YrsSelection,
+    applyUpdate: () => null,
+  } as unknown as YrsSession;
+  const overrides = { getInputs: () => inputs };
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  const inputRequests = () => worker!.posted.filter((request) => request.type === 'applyInput').length;
+  try {
+    const { result, unmount } = renderHook(
+      ({ layout }) => useRustDisplayList(layout, overrides, undefined, undefined, engine),
+      { initialProps: { layout: inputs.layout as Layout } }
+    );
+    await act(async () => {
+      worker!.replyBootstrap();
+    });
+    await waitFor(() => {
+      if (result.current.error) throw result.current.error;
+      expect(result.current.frame?.frameEpoch).toBe(100);
+    });
+    const outcomes: Array<ResidentFrameApplyResult | null> = [];
+    for (const flagged of [false, true]) {
+      const before = inputRequests();
+      await act(async () => {
+        const pending = result.current.applyInput('x');
+        for (let i = 0; i < 25 && inputRequests() === before; i += 1) await Promise.resolve();
+        expect(inputRequests()).toBe(before + 1);
+        worker!.replyInputError('table cell "body:t0:r0c2~9" has no story', flagged);
+        outcomes.push(await pending);
+      });
+    }
+    expect(outcomes).toEqual([null, null]);
+    expect(result.current.error).toBeNull();
+    expect(worker!.terminated).toBe(false);
+    expect(created).toBe(1);
+    expect(hostInputs).toEqual([]);
+    expect(result.current.workerSurfacesActive).toBe(true);
+    expect(errors.mock.calls.filter(([message]) => String(message).includes('[CanvasRenderer]'))).toEqual([]);
+    const before = inputRequests();
+    await act(async () => {
+      const pending = result.current.applyInput('later');
+      for (let i = 0; i < 25 && inputRequests() === before; i += 1) await Promise.resolve();
+      expect(inputRequests()).toBe(before + 1);
+      worker!.replyInputError('resident input state is not ready for this paragraph', true);
+      await pending;
+    });
+    expect(worker!.terminated).toBe(false);
     unmount();
   } finally {
     errors.mockRestore();

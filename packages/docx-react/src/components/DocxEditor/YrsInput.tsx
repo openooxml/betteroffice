@@ -399,6 +399,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     queuedSessionRef.current = session;
     const queue = new InputOperationQueue(
       (error) => {
+        // A write into a table cell with no story is refused before the engine changes anything.
+        if (error instanceof Error && error.message.includes('has no story')) return;
         console.error('[YrsInput] queued input operation failed', error);
       },
       (pending) => {

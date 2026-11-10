@@ -25,7 +25,7 @@ use crate::structured::{
     ExportError, ExportFailure, ExportFailureCode, ExportRead, ExportRefusal, StoryKind,
     byte_limit, invalid_options, limit_exceeded,
 };
-use crate::{DEL, EditingDoc, INS, KIND_KEY, PARA_ID, PPR_DEL, PPR_INS, map_string, story_ref};
+use crate::{DEL, EditingDoc, INS, KIND_KEY, PARA_ID, PPR_DEL, PPR_INS, map_string, story_text};
 
 pub use crate::read_types::{Anchor, ControlMetadata, StorySelection};
 pub use crate::structured::{AnchorScope, Diagnostic, DiagnosticCode, Severity};
@@ -623,7 +623,7 @@ impl<'a, T: ReadTxn> Builder<'a, T> {
         if !self.walked.insert(story.to_owned()) {
             return Ok(summary);
         }
-        let Ok(text) = story_ref(self.txn, story) else {
+        let Some(text) = story_text(self.txn, story) else {
             return Ok(summary);
         };
         let chunks = self.doc.chunk_snapshot(story, &text, self.txn);

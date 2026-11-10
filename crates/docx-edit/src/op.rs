@@ -4,6 +4,7 @@ use std::fmt;
 
 use yrs::{ReadTxn, TextRef, Transact};
 
+use crate::empty_cells::EmptyCell;
 use crate::{
     CommentId, EditError, ParagraphId, Position, RevisionId, StoryId, StoryRange, pilcrows,
 };
@@ -14,6 +15,8 @@ pub type OpResult<T> = Result<T, OpError>;
 #[derive(Clone, Debug, PartialEq)]
 pub enum OpError {
     UnknownStory(StoryId),
+    /// A table of a live story names this cell while its story is missing or removed.
+    CellHasNoStory(StoryId),
     StoryExists(StoryId),
     UnknownPara(ParagraphId),
     UnknownEmbed(String),
@@ -68,6 +71,7 @@ impl fmt::Display for OpError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnknownStory(id) => write!(f, "story {id:?} was not found"),
+            Self::CellHasNoStory(id) => write!(f, "table cell {id:?} has no story"),
             Self::StoryExists(id) => write!(f, "story {id:?} already exists"),
             Self::UnknownPara(id) => write!(f, "paragraph {id:?} was not found"),
             Self::UnknownEmbed(id) => write!(f, "embed {id:?} was not found"),
@@ -131,6 +135,7 @@ impl From<EditError> for OpError {
         match error {
             EditError::StoryExists(id) => Self::StoryExists(id),
             EditError::StoryNotFound(id) => Self::UnknownStory(id),
+            EditError::CellHasNoStory(id) => Self::CellHasNoStory(id),
             EditError::CommentNotFound(id) => Self::UnknownComment(id),
             EditError::ParagraphNotFound(id) => Self::UnknownPara(id),
             EditError::InvalidRange { start, end } => Self::InvalidRange { start, end },
@@ -322,7 +327,13 @@ impl crate::EditingDoc {
     /// Resolves a public [`Loc`] to a transient story-global [`Position`].
     pub fn locate(&self, loc: &Loc) -> OpResult<Position> {
         let txn = self.yrs_doc().transact();
-        let story = crate::story_ref(&txn, &loc.story)?;
+        let story = match crate::story_ref(&txn, &loc.story) {
+            Ok(story) => story,
+            Err(EditError::CellHasNoStory(_)) => {
+                return EmptyCell::new(&loc.story).doc().locate(loc);
+            }
+            Err(error) => return Err(error.into()),
+        };
         let index = global_of_loc(&story, &txn, loc)?;
         Ok(Position::new(loc.story.clone(), index))
     }
@@ -330,14 +341,27 @@ impl crate::EditingDoc {
     /// Maps a transient story-global [`Position`] to the public [`Loc`] vocabulary.
     pub fn loc_at(&self, position: &Position) -> OpResult<Loc> {
         let txn = self.yrs_doc().transact();
-        let story = crate::story_ref(&txn, &position.story)?;
+        let story = match crate::story_ref(&txn, &position.story) {
+            Ok(story) => story,
+            Err(EditError::CellHasNoStory(_)) => {
+                return EmptyCell::new(&position.story).doc().loc_at(position);
+            }
+            Err(error) => return Err(error.into()),
+        };
         loc_of_global(&position.story, &story, &txn, position.index)
     }
 
     /// Resolves a public [`LocRange`] to a transient [`StoryRange`].
     pub fn locate_range(&self, range: &LocRange) -> OpResult<StoryRange> {
         let txn = self.yrs_doc().transact();
-        let story = crate::story_ref(&txn, &range.start.story)?;
+        let story = match crate::story_ref(&txn, &range.start.story) {
+            Ok(story) => story,
+            Err(EditError::CellHasNoStory(_)) => {
+                let cell = EmptyCell::new(&range.start.story);
+                return cell.doc().locate_range(range);
+            }
+            Err(error) => return Err(error.into()),
+        };
         let start = global_of_loc(&story, &txn, &range.start)?;
         let end = global_of_loc(&story, &txn, &range.end)?;
         if end < start {
@@ -349,7 +373,13 @@ impl crate::EditingDoc {
     /// Maps a transient [`StoryRange`] to the public [`LocRange`] vocabulary.
     pub fn loc_range_of(&self, range: &StoryRange) -> OpResult<LocRange> {
         let txn = self.yrs_doc().transact();
-        let story = crate::story_ref(&txn, &range.story)?;
+        let story = match crate::story_ref(&txn, &range.story) {
+            Ok(story) => story,
+            Err(EditError::CellHasNoStory(_)) => {
+                return EmptyCell::new(&range.story).doc().loc_range_of(range);
+            }
+            Err(error) => return Err(error.into()),
+        };
         Ok(LocRange {
             start: loc_of_global(&range.story, &story, &txn, range.start)?,
             end: loc_of_global(&range.story, &story, &txn, range.end)?,

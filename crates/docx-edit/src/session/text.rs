@@ -3,7 +3,7 @@ use yrs::Any;
 
 use super::args::{
     apply_mark, edit_ctx, find_para_span, json_to_any, loc_index, parse_inline_format_delta,
-    parse_para_attr_delta, text_receipt_json,
+    parse_para_attr_delta, text_receipt_json, writable_story,
 };
 use super::{EditSessionCore, EngineError, EngineResult};
 use crate::{FormatPolicy, MergeDirection, ParaAttrDelta, ParaSelector, Position, StoryRange};
@@ -30,7 +30,7 @@ impl EditSessionCore {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> EngineResult<String> {
-        self.engine.doc().ensure_cell_story(story);
+        writable_story(self.engine.doc(), story)?;
         let at = loc_index(self.engine.doc(), story, para_id, offset)?;
         let ctx = edit_ctx(author_name, author_date)?;
         let doc = self.engine.doc();
@@ -84,7 +84,7 @@ impl EditSessionCore {
         end_offset: u32,
         text: Option<String>,
     ) -> EngineResult<String> {
-        self.engine.doc().ensure_cell_story(story);
+        writable_story(self.engine.doc(), story)?;
         let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
         if text.is_some() && start != end {
@@ -130,6 +130,7 @@ impl EditSessionCore {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> EngineResult<String> {
+        writable_story(self.engine.doc(), story)?;
         let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
         let ctx = edit_ctx(author_name, author_date)?;
@@ -168,7 +169,7 @@ impl EditSessionCore {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> EngineResult<String> {
-        self.engine.doc().ensure_cell_story(story);
+        writable_story(self.engine.doc(), story)?;
         let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
         let ctx = edit_ctx(author_name, author_date)?;
@@ -188,7 +189,7 @@ impl EditSessionCore {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> EngineResult<String> {
-        self.engine.doc().ensure_cell_story(story);
+        writable_story(self.engine.doc(), story)?;
         let at = loc_index(self.engine.doc(), story, para_id, offset)?;
         let ctx = edit_ctx(author_name, author_date)?;
         let receipt = self
@@ -207,7 +208,7 @@ impl EditSessionCore {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> EngineResult<String> {
-        self.engine.doc().ensure_cell_story(story);
+        writable_story(self.engine.doc(), story)?;
         let at = loc_index(self.engine.doc(), story, para_id, offset)?;
         let receipt = if author_name.is_none() && author_date.is_none() {
             let receipt = self
@@ -239,6 +240,7 @@ impl EditSessionCore {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> EngineResult<String> {
+        writable_story(self.engine.doc(), story)?;
         // Validate story membership (story-scoped "not found") before merging.
         find_para_span(self.engine.doc(), story, para_id)?;
         let ctx = edit_ctx(author_name, author_date)?;
@@ -261,7 +263,7 @@ impl EditSessionCore {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> EngineResult<String> {
-        self.engine.doc().ensure_cell_story(story);
+        writable_story(self.engine.doc(), story)?;
         let ctx = edit_ctx(author_name, author_date)?;
         let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
@@ -285,7 +287,7 @@ impl EditSessionCore {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> EngineResult<String> {
-        self.engine.doc().ensure_cell_story(story);
+        writable_story(self.engine.doc(), story)?;
         let ctx = edit_ctx(author_name, author_date)?;
         let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
@@ -308,7 +310,7 @@ impl EditSessionCore {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> EngineResult<()> {
-        self.engine.doc().ensure_cell_story(story);
+        writable_story(self.engine.doc(), story)?;
         let ctx = edit_ctx(author_name, author_date)?;
         let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
@@ -339,6 +341,7 @@ impl EditSessionCore {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> EngineResult<String> {
+        writable_story(self.engine.doc(), story)?;
         let ctx = edit_ctx(author_name, author_date)?;
         let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
@@ -384,7 +387,7 @@ impl EditSessionCore {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> EngineResult<()> {
-        self.engine.doc().ensure_cell_story(story);
+        writable_story(self.engine.doc(), story)?;
         let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
         let selector = ParaSelector::Range(StoryRange::new(story, start, end));
@@ -421,7 +424,7 @@ impl EditSessionCore {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> EngineResult<()> {
-        self.engine.doc().ensure_cell_story(story);
+        writable_story(self.engine.doc(), story)?;
         let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
         let selector = ParaSelector::Range(StoryRange::new(story, start, end));

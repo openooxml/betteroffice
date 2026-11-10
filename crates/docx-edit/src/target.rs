@@ -106,6 +106,20 @@ pub enum TextTarget {
     },
 }
 
+impl TextTarget {
+    /// The story the target addresses.
+    pub(crate) fn story(&self) -> &str {
+        match self {
+            Self::Paragraph(paragraph) => paragraph.story.as_str(),
+            Self::Range(range) => range.story.as_str(),
+            Self::Search { within, .. } => match within {
+                SearchScope::Story { story } => story.as_str(),
+                SearchScope::Paragraph(paragraph) => paragraph.story.as_str(),
+            },
+        }
+    }
+}
+
 /// What an inline atom in projected text stands for.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -799,7 +813,15 @@ impl StoryView {
         view: EditTextView,
         limit: u32,
     ) -> Option<(Self, bool)> {
-        let story = story_ref(txn, story_id).ok()?;
+        let story = match story_ref(txn, story_id) {
+            Ok(story) => story,
+            Err(crate::EditError::CellHasNoStory(_)) => {
+                let cell = crate::empty_cells::EmptyCell::new(story_id);
+                let scratch = cell.doc().yrs_doc().transact();
+                return Self::build_within(cell.doc(), &scratch, story_id, view, limit);
+            }
+            Err(_) => return None,
+        };
         let chunks = doc.chunk_snapshot(story_id, &story, txn);
         Self::from_chunks(doc, txn, story_id, view, limit, &chunks, false)
     }
@@ -1080,7 +1102,9 @@ impl<'a, T: ReadTxn> Views<'a, T> {
             .entry((story.to_owned(), view))
             .or_insert_with(|| {
                 if fresh {
-                    let text = story_ref(txn, story).ok()?;
+                    let Some(text) = crate::story_text(txn, story) else {
+                        return StoryView::build(doc, txn, story, view).map(Arc::new);
+                    };
                     let chunks = crate::ops::snapshot(&text, txn);
                     StoryView::from_chunks(doc, txn, story, view, u32::MAX, &chunks, false)
                         .map(|(view, _)| Arc::new(view))
@@ -1124,9 +1148,11 @@ impl<'a, T: ReadTxn> Views<'a, T> {
                     .get(&story_view_key(story, view), epoch)
                     .is_some()
             });
-        let units = yrs::Text::len(&story_ref(self.txn, story).ok()?, self.txn);
+        let Some(text) = crate::story_text(self.txn, story) else {
+            return self.story(story, view).map(|built| (built, true));
+        };
+        let units = yrs::Text::len(&text, self.txn);
         if self.fresh {
-            let text = story_ref(self.txn, story).ok()?;
             let chunks = crate::ops::snapshot(&text, self.txn);
             return StoryView::from_chunks(self.doc, self.txn, story, view, limit, &chunks, false)
                 .map(|(view, complete)| (Arc::new(view), complete));
@@ -1388,6 +1414,13 @@ impl<'a, T: ReadTxn> Views<'a, T> {
         story: &str,
         target: &EditTarget,
     ) -> Result<(), EditFailure> {
+        if crate::empty_cells::is_empty_cell(self.txn, story) {
+            return Err(failure(
+                EditFailureCode::Unsupported,
+                crate::EditError::CellHasNoStory(story.to_owned()).to_string(),
+                Some(target.clone()),
+            ));
+        }
         let ownership = self.ownership();
         let chain = ownership
             .chain(story)
@@ -1734,6 +1767,9 @@ impl EditingDoc {
         target: &TextTarget,
         delta: &InlineFormatDelta,
     ) -> OpResult<Result<crate::KeptUnchanged, EditRefusal>> {
+        if let Err(refusal) = self.refuse_empty_cell(target) {
+            return Ok(Err(refusal));
+        }
         let span = match self.resolve_text_span(target) {
             Ok(span) => span,
             Err(refusal) => return Ok(Err(refusal)),
@@ -1774,6 +1810,9 @@ impl EditingDoc {
         date: &str,
         body: Any,
     ) -> OpResult<Result<(), EditRefusal>> {
+        if let Err(refusal) = self.refuse_empty_cell(target) {
+            return Ok(Err(refusal));
+        }
         let span = match self.resolve_text_span(target) {
             Ok(span) => span,
             Err(refusal) => return Ok(Err(refusal)),
@@ -1802,6 +1841,22 @@ impl EditingDoc {
         Ok(Ok(()))
     }
 
+    /// Refuses a target in a cell that a live table names while its story is missing or removed.
+    fn refuse_empty_cell(&self, target: &TextTarget) -> Result<(), EditRefusal> {
+        let story = target.story();
+        if !crate::empty_cells::is_empty_cell(&self.yrs_doc().transact(), story) {
+            return Ok(());
+        }
+        Err(refusal(
+            self.version(),
+            failure(
+                EditFailureCode::Unsupported,
+                crate::EditError::CellHasNoStory(story.to_owned()).to_string(),
+                Some(EditTarget::from(target.clone())),
+            ),
+        ))
+    }
+
     fn writable(&self, story: &str, target: &TextTarget) -> Result<(), EditRefusal> {
         self.read_scope(|views| {
             views.check_story_writable(story, &EditTarget::from(target.clone()))
@@ -1814,7 +1869,6 @@ impl EditingDoc {
     pub fn selection_text(&self, range: &LocRange, view: EditTextView) -> OpResult<SelectionInfo> {
         let txn = self.yrs_doc().transact();
         let story_id = &range.start.story;
-        story_ref(&txn, story_id)?;
         let story = StoryView::build(self, &txn, story_id, view)
             .ok_or_else(|| OpError::UnknownStory(story_id.clone()))?;
         let locate = |loc: &Loc| -> OpResult<(usize, u32)> {

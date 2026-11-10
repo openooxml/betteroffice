@@ -3498,7 +3498,11 @@ impl EditingDoc {
     pub fn story_paragraph_ids(&self, story_id: &str) -> EditResult<Vec<Option<String>>> {
         let source = self.source_index();
         let txn = self.yrs_doc().transact();
-        let story = story_ref(&txn, story_id)?;
+        let story = match story_ref(&txn, story_id) {
+            Ok(story) => story,
+            Err(crate::EditError::CellHasNoStory(_)) => return Ok(vec![None]),
+            Err(error) => return Err(error),
+        };
         Ok(pilcrows(&story, &txn)
             .into_iter()
             .map(|(_, map)| {

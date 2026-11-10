@@ -375,6 +375,27 @@ pub(crate) enum BatchStep<'a> {
     Rich(&'a RichReplacement),
 }
 
+impl<'a> BatchStep<'a> {
+    /// The story the step names, when it names one before resolving.
+    fn story(self) -> Option<&'a str> {
+        let step = match self {
+            Self::Edit(step) => step,
+            Self::Rich(rich) => return Some(rich.story.as_str()),
+        };
+        match &step.operation {
+            EditOperation::InsertText { target, .. }
+            | EditOperation::ReplaceText { target, .. }
+            | EditOperation::DeleteText { target } => Some(target.story()),
+            EditOperation::InsertParagraphs { target, .. }
+            | EditOperation::SetParagraphStyle { target, .. }
+            | EditOperation::InsertSectionBreakAfter { target, .. } => Some(target.story.as_str()),
+            EditOperation::DeleteParagraphs { story, .. } => Some(story.as_str()),
+            EditOperation::SetSectionProperties { .. }
+            | EditOperation::SetContentControlText { .. } => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
@@ -2879,6 +2900,15 @@ impl EditingDoc {
         let mut planned_steps = Vec::with_capacity(steps.len());
         for (index, step) in steps.iter().enumerate() {
             let index = index as u32;
+            if let Some(story) = step.story()
+                && crate::empty_cells::is_empty_cell(&txn, story)
+            {
+                let message = EditError::CellHasNoStory(story.to_owned()).to_string();
+                return Err(refusal(
+                    version,
+                    failure(EditFailureCode::Unsupported, message, None).at(index),
+                ));
+            }
             let planned = match step {
                 BatchStep::Edit(step) => plan_step(&mut views, source.as_deref(), index, step),
                 BatchStep::Rich(rich) => plan_rich(&mut views, source.as_deref(), index, rich)

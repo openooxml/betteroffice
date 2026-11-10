@@ -295,7 +295,7 @@ fn preview_touches_state_inner<T: ReadTxn>(
                         if !active_stories.insert(story_id.clone()) {
                             return true;
                         }
-                        let Ok(story) = story_ref(txn, &story_id) else {
+                        let Some(story) = crate::story_text(txn, &story_id) else {
                             return true;
                         };
                         let stateful = story

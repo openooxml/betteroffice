@@ -2552,10 +2552,7 @@ impl EditingDoc {
                 }
             }
         }
-        let destination = match story_ref(&txn, &target.cell.story) {
-            Ok(story) => story,
-            Err(_) => self.create_empty_cell(&mut txn, &target.cell.story),
-        };
+        let destination = story_ref(&txn, &target.cell.story).map_err(OpError::from)?;
         let mut deleted = Vec::new();
         let source_ids: HashSet<String> = selected
             .iter()
@@ -2566,9 +2563,7 @@ impl EditingDoc {
         let mut offsets = HashMap::new();
         let mut offset = destination.len(&txn);
         for source in selected.iter().skip(1) {
-            let Ok(source_story) = story_ref(&txn, &source.cell.story) else {
-                continue;
-            };
+            let source_story = story_ref(&txn, &source.cell.story).map_err(OpError::from)?;
             sources.push(snapshot_story(&source_story, &txn)?);
             offsets.insert(source.cell.story.clone(), offset);
             offset = offset
@@ -2633,6 +2628,7 @@ impl EditingDoc {
             })
             .ok_or_else(|| invalid("split target is outside the table"))?;
         let target = cell_anchors[target_index].clone();
+        story_ref(&txn, &target.cell.story).map_err(OpError::from)?;
         let requested_rows = rows.map(|value| value as usize).unwrap_or(target.rowspan);
         let requested_columns = columns
             .map(|value| value as usize)
@@ -4873,20 +4869,24 @@ mod tests {
         }
     }
 
-    fn entries(doc: &EditingDoc, story: &str) -> usize {
-        let txn = doc.yrs_doc().transact();
-        txn.get_map(STORIES)
-            .unwrap()
-            .iter(&txn)
-            .filter(|(id, _)| *id == story)
-            .count()
+    fn state(doc: &EditingDoc) -> (Vec<u8>, Vec<u8>) {
+        (doc.encode_state_vector_v1(), doc.encode_state_as_update_v1())
+    }
+
+    fn refused<T: std::fmt::Debug>(result: OpResult<T>, story: &str) {
+        match result {
+            Err(OpError::CellHasNoStory(id)) => assert_eq!(id, story),
+            other => panic!("expected a refusal for {story}, got {other:?}"),
+        }
     }
 
     #[test]
-    fn a_named_cell_without_its_story_reads_as_one_empty_paragraph_until_an_edit_creates_it() {
+    fn a_named_cell_without_its_story_reads_as_one_empty_paragraph_and_refuses_writes() {
         for removed in [false, true] {
-            let doc = inserted(&direct(), 1, 2);
+            let doc = inserted(&direct(), 1, 3);
+            let first = named_cell_story(&doc, 0);
             let story = named_cell_story(&doc, 1);
+            let last = named_cell_story(&doc, 2);
             doc.insert_text(
                 &direct(),
                 Position::new(story.as_str(), 0),
@@ -4896,7 +4896,7 @@ mod tests {
             .unwrap();
             drop_cell_story(&doc, &story, removed);
             let key = crate::empty_cells::empty_cell_para_key(&story);
-            let before = doc.encode_state_as_update_v1();
+            let before = state(&doc);
             let paragraphs = doc.paragraphs(&story).unwrap();
             assert_eq!(paragraphs.len(), 1, "removed={removed}");
             assert_eq!(
@@ -4908,42 +4908,55 @@ mod tests {
                 doc.paragraph_index(&story).unwrap().para_span(&key),
                 Some((0, 0))
             );
-            assert_eq!(doc.story_segment_units(&story).unwrap().len(), 1);
-            assert_eq!(doc.story_segment_units_at(&story, &[0]).unwrap().len(), 1);
             let blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
             assert_eq!(serde_json::to_value(&blocks).unwrap()[0]["kind"], "table");
-            let sticky = doc
-                .cached_sticky_index(&story, 0, Assoc::After)
-                .unwrap()
-                .unwrap();
-            assert_eq!(doc.cached_sticky_offset(&story, &sticky).unwrap(), Some(0));
-            assert_eq!(doc.encode_state_as_update_v1(), before, "reads never write");
+            assert!(!serde_json::to_string(&blocks).unwrap().contains("old"));
+            assert_eq!(state(&doc), before, "reads never write");
 
-            assert!(doc.ensure_cell_story(&story));
-            assert!(!doc.ensure_cell_story(&story));
-            assert_eq!(doc.cached_sticky_offset(&story, &sticky).unwrap(), Some(0));
+            refused(
+                doc.insert_text(
+                    &direct(),
+                    Position::new(story.as_str(), 0),
+                    "x",
+                    crate::FormatPolicy::Inherit,
+                ),
+                &story,
+            );
+            refused(
+                doc.merge_cells(&direct(), &TableRange::new(cell(0, 0), cell(0, 1))),
+                &story,
+            );
+            refused(
+                doc.merge_cells(&direct(), &TableRange::new(cell(0, 1), cell(0, 2))),
+                &story,
+            );
+            refused(
+                doc.split_cell_grid(&direct(), &cell(0, 1), Some(2), Some(1)),
+                &story,
+            );
+            assert_eq!(state(&doc), before, "refused writes change nothing");
+
             doc.insert_text(
                 &direct(),
-                Position::new(story.as_str(), 0),
-                "x",
+                Position::new(last.as_str(), 0),
+                "kept",
                 crate::FormatPolicy::Inherit,
             )
             .unwrap();
-            let paragraphs = doc.paragraphs(&story).unwrap();
-            assert_eq!(paragraphs.len(), 1);
-            assert_eq!(
-                (paragraphs[0].para_id.as_str(), paragraphs[0].text.as_str()),
-                (key.as_str(), "x")
-            );
-            assert_eq!(entries(&doc, &story), 1);
-            assert!(!crate::story_is_removed(&doc.yrs_doc().transact(), &story));
-            let blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
-            assert!(!serde_json::to_string(&blocks).unwrap().contains("old"));
+            assert_eq!(doc.paragraphs(&last).unwrap()[0].text, "kept");
+            doc.delete_column(&direct(), &TableRange::cell(cell(0, 1)))
+                .unwrap();
+            assert!(matches!(
+                doc.story_len(&story),
+                Err(crate::EditError::StoryNotFound(_))
+            ));
+            assert_eq!(doc.paragraphs(&first).unwrap().len(), 1);
+            yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
         }
     }
 
     #[test]
-    fn a_story_no_live_table_names_stays_unknown_and_is_never_created() {
+    fn a_story_no_live_table_names_stays_unknown() {
         let doc = inserted(&direct(), 1, 2);
         for story in [
             "body:t0:r5c5",
@@ -4951,37 +4964,19 @@ mod tests {
             "nobody:t0:r0c0",
             "body:sdt0",
         ] {
-            assert!(doc.paragraphs(story).is_err(), "{story}");
-            assert!(doc.story_len(story).is_err(), "{story}");
-            assert!(!doc.ensure_cell_story(story), "{story}");
-            assert_eq!(entries(&doc, story), 0);
+            assert!(matches!(
+                doc.paragraphs(story),
+                Err(crate::EditError::StoryNotFound(_))
+            ));
+            assert!(matches!(
+                doc.insert_text(
+                    &direct(),
+                    Position::new(story, 0),
+                    "x",
+                    crate::FormatPolicy::Inherit,
+                ),
+                Err(OpError::UnknownStory(_))
+            ));
         }
-    }
-
-    #[test]
-    fn merging_cells_whose_stories_are_missing_keeps_the_others_text() {
-        let doc = inserted(&direct(), 1, 3);
-        let first = named_cell_story(&doc, 0);
-        let middle = named_cell_story(&doc, 1);
-        let last = named_cell_story(&doc, 2);
-        doc.insert_text(
-            &direct(),
-            Position::new(last.as_str(), 0),
-            "kept",
-            crate::FormatPolicy::Inherit,
-        )
-        .unwrap();
-        drop_cell_story(&doc, &first, false);
-        drop_cell_story(&doc, &middle, true);
-        doc.merge_cells(&direct(), &TableRange::new(cell(0, 0), cell(0, 2)))
-            .unwrap();
-        let text: Vec<String> = doc
-            .paragraphs(&first)
-            .unwrap()
-            .into_iter()
-            .map(|paragraph| paragraph.text)
-            .collect();
-        assert!(text.contains(&"kept".to_owned()), "{text:?}");
-        assert_eq!(entries(&doc, &first), 1);
     }
 }

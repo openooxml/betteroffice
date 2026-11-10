@@ -443,6 +443,10 @@ pub fn yrs_doc_to_mapped_layout_blocks(
     story_id: &str,
     env: &RenderEnv,
 ) -> Result<(Vec<LayoutBlock>, LoweringMap), BridgeError> {
+    if crate::empty_cells::is_empty_cell(&doc.yrs_doc().transact(), story_id) {
+        let cell = crate::empty_cells::EmptyCell::new(story_id);
+        return yrs_doc_to_mapped_layout_blocks(cell.doc(), story_id, env);
+    }
     let mut local = local::LocalLowering::new(false);
     yrs_doc_to_mapped_layout_blocks_inner(doc, story_id, env, &mut None, &mut local, &mut None)
 }
@@ -2323,7 +2327,7 @@ fn lower_table<T: ReadTxn>(
                 before: true,
                 after: true,
             };
-            let (mut blocks, content_size) = if crate::story_ref(txn, &cell_story).is_ok() {
+            let (mut blocks, content_size) = if crate::story_text(txn, &cell_story).is_some() {
                 lower_story(
                     txn,
                     &cell_story,
