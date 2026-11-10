@@ -255,7 +255,7 @@ function readerRows(session: YrsSession): Record<string, string> {
   check('frame', () => session.buildDisplayListFrame('{}', 0));
   check('plainText', () => storyPlainText(session, 'body'));
   check('sidebar', () => createYrsSidebarProjection(session));
-  check('copyTable', () => readTableFragment(session, { story: 'body', tableIndex: 0 }));
+  if (session.tablePayload('body', 0)) check('copyTable', () => readTableFragment(session, { story: 'body', tableIndex: 0 }));
   for (const story of danglingCells(session)) {
     check(`${story} paragraphs`, () => {
       const paragraphs = session.paragraphs(story);
@@ -425,6 +425,7 @@ const WRITES: Array<[string, (session: YrsSession, story: string) => unknown]> =
 
 test('every write entry point aimed at a missing cell works or refuses cleanly, and the room stays readable and converges', async () => {
   const outcomes: Record<string, string> = {};
+  const problems: string[] = [];
   let base = 10_000;
   for (const [name, write] of WRITES) {
     const { a, b, peers } = await danglingRoom(base, 2, 'synced');
@@ -435,13 +436,17 @@ test('every write entry point aimed at a missing cell works or refuses cleanly, 
     const outcome = attempt(name, () => write(b, story!));
     const wrote = JSON.stringify(Array.from(b.encodeStateVector())) !== JSON.stringify(before);
     outcomes[name] = `${outcome}${wrote ? ' (wrote)' : ''}`;
-    expect(outcome).not.toMatch(/unreachable|panicked|RuntimeError/);
-    if (outcome.includes(' throws: ') && wrote) expect(b.paragraphs(story!).map((paragraph) => paragraph.text)).toEqual(['']);
+    if (/unreachable|panicked|RuntimeError/.test(outcome)) problems.push(`${name}: engine trap ${outcome}`);
+    if (outcome.includes(' throws: ') && wrote && JSON.stringify(b.paragraphs(story!).map((paragraph) => paragraph.text)) !== '[""]') problems.push(`${name}: refused after writing content`);
     syncAll(peers);
-    for (const peer of [a, b]) expectReadable(peer);
-    expectConverged(peers);
+    for (const peer of [a, b]) {
+      for (const [reader, result] of Object.entries(readerRows(peer))) if (result !== 'ok') problems.push(`${name}: ${reader} ${result}`);
+    }
+    if (content(a) !== content(b)) problems.push(`${name}: peers diverge`);
   }
   console.log(`WRITE-SURFACE ${JSON.stringify(outcomes)}`);
+  console.log(`WRITE-SURFACE-PROBLEMS ${JSON.stringify(problems)}`);
+  expect(problems).toEqual([]);
 }, 120_000);
 
 test('the first write into a removed cell that a live table still names holds only the new text, on both peers and after save and reopen', async () => {

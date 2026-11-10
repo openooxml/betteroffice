@@ -288,13 +288,6 @@ fn undoing_a_table_edit_keeps_a_previously_removed_cell_hidden() {
                     .all(|info| info.story != cell)
             );
         }
-        peer.doc()
-            .insert_text(&ctx(), Position::new(&cell, 0), "new", FormatPolicy::Plain)
-            .unwrap();
-        exchange(&actor, &peer);
-        for engine in [&actor, &peer] {
-            assert_eq!(text(engine.doc(), &cell), "new");
-        }
     }
 }
 

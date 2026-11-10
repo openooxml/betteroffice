@@ -4887,6 +4887,13 @@ mod tests {
         for removed in [false, true] {
             let doc = inserted(&direct(), 1, 2);
             let story = named_cell_story(&doc, 1);
+            doc.insert_text(
+                &direct(),
+                Position::new(story.as_str(), 0),
+                "old",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
             drop_cell_story(&doc, &story, removed);
             let key = crate::empty_cells::empty_cell_para_key(&story);
             let before = doc.encode_state_as_update_v1();
@@ -4930,6 +4937,8 @@ mod tests {
             );
             assert_eq!(entries(&doc, &story), 1);
             assert!(!crate::story_is_removed(&doc.yrs_doc().transact(), &story));
+            let blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+            assert!(!serde_json::to_string(&blocks).unwrap().contains("old"));
         }
     }
 
