@@ -197,7 +197,7 @@ test('a picture no engine can draw previews as a placeholder with a warning', as
   try {
     const preview = await doc.render(1);
     expect([...preview.png.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
-    expect(preview.warnings).toContain('1 picture(s) could not be drawn; the preview shows a placeholder in their place.');
+    expect(preview.warnings).toContain('1 picture could not be drawn; the preview shows a placeholder in its place.');
   } finally { doc.close(); }
 });
 
@@ -209,7 +209,7 @@ test('engine diagnostics become one warning line', async () => {
     return png;
   });
   try {
-    expect((await renderDocxPage(doc.session, 1)).warnings).toContain('2 picture(s) could not be drawn; the preview shows a placeholder in their place.');
+    expect((await renderDocxPage(doc.session, 1)).warnings).toContain('2 pictures could not be drawn; the preview shows a placeholder in their place.');
   } finally { render.mockRestore(); doc.close(); }
 });
 

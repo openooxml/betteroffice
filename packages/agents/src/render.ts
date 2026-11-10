@@ -6,7 +6,9 @@ import type { ResidentFontRequirement } from '@betteroffice/docx/layout';
 import { cleanupGuard } from './cleanup';
 import { DocumentToolError, type DocumentRenderer } from './types';
 
-const placeholderWarning = (count: number) => `${count} picture(s) could not be drawn; the preview shows a placeholder in their place.`;
+const placeholderWarning = (count: number) => count === 1
+  ? '1 picture could not be drawn; the preview shows a placeholder in its place.'
+  : `${count} pictures could not be drawn; the preview shows a placeholder in their place.`;
 
 const previewWarning = 'Preview uses BetterOffice layout and bundled substitute fonts; compare with the target Office application when exact fidelity matters.';
 
