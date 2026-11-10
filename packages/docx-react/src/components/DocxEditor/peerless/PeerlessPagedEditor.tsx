@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useInsertionEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type PointerEvent, type ReactElement, type ReactNode, type RefObject } from 'react';
+import { Fragment, memo, useCallback, useEffect, useInsertionEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type PointerEvent, type ReactElement, type ReactNode, type RefObject } from 'react';
 import type { DocxEchoRect } from '@betteroffice/docx/worker';
 import type { DocxCommandPageIdentity } from '@betteroffice/docx/worker';
 import { displayPageNoteAnchorRevision, displayPageRevision, loadedRustDisplayListQueryEngine, loadRustDisplayListQueryEngine, type DisplayPage } from '@betteroffice/docx/layout/render';
@@ -28,6 +28,8 @@ import { DEFAULT_BLINK_INTERVAL } from '../overlays/SelectionOverlay';
 import { createPresentedPageQueries } from './presentedPageQueries';
 import { peerlessCaretPaint } from './caretColor';
 import { useTranslation } from '../../../i18n';
+import { workerPageAtViewport } from './pageNavigation';
+import { UnbuiltMirrorSection, useUnbuiltPageMirrors, type ReadPageTexts } from './UnbuiltPageMirrors';
 
 type PageGeometry = PeerlessFrameGeometry['pages'][number];
 const emptyPages: readonly PageGeometry[] = [];
@@ -126,14 +128,37 @@ const PeerlessPage = memo(function PeerlessPage({ geometry, canvasForPage, visib
   previous.geometry.bounds.x === next.geometry.bounds.x && previous.geometry.bounds.y === next.geometry.bounds.y &&
   previous.geometry.bounds.width === next.geometry.bounds.width && previous.geometry.bounds.height === next.geometry.bounds.height);
 
-const PeerlessPages = memo(function PeerlessPages({ pages, visiblePages, canvasForPage, hold, textMirror }: {
+const PeerlessPages = memo(function PeerlessPages({ pages, visiblePages, canvasForPage, hold, textMirror, unbuiltMirrors }: {
   pages: readonly PageGeometry[];
   canvasForPage(page: DocxCommandPageIdentity): HTMLCanvasElement | null;
   visiblePages: readonly PageGeometry[];
   hold: PageChromeHold;
   textMirror: boolean;
+  unbuiltMirrors?: ReturnType<typeof useUnbuiltPageMirrors>;
 }) {
+  const { t } = useTranslation();
   const visible = new Set(visiblePages.map(({ page }) => page.pageId));
+  const pageNode = (page: PageGeometry) => <PeerlessPage key={page.page.pageId}
+    geometry={page} visible={visible.has(page.page.pageId)} hold={hold} fullMirror={!textMirror} canvasForPage={canvasForPage}
+    revision={page.displayPage ? displayPageRevision(page.displayPage) : 0}
+    noteAnchorRevision={page.displayPage ? displayPageNoteAnchorRevision(page.displayPage) : 0} />;
+  if (unbuiltMirrors) {
+    const sections = new Map(unbuiltMirrors.snapshot.sections.map((section) => [section.pageIndex, section.value]));
+    return <>{pages.map((page) => {
+      const index = page.page.pageIndex;
+      const range = unbuiltMirrors.snapshot.ranges.find(({ from }) => from === index + 1);
+      const section = sections.get(index);
+      if (page.displayPage?.unbuilt && !visible.has(page.page.pageId)) return <Fragment key={page.page.pageId}>
+        {range && <section data-docx-unbuilt-range={`${range.from}-${range.to}`}
+          style={{ position: 'absolute', left: page.bounds.x, top: page.bounds.y, width: page.bounds.width, height: page.bounds.height, opacity: 0, pointerEvents: 'none' }}>
+          {t('a11y.unbuiltPagesNotMirrored', range)}<button type="button" tabIndex={-1}
+            onClick={() => unbuiltMirrors.navigate(range.from)}>{t('a11y.goToPage', { number: range.from })}</button>
+        </section>}
+        {section && <UnbuiltMirrorSection page={page} value={section} remember={unbuiltMirrors.remember} />}
+      </Fragment>;
+      return visible.has(page.page.pageId) || page.displayPage ? pageNode(page) : null;
+    })}</>;
+  }
   return <>{pages.filter((page) => visible.has(page.page.pageId) || page.displayPage?.unbuilt === false ||
     (page.displayPage && !page.displayPage.unbuilt)).map((page) => <PeerlessPage key={page.page.pageId}
       geometry={page} visible={visible.has(page.page.pageId)} hold={hold} fullMirror={!textMirror} canvasForPage={canvasForPage}
@@ -203,7 +228,7 @@ function PeerlessCaretLayer({ viewStore, geometryCaret, matches, compositionActi
   return <PeerlessCaret caret={caret} input={input} pages={pages} />;
 }
 
-function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableText, displayWindow, onDisplayWindowChange, onClipboard, onPasteFragment, highlights, onNavigateCell, onPartPoint, onDragSelectionChange, pageOverlays, pageMirror, overlay, pictures, tables, queryEngineReady }: {
+function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableText, displayWindow, onDisplayWindowChange, onClipboard, onPasteFragment, highlights, onNavigateCell, onPartPoint, onDragSelectionChange, pageOverlays, pageMirror, unbuiltPageMirror, readPageTexts, mirrorReadBlocked, scrollToPage, overlay, pictures, tables, queryEngineReady }: {
   binding: PeerlessEditSessionBinding;
   canvasForPage(page: DocxCommandPageIdentity): HTMLCanvasElement | null;
   zoom: number;
@@ -220,6 +245,10 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   onDragSelectionChange?(active: boolean): void;
   pageOverlays?: ReactNode;
   pageMirror?: 'full' | 'text';
+  unbuiltPageMirror?: 'text' | 'off';
+  readPageTexts?: ReadPageTexts;
+  mirrorReadBlocked?: () => boolean;
+  scrollToPage?: (number: number) => void;
   overlay?: ReactNode;
   pictures?: PeerlessPictureMoves;
   tables?: PeerlessTableResize;
@@ -252,6 +281,12 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   const width = Math.max(layout.width, geometry?.documentWidth ?? 0);
   const { height } = layout;
   const column = useRef<HTMLDivElement>(null);
+  const [mirrorCurrentPage, setMirrorCurrentPage] = useState(0);
+  const mirrorNavigate = useCallback((number: number) => {
+    setMirrorCurrentPage(number - 1);
+    scrollToPage?.(number);
+  }, [scrollToPage]);
+  const { t } = useTranslation();
   const measuredWindow = useRef<{ start: number; end: number } | null>(null);
   const chromeHold = useMemo(createPageChromeHold, []);
   const pauseWarm = useRef<(() => void) | null>(null);
@@ -314,10 +349,11 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     let raf: number | null = null;
     const measure = () => {
       raf = null;
+      const band = viewportColumnBand(root ? null : scrollParent, host);
+      if (unbuiltPageMirror === 'text') setMirrorCurrentPage(workerPageAtViewport(pages, band.top - band.columnTop, band.height, zoom) - 1);
       let next: { start: number; end: number };
       if (pages.length <= 12) next = { start: 0, end: pages.length - 1 };
       else {
-        const band = viewportColumnBand(root ? null : scrollParent, host);
         const top = (band.top - band.columnTop) / zoom;
         const bottom = top + band.height / zoom;
         let first = pages.length - 1;
@@ -358,13 +394,16 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
       window.removeEventListener('resize', schedule);
       observer?.disconnect();
     };
-  }, [pages, zoom, onDisplayWindowChange, chromeHold]);
+  }, [pages, zoom, onDisplayWindowChange, chromeHold, unbuiltPageMirror]);
   useLayoutEffect(() => {
     if (geometry && displayWindow[1] > displayWindow[0]) binding.setDisplayWindow?.(displayWindow[0], displayWindow[1]);
   }, [binding, displayWindow[0], displayWindow[1], geometry?.identity.incarnation, geometry?.identity.epoch]);
   const caretPage = geometry?.caret ? clientPointToPage(geometry.caret.x, geometry.caret.y, { left: 0, top: 0 }, 1, pages)?.page.page.pageId : undefined;
   const visiblePages = useMemo(() => pages.filter(({ page }) => page.pageId === caretPage ||
     (page.pageIndex >= displayWindow[0] && page.pageIndex < displayWindow[1])), [pages, caretPage, displayWindow]);
+  const unbuiltMirrors = useUnbuiltPageMirrors({ binding, geometry, center: mirrorCurrentPage,
+    enabled: unbuiltPageMirror === 'text', read: readPageTexts, blocked: mirrorReadBlocked,
+    navigate: mirrorNavigate, column, t, mountedPages: visiblePages });
   const warmed = useRef(new WeakSet<NonNullable<ReturnType<typeof pageQueries.get>>>());
   const lastInput = useRef(Number.NEGATIVE_INFINITY);
   const lastDocumentChange = useRef(Number.NEGATIVE_INFINITY);
@@ -870,7 +909,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
         }}>
         {pageOverlays}
         <PeerlessPages pages={pages} visiblePages={visiblePages} canvasForPage={canvasForPage} hold={chromeHold}
-          textMirror={pageMirror === 'text'} />
+          textMirror={pageMirror === 'text'} unbuiltMirrors={unbuiltPageMirror === 'text' && readPageTexts ? unbuiltMirrors : undefined} />
         {overlay}
         {highlights?.map((rect, index) => <div key={`find-${index}`} aria-hidden style={{ position: 'absolute', left: rect.x, top: rect.y, width: rect.width, height: rect.height, background: rect.current ? 'rgba(255, 150, 0, 0.4)' : 'rgba(255, 220, 0, 0.3)', pointerEvents: 'none' }} />)}
         <PeerlessSelectionLayer viewStore={binding.viewStore} rects={geometry?.selectionRects}
@@ -941,6 +980,10 @@ export interface PeerlessPagedEditorProps {
   onDragSelectionChange?(active: boolean): void;
   pageOverlays?: ReactNode;
   pageMirror?: 'full' | 'text';
+  unbuiltPageMirror?: 'text' | 'off';
+  readPageTexts?: ReadPageTexts;
+  mirrorReadBlocked?: () => boolean;
+  scrollToPage?: (number: number) => void;
   /** Picture selection, floating drags and resizing. */
   pictures?: PeerlessPictureMoves;
   /** Table column border, right edge and row border dragging. */
@@ -962,7 +1005,7 @@ export interface PeerlessPictureMoves {
 }
 
 /** @internal */
-export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoFocus, onReady, displayWindow, onDisplayWindowChange, onClipboard, onPasteFragment, highlights, onNavigateCell, onPartPoint, onDragSelectionChange, pageOverlays, pageMirror, overlay, pictures, tables }: PeerlessPagedEditorProps): ReactElement | null {
+export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoFocus, onReady, displayWindow, onDisplayWindowChange, onClipboard, onPasteFragment, highlights, onNavigateCell, onPartPoint, onDragSelectionChange, pageOverlays, pageMirror, unbuiltPageMirror = 'text', readPageTexts, mirrorReadBlocked, scrollToPage, overlay, pictures, tables }: PeerlessPagedEditorProps): ReactElement | null {
   const { t } = useTranslation();
   const [queryEngineReady, setQueryEngineReady] = useState(() => !!loadedRustDisplayListQueryEngine());
   useEffect(() => {
@@ -1086,7 +1129,7 @@ export function PeerlessPagedEditor({ sessionOptions, zoom = 1, className, autoF
   }, [sessionOptions.source, session.status === 'failed']);
   return <div className={className} data-docx-worker-editor="true" aria-busy={session.status === 'opening'}>
     {session.status === 'ready' && <PeerlessReady binding={session.binding} canvasForPage={canvasForPage} zoom={pageZoom} autoFocus={autoFocus}
-      onRecoverableText={retainText} displayWindow={pageWindow} onDisplayWindowChange={changeWindow} onClipboard={onClipboard} onPasteFragment={onPasteFragment} highlights={highlights} onNavigateCell={onNavigateCell} onPartPoint={onPartPoint} onDragSelectionChange={onDragSelectionChange} pageOverlays={pageOverlays} pageMirror={pageMirror} overlay={overlay} pictures={pictures} tables={tables} queryEngineReady={queryEngineReady} />}
+      onRecoverableText={retainText} displayWindow={pageWindow} onDisplayWindowChange={changeWindow} onClipboard={onClipboard} onPasteFragment={onPasteFragment} highlights={highlights} onNavigateCell={onNavigateCell} onPartPoint={onPartPoint} onDragSelectionChange={onDragSelectionChange} pageOverlays={pageOverlays} pageMirror={pageMirror} unbuiltPageMirror={unbuiltPageMirror} readPageTexts={readPageTexts} mirrorReadBlocked={mirrorReadBlocked} scrollToPage={scrollToPage} overlay={overlay} pictures={pictures} tables={tables} queryEngineReady={queryEngineReady} />}
     {session.status === 'failed' && <div role="alert">{t('errors.failedToLoad')}</div>}
     {recoverableText.map((text, index) => <div key={index} role="status">
       {t('editor.recoverableTextNotice')}

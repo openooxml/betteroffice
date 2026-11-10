@@ -799,6 +799,8 @@
   },
   "a11y": {
     "pageLabel": "Halaman {number}",
+    "unbuiltPagesNotMirrored": "Halaman {from} hingga {to} belum ada dalam tampilan baca.",
+    "goToPage": "Buka halaman {number}",
     "headerLabel": "Header halaman",
     "footerLabel": "Footer halaman",
     "chartNoData": "Tidak ada data",
