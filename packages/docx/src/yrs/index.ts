@@ -48,7 +48,6 @@ import type {
   DocxReadParagraphsResult,
   DocxReadStoriesRequest,
   DocxReadStoriesResult,
-  DocxTextMarkName,
   DocxTextTarget,
   DocxValidationResult,
 } from './edits';
@@ -326,12 +325,6 @@ export interface YrsInlineFormatDelta {
   language?: YrsLanguagePatch | null;
   /** Passive run properties not covered by the typed fields. `null` clears. */
   other?: Readonly<Record<string, unknown | null>>;
-  /**
-   * Returns these marks (or every character formatting mark for `'all'`, also removing the
-   * character style) to what the styles give before the other fields apply, as a `formatText`
-   * step's `clear` does. @internal
-   */
-  clearToStyles?: readonly DocxTextMarkName[] | 'all';
 }
 
 export interface YrsHyperlinkAttrs {

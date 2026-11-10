@@ -145,7 +145,10 @@ fn clear_returns_text_to_what_its_styles_give() {
         ]),
     );
     assert!(!active(&marks(&doc, "Bold words"), "bold"));
-    assert!(active(&marks(&doc, "Title"), "bold"));
+    assert!(
+        active(&marks(&doc, "Title"), "bold"),
+        "a staged clear must resolve the paragraph style from the source"
+    );
     let strong = marks(&doc, "Strong run");
     assert!(active(&strong, "bold") && active(&strong, "runStyle"));
 }

@@ -1,5 +1,5 @@
 import { engines } from '#agents-engines';
-import type { DocxDroppedStructure, DocxKeptParagraph, DocxCommentSaveBaseline, DocxCommentSaveIdentity, DocxParagraphTarget, DocxProposalInput, DocxProposalRecord, DocxProposalSnapshot, DocxProposalResult, DocxProposalStateRequest, YrsInlineFormatDelta, YrsSession, YrsStorySegment } from '@betteroffice/docx/yrs';
+import type { DocxDroppedStructure, DocxKeptParagraph, DocxCommentSaveBaseline, DocxCommentSaveIdentity, DocxParagraphTarget, DocxProposalInput, DocxProposalRecord, DocxProposalSnapshot, DocxProposalResult, DocxProposalStateRequest, DocxTextMarkName, YrsInlineFormatDelta, YrsSession, YrsStorySegment } from '@betteroffice/docx/yrs';
 import { readCommentPart, readSavedCommentIdentities, verifyCommentOutput, type CommentSource } from './comment-output';
 import { cellPosition, commentBody, commentRanges, commentRoot, commentText, continueList, deleteParagraph, deleteTableRow, formatParagraph, hostEdit, insertParagraphsBefore, insertParagraphsWithAnchorFormat, insertSectionBreak, replaceCommentText, setSection, insertTableRow, lineText, listLevel, mergeCells, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
 import { createDocxBatchSchema, type DocxAgentBatch, type DocxAgentEdit, type DocxEditOutcome } from './docx-schema';
@@ -1662,8 +1662,11 @@ export function attachDocx(session: YrsSession, options: DocumentOptions = {}): 
   return new DocxAgentDocument(session, options);
 }
 
+/** A formatting delta whose engine-only `clearToStyles` returns marks to what the styles give first. */
+type FormatTextDelta = YrsInlineFormatDelta & { clearToStyles?: readonly DocxTextMarkName[] | 'all' };
+
 /** The session formatting delta a `format_text` edit writes; `clear` returns marks to the styles first. */
-function formatTextDelta(edit: Extract<DocxAgentEdit, { op: 'format_text' }>): YrsInlineFormatDelta {
+function formatTextDelta(edit: Extract<DocxAgentEdit, { op: 'format_text' }>): FormatTextDelta {
   const strike = edit.strike === undefined ? undefined
     : edit.strike === 'dblStrike' ? { double: true }
       : edit.strike === true || edit.strike === 'sngStrike';
