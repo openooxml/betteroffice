@@ -181,6 +181,10 @@ async function row(yrs: Yrs, kind: string, shape: string, edit: string, mode: Mo
         problems.push(`${who} reopened pages start ${JSON.stringify(pageStarts(reopened))}, live ${JSON.stringify(pageStarts(host))}`);
       }
       if (keepsL && mode !== 'tracked' && !save.xml.includes(L)) problems.push(`${who} rewrote the untouched paragraph`);
+      const next = save.xml.match(/<w:p w14:paraId="72000003"[^>]*>[\s\S]*?<\/w:p>/)?.[0];
+      if (next?.includes(`<w:r>${brk(kind)}</w:r>`) && next.replace(/<[^>]*>/g, '') === 'N' && next.replaceAll(`<w:r>${brk(kind)}</w:r>`, '') !== N) {
+        problems.push(`${who} wrote the paragraph after the break as ${next}, not its source with only break runs added`);
+      }
     }
     return problems;
   } catch (error) {
