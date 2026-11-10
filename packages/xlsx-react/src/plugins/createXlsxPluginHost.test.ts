@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test';
 import type { WorkbookHandle } from '@betteroffice/xlsx';
 import { createXlsxPluginHost } from './createXlsxPluginHost';
 import { defineXlsxPlugin } from './defineXlsxPlugin';
-import type { XlsxAnchorGeometryResult, XlsxPluginEvent, XlsxPluginGeometry, XlsxPluginLayout } from './types';
+import type { XlsxAnchorGeometryResult, XlsxPluginEvent, XlsxPluginGeometry, XlsxPluginLayout, XlsxPluginSelection } from './types';
 
 const settle = () => new Promise((done) => setTimeout(done, 0));
 function setupSignals(geometry: () => XlsxPluginGeometry | null = () => null) {
@@ -37,9 +37,10 @@ test('contexts bind synchronous and pending geometry to their snapshot selection
     layoutId: layout.id, rects: [{ x, y: 0, width: 64, height: 20 }],
     anchor: { x, y: 0, width: 64, height: 20 },
     pageRect: { x: 0, y: 0, width: 300, height: 200 } });
-  const geometry = { layout, getAnchorGeometry: answer, getPositionAtPoint: null,
+  const geometry: XlsxPluginGeometry = { layout, getAnchorGeometry: answer, getPositionAtPoint: null,
+    getCellRect: () => null, getRangeRect: () => null,
     readAnchorGeometries: async (targets) => { if (pending) await pending; return targets.map(answer); },
-  } as XlsxPluginGeometry;
+  };
   const { host, open } = setupSignals(() => geometry);
   host.setPlugins([defineXlsxPlugin({ id: 'selection-geometry', createState: () => null })]);
   open();
@@ -181,7 +182,7 @@ for (const changed of ['selection', 'version', 'selection-returned', 'selection-
     const held = new Promise<void>((resolve) => { release = resolve; });
     const drained = new Promise<void>((resolve) => { finished = resolve; });
     const events: XlsxPluginEvent[] = [];
-    const delivered: Array<{ event: XlsxPluginEvent; version: string; selection: unknown }> = [];
+    const delivered: Array<{ event: XlsxPluginEvent; version: string; selection: XlsxPluginSelection }> = [];
     host.setPlugins([defineXlsxPlugin({ id: 'queued-settle', createState: () => null,
       async onEvent(context, event) {
         if (event.type === 'mode-change') { entered(); await held; }

@@ -90,8 +90,8 @@ function queries(): DisplayListQueries {
 }
 
 test('scoped geometry caches each context while keeping its selection checks live', async () => {
-  const answer: DocxAnchorGeometryResult = { ok: true, version: 'v1', previewVersion: 0,
-    layoutId: 'layout', rects: [], anchor: null, pageRect: null };
+  const answer = { ok: true, version: 'v1', previewVersion: 0,
+    layoutId: 'layout', rects: [], anchor: null, pageRect: null } as unknown as DocxAnchorGeometryResult;
   const geometry = { getAnchorGeometry: () => answer, readAnchorGeometries: async () => [answer] } as unknown as DocxPluginGeometry;
   const first = {};
   const second = {};

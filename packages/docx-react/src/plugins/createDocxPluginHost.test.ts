@@ -9,7 +9,7 @@ import { createDocxPluginHost, type DocxPluginHostAccess } from './createDocxPlu
 import { defineDocxPlugin } from './defineDocxPlugin';
 import { docxSelectionIdentity } from './selectionIdentity';
 import type { DocxProposalSnapshot } from './proposalPreview';
-import type { DocxAnchorGeometryResult, DocxPluginEvent, DocxPluginGeometry, DocxPluginLayout, DocxPluginSelection } from './types';
+import type { DocxAnchorGeometryResult, DocxGeometryTarget, DocxPluginEvent, DocxPluginGeometry, DocxPluginLayout, DocxPluginSelection } from './types';
 
 function stubSession(previewVersion = 0) {
   const updates = new Set<() => void>();
@@ -112,8 +112,8 @@ for (const mode of ['session', 'worker'] as const) {
       pageRect: { x: 0, y: 0, width: 100, height: 200 } });
     const geometry = { layout: frame,
       getAnchorGeometry: answer,
-      readAnchorGeometries: async (targets) => { if (pending) await pending; return targets.map(answer); },
-    } as DocxPluginGeometry;
+      readAnchorGeometries: async (targets: readonly DocxGeometryTarget[]) => { if (pending) await pending; return targets.map(answer); },
+    } as unknown as DocxPluginGeometry;
     const { host, plugin } = setup(() => geometry);
     host.setPlugins([plugin]);
     if (mode === 'session') host.open(stubSession().session);
@@ -1143,7 +1143,7 @@ for (const changed of ['selection', 'version', 'selection-returned', 'selection-
     const held = new Promise<void>((resolve) => { release = resolve; });
     const drained = new Promise<void>((resolve) => { finished = resolve; });
     const events: DocxPluginEvent[] = [];
-    const delivered: Array<{ event: DocxPluginEvent; version: string; selection: unknown }> = [];
+    const delivered: Array<{ event: DocxPluginEvent; version: string; selection: DocxPluginSelection }> = [];
     host.setPlugins([defineDocxPlugin({ id: 'queued-settle', createState: () => null,
       async onEvent(context, event) {
         if (event.type === 'mode-change') { entered(); await held; }

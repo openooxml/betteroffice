@@ -2900,7 +2900,8 @@ test('plugin locales are canonical and equivalent tags do not notify twice', asy
 
 async function xlsxMatrix(engine: 'XI' | 'XP', file = fixture, controlledClock = false) {
   const collaboration = {};
-  const clock = controlledClock ? selectionClock() : selectionWindow();
+  const clock = (controlledClock ? selectionClock() : selectionWindow()) as
+    ReturnType<typeof selectionClock> | ReturnType<typeof selectionWindow>;
   const restoreClock = () => { if ('restore' in clock) clock.restore(); };
   const events: XlsxPluginEvent[] = [];
   const anchors: Array<XlsxAnchorGeometryResult | null> = [];

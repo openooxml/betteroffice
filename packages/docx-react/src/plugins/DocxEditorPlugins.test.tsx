@@ -39,6 +39,7 @@ import {
   useDocxCommand,
   useDocxCommands,
   type DocxCommandResult,
+  type DocxAsyncEditorProps,
   type DocxEditorBaseProps,
   type DocxEditorPluginProps,
   type DocxEditorRef,
@@ -372,14 +373,14 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
         open = result.handleHeaderFooterDoubleClick;
         return result;
       });
-      const canvasContext = spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => new Proxy({} as Record<string, unknown>, {
+      const canvasContext = spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation((() => new Proxy({} as Record<string, unknown>, {
         get(target, key) {
           if (key === 'measureText') return () => ({ width: 0 });
           if (key === 'createImageData') return (width: number, height: number) => ({ width, height, data: new Uint8ClampedArray(width * height * 4) });
           return key in target ? target[key as string] : () => {};
         },
         set(target, key, value) { target[key as string] = value; return true; },
-      }) as unknown as CanvasRenderingContext2D);
+      }) as unknown as CanvasRenderingContext2D) as unknown as HTMLCanvasElement['getContext']);
       const bounds = spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 800, 1000));
       const clock = selectionClock();
       try {
@@ -2751,16 +2752,17 @@ async function removeRemoteHeader(peer: YrsSession, buffer: ArrayBuffer) {
 }
 
 async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapping?: { reject(): boolean; rejected(): void }, controlledClock = false) {
-  const canvasContext = spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => new Proxy({} as Record<string, unknown>, {
+  const canvasContext = spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation((() => new Proxy({} as Record<string, unknown>, {
     get(target, key) {
       if (key === 'measureText') return () => ({ width: 0 });
       if (key === 'createImageData') return (width: number, height: number) => ({ width, height, data: new Uint8ClampedArray(width * height * 4) });
       return key in target ? target[key as string] : () => {};
     },
     set(target, key, value) { target[key as string] = value; return true; },
-  }) as unknown as CanvasRenderingContext2D);
+  }) as unknown as CanvasRenderingContext2D) as unknown as HTMLCanvasElement['getContext']);
   const bounds = spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 800, 1000));
-  const clock = controlledClock ? selectionClock() : selectionWindow();
+  const clock = (controlledClock ? selectionClock() : selectionWindow()) as
+    ReturnType<typeof selectionClock> | ReturnType<typeof selectionWindow>;
   const restoreClock = () => { if ('restore' in clock) clock.restore(); };
   const events: DocxPluginEvent[] = [];
   const settles: Array<{ context: DocxPluginContext<null>; anchor: DocxAnchorGeometryResult | null; at: number }> = [];
@@ -2837,14 +2839,14 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
     controller.attach = (next) => { binding = next; attach(next); };
     return controller;
   });
-  let mounted: { ref: React.RefObject<DocxEditorRef | null>; view: ReturnType<typeof render>; rerender(next: Partial<DocxEditorBaseProps>): void };
+  let mounted: { ref: React.RefObject<DocxEditorRef | null>; view: ReturnType<typeof render>; rerender(next: Partial<DocxAsyncEditorProps>): void };
   let painted = false;
   const props = { plugins: [plugin], onFirstPagePainted: () => { painted = true; }, ...(engine === 'DV' ? { readOnly: true } : {}), collaboration: { onReplica: (next: CollaborationReplica | null) => { replica = next; } } };
   try {
     if (engine !== 'DI') installWorkerEngine();
     if (engine === 'DP') {
       const ref = createRef<DocxEditorRef>();
-      const element = (next: Partial<DocxEditorBaseProps>) => <DocxEditor ref={ref} documentBuffer={buffer} {...props} {...next} />;
+      const element = (next: Partial<DocxAsyncEditorProps>) => <DocxEditor ref={ref} documentBuffer={buffer} {...props} {...next} />;
       const view = render(element({}));
       mounted = { ref, view, rerender: (next) => view.rerender(element(next)) };
       await until(() => ref.current?.commands.getState('save').enabled === true);
@@ -3157,7 +3159,7 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
         keyboard('body', h.first.paraId),
         () => h.selection('body', h.first.paraId, 2, 4),
         () => h.selection('body', h.first.paraId, 2, 4),
-        () => h.remote(peer => peer.insertText({ story: 'body', paraId: h.first.paraId, offset: 0 }, 'remote ')),
+        () => h.remote(peer => { peer.insertText({ story: 'body', paraId: h.first.paraId, offset: 0 }, 'remote '); }),
         () => h.selection('body', h.first.paraId, 2, 4),
         () => h.openStory('hf:rIdH1'),
         () => h.selection('hf:rIdH1', '10000001', 1),
@@ -3177,7 +3179,7 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
         () => h.selection('body:t0:r0c0', '00000002', 1),
         keyboard('body:t0:r0c0', '00000002'),
         () => h.selection('body:t0:r0c0', '00000002', 1, 4),
-        () => h.remote(peer => peer.insertText({ story: 'body', paraId: h.first.paraId, offset: 0 }, 'after '), engine === 'DP' ? 'pipe' : 'chunks'),
+        () => h.remote(peer => { peer.insertText({ story: 'body', paraId: h.first.paraId, offset: 0 }, 'after '); }, engine === 'DP' ? 'pipe' : 'chunks'),
         () => h.selection('body', h.first.paraId, 1, 3),
         () => h.clearSelection(),
         () => h.selection('body', h.first.paraId, 1, 3),
@@ -3496,7 +3498,7 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
       await h.quiet();
       const a = h.context().snapshot.selection.displayRange!;
       h.reset();
-      await h.remote(peer => peer.insertText({ story: 'body', paraId: h.first.paraId, offset: 0 }, 'remote '), path);
+      await h.remote(peer => { peer.insertText({ story: 'body', paraId: h.first.paraId, offset: 0 }, 'remote '); }, path);
       await h.selectionLayout();
       await h.quiet();
       expect(h.settles).toHaveLength(0);

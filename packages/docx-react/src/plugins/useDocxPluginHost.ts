@@ -399,9 +399,12 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
 
   const publishSelection = useCallback(() => {
     if (!latest.current.plugins?.length) return;
+    if (latest.current.viewerSelection || latest.current.viewerDocumentRead) {
+      host.markSelectionDirty();
+      return;
+    }
     const session = latest.current.pagedEditorRef.current?.getYrsSession() ?? latest.current.session;
-    host.markSelectionDirty(session && !latest.current.viewerSelection && !latest.current.viewerDocumentRead
-      ? yrsSelectionCause(session) : undefined);
+    host.markSelectionDirty(session ? yrsSelectionCause(session) : undefined);
   }, [host]);
 
   useEffect(() => {
@@ -434,9 +437,9 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   }, [host, managed, options.session, options.loadGeneration, refreshSelection]);
 
   useEffect(() => {
-    if (!managed || !options.session) return;
+    if (!managed || options.viewerSelection || options.viewerDocumentRead || !options.session) return;
     return subscribeYrsSelection(options.session, () => { publishSelection(); });
-  }, [managed, options.session, publishSelection]);
+  }, [managed, options.session, options.viewerSelection, options.viewerDocumentRead, publishSelection]);
 
   const publishViewerSelection = useCallback((selection: ViewerSelectionChange) => {
     viewerSelectionRef.current = selection;
