@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { createCanvas, loadImage } from '@napi-rs/canvas';
 import { engines } from '#agents-engines';
 import type { DisplayList } from '@betteroffice/docx/layout/render';
+import type { YrsSession } from '@betteroffice/docx/yrs';
 import JSZip from 'jszip';
 import { openDocx, type DocumentRenderer } from '../src';
 import { renderDocxPage } from '../src/render';
@@ -11,6 +12,38 @@ import { fixture } from './fixture';
 const configureDefaultFonts = async (options: Parameters<typeof import('@betteroffice/docx/layout').configureDefaultFonts>[0]) => (await engines.load('docx')).module.layout.configureDefaultFonts(options);
 
 afterEach(() => configureDefaultFonts({}));
+
+let restoreYrs: (() => void) | undefined;
+afterEach(() => { restoreYrs?.(); restoreYrs = undefined; });
+
+/** Runs `install` on each private session a preview lays out on. */
+const onPreviewSession = async (install: (session: YrsSession) => void) => {
+  const { module } = await engines.load('docx');
+  const { yrs } = module;
+  (module as { yrs: typeof yrs }).yrs = {
+    ...yrs,
+    createYrsSession: async (...args: Parameters<typeof yrs.createYrsSession>) => {
+      const session = await yrs.createYrsSession(...args);
+      install(session);
+      return session;
+    },
+  };
+  restoreYrs = () => { (module as { yrs: typeof yrs }).yrs = yrs; };
+};
+
+const frameBuilds = async () => {
+  const calls = mock((input: string, frame: Uint8Array) => { void input; return frame; });
+  await onPreviewSession((session) => {
+    const original = session.buildDisplayListFrame;
+    session.buildDisplayListFrame = (input, epoch) => calls(input, original(input, epoch));
+  });
+  return calls;
+};
+
+const frameDisplay = async (frame: Uint8Array): Promise<DisplayList> => {
+  const { module } = await engines.load('docx');
+  return module.render.applyFrameDelta(null, module.render.decodeFrameDelta(frame)).displayList;
+};
 
 const canvasRenderer: DocumentRenderer = async (session, page) => {
   const render = spyOn(session, 'renderPng').mockRejectedValue(Object.assign(new Error('canvas unavailable'), { code: 'canvas-unavailable' }));
@@ -45,7 +78,11 @@ for (const embedded of [false, true]) {
     const module = { createFontProvider: () => ({ resolve }) };
     await configureDefaultFonts(embedded ? { load: async () => module } : { fonts: module });
     const doc = await openDocx(await zip.generateAsync({ type: 'uint8array' }), { renderer: canvasRenderer });
-    const register = spyOn(doc.session, 'registerFont');
+    const register = mock((bytes: Uint8Array) => { void bytes; });
+    await onPreviewSession((session) => {
+      const original = session.registerFont;
+      session.registerFont = (...args: Parameters<typeof original>) => { register(args[0] as Uint8Array); return original(...args); };
+    });
     try {
       const rendered = await canvasRenderer(doc.session, 1);
       expect([...rendered.png.slice(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
@@ -73,12 +110,12 @@ test('renders actual before/after pages without changing the live document', asy
 
 test('headless default preview keeps Latin native beside an uncovered emoji', async () => {
   const doc = await openDocx(await fixture(), { renderer: canvasRenderer });
-  const build = spyOn(doc.session, 'buildDisplayListJson');
+  const build = await frameBuilds();
   try {
     const rendered = await canvasRenderer(doc.session, 1);
     const input = JSON.parse(build.mock.calls[0]![0]) as { fontChains: Record<string, number[]> };
     expect(input.fontChains['@betteroffice/fonts/coverage']).toBeUndefined();
-    const display = JSON.parse(build.mock.results[0]!.value as string) as DisplayList;
+    const display = await frameDisplay(build.mock.results[0]!.value as Uint8Array);
     const text = display.pages[0]!.primitives.filter(
       primitive => primitive.kind === 'text' || primitive.kind === 'glyphRun',
     );
@@ -99,13 +136,13 @@ test('headless default preview wraps an unbundled Aptos body beside a Calibri he
     <w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>
   </w:body></w:document>`);
   const doc = await openDocx(await zip.generateAsync({ type: 'uint8array' }), { renderer: canvasRenderer });
-  const build = spyOn(doc.session, 'buildDisplayListJson');
+  const build = await frameBuilds();
   try {
     await canvasRenderer(doc.session, 1);
     const input = JSON.parse(build.mock.calls[0]![0]) as { fontChains: Record<string, number[]> };
     expect(input.fontChains['calibri|1|0']?.length).toBeGreaterThan(0);
     expect(input.fontChains['aptos|0|0']?.length).toBeGreaterThan(0);
-    const display = JSON.parse(build.mock.results[0]!.value as string) as DisplayList;
+    const display = await frameDisplay(build.mock.results[0]!.value as Uint8Array);
     const runs = display.pages[0]!.primitives.filter(
       primitive => primitive.kind === 'glyphRun' && primitive.fallbackFont?.includes('Aptos'),
     );
@@ -182,7 +219,7 @@ test('DOCX previews use the engine PNG where it can draw', async () => {
   const doc = await openDocx(await zip.generateAsync({ type: 'uint8array' }));
   const png = new Uint8Array(await createCanvas(12, 7).encode('png'));
   const render = spyOn(doc.session, 'renderPng').mockResolvedValue(png);
-  const build = spyOn(doc.session, 'buildDisplayListJson');
+  const build = await frameBuilds();
   try {
     const preview = await renderDocxPage(doc.session, 1);
     expect(render).toHaveBeenCalledTimes(1);
@@ -196,7 +233,7 @@ test('DOCX previews use the engine PNG where it can draw', async () => {
 test('DOCX previews fall back to canvas when the engine cannot draw', async () => {
   const doc = await openDocx(await fixture());
   const render = spyOn(doc.session, 'renderPng').mockRejectedValue(Object.assign(new Error('canvas unavailable'), { code: 'canvas-unavailable' }));
-  const build = spyOn(doc.session, 'buildDisplayListJson');
+  const build = await frameBuilds();
   try {
     const preview = await renderDocxPage(doc.session, 1);
     expect(render).toHaveBeenCalledTimes(1);
@@ -210,7 +247,7 @@ test('DOCX previews fall back to canvas when the engine cannot draw', async () =
 test('DOCX previews map engine errors without using canvas', async () => {
   const doc = await openDocx(await fixture());
   const render = spyOn(doc.session, 'renderPng');
-  const build = spyOn(doc.session, 'buildDisplayListJson');
+  const build = await frameBuilds();
   try {
     for (const [code, mapped] of [['canvas-too-large', 'PAGE_TOO_LARGE'], ['font-unavailable', 'FONT_UNAVAILABLE']] as const) {
       render.mockRejectedValue(Object.assign(new Error('engine refused'), { code }));

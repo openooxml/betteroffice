@@ -670,6 +670,7 @@ export function wrapSession(
     },
     buildDisplayListFrame: (input, expectedFrameEpoch) =>
       session.build_display_list_frame(input, expectedFrameEpoch),
+    retainedHeadersFootersJson: () => session.retained_headers_footers_json(),
     setDisplayWindow: (start, end) => session.set_display_window(start, end),
     setDisplayRetainBuiltPages: (retain) => session.set_display_retain_built_pages(retain),
     setWindowedIncrementalBuilds: (enabled) => session.set_windowed_incremental_builds(enabled),

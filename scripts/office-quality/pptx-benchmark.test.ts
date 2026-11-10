@@ -24,8 +24,8 @@ test('adds a versioned PPTX LibreOffice comparison with scored coverage', () => 
   expect(text).toContain('<td align="right">1/1</td>');
   expect(text).toContain('Render time (avg)');
   expect(text).toContain('100 ms');
-  expect(text).not.toContain('Exact page counts');
-  expect(text).not.toContain('Absolute page error');
+  expect(text).toContain('<tr><td>Exact page counts</td><td align="right">—</td><td align="right">—</td><td align="right">1/1</td></tr>');
+  expect(text).toContain('<tr><td>Absolute page error</td><td align="right">—</td><td align="right">—</td><td align="right">0</td></tr>');
 });
 
 test('keeps PPTX export failures and refuses incomplete or mismatched reports', () => {

@@ -7,6 +7,7 @@ import {
   type PptxEditorApi,
   type PptxAsyncEditorApi,
   type PptxPluginContext,
+  type PptxPluginEvent,
   type PptxPluginNavigationResult,
   type PptxPluginSelection,
 } from '@betteroffice/pptx-react';
@@ -20,6 +21,7 @@ interface ProbeState {
 type ProbeContext = PptxPluginContext<ProbeState>;
 
 interface ProbeWindow {
+  events: PptxPluginEvent[];
   editor: PptxEditorApi | PptxAsyncEditorApi | null;
   navigation: PptxPluginNavigationResult | null;
   selection: PptxPluginSelection;
@@ -27,7 +29,7 @@ interface ProbeWindow {
 }
 
 const workerOnly = new URLSearchParams(location.search).get('engine') === 'worker';
-const probe: ProbeWindow = { editor: null, navigation: null, selection: null, marks: 0 };
+const probe: ProbeWindow = { events: [], editor: null, navigation: null, selection: null, marks: 0 };
 (window as unknown as { __probe: ProbeWindow }).__probe = probe;
 
 async function refresh(context: ProbeContext) {
@@ -76,6 +78,7 @@ const alignment = definePptxPlugin<ProbeState>({
   id: 'probe.alignment',
   createState: () => ({ slides: [] }),
   async onEvent(context, event) {
+    probe.events.push(event);
     if (event.type === 'selection-change') probe.selection = event.selection;
     if (event.type === 'load' || event.type === 'document-change') await refresh(context);
   },

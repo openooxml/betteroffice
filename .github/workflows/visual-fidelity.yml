@@ -38,6 +38,11 @@ on:
         default: false
         required: false
         type: boolean
+      publish_readme:
+        description: "Private corpus run: commit this run's aggregate-only section to the README"
+        default: false
+        required: false
+        type: boolean
 
 permissions:
   contents: read
@@ -72,6 +77,7 @@ jobs:
       xlsx-shards: ${{ steps.plan.outputs.xlsx-shards }}
       xlsx-fidelity-shards: ${{ steps.plan.outputs.xlsx-fidelity-shards }}
       xlsx-published-source: ${{ steps.plan.outputs.xlsx-published-source }}
+      timing-formats: ${{ steps.plan.outputs.timing-formats }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -114,6 +120,12 @@ jobs:
           echo "::error::A report-only run cannot publish renders. Re-run with publish_renders off."
           exit 1
 
+      - name: Keep README publishing to private runs
+        if: inputs.publish_readme && (!inputs.private_corpus || inputs.report_only)
+        run: |
+          echo "::error::publish_readme is for private corpus runs that are not report-only"
+          exit 1
+
       - name: Keep private runs aggregate-only
         if: inputs.private_corpus
         env:
@@ -152,6 +164,7 @@ jobs:
           import { roundtripMatrices } from './scripts/office-quality/roundtrip.mjs';
           import { xlsxFidelityShards } from './scripts/office-quality/xlsx-fidelity.mjs';
           import { xlsxShards } from './scripts/office-quality/xlsx-benchmark.mjs';
+          import { timingFormats } from './scripts/office-quality/timing.mjs';
           const plan = JSON.parse(await readFile(`${process.env.QUALITY_OUTPUT}/plan.json`, 'utf8'));
           const builds = plan.formats.flatMap(format => ['published', 'commit'].map(channel =>
             ({ format, channel, source: channel === 'commit' ? plan.source_sha : plan[`${format}_published_source_sha`] })));
@@ -167,6 +180,7 @@ jobs:
           await appendFile(process.env.GITHUB_OUTPUT, `xlsx-shards=${JSON.stringify(xlsxShards(plan).map((_, index) => index))}\n`);
           await appendFile(process.env.GITHUB_OUTPUT, `xlsx-published-source=${plan.xlsx_published_source_sha ?? ''}\n`);
           await appendFile(process.env.GITHUB_OUTPUT, `pptx-published-source=${plan.pptx_published_source_sha ?? ''}\n`);
+          await appendFile(process.env.GITHUB_OUTPUT, `timing-formats=${JSON.stringify(timingFormats(plan))}\n`);
           JS
 
       - if: ${{ !inputs.private_corpus }}
@@ -1168,8 +1182,103 @@ jobs:
         include: ${{ fromJSON(needs.prepare.outputs.roundtrip-shards-b) }}
     steps: *roundtrip-steps
 
+  timing:
+    needs: [prepare, native-build, xlsx-native-build, pptx-native-build]
+    if: >-
+      !cancelled() && inputs.private_corpus && needs.prepare.result == 'success' &&
+      needs.prepare.outputs.timing-formats != '[]'
+    runs-on: ubuntu-24.04
+    environment: *private-environment
+    timeout-minutes: 300
+    env:
+      SOFFICE: /opt/libreoffice26.2/program/soffice
+    strategy:
+      fail-fast: false
+      matrix:
+        format: ${{ fromJSON(needs.prepare.outputs.timing-formats) }}
+    steps:
+      - name: Require the planned runner image
+        env:
+          PLANNED_IMAGE: ${{ needs.prepare.outputs.runner-image }}
+        run: |
+          if [ "$ImageVersion" != "$PLANNED_IMAGE" ]; then
+            echo "::error::Runner image $ImageVersion differs from the planned $PLANNED_IMAGE; re-run the failed jobs, or the whole run once that image is no longer served"
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.prepare.outputs.source-sha }}
+          persist-credentials: false
+
+      - name: Fetch the plan from the private bucket
+        if: inputs.private_corpus
+        env: *private-read
+        run: node scripts/office-quality/private-store.mjs get visual-fidelity-plan "$RUNNER_TEMP/fidelity-plan"
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: ${{ matrix.format }}-native-published
+          path: ${{ runner.temp }}/native/published
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: ${{ matrix.format }}-native-commit
+          path: ${{ runner.temp }}/native/commit
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "24"
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.13"
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: "1.4.3"
+
+      - name: Install LibreOffice and comparison tools
+        timeout-minutes: 15
+        env:
+          FORMAT: ${{ matrix.format }}
+        run: |
+          bash scripts/office-quality/install-libreoffice.sh
+          python -m pip install -r scripts/office-quality/requirements.txt
+          chmod +x "${RUNNER_TEMP}/native/published/${FORMAT}-native-bench" "${RUNNER_TEMP}/native/commit/${FORMAT}-native-bench"
+          bun scripts/office-quality/native-fonts.ts "${RUNNER_TEMP}/native-fonts"
+
+      - name: Download the seeded timing sample
+        env:
+          QUALITY_PLAN: ${{ runner.temp }}/fidelity-plan/plan.json
+          QUALITY_FORMAT: ${{ matrix.format }}
+          QUALITY_OUTPUT: ${{ runner.temp }}/timing
+          PRIVATE_R2_ENDPOINT: ${{ secrets.PRIVATE_R2_ENDPOINT }}
+          PRIVATE_R2_READ_KEY_ID: ${{ secrets.PRIVATE_R2_READ_KEY_ID }}
+          PRIVATE_R2_READ_SECRET: ${{ secrets.PRIVATE_R2_READ_SECRET }}
+        run: node scripts/office-quality/private-step.mjs timing-stage -- node scripts/office-quality/timing.mjs
+
+      - name: Time every engine sequentially on this runner
+        env:
+          QUALITY_OUTPUT: ${{ runner.temp }}/timing
+          QUALITY_NATIVE: ${{ runner.temp }}/native
+          QUALITY_FONTS: ${{ runner.temp }}/native-fonts/manifest.json
+        run: node scripts/office-quality/private-step.mjs timing -- python scripts/office-quality/timing.py
+
+      - name: Keep the report in the private bucket
+        if: inputs.private_corpus
+        env: *private-write
+        run: |
+          cd "$RUNNER_TEMP/timing"
+          node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put timing-report-${{ matrix.format }} report.json
+
+      - name: Keep the private logs
+        if: always() && inputs.private_corpus
+        env: *private-write
+        run: cd "$RUNNER_TEMP" && node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put --optional logs-timing-${{ matrix.format }} private-logs
+
   publish:
-    needs: [prepare, measure, docx-benchmark, xlsx-benchmark, pptx-benchmark, xlsx-fidelity, roundtrip-a, roundtrip-b]
+    needs: [prepare, measure, docx-benchmark, xlsx-benchmark, pptx-benchmark, xlsx-fidelity, roundtrip-a, roundtrip-b, timing]
     if: >-
       !cancelled() && github.ref == 'refs/heads/main' &&
       needs.prepare.result == 'success' && needs.measure.result == 'success' && needs.roundtrip-a.result == 'success' &&
@@ -1177,7 +1286,8 @@ jobs:
       (!contains(fromJSON(needs.prepare.outputs.formats), 'docx') || needs.docx-benchmark.result == 'success') &&
       (needs.prepare.outputs.xlsx-shards == '[]' || needs.xlsx-benchmark.result == 'success') &&
       (!contains(fromJSON(needs.prepare.outputs.formats), 'pptx') || needs.pptx-benchmark.result == 'success') &&
-      (!contains(fromJSON(needs.prepare.outputs.formats), 'xlsx') || needs.xlsx-fidelity.result == 'success')
+      (!contains(fromJSON(needs.prepare.outputs.formats), 'xlsx') || needs.xlsx-fidelity.result == 'success') &&
+      (!inputs.private_corpus || needs.prepare.outputs.timing-formats == '[]' || needs.timing.result == 'success')
     runs-on: ubuntu-latest
     environment: *private-environment
     timeout-minutes: 30
@@ -1261,6 +1371,7 @@ jobs:
           if ${{ contains(fromJSON(needs.prepare.outputs.formats), 'pptx') }}; then node "$store" get pptx-benchmark-report "$parts/pptx-benchmark-report"; fi
           if ${{ contains(fromJSON(needs.prepare.outputs.formats), 'xlsx') }}; then node "$store" get 'xlsx-fidelity-report-*' "$parts"; fi
           node "$store" get 'roundtrip-report-*' "$parts"
+          if ${{ needs.prepare.outputs.timing-formats != '[]' }}; then node "$store" get 'timing-report-*' "$parts"; fi
 
       - name: Reconcile the format reports
         env:
@@ -1273,6 +1384,7 @@ jobs:
           QUALITY_REQUIRE_XLSX_BENCHMARK: 'true'
           QUALITY_REQUIRE_XLSX_FIDELITY: 'true'
           QUALITY_REQUIRE_ROUNDTRIP: 'true'
+          QUALITY_REQUIRE_TIMING: ${{ inputs.private_corpus }}
         run: |
           node scripts/office-quality/private-step.mjs merge -- node scripts/office-quality/merge.mjs
           cat "${QUALITY_OUTPUT}/section.md" >> "$GITHUB_STEP_SUMMARY"
@@ -1326,7 +1438,7 @@ jobs:
         run: bun scripts/office-quality/publish-renders.mjs
 
       - name: Replace the generated README section
-        if: ${{ !inputs.private_corpus && !inputs.report_only && inputs.corpus_origin == '' && inputs.samples == '' && inputs.collection == 'office-quality' }}
+        if: ${{ (!inputs.private_corpus && !inputs.report_only && inputs.corpus_origin == '' && inputs.samples == '' && inputs.collection == 'office-quality') || (inputs.private_corpus && inputs.publish_readme && !inputs.report_only) }}
         run: |
           python3 - <<'PY'
           import os
@@ -1349,7 +1461,7 @@ jobs:
 
       - name: Detect a changed report
         id: changed
-        if: ${{ !inputs.private_corpus && !inputs.report_only && inputs.corpus_origin == '' && inputs.samples == '' && inputs.collection == 'office-quality' }}
+        if: ${{ (!inputs.private_corpus && !inputs.report_only && inputs.corpus_origin == '' && inputs.samples == '' && inputs.collection == 'office-quality') || (inputs.private_corpus && inputs.publish_readme && !inputs.report_only) }}
         run: |
           if git diff --quiet -- README.md; then
             echo "value=false" >> "$GITHUB_OUTPUT"

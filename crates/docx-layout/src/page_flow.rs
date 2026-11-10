@@ -349,6 +349,15 @@ pub struct Paginator {
     resumed_pending: Option<(Option<Size>, Option<PageMargins>, Option<ColumnLayout>)>,
 }
 
+fn fit_request(height: f64, trailing: f64) -> (f64, f64) {
+    let height = if height.is_finite() && height > 0.0 {
+        height
+    } else {
+        0.0
+    };
+    (height, trailing.max(0.0).min(height))
+}
+
 impl Paginator {
     /// Constructs a paginator with the initial section geometry.
     pub fn new(
@@ -1149,13 +1158,7 @@ impl Paginator {
 
     pub(crate) fn ensure_fits_with_trailing(&mut self, height: f64, trailing: f64) -> usize {
         let mut idx = self.get_current();
-        let safe_height = if height.is_finite() && height > 0.0 {
-            height
-        } else {
-            0.0
-        };
-
-        let trailing = trailing.max(0.0).min(safe_height);
+        let (safe_height, trailing) = fit_request(height, trailing);
         while !self.fits_with_trailing(safe_height, trailing, idx) {
             // oversized-fragment guard, re-checked per iteration because a
             // queued continuous-section geometry can change page capacity
@@ -1175,6 +1178,15 @@ impl Paginator {
         }
 
         idx
+    }
+
+    /// Whether [`Self::ensure_fits_with_trailing`] would stay on this page.
+    pub(crate) fn fits_on_current_page(&mut self, height: f64, trailing: f64) -> bool {
+        let idx = self.get_current();
+        let (safe_height, trailing) = fit_request(height, trailing);
+        self.fits_with_trailing(safe_height, trailing, idx)
+            || (safe_height <= self.get_column_capacity_with_trailing(trailing)
+                && self.clear_float_bands(idx, safe_height, trailing).1)
     }
 
     /// Places a fragment at the cursor, collapsing adjacent spacing, and

@@ -38,7 +38,11 @@ use crate::caps::{
 };
 use crate::font_store::{FontId, FontStore, covered_character};
 use crate::line_break::break_opportunities;
-use crate::shape::{ShapeDirection, ShapeFeature, shape_with_direction, shape_with_properties};
+use crate::scripts::is_joining_or_indic;
+use crate::shape::{
+    ShapeContext, ShapeDirection, ShapeFeature, is_nonspacing_mark, shape_in_context,
+    shape_with_direction,
+};
 use crate::word_metrics::{kern_enabled, kern_features};
 
 use super::font_slots::{FontSlot, char_slot};
@@ -314,7 +318,11 @@ fn prepare_runs_inner(
                     .sum(),
             }),
             "text" => prepared.push(PreparedRun::Text(prepare_text_run(
-                store, input, run, levels,
+                store,
+                input,
+                run,
+                levels,
+                run_shape_context(input, &bidi_levels, run_index),
             )?)),
             "tab" => prepared.push(PreparedRun::Tab(prepare_tab_run(
                 store,
@@ -342,6 +350,141 @@ fn prepare_runs_inner(
     }
     apply_auto_space(input, &mut prepared);
     Ok(prepared)
+}
+
+/// How many characters of a neighbouring run the shaper can look at.
+const SHAPE_CONTEXT_CHARS: usize = 5;
+
+/// The neighbouring text a run's edges shape against: a word split across
+/// adjacent text runs joins when both sides would shape alike. Only authoritative
+/// shaping takes it, since paint then draws the same glyphs; a host that reshapes
+/// runs on its own would disagree with the measured widths.
+fn run_shape_context<'a>(
+    input: &'a MeasureRequest<'_>,
+    levels: &[Vec<u8>],
+    run_index: usize,
+) -> ShapeContext<'a> {
+    if !input.authoritative_shaping {
+        return ShapeContext::default();
+    }
+    let runs = &input.block.runs;
+    let before = adjacent_text_run((0..run_index).rev().map(|index| (index, &runs[index])))
+        .filter(|&(index, _)| edges_shape_alike(input, levels, index, run_index))
+        .map_or("", |(_, text)| {
+            let start = text
+                .char_indices()
+                .rev()
+                .nth(SHAPE_CONTEXT_CHARS - 1)
+                .map_or(0, |(byte, _)| byte);
+            &text[start..]
+        });
+    let after = adjacent_text_run(runs.iter().enumerate().skip(run_index + 1))
+        .filter(|&(index, _)| edges_shape_alike(input, levels, run_index, index))
+        .map_or("", |(_, text)| {
+            let end = text
+                .char_indices()
+                .nth(SHAPE_CONTEXT_CHARS)
+                .map_or(text.len(), |(byte, _)| byte);
+            &text[..end]
+        });
+    ShapeContext { before, after }
+}
+
+/// The first run with text in `runs`, unless anything but an empty text run
+/// comes before it.
+fn adjacent_text_run<'a>(
+    runs: impl Iterator<Item = (usize, &'a RunIn)>,
+) -> Option<(usize, &'a str)> {
+    for (index, run) in runs {
+        if run.kind != "text" || run.hidden {
+            return None;
+        }
+        let text = run.text.as_deref().unwrap_or("");
+        if !text.is_empty() {
+            return Some((index, text));
+        }
+    }
+    None
+}
+
+/// Whether the end of run `left` and the start of run `right` are joining or
+/// Indic text at one bidi level, with every property shaping takes from their
+/// `w:rFonts` slot equal. Differences outside that slot, such as an ASCII font
+/// or a colour, do not count.
+fn edges_shape_alike(
+    input: &MeasureRequest<'_>,
+    levels: &[Vec<u8>],
+    left: usize,
+    right: usize,
+) -> bool {
+    let runs = &input.block.runs;
+    let (left_run, right_run) = (&runs[left], &runs[right]);
+    let base = |ch: &char| !is_nonspacing_mark(*ch);
+    let (Some(left_char), Some(right_char)) = (
+        left_run
+            .text
+            .as_deref()
+            .and_then(|t| t.chars().rev().find(base)),
+        right_run.text.as_deref().and_then(|t| t.chars().find(base)),
+    ) else {
+        return false;
+    };
+    if !is_joining_or_indic(left_char) || !is_joining_or_indic(right_char) {
+        return false;
+    }
+    let edge_level = |index: usize, level: fn(&[u8]) -> Option<&u8>| {
+        levels.get(index).and_then(|levels| level(levels)).copied()
+    };
+    let (left_level, right_level) = (
+        edge_level(left, <[u8]>::last),
+        edge_level(right, <[u8]>::first),
+    );
+    if left_level.is_none() || left_level != right_level {
+        return false;
+    }
+    let (left_family, left_style, left_size, left_language) =
+        edge_shaping(input, left_run, left_char);
+    let (right_family, right_style, right_size, right_language) =
+        edge_shaping(input, right_run, right_char);
+    left_family.eq_ignore_ascii_case(right_family)
+        && left_style == right_style
+        && left_size == right_size
+        && left_language == right_language
+}
+
+/// What shaping takes from `run` for `ch`: family, weight and slant, size and
+/// baseline shift, language, all from `ch`'s `w:rFonts` slot.
+fn edge_shaping<'a>(
+    input: &'a MeasureRequest<'_>,
+    run: &'a RunIn,
+    ch: char,
+) -> (&'a str, (bool, bool), (f32, f32), Option<&'a str>) {
+    let hint = run
+        .font_slots
+        .as_ref()
+        .and_then(|slots| slots.hint.as_deref());
+    let slot = char_slot(
+        ch,
+        run.complex_script,
+        hint == Some("eastAsia"),
+        FontSlot::HAnsi,
+    );
+    let default_size = run.font_size.unwrap_or(input.defaults.font_size);
+    let (bold, italic, size) = if slot == FontSlot::Cs {
+        (
+            run.bold_cs.unwrap_or(run.bold),
+            run.italic_cs.unwrap_or(run.italic),
+            run.font_size_cs.unwrap_or(default_size),
+        )
+    } else {
+        (run.bold, run.italic, default_size)
+    };
+    (
+        family_for_slot(run, slot, &input.defaults.font_family),
+        (bold, italic),
+        script_metrics(size, run),
+        language_for_slot(run, slot),
+    )
 }
 
 /// Widens the cluster before each East Asian / Latin boundary by the
@@ -919,6 +1062,7 @@ fn prepare_text_run(
     input: &MeasureRequest<'_>,
     run: &RunIn,
     resolved_levels: &[u8],
+    context: ShapeContext<'_>,
 ) -> Result<PreparedText, MeasureError> {
     let text = run.text.as_deref().unwrap_or("");
     if text.len() > MAX_RUN_TEXT_BYTES {
@@ -1209,7 +1353,7 @@ fn prepare_text_run(
             }
         }
 
-        let glyphs = shape_with_properties(
+        let glyphs = shape_in_context(
             store,
             font,
             &shaped_text,
@@ -1217,6 +1361,14 @@ fn prepare_text_run(
             &first_plan.features,
             shape_direction(seg_level),
             first_plan.language.as_deref(),
+            ShapeContext {
+                before: if seg_start == 0 { context.before } else { "" },
+                after: if seg_end == plan.len() {
+                    context.after
+                } else {
+                    ""
+                },
+            },
         )
         .map_err(|e| MeasureError::Invalid(format!("shaping failed: {e}")))?;
         if input.authoritative_shaping {

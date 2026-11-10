@@ -1539,6 +1539,13 @@ impl EditingDoc {
     ) -> Result<ReadParagraphsResponse, EditRefusal> {
         let story_id = request.story.as_deref().unwrap_or("body");
         let (version, paragraphs) = self.read_scope(|views| {
+            // Hosts read no paragraphs of the body to get the version, on every document read.
+            if story_id == "body"
+                && request.para_ids.as_ref().is_some_and(Vec::is_empty)
+                && story_ref(views.txn(), story_id).is_ok()
+            {
+                return Ok(Vec::new());
+            }
             read_story(
                 views,
                 story_id,

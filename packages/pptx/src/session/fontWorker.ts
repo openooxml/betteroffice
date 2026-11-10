@@ -1,3 +1,4 @@
+import { getFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { createSessionClient, requestWasmCompile } from '../../../../shared/office-session/client';
 import { rpcFontDecoder, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
@@ -93,8 +94,9 @@ function createPreparedFontWorker() {
     shared: () => holders > 1,
     take,
     prefetchCoverage(source: Uint8Array | ArrayBuffer, activeSlideIndex: number, sliced: boolean): void {
+      const fontCdn = getFontCdnConfiguration();
       void import('./coverageScan').then((scan) => scan.activeSlideCoverageScripts(source, activeSlideIndex)).then((scripts) => {
-        if (scripts.length) connection.post({ protocol: 1, kind: 'call', id: UNTRACKED_CALL_ID, method: 'prefetchCoverageFonts', args: sliced ? [scripts, true] : [scripts] }, []);
+        if (scripts.length) connection.post({ protocol: 1, kind: 'call', id: UNTRACKED_CALL_ID, method: 'prefetchCoverageFonts', args: fontCdn ? [scripts, sliced, fontCdn] : sliced ? [scripts, true] : [scripts] }, []);
       }).catch(() => {});
     },
     /** A holder's own handle: the worker stops once every handle is released, or collected after its decodes. */

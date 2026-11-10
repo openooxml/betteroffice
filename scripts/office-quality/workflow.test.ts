@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, test } from 'bun:test';
-import { CHANNELS, ENGINE_TIMEOUT, HELPER_TIMEOUT, PARALLELISM, SHARD_SIZE } from './roundtrip.mjs';
+import { CHANNELS, ENGINE_TIMEOUT, HELPER_TIMEOUT, PARALLELISM, SHARD_SIZE, ROUNDTRIP_MATRICES, MAX_MATRIX_JOBS, roundtripMatrices, roundtripShards } from './roundtrip.mjs';
 
 const workflow = Bun.YAML.parse(
   await readFile(
@@ -49,7 +49,7 @@ test('every job feeding the report runs on the runner image the plan recorded', 
 });
 
 test('only the reconciler publishes reports and renders after every format succeeds', () => {
-  expect(publish.needs).toEqual(['prepare', 'measure', 'docx-benchmark', 'xlsx-benchmark', 'pptx-benchmark', 'xlsx-fidelity', 'roundtrip-a', 'roundtrip-b']);
+  expect(publish.needs).toEqual(['prepare', 'measure', 'docx-benchmark', 'xlsx-benchmark', 'pptx-benchmark', 'xlsx-fidelity', 'roundtrip-a', 'roundtrip-b', 'timing']);
   expect(publish.if).not.toContain('always()');
   expect(
     measure.steps.some((step: any) => step.run?.includes('publish-renders.mjs'))
@@ -203,6 +203,7 @@ const steps = Object.entries<any>(workflow.jobs).flatMap(([job, definition]) =>
 const CORPUS_FREE = new Set(['build-native.mjs', 'build-format.mjs', 'build-roundtrip.mjs', 'native-fonts.ts',
   'install-libreoffice.sh', 'asset-cache.mjs', 'publish-renders.mjs', 'private-store.mjs']);
 const BINARY_ARTIFACTS = /^(docx-native-\$\{\{ matrix\.channel \}\}|docx-native-fonts|xlsx-native-\$\{\{ matrix\.channel \}\}|pptx-native-\$\{\{ matrix\.channel \}\}|roundtrip-native-\$\{\{ matrix\.format \}\}-\$\{\{ matrix\.channel \}\})$/;
+const README = "${{ (!inputs.private_corpus && !inputs.report_only && inputs.corpus_origin == '' && inputs.samples == '' && inputs.collection == 'office-quality') || (inputs.private_corpus && inputs.publish_readme && !inputs.report_only) }}";
 const PRIVATE_OFF = /(^|&& |^\$\{\{ )!inputs\.private_corpus( &&|$| \}\}$)/;
 
 test('private corpus runs are an explicit input that refuses sample lists and render publishing', () => {
@@ -234,7 +235,7 @@ test('every step that reads the corpus runs through the private-step wrapper', (
       labels.push(`${job}/${wrapped![1]}`);
     }
   }
-  expect(labels.length).toBe(15);
+  expect(labels.length).toBe(17);
   expect(new Set(labels).size).toBe(labels.length);
 });
 
@@ -251,8 +252,9 @@ test('private runs upload no per-document artifact and touch no asset cache, ren
     }
     if (uses.startsWith('actions/cache') && step.with.path.includes('fidelity-assets') || step.id === 'asset-cache' || String(step.run ?? '').includes('publish-renders.mjs') ||
         ['oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6'].includes(uses) && job === 'publish' ||
-        ['Replace the generated README section', 'Detect a changed report'].includes(step.name))
+        false)
       expect({ job, name: step.name ?? uses, if: step.if }).toEqual({ job, name: step.name ?? uses, if: expect.stringMatching(PRIVATE_OFF) });
+    if (['Replace the generated README section', 'Detect a changed report'].includes(step.name)) expect(step.if).toBe(README);
     const cache = step.env?.QUALITY_ASSET_CACHE;
     if (cache !== undefined) expect(cache).toStartWith('${{ !inputs.private_corpus && ');
   }
@@ -281,7 +283,7 @@ test('private runs take their secrets from a main-only environment without deplo
   const corpusJobs = Object.entries<any>(workflow.jobs).filter(([, job]) =>
     (job.steps ?? []).some((step: any) => /private-(step|store)\.mjs/.test(String(step.run ?? ''))));
   expect(corpusJobs.map(([name]) => name).sort()).toEqual(
-    ['docx-benchmark', 'measure', 'prepare', 'publish', 'pptx-benchmark', 'roundtrip-a', 'roundtrip-b', 'xlsx-benchmark', 'xlsx-fidelity'].sort());
+    ['docx-benchmark', 'measure', 'prepare', 'publish', 'pptx-benchmark', 'roundtrip-a', 'roundtrip-b', 'timing', 'xlsx-benchmark', 'xlsx-fidelity'].sort());
   for (const [, job] of corpusJobs) expect(job.environment).toEqual(ENVIRONMENT);
   for (const [name, job] of Object.entries<any>(workflow.jobs))
     if (!corpusJobs.some(([corpus]) => corpus === name)) expect({ name, environment: job.environment }).toEqual({ name, environment: undefined });
@@ -311,7 +313,7 @@ test('read keys reach only corpus readers and bucket reads, write keys only buck
       readers += 1;
     }
   }
-  expect(readers).toBe(8);
+  expect(readers).toBe(9);
   const checks = measure.steps.find((step: any) => step.name === 'Check benchmark scripts');
   expect(checks.env).toEqual({ QUALITY_PRIVATE: 'false' });
 });
@@ -331,7 +333,7 @@ test('every per-document artifact has a private bundle of the same name and dire
   }
   const puts = stores.filter((store) => store.mode === 'put').map((store) => `${store.job}/${store.name}`);
   expect(new Set(puts).size).toBe(puts.length);
-  for (const job of ['prepare', 'measure', 'docx-benchmark', 'xlsx-benchmark', 'pptx-benchmark', 'xlsx-fidelity', 'roundtrip-a', 'publish'])
+  for (const job of ['prepare', 'measure', 'docx-benchmark', 'xlsx-benchmark', 'pptx-benchmark', 'xlsx-fidelity', 'roundtrip-a', 'timing', 'publish'])
     expect(stores.some((store) => store.job === job && store.mode === 'put' && store.name.startsWith('logs-') &&
       store.step.if === 'always() && inputs.private_corpus')).toBe(true);
 });
@@ -383,7 +385,18 @@ test('the pin step refuses private runs on another branch or commit', async () =
 });
 
 const AGGREGATE_ONLY = '${{ runner.temp }}/fidelity-report/section.md\n${{ runner.temp }}/fidelity-report/aggregate.json\n';
-const README = "${{ !inputs.private_corpus && !inputs.report_only && inputs.corpus_origin == '' && inputs.samples == '' && inputs.collection == 'office-quality' }}";
+test('a private run commits the README only when publish_readme asks for it', () => {
+  expect(workflow.on.workflow_dispatch.inputs.publish_readme).toEqual({
+    description: "Private corpus run: commit this run's aggregate-only section to the README",
+    default: false, required: false, type: 'boolean',
+  });
+  const guard = prepare.steps.find((step: any) => step.name === 'Keep README publishing to private runs');
+  expect(guard.if).toBe('inputs.publish_readme && (!inputs.private_corpus || inputs.report_only)');
+  expect(guard.run).toContain('exit 1');
+  expect(prepare.steps.indexOf(guard)).toBeLessThan(prepare.steps.findIndex((step: any) => step.id === 'plan'));
+  const merge = publish.steps.find((step: any) => String(step.run ?? '').includes('merge.mjs'));
+  expect(merge.env?.QUALITY_PRIVATE ?? workflow.env.QUALITY_PRIVATE).toBe("${{ inputs.private_corpus && 'true' || 'false' }}");
+});
 
 test('only a default showcase run commits the README; report-only runs publish nothing', () => {
   expect(workflow.on.workflow_dispatch.inputs.report_only).toEqual({
@@ -408,4 +421,44 @@ test('the reconciled artifact always carries the aggregate, and the private bund
   ]);
   const keep = publish.steps.find((step: any) => step.name === 'Keep the reconciled report in the private bucket');
   expect(keep.run).toContain('private-store.mjs" put visual-fidelity report.json section.md aggregate.json failures.json');
+});
+
+test('private runs time a seeded sample per format, sequentially on one runner each, and gate the report on it', () => {
+  const timing = workflow.jobs.timing;
+  expect(timing.needs).toEqual(['prepare', 'native-build', 'xlsx-native-build', 'pptx-native-build']);
+  expect(timing.if).toContain('inputs.private_corpus');
+  expect(timing.if).toContain("needs.prepare.outputs.timing-formats != '[]'");
+  expect(timing.if).toStartWith('!cancelled()');
+  expect(prepare.outputs['timing-formats']).toBe('${{ steps.plan.outputs.timing-formats }}');
+  expect(prepare.steps.find((step: any) => step.id === 'plan').run).toContain('timing-formats=${JSON.stringify(timingFormats(plan))}');
+  expect(timing.strategy).toEqual({ 'fail-fast': false, matrix: { format: '${{ fromJSON(needs.prepare.outputs.timing-formats) }}' } });
+  const downloads = timing.steps.filter((step: any) => step.uses?.startsWith('actions/download-artifact@')).map((step: any) => step.with.name);
+  expect(downloads).toEqual(['${{ matrix.format }}-native-published', '${{ matrix.format }}-native-commit']);
+  const measured = timing.steps.find((step: any) => String(step.run ?? '').includes('timing.py'));
+  expect(measured.run).toBe('node scripts/office-quality/private-step.mjs timing -- python scripts/office-quality/timing.py');
+  expect(timing.steps.some((step: any) => step.uses?.startsWith('actions/upload-artifact@'))).toBe(false);
+  expect(publish.if).toContain("(!inputs.private_corpus || needs.prepare.outputs.timing-formats == '[]' || needs.timing.result == 'success')");
+  const merge = publish.steps.find((step: any) => step.run?.includes('merge.mjs'));
+  expect(merge.env.QUALITY_REQUIRE_TIMING).toBe('${{ inputs.private_corpus }}');
+  const fetch = publish.steps.find((step: any) => step.name === 'Fetch the format reports from the private bucket');
+  expect(fetch.run).toContain(`node "$store" get 'timing-report-*' "$parts"`);
+  expect(stores.some((store) => store.job === 'timing' && store.mode === 'put' && store.name === 'timing-report-${{ matrix.format }}')).toBe(true);
+});
+
+test('the roundtrip matrices cover every file of a corpus-sized plan for all three channels', () => {
+  const ids = (format: string, count: number) => Array.from({ length: count }, (_, index) => ({ id: `${format}-${index}`, format }));
+  for (const sizes of [{ docx: 1776, pptx: 656, xlsx: 3297 }, { docx: 1823, pptx: 674, xlsx: 3526 }, { docx: 2667, pptx: 2667, xlsx: 2666 }]) {
+    const samples = Object.entries(sizes).flatMap(([format, count]) => ids(format, count));
+    const plan = { formats: Object.keys(sizes), samples };
+    const shards = roundtripShards(plan);
+    expect(shards.every((shard: any) => shard.ids.length >= 1 && shard.ids.length <= SHARD_SIZE)).toBe(true);
+    expect(shards.flatMap((shard: any) => shard.ids).sort()).toEqual(samples.map((sample) => sample.id).sort());
+    const matrices = roundtripMatrices(plan);
+    expect(matrices).toHaveLength(ROUNDTRIP_MATRICES);
+    for (const matrix of matrices) expect(matrix.length).toBeLessThanOrEqual(MAX_MATRIX_JOBS);
+    const jobs = matrices.flat().map(({ format, shard }: any) => `${format}/${shard}`);
+    expect(new Set(jobs).size).toBe(shards.length);
+    expect(jobs.sort()).toEqual(shards.map(({ format, shard }: any) => `${format}/${shard}`).sort());
+  }
+  expect(CHANNELS).toEqual(['published', 'commit', 'libreoffice']);
 });

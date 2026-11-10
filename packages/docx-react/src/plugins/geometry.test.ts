@@ -33,6 +33,7 @@ import {
   scopePluginGeometry,
   toOverlayRect,
   unbuiltPagesOf,
+  visibleViewport,
 } from './geometry';
 import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
 import type { DocxPointPosition } from '../components/DocxEditor/types';
@@ -1371,4 +1372,21 @@ test('unbuiltPages takes range ends as exclusive and an empty range where it sit
   const source = { displayList: { pages: [{}, { unbuilt: true, positionSpan: [100, 199] }] } } as unknown as DisplayListQueries;
   const pagesOf = (from: number, to: number) => unbuiltPagesOf(source, [{ from, to }]);
   expect([pagesOf(90, 100), pagesOf(90, 101), pagesOf(100, 100), pagesOf(199, 205), pagesOf(200, 205)]).toEqual([[], [1], [1], [1], []]);
+});
+
+test('viewport intersects the scroller client box with the editor root in overlay pixels', () => {
+  const scroller = document.createElement('div');
+  const root = document.createElement('div');
+  const layer = document.createElement('div');
+  for (const element of [scroller, layer]) {
+    Object.defineProperty(element, 'currentCSSZoom', { value: 2 });
+  }
+  place(scroller, rectAt(100, 40, 1000, 700), { clientLeft: 5, clientTop: 4 });
+  Object.defineProperty(scroller, 'clientWidth', { value: 480 });
+  Object.defineProperty(scroller, 'clientHeight', { value: 320 });
+  place(root, rectAt(140, 60, 800, 580));
+  place(layer, rectAt(80, -300, 1200, 2400), { clientLeft: 2, clientTop: 3, scrollLeft: 7, scrollTop: 11 });
+  expect(visibleViewport(scroller, root, layer)).toEqual({ x: 35, y: 188, width: 400, height: 290 });
+  place(layer, rectAt(80, -460, 1200, 2400), { clientLeft: 2, clientTop: 3, scrollLeft: 7, scrollTop: 11 });
+  expect(visibleViewport(scroller, root, layer)).toEqual({ x: 35, y: 268, width: 400, height: 290 });
 });

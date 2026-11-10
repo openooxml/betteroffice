@@ -118,7 +118,7 @@ function revealAxis(position: number, size: number, frozen: boolean, scroll: num
 }
 
 export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
-  const { t } = useTranslation();
+  const { t, lang } = useTranslation();
   const rootRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -711,7 +711,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     return sheetId === undefined ? null : { sheetId, sheetIndex: active,
       cells: selection, chartId: selectedChart?.id ?? null };
   }, [run, active, selection, selectedChart]);
-  const pluginHost = useXlsxPluginHost({ ...props, access: pluginAccess, commands, editGate: false,
+  const pluginHost = useXlsxPluginHost({ locale: lang, focusRoot: scrollRef, ...props, access: pluginAccess, commands, editGate: false,
     readOnly: props.readOnly ?? false, handle: run?.ready && !run.failure ? run.peer : null,
     selection: pluginSelection, proposals, staleFor, proposalsPending: () => coordinator.pending, canvasRef, t,
     positionAtPoint: (clientX, clientY) => {

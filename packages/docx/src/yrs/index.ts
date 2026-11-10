@@ -1127,6 +1127,8 @@ export interface YrsSession extends CollaborationReplica {
   buildDisplayListJson(input: string): string;
   /** Build a binary FrameDelta v1 against the last host-applied frame. */
   buildDisplayListFrame(input: string, expectedFrameEpoch: number): Uint8Array;
+  /** The retained layout's header and footer payload. @internal */
+  retainedHeadersFootersJson(): string | undefined;
   /**
    * Limit full display builds to pages `start..end` plus the pages already
    * built; the rest stay unbuilt placeholders carrying their geometry. @internal
