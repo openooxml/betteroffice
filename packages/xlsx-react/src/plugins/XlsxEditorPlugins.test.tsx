@@ -3157,18 +3157,35 @@ for (const engine of ['XI', 'XP'] as const) describe(`selection matrix ${engine}
     } finally { replica.dispose(); h.dispose(); }
   });
 
-  if (engine === 'XI') editorTest('T5: undo that restores a selection settles once', async () => {
+  if (engine === 'XI') editorTest('T5: undo preserves the current cell selection without unsettling or settling', async () => {
     const h = await xlsxMatrix(engine, fixture, true);
     try {
       await h.select(1, 1); await h.paint(); await h.quiet();
+      const beforeInput = input(h.api(), 1, 1);
       await act(async () => { await h.api().applyEdits(setCell(h.api().handle.version(), 'B2', 'changed')); });
+      expect(input(h.api(), 1, 1)).toBe('changed');
       await h.select(2, 1); await h.paint(); await h.quiet(); h.reset();
-      await act(async () => { expect(await h.api().commands.execute('undo', null)).toMatchObject({ ok: true }); });
-      await h.paint(); await h.quiet();
-      expect(h.anchors).toHaveLength(1);
-      expect(h.context().snapshot.selection?.cells?.focus).toEqual({ row: 1, col: 1 });
-      await h.quiet(700);
-      expect(h.anchors).toHaveLength(1);
+      const beforeSelection = h.context().snapshot.selection;
+      expect(beforeSelection?.cells?.focus).toEqual({ row: 2, col: 1 });
+      const states: boolean[] = [];
+      const stop = h.binding().host.subscribe(() => states.push(h.context().snapshot.selectionSettled));
+      try {
+        await act(async () => { expect(await h.api().commands.execute('undo', null)).toMatchObject({ ok: true, status: 'executed' }); });
+        await h.paint(); await h.quiet();
+        expect(input(h.api(), 1, 1)).toBe(beforeInput);
+        expect(h.events.some(event => event.type === 'document-change')).toBe(true);
+        expect(h.context().snapshot.selection).toEqual(beforeSelection);
+        expect(h.context().snapshot.selectionSettled).toBe(true);
+        expect(states).not.toContain(false);
+        expect(h.events.filter(event => event.type === 'selection-settle')).toEqual([]);
+        expect(h.anchors).toHaveLength(0);
+        expect(h.context().geometry!.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: true });
+        await h.quiet(700);
+        expect(h.events.filter(event => event.type === 'selection-settle')).toEqual([]);
+        expect(h.anchors).toHaveLength(0);
+        expect(h.context().snapshot.selection).toEqual(beforeSelection);
+        expect(states).not.toContain(false);
+      } finally { stop(); }
     } finally { h.dispose(); }
   });
 

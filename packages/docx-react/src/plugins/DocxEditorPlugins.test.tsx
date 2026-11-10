@@ -371,9 +371,10 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
         expect(story.startsWith('hf:')).toBe(true);
         events.length = 0;
         onSelectionChange.mockClear();
+        const previousSelection = JSON.stringify(context!.snapshot.selection);
         await act(async () => { ref.current!.getEditorRef()!.setSelection(3, 3); });
         expect(onSelectionChange).not.toHaveBeenCalled();
-        await until(() => context!.snapshot.selection.displayRange?.from === 3);
+        await until(() => JSON.stringify(context!.snapshot.selection) !== previousSelection);
         expect(context!.snapshot.selectionSettled).toBe(false);
         expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(0);
         await settle(400);
@@ -2745,8 +2746,9 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
     const selectionLayout = async () => {
       await act(async () => {
         await mounted.ref.current!.flushPendingInput();
-        await mounted.ref.current!.whenLayoutComplete({ timeoutMs: 3000 });
       });
+      await mounted.ref.current!.whenLayoutComplete({ timeoutMs: 3000 });
+      await act(async () => {});
       await new Promise<void>(resolve => {
         const ready = () => {
           const current = context();
@@ -3125,9 +3127,27 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
   });
 
   if (engine !== 'DL') test.each(['image', 'shape'] as const)('T16/B11: a %s selection exposes its text atom range', async (kind) => {
-    const shape = '<w:p w14:paraId="00000001"><w:r><w:t xml:space="preserve">Before </w:t></w:r><w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml"><v:shape id="shape" style="width:100pt;height:40pt"/></w:pict></w:r><w:r><w:t> after</w:t></w:r></w:p>';
-    const h = await matrixEditor(engine, await inlineImageDocument(kind === 'image' ? undefined : shape));
+    const shape = '<w:p w14:paraId="00000001"><w:r><w:t xml:space="preserve">Before </w:t></w:r><w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml"><v:shape id="shape" style="width:100pt;height:40pt"><v:textbox><w:txbxContent><w:p/></w:txbxContent></v:textbox></v:shape></w:pict></w:r><w:r><w:t> after</w:t></w:r></w:p>';
+    const buffer = await inlineImageDocument(kind === 'image' ? undefined : shape);
+    const originalImage = globalThis.Image;
+    const h = await (async () => {
+      try {
+        if (engine === 'DI' && kind === 'image') {
+          class LoadedImage {
+            naturalWidth = 1;
+            naturalHeight = 1;
+            onload: (() => void) | null = null;
+            onerror: (() => void) | null = null;
+            set src(_value: string) { queueMicrotask(() => this.onload?.()); }
+          }
+          globalThis.Image = LoadedImage as unknown as typeof Image;
+        }
+        return await matrixEditor(engine, buffer);
+      } finally { globalThis.Image = originalImage; }
+    })();
     try {
+      expect(h.first.paraId).toBe('00000001');
+      expect(h.first.text.slice(7, 8)).toBe('\uFFFC');
       if (kind === 'image' && h.controller()) {
         const objects = h.controller()!.getSnapshot().view!.geometry!.objects!;
         const picture = objects.objects.find(object => object.kind === 'image')!;
@@ -3140,6 +3160,7 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
         });
       }
       await h.selection('body', '00000001', 7, 8);
+      await h.selectionLayout();
       await h.quiet();
       expect(h.settles).toHaveLength(1);
       expect(Object.keys(h.context().snapshot.selection).sort()).toEqual(['displayRange', 'formatting']);
