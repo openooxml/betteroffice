@@ -3782,9 +3782,18 @@ mod tests {
             )],
         );
         for (position, x) in [(11, 110.0), (12, 120.0), (13, 130.0), (14, 140.0)] {
-            assert!((caret_rect(&dl, position).unwrap().x - x).abs() < 0.01, "{position}");
+            assert!(
+                (caret_rect(&dl, position).unwrap().x - x).abs() < 0.01,
+                "{position}"
+            );
         }
-        for (x, position) in [(114.0, 11), (118.0, 12), (124.0, 12), (126.0, 13), (136.0, 14)] {
+        for (x, position) in [
+            (114.0, 11),
+            (118.0, 12),
+            (124.0, 12),
+            (126.0, 13),
+            (136.0, 14),
+        ] {
             assert_eq!(hit_test(&dl, 0, x, 195.0), Some(position), "{x}");
         }
         for (from, to, x, width) in [
@@ -3796,7 +3805,10 @@ mod tests {
             let rects = range_rects(&dl, from, to);
             assert_eq!(rects.len(), 1);
             assert!((rects[0].x - x).abs() < 0.01, "{from}..{to}: {rects:?}");
-            assert!((rects[0].width - width).abs() < 0.01, "{from}..{to}: {rects:?}");
+            assert!(
+                (rects[0].width - width).abs() < 0.01,
+                "{from}..{to}: {rects:?}"
+            );
         }
     }
 
