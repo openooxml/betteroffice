@@ -1194,7 +1194,6 @@ describe('XlsxEditor plugins', () => {
       dispatching = undefined;
       armed = true;
       host.proposalsChanged('outside-proposals');
-      await host.notificationsIdle();
       await until(() => delivered.length === 2 && nested.length === 2);
       expect(delivered[1]).toMatchObject({ ok: false, failure: { code: 'unsupported-policy' } });
       expect(nested[1]).toMatchObject({ ok: false, failure: { code: 'unsupported-policy' } });

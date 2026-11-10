@@ -403,6 +403,7 @@ describe('PptxEditor plugins', () => {
     let host!: pluginHosts.PptxPluginHost;
     const createHost = pluginHosts.createPptxPluginHost;
     const capture = spyOn(pluginHosts, 'createPptxPluginHost').mockImplementation((access) => {
+      if (!('handle' in access)) throw new Error('Expected document access');
       host = createHost(access);
       return host;
     });
