@@ -6,13 +6,21 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 publish = false
-description = "Read-only DOCX font preflight without the editing engine."
+description = "Read-only OOXML font preflight without the editing engine."
 
 [lib]
 name = "ooxml_font_preflight"
 crate-type = ["cdylib", "rlib"]
 
+[[example]]
+name = "preflight_eval"
+required-features = ["docx"]
+
 [features]
+default = ["docx", "pptx", "xlsx"]
+docx = []
+pptx = []
+xlsx = []
 wasm = ["dep:wasm-bindgen"]
 
 [package.metadata.wasm-pack.profile.release]

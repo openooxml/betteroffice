@@ -44,6 +44,8 @@ function memoryLimits(bytes: Uint8Array): Limits {
 }
 
 const ENGINES = [
+  { name: 'xlsx preflight', wasm: 'packages/xlsx/src/wasm/generated/preflight/xlsx_preflight_bg.wasm' },
+  { name: 'pptx preflight', wasm: 'packages/pptx/src/wasm/generated/preflight/pptx_preflight_bg.wasm' },
   { name: 'docx edit', wasm: 'packages/docx/src/wasm/generated/edit/docx_edit_bg.wasm', glue: 'packages/docx/src/wasm/generated/edit/docx_edit.js' },
   { name: 'docx opc', wasm: 'packages/docx/src/wasm/generated/opc/ooxml_opc_bg.wasm' },
   { name: 'docx parse', wasm: 'packages/docx/src/wasm/generated/parse/docx_parse_bg.wasm' },
