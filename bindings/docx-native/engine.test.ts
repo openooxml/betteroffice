@@ -1742,10 +1742,10 @@ test('native and wasm find a table crossing undos emptied in a header, a footnot
   const bytes = wasm.rezip_docx({
     '[Content_Types].xml': encoder.encode(`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="${office}.document.main+xml"/><Override PartName="/word/header1.xml" ContentType="${office}.header+xml"/><Override PartName="/word/footnotes.xml" ContentType="${office}.footnotes+xml"/></Types>`),
     '_rels/.rels': encoder.encode(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/officeDocument" Target="word/document.xml"/></Relationships>`),
-    'word/_rels/document.xml.rels': encoder.encode(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdH1" Type="${rel}/header" Target="header1.xml"/><Relationship Id="rIdF1" Type="${rel}/footnotes" Target="footnotes.xml"/></Relationships>`),
+    'word/_rels/document.xml.rels': encoder.encode(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="top" Type="${rel}/header" Target="header1.xml"/><Relationship Id="rIdF1" Type="${rel}/footnotes" Target="footnotes.xml"/></Relationships>`),
     'word/header1.xml': encoder.encode(`<w:hdr ${ns}>${plain('Header')}${paragraph('Header text')}</w:hdr>`),
     'word/footnotes.xml': encoder.encode(`<w:footnotes ${ns}><w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote><w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote><w:footnote w:id="1">${plain('Note')}${paragraph('Note text')}</w:footnote></w:footnotes>`),
-    'word/document.xml': encoder.encode(`<w:document ${ns}><w:body><w:p><w:r><w:t>Before</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r></w:p>${table(cell(`${control}${paragraph('In cell')}`), cell(paragraph('Body two')))}${paragraph('After')}<w:sectPr><w:headerReference w:type="default" r:id="rIdH1"/></w:sectPr></w:body></w:document>`),
+    'word/document.xml': encoder.encode(`<w:document ${ns}><w:body><w:p><w:r><w:t>Before</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r></w:p>${table(cell(`${control}${paragraph('In cell')}`), cell(paragraph('Body two')))}${paragraph('After')}<w:sectPr><w:headerReference w:type="default" r:id="top"/></w:sectPr></w:body></w:document>`),
   });
   const probe = new wasm.EditSession(60);
   let stories: string[];
@@ -1757,7 +1757,7 @@ test('native and wasm find a table crossing undos emptied in a header, a footnot
   }
   expect(stories).toContain('body');
   expect(stories.some((story) => story.includes(':sdt'))).toBe(true);
-  expect(stories.some((story) => story.startsWith('hf:'))).toBe(true);
+  expect(stories).toContain('hf:top');
   expect(stories.some((story) => story.startsWith('fn:'))).toBe(true);
   for (const story of stories) {
     const at = JSON.stringify({ story, tableIndex: 0, row: 0, column: 0 });

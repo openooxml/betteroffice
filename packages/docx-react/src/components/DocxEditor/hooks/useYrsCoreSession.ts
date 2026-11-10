@@ -250,6 +250,31 @@ export function seedYrsSession(
 }
 
 /**
+ * Runs the save projection once. A table a concurrent undo emptied makes the engine refuse with
+ * the `table-unavailable` code: the projection reads as absent, reported once until a
+ * projection succeeds again, and editing carries on. Any other failure is logged.
+ * @internal
+ */
+export function projectForSave(
+  project: () => Document | null,
+  refusalReported: { current: boolean }
+): Document | null {
+  try {
+    const projected = project();
+    if (projected) refusalReported.current = false;
+    return projected;
+  } catch (error) {
+    if (error instanceof Error && (error as Error & { code?: unknown }).code === 'table-unavailable') {
+      if (!refusalReported.current) console.warn(`[yrs] table-unavailable: ${error.message}`);
+      refusalReported.current = true;
+      return null;
+    }
+    console.error('[yrs] failed to project the document for save', error);
+    return null;
+  }
+}
+
+/**
  * Materializes the save-projection base once. `materializeDocx` re-parses the
  * retained source and ships the full envelope (every media entry, twice, as
  * JSON), so a host projecting every change warms it before the first edit.
@@ -332,6 +357,7 @@ export function useYrsCoreSession(
   const callbacksRef = useRef(callbacks);
   callbacksRef.current = callbacks;
   const compatibilityBaseRef = useRef<Document | null>(null);
+  const tableRefusalReportedRef = useRef(false);
   const compatibilitySourceBufferRef = useRef<ArrayBuffer | undefined>(undefined);
   const cancelCompatibilityWarmRef = useRef<(() => void) | null>(null);
   const seedBytesRef = useRef(seedBytes);
@@ -1284,26 +1310,23 @@ export function useYrsCoreSession(
     // A preview holds only the first pages: nothing saves or exports it.
     if (!enabledRef.current || previewingRef.current || !live || !facade || !base ||
       workerOpenDocumentHeld(live)) return null;
-    try {
+    return projectForSave(() => {
       if (workerOpenEnabledRef.current && workerOpenReplicaPending(live)) return null;
       const compatibilityBase = compatibilityBaseRef.current ?? live.materializeDocx();
       if (compatibilityBase) {
         compatibilitySourceBufferRef.current ??= compatibilityBase.originalBuffer;
-        base = mergeDocxHostMetadata(compatibilityBase, base);
+        base = mergeDocxHostMetadata(compatibilityBase, base!);
       }
       const dirtyStories = dirtyStoriesRef.current;
       const projected = facade.yrsToDocument(
         live,
-        base,
+        base!,
         dirtyStories.projection.projectionOptions()
       );
       dirtyStories.projected();
       if (compatibilityBase) compatibilityBaseRef.current = projected;
       return projected;
-    } catch (error) {
-      console.error('[yrs] failed to project the document for save', error);
-      return null;
-    }
+    }, tableRefusalReportedRef);
   }, []);
 
   const publishDirectInput = useCallback((stories?: string | readonly string[]): void => {

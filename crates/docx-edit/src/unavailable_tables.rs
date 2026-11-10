@@ -6,9 +6,9 @@
 use std::sync::atomic::Ordering;
 
 use yrs::types::{Delta, EntryChange, Event, Events};
-use yrs::{Map, MapRef, Out, ReadTxn, Transact, TransactionMut};
+use yrs::{Map, MapRef, Out, ReadTxn, TransactionMut};
 
-use crate::{EditingDoc, STORIES, TableLocator};
+use crate::{EditingDoc, TableLocator};
 
 /// The refusal text of a table operation or save over an unavailable table.
 pub const TABLE_UNAVAILABLE: &str = "a table is unavailable after a concurrent undo: redo on the collaborator who undid, or delete the table";
@@ -42,18 +42,28 @@ pub(crate) fn may_have_left_unavailable(txn: &TransactionMut, events: &Events) -
 
 impl EditingDoc {
     /// Every unavailable table a reader can reach, by story and ordinal: the geometry outline
-    /// walk (the editor projection's walk) from each root story, through the cells of complete
-    /// tables and block controls' stories. A story only an unavailable or deleted table named is
-    /// out of reach and never counts. `None` when a walk cannot finish.
+    /// walk (the editor projection's walk) from each root story the story list names (the body,
+    /// headers and footers by their section references, footnotes and endnotes), through the
+    /// cells of complete tables and block controls' stories. A story only an unavailable or
+    /// deleted table named is out of reach and never counts. `None` when a walk cannot finish.
     pub(crate) fn unavailable_tables(&self) -> Option<Vec<TableLocator>> {
-        let roots: Vec<String> = {
-            let txn = self.yrs_doc().transact();
-            let stories = txn.get_map(STORIES)?;
-            crate::live_stories(&stories, &txn)
-                .map(|(id, _)| id.to_owned())
-                .filter(|id| crate::structured::source::story_root(id) == id.as_str())
-                .collect()
-        };
+        use crate::stories::StoryInfoKind;
+        let roots: Vec<String> = self
+            .list_stories()
+            .stories
+            .into_iter()
+            .filter(|info| {
+                matches!(
+                    info.kind,
+                    StoryInfoKind::Body
+                        | StoryInfoKind::Header
+                        | StoryInfoKind::Footer
+                        | StoryInfoKind::Footnote
+                        | StoryInfoKind::Endnote
+                )
+            })
+            .map(|info| info.story)
+            .collect();
         let mut found = Vec::new();
         for root in roots {
             found.extend(self.unavailable_tables_under(&root).ok()?);

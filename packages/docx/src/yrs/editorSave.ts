@@ -149,7 +149,7 @@ async function writeEditorDocument(
   record?: EditorSaveRecord,
   yieldSave?: () => Promise<void>
 ): Promise<ArrayBuffer> {
-  if (session) refuseUnavailableTables(session);
+  if (session) refuseUnavailableTables(session, document);
   const original = document.originalBuffer;
   if (!original) return createDocx(document);
   if (!session || !capture) return repackDocx(document);

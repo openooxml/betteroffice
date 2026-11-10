@@ -67,7 +67,7 @@ import type {
   SectionProperties,
 } from '../types/document';
 import type { YrsRunInheritance, YrsSession, YrsTableInheritance } from './index';
-import { isUnavailableTablePayload, tableUnavailableError } from './tableUnavailable';
+import { isUnavailableTablePayload, refuseUnavailableTables, tableUnavailableError } from './tableUnavailable';
 
 type Attrs = Record<string, unknown>;
 
@@ -4359,6 +4359,7 @@ function projectDocument(
   options: YrsToDocumentOptions,
   revisionIds?: RevisionIds
 ): Document {
+  refuseUnavailableTables(session, base);
   const previous = projectedMedia;
   projectedMedia = (token) => session.mediaDataUrl?.(token) ?? null;
   let context: SaveContext | undefined;

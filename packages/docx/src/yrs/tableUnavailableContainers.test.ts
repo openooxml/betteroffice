@@ -7,6 +7,7 @@ import { preloadEditWasm } from '../wasm/edit';
 import { preloadOpcWasm } from '../wasm/opc';
 import { createYrsSession, saveYrsDocx, writeSessionSave, type YrsCellLoc, type YrsSession } from './index';
 import { captureSessionSave } from './saveYrsDocx';
+import { yrsToDocument } from './yrsToDocument';
 
 const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm');
 const OFFICE_DOC = 'application/vnd.openxmlformats-officedocument';
@@ -27,13 +28,13 @@ function containers(): Uint8Array {
   parts.set('_rels/.rels', toBytes(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdPkg1" Type="${REL}/officeDocument" Target="word/document.xml"/></Relationships>`));
   parts.set('word/_rels/document.xml.rels', toBytes(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdH1" Type="${REL}/header" Target="header1.xml"/><Relationship Id="rIdF1" Type="${REL}/footnotes" Target="footnotes.xml"/></Relationships>`));
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="top" Type="${REL}/header" Target="header1.xml"/><Relationship Id="rIdF1" Type="${REL}/footnotes" Target="footnotes.xml"/></Relationships>`));
   parts.set('word/header1.xml', toBytes(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:hdr ${W}>${plain('Header')}${paragraph('Header text')}</w:hdr>`));
   parts.set('word/footnotes.xml', toBytes(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:footnotes ${W}><w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote><w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote><w:footnote w:id="1">${plain('Note')}${paragraph('Note text')}</w:footnote></w:footnotes>`));
   parts.set('word/document.xml', toBytes(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:document ${W}><w:body><w:p><w:r><w:t>Before</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r></w:p>${table(cell(`${control}${paragraph('In cell')}`), cell(paragraph('Body two')))}${paragraph('After')}<w:sectPr><w:headerReference w:type="default" r:id="rIdH1"/><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>`));
+<w:document ${W}><w:body><w:p><w:r><w:t>Before</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r></w:p>${table(cell(`${control}${paragraph('In cell')}`), cell(paragraph('Body two')))}${paragraph('After')}<w:sectPr><w:headerReference w:type="default" r:id="top"/><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>`));
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
@@ -102,7 +103,7 @@ describe('an unavailable table in any container', () => {
     const stories = tableStories(probe);
     expect(stories).toContain('body');
     expect(stories.some((story) => story.startsWith('body:t0:') && story.includes(':sdt'))).toBe(true);
-    expect(stories.some((story) => story.startsWith('hf:'))).toBe(true);
+    expect(stories).toContain('hf:top');
     expect(stories.some((story) => story.startsWith('fn:'))).toBe(true);
     expect((await saveYrsDocx(probe, { updateModifiedDate: false })).bytes.byteLength).toBeGreaterThan(0);
   });
@@ -122,6 +123,9 @@ describe('an unavailable table in any container', () => {
           writeSessionSave(target, base, captureSessionSave(target), base.originalBuffer!, {}, () => false, false, () => false));
         expect(writer.code, story).toBe('table-unavailable');
         expect((await refusal(() => saveYrsDocx(target, { updateModifiedDate: false }))).code, story).toBe('table-unavailable');
+        const elsewhere = new Set(['body', 'hf:top'].filter((root) => root !== story));
+        expect((await refusal(async () => yrsToDocument(target, base, { storyIds: elsewhere }))).code, story)
+          .toBe('table-unavailable');
         expect(target.encodeState()).toEqual(before);
       }
     }

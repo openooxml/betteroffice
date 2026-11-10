@@ -92,13 +92,6 @@ impl EditingDoc {
         build_story(&txn, &mut BTreeMap::new(), root, 0, 0, &mut scan)?;
         Ok(scan.found)
     }
-}
-
-/// What a scanning outline walk collects: the unavailable tables it meets.
-#[derive(Default)]
-struct Scan {
-    active: bool,
-    found: Vec<TableLocator>,
 
     pub fn owned_revision_ranges(&self, ids: &[String]) -> GeometryRead<Vec<OwnedRevisionRange>> {
         let txn = self.doc.transact();
@@ -107,6 +100,13 @@ struct Scan {
             Err(sentinel) => GeometryRead::Sentinel(sentinel),
         }
     }
+}
+
+/// What a scanning outline walk collects: the unavailable tables it meets.
+#[derive(Default)]
+struct Scan {
+    active: bool,
+    found: Vec<TableLocator>,
 }
 
 fn plain_value<T: ReadTxn>(map: &MapRef, txn: &T, key: &str) -> Option<Any> {

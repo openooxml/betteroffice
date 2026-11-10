@@ -571,7 +571,7 @@ export async function writeSessionSave(
   splices: (part: string) => boolean = patches,
   yieldSave?: () => Promise<void>
 ): Promise<DocxSavedDocument> {
-  refuseUnavailableTables(session);
+  refuseUnavailableTables(session, document);
   if (yieldSave) await yieldSave();
   engineProgress();
   const output = withoutSyntheticParagraphs(document, capture.identities);
