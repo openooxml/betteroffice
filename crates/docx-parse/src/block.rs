@@ -24,6 +24,7 @@ use crate::table::{
     parse_document_table_row_properties, parse_table_cell_property_changes,
     parse_table_cell_structural_change, parse_table_grid, parse_table_property_changes,
     parse_table_row_property_changes, parse_table_row_structural_change,
+    row_is_hidden_content_only,
 };
 use crate::text_box::get_text_box_content_element;
 use crate::theme::Theme;
@@ -489,7 +490,14 @@ impl StoryParser<'_, '_> {
         context: StoryContext,
     ) -> Result<TableRow, ParseError> {
         let properties = element.child("w", "trPr");
-        let formatting = parse_document_table_row_properties(properties);
+        let mut formatting = parse_document_table_row_properties(properties);
+        let property_changes = parse_table_row_property_changes(properties, formatting.as_ref());
+        if let Some(formatting) = formatting
+            .as_mut()
+            .filter(|value| value.hidden == Some(true))
+        {
+            formatting.hidden_content_only = row_is_hidden_content_only(element).then_some(true);
+        }
         let mut row = TableRow {
             node_type: "tableRow".to_owned(),
             extra_attributes: (!element.attributes.is_empty()).then(|| {
@@ -502,7 +510,7 @@ impl StoryParser<'_, '_> {
                     })
                     .collect()
             }),
-            property_changes: parse_table_row_property_changes(properties, formatting.as_ref()),
+            property_changes,
             structural_change: parse_table_row_structural_change(properties),
             formatting,
             cells: Vec::new(),
