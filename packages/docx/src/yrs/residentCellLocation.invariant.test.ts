@@ -184,9 +184,11 @@ test('engine cell location is null or equal to the projection after every step o
           const bad = (fast !== null && JSON.stringify(fast) !== JSON.stringify(projected)) || (projected === null && fast !== null) ||
             JSON.stringify(live) !== JSON.stringify(projected);
           if (bad) {
+            const located = (value: unknown) => value !== null && typeof value === 'object';
             const kind = typeof live === 'string' && live.startsWith('shadow:') ? 'stale-cache'
               : fast !== null && projected === null ? 'engine-answers-unreachable'
-              : fast === null && projected !== null && live === null ? 'engine-misses-cell'
+              : typeof projected === 'string' ? 'projection-throws'
+              : fast === null && located(projected) && live === null ? 'engine-misses-cell'
               : fast !== null && projected !== null ? 'engine-differs'
               : 'resolved-differs';
             kinds[kind] = (kinds[kind] ?? 0) + 1;
@@ -202,8 +204,7 @@ test('engine cell location is null or equal to the projection after every step o
         const op = names[Math.floor(next() * names.length)]!;
         if (step === Math.floor(STEPS / 2)) {
           try {
-            const other = await openCommandEngine([], { bodyXml: body, clientId: 8500 + seed });
-            local.openSourceDocx(await packageBytes(body), { state: other.engine.encodeState() });
+            local.openDocx(await packageBytes(body), undefined, `reseed-${seed}`);
             reseeds++;
           } catch (error) {
             if (isEngineTrap(error)) throw error;
@@ -226,7 +227,7 @@ test('engine cell location is null or equal to the projection after every step o
         if (remote) syncFromPeer();
         check(step, remote ? `remote:${op}` : op);
       }
-      report.push(`INVARIANT seed=${seed} steps=${STEPS} remote=${remoteSteps} reseeds=${reseeds} keyMovesWithinChecks=${keyMoves} applied=${applied} refused=${refused} storiesSeen=${seen.size} checks=${checks} engineAnswered=${answered} ops=${JSON.stringify(ops)}`);
+      report.push(`INVARIANT seed=${seed} roots=${new Set([...seen].map(selection.rootOf)).size} steps=${STEPS} remote=${remoteSteps} reseeds=${reseeds} keyMovesWithinChecks=${keyMoves} applied=${applied} refused=${refused} storiesSeen=${seen.size} checks=${checks} engineAnswered=${answered} ops=${JSON.stringify(ops)}`);
       closeCommandEngines();
     }
     (selection as { setCellLocationShadowCheck?: (on: boolean) => void }).setCellLocationShadowCheck?.(false);

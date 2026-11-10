@@ -47,7 +47,7 @@ function cellIn(tables: readonly ProjectedCellTable[] | null, story: string): Yr
 
 const projectedTables = new WeakMap<object, Map<string, { key: string; tables: ProjectedCellTable[] | null }>>();
 let shadowCheck = false;
-const cacheCounts = { built: 0, reused: 0, uncached: 0 };
+const cacheCounts = { built: 0, reused: 0, uncached: 0, newRoot: 0, keyChanged: 0 };
 
 /** @internal Every resolveLiveCell call also builds a fresh projection and throws when the answers differ. */
 export function setCellLocationShadowCheck(enabled: boolean): void {
@@ -55,7 +55,7 @@ export function setCellLocationShadowCheck(enabled: boolean): void {
 }
 
 /** @internal How often resolveLiveCell rebuilt, reused or could not cache the projected tables. */
-export function cellLocationCacheCounts(): { built: number; reused: number; uncached: number } {
+export function cellLocationCacheCounts(): { built: number; reused: number; uncached: number; newRoot: number; keyChanged: number } {
   return { ...cacheCounts };
 }
 
@@ -82,6 +82,7 @@ export function resolveLiveCell(engine: DocxWorkerCommandEngine, story: string):
       tables = cached.tables;
     } else {
       cacheCounts.built++;
+      if (cached) cacheCounts.keyChanged++; else cacheCounts.newRoot++;
       tables = projectedCellTables(engine, root);
       roots.set(root, { key, tables });
     }
