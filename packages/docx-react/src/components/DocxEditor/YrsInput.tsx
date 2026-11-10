@@ -58,6 +58,7 @@ import {
   type LayoutUpdateOrigin,
 } from './internals/viewportAnchoring';
 import { useTranslation } from '../../i18n';
+import { bumpLocalSelection } from '../../plugins/selectionIdentity';
 
 const READER_SCROLL = ['wheel', 'touchmove'] as const;
 const READER_SCROLL_KEYS = new Set(['PageDown', 'PageUp', ' ', 'ArrowDown', 'ArrowUp', 'Home', 'End']);
@@ -387,12 +388,13 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       if (!readOnly) {
         entry.inputTime ??= performance.now();
         heldInputRef.current.entries.push(entry);
+        if (session && entry.kind !== 'copy' && entry.kind !== 'undo-boundary') bumpLocalSelection(session);
         if (isOpeningHeldInput(entry)) requestOpeningPeer();
         onPendingInputChangeRef.current?.(true);
       }
       return true;
     },
-    [holdInput, readOnly, requestOpeningPeer]
+    [holdInput, readOnly, requestOpeningPeer, session]
   );
   const queuedSessionRef = useRef(session);
   if (!inputOperationQueueRef.current || queuedSessionRef.current !== session) {
@@ -693,6 +695,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       if (!session) return;
       defaultCaretRef.current = null;
       session.setSelection(anchor, head);
+      bumpLocalSelection(session);
       if (emit) {
         if (!readOnly) requestLocalCaretReveal();
         onCaretInterrupt?.();
@@ -709,6 +712,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       dirtyStories?: string | readonly string[]
     ): void => {
       defaultCaretRef.current = null;
+      if (session) bumpLocalSelection(session);
       verticalCaretGoalRef.current.reset();
       if (residentLayoutReady) requestLocalCaretReveal();
       if (!composingRef.current && textareaRef.current) textareaRef.current.value = '';
@@ -721,7 +725,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       onDirectInput(dirtyStories);
       emitSelection(true, residentLayoutReady, residentCaretReady);
     },
-    [emitSelection, onCaretInput, onDirectInput, requestLocalCaretReveal]
+    [emitSelection, onCaretInput, onDirectInput, requestLocalCaretReveal, session]
   );
 
   const finishResidentMutation = useCallback(
@@ -737,6 +741,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   // Body-story only: painted-caret coverage for other stories is unproven, and
   // an unhonored dispatch hold would blank the caret per keystroke there.
   const dispatchCaretInput = useCallback((): void => {
+    if (session && !readOnly) bumpLocalSelection(session);
     if (heldReplayBatchRef.current) return;
     if (!session || readOnly || replicaReadyRef?.current === false) return;
     if (session.selection()?.head.story !== 'body') return;
@@ -1339,6 +1344,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   const deleteSelection = useCallback(
     (queued = false, cut?: CutCopy): void => {
       if (holdOperation({ kind: 'delete-selection', cut })) return;
+      if (session && !readOnly) bumpLocalSelection(session);
       const apply = (): void => {
         if (cut && !cut.written) return;
         if (!readOnly && replicaReadyRef?.current !== false && deleteSelected()) {
@@ -1357,6 +1363,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       holdOperation,
       readOnly,
       replicaReadyRef,
+      session,
     ]
   );
 
@@ -2174,12 +2181,16 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   }, [session, story]);
 
   const seededSessionRef = useRef<YrsSession | null>(null);
+  const activeStoryRef = useRef({ session, story });
   useEffect(() => {
     if (!enabled || !session || !replicaReady || holdInput) return;
     if (seedSelection) ensureSelection();
+    const previous = activeStoryRef.current;
+    activeStoryRef.current = { session, story };
+    if (previous.session === session && previous.story !== story) bumpLocalSelection(session);
     const initializing = seededSessionRef.current !== session;
     if (emitSelection(false, false, false, false, initializing)) seededSessionRef.current = session;
-  }, [emitSelection, enabled, ensureSelection, holdInput, seedSelection, session, replicaReady]);
+  }, [emitSelection, enabled, ensureSelection, holdInput, seedSelection, session, replicaReady, story]);
 
   const focusedSessionRef = useRef<YrsSession | null>(null);
   useEffect(() => {

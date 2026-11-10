@@ -9,6 +9,7 @@ import type { PeerlessFrameGeometry, PeerlessViewIdentity, PeerlessViewSnapshot 
 import { clientPointToPage } from './pagePoint';
 import { reviewVersionOf } from './workerReview';
 import { sameReservationOwner } from '../internals/layoutProvenance';
+import { docxSelectionIdentity } from '../../../plugins/selectionIdentity';
 
 export function workerDocumentVersion(view: PeerlessViewSnapshot | null | undefined): string {
   return view?.editState?.documentVersion ?? view?.geometry?.documentVersion ?? String(view?.version ?? 0);
@@ -40,11 +41,15 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
   const listeners = new Set<() => void>();
   const publish = () => { changed(); for (const listener of listeners) listener(); };
   const keyOf = (target: DocxGeometryTarget) => JSON.stringify(target);
-  const selectionIdentity = () => {
+  const selectionIdentity = (localRevision = 0) => {
     const selection = controller.getSnapshot().view?.workerSelection;
     const endpoint = (point: NonNullable<typeof selection>['anchor']) =>
       [point.story, point.sticky ? Array.from(point.sticky) : [point.paraId, point.offset]];
-    return JSON.stringify(selection ? [endpoint(selection.anchor), endpoint(selection.focus)] : null);
+    const collapsed = !!selection && selection.anchor.story === selection.focus.story &&
+      selection.anchor.paraId === selection.focus.paraId && selection.anchor.offset === selection.focus.offset;
+    const resolved = (point: NonNullable<typeof selection>['anchor']) => [point.story, point.paraId, point.offset];
+    return docxSelectionIdentity(localRevision, selection ? [endpoint(selection.anchor), endpoint(selection.focus)] : null,
+      selection ? [resolved(selection.anchor), resolved(selection.focus)] : null, collapsed);
   };
   const sameView = (a: PeerlessViewIdentity, b: PeerlessViewIdentity) => a.session === b.session && a.incarnation === b.incarnation && a.epoch === b.epoch;
   const pinnedVersion = (target: DocxGeometryTarget) => target.kind === 'range' ? target.version
@@ -330,7 +335,7 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
     const readAll: ReadAll = async (targets, retry, owner, deadline = Date.now() + SELECTION_ANCHOR_WAIT_MS) => {
       const sameDocument = () => !!current && sameView(current.frame.identity, frame.identity);
       if (!sameDocument()) return targets.map(unavailable);
-      const selection = selectionIdentity();
+      const selection = selectionIdentity().stickyKey;
       const asked = measure();
       let expired = false;
       await Promise.all(targets.map(async target => {
@@ -351,7 +356,7 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
         const measured = measure();
         results = targets.map(target => answer(target, false, measured, owner));
       }
-      const selectionCurrent = selectionIdentity() === selection;
+      const selectionCurrent = selectionIdentity().stickyKey === selection;
       return results.map((result, index) => targets[index]!.kind === 'selection' &&
         (expired || !selectionCurrent) ? unavailable() : result);
     };

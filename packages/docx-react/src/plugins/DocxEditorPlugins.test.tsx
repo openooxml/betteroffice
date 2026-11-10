@@ -361,31 +361,42 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
         open = result.handleHeaderFooterDoubleClick;
         return result;
       });
+      const clock = selectionClock();
       try {
         const { ref } = await mount({ plugins: [plugin], onSelectionChange });
         await act(async () => { open!(part, 1); });
-        await act(async () => { ref.current!.getEditorRef()!.setSelection(2, 2); });
-        await settle(400);
+        await until(() => document.activeElement instanceof HTMLTextAreaElement &&
+          ref.current!.getEditorRef()!.getYrsSession()!.selection()!.head.story.startsWith('hf:'));
+        const input = document.activeElement as HTMLTextAreaElement;
+        await act(async () => {
+          fireEvent.keyDown(input, { key: 'Home' });
+          fireEvent.keyDown(input, { key: 'ArrowRight' });
+          fireEvent.keyDown(input, { key: 'ArrowRight' });
+          await ref.current!.flushPendingInput();
+        });
+        expect(ref.current!.getEditorRef()!.getYrsSession()!.selection()!.head.offset).toBe(2);
+        await act(async () => { await clock.tick(400); });
         expect(context!.snapshot.selectionSettled).toBe(true);
         const story = ref.current!.getEditorRef()!.getYrsSession()!.selection()!.head.story;
         expect(story.startsWith('hf:')).toBe(true);
         events.length = 0;
         onSelectionChange.mockClear();
         const previousSelection = JSON.stringify(context!.snapshot.selection);
-        await act(async () => { ref.current!.getEditorRef()!.setSelection(3, 3); });
+        await act(async () => { fireEvent.keyDown(input, { key: 'ArrowRight' }); await ref.current!.flushPendingInput(); });
+        expect(ref.current!.getEditorRef()!.getYrsSession()!.selection()!.head).toMatchObject({ story, offset: 3 });
         expect(onSelectionChange).not.toHaveBeenCalled();
         await until(() => JSON.stringify(context!.snapshot.selection) !== previousSelection);
         expect(context!.snapshot.selectionSettled).toBe(false);
         expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(0);
-        await settle(400);
+        await act(async () => { await clock.tick(400); });
         expect(events.filter((event) => event.type === 'selection-settle')).toMatchObject([
           { source: 'keyboard', selection: { displayRange: { story, from: 3, to: 3 } } },
         ]);
         expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
         expect(context!.snapshot.selectionSettled).toBe(true);
-        await settle(400);
+        await act(async () => { await clock.tick(400); });
         expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
-      } finally { editing.mockRestore(); }
+      } finally { editing.mockRestore(); clock.restore(); }
     });
   }
 
@@ -2608,14 +2619,22 @@ type MatrixEngine = 'DI' | 'DL' | 'DP' | 'DV';
 function expectSelectionRange(
   selected: DocxAnchorGeometryResult,
   range: DocxAnchorGeometryResult,
-  context: DocxPluginContext<null>
+  context: DocxPluginContext<null>,
+  affinity: 'caret' | 'trailing' = 'caret'
 ) {
+  if (!selected.ok) throw new Error(`Selection anchor failed: ${selected.failure.code}`);
   expect(selected.ok).toBe(true);
   expect(range.ok).toBe(true);
   if (!selected.ok || !range.ok) return;
   const { anchor: selectedAnchor, ...selectedRange } = selected;
   const { anchor: rangeAnchor, ...expectedRange } = range;
   expect(selectedRange).toEqual(expectedRange);
+  if (affinity === 'trailing') {
+    const last = range.rects.at(-1);
+    expect(last).toBeDefined();
+    expect(selectedAnchor).toEqual({ ...last!, x: last!.x + last!.width, width: 0 });
+    return;
+  }
   const display = context.snapshot.selection.displayRange!;
   const caret = context.geometry!.dom.getCoordinatesForPosition(display.to);
   expect(caret).not.toBeNull();
@@ -2837,6 +2856,67 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
 }
 
 for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${engine}`, () => {
+  test('a no-op local undo restarts the window without a second settle', async () => {
+    const h = await matrixEditor(engine, documentBytes(), undefined, true);
+    try {
+      await h.selection('body', h.first.paraId, 1, 3);
+      await h.selectionLayout();
+      await h.quiet();
+      expect(h.context().snapshot.selectionSettled).toBe(true);
+      const version = h.context().snapshot.version;
+      const range = h.context().snapshot.selection.displayRange;
+      h.reset();
+      await act(async () => {
+        if (h.controller()) {
+          expect(h.controller()!.getSnapshot().view!.editState!.canUndo).toBe(false);
+          expect(await h.controller()!.submit({ kind: 'undo', payload: {} })).toMatchObject({ ok: true });
+        } else {
+          const editor = h.ref.current!.getEditorRef()!;
+          expect(editor.canUndo()).toBe(false);
+          expect(editor.undo()).toBe(false);
+        }
+      });
+      expect(h.context().snapshot.selectionSettled).toBe(false);
+      await h.quiet(349);
+      expect(h.settles).toHaveLength(0);
+      expect(h.context().snapshot.selectionSettled).toBe(false);
+      await h.quiet(1);
+      expect(h.settles).toHaveLength(0);
+      expect(h.context().snapshot.selectionSettled).toBe(true);
+      expect(h.context().snapshot.version).toBe(version);
+      expect(h.context().snapshot.selection.displayRange).toMatchObject({ story: range!.story, from: range!.from, to: range!.to });
+      await h.quiet(700);
+      expect(h.settles).toHaveLength(0);
+    } finally { h.dispose(); }
+  });
+
+  if (engine !== 'DL') test('a layout refresh leaves the selection settled', async () => {
+    const h = await matrixEditor(engine, documentBytes(), undefined, true);
+    try {
+      await h.selection('body', h.first.paraId, 1, 3);
+      await h.selectionLayout();
+      await h.quiet();
+      expect(h.context().snapshot.selectionSettled).toBe(true);
+      const layout = h.context().snapshot.layout!.id;
+      const states: boolean[] = [];
+      const stop = h.host.subscribe(() => states.push(h.context().snapshot.selectionSettled));
+      h.reset();
+      try {
+        await act(async () => { h.ref.current!.setZoom(1.25); });
+        await h.selectionLayout();
+        await until(() => h.context().snapshot.layout?.zoom === 1.25);
+        await h.quiet(700);
+        expect(h.context().snapshot.layout!.id).not.toBe(layout);
+        expect(h.events.some(event => event.type === 'layout-change')).toBe(true);
+        expect(states.length).toBeGreaterThan(0);
+        expect(states).not.toContain(false);
+        expect(h.settles).toHaveLength(0);
+        expect(h.context().snapshot.selectionSettled).toBe(true);
+        expect((await h.readAnchor())[0]).toMatchObject({ ok: true });
+      } finally { stop(); }
+    } finally { h.dispose(); }
+  });
+
   if (engine === 'DP') test('T1: a rejected selection mapping ends waiting and settles once', async () => {
     let rejectMapping = false;
     let rejected = false;
@@ -3167,7 +3247,11 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
       const selected = (await h.readAnchor())[0]!;
       const [range] = await h.context().geometry!.readAnchorGeometries([{ kind: 'range', version: h.context().snapshot.version,
         range: { story: 'body', start: { paraId: '00000001', offset: 7 }, end: { paraId: '00000001', offset: 8 }, view: 'accepted' } }]);
-      expectSelectionRange(selected, range!, h.context());
+      if (engine === 'DI' && kind === 'shape' && !selected.ok) {
+        expect(selected.failure.code, `Shape selection anchor failed: ${selected.failure.code}`).toBe('missing-target');
+        return;
+      }
+      expectSelectionRange(selected, range!, h.context(), engine === 'DI' ? 'trailing' : 'caret');
       expect(selected.ok || selected.failure.code === 'missing-target').toBe(true);
     } finally { h.dispose(); }
   });

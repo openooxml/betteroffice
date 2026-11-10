@@ -297,7 +297,9 @@ function pluginWorker(sheetCount = 2) {
       rect: { x: col * 96, y: row * 24, w: 96, h: 24 },
       scrollPosition: { x: 0, y: 0 } })),
     cellInputs: mock(async () => ({ sheet: 0, version, cells: [[{ input: '', isFormula: false }]] })),
-    frame: mock(async () => frame()),
+    frame: mock(async (viewport: WorkbookCommandFrame['viewport'], options?: { sheet?: number }) => ({
+      ...frame(), viewport, sheet: options?.sheet ?? editState.activeSheet,
+    })),
   };
   const session = {
     ...testSessionCommands(), state: { format: 'xlsx', stage: 'ready', version: 0,
@@ -3010,7 +3012,7 @@ async function xlsxMatrix(engine: 'XI' | 'XP', file = fixture, controlledClock =
 
 for (const engine of ['XI', 'XP'] as const) describe(`selection matrix ${engine}`, () => {
   editorTest('T19: settle follows the pending paint and the anchor answers ok at settle time', async () => {
-    const h = await xlsxMatrix(engine);
+    const h = await xlsxMatrix(engine, fixture, true);
     try {
       await h.select(2, 1);
       await h.schedulePaint();
@@ -3019,6 +3021,7 @@ for (const engine of ['XI', 'XP'] as const) describe(`selection matrix ${engine}
       expect(h.events.filter(event => event.type === 'selection-settle')).toHaveLength(0);
       expect(h.context().snapshot.selectionSettled).toBe(false);
       await h.paint();
+      await until(() => h.context().snapshot.selectionSettled);
       expect(h.events.filter(event => event.type === 'selection-settle')).toHaveLength(1);
       expect(h.anchors).toMatchObject([{ ok: true }]);
       expect(h.context().snapshot.selectionSettled).toBe(true);

@@ -8,6 +8,7 @@ import type { DocxClipboardFragment, YrsAuthor } from '@betteroffice/docx/yrs';
 import type { PeerlessEchoIntent, PeerlessEchoPainter } from './echoPainter';
 import { hasImplicitVerticalGoal, type PeerlessInputIntent, type PeerlessProposalIntent, type PeerlessRevisionIntent, type PeerlessTextIntent } from './inputEvents';
 import type { PeerlessViewStore } from './viewStore';
+import { bumpLocalSelection, notifySelectionActivity } from '../../../plugins/selectionIdentity';
 
 /** @internal */
 export const DOCX_ECHO_MAX_UNACKED_INTENTS = 256;
@@ -133,6 +134,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
   const releaseCount = (count = 1) => {
     originalUnackedIntents -= count;
     resetIdle();
+    notifySelectionActivity(session);
   };
   const readOnly = () => requestedReadOnly ?? viewStore.getSnapshot().editState?.readOnly ?? session.state.editState?.readOnly ?? false;
   const workerSelection = () => latestSelection(session, viewStore);
@@ -267,6 +269,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
     let echoTicket: { ticket?: CommandTicket; settled?: boolean; dropped?: boolean } | undefined;
     try {
       if (!counted) count();
+      if (!counted && !environment) bumpLocalSelection(session);
       if (compositionSlot !== null && !target) {
         let release!: (result: PeerlessAdmissionResult) => void;
         let drop!: (error: Error) => void;
@@ -362,7 +365,10 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
         pendingInputs += 1;
         const done = () => {
           if (echoTicket) echoTicket.settled = true;
-          if (!disposed) pendingInputs -= 1;
+          if (!disposed) {
+            pendingInputs -= 1;
+            notifySelectionActivity(session);
+          }
         };
         void ticket.ack.then(done, done);
       }
@@ -468,6 +474,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
       viewStore.setProvisionalCaret(null);
       echoFence = undefined;
       compositionSlot = ++nextSlot;
+      notifySelectionActivity(session);
       const target: PeerlessAdmissionTarget = tail
         ? { kind: 'predecessor', ticket: tail, suggesting: suggesting === null ? undefined : { name: suggesting, date: new Date().toISOString() } }
         : { kind: 'worker-selection', snapshot: viewStore.getSnapshot(), suggesting: suggesting === null ? undefined : { name: suggesting, date: new Date().toISOString() } };
@@ -499,6 +506,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
       for (const waiter of compositionWaiters) waiter.resolve();
       compositionWaiters.clear();
       resetIdle();
+      notifySelectionActivity(session);
       if (compositionFailed) throw failure;
       return result;
     },

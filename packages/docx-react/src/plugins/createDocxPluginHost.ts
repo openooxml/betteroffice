@@ -30,6 +30,7 @@ import {
 } from './createPluginClients';
 import { definitionProblem, pluginDefinition } from './defineDocxPlugin';
 import { scopePluginGeometry } from './geometry';
+import type { DocxSelectionIdentity } from './selectionIdentity';
 import { observeProposals, proposalSnapshot, type DocxProposalSnapshot } from './proposalPreview';
 import type {
   DocxPlugin,
@@ -74,7 +75,7 @@ export interface DocxPluginHost {
   generation(): string | null;
   version(): string;
   previewVersion(): number;
-  selectionChanged(selection: DocxPluginSelection, identity?: string): string;
+  selectionChanged(selection: DocxPluginSelection, identity?: string | DocxSelectionIdentity): string;
   selectionUnsettled(generation?: string | null): void;
   selectionSettled(source: 'pointer' | 'touch' | 'keyboard', generation?: string | null): void;
   focusChanged(focused: boolean): void;
@@ -163,6 +164,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
   let installed = false;
   let generations = 0;
   let selectionIdentity = 'null';
+  let resolvedSelection = 'null';
   const selectionIdentities = new WeakMap<DocxPluginSnapshot, string>();
   let settledSelection: string | null = null;
   let settleEvent: Extract<DocxPluginEvent, { type: 'selection-settle' }> | null = null;
@@ -464,6 +466,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       state.layout = null;
       state.selectionSettled = true;
       selectionIdentity = 'null';
+      resolvedSelection = 'null';
       settledSelection = null;
       settleEvent = null;
       state.selection = EMPTY_SELECTION;
@@ -491,6 +494,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       state.layout = null;
       state.selectionSettled = true;
       selectionIdentity = 'null';
+      resolvedSelection = 'null';
       settledSelection = null;
       settleEvent = null;
       state.selection = EMPTY_SELECTION;
@@ -534,18 +538,20 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
     previewVersion: () => state.previewVersion,
 
     selectionChanged(selection, identity = JSON.stringify(selection)) {
-      const moved = identity !== selectionIdentity;
-      selectionIdentity = identity;
+      const sticky = typeof identity === 'string' ? identity : identity.stickyKey;
+      const moved = sticky !== selectionIdentity;
+      selectionIdentity = sticky;
+      resolvedSelection = typeof identity === 'string' ? identity : identity.resolvedKey;
       if (JSON.stringify(selection) === JSON.stringify(state.selection)) {
         if (moved) { invalidateSettle(); runtime.touch(); }
-        return identity;
+        return sticky;
       }
       state.selection = selection;
       const generation = runtime.generation();
       if (generation) {
         notify({ type: 'selection-change', generation, version: state.version, selection });
       }
-      return identity;
+      return sticky;
     },
 
     selectionUnsettled(expected = runtime.generation()) {
@@ -559,7 +565,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       if (!expected || runtime.generation() !== expected) return;
       const changed = !state.selectionSettled;
       state.selectionSettled = true;
-      const key = selectionIdentity;
+      const key = resolvedSelection;
       if (key === settledSelection) {
         if (changed) runtime.touch();
         return;

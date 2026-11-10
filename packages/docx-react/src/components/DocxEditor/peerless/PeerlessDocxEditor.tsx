@@ -90,6 +90,7 @@ import { resolvedLocale } from '../../../i18n/LocaleContext';
 import { visibleViewport } from '../../../plugins/geometry';
 import { createSelectionSettle } from '../../../../../../shared/plugin-host/selectionSettle';
 import { trackFocus } from '../../../../../../shared/plugin-host/focusTracker';
+import { localSelectionRevision, subscribeSelectionActivity } from '../../../plugins/selectionIdentity';
 
 const PREVIEW_CUT = { blocks: 200, paragraphBudget: 256 };
 const SIDEBAR_EDGE = 16;
@@ -344,20 +345,37 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   useLayoutEffect(() => { pluginHost.localeChanged(locale); }, [pluginHost, locale]);
   const managedPlugins = Boolean(props.plugins?.length);
   const settleRef = useRef<ReturnType<typeof createSelectionSettle> | null>(null);
+  const publishPluginSelection = useCallback((notify = true) => {
+    const toolbar = controller.getSnapshot().view?.editState?.toolbar;
+    const selection = { formatting: toolbar ? yrsSelectionState({ context: toolbar, startParagraphIndex: -1, endParagraphIndex: -1 }) : null,
+      displayRange: pluginGeometry.displaySelection() };
+    const identity = pluginGeometry.selectionIdentity(localSelectionRevision(active.current?.binding.session));
+    pluginHost.selectionChanged(selection, identity);
+    if (notify) settleRef.current?.notifySelectionChange(identity.settleKey);
+  }, [controller, pluginGeometry, pluginHost]);
   useEffect(() => {
     if (!managedPlugins || !documentReady) return;
     let generation = pluginHost.generation();
     const settled = (source: 'pointer' | 'touch' | 'keyboard') => pluginHost.selectionSettled(source, generation);
     const machine = createSelectionSettle({
       root: () => host.current?.querySelector('[data-docx-worker-editor]') ?? null,
-      canSettle: pluginGeometry.selectionMapped,
+      restartOnTyping: false,
+      canSettle: () => {
+        const work = active.current?.binding.admission.getSnapshot();
+        if (!work || work.originalUnackedIntents || work.pendingInputs || work.heldIntents || work.compositionSlot !== null ||
+          !pluginGeometry.selectionMapped()) return false;
+        publishPluginSelection(false);
+        return true;
+      },
       onUnsettle: () => { generation = pluginHost.generation(); pluginHost.selectionUnsettled(generation); },
       onSettle: settled,
       onResettle: settled,
     });
     settleRef.current = machine;
-    return () => { machine.dispose(); settleRef.current = null; };
-  }, [pluginHost, pluginGeometry, managedPlugins, documentReady, shellState.view?.identity.session,
+    const session = active.current?.binding.session;
+    const unsubscribe = session ? subscribeSelectionActivity(session, publishPluginSelection) : undefined;
+    return () => { unsubscribe?.(); machine.dispose(); settleRef.current = null; };
+  }, [pluginHost, pluginGeometry, publishPluginSelection, managedPlugins, documentReady, shellState.view?.identity.session,
     shellState.view?.identity.incarnation, shellState.view?.identity.epoch]);
   useLayoutEffect(() => {
     if (!managedPlugins) return;
@@ -400,17 +418,13 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       if (review) pluginHost.workerProposalsChanged(review.proposals);
       const layout = pluginGeometry.layout();
       pluginHost.layoutChanged(layout);
-      const toolbar = shellState.view?.editState?.toolbar;
       if (layout && pluginGeometry.geometry()) props.onRenderedDomContextReady?.(pluginGeometry.geometry()!.dom);
-      const selection = { formatting: toolbar ? yrsSelectionState({ context: toolbar, startParagraphIndex: -1, endParagraphIndex: -1 }) : null, displayRange: pluginGeometry.displaySelection() };
-      const identity = pluginGeometry.selectionIdentity();
-      pluginHost.selectionChanged(selection, identity);
-      settleRef.current?.notifySelectionChange(identity);
+      publishPluginSelection();
       if (layout) pluginHost.geometryPresented(layout);
       pluginHost.geometryChanged();
       pluginHost.syncCommands();
     } else { pluginHost.close('document-replaced'); setExpandedSidebarItem(null); }
-  }, [shellState, documentReady, pluginHost, props.mode, effectiveReadOnly, pluginGeometry, overlayLayer, geometryRevision, displayWindow]);
+  }, [shellState, documentReady, pluginHost, props.mode, effectiveReadOnly, pluginGeometry, publishPluginSelection, overlayLayer, geometryRevision, displayWindow]);
   const pluginSidebarItemCount = props.pluginSidebarItems?.length ?? 0;
   useLayoutEffect(() => { if (activations.length || pluginSidebarItemCount || props.onRenderedDomContextReady || props.showHostProposalsInSidebar) void pluginGeometry.update().catch(() => {}); },
     [shellState.view, zoom, overlayLayer, pluginGeometry, activations.length, pluginSidebarItemCount, props.onRenderedDomContextReady, props.showHostProposalsInSidebar]);

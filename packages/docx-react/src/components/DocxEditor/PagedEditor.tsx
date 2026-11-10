@@ -18,6 +18,7 @@ import type { DocxClipboardFragment } from '@betteroffice/docx/yrs';
 import React, { useEffect, useRef, useState, useCallback, useMemo, useId, forwardRef, memo } from 'react';
 import type { CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
+import { bumpLocalSelection } from '../../plugins/selectionIdentity';
 
 // Internal components
 import {
@@ -1116,6 +1117,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         inWorker?: boolean
       ): boolean => {
         if (!yrsCore.session) return false;
+        if (origin === 'local' && !inWorker) bumpLocalSelection(yrsCore.session);
         const displaySelection = yrsInputRef.current?.displaySelection() ?? { anchor: 0, head: 0 };
         if (docChanged) {
           yrsCore.publishDirectInput(dirtyStory);

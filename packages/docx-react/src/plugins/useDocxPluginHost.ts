@@ -61,6 +61,7 @@ import {
 import { resolveParagraph } from './createPluginClients';
 import { createPluginGeometry, pluginLayout, readPluginPositionAtPoint, visibleViewport } from './geometry';
 import { managedSidebarItems } from './PluginSidebarItems';
+import { docxSelectionIdentity, localSelectionRevision, subscribeSelectionActivity } from './selectionIdentity';
 import { usePluginReservations } from './reservations';
 import { currentPreviewKey } from './proposalPreview';
 import type {
@@ -196,7 +197,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   );
 
   const selectionRef = useRef<DocxPluginSelection>({ formatting: null, displayRange: null });
-  const selectionIdentityRef = useRef('null');
+  const selectionIdentityRef = useRef(docxSelectionIdentity(0, null, null, false));
   const settleRef = useRef<ReturnType<typeof createSelectionSettle> | null>(null);
   const managed = (options.plugins?.length ?? 0) > 0;
   const locale = resolvedLocale(options.locale ?? options.i18n?._lang);
@@ -315,8 +316,10 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
     if (latest.current.viewerSelection || latest.current.viewerDocumentRead) {
       const selection = { formatting: null, displayRange: viewerSelectionRef.current?.displayRange ?? null };
       const range = selection.displayRange;
-      selectionIdentityRef.current = JSON.stringify(range
-        ? [range.story, range.from, range.to, viewerSelectionRef.current?.head ?? range.to] : null);
+      const identity = range
+        ? [range.story, range.from, range.to, viewerSelectionRef.current?.head ?? range.to] : null;
+      selectionIdentityRef.current = { settleKey: JSON.stringify(identity), stickyKey: JSON.stringify(identity),
+        resolvedKey: JSON.stringify(identity) };
       selectionRef.current = selection;
       host.selectionChanged(selection, selectionIdentityRef.current);
       return selection;
@@ -325,15 +328,24 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
     const session = editor?.getYrsSession() ?? latest.current.session;
     const range = editor?.getSelectionRange() ?? null;
     const layout = layoutRef.current;
-    const story = session?.selection()?.head.story ?? 'body';
+    const live = session?.selection();
+    const story = live?.head.story ?? 'body';
     const selection = {
       formatting: formattingRef.current,
       displayRange:
         range && layout ? { story, from: range.from, to: range.to, layoutId: layout.id } : null,
     };
     const encoded = session?.encodeSelection?.();
-    selectionIdentityRef.current = JSON.stringify(encoded
-      ? [encoded.story, Array.from(encoded.anchor), Array.from(encoded.head)] : null);
+    const offset = (point: NonNullable<typeof live>['anchor']) =>
+      session!.locateParagraph(point.story, point.paraId).start + point.offset;
+    const anchor = live ? offset(live.anchor) : 0;
+    const focus = live ? offset(live.head) : 0;
+    const direction = Math.sign(focus - anchor);
+    const collapsed = !!live && live.anchor.story === live.head.story &&
+      live.anchor.paraId === live.head.paraId && live.anchor.offset === live.head.offset;
+    selectionIdentityRef.current = docxSelectionIdentity(localSelectionRevision(session), encoded
+      ? [encoded.story, Array.from(encoded.anchor), Array.from(encoded.head), direction] : null,
+      live ? [live.anchor.story, anchor, live.head.story, focus, direction] : null, collapsed);
     selectionRef.current = selection;
     host.selectionChanged(selection, selectionIdentityRef.current);
     return selection;
@@ -342,7 +354,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   const publishSelection = useCallback(() => {
     if (!latest.current.plugins?.length) return;
     refreshSelection();
-    settleRef.current?.notifySelectionChange(selectionIdentityRef.current);
+    settleRef.current?.notifySelectionChange(selectionIdentityRef.current.settleKey);
   }, [host, refreshSelection]);
 
   useEffect(() => {
@@ -351,6 +363,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
     const settled = (source: 'pointer' | 'touch' | 'keyboard') => host.selectionSettled(source, generation);
     const machine = createSelectionSettle({
       root: () => latest.current.focusRoot?.() ?? null,
+      restartOnTyping: false,
       isEditorTarget: (target) => {
         const id = latest.current.focusRoot?.()?.getAttribute('data-docx-input');
         return !!id && target instanceof Element && target.id === id;
@@ -369,6 +382,11 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
     settleRef.current = machine;
     return () => { machine.dispose(); settleRef.current = null; };
   }, [host, managed, options.session, options.loadGeneration, refreshSelection]);
+
+  useEffect(() => {
+    if (!managed || !options.session) return;
+    return subscribeSelectionActivity(options.session, publishSelection);
+  }, [managed, options.session, publishSelection]);
 
   const publishViewerSelection = useCallback((selection: ViewerSelectionChange) => {
     viewerSelectionRef.current = selection;

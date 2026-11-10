@@ -6,6 +6,7 @@ export interface SelectionSettleOptions {
   root: Element | (() => Element | null);
   isEditorTarget?(target: EventTarget | null): boolean;
   settleMs?: number;
+  restartOnTyping?: boolean;
   /** Re-notify the same key when this becomes true. */
   canSettle?(): boolean;
   onUnsettle(): void;
@@ -21,7 +22,7 @@ function isTypingKey(event: KeyboardEvent): boolean {
 }
 
 export function createSelectionSettle({
-  root, isEditorTarget, settleMs = 350, canSettle = () => true, onUnsettle, onSettle, onResettle,
+  root, isEditorTarget, settleMs = 350, restartOnTyping = true, canSettle = () => true, onUnsettle, onSettle, onResettle,
 }: SelectionSettleOptions) {
   const rootOf = () => typeof root === 'function' ? root() : root;
   const document = rootOf()?.ownerDocument ?? globalThis.document;
@@ -73,7 +74,7 @@ export function createSelectionSettle({
   const keydown = (event: KeyboardEvent) => {
     if (!inside(event.target)) return;
     source = 'keyboard';
-    if (isTypingKey(event) && (timer !== null || waiting)) schedule();
+    if (restartOnTyping && isTypingKey(event) && (timer !== null || waiting)) schedule();
   };
   const window = document.defaultView;
   document.addEventListener('pointerdown', down, true);
