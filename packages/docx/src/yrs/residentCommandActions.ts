@@ -770,6 +770,8 @@ export function preflightDocxCommand(
     paragraphChanges: planResidentListChanges(engine, resolved.range, command.payload),
   } };
   let range = resolved.range;
+  if ((command.kind === 'formatRange' || command.kind === 'formatSelection') && command.payload.delta.clear !== undefined &&
+    (collapsed(range) || range.start.paraId !== range.end.paraId)) return refuse('invalid-formatting');
   if ((command.kind === 'insertText' || command.kind === 'replaceSelection' || command.kind === 'lineBreak') && state.storedMarks &&
     (typeof state.storedMarks.clear !== 'boolean' || !validDelta(state.storedMarks.delta))) return refuse('invalid-stored-marks');
   if (command.kind === 'deleteBackward' || command.kind === 'deleteForward') {
