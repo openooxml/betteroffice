@@ -549,6 +549,10 @@ function drawGlyphRunFallback(ctx: CanvasRenderingContext2D, run: GlyphRunPrimit
   drawGlyphEmphasisMarks(ctx, run);
 }
 
+// fillText has no per-feature control: a run that asks for none of the optional
+// switches paints with optimizeSpeed (no optional ligatures); a run that asks for
+// any of them paints with the browser's defaults, so historical/discretionary
+// forms are not drawn on this path and standard ligatures come with any request.
 function drawRunText(
   ctx: CanvasRenderingContext2D,
   text: string,
@@ -573,7 +577,7 @@ function drawRunText(
     const kern = enabled.has('kern');
     if ('fontKerning' in ctx) ctx.fontKerning = kern ? 'normal' : 'none';
     if (!('textRendering' in ctx)
-      || ['liga', 'clig', 'hlig', 'dlig'].some(tag => enabled.has(tag))
+      || ['liga', 'clig', 'hlig', 'dlig', 'calt'].some(tag => enabled.has(tag))
       || (kern && !speedPreservesKerning(ctx))) {
       paint(text, x);
       return;

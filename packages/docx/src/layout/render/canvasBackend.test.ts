@@ -526,6 +526,9 @@ describe('Canvas substitute widths', () => {
       run.fontFeatures = ['kern', 'liga', 'clig'];
       await drawPrimitive(ctx, run);
       expect(states.at(-1)).toEqual(['auto', 'normal']);
+      run.fontFeatures = ['calt'];
+      await drawPrimitive(ctx, run);
+      expect(states.at(-1)).toEqual(['auto', 'none']);
     }
   });
 
