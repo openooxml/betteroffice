@@ -4891,7 +4891,10 @@ mod tests {
     }
 
     fn state(doc: &EditingDoc) -> (Vec<u8>, Vec<u8>) {
-        (doc.encode_state_vector_v1(), doc.encode_state_as_update_v1())
+        (
+            doc.encode_state_vector_v1(),
+            doc.encode_state_as_update_v1(),
+        )
     }
 
     fn refused<T: std::fmt::Debug>(result: OpResult<T>, story: &str) {

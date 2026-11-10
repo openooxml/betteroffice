@@ -462,10 +462,22 @@ pub enum EditError {
     CellHasNoStory(String),
     CommentNotFound(String),
     ParagraphNotFound(String),
-    InvalidRange { start: u32, end: u32 },
-    OutOfBounds { index: u32, len: u32 },
-    ExpectedPilcrow { story: String, index: u32 },
-    CannotMergeFinalParagraph { story: String, index: u32 },
+    InvalidRange {
+        start: u32,
+        end: u32,
+    },
+    OutOfBounds {
+        index: u32,
+        len: u32,
+    },
+    ExpectedPilcrow {
+        story: String,
+        index: u32,
+    },
+    CannotMergeFinalParagraph {
+        story: String,
+        index: u32,
+    },
     InvalidComment(String),
     InvalidStateVector(String),
     InvalidUpdate(String),
@@ -964,11 +976,9 @@ impl EditingDoc {
         }
         match self.build_story_indexes(story_id) {
             Ok((_, paragraphs)) => Ok(paragraphs),
-            Err(EditError::CellHasNoStory(_)) => {
-                empty_cells::EmptyCell::new(story_id)
-                    .doc()
-                    .paragraph_index(story_id)
-            }
+            Err(EditError::CellHasNoStory(_)) => empty_cells::EmptyCell::new(story_id)
+                .doc()
+                .paragraph_index(story_id),
             Err(error) => Err(error),
         }
     }

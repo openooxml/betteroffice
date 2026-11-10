@@ -117,7 +117,10 @@ fn dangling_state(synced: bool) -> (EditingDoc, EditingDoc, DocUndoManager) {
 }
 
 fn state(doc: &EditingDoc) -> (Vec<u8>, Vec<u8>) {
-    (doc.encode_state_vector_v1(), doc.encode_state_as_update_v1())
+    (
+        doc.encode_state_vector_v1(),
+        doc.encode_state_as_update_v1(),
+    )
 }
 
 fn assert_reads_empty(doc: &EditingDoc, cell: &str) {
@@ -155,9 +158,7 @@ fn assert_reads_empty(doc: &EditingDoc, cell: &str) {
         doc.loc_range_of(&StoryRange::new(cell, 0, 0)).unwrap(),
         range
     );
-    let context = doc
-        .selection_context(&StoryRange::new(cell, 0, 0))
-        .unwrap();
+    let context = doc.selection_context(&StoryRange::new(cell, 0, 0)).unwrap();
     assert_eq!(context.para_id, key);
     assert!(context.in_table);
     assert_eq!(doc.selection_info(&loc, &loc).unwrap().paragraph_text, "");
@@ -412,11 +413,7 @@ fn assert_writes_refused(doc: &EditingDoc, row: u32, column: u32, cell: &str) {
         "collapsed set_comment_ranges",
     );
     for kind in ["sectionBreak", "watermark", "pilcrow"] {
-        assert_refused(
-            doc.insert_embed(&ctx(), at(), kind, Vec::new()),
-            cell,
-            kind,
-        );
+        assert_refused(doc.insert_embed(&ctx(), at(), kind, Vec::new()), cell, kind);
     }
     assert_refused(
         doc.move_embed(&ctx(), Position::new("body", 0), at()),

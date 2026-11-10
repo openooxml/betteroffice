@@ -533,7 +533,12 @@ fn missing_cell_session(synced: bool, select_early: bool) -> (EditSessionCore, S
     };
     let mut undo = splitter.undo_manager();
     splitter
-        .split_cell_grid(&ctx, &crate::CellLoc::new("body", 0, 0, 1), Some(1), Some(2))
+        .split_cell_grid(
+            &ctx,
+            &crate::CellLoc::new("body", 0, 0, 1),
+            Some(1),
+            Some(2),
+        )
         .unwrap();
     exchange();
     let session = core(93);

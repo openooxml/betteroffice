@@ -1845,7 +1845,10 @@ impl EditingDoc {
             return Ok(());
         }
         let target = EditTarget::from(target.clone());
-        Err(refusal(self.version(), cell_has_no_story(story, Some(target))))
+        Err(refusal(
+            self.version(),
+            cell_has_no_story(story, Some(target)),
+        ))
     }
 
     fn writable(&self, story: &str, target: &TextTarget) -> Result<(), EditRefusal> {

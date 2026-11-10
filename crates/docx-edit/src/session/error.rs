@@ -9,7 +9,9 @@ pub struct EngineError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineErrorKind {
     Message,
-    PeerMetadata { code: &'static str },
+    PeerMetadata {
+        code: &'static str,
+    },
     SuggestedFormattingOverContainer,
     /// A write aimed at a table cell that a live table names while its story is missing or removed.
     CellHasNoStory,
