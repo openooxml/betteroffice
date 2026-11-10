@@ -799,6 +799,8 @@
   },
   "a11y": {
     "pageLabel": "第 {number} 頁",
+    "unbuiltPagesNotMirrored": "第 {from} 頁至第 {to} 頁尚未包含在閱讀檢視中。",
+    "goToPage": "前往第 {number} 頁",
     "headerLabel": "頁首",
     "footerLabel": "頁尾",
     "chartNoData": "無資料",

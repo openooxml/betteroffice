@@ -1272,6 +1272,13 @@ export interface YrsSession extends CollaborationReplica {
    * snapshot's `mediaSources` names. @internal
    */
   loadMediaSources(json: string): void;
+  /**
+   * Adds to this replica's media sources every part of its own media table
+   * they lack, so it resolves the `data:` URLs seeding wrote whether or not
+   * it was seeded itself; `false` when nothing was added or it has no table.
+   * @internal
+   */
+  rebuildMediaSources(): boolean;
   /** Loads the opened package's separator notes for this replica. @internal */
   loadNoteSeparators(state: Uint8Array): void;
   /**

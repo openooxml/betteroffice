@@ -143,6 +143,23 @@ impl EditSessionCore {
         }
     }
 
+    /// Adds to this replica's media sources every part of its own media table
+    /// they lack, so it resolves the `data:` URLs seeding wrote whether or not
+    /// it was seeded itself; `false` when nothing was added or it has no table.
+    pub fn rebuild_media_sources(&self) -> bool {
+        let doc = self.engine.doc();
+        let Some(table) = doc.media_table() else {
+            return false;
+        };
+        let current = doc.media_sources();
+        let rebuilt = crate::media::sources_from_table(&current, &table);
+        if rebuilt == current {
+            return false;
+        }
+        doc.set_media_sources(rebuilt);
+        true
+    }
+
     /// Lays this replica's `data:` image sources out as the `media:{n}` tokens
     /// another replica seeded them from.
     pub fn load_media_sources(&self, json: &str) -> EngineResult<()> {
