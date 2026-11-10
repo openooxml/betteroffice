@@ -62,6 +62,8 @@ export function calculationSummary(samples) {
     channels: Object.fromEntries(CHANNELS.map(channel => [channel, {
       correct: rows.reduce((sum, row) => sum + row.calculations[channel].correct, 0),
       total: rows.reduce((sum, row) => sum + row.calculations[channel].total, 0),
+      fully_matching: rows.filter(row => row.calculations[channel].status === 'ok' &&
+        row.calculations[channel].correct === row.calculations[channel].total).length,
       mean_ms: common.length ? common.reduce((sum, row) =>
         sum + row.calculations[channel].elapsed_ms.reduce((a, b) => a + b, 0) / TRIALS, 0) / common.length : null,
     }])),

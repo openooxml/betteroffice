@@ -71,6 +71,47 @@ function score(samples, channel, revision) {
   };
 }
 
+const count = (value) => value.toLocaleString('en-US');
+const NOUNS = { docx: ['DOCX documents', 'pages'], pptx: ['PPTX presentations', 'slides'], xlsx: ['XLSX workbooks', 'printed pages'] };
+
+export function corpusSummary(plan) {
+  return Object.fromEntries(FORMATS.filter((format) => plan.formats.includes(format)).map((format) => {
+    const samples = plan.samples.filter((sample) => sample.format === format);
+    return [format, { documents: samples.length, pages: samples.reduce((sum, sample) => sum + sample.metadata.reference.pages, 0) }];
+  }));
+}
+
+function corpusNote(corpus) {
+  if (!corpus) return '';
+  const parts = FORMATS.filter((format) => corpus[format]).map((format) => {
+    const { documents, pages } = corpus[format];
+    if (!Number.isSafeInteger(documents) || !Number.isSafeInteger(pages) || documents < 1 || pages < documents)
+      throw new Error('Invalid corpus summary');
+    return `${count(documents)} ${NOUNS[format][0]} (${count(pages)} ${NOUNS[format][1]})`;
+  });
+  if (!parts.length) return '';
+  const list = parts.length > 1 ? `${parts.slice(0, -1).join(', ')} and ${parts.at(-1)}` : parts[0];
+  return `Corpus: ${list}, each with a Microsoft Office reference. Every page is rendered and scored against Office's PDF at 150 DPI with page-penalized SSIM, and each mean covers the documents that engine scored.${
+    corpus.xlsx ? ' XLSX is compared per Excel print range, one range per page, so its page counts always match and are not reported.' : ''}`;
+}
+
+function recalcNote(calculation, benchmark, version, short) {
+  const { workbooks, channels } = calculation;
+  if (!workbooks) return '';
+  const missing = benchmark.reference_coverage?.missing_reference?.length ?? 0;
+  const matching = (channel) => `${channels[channel].fully_matching}/${workbooks}`;
+  return `Recalc rows: ${count(workbooks)} workbooks with formulas (${count(channels.commit.total)} formula results), each recalculated from cleared caches and compared with the values Excel saved. Workbooks fully matching: BetterOffice ${version} ${matching('published')}, BetterOffice at ${short} ${matching('commit')}, LibreOffice ${benchmark.libreoffice_version} ${matching('libreoffice')}.${
+    missing ? ` ${count(missing)} further ${missing === 1 ? 'workbook has' : 'workbooks have'} no Excel calculation reference and ${missing === 1 ? 'is' : 'are'} not counted.` : ''}`;
+}
+
+function timingNote(sequential) {
+  const formats = FORMATS.filter((format) => sequential[format]);
+  if (!formats.length) return '';
+  const { sample_size: size, rounds } = sequential[formats[0]];
+  const timed = formats.map((format) => `${format.toUpperCase()} ${sequential[format].summary.common}`).join(', ');
+  return `Times: mean per document over a seeded sample of up to ${size} documents per format (timed by every engine: ${timed}), run one after another on one machine per format with the engine order rotated per document, ${rounds} rounds, each after a warm-up. Every run is a fresh process, so process start is included. DOCX and PPTX time a first-page render, XLSX a full recalculation and save.`;
+}
+
 function picture(url, alt) {
   return `<picture>
 <source media="(prefers-color-scheme: dark)" srcset="${url}?theme=dark">
@@ -130,9 +171,12 @@ export function renderSection(report, { privateCorpus = false } = {}) {
       xlsxFidelity.source_sha !== report.source_sha ||
       (report.xlsx_benchmark && report.xlsx_benchmark.libreoffice_version !== xlsxFidelity.libreoffice_version)))
     throw new Error('XLSX fidelity does not match the report revision or LibreOffice version');
+  const sequential = report.timing_benchmark ?? {};
   const timings = Object.fromEntries(['docx', 'pptx'].map(format =>
-    [format, report[`${format}_benchmark`] ? timingSummary(report.samples, format) : null]));
+    [format, privateCorpus ? sequential[format]?.summary ?? null
+      : report[`${format}_benchmark`] ? timingSummary(report.samples, format) : null]));
   const calculation = report.xlsx_benchmark ? calculationSummary(report.samples) : null;
+  const recalcTiming = privateCorpus ? sequential.xlsx?.summary ?? null : calculation;
   const headline = [];
   const perf = [];
   const table = (format, extraRows = []) => {
@@ -163,7 +207,10 @@ export function renderSection(report, { privateCorpus = false } = {}) {
       const channels = ['published', 'commit', 'libreoffice'].map(channel => calculation.channels[channel]);
       rows.push(['Recalc accuracy', ...channels.map(channel => channel.total
         ? `${(100 * channel.correct / channel.total).toFixed(2)}%` : '—')]);
-      rows.push(['Recalc time (avg)', ...channels.map(channel => channel.mean_ms === null ? '—' : `${channel.mean_ms.toFixed(0)} ms`)]);
+      if (recalcTiming) {
+        const times = ['published', 'commit', 'libreoffice'].map(channel => recalcTiming.channels[channel]);
+        rows.push(['Recalc time (avg)', ...times.map(channel => channel.mean_ms === null ? '—' : `${channel.mean_ms.toFixed(0)} ms`)]);
+      }
     }
     if (preservation) {
       if (preservation.published_version !== report.versions[format] ||
@@ -198,14 +245,24 @@ export function renderSection(report, { privateCorpus = false } = {}) {
     ['Exact page counts', pages],
     ['Absolute page error', pageError],
   ]);
-  const pptxTable = table('pptx');
+  const pptxTable = table('pptx', [
+    ['Exact page counts', pages],
+    ['Absolute page error', pageError],
+  ]);
   const xlsxTable = table('xlsx');
+  const versionOf = (format) => report.versions[format];
+  const notes = {
+    corpus: corpusNote(report.corpus),
+    recalc: calculation ? recalcNote(calculation, report.xlsx_benchmark, versionOf('xlsx'), short) : '',
+    timing: privateCorpus ? timingNote(sequential) : '',
+  };
+  const note = (text) => (text ? `\n\n${text}` : '');
   return `${BEGIN}
 ## Benchmarks
 
 *Generated by the [Benchmarks action](.github/workflows/visual-fidelity.yml); ${privateCorpus ? 'per-document results are not published' : 'per-document results are on the [benchmarks site](https://benchmarks.betteroffice.dev)'}.*
 
-${chart(headline, perf)}
+${notes.corpus ? `${notes.corpus}\n\n` : ''}${chart(headline, perf)}
 
 <details>
 <summary>Data</summary>
@@ -223,7 +280,7 @@ ${pptxTable}
 
 ### XLSX
 
-${xlsxTable}
+${xlsxTable}${note(notes.recalc)}${note(notes.timing)}
 
 </details>
 
@@ -258,6 +315,7 @@ export function aggregateReport(report) {
         libreoffice: fidelity ? side(score(samples, 'libreoffice', fidelity.libreoffice_version)) : null,
       },
     };
+    if (report.corpus?.[format]) entry.corpus = { ...report.corpus[format] };
     if (format !== 'xlsx' && report[`${format}_benchmark`]) {
       const timing = timingSummary(report.samples, format);
       entry.render_ms = Object.fromEntries(['published', 'commit', 'libreoffice'].map((channel) =>
@@ -266,8 +324,8 @@ export function aggregateReport(report) {
     if (format === 'xlsx' && report.xlsx_benchmark) {
       const calculation = calculationSummary(report.samples);
       entry.recalc = Object.fromEntries(['published', 'commit', 'libreoffice'].map((channel) => {
-        const { correct, total, mean_ms } = calculation.channels[channel];
-        return [channel, { correct, total, mean_ms: meanMs(mean_ms) }];
+        const { correct, total, fully_matching, mean_ms } = calculation.channels[channel];
+        return [channel, { correct, total, workbooks: calculation.workbooks, fully_matching, mean_ms: meanMs(mean_ms) }];
       }));
     }
     if (report.roundtrip_benchmark?.[format]) {
@@ -276,6 +334,20 @@ export function aggregateReport(report) {
         const { parsed, preserved, total } = summary[channel];
         return [channel, { parsed, preserved, total }];
       }));
+    }
+    const sequential = report.timing_benchmark?.[format];
+    if (sequential) {
+      const { summary } = sequential;
+      entry.timing = {
+        method: sequential.method, sample: summary.total, timed_by_every_engine: summary.common, rounds: sequential.rounds,
+        processors: sequential.runner.processors,
+        channels: Object.fromEntries(Object.entries(summary.channels).map(([channel, value]) => [channel, {
+          successful: value.successful, mean_ms: meanMs(value.mean_ms), median_ms: meanMs(value.median_ms),
+          round_means_ms: value.round_means_ms.map(meanMs),
+          round_spread: value.round_spread === null ? null : Number(value.round_spread.toFixed(4)),
+        }])),
+        ratio_to_libreoffice: summary.ratio_to_libreoffice,
+      };
     }
     entry.failures = failureCounts(report, format);
     formats[format] = entry;
