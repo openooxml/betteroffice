@@ -1742,7 +1742,9 @@ fn shift_cells(s: &mut Sheet, op: &Op) -> Vec<(CellRef, Cell)> {
 }
 
 /// The size of the run an insert at `at` lands inside: the entries either side of it, when they are
-/// equal. Columns inserted there take it, so a run (a whole-sheet one included) stays whole.
+/// equal. Columns inserted there take it, so a run (a whole-sheet one included) stays whole, with the
+/// left column's remembered hidden size. The decision reads sizes only: an authority that does not
+/// hold remembered hidden sizes replays the same op to the same sizes.
 fn run_around(
     sizes: &BTreeMap<u32, f64>,
     hidden: &BTreeMap<u32, f64>,
@@ -1750,9 +1752,7 @@ fn run_around(
 ) -> Option<(f64, Option<f64>)> {
     let before = at.checked_sub(1)?;
     let size = *sizes.get(&before)?;
-    let hidden_size = hidden.get(&before).copied();
-    (sizes.get(&at) == Some(&size) && hidden.get(&at).copied() == hidden_size)
-        .then_some((size, hidden_size))
+    (sizes.get(&at) == Some(&size)).then(|| (size, hidden.get(&before).copied()))
 }
 
 /// The sizes an insert would push past the grid's last row or column: formatting only, so they are

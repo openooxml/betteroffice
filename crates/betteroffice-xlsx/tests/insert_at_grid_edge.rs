@@ -320,3 +320,52 @@ fn a_column_inserted_inside_a_hidden_run_is_hidden() {
     workbook.undo(options()).unwrap();
     assert_eq!(workbook.save().unwrap(), before);
 }
+
+#[test]
+fn a_hidden_run_with_different_remembered_widths_replays_to_the_same_widths() {
+    let source = || {
+        model(|sheet| {
+            for (col, remembered) in [(3, 9.0), (4, 10.0)] {
+                sheet.col_widths.insert(col, 0.0);
+                sheet.hidden_col_widths.insert(col, remembered);
+            }
+        })
+    };
+    let insert = || {
+        vec![Op::InsertCols {
+            sheet: SheetId(0),
+            at: 4,
+            count: 1,
+        }]
+    };
+    for observed in [false, true] {
+        let mut workbook = Workbook::from_model(source()).unwrap();
+        let before = workbook.model().clone();
+        let _subscription = observed.then(|| workbook.observe_update_v1(|_| {}).unwrap());
+        workbook.apply_ops(insert(), options()).unwrap();
+        let sheet = &workbook.model().sheets[0];
+        assert_eq!(sheet.col_widths.get(&4), Some(&0.0), "observed={observed}");
+        assert_eq!(
+            sheet.hidden_col_widths.get(&4),
+            Some(&9.0),
+            "observed={observed}"
+        );
+        assert_eq!(
+            sheet.hidden_col_widths.get(&5),
+            Some(&10.0),
+            "observed={observed}"
+        );
+        let checkpoint = workbook
+            .recovery_checkpoint(0, None)
+            .unwrap_or_else(|error| panic!("observed={observed}: {error}"));
+        let (restored, _, _, _) = Workbook::restore_recovery_checkpoint(&checkpoint).unwrap();
+        let restored = &restored.model().sheets[0];
+        assert_eq!(restored.col_widths, sheet.col_widths, "observed={observed}");
+        assert_eq!(
+            restored.hidden_col_widths, sheet.hidden_col_widths,
+            "observed={observed}"
+        );
+        workbook.undo(options()).unwrap();
+        assert_eq!(workbook.model(), &before, "observed={observed}");
+    }
+}
