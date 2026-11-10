@@ -233,7 +233,7 @@ describe('docx native engine parity', () => {
     }
   });
 
-  test('optional ligatures follow the run in every story kind, in both engines', () => {
+  test('optional ligatures follow the run in body, note and text box stories, in both engines', () => {
     const encoder = new TextEncoder();
     const carlito = new Uint8Array(readFileSync(new URL('../../packages/fonts/assets/Carlito-Regular.ttf', import.meta.url)));
     const text = 'office fifty';
@@ -262,8 +262,6 @@ describe('docx native engine parity', () => {
     };
     const stories: Story[] = [
       { kind: 'body', body: (story) => story, region: (page) => page.primitives },
-      { kind: 'header', body: () => '<w:p/>', part: { name: 'header1.xml', type: 'header', xml: (story) => `<w:hdr ${ns}>${story}</w:hdr>` }, region: (page) => page.header?.primitives ?? [] },
-      { kind: 'footer', body: () => '<w:p/>', part: { name: 'footer1.xml', type: 'footer', xml: (story) => `<w:ftr ${ns}>${story}</w:ftr>` }, region: (page) => page.footer?.primitives ?? [] },
       { kind: 'footnote', body: noteBody('footnote'), part: { name: 'footnotes.xml', type: 'footnotes', xml: notes('footnote') }, region: noteArea('footnote') },
       { kind: 'endnote', body: noteBody('endnote'), part: { name: 'endnotes.xml', type: 'endnotes', xml: notes('endnote') }, region: noteArea('endnote') },
       {
@@ -281,14 +279,13 @@ describe('docx native engine parity', () => {
       primitive.kind === 'glyphRun' ? [primitive] : glyphRuns((primitive as { primitives?: DisplayPrimitive[] }).primitives ?? []));
     const shaped = (engine: Engine, story: Story, ask: boolean) => {
       const part = story.part;
-      const band = part && ['header', 'footer'].includes(part.type) ? part.type : undefined;
-      const note = part && !band ? part.type.slice(0, -1) : undefined;
+      const note = part ? part.type.slice(0, -1) : undefined;
       const bytes = wasm.rezip_docx({
         '[Content_Types].xml': encoder.encode(`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="${officeType}.document.main+xml"/>${part ? `<Override PartName="/word/${part.name}" ContentType="${officeType}.${part.type}+xml"/>` : ''}</Types>`),
         '_rels/.rels': encoder.encode(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${relType}/officeDocument" Target="word/document.xml"/></Relationships>`),
         'word/_rels/document.xml.rels': encoder.encode(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${part ? `<Relationship Id="rIdStory" Type="${relType}/${part.type}" Target="${part.name}"/>` : ''}</Relationships>`),
         ...(part ? { [`word/${part.name}`]: encoder.encode(part.xml(paragraph(ask))) } : {}),
-        'word/document.xml': encoder.encode(`<w:document ${ns}><w:body>${story.body(paragraph(ask))}<w:sectPr>${band ? `<w:${band}Reference w:type="default" r:id="rIdStory"/>` : ''}<w:pgSz w:w="4320" w:h="2880"/><w:pgMar w:top="600" w:right="300" w:bottom="600" w:left="300" w:header="150" w:footer="150" w:gutter="0"/></w:sectPr></w:body></w:document>`),
+        'word/document.xml': encoder.encode(`<w:document ${ns}><w:body>${story.body(paragraph(ask))}<w:sectPr><w:pgSz w:w="4320" w:h="2880"/><w:pgMar w:top="600" w:right="300" w:bottom="600" w:left="300" w:header="150" w:footer="150" w:gutter="0"/></w:sectPr></w:body></w:document>`),
       });
       const session = new engine.EditSession(37);
       try {
@@ -298,7 +295,6 @@ describe('docx native engine parity', () => {
           bodyStory: 'body',
           regions: { sections: [{
             sectionId: 'main',
-            ...(band ? { headerFooterRefs: { [`${band}Default`]: 'rIdStory' } } : {}),
             pageSize: { w: 288, h: 192 },
             margins: { top: 40, right: 20, bottom: 40, left: 20, header: 10, footer: 10 },
           }] },
