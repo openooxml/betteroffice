@@ -3098,12 +3098,13 @@ impl Workbook {
                 },
                 faces,
             ),
-            crate::PngTarget::UsedRange { sheet } => self.render_sheet(
+            crate::PngTarget::UsedRange { sheet } => self.render_sheet_with_faces(
                 sheet,
                 &RenderOptions {
                     range: None,
                     ..options.clone()
                 },
+                faces,
             ),
         }
     }

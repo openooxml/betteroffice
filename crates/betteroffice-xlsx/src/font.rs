@@ -236,7 +236,7 @@ pub(crate) fn supplied_fonts(
         else {
             continue;
         };
-        if !seen.insert((family.trim().to_lowercase(), *bold, *italic)) {
+        if !seen.insert((family.trim().to_lowercase(), *bold, *italic, *chart)) {
             continue;
         }
         if let Some(face) = suppliable_family(family, *chart)
@@ -333,6 +333,39 @@ mod tests {
         );
         model.sheets.push(sheet);
         Workbook::from_model(model).unwrap().save().unwrap()
+    }
+
+    #[test]
+    fn every_png_target_paints_with_the_supplied_faces() {
+        let workbook = Workbook::open(&fixture()).unwrap();
+        let faces = [PngFontFace {
+            family: "Calibri",
+            bold: false,
+            italic: false,
+            bytes: &[1, 2, 3],
+        }];
+        let targets = [
+            crate::PngTarget::Viewport {
+                sheet: SheetId(0),
+                viewport: viewport(),
+            },
+            crate::PngTarget::Range {
+                sheet: SheetId(0),
+                range: crate::CellRange::new(CellRef::new(0, 0), CellRef::new(0, 0)),
+            },
+            crate::PngTarget::UsedRange { sheet: SheetId(0) },
+        ];
+        for target in targets {
+            let result = workbook.render_png_with_faces(
+                target.clone(),
+                &crate::RenderOptions::default(),
+                Some(&faces),
+            );
+            assert!(
+                matches!(&result, Err(Error::FontUnavailable { family }) if family == "Calibri"),
+                "{target:?}: {result:?}"
+            );
+        }
     }
 
     fn viewport() -> Viewport {
