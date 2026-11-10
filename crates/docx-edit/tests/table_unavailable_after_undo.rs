@@ -259,13 +259,88 @@ fn undos_in_synced_order_keep_the_table() {
         let run = run(case, true);
         for (name, engine) in [("A", &run.a), ("B", &run.b)] {
             assert_eq!(keys(engine), [true; 3], "{case} {name}");
-            if case == "S1" {
-                // The split's undo removes a cell story the other replica's row still names; a
-                // table cell without its story is a separate fix.
+            if let Err(error) = engine.doc().set_column_width(&ctx(), &at(0, 0), 2500.0) {
+                assert_ne!(format!("{error:?}"), "TableUnavailable", "{case} {name}");
+            }
+            if case != "S2" {
+                // The undone split or row leaves a cell story the other replica's rows still
+                // name; a table cell without its story is a separate fix.
                 continue;
             }
             assert!(laid_out_text(engine, &run.request).contains("First cell"));
             engine.doc().insert_row(&ctx(), &at(0, 0), true).unwrap();
         }
+    }
+}
+
+/// Display starts of the body's paragraphs as the lowering gives them and as the geometry outline
+/// gives them.
+fn paragraph_starts(engine: &EngineSession) -> (Vec<f64>, Vec<f64>) {
+    let lowered = yrs_doc_to_layout_blocks(engine.doc(), "body", &RenderEnv::default())
+        .unwrap()
+        .iter()
+        .filter_map(|block| match block {
+            docx_layout::types::LayoutBlock::Paragraph(paragraph) => paragraph.pm_start,
+            _ => None,
+        })
+        .collect();
+    let GeometryRead::Value(outline) = engine.doc().geometry_position_outline("body") else {
+        panic!("no geometry outline");
+    };
+    let outlined = serde_json::to_value(&outline["body"]).unwrap()["paragraphs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|paragraph| paragraph["displayStart"].as_f64().unwrap())
+        .collect();
+    (lowered, outlined)
+}
+
+#[test]
+fn a_table_that_lost_only_its_properties_takes_two_units_in_layout_and_geometry_alike() {
+    let (origin, request) = fixture::laid_out(&fixture::with_body(&body()), 100);
+    let state = origin.doc().encode_state_as_update_v1();
+    let a = joined(&state, 61);
+    let b = joined(&state, 62);
+    let mut undo_a = a.doc().undo_manager();
+    let mut undo_b = b.doc().undo_manager();
+    let patch = |key: &str, value: yrs::Any| {
+        std::collections::HashMap::from([(key.to_owned(), value)])
+    };
+    a.doc()
+        .set_table_properties(&ctx(), &table(), &patch("width", yrs::Any::from(4000.0)))
+        .unwrap();
+    exchange(&a, &b);
+    b.doc()
+        .set_table_properties(
+            &ctx(),
+            &table(),
+            &patch("justification", yrs::Any::from("center")),
+        )
+        .unwrap();
+    assert!(undo_a.undo());
+    exchange(&a, &b);
+    assert!(undo_b.undo());
+    exchange(&a, &b);
+    for (name, engine) in [("A", &a), ("B", &b)] {
+        assert_eq!(keys(engine), [false, true, true], "{name}: only tblPr is gone");
+        let text = laid_out_text(engine, &request);
+        assert!(
+            text.contains("After the table") && !text.contains("First cell"),
+            "{name}"
+        );
+        let (lowered, outlined) = paragraph_starts(engine);
+        assert_eq!(lowered.len(), outlined.len(), "{name}");
+        assert!(lowered.len() >= 2, "{name}");
+        assert_eq!(
+            lowered[1] - lowered[0],
+            outlined[1] - outlined[0],
+            "{name}: layout and geometry agree after the table"
+        );
+        let error = engine
+            .doc()
+            .insert_row(&ctx(), &at(0, 0), true)
+            .unwrap_err();
+        assert_eq!(format!("{error:?}"), "TableUnavailable", "{name}");
     }
 }

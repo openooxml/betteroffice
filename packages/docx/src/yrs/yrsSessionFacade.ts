@@ -31,7 +31,6 @@ import type {
   YrsSplitReceipt,
   YrsStoryRange,
   YrsStorySegment,
-  YrsTableLoc,
   YrsTableRange,
   YrsTableReceipt,
   YrsTableFragmentReceipt,
@@ -1789,7 +1788,6 @@ export function wrapSession(
 
   registerSessionInternals(facade, {
     headerFooterAliases,
-    unavailableTables: () => JSON.parse(session.unavailable_tables()) as YrsTableLoc[],
     mediaSources: () => session.media_sources_json(),
     materializedSource,
     setHeaderFooterAliases: (json) => mutate(() => session.set_header_footer_aliases(json)),

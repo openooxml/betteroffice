@@ -486,7 +486,8 @@ export class YrsPositionProjection {
     start: number,
     depth: number
   ): YrsProjectedTable {
-    const rows = Array.isArray(segment.payload.rows)
+    const unavailable = isUnavailableTablePayload(segment.payload);
+    const rows = !unavailable && Array.isArray(segment.payload.rows)
       ? (segment.payload.rows as Array<Record<string, unknown>>)
       : [];
     const occupied: boolean[][] = Array.from({ length: rows.length }, () => []);
@@ -545,7 +546,7 @@ export class YrsPositionProjection {
         : [],
       rowCount: rows.length,
       cells,
-      ...(isUnavailableTablePayload(segment.payload) ? { unavailable: true as const } : {}),
+      ...(unavailable ? { unavailable: true as const } : {}),
     };
   }
 }

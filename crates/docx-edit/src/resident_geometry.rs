@@ -270,7 +270,15 @@ impl ResidentGeometryIndex {
                         let mut size = 0;
                         let mut occupied: HashMap<usize, HashSet<usize>> = HashMap::new();
                         let mut cells = Vec::new();
-                        for (row, data) in array(payload.get("rows")).iter().enumerate() {
+                        let complete = ["tblPr", "grid", "rows"]
+                            .iter()
+                            .all(|key| payload.contains_key(*key));
+                        let rows: &[Any] = if complete {
+                            array(payload.get("rows"))
+                        } else {
+                            &[]
+                        };
+                        for (row, data) in rows.iter().enumerate() {
                             let mut row_size = 0;
                             let mut column = 0;
                             for (cell_index, data) in

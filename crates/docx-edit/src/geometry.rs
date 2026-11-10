@@ -231,6 +231,9 @@ fn build_table<T: ReadTxn>(
     if start > MAX_POSITION {
         return Err(());
     }
+    if crate::unavailable_tables::is_unavailable(map, txn) {
+        return Ok(2);
+    }
     let rows = plain_value(map, txn, "rows");
     let rows = match rows.as_ref() {
         Some(Any::Array(rows)) => rows.as_ref(),

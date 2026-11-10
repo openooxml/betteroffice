@@ -1,7 +1,7 @@
 /** Engine operations the package runs on sessions it creates itself; not public API. */
 
 import type { editorSaveKeys, noteSeparatorKeys } from './editorSaveKeys';
-import type { YrsSession, YrsTableLoc } from './index';
+import type { YrsSession } from './index';
 import type { Document } from '../types/document';
 
 export interface YrsSessionInternals {
@@ -19,8 +19,6 @@ export interface YrsSessionInternals {
   finishComparedDocx(bytes: Uint8Array): string;
   /** The final comparison result when saving failed; bridge JSON. */
   failComparedDocx(message: string): string;
-  /** Tables that lost their payload to a concurrent undo; empty when none. */
-  unavailableTables(): YrsTableLoc[];
 }
 
 const registry = new WeakMap<object, YrsSessionInternals>();
@@ -78,9 +76,4 @@ export function routedHeaderFooterRIds(
 /** The `data:` image sources the session seeded, as its media tokens. @internal */
 export function sessionMediaSources(session: YrsSession): string {
   return registry.get(session)?.mediaSources() ?? '';
-}
-
-/** Tables of the session that lost their payload to a concurrent undo; empty when none. @internal */
-export function sessionUnavailableTables(session: object): YrsTableLoc[] {
-  return registry.get(session)?.unavailableTables() ?? [];
 }

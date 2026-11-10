@@ -21,12 +21,17 @@ const cell = (text: string) => `<w:tc><w:tcPr><w:tcW w:w="4680" w:type="dxa"/></
 const CASES = ['S1', 'S2', 'S3'] as const;
 type Case = (typeof CASES)[number];
 
-function docx(): Uint8Array {
+const table = (...cells: string[]) =>
+  `<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid>${cells.map(() => '<w:gridCol w:w="4680"/>').join('')}</w:tblGrid><w:tr>${cells.join('')}</w:tr></w:tbl>`;
+const TABLE_BODY = `${paragraph('Before')}${table(cell('First'), cell('Second'))}${paragraph('After')}`;
+const NESTED_BODY = `${paragraph('Before')}${table(`<w:tc><w:tcPr><w:tcW w:w="4680" w:type="dxa"/></w:tcPr>${table(cell('Inner'), cell('Other'))}${paragraph('Outer')}</w:tc>`)}${paragraph('After')}`;
+
+function docx(body = TABLE_BODY): Uint8Array {
   const parts: PartsMap = new Map();
   parts.set('[Content_Types].xml', toBytes(CONTENT_TYPES));
   parts.set('_rels/.rels', toBytes(RELS));
   parts.set('word/document.xml', toBytes(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${paragraph('Before')}<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="4680"/><w:gridCol w:w="4680"/></w:tblGrid><w:tr>${cell('First')}${cell('Second')}</w:tr></w:tbl>${paragraph('After')}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>`));
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>`));
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
@@ -235,4 +240,113 @@ describe('a table that crossing undos emptied', () => {
       }
     });
   }
+});
+
+async function openPair(source: Uint8Array) {
+  const a = await session(61);
+  const b = await session(62);
+  a.seedFromDocx(source);
+  b.openDocx(source, false);
+  b.applyUpdate(a.encodeState());
+  return { a, b };
+}
+
+/** A changes, B changes on top, A undoes before B's change arrives, then B undoes. */
+function crossing(a: YrsSession, b: YrsSession, first: (target: YrsSession) => unknown, second: (target: YrsSession) => unknown): void {
+  first(a);
+  exchange(a, b);
+  second(b);
+  expect(a.undo()).toBe(true);
+  exchange(a, b);
+  expect(b.undo()).toBe(true);
+  exchange(a, b);
+}
+
+/** Display units from the end of the paragraph before the body's first table to the start of the one after it. */
+function tableSpan(target: YrsSession): number {
+  const [before, after] = target.paragraphs('body');
+  const projection = createYrsPositionProjection(target, 'body')!;
+  const end = projection.positionForLoc({ story: 'body', paraId: before!.paraId, offset: before!.text.length })!;
+  return projection.positionForLoc({ story: 'body', paraId: after!.paraId, offset: 0 })! - end;
+}
+
+describe('every save scans the reachable tables', () => {
+  it('a session without registered internals still refuses', async () => {
+    const { a } = await crossingUndos('S3', false);
+    const proxy = new Proxy(a, {}) as YrsSession;
+    let written: unknown = 'not attempted';
+    expectCodedRefusal(await caughtAsync(async () => {
+      written = await saveEditorDocument(proxy, a.materializeDocx()!, []);
+    }));
+    expectCodedRefusal(await caughtAsync(async () => {
+      written = await saveYrsDocx(proxy, { updateModifiedDate: false });
+    }));
+    expect(written).toBe('not attempted');
+  });
+
+  it('undoing the deletion of an unavailable table blocks saving again', async () => {
+    const { a } = await crossingUndos('S3', false);
+    a.deleteTable({ story: 'body', tableIndex: 0 });
+    expect(await savedXml(a)).not.toContain('<w:tbl>');
+    expect(a.undo()).toBe(true);
+    expect(payloadKeys(a)).toEqual([]);
+    expectCodedRefusal(await caughtAsync(() => saveYrsDocx(a, { updateModifiedDate: false })));
+  });
+
+  it('a table that lost only its properties takes the same two display units and refuses alike', async () => {
+    const { a, b } = await openPair(docx());
+    const full = await crossingUndos('S3', false);
+    const unavailableSpan = tableSpan(full.a);
+    crossing(a, b,
+      (target) => target.setTableProperties({ story: 'body', tableIndex: 0 }, { width: 4000, widthType: 'dxa' }),
+      (target) => target.setTableProperties({ story: 'body', tableIndex: 0 }, { justification: 'center' }));
+    for (const target of [a, b]) {
+      expect(payloadKeys(target)).toEqual(['grid', 'rows']);
+      const [projected] = createYrsPositionProjection(target, 'body')!.allTables();
+      expect(projected).toMatchObject({ unavailable: true, nodeSize: 2, rowCount: 0, cells: [] });
+      expect(tableSpan(target)).toBe(unavailableSpan);
+      expectCodedRefusal(caught(() => target.insertRow(at(0, 0), 'below')));
+      expectCodedRefusal(await caughtAsync(() => saveYrsDocx(target, { updateModifiedDate: false })));
+    }
+  });
+
+  it('a nested unavailable table blocks saving only while a complete table reaches it', async () => {
+    const source = docx(NESTED_BODY);
+    const run = async () => {
+      const { a, b } = await openPair(source);
+      const outerCell = (a.tablePayload('body', 0)!.rows as Array<{ cells: Array<{ story: string }> }>)[0]!.cells[0]!.story;
+      const inner = (row: number, column: number): YrsCellLoc => ({ story: outerCell, tableIndex: 0, row, column });
+      crossing(a, b, (target) => target.insertRow(inner(0, 0), 'below'), (target) => target.setColumnWidth(inner(0, 0), 2000));
+      crossing(a, b, (target) => target.insertRow(at(0, 0), 'below'), (target) => target.setColumnWidth(at(0, 0), 2000));
+      expect(payloadKeys(a)).toEqual([]);
+      return { a, b, outerCell };
+    };
+
+    const deleted = await run();
+    expectCodedRefusal(await caughtAsync(() => saveYrsDocx(deleted.a, { updateModifiedDate: false })));
+    deleted.a.deleteTable({ story: 'body', tableIndex: 0 });
+    exchange(deleted.a, deleted.b);
+    for (const target of [deleted.a, deleted.b]) {
+      const xml = await savedXml(target);
+      expect(xml).not.toContain('<w:tbl>');
+      expect(text(xml)).toContain('After');
+    }
+
+    const redone = await run();
+    expect(redone.b.redo()).toBe(true);
+    exchange(redone.a, redone.b);
+    for (const target of [redone.a, redone.b]) {
+      expect(payloadKeys(target)).toEqual(['tblPr', 'grid', 'rows']);
+      const inner = target.tablePayload(redone.outerCell, 0) ?? {};
+      expect(['tblPr', 'grid', 'rows'].filter((key) => key in inner)).toEqual([]);
+      expectCodedRefusal(await caughtAsync(() => saveYrsDocx(target, { updateModifiedDate: false })));
+    }
+    redone.a.deleteTable({ story: redone.outerCell, tableIndex: 0 });
+    exchange(redone.a, redone.b);
+    for (const target of [redone.a, redone.b]) {
+      const xml = await savedXml(target);
+      expect(count(xml, /<w:tbl>/g)).toBe(1);
+      expect(text(xml)).toContain('Outer');
+    }
+  });
 });
