@@ -4,4 +4,4 @@
 '@betteroffice/rust-crates': patch
 ---
 
-Page and column breaks next to an edited paragraph are kept on save.
+A page or column break that an edit moves to the start of the next paragraph is now saved there instead of being dropped, in paragraphs that start with a plain run.
