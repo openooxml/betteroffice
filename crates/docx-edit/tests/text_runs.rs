@@ -13,7 +13,7 @@ const NS: &str = concat!(
     r#"xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml""#
 );
 
-const STYLES: &str = r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:rPr><w:b/><w:sz w:val="32"/></w:rPr></w:style>"#;
+const STYLES: &str = r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:rPr><w:b/><w:sz w:val="32"/></w:rPr></w:style><w:style w:type="character" w:styleId="Strong"><w:name w:val="Strong"/><w:rPr><w:b/></w:rPr></w:style>"#;
 
 fn package(body: &str) -> Vec<u8> {
     let content_types = r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>"#;
@@ -37,12 +37,14 @@ fn package(body: &str) -> Vec<u8> {
     .unwrap()
 }
 
-/// `00000001` plain, `00000002` directly bold, `00000003` a bold Heading1.
+/// `00000001` plain, `00000002` directly bold, `00000003` a bold Heading1, `00000004` a run in
+/// the bold character style `Strong`.
 fn open() -> EditingDoc {
     let body = concat!(
         r#"<w:p w14:paraId="00000001"><w:r><w:t>Plain text</w:t></w:r></w:p>"#,
         r#"<w:p w14:paraId="00000002"><w:r><w:rPr><w:b/></w:rPr><w:t>Bold words</w:t></w:r></w:p>"#,
         r#"<w:p w14:paraId="00000003"><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Title</w:t></w:r></w:p>"#,
+        r#"<w:p w14:paraId="00000004"><w:r><w:rPr><w:rStyle w:val="Strong"/></w:rPr><w:t>Strong run</w:t></w:r></w:p>"#,
     );
     let doc = EditingDoc::new(7001);
     seed_from_docx(&doc, &package(body)).unwrap();
@@ -493,4 +495,21 @@ fn a_peer_converges_on_formatted_runs() {
         peer.encode_state_as_update_v1(),
         doc.encode_state_as_update_v1()
     );
+}
+
+#[test]
+fn false_turns_a_mark_off_whether_it_is_direct_or_from_a_style() {
+    for id in ["00000002", "00000003", "00000004"] {
+        let doc = open();
+        apply(
+            &doc,
+            &UndoSession::new(),
+            json!([{"op": "insertText", "target": paragraph(id), "at": "end", "runs": [
+                {"text": " kept"},
+                {"text": " off", "marks": {"bold": false}}
+            ]}]),
+        );
+        assert!(active(&marks(&doc, " kept"), "bold"), "{id}");
+        assert!(!active(&marks(&doc, " off"), "bold"), "{id}");
+    }
 }

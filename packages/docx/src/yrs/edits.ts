@@ -87,8 +87,9 @@ export interface DocxEditSuggestion {
 
 /**
  * Character formatting for one inserted run, written over the formatting plain text gets at the
- * same place. `false`, `'none'` and `'baseline'` remove the run's own value, so the paragraph or
- * character style shows through. An unknown key or unsupported value refuses the step.
+ * same place; an absent key keeps that formatting. `false`, `'none'`, `'noStrike'` and `'baseline'`
+ * turn the mark off, also where a paragraph or character style turns it on. An unknown key or
+ * unsupported value refuses the step.
  */
 export interface DocxTextMarks {
   bold?: boolean;

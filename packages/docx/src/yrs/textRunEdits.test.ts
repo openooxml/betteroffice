@@ -58,10 +58,23 @@ describe('formatted runs in host edits', () => {
     }
   });
 
-  test('false removes the inherited direct value', async () => {
-    const { xml } = await editSaveReopen(yrs, [insert('00000002', [{ text: ' kept' }, { text: ' off', marks: { bold: false } }])]);
-    expect(holdsProperty(savedRunProperties(xml, ' kept'), 'w:b', {})).toBe(true);
-    expect(savedRunProperties(xml, ' off') ?? '').not.toContain('<w:b');
+  test('false turns bold off whether it is direct or comes from a paragraph or character style', async () => {
+    const cases = [
+      { paraId: '00000002', off: null },
+      { paraId: '00000003', off: '<w:b w:val="0"/>' },
+      { paraId: '00000004', off: '<w:b w:val="0"/>' },
+    ];
+    for (const { paraId, off } of cases) {
+      const { xml, resavedXml, reopened } = await editSaveReopen(yrs, [insert(paraId, [{ text: ' kept' }, { text: ' off', marks: { bold: false } }])]);
+      for (const document of [xml, resavedXml]) {
+        const properties = savedRunProperties(document, ' off') ?? '';
+        if (off) expect(properties, paraId).toContain(off);
+        else expect(properties, paraId).not.toContain('<w:b');
+      }
+      expect(resavedXml, paraId).toBe(xml);
+      const segment = reopened.find((entry) => entry.kind === 'text' && entry.text.includes(' off'));
+      expect(segment && segment.kind === 'text' && Boolean(segment.attributes.bold), paraId).toBe(false);
+    }
   });
 
   test('adjacent runs with equal marks save as one run', async () => {
