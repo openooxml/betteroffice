@@ -157,6 +157,7 @@ export const editsession_prime_save_seed_states_slice: (a: number, b: number, c:
 export const editsession_proposal_revision_ranges_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_read_paragraphs_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_read_stories_json: (a: number, b: number, c: number) => [number, number, number, number];
+export const editsession_rebuild_media_sources: (a: number) => number;
 export const editsession_record_saved_paragraph_ids: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_redo: (a: number) => number;
 export const editsession_register_measure_font: (a: number, b: number, c: number) => [number, number, number];
