@@ -166,6 +166,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
   let selectionIdentity = 'null';
   let resolvedSelection = 'null';
   const selectionIdentities = new WeakMap<DocxPluginSnapshot, string>();
+  const resolvedSelectionKeys = new WeakMap<DocxPluginSnapshot, string>();
   let settledSelection: string | null = null;
   let settleEvent: Extract<DocxPluginEvent, { type: 'selection-settle' }> | null = null;
   let settleDelivered = false;
@@ -289,6 +290,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
         layout: state.layout,
       };
       selectionIdentities.set(snapshot, selectionIdentity);
+      resolvedSelectionKeys.set(snapshot, resolvedSelection);
       return snapshot;
     },
     currentVersion: () => runtime.generation() === null ? null : session ? readSessionVersion(session) : state.version,
@@ -306,7 +308,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
     eventCurrent: (event, snapshot) => {
       if (event.type !== 'selection-settle') return true;
       const current = event === settleEvent && event.version === snapshot.version &&
-        settledSelection === selectionIdentities.get(snapshot) &&
+        settledSelection === resolvedSelectionKeys.get(snapshot) &&
         JSON.stringify(event.selection) === JSON.stringify(snapshot.selection);
       if (event === settleEvent) {
         if (current) settleDelivered = true;

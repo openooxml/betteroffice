@@ -28,7 +28,11 @@ async function setup(viewerSelection: boolean, initialRange: { from: number; to:
     getProposals: () => ({ version: 'v1', previewVersion: 0, proposals: [] }),
     onUpdate: () => () => {},
     onProposalChange: () => () => {},
-    selection: () => { shellReads += 1; return { head: { story } }; },
+    selection: () => {
+      shellReads += 1;
+      return { anchor: { story, paraId: '00000001', offset: 0 }, head: { story, paraId: '00000001', offset: 0 } };
+    },
+    locateParagraph: () => ({ start: 0 }),
   } as unknown as YrsSession;
   const queries = {
     displayList: { pages: [] },

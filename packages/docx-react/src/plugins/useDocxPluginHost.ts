@@ -141,6 +141,14 @@ function layoutComplete(editor: PagedEditorRef | null, queries: DisplayListQueri
   );
 }
 
+function readSelection(session: YrsSession | null | undefined) {
+  const selection = session?.selection();
+  return selection && [selection.anchor, selection.head].every((point) =>
+    typeof point?.story === 'string' && typeof point.paraId === 'string' &&
+    Number.isInteger(point.offset) && point.offset >= 0
+  ) ? selection : null;
+}
+
 /** Owns the plugin host of one `DocxEditor` and binds it to the editor's authority. */
 export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPluginHostBinding {
   const latest = useRef(options);
@@ -328,14 +336,13 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
     const session = editor?.getYrsSession() ?? latest.current.session;
     const range = editor?.getSelectionRange() ?? null;
     const layout = layoutRef.current;
-    const live = session?.selection();
-    const story = live?.head.story ?? 'body';
+    const live = readSelection(session);
     const selection = {
-      formatting: formattingRef.current,
+      formatting: live ? formattingRef.current : null,
       displayRange:
-        range && layout ? { story, from: range.from, to: range.to, layoutId: layout.id } : null,
+        live && range && layout ? { story: live.head.story, from: range.from, to: range.to, layoutId: layout.id } : null,
     };
-    const encoded = session?.encodeSelection?.();
+    const encoded = live ? session?.encodeSelection?.() : null;
     const offset = (point: NonNullable<typeof live>['anchor']) =>
       session!.locateParagraph(point.story, point.paraId).start + point.offset;
     const anchor = live ? offset(live.anchor) : 0;
@@ -372,7 +379,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
         if (!generation || host.generation() !== generation) return false;
         const selection = refreshSelection();
         if (selection.displayRange !== null || latest.current.viewerSelection === true) return true;
-        const sticky = (latest.current.pagedEditorRef.current?.getYrsSession() ?? latest.current.session)?.selection();
+        const sticky = readSelection(latest.current.pagedEditorRef.current?.getYrsSession() ?? latest.current.session);
         return !sticky || anchorDisplayRoot(sticky.head.story) === null;
       },
       onUnsettle: () => { generation = host.generation(); host.selectionUnsettled(generation); },
@@ -579,7 +586,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
           return typeof head === 'number' ? { ...range, focus: head } : range;
         }
         const editor = latest.current.pagedEditorRef.current;
-        const head = editor?.getYrsSession()?.selection()?.head;
+        const head = readSelection(editor?.getYrsSession())?.head;
         const focus = head && editor?.yrsLocToDisplayPosition(head);
         return range && head?.story === range.story && typeof focus === 'number' &&
           focus >= Math.min(range.from, range.to) && focus <= Math.max(range.from, range.to)
@@ -587,7 +594,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
       },
       host.subscribe,
       () => latest.current.viewerSelection || latest.current.viewerDocumentRead ? null
-        : (latest.current.pagedEditorRef.current?.getYrsSession() ?? latest.current.session)?.selection()?.head.story ?? null
+        : readSelection(latest.current.pagedEditorRef.current?.getYrsSession() ?? latest.current.session)?.head.story ?? null
     );
     const resolveAnchor = created.getAnchorGeometry;
     created.getAnchorGeometry = (target) => {
