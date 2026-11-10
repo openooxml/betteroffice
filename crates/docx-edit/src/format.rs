@@ -1419,9 +1419,7 @@ impl EditingDoc {
         }
         let (_, children) = block_free_spans(&story, &txn, range.start, range.end, false);
         if paragraphs.len() != 1 || !children.is_empty() {
-            return Err(OpError::InvalidFormatValue(
-                "clear needs a range within one paragraph".to_owned(),
-            ));
+            return Err(OpError::ClearAcrossParagraphs);
         }
         let source = self.source_metadata();
         let mut pieces = Vec::new();

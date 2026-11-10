@@ -331,7 +331,8 @@ export interface YrsInlineFormatDelta {
    * `formatText` step's `clear` does: each cleared key takes the paragraph style's and the run's
    * character style's value, and is removed where no style supplies it. `'all'` clears every
    * character formatting mark and also removes the character style; the paragraph style stays.
-   * With `clear`, the range must lie within one paragraph.
+   * With `clear`, the range must lie within one paragraph; otherwise the call throws an error whose
+   * `code` is `clear-across-paragraphs` and changes nothing.
    *
    * @example
    * session.formatRange(range, { clear: ['bold', 'fontSizePt'], italic: true });

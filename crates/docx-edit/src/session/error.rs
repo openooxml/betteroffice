@@ -11,6 +11,7 @@ pub enum EngineErrorKind {
     Message,
     PeerMetadata { code: &'static str },
     SuggestedFormattingOverContainer,
+    ClearAcrossParagraphs,
 }
 
 pub type EngineResult<T> = Result<T, EngineError>;
@@ -30,6 +31,7 @@ impl From<crate::OpError> for EngineError {
             crate::OpError::SuggestedFormattingOverContainer => {
                 EngineErrorKind::SuggestedFormattingOverContainer
             }
+            crate::OpError::ClearAcrossParagraphs => EngineErrorKind::ClearAcrossParagraphs,
             _ => EngineErrorKind::Message,
         };
         Self {

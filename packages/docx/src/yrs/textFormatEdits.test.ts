@@ -73,7 +73,13 @@ describe('formatText clear', () => {
       session.seedFromDocx(await textRunFixture());
       const before = session.encodeState();
       const across = { story: 'body', start: { paraId: '00000002', offset: 0 }, end: { paraId: '00000003', offset: 5 } };
-      expect(() => session.formatRange(across, { clear: ['bold'] })).toThrow();
+      let code: unknown;
+      try {
+        session.formatRange(across, { clear: ['bold'] });
+      } catch (error) {
+        code = (error as { code?: unknown }).code;
+      }
+      expect(code).toBe('clear-across-paragraphs');
       expect(session.encodeState()).toEqual(before);
       const within = { story: 'body', start: { paraId: '00000003', offset: 0 }, end: { paraId: '00000003', offset: 5 } };
       session.formatRange(within, { clear: 'all', italic: true });
