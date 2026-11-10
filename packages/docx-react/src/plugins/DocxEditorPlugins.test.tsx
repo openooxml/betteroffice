@@ -2459,6 +2459,82 @@ describe('DocxEditor plugins (in-thread engine)', () => {
     });
   }
 
+  test('focus-change admits the owner but refuses another granted plugin inside the owner\'s window', async () => {
+    let host!: pluginHosts.DocxPluginHost;
+    let access!: pluginHosts.DocxPluginHostAccess;
+    const createHost = pluginHosts.createDocxPluginHost;
+    const capture = spyOn(pluginHosts, 'createDocxPluginHost').mockImplementation((next) => {
+      access = next;
+      host = createHost(next);
+      return host;
+    });
+    let dispatching: Event | undefined;
+    let aActivationId = '';
+    let bActivationId = '';
+    let armed = false;
+    let own!: Promise<DocxPluginCommandResult>;
+    const other: unknown[] = [];
+    const otherGestures: boolean[][] = [];
+    let focusDocument = () => {};
+    const plugin = defineDocxPlugin({
+      id: 'event-gesture', createState: () => null,
+      panel: { title: 'Events', placement: 'left', render: ({ context }) => (
+        <button type="button" data-testid="event-gesture" onClick={(event) => {
+          event.stopPropagation();
+          armed = true;
+          focusDocument();
+          own = context.commands.execute('bold', null);
+        }}>Bold</button>
+      ) },
+    });
+    const peer = defineDocxPlugin({
+      id: 'other-activation', createState: () => null,
+      panel: { title: 'Other', placement: 'right', render: () => <output data-testid="other-activation" /> },
+      onEvent(context, event) {
+        if (!armed || event.type !== 'focus-change') return;
+        armed = false;
+        otherGestures.push([gestureFor(aActivationId), gestureFor(bActivationId)]);
+        void context.commands.execute('bold', null).then((result) => other.push(result));
+      },
+    });
+    let mounted!: Awaited<ReturnType<typeof mount>>;
+    try {
+      mounted = await mount({ plugins: [plugin, peer], pluginGrants: {
+        'event-gesture': { document: 'write', commands: ['bold'] },
+        'other-activation': { document: 'write', commands: ['bold'] },
+      } });
+    } finally {
+      capture.mockRestore();
+    }
+    const { ref, view } = mounted;
+    await selectInThreadFirstWord(ref);
+    await until(() => access.geometry() !== null);
+    focusDocument = () => ref.current!.focus();
+    const button = view.getByTestId('event-gesture');
+    await act(async () => { button.focus(); });
+    await host.notificationsIdle();
+    const marker = button.closest<HTMLElement>('[data-plugin-activation]')!;
+    aActivationId = marker.dataset.pluginActivation!;
+    bActivationId = view.getByTestId('other-activation')
+      .closest<HTMLElement>('[data-plugin-activation]')!.dataset.pluginActivation!;
+    const release = trackPluginGestures(marker,
+      (event) => { dispatching = event; return true; }, () => dispatching);
+    try {
+      await act(async () => {
+        fireEvent.click(button);
+        Object.defineProperty(dispatching!, 'eventPhase', { value: Event.BUBBLING_PHASE });
+        await own;
+        await host.notificationsIdle();
+      });
+      await until(() => other.length === 1);
+      expect(await own).toMatchObject({ ok: true, status: 'executed' });
+      expect(other[0]).toMatchObject({ ok: false, failure: { code: 'unsupported-policy' } });
+      expect(otherGestures).toEqual([[true, false]]);
+    } finally {
+      release();
+    }
+  });
+
   test('overlays and layout events re-anchor once the pages show a new zoom', async () => {
     const results: DocxAnchorGeometryResult[] = [];
     const events: (DocxAnchorGeometryResult | null)[] = [];
