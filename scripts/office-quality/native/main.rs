@@ -32,6 +32,7 @@ fn run() -> Result<()> {
     let engine = EngineSession::new(1);
     seed_from_docx(engine.doc(), &bytes)?;
     let mut request = region_request(&package);
+    whole_numbers_as_integers(&mut request);
     let requirements: Value =
         serde_json::from_str(&engine.layout_font_requirements_json(&request.to_string())?)?;
     let fonts = Fonts::load(Path::new(&args[2]), &requirements)?;
@@ -418,4 +419,18 @@ fn pick_face<'a>(faces: &'a [Value], family: &str, bold: bool, italic: bool) -> 
             })
         })
         .ok_or_else(|| format!("no bundled font for {family}").into())
+}
+
+fn whole_numbers_as_integers(value: &mut Value) {
+    match value {
+        Value::Number(number) if number.is_f64() => {
+            let float = number.as_f64().unwrap_or(0.5);
+            if float.fract() == 0.0 && float.abs() < 9.0e15 {
+                *value = json!(float as i64);
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(whole_numbers_as_integers),
+        Value::Object(map) => map.values_mut().for_each(whole_numbers_as_integers),
+        _ => {}
+    }
 }
