@@ -308,14 +308,14 @@ impl<F: PartialEq> ConvergenceInput<'_, F> {
         {
             return None;
         }
-        // A block's placement can depend on the block before it (a section
-        // mark on the page break ahead of it), so that block must be unchanged too.
-        let from = checkpoint.block_index.saturating_sub(1);
         let suffix_matches = match self.dirty {
             Some(dirty) => dirty
                 .last()
                 .is_none_or(|&last| last < checkpoint.block_index),
-            None => self.previous_fingerprints.get(from..) == self.next_fingerprints.get(from..),
+            None => {
+                self.previous_fingerprints.get(checkpoint.block_index..)
+                    == self.next_fingerprints.get(checkpoint.block_index..)
+            }
         };
         if !suffix_matches && !self.skippable {
             return None;
@@ -825,6 +825,9 @@ pub fn layout_document_incremental_ranges<F: PartialEq>(
                 .map(|(index, _)| index)
                 .collect()
         });
+    // A block's placement can depend on the block before it (a section mark on
+    // the page break ahead of it), so the block after each changed one is dirty
+    // too. With a changed block count no retained suffix lines up at all.
     let dirty: Option<Vec<usize>> = changed.as_ref().map(|changed| {
         changed
             .iter()
@@ -2802,6 +2805,11 @@ mod pagination_rule_tests {
             page_fragments(&incremental.layout),
             page_fragments(&full.layout),
             "{name}: incremental placement differs from a fresh one"
+        );
+        assert_eq!(
+            serde_json::to_string(&incremental.layout).unwrap(),
+            serde_json::to_string(&full.layout).unwrap(),
+            "{name}: incremental layout differs from a fresh one outside the fragments"
         );
         Some(incremental.placed_blocks)
     }

@@ -1649,6 +1649,26 @@ mod tests {
     }
 
     #[test]
+    fn a_resumed_checkpoint_keeps_the_continuous_section_frame() {
+        for (frame, started) in [(true, true), (true, false), (false, true)] {
+            let mut paginator = Paginator::new(
+                Size { w: 600.0, h: 600.0 },
+                margins(60.0, 80.0),
+                columns(),
+                None,
+            )
+            .unwrap();
+            paginator.continuous_horizontal_frame = frame;
+            paginator.section_started = started;
+            let geometry = paginator.snapshot_geometry();
+            let resumed = Paginator::resume_in_section(&geometry, 1, 0, None).unwrap();
+            assert_eq!(resumed.continuous_horizontal_frame, frame);
+            assert_eq!(resumed.section_started, started);
+            assert_eq!(resumed.snapshot_geometry(), geometry);
+        }
+    }
+
+    #[test]
     fn physical_section_change_refreshes_footer_bands_without_restarting_caller() {
         let initial = margins(60.0, 80.0);
         let next = PageMargins {
