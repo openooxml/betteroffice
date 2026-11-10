@@ -1432,6 +1432,7 @@ export const createResidentDocxCommandHooks: DocxCommandHooksFactory = (engine, 
       state.storedMarks = survived && storedMarks && state.selection && sameSelection({ anchor: state.selection.anchor, focus: state.selection.anchor }, state.selection)
         ? { ...storedMarks, story: state.selection.focus.story, paraId: state.selection.focus.paraId }
         : null;
+      return { cause: 'remote' };
     },
     selection: () => projected().selection,
     editState: () => projected().editState,

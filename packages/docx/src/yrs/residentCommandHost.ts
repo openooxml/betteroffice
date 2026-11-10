@@ -34,6 +34,7 @@ export function createResidentCommandHost(options: DocxCommandHostOptions): Docx
   let selection: DocxCommandSelection | null | undefined;
   let editState: DocxEditState | undefined;
   let selectionOnly = false;
+  let selectionCause: 'remote' | undefined;
   const selections = new Map<number, DocxCommandSelection | null>(structuredClone(init.recoveryState?.selections ?? []));
   const selectionLimit = Math.max(256, options.retainedOutcomes ?? 256);
   const shared = createCommandHost<
@@ -58,6 +59,7 @@ export function createResidentCommandHost(options: DocxCommandHostOptions): Docx
       const preflight = await hooks.preflight(command, applyContext);
       const result = preflight.status === 'ready'
         ? await hooks.apply(preflight.prepared, applyContext) : preflight;
+      selectionCause = 'cause' in result ? result.cause : undefined;
       if (result.status === 'applied') {
         if (version === Number.MAX_SAFE_INTEGER) throw new Error('Command version space is exhausted');
         version += 1;
@@ -100,7 +102,12 @@ export function createResidentCommandHost(options: DocxCommandHostOptions): Docx
     if (includeState || !sameCommandState(selection, nextSelection)) {
       selection = structuredClone(nextSelection);
       ack.selection = structuredClone(selection);
-    } else delete ack.selection;
+      if (selectionCause) ack.cause = selectionCause;
+      else delete ack.cause;
+    } else {
+      delete ack.selection;
+      delete ack.cause;
+    }
     if (includeState || !sameCommandState(editState, nextEditState)) {
       editState = structuredClone(nextEditState);
       ack.editState = structuredClone(editState);
@@ -127,6 +134,8 @@ export function createResidentCommandHost(options: DocxCommandHostOptions): Docx
   const host: DocxCommandHost = {
     handler(context, command) {
       return serialize(async () => {
+        selectionOnly = false;
+        selectionCause = undefined;
         if (isCommandEnvelope(command) && command.basis.epoch !== init.epoch) {
           return packState({
             session: init.session, incarnation: init.incarnation, epoch: init.epoch,
@@ -134,7 +143,6 @@ export function createResidentCommandHost(options: DocxCommandHostOptions): Docx
             outcomes: [{ seq: command.seq, status: 'refused', reason: 'stale-epoch', committed: false }],
           }, true);
         }
-        selectionOnly = false;
         const duplicate = command.seq <= throughSeq;
         const reply = await shared.handler(context, command);
         const ack = isTransferResult(reply) ? reply.value : reply;

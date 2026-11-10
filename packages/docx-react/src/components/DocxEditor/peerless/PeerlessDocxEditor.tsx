@@ -90,7 +90,7 @@ import { resolvedLocale } from '../../../i18n/LocaleContext';
 import { visibleViewport } from '../../../plugins/geometry';
 import { createSelectionSettle } from '../../../../../../shared/plugin-host/selectionSettle';
 import { trackFocus } from '../../../../../../shared/plugin-host/focusTracker';
-import { localSelectionRevision, subscribeSelectionActivity } from '../../../plugins/selectionIdentity';
+import { createDocxSelectionObserver, subscribeSelectionActivity } from '../../../plugins/selectionIdentity';
 
 const PREVIEW_CUT = { blocks: 200, paragraphBudget: 256 };
 const SIDEBAR_EDGE = 16;
@@ -345,11 +345,14 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   useLayoutEffect(() => { pluginHost.localeChanged(locale); }, [pluginHost, locale]);
   const managedPlugins = Boolean(props.plugins?.length);
   const settleRef = useRef<ReturnType<typeof createSelectionSettle> | null>(null);
+  const observeSelection = useRef(createDocxSelectionObserver());
   const publishPluginSelection = useCallback((notify = true) => {
     const toolbar = controller.getSnapshot().view?.editState?.toolbar;
     const selection = { formatting: toolbar ? yrsSelectionState({ context: toolbar, startParagraphIndex: -1, endParagraphIndex: -1 }) : null,
       displayRange: pluginGeometry.displaySelection() };
-    const identity = pluginGeometry.selectionIdentity(localSelectionRevision(active.current?.binding.session));
+    const view = controller.getSnapshot().view;
+    const identity = observeSelection.current(active.current?.binding.session ?? controller,
+      pluginGeometry.selectionIdentity(), view?.selectionCause);
     pluginHost.selectionChanged(selection, identity);
     if (notify) settleRef.current?.notifySelectionChange(identity.settleKey);
   }, [controller, pluginGeometry, pluginHost]);
@@ -373,9 +376,10 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     });
     settleRef.current = machine;
     const session = active.current?.binding.session;
-    const unsubscribe = session ? subscribeSelectionActivity(session, publishPluginSelection) : undefined;
-    return () => { unsubscribe?.(); machine.dispose(); settleRef.current = null; };
-  }, [pluginHost, pluginGeometry, publishPluginSelection, managedPlugins, documentReady, shellState.view?.identity.session,
+    const unsubscribe = session ? subscribeSelectionActivity(session, () => publishPluginSelection()) : undefined;
+    const unsubscribeView = controller.subscribe(() => publishPluginSelection());
+    return () => { unsubscribe?.(); unsubscribeView(); machine.dispose(); settleRef.current = null; };
+  }, [controller, pluginHost, pluginGeometry, publishPluginSelection, managedPlugins, documentReady, shellState.view?.identity.session,
     shellState.view?.identity.incarnation, shellState.view?.identity.epoch]);
   useLayoutEffect(() => {
     if (!managedPlugins) return;

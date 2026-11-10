@@ -1,5 +1,4 @@
 import { useEffect, useImperativeHandle, useRef } from 'react';
-import { bumpLocalSelection } from '../../../plugins/selectionIdentity';
 
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import type { Document } from '@betteroffice/docx/types/document';
@@ -181,7 +180,6 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     const session = yrsSessionRef.current;
     if (!session || start.story !== end.story) return false;
     session.setSelection(start, end);
-    bumpLocalSelection(session);
     const startPos = yrsLocToDisplayPositionRef.current(start);
     if (startPos != null) scrollToPositionImpl(startPos, true);
     yrsInputRef.current?.focus();
@@ -206,7 +204,6 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
         ? performYrsHistoryAction(session, false)
         : { changed: false, stories: [] };
       if (result.changed) syncYrsInputStateRef.current(true, result.stories);
-      else if (session) bumpLocalSelection(session);
       return result.changed;
     },
     redo: () => {
@@ -216,7 +213,6 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
         ? performYrsHistoryAction(session, true)
         : { changed: false, stories: [] };
       if (result.changed) syncYrsInputStateRef.current(true, result.stories);
-      else if (session) bumpLocalSelection(session);
       return result.changed;
     },
     canUndo: () => yrsSessionRef.current?.canUndo() ?? false,
@@ -669,7 +665,6 @@ export function usePagedEditorCommandBridge(options: UsePagedEditorCommandBridge
         if (!session) return false;
         const result = performYrsHistoryAction(session, redo);
         if (result.changed) current.syncYrsInputState(true, result.stories);
-        else bumpLocalSelection(session);
         return result.changed;
       },
       select(start, end) {

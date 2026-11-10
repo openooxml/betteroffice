@@ -1,5 +1,5 @@
 import { afterEach, expect, mock, test } from 'bun:test';
-import type { YrsSession } from '@betteroffice/docx/yrs';
+import { yrsSelectionCause, type YrsSession } from '@betteroffice/docx/yrs';
 import {
   adoptWorkerOpenHandoverVersion,
   adoptWorkerOpenMirrorVersion,
@@ -200,6 +200,31 @@ test.each(['rejection', 'load', 'ensure'] as const)('a replica %s fallback defau
   expect(fallback).toHaveBeenCalledTimes(1);
   expect(fallback).toHaveBeenCalledWith('failure');
   expect(workerOpenReplicaPending(session)).toBe(false);
+});
+
+test('replica adoption marks each step remote without carrying its scope across task yields', async () => {
+  const tasks = holdTasks();
+  try {
+    const session = fakeSession();
+    const other = fakeSession();
+    const causes: Array<'remote' | 'seed' | undefined> = [];
+    const step = () => {
+      causes.push(yrsSelectionCause(session));
+      expect(yrsSelectionCause(other)).toBeUndefined();
+    };
+    const replica = deferWorkerOpenReplica(session, async () => [step, step, step], () => {}, () => {});
+    replica.start();
+    await Promise.resolve();
+    expect(causes).toEqual(['remote']);
+    expect(yrsSelectionCause(session)).toBeUndefined();
+    await tasks.run();
+    expect(causes).toEqual(['remote', 'remote']);
+    expect(yrsSelectionCause(session)).toBeUndefined();
+    await tasks.run();
+    await replica.ready;
+    expect(causes).toEqual(['remote', 'remote', 'remote']);
+    expect(yrsSelectionCause(session)).toBeUndefined();
+  } finally { tasks.restore(); }
 });
 
 test('hydration opens, loads and publishes readiness in separate tasks', async () => {

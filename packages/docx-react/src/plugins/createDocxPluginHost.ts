@@ -165,6 +165,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
   let generations = 0;
   let selectionIdentity = 'null';
   let resolvedSelection = 'null';
+  let selectionSettleKey = 'null';
   const selectionIdentities = new WeakMap<DocxPluginSnapshot, string>();
   const resolvedSelectionKeys = new WeakMap<DocxPluginSnapshot, string>();
   let settledSelection: string | null = null;
@@ -469,6 +470,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       state.selectionSettled = true;
       selectionIdentity = 'null';
       resolvedSelection = 'null';
+      selectionSettleKey = 'null';
       settledSelection = null;
       settleEvent = null;
       state.selection = EMPTY_SELECTION;
@@ -497,6 +499,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       state.selectionSettled = true;
       selectionIdentity = 'null';
       resolvedSelection = 'null';
+      selectionSettleKey = 'null';
       settledSelection = null;
       settleEvent = null;
       state.selection = EMPTY_SELECTION;
@@ -542,8 +545,15 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
     selectionChanged(selection, identity = JSON.stringify(selection)) {
       const sticky = typeof identity === 'string' ? identity : identity.stickyKey;
       const moved = sticky !== selectionIdentity;
+      const resolved = typeof identity === 'string' ? identity : identity.resolvedKey;
+      const settleKey = typeof identity === 'string' ? identity : identity.settleKey;
+      if (settleKey === selectionSettleKey &&
+        resolved !== resolvedSelection && state.selectionSettled && settledSelection !== null && settleDelivered) {
+        settledSelection = resolved;
+      }
       selectionIdentity = sticky;
-      resolvedSelection = typeof identity === 'string' ? identity : identity.resolvedKey;
+      resolvedSelection = resolved;
+      selectionSettleKey = settleKey;
       if (JSON.stringify(selection) === JSON.stringify(state.selection)) {
         if (moved) { invalidateSettle(); runtime.touch(); }
         return sticky;

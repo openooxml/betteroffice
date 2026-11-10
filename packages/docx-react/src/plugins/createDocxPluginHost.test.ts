@@ -3,6 +3,7 @@ import type { ResidentProposalReply, YrsSession } from '@betteroffice/docx/yrs';
 import { registerWorkerProposalAuthority } from '../components/DocxEditor/internals/workerProposalAuthority';
 import { createDocxPluginHost, type DocxPluginHostAccess } from './createDocxPluginHost';
 import { defineDocxPlugin } from './defineDocxPlugin';
+import { createDocxSelectionObserver, docxSelectionIdentity } from './selectionIdentity';
 import type { DocxProposalSnapshot } from './proposalPreview';
 import type { DocxAnchorGeometryResult, DocxPluginEvent, DocxPluginGeometry, DocxPluginLayout } from './types';
 
@@ -614,6 +615,34 @@ test('a superseded generation receives no queued signals', async () => {
   host.close('unmounted');
 });
 
+
+test.each(['remote', 'seed'] as const)('silent %s movement rebases dedupe before a local return to the last settled position', async (cause) => {
+  const { host } = setup();
+  const events: DocxPluginEvent[] = [];
+  host.setPlugins([defineDocxPlugin({ id: 'remote-return', createState: () => null,
+    onEvent(_context, event) { events.push(event); } })]);
+  host.openWorker('v1');
+  const observe = createDocxSelectionObserver();
+  const publish = (offset: number, remote = false) => {
+    const identity = observe(host, docxSelectionIdentity(0, ['sticky-a', 'sticky-b'], [offset, offset + 2], false),
+      remote ? cause : undefined);
+    host.selectionChanged({ formatting: null, displayRange: { story: 'body', from: offset, to: offset + 2, layoutId: 'layout' } }, identity);
+  };
+  publish(1);
+  host.selectionUnsettled();
+  host.selectionSettled('keyboard');
+  await host.notificationsIdle();
+  publish(4, true);
+  await host.notificationsIdle();
+  expect(host.activations()[0]!.context.snapshot.selectionSettled).toBe(true);
+  expect(events.filter(event => event.type === 'selection-settle')).toHaveLength(1);
+  publish(1);
+  host.selectionUnsettled();
+  host.selectionSettled('keyboard');
+  await host.notificationsIdle();
+  expect(events.filter(event => event.type === 'selection-settle')).toHaveLength(2);
+  host.close('unmounted');
+});
 
 test('selection settling publishes the current snapshot once and ignores superseded generations', async () => {
   const { host } = setup();

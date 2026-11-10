@@ -12,9 +12,11 @@ if (ownsDom) GlobalRegistrator.register();
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import { configureDefaultFonts } from '@betteroffice/docx/layout';
 import type { AsyncReplicaAdapter, CollaborationReplica } from '@betteroffice/docx/collaboration';
+import { encodeUpdate } from '@betteroffice/docx/collaboration/protocol';
 import {
   createYrsSession,
   takePreloadedResidentEngineWorker,
+  withYrsSelectionCause,
   type DocxEditRequest,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
@@ -2632,7 +2634,9 @@ function expectSelectionRange(
   if (affinity === 'trailing') {
     const last = range.rects.at(-1);
     expect(last).toBeDefined();
-    expect(selectedAnchor).toEqual({ ...last!, x: last!.x + last!.width, width: 0 });
+    const { x, ...rest } = selectedAnchor;
+    expect(rest).toEqual({ y: last!.y, height: last!.height, pageIndex: last!.pageIndex, width: 0 });
+    expect(x).toBeCloseTo(last!.x + last!.width, 10);
     return;
   }
   const display = context.snapshot.selection.displayRange!;
@@ -2803,7 +2807,8 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
     return { ...mounted, host, plugin, events, settles, first, context, selection, selectionLayout, quiet, reset, anchor, readAnchor, clock, input,
       controller: () => controller,
       session: () => mounted.ref.current!.getEditorRef()!.getYrsSession()!,
-      async remote(edit: (session: YrsSession) => void) {
+      binding: () => binding,
+      async remote(edit: (session: YrsSession) => void, path: 'update' | 'chunks' | 'pipe' = 'update') {
         const transport: CollaborationReplica = engine === 'DI' ? this.session() : replica!;
         expect(transport).not.toBeNull();
         const peer = await createYrsSession({ clientId: 67771 });
@@ -2812,7 +2817,21 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
           peer.applyUpdate(await access.encodeStateAsUpdate());
           edit(peer);
           const update = peer.encodeStateAsUpdate(await access.encodeStateVector());
-          await act(async () => { await access.applyUpdate(update); });
+          await act(async () => {
+            if (path === 'pipe') {
+              expect(binding).not.toBeNull();
+              const data = encodeUpdate(update).slice().buffer;
+              const ticket = binding!.session.submit('collabPipe', { provider: 84711, ops: [
+                { op: 'create', seq: 1, options: {} }, { op: 'connect', seq: 2 },
+                { op: 'event', seq: 3, event: { type: 'open' } },
+                { op: 'event', seq: 4, event: { type: 'message', data } },
+              ] }, { lane: 'collab', fence: true });
+              expect(await ticket.ack).toMatchObject({ status: 'applied' });
+            } else if (path === 'chunks') {
+              expect(access.applyUpdateChunks).toBeDefined();
+              await access.applyUpdateChunks!([update]);
+            } else await access.applyUpdate(update);
+          });
           await mounted.ref.current!.flushPendingInput();
           if (workerGeometry) await until(() => workerGeometry!.selectionMapped());
           await host.notificationsIdle();
@@ -2856,7 +2875,7 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
 }
 
 for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${engine}`, () => {
-  test('a no-op local undo restarts the window without a second settle', async () => {
+  test('a no-op local undo keeps the selection settled without a second settle', async () => {
     const h = await matrixEditor(engine, documentBytes(), undefined, true);
     try {
       await h.selection('body', h.first.paraId, 1, 3);
@@ -2876,10 +2895,10 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
           expect(editor.undo()).toBe(false);
         }
       });
-      expect(h.context().snapshot.selectionSettled).toBe(false);
+      expect(h.context().snapshot.selectionSettled).toBe(true);
       await h.quiet(349);
       expect(h.settles).toHaveLength(0);
-      expect(h.context().snapshot.selectionSettled).toBe(false);
+      expect(h.context().snapshot.selectionSettled).toBe(true);
       await h.quiet(1);
       expect(h.settles).toHaveLength(0);
       expect(h.context().snapshot.selectionSettled).toBe(true);
@@ -2902,7 +2921,16 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
       const stop = h.host.subscribe(() => states.push(h.context().snapshot.selectionSettled));
       h.reset();
       try {
-        await act(async () => { h.ref.current!.setZoom(1.25); });
+        await act(async () => {
+          h.ref.current!.setZoom(1.25);
+          if (h.controller()) expect(await h.controller()!.submit({ kind: 'setSectionProperties', payload: {
+            section: 'final', patch: { pageWidth: 10000 }, expectVersion: h.host.version(),
+          } })).toMatchObject({ ok: true });
+          else {
+            h.session().setSectionProperties(h.session().listSections().length, { pageWidth: 10000 });
+            h.ref.current!.getEditorRef()!.syncYrsInputState(true);
+          }
+        });
         await h.selectionLayout();
         await until(() => h.context().snapshot.layout?.zoom === 1.25);
         await h.quiet(700);
@@ -2980,11 +3008,13 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
     } finally { h.dispose(); }
   });
 
-  for (const place of ['elsewhere', 'after', 'before', 'delete'] as const) test(`${place === 'elsewhere' ? 'T4' : place === 'after' ? 'T4a' : place === 'before' ? 'T4b' : 'T4c'}: a remote edit ${place === 'elsewhere' ? 'elsewhere' : place === 'delete' ? 'that deletes the selection' : `${place} the selection`} ${place === 'delete' ? 'settles once' : 'neither unsettles nor settles'}`, async () => {
-    const h = await matrixEditor(engine, documentBytes(), undefined, place === 'delete');
+  const remotePaths: readonly ('update' | 'chunks' | 'pipe')[] = engine === 'DP' ? ['update', 'chunks', 'pipe'] : ['update', 'chunks'];
+  for (const path of remotePaths) for (const place of ['elsewhere', 'after', 'before', 'inside', 'collapse', 'delete'] as const) test(`${path}: ${place === 'elsewhere' ? 'T4' : place === 'after' ? 'T4a' : place === 'before' ? 'T4b' : 'T4c'}: a remote edit ${place === 'elsewhere' ? 'elsewhere' : place === 'delete' ? 'that deletes the selection' : `${place} the selection`} ${place === 'delete' || place === 'collapse' ? 'settles once' : 'neither unsettles nor settles'}`, async () => {
+    const h = await matrixEditor(engine, documentBytes(), undefined, true);
+    const destroyed = place === 'delete' || place === 'collapse';
     try {
       await h.selection('body', h.first.paraId, 1, 3);
-      if (place === 'delete') await h.selectionLayout();
+      await h.selectionLayout();
       await h.quiet();
       const beforeRange = h.context().snapshot.selection.displayRange;
       const states: boolean[] = [];
@@ -2996,19 +3026,21 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
             const paragraph = peer.paragraphs('body').find(candidate => candidate.paraId !== h.first.paraId)!;
             expect(paragraph).toBeDefined();
             peer.insertText({ story: 'body', paraId: paragraph.paraId, offset: paragraph.text.length }, 'remote');
-          } else if (place === 'delete') peer.deleteRange({ story: 'body', start: { paraId: h.first.paraId, offset: 0 }, end: { paraId: h.first.paraId, offset: h.first.text.length } });
-          else peer.insertText({ story: 'body', paraId: h.first.paraId, offset: place === 'before' ? 0 : h.first.text.length }, 'remote ');
-        });
-        if (place === 'delete') await h.selectionLayout();
+          } else if (place === 'collapse') peer.deleteRange({ story: 'body', start: { paraId: h.first.paraId, offset: 1 }, end: { paraId: h.first.paraId, offset: 3 } });
+          else if (place === 'delete') peer.deleteRange({ story: 'body', start: { paraId: h.first.paraId, offset: 0 }, end: { paraId: h.first.paraId, offset: h.first.text.length } });
+          else peer.insertText({ story: 'body', paraId: h.first.paraId, offset: place === 'before' ? 0 : place === 'inside' ? 2 : h.first.text.length }, 'remote ');
+        }, path);
+        await h.selectionLayout();
         await h.quiet();
-        expect(h.settles).toHaveLength(place === 'delete' ? 1 : 0);
-        if (place !== 'delete') expect(states).not.toContain(false);
+        expect(h.settles).toHaveLength(destroyed ? 1 : 0);
+        if (!destroyed) expect(states).not.toContain(false);
         expect(h.context().snapshot.selectionSettled).toBe(true);
-        if (place !== 'delete') {
+        if (!destroyed) {
           expect(h.events.some(event => event.type === 'document-change')).toBe(true);
           await act(async () => { await h.ref.current!.whenLayoutComplete({ timeoutMs: 3000 }); });
           expect((await h.readAnchor())[0]).toMatchObject({ ok: true });
-          expect((await h.ref.current!.readSelectionInfo())?.selectedText).toBe(h.first.text.slice(1, 3));
+          expect((await h.ref.current!.readSelectionInfo())?.selectedText).toBe(place === 'inside'
+            ? h.first.text.slice(1, 2) + 'remote ' + h.first.text.slice(2, 3) : h.first.text.slice(1, 3));
           expect(h.events.some(event => event.type === 'selection-change' || event.type === 'layout-change')).toBe(true);
           if (place === 'before') expect(h.context().snapshot.selection.displayRange!.from).toBeGreaterThan(beforeRange!.from);
         } else {
@@ -3017,6 +3049,192 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
         }
       } finally { stop(); }
     } finally { h.dispose(); }
+  });
+
+  for (const path of remotePaths) test(`${path}: removing the selected story settles once`, async () => {
+    const bytes = await storyAnchorsDocx();
+    const h = await matrixEditor(engine, bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer, undefined, true);
+    try {
+      await h.openStory('hf:rIdH1');
+      await h.selection('hf:rIdH1', '10000001', 1, 3);
+      await h.selectionLayout();
+      await h.quiet();
+      h.reset();
+      await h.remote(peer => peer.deleteStory('hf:rIdH1'), path);
+      await h.quiet();
+      expect(h.settles).toHaveLength(1);
+      expect(h.context().snapshot.selectionSettled).toBe(true);
+      expect(h.context().snapshot.selection.displayRange?.story).not.toBe('hf:rIdH1');
+      await h.quiet(700);
+      expect(h.settles).toHaveLength(1);
+    } finally { h.dispose(); }
+  });
+
+  for (const path of remotePaths) test(`${path}: a local return after a silent remote move settles again`, async () => {
+    const h = await matrixEditor(engine, documentBytes(), undefined, true);
+    try {
+      await h.selection('body', h.first.paraId, 1, 3);
+      await h.selectionLayout();
+      await h.quiet();
+      const a = h.context().snapshot.selection.displayRange!;
+      h.reset();
+      await h.remote(peer => peer.insertText({ story: 'body', paraId: h.first.paraId, offset: 0 }, 'remote '), path);
+      await h.selectionLayout();
+      await h.quiet();
+      expect(h.settles).toHaveLength(0);
+      expect(h.context().snapshot.selection.displayRange!.from).toBeGreaterThan(a.from);
+      await h.selection('body', h.first.paraId, 1, 3);
+      await h.selectionLayout();
+      await h.quiet();
+      expect(h.settles).toHaveLength(1);
+      expect(h.settles[0]!.context.snapshot.selection.displayRange).toMatchObject({ story: a.story, from: a.from, to: a.to });
+      await h.quiet(700);
+      expect(h.settles).toHaveLength(1);
+    } finally { h.dispose(); }
+  });
+
+  test('reader and seeding publications keep the selection settled', async () => {
+    const h = await matrixEditor(engine, documentBytes(), undefined, true);
+    try {
+      await h.selection('body', h.first.paraId, 1, 3);
+      await h.selectionLayout();
+      await h.quiet();
+      h.reset();
+      const states: boolean[] = [];
+      const stop = h.host.subscribe(() => states.push(h.context().snapshot.selectionSettled));
+      try {
+        await act(async () => {
+          await h.ref.current!.readSelectionInfo();
+          await h.ref.current!.readParagraphs({ view: 'accepted', paraIds: [h.first.paraId] });
+          if (!h.controller()) {
+            const current = h.session().selection()!;
+            withYrsSelectionCause(h.session(), 'seed', () => h.session().setSelection(current.anchor, current.head));
+            h.ref.current!.getEditorRef()!.getSelectionRange();
+          }
+        });
+        await h.quiet(700);
+        expect(h.settles).toHaveLength(0);
+        expect(states).not.toContain(false);
+        expect(h.context().snapshot.selectionSettled).toBe(true);
+      } finally { stop(); }
+    } finally { h.dispose(); }
+  });
+
+  if (engine !== 'DL') for (const family of ['typing', 'keyboard navigation', 'pointer', 'host setSelection', 'table insert', 'image insert', 'hyperlink insert', 'undo', 'redo', 'story switch'] as const) test(`H2: ${family} settles once without a path revision bump`, async () => {
+    const bytes = family === 'story switch' ? await storyAnchorsDocx() : null;
+    const buffer = bytes ? bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer : documentBytes();
+    const h = await matrixEditor(engine, buffer, undefined, true);
+    try {
+      await h.selection('body', h.first.paraId, 1, 3);
+      await h.selectionLayout();
+      await h.quiet();
+      const insertText = async () => {
+        if (h.controller()) expect(await h.controller()!.submit({ kind: 'insertText', payload: { text: 'x' } })).toMatchObject({ ok: true });
+        else h.ref.current!.getEditorRef()!.insertText('x');
+      };
+      if (family === 'undo' || family === 'redo') {
+        await act(insertText);
+        await h.selectionLayout();
+        await h.quiet();
+        if (family === 'redo') {
+          await act(async () => { expect(await h.ref.current!.commands.execute('undo', null)).toMatchObject({ ok: true }); });
+          await h.selectionLayout();
+          await h.quiet();
+        }
+      }
+      h.reset();
+      const before = h.context().snapshot.selection.displayRange!;
+      if (family === 'story switch') await h.openStory('hf:rIdH1');
+      else await act(async () => {
+        const controller = h.controller();
+        const editor = h.ref.current!.getEditorRef();
+        if (family === 'typing') {
+          fireEvent.keyDown(h.input(), { key: 'x' });
+          await insertText();
+        } else if (family === 'keyboard navigation') {
+          fireEvent.keyDown(h.input(), { key: 'ArrowRight' });
+        } else if (family === 'pointer') {
+          const target = h.view.container.querySelector<HTMLElement>('[data-page-index="0"] canvas, canvas[data-page-index="0"]')!;
+          expect(target).not.toBeNull();
+          const pages = target.closest<HTMLElement>('[data-docx-pages-host]');
+          if (pages) Object.defineProperties(pages, {
+            setPointerCapture: { configurable: true, value() {} },
+            hasPointerCapture: { configurable: true, value: () => true },
+            releasePointerCapture: { configurable: true, value() {} },
+          });
+          const anchor = h.anchor();
+          expect(anchor.ok).toBe(true);
+          if (!anchor.ok) throw new Error('Pointer target is unavailable');
+          const point = { pointerId: 1, pointerType: 'mouse', button: 0, buttons: 1,
+            clientX: anchor.anchor.x, clientY: anchor.anchor.y + anchor.anchor.height / 2, detail: 1 };
+          fireEvent.pointerDown(target, point);
+          if (!controller) fireEvent.mouseDown(target, point);
+          fireEvent.mouseUp(document, { ...point, buttons: 0 });
+          fireEvent.pointerUp(target, { ...point, buttons: 0 });
+        } else if (family === 'host setSelection') {
+          if (controller) expect(await controller.submit({ kind: 'select', payload: { selection: {
+            anchor: { story: 'body', paraId: h.first.paraId, offset: 4 },
+            focus: { story: 'body', paraId: h.first.paraId, offset: 4 },
+          } } })).toMatchObject({ ok: true });
+          else editor!.setSelection(before.from + 3, before.from + 3);
+        } else if (family === 'table insert') {
+          if (controller) expect(await controller.submit({ kind: 'insertTable', payload: { rows: 2, columns: 2 } })).toMatchObject({ ok: true });
+          else expect(editor!.applyYrsCommand({ type: 'insertTable', rows: 2, columns: 2 })).toBe(true);
+        } else if (family === 'image insert') {
+          const image = { rId: 'synthetic-image', widthEmu: 952500, heightEmu: 952500 };
+          if (controller) expect(await controller.submit({ kind: 'insertImage', payload: { image } })).toMatchObject({ ok: true });
+          else expect(editor!.applyYrsCommand({ type: 'insertImage', image })).toBe(true);
+        } else if (family === 'hyperlink insert') {
+          if (controller) expect(await controller.submit({ kind: 'setHyperlink', payload: {
+            selection: controller.getSnapshot().view!.workerSelection!, hyperlink: { href: 'https://example.com' },
+            displayText: 'link', expectVersion: h.host.version(),
+          } })).toMatchObject({ ok: true });
+          else expect(editor!.applyYrsCommand({ type: 'setHyperlink', href: 'https://example.com', displayText: 'link' })).toBe(true);
+        } else expect(await h.ref.current!.commands.execute(family, null)).toMatchObject({ ok: true });
+        await h.ref.current!.flushPendingInput();
+      });
+      await h.selectionLayout();
+      expect(h.context().snapshot.selection.displayRange).not.toMatchObject({ story: before.story, from: before.from, to: before.to });
+      expect(h.context().snapshot.selectionSettled).toBe(false);
+      await h.quiet();
+      expect(h.settles).toHaveLength(1);
+      if (family === 'pointer') expect(h.events.find(event => event.type === 'selection-settle')).toMatchObject({ source: 'pointer' });
+      await h.quiet(700);
+      expect(h.settles).toHaveLength(1);
+    } finally { h.dispose(); }
+  });
+
+  if (engine === 'DP') test('H2: mapped selection waits while a local intent is unacknowledged', async () => {
+    const h = await matrixEditor(engine, documentBytes(), undefined, true);
+    const releases: Array<() => void> = [];
+    const intercepts = workers.map(worker => {
+      const post = worker.postMessage.bind(worker);
+      return spyOn(worker, 'postMessage').mockImplementation((request, transfer) => {
+        if (request.type === 'edit' && request.command.kind === 'insertText') releases.push(() => post(request, transfer));
+        else post(request, transfer);
+      });
+    });
+    let pending: ReturnType<NonNullable<ReturnType<typeof h.controller>>['submit']> | undefined;
+    try {
+      await h.selection('body', h.first.paraId, 1, 3);
+      h.reset();
+      await act(async () => { pending = h.controller()!.submit({ kind: 'insertText', payload: { text: 'held' } }); });
+      await until(() => releases.length > 0);
+      expect(h.binding()!.admission.getSnapshot().originalUnackedIntents).toBeGreaterThan(0);
+      await h.quiet(700);
+      expect(h.settles).toHaveLength(0);
+      expect(h.context().snapshot.selectionSettled).toBe(false);
+      await act(async () => { for (const release of releases.splice(0)) release(); await pending; });
+      await h.selectionLayout();
+      await h.quiet();
+      expect(h.settles).toHaveLength(1);
+      expect(h.context().snapshot.selectionSettled).toBe(true);
+    } finally {
+      for (const intercept of intercepts) intercept.mockRestore();
+      for (const release of releases.splice(0)) release();
+      await pending;
+      h.dispose();
+    }
   });
 
   if (engine !== 'DL') test('T5: undo after replacing a selection settles once with a collapsed selection', async () => {

@@ -10,7 +10,6 @@ import type { Layout } from '@betteroffice/docx/layout/pagination';
 import type { ParagraphHighlightOptions, ScrollToParaIdOptions } from '@betteroffice/docx/utils';
 import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
 import type { YrsLoc, YrsSession } from '@betteroffice/docx/yrs';
-import { bumpLocalSelection } from '../../../plugins/selectionIdentity';
 
 import type { YrsInputRef } from '../YrsInput';
 import { layoutScrollCompensation } from '../internals/scrollRestore';
@@ -456,7 +455,6 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
       if (startPos == null || startPos < 0) return false;
       scrollToPositionImpl(startPos, true);
       yrsSession.setSelection(startLoc);
-      bumpLocalSelection(yrsSession);
       if (options?.highlight && requestCanvasParagraphFlash) {
         const endPos = yrsLocToDisplayPosition(endLoc) ?? startPos + 1;
         requestCanvasParagraphFlash({

@@ -8,7 +8,7 @@ import type { DocxClipboardFragment, YrsAuthor } from '@betteroffice/docx/yrs';
 import type { PeerlessEchoIntent, PeerlessEchoPainter } from './echoPainter';
 import { hasImplicitVerticalGoal, type PeerlessInputIntent, type PeerlessProposalIntent, type PeerlessRevisionIntent, type PeerlessTextIntent } from './inputEvents';
 import type { PeerlessViewStore } from './viewStore';
-import { bumpLocalSelection, notifySelectionActivity } from '../../../plugins/selectionIdentity';
+import { notifySelectionActivity } from '../../../plugins/selectionIdentity';
 
 /** @internal */
 export const DOCX_ECHO_MAX_UNACKED_INTENTS = 256;
@@ -269,7 +269,7 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
     let echoTicket: { ticket?: CommandTicket; settled?: boolean; dropped?: boolean } | undefined;
     try {
       if (!counted) count();
-      if (!counted && !environment) bumpLocalSelection(session);
+      if (!counted && !environment) notifySelectionActivity(session);
       if (compositionSlot !== null && !target) {
         let release!: (result: PeerlessAdmissionResult) => void;
         let drop!: (error: Error) => void;

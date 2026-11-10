@@ -25,6 +25,8 @@ import {
   anchorDisplayRoot,
   anchorFailure,
   resolveReservations,
+  subscribeYrsSelection,
+  yrsSelectionCause,
   type AnchorGeometryTarget,
   type DocxReservationsPayload,
   type DocxResolvedReservations,
@@ -61,7 +63,7 @@ import {
 import { resolveParagraph } from './createPluginClients';
 import { createPluginGeometry, pluginLayout, readPluginPositionAtPoint, visibleViewport } from './geometry';
 import { managedSidebarItems } from './PluginSidebarItems';
-import { docxSelectionIdentity, localSelectionRevision, subscribeSelectionActivity } from './selectionIdentity';
+import { createDocxSelectionObserver, docxSelectionIdentity } from './selectionIdentity';
 import { usePluginReservations } from './reservations';
 import { currentPreviewKey } from './proposalPreview';
 import type {
@@ -206,6 +208,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
 
   const selectionRef = useRef<DocxPluginSelection>({ formatting: null, displayRange: null });
   const selectionIdentityRef = useRef(docxSelectionIdentity(0, null, null, false));
+  const observeSelection = useRef(createDocxSelectionObserver());
   const settleRef = useRef<ReturnType<typeof createSelectionSettle> | null>(null);
   const managed = (options.plugins?.length ?? 0) > 0;
   const locale = resolvedLocale(options.locale ?? options.i18n?._lang);
@@ -350,9 +353,10 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
     const direction = Math.sign(focus - anchor);
     const collapsed = !!live && live.anchor.story === live.head.story &&
       live.anchor.paraId === live.head.paraId && live.anchor.offset === live.head.offset;
-    selectionIdentityRef.current = docxSelectionIdentity(localSelectionRevision(session), encoded
+    selectionIdentityRef.current = observeSelection.current(session ?? host, docxSelectionIdentity(0, encoded
       ? [encoded.story, Array.from(encoded.anchor), Array.from(encoded.head), direction] : null,
-      live ? [live.anchor.story, anchor, live.head.story, focus, direction] : null, collapsed);
+      live ? [live.anchor.story, anchor, live.head.story, focus, direction] : null, collapsed),
+      session ? yrsSelectionCause(session) : undefined);
     selectionRef.current = selection;
     host.selectionChanged(selection, selectionIdentityRef.current);
     return selection;
@@ -392,7 +396,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
 
   useEffect(() => {
     if (!managed || !options.session) return;
-    return subscribeSelectionActivity(options.session, publishSelection);
+    return subscribeYrsSelection(options.session, () => publishSelection());
   }, [managed, options.session, publishSelection]);
 
   const publishViewerSelection = useCallback((selection: ViewerSelectionChange) => {

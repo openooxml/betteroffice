@@ -63,6 +63,7 @@ export type CommandAck<S, E, F> = {
   version: number;
   outcomes: CommandOutcome[];
   selection?: S;
+  cause?: 'remote';
   editState?: E;
   frame?: FrameEnvelope<F>;
   revisions?: { selection: number; layout: number };
@@ -151,6 +152,7 @@ export type EditSessionState<S, E> = {
   throughSeq: number;
   presentedThroughSeq: number;
   selection: S | undefined;
+  selectionCause?: 'remote';
   editState: E | undefined;
 };
 
