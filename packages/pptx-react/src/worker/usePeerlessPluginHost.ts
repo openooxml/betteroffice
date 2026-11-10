@@ -69,7 +69,7 @@ export function usePeerlessPluginHost(run: PeerlessPresentation | null, commands
 
   const subscribe = useCallback((listener: () => void) =>
     managed && run ? run.subscribeVisual(listener) : () => {}, [run, managed]);
-  const snapshot = useCallback(() => managed ? run?.getVisualSnapshot() ?? null : null, [run, managed]);
+  const snapshot = useCallback(() => managed ? run?.pluginVisual() ?? null : null, [run, managed]);
   const visual = useSyncExternalStore(subscribe, snapshot, snapshot);
   const confirmed = visual?.view.confirmed;
   const fit = visual?.fit;
@@ -98,8 +98,8 @@ export function usePeerlessPluginHost(run: PeerlessPresentation | null, commands
       width: displayList.width, height: displayList.height,
     };
     const current = () => run.current && !latest.current.reviewing && surface.isConnected &&
-      host.layoutId() === layout.id && run.getVisualSnapshot()?.view.confirmed === confirmed &&
-      run.getVisualSnapshot()?.fit === fit && run.store.getSnapshot().confirmed === confirmed && run.client.state.version === frame.version;
+      host.layoutId() === layout.id && run.pluginVisual()?.view.confirmed === confirmed &&
+      run.pluginVisual()?.fit === fit && run.store.getSnapshot().confirmed === confirmed && run.client.state.version === frame.version;
     const toOverlay = (rect: { x: number; y: number; width: number; height: number }) =>
       current() ? slideRectToOverlay(surface, layer, displayList, rect) : null;
     const indexed = pluginGeometryIndex(displayList);

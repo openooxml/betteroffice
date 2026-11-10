@@ -119,6 +119,17 @@ test('document focus excludes the plugin panel', async ({ page }) => {
   expect((await events()).map((event) => event.focused)).toEqual([true, false]);
 });
 
+if (engine === 'worker') {
+  test('pptx: slide navigation is announced with worker plugins registered', async ({ page }) => {
+    await open(page, 'worker');
+    const stage = page.getByRole('application');
+    await stage.focus();
+    await expect(stage).toBeFocused();
+    await page.keyboard.press('PageDown');
+    await expect(page.getByTestId('pptx-live-region')).toContainText('Slide 2 of 3');
+  });
+}
+
 test('resizing the page changes the viewport', async ({ page }) => {
   await open(page, engine);
   const viewport = () => page.evaluate(() =>

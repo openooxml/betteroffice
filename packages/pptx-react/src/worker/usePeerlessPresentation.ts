@@ -68,6 +68,8 @@ export interface PeerlessPresentation {
   readonly hydrated: boolean;
   readonly failure: PptxWorkerEditorFailedError | undefined;
   getVisualSnapshot(): PeerlessVisualSnapshot | null;
+  /** @internal */
+  pluginVisual(): PeerlessVisualSnapshot | null;
   subscribeVisual(listener: () => void): () => void;
   require(): void;
   fit(value: SlideFit): void;
@@ -588,7 +590,8 @@ export function usePeerlessPresentation(
             (family) => suppliedFamilies.has(family.trim().toLowerCase())),
           fileGeneration, session: owner, client, store, images, thumbnailImages, collaborationClientId: sessionCollaboration?.clientId,
           visual: { subscribePresentation: subscribeVisual, getSnapshot: () => failedView ?? paintedView ?? getSnapshot() },
-          getVisualSnapshot: () => prerenderPresented ||
+          getVisualSnapshot: () => visual,
+          pluginVisual: () => prerenderPresented ||
             visual?.view.confirmed?.frame.slideId !== getSnapshot().confirmed?.frame.slideId ? null : visual,
           subscribeVisual,
           get ready() { return whenPainted(); },
@@ -676,6 +679,7 @@ export function usePeerlessPresentation(
             if (prerender.restore()) {
               prerenderPresented = false;
               paintLocal(getSnapshot());
+              notifyVisual();
             }
           },
           fit(token) {

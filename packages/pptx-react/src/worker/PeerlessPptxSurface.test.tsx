@@ -26,6 +26,7 @@ import { PptxEditor, pptxPeerlessEditorLoader } from '../PptxEditor';
 import { definePptxPlugin } from '../plugins/definePptxPlugin';
 import type { PptxGeometryTarget, PptxPluginContext, PptxPluginEvent, PptxPluginGeometry } from '../plugins/types';
 import type { PptxAsyncEditorApi } from './createPeerlessEditorApi';
+import * as peerlessEditorApi from './createPeerlessEditorApi';
 import type { PeerlessConfirmedFrame, PeerlessViewSnapshot } from './peerlessViewStore';
 import { peerlessPainterFactories, peerlessSessionOpener, type PeerlessPresentation } from './usePeerlessPresentation';
 import { PeerlessSlideStrip } from './PeerlessSlideStrip';
@@ -3988,6 +3989,32 @@ function prerenderGeometryPainter() {
   return { records, block() { pending = 0; gate = deferred<void>(); }, release,
     async pending() { await waitFor(() => expect(pending).toBeGreaterThan(0)); } };
 }
+
+test('presented prerenders preserve the visual snapshot while plugin geometry is unavailable', async () => {
+  const value = session();
+  value.client.state.slides.push({ id: 'other', index: 1, name: null, layoutPartPath: null });
+  const painter = prerenderGeometryPainter();
+  const probe = geometryProbe(value.client);
+  const createApi = spyOn(peerlessEditorApi, 'createPeerlessEditorApi');
+  restorers.push(() => createApi.mockRestore());
+  const view = render(<PptxEditor fonts={[]} file={file} showToolbar={false} plugins={[probe.plugin]} />);
+  await waitFor(() => expect(probe.context()?.geometry).toBeTruthy());
+  await waitFor(() => expect(createApi).toHaveBeenCalled());
+  const run = createApi.mock.calls[0][0];
+  const visual = run.getVisualSnapshot();
+  expect(visual).not.toBeNull();
+  const retained = probe.context().geometry!;
+  expect(retained.getAnchorGeometry({ kind: 'selection' }).ok).toBe(true);
+  value.client.hold = true;
+  const other = view.container.querySelector<HTMLButtonElement>('button[data-slide-id="other"]')!;
+  await act(async () => { fireEvent.pointerDown(other, { button: 0, isPrimary: true }); fireEvent.click(other); });
+  expect(painter.records[0].presented).toBe(true);
+  expect(run.getVisualSnapshot()).toBe(visual);
+  await waitFor(() => expect(probe.context().geometry).toBeNull());
+  expect(retained.getAnchorGeometry({ kind: 'selection' })).toMatchObject({
+    ok: false, failure: { code: 'layout-unavailable' },
+  });
+});
 
 for (const selected of ['slide', 'shape', 'forward', 'backward', 'caret'] as const) {
   for (const outcome of ['commit', 'refused'] as const) {
