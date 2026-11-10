@@ -666,14 +666,23 @@ pub fn pptx_font_preflight(
         nodes: xml::MAX_NODES,
     };
     let mut complete = true;
+    let package = parts.part("_rels/.rels", &mut complete)?;
+    let package = crate::relationships_from(package.as_ref(), "", &mut complete);
+    let mut main = package.iter().filter(|rel| rel.kind == "officeDocument");
+    let presentation_path = main
+        .next()
+        .map_or("ppt/presentation.xml", |rel| rel.target.as_str());
+    if main.next().is_some() || presentation_path != "ppt/presentation.xml" {
+        complete = false;
+    }
     let mut presentation = parts
-        .part("ppt/presentation.xml", &mut complete)?
+        .part(presentation_path, &mut complete)?
         .ok_or(PreflightError::MissingPart)?;
     resolve_alternate_content(&mut presentation, &mut complete);
     if presentation.name != "p:presentation" {
         return Err(PreflightError::Xml);
     }
-    let rels = parts.rels("ppt/presentation.xml", &mut complete)?;
+    let rels = parts.rels(presentation_path, &mut complete)?;
     let id = presentation
         .child("p:sldIdLst")
         .into_iter()

@@ -730,3 +730,36 @@ fn table_styles_load_the_conventional_part_without_a_relationship() {
     assert!(result.complete);
     assert_eq!(keys(&result), [("Body", false, true), ("Body", true, true)]);
 }
+
+#[test]
+fn main_part_named_by_the_package_relationship_is_read_and_incomplete() {
+    let presentation = format!(
+        r#"<p:presentation xmlns:p="{P}" xmlns:r="{R}"><p:sldIdLst><p:sldId id="256" r:id="first"/></p:sldIdLst></p:presentation>"#
+    );
+    let main_rels = rels(&[("first", "slide", "slides/real.xml")]);
+    let real = part("sld", &shape("", &run("RealFont", "Real")), "");
+    let real_rels = rels(&[("layout", "slideLayout", "../slideLayouts/one.xml")]);
+    let package = format!(
+        r#"<Relationships><Relationship Id="main" Type="{R}/officeDocument" Target="ppt/main.xml"/></Relationships>"#
+    );
+    let result = pptx_font_preflight(
+        &fixture(
+            &part("sld", &shape("", &run("Decoy", "Decoy")), ""),
+            &part("sldLayout", "", ""),
+            &part("sldMaster", "", ""),
+            &[
+                ("_rels/.rels", &package),
+                ("ppt/main.xml", &presentation),
+                ("ppt/_rels/main.xml.rels", &main_rels),
+                ("ppt/slides/real.xml", &real),
+                ("ppt/slides/_rels/real.xml.rels", &real_rels),
+            ],
+            false,
+        ),
+        0,
+    )
+    .unwrap();
+    assert!(!result.complete);
+    assert!(keys(&result).contains(&("RealFont", false, false)));
+    assert!(!keys(&result).iter().any(|(family, ..)| *family == "Decoy"));
+}
