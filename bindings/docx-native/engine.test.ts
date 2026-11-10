@@ -1609,3 +1609,70 @@ test('native and wasm leave hidden table rows out of the display list unless hid
   expect(shown.borders).toBeGreaterThan(hidden.borders);
   expect(shown).toEqual(run(wasm, true));
 });
+
+test('native and wasm read a table cell without its story as one empty paragraph and refuse writes into it with the same coded error', () => {
+  const encoder = new TextEncoder();
+  const paragraph = (text: string) => `<w:p><w:r><w:t>${text}</w:t></w:r></w:p>`;
+  const cell = (text: string) => `<w:tc><w:tcPr><w:tcW w:w="2340" w:type="dxa"/></w:tcPr>${paragraph(text)}</w:tc>`;
+  const bytes = wasm.rezip_docx({
+    '[Content_Types].xml': encoder.encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'),
+    '_rels/.rels': encoder.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'),
+    'word/document.xml': encoder.encode(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${paragraph('Before')}<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="2340"/><w:gridCol w:w="2340"/></w:tblGrid><w:tr>${cell('A')}${cell('B')}</w:tr></w:tbl>${paragraph('After')}<w:sectPr/></w:body></w:document>`),
+  });
+  const at = (row: number, column: number) => JSON.stringify({ story: 'body', tableIndex: 0, row, column });
+  const a = new wasm.EditSession(41);
+  const b = new wasm.EditSession(42);
+  const expected = new wasm.EditSession(43);
+  const actual = new native.EditSession(43);
+  try {
+    a.open_docx(bytes, true, 'opening');
+    a.track_undo();
+    b.open_docx(bytes, false, 'opening');
+    b.apply_update(a.encode_state());
+    b.track_undo();
+    a.split_cell(at(0, 1), 1, 2);
+    b.apply_update(a.encode_state());
+    b.insert_row(at(0, 0), true);
+    a.apply_update(b.encode_state());
+    expect(a.undo()).toBe(true);
+    b.apply_update(a.encode_state());
+    const update = b.encode_state();
+    for (const session of [expected, actual]) {
+      session.open_docx(bytes, false, 'opening');
+      session.apply_update(update);
+    }
+    const stories = expected.story_ids();
+    const payload = JSON.parse(expected.table_payload('body', 0)!) as { rows: { cells: { story: string }[] }[] };
+    const story = payload.rows.flatMap((row) => row.cells.map((entry) => entry.story)).find((id) => !stories.includes(id));
+    expect(story).toBeDefined();
+    expect(actual.story_ids()).not.toContain(story!);
+    const paraId = `${story!}#p0`;
+
+    const cellParagraphs = (session: Session) =>
+      (JSON.parse(session.paragraphs(story!)) as { paraId: string; text: string }[]).map((entry) => ({ paraId: entry.paraId, text: entry.text }));
+    expect(cellParagraphs(expected)).toEqual([{ paraId, text: '' }]);
+    expect(cellParagraphs(actual)).toEqual(cellParagraphs(expected));
+
+    const writes: Array<[string, (session: Session) => unknown]> = [
+      ['insert_text', (session) => session.insert_text(story!, paraId, 0, 'typed')],
+      ['insert_line_break', (session) => session.insert_line_break(story!, paraId, 0)],
+    ];
+    for (const [, write] of writes) {
+      const before = { expected: expected.encode_state(), actual: actual.encode_state() };
+      const thrown = expectThrownParity(() => write(expected), () => write(actual));
+      for (const error of [thrown, caughtValue(() => write(expected))]) {
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).name).toBe('CellHasNoStoryError');
+        expect((error as Error & { code?: string }).code).toBe('cell-has-no-story');
+      }
+      expect(expected.encode_state()).toEqual(before.expected);
+      expect(actual.encode_state()).toEqual(before.actual);
+    }
+    expect(cellParagraphs(actual)).toEqual([{ paraId, text: '' }]);
+  } finally {
+    actual.free();
+    expected.free();
+    b.free();
+    a.free();
+  }
+});
