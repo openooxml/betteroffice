@@ -32,6 +32,7 @@ fn run() -> Result<()> {
     let engine = EngineSession::new(1);
     seed_from_docx(engine.doc(), &bytes)?;
     let mut request = region_request(&package);
+    whole_numbers_as_integers(&mut request);
     let requirements: Value =
         serde_json::from_str(&engine.layout_font_requirements_json(&request.to_string())?)?;
     let fonts = Fonts::load(Path::new(&args[2]), &requirements)?;
@@ -47,9 +48,7 @@ fn run() -> Result<()> {
     let layout: Value = serde_json::from_str(
         &engine.layout_document_with_regions_retained_json(&request.to_string())?,
     )?;
-    if layout["notesConverged"].as_bool() == Some(false) {
-        return Err("note layout did not converge".into());
-    }
+    let notes_converged = layout["notesConverged"].as_bool().unwrap_or(true);
     engine.build_display_list_frame(&json!({"fontChains": fonts.ids}).to_string(), 0)?;
     let images = ImageMap::new();
     let resources = RenderResources::new(&fonts.store, &fonts.chains, &images);
@@ -72,7 +71,7 @@ fn run() -> Result<()> {
     println!(
         "{}",
         json!({
-            "schema_version": 1, "status": "ok", "pages": pages, "page": 1, "dpi": 96,
+            "schema_version": 1, "status": "ok", "pages": pages, "notes_converged": notes_converged, "page": 1, "dpi": 96,
             "width": width, "height": height, "skipped_images": rendered.skipped_images,
             "source_sha256": format!("{:x}", Sha256::digest(&bytes)),
             "png_sha256": format!("{:x}", Sha256::digest(&rendered.bytes))
@@ -418,4 +417,20 @@ fn pick_face<'a>(faces: &'a [Value], family: &str, bold: bool, italic: bool) -> 
             })
         })
         .ok_or_else(|| format!("no bundled font for {family}").into())
+}
+
+// The parser carries note ids, note numbering starts and chapter styles as floats while the
+// layout request types them as integers; a JavaScript host writes them as integers already.
+fn whole_numbers_as_integers(value: &mut Value) {
+    match value {
+        Value::Number(number) if number.is_f64() => {
+            let float = number.as_f64().unwrap_or(0.5);
+            if float.fract() == 0.0 && float.abs() < 9.0e15 {
+                *value = json!(float as i64);
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(whole_numbers_as_integers),
+        Value::Object(map) => map.values_mut().for_each(whole_numbers_as_integers),
+        _ => {}
+    }
 }

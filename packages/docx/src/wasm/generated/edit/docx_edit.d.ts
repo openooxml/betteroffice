@@ -814,6 +814,14 @@ export class EditSession {
      */
     outline_glyph_json(font_id: number, glyph_id: number): string;
     /**
+     * The text each of `pages` shows in the retained layout, built or not, as
+     * `[{"pageIndex","paragraphs":[{"text","level"?,"inTable"?}]}]`: body
+     * paragraphs cut where the page cuts them, headings with their zero-based
+     * outline level, and the rows of tables the page places, cell by cell.
+     * Header rows a table repeats on later pages read only once.
+     */
+    page_texts_json(pages: Uint32Array): string;
+    /**
      * How many paragraphs of `story` carry `para_id`: 0, 1, or 2 for two or
      * more. Errors on an unknown story.
      */
@@ -1925,6 +1933,7 @@ export interface InitOutput {
     readonly editsession_open_docx_preview: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_open_docx_preview_with_budget: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_outline_glyph_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_page_texts_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_paragraph_id_count: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly editsession_paragraph_identities: (a: number) => [number, number, number, number];
     readonly editsession_paragraph_save_plan: (a: number) => [number, number, number, number];
