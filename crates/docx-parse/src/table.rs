@@ -362,35 +362,37 @@ pub fn parse_document_table_properties(element: Option<&XmlElement>) -> Option<T
     (formatting != TableFormatting::default()).then_some(formatting)
 }
 
-/// Whether a `w:tr` holds nothing Word shows once hidden text is off: every run
-/// has a direct `w:vanish`, and nothing paints outside a run. Read from the
-/// source because later stages can lose field results, form controls and inline
-/// controls. A run hidden only through its style doesn't count, so its row stays.
+/// Whether a `w:tr` holds only known-inert structure and runs with a direct
+/// `w:vanish`. Anything else, including an element this list has never heard
+/// of, keeps the row. Read from the source because later stages can lose field
+/// results, form controls and imported content.
 pub fn row_is_hidden_content_only(row: &XmlElement) -> bool {
-    let mut pending: Vec<_> = row.child_elements().map(|child| (child, false)).collect();
-    while let Some((element, in_run)) = pending.pop() {
-        let is_run = element.matches_name("w", "r");
-        let vanished = || {
-            element
-                .child("w", "rPr")
-                .and_then(|properties| properties.child("w", "vanish"))
-                .is_some_and(|vanish| vanish.parse_boolean("w"))
-        };
-        let shows = match element.local_name() {
-            "tbl" => true,
-            "pPr" => element.child("w", "shd").is_some() || element.child("w", "pBdr").is_some(),
-            "altChunk" | "contentPart" | "control" => true,
-            "drawing" | "pict" | "object" | "ffData" | "oMath" | "oMathPara" => !in_run,
-            _ => is_run && !vanished(),
-        };
-        if shows {
+    let mut pending: Vec<_> = row.child_elements().collect();
+    while let Some(element) = pending.pop() {
+        let name = element.local_name();
+        if element.namespace_prefix() != Some("w") {
             return false;
         }
-        pending.extend(
-            element
-                .child_elements()
-                .map(|child| (child, in_run || is_run)),
-        );
+        match name {
+            "tblPrEx" | "trPr" | "tcPr" | "proofErr" | "bookmarkStart" | "bookmarkEnd"
+            | "commentRangeStart" | "commentRangeEnd" => {}
+            "tc" | "p" | "fldSimple" => pending.extend(element.child_elements()),
+            "pPr" => {
+                if element.child("w", "shd").is_some() || element.child("w", "pBdr").is_some() {
+                    return false;
+                }
+            }
+            "r" => {
+                let vanished = element
+                    .child("w", "rPr")
+                    .and_then(|properties| properties.child("w", "vanish"))
+                    .is_some_and(|vanish| vanish.parse_boolean("w"));
+                if !vanished {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
     }
     true
 }
@@ -854,7 +856,7 @@ mod tests {
     }
 
     #[test]
-    fn imported_content_is_never_hidden_content() {
+    fn anything_not_known_inert_is_never_hidden_content() {
         let hidden = r#"<w:p><w:r><w:rPr><w:vanish/></w:rPr><w:t>Hidden</w:t></w:r></w:p>"#;
         assert!(row_is_hidden_content_only(&root(&format!(
             "<w:tr><w:tc>{hidden}</w:tc></w:tr>"
@@ -863,6 +865,8 @@ mod tests {
             r#"<w:altChunk r:id="chunk"/>"#,
             r#"<w:contentPart r:id="ink"/>"#,
             r#"<w:control r:id="activeX"/>"#,
+            r#"<w:futureElement/>"#,
+            r#"<x:unknown/>"#,
         ] {
             let row = format!("<w:tr><w:tc>{imported}{hidden}</w:tc></w:tr>");
             assert!(!row_is_hidden_content_only(&root(&row)), "{imported}");
