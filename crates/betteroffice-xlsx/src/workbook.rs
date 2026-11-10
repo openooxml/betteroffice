@@ -5118,10 +5118,6 @@ fn validate_insert_capacity(model: &WorkbookModel, op: &Op) -> Result<()> {
             let loses_cells = sheet
                 .iter_cells()
                 .any(|(cell, _)| cell.row >= at && cell.row >= cutoff);
-            let loses_heights = sheet
-                .row_heights
-                .keys()
-                .any(|&row| row >= at && row >= cutoff);
             let loses_merges = sheet
                 .merges
                 .iter()
@@ -5130,7 +5126,7 @@ fn validate_insert_capacity(model: &WorkbookModel, op: &Op) -> Result<()> {
                 .hyperlinks
                 .iter()
                 .any(|link| link.range.end.row >= at && link.range.end.row >= cutoff);
-            if loses_cells || loses_heights || loses_merges || loses_hyperlinks {
+            if loses_cells || loses_merges || loses_hyperlinks {
                 return Err(Error::InvalidOperation(
                     "row insertion would discard content at the sheet boundary".to_string(),
                 ));
@@ -5145,10 +5141,6 @@ fn validate_insert_capacity(model: &WorkbookModel, op: &Op) -> Result<()> {
             let loses_cells = sheet
                 .iter_cells()
                 .any(|(cell, _)| cell.col >= at && cell.col >= cutoff);
-            let loses_widths = sheet
-                .col_widths
-                .keys()
-                .any(|&col| col >= at && col >= cutoff);
             let loses_merges = sheet
                 .merges
                 .iter()
@@ -5157,7 +5149,7 @@ fn validate_insert_capacity(model: &WorkbookModel, op: &Op) -> Result<()> {
                 .hyperlinks
                 .iter()
                 .any(|link| link.range.end.col >= at && link.range.end.col >= cutoff);
-            if loses_cells || loses_widths || loses_merges || loses_hyperlinks {
+            if loses_cells || loses_merges || loses_hyperlinks {
                 return Err(Error::InvalidOperation(
                     "column insertion would discard content at the sheet boundary".to_string(),
                 ));

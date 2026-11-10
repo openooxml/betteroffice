@@ -274,6 +274,8 @@ impl RecoveryCache {
         story_id: &str,
     ) -> EditResult<Option<(&Story, Option<&Replayed>)>> {
         if self.replay.is_none() {
+            #[cfg(feature = "test-counters")]
+            crate::test_counters::bump(|work| work.replay_seeds += 1);
             let replay = crate::doc_with_client_id(BOOTSTRAP_CLIENT_ID);
             crate::deck::seed_doc(&replay, package, "")?;
             let state = replay.transact().state_vector();
@@ -296,6 +298,8 @@ impl RecoveryCache {
 }
 
 fn visible(doc: &Doc) -> Visible {
+    #[cfg(feature = "test-counters")]
+    crate::test_counters::bump(|work| work.visible_builds += 1);
     let txn = doc.transact();
     let mut state = StateVector::default();
     let mut tiny = Vec::new();
@@ -323,6 +327,8 @@ fn visible(doc: &Doc) -> Visible {
 }
 
 fn read_story(doc: &Doc, story_id: &str, visible: &Visible) -> Option<Story> {
+    #[cfg(feature = "test-counters")]
+    crate::test_counters::bump(|work| work.story_reads += 1);
     let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
     let text = txn
         .get_map(crate::STORIES)?
@@ -426,6 +432,8 @@ fn read_story(doc: &Doc, story_id: &str, visible: &Visible) -> Option<Story> {
 }
 
 fn read_replayed(replay: &Doc, snapshot: &Snapshot, story_id: &str) -> Option<Replayed> {
+    #[cfg(feature = "test-counters")]
+    crate::test_counters::bump(|work| work.replayed_reads += 1);
     let mut txn = replay.transact_mut();
     let text = txn
         .get_map(crate::STORIES)?

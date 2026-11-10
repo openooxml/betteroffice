@@ -433,7 +433,12 @@ impl DocUndoManager {
                 .unwrap()
                 .clone()
                 .unwrap_or_default();
-            for (story, hidden) in visibility.lock().unwrap().iter() {
+            let visibility = visibility.lock().unwrap();
+            let kept_visible = stories_named_after_hiding(&txn, &visibility);
+            for (story, hidden) in visibility.iter() {
+                if *hidden && kept_visible.contains(story) {
+                    continue;
+                }
                 if *hidden {
                     removed.insert(&mut txn, story.as_str(), true);
                     lock(&self.changed_stories).push(story.clone());
@@ -451,6 +456,7 @@ impl DocUndoManager {
                     lock(&self.changed_stories).push(story.clone());
                 }
             }
+            drop(visibility);
             drop(txn);
             let stack = if undoing {
                 self.inner.redo_stack()
@@ -728,6 +734,57 @@ fn comment_boundaries(txn: &impl ReadTxn) -> AnchorBoundaries {
         }
     }
     boundaries
+}
+
+/// The stories among those `visibility` would hide that a table still names once the pass is
+/// done: a table counts only while the story embedding it stays live, so hiding a parent also
+/// lets the cells of its nested tables go.
+fn stories_named_after_hiding(
+    txn: &impl ReadTxn,
+    visibility: &[(String, bool)],
+) -> HashSet<String> {
+    let mut hiding: HashSet<String> = visibility
+        .iter()
+        .filter(|(_, hidden)| *hidden)
+        .map(|(story, _)| story.clone())
+        .collect();
+    let mut kept = HashSet::new();
+    loop {
+        let named = live_table_cells(txn, &hiding);
+        let newly_kept: Vec<String> = hiding
+            .iter()
+            .filter(|story| named.contains(*story))
+            .cloned()
+            .collect();
+        if newly_kept.is_empty() {
+            return kept;
+        }
+        for story in newly_kept {
+            hiding.remove(&story);
+            kept.insert(story);
+        }
+    }
+}
+
+/// Cell stories that a table embedded in a live story outside `excluded` names.
+fn live_table_cells(txn: &impl ReadTxn, excluded: &HashSet<String>) -> HashSet<String> {
+    let mut named = HashSet::new();
+    for (story, value) in crate::live_stories(&stories_root(txn), txn) {
+        if excluded.contains(story) {
+            continue;
+        }
+        let Out::YText(text) = value else {
+            continue;
+        };
+        for diff in text.diff(txn, YChange::identity) {
+            if let Out::YMap(map) = diff.insert
+                && let Some(Out::Any(rows)) = map.get(txn, "rows")
+            {
+                collect_row_stories(&rows, &mut named);
+            }
+        }
+    }
+    named
 }
 
 fn stories_root(txn: &impl ReadTxn) -> yrs::MapRef {
