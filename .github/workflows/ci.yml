@@ -361,6 +361,7 @@ jobs:
           cargo test -p betteroffice-docx-parse --features tiff,metafile
           cargo test -p betteroffice-docx --all-features
           cargo test -p betteroffice-pptx --all-features
+          cargo test -p betteroffice-pptx-edit --features test-counters --test attach_scaling
           cargo test -p betteroffice-vsdx-edit --features wasm
           cargo test -p betteroffice-docx-edit --features wasm
           cargo test -p betteroffice-docx-layout --no-default-features --test without_base_latin
