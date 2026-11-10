@@ -287,7 +287,8 @@ fn canvas_caret_stops(
 /// real boundaries rather than an even split across the run. Inside one Latin,
 /// Greek or Cyrillic cluster of several graphemes, such as an "ffi" ligature,
 /// Word splits the cluster's advance evenly between them; a base letter with
-/// its combining marks stays one grapheme and gains no stop.
+/// its combining marks stays one grapheme and gains no stop. A run with fewer
+/// document positions than text units, such as a field result, keeps its edges.
 fn glyph_caret_stops(
     text: &str,
     glyphs: &[crate::display_list::PlacedGlyph],
@@ -312,6 +313,7 @@ fn glyph_caret_stops(
         })
         .collect();
     let utf16_len = text.encode_utf16().count() as i64;
+    let one_position_per_unit = doc_end - doc_start == utf16_len;
     let mut stops = Vec::with_capacity(clusters.len() * 2);
     // clusters are byte-ordered and contiguous (each ends where the next
     // starts), so UTF-16 offsets accumulate in one linear pass — a per-cluster
@@ -340,7 +342,9 @@ fn glyph_caret_stops(
             x: right,
             position: if rtl { start_position } else { end_position },
         });
-        if ooxml_text::word_typography_mask(cluster_text).contains(&false) {
+        if !one_position_per_unit
+            || ooxml_text::word_typography_mask(cluster_text).contains(&false)
+        {
             continue;
         }
         let graphemes: Vec<&str> = cluster_text.graphemes(true).collect();
@@ -3766,21 +3770,34 @@ mod tests {
         })
     }
 
+    fn office_glyphs() -> serde_json::Value {
+        serde_json::json!([
+            {"id": 1, "x": 100, "y": 200, "cluster": 0, "advance": 10},
+            {"id": 2, "x": 110, "y": 200, "cluster": 1, "advance": 30},
+            {"id": 3, "x": 140, "y": 200, "cluster": 4, "advance": 10},
+            {"id": 4, "x": 150, "y": 200, "cluster": 5, "advance": 10}
+        ])
+    }
+
+    #[test]
+    fn a_ligature_in_a_field_result_keeps_the_field_edges() {
+        let mut glyphs = office_glyphs();
+        for glyph in glyphs.as_array_mut().unwrap() {
+            glyph["cluster"] = 0.into();
+        }
+        let mut field = ligature_run("office", 10, glyphs);
+        field["docEnd"] = 11.into();
+        let dl = page(serde_json::Value::Null, vec![field]);
+        let rects = range_rects(&dl, 10, 11);
+        assert_eq!(rects.len(), 1);
+        assert!((rects[0].x - 100.0).abs() < 0.01, "{rects:?}");
+        assert!((rects[0].width - 60.0).abs() < 0.01, "{rects:?}");
+        assert_eq!(hit_test(&dl, 0, 158.0, 195.0), Some(11));
+    }
+
     #[test]
     fn a_ligature_splits_its_advance_evenly_between_its_characters() {
-        let dl = page(
-            serde_json::Value::Null,
-            vec![ligature_run(
-                "office",
-                10,
-                serde_json::json!([
-                    {"id": 1, "x": 100, "y": 200, "cluster": 0, "advance": 10},
-                    {"id": 2, "x": 110, "y": 200, "cluster": 1, "advance": 30},
-                    {"id": 3, "x": 140, "y": 200, "cluster": 4, "advance": 10},
-                    {"id": 4, "x": 150, "y": 200, "cluster": 5, "advance": 10}
-                ]),
-            )],
-        );
+        let dl = page(serde_json::Value::Null, vec![ligature_run("office", 10, office_glyphs())]);
         for (position, x) in [(11, 110.0), (12, 120.0), (13, 130.0), (14, 140.0)] {
             assert!(
                 (caret_rect(&dl, position).unwrap().x - x).abs() < 0.01,
