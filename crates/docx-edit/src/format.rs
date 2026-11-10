@@ -1403,37 +1403,32 @@ impl EditingDoc {
         if ctx.is_suggesting() && refuses_suggestion(&story, &txn, range.start, range.end) {
             return Err(OpError::SuggestedFormattingOverContainer);
         }
-        let mut paragraphs = Vec::new();
-        let mut from = range.start;
+        let mut crossed = false;
+        let mut paragraph_style = None;
         for chunk in crate::ops::snapshot_range(&story, &txn, range.start, story.len(&txn)) {
             if let crate::ops::ChunkKind::Pilcrow(mark) = &chunk.kind {
-                let to = chunk.start.min(range.end);
-                if from < to {
-                    paragraphs.push((from, to, crate::map_string(mark, &txn, "pStyle")));
+                if chunk.start < range.end {
+                    crossed = true;
+                } else {
+                    paragraph_style = crate::map_string(mark, &txn, "pStyle");
                 }
-                from = chunk.end();
-                if from >= range.end {
-                    break;
-                }
+                break;
             }
         }
         let (_, children) = block_free_spans(&story, &txn, range.start, range.end, false);
-        if paragraphs.len() != 1 || !children.is_empty() {
+        if crossed || !children.is_empty() {
             return Err(OpError::ClearAcrossParagraphs);
         }
         let source = self.source_metadata();
-        let mut pieces = Vec::new();
-        for (start, end, paragraph_style) in paragraphs {
-            pieces.extend(self.style_reset_pieces(
-                &txn,
-                &story,
-                &range.story,
-                (start, end),
-                clear,
-                paragraph_style.as_deref(),
-                source.as_deref(),
-            )?);
-        }
+        let pieces = self.style_reset_pieces(
+            &txn,
+            &story,
+            &range.story,
+            (range.start, range.end),
+            clear,
+            paragraph_style.as_deref(),
+            source.as_deref(),
+        )?;
         let mut keeper = Keeper::new(self);
         let mut revision_ids: Vec<String> = Vec::new();
         for (start, end, mut attrs) in pieces {
