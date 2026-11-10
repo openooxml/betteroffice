@@ -194,6 +194,11 @@ export type ResidentEngineSession = Pick<
   /** Rects of the resident display list for each `[from, to)` range of one region, in order. */
   storyRangeRects(region: DisplayListHitRegion, partId: string, ranges: readonly (readonly [number, number])[]): DisplayListRect[][];
   clearCellSelection(): YrsLoc | null;
+  /**
+   * @internal A key that changes whenever an embed, a table's rows, cells or cell stories, or
+   * the set of stories changes, and with every document instance, seed or loaded state.
+   */
+  cellStructureKey?(): string;
   controlTargets(): ResidentControlTarget[];
   repeatControlAt(at: ResidentControlPosition, remove: boolean): boolean;
   setControlValue(at: ResidentControlPosition, value: import('./index').YrsContentControlValue): void;
@@ -821,6 +826,7 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
       const payload = session.table_payload(story, index);
       return payload === undefined ? null : JSON.parse(payload);
     },
+    cellStructureKey: () => `${session.version().split('-')[0]}:${session.resident_section_revision().split(':')[0]}`,
     setHyperlink: (range, hyperlink, suggesting) => applyCommandMutation(range.story, () =>
       session.set_hyperlink(...rangeArgs(range), JSON.stringify(hyperlink), suggesting?.name, suggesting?.date)),
     setImageGeometryAt: (at, geometry) => applyCommandMutation(at.story, () =>
