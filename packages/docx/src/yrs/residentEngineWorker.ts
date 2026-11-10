@@ -56,6 +56,7 @@ import {
 import { finalPreviewDisplayWindow, finalPreviewPageCount } from './previewDisplayWindow';
 import { decodePackedFontFace, preloadEditWasm, preloadEditWasmFrom } from './wasm/index';
 import { shipsWasmAsset } from '../wasm/assetEdit';
+import { engineKind } from '../wasm/engineEdit';
 import { copyDecodedFace, fontBytes } from '../../../../shared/office-session/fontDecoder';
 import { glyphsByFont, ResidentProgressiveFonts, type ProgressiveFontSpec } from './residentProgressiveFonts';
 import {
@@ -4132,6 +4133,8 @@ function saveWarmupCurrent(attempt: SaveWarmup): boolean {
 }
 
 function saveWarmupHasHeadroom(): boolean {
+  // Save warmup is sized against a wasm32 memory; the native engine does not run it.
+  if (engineKind === 'native') return false;
   const configured = openedDocument?.heapLimitBytes;
   if (configured !== undefined && (!Number.isSafeInteger(configured) || configured <= 0)) return false;
   let memory: ReturnType<typeof wasmModuleMemories>[number] | undefined;

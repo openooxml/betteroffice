@@ -336,6 +336,10 @@ jobs:
           cargo fmt --check --all --manifest-path bindings/Cargo.toml
           cargo clippy --locked --manifest-path bindings/Cargo.toml --workspace --all-targets -- -D warnings
 
+      - name: Test the native DOCX heap counters
+        if: steps.ws.outputs.present == 'true'
+        run: cargo test --locked --manifest-path bindings/Cargo.toml -p betteroffice-docx-native --lib heap::
+
       # Running a fuzz target needs nightly; checking that the package still builds does not.
       - name: Lint the standalone fuzz package
         if: steps.ws.outputs.present == 'true'

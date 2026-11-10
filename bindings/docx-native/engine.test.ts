@@ -1057,12 +1057,18 @@ describe('docx native engine parity', () => {
     });
     expect(native.unzip_docx(native.rezip_docx(entries)))
       .toEqual(wasm.unzip_docx(wasm.rezip_docx(entries)));
-    expect(native.wasm_heap_counted()).toBe(false);
+    expect(native.wasm_heap_counted()).toBe(wasm.wasm_heap_counted());
     native.set_wasm_heap_limit(1);
-    expect(native.wasm_live_bytes()).toBe(0);
-    expect(native.wasm_peak_bytes()).toBe(0);
-    expect(native.wasm_failed_allocation_bytes()).toBe(0);
+    try {
+      expect(native.unzip_docx(native.rezip_docx(entries))).toEqual(wasm.unzip_docx(wasm.rezip_docx(entries)));
+      expect(native.wasm_failed_allocation_bytes()).toBe(0);
+    } finally {
+      native.set_wasm_heap_limit(Infinity);
+    }
+    expect(native.wasm_live_bytes()).toBeGreaterThan(0);
+    expect(native.wasm_peak_bytes()).toBeGreaterThanOrEqual(native.wasm_live_bytes());
     expect(native.reset_wasm_peak_bytes()).toBeUndefined();
+    expect(native.wasm_peak_bytes()).toBe(native.wasm_live_bytes());
     expect(native.install_panic_hook()).toBeUndefined();
   });
 

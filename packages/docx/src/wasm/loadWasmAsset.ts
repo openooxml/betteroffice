@@ -96,12 +96,16 @@ export interface WasmHeapStats {
   failedAllocationBytes: number;
 }
 
-/** One instantiated wasm module's memory in this thread; heap counters only for modules that keep them. */
+/**
+ * One instantiated engine module's memory in this thread; heap counters only for modules that
+ * keep them. A native engine that counts its heap is listed too, with no linear memory.
+ */
 export interface WasmModuleMemory extends Partial<WasmHeapStats> {
   label: string;
   /**
    * Size of its linear memory. It only grows, so it is also the module's
-   * high-water mark.
+   * high-water mark. A native engine has no linear memory: this is its peak
+   * heap bytes, its high-water mark, and `maximumBytes` is absent.
    */
   bufferBytes: number;
   maximumBytes?: number;
@@ -113,17 +117,22 @@ export const WASM32_MEMORY_LIMIT_BYTES = 4 * 1024 * 1024 * 1024;
 interface RegisteredModule {
   label: string;
   memory: () => WebAssembly.Memory | null;
+  nativeReady?: () => boolean;
   heap?: () => WasmHeapStats | undefined;
 }
 
 const registered: RegisteredModule[] = [];
 
-/** The memory of every wasm module instantiated in this thread, by label. */
+/** The memory of every engine module instantiated in this thread, by label. */
 export function wasmModuleMemories(): WasmModuleMemory[] {
   const out: WasmModuleMemory[] = [];
   for (const module of registered) {
     const memory = module.memory();
-    if (!memory) continue;
+    if (!memory) {
+      const heap = module.nativeReady?.() ? module.heap?.() : undefined;
+      if (heap) out.push({ label: module.label, bufferBytes: heap.peakBytes, ...heap });
+      continue;
+    }
     const maximumBytes = memoryMaximumBytes(memory);
     out.push({ label: module.label, bufferBytes: memory.buffer.byteLength,
       ...(maximumBytes === undefined ? {} : { maximumBytes }), ...module.heap?.() });
@@ -167,6 +176,7 @@ export function createWasmModuleState(options: {
   registered.push({
     label: options.label,
     memory: () => (initialized ? memory : null),
+    ...(options.engineKind === 'native' ? { nativeReady: () => initialized } : {}),
     ...(options.heap ? { heap: options.heap } : {}),
   });
 

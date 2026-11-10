@@ -351,7 +351,7 @@ export declare function render_docx_markdown_json(content: string, options: stri
 
 export declare function render_docx_markdown_with_pages_json(content: string, options: string): string
 
-/** Native no-op; native allocations are not counted. */
+/** Starts a new peak window at the calling thread's live bytes. */
 export declare function reset_wasm_peak_bytes(): void
 
 export declare function rezip_docx(entries: any): Uint8Array
@@ -375,16 +375,16 @@ export declare function vertical_move_by_handle(handle: number, position: number
 
 export declare function vertical_move_json(displayList: string, position: number, direction: string, goalX: number): string
 
-/** Native no-op; native allocations are not counted. */
+/** Size of the calling thread's last allocation that failed, or 0. */
 export declare function wasm_failed_allocation_bytes(): number
 
-/** Native no-op; native allocations are not counted. */
+/** Whether the counters below see every allocation of this thread's engine. */
 export declare function wasm_heap_counted(): boolean
 
-/** Native no-op; native allocations are not counted. */
+/** Bytes the calling thread currently holds on the engine's heap. */
 export declare function wasm_live_bytes(): number
 
-/** Native no-op; native allocations are not counted. */
+/** The most bytes the calling thread held at once since it started or the last reset. */
 export declare function wasm_peak_bytes(): number
 
 export declare function write_docx_s13_wasm(requestJson: string, originalDocx: Uint8Array): Uint8Array

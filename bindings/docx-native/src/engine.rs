@@ -3799,33 +3799,35 @@ pub fn rezip_docx(env: Env, entries: Unknown<'_>) -> Result<Uint8Array> {
         .and_then(|bytes| byte_result(env, bytes))
 }
 
-/// Native no-op; native allocations are not counted.
+/// Whether the counters below see every allocation of this thread's engine.
 #[napi(catch_unwind, js_name = "wasm_heap_counted")]
 pub fn wasm_heap_counted() -> bool {
-    false
+    true
 }
 
-/// Native no-op; native allocations are not counted.
+/// Bytes the calling thread currently holds on the engine's heap.
 #[napi(catch_unwind, js_name = "wasm_live_bytes")]
 pub fn wasm_live_bytes() -> f64 {
-    0.0
+    crate::heap::live() as f64
 }
 
-/// Native no-op; native allocations are not counted.
+/// The most bytes the calling thread held at once since it started or the last reset.
 #[napi(catch_unwind, js_name = "wasm_peak_bytes")]
 pub fn wasm_peak_bytes() -> f64 {
-    0.0
+    crate::heap::peak() as f64
 }
 
-/// Native no-op; native allocations are not counted.
+/// Size of the calling thread's last allocation that failed, or 0.
 #[napi(catch_unwind, js_name = "wasm_failed_allocation_bytes")]
 pub fn wasm_failed_allocation_bytes() -> f64 {
-    0.0
+    crate::heap::failed_bytes() as f64
 }
 
-/// Native no-op; native allocations are not counted.
+/// Starts a new peak window at the calling thread's live bytes.
 #[napi(catch_unwind, js_name = "reset_wasm_peak_bytes")]
-pub fn reset_wasm_peak_bytes() {}
+pub fn reset_wasm_peak_bytes() {
+    crate::heap::reset_peak();
+}
 
 /// Native no-op; native allocations are not limited.
 #[napi(catch_unwind, js_name = "set_wasm_heap_limit")]
