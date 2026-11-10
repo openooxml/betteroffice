@@ -457,3 +457,25 @@ fn sheet_drawings_are_incomplete() {
     assert_eq!(keys(&result), [("Base", false, false)]);
     assert!(!result.complete);
 }
+
+#[test]
+fn active_chartsheet_never_reads_a_worksheet_by_position() {
+    let workbook = format!(
+        r#"<workbook xmlns="{S}" xmlns:r="{R}"><sheets><sheet name="Chart" sheetId="1" r:id="chart"/><sheet name="Data" sheetId="2" r:id="data"/></sheets></workbook>"#
+    );
+    let rels = format!(
+        r#"<Relationships><Relationship Id="chart" Type="{R}/chartsheet" Target="chartsheets/sheet1.xml"/><Relationship Id="data" Type="{R}/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="styles" Type="{R}/styles" Target="styles.xml"/></Relationships>"#
+    );
+    let data = worksheet(r#"<row r="1"><c r="A1"><v>1</v></c></row>"#, "");
+    let bytes = zip(
+        &[
+            ("xl/workbook.xml", workbook.as_bytes()),
+            ("xl/_rels/workbook.xml.rels", rels.as_bytes()),
+            ("xl/chartsheets/sheet1.xml", b"<chartsheet/>".as_slice()),
+            ("xl/worksheets/sheet1.xml", data.as_bytes()),
+            ("xl/styles.xml", STYLES.as_bytes()),
+        ],
+        false,
+    );
+    assert!(!xlsx_font_preflight(&bytes).unwrap().complete);
+}
