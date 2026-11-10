@@ -18,9 +18,9 @@ const W_NAMESPACE: &str = "http://schemas.openxmlformats.org/wordprocessingml/20
 
 /// What the XML written for an unchanged paragraph must agree on with its source XML for the
 /// source to stand in for it: the same comment markers in order, at the same text offsets, the
-/// same permission markers, the same number of page and column breaks, and no revision or note
-/// ID the source lacks. Source IDs the written XML lacks are kept, as are
-/// relationship IDs: the save keeps every source relationship.
+/// same permission markers, the same number of page and column breaks in the paragraph's own
+/// runs, and no revision or note ID the source lacks. Source IDs the written XML lacks are kept,
+/// as are relationship IDs: the save keeps every source relationship.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Marks {
     comments: Vec<(String, String, usize)>,
@@ -76,11 +76,18 @@ fn marks(xml: &str) -> Option<Marks> {
     let mut in_text = 0usize;
     let mut in_properties = 0usize;
     let mut previous = 0;
+    let mut open: Vec<&str> = Vec::new();
     for tag in tags(xml)? {
         if in_text > 0 {
             offset += unescaped(xml, previous..tag.range.start)?.chars().count();
         }
         previous = tag.range.end;
+        let own_run = open.as_slice() == ["w:p", "w:r"];
+        if tag.end {
+            open.pop();
+        } else if !tag.empty {
+            open.push(tag.name);
+        }
         let text = matches!(tag.name, "w:t" | "w:delText");
         let properties = tag.name.ends_with("Pr");
         if tag.end {
@@ -98,7 +105,7 @@ fn marks(xml: &str) -> Option<Marks> {
         if in_properties == 0 && POSITIONED.contains(&tag.name) {
             offset += 1;
         }
-        if in_properties == 0 && tag.name == "w:br" {
+        if own_run && tag.name == "w:br" {
             match attribute(&tag, "w:type")
                 .and_then(|range| unescaped(xml, range))
                 .as_deref()
@@ -4240,6 +4247,14 @@ mod tests {
         assert_eq!(
             splice(&with_break, &[(0, line)], &[]),
             Some(with_break.clone())
+        );
+        let nested = format!(
+            "{ROOT}<w:body><w:p w14:paraId=\"0000000A\"><w:hyperlink w:anchor=\"x\"><w:r><w:br w:type=\"page\"/><w:t>a</w:t></w:r></w:hyperlink></w:p></w:body></w:document>"
+        );
+        let unmodelled = "<w:p w14:paraId=\"0000000A\"><w:hyperlink w:anchor=\"x\"><w:r><w:t>a</w:t></w:r></w:hyperlink></w:p>";
+        assert_eq!(
+            splice(&nested, &[(0, unmodelled)], &[]),
+            Some(nested.clone())
         );
     }
 

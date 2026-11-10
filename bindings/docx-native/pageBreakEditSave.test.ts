@@ -51,10 +51,10 @@ const EDITS: Record<string, Edit> = {
   'type at the end of the break paragraph': (s, a) => { s.insertText({ story: 'body', ...at(s, 1, length(s, 1)) }, 'x', a); },
   'delete from the previous paragraph into the break paragraph': (s, a) => { s.deleteRange({ story: 'body', start: at(s, 0, 0), end: at(s, 1, 0) }, a); },
   'Enter at the start of the break paragraph': (s, a) => { s.splitParagraph({ story: 'body', ...at(s, 1, 0) }, a); },
-  'delete the break': (s, a) => { s.deleteRange({ story: 'body', start: at(s, 1, 1), end: at(s, 1, 2) }, a); },
+  'remove the text past the break': (s, a) => { s.deleteRange({ story: 'body', start: at(s, 1, 1), end: at(s, 1, 2) }, a); },
   'delete the break paragraph': (s, a) => { s.deleteRange({ story: 'body', start: at(s, 0, 1), end: at(s, 1, length(s, 1)) }, a); },
   'Delete at the end of the break paragraph': (s, a) => { s.deleteRange({ story: 'body', start: at(s, 1, length(s, 1)), end: at(s, 2, 0) }, a); },
-  'split after the break': (s, a) => { s.splitParagraph({ story: 'body', ...at(s, 1, 2) }, a); },
+  'split at the end of the break paragraph': (s, a) => { s.splitParagraph({ story: 'body', ...at(s, 1, length(s, 1)) }, a); },
   'merge with the next paragraph': (s, a) => { s.mergeParagraphs('body', ids(s)[1]!, a); },
   'type before the break': (s, a) => { s.insertText({ story: 'body', ...at(s, 1, 1) }, 'x', a); },
   'Enter at the end of the previous paragraph': (s, a) => { s.splitParagraph({ story: 'body', ...at(s, 0, 1) }, a); },
@@ -70,8 +70,9 @@ const ROWS: Array<[string, string, boolean]> = [
     [shape, 'split before the break', true],
     [shape, 'join with the previous paragraph', false],
     [shape, 'merge the previous paragraph', false],
-    [shape, 'delete the break', true],
-    [shape, 'split after the break', true],
+    [shape, 'remove the text past the break', true],
+    [shape, 'split at the end of the break paragraph', true],
+    [shape, 'delete the break paragraph', false],
     [shape, 'merge with the next paragraph', true],
     [shape, 'type before the break', true],
   ]),
@@ -81,6 +82,7 @@ const ROWS: Array<[string, string, boolean]> = [
   ['end', 'split before the break', true],
   ['end', 'Delete at the end of the break paragraph', true],
   ['end', 'type before the break', true],
+  ['end', 'delete the break paragraph', false],
   ['own paragraph', 'join with the previous paragraph', false],
   ['own paragraph', 'merge the previous paragraph', false],
   ['own paragraph', 'delete from the previous paragraph into the break paragraph', false],
@@ -174,4 +176,56 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
       expect(failures).toEqual([]);
     });
   }
+}
+
+/** Paragraphs whose break sits inside a non-run child, left untouched while another paragraph is edited. */
+const NESTED: Record<string, string> = {
+  'hyperlink starting with the break': `<w:hyperlink w:anchor="x"><w:r>${brk('page')}<w:t>A</w:t></w:r></w:hyperlink>`,
+  'hyperlink with the break inside its text': `<w:hyperlink w:anchor="x"><w:r><w:t>A</w:t>${brk('page')}<w:t>C</w:t></w:r></w:hyperlink>`,
+  'inline content control with the break inside its text': `<w:sdt><w:sdtContent><w:r><w:t>A</w:t>${brk('page')}<w:t>C</w:t></w:r></w:sdtContent></w:sdt>`,
+  'inline content control starting with the break': `<w:sdt><w:sdtContent><w:r>${brk('page')}<w:t>A</w:t></w:r></w:sdtContent></w:sdt>`,
+  'field result holding the break': `<w:r><w:t>A</w:t></w:r><w:fldSimple w:instr=" PAGE "><w:r>${brk('page')}<w:t>1</w:t></w:r></w:fldSimple>`,
+  'tracked insertion of the break': `<w:r><w:t>A</w:t></w:r><w:ins w:id="9" w:author="Ada" w:date="2026-01-01T00:00:00Z"><w:r>${brk('page')}</w:r></w:ins><w:r><w:t>C</w:t></w:r>`,
+};
+
+for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown as Yrs]] as const) {
+  test(`${engine}: an untouched paragraph with a nested page break keeps it when another paragraph is edited`, async () => {
+    const failures: string[] = [];
+    for (const [name, inner] of Object.entries(NESTED)) {
+      const source = `<w:p w14:paraId="72000001">${inner}</w:p>`;
+      const bytes = await docx(L + source + N);
+      const session = await yrs.createYrsSession();
+      try {
+        session.openDocx(bytes, true);
+        session.insertText({ story: 'body', ...at(session, 2, 1) }, 'x');
+        const live = blockBreaks(session, 'page');
+        const { xml } = await savedXml(yrs, session);
+        const written = (xml.match(/w:type="page"/g) ?? []).length;
+        if (live !== 1 || written !== live) failures.push(`${name}: saved ${written} page breaks, live ${live}, the source 1`);
+        if (!xml.includes(source)) failures.push(`${name}: rewrote the untouched paragraph`);
+      } catch (error) {
+        failures.push(`${name}: threw ${error instanceof Error ? error.message : String(error)}`);
+      } finally {
+        session.destroy();
+      }
+    }
+    expect(failures).toEqual([]);
+  });
+
+  test(`${engine}: a text edit and a section break save beside a content control that starts with a page break`, async () => {
+    const control = `<w:p w14:paraId="72000001">${NESTED['inline content control starting with the break']}</w:p>`;
+    const bytes = await docx(L + control + N);
+    const session = await yrs.createYrsSession();
+    try {
+      session.openDocx(bytes, true);
+      session.insertText({ story: 'body', ...at(session, 2, 1) }, 'x');
+      session.insertSectionBreakAfter(ids(session)[0]!, 'nextPage');
+      const live = blockBreaks(session, 'page');
+      const { xml } = await savedXml(yrs, session);
+      expect([live, (xml.match(/w:type="page"/g) ?? []).length]).toEqual([1, 1]);
+      expect(xml).toContain(control);
+    } finally {
+      session.destroy();
+    }
+  });
 }
