@@ -1,4 +1,6 @@
+import { configureFontCdn } from '@betteroffice/fonts';
 import { expect, spyOn, test } from 'bun:test';
+import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { isClientMessage, type ClientMessage } from '../../../../shared/office-session/protocol';
 import type { SessionTransport } from '../../../../shared/office-session/transport';
 import type { PipeCommandPayload } from '../../../../shared/collaboration-pipe/protocol';
@@ -7,6 +9,7 @@ import { CollaborationProvider } from '../collaboration/provider';
 import { encodeSyncStep2, encodeUpdate } from '../collaboration/protocol';
 import type { AwarenessCursor, CollaborationError, CollaborationTransportEvent } from '../collaboration/types';
 import { createWorkbookSession, type WorkbookSession } from './client';
+import { createWorkbookRecoverySession } from './clientRecovery';
 import type { WorkbookCommand, WorkbookCommandWireFrame, WorkbookSharedWireAck } from './commandProtocol';
 import type { WorkbookSessionOpenReply } from './methods';
 
@@ -27,6 +30,7 @@ function paint(seq: number): WorkbookCommandWireFrame {
 
 function controlled(value: (throughSeq: number) => unknown = () => undefined, openReply = opened) {
   const calls: Extract<ClientMessage, { kind: 'call' }>[] = [];
+  const openedInputs: unknown[] = [];
   const snapshots = new Map<number, unknown>();
   const events: string[] = [];
   let listener: (message: unknown) => void = () => {};
@@ -34,7 +38,8 @@ function controlled(value: (throughSeq: number) => unknown = () => undefined, op
   const transport: SessionTransport = {
     post(message) {
       if (!isClientMessage(message) || message.kind !== 'call') return;
-      if (message.method === 'open') {
+      if (message.method === 'open' || message.method === 'openRecovery') {
+        openedInputs.push(message.args[1]);
         queueMicrotask(() => { listener({ protocol: 1, kind: 'reply', id: message.id, ok: true, value: openReply }); });
         return;
       }
@@ -50,7 +55,7 @@ function controlled(value: (throughSeq: number) => unknown = () => undefined, op
     onError: () => () => {},
     close: () => {},
   };
-  return { transport, calls, events,
+  return { transport, calls, events, openedInputs,
     ack(index: number, sharedFrame = false, compatibilityFrame = false) {
       const call = calls[index];
       const input = call.args[0] as { seq: number };
@@ -339,4 +344,52 @@ test('save emits each save warning on the calling thread, and saveWithWarnings r
     emitted.mockRestore();
     await session.dispose();
   }
+});
+
+test('workbook workers receive the configured font CDN and explicit disable state', async () => {
+  const previous = getFontCdnConfiguration();
+  try {
+    for (const baseUrl of ['https://workbook-fonts.example/root/', false] as const) {
+      configureFontCdn({ baseUrl, timeoutMs: 2468 });
+      const port = controlled();
+      const session = await createWorkbookSession(new Uint8Array(), {}, port.transport);
+      try {
+        expect(port.openedInputs[0]).toMatchObject({ fontCdn: { baseUrl, timeoutMs: 2468 } });
+      } finally { await session.dispose(); }
+    }
+  } finally { setFontCdnConfiguration(previous); }
+});
+
+test('workbook recovery forwards the font CDN through checkpoint and source opens', async () => {
+  const previous = getFontCdnConfiguration();
+  const configured = { baseUrl: 'https://recovery-fonts.example/', timeoutMs: 1357 };
+  configureFontCdn(configured);
+  try {
+    for (const checkpoint of [undefined, { state: new Uint8Array([1]), epoch: 1, version: 0, throughSeq: 0 }]) {
+      const port = controlled();
+      const recovery = await createWorkbookRecoverySession(new Uint8Array(), {}, port.transport, checkpoint);
+      try {
+        expect(port.openedInputs[0]).toMatchObject({ fontCdn: configured });
+      } finally { await recovery.dispose(); }
+    }
+  } finally { setFontCdnConfiguration(previous); }
+});
+
+test('workbook opens omit font CDN configuration when none was configured', async () => {
+  const previous = getFontCdnConfiguration();
+  setFontCdnConfiguration(undefined);
+  try {
+    const port = controlled();
+    const session = await createWorkbookSession(new Uint8Array(), {}, port.transport);
+    try {
+      expect(port.openedInputs[0]).not.toHaveProperty('fontCdn');
+    } finally { await session.dispose(); }
+    for (const checkpoint of [undefined, { state: new Uint8Array([1]), epoch: 1, version: 0, throughSeq: 0 }]) {
+      const recoveryPort = controlled();
+      const recovery = await createWorkbookRecoverySession(new Uint8Array(), {}, recoveryPort.transport, checkpoint);
+      try {
+        expect(recoveryPort.openedInputs[0]).not.toHaveProperty('fontCdn');
+      } finally { await recovery.dispose(); }
+    }
+  } finally { setFontCdnConfiguration(previous); }
 });

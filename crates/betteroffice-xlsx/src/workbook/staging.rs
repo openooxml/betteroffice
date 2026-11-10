@@ -56,7 +56,7 @@ impl Workbook {
     ) -> Result<PreparedCommit> {
         if !self.is_collaborative()
             && baseline.is_none()
-            && let Some(authority) = self.authority.prepare_range_format_sync(&ops, origin)
+            && let Some(authority) = self.authority()?.prepare_range_format_sync(&ops, origin)
         {
             return Ok(PreparedCommit {
                 ops,
@@ -67,15 +67,13 @@ impl Workbook {
             });
         }
         let styles = &staged.model.styles;
+        let built = self.authority()?;
         let mut authority = if !self.is_collaborative() {
-            self.authority
-                .stage_standalone_ops_v1(&ops, origin, styles, baseline)
+            built.stage_standalone_ops_v1(&ops, origin, styles, baseline)
         } else {
             match baseline {
-                Some(baseline) => self
-                    .authority
-                    .stage_local_ops_from_v1(&ops, origin, styles, baseline),
-                None => self.authority.stage_local_ops_v1(&ops, origin, styles),
+                Some(baseline) => built.stage_local_ops_from_v1(&ops, origin, styles, baseline),
+                None => built.stage_local_ops_v1(&ops, origin, styles),
             }
         }
         .map_err(authority_error)?;
@@ -134,13 +132,14 @@ impl Workbook {
             (true, false) => LocalHistory::SheetOrder,
             (false, _) => LocalHistory::None,
         };
+        let built = self.authority.get_mut()?;
         let update = match authority {
             PreparedAuthority::Staged(authority) => {
-                self.authority.adopt_local_update(*authority, local_history)
+                built.adopt_local_update(*authority, local_history)
             }
-            PreparedAuthority::RangeFormat(authority) => self
-                .authority
-                .commit_range_format_sync(*authority, local_history),
+            PreparedAuthority::RangeFormat(authority) => {
+                built.commit_range_format_sync(*authority, local_history)
+            }
         }
         .map_err(authority_error)?;
         self.install_model_with_ops(model, &ops)?;

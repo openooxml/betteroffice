@@ -123,6 +123,7 @@ export interface YrsStoredFormatting {
 }
 
 export interface YrsInputProps {
+  id?: string;
   enabled: boolean;
   readOnly: boolean;
   holdInput?: boolean;
@@ -300,6 +301,7 @@ function isBodyFlowStory(story: string): boolean {
 
 const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInput(
   {
+    id,
     enabled,
     readOnly,
     holdInput = false,
@@ -2303,6 +2305,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   if (!enabled) return null;
   const textarea = (
     <textarea
+      id={id}
       ref={textareaRef}
       // Preserve the editor focus-target contract while the implementation is
       // yrs-owned. This is only a compatibility class on the hidden textarea;

@@ -431,7 +431,7 @@ export function XlsxEditorContent({
   shortcuts,
   onShortcutIssue,
 }: Omit<XlsxInThreadEditorProps, 'file'> & { file?: Uint8Array }) {
-  const { t } = useTranslation();
+  const { t, lang } = useTranslation();
   const collaborationEnabled = collaboration !== undefined;
   const collaborationClientId = collaboration?.clientId;
   const collaborationInitialUpdate = collaboration?.initialUpdate;
@@ -858,7 +858,7 @@ export function XlsxEditorContent({
       chartId: selectedChart?.id ?? null,
     };
   }, [sheetInfo, activeSheet, selection, selectedChart]);
-  const pluginHost = useXlsxPluginHost({
+  const pluginHost = useXlsxPluginHost({ locale: lang, focusRoot: scrollRef,
     plugins,
     pluginGrants,
     onPluginError,

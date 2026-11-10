@@ -8,6 +8,8 @@ import {
   useSyncExternalStore,
 } from 'react';
 import type { RefObject } from 'react';
+import { resolvedLocale } from '../i18n/LocaleContext';
+import { trackFocus } from '../../../../shared/plugin-host/focusTracker';
 import type { TFunction } from '@betteroffice/xlsx-i18n';
 import type { Proposal } from '@betteroffice/xlsx';
 import type { XlsxCommandController } from '../commands/createXlsxCommandStore';
@@ -39,6 +41,8 @@ export interface PaintedGridStore {
 }
 
 export interface UseXlsxPluginHostOptions extends XlsxEditorPluginProps {
+  locale?: string;
+  focusRoot?: RefObject<HTMLElement | null>;
   createClients?: typeof createPluginClients;
   createGeometry?: typeof createPeerlessPluginGeometry;
   /** Stable; its members read the editor at call time. */
@@ -113,6 +117,13 @@ export function useXlsxPluginHost(options: UseXlsxPluginHostOptions): XlsxPlugin
   );
 
   const managed = (options.plugins?.length ?? 0) > 0;
+  const locale = resolvedLocale(options.locale);
+  useLayoutEffect(() => { host.localeChanged(locale); }, [host, locale]);
+  useLayoutEffect(() => {
+    if (!managed) return;
+    return trackFocus(() => latest.current.focusRoot?.current ? [latest.current.focusRoot.current] : [],
+      (focused) => host.focusChanged(focused));
+  }, [host, managed]);
 
   /** Publishes the layout and geometry of the painted frame for the current version. */
   const publish = useCallback(() => {
