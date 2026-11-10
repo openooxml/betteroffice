@@ -2,6 +2,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, test } from 'bun:test';
 import type { DisplayPage, DisplayPrimitive } from '@betteroffice/docx/layout/render';
 import { CanvasPageMirror } from './CanvasPageMirror';
+import { describeNode, sameNode } from './__fixtures__/nodeIdentity';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -66,12 +67,12 @@ test('a rebuilt page keeps focus on the focused mirror paragraph that is not a t
   const before = view.block(0, 'p2');
   before.tabIndex = -1;
   before.focus();
-  expect(document.activeElement).toBe(before);
+  expect(sameNode(document.activeElement, before)).toBe('same');
   view.update([edited]);
   const after = view.block(0, 'p2');
-  expect(after).not.toBe(before);
+  expect(after === before).toBe(false);
   expect(after.textContent).toContain('edited');
-  expect(document.activeElement).toBe(after);
+  expect(sameNode(document.activeElement, after)).toBe('same');
 });
 
 test('a rebuilt page keeps a selection inside it by paragraph and offset', () => {
@@ -81,7 +82,7 @@ test('a rebuilt page keeps a selection inside it by paragraph and offset', () =>
   const before = view.block(0, 'p2');
   view.update([edited]);
   const after = view.block(0, 'p2');
-  expect(after).not.toBe(before);
+  expect(after === before).toBe(false);
   const selection = getSelection()!;
   expect(selection.toString()).toBe('Second');
   expect(after.contains(selection.anchorNode)).toBe(true);
@@ -96,7 +97,7 @@ test('a rebuilt page does not pull back focus that moved elsewhere', () => {
   const outside = view.getByText('outside');
   outside.focus();
   view.update([edited]);
-  expect(document.activeElement).toBe(outside);
+  expect(sameNode(document.activeElement, outside)).toBe('same');
 });
 
 test('a rebuilt page does not collapse or move a selection that extends to another page', () => {
@@ -106,7 +107,7 @@ test('a rebuilt page does not collapse or move a selection that extends to anoth
   view.update([edited, first]);
   const selection = getSelection()!;
   expect(selection.isCollapsed).toBe(false);
-  expect(selection.focusNode).toBe(focusNode);
+  expect(sameNode(selection.focusNode, focusNode)).toBe('same');
   expect(selection.focusOffset).toBe(5);
   expect(view.host(0).contains(selection.focusNode)).toBe(false);
 });
@@ -118,7 +119,7 @@ test('a rebuilt page whose focused paragraph is gone restores neither focus nor 
   block.focus();
   select([block, 0], [block, 6]);
   view.update([{ p1: 'First paragraph' }]);
-  expect(view.host(0).querySelector('[data-block-id="p2"]')).toBeNull();
+  expect(describeNode(view.host(0).querySelector('[data-block-id="p2"]'))).toBe('null');
   expect(view.host(0).contains(document.activeElement)).toBe(false);
   expect(view.host(0).contains(getSelection()!.anchorNode)).toBe(false);
   expect(view.host(0).contains(getSelection()!.focusNode)).toBe(false);
@@ -142,8 +143,8 @@ test('a rebuilt page leaves a selection whose text survived as it was', () => {
   const { anchorNode, focusNode } = getSelection()!;
   view.update([edited]);
   const selection = getSelection()!;
-  expect(view.block(0, 'p1')).toBe(p1);
-  expect(selection.anchorNode).toBe(anchorNode);
-  expect(selection.focusNode).toBe(focusNode);
+  expect(sameNode(view.block(0, 'p1'), p1)).toBe('same');
+  expect(sameNode(selection.anchorNode, anchorNode)).toBe('same');
+  expect(sameNode(selection.focusNode, focusNode)).toBe('same');
   expect(selection.toString()).toBe('First');
 });

@@ -5,6 +5,7 @@ import type { DisplayPage, DisplayPrimitive } from '@betteroffice/docx/layout/re
 import type { TFunction } from '@betteroffice/docx-i18n';
 import { CanvasPageMirror } from '../CanvasPageMirror';
 import { fakeIdleScheduler } from '../__fixtures__/fakeIdleScheduler';
+import { describeNode, sameNode } from '../__fixtures__/nodeIdentity';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
 import { useUnbuiltPageMirrors } from './UnbuiltPageMirrors';
 
@@ -97,7 +98,7 @@ test('focus handed from an unbuilt paragraph lands in the full mirror, not in it
   await settle();
   const block = view.fullBlock();
   expect(block?.textContent).toBe(TEXT);
-  expect(document.activeElement).toBe(block);
+  expect(sameNode(document.activeElement, block)).toBe('same');
 });
 
 test('a selection handed from an unbuilt paragraph lands in the full mirror, not in its text stand-in', async () => {
@@ -126,7 +127,7 @@ test('with text page mirrors, focus handed from an unbuilt paragraph lands in th
   await settle();
   const block = view.textBlock();
   expect(block).not.toBeNull();
-  expect(document.activeElement).toBe(block);
+  expect(sameNode(document.activeElement, block)).toBe('same');
 });
 
 const shell = (): DisplayPage => ({ ...page([]), unbuilt: true });
@@ -144,12 +145,12 @@ test('focus handed to a page whose full mirror fills in place waits for the para
   await view.to('full', shell());
   const root = mirrorRoot(view);
   expect(root).not.toBeNull();
-  expect(view.fullBlock()).toBeNull();
+  expect(describeNode(view.fullBlock())).toBe('null');
   await view.to('full', page());
-  expect(mirrorRoot(view)).toBe(root);
+  expect(sameNode(mirrorRoot(view), root)).toBe('same');
   const block = view.fullBlock();
   expect(block?.textContent).toBe(TEXT);
-  expect(document.activeElement).toBe(block);
+  expect(sameNode(document.activeElement, block)).toBe('same');
 });
 
 test('a selection handed to a page whose full mirror fills in place waits for the paragraph', async () => {
@@ -160,7 +161,7 @@ test('a selection handed to a page whose full mirror fills in place waits for th
   const root = mirrorRoot(view);
   expect(root).not.toBeNull();
   await view.to('full', page());
-  expect(mirrorRoot(view)).toBe(root);
+  expect(sameNode(mirrorRoot(view), root)).toBe('same');
   const block = view.fullBlock();
   const selection = getSelection()!;
   expect(selection.toString()).toBe(TEXT);
@@ -173,13 +174,13 @@ test('while the page is an empty shell, focus waits on the named page and then l
   await view.to('full', shell());
   const root = mirrorRoot(view);
   expect(root?.childNodes.length).toBeGreaterThan(0);
-  expect(root?.querySelector('[role="paragraph"], p')).toBeNull();
-  expect(document.activeElement).toBe(root);
+  expect(describeNode(root?.querySelector('[role="paragraph"], p'))).toBe('null');
+  expect(sameNode(document.activeElement, root)).toBe('same');
   expect(root?.getAttribute('role')).toBe('document');
   expect(root?.getAttribute('aria-label')).toBe('Page 2');
   await view.to('full', page());
-  expect(mirrorRoot(view)).toBe(root);
-  expect(document.activeElement).toBe(view.fullBlock());
+  expect(sameNode(mirrorRoot(view), root)).toBe('same');
+  expect(sameNode(document.activeElement, view.fullBlock())).toBe('same');
 });
 
 test('a hand-off to a page built without paragraphs ends on the page and is not taken back', async () => {
@@ -187,10 +188,10 @@ test('a hand-off to a page built without paragraphs ends on the page and is not 
   await focusUnbuilt(view, 0);
   await view.to('full', page([]));
   const root = mirrorRoot(view);
-  expect(document.activeElement).toBe(root);
+  expect(sameNode(document.activeElement, root)).toBe('same');
   await view.to('full', page());
   expect(view.fullBlock()).not.toBeNull();
-  expect(document.activeElement).toBe(root);
+  expect(sameNode(document.activeElement, root)).toBe('same');
 });
 
 test('a paragraph that left the page ends the hand-off at its remembered place, not where it reappears', async () => {
@@ -198,7 +199,7 @@ test('a paragraph that left the page ends the hand-off at its remembered place, 
   await focusUnbuilt(view, 1);
   await view.to('full', shell());
   await view.to('full', page([['p1', 'First paragraph', 'A'], ['p3', 'Third paragraph', 'C']]));
-  expect(document.activeElement).toBe(blockOf(view, 'p3'));
+  expect(sameNode(document.activeElement, blockOf(view, 'p3'))).toBe('same');
   await view.to('full', page([['p1', 'First paragraph', 'A'], ['p2', 'Moved paragraph', 'B'], ['p3', 'Third paragraph', 'C']]));
   expect(document.activeElement?.getAttribute('data-block-id')).toBe('p3');
 });
@@ -219,7 +220,7 @@ test('of two paragraphs with the same text, the hand-off lands on the one at the
   await focusUnbuilt(view, 1);
   await view.to('full', shell());
   await view.to('full', page([['p1', 'Same text'], ['p2', 'Same text']]));
-  expect(document.activeElement).toBe(blockOf(view, 'p2'));
+  expect(sameNode(document.activeElement, blockOf(view, 'p2'))).toBe('same');
 });
 
 for (const marker of ['numbered', 'bullet'] as const) {
@@ -230,7 +231,7 @@ for (const marker of ['numbered', 'bullet'] as const) {
     await view.to('full', page([['p0', 'Inserted paragraph', 'Z'], ['p1', 'First paragraph', 'A'], ['p2', 'List item', 'B', marker]]));
     const item = blockOf(view, 'p2');
     expect(item?.textContent?.trim()).not.toBe('List item');
-    expect(document.activeElement).toBe(item);
+    expect(sameNode(document.activeElement, item)).toBe('same');
   });
 }
 
@@ -241,7 +242,7 @@ test('without paragraph ids, focus handed from an unbuilt list item ends on the 
   await view.to('full', page([['p1', 'First paragraph'], ['p2', 'List item', undefined, 'numbered'], ['p3', 'Third paragraph']]));
   const item = blockOf(view, 'p2');
   expect(item?.textContent?.trim()).not.toBe('List item');
-  expect(document.activeElement).toBe(item);
+  expect(sameNode(document.activeElement, item)).toBe('same');
 });
 
 test('focus handed from an unbuilt paragraph lands on it after its text was edited', async () => {
@@ -249,7 +250,7 @@ test('focus handed from an unbuilt paragraph lands on it after its text was edit
   await focusUnbuilt(view, 1);
   await view.to('full', shell());
   await view.to('full', page([['p0', 'Inserted paragraph', 'Z'], ['p1', 'First paragraph', 'A'], ['p2', `${TEXT}, edited`, 'B']]));
-  expect(document.activeElement).toBe(blockOf(view, 'p2'));
+  expect(sameNode(document.activeElement, blockOf(view, 'p2'))).toBe('same');
 });
 
 test('focus moved elsewhere while a hand-off waits drops it', async () => {
@@ -261,6 +262,6 @@ test('focus moved elsewhere while a hand-off waits drops it', async () => {
   await act(async () => { outside.focus(); });
   await view.to('full', page());
   expect(view.fullBlock()).not.toBeNull();
-  expect(document.activeElement).toBe(outside);
+  expect(sameNode(document.activeElement, outside)).toBe('same');
   outside.remove();
 });

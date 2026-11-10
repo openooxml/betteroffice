@@ -8,6 +8,7 @@ import {
   type DecodedFrameDelta, type DisplayPage, type FramePageOperation,
 } from '@betteroffice/docx/layout/render';
 import type { PeerlessEditSessionBinding, UsePeerlessEditSessionOptions } from '../hooks/usePeerlessEditSession';
+import { describeNode, sameNode } from '../__fixtures__/nodeIdentity';
 import * as composition from './composition';
 import * as display from '@betteroffice/docx/layout/render';
 import { installCompositionEventPolyfill } from './compositionEventPolyfill.testing';
@@ -1601,7 +1602,7 @@ test('unbuilt pages default to labelled regions of focusable plain paragraphs wi
   expect(Array.from(section.children).map((block) => block.tagName)).toEqual(['P', 'P', 'P']);
   expect(Array.from(section.children).every((block) => block.getAttribute('dir') === 'auto' &&
     block.getAttribute('tabindex') === '-1' && !block.hasAttribute('lang'))).toBe(true);
-  expect(section.querySelector('h1, h2, h3, h4, h5, h6, [role="heading"]')).toBeNull();
+  expect(describeNode(section.querySelector('h1, h2, h3, h4, h5, h6, [role="heading"]'))).toBe('null');
   expect(section.firstElementChild?.textContent).toBe('Unbuilt title 16');
   editor.present(frame(2, 0));
   await editor.fill();
@@ -1614,7 +1615,7 @@ test('focusing an unbuilt paragraph navigates and hands focus to its matching bu
   const paragraph = editor.getByText('Unbuilt paragraph 16');
   act(() => paragraph.focus());
   expect(editor.navigate).toHaveBeenCalledWith(16);
-  expect(document.activeElement).toBe(paragraph);
+  expect(sameNode(document.activeElement, paragraph)).toBe('same');
   editor.present(frame(2, 0));
   await editor.fill();
   await waitForMirror(() => {
@@ -1623,7 +1624,7 @@ test('focusing an unbuilt paragraph navigates and hands focus to its matching bu
     expect(active?.getAttribute('role')).toBe('paragraph');
     expect(active?.textContent).toBe('Unbuilt paragraph 16');
   });
-  expect(editor.container.querySelector('[data-docx-unbuilt-page="15"]')).toBeNull();
+  expect(describeNode(editor.container.querySelector('[data-docx-unbuilt-page="15"]'))).toBe('null');
   const block = document.activeElement!;
   expect(block.getAttribute('tabindex')).toBe('-1');
   expect(block.hasAttribute('aria-level')).toBe(false);
@@ -1653,7 +1654,7 @@ test('a selection inside one unbuilt section navigates once and moves the select
     act(() => fireEvent(document, new Event('selectionchange')));
     expect(editor.navigate.mock.calls).toEqual([]);
     await waitForMirror(() => expect(editor.navigate.mock.calls).toEqual([[16]]));
-    expect(document.activeElement).toBe(editor.textarea);
+    expect(sameNode(document.activeElement, editor.textarea)).toBe('same');
     editor.present(frame(2, 0));
     await editor.fill();
     await waitForMirror(() => {
@@ -1662,8 +1663,8 @@ test('a selection inside one unbuilt section navigates once and moves the select
       expect(block?.closest('[data-page-index="15"] .canvas-page-mirror')).not.toBeNull();
       expect(block?.textContent).toBe('Unbuilt paragraph 16');
     });
-    expect(document.activeElement).toBe(editor.textarea);
-    expect(editor.container.querySelector('[data-docx-unbuilt-page="15"]')).toBeNull();
+    expect(sameNode(document.activeElement, editor.textarea)).toBe('same');
+    expect(describeNode(editor.container.querySelector('[data-docx-unbuilt-page="15"]'))).toBe('null');
   } finally {
     selection.removeAllRanges();
   }
@@ -1689,7 +1690,7 @@ test('a selection spanning beyond one unbuilt section, or select-all, never navi
     });
     await new Promise((resolve) => globalThis.setTimeout(resolve, 120));
     expect(editor.navigate.mock.calls).toEqual([]);
-    expect(document.activeElement).toBe(editor.textarea);
+    expect(sameNode(document.activeElement, editor.textarea)).toBe('same');
   } finally {
     selection.removeAllRanges();
   }
@@ -1715,7 +1716,7 @@ test('a pending paragraph handover preserves focus moved back to the input', asy
   act(() => editor.textarea.focus());
   await editor.fill();
   await waitForMirror(() => expect(editor.container.querySelector('[data-page-index="15"] .canvas-page-mirror')?.textContent).toContain('Unbuilt paragraph 16'));
-  expect(document.activeElement).toBe(editor.textarea);
+  expect(sameNode(document.activeElement, editor.textarea)).toBe('same');
 });
 
 test('paragraph handover prefers a text match at or after its non-blank ordinal', async () => {
@@ -1725,8 +1726,8 @@ test('paragraph handover prefers a text match at or after its non-blank ordinal'
   await editor.fill();
   await waitForMirror(() => {
     const blocks = editor.container.querySelectorAll('[data-page-index="15"] .canvas-page-mirror [role="paragraph"]');
-    expect(blocks).toHaveLength(3);
-    expect(document.activeElement).toBe(blocks[2]!);
+    expect(blocks.length).toBe(3);
+    expect(sameNode(document.activeElement, blocks[2]!)).toBe('same');
   });
 });
 
@@ -1737,8 +1738,8 @@ test('paragraph handover falls back to the first built paragraph when nothing ma
   await editor.fill();
   await waitForMirror(() => {
     const blocks = editor.container.querySelectorAll('[data-page-index="15"] .canvas-page-mirror [role="paragraph"]');
-    expect(blocks).toHaveLength(1);
-    expect(document.activeElement).toBe(blocks[0]!);
+    expect(blocks.length).toBe(1);
+    expect(sameNode(document.activeElement, blocks[0]!)).toBe('same');
   });
   const block = document.activeElement!;
   expect(block.getAttribute('tabindex')).toBe('-1');
@@ -1754,8 +1755,8 @@ test('activating an unbuilt paragraph navigates to its page', async () => {
 
 test('off preserves the page DOM without any unbuilt sections, edge sections or reads', async () => {
   const editor = await unbuiltMirrorEditor('off');
-  expect(editor.container.querySelector('[data-docx-unbuilt-page]')).toBeNull();
-  expect(editor.container.querySelector('[data-docx-unbuilt-range]')).toBeNull();
+  expect(describeNode(editor.container.querySelector('[data-docx-unbuilt-page]'))).toBe('null');
+  expect(describeNode(editor.container.querySelector('[data-docx-unbuilt-range]'))).toBe('null');
   expect(editor.container.textContent).not.toContain('Unbuilt title 16');
   expect(editor.reads).toEqual([]);
 });
@@ -1767,7 +1768,7 @@ test('unbuilt section cost counts accessibility nodes per paragraph and text lin
   expect(result.nodes).toBe(1 + 3 * 3 + (2 + 3));
   expect(result.value.querySelectorAll('p')).toHaveLength(4);
   expect(Array.from(result.value.children).every((block) => block.getAttribute('tabindex') === '-1')).toBe(true);
-  expect(result.value.querySelector('h1, h2, h3, h4, h5, h6, [role="heading"]')).toBeNull();
+  expect(describeNode(result.value.querySelector('h1, h2, h3, h4, h5, h6, [role="heading"]'))).toBe('null');
 });
 
 test('turning the mirror off removes its sections and temporary focusability without changing built roles', async () => {
@@ -1783,8 +1784,8 @@ test('turning the mirror off removes its sections and temporary focusability wit
   expect(block.getAttribute('role')).toBe('paragraph');
   expect(block.getAttribute('tabindex')).toBe('-1');
   editor.rerender(<PeerlessPagedEditor sessionOptions={editor.sessionOptions} unbuiltPageMirror="off" />);
-  expect(editor.container.querySelector('[data-docx-unbuilt-page]')).toBeNull();
-  expect(editor.container.querySelector('[data-docx-unbuilt-range]')).toBeNull();
+  expect(describeNode(editor.container.querySelector('[data-docx-unbuilt-page]'))).toBe('null');
+  expect(describeNode(editor.container.querySelector('[data-docx-unbuilt-range]'))).toBe('null');
   expect(block.getAttribute('role')).toBe('paragraph');
   expect(block.hasAttribute('aria-level')).toBe(false);
   expect(block.hasAttribute('tabindex')).toBe(false);
