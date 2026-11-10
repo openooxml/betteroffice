@@ -592,6 +592,16 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     createClients: createPeerlessPluginClients, createGeometry: createPeerlessPluginGeometry,
     readOnly: props.readOnly ?? false, handle: pluginIdentity, selection: pluginSelection, proposals, staleFor,
     proposalsPending: () => coordinator.pending || proposalsPending.current !== null, canvasRef, t,
+    selectionPaintReady: (sheet) => {
+      const source = sourceRef.current;
+      const ready = source?.selectionPaintReady(sheet, activeRef.current) ?? (() => true);
+      const sequence = Math.max(0, ...[...requests].filter(([, request]) => request.sheet === sheet).map(([seq]) => seq));
+      return () => {
+        const painted = source?.painted;
+        return ready() && (!sequence || (painted?.request.sheet === sheet &&
+          !painted.provisional && (source?.coversThroughSeq ?? -1) >= sequence));
+      };
+    },
     positionAtPoint: (clientX, clientY) => {
       const owner = ownerRef.current;
       const frame = sourceRef.current?.painted;

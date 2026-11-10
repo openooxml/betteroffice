@@ -867,6 +867,15 @@ export function XlsxEditorContent({
     readOnly,
     handle: openedHandle,
     selection: pluginSelection,
+    selectionPaintReady: (sheet) => {
+      const mark = { generation: generationRef.current, mutation: mutationRef.current,
+        view: `${sheet}:${zoomRef.current}` };
+      const previous = paintMarkRef.current;
+      const pending = sheet === activeSheetRef.current &&
+        (rafRef.current !== null || !previous || !covers(previous, mark));
+      return () => !pending || (paintMarkRef.current !== previous &&
+        paintMarkRef.current !== null && covers(paintMarkRef.current, mark));
+    },
     proposals,
     staleFor,
     proposalsPending: () => coordinator.pending,
@@ -1232,6 +1241,12 @@ export function XlsxEditorContent({
     try {
       version = handle ? handle.version() : null;
     } catch {}
+    const painted: PaintMark = {
+      generation: generationRef.current,
+      mutation: mutationRef.current,
+      view: `${activeSheet}:${zoom}`,
+    };
+    paintMarkRef.current = painted;
     const sheetId = sheetInfoRef.current?.sheetIds[activeSheet];
     presentGrid(
       version !== null && sheetId !== undefined
@@ -1243,12 +1258,6 @@ export function XlsxEditorContent({
     mergedRangesRef.current = { sheet: activeSheet, ranges: nextMergedRanges };
     setFrame(dl);
     if (!handle) return;
-    const painted: PaintMark = {
-      generation: generationRef.current,
-      mutation: mutationRef.current,
-      view: `${activeSheet}:${zoom}`,
-    };
-    paintMarkRef.current = painted;
     const waiters = paintWaitersRef.current;
     paintWaitersRef.current = waiters.filter((waiter) => !covers(painted, waiter.mark));
     for (const waiter of waiters) if (covers(painted, waiter.mark)) waiter.resolve(true);

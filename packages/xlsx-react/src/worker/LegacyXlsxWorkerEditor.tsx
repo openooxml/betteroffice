@@ -714,6 +714,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   const pluginHost = useXlsxPluginHost({ locale: lang, focusRoot: scrollRef, ...props, access: pluginAccess, commands, editGate: false,
     readOnly: props.readOnly ?? false, handle: run?.ready && !run.failure ? run.peer : null,
     selection: pluginSelection, proposals, staleFor, proposalsPending: () => coordinator.pending, canvasRef, t,
+    selectionPaintReady: (sheet) => sourceRef.current?.selectionPaintReady(sheet, activeRef.current) ?? (() => true),
     positionAtPoint: (clientX, clientY) => {
       const owner = runRef.current;
       return owner?.current && !owner.retiring && !owner.failure ? apiBridge.getPositionAtPoint?.(clientX, clientY) ?? null : null;
@@ -771,6 +772,9 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
           previewState.committed = null;
           flushSync(() => setPreviewDraft(null));
         }
+      },
+      onInstalled(painted) {
+        const request = painted.request;
         const sheetId = run.session.state.sheets[request.sheet]?.id;
         presentGridRef.current(sheetId === undefined ? null : {
           frame: painted.displayList, zoom: request.zoom, viewport: request.viewport, version: painted.version, sheetId,

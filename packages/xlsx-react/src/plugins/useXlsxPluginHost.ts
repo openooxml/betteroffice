@@ -34,6 +34,7 @@ import type { XlsxEditorPluginProps, XlsxPluginGeometry, XlsxPluginSelection } f
 
 const NO_ACTIVATIONS: readonly XlsxPluginActivation[] = Object.freeze([]);
 const NO_DECORATIONS: readonly RowDecorationSet[] = Object.freeze([]);
+const SELECTION_PAINT_WAIT_MS = 1500;
 
 /** The frame the canvas shows, for chrome that follows every paint. */
 export interface PaintedGridStore {
@@ -58,6 +59,8 @@ export interface UseXlsxPluginHostOptions extends XlsxEditorPluginProps {
   /** The workbook once it is open, else null. Plugins open it while the editor still holds it. */
   handle: object | null;
   selection: XlsxPluginSelection;
+  /** Captures pending paint readiness at the quiet-window deadline. */
+  selectionPaintReady?(sheet: number): () => boolean;
   /** The canvas the grid paints into. */
   canvasRef: RefObject<HTMLCanvasElement | null>;
   /** The editor's hit test that plugin point queries go through; read at call time. */
@@ -118,20 +121,47 @@ export function useXlsxPluginHost(options: UseXlsxPluginHostOptions): XlsxPlugin
   );
 
   const selectionRef = useRef<XlsxPluginSelection>(null);
+  const selectionIdentityRef = useRef<string | null>(null);
   const settleRef = useRef<ReturnType<typeof createSelectionSettle> | null>(null);
   const managed = (options.plugins?.length ?? 0) > 0;
   useEffect(() => {
     if (!managed || !options.handle) return;
     let generation = host.generation();
-    const settled = (source: 'pointer' | 'touch' | 'keyboard') => host.selectionSettled(source, generation);
+    let paintReady: (() => boolean) | undefined;
+    let paintTimer: ReturnType<typeof setTimeout> | null = null;
+    let paintExpired = false;
+    const clearPaintWait = () => {
+      if (paintTimer !== null) clearTimeout(paintTimer);
+      paintTimer = null;
+    };
+    const settled = (source: 'pointer' | 'touch' | 'keyboard') => {
+      clearPaintWait();
+      paintReady = undefined;
+      host.selectionSettled(source, generation);
+    };
     const machine = createSelectionSettle({
       root: () => latest.current.focusRoot?.current ?? null,
-      onUnsettle: () => { generation = host.generation(); host.selectionUnsettled(generation); },
+      canSettle: () => {
+        const sheet = selectionRef.current?.sheetIndex;
+        if (sheet === undefined || paintExpired) return true;
+        paintReady ??= latest.current.selectionPaintReady?.(sheet) ?? (() => true);
+        if (paintReady()) return true;
+        if (paintTimer === null) paintTimer = setTimeout(() => {
+          paintTimer = null;
+          paintExpired = true;
+          if (selectionIdentityRef.current !== null) machine.notifySelectionChange(selectionIdentityRef.current);
+        }, SELECTION_PAINT_WAIT_MS);
+        return false;
+      },
+      onUnsettle: () => {
+        clearPaintWait(); paintReady = undefined; paintExpired = false;
+        generation = host.generation(); host.selectionUnsettled(generation);
+      },
       onSettle: settled,
       onResettle: settled,
     });
     settleRef.current = machine;
-    return () => { machine.dispose(); settleRef.current = null; };
+    return () => { clearPaintWait(); machine.dispose(); settleRef.current = null; };
   }, [host, managed, options.handle]);
   const locale = resolvedLocale(options.locale);
   useLayoutEffect(() => { host.localeChanged(locale); }, [host, locale]);
@@ -241,6 +271,7 @@ export function useXlsxPluginHost(options: UseXlsxPluginHostOptions): XlsxPlugin
     if (managed) {
       selectionRef.current = options.selection;
       const identity = host.selectionChanged(options.selection);
+      selectionIdentityRef.current = identity;
       settleRef.current?.notifySelectionChange(identity);
     }
   }, [host, managed, options.handle, options.selection]);
@@ -254,6 +285,9 @@ export function useXlsxPluginHost(options: UseXlsxPluginHostOptions): XlsxPlugin
       paintedRef.current = next;
       if (!next || (latest.current.plugins?.length ?? 0) > 0) publish();
       paintedStore.emit();
+      if (next && selectionIdentityRef.current !== null) {
+        settleRef.current?.notifySelectionChange(selectionIdentityRef.current);
+      }
     },
     [paintedStore, publish]
   );
