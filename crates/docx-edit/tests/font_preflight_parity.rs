@@ -216,3 +216,55 @@ fn main_part_named_by_the_package_relationship() {
     ]);
     assert_parity(&bytes, "MissingFont");
 }
+
+#[test]
+fn duplicate_numbering_ids_take_the_last_definition() {
+    let level = |id: u32, family: &str| {
+        format!(
+            r#"<w:abstractNum w:abstractNumId="{id}"><w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val="*"/><w:rPr><w:rFonts w:ascii="{family}" w:hAnsi="{family}"/></w:rPr></w:lvl></w:abstractNum>"#
+        )
+    };
+    let num = |num: u32, abs: u32| {
+        format!(r#"<w:num w:numId="{num}"><w:abstractNumId w:val="{abs}"/></w:num>"#)
+    };
+    for (definitions, wanted) in [
+        (
+            format!(
+                "{}{}{}{}",
+                level(0, "BulletA"),
+                level(1, "BulletB"),
+                num(1, 0),
+                num(1, 1)
+            ),
+            "BulletB",
+        ),
+        (
+            format!(
+                "{}{}{}",
+                level(0, "BulletA"),
+                level(0, "BulletC"),
+                num(1, 0)
+            ),
+            "BulletC",
+        ),
+    ] {
+        let bytes = package(&[
+            (
+                "word/document.xml",
+                document(
+                    r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>Item</w:t></w:r></w:p>"#,
+                ),
+            ),
+            (
+                "word/_rels/document.xml.rels",
+                rels(&[("styles", "styles.xml"), ("numbering", "numbering.xml")]),
+            ),
+            ("word/styles.xml", styles("Base", "")),
+            (
+                "word/numbering.xml",
+                format!(r#"<w:numbering xmlns:w="{W}">{definitions}</w:numbering>"#),
+            ),
+        ]);
+        assert_parity(&bytes, wanted);
+    }
+}

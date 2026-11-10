@@ -310,6 +310,9 @@ impl<'a> Numbering<'a> {
             by_style_link: BTreeMap::new(),
             markers: RefCell::new(BTreeMap::new()),
         };
+        let mut order: Vec<usize> = Vec::new();
+        let mut positions = BTreeMap::new();
+        let mut links = Vec::new();
         for node in &root.children {
             visited(1);
             match node.name {
@@ -317,22 +320,23 @@ impl<'a> Numbering<'a> {
                     let Some(id) = node.attr("numId") else {
                         continue;
                     };
-                    numbering.instances.entry(id).or_insert_with(|| {
-                        let mut overrides = BTreeMap::new();
-                        for child in &node.children {
-                            if child.name == "w:lvlOverride"
-                                && let Some(ilvl) = child.attr("ilvl")
-                            {
-                                overrides
-                                    .entry(ilvl)
-                                    .or_insert_with(|| child.child("w:lvl"));
-                            }
+                    let mut overrides = BTreeMap::new();
+                    for child in &node.children {
+                        if child.name == "w:lvlOverride"
+                            && let Some(ilvl) = child.attr("ilvl")
+                        {
+                            overrides
+                                .entry(ilvl)
+                                .or_insert_with(|| child.child("w:lvl"));
                         }
+                    }
+                    numbering.instances.insert(
+                        id,
                         NumInstance {
                             abstract_id: node.val("w:abstractNumId"),
                             overrides,
-                        }
-                    });
+                        },
+                    );
                 }
                 "w:abstractNum" => {
                     let index = numbering.abstracts.len();
@@ -351,14 +355,29 @@ impl<'a> Numbering<'a> {
                         has_levels,
                         style_link: node.val("w:numStyleLink"),
                     });
-                    if let Some(id) = node.attr("abstractNumId") {
-                        numbering.by_id.entry(id).or_insert(index);
+                    let id = node.attr("abstractNumId");
+                    if let Some(id) = id {
+                        numbering.by_id.insert(id, index);
                     }
-                    if let Some(link) = node.val("w:styleLink") {
-                        numbering.by_style_link.entry(link).or_insert(index);
+                    match id.and_then(|id| positions.get(id).copied()) {
+                        Some(position) => order[position] = index,
+                        None => {
+                            if let Some(id) = id {
+                                positions.insert(id, order.len());
+                            }
+                            order.push(index);
+                        }
                     }
+                    links.push(node.val("w:styleLink"));
                 }
                 _ => {}
+            }
+        }
+        for index in order {
+            if numbering.abstracts[index].has_levels
+                && let Some(link) = links[index]
+            {
+                numbering.by_style_link.entry(link).or_insert(index);
             }
         }
         numbering
