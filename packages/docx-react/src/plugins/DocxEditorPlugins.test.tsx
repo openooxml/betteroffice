@@ -54,7 +54,7 @@ import * as workerPluginGeometry from '../components/DocxEditor/peerless/workerP
 import * as shellControllers from '../components/DocxEditor/peerless/shellController';
 import * as pagePointers from '../components/DocxEditor/hooks/usePagesPointer';
 import * as docxBindings from './useDocxPluginHost';
-import { selectionWindow } from '../../../../e2e/browser/plugin-host/selection-clock';
+import { selectionClock, selectionWindow } from '../../../../e2e/browser/plugin-host/selection-clock';
 import { storyAnchorsDocx } from './__fixtures__/storyAnchorsDocx';
 import { scopePluginGeometry } from './geometry';
 import * as canvasReplay from '../components/DocxEditor/canvasReplay';
@@ -2642,7 +2642,7 @@ async function matrixDocument() {
   return zip.generateAsync({ type: 'arraybuffer' });
 }
 
-async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapping?: { reject(): boolean; rejected(): void }) {
+async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapping?: { reject(): boolean; rejected(): void }, controlledClock = false) {
   const canvasContext = spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => new Proxy({} as Record<string, unknown>, {
     get(target, key) {
       if (key === 'measureText') return () => ({ width: 0 });
@@ -2652,7 +2652,8 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
     set(target, key, value) { target[key as string] = value; return true; },
   }) as unknown as CanvasRenderingContext2D);
   const bounds = spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 800, 1000));
-  const clock = selectionWindow();
+  const clock = controlledClock ? selectionClock() : selectionWindow();
+  const restoreClock = () => { if ('restore' in clock) clock.restore(); };
   const events: DocxPluginEvent[] = [];
   const settles: Array<{ context: DocxPluginContext<null>; anchor: DocxAnchorGeometryResult | null; at: number }> = [];
   const plugin = defineDocxPlugin({ id: 'matrix', createState: () => null,
@@ -2741,6 +2742,31 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
       await act(async () => { await clock.tick(ms); });
       await host.notificationsIdle();
     };
+    const selectionLayout = async () => {
+      await act(async () => {
+        await mounted.ref.current!.flushPendingInput();
+        await mounted.ref.current!.whenLayoutComplete({ timeoutMs: 3000 });
+      });
+      await new Promise<void>(resolve => {
+        const ready = () => {
+          const current = context();
+          const display = current.snapshot.selection.displayRange;
+          const layout = current.geometry?.layout;
+          return !!display && !!layout && layout.version === host.version() &&
+            display.layoutId === layout.id && (workerGeometry?.selectionMapped() ?? true);
+        };
+        const stop: Array<() => void> = [];
+        const check = () => {
+          if (!ready()) return;
+          for (const unsubscribe of stop) unsubscribe();
+          resolve();
+        };
+        stop.push(host.subscribe(check));
+        if (workerGeometry) stop.push(workerGeometry.subscribe(check));
+        check();
+      });
+      await host.notificationsIdle();
+    };
     const reset = () => { events.length = 0; settles.length = 0; };
     const anchor = () => context().geometry!.getAnchorGeometry({ kind: 'selection' });
     const readAnchor = () => context().geometry!.readAnchorGeometries([{ kind: 'selection' }]);
@@ -2753,7 +2779,7 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
     };
     const first = (await firstParagraph(mounted.ref)).paragraph;
     reset();
-    return { ...mounted, host, plugin, events, settles, first, context, selection, quiet, reset, anchor, readAnchor, clock, input,
+    return { ...mounted, host, plugin, events, settles, first, context, selection, selectionLayout, quiet, reset, anchor, readAnchor, clock, input,
       controller: () => controller,
       session: () => mounted.ref.current!.getEditorRef()!.getYrsSession()!,
       async remote(edit: (session: YrsSession) => void) {
@@ -2802,9 +2828,9 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
         });
         await host.notificationsIdle();
       },
-      dispose() { mounted.view.unmount(); for (const restore of restores) restore(); canvasContext.mockRestore(); bounds.mockRestore(); },
+      dispose() { try { mounted.view.unmount(); for (const restore of restores) restore(); canvasContext.mockRestore(); bounds.mockRestore(); } finally { restoreClock(); } },
     };
-  } catch (error) { cleanup(); canvasContext.mockRestore(); bounds.mockRestore(); throw error; }
+  } catch (error) { try { cleanup(); canvasContext.mockRestore(); bounds.mockRestore(); } finally { restoreClock(); } throw error; }
   finally { captureHost.mockRestore(); captureController.mockRestore(); captureBinding.mockRestore(); captureParts.mockRestore(); capturePointer.mockRestore(); captureGeometry.mockRestore(); }
 }
 
@@ -2873,9 +2899,10 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
   });
 
   for (const place of ['elsewhere', 'after', 'before', 'delete'] as const) test(`${place === 'elsewhere' ? 'T4' : place === 'after' ? 'T4a' : place === 'before' ? 'T4b' : 'T4c'}: a remote edit ${place === 'elsewhere' ? 'elsewhere' : place === 'delete' ? 'that deletes the selection' : `${place} the selection`} ${place === 'delete' ? 'settles once' : 'neither unsettles nor settles'}`, async () => {
-    const h = await matrixEditor(engine);
+    const h = await matrixEditor(engine, documentBytes(), undefined, place === 'delete');
     try {
       await h.selection('body', h.first.paraId, 1, 3);
+      if (place === 'delete') await h.selectionLayout();
       await h.quiet();
       const beforeRange = h.context().snapshot.selection.displayRange;
       const states: boolean[] = [];
@@ -2890,6 +2917,7 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
           } else if (place === 'delete') peer.deleteRange({ story: 'body', start: { paraId: h.first.paraId, offset: 0 }, end: { paraId: h.first.paraId, offset: h.first.text.length } });
           else peer.insertText({ story: 'body', paraId: h.first.paraId, offset: place === 'before' ? 0 : h.first.text.length }, 'remote ');
         });
+        if (place === 'delete') await h.selectionLayout();
         await h.quiet();
         expect(h.settles).toHaveLength(place === 'delete' ? 1 : 0);
         if (place !== 'delete') expect(states).not.toContain(false);
@@ -2901,27 +2929,35 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
           expect((await h.ref.current!.readSelectionInfo())?.selectedText).toBe(h.first.text.slice(1, 3));
           expect(h.events.some(event => event.type === 'selection-change' || event.type === 'layout-change')).toBe(true);
           if (place === 'before') expect(h.context().snapshot.selection.displayRange!.from).toBeGreaterThan(beforeRange!.from);
+        } else {
+          await h.quiet(700);
+          expect(h.settles).toHaveLength(1);
         }
       } finally { stop(); }
     } finally { h.dispose(); }
   });
 
-  if (engine !== 'DL') test('T5: undo that restores a selection settles once', async () => {
-    const h = await matrixEditor(engine);
+  if (engine !== 'DL') test('T5: undo after replacing a selection settles once with a collapsed selection', async () => {
+    const h = await matrixEditor(engine, documentBytes(), undefined, true);
     try {
       await h.selection('body', h.first.paraId, 0, 3);
+      await h.selectionLayout();
       await h.quiet();
       await act(async () => {
         if (h.controller()) expect(await h.controller()!.submit({ kind: 'replaceSelection', payload: { text: 'replacement' } })).toMatchObject({ ok: true });
         else h.ref.current!.getEditorRef()!.insertText('replacement');
       });
+      await h.selectionLayout();
       await h.quiet();
       h.reset();
       await act(async () => { expect(await h.ref.current!.commands.execute('undo', null)).toMatchObject({ ok: true }); });
+      await h.selectionLayout();
       await h.quiet();
       expect(h.settles).toHaveLength(1);
       expect(h.context().snapshot.selectionSettled).toBe(true);
-      expect((await h.ref.current!.readSelectionInfo())?.selectedText).toBe(h.first.text.slice(0, 3));
+      await h.quiet(700);
+      expect(h.settles).toHaveLength(1);
+      expect((await h.ref.current!.readSelectionInfo())?.selectedText ?? '').toBe('');
     } finally { h.dispose(); }
   });
 

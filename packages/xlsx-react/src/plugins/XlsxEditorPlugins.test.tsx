@@ -21,7 +21,7 @@ import { createXlsxCommandController, xlsxCommandController } from '../commands/
 import type { XlsxPluginEditorAccess } from './createPluginClients';
 import { useXlsxPluginHost } from './useXlsxPluginHost';
 import * as xlsxBindings from './useXlsxPluginHost';
-import { selectionWindow } from '../../../../e2e/browser/plugin-host/selection-clock';
+import { selectionClock, selectionWindow } from '../../../../e2e/browser/plugin-host/selection-clock';
 import type { XlsxAnchorGeometryResult, XlsxPluginSelection } from './types';
 import { isMacPlatform } from '../commands/descriptors';
 import { pluginDefinition } from './defineXlsxPlugin';
@@ -2896,9 +2896,10 @@ test('plugin locales are canonical and equivalent tags do not notify twice', asy
 });
 
 
-async function xlsxMatrix(engine: 'XI' | 'XP', file = fixture) {
+async function xlsxMatrix(engine: 'XI' | 'XP', file = fixture, controlledClock = false) {
   const collaboration = {};
-  const clock = selectionWindow();
+  const clock = controlledClock ? selectionClock() : selectionWindow();
+  const restoreClock = () => { if ('restore' in clock) clock.restore(); };
   const events: XlsxPluginEvent[] = [];
   const anchors: Array<XlsxAnchorGeometryResult | null> = [];
   const settledAt: number[] = [];
@@ -2993,6 +2994,7 @@ async function xlsxMatrix(engine: 'XI' | 'XP', file = fixture) {
           globalThis.requestAnimationFrame = raf; globalThis.cancelAnimationFrame = caf;
           window.requestAnimationFrame = windowRaf; window.cancelAnimationFrame = windowCaf;
         }
+        restoreClock();
       },
     };
   } catch (error) {
@@ -3001,6 +3003,7 @@ async function xlsxMatrix(engine: 'XI' | 'XP', file = fixture) {
       globalThis.requestAnimationFrame = raf; globalThis.cancelAnimationFrame = caf;
       window.requestAnimationFrame = windowRaf; window.cancelAnimationFrame = windowCaf;
     }
+    restoreClock();
     throw error;
   }
 }
@@ -3155,7 +3158,7 @@ for (const engine of ['XI', 'XP'] as const) describe(`selection matrix ${engine}
   });
 
   if (engine === 'XI') editorTest('T5: undo that restores a selection settles once', async () => {
-    const h = await xlsxMatrix(engine);
+    const h = await xlsxMatrix(engine, fixture, true);
     try {
       await h.select(1, 1); await h.paint(); await h.quiet();
       await act(async () => { await h.api().applyEdits(setCell(h.api().handle.version(), 'B2', 'changed')); });
@@ -3164,6 +3167,8 @@ for (const engine of ['XI', 'XP'] as const) describe(`selection matrix ${engine}
       await h.paint(); await h.quiet();
       expect(h.anchors).toHaveLength(1);
       expect(h.context().snapshot.selection?.cells?.focus).toEqual({ row: 1, col: 1 });
+      await h.quiet(700);
+      expect(h.anchors).toHaveLength(1);
     } finally { h.dispose(); }
   });
 
