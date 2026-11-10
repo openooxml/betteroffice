@@ -298,6 +298,7 @@ describe('docx native engine parity', () => {
           bodyStory: 'body',
           regions: { sections: [{
             sectionId: 'main',
+            ...(band ? { headerFooterRefs: { [`${band}Default`]: 'rIdStory' } } : {}),
             properties: {
               pageWidth: 4320, pageHeight: 2880,
               marginTop: 600, marginRight: 300, marginBottom: 600, marginLeft: 300,
