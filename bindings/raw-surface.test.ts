@@ -34,6 +34,10 @@ const GLUE = {
 
 type Format = keyof typeof GLUE;
 
+/** Each binding as loaded, taken before any engine module runs: engine modules install members on the binding classes. */
+const RAW_NATIVE = Object.fromEntries((Object.keys(GLUE) as Format[])
+  .map((format) => [format, discover(require(join(root, `bindings/${format}-native/index.js`)))])) as Record<Format, RuntimeSurface>;
+
 function declared(paths: readonly string[]): { surface: Surface; problems: string[] } {
   return mergeDeclarations(paths.map((path) => [path, parseSurface(readFileSync(join(root, path), 'utf8'), { paramNames: true })]));
 }
@@ -48,7 +52,7 @@ describe('native and wasm engine surfaces', () => {
       const parts: [string, RuntimeSurface][] = [];
       for (const module of GLUE[format]) parts.push([module, await surfaceOf(`${module}.js`)]);
       const { surface: wasm, problems: runtimeMerge } = mergeSurfaces(parts);
-      const native = discover(require(join(root, `bindings/${format}-native/index.js`)));
+      const native = RAW_NATIVE[format];
       const allow = rawAllowances(format);
       const report = compareRuntime(wasm, native, allow);
       const wasmDeclared = declared(GLUE[format].map((module) => `${module}.d.ts`));

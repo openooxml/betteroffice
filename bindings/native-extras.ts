@@ -68,10 +68,11 @@ function wasmInternals(format: Format, level: 'raw' | 'engine'): Record<string, 
   return internals;
 }
 
-const disposePending = (format: Format): Record<string, Extra> => Object.fromEntries(
+/** The binding classes get [Symbol.dispose] from their engine module (shared/nativeDispose.ts), so only the raw binding lacks it. */
+const disposeFromEngineModule = (format: Format): Record<string, Extra> => Object.fromEntries(
   WASM_CLASSES[format].all
     .filter((name) => name !== 'MetafileConverter')
-    .map((name) => [`${name}.prototype.[Symbol.dispose]`, { reason: 'native classes get Symbol.dispose from the engine module, not the binding', pending: 'item 4' }]),
+    .map((name) => [`${name}.prototype.[Symbol.dispose]`, { reason: 'installed on the binding class by its engine module', backs: 'Symbol.dispose' }]),
 );
 
 function flatten(extras: { functions: object; members: object }): Record<string, Extra> {
@@ -105,7 +106,7 @@ export function arityAllowances(format: Format): Record<string, Record<string, E
 /** Allowances for the raw compare: wasm-bindgen glue against the napi binding. */
 export function rawAllowances(format: Format): Allowances {
   const extras = { xlsx: xlsxExtras, pptx: pptxExtras, docx: docxExtras }[format];
-  const wasmOnly: Record<string, Extra> = { ...disposePending(format) };
+  const wasmOnly: Record<string, Extra> = { ...disposeFromEngineModule(format) };
   if (format === 'pptx') wasmOnly.MetafileConverter = { reason: 'metafile conversion runs inside the native engine; no standalone converter', pending: 'item 11' };
   return {
     nativeOnly: flatten(extras),
@@ -122,7 +123,7 @@ export function engineAllowances(format: Format): Allowances {
   const extras = { xlsx: xlsxExtras, pptx: pptxExtras, docx: docxExtras }[format];
   return {
     nativeOnly: flatten({ functions: {}, members: extras.members }),
-    wasmOnly: disposePending(format),
+    wasmOnly: {},
     internals: { wasm: wasmInternals(format, 'engine'), native: {} },
   };
 }
