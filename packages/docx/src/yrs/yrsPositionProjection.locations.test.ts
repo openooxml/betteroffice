@@ -14,6 +14,7 @@ const segments: Record<string, YrsStorySegment[]> = {
       kind: 'embed',
       embedKind: 'table',
       payload: {
+        tblPr: {},
         grid: [100],
         rows: [{ cells: [{ story: 'body:t0:r0c0', tcPr: {} }] }],
       },

@@ -385,8 +385,8 @@ describe('native proposal geometry outline parity', () => {
   test('legacy position outline for coercible non-string story refs and primitive row/cell shapes', async () => {
     for (const embed of [
       { kind: 'blockSdt', payload: { story: 42 } },
-      { kind: 'table', payload: { rows: [7] } },
-      { kind: 'table', payload: { rows: [{ cells: [false] }] } },
+      { kind: 'table', payload: { tblPr: {}, grid: [], rows: [7] } },
+      { kind: 'table', payload: { tblPr: {}, grid: [], rows: [{ cells: [false] }] } },
     ]) {
       const main = await createYrsSession({ clientId: 84107 });
       let resident: ResidentEngineSession | undefined;

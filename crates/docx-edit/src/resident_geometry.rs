@@ -782,7 +782,7 @@ mod tests {
             "body",
             json!([
                 {"text":"First"}, {"kind":"pilcrow", "paraId":"first"},
-                {"kind":"table", "rows":[{"cells":[{"story":"body:t0:r0c0"}]}]},
+                {"kind":"table", "tblPr":{}, "grid":[], "rows":[{"cells":[{"story":"body:t0:r0c0"}]}]},
                 {"kind":"pilcrow", "paraId":"table"},
                 {"text":"Last"}, {"kind":"pilcrow", "paraId":"last"}
             ]),

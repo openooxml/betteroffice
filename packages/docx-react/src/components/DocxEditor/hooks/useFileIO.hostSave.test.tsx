@@ -117,6 +117,9 @@ function setup(
       return {};
     },
     recordSavedParagraphIds: () => [],
+    storyIds: () => [],
+    storySegments: () => [],
+    listComments: () => [],
     canUndo: () => false,
     canRedo: () => false,
     onUpdate: () => () => {},

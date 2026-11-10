@@ -131,6 +131,23 @@ describe('an unavailable table in any container', () => {
     }
   });
 
+  it('a file table without w:tblPr or w:tblGrid seeds all three payload keys and stays available', async () => {
+    const parts: PartsMap = new Map();
+    parts.set('[Content_Types].xml', toBytes(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="${OFFICE_DOC}.wordprocessingml.document.main+xml"/></Types>`));
+    parts.set('_rels/.rels', toBytes(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdPkg1" Type="${REL}/officeDocument" Target="word/document.xml"/></Relationships>`));
+    parts.set('word/document.xml', toBytes(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document ${W}><w:body>${paragraph('Before')}<w:tbl><w:tr>${cell(paragraph('Bare one'))}${cell(paragraph('Bare two'))}</w:tr></w:tbl>${paragraph('After')}<w:sectPr/></w:body></w:document>`));
+    const bare = await session(63);
+    bare.seedFromDocx(new Uint8Array(rezipPartsToArrayBuffer(parts)));
+    const payload = bare.tablePayload('body', 0)!;
+    expect(['tblPr', 'grid', 'rows'].filter((key) => key in payload)).toEqual(['tblPr', 'grid', 'rows']);
+    const saved = await saveYrsDocx(bare, { updateModifiedDate: false });
+    expect(saved.bytes.byteLength).toBeGreaterThan(0);
+    bare.insertRow({ story: 'body', tableIndex: 0, row: 0, column: 0 }, 'below');
+  });
+
   it('saves again once the unavailable table holding a cell content control is deleted', async () => {
     const source = containers();
     const { a } = await emptied(source, 'body');

@@ -58,6 +58,9 @@ for (const full of [false, true]) {
       paragraphIdentities: () => ({ sessionId: 'session', paragraphs: [] }),
       writtenParagraphIds: () => ({}),
       recordSavedParagraphIds: () => [],
+      storyIds: () => [],
+      storySegments: () => [],
+      listComments: () => [],
     } as unknown as YrsSession;
     const document = { package: { document: { content: [] } } } as unknown as Document;
     const buffer = new ArrayBuffer(0);

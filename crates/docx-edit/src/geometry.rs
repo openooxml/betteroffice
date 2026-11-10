@@ -569,7 +569,7 @@ mod tests {
             &doc,
             "body",
             json!([
-                {"kind": "table", "rows": [
+                {"kind": "table", "tblPr": {}, "grid": [], "rows": [
                     {"cells": [{"story": "a", "tcPr": {"rowspan": 2, "colspan": 2}}, {"story": "b"}]},
                     {"cells": [{}]}, {"cells": []}
                 ]}, {"text": "Z"}, {"kind": "pilcrow", "paraId": "p"}
@@ -579,7 +579,7 @@ mod tests {
             &doc,
             "a",
             json!([
-                {"kind": "table", "rows": []}, {"text": "😀"}, {"kind": "pilcrow", "paraId": "ap"}
+                {"kind": "table", "tblPr": {}, "grid": [], "rows": []}, {"text": "😀"}, {"kind": "pilcrow", "paraId": "ap"}
             ]),
         );
         story(&doc, "b", json!([{ "kind": "pilcrow", "paraId": "bp" }]));
@@ -603,8 +603,8 @@ mod tests {
             "body",
             json!([
                 {"text": "x"}, {"kind": "pilcrow", "paraId": "p0"},
-                {"kind": "table", "rows": [{"cells": [{}]}]},
-                {"kind": "table", "rows": [{"cells": [{}]}]},
+                {"kind": "table", "tblPr": {}, "grid": [], "rows": [{"cells": [{}]}]},
+                {"kind": "table", "tblPr": {}, "grid": [], "rows": [{"cells": [{}]}]},
                 {"text": "z"}, {"kind": "pilcrow", "paraId": "p1"}
             ]),
         );
@@ -612,7 +612,7 @@ mod tests {
             &doc,
             "body:t0:r0c0",
             json!([
-                {"kind": "table", "rows": [{"cells": [{"story": null}]}]},
+                {"kind": "table", "tblPr": {}, "grid": [], "rows": [{"cells": [{"story": null}]}]},
                 {"text": "A"}, {"kind": "pilcrow", "paraId": "cp"}
             ]),
         );
@@ -830,9 +830,9 @@ mod tests {
         for segment in [
             json!({"kind": "blockSdt", "story": 42}),
             json!({"kind": "blockSdt", "story": "missing"}),
-            json!({"kind": "table", "rows": [null]}),
-            json!({"kind": "table", "rows": [{"cells": [false]}]}),
-            json!({"kind": "table", "rows": [{"cells": [{"story": []}]}]}),
+            json!({"kind": "table", "tblPr": {}, "grid": [], "rows": [null]}),
+            json!({"kind": "table", "tblPr": {}, "grid": [], "rows": [{"cells": [false]}]}),
+            json!({"kind": "table", "tblPr": {}, "grid": [], "rows": [{"cells": [{"story": []}]}]}),
         ] {
             let doc = EditingDoc::new(84010);
             story(&doc, "body", json!([segment]));

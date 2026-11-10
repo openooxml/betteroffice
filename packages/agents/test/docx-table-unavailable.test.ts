@@ -55,7 +55,8 @@ test('an agent edit that reads run formatting is refused with the table-unavaila
   const doc = attachDocx(session);
   attached.push(doc);
   const before = session.encodeState();
-  const target = doc.list({ limit: 100 }).items.find((item) => item.text === 'Closing note.')!;
+  const target = doc.list({ limit: 100 }).items.find((item) => item.text.endsWith('Closing note.'))!;
+  expect(target).toBeDefined();
   const error = await caught(() => doc.edit({ version: doc.list().version, edits: [{
     op: 'insert_paragraphs', before: target.ref, runFormat: 'anchor', paragraphs: [{ text: 'Inserted' }],
   }] }));
@@ -71,7 +72,7 @@ test('reading the document keeps working and the structured export marks the tab
   attached.push(doc);
   const texts = doc.list({ limit: 100 }).items.map((item) => item.text);
   expect(texts).toContain('Quarterly report');
-  expect(texts).toContain('Closing note.');
+  expect(texts.some((text) => text.endsWith('Closing note.'))).toBe(true);
   const exported = session.exportStructured({ revisionView: 'accepted' });
   if (!exported.ok) throw new Error('expected an export');
   expect(exported.content.diagnostics).toContainEqual(expect.objectContaining({
