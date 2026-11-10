@@ -9,6 +9,7 @@ import JSZip from 'jszip';
 import initWasm, { XlsxDocument as WasmDocument, XlsxSnapshotBuilder as WasmSnapshotBuilder, decodeFontFace as wasmDecodeFontFace, displayListCellLimit as wasmDisplayListCellLimit } from '../../packages/xlsx/src/wasm/generated/xlsx_wasm.js';
 import { expectFontFace, fontCases, fontErrorCases } from '../font-fixtures';
 import { cappedExtent } from '../../packages/xlsx/src/wasm/pngResolve';
+import { PNG_BROKEN_FACE, PNG_FONT_CASES, PNG_FONT_FACES, PNG_FONT_TARGET, pngFontOutcomeFailures, pngFontsWorkbook, type PngFontFaceName, type PngFontResult } from '../../e2e/xlsx-png-fonts';
 
 const native = require('./index.js');
 
@@ -127,64 +128,27 @@ function runScript(doc: EngineDocument) {
 
 describe('xlsx native engine parity', () => {
   describe('renderPng fonts option', () => {
-    const face = (name: string) => new Uint8Array(readFileSync(new URL(`../../crates/betteroffice-fonts/tests/fixtures/Synthetic-${name}.ttf`, import.meta.url)));
-    const regular = face('Regular');
-    const bold = face('Bold');
-    const view = { sheet: 0, viewport: { x: 0, y: 0, width: 300, height: 150 } };
-
-    async function openFixture() {
-      const main = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
-      const rels = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
-      const zip = new JSZip();
-      zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>');
-      zip.file('_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rels}/officeDocument" Target="xl/workbook.xml"/></Relationships>`);
-      zip.file('xl/workbook.xml', `<workbook xmlns="${main}" xmlns:r="${rels}"><sheets><sheet name="Fonts" sheetId="1" r:id="rId1"/></sheets></workbook>`);
-      zip.file('xl/_rels/workbook.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rels}/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="${rels}/styles" Target="styles.xml"/></Relationships>`);
-      zip.file('xl/styles.xml', `<styleSheet xmlns="${main}"><fonts count="1"><font><sz val="24"/><name val="Calibri"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf/></cellStyleXfs><cellXfs count="1"><xf/></cellXfs></styleSheet>`);
-      zip.file('xl/worksheets/sheet1.xml', `<worksheet xmlns="${main}"><cols><col min="1" max="1" width="40" customWidth="1"/></cols><sheetData><row r="1" ht="40" customHeight="1"><c r="A1" t="inlineStr"><is><t>ABCABC</t></is></c></row><row r="2" ht="40" customHeight="1"><c r="A2" t="inlineStr"><is><t>\u65e5\u672c\u8a9e \u0928\u092e\u0938\u094d\u0924\u0947</t></is></c></row></sheetData></worksheet>`);
+    test('follows the outcome table shared with the browser engine', async () => {
       const entry = await import('./dist/index.js') as typeof import('../../packages/xlsx/src/index');
       await entry.initWasm();
-      return entry.openWorkbook(await zip.generateAsync({ type: 'uint8array' }));
-    }
-
-    test('paints with the supplied face, for that export only', async () => {
-      const workbook = await openFixture();
+      const workbook = entry.openWorkbook(await pngFontsWorkbook());
+      const face = (name: PngFontFaceName) => name === 'broken'
+        ? new Uint8Array(PNG_BROKEN_FACE)
+        : new Uint8Array(readFileSync(new URL(`../../${PNG_FONT_FACES[name]}`, import.meta.url)));
+      const results: Record<string, PngFontResult> = {};
       try {
-        const baseline = Buffer.from(await workbook.renderPng(view));
-        const withRegular = Buffer.from(await workbook.renderPng(view, { fonts: [{ family: 'Calibri', bytes: regular }] }));
-        const withBold = Buffer.from(await workbook.renderPng(view, { fonts: [{ family: ' calibri ', bytes: bold }] }));
-        expect(withRegular.equals(baseline)).toBe(false);
-        expect(withBold.equals(withRegular)).toBe(false);
-        expect(Buffer.from(await workbook.renderPng(view)).equals(baseline)).toBe(true);
+        for (const { name, fonts } of PNG_FONT_CASES) {
+          try {
+            const options = fonts ? { fonts: fonts.map(({ family, face: faceName }) => ({ family, bytes: face(faceName) })) } : {};
+            results[name] = { png: Buffer.from(await workbook.renderPng(PNG_FONT_TARGET, options)).toString('base64') };
+          } catch (error) {
+            results[name] = { code: (error as { code?: string }).code, message: error instanceof Error ? error.message : String(error) };
+          }
+        }
       } finally {
         workbook.dispose();
       }
-    });
-
-    test('an absent list keeps the bundled faces and an explicit one replaces them', async () => {
-      const workbook = await openFixture();
-      try {
-        const absent = Buffer.from(await workbook.renderPng(view));
-        const empty = Buffer.from(await workbook.renderPng(view, { fonts: [] }));
-        expect(empty.equals(absent)).toBe(false);
-        expect(Buffer.from(await workbook.renderPng(view)).equals(absent)).toBe(true);
-        const unused = await workbook.renderPng(view, { fonts: [{ family: 'Not Used', bytes: new Uint8Array([1, 2, 3]) }] });
-        expect(Buffer.from(unused).equals(empty)).toBe(true);
-      } finally {
-        workbook.dispose();
-      }
-    });
-
-    test('a supplied face that cannot paint rejects with font-unavailable', async () => {
-      const workbook = await openFixture();
-      try {
-        const error = await workbook.renderPng(view, { fonts: [{ family: 'Calibri', bytes: new Uint8Array([1, 2, 3]) }] }).catch((failure: unknown) => failure);
-        expect(error).toBeInstanceOf(Error);
-        expect((error as { code?: string }).code).toBe('font-unavailable');
-        expect((error as Error).message).toContain('Calibri');
-      } finally {
-        workbook.dispose();
-      }
+      expect(pngFontOutcomeFailures(results)).toEqual([]);
     });
   });
 
