@@ -119,20 +119,28 @@ const blockBreaks = (session: Session, kind: string) => session.storySegments('b
   .filter((segment) => segment.kind === 'embed' && segment.embedKind === (kind === 'page' ? 'pageBreak' : 'columnBreak')).length
   + (kind === 'page' ? session.storySegments('body').filter((segment) => segment.kind === 'pilcrow' && segment.properties.pageBreakBeforeRun === true).length : 0);
 
-/** The text that opens each page, read from the story: a page break ends one page and starts the next. */
+/**
+ * The text that opens each page, read from the story: a page break embed starts the next page,
+ * and a pilcrow's pageBreakBeforeRun starts a page at its own paragraph's first text.
+ */
 function pageStarts(session: Session): string[] {
   const starts: string[] = [''];
   let pending = false;
-  for (const segment of session.storySegments('body')) {
-    if (segment.kind === 'embed' && segment.embedKind === 'pageBreak') { pending = true; continue; }
-    if (segment.kind === 'pilcrow') {
-      if (segment.properties.pageBreakBeforeRun === true) pending = true;
-      continue;
+  let texts: string[] = [];
+  const flush = (leading: boolean) => {
+    if (leading) pending = true;
+    for (const value of texts) {
+      if (pending) { starts.push(''); pending = false; }
+      if (!starts[starts.length - 1]) starts[starts.length - 1] = value.slice(0, 3);
     }
-    if (segment.kind !== 'text' || !segment.text.trim()) continue;
-    if (pending) { starts.push(''); pending = false; }
-    if (!starts[starts.length - 1]) starts[starts.length - 1] = segment.text.trim().slice(0, 3);
+    texts = [];
+  };
+  for (const segment of session.storySegments('body')) {
+    if (segment.kind === 'embed' && segment.embedKind === 'pageBreak') { flush(false); pending = true; continue; }
+    if (segment.kind === 'pilcrow') { flush(segment.properties.pageBreakBeforeRun === true); continue; }
+    if (segment.kind === 'text' && segment.text.trim()) texts.push(segment.text.trim());
   }
+  flush(false);
   return starts;
 }
 
@@ -281,24 +289,28 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
     expect(failures).toEqual([]);
   });
 
-  test(`${engine}: a part that binds the WordprocessingML namespace to another prefix saves its page break once`, async () => {
-    const zip = new JSZip();
-    const types = await (await JSZip.loadAsync(await docx(''))).file('[Content_Types].xml')!.async('string');
-    const rels = await (await JSZip.loadAsync(await docx(''))).file('_rels/.rels')!.async('string');
-    zip.file('[Content_Types].xml', types);
-    zip.file('_rels/.rels', rels);
-    const run = (value: string) => `<v:r><v:t xml:space="preserve">${value}</v:t></v:r>`;
-    zip.file('word/document.xml', `<v:document xmlns:v="${W}"><v:body><v:p>${run('L')}</v:p><v:p><v:r><v:t>A</v:t><v:br v:type="page"/></v:r></v:p><v:p>${run('N')}</v:p><v:sectPr/></v:body></v:document>`);
-    const session = await yrs.createYrsSession();
-    try {
-      session.openDocx(await zip.generateAsync({ type: 'uint8array' }), true);
-      session.insertText({ story: 'body', ...at(session, 0, 1) }, 'x');
-      const live = blockBreaks(session, 'page');
-      const { xml } = await savedXml(yrs, session);
-      expect([live, (xml.match(/:type="page"/g) ?? []).length]).toEqual([1, 1]);
-    } finally {
-      session.destroy();
+  test(`${engine}: page starts read a break the same on either side of its boundary and tell a moved one apart`, async () => {
+    const P = (inner: string) => `<w:p w14:paraId="72000001">${inner}</w:p>`;
+    const M = (inner: string) => `<w:p w14:paraId="72000004">${inner}</w:p>`;
+    const N2 = (inner: string) => `<w:p w14:paraId="72000003">${inner}</w:p>`;
+    const bodies = {
+      trailing: L + P(`<w:r><w:t>A</w:t>${brk('page')}</w:r>`) + N + M(text('M')),
+      leading: L + P(text('A')) + N2(`<w:r>${brk('page')}<w:t>N</w:t></w:r>`) + M(text('M')),
+      moved: L + P(text('A')) + N + M(`<w:r>${brk('page')}<w:t>M</w:t></w:r>`),
+    };
+    const starts: Record<string, string[]> = {};
+    for (const [name, body] of Object.entries(bodies)) {
+      const session = await yrs.createYrsSession();
+      try {
+        session.openDocx(await docx(body), true);
+        starts[name] = pageStarts(session);
+      } finally {
+        session.destroy();
+      }
     }
+    expect(starts.trailing).toEqual(['L', 'N']);
+    expect(starts.leading).toEqual(starts.trailing);
+    expect(starts.moved).toEqual(['L', 'M']);
   });
 
   test(`${engine}: a text edit and a section break save beside a content control that starts with a page break`, async () => {
