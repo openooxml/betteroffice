@@ -26,8 +26,8 @@ const require = createRequire(import.meta.url);
 
 /** The wasm-bindgen modules each native binding replaces. */
 const GLUE = {
-  xlsx: ['packages/xlsx/src/wasm/generated/xlsx_wasm'],
-  pptx: ['packages/pptx/src/wasm/generated/pptx_wasm', 'packages/pptx/src/wasm/generated/metafile_svg_wasm'],
+  xlsx: ['packages/xlsx/src/wasm/generated/xlsx_wasm', 'packages/xlsx/src/wasm/generated/preflight/xlsx_preflight'],
+  pptx: ['packages/pptx/src/wasm/generated/pptx_wasm', 'packages/pptx/src/wasm/generated/metafile_svg_wasm', 'packages/pptx/src/wasm/generated/preflight/pptx_preflight'],
   docx: ['edit/docx_edit', 'parse/docx_parse', 'query/docx_query', 'opc/ooxml_opc', 'preflight/docx_preflight']
     .map((module) => `packages/docx/src/wasm/generated/${module}`),
 } as const;

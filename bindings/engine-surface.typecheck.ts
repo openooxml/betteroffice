@@ -8,10 +8,14 @@ import type * as WasmXlsxEngine from '../packages/xlsx/src/wasm/engine';
 import type * as NativeXlsxEngine from './xlsx-native/js/engine';
 import type * as WasmXlsxEnginePng from '../packages/xlsx/src/wasm/enginePng';
 import type * as NativeXlsxEnginePng from './xlsx-native/js/enginePng';
+import type * as WasmXlsxEnginePreflight from '../packages/xlsx/src/wasm/enginePreflight';
+import type * as NativeXlsxEnginePreflight from './xlsx-native/js/enginePreflight';
 import type * as WasmPptxEngine from '../packages/pptx/src/wasm/engine';
 import type * as NativePptxEngine from './pptx-native/js/engine';
 import type * as WasmPptxEnginePng from '../packages/pptx/src/wasm/enginePng';
 import type * as NativePptxEnginePng from './pptx-native/js/enginePng';
+import type * as WasmPptxEnginePreflight from '../packages/pptx/src/wasm/enginePreflight';
+import type * as NativePptxEnginePreflight from './pptx-native/js/enginePreflight';
 import type * as WasmDocxEngineEdit from '../packages/docx/src/wasm/engineEdit';
 import type * as NativeDocxEngineEdit from './docx-native/js/engineEdit';
 import type * as WasmDocxEngineParse from '../packages/docx/src/wasm/engineParse';
@@ -29,6 +33,8 @@ export type XlsxEngineDiffers = Same<Mismatched<typeof WasmXlsxEngine, typeof Na
 export type XlsxEngineMissing = Same<Missing<typeof WasmXlsxEngine, typeof NativeXlsxEngine>>;
 export type XlsxEnginePngDiffers = Same<Mismatched<typeof WasmXlsxEnginePng, typeof NativeXlsxEnginePng>>;
 export type XlsxEnginePngMissing = Same<Missing<typeof WasmXlsxEnginePng, typeof NativeXlsxEnginePng>>;
+export type XlsxEnginePreflightDiffers = Same<Mismatched<typeof WasmXlsxEnginePreflight, typeof NativeXlsxEnginePreflight>>;
+export type XlsxEnginePreflightMissing = Same<Missing<typeof WasmXlsxEnginePreflight, typeof NativeXlsxEnginePreflight>>;
 /** Declared differently on purpose, pending: listed in bindings/native-extras.ts typeAllowances. */
 type PptxEnginePending = 'metafileSvgBindings';
 export type PptxEngineDiffers = Same<Exclude<Mismatched<typeof WasmPptxEngine, typeof NativePptxEngine>, PptxEnginePending>>;
@@ -36,6 +42,8 @@ export type PptxEnginePendingStale = Same<Exclude<PptxEnginePending, Mismatched<
 export type PptxEngineMissing = Same<Missing<typeof WasmPptxEngine, typeof NativePptxEngine>>;
 export type PptxEnginePngDiffers = Same<Mismatched<typeof WasmPptxEnginePng, typeof NativePptxEnginePng>>;
 export type PptxEnginePngMissing = Same<Missing<typeof WasmPptxEnginePng, typeof NativePptxEnginePng>>;
+export type PptxEnginePreflightDiffers = Same<Mismatched<typeof WasmPptxEnginePreflight, typeof NativePptxEnginePreflight>>;
+export type PptxEnginePreflightMissing = Same<Missing<typeof WasmPptxEnginePreflight, typeof NativePptxEnginePreflight>>;
 export type DocxEngineEditDiffers = Same<Mismatched<typeof WasmDocxEngineEdit, typeof NativeDocxEngineEdit>>;
 export type DocxEngineEditMissing = Same<Missing<typeof WasmDocxEngineEdit, typeof NativeDocxEngineEdit>>;
 export type DocxEngineParseDiffers = Same<Mismatched<typeof WasmDocxEngineParse, typeof NativeDocxEngineParse>>;
