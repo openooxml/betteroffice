@@ -2126,6 +2126,12 @@ impl EditSession {
             .map_err(|error| map_error(env, error))
     }
 
+    #[napi(catch_unwind, js_name = "rebuild_media_sources")]
+    pub fn rebuild_media_sources(&self, env: Env) -> Result<bool> {
+        let _call = EngineCall::new(env);
+        Ok(self.document(env)?.rebuild_media_sources())
+    }
+
     #[napi(catch_unwind, js_name = "load_media_sources")]
     pub fn load_media_sources(&self, env: Env, json: String) -> Result<()> {
         let _call = EngineCall::new(env);
