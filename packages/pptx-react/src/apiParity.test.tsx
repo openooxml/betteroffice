@@ -87,7 +87,7 @@ async function selectTextParity(viaPlugin: boolean) {
       const selection = selected ?? { anchor: 0, focus: offsets[++refused]! };
       const expected = {
         slideId: current.slideId, slide: 1,
-        target: { kind: 'text', shapeId: current.shapeId, storyId: current.storyId, ...selection },
+        target: { kind: 'text' as const, shapeId: current.shapeId, storyId: current.storyId, ...selection },
       };
       if (!accepted) {
         await act(async () => { expect(await select(selection.anchor, selection.focus)).toBe(true); });
