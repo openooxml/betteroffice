@@ -136,6 +136,7 @@ export declare class EditSession {
   list_stories_json(): string
   load(update: Uint8Array): void
   load_json(storiesJson: string): string
+  rebuild_media_sources(): boolean
   load_media_sources(json: string): void
   load_note_separators(state: Uint8Array): void
   locate_paragraph(story: string, paraId: string): string

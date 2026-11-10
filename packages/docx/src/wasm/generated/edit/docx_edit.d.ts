@@ -897,6 +897,12 @@ export class EditSession {
      */
     read_stories_json(request: string): string;
     /**
+     * Adds to this replica's media sources every part of its own media table
+     * they lack, so it resolves the `data:` URLs seeding wrote whether or not
+     * it was seeded itself; `false` when nothing was added or it has no table.
+     */
+    rebuild_media_sources(): boolean;
+    /**
      * Reconciles and publishes the `[owner, paraId]` pairs a save captured,
      * an owner being a session key or a source occurrence's
      * `{partUri}#{ordinal}`; returns the stale pairs as the same JSON shape.
@@ -1933,6 +1939,7 @@ export interface InitOutput {
     readonly editsession_proposal_revision_ranges_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_read_paragraphs_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_read_stories_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_rebuild_media_sources: (a: number) => number;
     readonly editsession_record_saved_paragraph_ids: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_redo: (a: number) => number;
     readonly editsession_register_measure_font: (a: number, b: number, c: number) => [number, number, number];

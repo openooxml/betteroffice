@@ -876,6 +876,13 @@ impl EditSession {
         self.core.media_sources_json()
     }
 
+    /// Adds to this replica's media sources every part of its own media table
+    /// they lack, so it resolves the `data:` URLs seeding wrote whether or not
+    /// it was seeded itself; `false` when nothing was added or it has no table.
+    pub fn rebuild_media_sources(&self) -> bool {
+        self.core.rebuild_media_sources()
+    }
+
     /// Lays this replica's `data:` image sources out as the `media:{n}` tokens
     /// another replica seeded them from.
     pub fn load_media_sources(&self, json: &str) -> Result<(), JsValue> {
