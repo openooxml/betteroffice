@@ -194,10 +194,11 @@ impl Theme {
                     .and_then(language_script);
                 if result.fonts[index][slot].is_empty()
                     && let Some(script) = script
-                    && let Some(face) = font
-                        .children
-                        .iter()
-                        .find(|node| node.name == "a:font" && node.attr("script") == Some(script))
+                    && let Some(face) = font.children.iter().rfind(|node| {
+                        node.name == "a:font"
+                            && node.attr("script") == Some(script)
+                            && node.attr("typeface").is_some_and(|face| !face.is_empty())
+                    })
                 {
                     result.fonts[index][slot] = Rc::from(face.attr("typeface").unwrap_or_default());
                 }

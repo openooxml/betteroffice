@@ -268,3 +268,33 @@ fn duplicate_numbering_ids_take_the_last_definition() {
         assert_parity(&bytes, wanted);
     }
 }
+
+#[test]
+fn duplicate_theme_script_fonts_take_the_last_entry() {
+    let theme = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:fontScheme><a:majorFont><a:latin typeface="Heading"/><a:ea typeface=""/><a:cs typeface=""/></a:majorFont><a:minorFont><a:latin typeface="Body"/><a:ea typeface=""/><a:cs typeface=""/><a:font script="Jpan" typeface="FirstFont"/><a:font script="Jpan" typeface="SecondFont"/></a:minorFont></a:fontScheme></a:themeElements></a:theme>"#;
+    let bytes = package(&[
+        (
+            "word/document.xml",
+            document(
+                r#"<w:p><w:r><w:rPr><w:rFonts w:eastAsiaTheme="minorEastAsia"/></w:rPr><w:t>漢字</w:t></w:r></w:p>"#,
+            ),
+        ),
+        (
+            "word/_rels/document.xml.rels",
+            rels(&[
+                ("styles", "styles.xml"),
+                ("theme", "theme/theme1.xml"),
+                ("settings", "settings.xml"),
+            ]),
+        ),
+        ("word/styles.xml", styles("Base", "")),
+        ("word/theme/theme1.xml", theme.to_owned()),
+        (
+            "word/settings.xml",
+            format!(
+                r#"<w:settings xmlns:w="{W}"><w:themeFontLang w:val="en-US" w:eastAsia="ja-JP"/></w:settings>"#
+            ),
+        ),
+    ]);
+    assert_parity(&bytes, "SecondFont");
+}
