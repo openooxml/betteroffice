@@ -2982,6 +2982,24 @@ mod pagination_rule_tests {
     }
 
     #[test]
+    fn a_margin_change_on_a_continuous_section_reframes_the_pages_after_an_authored_break() {
+        let blocks = |side: u32| {
+            vec![
+                paragraph(0, 2, 20.0, json!({})),
+                margined_section_break("a", "continuous", Some((10, side))),
+                paragraph(1, 2, 20.0, json!({"pageBreakBefore": true})),
+                paragraph(2, 2, 20.0, json!({"pageBreakBefore": true})),
+            ]
+        };
+        incremental_matches_full_with(
+            "side margins 10 to 20",
+            blocks(10),
+            blocks(20),
+            continuous_body,
+        );
+    }
+
+    #[test]
     fn a_page_break_flag_change_repaginates_the_section_mark_after_it() {
         for (before, after) in [(true, false), (false, true)] {
             incremental_matches_full(
