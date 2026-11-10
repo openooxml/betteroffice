@@ -47,7 +47,7 @@ function setup(
 
 describe('plugin gestures', () => {
   for (const type of ['focus-change', 'viewport-change', 'proposal-change', 'locale-change']) {
-    test(`${type} admits owner handler, microtasks, onEvent, run and nested notify only inside its window`, async () => {
+    test(`${type} admits the owning plugin's handler, microtasks, onEvent, run and nested notify only inside its window`, async () => {
       type Snapshot = { generation: string; version: string };
       type Invocation = PluginInvocation<Snapshot>;
       type Notification = { type: string; generation: string };
@@ -104,7 +104,7 @@ describe('plugin gestures', () => {
   }
 
   for (const inside of [true, false]) {
-    test(`load delivery and its nested notify are ${inside ? 'admitted inside the owner window' : 'refused outside a gesture'}`, async () => {
+    test(`load delivery and its nested notify are ${inside ? 'admitted inside the owning plugin\'s window' : 'refused outside a gesture'}`, async () => {
       type Snapshot = { generation: string; version: string };
       type Invocation = PluginInvocation<Snapshot>;
       type Notification = { type: string; generation: string };

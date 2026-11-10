@@ -1127,7 +1127,7 @@ describe('XlsxEditor plugins', () => {
     expect(input(api(), 2, 1)).toBe('100');
   });
 
-  editorTest('proposal-change admits owner handler, microtask and nested onEvent mutations only inside its window', async () => {
+  editorTest('proposal-change admits the owning plugin\'s handler, microtask and nested onEvent mutations only inside its window', async () => {
     let host!: pluginHosts.XlsxPluginHost;
     const createHost = pluginHosts.createXlsxPluginHost;
     const capture = spyOn(pluginHosts, 'createXlsxPluginHost').mockImplementation((access) => {
@@ -1203,7 +1203,7 @@ describe('XlsxEditor plugins', () => {
     }
   });
 
-  editorTest('the owner handler is admitted during dispatch but its later await and timer are refused', async () => {
+  editorTest('the owning plugin\'s handler is admitted during dispatch but its later await and timer are refused', async () => {
     let dispatching: Event | undefined;
     let resume!: () => void;
     const gate = new Promise<void>((resolve) => { resume = resolve; });

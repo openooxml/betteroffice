@@ -2376,7 +2376,7 @@ describe('DocxEditor plugins (peer-less engine)', () => {
 
 describe('DocxEditor plugins (in-thread engine)', () => {
   for (const producer of ['focus-change', 'viewport-change'] as const) {
-    test(`${producer} admits the owner's handler, onEvent and nested document-change mutations`, async () => {
+    test(`${producer} admits the owning plugin's handler, onEvent and nested document-change mutations`, async () => {
       let host!: pluginHosts.DocxPluginHost;
       let access!: pluginHosts.DocxPluginHostAccess;
       const createHost = pluginHosts.createDocxPluginHost;
@@ -2459,7 +2459,7 @@ describe('DocxEditor plugins (in-thread engine)', () => {
     });
   }
 
-  test('focus-change admits the owner but refuses another granted plugin inside the owner\'s window', async () => {
+  test('focus-change admits the owning plugin but refuses another granted plugin inside the owning plugin\'s window', async () => {
     let host!: pluginHosts.DocxPluginHost;
     let access!: pluginHosts.DocxPluginHostAccess;
     const createHost = pluginHosts.createDocxPluginHost;

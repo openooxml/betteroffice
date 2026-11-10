@@ -399,7 +399,7 @@ describe('PptxEditor plugins', () => {
     expect((await read(api())).version).toBe(reread.version);
   });
 
-  test('locale-change admits the owner handler and onEvent but refuses another granted plugin', async () => {
+  test('locale-change admits the owning plugin\'s handler and onEvent but refuses another granted plugin', async () => {
     let host!: pluginHosts.PptxPluginHost;
     const createHost = pluginHosts.createPptxPluginHost;
     const capture = spyOn(pluginHosts, 'createPptxPluginHost').mockImplementation((access) => {
