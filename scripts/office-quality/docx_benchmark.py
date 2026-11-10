@@ -140,9 +140,9 @@ def validate_png(path, size, require_ink):
                     grayscale_variance=variance)
 
 
-def measure_sample(sample, root, binaries, manifest, soffice, trials, offset=0):
+def measure_sample(sample, root, binaries, manifest, soffice, trials, offset=0, directory='timing'):
     format = sample.get('format', 'docx')
-    output = root / 'timing'
+    output = root / directory
     output.mkdir()
     with Image.open(root / 'reference/page_0001.png') as reference:
         size = tuple(round(value * 96 / 150) for value in reference.size)
