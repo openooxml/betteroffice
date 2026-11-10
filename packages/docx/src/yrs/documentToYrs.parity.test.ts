@@ -206,7 +206,7 @@ describe('DOCX engine seeding', () => {
         const saved = unzipContainer((await saveYrsDocx(session)).bytes);
         const xml = new TextDecoder().decode(saved['word/document.xml']);
         expect(xml).toContain('w14:val="standardContextual"');
-        expect(xml).toContain('w14:val="false"');
+        expect(xml).toMatch(/<w14:cntxtAlts\b[^>]*\bw14:val="0"/);
       }
     } finally {
       engine.destroy();
