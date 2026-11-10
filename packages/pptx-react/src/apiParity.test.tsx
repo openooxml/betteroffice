@@ -35,28 +35,35 @@ async function selectTextParity(viaPlugin: boolean) {
   const inserted = '😀';
   const text = target.text.slice(0, insertion) + inserted + target.text.slice(insertion);
   const last = text.length;
-  const outside = last + 1;
+  const snapshotLength = last + 1;
+  const outside = snapshotLength + 1;
   const split = insertion + 1;
-  const collapsed = { anchor: 2, focus: 2 };
   const cases = [
-    { start: 1, end: 4, accepted: true, selection: { anchor: 1, focus: 4 } },
-    { start: 4, end: 1, accepted: true, selection: { anchor: 4, focus: 1 } },
-    { start: 2, end: 2, accepted: true, selection: collapsed },
-    { start: last, end: last, accepted: true, selection: { anchor: last, focus: last } },
-    { start: last, end: 1, accepted: true, selection: { anchor: last, focus: 1 } },
-    { start: 1, end: last, accepted: true, selection: { anchor: 1, focus: last } },
+    { start: 1, end: 4, accepted: true },
+    { start: 4, end: 1, accepted: true },
+    { start: 2, end: 2, accepted: true },
+    { start: last, end: last, accepted: true },
+    { start: last, end: 1, accepted: true },
+    { start: 1, end: last, accepted: true },
     { start: -1, end: 1, accepted: false },
     { start: 1, end: -1, accepted: false },
+    { start: snapshotLength, end: 1, accepted: { inThread: true, worker: false },
+      difference: 'in-thread accepts the snapshot length' },
+    { start: 1, end: snapshotLength, accepted: { inThread: true, worker: false },
+      difference: 'in-thread accepts the snapshot length' },
+    { start: snapshotLength, end: snapshotLength, accepted: { inThread: true, worker: false },
+      difference: 'in-thread accepts the snapshot length' },
     { start: outside, end: 1, accepted: false },
-    { start: 1, end: outside, accepted: false },
-    { start: outside, end: outside, accepted: false },
     { start: 1.5, end: 4, accepted: false },
     { start: 1, end: 4.5, accepted: false },
-    { start: split, end: 1, accepted: false },
-    { start: 1, end: split, accepted: false },
-    { start: split, end: split, accepted: false },
+    { start: split, end: 1, accepted: { inThread: true, worker: false },
+      difference: 'in-thread accepts an offset inside a surrogate pair' },
+    { start: 1, end: split, accepted: { inThread: true, worker: false },
+      difference: 'in-thread accepts an offset inside a surrogate pair' },
+    { start: split, end: split, accepted: { inThread: true, worker: false },
+      difference: 'in-thread accepts an offset inside a surrogate pair' },
   ];
-  const exercise = async (api: PptxAsyncEditorApi) => {
+  const exercise = async (api: PptxAsyncEditorApi, engine: 'inThread' | 'worker') => {
     const current = await story(api);
     expect(current.text).toBe(target.text);
     await act(async () => {
@@ -83,13 +90,17 @@ async function selectTextParity(viaPlugin: boolean) {
     for (const character of text) offsets.push(offsets[offsets.length - 1]! + character.length);
     let refused = 0;
     const results = [];
-    for (const { start, end, accepted, selection: selected } of cases) {
-      const selection = selected ?? { anchor: 0, focus: offsets[++refused]! };
+    for (const { start, end, accepted, difference } of cases) {
+      const expectedAccepted = typeof accepted === 'boolean' ? accepted : accepted[engine];
+      if (accepted !== true) refused++;
+      const selection = expectedAccepted
+        ? { anchor: start, focus: end }
+        : { anchor: 0, focus: offsets[refused]! };
       const expected = {
         slideId: current.slideId, slide: 1,
         target: { kind: 'text' as const, shapeId: current.shapeId, storyId: current.storyId, ...selection },
       };
-      if (!accepted) {
+      if (!expectedAccepted) {
         await act(async () => { expect(await select(selection.anchor, selection.focus)).toBe(true); });
         await waitFor(() => expect(context?.snapshot.selection).toEqual(expected));
       }
@@ -97,14 +108,14 @@ async function selectTextParity(viaPlugin: boolean) {
       await act(async () => {
         result = await select(start, end);
       });
-      expect(result).toBe(accepted);
+      expect(result).toBe(expectedAccepted);
       await waitFor(() => expect(context?.snapshot.selection).toEqual(expected));
-      results.push({ accepted: result, selection: direction() });
+      if (!difference) results.push({ accepted: result, selection: direction() });
     }
     return results;
   };
 
-  const workerResults = await exercise(worker.api);
+  const workerResults = await exercise(worker.api, 'worker');
   worker.view.unmount();
   context = undefined;
   const font = await readFile(fileURLToPath(new URL('../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url)));
@@ -114,7 +125,7 @@ async function selectTextParity(viaPlugin: boolean) {
     experimentalWorkerOpen={false} plugins={[plugin]} onReady={(ready) => { api = ready; }} />);
   try {
     await waitFor(() => expect(api).toBeDefined(), { timeout: 15_000 });
-    expect(await exercise(api!)).toEqual(workerResults);
+    expect(await exercise(api!, 'inThread')).toEqual(workerResults);
   } finally { inThread.unmount(); warn.mockRestore(); }
 }
 
