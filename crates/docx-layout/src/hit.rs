@@ -283,8 +283,10 @@ fn canvas_caret_stops(
     Some(stops)
 }
 
-/// Caret stops taken from shaped cluster bounds, so ligatures and reordered
-/// clusters land on real boundaries rather than an even split.
+/// Caret stops taken from shaped cluster bounds, so reordered clusters land on
+/// real boundaries rather than an even split across the run. Inside one
+/// cluster of several characters outside joining and Indic scripts, such as an
+/// "fi" ligature, Word splits the cluster's advance evenly between them.
 fn glyph_caret_stops(
     text: &str,
     glyphs: &[crate::display_list::PlacedGlyph],
@@ -337,6 +339,20 @@ fn glyph_caret_stops(
             x: right,
             position: if rtl { start_position } else { end_position },
         });
+        if cluster_text.chars().any(ooxml_text::is_joining_or_indic) {
+            continue;
+        }
+        let graphemes: Vec<&str> = cluster_text.graphemes(true).collect();
+        let count = graphemes.len();
+        let mut inner = logical_start;
+        for (index, grapheme) in graphemes.iter().enumerate().take(count.saturating_sub(1)) {
+            inner += grapheme.encode_utf16().count() as i64;
+            let share = (right - left) * (index + 1) as f64 / count as f64;
+            stops.push(CaretStop {
+                x: if rtl { right - share } else { left + share },
+                position: doc_position_at_utf16(doc_start, doc_end, inner, utf16_len),
+            });
+        }
     }
     stops.sort_by(|left, right| {
         left.x
@@ -3738,5 +3754,62 @@ mod tests {
         assert_eq!(rects.len(), 1);
         assert_eq!((rects[0].x, rects[0].y), (100.0, 200.0));
         assert_eq!((rects[0].width, rects[0].height), (60.0, 18.0));
+    }
+
+    fn ligature_run(text: &str, doc_start: i64, glyphs: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "kind": "glyphRun", "fontId": 1, "size": 16, "color": "#000000",
+            "text": text, "docStart": doc_start,
+            "docEnd": doc_start + text.encode_utf16().count() as i64,
+            "blockId": doc_start, "lineIndex": 0, "glyphs": glyphs
+        })
+    }
+
+    #[test]
+    fn a_ligature_splits_its_advance_evenly_between_its_characters() {
+        let dl = page(
+            serde_json::Value::Null,
+            vec![ligature_run(
+                "office",
+                10,
+                serde_json::json!([
+                    {"id": 1, "x": 100, "y": 200, "cluster": 0, "advance": 10},
+                    {"id": 2, "x": 110, "y": 200, "cluster": 1, "advance": 30},
+                    {"id": 3, "x": 140, "y": 200, "cluster": 4, "advance": 10},
+                    {"id": 4, "x": 150, "y": 200, "cluster": 5, "advance": 10}
+                ]),
+            )],
+        );
+        for (position, x) in [(11, 110.0), (12, 120.0), (13, 130.0), (14, 140.0)] {
+            assert!((caret_rect(&dl, position).unwrap().x - x).abs() < 0.01, "{position}");
+        }
+        for (x, position) in [(114.0, 11), (118.0, 12), (124.0, 12), (126.0, 13), (136.0, 14)] {
+            assert_eq!(hit_test(&dl, 0, x, 195.0), Some(position), "{x}");
+        }
+        for (from, to, x, width) in [
+            (11, 12, 110.0, 10.0),
+            (12, 13, 120.0, 10.0),
+            (13, 14, 130.0, 10.0),
+            (11, 14, 110.0, 30.0),
+        ] {
+            let rects = range_rects(&dl, from, to);
+            assert_eq!(rects.len(), 1);
+            assert!((rects[0].x - x).abs() < 0.01, "{from}..{to}: {rects:?}");
+            assert!((rects[0].width - width).abs() < 0.01, "{from}..{to}: {rects:?}");
+        }
+    }
+
+    #[test]
+    fn a_ligature_of_a_joining_script_keeps_its_edges() {
+        let dl = page(
+            serde_json::Value::Null,
+            vec![ligature_run(
+                "\u{644}\u{627}",
+                10,
+                serde_json::json!([{"id": 1, "x": 100, "y": 200, "cluster": 0, "advance": 20}]),
+            )],
+        );
+        assert!((caret_rect(&dl, 11).unwrap().x - 100.0).abs() < 0.01);
+        assert_eq!(hit_test(&dl, 0, 109.0, 195.0), Some(10));
     }
 }
