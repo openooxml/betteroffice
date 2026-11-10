@@ -3,13 +3,21 @@
 //! values as `1.0`, so these fields accept a whole-number float as the
 //! integer and reject a fractional or out-of-range one, naming the field.
 
-use serde::de::Error as _;
-use serde::{Deserialize, Deserializer};
-use serde_json::Number;
+use std::fmt;
+use std::marker::PhantomData;
 
-pub(crate) trait WholeNumber: Sized {
+use serde::Deserializer;
+use serde::de::{Error, Visitor};
+
+pub(crate) trait WholeNumber: Sized + fmt::Display {
     const KIND: &'static str;
-    fn from_number(number: &Number) -> Option<Self>;
+    fn from_i64(value: i64) -> Option<Self>;
+    fn from_u64(value: u64) -> Option<Self>;
+    fn from_f64(value: f64) -> Option<Self>;
+    fn deserialize_typed<'de, D: Deserializer<'de>, V: Visitor<'de, Value = Self>>(
+        deserializer: D,
+        visitor: V,
+    ) -> Result<Self, D::Error>;
 }
 
 const TWO_POW_63: f64 = 9_223_372_036_854_775_808.0;
@@ -17,44 +25,108 @@ const TWO_POW_64: f64 = 18_446_744_073_709_551_616.0;
 
 impl WholeNumber for i64 {
     const KIND: &'static str = "an integer";
-    fn from_number(number: &Number) -> Option<Self> {
-        number.as_i64().or_else(|| {
-            let value = number.as_f64()?;
-            (value.fract() == 0.0 && (-TWO_POW_63..TWO_POW_63).contains(&value))
-                .then_some(value as i64)
-        })
+    fn from_i64(value: i64) -> Option<Self> {
+        Some(value)
+    }
+    fn from_u64(value: u64) -> Option<Self> {
+        i64::try_from(value).ok()
+    }
+    fn from_f64(value: f64) -> Option<Self> {
+        (value.fract() == 0.0 && (-TWO_POW_63..TWO_POW_63).contains(&value)).then_some(value as i64)
+    }
+    fn deserialize_typed<'de, D: Deserializer<'de>, V: Visitor<'de, Value = Self>>(
+        deserializer: D,
+        visitor: V,
+    ) -> Result<Self, D::Error> {
+        if deserializer.is_human_readable() {
+            deserializer.deserialize_any(visitor)
+        } else {
+            deserializer.deserialize_i64(visitor)
+        }
     }
 }
 
 impl WholeNumber for u64 {
     const KIND: &'static str = "a nonnegative integer";
-    fn from_number(number: &Number) -> Option<Self> {
-        number.as_u64().or_else(|| {
-            let value = number.as_f64()?;
-            (value.fract() == 0.0 && (0.0..TWO_POW_64).contains(&value)).then_some(value as u64)
-        })
+    fn from_i64(value: i64) -> Option<Self> {
+        u64::try_from(value).ok()
+    }
+    fn from_u64(value: u64) -> Option<Self> {
+        Some(value)
+    }
+    fn from_f64(value: f64) -> Option<Self> {
+        (value.fract() == 0.0 && (0.0..TWO_POW_64).contains(&value)).then_some(value as u64)
+    }
+    fn deserialize_typed<'de, D: Deserializer<'de>, V: Visitor<'de, Value = Self>>(
+        deserializer: D,
+        visitor: V,
+    ) -> Result<Self, D::Error> {
+        if deserializer.is_human_readable() {
+            deserializer.deserialize_any(visitor)
+        } else {
+            deserializer.deserialize_u64(visitor)
+        }
     }
 }
 
-fn convert<T: WholeNumber, E: serde::de::Error>(number: &Number, field: &str) -> Result<T, E> {
-    T::from_number(number)
-        .ok_or_else(|| E::custom(format!("{field} must be {}, got {number}", T::KIND)))
+struct Whole<T> {
+    field: &'static str,
+    kind: PhantomData<T>,
+}
+
+impl<T: WholeNumber> Whole<T> {
+    fn reject<E: Error>(&self, value: impl fmt::Display) -> E {
+        E::custom(format!("{} must be {}, got {value}", self.field, T::KIND))
+    }
+}
+
+impl<'de, T: WholeNumber> Visitor<'de> for Whole<T> {
+    type Value = T;
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        write!(formatter, "{} as {}", self.field, T::KIND)
+    }
+    fn visit_i64<E: Error>(self, value: i64) -> Result<T, E> {
+        T::from_i64(value).ok_or_else(|| self.reject(value))
+    }
+    fn visit_u64<E: Error>(self, value: u64) -> Result<T, E> {
+        T::from_u64(value).ok_or_else(|| self.reject(value))
+    }
+    fn visit_f64<E: Error>(self, value: f64) -> Result<T, E> {
+        T::from_f64(value).ok_or_else(|| self.reject(value))
+    }
+}
+
+struct OptionalWhole<T>(Whole<T>);
+
+impl<'de, T: WholeNumber> Visitor<'de> for OptionalWhole<T> {
+    type Value = Option<T>;
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        self.0.expecting(formatter)?;
+        formatter.write_str(" or null")
+    }
+    fn visit_none<E: Error>(self) -> Result<Option<T>, E> {
+        Ok(None)
+    }
+    fn visit_unit<E: Error>(self) -> Result<Option<T>, E> {
+        Ok(None)
+    }
+    fn visit_some<D: Deserializer<'de>>(self, deserializer: D) -> Result<Option<T>, D::Error> {
+        T::deserialize_typed(deserializer, self.0).map(Some)
+    }
 }
 
 pub(crate) fn required<'de, T: WholeNumber, D: Deserializer<'de>>(
     deserializer: D,
-    field: &str,
+    field: &'static str,
 ) -> Result<T, D::Error> {
-    convert(&Number::deserialize(deserializer)?, field)
+    T::deserialize_typed(deserializer, Whole { field, kind: PhantomData })
 }
 
 pub(crate) fn optional<'de, T: WholeNumber, D: Deserializer<'de>>(
     deserializer: D,
-    field: &str,
+    field: &'static str,
 ) -> Result<Option<T>, D::Error> {
-    Option::<Number>::deserialize(deserializer)?
-        .map(|number| convert(&number, field))
-        .transpose()
+    deserializer.deserialize_option(OptionalWhole(Whole { field, kind: PhantomData }))
 }
 
 macro_rules! whole_fields {
@@ -153,5 +225,73 @@ mod tests {
                 assert_eq!(unsigned(&format!(r#"{{"columns":{value}.0}}"#)), expected);
             }
         }
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct Inner {
+        #[serde(default, deserialize_with = "super::grid_before")]
+        grid_before: Option<u64>,
+        #[serde(deserialize_with = "super::note_id")]
+        id: i64,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct Flattened {
+        #[serde(flatten)]
+        inner: Inner,
+    }
+
+    #[test]
+    fn flattened_fields_read_whole_floats_and_integers() {
+        let read = |json: &str| {
+            serde_json::from_str::<Flattened>(json).map(|value| (value.inner.grid_before, value.inner.id))
+        };
+        assert_eq!(read(r#"{"grid_before":2.0,"id":3.0}"#).unwrap(), (Some(2), 3));
+        assert_eq!(read(r#"{"grid_before":2,"id":-3}"#).unwrap(), (Some(2), -3));
+        assert_eq!(read(r#"{"id":3}"#).unwrap(), (None, 3));
+        let error = read(r#"{"grid_before":2.5,"id":3}"#).unwrap_err().to_string();
+        assert!(error.contains("gridBefore must be a nonnegative integer, got 2.5"), "{error}");
+    }
+
+    struct Binary(Option<i64>);
+
+    impl<'de> serde::Deserializer<'de> for Binary {
+        type Error = serde::de::value::Error;
+
+        fn deserialize_any<V: serde::de::Visitor<'de>>(self, _: V) -> Result<V::Value, Self::Error> {
+            Err(serde::de::Error::custom("deserialize_any is not supported"))
+        }
+
+        fn deserialize_i64<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+            visitor.visit_i64(self.0.expect("a value"))
+        }
+
+        fn deserialize_u64<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+            visitor.visit_u64(self.0.expect("a value") as u64)
+        }
+
+        fn deserialize_option<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+            match self.0 {
+                None => visitor.visit_none(),
+                Some(_) => visitor.visit_some(self),
+            }
+        }
+
+        fn is_human_readable(&self) -> bool {
+            false
+        }
+
+        serde::forward_to_deserialize_any! {
+            bool i8 i16 i32 i128 u8 u16 u32 u128 f32 f64 char str string bytes byte_buf unit
+            unit_struct newtype_struct seq tuple tuple_struct map struct enum identifier ignored_any
+        }
+    }
+
+    #[test]
+    fn binary_formats_read_typed_integers_without_deserialize_any() {
+        assert_eq!(super::note_id(Binary(Some(7))).unwrap(), 7);
+        assert_eq!(super::footnote_columns(Binary(Some(3))).unwrap(), Some(3));
+        assert_eq!(super::footnote_columns(Binary(None)).unwrap(), None);
+        assert_eq!(super::note_num_start(Binary(Some(-2))).unwrap(), Some(-2));
     }
 }
