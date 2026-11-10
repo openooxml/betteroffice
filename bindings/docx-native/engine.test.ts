@@ -1786,6 +1786,9 @@ test('native and wasm find a table crossing undos emptied in a header, a footnot
       const found = JSON.parse(expected.unavailable_tables()) as Array<{ story: string; tableIndex: number }>;
       expect(found, story).toContainEqual({ story, tableIndex: 0 });
       expect(actual.unavailable_tables()).toBe(expected.unavailable_tables());
+      const roots = JSON.stringify(expected.story_ids().filter((id) => id === 'body' || id.startsWith('hf:') || id.startsWith('fn:')));
+      expect(JSON.parse(expected.unavailable_tables_from(roots))).toContainEqual({ story, tableIndex: 0 });
+      expect(actual.unavailable_tables_from(roots)).toBe(expected.unavailable_tables_from(roots));
     } finally {
       actual.free();
       expected.free();
