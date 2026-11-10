@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, test } from 'bun:test';
+import { JOB_TIMEOUT_MINUTES } from './shards.mjs';
 import { CHANNELS, ENGINE_TIMEOUT, HELPER_TIMEOUT, PARALLELISM, SHARD_SIZE, ROUNDTRIP_MATRICES, MAX_MATRIX_JOBS, roundtripMatrices, roundtripShards } from './roundtrip.mjs';
 
 const workflow = Bun.YAML.parse(
@@ -121,6 +122,12 @@ test('XLSX calculation and PPTX LibreOffice run independently and gate publicati
   expect(xlsx.needs).toEqual(['prepare', 'xlsx-native-build']);
   expect(xlsx.strategy.matrix.shard).toBe('${{ fromJSON(needs.prepare.outputs.xlsx-shards) }}');
   expect(pptx.needs).toEqual(['prepare', 'pptx-native-build']);
+  expect(pptx.strategy).toEqual({ 'fail-fast': false, matrix: { shard: '${{ fromJSON(needs.prepare.outputs.pptx-shards) }}' } });
+  expect(prepare.outputs['pptx-shards']).toBe('${{ steps.plan.outputs.pptx-shards }}');
+  expect(pptx.steps.find((step: any) => String(step.run ?? '').includes('pptx-benchmark.mjs')).env.QUALITY_SHARD).toBe('${{ matrix.shard }}');
+  expect(pptx.steps.filter((step: any) => step.uses?.startsWith('actions/upload-artifact@')).map((step: any) => step.with.name))
+    .toEqual(['pptx-benchmark-report-${{ matrix.shard }}', 'pptx-benchmark-diagnostics-${{ matrix.shard }}']);
+  expect(publish.steps.find((step: any) => step.with?.pattern === 'pptx-benchmark-report-*')).toBeDefined();
   expect(workflow.jobs['pptx-native-build'].steps[1].with.ref).toContain('needs.prepare.outputs.pptx-published-source');
   expect(pptx.steps.find((step: any) => step.run?.includes('pptx_benchmark.py')).env.QUALITY_NATIVE).toBe('${{ runner.temp }}/native');
   expect(publish.if).toContain("needs.xlsx-benchmark.result == 'success'");
@@ -461,4 +468,13 @@ test('the roundtrip matrices cover every file of a corpus-sized plan for all thr
     expect(jobs.sort()).toEqual(shards.map(({ format, shard }: any) => `${format}/${shard}`).sort());
   }
   expect(CHANNELS).toEqual(['published', 'commit', 'libreoffice']);
+});
+
+test('planning prints every benchmark job shard count and longest planned shard against the timeout', () => {
+  const plan = prepare.steps.find((step: any) => step.id === 'plan').run;
+  expect(plan).toContain('benchmarkShardPlan(plan)');
+  expect(plan).toContain('GITHUB_STEP_SUMMARY');
+  expect(plan).toContain('pptx-shards=${JSON.stringify(pptxShards(plan).map((_, index) => index))}');
+  for (const name of ['docx-benchmark', 'xlsx-benchmark', 'pptx-benchmark', 'xlsx-fidelity'])
+    expect({ name, timeout: workflow.jobs[name]['timeout-minutes'] }).toEqual({ name, timeout: JOB_TIMEOUT_MINUTES });
 });

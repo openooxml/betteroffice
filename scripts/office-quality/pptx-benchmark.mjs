@@ -7,11 +7,15 @@ import { download } from './download.mjs';
 import { mapPool, validatePlan } from './plan.mjs';
 import { validateComparison } from './results.mjs';
 import { corpusOrigin } from './samples.mjs';
+import { budgetShards } from './shards.mjs';
 
 export const METHOD = 'pptx-cli-slide1-v1';
 
-export function mergePptxBenchmark(plan, report, part, planHash) {
-  const expected = plan.samples.filter(sample => sample.format === 'pptx');
+export function pptxShards(plan) {
+  return budgetShards('pptx-benchmark', plan.samples.filter(sample => sample.format === 'pptx')).map(shard => shard.samples);
+}
+
+function mergePart(plan, part, planHash, expected) {
   const benchmark = part?.benchmark;
   if (part?.schema_version !== 1 || part.plan_sha256 !== planHash ||
       benchmark?.method !== METHOD || benchmark.dpi !== 96 || benchmark.trials !== TRIALS ||
@@ -50,6 +54,28 @@ export function mergePptxBenchmark(plan, report, part, planHash) {
     }
     results.set(row.id, row);
   }
+  return results;
+}
+
+export function mergePptxBenchmark(plan, report, parts, planHash) {
+  const shards = pptxShards(plan);
+  if (!Array.isArray(parts) || !shards.length || parts.length !== shards.length)
+    throw new Error('Missing or unexpected PPTX benchmark shards');
+  const results = new Map();
+  const seen = new Set();
+  let identity;
+  for (const part of parts) {
+    const ids = shards[part?.shard];
+    if (!Number.isInteger(part?.shard) || !ids || seen.has(part.shard))
+      throw new Error('Duplicate or unknown PPTX benchmark shard');
+    seen.add(part.shard);
+    const serialized = JSON.stringify(part.benchmark);
+    if (identity && serialized !== identity) throw new Error('PPTX benchmark shard environments differ');
+    identity = serialized;
+    const expected = ids.map(id => plan.samples.find(sample => sample.id === id));
+    for (const [id, row] of mergePart(plan, part, planHash, expected)) results.set(id, row);
+  }
+  const benchmark = parts[0].benchmark;
   const samples = report.samples.map(sample => sample.format === 'pptx' ? {
     ...sample, comparisons: [...sample.comparisons, results.get(sample.id).libreoffice],
     native_timings: results.get(sample.id).timings,
@@ -58,11 +84,12 @@ export function mergePptxBenchmark(plan, report, part, planHash) {
   return { ...report, pptx_benchmark: benchmark, samples };
 }
 
-export async function stagePptx(planPath, output, cacheDir) {
+export async function stagePptx(planPath, shard, output, cacheDir) {
   const bytes = await readFile(planPath);
   const plan = validatePlan(JSON.parse(bytes));
-  const samples = plan.samples.filter(sample => sample.format === 'pptx');
-  if (!samples.length || !plan.pptx_published_source_sha) throw new Error('Missing PPTX samples or published source');
+  const ids = pptxShards(plan)[shard];
+  if (!ids || !plan.pptx_published_source_sha) throw new Error('Invalid PPTX shard or missing published source');
+  const samples = ids.map(id => plan.samples.find(sample => sample.id === id));
   const tasks = [];
   for (const sample of samples) {
     const root = resolve(output, sample.id);
@@ -78,12 +105,13 @@ export async function stagePptx(planPath, output, cacheDir) {
     if (++completed % 50 === 0 || completed === tasks.length)
       console.log(`PPTX LibreOffice: staged ${completed}/${tasks.length} verified assets`);
   });
-  await writeFile(resolve(output, 'job.json'), JSON.stringify({ plan_sha256: digest(bytes), samples, method: METHOD, trials: TRIALS,
+  await writeFile(resolve(output, 'job.json'), JSON.stringify({ plan_sha256: digest(bytes), shard, samples, method: METHOD, trials: TRIALS,
     source_sha: plan.source_sha, published_source_sha: plan.pptx_published_source_sha, published_version: plan.versions.pptx }, null, 2) + '\n');
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  const { QUALITY_PLAN, QUALITY_OUTPUT, QUALITY_ASSET_CACHE } = process.env;
-  if (!QUALITY_PLAN || !QUALITY_OUTPUT) throw new Error('QUALITY_PLAN and QUALITY_OUTPUT are required');
-  await stagePptx(resolve(QUALITY_PLAN), resolve(QUALITY_OUTPUT), QUALITY_ASSET_CACHE);
+  const { QUALITY_PLAN, QUALITY_OUTPUT, QUALITY_SHARD, QUALITY_ASSET_CACHE } = process.env;
+  if (!QUALITY_PLAN || !QUALITY_OUTPUT || !/^\d+$/.test(QUALITY_SHARD ?? ''))
+    throw new Error('QUALITY_PLAN, QUALITY_OUTPUT, and QUALITY_SHARD are required');
+  await stagePptx(resolve(QUALITY_PLAN), Number(QUALITY_SHARD), resolve(QUALITY_OUTPUT), QUALITY_ASSET_CACHE);
 }
