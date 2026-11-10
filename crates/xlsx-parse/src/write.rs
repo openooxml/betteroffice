@@ -640,7 +640,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
             parts.remove(&relationship_part_path(&calc_chain.path));
         }
     }
-    let chart_refreshes = patch_chart_parts(wb, package, origins, &mut parts)?;
+    let chart_refreshes = patch_chart_parts(wb, package, origins, sheet_axes, &mut parts)?;
 
     let shared_strings_stable = wb.shared_strings == package.original_workbook.shared_strings;
     let style_plan = style_derivation::StylePlan::new(wb, package, origins, sheet_axes)?;
@@ -891,6 +891,7 @@ fn patch_chart_parts(
     wb: &Workbook,
     package: &PreservedPackage,
     origins: &[Option<usize>],
+    sheet_axes: &[Option<SheetAxes>],
     parts: &mut PartStore<'_>,
 ) -> Result<Vec<(String, Vec<u8>)>, ParseError> {
     if let Some((drawing, _, first, second)) = crate::chart::conflicting_drawing_anchor(wb) {
@@ -984,22 +985,66 @@ fn patch_chart_parts(
             parts.set(path.to_owned(), rewritten)?;
         }
     }
+    let followed = followed_drawings(package, origins, sheet_axes)?;
+    let mut drawings: BTreeMap<&str, Vec<(usize, ChartAnchor)>> =
+        followed.keys().map(|path| (*path, Vec::new())).collect();
     for (path, claims) in anchors {
-        let moved = claims
-            .into_iter()
-            .filter(|(_, claim)| claim.moved)
-            .map(|(index, claim)| (index, claim.anchor))
-            .collect::<Vec<_>>();
-        if moved.is_empty() {
+        drawings.entry(path).or_default().extend(
+            claims
+                .into_iter()
+                .filter(|(_, claim)| claim.moved)
+                .map(|(index, claim)| (index, claim.anchor)),
+        );
+    }
+    for (path, moved) in drawings {
+        let axes = followed.get(path).copied();
+        if moved.is_empty() && axes.is_none() {
             continue;
         }
         let source = package.part_bytes(path).ok_or_else(|| missing_part(path))?;
-        parts.set(
-            path.to_owned(),
-            crate::chart::patch_drawing_anchors(source, &moved)?,
-        )?;
+        let patched = crate::chart::patch_drawing_anchors(source, &moved, axes)?;
+        if patched != source {
+            parts.set(path.to_owned(), patched)?;
+        }
     }
     Ok(refreshes)
+}
+
+/// The drawings whose unclaimed anchors follow a row or column edit, each with the axes of the
+/// sheet that holds it. A drawing two edited sheets share must follow both the same way, and a
+/// drawing the edit-time check could not read is never moved silently.
+fn followed_drawings<'a>(
+    package: &'a PreservedPackage,
+    origins: &[Option<usize>],
+    sheet_axes: &'a [Option<SheetAxes>],
+) -> Result<BTreeMap<&'a str, &'a SheetAxes>, ParseError> {
+    let mut followed: BTreeMap<&str, &SheetAxes> = BTreeMap::new();
+    for (origin, axes) in origins.iter().zip(sheet_axes) {
+        let (Some(origin), Some(axes)) = (origin, axes) else {
+            continue;
+        };
+        if axes.is_identity() {
+            continue;
+        }
+        for drawing in package.sheet_drawings().get(*origin).into_iter().flatten() {
+            if drawing.anchors.is_none() {
+                return Err(ParseError::UnsupportedEdit(format!(
+                    "{} cannot follow the row and column edits on its sheet",
+                    drawing.part
+                )));
+            }
+            if followed
+                .insert(drawing.part.as_str(), axes)
+                .is_some_and(|other| other != axes)
+            {
+                return Err(ParseError::UnsupportedEdit(format!(
+                    "{} is drawn on two sheets whose rows and columns moved differently",
+                    drawing.part
+                )));
+            }
+        }
+    }
+    Ok(followed)
 }
 
 fn refreshed_chart_bytes(

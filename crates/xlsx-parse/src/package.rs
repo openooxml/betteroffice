@@ -36,6 +36,8 @@ pub struct PreservedPackage {
     pub(crate) original_workbook: Workbook,
     pub(crate) active_sheet: SheetId,
     pub(crate) unpatchable_references: Vec<UnpatchableReference>,
+    /// Per source sheet, the drawings holding anchors no chart claims; read on first use.
+    pub(crate) drawing_anchors: Arc<OnceLock<Vec<Vec<crate::drawing_anchors::SheetDrawing>>>>,
     pub(crate) rich_shared_strings: BTreeSet<usize>,
     pub(crate) text_runs: Arc<OnceLock<crate::rich_text::RichTextIndex>>,
 }
@@ -190,6 +192,7 @@ impl PreservedPackage {
             original_workbook: workbook.clone(),
             active_sheet,
             unpatchable_references,
+            drawing_anchors: Arc::new(OnceLock::new()),
             rich_shared_strings,
             text_runs: Arc::new(OnceLock::new()),
         })
@@ -236,6 +239,33 @@ impl PreservedPackage {
     #[doc(hidden)]
     pub fn unpatchable_references(&self) -> &[UnpatchableReference] {
         &self.unpatchable_references
+    }
+
+    /// A drawing of the source sheet `sheet` that a row or column `shift` would leave where a
+    /// save cannot place it, with the sheet's rows and columns where `axes` says they are now.
+    #[doc(hidden)]
+    pub fn drawing_blocking_shift(
+        &self,
+        sheet: usize,
+        axes: Option<&crate::SheetAxes>,
+        shift: crate::GridShift,
+    ) -> Option<&str> {
+        self.sheet_drawings()
+            .get(sheet)?
+            .iter()
+            .find(|drawing| crate::drawing_anchors::blocks(drawing, axes, shift))
+            .map(|drawing| drawing.part.as_str())
+    }
+
+    pub(crate) fn sheet_drawings(&self) -> &[Vec<crate::drawing_anchors::SheetDrawing>] {
+        self.drawing_anchors.get_or_init(|| {
+            self.sheets
+                .iter()
+                .map(|sheet| {
+                    crate::drawing_anchors::sheet_drawing_anchors(&self.parts, &sheet.path)
+                })
+                .collect()
+        })
     }
 
     /// Returns a preserved part whose references cannot be patched.
