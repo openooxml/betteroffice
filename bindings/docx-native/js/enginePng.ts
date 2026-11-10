@@ -1,5 +1,6 @@
 import { fontUnavailable, pagePngRequest, type DocxPngOptions } from '../../../packages/docx/src/layout/render/png';
-import { DEFAULT_STRICT_PICTURES, PngExportError, strictPicturesError, type PngUnavailablePicture } from '../../../shared/office-session/pngExportError';
+import { PngExportError, type PngUnavailablePicture } from '../../../shared/office-session/pngExportError';
+import { DEFAULT_STRICT_PICTURES, strictPicturesError } from '../../../shared/office-session/strictPictures';
 import type { DocxPngEngine } from '../../../packages/docx/src/wasm/enginePng';
 
 export type { DocxPngEngine } from '../../../packages/docx/src/wasm/enginePng';

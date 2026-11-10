@@ -2,7 +2,8 @@ import { GlyphCache } from '../layout/render/glyphCache';
 import { createCanvasImageResolver } from '../layout/render/canvasImageResolver';
 import { rasterizeDisplayPageToBackBuffer, type PageCanvasBuffer } from '../layout/render/canvasBackend';
 import { canvasPngAvailable, canvasUnavailable, fontUnavailable, pagePngRequest, type DocxPngOptions } from '../layout/render/png';
-import { DEFAULT_STRICT_PICTURES, strictPicturesError, type PngPictureUnavailableReason, type PngUnavailablePicture } from '../../../../shared/office-session/pngExportError';
+import type { PngPictureUnavailableReason, PngUnavailablePicture } from '../../../../shared/office-session/pngExportError';
+import { DEFAULT_STRICT_PICTURES, strictPicturesError } from '../../../../shared/office-session/strictPictures';
 import type { DisplayList, DisplayPage } from '../layout/render/displayList';
 
 /** What an engine needs to draw one page, from the session that laid it out. */
