@@ -47,16 +47,18 @@ test('format_text clear on a heading run keeps the heading bold', async () => {
   expect(Boolean(segment(reopened, 'Heading').bold)).toBe(true);
 });
 
-test('format_text on a range touching a tracked insertion formats it as the editor does', async () => {
+test('format_text around a tracked insertion behaves as on main: no match spans it, a neighbouring match formats as the editor does', async () => {
   const body = '<w:p><w:r><w:t xml:space="preserve">Before </w:t></w:r><w:ins w:id="7" w:author="Ann" w:date="2026-01-01T00:00:00Z"><w:r><w:t>inserted</w:t></w:r></w:ins><w:r><w:t xml:space="preserve"> after</w:t></w:r></w:p>';
   const tool = await open(await fixture(body));
   const direct = await open(await fixture(body));
-  const result = await format(tool, 'Before inserted', { bold: true });
+  expect(tool.grep({ query: 'Before inserted' }).matches).toEqual([]);
+  const result = await format(tool, 'Before', { bold: true });
   expect(JSON.stringify(result)).not.toContain('error');
   const paraId = direct.session.paragraphs('body')[0].paraId;
-  direct.session.formatRange({ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 15 } }, { bold: true });
+  direct.session.formatRange({ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 6 } }, { bold: true });
   expect(tool.session.storySegments('body')).toEqual(direct.session.storySegments('body'));
-  expect(Boolean(segment(tool, 'inserted').bold) && Boolean(segment(tool, 'inserted').ins)).toBe(true);
+  expect(Boolean(segment(tool, 'inserted').bold)).toBe(false);
+  expect(Boolean(segment(tool, 'inserted').ins)).toBe(true);
 });
 
 test('format_text writes the new marks', async () => {
