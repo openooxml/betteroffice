@@ -44,6 +44,35 @@ test('the split never exceeds max_parallel, never starves or over-fills a matrix
   }
 });
 
+function optimum(load: Load, total: number) {
+  const running = runningOf(load);
+  const candidates = running.flatMap((name) => Array.from({ length: load[name].jobs }, (_, index) => load[name].minutes / (index + 1)));
+  const feasible = (limit: number) => {
+    let used = 0;
+    for (const name of running) {
+      const slots = Math.max(1, Math.ceil(load[name].minutes / limit - 1e-9));
+      if (slots > load[name].jobs) return false;
+      used += slots;
+    }
+    return used <= total;
+  };
+  return Math.min(...candidates.filter(feasible));
+}
+
+test('the split reaches the exact optimum for the longest matrix, including where single slot moves cannot find it', () => {
+  const load: Load = { a: { jobs: 2, minutes: 10 }, b: { jobs: 2, minutes: 10 }, c: { jobs: 3, minutes: 1 } };
+  expect(wallOf(load, allocate(load, 5))).toBe(5);
+  const next = random(7);
+  for (let round = 0; round < 300; round += 1) {
+    const sized: Load = Object.fromEntries(['a', 'b', 'c', 'd'].map((name) => {
+      const jobs = 1 + Math.floor(next() * 6);
+      return [name, { jobs, minutes: 1 + Math.floor(next() * 50) }];
+    }));
+    const total = 4 + Math.floor(next() * 20);
+    expect(wallOf(sized, allocate(sized, total))).toBeCloseTo(optimum(sized, total), 9);
+  }
+});
+
 test('property: for any loads and job counts the invariants hold and no single slot move shortens the longest matrix', () => {
   const next = random(20261110);
   const names = ['measure', 'docx-benchmark', 'xlsx-benchmark', 'pptx-benchmark', 'xlsx-fidelity', 'roundtrip-a', 'roundtrip-b', 'timing'];
