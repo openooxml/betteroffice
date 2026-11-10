@@ -172,6 +172,7 @@ async function setup(
   const invocation: PluginInvocation<DocxPluginSnapshot> = {
     pluginId: 'acme.review',
     activation: {},
+    eventDelivered: false,
     snapshot: {} as DocxPluginSnapshot,
     signal: controller.signal,
     lifetimeSignal: lifetimeController.signal,
@@ -576,6 +577,7 @@ describe('plugin read and navigation clients', () => {
     const invocation: PluginInvocation<DocxPluginSnapshot> = {
       pluginId: 'acme.review',
       activation: {},
+      eventDelivered: false,
       snapshot: {} as DocxPluginSnapshot,
       signal: env.controller.signal,
       lifetimeSignal: env.lifetimeController.signal,

@@ -134,8 +134,8 @@ context or unpainted layout. The result type also allows `stale-version`,
 
 Granted mutating built-in commands require `document: "write"` and a call while a trusted
 `click`, `keydown`, or `pointerup` in that plugin's own UI is being handled, including its
-contributed toolbar buttons. Synchronous calls and microtasks before the event finishes
-dispatching qualify. Timers, later unrelated events, awaits that outlive dispatch,
+contributed toolbar buttons. Calls made by that handler, and microtasks it schedules,
+qualify; event notifications (`onEvent`) never do. Timers, later unrelated events, awaits that outlive dispatch,
 synthetic events, and gestures outside that plugin's UI refuse with `unsupported-policy`.
 
 ## Structured export

@@ -1,4 +1,4 @@
-import { trackPluginGestures } from '../../../../shared/plugin-host/gesture';
+import { gestureFor, trackPluginGestures } from '../../../../shared/plugin-host/gesture';
 import { LEGACY_SYNC_API_PROP } from '../components/DocxEditor/peerless/contracts';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
@@ -2375,6 +2375,82 @@ describe('DocxEditor plugins (peer-less engine)', () => {
 });
 
 describe('DocxEditor plugins (in-thread engine)', () => {
+  for (const producer of ['focus-change', 'viewport-change'] as const) {
+    test(`${producer} onEvent never qualifies; the handler's mutation qualifies, including nested documentChanged`, async () => {
+      let host!: pluginHosts.DocxPluginHost;
+      let access!: pluginHosts.DocxPluginHostAccess;
+      const createHost = pluginHosts.createDocxPluginHost;
+      const capture = spyOn(pluginHosts, 'createDocxPluginHost').mockImplementation((next) => {
+        access = next;
+        host = createHost(next);
+        return host;
+      });
+      let dispatching: Event | undefined;
+      let activationId = '';
+      let armed = false;
+      let own!: Promise<DocxPluginCommandResult>;
+      const delivered: unknown[] = [];
+      const gestures: boolean[] = [];
+      let focusDocument = () => {};
+      const plugin = defineDocxPlugin({
+        id: 'event-gesture', createState: () => null,
+        panel: { title: 'Events', placement: 'left', render: ({ context }) => (
+          <button type="button" data-testid="event-gesture" onClick={(event) => {
+            event.stopPropagation();
+            armed = true;
+            if (producer === 'focus-change') focusDocument();
+            own = context.commands.execute('bold', null);
+          }}>Bold</button>
+        ) },
+        onEvent(context, event) {
+          if (!armed || event.type !== producer) return;
+          armed = false;
+          gestures.push(gestureFor(activationId));
+          void context.commands.execute('bold', null).then((result) => delivered.push(result));
+        },
+      });
+      let mounted!: Awaited<ReturnType<typeof mount>>;
+      try {
+        mounted = await mount({ plugins: [plugin],
+          pluginGrants: { 'event-gesture': { document: 'write', commands: ['bold'] } } });
+      } finally {
+        capture.mockRestore();
+      }
+      const { ref, view } = mounted;
+      await selectInThreadFirstWord(ref);
+      await until(() => access.geometry() !== null);
+      const geometry = access.geometry;
+      access.geometry = () => {
+        const current = geometry();
+        return current ? { ...current, viewport: { x: 0, y: 0, width: 600, height: 400 } } : null;
+      };
+      host.geometryChanged();
+      focusDocument = () => ref.current!.focus();
+      const button = view.getByTestId('event-gesture');
+      await act(async () => { button.focus(); });
+      await host.notificationsIdle();
+      const marker = button.closest<HTMLElement>('[data-plugin-activation]')!;
+      activationId = marker.dataset.pluginActivation!;
+      const release = trackPluginGestures(marker,
+        (event) => { dispatching = event; return true; }, () => dispatching);
+      try {
+        await act(async () => {
+          fireEvent.click(button);
+          Object.defineProperty(dispatching!, 'eventPhase', { value: Event.BUBBLING_PHASE });
+          await own;
+          await host.notificationsIdle();
+        });
+        await until(() => delivered.length === 1);
+        expect(delivered[0]).toMatchObject({ ok: false, failure: { code: 'unsupported-policy' } });
+        expect(await own).toMatchObject({ ok: true, status: 'executed' });
+        expect(gestures).toEqual([true]);
+      } finally {
+        release();
+        access.geometry = geometry;
+      }
+    });
+  }
+
   test('overlays and layout events re-anchor once the pages show a new zoom', async () => {
     const results: DocxAnchorGeometryResult[] = [];
     const events: (DocxAnchorGeometryResult | null)[] = [];

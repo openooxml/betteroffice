@@ -121,7 +121,7 @@ export function pluginCommandScope(
   subscribe: (listener: () => void) => () => void
 ): XlsxCommandScope {
   return {
-    gesture: () => gestureFor(pluginActivationId(invocation.activation)),
+    gesture: () => gestureFor(pluginActivationId(invocation.activation), invocation),
     deny(id) {
       const refusal = invocation.refusal();
       if (refusal) return refusal;

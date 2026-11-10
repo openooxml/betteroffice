@@ -1,6 +1,7 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, describe, expect, test } from 'bun:test';
 import { gestureFor, pluginActivationId, trackPluginGestures } from './gesture';
+import { createPluginRuntime, type PluginInvocation, type RuntimePlugin } from './runtime';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -45,6 +46,72 @@ function setup(
 }
 
 describe('plugin gestures', () => {
+  for (const type of ['focus-change', 'viewport-change', 'proposal-change', 'locale-change']) {
+    test(`${type} pump invocations never qualify; the handler and its microtasks qualify`, async () => {
+      type Snapshot = { generation: string; version: string };
+      type Invocation = PluginInvocation<Snapshot>;
+      type Notification = { type: string; generation: string };
+      type Plugin = RuntimePlugin<Invocation, Notification>;
+      const seen: boolean[] = [];
+      const own: boolean[] = [];
+      let id = '';
+      const runtime = createPluginRuntime<Plugin, Invocation, Notification, Snapshot, 'command'>({
+        context: (invocation) => invocation,
+        snapshot: (_pluginId, generation) => ({ generation, version: 'v1' }),
+        currentVersion: () => 'v1',
+        loadEvent: (snapshot) => ({ type: 'load', generation: snapshot.generation }),
+        grantsEvent: (snapshot) => ({ type: 'grants-change', generation: snapshot.generation }),
+        report: (error) => { throw error.error; },
+      });
+      runtime.setPlugins([{
+        id: 'gesture', createState: () => null,
+        async onEvent(invocation, event) {
+          if (event.type !== type) return;
+          seen.push(gestureFor(id, invocation));
+          await Promise.resolve();
+          seen.push(gestureFor(id, invocation));
+          await invocation.run((next) => { seen.push(gestureFor(id, next)); });
+        },
+      }]);
+      runtime.open('g1');
+      await runtime.notificationsIdle();
+      const entry = runtime.activations()[0]!;
+      const event = new Event('click', { bubbles: true });
+      const ui = setup(() => true, () => event);
+      id = pluginActivationId(entry.activation);
+      ui.marker.setAttribute('data-plugin-activation', id);
+      on(ui.button, 'click', (event) => {
+        event.stopPropagation();
+        own.push(gestureFor(id, entry.context));
+        queueMicrotask(() => own.push(gestureFor(id, entry.context)));
+        runtime.notify({ type, generation: 'g1' });
+      });
+      try {
+        ui.button.dispatchEvent(event);
+        Object.defineProperty(event, 'eventPhase', { value: Event.BUBBLING_PHASE });
+        await runtime.notificationsIdle();
+        expect(seen).toEqual([false, false, false]);
+        expect(own).toEqual([true, true]);
+      } finally {
+        runtime.close('unmounted');
+      }
+    });
+  }
+
+  test('an await past dispatch does not qualify for the handler invocation', async () => {
+    const { button, id } = setup(() => true);
+    let resume!: () => void;
+    const gate = new Promise<void>((resolve) => { resume = resolve; });
+    let result!: Promise<boolean>;
+    on(button, 'click', () => {
+      expect(gestureFor(id)).toBe(true);
+      result = gate.then(() => gestureFor(id));
+    });
+    button.click();
+    resume();
+    expect(await result).toBe(false);
+  });
+
   for (const type of ['click', 'keydown', 'pointerup']) {
     test(`${type} stays open through ancestor bubble handlers and closes after dispatch`, async () => {
       const { ancestor, button, id } = setup(() => true);

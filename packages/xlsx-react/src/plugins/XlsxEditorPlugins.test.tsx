@@ -1,4 +1,4 @@
-import { trackPluginGestures } from '../../../../shared/plugin-host/gesture';
+import { gestureFor, trackPluginGestures } from '../../../../shared/plugin-host/gesture';
 import { testScope } from './__fixtures__/testScope';
 import { hostProposalWorkbook } from '../__fixtures__/hostProposalWorkbook';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
@@ -24,6 +24,7 @@ import { useXlsxPluginHost } from './useXlsxPluginHost';
 import { isMacPlatform } from '../commands/descriptors';
 import { pluginDefinition } from './defineXlsxPlugin';
 import * as publicApi from '../index';
+import * as pluginHosts from './createXlsxPluginHost';
 import {
   EditorToolbar,
   ToolbarCommandButton,
@@ -1124,6 +1125,102 @@ describe('XlsxEditor plugins', () => {
     ).toMatchObject({ ok: false, failure: { code: 'stale-version' } });
     expect(api().handle.version()).toBe(read.version);
     expect(input(api(), 2, 1)).toBe('100');
+  });
+
+  editorTest('proposal-change onEvent never qualifies; the handler and its microtask qualify', async () => {
+    let host!: pluginHosts.XlsxPluginHost;
+    const createHost = pluginHosts.createXlsxPluginHost;
+    const capture = spyOn(pluginHosts, 'createXlsxPluginHost').mockImplementation((access) => {
+      host = createHost(access);
+      return host;
+    });
+    let dispatching: Event | undefined;
+    let activationId = '';
+    let armed = false;
+    const own: unknown[] = [];
+    const delivered: unknown[] = [];
+    const gestures: boolean[] = [];
+    const plugin = defineXlsxPlugin({
+      id: 'event-gesture', createState: () => null,
+      panel: { title: 'Events', placement: 'left', render: ({ context }) => (
+        <button type="button" data-testid="event-gesture" onClick={(event) => {
+          event.stopPropagation();
+          armed = true;
+          host.proposalsChanged('gesture-proposals');
+          void context.commands.execute('bold', null).then((result) => own.push(result));
+          queueMicrotask(() => {
+            void context.commands.execute('bold', null).then((result) => own.push(result));
+          });
+        }}>Bold</button>
+      ) },
+      onEvent(context, event) {
+        if (!armed || event.type !== 'proposal-change') return;
+        armed = false;
+        gestures.push(gestureFor(activationId));
+        void context.commands.execute('bold', null).then((result) => delivered.push(result));
+      },
+    });
+    let mounted!: Awaited<ReturnType<typeof mount>>;
+    try {
+      mounted = await mount({ plugins: [plugin],
+        pluginGrants: { 'event-gesture': { document: 'write', commands: ['bold'] } } });
+    } finally {
+      capture.mockRestore();
+    }
+    const { view } = mounted;
+    await settle();
+    const button = view.getByTestId('event-gesture');
+    const marker = button.closest<HTMLElement>('[data-plugin-activation]')!;
+    activationId = marker.dataset.pluginActivation!;
+    const release = trackPluginGestures(marker,
+      (event) => { dispatching = event; return true; }, () => dispatching);
+    try {
+      fireEvent.click(button);
+      Object.defineProperty(dispatching!, 'eventPhase', { value: Event.BUBBLING_PHASE });
+      await until(() => delivered.length === 1 && own.length === 2);
+      expect(delivered[0]).toMatchObject({ ok: false, failure: { code: 'unsupported-policy' } });
+      expect(own).toEqual([
+        expect.objectContaining({ ok: true, status: 'executed' }),
+        expect.objectContaining({ ok: true, status: 'executed' }),
+      ]);
+      expect(gestures).toEqual([true]);
+    } finally {
+      release();
+    }
+  });
+
+  editorTest('a handler invocation that awaits past dispatch cannot mutate', async () => {
+    let dispatching: Event | undefined;
+    let resume!: () => void;
+    const gate = new Promise<void>((resolve) => { resume = resolve; });
+    const results: unknown[] = [];
+    const plugin = defineXlsxPlugin({
+      id: 'await-gesture', createState: () => null,
+      panel: { title: 'Await', placement: 'left', render: ({ context }) => (
+        <button type="button" data-testid="await-gesture" onClick={async () => {
+          results.push(await context.commands.execute('bold', null));
+          await gate;
+          results.push(await context.commands.execute('bold', null));
+        }}>Bold</button>
+      ) },
+    });
+    const { view } = await mount({ plugins: [plugin],
+      pluginGrants: { 'await-gesture': { document: 'write', commands: ['bold'] } } });
+    await settle();
+    const button = view.getByTestId('await-gesture');
+    const release = trackPluginGestures(button.closest<HTMLElement>('[data-plugin-activation]')!,
+      (event) => { dispatching = event; return true; }, () => dispatching);
+    try {
+      fireEvent.click(button);
+      await until(() => results.length === 1);
+      resume();
+      await until(() => results.length === 2);
+      expect(results[1]).toMatchObject({ ok: false, failure: { code: 'unsupported-policy' } });
+      expect(results[0]).toMatchObject({ ok: true, status: 'executed' });
+    } finally {
+      resume();
+      release();
+    }
   });
 
   editorTest('granted built-in mutations need a gesture in their panel; granted views run', async () => {

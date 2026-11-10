@@ -1,4 +1,4 @@
-import { trackPluginGestures } from '../../../../shared/plugin-host/gesture';
+import { gestureFor, trackPluginGestures } from '../../../../shared/plugin-host/gesture';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, describe, expect, mock, spyOn, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
@@ -19,6 +19,7 @@ import { pptxCommandController } from '../commands/createPptxCommandStore';
 import { isMacPlatform } from '../commands/descriptors';
 import type { PptxInThreadEditorProps } from '../PptxEditor';
 import * as publicApi from '../index';
+import * as pluginHosts from './createPptxPluginHost';
 import {
   EditorToolbar,
   PptxEditor,
@@ -396,6 +397,81 @@ describe('PptxEditor plugins', () => {
       await context.navigation.goToSlide({ slideId: story.slideId }, { expectVersion: 'stale' })
     ).toMatchObject({ ok: false, failure: { code: 'stale-version' } });
     expect((await read(api())).version).toBe(reread.version);
+  });
+
+  test('locale-change onEvent never qualifies, including another activation; the handler qualifies', async () => {
+    let host!: pluginHosts.PptxPluginHost;
+    const createHost = pluginHosts.createPptxPluginHost;
+    const capture = spyOn(pluginHosts, 'createPptxPluginHost').mockImplementation((access) => {
+      host = createHost(access);
+      return host;
+    });
+    let dispatching: Event | undefined;
+    let activationId = '';
+    let peerActivationId = '';
+    let own!: Promise<PptxPluginCommandResult>;
+    const delivered: unknown[] = [];
+    const other: unknown[] = [];
+    const gestures: boolean[] = [];
+    const otherGestures: boolean[][] = [];
+    const plugin = definePptxPlugin({
+      id: 'event-gesture', createState: () => null,
+      panel: { title: 'Events', placement: 'left', render: ({ context }) => (
+        <button type="button" data-testid="event-gesture" onClick={(event) => {
+          event.stopPropagation();
+          host.localeChanged('de');
+          own = context.commands.execute('bold', null);
+        }}>Bold</button>
+      ) },
+      onEvent(context, event) {
+        if (event.type !== 'locale-change') return;
+        gestures.push(gestureFor(activationId));
+        void context.commands.execute('bold', null).then((result) => delivered.push(result));
+      },
+    });
+    const peer = definePptxPlugin({
+      id: 'other-activation', createState: () => null,
+      panel: { title: 'Other', placement: 'right', render: () => <output data-testid="other-activation" /> },
+      onEvent(context, event) {
+        if (event.type !== 'locale-change') return;
+        otherGestures.push([gestureFor(activationId), gestureFor(peerActivationId)]);
+        void context.commands.execute('bold', null).then((result) => other.push(result));
+      },
+    });
+    let mounted!: Awaited<ReturnType<typeof mount>>;
+    try {
+      mounted = await mount({ plugins: [plugin, peer], pluginGrants: {
+        'event-gesture': { document: 'write', commands: ['bold'] },
+        'other-activation': { document: 'write', commands: ['bold'] },
+      } });
+    } finally {
+      capture.mockRestore();
+    }
+    const { api, view } = mounted;
+    const story = (await read(api())).stories[0]!;
+    await act(async () => {
+      api().selectText({ slide: 1, shapeId: story.shapeId, storyId: story.storyId, start: 0, end: 2 });
+    });
+    await settle();
+    const button = view.getByTestId('event-gesture');
+    const marker = button.closest<HTMLElement>('[data-plugin-activation]')!;
+    activationId = marker.dataset.pluginActivation!;
+    peerActivationId = view.getByTestId('other-activation')
+      .closest<HTMLElement>('[data-plugin-activation]')!.dataset.pluginActivation!;
+    const release = trackPluginGestures(marker,
+      (event) => { dispatching = event; return true; }, () => dispatching);
+    try {
+      fireEvent.click(button);
+      Object.defineProperty(dispatching!, 'eventPhase', { value: Event.BUBBLING_PHASE });
+      await until(() => delivered.length === 1 && other.length === 1);
+      expect(delivered[0]).toMatchObject({ ok: false, failure: { code: 'unsupported-policy' } });
+      expect(other[0]).toMatchObject({ ok: false, failure: { code: 'unsupported-policy' } });
+      expect(await own).toMatchObject({ ok: true, status: 'executed' });
+      expect(gestures).toEqual([true]);
+      expect(otherGestures).toEqual([[true, false]]);
+    } finally {
+      release();
+    }
   });
 
   test('granted built-in mutations need a gesture in their panel; granted views run', async () => {

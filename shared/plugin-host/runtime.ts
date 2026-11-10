@@ -43,6 +43,7 @@ export interface PluginInvocation<Snapshot extends RuntimeSnapshot> {
   readonly pluginId: string;
   /** Identifies the activation; readding a plugin creates a new one. */
   readonly activation: object;
+  readonly eventDelivered: boolean;
   readonly snapshot: Snapshot;
   readonly signal: AbortSignal;
   readonly lifetimeSignal: AbortSignal;
@@ -350,12 +351,14 @@ export function createPluginRuntime<
 
   function invocationOf(
     activation: Activation<Plugin>,
-    signal: AbortSignal
+    signal: AbortSignal,
+    eventDelivered = false
   ): PluginInvocation<Snapshot> {
     const snapshot = options.snapshot(activation.registration.id, activation.generation);
     const invocation: PluginInvocation<Snapshot> = {
       pluginId: activation.registration.id,
       activation: activation.token,
+      eventDelivered,
       snapshot,
       signal,
       lifetimeSignal: activation.lifetime.signal,
@@ -380,7 +383,7 @@ export function createPluginRuntime<
           activation.cleanups.push(cleanup);
         }
       },
-      run: (action) => runAction(activation, action),
+      run: (action) => runAction(activation, action, eventDelivered),
       commit(write) {
         const outer = committing;
         committing = signal;
@@ -397,12 +400,13 @@ export function createPluginRuntime<
 
   async function runAction(
     activation: Activation<Plugin>,
-    action: (invocation: PluginInvocation<Snapshot>) => MaybePromise<void>
+    action: (invocation: PluginInvocation<Snapshot>) => MaybePromise<void>,
+    eventDelivered: boolean
   ): Promise<void> {
     const { controller, release } = linked(activation.lifetime.signal);
     if (controller.signal.aborted) return;
     try {
-      await action(invocationOf(activation, controller.signal));
+      await action(invocationOf(activation, controller.signal, eventDelivered));
     } catch (error) {
       if (!controller.signal.aborted) quarantine(activation, 'action', error);
     } finally {
@@ -415,12 +419,13 @@ export function createPluginRuntime<
     activation: Activation<Plugin>,
     phase: Phase | RuntimePhase,
     channel: string,
+    eventDelivered: boolean,
     call: (context: Context, invocation: PluginInvocation<Snapshot>) => MaybePromise<void>
   ): Promise<'ok' | 'aborted' | 'ended'> {
     const { controller, release } = linked(activation.lifetime.signal);
     activation.running = { channel, controller };
     try {
-      const invocation = invocationOf(activation, controller.signal);
+      const invocation = invocationOf(activation, controller.signal, eventDelivered);
       await call(options.context(invocation, activation.registration.plugin), invocation);
       if (activation.status === 'disposed') return 'ended';
       return controller.signal.aborted ? 'aborted' : 'ok';
@@ -443,7 +448,7 @@ export function createPluginRuntime<
         const event = activation.pending.shift();
         if (!event) break;
         if (!activation.registration.plugin.onEvent) continue;
-        const outcome = await hook(activation, 'event', channelOf(event), (context) =>
+        const outcome = await hook(activation, 'event', channelOf(event), true, (context) =>
           activation.registration.plugin.onEvent?.(context, event as Event)
         );
         if (outcome === 'ended') break;
@@ -501,7 +506,7 @@ export function createPluginRuntime<
       return;
     }
     if (registration.plugin.initialize) {
-      const initialized = await hook(activation, 'initialize', 'initialize', (context) =>
+      const initialized = await hook(activation, 'initialize', 'initialize', false, (context) =>
         activation.registration.plugin.initialize?.(context)
       );
       if (initialized === 'ended') return;
@@ -517,7 +522,7 @@ export function createPluginRuntime<
         return;
       }
       activation.pending = [];
-      loaded = await hook(activation, 'event', 'document-change', (context, invocation) =>
+      loaded = await hook(activation, 'event', 'document-change', true, (context, invocation) =>
         activation.registration.plugin.onEvent?.(
           context,
           options.loadEvent(invocation.snapshot, reason)
