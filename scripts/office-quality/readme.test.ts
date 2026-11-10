@@ -354,7 +354,7 @@ test('private runs show time rows only from the sequential timing job, as the me
   const shown = renderSection(input, { privateCorpus: true });
   expect(shown).toContain(three('Recalc time (avg)', '120 ms', '100 ms', '410 ms'));
   expect(shown).toContain('XLSX Recalc time (avg) 100 ms vs 410 ms');
-  expect(shown).toContain('Times: mean per document over a seeded sample of up to 200 documents per format (timed by every engine: XLSX 2), run one after another on one machine per format');
+  expect(shown).toContain(`Times: mean per document over a seeded sample of up to 200 documents per format. A document counts only when every engine timed it in every round: XLSX 2 of 2 sampled (timed per engine: BetterOffice 0.1.0 2, BetterOffice at ${commit.slice(0, 8)} 2, LibreOffice 2). They run one after another on one machine per format`);
   expect(shown).not.toContain('w1');
   const timing = aggregateReport(input).formats.xlsx.timing;
   expect(timing.channels.commit).toEqual({ successful: 2, mean_ms: 100, median_ms: 100, round_means_ms: [100, 100, 100], round_spread: 0 });
