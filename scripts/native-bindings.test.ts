@@ -217,7 +217,10 @@ describe('native package release wiring', () => {
   ) as any;
 
   test('keeps native publishing outside the main release job', () => {
-    const job = release.jobs.release;
+    const job = structuredClone(release.jobs.release);
+    const npmCheck = job.steps.find((step: any) => step.name === 'Check npm publish targets');
+    expect(npmCheck.env).toEqual({ RELEASE_SKIP_NATIVE: '${{ vars.RELEASE_SKIP_NATIVE }}' });
+    delete npmCheck.env;
     expect(job['timeout-minutes']).toBe(90);
     expect(JSON.stringify(job)).not.toContain('native');
     expect(JSON.stringify(job)).not.toContain('withhold');

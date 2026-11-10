@@ -1740,3 +1740,51 @@ test('native and wasm read a paragraph split after a line break across columns a
   expect(built.pages.map(({ built: reading }) => reading).join('')).toBe(lines.join('\n'));
   for (const engine of [native, wasm]) expect(run(engine, plain).json).not.toContain('separator');
 }, 60_000);
+
+test('a footnote document lays out natively from its forwarded parse model', () => {
+  const encoder = new TextEncoder();
+  const ns = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+  const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const office = 'application/vnd.openxmlformats-officedocument.wordprocessingml';
+  const bytes = wasm.rezip_docx({
+    '[Content_Types].xml': encoder.encode(`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="${office}.document.main+xml"/><Override PartName="/word/footnotes.xml" ContentType="${office}.footnotes+xml"/><Override PartName="/word/settings.xml" ContentType="${office}.settings+xml"/></Types>`),
+    '_rels/.rels': encoder.encode(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/officeDocument" Target="word/document.xml"/></Relationships>`),
+    'word/_rels/document.xml.rels': encoder.encode(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdFn" Type="${rel}/footnotes" Target="footnotes.xml"/><Relationship Id="rIdSet" Type="${rel}/settings" Target="settings.xml"/></Relationships>`),
+    'word/document.xml': encoder.encode(`<w:document ${ns}><w:body><w:p><w:r><w:t>Body</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r></w:p><w:sectPr><w:footnotePr><w:numStart w:val="8"/></w:footnotePr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>`),
+    'word/footnotes.xml': encoder.encode(`<w:footnotes ${ns}><w:footnote w:id="1"><w:p><w:r><w:t>Footnote</w:t></w:r></w:p></w:footnote></w:footnotes>`),
+    'word/settings.xml': encoder.encode(`<w:settings ${ns}><w:footnotePr><w:numStart w:val="1"/></w:footnotePr></w:settings>`),
+  });
+  type Section = { id?: string; properties: unknown };
+  type Note = { id: number; noteType?: string };
+  const pkg = JSON.parse(native.parse_docx_s9(bytes, '{}')).document.package as {
+    document: { sections?: Section[]; finalSectionProperties?: unknown };
+    footnotes?: Note[];
+    settings?: unknown;
+  };
+  const sections: object[] = (pkg.document.sections ?? []).map((section) => ({ sectionId: section.id, properties: section.properties }));
+  sections.push({ properties: pkg.document.finalSectionProperties });
+  const contents = (pkg.footnotes ?? [])
+    .filter((note) => !note.noteType || note.noteType === 'normal')
+    .map((note) => ({ id: note.id, noteKind: 'footnote', height: 0 }));
+  expect(contents.map((note) => note.id)).toEqual([1]);
+  const request: Record<string, unknown> = {
+    bodyStory: 'body', renderEnv: {}, options: { pageGap: 24 },
+    regions: { sections, settings: pkg.settings }, notes: { contents },
+  };
+  expect(JSON.stringify(request)).toContain('"numStart":8');
+  expect(JSON.stringify(request)).not.toMatch(/"(id|numStart)":\d+\.0\b/);
+  const session = new native.EditSession(43);
+  try {
+    session.seed_from_docx(bytes, 'opening');
+    const font = session.register_measure_font(fontBytes);
+    const requirements = JSON.parse(session.layout_font_requirements_json(JSON.stringify(request))) as { key: string }[];
+    request.measurement = {
+      fontChains: Object.fromEntries(requirements.map((requirement) => [requirement.key, [font]])),
+      defaults: { fontSize: 11, fontFamily: 'Calibri' },
+      authoritativeShaping: true,
+    };
+    expect(typeof session.layout_document_with_regions_retained_json(JSON.stringify(request))).toBe('string');
+  } finally {
+    session.free();
+  }
+});
