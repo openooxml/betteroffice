@@ -155,3 +155,18 @@ test('a selection handed to a page whose full mirror fills in place waits for th
   expect(selection.toString()).toBe(TEXT);
   expect(block!.contains(selection.anchorNode)).toBe(true);
 });
+
+test('focus handed to a page whose full mirror starts as an empty shell waits for the paragraph', async () => {
+  const view = mount();
+  const paragraph = view.section().querySelector('p')!;
+  await act(async () => { paragraph.focus(); });
+  await view.to('full', page([]));
+  const root = mirrorRoot(view);
+  expect(root?.childNodes.length).toBeGreaterThan(0);
+  expect(root?.querySelector('[role="paragraph"], p')).toBeNull();
+  await view.to('full', page());
+  expect(mirrorRoot(view)).toBe(root);
+  const block = view.fullBlock();
+  expect(block?.textContent).toBe(TEXT);
+  expect(document.activeElement).toBe(block);
+});
