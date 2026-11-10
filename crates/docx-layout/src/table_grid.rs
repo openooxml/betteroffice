@@ -32,7 +32,7 @@ pub use ooxml_drawingml::normalize_table_column_widths;
 use serde::Serialize;
 
 use crate::cell_layout::table_compat_leading_shift;
-use crate::types::TableBlock;
+use crate::types::{LayoutBlock, Run, TableBlock, TableCell, TableRow};
 
 /// Twips per inch.
 const TWIPS_PER_INCH: f64 = 1440.0;
@@ -129,6 +129,116 @@ pub fn resolve_cell_grid(table_block: &TableBlock) -> Vec<ResolvedGridCell> {
         }
     }
     out
+}
+
+/// Removes rows marked `w:hidden` (§17.4.20) that held only vanished runs when
+/// read and still show nothing, as Word does when hidden text is not shown:
+/// they take no height, paint nothing and leave the borders of the rows around
+/// them as if they were never there. The mark only hides the end-of-row mark,
+/// so a marked row with visible content stays, as does one that starts a
+/// vertical merge continuing into a row that stays. A merge through a removed
+/// row shrinks by it. A table left with no rows takes no space.
+pub fn drop_hidden_rows(table: &mut TableBlock) {
+    let mut dropped: Vec<bool> = table
+        .rows
+        .iter()
+        .map(|row| {
+            row.hidden == Some(true)
+                && row.hidden_content_only == Some(true)
+                && !row_shows_content(row)
+        })
+        .collect();
+    if !dropped.contains(&true) {
+        return;
+    }
+    let grid = resolve_cell_grid(table);
+    // spans only reach down, so walking up settles each row once
+    for cell in grid.iter().rev().filter(|cell| cell.row_span > 1) {
+        let end = (cell.row_index + cell.row_span).min(dropped.len());
+        if (cell.row_index + 1..end).any(|row| !dropped[row]) {
+            dropped[cell.row_index] = false;
+        }
+    }
+    if !dropped.contains(&true) {
+        return;
+    }
+    for cell in grid
+        .iter()
+        .filter(|cell| cell.row_span > 1 && !dropped[cell.row_index])
+    {
+        let end = (cell.row_index + cell.row_span).min(dropped.len());
+        let kept = (cell.row_index..end).filter(|row| !dropped[*row]).count();
+        table.rows[cell.row_index].cells[cell.cell_index].row_span = Some(kept as f64);
+    }
+    let mut index = 0;
+    table.rows.retain_mut(|row| {
+        index += 1;
+        row.source_row.get_or_insert(index as u64 - 1);
+        !dropped[index - 1]
+    });
+}
+
+fn row_shows_content(row: &TableRow) -> bool {
+    row.cells
+        .iter()
+        .any(|cell| cell.blocks.iter().any(block_shows_content))
+}
+
+fn block_shows_content(block: &LayoutBlock) -> bool {
+    match block {
+        LayoutBlock::Paragraph(paragraph) => {
+            paragraph.runs.iter().any(|run| match run {
+                Run::Text(run) => !run.text.is_empty(),
+                // a field with an empty result paints nothing unless layout computes it
+                Run::Field(field) => {
+                    matches!(field.field_type.as_str(), "PAGE" | "NUMPAGES")
+                        || field
+                            .raw_type
+                            .as_deref()
+                            .is_some_and(|kind| kind.eq_ignore_ascii_case("SEQ"))
+                        || field
+                            .fallback
+                            .as_deref()
+                            .is_some_and(|text| !text.is_empty())
+                }
+                _ => true,
+            }) || paragraph.attrs.as_ref().is_some_and(|attrs| {
+                attrs.shading.is_some()
+                    || attrs.borders.is_some()
+                    || (attrs.list_marker_hidden != Some(true)
+                        && attrs
+                            .list_marker
+                            .as_deref()
+                            .is_some_and(|marker| !marker.is_empty()))
+            })
+        }
+        LayoutBlock::Table(table) => table
+            .rows
+            .iter()
+            .any(|row| row_shows_content(row) || row.cells.iter().any(cell_paints)),
+        LayoutBlock::SectionBreak(_) | LayoutBlock::PageBreak(_) | LayoutBlock::ColumnBreak(_) => {
+            false
+        }
+        _ => true,
+    }
+}
+
+/// A nested cell paints shading or a border line even with no content, by the
+/// same tests the display list applies.
+fn cell_paints(cell: &TableCell) -> bool {
+    cell.background.is_some()
+        || cell.borders.as_ref().is_some_and(|borders| {
+            [&borders.top, &borders.right, &borders.bottom, &borders.left]
+                .into_iter()
+                .flatten()
+                .any(|border| {
+                    crate::display_list::border_paints(
+                        border.style.as_deref(),
+                        border.ooxml_style.as_deref(),
+                        border.width,
+                    )
+                })
+        })
 }
 
 /// Total grid columns: the furthest column any cell reaches, and every row's

@@ -799,6 +799,8 @@
   },
   "a11y": {
     "pageLabel": "पेज {number}",
+    "unbuiltPagesNotMirrored": "पृष्ठ {from} से {to} अभी पठन दृश्य में नहीं हैं।",
+    "goToPage": "पृष्ठ {number} पर जाएँ",
     "headerLabel": "पेज हेडर",
     "footerLabel": "पेज फ़ुटर",
     "chartNoData": "कोई डेटा नहीं",

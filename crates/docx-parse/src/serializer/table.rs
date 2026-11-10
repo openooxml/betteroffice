@@ -827,6 +827,19 @@ mod tests {
     }
 
     #[test]
+    fn the_computed_hidden_content_flag_is_not_written() {
+        let formatting = TableRowFormatting {
+            hidden: Some(true),
+            hidden_content_only: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(
+            serialize_table_row_formatting(Some(&formatting), None, None),
+            "<w:trPr><w:hidden/></w:trPr>"
+        );
+    }
+
+    #[test]
     fn row_grid_offsets_and_their_widths_survive_serialization() {
         let formatting = TableRowFormatting {
             grid_before: Some(1.0),

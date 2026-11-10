@@ -26,6 +26,7 @@ test('one frozen plan feeds independent format jobs at the same source revision'
     .toContain('measure-shards=${JSON.stringify(measureMatrix(plan))}');
   expect(measure.strategy).toEqual({
     'fail-fast': false,
+    'max-parallel': "${{ fromJSON(needs.prepare.outputs.parallel)['measure'] }}",
     matrix: { include: '${{ fromJSON(needs.prepare.outputs.measure-shards) }}' },
   });
   const checkout = measure.steps.find((step: any) => step.uses?.startsWith('actions/checkout@'));
@@ -123,7 +124,8 @@ test('XLSX calculation and PPTX LibreOffice run independently and gate publicati
   expect(xlsx.needs).toEqual(['prepare', 'xlsx-native-build']);
   expect(xlsx.strategy.matrix.shard).toBe('${{ fromJSON(needs.prepare.outputs.xlsx-shards) }}');
   expect(pptx.needs).toEqual(['prepare', 'pptx-native-build']);
-  expect(pptx.strategy).toEqual({ 'fail-fast': false, matrix: { shard: '${{ fromJSON(needs.prepare.outputs.pptx-shards) }}' } });
+  expect(pptx.strategy).toEqual({ 'fail-fast': false, 'max-parallel': "${{ fromJSON(needs.prepare.outputs.parallel)['pptx-benchmark'] }}",
+    matrix: { shard: '${{ fromJSON(needs.prepare.outputs.pptx-shards) }}' } });
   expect(prepare.outputs['pptx-shards']).toBe('${{ steps.plan.outputs.pptx-shards }}');
   expect(pptx.steps.find((step: any) => String(step.run ?? '').includes('pptx-benchmark.mjs')).env.QUALITY_SHARD).toBe('${{ matrix.shard }}');
   expect(pptx.steps.filter((step: any) => step.uses?.startsWith('actions/upload-artifact@')).map((step: any) => step.with.name))
@@ -162,7 +164,8 @@ test('native parse/edit/save probes run independently and gate the final report'
     const probe = workflow.jobs[`roundtrip-${half}`];
     expect(prepare.outputs[`roundtrip-shards-${half}`]).toBe(`\${{ steps.plan.outputs.roundtrip-shards-${half} }}`);
     expect(probe.needs).toEqual(['prepare', 'roundtrip-build']);
-    expect(probe.strategy).toEqual({'fail-fast': false, matrix: {include: `\${{ fromJSON(needs.prepare.outputs.roundtrip-shards-${half}) }}`}});
+    expect(probe.strategy).toEqual({'fail-fast': false, 'max-parallel': `\${{ fromJSON(needs.prepare.outputs.parallel)['roundtrip-${half}'] }}`,
+      matrix: {include: `\${{ fromJSON(needs.prepare.outputs.roundtrip-shards-${half}) }}`}});
     expect(probe.env.LO_PYTHON).toBe('/opt/libreoffice26.2/program/python');
     expect(probe.steps.some((step: any) => step.run?.includes('install-libreoffice.sh'))).toBe(true);
     return probe;
@@ -439,7 +442,8 @@ test('private runs time a seeded sample per format, sequentially on one runner e
   expect(timing.if).toStartWith('!cancelled()');
   expect(prepare.outputs['timing-formats']).toBe('${{ steps.plan.outputs.timing-formats }}');
   expect(prepare.steps.find((step: any) => step.id === 'plan').run).toContain('timing-formats=${JSON.stringify(timingFormats(plan))}');
-  expect(timing.strategy).toEqual({ 'fail-fast': false, matrix: { format: '${{ fromJSON(needs.prepare.outputs.timing-formats) }}' } });
+  expect(timing.strategy).toEqual({ 'fail-fast': false, 'max-parallel': "${{ fromJSON(needs.prepare.outputs.parallel)['timing'] }}",
+    matrix: { format: '${{ fromJSON(needs.prepare.outputs.timing-formats) }}' } });
   const downloads = timing.steps.filter((step: any) => step.uses?.startsWith('actions/download-artifact@')).map((step: any) => step.with.name);
   expect(downloads).toEqual(['${{ matrix.format }}-native-published', '${{ matrix.format }}-native-commit']);
   const measured = timing.steps.find((step: any) => String(step.run ?? '').includes('timing.py'));
@@ -487,4 +491,36 @@ test('every benchmark job prints its wall time next to its planned work, even wh
     expect(steps.at(-1)).toEqual({ name: 'Compare the wall time with the planned work', if: 'always()',
       env: { QUALITY_PLAN: '${{ runner.temp }}/fidelity-plan/plan.json' }, run: `node scripts/office-quality/shards.mjs wall ${name} "\${{ matrix.shard }}"` });
   }
+});
+
+test('a private run bounds its concurrent benchmark jobs by max_parallel; public runs are unbounded', () => {
+  expect(workflow.on.workflow_dispatch.inputs.max_parallel).toEqual({
+    description: "Private corpus run: most benchmark jobs held at once, leaving the rest of the plan's concurrent jobs to pull request CI",
+    default: 12, required: false, type: 'number',
+  });
+  const plan = prepare.steps.find((step: any) => step.id === 'plan');
+  expect(plan.env.MAX_PARALLEL).toBe('${{ inputs.max_parallel }}');
+  expect(plan.run).toContain("parallelPlan(plan, { privateRun: process.env.QUALITY_PRIVATE === 'true', total: Number(process.env.MAX_PARALLEL) })");
+  expect(plan.run).toContain('parallelSummary(plan, parallel)');
+  expect(prepare.outputs.parallel).toBe('${{ steps.plan.outputs.parallel }}');
+  for (const name of ['measure', 'docx-benchmark', 'xlsx-benchmark', 'pptx-benchmark', 'xlsx-fidelity', 'roundtrip-a', 'roundtrip-b', 'timing'])
+    expect({ name, cap: workflow.jobs[name].strategy['max-parallel'] }).toEqual({ name, cap: `\${{ fromJSON(needs.prepare.outputs.parallel)['${name}'] }}` });
+});
+
+test('the reconciler fails on a channel that scored nothing, and the summary leads with scored counts even when it fails', () => {
+  const reconcile = publish.steps.find((step: any) => step.name === 'Reconcile the format reports');
+  expect(reconcile.env.QUALITY_REQUIRE_COVERAGE).toBe('true');
+  expect(reconcile.env.QUALITY_COVERAGE).toBe('${{ runner.temp }}/coverage.md');
+  expect(reconcile.run).toBe('node scripts/office-quality/private-step.mjs merge -- node scripts/office-quality/merge.mjs');
+  const summary = publish.steps[publish.steps.indexOf(reconcile) + 1];
+  expect(summary.name).toBe('Summarise scored documents and the generated section');
+  expect(summary.if).toBe('always()');
+  expect(summary.run.indexOf('coverage.md')).toBeLessThan(summary.run.indexOf('section.md'));
+});
+
+test('planning states which font package each channel renders with', () => {
+  const plan = prepare.steps.find((step: any) => step.id === 'plan').run;
+  expect(plan).toContain("published channel: @betteroffice/fonts@${version}, ${plan.fonts_basis?.[format] === 'release-commit' ? 'the fonts release from the same release commit as' : 'the latest fonts release published before'} @betteroffice/${format}@${plan.versions[format]}");
+  expect(plan).toContain('commit channel: the font packages of this checkout');
+  expect(plan).toContain('### Font sources');
 });

@@ -2,16 +2,15 @@ declare const __QUALITY_FONT_BASE__: string | null;
 declare const __QUALITY_FONT_BASE_CJK__: string | null;
 
 import JSZip from 'jszip';
-import { createFontProvider } from '../../packages/fonts/src/cdn';
 import {
+  createFontProvider,
   maxDigitWidth,
   resolveLastResortFace,
   resolveMetricCompatFace,
   resolveScriptFallbackFace,
   resolveGlyphFallbackFace,
-  type BundledFontFace,
-  type BundledFontScript,
-} from '../../packages/fonts/src/manifest';
+} from 'virtual:office-quality-fonts';
+import type { BundledFontFace, BundledFontScript } from '../../packages/fonts/src/manifest';
 import { normalFontIndex } from './xlsx-styles';
 import { SCRIPT_PATTERNS } from '../../packages/fonts/src/scripts';
 

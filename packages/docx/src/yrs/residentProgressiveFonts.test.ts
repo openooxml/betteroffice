@@ -111,6 +111,31 @@ test('a frame stops waiting at the guard, logs once, and repaints when the outli
   expect([chunkFile(50), chunkFile(51)].map((file) => hits.get(file))).toEqual([1, 1]);
 });
 
+test('frames arriving during the progressive module import install after their guards and repaint', async () => {
+  const module = await import('@betteroffice/fonts/progressive');
+  let arrive!: (value: typeof module) => void;
+  const imported = new Promise<typeof module>((resolve) => { arrive = resolve; });
+  let loads = 0;
+  let updates = 0;
+  let repaints = 0;
+  const resident = new ResidentProgressiveFonts([spec], [10, 11], [undefined, 0], {
+    updateFontOutlines() { updates++; },
+  }, decode, () => {}, () => { loads++; return imported; });
+  resident.onLateInstall(() => { repaints++; });
+  try {
+    expect(await resident.ensure(new Map([[10, new Set([glyphIn(41)])]]), 10)).toEqual(new Set());
+    expect(await resident.ensure(new Map([[11, new Set([glyphIn(42)])]]), 10)).toEqual(new Set());
+    expect(loads).toBe(1);
+    expect(updates).toBe(0);
+    arrive(module);
+    await resident.whenInstalled();
+    expect(updates).toBeGreaterThanOrEqual(1);
+    expect(repaints).toBeGreaterThanOrEqual(1);
+    expect([ref.index, chunkFile(41), chunkFile(42)].map((file) => hits.get(file))).toEqual([1, 1, 1]);
+    expect(loads).toBe(1);
+  } finally { resident.dispose(); }
+});
+
 test('a chunk that fails to load is fetched again', async () => {
   const { resident, updates, logs } = fonts();
   failing.add(chunkFile(60));

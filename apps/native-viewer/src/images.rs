@@ -1,6 +1,5 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::io::Cursor;
 
 use anyhow::Result;
 use base64::Engine as _;
@@ -8,11 +7,8 @@ use docx_parse::{
     RelationshipTarget, is_footer_relationship, is_header_relationship, is_image_relationship,
     parse_docx_relationship_parts, resolve_relationship_target,
 };
-use docx_raster::{
-    ImageMap, ImageScope, MAX_DATA_URL_BYTES, MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS, NoteKind,
-    scoped_image_key,
-};
-use vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
+use docx_raster::{ImageMap, ImageScope, MAX_DATA_URL_BYTES, NoteKind, scoped_image_key};
+use vello::peniko::ImageData;
 
 pub struct ImageRegistry {
     pub raw: ImageMap,
@@ -121,39 +117,8 @@ fn decode_data_url(source: &str) -> Option<ImageData> {
 }
 
 fn decode_image(bytes: &[u8]) -> Option<ImageData> {
-    use image::ImageDecoder as _;
-
-    let reader = image::ImageReader::new(Cursor::new(bytes))
-        .with_guessed_format()
-        .ok()?;
-    if reader.format() == Some(image::ImageFormat::Tiff)
-        && ooxml_drawingml::media::tiff_bounded_pixels(bytes).is_none()
-    {
-        return None;
-    }
-    let mut decoder = reader.into_decoder().ok()?;
-    let (declared_width, declared_height) = decoder.dimensions();
-    let declared = u64::from(declared_width) * u64::from(declared_height);
-    if declared > MAX_IMAGE_PIXELS
-        || decoder
-            .total_bytes()
-            .saturating_add(declared.saturating_mul(4))
-            > MAX_IMAGE_BYTES
-    {
-        return None;
-    }
-    let orientation = decoder.orientation().ok()?;
-    let mut image = image::DynamicImage::from_decoder(decoder).ok()?;
-    image.apply_orientation(orientation);
-    let rgba = image.into_rgba8();
-    let (width, height) = rgba.dimensions();
-    Some(ImageData {
-        data: Blob::from(rgba.into_raw()),
-        format: ImageFormat::Rgba8,
-        alpha_type: ImageAlphaType::Alpha,
-        width,
-        height,
-    })
+    let mut unlimited = u64::MAX;
+    crate::picture_decode::decode_bounded(bytes, true, &mut unlimited).ok()
 }
 
 fn relationship_owner(path: &str) -> Option<String> {
