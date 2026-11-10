@@ -128,7 +128,7 @@ function targets(read: ReadContent, target: TextTarget): PptxGeometryTarget[] {
 
 async function parity(geometry: PptxPluginGeometry, values: PptxGeometryTarget[], codes: string[]) {
   const answers = values.map(target => geometry.getAnchorGeometry(target));
-  expect(answers.map(answer => answer.ok ? 'ok' : answer.failure.code)).toEqual(codes);
+  expect(answers.map((answer): string => answer.ok ? 'ok' : answer.failure.code)).toEqual(codes);
   expect(await geometry.readAnchorGeometries(values)).toEqual(answers);
   for (const answer of answers) if (answer.ok) {
     expect(answer.layoutId).toBe(geometry.layout.id);
@@ -426,8 +426,9 @@ for (const engine of ['IN', 'PL'] as const) describe(`plugin anchor matrix (${en
         const expected = geometry.toOverlayRect({ space: 'slide-px', rect: transformedRect(transforms, {
           x: Math.min(left, right), y: line.y,
           width: anchor === focus ? 1 : Math.abs(right - left), height: line.height }) });
-        expect(answer.anchor).toEqual(expected);
-        if (anchor !== focus) expect(answer.rects).toEqual([expected]);
+        expect(expected).not.toBeNull();
+        expect(answer.anchor).toEqual(expected!);
+        if (anchor !== focus) expect(answer.rects).toEqual([expected!]);
         expect(geometry.getAnchorGeometry({ kind: 'selection' })).toEqual(answer);
         expect(await geometry.readAnchorGeometries([{ kind: 'selection' }, range(read, story, anchor, focus)])).toEqual([answer, answer]);
       }

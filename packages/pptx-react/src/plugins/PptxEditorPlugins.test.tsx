@@ -995,7 +995,7 @@ describe('PptxEditor plugins', () => {
       expect(answer.rects.length).toBeGreaterThan(0);
       expect(answer.version).toBe(content.version);
       expect(answer.layoutId).toBe(context.snapshot.layout!.id);
-      expect(answer).toEqual(geometry.getAnchorGeometry({
+      expect(answer as PptxAnchorGeometryResult).toEqual(geometry.getAnchorGeometry({
         kind: 'range', version: content.version, slideId: story.slideId,
         shapeId: story.shapeId, storyId: story.storyId, anchor: 3, focus: 1,
       }));
