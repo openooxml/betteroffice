@@ -4019,3 +4019,33 @@ fn removing_the_end_of_a_paragraph_keeps_the_formatting_of_the_marks_after_it() 
     assert_eq!(embed_formatting(&doc), before);
     assert_eq!(accepted(&doc), ["On", "", "Tw"]);
 }
+
+#[test]
+fn a_built_step_with_both_text_and_runs_is_invalid() {
+    let doc = basic();
+    let run = docx_edit::TextRun {
+        text: "x".to_owned(),
+        marks: None,
+    };
+    let both = step(EditOperation::InsertText {
+        target: TextTarget::Paragraph(body("00000001")),
+        at: TargetEdge::End,
+        text: "x".to_owned(),
+        runs: Some(vec![run.clone()]),
+    });
+    let mut paragraph = new_paragraph("x", None);
+    paragraph.runs = Some(vec![run]);
+    let before = doc.encode_state_as_update_v1();
+    for steps in [
+        vec![both],
+        vec![insert_paragraphs(
+            "00000001",
+            TargetEdge::End,
+            vec![paragraph],
+        )],
+    ] {
+        let refusal = refuse(&doc, &UndoSession::new(), steps);
+        assert_eq!(refusal.failure.code, EditFailureCode::InvalidStep);
+        assert_eq!(doc.encode_state_as_update_v1(), before);
+    }
+}

@@ -77,6 +77,40 @@ describe('formatted runs in host edits', () => {
     }
   });
 
+  test('a style-supplied superscript or highlight reset saves in an existing paragraph and is refused in a new one', async () => {
+    const { xml, resavedXml, reopened } = await editSaveReopen(yrs, [
+      insert('00000005', [{ text: ' flat', marks: { verticalAlign: 'baseline' } }]),
+      insert('00000006', [{ text: ' clear', marks: { highlight: 'none' } }]),
+    ]);
+    for (const document of [xml, resavedXml]) {
+      expect(holdsProperty(savedRunProperties(document, ' flat'), 'w:vertAlign', { 'w:val': 'baseline' })).toBe(true);
+      expect(holdsProperty(savedRunProperties(document, ' clear'), 'w:highlight', { 'w:val': 'none' })).toBe(true);
+    }
+    const attributes = (text: string) => {
+      const segment = reopened.find((entry) => entry.kind === 'text' && entry.text.includes(text));
+      return segment?.kind === 'text' ? segment.attributes : {};
+    };
+    expect(Boolean(attributes(' flat').superscript)).toBe(false);
+    expect(Boolean(attributes(' clear').highlight)).toBe(false);
+
+    const session = await yrs.createYrsSession({ clientId: 53 });
+    try {
+      session.seedFromDocx(await textRunFixture());
+      const before = session.encodeState();
+      for (const [styleId, marks, mark] of [['Raised', { verticalAlign: 'baseline' }, 'verticalAlign'], ['Marked', { highlight: 'none' }, 'highlight']] as const) {
+        const refused = session.applyEdits({
+          expectVersion: session.version(),
+          steps: [{ op: 'insertParagraphs', target: { story: 'body', paraId: '00000001' }, at: 'end', paragraphs: [{ styleId, runs: [{ text: 'a', marks }] }] }],
+        });
+        expect(refused).toMatchObject({ ok: false, failure: { code: 'unsupported', stepIndex: 0 } });
+        expect(!refused.ok && refused.failure.message).toContain(mark);
+        expect(session.encodeState()).toEqual(before);
+      }
+    } finally {
+      session.destroy();
+    }
+  });
+
   test('adjacent runs with equal marks save as one run', async () => {
     const { xml } = await editSaveReopen(yrs, [insert('00000001', [{ text: ' aa', marks: { bold: true } }, { text: 'bb', marks: { bold: true } }])]);
     expect(xml).toMatch(/<w:t(?: [^>]*)?> aabb<\/w:t>/);

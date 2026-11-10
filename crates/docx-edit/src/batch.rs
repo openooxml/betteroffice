@@ -10,7 +10,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use serde::de::Error as _;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use yrs::updates::decoder::Decode;
 use yrs::{ReadTxn, StateVector, Text, Transact, TransactionMut, Update};
@@ -180,7 +180,7 @@ pub struct TextRun {
 /// One new paragraph; without `style_id` it takes the anchor paragraph's style. It carries
 /// exactly one of `text` and `runs`.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(remote = "Self", rename_all = "camelCase", deny_unknown_fields)]
 pub struct ParagraphInput {
     #[serde(default)]
     pub text: String,
@@ -192,6 +192,7 @@ pub struct ParagraphInput {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(
+    remote = "Self",
     tag = "op",
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -278,7 +279,6 @@ impl<'de> Deserialize<'de> for EditStep {
             .ok_or_else(|| D::Error::custom("an edit step must be an object"))?;
         let expect = object.remove("expect").unwrap_or(Value::Null);
         let suggest = object.remove("suggest").unwrap_or(Value::Null);
-        check_text_content(object).map_err(D::Error::custom)?;
         Ok(Self {
             expect: serde_json::from_value(expect).map_err(D::Error::custom)?,
             suggest: serde_json::from_value(suggest).map_err(D::Error::custom)?,
@@ -288,26 +288,49 @@ impl<'de> Deserialize<'de> for EditStep {
 }
 
 /// Text steps and new paragraphs carry exactly one of `text` and an array of `runs`.
-fn check_text_content(step: &serde_json::Map<String, Value>) -> Result<(), String> {
-    let exactly_one = |object: &serde_json::Map<String, Value>, what: &str| match (
-        object.get("text"),
-        object.get("runs"),
-    ) {
+fn text_xor_runs(object: &serde_json::Map<String, Value>, what: &str) -> Result<(), String> {
+    match (object.get("text"), object.get("runs")) {
         (Some(_), None) | (None, Some(Value::Array(_))) => Ok(()),
         _ => Err(format!(
             "{what} takes exactly one of \"text\" or an array of \"runs\""
         )),
-    };
-    match step.get("op").and_then(Value::as_str) {
-        Some("insertText" | "replaceText") => exactly_one(step, "a text step"),
-        Some("insertParagraphs") => match step.get("paragraphs") {
-            Some(Value::Array(paragraphs)) => paragraphs
-                .iter()
-                .filter_map(Value::as_object)
-                .try_for_each(|paragraph| exactly_one(paragraph, "a paragraph")),
-            _ => Ok(()),
-        },
-        _ => Ok(()),
+    }
+}
+
+impl<'de> Deserialize<'de> for ParagraphInput {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = Value::deserialize(deserializer)?;
+        if let Some(object) = value.as_object() {
+            text_xor_runs(object, "a paragraph").map_err(D::Error::custom)?;
+        }
+        Self::deserialize(value).map_err(D::Error::custom)
+    }
+}
+
+impl Serialize for ParagraphInput {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        Self::serialize(self, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for EditOperation {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = Value::deserialize(deserializer)?;
+        if let Some(object) = value.as_object()
+            && matches!(
+                object.get("op").and_then(Value::as_str),
+                Some("insertText" | "replaceText")
+            )
+        {
+            text_xor_runs(object, "a text step").map_err(D::Error::custom)?;
+        }
+        Self::deserialize(value).map_err(D::Error::custom)
+    }
+}
+
+impl Serialize for EditOperation {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        Self::serialize(self, serializer)
     }
 }
 
@@ -1006,8 +1029,19 @@ enum Content<'a> {
 }
 
 impl<'a> Content<'a> {
-    fn of(text: &'a str, runs: &'a Option<Vec<TextRun>>) -> Self {
-        runs.as_deref().map_or(Self::Plain(text), Self::Runs)
+    fn of(
+        text: &'a str,
+        runs: &'a Option<Vec<TextRun>>,
+        target: &EditTarget,
+    ) -> Result<Self, EditFailure> {
+        match runs {
+            Some(_) if !text.is_empty() => Err(invalid(
+                "a step carries exactly one of text and runs",
+                target,
+            )),
+            Some(runs) => Ok(Self::Runs(runs)),
+            None => Ok(Self::Plain(text)),
+        }
     }
 
     /// The runs to insert; `runs` must be non-empty and every run's text too.
@@ -1425,7 +1459,7 @@ fn plan_insert_paragraphs<T: ReadTxn>(
     let anchor_style = anchor.mark.style_id();
     let mut records = Vec::with_capacity(paragraphs.len());
     for paragraph in paragraphs {
-        let runs = Content::of(&paragraph.text, &paragraph.runs).runs(&requested)?;
+        let runs = Content::of(&paragraph.text, &paragraph.runs, &requested)?.runs(&requested)?;
         for run in &runs {
             validate_text(&run.text).map_err(|_| {
                 invalid(
@@ -1454,6 +1488,37 @@ fn plan_insert_paragraphs<T: ReadTxn>(
             return Err(unsupported(
                 format!(
                     "{named} defines list numbering, which v1 batches do not apply; {NUMBERING_FOLLOW_UP}"
+                ),
+                &requested,
+            ));
+        }
+        let supplied = |keys: &[&str]| {
+            styled
+                .run
+                .iter()
+                .any(|(key, value)| keys.contains(&key.as_str()) && *value != yrs::Any::Null)
+        };
+        if let Some(mark) = runs.iter().find_map(|run| {
+            let resets = |keys: &[&str]| {
+                run.overlay
+                    .iter()
+                    .any(|(key, _)| keys.contains(&key.as_str()))
+                    && run.overlay.iter().all(|(key, value)| {
+                        !keys.contains(&key.as_str()) || *value == yrs::Any::Null
+                    })
+            };
+            let vertical = ["superscript", "subscript"];
+            if resets(&vertical) && supplied(&vertical) {
+                Some("verticalAlign")
+            } else if resets(&["highlight"]) && supplied(&["highlight"]) {
+                Some("highlight")
+            } else {
+                None
+            }
+        }) {
+            return Err(unsupported(
+                format!(
+                    "the paragraph style supplies {mark}; resetting it in a new paragraph is not saved yet"
                 ),
                 &requested,
             ));
@@ -2569,7 +2634,10 @@ fn plan_step<T: ReadTxn>(
             index,
             step,
             target,
-            Replacement::Insert(Content::of(text, runs), *at),
+            Replacement::Insert(
+                Content::of(text, runs, &EditTarget::from(target.clone()))?,
+                *at,
+            ),
         ),
         EditOperation::ReplaceText { target, text, runs } => plan_text(
             views,
@@ -2577,7 +2645,7 @@ fn plan_step<T: ReadTxn>(
             index,
             step,
             target,
-            Replacement::Text(Content::of(text, runs)),
+            Replacement::Text(Content::of(text, runs, &EditTarget::from(target.clone()))?),
         ),
         EditOperation::DeleteText { target } => {
             plan_text(views, source, index, step, target, Replacement::Delete)

@@ -13,7 +13,7 @@ const NS: &str = concat!(
     r#"xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml""#
 );
 
-const STYLES: &str = r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:rPr><w:b/><w:sz w:val="32"/></w:rPr></w:style><w:style w:type="character" w:styleId="Strong"><w:name w:val="Strong"/><w:rPr><w:b/></w:rPr></w:style>"#;
+const STYLES: &str = r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:rPr><w:b/><w:sz w:val="32"/></w:rPr></w:style><w:style w:type="character" w:styleId="Strong"><w:name w:val="Strong"/><w:rPr><w:b/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Raised"><w:name w:val="Raised"/><w:rPr><w:vertAlign w:val="superscript"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Marked"><w:name w:val="Marked"/><w:rPr><w:highlight w:val="yellow"/></w:rPr></w:style>"#;
 
 fn package(body: &str) -> Vec<u8> {
     let content_types = r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>"#;
@@ -38,13 +38,16 @@ fn package(body: &str) -> Vec<u8> {
 }
 
 /// `00000001` plain, `00000002` directly bold, `00000003` a bold Heading1, `00000004` a run in
-/// the bold character style `Strong`.
+/// the bold character style `Strong`, `00000005` in the superscript style `Raised`, `00000006` in
+/// the highlighting style `Marked`.
 fn open() -> EditingDoc {
     let body = concat!(
         r#"<w:p w14:paraId="00000001"><w:r><w:t>Plain text</w:t></w:r></w:p>"#,
         r#"<w:p w14:paraId="00000002"><w:r><w:rPr><w:b/></w:rPr><w:t>Bold words</w:t></w:r></w:p>"#,
         r#"<w:p w14:paraId="00000003"><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Title</w:t></w:r></w:p>"#,
         r#"<w:p w14:paraId="00000004"><w:r><w:rPr><w:rStyle w:val="Strong"/></w:rPr><w:t>Strong run</w:t></w:r></w:p>"#,
+        r#"<w:p w14:paraId="00000005"><w:pPr><w:pStyle w:val="Raised"/></w:pPr><w:r><w:t>Up</w:t></w:r></w:p>"#,
+        r#"<w:p w14:paraId="00000006"><w:pPr><w:pStyle w:val="Marked"/></w:pPr><w:r><w:t>Lit</w:t></w:r></w:p>"#,
     );
     let doc = EditingDoc::new(7001);
     seed_from_docx(&doc, &package(body)).unwrap();
@@ -512,4 +515,73 @@ fn false_turns_a_mark_off_whether_it_is_direct_or_from_a_style() {
         assert!(active(&marks(&doc, " kept"), "bold"), "{id}");
         assert!(!active(&marks(&doc, " off"), "bold"), "{id}");
     }
+}
+
+#[test]
+fn a_new_paragraph_refuses_to_reset_what_its_style_supplies() {
+    let paragraphs = |style: &str, marks: Value| {
+        json!({"op": "insertParagraphs", "target": paragraph("00000001"), "at": "end",
+            "paragraphs": [{"styleId": style, "runs": [{"text": "a", "marks": marks}]}]})
+    };
+    for (style, marks, mark) in [
+        (
+            "Raised",
+            json!({"verticalAlign": "baseline"}),
+            "verticalAlign",
+        ),
+        ("Marked", json!({"highlight": "none"}), "highlight"),
+    ] {
+        let doc = open();
+        let before = doc.encode_state_as_update_v1();
+        let refusal = refuse(&doc, json!([paragraphs(style, marks.clone())]));
+        assert_eq!(
+            refusal.failure.code,
+            EditFailureCode::Unsupported,
+            "{style}"
+        );
+        assert_eq!(refusal.failure.step_index, Some(0), "{style}");
+        assert!(
+            refusal.failure.message.contains(mark),
+            "{}",
+            refusal.failure.message
+        );
+        assert_eq!(doc.encode_state_as_update_v1(), before, "{style}");
+    }
+    let doc = open();
+    apply(
+        &doc,
+        &UndoSession::new(),
+        json!([
+            paragraphs("Raised", json!({"verticalAlign": "subscript"})),
+            {"op": "insertText", "target": paragraph("00000005"), "at": "end",
+                "runs": [{"text": " flat", "marks": {"verticalAlign": "baseline"}}]},
+            {"op": "insertText", "target": paragraph("00000006"), "at": "end",
+                "runs": [{"text": " clear", "marks": {"highlight": "none"}}]}
+        ]),
+    );
+    assert!(active(&marks(&doc, "Up"), "superscript"));
+    let flat = marks(&doc, " flat");
+    assert!(!active(&flat, "superscript") && !active(&flat, "subscript"));
+    assert!(active(&marks(&doc, "Lit"), "highlight"));
+    assert!(!active(&marks(&doc, " clear"), "highlight"));
+}
+
+#[test]
+fn edit_operations_deserialized_on_their_own_take_exactly_one_of_text_and_runs() {
+    let target = paragraph("00000001");
+    for operation in [
+        json!({"op": "replaceText", "target": target}),
+        json!({"op": "insertText", "target": target, "at": "end"}),
+        json!({"op": "insertText", "target": target, "at": "end", "text": "a", "runs": [{"text": "a"}]}),
+        json!({"op": "insertParagraphs", "target": {"story": "body", "paraId": "00000001"}, "at": "end",
+            "paragraphs": [{"styleId": "Normal"}]}),
+    ] {
+        assert!(
+            serde_json::from_value::<docx_edit::EditOperation>(operation.clone()).is_err(),
+            "{operation}"
+        );
+    }
+    assert!(
+        serde_json::from_value::<docx_edit::ParagraphInput>(json!({"styleId": "Normal"})).is_err()
+    );
 }
