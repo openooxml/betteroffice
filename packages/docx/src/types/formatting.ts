@@ -635,6 +635,8 @@ export interface TableRowFormatting {
   justification?: 'left' | 'center' | 'right';
   /** Hidden row */
   hidden?: boolean;
+  /** Computed on load, never written back: every run in the hidden row has its own `w:vanish`. */
+  hiddenContentOnly?: boolean;
   /** Conditional format style */
   conditionalFormat?: ConditionalFormatStyle;
   /** Leading omitted grid columns (`w:gridBefore`). Undefined = 0. */

@@ -974,6 +974,11 @@ pub struct TableRowFormatting {
     pub justification: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hidden: Option<bool>,
+    /// Computed from the row's XML on load, never written back: every run in a
+    /// `w:hidden` row carries its own `w:vanish` (see
+    /// [`crate::table::row_is_hidden_content_only`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden_content_only: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conditional_format: Option<ConditionalFormatStyle>,
     #[serde(skip_serializing_if = "Option::is_none")]
