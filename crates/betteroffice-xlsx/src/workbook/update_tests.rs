@@ -237,7 +237,10 @@ fn a_standalone_filter_keeps_the_table_its_edits_left() {
         )
         .unwrap();
     assert!(workbook.model().defined_names.is_empty());
-    assert_eq!(workbook.authority.materialize().unwrap(), *workbook.model());
+    assert_eq!(
+        workbook.authority_for_test().materialize().unwrap(),
+        *workbook.model()
+    );
 }
 
 /// A batch that needs a full sync reaches the document through the sheet's frame
@@ -269,7 +272,7 @@ fn a_standalone_row_insert_stores_the_rules_and_filter_of_its_batch() {
     let sheet = &workbook.model().sheets[0];
     assert_eq!(sheet.conditional_formats.len(), 1);
     assert_eq!(sheet.auto_filter.as_ref().unwrap().range.to_a1(), "C21:D31");
-    let stored = workbook.authority.materialize().unwrap();
+    let stored = workbook.authority_for_test().materialize().unwrap();
     assert_eq!(
         (
             &stored.sheets[0].auto_filter,
@@ -353,7 +356,10 @@ fn unobserved_fallback_does_not_encode_updates() {
             .unwrap();
     });
     assert_eq!(LOCAL_UPDATE_ENCODINGS.get(), 0);
-    assert_eq!(workbook.authority.materialize().unwrap(), *workbook.model());
+    assert_eq!(
+        workbook.authority_for_test().materialize().unwrap(),
+        *workbook.model()
+    );
 }
 
 #[test]
@@ -549,7 +555,10 @@ fn unobserved_atomic_edits_keep_the_update_needed_for_commit() {
         .unwrap();
     assert_eq!(LOCAL_UPDATE_ENCODINGS.get(), 1);
     assert_ne!(workbook.version(), version);
-    assert_eq!(workbook.authority.materialize().unwrap(), *workbook.model());
+    assert_eq!(
+        workbook.authority_for_test().materialize().unwrap(),
+        *workbook.model()
+    );
     let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
     assert_eq!(
         reopened.cell(SheetId(0), CellRef::new(1, 0)).unwrap().input,
