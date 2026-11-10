@@ -1456,9 +1456,15 @@ jobs:
           QUALITY_REQUIRE_XLSX_FIDELITY: 'true'
           QUALITY_REQUIRE_ROUNDTRIP: 'true'
           QUALITY_REQUIRE_TIMING: ${{ inputs.private_corpus }}
+          QUALITY_COVERAGE: ${{ runner.temp }}/coverage.md
+          QUALITY_REQUIRE_COVERAGE: 'true'
+        run: node scripts/office-quality/private-step.mjs merge -- node scripts/office-quality/merge.mjs
+
+      - name: Summarise scored documents and the generated section
+        if: always()
         run: |
-          node scripts/office-quality/private-step.mjs merge -- node scripts/office-quality/merge.mjs
-          cat "${QUALITY_OUTPUT}/section.md" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f "$RUNNER_TEMP/coverage.md" ]; then cat "$RUNNER_TEMP/coverage.md" >> "$GITHUB_STEP_SUMMARY"; fi
+          if [ -f "$RUNNER_TEMP/fidelity-report/section.md" ]; then cat "$RUNNER_TEMP/fidelity-report/section.md" >> "$GITHUB_STEP_SUMMARY"; fi
 
       - if: ${{ !inputs.private_corpus }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a

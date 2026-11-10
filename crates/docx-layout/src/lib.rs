@@ -72,6 +72,7 @@ mod fmath;
 pub mod hooks;
 mod line_fit;
 pub mod page_flow;
+pub mod page_text;
 pub mod paragraph_spacing;
 pub mod place;
 pub mod placement;

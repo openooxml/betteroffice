@@ -13630,7 +13630,7 @@ fn prune_resident_display_measured(resident: &mut ResidentDisplayInput, list: &D
 }
 
 /// The affected pages' source blocks by canonical key, first occurrence winning.
-fn source_blocks_by_key<'a, 'b>(
+pub(crate) fn source_blocks_by_key<'a, 'b>(
     pagination: &'a crate::types::Input,
     pages: impl IntoIterator<Item = &'b crate::types::Page>,
 ) -> HashMap<Cow<'a, str>, &'a crate::types::MeasuredBlock> {
@@ -14661,7 +14661,7 @@ fn resident_block_key(block: &crate::types::LayoutBlock) -> Option<Cow<'_, str>>
 }
 
 /// Borrows pagination fragment ids with the resident display key text.
-fn resident_fragment_block_key(fragment: &crate::types::Fragment) -> Cow<'_, str> {
+pub(crate) fn resident_fragment_block_key(fragment: &crate::types::Fragment) -> Cow<'_, str> {
     use crate::types::Fragment;
     let id = match fragment {
         Fragment::Paragraph(value) => &value.block_id,
@@ -14677,7 +14677,7 @@ fn resident_fragment_block_key(fragment: &crate::types::Fragment) -> Cow<'_, str
 
 /// [`block_key`] of `id` once transcoded, which reads an integral number back
 /// as an integer.
-fn resident_block_id_key(id: &crate::types::BlockId) -> Cow<'_, str> {
+pub(crate) fn resident_block_id_key(id: &crate::types::BlockId) -> Cow<'_, str> {
     match id {
         crate::types::BlockId::Str(value) => Cow::Borrowed(value),
         crate::types::BlockId::Num(value)
