@@ -376,6 +376,19 @@ pub struct DocAttrs {
     /// The marker is a visible bullet, whatever its stored character.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub list_marker_bullet: Option<bool>,
+    /// Text the paragraph reads before this run for explicit line breaks
+    /// (`"\n"`) and tabs (`"\t"`) that sit between it and the previous run and
+    /// that no primitive paints. Set on the first text primitive after them;
+    /// rare, so boxed to keep primitives compact.
+    #[allow(clippy::box_collection)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub separator_before: Option<Box<String>>,
+    /// As `separator_before`, for breaks and tabs that end the fragment's
+    /// lines with no text after them in the fragment. Set on its last text
+    /// primitive, so a paragraph continued in the next column still reads apart.
+    #[allow(clippy::box_collection)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub separator_after: Option<Box<String>>,
     /// Pending tracked-change paint for the synthetic numbering glyph.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub list_marker_revision: Option<RevisionKind>,
@@ -6857,6 +6870,17 @@ pub(crate) fn emit_paragraph_fragment(
 
         line_top += line.line_height;
     }
+    let shown_lines = measure
+        .lines
+        .get(frag.from_line..frag.to_line.min(total_lines))
+        .unwrap_or(&[]);
+    if let (Some(first), Some(last)) = (shown_lines.first(), shown_lines.last()) {
+        stamp_separators_before(
+            &block.runs,
+            first.head_run..=last.tail_run,
+            &mut prims[stamp_from..],
+        );
+    }
 
     // The tracked-change pilcrow marks the paragraph's end, so only the final
     // fragment gets it; earlier fragments get the margin bar alone.
@@ -13319,6 +13343,72 @@ pub(crate) fn doc_attrs(p: &Primitive) -> Option<&DocAttrs> {
         Primitive::Shape(s) => Some(&s.attrs),
         Primitive::Decoration(d) => Some(&d.attrs),
         Primitive::Line(_) => None,
+    }
+}
+
+/// Stamps `separator_before` on the first painted text after each group of
+/// adjacent line breaks and tabs, which paint nothing and would otherwise read
+/// as no gap at all between the words around them, or on the last text when
+/// nothing follows them in the fragment. Only the breaks and tabs of `shown`
+/// (the runs of the fragment's lines) count, so a fragment never reads a
+/// separator that belongs to another one.
+fn stamp_separators_before(
+    runs: &[RunIn],
+    shown: std::ops::RangeInclusive<usize>,
+    prims: &mut [Primitive],
+) {
+    let mut groups: Vec<(i64, String)> = Vec::new();
+    let shown = *shown.start()..(*shown.end()).saturating_add(1).min(runs.len());
+    for run in runs.get(shown).unwrap_or(&[]) {
+        let (start, end, separator) = match run {
+            RunIn::LineBreak(run) => (run.pm_start, run.pm_start.map(|p| p + 1), '\n'),
+            RunIn::Tab(run) => (
+                run.pm_start,
+                run.pm_end.or(run.pm_start.map(|p| p + 1)),
+                '\t',
+            ),
+            _ => continue,
+        };
+        let (Some(start), Some(end)) = (start, end) else {
+            continue;
+        };
+        match groups.last_mut() {
+            Some((after, text)) if *after == start => {
+                text.push(separator);
+                *after = end;
+            }
+            _ => groups.push((end, separator.to_string())),
+        }
+    }
+    if groups.is_empty() {
+        return;
+    }
+    let mut texts: Vec<(i64, usize)> = prims
+        .iter()
+        .enumerate()
+        .filter_map(|(index, primitive)| match primitive {
+            Primitive::Text(text) => text.attrs.doc_start.map(|start| (start, index)),
+            Primitive::GlyphRun(run) => run.attrs.doc_start.map(|start| (start, index)),
+            _ => None,
+        })
+        .collect();
+    texts.sort_unstable();
+    for (after, separator) in groups {
+        let at = texts.partition_point(|&(start, _)| start < after);
+        let (index, before) = match texts.get(at) {
+            Some(&(_, index)) => (index, true),
+            None if at > 0 => (texts[at - 1].1, false),
+            None => continue,
+        };
+        if let Some(attrs) = doc_attrs_mut(&mut prims[index]) {
+            let slot = if before {
+                &mut attrs.separator_before
+            } else {
+                &mut attrs.separator_after
+            };
+            slot.get_or_insert_with(Default::default)
+                .push_str(&separator);
+        }
     }
 }
 

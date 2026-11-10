@@ -1609,3 +1609,134 @@ test('native and wasm leave hidden table rows out of the display list unless hid
   expect(shown.borders).toBeGreaterThan(hidden.borders);
   expect(shown).toEqual(run(wasm, true));
 });
+
+test('native and wasm mark explicit breaks and tabs so the built page reads like the page text', () => {
+  const encoder = new TextEncoder();
+  const w = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+  const t = (text: string) => `<w:t xml:space="preserve">${text}</w:t>`;
+  const p = (inner: string) => `<w:p><w:r>${inner}</w:r></w:p>`;
+  const cell = (inner: string) => `<w:tc><w:tcPr><w:tcW w:w="2400" w:type="dxa"/></w:tcPr>${p(inner)}</w:tc>`;
+  const wrap = 'Alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango uniform victor whiskey.';
+  const hyphens = 'state-of-the-art well-known up-to-date long-term high-quality self-contained cross-platform real-time open-source user-friendly read-only.';
+  const cjk = '日本語のテキストは単語の間に空白がありません。行の折り返しで空白を入れてはいけません。日本語のテキストは単語の間に空白がありません。';
+  const body = [
+    p(`${t('Special')}<w:br/>${t('Appropriation')}`),
+    p(`${t('Carriage')}<w:cr/>${t('Return')}`),
+    p(`${t('Tabbed')}<w:tab/>${t('Word')}`),
+    p(`${t('Double')}<w:br/><w:br/>${t('Gap')}`),
+    p(`<w:br/>${t('Startbreak')}`),
+    p(`${t('Endbreak')}<w:br/>`),
+    p(t(wrap)), p(t(hyphens)), p(t(cjk)),
+    `<w:tbl><w:tblPr><w:tblW w:w="7200" w:type="dxa"/><w:tblLayout w:type="fixed"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/><w:gridCol w:w="2400"/><w:gridCol w:w="2400"/></w:tblGrid><w:tr>${
+      cell(`${t('Cellspecial')}<w:br/>${t('Cellappropriation')}`)}${cell(`${t('Celltab')}<w:tab/>${t('Cellword')}`)}${cell(t('Appropriation Bill Number One Special Accounts'))}</w:tr></w:tbl>`,
+  ].join('');
+  const bytes = wasm.rezip_docx({
+    '[Content_Types].xml': encoder.encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'),
+    '_rels/.rels': encoder.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'),
+    'word/document.xml': encoder.encode(`<w:document xmlns:w="${w}"><w:body>${body}<w:sectPr/></w:body></w:document>`),
+  });
+  type Primitive = { kind: string; text?: string; docStart?: number; blockKey?: string; blockId?: number; separatorBefore?: string; separatorAfter?: string };
+  const run = (engine: Engine) => {
+    const session = new engine.EditSession(79);
+    try {
+      session.open_docx(bytes, true);
+      const font = session.register_measure_font(fontBytes);
+      const fontChains = { 'calibri|0|0': [font], 'calibri|1|0': [font] };
+      const layout = session.layout_document_with_regions_json(JSON.stringify({
+        bodyStory: 'body',
+        regions: { sections: [{ sectionId: 'main', properties: {
+          pageWidth: 12240, pageHeight: 15840, marginTop: 1440, marginRight: 1440, marginBottom: 1440, marginLeft: 1440,
+        } }] },
+        measurement: { fontChains, defaults: { fontSize: 11, fontFamily: 'Calibri' }, authoritativeShaping: true },
+        renderEnv: { themeColors: {} },
+      }));
+      const list = JSON.parse(session.build_display_list_json(JSON.stringify({ ...JSON.parse(layout), fontChains }))) as {
+        pages: { primitives: Primitive[] }[];
+      };
+      const blocks = new Map<string, Primitive[]>();
+      for (const primitive of list.pages[0]!.primitives) {
+        if ((primitive.kind !== 'text' && primitive.kind !== 'glyphRun') || primitive.docStart === undefined) continue;
+        const key = primitive.blockKey ?? String(primitive.blockId);
+        blocks.set(key, [...(blocks.get(key) ?? []), primitive]);
+      }
+      const reads = [...blocks.values()].map((primitives) => primitives
+        .sort((a, b) => a.docStart! - b.docStart!)
+        .map((primitive) => `${primitive.separatorBefore ?? ''}${primitive.text ?? ''}${primitive.separatorAfter ?? ''}`).join(''));
+      const pages = JSON.parse(session.page_texts_json(Uint32Array.of(0))) as { paragraphs: { text: string }[] }[];
+      const marked = list.pages[0]!.primitives
+        .filter((primitive) => primitive.separatorBefore !== undefined || primitive.separatorAfter !== undefined)
+        .map(({ docStart, text, separatorBefore, separatorAfter }) => [docStart, text, separatorBefore, separatorAfter]);
+      return { reads, texts: pages[0]!.paragraphs.map(({ text }) => text), marked };
+    } finally {
+      session.free();
+    }
+  };
+  const built = run(native);
+  expect(built).toEqual(run(wasm));
+  const expected = ['Special\nAppropriation', 'Carriage\nReturn', 'Tabbed\tWord', 'Double\n\nGap', '\nStartbreak', 'Endbreak\n',
+    'Cellspecial\nCellappropriation', 'Celltab\tCellword'];
+  for (const text of expected) {
+    expect(built.texts).toContain(text);
+    expect(built.reads).toContain(text);
+  }
+  expect(built.marked).toHaveLength(8);
+  for (const text of [wrap, hyphens, cjk, 'Appropriation Bill Number One Special Accounts']) {
+    expect(built.texts).toContain(text);
+    expect(built.reads).toContain(text);
+  }
+}, 30_000);
+
+test('native and wasm read a paragraph split after a line break across columns and pages like the page text', () => {
+  const encoder = new TextEncoder();
+  const w = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+  const lines = Array.from({ length: 240 }, (_, index) => `Line${String(index + 1).padStart(3, '0')}`);
+  const docx = (body: string) => wasm.rezip_docx({
+    '[Content_Types].xml': encoder.encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'),
+    '_rels/.rels': encoder.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'),
+    'word/document.xml': encoder.encode(`<w:document xmlns:w="${w}"><w:body>${body}<w:sectPr/></w:body></w:document>`),
+  });
+  const broken = docx(`<w:p><w:r>${lines.map((line) => `<w:t>${line}</w:t>`).join('<w:br/>')}</w:r></w:p>`);
+  const plain = docx(lines.map((line) => `<w:p><w:r><w:t>${line}</w:t></w:r></w:p>`).join(''));
+  type Primitive = { kind: string; text?: string; docStart?: number; separatorBefore?: string; separatorAfter?: string; glyphs?: { x: number }[]; x?: number };
+  const run = (engine: Engine, bytes: Uint8Array) => {
+    const session = new engine.EditSession(79);
+    try {
+      session.open_docx(bytes, true);
+      const font = session.register_measure_font(fontBytes);
+      const fontChains = { 'calibri|0|0': [font], 'calibri|1|0': [font] };
+      const layout = session.layout_document_with_regions_json(JSON.stringify({
+        bodyStory: 'body',
+        regions: { sections: [{ sectionId: 'main', properties: {
+          pageWidth: 12240, pageHeight: 15840, marginTop: 1440, marginRight: 1440, marginBottom: 1440, marginLeft: 1440,
+          columnCount: 2, columnSpace: 720,
+        } }] },
+        measurement: { fontChains, defaults: { fontSize: 11, fontFamily: 'Calibri' }, authoritativeShaping: true },
+        renderEnv: { themeColors: {} },
+      }));
+      const json = session.build_display_list_json(JSON.stringify({ ...JSON.parse(layout), fontChains }));
+      const list = JSON.parse(json) as { pages: { primitives: Primitive[] }[] };
+      const texts = JSON.parse(session.page_texts_json(Uint32Array.from(list.pages, (_, index) => index))) as { paragraphs: { text: string }[] }[];
+      return {
+        json,
+        pages: list.pages.map(({ primitives }, index) => {
+          const runs = primitives.filter((primitive) => (primitive.kind === 'text' || primitive.kind === 'glyphRun') && primitive.docStart !== undefined)
+            .sort((a, b) => a.docStart! - b.docStart!);
+          return {
+            built: runs.map((primitive) => `${primitive.separatorBefore ?? ''}${primitive.text ?? ''}${primitive.separatorAfter ?? ''}`).join(''),
+            text: texts[index]!.paragraphs.map(({ text }) => text).join(''),
+            columns: new Set(runs.filter((primitive) => primitive.text).map((primitive) => (primitive.glyphs?.[0]?.x ?? primitive.x ?? 0) > 408 ? 1 : 0)).size,
+          };
+        }),
+      };
+    } finally {
+      session.free();
+    }
+  };
+  const built = run(native, broken);
+  expect(built).toEqual(run(wasm, broken));
+  expect(built.pages.length).toBeGreaterThanOrEqual(2);
+  expect(built.pages[0]!.columns).toBe(2);
+  for (const { built: reading, text } of built.pages) expect(reading).toBe(text);
+  expect(built.pages.map(({ built: reading }) => reading).join('')).toBe(lines.join('\n'));
+  for (const engine of [native, wasm]) expect(run(engine, plain).json).not.toContain('separator');
+}, 60_000);
