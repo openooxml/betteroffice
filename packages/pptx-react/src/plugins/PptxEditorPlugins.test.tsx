@@ -960,6 +960,7 @@ describe('PptxEditor plugins', () => {
 
   test('a plugin reads selection anchor geometry after selecting text', async () => {
     const canvases = fakeContexts();
+    const ownBounds = Object.prototype.hasOwnProperty.call(HTMLElement.prototype, 'getBoundingClientRect');
     const bounds = spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(
       () => ({ left: 0, top: 0, width: 640, height: 360, x: 0, y: 0, right: 640, bottom: 360 } as DOMRect)
     );
@@ -1029,6 +1030,7 @@ describe('PptxEditor plugins', () => {
       });
     } finally {
       bounds.mockRestore();
+      if (!ownBounds) delete (HTMLElement.prototype as { getBoundingClientRect?: unknown }).getBoundingClientRect;
       canvases.restore();
     }
   });
