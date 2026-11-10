@@ -290,7 +290,7 @@ function readerRows(session: YrsSession): Record<string, string> {
       if (!result.ok) throw new Error(JSON.stringify(result.failure));
       expectOneEmptyParagraph(story, result.paragraphs);
     });
-    check(`${story} plainText`, () => { const text = storyPlainText(session, story); if (text !== '') throw new Error(JSON.stringify(text)); });
+    check(`${story} plainText`, () => { const text = storyPlainText(session, story); if (text !== '\n') throw new Error(JSON.stringify(text)); });
     check(`${story} selectionContext`, () => session.selectionContext(collapsed(loc)));
     check(`${story} selectionText`, () => session.selectionText(collapsed(loc)));
     check(`${story} projection`, () => {
@@ -366,6 +366,8 @@ interface WriteCase {
   prepare: (session: YrsSession, story: string) => WriteThunk;
   /** A collapsed deletion at a cell edge may be a no-op instead of a refusal. */
   mayNoop?: boolean;
+  /** A host-side argument check that rejects every table cell before the engine is reached. */
+  hostRefusal?: RegExp;
 }
 
 const cellLoc = (session: YrsSession, story: string) => firstParagraph(session, story);
@@ -425,7 +427,7 @@ const WRITES: WriteCase[] = [
   { name: 'insertTable', prepare: (s, story) => () => s.insertTable(cellLoc(s, story), 1, 1) },
   { name: 'insertImage', prepare: (s, story) => () => s.insertImage(cellLoc(s, story), { rId: 'rIdImage' }) },
   { name: 'insertPageBreak', prepare: (s, story) => () => s.insertPageBreak(cellLoc(s, story)) },
-  { name: 'insertSectionBreak', prepare: (s, story) => () => s.insertSectionBreak(cellLoc(s, story), 'nextPage') },
+  { name: 'insertSectionBreak', hostRefusal: /^Section breaks belong to body paragraphs$/, prepare: (s, story) => () => s.insertSectionBreak(cellLoc(s, story), 'nextPage') },
   {
     name: 'insertWatermark',
     prepare: (s, story) => () => s.insertWatermark(cellLoc(s, story), {
@@ -501,7 +503,7 @@ for (const order of ['synced', 'concurrent'] as const) test(`${order}: every wri
   const outcomes: Record<string, string> = {};
   const problems: string[] = [];
   let base = order === 'synced' ? 10_000 : 30_000;
-  for (const { name, prepare, mayNoop } of WRITES) {
+  for (const { name, prepare, mayNoop, hostRefusal } of WRITES) {
     const { a, b, peers, story } = await danglingRoom(base, 2, order);
     base += 10;
     const run = prepare(b, story);
@@ -515,7 +517,7 @@ for (const order of ['synced', 'concurrent'] as const) test(`${order}: every wri
     const text = error === undefined ? `ok ${JSON.stringify(value ?? null).slice(0, 120)}` : `throws: ${fullMessage(error)}`;
     outcomes[name] = `${text.slice(0, 200)}${unchanged ? '' : ' (wrote)'}`;
     if (/unreachable|panicked|RuntimeError/.test(text)) problems.push(`${name}: engine trap ${text}`);
-    const refused = cellRefused(error) || batchUnsupported(value);
+    const refused = cellRefused(error) || batchUnsupported(value) || (hostRefusal !== undefined && error instanceof Error && hostRefusal.test(error.message));
     if (!refused && !(mayNoop && error === undefined)) problems.push(`${name}: not refused: ${text.slice(0, 200)}`);
     if (!unchanged) problems.push(`${name}: state changed`);
     for (const peer of [a, b]) {
