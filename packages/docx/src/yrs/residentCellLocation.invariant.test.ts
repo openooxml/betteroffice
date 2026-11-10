@@ -41,6 +41,15 @@ function withoutCellLocation(engine: DocxWorkerCommandEngine): DocxWorkerCommand
   return new Proxy(engine, { get: (target, key) => (key === 'cellLocation' || key === 'cellStructureKey' ? undefined : Reflect.get(target, key)) });
 }
 
+async function packageBytes(bodyXml: string): Promise<Uint8Array> {
+  const { rezipPartsToArrayBuffer, toBytes } = await import('../docx/rezip/parts');
+  const parts = new Map<string, Uint8Array>();
+  parts.set('[Content_Types].xml', toBytes('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'));
+  parts.set('_rels/.rels', toBytes('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDoc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'));
+  parts.set('word/document.xml', toBytes(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"><w:body>${bodyXml}<w:sectPr/></w:body></w:document>`));
+  return new Uint8Array(rezipPartsToArrayBuffer(parts));
+}
+
 const units = (segment: YrsStorySegment) => (segment.kind === 'text' ? segment.text.length : 1);
 
 function embeds(engine: DocxWorkerCommandEngine, story: string, kind: string) {
@@ -58,6 +67,7 @@ test('engine cell location is null or equal to the projection after every step o
     (selection as { setCellLocationShadowCheck?: (on: boolean) => void }).setCellLocationShadowCheck?.(true);
     const report: string[] = [];
     const violations: string[] = [];
+    const kinds: Record<string, number> = {};
     for (const seed of SEEDS) {
       const next = random(seed);
       const pick = <T>(items: readonly T[]): T | undefined => (items.length ? items[Math.floor(next() * items.length)] : undefined);
@@ -83,6 +93,7 @@ test('engine cell location is null or equal to the projection after every step o
       let engine = local;
       let remoteSteps = 0;
       let reseeds = 0;
+      let keyMoves = 0;
       const syncToPeer = () => peer?.applyUpdate(local.encodeStateAsUpdate(peer.encodeStateVector()));
       const syncFromPeer = () => peer && local.applyUpdate(peer.encodeStateAsUpdate(local.encodeStateVector()));
       const answer = (target: DocxWorkerCommandEngine, story: string): unknown => {
@@ -158,7 +169,12 @@ test('engine cell location is null or equal to the projection after every step o
       const check = (step: number, op: string) => {
         for (const story of local.geometryReader.storyIds()) seen.add(story);
         for (const story of peer?.geometryReader.storyIds() ?? []) seen.add(story);
+        const keyOf = () => (local as { cellStructureKey?: () => string }).cellStructureKey?.() ?? '';
+        let previousKey = keyOf();
         for (const story of [...seen, 'body:t99:r0c0', 'hf:rId9:t0:r0c0', 'custom:t0:r0c0', 'custom']) {
+          const currentKey = keyOf();
+          if (currentKey !== previousKey) { keyMoves++; if (keyMoves <= 3) console.log(`KEY-MOVED seed=${seed} step=${step} op=${op} before=${previousKey} after=${currentKey} at=${story}`); }
+          previousKey = currentKey;
           checks++;
           const read = (local as { cellLocation?: (story: string) => unknown }).cellLocation;
           const fast = typeof read === 'function' ? read(story) ?? null : null;
@@ -167,6 +183,15 @@ test('engine cell location is null or equal to the projection after every step o
           if (fast) answered++;
           const bad = (fast !== null && JSON.stringify(fast) !== JSON.stringify(projected)) || (projected === null && fast !== null) ||
             JSON.stringify(live) !== JSON.stringify(projected);
+          if (bad) {
+            const kind = typeof live === 'string' && live.startsWith('shadow:') ? 'stale-cache'
+              : fast !== null && projected === null ? 'engine-answers-unreachable'
+              : fast === null && projected !== null && live === null ? 'engine-misses-cell'
+              : fast !== null && projected !== null ? 'engine-differs'
+              : 'resolved-differs';
+            kinds[kind] = (kinds[kind] ?? 0) + 1;
+            if (!kinds[`first:${kind}`]) { kinds[`first:${kind}`] = 1; console.log(`FIRST ${kind} seed=${seed} step=${step} op=${op} story=${story} engine=${JSON.stringify(fast)} projection=${JSON.stringify(projected)} resolved=${JSON.stringify(live)}`); }
+          }
           if (bad && violations.length < 40) {
             violations.push(`seed=${seed} step=${step} op=${op} story=${story} engine=${JSON.stringify(fast)} projection=${JSON.stringify(projected)} resolved=${JSON.stringify(live)}`);
           }
@@ -178,7 +203,7 @@ test('engine cell location is null or equal to the projection after every step o
         if (step === Math.floor(STEPS / 2)) {
           try {
             const other = await openCommandEngine([], { bodyXml: body, clientId: 8500 + seed });
-            local.loadState(other.engine.encodeState());
+            local.openSourceDocx(await packageBytes(body), { state: other.engine.encodeState() });
             reseeds++;
           } catch (error) {
             if (isEngineTrap(error)) throw error;
@@ -201,14 +226,15 @@ test('engine cell location is null or equal to the projection after every step o
         if (remote) syncFromPeer();
         check(step, remote ? `remote:${op}` : op);
       }
-      report.push(`INVARIANT seed=${seed} steps=${STEPS} remote=${remoteSteps} reseeds=${reseeds} applied=${applied} refused=${refused} storiesSeen=${seen.size} checks=${checks} engineAnswered=${answered} ops=${JSON.stringify(ops)}`);
+      report.push(`INVARIANT seed=${seed} steps=${STEPS} remote=${remoteSteps} reseeds=${reseeds} keyMovesWithinChecks=${keyMoves} applied=${applied} refused=${refused} storiesSeen=${seen.size} checks=${checks} engineAnswered=${answered} ops=${JSON.stringify(ops)}`);
       closeCommandEngines();
     }
     (selection as { setCellLocationShadowCheck?: (on: boolean) => void }).setCellLocationShadowCheck?.(false);
     const counts = (selection as { cellLocationCacheCounts?: () => unknown }).cellLocationCacheCounts?.();
     if (counts) console.log(`INVARIANT-CACHE ${JSON.stringify(counts)}`);
     for (const line of report) console.log(line);
-    console.log(`INVARIANT-VIOLATIONS ${violations.length}`);
+    const total = Object.entries(kinds).filter(([key]) => !key.startsWith('first:')).reduce((sum, [, n]) => sum + n, 0);
+    console.log(`INVARIANT-VIOLATIONS ${total} kinds=${JSON.stringify(Object.fromEntries(Object.entries(kinds).filter(([key]) => !key.startsWith('first:'))))}`);
     for (const line of violations.slice(0, 12)) console.log(`VIOLATION ${line}`);
     expect(violations).toEqual([]);
   })();
