@@ -122,7 +122,6 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
       if (displayedFor !== selected || !sameView(view.identity, source.frame.identity)) showSelection(null, null);
       return;
     }
-    const asked = view.version;
     const key = `${source.layout.id}|${selected}`;
     if (selectionRead?.key === key && (!retry || !selectionRead.failed)) return selectionRead.read;
     const entry: NonNullable<typeof selectionRead> = { key, read: Promise.resolve(false), failed: false };
@@ -154,14 +153,14 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
       showSelection(entry.mapped?.ok && entry.mapped.ranges[0] ? { story: selection.anchor.story, from: entry.mapped.ranges[0].from,
         to: entry.mapped.ranges.at(-1)!.to, layoutId: source.layout.id } : null, selected);
       return true;
-    }).catch((error): Promise<boolean> | boolean => {
-      if (current !== source || selectionRead !== entry || !fresh(source)) return false;
-      if (error instanceof WorkerReadSupersededError && controller.getSnapshot().view?.version !== asked) {
-        selectionRead = null;
-        return requestSelection() ?? false;
+    }).catch(error => {
+      if (current === source && selectionRead === entry) {
+        if (error instanceof WorkerReadSupersededError) selectionRead = null;
+        else if (fresh(source)) {
+          entry.failed = true;
+          showSelection(null, selected);
+        }
       }
-      entry.failed = true;
-      showSelection(null, selected);
       return false;
     }).finally(() => { if (current === source && selectionRead === entry) publish(); });
     return entry.read;
