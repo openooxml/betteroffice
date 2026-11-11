@@ -884,13 +884,8 @@ fn write_empty(
             overlay_default(effective.entry(key.clone()).or_insert(Value::Null), direct);
         }
         let deltas = attr_deltas(&effective, &insert.attrs);
-        let properties = properties::run_properties(
-            original,
-            &deltas,
-            &insert.inherit,
-            &insert.attrs,
-            current,
-        )?;
+        let properties =
+            properties::run_properties(original, &deltas, &insert.inherit, &insert.attrs, current)?;
         let run = if let Some((_, run)) = empty.first() {
             let node = &lowered.xml.nodes[run.node];
             let children: Vec<_> = node

@@ -1108,12 +1108,12 @@ fn changes_units_in(
         .filter(|chunk| if text_only { chunk.text } else { !chunk.block })
         .any(|chunk| {
             let current = chunk.attrs.as_deref();
-            attrs
-                .iter()
-                .any(|(key, value)| match current.and_then(|current| current.get(key)) {
+            attrs.iter().any(
+                |(key, value)| match current.and_then(|current| current.get(key)) {
                     None if chunk.pilcrow => false,
                     current => current.unwrap_or(&Any::Null) != value,
-                })
+                },
+            )
         })
 }
 
@@ -1206,7 +1206,12 @@ fn styled_run_base(
 fn reset_to(base: &BTreeMap<String, Any>) -> Attrs {
     FORMATTING_ATTRS
         .iter()
-        .map(|key| (Arc::from(*key), base.get(*key).cloned().unwrap_or(Any::Null)))
+        .map(|key| {
+            (
+                Arc::from(*key),
+                base.get(*key).cloned().unwrap_or(Any::Null),
+            )
+        })
         .collect()
 }
 

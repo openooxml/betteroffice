@@ -3963,9 +3963,9 @@ impl EditingDoc {
                         ) {
                             Ok(mut patch) => {
                                 if stale.iter().any(|cell| {
-                                    story
-                                        .strip_prefix(cell.as_str())
-                                        .is_some_and(|rest| rest.is_empty() || rest.starts_with(':'))
+                                    story.strip_prefix(cell.as_str()).is_some_and(|rest| {
+                                        rest.is_empty() || rest.starts_with(':')
+                                    })
                                 }) {
                                     patch.inheritance = InheritanceStateV1::Unknown;
                                 }

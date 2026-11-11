@@ -606,11 +606,10 @@ fn present(value: Option<&Value>) -> Option<&Value> {
 fn same_value(left: Option<&Value>, right: Option<&Value>) -> bool {
     match (left, right) {
         (Some(Value::Number(left)), Some(Value::Number(right))) => left.as_f64() == right.as_f64(),
-        (Some(Value::Object(left)), Some(Value::Object(right))) => {
-            left.keys()
-                .chain(right.keys())
-                .all(|key| same_value(present(left.get(key)), present(right.get(key))))
-        }
+        (Some(Value::Object(left)), Some(Value::Object(right))) => left
+            .keys()
+            .chain(right.keys())
+            .all(|key| same_value(present(left.get(key)), present(right.get(key)))),
         _ => left == right,
     }
 }
@@ -824,16 +823,14 @@ fn run_leaf(
             if value.is_some_and(|value| !value.is_boolean()) {
                 return Err(unsupported(path));
             }
-            let alignment = |attrs: &Attrs| {
-                match (
-                    attrs.get("superscript") == Some(&Value::Bool(true)),
-                    attrs.get("subscript") == Some(&Value::Bool(true)),
-                ) {
-                    (true, true) => Err(conflict("conflicting vertical alignment")),
-                    (true, false) => Ok("superscript"),
-                    (false, true) => Ok("subscript"),
-                    (false, false) => Ok("baseline"),
-                }
+            let alignment = |attrs: &Attrs| match (
+                attrs.get("superscript") == Some(&Value::Bool(true)),
+                attrs.get("subscript") == Some(&Value::Bool(true)),
+            ) {
+                (true, true) => Err(conflict("conflicting vertical alignment")),
+                (true, false) => Ok("superscript"),
+                (false, true) => Ok("subscript"),
+                (false, false) => Ok("baseline"),
             };
             let value = alignment(target)?;
             let inherited = alignment(inherit).unwrap_or("baseline");

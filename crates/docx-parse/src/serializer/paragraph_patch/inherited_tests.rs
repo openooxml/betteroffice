@@ -58,7 +58,11 @@ fn without_current_inheritance_a_changed_value_stays_explicit() {
     }
     let sized = written_in(
         r#"<w:rPr><w:sz w:val="40"/></w:rPr>"#,
-        &[delta(&["fontSize", "size"], Some(json!(40)), Some(json!(32)))],
+        &[delta(
+            &["fontSize", "size"],
+            Some(json!(40)),
+            Some(json!(32)),
+        )],
         heading(),
         heading(),
         false,
@@ -85,7 +89,11 @@ fn a_value_changed_to_what_the_style_gives_removes_the_element() {
     assert_eq!(cleared, "");
     let sized = written(
         r#"<w:rPr><w:i/><w:sz w:val="40"/></w:rPr>"#,
-        &[delta(&["fontSize", "size"], Some(json!(40)), Some(json!(32)))],
+        &[delta(
+            &["fontSize", "size"],
+            Some(json!(40)),
+            Some(json!(32)),
+        )],
         heading(),
         json!({"bold": true, "italic": true, "fontSize": {"size": 32}}),
     );
@@ -117,7 +125,11 @@ fn a_value_changed_away_from_the_style_is_written() {
     assert_eq!(on, "<w:rPr><w:b/></w:rPr>");
     let sized = written(
         r#"<w:rPr><w:sz w:val="40"/></w:rPr>"#,
-        &[delta(&["fontSize", "size"], Some(json!(40)), Some(json!(22)))],
+        &[delta(
+            &["fontSize", "size"],
+            Some(json!(40)),
+            Some(json!(22)),
+        )],
         heading(),
         json!({"bold": true, "fontSize": {"size": 22}}),
     );

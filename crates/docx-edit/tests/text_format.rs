@@ -819,7 +819,11 @@ fn editor_clear_removes_direct_formatting_from_note_references_and_fields() {
         let doc = open_with_embeds();
         let before = body_embeds(&doc);
         assert!(
-            before.iter().filter(|(_, attrs)| active(attrs, "bold")).count() >= 3,
+            before
+                .iter()
+                .filter(|(_, attrs)| active(attrs, "bold"))
+                .count()
+                >= 3,
             "{before:?}"
         );
         editor_clear(
