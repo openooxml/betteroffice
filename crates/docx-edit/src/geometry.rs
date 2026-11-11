@@ -282,14 +282,17 @@ fn build_table<T: ReadTxn>(
     if start > MAX_POSITION {
         return Err(());
     }
-    if crate::unavailable_tables::is_unavailable(map, txn) {
+    let Some(payload) = crate::unavailable_tables::table_payload(map, txn) else {
         if scan.active {
             scan.found
                 .push(TableLocator::new(story_id, table_index as u32));
         }
         return Ok(2);
-    }
-    let rows = plain_value(map, txn, "rows");
+    };
+    let rows = match payload.rows {
+        Out::Any(rows) => Some(rows),
+        _ => None,
+    };
     let rows = match rows.as_ref() {
         Some(Any::Array(rows)) => rows.as_ref(),
         Some(Any::Buffer(_)) => return lenient(scan, Err(()), 2),

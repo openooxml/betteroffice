@@ -2203,7 +2203,7 @@ impl<'a> Exporter<'a> {
                     story: ctx.story.clone(),
                     table_index: index,
                 });
-                if crate::unavailable_tables::is_unavailable(map, txn) {
+                if crate::unavailable_tables::lacks_payload(|key| payload.contains_key(key)) {
                     self.note(
                         DiagnosticCode::UnsupportedContent,
                         Severity::Error,

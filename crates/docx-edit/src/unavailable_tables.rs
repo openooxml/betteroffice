@@ -3,7 +3,7 @@
 //! crossing order can leave every entry deleted. Such a table lays out as nothing, takes no table
 //! operation and blocks saving until its last undo is redone or the table is deleted.
 
-use yrs::{Map, MapRef, ReadTxn};
+use yrs::{Map, MapRef, Out, ReadTxn};
 
 use crate::{EditingDoc, TableLocator};
 
@@ -12,9 +12,35 @@ pub const TABLE_UNAVAILABLE: &str = "a table is unavailable after a concurrent u
 
 const PAYLOAD_KEYS: [&str; 3] = ["tblPr", "grid", "rows"];
 
-/// Whether the table embed `table` lacks any of its payload entries.
-pub(crate) fn is_unavailable<T: ReadTxn>(table: &MapRef, txn: &T) -> bool {
-    PAYLOAD_KEYS.iter().any(|key| table.get(txn, key).is_none())
+/// A table embed's payload entries, each read once.
+pub(crate) struct TablePayload {
+    pub(crate) tbl_pr: Out,
+    pub(crate) grid: Out,
+    pub(crate) rows: Out,
+}
+
+/// The payload of the table embed `table`, or `None` when it lacks any of its entries: the
+/// table is unavailable. Readers take the entries from here rather than reading them again.
+pub(crate) fn table_payload<T: ReadTxn>(table: &MapRef, txn: &T) -> Option<TablePayload> {
+    #[cfg(test)]
+    PAYLOAD_READS.with(|reads| reads.set(reads.get() + 1));
+    Some(TablePayload {
+        tbl_pr: table.get(txn, "tblPr")?,
+        grid: table.get(txn, "grid")?,
+        rows: table.get(txn, "rows")?,
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Table payloads read on this thread.
+    static PAYLOAD_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Whether a table payload already read as a map, where `has` tells whether it holds an entry,
+/// lacks any of its entries.
+pub(crate) fn lacks_payload(has: impl Fn(&str) -> bool) -> bool {
+    !PAYLOAD_KEYS.iter().all(|key| has(key))
 }
 
 /// Whether `story` is a footnote or endnote itself, `fn:<id>` or `en:<id>`, rather than a story
@@ -189,6 +215,23 @@ mod tests {
         for key in super::PAYLOAD_KEYS {
             yrs::Map::remove(&table, &mut txn, key);
         }
+    }
+
+    #[test]
+    fn a_healthy_table_operation_and_outline_read_the_payload_once() {
+        let doc = EditingDoc::new(81);
+        doc.create_story("body", "Hello", "Normal", "left")
+            .unwrap();
+        doc.insert_table(&ctx(), Position::new("body", 0), 2, 2)
+            .unwrap();
+        let reads = || super::PAYLOAD_READS.with(std::cell::Cell::get);
+        let start = reads();
+        doc.set_column_width(&ctx(), &CellLoc::new("body", 0, 0, 0), 2000.0)
+            .unwrap();
+        assert_eq!(reads() - start, 1, "one table operation, one payload read");
+        let start = reads();
+        assert_eq!(doc.unavailable_tables(), Some(Vec::new()));
+        assert_eq!(reads() - start, 1, "one table in the outline, one payload read");
     }
 
     #[test]
