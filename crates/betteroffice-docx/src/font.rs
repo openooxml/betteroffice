@@ -23,6 +23,8 @@ pub(crate) struct FontRegistry {
     application: HashMap<String, usize>,
     #[cfg(feature = "fonts")]
     resolved: HashSet<(String, Vec<String>)>,
+    #[cfg(feature = "fonts")]
+    pub(crate) cjk_fallbacks: bool,
     registrations: usize,
 }
 

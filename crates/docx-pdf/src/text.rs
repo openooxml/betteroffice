@@ -19,9 +19,6 @@ use crate::units::{PX_TO_PT, f64_to_points, font_size_px, parse_color, points};
 
 /// Base-14 resource registered by the writer for text without embedded fonts.
 const BASE_FONT: Name<'static> = Name(b"F0");
-/// Source text reported for `.notdef`: the scalar itself is unavailable.
-const REPLACEMENT: char = '\u{FFFD}';
-
 /// One parsed face per font id, in registry order.
 ///
 /// Painting and collection must agree on which font supplies each scalar, so
@@ -67,10 +64,23 @@ impl<'a> FontFaces<'a> {
     }
 
     fn first_face(&self) -> Option<u32> {
+        // Prefer a TrueType face for `.notdef` fallback: its CIDToGIDMap can
+        // duplicate one empty glyph into several searchable CIDs, while CFF
+        // CIDs cannot be duplicated.
         self.faces
             .iter()
-            .position(Option::is_some)
-            .map(|index| index as u32)
+            .enumerate()
+            .find_map(|(index, face)| {
+                face.as_ref()
+                    .filter(|face| face.tables().cff.is_none())
+                    .map(|_| index as u32)
+            })
+            .or_else(|| {
+                self.faces
+                    .iter()
+                    .position(Option::is_some)
+                    .map(|index| index as u32)
+            })
     }
 
     /// Character advance in CSS pixels: `glyph_hor_advance * size / upem`.
@@ -104,12 +114,9 @@ pub(crate) fn collect_text_glyphs(
             continue;
         };
         let entry = out.entry(font_id).or_default();
-        let text = if glyph == 0 {
-            REPLACEMENT.to_string()
-        } else {
-            ch.to_string()
-        };
-        entry.entry(glyph).or_default().insert(text);
+        // Even `.notdef` keeps the source scalar: the text layer must stay
+        // searchable when no registered face covers the glyph.
+        entry.entry(glyph).or_default().insert(ch.to_string());
     }
 }
 
@@ -147,12 +154,9 @@ pub(crate) fn collect_glyph_run_fallbacks(
             continue;
         };
         let entry = out.entry(font_id).or_default();
-        let text = if glyph_id == 0 {
-            REPLACEMENT.to_string()
-        } else {
-            ch.to_string()
-        };
-        entry.entry(glyph_id).or_default().insert(text);
+        // `.notdef` still carries its source scalar so extraction can recover
+        // characters no registered face covers.
+        entry.entry(glyph_id).or_default().insert(ch.to_string());
     }
 }
 
@@ -235,6 +239,14 @@ pub(crate) fn paint_text(
     let horizontal_scale = optional_number(text.horizontal_scale.as_ref(), 100.0) as f32;
     let rtl = text.rtl == Some(true);
 
+    let actual_text = !text.text.is_empty();
+    if actual_text {
+        content
+            .begin_marked_content_with_properties(Name(b"Span"))
+            .properties()
+            .actual_text(TextStr(text.text.as_str()));
+    }
+
     let faces = FontFaces::new(store);
     let segments = shape_text(&faces, &text.text, size_px);
     let usable = !fonts.is_empty()
@@ -254,6 +266,9 @@ pub(crate) fn paint_text(
             width,
             rtl,
         );
+        if actual_text {
+            content.end_marked_content();
+        }
         return Ok(());
     }
 
@@ -332,6 +347,9 @@ pub(crate) fn paint_text(
             width,
             rtl,
         );
+    }
+    if actual_text {
+        content.end_marked_content();
     }
     Ok(())
 }
@@ -469,11 +487,25 @@ fn paint_glyph_run_impl(
         })
         .collect();
 
-    // Rotate every glyph around the first glyph's origin so a run keeps its
-    // internal offsets and baseline shifts.
+    // Match the raster oracle: rotate around the run box's centre, not the
+    // first glyph. `glyph_rect` there spans every advance and a 1.2em line box.
     let pivot = run.glyphs.first().expect("non-empty glyph run");
-    let pivot_x = f64_to_points(pivot.x, "glyph x")?;
-    let pivot_y = page_height - f64_to_points(pivot.y, "glyph y")?;
+    let mut left = f64::INFINITY;
+    let mut right = f64::NEG_INFINITY;
+    for glyph in &run.glyphs {
+        if !glyph.x.is_finite() || !glyph.advance.is_finite() {
+            continue;
+        }
+        left = left.min(glyph.x);
+        right = right.max(glyph.x + glyph.advance);
+    }
+    let (pivot_x_px, pivot_y_px) = if left.is_finite() && right.is_finite() {
+        ((left + right) / 2.0, pivot.y - run.size * 0.2)
+    } else {
+        (pivot.x, pivot.y)
+    };
+    let pivot_x = f64_to_points(pivot_x_px, "glyph x")?;
+    let pivot_y = page_height - f64_to_points(pivot_y_px, "glyph y")?;
     let theta = -rotation.to_radians();
     let (sin, cos) = theta.sin_cos();
     let (a, b, c, d) = if rotated {

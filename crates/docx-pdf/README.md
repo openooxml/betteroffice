@@ -18,6 +18,9 @@ Supported today:
   `/ActualText` and stay out of the text layer
 - CFF fonts cannot duplicate CIDs: a glyph shared by several source characters
   keeps its first ToUnicode mapping (CJK subsets normally hit no duplicate)
+- `TextRun` primitives carry `/ActualText`, so a scalar its chosen face lacks
+  (for example Simplified Chinese in a Japanese chain) is still searchable when
+  no covering face was registered
 - headers, footers and note regions as separate paint layers
 - filled/stroked rectangles, lines, decorations and shape paths
 - images as RGB XObjects with optional alpha soft masks, crop, rotation and data URLs
@@ -26,8 +29,9 @@ Supported today:
 
 Not yet covered: tagged PDF/PDF-UA, gradients, SVG/EMF/JPEG XL images,
 named destinations for internal anchors (internal `#anchor` links are
-skipped, not emitted as unresolved `/GoTo` actions), and color emoji rendering (missing emoji glyphs
-still produce a searchable .notdef with a coverage warning).
+skipped, not emitted as unresolved `/GoTo` actions), and color emoji rendering.
+Missing emoji still paint `.notdef` (or nothing when no face covers them), but
+the text layer recovers the source scalar through `/ActualText`/`ToUnicode`.
 
 ```rust
 use betteroffice_docx_pdf::export_pdf_with_fonts;

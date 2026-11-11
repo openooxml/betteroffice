@@ -113,7 +113,10 @@ chains return an error.
 
 `export_pdf` lays out the current document through the same path as
 `render_png` and returns a paginated PDF with embedded TrueType subsets and
-`ToUnicode` maps, so text stays searchable. A display list with an unbuilt page
+`ToUnicode` maps, so text stays searchable. Before layout it registers the
+provider's Han/Kana/Hangul fallback faces into the export font store without
+changing chains; a mixed CJK run that picked a Japanese face can therefore
+paint Simplified Chinese glyphs from a covering face. A display list with an unbuilt page
 is refused rather than exported partially. The output is a plain, untagged PDF;
 it makes no PDF/A claim.
 
