@@ -482,6 +482,20 @@ const WRITES: WriteCase[] = [
     }),
   },
   {
+    name: 'host batch insertText step with formatted runs',
+    prepare: (s, story) => () => s.applyEdits({
+      expectVersion: s.version(),
+      steps: [{
+        op: 'insertText', target: { kind: 'paragraph', story, paraId: cellLoc(s, story).paraId }, at: 'end',
+        runs: [
+          { text: 'No changes needed.', marks: { bold: true } },
+          { text: ' ' },
+          { text: 'See the attached notes.', marks: { italic: true, color: 'C00000' } },
+        ],
+      }],
+    }),
+  },
+  {
     name: 'host batch replaceText step',
     prepare: (s, story) => () => s.applyEdits({
       expectVersion: s.version(),

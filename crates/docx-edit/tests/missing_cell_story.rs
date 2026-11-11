@@ -688,3 +688,47 @@ fn metadata_setters_never_create_a_header_cell_without_its_story() {
         }
     }
 }
+
+#[test]
+fn host_batches_with_formatted_runs_aimed_at_the_cell_are_refused() {
+    for synced in [true, false] {
+        let (left, right, _undo) = dangling_state(synced);
+        let (_, _, cell) = dangling(&left).remove(0);
+        let key = format!("{cell}#p0");
+        let target = json!({"kind": "paragraph", "story": cell, "paraId": key});
+        let runs = json!([
+            {"text": "bold", "marks": {"bold": true}},
+            {"text": " plain"},
+        ]);
+        for doc in [&left, &right] {
+            for step in [
+                json!({"op": "insertText", "target": target, "at": "end", "runs": runs}),
+                json!({"op": "replaceText", "target": target, "runs": runs}),
+                json!({
+                    "op": "insertParagraphs",
+                    "target": {"story": cell, "paraId": key},
+                    "at": "end",
+                    "paragraphs": [{"runs": runs}],
+                }),
+            ] {
+                let before = state(doc);
+                let request: EditRequest = serde_json::from_value(json!({
+                    "expectVersion": doc.version().as_str(),
+                    "steps": [step],
+                }))
+                .unwrap();
+                let refusal = doc
+                    .apply_edits(&request, &UndoSession::new())
+                    .unwrap()
+                    .expect_err("a step into the cell is refused");
+                assert_eq!(refusal.failure.code, EditFailureCode::Unsupported);
+                assert_eq!(
+                    refusal.failure.reason,
+                    Some(EditFailureReason::CellHasNoStory),
+                    "synced={synced}"
+                );
+                assert_eq!(state(doc), before, "synced={synced}");
+            }
+        }
+    }
+}
