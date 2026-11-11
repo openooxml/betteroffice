@@ -1,6 +1,7 @@
 ---
 '@betteroffice/xlsx': minor
 '@betteroffice/xlsx-react': minor
+'@betteroffice/xlsx-i18n': patch
 ---
 
 Add column/row header bands: select, shift-extend, drag-reorder, boundary

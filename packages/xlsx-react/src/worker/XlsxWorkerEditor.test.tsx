@@ -9654,6 +9654,9 @@ describe('worker fill handle', () => {
     expect(size()).toEqual({ rows: 1, columns: 16_384 });
     expect(view.getByTestId('xlsx-selection')).toBeDefined();
     expect(view.queryByTestId('xlsx-fill-handle')).toBeNull();
+  });
+});
+
 describe('workbook worker editor header interactions', () => {
   const mountLegacy = async () => {
     const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} />);
