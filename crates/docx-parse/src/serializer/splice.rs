@@ -18,21 +18,30 @@ const W_NAMESPACE: &str = "http://schemas.openxmlformats.org/wordprocessingml/20
 
 /// What the XML written for an unchanged paragraph must agree on with its source XML for the
 /// source to stand in for it: the same comment markers in order, at the same text offsets, the
-/// same permission markers, and no revision or note ID the source lacks. Source IDs the written XML lacks are kept, as are
-/// relationship IDs: the save keeps every source relationship.
+/// same permission markers, the same number of page and column breaks in the paragraph's own
+/// runs, and no revision or note ID the source lacks. Source IDs the written XML lacks are kept,
+/// as are relationship IDs: the save keeps every source relationship.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Marks {
     comments: Vec<(String, String, usize)>,
     permissions: Vec<(String, String)>,
+    page_breaks: usize,
+    column_breaks: usize,
     footnote_refs: usize,
     endnote_refs: usize,
     ids: BTreeMap<(&'static str, String), usize>,
 }
 
 impl Marks {
-    fn admit(&self, written: &Marks) -> bool {
+    /// `breaks` is false for a part where some page or column break sits outside a paragraph's
+    /// own runs: the editing model may keep such a break with another paragraph, so counts per
+    /// paragraph cannot decide there.
+    fn admit(&self, written: &Marks, breaks: bool) -> bool {
         self.comments == written.comments
             && self.permissions == written.permissions
+            && (!breaks
+                || (self.page_breaks == written.page_breaks
+                    && self.column_breaks == written.column_breaks))
             && self.footnote_refs >= written.footnote_refs
             && self.endnote_refs >= written.endnote_refs
             && written
@@ -65,17 +74,217 @@ pub(crate) const POSITIONED: [&str; 19] = [
     "m:oMath",
 ];
 
+/// Whether every page or column break in `xml` is a `w:br` directly in a paragraph's own run,
+/// whatever wraps the paragraph. A break under any other element, prefix or namespace binding
+/// is one the per-paragraph break counts do not see.
+fn breaks_on_own_runs(xml: &str) -> Option<bool> {
+    let local = |name: &str| name.rsplit(':').next().unwrap_or(name).to_owned();
+    let mut open: Vec<&str> = Vec::new();
+    for tag in tags(xml)? {
+        if tag.end {
+            open.pop();
+            continue;
+        }
+        if local(tag.name) == "br" {
+            let typed = tag.attributes.iter().any(|(key, range)| {
+                local(key) == "type"
+                    && unescaped(xml, range.clone())
+                        .is_some_and(|value| value == "page" || value == "column")
+            });
+            let own = tag.name == "w:br"
+                && open.ends_with(&["w:p", "w:r"])
+                && !open.iter().any(|name| name.starts_with("mc:"));
+            if typed && !own {
+                return Some(false);
+            }
+        }
+        if !tag.empty {
+            open.push(tag.name);
+        }
+    }
+    Some(true)
+}
+
+/// The page and column breaks at the start of `paragraph`'s content, in order, before any
+/// text or other run content; `None` when it is not a plain `w:p`.
+fn leading_breaks(paragraph: &str) -> Option<Vec<&'static str>> {
+    let mut kinds = Vec::new();
+    let mut open: Vec<&str> = Vec::new();
+    let mut skip = 0usize;
+    for tag in tags(paragraph)? {
+        if skip > 0 {
+            if tag.end {
+                skip -= 1;
+            } else if !tag.empty {
+                skip += 1;
+            }
+            continue;
+        }
+        if tag.end {
+            open.pop();
+            continue;
+        }
+        match (open.as_slice(), tag.name) {
+            ([], "w:p") | (["w:p"], "w:r") => {}
+            (["w:p"], "w:pPr") | (["w:p", "w:r"], "w:rPr") => {
+                skip = usize::from(!tag.empty);
+                continue;
+            }
+            (["w:p", "w:r"], "w:br") => {
+                match attribute(&tag, "w:type")
+                    .and_then(|range| unescaped(paragraph, range))
+                    .as_deref()
+                {
+                    Some("page") => kinds.push("page"),
+                    Some("column") => kinds.push("column"),
+                    _ => break,
+                }
+            }
+            ([], _) => return None,
+            _ => break,
+        }
+        if !tag.empty {
+            open.push(tag.name);
+        }
+    }
+    Some(kinds)
+}
+
+/// The offset in `paragraph` where its content starts: after its properties, before a first
+/// child that is a plain run, or before its end tag. `None` for any other first child.
+fn content_start(paragraph: &str) -> Option<usize> {
+    let tags = tags(paragraph)?;
+    let mut iter = tags.iter();
+    let first = iter.next()?;
+    if first.name != "w:p" || first.end || first.empty {
+        return None;
+    }
+    let mut next = iter.next()?;
+    if next.name == "w:pPr" && !next.end {
+        if !next.empty {
+            let mut depth = 1usize;
+            for tag in iter.by_ref() {
+                if tag.end {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                } else if !tag.empty {
+                    depth += 1;
+                }
+            }
+        }
+        next = iter.next()?;
+    }
+    ((next.name == "w:r" && !next.end) || (next.name == "w:p" && next.end))
+        .then_some(next.range.start)
+}
+
+/// The part's source with each page or column break the model moved to the start of an
+/// unchanged paragraph inserted there as its own run, and whether break counts then decide
+/// which unchanged paragraphs keep their source bytes. Nothing else of such a paragraph
+/// changes, so properties the model does not hold stay. Counts decide only when the part's
+/// breaks all sit in paragraphs' own runs and no paragraph holds fewer such breaks than its
+/// source or patch: the model can drop a break it does not place, so a loss is never taken
+/// as a removal. When they do not decide, the part keeps source paragraphs exactly as
+/// without the comparison.
+fn source_with_gained_breaks<'s>(
+    source: &'s str,
+    recorded: &RecordedParagraphs,
+    part: &S13SplicedPart,
+    patched: &BTreeMap<u32, String>,
+) -> Option<(Cow<'s, str>, bool)> {
+    let off = Some((Cow::Borrowed(source), false));
+    let inserted = placed(recorded, &part.inserted)?;
+    if !breaks_on_own_runs(source)?
+        || recorded
+            .written
+            .values()
+            .map(String::as_str)
+            .chain(inserted.iter().map(|(_, xml)| *xml))
+            .chain(patched.values().map(String::as_str))
+            .map(breaks_on_own_runs)
+            .collect::<Option<Vec<_>>>()?
+            .contains(&false)
+    {
+        return off;
+    }
+    let breaks = |xml: &str| marks(xml).map(|marks| (marks.page_breaks, marks.column_breaks));
+    let changed: BTreeSet<u32> = part.changed.iter().copied().collect();
+    let format_only: BTreeSet<u32> = part.format_only.iter().copied().collect();
+    let occurrences = paragraph_occurrences(source)?;
+    let mut insertions = Vec::new();
+    for (&ordinal, xml) in &recorded.written {
+        let occurrence = occurrences
+            .get(ordinal as usize)
+            .filter(|occurrence| occurrence.ordinal == ordinal)?;
+        let span = paragraph_span(source, occurrence)?;
+        let paragraph = &source[span.clone()];
+        let projected = breaks(xml)?;
+        let edited = changed.contains(&ordinal);
+        let kept = if edited {
+            let candidate = patched.get(&ordinal).map_or(xml.as_str(), String::as_str);
+            if format_only.contains(&ordinal) && !dropped_structure(paragraph, candidate).is_empty()
+            {
+                breaks(paragraph)?
+            } else if let Some(patch) = patched.get(&ordinal) {
+                breaks(patch)?
+            } else {
+                continue;
+            }
+        } else {
+            breaks(paragraph)?
+        };
+        if kept == projected {
+            continue;
+        }
+        if edited || kept != (0, 0) {
+            return off;
+        }
+        let Some(kinds) = leading_breaks(xml) else {
+            return off;
+        };
+        let Some(at) = content_start(paragraph) else {
+            return off;
+        };
+        if kinds.len() != projected.0 + projected.1 {
+            return off;
+        }
+        let runs: String = kinds
+            .iter()
+            .map(|kind| format!("<w:r><w:br w:type=\"{kind}\"/></w:r>"))
+            .collect();
+        insertions.push((span.start + at, runs));
+    }
+    if insertions.is_empty() {
+        return Some((Cow::Borrowed(source), true));
+    }
+    insertions.sort_by_key(|(at, _)| *at);
+    let mut written = source.to_owned();
+    for (at, runs) in insertions.into_iter().rev() {
+        written.insert_str(at, &runs);
+    }
+    Some((Cow::Owned(written), true))
+}
+
 fn marks(xml: &str) -> Option<Marks> {
     let mut marks = Marks::default();
     let mut offset = 0;
     let mut in_text = 0usize;
     let mut in_properties = 0usize;
     let mut previous = 0;
+    let mut open: Vec<&str> = Vec::new();
     for tag in tags(xml)? {
         if in_text > 0 {
             offset += unescaped(xml, previous..tag.range.start)?.chars().count();
         }
         previous = tag.range.end;
+        let own_run = open.as_slice() == ["w:p", "w:r"];
+        if tag.end {
+            open.pop();
+        } else if !tag.empty {
+            open.push(tag.name);
+        }
         let text = matches!(tag.name, "w:t" | "w:delText");
         let properties = tag.name.ends_with("Pr");
         if tag.end {
@@ -92,6 +301,17 @@ fn marks(xml: &str) -> Option<Marks> {
         }
         if in_properties == 0 && POSITIONED.contains(&tag.name) {
             offset += 1;
+        }
+        if own_run && tag.name == "w:br" {
+            match attribute(&tag, "w:type")
+                .and_then(|range| unescaped(xml, range))
+                .as_deref()
+            {
+                Some("page") => marks.page_breaks += 1,
+                Some("column") => marks.column_breaks += 1,
+                _ => {}
+            }
+            continue;
         }
         let id = || {
             attribute(&tag, "w:id")
@@ -1484,6 +1704,8 @@ pub(crate) fn splice_section_story_part(
     patched: &BTreeMap<u32, String>,
     replace_reasons: &mut Vec<String>,
 ) -> Option<String> {
+    let (source, _) = source_with_gained_breaks(source, recorded, part, patched)?;
+    let source: &str = &source;
     let spliced = splice_story_part_inner(
         source,
         serialized,
@@ -1515,6 +1737,8 @@ fn splice_story_part_inner(
     }) {
         return None;
     }
+    let (source, breaks) = source_with_gained_breaks(source, recorded, part, patched)?;
+    let source: &str = &source;
     let planned: BTreeSet<u32> = part.changed.iter().copied().collect();
     let mut patched_recording;
     let recorded = if patched.is_empty() {
@@ -1599,11 +1823,12 @@ fn splice_story_part_inner(
         }
         let paragraph = &source[spans[&ordinal].clone()];
         let wanted = marks(xml)?;
-        if marks(paragraph)?.admit(&wanted) {
+        if marks(paragraph)?.admit(&wanted, breaks) {
             continue;
         }
-        let rangeable = changed_comment_ranges(paragraph, xml)
-            .is_some_and(|patched| marks(&patched).is_some_and(|marks| marks.admit(&wanted)));
+        let rangeable = changed_comment_ranges(paragraph, xml).is_some_and(|patched| {
+            marks(&patched).is_some_and(|marks| marks.admit(&wanted, breaks))
+        });
         if rangeable {
             ranged.insert(ordinal);
         } else {
@@ -2060,6 +2285,8 @@ pub(crate) fn replace_story_part(
     {
         return None;
     }
+    let (source, breaks) = source_with_gained_breaks(source, recorded, part, patched)?;
+    let source: &str = &source;
     let source_assignments = assignments
         .iter()
         .filter(|(ordinal, _)| !changed.contains(*ordinal) || !patched.contains_key(*ordinal))
@@ -2097,7 +2324,7 @@ pub(crate) fn replace_story_part(
         }
         let range = span(ordinal)?;
         let paragraph = &source[range.clone()];
-        if changed.contains(&ordinal) || !marks(paragraph)?.admit(&marks(xml)?) {
+        if changed.contains(&ordinal) || !marks(paragraph)?.admit(&marks(xml)?, breaks) {
             let xml = if let Some(patched) = patched.get(&ordinal) {
                 let id = assignments
                     .get(&ordinal)
@@ -2196,6 +2423,8 @@ pub(crate) fn splice_source_direct(
     {
         return None;
     }
+    let (source, breaks) = source_with_gained_breaks(source, recorded, part, patched)?;
+    let source: &str = &source;
     if !crate::xml::reads_as_written(source.as_bytes()) {
         return None;
     }
@@ -2238,7 +2467,7 @@ pub(crate) fn splice_source_direct(
         }
         retained.comments.clear();
         written.comments.clear();
-        if !retained.admit(&written) {
+        if !retained.admit(&written, breaks) {
             return None;
         }
     }
@@ -4188,6 +4417,349 @@ mod tests {
         assert!(splice(&source, &[(0, moved)], &[]).is_some_and(|xml| xml.contains(moved)));
         let same = "<w:p w14:paraId=\"0000000A\"><w:commentRangeStart w:id=\"1\"/><w:r><w:t>a</w:t><w:t>b</w:t></w:r><w:commentRangeEnd w:id=\"1\"/></w:p>";
         assert_eq!(splice(&source, &[(0, same)], &[]), Some(source.clone()));
+    }
+
+    #[test]
+    fn rewrites_an_unchanged_paragraph_that_gains_a_page_or_column_break() {
+        let source = format!(
+            "{ROOT}<w:body><w:p w14:paraId=\"0000000A\"><w:r><w:t>a</w:t></w:r></w:p><w:p w14:paraId=\"0000000B\"><w:r><w:t>b</w:t></w:r></w:p></w:body></w:document>"
+        );
+        for kind in ["page", "column"] {
+            let gained = format!(
+                "<w:p w14:paraId=\"0000000B\"><w:r><w:br w:type=\"{kind}\"/><w:t>b</w:t></w:r></w:p>"
+            );
+            let edited = "<w:p w14:paraId=\"0000000A\"><w:r><w:t>ax</w:t></w:r></w:p>";
+            let spliced = splice(&source, &[(0, edited), (1, &gained)], &[0]).unwrap();
+            let inserted = format!(
+                "<w:p w14:paraId=\"0000000B\"><w:r><w:br w:type=\"{kind}\"/></w:r><w:r><w:t>b</w:t></w:r></w:p>"
+            );
+            assert!(spliced.contains(&inserted), "{kind}: {spliced}");
+            assert!(spliced.contains(edited));
+        }
+        let with_break = format!(
+            "{ROOT}<w:body><w:p w14:paraId=\"0000000A\"><w:r><w:t>a</w:t><w:br w:type=\"page\"/></w:r></w:p></w:body></w:document>"
+        );
+        let lost = "<w:p w14:paraId=\"0000000A\"><w:r><w:t>a</w:t></w:r></w:p>";
+        assert_eq!(
+            splice(&with_break, &[(0, lost)], &[]),
+            Some(with_break.clone())
+        );
+        let moved =
+            "<w:p w14:paraId=\"0000000A\"><w:r><w:br w:type=\"page\"/><w:t>a</w:t></w:r></w:p>";
+        assert_eq!(
+            splice(&with_break, &[(0, moved)], &[]),
+            Some(with_break.clone())
+        );
+        let rendered = "<w:p w14:paraId=\"0000000A\"><w:r><w:t>a</w:t></w:r><w:r><w:br w:type=\"page\"/><w:lastRenderedPageBreak/></w:r></w:p>";
+        assert_eq!(
+            splice(&with_break, &[(0, rendered)], &[]),
+            Some(with_break.clone())
+        );
+        let line = "<w:p w14:paraId=\"0000000A\"><w:r><w:t>a</w:t><w:br/><w:br w:type=\"textWrapping\"/><w:br w:type=\"page\"/></w:r></w:p>";
+        assert_eq!(
+            splice(&with_break, &[(0, line)], &[]),
+            Some(with_break.clone())
+        );
+        let nested = format!(
+            "{ROOT}<w:body><w:p w14:paraId=\"0000000A\"><w:hyperlink w:anchor=\"x\"><w:r><w:br w:type=\"page\"/><w:t>a</w:t></w:r></w:hyperlink></w:p></w:body></w:document>"
+        );
+        let unmodelled = "<w:p w14:paraId=\"0000000A\"><w:hyperlink w:anchor=\"x\"><w:r><w:t>a</w:t></w:r></w:hyperlink></w:p>";
+        assert_eq!(
+            splice(&nested, &[(0, unmodelled)], &[]),
+            Some(nested.clone())
+        );
+    }
+
+    #[test]
+    fn finds_page_and_column_breaks_outside_a_paragraphs_own_runs() {
+        for own in [
+            "<w:p><w:r><w:t>a</w:t><w:br w:type=\"page\"/></w:r></w:p>",
+            "<w:p><w:r><w:br w:type=\"page\"></w:br></w:r></w:p>",
+            "<w:p><w:r><w:br w:type='column'/></w:r></w:p>",
+            "<w:p><!-- <w:hyperlink> --><?pi <w:sdt>?><w:r><w:br w:type=\"column\"/></w:r></w:p>",
+            "<w:p><w:hyperlink><w:r><w:br/><w:br w:type=\"textWrapping\"/></w:r></w:hyperlink></w:p>",
+            "<w:p><w:r><w:pict><w:txbxContent><w:p><w:r><w:br w:type=\"page\"/></w:r></w:p></w:txbxContent></w:pict></w:r></w:p>",
+        ] {
+            assert_eq!(breaks_on_own_runs(own), Some(true), "{own}");
+        }
+        for wrapper in [
+            ("<w:hyperlink w:anchor=\"x\">", "</w:hyperlink>"),
+            ("<w:smartTag w:element=\"x\">", "</w:smartTag>"),
+            ("<w:customXml w:element=\"x\">", "</w:customXml>"),
+            ("<w:sdt><w:sdtContent>", "</w:sdtContent></w:sdt>"),
+            ("<w:ins w:id=\"1\">", "</w:ins>"),
+            ("<w:del w:id=\"1\">", "</w:del>"),
+            ("<w:fldSimple w:instr=\" PAGE \">", "</w:fldSimple>"),
+            ("<w:dir w:val=\"rtl\">", "</w:dir>"),
+            (
+                "<mc:AlternateContent><mc:Choice Requires=\"w14\">",
+                "</mc:Choice></mc:AlternateContent>",
+            ),
+        ] {
+            for brk in ["<w:br w:type=\"page\"/>", "<w:br w:type=\"page\"></w:br>"] {
+                let xml = format!("<w:p>{}<w:r>{brk}</w:r>{}</w:p>", wrapper.0, wrapper.1);
+                assert_eq!(breaks_on_own_runs(&xml), Some(false), "{xml}");
+            }
+        }
+        for stray in [
+            "<w:p><w:r><mc:AlternateContent><mc:Fallback><w:pict><w:txbxContent><w:p><w:r><w:br w:type=\"page\"/></w:r></w:p></w:txbxContent></w:pict></mc:Fallback></mc:AlternateContent></w:r></w:p>",
+            "<x:p><x:r><x:br x:type=\"page\"/></x:r></x:p>",
+            "<p><r><br type=\"column\"/></r></p>",
+            "<w:body><w:br w:type=\"page\"/></w:body>",
+        ] {
+            assert_eq!(breaks_on_own_runs(stray), Some(false), "{stray}");
+        }
+    }
+
+    #[test]
+    fn a_part_with_a_break_outside_own_runs_keeps_unchanged_paragraphs_without_counting_breaks() {
+        let wrappers: [(&str, &str); 7] = [
+            ("<w:hyperlink w:anchor=\"x\">", "</w:hyperlink>"),
+            ("<w:smartTag w:element=\"x\">", "</w:smartTag>"),
+            ("<w:customXml w:element=\"x\">", "</w:customXml>"),
+            ("<w:sdt><w:sdtContent>", "</w:sdtContent></w:sdt>"),
+            (
+                "<w:ins w:id=\"9\" w:author=\"A\" w:date=\"2026-01-01T00:00:00Z\">",
+                "</w:ins>",
+            ),
+            ("<w:fldSimple w:instr=\" PAGE \">", "</w:fldSimple>"),
+            ("<w:hyperlink w:anchor=\"y\">", "</w:hyperlink>"),
+        ];
+        let edited = "<w:p w14:paraId=\"0000000A\"><w:r><w:t>ax</w:t></w:r></w:p>";
+        let next = "<w:p w14:paraId=\"0000000C\"><w:r><w:t>n</w:t></w:r></w:p>";
+        let handed =
+            "<w:p w14:paraId=\"0000000C\"><w:r><w:br w:type=\"page\"/><w:t>n</w:t></w:r></w:p>";
+        for (index, (open, close)) in wrappers.into_iter().enumerate() {
+            let brk = if index == 6 {
+                "<w:br w:type=\"page\"></w:br>"
+            } else {
+                "<w:br w:type=\"page\"/>"
+            };
+            let wrapped = |inner: &str| {
+                format!(
+                    "<w:p w14:paraId=\"0000000B\">{open}<w:r>{inner}<w:t>b</w:t></w:r>{close}</w:p>"
+                )
+            };
+            let kept = wrapped(brk);
+            let source = format!(
+                "{ROOT}<w:body><w:p w14:paraId=\"0000000A\"><w:r><w:t>a</w:t></w:r></w:p>{kept}{next}</w:body></w:document>"
+            );
+            let projected = wrapped("");
+            let spliced = splice(&source, &[(0, edited), (1, &projected), (2, handed)], &[0])
+                .unwrap_or_else(|| panic!("{open}: no splice"));
+            assert_eq!(
+                spliced,
+                source.replace(
+                    "<w:p w14:paraId=\"0000000A\"><w:r><w:t>a</w:t></w:r></w:p>",
+                    edited
+                ),
+                "{open}"
+            );
+        }
+        let own = format!(
+            "{ROOT}<w:body><w:p w14:paraId=\"0000000A\"><w:r><w:t>a</w:t></w:r></w:p><w:p w14:paraId=\"0000000B\"><w:r><w:t>b</w:t><w:br w:type=\"page\"/></w:r></w:p>{next}</w:body></w:document>"
+        );
+        let moved = "<w:p w14:paraId=\"0000000B\"><w:r><w:t>b</w:t></w:r></w:p>";
+        assert_eq!(
+            splice(&own, &[(0, edited), (1, moved), (2, handed)], &[0]),
+            Some(own.replace(
+                "<w:p w14:paraId=\"0000000A\"><w:r><w:t>a</w:t></w:r></w:p>",
+                edited
+            ))
+        );
+    }
+
+    /// Saves `source` through each of the three splice paths with `written` as the model's
+    /// paragraphs and `patched` as the precise patches of the changed ones.
+    fn splice_paths(
+        source: &str,
+        written: &[(u32, &str)],
+        changed: &[u32],
+        removed: &[u32],
+        patched: &[(u32, &str)],
+    ) -> [Option<String>; 3] {
+        let mut recorded = RecordedParagraphs::default();
+        for (ordinal, xml) in written {
+            recorded.written.insert(*ordinal, (*xml).to_owned());
+            recorded.order.push(Some(*ordinal));
+        }
+        let body: String = written.iter().map(|(_, xml)| *xml).collect();
+        let serialized = format!("{SERIALIZED_ROOT}<w:body>{body}</w:body></w:document>");
+        let part = S13SplicedPart {
+            format_only: Vec::new(),
+            part: "word/document.xml".to_owned(),
+            sha256: String::new(),
+            paragraphs: written.iter().map(|(ordinal, _)| *ordinal).collect(),
+            changed: changed.to_vec(),
+            inserted: Vec::new(),
+            removed: removed.to_vec(),
+            paragraph_patches: Vec::new(),
+            legacy_paragraphs: Vec::new(),
+            table_patches: Vec::new(),
+        };
+        let patched: BTreeMap<u32, String> = patched
+            .iter()
+            .map(|(ordinal, xml)| (*ordinal, (*xml).to_owned()))
+            .collect();
+        let none = BTreeMap::new();
+        [
+            splice_story_part(
+                source,
+                &serialized,
+                &recorded,
+                &part,
+                &none,
+                &patched,
+                &mut Vec::new(),
+            ),
+            replace_story_part(
+                source,
+                &serialized,
+                &recorded,
+                &part,
+                &none,
+                &patched,
+                &mut Vec::new(),
+            ),
+            splice_source_direct(
+                source,
+                &serialized,
+                &recorded,
+                &part,
+                &none,
+                &patched,
+                &mut Vec::new(),
+            ),
+        ]
+    }
+
+    #[test]
+    fn a_patch_that_keeps_a_break_the_model_moved_on_keeps_the_part_as_before() {
+        let source = format!(
+            "{ROOT}<w:body><w:p w14:paraId=\"0000000B\"><w:hyperlink w:anchor=\"x\"><w:r><w:t>h</w:t></w:r></w:hyperlink><w:r><w:t>AB</w:t><w:br w:type=\"page\"/></w:r></w:p><w:p w14:paraId=\"0000000C\"><w:r><w:t>n</w:t></w:r></w:p></w:body></w:document>"
+        );
+        let patch = "<w:p w14:paraId=\"0000000B\"><w:hyperlink w:anchor=\"x\"><w:r><w:t>h</w:t></w:r></w:hyperlink><w:r><w:t>AxB</w:t><w:br w:type=\"page\"/></w:r></w:p>";
+        let projected = "<w:p w14:paraId=\"0000000B\"><w:hyperlink w:anchor=\"x\"><w:r><w:t>h</w:t></w:r></w:hyperlink><w:r><w:t>AxB</w:t></w:r></w:p>";
+        let handed =
+            "<w:p w14:paraId=\"0000000C\"><w:r><w:br w:type=\"page\"/><w:t>n</w:t></w:r></w:p>";
+        let mut spliced = 0;
+        for (path, saved) in splice_paths(
+            &source,
+            &[(0, projected), (1, handed)],
+            &[0],
+            &[],
+            &[(0, patch)],
+        )
+        .into_iter()
+        .enumerate()
+        {
+            let Some(saved) = saved else { continue };
+            spliced += 1;
+            assert_eq!(
+                saved.matches("w:type=\"page\"").count(),
+                1,
+                "path {path}: {saved}"
+            );
+            assert!(
+                saved.contains("<w:p w14:paraId=\"0000000C\"><w:r><w:t>n</w:t></w:r></w:p>"),
+                "path {path}: {saved}"
+            );
+        }
+        assert!(spliced > 0);
+    }
+
+    #[test]
+    fn a_patch_that_keeps_a_break_the_model_lost_keeps_the_part_as_before() {
+        let source = format!(
+            "{ROOT}<w:body><w:p w14:paraId=\"0000000B\"><w:r><w:t>AC</w:t><w:br w:type=\"page\"/></w:r></w:p><w:p w14:paraId=\"0000000C\"><w:r><w:t>N</w:t></w:r></w:p></w:body></w:document>"
+        );
+        let patch = "<w:p w14:paraId=\"0000000B\"><w:r><w:t>AC</w:t><w:br w:type=\"page\"/><w:t>N</w:t></w:r></w:p>";
+        let projected = "<w:p w14:paraId=\"0000000B\"><w:r><w:t>ACN</w:t></w:r></w:p>";
+        let mut spliced = 0;
+        for (path, saved) in splice_paths(&source, &[(0, projected)], &[0], &[1], &[(0, patch)])
+            .into_iter()
+            .enumerate()
+        {
+            let Some(saved) = saved else { continue };
+            spliced += 1;
+            assert!(saved.contains(patch), "path {path}: {saved}");
+        }
+        assert!(spliced > 0);
+    }
+
+    #[test]
+    fn a_break_lost_from_a_paragraph_the_model_cannot_place_it_in_stays() {
+        let kept = "<w:p w14:paraId=\"0000000B\"><w:hyperlink w:anchor=\"x\"><w:r><w:t>h</w:t></w:r></w:hyperlink><w:r><w:t>A</w:t><w:br w:type=\"page\"/></w:r></w:p>";
+        let source = format!(
+            "{ROOT}<w:body><w:p w14:paraId=\"0000000A\"><w:r><w:t>a</w:t></w:r></w:p>{kept}</w:body></w:document>"
+        );
+        let edited = "<w:p w14:paraId=\"0000000A\"><w:r><w:t>ax</w:t></w:r></w:p>";
+        let dropped = "<w:p w14:paraId=\"0000000B\"><w:hyperlink w:anchor=\"x\"><w:r><w:t>h</w:t></w:r></w:hyperlink><w:r><w:t>A</w:t></w:r></w:p>";
+        let saved = splice(&source, &[(0, edited), (1, dropped)], &[0]).expect("saved");
+        assert!(saved.contains(kept), "{saved}");
+    }
+
+    #[test]
+    fn a_gained_break_is_inserted_into_the_source_paragraph() {
+        let edited = "<w:p w14:paraId=\"0000000A\"><w:r><w:t>ax</w:t></w:r></w:p>";
+        let source_of = |next: &str| {
+            format!(
+                "{ROOT}<w:body><w:p w14:paraId=\"0000000A\"><w:r><w:t>a</w:t></w:r></w:p>{next}</w:body></w:document>"
+            )
+        };
+        let vertical = "<w:p w14:paraId=\"0000000B\"><w:pPr><w:textDirection w:val=\"tbRl\"/></w:pPr><w:r><w:t>b</w:t></w:r></w:p>";
+        let gained = "<w:p w14:paraId=\"0000000B\"><w:pPr><w:rPr><w:b/></w:rPr></w:pPr><w:r><w:br w:type=\"page\"/><w:br w:type=\"column\"/><w:t>b</w:t></w:r></w:p>";
+        let expected = vertical.replace(
+            "</w:pPr>",
+            "</w:pPr><w:r><w:br w:type=\"page\"/></w:r><w:r><w:br w:type=\"column\"/></w:r>",
+        );
+        let mut spliced = 0;
+        for saved in splice_paths(
+            &source_of(vertical),
+            &[(0, edited), (1, gained)],
+            &[0],
+            &[],
+            &[],
+        )
+        .into_iter()
+        .flatten()
+        {
+            spliced += 1;
+            assert!(saved.contains(&expected), "{saved}");
+            assert_eq!(saved.matches("w:type=\"page\"").count(), 1, "{saved}");
+        }
+        assert!(spliced > 0);
+        for properties in [
+            "<w:pPr><w:pStyle w:val=\"Heading1\"/><w:rPr><w:b/><w:color w:val=\"FF0000\"/></w:rPr></w:pPr>",
+            "<w:pPr><mc:AlternateContent><mc:Choice Requires=\"w14\"><w:jc w:val=\"center\"/></mc:Choice><mc:Fallback><w:jc w:val=\"left\"/></mc:Fallback></mc:AlternateContent><w:spacing w:after=\"0\"/></w:pPr>",
+            "<w:pPr/>",
+        ] {
+            let next =
+                format!("<w:p w14:paraId=\"0000000B\">{properties}<w:r><w:t>b</w:t></w:r></w:p>");
+            let projected = format!(
+                "<w:p w14:paraId=\"0000000B\">{properties}<w:r><w:br w:type=\"page\"/><w:t>b</w:t></w:r></w:p>"
+            );
+            let expected = format!(
+                "<w:p w14:paraId=\"0000000B\">{properties}<w:r><w:br w:type=\"page\"/></w:r><w:r><w:t>b</w:t></w:r></w:p>"
+            );
+            let saved =
+                splice(&source_of(&next), &[(0, edited), (1, &projected)], &[0]).expect(properties);
+            assert!(saved.contains(&expected), "{properties}: {saved}");
+            assert_eq!(saved.matches("w:type=\"page\"").count(), 1, "{properties}");
+        }
+        let empty = "<w:p w14:paraId=\"0000000B\"/>";
+        let marked = "<w:p w14:paraId=\"0000000B\"><w:bookmarkStart w:id=\"1\" w:name=\"m\"/><w:r><w:t>b</w:t></w:r><w:bookmarkEnd w:id=\"1\"/></w:p>";
+        let plain = "<w:p w14:paraId=\"0000000B\"><w:r><w:t>b</w:t></w:r></w:p>";
+        let trailing =
+            "<w:p w14:paraId=\"0000000B\"><w:r><w:t>b</w:t><w:br w:type=\"page\"/></w:r></w:p>";
+        for (next, written) in [(empty, gained), (marked, gained), (plain, trailing)] {
+            let source = source_of(next);
+            assert_eq!(
+                splice(&source, &[(0, edited), (1, written)], &[0]),
+                Some(source.replace("<w:t>a</w:t>", "<w:t>ax</w:t>")),
+                "{next} written as {written}"
+            );
+        }
     }
 
     #[test]
