@@ -392,8 +392,11 @@ for (const [index, lost] of LOST.entries()) {
 const INNER_LOST: Array<{ name: string; key: string; edit: (session: YrsSession, story: string, first: boolean) => void }> = [
   { name: 'its properties', key: 'tblPr', edit: (session, story, first) =>
     session.setTableProperties({ story, tableIndex: 0 }, first ? { width: 4000, widthType: 'dxa' } : { justification: 'center' }) },
-  { name: 'its grid', key: 'grid', edit: (session, story, first) =>
-    session.applyRawOps(story, [{ op: 'setEmbedAttr', index: 0, key: 'grid', value: first ? [2000, 2340] : [2340, 3000] }]) },
+  { name: 'its grid', key: 'grid', edit: (session, story, first) => {
+    // Raw ops do not begin undo tracking; an empty local update does, so the grid write below becomes this peer's undo step.
+    session.applyLocalUpdate(session.encodeStateAsUpdate(session.encodeStateVector()));
+    session.applyRawOps(story, [{ op: 'setEmbedAttr', index: 0, key: 'grid', value: first ? [2000, 2340] : [2340, 3000] }]);
+  } },
 ];
 
 for (const [index, lost] of INNER_LOST.entries()) {
