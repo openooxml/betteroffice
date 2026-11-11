@@ -26604,6 +26604,225 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         );
     }
 
+    type NoteKey = (String, i64);
+
+    /// Lays out one paragraph per entry of `paragraphs`, each holding its note references, with a
+    /// next-page section break after each paragraph in `section_breaks`. Returns the body's note
+    /// marks in document order and the label each note area gives each note.
+    fn note_ordinal_layout(
+        client_id: u64,
+        paragraphs: &[&[(&str, f64)]],
+        section_breaks: &[usize],
+        regions: serde_json::Value,
+    ) -> (Vec<(NoteKey, String)>, BTreeMap<NoteKey, String>) {
+        const FONT: &[u8] =
+            include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        docx_layout::clear_measure_fonts();
+        let font_id = docx_layout::register_measure_font(FONT).unwrap();
+        let engine = EngineSession::new(client_id);
+        engine
+            .doc()
+            .create_story("body", "", "Normal", "left")
+            .unwrap();
+        let mut ops = vec![crate::RawOp::Delete { index: 0, len: 1 }];
+        let mut contents = Vec::new();
+        let mut cursor = 0;
+        for (paragraph, refs) in paragraphs.iter().enumerate() {
+            for &(kind, id) in refs.iter() {
+                let (key, prefix) = if kind == "endnote" {
+                    ("endnoteRefId", "en")
+                } else {
+                    ("footnoteRefId", "fn")
+                };
+                ops.push(crate::RawOp::Insert {
+                    index: cursor,
+                    text: "ab".to_owned(),
+                    attrs: Attrs::new(),
+                });
+                ops.push(crate::RawOp::InsertEmbed {
+                    index: cursor + 2,
+                    kind: "noteRef".to_owned(),
+                    payload: vec![(key.to_owned(), Any::Number(id))],
+                    attrs: Attrs::new(),
+                });
+                cursor += 3;
+                engine
+                    .doc()
+                    .create_story(format!("{prefix}:{id}").as_str(), "Note", "Normal", "left")
+                    .unwrap();
+                contents.push(json!({"id": id as i64, "noteKind": kind, "height": 0}));
+            }
+            ops.push(crate::RawOp::InsertEmbed {
+                index: cursor,
+                kind: "pilcrow".to_owned(),
+                payload: vec![("paraId".to_owned(), Any::from(format!("note-p{paragraph}")))],
+                attrs: Attrs::new(),
+            });
+            cursor += 1;
+        }
+        engine
+            .doc()
+            .apply_raw_ops("body", ops, &crate::EditCtx::local("", "2026-07-18T00:00:00Z"))
+            .unwrap();
+        let body = engine.doc().paragraphs("body").unwrap();
+        for &index in section_breaks {
+            engine
+                .doc()
+                .set_paragraph_attr(
+                    &body[index].para_id,
+                    "sectionBreakType",
+                    Any::from("nextPage"),
+                )
+                .unwrap();
+        }
+        let request = json!({
+            "bodyStory": "body",
+            "regions": regions,
+            "notes": {"contents": contents},
+            "measurement": {
+                "fontChains": {"calibri|0|0": [font_id]},
+                "defaults": {"fontSize": 11, "fontFamily": "Calibri"},
+                "authoritativeShaping": true
+            },
+            "renderEnv": {}
+        });
+        let output: serde_json::Value = serde_json::from_str(
+            &engine
+                .layout_document_with_regions_json(&request.to_string())
+                .unwrap(),
+        )
+        .unwrap();
+        let mut labels = BTreeMap::new();
+        for page in output["layout"]["pages"].as_array().unwrap() {
+            for area in page["noteAreas"].as_array().into_iter().flatten() {
+                for note in area["notes"].as_array().into_iter().flatten() {
+                    labels.insert(
+                        (
+                            note["kind"].as_str().unwrap().to_owned(),
+                            note["id"].as_i64().unwrap(),
+                        ),
+                        note["displayLabel"].as_str().unwrap().to_owned(),
+                    );
+                }
+            }
+        }
+        let pagination = engine.pagination.borrow();
+        let marks = pagination
+            .input
+            .as_ref()
+            .unwrap()
+            .measured
+            .iter()
+            .filter_map(|measured| match &measured.block {
+                LayoutBlock::Paragraph(paragraph) => Some(paragraph.runs.iter()),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|run| match run {
+                Run::Text(text) => {
+                    let key = match (text.fmt.footnote_ref_id, text.fmt.endnote_ref_id) {
+                        (Some(id), _) => ("footnote".to_owned(), id as i64),
+                        (None, Some(id)) => ("endnote".to_owned(), id as i64),
+                        (None, None) => return None,
+                    };
+                    Some((key, text.text.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        (marks, labels)
+    }
+
+    fn assert_marks_follow_notes(
+        (marks, labels): (Vec<(NoteKey, String)>, BTreeMap<NoteKey, String>),
+        expected: &[&str],
+    ) {
+        let texts: Vec<&str> = marks.iter().map(|(_, text)| text.as_str()).collect();
+        assert_eq!(texts, expected);
+        for (key, text) in &marks {
+            assert_eq!(labels.get(key), Some(text), "{key:?}");
+        }
+    }
+
+    fn note_ordinal_regions(note_settings: serde_json::Value) -> serde_json::Value {
+        json!({
+            "noteSettings": note_settings,
+            "sections": [{
+                "sectionId": "main",
+                "pageSize": {"w": 300, "h": 200},
+                "margins": {"top": 20, "right": 20, "bottom": 20, "left": 20}
+            }]
+        })
+    }
+
+    #[test]
+    fn a_lone_note_marks_the_body_with_its_ordinal() {
+        for (client_id, kind) in [(7311, "footnote"), (7312, "endnote")] {
+            assert_marks_follow_notes(
+                note_ordinal_layout(
+                    client_id,
+                    &[&[(kind, 2.0)]],
+                    &[],
+                    note_ordinal_regions(json!({})),
+                ),
+                &["1"],
+            );
+        }
+    }
+
+    #[test]
+    fn notes_out_of_id_order_mark_the_body_in_document_order() {
+        for (client_id, kind) in [(7313, "footnote"), (7314, "endnote")] {
+            assert_marks_follow_notes(
+                note_ordinal_layout(
+                    client_id,
+                    &[&[(kind, 7.0), (kind, 3.0)], &[(kind, 5.0)]],
+                    &[],
+                    note_ordinal_regions(json!({})),
+                ),
+                &["1", "2", "3"],
+            );
+        }
+    }
+
+    #[test]
+    fn note_number_format_and_start_reach_the_body_mark() {
+        for (client_id, kind) in [(7315, "footnote"), (7316, "endnote")] {
+            assert_marks_follow_notes(
+                note_ordinal_layout(
+                    client_id,
+                    &[&[(kind, 4.0), (kind, 2.0)]],
+                    &[],
+                    note_ordinal_regions(json!({kind: {"numFmt": "lowerRoman", "numStart": 3}})),
+                ),
+                &["iii", "iv"],
+            );
+        }
+    }
+
+    #[test]
+    fn footnotes_restarting_each_section_mark_the_body_per_section() {
+        let section = |id: &str| {
+            json!({
+                "sectionId": id,
+                "pageSize": {"w": 300, "h": 200},
+                "margins": {"top": 20, "right": 20, "bottom": 20, "left": 20}
+            })
+        };
+        assert_marks_follow_notes(
+            note_ordinal_layout(
+                7317,
+                &[&[("footnote", 2.0), ("footnote", 3.0)], &[("footnote", 4.0)]],
+                &[0],
+                json!({
+                    "noteSettings": {"footnote": {"numRestart": "eachSect"}},
+                    "sections": [section("first"), section("second")]
+                }),
+            ),
+            &["1", "2", "1"],
+        );
+    }
+
     fn paragraph_pagination_input(first_text: &str, shifted_suffix: bool) -> String {
         let measured: Vec<_> = (0..15)
             .map(|index| {
