@@ -34,6 +34,18 @@ thread_local! {
     static FAILED: Cell<usize> = const { Cell::new(0) };
     static LIMIT: Cell<usize> = const { Cell::new(NO_LIMIT) };
     static OVER: Cell<bool> = const { Cell::new(false) };
+    static SHARE: LimitShare = const { LimitShare };
+}
+
+/// Gives up an exiting thread's share in keeping counting on, if it still holds a limit.
+struct LimitShare;
+
+impl Drop for LimitShare {
+    fn drop(&mut self) {
+        if limit().is_some() {
+            set_limit(None);
+        }
+    }
 }
 
 pub(crate) struct CountingAllocator;
@@ -52,12 +64,16 @@ pub(crate) fn enabled() -> bool {
 }
 
 /// Sets the calling thread's limit on live bytes; `None` removes it. Counting is on while any
-/// thread has a limit. A thread that had none, in a process where no host asked for counting,
-/// counts from zero.
+/// thread has a limit, and a thread that exits with one gives it up. When this call is what turns
+/// counting on, the thread counts from zero; when counting was already on, it keeps the bytes
+/// measured so far.
 pub(crate) fn set_limit(bytes: Option<usize>) {
     let limit = bytes.unwrap_or(NO_LIMIT);
-    let had = LIMIT.try_with(|slot| slot.replace(limit)).unwrap_or(NO_LIMIT) != NO_LIMIT;
     let has = limit != NO_LIMIT;
+    if has {
+        let _ = SHARE.try_with(|_| ());
+    }
+    let had = LIMIT.try_with(|slot| slot.replace(limit)).unwrap_or(NO_LIMIT) != NO_LIMIT;
     let _ = OVER.try_with(|over| over.set(false));
     let mut switch = SWITCH.lock().unwrap_or_else(|error| error.into_inner());
     match (had, has) {
@@ -65,10 +81,11 @@ pub(crate) fn set_limit(bytes: Option<usize>) {
         (true, false) => switch.1 = switch.1.saturating_sub(1),
         _ => {}
     }
-    if has && !had && !switch.0 {
+    let counting = switch.0 || switch.1 > 0;
+    if counting && !COUNTING.load(Ordering::Relaxed) {
         let _ = LIVE.try_with(|live| live.set(0));
     }
-    COUNTING.store(switch.0 || switch.1 > 0, Ordering::Relaxed);
+    COUNTING.store(counting, Ordering::Relaxed);
 }
 
 /// The calling thread's limit.
@@ -93,6 +110,12 @@ pub(crate) fn begin_call(outermost: bool) -> bool {
     }
     let _ = OVER.try_with(|over| over.set(false));
     true
+}
+
+/// Forgets a crossing made by a call that started within the limit and is refusing without doing
+/// engine work, so the refusal is not reported as running out of memory.
+pub(crate) fn forget_crossing() {
+    let _ = OVER.try_with(|over| over.set(false));
 }
 
 /// The error message of a call that ran past the limit, with the allocation that crossed it.
@@ -216,6 +239,14 @@ static ALLOCATOR: CountingAllocator = CountingAllocator;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::MutexGuard;
+
+    static LIMITS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Serialises the tests that change how many threads hold a limit.
+    fn limits() -> MutexGuard<'static, ()> {
+        LIMITS.lock().unwrap_or_else(|error| error.into_inner())
+    }
 
     #[test]
     fn counts_allocations_reallocations_and_frees() {
@@ -331,9 +362,10 @@ mod tests {
 
     #[test]
     fn crossing_the_limit_flags_the_thread_and_keeps_the_allocation() {
+        let _limits = limits();
         set_limit(Some(1 << 40));
-        let limit = live() + 1024;
-        set_limit(Some(limit));
+        let cap = live() + 1024;
+        set_limit(Some(cap));
         let layout = Layout::from_size_align(4096, 8).unwrap();
         unsafe {
             let pointer = CountingAllocator.alloc(layout);
@@ -345,7 +377,7 @@ mod tests {
         assert!(over_limit());
         assert_eq!(
             exceeded(),
-            format!("{EXCEEDED} (4096 bytes over a {limit}-byte budget)")
+            format!("{EXCEEDED} (4096 bytes over a {cap}-byte budget)")
         );
         assert!(!begin_call(false));
         assert!(begin_call(true));
@@ -356,6 +388,7 @@ mod tests {
 
     #[test]
     fn an_outermost_call_still_over_the_limit_is_refused() {
+        let _limits = limits();
         set_limit(Some(1 << 40));
         let block = vec![1u8; 4096];
         set_limit(Some(live() - 1024));
@@ -371,6 +404,7 @@ mod tests {
 
     #[test]
     fn a_reallocation_past_the_limit_flags_the_thread_and_moves_the_block() {
+        let _limits = limits();
         set_limit(Some(1 << 40));
         set_limit(Some(live() + 1024));
         let layout = Layout::from_size_align(64, 8).unwrap();
@@ -388,6 +422,7 @@ mod tests {
 
     #[test]
     fn clearing_the_limit_clears_the_flag() {
+        let _limits = limits();
         set_limit(Some(0));
         let block = vec![1u8; 16];
         assert!(over_limit());
@@ -410,6 +445,7 @@ mod tests {
 
     #[test]
     fn a_limit_starts_counting_and_clearing_it_keeps_counting_a_host_asked_for() {
+        let _limits = limits();
         set_limit(Some(1 << 40));
         assert!(enabled());
         enable();
@@ -419,6 +455,7 @@ mod tests {
 
     #[test]
     fn a_limit_belongs_to_the_thread_that_set_it() {
+        let _limits = limits();
         set_limit(Some(0));
         let (other_limit, other_over) = std::thread::spawn(|| {
             let block = vec![1u8; 4096];
@@ -431,5 +468,37 @@ mod tests {
         assert_eq!(other_limit, None);
         assert!(!other_over);
         set_limit(None);
+    }
+
+    #[test]
+    fn a_thread_that_exits_with_a_limit_gives_up_its_share() {
+        let _limits = limits();
+        let before = SWITCH.lock().unwrap_or_else(|error| error.into_inner()).1;
+        let counted_there = std::thread::spawn(|| {
+            set_limit(Some(1 << 40));
+            enabled()
+        })
+        .join()
+        .unwrap();
+        assert!(counted_there);
+        let switch = SWITCH.lock().unwrap_or_else(|error| error.into_inner());
+        assert_eq!(switch.1, before);
+        assert_eq!(enabled(), switch.0 || switch.1 > 0);
+        if !switch.0 && before == 0 {
+            assert!(!enabled());
+        }
+    }
+
+    #[test]
+    fn a_limit_set_while_counting_is_on_keeps_the_bytes_already_counted() {
+        let _limits = limits();
+        enable();
+        let block = vec![1u8; 1 << 16];
+        let counted = live();
+        assert!(counted >= 1 << 16);
+        set_limit(Some(1 << 40));
+        assert_eq!(live(), counted);
+        set_limit(None);
+        drop(block);
     }
 }

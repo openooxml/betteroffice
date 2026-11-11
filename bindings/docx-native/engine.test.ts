@@ -1330,6 +1330,35 @@ describe('docx native engine parity', () => {
     }
   });
 
+  test('while its thread stays past the limit, a failed object refuses as failed and another object fails at entry', () => {
+    const failed = new native.EditSession(21);
+    const other = new native.EditSession(22);
+    try {
+      failed.open_docx(fixture, true, 'opening');
+      other.open_docx(fixture, true, 'opening');
+      native.set_wasm_heap_limit(0);
+      let budget: unknown;
+      let refused: unknown;
+      let entry: unknown;
+      try {
+        budget = caughtValue(() => failed.version());
+        refused = caughtValue(() => failed.version());
+        entry = caughtValue(() => other.version());
+      } finally {
+        native.set_wasm_heap_limit(Number.NaN);
+      }
+      expect(nativeBudgetFailure((budget as Error).message)).toMatchObject({ budgetBytes: 0 });
+      expect((refused as Error).message).toBe(NATIVE_ENGINE_OBJECT_FAILED);
+      expect(isEngineTrap(entry)).toBe(true);
+      expect(nativeBudgetFailure((entry as Error).message)).toMatchObject({ budgetBytes: 0 });
+      expect((caughtValue(() => other.version()) as Error).message).toBe(NATIVE_ENGINE_OBJECT_FAILED);
+      expect((caughtValue(() => failed.version()) as Error).message).toBe(NATIVE_ENGINE_OBJECT_FAILED);
+    } finally {
+      failed.free();
+      other.free();
+    }
+  });
+
   test('module measurement fonts share the free glyph API', () => {
     wasm.clear_measure_fonts();
     native.clear_measure_fonts();
