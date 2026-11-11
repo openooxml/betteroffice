@@ -1142,10 +1142,22 @@ function populateParagraphBlock(
   for (const p of inLogicalOrder(prims)) {
     const child = renderMirrorPrimitive(p, doc, offsetY, ctx);
     const textRun = p.kind === 'glyphRun' || p.kind === 'text';
-    if (textRun && open && (joinTextRunElement(open, child) || joinListMarker(open, child))) continue;
-    el.appendChild(child);
-    if (textRun) open = child;
-    else if (p.kind !== 'decoration' && p.kind !== 'rect') open = null;
+    const separator = textRun ? p.separatorBefore : undefined;
+    if (separator) {
+      el.appendChild(doc.createTextNode(separator));
+      open = null;
+    }
+    const joined = textRun && open && (joinTextRunElement(open, child) || joinListMarker(open, child));
+    if (!joined) {
+      el.appendChild(child);
+      if (textRun) open = child;
+      else if (p.kind !== 'decoration' && p.kind !== 'rect') open = null;
+    }
+    const after = textRun ? p.separatorAfter : undefined;
+    if (after) {
+      el.appendChild(doc.createTextNode(after));
+      open = null;
+    }
   }
   const pmarkRevision = findStructuralRevision(prims, 'pmark');
   if (pmarkRevision) applyStructuralRevisionAttrs(el, pmarkRevision);
