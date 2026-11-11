@@ -1162,11 +1162,194 @@ pub(crate) fn trim_trailing(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use xlsx_model::{CellValue, ErrorValue, Sheet, SheetId, Workbook};
+    use std::rc::Rc;
 
-    use crate::array::{STEPS, evaluate_array};
-    use crate::eval::EvalContext;
+    use xlsx_model::{Cell, CellRef, CellValue, ErrorValue, Sheet, SheetId, Workbook};
+
+    use crate::array::{STEPS, Value, evaluate_array};
+    use crate::eval::{EvalContext, EvaluationBudget, MAX_RECALCULATION_CELL_VISITS};
     use crate::parser::parse_formula;
+
+    fn put(sheet: &mut Sheet, row: u32, col: u32, value: CellValue) {
+        sheet.set_cell(
+            CellRef::new(row, col),
+            Cell {
+                value,
+                ..Cell::default()
+            },
+        );
+    }
+
+    fn budgeted(workbook: &Workbook, formula: &str, budget: EvaluationBudget) -> (Value, bool) {
+        let context = EvalContext::with_budget(workbook, SheetId(0), Rc::new(budget));
+        let value = evaluate_array(&parse_formula(formula).unwrap(), &context);
+        (value, context.has_unhandled_budget_error())
+    }
+
+    fn text_budget(bytes: u64) -> EvaluationBudget {
+        EvaluationBudget::with_text(MAX_RECALCULATION_CELL_VISITS, bytes)
+    }
+
+    /// one row of eight 1,000-character fields in A1:H1 and the value 1 in I1.
+    fn wide_text_row() -> Workbook {
+        let mut workbook = Workbook::default();
+        let mut sheet = Sheet::new("Data");
+        let long = CellValue::Text {
+            value: "x".repeat(1_000),
+        };
+        for col in 0..8 {
+            put(&mut sheet, 0, col, long.clone());
+        }
+        put(&mut sheet, 0, 8, CellValue::Number { value: 1.0 });
+        workbook.sheets.push(sheet);
+        workbook
+    }
+
+    fn num_error() -> CellValue {
+        CellValue::Error {
+            value: ErrorValue::Num,
+        }
+    }
+
+    /// the group keys are a charged copy of the field text: reading the
+    /// fields, keeping their key and writing the output row cost 24,000
+    /// bytes, so 20,000 is refused while 30,000 is enough.
+    #[test]
+    fn groupby_charges_the_text_of_wide_group_keys() {
+        let workbook = wide_text_row();
+        let formula = "GROUPBY(A1:H1,I1,SUM,0,0)";
+        let (value, refused) = budgeted(&workbook, formula, text_budget(20_000));
+        assert_eq!(value.into_scalar(), num_error());
+        assert!(refused);
+        let (value, refused) = budgeted(&workbook, formula, text_budget(30_000));
+        assert!(!refused);
+        let Value::Array(block) = value else {
+            panic!("expected a block");
+        };
+        assert_eq!((block.rows, block.cols), (1, 9));
+        assert_eq!(block.values[8], CellValue::Number { value: 1.0 });
+    }
+
+    /// with every subtotal the output repeats the key prefixes: 8,000 bytes
+    /// of input, 8,000 of keys and 36,011 of output labels.
+    #[test]
+    fn groupby_subtotals_of_wide_text_keys_stay_within_the_text_budget() {
+        let workbook = wide_text_row();
+        let formula = "GROUPBY(A1:H1,I1,SUM,0,8)";
+        let (value, refused) = budgeted(&workbook, formula, text_budget(48_000));
+        assert_eq!(value.into_scalar(), num_error());
+        assert!(refused);
+        let (value, refused) = budgeted(&workbook, formula, text_budget(60_000));
+        assert!(!refused);
+        let Value::Array(block) = value else {
+            panic!("expected a block");
+        };
+        assert_eq!((block.rows, block.cols), (9, 9));
+        let blank = CellValue::Text {
+            value: String::new(),
+        };
+        for row in 1..8 {
+            for col in 0..8 {
+                let cell = &block.values[row * 9 + col];
+                if col < 8 - row {
+                    assert_eq!(cell, &block.values[col], "{row},{col}");
+                } else {
+                    assert_eq!(cell, &blank, "{row},{col}");
+                }
+            }
+        }
+        assert_eq!(
+            block.values[72],
+            CellValue::Text {
+                value: "Grand Total".into()
+            }
+        );
+    }
+
+    /// three nested fields with subtotals below and above their groups.
+    #[test]
+    fn groupby_nested_subtotal_layouts() {
+        let mut workbook = Workbook::default();
+        let mut sheet = Sheet::new("Data");
+        let rows = [
+            ("a", "x", "p", 1.0),
+            ("a", "x", "q", 2.0),
+            ("a", "y", "p", 3.0),
+            ("b", "x", "p", 4.0),
+        ];
+        for (row, (a, b, c, v)) in rows.into_iter().enumerate() {
+            let row = row as u32;
+            put(&mut sheet, row, 0, CellValue::Text { value: a.into() });
+            put(&mut sheet, row, 1, CellValue::Text { value: b.into() });
+            put(&mut sheet, row, 2, CellValue::Text { value: c.into() });
+            put(&mut sheet, row, 3, CellValue::Number { value: v });
+        }
+        workbook.sheets.push(sheet);
+        let line = |labels: [&str; 3], sum: f64| {
+            let mut out = Vec::with_capacity(4);
+            for label in labels {
+                out.push(CellValue::Text {
+                    value: label.into(),
+                });
+            }
+            out.push(CellValue::Number { value: sum });
+            out
+        };
+        let below = [
+            line(["a", "x", "p"], 1.0),
+            line(["a", "x", "q"], 2.0),
+            line(["a", "x", ""], 3.0),
+            line(["a", "y", "p"], 3.0),
+            line(["a", "y", ""], 3.0),
+            line(["a", "", ""], 6.0),
+            line(["b", "x", "p"], 4.0),
+            line(["b", "x", ""], 4.0),
+            line(["b", "", ""], 4.0),
+            line(["Grand Total", "", ""], 10.0),
+        ];
+        let above = [
+            line(["Grand Total", "", ""], 10.0),
+            line(["a", "", ""], 6.0),
+            line(["a", "x", ""], 3.0),
+            line(["a", "x", "p"], 1.0),
+            line(["a", "x", "q"], 2.0),
+            line(["a", "y", ""], 3.0),
+            line(["a", "y", "p"], 3.0),
+            line(["b", "", ""], 4.0),
+            line(["b", "x", ""], 4.0),
+            line(["b", "x", "p"], 4.0),
+        ];
+        for (formula, want) in [
+            ("GROUPBY(A1:C4,D1:D4,SUM,0,3)", below.concat()),
+            ("GROUPBY(A1:C4,D1:D4,SUM,0,-3)", above.concat()),
+        ] {
+            let context = EvalContext::new(&workbook, SheetId(0));
+            let value = evaluate_array(&parse_formula(formula).unwrap(), &context);
+            let Value::Array(block) = value else {
+                panic!("{formula}: expected a block");
+            };
+            assert_eq!((block.rows, block.cols), (10, 4), "{formula}");
+            assert_eq!(block.values, want, "{formula}");
+        }
+    }
+
+    /// a stack stops at its first error argument: the sequence after it
+    /// would be refused by a 100-cell budget, and is never evaluated.
+    #[test]
+    fn stacks_stop_at_the_first_error_argument() {
+        let workbook = wide_text_row();
+        for formula in ["HSTACK(1/0,SEQUENCE(999))", "VSTACK(1/0,SEQUENCE(999))"] {
+            let (value, refused) = budgeted(&workbook, formula, EvaluationBudget::new(100));
+            assert_eq!(
+                value.into_scalar(),
+                CellValue::Error {
+                    value: ErrorValue::Div0
+                },
+                "{formula}"
+            );
+            assert!(!refused, "{formula}");
+        }
+    }
 
     /// 2048 functions side by side leave room for 511 groups; 600 distinct
     /// keys are #NUM! before a single group is aggregated.

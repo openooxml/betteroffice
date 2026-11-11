@@ -1823,6 +1823,20 @@ fn function_vectors_past_the_array_limit_are_num() {
     }
 }
 
+/// a stack with an error before a function gives that error, as it does
+/// before a value.
+#[test]
+fn stacks_give_their_first_error_before_a_function() {
+    let workbook = sales_workbook();
+    for formula in ["HSTACK(1,1/0,LAMBDA(x,x))", "VSTACK(1,1/0,LAMBDA(x,x))"] {
+        assert_eq!(
+            values(formula, &workbook),
+            error(ErrorValue::Div0),
+            "{formula}"
+        );
+    }
+}
+
 /// each group's copy of a text column is charged to the text budget, so 300
 /// cells of 32,767 characters copied once per group stop at the budget.
 #[test]
