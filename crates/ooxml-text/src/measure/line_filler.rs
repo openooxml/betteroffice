@@ -637,14 +637,7 @@ impl Filler<'_> {
 
             if self.cur.width > 0.0
                 && ((t.letter_spacing < 0.0 && self.cur.width > self.cur.available + WRAP_SLACK_PX)
-                    || (fitting_width > 0.0
-                        && self.cur.width + wrap_width
-                            - if self.p.justify {
-                                self.cur.space_width * self.p.space_shrink_limit
-                            } else {
-                                0.0
-                            }
-                            > self.cur.available + WRAP_SLACK_PX))
+                    || (fitting_width > 0.0 && !self.keeps_word(wrap_width)))
             {
                 self.start_new_line(ri, utf16_at(t, char_idx))?;
             }
@@ -656,6 +649,32 @@ impl Filler<'_> {
             char_idx = next_break;
         }
         Ok(())
+    }
+
+    /// Whether a word of visible width `wrap_width` stays on the current line.
+    /// It fits at natural spacing, or the line is justified and Word keeps it
+    /// by compressing the spaces: the overflow O must stay within the shrink
+    /// limit and at most half of R, the room the line would be stretched by
+    /// if the word moved down. O and R exclude the line's trailing spaces.
+    fn keeps_word(&self, wrap_width: f32) -> bool {
+        let o = self.cur.width + wrap_width - self.cur.available;
+        if o <= WRAP_SLACK_PX {
+            return true;
+        }
+        if !self.p.justify {
+            return false;
+        }
+        let trailing_spaces: f32 = self
+            .cur
+            .contributions
+            .iter()
+            .rev()
+            .take_while(|part| part.is_fit_space)
+            .map(|part| part.advance)
+            .sum();
+        let r = self.cur.available - (self.cur.width - trailing_spaces);
+        o <= self.cur.space_width * self.p.space_shrink_limit + WRAP_SLACK_PX
+            && o <= r / 2.0 + WRAP_SLACK_PX
     }
 
     /// Accumulates each run's extents above and below the shared baseline.
