@@ -21,7 +21,8 @@ const control = `<w:sdt><w:sdtPr><w:alias w:val="Box"/></w:sdtPr><w:sdtContent>$
 
 /**
  * Every container a table can sit in: the body, a block content control in a cell, a table in a
- * cell, a header with relationship id `top`, a footnote and a comment.
+ * cell, a header with relationship id `top` and a footnote. Its comment holds a table too, but a
+ * comment body is not a story of the session, so the save's comment roots must find nothing.
  */
 function containers(): Uint8Array {
   const parts: PartsMap = new Map();
@@ -84,7 +85,6 @@ function locate(target: YrsSession) {
     innerCell,
     header: 'hf:top',
     footnote: stories.find((story) => story.startsWith('fn:') && target.tablePayload(story, 0)) ?? '',
-    comment: stories.find((story) => story.startsWith('comment:') && target.tablePayload(story, 0)) ?? '',
   };
 }
 
@@ -98,7 +98,6 @@ const CASES: Array<{ name: string; damage: (a: YrsSession, b: YrsSession, where:
   { name: 'table in a cell', damage: (a, b, where) => crossing(a, b, where.innerCell), expected: (where) => [{ story: where.innerCell, tableIndex: 0 }] },
   { name: 'header with relationship id top', damage: (a, b, where) => crossing(a, b, where.header), expected: (where) => [{ story: where.header, tableIndex: 0 }] },
   { name: 'footnote', damage: (a, b, where) => crossing(a, b, where.footnote), expected: (where) => [{ story: where.footnote, tableIndex: 0 }] },
-  { name: 'comment', damage: (a, b, where) => crossing(a, b, where.comment), expected: (where) => [{ story: where.comment, tableIndex: 0 }] },
   { name: 'table that lost only its properties', damage: (a, b) => crossing(a, b, 'body', true), expected: () => [{ story: 'body', tableIndex: 0 }] },
   {
     name: 'inner and outer: only the outer is in reach',
@@ -123,7 +122,7 @@ describe('the engine walk and the projection walk', () => {
     const probe = await session(60);
     probe.seedFromDocx(containers());
     const where = locate(probe);
-    for (const story of [where.control, where.innerCell, where.header, where.footnote, where.comment]) {
+    for (const story of [where.control, where.innerCell, where.header, where.footnote]) {
       expect(story).not.toBe('');
       expect(probe.tablePayload(story, 0)).not.toBeNull();
     }
@@ -180,6 +179,14 @@ describe('one scan per save', () => {
     await saveEditorDocument(a, projected, []);
     expect(scans).toBe(1);
 
+    a.setTableProperties({ story: 'body', tableIndex: 0 }, { justification: 'center' });
+    scans = 0;
+    await saveEditorDocument(a, projected, []);
+    expect(scans).toBe(1);
+    scans = 0;
+    await saveYrsDocx(a, { updateModifiedDate: false });
+    expect(scans).toBe(1);
+
     crossing(a, b, 'body');
     scans = 0;
     let written: unknown = 'not written';
@@ -191,4 +198,36 @@ describe('one scan per save', () => {
     expect(written).toBe('not written');
     expect(scans).toBe(1);
   });
+});
+
+describe('a gate pass', () => {
+  for (const kind of ['header', 'footnote'] as const) {
+    it(`covers only the roots it scanned: a ${kind} added after the pass is scanned`, async () => {
+      const { carryGate, markGated, refuseUnavailableTables } = await import('./tableUnavailable');
+      const source = containers();
+      const a = await session(61);
+      const b = await session(62);
+      a.seedFromDocx(source);
+      b.openDocx(source, false);
+      b.applyUpdate(a.encodeState());
+      crossing(a, b, locate(a)[kind]);
+      const full = a.materializeDocx()!;
+      const without = {
+        ...full,
+        package: kind === 'header' ? { ...full.package, headers: new Map() } : { ...full.package, footnotes: [] },
+      };
+      const scanned = refuseUnavailableTables(a, without);
+      markGated(a, without, scanned);
+      expect(() => refuseUnavailableTables(a, without)).not.toThrow();
+      const added = { ...without, package: full.package };
+      carryGate(without, added);
+      let code: string | undefined;
+      try {
+        refuseUnavailableTables(a, added);
+      } catch (error) {
+        code = (error as Error & { code?: string }).code;
+      }
+      expect(code).toBe('table-unavailable');
+    });
+  }
 });

@@ -547,6 +547,8 @@ impl StoryRevisions {
                             key.as_ref(),
                             KIND_KEY
                                 | PARA_ID
+                                | "tblPr"
+                                | "grid"
                                 | "rows"
                                 | "cells"
                                 | "story"
@@ -571,7 +573,12 @@ impl StoryRevisions {
                     || event
                         .keys(txn)
                         .keys()
-                        .any(|key| matches!(key.as_ref(), KIND_KEY | "rows" | "cells" | "story"))
+                        .any(|key| {
+                            matches!(
+                                key.as_ref(),
+                                KIND_KEY | "tblPr" | "grid" | "rows" | "cells" | "story"
+                            )
+                        })
             }
             _ => true,
         }) {

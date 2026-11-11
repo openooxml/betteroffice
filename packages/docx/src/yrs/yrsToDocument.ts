@@ -4359,14 +4359,14 @@ function projectDocument(
   options: YrsToDocumentOptions,
   revisionIds?: RevisionIds
 ): Document {
-  refuseUnavailableTables(session, base);
+  const scanned = refuseUnavailableTables(session, base);
   const previous = projectedMedia;
   projectedMedia = (token) => session.mediaDataUrl?.(token) ?? null;
   let context: SaveContext | undefined;
   try {
     context = new SaveContext(session, base, options.commentIds, revisionIds);
     const projected = projectStories(context, session, base, options);
-    markGated(session, projected);
+    markGated(session, projected, scanned);
     return projected;
   } finally {
     context?.dispose();

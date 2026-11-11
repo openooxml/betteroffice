@@ -84,28 +84,46 @@ export function unavailableTables(session: TableScanSession, document: Document)
   return sessionUnavailableTablesFrom(session, roots) ?? unavailableTablesByProjection(session, roots);
 }
 
-/** Documents made from a session after a scan, with the session version they were scanned at. */
-const gated = new WeakMap<Document, string>();
+/** A gate pass: the session version and the root stories the scan covered. */
+interface GateMark {
+  version: string;
+  roots: ReadonlySet<string>;
+}
+
+/** Documents made from a session after a scan, with what that scan covered. */
+const gated = new WeakMap<Document, GateMark>();
 
 /**
  * Refuses to make or write `document` from `session` while a save would meet a table a
  * concurrent undo left without its payload: the written file would lose that table. A document
- * this gate already passed at the session's current version is not scanned again. The session
- * is unchanged.
+ * this gate already passed at the session's current version is not scanned again, unless it
+ * now lists a root story that scan did not cover. A pass marks `document`, so the writer it is
+ * handed to next does not scan it again. Returns the root stories it covered. The session is
+ * unchanged.
  * @internal
  */
-export function refuseUnavailableTables(session: TableScanSession, document: Document): void {
-  if (gated.get(document) === session.version()) return;
-  if (unavailableTables(session, document).length > 0) throw tableUnavailableError();
+export function refuseUnavailableTables(session: TableScanSession, document: Document): string[] {
+  const roots = savedRootStories(session, document);
+  const version = session.version();
+  const mark = gated.get(document);
+  if (mark?.version === version && roots.every((root) => mark.roots.has(root))) return roots;
+  const found = sessionUnavailableTablesFrom(session, roots) ?? unavailableTablesByProjection(session, roots);
+  if (found.length > 0) throw tableUnavailableError();
+  gated.set(document, { version, roots: new Set(roots) });
+  return roots;
 }
 
-/** Records that `document`, made from `session` just now, passed the gate at its version. @internal */
-export function markGated(session: Pick<YrsSession, 'version'>, document: Document): void {
-  gated.set(document, session.version());
+/**
+ * Records that `document`, made from `session` just now, passed the gate at its version with a
+ * scan of `roots`.
+ * @internal
+ */
+export function markGated(session: Pick<YrsSession, 'version'>, document: Document, roots: readonly string[]): void {
+  gated.set(document, { version: session.version(), roots: new Set(roots) });
 }
 
 /** Carries `from`'s gate record to `to`, a copy of it made without reading the session. @internal */
 export function carryGate(from: Document, to: Document): void {
-  const version = gated.get(from);
-  if (version !== undefined) gated.set(to, version);
+  const mark = gated.get(from);
+  if (mark !== undefined) gated.set(to, mark);
 }

@@ -168,4 +168,77 @@ mod tests {
             .unwrap();
         assert_eq!(doc.unavailable_tables(), Some(Vec::new()));
     }
+
+    fn table_map(story: &str, txn: &yrs::TransactionMut) -> yrs::MapRef {
+        crate::story_ref(txn, story)
+            .unwrap()
+            .diff(txn, yrs::types::text::YChange::identity)
+            .into_iter()
+            .find_map(|diff| match diff.insert {
+                yrs::Out::YMap(map) => (crate::map_string(&map, txn, crate::KIND_KEY).as_deref()
+                    == Some("table"))
+                .then_some(map),
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    fn strip(doc: &EditingDoc, story: &str) {
+        let mut txn = doc.yrs_doc().transact_mut();
+        let table = table_map(story, &txn);
+        for key in super::PAYLOAD_KEYS {
+            yrs::Map::remove(&table, &mut txn, key);
+        }
+    }
+
+    #[test]
+    fn a_malformed_block_control_does_not_stop_the_scan() {
+        let doc = EditingDoc::new(79);
+        doc.create_story("body", "Hello", "Normal", "left")
+            .unwrap();
+        doc.insert_table(&ctx(), Position::new("body", 0), 1, 1)
+            .unwrap();
+        {
+            let mut txn = doc.yrs_doc().transact_mut();
+            let body = crate::story_ref(&txn, "body").unwrap();
+            let control = body.insert_embed(&mut txn, 0, yrs::MapPrelim::default());
+            yrs::Map::insert(&control, &mut txn, crate::KIND_KEY, "blockSdt");
+            yrs::Map::insert(&control, &mut txn, "story", 42.0);
+        }
+        assert_eq!(doc.unavailable_tables(), Some(Vec::new()));
+        strip(&doc, "body");
+        assert_eq!(
+            doc.unavailable_tables(),
+            Some(vec![TableLocator::new("body", 0)]),
+            "the table after the malformed control is still found"
+        );
+        doc.delete_table(&ctx(), &TableLocator::new("body", 0))
+            .unwrap();
+        assert_eq!(doc.unavailable_tables(), Some(Vec::new()));
+    }
+
+    #[test]
+    fn a_note_cell_whose_table_lost_its_rows_is_not_a_root() {
+        assert!(super::is_note_root("fn:1"));
+        assert!(super::is_note_root("en:-1"));
+        assert!(!super::is_note_root("fn:1:t0:r0c0"));
+        assert!(!super::is_note_root("fn:"));
+        let doc = EditingDoc::new(80);
+        doc.create_story("body", "Hello", "Normal", "left")
+            .unwrap();
+        doc.create_story("fn:1", "Note", "Normal", "left").unwrap();
+        let outer = doc
+            .insert_table(&ctx(), Position::new("fn:1", 0), 1, 1)
+            .unwrap();
+        let cell = outer.created_story_ids[0].clone();
+        doc.insert_table(&ctx(), Position::new(&cell, 0), 1, 1)
+            .unwrap();
+        strip(&doc, &cell);
+        strip(&doc, "fn:1");
+        assert_eq!(
+            doc.unavailable_tables(),
+            Some(vec![TableLocator::new("fn:1", 0)]),
+            "the inner table under the note's emptied table is out of reach, not a root"
+        );
+    }
 }

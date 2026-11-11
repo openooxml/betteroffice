@@ -109,6 +109,15 @@ struct Scan {
     found: Vec<TableLocator>,
 }
 
+/// `result`, except that a scanning walk takes `skipped` for a malformed entry so it still
+/// reaches everything after it; a layout walk refuses the whole outline instead.
+fn lenient<V>(scan: &Scan, result: Result<V, ()>, skipped: V) -> Result<V, ()> {
+    match result {
+        Err(()) if scan.active => Ok(skipped),
+        other => other,
+    }
+}
+
 fn plain_value<T: ReadTxn>(map: &MapRef, txn: &T, key: &str) -> Option<Any> {
     match map.get(txn, key) {
         Some(Out::Any(value)) => Some(value),
@@ -184,7 +193,7 @@ fn build_story<T: ReadTxn>(
             }
             Out::YMap(map) => match map_string(&map, txn, KIND_KEY).as_deref().unwrap_or("") {
                 "table" => {
-                    cursor += build_table(
+                    let size = build_table(
                         txn,
                         outline,
                         &map,
@@ -193,7 +202,8 @@ fn build_story<T: ReadTxn>(
                         content_start + cursor,
                         depth,
                         scan,
-                    )?;
+                    );
+                    cursor += lenient(scan, size, 2)?;
                     table_index += 1;
                     paragraph_start = cursor;
                     leading += 1;
@@ -202,15 +212,22 @@ fn build_story<T: ReadTxn>(
                     let child = child_story(
                         plain_value(&map, txn, "story").as_ref(),
                         format!("{story_id}:sdt0"),
-                    )?;
-                    cursor += build_story(
-                        txn,
-                        outline,
-                        &child,
-                        content_start + cursor + 1,
-                        depth + 1,
-                        scan,
-                    )? + 2;
+                    );
+                    let size = match lenient(scan, child.map(Some), None)? {
+                        Some(child) => {
+                            let size = build_story(
+                                txn,
+                                outline,
+                                &child,
+                                content_start + cursor + 1,
+                                depth + 1,
+                                scan,
+                            );
+                            lenient(scan, size, 0)?
+                        }
+                        None => 0,
+                    };
+                    cursor += size + 2;
                     paragraph_start = cursor;
                     leading += 1;
                 }
@@ -275,15 +292,21 @@ fn build_table<T: ReadTxn>(
     let rows = plain_value(map, txn, "rows");
     let rows = match rows.as_ref() {
         Some(Any::Array(rows)) => rows.as_ref(),
-        Some(Any::Buffer(_)) => return Err(()),
+        Some(Any::Buffer(_)) => return lenient(scan, Err(()), 2),
         _ => return Ok(2),
     };
     let mut table_size = 0;
     for (row_index, row) in rows.iter().enumerate() {
-        let Any::Map(row) = row else { return Err(()) };
+        let Any::Map(row) = row else {
+            lenient(scan, Err(()), ())?;
+            continue;
+        };
         let cells = match row.get("cells") {
             Some(Any::Array(cells)) => cells.as_ref(),
-            Some(Any::Buffer(_)) => return Err(()),
+            Some(Any::Buffer(_)) => {
+                lenient(scan, Err(()), ())?;
+                continue;
+            }
             _ => {
                 table_size += 2;
                 if table_size > MAX_POSITION {
@@ -294,13 +317,20 @@ fn build_table<T: ReadTxn>(
         };
         let mut row_size = 0;
         for (cell_index, cell) in cells.iter().enumerate() {
-            let Any::Map(cell) = cell else { return Err(()) };
+            let Any::Map(cell) = cell else {
+                lenient(scan, Err(()), ())?;
+                continue;
+            };
             let child = child_story(
                 cell.get("story"),
                 format!("{story_id}:t{table_index}:r{row_index}c{cell_index}"),
-            )?;
+            );
+            let Some(child) = lenient(scan, child.map(Some), None)? else {
+                continue;
+            };
             let child_start = start + 3 + table_size + row_size;
-            row_size += build_story(txn, outline, &child, child_start, depth + 1, scan)? + 2;
+            let size = build_story(txn, outline, &child, child_start, depth + 1, scan);
+            row_size += lenient(scan, size, 0)? + 2;
             if row_size > MAX_POSITION {
                 return Err(());
             }
