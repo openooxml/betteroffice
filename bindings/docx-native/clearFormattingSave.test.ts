@@ -54,10 +54,16 @@ async function fixture(body = FORMATTED_BODY): Promise<Uint8Array> {
   return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
 }
 
-const whole = (session: Session, from: string, to = from, story = 'body') => {
-  const length = session.paragraphs(story).find((entry) => entry.paraId === to)!.text.length;
-  return { story, start: { paraId: from, offset: 0 }, end: { paraId: to, offset: length } };
+const unitLength = (session: Session, story: string, paraId: string) => {
+  const segments = session.storySegments(story);
+  const end = segments.findIndex((segment) => segment.kind === 'pilcrow' && segment.paraId === paraId);
+  let start = end;
+  while (start > 0 && segments[start - 1]!.kind !== 'pilcrow') start--;
+  return segments.slice(start, end).reduce((length, segment) => length + (segment.kind === 'text' ? segment.text.length : 1), 0);
 };
+
+const whole = (session: Session, from: string, to = from, story = 'body') =>
+  ({ story, start: { paraId: from, offset: 0 }, end: { paraId: to, offset: unitLength(session, story, to) } });
 
 const bold = (session: Session, marker: string) => {
   const segment = session.storySegments('body').find((entry) => entry.kind === 'text' && entry.text.includes(marker));
@@ -347,17 +353,17 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
     }
   });
 
-  test(`${engine}: a peer bootstrapped from an update keeps the table style's bold when clearing formatting over a body range spanning the table, and the range's last character after the table keeps its direct formatting`, async () => {
+  test(`${engine}: a peer bootstrapped from an update keeps the table style's bold when clearing formatting over a body range spanning the table`, async () => {
     const cell = (paraId: string, text: string) =>
       `<w:tc><w:tcPr><w:tcW w:w="2400" w:type="dxa"/></w:tcPr><w:p w14:paraId="${paraId}"><w:r><w:rPr><w:i/></w:rPr><w:t>${text}</w:t></w:r></w:p></w:tc>`;
     const body = '<w:p w14:paraId="00000071"><w:r><w:rPr><w:b/></w:rPr><w:t>Before table</w:t></w:r></w:p>' +
       '<w:tbl><w:tblPr><w:tblStyle w:val="BoldGrid"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/><w:gridCol w:w="2400"/></w:tblGrid>' +
       `<w:tr>${cell('00000072', 'Peer left')}${cell('00000073', 'Peer right')}</w:tr>` +
       '</w:tbl><w:p w14:paraId="00000074"><w:r><w:rPr><w:b/></w:rPr><w:t>After table</w:t></w:r></w:p>';
-    const markers = ['Before table', 'Peer left', 'Peer right', 'After tabl', 'e'];
+    const markers = ['Before table', 'Peer left', 'Peer right', 'After table'];
     const formattingOf = (session: Session, marker: string) => {
       for (const { story } of session.listStories().stories) {
-        const segment = session.storySegments(story).find((entry) => entry.kind === 'text' && entry.text === marker);
+        const segment = session.storySegments(story).find((entry) => entry.kind === 'text' && entry.text.includes(marker));
         if (segment?.kind === 'text') return { bold: Boolean(segment.attributes.bold), italic: Boolean(segment.attributes.italic) };
       }
       return undefined;
@@ -367,7 +373,6 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
       { bold: true, italic: false },
       { bold: true, italic: false },
       { bold: false, italic: false },
-      { bold: true, italic: false },
     ];
     const bytes = await fixture(body);
     const host = await yrs.createYrsSession({ clientId: 83 });
@@ -379,7 +384,7 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
       expect(markers.map((marker) => formattingOf(peer, marker))).toEqual(expected);
       const { xml, reopened } = await saveAndReopen(yrs, peer);
       try {
-        expect(markers.map((marker) => savedRunReading(xml, marker))).toEqual([null, null, null, null, '<w:b/>']);
+        expect(markers.map((marker) => savedRunReading(xml, marker))).toEqual([null, null, null, null]);
         expect(markers.map((marker) => formattingOf(reopened, marker))).toEqual(expected);
       } finally {
         reopened.destroy();
@@ -399,7 +404,7 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
     `<w:sdt><w:sdtPr><w:id w:val="11"/></w:sdtPr><w:sdtContent>${content}</w:sdtContent></w:sdt>`;
   const formattingIn = (session: Session, marker: string) => {
     for (const { story } of session.listStories().stories) {
-      const segment = session.storySegments(story).find((entry) => entry.kind === 'text' && entry.text === marker);
+      const segment = session.storySegments(story).find((entry) => entry.kind === 'text' && entry.text.includes(marker));
       if (segment?.kind === 'text') return { bold: Boolean(segment.attributes.bold), italic: Boolean(segment.attributes.italic) };
     }
     return undefined;
@@ -446,20 +451,19 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
     });
   });
 
-  test(`${engine}: a peer bootstrapped from an update keeps the table styles' bold when clearing formatting over the paragraphs of a block content control holding a nested table in a cell, and the range's last character after the nested table keeps its direct formatting`, async () => {
+  test(`${engine}: a peer bootstrapped from an update keeps the table styles' bold when clearing formatting over the paragraphs of a block content control holding a nested table in a cell`, async () => {
     const control = blockControl(
       italic('00000091', 'Control own') + boldGridCell(italic('00000092', 'Nested cell')) + italic('00000093', 'Control tail'),
     );
     const body = boldGridCell(`${control}<w:p w14:paraId="00000094"/>`) +
       '<w:p w14:paraId="00000095"><w:r><w:t>After</w:t></w:r></w:p>';
-    const markers = ['Control own', 'Nested cell', 'Control tai', 'l'];
+    const markers = ['Control own', 'Nested cell', 'Control tail'];
     const kept = { bold: true, italic: false };
-    const lastKeepsDirect = { bold: true, italic: true };
     expect(await peerClearsInControl(body, '00000091', '00000093', markers, 87)).toEqual({
       story: 'body:t0:r0c0:sdt0',
-      session: [kept, kept, kept, lastKeepsDirect],
-      saved: ['<w:b/>', null, '<w:b/>', '<w:b/><w:i/>'],
-      reopened: [kept, kept, kept, lastKeepsDirect],
+      session: [kept, kept, kept],
+      saved: ['<w:b/>', null, '<w:b/>'],
+      reopened: [kept, kept, kept],
     });
   });
 
