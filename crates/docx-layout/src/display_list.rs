@@ -1256,6 +1256,10 @@ pub struct ImagePrimitive {
     /// [`MAX_ALT_TEXT_CHARS`] — file-derived, attacker-controlled data
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alt_text: Option<String>,
+    /// The picture's relationship id (`r:embed`), which names it when `rel_id`
+    /// resolves to nothing; dropped past [`MAX_RELATIONSHIP_ID_CHARS`]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relationship_id: Option<String>,
     #[serde(flatten)]
     pub attrs: DocAttrs,
 }
@@ -2104,6 +2108,8 @@ struct ImageRunIn {
     #[serde(default)]
     src: String,
     #[serde(default)]
+    relationship_id: Option<String>,
+    #[serde(default)]
     width: f64,
     #[serde(default)]
     height: f64,
@@ -2523,6 +2529,8 @@ pub(crate) struct ImageBlockIn {
     pub(crate) id: Value,
     #[serde(default)]
     pub(crate) src: String,
+    #[serde(default)]
+    pub(crate) relationship_id: Option<String>,
     #[serde(default)]
     pub(crate) width: f64,
     #[serde(default)]
@@ -4159,6 +4167,15 @@ pub(crate) fn capped_alt_text(alt: Option<&str>) -> Option<String> {
     Some(alt.chars().take(MAX_ALT_TEXT_CHARS).collect())
 }
 
+/// Cap on a picture's relationship id: file-derived like alt text, and only a
+/// label, so a longer one is dropped rather than truncated into a wrong name.
+pub const MAX_RELATIONSHIP_ID_CHARS: usize = 255;
+
+pub(crate) fn capped_relationship_id(id: Option<&str>) -> Option<String> {
+    id.filter(|id| !id.is_empty() && id.chars().count() <= MAX_RELATIONSHIP_ID_CHARS)
+        .map(str::to_owned)
+}
+
 fn emit_watermark(prims: &mut Vec<Primitive>, watermark: &WatermarkIn, page: &PageIn) {
     match watermark {
         WatermarkIn::Text(wm) => emit_text_watermark(prims, wm, page),
@@ -4282,6 +4299,7 @@ fn emit_picture_watermark(prims: &mut Vec<Primitive>, wm: &PictureWatermarkIn, p
         decorative: wm.decorative.unwrap_or(true),
         crop: None,
         alt_text: None,
+        relationship_id: None,
         attrs: DocAttrs::default(),
     }));
 }
@@ -5633,6 +5651,7 @@ fn emit_note_item(
                     decorative: block.decorative.unwrap_or(false),
                     crop: crop_of_block(block),
                     alt_text: capped_alt_text(block.alt.as_deref()),
+                    relationship_id: capped_relationship_id(block.relationship_id.as_deref()),
                     attrs,
                 }));
                 cursor += measure.height;
@@ -6067,6 +6086,7 @@ fn recompose_hf_region(
                     decorative: block.decorative.unwrap_or(false),
                     crop: crop_of_block(block),
                     alt_text: capped_alt_text(block.alt.as_deref()),
+                    relationship_id: capped_relationship_id(block.relationship_id.as_deref()),
                     attrs,
                 }));
             }
@@ -6387,6 +6407,9 @@ fn build_display_list_selected(
                         decorative: block.and_then(|b| b.decorative).unwrap_or(false),
                         crop: block.and_then(|block| crop_of_block(block)),
                         alt_text: capped_alt_text(block.and_then(|b| b.alt.as_deref())),
+                        relationship_id: capped_relationship_id(
+                            block.and_then(|b| b.relationship_id.as_deref()),
+                        ),
                         attrs,
                     }));
                 }
@@ -8170,6 +8193,7 @@ fn emit_line<'a>(
                     decorative: imr.decorative.unwrap_or(false),
                     crop: crop_of(imr),
                     alt_text: capped_alt_text(imr.alt.as_deref()),
+                    relationship_id: capped_relationship_id(imr.relationship_id.as_deref()),
                     attrs: img_attrs,
                 }));
                 if imr.display_mode.as_deref() != Some("block")
@@ -10038,6 +10062,7 @@ fn emit_floating_image(
         decorative: imr.decorative.unwrap_or(false),
         crop: crop_of(imr),
         alt_text: capped_alt_text(imr.alt.as_deref()),
+        relationship_id: capped_relationship_id(imr.relationship_id.as_deref()),
         attrs,
     }));
 }
@@ -12635,6 +12660,7 @@ fn emit_cell_content(
                 decorative: image.decorative.unwrap_or(false),
                 crop: crop_of_block(image),
                 alt_text: capped_alt_text(image.alt.as_deref()),
+                relationship_id: capped_relationship_id(image.relationship_id.as_deref()),
                 attrs,
             }));
             postprocess_cell_primitives(
@@ -13101,6 +13127,7 @@ fn emit_cell_floating_images(
                 decorative: imr.decorative.unwrap_or(false),
                 crop: crop_of(imr),
                 alt_text: capped_alt_text(imr.alt.as_deref()),
+                relationship_id: capped_relationship_id(imr.relationship_id.as_deref()),
                 attrs,
             });
             // Clip to the fragment window.

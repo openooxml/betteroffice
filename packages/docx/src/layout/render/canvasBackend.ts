@@ -39,7 +39,10 @@ export interface DrawPageOptions {
   fontFamilies?: ReadonlyMap<string, string>;
   /** Told when a glyph run's outlines fail and it falls back to `fillText`. */
   onGlyphFallback?: (error: unknown) => void;
-  /** With it set, a picture that resolves to nothing paints a placeholder and is reported here, instead of being left out. */
+  /**
+   * With it set, a picture that resolves to nothing paints a placeholder and is reported here, instead of being left out:
+   * by its `relId`, or by its `relationshipId` when it has no `relId`.
+   */
   onPictureUnavailable?: (relId: string) => void;
 }
 
@@ -1504,7 +1507,7 @@ async function drawImagePrimitive(
     ctx.translate(-cx, -cy);
   }
   if (!source) {
-    onPictureUnavailable?.(image.relId);
+    onPictureUnavailable?.(image.relId || (image.relationshipId ?? ''));
     paintPicturePlaceholder(ctx, () => {
       if (image.shapeType === 'ellipse') traceImageEllipse(ctx, frame);
       else {
