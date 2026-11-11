@@ -924,13 +924,13 @@ fn editor_clear_of_unformatted_text_changes_nothing_and_adds_no_undo_step() {
         assert_eq!(doc.encode_state_as_update_v1(), before, "{case}");
         assert!(!undo.can_undo(), "{case}");
     }
-    let before = doc.encode_state_vector_v1();
+    let before = doc.encode_state_as_update_v1();
     editor_clear(
         &doc,
         &ctx,
         editor_range(&doc, "body", ("00000045", 0), ("00000046", 9)),
     );
-    assert_ne!(doc.encode_state_vector_v1(), before);
+    assert_ne!(doc.encode_state_as_update_v1(), before);
     assert!(!active(&marks(&doc, "Bold tail"), "bold"));
     assert!(undo.can_undo());
 }
