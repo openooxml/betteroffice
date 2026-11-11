@@ -1858,18 +1858,23 @@ test('native and wasm leave hidden table rows out of the display list unless hid
   const encoder = new TextEncoder();
   const w = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
   const border = 'w:val="single" w:sz="24" w:space="0" w:color="000000"';
-  const row = (text: string, hidden: boolean) => `<w:tr>${hidden ? '<w:trPr><w:hidden/></w:trPr>' : ''}<w:tc><w:tcPr><w:tcW w:w="3000" w:type="dxa"/></w:tcPr><w:p><w:r>${hidden ? '<w:rPr><w:vanish/></w:rPr>' : ''}<w:t>${text}</w:t></w:r></w:p></w:tc></w:tr>`;
+  const vanish = '<w:rPr><w:vanish/></w:rPr>';
+  const row = (text: string, hidden: boolean) => `<w:tr>${hidden ? '<w:trPr><w:hidden/></w:trPr>' : ''}<w:tc><w:tcPr><w:tcW w:w="3000" w:type="dxa"/></w:tcPr><w:p>${hidden ? `<w:pPr>${vanish}</w:pPr>` : ''}<w:r>${hidden ? vanish : ''}<w:t>${text}</w:t></w:r></w:p></w:tc></w:tr>`;
+  const blankRow = (trPr: string) => `<w:tr><w:trPr>${trPr}</w:trPr><w:tc><w:tcPr><w:tcW w:w="3000" w:type="dxa"/></w:tcPr><w:p/></w:tc></w:tr>`;
   const table = (rows: string) => `<w:tbl><w:tblPr><w:tblW w:w="3000" w:type="dxa"/><w:tblBorders><w:top ${border}/><w:bottom ${border}/><w:insideH ${border}/></w:tblBorders></w:tblPr><w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid>${rows}</w:tbl>`;
-  const bytes = wasm.rezip_docx({
+  const docx = (blank: string) => wasm.rezip_docx({
     '[Content_Types].xml': encoder.encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'),
     '_rels/.rels': encoder.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'),
-    'word/document.xml': encoder.encode(`<w:document xmlns:w="${w}"><w:body>${table(row('Alpha', false) + row('Bravo', true) + row('Charlie', false))}<w:p/>${table(row('Delta', true) + row('Echo', true))}<w:p><w:r><w:t>Tail</w:t></w:r></w:p><w:sectPr/></w:body></w:document>`),
+    'word/document.xml': encoder.encode(`<w:document xmlns:w="${w}"><w:body>${table(row('Alpha', false) + row('Bravo', true) + row('Charlie', false) + blank)}<w:p/>${table(row('Delta', true) + row('Echo', true))}<w:p><w:r><w:t>Tail</w:t></w:r></w:p><w:sectPr/></w:body></w:document>`),
   });
+  const exact = '<w:trHeight w:val="300" w:hRule="exact"/>';
+  const bytes = docx(blankRow(`${exact}<w:hidden/>`));
+  const unmarked = docx(blankRow(exact));
   type Primitive = { kind: string; text?: string; role?: string; y1?: number; cell?: { row: number } };
-  const run = (engine: Engine, showHiddenText: boolean) => {
+  const run = (engine: Engine, showHiddenText: boolean, source = bytes) => {
     const session = new engine.EditSession(79);
     try {
-      session.open_docx(bytes, true);
+      session.open_docx(source, true);
       const font = session.register_measure_font(fontBytes);
       const fontChains = { 'calibri|0|0': [font], 'calibri|1|0': [font] };
       const layout = session.layout_document_with_regions_json(JSON.stringify({
@@ -1895,8 +1900,9 @@ test('native and wasm leave hidden table rows out of the display list unless hid
   };
   const hidden = run(native, false);
   expect(hidden.text).toBe('AlphaCharlieTail');
-  expect(hidden.rows).toEqual([0, 2]);
+  expect(hidden.rows.slice(0, 2)).toEqual([0, 2]);
   expect(hidden).toEqual(run(wasm, false));
+  expect(hidden).toEqual(run(native, false, unmarked));
   const shown = run(native, true);
   expect(shown.text).toBe('AlphaBravoCharlieDeltaEchoTail');
   expect(shown.borders).toBeGreaterThan(hidden.borders);

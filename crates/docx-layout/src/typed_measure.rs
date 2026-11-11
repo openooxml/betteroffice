@@ -581,6 +581,33 @@ mod parity_tests {
     }
 
     #[test]
+    fn justified_short_word_acceptance_matches_on_both_measure_paths() {
+        let fixture = fixture();
+        let (w0, sp) = (1139.0 / 128.0, 569.0 / 128.0);
+        let paragraph = paragraph(
+            vec![text_run("000 000 000 000 000 000 0")],
+            Some(crate::types::ParagraphAttrs {
+                alignment: Some("justify".to_owned()),
+                justification_mode: Some("both".to_owned()),
+                ..Default::default()
+            }),
+        );
+        let config = MeasurementConfig {
+            compat: json!({"compatibilityMode": 15}),
+            ..fixture.config.clone()
+        };
+        for (overflow, expected) in [(0.5, 1), (0.85, 1), (1.25, 2)] {
+            let width = 19.0 * w0 + 6.0 * sp - overflow * sp;
+            let typed = measure_paragraph(&paragraph, width, &config, None, 0.0).unwrap();
+            assert_eq!(
+                typed,
+                legacy_measure(&paragraph, width, &config, None, 0.0).unwrap()
+            );
+            assert_eq!(typed.lines.len(), expected, "overflow {overflow}");
+        }
+    }
+
+    #[test]
     fn compatibility_mode_controls_latin_soft_break_space_shrink() {
         let fixture = fixture();
         let paragraph = paragraph(

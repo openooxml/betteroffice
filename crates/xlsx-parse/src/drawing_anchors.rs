@@ -11,7 +11,7 @@ use crate::axis::SheetAxes;
 use crate::chart::{
     NS_SPREADSHEET_DRAWING, anchor_geometry, holds_related_chart, is_anchor, sheet_drawings,
 };
-use crate::tree::Part;
+use crate::tree::{Element, Part};
 
 /// One drawing part a source sheet relates to.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -108,9 +108,9 @@ pub fn sheet_drawings_may_move(parts: &[(String, Vec<u8>)], sheet_path: &str) ->
         || !sheet_drawing_anchors(parts, sheet_path).is_empty()
 }
 
-/// Every anchor of a drawing part that no chart claims. Any child of the drawing that is not an
-/// anchor (an `mc:AlternateContent` wrapper, say) is markup that may name cells, so it makes the
-/// part unreadable rather than being left where it was.
+/// Every anchor of a drawing part that no chart claims, one per `mc:AlternateContent` wrapper.
+/// Any other child of the drawing (or a wrapper [`alternate_anchors`] cannot read) is markup that
+/// may name cells, so it makes the part unreadable rather than being left where it was.
 fn unclaimed_anchors(bytes: &[u8]) -> Result<Vec<ChartAnchor>, ParseError> {
     let part = Part::decode(bytes)?;
     let root = part.tree()?;
@@ -121,6 +121,11 @@ fn unclaimed_anchors(bytes: &[u8]) -> Result<Vec<ChartAnchor>, ParseError> {
     }
     let mut anchors = Vec::new();
     for child in root.child_elements() {
+        if child.is(NS_MARKUP_COMPATIBILITY, "AlternateContent") {
+            let branches = alternate_anchors(child)?;
+            anchors.push(anchor_geometry(branches[0])?);
+            continue;
+        }
         if !is_anchor(&child) {
             return Err(ParseError::UnsupportedEdit(format!(
                 "drawing holds {} beside its anchors",
@@ -130,6 +135,49 @@ fn unclaimed_anchors(bytes: &[u8]) -> Result<Vec<ChartAnchor>, ParseError> {
         if !holds_related_chart(child) {
             anchors.push(anchor_geometry(child)?);
         }
+    }
+    Ok(anchors)
+}
+
+pub(crate) const NS_MARKUP_COMPATIBILITY: &str =
+    "http://schemas.openxmlformats.org/markup-compatibility/2006";
+
+/// The anchor in each branch of an `mc:AlternateContent` wrapper, when every branch is an
+/// `mc:Choice` or `mc:Fallback` holding exactly one anchor and nothing else, and all of them sit
+/// on the same cells. A consumer reads one branch, so a save moves every branch alike and they
+/// stay one drawing; anything else is refused. A chart inside a branch is not one the model
+/// reads, so it moves here too.
+pub(crate) fn alternate_anchors(wrapper: &Element) -> Result<Vec<&Element>, ParseError> {
+    let unsupported = |what: &str| {
+        Err(ParseError::UnsupportedEdit(format!(
+            "an alternate-content drawing {what}"
+        )))
+    };
+    let mut anchors = Vec::new();
+    let mut placed: Option<ChartAnchor> = None;
+    for branch in wrapper.child_elements() {
+        if !(branch.is(NS_MARKUP_COMPATIBILITY, "Choice")
+            || branch.is(NS_MARKUP_COMPATIBILITY, "Fallback"))
+        {
+            return unsupported("holds something besides its branches");
+        }
+        let mut children = branch.child_elements();
+        let (Some(anchor), None) = (children.next(), children.next()) else {
+            return unsupported("branch does not hold exactly one anchor");
+        };
+        if !is_anchor(&anchor) {
+            return unsupported("branch holds something besides an anchor");
+        }
+        let geometry = anchor_geometry(anchor)?;
+        match placed {
+            None => placed = Some(geometry),
+            Some(first) if first == geometry => {}
+            Some(_) => return unsupported("places its branches on different cells"),
+        }
+        anchors.push(anchor);
+    }
+    if anchors.is_empty() {
+        return unsupported("has no branch");
     }
     Ok(anchors)
 }
