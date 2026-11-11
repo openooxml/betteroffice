@@ -8152,6 +8152,7 @@ pub(crate) mod open_test_cases {
                 default_row_height_pt: Some(16.0),
                 custom_height: true,
                 zero_height: false,
+                ..SheetFormat::default()
             };
             if col_styles {
                 sheet.col_styles.push(ColStyle {

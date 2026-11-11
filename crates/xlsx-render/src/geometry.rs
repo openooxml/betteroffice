@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use xlsx_model::styles::{Font, Stylesheet};
 use xlsx_model::value::CellValue;
-use xlsx_model::workbook::Sheet;
+use xlsx_model::workbook::{Sheet, SheetFormat};
 use xlsx_model::{CellRef, ColId, HAlign, MAX_COLS, MAX_ROWS, RowId};
 
 use crate::{Viewport, wrap};
@@ -103,10 +103,19 @@ impl ColumnScale {
             / self.dpi) as f32
     }
 
-    /// a screen column no `<col>` sizes: `baseColWidth` digits plus 5 pixels
-    /// of padding and gridline, rounded up to a multiple of 8 (ecma-376 §18.3.1.81).
-    fn default_pixels(self) -> f32 {
-        (((DEFAULT_BASE_COL_WIDTH * self.digit + 5.0) / 8.0).ceil() * 8.0) as f32
+    /// a screen column no `<col>` sizes: `defaultColWidth`, else `baseColWidth`
+    /// digits plus 5 pixels of padding and gridline, rounded up to a multiple
+    /// of 8 (ecma-376 §18.3.1.81).
+    fn default_pixels(self, format: &SheetFormat) -> f32 {
+        format.default_col_width.map_or_else(
+            || {
+                let base = format
+                    .base_col_width
+                    .map_or(DEFAULT_BASE_COL_WIDTH, f64::from);
+                (((base * self.digit + 5.0) / 8.0).ceil() * 8.0) as f32
+            },
+            |width| self.pixels(width),
+        )
     }
 }
 
@@ -933,7 +942,7 @@ impl GridGeometry {
         Self::with_sizes(
             sheet,
             styles,
-            scale.default_pixels(),
+            scale.default_pixels(&sheet.format),
             sheet
                 .format
                 .default_row_height_pt
@@ -1748,6 +1757,30 @@ mod tests {
         let arial = GridGeometry::new(&sheet, &normal_styles("Arial", 10.0));
         assert_eq!(arial.col_x(1), 119.0);
         assert_eq!(arial.col_x(2) - arial.col_x(1), 64.0);
+    }
+
+    #[test]
+    fn unsized_screen_columns_take_the_sheets_default_width() {
+        let calibri = normal_styles("Calibri", 11.0);
+        let mut sheet = sheet_with(&[(0, 17.0), (2, 0.0)], &[]);
+        sheet.format.default_col_width = Some(22.86);
+        let grid = GridGeometry::new(&sheet, &calibri);
+        assert_eq!(grid.col_x(1), 119.0);
+        assert_eq!(grid.col_x(2) - grid.col_x(1), 160.0);
+        assert_eq!(grid.col_x(3), grid.col_x(2));
+        assert_eq!(grid.col_x(4) - grid.col_x(3), 160.0);
+        sheet.format.base_col_width = Some(20);
+        assert_eq!(GridGeometry::new(&sheet, &calibri).col_x(2), 279.0);
+
+        sheet.format.default_col_width = None;
+        sheet.format.base_col_width = Some(10);
+        let grid = GridGeometry::new(&sheet, &calibri);
+        assert_eq!(grid.col_x(2) - grid.col_x(1), 80.0);
+        let verdana = GridGeometry::new(&sheet, &normal_styles("Verdana", 10.0));
+        assert_eq!(verdana.col_x(2) - verdana.col_x(1), 88.0);
+        sheet.format.default_col_width = Some(10.66);
+        let verdana = GridGeometry::new(&sheet, &normal_styles("Verdana", 10.0));
+        assert_eq!(verdana.col_x(2) - verdana.col_x(1), 85.0);
     }
 
     #[test]

@@ -45,6 +45,28 @@ fn zero_height_parts() -> Vec<(String, Vec<u8>)> {
 }
 
 #[test]
+fn sheet_format_reads_default_column_widths() {
+    for (format, default, base) in [
+        (
+            r#"<sheetFormatPr baseColWidth="10" defaultColWidth="10.66" defaultRowHeight="13"/>"#,
+            Some(10.66),
+            Some(10),
+        ),
+        (r#"<sheetFormatPr baseColWidth="12"/>"#, None, Some(12)),
+        (
+            r#"<sheetFormatPr defaultColWidth="300" baseColWidth="-1"/>"#,
+            None,
+            None,
+        ),
+    ] {
+        let parts = package(&format!("{format}<sheetData/>"), &[], false);
+        let sheet = &parse_workbook(&parts).unwrap().sheets[0];
+        assert_eq!(sheet.format.default_col_width, default, "{format}");
+        assert_eq!(sheet.format.base_col_width, base, "{format}");
+    }
+}
+
+#[test]
 fn zero_height_keeps_content_rows_visible_and_empty_rows_hidden() {
     let workbook = parse_workbook(&zero_height_parts()).unwrap();
     let sheet = &workbook.sheets[0];
