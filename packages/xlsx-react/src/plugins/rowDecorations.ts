@@ -64,6 +64,7 @@ export function checkedRowDecorations(value: unknown): XlsxPluginRowDecorations 
 
 /** One plugin's current set, as the gutter shows it. */
 export interface RowDecorationSet {
+  activationId?: string;
   pluginId: string;
   /** The activation that computed it. */
   key: string;
@@ -71,6 +72,7 @@ export interface RowDecorationSet {
 }
 
 export interface RowDecorationEntry {
+  activationId?: string;
   pluginId: string;
   key: string;
   item: XlsxPluginRowDecoration;
@@ -115,7 +117,7 @@ export function rowDecorationIndex(
         rows.set(item.row, row);
       }
       if (row.shown.length < ROW_DECORATIONS_PER_ROW) {
-        row.shown.push({ entry: { pluginId: set.pluginId, key: set.key, item }, label: label(item) });
+        row.shown.push({ entry: { pluginId: set.pluginId, key: set.key, ...(set.activationId && { activationId: set.activationId }), item }, label: label(item) });
         continue;
       }
       row.more += 1;
