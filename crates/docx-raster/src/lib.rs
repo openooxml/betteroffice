@@ -282,6 +282,7 @@ pub fn render_page_cached_scaled(
     renderer.scratch.images.fonts = Some(resources.fonts);
     renderer.scale = scale;
     renderer.paint_page(&mut pixmap, page, resources)?;
+    docx_layout::progress::pulse();
     Ok(RenderedPage {
         bytes: encode_png(pixmap, width, height)?,
         skipped_images: renderer.scratch.images.skipped,
@@ -577,6 +578,7 @@ impl<'k> Renderer<'k> {
         resources: &RenderResources<'_>,
         scope: ImageScope<'k>,
     ) -> Result<(), String> {
+        docx_layout::progress::tick();
         let attrs = primitive_attrs(primitive);
         validate_visual_attrs(primitive, attrs)?;
         let opacity = primitive_opacity(primitive)?;

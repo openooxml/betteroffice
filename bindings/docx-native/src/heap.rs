@@ -1,12 +1,16 @@
 //! Per-thread heap accounting for the native engine: the live and peak bytes the calling thread
 //! holds, as each WebAssembly instance counts its own heap. Counting is off until [`enable`] is
-//! called; it then stays on for the life of the process. While it is off an allocation does what
-//! the inner allocator does plus one relaxed load. A block freed on a thread other than the one
-//! that allocated it, or allocated before counting started, is subtracted on the freeing thread,
-//! saturating at zero.
+//! called, after which it stays on for the life of the process, or while any thread has a heap
+//! limit. While it is off an allocation does what the inner allocator does plus one relaxed load.
+//! A block freed on a thread other than the one that allocated it, or allocated before counting
+//! started, is subtracted on the freeing thread, saturating at zero.
+//!
+//! A limit never refuses an allocation: the one that takes its thread past the limit raises the
+//! thread's over-limit flag, and the engine call fails at its next checkpoint.
 
 use std::alloc::{GlobalAlloc, Layout};
 use std::cell::Cell;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(feature = "mimalloc")]
@@ -14,25 +18,88 @@ const INNER: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[cfg(not(feature = "mimalloc"))]
 const INNER: std::alloc::System = std::alloc::System;
 
+/// The start of the message of an engine call that ran past its thread's limit.
+pub(crate) const EXCEEDED: &str = "BetterOffice engine memory budget exceeded";
+
+const NO_LIMIT: usize = usize::MAX;
+
 static COUNTING: AtomicBool = AtomicBool::new(false);
+
+/// Whether a host asked for counting, and how many threads hold a limit.
+static SWITCH: Mutex<(bool, usize)> = Mutex::new((false, 0));
 
 thread_local! {
     static LIVE: Cell<usize> = const { Cell::new(0) };
     static PEAK: Cell<usize> = const { Cell::new(0) };
     static FAILED: Cell<usize> = const { Cell::new(0) };
+    static LIMIT: Cell<usize> = const { Cell::new(NO_LIMIT) };
+    static OVER: Cell<bool> = const { Cell::new(false) };
 }
 
 pub(crate) struct CountingAllocator;
 
 /// Starts counting on every thread. Idempotent; counting cannot be stopped again.
 pub(crate) fn enable() -> bool {
+    let mut switch = SWITCH.lock().unwrap_or_else(|error| error.into_inner());
+    switch.0 = true;
     COUNTING.store(true, Ordering::Relaxed);
     true
 }
 
-/// Whether counting has started.
+/// Whether counting is on.
 pub(crate) fn enabled() -> bool {
     COUNTING.load(Ordering::Relaxed)
+}
+
+/// Sets the calling thread's limit on live bytes; `None` removes it. Counting is on while any
+/// thread has a limit. A thread that had none, in a process where no host asked for counting,
+/// counts from zero.
+pub(crate) fn set_limit(bytes: Option<usize>) {
+    let limit = bytes.unwrap_or(NO_LIMIT);
+    let had = LIMIT.try_with(|slot| slot.replace(limit)).unwrap_or(NO_LIMIT) != NO_LIMIT;
+    let has = limit != NO_LIMIT;
+    let _ = OVER.try_with(|over| over.set(false));
+    let mut switch = SWITCH.lock().unwrap_or_else(|error| error.into_inner());
+    match (had, has) {
+        (false, true) => switch.1 += 1,
+        (true, false) => switch.1 = switch.1.saturating_sub(1),
+        _ => {}
+    }
+    if has && !had && !switch.0 {
+        let _ = LIVE.try_with(|live| live.set(0));
+    }
+    COUNTING.store(switch.0 || switch.1 > 0, Ordering::Relaxed);
+}
+
+/// The calling thread's limit.
+pub(crate) fn limit() -> Option<usize> {
+    Some(LIMIT.try_with(Cell::get).unwrap_or(NO_LIMIT)).filter(|limit| *limit != NO_LIMIT)
+}
+
+/// Whether an allocation took the calling thread past its limit since its current engine call
+/// began; later frees do not lower it.
+pub(crate) fn over_limit() -> bool {
+    OVER.try_with(Cell::get).unwrap_or(false)
+}
+
+/// Starts a limit-checked engine call; false when it must fail at once. An outermost call that
+/// starts within the limit forgets the crossing an earlier call left; a nested call inherits it.
+pub(crate) fn begin_call(outermost: bool) -> bool {
+    if !over_limit() {
+        return true;
+    }
+    if !outermost || limit().is_some_and(|limit| live() > limit) {
+        return false;
+    }
+    let _ = OVER.try_with(|over| over.set(false));
+    true
+}
+
+/// The error message of a call that ran past the limit, with the allocation that crossed it.
+pub(crate) fn exceeded() -> String {
+    let bytes = failed_bytes().max(1);
+    let limit = LIMIT.try_with(Cell::get).unwrap_or(NO_LIMIT);
+    format!("{EXCEEDED} ({bytes} bytes over a {limit}-byte budget)")
 }
 
 #[cold]
@@ -42,6 +109,11 @@ fn grew(bytes: usize) {
         let next = live.get().saturating_add(bytes);
         live.set(next);
         let _ = PEAK.try_with(|peak| peak.set(peak.get().max(next)));
+        if next > LIMIT.try_with(Cell::get).unwrap_or(NO_LIMIT)
+            && !OVER.try_with(|over| over.replace(true)).unwrap_or(true)
+        {
+            failed(bytes.max(1));
+        }
     });
 }
 

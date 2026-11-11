@@ -1,6 +1,6 @@
 /// <reference lib="webworker" />
 
-import { isEngineTrap } from '../../../../shared/office-session/trap';
+import { isEngineTrap, nativeBudgetFailure } from '../../../../shared/office-session/trap';
 import { isCellHasNoStoryRefusal } from './cellRefusal';
 import { resolveReservations, validReservationsPayload, type DocxResolvedReservations } from './reservations';
 import { readParsedToolbarMetadata, readResidentToolbarMetadata, type DocxToolbarMetadata } from './residentToolbarMetadata';
@@ -1661,7 +1661,8 @@ function trapped(id: number, error: Error): void {
   trap = error;
   let memory: ReturnType<typeof wasmModuleMemories> = [];
   try { memory = wasmModuleMemories(); } catch {}
-  const failed = memory.find((module) => module.label === 'docx-edit')?.failedAllocationBytes ?? 0;
+  const counted = memory.find((module) => module.label === 'docx-edit')?.failedAllocationBytes ?? 0;
+  const failed = counted > 0 ? counted : nativeBudgetFailure(error.message)?.bytes ?? 0;
   reply({
     id,
     ok: false,
