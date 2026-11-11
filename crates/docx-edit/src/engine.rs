@@ -5741,11 +5741,16 @@ impl EngineSession {
             let blocks = Rc::get_mut(&mut lowered.blocks)?;
             let map = Rc::get_mut(&mut lowered.map)?;
             let revealable = Rc::get_mut(&mut lowered.revealable_blocks)?;
-            lowered
+            let shift = lowered
                 .local
-                .patch(blocks.shared_mut(), map, revealable, &txn, env, &edit)
+                .patch(blocks.shared_mut(), map, revealable, &txn, env, &edit)?;
+            let renumbered = docx_layout::footnotes::number_note_references(
+                blocks.shared_mut().as_mut_slice(),
+                &env.note_numbering,
+            );
+            Some((shift, renumbered))
         })();
-        let Some(shift) = shift else {
+        let Some((shift, renumbered)) = shift else {
             if let Some((_, revision)) = previous_version
                 && let Some(blocks) = Rc::get_mut(&mut lowered.blocks)
             {
@@ -5776,7 +5781,9 @@ impl EngineSession {
                 *certificate = None;
             }
         }
-        let measurement_patch = if origin_matches {
+        let measurement_patch = if renumbered {
+            None
+        } else if origin_matches {
             Some(MeasurementPatch {
                 base_generation: lowered.generation,
                 current_generation: generation,
@@ -5884,6 +5891,7 @@ impl EngineSession {
                     Rc::make_mut(&mut lowered.revealable_blocks),
                     &mut units,
                     &mut lowered.local,
+                    &env.note_numbering,
                 );
                 lowered.preview = Some(Rc::new(units));
                 lowered.serialized_blocks = None;

@@ -535,81 +535,164 @@ impl NoteCounters {
     }
 }
 
+/// A block of a lowered story, owned or shared, whose note reference marks
+/// [`number_note_references`] sets.
+pub trait NoteReferenceBlock {
+    fn block(&self) -> &LayoutBlock;
+    fn block_mut(&mut self) -> &mut LayoutBlock;
+}
+
+impl NoteReferenceBlock for LayoutBlock {
+    fn block(&self) -> &LayoutBlock {
+        self
+    }
+
+    fn block_mut(&mut self) -> &mut LayoutBlock {
+        self
+    }
+}
+
+impl NoteReferenceBlock for std::rc::Rc<LayoutBlock> {
+    fn block(&self) -> &LayoutBlock {
+        self
+    }
+
+    fn block_mut(&mut self) -> &mut LayoutBlock {
+        std::rc::Rc::make_mut(self)
+    }
+}
+
+fn referenced_note(text: &TextRun) -> Option<(i64, NoteKind)> {
+    if let Some(id) = text.fmt.footnote_ref_id {
+        Some((id as i64, NoteKind::Footnote))
+    } else {
+        text.fmt
+            .endnote_ref_id
+            .map(|id| (id as i64, NoteKind::Endnote))
+    }
+}
+
+enum ReferenceVisit<'a> {
+    Reference(&'a TextRun),
+    SectionEnd,
+}
+
+fn paragraph_references<'a>(
+    paragraph: &'a ParagraphBlock,
+    visit: &mut dyn FnMut(ReferenceVisit<'a>),
+) {
+    for run in &paragraph.runs {
+        if let Run::Text(text) = run
+            && referenced_note(text).is_some()
+        {
+            visit(ReferenceVisit::Reference(text));
+        }
+    }
+}
+
+fn block_references<'a>(block: &'a LayoutBlock, visit: &mut dyn FnMut(ReferenceVisit<'a>)) {
+    match block {
+        LayoutBlock::Paragraph(paragraph) => paragraph_references(paragraph, visit),
+        LayoutBlock::Table(table) => {
+            for cell in table.rows.iter().flat_map(|row| &row.cells) {
+                for block in &cell.blocks {
+                    block_references(block, visit);
+                }
+            }
+        }
+        LayoutBlock::TextBox(text_box) => {
+            for paragraph in &text_box.content {
+                paragraph_references(paragraph, visit);
+            }
+        }
+        _ => {}
+    }
+    if advances_region_section(block) {
+        visit(ReferenceVisit::SectionEnd);
+    }
+}
+
+fn paragraph_references_mut(paragraph: &mut ParagraphBlock, visit: &mut dyn FnMut(&mut TextRun)) {
+    for run in &mut paragraph.runs {
+        if let Run::Text(text) = run
+            && referenced_note(text).is_some()
+        {
+            visit(text);
+        }
+    }
+}
+
+fn block_references_mut(block: &mut LayoutBlock, visit: &mut dyn FnMut(&mut TextRun)) {
+    match block {
+        LayoutBlock::Paragraph(paragraph) => paragraph_references_mut(paragraph, visit),
+        LayoutBlock::Table(table) => {
+            for cell in table.rows.iter_mut().flat_map(|row| &mut row.cells) {
+                for block in &mut cell.blocks {
+                    block_references_mut(block, visit);
+                }
+            }
+        }
+        LayoutBlock::TextBox(text_box) => {
+            for paragraph in &mut text_box.content {
+                paragraph_references_mut(paragraph, visit);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Sets each note reference run's text to its note's label, numbered in document order by the
 /// counters [`build_note_presentations`] numbers the notes with. `sections` holds each region
-/// section's properties; without any, notes number in decimal from 1.
-pub fn number_note_references(blocks: &mut [LayoutBlock], sections: &[SectionNoteNumbering]) {
-    struct References<'a> {
-        sections: &'a [SectionNoteNumbering],
-        section: usize,
-        counters: NoteCounters,
-        labels: HashMap<i64, String>,
-    }
-
-    impl References<'_> {
-        fn paragraph(&mut self, paragraph: &mut ParagraphBlock) {
-            for run in &mut paragraph.runs {
-                let Run::Text(text) = run else {
-                    continue;
+/// section's properties; without any, notes number in decimal from 1. Only a block whose marks
+/// change is written, so a shared block whose marks already read their labels keeps its
+/// identity. Returns whether any block changed.
+pub fn number_note_references<B: NoteReferenceBlock>(
+    blocks: &mut [B],
+    sections: &[SectionNoteNumbering],
+) -> bool {
+    let fallback = SectionNoteNumbering::default();
+    let mut section = 0_usize;
+    let mut counters = NoteCounters::default();
+    let mut note_labels = HashMap::<i64, String>::new();
+    let mut labels = Vec::new();
+    let mut changed = false;
+    for block in blocks {
+        let mut stale = false;
+        block_references(block.block(), &mut |visit| match visit {
+            ReferenceVisit::SectionEnd => section += 1,
+            ReferenceVisit::Reference(text) => {
+                let Some((note_id, kind)) = referenced_note(text) else {
+                    return;
                 };
-                let (note_id, kind) = if let Some(id) = text.fmt.footnote_ref_id {
-                    (id as i64, NoteKind::Footnote)
-                } else if let Some(id) = text.fmt.endnote_ref_id {
-                    (id as i64, NoteKind::Endnote)
-                } else {
-                    continue;
-                };
-                let map_id = note_reference_map_id(note_id, kind);
-                if let Some(label) = self.labels.get(&map_id) {
-                    text.text.clone_from(label);
-                    continue;
-                }
-                let fallback = SectionNoteNumbering::default();
-                let numbering = self
-                    .sections
-                    .get(self.section)
-                    .or(self.sections.last())
-                    .unwrap_or(&fallback);
-                let section = self.section.to_string();
-                let (_, label) =
-                    self.counters.next(kind, numbering.properties(kind), &section, None);
-                text.text.clone_from(&label);
-                self.labels.insert(map_id, label);
+                let label = note_labels
+                    .entry(note_reference_map_id(note_id, kind))
+                    .or_insert_with(|| {
+                        let numbering = sections
+                            .get(section)
+                            .or(sections.last())
+                            .unwrap_or(&fallback);
+                        let section = section.to_string();
+                        counters
+                            .next(kind, numbering.properties(kind), &section, None)
+                            .1
+                    })
+                    .clone();
+                stale |= text.text != label;
+                labels.push(label);
             }
-        }
-
-        fn blocks(&mut self, blocks: &mut [LayoutBlock]) {
-            for block in blocks {
-                match block {
-                    LayoutBlock::Paragraph(paragraph) => self.paragraph(paragraph),
-                    LayoutBlock::Table(table) => {
-                        for row in &mut table.rows {
-                            for cell in &mut row.cells {
-                                self.blocks(&mut cell.blocks);
-                            }
-                        }
-                    }
-                    LayoutBlock::TextBox(text_box) => {
-                        for paragraph in &mut text_box.content {
-                            self.paragraph(paragraph);
-                        }
-                    }
-                    _ => {}
+        });
+        if stale {
+            let mut next = labels.drain(..);
+            block_references_mut(block.block_mut(), &mut |text| {
+                if let Some(label) = next.next() {
+                    text.text = label;
                 }
-                if advances_region_section(block) {
-                    self.section += 1;
-                }
-            }
+            });
+            changed = true;
         }
+        labels.clear();
     }
-
-    References {
-        sections,
-        section: 0,
-        counters: NoteCounters::default(),
-        labels: HashMap::new(),
-    }
-    .blocks(blocks);
+    changed
 }
 
 pub fn assign_note_presentations(
