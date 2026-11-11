@@ -698,7 +698,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
     host.layoutChanged(currentLayout);
     publishSelection();
     host.flushSelection();
-  }, [host, currentLayout, publishSelection]);
+  }, [host, currentLayout, options.layoutError, publishSelection]);
 
   useLayoutEffect(() => {
     if (!managed) return;
