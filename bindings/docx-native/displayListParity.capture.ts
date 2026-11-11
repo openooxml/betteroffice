@@ -18,6 +18,18 @@ let probed: object | undefined;
 
 const digest = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
 
+const canonicalNames: Record<string, string> = {
+  'ｍｓ 明朝': 'ms mincho',
+  'ｍｓ ｐ明朝': 'ms pmincho',
+  'ｍｓ ゴシック': 'ms gothic',
+  'ｍｓ ｐゴシック': 'ms pgothic',
+};
+
+function substituteName(family: string): string {
+  const name = family.trim().toLowerCase();
+  return canonicalNames[name] ?? name;
+}
+
 function storeOf(session: object): Map<number, Face> {
   let store = stores.get(session);
   if (!store) stores.set(session, store = new Map());
@@ -28,7 +40,6 @@ function observe(EditSession: { prototype: Record<string, Method> }): void {
   const proto = EditSession.prototype;
   const register = proto.register_measure_font!;
   const substitute = proto.register_substitute_measure_font!;
-  const update = proto.update_measure_font_outlines!;
   const clear = proto.clear_measure_fonts!;
   const outline = proto.outline_glyph_json!;
   proto.register_measure_font = function (this: object, bytes: Uint8Array) {
@@ -39,16 +50,11 @@ function observe(EditSession: { prototype: Record<string, Method> }): void {
   proto.register_substitute_measure_font = function (this: object, base: number, family: string) {
     const id = Reflect.apply(substitute, this, [base, family]) as number;
     const face = storeOf(this).get(base);
-    if (id !== base && face) storeOf(this).set(id, { bytes: face.bytes, view: family });
+    if (id !== base && face) storeOf(this).set(id, { bytes: face.bytes, view: substituteName(family) });
     return id;
   } as Method;
-  proto.update_measure_font_outlines = function (this: object, fontId: number, bytes: Uint8Array) {
-    Reflect.apply(update, this, [fontId, bytes]);
-    const store = storeOf(this);
-    const old = store.get(fontId)?.bytes;
-    if (old === undefined) return;
-    const next = digest(bytes);
-    for (const [id, face] of store) if (face.bytes === old) store.set(id, { ...face, bytes: next });
+  proto.update_measure_font_outlines = function (this: object) {
+    throw new Error('display-list parity: parity capture does not track outline updates');
   } as Method;
   proto.clear_measure_fonts = function (this: object) {
     Reflect.apply(clear, this, []);
