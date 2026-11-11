@@ -13,7 +13,7 @@ import {
 import { projectDocxEditState, withStoredMarks } from './residentCommandEditState';
 import { resolveDocxSelectionIntent, selectResidentPartPage } from './residentCommandSelection';
 import { applyCellNavigation, resolveCellNavigation } from './residentCommandCells';
-import { cellsForCaret, readCellSelection, resolveLiveCell, rootOf, tableRangeFor } from './residentCommandTableSelection';
+import { cellsForCaret, laidOutStory, readCellSelection, resolveLiveCell, tableRangeFor } from './residentCommandTableSelection';
 import {
   applyTableCommand, isTableCommandKind, liveTableAncestors, nearTable,
   preflightTableCommand, syncCellSelectionWithCaret, type TableCommandIntent,
@@ -1152,13 +1152,7 @@ function applyPreparedDocxCommand(
     const native = !story || engine.geometryReader.hasStory(story) ? engine.selection() : null;
     const resolvedSelection = resolved?.ok ? resolved.selection : native && commandSelectionRange(engine, { anchor: native.anchor, focus: native.head })
       ? { anchor: native.anchor, focus: native.head } : null;
-    const projections = new Map<string, YrsPositionProjection | null>();
-    const placed = (at: YrsLoc): boolean => {
-      const root = rootOf(at.story);
-      if (at.story === root) return true;
-      if (!projections.has(root)) projections.set(root, createYrsPositionProjection(engine.geometryReader, root));
-      return projections.get(root)?.positionForLoc(at) != null;
-    };
+    const placed = (at: YrsLoc): boolean => laidOutStory(engine, at.story);
     const hidden = tables.length > 0 && !!resolvedSelection &&
       ![resolvedSelection.anchor, resolvedSelection.focus].every(placed);
     const selected = hidden ? null : resolvedSelection;

@@ -8,6 +8,7 @@ import type {
   DocxWorkerCommandState,
   ResolvedDocxCommandSelection,
 } from './residentCommandProtocol';
+import { besideHiddenStory, laidOutStory } from './residentCommandTableSelection';
 
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u;
 const commandStates = new WeakMap<DocxWorkerCommandEngine, DocxWorkerCommandState>();
@@ -91,7 +92,12 @@ export function readCommandSelection(
   const anchor = resolve(selected.anchor);
   const focus = resolve(selected.focus);
   if (!anchor || !focus) return { ok: false, reason: 'stale-anchor' };
-  const selection = { anchor, focus };
+  let selection: DocxCommandSelection = { anchor, focus };
+  if (!laidOutStory(engine, anchor.story)) {
+    const beside = besideHiddenStory(engine, anchor.story);
+    if (!beside) return { ok: false, reason: 'stale-anchor' };
+    selection = { anchor: beside, focus: beside };
+  }
   const range = commandSelectionRange(engine, selection);
   return range ? { ok: true, selection, range } : { ok: false, reason: 'invalid-selection' };
 }

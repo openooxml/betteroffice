@@ -290,3 +290,45 @@ for (const [index, lost] of LOST.entries()) {
     }
   }, TIMEOUT);
 }
+
+for (const [index, queued] of (['navigate', 'deleteBackward'] as const).entries()) {
+  test(`a queued ${queued} whose predecessor selection sits in a cell a merge hid in between moves beside the table, leaves the hidden text unchanged and keeps the session usable`, async () => {
+    const base = 9900 + index * 10;
+    const replica = await open(base + 1);
+    const first = await peer(replica, base + 2);
+    const second = await peer(replica, base + 3);
+    try {
+      const story = cellStory(replica);
+      const inCell = { story, paraId: replica.engine.paragraphs(story)[0]!.paraId, offset: 2 };
+      const before = cellTexts(replica, story);
+      first.insertRow(at('body', 0, 0), 'below');
+      sync(first, second);
+      second.setColumnWidth(at('body', 0, 0), 2000);
+      expect(first.undo()).toBe(true);
+      sync(first, second);
+      expect(second.undo()).toBe(true);
+      sync(first, second);
+      const update = second.encodeStateAsUpdate(replica.engine.encodeStateVector()).slice().buffer;
+
+      const selected = replica.session.submit('select', { selection: { anchor: inCell, focus: inCell } });
+      const merged = replica.session.submit('applyRemoteUpdate', { update }, merge);
+      const command = queued === 'navigate'
+        ? replica.session.submit('navigate', { unit: 'character', direction: 'forward', extend: false }, { after: selected })
+        : replica.session.submit('deleteBackward', {}, { after: selected });
+      await selected.ack;
+      expect((await merged.ack).status).toBe('applied');
+      expect(['applied', 'noop', 'refused']).toContain((await command.ack).status);
+
+      expect(located(replica, story)).toBeNull();
+      expect(cellTexts(replica, story)).toEqual(before);
+      expect(replica.session.state.selection?.focus.story).not.toBe(story);
+      const body = { story: 'body', paraId: replica.engine.paragraphs('body')[0]!.paraId, offset: 0 };
+      expect((await replica.session.submit('insertText', { text: 'Z', selection: { anchor: body, focus: body } }).ack).status).toBe('applied');
+      expect(replica.engine.paragraphs('body')[0]!.text.startsWith('Z')).toBe(true);
+    } finally {
+      first.destroy();
+      second.destroy();
+      replica.session.dispose();
+    }
+  }, TIMEOUT);
+}

@@ -1,5 +1,5 @@
 import { isEngineTrap } from '../../../../shared/office-session/trap';
-import type { YrsCellLoc, YrsLoc, YrsTableRange } from './index';
+import type { YrsCellLoc, YrsLoc, YrsTableLoc, YrsTableRange } from './index';
 import type { DocxCommandSelection, DocxWorkerCommandEngine } from './residentCommandProtocol';
 import { tableAnchors, type TablePayload } from './storyPlainText';
 import { createYrsPositionProjection, isUnavailableTablePayload } from './yrsPositionProjection';
@@ -21,15 +21,44 @@ export function readCellSelection(engine: Pick<DocxWorkerCommandEngine, 'cellSel
 
 type ProjectedCellTable = { story: string; tableIndex: number; cells: { story: string; row: number; column: number }[] };
 
-/** The tables of `root` as the position projection lays them out: only what cell location reads. */
-function projectedCellTables(engine: DocxWorkerCommandEngine, root: string): ProjectedCellTable[] | null {
+/** What a root's position projection lays out: its tables, and every story it places. */
+type ProjectedRoot = { tables: ProjectedCellTable[]; stories: ReadonlySet<string> };
+
+/** The tables and stories of `root` as the position projection lays them out: only what cell location reads. */
+function projectRoot(engine: DocxWorkerCommandEngine, root: string): ProjectedRoot | null {
   const projection = createYrsPositionProjection(engine.geometryReader, root);
   if (!projection) return null;
-  return projection.allTables().map((table) => ({
-    story: table.story,
-    tableIndex: table.tableIndex,
-    cells: table.cells.map((cell) => ({ story: cell.story, row: cell.row, column: cell.column })),
-  }));
+  return {
+    tables: projection.allTables().map((table) => ({
+      story: table.story,
+      tableIndex: table.tableIndex,
+      cells: table.cells.map((cell) => ({ story: cell.story, row: cell.row, column: cell.column })),
+    })),
+    stories: new Set(projection.storyIds()),
+  };
+}
+
+/** The paragraph next to `table` in its story, after it when there is one: where a caret goes that leaves it. */
+export function nearTable(engine: Pick<DocxWorkerCommandEngine, 'geometryReader'>, table: YrsTableLoc): YrsLoc | null {
+  const segments = engine.geometryReader.storySegments(table.story);
+  let ordinal = 0;
+  let target = -1;
+  for (let index = 0; index < segments.length; index += 1) {
+    const segment = segments[index]!;
+    if (segment.kind !== 'embed' || segment.embedKind !== 'table') continue;
+    if (ordinal === table.tableIndex) {
+      target = index;
+      break;
+    }
+    ordinal += 1;
+  }
+  if (target < 0) return null;
+  const following = segments.slice(target + 1).find((segment) => segment.kind === 'pilcrow');
+  const preceding = segments.slice(0, target).reverse().find((segment) => segment.kind === 'pilcrow');
+  const paragraph = following ?? preceding;
+  return paragraph?.kind === 'pilcrow'
+    ? { story: table.story, paraId: paragraph.paraId, offset: 0 }
+    : null;
 }
 
 function cellIn(tables: readonly ProjectedCellTable[] | null, story: string): YrsCellLoc | null {
@@ -45,7 +74,7 @@ function cellIn(tables: readonly ProjectedCellTable[] | null, story: string): Yr
   return best;
 }
 
-const projectedTables = new WeakMap<object, Map<string, { key: string; tables: ProjectedCellTable[] | null }>>();
+const projectedTables = new WeakMap<object, Map<string, { key: string; projected: ProjectedRoot | null }>>();
 let shadowCheck = false;
 const cacheCounts = { built: 0, reused: 0, uncached: 0 };
 
@@ -68,27 +97,10 @@ export function cellLocationCacheCounts(): { built: number; reused: number; unca
 export function resolveLiveCell(engine: DocxWorkerCommandEngine, story: string): YrsCellLoc | null {
   const root = rootOf(story);
   if (story === root) return null;
-  const key = typeof engine.cellStructureKey === 'function' ? engine.cellStructureKey() : null;
-  let tables: ProjectedCellTable[] | null;
-  if (key === null) {
-    cacheCounts.uncached++;
-    tables = projectedCellTables(engine, root);
-  } else {
-    let roots = projectedTables.get(engine);
-    if (!roots) projectedTables.set(engine, roots = new Map());
-    const cached = roots.get(root);
-    if (cached?.key === key) {
-      cacheCounts.reused++;
-      tables = cached.tables;
-    } else {
-      cacheCounts.built++;
-      tables = projectedCellTables(engine, root);
-      roots.set(root, { key, tables });
-    }
-  }
-  const located = cellIn(tables, story);
+  const { key, projected } = projectedRoot(engine, root);
+  const located = cellIn(projected?.tables ?? null, story);
   if (shadowCheck && key !== null) {
-    const fresh = cellIn(projectedCellTables(engine, root), story);
+    const fresh = cellIn(projectRoot(engine, root)?.tables ?? null, story);
     if (JSON.stringify(fresh) !== JSON.stringify(located)) {
       throw new Error(`cell location cache differs for ${story}: ${JSON.stringify(located)} != ${JSON.stringify(fresh)}`);
     }
@@ -96,8 +108,70 @@ export function resolveLiveCell(engine: DocxWorkerCommandEngine, story: string):
   return located;
 }
 
+/** `root`'s projection, kept per engine and root until the engine's structure key changes. */
+function projectedRoot(engine: DocxWorkerCommandEngine, root: string): { key: string | null; projected: ProjectedRoot | null } {
+  const key = typeof engine.cellStructureKey === 'function' ? engine.cellStructureKey() : null;
+  if (key === null) {
+    cacheCounts.uncached++;
+    return { key, projected: projectRoot(engine, root) };
+  }
+  let roots = projectedTables.get(engine);
+  if (!roots) projectedTables.set(engine, roots = new Map());
+  const cached = roots.get(root);
+  if (cached?.key === key) {
+    cacheCounts.reused++;
+    return { key, projected: cached.projected };
+  }
+  cacheCounts.built++;
+  const projected = projectRoot(engine, root);
+  roots.set(root, { key, projected });
+  return { key, projected };
+}
+
+/**
+ * Whether the position projection of `story`'s root lays `story` out: a root always, any other
+ * story only when the walk reaches it through complete tables and block controls. A cell of an
+ * unavailable table, at any depth, is not laid out. The one test a selection passes before a
+ * command uses it, wherever the selection comes from.
+ */
+export function laidOutStory(engine: DocxWorkerCommandEngine, story: string): boolean {
+  const root = rootOf(story);
+  if (story === root) return true;
+  const { key, projected } = projectedRoot(engine, root);
+  const placed = projected?.stories.has(story) ?? false;
+  if (shadowCheck && key !== null && (projectRoot(engine, root)?.stories.has(story) ?? false) !== placed) {
+    throw new Error(`laid-out story cache differs for ${story}`);
+  }
+  return placed;
+}
+
+/**
+ * Where a selection in `story`, which the projection does not lay out, goes instead: the
+ * paragraph next to the unavailable table that hides it, in a story the projection lays out; the
+ * innermost such table whose story `story` descends from when its rows no longer name the cell.
+ */
+export function besideHiddenStory(engine: DocxWorkerCommandEngine, story: string): YrsLoc | null {
+  const projected = projectedRoot(engine, rootOf(story)).projected;
+  if (!projected) return null;
+  let fallback: YrsTableLoc | null = null;
+  for (const parent of projected.stories) {
+    let ordinal = 0;
+    for (const segment of engine.geometryReader.storySegments(parent)) {
+      if (segment.kind !== 'embed' || segment.embedKind !== 'table') continue;
+      const table = { story: parent, tableIndex: ordinal++ };
+      if (!isUnavailableTablePayload(segment.payload)) continue;
+      const rows = Array.isArray(segment.payload.rows) ? segment.payload.rows as TablePayload['rows'] : [];
+      if (rows.some((row) => row?.cells?.some((cell) => cell?.story === story || story.startsWith(`${cell?.story}:`)))) {
+        return nearTable(engine, table);
+      }
+      if (story.startsWith(`${parent}:`) && (!fallback || parent.length > fallback.story.length)) fallback = table;
+    }
+  }
+  return fallback ? nearTable(engine, fallback) : null;
+}
+
 function validPayload(value: unknown): value is TablePayload {
-  return !!value && typeof value === 'object' && !isUnavailableTablePayload(value as Record<string, unknown>) &&
+  return !!value && typeof value === 'object' && !isUnavailableTablePayload(value) &&
     Array.isArray((value as TablePayload).rows);
 }
 

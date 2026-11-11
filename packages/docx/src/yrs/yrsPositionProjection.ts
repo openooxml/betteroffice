@@ -209,6 +209,11 @@ export class YrsPositionProjection {
     return this.nodes.get(position) ?? null;
   }
 
+  /** Every story this projection lays out: the root, and each story reached through complete tables and block controls. */
+  storyIds(): string[] {
+    return [...this.stories.keys()];
+  }
+
   allTables(): readonly YrsProjectedTable[] {
     return this.tables;
   }
@@ -551,7 +556,7 @@ export class YrsPositionProjection {
 }
 
 /** Whether a table embed's payload lacks its properties, grid or rows. @internal */
-export function isUnavailableTablePayload(payload: Record<string, unknown>): boolean {
+export function isUnavailableTablePayload(payload: object): boolean {
   return !('tblPr' in payload && 'grid' in payload && 'rows' in payload);
 }
 

@@ -84,7 +84,7 @@ import { partMetadata } from './residentParts';
 import { readControlHandles } from './residentControls';
 import { readResidentProperties } from './residentProperties';
 import { readResidentFrameGeometry, readResidentCellSelectionRects, resetResidentObjectHandles } from './residentObjectGeometry';
-import { cellSelectionHeadPosition, readCellSelection } from './residentCommandTableSelection';
+import { cellSelectionHeadPosition, laidOutStory, readCellSelection } from './residentCommandTableSelection';
 import {
   resolveBookmarkPosition,
   resolveBookmarkTarget,
@@ -649,7 +649,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
           const focus = selected?.sticky
             ? engine.resolveStickyPosition({ story: selected.story, encoded: selected.sticky })
             : selected ?? engine.selection()?.head;
-          if (focus) selectionNavigation = {
+          if (focus && laidOutStory(engine as DocxWorkerCommandEngine, focus.story)) selectionNavigation = {
             focus: navigation.unit === 'page' ? cellSelectionHeadPosition(engine, focus) ?? focus : focus,
             direction: navigation.direction,
             ...(navigation.unit === 'page' ? { distance: navigation.distance } : {}) };
