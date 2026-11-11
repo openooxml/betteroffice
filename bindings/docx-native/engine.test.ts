@@ -7,6 +7,8 @@ import initWasm, * as wasm from '../../packages/docx/src/wasm/generated/edit/doc
 import initPreflight, { font_preflight as wasmFontPreflight } from '../../packages/docx/src/wasm/generated/preflight/docx_preflight.js';
 
 import { openFailureKind } from '../../packages/docx-react/src/components/openFailure';
+import { readClipboardSlice, readTableFragment, type ClipboardTableReader } from '../../packages/docx/src/yrs/clipboardFragment';
+import type { YrsStorySegment } from '../../packages/docx/src/yrs/index';
 
 type Engine = typeof wasm;
 type Session = wasm.EditSession;
@@ -2237,4 +2239,105 @@ test('native and wasm find a table crossing undos emptied in a header, a footnot
       a.free();
     }
   }
+});
+
+type TablePayloadEdit = (payload: Record<string, unknown>) => Record<string, unknown>;
+
+function clipboardTableBytes(tblPr: string): Uint8Array {
+  const encoder = new TextEncoder();
+  const paragraph = (text: string) => `<w:p><w:r><w:t>${text}</w:t></w:r></w:p>`;
+  const cell = (text: string) => `<w:tc><w:tcPr><w:tcW w:w="2340" w:type="dxa"/></w:tcPr>${paragraph(text)}</w:tc>`;
+  return wasm.rezip_docx({
+    '[Content_Types].xml': encoder.encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'),
+    '_rels/.rels': encoder.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'),
+    'word/document.xml': encoder.encode(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${paragraph('Before')}<w:tbl>${tblPr}<w:tblGrid><w:gridCol w:w="2340"/><w:gridCol w:w="2340"/></w:tblGrid><w:tr>${cell('A')}${cell('B')}</w:tr><w:tr>${cell('C')}${cell('D')}</w:tr></w:tbl>${paragraph('After')}<w:sectPr/></w:body></w:document>`),
+  });
+}
+
+function clipboardCopies(session: Session, edit: TablePayloadEdit = (payload) => payload) {
+  const reader: ClipboardTableReader = {
+    storySegments: (story) => (JSON.parse(session.story_segments(story)) as YrsStorySegment[]).map((segment) =>
+      segment.kind === 'embed' && segment.embedKind === 'table' ? { ...segment, payload: edit({ ...segment.payload }) } : segment),
+    tablePayload: (story, tableIndex) => {
+      const payload = session.table_payload(story, tableIndex);
+      return payload === undefined ? null : edit(JSON.parse(payload) as Record<string, unknown>);
+    },
+  };
+  const cell = (row: number, column: number) => ({ story: 'body', tableIndex: 0, row, column });
+  return {
+    fragment: () => readTableFragment(reader, { story: 'body', tableIndex: 0 }),
+    cells: () => readClipboardSlice(reader, { cells: { anchor: cell(0, 0), head: cell(1, 1) } }),
+    story: () => readClipboardSlice(reader, { story: 'body', from: 0, to: session.story_len('body') }),
+  };
+}
+
+function withClipboardEngines(bytes: Uint8Array, run: (expected: Session, actual: Session) => void): void {
+  const expected = new wasm.EditSession(70);
+  const actual = new native.EditSession(70);
+  try {
+    expected.open_docx(bytes, true, 'opening');
+    actual.open_docx(bytes, true, 'opening');
+    run(expected, actual as unknown as Session);
+  } finally {
+    actual.free();
+    expected.free();
+  }
+}
+
+const CLIPBOARD_ROUTES = ['fragment', 'cells', 'story'] as const;
+
+for (const [label, tblPr] of [['null', null], ['an array', []]] as const) {
+  test(`native and wasm copy a table whose tblPr is ${label} as one whose tblPr is empty on every clipboard route`, () => {
+    withClipboardEngines(clipboardTableBytes('<w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>'), (expected, actual) => {
+      const odd: TablePayloadEdit = (payload) => ({ ...payload, tblPr });
+      const empty: TablePayloadEdit = (payload) => ({ ...payload, tblPr: {} });
+      for (const route of CLIPBOARD_ROUTES) {
+        const copied = clipboardCopies(expected, odd)[route]();
+        expect(copied, route).toEqual(clipboardCopies(expected, empty)[route]());
+        expect(clipboardCopies(actual, odd)[route](), route).toEqual(copied);
+      }
+      const slice = clipboardCopies(actual, odd).cells();
+      expect(slice.fragment?.paragraphs[0]?.tables?.[0]?.tblPr).toEqual({});
+      expect(clipboardCopies(actual, odd).fragment().tblPr).toEqual({});
+    });
+  });
+}
+
+for (const key of ['tblPr', 'grid', 'rows'] as const) {
+  test(`native and wasm refuse to copy a table without ${key} with the table-unavailable code on every clipboard route`, () => {
+    withClipboardEngines(clipboardTableBytes('<w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>'), (expected, actual) => {
+      const without: TablePayloadEdit = (payload) => {
+        const rest = { ...payload };
+        delete rest[key];
+        return rest;
+      };
+      for (const route of CLIPBOARD_ROUTES) {
+        const thrown = expectThrownParity(
+          () => clipboardCopies(expected, without)[route](),
+          () => clipboardCopies(actual, without)[route](),
+        );
+        expect(thrown, route).toBeInstanceOf(Error);
+        expect((thrown as Error & { code?: string }).code, route).toBe('table-unavailable');
+      }
+    });
+  });
+}
+
+test('native and wasm open a table without w:tblPr with its properties present and copy it on every clipboard route', () => {
+  withClipboardEngines(clipboardTableBytes(''), (expected, actual) => {
+    for (const session of [expected, actual]) {
+      const payload = JSON.parse(session.table_payload('body', 0)!) as Record<string, unknown>;
+      expect(Object.keys(payload)).toEqual(expect.arrayContaining(['tblPr', 'grid', 'rows']));
+      expect(payload.tblPr).toBeInstanceOf(Object);
+      expect(Array.isArray(payload.tblPr)).toBe(false);
+    }
+    for (const route of CLIPBOARD_ROUTES) {
+      const copied = clipboardCopies(expected)[route]();
+      expect(clipboardCopies(actual)[route](), route).toEqual(copied);
+    }
+    const fragment = clipboardCopies(actual).fragment();
+    expect(fragment.rows).toHaveLength(2);
+    const slice = clipboardCopies(actual).cells();
+    expect(slice.fragment?.paragraphs[0]?.tables?.[0]?.rows).toHaveLength(2);
+  });
 });
