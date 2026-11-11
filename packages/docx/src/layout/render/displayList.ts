@@ -324,6 +324,16 @@ export interface DocAttrs {
   /** Resolved line index within the owning paragraph. */
   lineIndex?: number;
   /**
+   * Text the paragraph reads before this run: `"\n"` per explicit line break
+   * and `"\t"` per tab between it and the previous run, which paint nothing.
+   */
+  separatorBefore?: string;
+  /**
+   * As `separatorBefore`, for line breaks and tabs that end the fragment's
+   * lines with nothing after them in it: read after this, its last text run.
+   */
+  separatorAfter?: string;
+  /**
    * Table cell the primitive paints inside, when any. The a11y mirror builds
    * real ARIA table semantics (role table/row/cell, aria-row/colindex) from
    * this — without it a table block reads as a flat run of text.

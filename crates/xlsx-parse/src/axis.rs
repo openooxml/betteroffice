@@ -49,6 +49,17 @@ impl AxisMap {
         (source >= segment.source).then(|| segment.current + (source - segment.source))
     }
 
+    /// Current index of a source index, or of the first source index after it that survives
+    /// when it was deleted: where a deleted row or column's neighbour now sits. `None` when no
+    /// later index survives.
+    pub fn current_at_or_after(&self, source: u32) -> Option<u32> {
+        let index = self
+            .segments
+            .partition_point(|segment| segment.source + segment.len <= source);
+        let segment = self.segments.get(index)?;
+        Some(segment.current + source.saturating_sub(segment.source))
+    }
+
     /// The source index of a current index; `None` for an inserted one.
     pub fn source(&self, current: u32) -> Option<u32> {
         let index = self
@@ -231,6 +242,20 @@ mod tests {
         assert_eq!(map.source(4), None);
         assert_eq!(map.source(5), Some(3));
         assert!(!map.is_identity());
+    }
+
+    #[test]
+    fn a_deleted_index_resolves_to_the_next_survivor() {
+        let mut map = AxisMap::identity(100);
+        map.delete(3, 2);
+        assert_eq!(map.current_at_or_after(2), Some(2));
+        assert_eq!(map.current_at_or_after(3), Some(3));
+        assert_eq!(map.current_at_or_after(4), Some(3));
+        assert_eq!(map.current_at_or_after(5), Some(3));
+        map.insert(3, 2);
+        assert_eq!(map.current_at_or_after(4), Some(5));
+        map.delete(90, 10);
+        assert_eq!(map.current_at_or_after(97), None);
     }
 
     #[test]
