@@ -40,16 +40,16 @@ thread_local! {
     static PAYLOAD_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// What one root's reachability walk found: the stories it reached, and whether it met an
-/// unavailable table on the way.
-pub(crate) struct RootReach {
+/// What the reachability walk from the document's roots found: the stories it reached, and
+/// whether it met an unavailable table on the way.
+pub(crate) struct DocumentReach {
     reached: HashSet<String>,
     met_unavailable: bool,
 }
 
-impl RootReach {
-    /// Whether the layout of this root shows a live story: hidden only when the walk met an
-    /// unavailable table and did not reach the story.
+impl DocumentReach {
+    /// Whether the layout shows a live story: hidden only when the walk met an unavailable table
+    /// and did not reach the story.
     fn shows(&self, story: &str) -> bool {
         !self.met_unavailable || self.reached.contains(story)
     }
@@ -93,48 +93,67 @@ impl EditingDoc {
         self.unavailable_tables_from(&roots)
     }
 
-    /// Whether the layout of `root` shows the live `story`. A story is hidden only on positive
-    /// evidence: the walk from `root` met an unavailable table and did not reach the story (a cell
-    /// of that table, at any depth). Without an unavailable table in reach every live story counts
-    /// as shown, exactly as before. Each root's walk is kept until a structural change, so typing
-    /// never walks again. The walk has no depth limit.
-    pub(crate) fn story_laid_out(&self, root: &str, story: &str) -> bool {
-        if crate::story_ref(&self.yrs_doc().transact(), story).is_err() {
-            return false;
-        }
-        if story == root {
-            return true;
+    /// Whether the layout shows the live `story` (a cell without its story under a complete table
+    /// counts as live: it shows as an empty paragraph). A story is hidden only on positive
+    /// evidence: the walk from the document's roots met an unavailable table and did not reach
+    /// the story. Without an unavailable table in reach every live story counts as shown, exactly
+    /// as before. The walk runs once per structural change, so typing never walks again, and has
+    /// no depth limit.
+    pub(crate) fn story_laid_out(&self, story: &str) -> bool {
+        match crate::story_ref(&self.yrs_doc().transact(), story) {
+            Ok(_) | Err(crate::EditError::CellHasNoStory(_)) => {}
+            Err(_) => return false,
         }
         let structure = self.story_revisions.lock().unwrap().structure;
-        if let Some((at, reach)) = self.laid_out_stories.lock().unwrap().get(root)
+        if let Some((at, reach)) = self.laid_out_stories.lock().unwrap().as_ref()
             && *at == structure
         {
             return reach.shows(story);
         }
-        let reach = self.reachable_stories(root);
+        let reach = self.reachable_stories(&self.document_roots());
         let laid_out = reach.shows(story);
-        self.laid_out_stories
-            .lock()
-            .unwrap()
-            .insert(root.to_owned(), (structure, std::sync::Arc::new(reach)));
+        *self.laid_out_stories.lock().unwrap() = Some((structure, std::sync::Arc::new(reach)));
         laid_out
     }
 
-    /// Every live story reachable from `root` through the cells of complete tables and block
-    /// controls' stories, at any depth: the stories the layout shows, named as the outline walk
-    /// names them, and whether the walk met an unavailable table. A malformed entry is skipped;
-    /// an unavailable table leads nowhere.
-    fn reachable_stories(&self, root: &str) -> RootReach {
+    /// The document's roots, from its story metadata: the body, and each header and footer its
+    /// sections reference. Notes are reached through their references.
+    fn document_roots(&self) -> Vec<String> {
+        use crate::stories::StoryInfoKind;
+        self.list_stories()
+            .stories
+            .into_iter()
+            .filter(|info| {
+                matches!(
+                    info.kind,
+                    StoryInfoKind::Body | StoryInfoKind::Header | StoryInfoKind::Footer
+                )
+            })
+            .map(|info| info.story)
+            .collect()
+    }
+
+    /// Every live story reachable from `roots` through the cells of complete tables, block
+    /// controls' stories and note references, at any depth: the stories the layout shows, named
+    /// as the outline walk names them, and whether the walk met an unavailable table. A cell
+    /// without its story under a complete table is reached as a leaf, as the layout shows it. A
+    /// malformed entry is skipped; an unavailable table leads nowhere.
+    fn reachable_stories(&self, roots: &[String]) -> DocumentReach {
         let txn = self.yrs_doc().transact();
         let mut reached = HashSet::new();
         let mut met_unavailable = false;
-        let mut queue = vec![root.to_owned()];
+        let mut queue = roots.to_vec();
         while let Some(story_id) = queue.pop() {
             if reached.contains(&story_id) {
                 continue;
             }
-            let Ok(story) = crate::story_ref(&txn, &story_id) else {
-                continue;
+            let story = match crate::story_ref(&txn, &story_id) {
+                Ok(story) => story,
+                Err(crate::EditError::CellHasNoStory(_)) => {
+                    reached.insert(story_id);
+                    continue;
+                }
+                Err(_) => continue,
             };
             reached.insert(story_id.clone());
             let mut table_index = 0;
@@ -177,11 +196,23 @@ impl EditingDoc {
                         Some(Out::Any(Any::String(child))) => queue.push(child.to_string()),
                         Some(_) => {}
                     },
+                    Some("noteRef") => {
+                        for (key, prefix) in [("footnoteRefId", "fn"), ("endnoteRefId", "en")] {
+                            let id = match map.get(&txn, key) {
+                                Some(Out::Any(Any::Number(id))) => Some(id as i64),
+                                Some(Out::Any(Any::String(id))) => id.parse::<i64>().ok(),
+                                _ => None,
+                            };
+                            if let Some(id) = id {
+                                queue.push(format!("{prefix}:{id}"));
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
         }
-        RootReach {
+        DocumentReach {
             reached,
             met_unavailable,
         }
@@ -367,38 +398,125 @@ mod tests {
             "a healthy document nested past the limit cannot be vouched for"
         );
         assert!(
-            doc.story_laid_out("body", &story),
+            doc.story_laid_out(&story),
             "a cell of a complete table is shown at any depth"
         );
         strip(&doc, &deepest);
         assert_eq!(doc.unavailable_tables_from(&roots), None);
         assert!(
-            !doc.story_laid_out("body", &story),
+            !doc.story_laid_out(&story),
             "a cell of the deepest table is hidden once that table lost its payload, past any walk limit"
         );
-        assert!(doc.story_laid_out("body", &deepest));
+        assert!(doc.story_laid_out(&deepest));
     }
 
     #[test]
-    fn a_story_nothing_reaches_is_hidden_only_while_its_root_holds_an_unavailable_table() {
+    fn a_story_nothing_reaches_is_hidden_only_while_the_document_holds_an_unavailable_table() {
         let doc = EditingDoc::new(84);
         doc.create_story("body", "Hello", "Normal", "left")
             .unwrap();
         doc.insert_table(&ctx(), Position::new("body", 0), 1, 1)
             .unwrap();
-        doc.create_story("body:left-behind", "Leftover", "Normal", "left")
+        doc.create_story("left-behind", "Leftover", "Normal", "left")
             .unwrap();
         assert!(
-            doc.story_laid_out("body", "body:left-behind"),
+            doc.story_laid_out("left-behind"),
             "with no unavailable table in reach a live story counts as shown, as before"
         );
         strip(&doc, "body");
         assert!(
-            !doc.story_laid_out("body", "body:left-behind"),
-            "once the root holds an unavailable table, a story nothing reaches counts as hidden"
+            !doc.story_laid_out("left-behind"),
+            "once the document holds an unavailable table, a story nothing reaches counts as hidden"
         );
-        assert!(doc.story_laid_out("body", "body"));
-        assert!(!doc.story_laid_out("body", "body:missing"));
+        assert!(doc.story_laid_out("body"));
+        assert!(!doc.story_laid_out("missing"));
+    }
+
+    #[test]
+    fn a_host_block_control_holding_an_unavailable_table_hides_its_cells_whatever_their_names() {
+        let doc = EditingDoc::new(85);
+        doc.create_story("body", "Hello", "Normal", "left")
+            .unwrap();
+        doc.create_story("host", "Inside", "Normal", "left")
+            .unwrap();
+        let cell = doc
+            .insert_table(&ctx(), Position::new("host", 0), 1, 1)
+            .unwrap()
+            .created_story_ids[0]
+            .clone();
+        {
+            let mut txn = doc.yrs_doc().transact_mut();
+            let body = crate::story_ref(&txn, "body").unwrap();
+            let control = body.insert_embed(&mut txn, 0, yrs::MapPrelim::default());
+            yrs::Map::insert(&control, &mut txn, crate::KIND_KEY, "blockSdt");
+            yrs::Map::insert(&control, &mut txn, "story", "host");
+        }
+        assert!(doc.story_laid_out(&cell));
+        strip(&doc, "host");
+        assert!(
+            !doc.story_laid_out(&cell),
+            "the cell is hidden though its name does not lead to the body"
+        );
+        assert!(doc.story_laid_out("host"));
+        assert!(doc.story_laid_out("body"));
+    }
+
+    #[test]
+    fn a_cell_without_its_story_under_a_complete_table_stays_shown_beside_an_unavailable_table() {
+        let origin = EditingDoc::new(100);
+        origin
+            .create_story("body", "Hello", "Normal", "left")
+            .unwrap();
+        origin
+            .insert_table(&ctx(), Position::new("body", 0), 1, 2)
+            .unwrap();
+        origin
+            .create_story("other", "Elsewhere", "Normal", "left")
+            .unwrap();
+        origin
+            .insert_table(&ctx(), Position::new("other", 0), 1, 1)
+            .unwrap();
+        {
+            let mut txn = origin.yrs_doc().transact_mut();
+            let body = crate::story_ref(&txn, "body").unwrap();
+            let control = body.insert_embed(&mut txn, 0, yrs::MapPrelim::default());
+            yrs::Map::insert(&control, &mut txn, crate::KIND_KEY, "blockSdt");
+            yrs::Map::insert(&control, &mut txn, "story", "other");
+        }
+        let state = origin.encode_state_as_update_v1();
+        let open = |client| {
+            let doc = EditingDoc::new(client);
+            doc.apply_update_v1(&state).unwrap();
+            doc
+        };
+        let (doc, peer) = (open(81), open(82));
+        let mut undo = doc.undo_manager();
+        doc.split_cell_grid(&ctx(), &CellLoc::new("body", 0, 0, 1), Some(1), Some(2))
+            .unwrap();
+        exchange(&doc, &peer);
+        peer.insert_row(&ctx(), &CellLoc::new("body", 0, 0, 0), true)
+            .unwrap();
+        exchange(&doc, &peer);
+        assert!(undo.undo());
+        exchange(&doc, &peer);
+        let txn = doc.yrs_doc().transact();
+        let empty: Vec<String> = crate::empty_cells::named_cell_ids(&txn)
+            .into_iter()
+            .filter(|story| crate::empty_cells::is_empty_cell(&txn, story))
+            .collect();
+        drop(txn);
+        assert!(!empty.is_empty(), "the undo left a cell without its story");
+        strip(&doc, "other");
+        assert_eq!(
+            doc.unavailable_tables(),
+            Some(vec![TableLocator::new("other", 0)])
+        );
+        for cell in &empty {
+            assert!(
+                doc.story_laid_out(cell),
+                "a cell without its story under a complete table shows as an empty paragraph"
+            );
+        }
     }
 
     #[test]

@@ -416,6 +416,86 @@ for (const [index, fallback] of FALLBACKS.entries()) {
   }, TIMEOUT);
 }
 
+const storiesNamedBy = (replica: Opened, story: string, tableIndex: number) =>
+  ((replica.engine.tablePayload(story, tableIndex)?.rows ?? []) as Array<{ cells: Array<{ story: string }> }>)
+    .flatMap((row) => row.cells.map((named) => named.story));
+
+test('a caret in a cell without its story under a complete table stays put beside an unavailable table elsewhere, and typing is refused as before', async () => {
+  const replica = await open(9991, false, table(cell('A'), cell('B')) + paragraph('Between') + table(cell('C'), cell('D')));
+  const a = await peer(replica, 9992);
+  const b = await peer(replica, 9993);
+  const first = await peer(replica, 9994);
+  const second = await peer(replica, 9995);
+  try {
+    a.splitCell(at('body', 0, 1), 1, 2);
+    sync(a, b);
+    b.insertRow(at('body', 0, 0), 'below');
+    sync(a, b);
+    expect(a.undo()).toBe(true);
+    sync(a, b);
+    await receive(replica, a);
+    const live = new Set(replica.engine.storyIds());
+    const missing = storiesNamedBy(replica, 'body', 0).find((story) => !live.has(story));
+    expect(missing).toBeDefined();
+    const caret = { story: missing!, paraId: `${missing}#p0`, offset: 0 };
+    await replica.session.submit('select', { selection: { anchor: caret, focus: caret } }).ack;
+    expect(replica.session.state.selection?.focus).toMatchObject({ story: missing });
+
+    crossTable(first, second, { story: 'body', tableIndex: 1 });
+    await receive(replica, second);
+    expect(Array.isArray(replica.engine.tablePayload('body', 1)?.rows)).toBe(false);
+    expect(replica.session.state.selection?.focus).toMatchObject({ story: missing });
+    const before = replica.engine.paragraphs('body').map(({ text }) => text);
+    const typed = await replica.session.submit('insertText', { text: 'x' }).ack;
+    expect(typed).toMatchObject({ status: 'refused', reason: 'unsupported' });
+    expect(replica.engine.paragraphs('body').map(({ text }) => text)).toEqual(before);
+    expect(replica.session.state.selection?.focus).toMatchObject({ story: missing });
+  } finally {
+    for (const session of [a, b, first, second]) session.destroy();
+    replica.session.dispose();
+  }
+}, TIMEOUT);
+
+test('a caret in a cell of a host-made block control whose table crossing undos emptied is repaired, and an explicit target there is refused', async () => {
+  const replica = await open(9996);
+  const builder = await peer(replica, 9997);
+  const first = await peer(replica, 9998);
+  const second = await peer(replica, 9999);
+  try {
+    builder.createStory('host', 'Inside', 'Normal', 'left');
+    const created = builder.insertTable({ story: 'host', paraId: builder.paragraphs('host')[0]!.paraId, offset: 0 }, 1, 2);
+    const hidden = created.createdStoryIds[0]!;
+    builder.applyRawOps(hidden, [{ op: 'insert', index: 0, text: 'Cell' }]);
+    builder.applyRawOps('body', [{ op: 'insertEmbed', index: 0, kind: 'blockSdt', payload: { story: 'host' } }]);
+    for (const target of [first, second]) sync(builder, target);
+    await receive(replica, builder);
+    const paraId = replica.engine.paragraphs(hidden)[0]!.paraId;
+    const caret = { story: hidden, paraId, offset: 0 };
+    await replica.session.submit('select', { selection: { anchor: caret, focus: caret } }).ack;
+    expect(replica.session.state.selection?.focus).toMatchObject({ story: hidden });
+
+    crossTable(first, second, { story: 'host', tableIndex: 0 });
+    await receive(replica, second);
+    const selection = replica.session.state.selection!;
+    expect(selection.focus.story).not.toBe(hidden);
+    expect(['host', 'body']).toContain(selection.focus.story);
+    expect(selection.anchor.story).toBe(selection.focus.story);
+    const before = replica.engine.encodeState();
+    const outcome = await replica.session.submit('setHyperlink', {
+      selection: { anchor: caret, focus: { ...caret, offset: 3 } },
+      hyperlink: { href: 'https://example.com' }, expectVersion: replica.engine.proposalEngine.version(),
+    }).ack;
+    expect(outcome).toMatchObject({ status: 'refused', reason: 'table-unavailable' });
+    expect(replica.engine.encodeState()).toEqual(before);
+    expect((await replica.session.submit('insertText', { text: 'Z' }).ack).status).toBe('applied');
+    expect(replica.engine.paragraphs(selection.focus.story).some(({ text }) => text.includes('Z'))).toBe(true);
+    expect(cellTexts(replica, hidden).join('')).not.toContain('Z');
+  } finally {
+    for (const session of [builder, first, second]) session.destroy();
+    replica.session.dispose();
+  }
+}, TIMEOUT);
+
 test('an explicit range in a hidden cell is refused with table-unavailable and changes nothing', async () => {
   const replica = await open(9981);
   const first = await peer(replica, 9982);

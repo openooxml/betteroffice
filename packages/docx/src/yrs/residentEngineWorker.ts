@@ -650,8 +650,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
           const focus = selected?.sticky
             ? engine.resolveStickyPosition({ story: selected.story, encoded: selected.sticky })
             : selected ?? engine.selection()?.head;
-          const focusRoot = focus && (focus.story === 'body' || focus.story.startsWith('body:') ? 'body' : focus.story.split(':').slice(0, 2).join(':'));
-          if (focus && focusRoot && engine.geometryReader?.storyLaidOut?.(focusRoot, focus.story) !== false) selectionNavigation = {
+          if (focus && engine.geometryReader?.storyLaidOut?.(focus.story) !== false) selectionNavigation = {
             focus: navigation.unit === 'page' ? cellSelectionHeadPosition(engine, focus) ?? focus : focus,
             direction: navigation.direction,
             ...(navigation.unit === 'page' ? { distance: navigation.distance } : {}) };

@@ -22,8 +22,8 @@ export function readCellSelection(engine: Pick<DocxWorkerCommandEngine, 'cellSel
 
 type ProjectedCellTable = { story: string; tableIndex: number; cells: { story: string; row: number; column: number }[] };
 
-/** What a root's position projection lays out: its tables, every story it places, and whether it met an unavailable table. */
-type ProjectedRoot = { tables: ProjectedCellTable[]; stories: ReadonlySet<string>; metUnavailable: boolean };
+/** What a root's position projection lays out: its tables and every story it places. */
+type ProjectedRoot = { tables: ProjectedCellTable[]; stories: ReadonlySet<string> };
 
 /** The tables and stories of `root` as the position projection lays them out: only what cell location reads. */
 function projectRoot(engine: DocxWorkerCommandEngine, root: string): ProjectedRoot | null {
@@ -36,7 +36,6 @@ function projectRoot(engine: DocxWorkerCommandEngine, root: string): ProjectedRo
       cells: table.cells.map((cell) => ({ story: cell.story, row: cell.row, column: cell.column })),
     })),
     stories: new Set(projection.storyIds()),
-    metUnavailable: projection.allTables().some((table) => table.unavailable),
   };
 }
 
@@ -131,42 +130,38 @@ function projectedRoot(engine: DocxWorkerCommandEngine, root: string): { key: st
 }
 
 /**
- * Whether the layout of `story`'s root shows the live `story`: hidden only when the walk from the
- * root met an unavailable table and did not reach the story (a cell of that table, at any depth);
- * otherwise shown, as before. The engine answers when it can; otherwise the position projection.
+ * Whether the live `story` is shown: the engine's document-wide answer, hidden only when the
+ * walk from the document's roots met an unavailable table and did not reach the story. A reader
+ * without that read answers as before, by whether the story exists.
  */
 export function laidOutStory(engine: Pick<DocxWorkerCommandEngine, 'geometryReader'>, story: string): boolean {
-  const root = rootOf(story);
-  if (story === root) return true;
   const reader = engine.geometryReader;
-  if (reader.storyLaidOut) return reader.storyLaidOut(root, story);
-  if (!reader.hasStory(story)) return false;
-  const projected = projectRoot(engine as DocxWorkerCommandEngine, root);
-  return !projected?.metUnavailable || projected.stories.has(story);
+  return reader.storyLaidOut ? reader.storyLaidOut(story) : reader.hasStory(story);
 }
 
 /**
  * Where a selection in `story`, which the layout does not show, goes instead: beside the
- * unavailable table whose rows still name `story` as a cell, when one in a shown story does;
- * otherwise the first paragraph of the root story, past its leading blocks. Never beside a table
- * chosen by a story's name.
+ * unavailable table whose rows still name `story` as a cell, when one in a story the body or the
+ * story's own root lays out does; otherwise the first paragraph of that root when it is shown, or
+ * of the body, past its leading blocks. Never beside a table chosen by a story's name.
  */
 export function besideHiddenStory(engine: DocxWorkerCommandEngine, story: string): YrsLoc | null {
-  const root = rootOf(story);
-  const projected = projectedRoot(engine, root).projected;
-  if (!projected) return null;
-  for (const parent of projected.stories) {
-    let ordinal = 0;
-    for (const segment of engine.geometryReader.storySegments(parent)) {
-      if (segment.kind !== 'embed' || segment.embedKind !== 'table') continue;
-      const table = { story: parent, tableIndex: ordinal++ };
-      if (!isUnavailableTablePayload(segment.payload) || !Array.isArray(segment.payload.rows)) continue;
-      const rows = segment.payload.rows as TablePayload['rows'];
-      if (rows.some((row) => row?.cells?.some((cell) => cell?.story === story))) {
-        return nearTable(engine, table);
+  for (const root of new Set([rootOf(story), 'body'])) {
+    const projected = projectedRoot(engine, root).projected;
+    for (const parent of projected?.stories ?? []) {
+      let ordinal = 0;
+      for (const segment of engine.geometryReader.storySegments(parent)) {
+        if (segment.kind !== 'embed' || segment.embedKind !== 'table') continue;
+        const table = { story: parent, tableIndex: ordinal++ };
+        if (!isUnavailableTablePayload(segment.payload) || !Array.isArray(segment.payload.rows)) continue;
+        const rows = segment.payload.rows as TablePayload['rows'];
+        if (rows.some((row) => row?.cells?.some((cell) => cell?.story === story)) && laidOutStory(engine, parent)) {
+          return nearTable(engine, table);
+        }
       }
     }
   }
+  const root = [rootOf(story), 'body'].find((candidate) => candidate !== story && laidOutStory(engine, candidate)) ?? 'body';
   const first = engine.geometryReader.paragraphSpans(root)[0];
   if (!first) return null;
   const leading = leadingBlockCount(engine.paragraphSegments(root, [0])[0] ?? []);

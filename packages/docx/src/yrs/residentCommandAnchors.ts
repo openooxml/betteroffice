@@ -8,7 +8,7 @@ import type {
   DocxWorkerCommandState,
   ResolvedDocxCommandSelection,
 } from './residentCommandProtocol';
-import { besideHiddenStory, rootOf } from './residentCommandTableSelection';
+import { besideHiddenStory } from './residentCommandTableSelection';
 
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u;
 const commandStates = new WeakMap<DocxWorkerCommandEngine, DocxWorkerCommandState>();
@@ -64,10 +64,10 @@ export function commandTargetRange(
   return range === 'hidden' ? 'table-unavailable' : range;
 }
 
-/** The engine read standing in for `hasStory`: whether the story exists and the layout of its root shows it. */
+/** The engine read standing in for `hasStory`: whether the story exists and the layout shows it. */
 function shown(engine: Pick<DocxWorkerCommandEngine, 'geometryReader'>, story: string): boolean {
   const reader = engine.geometryReader;
-  return reader.storyLaidOut ? reader.storyLaidOut(rootOf(story), story) : reader.hasStory(story);
+  return reader.storyLaidOut ? reader.storyLaidOut(story) : reader.hasStory(story);
 }
 
 function selectionRange(

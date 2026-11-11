@@ -212,11 +212,11 @@ impl EditSessionCore {
         )
     }
 
-    /// Whether the document has `story` and the layout of `root` shows it: false for a cell of a
-    /// table that a concurrent undo left without its payload, at any depth. Internal: the editor's
-    /// selection check.
-    pub fn story_laid_out(&self, root: &str, story: &str) -> bool {
-        self.engine.doc().story_laid_out(root, story)
+    /// Whether the document has `story` and the layout shows it: false for a cell of a table that
+    /// a concurrent undo left without its payload, at any depth. Internal: the editor's selection
+    /// check.
+    pub fn story_laid_out(&self, story: &str) -> bool {
+        self.engine.doc().story_laid_out(story)
     }
 
     /// `{"revision","stories":[…]}`: the current story revision and the sorted

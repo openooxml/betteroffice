@@ -2619,10 +2619,10 @@ impl EditSession {
         self.core.has_story(story)
     }
 
-    /// Whether the document has `story` and the layout of `root` shows it.
+    /// Whether the document has `story` and the layout shows it.
     /// @internal
-    pub fn story_laid_out(&self, root: &str, story: &str) -> bool {
-        self.core.story_laid_out(root, story)
+    pub fn story_laid_out(&self, story: &str) -> bool {
+        self.core.story_laid_out(story)
     }
 
     /// `{"revision","stories":[…]}`: the current story revision and the sorted

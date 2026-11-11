@@ -524,10 +524,10 @@ export class EditSession {
      */
     has_story(story: string): boolean;
     /**
-     * Whether the document has `story` and the layout of `root` shows it.
+     * Whether the document has `story` and the layout shows it.
      * @internal
      */
-    story_laid_out(root: string, story: string): boolean;
+    story_laid_out(story: string): boolean;
     /**
      * Returns active alias-to-canonical relationship ids as a JSON object.
      */
