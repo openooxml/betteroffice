@@ -468,6 +468,34 @@ fn justified_acceptance_excludes_the_word_trailing_space() {
 }
 
 #[test]
+fn justified_acceptance_keeps_a_word_split_across_runs_together() {
+    let width = 20.0 * W0 + 6.0 * SP - 0.85 * SP;
+    let measure_runs = |runs: Value| {
+        let input = json!({
+            "block": {"kind": "paragraph", "runs": runs, "attrs": {"alignment": "justify"}},
+            "maxWidth": width, "fontChains": {"liberation sans|0|0": [0]},
+            "defaults": {"fontFamily": "Liberation Sans", "fontSize": 12},
+            "authoritativeShaping": true
+        });
+        let out = measure_paragraph_json(&store(), &input.to_string()).unwrap();
+        serde_json::from_str::<Value>(&out).unwrap()
+    };
+    let whole = measure_runs(json!([{"kind": "text", "text": "000 000 000 000 000 000 00"}]));
+    let split = measure_runs(json!([
+        {"kind": "text", "text": "000 000 000 000 000 000 0"},
+        {"kind": "text", "text": "0"}
+    ]));
+    assert_eq!(spans(&whole), vec![(0, 0, 0, 26)]);
+    assert_eq!(spans(&split), vec![(0, 0, 1, 1)]);
+}
+
+#[test]
+fn natural_fit_keeps_the_exact_slack_comparison() {
+    let v = measure_aligned(SIX_WORDS_THEN_SHORT, "left", 195.741_180_419_921_875);
+    assert_eq!(spans(&v), vec![(0, 0, 0, 25)]);
+}
+
+#[test]
 fn shrink_acceptance_leaves_unjustified_and_natural_lines_alone() {
     for overflow in [0.5 * SP, 1.25 * SP] {
         let width = short_word_overflow_width(overflow);
