@@ -195,8 +195,11 @@ test('an unknown worker family gets the last-resort face unless the host serves 
         families: ['Custom'], provider: undefined, compat: undefined, signal: new AbortController().signal,
       });
       if (hosted) expect(environment.faces).toEqual([{ family: 'Custom', data: custom, weight: 'normal', style: 'normal' }]);
-      else expect(environment.faces.filter(face => 'data' in face).map(face => face.data)).toEqual([standIn]);
-      expect(environment.chains['custom|0|0']).toEqual([0]);
+      else {
+        expect(environment.faces.filter(face => 'data' in face).map(face => face.data)).toEqual([standIn]);
+        expect(environment.faces[1]).toEqual({ substituteOf: 0, family: 'Custom' });
+      }
+      expect(environment.chains['custom|0|0']).toEqual(hosted ? [0] : [1]);
     }
     expect(warn.mock.calls.filter(([message]) => String(message).includes('stands in'))).toHaveLength(1);
   } finally { create.mockRestore(); warn.mockRestore(); }

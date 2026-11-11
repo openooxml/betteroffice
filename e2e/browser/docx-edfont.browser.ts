@@ -8,7 +8,6 @@ const paragraphs = [
   { family: 'Calibri', text: 'Calibri draws with its own metric twin' },
 ];
 const symbolDrawn = 'αβγ';
-const standIns = ['Aptos', 'Calibri Light', 'Symbol'];
 
 interface LineRun { kind: string; text: string; glyphs: number[] }
 interface Line { y: number; runs: LineRun[] }
@@ -69,9 +68,7 @@ for (const worker of [true, false]) {
     const symbol = lines[2]!.runs.flatMap(run => run.glyphs);
     expect(symbol).toHaveLength(3);
     expect(symbol).not.toEqual(aptos);
-    for (const family of standIns) {
-      expect(warnings.filter(text => text.includes(`"${family}"`) && text.includes('stands in'))).toHaveLength(1);
-    }
+    expect(warnings.filter(text => text.includes('stands in'))).toEqual([]);
     expect(warnings.some(text => text.includes('"Calibri"'))).toBe(false);
     await expect(page.locator('.notice')).toHaveCount(0);
   });
