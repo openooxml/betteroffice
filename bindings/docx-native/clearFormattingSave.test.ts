@@ -277,7 +277,7 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
     }
   });
 
-  test(`${engine}: a peer joined from an update keeps the table style's bold when clearing formatting in a cell`, async () => {
+  test(`${engine}: a peer bootstrapped from an update keeps the table style's bold when clearing formatting in a cell`, async () => {
     const body = '<w:tbl><w:tblPr><w:tblStyle w:val="BoldGrid"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="2400" w:type="dxa"/></w:tcPr>' +
       '<w:p w14:paraId="00000061"><w:r><w:rPr><w:i/></w:rPr><w:t>Peer cell</w:t></w:r></w:p>' +
       '</w:tc></w:tr></w:tbl><w:p w14:paraId="00000062"><w:r><w:t>After</w:t></w:r></w:p>';
@@ -285,17 +285,23 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
     const host = await yrs.createYrsSession({ clientId: 81 });
     const peer = await yrs.createYrsSession({ clientId: 82 });
     try {
-      host.seedFromDocx(bytes);
-      peer.openDocx(bytes, false);
-      peer.applyUpdate(host.encodeState());
+      const hostMetadata = host.seedFromDocx(bytes);
+      peer.bootstrapPeer(host.encodeState(), host.encodePeerMetadata(), bytes, hostMetadata);
       const cell = peer.listStories().stories.find((entry) => entry.kind === 'tableCell')!.story;
       peer.clearFormatting(whole(peer, '00000061', '00000061', cell));
       const segment = peer.storySegments(cell).find((entry) => entry.kind === 'text' && entry.text.includes('Peer cell'));
       expect(segment?.kind === 'text' && { bold: Boolean(segment.attributes.bold), italic: Boolean(segment.attributes.italic) })
         .toEqual({ bold: true, italic: false });
       const { xml, reopened } = await saveAndReopen(yrs, peer);
-      reopened.destroy();
-      expect(savedRunProperties(xml, 'Peer cell')).toBeNull();
+      try {
+        expect(savedRunProperties(xml, 'Peer cell')).toBeNull();
+        const reopenedCell = reopened.listStories().stories.find((entry) => entry.kind === 'tableCell')!.story;
+        const saved = reopened.storySegments(reopenedCell).find((entry) => entry.kind === 'text' && entry.text.includes('Peer cell'));
+        expect(saved?.kind === 'text' && { bold: Boolean(saved.attributes.bold), italic: Boolean(saved.attributes.italic) })
+          .toEqual({ bold: true, italic: false });
+      } finally {
+        reopened.destroy();
+      }
     } finally {
       peer.destroy();
       host.destroy();
