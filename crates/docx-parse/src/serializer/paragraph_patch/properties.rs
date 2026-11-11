@@ -577,7 +577,9 @@ fn flag(
     if current && on == inherited_on {
         change.remove = true;
     } else {
-        change.attributes.insert("w:val", (!on).then(|| "0".to_owned()));
+        change
+            .attributes
+            .insert("w:val", (!on).then(|| "0".to_owned()));
     }
     Ok(())
 }

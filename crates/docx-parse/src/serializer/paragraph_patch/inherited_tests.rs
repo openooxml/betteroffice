@@ -152,8 +152,7 @@ fn widow_control_turned_off_where_the_styles_say_nothing_stays_explicitly_off() 
         );
         let off = result.unwrap_or_else(|error| panic!("{}", error.detail));
         assert_eq!(
-            off,
-            r#"<w:pPr><w:widowControl w:val="0"/></w:pPr>"#,
+            off, r#"<w:pPr><w:widowControl w:val="0"/></w:pPr>"#,
             "{source}"
         );
     }
