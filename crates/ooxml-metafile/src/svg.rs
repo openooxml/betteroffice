@@ -67,6 +67,27 @@ fn output_refusal() -> Refusal {
     Refusal("the metafile's SVG would exceed the display size limit".to_owned())
 }
 
+/// Whether `bytes` are a [`placeholder_svg`] of any size: the stand-in shown for
+/// a metafile that could not be converted.
+pub fn is_placeholder_svg(bytes: &[u8]) -> bool {
+    bytes.len() < 4096 && svg_shape(bytes) == svg_shape(placeholder_svg(1.0, 1.0).as_bytes())
+}
+
+/// The markup with each run of digits and dots collapsed to one `#`.
+fn svg_shape(bytes: &[u8]) -> Vec<u8> {
+    let mut shape = Vec::with_capacity(bytes.len());
+    for &byte in bytes {
+        if byte.is_ascii_digit() || byte == b'.' {
+            if shape.last() != Some(&b'#') {
+                shape.push(b'#');
+            }
+        } else {
+            shape.push(byte);
+        }
+    }
+    shape
+}
+
 /// A neutral box with a picture glyph, standing in for a picture that could
 /// not be drawn.
 pub fn placeholder_svg(width: f64, height: f64) -> String {
@@ -829,6 +850,23 @@ mod tests {
     use super::*;
     use crate::drawing::LinearGradient;
     use crate::test_records::*;
+
+    #[test]
+    fn placeholders_of_any_size_are_recognised_and_drawings_are_not() {
+        for (width, height) in [
+            (1.0, 1.0),
+            (96.0, 72.5),
+            (0.25, 40_000.0),
+            (f64::NAN, 3.3333),
+        ] {
+            assert!(is_placeholder_svg(
+                placeholder_svg(width, height).as_bytes()
+            ));
+        }
+        let drawn = r##"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="4" height="4" fill="#f1f3f4"/></svg>"##;
+        assert!(!is_placeholder_svg(drawn.as_bytes()));
+        assert!(!is_placeholder_svg(b"not an svg"));
+    }
 
     fn write(drawing: &Drawing) -> Result<String, Refusal> {
         crate::with_budget(&mut crate::ReplayBudget::default(), |shared| {
