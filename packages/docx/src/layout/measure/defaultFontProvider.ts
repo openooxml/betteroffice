@@ -16,6 +16,7 @@ export function isImplicitFontProvider(provider: BundledFontProvider | undefined
 }
 
 const hostedFamiliesKey = Symbol.for('@betteroffice/docx/hostedFontFamilies');
+const standInKey = Symbol.for('@betteroffice/docx/standInFamily');
 
 export function hostedFontFamilies(source: object | undefined): ReadonlySet<string> | undefined {
   return (source as { [hostedFamiliesKey]?: ReadonlySet<string> } | undefined)?.[hostedFamiliesKey];
@@ -113,6 +114,15 @@ function implicitFontProvider(
       ), family, bold, italic
     ) : undefined,
   };
+  const reported = new Set<string>();
+  Object.assign(implicit, {
+    [standInKey]: (family: string) => {
+      const key = family.trim().toLowerCase();
+      if (!standIns || providesFamily(family) || reported.has(key)) return false;
+      reported.add(key);
+      return true;
+    },
+  });
   implicitProviders.add(implicit);
   return implicit;
 }

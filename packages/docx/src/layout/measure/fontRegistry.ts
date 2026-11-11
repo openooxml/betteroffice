@@ -8,6 +8,8 @@ export interface ProgressiveFontFace {
 
 import { baseLatinAlias, baseLatinCandidate, coverageFromBits, symbolFamily, wordsCoverage, type FontCoverage } from './fontCoverage';
 
+const standInKey = Symbol.for('@betteroffice/docx/standInFamily');
+
 async function parsedCoverage(data: Uint8Array): Promise<FontCoverage | undefined> {
   try {
     const words = (await import('./cmapCoverage')).fontCoverageWords(data);
@@ -560,9 +562,11 @@ export class TextMeasureFontRegistry {
       );
     }
     if (lastResort && !(lastResort.onlyIfPrimaryFails && primaryRegistered)) {
+      const standsIn = ids.length === 0;
       const id = await this.registerLastResort(key, lastResort, family);
       if (id !== null && !ids.includes(id)) ids.push(id);
       if (id === null) retryable = true;
+      else if (standsIn) this.warnStandIn(bundled, family);
     }
 
     try {
@@ -585,6 +589,17 @@ export class TextMeasureFontRegistry {
     }
 
     return { ids, retryable };
+  }
+
+  /** The default provider reports each family it stands in for once. */
+  private warnStandIn(provider: BundledFontProvider | undefined, family: string): void {
+    const claim = (provider as { [standInKey]?: (family: string) => boolean } | undefined)?.[standInKey];
+    if (!claim?.(family)) return;
+    console.warn(
+      `[fontRegistry] no font bytes for "${family}": a last-resort face stands in for it, so line ` +
+        'breaks can differ from Word. Pass the font to the editor or embed it in the document. ' +
+        'Reported once per family.'
+    );
   }
 
   /**
