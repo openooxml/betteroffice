@@ -154,6 +154,42 @@ for (const nested of [false, true]) {
   }, TIMEOUT);
 }
 
+test(`after the local user's own crossing undo, a caret in the table's cell stays there, typing is kept, saves refuse coded, and the redo shows the typed text`, async () => {
+  const replica = await open(9651);
+  const first = await peer(replica, 9652);
+  try {
+    const story = (replica.engine.tablePayload('body', 0)!.rows as Array<{ cells: Array<{ story: string }> }>)[0]!.cells[1]!.story;
+    const inCell = { story, paraId: replica.engine.paragraphs(story)[0]!.paraId, offset: 2 };
+    const selection = { anchor: inCell, focus: inCell };
+
+    first.setCellShading(cellRange(0, 0), 'FF0000');
+    await receive(replica, first);
+    const shaded = await replica.session.submit('setTableCellShading', { color: '00FF00', selection } as never).ack;
+    expect(shaded.status).toBe('applied');
+    expect(first.undo()).toBe(true);
+    await receive(replica, first);
+    await replica.session.submit('select', { selection }).ack;
+    expect(replica.session.state.selection?.focus.story).toBe(story);
+    expect((await replica.session.submit('undo', {}).ack).status).toBe('applied');
+
+    expect(Array.isArray(replica.engine.tablePayload('body', 0)?.rows)).toBe(false);
+    expect(replica.session.state.selection?.focus.story).toBe(story);
+    expect((await replica.session.submit('insertText', { text: 'Z' }).ack).status).toBe('applied');
+    expect(cellTexts(replica, story).join('')).toContain('Z');
+    const unsaved = replica.engine.encodeState();
+    await expect(replica.client.save({ comments: [] })).rejects.toThrow(tableUnavailableError().message);
+    expect(replica.engine.encodeState()).toEqual(unsaved);
+
+    expect((await replica.session.submit('redo', {}).ack).status).toBe('applied');
+    expect(Array.isArray(replica.engine.tablePayload('body', 0)?.rows)).toBe(true);
+    expect(located(replica, story)).toEqual(at('body', 0, 1));
+    expect(cellTexts(replica, story).join('')).toContain('Z');
+  } finally {
+    first.destroy();
+    replica.session.dispose();
+  }
+}, TIMEOUT);
+
 /** Counts every call this engine instance receives, by method name. */
 const border = { style: 'single', size: 4, color: { rgb: '000000' } };
 const CARET_TABLE_COMMANDS = [
