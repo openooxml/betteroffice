@@ -100,7 +100,10 @@ pub(crate) fn set_limit(bytes: Option<usize>) {
     if has {
         let _ = SHARE.try_with(|_| ());
     }
-    let had = LIMIT.try_with(|slot| slot.replace(limit)).unwrap_or(NO_LIMIT) != NO_LIMIT;
+    let had = LIMIT
+        .try_with(|slot| slot.replace(limit))
+        .unwrap_or(NO_LIMIT)
+        != NO_LIMIT;
     let _ = OVER.try_with(|over| over.set(false));
     let _ = REPORTED.try_with(|reported| reported.set(false));
     let mut switch = SWITCH.lock().unwrap_or_else(|error| error.into_inner());
