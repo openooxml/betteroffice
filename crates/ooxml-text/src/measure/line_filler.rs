@@ -112,6 +112,8 @@ struct LineState {
     tail_char: u32,
     width: f32,
     space_width: f32,
+    /// The room R measured where a word continuing into the next run began.
+    word_room: Option<f32>,
     max_font_size_pt: f32,
     max_font: Option<FontId>,
     max_ascent: f32,
@@ -258,6 +260,7 @@ pub(super) fn fill(p: FillParams) -> Result<ParagraphExtentOut, MeasureError> {
             tail_char: 0,
             width: 0.0,
             space_width: 0.0,
+            word_room: None,
             max_font_size_pt: p.default_font_size_pt,
             max_font: None,
             max_ascent: 0.0,
@@ -597,6 +600,7 @@ impl Filler<'_> {
             } else {
                 fitting_width
             };
+            let carried_room = self.cur.word_room.take();
 
             if fitting_width > self.cur.available + WRAP_SLACK_PX {
                 // Overlong unbreakable word: fill the remaining space on the
@@ -635,13 +639,18 @@ impl Filler<'_> {
                 continue;
             }
 
-            if self.cur.width > 0.0
+            let moves_down = self.cur.width > 0.0
                 && ((t.letter_spacing < 0.0 && self.cur.width > self.cur.available + WRAP_SLACK_PX)
-                    || (fitting_width > 0.0 && !self.keeps_word(wrap_width)))
-            {
+                    || (fitting_width > 0.0 && !self.keeps_word(wrap_width, carried_room)));
+            if moves_down {
                 self.start_new_line(ri, utf16_at(t, char_idx))?;
             }
-
+            if next_break == t.chars.len() && wrap_width > fitting_width {
+                self.cur.word_room = Some(match carried_room {
+                    Some(room) if !moves_down => room,
+                    _ => self.room(),
+                });
+            }
             self.record_text_clusters(ri, word, t.letter_spacing);
             self.cur.width += word_width;
             self.cur.tail_run = ri;
@@ -651,19 +660,9 @@ impl Filler<'_> {
         Ok(())
     }
 
-    /// Whether a word of visible width `wrap_width` stays on the current line.
-    /// It fits at natural spacing, or the line is justified and Word keeps it
-    /// by compressing the spaces: the overflow O must stay within the shrink
-    /// limit and at most half of R, the room the line would be stretched by
-    /// if the word moved down. O and R exclude the line's trailing spaces.
-    fn keeps_word(&self, wrap_width: f32) -> bool {
-        let o = self.cur.width + wrap_width - self.cur.available;
-        if o <= WRAP_SLACK_PX {
-            return true;
-        }
-        if !self.p.justify {
-            return false;
-        }
+    /// The room R the line would be stretched by if the next word moved down:
+    /// the available width less the line's width without its trailing spaces.
+    fn room(&self) -> f32 {
         let trailing_spaces: f32 = self
             .cur
             .contributions
@@ -672,9 +671,27 @@ impl Filler<'_> {
             .take_while(|part| part.is_fit_space)
             .map(|part| part.advance)
             .sum();
-        let r = self.cur.available - (self.cur.width - trailing_spaces);
-        o <= self.cur.space_width * self.p.space_shrink_limit + WRAP_SLACK_PX
-            && o <= r / 2.0 + WRAP_SLACK_PX
+        self.cur.available - (self.cur.width - trailing_spaces)
+    }
+
+    /// Whether a word of visible width `wrap_width` stays on the current line.
+    /// It fits at natural spacing, or the line is justified and Word keeps it
+    /// by compressing the spaces: the overflow O must stay within the shrink
+    /// limit and at most half of R. A word continuing from the previous run
+    /// keeps the R measured where it began.
+    fn keeps_word(&self, wrap_width: f32, carried_room: Option<f32>) -> bool {
+        if self.cur.width + wrap_width <= self.cur.available + WRAP_SLACK_PX {
+            return true;
+        }
+        if !self.p.justify
+            || self.cur.width + wrap_width - self.cur.space_width * self.p.space_shrink_limit
+                > self.cur.available + WRAP_SLACK_PX
+        {
+            return false;
+        }
+        let o = self.cur.width + wrap_width - self.cur.available;
+        let r = carried_room.unwrap_or_else(|| self.room());
+        o <= r / 2.0 + WRAP_SLACK_PX
     }
 
     /// Accumulates each run's extents above and below the shared baseline.
@@ -1068,6 +1085,7 @@ impl Filler<'_> {
             tail_char: char_utf16,
             width: 0.0,
             space_width: 0.0,
+            word_room: None,
             max_font_size_pt: self.p.default_font_size_pt,
             max_font: None,
             max_ascent: 0.0,
