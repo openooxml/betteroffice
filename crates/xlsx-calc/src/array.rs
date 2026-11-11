@@ -1660,7 +1660,10 @@ fn stack_arguments(
             return Err(value);
         }
         if let Value::Lambda(lambda) = &value
-            && lambda.vector.as_ref().is_some_and(|(dir, _)| *dir != by_col)
+            && lambda
+                .vector
+                .as_ref()
+                .is_some_and(|(dir, _)| *dir != by_col)
         {
             return Err(ErrorValue::Value);
         }
