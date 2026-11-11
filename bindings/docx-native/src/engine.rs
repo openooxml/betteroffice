@@ -301,6 +301,12 @@ fn map_error(env: Env, error: EngineError) -> Error {
                 exception.set_named_property("code", "suggested-formatting-over-container")?;
                 env.throw(exception)
             }
+            EngineErrorKind::CellHasNoStory => {
+                let mut exception = env.create_error(Error::from_reason(error.message.clone()))?;
+                exception.set_named_property("name", "CellHasNoStoryError")?;
+                exception.set_named_property("code", "cell-has-no-story")?;
+                env.throw(exception)
+            }
         }
     })();
     match result {

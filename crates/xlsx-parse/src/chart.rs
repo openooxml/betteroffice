@@ -682,28 +682,39 @@ pub(crate) fn parse_sheet_charts(
 /// Every drawing part a sheet relates to, with its bytes. A part two
 /// relationships both name is one drawing, and following it twice would emit
 /// every anchor twice, so it is walked once.
-fn sheet_drawings<'a>(
+pub(crate) fn sheet_drawings<'a>(
     parts: &'a [(String, Vec<u8>)],
     sheet_path: &str,
 ) -> Result<Vec<(String, &'a [u8])>, ParseError> {
     let Some(rels) = find_part(parts, &relationship_part_path(sheet_path)) else {
         return Ok(Vec::new());
     };
-    let sheet_dir = directory_of(sheet_path);
     let mut drawings: Vec<(String, &[u8])> = Vec::new();
-    for (_, _, target) in parse_relationships(rels)?
-        .iter()
-        .filter(|(_, kind, _)| type_is(kind, TYPE_DRAWING))
-    {
-        let path = resolve_part_path(sheet_dir, target);
-        if drawings.iter().any(|(walked, _)| *walked == path) {
-            continue;
-        }
+    for path in sheet_drawing_paths(rels, sheet_path)? {
         if let Some(bytes) = find_part(parts, &path) {
             drawings.push((path, bytes));
         }
     }
     Ok(drawings)
+}
+
+/// The drawing parts a sheet's relationship part names, each once, resolved against the sheet.
+pub(crate) fn sheet_drawing_paths(
+    rels: &[u8],
+    sheet_path: &str,
+) -> Result<Vec<String>, ParseError> {
+    let sheet_dir = directory_of(sheet_path);
+    let mut paths: Vec<String> = Vec::new();
+    for (_, _, target) in parse_relationships(rels)?
+        .iter()
+        .filter(|(_, kind, _)| type_is(kind, TYPE_DRAWING))
+    {
+        let path = resolve_part_path(sheet_dir, target);
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    Ok(paths)
 }
 
 struct DrawingAnchor {
@@ -774,6 +785,11 @@ pub(crate) fn is_anchor(element: &&Element) -> bool {
 
 /// The `c:chart` under a graphic frame, searched depth-capped by expanded name
 /// so an alternate prefix still resolves, and whether it names a relationship.
+/// Whether an anchor holds a chart a sheet's model claims through a relationship.
+pub(crate) fn holds_related_chart(anchor: &Element) -> bool {
+    matches!(anchor_chart(anchor, 0), AnchorChart::Related(_))
+}
+
 fn anchor_chart(element: &Element, depth: usize) -> AnchorChart {
     if depth > MAX_DEPTH {
         return AnchorChart::None;
@@ -1510,35 +1526,48 @@ pub(crate) fn parse_area(source: &str) -> Option<(CellRef, CellRef)> {
 /// may be re-placed and resized by moving its corners. An anchor whose kind,
 /// `editAs` mode, one-cell extent or absolute position also changed is refused,
 /// because none of that is written back.
+///
+/// With `axes`, every anchor no chart claims follows the sheet's row and column
+/// edits too, by the rules chart anchors follow.
 pub(crate) fn patch_drawing_anchors(
     part: &[u8],
     anchors: &[(usize, ChartAnchor)],
+    axes: Option<&crate::axis::SheetAxes>,
 ) -> Result<Vec<u8>, ParseError> {
     let source = Part::decode(part)?;
     let root = source.tree()?;
     let indexed = anchor_elements(&root);
-    let authored = read_anchors(&root)?;
     let mut edits: Vec<Edit> = Vec::new();
-    for (index, anchor) in anchors {
-        let (Some(element), Some(authored)) = (indexed.get(*index), authored.get(*index)) else {
-            return Err(ParseError::UnsupportedEdit(
-                "a chart anchor no longer exists in its drawing part".into(),
-            ));
-        };
-        if !only_grid_position_moved(&authored.anchor, anchor) {
-            return Err(ParseError::UnsupportedEdit(
-                "a chart anchor changed more than the grid position a save writes back".into(),
-            ));
+    if !anchors.is_empty() {
+        let authored = read_anchors(&root)?;
+        for (index, anchor) in anchors {
+            let (Some(element), Some(authored)) = (indexed.get(*index), authored.get(*index))
+            else {
+                return Err(ParseError::UnsupportedEdit(
+                    "a chart anchor no longer exists in its drawing part".into(),
+                ));
+            };
+            if !only_grid_position_moved(&authored.anchor, anchor) {
+                return Err(ParseError::UnsupportedEdit(
+                    "a chart anchor changed more than the grid position a save writes back".into(),
+                ));
+            }
+            push_anchor_edits(element, anchor, &mut edits)?;
         }
-        match anchor {
-            ChartAnchor::TwoCell { from, to, .. } => {
-                push_cell_edits(element.child("from"), *from, &mut edits)?;
-                push_cell_edits(element.child("to"), *to, &mut edits)?;
+    }
+    if let Some(axes) = axes {
+        for (index, element) in indexed.iter().enumerate() {
+            if holds_related_chart(element) || anchors.iter().any(|(claimed, _)| *claimed == index)
+            {
+                continue;
             }
-            ChartAnchor::OneCell { from, .. } => {
-                push_cell_edits(element.child("from"), *from, &mut edits)?;
+            let authored = anchor_geometry(element)?;
+            let moved = crate::drawing_anchors::followed(&authored, axes).ok_or_else(|| {
+                ParseError::UnsupportedEdit("a drawing anchor would leave the grid".into())
+            })?;
+            if moved != authored {
+                push_anchor_edits(element, &moved, &mut edits)?;
             }
-            ChartAnchor::Absolute { .. } => {}
         }
     }
     if edits.is_empty() {
@@ -1548,6 +1577,24 @@ pub(crate) fn patch_drawing_anchors(
         left.start.cmp(&right.start)
     });
     source.splice(&edits)
+}
+
+fn push_anchor_edits(
+    element: &Element,
+    anchor: &ChartAnchor,
+    edits: &mut Vec<Edit>,
+) -> Result<(), ParseError> {
+    match anchor {
+        ChartAnchor::TwoCell { from, to, .. } => {
+            push_cell_edits(element.child("from"), *from, edits)?;
+            push_cell_edits(element.child("to"), *to, edits)?;
+        }
+        ChartAnchor::OneCell { from, .. } => {
+            push_cell_edits(element.child("from"), *from, edits)?;
+        }
+        ChartAnchor::Absolute { .. } => {}
+    }
+    Ok(())
 }
 
 /// The anchor elements [`read_anchors`] modelled, in the same order, so an
