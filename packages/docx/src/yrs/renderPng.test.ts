@@ -1,13 +1,11 @@
 import { afterEach, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import * as bundled from '@betteroffice/fonts';
 import * as enginePng from '../wasm/enginePng';
 import { engineKind } from '../wasm/enginePng';
 import { resolveCompleteFontProvider } from '../layout/measure';
-import { preloadEditWasm } from '../wasm/edit';
-import { preloadOpcWasm } from '../wasm/opc';
 import { createYrsSession, type YrsSession } from './index';
+import { ENGINES, preloadEngines, restoreBrowser, scriptDocument, stubBrowser } from './renderPngTestSupport';
 import type { PngDiagnostic } from '../../../../shared/office-session/pngExportError';
 import fixture from '../../../../crates/docx-edit/tests/fixtures/behind_objects.json';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
@@ -16,43 +14,8 @@ const root = resolve(import.meta.dir, '../../../..');
 const deck = new Uint8Array(readFileSync(resolve(root, 'apps/demo/public/betteroffice-demo.docx')));
 const native = engineKind === 'native';
 
-beforeAll(async () => {
-  await preloadEditWasm(new Uint8Array(readFileSync(resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm'))));
-  await preloadOpcWasm(new Uint8Array(readFileSync(resolve(import.meta.dir, '../wasm/generated/opc/ooxml_opc_bg.wasm'))));
-});
-
-let restore: (() => void) | undefined;
-afterEach(() => { restore?.(); restore = undefined; });
-
-function stubBrowser() {
-  const calls = { sizes: [] as [number, number][], fills: 0, encoded: 0, scales: [] as number[][], bitmaps: 0 };
-  class Canvas {
-    constructor(public width: number, public height: number) {}
-    getContext() {
-      if (calls.sizes.at(-1)?.[0] !== this.width || calls.sizes.at(-1)?.[1] !== this.height) calls.sizes.push([this.width, this.height]);
-      return new Proxy({} as Record<string, unknown>, {
-        get(target, property) {
-          if (property === 'fill') return () => { calls.fills++; };
-          if (property === 'scale') return (x: number, y: number) => { calls.scales.push([x, y]); };
-          if (property === 'measureText') return (text: string) => ({ width: text.length });
-          if (property === 'createLinearGradient' || property === 'createRadialGradient' || property === 'createPattern') return () => ({ addColorStop: () => undefined });
-          return property in target ? target[property as string] : () => undefined;
-        },
-        set(target, property, value) { target[property as string] = value; return true; },
-      });
-    }
-    convertToBlob(request: { type: string }) { calls.encoded++; return Promise.resolve(new Blob(['png'], { type: request.type })); }
-  }
-  class Path { moveTo() {} lineTo() {} quadraticCurveTo() {} bezierCurveTo() {} closePath() {} addPath() {} }
-  const scope = globalThis as Record<string, unknown>;
-  const saved = { OffscreenCanvas: scope.OffscreenCanvas, Path2D: scope.Path2D, Image: scope.Image, createImageBitmap: scope.createImageBitmap };
-  Object.assign(scope, {
-    OffscreenCanvas: Canvas, Path2D: Path, Image: undefined,
-    createImageBitmap: () => { calls.bitmaps++; return Promise.resolve({ width: 4, height: 4, close: () => undefined }); },
-  });
-  restore = () => { Object.assign(scope, saved); };
-  return calls;
-}
+beforeAll(preloadEngines);
+afterEach(restoreBrowser);
 
 const pngSize = (bytes: Uint8Array): [number, number] => {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -75,22 +38,6 @@ const smartArtParts = (drawingRels = '<Relationships xmlns="http://schemas.openx
         ['word/diagrams/_rels/drawing1.xml.rels', toBytes(drawingRels)],
         ['word/media/image1.png', new Uint8Array(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYPj/HwADAgH/5ncLrgAAAABJRU5ErkJggg==', 'base64'))],
     ]);
-
-const scriptRun = (family: string, text: string, rtl = false) =>
-  `<w:p>${rtl ? '<w:pPr><w:bidi/></w:pPr>' : ''}<w:r><w:rPr><w:rFonts w:ascii="${family}" w:hAnsi="${family}" w:cs="${family}"/>${rtl ? '<w:rtl/>' : ''}</w:rPr><w:t>${text}</w:t></w:r></w:p>`;
-
-const scriptDocument = () => new Uint8Array(rezipPartsToArrayBuffer(new Map([
-  ['[Content_Types].xml', toBytes('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')],
-  ['_rels/.rels', toBytes('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>')],
-  ['word/document.xml', toBytes(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${[
-    scriptRun('Calibri', 'Total 2024'),
-    scriptRun('Arial', 'مرحبا بالعالم', true),
-    scriptRun('Calibri', 'שלום עולם', true),
-    scriptRun('Brand Sans', 'Brand text'),
-  ].join('')}<w:sectPr/></w:body></w:document>`)],
-]) as PartsMap));
-
-const arabicFiles = new Set(bundled.BUNDLED_FONTS.filter((face) => face.script === 'arabic').map((face) => face.file));
 
 function withCanonicalFontIds(value: unknown, ids = new Map<number, number>()): unknown {
   if (Array.isArray(value)) return value.map((item) => withCanonicalFontIds(item, ids));
@@ -119,102 +66,14 @@ async function drawnPrimitives(options: Parameters<YrsSession['renderPng']>[1] =
   } finally { drawing.mockRestore(); }
 }
 
-const ENGINES = [{ kind: 'wasm' }, { kind: 'native' }] as const;
-
 for (const { kind } of ENGINES) {
   describe.skipIf(engineKind !== kind)(`renderPng default fonts on the ${kind} engine`, () => {
-    test('without fontProvider, a face that cannot load rejects the export with font-unavailable', async () => {
-      stubBrowser();
-      const failing = spyOn(bundled, 'loadBundledFontBytes').mockImplementation(() => Promise.reject(new Error('offline')));
-      try {
-        await expect(exportScriptDocument()).rejects.toMatchObject({
-          name: 'PngExportError', code: 'font-unavailable', message: expect.stringMatching(/could not load: offline/),
-        });
-        expect(failing).toHaveBeenCalled();
-      } finally { failing.mockRestore(); }
-    });
-
-    test('without fontProvider, an installed script face that fails to load rejects the export naming it', async () => {
-      stubBrowser();
-      const original = bundled.loadBundledFontBytes;
-      const loading = spyOn(bundled, 'loadBundledFontBytes').mockImplementation((face, ...rest) =>
-        arabicFiles.has(face.file) ? Promise.reject(new Error('offline')) : original(face, ...rest));
-      try {
-        await expect(exportScriptDocument()).rejects.toMatchObject({
-          name: 'PngExportError', code: 'font-unavailable', message: expect.stringMatching(/Arabic.* could not load: offline/),
-        });
-        expect(loading.mock.calls.some(([face]) => arabicFiles.has(face.file))).toBe(true);
-      } finally { loading.mockRestore(); }
-    });
-
-    test('without fontProvider, a script face whose package is not installed is skipped and the export succeeds', async () => {
-      stubBrowser();
-      const installedOriginal = bundled.bundledFaceInstalled;
-      const installed = spyOn(bundled, 'bundledFaceInstalled')
-        .mockImplementation((face) => arabicFiles.has(face.file) ? Promise.resolve(false) : installedOriginal(face));
-      const original = bundled.loadBundledFontBytes;
-      const loading = spyOn(bundled, 'loadBundledFontBytes').mockImplementation((face, ...rest) =>
-        arabicFiles.has(face.file) ? Promise.reject(new Error('offline')) : original(face, ...rest));
-      try {
-        expect(await exportScriptDocument()).toBeInstanceOf(Uint8Array);
-        expect(installed).toHaveBeenCalled();
-        expect(loading.mock.calls.some(([face]) => arabicFiles.has(face.file))).toBe(false);
-      } finally { installed.mockRestore(); loading.mockRestore(); }
-    });
-
-    test('without fontProvider, faces load strictly from the bundled packages', async () => {
-      stubBrowser();
-      const loading = spyOn(bundled, 'loadBundledFontBytes');
-      try {
-        await exportScriptDocument();
-        expect(loading.mock.calls.length).toBeGreaterThan(0);
-        expect(loading.mock.calls.every((call) => call[2]?.strict === true)).toBe(true);
-      } finally { loading.mockRestore(); }
-    });
-
     test('without fontProvider, script text draws the primitives the complete bundled provider draws', async () => {
       stubBrowser();
       const complete = await resolveCompleteFontProvider();
       expect(complete).toBeDefined();
       const pinned = await drawnPrimitives({ fontProvider: complete });
       expect(await drawnPrimitives()).toEqual(pinned);
-    });
-
-    test('an export aborted while the shared layout loads its faces rejects at once, and another export of the document completes', async () => {
-      stubBrowser();
-      const original = bundled.loadBundledFontBytes;
-      let entered!: () => void;
-      const loadStarted = new Promise<void>((resolve) => { entered = resolve; });
-      let release!: () => void;
-      const gate = new Promise<void>((resolve) => { release = resolve; });
-      const loading = spyOn(bundled, 'loadBundledFontBytes').mockImplementation(async (face, ...rest) => {
-        entered();
-        await gate;
-        return original(face, ...rest);
-      });
-      const session = await createYrsSession();
-      try {
-        session.openDocx(scriptDocument(), true);
-        const controller = new AbortController();
-        const aborted = session.renderPng({ page: 0 }, { signal: controller.signal });
-        const other = session.renderPng({ page: 0 });
-        await loadStarted;
-        controller.abort(new Error('stopped'));
-        await expect(aborted).rejects.toThrow('stopped');
-        release();
-        expect(await other).toBeInstanceOf(Uint8Array);
-        expect(loading).toHaveBeenCalled();
-      } finally { release(); loading.mockRestore(); session.destroy(); }
-    });
-
-    test('an explicit fontProvider keeps its own faces and never loads bundled bytes strictly', async () => {
-      stubBrowser();
-      const fontProvider = await resolveCompleteFontProvider();
-      const failing = spyOn(bundled, 'loadBundledFontBytes').mockImplementation(() => Promise.reject(new Error('offline')));
-      try {
-        expect(await exportScriptDocument({ fontProvider })).toBeInstanceOf(Uint8Array);
-        expect(failing).not.toHaveBeenCalled();
-      } finally { failing.mockRestore(); }
     });
   });
 }
@@ -356,7 +215,7 @@ describe('YrsSession.renderPng', () => {
         session.openDocx(new Uint8Array(rezipPartsToArrayBuffer(parts)), true);
         await session.renderPng({ page: 0 });
         return calls.scales;
-      } finally { session.destroy(); restore?.(); restore = undefined; }
+      } finally { session.destroy(); restoreBrowser(); }
     };
     expect(await scales('50')).toContainEqual([0.5, 1]);
     expect((await scales('0')).filter(([x]) => x === 0)).toEqual([]);

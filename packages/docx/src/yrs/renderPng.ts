@@ -6,7 +6,7 @@ import { fontUnavailable, pngPage, pngScale, type DocxPngFontFace, type DocxPngO
 import { openPagedDisplay } from '../layout/render/rustDisplayList';
 import { extractEmbeddedFontFaces } from '../utils';
 import { renderPng as renderEnginePng } from '../wasm/enginePng';
-import { loadDocumentFaces, untilAborted } from '../wasm/enginePngFonts';
+import { faceLoadFailure, recordProviderFaceLoads, untilAborted } from '../wasm/enginePngFonts';
 import { createYrsSession, type YrsSession } from './index';
 import { sessionMediaSources } from './sessionInternals';
 
@@ -59,15 +59,19 @@ export function createPngExporter(session: YrsSession) {
       copy.rebuildMediaSources();
       const document = copy.materializeDocx();
       if (!document) throw new Error('renderPng needs a session opened from DOCX bytes');
-      const bundled = fontProvider ?? await resolveCompleteFontProvider();
+      const complete = fontProvider ? undefined : await resolveCompleteFontProvider();
+      const recorded = complete && !hasConfiguredFontSource() && baseLatinFontState().baseUrl === undefined
+        ? await recordProviderFaceLoads(complete) : undefined;
+      const bundled = fontProvider ?? recorded?.provider ?? complete;
       const measure = createRustMeasureSource({ engine: copy, ...(bundled ? { bundled } : {}) });
       measure.setCompat(document.package.settings?.compatibilityFlags);
       measure.setEmbeddedFaces(await extractEmbeddedFontFaces(document), appFaces(fonts));
       const renderEnv = documentRenderEnv(document);
       const request = buildResidentRegionLayoutRequest(document, 0, renderEnv);
       const requirements = JSON.parse(copy.layoutFontRequirementsJson(JSON.stringify(request))) as ResidentFontRequirement[];
-      if (!fontProvider && !hasConfiguredFontSource() && baseLatinFontState().baseUrl === undefined) await loadDocumentFaces(requirements);
       await measure.prepareFontRequirements(requirements);
+      const failed = recorded && faceLoadFailure(recorded.failures);
+      if (failed) throw failed;
       const measurement = measure.measurementConfigForRequirements(requirements);
       if (!measurement) throw fontUnavailable('The fonts this document lays out with could not be loaded. Install @betteroffice/fonts, or pass them in `fonts`.');
       computeLayout({ document, pageGap: 0, session: copy, renderEnv, measurement });

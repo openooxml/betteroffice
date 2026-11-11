@@ -1,60 +1,81 @@
-import { expect, spyOn, test } from 'bun:test';
-import * as bundled from '@betteroffice/fonts';
-import cases from '../../../../crates/betteroffice-fonts/data/script-fallback-chains.json';
-import { documentFaceChain, loadDocumentFace } from './enginePngFonts';
+import { expect, mock, test } from 'bun:test';
+import * as fonts from '@betteroffice/fonts';
+import { resolveCompleteFontProvider } from '../layout/measure';
+import type { BundledFontLoader, BundledFontProvider } from '../layout/measure/fontRegistry';
+import { faceLoadFailure, recordFaceLoads } from './enginePngFonts';
 
-const arabicFaces = bundled.BUNDLED_FONTS.filter((face) => face.script === 'arabic');
-const sameFace = (a: bundled.BundledFontFace, b: bundled.BundledFontFace) => a.family === b.family && a.weight === b.weight && a.style === b.style;
+mock.module('@betteroffice/fonts-intl', () => ({
+  then(_resolve: unknown, reject: (error: unknown) => void) {
+    Promise.resolve().then(() => reject(new Error("Cannot find package '@betteroffice/fonts-intl'")));
+  },
+}));
 
-async function nativeChain(family: string, bold: boolean, scripts: bundled.BundledFontScript[]): Promise<bundled.BundledFontFace[]> {
-  const chain: bundled.BundledFontFace[] = [];
-  const push = async (face: bundled.BundledFontFace | undefined) => {
-    if (face && await bundled.bundledFaceInstalled(face) && !chain.some((known) => sameFace(known, face))) chain.push(face);
-  };
-  const primary = bundled.resolveBundledFamilyFace(family, bold, false);
-  const installedPrimary = primary && await bundled.bundledFaceInstalled(primary) ? primary : undefined;
-  await push(installedPrimary);
-  for (const script of scripts) await push(bundled.resolveScriptFallbackFace(script, bold, false, family));
-  await push(bundled.resolveGlyphFallbackFace(family, bold, false, 'word'));
-  const last = bundled.resolveLastResortChoice(family, bold, false, 'word');
-  if (!last.onlyIfPrimaryFails || !installedPrimary) await push(last.face);
-  return chain;
+const hosted = Symbol.for('@betteroffice/docx/hostedFontFamilies');
+const bytes = new ArrayBuffer(8);
+
+function providerOf(loader: BundledFontLoader): BundledFontProvider {
+  const provider = { resolve: () => loader, resolveLastResort: () => loader, [hosted]: new Set(['brand sans']) };
+  return provider;
 }
 
-for (const { family, bold, arabic } of cases) {
-  test(`a ${family}${bold ? ' bold' : ''} run falls back for Arabic to the face the native chain gives`, async () => {
-    const chain = await documentFaceChain({ family, bold, italic: false, scripts: ['arabic'] });
-    const files = chain.flatMap((face) => arabicFaces.filter((known) => known.file === face.file).map((known) => known.file));
-    expect(files).toEqual([arabic]);
+test('a wrapped loader keeps every property of the loader it wraps, and the provider keeps its own', async () => {
+  const slices = { ref: { file: 'x' } } as unknown as BundledFontLoader['slices'];
+  const readOnly = new ArrayBuffer(4);
+  const inner: BundledFontLoader = Object.assign(async () => bytes, {
+    measureAs: 'Segoe UI', onlyIfPrimaryFails: true, slices, coverage: 'ff', readOnlyBytes: async () => readOnly,
   });
-}
-
-for (const [family, scripts] of [['Calibri', []], ['Calibri', ['hebrew']], ['Arial', ['arabic']], ['Brand Sans', []], ['Brand Sans', ['arabic', 'hebrew']]] as const) {
-  test(`the ${family} chain${scripts.length ? ` for ${scripts.join(' and ')}` : ''} runs family face, script faces, glyph fallback, then last resort`, async () => {
-    const chain = await documentFaceChain({ family, bold: false, italic: false, scripts: [...scripts] });
-    expect(chain.map((face) => face.file)).toEqual((await nativeChain(family, false, [...scripts])).map((face) => face.file));
-  });
-}
-
-test('a script face whose package is not installed is left out of the chain', async () => {
-  const arabic = bundled.resolveScriptFallbackFace('arabic', false, false, 'Arial')!;
-  const original = bundled.bundledFaceInstalled;
-  const installed = spyOn(bundled, 'bundledFaceInstalled')
-    .mockImplementation((face) => face.file === arabic.file ? Promise.resolve(false) : original(face));
-  try {
-    const chain = await documentFaceChain({ family: 'Arial', bold: false, italic: false, scripts: ['arabic'] });
-    expect(chain.map((face) => face.file)).not.toContain(arabic.file);
-    expect(chain.length).toBeGreaterThan(0);
-  } finally { installed.mockRestore(); }
+  const provider = providerOf(inner);
+  const { provider: watched } = recordFaceLoads(provider, fonts);
+  const loader = watched.resolve('Arial', false, false)!;
+  expect(loader).not.toBe(inner);
+  expect(loader).toMatchObject({ measureAs: 'Segoe UI', onlyIfPrimaryFails: true, slices, coverage: 'ff' });
+  expect(await loader()).toBe(bytes);
+  expect(await loader.readOnlyBytes!()).toBe(readOnly);
+  expect((watched as unknown as Record<symbol, unknown>)[hosted]).toBe((provider as unknown as Record<symbol, unknown>)[hosted]);
 });
 
-test('a face loads strictly, and one that cannot load rejects with font-unavailable naming it', async () => {
-  const face = bundled.resolveScriptFallbackFace('hebrew', false, false, 'Calibri')!;
-  const failing = spyOn(bundled, 'loadBundledFontBytes').mockImplementation(() => Promise.reject(new Error('offline')));
-  try {
-    await expect(loadDocumentFace(face, 'Calibri')).rejects.toMatchObject({
-      name: 'PngExportError', code: 'font-unavailable', message: `${face.family} for Calibri could not load: offline`,
-    });
-    expect(failing.mock.calls.every((call) => call[2]?.strict === true)).toBe(true);
-  } finally { failing.mockRestore(); }
+test('each loader is wrapped once, whichever method returns it', () => {
+  const inner: BundledFontLoader = async () => bytes;
+  const { provider: watched } = recordFaceLoads(providerOf(inner), fonts);
+  const loader = watched.resolve('Arial', false, false);
+  expect(watched.resolve('Arial', false, false)).toBe(loader);
+  expect(watched.resolveLastResort!('Arial', false, false, 'word')).toBe(loader);
+});
+
+test('a failed load is recorded with its face and family and still rejects, through the loader and its read-only bytes', async () => {
+  const offline = new Error('offline');
+  const inner: BundledFontLoader = Object.assign(() => Promise.reject(offline), { readOnlyBytes: () => Promise.reject(offline) });
+  const { provider: watched, failures } = recordFaceLoads(providerOf(inner), fonts);
+  const loader = watched.resolve('Arial', false, false)!;
+  await expect(loader()).rejects.toBe(offline);
+  await expect(loader.readOnlyBytes!()).rejects.toBe(offline);
+  const face = fonts.resolveMetricCompatFace('Arial', false, false)!;
+  expect(failures).toEqual([
+    { face, family: 'Arial', reason: 'offline' },
+    { face, family: 'Arial', reason: 'offline' },
+  ]);
+  expect(faceLoadFailure(failures)).toMatchObject({
+    name: 'PngExportError', code: 'font-unavailable', message: `${face.family} for Arial could not load: offline`,
+  });
+  expect(faceLoadFailure([])).toBeUndefined();
+});
+
+test('a face whose optional pack is not installed still rejects but is not recorded', async () => {
+  const thai = fonts.BUNDLED_FONTS.find((face) => face.script === 'thai')!;
+  const absent = await fonts.loadBundledFontBytes(thai).then(() => undefined, (error: unknown) => error);
+  expect(fonts.isMissingFontAddon(absent)).toBe(true);
+  expect(fonts.isMissingFontAddon(new Error(`Unknown bundled font asset: ${thai.file}`))).toBe(false);
+  const { provider: watched, failures } = recordFaceLoads(providerOf(() => Promise.reject(absent)), fonts);
+  await expect(watched.resolve('Arial', false, false)!()).rejects.toBe(absent);
+  expect(failures).toEqual([]);
+});
+
+test('the complete provider wrapped loads the same bytes', async () => {
+  const complete = (await resolveCompleteFontProvider())!;
+  const { provider: watched, failures } = recordFaceLoads(complete, fonts);
+  const face = fonts.resolveMetricCompatFace('Arial', false, false)!;
+  const loader = watched.resolve('Arial', false, false)!;
+  expect((await loader()).byteLength).toBe(face.byteLength);
+  expect((await loader.readOnlyBytes!()).byteLength).toBe(face.byteLength);
+  expect(failures).toEqual([]);
 });
