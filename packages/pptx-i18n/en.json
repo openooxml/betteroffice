@@ -191,7 +191,7 @@
       "gestureActive": "Finish the pointer gesture first.",
       "commandFailed": "The command failed.",
       "permissionDenied": "The host application has not allowed this plugin to use this command.",
-      "unsupportedPolicy": "Plugins can't run this command yet. Use an edit batch instead.",
+      "unsupportedPolicy": "This command needs a user gesture in the plugin's own UI.",
       "pluginUnavailable": "The plugin is no longer active.",
       "aborted": "The plugin action was cancelled before the command ran.",
       "clipboardUnavailable": "Clipboard access is unavailable or was denied.",

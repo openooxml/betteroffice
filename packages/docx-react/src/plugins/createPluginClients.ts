@@ -1,3 +1,4 @@
+import { gestureFor, pluginActivationId } from '../../../../shared/plugin-host/gesture';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import { resolveNavigationTarget, type YrsSession } from '@betteroffice/docx/yrs';
 import { grantsCommand, grantsEditBatch, grantsWrite } from '../../../../shared/plugin-host/grants';
@@ -92,6 +93,7 @@ export function pluginCommandScope(
   subscribe: (listener: () => void) => () => void
 ): DocxCommandScope {
   return {
+    gesture: () => gestureFor(pluginActivationId(invocation.activation)),
     deny(id) {
       const refusal = invocation.refusal();
       if (refusal) return refusal;
