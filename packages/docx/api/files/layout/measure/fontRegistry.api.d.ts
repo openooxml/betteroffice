@@ -166,11 +166,16 @@ export declare class TextMeasureFontRegistry {
     /** Script-fallback faces registered from their skeleton and core, by font id. */
     private progressiveIds;
     private readonly progressive?;
-    /** `progressive` opens sliced faces, which register from their skeleton and core. */
+    private readonly standInTail;
+    /**
+     * `progressive` opens sliced faces, which register from their skeleton and core.
+     * `standInTail` gives a stand-in family the last-resort tail even when its chain is not empty.
+     */
     constructor(sink: TextEngineFontSink, opts?: {
         bundled?: BundledFontProviderSource;
         baseLatin?: BundledFontProviderSource;
         progressive?: (slices: SliceLocation) => Promise<ProgressiveFontFace>;
+        standInTail?: boolean;
     });
     /** The sliced faces registered from their skeleton and core, by font id. */
     progressiveFaces(): ReadonlyMap<number, ProgressiveFontFace>;

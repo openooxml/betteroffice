@@ -133,7 +133,7 @@ export function createRustMeasureSource(options: {
       const provider = excludeHostedFontFamilies(await resolveDefaultFontProvider(options.runtime, standIns), hosted);
       if (current === generation) implicit = isImplicitFontProvider(provider);
       return provider;
-    }), progressive: options.progressive
+    }), standInTail: options.standIns === true, progressive: options.progressive
       ? async (slices) => import('@betteroffice/fonts/progressive').then(async ({ openSlicedFace, sliceSourceOf }) => {
         const face = await openSlicedFace(slices as Parameters<typeof openSlicedFace>[0]);
         if (!sliceSourceOf(face)) throw new Error('A sliced face opened without file URLs cannot load its outlines in the worker');

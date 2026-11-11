@@ -257,17 +257,23 @@ export class TextMeasureFontRegistry {
   /** Script-fallback faces registered from their skeleton and core, by font id. */
   private progressiveIds = new Map<number, ProgressiveFontFace>();
   private readonly progressive?: (slices: SliceLocation) => Promise<ProgressiveFontFace>;
+  private readonly standInTail: boolean;
 
-  /** `progressive` opens sliced faces, which register from their skeleton and core. */
+  /**
+   * `progressive` opens sliced faces, which register from their skeleton and core.
+   * `standInTail` gives a stand-in family the last-resort tail even when its chain is not empty.
+   */
   constructor(sink: TextEngineFontSink, opts?: {
     bundled?: BundledFontProviderSource;
     baseLatin?: BundledFontProviderSource;
     progressive?: (slices: SliceLocation) => Promise<ProgressiveFontFace>;
+    standInTail?: boolean;
   }) {
     this.sink = sink;
     this.bundledSource = opts?.bundled;
     this.baseLatinSource = opts?.baseLatin;
     this.progressive = opts?.progressive;
+    this.standInTail = opts?.standInTail === true;
   }
 
   /** The sliced faces registered from their skeleton and core, by font id. */
@@ -559,7 +565,7 @@ export class TextMeasureFontRegistry {
     // the base face, e.g. Arial→Liberation Sans, contributes one id).
     const standIn = (bundled as { [standInKey]?: StandInHook } | undefined)?.[standInKey];
     const standsIn = standIn?.standsIn(family) === true;
-    const tail = !standsIn || ids.length === 0;
+    const tail = !standsIn || ids.length === 0 || this.standInTail;
     let lastResort: BundledFontLoader | undefined;
     try {
       if (tail) lastResort = bundled?.resolveLastResort?.(family, bold, italic, 'word');

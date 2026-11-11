@@ -214,6 +214,30 @@ for (const origin of ['embedded', 'app'] as const) {
   });
 }
 
+test('explicit stand-ins keep the last-resort tail after embedded bytes for a family the default fonts do not carry', async () => {
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    const data = Uint8Array.of(11, 12, 13).buffer;
+    const face: EmbeddedFaceInput = { family: 'Brand Sans', weight: 'normal', style: 'normal', data, subsetted: false };
+    const requirements: ResidentFontRequirement[] = [
+      { key: 'brand sans|0|0', family: 'Brand Sans', bold: false, italic: false },
+    ];
+    const explicit = await measurementConfig(requirements, true, { embedded: [face] });
+    const liberation = await fontManager.createFontProvider().resolveLastResort('Brand Sans', false, false, 'word')();
+    expect(explicit.registered).toEqual([new Uint8Array(data), new Uint8Array(liberation)]);
+    expect(explicit.config).toEqual({
+      fontChains: {
+        'brand sans|0|0': [1, 2],
+        [IMPLICIT_FONT_COVERAGE]: [1, 2],
+        [IMPLICIT_SYMBOL_SHAPING]: [1, 2],
+      },
+      defaults: { fontSize: 11, fontFamily: 'Calibri' },
+      compat: { compatibilityMode: 12, noLeading: false, doNotExpandShiftReturn: false },
+      authoritativeShaping: true,
+    });
+  } finally { warn.mockRestore(); }
+});
+
 test('unconfigured measurement lazily resolves faces through the fonts manager', async () => {
   const data = new Uint8Array([1, 2, 3]).buffer;
   const provider = providerFor(data);
