@@ -339,21 +339,28 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
   ) => mountEditor(props, strict, buffer, experimentalWorkerOpen);
 
   test('selection changes emit one selection-settle after the quiet window', async () => {
-    const events: DocxPluginEvent[] = [];
-    const plugin = defineDocxPlugin({ id: 'settle', createState: () => null,
-      onEvent(_context, event) { events.push(event); } });
-    const { ref } = await mount({ plugins: [plugin] });
-    await settle(400);
-    events.length = 0;
-    await act(async () => { ref.current!.getEditorRef()!.setSelection(1, 4); });
-    expect(events.filter((event) => event.type === 'selection-settle')).toEqual([]);
-    await settle(400);
-    expect(events.filter((event) => event.type === 'selection-settle')).toMatchObject([
-      { source: 'keyboard', selection: { displayRange: { from: 1, to: 4 } } },
-    ]);
-    expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
-    await settle(400);
-    expect(events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
+    const clock = selectionClock();
+    try {
+      const events: DocxPluginEvent[] = [];
+      const plugin = defineDocxPlugin({ id: 'settle', createState: () => null,
+        onEvent(_context, event) { events.push(event); } });
+      const { ref } = await mount({ plugins: [plugin] });
+      await act(async () => { await ref.current!.whenLayoutComplete({ timeoutMs: 3000 }); });
+      await act(async () => { await clock.tick(400); });
+      events.length = 0;
+      const settles = () => events.filter((event) => event.type === 'selection-settle');
+      await act(async () => { ref.current!.getEditorRef()!.setSelection(1, 4); });
+      expect(settles()).toEqual([]);
+      await act(async () => { await clock.tick(349); });
+      expect(settles()).toEqual([]);
+      await act(async () => { await clock.tick(1); });
+      expect(settles()).toMatchObject([
+        { source: 'keyboard', selection: { displayRange: { from: 1, to: 4 } } },
+      ]);
+      expect(settles()).toHaveLength(1);
+      await act(async () => { await clock.tick(400); });
+      expect(settles()).toHaveLength(1);
+    } finally { clock.restore(); }
   });
 
   if (experimentalWorkerOpen === undefined) test('viewer open reads the main session selection at most once with plugins installed', async () => {
@@ -3776,6 +3783,30 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
       expect(answer![0]).toMatchObject(outcome === 'mapped' ? { ok: true } : { ok: false, failure: { code: 'layout-unavailable' } });
       await read;
       if (outcome === 'expired') await act(async () => { held.release(); });
+    } finally { h.dispose(); }
+  });
+
+  test('a selection whose quiet window passed before its range was ready settles once as soon as the range arrives', async () => {
+    const h = await matrixEditor(engine, documentBytes(), undefined, true);
+    try {
+      await h.selection('body', h.first.paraId, 0);
+      await h.selectionLayout();
+      await h.quiet();
+      h.reset();
+      const held = h.holdDisplayRange();
+      await h.selection('body', h.first.paraId, 1, 3, false);
+      await h.quiet();
+      expect(h.settles).toHaveLength(0);
+      expect(h.context().snapshot.selectionSettled).toBe(false);
+      await act(async () => { held.release(); });
+      await until(() => h.settles.length > 0);
+      await h.host.notificationsIdle();
+      expect(h.settles).toHaveLength(1);
+      expect(h.events.filter(event => event.type === 'selection-settle')).toMatchObject([
+        { selection: { displayRange: { story: 'body' } } },
+      ]);
+      await h.quiet(700);
+      expect(h.settles).toHaveLength(1);
     } finally { h.dispose(); }
   });
 

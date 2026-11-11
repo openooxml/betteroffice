@@ -197,6 +197,55 @@ for (const [name, insertAt, expected] of [
   });
 }
 
+test('a selection moved while the layout is behind settles once when the next layout maps it after its quiet window', async () => {
+  const clock = selectionClock();
+  try {
+    const { view, editElsewhere } = await bodyBesideOtherStory();
+    await act(async () => { await clock.tick(350); });
+    view.settledSelections.length = 0;
+    const moved = { from: 4, to: 6 };
+    await remoteEdit(view, editElsewhere(), () => view.selectRange(moved));
+    expect(snapshotOf(view).layout).toBeNull();
+    await act(async () => { await clock.tick(350); });
+    expect(view.settledSelections).toEqual([]);
+    expect(snapshotOf(view).selectionSettled).toBe(false);
+    view.setDisplayRange(moved);
+    await relayout(view);
+    expect(view.settledSelections).toEqual([{ formatting: view.formatting(),
+      displayRange: { story: 'body', ...moved, layoutId: snapshotOf(view).layout!.id } }]);
+    await act(async () => { await clock.tick(700); });
+    expect(view.settledSelections).toHaveLength(1);
+  } finally { cleanup(); clock.restore(); }
+});
+
+test('a selection change after a selection moved under a stale layout waits for its own quiet window', async () => {
+  const clock = selectionClock();
+  try {
+    const { view, editElsewhere } = await bodyBesideOtherStory();
+    await act(async () => { await clock.tick(350); });
+    view.settledSelections.length = 0;
+    await remoteEdit(view, editElsewhere(), () => view.selectRange({ from: 4, to: 6 }));
+    expect(snapshotOf(view).layout).toBeNull();
+    await act(async () => { await clock.tick(350); });
+    expect(view.settledSelections).toEqual([]);
+    const next = { from: 7, to: 9 };
+    await act(async () => {
+      view.setRange(next);
+      view.options.queries = queriesAt(view.session.version());
+      view.rerender();
+    });
+    expect(snapshotOf(view).selection.displayRange).toEqual({ story: 'body', ...next, layoutId: snapshotOf(view).layout!.id });
+    expect(view.settledSelections).toEqual([]);
+    await act(async () => { await clock.tick(349); });
+    expect(view.settledSelections).toEqual([]);
+    await act(async () => { await clock.tick(1); });
+    expect(view.settledSelections).toEqual([{ formatting: view.formatting(),
+      displayRange: { story: 'body', ...next, layoutId: snapshotOf(view).layout!.id } }]);
+    await act(async () => { await clock.tick(700); });
+    expect(view.settledSelections).toHaveLength(1);
+  } finally { cleanup(); clock.restore(); }
+});
+
 test('an unchanged selection the next layout cannot place ends its kept range with one empty change', async () => {
   const { view, before, editElsewhere } = await bodyBesideOtherStory();
   await remoteEdit(view, editElsewhere());
