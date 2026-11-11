@@ -139,7 +139,11 @@ export async function ranInOwnEngineProcess(file: string, name: string): Promise
   ]);
   clearTimeout(deadline);
   const output = stdout + stderr;
-  const ranAlone = status === 0 && /(^|\s)1 pass\b/m.test(output) && /(^|\s)0 fail\b/m.test(output);
+  const counts = (pattern: RegExp) => [...output.matchAll(pattern)].map((match) => match[1]);
+  const ranAlone = status === 0
+    && counts(/^\s*(\d+) pass$/gm).join() === '1'
+    && counts(/^\s*(\d+) fail$/gm).join() === '0'
+    && counts(/^Ran (\d+) tests? across \d+ files?\./gm).join() === '1';
   expect({ status, ranAlone, output: ranAlone ? '' : output }).toEqual({ status: 0, ranAlone: true, output: '' });
   return true;
 }
