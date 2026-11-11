@@ -425,7 +425,7 @@ function storyKindsBytes(): Uint8Array {
   const parts: PartsMap = new Map();
   parts.set('[Content_Types].xml', toBytes(`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="${MAIN}.document.main+xml"/><Override PartName="/word/footnotes.xml" ContentType="${MAIN}.footnotes+xml"/><Override PartName="/word/header1.xml" ContentType="${MAIN}.header+xml"/><Override PartName="/word/settings.xml" ContentType="${MAIN}.settings+xml"/><Override PartName="/word/comments.xml" ContentType="${MAIN}.comments+xml"/></Types>`));
   parts.set('_rels/.rels', toBytes(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="r1" Type="${REL}/officeDocument" Target="word/document.xml"/></Relationships>`));
-  parts.set('word/_rels/document.xml.rels', toBytes(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdFn" Type="${REL}/footnotes" Target="footnotes.xml"/><Relationship Id="rIdEven" Type="${REL}/header" Target="header1.xml"/><Relationship Id="rIdSet" Type="${REL}/settings" Target="settings.xml"/><Relationship Id="rIdCm" Type="${REL}/comments" Target="comments.xml"/></Relationships>`));
+  parts.set('word/_rels/document.xml.rels', toBytes(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdFn" Type="${REL}/footnotes" Target="footnotes.xml"/><Relationship Id="rId:Even" Type="${REL}/header" Target="header1.xml"/><Relationship Id="rIdSet" Type="${REL}/settings" Target="settings.xml"/><Relationship Id="rIdCm" Type="${REL}/comments" Target="comments.xml"/></Relationships>`));
   parts.set('word/settings.xml', toBytes(`<w:settings xmlns:w="${W}"><w:evenAndOddHeaders/></w:settings>`));
   parts.set('word/header1.xml', toBytes(`<w:hdr xmlns:w="${W}">${paragraph('Even header')}</w:hdr>`));
   parts.set('word/footnotes.xml', toBytes(`<w:footnotes xmlns:w="${W}"><w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote><w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote><w:footnote w:id="1">${paragraph('Note text')}</w:footnote></w:footnotes>`));
@@ -433,13 +433,13 @@ function storyKindsBytes(): Uint8Array {
   const textBox = `<w:p><w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"><wp:extent cx="2743200" cy="1371600"/><wp:docPr id="1" name="Box"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:cNvSpPr txBox="1"/><wps:spPr><a:prstGeom prst="rect"/></wps:spPr><wps:txbx><w:txbxContent>${paragraph('Boxed text')}</w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`;
   const noted = `<w:p><w:r><w:t>Noted</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r></w:p>`;
   const commented = `<w:p><w:commentRangeStart w:id="0"/><w:r><w:t>Commented</w:t></w:r><w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r></w:p>`;
-  parts.set('word/document.xml', toBytes(`<w:document xmlns:w="${W}" xmlns:r="${R}"><w:body>${paragraph('Before')}${table(cell('First'), cell('Second'))}${noted}${commented}${textBox}${paragraph('After')}<w:sectPr><w:headerReference w:type="even" r:id="rIdEven"/></w:sectPr></w:body></w:document>`));
+  parts.set('word/document.xml', toBytes(`<w:document xmlns:w="${W}" xmlns:r="${R}"><w:body>${paragraph('Before')}${table(cell('First'), cell('Second'))}${noted}${commented}${textBox}${paragraph('After')}<w:sectPr><w:headerReference w:type="even" r:id="rId:Even"/></w:sectPr></w:body></w:document>`));
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
 const STORY_KINDS: Array<{ name: string; story: (ids: readonly string[]) => string | undefined; text: string }> = [
   { name: 'a footnote', story: (ids) => ids.find((id) => id.startsWith('fn:') && !id.slice(3).includes(':')), text: 'Note text' },
-  { name: 'an even-page header', story: (ids) => ids.find((id) => id.startsWith('hf:') && !id.slice(3).includes(':')), text: 'Even header' },
+  { name: 'an even-page header whose relationship id holds a colon', story: (ids) => ids.find((id) => id === 'hf:rId:Even'), text: 'Even header' },
 ];
 
 for (const [index, kind] of STORY_KINDS.entries()) {
