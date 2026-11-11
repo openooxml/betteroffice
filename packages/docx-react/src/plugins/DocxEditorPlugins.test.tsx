@@ -4047,20 +4047,23 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
   });
 
   if (engine === 'DI') test('T6: focus change neither cancels nor restarts a pending settle', async () => {
-    const h = await matrixEditor(engine);
+    const h = await matrixEditor(engine, documentBytes(), undefined, true);
     try {
       h.reset();
       const selectedAt = Date.now();
       await h.selection('body', h.first.paraId, 0, 3);
+      await h.selectionLayout();
       await h.quiet(200);
       const input = h.input();
-      const focusedAt = Date.now();
       await act(async () => { input.focus(); input.blur(); });
       expect(h.settles).toHaveLength(0);
-      await until(() => h.settles.length > 0);
+      await h.quiet(149);
+      expect(h.settles).toHaveLength(0);
+      await h.quiet(1);
       expect(h.settles).toHaveLength(1);
-      expect(h.settles[0]!.at - selectedAt).toBeGreaterThanOrEqual(350);
-      expect(h.settles[0]!.at - focusedAt).toBeLessThan(350);
+      expect(h.settles[0]!.at - selectedAt).toBe(350);
+      await h.quiet(700);
+      expect(h.settles).toHaveLength(1);
       expect(h.events.some(event => event.type === 'focus-change')).toBe(true);
     } finally { h.dispose(); }
   });
@@ -4089,7 +4092,7 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
   });
 
   if (engine === 'DI') test('T8: removing one of two plugins keeps the other pending settle; reattach does not replay', async () => {
-    const h = await matrixEditor(engine);
+    const h = await matrixEditor(engine, documentBytes(), undefined, true);
     const otherEvents: DocxPluginEvent[] = [];
     const other = defineDocxPlugin({ id: 'other', createState: () => null, onEvent(_context, event) { otherEvents.push(event); } });
     try {
@@ -4097,6 +4100,7 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
       await h.host.notificationsIdle();
       h.reset();
       await h.selection('body', h.first.paraId, 0, 3);
+      await h.selectionLayout();
       await h.quiet(200);
       h.rerender({ plugins: [other] });
       await h.quiet(150);
