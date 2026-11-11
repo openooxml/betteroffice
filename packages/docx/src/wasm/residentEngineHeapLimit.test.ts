@@ -21,7 +21,7 @@ test('the edit heap limit also caps OPC calls routed through the resident engine
   if (engineKind === 'wasm') expect(before?.liveBytes).toBeDefined();
   expect(archive.byteLength).toBeGreaterThan(128 * 1024);
   try {
-    setEditWasmHeapLimit((before?.liveBytes ?? 0) + 128 * 1024);
+    setEditWasmHeapLimit(128 * 1024);
     expect(() => unzipContainer(archive)).toThrow();
     const capped = wasmModuleMemories().find(({ label }) => label === 'docx-edit')!;
     expect(capped.failedAllocationBytes).toBeGreaterThan(0);

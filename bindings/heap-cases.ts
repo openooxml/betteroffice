@@ -24,7 +24,8 @@ export interface HeapMemoryEntry {
 /**
  * What a limit does on each engine: wasm refuses the allocation past it; native
  * fails the engine call that crossed it. Either way the call throws and the
- * crossing allocation is recorded.
+ * crossing allocation is recorded. The table's limit is 0, so the outcome does
+ * not depend on live bytes that other objects free while the case runs.
  */
 export const HEAP_LIMIT = { wasm: 'refuses', native: 'refuses' } as const;
 
@@ -110,8 +111,7 @@ export function describeHeapTable<T>(
   });
 
   test(`a heap limit on ${engineKind}: ${HEAP_LIMIT[engineKind]}`, () => {
-    const live = engine().wasm_live_bytes();
-    engine().set_wasm_heap_limit(live + 1024);
+    engine().set_wasm_heap_limit(0);
     let thrown: unknown;
     try {
       release(hold());

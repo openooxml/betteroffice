@@ -1276,7 +1276,7 @@ describe('docx native engine parity', () => {
   test('a call past the heap limit fails its object, which refuses later calls until freed', () => {
     expect(native.set_wasm_heap_counting(true)).toBe(true);
     const failing = new native.EditSession(18);
-    const limit = native.wasm_live_bytes() + 1024;
+    const limit = 0;
     native.set_wasm_heap_limit(limit);
     let budget: unknown;
     try {
