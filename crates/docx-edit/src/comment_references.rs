@@ -87,7 +87,7 @@ fn range_ends<T: ReadTxn>(txn: &T, comment_id: &str) -> BTreeMap<String, u32> {
         return ends;
     };
     for anchor in anchors.iter().filter_map(|value| decode_anchor(value).ok()) {
-        if crate::story_ref(txn, &anchor.story).is_err() {
+        if crate::story_text(txn, &anchor.story).is_none() {
             continue;
         }
         if let Some(end) = sticky_offset(&anchor.end, txn) {

@@ -285,7 +285,7 @@ impl Provenance {
                 .entry((pin.story.clone(), pin.unit))
                 .or_insert_with(|| {
                     if let Some(range) = ranges.get(&pin.story)
-                        && story_ref(&txn, &pin.story).is_ok()
+                        && crate::story_text(&txn, &pin.story).is_some()
                     {
                         (pin.unit < range.len).then(|| {
                             StickyIndex::new(

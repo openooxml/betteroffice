@@ -226,6 +226,8 @@ export interface TextFormatting {
   shadow?: boolean;
   /** Modern w14 text effects (glow/shadow/reflection/textFill/textOutline). */
   modernEffects?: TextModernEffects;
+  ligatures?: string;
+  contextualAlternates?: boolean;
 
   // Complex script
   /** Right-to-left text (w:rtl) */

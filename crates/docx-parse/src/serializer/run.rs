@@ -153,6 +153,29 @@ pub fn serialize_text_formatting(formatting: Option<&TextFormatting>) -> String 
         }
     }
 
+    if let Some(value) = formatting
+        .ligatures
+        .as_deref()
+        .filter(|value| crate::formatting::valid_ligatures(value))
+    {
+        body.start_element("w14:ligatures")
+            .attribute(
+                "xmlns:w14",
+                "http://schemas.microsoft.com/office/word/2010/wordml",
+            )
+            .attribute("w14:val", value)
+            .end_element();
+    }
+    if let Some(value) = formatting.contextual_alternates {
+        body.start_element("w14:cntxtAlts")
+            .attribute(
+                "xmlns:w14",
+                "http://schemas.microsoft.com/office/word/2010/wordml",
+            )
+            .attribute("w14:val", if value { "1" } else { "0" })
+            .end_element();
+    }
+
     let body = body.finish();
     if body.is_empty() {
         String::new()
@@ -359,8 +382,13 @@ fn patch_run_properties(
     let end = source.rfind("</").ok_or_else(|| {
         ParseError::Canonical("drawing run properties have no closing tag".to_owned())
     })?;
-    let rank = |local: &str| {
-        "rStyle rFonts b bCs i iCs caps smallCaps strike dstrike outline shadow emboss imprint noProof snapToGrid vanish webHidden color spacing w kern position sz szCs highlight u effect bdr shd fitText vertAlign rtl cs em lang eastAsianLayout specVanish oMath rPrChange"
+    let rank = |element: &XmlElement| {
+        let local = if element.name == "w14:shadow" {
+            "shadow14"
+        } else {
+            element.local_name()
+        };
+        "rStyle rFonts b bCs i iCs caps smallCaps strike dstrike outline shadow emboss imprint noProof snapToGrid vanish webHidden color spacing w kern position sz szCs highlight u effect bdr shd fitText vertAlign rtl cs em lang eastAsianLayout specVanish oMath rPrChange glow shadow14 reflection textOutline textFill scene3d props3d ligatures numForm numSpacing stylisticSets cntxtAlts"
             .split_whitespace().position(|name| name == local).unwrap_or(usize::MAX)
     };
     let mut edits: Vec<_> = children
@@ -372,7 +400,7 @@ fn patch_run_properties(
     for child in additions {
         let at = children
             .iter()
-            .find(|(source, _)| rank(source.local_name()) > rank(child.local_name()))
+            .find(|(source, _)| rank(source) > rank(child))
             .map_or(end, |(_, span)| span.start);
         insertions
             .entry(at)
@@ -458,9 +486,13 @@ fn serialize_run_properties(
 ) -> String {
     let current = serialize_text_formatting(formatting);
     let mut inner = strip_wrapper(&current, "<w:rPr>", "</w:rPr>").to_owned();
-    for change in changes.unwrap_or_default() {
-        inner.push_str(&serialize_run_property_change(change));
-    }
+    let at = inner.find("<w14:").unwrap_or(inner.len());
+    let changes: String = changes
+        .unwrap_or_default()
+        .iter()
+        .map(serialize_run_property_change)
+        .collect();
+    inner.insert_str(at, &changes);
     if inner.is_empty() {
         String::new()
     } else {
@@ -2088,6 +2120,26 @@ mod tests {
             let formatting = parse_run_properties(parsed.root(), None);
             assert_eq!(serialize_text_formatting(formatting.as_ref()), xml);
         }
+    }
+
+    #[test]
+    fn optional_typography_serializes_after_word_properties() {
+        let formatting = TextFormatting {
+            bold: Some(true),
+            ligatures: Some("standardContextual".to_owned()),
+            contextual_alternates: Some(false),
+            ..Default::default()
+        };
+        let xml = serialize_text_formatting(Some(&formatting));
+        assert!(xml.contains(r#"<w:b/><w14:ligatures xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" w14:val="standardContextual"/>"#));
+        assert!(xml.find("w14:ligatures").unwrap() < xml.find("w14:cntxtAlts").unwrap());
+        let limits = ParseLimits::default();
+        let parsed = parse_xml(xml.as_bytes(), "run.xml", &mut ParseBudget::new(&limits)).unwrap();
+        assert_eq!(parse_run_properties(parsed.root(), None), Some(formatting));
+        assert_eq!(
+            serialize_text_formatting(Some(&TextFormatting::default())),
+            ""
+        );
     }
 
     #[test]
