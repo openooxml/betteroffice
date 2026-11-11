@@ -1185,14 +1185,13 @@ fn styled_run_base(
         .collect())
 }
 
-/// Every character-formatting attribute set back to `base`, removed where `base` has none.
+/// Every character-formatting attribute set back to `base`, removed where `base` has none. Only
+/// [`FORMATTING_ATTRS`] are written, so script direction and every other attribute a clear keeps
+/// stay as they are even where the styles give them a value.
 fn reset_to(base: &BTreeMap<String, Any>) -> Attrs {
     FORMATTING_ATTRS
         .iter()
-        .copied()
-        .chain(base.keys().map(String::as_str))
-        .filter(|key| !PROTECTED_ATTRS.contains(key))
-        .map(|key| (Arc::from(key), base.get(key).cloned().unwrap_or(Any::Null)))
+        .map(|key| (Arc::from(*key), base.get(*key).cloned().unwrap_or(Any::Null)))
         .collect()
 }
 
@@ -1664,11 +1663,10 @@ impl EditingDoc {
                 let attrs = paragraph_delta(delta, &range.story, paragraph.style.as_deref(), || {
                     clearing_attrs_in(&chunks, from, to)
                 })?;
-                let changes = changes_text_in(&chunks, from, to, &attrs);
-                if attrs.is_empty() || (matches!(delta, RunDelta::Clear(_)) && !changes) {
+                if attrs.is_empty() {
                     continue;
                 }
-                if changes
+                if changes_text_in(&chunks, from, to, &attrs)
                     && let Some(reason) = paragraph
                         .key
                         .as_deref()
@@ -1696,13 +1694,12 @@ impl EditingDoc {
                 paragraph.and_then(|paragraph| paragraph.style.as_deref()),
                 || clearing_attrs(story, txn, range.start, range.end),
             )?;
-            let changes = changes_text(story, txn, range.start, range.end, &attrs);
             if let Some(key) = paragraph.and_then(|paragraph| paragraph.key.as_deref())
-                && changes
+                && changes_text(story, txn, range.start, range.end, &attrs)
                 && keeper.rewrite_loss(key) == Some(KeptReason::Field)
             {
                 keeper.keep(KeptReason::Field);
-            } else if changes || matches!(delta, RunDelta::Set(_)) {
+            } else {
                 for (at, len) in spans {
                     let span = StoryRange::new(range.story.clone(), at, at + len);
                     revision_ids.extend(self.apply_run_format(

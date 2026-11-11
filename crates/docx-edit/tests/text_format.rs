@@ -20,25 +20,46 @@ fn package(body: &str) -> Vec<u8> {
 }
 
 fn package_with_styles(body: &str, styles: &str) -> Vec<u8> {
-    let content_types = r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>"#;
+    package_parts(body, styles, None)
+}
+
+fn package_parts(body: &str, styles: &str, notes: Option<&str>) -> Vec<u8> {
+    let notes_type = if notes.is_some() {
+        r#"<Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/>"#
+    } else {
+        ""
+    };
+    let notes_rel = if notes.is_some() {
+        r#"<Relationship Id="rIdNotes" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml"/>"#
+    } else {
+        ""
+    };
+    let content_types = format!(
+        r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>{notes_type}</Types>"#
+    );
     let root_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;
-    let document_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#;
+    let document_rels = format!(
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>{notes_rel}</Relationships>"#
+    );
     let document = format!(r#"<w:document {NS}><w:body>{body}<w:sectPr/></w:body></w:document>"#);
     let styles = format!(r#"<w:styles {NS}>{styles}</w:styles>"#);
-    ooxml_opc::rezip_parts(&[
-        (
-            "[Content_Types].xml".to_owned(),
-            content_types.as_bytes().to_vec(),
-        ),
+    let mut parts = vec![
+        ("[Content_Types].xml".to_owned(), content_types.into_bytes()),
         ("_rels/.rels".to_owned(), root_rels.as_bytes().to_vec()),
         (
             "word/_rels/document.xml.rels".to_owned(),
-            document_rels.as_bytes().to_vec(),
+            document_rels.into_bytes(),
         ),
         ("word/document.xml".to_owned(), document.into_bytes()),
         ("word/styles.xml".to_owned(), styles.into_bytes()),
-    ])
-    .unwrap()
+    ];
+    if let Some(notes) = notes {
+        parts.push((
+            "word/footnotes.xml".to_owned(),
+            format!(r#"<w:footnotes {NS}>{notes}</w:footnotes>"#).into_bytes(),
+        ));
+    }
+    ooxml_opc::rezip_parts(&parts).unwrap()
 }
 
 /// `00000001` plain, `00000002` directly bold, `00000003` a bold Heading1, `00000004` a run in the
@@ -729,4 +750,101 @@ fn a_replica_without_the_opened_styles_removes_the_formatting() {
         editor_range(&replica, "body", ("00000003", 0), ("00000003", 5)),
     );
     assert!(!active(&marks(&replica, "Title"), "bold"));
+}
+
+const BOLD_PAGE_FIELD: &str = concat!(
+    r#"<w:r><w:rPr><w:b/></w:rPr><w:fldChar w:fldCharType="begin"/></w:r>"#,
+    r#"<w:r><w:rPr><w:b/></w:rPr><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r>"#,
+    r#"<w:r><w:rPr><w:b/></w:rPr><w:fldChar w:fldCharType="separate"/></w:r>"#,
+    r#"<w:r><w:rPr><w:b/></w:rPr><w:t>7</w:t></w:r>"#,
+    r#"<w:r><w:rPr><w:b/></w:rPr><w:fldChar w:fldCharType="end"/></w:r>"#,
+);
+
+/// `00000021` plain text around a bold note reference and a bold PAGE field, `00000023` plain
+/// text and a bold note reference, each followed by a plain paragraph.
+fn open_with_embeds() -> EditingDoc {
+    let body = format!(
+        "{}{}{}{}",
+        format_args!(
+            r#"<w:p w14:paraId="00000021"><w:r><w:t xml:space="preserve">See </w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:footnoteReference w:id="1"/></w:r><w:r><w:t xml:space="preserve"> page </w:t></w:r>{BOLD_PAGE_FIELD}</w:p>"#
+        ),
+        r#"<w:p w14:paraId="00000022"><w:r><w:t>End</w:t></w:r></w:p>"#,
+        r#"<w:p w14:paraId="00000023"><w:r><w:t xml:space="preserve">Cite </w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:footnoteReference w:id="2"/></w:r></w:p>"#,
+        r#"<w:p w14:paraId="00000024"><w:r><w:t>Tail</w:t></w:r></w:p>"#,
+    );
+    let notes = concat!(
+        r#"<w:footnote w:id="1"><w:p><w:r><w:t>One</w:t></w:r></w:p></w:footnote>"#,
+        r#"<w:footnote w:id="2"><w:p><w:r><w:t>Two</w:t></w:r></w:p></w:footnote>"#,
+    );
+    let doc = EditingDoc::new(7113);
+    seed_from_docx(&doc, &package_parts(&body, STYLES, Some(notes))).unwrap();
+    doc
+}
+
+/// The kind and attributes of every inline embed of the body.
+fn body_embeds(doc: &EditingDoc) -> Vec<(String, BTreeMap<String, Any>)> {
+    segments(doc, "body")
+        .into_iter()
+        .filter_map(|segment| match segment.content {
+            SegmentContent::OtherEmbed { kind, .. } => Some((kind, segment.attributes)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn editor_clear_removes_direct_formatting_from_note_references_and_fields() {
+    for end in [("00000022", 0), ("00000022", 3)] {
+        let doc = open_with_embeds();
+        let before = body_embeds(&doc);
+        assert!(
+            before.iter().filter(|(_, attrs)| active(attrs, "bold")).count() >= 3,
+            "{before:?}"
+        );
+        editor_clear(
+            &doc,
+            &EditCtx::local("", ""),
+            editor_range(&doc, "body", ("00000021", 0), end),
+        );
+        let after = body_embeds(&doc);
+        let still_bold: Vec<_> = after
+            .iter()
+            .filter(|(_, attrs)| active(attrs, "bold"))
+            .map(|(kind, _)| kind.as_str())
+            .collect();
+        assert_eq!(still_bold.len(), 1, "{end:?}: {after:?}");
+    }
+}
+
+#[test]
+fn a_suggested_editor_clear_records_a_note_reference_change() {
+    let doc = open_with_embeds();
+    let revisions = editor_clear(
+        &doc,
+        &EditCtx::local("Ann", "2026-11-10T12:00:00Z").suggesting(),
+        editor_range(&doc, "body", ("00000023", 0), ("00000024", 0)),
+    );
+    assert_eq!(revisions.len(), 1);
+    let reference = body_embeds(&doc).pop().unwrap().1;
+    assert!(!active(&reference, "bold") && active(&reference, "rPrChange"));
+}
+
+#[test]
+fn editor_clear_keeps_an_explicit_run_direction() {
+    let styles = format!(
+        r#"{STYLES}<w:style w:type="paragraph" w:styleId="RtlBody"><w:name w:val="Rtl Body"/><w:pPr><w:bidi/></w:pPr><w:rPr><w:rtl/></w:rPr></w:style>"#
+    );
+    let body = r#"<w:p w14:paraId="00000031"><w:pPr><w:pStyle w:val="RtlBody"/></w:pPr><w:r><w:rPr><w:rtl w:val="0"/><w:i/></w:rPr><w:t>Left words</w:t></w:r></w:p>"#;
+    let doc = EditingDoc::new(7114);
+    seed_from_docx(&doc, &package_with_styles(body, &styles)).unwrap();
+    let before = marks(&doc, "Left words");
+    assert!(!active(&before, "rtl") && active(&before, "italic"));
+    editor_clear(
+        &doc,
+        &EditCtx::local("", ""),
+        editor_range(&doc, "body", ("00000031", 0), ("00000031", 10)),
+    );
+    let after = marks(&doc, "Left words");
+    assert!(!active(&after, "rtl") && !active(&after, "italic"));
+    assert_eq!(after.get("rtl"), before.get("rtl"));
 }
