@@ -6289,7 +6289,7 @@ impl EngineSession {
         let mut measured_spacing = None;
         let worker_owned = request.worker_owned.is_some();
         if let Some(worker) = request.worker_owned {
-            let env = if worker.render_env.is_null() {
+            let mut env: RenderEnv = if worker.render_env.is_null() {
                 RenderEnv::default()
             } else {
                 serde_json::from_value(worker.render_env.clone())
@@ -6298,6 +6298,8 @@ impl EngineSession {
             let story = worker.body_story.as_deref().unwrap_or("body");
             let mut regions = request.regions;
             regions.normalize_authored();
+            env.note_numbering =
+                docx_layout::footnotes::SectionNoteNumbering::for_regions(&regions);
             if let Some(payload) = request.worker_headers_footers {
                 let value = serde_json::json!({ "headersFooters": payload });
                 for variant in value["headersFooters"]["variants"]
@@ -6774,6 +6776,8 @@ impl EngineSession {
             if cache_key.is_some() {
                 render_env.revision_preview.clear();
             }
+            render_env.note_numbering =
+                docx_layout::footnotes::SectionNoteNumbering::for_regions(&regions);
             let mut stories = BTreeSet::from([body_story]);
             for section_index in 0..regions.sections.len() {
                 let Some(refs) = effective_header_footer_refs(&regions, section_index) else {
@@ -7440,6 +7444,10 @@ impl EngineSession {
             let line_px = regions.paragraph_spacing_line_px(0);
             env.paragraph_spacing_line_px = (line_px != 16.0).then_some(line_px);
             env.doc_grid_pitch_px = regions.doc_grid_snap_pitch_px(0);
+        }
+        if let Some(env) = &mut parsed_render_env {
+            env.note_numbering =
+                docx_layout::footnotes::SectionNoteNumbering::for_regions(&regions);
         }
         let prefix = match prefix {
             Some(PagePrefix { exact: true, .. })

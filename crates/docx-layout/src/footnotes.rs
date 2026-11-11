@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap};
 use serde::{Deserialize, Serialize};
 
 use crate::LayoutError;
-use crate::regions::{DocumentRegions, format_number};
+use crate::regions::{DocumentRegions, NoteProperties, advances_region_section, format_number};
 use crate::types::{
     BlockExtent, BlockId, Fragment, Layout, LayoutBlock, NoteAreaContract, NoteLayoutItemContract,
     Page, PageFloatBand, ParagraphBlock, Run, RunFormatting, TextRun,
@@ -421,7 +421,7 @@ pub fn build_note_presentations(
 ) -> OrderedMap<i64, NotePresentation> {
     let anchors = map_note_anchors_to_pages(pages, refs);
     let mut result = OrderedMap::new();
-    let mut counters = HashMap::<String, i64>::new();
+    let mut counters = NoteCounters::default();
     for reference in refs {
         let map_id = reference.map_id();
         if result.get(&map_id).is_some() {
@@ -432,30 +432,21 @@ pub fn build_note_presentations(
         };
         let properties =
             regions.note_properties(page.region_section_index, reference.note_kind.as_str());
-        let key = match properties.num_restart.as_deref() {
-            Some("eachPage") => format!("{}:page:{}", reference.note_kind.as_str(), page.number),
-            Some("eachSect") => format!(
-                "{}:section:{}",
-                reference.note_kind.as_str(),
-                page.section_id
-                    .clone()
-                    .unwrap_or_else(|| page.region_section_index.to_string())
-            ),
-            _ => format!("{}:continuous", reference.note_kind.as_str()),
-        };
-        let display_number = counters
-            .get(&key)
-            .copied()
-            .unwrap_or(properties.num_start.unwrap_or(1));
-        counters.insert(key, display_number + 1);
+        let section = page
+            .section_id
+            .clone()
+            .unwrap_or_else(|| page.region_section_index.to_string());
+        let (display_number, display_label) = counters.next(
+            reference.note_kind,
+            &properties,
+            &section,
+            Some(page.number),
+        );
         result.set(
             map_id,
             NotePresentation {
                 display_number,
-                display_label: format_number(
-                    display_number,
-                    properties.num_fmt.as_deref().unwrap_or("decimal"),
-                ),
+                display_label,
                 anchor: NoteAnchor {
                     doc_start: Some(reference.pm_pos),
                     doc_end: Some(reference.pm_pos + 1.0),
@@ -464,6 +455,138 @@ pub fn build_note_presentations(
         );
     }
     result
+}
+
+/// The note numbering properties of one region section.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SectionNoteNumbering {
+    pub footnote: NoteProperties,
+    pub endnote: NoteProperties,
+}
+
+impl SectionNoteNumbering {
+    pub fn for_regions(regions: &DocumentRegions) -> Vec<Self> {
+        (0..regions.sections.len().max(1))
+            .map(|index| Self {
+                footnote: regions.note_properties(index, NoteKind::Footnote.as_str()),
+                endnote: regions.note_properties(index, NoteKind::Endnote.as_str()),
+            })
+            .collect()
+    }
+
+    fn properties(&self, kind: NoteKind) -> &NoteProperties {
+        match kind {
+            NoteKind::Footnote => &self.footnote,
+            NoteKind::Endnote => &self.endnote,
+        }
+    }
+}
+
+#[derive(Default)]
+struct NoteCounters(HashMap<String, i64>);
+
+impl NoteCounters {
+    /// The next number and label of a `kind` note in `section`. Without a page, a per-page
+    /// restart counts per section.
+    fn next(
+        &mut self,
+        kind: NoteKind,
+        properties: &NoteProperties,
+        section: &str,
+        page: Option<u32>,
+    ) -> (i64, String) {
+        let key = match (properties.num_restart.as_deref(), page) {
+            (Some("eachPage"), Some(page)) => format!("{}:page:{page}", kind.as_str()),
+            (Some("eachPage" | "eachSect"), _) => format!("{}:section:{section}", kind.as_str()),
+            _ => format!("{}:continuous", kind.as_str()),
+        };
+        let number = self
+            .0
+            .get(&key)
+            .copied()
+            .unwrap_or(properties.num_start.unwrap_or(1));
+        self.0.insert(key, number + 1);
+        let label = format_number(number, properties.num_fmt.as_deref().unwrap_or("decimal"));
+        (number, label)
+    }
+}
+
+/// Sets each note reference run's text to its note's label, numbered in document order by the
+/// counters [`build_note_presentations`] numbers the notes with. `sections` holds each region
+/// section's properties; without any, notes number in decimal from 1.
+pub fn number_note_references(blocks: &mut [LayoutBlock], sections: &[SectionNoteNumbering]) {
+    struct References<'a> {
+        sections: &'a [SectionNoteNumbering],
+        section: usize,
+        counters: NoteCounters,
+        labels: HashMap<i64, String>,
+    }
+
+    impl References<'_> {
+        fn paragraph(&mut self, paragraph: &mut ParagraphBlock) {
+            for run in &mut paragraph.runs {
+                let Run::Text(text) = run else {
+                    continue;
+                };
+                let (note_id, kind) = if let Some(id) = text.fmt.footnote_ref_id {
+                    (id as i64, NoteKind::Footnote)
+                } else if let Some(id) = text.fmt.endnote_ref_id {
+                    (id as i64, NoteKind::Endnote)
+                } else {
+                    continue;
+                };
+                let map_id = note_reference_map_id(note_id, kind);
+                if let Some(label) = self.labels.get(&map_id) {
+                    text.text.clone_from(label);
+                    continue;
+                }
+                let fallback = SectionNoteNumbering::default();
+                let numbering = self
+                    .sections
+                    .get(self.section)
+                    .or(self.sections.last())
+                    .unwrap_or(&fallback);
+                let section = self.section.to_string();
+                let (_, label) =
+                    self.counters.next(kind, numbering.properties(kind), &section, None);
+                text.text.clone_from(&label);
+                self.labels.insert(map_id, label);
+            }
+        }
+
+        fn blocks(&mut self, blocks: &mut [LayoutBlock]) {
+            for block in blocks {
+                match block {
+                    LayoutBlock::Paragraph(paragraph) => self.paragraph(paragraph),
+                    LayoutBlock::Table(table) => {
+                        for row in &mut table.rows {
+                            for cell in &mut row.cells {
+                                self.blocks(&mut cell.blocks);
+                            }
+                        }
+                    }
+                    LayoutBlock::TextBox(text_box) => {
+                        for paragraph in &mut text_box.content {
+                            self.paragraph(paragraph);
+                        }
+                    }
+                    _ => {}
+                }
+                if advances_region_section(block) {
+                    self.section += 1;
+                }
+            }
+        }
+    }
+
+    References {
+        sections,
+        section: 0,
+        counters: NoteCounters::default(),
+        labels: HashMap::new(),
+    }
+    .blocks(blocks);
 }
 
 pub fn assign_note_presentations(

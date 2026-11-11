@@ -128,6 +128,10 @@ pub struct RenderEnv {
     /// sections. `None` disables snapping.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub doc_grid_pitch_px: Option<f64>,
+    /// Each region section's note numbering, which the body's note reference marks follow.
+    /// Empty numbers them in decimal from 1.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub note_numbering: Vec<docx_layout::footnotes::SectionNoteNumbering>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_paragraph_style_id: Option<String>,
     /// Resolved paragraph style chain font size in pt, keyed by style id.
@@ -569,6 +573,9 @@ fn yrs_doc_to_mapped_layout_blocks_inner(
             &mut blocks,
             opaque_sequences,
         );
+    }
+    if story_id == "body" {
+        docx_layout::footnotes::number_note_references(&mut blocks, &env.note_numbering);
     }
     map.finish();
     Ok((blocks, map.map))
@@ -7728,7 +7735,7 @@ mod tests {
             yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap(),
         )
         .unwrap();
-        assert_eq!(body[0]["runs"][1]["text"], json!("5"));
+        assert_eq!(body[0]["runs"][1]["text"], json!("1"));
         assert_eq!(body[0]["runs"][1]["footnoteRefId"], json!(5.0));
         assert_eq!(body[0]["runs"][1]["superscript"], json!(true));
 
@@ -7771,11 +7778,19 @@ mod tests {
         )
         .unwrap();
         replace_story_with_paragraph(&doc, "fn:12", "fn-p", "Footnote text");
+        let env = RenderEnv {
+            note_numbering: vec![docx_layout::footnotes::SectionNoteNumbering {
+                footnote: docx_layout::regions::NoteProperties {
+                    num_start: Some(12),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+            ..RenderEnv::default()
+        };
 
-        let body = serde_json::to_value(
-            yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap(),
-        )
-        .unwrap();
+        let body =
+            serde_json::to_value(yrs_doc_to_layout_blocks(&doc, "body", &env).unwrap()).unwrap();
         assert_eq!(body[0]["runs"][1]["text"], json!("12"));
         assert_eq!(body[0]["runs"][1]["pmStart"], json!(2.0));
         assert_eq!(body[0]["runs"][1]["pmEnd"], json!(3.0));
