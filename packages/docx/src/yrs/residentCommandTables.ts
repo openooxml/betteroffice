@@ -50,39 +50,35 @@ function resolveTableTarget(
   return { focused, range, table };
 }
 
-const CELL_SEGMENT = /:t\d+:r(\d+)c(\d+)(?:~\d+)?(?=:|$)/g;
-
 /**
- * For a story in no laid-out cell, the unavailable table whose cell holds it: `undefined` when
- * its innermost cell belongs to no unavailable table, `null` when it does but which one is unsure.
+ * For a story in no laid-out cell, the one unavailable table whose rows name it as a cell, looked
+ * up in every story the story id starts with: `undefined` when no such story holds an unavailable
+ * table, `null` when none or several of them name it.
  */
 function unavailableTableHolding(
   engine: DocxWorkerCommandEngine,
   story: string
 ): { cell: YrsCellLoc; table: YrsTableLoc } | null | undefined {
-  const match = Array.from(story.matchAll(CELL_SEGMENT)).at(-1);
-  if (match?.index === undefined) return undefined;
-  const parent = story.slice(0, match.index);
-  const cellStory = story.slice(0, match.index + match[0].length);
-  const holds = (payload: TablePayload) =>
-    Array.isArray(payload.rows) && payload.rows.some((row) => row.cells?.some((cell) => cell.story === cellStory));
-  const unavailable: Array<{ tableIndex: number; payload: TablePayload }> = [];
-  for (let tableIndex = 0; ; tableIndex += 1) {
-    const payload = engine.tablePayload(parent, tableIndex) as TablePayload | null;
-    if (!payload) break;
-    if (!isUnavailableTablePayload(payload)) {
-      if (holds(payload)) return undefined;
-      continue;
+  let seen = false;
+  const tied: YrsCellLoc[] = [];
+  for (let cut = story.indexOf(':'); cut > 0; cut = story.indexOf(':', cut + 1)) {
+    const parent = story.slice(0, cut);
+    if (!engine.geometryReader.hasStory(parent)) continue;
+    for (let tableIndex = 0; ; tableIndex += 1) {
+      const payload = engine.tablePayload(parent, tableIndex) as TablePayload | null;
+      if (!payload) break;
+      if (!isUnavailableTablePayload(payload)) continue;
+      seen = true;
+      if (!Array.isArray(payload.rows)) continue;
+      payload.rows.forEach((row, rowIndex) => row.cells?.forEach((cell, column) => {
+        if (cell.story === story) tied.push({ story: parent, tableIndex, row: rowIndex, column });
+      }));
     }
-    unavailable.push({ tableIndex, payload });
   }
-  if (unavailable.length === 0) return undefined;
-  const holding = unavailable.filter(({ payload }) => holds(payload));
-  const rowless = unavailable.filter(({ payload }) => !Array.isArray(payload.rows));
-  const found = holding.length === 1 ? holding[0] : holding.length === 0 && rowless.length === 1 ? rowless[0] : null;
-  if (!found) return null;
-  const table = { story: parent, tableIndex: found.tableIndex };
-  return { table, cell: { ...table, row: Number(match[1]), column: Number(match[2]) } };
+  if (!seen) return undefined;
+  if (tied.length !== 1) return null;
+  const cell = tied[0]!;
+  return { cell, table: { story: cell.story, tableIndex: cell.tableIndex } };
 }
 
 export function nearTable(engine: DocxWorkerCommandEngine, table: YrsTableLoc): YrsLoc | null {

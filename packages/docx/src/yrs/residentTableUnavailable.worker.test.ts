@@ -153,10 +153,10 @@ const CARET_TABLE_COMMANDS = [
   ['insertTableRow', { side: 'below' }], ['insertTableColumn', { side: 'right' }], ['deleteTableRow', {}],
   ['deleteTableColumn', {}], ['mergeTableCells', {}], ['splitTableCell', { rows: 1, columns: 2 }],
   ['setTableCellShading', { color: 'FF0000' }], ['setTableBorders', { borders: { top: border } }],
-  ['setTableProperties', { op: 'patch', patch: { justification: 'center' } }],
+  ['setTableProperties', { op: 'patch', patch: { justification: 'center' } }], ['deleteTable', {}],
 ] as const;
 
-test('with the caret in a cell of an unavailable inner table, table commands refuse coded and deleteTable removes only the inner table', async () => {
+test('with the caret in a cell of an inner table that lost its rows, every table command refuses coded and the outer table is untouched', async () => {
   const replica = await open(9801, true);
   const first = await peer(replica, 9802);
   const second = await peer(replica, 9803);
@@ -184,13 +184,8 @@ test('with the caret in a cell of an unavailable inner table, table commands ref
       expect([kind, ack.status, (ack as { reason?: string }).reason]).toEqual([kind, 'refused', 'table-unavailable']);
       expect(outer()).toBe(intact);
     }
-
-    expect((await replica.session.submit('deleteTable', { selection }).ack).status).toBe('applied');
-    expect(replica.engine.tablePayload(table, 0)).toBeNull();
-    expect(outer()).toBe(intact);
-    expect(cellTexts(replica, outerCells[0]!)).toEqual(['After inner']);
+    expect(replica.engine.tablePayload(table, 0)).not.toBeNull();
     expect(cellTexts(replica, outerCells[1]!)).toEqual(['Outer two']);
-    await expect(replica.client.save({ comments: [] })).resolves.toBeDefined();
   } finally {
     first.destroy();
     second.destroy();

@@ -32,24 +32,28 @@ function projectedCellTables(engine: DocxWorkerCommandEngine, root: string): Pro
   }));
 }
 
-const NESTED_CELL = /:t\d+:r\d+c\d+(?:~\d+)?(?=:|$)/;
-
-/**
- * The innermost laid-out cell holding `story`. A laid-out nested table always wins over its outer
- * cell, so a story below the cell of a nested table that is not laid out is in no cell.
- */
 function cellIn(tables: readonly ProjectedCellTable[] | null, story: string): YrsCellLoc | null {
   if (!tables) return null;
   let best: YrsCellLoc | null = null;
   for (const table of tables) {
-    const cell = table.cells.find((candidate) => candidate.story === story ||
-      (story.startsWith(`${candidate.story}:`) && !NESTED_CELL.test(story.slice(candidate.story.length))));
+    const cell = table.cells.find((candidate) => candidate.story === story || story.startsWith(`${candidate.story}:`));
     if (!cell) continue;
     if (!best || table.story.length > best.story.length) {
       best = { story: table.story, tableIndex: table.tableIndex, row: cell.row, column: cell.column };
     }
   }
   return best;
+}
+
+function isCellOf(tables: readonly ProjectedCellTable[] | null, story: string): boolean {
+  return !!tables?.some((table) => table.cells.some((cell) => cell.story === story));
+}
+
+/** Whether the layout shows `story`: its first paragraph has a position in a fresh projection of `root`. */
+function laidOut(engine: DocxWorkerCommandEngine, root: string, story: string): boolean {
+  const paragraph = engine.geometryReader.hasStory(story) ? engine.geometryReader.paragraphSpans(story)[0] : undefined;
+  if (!paragraph) return false;
+  return createYrsPositionProjection(engine.geometryReader, root)?.positionForLoc({ story, paraId: paragraph.paraId, offset: 0 }) != null;
 }
 
 const projectedTables = new WeakMap<object, Map<string, { key: string; tables: ProjectedCellTable[] | null }>>();
@@ -70,7 +74,8 @@ export function cellLocationCacheCounts(): { built: number; reused: number; unca
  * The innermost table cell holding `story`, as the position projection of its root finds it. The
  * projected tables are kept per engine and root until the engine's structure key changes: a key
  * that changes with every embed, table row/cell/story change, story creation or removal, and with
- * the document instance. Engines without a key project on every call.
+ * the document instance. Engines without a key project on every call. A story that is not itself
+ * a laid-out cell resolves to an outer cell only while the layout shows it.
  */
 export function resolveLiveCell(engine: DocxWorkerCommandEngine, story: string): YrsCellLoc | null {
   const root = rootOf(story);
@@ -100,6 +105,7 @@ export function resolveLiveCell(engine: DocxWorkerCommandEngine, story: string):
       throw new Error(`cell location cache differs for ${story}: ${JSON.stringify(located)} != ${JSON.stringify(fresh)}`);
     }
   }
+  if (located && !isCellOf(tables, story) && !laidOut(engine, root, story)) return null;
   return located;
 }
 
