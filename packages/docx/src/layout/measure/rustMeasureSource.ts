@@ -276,7 +276,7 @@ export function createRustMeasureSource(options: {
       if (implicit) {
         const ids = [...new Set(Object.values(fontChains).flat())];
         if (ids.length > 0) fontChains[IMPLICIT_FONT_COVERAGE] = ids;
-        if (ids.length > 0 && standIns) fontChains[IMPLICIT_SYMBOL_SHAPING] = ids;
+        if (ids.length > 0 && options.standIns === true) fontChains[IMPLICIT_SYMBOL_SHAPING] = ids;
       }
       return {
         fontChains,

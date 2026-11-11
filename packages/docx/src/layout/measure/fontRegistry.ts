@@ -10,6 +10,12 @@ import { baseLatinAlias, baseLatinCandidate, coverageFromBits, symbolFamily, wor
 
 const standInKey = Symbol.for('@betteroffice/docx/standInFamily');
 
+/** What the default provider tells the registry about the families it stands in for. */
+interface StandInHook {
+  standsIn(family: string): boolean;
+  report(family: string): boolean;
+}
+
 async function parsedCoverage(data: Uint8Array): Promise<FontCoverage | undefined> {
   try {
     const words = (await import('./cmapCoverage')).fontCoverageWords(data);
@@ -551,9 +557,12 @@ export class TextMeasureFontRegistry {
     // bytes to measure with, keeping the block on the native path instead of the
     // browser fallback. Deduped by engine id (a family whose metric-compat IS
     // the base face, e.g. Arial→Liberation Sans, contributes one id).
+    const standIn = (bundled as { [standInKey]?: StandInHook } | undefined)?.[standInKey];
+    const standsIn = standIn?.standsIn(family) === true;
+    const tail = !standsIn || ids.length === 0;
     let lastResort: BundledFontLoader | undefined;
     try {
-      lastResort = bundled?.resolveLastResort?.(family, bold, italic, 'word');
+      if (tail) lastResort = bundled?.resolveLastResort?.(family, bold, italic, 'word');
     } catch (error) {
       retryable = true;
       this.warnFailure(
@@ -562,15 +571,14 @@ export class TextMeasureFontRegistry {
       );
     }
     if (lastResort && !(lastResort.onlyIfPrimaryFails && primaryRegistered)) {
-      const standsIn = ids.length === 0;
       const id = await this.registerLastResort(key, lastResort, family);
       if (id !== null && !ids.includes(id)) ids.push(id);
       if (id === null) retryable = true;
-      else if (standsIn) this.warnStandIn(bundled, family);
+      else if (standsIn && standIn?.report(family)) this.warnStandIn(family);
     }
 
     try {
-      const coverage = bundled?.resolveGlyphFallback?.(family, bold, italic, 'word');
+      const coverage = tail ? bundled?.resolveGlyphFallback?.(family, bold, italic, 'word') : undefined;
       if (coverage) {
         const id = await this.registerLastResort(`${key}|coverage`, coverage, family);
         if (id !== null && !ids.includes(id)) ids.push(id);
@@ -591,10 +599,7 @@ export class TextMeasureFontRegistry {
     return { ids, retryable };
   }
 
-  /** The default provider reports each family it stands in for once. */
-  private warnStandIn(provider: BundledFontProvider | undefined, family: string): void {
-    const claim = (provider as { [standInKey]?: (family: string) => boolean } | undefined)?.[standInKey];
-    if (!claim?.(family)) return;
+  private warnStandIn(family: string): void {
     console.warn(
       `[fontRegistry] no font bytes for "${family}": a last-resort face stands in for it, so line ` +
         'breaks can differ from Word. Pass the font to the editor or embed it in the document. ' +

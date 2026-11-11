@@ -2,6 +2,7 @@ import { afterEach, expect, mock, spyOn, test } from 'bun:test';
 import * as fontManager from '@betteroffice/fonts';
 import { DEFAULT_COMPATIBILITY_FLAGS } from '../../docx/settingsParser';
 import { configureDefaultFonts, IMPLICIT_FONT_COVERAGE, IMPLICIT_SYMBOL_SHAPING, resolveDefaultFontProvider } from './defaultFontProvider';
+import type { EmbeddedFaceInput } from './fontRegistry';
 import {
   createRustMeasureSource,
   type ResidentFontRequirement,
@@ -39,7 +40,7 @@ test('hosted families exclude every style from implicit measurement while unhost
     const source = createRustMeasureSource({ bundled: hosted, engine: { registerFont: () => 7, clearFonts() {} } });
     await source.prepareFontRequirements([...requirements, cambria]);
     expect(source.measurementConfigForRequirements([...requirements, cambria])?.fontChains).toEqual({
-      [cambria.key]: [7], [IMPLICIT_FONT_COVERAGE]: [7], [IMPLICIT_SYMBOL_SHAPING]: [7],
+      [cambria.key]: [7], [IMPLICIT_FONT_COVERAGE]: [7],
     });
     expect(provider.resolve).toHaveBeenCalledWith('Cambria', false, false);
     expect(provider.resolve.mock.calls.some(([family]) => family.trim().toLowerCase() === 'calibri')).toBe(false);
@@ -57,7 +58,7 @@ test('implicit measurement gives an unknown family the last-resort face, with or
     };
     await source.prepareFontRequirements([unknown]);
     expect(source.measurementConfigForRequirements([unknown])?.fontChains).toEqual({
-      [unknown.key]: [7], [IMPLICIT_FONT_COVERAGE]: [7], [IMPLICIT_SYMBOL_SHAPING]: [7],
+      [unknown.key]: [7], [IMPLICIT_FONT_COVERAGE]: [7],
     });
     const liberation = await fontManager.createFontProvider().resolveLastResort('Brand Sans', false, false, 'word')();
     expect(registerFont.mock.calls.map(([bytes]) => bytes)).toContainEqual(new Uint8Array(liberation));
@@ -118,6 +119,101 @@ test('a stand-in that cannot load leaves the family absent with one warning', as
   } finally { create.mockRestore(); warn.mockRestore(); }
 });
 
+test('a stand-in that never loads gives up at the font fetch deadline, leaving the family absent with one warning', async () => {
+  const create = spyOn(fontManager, 'createFontProvider').mockReturnValue({
+    resolve: () => undefined, resolveFamily: () => undefined, resolveScriptFallback: () => undefined,
+    resolveLastResort: () => () => new Promise<ArrayBuffer>(() => {}),
+  });
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  const delays: Array<number | undefined> = [];
+  const timeout = globalThis.setTimeout;
+  const timer = spyOn(globalThis, 'setTimeout').mockImplementation(((callback: TimerHandler, delay?: number, ...args: unknown[]) => {
+    delays.push(delay);
+    return timeout(callback, delay === 30_000 ? 10 : delay, ...args);
+  }) as typeof setTimeout);
+  try {
+    const source = createRustMeasureSource({ engine: { registerFont: () => 7, clearFonts() {} } });
+    const unknown: ResidentFontRequirement = {
+      key: 'brand sans|0|0', family: 'Brand Sans', bold: false, italic: false,
+    };
+    await source.prepareFontRequirements([unknown]);
+    expect(source.measurementConfigForRequirements([unknown])?.fontChains).toEqual({});
+    expect(delays).toContain(30_000);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]![0])).toContain('falling back');
+  } finally { timer.mockRestore(); create.mockRestore(); warn.mockRestore(); }
+});
+
+async function measurementConfig(
+  requirements: ResidentFontRequirement[],
+  standIns: boolean | undefined,
+  faces?: { embedded?: EmbeddedFaceInput[]; app?: EmbeddedFaceInput[] },
+) {
+  const registered: Uint8Array[] = [];
+  const source = createRustMeasureSource({
+    engine: {
+      registerFont(bytes) { registered.push(bytes); return registered.length; },
+      clearFonts() {},
+    },
+    ...(standIns !== undefined && { standIns }),
+  });
+  if (faces) source.setEmbeddedFaces(faces.embedded ?? [], faces.app);
+  await source.prepareFontRequirements(requirements);
+  return { config: source.measurementConfigForRequirements(requirements), registered };
+}
+
+test('a family the default fonts carry measures exactly as without stand-ins', async () => {
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    const requirements: ResidentFontRequirement[] = [
+      regular,
+      { key: 'calibri|1|1', family: 'Calibri', bold: true, italic: true, characters: ['A', 'z', '€'] },
+      { key: 'arial|0|0', family: 'Arial', bold: false, italic: false, scripts: ['arabic'] },
+      { key: 'cambria|0|0', family: 'Cambria', bold: false, italic: false },
+    ];
+    await measurementConfig(requirements, false);
+    const without = await measurementConfig(requirements, false);
+    const fallback = await measurementConfig(requirements, undefined);
+    expect(without.config).toBeDefined();
+    expect(fallback.config).toEqual(without.config);
+    expect(fallback.registered).toEqual(without.registered);
+    expect(fallback.config!.fontChains[IMPLICIT_SYMBOL_SHAPING]).toBeUndefined();
+    expect(warn.mock.calls.some(([message]) => String(message).includes('stands in'))).toBe(false);
+  } finally { warn.mockRestore(); }
+});
+
+test('a private-use character in a carried family keeps the shaping it has without stand-ins', async () => {
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    const requirements: ResidentFontRequirement[] = [{ ...regular, characters: ['a', '', ''] }];
+    await measurementConfig(requirements, false);
+    const without = await measurementConfig(requirements, false);
+    const fallback = await measurementConfig(requirements, undefined);
+    expect(fallback.config).toEqual(without.config);
+    expect(Object.keys(fallback.config!.fontChains).sort()).toEqual([IMPLICIT_FONT_COVERAGE, regular.key].sort());
+  } finally { warn.mockRestore(); }
+});
+
+for (const origin of ['embedded', 'app'] as const) {
+  test(`a family the default fonts do not carry but ${origin} bytes resolve gets no stand-in`, async () => {
+    const warn = spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const data = Uint8Array.of(11, 12, 13).buffer;
+      const face: EmbeddedFaceInput = { family: 'Brand Sans', weight: 'normal', style: 'normal', data, subsetted: false };
+      const faces = origin === 'embedded' ? { embedded: [face] } : { app: [face] };
+      const requirements: ResidentFontRequirement[] = [
+        { key: 'brand sans|0|0', family: 'Brand Sans', bold: false, italic: false },
+      ];
+      const without = await measurementConfig(requirements, false, faces);
+      const fallback = await measurementConfig(requirements, undefined, faces);
+      expect(fallback.config).toEqual(without.config);
+      expect(fallback.registered).toEqual([new Uint8Array(data)]);
+      expect(fallback.config!.fontChains['brand sans|0|0']).toEqual([1]);
+      expect(warn.mock.calls.some(([message]) => String(message).includes('stands in'))).toBe(false);
+    } finally { warn.mockRestore(); }
+  });
+}
+
 test('unconfigured measurement lazily resolves faces through the fonts manager', async () => {
   const data = new Uint8Array([1, 2, 3]).buffer;
   const provider = providerFor(data);
@@ -134,7 +230,6 @@ test('unconfigured measurement lazily resolves faces through the fonts manager',
     expect(source.measurementConfigForRequirements([regular])?.fontChains).toEqual({
       [regular.key]: [7],
       [IMPLICIT_FONT_COVERAGE]: [7],
-      [IMPLICIT_SYMBOL_SHAPING]: [7],
     });
   } finally { create.mockRestore(); }
 });
@@ -190,7 +285,7 @@ for (const configured of ['default', 'configured', 'explicit'] as const) {
       expect(registered).toEqual([new Uint8Array(embedded), new Uint8Array(bundled)]);
       expect(source.measurementConfigForRequirements([regular])?.fontChains).toEqual({
         [regular.key]: [1, 2],
-        ...(configured === 'default' && { [IMPLICIT_FONT_COVERAGE]: [1, 2], [IMPLICIT_SYMBOL_SHAPING]: [1, 2] }),
+        ...(configured === 'default' && { [IMPLICIT_FONT_COVERAGE]: [1, 2] }),
       });
       expect(create).toHaveBeenCalledTimes(configured === 'default' ? 1 : 0);
     } finally { create.mockRestore(); }
@@ -219,7 +314,6 @@ test('a failed default manager load settles to approximate metrics and retries',
     expect(source.measurementConfigForRequirements([regular])?.fontChains).toEqual({
       [regular.key]: [3],
       [IMPLICIT_FONT_COVERAGE]: [3],
-      [IMPLICIT_SYMBOL_SHAPING]: [3],
     });
     expect(create).toHaveBeenCalledTimes(2);
     expect(warn).toHaveBeenCalledTimes(2);
@@ -250,7 +344,6 @@ test('a failed default manager face remains retryable', async () => {
     expect(source.measurementConfigForRequirements([regular])?.fontChains).toEqual({
       [regular.key]: [5],
       [IMPLICIT_FONT_COVERAGE]: [5],
-      [IMPLICIT_SYMBOL_SHAPING]: [5],
     });
     expect(create).toHaveBeenCalledTimes(1);
     expect(warn).toHaveBeenCalledTimes(1);
