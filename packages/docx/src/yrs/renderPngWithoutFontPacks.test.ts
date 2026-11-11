@@ -31,13 +31,13 @@ async function exported(): Promise<unknown> {
 for (const { kind } of ENGINES) {
   describe.skipIf(engineKind !== kind)(`renderPng without the optional font packs on the ${kind} engine`, () => {
     if (kind === 'wasm') {
-      test('faces whose pack is not installed are skipped and the export succeeds', async () => {
+      test('with no Latin pack installed the wasm engine draws with the browser\'s fonts, as before, while the native engine refuses the export', async () => {
         stubBrowser();
         expect(await exported()).toBeInstanceOf(Uint8Array);
         expect(importLatin).toHaveBeenCalled();
       });
     } else {
-      test('faces whose pack is not installed are skipped, and a family left without a face rejects the export naming it', async () => {
+      test('with no Latin pack installed the native engine refuses the export naming the family, while the wasm engine draws with the browser\'s fonts, as before', async () => {
         const error = await exported();
         expect(importLatin).toHaveBeenCalled();
         expect(error).toMatchObject({ name: 'PngExportError', code: 'font-unavailable' });
