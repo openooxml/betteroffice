@@ -338,7 +338,15 @@ jobs:
 
       - name: Test the native DOCX heap counters
         if: steps.ws.outputs.present == 'true'
-        run: cargo test --locked --manifest-path bindings/Cargo.toml -p betteroffice-docx-native --lib heap
+        run: |
+          log="${RUNNER_TEMP:-/tmp}/heap-tests.log"
+          cargo test --locked --manifest-path bindings/Cargo.toml -p betteroffice-docx-native --lib heap 2>&1 | tee "$log"
+          test "${PIPESTATUS[0]}" -eq 0
+          for name in counts_allocations_reallocations_and_frees counts_zeroed_allocations \
+            a_failed_reallocation_keeps_the_block_and_records_its_size counters_belong_to_the_calling_thread \
+            a_free_on_another_thread_subtracts_there_saturating_at_zero; do
+            grep -q "^test heap::tests::$name \.\.\. ok$" "$log" || { echo "heap test did not run: $name"; exit 1; }
+          done
 
       # Running a fuzz target needs nightly; checking that the package still builds does not.
       - name: Lint the standalone fuzz package

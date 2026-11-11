@@ -53,6 +53,15 @@ test('a native engine reports no pressure without a budget: the 4 GiB limit is w
   expect(memoryPressureLevel(stats([nativeEdit(16 * GIB)], [edit(3.1 * GIB)]))).toBe('warning');
 });
 
+test('a zero limit is a real zero for wasm and no budget for native', () => {
+  const zero = (worker: WasmModuleMemory[] | null, main: WasmModuleMemory[] = []) => ({ ...stats(worker, main), limitBytes: 0 });
+  expect(memoryPressureLevel(zero([edit(0)]))).toBe('critical');
+  expect(memoryPressureLevel(zero(null))).toBe('critical');
+  expect(memoryPressureLevel(zero([nativeEdit(16 * GIB)]))).toBe('normal');
+  expect(memoryPressureLevel(zero(null, [nativeEdit(0)]))).toBe('normal');
+  expect(memoryPressureLevel(zero([nativeEdit(0)]), { criticalBytes: 0 })).toBe('critical');
+});
+
 test('a native engine follows the budget it is given', () => {
   const budget = { warningBytes: 1 * GIB, criticalBytes: 2 * GIB };
   expect(memoryPressureLevel(stats([nativeEdit(0.5 * GIB)]), budget)).toBe('normal');
