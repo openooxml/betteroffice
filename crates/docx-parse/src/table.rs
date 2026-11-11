@@ -411,9 +411,9 @@ pub fn row_is_hidden_content_only(
 }
 
 /// The paragraph mark's `w:vanish`, resolved as for a run: direct on the mark
-/// wins; otherwise `w:vanish` is a toggle across the paragraph style (or the
-/// default one) and the mark's character style (§17.7.3); otherwise the
-/// document defaults. A style id naming a style of another type is ignored.
+/// wins; otherwise it toggles across the document defaults, the paragraph
+/// style (or the default one) and the mark's character style (§17.7.3). A
+/// style id naming a style of another type is ignored.
 fn paragraph_mark_hidden(
     paragraph: &XmlElement,
     styles: Option<&StyleMap>,
@@ -425,17 +425,20 @@ fn paragraph_mark_hidden(
         return vanish.parse_boolean("w");
     }
     let paragraph_style = styles.and_then(|styles| {
+        let default = get_default_paragraph_style(styles);
         referenced_style(styles, properties, "pStyle", "paragraph")
-            .or_else(|| get_default_paragraph_style(styles))
+            .or(default.filter(|style| style.style_type == "paragraph"))
     });
     let character_style =
         styles.and_then(|styles| referenced_style(styles, mark, "rStyle", "character"));
-    match (style_hidden(paragraph_style), style_hidden(character_style)) {
-        (None, None) => doc_defaults
-            .and_then(|defaults| defaults.r_pr.as_ref()?.hidden)
-            .unwrap_or(false),
-        (paragraph, character) => paragraph.unwrap_or(false) ^ character.unwrap_or(false),
-    }
+    let defaults = doc_defaults_hidden(doc_defaults).unwrap_or(false);
+    let paragraph = style_hidden(paragraph_style).unwrap_or(false);
+    let character = style_hidden(character_style).unwrap_or(false);
+    defaults ^ paragraph ^ character
+}
+
+fn doc_defaults_hidden(doc_defaults: Option<&DocDefaults>) -> Option<bool> {
+    doc_defaults?.r_pr.as_ref()?.hidden
 }
 
 fn referenced_style<'a>(
@@ -1013,6 +1016,15 @@ mod tests {
             None,
             Some(&doc_defaults)
         ));
+        assert!(!row_is_hidden_content_only(
+            &row(para),
+            styles,
+            Some(&doc_defaults)
+        ));
+        let normal: StyleMap = [style("Normal", "character", None)]
+            .into_iter()
+            .collect();
+        assert!(!hidden_only(&row(""), Some(&normal)));
     }
 
     #[test]
