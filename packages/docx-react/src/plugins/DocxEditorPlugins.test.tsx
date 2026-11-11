@@ -544,9 +544,13 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
 
   const focusRecorder = () => {
     const focus: boolean[] = [];
+    let loads = 0;
     const plugin = defineDocxPlugin({ id: 'focus-surface', createState: () => null,
-      onEvent(_context, event) { if (event.type === 'focus-change') focus.push(event.focused); } });
-    return { focus, plugin };
+      onEvent(_context, event) {
+        if (event.type === 'load') loads += 1;
+        if (event.type === 'focus-change') focus.push(event.focused);
+      } });
+    return { focus, loaded: () => loads > 0, plugin };
   };
 
   if (experimentalWorkerOpen === undefined) test('turning read-only off in a viewer session replaces the focused input and blurs once', async () => {
@@ -567,12 +571,13 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
   });
 
   test('a render error in the editor shell while the document has focus blurs once', async () => {
-    const { focus, plugin } = focusRecorder();
+    const { focus, loaded, plugin } = focusRecorder();
     const Fails = ({ armed }: { armed: boolean }) => {
       if (armed) throw new Error('shell render failed');
       return null;
     };
     const { ref, view, rerender } = await mount({ plugins: [plugin], toolbar: <Fails armed={false} /> });
+    await until(loaded);
     await act(async () => { ref.current!.focus(); });
     await until(() => focus.includes(true));
     focus.length = 0;

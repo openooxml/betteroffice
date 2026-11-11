@@ -2438,7 +2438,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           {pluginOverlays &&
             (() => {
               const overlay = (
-                <div className="paged-editor__plugin-overlays" style={pluginOverlaysStyles}>
+                <div className="paged-editor__plugin-overlays" data-plugin-overlays="" style={pluginOverlaysStyles}>
                   {pluginOverlays}
                 </div>
               );

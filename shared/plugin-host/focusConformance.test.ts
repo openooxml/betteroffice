@@ -131,8 +131,12 @@ function mountSurface(engine: EngineHost) {
   editor.append(root);
   document.body.append(editor);
   const surface = { editor, root, input };
-  const track = () => {
+  const track = (recheck = false) => {
     const tracker = trackFocus(() => [surface.root], (focused) => engine.focusChanged(focused));
+    if (!recheck) {
+      cleanups.push(tracker);
+      return;
+    }
     engine.setFocusCheck(tracker.recheck);
     cleanups.push(() => {
       engine.setFocusCheck(null);
@@ -177,7 +181,7 @@ const cases: [string, (engine: EngineHost) => Promise<void>][] = [
   }],
   ['swapping the surface with focus inside reports one blur when the new surface opens', async (engine) => {
     const { surface, track, swap } = mountSurface(engine);
-    track();
+    track(true);
     engine.open();
     surface.input.focus();
     await settle();
