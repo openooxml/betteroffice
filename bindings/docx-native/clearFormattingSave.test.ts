@@ -382,6 +382,78 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
     }
   });
 
+  const italic = (paraId: string, text: string) =>
+    `<w:p w14:paraId="${paraId}"><w:r><w:rPr><w:i/></w:rPr><w:t>${text}</w:t></w:r></w:p>`;
+  const boldGridCell = (content: string) =>
+    '<w:tbl><w:tblPr><w:tblStyle w:val="BoldGrid"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="2400" w:type="dxa"/></w:tcPr>' +
+    `${content}</w:tc></w:tr></w:tbl>`;
+  const blockControl = (content: string) =>
+    `<w:sdt><w:sdtPr><w:id w:val="11"/></w:sdtPr><w:sdtContent>${content}</w:sdtContent></w:sdt>`;
+  const formattingIn = (session: Session, marker: string) => {
+    for (const { story } of session.listStories().stories) {
+      const segment = session.storySegments(story).find((entry) => entry.kind === 'text' && entry.text.includes(marker));
+      if (segment?.kind === 'text') return { bold: Boolean(segment.attributes.bold), italic: Boolean(segment.attributes.italic) };
+    }
+    return undefined;
+  };
+  const controlStory = (session: Session) =>
+    session.listStories().stories.find((entry) => entry.kind === 'contentControl')!.story;
+
+  const peerClearsInControl = async (body: string, from: string, to: string, markers: string[], clientId: number) => {
+    const bytes = await fixture(body);
+    const host = await yrs.createYrsSession({ clientId });
+    const peer = await yrs.createYrsSession({ clientId: clientId + 1 });
+    try {
+      const hostMetadata = host.seedFromDocx(bytes);
+      peer.bootstrapPeer(host.encodeState(), host.encodePeerMetadata(), bytes, hostMetadata);
+      peer.clearFormatting(whole(peer, from, to, controlStory(peer)));
+      const inSession = markers.map((marker) => formattingIn(peer, marker));
+      const { xml, reopened } = await saveAndReopen(yrs, peer);
+      try {
+        return {
+          story: controlStory(peer),
+          session: inSession,
+          saved: markers.map((marker) => savedRunProperties(xml, marker)),
+          reopened: markers.map((marker) => formattingIn(reopened, marker)),
+        };
+      } finally {
+        reopened.destroy();
+      }
+    } finally {
+      peer.destroy();
+      host.destroy();
+    }
+  };
+
+  test(`${engine}: a peer bootstrapped from an update keeps the table style's bold when clearing formatting inside a block content control in a cell`, async () => {
+    const body = boldGridCell(`${blockControl(italic('00000081', 'Control cell'))}<w:p w14:paraId="00000082"/>`) +
+      '<w:p w14:paraId="00000083"><w:r><w:t>After</w:t></w:r></w:p>';
+    const markers = ['Control cell'];
+    const kept = { bold: true, italic: false };
+    expect(await peerClearsInControl(body, '00000081', '00000081', markers, 85)).toEqual({
+      story: 'body:t0:r0c0:sdt0',
+      session: [kept],
+      saved: [null],
+      reopened: [kept],
+    });
+  });
+
+  test(`${engine}: a peer bootstrapped from an update keeps the table styles' bold when clearing formatting over a selected block content control holding a nested table in a cell`, async () => {
+    const control = blockControl(
+      italic('00000091', 'Control own') + boldGridCell(italic('00000092', 'Nested cell')) + italic('00000093', 'Control tail'),
+    );
+    const body = boldGridCell(`${control}<w:p w14:paraId="00000094"/>`) +
+      '<w:p w14:paraId="00000095"><w:r><w:t>After</w:t></w:r></w:p>';
+    const markers = ['Control own', 'Nested cell', 'Control tail'];
+    const kept = { bold: true, italic: false };
+    expect(await peerClearsInControl(body, '00000091', '00000093', markers, 87)).toEqual({
+      story: 'body:t0:r0c0:sdt0',
+      session: [kept, kept, kept],
+      saved: [null, null, null],
+      reopened: [kept, kept, kept],
+    });
+  });
+
   test(`${engine}: known limit: Clear Formatting in a cell resets to the formatting of the row position the cell had when the document was opened`, async () => {
     const body = '<w:tbl><w:tblPr><w:tblStyle w:val="HeaderGrid"/><w:tblLook w:val="0020" w:firstRow="1" w:lastRow="0" w:firstColumn="0" w:lastColumn="0" w:noHBand="1" w:noVBand="1"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid>' +
       '<w:tr><w:tc><w:tcPr><w:tcW w:w="2400" w:type="dxa"/></w:tcPr><w:p w14:paraId="00000071"><w:r><w:rPr><w:b w:val="0"/></w:rPr><w:t>Moved head</w:t></w:r></w:p></w:tc></w:tr>' +
