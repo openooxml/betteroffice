@@ -11,7 +11,7 @@
 use std::alloc::{GlobalAlloc, Layout};
 use std::cell::Cell;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 #[cfg(feature = "mimalloc")]
 const INNER: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -25,6 +25,9 @@ const NO_LIMIT: usize = usize::MAX;
 
 static COUNTING: AtomicBool = AtomicBool::new(false);
 
+/// How many times counting has switched on from off; changed only under [`SWITCH`].
+static COUNT_EPOCH: AtomicU64 = AtomicU64::new(0);
+
 /// Whether a host asked for counting, and how many threads hold a limit.
 static SWITCH: Mutex<(bool, usize)> = Mutex::new((false, 0));
 
@@ -34,6 +37,9 @@ thread_local! {
     static FAILED: Cell<usize> = const { Cell::new(0) };
     static LIMIT: Cell<usize> = const { Cell::new(NO_LIMIT) };
     static OVER: Cell<bool> = const { Cell::new(false) };
+    static REPORTED: Cell<bool> = const { Cell::new(false) };
+    /// The counting epoch the thread's live and peak bytes belong to; 0 until it first adopts one.
+    static LIVE_EPOCH: Cell<u64> = const { Cell::new(0) };
     static SHARE: LimitShare = const { LimitShare };
 }
 
@@ -54,8 +60,32 @@ pub(crate) struct CountingAllocator;
 pub(crate) fn enable() -> bool {
     let mut switch = SWITCH.lock().unwrap_or_else(|error| error.into_inner());
     switch.0 = true;
-    COUNTING.store(true, Ordering::Relaxed);
+    switch_counting(true);
     true
+}
+
+/// Stores whether counting is on, starting a new epoch when it switches on from off. Called with
+/// [`SWITCH`] held.
+fn switch_counting(counting: bool) {
+    if counting && !COUNTING.load(Ordering::Relaxed) {
+        COUNT_EPOCH.fetch_add(1, Ordering::Relaxed);
+    }
+    COUNTING.store(counting, Ordering::Relaxed);
+}
+
+/// Makes the calling thread's live and peak bytes belong to the current epoch. Bytes from an
+/// earlier epoch missed the frees made while counting was off, so they restart from zero; a thread
+/// that never adopted one keeps its bytes while counting has only ever run once. Called with
+/// [`SWITCH`] held.
+fn adopt_epoch() {
+    let current = COUNT_EPOCH.load(Ordering::Relaxed);
+    let own = LIVE_EPOCH
+        .try_with(|epoch| epoch.replace(current))
+        .unwrap_or(current);
+    if own != current && !(own == 0 && current == 1) {
+        let _ = LIVE.try_with(|live| live.set(0));
+        let _ = PEAK.try_with(|peak| peak.set(0));
+    }
 }
 
 /// Whether counting is on.
@@ -64,9 +94,9 @@ pub(crate) fn enabled() -> bool {
 }
 
 /// Sets the calling thread's limit on live bytes; `None` removes it. Counting is on while any
-/// thread has a limit, and a thread that exits with one gives it up. When this call is what turns
-/// counting on, the thread counts from zero; when counting was already on, it keeps the bytes
-/// measured so far.
+/// thread has a limit, and a thread that exits with one gives it up. A thread taking a limit
+/// adopts the current counting epoch first, so its bytes are the ones counted since counting last
+/// switched on.
 pub(crate) fn set_limit(bytes: Option<usize>) {
     let limit = bytes.unwrap_or(NO_LIMIT);
     let has = limit != NO_LIMIT;
@@ -75,17 +105,17 @@ pub(crate) fn set_limit(bytes: Option<usize>) {
     }
     let had = LIMIT.try_with(|slot| slot.replace(limit)).unwrap_or(NO_LIMIT) != NO_LIMIT;
     let _ = OVER.try_with(|over| over.set(false));
+    let _ = REPORTED.try_with(|reported| reported.set(false));
     let mut switch = SWITCH.lock().unwrap_or_else(|error| error.into_inner());
     match (had, has) {
         (false, true) => switch.1 += 1,
         (true, false) => switch.1 = switch.1.saturating_sub(1),
         _ => {}
     }
-    let counting = switch.0 || switch.1 > 0;
-    if counting && !COUNTING.load(Ordering::Relaxed) {
-        let _ = LIVE.try_with(|live| live.set(0));
+    switch_counting(switch.0 || switch.1 > 0);
+    if has && !had {
+        adopt_epoch();
     }
-    COUNTING.store(counting, Ordering::Relaxed);
 }
 
 /// The calling thread's limit.
@@ -100,15 +130,21 @@ pub(crate) fn over_limit() -> bool {
 }
 
 /// Starts a limit-checked engine call; false when it must fail at once. An outermost call that
-/// starts within the limit forgets the crossing an earlier call left; a nested call inherits it.
+/// starts within the limit forgets a crossing an earlier call already failed with; a crossing no
+/// call reported, such as one made converting a return value after its call's last check, fails
+/// the next call. A nested call inherits any crossing.
 pub(crate) fn begin_call(outermost: bool) -> bool {
     if !over_limit() {
         return true;
     }
-    if !outermost || limit().is_some_and(|limit| live() > limit) {
+    if !outermost
+        || !REPORTED.try_with(Cell::get).unwrap_or(false)
+        || limit().is_some_and(|limit| live() > limit)
+    {
         return false;
     }
     let _ = OVER.try_with(|over| over.set(false));
+    let _ = REPORTED.try_with(|reported| reported.set(false));
     true
 }
 
@@ -118,8 +154,10 @@ pub(crate) fn forget_crossing() {
     let _ = OVER.try_with(|over| over.set(false));
 }
 
-/// The error message of a call that ran past the limit, with the allocation that crossed it.
+/// The error message of a call that ran past the limit, with the allocation that crossed it. The
+/// crossing counts as reported.
 pub(crate) fn exceeded() -> String {
+    let _ = REPORTED.try_with(|reported| reported.set(true));
     let bytes = failed_bytes().max(1);
     let limit = LIMIT.try_with(Cell::get).unwrap_or(NO_LIMIT);
     format!("{EXCEEDED} ({bytes} bytes over a {limit}-byte budget)")
@@ -135,6 +173,7 @@ fn grew(bytes: usize) {
         if next > LIMIT.try_with(Cell::get).unwrap_or(NO_LIMIT)
             && !OVER.try_with(|over| over.replace(true)).unwrap_or(true)
         {
+            let _ = REPORTED.try_with(|reported| reported.set(false));
             failed(bytes.max(1));
         }
     });
@@ -394,12 +433,71 @@ mod tests {
         set_limit(Some(live() - 1024));
         let more = vec![1u8; 64];
         assert!(over_limit());
+        let _ = exceeded();
         assert!(!begin_call(true));
         drop(block);
         drop(more);
         assert!(begin_call(true));
         assert!(!over_limit());
         set_limit(None);
+    }
+
+    #[test]
+    fn a_crossing_no_call_reported_fails_the_next_call() {
+        let _limits = limits();
+        set_limit(Some(1 << 40));
+        set_limit(Some(live() + 1024));
+        let block = vec![1u8; 4096];
+        assert!(over_limit());
+        drop(block);
+        assert!(!begin_call(true));
+        let _ = exceeded();
+        assert!(begin_call(true));
+        assert!(!over_limit());
+        set_limit(None);
+    }
+
+    #[test]
+    fn clearing_the_limit_forgets_an_unreported_crossing() {
+        let _limits = limits();
+        set_limit(Some(0));
+        let block = vec![1u8; 16];
+        assert!(over_limit());
+        set_limit(None);
+        assert!(begin_call(true));
+        drop(block);
+    }
+
+    #[test]
+    fn a_thread_taking_a_limit_after_counting_restarted_drops_its_stale_bytes() {
+        use std::sync::mpsc::channel;
+        let _limits = limits();
+        let (stale_tx, stale_rx) = channel::<()>();
+        let (restarted_tx, restarted_rx) = channel::<()>();
+        let first = std::thread::spawn(move || {
+            set_limit(Some(1 << 40));
+            set_limit(None);
+            let _ = LIVE.try_with(|live| live.set(live.get() + (1 << 30)));
+            stale_tx.send(()).unwrap();
+            restarted_rx.recv().unwrap();
+            set_limit(Some(1 << 20));
+            let block = vec![1u8; 4096];
+            let seen = (live(), over_limit());
+            drop(block);
+            set_limit(None);
+            seen
+        });
+        stale_rx.recv().unwrap();
+        std::thread::spawn(|| {
+            let _switch = SWITCH.lock().unwrap_or_else(|error| error.into_inner());
+            COUNT_EPOCH.fetch_add(1, Ordering::Relaxed);
+        })
+        .join()
+        .unwrap();
+        restarted_tx.send(()).unwrap();
+        let (live_after, over_after) = first.join().unwrap();
+        assert!(live_after < 1 << 20);
+        assert!(!over_after);
     }
 
     #[test]
@@ -493,6 +591,8 @@ mod tests {
     fn a_limit_set_while_counting_is_on_keeps_the_bytes_already_counted() {
         let _limits = limits();
         enable();
+        set_limit(Some(1 << 40));
+        set_limit(None);
         let block = vec![1u8; 1 << 16];
         let counted = live();
         assert!(counted >= 1 << 16);
