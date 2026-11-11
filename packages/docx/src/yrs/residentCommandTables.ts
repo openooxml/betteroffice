@@ -6,7 +6,7 @@ import type {
   DocxWorkerCommandEngine,
   DocxWorkerCommandState,
 } from './residentCommandProtocol';
-import { nearTable, readCellSelection, resolveLiveCell, rootOf } from './residentCommandTableSelection';
+import { readCellSelection, resolveLiveCell, rootOf } from './residentCommandTableSelection';
 import { isTableUnavailableRefusal, isUnavailableTablePayload } from './tableUnavailable';
 
 export type TableCommandKind =
@@ -50,7 +50,27 @@ function resolveTableTarget(
   return { focused, range, table };
 }
 
-export { nearTable };
+export function nearTable(engine: DocxWorkerCommandEngine, table: YrsTableLoc): YrsLoc | null {
+  const segments = engine.geometryReader.storySegments(table.story);
+  let ordinal = 0;
+  let target = -1;
+  for (let index = 0; index < segments.length; index += 1) {
+    const segment = segments[index]!;
+    if (segment.kind !== 'embed' || segment.embedKind !== 'table') continue;
+    if (ordinal === table.tableIndex) {
+      target = index;
+      break;
+    }
+    ordinal += 1;
+  }
+  if (target < 0) return null;
+  const following = segments.slice(target + 1).find((segment) => segment.kind === 'pilcrow');
+  const preceding = segments.slice(0, target).reverse().find((segment) => segment.kind === 'pilcrow');
+  const paragraph = following ?? preceding;
+  return paragraph?.kind === 'pilcrow'
+    ? { story: table.story, paraId: paragraph.paraId, offset: 0 }
+    : null;
+}
 
 /** Live tables holding a story, innermost first; empty outside tables. */
 export function liveTableAncestors(engine: DocxWorkerCommandEngine, story: string): YrsTableLoc[] {

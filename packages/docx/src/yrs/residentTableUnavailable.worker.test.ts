@@ -7,7 +7,7 @@ import { residentWorkerFactory } from './__fixtures__/residentWorker';
 import { DocxSourceWorkerClient } from './residentSourceWorkerClient';
 import { createDocxCommandConnection } from './residentCommandConnection';
 import { createDocxWorkerEditSession } from './createDocxWorkerEditSession';
-import { createYrsSession, type YrsCellLoc, type YrsSession } from './index';
+import { createYrsSession, saveYrsDocx, type YrsCellLoc, type YrsSession } from './index';
 import { closeCommandEngines, openCommandEngine, TIMEOUT } from './residentCommandTestSupport';
 import type { DocxWorkerCommandEngine } from './residentCommandProtocol';
 import { resolveLiveCell, setCellLocationShadowCheck } from './residentCommandTableSelection';
@@ -26,11 +26,11 @@ const cell = (text: string) => `<w:tc><w:tcPr><w:tcW w:w="2340" w:type="dxa"/></
 const table = (...cells: string[]) => `<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid>${cells.map(() => '<w:gridCol w:w="2340"/>').join('')}</w:tblGrid><w:tr>${cells.join('')}</w:tr></w:tbl>`;
 
 /** A body with one two-cell table, or, `nested`, that table inside the first cell of a healthy outer table. */
-function documentBytes(nested: boolean, body?: string): Uint8Array {
+function documentBytes(nested: boolean): Uint8Array {
   const inner = table(cell('First'), cell('Second'));
-  const content = body ?? (nested
+  const content = nested
     ? table(`<w:tc><w:tcPr><w:tcW w:w="4680" w:type="dxa"/></w:tcPr>${inner}${paragraph('After inner')}</w:tc>`, cell('Outer two'))
-    : inner);
+    : inner;
   const parts: PartsMap = new Map();
   parts.set('[Content_Types].xml', toBytes('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'));
   parts.set('_rels/.rels', toBytes('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="r1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'));
@@ -38,7 +38,8 @@ function documentBytes(nested: boolean, body?: string): Uint8Array {
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
-async function open(clientId: number, nested = false, body?: string, bytes = documentBytes(nested, body)) {
+async function open(clientId: number, nested = false) {
+  const bytes = documentBytes(nested);
   const worker = start(clientId);
   const client = new DocxSourceWorkerClient(worker);
   await client.openSource({ bytes, collaboration: { clientId } });
@@ -97,23 +98,11 @@ const cellTexts = (replica: Opened, story: string) => replica.engine.paragraphs(
 const located = (replica: Opened, story: string) =>
   resolveLiveCell(replica.engine as unknown as DocxWorkerCommandEngine, story);
 
-/** The selection sits in a story that lays out (the body, or the healthy outer cell), and typing lands there. */
-async function expectVisibleTyping(replica: Opened, hidden: string): Promise<void> {
-  const selection = replica.session.state.selection!;
-  const visible = selection.focus.story;
-  expect(['body', tableStory(replica)]).toContain(visible);
-  expect(selection.anchor.story).toBe(visible);
-  expect((await replica.session.submit('insertText', { text: 'Z' }).ack).status).toBe('applied');
-  expect(replica.engine.paragraphs(visible).some(({ text }) => text.includes('Z'))).toBe(true);
-  expect(cellTexts(replica, hidden).join('')).not.toContain('Z');
-}
-
 for (const nested of [false, true]) {
   const where = nested ? 'a table inside a healthy outer table' : 'a body table';
   const base = nested ? 9700 : 9600;
 
-  test(`a remote crossing undo on ${where} moves a caret out of the cell it hides; typing lands visibly and the redo leaves the caret outside`, async () => {
-    setCellLocationShadowCheck(true);
+  test(`after a remote crossing undo on ${where}, a caret left in its cell types into the cell, saves refuse coded, and the restored table shows the text`, async () => {
     const replica = await open(base + 1, nested);
     const first = await peer(replica, base + 2);
     const second = await peer(replica, base + 3);
@@ -123,7 +112,6 @@ for (const nested of [false, true]) {
       const inCell = { story, paraId: replica.engine.paragraphs(story)[0]!.paraId, offset: 2 };
       await replica.session.submit('select', { selection: { anchor: inCell, focus: inCell } }).ack;
       expect(replica.session.state.selection?.focus.story).toBe(story);
-      const before = cellTexts(replica, story);
 
       first.insertRow(at(table, 0, 0), 'below');
       sync(first, second);
@@ -133,63 +121,33 @@ for (const nested of [false, true]) {
       expect(second.undo()).toBe(true);
       sync(first, second);
       await receive(replica, second);
-      expect(located(replica, story)).not.toEqual(at(table, 0, 0));
-      await expectVisibleTyping(replica, story);
+      expect(Array.isArray(replica.engine.tablePayload(table, 0)?.rows)).toBe(false);
+
+      expect(replica.session.state.selection?.focus.story).toBe(story);
+      expect((await replica.session.submit('insertText', { text: 'Z' }).ack).status).toBe('applied');
+      expect(cellTexts(replica, story).join('')).toContain('Z');
+      let code: string | undefined;
+      try {
+        await saveYrsDocx(replica.engine as unknown as YrsSession, { updateModifiedDate: false });
+      } catch (error) {
+        code = (error as Error & { code?: string }).code;
+      }
+      expect(code).toBe('table-unavailable');
 
       send(replica, second);
       expect(second.redo()).toBe(true);
       await receive(replica, second);
       expect(located(replica, story)).toEqual(at(table, 0, 0));
-      expect(cellTexts(replica, story)).toEqual(before);
-      expect(replica.session.state.selection?.focus.story).not.toBe(story);
+      expect(cellTexts(replica, story).join('')).toContain('Z');
+      const body = { story: 'body', paraId: replica.engine.paragraphs('body').at(-1)!.paraId, offset: 0 };
+      await replica.session.submit('select', { selection: { anchor: body, focus: body } }).ack;
+      expect((await replica.session.submit('insertText', { text: 'Y' }).ack).status).toBe('applied');
     } finally {
-      setCellLocationShadowCheck(false);
       first.destroy();
       second.destroy();
       replica.session.dispose();
     }
   }, TIMEOUT);
-
-  for (const range of [false, true]) {
-    test(`the second undoer on ${where} with a ${range ? 'range selected' : 'caret'} in the cell is moved next to the table; typing lands visibly and the redo restores the cell unchanged without pulling the caret back`, async () => {
-      setCellLocationShadowCheck(true);
-      const offset = base + (range ? 20 : 10);
-      const replica = await open(offset + 1, nested);
-      const first = await peer(replica, offset + 2);
-      try {
-        const table = tableStory(replica);
-        const story = cellStory(replica);
-        const paraId = replica.engine.paragraphs(story)[0]!.paraId;
-        const anchor = { story, paraId, offset: range ? 0 : 2 };
-        const focus = { story, paraId, offset: range ? 4 : 2 };
-        await replica.session.submit('select', { selection: { anchor, focus } }).ack;
-        const before = cellTexts(replica, story);
-
-        first.insertRow(at(table, 0, 0), 'below');
-        await receive(replica, first);
-        expect((await replica.session.submit('setTableCellShading', { color: 'FFCC00' }).ack).status).toBe('applied');
-        send(replica, first);
-        expect(first.undo()).toBe(true);
-        await receive(replica, first);
-        expect((await replica.session.submit('undo', {}).ack).status).toBe('applied');
-        const payload = replica.engine.tablePayload(table, 0) ?? {};
-        expect(['tblPr', 'grid', 'rows'].some((key) => !(key in payload))).toBe(true);
-        expect(located(replica, story)).not.toEqual(at(table, 0, 0));
-        const moved = replica.session.state.selection!;
-        expect(moved.anchor).toEqual(moved.focus);
-        await expectVisibleTyping(replica, story);
-
-        expect((await replica.session.submit('redo', {}).ack).status).toBe('applied');
-        expect(located(replica, story)).toEqual(at(table, 0, 0));
-        expect(cellTexts(replica, story)).toEqual(before);
-        expect(replica.session.state.selection?.focus.story).not.toBe(story);
-      } finally {
-        setCellLocationShadowCheck(false);
-        first.destroy();
-        replica.session.dispose();
-      }
-    }, TIMEOUT);
-  }
 }
 
 /** Counts every call this engine instance receives, by method name. */
@@ -303,7 +261,6 @@ for (const [index, lost] of LOST.entries()) {
       }).ack;
       expect(['refused', 'noop', 'applied']).toContain(outcome.status);
       expect(replica.engine.encodeState()).toEqual(before);
-      expect(replica.session.state.selection?.focus.story).not.toBe(last);
 
       const bodyParaId = replica.engine.paragraphs('body')[0]!.paraId;
       const body = { story: 'body', paraId: bodyParaId, offset: 0 };
@@ -316,287 +273,3 @@ for (const [index, lost] of LOST.entries()) {
     }
   }, TIMEOUT);
 }
-
-for (const [index, queued] of (['navigate', 'deleteBackward'] as const).entries()) {
-  test(`a queued ${queued} whose predecessor selection sits in a cell a merge hid in between moves beside the table, leaves the hidden text unchanged and keeps the session usable`, async () => {
-    const base = 9900 + index * 10;
-    const replica = await open(base + 1);
-    const first = await peer(replica, base + 2);
-    const second = await peer(replica, base + 3);
-    try {
-      const story = cellStory(replica);
-      const inCell = { story, paraId: replica.engine.paragraphs(story)[0]!.paraId, offset: 2 };
-      const before = cellTexts(replica, story);
-      first.insertRow(at('body', 0, 0), 'below');
-      sync(first, second);
-      second.setColumnWidth(at('body', 0, 0), 2000);
-      expect(first.undo()).toBe(true);
-      sync(first, second);
-      expect(second.undo()).toBe(true);
-      sync(first, second);
-      const update = second.encodeStateAsUpdate(replica.engine.encodeStateVector()).slice().buffer;
-
-      const selected = replica.session.submit('select', { selection: { anchor: inCell, focus: inCell } });
-      const merged = replica.session.submit('applyRemoteUpdate', { update }, merge);
-      const command = queued === 'navigate'
-        ? replica.session.submit('navigate', { unit: 'character', direction: 'forward', extend: false }, { after: selected })
-        : replica.session.submit('deleteBackward', {}, { after: selected });
-      await selected.ack;
-      expect((await merged.ack).status).toBe('applied');
-      expect(['applied', 'noop', 'refused']).toContain((await command.ack).status);
-
-      expect(located(replica, story)).toBeNull();
-      expect(cellTexts(replica, story)).toEqual(before);
-      expect(replica.session.state.selection?.focus.story).not.toBe(story);
-      const body = { story: 'body', paraId: replica.engine.paragraphs('body')[0]!.paraId, offset: 0 };
-      expect((await replica.session.submit('insertText', { text: 'Z', selection: { anchor: body, focus: body } }).ack).status).toBe('applied');
-      expect(replica.engine.paragraphs('body')[0]!.text.startsWith('Z')).toBe(true);
-    } finally {
-      first.destroy();
-      second.destroy();
-      replica.session.dispose();
-    }
-  }, TIMEOUT);
-}
-
-/** Crossing undos of two peers on the table at `table`, leaving it without its payload. */
-function crossTable(first: YrsSession, second: YrsSession, table: { story: string; tableIndex: number }): void {
-  const at0 = { ...table, row: 0, column: 0 };
-  first.insertRow(at0, 'below');
-  sync(first, second);
-  second.setColumnWidth(at0, 2000);
-  expect(first.undo()).toBe(true);
-  sync(first, second);
-  expect(second.undo()).toBe(true);
-  sync(first, second);
-}
-
-const FALLBACKS: Array<{ name: string; body: string; story: (replica: Opened) => string; hide: (replica: Opened) => Array<{ story: string; tableIndex: number }> }> = [
-  {
-    name: 'two sibling tables that both lost their rows, the caret in the second',
-    body: table(cell('One A'), cell('One B')) + paragraph('Between') + table(cell('Two A'), cell('Two B')),
-    story: (replica) => (replica.engine.tablePayload('body', 1)!.rows as Array<{ cells: Array<{ story: string }> }>)[0]!.cells[0]!.story,
-    hide: () => [{ story: 'body', tableIndex: 0 }, { story: 'body', tableIndex: 1 }],
-  },
-  {
-    name: 'three levels of nesting, the outer table emptied and the caret in the innermost cell',
-    body: table(`<w:tc><w:tcPr><w:tcW w:w="4680" w:type="dxa"/></w:tcPr>${table(`<w:tc><w:tcPr><w:tcW w:w="2340" w:type="dxa"/></w:tcPr>${table(cell('Deep'))}${paragraph('Mid')}</w:tc>`)}${paragraph('Outer')}</w:tc>`),
-    story: (replica) => {
-      const outer = firstCell(replica, 'body');
-      const middle = firstCell(replica, outer);
-      return firstCell(replica, middle);
-    },
-    hide: () => [{ story: 'body', tableIndex: 0 }],
-  },
-];
-
-for (const [index, fallback] of FALLBACKS.entries()) {
-  test(`a caret hidden with ${fallback.name} goes to the first paragraph of the body, not beside another table`, async () => {
-    const base = 9950 + index * 10;
-    const replica = await open(base + 1, false, fallback.body);
-    const first = await peer(replica, base + 2);
-    const second = await peer(replica, base + 3);
-    try {
-      const story = fallback.story(replica);
-      const inCell = { story, paraId: replica.engine.paragraphs(story)[0]!.paraId, offset: 1 };
-      await replica.session.submit('select', { selection: { anchor: inCell, focus: inCell } }).ack;
-      for (const table of fallback.hide(replica)) crossTable(first, second, table);
-      await receive(replica, second);
-      const selection = replica.session.state.selection!;
-      expect(selection.focus.story).toBe('body');
-      expect(selection.focus.paraId).toBe(replica.engine.paragraphs('body')[0]!.paraId);
-      expect((await replica.session.submit('insertText', { text: 'Z' }).ack).status).toBe('applied');
-      expect(cellTexts(replica, story).join('')).not.toContain('Z');
-    } finally {
-      first.destroy();
-      second.destroy();
-      replica.session.dispose();
-    }
-  }, TIMEOUT);
-}
-
-const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
-const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
-const REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
-const MAIN = 'application/vnd.openxmlformats-officedocument.wordprocessingml';
-
-/** Headers and footers whose relationship ids hold a colon, some shaped like a cell, a block control or a repeated item. */
-const BANDS: Array<{ id: string; part: string; root: 'hdr' | 'ftr'; kind: 'header' | 'footer'; type: string; text: string }> = [
-  { id: 'rId:Even', part: 'header1.xml', root: 'hdr', kind: 'header', type: 'even', text: 'Even header' },
-  { id: 'x:t0:r0c0', part: 'header2.xml', root: 'hdr', kind: 'header', type: 'default', text: 'Cell-shaped header' },
-  { id: 'y:sdt0', part: 'header3.xml', root: 'hdr', kind: 'header', type: 'first', text: 'Control-shaped header' },
-  { id: 'z:repeat:1', part: 'footer1.xml', root: 'ftr', kind: 'footer', type: 'default', text: 'Repeat-shaped footer' },
-];
-
-/** A body table beside a footnote, headers and a footer, a comment and a text box. */
-function storyKindsBytes(): Uint8Array {
-  const parts: PartsMap = new Map();
-  const overrides = BANDS.map((band) => `<Override PartName="/word/${band.part}" ContentType="${MAIN}.${band.kind}+xml"/>`).join('');
-  const relationships = BANDS.map((band) => `<Relationship Id="${band.id}" Type="${REL}/${band.kind}" Target="${band.part}"/>`).join('');
-  const references = BANDS.map((band) => `<w:${band.kind}Reference w:type="${band.type}" r:id="${band.id}"/>`).join('');
-  parts.set('[Content_Types].xml', toBytes(`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="${MAIN}.document.main+xml"/><Override PartName="/word/footnotes.xml" ContentType="${MAIN}.footnotes+xml"/>${overrides}<Override PartName="/word/settings.xml" ContentType="${MAIN}.settings+xml"/><Override PartName="/word/comments.xml" ContentType="${MAIN}.comments+xml"/></Types>`));
-  parts.set('_rels/.rels', toBytes(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="r1" Type="${REL}/officeDocument" Target="word/document.xml"/></Relationships>`));
-  parts.set('word/_rels/document.xml.rels', toBytes(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdFn" Type="${REL}/footnotes" Target="footnotes.xml"/>${relationships}<Relationship Id="rIdSet" Type="${REL}/settings" Target="settings.xml"/><Relationship Id="rIdCm" Type="${REL}/comments" Target="comments.xml"/></Relationships>`));
-  parts.set('word/settings.xml', toBytes(`<w:settings xmlns:w="${W}"><w:evenAndOddHeaders/></w:settings>`));
-  for (const band of BANDS) parts.set(`word/${band.part}`, toBytes(`<w:${band.root} xmlns:w="${W}">${paragraph(band.text)}</w:${band.root}>`));
-  parts.set('word/footnotes.xml', toBytes(`<w:footnotes xmlns:w="${W}"><w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote><w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote><w:footnote w:id="1">${paragraph('Note text')}</w:footnote></w:footnotes>`));
-  parts.set('word/comments.xml', toBytes(`<w:comments xmlns:w="${W}"><w:comment w:id="0" w:author="Ada" w:date="2026-01-01T00:00:00Z">${paragraph('Comment text')}</w:comment></w:comments>`));
-  const textBox = `<w:p><w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"><wp:extent cx="2743200" cy="1371600"/><wp:docPr id="1" name="Box"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:cNvSpPr txBox="1"/><wps:spPr><a:prstGeom prst="rect"/></wps:spPr><wps:txbx><w:txbxContent>${paragraph('Boxed text')}</w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`;
-  const noted = `<w:p><w:r><w:t>Noted</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r></w:p>`;
-  const commented = `<w:p><w:commentRangeStart w:id="0"/><w:r><w:t>Commented</w:t></w:r><w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r></w:p>`;
-  parts.set('word/document.xml', toBytes(`<w:document xmlns:w="${W}" xmlns:r="${R}"><w:body>${paragraph('Before')}${table(cell('First'), cell('Second'))}${noted}${commented}${textBox}${paragraph('After')}<w:sectPr>${references}<w:titlePg/></w:sectPr></w:body></w:document>`));
-  return new Uint8Array(rezipPartsToArrayBuffer(parts));
-}
-
-const STORY_KINDS: Array<{ name: string; story: (ids: readonly string[]) => string | undefined; text: string }> = [
-  { name: 'a footnote', story: (ids) => ids.find((id) => id.startsWith('fn:') && !id.slice(3).includes(':')), text: 'Note text' },
-  ...BANDS.map((band) => ({
-    name: `a ${band.type} ${band.kind} whose relationship id is ${band.id}`,
-    story: (ids: readonly string[]) => ids.find((id) => id === `hf:${band.id}`),
-    text: band.text,
-  })),
-];
-
-for (const [index, kind] of STORY_KINDS.entries()) {
-  test(`a caret in ${kind.name} stays where it is while a body table is unavailable, and typing lands there`, async () => {
-    const base = 10_100 + index * 10;
-    const replica = await open(base + 1, false, undefined, storyKindsBytes());
-    const first = await peer(replica, base + 2);
-    const second = await peer(replica, base + 3);
-    try {
-      const story = kind.story(replica.engine.storyIds());
-      expect(story).toBeDefined();
-      const target = replica.engine.paragraphs(story!).find(({ text }) => text === kind.text)!;
-      const caret = { story: story!, paraId: target.paraId, offset: 4 };
-      await replica.session.submit('select', { selection: { anchor: caret, focus: caret } }).ack;
-      expect(replica.session.state.selection?.focus).toMatchObject({ story });
-      crossTable(first, second, { story: 'body', tableIndex: 0 });
-      await receive(replica, second);
-      expect(Array.isArray(replica.engine.tablePayload('body', 0)?.rows)).toBe(false);
-      expect(replica.session.state.selection?.focus).toMatchObject({ story, paraId: target.paraId, offset: 4 });
-      expect((await replica.session.submit('insertText', { text: 'Z' }).ack).status).toBe('applied');
-      expect(replica.engine.paragraphs(story!).some(({ text }) => text.includes('Z'))).toBe(true);
-    } finally {
-      first.destroy();
-      second.destroy();
-      replica.session.dispose();
-    }
-  }, TIMEOUT);
-}
-
-test('a comment body and a text box are not session stories, so the reach walk needs no edge to them', async () => {
-  const replica = await open(10_191, false, undefined, storyKindsBytes());
-  try {
-    const ids = replica.engine.storyIds();
-    const texts = ids.flatMap((id) => replica.engine.paragraphs(id).map(({ text }) => text));
-    expect(texts).toContain('Note text');
-    expect(texts).toContain('Even header');
-    expect(texts.some((text) => text.includes('Comment text'))).toBe(false);
-    expect(texts.some((text) => text.includes('Boxed text'))).toBe(false);
-  } finally {
-    replica.session.dispose();
-  }
-}, TIMEOUT);
-
-const storiesNamedBy = (replica: Opened, story: string, tableIndex: number) =>
-  ((replica.engine.tablePayload(story, tableIndex)?.rows ?? []) as Array<{ cells: Array<{ story: string }> }>)
-    .flatMap((row) => row.cells.map((named) => named.story));
-
-test('a caret in a cell without its story under a complete table stays put beside an unavailable table elsewhere, and typing is refused as before', async () => {
-  const replica = await open(9991, false, table(cell('A'), cell('B')) + paragraph('Between') + table(cell('C'), cell('D')));
-  const a = await peer(replica, 9992);
-  const b = await peer(replica, 9993);
-  const first = await peer(replica, 9994);
-  const second = await peer(replica, 9995);
-  try {
-    a.splitCell(at('body', 0, 1), 1, 2);
-    sync(a, b);
-    b.insertRow(at('body', 0, 0), 'below');
-    sync(a, b);
-    expect(a.undo()).toBe(true);
-    sync(a, b);
-    await receive(replica, a);
-    const live = new Set(replica.engine.storyIds());
-    const missing = storiesNamedBy(replica, 'body', 0).find((story) => !live.has(story));
-    expect(missing).toBeDefined();
-    const caret = { story: missing!, paraId: `${missing}#p0`, offset: 0 };
-    await replica.session.submit('select', { selection: { anchor: caret, focus: caret } }).ack;
-    expect(replica.session.state.selection?.focus).toMatchObject({ story: missing });
-
-    crossTable(first, second, { story: 'body', tableIndex: 1 });
-    await receive(replica, second);
-    expect(Array.isArray(replica.engine.tablePayload('body', 1)?.rows)).toBe(false);
-    expect(replica.session.state.selection?.focus).toMatchObject({ story: missing });
-    const before = replica.engine.paragraphs('body').map(({ text }) => text);
-    const typed = await replica.session.submit('insertText', { text: 'x' }).ack;
-    expect(typed).toMatchObject({ status: 'refused', reason: 'unsupported' });
-    expect(replica.engine.paragraphs('body').map(({ text }) => text)).toEqual(before);
-    expect(replica.session.state.selection?.focus).toMatchObject({ story: missing });
-  } finally {
-    for (const session of [a, b, first, second]) session.destroy();
-    replica.session.dispose();
-  }
-}, TIMEOUT);
-
-test('a caret in a cell of a host-made block control whose table crossing undos emptied is repaired, and an explicit target there is refused', async () => {
-  const replica = await open(9996);
-  const builder = await peer(replica, 9997);
-  const first = await peer(replica, 9998);
-  const second = await peer(replica, 9999);
-  try {
-    builder.createStory('host', 'Inside', 'Normal', 'left');
-    const created = builder.insertTable({ story: 'host', paraId: builder.paragraphs('host')[0]!.paraId, offset: 0 }, 1, 2);
-    const hidden = created.createdStoryIds[0]!;
-    builder.applyRawOps(hidden, [{ op: 'insert', index: 0, text: 'Cell' }]);
-    builder.applyRawOps('body', [{ op: 'insertEmbed', index: 0, kind: 'blockSdt', payload: { story: 'host' } }]);
-    for (const target of [first, second]) sync(builder, target);
-    await receive(replica, builder);
-    const paraId = replica.engine.paragraphs(hidden)[0]!.paraId;
-    const caret = { story: hidden, paraId, offset: 0 };
-    await replica.session.submit('select', { selection: { anchor: caret, focus: caret } }).ack;
-    expect(replica.session.state.selection?.focus).toMatchObject({ story: hidden });
-
-    crossTable(first, second, { story: 'host', tableIndex: 0 });
-    await receive(replica, second);
-    const selection = replica.session.state.selection!;
-    expect(selection.focus.story).not.toBe(hidden);
-    expect(['host', 'body']).toContain(selection.focus.story);
-    expect(selection.anchor.story).toBe(selection.focus.story);
-    const before = replica.engine.encodeState();
-    const outcome = await replica.session.submit('setHyperlink', {
-      selection: { anchor: caret, focus: { ...caret, offset: 3 } },
-      hyperlink: { href: 'https://example.com' }, expectVersion: replica.engine.proposalEngine.version(),
-    }).ack;
-    expect(outcome).toMatchObject({ status: 'refused', reason: 'table-unavailable' });
-    expect(replica.engine.encodeState()).toEqual(before);
-    expect((await replica.session.submit('insertText', { text: 'Z' }).ack).status).toBe('applied');
-    expect(replica.engine.paragraphs(selection.focus.story).some(({ text }) => text.includes('Z'))).toBe(true);
-    expect(cellTexts(replica, hidden).join('')).not.toContain('Z');
-  } finally {
-    for (const session of [builder, first, second]) session.destroy();
-    replica.session.dispose();
-  }
-}, TIMEOUT);
-
-test('an explicit range in a hidden cell is refused with table-unavailable and changes nothing', async () => {
-  const replica = await open(9981);
-  const first = await peer(replica, 9982);
-  const second = await peer(replica, 9983);
-  try {
-    const story = cellStory(replica);
-    const paraId = replica.engine.paragraphs(story)[0]!.paraId;
-    crossTable(first, second, { story: 'body', tableIndex: 0 });
-    await receive(replica, second);
-    const before = replica.engine.encodeState();
-    const outcome = await replica.session.submit('setHyperlink', {
-      selection: { anchor: { story, paraId, offset: 0 }, focus: { story, paraId, offset: 3 } },
-      hyperlink: { href: 'https://example.com' }, expectVersion: replica.engine.proposalEngine.version(),
-    }).ack;
-    expect(outcome).toMatchObject({ status: 'refused', reason: 'table-unavailable' });
-    expect(replica.engine.encodeState()).toEqual(before);
-  } finally {
-    first.destroy();
-    second.destroy();
-    replica.session.dispose();
-  }
-}, TIMEOUT);

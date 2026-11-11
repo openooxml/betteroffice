@@ -650,7 +650,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
           const focus = selected?.sticky
             ? engine.resolveStickyPosition({ story: selected.story, encoded: selected.sticky })
             : selected ?? engine.selection()?.head;
-          if (focus && engine.geometryReader?.storyLaidOut?.(focus.story) !== false) selectionNavigation = {
+          if (focus) selectionNavigation = {
             focus: navigation.unit === 'page' ? cellSelectionHeadPosition(engine, focus) ?? focus : focus,
             direction: navigation.direction,
             ...(navigation.unit === 'page' ? { distance: navigation.distance } : {}) };

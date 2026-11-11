@@ -1847,12 +1847,6 @@ impl EditSession {
         Ok(self.document(env)?.has_story(&story))
     }
 
-    #[napi(catch_unwind, js_name = "story_laid_out")]
-    pub fn story_laid_out(&self, env: Env, story: String) -> Result<bool> {
-        let _call = EngineCall::new(env);
-        Ok(self.document(env)?.story_laid_out(&story))
-    }
-
     #[napi(catch_unwind, js_name = "header_footer_aliases_json")]
     pub fn header_footer_aliases_json(&self, env: Env) -> Result<String> {
         let _call = EngineCall::new(env);

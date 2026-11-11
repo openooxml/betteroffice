@@ -728,11 +728,6 @@ pub struct EditingDoc {
     seen: identity::SeenCell,
     scan_cache: identity::ScanCache,
     story_revisions: Arc<Mutex<StoryRevisions>>,
-    /// The stories the walk from the document's roots lays out, at the reach key it ran under.
-    laid_out_stories:
-        Mutex<Option<(unavailable_tables::ReachKey, Arc<unavailable_tables::DocumentReach>)>>,
-    /// The note stories and header/footer relationship ids layout requests have been given.
-    layout_roots: Mutex<unavailable_tables::LayoutRoots>,
     remote_deletions: remote_cleanup::RemoteDeletions,
     keeps_deleted: Arc<AtomicBool>,
     commit_hooks: Rc<RefCell<CommitHooks>>,
@@ -843,8 +838,6 @@ impl EditingDoc {
             seen,
             scan_cache: identity::ScanCache::default(),
             story_revisions,
-            laid_out_stories: Mutex::default(),
-            layout_roots: Mutex::default(),
             remote_deletions: remote_cleanup::RemoteDeletions::default(),
             keeps_deleted,
             commit_hooks,

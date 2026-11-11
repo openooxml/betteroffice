@@ -7420,26 +7420,6 @@ impl EngineSession {
             serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?;
         let cached_page_totals = request.cached_page_totals;
         let (mut input, mut regions, notes, measurement, render_env, body_story) = request.split();
-        self.doc.note_layout_roots(
-            notes.contents.iter().map(|content| match content.note_kind {
-                NoteKind::Footnote => format!("fn:{}", content.id),
-                NoteKind::Endnote => format!("en:{}", content.id),
-            }),
-            (0..regions.sections.len())
-                .filter_map(|index| effective_header_footer_refs(&regions, index))
-                .flat_map(|refs| {
-                    [
-                        refs.header_default,
-                        refs.header_first,
-                        refs.header_even,
-                        refs.footer_default,
-                        refs.footer_first,
-                        refs.footer_even,
-                    ]
-                })
-                .flatten()
-                .collect::<Vec<_>>(),
-        );
         let request_options = input.options.clone();
         let mut parsed_render_env = if render_env.is_null() {
             None

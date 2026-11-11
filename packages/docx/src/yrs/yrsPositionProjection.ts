@@ -209,11 +209,6 @@ export class YrsPositionProjection {
     return this.nodes.get(position) ?? null;
   }
 
-  /** Every story this projection lays out: the root, and each story reached through complete tables and block controls. */
-  storyIds(): string[] {
-    return [...this.stories.keys()];
-  }
-
   allTables(): readonly YrsProjectedTable[] {
     return this.tables;
   }

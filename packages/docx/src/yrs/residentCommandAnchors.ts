@@ -8,7 +8,6 @@ import type {
   DocxWorkerCommandState,
   ResolvedDocxCommandSelection,
 } from './residentCommandProtocol';
-import { besideHiddenStory } from './residentCommandTableSelection';
 
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u;
 const commandStates = new WeakMap<DocxWorkerCommandEngine, DocxWorkerCommandState>();
@@ -40,46 +39,16 @@ function position(value: unknown): value is DocxCommandPosition {
     (at.sticky === undefined || (at.sticky instanceof Uint8Array && at.sticky.length > 0));
 }
 
-/**
- * The range `selected` covers, or null when it does not resolve. A selection in a story the
- * layout does not show (a cell of an unavailable table) does not resolve either.
- */
 export function commandSelectionRange(
   engine: Pick<DocxWorkerCommandEngine, 'geometryReader'>,
   selected: DocxCommandSelection
 ): YrsStoryRange | null {
-  const range = selectionRange(engine, selected);
-  return range === 'hidden' ? null : range;
-}
-
-/**
- * The range an explicit target in a command payload covers, `table-unavailable` when it lies in
- * a story the layout does not show, or null when it does not resolve.
- */
-export function commandTargetRange(
-  engine: Pick<DocxWorkerCommandEngine, 'geometryReader'>,
-  selected: DocxCommandSelection
-): YrsStoryRange | 'table-unavailable' | null {
-  const range = selectionRange(engine, selected);
-  return range === 'hidden' ? 'table-unavailable' : range;
-}
-
-/** The engine read standing in for `hasStory`: whether the story exists and the layout shows it. */
-function shown(engine: Pick<DocxWorkerCommandEngine, 'geometryReader'>, story: string): boolean {
-  const reader = engine.geometryReader;
-  return reader.storyLaidOut ? reader.storyLaidOut(story) : reader.hasStory(story);
-}
-
-function selectionRange(
-  engine: Pick<DocxWorkerCommandEngine, 'geometryReader'>,
-  selected: DocxCommandSelection
-): YrsStoryRange | 'hidden' | null {
   if (!selected || typeof selected !== 'object' || Array.isArray(selected) ||
     Object.keys(selected).some((key) => !['anchor', 'focus'].includes(key)) ||
     !position(selected.anchor) || !position(selected.focus) ||
     selected.anchor.story !== selected.focus.story) return null;
   const { anchor, focus } = selected;
-  if (!shown(engine, anchor.story)) return engine.geometryReader.hasStory(anchor.story) ? 'hidden' : null;
+  if (!engine.geometryReader.hasStory(anchor.story)) return null;
   if ([anchor, focus].some((at) => engine.geometryReader.paragraphIdCount(at.story, at.paraId) !== 1)) return null;
   if (anchor.paraId !== focus.paraId) {
     const paragraphs = engine.geometryReader.paragraphSpans(anchor.story);
@@ -122,15 +91,9 @@ export function readCommandSelection(
   const anchor = resolve(selected.anchor);
   const focus = resolve(selected.focus);
   if (!anchor || !focus) return { ok: false, reason: 'stale-anchor' };
-  let selection: DocxCommandSelection = { anchor, focus };
-  let range = selectionRange(engine, selection);
-  if (range === 'hidden') {
-    const beside = besideHiddenStory(engine, anchor.story);
-    if (!beside) return { ok: false, reason: 'stale-anchor' };
-    selection = { anchor: beside, focus: beside };
-    range = selectionRange(engine, selection);
-  }
-  return range && range !== 'hidden' ? { ok: true, selection, range } : { ok: false, reason: 'invalid-selection' };
+  const selection = { anchor, focus };
+  const range = commandSelectionRange(engine, selection);
+  return range ? { ok: true, selection, range } : { ok: false, reason: 'invalid-selection' };
 }
 
 /** The range a selection covers in the current document; positions carrying an issued sticky follow later edits. */

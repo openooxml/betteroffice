@@ -1,9 +1,8 @@
 import { isEngineTrap } from '../../../../shared/office-session/trap';
-import type { YrsCellLoc, YrsLoc, YrsTableLoc, YrsTableRange } from './index';
+import type { YrsCellLoc, YrsLoc, YrsTableRange } from './index';
 import type { DocxCommandSelection, DocxWorkerCommandEngine } from './residentCommandProtocol';
 import { tableAnchors, type TablePayload } from './storyPlainText';
 import { createYrsPositionProjection, isUnavailableTablePayload } from './yrsPositionProjection';
-import { leadingBlockCount } from './sectionBreak';
 
 export type TableSelectionTarget = 'table' | 'row' | 'column';
 
@@ -22,44 +21,15 @@ export function readCellSelection(engine: Pick<DocxWorkerCommandEngine, 'cellSel
 
 type ProjectedCellTable = { story: string; tableIndex: number; cells: { story: string; row: number; column: number }[] };
 
-/** What a root's position projection lays out: its tables and every story it places. */
-type ProjectedRoot = { tables: ProjectedCellTable[]; stories: ReadonlySet<string> };
-
-/** The tables and stories of `root` as the position projection lays them out: only what cell location reads. */
-function projectRoot(engine: DocxWorkerCommandEngine, root: string): ProjectedRoot | null {
+/** The tables of `root` as the position projection lays them out: only what cell location reads. */
+function projectedCellTables(engine: DocxWorkerCommandEngine, root: string): ProjectedCellTable[] | null {
   const projection = createYrsPositionProjection(engine.geometryReader, root);
   if (!projection) return null;
-  return {
-    tables: projection.allTables().map((table) => ({
-      story: table.story,
-      tableIndex: table.tableIndex,
-      cells: table.cells.map((cell) => ({ story: cell.story, row: cell.row, column: cell.column })),
-    })),
-    stories: new Set(projection.storyIds()),
-  };
-}
-
-/** The paragraph next to `table` in its story, after it when there is one: where a caret goes that leaves it. */
-export function nearTable(engine: Pick<DocxWorkerCommandEngine, 'geometryReader'>, table: YrsTableLoc): YrsLoc | null {
-  const segments = engine.geometryReader.storySegments(table.story);
-  let ordinal = 0;
-  let target = -1;
-  for (let index = 0; index < segments.length; index += 1) {
-    const segment = segments[index]!;
-    if (segment.kind !== 'embed' || segment.embedKind !== 'table') continue;
-    if (ordinal === table.tableIndex) {
-      target = index;
-      break;
-    }
-    ordinal += 1;
-  }
-  if (target < 0) return null;
-  const following = segments.slice(target + 1).find((segment) => segment.kind === 'pilcrow');
-  const preceding = segments.slice(0, target).reverse().find((segment) => segment.kind === 'pilcrow');
-  const paragraph = following ?? preceding;
-  return paragraph?.kind === 'pilcrow'
-    ? { story: table.story, paraId: paragraph.paraId, offset: 0 }
-    : null;
+  return projection.allTables().map((table) => ({
+    story: table.story,
+    tableIndex: table.tableIndex,
+    cells: table.cells.map((cell) => ({ story: cell.story, row: cell.row, column: cell.column })),
+  }));
 }
 
 function cellIn(tables: readonly ProjectedCellTable[] | null, story: string): YrsCellLoc | null {
@@ -75,7 +45,7 @@ function cellIn(tables: readonly ProjectedCellTable[] | null, story: string): Yr
   return best;
 }
 
-const projectedTables = new WeakMap<object, Map<string, { key: string; projected: ProjectedRoot | null }>>();
+const projectedTables = new WeakMap<object, Map<string, { key: string; tables: ProjectedCellTable[] | null }>>();
 let shadowCheck = false;
 const cacheCounts = { built: 0, reused: 0, uncached: 0 };
 
@@ -98,74 +68,32 @@ export function cellLocationCacheCounts(): { built: number; reused: number; unca
 export function resolveLiveCell(engine: DocxWorkerCommandEngine, story: string): YrsCellLoc | null {
   const root = rootOf(story);
   if (story === root) return null;
-  const { key, projected } = projectedRoot(engine, root);
-  const located = cellIn(projected?.tables ?? null, story);
+  const key = typeof engine.cellStructureKey === 'function' ? engine.cellStructureKey() : null;
+  let tables: ProjectedCellTable[] | null;
+  if (key === null) {
+    cacheCounts.uncached++;
+    tables = projectedCellTables(engine, root);
+  } else {
+    let roots = projectedTables.get(engine);
+    if (!roots) projectedTables.set(engine, roots = new Map());
+    const cached = roots.get(root);
+    if (cached?.key === key) {
+      cacheCounts.reused++;
+      tables = cached.tables;
+    } else {
+      cacheCounts.built++;
+      tables = projectedCellTables(engine, root);
+      roots.set(root, { key, tables });
+    }
+  }
+  const located = cellIn(tables, story);
   if (shadowCheck && key !== null) {
-    const fresh = cellIn(projectRoot(engine, root)?.tables ?? null, story);
+    const fresh = cellIn(projectedCellTables(engine, root), story);
     if (JSON.stringify(fresh) !== JSON.stringify(located)) {
       throw new Error(`cell location cache differs for ${story}: ${JSON.stringify(located)} != ${JSON.stringify(fresh)}`);
     }
   }
   return located;
-}
-
-/** `root`'s projection, kept per engine and root until the engine's structure key changes. */
-function projectedRoot(engine: DocxWorkerCommandEngine, root: string): { key: string | null; projected: ProjectedRoot | null } {
-  const key = typeof engine.cellStructureKey === 'function' ? engine.cellStructureKey() : null;
-  if (key === null) {
-    cacheCounts.uncached++;
-    return { key, projected: projectRoot(engine, root) };
-  }
-  let roots = projectedTables.get(engine);
-  if (!roots) projectedTables.set(engine, roots = new Map());
-  const cached = roots.get(root);
-  if (cached?.key === key) {
-    cacheCounts.reused++;
-    return { key, projected: cached.projected };
-  }
-  cacheCounts.built++;
-  const projected = projectRoot(engine, root);
-  roots.set(root, { key, projected });
-  return { key, projected };
-}
-
-/**
- * Whether the live `story` is shown: the engine's document-wide answer, hidden only when the
- * walk from the document's roots met an unavailable table and did not reach the story. A reader
- * without that read answers as before, by whether the story exists.
- */
-export function laidOutStory(engine: Pick<DocxWorkerCommandEngine, 'geometryReader'>, story: string): boolean {
-  const reader = engine.geometryReader;
-  return reader.storyLaidOut ? reader.storyLaidOut(story) : reader.hasStory(story);
-}
-
-/**
- * Where a selection in `story`, which the layout does not show, goes instead: beside the
- * unavailable table whose rows still name `story` as a cell, when one in a story the body or the
- * story's own root lays out does; otherwise the first paragraph of that root when it is shown, or
- * of the body, past its leading blocks. Never beside a table chosen by a story's name.
- */
-export function besideHiddenStory(engine: DocxWorkerCommandEngine, story: string): YrsLoc | null {
-  for (const root of new Set([rootOf(story), 'body'])) {
-    const projected = projectedRoot(engine, root).projected;
-    for (const parent of projected?.stories ?? []) {
-      let ordinal = 0;
-      for (const segment of engine.geometryReader.storySegments(parent)) {
-        if (segment.kind !== 'embed' || segment.embedKind !== 'table') continue;
-        const table = { story: parent, tableIndex: ordinal++ };
-        if (!isUnavailableTablePayload(segment.payload) || !Array.isArray(segment.payload.rows)) continue;
-        const rows = segment.payload.rows as TablePayload['rows'];
-        if (rows.some((row) => row?.cells?.some((cell) => cell?.story === story)) && laidOutStory(engine, parent)) {
-          return nearTable(engine, table);
-        }
-      }
-    }
-  }
-  const root = [rootOf(story), 'body'].find((candidate) => candidate !== story && laidOutStory(engine, candidate)) ?? 'body';
-  const first = engine.geometryReader.paragraphSpans(root)[0];
-  if (!first) return null;
-  const leading = leadingBlockCount(engine.paragraphSegments(root, [0])[0] ?? []);
-  return { story: root, paraId: first.paraId, offset: Math.min(first.length, leading) };
 }
 
 function validPayload(value: unknown): value is TablePayload {

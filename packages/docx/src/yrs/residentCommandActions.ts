@@ -14,7 +14,7 @@ import {
 import { projectDocxEditState, withStoredMarks } from './residentCommandEditState';
 import { resolveDocxSelectionIntent, selectResidentPartPage } from './residentCommandSelection';
 import { applyCellNavigation, resolveCellNavigation } from './residentCommandCells';
-import { cellsForCaret, laidOutStory, readCellSelection, resolveLiveCell, tableRangeFor } from './residentCommandTableSelection';
+import { cellsForCaret, readCellSelection, resolveLiveCell, tableRangeFor } from './residentCommandTableSelection';
 import {
   applyTableCommand, isTableCommandKind, liveTableAncestors, nearTable,
   preflightTableCommand, syncCellSelectionWithCaret, type TableCommandIntent,
@@ -567,7 +567,6 @@ export function preflightDocxCommand(
     if (command.payload.expectVersion !== engine.proposalEngine.version()) return refuse('stale-version');
     const target = resolveControlHandle(engine, command.payload.handle);
     if (!target) return refuse('stale-control');
-    if (!laidOutStory(engine, target.at.story)) return refuse('table-unavailable');
     if (target.control.effectiveLock.content || !target.control.effectiveLock.known || target.control.dataBound) return refuse('locked-target');
     return { status: 'ready', prepared: { command: structuredClone(command), selection: state.selection, range: null } };
   }
@@ -627,23 +626,13 @@ export function preflightDocxCommand(
   }
   if (command.kind === 'applyEdits') {
     if (readOnly) return refuse('read-only');
-    const request = commandBatchRequest(command.payload);
-    const named = (step: unknown): unknown => {
-      const fields = step as { story?: unknown; target?: { story?: unknown } } | null;
-      return fields?.target?.story ?? fields?.story;
-    };
-    if ((request.steps ?? []).some((step: unknown) => {
-      const story = named(step);
-      return typeof story === 'string' && !laidOutStory(engine, story);
-    })) return refuse('table-unavailable');
-    const validation = engine.proposalEngine.validateEdits(request);
+    const validation = engine.proposalEngine.validateEdits(commandBatchRequest(command.payload));
     if (!validation.ok) return refuse(validation.failure.code);
     return { status: 'ready', prepared: { command: structuredClone(command), selection: state.selection, range: null } };
   }
   if (command.kind === 'replaceMatches') {
     if (readOnly) return refuse('read-only');
     if (command.payload.expectVersion !== engine.proposalEngine.version()) return refuse('stale-version');
-    if (command.payload.targets.some((target) => !laidOutStory(engine, target.story))) return refuse('table-unavailable');
     return { status: 'ready', prepared: { command: structuredClone(command), selection: state.selection, range: null } };
   }
   if (command.kind === 'moveEmbed') {
@@ -653,7 +642,6 @@ export function preflightDocxCommand(
     if (command.payload.suggesting !== undefined) return refuse('unsupported-suggesting');
     const target = resolveResidentObject(engine, command.payload.handle);
     if (!target) return refuse('stale-object');
-    if (!laidOutStory(engine, target.story)) return refuse('table-unavailable');
     if (target.kind !== 'image') return refuse('unsupported-object');
     const paragraph = engine.geometryReader.paragraphSpans(target.story).findIndex(span => span.paraId === target.paraId);
     let offset = 0;
@@ -692,7 +680,6 @@ export function preflightDocxCommand(
     if (command.payload.expectVersion !== engine.proposalEngine.version()) return refuse('stale-version');
     const target = resolveResidentObject(engine, command.payload.handle);
     if (!target) return refuse('stale-object');
-    if (!laidOutStory(engine, target.story) || (target.cell && !laidOutStory(engine, target.cell.story))) return refuse('table-unavailable');
     const cellResize = command.kind === 'resizeObject' && ('widthTwips' in command.payload || 'columnEdge' in command.payload || 'rowDeltaTwips' in command.payload);
     if (target.kind === 'cell' && cellResize) {
       if (!target.cell) return refuse('stale-object');
@@ -1167,16 +1154,11 @@ function applyPreparedDocxCommand(
     const resolved = state.selection ? readCommandSelection(engine, state) : null;
     const story = state.selection?.focus.story;
     const native = !story || engine.geometryReader.hasStory(story) ? engine.selection() : null;
-    const resolvedSelection = resolved?.ok ? resolved.selection : native && commandSelectionRange(engine, { anchor: native.anchor, focus: native.head })
+    const selected = resolved?.ok ? resolved.selection : native && commandSelectionRange(engine, { anchor: native.anchor, focus: native.head })
       ? { anchor: native.anchor, focus: native.head } : null;
-    const placed = (at: YrsLoc): boolean => laidOutStory(engine, at.story);
-    const hidden = tables.length > 0 && !!resolvedSelection &&
-      ![resolvedSelection.anchor, resolvedSelection.focus].every(placed);
-    const selected = hidden ? null : resolvedSelection;
     const root = story && story !== 'body' && !story.startsWith('body:') ? story.split(':').slice(0, 2).join(':') : 'body';
     const fallbackStory = engine.geometryReader.hasStory(root) ? root : 'body';
-    const near = nearby.map((at) => pastLeadingBlocks(engine, at))
-      .find((at) => !!at && placed(at)) ?? null;
+    const near = nearby.map((at) => pastLeadingBlocks(engine, at)).find((at) => !!at) ?? null;
     const first = selected ? null : engine.geometryReader.paragraphSpans(fallbackStory)[0];
     const at = first ? { story: fallbackStory, paraId: first.paraId, offset: 0 } : null;
     const repaired = selected ?? (near ? { anchor: near, focus: near } : null) ?? (at ? { anchor: at, focus: at } : null);

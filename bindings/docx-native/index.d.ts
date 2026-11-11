@@ -117,7 +117,6 @@ export declare class EditSession {
   geometry_position_outline_json(root: string): string
   has_pending_update(): boolean
   has_story(story: string): boolean
-  story_laid_out(story: string): boolean
   header_footer_aliases_json(): string
   headings_json(story: string): string
   history_stories(): string[]
