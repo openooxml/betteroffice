@@ -2,4 +2,4 @@
 '@betteroffice/xlsx-react': patch
 ---
 
-The legacy read-only viewer now reports unsupported plugins again through `onPluginError` when a plugin is removed and re-added, when the file changes, or when the viewer returns after the editor.
+The legacy read-only worker viewer (`experimentalWorkerOpen` with `legacySyncApi` and `readOnly`) reports unsupported plugins again through `onPluginError`, or `console.error` without it, after re-adding, a revision change, a file change, or a return from the editor.

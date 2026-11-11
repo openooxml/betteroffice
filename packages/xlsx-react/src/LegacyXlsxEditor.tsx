@@ -29,7 +29,7 @@ export function LegacyXlsxEditor(props: GeneralEditorSessionProps | XlsxLegacyEd
   useEffect(() => {
     if (!viewer || reportedPlugins.current.identity !== identity) reportedPlugins.current = { identity, keys: new Set() };
     if (!viewer) return;
-    const plugins = (props.plugins ?? []).map((plugin) => ({ plugin, key: `${plugin.id}\u0000${plugin.revision ?? ''}` }));
+    const plugins = (props.plugins ?? []).map((plugin) => ({ plugin, key: `${plugin.id}\u0000${plugin.revision === undefined ? '' : `${typeof plugin.revision}:${plugin.revision}`}` }));
     const reported = reportedPlugins.current.keys;
     const present = new Set(plugins.map(({ key }) => key));
     for (const key of reported) if (!present.has(key)) reported.delete(key);
