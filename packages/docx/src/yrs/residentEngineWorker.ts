@@ -98,6 +98,7 @@ import {
 } from './viewerSelection';
 import { readAdjacentRevision, readSidebar, readOutlineHeadings } from './sidebarReads';
 import { clipboardTablePayload, readClipboardSlice } from './clipboardFragment';
+import { isTableUnavailableRefusal, isUnavailableTablePayload, tableUnavailableError } from './tableUnavailable';
 import { storyOffsetForLoc, tableAnchors } from './storyPlainText';
 import { createResidentScheduler, type SchedulerMessage } from './residentScheduler';
 import { hasCachedYrsSidebarProjection } from '../layout/render/yrsSidebarProjection';
@@ -1652,6 +1653,7 @@ function replyFailure(id: number, error: unknown): void {
     ...(failure instanceof SaveUnavailableError ? { code: 'save-unavailable' as const } : {}),
     ...(failure instanceof SourceCutKeptError ? { code: 'cut-kept' as const } : {}),
     ...(failure instanceof InvalidSelectionError ? { code: 'invalid-selection' as const } : {}),
+    ...(isTableUnavailableRefusal(failure) ? { code: 'table-unavailable' as const } : {}),
   });
 }
 
@@ -2296,9 +2298,9 @@ async function handle(request: ScheduledRequest): Promise<void> {
           cells.anchor.tableIndex !== cells.head.tableIndex ||
           cells.anchor.row !== cells.head.row || cells.anchor.column !== cells.head.column);
         if (multiCell && cells) {
-          const payload = clipboardTablePayload(
-            session.tablePayload(cells.anchor.story, cells.anchor.tableIndex),
-          );
+          const raw = session.tablePayload(cells.anchor.story, cells.anchor.tableIndex);
+          if (raw && isUnavailableTablePayload(raw)) throw tableUnavailableError();
+          const payload = clipboardTablePayload(raw);
           const anchors = payload ? tableAnchors(payload).anchors : [];
           const holds = anchors.some((cell) => focus.story === cell.story) ||
             (anchors.some((cell) => focus.story.startsWith(`${cell.story}:`)) &&

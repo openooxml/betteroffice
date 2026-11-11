@@ -7,12 +7,12 @@ import { residentWorkerFactory } from './__fixtures__/residentWorker';
 import { DocxSourceWorkerClient } from './residentSourceWorkerClient';
 import { createDocxCommandConnection } from './residentCommandConnection';
 import { createDocxWorkerEditSession } from './createDocxWorkerEditSession';
-import { createYrsSession, type YrsCellLoc, type YrsSession } from './index';
+import { createYrsSession, type YrsCellLoc, type YrsSession, type YrsStorySegment } from './index';
 import { tableUnavailableError } from './tableUnavailable';
 import { closeCommandEngines, openCommandEngine, TIMEOUT } from './residentCommandTestSupport';
 import type { DocxWorkerCommandEngine } from './residentCommandProtocol';
 import type { DocxEngineWorkerResponse } from './residentEngineWorkerProtocol';
-import { ResidentWorkerInvalidSelectionError } from './residentEngineWorkerClient';
+import { ResidentWorkerInvalidSelectionError, ResidentWorkerTableUnavailableError } from './residentEngineWorkerClient';
 import { resolveLiveCell, resolvePointerCellRange, setCellLocationShadowCheck } from './residentCommandTableSelection';
 
 let start: Awaited<ReturnType<typeof residentWorkerFactory>>;
@@ -951,6 +951,181 @@ test('with the caret in a cell of an inner table a merge moved into another oute
     expect(typed.status).toBe('applied');
   } finally {
     host.destroy();
+    first.destroy();
+    second.destroy();
+    replica.session.dispose();
+  }
+}, TIMEOUT);
+
+const copyBody = (replica: Opened) => {
+  const paragraphs = replica.engine.paragraphs('body');
+  const last = paragraphs.at(-1)!;
+  return replica.client.documentRead({ kind: 'clipboardSlice', selection: {
+    anchor: { story: 'body', paraId: paragraphs[0]!.paraId, offset: 0 },
+    focus: { story: 'body', paraId: last.paraId, offset: last.text.length },
+  } });
+};
+
+const copyCells = (replica: Opened, left: string, right: string) =>
+  replica.client.documentRead({ kind: 'clipboardSlice', selection: { anchor: startOf(replica, left), focus: { ...startOf(replica, right), offset: 1 } } });
+
+const copiedTables = (slice: { fragment?: { paragraphs: Array<{ tables?: unknown[] }> } | null }) =>
+  (slice.fragment?.paragraphs ?? []).flatMap((entry) => entry.tables ?? []) as Array<{ tblPr: unknown; rows: unknown[]; content?: unknown }>;
+
+function tableOffset(replica: Opened, story: string): number {
+  let offset = 0;
+  for (const segment of replica.engine.storySegments(story) as YrsStorySegment[]) {
+    if (segment.kind === 'embed' && segment.embedKind === 'table') return offset;
+    offset += segment.kind === 'text' ? segment.text.length : 1;
+  }
+  throw new Error(`No table in ${story}`);
+}
+
+async function setTblPr(replica: Opened, clientId: number, story: string, value: unknown): Promise<void> {
+  const editor = await peer(replica, clientId);
+  try {
+    editor.applyRawOps(story, [{ op: 'setEmbedAttr', index: tableOffset(replica, story), key: 'tblPr', value }]);
+    await receive(replica, editor);
+  } finally {
+    editor.destroy();
+  }
+}
+
+async function expectUsable(replica: Opened): Promise<void> {
+  const body = startOf(replica, 'body');
+  const typed = await replica.session.submit('insertText', { text: 'Z', selection: { anchor: body, focus: body } }).ack;
+  expect(typed.status).toBe('applied');
+  expect(replica.engine.paragraphs('body')[0]!.text.startsWith('Z')).toBe(true);
+}
+
+async function expectCodedRefusal(read: Promise<unknown>): Promise<void> {
+  await expect(read).rejects.toBeInstanceOf(ResidentWorkerTableUnavailableError);
+  await expect(read).rejects.toMatchObject({ code: 'table-unavailable' });
+}
+
+for (const [index, lost] of LOST.entries()) {
+  test(`a story copy across a table that lost ${lost.name} rejects at the client with table-unavailable and the next command applies`, async () => {
+    const base = 9500 + index * 10;
+    const replica = await open(base + 1);
+    const first = await peer(replica, base + 2);
+    const second = await peer(replica, base + 3);
+    try {
+      lost.edit(first, true);
+      sync(first, second);
+      lost.edit(second, false);
+      expect(first.undo()).toBe(true);
+      sync(first, second);
+      expect(second.undo()).toBe(true);
+      sync(first, second);
+      await receive(replica, second);
+      expect(lost.key in (replica.engine.tablePayload('body', 0) ?? {})).toBe(false);
+      const untouched = replica.engine.encodeState();
+      await expectCodedRefusal(copyBody(replica));
+      expect(replica.engine.encodeState()).toEqual(untouched);
+      await expectUsable(replica);
+    } finally {
+      first.destroy();
+      second.destroy();
+      replica.session.dispose();
+    }
+  }, TIMEOUT);
+
+  test(`a multi-cell copy in a table that lost ${lost.name} rejects at the client with table-unavailable and the next command applies`, async () => {
+    const base = 9540 + index * 10;
+    const replica = await open(base + 1);
+    const first = await peer(replica, base + 2);
+    const second = await peer(replica, base + 3);
+    try {
+      const [left, right] = outerCellsOf(replica);
+      replica.engine.setCellSelection(outerRange);
+      lost.edit(first, true);
+      sync(first, second);
+      lost.edit(second, false);
+      expect(first.undo()).toBe(true);
+      sync(first, second);
+      expect(second.undo()).toBe(true);
+      sync(first, second);
+      await receive(replica, second);
+      expect(lost.key in (replica.engine.tablePayload('body', 0) ?? {})).toBe(false);
+      await expectCodedRefusal(copyCells(replica, left!, right!));
+      await expectUsable(replica);
+    } finally {
+      first.destroy();
+      second.destroy();
+      replica.session.dispose();
+    }
+  }, TIMEOUT);
+}
+
+for (const [index, [label, tblPr]] of ([['null', null], ['an array', []]] as const).entries()) {
+  test(`a story copy across a table whose tblPr is ${label} copies it through the worker with empty properties`, async () => {
+    const replica = await open(9581 + index * 2);
+    try {
+      await setTblPr(replica, 9582 + index * 2, 'body', tblPr);
+      expect(replica.engine.tablePayload('body', 0)?.tblPr).toEqual(tblPr);
+      const tables = copiedTables((await copyBody(replica)).value);
+      expect(tables).toHaveLength(1);
+      expect(tables[0]!.tblPr).toEqual({});
+      expect(tables[0]!.rows).toHaveLength(1);
+      await expectUsable(replica);
+    } finally {
+      replica.session.dispose();
+    }
+  }, TIMEOUT);
+
+  test(`a multi-cell copy in a table whose tblPr is ${label} fails in the engine's cell selection, not as table-unavailable, and the next command applies`, async () => {
+    const replica = await open(9531 + index * 2);
+    try {
+      const [left, right] = outerCellsOf(replica);
+      replica.engine.setCellSelection(outerRange);
+      await setTblPr(replica, 9532 + index * 2, 'body', tblPr);
+      const read = copyCells(replica, left!, right!);
+      await expect(read).rejects.toThrow('tblPr must be a map');
+      await expect(read).rejects.not.toBeInstanceOf(ResidentWorkerTableUnavailableError);
+      await expectUsable(replica);
+    } finally {
+      replica.session.dispose();
+    }
+  }, TIMEOUT);
+
+  test(`a story copy across an outer table whose inner table's tblPr is ${label} copies the inner table with empty properties`, async () => {
+    const replica = await open(9591 + index * 2, true);
+    try {
+      const table = tableStory(replica);
+      await setTblPr(replica, 9592 + index * 2, table, tblPr);
+      expect(replica.engine.tablePayload(table, 0)?.tblPr).toEqual(tblPr);
+      const [outer] = copiedTables((await copyBody(replica)).value);
+      const content = (outer!.rows[0] as { cells: Array<{ content: Array<{ kind: string; table?: { tblPr: unknown; rows: unknown[] } }> }> })
+        .cells[0]!.content;
+      const inner = content.find((entry) => entry.kind === 'table')?.table;
+      expect(inner?.tblPr).toEqual({});
+      expect(inner?.rows).toHaveLength(1);
+      await expectUsable(replica);
+    } finally {
+      replica.session.dispose();
+    }
+  }, TIMEOUT);
+}
+
+test('a story copy across an outer table whose inner table lost its properties rejects at the client with table-unavailable and the next command applies', async () => {
+  const replica = await open(9571, true);
+  const first = await peer(replica, 9572);
+  const second = await peer(replica, 9573);
+  try {
+    const table = tableStory(replica);
+    const [lost] = INNER_LOST;
+    lost!.edit(first, table, true);
+    sync(first, second);
+    lost!.edit(second, table, false);
+    expect(first.undo()).toBe(true);
+    sync(first, second);
+    expect(second.undo()).toBe(true);
+    sync(first, second);
+    await receive(replica, second);
+    expect('tblPr' in (replica.engine.tablePayload(table, 0) ?? {})).toBe(false);
+    await expectCodedRefusal(copyBody(replica));
+    await expectUsable(replica);
+  } finally {
     first.destroy();
     second.destroy();
     replica.session.dispose();

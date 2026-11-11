@@ -316,6 +316,8 @@ export class ResidentEngineWorkerClient implements DocxCommandClient {
             ? new ResidentWorkerCutKeptError(response.error)
             : response.code === 'invalid-selection'
             ? new ResidentWorkerInvalidSelectionError(response.error)
+            : response.code === 'table-unavailable'
+            ? new ResidentWorkerTableUnavailableError(response.error)
             : residentWorkerError(response.error, response.residentUnavailable)
         );
       }
@@ -1275,6 +1277,11 @@ export class ResidentWorkerCutKeptError extends Error {}
 /** The worker refused a read of a selection it cannot answer, such as one across stories; the session stays usable. @internal */
 export class ResidentWorkerInvalidSelectionError extends Error {
   readonly code = 'invalid-selection' as const;
+}
+
+/** The worker refused a read over a table a concurrent undo left without its properties, grid or rows; the session stays usable. @internal */
+export class ResidentWorkerTableUnavailableError extends Error {
+  readonly code = 'table-unavailable' as const;
 }
 
 /** The worker trapped because its wasm memory could not grow any further. */

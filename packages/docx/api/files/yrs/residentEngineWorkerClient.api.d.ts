@@ -370,6 +370,10 @@ export declare class ResidentWorkerCutKeptError extends Error {
 export declare class ResidentWorkerInvalidSelectionError extends Error {
     readonly code: "invalid-selection";
 }
+/** The worker refused a read over a table a concurrent undo left without its properties, grid or rows; the session stays usable. @internal */
+export declare class ResidentWorkerTableUnavailableError extends Error {
+    readonly code: "table-unavailable";
+}
 /** The worker trapped because its wasm memory could not grow any further. */
 export declare class ResidentWorkerOutOfMemoryError extends ResidentWorkerUnavailableError {
     /** The worker's wasm memories when it trapped. */
