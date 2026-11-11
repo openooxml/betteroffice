@@ -1,0 +1,1477 @@
+// @betteroffice/docx declaration yrs/index.d.ts
+// Regenerate: bun scripts/api-surface.ts --write docx
+import type { SectionInfo, SectionPropertyPatch, SectionStartKind } from './sections';
+export { DocxSectionError } from './sections';
+export { SuggestedFormattingOverContainerError } from './formattingError';
+export type { SectionInfo, SectionPropertyPatch, SectionStartKind } from './sections';
+/**
+ * Typed facade over the Rust yrs editing core (`crates/docx-edit`).
+ *
+ * This module is the ONLY JS entry to that crate — the `docx/zipContainer.ts`
+ * facade precedent. It is types + JSON marshaling only; every editing
+ * semantic (pilcrow-as-character stories, explicit-attribute inserts,
+ * suggesting mode, sticky comment anchors) lives in Rust.
+ *
+ * `createYrsSession()` lazily loads the embedded wasm (`./wasm`) on first call.
+ *
+ * Addressing is the op-contract public vocabulary: a {@link YrsLoc} is
+ * `(story, paraId, offset)` with UTF-16 offsets scoped to one paragraph
+ * (`offset ∈ [0, paragraphLength]`; the paragraph's own pilcrow is excluded
+ * from its offset space). Story-global indices never cross this boundary.
+ */
+import type { RetainedLayoutMeta } from './layoutMeta';
+import type { ResidentEngineWorkerFontSync } from './residentEngineWorkerProtocol';
+import type { Document, ParagraphFormatting, Table, TextFormatting } from '../types/document';
+import type { CompatibilityFlags } from '../docx/settingsParser';
+import type { CellMargins } from '../types/formatting';
+import type { Theme } from '../types/drawingml';
+import type { DocxParagraphAnchor, DocxParagraphAnchorResult, DocxParagraphIdentityReceipt, DocxParagraphIdentitySnapshot, DocxParagraphSavePlan } from './paragraphIdentity';
+import type { CollaborationCursor, CollaborationReplica, CollaborationTextInsertion, CollaborationUpdateOrigin } from '../collaboration/types';
+import type { DocxEditRefusal, DocxEditRequest, DocxEditResult, DocxFindTextRequest, DocxFindTextResult, DocxReadParagraphsRequest, DocxReadParagraphsResult, DocxReadStoriesRequest, DocxReadStoriesResult, DocxTextTarget, DocxValidationResult } from './edits';
+import type { DocxParagraphHeading } from './readTypes';
+import type { DocxListStoriesResult } from './stories';
+import type { DocxReservationsPayload, DocxResolvedReservations } from './reservations';
+import type { DocxTableFragment } from './clipboardFragment';
+import { type DocxProposalRegistryState, type DocxProposalRequest, type DocxProposalResult, type DocxProposalSnapshot, type DocxProposalStateRequest, type DocxProposalWithdrawRequest } from './proposals';
+import type { DocxContentControlQuery, DocxContentControlsOptions, DocxContentControlsResult } from './contentControls';
+import type { DocxExportFailure, DocxExportOptions, DocxExportResult, DocxMarkdownContent, DocxStructuredContent } from './structuredExport';
+import type { DocxLayoutMap, DocxPageExportOptions, DocxPagedStructuredContent, DocxSnapshotLayoutMap } from './pagedExport';
+export { decodeDocxHostJson } from './yrsSessionFacade';
+import type { DocxPngOptions, DocxPngTarget } from '../layout/render/png';
+export { PngExportError, type PngExportCode } from '../../../../shared/office-session/pngExportError';
+export type { DocxPngFontFace, DocxPngOptions, DocxPngTarget } from '../layout/render/png';
+/** @internal */
+export type { DocxCommandEchoContext, DocxCommandKind, DocxCommandFrame, DocxFrameReservations, DocxCommandPageIdentity, DocxCommandPayloads, DocxCommandSelection, DocxEditState, DocxEchoGlyphLine, DocxEchoGlyphSet, DocxEchoRect, DocxEchoTransform, DocxNavigationIntent, DocxSelectionPointIntent, DocxWorkerEditSession, DocxCommandConnection, DocxCommandInitReply, } from './residentCommandProtocol';
+/** @internal */
+export type { DocxEngineWorkerHostModule, DocxEngineWorkerRequest, DocxEngineWorkerResponse, } from './residentEngineWorkerProtocol';
+export * from './layoutMeta';
+export * from './edits';
+export * from './contentControls';
+export * from './readTypes';
+export * from './findParagraphs';
+export { findBodyMatches, type DocxFindDisplayMatch } from './findMatches';
+export { breakRefusedWhileSuggesting } from './sectionBreak';
+export * from './structuredExport';
+export * from './pagedExport';
+export * from './inputPositionMap';
+export * from './storyPlainText';
+export { tableBoundaryDeleteTarget } from './tableBoundaryDelete';
+export * from './clipboardFragment';
+export * from './stories';
+export type { DocxResolvedPointPosition } from './pointPosition';
+export type { DocxRangeHighlights } from './residentRangeHighlights';
+export type { DocxPresencePeer, DocxPresenceGeometry } from './residentCollaboration';
+export type { DocxDocumentRead, DocxDocumentReadValues } from './residentEngineWorkerProtocol';
+export type { DocxCommentPatch, DocxReviewSnapshot, DocxReviewTarget, DocxReviewTargetRanges } from './residentReview';
+export type { DocxToolbarMetadata } from './residentToolbarMetadata';
+export type { DocxDisplayRange, DocxDisplaySelectionInfo, DocxDisplaySelectionText, DocxSelectionUnit, } from './viewerSelection';
+export { readSidebar, readOutlineHeadings } from './sidebarReads';
+export type { DocxSidebarReader, DocxSidebarAnchorPoints, DocxSidebarRead, DocxOutlineHeading, } from './sidebarReads';
+export { ResidentEngineWorkerClient, ResidentWorkerFailureError, DocxWorkerSaveUnavailableError, ResidentWorkerOutOfMemoryError, canUseResidentEngineWorker, preloadResidentEngineWorker, retainPreloadedResidentEngineWorker, takePreloadedResidentEngineWorker, type ResidentEngineWorkerApplyResult, type ResidentEngineWorkerFrame, type ResidentEngineWorkerOpened, type ResidentProposalReply, type ResidentEngineOffscreenPage, } from './residentEngineWorkerClient';
+export type { DocxSourceOpenRequest, DocxSourcePreviewOptions } from './residentSource';
+export type { DocxFontFace, DocxFontEnvironment, DocxFontEnvironmentEvent, DocxFontEnvironmentSnapshot } from './residentFontEnvironment';
+export { preloadDocxEngine } from './preloadDocxEngine';
+export { residentCaretSnapshotForFrame, residentCaretDeviceRect, type ResidentCaretPaintStyle, } from './residentCaret';
+export { WASM32_MEMORY_LIMIT_BYTES, wasmModuleMemories, type WasmHeapStats, type WasmModuleMemory, } from '../wasm/loadWasmAsset';
+export { documentToYrs } from './documentToYrs';
+export { OPAQUE_SEED_BUDGET_BYTES, OpaqueSeedBudgetError, assertOpaqueSeedBudget, normalizeSeedError, } from './documentToYrs';
+export { ownProjectedParagraphs, yrsToDocument } from './yrsToDocument';
+export * from './paragraphIdentity';
+export { proposalRevisionPreview, type DocxOccurrence, type DocxProposalFailure, type DocxProposalInput, type DocxProposalRecord, type DocxProposalRegistryState, type DocxProposalRequest, type DocxProposalResult, type DocxProposalSnapshot, type DocxProposalState, type DocxProposalStateRequest, type DocxProposalWithdrawRequest, } from './proposals';
+export { captureSessionSave, saveYrsDocx, writeSessionSave, type DocxDroppedStructure, type DocxKeptParagraph, type DocxSavedDocument, type DocxCommentSaveIdentity, type DocxCommentSaveBaseline, type DocxSaveOptions, type DocxSavedParagraph, type DocxSessionSave, } from './saveYrsDocx';
+export { headerFooterDisplayRIds, headerFooterStory, sessionSourcePackage } from './sessionInternals';
+export { PeerMetadataError, peerMetadataTags } from './peerMetadata';
+export { DirtyProjectionStories, dirtyProjectionStory, EditorDirtyStories, hostSaveMetadata, mergeDocxHostMetadata, proposalProjectionStories, editorSaveKeptUnchanged, editorSaveStructureDropped, saveEditorDocument, serialWorkerSaves, type EditorSaveRecord, } from './editorSave';
+export { editorSaveKeys } from './editorSaveKeys';
+export * from './yrsPositionProjection';
+export * from './proposalGeometry';
+export * from './reservations';
+export interface YrsDocxHost {
+    document: Document;
+    referencedFonts: string[];
+    /**
+     * The `referencedFonts` a document seeded from its package names only for
+     * East Asian or complex-script text it does not contain, so no text is
+     * measured or drawn with them. Empty when its stories were not seeded; a
+     * preview's cover only its own first pages.
+     */
+    unusedScriptFonts?: string[];
+    /** A preview whose cut holds the whole body. */
+    wholeBody?: true;
+    embeddedFonts: Map<string, ArrayBuffer>;
+    fontTableRelationshipsXml?: string;
+}
+/** Durable authorship metadata for one suggested (tracked-change) operation. */
+export interface YrsAuthor {
+    name: string;
+    /** ISO timestamp supplied by the host so all peers share one clock policy. */
+    date: string;
+}
+/** One position: `(story, paraId, offset)` — offsets are UTF-16 units within the paragraph. */
+export interface YrsLoc {
+    story: string;
+    paraId: string;
+    offset: number;
+}
+/** One binary Yrs position that transforms with collaborative edits. */
+export interface YrsStickyPosition {
+    story: string;
+    encoded: Uint8Array;
+}
+/** A paragraph-addressed position without the story (used inside {@link YrsStoryRange}). */
+export interface YrsParaOffset {
+    paraId: string;
+    offset: number;
+}
+/**
+ * A half-open range `[start, end)` inside one story. Ends may sit in
+ * different paragraphs; the boundary pilcrows are then part of the range
+ * (deleting such a range merges paragraphs).
+ */
+export interface YrsStoryRange {
+    story: string;
+    start: YrsParaOffset;
+    end: YrsParaOffset;
+}
+/** One run-level mark for {@link YrsSession.toggleMark}. */
+export type YrsRunMark = {
+    type: 'bold';
+} | {
+    type: 'italic';
+} | {
+    type: 'underline';
+} | {
+    type: 'superscript';
+} | {
+    type: 'subscript';
+} | {
+    type: 'fontFamily';
+    value: string;
+} | {
+    type: 'fontSize';
+    value: number;
+} | {
+    type: 'color';
+    value: string;
+};
+/** A direct text color written by {@link YrsSession.formatRange}. */
+export type YrsTextColor = {
+    rgb: string;
+    themeColor?: never;
+} | {
+    rgb?: never;
+    themeColor: string;
+};
+export interface YrsLanguagePatch {
+    lang?: string | null;
+    eastAsia?: string | null;
+    bidi?: string | null;
+}
+/**
+ * Set-valued inline formatting for {@link YrsSession.formatRange}. Omitted
+ * fields are left unchanged; `null` clears a field. Boolean `false` also
+ * clears the corresponding mark.
+ */
+export interface YrsInlineFormatDelta {
+    bold?: boolean | null;
+    italic?: boolean | null;
+    underline?: boolean | {
+        style?: string;
+        color?: string;
+    } | null;
+    strike?: boolean | {
+        double?: boolean;
+    } | null;
+    color?: YrsTextColor | null;
+    highlight?: string | null;
+    /** Font size in points; Rust writes both OOXML half-point size fields. */
+    fontSize?: number | null;
+    fontFamily?: {
+        ascii: string;
+        hAnsi?: string;
+    } | null;
+    language?: YrsLanguagePatch | null;
+    /** Passive run properties not covered by the typed fields. `null` clears. */
+    other?: Readonly<Record<string, unknown | null>>;
+}
+export interface YrsHyperlinkAttrs {
+    href: string;
+    tooltip?: string | null;
+    rId?: string | null;
+}
+/** Seed shape for {@link YrsSession.loadStories}. */
+export interface YrsParagraphSeed {
+    /** Paragraph text; must not contain paragraph breaks. */
+    text: string;
+    /** Defaults to `"Normal"`. */
+    pStyle?: string;
+    /** Defaults to `"left"`. */
+    alignment?: string;
+}
+/** One story to seed via {@link YrsSession.loadStories}. */
+export interface YrsStorySeed {
+    storyId: string;
+    /** At least one paragraph. */
+    paragraphs: readonly YrsParagraphSeed[];
+}
+/** How a seeding entry point starts its opening; see {@link YrsSession.beginOpening}. */
+export interface YrsOpeningOptions {
+    /**
+     * A fixed opening generation, for a deterministic seed every replica loads
+     * as one session. Each opening mints a fresh one by default.
+     */
+    generation?: string;
+    /**
+     * Seeds images as `media:{n}` tokens naming their part of the package,
+     * instead of `data:` URLs, keeping them out of the document state. Only a
+     * replica opened from the same package on a version that reads tokens
+     * shows them, so every client of a shared room must be one. Off by default.
+     */
+    mediaTokens?: boolean;
+}
+/**
+ * A copy of `bytes` whose SHA-256 the platform takes off the calling thread,
+ * where it has Web Crypto. Opening that copy unchanged skips hashing the
+ * package on the calling thread; any other bytes open as before.
+ * @internal
+ */
+export declare function prepareDocxBytes(bytes: Uint8Array): Promise<Uint8Array>;
+/** The SHA-256 {@link prepareDocxBytes} took of `bytes`, if it took one. @internal */
+export declare function preparedDocxDigest(bytes: Uint8Array): string | undefined;
+/** Snapshot of one paragraph from {@link YrsSession.paragraphs}. */
+export interface YrsParagraph {
+    /** Session key; not the paragraph's Word `w14:paraId`. */
+    paraId: string;
+    text: string;
+    /** pStyle / alignment plus any op-set extras. */
+    properties: Record<string, unknown>;
+}
+export interface YrsTextSearchOptions {
+    /** Defaults to false. */
+    caseSensitive?: boolean;
+    /** Maximum matches; unlimited by default. */
+    limit?: number;
+}
+/** Paragraph-local UTF-16 offsets. */
+export interface YrsTextMatch {
+    story: string;
+    paraId: string;
+    start: number;
+    end: number;
+    text: string;
+}
+/** One direct numbering reference (`w:numPr`) on a paragraph. */
+export interface YrsNumberingProperties {
+    numId?: number;
+    ilvl?: number;
+}
+/** One paragraph tab stop, measured in twips from the left margin. */
+export interface YrsParagraphTabStop {
+    position: number;
+    alignment: 'left' | 'center' | 'right' | 'decimal' | 'bar' | 'clear' | 'num';
+    leader?: 'none' | 'dot' | 'hyphen' | 'underscore' | 'heavy' | 'middleDot';
+}
+/**
+ * Tri-state properties for {@link YrsSession.setParagraphAttrs}. Omitted
+ * fields are kept and `null` clears. Numeric spacing and indents are OOXML
+ * twips/line-spacing units, never CSS pixels.
+ */
+export interface YrsParagraphAttrs {
+    alignment?: 'left' | 'center' | 'right' | 'both' | 'distribute' | 'mediumKashida' | 'highKashida' | 'lowKashida' | 'thaiDistribute' | null;
+    lineSpacing?: number | null;
+    lineSpacingRule?: 'auto' | 'exact' | 'atLeast' | null;
+    spaceBefore?: number | null;
+    spaceAfter?: number | null;
+    indentLeft?: number | null;
+    indentRight?: number | null;
+    indentFirstLine?: number | null;
+    hangingIndent?: boolean | null;
+    bidi?: boolean | null;
+    tabs?: readonly YrsParagraphTabStop[] | null;
+    defaultTextFormatting?: Readonly<Record<string, unknown>> | null;
+    numPr?: YrsNumberingProperties | null;
+    numPrFromStyle?: YrsNumberingProperties | null;
+    listNumFmt?: string | null;
+    listIsBullet?: boolean | null;
+    listMarker?: string | null;
+    listMarkerHidden?: boolean | null;
+    listMarkerFontFamily?: string | null;
+    listMarkerFontSize?: number | null;
+    listMarkerBold?: boolean | null;
+    listMarkerItalic?: boolean | null;
+    listMarkerColor?: import('../types/colors').ColorValue | null;
+    listMarkerSuffix?: 'tab' | 'space' | 'nothing' | null;
+    listLevelNumFmts?: readonly string[] | null;
+    listAbstractNumId?: number | null;
+    listStartOverride?: number | null;
+    /** Passive pPr/model properties not covered by the typed fields. */
+    other?: Readonly<Record<string, unknown | null>>;
+}
+/**
+ * Typed value for a content control. A string fills a plain- or rich-text control's content
+ * (as a `setContentControlText` edit step would); the objects set checkbox, dropdown and date
+ * controls.
+ */
+export type YrsContentControlValue = {
+    kind: 'dropdown';
+    value: string;
+} | {
+    kind: 'checkbox';
+    checked: boolean;
+} | {
+    kind: 'date';
+    date: string;
+} | string;
+/** Image geometry authored in OOXML EMUs plus wrapping/position metadata. */
+export interface YrsImageGeometry {
+    widthEmu: number;
+    heightEmu: number;
+    wrap?: 'inline' | 'square' | 'tight' | 'through' | 'topAndBottom' | 'behind' | 'inFront';
+    hOffsetEmu?: number | null;
+    vOffsetEmu?: number | null;
+    distTopEmu?: number | null;
+    distBottomEmu?: number | null;
+    distLeftEmu?: number | null;
+    distRightEmu?: number | null;
+    relativeFromHorizontal?: string | null;
+    relativeFromVertical?: string | null;
+    /** Additional image payload fields; `null` clears an existing field. */
+    other?: Readonly<Record<string, unknown | null>>;
+}
+/** A text or picture watermark payload for {@link YrsSession.insertWatermark}. */
+export type YrsWatermark = {
+    kind: 'text';
+    text: string;
+    font: string;
+    color: string;
+    semitransparent: boolean;
+    layout: 'diagonal' | 'horizontal';
+    fontSize?: number;
+    decorative?: boolean;
+} | {
+    kind: 'picture';
+    relId?: string;
+    mediaPath?: string;
+    dataUrl?: string;
+    contentType?: string;
+    scale: number;
+    washout: boolean;
+    widthEmu?: number;
+    heightEmu?: number;
+    decorative?: boolean;
+};
+/**
+ * One formatted segment from {@link YrsSession.storySegments} — the render
+ * bridge's input. `attributes` carries run marks plus `ins` / `del` revision
+ * values (suggested deletions are retained text with a `del` attribute).
+ */
+export type YrsStorySegment = {
+    kind: 'text';
+    text: string;
+    attributes: Record<string, unknown>;
+} | {
+    kind: 'pilcrow';
+    paraId: string;
+    properties: Record<string, unknown>;
+    attributes: Record<string, unknown>;
+} | {
+    kind: 'embed';
+    /** Map-backed embed discriminator (`table`, `noteRef`, `image`, …). */
+    embedKind: string;
+    /** Authored map entries excluding the discriminator. */
+    payload: Record<string, unknown>;
+    attributes: Record<string, unknown>;
+};
+/** Current offsets of one sticky comment anchor. */
+export interface YrsResolvedCommentAnchor {
+    story: string;
+    start: number;
+    end: number;
+}
+/** A paragraph's story span; `end` is its pilcrow, so `end - start` is the paragraph length. */
+export interface YrsParagraphSpan {
+    start: number;
+    end: number;
+}
+/** Compact paragraph entry used to build the live input-position projection. */
+export interface YrsParagraphLength {
+    paraId: string;
+    /** UTF-16 text and inline embed units before the paragraph's pilcrow. */
+    length: number;
+}
+/** Receipt of an op that minted a paragraph id. */
+export interface YrsParagraphReceipt {
+    paraId: string;
+}
+/** Receipt of an op that may have minted a tracked-change revision (suggesting mode). */
+export interface YrsRevisionReceipt {
+    revisionId: string | null;
+}
+/**
+ * Where an edit landed, in whole characters: the inserted text (after the struck-out text when
+ * suggesting), or what a delete left (collapsed when plain, the struck-out text when suggesting).
+ */
+export interface YrsReplaceReceipt extends YrsRevisionReceipt {
+    range?: YrsStoryRange;
+}
+/**
+ * Receipt of {@link YrsSession.splitParagraph}. The first half keeps the
+ * original paraId and the second half is re-minted; suggesting
+ * mode stamps a `pPrIns` revision on the first half.
+ */
+export interface YrsSplitReceipt {
+    firstParaId: string;
+    secondParaId: string;
+    revisionId: string | null;
+}
+/** Low-level UTF-16 story operation for {@link YrsSession.applyRawOps}. */
+export type YrsRawOp = {
+    op: 'insert';
+    index: number;
+    text: string;
+    attrs?: Record<string, unknown>;
+} | {
+    op: 'delete';
+    index: number;
+    len: number;
+} | {
+    op: 'format';
+    index: number;
+    len: number;
+    attrs?: Record<string, unknown>;
+} | {
+    /**
+     * A pilcrow's `ooxmlParaId` binds its Word paragraph ID and is dropped
+     * when it is not one; `sourceParaId` and `paraOrigin` are seeding's to set.
+     */
+    op: 'insertEmbed';
+    index: number;
+    kind: string;
+    payload?: Record<string, unknown>;
+    attrs?: Record<string, unknown>;
+} | {
+    op: 'setEmbedAttr';
+    index: number;
+    key: string;
+    value: unknown;
+} | {
+    /** Upserts a side-map comment with sticky story-unit ranges. */
+    op: 'setComment';
+    id: string;
+    ranges: ReadonlyArray<readonly [number, number]>;
+    author?: string;
+    date?: string;
+    body?: unknown;
+} | {
+    /** Removes the side-map comment keyed by `id`; errors when missing. */
+    op: 'removeComment';
+    id: string;
+};
+/** Host context for {@link YrsSession.yrsBlocksForStory} (theme + list numbering). */
+export interface YrsRenderEnv {
+    compatibilityFlags?: Partial<CompatibilityFlags>;
+    /** `w:tblCellMar` of the document's table styles that set one, by style id. */
+    tableStyleCellMargins?: Record<string, CellMargins>;
+    /** The document's default table style id. */
+    defaultTableStyleId?: string;
+    tocStyleIds?: string[];
+    paragraphSpacingLinePx?: number;
+    /** Section document-grid snap pitch in px (w:docGrid). The engine derives this from sections; hosts may omit it. */
+    docGridPitchPx?: number;
+    defaultParagraphStyleId?: string;
+    /** Resolved paragraph style chain font size in pt, keyed by style id. */
+    paragraphStyleFontSizes?: Record<string, number>;
+    /** Resolved Hyperlink character style chain font size in pt, keyed by style id. */
+    hyperlinkStyleFontSizes?: Record<string, number>;
+    /** The docDefaults font size in pt. */
+    docDefaultFontSize?: number;
+    /** The docDefaults run language, which runs that name none inherit. */
+    docDefaultLanguage?: {
+        latin?: string;
+        eastAsia?: string;
+        bidi?: string;
+    };
+    /** Theme color name → hex (`accent1` → `4472C4`), for theme-color resolution. */
+    themeColors?: Record<string, string>;
+    fontTheme?: Theme;
+    /** The document default tab stop in twips. */
+    defaultTabStopTwips?: number | null;
+    /** Current page content height in CSS px, for proportional drawing constraints. */
+    pageContentHeight?: number | null;
+    /** yrs revision/paragraph id → dense numeric layout id (list markers, revisions). */
+    numericIds?: Record<string, number>;
+    /** Include hidden text in visible layout without changing the document. */
+    showHiddenText?: boolean;
+    /** Report borderless table cell edges as view-only guides on each display page. */
+    showTableGridlines?: boolean;
+    /** Revision id → decision shown in layout; unlisted revisions render as tracked changes. */
+    revisionPreview?: Readonly<Record<string, 'accepted' | 'rejected'>>;
+    /** View-only layout reservations; saves and paged exports leave them out. @internal */
+    reservations?: Readonly<DocxResolvedReservations>;
+    /** Unresolved viewer reservations for resident layout requests. @internal */
+    reservationSets?: DocxReservationsPayload;
+    /**
+     * Lay the opened package's images out as `media:{n}` tokens, which a
+     * resolver given the session's `mediaSource` reads. @internal
+     */
+    mediaTokens?: boolean;
+}
+/** Receipt of {@link YrsSession.addComment}. */
+export interface YrsCommentReceipt {
+    commentId: string;
+}
+/** A comment the session holds; see {@link YrsSession.listComments}. @internal */
+export interface YrsCommentInfo {
+    id: string;
+    author: string;
+    date: string;
+    done: boolean;
+    parentId: string | null;
+    /** The body as it was given to {@link YrsSession.addComment} or `setComment`. */
+    body: unknown;
+}
+/**
+ * Target of {@link YrsSession.acceptChange} / {@link YrsSession.rejectChange}:
+ * one coalesced revision id (resolved at every site, in any story — the
+ * `acceptChangeById` twin) or an explicit story range (the range-command twin;
+ * every tracked change overlapping the range resolves, no id filtering).
+ */
+export type YrsChangeTarget = {
+    revisionId: string;
+} | YrsStoryRange;
+/**
+ * Why formatting through a table or a block content control kept a paragraph unchanged: saving it
+ * rewritten would drop content of its source, such as a text box, a page break or a nested field.
+ */
+export type YrsKeptReason = 'alternateContent' | 'break' | 'contentControl' | 'field' | 'hyperlinkMarker' | 'unreadable';
+/** Receipt of {@link YrsSession.toggleMark}, {@link YrsSession.formatRange} and {@link YrsSession.clearFormatting}. */
+export interface YrsFormatReceipt {
+    /** The table-cell and content-control paragraphs left unchanged, counted by reason; empty when none were. */
+    keptUnchanged: Partial<Record<YrsKeptReason, number>>;
+}
+/** Receipt of {@link YrsSession.acceptChange} / {@link YrsSession.rejectChange}. */
+export interface YrsResolveReceipt {
+    /** The revision ids resolved by the op (resolution order, deduplicated). */
+    revisionIds: string[];
+}
+/** This peer's awareness selection, resolved from two yrs sticky positions. */
+export interface YrsSelection {
+    anchor: YrsLoc;
+    head: YrsLoc;
+}
+export interface YrsResidentCaretRect {
+    pageIndex: number;
+    pageId: string;
+    x: number;
+    y: number;
+    height: number;
+}
+export interface YrsResidentCaretSnapshot {
+    frameEpoch: number;
+    caretRect: YrsResidentCaretRect | null;
+    /** Selection the rect was computed for. Absent on raw engine snapshots. */
+    selection?: YrsSelection | null;
+}
+export declare function sameYrsSelection(left: YrsSelection | null, right: YrsSelection | null): boolean;
+/** How far a region layout begun with {@link YrsSession.beginRegionLayout} has come. */
+export interface YrsRegionLayoutProgress {
+    measuredBlocks: number;
+    bodyBlocks: number;
+    /** The retained region layout reply, once the pass is complete. */
+    layoutJson?: string;
+}
+/** Opt-in internal stage timings for one resident engine input. @internal */
+export interface YrsEngineApplyProfile {
+    selectionMs: number;
+    editMs: number;
+    lowerMs: number;
+    measureMs: number;
+    paginateMs: number;
+    displayInputMs: number;
+    displayBuildMs: number;
+    displayFinalizeMs: number;
+    displayMs: number;
+    encodeMs: number;
+}
+/**
+ * Serializable bootstrap state for the dedicated resident-layout worker.
+ * The main-thread yrs replica records the inputs that established resident
+ * render, measurement, and pagination state; the worker replays them once and
+ * then owns every ordinary input-to-frame transaction.
+ *
+ * @internal
+ */
+/**
+ * One resident font-store registration, in the order the main thread made it:
+ * raw bytes, or a measurement view of an earlier id. The worker replays the
+ * list to reproduce the same dense ids, so the order and the mix both matter.
+ *
+ * @internal
+ */
+export type YrsResidentFontRegistration = Uint8Array | {
+    substituteOf: number;
+    family: string;
+};
+export interface YrsResidentWorkerSnapshot extends ResidentEngineWorkerFontSync {
+    /** @internal */
+    workerAuthoritative?: true;
+    clientId: number;
+    /** Full document state, or a state-vector diff when the caller supplied
+     * the worker's known vector — both apply through the same merge path. */
+    state: Uint8Array;
+    selection: YrsSelection | null;
+    /** Full registrations, or a possibly empty suffix after `fontsBaseRevision`. */
+    fonts: YrsResidentFontRegistration[];
+    /** Monotonic revision of the resident font set (bumped by register/clear). */
+    fontsRevision: number;
+    renderInputs: Array<{
+        story: string;
+        env: YrsRenderEnv;
+    }>;
+    measureInputs: string[];
+    layoutInput: string;
+    layoutWithRegions: boolean;
+    layoutRevision: number;
+    /** The document is a preview's cut of a package: its layouts render NUMPAGES empty. */
+    partialDocument?: boolean;
+    /** Which seeded `data:` image sources lay out as `media:{n}` tokens. @internal */
+    mediaSources?: string;
+    /** The opened package's footnote/endnote separator notes, for replicas without its source. @internal */
+    noteSeparators?: Uint8Array;
+}
+/**
+ * What the sync target already holds, so a snapshot can ship deltas instead
+ * of the whole world.
+ *
+ * @internal
+ */
+export interface YrsResidentWorkerSyncOptions {
+    /** The worker replica's last reported yrs state vector. */
+    knownStateVector?: Uint8Array | null;
+    /** The `fontsRevision` the worker last applied. */
+    knownFontsRevision?: number | null;
+}
+/** A range-aggregated toggle mark. @public */
+export type YrsTriState = boolean | 'mixed';
+/**
+ * Read-only toolbar/a11y state aggregated from yrs over one story range.
+ * Toggle marks are tri-state; value marks are `null` when absent or mixed.
+ *
+ * @public
+ */
+export interface YrsSelectionContext {
+    bold: YrsTriState;
+    italic: YrsTriState;
+    underline: YrsTriState;
+    strike: YrsTriState;
+    superscript: YrsTriState;
+    subscript: YrsTriState;
+    /** Uniform ASCII font family, or `null` when absent/mixed. */
+    fontFamily: string | null;
+    /** Uniform font size in half-points (the OOXML `w:sz` unit). */
+    fontSize: number | null;
+    /** Uniform RGB hex or theme-color name, or `null` when absent/mixed. */
+    color: string | null;
+    /** Uniform highlight name (`yellow`, …) or unmapped hex, or `null` when absent/mixed. */
+    highlight: string | null;
+    /** Paragraph containing the range start. */
+    paraId: string;
+    styleId: string | null;
+    alignment: string | null;
+    /**
+     * Full authored pilcrow property bag. Known toolbar fields retain their
+     * names (`indentLeft`, `spaceBefore`, `lineSpacing`, `numPr`, and so on);
+     * paragraph style is stored as `pStyle`.
+     */
+    paragraphProperties: {
+        [key: string]: unknown;
+        pStyle?: string;
+        alignment?: string;
+        indentLeft?: number;
+        indentRight?: number;
+        indentFirstLine?: number;
+        hangingIndent?: boolean;
+        spaceBefore?: number;
+        spaceAfter?: number;
+        lineSpacing?: number;
+        lineSpacingRule?: string;
+        numPr?: {
+            numId?: number;
+            ilvl?: number;
+        };
+    };
+    hasSelection: boolean;
+    isMultiParagraph: boolean;
+    /** The range belongs to a table-cell story. */
+    inTable: boolean;
+    /** The range covers exactly one non-pilcrow embed unit. */
+    isSingleEmbed: boolean;
+    /** Embed discriminator (`image`, `drawing`, …), else `null`. */
+    embedKind: string | null;
+    /** Convenience flag for a single `image` embed selection. */
+    isImage: boolean;
+    inInsertion: boolean;
+    inDeletion: boolean;
+}
+/**
+ * One pending tracked change read from yrs.
+ *
+ * @public
+ */
+export interface YrsRevisionInfo {
+    revisionId: string;
+    author: string;
+    date: string;
+    kind: 'insertion' | 'deletion' | 'pPrIns' | 'pPrDel' | 'pPrChange' | 'rPrChange' | 'trIns' | 'trDel' | 'tableIns' | 'tableDel';
+    story: string;
+    /** Raw affected text, capped at 80 Unicode code points. */
+    preview: string;
+    range: YrsStoryRange;
+}
+/**
+ * Story-local locator for one native table embed.
+ *
+ * @public
+ */
+export interface YrsTableLoc {
+    story: string;
+    /** Zero-based table ordinal in the parent story. */
+    tableIndex: number;
+}
+/**
+ * One table cell addressed in the resolved rectangular grid.
+ *
+ * @public
+ */
+export interface YrsCellLoc extends YrsTableLoc {
+    row: number;
+    column: number;
+}
+/**
+ * Anchor-cell to head-cell rectangular selection, addressed by grid
+ * coordinates rather than document positions.
+ *
+ * @public
+ */
+export interface YrsTableRange {
+    anchor: YrsCellLoc;
+    head: YrsCellLoc;
+}
+/**
+ * Receipt shared by native table-structure and cell-format operations.
+ *
+ * @public
+ */
+export interface YrsTableReceipt {
+    table: YrsTableLoc;
+    rows: number;
+    columns: number;
+    createdStoryIds: string[];
+    deletedStoryIds: string[];
+    /** Existing stories whose content changed: the table's story, plus a merge's surviving cell. */
+    changedStoryIds: string[];
+    newParaIds: string[];
+    deletedTable: boolean;
+    revisionIds: string[];
+}
+/**
+ * Receipt of {@link YrsSession.insertTableFragment}: the table receipt plus
+ * the caret right after the inserted table embed.
+ *
+ * @public
+ */
+export interface YrsTableFragmentReceipt extends YrsTableReceipt {
+    after: YrsLoc;
+}
+/**
+ * OOXML-shaped cell border value passed through to `tcPr.borders`.
+ *
+ * @public
+ */
+export interface YrsCellBorder {
+    style: string;
+    size?: number;
+    color?: {
+        rgb: string;
+    };
+}
+/**
+ * Per-side border patch for {@link YrsSession.setCellBorders}. An omitted side
+ * is left alone, `style: 'none'` authors an explicit no-border, and `null`
+ * drops the authored side.
+ *
+ * @public
+ */
+export type YrsCellBorders = Partial<Record<'top' | 'bottom' | 'left' | 'right' | 'insideH' | 'insideV', YrsCellBorder | null>>;
+export interface YrsTablePropertiesPatch {
+    width?: number | null;
+    widthType?: string | null;
+    justification?: 'left' | 'center' | 'right' | null;
+    tableLayout?: 'fixed' | 'autofit' | null;
+}
+/** Undo grouping for tracked local transactions. */
+export type YrsUndoCaptureMode = 'auto' | 'manual';
+/** Outcome of a target-resolving helper edit. @internal */
+export type YrsTargetEditResult = {
+    ok: true;
+    version: string;
+    keptUnchanged?: Partial<Record<YrsKeptReason, number>>;
+} | DocxEditRefusal;
+/** Accepted-view texts around a selection; U+FFFC stands for each inline atom. @internal */
+export interface YrsSelectionText {
+    paraId: string;
+    selectedText: string;
+    paragraphText: string;
+    before: string;
+    after: string;
+}
+/**
+ * One live replica of the yrs editing model. Thin typed wrapper over the
+ * wasm `EditSession` — no editing logic on this side of the boundary.
+ */
+/** An embedded image's bytes, as its `media:{n}` source displays them. */
+export interface YrsMediaSource {
+    bytes: Uint8Array;
+    mimeType: string;
+}
+/** @internal */
+export interface YrsWorkerDocumentMirror {
+    version: string;
+    proposals: DocxProposalRegistryState;
+}
+/** What runs inherit under one package's styles. @internal */
+export interface YrsRunInheritance {
+    /**
+     * The attributes seeding merges into the marks of a run of `runStyle` in a
+     * paragraph of `paragraphStyle` before the run's direct formatting.
+     */
+    attributes(paragraphStyle: string | null, runStyle: string | null, tableRun?: TextFormatting): Record<string, unknown>;
+    paragraphFormatting(paragraphStyle: string | null, tableFormatting: ParagraphFormatting | undefined): ParagraphFormatting | undefined;
+    tableAttributes(table: Table): YrsTableInheritance;
+    dispose(): void;
+}
+export interface YrsTableInheritance {
+    attributes: Record<string, unknown>;
+    rows: Array<Array<{
+        attributes: Record<string, unknown>;
+        paragraphFormatting: ParagraphFormatting | null;
+        runFormatting: TextFormatting | null;
+    }>>;
+}
+export interface YrsSession extends CollaborationReplica {
+    /** The yrs client id this replica writes with. */
+    readonly clientId: number;
+    /** Register raw sfnt bytes in the session's measurement/display font store. */
+    registerFont(bytes: Uint8Array): number;
+    /** Replaces a registered font's outlines with a face whose other tables are unchanged; throws, leaving it as it was, for other bytes. */
+    updateFontOutlines(fontId: number, bytes: Uint8Array): void;
+    /**
+     * Register a measurement view of `base` carrying the vertical metrics Word
+     * measures `family` with, for a face the host substituted; `base` when the
+     * engine knows no metrics for the family.
+     */
+    registerSubstituteFont(base: number, family: string): number;
+    /** Clear the session's registered measurement/display fonts. */
+    clearFonts(): void;
+    /** Measure one paragraph through the session's resident text engine. */
+    measureParagraphJson(input: string): string;
+    /** Paginate and retain the measured input and Layout in the session. */
+    layoutDocumentJson(input: string): string;
+    /** Return the compact font requirements for resident region layout. */
+    layoutFontRequirementsJson(input: string): string;
+    /** Paginate and compose section/page regions in the resident engine. */
+    layoutDocumentWithRegionsJson(input: string): string;
+    /** Same pass, but the reply omits the measured arena (fetch it on demand
+     * through {@link YrsSession.retainedKernelInputsJson}). */
+    layoutDocumentWithRegionsRetainedJson(input: string): string;
+    layoutDocumentWithRegionsRetainedMeta(input: string): RetainedLayoutMeta;
+    retainedLayoutJson(): string;
+    /**
+     * {@link YrsSession.layoutDocumentWithRegionsRetainedJson} a step at a time:
+     * this lowers the body, and each {@link YrsSession.resumeRegionLayout}
+     * measures up to `blocks` more body blocks. `layoutJson` arrives with the
+     * step that completes the pass, equal to the one-call reply. A document
+     * change, a font registration or another layout in between abandons the
+     * pass, and resuming it then throws.
+     */
+    beginRegionLayout(input: string): YrsRegionLayoutProgress;
+    resumeRegionLayout(blocks: number): YrsRegionLayoutProgress;
+    /** Retained `{ measured, options }` for the main-thread display fallback. */
+    retainedKernelInputsJson(expectedLayoutRevision: number): string;
+    /**
+     * Record region layout `input` as the resident layout without running it
+     * here: a resident worker replica runs it, and snapshots carry it there.
+     * Returns the new layout revision. @internal
+     */
+    adoptResidentWorkerLayout?(input: string): number;
+    /** The current resident layout ran only in a worker replica. @internal */
+    residentLayoutInWorker?(): boolean;
+    /** Build display primitives against the session's resident font store. */
+    buildDisplayListJson(input: string): string;
+    /** Build a binary FrameDelta v1 against the last host-applied frame. */
+    buildDisplayListFrame(input: string, expectedFrameEpoch: number): Uint8Array;
+    /** The retained layout's header and footer payload. @internal */
+    retainedHeadersFootersJson(): string | undefined;
+    /**
+     * Limit full display builds to pages `start..end` plus the pages already
+     * built; the rest stay unbuilt placeholders carrying their geometry. @internal
+     */
+    setDisplayWindow(start: number, end: number): void;
+    /** Keep every previously built page while windowed builds are on. @internal */
+    setDisplayRetainBuiltPages(retain: boolean): void;
+    /** @internal */
+    setWindowedIncrementalBuilds(enabled: boolean): void;
+    /** Build the listed unbuilt pages into a FrameDelta v1. @internal */
+    buildDisplayPagesFrame(pages: readonly number[], expectedFrameEpoch: number): Uint8Array;
+    /** Release built pages; null means the request was superseded. @internal */
+    releaseDisplayPagesFrame(pages: number[], expectedFrameEpoch: number): Uint8Array | null;
+    /** Make the next frame a full one, for a host taking over from another engine; no-op once destroyed. */
+    resetFrameBase(): void;
+    /** Caret geometry from the current resident display frame. */
+    residentCaretSnapshot(): YrsResidentCaretSnapshot;
+    /** Apply a collapsed plain-text insertion and return its resident FrameDelta. */
+    applyInput(text: string, expectedFrameEpoch: number): Uint8Array;
+    /**
+     * Apply up to `count` (default 1) collapsed character deletions/paragraph
+     * merges, lay out once, and return the resident FrameDelta.
+     */
+    applyDelete(direction: 'backward' | 'forward', expectedFrameEpoch: number, count?: number): Uint8Array;
+    /** Characters the last resident deletion removed; fewer than asked at a document boundary. */
+    residentDeletedUnits(): number;
+    /** Instrumented apply used only by opt-in browser performance traces. */
+    applyInputProfiled(text: string, expectedFrameEpoch: number): {
+        frame: Uint8Array;
+        profile: YrsEngineApplyProfile;
+    };
+    /** Instrumented deletion used only by opt-in browser performance traces. */
+    applyDeleteProfiled(direction: 'backward' | 'forward', expectedFrameEpoch: number, count?: number): {
+        frame: Uint8Array;
+        profile: YrsEngineApplyProfile;
+    };
+    /** Snapshot the inputs needed to move resident layout ownership to a worker. */
+    residentWorkerSnapshot(options?: YrsResidentWorkerSyncOptions): YrsResidentWorkerSnapshot | null;
+    /**
+     * Cheap worker-sync probe: the resident layout revision when a worker
+     * snapshot would be available, without encoding document state or copying
+     * font bytes. Steady-state frame builds consult this instead of building a
+     * full snapshot.
+     */
+    residentWorkerProbe(): {
+        layoutRevision: number;
+    } | null;
+    /** Resident display-list hit/range queries; results are small JSON records. */
+    displayHitTestRegionsJson(pageIndex: number, x: number, y: number): string;
+    displayVerticalMoveJson(position: number, direction: 'up' | 'down', goalX: number): string;
+    displayRangeRectsJson(from: number, to: number): string;
+    /** @internal */
+    displayRangeRectsOnPagesJson?(from: number, to: number, firstPage: number, lastPage: number): string;
+    displayRangeRectsRegionJson(region: 'body' | 'header' | 'footer', rId: string, from: number, to: number): string;
+    /** Read a glyph outline from the session's resident font store. */
+    outlineGlyphJson(fontId: number, glyphId: number): string;
+    /** Hydrates from an encoded yrs v1 update (typically a peer's {@link encodeState} output). */
+    loadState(update: Uint8Array): void;
+    encodePeerMetadata(): Uint8Array;
+    bootstrapPeer(state: Uint8Array, metadata: Uint8Array, source: Uint8Array | undefined, host: YrsDocxHost, options?: YrsOpeningOptions): YrsDocxHost;
+    /** Parses a DOCX, seeds its stories, and returns thin host metadata; see {@link openDocx}. */
+    seedFromDocx(bytes: Uint8Array, options?: YrsOpeningOptions): YrsDocxHost;
+    /**
+     * Parses a DOCX and optionally seeds its stories. Seeding starts a new
+     * opening, so its session anchors never resolve in another opening, even
+     * one seeded alike by the same client; see {@link beginOpening}.
+     */
+    openDocx(bytes: Uint8Array, seedStories: boolean, options?: YrsOpeningOptions): YrsDocxHost;
+    /**
+     * Opens a DOCX for display only, from the body's first `blocks` blocks:
+     * enough to lay out its first pages with a prefix pass before the whole
+     * document is opened. With `paragraphBudget`, the cut also ends at the first
+     * whole block (from the 32nd on) where the paragraphs read, table cells
+     * included, reach the budget, only when the block limit would also cut the body.
+     * The session cannot save. `null`, opening nothing,
+     * for a document with a float placed from outside the text or a section
+     * with columns, which no cut of the body lays out like the whole: open it
+     * with {@link openDocx}. @internal
+     */
+    openDocxPreview(bytes: Uint8Array, blocks: number, paragraphBudget?: number): YrsDocxHost | null;
+    /** Opened by {@link openDocxPreview}: its document refuses every change. @internal */
+    isDisplayOnly(): boolean;
+    /**
+     * Marks this empty session as showing a preview another engine opened: it refuses every
+     * change, and {@link openDocxPreview} can still load the preview here. @internal
+     */
+    markDisplayOnly(): void;
+    /**
+     * Marks whether the document is a preview's, as a replica of one is: its
+     * layouts render NUMPAGES empty. @internal
+     */
+    setPartialDocument(partial: boolean): void;
+    /**
+     * The region layout of only as much of the body as fills `pages` pages;
+     * a reply marked `provisional` covers a prefix. @internal
+     */
+    layoutDocumentWithRegionsPrefixRetainedJson(input: string, pages: number): string;
+    /**
+     * Starts a new opening of the document: its generation, replicated to
+     * every replica, becomes part of every session anchor. Every seeding entry
+     * point calls it; call it after building a document another way.
+     */
+    beginOpening(generation?: string): void;
+    /** Unions seeded opaque sequence names into document state. @internal */
+    seedOpaqueSequences(names: readonly string[]): void;
+    /** Materializes the retained canonical package for compatibility APIs. */
+    materializeDocx(): Document | null;
+    /**
+     * The displayed bytes and media type of the package part a `media:{n}`
+     * image source names, or `null` for any other source or a destroyed session.
+     */
+    mediaSource(token: string): YrsMediaSource | null;
+    /** Changes on package opening and session destruction. */
+    mediaScope(): number;
+    /** The `data:` URL a token stands for, or `null` when unavailable or destroyed. */
+    mediaDataUrl(token: string): string | null;
+    /**
+     * Lays this replica's `data:` image sources out as the `media:{n}` tokens a
+     * snapshot's `mediaSources` names. @internal
+     */
+    loadMediaSources(json: string): void;
+    /**
+     * Adds to this replica's media sources every part of its own media table
+     * they lack, so it resolves the `data:` URLs seeding wrote whether or not
+     * it was seeded itself; `false` when nothing was added or it has no table.
+     * @internal
+     */
+    rebuildMediaSources(): boolean;
+    /** Loads the opened package's separator notes for this replica. @internal */
+    loadNoteSeparators(state: Uint8Array): void;
+    /**
+     * Seeds stories and returns paragraph IDs in document order. Seeding a
+     * document that has no opening yet starts one; see {@link beginOpening}.
+     */
+    loadStories(stories: readonly YrsStorySeed[]): Record<string, string[]>;
+    /** Full document state as one yrs v1 update (Yjs wire format). */
+    encodeState(): Uint8Array;
+    /** Current Yrs state vector in the Yjs v1 wire format. */
+    encodeStateVector(): Uint8Array;
+    /** Full state, or only the state missing from a peer vector. */
+    encodeStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array;
+    /**
+     * The state missing from a peer vector as ordered updates of at most `maxChunkBytes` each: one update when it fits,
+     * otherwise causally ordered structs and then the delete set alone. Only an update holding a single larger struct
+     * exceeds the limit.
+     */
+    encodeStateAsUpdateChunks(remoteStateVector: Uint8Array, maxChunkBytes: number): Uint8Array[];
+    /** Applies a remote/incremental yrs v1 update. */
+    applyUpdate(update: Uint8Array): CollaborationTextInsertion | null;
+    /** Applies one sync's ordered updates as a single remote change; refuses all if any is malformed or oversized. */
+    applyUpdateChunks(updates: readonly Uint8Array[]): void;
+    /** Apply a same-user worker update under the local undo origin. @internal */
+    applyLocalUpdate(update: Uint8Array): void;
+    /** Adopt another replica's host batch outside undo history. @internal */
+    applyHostUpdate(update: Uint8Array, stories?: readonly string[]): void;
+    /**
+     * Subscribes to every committed transaction's v1 update (local AND
+     * applied-remote). Returns an unsubscribe function.
+     */
+    onUpdate(listener: (update: Uint8Array, origin: CollaborationUpdateOrigin) => void): () => void;
+    /** Encode one location as a binary Yrs sticky position. */
+    encodeStickyPosition(loc: YrsLoc): YrsStickyPosition;
+    /** Resolve a binary Yrs sticky position against this replica. */
+    resolveStickyPosition(position: YrsStickyPosition): YrsLoc | null;
+    /** Store this peer's awareness selection as sticky positions. */
+    setSelection(anchor: YrsLoc, head?: YrsLoc): void;
+    /** Resolve this peer's current sticky selection, or null before initialization. */
+    selection(): YrsSelection | null;
+    /** Encode the current selection as binary Yrs sticky indices. */
+    encodeSelection(): CollaborationCursor | null;
+    /** Resolve a peer's binary Yrs sticky indices against this replica. */
+    resolveSelection(cursor: CollaborationCursor): YrsSelection | null;
+    /** Store this peer's rectangular table selection outside the document. */
+    setCellSelection(range: YrsTableRange): void;
+    /** Resolve the current sticky cell selection, or null before initialization. */
+    cellSelection(): YrsTableRange | null;
+    /** Begin local-origin undo capture once import/seeding has completed. */
+    beginUndoCapture(): void;
+    /** Separates subsequent local edits from the current undo step; safe before capture starts. */
+    addUndoBoundary(): void;
+    /** Changes grouping policy, closing the current group while retaining history. */
+    setUndoCaptureMode(mode: YrsUndoCaptureMode): void;
+    /** Current grouping policy; defaults to auto. */
+    undoCaptureMode(): YrsUndoCaptureMode;
+    /** Stories changed by the latest undo or redo, sorted. */
+    historyStories(): string[];
+    /** Undo/redo only local-origin direct operations (never remote/system transactions). */
+    undo(): boolean;
+    redo(): boolean;
+    canUndo(): boolean;
+    canRedo(): boolean;
+    /** Adds a story with one paragraph; the receipt carries its paraId. */
+    createStory(storyId: string, initialText: string, pStyle?: string, alignment?: string): YrsParagraphReceipt;
+    /** Removes a complete story (including an unreachable table-cell story). */
+    deleteStory(storyId: string): void;
+    /** Inserts a row above or below the cell that `at` resolves into. */
+    insertRow(at: YrsCellLoc, side: 'above' | 'below', suggesting?: YrsAuthor): YrsTableReceipt;
+    /** Inserts a rectangular structural table at a paragraph-keyed location. */
+    insertTable(at: YrsLoc, rows: number, columns: number, suggesting?: YrsAuthor): YrsTableReceipt;
+    /** Inserts a clipboard table fragment at a paragraph-keyed location. */
+    insertTableFragment(at: YrsLoc, table: DocxTableFragment, suggesting?: YrsAuthor): YrsTableFragmentReceipt;
+    /** Validates a clipboard table fragment without mutating; throws when invalid. */
+    validateTableFragment(table: DocxTableFragment): void;
+    /** Inserts a column left or right of the cell that `at` resolves into. */
+    insertColumn(at: YrsCellLoc, side: 'left' | 'right'): YrsTableReceipt;
+    /** Deletes every row covered by an explicit rectangular cell range. */
+    deleteRow(range: YrsTableRange, suggesting?: YrsAuthor): YrsTableReceipt;
+    /** Deletes every column covered by an explicit rectangular cell range. */
+    deleteColumn(range: YrsTableRange): YrsTableReceipt;
+    /** Removes a complete table plus its reachable cell stories. */
+    deleteTable(table: YrsTableLoc): YrsTableReceipt;
+    /** Merges a rectangular range into its top-left cell. */
+    mergeCells(range: YrsTableRange): YrsTableReceipt;
+    /** Splits the merged cell covering `at` into one cell per grid slot. */
+    splitCell(at: YrsCellLoc, rows?: number, columns?: number): YrsTableReceipt;
+    /** Sets or clears the selected cells' background color. */
+    setCellShading(range: YrsTableRange, color: string | null): YrsTableReceipt;
+    /**
+     * Merges an OOXML-shaped patch into selected cells' `tcPr`. JSON `null`
+     * clears a property; merge/split-owned span keys are rejected.
+     */
+    setCellTextFormat(range: YrsTableRange, patch: Readonly<Record<string, unknown>>): YrsTableReceipt;
+    /**
+     * Merges border sides into the selected cells. `insideH`/`insideV` resolve
+     * per cell to the physical edges interior to the selection.
+     */
+    setCellBorders(range: YrsTableRange, borders: YrsCellBorders): YrsTableReceipt;
+    /** Sets one authored grid-column width in twips. */
+    setColumnWidth(at: YrsCellLoc, widthTwips: number): YrsTableReceipt;
+    /** Sets the table-wide preferred width in twips. */
+    /** Sets the height and `w:hRule` of the row holding `at`. */
+    setRowHeight(at: YrsCellLoc, heightTwips: number, rule: 'atLeast' | 'exact'): YrsTableReceipt;
+    setTableWidth(table: YrsTableLoc, widthTwips: number): YrsTableReceipt;
+    setTableProperties(table: YrsTableLoc, patch: YrsTablePropertiesPatch): YrsTableReceipt;
+    /** Inserts paragraph-break-free text. Suggesting mode mints a revision. */
+    insertText(at: YrsLoc, text: string, suggesting?: YrsAuthor): YrsReplaceReceipt;
+    insertLineBreak(at: YrsLoc, suggesting?: YrsAuthor): YrsReplaceReceipt;
+    /**
+     * Deletes a range (plain) or marks it as a suggested deletion (suggesting).
+     * A range spanning paragraphs also merges them (pilcrow-as-character).
+     */
+    deleteRange(range: YrsStoryRange, suggesting?: YrsAuthor): YrsReplaceReceipt;
+    /** Replaces a range with text in one transaction (one shared revision when suggesting). */
+    replaceRange(range: YrsStoryRange, text: string, suggesting?: YrsAuthor): YrsReplaceReceipt;
+    /**
+     * Splits a paragraph by inserting one pilcrow. The FIRST half keeps the
+     * original paraId; the SECOND half is re-minted (`secondParaId`).
+     */
+    splitParagraph(at: YrsLoc, suggesting?: YrsAuthor): YrsSplitReceipt;
+    /** Merges `paraId` with the FOLLOWING paragraph. Errors on the final paragraph. */
+    mergeParagraphs(story: string, paraId: string, suggesting?: YrsAuthor): YrsRevisionReceipt;
+    /**
+     * Toggles one run mark across a range: removes it when every unit already
+     * carries it, otherwise adds it. Adding superscript clears subscript and
+     * vice versa.
+     */
+    toggleMark(range: YrsStoryRange, mark: YrsRunMark, suggesting?: YrsAuthor): YrsFormatReceipt;
+    /** Applies set-valued direct formatting; omitted fields are kept and `null` fields clear. */
+    formatRange(range: YrsStoryRange, delta: YrsInlineFormatDelta, suggesting?: YrsAuthor): YrsFormatReceipt;
+    /** Sets or clears the protected hyperlink attribute over a non-empty range. */
+    setHyperlink(range: YrsStoryRange, hyperlink: YrsHyperlinkAttrs | null, suggesting?: YrsAuthor): void;
+    /** Clears direct formatting while retaining hyperlinks and tracked-change stamps. */
+    clearFormatting(range: YrsStoryRange, suggesting?: YrsAuthor): YrsFormatReceipt;
+    /** Applies a paragraph style id to every paragraph intersecting the range. */
+    applyParagraphStyle(range: YrsStoryRange, styleId: string, suggesting?: YrsAuthor): void;
+    /** Applies tri-state paragraph properties to every paragraph intersecting the range. */
+    setParagraphAttrs(range: YrsStoryRange, attrs: YrsParagraphAttrs, suggesting?: YrsAuthor): void;
+    /** Inserts one inline image embed, optionally as a tracked insertion. */
+    insertImage(at: YrsLoc, image: Readonly<Record<string, unknown>>, suggesting?: YrsAuthor): YrsReplaceReceipt;
+    /**
+     * Sets the value of a content-control embed addressed by stable payload id. A string fills a
+     * text control's content as one version-checked step and throws when the fill is refused.
+     */
+    setContentControlValue(embedId: string, value: YrsContentControlValue): void;
+    /** {@link setContentControlValue} for the embed at a paragraph-keyed position. */
+    setContentControlValueAt(at: YrsLoc, value: YrsContentControlValue): void;
+    /**
+     * Removes an authored value from a content-control embed. It never erases a text control's
+     * text: fill it with `''` for that.
+     */
+    clearContentControlValue(embedId: string): void;
+    /** Commits image size/wrapping/position fields in one transaction. */
+    setImageGeometry(embedId: string, geometry: YrsImageGeometry): void;
+    /** Commits image geometry at a paragraph-keyed position; reaches images that share an id. */
+    setImageGeometryAt(at: YrsLoc, geometry: YrsImageGeometry): void;
+    /**
+     * Inserts a native page-break embed at a paragraph-keyed location, past the
+     * paragraph's leading blocks; inside a paragraph it splits the paragraph
+     * first. Returns where the break landed.
+     */
+    insertPageBreak(at: YrsLoc): YrsLoc;
+    /** Splits the paragraph at a paragraph-keyed location into a section boundary that starts the next section with `type`. */
+    insertSectionBreak(at: YrsLoc, type: 'nextPage' | 'continuous' | 'oddPage' | 'evenPage'): void;
+    insertSectionBreakAfter(paraId: string, kind: SectionStartKind): void;
+    setSectionProperties(section: string | number, properties: SectionPropertyPatch): void;
+    listSections(): SectionInfo[];
+    /** Inserts a typed watermark embed at a paragraph-keyed location. */
+    insertWatermark(at: YrsLoc, watermark: YrsWatermark): void;
+    /**
+     * Applies raw story operations in one transaction, then repairs any
+     * paragraph identity a pilcrow they insert or re-key duplicates and
+     * promotes an editor-only paragraph they author into.
+     */
+    applyRawOps(story: string, ops: readonly YrsRawOp[]): void;
+    /**
+     * Applies seed raw operations with deterministic item ordering. A
+     * `setComment` for a comment already seeded adds its ranges to it.
+     */
+    applySeedRawOps(story: string, ops: readonly YrsRawOp[]): void;
+    /** Sets one paragraph property (any JSON value). `paraId` is reserved. */
+    setParagraphAttr(paraId: string, key: string, value: unknown): void;
+    /** Adds a sticky-anchored comment over one or more ranges. */
+    addComment(ranges: readonly YrsStoryRange[], author: string, date: string, body: unknown): YrsCommentReceipt;
+    /** Updates comment metadata with local undo capture. */
+    updateComment(id: string, patch: {
+        done?: boolean;
+        parentId?: string | null;
+        body?: unknown;
+        author?: string;
+        date?: string;
+    }): void;
+    /** Reanchors an existing comment with non-empty ranges; preserves metadata and joins local undo capture. */
+    setCommentRanges(commentId: string, ranges: readonly YrsStoryRange[]): void;
+    /**
+     * Accepts tracked changes: pending insertions become plain content,
+     * pending deletions are carried out; a `pPrIns` paragraph mark clears (the
+     * split stays), a `pPrDel` mark joins with the following paragraph (whose
+     * pPr survives — Word's surviving-`w:p` rule). Resolving never stamps a new
+     * revision. Throws on an unknown revision id.
+     */
+    acceptChange(target: YrsChangeTarget): YrsResolveReceipt;
+    /**
+     * Rejects tracked changes — the inverse of {@link acceptChange}: pending
+     * insertions roll back, pending deletions restore their text; a `pPrIns`
+     * mark joins back with the following paragraph, a `pPrDel` mark clears.
+     */
+    rejectChange(target: YrsChangeTarget): YrsResolveReceipt;
+    /** Aggregate toolbar/a11y state from yrs over one paragraph-addressed range. */
+    selectionContext(range: YrsStoryRange): YrsSelectionContext;
+    /** Enumerate tracked changes across every story in deterministic order. */
+    listRevisions(): YrsRevisionInfo[];
+    /** Current offsets of a comment's sticky anchors. Throws when an anchor no longer resolves. */
+    resolveComment(commentId: string): YrsResolvedCommentAnchor[];
+    /** Every comment the session holds, sorted by id. @internal */
+    listComments(): YrsCommentInfo[];
+    /** Story ids in the document, sorted. */
+    storyIds(): string[];
+    /** Whether the document has a story with this id, without listing them all. */
+    hasStory(story: string): boolean;
+    /** Story length in UTF-16 units (every embed, pilcrows included, counts 1). */
+    storyLength(story: string): number;
+    /** Returns the story's canonical-stream checksum. */
+    storyChecksum(story: string): bigint;
+    /** Lowers a story to layout blocks and rejects unsupported embeds. */
+    yrsBlocksForStory(story: string, env?: YrsRenderEnv): unknown[];
+    /** Paragraph snapshots in document order. */
+    paragraphs(story: string): YrsParagraph[];
+    /** Literal search in document order. */
+    searchText(query: string, options?: YrsTextSearchOptions): YrsTextMatch[];
+    /** Paragraph ids and inline-unit lengths, resolved in one Rust story traversal. */
+    paragraphSpans(story: string): YrsParagraphLength[];
+    /** The raw formatted-segment view (the render bridge's input). */
+    storySegments(story: string): YrsStorySegment[];
+    /**
+     * The current story revision and the sorted ids of the stories created,
+     * edited, or deleted after revision `since` (0 lists every story).
+     */
+    storiesChangedSince(since: number): {
+        revision: number;
+        stories: string[];
+    };
+    /**
+     * One digest per unit of {@link YrsSession.storySegments}, split after each
+     * pilcrow. Equal digests mean equal segments.
+     */
+    storySegmentUnitDigests(story: string): string[];
+    /** The segments of the listed units, each as {@link YrsSession.storySegments} gives them. */
+    storySegmentUnits(story: string, units: readonly number[]): YrsStorySegment[][];
+    /**
+     * The payload of the story's `tableIndex`-th table embed, as
+     * {@link YrsSession.storySegments} gives it, or null when there is no such
+     * table. Reads the one table rather than the whole story.
+     */
+    tablePayload(story: string, tableIndex: number): Record<string, unknown> | null;
+    /** A paragraph's story span (start unit, pilcrow index). */
+    locateParagraph(story: string, paraId: string): YrsParagraphSpan;
+    /** How many paragraphs of `story` carry `paraId`: 0, 1, or 2 for two or more. */
+    paragraphIdCount(story: string, paraId: string): number;
+    /**
+     * Session, persisted and source anchors of every paragraph, including the
+     * source package's paragraphs outside the stories, and the Word paragraph ID
+     * each saves with. Reads only.
+     */
+    paragraphIdentities(): DocxParagraphIdentitySnapshot;
+    /**
+     * Gives every paragraph that saves without a Word paragraph ID a fresh one,
+     * editor-only paragraphs excepted, and repairs duplicates, so persisted
+     * anchors survive save and reopen. Source IDs and saved claims keep their
+     * IDs over unsaved claims and copies. A replicated change outside undo
+     * history that later saves keep; a refusal changes nothing.
+     */
+    persistParagraphIds(): DocxParagraphIdentityReceipt;
+    /** Resolves an anchor to the paragraph that currently holds it. Reads only. */
+    resolveParagraphAnchor(anchor: DocxParagraphAnchor): DocxParagraphAnchorResult;
+    /** The Word paragraph ID each paragraph of a story saves with, in pilcrow order. @internal */
+    storyParagraphIds(story: string): Array<string | null>;
+    /** The paragraph IDs a save of the session applies. @internal */
+    paragraphSavePlan(): DocxParagraphSavePlan;
+    /**
+     * Publishes the `[owner, paraId]` pairs a save captured and returns those
+     * whose binding changed since. @internal
+     */
+    recordSavedParagraphIds(saved: ReadonlyArray<readonly [string, string]>): Array<[string, string]>;
+    /**
+     * The Word paragraph IDs a DOCX package holds, by part URI, in document
+     * order and upper case. Reads only. @internal
+     */
+    writtenParagraphIds(bytes: Uint8Array): Record<string, string[]>;
+    /** Resolves what runs inherit under a package's `styles`. Reads only. @internal */
+    runInheritance(styles: Document['package']['styles']): YrsRunInheritance;
+    /**
+     * The session-scoped version token. It changes on every committed change, local or remote,
+     * and when the document is replaced; compare tokens only within this session.
+     */
+    version(): string;
+    /** Paragraph texts in one view, with the version they were read at. */
+    readParagraphs(request: DocxReadParagraphsRequest): DocxReadParagraphsResult;
+    /**
+     * Paragraph texts of the selected stories in one read. A story that cannot be read reports
+     * why, and the read stops at its limits with `truncated`.
+     */
+    readStories(request: DocxReadStoriesRequest): DocxReadStoriesResult;
+    /** Every story with its kind, container and, for a header or footer, its part and uses. */
+    listStories(): DocxListStoriesResult;
+    /** Exact, case-sensitive, paragraph-local search; overlapping matches count separately. */
+    findText(request: DocxFindTextRequest): DocxFindTextResult;
+    /** Resolves and checks an edit batch without changing anything or reserving ids. */
+    validateEdits(request: DocxEditRequest): DocxValidationResult;
+    /**
+     * Applies every step or none, resolving all targets against `expectVersion`. Policy
+     * failures are returned; malformed requests throw.
+     */
+    applyEdits(request: DocxEditRequest): DocxEditResult;
+    /** Sets style or document-default proofing language slots. */
+    setStyleLanguage(styleId: string | null, slots: YrsLanguagePatch): boolean;
+    styleLanguages(): Record<string, YrsLanguagePatch>;
+    patchStyleLanguagesXml(source: string): string;
+    /** Resolves a text target and formats it in one call. @internal */
+    formatTextTarget(target: DocxTextTarget, delta: YrsInlineFormatDelta): YrsTargetEditResult;
+    /** Resolves a text target and anchors side-map comment `id` over it in one call. @internal */
+    commentTextTarget(target: DocxTextTarget, comment: {
+        id: string;
+        author: string;
+        date: string;
+        body: unknown;
+    }): YrsTargetEditResult;
+    /** Accepted-view texts around a paragraph-keyed selection. @internal */
+    selectionText(range: YrsStoryRange): YrsSelectionText;
+    /**
+     * Proposes a round of tracked changes: every new proposal resolves against `expectVersion` and
+     * the round applies as one batch outside undo history, or nothing changes. A retried id with
+     * the same edit is a no-op; the same id with another edit refuses. Opening another document
+     * forgets every proposal.
+     * On an editor peer this registry is peer-local, invisible to worker rounds and ref API results.
+     */
+    proposeChanges(request: DocxProposalRequest): DocxProposalResult;
+    /**
+     * Sets how proposals render. Decisions change neither the document, its version nor undo
+     * history; each call that changes one increments `previewVersion`.
+     * On an editor peer this registry is peer-local, invisible to worker rounds and ref API results.
+     */
+    setProposalStates(request: DocxProposalStateRequest): DocxProposalResult;
+    /**
+     * Withdraws proposals, settling each as its decision previews it: accepted ones apply for good,
+     * rejected and undecided ones are removed. The settlement is one change against `expectVersion`
+     * outside undo history, so a later round resolves against the text the preview showed.
+     * On an editor peer this registry is peer-local, invisible to worker rounds and ref API results.
+     */
+    withdrawProposals(request: DocxProposalWithdrawRequest): DocxProposalResult;
+    /** The proposals in the order they were made. */
+    getProposals(): DocxProposalSnapshot;
+    /** @internal */
+    mirrorWorkerDocument(mirror: YrsWorkerDocumentMirror | null): void;
+    createWorkerProposalRegistry(state: DocxProposalRegistryState): import('./proposals').DocxProposalRegistry;
+    /** @internal */
+    workerDocumentMirrored(): boolean;
+    /** Listens for new proposals, decisions and a forgotten registry. Returns the unsubscribe. */
+    onProposalChange(listener: (snapshot: DocxProposalSnapshot) => void): () => void;
+    /**
+     * Exports the committed document as read-only structured content with the version it was read
+     * at; anchors resolve against that version. Nothing is committed, flushed or published.
+     * Unusable options are refused; malformed ones throw.
+     */
+    exportStructured(options: DocxExportOptions): DocxExportResult<DocxStructuredContent>;
+    /** {@link exportStructured} rendered as Markdown from the same read. */
+    exportMarkdown(options: DocxExportOptions): DocxExportResult<DocxMarkdownContent>;
+    /**
+     * {@link exportStructured} with the page map of the region layout this session retains. The
+     * layout must have lowered the current version from this session's stories with section,
+     * settings and note metadata that describe it, and measured every font the document uses
+     * with the fonts registered now; this call lays nothing out, flushes nothing and loads no
+     * font, and refuses a stale or incomplete layout.
+     */
+    exportStructuredWithPages(options: DocxPageExportOptions): DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>;
+    /**
+     * {@link exportStructuredWithPages} for an editor: `currentRequest` is the region layout
+     * request it would lay the document out with now, and the retained layout must have used the
+     * same fonts, measurement defaults, render environment and pagination options. @internal
+     */
+    exportStructuredWithPagesFor(options: DocxPageExportOptions, currentRequest: string): DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>;
+    /**
+     * Lays this private session out with `fonts` alone, in a measurement font store of its own,
+     * and exports it with snapshot anchors and a snapshot map. `fonts` holds the font files back
+     * to back and `fontLengths` their lengths; `request`'s font chains name them by index. Throws
+     * for a font the engine rejects. @internal
+     */
+    exportSnapshotWithPrivateFonts(fonts: Uint8Array, fontLengths: Uint32Array, request: string, options: DocxPageExportOptions): {
+        ok: true;
+        content: DocxPagedStructuredContent<DocxSnapshotLayoutMap>;
+    } | {
+        ok: false;
+        failure: DocxExportFailure;
+    };
+    /**
+     * The heading paragraphs of `story` in document order, classified as the structured export
+     * classifies them. Throws for an unknown story.
+     */
+    headings(story: string): DocxParagraphHeading[];
+    /**
+     * The content controls of the committed document with the version they were read at; control
+     * ids and anchors resolve against that version. Nothing is committed, flushed or published.
+     * Unusable options are refused; malformed ones throw.
+     */
+    listContentControls(options?: DocxContentControlsOptions): DocxContentControlsResult;
+    /** The controls {@link listContentControls} lists that match `query` exactly; none or several. */
+    findContentControls(query: DocxContentControlQuery, options?: DocxContentControlsOptions): DocxContentControlsResult;
+    /**
+     * Draws a page as PNG bytes with the editor's layout and painter, on a replica
+     * of this session's state. Rejects with `PngExportError` rather than paint a
+     * substitute font; where no canvas exists names `@betteroffice/docx-native`.
+     */
+    renderPng(target: DocxPngTarget, options?: DocxPngOptions): Promise<Uint8Array>;
+    /** The native engine's rasterizer; the wasm engine has none. @internal */
+    renderPngTarget?(displayListJson: string, targetJson: string, optionsJson: string): Uint8Array;
+    /** Drops the observer and frees the wasm-side replica. Idempotent. */
+    destroy(): void;
+}
+/** Options for {@link createYrsSession}. */
+export interface CreateYrsSessionOptions {
+    /**
+     * The yrs client id (non-negative safe integer). Omit to allocate a random
+     * 32-bit id, yjs-style.
+     */
+    clientId?: number;
+}
+/**
+ * Creates a yrs editing replica. The first call dynamically imports the edit
+ * loader and preloads the external docx-edit wasm asset — callers must load
+ * it lazily so non-editor consumers avoid the wasm startup cost.
+ */
+export declare function createYrsSession(options?: CreateYrsSessionOptions): Promise<YrsSession>;
+export type { DocxEngineWorkerSourceOpened } from './residentSourceWorkerClient';
+export { decodeFontFace } from '../wasm/fontDecoder';

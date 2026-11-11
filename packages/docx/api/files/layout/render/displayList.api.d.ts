@@ -1,0 +1,781 @@
+// @betteroffice/docx declaration layout/render/displayList.d.ts
+// Regenerate: bun scripts/api-surface.ts --write docx
+/** Renderer-agnostic display contract with page-local pixel coordinates. */
+import type { DrawingScene, ShapeTextBodyProperties } from '../drawing';
+export interface DisplayList {
+    /** Contract version. Undefined reads as legacy version 0. */
+    contractVersion?: number;
+    pages: DisplayPage[];
+}
+/**
+ * Modern (`w14:*`) run text-effect payload carried on text/glyph primitives.
+ * Same shape as the document model's `TextModernEffects` — px distances,
+ * degree directions, 0..1 opacities, resolved `#rrggbb` colors.
+ */
+export type DisplayTextModernEffects = import('../../types/formatting').TextModernEffects;
+export interface DisplayPage {
+    pageIndex: number;
+    width: number;
+    height: number;
+    /** Authored body content box (page-local px), derived from page margins. */
+    contentBounds?: DisplayBounds;
+    /** Authored body column boxes in reading order (page-local px). */
+    columnBounds?: DisplayBounds[];
+    /** Stable section identity for this page. Undefined = legacy/global section. */
+    sectionId?: string;
+    /** Zero-based section ordinal. */
+    sectionIndex?: number;
+    /** Zero-based page ordinal within the section. */
+    sectionPageIndex?: number;
+    /** Effective page number within the section, after any restart. */
+    sectionPageNumber?: number;
+    /** Formatted PAGE label (for example, "vii"). */
+    pageLabel?: string;
+    primitives: DisplayPrimitive[];
+    /** Leading primitives painted beneath the header and footer. */
+    watermarkPrimitiveCount?: number;
+    /** Resolved page background. Undefined = transparent/host white. */
+    background?: string;
+    pageBorders?: PageBorderPrimitive[];
+    header?: HfRegion;
+    footer?: HfRegion;
+    /** Footnote/endnote regions in page coordinates. Undefined = none. */
+    noteAreas?: NoteRegion[];
+    /** Page-local rects of host layout reservations; nothing paints them. Undefined = none. */
+    reservations?: DisplayReservation[];
+    /** Table cell edges without a visible border, for a view-only overlay; nothing paints them. Undefined = none. */
+    tableGridlines?: DisplayGridline[];
+    /** Geometry only: the page's content is built when the host asks for it. */
+    unbuilt?: boolean;
+    /** For an unbuilt page, the lowest and highest body position its layout places. */
+    positionSpan?: [number, number];
+    /** For an unbuilt page, the relationship ids of the header and footer parts its build paints. */
+    hfParts?: {
+        header?: string;
+        footer?: string;
+    };
+}
+/** One table cell edge segment in page-local px. */
+export interface DisplayGridline {
+    x1: number;
+    y1: number;
+    x2: number;
+    y2: number;
+}
+/** Where a host's layout reservation landed, in page-local px. */
+export interface DisplayReservation extends DisplayBounds {
+    owner: string;
+    id: string;
+}
+/** A page-local rectangle emitted as display-list metadata. */
+export interface DisplayBounds {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+}
+/** Page note region; primitives retain normal doc/a11y metadata. */
+export interface NoteRegion {
+    kind?: 'footnote' | 'endnote';
+    sectionId?: string;
+    y?: number;
+    height?: number;
+    columns?: number;
+    separatorPrimitives?: DisplayPrimitive[];
+    primitives?: DisplayPrimitive[];
+    noteIds?: number[];
+    /**
+     * Per-note backlink metadata (W17): the body-doc range of each note's
+     * reference mark plus its formatted label, so the a11y mirror can wire
+     * note ↔ reference associations (doc-noteref / doc-backlink). Parallel to
+     * `noteIds`; undefined = legacy region without backlink data.
+     */
+    notes?: NoteRegionNote[];
+    /** Notes this region continues from an earlier page, which shows their opening. */
+    continuedNoteIds?: number[];
+    /** Left edge of the column the region paints in; undefined = the page's text area. */
+    x?: number;
+    /** Width of that column; undefined = the page's text area. */
+    width?: number;
+}
+/** Backlink metadata for one note in a NoteRegion. */
+export interface NoteRegionNote {
+    id?: number;
+    /** Body-doc range of the reference mark anchoring this note. */
+    anchorDocStart?: number;
+    anchorDocEnd?: number;
+    /** Formatted reference label (display number / custom mark). File-derived. */
+    label?: string;
+}
+export interface HfRegion {
+    rId: string;
+    kind: 'header' | 'footer';
+    y: number;
+    height: number;
+    primitives: DisplayPrimitive[];
+}
+export type DisplayPrimitive = TextRunPrimitive | GlyphRunPrimitive | RectPrimitive | LinePrimitive | ImagePrimitive | ShapePrimitive | DecorationPrimitive;
+export interface TableCellRef {
+    row: number;
+    col: number;
+    rowSpan: number;
+    colSpan: number;
+    continuation?: boolean;
+    /** Stable semantic cell identity. */
+    cellId?: string;
+    /** Cell participates as a row/column header. */
+    isHeader?: boolean;
+    /** Cell heads its row: the table has header rows and first-column
+     *  formatting, and the cell starts in grid column 0. */
+    isRowHeader?: boolean;
+    /** Header cell was repeated on a continuation page. */
+    repeatedHeader?: boolean;
+    /** Word `w:noWrap` cell behavior. */
+    noWrap?: boolean;
+    /** IDs of header cells that label this data cell. */
+    headerIds?: string[];
+    /** Collapsed-border ownership retained for exact fragment replay. */
+    ownsTopBorder?: boolean;
+    ownsRightBorder?: boolean;
+    ownsBottomBorder?: boolean;
+    ownsLeftBorder?: boolean;
+}
+/** Table-fragment semantics shared by every primitive emitted for that fragment. */
+export interface DisplayTableMetadata {
+    tableId?: string;
+    rowStart?: number;
+    rowEnd?: number;
+    rowCount?: number;
+    columnCount?: number;
+    headerRowCount?: number;
+    caption?: string;
+    description?: string;
+    parentTableId?: string;
+}
+/** Resolved review presentation for the primitive's `commentIds`. */
+export interface DisplayCommentMetadata {
+    status?: 'active' | 'resolved';
+    authorId?: string;
+    paletteIndex?: number;
+    color?: string;
+    selected?: boolean;
+    /** Reviewer display name (file-derived, attacker-controlled). */
+    authorName?: string;
+    /** Comment date string, passed through verbatim. */
+    date?: string;
+    /** Plain-text comment body excerpt (builder-capped, file-derived). */
+    text?: string;
+    /** Number of replies in the thread. */
+    replyCount?: number;
+    /** Reply summaries in thread order (builder-capped). */
+    replies?: DisplayCommentReply[];
+}
+/** One reply summary inside DisplayCommentMetadata. */
+export interface DisplayCommentReply {
+    authorName?: string;
+    date?: string;
+    text?: string;
+}
+/**
+ * Inert field identity for a11y announcement. `instruction` is the raw Word
+ * field instruction, carried for announcement/inspection ONLY — it is never
+ * parsed into behavior or executed by any consumer (see the repo security guidelines security).
+ */
+export interface DisplayFieldMetadata {
+    /** Painter-resolved category (PAGE, NUMPAGES, DATE, TIME, OTHER). */
+    category?: string;
+    /** Raw Word field type token (e.g. TOC, PAGEREF, REF). */
+    type?: string;
+    /** Raw field instruction text (announce-only, builder-capped). */
+    instruction?: string;
+}
+/** Footnote/endnote reference identity on the body reference-mark primitive. */
+export interface DisplayNoteRef {
+    kind?: 'footnote' | 'endnote';
+    id?: number;
+}
+/** Scoped clip/group membership emitted by the Rust compiler. */
+export interface DisplayClipGroupMetadata {
+    id?: string;
+    clip?: {
+        x?: number;
+        y?: number;
+        w?: number;
+        h?: number;
+    };
+    opacity?: number;
+}
+/** Horizontal paint slot for text laid out with guessed metrics. */
+export interface DisplayPaintClip {
+    x: number;
+    w: number;
+}
+export interface StructuralRevision {
+    scope: 'pmark' | 'table' | 'row' | 'cell';
+    author: string;
+    date?: string;
+    revisionId: string;
+    kind: 'ins' | 'del' | 'merge';
+    rowIndex?: number;
+    colIndex?: number;
+}
+export interface SdtAttrs {
+    groupId: string;
+    sdtType: string;
+    depth?: number;
+    tag?: string;
+    alias?: string;
+    lock?: string;
+    checked?: boolean;
+    bound?: boolean;
+    repeatingItem?: boolean;
+}
+export interface InlineSdtWidgetAttrs {
+    kind: 'checkbox';
+    /** Rich control kind. Undefined = legacy checkbox. */
+    controlKind?: 'checkbox' | 'dropDownList' | 'comboBox' | 'date' | 'picture' | 'repeatingSection';
+    groupId: string;
+    pos: number;
+    tag?: string;
+    alias?: string;
+    checked?: boolean;
+    controlId?: number;
+    value?: string;
+    selectedIndex?: number;
+    listItems?: Array<{
+        displayText?: string;
+        value?: string;
+    }>;
+    dateFormat?: string;
+    dateLanguage?: string;
+    locked?: boolean;
+}
+export interface ChartA11yAttrs {
+    label: string;
+    /** The placed chart box every primitive of the chart paints inside. */
+    frame?: {
+        x?: number;
+        y?: number;
+        w?: number;
+        h?: number;
+    };
+    /** The plotted values as text, on the chart's first primitive only: one
+     *  row per category, one column per series; empty when the chart caches
+     *  no points. */
+    data?: ChartData;
+}
+export interface ChartData {
+    categories: string[];
+    series: {
+        name?: string;
+        values: (string | null)[];
+    }[];
+}
+export interface DocAttrs {
+    docStart?: number;
+    docEnd?: number;
+    blockId?: number;
+    blockKey?: string;
+    fragmentDocStart?: number;
+    fragmentDocEnd?: number;
+    paraId?: string;
+    fromLine?: number;
+    toLine?: number;
+    /** Resolved line index within the owning paragraph. */
+    lineIndex?: number;
+    /**
+     * Table cell the primitive paints inside, when any. The a11y mirror builds
+     * real ARIA table semantics (role table/row/cell, aria-row/colindex) from
+     * this — without it a table block reads as a flat run of text.
+     */
+    cell?: TableCellRef;
+    /** Sanitized hyperlink target when this primitive paints linked content. */
+    href?: string;
+    /** Optional hyperlink tooltip/title for popup UI. */
+    tooltip?: string;
+    /** ScreenTip exposed as DOM `title`; undefined falls back to `tooltip`. */
+    linkTitle?: string;
+    /** Safe hyperlink target frame. */
+    linkTarget?: string;
+    /** Link history bit. Undefined = host-unmanaged. */
+    linkHistory?: boolean;
+    /** Location within the target document. */
+    linkDocLocation?: string;
+    commentIds?: string[];
+    /**
+     * Inert field identity when this primitive paints a field result. The a11y
+     * mirror announces it (data-field-* + aria-description); nothing executes it.
+     */
+    field?: DisplayFieldMetadata;
+    /**
+     * Footnote/endnote reference identity when this primitive is the body
+     * reference mark — the mirror renders it as a doc-noteref link to the
+     * note's mirror element (W17 backlinks).
+     */
+    noteRef?: DisplayNoteRef;
+    revision?: {
+        author: string;
+        date: string;
+        revisionId: string;
+        kind: 'ins' | 'del' | 'format';
+    };
+    /** Synthetic numbering glyph for the first line of a list paragraph. */
+    listMarker?: boolean;
+    /** The marker is a number or label a reader needs, not a bullet. */
+    listMarkerNumbered?: boolean;
+    /** The marker is a visible bullet, whatever its stored character. */
+    listMarkerBullet?: boolean;
+    /** Pending suggestion paint for a synthetic numbering glyph. */
+    listMarkerRevision?: 'ins' | 'del';
+    structuralRevision?: StructuralRevision;
+    /** Innermost block-level content-control identity for this primitive. */
+    sdt?: SdtAttrs;
+    /** Full outer-to-inner content-control ancestry. */
+    sdtPath?: SdtAttrs[];
+    /** Inline content-control widget metadata when this text run is its glyph. */
+    inlineSdtWidget?: InlineSdtWidgetAttrs;
+    /** Accessibility summary for primitives that compose one chart block. */
+    chart?: ChartA11yAttrs;
+    /** Logical/source order, independent of visual bidi paint order. */
+    logicalOrder?: number;
+    /** Resolved bidi embedding level. */
+    bidiLevel?: number;
+    /** BCP-47 language for a11y/font fallback. */
+    lang?: string;
+    /** Decorative content is omitted from the accessibility mirror. */
+    decorative?: boolean;
+    /** Authored accessibility name. */
+    ariaLabel?: string;
+    /** Authored accessibility description. */
+    ariaDescription?: string;
+    /** Hidden authored object. Undefined = visible. */
+    hiddenObject?: boolean;
+    /** Stable logical scene/group identity. */
+    groupId?: string;
+    /** Review presentation for comment-associated primitives. */
+    comment?: DisplayCommentMetadata;
+    /** Scoped clip/group membership. Undefined = ungrouped. */
+    clipGroup?: DisplayClipGroupMetadata;
+    /** Enclosing table-fragment identity and accessibility semantics. */
+    table?: DisplayTableMetadata;
+    /** Inline native-shape atom; true only for paragraph-inline shapes. */
+    inlineShapeAtom?: boolean;
+}
+export interface TextRunPrimitive extends DocAttrs {
+    kind: 'text';
+    text: string;
+    /** Canvas-only glyph stand-in text. */
+    paintText?: string;
+    x: number;
+    baselineY: number;
+    width: number;
+    paintClip?: DisplayPaintClip;
+    font: string;
+    scripts?: string[];
+    color: string;
+    letterSpacing?: number;
+    wordSpacing?: number;
+    rtl?: boolean;
+    /** 0..1 alpha applied only to this run. Absent = opaque. */
+    opacity?: number;
+    /** Degrees clockwise around the primitive's geometry center. Absent = 0. */
+    rotationDeg?: number;
+    /** Horizontal text scale as a percentage (100 = normal). Absent = 100. */
+    horizontalScale?: number;
+    /** Canvas-only width ratio for substitute font bytes. Absent = 1. */
+    substituteScale?: number;
+    /** Browser text clusters at offsets from the run origin. */
+    canvasClusters?: Array<{
+        text: string;
+        offset: number;
+        /** @internal Source byte range of the cluster, set when the painted text differs from the source. */
+        sourceRange?: {
+            start: number;
+            end: number;
+        };
+    }>;
+    /** Render glyphs uppercase without changing the accessible source text. */
+    allCaps?: boolean;
+    /** Render lowercase glyphs as small uppercase. */
+    smallCaps?: boolean;
+    /** Hidden run shown in editing view as dimmed/dotted, matching the DOM painter. */
+    hidden?: boolean;
+    /** CSS-like shadow effect from run formatting. */
+    textShadow?: 'shadow' | 'emboss' | 'imprint';
+    /** Outlined / hollow text. */
+    textOutline?: boolean;
+    /** CJK emphasis mark. */
+    emphasisMark?: 'dot' | 'comma' | 'circle' | 'underDot';
+    /** Legacy text-effect class hook for the a11y mirror. */
+    textEffect?: 'blinkBackground' | 'lights' | 'antsBlack' | 'antsRed' | 'shimmer' | 'sparkle';
+    /** Modern w14 text effects (glow/shadow/reflection/textFill/textOutline). */
+    modernEffects?: DisplayTextModernEffects;
+    /** Shaped tab/TOC leader metadata. Undefined = ordinary text. */
+    leaderGlyphs?: Omit<LeaderGlyphPrimitive, 'kind'>;
+}
+export interface PositionedGlyph {
+    id: number;
+    x: number;
+    y: number;
+    cluster: number;
+    advance?: number;
+    /** Logical cluster order before bidi reordering. */
+    logicalOrder?: number;
+    /** Bidi embedding level for this cluster. */
+    bidiLevel?: number;
+}
+/** Shaped glyph run with source text for accessibility. */
+export interface GlyphRunPrimitive extends DocAttrs {
+    kind: 'glyphRun';
+    fontId: number;
+    size: number;
+    color: string;
+    text: string;
+    /** Canvas-only glyph stand-in text for the fillText fallback. */
+    paintText?: string;
+    glyphs: PositionedGlyph[];
+    echo?: {
+        x: number;
+        right: number;
+        kern?: boolean;
+        primaryFont?: boolean;
+        kerning?: number;
+        letterSpacing?: number;
+        position?: number;
+        scale?: number;
+        canEmpty?: boolean;
+        /** Unstretched width of a line that justification stretches to `right`. */
+        stretch?: number;
+        /** Width a centered line centers in from `x`. */
+        centerWidth?: number;
+    };
+    paintClip?: DisplayPaintClip;
+    fallbackFont?: string;
+    wordSpacing?: number;
+    rtl?: boolean;
+    /** 0..1 alpha applied only to this run. Absent = opaque. */
+    opacity?: number;
+    /** Degrees clockwise around the primitive's geometry center. Absent = 0. */
+    rotationDeg?: number;
+    /** Horizontal text scale as a percentage (100 = normal). Absent = 100. */
+    horizontalScale?: number;
+    /** Render glyphs uppercase without changing the accessible source text. */
+    allCaps?: boolean;
+    /** Render lowercase glyphs as small uppercase. */
+    smallCaps?: boolean;
+    /** Hidden run shown in editing view as dimmed/dotted, matching the DOM painter. */
+    hidden?: boolean;
+    /** CSS-like shadow effect from run formatting. */
+    textShadow?: 'shadow' | 'emboss' | 'imprint';
+    /** Outlined / hollow text. */
+    textOutline?: boolean;
+    /** CJK emphasis mark. */
+    emphasisMark?: 'dot' | 'comma' | 'circle' | 'underDot';
+    /** Legacy text-effect class hook for the a11y mirror. */
+    textEffect?: 'blinkBackground' | 'lights' | 'antsBlack' | 'antsRed' | 'shimmer' | 'sparkle';
+    /** Modern w14 text effects (glow/shadow/reflection/textFill/textOutline). */
+    modernEffects?: DisplayTextModernEffects;
+    /** Shaped tab/TOC leader metadata. Undefined = ordinary glyph run. */
+    leaderGlyphs?: Omit<LeaderGlyphPrimitive, 'kind'>;
+}
+export interface RectPrimitive extends DocAttrs {
+    kind: 'rect';
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    fill: string;
+    /** Alpha multiplier. Undefined = 1. */
+    opacity?: number;
+}
+/** Word/CSS line recipe retained instead of flattening to a solid stroke. */
+export type DisplayBorderStyle = 'solid' | 'double' | 'dotted' | 'dashed' | 'dashDot' | 'dashDotDot' | 'triple' | 'thinThick' | 'thickThin' | 'wave' | 'doubleWave' | 'groove' | 'ridge' | 'inset' | 'outset';
+export interface LinePrimitive extends DocAttrs {
+    kind: 'line';
+    x1: number;
+    y1: number;
+    x2: number;
+    y2: number;
+    strokeWidth: number;
+    color: string;
+    dash?: number[];
+    role?: 'border' | 'table-border' | 'table-cut' | 'separator';
+    /** Full border recipe. Undefined = infer solid/dash from `dash`. */
+    borderStyle?: DisplayBorderStyle;
+    /** Secondary color for 3-D/multi-stroke recipes. */
+    secondaryColor?: string;
+    /** Alpha multiplier. Undefined = 1. */
+    opacity?: number;
+    /** Owner of the retained Word border recipe. */
+    borderOwner?: 'cell' | 'fragment' | 'paragraph' | 'textBox';
+}
+export interface PageBorderSide {
+    width: number;
+    color: string;
+    style: 'solid' | 'double' | 'dotted' | 'dashed' | 'groove' | 'ridge' | 'inset' | 'outset';
+}
+export interface PageBorderPrimitive {
+    kind: 'pageBorder';
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    zOrder?: 'front' | 'back';
+    top?: PageBorderSide;
+    right?: PageBorderSide;
+    bottom?: PageBorderSide;
+    left?: PageBorderSide;
+}
+export interface ImagePrimitive extends DocAttrs {
+    kind: 'image';
+    shapeType?: string;
+    relId: string;
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    rotationDeg?: number;
+    /** 0..1 alpha applied only to this image. Absent = opaque. */
+    opacity?: number;
+    /** Flip about the content-frame center. Undefined = false. */
+    flipH?: boolean;
+    /** Flip about the content-frame center. Undefined = false. */
+    flipV?: boolean;
+    /** Original image frame when w/h are a transformed layout bbox. */
+    contentFrame?: {
+        x?: number;
+        y?: number;
+        w?: number;
+        h?: number;
+    };
+    /** Canvas/CSS filter string for renderer-owned effects, e.g. watermark washout. */
+    filter?: string;
+    /** True for decorative/non-content images such as picture watermarks. */
+    decorative?: boolean;
+    crop?: {
+        top: number;
+        right: number;
+        bottom: number;
+        left: number;
+    };
+    altText?: string;
+    /** Ordered image effects. Undefined = use legacy `filter` only. */
+    effects?: Array<{
+        kind?: string;
+        amount?: number;
+        threshold?: number;
+        colors?: string[];
+        rawName?: string;
+    }>;
+    /** Picture border recipe. Undefined = none. */
+    border?: {
+        width?: number;
+        color?: string;
+        style?: string;
+        dash?: number[];
+    };
+}
+export type ShapePathCommand = {
+    type: 'move';
+    x: number;
+    y: number;
+} | {
+    type: 'line';
+    x: number;
+    y: number;
+} | {
+    type: 'quad';
+    cpx: number;
+    cpy: number;
+    x: number;
+    y: number;
+} | {
+    type: 'cubic';
+    cp1x: number;
+    cp1y: number;
+    cp2x: number;
+    cp2y: number;
+    x: number;
+    y: number;
+} | {
+    type: 'close';
+};
+export interface ShapePrimitive extends DocAttrs {
+    kind: 'shape';
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    /** Page-local path commands scaled from the shape's normalized geometry. */
+    geometryPath: ShapePathCommand[];
+    fill?: string;
+    stroke?: {
+        color: string;
+        width: number;
+        /** DrawingML/CSS dash style token. */
+        dash?: string;
+    };
+    transform?: {
+        rotation?: number;
+        flipH?: boolean;
+        flipV?: boolean;
+    };
+    /** True when the shape carries no accessible inner text. */
+    decorative?: boolean;
+    /** Alpha multiplier. Undefined = 1. */
+    opacity?: number;
+    /** Lossless paint server; undefined = legacy `fill`. */
+    fillPaint?: {
+        kind?: 'none' | 'solid' | 'gradient' | 'pattern' | 'picture' | 'theme';
+        color?: string;
+        angle?: number;
+        gradientType?: string;
+        stops?: Array<{
+            position?: number;
+            color?: string;
+        }>;
+        patternPreset?: string;
+        foregroundColor?: string;
+        backgroundColor?: string;
+        pictureRelId?: string;
+        /**
+         * Resolved SAFE embedded source for a picture fill (`blob:`/`data:` only —
+         * external-mode blip relationships are never resolved, so opening a file
+         * cannot trigger a network fetch). The canvas image resolver rejects any
+         * other scheme as defense in depth. Absent = unresolvable, paint the
+         * legacy `fill`/`color` instead.
+         */
+        pictureSrc?: string;
+        /** Picture source crop fractions (`a:srcRect`, 0..1; negative = outset). */
+        pictureSrcRect?: {
+            left?: number;
+            top?: number;
+            right?: number;
+            bottom?: number;
+        };
+        /** Picture fill mode. Absent = 'stretch' (`a:stretch`). */
+        pictureFillMode?: 'stretch' | 'tile';
+        /** Tile parameters when `pictureFillMode` = 'tile'. Offsets px, scales fractions. */
+        pictureTile?: {
+            offsetX?: number;
+            offsetY?: number;
+            scaleX?: number;
+            scaleY?: number;
+            alignment?: string;
+            flip?: 'none' | 'x' | 'y' | 'xy';
+        };
+        /** Stretch target rect fractions of the shape box (`a:fillRect`, 0..1). */
+        pictureStretchRect?: {
+            left?: number;
+            top?: number;
+            right?: number;
+            bottom?: number;
+        };
+        /** Picture alpha 0..1 (`a:alphaModFix`). Absent = opaque. */
+        pictureOpacity?: number;
+        themeRefIndex?: number;
+    };
+    /** Lossless DrawingML stroke details beyond the legacy `stroke` triple. */
+    strokePaint?: {
+        color?: string;
+        width?: number;
+        dash?: string;
+        customDash?: number[];
+        compound?: 'single' | 'double' | 'thickThin' | 'thinThick' | 'triple';
+        alignment?: 'center' | 'inset';
+        cap?: 'flat' | 'round' | 'square';
+        join?: 'bevel' | 'miter' | 'round';
+        miterLimit?: number;
+        headEnd?: {
+            type?: string;
+            width?: string;
+            length?: string;
+        };
+        tailEnd?: {
+            type?: string;
+            width?: string;
+            length?: string;
+        };
+    };
+    /** Ordered 2-D effects. Undefined = none. */
+    effects?: Array<{
+        kind?: string;
+        color?: string;
+        opacity?: number;
+        blurRadius?: number;
+        distance?: number;
+        direction?: number;
+        size?: number;
+        rawName?: string;
+    }>;
+    /** Effect extents in page px. Undefined = zero. */
+    effectExtent?: {
+        top?: number;
+        right?: number;
+        bottom?: number;
+        left?: number;
+    };
+    /** Versioned heterogeneous DrawingML group/canvas scene. */
+    drawingScene?: DrawingScene;
+    /** Full DrawingML `a:bodyPr` projection for shape text. */
+    textBodyProperties?: ShapeTextBodyProperties;
+}
+export interface DecorationPrimitive extends DocAttrs {
+    kind: 'decoration';
+    deco: 'underline' | 'strike' | 'highlight' | 'comment-range' | 'spell';
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    color: string;
+    dashed?: boolean;
+    dotted?: boolean;
+    /** Exact highlight font-box/source slice. Undefined = legacy rect. */
+    highlightSlice?: {
+        sourceStart?: number;
+        sourceEnd?: number;
+        ascent?: number;
+        descent?: number;
+        includesTrailingWhitespace?: boolean;
+    };
+    /** Full border/decoration recipe. Undefined = solid/dashed/dotted flags. */
+    style?: DisplayBorderStyle;
+}
+/** Scoped opacity/transform/clip group. Empty/missing members are no-ops. */
+export interface ClipGroupPrimitive extends DocAttrs {
+    /** Primitive tag. */
+    kind?: 'clipGroup';
+    clip?: {
+        x?: number;
+        y?: number;
+        w?: number;
+        h?: number;
+    };
+    opacity?: number;
+    transform?: {
+        translateX?: number;
+        translateY?: number;
+        rotationDeg?: number;
+        scaleX?: number;
+        scaleY?: number;
+        flipH?: boolean;
+        flipV?: boolean;
+    };
+    primitives?: DisplayPrimitive[];
+}
+/** Shaped tab/TOC leader glyphs; absent metrics mean no painted leader. */
+export interface LeaderGlyphPrimitive extends DocAttrs {
+    /** Primitive tag. Undefined when embedded as run metadata. */
+    kind?: 'leaderGlyphs';
+    glyph?: string;
+    count?: number;
+    x?: number;
+    baselineY?: number;
+    advance?: number;
+    width?: number;
+    font?: string;
+    fontId?: number;
+    size?: number;
+    color?: string;
+    rtl?: boolean;
+}
