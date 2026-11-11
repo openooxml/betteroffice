@@ -130,10 +130,13 @@ const registered: RegisteredModule[] = [];
  * Starts counting the heap of every native engine in this process, so that
  * {@link wasmModuleMemories} lists it. A native engine does not count by default:
  * counting costs a little on every allocation. It starts at zero and stays on for
- * the life of the process. Call it before opening documents: memory allocated
+ * the life of the process, for every thread and session in it: one caller starting
+ * it changes what every session in the process reports, and it cannot be stopped.
+ * Each thread's figures stay its own. Call it before opening documents: memory allocated
  * earlier is subtracted when freed without having been counted (saturating at
  * zero), so live and peak bytes can read low. Pressure events on a native engine
- * also need a host memory budget. WebAssembly engines always count. Returns
+ * also need a host memory budget. WebAssembly engines always count, each module
+ * instance its own heap, from the start, and cannot be stopped either. Returns
  * whether every engine module that can count now does.
  */
 export function startHeapCounting(): boolean {
