@@ -4,6 +4,7 @@ import JSZip from 'jszip';
 
 const SEED = '<w:p><w:r><w:t>Seed</w:t></w:r></w:p>';
 const HEADING_STYLES = '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:rPr><w:b/><w:sz w:val="32"/></w:rPr></w:style></w:styles>';
+const TABLE_BETWEEN = '<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>Before words</w:t></w:r></w:p><w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/></w:tblPr><w:tblGrid><w:gridCol w:w="9000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="9000" w:type="dxa"/></w:tcPr><w:p><w:r><w:rPr><w:b/><w:i/></w:rPr><w:t>Cell words</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p><w:r><w:rPr><w:b/></w:rPr><w:t>After words here</w:t></w:r></w:p>';
 
 async function open(page: Page, arm: string, body = SEED, styles?: string) {
   const zip = new JSZip();
@@ -95,4 +96,38 @@ for (const arm of ['&peerless=0', '']) {
       expect(run.properties).toEqual([]);
     }
   });
+
+  for (const how of ['select all', 'drag'] as const) {
+    test(`docx clear formatting over a ${how} that spans a table clears the cell text (${label})`, async ({ page }, info) => {
+      const input = await open(page, arm, TABLE_BETWEEN);
+      if (how === 'select all') {
+        await input.press('ControlOrMeta+A');
+      } else {
+        const caret = page.locator('[data-docx-caret]');
+        await input.press('ControlOrMeta+End');
+        const end = await caret.boundingBox();
+        await input.press('Home');
+        const lineStart = await caret.boundingBox();
+        await input.press('ControlOrMeta+Home');
+        const start = await caret.boundingBox();
+        if (!end || !lineStart || !start) throw new Error('Document caret has no bounds');
+        await page.mouse.move(start.x + 0.25, start.y + start.height / 2);
+        await page.mouse.down();
+        await page.mouse.move((lineStart.x + end.x) / 2, end.y + end.height / 2, { steps: 12 });
+        await page.mouse.up();
+      }
+      const rail = page.getByTestId('formatting-bar');
+      const bold = rail.getByRole('button', { name: 'Bold', exact: true });
+      await expect(bold).toHaveAttribute('aria-pressed', 'true');
+      await rail.getByRole('button', { name: 'Clear formatting', exact: true }).click();
+      await expect(bold).toHaveAttribute('aria-pressed', 'false');
+      const runs = (await savedRuns(page, info, `${label}-${how}-table`)).filter((run) => run.text);
+      expect(runs.find((run) => run.text.includes('Cell'))?.properties).toEqual([]);
+      expect(runs.find((run) => run.text.includes('Before'))?.properties).toEqual([]);
+      const after = runs.filter((run) => 'After words here'.includes(run.text) && run.text);
+      expect(after.map((run) => run.text).join('')).toBe('After words here');
+      expect(after.some((run) => run.bold)).toBe(how === 'drag');
+      expect(after.some((run) => !run.bold)).toBe(true);
+    });
+  }
 }
