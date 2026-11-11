@@ -154,36 +154,61 @@ for (const nested of [false, true]) {
   }, TIMEOUT);
 }
 
-test(`after the local user's own crossing undo, a caret in the table's cell stays there, typing is kept, saves refuse coded, and the redo shows the typed text`, async () => {
+/** The local user's own undo crosses a peer's undone shading so the body table loses its rows; the caret stays in its second cell. */
+async function ownCrossingUndo(replica: Opened, first: YrsSession): Promise<string> {
+  const story = (replica.engine.tablePayload('body', 0)!.rows as Array<{ cells: Array<{ story: string }> }>)[0]!.cells[1]!.story;
+  const inCell = { story, paraId: replica.engine.paragraphs(story)[0]!.paraId, offset: 2 };
+  const selection = { anchor: inCell, focus: inCell };
+
+  first.setCellShading(cellRange(0, 0), 'FF0000');
+  await receive(replica, first);
+  const shaded = await replica.session.submit('setTableCellShading', { color: '00FF00', selection } as never).ack;
+  expect(shaded.status).toBe('applied');
+  expect(first.undo()).toBe(true);
+  await receive(replica, first);
+  await replica.session.submit('select', { selection }).ack;
+  expect(replica.session.state.selection?.focus.story).toBe(story);
+  expect((await replica.session.submit('undo', {}).ack).status).toBe('applied');
+
+  expect(Array.isArray(replica.engine.tablePayload('body', 0)?.rows)).toBe(false);
+  expect(replica.session.state.selection?.focus.story).toBe(story);
+  return story;
+}
+
+test(`after the local user's own crossing undo, a caret in the table's cell stays there, typing applies and is kept, and saves refuse coded`, async () => {
   const replica = await open(9651);
   const first = await peer(replica, 9652);
   try {
-    const story = (replica.engine.tablePayload('body', 0)!.rows as Array<{ cells: Array<{ story: string }> }>)[0]!.cells[1]!.story;
-    const inCell = { story, paraId: replica.engine.paragraphs(story)[0]!.paraId, offset: 2 };
-    const selection = { anchor: inCell, focus: inCell };
-
-    first.setCellShading(cellRange(0, 0), 'FF0000');
-    await receive(replica, first);
-    const shaded = await replica.session.submit('setTableCellShading', { color: '00FF00', selection } as never).ack;
-    expect(shaded.status).toBe('applied');
-    expect(first.undo()).toBe(true);
-    await receive(replica, first);
-    await replica.session.submit('select', { selection }).ack;
-    expect(replica.session.state.selection?.focus.story).toBe(story);
-    expect((await replica.session.submit('undo', {}).ack).status).toBe('applied');
-
-    expect(Array.isArray(replica.engine.tablePayload('body', 0)?.rows)).toBe(false);
-    expect(replica.session.state.selection?.focus.story).toBe(story);
+    const story = await ownCrossingUndo(replica, first);
     expect((await replica.session.submit('insertText', { text: 'Z' }).ack).status).toBe('applied');
     expect(cellTexts(replica, story).join('')).toContain('Z');
     const unsaved = replica.engine.encodeState();
     await expect(replica.client.save({ comments: [] })).rejects.toThrow(tableUnavailableError().message);
     expect(replica.engine.encodeState()).toEqual(unsaved);
+    expect(cellTexts(replica, story).join('')).toContain('Z');
+  } finally {
+    first.destroy();
+    replica.session.dispose();
+  }
+}, TIMEOUT);
+
+test(`after the local user's own crossing undo and a peer's text edit, the local redo brings the table back with the peer's text and the caret's cell maps to it again`, async () => {
+  const replica = await open(9656);
+  const first = await peer(replica, 9657);
+  try {
+    const story = await ownCrossingUndo(replica, first);
+    send(replica, first);
+    const after = first.paragraphs('body').at(-1)!;
+    first.insertText({ story: 'body', paraId: after.paraId, offset: 0 }, 'Peer ');
+    await receive(replica, first);
+    expect(replica.engine.paragraphs('body').at(-1)!.text).toBe('Peer After');
+    expect(Array.isArray(replica.engine.tablePayload('body', 0)?.rows)).toBe(false);
 
     expect((await replica.session.submit('redo', {}).ack).status).toBe('applied');
     expect(Array.isArray(replica.engine.tablePayload('body', 0)?.rows)).toBe(true);
+    expect(replica.engine.paragraphs('body').at(-1)!.text).toBe('Peer After');
     expect(located(replica, story)).toEqual(at('body', 0, 1));
-    expect(cellTexts(replica, story).join('')).toContain('Z');
+    expect(cellTexts(replica, story)).toEqual(['Second']);
   } finally {
     first.destroy();
     replica.session.dispose();
