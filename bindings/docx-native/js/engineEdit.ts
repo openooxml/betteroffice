@@ -54,6 +54,7 @@ type Engine = Pick<
   | 'serialize_docx_s10'
   | 'serialize_docx_s11'
   | 'serialize_docx_s12'
+  | 'set_wasm_heap_counting'
   | 'set_wasm_heap_limit'
   | 'unzip_docx'
   | 'update_display_list'
@@ -120,6 +121,7 @@ export const sanitizeOoxml = binding.sanitizeOoxml;
 export const serialize_docx_s10 = binding.serialize_docx_s10;
 export const serialize_docx_s11 = binding.serialize_docx_s11;
 export const serialize_docx_s12 = binding.serialize_docx_s12;
+export const set_wasm_heap_counting = binding.set_wasm_heap_counting;
 export const set_wasm_heap_limit = binding.set_wasm_heap_limit;
 export const unzip_docx = binding.unzip_docx;
 export const update_display_list = binding.update_display_list;
