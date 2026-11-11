@@ -122,7 +122,7 @@ test('native docx PNG draws a dotted tab leader, as on a contents page', () => {
       }), true);
       const list = pngDisplayList(session);
       const primitives = (JSON.parse(list) as DisplayList).pages[0]?.primitives ?? [];
-      const leaders = primitives.filter((primitive) => (primitive as { leaderGlyphs?: unknown }).leaderGlyphs).length;
+      const leaders = primitives.filter((p) => p.kind === 'decoration' && (p as DecorationPrimitive).dotted).length;
       const ink = pngPixels(pagePng(session, list, 0, 1)).filter((value, index) => index % 4 === 0 && value < 160).length;
       return { leaders, ink };
     } finally {
