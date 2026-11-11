@@ -111,6 +111,31 @@ test('native docx draws a run scale of 0 at full width, as Word does', () => {
   expect(scaled('<w:rPr><w:w w:val="50"/></w:rPr>').equals(plain)).toBe(false);
 });
 
+test('native docx PNG draws a dotted tab leader, as on a contents page', () => {
+  const page = (leader: string) => {
+    const session = new raw.EditSession(406);
+    try {
+      session.open_docx(raw.rezip_docx({
+        '[Content_Types].xml': encoder.encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'),
+        '_rels/.rels': encoder.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'),
+        'word/document.xml': encoder.encode(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:tabs><w:tab w:val="right" w:leader="${leader}" w:pos="3600"/></w:tabs></w:pPr><w:r><w:t>Chapter</w:t></w:r><w:r><w:tab/><w:t>9</w:t></w:r></w:p><w:sectPr/></w:body></w:document>`),
+      }), true);
+      const list = pngDisplayList(session);
+      const primitives = (JSON.parse(list) as DisplayList).pages[0]?.primitives ?? [];
+      const leaders = primitives.filter((primitive) => (primitive as { leaderGlyphs?: unknown }).leaderGlyphs).length;
+      const ink = pngPixels(pagePng(session, list, 0, 1)).filter((value, index) => index % 4 === 0 && value < 160).length;
+      return { leaders, ink };
+    } finally {
+      session.free();
+    }
+  };
+  const dotted = page('dot');
+  const plain = page('none');
+  expect(plain.leaders).toBe(0);
+  expect(dotted.leaders).toBeGreaterThan(0);
+  expect(dotted.ink).toBeGreaterThan(plain.ink + 10);
+});
+
 test('native docx PNG refuses invalid input, missing fonts and oversized surfaces', () => {
   const session = new raw.EditSession(402);
   try {

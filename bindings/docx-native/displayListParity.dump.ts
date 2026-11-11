@@ -20,6 +20,19 @@ const root = resolve(import.meta.dir, '../..');
 const drawn = (globalThis as Record<symbol, unknown>)[Symbol.for('betteroffice.displayListParity')] as string[] | undefined;
 if (!drawn) throw new Error('displayListParity.capture.ts must be preloaded');
 
+function documentWithBody(body: string): Promise<Uint8Array> {
+  const zip = new JSZip();
+  zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
+  zip.file('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
+  zip.file('word/document.xml', `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>${body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:body></w:document>`);
+  return zip.generateAsync({ type: 'uint8array' });
+}
+
+function leaderDocument(): Promise<Uint8Array> {
+  const entry = (leader: string, title: string, page: number) => `<w:p><w:pPr><w:tabs><w:tab w:val="right" w:leader="${leader}" w:pos="9000"/></w:tabs></w:pPr><w:r><w:t>${title}</w:t></w:r><w:r><w:tab/><w:t>${page}</w:t></w:r></w:p>`;
+  return documentWithBody(['dot', 'hyphen', 'underscore', 'middleDot', 'none'].map((leader, index) => entry(leader, `Chapter ${index + 1}`, index * 4 + 1)).join(''));
+}
+
 async function typographyDocument(): Promise<Uint8Array> {
   const paragraphs = typographyRows.map(row => {
     const properties = [
@@ -32,11 +45,7 @@ async function typographyDocument(): Promise<Uint8Array> {
     ].join('');
     return `<w:p>${row.rtl ? '<w:pPr><w:bidi/></w:pPr>' : ''}<w:r><w:rPr>${properties}</w:rPr><w:t>${row.text}</w:t></w:r></w:p>`;
   }).join('');
-  const zip = new JSZip();
-  zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
-  zip.file('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
-  zip.file('word/document.xml', `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>${paragraphs}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:body></w:document>`);
-  return zip.generateAsync({ type: 'uint8array' });
+  return documentWithBody(paragraphs);
 }
 
 await preloadEditWasm(new Uint8Array(readFileSync(resolve(root, 'packages/docx/src/wasm/generated/edit/docx_edit_bg.wasm'))));
@@ -47,6 +56,7 @@ if (fonts === 'pinned' && !fontProvider) throw new Error('the complete font prov
 const fixtures: Record<string, Uint8Array> = {
   demo: new Uint8Array(readFileSync(resolve(root, 'apps/demo/public/betteroffice-demo.docx'))),
   typography: await typographyDocument(),
+  leaders: await leaderDocument(),
 };
 for (const part of ['none', 'drawn', 'missing', 'corrupt'] satisfies PicturePart[]) fixtures[`picture-${part}`] = await pictureDocument(part);
 
