@@ -73,8 +73,7 @@ pub(crate) fn numbering_level(value: f64) -> Option<usize> {
 /// start share one list, so a second instance continues the first one's numbers: Word's "Restart
 /// numbering" writes a new instance with a `w:startOverride` precisely because a plain second
 /// instance would continue. An instance overriding a start begins a list of its own, at that
-/// start. Levels begin at `w:start` (0 when absent) and restart as `w:lvlRestart` says; a level
-/// override without a `w:start` keeps the abstract level's.
+/// start. Levels begin at `w:start` (0 when absent) and restart as `w:lvlRestart` says.
 struct List {
     key: String,
     /// Per level: its start and the `w:lvlRestart` value.
@@ -103,10 +102,7 @@ impl List {
                 .or(definition.start)
                 .or_else(|| {
                     numbering
-                        .get_abstract(instance.abstract_num_id)?
-                        .levels
-                        .iter()
-                        .find(|value| value.ilvl == level as f64)?
+                        .get_abstract_level(instance.abstract_num_id, level as f64)?
                         .start
                 })
                 .filter(|start| start.is_finite())
@@ -702,6 +698,76 @@ mod tests {
     #[test]
     fn letter_level_with_no_start_anywhere_has_an_empty_label_unverified() {
         assert_eq!(first_override_marker("upperLetter", None, None, None), "");
+    }
+
+    fn style_linked_numbering(linked_levels: &str, override_levels: &str) -> Arc<NumberingMap> {
+        let xml = format!(
+            r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="4"><w:styleLink w:val="Linked"/>{linked_levels}</w:abstractNum><w:abstractNum w:abstractNumId="5"><w:numStyleLink w:val="Linked"/></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="5"/>{override_levels}</w:num></w:numbering>"#
+        );
+        let limits = docx_parse::ParseLimits::default();
+        Arc::new(
+            docx_parse::numbering::parse_numbering(
+                Some(xml.as_bytes()),
+                "word/numbering.xml",
+                &mut docx_parse::ParseBudget::new(&limits),
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn style_linked_letter_override_keeps_the_linked_start_by_extension_unverified() {
+        let numbering = style_linked_numbering(
+            r#"<w:lvl w:ilvl="0"><w:start w:val="2"/><w:numFmt w:val="upperLetter"/><w:lvlText w:val="%1."/></w:lvl>"#,
+            r#"<w:lvlOverride w:ilvl="0"><w:lvl w:ilvl="0"><w:numFmt w:val="upperLetter"/><w:lvlText w:val="%1."/></w:lvl></w:lvlOverride>"#,
+        );
+        let mut state = ListState::new(Some(numbering));
+        let mut values = paragraph(1.0, 0.0, "%1.");
+        values.insert(
+            "listLevelNumFmts".to_owned(),
+            Any::from_json(r#"["upperLetter"]"#).unwrap(),
+        );
+        assert_eq!(markers(&mut state, &[values]), ["B."]);
+    }
+
+    #[test]
+    fn style_linked_decimal_override_keeps_the_linked_start_by_extension_unverified() {
+        let numbering = style_linked_numbering(
+            &decimal_level(3),
+            r#"<w:lvlOverride w:ilvl="0"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl></w:lvlOverride>"#,
+        );
+        let mut state = ListState::new(Some(numbering));
+        assert_eq!(
+            markers(
+                &mut state,
+                &[paragraph(1.0, 0.0, "%1."), paragraph(1.0, 0.0, "%1.")]
+            ),
+            ["3.", "4."]
+        );
+    }
+
+    #[test]
+    fn style_linked_deeper_override_restarts_at_the_linked_start_by_extension_unverified() {
+        let numbering = style_linked_numbering(
+            concat!(
+                r#"<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>"#,
+                r#"<w:lvl w:ilvl="1"><w:start w:val="3"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%2."/></w:lvl>"#
+            ),
+            r#"<w:lvlOverride w:ilvl="1"><w:lvl w:ilvl="1"><w:numFmt w:val="decimal"/><w:lvlText w:val="%2."/></w:lvl></w:lvlOverride>"#,
+        );
+        let mut state = ListState::new(Some(numbering));
+        assert_eq!(
+            markers(
+                &mut state,
+                &[
+                    paragraph(1.0, 1.0, "%2."),
+                    paragraph(1.0, 1.0, "%2."),
+                    paragraph(1.0, 0.0, "%1."),
+                    paragraph(1.0, 1.0, "%2."),
+                ]
+            ),
+            ["3.", "4.", "1.", "3."]
+        );
     }
 
     #[test]
