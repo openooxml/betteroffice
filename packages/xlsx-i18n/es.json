@@ -114,6 +114,14 @@
     "zoomPercent": "Zoom en porcentaje",
     "apply": "Aplicar",
     "cancel": "Cancelar",
+    "freezeColumn": "Inmovilizar columna {column}",
+    "freezeColumns": "Inmovilizar columnas {first}–{last}",
+    "freezeRow": "Inmovilizar fila {row}",
+    "freezeRows": "Inmovilizar filas {first}–{last}",
+    "unfreezePanes": "Desmovilizar paneles",
+    "unhideColumns": "Mostrar columnas",
+    "unhideRows": "Mostrar filas",
+    "selectAll": "Seleccionar todo",
     "reasons": {
       "editorUnavailable": "El editor no está listo.",
       "documentLoading": "El libro aún se está abriendo.",
@@ -159,7 +167,9 @@
       "lastSheet": "Un libro necesita al menos una hoja.",
       "sheetAtEdge": "La hoja no se puede mover más.",
       "sheetNameInvalid": "Los nombres de hoja necesitan de 1 a 31 caracteres, deben ser únicos y no pueden contener : \\ / ? * [ ].",
-      "clipboardDenied": "El navegador no permitió el acceso al portapapeles."
+      "clipboardDenied": "El navegador no permitió el acceso al portapapeles.",
+      "clipboardInsecure": "El portapapeles necesita una página segura (HTTPS).",
+      "clipboardWriteUnavailable": "Este navegador no permite copiar al portapapeles."
     },
     "cut": "Cortar",
     "copy": "Copiar",
@@ -195,6 +205,8 @@
     "sheetTabsLabel": "Hojas",
     "clearExceedsLimit": "Borrar supera el límite de celdas.",
     "cellMenuLabel": "Menú de celda",
+    "columnHeaderMenuLabel": "Menú del encabezado de columna",
+    "rowHeaderMenuLabel": "Menú del encabezado de fila",
     "sheetTabMenuLabel": "Menú de la pestaña de hoja",
     "renameSheetLabel": "Cambiar nombre de la hoja",
     "sheetNamePrefix": "Hoja"

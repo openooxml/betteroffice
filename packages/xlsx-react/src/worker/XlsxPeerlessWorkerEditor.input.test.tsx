@@ -91,7 +91,7 @@ async function mount(protectedSheet: boolean, formatCells = false, i18n?: Transl
   return { view, session, api: ready.mock.calls[0][0] };
 }
 
-async function enter(view: ReturnType<typeof render>, value: string) {
+async function enter(view: { getByTestId(id: string): HTMLElement }, value: string) {
   fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'F2' });
   const input = await waitFor(() => view.getByTestId('xlsx-cell-editor') as HTMLInputElement);
   await waitFor(() => expect(input.value).not.toBe(''));
@@ -142,5 +142,62 @@ describe('peerless protected cell input', () => {
     await waitFor(() => expect(view.getByTestId('xlsx-input-refusal').textContent).toBe('Diese Zelle liegt auf einem geschützten Blatt.'));
     expect(await api.commands.execute('save', null)).toMatchObject({ ok: false,
       failure: { code: 'sheet-protected', message: 'Diese Zelle liegt auf einem geschützten Blatt.' } });
+  });
+});
+
+describe('peerless clipboard refusal', () => {
+  function replaceClipboard(value: unknown) {
+    const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value });
+    restorers.push(() => {
+      if (original) Object.defineProperty(navigator, 'clipboard', original);
+      else Reflect.deleteProperty(navigator, 'clipboard');
+    });
+  }
+
+  function replaceSecureContext(value: boolean) {
+    const original = Object.getOwnPropertyDescriptor(window, 'isSecureContext');
+    Object.defineProperty(window, 'isSecureContext', { configurable: true, value });
+    restorers.push(() => {
+      if (original) Object.defineProperty(window, 'isSecureContext', original);
+      else Reflect.deleteProperty(window, 'isSecureContext');
+    });
+  }
+
+  async function typedAndPaste(view: { getByTestId(id: string): HTMLElement }, session: xlsx.WorkbookSession) {
+    await enter(view, 'typed');
+    await waitFor(async () => expect((await session.call.cellInputs(0, 'A1')).cells[0][0].input).toBe('typed'));
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'v', ctrlKey: true });
+  }
+
+  it('commits the cell entry and refuses a paste when the page has no clipboard API', async () => {
+    const { view, session } = await mount(false);
+    replaceClipboard(undefined);
+    await typedAndPaste(view, session);
+    await waitFor(() => expect(view.getByTestId('xlsx-input-refusal').textContent)
+      .toBe('This browser does not allow pasting from a menu. Use the keyboard shortcut.'));
+    expect((await session.call.cellInputs(0, 'A1')).cells[0][0].input).toBe('typed');
+    expect(session.failure).toBeUndefined();
+    expect(view.queryByTestId('xlsx-error')).toBeNull();
+  });
+
+  it('names an insecure origin when the page is not a secure context', async () => {
+    const { view, session } = await mount(false);
+    replaceSecureContext(false);
+    await typedAndPaste(view, session);
+    await waitFor(() => expect(view.getByTestId('xlsx-input-refusal').textContent)
+      .toBe('The clipboard needs a secure (HTTPS) page.'));
+    expect((await session.call.cellInputs(0, 'A1')).cells[0][0].input).toBe('typed');
+    expect(session.failure).toBeUndefined();
+  });
+
+  it('reports a clipboard denial without dropping the cell entry', async () => {
+    const { view, session } = await mount(false);
+    replaceClipboard({ readText: async () => { throw new DOMException('Paste denied', 'NotAllowedError'); } });
+    await typedAndPaste(view, session);
+    await waitFor(() => expect(view.getByTestId('xlsx-input-refusal').textContent)
+      .toBe('The browser did not allow access to the clipboard.'));
+    expect((await session.call.cellInputs(0, 'A1')).cells[0][0].input).toBe('typed');
+    expect(session.failure).toBeUndefined();
   });
 });

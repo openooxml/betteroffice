@@ -115,6 +115,7 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
                 color,
                 style,
                 rail,
+                hairline: _,
                 clip,
             } => {
                 let paint =
@@ -699,6 +700,7 @@ mod tests {
             style: Some("dashDot".into()),
             rail: None,
             clip: None,
+            hairline: false,
         });
         let pixels = Pixmap::decode_png(&render_png(&dl).unwrap()).unwrap();
         for y in 0..8 {
@@ -956,6 +958,7 @@ mod tests {
                     color: "#d4d4d4".into(),
                     style: None,
                     rail: None,
+                    hairline: true,
                     clip: None,
                 },
                 DrawCmd::Text {
@@ -1546,6 +1549,7 @@ mod tests {
             style: None,
             rail: None,
             clip: Some(full(20.0, 10.0)),
+            hairline: false,
         };
         assert_eq!(render(20.0, 10.0, far_line).pixel(5, 4).unwrap().red(), 0);
         let far_fill = DrawCmd::FillRect {
@@ -1588,6 +1592,7 @@ mod tests {
             style: Some("double".into()),
             rail: Some(2.0),
             clip: Some(full(40.0, 40.0)),
+            hairline: false,
         };
         assert_eq!(render(40.0, 40.0, rails).pixel(10, 4).unwrap().red(), 0);
     }

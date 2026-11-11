@@ -201,6 +201,12 @@ export interface LineCmd {
      * `width`. Absent, painters keep the legacy rails derived from `width`.
      */
     rail?: number;
+    /**
+     * Gridlines and the frozen-pane divider: a hairline in sheet space. The painter
+     * snaps it to whole CSS pixels and keeps it one CSS pixel wide at any zoom.
+     * Absent/false on real cell borders, including solid ones without a style.
+     */
+    hairline?: boolean;
     clip?: Rect;
 }
 export type GeometryPathCommand = {
@@ -321,12 +327,25 @@ export type DrawCmd = FillRectCmd | PatternFillCmd | LineCmd | PathCmd | TextCmd
 export interface GridMeta {
     startRow: number;
     startCol: number;
+    /** Leading tracks pinned by a frozen pane; absent when nothing is frozen. */
+    frozenRows?: number;
+    frozenCols?: number;
+    /** Viewport-pixel freeze line on each axis; absent when there is no split. */
+    dividerX?: number;
+    dividerY?: number;
     hiddenRowSpans?: [number, number][];
     hiddenColSpans?: [number, number][];
     rowIndices?: number[];
     colIndices?: number[];
     rowOffsets: number[];
     colOffsets: number[];
+    /**
+     * Full track sizes parallel to `rowOffsets`/`colOffsets`: the sheet-px extent
+     * of each visible track, independent of scroll and of a frozen pane clipping
+     * its leading edge. Absent on lists that predate the field.
+     */
+    rowSizes?: number[];
+    colSizes?: number[];
 }
 export interface HyperlinkRegion {
     top: number;

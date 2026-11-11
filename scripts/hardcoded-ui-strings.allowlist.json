@@ -57,5 +57,25 @@
     "text": "BetterOffice",
     "file": "apps/desktop/src/App.tsx",
     "reason": "Product name in the title bar"
+  },
+  {
+    "text": "The clipboard needs a secure (HTTPS) page",
+    "file": "packages/xlsx-react/src/clipboard.ts",
+    "reason": "Fallback refusal text on the clipboard error object; the surfaces localize the cause through commands.reasons.clipboard*"
+  },
+  {
+    "text": "The clipboard is unavailable in this browser",
+    "file": "packages/xlsx-react/src/clipboard.ts",
+    "reason": "Fallback refusal text on the clipboard error object; the surfaces localize the cause through commands.reasons.clipboard*"
+  },
+  {
+    "text": "The browser did not allow access to the clipboard",
+    "file": "packages/xlsx-react/src/clipboard.ts",
+    "reason": "Fallback refusal text on the clipboard error object; the surfaces localize the cause through commands.reasons.clipboard*"
+  },
+  {
+    "text": "This browser does not allow copying to the clipboard",
+    "file": "packages/xlsx-react/src/clipboard.ts",
+    "reason": "Fallback refusal text on the clipboard error object; the surfaces localize the cause through commands.reasons.clipboard*"
   }
 ]

@@ -114,6 +114,14 @@
     "zoomPercent": "Масштаб у відсотках",
     "apply": "Застосувати",
     "cancel": "Скасувати",
+    "freezeColumn": "Закріпити стовпець {column}",
+    "freezeColumns": "Закріпити стовпці {first}–{last}",
+    "freezeRow": "Закріпити рядок {row}",
+    "freezeRows": "Закріпити рядки {first}–{last}",
+    "unfreezePanes": "Зняти закріплення областей",
+    "unhideColumns": "Показати стовпці",
+    "unhideRows": "Показати рядки",
+    "selectAll": "Виділити все",
     "reasons": {
       "editorUnavailable": "Редактор ще не готовий.",
       "documentLoading": "Книга ще відкривається.",
@@ -159,7 +167,9 @@
       "lastSheet": "У книзі має бути щонайменше один аркуш.",
       "sheetAtEdge": "Аркуш не можна перемістити далі.",
       "sheetNameInvalid": "Назва аркуша має містити від 1 до 31 символу, бути унікальною й не містити : \\ / ? * [ ].",
-      "clipboardDenied": "Браузер не дозволив доступ до буфера обміну."
+      "clipboardDenied": "Браузер не дозволив доступ до буфера обміну.",
+      "clipboardInsecure": "Для буфера обміну потрібна захищена сторінка (HTTPS).",
+      "clipboardWriteUnavailable": "Цей браузер не дозволяє копіювати до буфера обміну."
     },
     "cut": "Вирізати",
     "copy": "Копіювати",
@@ -195,6 +205,8 @@
     "sheetTabsLabel": "Аркуші",
     "clearExceedsLimit": "Очищення перевищує ліміт клітинок.",
     "cellMenuLabel": "Меню клітинки",
+    "columnHeaderMenuLabel": "Меню заголовка стовпця",
+    "rowHeaderMenuLabel": "Меню заголовка рядка",
     "sheetTabMenuLabel": "Меню ярлика аркуша",
     "renameSheetLabel": "Перейменувати аркуш",
     "sheetNamePrefix": "Аркуш"

@@ -114,6 +114,14 @@
     "zoomPercent": "प्रतिशत में ज़ूम",
     "apply": "लागू करें",
     "cancel": "रद्द करें",
+    "freezeColumn": "स्तंभ {column} फ़्रीज़ करें",
+    "freezeColumns": "स्तंभ {first}–{last} फ़्रीज़ करें",
+    "freezeRow": "पंक्ति {row} फ़्रीज़ करें",
+    "freezeRows": "पंक्तियाँ {first}–{last} फ़्रीज़ करें",
+    "unfreezePanes": "पैन अनफ़्रीज़ करें",
+    "unhideColumns": "स्तंभ दिखाएँ",
+    "unhideRows": "पंक्तियाँ दिखाएँ",
+    "selectAll": "सभी चुनें",
     "reasons": {
       "editorUnavailable": "संपादक तैयार नहीं है।",
       "documentLoading": "कार्यपुस्तिका अभी भी खुल रही है।",
@@ -159,7 +167,9 @@
       "lastSheet": "वर्कबुक में कम से कम एक शीट होनी चाहिए।",
       "sheetAtEdge": "शीट को और आगे नहीं ले जाया जा सकता।",
       "sheetNameInvalid": "शीट के नाम में 1 से 31 वर्ण होने चाहिए, वह अद्वितीय होना चाहिए और उसमें : \\ / ? * [ ] नहीं हो सकते।",
-      "clipboardDenied": "ब्राउज़र ने क्लिपबोर्ड तक पहुँच की अनुमति नहीं दी।"
+      "clipboardDenied": "ब्राउज़र ने क्लिपबोर्ड तक पहुँच की अनुमति नहीं दी।",
+      "clipboardInsecure": "क्लिपबोर्ड के लिए सुरक्षित (HTTPS) पृष्ठ आवश्यक है।",
+      "clipboardWriteUnavailable": "यह ब्राउज़र क्लिपबोर्ड में कॉपी करने की अनुमति नहीं देता।"
     },
     "cut": "काटें",
     "copy": "कॉपी करें",
@@ -195,6 +205,8 @@
     "sheetTabsLabel": "शीट",
     "clearExceedsLimit": "साफ़ करना सेल सीमा से अधिक है",
     "cellMenuLabel": "सेल मेनू",
+    "columnHeaderMenuLabel": "कॉलम हैडर मेनू",
+    "rowHeaderMenuLabel": "पंक्ति हैडर मेनू",
     "sheetTabMenuLabel": "शीट टैब मेनू",
     "renameSheetLabel": "शीट का नाम बदलें",
     "sheetNamePrefix": "शीट"

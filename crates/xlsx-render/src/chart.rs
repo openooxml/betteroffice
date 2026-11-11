@@ -672,6 +672,7 @@ fn paint_chart_placeholder(
             style: None,
             rail: None,
             clip: Some(clip),
+            hairline: false,
         })?;
     }
     Ok(())
@@ -1062,6 +1063,7 @@ fn translate_op(op: PlotOp, chart_clip: Rect, end_aligned: bool) -> Result<Optio
             style: None,
             rail: None,
             clip: Some(chart_clip),
+            hairline: false,
         })),
         PlotOp::Path {
             commands,

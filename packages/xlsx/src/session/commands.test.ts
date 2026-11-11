@@ -2085,6 +2085,10 @@ describe('workbook commands', () => {
       ['fillRange', 'fill cannot safely preserve comments', 'fill'],
       ['fillRange', 'fill cannot safely preserve data validations', 'fill'],
       ['fillRange', 'fill cannot safely preserve conditional formats', 'fill'],
+      ['applyOps', 'cannot move sheet 0 tracks: merged range B4:D5 crosses the moved tracks', 'other'],
+      ['applyOps', 'cannot move sheet 0 tracks: table Sales covers the moved tracks', 'table'],
+      ['applyOps', 'cannot move sheet 1 tracks: the run or its destination is outside the worksheet', 'other'],
+      ['applyOps', 'cannot move sheet 0 tracks: the source run is outside the worksheet', 'other'],
       ['moveRange', 'range move cannot safely preserve charts', 'chart'],
       ['moveRange', 'range move cannot safely preserve Excel tables', 'table'],
       ['moveRange', 'range move cannot safely preserve merged cells', 'other'],
@@ -2105,6 +2109,24 @@ describe('workbook commands', () => {
       expect(refusal?.reason).toBe('unsupported');
       expect(refusal?.result).toBeUndefined();
     }
+  });
+
+  test('a merged range crossing a column move is an ordinary structural refusal', async () => {
+    const session = await createTestWorkbookSession(bytes);
+    try {
+      const saved = await session.save();
+      const version = session.confirmedBasis.version;
+      expect(await session.submit(command(session, 1, 'applyOps', { args: [[
+        { type: 'moveCols', sheet: 0, col: 3, count: 1, before: 5 },
+      ]] }))).toMatchObject({ status: 'refused', reason: 'unsupported', committed: false,
+        result: { failure: { code: 'unsupported', cause: 'other',
+          message: 'cannot move sheet 0 tracks: merged range D1:E1 crosses the moved tracks' } } });
+      expect(await session.save()).toEqual(saved);
+      expect(session.confirmedBasis.version).toBe(version);
+      expect(await session.submit(command(session, 2, 'editCell', { args: [0, 0, 0, '2'] })))
+        .toMatchObject({ status: 'applied', committed: true });
+      expect(session.failure).toBeUndefined();
+    } finally { await session.dispose(); }
   });
 
   test('copy origin errors from batch edits are classified as invalid commands', () => {

@@ -114,6 +114,14 @@
     "zoomPercent": "Zoom em porcentagem",
     "apply": "Aplicar",
     "cancel": "Cancelar",
+    "freezeColumn": "Congelar coluna {column}",
+    "freezeColumns": "Congelar colunas {first}–{last}",
+    "freezeRow": "Congelar linha {row}",
+    "freezeRows": "Congelar linhas {first}–{last}",
+    "unfreezePanes": "Descongelar painéis",
+    "unhideColumns": "Reexibir colunas",
+    "unhideRows": "Reexibir linhas",
+    "selectAll": "Selecionar tudo",
     "reasons": {
       "editorUnavailable": "O editor não está pronto.",
       "documentLoading": "A pasta de trabalho ainda está sendo aberta.",
@@ -159,7 +167,9 @@
       "lastSheet": "Uma pasta de trabalho precisa de pelo menos uma planilha.",
       "sheetAtEdge": "A planilha não pode ser movida mais.",
       "sheetNameInvalid": "Nomes de planilha precisam de 1 a 31 caracteres, devem ser únicos e não podem conter : \\ / ? * [ ].",
-      "clipboardDenied": "O navegador não permitiu o acesso à área de transferência."
+      "clipboardDenied": "O navegador não permitiu o acesso à área de transferência.",
+      "clipboardInsecure": "A área de transferência precisa de uma página segura (HTTPS).",
+      "clipboardWriteUnavailable": "Este navegador não permite copiar para a área de transferência."
     },
     "cut": "Recortar",
     "copy": "Copiar",
@@ -195,6 +205,8 @@
     "sheetTabsLabel": "Planilhas",
     "clearExceedsLimit": "Limpar excede o limite de células.",
     "cellMenuLabel": "Menu da célula",
+    "columnHeaderMenuLabel": "Menu do cabeçalho de coluna",
+    "rowHeaderMenuLabel": "Menu do cabeçalho de linha",
     "sheetTabMenuLabel": "Menu da guia da planilha",
     "renameSheetLabel": "Renomear planilha",
     "sheetNamePrefix": "Planilha"
