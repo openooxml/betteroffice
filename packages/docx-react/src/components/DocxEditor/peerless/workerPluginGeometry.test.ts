@@ -37,6 +37,7 @@ import type { DocxAnchorGeometryResult, DocxGeometryTarget, DocxPluginGeometry, 
 import { createWorkerPluginGeometry } from './workerPluginGeometry';
 import { inputs, proposalHost } from './workerProposalHost.testing';
 import type { PeerlessFrameGeometry } from './viewStore';
+import { WorkerReadSupersededError } from './shellController';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -273,7 +274,7 @@ async function selectionRemap() {
     anchors: null, editState: undefined, geometry: frame() };
   const review = { version: 'v1', previewVersion: 0 };
   const held: (() => void)[] = [];
-  const mapping = { hold: false, geometry: true };
+  const mapping = { hold: false, geometry: true, supersede: false };
   const readAt = async (request: { kind: string; selection?: WorkerSelection;
     targets?: { kind: string; range: { start: { offset: number }; end: { offset: number } } }[] }) => {
     if (request.kind === 'commentSelectionRange') {
@@ -285,6 +286,10 @@ async function selectionRemap() {
     }
     if (request.kind !== 'anchorTargets') throw new Error(`Unexpected read: ${request.kind}`);
     if (mapping.hold) await new Promise<void>(resolve => held.push(resolve));
+    if (mapping.supersede) {
+      mapping.supersede = false;
+      throw new WorkerReadSupersededError('Worker read was superseded');
+    }
     return request.targets!.map(target => mapping.geometry
       ? { ok: true, ranges: [{ from: 100 + target.range.start.offset, to: 100 + target.range.end.offset }], paragraph: 0 }
       : anchorFailure('missing-target', 'No layout shows the selection story'));
@@ -323,16 +328,25 @@ async function selectionRemap() {
   const first = { story: 'body', from: 101, to: 103, layoutId: 's:0:1' };
   expect(events).toEqual([{ formatting: null, displayRange: first }]);
   events.length = 0;
+  type Moved = { selection?: WorkerSelection; version?: number; identity?: typeof identity };
+  const move = (next: Moved = {}) => {
+    if (next.identity) { identity = next.identity; view.identity = identity; }
+    if (next.version !== undefined) view.version = next.version;
+    if (next.selection) view.workerSelection = next.selection;
+    frameEpoch += 1;
+    view.geometry = frame();
+  };
   return {
     geometry, host, events, mapping, first, flush, release,
     layoutId: () => geometry.layout()?.id,
     snapshot: () => host.activations()[0]!.context.snapshot,
-    present(next: { selection?: WorkerSelection; version?: number; identity?: typeof identity } = {}) {
-      if (next.identity) { identity = next.identity; view.identity = identity; }
-      if (next.version !== undefined) view.version = next.version;
-      if (next.selection) view.workerSelection = next.selection;
-      frameEpoch += 1;
-      view.geometry = frame();
+    move,
+    present(next: Moved = {}) {
+      move(next);
+      return geometry.update();
+    },
+    ack(version: number) {
+      view.version = version;
       return geometry.update();
     },
     dispose() {
@@ -509,6 +523,61 @@ test('a replaced worker document that cannot place the selection ends the kept r
     expect(h.snapshot().selection.displayRange).toBeNull();
   } finally { h.dispose(); }
 });
+
+for (const [name, next, displayRange] of [
+  ['a changed selection on a new frame', { selection: { anchor: caretAt(4), focus: caretAt(6) } }, { story: 'body', from: 104, to: 106, layoutId: 's:0:2' }],
+  ['a replaced document with the same selection', { identity: { session: 's2', incarnation: 1, epoch: 1 } }, { story: 'body', from: 101, to: 103, layoutId: 's2:0:2' }],
+] as [string, { selection?: WorkerSelection; identity?: { session: string; incarnation: number; epoch: number } }, DocxPluginSelection['displayRange']][]) {
+  test(`${name} shows no range while the geometry has not caught up with the view, then changes once`, async () => {
+    const h = await selectionRemap();
+    try {
+      h.move(next);
+      expect(h.geometry.displaySelection()).toBeNull();
+      h.host.markSelectionDirty('refresh');
+      await h.flush();
+      expect(h.geometry.displaySelection()).toBeNull();
+      expect(h.geometry.selectionMapped()).toBe(false);
+      expect(h.snapshot().selection.displayRange).toBeNull();
+      expect(h.events).toEqual([]);
+      await h.geometry.update();
+      await h.flush();
+      expect(h.events).toEqual([{ formatting: null, displayRange }]);
+      expect(h.snapshot().selection.displayRange).toEqual(displayRange);
+      h.host.markSelectionDirty('refresh');
+      await h.flush();
+      expect(h.events).toHaveLength(1);
+    } finally { h.dispose(); }
+  });
+}
+
+for (const acked of [true, false]) {
+  test(`a superseded remap of a kept worker range ${acked ? 'after a version ack reads again' : 'on an unmoved view ends empty'}, with one change`, async () => {
+    const h = await selectionRemap();
+    try {
+      h.mapping.hold = true;
+      h.mapping.supersede = true;
+      const replaced = h.present();
+      await h.flush();
+      expect(h.layoutId()).toBe('s:0:2');
+      const ack = acked ? h.ack(1) : Promise.resolve();
+      await h.flush();
+      expect(h.geometry.selectionMapped()).toBe(false);
+      expect(h.snapshot().selection.displayRange).toEqual(h.first);
+      expect(h.events).toEqual([]);
+      h.release();
+      await Promise.all([replaced, ack]);
+      await h.flush();
+      const displayRange = acked ? { ...h.first, layoutId: 's:0:2' } : null;
+      expect(h.geometry.selectionMapped()).toBe(true);
+      expect(h.geometry.displaySelection()).toEqual(displayRange);
+      expect(h.events).toEqual([{ formatting: null, displayRange }]);
+      expect(h.snapshot().selection.displayRange).toEqual(displayRange);
+      h.host.markSelectionDirty('refresh');
+      await h.flush();
+      expect(h.events).toHaveLength(1);
+    } finally { h.dispose(); }
+  });
+}
 
 interface LaidOut { main: YrsSession; engine: ResidentEngineSession; frame: ReturnType<typeof applyFrameDelta>; window: readonly [number, number] }
 
