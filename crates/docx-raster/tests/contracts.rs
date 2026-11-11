@@ -886,6 +886,67 @@ fn carlito_text(extra: Value) -> Value {
 }
 
 #[test]
+fn text_primitives_paint_their_optional_feature_list() {
+    let (fonts, chains, images) = carlito_resources();
+    let font = chains["carlito|0|0"][0];
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let mut painted = Vec::new();
+    for (source, setting, kern) in [
+        ("fi ti", None, false),
+        ("fi ti", Some("standardContextual"), false),
+        ("AV", None, false),
+        ("AV", None, true),
+    ] {
+        let mut features = ooxml_text::kern_features(kern);
+        features.extend(ooxml_text::ligature_features(setting, None));
+        let mut listed: Vec<_> = features
+            .iter()
+            .copied()
+            .filter(|feature| feature.value != 0)
+            .collect();
+        if kern {
+            listed.insert(
+                0,
+                ooxml_text::ShapeFeature {
+                    tag: *b"kern",
+                    value: 1,
+                },
+            );
+        }
+        let mut text = carlito_text(json!({"text": source}));
+        if !listed.is_empty() {
+            text["fontFeatures"] = json!(listed);
+        }
+        let actual = render_png(&list(100.0, 30.0, vec![text]), 0, &resources).unwrap();
+        let glyphs: Vec<Value> = shape(&fonts, font, source, 16.0, &features)
+            .unwrap()
+            .iter()
+            .scan(4.0_f32, |pen, glyph| {
+                let placed = json!({
+                    "id": glyph.glyph_id, "x": *pen + glyph.x_offset,
+                    "y": 20.0 - glyph.y_offset, "cluster": glyph.cluster,
+                    "advance": glyph.x_advance,
+                });
+                *pen += glyph.x_advance;
+                Some(placed)
+            })
+            .collect();
+        let expected = list(
+            100.0,
+            30.0,
+            vec![json!({
+                "kind": "glyphRun", "fontId": font.to_u32(), "size": 16,
+                "color": "#000000", "text": source, "glyphs": glyphs,
+            })],
+        );
+        assert_eq!(actual, render_png(&expected, 0, &resources).unwrap());
+        painted.push(actual);
+    }
+    assert_ne!(painted[0], painted[1]);
+    assert_ne!(painted[2], painted[3]);
+}
+
+#[test]
 fn small_caps_text_runs_are_synthesized_and_drawn() {
     let (fonts, chains, images) = carlito_resources();
     let resources = RenderResources::new(&fonts, &chains, &images);

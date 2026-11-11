@@ -283,8 +283,13 @@ fn canvas_caret_stops(
     Some(stops)
 }
 
-/// Caret stops taken from shaped cluster bounds, so ligatures and reordered
-/// clusters land on real boundaries rather than an even split.
+/// Caret stops taken from shaped cluster bounds, so reordered clusters land on
+/// real boundaries rather than an even split across the run. Inside one Latin,
+/// Greek or Cyrillic cluster of several graphemes, such as an "ffi" ligature,
+/// Word splits the cluster's advance evenly between them; a base letter with
+/// its combining marks stays one grapheme and gains no stop. A run with fewer
+/// document positions than text units, such as a field result, has only its
+/// two outer edges, so its start and end never collapse onto an inner cluster.
 fn glyph_caret_stops(
     text: &str,
     glyphs: &[crate::display_list::PlacedGlyph],
@@ -309,6 +314,32 @@ fn glyph_caret_stops(
         })
         .collect();
     let utf16_len = text.encode_utf16().count() as i64;
+    if doc_end - doc_start < utf16_len && !clusters.is_empty() {
+        let left = clusters
+            .iter()
+            .map(|(_, left, _)| *left)
+            .fold(f64::INFINITY, f64::min);
+        let right = clusters
+            .iter()
+            .map(|(_, _, right)| *right)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let (left_position, right_position) = if rtl {
+            (doc_end, doc_start)
+        } else {
+            (doc_start, doc_end)
+        };
+        return vec![
+            CaretStop {
+                x: left,
+                position: left_position,
+            },
+            CaretStop {
+                x: right,
+                position: right_position,
+            },
+        ];
+    }
+    let one_position_per_unit = doc_end - doc_start == utf16_len;
     let mut stops = Vec::with_capacity(clusters.len() * 2);
     // clusters are byte-ordered and contiguous (each ends where the next
     // starts), so UTF-16 offsets accumulate in one linear pass — a per-cluster
@@ -337,6 +368,21 @@ fn glyph_caret_stops(
             x: right,
             position: if rtl { start_position } else { end_position },
         });
+        if !one_position_per_unit || ooxml_text::word_typography_mask(cluster_text).contains(&false)
+        {
+            continue;
+        }
+        let graphemes: Vec<&str> = cluster_text.graphemes(true).collect();
+        let count = graphemes.len();
+        let mut inner = logical_start;
+        for (index, grapheme) in graphemes.iter().enumerate().take(count.saturating_sub(1)) {
+            inner += grapheme.encode_utf16().count() as i64;
+            let share = (right - left) * (index + 1) as f64 / count as f64;
+            stops.push(CaretStop {
+                x: if rtl { right - share } else { left + share },
+                position: doc_position_at_utf16(doc_start, doc_end, inner, utf16_len),
+            });
+        }
     }
     stops.sort_by(|left, right| {
         left.x
@@ -3738,5 +3784,271 @@ mod tests {
         assert_eq!(rects.len(), 1);
         assert_eq!((rects[0].x, rects[0].y), (100.0, 200.0));
         assert_eq!((rects[0].width, rects[0].height), (60.0, 18.0));
+    }
+
+    fn ligature_run(text: &str, doc_start: i64, glyphs: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "kind": "glyphRun", "fontId": 1, "size": 16, "color": "#000000",
+            "text": text, "docStart": doc_start,
+            "docEnd": doc_start + text.encode_utf16().count() as i64,
+            "blockId": doc_start, "lineIndex": 0, "glyphs": glyphs
+        })
+    }
+
+    fn office_glyphs() -> serde_json::Value {
+        serde_json::json!([
+            {"id": 1, "x": 100, "y": 200, "cluster": 0, "advance": 10},
+            {"id": 2, "x": 110, "y": 200, "cluster": 1, "advance": 30},
+            {"id": 3, "x": 140, "y": 200, "cluster": 4, "advance": 10},
+            {"id": 4, "x": 150, "y": 200, "cluster": 5, "advance": 10}
+        ])
+    }
+
+    #[test]
+    fn caret_stops_for_every_run_shape() {
+        let glyph = |x: f64, cluster: u32, advance: f64| serde_json::json!({"id": 1, "x": x, "y": 200, "cluster": cluster, "advance": advance});
+        let one = |advance: f64| vec![glyph(100.0, 0, advance)];
+        let office = || {
+            vec![
+                glyph(100.0, 0, 10.0),
+                glyph(110.0, 1, 30.0),
+                glyph(140.0, 4, 10.0),
+                glyph(150.0, 5, 10.0),
+            ]
+        };
+        type Case<'a> = (
+            &'a str,
+            &'a str,
+            i64,
+            i64,
+            Vec<serde_json::Value>,
+            bool,
+            Vec<(f64, i64)>,
+        );
+        let cases: Vec<Case> = vec![
+            (
+                "plain",
+                "ab",
+                10,
+                12,
+                vec![glyph(100.0, 0, 10.0), glyph(110.0, 1, 10.0)],
+                false,
+                vec![(100.0, 10), (110.0, 11), (120.0, 12)],
+            ),
+            (
+                "ligature",
+                "fi",
+                10,
+                12,
+                one(20.0),
+                false,
+                vec![(100.0, 10), (110.0, 11), (120.0, 12)],
+            ),
+            (
+                "ligature rtl",
+                "fi",
+                10,
+                12,
+                one(20.0),
+                true,
+                vec![(100.0, 12), (110.0, 11), (120.0, 10)],
+            ),
+            (
+                "cyrillic",
+                "\u{444}\u{438}",
+                10,
+                12,
+                one(20.0),
+                false,
+                vec![(100.0, 10), (110.0, 11), (120.0, 12)],
+            ),
+            (
+                "field",
+                "office",
+                10,
+                11,
+                office(),
+                false,
+                vec![(100.0, 10), (160.0, 11)],
+            ),
+            (
+                "field one cluster",
+                "office",
+                10,
+                11,
+                one(60.0),
+                false,
+                vec![(100.0, 10), (160.0, 11)],
+            ),
+            (
+                "field rtl",
+                "office",
+                10,
+                11,
+                office(),
+                true,
+                vec![(100.0, 11), (160.0, 10)],
+            ),
+            (
+                "joining",
+                "\u{644}\u{627}",
+                10,
+                12,
+                one(20.0),
+                true,
+                vec![(100.0, 12), (120.0, 10)],
+            ),
+            (
+                "combining mark",
+                "e\u{301}",
+                10,
+                12,
+                one(20.0),
+                false,
+                vec![(100.0, 10), (120.0, 12)],
+            ),
+            (
+                "emoji",
+                "\u{1F469}\u{200D}\u{1F4BB}",
+                10,
+                15,
+                one(20.0),
+                false,
+                vec![(100.0, 10), (120.0, 15)],
+            ),
+            (
+                "tab",
+                "\t",
+                10,
+                11,
+                one(36.0),
+                false,
+                vec![(100.0, 10), (136.0, 11)],
+            ),
+            (
+                "zero width",
+                " ",
+                10,
+                10,
+                one(5.0),
+                false,
+                vec![(100.0, 10), (105.0, 10)],
+            ),
+            (
+                "expanded",
+                "fi",
+                10,
+                13,
+                one(20.0),
+                false,
+                vec![(100.0, 10), (120.0, 13)],
+            ),
+        ];
+        for (name, text, doc_start, doc_end, glyphs, rtl, expected) in cases {
+            let glyphs: Vec<crate::display_list::PlacedGlyph> =
+                serde_json::from_value(serde_json::Value::Array(glyphs)).unwrap();
+            let stops: Vec<(i64, i64)> = glyph_caret_stops(text, &glyphs, rtl, doc_start, doc_end)
+                .iter()
+                .map(|stop| ((stop.x * 1000.0).round() as i64, stop.position))
+                .collect();
+            let expected: Vec<(i64, i64)> = expected
+                .iter()
+                .map(|(x, position)| ((x * 1000.0).round() as i64, *position))
+                .collect();
+            assert_eq!(stops, expected, "{name}");
+        }
+        let mut link = ligature_run("office", 10, office_glyphs());
+        link["href"] = "https://example.com".into();
+        let dl = page(serde_json::Value::Null, vec![link]);
+        assert!((caret_rect(&dl, 12).unwrap().x - 120.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_field_result_keeps_its_outer_edges() {
+        let single_cluster = || {
+            let mut glyphs = office_glyphs();
+            for glyph in glyphs.as_array_mut().unwrap() {
+                glyph["cluster"] = 0.into();
+            }
+            glyphs
+        };
+        for (glyphs, rtl) in [
+            (office_glyphs(), false),
+            (single_cluster(), false),
+            (office_glyphs(), true),
+        ] {
+            let mut field = ligature_run("office", 10, glyphs);
+            field["docEnd"] = 11.into();
+            field["rtl"] = rtl.into();
+            let dl = page(serde_json::Value::Null, vec![field]);
+            let rects = range_rects(&dl, 10, 11);
+            assert_eq!(rects.len(), 1, "rtl={rtl}");
+            assert!((rects[0].x - 100.0).abs() < 0.01, "rtl={rtl} {rects:?}");
+            assert!((rects[0].width - 60.0).abs() < 0.01, "rtl={rtl} {rects:?}");
+            let (start_x, end_x) = if rtl { (158.0, 102.0) } else { (102.0, 158.0) };
+            assert_eq!(hit_test(&dl, 0, start_x, 195.0), Some(10), "rtl={rtl}");
+            assert_eq!(hit_test(&dl, 0, end_x, 195.0), Some(11), "rtl={rtl}");
+        }
+    }
+
+    #[test]
+    fn a_ligature_splits_its_advance_evenly_between_its_characters() {
+        let dl = page(
+            serde_json::Value::Null,
+            vec![ligature_run("office", 10, office_glyphs())],
+        );
+        for (position, x) in [(11, 110.0), (12, 120.0), (13, 130.0), (14, 140.0)] {
+            assert!(
+                (caret_rect(&dl, position).unwrap().x - x).abs() < 0.01,
+                "{position}"
+            );
+        }
+        for (x, position) in [
+            (114.0, 11),
+            (118.0, 12),
+            (124.0, 12),
+            (126.0, 13),
+            (136.0, 14),
+        ] {
+            assert_eq!(hit_test(&dl, 0, x, 195.0), Some(position), "{x}");
+        }
+        for (from, to, x, width) in [
+            (11, 12, 110.0, 10.0),
+            (12, 13, 120.0, 10.0),
+            (13, 14, 130.0, 10.0),
+            (11, 14, 110.0, 30.0),
+        ] {
+            let rects = range_rects(&dl, from, to);
+            assert_eq!(rects.len(), 1);
+            assert!((rects[0].x - x).abs() < 0.01, "{from}..{to}: {rects:?}");
+            assert!(
+                (rects[0].width - width).abs() < 0.01,
+                "{from}..{to}: {rects:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn joining_mark_and_emoji_clusters_keep_only_their_edges() {
+        for text in ["\u{644}\u{627}", "e\u{301}", "\u{1F469}\u{200D}\u{1F4BB}"] {
+            let end = 10 + text.encode_utf16().count() as i64;
+            let dl = page(
+                serde_json::Value::Null,
+                vec![ligature_run(
+                    text,
+                    10,
+                    serde_json::json!([{"id": 1, "x": 100, "y": 200, "cluster": 0, "advance": 20}]),
+                )],
+            );
+            for position in 11..end {
+                let x = caret_rect(&dl, position).unwrap().x;
+                assert!(
+                    (x - 100.0).abs() < 0.01 || (x - 120.0).abs() < 0.01,
+                    "{text:?} {position}: {x}"
+                );
+            }
+            assert_eq!(hit_test(&dl, 0, 109.0, 195.0), Some(10), "{text:?}");
+            assert_eq!(hit_test(&dl, 0, 111.0, 195.0), Some(end), "{text:?}");
+        }
     }
 }

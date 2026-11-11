@@ -459,6 +459,10 @@ fn parse_level_paragraph_properties(element: &XmlElement) -> ParagraphFormatting
 
 fn parse_level_run_properties(element: &XmlElement) -> TextFormatting {
     let mut value = TextFormatting::default();
+    let typography =
+        crate::formatting::parse_run_properties(Some(element), None).unwrap_or_default();
+    value.ligatures = typography.ligatures;
+    value.contextual_alternates = typography.contextual_alternates;
     value.font_family = element.child("w", "rFonts").map(|fonts| FontFamily {
         ascii: attribute_owned(fonts, "ascii"),
         h_ansi: attribute_owned(fonts, "hAnsi"),

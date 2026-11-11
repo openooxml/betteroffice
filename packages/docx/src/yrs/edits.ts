@@ -109,6 +109,9 @@ export interface DocxTextMarks {
   fontFamily?: string;
 }
 
+/** A mark name of {@link DocxTextMarks}. */
+export type DocxTextMarkName = keyof DocxTextMarks;
+
 /** One run of inserted text. */
 export interface DocxTextRun {
   /** Non-empty; no paragraph or line breaks. */
@@ -138,6 +141,7 @@ export type DocxEditOperation =
   | { op: 'insertSectionBreakAfter'; target: DocxParagraphTarget; kind: SectionStartKind }
   | { op: 'setSectionProperties'; section: string; properties: SectionPropertyPatch }
   | { op: 'setParagraphStyle'; target: DocxParagraphTarget; styleId: string }
+  | DocxFormatTextOperation
   | Omit<DocxSetContentControlTextStep, 'expect'>;
 
 /**
@@ -152,6 +156,21 @@ export interface DocxSetContentControlTextStep {
   target: DocxContentControlSelector;
   text: string;
   expect?: DocxEditGuard;
+}
+
+/**
+ * Formats a non-empty range of one paragraph: `clear` first returns the named marks (or every
+ * character formatting mark for `'all'`) to what the paragraph style and the run's character
+ * style give, `'all'` also removing the character style; then `set` writes its marks. A paragraph
+ * whose rewrite would lose content refuses the step, or with `onUnsupported: 'skip'` stays as it
+ * is and is listed in the receipt's `skipped`.
+ */
+export interface DocxFormatTextOperation {
+  op: 'formatText';
+  target: DocxTextTarget;
+  set?: DocxTextMarks;
+  clear?: readonly DocxTextMarkName[] | 'all';
+  onUnsupported?: 'refuse' | 'skip';
 }
 
 export type DocxEditStep =
@@ -232,6 +251,14 @@ export interface DocxEditReceipt {
   removedParagraphs: DocxParagraphTarget[];
   revisionIds: string[];
   control?: DocxResolvedControl;
+  /** Paragraphs a `formatText` step with `onUnsupported: 'skip'` left as they are. */
+  skipped?: DocxSkippedParagraph[];
+}
+
+/** A paragraph a step left as it is, and why. */
+export interface DocxSkippedParagraph {
+  paraId: string;
+  reason: string;
 }
 
 /** What one step would do; it cannot be committed later. */
