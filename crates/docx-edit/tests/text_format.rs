@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use docx_edit::{
     EditApplication, EditCtx, EditFailureCode, EditRefusal, EditRequest, EditingDoc,
-    InlineFormatDelta, Loc, LocRange, Patch, SegmentContent, StoryInfoKind, StoryRange, StorySegment, UndoSession,
-    seed_from_docx,
+    InlineFormatDelta, Loc, LocRange, Patch, SegmentContent, StoryInfoKind, StoryRange,
+    StorySegment, UndoSession, seed_from_docx,
 };
 use serde_json::{Value, json};
 use yrs::Any;

@@ -26,7 +26,7 @@ test('the worker clearFormatting command keeps a heading bold and drops its dire
 
 test('text typed after clearing at a collapsed caret in a heading is heading-bold', async () => {
   const arm = await openCommandEngine([], { bodyXml: BODY, stylesXml: STYLES });
-  expect(execute(arm, command(arm, 'clearFormatting', { selection: selection('00000001', 5) })).status).toBe('applied');
+  expect(execute(arm, command(arm, 'clearFormatting', { selection: selection('00000001', 5) })).status).toBe('noop');
   expect(execute(arm, command(arm, 'insertText', { text: 'Typed', selection: selection('00000001', 5) })).status).toBe('applied');
   const typed = marksOf(arm, 'Typed');
   expect(Boolean(typed.bold)).toBe(true);

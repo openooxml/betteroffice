@@ -1447,7 +1447,12 @@ impl EditingDoc {
             let attrs: Attrs = match clear {
                 ClearMarks::Keys(keys) => keys
                     .iter()
-                    .map(|key| (Arc::from(*key), base.get(*key).cloned().unwrap_or(Any::Null)))
+                    .map(|key| {
+                        (
+                            Arc::from(*key),
+                            base.get(*key).cloned().unwrap_or(Any::Null),
+                        )
+                    })
                     .collect(),
                 ClearMarks::All => reset_to(&base),
             };
@@ -1675,9 +1680,10 @@ impl EditingDoc {
                     paragraph.start.max(range.start),
                     paragraph.end.min(range.end),
                 );
-                let attrs = paragraph_delta(delta, &range.story, paragraph.style.as_deref(), || {
-                    clearing_attrs_in(&chunks, from, to)
-                })?;
+                let attrs =
+                    paragraph_delta(delta, &range.story, paragraph.style.as_deref(), || {
+                        clearing_attrs_in(&chunks, from, to)
+                    })?;
                 if attrs.is_empty()
                     || (matches!(delta, RunDelta::Clear(_))
                         && !changes_units_in(&chunks, from, to, &attrs, false))
