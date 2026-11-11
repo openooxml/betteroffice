@@ -3,4 +3,4 @@
 "@betteroffice/xlsx-react": minor
 ---
 
-Adds experimental `selection-settle` events and `snapshot.selectionSettled` for installed plugins by default, plus `{ kind: 'selection' }` anchor geometry. XLSX also adds `readAnchorGeometries`.
+Adds experimental `selection-settle` events, `snapshot.selectionSettled` and `{ kind: 'selection' }` anchor geometry for plugins; XLSX adds `readAnchorGeometries`. DOCX plugins now receive header and footer caret moves, and a remote edit removing the story that holds the caret clears the selection.
