@@ -55,11 +55,18 @@ struct Built {
 fn build(fixture: &Fixture, runs: Value, attrs: Value, width: f64) -> Built {
     let chains = json!({ "face|0|0": [fixture.face.to_u32(), fixture.latin.to_u32()] });
     let block = json!({ "kind": "paragraph", "id": 0, "runs": runs, "attrs": attrs, "pmStart": 1, "pmEnd": 200 });
+    let mut measure_block = block.clone();
+    for run in measure_block["runs"].as_array_mut().unwrap() {
+        run["wordFeatures"] = json!(ooxml_text::ligature_features(
+            run["ligatures"].as_str(),
+            run["contextualAlternates"].as_bool(),
+        ));
+    }
     let measure: Value = serde_json::from_str(
         &ooxml_text::measure_paragraph_json(
             &fixture.store,
             &json!({
-                "block": block,
+                "block": measure_block,
                 "maxWidth": width,
                 "fontChains": chains,
                 "authoritativeShaping": true,
@@ -98,6 +105,44 @@ fn list_of(fixture: &Fixture, input: &Value) -> DisplayList {
 
 fn painted(fixture: &Fixture, built: &Built) -> DisplayList {
     list_of(fixture, &built.input)
+}
+
+#[test]
+fn carlito_paints_the_measured_optional_ligatures() {
+    let fixture = fixture(include_bytes!(
+        "../../../packages/fonts/assets/Carlito-Regular.ttf"
+    ));
+    let mut counts = Vec::new();
+    for setting in [None, Some("none"), Some("standardContextual")] {
+        let mut run = text_run("fi ti", 1);
+        if let Some(setting) = setting {
+            run["ligatures"] = json!(setting);
+        }
+        let built = build(&fixture, json!([run]), json!({}), FRAG_WIDTH);
+        let measured =
+            ooxml_text::unpack_glyph_runs(built.measure["lines"][0]["glyphRuns"].as_str().unwrap())
+                .unwrap();
+        let expected: Vec<_> = measured
+            .iter()
+            .flat_map(|run| run.glyphs.iter().map(|glyph| glyph.id))
+            .collect();
+        for list in [painted(&fixture, &built), reshaped(&fixture, &built)] {
+            let actual: Vec<_> = glyph_runs(&list).iter().flat_map(|run| ids(run)).collect();
+            assert_eq!(actual, expected);
+            for run in glyph_runs(&list) {
+                let encoded = serde_json::to_value(run).unwrap();
+                if setting == Some("standardContextual") {
+                    assert_eq!(encoded["fontFeatures"], json!(["liga", "clig"]));
+                } else {
+                    assert!(encoded.get("fontFeatures").is_none());
+                }
+            }
+        }
+        counts.push(expected.len());
+    }
+    assert_eq!(counts[0], 5);
+    assert_eq!(counts[1], counts[0]);
+    assert!(counts[2] < counts[0]);
 }
 
 fn reshaped(fixture: &Fixture, built: &Built) -> DisplayList {

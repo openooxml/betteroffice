@@ -263,6 +263,9 @@ fn paint_text_core(
         .unwrap_or(0.0);
     let x = number_f32(&run.x)?;
     let baseline = number_f32(&run.baseline_y)?;
+    let features = docx_layout::display_list::docx_paint_features(
+        run.attrs.font_features.as_deref().map(Vec::as_slice),
+    );
     let draw = |context: &mut PaintContext<'_, '_>, transform: Transform| {
         paint_cased_text(
             context,
@@ -276,6 +279,7 @@ fn paint_text_core(
             letter_spacing,
             word_spacing,
             small_caps,
+            &features,
             color,
             transform,
         )
@@ -316,6 +320,7 @@ fn paint_cased_text(
     letter_spacing: f32,
     word_spacing: f32,
     small_caps: bool,
+    features: &[ShapeFeature],
     color: tiny_skia::Color,
     transform: Transform,
 ) -> Result<f32, String> {
@@ -331,7 +336,7 @@ fn paint_cased_text(
             language,
             letter_spacing,
             word_spacing,
-            &[],
+            features,
             color,
             transform,
         );
@@ -393,7 +398,7 @@ fn paint_cased_text(
             language,
             spacing,
             word_spacing,
-            &[],
+            features,
             color,
             transform,
         )?;
@@ -838,7 +843,7 @@ fn paint_resolved_text(
     for segment_index in order {
         let segment = &segments[segment_index];
         let segment_text = &text[segment.start..segment.end];
-        let glyphs = shape_with_properties(
+        let glyphs = ooxml_text::shape::shape_with_word_features(
             context.resources.fonts,
             segment.font,
             segment_text,
@@ -1077,6 +1082,90 @@ mod tests {
     use super::*;
 
     #[test]
+    fn text_primitive_kerning_advances_match_measurement() {
+        let mut fonts = FontStore::new();
+        let id = fonts
+            .register(include_bytes!("../tests/assets/Carlito-Regular.ttf").to_vec())
+            .unwrap();
+        let chains = crate::FontChains::from([("carlito|0|0".to_string(), vec![id])]);
+        let images = crate::ImageMap::new();
+        let resources = RenderResources::new(&fonts, &chains, &images);
+        let mut pixmap = Pixmap::new(100, 40).unwrap();
+        let mut cache = GlyphCache::default();
+        let mut specs = FontSpecCache::default();
+        let mut budget = PageBudget::new(100, 40);
+        let mut skipped = BTreeMap::new();
+        let mut context = PaintContext {
+            pixmap: &mut pixmap,
+            resources: &resources,
+            cache: &mut cache,
+            specs: &mut specs,
+            budget: &mut budget,
+            base_transform: Transform::identity(),
+            mask: None,
+            retained_mask_bytes: 0,
+            opacity: 1.0,
+            skipped: &mut skipped,
+        };
+        let parsed = context.specs.font("16px Carlito").unwrap();
+        let mut advances = Vec::new();
+        for threshold in [None, Some(8.0)] {
+            let kern = ooxml_text::kern_enabled(24, if threshold.is_some() { 16 } else { 0 });
+            let listed = kern.then_some([ShapeFeature {
+                tag: *b"kern",
+                value: 1,
+            }]);
+            let features = docx_layout::display_list::docx_paint_features(
+                listed.as_ref().map(|features| features.as_slice()),
+            );
+            let painted = paint_cased_text(
+                &mut context,
+                "AV",
+                2.0,
+                30.0,
+                &parsed.spec,
+                &parsed.chain_key,
+                false,
+                None,
+                0.0,
+                0.0,
+                false,
+                &features,
+                tiny_skia::Color::BLACK,
+                Transform::identity(),
+            )
+            .unwrap();
+            let measured: serde_json::Value = serde_json::from_str(
+                &ooxml_text::measure_paragraph_json(
+                    &fonts,
+                    &serde_json::json!({
+                        "block": {"kind": "paragraph", "runs": [{
+                            "kind": "text", "text": "AV", "kerningMinPt": threshold,
+                            "wordFeatures": ooxml_text::ligature_features(None, None),
+                        }]},
+                        "maxWidth": 1000, "fontChains": {"carlito|0|0": [id.to_u32()]},
+                        "defaults": {"fontSize": 12, "fontFamily": "Carlito"},
+                        "authoritativeShaping": true,
+                    })
+                    .to_string(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            let measured = measured["lines"][0]["width"].as_f64().unwrap() as f32;
+            assert!(
+                (painted - measured).abs() < 0.001,
+                "{painted} against {measured}"
+            );
+            advances.push(painted);
+        }
+        let separate = measure_text(&fonts, id, "A", 16.0).unwrap()
+            + measure_text(&fonts, id, "V", 16.0).unwrap();
+        assert!((advances[0] - separate).abs() < 0.001);
+        assert!(advances[1] < advances[0]);
+    }
+
+    #[test]
     fn small_caps_advance_by_layouts_synthesized_measure() {
         let mut fonts = FontStore::new();
         let id = fonts
@@ -1115,6 +1204,7 @@ mod tests {
             0.0,
             0.0,
             true,
+            &[],
             tiny_skia::Color::BLACK,
             Transform::identity(),
         )
@@ -1140,6 +1230,7 @@ mod tests {
             2.0,
             0.0,
             true,
+            &[],
             tiny_skia::Color::BLACK,
             Transform::identity(),
         )

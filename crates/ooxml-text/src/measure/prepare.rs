@@ -816,6 +816,7 @@ fn prepare_field_run(
         base_direction(run.rtl, input),
         input.font_chains,
         (run.bold, run.italic, family),
+        &run.word_features,
     )?;
     Ok(PreparedField {
         width,
@@ -897,6 +898,7 @@ fn styled_font_resolver(
 /// Width of `text` shaped plainly through `chain` — no caps, letter spacing
 /// or horizontal scale — for field fallbacks and list markers. Segments split
 /// at font and UBA level boundaries under `base`.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn measure_plain_text(
     store: &FontStore,
     chain: &[FontId],
@@ -905,6 +907,7 @@ pub(super) fn measure_plain_text(
     base: crate::bidi::BaseDirection,
     font_chains: FontChains<'_>,
     style: (bool, bool, &str),
+    features: &[ShapeFeature],
 ) -> Result<f32, MeasureError> {
     if text.len() > MAX_RUN_TEXT_BYTES {
         return Err(MeasureError::Unsupported(format!(
@@ -951,9 +954,27 @@ pub(super) fn measure_plain_text(
             seg_end += 1;
         }
         let seg_text: String = plan[seg_start..seg_end].iter().map(|&(c, ..)| c).collect();
-        let glyphs =
-            shape_with_direction(store, font, &seg_text, size_px, &[], shape_direction(level))
-                .map_err(|e| MeasureError::Invalid(format!("shaping failed: {e}")))?;
+        let glyphs = if features.is_empty() {
+            shape_with_direction(
+                store,
+                font,
+                &seg_text,
+                size_px,
+                features,
+                shape_direction(level),
+            )
+        } else {
+            crate::shape::shape_with_word_features(
+                store,
+                font,
+                &seg_text,
+                size_px,
+                features,
+                shape_direction(level),
+                None,
+            )
+        }
+        .map_err(|e| MeasureError::Invalid(format!("shaping failed: {e}")))?;
         width += glyphs.iter().map(|g| g.x_advance).sum::<f32>();
         seg_start = seg_end;
     }
@@ -1176,6 +1197,8 @@ fn prepare_text_run(
     let mut slot_chains: [Option<Vec<FontId>>; 4] = [None, None, None, None];
     let mut slot_resolvers: [Option<FontResolver>; 4] = [None, None, None, None];
     let mut oversized: Vec<FontId> = Vec::new();
+    let typography =
+        (!run.word_features.is_empty()).then(|| crate::word_metrics::word_typography_mask(text));
     for (char_index, ch) in text.chars().enumerate() {
         let slot = char_slot(ch, run.complex_script, east_asia_hint, previous_slot);
         previous_slot = slot;
@@ -1256,6 +1279,9 @@ fn prepare_text_run(
                 (threshold * 2.0).round() as u32,
             )
         }));
+        if typography.as_ref().is_some_and(|mask| mask[char_index]) {
+            features.extend_from_slice(&run.word_features);
+        }
         if input.authoritative_shaping
             && run.small_caps
             && !run.all_caps
