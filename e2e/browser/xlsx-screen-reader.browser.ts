@@ -108,7 +108,12 @@ test('xlsx screen reader: rapid navigation is announced once, for the cell it st
     new MutationObserver(() => seen.push(region.textContent ?? '')).observe(region, { childList: true, characterData: true, subtree: true });
     (window as unknown as { announcements: string[] }).announcements = seen;
   });
-  for (let index = 0; index < 6; index++) await grid.press('ArrowDown', { delay: 20 });
+  const input = await page.context().newCDPSession(page);
+  const down = { key: 'ArrowDown', code: 'ArrowDown', windowsVirtualKeyCode: 40, nativeVirtualKeyCode: 40 };
+  await Promise.all(Array.from({ length: 6 }, () => [
+    input.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...down }),
+    input.send('Input.dispatchKeyEvent', { type: 'keyUp', ...down }),
+  ]).flat());
   await heard(page, 'A7, empty');
   const seen = await page.evaluate(() => (window as unknown as { announcements: string[] }).announcements);
   expect(seen.map((text) => text.trim())).toEqual(['A7, empty']);
