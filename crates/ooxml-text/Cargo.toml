@@ -22,6 +22,7 @@ skrifa = "0.44"
 rustybuzz = "0.20"
 unicode-linebreak = "0.1"
 unicode-bidi = "0.3"
+unicode-script = "0.5"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 

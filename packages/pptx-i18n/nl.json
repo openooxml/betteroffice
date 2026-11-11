@@ -235,7 +235,7 @@
       "gestureActive": "Voltooi eerst het aanwijzergebaar.",
       "commandFailed": "De opdracht is mislukt.",
       "permissionDenied": "De hosttoepassing heeft deze plug-in geen toestemming gegeven om deze opdracht te gebruiken.",
-      "unsupportedPolicy": "Plug-ins kunnen deze opdracht nog niet uitvoeren. Gebruik in plaats daarvan een bewerkingsbatch.",
+      "unsupportedPolicy": "Deze opdracht vereist een gebruikersactie in de eigen interface van de plug-in.",
       "pluginUnavailable": "De plug-in is niet meer actief.",
       "aborted": "De plug-inactie is geannuleerd voordat de opdracht werd uitgevoerd.",
       "clipboardUnavailable": "Toegang tot het klembord is niet beschikbaar of is geweigerd.",

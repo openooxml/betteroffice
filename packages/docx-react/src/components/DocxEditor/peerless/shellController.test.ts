@@ -42,6 +42,36 @@ function shellFixture() {
   return { ...base, binding, present(next: PeerlessViewSnapshot) { view = next; for (const listener of listeners) listener(); } };
 }
 
+test('scoped plain-text paste starts reading before worker input admission', async () => {
+  const { controller, binding } = fixture();
+  const navigatorDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  const text = Promise.resolve('plain');
+  const readText = mock(() => text);
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { clipboard: { readText } } });
+  let clipboardText: Promise<string> | undefined;
+  let gesture = true;
+  controller.update({ read: async () => ({} as never), focus() {}, zoom: 1,
+    perform: async (_id, _args, read) => { clipboardText = read; return { ok: true, status: 'executed' }; } });
+  controller.attach(binding);
+  const scoped = controller.commands.scoped({ gesture: () => gesture, deny: () => null, subscribe: () => () => {} });
+  try {
+    const pending = scoped.execute('pasteAsPlainText', null);
+    expect(readText).toHaveBeenCalledTimes(1);
+    expect(clipboardText).toBeUndefined();
+    gesture = false;
+    expect(await pending).toMatchObject({ ok: true });
+    expect(clipboardText).toBe(text);
+    expect(await scoped.execute('pasteAsPlainText', null)).toMatchObject({
+      ok: false, failure: { code: 'unsupported-policy' },
+    });
+    expect(readText).toHaveBeenCalledTimes(1);
+  } finally {
+    controller.dispose();
+    if (navigatorDescriptor) Object.defineProperty(globalThis, 'navigator', navigatorDescriptor);
+    else Reflect.deleteProperty(globalThis, 'navigator');
+  }
+});
+
 test('shell snapshots retain paint-only frames while full subscribers see every newest view', () => {
   const { controller, present } = shellFixture();
   const shell = controller.getShellSnapshot();

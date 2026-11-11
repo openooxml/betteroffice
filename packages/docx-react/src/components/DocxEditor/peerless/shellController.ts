@@ -89,7 +89,7 @@ interface Options extends Pick<DocxEditorProps, 'i18n' | 'theme' | 'mode' | 'rea
   hostComments?: Comment[];
   commentsSidebar?: { open: boolean; control: DocxCommandEnvironment['sidebarControl']; toggle(): void };
   readPositionAtPoint?(x: number, y: number): Promise<import('../types').DocxPointPosition | null>;
-  perform?(id: DocxCommandId, args: unknown): Promise<DocxCommandResult>;
+  perform?(id: DocxCommandId, args: unknown, clipboardText?: Promise<string>): Promise<DocxCommandResult>;
   prepareFontFamily?(family: string): Promise<DocxFontEnvironment | void>;
   /** The worker accepted `environment` from {@link prepareFontFamily}. */
   fontEnvironmentApplied?(environment: DocxFontEnvironment): void;
@@ -418,7 +418,8 @@ export function createPeerlessShellController(initial: Options) {
       }
       return operation();
     },
-    async perform(id, args) {
+    readClipboardText: () => navigator.clipboard.readText(),
+    async perform(id, args, _env, clipboardText) {
       if (id === 'editingMode') {
         const next = (args as { mode: NonNullable<DocxEditorProps['mode']> }).mode;
         if (options.mode) { emit(options.onModeChange, next); return { ok: true, status: 'requested' }; }
@@ -605,7 +606,7 @@ export function createPeerlessShellController(initial: Options) {
         if (result && typeof result === 'object' && 'ok' in result) return result;
         return result === false ? { ok: false, failure: { code: 'command-failed', message: 'Image transform is unavailable.' } } : { ok: true, status: 'executed' };
       }
-      return options.perform?.(id, args) ?? { ok: false, failure: { code: 'unsupported-command', message: translate('commands.reasons.unsupportedCommand') } };
+      return options.perform?.(id, args, clipboardText) ?? { ok: false, failure: { code: 'unsupported-command', message: translate('commands.reasons.unsupportedCommand') } };
     },
     capture: (target) => {
       const current = capture();

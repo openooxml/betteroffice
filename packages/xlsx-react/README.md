@@ -132,6 +132,12 @@ Failures carry `{ code, message }`: `unknown-proposal` for an unregistered id,
 context or unpainted layout. The result type also allows `stale-version`,
 `ambiguous-target` and `unsupported`.
 
+Granted mutating built-in commands require `document: "write"`. A trusted `click`, `keydown`,
+or `pointerup` in the plugin's own UI, including its contributed toolbar buttons, admits
+that plugin's mutating calls until the event finishes dispatching, including the handler
+and microtasks queued before it settles, whichever of the plugin's code paths makes them.
+Another plugin's calls and calls after the window closes refuse with `unsupported-policy`.
+
 ## Structured export
 
 Await `api.exportStructured()` or `api.exportMarkdown()` for content with positional anchors and

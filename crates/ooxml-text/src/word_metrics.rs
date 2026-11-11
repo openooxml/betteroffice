@@ -508,9 +508,136 @@ pub fn kern_features(enabled: bool) -> Vec<ShapeFeature> {
     }
 }
 
+/// Word's optional Latin, Greek and Cyrillic OpenType substitutions.
+pub fn ligature_features(
+    ligatures: Option<&str>,
+    contextual_alternates: Option<bool>,
+) -> Vec<ShapeFeature> {
+    let bits = match ligatures.unwrap_or("none") {
+        "standard" => 1,
+        "contextual" => 2,
+        "historical" => 4,
+        "discretionary" => 8,
+        "standardContextual" => 3,
+        "standardHistorical" => 5,
+        "contextualHistorical" => 6,
+        "standardDiscretionary" => 9,
+        "contextualDiscretionary" => 10,
+        "historicalDiscretionary" => 12,
+        "standardContextualHistorical" => 7,
+        "standardContextualDiscretionary" => 11,
+        "standardHistoricalDiscretionary" => 13,
+        "contextualHistoricalDiscretionary" => 14,
+        "all" => 15,
+        _ => 0,
+    };
+    [
+        (*b"liga", bits & 1 != 0),
+        (*b"clig", bits & 2 != 0),
+        (*b"hlig", bits & 4 != 0),
+        (*b"dlig", bits & 8 != 0),
+        (*b"calt", contextual_alternates == Some(true)),
+    ]
+    .into_iter()
+    .filter(|(tag, enabled)| *enabled || !matches!(tag, b"hlig" | b"dlig"))
+    .map(|(tag, enabled)| ShapeFeature {
+        tag,
+        value: u32::from(enabled),
+    })
+    .collect()
+}
+
+/// Common and Inherited characters follow their surrounding script.
+pub fn word_typography_mask(text: &str) -> Vec<bool> {
+    use unicode_script::{Script, UnicodeScript};
+
+    let scripts: Vec<_> = text.chars().map(|ch| ch.script()).collect();
+    let strong = |script| !matches!(script, Script::Common | Script::Inherited);
+    let mut previous = scripts.iter().copied().find(|script| strong(*script));
+    scripts
+        .into_iter()
+        .map(|script| {
+            if strong(script) {
+                previous = Some(script);
+            }
+            matches!(
+                previous,
+                Some(Script::Latin | Script::Greek | Script::Cyrillic)
+            )
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{LineBox, LineSpacingRule, apply_spacing_rule, snap_line_box, snap_line_height};
+
+    #[test]
+    fn word_optional_feature_table() {
+        for (value, bits) in [
+            (None, 0),
+            (Some("none"), 0),
+            (Some("invalid"), 0),
+            (Some("standard"), 1),
+            (Some("contextual"), 2),
+            (Some("historical"), 4),
+            (Some("discretionary"), 8),
+            (Some("standardContextual"), 3),
+            (Some("standardHistorical"), 5),
+            (Some("contextualHistorical"), 6),
+            (Some("standardDiscretionary"), 9),
+            (Some("contextualDiscretionary"), 10),
+            (Some("historicalDiscretionary"), 12),
+            (Some("standardContextualHistorical"), 7),
+            (Some("standardContextualDiscretionary"), 11),
+            (Some("standardHistoricalDiscretionary"), 13),
+            (Some("contextualHistoricalDiscretionary"), 14),
+            (Some("all"), 15),
+        ] {
+            for alternates in [None, Some(false), Some(true)] {
+                let expected: Vec<_> = [
+                    (*b"liga", u32::from(bits & 1 != 0)),
+                    (*b"clig", u32::from(bits & 2 != 0)),
+                    (*b"hlig", u32::from(bits & 4 != 0)),
+                    (*b"dlig", u32::from(bits & 8 != 0)),
+                    (*b"calt", u32::from(alternates == Some(true))),
+                ]
+                .into_iter()
+                .filter(|(tag, value)| *value != 0 || !matches!(tag, b"hlig" | b"dlig"))
+                .collect();
+                let actual: Vec<_> = super::ligature_features(value, alternates)
+                    .into_iter()
+                    .map(|feature| (feature.tag, feature.value))
+                    .collect();
+                assert_eq!(actual, expected, "{value:?}, {alternates:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn word_optional_features_leave_other_scripts_alone() {
+        for text in ["العربية", "עברית", "ܐܒ", "ހށ", "नमस्ते", "ไทย", "漢字"]
+        {
+            assert!(
+                super::word_typography_mask(text)
+                    .iter()
+                    .all(|enabled| !enabled)
+            );
+        }
+        assert!(
+            super::word_typography_mask(" (fi) αβ аб e\u{301}")
+                .iter()
+                .all(|enabled| *enabled)
+        );
+        assert_eq!(
+            super::word_typography_mask("fi اب"),
+            [true, true, true, false, false]
+        );
+        assert_eq!(
+            super::word_typography_mask("اب fi"),
+            [false, false, false, true, true]
+        );
+    }
 
     #[test]
     fn snap_rounds_up_to_whole_rows() {

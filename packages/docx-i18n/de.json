@@ -864,7 +864,7 @@
       "targetChanged": "Der Inhalt, für den diese Aktion geöffnet wurde, hat sich geändert, bevor sie angewendet werden konnte.",
       "commandFailed": "Der Befehl konnte nicht abgeschlossen werden.",
       "permissionDenied": "Die Host-Anwendung hat diesem Plugin die Verwendung dieses Befehls nicht gestattet.",
-      "unsupportedPolicy": "Plugins können diesen Befehl noch nicht ausführen. Verwenden Sie stattdessen einen Bearbeitungsstapel.",
+      "unsupportedPolicy": "Dieser Befehl erfordert eine Benutzeraktion in der eigenen Oberfläche des Plugins.",
       "pluginUnavailable": "Das Plugin ist nicht mehr aktiv.",
       "aborted": "Die Pluginaktion wurde abgebrochen, bevor der Befehl ausgeführt wurde."
     }

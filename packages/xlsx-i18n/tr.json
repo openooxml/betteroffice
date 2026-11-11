@@ -151,7 +151,7 @@
       "commandFailed": "Değişiklik uygulanamadı.",
       "commandRefused": "Komut reddedildi.",
       "permissionDenied": "Ana uygulama bu eklentinin bu komutu kullanmasına izin vermedi.",
-      "unsupportedPolicy": "Eklentiler bu komutu henüz çalıştıramaz. Bunun yerine bir düzenleme toplu işlemi kullanın.",
+      "unsupportedPolicy": "Bu komut, eklentinin kendi arayüzünde bir kullanıcı işlemi gerektirir.",
       "pluginUnavailable": "Eklenti artık etkin değil.",
       "aborted": "Eklenti eylemi komut çalışmadan önce iptal edildi.",
       "clipboardUnavailable": "Bu tarayıcı menüden yapıştırmaya izin vermiyor. Klavye kısayolunu kullanın.",

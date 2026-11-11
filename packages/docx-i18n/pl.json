@@ -864,7 +864,7 @@
       "targetChanged": "Zawartość, dla której otwarto tę czynność, uległa zmianie przed jej zastosowaniem.",
       "commandFailed": "Nie można było wykonać polecenia.",
       "permissionDenied": "Aplikacja hosta nie zezwoliła tej wtyczce na użycie tego polecenia.",
-      "unsupportedPolicy": "Wtyczki nie mogą jeszcze uruchamiać tego polecenia. Użyj zamiast tego pakietu edycji.",
+      "unsupportedPolicy": "To polecenie wymaga działania użytkownika we własnym interfejsie wtyczki.",
       "pluginUnavailable": "Wtyczka nie jest już aktywna.",
       "aborted": "Działanie wtyczki zostało anulowane przed wykonaniem polecenia."
     }
