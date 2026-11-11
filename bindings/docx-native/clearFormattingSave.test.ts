@@ -214,7 +214,7 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
       }],
       ['a row inserted above the header row, text typed into a cell of the inserted first row', (session) => {
         typeIntoInsertedFirstRow(session);
-        return [{ marker: 'New head', session: true, saved: null, reopens: true }];
+        return [{ marker: 'New head', session: false, saved: '<w:b w:val="0"/>', reopens: false }];
       }],
       ['the header row deleted', (session) => {
         session.deleteRow({ anchor: at(0, 0), head: at(0, 0) });
