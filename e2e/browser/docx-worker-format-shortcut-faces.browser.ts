@@ -137,7 +137,11 @@ for (const arm of ['', '&peerless=0']) {
       const measured = measure(after.runs);
       await pageView.screenshot({ path: info.outputPath(`${label}-after.png`) });
 
-      const selected = after.runs.filter((item) => item.text.includes('brown') || item.text.includes('jumps'));
+      const bold = (weight: string) => /bold|[6-9]00/.test(weight);
+      const formatted = (style: string, weight: string) => entry.name === 'bold' ? bold(weight) : style === 'italic';
+      const ordered = measured.runs.flat();
+      const selected = after.runs.filter((item) => item.text.length > 0 && formatted(item.fontStyle, item.fontWeight));
+      const selectedLeft = selected.length ? Math.min(...selected.map((item) => item.left)) : 0;
       const selectedRight = selected.length ? Math.max(...selected.map((item) => item.left + item.width)) : 0;
       const underlines = after.marks.filter((mark) => mark.height <= 4 && selected.some((item) =>
         mark.left < item.left + item.width && mark.left + mark.width > item.left && Math.abs(mark.top - (item.top + item.height)) < item.height));
@@ -154,10 +158,13 @@ for (const arm of ['', '&peerless=0']) {
       expect.soft(measured.maxGap, 'largest gap between adjacent runs').toBeLessThanOrEqual(Math.max(before.maxGap, 0) + 6);
       expect.soft(measured.right, 'right edge of the line').toBeLessThanOrEqual(CONTENT_RIGHT + 1);
       expect.soft(Math.abs(measured.right - before.right), 'line width change').toBeLessThanOrEqual(12);
-      expect.soft(selected.length, 'mirror runs holding the selected words').toBeGreaterThan(0);
-      if (entry.name === 'bold') expect.soft(selected.every((item) => /bold|[6-9]00/.test(item.fontWeight)), 'selected runs are bold').toBe(true);
-      else expect.soft(selected.every((item) => item.fontStyle === 'italic'), 'selected runs are italic').toBe(true);
+      expect.soft(ordered.filter((item) => formatted(item.style, item.weight)).map((item) => item.text).join(''), `text set ${entry.button.toLowerCase()}`).toBe(SELECTED);
+      if (entry.underlined) {
+        expect.soft(ordered.filter((item) => bold(item.weight)).map((item) => item.text).join(''), 'text kept bold').toBe(SELECTED);
+        expect.soft(underlines.length, 'underline marks under the selected words').toBeGreaterThan(0);
+      }
       for (const mark of underlines) {
+        expect.soft(mark.left, 'underline left edge').toBeGreaterThanOrEqual(selectedLeft - 2);
         expect.soft(mark.left + mark.width, 'underline right edge').toBeLessThanOrEqual(selectedRight + 2);
       }
     });
