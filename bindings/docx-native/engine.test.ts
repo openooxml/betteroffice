@@ -9,7 +9,6 @@ import initPreflight, { font_preflight as wasmFontPreflight } from '../../packag
 import { openFailureKind } from '../../packages/docx-react/src/components/openFailure';
 import {
   isEngineTrap,
-  NATIVE_ENGINE_OBJECT_FAILED,
   NATIVE_MEMORY_BUDGET_EXCEEDED,
   nativeBudgetFailure,
 } from '../../shared/office-session/trap';
@@ -71,6 +70,15 @@ function caughtValue(call: () => unknown): unknown {
     return error;
   }
   throw new Error('Expected the engine call to throw');
+}
+
+/** A later call on an object that failed on the heap limit answers with that same budget failure. */
+function expectSameBudgetFailure(later: unknown, budget: unknown) {
+  expect(later).toBeInstanceOf(Error);
+  expect((later as Error).message.startsWith(NATIVE_MEMORY_BUDGET_EXCEEDED)).toBe(true);
+  expect(nativeBudgetFailure((later as Error).message))
+    .toEqual(nativeBudgetFailure((budget as Error).message));
+  expect(isEngineTrap(later)).toBe(true);
 }
 
 function expectThrownParity(wasmCall: () => unknown, nativeCall: () => unknown): unknown {
@@ -1297,8 +1305,10 @@ describe('docx native engine parity', () => {
 
       const refused = caughtValue(() => failing.version());
       expect(refused).toBeInstanceOf(Error);
-      expect((refused as Error).message).toBe(NATIVE_ENGINE_OBJECT_FAILED);
+      expectSameBudgetFailure(refused, budget);
       expect(isEngineTrap(refused)).toBe(true);
+      expectSameBudgetFailure(caughtValue(() => failing.stories_changed_since(0)), budget);
+      expectSameBudgetFailure(caughtValue(() => failing.fail_compared_docx_json('projection failed')), budget);
     } finally {
       expect(() => failing.free()).not.toThrow();
     }
@@ -1324,7 +1334,7 @@ describe('docx native engine parity', () => {
         native.set_wasm_heap_limit(Number.NaN);
       }
       expect(nativeBudgetFailure((budget as Error).message)).toMatchObject({ budgetBytes: 0 });
-      expect((caughtValue(() => session.version()) as Error).message).toBe(NATIVE_ENGINE_OBJECT_FAILED);
+      expectSameBudgetFailure(caughtValue(() => session.version()), budget);
     } finally {
       session.free();
     }
@@ -1348,11 +1358,11 @@ describe('docx native engine parity', () => {
         native.set_wasm_heap_limit(Number.NaN);
       }
       expect(nativeBudgetFailure((budget as Error).message)).toMatchObject({ budgetBytes: 0 });
-      expect((refused as Error).message).toBe(NATIVE_ENGINE_OBJECT_FAILED);
+      expectSameBudgetFailure(refused, budget);
       expect(isEngineTrap(entry)).toBe(true);
       expect(nativeBudgetFailure((entry as Error).message)).toMatchObject({ budgetBytes: 0 });
-      expect((caughtValue(() => other.version()) as Error).message).toBe(NATIVE_ENGINE_OBJECT_FAILED);
-      expect((caughtValue(() => failed.version()) as Error).message).toBe(NATIVE_ENGINE_OBJECT_FAILED);
+      expectSameBudgetFailure(caughtValue(() => other.version()), entry);
+      expectSameBudgetFailure(caughtValue(() => failed.version()), budget);
     } finally {
       failed.free();
       other.free();

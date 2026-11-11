@@ -143,10 +143,11 @@ fn enter_object(failure: &Failure, env: Env) -> Result<()> {
         return Err(error);
     }
     if refused {
+        let message = crate::heap::exceeded();
         if let Ok(mut failure) = failure.try_borrow_mut() {
-            failure.get_or_insert_with(|| FAILED_OBJECT.to_owned());
+            failure.get_or_insert_with(|| message.clone());
         }
-        panic!("{}", crate::heap::exceeded());
+        panic!("{message}");
     }
     CURRENT_OBJECT.set(failure);
     Ok(())
@@ -209,7 +210,13 @@ impl Drop for EngineCall {
             if !object.is_null()
                 && let Ok(mut failure) = unsafe { &*object }.try_borrow_mut()
             {
-                failure.get_or_insert_with(|| FAILED_OBJECT.to_owned());
+                failure.get_or_insert_with(|| {
+                    if over || crate::heap::over_limit() {
+                        crate::heap::exceeded()
+                    } else {
+                        FAILED_OBJECT.to_owned()
+                    }
+                });
             }
             let mut exception = std::ptr::null_mut();
             // SAFETY: the env belongs to the call that is ending on this thread.
@@ -452,16 +459,17 @@ fn is_panic_exception(env: Env, exception: napi::sys::napi_value) -> bool {
 }
 
 /// The error an outer call fails with after an update observer made its object fail: the panic
-/// if the observer let it through, else the failed-object error.
+/// if the observer let it through, else the object's failure.
 fn trap_exception(
     env: Env,
     thrown: Option<napi::sys::napi_value>,
+    failure: &str,
 ) -> Option<napi::sys::napi_value> {
     if let Some(exception) = thrown.filter(|exception| is_panic_exception(env, *exception)) {
         return Some(exception);
     }
     let _ = take_pending_exception(env);
-    let _ = throw_error(&env, FAILED_OBJECT);
+    let _ = throw_error(&env, failure);
     take_pending_exception(env)
 }
 
@@ -728,8 +736,9 @@ impl EditSession {
                     .apply(Null, (bytes, u32::from(remote)).into())
             })();
             let thrown = take_pending_exception(env);
-            if self.failure.borrow().is_some() {
-                delivery.exception = trap_exception(env, thrown);
+            let failure = self.failure.borrow().clone();
+            if let Some(failure) = failure {
+                delivery.exception = trap_exception(env, thrown, &failure);
                 return;
             }
             next = self.next_update();
