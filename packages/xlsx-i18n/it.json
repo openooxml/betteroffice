@@ -227,7 +227,8 @@
     "rangeSelected": "Da {start} a {end} selezionato, {rows, plural, one {# riga} many {# righe} other {# righe}} per {columns, plural, one {# colonna} many {# colonne} other {# colonne}}",
     "sheetActivated": "{name}, foglio {index} di {count}",
     "cellInputLabel": "Modifica cella {address}",
-    "gridRoleDescription": "foglio di lavoro"
+    "gridRoleDescription": "foglio di lavoro",
+    "fillHandleLabel": "Maniglia di riempimento"
   },
   "plugins": {
     "toolbarGroup": "Plugin",

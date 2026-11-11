@@ -227,7 +227,8 @@
     "rangeSelected": "{start} bis {end} ausgewählt, {rows, plural, one {# Zeile} other {# Zeilen}} mal {columns, plural, one {# Spalte} other {# Spalten}}",
     "sheetActivated": "{name}, Arbeitsblatt {index} von {count}",
     "cellInputLabel": "Zelle {address} bearbeiten",
-    "gridRoleDescription": "Arbeitsblatt"
+    "gridRoleDescription": "Arbeitsblatt",
+    "fillHandleLabel": "Füllgriff"
   },
   "plugins": {
     "toolbarGroup": "Plugins",

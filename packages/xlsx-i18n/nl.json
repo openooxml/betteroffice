@@ -227,7 +227,8 @@
     "rangeSelected": "{start} tot {end} geselecteerd, {rows, plural, one {# rij} other {# rijen}} bij {columns, plural, one {# kolom} other {# kolommen}}",
     "sheetActivated": "{name}, werkblad {index} van {count}",
     "cellInputLabel": "Cel {address} bewerken",
-    "gridRoleDescription": "werkblad"
+    "gridRoleDescription": "werkblad",
+    "fillHandleLabel": "Vulgreep"
   },
   "plugins": {
     "toolbarGroup": "Plug-ins",

@@ -227,7 +227,8 @@
     "rangeSelected": "{start} a {end} selecionado, {rows, plural, one {# linha} many {# linhas} other {# linhas}} por {columns, plural, one {# coluna} many {# colunas} other {# colunas}}",
     "sheetActivated": "{name}, planilha {index} de {count}",
     "cellInputLabel": "Editar célula {address}",
-    "gridRoleDescription": "planilha"
+    "gridRoleDescription": "planilha",
+    "fillHandleLabel": "Alça de preenchimento"
   },
   "plugins": {
     "toolbarGroup": "Plugins",

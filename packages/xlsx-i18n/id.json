@@ -227,7 +227,8 @@
     "rangeSelected": "{start} sampai {end} dipilih, {rows} baris kali {columns} kolom",
     "sheetActivated": "{name}, lembar {index} dari {count}",
     "cellInputLabel": "Edit sel {address}",
-    "gridRoleDescription": "lembar kerja"
+    "gridRoleDescription": "lembar kerja",
+    "fillHandleLabel": "Gagang isi"
   },
   "plugins": {
     "toolbarGroup": "Plugin",

@@ -227,7 +227,8 @@
     "rangeSelected": "{start}부터 {end}까지 선택됨, {rows}행 × {columns}열",
     "sheetActivated": "{name}, 시트 {index}/{count}",
     "cellInputLabel": "셀 {address} 편집",
-    "gridRoleDescription": "워크시트"
+    "gridRoleDescription": "워크시트",
+    "fillHandleLabel": "채우기 핸들"
   },
   "plugins": {
     "toolbarGroup": "추가 기능",

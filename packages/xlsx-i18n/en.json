@@ -227,7 +227,8 @@
     "rangeSelected": "{start} to {end} selected, {rows, plural, one {# row} other {# rows}} by {columns, plural, one {# column} other {# columns}}",
     "sheetActivated": "{name}, sheet {index} of {count}",
     "cellInputLabel": "Edit cell {address}",
-    "gridRoleDescription": "worksheet"
+    "gridRoleDescription": "worksheet",
+    "fillHandleLabel": "Fill handle"
   },
   "plugins": {
     "toolbarGroup": "Plugins",

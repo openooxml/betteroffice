@@ -2392,6 +2392,30 @@ impl Workbook {
         Ok(result)
     }
 
+    /// Fill copies the block `source` over `destination` as one undoable
+    /// transaction: values and style indices are copied, formulas are
+    /// translated by their relative offset with `$` references kept, and the
+    /// source block tiles from the destination's top-left corner.
+    ///
+    /// `destination` is the complete filled rectangle and must start at
+    /// `source.start` and contain `source`; the source cells themselves are
+    /// left alone. This is copy tiling only — there is no series detection —
+    /// and an array formula, a partially covered merged range, an Excel table,
+    /// or a chart anchored in either rectangle is refused before anything
+    /// mutates.
+    pub fn fill_range(
+        &mut self,
+        sheet: SheetId,
+        source: CellRange,
+        destination: CellRange,
+        options: CalculationOptions,
+    ) -> Result<MutationResult> {
+        self.validate_bounded_range(sheet, source)?;
+        self.validate_bounded_range(sheet, destination)?;
+        let ops = crate::fill::fill_range_ops(&self.model, sheet, source, destination)?;
+        self.apply_carried_ops(ops, options)
+    }
+
     /// Moves a bounded range within one worksheet in one undoable transaction.
     /// Formulas that refer to the moved cells follow them; partially moved
     /// ranges and package features that cannot be rewritten are refused.

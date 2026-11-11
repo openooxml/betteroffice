@@ -227,7 +227,8 @@
     "rangeSelected": "Выделено {start} – {end}, {rows, plural, one {# строка} few {# строки} many {# строк} other {# строки}} на {columns, plural, one {# столбец} few {# столбца} many {# столбцов} other {# столбца}}",
     "sheetActivated": "{name}, лист {index} из {count}",
     "cellInputLabel": "Изменить ячейку {address}",
-    "gridRoleDescription": "лист"
+    "gridRoleDescription": "лист",
+    "fillHandleLabel": "Маркер заполнения"
   },
   "plugins": {
     "toolbarGroup": "Плагины",

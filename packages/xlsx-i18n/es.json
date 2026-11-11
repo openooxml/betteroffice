@@ -227,7 +227,8 @@
     "rangeSelected": "{start} a {end} seleccionado, {rows, plural, one {# fila} many {# filas} other {# filas}} por {columns, plural, one {# columna} many {# columnas} other {# columnas}}",
     "sheetActivated": "{name}, hoja {index} de {count}",
     "cellInputLabel": "Editar celda {address}",
-    "gridRoleDescription": "hoja de cálculo"
+    "gridRoleDescription": "hoja de cálculo",
+    "fillHandleLabel": "Controlador de relleno"
   },
   "plugins": {
     "toolbarGroup": "Complementos",

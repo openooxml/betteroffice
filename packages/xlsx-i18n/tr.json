@@ -227,7 +227,8 @@
     "rangeSelected": "{start} ile {end} arası seçildi, {rows} satır x {columns} sütun",
     "sheetActivated": "{name}, sayfa {index} / {count}",
     "cellInputLabel": "{address} hücresini düzenle",
-    "gridRoleDescription": "çalışma sayfası"
+    "gridRoleDescription": "çalışma sayfası",
+    "fillHandleLabel": "Doldurma tutamacı"
   },
   "plugins": {
     "toolbarGroup": "Eklentiler",

@@ -85,6 +85,16 @@ or WASM loader.
 references in one undo step; the destination is the new top-left cell. Surface errors when a move is
 refused rather than discarding the source workbook.
 
+## Filling a range
+
+`workbook.fillRange(sheet, source, destination)` copies the A1 source block over the complete
+destination rectangle as one undo step. `destination` includes the source and must start at its
+top-left corner; cells outside the source are filled by tiling the source block. Values, cached
+formula results, and styles are copied, and formulas are translated by their relative offset with
+`$` references kept. This is copy tiling only — there is no series or trend detection. Array
+formulas, merged cells, Excel tables, and charts anchored in either rectangle are refused before
+the workbook changes, so surface the error and keep the selection where it was.
+
 ## Printing and PNG export
 
 `workbook.printDisplayList(sheet, range, metrics, gridlines)` renders an A1 range using `PrintMetrics`

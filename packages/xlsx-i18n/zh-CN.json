@@ -227,7 +227,8 @@
     "rangeSelected": "已选择 {start} 到 {end}，{rows} 行 × {columns} 列",
     "sheetActivated": "{name}，第 {index} 个工作表，共 {count} 个",
     "cellInputLabel": "编辑单元格 {address}",
-    "gridRoleDescription": "工作表"
+    "gridRoleDescription": "工作表",
+    "fillHandleLabel": "填充柄"
   },
   "plugins": {
     "toolbarGroup": "插件",

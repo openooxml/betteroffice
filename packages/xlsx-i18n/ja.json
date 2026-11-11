@@ -227,7 +227,8 @@
     "rangeSelected": "{start} から {end} を選択、{rows} 行 × {columns} 列",
     "sheetActivated": "{name}、シート {index}/{count}",
     "cellInputLabel": "セル {address} を編集",
-    "gridRoleDescription": "ワークシート"
+    "gridRoleDescription": "ワークシート",
+    "fillHandleLabel": "フィルハンドル"
   },
   "plugins": {
     "toolbarGroup": "プラグイン",

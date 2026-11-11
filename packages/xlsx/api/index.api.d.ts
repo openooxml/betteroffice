@@ -1948,6 +1948,7 @@ import type { WorkbookFrame, WorkbookWireFrame } from './methods';
 export declare const WORKBOOK_REPLAY_MUTATORS: {
     editCell: true;
     editCells: true;
+    fillRange: true;
     applyEdits: true;
     applyOps: true;
     propose: true;
@@ -3481,6 +3482,7 @@ export class XlsxDocument {
      * Export the committed workbook with the version it was read at; nothing recalculates.
      */
     exportStructuredJson(options: string): string;
+    fillRangeJson(args: string): string;
     findTextJson(request: string): string;
     historyStateJson(): string;
     listDefinedNamesJson(request: string): string;
@@ -3677,6 +3679,7 @@ export interface InitOutput {
     readonly xlsxdocument_endPeerSnapshot: (a: number) => void;
     readonly xlsxdocument_exportMarkdownJson: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly xlsxdocument_exportStructuredJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_fillRangeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_findTextJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_historyStateJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_listDefinedNamesJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -4209,6 +4212,14 @@ export interface WorkbookHandle extends CollaborationReplica {
     editCellProfiled(sheet: number, row: number, col: number, input: string): ProfiledEditResult;
     /** apply a batch of inputs (paste path) as one undo step; dependents recalc. */
     editCells(sheet: number, edits: CellInputEdit[]): EditResult;
+    /**
+     * Fill copies `source` over the complete rectangle `destination` as one undo
+     * step. `destination` includes the source and must start at its top-left
+     * corner; values and styles are copied, formulas are translated with `$`
+     * preserved. Array formulas, merged cells, tables, and charts anchored in
+     * either rectangle are refused without changing the workbook.
+     */
+    fillRange(sheet: number, source: string, destination: string): EditResult;
     /** Move a range within one sheet and rewrite references in one native undo step. */
     moveRange(sheet: number, source: string, destination: string): EditResult;
     setHyperlink(sheet: number, hyperlink: WorkbookHyperlink): EditResult;

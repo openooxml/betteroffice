@@ -227,7 +227,8 @@
     "rangeSelected": "{start} à {end} sélectionné, {rows, plural, one {# ligne} many {# lignes} other {# lignes}} sur {columns, plural, one {# colonne} many {# colonnes} other {# colonnes}}",
     "sheetActivated": "{name}, feuille {index} sur {count}",
     "cellInputLabel": "Modifier la cellule {address}",
-    "gridRoleDescription": "feuille de calcul"
+    "gridRoleDescription": "feuille de calcul",
+    "fillHandleLabel": "Poignée de recopie"
   },
   "plugins": {
     "toolbarGroup": "Plugins",
