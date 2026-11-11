@@ -557,7 +557,7 @@ fn a_paragraph_mark_hidden_by_style_counts_as_hidden() {
 }
 
 #[test]
-fn a_visible_mark_inside_a_nested_table_keeps_the_hidden_row_height() {
+fn a_hidden_row_holding_a_nested_table_keeps_its_height() {
     let nested = row_with_nested_table("", "");
     let rows = |middle: String| render(&[row("Alpha", ""), middle, row("Charlie", "")], false);
     let marked = rows(nested.clone());

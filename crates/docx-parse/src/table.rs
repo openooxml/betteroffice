@@ -410,9 +410,10 @@ pub fn row_is_hidden_content_only(
     true
 }
 
-/// The paragraph mark's `w:vanish`, resolved as for a run: direct on the
-/// mark, then its character style, the paragraph style (or the default one),
-/// then the document defaults.
+/// The paragraph mark's `w:vanish`, resolved as for a run: direct on the mark
+/// wins; otherwise `w:vanish` is a toggle across the paragraph style (or the
+/// default one) and the mark's character style (§17.7.3); otherwise the
+/// document defaults. A style id naming a style of another type is ignored.
 fn paragraph_mark_hidden(
     paragraph: &XmlElement,
     styles: Option<&StyleMap>,
@@ -420,27 +421,25 @@ fn paragraph_mark_hidden(
 ) -> bool {
     let properties = paragraph.child("w", "pPr");
     let mark = properties.and_then(|properties| properties.child("w", "rPr"));
-    let style_val = |parent: Option<&XmlElement>, name: &str| {
-        parent
-            .and_then(|parent| parent.child("w", name))
-            .and_then(|style| style.attribute(Some("w"), "val"))
+    if let Some(vanish) = mark.and_then(|mark| mark.child("w", "vanish")) {
+        return vanish.parse_boolean("w");
+    }
+    let style = |parent: Option<&XmlElement>, name: &str, style_type: &str| {
+        let id = parent?.child("w", name)?.attribute(Some("w"), "val")?;
+        styles?.get(id).filter(|style| style.style_type == style_type)
     };
-    let style_hidden = |style: Option<&Style>| style.and_then(|style| style.r_pr.as_ref()?.hidden);
-    mark.and_then(|mark| mark.child("w", "vanish"))
-        .map(|vanish| vanish.parse_boolean("w"))
-        .or_else(|| {
-            style_hidden(style_val(mark, "rStyle").and_then(|id| styles?.get(id)))
-        })
-        .or_else(|| {
-            let styles = styles?;
-            style_hidden(
-                style_val(properties, "pStyle")
-                    .and_then(|id| styles.get(id))
-                    .or_else(|| get_default_paragraph_style(styles)),
-            )
-        })
-        .or_else(|| doc_defaults?.r_pr.as_ref()?.hidden)
-        .unwrap_or(false)
+    let paragraph_style = style(properties, "pStyle", "paragraph")
+        .or_else(|| styles.and_then(get_default_paragraph_style));
+    let hidden = |style: Option<&Style>| style.and_then(|style| style.r_pr.as_ref()?.hidden);
+    match (
+        hidden(paragraph_style),
+        hidden(style(mark, "rStyle", "character")),
+    ) {
+        (None, None) => doc_defaults
+            .and_then(|defaults| defaults.r_pr.as_ref()?.hidden)
+            .unwrap_or(false),
+        (paragraph, character) => paragraph.unwrap_or(false) ^ character.unwrap_or(false),
+    }
 }
 
 pub fn parse_document_table_row_properties(
@@ -975,6 +974,17 @@ mod tests {
         assert!(row_is_hidden_content_only(&by_character, Some(&styles), None));
         assert!(!row_is_hidden_content_only(&overridden, Some(&styles), None));
         assert!(!row_is_hidden_content_only(&by_paragraph, None, None));
+        let both = row(
+            r#"<w:pStyle w:val="HiddenPara"/><w:rPr><w:rStyle w:val="HiddenChar"/></w:rPr>"#,
+        );
+        assert!(!row_is_hidden_content_only(&both, Some(&styles), None));
+        let wrong_types = [
+            row(r#"<w:pStyle w:val="HiddenChar"/>"#),
+            row(r#"<w:rPr><w:rStyle w:val="HiddenPara"/></w:rPr>"#),
+        ];
+        for wrong in &wrong_types {
+            assert!(!row_is_hidden_content_only(wrong, Some(&styles), None));
+        }
         assert!(row_is_hidden_content_only(&row(""), Some(&defaults), None));
         let doc_defaults = DocDefaults {
             r_pr: vanish.clone(),
