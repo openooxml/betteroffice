@@ -350,6 +350,7 @@ jobs:
             enabling_from_any_thread_turns_counting_on_everywhere_and_stays_on; do
             grep -q "^test heap::tests::$name \.\.\. ok$" "$log" || { echo "heap test did not run: $name"; exit 1; }
           done
+          cargo test --locked --manifest-path bindings/Cargo.toml -p betteroffice-xlsx-native --lib memory
           rm -rf bindings/target
 
       # Running a fuzz target needs nightly; checking that the package still builds does not.
