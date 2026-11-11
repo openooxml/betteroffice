@@ -11,7 +11,7 @@ import type { ViewerSelectionChange } from '../components/DocxEditor/internals/v
 import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
 import type { SelectionState } from '../components/DocxEditor/types';
 import { defineDocxPlugin } from './defineDocxPlugin';
-import type { DocxPluginContext, DocxPluginError, DocxPluginSelection } from './types';
+import type { DocxPluginContext, DocxPluginError, DocxPluginSelection, DocxPluginSnapshot } from './types';
 import { useDocxPluginHost } from './useDocxPluginHost';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -53,6 +53,7 @@ async function setup(viewerSelection: boolean, initialRange: { from: number; to:
     getLayout: () => null,
   } as unknown as PagedEditorRef;
   const events: DocxPluginSelection[] = [];
+  const loads: Array<{ snapshot: DocxPluginSnapshot; eventsBefore: number }> = [];
   const settledSelections: DocxPluginSelection[] = [];
   const propSelections: Array<SelectionState | null> = [];
   const subscribedSelections: Array<SelectionState | null> = [];
@@ -62,7 +63,8 @@ async function setup(viewerSelection: boolean, initialRange: { from: number; to:
   const plugin = defineDocxPlugin({
     id: 'test.selection',
     createState: () => null,
-    onEvent(_context, event) {
+    onEvent(context, event) {
+      if (event.type === 'load') loads.push({ snapshot: context.snapshot, eventsBefore: events.length });
       if (event.type === 'selection-change') events.push(event.selection);
       if (event.type === 'selection-settle') settledSelections.push(event.selection);
     },
@@ -95,7 +97,7 @@ async function setup(viewerSelection: boolean, initialRange: { from: number; to:
     return yrsSelectionState(currentYrsToolbarSelection(session, createYrsInputPositionMap(currentStory,
       session.paragraphs(currentStory).map(paragraph => ({ paraId: paragraph.paraId, length: paragraph.text.length }))))!);
   };
-  return { result, rerender, unmount, options, errors, subscribers, formatting, events, settledSelections, propSelections, subscribedSelections, session,
+  return { result, rerender, unmount, options, errors, subscribers, formatting, events, loads, settledSelections, propSelections, subscribedSelections, session,
     selectRange,
     setDisplayRange: (next: typeof range) => { range = next; },
     setRange: (next: typeof range) => { range = next; if (next) selectRange(next); },
@@ -259,10 +261,17 @@ test('a replaced document never carries the kept range across', async () => {
   next.loadState(view.session.encodeState());
   const live = view.session.selection()!;
   next.setSelection(live.anchor, live.head);
+  const loadsBefore = view.loads.length;
   await act(async () => {
     view.replaceSession(next);
     view.rerender();
   });
+  await waitFor(() => expect(view.loads).toHaveLength(loadsBefore + 1));
+  const loaded = view.loads.at(-1)!;
+  expect(loaded.snapshot.generation).not.toBe(before.generation);
+  expect(loaded.eventsBefore).toBe(0);
+  expect(loaded.snapshot.layout).toBeNull();
+  expect(loaded.snapshot.selection.displayRange).toBeNull();
   await waitFor(() => expect(snapshotOf(view).generation).not.toBe(before.generation));
   expect(snapshotOf(view).layout).toBeNull();
   expect(snapshotOf(view).selection.displayRange).toBeNull();
