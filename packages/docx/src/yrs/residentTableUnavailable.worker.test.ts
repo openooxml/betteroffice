@@ -38,8 +38,7 @@ function documentBytes(nested: boolean, body?: string): Uint8Array {
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
-async function open(clientId: number, nested = false, body?: string) {
-  const bytes = documentBytes(nested, body);
+async function open(clientId: number, nested = false, body?: string, bytes = documentBytes(nested, body)) {
   const worker = start(clientId);
   const client = new DocxSourceWorkerClient(worker);
   await client.openSource({ bytes, collaboration: { clientId } });
@@ -415,6 +414,74 @@ for (const [index, fallback] of FALLBACKS.entries()) {
     }
   }, TIMEOUT);
 }
+
+const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+const REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+const MAIN = 'application/vnd.openxmlformats-officedocument.wordprocessingml';
+
+/** A body table beside a footnote, an even-page header, a comment and a text box. */
+function storyKindsBytes(): Uint8Array {
+  const parts: PartsMap = new Map();
+  parts.set('[Content_Types].xml', toBytes(`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="${MAIN}.document.main+xml"/><Override PartName="/word/footnotes.xml" ContentType="${MAIN}.footnotes+xml"/><Override PartName="/word/header1.xml" ContentType="${MAIN}.header+xml"/><Override PartName="/word/settings.xml" ContentType="${MAIN}.settings+xml"/><Override PartName="/word/comments.xml" ContentType="${MAIN}.comments+xml"/></Types>`));
+  parts.set('_rels/.rels', toBytes(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="r1" Type="${REL}/officeDocument" Target="word/document.xml"/></Relationships>`));
+  parts.set('word/_rels/document.xml.rels', toBytes(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdFn" Type="${REL}/footnotes" Target="footnotes.xml"/><Relationship Id="rIdEven" Type="${REL}/header" Target="header1.xml"/><Relationship Id="rIdSet" Type="${REL}/settings" Target="settings.xml"/><Relationship Id="rIdCm" Type="${REL}/comments" Target="comments.xml"/></Relationships>`));
+  parts.set('word/settings.xml', toBytes(`<w:settings xmlns:w="${W}"><w:evenAndOddHeaders/></w:settings>`));
+  parts.set('word/header1.xml', toBytes(`<w:hdr xmlns:w="${W}">${paragraph('Even header')}</w:hdr>`));
+  parts.set('word/footnotes.xml', toBytes(`<w:footnotes xmlns:w="${W}"><w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote><w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote><w:footnote w:id="1">${paragraph('Note text')}</w:footnote></w:footnotes>`));
+  parts.set('word/comments.xml', toBytes(`<w:comments xmlns:w="${W}"><w:comment w:id="0" w:author="Ada" w:date="2026-01-01T00:00:00Z">${paragraph('Comment text')}</w:comment></w:comments>`));
+  const textBox = `<w:p><w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"><wp:extent cx="2743200" cy="1371600"/><wp:docPr id="1" name="Box"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:cNvSpPr txBox="1"/><wps:spPr><a:prstGeom prst="rect"/></wps:spPr><wps:txbx><w:txbxContent>${paragraph('Boxed text')}</w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`;
+  const noted = `<w:p><w:r><w:t>Noted</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r></w:p>`;
+  const commented = `<w:p><w:commentRangeStart w:id="0"/><w:r><w:t>Commented</w:t></w:r><w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r></w:p>`;
+  parts.set('word/document.xml', toBytes(`<w:document xmlns:w="${W}" xmlns:r="${R}"><w:body>${paragraph('Before')}${table(cell('First'), cell('Second'))}${noted}${commented}${textBox}${paragraph('After')}<w:sectPr><w:headerReference w:type="even" r:id="rIdEven"/></w:sectPr></w:body></w:document>`));
+  return new Uint8Array(rezipPartsToArrayBuffer(parts));
+}
+
+const STORY_KINDS: Array<{ name: string; story: (ids: readonly string[]) => string | undefined; text: string }> = [
+  { name: 'a footnote', story: (ids) => ids.find((id) => id.startsWith('fn:') && !id.slice(3).includes(':')), text: 'Note text' },
+  { name: 'an even-page header', story: (ids) => ids.find((id) => id.startsWith('hf:') && !id.slice(3).includes(':')), text: 'Even header' },
+];
+
+for (const [index, kind] of STORY_KINDS.entries()) {
+  test(`a caret in ${kind.name} stays where it is while a body table is unavailable, and typing lands there`, async () => {
+    const base = 10_100 + index * 10;
+    const replica = await open(base + 1, false, undefined, storyKindsBytes());
+    const first = await peer(replica, base + 2);
+    const second = await peer(replica, base + 3);
+    try {
+      const story = kind.story(replica.engine.storyIds());
+      expect(story).toBeDefined();
+      const target = replica.engine.paragraphs(story!).find(({ text }) => text === kind.text)!;
+      const caret = { story: story!, paraId: target.paraId, offset: 4 };
+      await replica.session.submit('select', { selection: { anchor: caret, focus: caret } }).ack;
+      expect(replica.session.state.selection?.focus).toMatchObject({ story });
+      crossTable(first, second, { story: 'body', tableIndex: 0 });
+      await receive(replica, second);
+      expect(Array.isArray(replica.engine.tablePayload('body', 0)?.rows)).toBe(false);
+      expect(replica.session.state.selection?.focus).toMatchObject({ story, paraId: target.paraId, offset: 4 });
+      expect((await replica.session.submit('insertText', { text: 'Z' }).ack).status).toBe('applied');
+      expect(replica.engine.paragraphs(story!).some(({ text }) => text.includes('Z'))).toBe(true);
+    } finally {
+      first.destroy();
+      second.destroy();
+      replica.session.dispose();
+    }
+  }, TIMEOUT);
+}
+
+test('a comment body and a text box are not session stories, so the reach walk needs no edge to them', async () => {
+  const replica = await open(10_191, false, undefined, storyKindsBytes());
+  try {
+    const ids = replica.engine.storyIds();
+    const texts = ids.flatMap((id) => replica.engine.paragraphs(id).map(({ text }) => text));
+    expect(texts).toContain('Note text');
+    expect(texts).toContain('Even header');
+    expect(texts.some((text) => text.includes('Comment text'))).toBe(false);
+    expect(texts.some((text) => text.includes('Boxed text'))).toBe(false);
+  } finally {
+    replica.session.dispose();
+  }
+}, TIMEOUT);
 
 const storiesNamedBy = (replica: Opened, story: string, tableIndex: number) =>
   ((replica.engine.tablePayload(story, tableIndex)?.rows ?? []) as Array<{ cells: Array<{ story: string }> }>)
