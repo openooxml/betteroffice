@@ -17,6 +17,8 @@ export interface DrawPageOptions {
     fontFamilies?: ReadonlyMap<string, string>;
     /** Told when a glyph run's outlines fail and it falls back to `fillText`. */
     onGlyphFallback?: (error: unknown) => void;
+    /** With it set, a picture that resolves to nothing paints a placeholder and is reported here, instead of being left out. */
+    onPictureUnavailable?: (relId: string) => void;
 }
 /**
  * Minimal structural view of a canvas element for DPR sizing. Matches

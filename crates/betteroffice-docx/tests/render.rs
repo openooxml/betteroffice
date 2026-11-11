@@ -237,6 +237,9 @@ fn pixel(width: u32, pixels: &[u8], x: u32, y: u32) -> [u8; 4] {
     pixels[start..start + 4].try_into().expect("rgba pixel")
 }
 
+/// The fill of the placeholder drawn in the frame of a picture that cannot be drawn.
+const PLACEHOLDER_FILL: [u8; 4] = [242, 242, 242, 255];
+
 #[test]
 fn renders_an_embedded_image_from_its_data_url_without_an_image_map() {
     let document = document();
@@ -345,15 +348,15 @@ fn rejects_a_page_ordinal_past_the_end() {
 }
 
 #[test]
-fn an_unresolvable_image_is_skipped_rather_than_failing_the_page() {
+fn an_unresolvable_image_draws_a_placeholder_rather_than_failing_the_page() {
     let document = document();
     let rendered = document
         .render_display_list_png(&shared_relationship_id_page(), 0)
         .unwrap();
     assert_eq!(rendered.skipped_images, 2);
     let (width, _, pixels) = decode(&rendered.bytes);
-    assert_eq!(pixel(width, &pixels, 8, 8), [255, 255, 255, 255]);
-    assert_eq!(pixel(width, &pixels, 40, 8), [255, 255, 255, 255]);
+    assert_eq!(pixel(width, &pixels, 8, 8), PLACEHOLDER_FILL);
+    assert_eq!(pixel(width, &pixels, 40, 8), PLACEHOLDER_FILL);
 }
 
 #[test]
@@ -385,7 +388,7 @@ fn a_registration_does_not_leak_into_another_part() {
         .unwrap();
     assert_eq!(rendered.skipped_images, 1);
     let (width, _, pixels) = decode(&rendered.bytes);
-    assert_eq!(pixel(width, &pixels, 8, 8), [255, 255, 255, 255]);
+    assert_eq!(pixel(width, &pixels, 8, 8), PLACEHOLDER_FILL);
     assert_eq!(pixel(width, &pixels, 40, 8), [0, 0, 255, 255]);
 }
 

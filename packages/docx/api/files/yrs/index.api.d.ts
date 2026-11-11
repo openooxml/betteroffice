@@ -38,7 +38,8 @@ import type { DocxExportFailure, DocxExportOptions, DocxExportResult, DocxMarkdo
 import type { DocxLayoutMap, DocxPageExportOptions, DocxPagedStructuredContent, DocxSnapshotLayoutMap } from './pagedExport';
 export { decodeDocxHostJson } from './yrsSessionFacade';
 import type { DocxPngOptions, DocxPngTarget } from '../layout/render/png';
-export { PngExportError, type PngExportCode } from '../../../../shared/office-session/pngExportError';
+import type { PngUnavailablePicture } from '../../../../shared/office-session/pngExportError';
+export { PngExportError, type PngExportCode, type PngDiagnostic, type PngPictureUnavailableReason, type PngUnavailablePicture } from '../../../../shared/office-session/pngExportError';
 export type { DocxPngFontFace, DocxPngOptions, DocxPngTarget } from '../layout/render/png';
 /** @internal */
 export type { DocxCommandEchoContext, DocxCommandKind, DocxCommandFrame, DocxFrameReservations, DocxCommandPageIdentity, DocxCommandPayloads, DocxCommandSelection, DocxEditState, DocxEchoGlyphLine, DocxEchoGlyphSet, DocxEchoRect, DocxEchoTransform, DocxNavigationIntent, DocxSelectionPointIntent, DocxWorkerEditSession, DocxCommandConnection, DocxCommandInitReply, } from './residentCommandProtocol';
@@ -1455,10 +1456,16 @@ export interface YrsSession extends CollaborationReplica {
      * Draws a page as PNG bytes with the editor's layout and painter, on a replica
      * of this session's state. Rejects with `PngExportError` rather than paint a
      * substitute font; where no canvas exists names `@betteroffice/docx-native`.
+     * A picture it cannot draw paints a placeholder, reported to `onDiagnostic`.
      */
     renderPng(target: DocxPngTarget, options?: DocxPngOptions): Promise<Uint8Array>;
     /** The native engine's rasterizer; the wasm engine has none. @internal */
     renderPngTarget?(displayListJson: string, targetJson: string, optionsJson: string): Uint8Array;
+    /** {@link renderPngTarget}, with the pictures it drew as placeholders. @internal */
+    renderPngTargetReport?(displayListJson: string, targetJson: string, optionsJson: string): {
+        png: Uint8Array;
+        pictures: PngUnavailablePicture[];
+    };
     /** Drops the observer and frees the wasm-side replica. Idempotent. */
     destroy(): void;
 }
