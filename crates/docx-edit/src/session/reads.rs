@@ -208,6 +208,13 @@ impl EditSessionCore {
         crate::story_ref(&txn, story).is_ok()
     }
 
+    /// Whether the document has `story` and the layout of `root` shows it: false for a cell of a
+    /// table that a concurrent undo left without its payload, at any depth. Internal: the editor's
+    /// selection check.
+    pub fn story_laid_out(&self, root: &str, story: &str) -> bool {
+        self.engine.doc().story_laid_out(root, story)
+    }
+
     /// `{"revision","stories":[…]}`: the current story revision and the sorted
     /// ids of the stories created, edited, or deleted after revision `since`.
     pub fn stories_changed_since(&self, since: f64) -> String {

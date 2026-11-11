@@ -96,6 +96,23 @@ impl EditingDoc {
         Ok(scan.found)
     }
 
+    /// Every story the outline walk from `root` lays out: the root, and each story it reaches
+    /// through the cells of complete tables and block controls' stories. `Err` when the walk stops
+    /// at a depth or position limit.
+    pub(crate) fn laid_out_stories_under(&self, root: &str) -> Result<HashSet<String>, ()> {
+        let txn = self.doc.transact();
+        let mut scan = Scan {
+            active: true,
+            ..Scan::default()
+        };
+        let mut outline = BTreeMap::new();
+        build_story(&txn, &mut outline, root, 0, 0, &mut scan)?;
+        if scan.incomplete {
+            return Err(());
+        }
+        Ok(outline.into_keys().collect())
+    }
+
     pub fn owned_revision_ranges(&self, ids: &[String]) -> GeometryRead<Vec<OwnedRevisionRange>> {
         let txn = self.doc.transact();
         match revision_ranges(&txn, ids) {

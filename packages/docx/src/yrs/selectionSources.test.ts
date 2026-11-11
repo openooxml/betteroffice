@@ -43,9 +43,11 @@ for (const [text, files] of Object.entries(SOURCES)) {
   });
 }
 
-test('the one door: a resolved command selection passes laidOutStory and is moved beside a hidden table', () => {
+test('the one door: every range resolution asks whether the layout shows the story, and a resolved command selection in a hidden one moves beside the table', () => {
   const anchors = readFileSync(join(import.meta.dir, 'residentCommandAnchors.ts'), 'utf8');
+  const resolve = anchors.slice(anchors.indexOf('function selectionRange('), anchors.indexOf('export function readCommandSelection'));
+  expect(resolve).toContain('if (!shown(engine, anchor.story))');
   const read = anchors.slice(anchors.indexOf('export function readCommandSelection'), anchors.indexOf('export function currentSelectionRange'));
-  expect(read).toContain('laidOutStory(engine, anchor.story)');
+  expect(read).toContain("if (range === 'hidden')");
   expect(read).toContain('besideHiddenStory(engine, anchor.story)');
 });

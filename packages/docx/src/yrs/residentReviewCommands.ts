@@ -1,4 +1,4 @@
-import { commandSelectionRange } from './residentCommandAnchors';
+import { commandTargetRange } from './residentCommandAnchors';
 import type { DocxCommandIntent, DocxCommentChangeResult, DocxCommentResult, DocxWorkerCommandEngine, DocxWorkerCommandState } from './residentCommandProtocol';
 import type { DocxProposalRequest, DocxProposalStateRequest, DocxProposalWithdrawRequest } from './proposals';
 
@@ -32,9 +32,10 @@ export function preflightReviewCommand(engine: DocxWorkerCommandEngine, state: D
       if (!Array.isArray(command.payload.ranges) || !command.payload.ranges.length) return 'invalid-range';
       for (const range of command.payload.ranges) {
         if (!range || !range.start || !range.end) return 'invalid-range';
-        const resolved = commandSelectionRange(engine, {
+        const resolved = commandTargetRange(engine, {
           anchor: { story: range.story, ...range.start }, focus: { story: range.story, ...range.end },
         });
+        if (resolved === 'table-unavailable') return resolved;
         if (!resolved || resolved.start.paraId !== range.start.paraId || resolved.start.offset !== range.start.offset || (resolved.start.paraId === resolved.end.paraId && resolved.start.offset === resolved.end.offset)) return 'invalid-range';
       }
       break;

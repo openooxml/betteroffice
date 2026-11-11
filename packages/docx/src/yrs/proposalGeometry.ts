@@ -51,6 +51,8 @@ export type ProposalGeometryReader = AnchorReader &
     positionOutline?(root: string): YrsPositionOutline | null;
     /** Header and footer alias relationship ids, each mapped to its canonical one. */
     headerFooterAliases?(): ReadonlyMap<string, string>;
+    /** Whether `story` exists and the layout of `root` shows it: false for a cell of an unavailable table. */
+    storyLaidOut?(root: string, story: string): boolean;
   };
 
 /** @internal */

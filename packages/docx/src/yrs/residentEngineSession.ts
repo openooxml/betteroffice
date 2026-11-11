@@ -610,6 +610,7 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
     headings: (story) => JSON.parse(session.headings_json(story)),
     version: () => session.version(),
     hasStory: (story) => !LONE_SURROGATE.test(story) && session.has_story(story),
+    storyLaidOut: (root, story) => !LONE_SURROGATE.test(story) && !LONE_SURROGATE.test(root) && session.story_laid_out(root, story),
     storyIds: () => session.story_ids(),
     paragraphs: (story) => JSON.parse(session.paragraphs(story)) as YrsParagraph[],
     paragraphIdCount: (story, paraId) => session.paragraph_id_count(story, paraId),

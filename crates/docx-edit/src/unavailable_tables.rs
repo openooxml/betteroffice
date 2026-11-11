@@ -75,6 +75,35 @@ impl EditingDoc {
         self.unavailable_tables_from(&roots)
     }
 
+    /// Whether the outline walk from `root` lays `story` out: a live root always, any other live
+    /// story only when the walk reaches it through complete tables and block controls, so a cell
+    /// of an unavailable table, at any depth, is not laid out. Each root's set is kept until a
+    /// structural change, so typing never walks again. A walk that stops at a limit cannot tell,
+    /// and reads as laid out.
+    pub(crate) fn story_laid_out(&self, root: &str, story: &str) -> bool {
+        if crate::story_ref(&self.yrs_doc().transact(), story).is_err() {
+            return false;
+        }
+        if story == root {
+            return true;
+        }
+        let structure = self.story_revisions.lock().unwrap().structure;
+        if let Some((at, stories)) = self.laid_out_stories.lock().unwrap().get(root)
+            && *at == structure
+        {
+            return stories.contains(story);
+        }
+        let Ok(stories) = self.laid_out_stories_under(root) else {
+            return true;
+        };
+        let laid_out = stories.contains(story);
+        self.laid_out_stories
+            .lock()
+            .unwrap()
+            .insert(root.to_owned(), (structure, std::sync::Arc::new(stories)));
+        laid_out
+    }
+
     /// The unavailable tables the geometry outline walk meets from `roots`, by story and ordinal,
     /// in story then ordinal order: through the cells of complete tables and block controls'
     /// stories. A root the document lacks reads as empty. `None` when a walk cannot finish.

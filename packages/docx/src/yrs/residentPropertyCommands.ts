@@ -1,5 +1,7 @@
 import type { DocxCommandEnvelope, DocxCommandIntent, DocxCommandApplyResult, DocxWorkerCommandEngine } from './residentCommandProtocol';
-import { commandSelectionRange } from './residentCommandAnchors';
+import { commandTargetRange } from './residentCommandAnchors';
+import { laidOutStory } from './residentCommandTableSelection';
+import { tableUnavailableError } from './tableUnavailable';
 import { patchSection, readResidentProperties, resolvePropertyImage, sectionProperties, watermarkDocument } from './residentProperties';
 
 export const PROPERTY_COMMANDS = ['setHyperlink', 'setObjectProperties', 'setSectionProperties', 'setNoteProperties', 'setWatermark'] as const;
@@ -114,7 +116,9 @@ export function validPropertyCommand(command: DocxCommandEnvelope): boolean {
 export function propertyCommandTarget(engine: DocxWorkerCommandEngine, command: DocxCommandIntent): string | null {
   switch (command.kind) {
     case 'setHyperlink': {
-      const range = commandSelectionRange(engine, command.payload.selection);
+      const target = commandTargetRange(engine, command.payload.selection);
+      if (target === 'table-unavailable') return target;
+      const range = target;
       if (command.payload.displayText && range?.start.paraId !== range?.end.paraId) return 'invalid-range';
       if (range && command.payload.suggesting) {
         if (range.start.paraId !== range.end.paraId) return 'unsupported-suggesting';
@@ -132,7 +136,11 @@ export function propertyCommandTarget(engine: DocxWorkerCommandEngine, command: 
       if (range && command.payload.displayText) return null;
       return range && (range.start.paraId !== range.end.paraId || range.start.offset !== range.end.offset) ? null : 'invalid-range';
     }
-    case 'setObjectProperties': return resolvePropertyImage(engine, command.payload.handle) ? null : 'stale-object';
+    case 'setObjectProperties': {
+      const image = resolvePropertyImage(engine, command.payload.handle);
+      if (!image) return 'stale-object';
+      return laidOutStory(engine, image.story) ? null : 'table-unavailable';
+    }
     case 'setSectionProperties': case 'setNoteProperties': return sectionProperties(engine.propertyDocument(), command.payload.section) ? null : 'unknown-section';
     default: return null;
   }
@@ -146,7 +154,9 @@ export function applyPropertyCommand(engine: DocxWorkerCommandEngine, command: D
   }
   switch (command.kind) {
     case 'setHyperlink': {
-      let range = commandSelectionRange(engine, command.payload.selection)!;
+      const target = commandTargetRange(engine, command.payload.selection);
+      if (target === 'table-unavailable') throw tableUnavailableError();
+      let range = target!;
       if (command.payload.displayText) {
         const receipt = range.start.paraId === range.end.paraId && range.start.offset === range.end.offset
           ? engine.insertText({ story: range.story, ...range.start }, command.payload.displayText, command.payload.suggesting)

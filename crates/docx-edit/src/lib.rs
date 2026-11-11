@@ -711,6 +711,8 @@ pub struct EditingDoc {
     seen: identity::SeenCell,
     scan_cache: identity::ScanCache,
     story_revisions: Arc<Mutex<StoryRevisions>>,
+    /// Per root, the stories its outline walk lays out, at the structure revision it was read.
+    laid_out_stories: Mutex<HashMap<String, (u64, Arc<HashSet<String>>)>>,
     remote_deletions: remote_cleanup::RemoteDeletions,
     keeps_deleted: Arc<AtomicBool>,
     commit_hooks: Rc<RefCell<CommitHooks>>,
@@ -821,6 +823,7 @@ impl EditingDoc {
             seen,
             scan_cache: identity::ScanCache::default(),
             story_revisions,
+            laid_out_stories: Mutex::default(),
             remote_deletions: remote_cleanup::RemoteDeletions::default(),
             keeps_deleted,
             commit_hooks,

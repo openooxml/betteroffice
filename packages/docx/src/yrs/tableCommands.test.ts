@@ -13,15 +13,21 @@ function commandKinds(): string[] {
   return [...body.matchAll(/^ {2}([a-zA-Z]+):/gm)].map((match) => match[1]!).sort();
 }
 
-function rows(): Array<{ kind: string; reaches: string; mutatesBefore: string }> {
+const TARGETS = new Set(['selection', 'explicit-gated', 'explicit-root', 'explicit-layout', 'named-limit-pr2', 'none']);
+
+function rows(): Array<{ kind: string; reaches: string; mutatesBefore: string; target: string }> {
   return readFileSync(TABLE, 'utf8')
     .split('\n')
     .filter((line) => line.startsWith('| ') && !line.startsWith('| kind ') && !line.startsWith('|---'))
     .map((line) => {
-      const [kind, reaches, , mutatesBefore] = line.split('|').slice(1, -1).map((cell) => cell.trim());
-      return { kind: kind!, reaches: reaches!, mutatesBefore: mutatesBefore! };
+      const [kind, reaches, , mutatesBefore, , target] = line.split('|').slice(1, -1).map((cell) => cell.trim());
+      return { kind: kind!, reaches: reaches!, mutatesBefore: mutatesBefore!, target: (target ?? '').split(':')[0]!.trim() };
     });
 }
+
+test('every command kind says where its target comes from and how a hidden story is met', () => {
+  for (const row of rows()) expect(TARGETS.has(row.target), `${row.kind}: target ${row.target || 'missing'}`).toBe(true);
+});
 
 test('every editor command kind says whether it reaches a table operation, once', () => {
   const listed = rows().map((row) => row.kind);

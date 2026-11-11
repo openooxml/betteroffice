@@ -3,6 +3,7 @@ import type { YrsCellLoc, YrsLoc, YrsTableLoc, YrsTableRange } from './index';
 import type { DocxCommandSelection, DocxWorkerCommandEngine } from './residentCommandProtocol';
 import { tableAnchors, type TablePayload } from './storyPlainText';
 import { createYrsPositionProjection, isUnavailableTablePayload } from './yrsPositionProjection';
+import { leadingBlockCount } from './sectionBreak';
 
 export type TableSelectionTarget = 'table' | 'row' | 'column';
 
@@ -134,40 +135,39 @@ function projectedRoot(engine: DocxWorkerCommandEngine, root: string): { key: st
  * unavailable table, at any depth, is not laid out. The one test a selection passes before a
  * command uses it, wherever the selection comes from.
  */
-export function laidOutStory(engine: DocxWorkerCommandEngine, story: string): boolean {
+export function laidOutStory(engine: Pick<DocxWorkerCommandEngine, 'geometryReader'>, story: string): boolean {
   const root = rootOf(story);
   if (story === root) return true;
-  const { key, projected } = projectedRoot(engine, root);
-  const placed = projected?.stories.has(story) ?? false;
-  if (shadowCheck && key !== null && (projectRoot(engine, root)?.stories.has(story) ?? false) !== placed) {
-    throw new Error(`laid-out story cache differs for ${story}`);
-  }
-  return placed;
+  const reader = engine.geometryReader;
+  return reader.storyLaidOut ? reader.storyLaidOut(root, story) : projectRoot(engine as DocxWorkerCommandEngine, root)?.stories.has(story) ?? false;
 }
 
 /**
- * Where a selection in `story`, which the projection does not lay out, goes instead: the
- * paragraph next to the unavailable table that hides it, in a story the projection lays out; the
- * innermost such table whose story `story` descends from when its rows no longer name the cell.
+ * Where a selection in `story`, which the layout does not show, goes instead: beside the
+ * unavailable table whose rows still name `story` as a cell, when one in a shown story does;
+ * otherwise the first paragraph of the root story, past its leading blocks. Never beside a table
+ * chosen by a story's name.
  */
 export function besideHiddenStory(engine: DocxWorkerCommandEngine, story: string): YrsLoc | null {
-  const projected = projectedRoot(engine, rootOf(story)).projected;
+  const root = rootOf(story);
+  const projected = projectedRoot(engine, root).projected;
   if (!projected) return null;
-  let fallback: YrsTableLoc | null = null;
   for (const parent of projected.stories) {
     let ordinal = 0;
     for (const segment of engine.geometryReader.storySegments(parent)) {
       if (segment.kind !== 'embed' || segment.embedKind !== 'table') continue;
       const table = { story: parent, tableIndex: ordinal++ };
-      if (!isUnavailableTablePayload(segment.payload)) continue;
-      const rows = Array.isArray(segment.payload.rows) ? segment.payload.rows as TablePayload['rows'] : [];
-      if (rows.some((row) => row?.cells?.some((cell) => cell?.story === story || story.startsWith(`${cell?.story}:`)))) {
+      if (!isUnavailableTablePayload(segment.payload) || !Array.isArray(segment.payload.rows)) continue;
+      const rows = segment.payload.rows as TablePayload['rows'];
+      if (rows.some((row) => row?.cells?.some((cell) => cell?.story === story))) {
         return nearTable(engine, table);
       }
-      if (story.startsWith(`${parent}:`) && (!fallback || parent.length > fallback.story.length)) fallback = table;
     }
   }
-  return fallback ? nearTable(engine, fallback) : null;
+  const first = engine.geometryReader.paragraphSpans(root)[0];
+  if (!first) return null;
+  const leading = leadingBlockCount(engine.paragraphSegments(root, [0])[0] ?? []);
+  return { story: root, paraId: first.paraId, offset: Math.min(first.length, leading) };
 }
 
 function validPayload(value: unknown): value is TablePayload {

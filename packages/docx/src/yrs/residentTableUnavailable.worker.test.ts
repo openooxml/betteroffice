@@ -26,11 +26,11 @@ const cell = (text: string) => `<w:tc><w:tcPr><w:tcW w:w="2340" w:type="dxa"/></
 const table = (...cells: string[]) => `<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid>${cells.map(() => '<w:gridCol w:w="2340"/>').join('')}</w:tblGrid><w:tr>${cells.join('')}</w:tr></w:tbl>`;
 
 /** A body with one two-cell table, or, `nested`, that table inside the first cell of a healthy outer table. */
-function documentBytes(nested: boolean): Uint8Array {
+function documentBytes(nested: boolean, body?: string): Uint8Array {
   const inner = table(cell('First'), cell('Second'));
-  const content = nested
+  const content = body ?? (nested
     ? table(`<w:tc><w:tcPr><w:tcW w:w="4680" w:type="dxa"/></w:tcPr>${inner}${paragraph('After inner')}</w:tc>`, cell('Outer two'))
-    : inner;
+    : inner);
   const parts: PartsMap = new Map();
   parts.set('[Content_Types].xml', toBytes('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'));
   parts.set('_rels/.rels', toBytes('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="r1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'));
@@ -38,8 +38,8 @@ function documentBytes(nested: boolean): Uint8Array {
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
-async function open(clientId: number, nested = false) {
-  const bytes = documentBytes(nested);
+async function open(clientId: number, nested = false, body?: string) {
+  const bytes = documentBytes(nested, body);
   const worker = start(clientId);
   const client = new DocxSourceWorkerClient(worker);
   await client.openSource({ bytes, collaboration: { clientId } });
@@ -192,25 +192,51 @@ for (const nested of [false, true]) {
   }
 }
 
-test('typing in a document without tables asks the engine for its version the same number of times on every key', async () => {
-  const { command, execute, selection } = await import('./residentCommandTestSupport');
-  const arm = await openCommandEngine(['Alpha beta', 'Second']);
-  const paraId = arm.engine.paragraphs('body')[0]!.paraId;
-  const version = arm.engine.proposalEngine.version.bind(arm.engine.proposalEngine);
-  let calls = 0;
-  arm.engine.proposalEngine.version = () => {
-    calls += 1;
-    return version();
-  };
-  const counts: number[] = [];
-  for (const [index, text] of ['x', 'y', 'z'].entries()) {
-    calls = 0;
-    expect(execute(arm, command(arm, 'insertText', { text, selection: selection(paraId, index) })).status).toBe('applied');
-    counts.push(calls);
+/** Counts every call this engine instance receives, by method name. */
+function countEngineCalls(raw: object): () => Record<string, number> {
+  let counts: Record<string, number> = {};
+  for (let proto = Object.getPrototypeOf(raw); proto && proto !== Object.prototype; proto = Object.getPrototypeOf(proto)) {
+    for (const name of Object.getOwnPropertyNames(proto)) {
+      const method = Reflect.get(proto, name);
+      if (name === 'constructor' || typeof method !== 'function' || Object.hasOwn(raw, name)) continue;
+      Reflect.set(raw, name, (...args: unknown[]) => {
+        counts[name] = (counts[name] ?? 0) + 1;
+        return Reflect.apply(method, raw, args);
+      });
+    }
   }
-  console.log(`WORKCOUNT insertText version calls per key ${counts.join(',')}`);
-  expect(new Set(counts).size).toBe(1);
-}, TIMEOUT);
+  return () => {
+    const taken = counts;
+    counts = {};
+    return taken;
+  };
+}
+
+for (const where of ['body paragraph', 'healthy table cell'] as const) {
+  test(`typing in a ${where} makes the same engine calls on every key`, async () => {
+    const { command, execute, selection } = await import('./residentCommandTestSupport');
+    const arm = where === 'body paragraph'
+      ? await openCommandEngine(['Alpha beta', 'Second'])
+      : await openCommandEngine([], { bodyXml: paragraph('Before') + table(cell('First'), cell('Second')) + paragraph('After') });
+    const story = where === 'body paragraph'
+      ? 'body'
+      : (arm.engine.tablePayload('body', 0)!.rows as Array<{ cells: Array<{ story: string }> }>)[0]!.cells[0]!.story;
+    const paraId = arm.engine.paragraphs(story)[0]!.paraId;
+    const take = countEngineCalls(arm.native);
+    const at = (offset: number) => ({ ...selection(paraId, offset, offset, story) });
+    expect(execute(arm, command(arm, 'insertText', { text: 'w', selection: at(0) })).status).toBe('applied');
+    take();
+    const perKey: number[] = [];
+    let names: Record<string, number> = {};
+    for (const [index, text] of ['x', 'y', 'z'].entries()) {
+      expect(execute(arm, command(arm, 'insertText', { text, selection: at(index + 1) })).status).toBe('applied');
+      names = take();
+      perKey.push(Object.values(names).reduce((sum, count) => sum + count, 0));
+    }
+    console.log(`WORKCOUNT ${where} engine calls per key ${perKey.join(',')} ${JSON.stringify(Object.fromEntries(Object.entries(names).sort()))}`);
+    expect(new Set(perKey).size).toBe(1);
+  }, TIMEOUT);
+}
 
 test('the cached cell location drops a table that lost only its properties and finds it again after the redo', async () => {
   setCellLocationShadowCheck(true);
@@ -332,3 +358,82 @@ for (const [index, queued] of (['navigate', 'deleteBackward'] as const).entries(
     }
   }, TIMEOUT);
 }
+
+/** Crossing undos of two peers on the table at `table`, leaving it without its payload. */
+function crossTable(first: YrsSession, second: YrsSession, table: { story: string; tableIndex: number }): void {
+  const at0 = { ...table, row: 0, column: 0 };
+  first.insertRow(at0, 'below');
+  sync(first, second);
+  second.setColumnWidth(at0, 2000);
+  expect(first.undo()).toBe(true);
+  sync(first, second);
+  expect(second.undo()).toBe(true);
+  sync(first, second);
+}
+
+const FALLBACKS: Array<{ name: string; body: string; story: (replica: Opened) => string; hide: (replica: Opened) => Array<{ story: string; tableIndex: number }> }> = [
+  {
+    name: 'two sibling tables that both lost their rows, the caret in the second',
+    body: table(cell('One A'), cell('One B')) + paragraph('Between') + table(cell('Two A'), cell('Two B')),
+    story: (replica) => (replica.engine.tablePayload('body', 1)!.rows as Array<{ cells: Array<{ story: string }> }>)[0]!.cells[0]!.story,
+    hide: () => [{ story: 'body', tableIndex: 0 }, { story: 'body', tableIndex: 1 }],
+  },
+  {
+    name: 'three levels of nesting, the outer table emptied and the caret in the innermost cell',
+    body: table(`<w:tc><w:tcPr><w:tcW w:w="4680" w:type="dxa"/></w:tcPr>${table(`<w:tc><w:tcPr><w:tcW w:w="2340" w:type="dxa"/></w:tcPr>${table(cell('Deep'))}${paragraph('Mid')}</w:tc>`)}${paragraph('Outer')}</w:tc>`),
+    story: (replica) => {
+      const outer = firstCell(replica, 'body');
+      const middle = firstCell(replica, outer);
+      return firstCell(replica, middle);
+    },
+    hide: () => [{ story: 'body', tableIndex: 0 }],
+  },
+];
+
+for (const [index, fallback] of FALLBACKS.entries()) {
+  test(`a caret hidden with ${fallback.name} goes to the first paragraph of the body, not beside another table`, async () => {
+    const base = 9950 + index * 10;
+    const replica = await open(base + 1, false, fallback.body);
+    const first = await peer(replica, base + 2);
+    const second = await peer(replica, base + 3);
+    try {
+      const story = fallback.story(replica);
+      const inCell = { story, paraId: replica.engine.paragraphs(story)[0]!.paraId, offset: 1 };
+      await replica.session.submit('select', { selection: { anchor: inCell, focus: inCell } }).ack;
+      for (const table of fallback.hide(replica)) crossTable(first, second, table);
+      await receive(replica, second);
+      const selection = replica.session.state.selection!;
+      expect(selection.focus.story).toBe('body');
+      expect(selection.focus.paraId).toBe(replica.engine.paragraphs('body')[0]!.paraId);
+      expect((await replica.session.submit('insertText', { text: 'Z' }).ack).status).toBe('applied');
+      expect(cellTexts(replica, story).join('')).not.toContain('Z');
+    } finally {
+      first.destroy();
+      second.destroy();
+      replica.session.dispose();
+    }
+  }, TIMEOUT);
+}
+
+test('an explicit range in a hidden cell is refused with table-unavailable and changes nothing', async () => {
+  const replica = await open(9981);
+  const first = await peer(replica, 9982);
+  const second = await peer(replica, 9983);
+  try {
+    const story = cellStory(replica);
+    const paraId = replica.engine.paragraphs(story)[0]!.paraId;
+    crossTable(first, second, { story: 'body', tableIndex: 0 });
+    await receive(replica, second);
+    const before = replica.engine.encodeState();
+    const outcome = await replica.session.submit('setHyperlink', {
+      selection: { anchor: { story, paraId, offset: 0 }, focus: { story, paraId, offset: 3 } },
+      hyperlink: { href: 'https://example.com' }, expectVersion: replica.engine.proposalEngine.version(),
+    }).ack;
+    expect(outcome).toMatchObject({ status: 'refused', reason: 'table-unavailable' });
+    expect(replica.engine.encodeState()).toEqual(before);
+  } finally {
+    first.destroy();
+    second.destroy();
+    replica.session.dispose();
+  }
+}, TIMEOUT);

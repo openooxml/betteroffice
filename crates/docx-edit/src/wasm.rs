@@ -2609,6 +2609,12 @@ impl EditSession {
         self.core.has_story(story)
     }
 
+    /// Whether the document has `story` and the layout of `root` shows it.
+    /// @internal
+    pub fn story_laid_out(&self, root: &str, story: &str) -> bool {
+        self.core.story_laid_out(root, story)
+    }
+
     /// `{"revision","stories":[…]}`: the current story revision and the sorted
     /// ids of the stories created, edited, or deleted after revision `since`.
     pub fn stories_changed_since(&self, since: f64) -> String {
