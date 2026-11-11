@@ -1736,6 +1736,12 @@ export function serialize_docx_s11(request_json: string): string;
 export function serialize_docx_s12(request_json: string): string;
 
 /**
+ * Asks for heap counting. A wasm build with the counters always counts, so this only
+ * reports [`wasm_heap_counted`].
+ */
+export function set_wasm_heap_counting(on: boolean): boolean;
+
+/**
  * Caps the bytes allocated at once; an allocation past the cap fails. A
  * non-finite or negative value removes the cap.
  */
@@ -2092,6 +2098,7 @@ export interface InitOutput {
     readonly serialize_docx_s10: (a: number, b: number) => [number, number, number, number];
     readonly serialize_docx_s11: (a: number, b: number) => [number, number, number, number];
     readonly serialize_docx_s12: (a: number, b: number) => [number, number, number, number];
+    readonly set_wasm_heap_counting: (a: number) => number;
     readonly set_wasm_heap_limit: (a: number) => void;
     readonly unzip_docx: (a: number, b: number) => [number, number, number];
     readonly update_display_list: (a: number, b: number, c: number) => [number, number];
