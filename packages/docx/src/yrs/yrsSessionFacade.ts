@@ -1,5 +1,4 @@
 import type { PngUnavailablePicture } from '../../../../shared/office-session/pngExportError';
-import { withEngineCleanup } from '../../../../shared/office-session/trap';
 import { DocxSectionError, type SectionInfo } from './sections';
 import { formattingFailure } from './formattingError';
 import { PARAGRAPH_PATCH_WRITER_VERSION, paragraphPatchWriterVersionWire } from '../docx/parseWasm';
@@ -531,7 +530,11 @@ export function wrapSession(
       ? {
           sharedReads: <R>(read: () => R): R => {
             session.begin_shared_reads();
-            return withEngineCleanup(read, () => session.end_shared_reads());
+            try {
+              return read();
+            } finally {
+              session.end_shared_reads();
+            }
           },
         }
       : {}),

@@ -27,25 +27,6 @@ export function isWorkerEngineTrap(error: unknown): boolean {
       (error.message.startsWith(NATIVE_MEMORY_BUDGET_EXCEEDED) || error.message === NATIVE_ENGINE_OBJECT_FAILED));
 }
 
-/**
- * @internal Runs `cleanup` after `run` as a `finally` block would, except that when `run` threw, an
- * error from `cleanup` does not replace it: an engine object that failed in `run` refuses every
- * later call, and the error that says why it failed is the one to report.
- */
-export function withEngineCleanup<T>(run: () => T, cleanup: () => void): T {
-  let result: T;
-  try {
-    result = run();
-  } catch (error) {
-    try {
-      cleanup();
-    } catch {}
-    throw error;
-  }
-  cleanup();
-  return result;
-}
-
 const NATIVE_BUDGET_DETAIL = /BetterOffice engine memory budget exceeded \((\d+) bytes over a (\d+)-byte budget\)/;
 
 /** @internal The allocation and budget a native engine error reports, found anywhere in `text`. */
