@@ -420,26 +420,41 @@ const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
 const REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
 const MAIN = 'application/vnd.openxmlformats-officedocument.wordprocessingml';
 
-/** A body table beside a footnote, an even-page header, a comment and a text box. */
+/** Headers and footers whose relationship ids hold a colon, some shaped like a cell, a block control or a repeated item. */
+const BANDS: Array<{ id: string; part: string; root: 'hdr' | 'ftr'; kind: 'header' | 'footer'; type: string; text: string }> = [
+  { id: 'rId:Even', part: 'header1.xml', root: 'hdr', kind: 'header', type: 'even', text: 'Even header' },
+  { id: 'x:t0:r0c0', part: 'header2.xml', root: 'hdr', kind: 'header', type: 'default', text: 'Cell-shaped header' },
+  { id: 'y:sdt0', part: 'header3.xml', root: 'hdr', kind: 'header', type: 'first', text: 'Control-shaped header' },
+  { id: 'z:repeat:1', part: 'footer1.xml', root: 'ftr', kind: 'footer', type: 'default', text: 'Repeat-shaped footer' },
+];
+
+/** A body table beside a footnote, headers and a footer, a comment and a text box. */
 function storyKindsBytes(): Uint8Array {
   const parts: PartsMap = new Map();
-  parts.set('[Content_Types].xml', toBytes(`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="${MAIN}.document.main+xml"/><Override PartName="/word/footnotes.xml" ContentType="${MAIN}.footnotes+xml"/><Override PartName="/word/header1.xml" ContentType="${MAIN}.header+xml"/><Override PartName="/word/settings.xml" ContentType="${MAIN}.settings+xml"/><Override PartName="/word/comments.xml" ContentType="${MAIN}.comments+xml"/></Types>`));
+  const overrides = BANDS.map((band) => `<Override PartName="/word/${band.part}" ContentType="${MAIN}.${band.kind}+xml"/>`).join('');
+  const relationships = BANDS.map((band) => `<Relationship Id="${band.id}" Type="${REL}/${band.kind}" Target="${band.part}"/>`).join('');
+  const references = BANDS.map((band) => `<w:${band.kind}Reference w:type="${band.type}" r:id="${band.id}"/>`).join('');
+  parts.set('[Content_Types].xml', toBytes(`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="${MAIN}.document.main+xml"/><Override PartName="/word/footnotes.xml" ContentType="${MAIN}.footnotes+xml"/>${overrides}<Override PartName="/word/settings.xml" ContentType="${MAIN}.settings+xml"/><Override PartName="/word/comments.xml" ContentType="${MAIN}.comments+xml"/></Types>`));
   parts.set('_rels/.rels', toBytes(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="r1" Type="${REL}/officeDocument" Target="word/document.xml"/></Relationships>`));
-  parts.set('word/_rels/document.xml.rels', toBytes(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdFn" Type="${REL}/footnotes" Target="footnotes.xml"/><Relationship Id="rId:Even" Type="${REL}/header" Target="header1.xml"/><Relationship Id="rIdSet" Type="${REL}/settings" Target="settings.xml"/><Relationship Id="rIdCm" Type="${REL}/comments" Target="comments.xml"/></Relationships>`));
+  parts.set('word/_rels/document.xml.rels', toBytes(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdFn" Type="${REL}/footnotes" Target="footnotes.xml"/>${relationships}<Relationship Id="rIdSet" Type="${REL}/settings" Target="settings.xml"/><Relationship Id="rIdCm" Type="${REL}/comments" Target="comments.xml"/></Relationships>`));
   parts.set('word/settings.xml', toBytes(`<w:settings xmlns:w="${W}"><w:evenAndOddHeaders/></w:settings>`));
-  parts.set('word/header1.xml', toBytes(`<w:hdr xmlns:w="${W}">${paragraph('Even header')}</w:hdr>`));
+  for (const band of BANDS) parts.set(`word/${band.part}`, toBytes(`<w:${band.root} xmlns:w="${W}">${paragraph(band.text)}</w:${band.root}>`));
   parts.set('word/footnotes.xml', toBytes(`<w:footnotes xmlns:w="${W}"><w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote><w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote><w:footnote w:id="1">${paragraph('Note text')}</w:footnote></w:footnotes>`));
   parts.set('word/comments.xml', toBytes(`<w:comments xmlns:w="${W}"><w:comment w:id="0" w:author="Ada" w:date="2026-01-01T00:00:00Z">${paragraph('Comment text')}</w:comment></w:comments>`));
   const textBox = `<w:p><w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"><wp:extent cx="2743200" cy="1371600"/><wp:docPr id="1" name="Box"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:cNvSpPr txBox="1"/><wps:spPr><a:prstGeom prst="rect"/></wps:spPr><wps:txbx><w:txbxContent>${paragraph('Boxed text')}</w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`;
   const noted = `<w:p><w:r><w:t>Noted</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r></w:p>`;
   const commented = `<w:p><w:commentRangeStart w:id="0"/><w:r><w:t>Commented</w:t></w:r><w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r></w:p>`;
-  parts.set('word/document.xml', toBytes(`<w:document xmlns:w="${W}" xmlns:r="${R}"><w:body>${paragraph('Before')}${table(cell('First'), cell('Second'))}${noted}${commented}${textBox}${paragraph('After')}<w:sectPr><w:headerReference w:type="even" r:id="rId:Even"/></w:sectPr></w:body></w:document>`));
+  parts.set('word/document.xml', toBytes(`<w:document xmlns:w="${W}" xmlns:r="${R}"><w:body>${paragraph('Before')}${table(cell('First'), cell('Second'))}${noted}${commented}${textBox}${paragraph('After')}<w:sectPr>${references}<w:titlePg/></w:sectPr></w:body></w:document>`));
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
 const STORY_KINDS: Array<{ name: string; story: (ids: readonly string[]) => string | undefined; text: string }> = [
   { name: 'a footnote', story: (ids) => ids.find((id) => id.startsWith('fn:') && !id.slice(3).includes(':')), text: 'Note text' },
-  { name: 'an even-page header whose relationship id holds a colon', story: (ids) => ids.find((id) => id === 'hf:rId:Even'), text: 'Even header' },
+  ...BANDS.map((band) => ({
+    name: `a ${band.type} ${band.kind} whose relationship id is ${band.id}`,
+    story: (ids: readonly string[]) => ids.find((id) => id === `hf:${band.id}`),
+    text: band.text,
+  })),
 ];
 
 for (const [index, kind] of STORY_KINDS.entries()) {

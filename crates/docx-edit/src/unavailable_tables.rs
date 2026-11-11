@@ -3,10 +3,10 @@
 //! crossing order can leave every entry deleted. Such a table lays out as nothing, takes no table
 //! operation and blocks saving until its last undo is redone or the table is deleted.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use yrs::types::text::YChange;
-use yrs::{Any, Map, MapRef, Out, ReadTxn, Text, Transact};
+use yrs::{Any, Map, MapRef, Out, ReadTxn, Text, TextRef, Transact};
 
 use crate::{EditingDoc, TableLocator};
 
@@ -43,18 +43,26 @@ thread_local! {
 /// The structure revision a reach walk ran under.
 pub(crate) type ReachKey = u64;
 
-/// What the reachability walk from the document's roots found: the stories it reached, and
-/// whether it met an unavailable table on the way.
+/// What a pass over every live story found: for each story a complete table's cell or a block
+/// control names, the story that names it, and whether any story holds an unavailable table.
+/// Nothing in it depends on which stories are roots.
 pub(crate) struct DocumentReach {
-    reached: HashSet<String>,
+    parents: HashMap<String, String>,
     met_unavailable: bool,
 }
 
 impl DocumentReach {
-    /// Whether the layout shows a live story: hidden only when the walk met an unavailable table
-    /// and did not reach the story.
-    fn shows(&self, story: &str) -> bool {
-        !self.met_unavailable || self.reached.contains(story)
+    /// The story at the top of `story`'s chain of containers: itself when nothing names it.
+    fn top<'a>(&'a self, story: &'a str) -> &'a str {
+        let mut top = story;
+        let mut seen = HashSet::from([story]);
+        while let Some(parent) = self.parents.get(top) {
+            if !seen.insert(parent.as_str()) {
+                break;
+            }
+            top = parent;
+        }
+        top
     }
 }
 
@@ -64,52 +72,6 @@ pub(crate) fn lacks_payload(has: impl Fn(&str) -> bool) -> bool {
     !PAYLOAD_KEYS.iter().all(|key| has(key))
 }
 
-/// Whether the engine minted `story` as a root, by the id it gave it: `body`, a header or footer
-/// `hf:<relationship id>` ([`crate::header_footer::story_id`]), or a note `fn:<id>` / `en:<id>`.
-/// Relationship and note ids pass through as written, so they may hold ':' and even look like a
-/// child's. A story below a root is the one whose id is a live story's id followed by the
-/// segments a container mints for its children ([`container_parent`]); any other id with a root
-/// prefix is a root. `live` tells whether a story exists. Laid out as before whatever references
-/// it, and never hidden.
-pub(crate) fn is_root(story: &str, live: impl Fn(&str) -> bool) -> bool {
-    if story == "body" {
-        return true;
-    }
-    ["hf:", "fn:", "en:"]
-        .iter()
-        .find_map(|prefix| story.strip_prefix(prefix))
-        .is_some_and(|id| !id.is_empty() && !container_parent(story).is_some_and(live))
-}
-
-/// The story whose container minted `story` for a child, by the segments it appends: a
-/// table's `t<n>` and a cell's `r<n>c<n>` (with an edit's `~<client>`), a block control's
-/// `sdt<n>`, or a repeated item's `repeat:<n>`.
-fn container_parent(story: &str) -> Option<&str> {
-    let digits = |text: &str| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
-    let cell = |segment: &str| {
-        let segment = match segment.split_once('~') {
-            Some((cell, client)) if digits(client) => cell,
-            Some(_) => return false,
-            None => segment,
-        };
-        segment
-            .strip_prefix('r')
-            .and_then(|rest| rest.split_once('c'))
-            .is_some_and(|(row, column)| digits(row) && digits(column))
-    };
-    let (head, last) = story.rsplit_once(':')?;
-    if last.strip_prefix("sdt").is_some_and(digits) {
-        return Some(head);
-    }
-    let (parent, before) = head.rsplit_once(':')?;
-    if (cell(last) && before.strip_prefix('t').is_some_and(digits))
-        || (before == "repeat" && digits(last))
-    {
-        return Some(parent);
-    }
-    None
-}
-
 impl EditingDoc {
     /// Every unavailable table a reader can reach from the root stories the story list names:
     /// the body, headers and footers by their section references, and the notes themselves.
@@ -117,82 +79,116 @@ impl EditingDoc {
     /// `None` when a walk cannot finish.
     #[cfg(test)]
     pub(crate) fn unavailable_tables(&self) -> Option<Vec<TableLocator>> {
-        self.unavailable_tables_from(&self.document_roots())
+        let mut roots: Vec<String> = self.document_roots().into_iter().collect();
+        roots.sort();
+        self.unavailable_tables_from(&roots)
     }
 
     /// Whether the layout shows the live `story` (a cell without its story under a complete table
-    /// counts as live: it shows as an empty paragraph). Only a story that a container names can
-    /// be hidden, and only on positive evidence: the walk from the document's roots met an
-    /// unavailable table and did not reach the story. Roots, and every story while no table is
-    /// unavailable, count as shown exactly as before. The walk runs once per change to the
-    /// stories' structure or the section properties, so typing never walks again, and has no
-    /// depth limit.
+    /// counts as live: it shows as an empty paragraph). While no story holds an unavailable table
+    /// every live story counts as shown, exactly as before, and nothing else is read. Otherwise
+    /// the story counts as shown iff the top of its chain of containers is a root of the
+    /// document ([`Self::document_roots`]), read afresh: a story only an unavailable table named,
+    /// and everything below it, is hidden. The chains and the flag are kept until the stories'
+    /// structure changes, so typing never rebuilds them.
     pub(crate) fn story_laid_out(&self, story: &str) -> bool {
         match crate::story_ref(&self.yrs_doc().transact(), story) {
             Ok(_) | Err(crate::EditError::CellHasNoStory(_)) => {}
             Err(_) => return false,
         }
-        let key = self.reach_key();
-        if let Some((at, reach)) = self.laid_out_stories.lock().unwrap().as_ref()
-            && *at == key
-        {
-            return reach.shows(story);
-        }
-        let reach = self.reachable_stories(&self.document_roots());
-        let laid_out = reach.shows(story);
-        *self.laid_out_stories.lock().unwrap() = Some((key, std::sync::Arc::new(reach)));
-        laid_out
+        let reach = self.document_reach();
+        !reach.met_unavailable || self.document_roots().contains(reach.top(story))
     }
 
-    /// What the reach walk's answer depends on: the stories' structure (table payload keys,
-    /// cells, block controls' story references, story creation and removal). Roots do not depend
-    /// on section references, part metadata or aliases ([`is_root`]).
+    /// The structure revision the kept [`DocumentReach`] is valid for: it moves with table
+    /// payload keys, cells, block controls' story references, and story creation and removal.
     pub(crate) fn reach_key(&self) -> ReachKey {
         self.story_revisions.lock().unwrap().structure
     }
 
-    /// The document's live roots, by the ids the engine gave them ([`is_root`]): the body, the
-    /// headers and footers, and the notes.
-    fn document_roots(&self) -> Vec<String> {
-        let txn = self.yrs_doc().transact();
-        let Some(stories) = txn.get_map(crate::STORIES) else {
-            return Vec::new();
+    fn document_reach(&self) -> std::sync::Arc<DocumentReach> {
+        let key = self.reach_key();
+        if let Some((at, reach)) = self.laid_out_stories.lock().unwrap().as_ref()
+            && *at == key
+        {
+            return std::sync::Arc::clone(reach);
+        }
+        let reach = std::sync::Arc::new(self.containers());
+        *self.laid_out_stories.lock().unwrap() = Some((key, std::sync::Arc::clone(&reach)));
+        reach
+    }
+
+    /// The document's roots, read from its own indexes and never from a story's id: the body,
+    /// every header and footer the header/footer index knows (each section's references and
+    /// every sourced one, as the story list reads them), and every note the source package or
+    /// the part metadata holds.
+    fn document_roots(&self) -> HashSet<String> {
+        let mut roots: HashSet<String> = {
+            let txn = self.yrs_doc().transact();
+            let mut views = crate::target::Views::committed(self, &txn);
+            crate::structured::header_footer_index(&mut views)
+                .roles
+                .into_keys()
+                .collect()
         };
-        let live: HashSet<String> = crate::live_stories(&stories, &txn)
-            .map(|(id, _)| id.to_owned())
-            .collect();
-        let mut roots: Vec<String> = live
-            .iter()
-            .filter(|id| is_root(id, |story| live.contains(story)))
-            .cloned()
-            .collect();
-        roots.sort();
+        roots.insert("body".to_owned());
+        if let Some(source) = self.source_metadata() {
+            roots.extend(
+                source
+                    .read()
+                    .stories
+                    .iter()
+                    .filter(|story| {
+                        matches!(
+                            story.kind,
+                            crate::structured::StoryKind::Footnote
+                                | crate::structured::StoryKind::Endnote
+                        )
+                    })
+                    .map(|story| story.content_story(self)),
+            );
+        }
+        if let Ok(parts) = serde_json::from_str::<serde_json::Value>(&self.part_metadata_json()) {
+            for (kind, prefix) in [("footnotes", "fn"), ("endnotes", "en")] {
+                for note in parts
+                    .get(kind)
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    if let Some(id) = note.get("id").and_then(serde_json::Value::as_i64) {
+                        roots.insert(format!("{prefix}:{id}"));
+                    }
+                }
+            }
+        }
         roots
     }
 
-    /// Every live story reachable from `roots` through the cells of complete tables and block
-    /// controls' stories, at any depth: the stories the layout shows, named
-    /// as the outline walk names them, and whether the walk met an unavailable table. A cell
-    /// without its story under a complete table is reached as a leaf, as the layout shows it. A
-    /// malformed entry is skipped; an unavailable table leads nowhere.
-    fn reachable_stories(&self, roots: &[String]) -> DocumentReach {
+    /// One pass over every live story, with no starting roots: for each story a complete
+    /// table's cell or a block control names (by the outline walk's names, a cell without its
+    /// story included), the story that names it; and whether any story holds an unavailable
+    /// table. A malformed entry is skipped; an unavailable table names nothing.
+    fn containers(&self) -> DocumentReach {
         let txn = self.yrs_doc().transact();
-        let mut reached = HashSet::new();
+        let mut parents = HashMap::new();
         let mut met_unavailable = false;
-        let mut queue = roots.to_vec();
-        while let Some(story_id) = queue.pop() {
-            if reached.contains(&story_id) {
-                continue;
-            }
-            let story = match crate::story_ref(&txn, &story_id) {
-                Ok(story) => story,
-                Err(crate::EditError::CellHasNoStory(_)) => {
-                    reached.insert(story_id);
-                    continue;
-                }
-                Err(_) => continue,
+        let Some(stories) = txn.get_map(crate::STORIES) else {
+            return DocumentReach {
+                parents,
+                met_unavailable,
             };
-            reached.insert(story_id.clone());
+        };
+        let live: Vec<(String, TextRef)> = crate::live_stories(&stories, &txn)
+            .filter_map(|(id, value)| match value {
+                Out::YText(story) => Some((id.to_owned(), story)),
+                _ => None,
+            })
+            .collect();
+        for (story_id, story) in live {
+            let mut name = |child: String| {
+                parents.entry(child).or_insert_with(|| story_id.clone());
+            };
             let mut table_index = 0;
             for diff in story.diff(&txn, YChange::identity) {
                 let Out::YMap(map) = diff.insert else {
@@ -217,10 +213,10 @@ impl EditingDoc {
                             for (cell_index, cell) in cells.iter().enumerate() {
                                 let Any::Map(cell) = cell else { continue };
                                 match cell.get("story") {
-                                    None | Some(Any::Null | Any::Undefined) => queue.push(format!(
+                                    None | Some(Any::Null | Any::Undefined) => name(format!(
                                         "{story_id}:t{index}:r{row_index}c{cell_index}"
                                     )),
-                                    Some(Any::String(child)) => queue.push(child.to_string()),
+                                    Some(Any::String(child)) => name(child.to_string()),
                                     Some(_) => {}
                                 }
                             }
@@ -228,9 +224,9 @@ impl EditingDoc {
                     }
                     Some("blockSdt") => match map.get(&txn, "story") {
                         None | Some(Out::Any(Any::Null | Any::Undefined)) => {
-                            queue.push(format!("{story_id}:sdt0"));
+                            name(format!("{story_id}:sdt0"));
                         }
-                        Some(Out::Any(Any::String(child))) => queue.push(child.to_string()),
+                        Some(Out::Any(Any::String(child))) => name(child.to_string()),
                         Some(_) => {}
                     },
                     _ => {}
@@ -238,7 +234,7 @@ impl EditingDoc {
             }
         }
         DocumentReach {
-            reached,
+            parents,
             met_unavailable,
         }
     }
@@ -462,65 +458,6 @@ mod tests {
     }
 
     #[test]
-    fn every_story_kind_is_a_root_or_contained() {
-        use crate::stories::StoryInfoKind::{self, *};
-        const EVERY_KIND: [StoryInfoKind; 8] = [
-            Body,
-            TableCell,
-            ContentControl,
-            Header,
-            Footer,
-            Footnote,
-            Endnote,
-            Other,
-        ];
-        let _every_kind_is_listed = |kind: StoryInfoKind| match kind {
-            Body | TableCell | ContentControl | Header | Footer | Footnote | Endnote | Other => {}
-        };
-        let header = crate::header_footer::story_id("rId1");
-        let odd_header = crate::header_footer::story_id("rId:odd");
-        let edit_cell = format!("{header}:t2:r0c1~81");
-        let table = [
-            (Body, "body", true),
-            (Header, header.as_str(), true),
-            (Footer, odd_header.as_str(), true),
-            (Footnote, "fn:1", true),
-            (Footnote, "fn:a:b", true),
-            (Endnote, "en:-1", true),
-            (TableCell, "body:t0:r0c0", false),
-            (TableCell, edit_cell.as_str(), false),
-            (TableCell, "fn:1:t0:r0c0:t1:r1c0", false),
-            (TableCell, "hf:rId:odd:t0:r0c0", false),
-            (ContentControl, "body:sdt0", false),
-            (ContentControl, "hf:rId1:sdt3", false),
-            (ContentControl, "en:2:repeat:4", false),
-            (Other, "host", false),
-            (Other, "hf:rId9", true),
-            (Header, "hf:x:t0:r0c0", true),
-            (Footer, "hf:y:sdt0", true),
-            (Endnote, "en:z:repeat:1", true),
-        ];
-        let live = [
-            "body",
-            header.as_str(),
-            odd_header.as_str(),
-            "fn:1",
-            "fn:1:t0:r0c0",
-            "en:2",
-        ];
-        for kind in EVERY_KIND {
-            assert!(
-                table.iter().any(|(listed, _, _)| *listed == kind),
-                "{kind:?} has no row: say whether it is a root or contained"
-            );
-        }
-        for (kind, story, root) in table {
-            let exists = |id: &str| live.contains(&id);
-            assert_eq!(super::is_root(story, exists), root, "{kind:?} {story}");
-        }
-    }
-
-    #[test]
     fn every_root_a_document_seeds_or_a_host_or_peer_adds_is_recognised_and_stays_shown() {
         use crate::stories::StoryInfoKind;
         const W: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#;
@@ -534,6 +471,10 @@ mod tests {
             ("rIdC", "header3.xml", "hdr", "header"),
             ("rIdD", "header4.xml", "hdr", "header"),
             ("rIdF", "footer1.xml", "ftr", "footer"),
+            ("x", "header5.xml", "hdr", "header"),
+            ("x:t0:r0c0", "header6.xml", "hdr", "header"),
+            ("y:sdt0", "header7.xml", "hdr", "header"),
+            ("z:repeat:1", "footer2.xml", "ftr", "footer"),
         ];
         let mut parts = vec![
             (
@@ -587,7 +528,7 @@ mod tests {
             (
                 "word/document.xml".to_owned(),
                 format!(
-                    r#"<w:document {W}><w:body>{}<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc>{}</w:tc></w:tr></w:tbl><w:p><w:pPr><w:sectPr><w:headerReference w:type="default" r:id="rIdA"/><w:headerReference w:type="first" r:id="rId:B"/><w:titlePg/></w:sectPr></w:pPr><w:r><w:t>One</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r></w:p><w:p><w:r><w:t>Two</w:t></w:r><w:r><w:endnoteReference w:id="2"/></w:r></w:p><w:sectPr><w:headerReference w:type="even" r:id="rIdC"/><w:headerReference w:type="default" r:id="rIdD"/><w:footerReference w:type="default" r:id="rIdF"/></w:sectPr></w:body></w:document>"#,
+                    r#"<w:document {W}><w:body>{}<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc>{}</w:tc></w:tr></w:tbl><w:p><w:pPr><w:sectPr><w:headerReference w:type="default" r:id="rIdA"/><w:headerReference w:type="first" r:id="rId:B"/><w:titlePg/></w:sectPr></w:pPr><w:r><w:t>One</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r></w:p><w:p><w:pPr><w:sectPr><w:headerReference w:type="default" r:id="x"/><w:headerReference w:type="even" r:id="x:t0:r0c0"/><w:headerReference w:type="first" r:id="y:sdt0"/><w:footerReference w:type="default" r:id="z:repeat:1"/><w:titlePg/></w:sectPr></w:pPr><w:r><w:t>Three</w:t></w:r></w:p><w:p><w:r><w:t>Two</w:t></w:r><w:r><w:endnoteReference w:id="2"/></w:r></w:p><w:sectPr><w:headerReference w:type="even" r:id="rIdC"/><w:headerReference w:type="default" r:id="rIdD"/><w:footerReference w:type="default" r:id="rIdF"/></w:sectPr></w:body></w:document>"#,
                     p("Before"),
                     p("Cell")
                 ),
@@ -612,47 +553,64 @@ mod tests {
             .unwrap();
         exchange(&doc, &peer);
 
-        let mut minted = Vec::new();
-        let stories = doc.list_stories().stories;
-        let exists = |id: &str| stories.iter().any(|info| info.story == id);
-        for info in &stories {
-            let root = matches!(
-                info.kind,
+        let roots = doc.document_roots();
+        let reach = doc.document_reach();
+        for info in doc.list_stories().stories {
+            let (story, kind) = (info.story.as_str(), info.kind);
+            match kind {
                 StoryInfoKind::Body
-                    | StoryInfoKind::Header
-                    | StoryInfoKind::Footer
-                    | StoryInfoKind::Footnote
-                    | StoryInfoKind::Endnote
-            );
-            let recognised = super::is_root(&info.story, exists);
-            if root || info.story.starts_with("hf:") {
-                assert!(recognised, "{:?} {}", info.kind, info.story);
-                minted.push(info.story.clone());
-            } else {
-                assert!(!recognised, "{:?} {}", info.kind, info.story);
+                | StoryInfoKind::Header
+                | StoryInfoKind::Footer
+                | StoryInfoKind::Footnote
+                | StoryInfoKind::Endnote => {
+                    assert!(roots.contains(story), "{kind:?} {story} is a root by the indexes");
+                }
+                StoryInfoKind::TableCell | StoryInfoKind::ContentControl => {
+                    assert!(reach.parents.contains_key(story), "{kind:?} {story} has a container");
+                }
+                StoryInfoKind::Other => {}
             }
         }
-        for expected in [
-            "body", "hf:rIdA", "hf:rId:B", "hf:rIdC", "hf:rIdD", "hf:rIdF", "hf:rIdHost",
-            "hf:rIdPeer", "fn:1", "en:2",
-        ] {
-            assert!(minted.iter().any(|story| story == expected), "{expected} in {minted:?}");
+        let shown = [
+            "body",
+            "hf:rIdA",
+            "hf:rId:B",
+            "hf:rIdC",
+            "hf:rIdD",
+            "hf:rIdF",
+            "hf:x",
+            "hf:x:t0:r0c0",
+            "hf:y:sdt0",
+            "hf:z:repeat:1",
+            "fn:1",
+            "en:2",
+        ];
+        for story in shown {
+            assert!(roots.contains(story), "{story} in {roots:?}");
         }
 
         strip(&doc, "body");
         assert_eq!(doc.unavailable_tables(), Some(vec![TableLocator::new("body", 0)]));
-        for story in &minted {
+        for story in shown {
             assert!(doc.story_laid_out(story), "{story} stays shown beside an unavailable table");
         }
+        assert!(
+            !doc.story_laid_out("hf:rIdPeer"),
+            "a footer no section references is not laid out"
+        );
+        assert!(!doc.story_laid_out("hf:rIdHost"));
         let key = doc.reach_key();
         doc.set_part_metadata(
             &ctx(),
-            r#"{"body":{"finalSectionProperties":{"headerReferences":[{"type":"default","relationshipId":"rIdHost"}]}},"headers":[["rIdHost"]]}"#,
+            r#"{"body":{"finalSectionProperties":{"headerReferences":[{"type":"default","rId":"rIdHost"}]}},"headers":[["rIdHost"]]}"#,
             &[],
         )
         .unwrap();
-        assert_eq!(doc.reach_key(), key, "a reference changes no root");
-        assert!(doc.story_laid_out("hf:rIdHost"));
+        assert_eq!(doc.reach_key(), key, "a section reference is no input of the kept chains");
+        assert!(
+            doc.story_laid_out("hf:rIdHost"),
+            "a header a section references from now on is a root at once"
+        );
     }
 
     #[test]
@@ -810,15 +768,12 @@ mod tests {
 
     #[test]
     fn a_note_cell_whose_table_lost_its_rows_is_not_a_root() {
-        let exists = |id: &str| id == "fn:1";
-        assert!(super::is_root("fn:1", exists));
-        assert!(super::is_root("en:-1", exists));
-        assert!(!super::is_root("fn:1:t0:r0c0", exists));
-        assert!(!super::is_root("fn:", exists));
         let doc = EditingDoc::new(80);
         doc.create_story("body", "Hello", "Normal", "left")
             .unwrap();
-        doc.create_story("fn:1", "Note", "Normal", "left").unwrap();
+        doc.set_part_metadata(&ctx(), r#"{"body":{},"footnotes":[{"id":1}]}"#, &[])
+            .unwrap();
+        assert!(doc.document_roots().contains("fn:1"));
         let outer = doc
             .insert_table(&ctx(), Position::new("fn:1", 0), 1, 1)
             .unwrap();
