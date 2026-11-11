@@ -728,8 +728,9 @@ pub struct EditingDoc {
     seen: identity::SeenCell,
     scan_cache: identity::ScanCache,
     story_revisions: Arc<Mutex<StoryRevisions>>,
-    /// The stories the walk from the document's roots lays out, at the structure revision it ran.
-    laid_out_stories: Mutex<Option<(u64, Arc<unavailable_tables::DocumentReach>)>>,
+    /// The stories the walk from the document's roots lays out, at the reach key it ran under.
+    laid_out_stories:
+        Mutex<Option<(unavailable_tables::ReachKey, Arc<unavailable_tables::DocumentReach>)>>,
     remote_deletions: remote_cleanup::RemoteDeletions,
     keeps_deleted: Arc<AtomicBool>,
     commit_hooks: Rc<RefCell<CommitHooks>>,

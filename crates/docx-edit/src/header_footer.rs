@@ -59,6 +59,13 @@ impl EditingDoc {
             .unwrap_or_else(|| story_id(relationship_id))
     }
 
+    /// The stored header/footer alias groups as written, unparsed.
+    pub(crate) fn header_footer_aliases_raw(&self) -> Option<String> {
+        let txn = self.yrs_doc().transact();
+        txn.get_map(crate::identity::SESSION)
+            .and_then(|session| map_string(&session, &txn, HF_ALIASES))
+    }
+
     /// Active header/footer aliases paired with their canonical relationship ids.
     #[doc(hidden)]
     pub fn header_footer_aliases(&self) -> Vec<(String, String)> {

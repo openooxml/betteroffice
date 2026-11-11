@@ -40,6 +40,9 @@ thread_local! {
     static PAYLOAD_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// The structure revision, section revision and header/footer aliases a reach walk ran under.
+pub(crate) type ReachKey = (u64, u64, Option<String>);
+
 /// What the reachability walk from the document's roots found: the stories it reached, and
 /// whether it met an unavailable table on the way.
 pub(crate) struct DocumentReach {
@@ -63,12 +66,24 @@ pub(crate) fn lacks_payload(has: impl Fn(&str) -> bool) -> bool {
 
 /// Whether `story` is a footnote or endnote itself, `fn:<id>` or `en:<id>`, rather than a story
 /// below one (a cell `fn:1:t0:r0c0` reads as a note once the table naming it lost its rows).
-#[cfg(test)]
 fn is_note_root(story: &str) -> bool {
     story
         .strip_prefix("fn:")
         .or_else(|| story.strip_prefix("en:"))
         .is_some_and(|id| !id.is_empty() && !id.contains(':'))
+}
+
+/// Whether a story the story list reports as `kind` is a root: laid out as before whatever names
+/// it, and never hidden. Every other story exists because a container names it: a table cell, a
+/// block control's story, or one the list cannot place because the table that named it lost its
+/// rows (it reads as `Other`).
+pub(crate) fn is_root(kind: crate::stories::StoryInfoKind, story: &str) -> bool {
+    use crate::stories::StoryInfoKind;
+    match kind {
+        StoryInfoKind::Body | StoryInfoKind::Header | StoryInfoKind::Footer => true,
+        StoryInfoKind::Footnote | StoryInfoKind::Endnote => is_note_root(story),
+        StoryInfoKind::TableCell | StoryInfoKind::ContentControl | StoryInfoKind::Other => false,
+    }
 }
 
 impl EditingDoc {
@@ -78,76 +93,57 @@ impl EditingDoc {
     /// `None` when a walk cannot finish.
     #[cfg(test)]
     pub(crate) fn unavailable_tables(&self) -> Option<Vec<TableLocator>> {
-        use crate::stories::StoryInfoKind;
-        let roots: Vec<String> = self
-            .list_stories()
-            .stories
-            .into_iter()
-            .filter(|info| match info.kind {
-                StoryInfoKind::Body | StoryInfoKind::Header | StoryInfoKind::Footer => true,
-                StoryInfoKind::Footnote | StoryInfoKind::Endnote => is_note_root(&info.story),
-                _ => false,
-            })
-            .map(|info| info.story)
-            .collect();
-        self.unavailable_tables_from(&roots)
+        self.unavailable_tables_from(&self.document_roots())
     }
 
     /// Whether the layout shows the live `story` (a cell without its story under a complete table
-    /// counts as live: it shows as an empty paragraph). A story is hidden only on positive
-    /// evidence: the walk from the document's roots met an unavailable table and did not reach
-    /// the story. Without an unavailable table in reach every live story counts as shown, exactly
-    /// as before. The walk runs once per structural change, so typing never walks again, and has
-    /// no depth limit.
+    /// counts as live: it shows as an empty paragraph). Only a story that a container names can
+    /// be hidden, and only on positive evidence: the walk from the document's roots met an
+    /// unavailable table and did not reach the story. Roots, and every story while no table is
+    /// unavailable, count as shown exactly as before. The walk runs once per change to the
+    /// stories' structure or the section properties, so typing never walks again, and has no
+    /// depth limit.
     pub(crate) fn story_laid_out(&self, story: &str) -> bool {
         match crate::story_ref(&self.yrs_doc().transact(), story) {
             Ok(_) | Err(crate::EditError::CellHasNoStory(_)) => {}
             Err(_) => return false,
         }
-        let structure = self.story_revisions.lock().unwrap().structure;
+        let key = self.reach_key();
         if let Some((at, reach)) = self.laid_out_stories.lock().unwrap().as_ref()
-            && *at == structure
+            && *at == key
         {
             return reach.shows(story);
         }
         let reach = self.reachable_stories(&self.document_roots());
         let laid_out = reach.shows(story);
-        *self.laid_out_stories.lock().unwrap() = Some((structure, std::sync::Arc::new(reach)));
+        *self.laid_out_stories.lock().unwrap() = Some((key, std::sync::Arc::new(reach)));
         laid_out
     }
 
-    /// The document's roots, from its story metadata: the body, each header and footer the
-    /// sections reference, and every story the source package seeded as a root (body, headers,
-    /// footers and notes, referenced or not). Notes a host adds are reached through their
-    /// references.
-    fn document_roots(&self) -> Vec<String> {
-        use crate::stories::StoryInfoKind;
-        let mut roots: Vec<String> = self
-            .list_stories()
-            .stories
-            .into_iter()
-            .filter(|info| {
-                matches!(
-                    info.kind,
-                    StoryInfoKind::Body | StoryInfoKind::Header | StoryInfoKind::Footer
-                )
-            })
-            .map(|info| info.story)
-            .collect();
-        if let Some(source) = self.source_metadata() {
-            roots.extend(
-                source
-                    .read()
-                    .stories
-                    .iter()
-                    .map(|story| story.content_story(self)),
-            );
-        }
-        roots
+    /// What the reach walk's answer depends on: the stories' structure (table payload keys,
+    /// cells, block controls' story references, story creation and removal), the section
+    /// properties that reference headers and footers, and the header and footer aliases.
+    pub(crate) fn reach_key(&self) -> ReachKey {
+        let (structure, sections) = {
+            let revisions = self.story_revisions.lock().unwrap();
+            (revisions.structure, revisions.sections)
+        };
+        (structure, sections, self.header_footer_aliases_raw())
     }
 
-    /// Every live story reachable from `roots` through the cells of complete tables, block
-    /// controls' stories and note references, at any depth: the stories the layout shows, named
+    /// The document's roots, by the story list's kinds ([`is_root`]): the body, the headers and
+    /// footers, and the notes.
+    fn document_roots(&self) -> Vec<String> {
+        self.list_stories()
+            .stories
+            .into_iter()
+            .filter(|info| is_root(info.kind, &info.story))
+            .map(|info| info.story)
+            .collect()
+    }
+
+    /// Every live story reachable from `roots` through the cells of complete tables and block
+    /// controls' stories, at any depth: the stories the layout shows, named
     /// as the outline walk names them, and whether the walk met an unavailable table. A cell
     /// without its story under a complete table is reached as a leaf, as the layout shows it. A
     /// malformed entry is skipped; an unavailable table leads nowhere.
@@ -209,18 +205,6 @@ impl EditingDoc {
                         Some(Out::Any(Any::String(child))) => queue.push(child.to_string()),
                         Some(_) => {}
                     },
-                    Some("noteRef") => {
-                        for (key, prefix) in [("footnoteRefId", "fn"), ("endnoteRefId", "en")] {
-                            let id = match map.get(&txn, key) {
-                                Some(Out::Any(Any::Number(id))) => Some(id as i64),
-                                Some(Out::Any(Any::String(id))) => id.parse::<i64>().ok(),
-                                _ => None,
-                            };
-                            if let Some(id) = id {
-                                queue.push(format!("{prefix}:{id}"));
-                            }
-                        }
-                    }
                     _ => {}
                 }
             }
@@ -352,13 +336,17 @@ mod tests {
     }
 
     fn table_map(story: &str, txn: &yrs::TransactionMut) -> yrs::MapRef {
+        embed_map(story, "table", txn)
+    }
+
+    fn embed_map(story: &str, kind: &str, txn: &yrs::TransactionMut) -> yrs::MapRef {
         crate::story_ref(txn, story)
             .unwrap()
             .diff(txn, yrs::types::text::YChange::identity)
             .into_iter()
             .find_map(|diff| match diff.insert {
                 yrs::Out::YMap(map) => (crate::map_string(&map, txn, crate::KIND_KEY).as_deref()
-                    == Some("table"))
+                    == Some(kind))
                 .then_some(map),
                 _ => None,
             })
@@ -443,6 +431,93 @@ mod tests {
         );
         assert!(doc.story_laid_out("body"));
         assert!(!doc.story_laid_out("missing"));
+    }
+
+    #[test]
+    fn every_story_kind_is_a_root_or_contained() {
+        use crate::stories::StoryInfoKind::{self, *};
+        const EVERY_KIND: [StoryInfoKind; 8] = [
+            Body,
+            TableCell,
+            ContentControl,
+            Header,
+            Footer,
+            Footnote,
+            Endnote,
+            Other,
+        ];
+        let _every_kind_is_listed = |kind: StoryInfoKind| match kind {
+            Body | TableCell | ContentControl | Header | Footer | Footnote | Endnote | Other => {}
+        };
+        let table = [
+            (Body, "body", true),
+            (Header, "hf:rId1", true),
+            (Footer, "hf:rId2", true),
+            (Footnote, "fn:1", true),
+            (Endnote, "en:2", true),
+            (Footnote, "fn:1:t0:r0c0", false),
+            (TableCell, "body:t0:r0c0", false),
+            (ContentControl, "body:sdt0", false),
+            (Other, "host", false),
+        ];
+        for kind in EVERY_KIND {
+            assert!(
+                table.iter().any(|(listed, _, _)| *listed == kind),
+                "{kind:?} has no row: say whether it is a root or contained"
+            );
+        }
+        for (kind, story, root) in table {
+            assert_eq!(super::is_root(kind, story), root, "{kind:?} {story}");
+        }
+    }
+
+    #[test]
+    fn every_edit_that_can_change_the_reach_changes_its_key() {
+        let doc = EditingDoc::new(86);
+        doc.create_story("body", "Hello", "Normal", "left")
+            .unwrap();
+        let mut key = doc.reach_key();
+        let mut moved = |what: &str| {
+            let next = doc.reach_key();
+            assert_ne!(next, key, "{what} must change the reach key");
+            key = next;
+        };
+        doc.create_story("host", "Inside", "Normal", "left")
+            .unwrap();
+        moved("creating a story");
+        doc.insert_table(&ctx(), Position::new("body", 0), 1, 1)
+            .unwrap();
+        moved("inserting a table");
+        doc.set_column_width(&ctx(), &CellLoc::new("body", 0, 0, 0), 2000.0)
+            .unwrap();
+        moved("rewriting a table's payload");
+        strip(&doc, "body");
+        moved("removing a table's payload keys");
+        let control = {
+            let mut txn = doc.yrs_doc().transact_mut();
+            let body = crate::story_ref(&txn, "body").unwrap();
+            let control = body.insert_embed(&mut txn, 0, yrs::MapPrelim::default());
+            yrs::Map::insert(&control, &mut txn, crate::KIND_KEY, "blockSdt");
+            yrs::Map::insert(&control, &mut txn, "story", "host");
+            control
+        };
+        moved("inserting a block control");
+        {
+            let mut txn = doc.yrs_doc().transact_mut();
+            yrs::Map::insert(&control, &mut txn, "story", "elsewhere");
+        }
+        moved("pointing a block control at another story");
+        {
+            let mut txn = doc.yrs_doc().transact_mut();
+            let pilcrow = embed_map("body", "pilcrow", &txn);
+            yrs::Map::insert(&pilcrow, &mut txn, "sectPr", "{}");
+        }
+        moved("changing a section's properties");
+        let aliases = r#"[{"isHeader":true,"partPath":"word/header1.xml","relationshipIds":["rId7","rId9"]}]"#;
+        doc.set_header_footer_aliases(aliases).unwrap();
+        moved("setting header and footer aliases");
+        doc.delete_story("host").unwrap();
+        moved("deleting a story");
     }
 
     #[test]
