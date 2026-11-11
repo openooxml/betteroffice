@@ -2243,24 +2243,37 @@ test('native and wasm find a table crossing undos emptied in a header, a footnot
 
 type TablePayloadEdit = (payload: Record<string, unknown>) => Record<string, unknown>;
 
-function clipboardTableBytes(tblPr: string): Uint8Array {
+const clipboardParagraph = (text: string) => `<w:p><w:r><w:t>${text}</w:t></w:r></w:p>`;
+const blockControl = (content: string) => `<w:sdt><w:sdtPr><w:alias w:val="Box"/></w:sdtPr><w:sdtContent>${content}</w:sdtContent></w:sdt>`;
+
+function clipboardBodyBytes(body: string): Uint8Array {
   const encoder = new TextEncoder();
-  const paragraph = (text: string) => `<w:p><w:r><w:t>${text}</w:t></w:r></w:p>`;
-  const cell = (text: string) => `<w:tc><w:tcPr><w:tcW w:w="2340" w:type="dxa"/></w:tcPr>${paragraph(text)}</w:tc>`;
   return wasm.rezip_docx({
     '[Content_Types].xml': encoder.encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'),
     '_rels/.rels': encoder.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'),
-    'word/document.xml': encoder.encode(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${paragraph('Before')}<w:tbl>${tblPr}<w:tblGrid><w:gridCol w:w="2340"/><w:gridCol w:w="2340"/></w:tblGrid><w:tr>${cell('A')}${cell('B')}</w:tr><w:tr>${cell('C')}${cell('D')}</w:tr></w:tbl>${paragraph('After')}<w:sectPr/></w:body></w:document>`),
+    'word/document.xml': encoder.encode(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${clipboardParagraph('Before')}${body}${clipboardParagraph('After')}<w:sectPr/></w:body></w:document>`),
   });
 }
 
-function clipboardCopies(session: Session, edit: TablePayloadEdit = (payload) => payload) {
+function clipboardTableXml(tblPr: string, firstCell = clipboardParagraph('A')): string {
+  const cell = (content: string) => `<w:tc><w:tcPr><w:tcW w:w="2340" w:type="dxa"/></w:tcPr>${content}</w:tc>`;
+  return `<w:tbl>${tblPr}<w:tblGrid><w:gridCol w:w="2340"/><w:gridCol w:w="2340"/></w:tblGrid><w:tr>${cell(firstCell)}${cell(clipboardParagraph('B'))}</w:tr><w:tr>${cell(clipboardParagraph('C'))}${cell(clipboardParagraph('D'))}</w:tr></w:tbl>`;
+}
+
+function clipboardTableBytes(tblPr: string): Uint8Array {
+  return clipboardBodyBytes(clipboardTableXml(tblPr));
+}
+
+function clipboardCopies(session: Session, edit: TablePayloadEdit = (payload) => payload, only?: string) {
+  const edits = (story: string) => only === undefined || story === only;
   const reader: ClipboardTableReader = {
     storySegments: (story) => (JSON.parse(session.story_segments(story)) as YrsStorySegment[]).map((segment) =>
-      segment.kind === 'embed' && segment.embedKind === 'table' ? { ...segment, payload: edit({ ...segment.payload }) } : segment),
+      edits(story) && segment.kind === 'embed' && segment.embedKind === 'table' ? { ...segment, payload: edit({ ...segment.payload }) } : segment),
     tablePayload: (story, tableIndex) => {
       const payload = session.table_payload(story, tableIndex);
-      return payload === undefined ? null : edit(JSON.parse(payload) as Record<string, unknown>);
+      if (payload === undefined) return null;
+      const parsed = JSON.parse(payload) as Record<string, unknown>;
+      return edits(story) ? edit(parsed) : parsed;
     },
   };
   const cell = (row: number, column: number) => ({ story: 'body', tableIndex: 0, row, column });
@@ -2341,3 +2354,57 @@ test('native and wasm open a table without w:tblPr with its properties present a
     expect(slice.fragment?.paragraphs[0]?.tables?.[0]?.rows).toHaveLength(2);
   });
 });
+
+const CONTROLLED_TABLE = clipboardTableXml('<w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>');
+const CONTROL_LAYOUTS: Array<{ name: string; body: string; routes: ReadonlyArray<(typeof CLIPBOARD_ROUTES)[number]> }> = [
+  { name: 'a block content control', body: blockControl(`${CONTROLLED_TABLE}${clipboardParagraph('In control')}`), routes: ['story'] },
+  { name: 'a block content control inside another', routes: ['story'],
+    body: blockControl(`${blockControl(`${CONTROLLED_TABLE}${clipboardParagraph('Inner control')}`)}${clipboardParagraph('Outer control')}`) },
+  { name: 'a block content control in a table cell', routes: CLIPBOARD_ROUTES,
+    body: clipboardTableXml('<w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>', `${blockControl(`${CONTROLLED_TABLE}${clipboardParagraph('In control')}`)}${clipboardParagraph('A')}`) },
+];
+
+function controlledTableStory(session: Session): string {
+  const stories = session.story_ids().filter((story) => story !== 'body' && session.table_payload(story, 0) !== undefined);
+  expect(stories).toHaveLength(1);
+  return stories[0]!;
+}
+
+for (const layout of CONTROL_LAYOUTS) {
+  for (const key of ['tblPr', 'grid', 'rows'] as const) {
+    test(`native and wasm refuse to copy a table without ${key} inside ${layout.name} with the table-unavailable code`, () => {
+      withClipboardEngines(clipboardBodyBytes(layout.body), (expected, actual) => {
+        const story = controlledTableStory(expected);
+        expect(controlledTableStory(actual)).toBe(story);
+        const without: TablePayloadEdit = (payload) => {
+          const rest = { ...payload };
+          delete rest[key];
+          return rest;
+        };
+        for (const route of layout.routes) {
+          expect(clipboardCopies(expected)[route](), route).toEqual(clipboardCopies(actual)[route]());
+          const thrown = expectThrownParity(
+            () => clipboardCopies(expected, without, story)[route](),
+            () => clipboardCopies(actual, without, story)[route](),
+          );
+          expect(thrown, route).toBeInstanceOf(Error);
+          expect((thrown as Error & { code?: string }).code, route).toBe('table-unavailable');
+        }
+      });
+    });
+  }
+
+  test(`native and wasm copy a table whose tblPr is null inside ${layout.name} as one whose tblPr is empty`, () => {
+    withClipboardEngines(clipboardBodyBytes(layout.body), (expected, actual) => {
+      const story = controlledTableStory(expected);
+      const odd: TablePayloadEdit = (payload) => ({ ...payload, tblPr: null });
+      const empty: TablePayloadEdit = (payload) => ({ ...payload, tblPr: {} });
+      for (const route of layout.routes) {
+        const copied = clipboardCopies(expected, odd, story)[route]();
+        expect(copied, route).toEqual(clipboardCopies(expected, empty, story)[route]());
+        expect(clipboardCopies(actual, odd, story)[route](), route).toEqual(copied);
+      }
+      expect(clipboardCopies(actual, odd, story).story().text).toContain('A\tB');
+    });
+  });
+}

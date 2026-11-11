@@ -495,6 +495,41 @@ function requireAvailableTable(raw: unknown): void {
   if (map && isUnavailableTablePayload(map)) throw tableUnavailableError();
 }
 
+function requireAvailableEmbedTables(
+  reader: ClipboardTableReader,
+  kind: string,
+  payload: Record<string, unknown>,
+  seen: Set<string> = new Set(),
+): void {
+  const story = (id: unknown): void => {
+    if (typeof id !== 'string' || seen.has(id)) return;
+    seen.add(id);
+    for (const segment of reader.storySegments(id)) {
+      if (segment.kind === 'embed') requireAvailableEmbedTables(reader, segment.embedKind, segment.payload, seen);
+    }
+  };
+  switch (kind) {
+    case 'table':
+      requireAvailableTable(payload);
+      for (const row of Array.isArray(payload.rows) ? payload.rows : []) {
+        const cells = record(row)?.cells;
+        for (const cell of Array.isArray(cells) ? cells : []) story(record(cell)?.story);
+      }
+      return;
+    case 'sdt':
+      for (const item of Array.isArray(payload.content) ? payload.content : []) {
+        const entry = record(item);
+        if (entry && entry.kind !== 'text') requireAvailableEmbedTables(reader, String(entry.kind), record(entry.payload) ?? {}, seen);
+      }
+      return;
+    case 'blockSdt':
+      story(payload.story);
+      return;
+    default:
+      return;
+  }
+}
+
 function rawRows(payload: { rows?: unknown }): Array<{ cells?: unknown; trPr?: unknown }> {
   if (!payload || !Array.isArray(payload.rows) || payload.rows.length === 0) {
     throw new Error('Table payload holds no rows');
@@ -544,6 +579,7 @@ function embedTextSegments(
   onUnsupported?: () => void,
 ): DocxFragmentSegment[] {
   const out: DocxFragmentSegment[] = [];
+  requireAvailableEmbedTables(reader, segment.embedKind, segment.payload);
   const text = embedPlainText(reader, segment.embedKind, segment.payload);
   if (onUnsupported && !clipboardTextEmbed(reader, segment.embedKind, segment.payload, text)) onUnsupported();
   const parts = text.split('\n');
@@ -823,6 +859,7 @@ export function readClipboardSlice(
       sawBoundary = true;
       push();
     } else {
+      requireAvailableEmbedTables(reader, segment.embedKind, segment.payload);
       const plain = embedPlainText(reader, segment.embedKind, segment.payload);
       if (!clipboardTextEmbed(reader, segment.embedKind, segment.payload, plain)) sawUnrepresentableEmbed = true;
       appendPlainText(plain, segment.attributes);
