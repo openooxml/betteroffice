@@ -2,7 +2,7 @@ import { appendFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const GITHUB_HOSTED = /^(ubuntu|macos|windows)-[\w.-]+$/;
-export const LABEL = 'ubuntu-24.04';
+export const LABEL = 'ubuntu-latest';
 export const ROUTER = 'Route runners';
 export const BATCH_RUNS = 10;
 

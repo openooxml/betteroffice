@@ -189,7 +189,7 @@ jobs:
     name: ${{ matrix.name }}
     needs: [route, browser-build]
     if: ${{ !cancelled() }}
-    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-24.04' || vars.BO_CI_RUNNER || vars.BO_CI_SPILL != 'off' && needs.route.outputs.browser || 'kyora-8x8' }}
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || vars.BO_CI_SPILL != 'off' && needs.route.outputs.browser || 'kyora-8x8' }}
     timeout-minutes: 70
     strategy:
       fail-fast: false
@@ -247,6 +247,11 @@ jobs:
             echo "::warning::Chromium system packages failed to install (attempt $attempt of 3)"
             if [ "$attempt" = 1 ]; then sleep 30; elif [ "$attempt" = 2 ]; then sleep 90; fi
           done
+          echo "::group::Resolver diagnosis"
+          cat /etc/resolv.conf || true
+          resolvectl status 2>/dev/null | head -20 || true
+          getent hosts archive.ubuntu.com || echo "lookup failed"
+          echo "::endgroup::"
           exit 1
 
       - name: Run the production editors in Chromium

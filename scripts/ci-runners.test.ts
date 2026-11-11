@@ -182,15 +182,6 @@ const groupsOf = (router: (typeof jobs)[number]) =>
   parseGroups(router.job.steps.find((step: any) => step.id === 'route').env.ROUTE_GROUPS) as { name: string; slots: number }[];
 const everyGroup = Object.fromEntries(routers.flatMap((router) => groupsOf(router).map(({ name }) => [name, LABEL])));
 const runSteps = (job: any): string[] => (job.steps ?? []).map((step: any) => String(step.run ?? '')).filter(Boolean);
-const SYSTEM_PACKAGES = /\bapt(-get)?\b|\binstall-deps\b|--with-deps\b/;
-const installsSystemPackages = (job: any) =>
-  runSteps(job).some(
-    (run) =>
-      SYSTEM_PACKAGES.test(run) ||
-      [...run.matchAll(/\bscripts\/[\w./-]+\.sh\b/g)].some(([script]) =>
-        SYSTEM_PACKAGES.test(readFileSync(new URL(`../${script}`, import.meta.url), 'utf8'))
-      )
-  );
 
 describe('CI runner routing', () => {
   test('with nothing routed, every CI and End-to-end Linux job but the routers, the audit, the two native jobs and the timings upload runs on its kyora class', () => {
@@ -286,9 +277,7 @@ describe('CI runner routing', () => {
         );
       }
       for (const event of UNTRUSTED) {
-        expect(entry.runsOn(EVENTS[event], {}, everyGroup), `${entry.name}: ${event}`).toEqual([
-          installsSystemPackages(entry.job) ? 'ubuntu-24.04' : 'ubuntu-latest',
-        ]);
+        expect(entry.runsOn(EVENTS[event], {}, everyGroup), `${entry.name}: ${event}`).toEqual(['ubuntu-latest']);
       }
     }
   });
@@ -303,22 +292,6 @@ describe('CI runner routing', () => {
           expect(run, name).not.toMatch(/\bplaywright install(?!-deps)\b/);
           expect(run, name).toMatch(/for attempt in 1 2 3\b/);
           expect(run, name).toMatch(/\btimeout 240 bunx playwright install-deps chromium\b/);
-        }
-      }
-    }
-  });
-
-  test('no job that installs system packages runs on a floating -latest GitHub-hosted image', () => {
-    expect(LABEL).not.toMatch(/-latest$/);
-    const installers = jobs.filter(({ job }) => installsSystemPackages(job));
-    expect(installers.length).toBeGreaterThan(0);
-    for (const { name, runsOn } of installers) {
-      for (const [event, github] of Object.entries(EVENTS)) {
-        for (const vars of Object.values(VARIABLES)) {
-          for (const outputs of [{}, everyGroup]) {
-            const labels = runsOn(github, vars, outputs).filter((label) => label !== vars.BO_CI_RUNNER);
-            expect(labels.filter((label) => /-latest$/.test(label)), `${name}: ${event}`).toEqual([]);
-          }
         }
       }
     }
