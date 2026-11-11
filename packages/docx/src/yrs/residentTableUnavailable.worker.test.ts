@@ -156,7 +156,10 @@ for (const nested of [false, true]) {
   }, TIMEOUT);
 }
 
-/** The local user's own undo crosses a peer's undone shading so the body table loses its rows; the caret stays in its second cell. */
+/**
+ * The local user's own undo crosses a peer's undone shading so the body table loses its rows; the caret stays in its second cell.
+ * The replica needs the higher client id: otherwise the peer's undo restores the payload over the local shading and the local undo has nothing left to revert.
+ */
 async function ownCrossingUndo(replica: Opened, first: YrsSession): Promise<string> {
   const story = (replica.engine.tablePayload('body', 0)!.rows as Array<{ cells: Array<{ story: string }> }>)[0]!.cells[1]!.story;
   const inCell = { story, paraId: replica.engine.paragraphs(story)[0]!.paraId, offset: 2 };
@@ -178,8 +181,8 @@ async function ownCrossingUndo(replica: Opened, first: YrsSession): Promise<stri
 }
 
 test(`after the local user's own crossing undo, a caret in the table's cell stays there, typing applies and is kept, and saves refuse coded`, async () => {
-  const replica = await open(9651);
-  const first = await peer(replica, 9652);
+  const replica = await open(9652);
+  const first = await peer(replica, 9651);
   try {
     const story = await ownCrossingUndo(replica, first);
     expect((await replica.session.submit('insertText', { text: 'Z' }).ack).status).toBe('applied');
@@ -195,8 +198,8 @@ test(`after the local user's own crossing undo, a caret in the table's cell stay
 }, TIMEOUT);
 
 test(`after the local user's own crossing undo and a peer's text edit, the local redo brings the table back with the peer's text and the caret's cell maps to it again`, async () => {
-  const replica = await open(9656);
-  const first = await peer(replica, 9657);
+  const replica = await open(9657);
+  const first = await peer(replica, 9656);
   try {
     const story = await ownCrossingUndo(replica, first);
     send(replica, first);
@@ -389,7 +392,8 @@ for (const [index, lost] of LOST.entries()) {
 const INNER_LOST: Array<{ name: string; key: string; edit: (session: YrsSession, story: string, first: boolean) => void }> = [
   { name: 'its properties', key: 'tblPr', edit: (session, story, first) =>
     session.setTableProperties({ story, tableIndex: 0 }, first ? { width: 4000, widthType: 'dxa' } : { justification: 'center' }) },
-  { name: 'its grid', key: 'grid', edit: (session, story, first) => session.setColumnWidth(at(story, 0, first ? 0 : 1), first ? 2000 : 3000) },
+  { name: 'its grid', key: 'grid', edit: (session, story, first) =>
+    session.applyRawOps(story, [{ op: 'setEmbedAttr', index: 0, key: 'grid', value: first ? [2000, 2340] : [2340, 3000] }]) },
 ];
 
 for (const [index, lost] of INNER_LOST.entries()) {
@@ -450,8 +454,8 @@ const pointerRange = (replica: Opened, from: ReturnType<typeof startOf>, to: Ret
   resolvePointerCellRange(replica.engine as unknown as DocxWorkerCommandEngine, from, to);
 
 test(`a Shift-click from a caret the local user's own undo left in a cell of an inner table without properties to another outer cell builds no outer cell range`, async () => {
-  const replica = await open(9981, true);
-  const first = await peer(replica, 9982);
+  const replica = await open(9982, true);
+  const first = await peer(replica, 9981);
   try {
     const table = tableStory(replica);
     const story = cellStory(replica);
