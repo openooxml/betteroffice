@@ -66,7 +66,7 @@ export async function renderPng(engine: DocxPngEngine, options: Pick<DocxPngOpti
 }
 
 /** A picture's reference as diagnostics name it: a `data:` URL by its header, never its payload. */
-export function pictureId(id: string): string {
+function pictureId(id: string): string {
   const comma = id.indexOf(',');
   return id.startsWith('data:') && comma >= 0 ? id.slice(0, comma) : id;
 }
