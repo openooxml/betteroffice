@@ -263,7 +263,11 @@ fn a_fully_hidden_table_takes_no_space_and_paints_nothing() {
 }
 
 fn merged(text: &str, merge: &str, tr_pr: &str) -> String {
-    let (mark, r_pr) = if tr_pr == HIDDEN { (HIDDEN_MARK, VANISH) } else { ("", "") };
+    let (mark, r_pr) = if tr_pr == HIDDEN {
+        (HIDDEN_MARK, VANISH)
+    } else {
+        ("", "")
+    };
     format!(
         r#"<w:tr>{tr_pr}<w:tc><w:tcPr><w:tcW w:w="2340" w:type="dxa"/><w:vMerge{merge}/></w:tcPr><w:p>{mark}<w:r>{r_pr}<w:t>{text}</w:t></w:r></w:p></w:tc><w:tc><w:tcPr><w:tcW w:w="2340" w:type="dxa"/></w:tcPr><w:p>{mark}<w:r>{r_pr}<w:t>Side{text}</w:t></w:r></w:p></w:tc></w:tr>"#
     )
@@ -449,7 +453,10 @@ fn wide_row(tr_pr: &str, paragraphs: &[String]) -> String {
 }
 
 fn text_row(text: &str) -> String {
-    wide_row("", &vec![format!("<w:p><w:r><w:t>{text}</w:t></w:r></w:p>"); 5])
+    wide_row(
+        "",
+        &vec![format!("<w:p><w:r><w:t>{text}</w:t></w:r></w:p>"); 5],
+    )
 }
 
 fn hidden_field_paragraph() -> String {
@@ -532,8 +539,9 @@ fn one_visible_mark_among_hidden_ones_keeps_the_row() {
 #[test]
 fn a_paragraph_mark_hidden_by_style_counts_as_hidden() {
     let styles = r#"<w:style w:type="paragraph" w:styleId="HiddenMark"><w:name w:val="Hidden Mark"/><w:rPr><w:vanish/></w:rPr></w:style><w:style w:type="character" w:styleId="HiddenChar"><w:name w:val="Hidden Char"/><w:rPr><w:vanish/></w:rPr></w:style>"#;
-    let paragraph =
-        |p_pr: &str| format!("<w:p><w:pPr>{p_pr}</w:pPr><w:r>{VANISH}<w:t>Hidden</w:t></w:r></w:p>");
+    let paragraph = |p_pr: &str| {
+        format!("<w:p><w:pPr>{p_pr}</w:pPr><w:r>{VANISH}<w:t>Hidden</w:t></w:r></w:p>")
+    };
     let by_style = [
         paragraph(r#"<w:pStyle w:val="HiddenMark"/>"#),
         paragraph(r#"<w:rPr><w:rStyle w:val="HiddenChar"/></w:rPr>"#),
@@ -581,7 +589,10 @@ fn a_hidden_header_row_follows_its_paragraph_marks() {
         &visible,
         &render_wide(
             &[
-                wide_row("<w:trPr><w:tblHeader/></w:trPr>", &vec!["<w:p/>".to_owned(); 5]),
+                wide_row(
+                    "<w:trPr><w:tblHeader/></w:trPr>",
+                    &vec!["<w:p/>".to_owned(); 5],
+                ),
                 text_row("Alpha"),
                 text_row("Charlie"),
             ],
