@@ -1,11 +1,13 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { openWorkbookSession } from './client';
-import { createTestWorkbookSession, initRecordedWasm, limitEngineMemoryHeadroom, numbersWorkbook, restoreEngineMemory } from './testHelpers';
+import { createTestWorkbookSession, initRecordedWasm, limitEngineMemoryHeadroom, numbersWorkbook, ranInOwnEngineProcess, restoreEngineMemory } from './testHelpers';
 
 beforeAll(initRecordedWasm);
 afterAll(restoreEngineMemory);
 
-test('an edit that runs out of memory fails its session for good while a session on another thread keeps working', async () => {
+const name = 'an edit that runs out of memory fails its session for good while a session on another thread keeps working';
+test(name, async () => {
+  if (await ranInOwnEngineProcess(import.meta.path, name)) return;
   const bytes = await numbersWorkbook(200);
   const session = await createTestWorkbookSession(bytes);
   limitEngineMemoryHeadroom(4 * 2 ** 20);
@@ -27,4 +29,4 @@ test('an edit that runs out of memory fails its session for good while a session
   } finally {
     await other.dispose();
   }
-});
+}, 60_000);
