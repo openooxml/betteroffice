@@ -63,6 +63,7 @@
           "fromLine": 0,
           "kind": "text",
           "lineIndex": 1,
+          "separatorBefore": "\t\n",
           "text": "tail after break",
           "toLine": 2,
           "width": 180,
