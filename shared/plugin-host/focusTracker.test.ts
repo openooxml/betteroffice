@@ -31,6 +31,59 @@ function setup() {
   return { input, second, outside, roots, floating, changes, dispose };
 }
 
+const surfaceBoundaries: [string, () => Promise<boolean[]>, boolean[]][] = [
+  ['focus in a plugin overlay layer inside a root is outside the surface', async () => {
+    const { input, roots, changes } = setup();
+    const layer = document.createElement('div');
+    layer.setAttribute('data-plugin-overlays', '');
+    const field = document.createElement('input');
+    layer.append(field);
+    roots[0]!.append(layer);
+    input.focus();
+    field.focus();
+    await settle();
+    return changes;
+  }, [true, false]],
+  ['detaching a root with focus inside blurs once', async () => {
+    const { input, roots, changes } = setup();
+    input.focus();
+    roots[0]!.remove();
+    await settle();
+    await settle();
+    return changes;
+  }, [true, false]],
+  ['replacing a root with focus inside blurs once', async () => {
+    const { input, roots, changes } = setup();
+    input.focus();
+    const next = document.createElement('div');
+    roots[0]!.replaceWith(next);
+    roots[0] = next;
+    await settle();
+    await settle();
+    return changes;
+  }, [true, false]],
+  ['a document without focus starts unfocused with activeElement inside a root', async () => {
+    const editor = document.createElement('div');
+    const input = document.createElement('input');
+    editor.append(input);
+    document.body.append(editor);
+    input.focus();
+    const hasFocus = spyOn(document, 'hasFocus').mockReturnValue(false);
+    try {
+      const changes: boolean[] = [];
+      disposers.push(trackFocus(() => [editor], (focused) => changes.push(focused)));
+      await settle();
+      return changes;
+    } finally {
+      hasFocus.mockRestore();
+    }
+  }, [false]],
+];
+
+test.each(surfaceBoundaries)('%s', async (_name, run, expected) => {
+  expect(await run()).toEqual(expected);
+});
+
 test('moving between inside elements and dynamically added roots never blurs', async () => {
   const { input, second, roots, floating, changes } = setup();
   roots.push(floating);
