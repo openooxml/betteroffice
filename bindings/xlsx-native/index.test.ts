@@ -1,3 +1,4 @@
+import { fontPreflightFixture } from '../../packages/xlsx/src/wasm/__fixtures__/fontPreflight';
 import { readFileSync, readdirSync } from 'node:fs';
 import { describe, expect, spyOn, test } from 'bun:test';
 import JSZip from 'jszip';
@@ -133,4 +134,25 @@ describe('@betteroffice/xlsx-native', () => {
       finally { restored.dispose(); }
     } finally { await session.dispose(); }
   });
+});
+
+test('font preflight works without initializing an engine or fetching wasm', async () => {
+  const instantiate = spyOn(WebAssembly, 'instantiate');
+  const compile = spyOn(WebAssembly, 'compile');
+  const fetch = spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Network disabled'));
+  try {
+    const bytes = await fontPreflightFixture();
+    const core = await entry('.') as typeof import('../../packages/xlsx/src/index');
+    await core.preloadPreflightWasm();
+    const result = await core.fontPreflight(bytes);
+    expect(result.complete).toBe(true);
+    expect(result.faces.length).toBeGreaterThan(0);
+    expect(instantiate).not.toHaveBeenCalled();
+    expect(compile).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+  } finally {
+    instantiate.mockRestore();
+    compile.mockRestore();
+    fetch.mockRestore();
+  }
 });

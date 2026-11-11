@@ -1,7 +1,8 @@
 import type { XlsxPngEngine } from '../../../packages/xlsx/src/wasm/enginePng';
 import type { ResolvedPngTarget } from '../../../packages/xlsx/src/wasm/pngResolve';
-import type { XlsxFontFace, XlsxPngOptions } from '../../../packages/xlsx/src/wasm/pngTarget';
+import type { XlsxPngOptions } from '../../../packages/xlsx/src/wasm/pngTarget';
 import { fontUnavailable } from '../../../shared/office-session/pngFonts';
+import type { XlsxNativeExtras } from '../../native-extras-types';
 
 export type { XlsxPngEngine } from '../../../packages/xlsx/src/wasm/enginePng';
 
@@ -9,9 +10,7 @@ export const engineKind: 'wasm' | 'native' = 'native';
 
 const UNAVAILABLE = 'png-font-unavailable: ';
 
-interface NativePngDocument {
-  renderPngTarget(targetJson: string, optionsJson: string, fonts?: ReadonlyArray<XlsxFontFace>): Uint8Array;
-}
+type NativePngDocument = XlsxNativeExtras['members']['XlsxDocument'];
 
 /**
  * Renders in the native engine on the calling thread; the Promise settles once

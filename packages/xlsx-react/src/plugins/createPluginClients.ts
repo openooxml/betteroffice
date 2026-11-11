@@ -1,3 +1,4 @@
+import { gestureFor, pluginActivationId } from '../../../../shared/plugin-host/gesture';
 import type {
   Selection,
   WorkbookHandle,
@@ -120,6 +121,7 @@ export function pluginCommandScope(
   subscribe: (listener: () => void) => () => void
 ): XlsxCommandScope {
   return {
+    gesture: () => gestureFor(pluginActivationId(invocation.activation)),
     deny(id) {
       const refusal = invocation.refusal();
       if (refusal) return refusal;

@@ -6040,6 +6040,7 @@ mod tests {
                         },
                         at: TargetEdge::End,
                         paragraphs: vec![ParagraphInput {
+                            runs: None,
                             text: "Inserted".to_owned(),
                             style_id: None,
                         }],
@@ -6113,6 +6114,7 @@ mod tests {
                 at,
                 &[crate::ops::paragraph::ParagraphRecord {
                     text: "Inserted".to_owned(),
+                    runs: Vec::new(),
                     properties: Vec::new(),
                     run: Vec::new(),
                 }],

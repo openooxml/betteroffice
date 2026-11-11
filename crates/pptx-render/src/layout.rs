@@ -241,6 +241,11 @@ impl Default for SlideRenderer {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static BROWSER_COVERAGE_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl SlideRenderer {
     pub fn new() -> Self {
         Self {
@@ -458,6 +463,12 @@ impl SlideRenderer {
         pieces
     }
 
+    fn browser_covers(&self, id: FontId, character: char) -> Result<bool, ooxml_text::FontError> {
+        #[cfg(test)]
+        BROWSER_COVERAGE_LOOKUPS.with(|lookups| lookups.set(lookups.get() + 1));
+        self.fonts.covers(id, character)
+    }
+
     fn browser_coverage_face(
         &self,
         face: &FontFace,
@@ -469,7 +480,10 @@ impl SlideRenderer {
             cluster
                 .chars()
                 .filter(|character| needs_visible_glyph(*character))
-                .all(|character| self.fonts.covers(candidate.id, character).unwrap_or(false))
+                .all(|character| {
+                    self.browser_covers(candidate.id, character)
+                        .unwrap_or(false)
+                })
         };
         let covering = || {
             self.coverage_candidates(face)
@@ -512,7 +526,7 @@ impl SlideRenderer {
         let mut pieces: Vec<(usize, Option<FontFace>)> = Vec::new();
         if text
             .chars()
-            .all(|character| self.fonts.covers(face.id, character).unwrap_or(true))
+            .all(|character| self.browser_covers(face.id, character).unwrap_or(true))
             && !(promoted && text.graphemes(true).any(emoji_presentation_cluster))
         {
             return vec![(0, None)];
@@ -522,7 +536,7 @@ impl SlideRenderer {
             let own = cluster
                 .chars()
                 .filter(|character| needs_visible_glyph(*character))
-                .all(|character| self.fonts.covers(face.id, character).unwrap_or(true))
+                .all(|character| self.browser_covers(face.id, character).unwrap_or(true))
                 && !(promoted && emoji_presentation_cluster(cluster));
             let neutral = cluster
                 .chars()
@@ -531,7 +545,7 @@ impl SlideRenderer {
                 Some(current)
                     if neutral
                         && cluster.chars().all(|character| {
-                            self.fonts.covers(current.id, character).unwrap_or(false)
+                            self.browser_covers(current.id, character).unwrap_or(false)
                         }) =>
                 {
                     Some(current.clone())
