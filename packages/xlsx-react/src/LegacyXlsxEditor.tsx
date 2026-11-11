@@ -25,13 +25,17 @@ export function LegacyXlsxEditor(props: GeneralEditorSessionProps | XlsxLegacyEd
   if (choice !== session || choice.editor !== editor) setChoice({ ...session, editor });
   useEffect(() => { if (session.reason && session.reason !== 'in-thread') warnXlsxEngine(session.reason); }, [session.reason]);
   const viewer = !session.reason && !editor;
-  const reportedPlugins = useRef(new Set<string>());
+  const reportedPlugins = useRef({ identity, keys: new Set<string>() });
   useEffect(() => {
+    if (!viewer || reportedPlugins.current.identity !== identity) reportedPlugins.current = { identity, keys: new Set() };
     if (!viewer) return;
-    for (const plugin of props.plugins ?? []) {
-      const key = `${plugin.id}\u0000${plugin.revision ?? ''}`;
-      if (reportedPlugins.current.has(key)) continue;
-      reportedPlugins.current.add(key);
+    const plugins = (props.plugins ?? []).map((plugin) => ({ plugin, key: `${plugin.id}\u0000${plugin.revision ?? ''}` }));
+    const reported = reportedPlugins.current.keys;
+    const present = new Set(plugins.map(({ key }) => key));
+    for (const key of reported) if (!present.has(key)) reported.delete(key);
+    for (const { plugin, key } of plugins) {
+      if (reported.has(key)) continue;
+      reported.add(key);
       const error: XlsxPluginError = {
         pluginId: plugin.id,
         generation: null,
@@ -50,7 +54,7 @@ export function LegacyXlsxEditor(props: GeneralEditorSessionProps | XlsxLegacyEd
         console.error('[XlsxEditor] onPluginError threw', reporterError);
       }
     }
-  }, [viewer, props.plugins, props.onPluginError]);
+  }, [viewer, identity, props.plugins, props.onPluginError]);
   return session.reason ? <XlsxEditorContent {...props as Omit<XlsxInThreadEditorProps, 'file'> & { file?: Uint8Array }} />
     : editor ? <LegacyXlsxWorkerEditor {...props as EditableSessionWorkbookProps} />
     : <XlsxSessionViewer {...props as XlsxWorkerViewerProps & { file?: Uint8Array }} />;
