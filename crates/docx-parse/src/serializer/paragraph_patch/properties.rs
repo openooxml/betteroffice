@@ -204,6 +204,7 @@ pub(super) fn run_properties(
     deltas: &[AttrDeltaV1],
     inherit: &Attrs,
     target: &Attrs,
+    current: bool,
 ) -> Result<String, Failure> {
     if deltas.is_empty() {
         return Ok(source.to_owned());
@@ -248,7 +249,7 @@ pub(super) fn run_properties(
             return Err(unsupported(&delta.path));
         }
         expand(delta, &mut |path, after| {
-            run_leaf(path, after, inherit, target, &mut changes)
+            run_leaf(path, after, inherit, target, &mut changes, current)
         })?;
     }
     if changes.children.contains_key("color")
@@ -265,11 +266,7 @@ pub(super) fn run_properties(
     let highlight_changed = deltas
         .iter()
         .any(|delta| delta.path.first().is_some_and(|key| key == "highlight"));
-    let hex = target
-        .get("highlight")
-        .and_then(|value| value.get("color").unwrap_or(value).as_str())
-        .is_some_and(|value| value.starts_with('#'));
-    if highlight_changed && !hex && !source.is_empty() {
+    if highlight_changed && !hex_highlight(target) && !source.is_empty() {
         let xml = property_xml(source)?;
         if let Some(at) = xml.child(0, "shd")?
             && xml.nodes[at]
@@ -288,16 +285,16 @@ pub(super) fn run_properties(
     let output = write_container(source, "rPr", &changes)?;
     let slots = language_slots(deltas)?;
     if slots.is_empty() {
-        return Ok(output);
+        return without_empty_container(output);
     }
-    super::language::run_language(
+    without_empty_container(super::language::run_language(
         &output,
         &BTreeMap::from([
             ("w".to_owned(), WORD.to_owned()),
             ("w14".to_owned(), W14.to_owned()),
         ]),
         &slots,
-    )
+    )?)
 }
 
 pub(super) fn paragraph_properties(
@@ -306,6 +303,7 @@ pub(super) fn paragraph_properties(
     inherit: &Attrs,
     target: &Attrs,
     seed_inherit: &Attrs,
+    current: bool,
 ) -> Result<String, Failure> {
     if deltas.is_empty() {
         return Ok(source.to_owned());
@@ -378,7 +376,7 @@ pub(super) fn paragraph_properties(
             return Err(unsupported(&delta.path));
         }
         expand(delta, &mut |path, after| {
-            paragraph_leaf(path, after, inherit, target, &mut changes)
+            paragraph_leaf(path, after, inherit, target, &mut changes, current)
         })?;
     }
     let output = write_container(source, "pPr", &changes)?;
@@ -588,19 +586,85 @@ fn flag(
     child: &'static str,
     value: Option<&Value>,
     inherited: Option<&Value>,
+    current: bool,
 ) -> Result<(), Failure> {
     if value.is_some_and(|value| !value.is_boolean()) {
         return Err(conflict("expected boolean property"));
     }
+    let default = flag_default(child);
+    let on = value.and_then(Value::as_bool).unwrap_or(default);
+    let inherited_on = inherited.and_then(Value::as_bool).unwrap_or(default);
     let change = changes.children.entry(child).or_default();
-    if value == Some(&Value::Bool(true)) {
-        change.attributes.insert("w:val", None);
-    } else if inherited == Some(&Value::Bool(true)) || value == Some(&Value::Bool(false)) {
-        change.attributes.insert("w:val", Some("0".to_owned()));
-    } else {
+    if current && on == inherited_on {
         change.remove = true;
+    } else {
+        change
+            .attributes
+            .insert("w:val", (!on).then(|| "0".to_owned()));
     }
     Ok(())
+}
+
+/// The value an on/off property takes where neither the paragraph nor its styles set it.
+fn flag_default(child: &str) -> bool {
+    child == "widowControl"
+}
+
+/// Removes `child`, together with the attributes named in `attributes`, so the run takes the
+/// value its styles give.
+fn inherit_child(changes: &mut Change, child: &'static str, attributes: &[&'static str]) {
+    let change = changes.children.entry(child).or_default();
+    change.remove = true;
+    for attribute in attributes {
+        change.attributes.insert(attribute, None);
+    }
+}
+
+fn present(value: Option<&Value>) -> Option<&Value> {
+    value.filter(|value| !value.is_null())
+}
+
+fn same_value(left: Option<&Value>, right: Option<&Value>) -> bool {
+    match (left, right) {
+        (Some(Value::Number(left)), Some(Value::Number(right))) => left.as_f64() == right.as_f64(),
+        (Some(Value::Object(left)), Some(Value::Object(right))) => left
+            .keys()
+            .chain(right.keys())
+            .all(|key| same_value(present(left.get(key)), present(right.get(key)))),
+        _ => left == right,
+    }
+}
+
+/// `output` without a run-properties container that holds nothing.
+fn without_empty_container(output: String) -> Result<String, Failure> {
+    if output.is_empty() {
+        return Ok(output);
+    }
+    let xml = property_xml(&output)?;
+    let root = &xml.nodes[0];
+    let hollow = root.empty || output[root.open.end..root.close.start].trim().is_empty();
+    if root.children.is_empty() && root.attributes.is_empty() && hollow {
+        Ok(String::new())
+    } else {
+        Ok(output)
+    }
+}
+
+/// Whether `attrs` give a highlight in hex, which is written as a shading fill.
+fn hex_highlight(attrs: &Attrs) -> bool {
+    attrs
+        .get("highlight")
+        .and_then(|value| value.get("color").unwrap_or(value).as_str())
+        .is_some_and(|value| value.starts_with('#'))
+}
+
+fn strike_flags(value: Option<&Value>) -> (bool, bool) {
+    let double = value
+        .and_then(|value| value.get("double"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let enabled = value.is_some_and(|value| !value.is_null() && value != &Value::Bool(false));
+    (enabled && !double, enabled && double)
 }
 
 fn run_leaf(
@@ -609,6 +673,7 @@ fn run_leaf(
     inherit: &Attrs,
     target: &Attrs,
     changes: &mut Change,
+    current: bool,
 ) -> Result<(), Failure> {
     let key = path.first().map(String::as_str).unwrap_or_default();
     let flag_child = match key {
@@ -625,25 +690,74 @@ fn run_leaf(
         if path.len() != 1 {
             return Err(unsupported(path));
         }
-        return flag(changes, child, value, inherit.get(key));
+        return flag(changes, child, value, inherit.get(key), current);
     }
+    let same_as_style = |key: &str| {
+        if !current {
+            return false;
+        }
+        let normalized = |attrs: &Attrs| {
+            let single: Attrs = attrs
+                .get(key)
+                .map(|value| (key.to_owned(), value.clone()))
+                .into_iter()
+                .collect();
+            normalized_run_attrs(&single)
+                .remove(key)
+                .filter(|value| !value.is_null())
+        };
+        same_value(normalized(target).as_ref(), normalized(inherit).as_ref())
+    };
+    match key {
+        "textColor" if same_as_style(key) => {
+            inherit_child(
+                changes,
+                "color",
+                &["w:val", "w:themeColor", "w:themeTint", "w:themeShade"],
+            );
+            return Ok(());
+        }
+        "underline" if same_as_style(key) => {
+            inherit_child(
+                changes,
+                "u",
+                &[
+                    "w:val",
+                    "w:color",
+                    "w:themeColor",
+                    "w:themeTint",
+                    "w:themeShade",
+                ],
+            );
+            return Ok(());
+        }
+        "highlight" if !hex_highlight(target) && same_as_style(key) => {
+            inherit_child(changes, "highlight", &["w:val"]);
+            return Ok(());
+        }
+        _ => {}
+    }
+    let mut inherited_leaf = inherit.get(key);
+    for field in &path[1..] {
+        inherited_leaf = inherited_leaf.and_then(|value| value.get(field));
+    }
+    let from_style = current
+        && present(value).is_some()
+        && matches!(key, "fontFamily" | "fontSize" | "characterSpacing")
+        && same_value(present(value), present(inherited_leaf));
     if value.is_none()
         && matches!(
             key,
             "fontFamily" | "fontSize" | "textColor" | "characterSpacing"
         )
+        && present(inherited_leaf).is_some()
     {
-        let mut inherited = inherit.get(key);
-        for field in &path[1..] {
-            inherited = inherited.and_then(|value| value.get(field));
-        }
-        if inherited.is_some_and(|value| !value.is_null()) {
-            return Err(conflict(format!(
-                "unrepresentable reset {}",
-                path.join(".")
-            )));
-        }
+        return Err(conflict(format!(
+            "unrepresentable reset {}",
+            path.join(".")
+        )));
     }
+    let value = if from_style { None } else { value };
     match key {
         "fontFamily" if path.len() == 2 => {
             let (attr, theme) = match path[1].as_str() {
@@ -755,40 +869,47 @@ fn run_leaf(
             if value.is_some_and(|value| !value.is_boolean()) {
                 return Err(unsupported(path));
             }
-            let strike = target.get("strike");
-            let double = strike
-                .and_then(|value| value.get("double"))
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let enabled =
-                strike.is_some_and(|value| !value.is_null() && value != &Value::Bool(false));
+            let (single, double) = strike_flags(target.get("strike"));
+            let (inherited_single, inherited_double) = strike_flags(inherit.get("strike"));
             flag(
                 changes,
                 "strike",
-                Some(&Value::Bool(enabled && !double)),
-                inherit.get(key),
+                Some(&Value::Bool(single)),
+                Some(&Value::Bool(inherited_single)),
+                current,
             )?;
             flag(
                 changes,
                 "dstrike",
-                Some(&Value::Bool(enabled && double)),
-                inherit.get(key),
+                Some(&Value::Bool(double)),
+                Some(&Value::Bool(inherited_double)),
+                current,
             )?;
         }
-        "doubleStrike" if path.len() == 1 => flag(changes, "dstrike", value, inherit.get(key))?,
+        "doubleStrike" if path.len() == 1 => {
+            flag(changes, "dstrike", value, inherit.get(key), current)?;
+        }
         "superscript" | "subscript" if path.len() == 1 => {
             if value.is_some_and(|value| !value.is_boolean()) {
                 return Err(unsupported(path));
             }
-            let super_on = target.get("superscript") == Some(&Value::Bool(true));
-            let sub_on = target.get("subscript") == Some(&Value::Bool(true));
-            let value = match (super_on, sub_on) {
-                (true, true) => return Err(conflict("conflicting vertical alignment")),
-                (true, false) => "superscript",
-                (false, true) => "subscript",
-                (false, false) => "baseline",
+            let alignment = |attrs: &Attrs| match (
+                attrs.get("superscript") == Some(&Value::Bool(true)),
+                attrs.get("subscript") == Some(&Value::Bool(true)),
+            ) {
+                (true, true) => Err(conflict("conflicting vertical alignment")),
+                (true, false) => Ok("superscript"),
+                (false, true) => Ok("subscript"),
+                (false, false) => Ok("baseline"),
             };
-            set(changes, "vertAlign", "w:val", Some(value.to_owned()));
+            let value = alignment(target)?;
+            let inherited = alignment(inherit).unwrap_or("baseline");
+            set(
+                changes,
+                "vertAlign",
+                "w:val",
+                (!current || value != inherited).then(|| value.to_owned()),
+            );
         }
         "highlight" if path.len() == 2 && path[1] == "color" => {
             let color = string(value)?;
@@ -828,6 +949,7 @@ fn paragraph_leaf(
     inherit: &Attrs,
     target: &Attrs,
     changes: &mut Change,
+    current: bool,
 ) -> Result<(), Failure> {
     let key = path.first().map(String::as_str).unwrap_or_default();
     if path.len() == 1 {
@@ -840,7 +962,7 @@ fn paragraph_leaf(
             _ => None,
         };
         if let Some(child) = child {
-            return flag(changes, child, value, inherit.get(key));
+            return flag(changes, child, value, inherit.get(key), current);
         }
         if matches!(
             key,
@@ -1032,6 +1154,7 @@ fn write_child(
         if change.remove {
             if node.attributes.iter().any(|attribute| {
                 !matches!(attribute.name.as_str(), "w:val" | "w14:val" | "xmlns:w14")
+                    && !change.attributes.contains_key(attribute.name.as_str())
             }) || !node.children.is_empty()
             {
                 return Err(conflict(format!("cannot remove opaque {child}")));
@@ -1485,7 +1608,7 @@ mod tests {
                 value: serde_json::json!("standardContextual"),
             },
         };
-        let saved = run_properties(source, &[delta], &Attrs::new(), &Attrs::new())
+        let saved = run_properties(source, &[delta], &Attrs::new(), &Attrs::new(), true)
             .unwrap_or_else(|_| panic!("typography patch applies"));
         assert!(saved.contains(r#"<w14:glow w14:rad="12700"/>"#));
         assert!(saved.contains(r#"<w14:cntxtAlts w14:val="false"/>"#));
@@ -1499,7 +1622,7 @@ mod tests {
                 value: serde_json::json!("en-US"),
             },
         };
-        let saved = run_properties(&saved, &[language], &Attrs::new(), &Attrs::new())
+        let saved = run_properties(&saved, &[language], &Attrs::new(), &Attrs::new(), true)
             .unwrap_or_else(|_| panic!("language patch applies"));
         assert!(saved.find("w:lang").unwrap() < saved.find("w14:glow").unwrap());
     }

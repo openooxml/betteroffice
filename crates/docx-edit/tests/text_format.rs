@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use docx_edit::{
     EditApplication, EditCtx, EditFailureCode, EditRefusal, EditRequest, EditingDoc,
-    InlineFormatDelta, Patch, SegmentContent, StoryInfoKind, StoryRange, StorySegment, UndoSession,
-    seed_from_docx,
+    InlineFormatDelta, Loc, LocRange, Patch, SegmentContent, StoryInfoKind, StoryRange,
+    StorySegment, UndoSession, seed_from_docx,
 };
 use serde_json::{Value, json};
 use yrs::Any;
@@ -16,25 +16,50 @@ const NS: &str = concat!(
 const STYLES: &str = r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:rPr><w:b/><w:sz w:val="32"/></w:rPr></w:style><w:style w:type="character" w:styleId="Strong"><w:name w:val="Strong"/><w:rPr><w:b/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Ligated"><w:name w:val="Ligated"/><w:rPr><w14:ligatures w14:val="standard"/></w:rPr></w:style>"#;
 
 fn package(body: &str) -> Vec<u8> {
-    let content_types = r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>"#;
+    package_with_styles(body, STYLES)
+}
+
+fn package_with_styles(body: &str, styles: &str) -> Vec<u8> {
+    package_parts(body, styles, None)
+}
+
+fn package_parts(body: &str, styles: &str, notes: Option<&str>) -> Vec<u8> {
+    let notes_type = if notes.is_some() {
+        r#"<Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/>"#
+    } else {
+        ""
+    };
+    let notes_rel = if notes.is_some() {
+        r#"<Relationship Id="rIdNotes" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml"/>"#
+    } else {
+        ""
+    };
+    let content_types = format!(
+        r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>{notes_type}</Types>"#
+    );
     let root_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;
-    let document_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#;
+    let document_rels = format!(
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>{notes_rel}</Relationships>"#
+    );
     let document = format!(r#"<w:document {NS}><w:body>{body}<w:sectPr/></w:body></w:document>"#);
-    let styles = format!(r#"<w:styles {NS}>{STYLES}</w:styles>"#);
-    ooxml_opc::rezip_parts(&[
-        (
-            "[Content_Types].xml".to_owned(),
-            content_types.as_bytes().to_vec(),
-        ),
+    let styles = format!(r#"<w:styles {NS}>{styles}</w:styles>"#);
+    let mut parts = vec![
+        ("[Content_Types].xml".to_owned(), content_types.into_bytes()),
         ("_rels/.rels".to_owned(), root_rels.as_bytes().to_vec()),
         (
             "word/_rels/document.xml.rels".to_owned(),
-            document_rels.as_bytes().to_vec(),
+            document_rels.into_bytes(),
         ),
         ("word/document.xml".to_owned(), document.into_bytes()),
         ("word/styles.xml".to_owned(), styles.into_bytes()),
-    ])
-    .unwrap()
+    ];
+    if let Some(notes) = notes {
+        parts.push((
+            "word/footnotes.xml".to_owned(),
+            format!(r#"<w:footnotes {NS}>{notes}</w:footnotes>"#).into_bytes(),
+        ));
+    }
+    ooxml_opc::rezip_parts(&parts).unwrap()
 }
 
 /// `00000001` plain, `00000002` directly bold, `00000003` a bold Heading1, `00000004` a run in the
@@ -620,4 +645,369 @@ fn peers_clearing_overlapping_ranges_converge() {
     right.apply_update_v1(&to_right).unwrap();
     left.apply_update_v1(&to_left).unwrap();
     assert_eq!(segments(&left, "body"), segments(&right, "body"));
+}
+
+fn editor_range(doc: &EditingDoc, story: &str, from: (&str, u32), to: (&str, u32)) -> StoryRange {
+    let loc = |(para, offset): (&str, u32)| Loc {
+        story: story.to_owned(),
+        para: para.to_owned(),
+        offset,
+    };
+    doc.locate_range(&LocRange {
+        start: loc(from),
+        end: loc(to),
+    })
+    .unwrap()
+}
+
+fn editor_clear(doc: &EditingDoc, ctx: &EditCtx, range: StoryRange) -> Vec<String> {
+    let (receipt, kept) = doc.clear_formatting_keeping(ctx, range).unwrap();
+    assert!(kept.is_empty(), "{kept:?}");
+    receipt.revision_ids
+}
+
+const HEADING_KEYS: [&str; 6] = [
+    "bold",
+    "fontSize",
+    "textColor",
+    "color",
+    "fontFamily",
+    "rFonts",
+];
+
+#[test]
+fn editor_clear_returns_heading_runs_to_the_heading_style() {
+    let doc = open();
+    let title = marks(&open(), "Title");
+    assert!(active(&title, "bold"));
+    let ctx = EditCtx::local("", "");
+    editor_clear(
+        &doc,
+        &ctx,
+        editor_range(&doc, "body", ("00000003", 0), ("00000003", 5)),
+    );
+    editor_clear(
+        &doc,
+        &ctx,
+        editor_range(&doc, "body", ("00000009", 0), ("00000009", 10)),
+    );
+    for marker in ["Title", "Styled off"] {
+        let cleared = marks(&doc, marker);
+        for key in HEADING_KEYS {
+            assert_eq!(cleared.get(key), title.get(key), "{marker} {key}");
+        }
+    }
+}
+
+#[test]
+fn editor_clear_across_a_body_and_a_heading_paragraph_resets_each_to_its_style() {
+    let doc = open();
+    editor_clear(
+        &doc,
+        &EditCtx::local("", ""),
+        editor_range(&doc, "body", ("00000002", 0), ("00000003", 5)),
+    );
+    assert!(!active(&marks(&doc, "Bold words"), "bold"));
+    let title = marks(&open(), "Title");
+    let cleared = marks(&doc, "Title");
+    for key in HEADING_KEYS {
+        assert_eq!(cleared.get(key), title.get(key), "{key}");
+    }
+}
+
+#[test]
+fn editor_clear_drops_the_character_style_and_keeps_the_link() {
+    let doc = open();
+    let link = marks(&doc, "Linked").get("hyperlink").cloned();
+    assert!(link.is_some());
+    let ctx = EditCtx::local("", "");
+    editor_clear(
+        &doc,
+        &ctx,
+        editor_range(&doc, "body", ("00000004", 0), ("00000004", 10)),
+    );
+    editor_clear(
+        &doc,
+        &ctx,
+        editor_range(&doc, "body", ("0000000A", 0), ("0000000A", 6)),
+    );
+    let strong = marks(&doc, "Strong run");
+    assert!(!active(&strong, "runStyle") && !active(&strong, "bold"));
+    let linked = marks(&doc, "Linked");
+    assert_eq!(linked.get("hyperlink").cloned(), link);
+    assert!(!active(&linked, "italic") && !active(&linked, "runStyle"));
+}
+
+#[test]
+fn editor_clear_into_a_table_cell_keeps_what_the_table_style_gives() {
+    let styles = format!(
+        r#"{STYLES}<w:style w:type="table" w:styleId="BoldGrid"><w:name w:val="Bold Grid"/><w:rPr><w:b/></w:rPr></w:style>"#
+    );
+    let body = concat!(
+        r#"<w:p w14:paraId="00000011"><w:r><w:rPr><w:i/></w:rPr><w:t>Intro</w:t></w:r></w:p>"#,
+        r#"<w:tbl><w:tblPr><w:tblStyle w:val="BoldGrid"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="2400" w:type="dxa"/></w:tcPr>"#,
+        r#"<w:p w14:paraId="00000012"><w:r><w:rPr><w:i/><w:color w:val="C00000"/></w:rPr><w:t>Cell</w:t></w:r></w:p>"#,
+        r#"</w:tc></w:tr></w:tbl>"#,
+        r#"<w:p w14:paraId="00000013"><w:r><w:t>After</w:t></w:r></w:p>"#,
+    );
+    let doc = EditingDoc::new(7111);
+    seed_from_docx(&doc, &package_with_styles(body, &styles)).unwrap();
+    let cell = cell_story(&doc);
+    assert!(active(&marks_in(&doc, &cell, "Cell"), "bold"));
+    editor_clear(
+        &doc,
+        &EditCtx::local("", ""),
+        editor_range(&doc, "body", ("00000011", 0), ("00000013", 2)),
+    );
+    let cleared = marks_in(&doc, &cell, "Cell");
+    assert!(active(&cleared, "bold"));
+    assert!(!active(&cleared, "italic") && !active(&cleared, "color"));
+    assert!(!active(&marks(&doc, "Intro"), "italic"));
+}
+
+#[test]
+fn limit_a_clear_ending_at_the_start_of_the_paragraph_after_a_table_leaves_the_cells() {
+    let body = concat!(
+        r#"<w:p w14:paraId="00000011"><w:r><w:rPr><w:i/></w:rPr><w:t>Intro</w:t></w:r></w:p>"#,
+        r#"<w:tbl><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="2400" w:type="dxa"/></w:tcPr>"#,
+        r#"<w:p w14:paraId="00000012"><w:r><w:rPr><w:i/></w:rPr><w:t>Cell</w:t></w:r></w:p>"#,
+        r#"</w:tc></w:tr></w:tbl>"#,
+        r#"<w:p w14:paraId="00000013"><w:r><w:t>After</w:t></w:r></w:p>"#,
+    );
+    let doc = EditingDoc::new(7112);
+    seed_from_docx(&doc, &package_with_styles(body, STYLES)).unwrap();
+    let cell = cell_story(&doc);
+    editor_clear(
+        &doc,
+        &EditCtx::local("", ""),
+        editor_range(&doc, "body", ("00000011", 0), ("00000013", 0)),
+    );
+    assert!(active(&marks_in(&doc, &cell, "Cell"), "italic"));
+    assert!(!active(&marks(&doc, "Intro"), "italic"));
+}
+
+#[test]
+fn a_suggested_editor_clear_records_the_style_values() {
+    let doc = open();
+    let revisions = editor_clear(
+        &doc,
+        &EditCtx::local("Ann", "2026-11-10T12:00:00Z").suggesting(),
+        editor_range(&doc, "body", ("00000009", 0), ("00000009", 10)),
+    );
+    assert_eq!(revisions.len(), 1);
+    let cleared = marks(&doc, "Styled off");
+    assert!(active(&cleared, "bold") && active(&cleared, "rPrChange"));
+    assert!(!active(&cleared, "color"));
+}
+
+#[test]
+fn a_replica_without_the_opened_styles_removes_the_formatting() {
+    let replica = EditingDoc::new(7112);
+    replica
+        .apply_update_v1(&open().encode_state_as_update_v1())
+        .unwrap();
+    editor_clear(
+        &replica,
+        &EditCtx::local("", ""),
+        editor_range(&replica, "body", ("00000003", 0), ("00000003", 5)),
+    );
+    assert!(!active(&marks(&replica, "Title"), "bold"));
+}
+
+const BOLD_PAGE_FIELD: &str = concat!(
+    r#"<w:r><w:rPr><w:b/></w:rPr><w:fldChar w:fldCharType="begin"/></w:r>"#,
+    r#"<w:r><w:rPr><w:b/></w:rPr><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r>"#,
+    r#"<w:r><w:rPr><w:b/></w:rPr><w:fldChar w:fldCharType="separate"/></w:r>"#,
+    r#"<w:r><w:rPr><w:b/></w:rPr><w:t>7</w:t></w:r>"#,
+    r#"<w:r><w:rPr><w:b/></w:rPr><w:fldChar w:fldCharType="end"/></w:r>"#,
+);
+
+/// `00000021` plain text around a bold note reference and a bold PAGE field, `00000023` plain
+/// text and a bold note reference, each followed by a plain paragraph.
+fn open_with_embeds() -> EditingDoc {
+    let body = format!(
+        "{}{}{}{}",
+        format_args!(
+            r#"<w:p w14:paraId="00000021"><w:r><w:t xml:space="preserve">See </w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:footnoteReference w:id="1"/></w:r><w:r><w:t xml:space="preserve"> page </w:t></w:r>{BOLD_PAGE_FIELD}</w:p>"#
+        ),
+        r#"<w:p w14:paraId="00000022"><w:r><w:t>End</w:t></w:r></w:p>"#,
+        r#"<w:p w14:paraId="00000023"><w:r><w:t xml:space="preserve">Cite </w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:footnoteReference w:id="2"/></w:r></w:p>"#,
+        r#"<w:p w14:paraId="00000024"><w:r><w:t>Tail</w:t></w:r></w:p>"#,
+    );
+    let notes = concat!(
+        r#"<w:footnote w:id="1"><w:p><w:r><w:t>One</w:t></w:r></w:p></w:footnote>"#,
+        r#"<w:footnote w:id="2"><w:p><w:r><w:t>Two</w:t></w:r></w:p></w:footnote>"#,
+    );
+    let doc = EditingDoc::new(7113);
+    seed_from_docx(&doc, &package_parts(&body, STYLES, Some(notes))).unwrap();
+    doc
+}
+
+/// The kind and attributes of every inline embed of the body.
+fn body_embeds(doc: &EditingDoc) -> Vec<(String, BTreeMap<String, Any>)> {
+    segments(doc, "body")
+        .into_iter()
+        .filter_map(|segment| match segment.content {
+            SegmentContent::OtherEmbed { kind, .. } => Some((kind, segment.attributes)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn editor_clear_removes_direct_formatting_from_note_references_and_fields() {
+    for end in [("00000022", 0), ("00000022", 3)] {
+        let doc = open_with_embeds();
+        let before = body_embeds(&doc);
+        assert!(
+            before
+                .iter()
+                .filter(|(_, attrs)| active(attrs, "bold"))
+                .count()
+                >= 3,
+            "{before:?}"
+        );
+        editor_clear(
+            &doc,
+            &EditCtx::local("", ""),
+            editor_range(&doc, "body", ("00000021", 0), end),
+        );
+        let after = body_embeds(&doc);
+        let still_bold: Vec<_> = after
+            .iter()
+            .filter(|(_, attrs)| active(attrs, "bold"))
+            .map(|(kind, _)| kind.as_str())
+            .collect();
+        assert_eq!(still_bold.len(), 1, "{end:?}: {after:?}");
+    }
+}
+
+#[test]
+fn a_suggested_editor_clear_records_a_note_reference_change() {
+    let doc = open_with_embeds();
+    let revisions = editor_clear(
+        &doc,
+        &EditCtx::local("Ann", "2026-11-10T12:00:00Z").suggesting(),
+        editor_range(&doc, "body", ("00000023", 0), ("00000024", 0)),
+    );
+    assert_eq!(revisions.len(), 1);
+    let reference = body_embeds(&doc).pop().unwrap().1;
+    assert!(!active(&reference, "bold") && active(&reference, "rPrChange"));
+}
+
+#[test]
+fn editor_clear_keeps_an_explicit_run_direction() {
+    let styles = format!(
+        r#"{STYLES}<w:style w:type="paragraph" w:styleId="RtlBody"><w:name w:val="Rtl Body"/><w:pPr><w:bidi/></w:pPr><w:rPr><w:rtl/></w:rPr></w:style>"#
+    );
+    let body = r#"<w:p w14:paraId="00000031"><w:pPr><w:pStyle w:val="RtlBody"/></w:pPr><w:r><w:rPr><w:rtl w:val="0"/><w:i/></w:rPr><w:t>Left words</w:t></w:r></w:p>"#;
+    let doc = EditingDoc::new(7114);
+    seed_from_docx(&doc, &package_with_styles(body, &styles)).unwrap();
+    let before = marks(&doc, "Left words");
+    assert!(!active(&before, "rtl") && active(&before, "italic"));
+    editor_clear(
+        &doc,
+        &EditCtx::local("", ""),
+        editor_range(&doc, "body", ("00000031", 0), ("00000031", 10)),
+    );
+    let after = marks(&doc, "Left words");
+    assert!(!active(&after, "rtl") && !active(&after, "italic"));
+    assert_eq!(after.get("rtl"), before.get("rtl"));
+}
+
+#[test]
+fn clear_all_keeps_an_explicit_run_direction() {
+    let styles = format!(
+        r#"{STYLES}<w:style w:type="paragraph" w:styleId="RtlBody"><w:name w:val="Rtl Body"/><w:pPr><w:bidi/></w:pPr><w:rPr><w:rtl/></w:rPr></w:style>"#
+    );
+    let body = r#"<w:p w14:paraId="00000031"><w:pPr><w:pStyle w:val="RtlBody"/></w:pPr><w:r><w:rPr><w:rtl w:val="0"/><w:i/></w:rPr><w:t>Left words</w:t></w:r></w:p>"#;
+    let doc = EditingDoc::new(7115);
+    seed_from_docx(&doc, &package_with_styles(body, &styles)).unwrap();
+    let before = marks(&doc, "Left words");
+    apply(
+        &doc,
+        &UndoSession::new(),
+        json!([format(paragraph("00000031"), json!({"clear": "all"}))]),
+    );
+    let after = marks(&doc, "Left words");
+    assert!(!active(&after, "italic"));
+    assert_eq!(after.get("rtl"), before.get("rtl"));
+}
+
+/// `00000041` plain, `00000042` a plain Heading1, `00000043` plain text around a line break,
+/// `00000044` a plain paragraph in a cell of the bold table style `BoldGrid`, `00000045` plain and
+/// `00000046` directly bold.
+fn open_unformatted() -> EditingDoc {
+    let styles = format!(
+        r#"{STYLES}<w:style w:type="table" w:styleId="BoldGrid"><w:name w:val="Bold Grid"/><w:rPr><w:b/></w:rPr></w:style>"#
+    );
+    let body = concat!(
+        r#"<w:p w14:paraId="00000041"><w:r><w:t>Plain one</w:t></w:r></w:p>"#,
+        r#"<w:p w14:paraId="00000042"><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Plain heading</w:t></w:r></w:p>"#,
+        r#"<w:p w14:paraId="00000043"><w:r><w:t>Line one</w:t></w:r><w:r><w:br/></w:r><w:r><w:t>line two</w:t></w:r></w:p>"#,
+        r#"<w:tbl><w:tblPr><w:tblStyle w:val="BoldGrid"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="2400" w:type="dxa"/></w:tcPr>"#,
+        r#"<w:p w14:paraId="00000044"><w:r><w:t>Cell words</w:t></w:r></w:p>"#,
+        r#"</w:tc></w:tr></w:tbl>"#,
+        r#"<w:p w14:paraId="00000045"><w:r><w:t>After</w:t></w:r></w:p>"#,
+        r#"<w:p w14:paraId="00000046"><w:r><w:rPr><w:b/></w:rPr><w:t>Bold tail</w:t></w:r></w:p>"#,
+    );
+    let doc = EditingDoc::new(7116);
+    seed_from_docx(&doc, &package_with_styles(body, &styles)).unwrap();
+    doc
+}
+
+fn unformatted_ranges(doc: &EditingDoc) -> Vec<(&'static str, StoryRange)> {
+    let cell = cell_story(doc);
+    vec![
+        (
+            "heading",
+            editor_range(doc, "body", ("00000042", 0), ("00000042", 13)),
+        ),
+        (
+            "paragraphs",
+            editor_range(doc, "body", ("00000041", 0), ("00000043", 8)),
+        ),
+        (
+            "cell",
+            editor_range(doc, &cell, ("00000044", 0), ("00000044", 10)),
+        ),
+        (
+            "across the table",
+            editor_range(doc, "body", ("00000043", 0), ("00000045", 5)),
+        ),
+    ]
+}
+
+#[test]
+fn editor_clear_of_unformatted_text_changes_nothing_and_adds_no_undo_step() {
+    let doc = open_unformatted();
+    let undo = UndoSession::new();
+    undo.track(&doc);
+    let ctx = EditCtx::local("", "");
+    for (case, range) in unformatted_ranges(&doc) {
+        let before = doc.encode_state_as_update_v1();
+        assert!(editor_clear(&doc, &ctx, range).is_empty(), "{case}");
+        assert_eq!(doc.encode_state_as_update_v1(), before, "{case}");
+        assert!(!undo.can_undo(), "{case}");
+    }
+    let before = doc.encode_state_as_update_v1();
+    editor_clear(
+        &doc,
+        &ctx,
+        editor_range(&doc, "body", ("00000045", 0), ("00000046", 9)),
+    );
+    assert_ne!(doc.encode_state_as_update_v1(), before);
+    assert!(!active(&marks(&doc, "Bold tail"), "bold"));
+    assert!(undo.can_undo());
+}
+
+#[test]
+fn a_suggested_editor_clear_of_unformatted_text_records_no_revision() {
+    let doc = open_unformatted();
+    let ctx = EditCtx::local("Ann", "2026-11-10T12:00:00Z").suggesting();
+    for (case, range) in unformatted_ranges(&doc) {
+        let before = doc.encode_state_as_update_v1();
+        assert!(editor_clear(&doc, &ctx, range).is_empty(), "{case}");
+        assert_eq!(doc.encode_state_as_update_v1(), before, "{case}");
+    }
 }

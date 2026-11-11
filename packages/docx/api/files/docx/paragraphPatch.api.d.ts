@@ -70,6 +70,7 @@ export type ParagraphPatchV1 = {
     paraInherit: Attrs;
     markInherit?: Attrs;
     resultSha256: string;
+    inheritance?: 'current' | 'unknown';
 };
 export type PatchErrorCode = 'MISSING_SOURCE' | 'SOURCE_DIGEST_MISMATCH' | 'INVALID_PLAN' | 'SEED_MISMATCH' | 'AMBIGUOUS_ALIGNMENT' | 'AMBIGUOUS_DONOR' | 'INVALID_BOUNDARY' | 'UNSUPPORTED_KEY' | 'UNSUPPORTED_STRUCTURE' | 'PROPERTY_CONFLICT' | 'PATCH_CONFLICT' | 'RESULT_MISMATCH';
 export type LegacyParagraphV1 = {
