@@ -348,18 +348,18 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
       set(target, key, value) { target[key as string] = value; return true; },
     }) as unknown as CanvasRenderingContext2D) as unknown as HTMLCanvasElement['getContext']);
     const bounds = spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 800, 1000));
-    let restoreClock = () => {};
+    const clock = selectionClock();
     try {
       const events: DocxPluginEvent[] = [];
       let painted = false;
+      let laidOut = false;
       const plugin = defineDocxPlugin({ id: 'settle', createState: () => null,
         onEvent(_context, event) { events.push(event); } });
       const { ref } = await mount({ plugins: [plugin], onFirstPagePainted: () => { painted = true; } });
       await until(() => painted);
-      await act(async () => { await ref.current!.whenLayoutComplete({ timeoutMs: 3000 }); });
-      await act(async () => { await selectionWindow().tick(400); });
-      const clock = selectionClock();
-      restoreClock = () => clock.restore();
+      const layout = ref.current!.whenLayoutComplete({ timeoutMs: 3000 }).then(() => { laidOut = true; });
+      await until(() => laidOut);
+      await act(async () => { await layout; });
       await act(async () => { await clock.tick(400); });
       events.length = 0;
       const settles = () => events.filter((event) => event.type === 'selection-settle');
@@ -375,7 +375,7 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
       await act(async () => { await clock.tick(400); });
       expect(settles()).toHaveLength(1);
     } finally {
-      restoreClock();
+      clock.restore();
       bounds.mockRestore();
       canvasContext.mockRestore();
     }
