@@ -116,13 +116,16 @@ export function limitEngineMemoryHeadroom(bytes: number): void {
 
 const OWN_PROCESS = 'BETTEROFFICE_ENGINE_MEMORY_TEST';
 
-/** On the native engine, runs test `name` of `file` alone in a child process, after `before` in this
- * one, and returns true once the child passed; returns false inside the child and on the wasm engine,
- * where the caller runs the test body itself. The native budget counts every live byte of the
- * process's engine thread, so a child keeps other test files' frees out of it. */
-export async function ranInOwnEngineProcess(file: string, name: string, before?: () => Promise<void>): Promise<boolean> {
-  if (engineKind !== 'native' || process.env[OWN_PROCESS] === name) return false;
-  await before?.();
+export function isOwnEngineProcess(name: string): boolean {
+  return process.env[OWN_PROCESS] === name;
+}
+
+/** On the native engine, runs test `name` of `file` alone in a child process and returns true once
+ * the child reported exactly one passing and no failing test; returns false inside the child and on
+ * the wasm engine, where the caller runs the test body itself. The native budget counts every live
+ * byte of the process's engine thread, so a child keeps other test files' frees out of it. */
+export async function ranInOwnEngineProcess(file: string, name: string): Promise<boolean> {
+  if (engineKind !== 'native' || isOwnEngineProcess(name)) return false;
   const { BUN_OPTIONS, ...env } = process.env;
   const preload = (globalThis as Record<symbol, unknown>)[Symbol.for('betteroffice.testPreload')];
   const options = typeof preload === 'string' ? ['--preload', preload] : [];
@@ -135,7 +138,9 @@ export async function ranInOwnEngineProcess(file: string, name: string, before?:
     child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
   ]);
   clearTimeout(deadline);
-  expect({ status, output: status === 0 ? '' : stdout + stderr }).toEqual({ status: 0, output: '' });
+  const output = stdout + stderr;
+  const ranAlone = status === 0 && /(^|\s)1 pass\b/m.test(output) && /(^|\s)0 fail\b/m.test(output);
+  expect({ status, ranAlone, output: ranAlone ? '' : output }).toEqual({ status: 0, ranAlone: true, output: '' });
   return true;
 }
 
