@@ -353,7 +353,10 @@ impl GroupAggregator<'_> {
         };
         let out = invoke(lambda, argv, self.ctx);
         self.ctx.within_budget()?;
-        Ok(out.into_scalar())
+        match out {
+            Value::Array(block) if block.rows != 1 || block.cols != 1 => Err(ErrorValue::Calc),
+            other => Ok(other.into_scalar()),
+        }
     }
 
     fn eval_all_cols(
