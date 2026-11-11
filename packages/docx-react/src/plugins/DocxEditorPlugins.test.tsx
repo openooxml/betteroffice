@@ -3035,6 +3035,7 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
   let closeBand: ReturnType<typeof headerFooterEditing.useHeaderFooterEditing>['handleBodyClick'] | undefined;
   let openNote: pagePointers.UsePagesPointerOptions['onNoteClick'];
   let restoreClearedSelection: (() => void) | undefined;
+  let displayHold: Promise<void> | null = null;
   const restores: Array<() => void> = [];
   const useBinding = docxBindings.useDocxPluginHost;
   const captureBinding = spyOn(docxBindings, 'useDocxPluginHost').mockImplementation((options) => { hookBinding = useBinding(options); return hookBinding; });
@@ -3078,6 +3079,11 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
     controller = createController(options);
     const attach = controller.attach;
     controller.attach = (next) => { binding = next; attach(next); };
+    const readAt = controller.readAt;
+    controller.readAt = (async (request: Parameters<typeof readAt>[0], version: string) => {
+      if (displayHold && request.kind === 'anchorTargets') await displayHold;
+      return readAt(request, version);
+    }) as typeof readAt;
     return controller;
   });
   let mounted: { ref: React.RefObject<DocxEditorRef | null>; view: ReturnType<typeof render>; rerender(next: Partial<DocxAsyncEditorProps>): void };
@@ -3246,6 +3252,13 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
         } finally { peer.destroy(); }
       },
       holdDisplayRange() {
+        if (controller) {
+          let open!: () => void;
+          displayHold = new Promise<void>(resolve => { open = resolve; });
+          const release = () => { displayHold = null; open(); };
+          restores.push(release);
+          return { release };
+        }
         const range = spyOn(mounted.ref.current!.getEditorRef()!, 'getSelectionRange').mockReturnValue(null);
         restores.push(() => range.mockRestore());
         return { release() { range.mockRestore(); hookBinding!.publishSelection(); } };
@@ -3740,11 +3753,15 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
     } finally { h.dispose(); }
   });
 
-  if (engine !== 'DP') for (const outcome of ['mapped', 'expired'] as const) test(`F: not-ready selection is pending and its held display read ${outcome}`, async () => {
+  for (const outcome of ['mapped', 'expired'] as const) test(`F: not-ready selection is pending and its held display read ${outcome}`, async () => {
     const h = await matrixEditor(engine);
     try {
       const held = h.holdDisplayRange();
-      await h.selection('body', h.first.paraId, 1, 3);
+      await h.selection('body', h.first.paraId, 1, 3, false);
+      await until(() => {
+        const result = h.context().geometry?.getAnchorGeometry({ kind: 'selection' });
+        return !!result && !result.ok && result.failure.code === 'pending';
+      });
       expect(h.anchor()).toMatchObject({ ok: false, failure: { code: 'pending' } });
       let answer: readonly DocxAnchorGeometryResult[] | undefined;
       const read = h.readAnchor().then(value => { answer = value; });
@@ -3752,6 +3769,7 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
       expect(answer).toBeUndefined();
       if (outcome === 'mapped') await act(async () => { held.release(); });
       else await act(async () => { await h.clock.expire(() => answer !== undefined); });
+      await until(() => answer !== undefined);
       await h.host.notificationsIdle();
       expect(answer).toBeDefined();
       expect(answer![0]).toMatchObject(outcome === 'mapped' ? { ok: true } : { ok: false, failure: { code: 'layout-unavailable' } });
@@ -3818,6 +3836,7 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
           expect((await h.ref.current!.readSelectionInfo())?.selectedText).toBe(place === 'inside'
             ? h.first.text.slice(1, 2) + 'remote ' + h.first.text.slice(2, 3) : h.first.text.slice(1, 3));
           expect(h.events.some(event => event.type === 'selection-change' || event.type === 'layout-change')).toBe(true);
+          expect(h.events.filter(event => event.type === 'selection-change' && event.selection.displayRange === null)).toEqual([]);
           if (place === 'before') expect(h.context().snapshot.selection.displayRange!.from).toBeGreaterThan(beforeRange!.from);
         } else {
           await h.quiet(700);
