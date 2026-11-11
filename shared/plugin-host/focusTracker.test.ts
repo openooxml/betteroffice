@@ -45,20 +45,24 @@ const surfaceBoundaries: [string, () => Promise<boolean[]>, boolean[]][] = [
     return changes;
   }, [true, false]],
   ['detaching a root with focus inside blurs once', async () => {
-    const { input, roots, changes } = setup();
+    const { input, roots, changes, dispose } = setup();
     input.focus();
     roots[0]!.remove();
-    await settle();
+    dispose.recheck();
+    expect(changes).toEqual([true, false]);
+    dispose.recheck();
     await settle();
     return changes;
   }, [true, false]],
   ['replacing a root with focus inside blurs once', async () => {
-    const { input, roots, changes } = setup();
+    const { input, roots, changes, dispose } = setup();
     input.focus();
     const next = document.createElement('div');
     roots[0]!.replaceWith(next);
     roots[0] = next;
-    await settle();
+    dispose.recheck();
+    expect(changes).toEqual([true, false]);
+    dispose.recheck();
     await settle();
     return changes;
   }, [true, false]],

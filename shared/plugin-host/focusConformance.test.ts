@@ -35,6 +35,7 @@ interface EngineHost {
   open(): void;
   close(): void;
   focusChanged(focused: boolean): void;
+  setFocusCheck(check: (() => void) | null): void;
   focused(): boolean | undefined;
   focusEvents: boolean[];
   overlayMount: 'root' | 'editor';
@@ -61,6 +62,7 @@ function docxHost(): EngineHost {
     open: () => host.openWorker('v1'),
     close: () => host.close('unmounted'),
     focusChanged: (focused) => host.focusChanged(focused),
+    setFocusCheck: (check) => host.setFocusCheck(check),
     focused: () => host.activations()[0]?.context.snapshot.focused,
     focusEvents,
     overlayMount: 'editor',
@@ -86,6 +88,7 @@ function xlsxHost(): EngineHost {
     open: () => host.open(workbook),
     close: () => host.close('unmounted'),
     focusChanged: (focused) => host.focusChanged(focused),
+    setFocusCheck: (check) => host.setFocusCheck(check),
     focused: () => host.activations()[0]?.context.snapshot.focused,
     focusEvents,
     overlayMount: 'root',
@@ -111,6 +114,7 @@ function pptxHost(): EngineHost {
     open: () => host.open(presentation),
     close: () => host.close('unmounted'),
     focusChanged: (focused) => host.focusChanged(focused),
+    setFocusCheck: (check) => host.setFocusCheck(check),
     focused: () => host.activations()[0]?.context.snapshot.focused,
     focusEvents,
     overlayMount: 'root',
@@ -128,7 +132,12 @@ function mountSurface(engine: EngineHost) {
   document.body.append(editor);
   const surface = { editor, root, input };
   const track = () => {
-    cleanups.push(trackFocus(() => [surface.root],(focused) => engine.focusChanged(focused)));
+    const tracker = trackFocus(() => [surface.root], (focused) => engine.focusChanged(focused));
+    engine.setFocusCheck(tracker.recheck);
+    cleanups.push(() => {
+      engine.setFocusCheck(null);
+      tracker();
+    });
   };
   const renderOverlays = () => {
     const mount = document.createElement('div');
@@ -166,7 +175,7 @@ const cases: [string, (engine: EngineHost) => Promise<void>][] = [
     expect(engine.focusEvents).toEqual([true, false]);
     expect(engine.focused()).toBe(false);
   }],
-  ['swapping the surface with focus inside reports one blur', async (engine) => {
+  ['swapping the surface with focus inside reports one blur when the new surface opens', async (engine) => {
     const { surface, track, swap } = mountSurface(engine);
     track();
     engine.open();
@@ -174,6 +183,7 @@ const cases: [string, (engine: EngineHost) => Promise<void>][] = [
     await settle();
     expect(engine.focused()).toBe(true);
     swap();
+    engine.open();
     await settle();
     await settle();
     expect(engine.focusEvents).toEqual([true, false]);
