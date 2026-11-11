@@ -235,6 +235,7 @@ test('explicit stand-ins keep the last-resort tail after embedded bytes for a fa
       compat: { compatibilityMode: 12, noLeading: false, doNotExpandShiftReturn: false },
       authoritativeShaping: true,
     });
+    expect(warn.mock.calls.some(([message]) => String(message).includes('stands in'))).toBe(false);
   } finally { warn.mockRestore(); }
 });
 

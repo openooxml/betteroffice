@@ -563,7 +563,8 @@ export class TextMeasureFontRegistry {
     // the base face, e.g. Arial→Liberation Sans, contributes one id).
     const standIn = (bundled as { [standInKey]?: StandInHook } | undefined)?.[standInKey];
     const standsIn = standIn?.standsIn(family) === true;
-    const tail = !standsIn || ids.length === 0 || this.standInTail;
+    const noOtherFace = ids.length === 0;
+    const tail = !standsIn || noOtherFace || this.standInTail;
     let lastResort: BundledFontLoader | undefined;
     try {
       if (tail) lastResort = bundled?.resolveLastResort?.(family, bold, italic, 'word');
@@ -578,7 +579,7 @@ export class TextMeasureFontRegistry {
       const id = await this.registerLastResort(key, lastResort, family);
       if (id !== null && !ids.includes(id)) ids.push(id);
       if (id === null) retryable = true;
-      else if (standsIn && standIn?.report(family)) this.warnStandIn(family);
+      else if (standsIn && noOtherFace && standIn?.report(family)) this.warnStandIn(family);
     }
 
     try {
