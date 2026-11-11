@@ -220,13 +220,18 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   useLayoutEffect(() => { host.localeChanged(locale); }, [host, locale]);
   useLayoutEffect(() => {
     if (!managed) return;
-    return trackFocus(() => {
+    const tracker = trackFocus(() => {
       const root = latest.current.focusRoot?.();
       if (!root) return [];
       const inputId = root.getAttribute('data-docx-input');
       const input = inputId ? root.ownerDocument.getElementById(inputId) : null;
       return input ? [root, input] : [root];
     }, (focused) => host.focusChanged(focused));
+    host.setFocusCheck(tracker.recheck);
+    return () => {
+      host.setFocusCheck(null);
+      tracker();
+    };
   }, [host, managed]);
 
   useLayoutEffect(() => {
