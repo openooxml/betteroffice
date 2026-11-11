@@ -9,7 +9,7 @@ import { createResidentEngineSession } from './residentEngineSession';
 import { setEditWasmHeapLimit } from '../wasm/edit';
 import { wasmModuleMemories } from './index';
 import { commandMayNeedNewFonts } from './residentFontEnvironment';
-import { engineKind } from '../wasm/engineEdit';
+import { engineKind, wasm_heap_counted } from '../wasm/engineEdit';
 
 const TIMEOUT = 20_000;
 let startWorker: Awaited<ReturnType<typeof residentWorkerFactory>>;
@@ -84,7 +84,7 @@ for (const extension of ['woff', 'woff2']) {
       expect(worker.fontFaces.size).toBe(1);
       expect(events).toMatchObject([{ phase: 'ready', revision: 1 }, { phase: 'presentation', revision: 1, frameEpoch: ack.frame?.revision }]);
       expect(memory.length).toBeGreaterThan(0);
-      expect(client.memory()?.some(sample => sample.label === 'docx-edit')).toBe(engineKind === 'wasm');
+      expect(client.memory()?.some(sample => sample.label === 'docx-edit')).toBe(engineKind === 'wasm' || wasm_heap_counted());
       const duplicate = await client.edit(envelope);
       expect(duplicate.version).toBe(ack.version);
       expect(events).toHaveLength(2);

@@ -299,6 +299,7 @@ export const sanitizeOoxml: (a: number, b: number, c: number, d: number) => [num
 export const serialize_docx_s10: (a: number, b: number) => [number, number, number, number];
 export const serialize_docx_s11: (a: number, b: number) => [number, number, number, number];
 export const serialize_docx_s12: (a: number, b: number) => [number, number, number, number];
+export const set_wasm_heap_counting: (a: number) => number;
 export const set_wasm_heap_limit: (a: number) => void;
 export const unzip_docx: (a: number, b: number) => [number, number, number];
 export const update_display_list: (a: number, b: number, c: number) => [number, number];

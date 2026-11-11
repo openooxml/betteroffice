@@ -1066,10 +1066,15 @@ describe('docx native engine parity', () => {
     } finally {
       native.set_wasm_heap_limit(Infinity);
     }
-    expect(native.wasm_live_bytes()).toBeGreaterThan(0);
-    expect(native.wasm_peak_bytes()).toBeGreaterThanOrEqual(native.wasm_live_bytes());
-    expect(native.reset_wasm_peak_bytes()).toBeUndefined();
-    expect(native.wasm_peak_bytes()).toBe(native.wasm_live_bytes());
+    const held = new native.EditSession(17);
+    try {
+      expect(native.wasm_live_bytes()).toBeGreaterThan(0);
+      expect(native.wasm_peak_bytes()).toBeGreaterThanOrEqual(native.wasm_live_bytes());
+      expect(native.reset_wasm_peak_bytes()).toBeUndefined();
+      expect(native.wasm_peak_bytes()).toBe(native.wasm_live_bytes());
+    } finally {
+      held.free();
+    }
     expect(native.install_panic_hook()).toBeUndefined();
   });
 
