@@ -7717,6 +7717,80 @@ fn three_d_charts_read_as_their_flat_families() {
     }
 }
 
+/// Every text a chart part draws, through the xlsx chart parser.
+fn chart_texts(plot: &str, labels: &str, value_axis: &str) -> Vec<String> {
+    let part = format!(
+        concat!(
+            r#"<c:chartSpace xmlns:c="c"><c:chart><c:plotArea><c:{plot}><c:ser><c:idx val="0"/><c:order val="0"/>{labels}"#,
+            r#"<c:cat><c:strRef><c:f>S!$A$1:$A$2</c:f><c:strCache><c:ptCount val="2"/><c:pt idx="0"><c:v>North</c:v></c:pt><c:pt idx="1"><c:v>South</c:v></c:pt></c:strCache></c:strRef></c:cat>"#,
+            r##"<c:val><c:numRef><c:f>S!$B$1:$B$2</c:f><c:numCache><c:formatCode>"$"#,##0</c:formatCode><c:ptCount val="2"/>"##,
+            r#"<c:pt idx="0"><c:v>3750</c:v></c:pt><c:pt idx="1"><c:v>33750</c:v></c:pt></c:numCache></c:numRef></c:val>"#,
+            r#"</c:ser><c:axId val="1"/><c:axId val="2"/></c:{plot}>"#,
+            r#"<c:catAx><c:axId val="1"/><c:crossAx val="2"/></c:catAx><c:valAx><c:axId val="2"/>{value_axis}<c:crossAx val="1"/></c:valAx>"#,
+            r#"</c:plotArea></c:chart></c:chartSpace>"#,
+        ),
+        plot = plot,
+        labels = labels,
+        value_axis = value_axis,
+    );
+    let space = crate::chart_space(part.as_bytes(), &Default::default()).expect("chart");
+    let rect = ooxml_drawingml::chart::PlotRect {
+        x: 0.0,
+        y: 0.0,
+        w: 400.0,
+        h: 300.0,
+    };
+    ooxml_drawingml::chart::plot_chart(&ooxml_drawingml::chart::PlotChart::from(&space), rect)
+        .into_iter()
+        .filter_map(|op| match op {
+            ooxml_drawingml::chart::PlotOp::Text { text, .. } => Some(text),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn source_linked_labels_and_value_axes_read_the_cached_cell_format() {
+    let linked = r#"<c:numFmt formatCode="General" sourceLinked="1"/>"#;
+    let texts = chart_texts(
+        "barChart",
+        &format!(r#"<c:dLbls>{linked}<c:showVal val="1"/></c:dLbls>"#),
+        linked,
+    );
+    assert!(texts.contains(&"$3,750".to_owned()), "{texts:?}");
+    assert!(texts.contains(&"$33,750".to_owned()), "{texts:?}");
+    assert!(texts.contains(&"$40,000".to_owned()), "{texts:?}");
+}
+
+#[test]
+fn an_unlinked_label_number_format_wins_over_the_cached_cell_format() {
+    let texts = chart_texts(
+        "barChart",
+        r#"<c:dLbls><c:numFmt formatCode="0.0" sourceLinked="0"/><c:showVal val="1"/></c:dLbls>"#,
+        r##"<c:numFmt formatCode="#,##0" sourceLinked="0"/>"##,
+    );
+    assert!(texts.contains(&"3750.0".to_owned()), "{texts:?}");
+    assert!(texts.contains(&"40,000".to_owned()), "{texts:?}");
+    assert!(!texts.iter().any(|text| text.contains('$')), "{texts:?}");
+}
+
+#[test]
+fn a_pie_percent_label_reads_its_own_number_format() {
+    let percent = |format: &str| {
+        chart_texts(
+            "pieChart",
+            &format!(r#"<c:dLbls>{format}<c:showVal val="0"/><c:showPercent val="1"/></c:dLbls>"#),
+            "",
+        )
+    };
+    let explicit = percent(r#"<c:numFmt formatCode="0.0%" sourceLinked="0"/>"#);
+    assert!(explicit.contains(&"10.0%".to_owned()), "{explicit:?}");
+    assert!(explicit.contains(&"90.0%".to_owned()), "{explicit:?}");
+    let linked = percent(r#"<c:numFmt formatCode="General" sourceLinked="1"/>"#);
+    assert!(linked.contains(&"10%".to_owned()), "{linked:?}");
+    assert!(!linked.iter().any(|text| text.contains('$')), "{linked:?}");
+}
+
 /// A reference carrying markup-significant characters must come back escaped,
 /// so a rewrite can never reshape the part.
 #[test]

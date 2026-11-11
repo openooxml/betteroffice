@@ -10770,12 +10770,7 @@ fn plot_series_from<'a>(
     series: &'a ChartSeriesIn,
     group_labels: Option<&'a ChartDataLabelsIn>,
 ) -> PlotSeries<'a> {
-    let mut labels = plot_labels_from(group_labels, series.data_labels.as_ref());
-    if let Some(spec) = labels.as_mut()
-        && spec.number_format.is_none()
-    {
-        spec.number_format = series.value_format.as_deref();
-    }
+    let labels = plot_labels_from(group_labels, series.data_labels.as_ref());
     PlotSeries {
         name: series.name.as_deref(),
         categories: &series.categories,

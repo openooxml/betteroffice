@@ -488,6 +488,8 @@ pub struct PlotDataLabels<'a> {
     /// `c:dLblPos`: `ctr`, `inEnd`, `inBase`, `outEnd`, `bestFit`, `l`, `r`,
     /// `t` or `b`.
     pub position: Option<&'a str>,
+    /// The label's own `c:numFmt`. Without one, a value reads the series'
+    /// `value_format`, which is what makes 0.86 read as 86% (#797).
     pub number_format: Option<&'a str>,
     /// `c:txPr` on this `c:dLbls`.
     pub text: PlotTextStyle<'a>,
@@ -731,15 +733,7 @@ fn plot_series_from_model<'a>(
     series: &'a super::model::ChartSeries,
     group_labels: Option<&'a super::model::ChartDataLabels>,
 ) -> PlotSeries<'a> {
-    let mut labels = plot_labels_from_model(None, series.data_labels.as_ref(), None, group_labels);
-    // A label that names no format is source-linked, so it reads the one the
-    // values were cached with — that is what makes 0.86 read as 86% (#797).
-    let cached = series.value_format.as_deref();
-    if let Some(spec) = labels.as_mut()
-        && spec.number_format.is_none()
-    {
-        spec.number_format = cached;
-    }
+    let labels = plot_labels_from_model(None, series.data_labels.as_ref(), None, group_labels);
     let mut points: Vec<PlotPoint<'a>> = series
         .points
         .iter()
@@ -758,13 +752,6 @@ fn plot_series_from_model<'a>(
         })
         .collect();
     merge_point_labels(&mut points, group_labels, series.data_labels.as_ref());
-    for point in &mut points {
-        if let Some(spec) = point.labels.as_mut()
-            && spec.number_format.is_none()
-        {
-            spec.number_format = cached;
-        }
-    }
     PlotSeries {
         name: series.name.as_deref(),
         categories: &series.categories,
@@ -782,7 +769,7 @@ fn plot_series_from_model<'a>(
             color: line.color.as_deref(),
             width_emu: line.width_emu,
         }),
-        value_format: cached,
+        value_format: series.value_format.as_deref(),
     }
 }
 
@@ -3472,18 +3459,20 @@ fn point_label(
     }
     let value = series.value(index);
     if spec.show_value {
-        parts.push(
-            spec.number_format
-                .and_then(|code| format_with_code(value, code))
-                .unwrap_or_else(|| format_number(value)),
-        );
+        parts.push(format_value(
+            value,
+            spec.number_format.or(series.series.value_format),
+        ));
     }
     if spec.show_percent {
-        parts.push(if percent_total > 0.0 {
-            format_percent(value / percent_total)
-        } else {
-            format_percent(0.0)
-        });
+        parts.push(format_share(
+            if percent_total > 0.0 {
+                value / percent_total
+            } else {
+                0.0
+            },
+            spec.number_format,
+        ));
     }
     if spec.show_bubble_size {
         parts.push(format_number(series.bubble_size(index)));
@@ -3518,23 +3507,31 @@ fn label_field(
     percent_total: f64,
     number_format: Option<&str>,
 ) -> String {
-    let formatted = |value: f64| format_value(value, number_format);
     match field {
         "SERIESNAME" => label_part(series.series.name.unwrap_or_default()),
         "CATEGORYNAME" => label_category(family.series, index),
-        "VALUE" => formatted(series.value(index)),
-        "PERCENTAGE" => {
-            let share = if percent_total > 0.0 {
+        "VALUE" => format_value(
+            series.value(index),
+            number_format.or(series.series.value_format),
+        ),
+        "PERCENTAGE" => format_share(
+            if percent_total > 0.0 {
                 series.value(index) / percent_total
             } else {
                 0.0
-            };
-            number_format
-                .and_then(|code| format_with_code(share, code))
-                .unwrap_or_else(|| format_percent(share))
-        }
+            },
+            number_format,
+        ),
         _ => String::new(),
     }
+}
+
+/// A share as a percentage label reads it: through the label's own
+/// `c:numFmt`, else as [`format_percent`] writes it, as `General` does too.
+fn format_share(share: f64, code: Option<&str>) -> String {
+    code.filter(|code| !code.eq_ignore_ascii_case("general"))
+        .and_then(|code| format_with_code(share, code))
+        .unwrap_or_else(|| format_percent(share))
 }
 
 /// The series the chart draws, by plot group, read within `scan`.
