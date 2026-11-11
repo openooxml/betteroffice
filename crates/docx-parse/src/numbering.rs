@@ -535,8 +535,6 @@ impl NumberingMap {
             .cloned()
     }
 
-    /// Level `ilvl` of an abstract definition, read from the definition its `w:numStyleLink`
-    /// names when it has no levels of its own.
     pub fn get_abstract_level(&self, abstract_num_id: f64, ilvl: f64) -> Option<&ListLevel> {
         let mut abstract_numbering = self.get_abstract(abstract_num_id)?;
         if abstract_numbering
