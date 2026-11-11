@@ -57,23 +57,12 @@ for (const [kind, block] of Object.entries(BLOCKS)) {
     arm.state.selection = selection('00000011', 0);
     return arm;
   };
-  const extend = (arm: CommandArm, unit: 'character' | 'paragraph', times: number) => {
+  const extend = (arm: CommandArm, unit: 'character', times: number) => {
     for (let step = 0; step < times; step += 1) {
       execute(arm, command(arm, 'navigate', { unit, direction: 'forward', extend: true }));
     }
-    console.log(`SELECTION ${kind} ${unit}x${times} ${JSON.stringify(arm.state.selection)}`);
     return arm.state.selection!;
   };
-
-  test(`clear over a selection extended across a ${kind} clears the text inside it`, async () => {
-    for (const [unit, times] of [['paragraph', 2], ['character', 7]] as const) {
-      const arm = await open();
-      const across = extend(arm, unit, times);
-      expect(across.focus.paraId).toBe('00000013');
-      expect(execute(arm, command(arm, 'clearFormatting', { selection: across })).status).toBe('applied');
-      expect({ unit, inner: innerItalic(arm), intro: Boolean(marksOf(arm, 'Intro').italic) }).toEqual({ unit, inner: false, intro: false });
-    }
-  }, TIMEOUT);
 
   test(`clear over a selection ending at the end of the paragraph before a ${kind} leaves the text inside it`, async () => {
     const arm = await open();

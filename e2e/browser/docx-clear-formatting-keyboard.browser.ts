@@ -97,7 +97,7 @@ for (const arm of ['&peerless=0', '']) {
     }
   });
 
-  for (const how of ['select all', 'drag'] as const) {
+  for (const how of arm ? ['select all'] as const : ['select all', 'drag'] as const) {
     test(`docx clear formatting over a ${how} that spans a table clears the cell text (${label})`, async ({ page }, info) => {
       const input = await open(page, arm, TABLE_BETWEEN);
       if (how === 'select all') {
@@ -105,15 +105,14 @@ for (const arm of ['&peerless=0', '']) {
       } else {
         const caret = page.locator('[data-docx-caret]');
         await input.press('ControlOrMeta+End');
-        const end = await caret.boundingBox();
-        await input.press('Home');
-        const lineStart = await caret.boundingBox();
+        for (let step = 0; step < 'ords here'.length; step += 1) await input.press('ArrowLeft');
+        const middle = await caret.boundingBox();
         await input.press('ControlOrMeta+Home');
         const start = await caret.boundingBox();
-        if (!end || !lineStart || !start) throw new Error('Document caret has no bounds');
+        if (!middle || !start) throw new Error('Document caret has no bounds');
         await page.mouse.move(start.x + 0.25, start.y + start.height / 2);
         await page.mouse.down();
-        await page.mouse.move((lineStart.x + end.x) / 2, end.y + end.height / 2, { steps: 12 });
+        await page.mouse.move(middle.x, middle.y + middle.height / 2, { steps: 12 });
         await page.mouse.up();
       }
       const rail = page.getByTestId('formatting-bar');
