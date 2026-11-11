@@ -85,28 +85,36 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
         expect(result.ok).toBe(true);
       },
     };
+    const markers = ['Title', 'Unbolded', 'Bold words', 'Directbold'];
+    const cleared = ['Title', 'Unbolded', 'Bold words'];
+    const actual: Record<string, unknown>[] = [];
+    const expected: Record<string, unknown>[] = [];
     for (const [name, clear] of Object.entries(clears)) {
+      expected.push({ name, bold: [true, true, false, true], emptyRunProperties: false, saved: [null, null, null], reopenedBold: [true, true, false, true] });
       const session = await yrs.createYrsSession({ clientId: 91 });
       try {
         session.seedFromDocx(await fixture());
         clear(session);
-        const markers = ['Title', 'Unbolded', 'Bold words', 'Directbold'];
-        expect({ name, bold: markers.map((marker) => bold(session, marker)) }).toEqual({ name, bold: [true, true, false, true] });
+        const sessionBold = markers.map((marker) => bold(session, marker));
         const { xml, reopened } = await saveAndReopen(yrs, session);
         try {
-          expect(xml).not.toContain('<w:rPr></w:rPr>');
-          expect(xml).not.toContain('<w:rPr/>');
-          for (const marker of ['Title', 'Unbolded', 'Bold words']) {
-            expect({ name, marker, saved: savedRunProperties(xml, marker) }).toEqual({ name, marker, saved: null });
-          }
-          expect({ name, bold: markers.map((marker) => bold(reopened, marker)) }).toEqual({ name, bold: [true, true, false, true] });
+          actual.push({
+            name,
+            bold: sessionBold,
+            emptyRunProperties: xml.includes('<w:rPr></w:rPr>') || xml.includes('<w:rPr/>'),
+            saved: cleared.map((marker) => savedRunProperties(xml, marker)),
+            reopenedBold: markers.map((marker) => bold(reopened, marker)),
+          });
         } finally {
           reopened.destroy();
         }
+      } catch (e) {
+        actual.push({ name, error: String(e) });
       } finally {
         session.destroy();
       }
     }
+    expect(actual).toEqual(expected);
   });
 
   test(`${engine}: in a cell of a bold table style the saved bold follows the table style`, async () => {
@@ -237,28 +245,34 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
         return [direct('Inner head', true)];
       }],
     ];
+    const actual: Record<string, unknown>[] = [];
+    const expected: Record<string, unknown>[] = [];
     for (const [name, edit] of cases) {
       const session = await yrs.createYrsSession({ clientId: 99 });
       try {
         session.seedFromDocx(await fixture(body));
-        const expected = edit(session);
+        const wanted = edit(session);
         const first = await saveAndReopen(yrs, session);
         first.reopened.destroy();
         const { xml, reopened } = await saveAndReopen(yrs, session);
         try {
-          for (const want of expected) {
+          for (const want of wanted) {
             const { marker } = want;
-            const got: Record<string, unknown> = { marker, saved: savedRunProperties(xml, marker), reopens: boldIn(reopened, marker) };
+            const got: Record<string, unknown> = { name, marker, saved: savedRunProperties(xml, marker), reopens: boldIn(reopened, marker) };
             if ('session' in want) got.session = boldIn(session, marker);
-            expect({ engine, name, ...got }).toEqual({ engine, name, ...want });
+            actual.push(got);
+            expected.push({ name, ...want });
           }
         } finally {
           reopened.destroy();
         }
+      } catch (e) {
+        actual.push({ name, error: String(e) });
       } finally {
         session.destroy();
       }
     }
+    expect(actual).toEqual(expected);
   });
 
   test(`${engine}: the old header cell, explicitly not bold and now in row 1 after a row is inserted above it, made bold saves explicit bold`, async () => {
@@ -266,7 +280,10 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
       `<w:tc><w:tcPr><w:tcW w:w="2400" w:type="dxa"/></w:tcPr><w:p w14:paraId="${paraId}">${run}</w:p></w:tc>`;
     const body = '<w:tbl><w:tblPr><w:tblStyle w:val="HeaderGrid"/><w:tblLook w:val="0020" w:firstRow="1" w:lastRow="0" w:firstColumn="0" w:lastColumn="0" w:noHBand="1" w:noVBand="1"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid>' +
       `<w:tr>${cell('00000051', '<w:r><w:rPr><w:b w:val="0"/></w:rPr><w:t>Old head</w:t></w:r>')}</w:tr></w:tbl><w:p w14:paraId="00000052"><w:r><w:t>After</w:t></w:r></w:p>`;
+    const actual: Record<string, unknown>[] = [];
+    const expected: Record<string, unknown>[] = [];
     for (const saveBetween of [false, true]) {
+      expected.push({ saveBetween, saved: '<w:b/>', bold: true });
       const session = await yrs.createYrsSession({ clientId: 99 });
       try {
         session.seedFromDocx(await fixture(body));
@@ -276,18 +293,20 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
         session.formatRange(whole(session, '00000051', '00000051', story), { bold: true });
         const { xml, reopened } = await saveAndReopen(yrs, session);
         try {
-          expect({ saveBetween, saved: savedRunProperties(xml, 'Old head') }).toEqual({ saveBetween, saved: '<w:b/>' });
           const segment = reopened.listStories().stories
             .flatMap((entry) => reopened.storySegments(entry.story))
             .find((entry) => entry.kind === 'text' && entry.text.includes('Old head'));
-          expect({ saveBetween, bold: segment?.kind === 'text' && Boolean(segment.attributes.bold) }).toEqual({ saveBetween, bold: true });
+          actual.push({ saveBetween, saved: savedRunProperties(xml, 'Old head'), bold: segment?.kind === 'text' && Boolean(segment.attributes.bold) });
         } finally {
           reopened.destroy();
         }
+      } catch (e) {
+        actual.push({ saveBetween, error: String(e) });
       } finally {
         session.destroy();
       }
     }
+    expect(actual).toEqual(expected);
   });
 
   test(`${engine}: a peer bootstrapped from an update keeps the table style's bold when clearing formatting in a cell`, async () => {
@@ -367,25 +386,33 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
       ['size set to another size', '00000011', (session, range) => session.formatRange(range, { fontSize: 11 })],
       ['underline off', '00000014', (session, range) => session.formatRange(range, { underline: null })],
     ];
+    const actual: Record<string, unknown>[] = [];
+    const expected: Record<string, unknown>[] = [];
     for (const [name, paraId, edit] of edits) {
       const saved: (string | null)[] = [];
-      for (const withMark of [false, true]) {
-        const session = await yrs.createYrsSession({ clientId: 97 });
-        try {
-          session.seedFromDocx(await fixture(EDITED_BODY));
-          const range = whole(session, paraId);
-          const next = ids[ids.indexOf(paraId) + 1]!;
-          edit(session, withMark ? { ...range, end: { paraId: next, offset: 0 } } : range);
-          const { xml, reopened } = await saveAndReopen(yrs, session);
-          reopened.destroy();
-          const marker = { '00000011': 'Plain heading', '00000012': 'Styled heading', '00000013': 'Plain body', '00000014': 'Styled body' }[paraId]!;
-          saved.push(savedRunProperties(xml, marker));
-        } finally {
-          session.destroy();
+      try {
+        for (const withMark of [false, true]) {
+          const session = await yrs.createYrsSession({ clientId: 97 });
+          try {
+            session.seedFromDocx(await fixture(EDITED_BODY));
+            const range = whole(session, paraId);
+            const next = ids[ids.indexOf(paraId) + 1]!;
+            edit(session, withMark ? { ...range, end: { paraId: next, offset: 0 } } : range);
+            const { xml, reopened } = await saveAndReopen(yrs, session);
+            reopened.destroy();
+            const marker = { '00000011': 'Plain heading', '00000012': 'Styled heading', '00000013': 'Plain body', '00000014': 'Styled body' }[paraId]!;
+            saved.push(savedRunProperties(xml, marker));
+          } finally {
+            session.destroy();
+          }
         }
+        actual.push({ name, withMark: saved[1] });
+      } catch (e) {
+        actual.push({ name, error: String(e) });
       }
-      expect({ name, withMark: saved[1] }).toEqual({ name, withMark: saved[0] });
+      expected.push({ name, withMark: saved[0] });
     }
+    expect(actual).toEqual(expected);
   });
 
   test(`${engine}: text pasted into a heading keeps the heading bold and its own italic`, async () => {
@@ -426,7 +453,11 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
   });
 
   test(`${engine}: clearing unformatted text writes no update and adds no undo step`, async () => {
+    const sameBytes = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((byte, index) => byte === b[index]);
+    const actual: Record<string, unknown>[] = [];
+    const expected: Record<string, unknown>[] = [];
     for (const suggesting of [undefined, { name: 'Ann', date: '2026-11-10T12:00:00Z' }]) {
+      const mode = suggesting ? 'suggesting' : 'direct';
       const session = await yrs.createYrsSession({ clientId: 95 });
       try {
         session.seedFromDocx(await fixture(UNFORMATTED_BODY));
@@ -442,18 +473,21 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
           const vector = session.encodeStateVector();
           const update = session.encodeStateAsUpdate();
           session.clearFormatting(range, suggesting);
-          expect({ name, vector: session.encodeStateVector() }).toEqual({ name, vector });
-          expect({ name, update: session.encodeStateAsUpdate() }).toEqual({ name, update });
-          expect({ name, canUndo: session.canUndo() }).toEqual({ name, canUndo: false });
+          actual.push({ mode, name, vector: session.encodeStateVector(), update: session.encodeStateAsUpdate(), canUndo: session.canUndo() });
+          expected.push({ mode, name, vector, update, canUndo: false });
         }
         const after = whole(session, '00000044');
         session.formatRange(after, { italic: true });
         const vector = session.encodeStateVector();
         session.clearFormatting(after, suggesting);
-        expect(session.encodeStateVector()).not.toEqual(vector);
+        actual.push({ mode, name: 'formatted', vectorChanged: !sameBytes(session.encodeStateVector(), vector) });
+        expected.push({ mode, name: 'formatted', vectorChanged: true });
+      } catch (e) {
+        actual.push({ mode, error: String(e) });
       } finally {
         session.destroy();
       }
     }
+    expect(actual).toEqual(expected);
   });
 }
