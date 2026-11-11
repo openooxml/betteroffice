@@ -83,6 +83,7 @@ pub mod resolve_lines;
 mod transcode;
 pub mod types;
 mod utf16_index;
+mod whole_number;
 
 pub mod break_policy;
 pub mod cell_layout;

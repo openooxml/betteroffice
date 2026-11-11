@@ -89,6 +89,7 @@ fn proposals_in(bytes: &[u8]) -> (EngineSession, [String; 3]) {
         history: EditHistory::None,
         steps: vec![
             suggested(EditOperation::ReplaceText {
+                runs: None,
                 target: search("beta", "00000001"),
                 text: "BETA".to_owned(),
             }),
@@ -96,6 +97,7 @@ fn proposals_in(bytes: &[u8]) -> (EngineSession, [String; 3]) {
                 target: search("Delta", "00000002"),
             }),
             suggested(EditOperation::InsertText {
+                runs: None,
                 target: search("Title", "00000003"),
                 at: TargetEdge::End,
                 text: "!".to_owned(),
@@ -466,6 +468,7 @@ fn a_table_cell_previews_its_own_revisions() {
         source: EditSource::Host,
         history: EditHistory::None,
         steps: vec![suggested(EditOperation::ReplaceText {
+            runs: None,
             target: TextTarget::Search {
                 text: "beta".to_owned(),
                 within: SearchScope::Paragraph(ParagraphTarget {

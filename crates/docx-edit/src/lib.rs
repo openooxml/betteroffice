@@ -140,7 +140,7 @@ pub use batch::{
     DocumentVersion, EditApplication, EditFailure, EditFailureCode, EditFailureReason, EditGuard,
     EditHistory, EditOperation, EditPreview, EditReceipt, EditRefusal, EditRequest, EditSource,
     EditStep, EditSuggestion, EditTarget, EditValidation, ParagraphInput, ResolvedControl,
-    TargetEdge,
+    TargetEdge, TextRun,
 };
 pub use canonical::{CanonicalItem, checksum, project_story, story_checksum, to_canonical_bytes};
 pub use ctx::{EditCtx, EditOrigin, SuggestCtx};
