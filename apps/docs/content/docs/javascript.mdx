@@ -636,7 +636,9 @@ rails move groups into an accessible More menu; wrap other host content in
 `pluginGrants` and `onPluginError` props as the DOCX editor. A plugin
 created with `defineXlsxPlugin` contributes a docked panel, an overlay on the
 grid and commands, and works through restricted clients. The plugin API
-can change in minor releases; changes are listed in the changelog:
+can change in minor releases; changes are listed in the changelog. The legacy
+read-only viewer (`legacySyncApi` with `readOnly`) does not run plugins and
+reports each one through `onPluginError`:
 
 ```tsx
 import { XlsxEditor, defineXlsxPlugin } from "@betteroffice/xlsx-react";
