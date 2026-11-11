@@ -2621,12 +2621,6 @@ impl EditSession {
         self.core.story_ids()
     }
 
-    /// `[{"story","tableIndex"}]`: the tables that lost their payload to a concurrent undo.
-    /// @internal
-    pub fn unavailable_tables(&self) -> String {
-        self.core.unavailable_tables()
-    }
-
     /// `[{"story","tableIndex"}]` from a full walk of the roots in `roots_json`, or `null` when
     /// a walk cannot finish.
     /// @internal

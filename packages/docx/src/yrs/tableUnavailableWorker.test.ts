@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, expect, spyOn, test } from 'bun:test';
+import { afterEach, beforeAll, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
@@ -52,7 +52,7 @@ async function open(clientId: number, bytes: Uint8Array, initialUpdate?: Uint8Ar
   return { client, engine };
 }
 
-test('a worker that joins a document whose table crossing undos emptied warns once with a stable code', async () => {
+test('a worker that joins a document whose table crossing undos emptied lays it out without the table and refuses to save it', async () => {
   const bytes = documentBytes();
   const seeded = await open(9811, bytes);
   const peers: YrsSession[] = [];
@@ -76,23 +76,12 @@ test('a worker that joins a document whose table crossing undos emptied warns on
     const payload = a.tablePayload('body', 0) ?? {};
     expect(['tblPr', 'grid', 'rows'].filter((key) => key in payload)).toEqual([]);
 
-    const warn = spyOn(console, 'warn').mockImplementation(() => {});
-    try {
-      const joined = await open(9814, bytes, a.encodeState());
-      expect(joined.engine.paragraphs('body').map(({ text }) => text)).toEqual(['Before', 'After']);
-      const warnings = warn.mock.calls.filter(([message]) =>
-        typeof message === 'string' && message.startsWith('table-unavailable:'));
-      expect(warnings).toHaveLength(1);
-      expect(warnings[0]![1]).toEqual([{ story: 'body', tableIndex: 0 }]);
-      const before = joined.engine.encodeState();
-      await expect(joined.client.save({ comments: [] })).rejects.toThrow(
-        'a table is unavailable after a concurrent undo');
-      expect(joined.engine.encodeState()).toEqual(before);
-      expect(warn.mock.calls.filter(([message]) =>
-        typeof message === 'string' && message.startsWith('table-unavailable:'))).toHaveLength(1);
-    } finally {
-      warn.mockRestore();
-    }
+    const joined = await open(9814, bytes, a.encodeState());
+    expect(joined.engine.paragraphs('body').map(({ text }) => text)).toEqual(['Before', 'After']);
+    const before = joined.engine.encodeState();
+    await expect(joined.client.save({ comments: [] })).rejects.toThrow(
+      'a table is unavailable after a concurrent undo');
+    expect(joined.engine.encodeState()).toEqual(before);
   } finally {
     for (const created of peers) created.destroy();
   }

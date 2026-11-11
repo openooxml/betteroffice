@@ -3,10 +3,7 @@
 //! crossing order can leave every entry deleted. Such a table lays out as nothing, takes no table
 //! operation and blocks saving until its last undo is redone or the table is deleted.
 
-use std::sync::atomic::Ordering;
-
-use yrs::types::{Delta, EntryChange, Event, Events};
-use yrs::{Map, MapRef, Out, ReadTxn, TransactionMut};
+use yrs::{Map, MapRef, ReadTxn};
 
 use crate::{EditingDoc, TableLocator};
 
@@ -20,61 +17,41 @@ pub(crate) fn is_unavailable<T: ReadTxn>(table: &MapRef, txn: &T) -> bool {
     PAYLOAD_KEYS.iter().any(|key| table.get(txn, key).is_none())
 }
 
-/// Whether a commit's story events may have changed which tables are unavailable: a payload
-/// entry removed, an embed inserted (undoing a table's deletion brings a keyless one back), or
-/// stories added, replaced or removed at the root. Only the worker's notice reads it.
-pub(crate) fn may_have_left_unavailable(txn: &TransactionMut, events: &Events) -> bool {
-    events.iter().any(|event| match event {
-        Event::Map(event) => {
-            event.path().is_empty()
-                || event.keys(txn).iter().any(|(key, change)| {
-                    PAYLOAD_KEYS.contains(&key.as_ref())
-                        && matches!(change, EntryChange::Removed(_))
-                })
-        }
-        Event::Text(event) => event
-            .delta(txn)
-            .iter()
-            .any(|delta| matches!(delta, Delta::Inserted(Out::YMap(_), _))),
-        _ => false,
-    })
+/// Whether `story` is a footnote or endnote itself, `fn:<id>` or `en:<id>`, rather than a story
+/// below one (a cell `fn:1:t0:r0c0` reads as a note once the table naming it lost its rows).
+#[cfg(test)]
+fn is_note_root(story: &str) -> bool {
+    story
+        .strip_prefix("fn:")
+        .or_else(|| story.strip_prefix("en:"))
+        .is_some_and(|id| !id.is_empty() && !id.contains(':'))
 }
 
 impl EditingDoc {
-    /// Every unavailable table a reader can reach, by story and ordinal: the geometry outline
-    /// walk (the editor projection's walk) from each root story the story list names (the body,
-    /// headers and footers by their section references, footnotes and endnotes), through the
-    /// cells of complete tables and block controls' stories. A story only an unavailable or
-    /// deleted table named is out of reach and never counts. `None` when a walk cannot finish.
+    /// Every unavailable table a reader can reach from the root stories the story list names:
+    /// the body, headers and footers by their section references, and the notes themselves.
+    /// A story only an unavailable or deleted table named is out of reach and never counts.
+    /// `None` when a walk cannot finish.
+    #[cfg(test)]
     pub(crate) fn unavailable_tables(&self) -> Option<Vec<TableLocator>> {
         use crate::stories::StoryInfoKind;
         let roots: Vec<String> = self
             .list_stories()
             .stories
             .into_iter()
-            .filter(|info| {
-                matches!(
-                    info.kind,
-                    StoryInfoKind::Body
-                        | StoryInfoKind::Header
-                        | StoryInfoKind::Footer
-                        | StoryInfoKind::Footnote
-                        | StoryInfoKind::Endnote
-                )
+            .filter(|info| match info.kind {
+                StoryInfoKind::Body | StoryInfoKind::Header | StoryInfoKind::Footer => true,
+                StoryInfoKind::Footnote | StoryInfoKind::Endnote => is_note_root(&info.story),
+                _ => false,
             })
             .map(|info| info.story)
             .collect();
-        let found = self.unavailable_tables_from(&roots)?;
-        if found.is_empty() {
-            self.unavailable_tables_dirty
-                .store(false, Ordering::Relaxed);
-        }
-        Some(found)
+        self.unavailable_tables_from(&roots)
     }
 
     /// The unavailable tables the geometry outline walk meets from `roots`, by story and ordinal,
-    /// in story then ordinal order. A root the document lacks reads as empty. `None` when a walk
-    /// cannot finish.
+    /// in story then ordinal order: through the cells of complete tables and block controls'
+    /// stories. A root the document lacks reads as empty. `None` when a walk cannot finish.
     pub(crate) fn unavailable_tables_from(&self, roots: &[String]) -> Option<Vec<TableLocator>> {
         let mut found = Vec::new();
         for root in roots {
@@ -85,15 +62,6 @@ impl EditingDoc {
         });
         found.dedup();
         Some(found)
-    }
-
-    /// [`EditingDoc::unavailable_tables`], scanning only after a commit that may have changed
-    /// them; otherwise empty, as the last scan found. For the worker's notice, never for a save.
-    pub(crate) fn noticed_unavailable_tables(&self) -> Vec<TableLocator> {
-        if !self.unavailable_tables_dirty.load(Ordering::Relaxed) {
-            return Vec::new();
-        }
-        self.unavailable_tables().unwrap_or_default()
     }
 }
 
@@ -147,7 +115,6 @@ mod tests {
         let expected = Some(vec![TableLocator::new("body", 0)]);
         assert_eq!(a.unavailable_tables(), expected);
         assert_eq!(b.unavailable_tables(), expected);
-        assert_eq!(a.noticed_unavailable_tables(), expected.clone().unwrap());
         let late = open(70);
         late.apply_update_v1(&a.encode_state_as_update_v1())
             .unwrap();
@@ -156,10 +123,6 @@ mod tests {
         exchange(&a, &b);
         assert_eq!(a.unavailable_tables(), none);
         assert_eq!(b.unavailable_tables(), none);
-        assert!(
-            !a.unavailable_tables_dirty
-                .load(std::sync::atomic::Ordering::Relaxed)
-        );
     }
 
     #[test]

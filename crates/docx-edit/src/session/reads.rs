@@ -215,14 +215,6 @@ impl EditSessionCore {
         json!({ "revision": revision, "stories": stories }).to_string()
     }
 
-    /// `[{"story","tableIndex"}]`: the reachable tables that lost their payload to a concurrent
-    /// undo, scanned only after a commit that may have changed them. Internal: the worker reads
-    /// it for its notice; saves scan the stories themselves.
-    pub fn unavailable_tables(&self) -> String {
-        serde_json::to_string(&self.engine.doc().noticed_unavailable_tables())
-            .unwrap_or_else(|_| "[]".to_owned())
-    }
-
     /// `[{"story","tableIndex"}]` from a full walk of `roots_json` (a JSON array of root story
     /// ids), or `null` when a walk cannot finish. Internal: the save gate's scan.
     pub fn unavailable_tables_from(&self, roots_json: &str) -> EngineResult<String> {

@@ -1393,11 +1393,6 @@ export class EditSession {
      */
     track_undo(): void;
     /**
-     * `[{"story","tableIndex"}]`: the tables that lost their payload to a concurrent undo.
-     * @internal
-     */
-    unavailable_tables(): string;
-    /**
      * Current undo grouping policy.
      */
     undo_capture_mode(): string;

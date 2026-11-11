@@ -3124,12 +3124,6 @@ impl EditSession {
         Ok(self.document(env)?.story_ids())
     }
 
-    #[napi(catch_unwind, js_name = "unavailable_tables")]
-    pub fn unavailable_tables(&self, env: Env) -> Result<String> {
-        let _call = EngineCall::new(env);
-        Ok(self.document(env)?.unavailable_tables())
-    }
-
     #[napi(catch_unwind, js_name = "unavailable_tables_from")]
     pub fn unavailable_tables_from(&self, env: Env, roots_json: String) -> Result<String> {
         let _call = EngineCall::new(env);

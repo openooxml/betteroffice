@@ -1693,8 +1693,9 @@ test('native and wasm refuse table operations on a table that crossing undos emp
     }
     const payload = JSON.parse(expected.table_payload('body', 0)!) as Record<string, unknown>;
     expect(['tblPr', 'grid', 'rows'].filter((key) => key in payload)).toEqual([]);
-    expect(JSON.parse(actual.unavailable_tables())).toEqual([{ story: 'body', tableIndex: 0 }]);
-    expect(actual.unavailable_tables()).toBe(expected.unavailable_tables());
+    const body = JSON.stringify(['body']);
+    expect(JSON.parse(actual.unavailable_tables_from(body))).toEqual([{ story: 'body', tableIndex: 0 }]);
+    expect(actual.unavailable_tables_from(body)).toBe(expected.unavailable_tables_from(body));
 
     const range = (anchor: string, head = anchor) => JSON.stringify({ anchor: JSON.parse(anchor), head: JSON.parse(head) });
     const ops: Array<[string, (session: Session) => unknown]> = [
@@ -1718,7 +1719,7 @@ test('native and wasm refuse table operations on a table that crossing undos emp
 
     for (const session of [expected, actual as unknown as Session]) {
       session.delete_table(JSON.stringify({ story: 'body', tableIndex: 0 }));
-      expect(session.unavailable_tables()).toBe('[]');
+      expect(session.unavailable_tables_from(body)).toBe('[]');
     }
     expect(actual.story_ids()).toEqual(expected.story_ids());
   } finally {
@@ -1783,10 +1784,7 @@ test('native and wasm find a table crossing undos emptied in a header, a footnot
         session.open_docx(bytes, false, 'opening');
         session.apply_update(a.encode_state());
       }
-      const found = JSON.parse(expected.unavailable_tables()) as Array<{ story: string; tableIndex: number }>;
-      expect(found, story).toContainEqual({ story, tableIndex: 0 });
-      expect(actual.unavailable_tables()).toBe(expected.unavailable_tables());
-      const roots = JSON.stringify(expected.story_ids().filter((id) => id === 'body' || id.startsWith('hf:') || id.startsWith('fn:')));
+      const roots = JSON.stringify(['body', 'hf:top', ...expected.story_ids().filter((id) => /^fn:\d+$/.test(id))]);
       expect(JSON.parse(expected.unavailable_tables_from(roots))).toContainEqual({ story, tableIndex: 0 });
       expect(actual.unavailable_tables_from(roots)).toBe(expected.unavailable_tables_from(roots));
     } finally {
