@@ -341,6 +341,7 @@ name = "betteroffice-pptx-native"
 version = "0.5.1"
 dependencies = [
  "betteroffice-fonts",
+ "betteroffice-ooxml-font-preflight",
  "betteroffice-pptx-edit",
  "betteroffice-pptx-engine",
  "getrandom 0.3.4",
@@ -580,6 +581,7 @@ name = "betteroffice-xlsx-native"
 version = "0.5.1"
 dependencies = [
  "betteroffice-fonts",
+ "betteroffice-ooxml-font-preflight",
  "betteroffice-xlsx-engine",
  "napi",
  "napi-build",

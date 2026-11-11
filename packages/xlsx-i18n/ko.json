@@ -151,7 +151,7 @@
       "commandFailed": "변경 내용을 적용할 수 없습니다.",
       "commandRefused": "명령이 거부되었습니다",
       "permissionDenied": "호스트 애플리케이션이 이 추가 기능의 명령 사용을 허용하지 않았습니다.",
-      "unsupportedPolicy": "추가 기능은 아직 이 명령을 실행할 수 없습니다. 대신 편집 배치를 사용하세요.",
+      "unsupportedPolicy": "이 명령을 실행하려면 플러그인 자체 UI에서 사용자 동작이 필요합니다.",
       "pluginUnavailable": "추가 기능이 더 이상 활성화되어 있지 않습니다.",
       "aborted": "명령이 실행되기 전에 추가 기능 작업이 취소되었습니다.",
       "clipboardUnavailable": "이 브라우저에서는 메뉴에서 붙여넣을 수 없습니다. 바로 가기 키를 사용하세요.",

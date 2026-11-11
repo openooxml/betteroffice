@@ -518,6 +518,216 @@ pub(crate) fn parse_inline_format_delta(
     })
 }
 
+const UNDERLINE_STYLES: &[&str] = &[
+    "single",
+    "words",
+    "double",
+    "thick",
+    "dotted",
+    "dottedHeavy",
+    "dash",
+    "dashedHeavy",
+    "dashLong",
+    "dashLongHeavy",
+    "dotDash",
+    "dashDotHeavy",
+    "dotDotDash",
+    "dashDotDotHeavy",
+    "wave",
+    "wavyHeavy",
+    "wavyDouble",
+];
+
+const HIGHLIGHT_NAMES: &[&str] = &[
+    "black",
+    "blue",
+    "cyan",
+    "green",
+    "magenta",
+    "red",
+    "yellow",
+    "white",
+    "darkBlue",
+    "darkCyan",
+    "darkGreen",
+    "darkMagenta",
+    "darkRed",
+    "darkYellow",
+    "darkGray",
+    "lightGray",
+];
+
+const THEME_COLORS: &[&str] = &[
+    "dark1",
+    "light1",
+    "dark2",
+    "light2",
+    "accent1",
+    "accent2",
+    "accent3",
+    "accent4",
+    "accent5",
+    "accent6",
+    "hyperlink",
+    "followedHyperlink",
+    "background1",
+    "text1",
+    "background2",
+    "text2",
+];
+
+/// Lowers a host edit run's `marks` to the attributes the formatting commands write, in key
+/// order; `Any::Null` removes a key. Refuses unknown marks and unsupported values.
+pub(crate) fn text_marks_overlay(
+    marks: &serde_json::Map<String, Value>,
+) -> Result<Vec<(String, Any)>, String> {
+    let flag = |key: &str, value: &Value| match value {
+        Value::Bool(true) => Ok(Patch::Set(true)),
+        Value::Bool(false) => Ok(Patch::Clear),
+        _ => Err(format!("mark {key:?} must be a boolean")),
+    };
+    let mut delta = InlineFormatDelta::default();
+    let mut vertical = None;
+    for (key, value) in marks {
+        match key.as_str() {
+            "bold" => delta.bold = flag(key, value)?,
+            "italic" => delta.italic = flag(key, value)?,
+            "underline" => {
+                delta.underline = match value {
+                    Value::Bool(true) => Patch::Set(UnderlinePatch::default()),
+                    Value::Bool(false) => Patch::Clear,
+                    Value::String(style) if style == "none" => Patch::Clear,
+                    Value::String(style) if UNDERLINE_STYLES.contains(&style.as_str()) => {
+                        Patch::Set(UnderlinePatch {
+                            style: Some(style.clone()),
+                            color: None,
+                        })
+                    }
+                    _ => {
+                        return Err(
+                            "mark \"underline\" must be a boolean or a Word underline style"
+                                .to_owned(),
+                        );
+                    }
+                }
+            }
+            "strike" => {
+                delta.strike = match value
+                    .as_bool()
+                    .map(|on| if on { "sngStrike" } else { "noStrike" })
+                    .or(value.as_str())
+                {
+                    Some("sngStrike") => Patch::Set(StrikePatch { double: false }),
+                    Some("dblStrike") => Patch::Set(StrikePatch { double: true }),
+                    Some("noStrike") => Patch::Clear,
+                    _ => {
+                        return Err("mark \"strike\" must be a boolean, \"sngStrike\", \"dblStrike\" or \"noStrike\"".to_owned());
+                    }
+                }
+            }
+            "verticalAlign" => {
+                vertical = match value.as_str() {
+                    Some(align @ ("superscript" | "subscript")) => Some(align),
+                    Some("baseline") => {
+                        return Err(
+                            "mark \"verticalAlign\" \"baseline\" is not supported yet".to_owned()
+                        );
+                    }
+                    _ => {
+                        return Err(
+                            "mark \"verticalAlign\" must be \"superscript\" or \"subscript\""
+                                .to_owned(),
+                        );
+                    }
+                }
+            }
+            "color" => {
+                delta.color = match value {
+                    Value::String(rgb)
+                        if rgb.len() == 6 && rgb.bytes().all(|byte| byte.is_ascii_hexdigit()) =>
+                    {
+                        Patch::Set(ColorPatch::Rgb(rgb.clone()))
+                    }
+                    Value::Object(object) if object.len() == 1 => match object.get("themeColor") {
+                        Some(Value::String(theme)) if THEME_COLORS.contains(&theme.as_str()) => {
+                            Patch::Set(ColorPatch::Theme(theme.clone()))
+                        }
+                        _ => return Err("mark \"color\" has an unknown theme colour".to_owned()),
+                    },
+                    _ => {
+                        return Err(
+                            "mark \"color\" must be six hex digits or {\"themeColor\"}".to_owned()
+                        );
+                    }
+                }
+            }
+            "highlight" => {
+                delta.highlight = match value.as_str() {
+                    Some("none") => {
+                        return Err("mark \"highlight\" \"none\" is not supported yet".to_owned());
+                    }
+                    Some(name) if HIGHLIGHT_NAMES.contains(&name) => Patch::Set(name.to_owned()),
+                    _ => {
+                        return Err(
+                            "mark \"highlight\" must be a Word highlight colour name".to_owned()
+                        );
+                    }
+                }
+            }
+            "fontSizePt" => {
+                delta.font_size = match value.as_f64() {
+                    Some(points)
+                        if (1.0..=1638.0).contains(&points) && (points * 2.0).fract() == 0.0 =>
+                    {
+                        Patch::Set(points)
+                    }
+                    _ => {
+                        return Err(
+                            "mark \"fontSizePt\" must be 1 to 1638 points in half-point steps"
+                                .to_owned(),
+                        );
+                    }
+                }
+            }
+            "fontFamily" => {
+                delta.font_family = match value.as_str() {
+                    Some(name)
+                        if !name.trim().is_empty()
+                            && name.chars().count() <= 255
+                            && !name.chars().any(char::is_control) =>
+                    {
+                        Patch::Set(FontFamilyPatch {
+                            ascii: name.to_owned(),
+                            h_ansi: Some(name.to_owned()),
+                        })
+                    }
+                    _ => return Err("mark \"fontFamily\" must be a font name".to_owned()),
+                }
+            }
+            other => return Err(format!("unknown mark {other:?}")),
+        }
+    }
+    let mut overlay: Vec<(String, Any)> = delta
+        .to_attrs()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value))
+        .collect();
+    if let Some(align) = vertical {
+        let on = |mark: &str| {
+            if align == mark {
+                Any::Bool(true)
+            } else {
+                Any::Null
+            }
+        };
+        overlay.push(("superscript".to_owned(), on("superscript")));
+        overlay.push(("subscript".to_owned(), on("subscript")));
+    }
+    overlay.sort_by(|(left, _), (right, _)| left.cmp(right));
+    Ok(overlay)
+}
+
 /// Formatting policy for [`EditingDoc::insert_text`].
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum FormatPolicy {

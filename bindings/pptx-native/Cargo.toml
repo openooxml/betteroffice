@@ -17,6 +17,7 @@ mimalloc = ["dep:mimalloc"]
 test-hooks = []
 
 [dependencies]
+ooxml-font-preflight = { package = "betteroffice-ooxml-font-preflight", path = "../../crates/ooxml-font-preflight", default-features = false, features = ["pptx"] }
 mimalloc = { version = "0.1.52", optional = true, default-features = false, features = ["v2", "local_dynamic_tls"] }
 betteroffice-fonts = { path = "../../crates/betteroffice-fonts" }
 betteroffice-pptx-engine = { path = "../../crates/pptx-engine", features = ["raster", "fonts"] }

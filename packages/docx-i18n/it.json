@@ -864,7 +864,7 @@
       "targetChanged": "Il contenuto per cui questa azione è stata aperta è cambiato prima che potesse essere applicato.",
       "commandFailed": "Impossibile completare il comando.",
       "permissionDenied": "L'applicazione host non ha consentito a questo plug-in di usare questo comando.",
-      "unsupportedPolicy": "I plug-in non possono ancora eseguire questo comando. Usa invece un batch di modifiche.",
+      "unsupportedPolicy": "Questo comando richiede un'azione dell'utente nell'interfaccia del plug-in stesso.",
       "pluginUnavailable": "Il plug-in non è più attivo.",
       "aborted": "L'azione del plug-in è stata annullata prima dell'esecuzione del comando."
     }

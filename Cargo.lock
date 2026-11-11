@@ -409,6 +409,7 @@ version = "0.0.0"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-fonts",
+ "betteroffice-ooxml-font-preflight",
  "betteroffice-opc",
  "betteroffice-pptx-edit",
  "betteroffice-pptx-parse",
@@ -673,6 +674,8 @@ dependencies = [
 name = "betteroffice-xlsx-engine"
 version = "0.0.0"
 dependencies = [
+ "betteroffice-ooxml-font-preflight",
+ "betteroffice-ooxml-text",
  "betteroffice-opc",
  "betteroffice-xlsx",
  "betteroffice-xlsx-model",
