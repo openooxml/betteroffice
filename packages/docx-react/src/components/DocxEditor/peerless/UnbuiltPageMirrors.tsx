@@ -9,7 +9,7 @@ type Page = PeerlessFrameGeometry['pages'][number];
 export type ReadPageTexts = (pages: number[], stamp: MirrorStamp) => Promise<PageTexts | null>;
 const BLOCKS = 'p';
 const normalize = (text: string | null) => (text ?? '').replace(/\s+/g, ' ').trim();
-type FocusedBlock = { pageIndex: number; ordinal: number; text: string; active: Element | null; selection: boolean };
+type FocusedBlock = { pageIndex: number; ordinal: number; paraId?: string; text: string; active: Element | null; selection: boolean };
 
 function focusMirrorBlock(element: HTMLElement, cleanups: Set<() => void>) {
   if (element.ownerDocument.activeElement === element) return;
@@ -40,6 +40,7 @@ export function buildUnbuiltMirrorSection(page: MirrorPageText, t: TFunction, ow
     block.style.margin = '0';
     block.tabIndex = -1;
     block.textContent = paragraph.text;
+    if (paragraph.paraId) block.dataset.paraId = paragraph.paraId;
     section.appendChild(block);
     nodes += 2 + Math.ceil(paragraph.text.length / LINE_CHARS);
   }
@@ -73,7 +74,7 @@ export const UnbuiltMirrorSection = memo(function UnbuiltMirrorSection({ page, v
   previous.page.bounds.x === next.page.bounds.x && previous.page.bounds.y === next.page.bounds.y &&
   previous.page.bounds.width === next.page.bounds.width && previous.page.bounds.height === next.page.bounds.height);
 
-export function useUnbuiltPageMirrors({ binding, geometry, center, enabled, read, blocked, navigate, column, t, mountedPages }: {
+export function useUnbuiltPageMirrors({ binding, geometry, center, enabled, read, blocked, navigate, column, t, mountedPages, fullMirror = true }: {
   binding: PeerlessEditSessionBinding;
   geometry: PeerlessFrameGeometry | null;
   mountedPages: readonly Page[];
@@ -84,10 +85,12 @@ export function useUnbuiltPageMirrors({ binding, geometry, center, enabled, read
   navigate(number: number): void;
   column: RefObject<HTMLDivElement | null>;
   t: TFunction;
+  /** Visible pages build the full mirror; false when they keep the text mirror. */
+  fullMirror?: boolean;
 }) {
   const [snapshot, setSnapshot] = useState<UnbuiltMirrorSnapshot<HTMLElement>>({ sections: [], ranges: [], nodeCount: 0 });
-  const latest = useRef({ read, blocked, navigate });
-  latest.current = { read, blocked, navigate };
+  const latest = useRef({ read, blocked, navigate, geometry, mountedPages });
+  latest.current = { read, blocked, navigate, geometry, mountedPages };
   const focused = useRef<FocusedBlock | null>(null);
   const parked = useRef<HTMLElement | null>(null);
   const focusCleanups = useRef(new Set<() => void>());
@@ -97,7 +100,7 @@ export function useUnbuiltPageMirrors({ binding, geometry, center, enabled, read
     const block = target.closest<HTMLElement>(BLOCKS);
     if (!block) return;
     const paragraphs = Array.from(section.querySelectorAll<HTMLElement>(BLOCKS)).filter((paragraph) => normalize(paragraph.textContent));
-    focused.current = { pageIndex: Number(section.dataset.docxUnbuiltPage), ordinal: paragraphs.indexOf(block), text: normalize(block.textContent),
+    focused.current = { pageIndex: Number(section.dataset.docxUnbuiltPage), ordinal: paragraphs.indexOf(block), paraId: block.dataset.paraId, text: normalize(block.textContent),
       active: section.ownerDocument.activeElement, selection };
     parked.current = null;
   }, []);
@@ -200,33 +203,46 @@ export function useUnbuiltPageMirrors({ binding, geometry, center, enabled, read
       }
       const mirrorHost = host.querySelector<HTMLElement>(`[data-page-index="${wanted.pageIndex}"] .canvas-page-mirror`);
       const root = mirrorHost?.firstElementChild as HTMLElement | null;
-      if (!root || !root.childNodes.length || geometry?.pages.find(({ page }) => page.pageIndex === wanted.pageIndex)?.displayPage?.unbuilt) {
-        if (wanted.selection) return false;
-        const target = mirrorHost ?? host;
-        parked.current = target;
-        focusMirrorBlock(target, focusCleanups.current);
-        return false;
-      }
-      const paragraphs = Array.from(root.querySelectorAll<HTMLElement>('[role="paragraph"], p'))
-        .map((element) => ({ element, text: normalize(element.textContent) })).filter(({ text }) => text);
-      const block = paragraphs.slice(Math.max(0, wanted.ordinal)).find(({ text }) => text === wanted.text)
-        ?? paragraphs.find(({ text }) => text === wanted.text);
-      if (wanted.selection) {
+      const entry = latest.current.geometry?.pages.find(({ page }) => page.pageIndex === wanted.pageIndex);
+      const mounted = !entry || latest.current.mountedPages.some(({ page }) => page.pageId === entry.page.pageId);
+      const chrome = mirrorHost?.dataset.pageChrome;
+      // A mounted page's text stand-in is replaced by its full mirror; a page outside the window keeps it.
+      const ready = chrome === 'chrome' || (chrome === 'fallback' && (!fullMirror || !mounted));
+      const paragraphs = root && ready ? Array.from(root.querySelectorAll<HTMLElement>('[role="paragraph"], p'))
+        .map((element) => ({ element, text: normalize(element.textContent) })).filter(({ text }) => text) : [];
+      // The page mirror is first built from the unbuilt page, an empty shell, and filled in place once the page is built.
+      const shown = entry?.displayPage;
+      const builtFrom = ready ? mirrorHost?.dataset.pageChromeBuilt : undefined;
+      const filled = builtFrom !== undefined && (!shown || (!shown.unbuilt && builtFrom === String(displayPageRevision(shown))));
+      const block = (wanted.paraId ? paragraphs.find(({ element }) => element.dataset.paraId === wanted.paraId) : undefined)
+        ?? paragraphs.slice(Math.max(0, wanted.ordinal)).find(({ text }) => text === wanted.text)
+        ?? paragraphs.find(({ text }) => text === wanted.text)
+        ?? (filled ? paragraphs[wanted.ordinal] ?? paragraphs[0] : undefined);
+      if (!block) {
+        const page = (ready ? root : null) ?? mirrorHost ?? host;
+        if (!filled) {
+          if (wanted.selection) return false;
+          parked.current = page;
+          focusMirrorBlock(page, focusCleanups.current);
+          return false;
+        }
+        if (!wanted.selection) focusMirrorBlock(page, focusCleanups.current);
+      } else if (wanted.selection) {
         const selection = host.ownerDocument.getSelection();
-        if (block && selection) {
+        if (selection) {
           const range = host.ownerDocument.createRange();
           range.selectNodeContents(block.element);
           selection.removeAllRanges();
           selection.addRange(range);
         }
-      } else focusMirrorBlock(block?.element ?? root, focusCleanups.current);
+      } else focusMirrorBlock(block.element, focusCleanups.current);
       focused.current = null;
       parked.current = null;
       return true;
     };
     if (handover()) return;
     const observer = new MutationObserver(() => { if (handover()) observer.disconnect(); });
-    observer.observe(host, { childList: true, subtree: true });
+    observer.observe(host, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-page-chrome', 'data-page-chrome-built'] });
     return () => observer.disconnect();
   });
   return useMemo(() => ({ snapshot, remember, navigate }), [snapshot, remember, navigate]);

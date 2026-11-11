@@ -23,6 +23,8 @@ export interface CanvasImageResolverOptions {
   mediaScope?: () => number;
   /** Maximum cached decoded bytes; defaults to 64 MiB. */
   maxCacheBytes?: number;
+  /** Told why a source resolved to nothing; with it set, an unreadable token resolves to null instead of a grey box. */
+  onUnavailable?: (relId: string, reason: 'missing' | 'decode-failed') => void;
 }
 
 const MEDIA_TOKEN = /^media:(0|[1-9]\d*)$/;
@@ -59,7 +61,12 @@ export function createCanvasImageResolver(
   options: CanvasImageResolverOptions = {}
 ): ImageResolver {
   const cache = new Map<string, CachedImage>();
-  const { media, mediaScope } = options;
+  const { media, mediaScope, onUnavailable } = options;
+  const unavailable = (relId: string, reason: 'missing' | 'decode-failed', token: boolean): CanvasImageSource | null => {
+    if (onUnavailable) onUnavailable(relId, reason);
+    else if (token) return missingMedia();
+    return null;
+  };
   const maxCacheBytes =
     options.maxCacheBytes !== undefined && Number.isFinite(options.maxCacheBytes)
       ? Math.max(0, options.maxCacheBytes)
@@ -70,7 +77,7 @@ export function createCanvasImageResolver(
     let blob: Blob | undefined;
     if (token) {
       const source = media?.(relId);
-      if (!source) return missingMedia();
+      if (!source) return unavailable(relId, 'missing', true);
       blob = new Blob([source.bytes as Uint8Array<ArrayBuffer>], { type: source.mimeType });
     }
     if (typeof Image === 'undefined') {
@@ -78,7 +85,7 @@ export function createCanvasImageResolver(
         const source = blob ?? (await (await fetch(relId)).blob());
         return await createImageBitmap(source);
       } catch {
-        return token ? missingMedia() : null;
+        return unavailable(relId, 'decode-failed', token);
       }
     }
     return new Promise<CanvasImageSource | null>((resolve) => {
@@ -89,7 +96,7 @@ export function createCanvasImageResolver(
         resolve(image);
       };
       img.onload = () => settle(img);
-      img.onerror = () => settle(token ? missingMedia() : null);
+      img.onerror = () => settle(unavailable(relId, 'decode-failed', token));
       img.src = url;
     });
   };

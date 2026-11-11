@@ -40,7 +40,10 @@ export const pptxExtras = {
 export const docxExtras = {
   functions: {},
   members: {
-    EditSession: { renderPngTarget: { reason: 'renders in the native rasterizer instead of the wasm canvas path', backs: 'renderPng' } },
+    EditSession: {
+      renderPngTarget: { reason: 'renders in the native rasterizer instead of the wasm canvas path', backs: 'renderPng' },
+      renderPngTargetReport: { reason: 'renderPngTarget plus the pictures it drew as placeholders, for the native PNG diagnostics', backs: 'renderPng' },
+    },
   },
 } satisfies ExtraReasons<DocxNativeExtras>;
 

@@ -106,7 +106,7 @@ resolves one face per family, DOCX resolves a chain.
 Most embedded media arrives on the display list as a `data:` URL that
 `docx-parse` already resolved against its owning part, and needs nothing
 further. `register_image` supplies bytes keyed by owning part and relationship
-ID. `render_png` reports unresolved references in `skipped_images` and, by kind, the effects it could not draw yet in `skipped_effects`. Missing font
+ID. `render_png` draws a placeholder for each image it cannot draw and counts them in `skipped_images` and, by kind, the effects it could not draw yet in `skipped_effects`. Missing font
 chains return an error.
 
 ## Editing and layout

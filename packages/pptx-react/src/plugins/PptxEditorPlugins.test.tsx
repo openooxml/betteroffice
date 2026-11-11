@@ -1,6 +1,7 @@
+import { budgetedTest, pollUntil } from '../../../../shared/office-session/testing/loadBudget';
 import { gestureFor, trackPluginGestures } from '../../../../shared/plugin-host/gesture';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, describe, expect, mock, spyOn, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, describe, expect, mock, spyOn } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -67,6 +68,7 @@ beforeAll(async () => {
   console.error = () => {};
   console.warn = () => {};
 }, 30_000);
+const test = budgetedTest();
 afterEach(cleanup);
 afterAll(async () => {
   await new Promise((done) => setTimeout(done, 50));
@@ -86,7 +88,7 @@ async function settle(ms = 20) {
 }
 
 async function until(done: () => boolean) {
-  for (let attempt = 0; attempt < 300 && !done(); attempt += 1) await settle(10);
+  await pollUntil(done, settle);
   expect(done()).toBe(true);
 }
 

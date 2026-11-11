@@ -1,6 +1,7 @@
 import './peerlessTestCapabilities';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, mock, spyOn } from 'bun:test';
+import { budgetedTest, budgetedWaitFor } from '../../../../shared/office-session/testing/loadBudget';
 import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
 import { StrictMode } from 'react';
@@ -50,7 +51,9 @@ mock.module('./peerlessViewStore', () => ({
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
-const { act, cleanup, fireEvent, render, waitFor } = await import('@testing-library/react');
+const { act, cleanup, fireEvent, render, waitFor: waitForCondition } = await import('@testing-library/react');
+const waitFor = budgetedWaitFor(waitForCondition);
+const test = budgetedTest();
 const restorers: (() => void)[] = [];
 const file = new Uint8Array([1]);
 let paints: PeerlessConfirmedFrame[];

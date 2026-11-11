@@ -1,6 +1,7 @@
 import { FONT_FALLBACK_MESSAGE } from '../fontFaces';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';
+import { afterAll, afterEach, beforeEach, describe, expect, mock, spyOn } from 'bun:test';
+import { budgetedTest, budgetedWaitFor } from '../../../../shared/office-session/testing/loadBudget';
 import { readFile } from 'node:fs/promises';
 import * as pptx from '@betteroffice/pptx';
 import type { SlideDisplayList } from '@betteroffice/pptx';
@@ -17,7 +18,9 @@ import { frameImages } from './sessionPaint';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
-const { act, cleanup, fireEvent, render, waitFor } = await import('@testing-library/react');
+const { act, cleanup, fireEvent, render, waitFor: waitForCondition } = await import('@testing-library/react');
+const waitFor = budgetedWaitFor(waitForCondition);
+const it = budgetedTest();
 const file = new Uint8Array([1, 2, 3]);
 const restorers: (() => void)[] = [];
 let observed: HTMLElement[] = [];
