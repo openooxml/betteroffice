@@ -1,15 +1,14 @@
 import { fontUnavailable, pagePngRequest, type DocxPngOptions } from '../../../packages/docx/src/layout/render/png';
-import { PngExportError, type PngUnavailablePicture } from '../../../shared/office-session/pngExportError';
+import { PngExportError } from '../../../shared/office-session/pngExportError';
 import { DEFAULT_STRICT_PICTURES, strictPicturesError } from '../../../shared/office-session/strictPictures';
 import type { DocxPngEngine } from '../../../packages/docx/src/wasm/enginePng';
+import type { DocxNativeExtras } from '../../native-extras-types';
 
 export type { DocxPngEngine } from '../../../packages/docx/src/wasm/enginePng';
 
 export const engineKind: 'wasm' | 'native' = 'native';
 
-interface NativeSession {
-  renderPngTargetReport(displayListJson: string, targetJson: string, optionsJson: string): { png: Uint8Array; pictures: PngUnavailablePicture[] };
-}
+type NativeSession = DocxNativeExtras['members']['EditSession'];
 
 /**
  * Rasterizes the page's display list in the native engine on the calling

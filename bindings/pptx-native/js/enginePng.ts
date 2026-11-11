@@ -3,18 +3,19 @@ import { slidePngRequest } from '../../../packages/pptx/src/render/png';
 import type { PptxEnginePngOptions, PptxPngEngine } from '../../../packages/pptx/src/wasm/enginePng';
 import type { PptxFontFace } from '../../../packages/pptx/src/types';
 import { PptxRenderer } from './engine';
+import type { PptxNativeExtras } from '../../native-extras-types';
 
 export type { PptxEnginePngOptions, PptxPngEngine } from '../../../packages/pptx/src/wasm/enginePng';
 
 export const engineKind: 'wasm' | 'native' = 'native';
 
-interface NativeRenderer {
+interface NativeRendererBase {
   registerFont(family: string, bold: boolean, italic: boolean, bytes: Uint8Array): number;
   registerFallbackFont(family: string, bold: boolean, italic: boolean, bytes: Uint8Array): number;
-  registerDefaultFonts(document: unknown, slide: number): void;
-  renderPngTarget(document: unknown, targetJson: string, optionsJson: string): Uint8Array;
   free(): void;
 }
+
+type NativeRenderer = NativeRendererBase & PptxNativeExtras['members']['PptxRenderer'];
 
 /** One export renderer per document, so `layoutSlide` keeps measuring with the faces the caller registered. */
 const exporters = new WeakMap<object, { renderer: NativeRenderer; faces: number }>();

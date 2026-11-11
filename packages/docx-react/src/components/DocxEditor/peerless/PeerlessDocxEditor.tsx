@@ -264,8 +264,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     navigation.scrollToBookmark(name).then(() => focus(), error => reportRecoverableError(error instanceof Error ? error : new Error(String(error))));
   };
   const inputCommand = useRef<ReturnType<typeof useWorkerContextMenu>['input']>(async () => ({ ok: false, failure: { code: 'editor-unavailable', message: '' } }));
-  useLayoutEffect(() => controller.update({ ...controllerOptions, imagePropertiesAvailable: propertyDialogs.imagePropertiesAvailable, image: propertyDialogs.imageState, onImageWrap: propertyDialogs.applyImageWrap, onImageTransform: propertyDialogs.applyImageTransform, search: search.host, pickImage: fileIO.pickImage, openSplitCell: propertyDialogs.openSplitCell, openTableProperties: propertyDialogs.openTableProperties, perform: async (id) => {
-    if (id === 'cut' || id === 'copy' || id === 'paste' || id === 'pasteAsPlainText' || id === 'selectAll') return inputCommand.current(id);
+  useLayoutEffect(() => controller.update({ ...controllerOptions, imagePropertiesAvailable: propertyDialogs.imagePropertiesAvailable, image: propertyDialogs.imageState, onImageWrap: propertyDialogs.applyImageWrap, onImageTransform: propertyDialogs.applyImageTransform, search: search.host, pickImage: fileIO.pickImage, openSplitCell: propertyDialogs.openSplitCell, openTableProperties: propertyDialogs.openTableProperties, perform: async (id, _args, clipboardText) => {
+    if (id === 'cut' || id === 'copy' || id === 'paste' || id === 'pasteAsPlainText' || id === 'selectAll') return inputCommand.current(id, clipboardText);
     if (id === 'pageSetup') return propertyDialogs.openPageSetup();
     if (id === 'paragraphSpacingDialog') return propertyDialogs.openParagraphSpacing();
     if (id === 'watermark') return propertyDialogs.openWatermark();

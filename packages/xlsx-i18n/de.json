@@ -151,7 +151,7 @@
       "commandFailed": "Die Änderung konnte nicht angewendet werden.",
       "commandRefused": "Der Befehl wurde abgelehnt.",
       "permissionDenied": "Die Host-Anwendung hat diesem Plugin diesen Befehl nicht erlaubt.",
-      "unsupportedPolicy": "Plugins können diesen Befehl noch nicht ausführen. Verwenden Sie stattdessen einen Bearbeitungsstapel.",
+      "unsupportedPolicy": "Dieser Befehl erfordert eine Benutzeraktion in der eigenen Oberfläche des Plugins.",
       "pluginUnavailable": "Das Plugin ist nicht mehr aktiv.",
       "aborted": "Die Plugin-Aktion wurde abgebrochen, bevor der Befehl ausgeführt wurde.",
       "clipboardUnavailable": "Dieser Browser erlaubt kein Einfügen über ein Menü. Verwenden Sie die Tastenkombination.",
