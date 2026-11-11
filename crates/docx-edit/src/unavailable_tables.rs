@@ -66,24 +66,25 @@ pub(crate) fn lacks_payload(has: impl Fn(&str) -> bool) -> bool {
 
 /// Whether the engine minted `story` as a root, by the id it gave it: `body`, a header or footer
 /// `hf:<relationship id>` ([`crate::header_footer::story_id`]), or a note `fn:<id>` / `en:<id>`.
-/// Relationship and note ids pass through as written, so they may hold ':'; a story below a root
-/// is told apart by the segments a container mints for its children: a table's `t<n>` followed
-/// by a cell's `r<n>c<n>` (with an edit's `~<client>`), a block control's `sdt<n>`, or a repeated
-/// item's `repeat`. Laid out as before whatever references it, and never hidden.
-pub(crate) fn is_root(story: &str) -> bool {
+/// Relationship and note ids pass through as written, so they may hold ':' and even look like a
+/// child's. A story below a root is the one whose id is a live story's id followed by the
+/// segments a container mints for its children ([`container_parent`]); any other id with a root
+/// prefix is a root. `live` tells whether a story exists. Laid out as before whatever references
+/// it, and never hidden.
+pub(crate) fn is_root(story: &str, live: impl Fn(&str) -> bool) -> bool {
     if story == "body" {
         return true;
     }
-    let Some(id) = ["hf:", "fn:", "en:"]
+    ["hf:", "fn:", "en:"]
         .iter()
         .find_map(|prefix| story.strip_prefix(prefix))
-    else {
-        return false;
-    };
-    !id.is_empty() && !names_a_contained_story(id)
+        .is_some_and(|id| !id.is_empty() && !container_parent(story).is_some_and(live))
 }
 
-fn names_a_contained_story(id: &str) -> bool {
+/// The story whose container minted `story` for a child, by the segments it appends: a
+/// table's `t<n>` and a cell's `r<n>c<n>` (with an edit's `~<client>`), a block control's
+/// `sdt<n>`, or a repeated item's `repeat:<n>`.
+fn container_parent(story: &str) -> Option<&str> {
     let digits = |text: &str| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
     let cell = |segment: &str| {
         let segment = match segment.split_once('~') {
@@ -96,15 +97,17 @@ fn names_a_contained_story(id: &str) -> bool {
             .and_then(|rest| rest.split_once('c'))
             .is_some_and(|(row, column)| digits(row) && digits(column))
     };
-    let segments: Vec<&str> = id.split(':').collect();
-    let table_cell = segments
-        .windows(2)
-        .any(|pair| pair[0].strip_prefix('t').is_some_and(digits) && cell(pair[1]));
-    let control = segments
-        .iter()
-        .skip(1)
-        .any(|segment| *segment == "repeat" || segment.strip_prefix("sdt").is_some_and(digits));
-    table_cell || control
+    let (head, last) = story.rsplit_once(':')?;
+    if last.strip_prefix("sdt").is_some_and(digits) {
+        return Some(head);
+    }
+    let (parent, before) = head.rsplit_once(':')?;
+    if (cell(last) && before.strip_prefix('t').is_some_and(digits))
+        || (before == "repeat" && digits(last))
+    {
+        return Some(parent);
+    }
+    None
 }
 
 impl EditingDoc {
@@ -155,9 +158,13 @@ impl EditingDoc {
         let Some(stories) = txn.get_map(crate::STORIES) else {
             return Vec::new();
         };
-        let mut roots: Vec<String> = crate::live_stories(&stories, &txn)
+        let live: HashSet<String> = crate::live_stories(&stories, &txn)
             .map(|(id, _)| id.to_owned())
-            .filter(|id| is_root(id))
+            .collect();
+        let mut roots: Vec<String> = live
+            .iter()
+            .filter(|id| is_root(id, |story| live.contains(story)))
+            .cloned()
             .collect();
         roots.sort();
         roots
@@ -489,6 +496,17 @@ mod tests {
             (ContentControl, "en:2:repeat:4", false),
             (Other, "host", false),
             (Other, "hf:rId9", true),
+            (Header, "hf:x:t0:r0c0", true),
+            (Footer, "hf:y:sdt0", true),
+            (Endnote, "en:z:repeat:1", true),
+        ];
+        let live = [
+            "body",
+            header.as_str(),
+            odd_header.as_str(),
+            "fn:1",
+            "fn:1:t0:r0c0",
+            "en:2",
         ];
         for kind in EVERY_KIND {
             assert!(
@@ -497,7 +515,8 @@ mod tests {
             );
         }
         for (kind, story, root) in table {
-            assert_eq!(super::is_root(story), root, "{kind:?} {story}");
+            let exists = |id: &str| live.contains(&id);
+            assert_eq!(super::is_root(story, exists), root, "{kind:?} {story}");
         }
     }
 
@@ -594,7 +613,9 @@ mod tests {
         exchange(&doc, &peer);
 
         let mut minted = Vec::new();
-        for info in doc.list_stories().stories {
+        let stories = doc.list_stories().stories;
+        let exists = |id: &str| stories.iter().any(|info| info.story == id);
+        for info in &stories {
             let root = matches!(
                 info.kind,
                 StoryInfoKind::Body
@@ -603,11 +624,12 @@ mod tests {
                     | StoryInfoKind::Footnote
                     | StoryInfoKind::Endnote
             );
+            let recognised = super::is_root(&info.story, exists);
             if root || info.story.starts_with("hf:") {
-                assert!(super::is_root(&info.story), "{:?} {}", info.kind, info.story);
-                minted.push(info.story);
+                assert!(recognised, "{:?} {}", info.kind, info.story);
+                minted.push(info.story.clone());
             } else {
-                assert!(!super::is_root(&info.story), "{:?} {}", info.kind, info.story);
+                assert!(!recognised, "{:?} {}", info.kind, info.story);
             }
         }
         for expected in [
@@ -788,10 +810,11 @@ mod tests {
 
     #[test]
     fn a_note_cell_whose_table_lost_its_rows_is_not_a_root() {
-        assert!(super::is_root("fn:1"));
-        assert!(super::is_root("en:-1"));
-        assert!(!super::is_root("fn:1:t0:r0c0"));
-        assert!(!super::is_root("fn:"));
+        let exists = |id: &str| id == "fn:1";
+        assert!(super::is_root("fn:1", exists));
+        assert!(super::is_root("en:-1", exists));
+        assert!(!super::is_root("fn:1:t0:r0c0", exists));
+        assert!(!super::is_root("fn:", exists));
         let doc = EditingDoc::new(80);
         doc.create_story("body", "Hello", "Normal", "left")
             .unwrap();
