@@ -3,4 +3,4 @@
 '@betteroffice/fonts': minor
 ---
 
-Without `fontProvider`, PNG export uses the complete bundled fonts on both engines. On the native engine, an unloadable installed Latin or international face rejects with `font-unavailable` instead of being skipped. Aborted exports reject at once, not after font loads. Passing `fontProvider` keeps the old behaviour.
+Without `fontProvider`, PNG export uses the complete bundled fonts on both engines, native included: an installed Latin or international face that cannot load rejects with `font-unavailable` instead of being skipped. An aborted export rejects at once. Passing `fontProvider` keeps the old behaviour.
