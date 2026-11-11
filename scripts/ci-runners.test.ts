@@ -181,9 +181,19 @@ const routers = jobs.filter(({ id }) => id === 'route');
 const groupsOf = (router: (typeof jobs)[number]) =>
   parseGroups(router.job.steps.find((step: any) => step.id === 'route').env.ROUTE_GROUPS) as { name: string; slots: number }[];
 const everyGroup = Object.fromEntries(routers.flatMap((router) => groupsOf(router).map(({ name }) => [name, LABEL])));
+const runSteps = (job: any): string[] => (job.steps ?? []).map((step: any) => String(step.run ?? '')).filter(Boolean);
+const SYSTEM_PACKAGES = /\bapt(-get)?\b|\binstall-deps\b|--with-deps\b/;
+const installsSystemPackages = (job: any) =>
+  runSteps(job).some(
+    (run) =>
+      SYSTEM_PACKAGES.test(run) ||
+      [...run.matchAll(/\bscripts\/[\w./-]+\.sh\b/g)].some(([script]) =>
+        SYSTEM_PACKAGES.test(readFileSync(new URL(`../${script}`, import.meta.url), 'utf8'))
+      )
+  );
 
 describe('CI runner routing', () => {
-  test('with nothing routed, every CI and End-to-end Linux job but the routers, the two shortest and the timings upload runs on its kyora class', () => {
+  test('with nothing routed, every CI and End-to-end Linux job but the routers, the audit, the two native jobs and the timings upload runs on its kyora class', () => {
     expect(Object.fromEntries(kyoraJobs.map(({ name, runners }) => [name, runners['push to main'].unset]))).toEqual({
       'ci.yml packages': ['kyora-4x8'],
       'ci.yml package-tests': ['kyora-8x8'],
@@ -276,7 +286,40 @@ describe('CI runner routing', () => {
         );
       }
       for (const event of UNTRUSTED) {
-        expect(entry.runsOn(EVENTS[event], {}, everyGroup), `${entry.name}: ${event}`).toEqual(['ubuntu-latest']);
+        expect(entry.runsOn(EVENTS[event], {}, everyGroup), `${entry.name}: ${event}`).toEqual([
+          installsSystemPackages(entry.job) ? 'ubuntu-24.04' : 'ubuntu-latest',
+        ]);
+      }
+    }
+  });
+
+  test('Playwright installs browsers without system packages, which only a separate retried install-deps step adds', () => {
+    const installers = jobs.filter(({ job }) => runSteps(job).some((run) => /\bplaywright install-deps\b/.test(run)));
+    expect(installers.map(({ name }) => name).sort()).toEqual(['e2e.yml browser', 'visual-fidelity.yml measure']);
+    for (const { name, job } of jobs) {
+      for (const run of runSteps(job)) {
+        expect(run, name).not.toMatch(/--with-deps\b/);
+        if (/\bplaywright install-deps\b/.test(run)) {
+          expect(run, name).not.toMatch(/\bplaywright install(?!-deps)\b/);
+          expect(run, name).toMatch(/for attempt in 1 2 3\b/);
+          expect(run, name).toMatch(/\btimeout 240 bunx playwright install-deps chromium\b/);
+        }
+      }
+    }
+  });
+
+  test('no job that installs system packages runs on a floating -latest GitHub-hosted image', () => {
+    expect(LABEL).not.toMatch(/-latest$/);
+    const installers = jobs.filter(({ job }) => installsSystemPackages(job));
+    expect(installers.length).toBeGreaterThan(0);
+    for (const { name, runsOn } of installers) {
+      for (const [event, github] of Object.entries(EVENTS)) {
+        for (const vars of Object.values(VARIABLES)) {
+          for (const outputs of [{}, everyGroup]) {
+            const labels = runsOn(github, vars, outputs).filter((label) => label !== vars.BO_CI_RUNNER);
+            expect(labels.filter((label) => /-latest$/.test(label)), `${name}: ${event}`).toEqual([]);
+          }
+        }
       }
     }
   });
