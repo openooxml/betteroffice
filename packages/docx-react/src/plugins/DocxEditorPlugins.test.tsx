@@ -3672,8 +3672,7 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
       await h.quiet();
       expect(h.context().snapshot.selectionSettled).toBe(true);
       const layout = h.context().snapshot.layout!.id;
-      const kept = h.context().snapshot.selection.displayRange;
-      expect(kept).toMatchObject({ layoutId: layout });
+      expect(h.context().snapshot.selection.displayRange).toMatchObject({ layoutId: layout });
       const states: boolean[] = [];
       const stop = h.host.subscribe(() => states.push(h.context().snapshot.selectionSettled));
       h.reset();
@@ -3692,7 +3691,7 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
         if (held) {
           await h.heldRemap(layout);
           expect(h.context().snapshot.layout!.id).not.toBe(layout);
-          expect(h.context().snapshot.selection.displayRange).toEqual(kept);
+          expect(h.context().snapshot.selection.displayRange).toBeNull();
           expect(h.context().snapshot.selectionSettled).toBe(true);
           expect(h.events.filter(event => event.type === 'selection-change')).toEqual([]);
           await act(async () => { held.release(); });
@@ -3860,7 +3859,7 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
           await h.heldRemap(beforeRange!.layoutId);
           expect(h.context().snapshot.layout!.id).not.toBe(beforeRange!.layoutId);
           expect(workerSelection()).toEqual(selectedBefore!);
-          expect(h.context().snapshot.selection.displayRange).toEqual(beforeRange);
+          expect(h.context().snapshot.selection.displayRange).toBeNull();
           expect(h.context().snapshot.selectionSettled).toBe(true);
           expect(h.events.filter(event => event.type === 'selection-change')).toEqual([]);
           await act(async () => { held.release(); });

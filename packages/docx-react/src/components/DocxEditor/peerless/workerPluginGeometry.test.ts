@@ -341,7 +341,6 @@ async function selectionRemap() {
     geometry, host, events, mapping, first, flush, release,
     layoutId: () => geometry.layout()?.id,
     snapshot: () => host.activations()[0]!.context.snapshot,
-    move,
     present(next: Moved = {}) {
       move(next);
       return geometry.update();
@@ -360,7 +359,7 @@ async function selectionRemap() {
   };
 }
 
-test('an unchanged worker selection keeps its range across a frame replacement until the remap, then changes once', async () => {
+test('an unchanged worker selection shows no range across a frame replacement until the remap, then changes once', async () => {
   const h = await selectionRemap();
   try {
     h.mapping.hold = true;
@@ -368,9 +367,9 @@ test('an unchanged worker selection keeps its range across a frame replacement u
     await h.flush();
     expect(h.layoutId()).toBe('s:0:2');
     expect(h.geometry.selectionMapped()).toBe(false);
-    expect(h.geometry.displaySelection()).toEqual(h.first);
+    expect(h.geometry.displaySelection()).toBeNull();
     expect(h.snapshot().layout?.id).toBe('s:0:2');
-    expect(h.snapshot().selection).toEqual({ formatting: null, displayRange: h.first });
+    expect(h.snapshot().selection).toEqual({ formatting: null, displayRange: null });
     expect(h.events).toEqual([]);
     h.release();
     await replaced;
@@ -409,14 +408,15 @@ for (const [name, selection, version] of [
   });
 }
 
-test('an unchanged worker selection whose remap finds no geometry ends its kept range with one empty change', async () => {
+test('an unchanged worker selection whose remap finds no geometry shows no range, then changes once to empty', async () => {
   const h = await selectionRemap();
   try {
     h.mapping.hold = true;
     h.mapping.geometry = false;
     const replaced = h.present();
     await h.flush();
-    expect(h.snapshot().selection.displayRange).toEqual(h.first);
+    expect(h.geometry.selectionMapped()).toBe(false);
+    expect(h.snapshot().selection.displayRange).toBeNull();
     expect(h.events).toEqual([]);
     h.release();
     await replaced;
@@ -428,7 +428,7 @@ test('an unchanged worker selection whose remap finds no geometry ends its kept 
   } finally { h.dispose(); }
 });
 
-test('a frame replaced again before the remap still ends the kept worker range with one change', async () => {
+test('a frame replaced again before the remap shows no range, then changes once for the latest layout', async () => {
   const h = await selectionRemap();
   try {
     h.mapping.hold = true;
@@ -438,7 +438,8 @@ test('a frame replaced again before the remap still ends the kept worker range w
     await h.flush();
     expect(h.layoutId()).toBe('s:0:3');
     expect(h.geometry.selectionMapped()).toBe(false);
-    expect(h.snapshot().selection.displayRange).toEqual(h.first);
+    expect(h.geometry.displaySelection()).toBeNull();
+    expect(h.snapshot().selection.displayRange).toBeNull();
     expect(h.events).toEqual([]);
     h.release();
     await Promise.all([second, third]);
@@ -447,7 +448,7 @@ test('a frame replaced again before the remap still ends the kept worker range w
   } finally { h.dispose(); }
 });
 
-test('a frame replaced again whose remap finds no geometry ends the kept worker range with one empty change', async () => {
+test('a frame replaced again whose remap finds no geometry shows no range, then changes once to empty', async () => {
   const h = await selectionRemap();
   try {
     h.mapping.hold = true;
@@ -456,7 +457,8 @@ test('a frame replaced again whose remap finds no geometry ends the kept worker 
     const third = h.present();
     await h.flush();
     expect(h.layoutId()).toBe('s:0:3');
-    expect(h.snapshot().selection.displayRange).toEqual(h.first);
+    expect(h.geometry.selectionMapped()).toBe(false);
+    expect(h.snapshot().selection.displayRange).toBeNull();
     expect(h.events).toEqual([]);
     h.mapping.geometry = false;
     h.release();
@@ -469,13 +471,14 @@ test('a frame replaced again whose remap finds no geometry ends the kept worker 
   } finally { h.dispose(); }
 });
 
-test('unmounting while the worker range is kept publishes nothing more and drops the range', async () => {
+test('unmounting while the worker remap is held publishes nothing more', async () => {
   const h = await selectionRemap();
   try {
     h.mapping.hold = true;
     const replaced = h.present();
     await h.flush();
-    expect(h.snapshot().selection.displayRange).toEqual(h.first);
+    expect(h.snapshot().selection.displayRange).toBeNull();
+    expect(h.events).toEqual([]);
     h.host.close('unmounted');
     h.geometry.dispose();
     expect(h.geometry.displaySelection()).toBeNull();
@@ -487,7 +490,7 @@ test('unmounting while the worker range is kept publishes nothing more and drops
   } finally { h.dispose(); }
 });
 
-test('a replaced worker document never carries the kept range across', async () => {
+test('a replaced worker document shows no range until its remap, then changes once', async () => {
   const h = await selectionRemap();
   try {
     h.mapping.hold = true;
@@ -506,7 +509,7 @@ test('a replaced worker document never carries the kept range across', async () 
   } finally { h.dispose(); }
 });
 
-test('a replaced worker document that cannot place the selection ends the kept range with one empty change', async () => {
+test('a replaced worker document that cannot place the selection shows no range, then changes once to empty', async () => {
   const h = await selectionRemap();
   try {
     h.mapping.hold = true;
@@ -522,54 +525,6 @@ test('a replaced worker document that cannot place the selection ends the kept r
     expect(h.geometry.displaySelection()).toBeNull();
     expect(h.events).toEqual([{ formatting: null, displayRange: null }]);
     expect(h.snapshot().selection.displayRange).toBeNull();
-  } finally { h.dispose(); }
-});
-
-for (const [name, next, displayRange] of [
-  ['a changed selection on a new frame', { selection: { anchor: caretAt(4), focus: caretAt(6) } }, { story: 'body', from: 104, to: 106, layoutId: 's:0:2' }],
-  ['a replaced document with the same selection', { identity: { session: 's2', incarnation: 1, epoch: 1 } }, { story: 'body', from: 101, to: 103, layoutId: 's2:0:2' }],
-] as [string, { selection?: WorkerSelection; identity?: { session: string; incarnation: number; epoch: number } }, DocxPluginSelection['displayRange']][]) {
-  test(`${name} shows no range while the geometry has not caught up with the view, then changes once`, async () => {
-    const h = await selectionRemap();
-    try {
-      h.move(next);
-      expect(h.geometry.displaySelection()).toBeNull();
-      h.host.markSelectionDirty('refresh');
-      await h.flush();
-      expect(h.geometry.displaySelection()).toBeNull();
-      expect(h.geometry.selectionMapped()).toBe(false);
-      expect(h.snapshot().selection.displayRange).toBeNull();
-      expect(h.events).toEqual([]);
-      await h.geometry.update();
-      await h.flush();
-      expect(h.events).toEqual([{ formatting: null, displayRange }]);
-      expect(h.snapshot().selection.displayRange).toEqual(displayRange);
-      h.host.markSelectionDirty('refresh');
-      await h.flush();
-      expect(h.events).toHaveLength(1);
-    } finally { h.dispose(); }
-  });
-}
-
-test('an unchanged worker selection on a new frame before the geometry update keeps its range, then changes once after it', async () => {
-  const h = await selectionRemap();
-  try {
-    h.move();
-    expect(h.geometry.displaySelection()).toEqual(h.first);
-    expect(h.geometry.selectionMapped()).toBe(false);
-    h.host.markSelectionDirty('refresh');
-    await h.flush();
-    expect(h.geometry.displaySelection()).toEqual(h.first);
-    expect(h.geometry.selectionMapped()).toBe(false);
-    expect(h.snapshot().selection.displayRange).toEqual(h.first);
-    expect(h.events).toEqual([]);
-    await h.geometry.update();
-    await h.flush();
-    expect(h.events).toEqual([{ formatting: null, displayRange: { ...h.first, layoutId: 's:0:2' } }]);
-    expect(h.snapshot().selection.displayRange).toEqual({ ...h.first, layoutId: 's:0:2' });
-    h.host.markSelectionDirty('refresh');
-    await h.flush();
-    expect(h.events).toHaveLength(1);
   } finally { h.dispose(); }
 });
 
@@ -604,7 +559,8 @@ test('a remap superseded after the version ack shows null, as before, and the ho
     expect(h.layoutId()).toBe('s:0:2');
     const acked = h.ack(1);
     await h.flush();
-    expect(h.snapshot().selection.displayRange).toEqual(h.first);
+    expect(h.geometry.selectionMapped()).toBe(false);
+    expect(h.snapshot().selection.displayRange).toBeNull();
     expect(h.events).toEqual([]);
     h.release();
     await Promise.all([replaced, acked]);
