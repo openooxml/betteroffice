@@ -2,8 +2,8 @@
 //! eta-reduced or LAMBDA aggregations and blank-edge trimming, against
 //! Microsoft's reference.
 
-use xlsx_calc::{EvalContext, Value, evaluate_array, parse_formula};
-use xlsx_model::{Cell, CellRef, CellValue, ErrorValue, Sheet, SheetId, Workbook};
+use xlsx_calc::{EvalContext, Value, evaluate_array, parse_formula, rebuild_and_recalc_all};
+use xlsx_model::{Cell, CellProvider, CellRef, CellValue, ErrorValue, Sheet, SheetId, Workbook};
 
 fn n(value: f64) -> CellValue {
     CellValue::Number { value }
@@ -938,21 +938,8 @@ fn groupby_and_pivotby_vector_of_lambdas() {
         )
     );
     assert_eq!(
-        arrayed("GROUPBY(A2:A6,C2:C6,VSTACK(SUM,AVERAGE),0,0)", &workbook),
-        (
-            4,
-            2,
-            vec![
-                t("East"),
-                n(55.0),
-                t("East"),
-                n(55.0 / 3.0),
-                t("West"),
-                n(45.0),
-                t("West"),
-                n(22.5),
-            ]
-        )
+        values("GROUPBY(A2:A6,C2:C6,VSTACK(SUM,AVERAGE),0,0)", &workbook),
+        error(ErrorValue::Calc)
     );
     assert_eq!(
         arrayed(
@@ -1029,32 +1016,86 @@ fn groupby_and_pivotby_vector_of_lambdas() {
         )
     );
     assert_eq!(
-        arrayed(
+        values(
             "PIVOTBY(A2:A6,E2:E6,C2:C6,VSTACK(SUM,AVERAGE),0,0,1,0,1)",
             &workbook
         ),
-        (
-            5,
-            3,
-            vec![
-                t(""),
-                t("Q1"),
-                t("Q2"),
-                t("East"),
-                n(25.0),
-                n(30.0),
-                t("East"),
-                n(12.5),
-                n(30.0),
-                t("West"),
-                n(20.0),
-                n(25.0),
-                t("West"),
-                n(20.0),
-                n(25.0),
-            ]
-        )
+        error(ErrorValue::Calc)
     );
+}
+
+/// stacked function vectors, and several functions over several value
+/// columns, have no Excel-saved layout yet and give #CALC!.
+#[test]
+fn groupby_and_pivotby_unpinned_function_vector_shapes_are_calc() {
+    let workbook = sales_workbook();
+    let mut sheet = Sheet::new("Data");
+    for (row, key, col, low) in [
+        (1, "a", "x", 1.0),
+        (2, "b", "y", 2.0),
+        (3, "a", "x", 3.0),
+    ] {
+        put(&mut sheet, &format!("A{row}"), t(key));
+        put(&mut sheet, &format!("B{row}"), t(col));
+        put(&mut sheet, &format!("C{row}"), n(low));
+        put(&mut sheet, &format!("D{row}"), n(low * 10.0));
+    }
+    let mut small = Workbook::default();
+    small.sheets.push(sheet);
+    for formula in [
+        r#"GROUPBY({"a";"b";"a"},{1,10;2,20;3,30},HSTACK(SUM,MAX),0,0)"#,
+        r#"GROUPBY({"a";"b";"a"},{1;2;3},VSTACK(SUM,MAX),0,0)"#,
+        "PIVOTBY(A1:A3,B1:B3,C1:D3,HSTACK(SUM,MAX),0,0)",
+        "PIVOTBY(A1:A3,B1:B3,C1:C3,VSTACK(SUM,MAX),0,0)",
+    ] {
+        assert_eq!(
+            values(formula, &small),
+            error(ErrorValue::Calc),
+            "{formula}"
+        );
+    }
+    assert_eq!(
+        values(
+            r#"GROUPBY({"a";"b";"a"},{1,10;2,20;3,30},SUM,0,0)"#,
+            &small
+        ),
+        vec![t("a"), n(4.0), n(40.0), t("b"), n(2.0), n(20.0)]
+    );
+    assert_eq!(
+        values("GROUPBY(A2:A6,C2:C6,HSTACK(SUM,MAX),0,0)", &workbook)[..3],
+        [t(""), t("SUM"), t("MAX")]
+    );
+}
+
+/// a stacked function vector keeps the value the workbook saved for its
+/// cell, and is #CALC! when none was saved.
+#[test]
+fn groupby_with_a_stacked_function_vector_keeps_the_saved_value() {
+    let formula =
+        r#"ROWS(_xlfn.GROUPBY({"a";"b";"a"},{1;2;3},_xlfn.VSTACK(_xleta.SUM,_xleta.MAX),0,0))"#;
+    for (saved, want) in [
+        (n(4.0), n(4.0)),
+        (
+            CellValue::Empty,
+            CellValue::Error {
+                value: ErrorValue::Calc,
+            },
+        ),
+    ] {
+        let mut sheet = Sheet::new("Data");
+        sheet.set_cell(
+            CellRef::new(0, 0),
+            Cell {
+                formula: Some(formula.into()),
+                value: saved,
+                ..Cell::default()
+            },
+        );
+        let mut workbook = Workbook::default();
+        workbook.sheets.push(sheet);
+        rebuild_and_recalc_all(&mut workbook, None);
+        assert_eq!(workbook.value(SheetId(0), CellRef::new(0, 0)), want);
+    }
 }
 
 #[test]
@@ -1738,13 +1779,13 @@ fn groupby_and_trimrange_over_whole_columns_and_the_whole_sheet() {
 }
 
 /// more distinct keys than the engine's largest array block holds is #NUM!:
-/// 1024 stacked functions leave room for 512 groups, and there are 600.
+/// 2048 functions side by side leave room for 511 groups, and there are 600.
 #[test]
 fn groupby_with_more_distinct_keys_than_an_output_block_holds_is_num() {
     let workbook = sales_workbook();
     for formula in [
-        "LET(f,REDUCE(SUM,SEQUENCE(10),LAMBDA(a,i,VSTACK(a,a))),k,SEQUENCE(600),GROUPBY(k,k,f,0,0))",
-        "LET(f,REDUCE(SUM,SEQUENCE(10),LAMBDA(a,i,VSTACK(a,a))),k,SEQUENCE(600),PIVOTBY(k,,k,f,0,0))",
+        "LET(f,REDUCE(SUM,SEQUENCE(11),LAMBDA(a,i,HSTACK(a,a))),k,SEQUENCE(600),GROUPBY(k,k,f,0,0))",
+        "LET(f,REDUCE(SUM,SEQUENCE(11),LAMBDA(a,i,HSTACK(a,a))),k,SEQUENCE(600),PIVOTBY(k,,k,f,0,0))",
     ] {
         assert_eq!(
             values(formula, &workbook),

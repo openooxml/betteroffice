@@ -36,6 +36,22 @@ fn callbacks(
     Ok(list)
 }
 
+/// a stacked function vector, or several functions over several value
+/// columns, has no Excel-saved layout to follow yet: it counts as
+/// unsupported, so a saved result is kept and none gives `#CALC!`.
+fn check_supported_shape(
+    by_col: bool,
+    lambdas: &[Rc<Lambda>],
+    value_cols: usize,
+    ctx: &EvalContext<'_>,
+) -> Result<(), ErrorValue> {
+    if lambdas.len() > 1 && (!by_col || value_cols > 1) {
+        ctx.record_unsupported_function();
+        return Err(ErrorValue::Calc);
+    }
+    Ok(())
+}
+
 /// a key under which equal field values group: text ignores case, as in
 /// Excel, and carries its length, so no text can run into the next field.
 fn group_identity(slice: &[CellValue]) -> String {
@@ -627,6 +643,7 @@ pub(crate) fn groupby(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
             return Err(ErrorValue::Value);
         }
         let (by_col, lambdas) = callbacks(args, ctx, 2)?;
+        check_supported_shape(by_col, &lambdas, values.cols, ctx)?;
         let (has_headers, show_headers) = resolve_headers(args, ctx, 3, &values, row_fields.cols)?;
         let field_relationship = optional_number(args, ctx, 7, 0.0)?.trunc() as i64;
         if !matches!(field_relationship, 0 | 1) {
@@ -775,6 +792,7 @@ pub(crate) fn pivotby(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
         let row_field_cols = row_fields.as_ref().map_or(0, |rf| rf.cols);
         let col_field_cols = col_fields.as_ref().map_or(0, |cf| cf.cols);
         let (by_col, lambdas) = callbacks(args, ctx, 3)?;
+        check_supported_shape(by_col, &lambdas, values.cols, ctx)?;
         let (has_headers, show_headers) =
             resolve_headers(args, ctx, 4, &values, row_field_cols + col_field_cols)?;
         let row_total_depth = resolve_total_depth(args, ctx, 5, row_field_cols, 0)?;
@@ -1150,14 +1168,14 @@ mod tests {
     use crate::eval::EvalContext;
     use crate::parser::parse_formula;
 
-    /// 1024 stacked functions leave room for 512 groups; 600 distinct keys
-    /// are #NUM! before a single group is aggregated.
+    /// 2048 functions side by side leave room for 511 groups; 600 distinct
+    /// keys are #NUM! before a single group is aggregated.
     #[test]
     fn too_many_distinct_keys_stop_before_any_group_is_aggregated() {
         let mut workbook = Workbook::default();
         workbook.sheets.push(Sheet::new("Data"));
         let formula = parse_formula(
-            "LET(f,REDUCE(SUM,SEQUENCE(10),LAMBDA(a,i,VSTACK(a,a))),k,SEQUENCE(600),GROUPBY(k,k,f,0,0))",
+            "LET(f,REDUCE(SUM,SEQUENCE(11),LAMBDA(a,i,HSTACK(a,a))),k,SEQUENCE(600),GROUPBY(k,k,f,0,0))",
         )
         .unwrap();
         let context = EvalContext::new(&workbook, SheetId(0));
