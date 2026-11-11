@@ -1785,6 +1785,7 @@ fn edit_through_export_anchors(doc: &EditingDoc) {
         .enumerate()
         .map(|(index, (story, key, _))| {
             EditStep::new(EditOperation::InsertText {
+                runs: None,
                 target: TextTarget::Paragraph(ParagraphTarget {
                     story: story.clone(),
                     para_id: key.clone(),

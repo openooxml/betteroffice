@@ -15,8 +15,7 @@ use serde_json::Value;
 use yrs::types::Attrs;
 use yrs::types::text::YChange;
 use yrs::{
-    Any, Assoc, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextPrelim, TextRef, Transact,
-    TransactionMut,
+    Any, Assoc, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextRef, Transact, TransactionMut,
 };
 
 use crate::identity::IdAllocator;
@@ -1203,15 +1202,26 @@ fn table_base(locator: &TableLocator) -> String {
 }
 
 /// Story ids without the `~{client}` suffix of an edit-born cell, so a slot is fresh only when
-/// no replica's cell holds it.
+/// no replica's cell holds it, live or removed: a removed id keeps its tombstone, and a cell
+/// minted under it again would be born removed.
 fn story_ids<T: ReadTxn>(txn: &T) -> HashSet<String> {
-    let Some(stories) = txn.get_map(STORIES) else {
-        return HashSet::new();
-    };
-    stories
-        .iter(txn)
-        .map(|(id, _)| bare_story_id(id).to_owned())
-        .collect()
+    let mut ids: HashSet<String> = txn
+        .get_map(STORIES)
+        .map(|stories| {
+            stories
+                .iter(txn)
+                .map(|(id, _)| bare_story_id(id).to_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(removed) = txn.get_map(crate::REMOVED_STORIES) {
+        ids.extend(
+            removed
+                .iter(txn)
+                .map(|(id, _)| bare_story_id(id).to_owned()),
+        );
+    }
+    ids
 }
 
 fn bare_story_id(id: &str) -> &str {
@@ -1274,7 +1284,7 @@ fn create_cell_story(
         return Err(OpError::StoryExists(story_id.to_owned()));
     }
     let para_id = ids.session_key(doc);
-    let story = stories.insert(txn, story_id, TextPrelim::new(""));
+    let story = crate::insert_story(txn, &stories, story_id);
     let pilcrow = story.insert_embed_with_attributes(
         txn,
         0,
@@ -2078,7 +2088,7 @@ impl EditingDoc {
                 if stories.contains_key(txn, &story_id) {
                     return Err(OpError::StoryExists(story_id));
                 }
-                let cell_story = stories.insert(txn, story_id.as_str(), TextPrelim::new(""));
+                let cell_story = crate::insert_story(txn, &stories, story_id.as_str());
                 build.created_story_ids.push(story_id.clone());
                 self.write_fragment_content(
                     txn,

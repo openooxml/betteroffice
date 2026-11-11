@@ -1,3 +1,4 @@
+import { trackPluginGestures } from '../../../../shared/plugin-host/gesture';
 import type { Translations } from '@betteroffice/xlsx-i18n';
 import {
   isMacPlatform,
@@ -124,6 +125,7 @@ export interface XlsxChromeContext {
 
 /** A contributed command as the store runs it. */
 export interface XlsxPluginCommandBinding {
+  readonly activationId?: string;
   readonly descriptor: XlsxPluginCommandDescriptor;
   /** The plugin's own state; the editor's gate applies on top. */
   state(): XlsxPluginCommandState;
@@ -133,6 +135,7 @@ export interface XlsxPluginCommandBinding {
 
 /** Who a scoped store acts for; asked again inside every operation boundary. */
 export interface XlsxCommandScope {
+  gesture(): boolean;
   /** Why the caller may not run `id` now, or null. */
   deny(id: XlsxCommandId | XlsxPluginCommandId): XlsxCommandFailureCode | null;
   /** Notified whenever `deny` may answer differently. */
@@ -165,6 +168,7 @@ export interface XlsxCommandController {
   ): void;
   /** Contributed toolbar commands, in display order. */
   pluginToolbar(): readonly XlsxPluginCommandId[];
+  pluginActivation(id: XlsxPluginCommandId): string | undefined;
   /** Keyboard bindings of the contributed commands. */
   pluginShortcuts(): readonly { id: XlsxPluginCommandId; chord: string }[];
   /** Applies a host's shortcut map and returns what was wrong with it. */
@@ -197,10 +201,7 @@ export interface XlsxCommandController {
   shortcutRevision(): number;
   /** Notified after the shortcut map changes. */
   subscribeShortcuts(listener: () => void): () => void;
-  /**
-   * A store acting for `scope`: its answer is checked inside each operation, and mutating
-   * built-in commands refuse with `unsupported-policy`.
-   */
+  /** A store acting for `scope`; mutating built-ins need a gesture in the plugin's UI. */
   scoped(scope: XlsxCommandScope): XlsxCommandStore;
   guarded(assertCurrent: () => void): XlsxCommandStore;
   /** Whether `store` is this editor's store or one scoped from it. */
@@ -459,6 +460,7 @@ export function createXlsxCommandController(): XlsxCommandController {
     assertCurrent?.();
     const current = binding;
     if (!current) return failure('editor-unavailable', null);
+    const gesture = scope?.gesture() ?? false;
     const builtIn = isPluginCommandId(id) ? null : id;
     const ordered = builtIn !== null && current.ordered(builtIn);
     const origin =
@@ -478,7 +480,7 @@ export function createXlsxCommandController(): XlsxCommandController {
       const env = live && readOnly !== undefined ? { ...live, readOnly } : live;
       const state = compute(id, args, env);
       if (!state.enabled) return { ok: false, failure: state.disabledReason };
-      if (scope && mutatingBuiltIn(id)) return failure('unsupported-policy', env);
+      if (scope && mutatingBuiltIn(id) && !gesture) return failure('unsupported-policy', env);
       assertCurrent?.();
       return perform(id, args, env!);
     };
@@ -547,18 +549,17 @@ export function createXlsxCommandController(): XlsxCommandController {
   const createScoped = (scope: XlsxCommandScope): XlsxCommandStore => {
     const cache = new Map<
       string,
-      { base: unknown; denial: XlsxCommandFailureCode | null; policy: boolean; state: unknown }
+      { base: unknown; denial: XlsxCommandFailureCode | null; state: unknown }
     >();
     const getState = (id: AnyCommandId, args?: unknown) => {
       const base = snapshot(id, args).state;
       const denial = scope.deny(id);
-      const policy = !denial && base.enabled && mutatingBuiltIn(id);
       const key = snapshotKey(id, args);
       const cached = cache.get(key);
-      if (cached && cached.base === base && cached.denial === denial && cached.policy === policy) {
+      if (cached && cached.base === base && cached.denial === denial) {
         return cached.state;
       }
-      const code = denial ? disabledCode(denial) : policy ? 'unsupported-policy' : null;
+      const code = denial ? disabledCode(denial) : null;
       const { enabled: _enabled, disabledReason: _reason, ...presentation } = base;
       const state = code
         ? {
@@ -568,7 +569,7 @@ export function createXlsxCommandController(): XlsxCommandController {
           }
         : base;
       if (cache.size >= MAX_CACHED_SNAPSHOTS) cache.delete(cache.keys().next().value!);
-      cache.set(key, { base, denial, policy, state });
+      cache.set(key, { base, denial, state });
       return state;
     };
     const scopedStore = Object.freeze({
@@ -615,7 +616,9 @@ export function createXlsxCommandController(): XlsxCommandController {
     prepare: (id) => prepareFor(id),
     registerChrome(element) {
       chromeRoots.add(element);
+      const releaseGesture = trackPluginGestures(element);
       return () => {
+        releaseGesture();
         chromeRoots.delete(element);
       };
     },
@@ -646,6 +649,7 @@ export function createXlsxCommandController(): XlsxCommandController {
       notify();
     },
     pluginToolbar: () => pluginToolbarIds,
+    pluginActivation: (id) => pluginCommands.get(id)?.activationId,
     pluginShortcuts: () => pluginShortcutList,
     setShortcuts(shortcuts) {
       shortcutMap = shortcuts;

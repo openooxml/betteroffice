@@ -10,6 +10,7 @@ import { useRovingFocus } from './useRovingFocus';
 export type OverflowMenuEntry =
   | {
       kind: 'item';
+      activationId?: string;
       id: string;
       label: string;
       icon?: ReactNode;
@@ -283,6 +284,7 @@ export function MenuList({
                   : checked === true
                 : undefined
             }
+            data-plugin-activation={isSubmenu ? undefined : entry.activationId}
             aria-disabled={entry.disabled ? true : undefined}
             aria-describedby={descriptionId}
             title={entry.description}

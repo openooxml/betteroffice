@@ -46,12 +46,14 @@ function findItem(
 /** Items that act through the source's latest entries, so a rendered menu never runs a stale action. */
 function bindLatest(
   entries: readonly OverflowMenuEntry[],
-  latest: () => readonly OverflowMenuEntry[]
+  latest: () => readonly OverflowMenuEntry[],
+  activationId?: string
 ): OverflowMenuEntry[] {
   return entries.map((entry) => {
     if (entry.kind === 'item') {
       return {
         ...entry,
+        ...(activationId ? { activationId } : {}),
         onSelect: () => {
           const current = findItem(latest(), entry.id);
           if (current && !current.disabled) current.onSelect();
@@ -59,7 +61,7 @@ function bindLatest(
       };
     }
     if (entry.kind === 'group' || entry.kind === 'submenu') {
-      return { ...entry, entries: bindLatest(entry.entries, latest) };
+      return { ...entry, entries: bindLatest(entry.entries, latest, activationId) };
     }
     return entry;
   });
@@ -88,7 +90,8 @@ export function useOverflowSource(
     published.current = null;
     return registry.register({
       element: () => element.current,
-      entries: () => bindLatest(latest(), latest),
+      entries: () => bindLatest(latest(), latest,
+        element.current?.closest('[data-plugin-activation]')?.getAttribute('data-plugin-activation') ?? undefined),
     });
   }, [registry, element, enabled]);
   useLayoutEffect(() => {
@@ -97,7 +100,8 @@ export function useOverflowSource(
       published.current = null;
       return;
     }
-    const next = signature(entriesRef.current?.() ?? []);
+    const activationId = element.current?.closest('[data-plugin-activation]')?.getAttribute('data-plugin-activation');
+    const next = `${activationId ?? ''}:${signature(entriesRef.current?.() ?? [])}`;
     if (published.current !== next) registry.changed();
     published.current = next;
   });

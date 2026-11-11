@@ -1,64 +1,6 @@
 use super::*;
 
-fn zip(parts: &[(&str, &[u8])], deflate: bool) -> Vec<u8> {
-    let mut output = Vec::new();
-    let mut central = Vec::new();
-    let method = u16::from(deflate) * 8;
-    for (name, data) in parts {
-        let offset = output.len() as u32;
-        let crc = zip::crc32(data);
-        let compressed = if deflate {
-            let mut compressed = Vec::new();
-            let count = data.len().max(1).div_ceil(65535);
-            for index in 0..count {
-                let start = index * 65535;
-                let end = (start + 65535).min(data.len());
-                let len = (end - start) as u16;
-                compressed.push(u8::from(index + 1 == count));
-                compressed.extend_from_slice(&len.to_le_bytes());
-                compressed.extend_from_slice(&(!len).to_le_bytes());
-                compressed.extend_from_slice(&data[start..end]);
-            }
-            compressed
-        } else {
-            data.to_vec()
-        };
-        output.extend_from_slice(b"PK\x03\x04");
-        for value in [20u16, 0, method, 0, 0] {
-            output.extend_from_slice(&value.to_le_bytes());
-        }
-        for value in [crc, compressed.len() as u32, data.len() as u32] {
-            output.extend_from_slice(&value.to_le_bytes());
-        }
-        output.extend_from_slice(&(name.len() as u16).to_le_bytes());
-        output.extend_from_slice(&0u16.to_le_bytes());
-        output.extend_from_slice(name.as_bytes());
-        output.extend_from_slice(&compressed);
-        central.extend_from_slice(b"PK\x01\x02");
-        for value in [20u16, 20, 0, method, 0, 0] {
-            central.extend_from_slice(&value.to_le_bytes());
-        }
-        for value in [crc, compressed.len() as u32, data.len() as u32] {
-            central.extend_from_slice(&value.to_le_bytes());
-        }
-        for value in [name.len() as u16, 0, 0, 0, 0] {
-            central.extend_from_slice(&value.to_le_bytes());
-        }
-        central.extend_from_slice(&0u32.to_le_bytes());
-        central.extend_from_slice(&offset.to_le_bytes());
-        central.extend_from_slice(name.as_bytes());
-    }
-    let offset = output.len() as u32;
-    output.extend_from_slice(&central);
-    output.extend_from_slice(b"PK\x05\x06");
-    for value in [0u16, 0, parts.len() as u16, parts.len() as u16] {
-        output.extend_from_slice(&value.to_le_bytes());
-    }
-    output.extend_from_slice(&(central.len() as u32).to_le_bytes());
-    output.extend_from_slice(&offset.to_le_bytes());
-    output.extend_from_slice(&0u16.to_le_bytes());
-    output
-}
+use crate::test_support::zip;
 
 fn document(body: &str) -> String {
     format!(
@@ -251,11 +193,13 @@ fn empty_theme_slots_keep_cached_faces() {
 
 #[test]
 fn theme_language_fills_empty_slots() {
+    let rels = THEME_RELS.replace("./theme/custom.xml", "theme/theme1.xml");
     let result = docx_font_preflight(&fixture("",
         r#"<w:p><w:r><w:rPr><w:rFonts w:eastAsiaTheme="minorEastAsia" w:cstheme="minorBidi"/></w:rPr><w:t>かな العربية</w:t></w:r></w:p>"#,
-        &[("word/_rels/document.xml.rels", THEME_RELS), ("word/theme/custom.xml", THEME),
+        &[("word/_rels/document.xml.rels", &rels), ("word/theme/theme1.xml", THEME),
             ("word/settings.xml", r#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:themeFontLang w:eastAsia="ja-JP" w:bidi="ar-SA"/></w:settings>"#)], false,
     )).unwrap();
+    assert!(result.complete);
     assert_eq!(
         keys(&result),
         [
@@ -349,6 +293,43 @@ fn normal_without_default_and_paragraph_mark_fonts() {
 }
 
 #[test]
+fn duplicate_default_character_styles_select_the_lowest_style_id() {
+    let defaults = styles("").replace(
+        r#"w:ascii="Base" w:hAnsi="Base""#,
+        r#"w:asciiTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi""#,
+    );
+    let theme = THEME.replace(r#"typeface="Body""#, r#"typeface="Calibri""#);
+    let body = document(
+        r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:b/></w:rPr><w:t>Text</w:t></w:r></w:p><w:p/>"#,
+    );
+    let ordinary =
+        r#"<w:style w:type="character" w:default="1" w:styleId="DefaultParagraphFont"/>"#;
+    for id in ["ZCustom", "ACustom"] {
+        let custom = format!(
+            r#"<w:style w:type="character" w:default="1" w:styleId="{id}"><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr></w:style>"#
+        );
+        for definitions in [format!("{custom}{ordinary}"), format!("{ordinary}{custom}")] {
+            let styles = defaults.replace("</w:styles>", &format!("{definitions}</w:styles>"));
+            let result = docx_font_preflight(&zip(
+                &[
+                    ("word/document.xml", body.as_bytes()),
+                    ("word/styles.xml", styles.as_bytes()),
+                    ("word/theme/theme1.xml", theme.as_bytes()),
+                ],
+                false,
+            ))
+            .unwrap();
+            assert!(result.complete);
+            let mut expected = vec![("Arial", false, false), ("Arial", true, false)];
+            if id == "ZCustom" {
+                expected.push(("Calibri", false, false));
+            }
+            assert_eq!(keys(&result), expected, "{id}: {definitions}");
+        }
+    }
+}
+
+#[test]
 fn math_names_the_engine_fallback_and_inherited_slots() {
     let result = scan(
         "",
@@ -396,6 +377,96 @@ fn header_relationship_and_unused_header() {
         keys(&result),
         [("Base", false, false), ("Header", false, false)]
     );
+}
+
+#[test]
+fn footer_relationship_names_a_face() {
+    let rels = r#"<Relationships><Relationship Id="footer" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer.xml"/></Relationships>"#;
+    let footer = r#"<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:rPr><w:rFonts w:ascii="Footer" w:hAnsi="Footer"/></w:rPr><w:t>Footer</w:t></w:r></w:p></w:ftr>"#;
+    let bytes = fixture(
+        "",
+        r#"<w:p/><w:sectPr><w:footerReference w:type="default" r:id="footer"/></w:sectPr>"#,
+        &[
+            ("word/_rels/document.xml.rels", rels),
+            ("word/footer.xml", footer),
+        ],
+        false,
+    );
+    let result = docx_font_preflight(&bytes).unwrap();
+    assert!(result.complete);
+    assert!(keys(&result).contains(&("Footer", false, false)));
+}
+
+#[test]
+fn endnotes_relationship_names_a_face() {
+    let rels = r#"<Relationships><Relationship Id="notes" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/endnotes" Target="endnotes.xml"/></Relationships>"#;
+    let notes = r#"<w:endnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:endnote w:id="1"><w:p><w:r><w:rPr><w:rFonts w:ascii="Endnote" w:hAnsi="Endnote"/></w:rPr><w:t>Note</w:t></w:r></w:p></w:endnote></w:endnotes>"#;
+    let bytes = fixture(
+        "",
+        r#"<w:p><w:r><w:endnoteReference w:id="1"/></w:r></w:p>"#,
+        &[
+            ("word/_rels/document.xml.rels", rels),
+            ("word/endnotes.xml", notes),
+        ],
+        false,
+    );
+    let result = docx_font_preflight(&bytes).unwrap();
+    assert!(result.complete);
+    assert!(keys(&result).contains(&("Endnote", false, false)));
+}
+
+#[test]
+fn unsupported_drawing_relationships_are_incomplete() {
+    for (input, content) in [
+        (
+            "chart",
+            r#"<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="unsupported"/>"#,
+        ),
+        (
+            "diagramData",
+            r#"<d:relIds xmlns:d="http://schemas.openxmlformats.org/drawingml/2006/diagram" r:dm="unsupported"/>"#,
+        ),
+        (
+            "diagramLayout",
+            r#"<d:relIds xmlns:d="http://schemas.openxmlformats.org/drawingml/2006/diagram" r:lo="unsupported"/>"#,
+        ),
+        (
+            "diagramDrawing",
+            r#"<d:relIds xmlns:d="http://schemas.openxmlformats.org/drawingml/2006/diagram" r:dm="unsupported"/>"#,
+        ),
+        (
+            "oleObject",
+            r#"<o:OLEObject xmlns:o="urn:schemas-microsoft-com:office:office" r:id="unsupported"/>"#,
+        ),
+    ] {
+        let rels = format!(
+            r#"<Relationships><Relationship Id="unsupported" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/{input}" Target="unsupported.xml"/></Relationships>"#
+        );
+        let body = format!("<w:p><w:r><w:drawing>{content}</w:drawing></w:r></w:p>");
+        let bytes = fixture(
+            "",
+            &body,
+            &[
+                ("word/_rels/document.xml.rels", &rels),
+                ("word/unsupported.xml", "<unsupported/>"),
+            ],
+            false,
+        );
+        assert!(!docx_font_preflight(&bytes).unwrap().complete, "{input}");
+    }
+}
+
+#[test]
+fn unsupported_drawing_namespaces_are_incomplete() {
+    for (namespace, local) in [
+        ("wordprocessingCanvas", "wpc"),
+        ("wordprocessingGroup", "wgp"),
+    ] {
+        let body = format!(
+            r#"<w:p><w:r><w:drawing><s:{local} xmlns:s="http://schemas.microsoft.com/office/word/2010/{namespace}"/></w:drawing></w:r></w:p>"#
+        );
+        assert!(!scan("", &body).complete, "{namespace}");
+    }
 }
 
 #[test]
