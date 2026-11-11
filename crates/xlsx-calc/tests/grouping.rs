@@ -1030,11 +1030,7 @@ fn groupby_and_pivotby_vector_of_lambdas() {
 fn groupby_and_pivotby_unpinned_function_vector_shapes_are_calc() {
     let workbook = sales_workbook();
     let mut sheet = Sheet::new("Data");
-    for (row, key, col, low) in [
-        (1, "a", "x", 1.0),
-        (2, "b", "y", 2.0),
-        (3, "a", "x", 3.0),
-    ] {
+    for (row, key, col, low) in [(1, "a", "x", 1.0), (2, "b", "y", 2.0), (3, "a", "x", 3.0)] {
         put(&mut sheet, &format!("A{row}"), t(key));
         put(&mut sheet, &format!("B{row}"), t(col));
         put(&mut sheet, &format!("C{row}"), n(low));
@@ -1055,10 +1051,7 @@ fn groupby_and_pivotby_unpinned_function_vector_shapes_are_calc() {
         );
     }
     assert_eq!(
-        values(
-            r#"GROUPBY({"a";"b";"a"},{1,10;2,20;3,30},SUM,0,0)"#,
-            &small
-        ),
+        values(r#"GROUPBY({"a";"b";"a"},{1,10;2,20;3,30},SUM,0,0)"#, &small),
         vec![t("a"), n(4.0), n(40.0), t("b"), n(2.0), n(20.0)]
     );
     assert_eq!(
@@ -1881,7 +1874,10 @@ fn groupby_and_pivotby_aggregations_returning_arrays_are_calc() {
         );
     }
     assert_eq!(
-        values("GROUPBY(A2:A6,C2:C6,LAMBDA(x,HSTACK(SUM(x))),0,0)", &workbook),
+        values(
+            "GROUPBY(A2:A6,C2:C6,LAMBDA(x,HSTACK(SUM(x))),0,0)",
+            &workbook
+        ),
         vec![t("East"), n(55.0), t("West"), n(45.0)]
     );
 }
@@ -1891,7 +1887,10 @@ fn groupby_and_pivotby_aggregations_returning_arrays_are_calc() {
 fn percentof_with_overflowing_sums_is_num() {
     let mut workbook = Workbook::default();
     let mut sheet = Sheet::new("Data");
-    for (idx, (key, value)) in [("a", 1.0), ("b", 9e307), ("a", 9e307)].into_iter().enumerate() {
+    for (idx, (key, value)) in [("a", 1.0), ("b", 9e307), ("a", 9e307)]
+        .into_iter()
+        .enumerate()
+    {
         put(&mut sheet, &format!("A{}", idx + 1), t(key));
         put(&mut sheet, &format!("B{}", idx + 1), n(value));
     }
