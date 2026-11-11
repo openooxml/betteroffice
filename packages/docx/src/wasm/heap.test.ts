@@ -1,9 +1,11 @@
 import { beforeAll, expect, test } from 'bun:test';
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describeHeapTable } from '../../../../bindings/heap-cases';
 import { preloadEditWasm } from './edit';
 import * as engine from './engineEdit';
-import { startHeapCounting, wasmModuleMemories } from './loadWasmAsset';
+import { wasmModuleMemories } from './loadWasmAsset';
 
 let docx: Uint8Array;
 
@@ -38,10 +40,26 @@ describeHeapTable(
   () => wasmModuleMemories().find(({ label }) => label === 'docx-edit'),
 );
 
-test('a host starts heap counting through the package, and the engine then lists its counters', () => {
-  expect(startHeapCounting()).toBe(true);
-  expect(engine.wasm_heap_counted()).toBe(true);
-  const listed = wasmModuleMemories().find(({ label }) => label === 'docx-edit');
-  expect(listed?.liveBytes).toBeGreaterThanOrEqual(0);
-  expect(listed?.native).toBe(engine.engineKind === 'native' ? true : undefined);
+test('startHeapCounting from the package entry starts counting in a fresh process', () => {
+  const script = [
+    `const edit = await import(${JSON.stringify(fileURLToPath(new URL('./edit.ts', import.meta.url)))});`,
+    `const engine = await import(${JSON.stringify(fileURLToPath(new URL('./engineEdit.ts', import.meta.url)))});`,
+    `const yrs = await import(${JSON.stringify(fileURLToPath(new URL('../yrs/index.ts', import.meta.url)))});`,
+    `const { readFileSync } = await import('node:fs');`,
+    `await edit.preloadEditWasm(new Uint8Array(readFileSync(${JSON.stringify(fileURLToPath(new URL('./generated/edit/docx_edit_bg.wasm', import.meta.url)))})));`,
+    'const before = engine.wasm_heap_counted();',
+    'const started = yrs.startHeapCounting();',
+    'const session = new engine.EditSession(41);',
+    'const live = engine.wasm_live_bytes();',
+    'session.free();',
+    'console.log(JSON.stringify({ kind: engine.engineKind, before, started, after: engine.wasm_heap_counted(), live }));',
+  ].join('\n');
+  const result = spawnSync(process.execPath, ['--eval', script], { cwd: import.meta.dir, encoding: 'utf8', timeout: 120_000 });
+  expect(result.status).toBe(0);
+  const report = JSON.parse(result.stdout.trim().split('\n').at(-1) as string);
+  expect(report.kind).toBe(engine.engineKind);
+  expect(report.before).toBe(engine.engineKind === 'wasm');
+  expect(report.started).toBe(true);
+  expect(report.after).toBe(true);
+  expect(report.live).toBeGreaterThan(0);
 });
