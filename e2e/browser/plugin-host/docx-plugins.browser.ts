@@ -22,6 +22,13 @@ async function open(page: Page) {
   await page.goto(peerless ? '/?peerless=1' : '/');
   await expect(page.locator('canvas[data-page-index="0"]')).toBeVisible({ timeout: 120_000 });
   await expect(page.locator('[data-probe-page="0"]')).toBeAttached({ timeout: 60_000 });
+  await expect.poll(() => page.evaluate(() => {
+    const column = document.querySelector<HTMLElement>('.canvas-pages__column');
+    if (!column) return true;
+    const sidebarOpen = (document.querySelector('.docx-unified-sidebar')?.childElementCount ?? 0) > 0;
+    if (sidebarOpen && !column.style.transform) return false;
+    return column.getAnimations().length === 0;
+  }), { timeout: 10_000 }).toBe(true);
 }
 
 // Chromium's inspector holds an awaited promise weakly: a GC after it settles but before the reply
