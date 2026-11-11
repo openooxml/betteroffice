@@ -24,8 +24,9 @@ export function resolveCellNavigation(
   readOnly: boolean
 ): DocxCellNavigationPlan | 'read-only' | null {
   const story = selection.focus.story;
+  if (!CELL_STORY.test(story)) return { selection, cells: null };
   const live = resolveLiveCell(engine, story);
-  if (!live) return CELL_STORY.test(story) ? null : { selection, cells: null };
+  if (!live) return null;
   const table = { story: live.story, tableIndex: live.tableIndex };
   const payload = engine.tablePayload(table.story, table.tableIndex) as TablePayload | null;
   if (!payload || isUnavailableTablePayload(payload) || !Array.isArray(payload.rows)) return null;

@@ -711,6 +711,36 @@ test('Tab from a block control in the last cell moves back to the previous cell,
   }
 }, TIMEOUT);
 
+test('Tab with row creation from the last cell of a healthy inner table whose cell ids the cell pattern does not name stays a noop and changes nothing', async () => {
+  const replica = await open(9461, true);
+  const host = await peer(replica, 9462);
+  try {
+    const table = tableStory(replica);
+    const custom = ['body:custom', 'body:custom-two'];
+    const minted = replica.engine.tablePayload(table, 0) as { rows: Array<{ cells: Array<{ story: string }> }> };
+    host.createStory(custom[0]!, 'Custom one');
+    host.createStory(custom[1]!, 'Custom two');
+    host.applyRawOps(table, [{ op: 'insertEmbed', index: 0, kind: 'table', payload: {
+      ...minted, rows: minted.rows.map((row) => ({ ...row, cells: row.cells.map((entry, column) => ({ ...entry, story: custom[column]! })) })),
+    } }]);
+    await receive(replica, host);
+    expect(firstCell(replica, table)).toBe(custom[0]!);
+    expect(located(replica, custom[1]!)).toEqual(at(table, 0, 1));
+
+    const inner = JSON.stringify(replica.engine.tablePayload(table, 0));
+    const outer = JSON.stringify(replica.engine.tablePayload('body', 0));
+    const untouched = replica.engine.encodeState();
+    const ack = await tabForward(replica, custom[1]!);
+    expect(ack.status).toBe('noop');
+    expect(JSON.stringify(replica.engine.tablePayload(table, 0))).toBe(inner);
+    expect(JSON.stringify(replica.engine.tablePayload('body', 0))).toBe(outer);
+    expect(replica.engine.encodeState()).toEqual(untouched);
+  } finally {
+    host.destroy();
+    replica.session.dispose();
+  }
+}, TIMEOUT);
+
 const siblingTables = table(cell('A one'), cell('A two')) + paragraph('Between') + table(cell('B one'), cell('B two'));
 const siblingRange = (tableIndex: number, column: number) => {
   const loc = { story: 'body', tableIndex, row: 0, column };
