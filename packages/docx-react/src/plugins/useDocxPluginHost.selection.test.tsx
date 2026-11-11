@@ -75,7 +75,7 @@ async function setup(viewerSelection: boolean, initialRange: { from: number; to:
     plugins: [plugin], pagedEditorRef: { current: editor },
     writeModeRef: { current: 'viewing' as const }, mode: 'viewing' as const,
     readOnly: true, viewerSelection, commands: createDocxCommandController(),
-    session, loadGeneration: 0, queries, layoutError: null, zoom: 1,
+    session, loadGeneration: 0, queries, layoutError: null as Error | null, zoom: 1,
     canvasHostRef: { current: null }, overlayTarget: null,
     selectionChangeSubscribersRef: subscribers,
     i18n: undefined, onRenderedDomContextReady: undefined,
@@ -240,6 +240,31 @@ test('a layout replaced again that cannot place the selection ends the kept rang
   expect(snapshotOf(view).layout).not.toBeNull();
   expect(view.events).toEqual([{ formatting: before.selection.formatting, displayRange: null }]);
   expect(snapshotOf(view).selection.displayRange).toBeNull();
+});
+
+test('a layout that fails while a selection keeps its range ends the range with one empty change', async () => {
+  const { view, before, editElsewhere } = await bodyBesideOtherStory();
+  const host = view.result.current.host.host;
+  const publish = host.selectionChanged;
+  const readiness: Array<boolean | undefined> = [];
+  host.selectionChanged = (selection, identity, publication) => {
+    readiness.push(publication?.ready);
+    return publish(selection, identity, publication);
+  };
+  await remoteEdit(view, editElsewhere());
+  expect(snapshotOf(view).layout).toBeNull();
+  expect(snapshotOf(view).selection).toEqual(before.selection);
+  expect(readiness.at(-1)).toBe(false);
+  expect(view.events).toEqual([]);
+  await act(async () => {
+    view.options.layoutError = new Error('layout failed');
+    view.rerender();
+  });
+  expect(snapshotOf(view).layout).toBeNull();
+  expect(view.events).toEqual([{ formatting: before.selection.formatting, displayRange: null }]);
+  expect(snapshotOf(view).selection.displayRange).toBeNull();
+  expect(readiness.at(-1)).toBe(true);
+  expect(view.errors).toEqual([]);
 });
 
 test('unmounting while a selection keeps its range publishes nothing more', async () => {
