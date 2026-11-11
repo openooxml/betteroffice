@@ -1,7 +1,4 @@
-import { afterAll, beforeEach, test } from 'bun:test';
-
-const unmockedSetTimeout = globalThis.setTimeout;
-const unmockedClearTimeout = globalThis.clearTimeout;
+import { test } from 'bun:test';
 
 /** @internal Under 24 busy loops, outside a stalled round, a whole editor test took at most 6682 ms (p90 at most 4249 ms); a wait inside one gets about 2.2x that. */
 export const EDITOR_WAIT_BUDGET_MS = 15_000;
@@ -9,112 +6,24 @@ export const EDITOR_WAIT_BUDGET_MS = 15_000;
 /** @internal Under 24 busy loops, outside a stalled round, a whole editor test took at most 6682 ms (p90 at most 4249 ms); one test gets about 3x that. */
 export const EDITOR_TEST_BUDGET_MS = 20_000;
 
-/** @internal A teardown waits one test budget for a test that ran out of its own, plus one for the file's cleanup. */
-export const EDITOR_TEARDOWN_BUDGET_MS = 2 * EDITOR_TEST_BUDGET_MS;
-
-/** @internal Bun's own test timeout sits this far past a budget, so the budget's timer, which keeps the late work tracked, fires first. */
-export const RUNNER_TIMEOUT_MARGIN_MS = 5_000;
-
-/** @internal Thrown when a budgeted wait or a timed-out test's late work outlasts its budget. */
+/** @internal Thrown when a budgeted wait runs out before its condition holds. */
 export class BudgetExceededError extends Error {
   override name = 'BudgetExceededError';
 }
 
-type Run = {
-  name: string;
-  promise: Promise<void>;
-  timedOut: boolean;
-  settled: boolean;
-  abandoned: boolean;
-  failed?: boolean;
-  error?: unknown;
-};
 type Body = (...args: any[]) => Promise<void> | void;
-/** @internal The runner functions budgetedTests registers through. */
-export type BudgetHooks = {
-  test: {
-    (name: string, body: () => Promise<void>, timeoutMs: number): void;
-    each(cases: readonly unknown[]): (name: string, body: (...args: any[]) => Promise<void>, timeoutMs: number) => void;
-  };
-  beforeEach(body: () => void): void;
-  afterAll(body: () => void): void;
+/** @internal The runner function budgetedTest registers through. */
+export type TestRegister = {
+  (name: string, body: Body, timeoutMs: number): void;
+  each(cases: readonly unknown[]): (name: string, body: Body, timeoutMs: number) => void;
 };
 
-/**
- * @internal Tests that each fail once their budget runs out, and a teardown step that waits for such a test.
- * The timed-out body keeps running; the teardown waits up to one budget for it and throws its late
- * failure there. If it is still running then, every later test of this set fails before its setup
- * until it settles, and a failure it ends with is thrown once after the last test.
- */
-export function budgetedTests(
-  budgetMs: number = EDITOR_TEST_BUDGET_MS,
-  hooks: BudgetHooks = { test: test as unknown as BudgetHooks['test'], beforeEach, afterAll },
-) {
-  let current: Run | undefined;
-  let abandoned: Run | undefined;
-  const lateFailures: Run[] = [];
-  hooks.beforeEach(() => {
-    if (abandoned && !abandoned.settled) {
-      throw new BudgetExceededError(`"${abandoned.name}" is still running after its teardown wait of ${budgetMs} ms ran out`);
-    }
-    abandoned = undefined;
-  });
-  hooks.afterAll(() => {
-    if (lateFailures.length === 0) return;
-    const names = lateFailures.map((run) => `"${run.name}": ${String(run.error)}`).join('; ');
-    throw Object.assign(new BudgetExceededError(`failed after the teardown wait ran out: ${names}`), { cause: lateFailures[0].error });
-  });
-  const track = (name: string, start: () => Promise<void> | void, timeoutMs: number) => {
-    const run: Run = { name, promise: Promise.resolve(start()), timedOut: false, settled: false, abandoned: false };
-    run.promise.then(
-      () => { run.settled = true; },
-      (error: unknown) => {
-        run.settled = true;
-        run.failed = true;
-        run.error = error;
-        if (run.abandoned) lateFailures.push(run);
-      },
-    );
-    current = run;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    return new Promise<void>((resolve, reject) => {
-      timer = unmockedSetTimeout(() => {
-        if (run.settled) return;
-        run.timedOut = true;
-        reject(new BudgetExceededError(`"${name}" ran past its ${timeoutMs} ms budget`));
-      }, timeoutMs);
-      run.promise.then(resolve, reject);
-    }).finally(() => unmockedClearTimeout(timer));
-  };
-  const budgeted = (name: string, body: () => Promise<void> | void, timeoutMs: number = budgetMs) => {
-    hooks.test(name, () => track(name, body, timeoutMs), timeoutMs + RUNNER_TIMEOUT_MARGIN_MS);
-  };
+/** @internal The runner's test with the test budget as its default timeout; an explicit timeout is kept. */
+export function budgetedTest(budgetMs: number = EDITOR_TEST_BUDGET_MS, register: TestRegister = test as unknown as TestRegister) {
+  const budgeted = (name: string, body: Body, timeoutMs: number = budgetMs) => register(name, body, timeoutMs);
   budgeted.each = (cases: readonly unknown[]) =>
-    (name: string, body: Body, timeoutMs: number = budgetMs) => {
-      hooks.test.each(cases)(name, (...args: unknown[]) => track(`${name} ${JSON.stringify(args)}`, () => body(...args), timeoutMs), timeoutMs + RUNNER_TIMEOUT_MARGIN_MS);
-    };
-  return {
-    test: budgeted,
-    async previousTestSettled() {
-      const run = current;
-      current = undefined;
-      if (!run?.timedOut) return;
-      if (!run.settled) {
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        const settled = await Promise.race([
-          run.promise.then(() => true, () => true),
-          new Promise<false>((resolve) => { timer = unmockedSetTimeout(() => resolve(false), budgetMs); }),
-        ]);
-        unmockedClearTimeout(timer);
-        if (!settled) {
-          run.abandoned = true;
-          abandoned = run;
-          throw new BudgetExceededError(`"${run.name}" was still running ${budgetMs} ms after its budget ran out`);
-        }
-      }
-      if (run.failed) throw run.error;
-    },
-  };
+    (name: string, body: Body, timeoutMs: number = budgetMs) => register.each(cases)(name, body, timeoutMs);
+  return budgeted;
 }
 
 type WaitOptions = { timeout?: number };

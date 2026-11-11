@@ -2,7 +2,7 @@ import { LEGACY_SYNC_API_PROP } from '../peerless/contracts';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, spyOn } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { budgetedTests, EDITOR_TEARDOWN_BUDGET_MS } from '../../../../../../shared/office-session/testing/loadBudget';
+import { budgetedTest } from '../../../../../../shared/office-session/testing/loadBudget';
 import { resolve } from 'node:path';
 import JSZip from 'jszip';
 import { createRef, useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -127,8 +127,8 @@ const editModule = new WebAssembly.Module(
   new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00])
 );
 let compileModule: ReturnType<typeof spyOn<typeof wasm, 'editWasmModule'>>;
+const test = budgetedTest();
 
-const { test, previousTestSettled } = budgetedTests();
 beforeEach(() => {
   setMissingWorkerCapabilitiesForTests([]);
   const fonts = Object.getOwnPropertyDescriptor(document, 'fonts');
@@ -145,14 +145,7 @@ beforeAll(async () => {
   ))));
   startWorker = await residentWorkerFactory();
 }, 30_000);
-afterEach(async () => {
-  try {
-    await previousTestSettled();
-  } finally {
-    teardown();
-  }
-}, EDITOR_TEARDOWN_BUDGET_MS);
-function teardown() {
+afterEach(() => {
   try {
     cleanup();
   } finally {
@@ -166,7 +159,7 @@ function teardown() {
     console.error = originalConsoleError;
     for (const session of sessions.splice(0)) session.destroy();
   }
-}
+});
 afterAll(async () => {
   await act(async () => {});
   if (ownsDom) await GlobalRegistrator.unregister();

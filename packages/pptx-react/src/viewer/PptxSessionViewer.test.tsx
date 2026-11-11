@@ -1,7 +1,7 @@
 import { FONT_FALLBACK_MESSAGE } from '../fontFaces';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeEach, describe, expect, mock, spyOn } from 'bun:test';
-import { budgetedTests, budgetedWaitFor, EDITOR_TEARDOWN_BUDGET_MS } from '../../../../shared/office-session/testing/loadBudget';
+import { budgetedTest, budgetedWaitFor } from '../../../../shared/office-session/testing/loadBudget';
 import { readFile } from 'node:fs/promises';
 import * as pptx from '@betteroffice/pptx';
 import type { SlideDisplayList } from '@betteroffice/pptx';
@@ -20,7 +20,7 @@ const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 const { act, cleanup, fireEvent, render, waitFor: waitForCondition } = await import('@testing-library/react');
 const waitFor = budgetedWaitFor(waitForCondition);
-const { test: it, previousTestSettled } = budgetedTests();
+const it = budgetedTest();
 const file = new Uint8Array([1, 2, 3]);
 const restorers: (() => void)[] = [];
 let observed: HTMLElement[] = [];
@@ -101,14 +101,11 @@ beforeEach(() => {
   });
   restorers.push(() => paint.mockRestore());
 });
-afterEach(async () => {
-  try { await previousTestSettled(); }
-  finally {
-    cleanup();
-    for (const restore of restorers.reverse()) restore();
-    restorers.length = 0;
-  }
-}, EDITOR_TEARDOWN_BUDGET_MS);
+afterEach(() => {
+  cleanup();
+  for (const restore of restorers.reverse()) restore();
+  restorers.length = 0;
+});
 afterAll(async () => {
   await new Promise((done) => setTimeout(done));
   if (ownsDom) await GlobalRegistrator.unregister();

@@ -1,7 +1,7 @@
 import './peerlessTestCapabilities';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeEach, expect, mock, spyOn } from 'bun:test';
-import { budgetedTests, budgetedWaitFor, EDITOR_TEARDOWN_BUDGET_MS } from '../../../../shared/office-session/testing/loadBudget';
+import { budgetedTest, budgetedWaitFor } from '../../../../shared/office-session/testing/loadBudget';
 import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
 import type { TextBoxPrimitive } from '@betteroffice/pptx';
@@ -23,7 +23,7 @@ const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 const { act, cleanup, createEvent, fireEvent, render, waitFor: waitForCondition } = await import('@testing-library/react');
 const waitFor = budgetedWaitFor(waitForCondition);
-const { test, previousTestSettled } = budgetedTests();
+const test = budgetedTest();
 const restorers: (() => void)[] = [];
 let client: PresentationCommandClient;
 let commands: PresentationCommandEnvelope[];
@@ -124,12 +124,9 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-  try { await previousTestSettled(); }
-  finally {
-    try { cleanup(); await owner?.dispose(); }
-    finally { for (const restore of restorers.splice(0).reverse()) restore(); }
-  }
-}, EDITOR_TEARDOWN_BUDGET_MS);
+  try { cleanup(); await owner?.dispose(); }
+  finally { for (const restore of restorers.splice(0).reverse()) restore(); }
+});
 afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
 
 async function open(small = false, table: boolean | 'empty' | 'mixed' | 'stacked' = false) {

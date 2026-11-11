@@ -1,4 +1,4 @@
-import { budgetedTests, EDITOR_TEARDOWN_BUDGET_MS, pollUntil } from '../../../../shared/office-session/testing/loadBudget';
+import { budgetedTest, pollUntil } from '../../../../shared/office-session/testing/loadBudget';
 import { gestureFor, trackPluginGestures } from '../../../../shared/plugin-host/gesture';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, describe, expect, mock, spyOn } from 'bun:test';
@@ -63,11 +63,8 @@ beforeAll(async () => {
   console.error = () => {};
   console.warn = () => {};
 }, 30_000);
-const { test, previousTestSettled } = budgetedTests();
-afterEach(async () => {
-  try { await previousTestSettled(); }
-  finally { cleanup(); }
-}, EDITOR_TEARDOWN_BUDGET_MS);
+const test = budgetedTest();
+afterEach(cleanup);
 afterAll(async () => {
   await new Promise((done) => setTimeout(done, 50));
   console.error = quiet.error;
