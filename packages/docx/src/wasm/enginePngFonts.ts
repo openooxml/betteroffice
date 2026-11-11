@@ -15,6 +15,8 @@ export interface FailedFaceLoad {
 export interface RecordedFontProvider {
   provider: BundledFontProvider;
   failures: FailedFaceLoad[];
+  /** Resolves once no load through the provider is in flight, loads started meanwhile included. */
+  settled(): Promise<void>;
 }
 
 type Methods = { [K in keyof BundledFontProvider]-?: NonNullable<BundledFontProvider[K]> };
@@ -42,25 +44,36 @@ function resolvedFace(fonts: Fonts, method: PropertyKey, args: unknown[]): Resol
 /**
  * Wraps `provider` so each face load that fails is recorded and still rejects, leaving the layout to skip the face
  * as it does without the wrapper. A face whose optional pack is not installed is not recorded. Every property of
- * the provider and of its loaders is kept, and each loader is wrapped once.
+ * the provider and of its loaders is kept, and each loader is wrapped once. A font package too old to tell a pack
+ * that is not installed from one that fails rejects with `font-unavailable`.
  */
 export function recordFaceLoads(provider: BundledFontProvider, fonts: Fonts): RecordedFontProvider {
+  if (typeof fonts.isMissingFontAddon !== 'function') {
+    throw fontUnavailable('PNG export needs the @betteroffice/fonts release @betteroffice/docx depends on; this one is older.');
+  }
   const failures: FailedFaceLoad[] = [];
+  const pending = new Set<Promise<void>>();
   const loaders = new WeakMap<BundledFontLoader, BundledFontLoader>();
   const methods = new Map<PropertyKey, unknown>();
 
   const watch = (loader: BundledFontLoader, resolved: () => Resolved): BundledFontLoader => {
     let watched = loaders.get(loader);
     if (!watched) {
-      const recorded = (load: () => Promise<ArrayBuffer>) => async () => {
-        try {
-          return await load();
-        } catch (error) {
-          if (!fonts.isMissingFontAddon(error)) {
-            failures.push({ ...resolved(), reason: error instanceof Error ? error.message : String(error) });
+      const recorded = (load: () => Promise<ArrayBuffer>) => () => {
+        const loading = (async () => {
+          try {
+            return await load();
+          } catch (error) {
+            if (!fonts.isMissingFontAddon(error)) {
+              failures.push({ ...resolved(), reason: error instanceof Error ? error.message : String(error) });
+            }
+            throw error;
           }
-          throw error;
-        }
+        })();
+        const done = loading.then(() => {}, () => {});
+        pending.add(done);
+        void done.then(() => pending.delete(done));
+        return loading;
       };
       const readOnlyBytes = loader.readOnlyBytes;
       watched = Object.assign(
@@ -90,7 +103,13 @@ export function recordFaceLoads(provider: BundledFontProvider, fonts: Fonts): Re
       return method;
     },
   });
-  return { provider: watchedProvider, failures };
+  return {
+    provider: watchedProvider,
+    failures,
+    async settled() {
+      while (pending.size > 0) await Promise.all(pending);
+    },
+  };
 }
 
 /** The `font-unavailable` rejection for the first recorded failure, or undefined when none was recorded. */

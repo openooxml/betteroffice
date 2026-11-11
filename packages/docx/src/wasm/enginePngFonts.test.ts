@@ -70,6 +70,28 @@ test('a face whose optional pack is not installed still rejects but is not recor
   expect(failures).toEqual([]);
 });
 
+test('settling waits for every load in flight, and a failure that lands meanwhile is recorded', async () => {
+  let fail!: (error: Error) => void;
+  const inner: BundledFontLoader = () => new Promise<ArrayBuffer>((_, reject) => { fail = reject; });
+  const { provider: watched, failures, settled } = recordFaceLoads(providerOf(inner), fonts);
+  const loading = watched.resolve('Arial', false, false)!();
+  loading.catch(() => {});
+  let done = false;
+  const settling = settled().then(() => { done = true; });
+  await Promise.resolve();
+  expect(done).toBe(false);
+  fail(new Error('offline'));
+  await settling;
+  expect(failures.map((failure) => failure.reason)).toEqual(['offline']);
+});
+
+test('a font package without the pack check rejects with font-unavailable instead of skipping silently', () => {
+  const older = { ...fonts, isMissingFontAddon: undefined } as unknown as typeof fonts;
+  let thrown: unknown;
+  try { recordFaceLoads(providerOf(async () => bytes), older); } catch (error) { thrown = error; }
+  expect(thrown).toMatchObject({ name: 'PngExportError', code: 'font-unavailable' });
+});
+
 test('the complete provider wrapped loads the same bytes', async () => {
   const complete = (await resolveCompleteFontProvider())!;
   const { provider: watched, failures } = recordFaceLoads(complete, fonts);

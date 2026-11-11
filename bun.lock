@@ -221,7 +221,7 @@
       "name": "@betteroffice/docx-native",
       "version": "0.5.1",
       "dependencies": {
-        "@betteroffice/fonts": "workspace:^0",
+        "@betteroffice/fonts": "workspace:^",
         "@betteroffice/fonts-cjk": "workspace:^0",
         "@betteroffice/fonts-intl": "workspace:^0",
         "@betteroffice/fonts-latin": "workspace:^0",
@@ -319,7 +319,7 @@
       "name": "@betteroffice/docx",
       "version": "0.5.1",
       "dependencies": {
-        "@betteroffice/fonts": "workspace:^0",
+        "@betteroffice/fonts": "workspace:^",
       },
       "devDependencies": {
         "@types/bun": "^1.0.0",

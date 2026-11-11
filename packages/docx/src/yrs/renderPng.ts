@@ -63,6 +63,12 @@ export function createPngExporter(session: YrsSession) {
       const recorded = complete && !hasConfiguredFontSource() && baseLatinFontState().baseUrl === undefined
         ? await recordProviderFaceLoads(complete) : undefined;
       const bundled = fontProvider ?? recorded?.provider ?? complete;
+      const rejectFailedLoads = async () => {
+        if (!recorded) return;
+        await recorded.settled();
+        const failed = faceLoadFailure(recorded.failures);
+        if (failed) throw failed;
+      };
       const measure = createRustMeasureSource({ engine: copy, ...(bundled ? { bundled } : {}) });
       measure.setCompat(document.package.settings?.compatibilityFlags);
       measure.setEmbeddedFaces(await extractEmbeddedFontFaces(document), appFaces(fonts));
@@ -70,11 +76,11 @@ export function createPngExporter(session: YrsSession) {
       const request = buildResidentRegionLayoutRequest(document, 0, renderEnv);
       const requirements = JSON.parse(copy.layoutFontRequirementsJson(JSON.stringify(request))) as ResidentFontRequirement[];
       await measure.prepareFontRequirements(requirements);
-      const failed = recorded && faceLoadFailure(recorded.failures);
-      if (failed) throw failed;
+      await rejectFailedLoads();
       const measurement = measure.measurementConfigForRequirements(requirements);
       if (!measurement) throw fontUnavailable('The fonts this document lays out with could not be loaded. Install @betteroffice/fonts, or pass them in `fonts`.');
       computeLayout({ document, pageGap: 0, session: copy, renderEnv, measurement });
+      await rejectFailedLoads();
       return { copy, display: openPagedDisplay(copy, measurement.fontChains), fontChains: measurement.fontChains ?? {} };
     } catch (error) {
       try { copy.destroy(); } catch { /* the layout failure is the one to report */ }

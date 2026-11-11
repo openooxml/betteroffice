@@ -62,7 +62,7 @@ Node.js >= 20.16 / 22.3 runs worker sessions on `worker_threads`, keeping the pr
 const png = await session.renderPng({ page: 0 }, { scale: 2 });
 ```
 
-By default the export loads the complete bundled fonts on both engines, so script text and fonts the bundled set doesn't carry take the faces the native engine draws them with. A face from an optional font pack that is not installed is skipped; an installed face that cannot load rejects with `PngExportError` (`font-unavailable`) naming it. Pass `fontProvider`, such as the provider your editor measures with, to lay out with stand-ins or your own faces instead. Without a canvas it rejects with `PngExportError` (`canvas-unavailable`); `@betteroffice/docx-native` renders the same call natively. A worker cannot decode SVG or metafile pictures, so a page with them rejects there rather than lose them.
+By default the export loads the complete bundled fonts on both engines, so script text and fonts the bundled set doesn't carry take the faces the native engine draws them with. A face whose optional font pack is not installed is skipped; a Latin or international face from an installed pack that cannot load rejects with `PngExportError` (`font-unavailable`) naming it. Pass `fontProvider`, such as the provider your editor measures with, to lay out with stand-ins or your own faces instead. Without a canvas it rejects with `PngExportError` (`canvas-unavailable`); `@betteroffice/docx-native` renders the same call natively. A worker cannot decode SVG or metafile pictures, so a page with them rejects there rather than lose them.
 
 ## Undo grouping
 
