@@ -97,7 +97,7 @@ test('xlsx screen reader: menus open from the keyboard in each region and keep F
   await expect(grid).toBeFocused();
 });
 
-test('xlsx screen reader: rapid navigation is announced once, for the cell it stops on', async ({ page }) => {
+test('xlsx screen reader: rapid navigation with queued keys announces only the cell it stops on', async ({ page }) => {
   await open(page);
   const grid = page.getByTestId('xlsx-scroll');
   await grid.focus();
