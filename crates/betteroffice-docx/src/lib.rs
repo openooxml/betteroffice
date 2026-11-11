@@ -12,6 +12,8 @@ mod error;
 #[cfg(any(feature = "fonts", feature = "raster"))]
 mod font;
 #[cfg(feature = "raster")]
+mod pdf;
+#[cfg(feature = "raster")]
 mod render;
 mod types;
 

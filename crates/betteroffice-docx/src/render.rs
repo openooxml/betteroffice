@@ -94,6 +94,19 @@ impl Document {
         if !options.scale.is_finite() || options.scale <= 0.0 {
             return Err(Error::Render("scale must be finite and positive".into()));
         }
+        let (display_list, fonts) = self.layout_display_list()?;
+        drop(fonts);
+        self.render_display_list_scaled(&display_list, target.page, options.scale)
+    }
+
+    /// Lays out the complete document and returns both the display list and the
+    /// locked font registry that produced its glyph runs.
+    pub(crate) fn layout_display_list(
+        &self,
+    ) -> Result<(
+        DisplayList,
+        std::sync::MutexGuard<'_, crate::font::FontRegistry>,
+    )> {
         let bytes = self.save()?;
         let package = docx_parse::parse_docx_s9_wire(
             &bytes,
@@ -153,8 +166,23 @@ impl Document {
             output["fontChains"] = serde_json::json!(chains);
             docx_layout::build_display_list_value(&output.to_string()).map_err(Error::Render)
         })?;
-        drop(fonts);
-        self.render_display_list_scaled(&display_list, target.page, options.scale)
+        Ok((display_list, fonts))
+    }
+
+    /// Image bytes registered by relationship id, without the owning-part
+    /// scope prefix. PDF export has no per-part resolution step yet; a
+    /// relationship id reused across parts resolves to the last registration.
+    pub(crate) fn image_bytes_by_rel_id(&self) -> std::collections::BTreeMap<String, Vec<u8>> {
+        self.images
+            .entries
+            .iter()
+            .map(|(key, bytes)| {
+                let rel_id = key
+                    .rsplit_once('\u{1f}')
+                    .map_or(key.as_str(), |(_, rel)| rel);
+                (rel_id.to_owned(), bytes.clone())
+            })
+            .collect()
     }
 
     /// Supplies bytes for one relationship id the display list left

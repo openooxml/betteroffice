@@ -41,6 +41,7 @@ ooxml-metafile = { package = "betteroffice-metafile", path = "crates/ooxml-metaf
 docx-parse = { package = "betteroffice-docx-parse", path = "crates/docx-parse", version = "0.5.1" }
 docx-layout = { package = "betteroffice-docx-layout", path = "crates/docx-layout", version = "0.5.1" }
 docx-raster = { package = "betteroffice-docx-raster", path = "crates/docx-raster", version = "0.5.1" }
+docx-pdf = { package = "betteroffice-docx-pdf", path = "crates/docx-pdf", version = "0.5.1" }
 docx-edit = { package = "betteroffice-docx-edit", path = "crates/docx-edit", version = "0.5.1" }
 docx-engine = { package = "betteroffice-docx-engine", path = "crates/docx-engine" }
 betteroffice-docx = { path = "crates/betteroffice-docx", version = "0.5.1" }

@@ -1,0 +1,25 @@
+[package]
+name = "betteroffice-docx-pdf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = ["crates-io"]
+description = "Native PDF export for BetterOffice DOCX display lists."
+readme = "README.md"
+keywords = ["docx", "pdf", "ooxml", "rendering"]
+categories = ["rendering"]
+
+[dependencies]
+docx-layout.workspace = true
+ooxml-text.workspace = true
+pdf-writer = "0.15"
+serde_json = "1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+base64 = "0.22"
+subsetter = { version = "0.2.6", default-features = false }
+ttf-parser = "0.25.1"
+
+[dev-dependencies]
+serde_json = "1"
