@@ -183,7 +183,7 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
     }
   });
 
-  test(`${engine}: after a table edit the cells of that table save explicit run values`, async () => {
+  test(`${engine}: after a table edit the cells of that table reopen with their edited bold`, async () => {
     const cell = (paraId: string, run: string) =>
       `<w:tc><w:tcPr><w:tcW w:w="2400" w:type="dxa"/></w:tcPr><w:p w14:paraId="${paraId}">${run}</w:p></w:tc>`;
     const nested = '<w:tbl><w:tblPr><w:tblStyle w:val="HeaderGrid"/><w:tblLook w:val="0020" w:firstRow="1" w:lastRow="0" w:firstColumn="0" w:lastColumn="0" w:noHBand="1" w:noVBand="1"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>' +
@@ -229,10 +229,10 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
         format(session, '00000043', false);
         return [direct('Body one', false)];
       }],
-      ['a column deleted', (session) => {
+      ['a column deleted, the whole table rewritten: bold the table style already gives is not written and the first row reopens bold', (session) => {
         session.deleteColumn({ anchor: at(0, 1), head: at(0, 1) });
         format(session, '00000041', true);
-        return [direct('Old head', true)];
+        return [{ marker: 'Old head', saved: null, reopens: true }];
       }],
       ['cells merged down the first column', (session) => {
         session.mergeCells({ anchor: at(0, 0), head: at(1, 0) });
