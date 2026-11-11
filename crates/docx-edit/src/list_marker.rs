@@ -73,7 +73,8 @@ pub(crate) fn numbering_level(value: f64) -> Option<usize> {
 /// start share one list, so a second instance continues the first one's numbers: Word's "Restart
 /// numbering" writes a new instance with a `w:startOverride` precisely because a plain second
 /// instance would continue. An instance overriding a start begins a list of its own, at that
-/// start. Levels begin at `w:start` (0 when absent) and restart as `w:lvlRestart` says.
+/// start. Levels begin at `w:start` (0 when absent) and restart as `w:lvlRestart` says; a level
+/// override without a `w:start` keeps the abstract level's.
 struct List {
     key: String,
     /// Per level: its start and the `w:lvlRestart` value.
@@ -100,6 +101,14 @@ impl List {
                 .find(|value| value.ilvl == level as f64)
                 .and_then(|value| value.start_override)
                 .or(definition.start)
+                .or_else(|| {
+                    numbering
+                        .get_abstract(instance.abstract_num_id)?
+                        .levels
+                        .iter()
+                        .find(|value| value.ilvl == level as f64)?
+                        .start
+                })
                 .filter(|start| start.is_finite())
                 .map_or(0, |start| start.clamp(0.0, MAX_START as f64) as i64);
             *entry = (start, definition.lvl_restart);
