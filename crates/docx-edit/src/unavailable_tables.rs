@@ -116,11 +116,14 @@ impl EditingDoc {
         laid_out
     }
 
-    /// The document's roots, from its story metadata: the body, and each header and footer its
-    /// sections reference. Notes are reached through their references.
+    /// The document's roots, from its story metadata: the body, each header and footer the
+    /// sections reference, and every story the source package seeded as a root (body, headers,
+    /// footers and notes, referenced or not). Notes a host adds are reached through their
+    /// references.
     fn document_roots(&self) -> Vec<String> {
         use crate::stories::StoryInfoKind;
-        self.list_stories()
+        let mut roots: Vec<String> = self
+            .list_stories()
             .stories
             .into_iter()
             .filter(|info| {
@@ -130,7 +133,17 @@ impl EditingDoc {
                 )
             })
             .map(|info| info.story)
-            .collect()
+            .collect();
+        if let Some(source) = self.source_metadata() {
+            roots.extend(
+                source
+                    .read()
+                    .stories
+                    .iter()
+                    .map(|story| story.content_story(self)),
+            );
+        }
+        roots
     }
 
     /// Every live story reachable from `roots` through the cells of complete tables, block
