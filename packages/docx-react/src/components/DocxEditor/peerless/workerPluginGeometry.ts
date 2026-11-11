@@ -107,11 +107,22 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
       if (answers === entry) publish();
     });
   };
+  /** Whether the view still shows `source`'s document and frame, so a selection mapped on it may be kept. */
+  const fresh = (source: NonNullable<typeof current>) => {
+    const snapshot = controller.getSnapshot();
+    return snapshot.status === 'ready' && !!snapshot.view && sameView(snapshot.view.identity, source.frame.identity) && snapshot.view.geometry === source.frame;
+  };
   const requestSelection = (retry = false): Promise<boolean> | undefined => {
     const source = current;
-    const selection = controller.getSnapshot().view?.workerSelection;
-    if (!source || !selection) { selectionRead = null; showSelection(null, null); return; }
+    const view = controller.getSnapshot().view;
+    const selection = view?.workerSelection;
+    if (!source || !view || !selection) { selectionRead = null; showSelection(null, null); return; }
     const selected = JSON.stringify(selection);
+    if (!fresh(source)) {
+      if (displayedFor !== selected || !sameView(view.identity, source.frame.identity)) showSelection(null, null);
+      return;
+    }
+    const asked = view.version;
     const key = `${source.layout.id}|${selected}`;
     if (selectionRead?.key === key && (!retry || !selectionRead.failed)) return selectionRead.read;
     const entry: NonNullable<typeof selectionRead> = { key, read: Promise.resolve(false), failed: false };
@@ -123,8 +134,9 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
         offset: (await controller.readAt({ kind: 'rawSelectionInfo', selection: { anchor: point, focus: point } }, version)).before.length });
       const ordered = await controller.readAt({ kind: 'commentSelectionRange', selection }, version);
       if (!ordered) {
+        if (current !== source || selectionRead !== entry || !fresh(source)) return false;
         entry.mapped = anchorFailure('missing-target', 'The selection did not resolve');
-        if (selectionRead === entry) showSelection(null, selected);
+        showSelection(null, selected);
         return false;
       }
       const start = await accepted({ ...ordered.start, story: ordered.story });
@@ -135,21 +147,21 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
       const result = await controller.readAt({ kind: 'anchorTargets', targets: [{ kind: 'range', version, range: {
         story: selection.anchor.story, start, end, view: 'accepted',
       } }, { kind: 'range', version, range: { story: selection.focus.story, start: focus, end: focus, view: 'accepted' } }] }, version);
-      if (current !== source || selectionRead !== entry || JSON.stringify(controller.getSnapshot().view?.workerSelection) !== JSON.stringify(selection)) return false;
+      if (current !== source || selectionRead !== entry || !fresh(source) || JSON.stringify(controller.getSnapshot().view?.workerSelection) !== selected) return false;
       entry.mapped = result[0];
       entry.focus = result[1];
       entry.failed = !entry.mapped;
       showSelection(entry.mapped?.ok && entry.mapped.ranges[0] ? { story: selection.anchor.story, from: entry.mapped.ranges[0].from,
         to: entry.mapped.ranges.at(-1)!.to, layoutId: source.layout.id } : null, selected);
       return true;
-    }).catch(error => {
-      if (current === source && selectionRead === entry) {
-        if (error instanceof WorkerReadSupersededError) selectionRead = null;
-        else {
-          entry.failed = true;
-          showSelection(null, selected);
-        }
+    }).catch((error): Promise<boolean> | boolean => {
+      if (current !== source || selectionRead !== entry || !fresh(source)) return false;
+      if (error instanceof WorkerReadSupersededError && controller.getSnapshot().view?.version !== asked) {
+        selectionRead = null;
+        return requestSelection() ?? false;
       }
+      entry.failed = true;
+      showSelection(null, selected);
       return false;
     }).finally(() => { if (current === source && selectionRead === entry) publish(); });
     return entry.read;
