@@ -32,11 +32,18 @@ function projectedCellTables(engine: DocxWorkerCommandEngine, root: string): Pro
   }));
 }
 
+const NESTED_CELL = /:t\d+:r\d+c\d+(?:~\d+)?(?=:|$)/;
+
+/**
+ * The innermost laid-out cell holding `story`. A laid-out nested table always wins over its outer
+ * cell, so a story below the cell of a nested table that is not laid out is in no cell.
+ */
 function cellIn(tables: readonly ProjectedCellTable[] | null, story: string): YrsCellLoc | null {
   if (!tables) return null;
   let best: YrsCellLoc | null = null;
   for (const table of tables) {
-    const cell = table.cells.find((candidate) => candidate.story === story || story.startsWith(`${candidate.story}:`));
+    const cell = table.cells.find((candidate) => candidate.story === story ||
+      (story.startsWith(`${candidate.story}:`) && !NESTED_CELL.test(story.slice(candidate.story.length))));
     if (!cell) continue;
     if (!best || table.story.length > best.story.length) {
       best = { story: table.story, tableIndex: table.tableIndex, row: cell.row, column: cell.column };

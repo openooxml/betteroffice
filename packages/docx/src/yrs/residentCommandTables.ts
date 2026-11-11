@@ -50,6 +50,41 @@ function resolveTableTarget(
   return { focused, range, table };
 }
 
+const CELL_SEGMENT = /:t\d+:r(\d+)c(\d+)(?:~\d+)?(?=:|$)/g;
+
+/**
+ * For a story in no laid-out cell, the unavailable table whose cell holds it: `undefined` when
+ * its innermost cell belongs to no unavailable table, `null` when it does but which one is unsure.
+ */
+function unavailableTableHolding(
+  engine: DocxWorkerCommandEngine,
+  story: string
+): { cell: YrsCellLoc; table: YrsTableLoc } | null | undefined {
+  const match = Array.from(story.matchAll(CELL_SEGMENT)).at(-1);
+  if (match?.index === undefined) return undefined;
+  const parent = story.slice(0, match.index);
+  const cellStory = story.slice(0, match.index + match[0].length);
+  const holds = (payload: TablePayload) =>
+    Array.isArray(payload.rows) && payload.rows.some((row) => row.cells?.some((cell) => cell.story === cellStory));
+  const unavailable: Array<{ tableIndex: number; payload: TablePayload }> = [];
+  for (let tableIndex = 0; ; tableIndex += 1) {
+    const payload = engine.tablePayload(parent, tableIndex) as TablePayload | null;
+    if (!payload) break;
+    if (!isUnavailableTablePayload(payload)) {
+      if (holds(payload)) return undefined;
+      continue;
+    }
+    unavailable.push({ tableIndex, payload });
+  }
+  if (unavailable.length === 0) return undefined;
+  const holding = unavailable.filter(({ payload }) => holds(payload));
+  const rowless = unavailable.filter(({ payload }) => !Array.isArray(payload.rows));
+  const found = holding.length === 1 ? holding[0] : holding.length === 0 && rowless.length === 1 ? rowless[0] : null;
+  if (!found) return null;
+  const table = { story: parent, tableIndex: found.tableIndex };
+  return { table, cell: { ...table, row: Number(match[1]), column: Number(match[2]) } };
+}
+
 export function nearTable(engine: DocxWorkerCommandEngine, table: YrsTableLoc): YrsLoc | null {
   const segments = engine.geometryReader.storySegments(table.story);
   let ordinal = 0;
@@ -86,8 +121,13 @@ export function preflightTableCommand(
   command: TableCommandIntent,
   selection: DocxCommandSelection
 ): { target: DocxTableCommandTarget } | { reason: string } {
-  const resolved = resolveTableTarget(engine, selection);
-  if (!resolved) return { reason: 'invalid-cell-target' };
+  let resolved = resolveTableTarget(engine, selection);
+  if (!resolved) {
+    const held = unavailableTableHolding(engine, selection.focus.story);
+    if (held === undefined) return { reason: 'invalid-cell-target' };
+    if (command.kind !== 'deleteTable' || !held) return { reason: 'table-unavailable' };
+    resolved = { focused: held.cell, range: { anchor: held.cell, head: held.cell }, table: held.table };
+  }
   if (rootOf(resolved.table.story) !== 'body') return { reason: 'invalid-selection' };
   if (command.payload.suggesting !== undefined &&
     command.kind !== 'insertTableRow' && command.kind !== 'deleteTableRow') {

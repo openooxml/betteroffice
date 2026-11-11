@@ -7,7 +7,8 @@ import { residentWorkerFactory } from './__fixtures__/residentWorker';
 import { DocxSourceWorkerClient } from './residentSourceWorkerClient';
 import { createDocxCommandConnection } from './residentCommandConnection';
 import { createDocxWorkerEditSession } from './createDocxWorkerEditSession';
-import { createYrsSession, saveYrsDocx, type YrsCellLoc, type YrsSession } from './index';
+import { createYrsSession, type YrsCellLoc, type YrsSession } from './index';
+import { tableUnavailableError } from './tableUnavailable';
 import { closeCommandEngines, openCommandEngine, TIMEOUT } from './residentCommandTestSupport';
 import type { DocxWorkerCommandEngine } from './residentCommandProtocol';
 import { resolveLiveCell, setCellLocationShadowCheck } from './residentCommandTableSelection';
@@ -57,7 +58,7 @@ async function open(clientId: number, nested = false) {
     echo: { paint() {}, drop() {}, present() {} }, maxRecoveryAttempts: 0,
     recovery: { reopen: () => Promise.reject(new Error('Unexpected reopen')) },
   });
-  return { engine, session, bytes, nested };
+  return { engine, session, client, bytes, nested };
 }
 
 const merge = { lane: 'collab', fence: true } as const;
@@ -126,13 +127,9 @@ for (const nested of [false, true]) {
       expect(replica.session.state.selection?.focus.story).toBe(story);
       expect((await replica.session.submit('insertText', { text: 'Z' }).ack).status).toBe('applied');
       expect(cellTexts(replica, story).join('')).toContain('Z');
-      let code: string | undefined;
-      try {
-        await saveYrsDocx(replica.engine as unknown as YrsSession, { updateModifiedDate: false });
-      } catch (error) {
-        code = (error as Error & { code?: string }).code;
-      }
-      expect(code).toBe('table-unavailable');
+      const unsaved = replica.engine.encodeState();
+      await expect(replica.client.save({ comments: [] })).rejects.toThrow(tableUnavailableError().message);
+      expect(replica.engine.encodeState()).toEqual(unsaved);
 
       send(replica, second);
       expect(second.redo()).toBe(true);
@@ -151,6 +148,56 @@ for (const nested of [false, true]) {
 }
 
 /** Counts every call this engine instance receives, by method name. */
+const border = { style: 'single', size: 4, color: { rgb: '000000' } };
+const CARET_TABLE_COMMANDS = [
+  ['insertTableRow', { side: 'below' }], ['insertTableColumn', { side: 'right' }], ['deleteTableRow', {}],
+  ['deleteTableColumn', {}], ['mergeTableCells', {}], ['splitTableCell', { rows: 1, columns: 2 }],
+  ['setTableCellShading', { color: 'FF0000' }], ['setTableBorders', { borders: { top: border } }],
+  ['setTableProperties', { op: 'patch', patch: { justification: 'center' } }],
+] as const;
+
+test('with the caret in a cell of an unavailable inner table, table commands refuse coded and deleteTable removes only the inner table', async () => {
+  const replica = await open(9801, true);
+  const first = await peer(replica, 9802);
+  const second = await peer(replica, 9803);
+  try {
+    const table = tableStory(replica);
+    const story = cellStory(replica);
+    const inCell = { story, paraId: replica.engine.paragraphs(story)[0]!.paraId, offset: 0 };
+    first.insertRow(at(table, 0, 0), 'below');
+    sync(first, second);
+    second.setColumnWidth(at(table, 0, 0), 2000);
+    expect(first.undo()).toBe(true);
+    sync(first, second);
+    expect(second.undo()).toBe(true);
+    sync(first, second);
+    await receive(replica, second);
+    expect(Array.isArray(replica.engine.tablePayload(table, 0)?.rows)).toBe(false);
+
+    const outer = () => JSON.stringify(replica.engine.tablePayload('body', 0));
+    const intact = outer();
+    const outerCells = (replica.engine.tablePayload('body', 0) as { rows: Array<{ cells: Array<{ story: string }> }> })
+      .rows[0]!.cells.map((entry) => entry.story);
+    const selection = { anchor: inCell, focus: inCell };
+    for (const [kind, payload] of CARET_TABLE_COMMANDS) {
+      const ack = await replica.session.submit(kind as 'deleteTable', { ...payload, selection } as never).ack;
+      expect([kind, ack.status, (ack as { reason?: string }).reason]).toEqual([kind, 'refused', 'table-unavailable']);
+      expect(outer()).toBe(intact);
+    }
+
+    expect((await replica.session.submit('deleteTable', { selection }).ack).status).toBe('applied');
+    expect(replica.engine.tablePayload(table, 0)).toBeNull();
+    expect(outer()).toBe(intact);
+    expect(cellTexts(replica, outerCells[0]!)).toEqual(['After inner']);
+    expect(cellTexts(replica, outerCells[1]!)).toEqual(['Outer two']);
+    await expect(replica.client.save({ comments: [] })).resolves.toBeDefined();
+  } finally {
+    first.destroy();
+    second.destroy();
+    replica.session.dispose();
+  }
+}, TIMEOUT);
+
 function countEngineCalls(raw: object): () => Record<string, number> {
   let counts: Record<string, number> = {};
   for (let proto = Object.getPrototypeOf(raw); proto && proto !== Object.prototype; proto = Object.getPrototypeOf(proto)) {
