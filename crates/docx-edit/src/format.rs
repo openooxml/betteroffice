@@ -1666,17 +1666,7 @@ impl EditingDoc {
         delta: RunDelta<'_>,
         keeper: &mut Keeper<'_>,
     ) -> OpResult<Vec<String>> {
-        let blocks_end = if matches!(delta, RunDelta::Clear(_)) {
-            story_chunks(story, txn)
-                .iter()
-                .skip_while(|chunk| chunk.end <= range.end)
-                .take_while(|chunk| chunk.block)
-                .last()
-                .map_or(range.end, |chunk| chunk.end)
-        } else {
-            range.end
-        };
-        let (spans, children) = block_free_spans(story, txn, range.start, blocks_end, false);
+        let (spans, children) = block_free_spans(story, txn, range.start, range.end, false);
         let paragraphs: Vec<_> = story_paragraphs(story, txn)
             .into_iter()
             .filter(|paragraph| paragraph.end > range.start && paragraph.start < range.end)
