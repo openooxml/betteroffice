@@ -201,6 +201,63 @@ describe('XlsxEditor engine dispatch', () => {
     expect(errors).toHaveLength(1);
   });
 
+  it('reports a plugin again in the legacy viewer after it is removed and re-added', async () => {
+    const [first, second] = ['acme.first', 'acme.second'].map((id) => defineXlsxPlugin({ id, createState: () => null }));
+    const errors: XlsxPluginError[] = [];
+    const onPluginError = (error: XlsxPluginError) => { errors.push(error); };
+    const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen readOnly file={file}
+      plugins={[first!, second!]} onPluginError={onPluginError} />);
+    await waitFor(() => expect(errors).toHaveLength(2));
+    await act(async () => {
+      view.rerender(<XlsxEditor legacySyncApi experimentalWorkerOpen readOnly file={file}
+        plugins={[first!]} onPluginError={onPluginError} />);
+    });
+    expect(errors).toHaveLength(2);
+    await act(async () => {
+      view.rerender(<XlsxEditor legacySyncApi experimentalWorkerOpen readOnly file={file}
+        plugins={[first!, second!]} onPluginError={onPluginError} />);
+    });
+    expect(errors).toHaveLength(3);
+    expect(errors[2]?.pluginId).toBe('acme.second');
+  });
+
+  it('reports plugins again in the legacy viewer when the file changes', async () => {
+    const plugins = ['acme.first', 'acme.second'].map((id) => defineXlsxPlugin({ id, createState: () => null }));
+    const errors: XlsxPluginError[] = [];
+    const onPluginError = (error: XlsxPluginError) => { errors.push(error); };
+    const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen readOnly file={file}
+      plugins={plugins} onPluginError={onPluginError} />);
+    await waitFor(() => expect(errors).toHaveLength(2));
+    await act(async () => {
+      view.rerender(<XlsxEditor legacySyncApi experimentalWorkerOpen readOnly file={new Uint8Array([4, 5, 6])}
+        plugins={plugins} onPluginError={onPluginError} />);
+    });
+    expect(view.getByTestId('worker-viewer')).toBeDefined();
+    expect(errors).toHaveLength(4);
+    expect(errors.slice(2).map((error) => error.pluginId)).toEqual(['acme.first', 'acme.second']);
+  });
+
+  it('reports plugins again when the legacy viewer returns after the editor', async () => {
+    const plugins = ['acme.first', 'acme.second'].map((id) => defineXlsxPlugin({ id, createState: () => null }));
+    const errors: XlsxPluginError[] = [];
+    const onPluginError = (error: XlsxPluginError) => { errors.push(error); };
+    const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen readOnly file={file}
+      plugins={plugins} onPluginError={onPluginError} />);
+    await waitFor(() => expect(errors).toHaveLength(2));
+    await act(async () => {
+      view.rerender(<XlsxEditor legacySyncApi experimentalWorkerOpen file={file}
+        plugins={plugins} onPluginError={onPluginError} />);
+    });
+    await waitFor(() => expect(view.getByTestId('worker-editor')).toBeDefined());
+    expect(errors).toHaveLength(2);
+    await act(async () => {
+      view.rerender(<XlsxEditor legacySyncApi experimentalWorkerOpen readOnly file={new Uint8Array([4, 5, 6])}
+        plugins={plugins} onPluginError={onPluginError} />);
+    });
+    await waitFor(() => expect(view.getByTestId('worker-viewer')).toBeDefined());
+    expect(errors).toHaveLength(4);
+  });
+
   it('logs unsupported legacy viewer plugins when onPluginError is absent', async () => {
     const plugins = ['acme.first', 'acme.second'].map((id) => defineXlsxPlugin({ id, createState: () => null }));
     const messages: unknown[][] = [];
