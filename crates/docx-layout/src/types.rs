@@ -323,6 +323,9 @@ pub struct ImageRunPosition {
 #[serde(rename_all = "camelCase")]
 pub struct ImageRun {
     pub src: String,
+    /// The picture's relationship id, which names it when `src` resolves to nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relationship_id: Option<String>,
     pub width: f64,
     pub height: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1064,6 +1067,9 @@ pub struct ImageBlock {
     pub sdt_groups: Option<Vec<SdtGroup>>,
     pub id: BlockId,
     pub src: String,
+    /// The picture's relationship id, which names it when `src` resolves to nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relationship_id: Option<String>,
     pub width: f64,
     pub height: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1481,6 +1487,7 @@ impl PartialEq for ImageRun {
     fn eq(&self, other: &Self) -> bool {
         let Self {
             src: _,
+            relationship_id: _,
             width: _,
             height: _,
             alt: _,
@@ -1525,6 +1532,7 @@ impl PartialEq for ImageRun {
             pm_end: _,
         } = other;
         self.src == other.src
+            && self.relationship_id == other.relationship_id
             && self.width == other.width
             && self.height == other.height
             && self.alt == other.alt
@@ -1711,6 +1719,7 @@ impl PartialEq for ImageBlock {
             sdt_groups: _,
             id: _,
             src: _,
+            relationship_id: _,
             width: _,
             height: _,
             alt: _,
@@ -1734,6 +1743,7 @@ impl PartialEq for ImageBlock {
         self.sdt_groups == other.sdt_groups
             && self.id == other.id
             && self.src == other.src
+            && self.relationship_id == other.relationship_id
             && self.width == other.width
             && self.height == other.height
             && self.alt == other.alt

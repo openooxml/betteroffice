@@ -20,6 +20,8 @@ import {
   isCellHasNoStoryRefusal,
   sameYrsSelection,
   tableBoundaryDeleteTarget,
+  withYrsSelectionCause,
+  yrsSelectionCause,
   type YrsAuthor,
   type YrsInputPositionMap,
   type YrsInlineFormatDelta,
@@ -407,7 +409,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       }
       return true;
     },
-    [holdInput, readOnly, requestOpeningPeer]
+    [holdInput, readOnly, requestOpeningPeer, session]
   );
   const queuedSessionRef = useRef(session);
   if (!inputOperationQueueRef.current || queuedSessionRef.current !== session) {
@@ -667,10 +669,12 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     const first = inputPositionMap(story)?.paragraphs[0];
     if (!first) return null;
     const loc = { story, paraId: first.paraId, offset: 0 };
-    session.setSelection(loc);
+    const currentStory = session.selection()?.head.story;
+    const cause = currentStory && !belongsToRootStory(currentStory) ? undefined : yrsSelectionCause(session) ?? 'seed';
+    withYrsSelectionCause(session, cause, () => session.setSelection(loc));
     defaultCaretRef.current = { anchor: loc, head: loc };
     return { anchor: loc, head: loc };
-  }, [inputPositionMap, readSelection, session, story]);
+  }, [belongsToRootStory, inputPositionMap, readSelection, session, story]);
 
   const displaySelection = useCallback((): YrsDisplaySelection | null => {
     if (holdInput) return null;
@@ -737,7 +741,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       onDirectInput(dirtyStories);
       emitSelection(true, residentLayoutReady, residentCaretReady);
     },
-    [emitSelection, onCaretInput, onDirectInput, requestLocalCaretReveal]
+    [emitSelection, onCaretInput, onDirectInput, requestLocalCaretReveal, session]
   );
 
   const finishResidentMutation = useCallback(
@@ -1373,6 +1377,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       holdOperation,
       readOnly,
       replicaReadyRef,
+      session,
     ]
   );
 
@@ -2195,7 +2200,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     if (seedSelection) ensureSelection();
     const initializing = seededSessionRef.current !== session;
     if (emitSelection(false, false, false, false, initializing)) seededSessionRef.current = session;
-  }, [emitSelection, enabled, ensureSelection, holdInput, seedSelection, session, replicaReady]);
+  }, [emitSelection, enabled, ensureSelection, holdInput, seedSelection, session, replicaReady, story]);
 
   const focusedSessionRef = useRef<YrsSession | null>(null);
   useEffect(() => {

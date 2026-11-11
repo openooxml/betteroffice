@@ -143,6 +143,7 @@ export type {
   XlsxPluginEvent,
   XlsxPluginFocusChangeEvent,
   XlsxPluginLocaleChangeEvent,
+  XlsxPluginSelectionSettleEvent,
   XlsxPluginFailureCode,
   XlsxPluginGeometry,
   XlsxGeometryTarget,

@@ -153,6 +153,7 @@ files/yrs/residentToolbarMetadata.api.d.ts
 files/yrs/saveYrsDocx.api.d.ts
 files/yrs/sectionBreak.api.d.ts
 files/yrs/sections.api.d.ts
+files/yrs/selectionChanges.api.d.ts
 files/yrs/sessionInternals.api.d.ts
 files/yrs/sidebarReads.api.d.ts
 files/yrs/stories.api.d.ts

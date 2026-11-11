@@ -21,6 +21,9 @@ import { editableWorkbookSessionBackend } from '../worker/useEditableSessionWork
 import { createXlsxCommandController, xlsxCommandController } from '../commands/createXlsxCommandStore';
 import type { XlsxPluginEditorAccess } from './createPluginClients';
 import { useXlsxPluginHost } from './useXlsxPluginHost';
+import * as xlsxBindings from './useXlsxPluginHost';
+import { selectionClock, selectionWindow } from '../../../../e2e/browser/plugin-host/selection-clock';
+import type { XlsxAnchorGeometryResult, XlsxPluginSelection } from './types';
 import { isMacPlatform } from '../commands/descriptors';
 import { pluginDefinition } from './defineXlsxPlugin';
 import * as publicApi from '../index';
@@ -296,7 +299,9 @@ function pluginWorker(sheetCount = 2) {
       rect: { x: col * 96, y: row * 24, w: 96, h: 24 },
       scrollPosition: { x: 0, y: 0 } })),
     cellInputs: mock(async () => ({ sheet: 0, version, cells: [[{ input: '', isFormula: false }]] })),
-    frame: mock(async () => frame()),
+    frame: mock(async (viewport: WorkbookCommandFrame['viewport'], options?: { sheet?: number }) => ({
+      ...frame(), viewport, sheet: options?.sheet ?? editState.activeSheet,
+    })),
   };
   const session = {
     ...testSessionCommands(), state: { format: 'xlsx', stage: 'ready', version: 0,
@@ -351,6 +356,11 @@ function pluginWorker(sheetCount = 2) {
   const caf = spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => { animations.delete(id); });
   return {
     session, calls, sent, charts, hydrate, attach,
+    pendingPaints: () => animations.size,
+    publishSelection(row: number, col: number) {
+      selected = { sheetId: 'sheet:0', range: { kind: 'rowCol', start: { row, col }, end: { row, col } }, activeCell: { row, col } };
+      for (const listener of listeners) listener({ throughSeq, version, statuses: [], selection: selected, editState });
+    },
     setReadOnly(value: boolean) { editState.readOnly = value; },
     async paint() {
       const pending = [...animations.values()];
@@ -445,6 +455,26 @@ const headerFooterSheets = [
 ];
 
 describe('peer-less plugins', () => {
+  test('worker selection changes emit one selection-settle after acknowledgement', async () => {
+    const host = pluginWorker();
+    const plugin = recorder('settle');
+    try {
+      const view = await host.mount({ plugins: [plugin.plugin] });
+      await settle(400);
+      plugin.events.length = 0;
+      fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowDown', shiftKey: true });
+      const command = await host.dispatched(1);
+      await act(async () => { host.ack(command); });
+      expect(plugin.events.filter((event) => event.type === 'selection-settle')).toHaveLength(0);
+      await settle(400);
+      expect(plugin.events.filter((event) => event.type === 'selection-settle')).toMatchObject([{ source: 'keyboard' }]);
+      expect(plugin.events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
+      expect(last(plugin.contexts).snapshot.selectionSettled).toBe(true);
+      await settle(400);
+      expect(plugin.events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
+    } finally { host.restore(); }
+  });
+
   test('worker plugins receive the locale and one change after rerender', async () => {
     const host = pluginWorker();
     const contexts: XlsxPluginContext<null>[] = [];
@@ -2990,6 +3020,25 @@ describe('XlsxEditor plugin adapters', () => {
   });
 });
 
+test('selection changes emit exactly one selection-settle after the quiet window', async () => {
+  const plugin = recorder('settle');
+  const mounted = await mount({ plugins: [plugin.plugin] });
+  await settle(400);
+  plugin.events.length = 0;
+  await act(async () => { mounted.api().selectCells(0, {
+    anchor: { row: 0, col: 0 }, focus: { row: 2, col: 2 },
+  }); });
+  expect(plugin.events.filter((event) => event.type === 'selection-settle')).toEqual([]);
+  await settle(400);
+  expect(plugin.events.filter((event) => event.type === 'selection-settle')).toMatchObject([
+    { source: 'keyboard', selection: { cells: { focus: { row: 2, col: 2 } } } },
+  ]);
+  expect(plugin.events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
+  expect(last(plugin.contexts).snapshot.selectionSettled).toBe(true);
+  await settle(400);
+  expect(plugin.events.filter((event) => event.type === 'selection-settle')).toHaveLength(1);
+});
+
 test('plugins receive the resolved locale and one event when it changes', async () => {
   const contexts: XlsxPluginContext<null>[] = [];
   const events: XlsxPluginEvent[] = [];
@@ -3027,4 +3076,357 @@ test('plugin locales are canonical and equivalent tags do not notify twice', asy
     { type: 'locale-change', generation: last(contexts).snapshot.generation, locale: 'en' },
   ]);
   expect(last(contexts).snapshot.locale).toBe('en');
+});
+
+
+async function xlsxMatrix(engine: 'XI' | 'XP', file = fixture, controlledClock = false) {
+  const collaboration = {};
+  const clock = (controlledClock ? selectionClock() : selectionWindow()) as
+    ReturnType<typeof selectionClock> | ReturnType<typeof selectionWindow>;
+  const restoreClock = () => { if ('restore' in clock) clock.restore(); };
+  const events: XlsxPluginEvent[] = [];
+  const anchors: Array<XlsxAnchorGeometryResult | null> = [];
+  const settledAt: number[] = [];
+  let latest: XlsxPluginContext<null> | undefined;
+  let binding: ReturnType<typeof useXlsxPluginHost> | undefined;
+  let overrideSelection: XlsxPluginSelection | undefined;
+  const originalBinding = xlsxBindings.useXlsxPluginHost;
+  const capture = spyOn(xlsxBindings, 'useXlsxPluginHost').mockImplementation((options) => {
+    binding = originalBinding(overrideSelection === undefined ? options : { ...options, selection: overrideSelection });
+    return binding;
+  });
+  const plugin = defineXlsxPlugin({ id: 'matrix', createState: () => null,
+    initialize(context) { latest = context; },
+    onEvent(context, event) {
+      latest = context; events.push(event);
+      if (event.type === 'selection-settle') {
+        settledAt.push(Date.now());
+        anchors.push(context.geometry?.getAnchorGeometry({ kind: 'selection' }) ?? null);
+      }
+    } });
+  const peer = engine === 'XP' ? pluginWorker() : null;
+  if (peer && file === charted) {
+    const workbook = openWorkbook(charted.slice());
+    try { peer.charts.push(...(workbook.displayList({ x: 0, y: 0, ...VIEWPORT }).charts ?? [])); }
+    finally { workbook.dispose(); }
+  }
+  const frames = new Map<number, FrameRequestCallback>();
+  let sequence = 0;
+  const raf = globalThis.requestAnimationFrame;
+  const caf = globalThis.cancelAnimationFrame;
+  const windowRaf = window.requestAnimationFrame;
+  const windowCaf = window.cancelAnimationFrame;
+  let mounted: Awaited<ReturnType<typeof mount>> | undefined;
+  let workerView: Awaited<ReturnType<ReturnType<typeof pluginWorker>['mount']>> | undefined;
+  try {
+    if (peer) {
+      workerView = await peer.mount({ plugins: [plugin] });
+      await peer.paint();
+    } else {
+      mounted = await mount({ plugins: [plugin], file, collaboration });
+      await until(() => latest?.geometry !== null && latest?.geometry !== undefined);
+      globalThis.requestAnimationFrame = window.requestAnimationFrame = callback => { frames.set(++sequence, callback); return sequence; };
+      globalThis.cancelAnimationFrame = window.cancelAnimationFrame = id => { frames.delete(id); };
+    }
+    await act(async () => { await clock.tick(350); });
+    await act(async () => {});
+    const view = workerView ?? mounted!.view;
+    const context = () => binding!.host.activations()[0]!.context as XlsxPluginContext<null>;
+    const reset = () => { events.length = 0; anchors.length = 0; settledAt.length = 0; };
+    const quiet = async (ms = 350) => {
+      await act(async () => { await clock.tick(ms); });
+      await act(async () => {});
+    };
+    const paint = async () => {
+      if (peer) await peer.paint();
+      else await act(async () => { const pending = [...frames.values()]; frames.clear(); for (const callback of pending) callback(0); });
+      await act(async () => {});
+    };
+    const select = async (row: number, col = 0) => {
+      if (peer) {
+        const nextSequence = peer.sent.length + 1;
+        const selecting = context().navigation.selectCells({ sheetId: 'sheet:0', selection: selectionAt({ row, col }) },
+          { expectVersion: context().snapshot.version, focus: false });
+        const command = await peer.dispatched(nextSequence);
+        await act(async () => { peer.ack(command); await selecting; });
+      } else await act(async () => { mounted!.api().selectCells(0, selectionAt({ row, col })); });
+      await act(async () => {});
+    };
+    reset();
+    return { plugin, events, anchors, settledAt, view, clock, context, quiet, paint, select, reset, peer,
+      binding: () => binding!, api: () => mounted!.api(), pendingPaints: () => peer?.pendingPaints() ?? frames.size,
+      rerender(plugins = [plugin], file?: Uint8Array) {
+        if (workerView) workerView.rerender({ plugins, ...(file ? { file } : {}) });
+        else mounted!.rerender({ plugins, collaboration, ...(file ? { file } : {}) });
+      },
+      clearSelection() { overrideSelection = null; this.rerender(); },
+      async selectOffscreen(row: number, col: number) {
+        if (peer) await act(async () => { peer.publishSelection(row, col); });
+        else await select(row, col);
+      },
+      async schedulePaint() {
+        await act(async () => {
+          if (peer) peer.push('v2');
+          else await mounted!.api().applyEdits(setCell(mounted!.api().handle.version(), 'A1', 'paint revision'));
+          const scroll = view.getByTestId('xlsx-scroll');
+          scroll.scrollTop += 24; fireEvent.scroll(scroll);
+        });
+      },
+      dispose() {
+        cleanup(); capture.mockRestore(); peer?.restore();
+        if (!peer) {
+          globalThis.requestAnimationFrame = raf; globalThis.cancelAnimationFrame = caf;
+          window.requestAnimationFrame = windowRaf; window.cancelAnimationFrame = windowCaf;
+        }
+        restoreClock();
+      },
+    };
+  } catch (error) {
+    cleanup(); capture.mockRestore(); peer?.restore();
+    if (!peer) {
+      globalThis.requestAnimationFrame = raf; globalThis.cancelAnimationFrame = caf;
+      window.requestAnimationFrame = windowRaf; window.cancelAnimationFrame = windowCaf;
+    }
+    restoreClock();
+    throw error;
+  }
+}
+
+for (const engine of ['XI', 'XP'] as const) describe(`selection matrix ${engine}`, () => {
+  editorTest('T19: settle follows the pending paint and the anchor answers ok at settle time', async () => {
+    const h = await xlsxMatrix(engine, fixture, true);
+    try {
+      await h.select(2, 1);
+      await h.schedulePaint();
+      expect(h.pendingPaints()).toBeGreaterThan(0);
+      await h.quiet();
+      expect(h.events.filter(event => event.type === 'selection-settle')).toHaveLength(0);
+      expect(h.context().snapshot.selectionSettled).toBe(false);
+      await h.paint();
+      await until(() => h.context().snapshot.selectionSettled);
+      expect(h.events.filter(event => event.type === 'selection-settle')).toHaveLength(1);
+      expect(h.anchors).toMatchObject([{ ok: true }]);
+      expect(h.context().snapshot.selectionSettled).toBe(true);
+      await h.quiet(700);
+      expect(h.anchors).toHaveLength(1);
+    } finally { h.dispose(); }
+  });
+
+  editorTest('T19b: an offscreen selection settles and its anchor is layout-unavailable', async () => {
+    const h = await xlsxMatrix(engine);
+    try {
+      await h.selectOffscreen(1000, 1);
+      await h.paint();
+      await h.quiet();
+      expect(h.anchors).toMatchObject([{ ok: false, failure: { code: 'layout-unavailable' } }]);
+      expect(h.context().snapshot.selectionSettled).toBe(true);
+      const result = await h.context().geometry!.readAnchorGeometries([{ kind: 'selection' }]);
+      expect(result).toMatchObject([{ ok: false, failure: { code: 'layout-unavailable' } }]);
+      expect(JSON.stringify(result)).not.toContain('pending');
+    } finally { h.dispose(); }
+  });
+
+  editorTest('T19c: a sheet that never paints settles after the bounded wait', async () => {
+    const h = await xlsxMatrix(engine);
+    try {
+      await h.select(2, 1);
+      await h.schedulePaint();
+      expect(h.pendingPaints()).toBeGreaterThan(0);
+      await h.quiet();
+      expect(h.anchors).toEqual([]);
+      await act(async () => { await h.clock.expire(() => h.anchors.length > 0); });
+      await act(async () => {});
+      expect(h.pendingPaints()).toBeGreaterThan(0);
+      expect(h.anchors).toHaveLength(1);
+      expect(h.context().snapshot.selectionSettled).toBe(true);
+      await h.paint();
+      await h.quiet(700);
+      expect(h.anchors).toHaveLength(1);
+    } finally { h.dispose(); }
+  });
+
+  editorTest('T7: reload drops a pending settle and refuses retained geometry', async () => {
+    const h = await xlsxMatrix(engine);
+    try {
+      await h.select(1, 1);
+      const retained = h.context();
+      const generation = retained.snapshot.generation;
+      h.reset();
+      h.rerender([h.plugin], fixture.slice());
+      await act(async () => {});
+      await h.paint();
+      await h.quiet(700);
+      expect(h.binding().host.generation()).not.toBe(generation);
+      expect(h.events.filter(event => event.type === 'selection-settle' && event.generation === generation)).toEqual([]);
+      expect(retained.geometry!.getAnchorGeometry({ kind: 'selection' }))
+        .toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
+    } finally { h.dispose(); }
+  });
+
+  editorTest('T17: clearing the selection settles once with missing-target', async () => {
+    const h = await xlsxMatrix(engine);
+    try {
+      await h.select(1, 1);
+      await h.paint();
+      await h.quiet();
+      h.reset();
+      await act(async () => { h.clearSelection(); });
+      await h.quiet();
+      expect(h.anchors).toMatchObject([{ ok: false, failure: { code: 'missing-target' } }]);
+      expect(h.context().snapshot.selection).toBeNull();
+      expect(await h.context().geometry!.readAnchorGeometries([{ kind: 'selection' }]))
+        .toMatchObject([{ ok: false, failure: { code: 'missing-target' } }]);
+      await h.quiet(700);
+      expect(h.anchors).toHaveLength(1);
+    } finally { h.dispose(); }
+  });
+
+  editorTest('T20: chart selection settles once with missing-target', async () => {
+    const h = await xlsxMatrix(engine, charted);
+    const workbook = openWorkbook(charted.slice());
+    try {
+      const chart = workbook.displayList({ x: 0, y: 0, ...VIEWPORT }).charts![0]!;
+      const point = { button: 0, clientX: chart.clip.x + chart.clip.w / 2, clientY: chart.clip.y + chart.clip.h / 2 };
+      await act(async () => {
+        fireEvent.mouseDown(h.view.getByTestId('xlsx-scroll'), point);
+        fireEvent.mouseUp(window, point);
+      });
+      expect(h.context().snapshot.selection?.chartId).toBe(chart.id);
+      await h.paint(); await h.quiet();
+      expect(h.anchors).toMatchObject([{ ok: false, failure: { code: 'missing-target' } }]);
+      expect(await h.context().geometry!.readAnchorGeometries([{ kind: 'selection' }]))
+        .toMatchObject([{ ok: false, failure: { code: 'missing-target' } }]);
+      await h.quiet(700);
+      expect(h.anchors).toHaveLength(1);
+    } finally { workbook.dispose(); h.dispose(); }
+  });
+
+  editorTest('T21: cell-editor caret moves do not settle', async () => {
+    const h = await xlsxMatrix(engine);
+    try {
+      await h.select(1, 1);
+      await h.paint();
+      await h.quiet();
+      const before = h.context().snapshot.selection;
+      await act(async () => { fireEvent.keyDown(h.view.getByTestId('xlsx-scroll'), { key: 'F2' }); });
+      await act(async () => {});
+      const editor = h.view.getByTestId('xlsx-cell-editor') as HTMLTextAreaElement;
+      expect(editor).toBeTruthy();
+      h.reset();
+      for (const key of ['Home', 'ArrowRight', 'ArrowLeft', 'End']) await act(async () => {
+        editor.focus(); fireEvent.keyDown(editor, { key }); fireEvent.select(editor);
+      });
+      await h.quiet(700);
+      expect(h.anchors).toEqual([]);
+      expect(h.context().snapshot.selection).toEqual(before);
+      expect(h.context().geometry!.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: true });
+    } finally { h.dispose(); }
+  });
+
+  if (engine === 'XI') editorTest('T4: a remote edit under an unmoved cell selection neither unsettles nor settles', async () => {
+    const h = await xlsxMatrix(engine);
+    const replica = openWorkbook(fixture, { collaborative: true, clientId: 7172 });
+    try {
+      await h.select(1, 1); await h.paint(); await h.quiet(); h.reset();
+      const states: boolean[] = [];
+      const stop = h.binding().host.subscribe(() => states.push(h.context().snapshot.selectionSettled));
+      try {
+        replica.applyUpdate(h.api().handle.encodeStateAsUpdate());
+        replica.editCell(0, 10, 5, 'remote');
+        await act(async () => { h.api().handle.applyUpdate(replica.encodeStateAsUpdate(h.api().handle.encodeStateVector())); });
+        await h.paint(); await h.quiet();
+        expect(h.events.some(event => event.type === 'document-change')).toBe(true);
+        expect(states).not.toContain(false);
+        expect(h.anchors).toEqual([]);
+      } finally { stop(); }
+    } finally { replica.dispose(); h.dispose(); }
+  });
+
+  if (engine === 'XI') editorTest('T5: undo preserves the current cell selection without unsettling or settling', async () => {
+    const h = await xlsxMatrix(engine, fixture, true);
+    try {
+      await h.select(1, 1); await h.paint(); await h.quiet();
+      const beforeInput = input(h.api(), 1, 1);
+      await act(async () => { await h.api().applyEdits(setCell(h.api().handle.version(), 'B2', 'changed')); });
+      expect(input(h.api(), 1, 1)).toBe('changed');
+      await h.select(2, 1); await h.paint(); await h.quiet(); h.reset();
+      const beforeSelection = h.context().snapshot.selection;
+      expect(beforeSelection?.cells?.focus).toEqual({ row: 2, col: 1 });
+      const states: boolean[] = [];
+      const stop = h.binding().host.subscribe(() => states.push(h.context().snapshot.selectionSettled));
+      try {
+        await act(async () => { expect(await h.api().commands.execute('undo', null)).toMatchObject({ ok: true, status: 'executed' }); });
+        await h.paint(); await h.quiet();
+        expect(input(h.api(), 1, 1)).toBe(beforeInput);
+        expect(h.events.some(event => event.type === 'document-change')).toBe(true);
+        expect(h.context().snapshot.selection).toEqual(beforeSelection);
+        expect(h.context().snapshot.selectionSettled).toBe(true);
+        expect(states).not.toContain(false);
+        expect(h.events.filter(event => event.type === 'selection-settle')).toEqual([]);
+        expect(h.anchors).toHaveLength(0);
+        expect(h.context().geometry!.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: true });
+        await h.quiet(700);
+        expect(h.events.filter(event => event.type === 'selection-settle')).toEqual([]);
+        expect(h.anchors).toHaveLength(0);
+        expect(h.context().snapshot.selection).toEqual(beforeSelection);
+        expect(states).not.toContain(false);
+      } finally { stop(); }
+    } finally { h.dispose(); }
+  });
+
+  if (engine === 'XI') editorTest('T6: focus change neither cancels nor restarts a pending settle', async () => {
+    const h = await xlsxMatrix(engine);
+    try {
+      const selectedAt = Date.now();
+      await h.select(1, 1); await h.paint(); await h.quiet(200);
+      const focusedAt = Date.now();
+      await act(async () => { const root = h.view.getByTestId('xlsx-scroll'); root.focus(); root.blur(); });
+      expect(h.anchors).toEqual([]);
+      await until(() => h.anchors.length > 0);
+      expect(h.anchors).toHaveLength(1);
+      expect(h.settledAt[0]! - selectedAt).toBeGreaterThanOrEqual(350);
+      expect(h.settledAt[0]! - focusedAt).toBeLessThan(350);
+      expect(h.events.some(event => event.type === 'focus-change')).toBe(true);
+    } finally { h.dispose(); }
+  });
+
+  if (engine === 'XI') editorTest('T8: removing one of two plugins keeps the other pending settle; reattach does not replay', async () => {
+    const h = await xlsxMatrix(engine);
+    const events: XlsxPluginEvent[] = [];
+    const other = defineXlsxPlugin({ id: 'other', createState: () => null, onEvent(_context, event) { events.push(event); } });
+    try {
+      await act(async () => { h.rerender([h.plugin, other]); });
+      await h.select(1, 1); await h.paint(); await h.quiet(200);
+      await act(async () => { h.rerender([other]); });
+      await h.quiet(150);
+      expect(h.anchors).toEqual([]);
+      expect(events.filter(event => event.type === 'selection-settle')).toHaveLength(1);
+      await act(async () => { h.rerender([h.plugin, other]); });
+      await h.quiet(700);
+      expect(h.anchors).toEqual([]);
+      expect(events.filter(event => event.type === 'selection-settle')).toHaveLength(1);
+    } finally { h.dispose(); }
+  });
+
+  if (engine === 'XI') editorTest('T23: continuous typing longer than the window settles once after the last key', async () => {
+    const h = await xlsxMatrix(engine);
+    try {
+      await h.select(0); await h.paint(); await h.quiet(); h.reset();
+      let lastKeyAt = 0;
+      for (let index = 1; index <= 8; index++) {
+        await act(async () => { lastKeyAt = Date.now(); fireEvent.keyDown(h.view.getByTestId('xlsx-scroll'), { key: 'x' }); });
+        await act(async () => {
+          const editor = h.view.getByTestId('xlsx-cell-editor');
+          fireEvent.change(editor, { target: { value: `typed ${index}` } });
+          fireEvent.keyDown(editor, { key: 'Enter' });
+        });
+        await h.paint(); await h.quiet(100);
+        expect(h.anchors).toEqual([]);
+      }
+      expect(h.anchors).toEqual([]);
+      await until(() => h.anchors.length > 0);
+      expect(h.anchors).toHaveLength(1);
+      expect(h.settledAt[0]! - lastKeyAt).toBeGreaterThanOrEqual(350);
+    } finally { h.dispose(); }
+  });
 });

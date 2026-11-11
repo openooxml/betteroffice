@@ -4,8 +4,10 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, describe, expect, mock, spyOn } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { StrictMode, useState } from 'react';
 import { createPortal } from 'react-dom';
+import * as pptx from '@betteroffice/pptx';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -13,8 +15,10 @@ if (ownsDom) GlobalRegistrator.register();
 import {
   initWasm,
   openPresentation,
+  type HitTestResult,
   type PptxEditRequest,
   type PptxEditResult,
+  type TextBoxPrimitive,
 } from '@betteroffice/pptx';
 import { pptxCommandController } from '../commands/createPptxCommandStore';
 import { isMacPlatform } from '../commands/descriptors';
@@ -30,6 +34,7 @@ import {
   usePptxCommand,
   usePptxCommands,
   type PptxCommandResult,
+  type PptxAnchorGeometryResult,
   type PptxCommandStore,
   type PptxEditorApi,
   type PptxPlugin,
@@ -42,11 +47,11 @@ import {
   type PptxPluginRefusal,
 } from '../index';
 
-const { act, cleanup, fireEvent, render, within } = await import('@testing-library/react');
+const { act, cleanup, fireEvent, render, waitFor, within } = await import('@testing-library/react');
 
 const MOD = isMacPlatform() ? { metaKey: true } : { ctrlKey: true };
 
-const root = resolve(import.meta.dir, '../../../..');
+const root = fileURLToPath(new URL('../../../../', import.meta.url));
 const quiet = { error: console.error, warn: console.warn };
 let fixture: Uint8Array;
 let faces: { family: string; bytes: Uint8Array }[];
@@ -1130,6 +1135,182 @@ describe('PptxEditor plugins', () => {
     expect(changes).toEqual([]);
   });
 
+  test('a plugin reads selection anchor geometry after selecting text', async () => {
+    const canvases = fakeContexts();
+    const ownBounds = Object.prototype.hasOwnProperty.call(HTMLElement.prototype, 'getBoundingClientRect');
+    const bounds = spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(
+      () => ({ left: 0, top: 0, width: 640, height: 360, x: 0, y: 0, right: 640, bottom: 360 } as DOMRect)
+    );
+    try {
+      const contexts: PptxPluginContext<null>[] = [];
+      const answers: PptxAnchorGeometryResult[] = [];
+      const plugin = definePptxPlugin<null>({
+        id: 'selection-geometry',
+        createState: () => null,
+        onEvent(context) {
+          contexts.push(context);
+          if (context.snapshot.selection?.target.kind === 'text' && context.geometry) {
+            answers.push(context.geometry.getAnchorGeometry({ kind: 'selection' }));
+          }
+        },
+      });
+      const { api, view } = await mount({ plugins: [plugin] });
+      await waitFor(() => expect(last(contexts)?.geometry).toBeTruthy());
+      const content = await read(api());
+      const story = content.stories.find((candidate) => candidate.slideId === content.slides[0].id && candidate.text.length > 3)!;
+      await act(async () => {
+        expect(await last(contexts).navigation.selectText({
+          slideId: story.slideId, shapeId: story.shapeId, storyId: story.storyId, anchor: 3, focus: 1,
+        }, { expectVersion: content.version })).toEqual({ ok: true });
+      });
+      await waitFor(() => expect(answers.some((answer) => answer.ok)).toBe(true));
+      const context = last(contexts);
+      const geometry = context.geometry!;
+      const answer = geometry.getAnchorGeometry({ kind: 'selection' });
+      expect(answer.ok).toBe(true);
+      if (!answer.ok) throw new Error(answer.failure.message);
+      expect(answer.rects.length).toBeGreaterThan(0);
+      expect(answer.version).toBe(content.version);
+      expect(answer.layoutId).toBe(context.snapshot.layout!.id);
+      expect(answer as PptxAnchorGeometryResult).toEqual(geometry.getAnchorGeometry({
+        kind: 'range', version: content.version, slideId: story.slideId,
+        shapeId: story.shapeId, storyId: story.storyId, anchor: 3, focus: 1,
+      }));
+      expect(await geometry.readAnchorGeometries([{ kind: 'selection' }])).toEqual([answer]);
+      await act(async () => {
+        fireEvent.keyDown(view.getByRole('application'), { key: 'ArrowRight' });
+      });
+      await waitFor(() => {
+        const selection = last(contexts).snapshot.selection?.target;
+        expect(selection).toMatchObject({ kind: 'text', anchor: 2, focus: 2 });
+        expect(last(contexts).geometry).not.toBeNull();
+      });
+      expect(last(contexts).snapshot.layout!.id).toBe(context.snapshot.layout!.id);
+      expect(last(contexts).geometry!.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: true, rects: [] });
+      const retained = geometry.getAnchorGeometry({ kind: 'selection' });
+      expect(retained).toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
+      expect(context.snapshot.selection?.target).toMatchObject({ kind: 'text', anchor: 3, focus: 1 });
+      await act(async () => {
+        expect(await last(contexts).navigation.selectText({
+          slideId: story.slideId, shapeId: story.shapeId, storyId: story.storyId, anchor: 2, focus: 2,
+        }, { expectVersion: content.version })).toEqual({ ok: true });
+      });
+      await waitFor(() => {
+        expect(last(contexts).geometry?.getAnchorGeometry({ kind: 'selection' }))
+          .toMatchObject({ ok: true, rects: [] });
+        expect(last(contexts).snapshot.layout!.id).not.toBe(context.snapshot.layout!.id);
+      });
+      expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({
+        ok: false, failure: { code: 'layout-unavailable' },
+      });
+    } finally {
+      bounds.mockRestore();
+      if (!ownBounds) delete (HTMLElement.prototype as { getBoundingClientRect?: unknown }).getBoundingClientRect;
+      canvases.restore();
+    }
+  });
+
+  test('retained selection anchors refuse a same-offset caret move to the other wrapped line', async () => {
+    const canvases = fakeContexts();
+    const ownBounds = Object.prototype.hasOwnProperty.call(HTMLElement.prototype, 'getBoundingClientRect');
+    const bounds = spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 640, 360));
+    const originalOpen = pptx.openPresentation;
+    const restorers: Array<() => void> = [];
+    let text!: TextBoxPrimitive;
+    const open = spyOn(pptx, 'openPresentation').mockImplementation((bytes, options) => {
+      const handle = originalOpen(bytes, options);
+      const slide = handle.snapshot().slides[0];
+      const shape = slide.shapes.find((candidate) => candidate.textStories.some(
+        (story) => handle.story(story.id).length > 10
+      ))!;
+      const story = shape.textStories.find((candidate) => handle.story(candidate.id).length > 10)!;
+      const originalLayout = handle.layoutSlide.bind(handle);
+      const layout = spyOn(handle, 'layoutSlide').mockImplementation((index) => {
+        const frame = originalLayout(index);
+        if (index !== 0) return frame;
+        const source = frame.primitives.find((primitive): primitive is TextBoxPrimitive =>
+          primitive.kind === 'textBox' && primitive.shapeId === shape.id && primitive.storyId === story.id)!;
+        text = { ...source, x: 100, y: 50, w: 400, h: 80, transform: undefined,
+          lines: [0, 5].map((start, row) => ({
+            x: 120, y: 60 + row * 20, width: 50, height: 20, baseline: 75 + row * 20,
+            start, end: start + 5, runs: [],
+            caretStops: Array.from({ length: 6 }, (_, offset) => ({ position: start + offset, x: 120 + offset * 10 })),
+          })) };
+        return { ...frame, primitives: [text] };
+      });
+      const cache = (handle as unknown as Record<symbol, {
+        hitTest(slideId: string, x: number, y: number): HitTestResult | null;
+      }>)[Symbol.for('@betteroffice/pptx/slide-layout-cache')];
+      const hit = spyOn(cache, 'hitTest').mockImplementation(() => ({
+        kind: 'text', shapeId: text.shapeId!, storyId: text.storyId!, position: 5,
+      }));
+      restorers.push(() => layout.mockRestore(), () => hit.mockRestore());
+      return handle;
+    });
+    try {
+      const probe = recorder();
+      const { api, view } = await mount({ plugins: [probe.plugin], showToolbar: false });
+      await waitFor(() => expect(last(probe.contexts)?.geometry).toBeTruthy());
+      const content = await read(api());
+      const story = content.stories.find((candidate) => candidate.slideId === content.slides[0].id &&
+        candidate.shapeId === text.shapeId && candidate.storyId === text.storyId)!;
+      expect(story.text.length).toBeGreaterThanOrEqual(10);
+      await act(async () => {
+        expect(await last(probe.contexts).navigation.selectText({
+          slideId: story.slideId, shapeId: story.shapeId, storyId: story.storyId, anchor: 1, focus: 1,
+        }, { expectVersion: content.version, focus: true })).toEqual({ ok: true });
+      });
+      const stage = view.getByRole('application');
+      await act(async () => { fireEvent.keyDown(stage, { key: 'End' }); });
+      await waitFor(() => {
+        expect(last(probe.contexts).snapshot.selection?.target).toMatchObject({ anchor: 5, focus: 5 });
+        expect(last(probe.contexts).geometry).toBeTruthy();
+      });
+      let retained!: PptxPluginContext<State>;
+      await act(async () => { await last(probe.contexts).run((context) => { retained = context; }); });
+      const geometry = retained.geometry!;
+      const before = geometry.getAnchorGeometry({ kind: 'selection' });
+      expect(before).toMatchObject({ ok: true, rects: [], anchor: geometry.toOverlayRect({
+        space: 'slide-px', rect: { x: 170, y: 60, width: 1, height: 20 },
+      }) });
+      const events = () => probe.events.filter((event) => event.type === 'selection-change');
+      const count = events().length;
+      await act(async () => { fireEvent.keyDown(stage, { key: 'End' }); });
+      expect(geometry.getAnchorGeometry({ kind: 'selection' })).toEqual(before);
+      expect(events()).toHaveLength(count);
+      const canvas = view.getByTestId('pptx-slide-canvas') as HTMLCanvasElement;
+      canvas.setPointerCapture = () => {};
+      const frame = api().handle.layoutSlide(0);
+      await act(async () => {
+        fireEvent.pointerDown(canvas, { isPrimary: true, button: 0, pointerId: 7,
+          clientX: 120 * 640 / frame.width, clientY: 90 * 360 / frame.height });
+      });
+      let fresh!: PptxPluginContext<State>;
+      await act(async () => { await retained.run((context) => { fresh = context; }); });
+      expect(fresh.snapshot.selection).toEqual(retained.snapshot.selection);
+      expect(fresh.geometry?.layout.id).toBe(geometry.layout.id);
+      expect(fresh.geometry?.getAnchorGeometry({ kind: 'selection' })).toMatchObject({
+        ok: true, rects: [], anchor: geometry.toOverlayRect({
+          space: 'slide-px', rect: { x: 120, y: 80, width: 1, height: 20 },
+        }),
+      });
+      expect(geometry.getAnchorGeometry({ kind: 'range', version: geometry.layout.version,
+        slideId: retained.snapshot.selection!.slideId, shapeId: text.shapeId!, storyId: text.storyId!, anchor: 5, focus: 5 }))
+        .toEqual(fresh.geometry!.getAnchorGeometry({ kind: 'selection' }));
+      expect(events()).toHaveLength(count);
+      expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({
+        ok: false, failure: { code: 'layout-unavailable' },
+      });
+    } finally {
+      cleanup();
+      for (const restore of restorers.reverse()) restore();
+      open.mockRestore();
+      bounds.mockRestore();
+      if (!ownBounds) delete (HTMLElement.prototype as { getBoundingClientRect?: unknown }).getBoundingClientRect;
+      canvases.restore();
+    }
+  });
+
   test('layouts follow the presented frame, its version, slide and zoom', async () => {
     const canvases = fakeContexts();
     try {
@@ -1198,6 +1379,7 @@ describe('PptxEditor plugins', () => {
       const story = content.stories.find(
         (candidate) => candidate.slideId === content.slides[2].id
       )!;
+      const retained = last(contexts).geometry!;
       await act(async () => {
         api().handle.propose('Agent', null, [
           { type: 'replaceText', storyId: story.storyId, start: 0, end: 0, text: 'Proposed ' },
@@ -1206,6 +1388,9 @@ describe('PptxEditor plugins', () => {
       });
       await until(() => marker() === null);
       expect(last(contexts).geometry).toBeNull();
+      expect(retained.getAnchorGeometry({ kind: 'selection' })).toMatchObject({
+        ok: false, failure: { code: 'layout-unavailable' },
+      });
       expect(last(layouts)).toBeNull();
       await act(async () => {
         await api().commands.execute('proposalDiff', { enabled: false });

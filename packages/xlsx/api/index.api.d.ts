@@ -2620,6 +2620,7 @@ export type CommandAck<S, E, F> = {
     version: number;
     outcomes: CommandOutcome[];
     selection?: S;
+    cause?: 'remote';
     editState?: E;
     frame?: FrameEnvelope<F>;
     revisions?: {
@@ -2697,6 +2698,7 @@ export type EditSessionState<S, E> = {
     throughSeq: number;
     presentedThroughSeq: number;
     selection: S | undefined;
+    selectionCause?: 'remote';
     editState: E | undefined;
 };
 /** @internal Shared asynchronous editor contract for worker and legacy backends. */

@@ -31,6 +31,7 @@ import {
   type PptxPluginClients,
 } from './createPluginClients';
 import { definitionProblem, pluginDefinition } from './definePptxPlugin';
+import type { SelectionCaret } from './geometry';
 import type {
   PptxPlugin,
   PptxPluginCommand,
@@ -56,7 +57,7 @@ export type PptxPluginActivation = RuntimeActivation<Definition, Context>;
 export interface PptxPluginHostAccess extends PptxPluginEditorAccess {
   translate(key: TranslationKey): string;
   /** Geometry of the presented frame that shows the current version, or null. */
-  geometry(): PptxPluginGeometry | null;
+  geometry(selection?: PptxPluginSelection, caretHint?: SelectionCaret): PptxPluginGeometry | null;
 }
 
 export type PptxPluginDocument = Pick<PresentationHandle, 'version' | 'onUpdate'>;
@@ -73,7 +74,7 @@ export interface PptxPluginHost {
   close(reason: 'document-replaced' | 'unmounted'): void;
   generation(): string | null;
   version(): string;
-  selectionChanged(selection: PptxPluginSelection): void;
+  selectionChanged(selection: PptxPluginSelection, caretHint?: SelectionCaret): void;
   focusChanged(focused: boolean): void;
   localeChanged(locale: string): void;
   modeChanged(readOnly: boolean): void;
@@ -131,6 +132,10 @@ function sameLayout(a: PptxPluginLayout | null, b: PptxPluginLayout | null): boo
   return a === b || (!!a && !!b && a.id === b.id && a.version === b.version);
 }
 
+function sameCaret(a: SelectionCaret | undefined, b: SelectionCaret | undefined): boolean {
+  return a?.focusLine === b?.focusLine && a?.affinity === b?.affinity;
+}
+
 function readVersion(handle: PptxPluginDocument): string | null {
   try {
     return handle.version();
@@ -159,6 +164,7 @@ export function createPptxPluginHost(access: PptxPluginHostAccess | PptxPluginVi
     focused: false,
     locale: 'en',
     selection: null as PptxPluginSelection,
+    caretHint: undefined as SelectionCaret | undefined,
     layout: null as PptxPluginLayout | null,
   };
   const activationScopes = new WeakMap<object, PptxCommandScope>();
@@ -210,7 +216,16 @@ export function createPptxPluginHost(access: PptxPluginHostAccess | PptxPluginVi
       () => runtime.grant(pluginId) as PptxPluginGrant,
       scopedCommandStore(controller(), scopeFor(invocation))
     );
-    const geometry = access.geometry();
+    const caretHint = state.caretHint;
+    const geometry = access.geometry(invocation.snapshot.selection, caretHint);
+    const getAnchorGeometry: PptxPluginGeometry['getAnchorGeometry'] = (target) => {
+      if (!geometry || invocation.refusal() || target.kind === 'selection' &&
+        (JSON.stringify(invocation.snapshot.selection) !== JSON.stringify(state.selection) ||
+          !sameCaret(caretHint, state.caretHint))) {
+        return { ok: false, failure: { code: 'layout-unavailable', message: 'The plugin context is no longer current.' } };
+      }
+      return geometry.getAnchorGeometry(target);
+    };
     return {
       pluginId,
       snapshot: invocation.snapshot,
@@ -222,7 +237,15 @@ export function createPptxPluginHost(access: PptxPluginHostAccess | PptxPluginVi
       read: clients.read,
       commands: clients.commands,
       edits: clients.edits,
-      geometry: geometry && invocation.snapshot.layout?.id === geometry.layout.id ? geometry : null,
+      geometry: geometry && invocation.snapshot.layout?.id === geometry.layout.id ? {
+        layout: geometry.layout,
+        get viewport() { return geometry.viewport; },
+        getAnchorGeometry,
+        readAnchorGeometries: (targets) => Promise.resolve(targets.map(getAnchorGeometry)),
+        toOverlayRect: geometry.toOverlayRect,
+        getShapeRect: geometry.getShapeRect,
+        getPositionAtPoint: geometry.getPositionAtPoint,
+      } : null,
       navigation: clients.navigation,
       setState: (next, atVersion) => invocation.setState(next, atVersion),
       onCleanup: (cleanup) => invocation.onCleanup(cleanup),
@@ -375,6 +398,7 @@ export function createPptxPluginHost(access: PptxPluginHostAccess | PptxPluginVi
       state.version = readVersion(next) ?? '';
       state.layout = null;
       state.selection = null;
+      state.caretHint = undefined;
       observe();
       viewport = null;
       generations += 1;
@@ -390,8 +414,14 @@ export function createPptxPluginHost(access: PptxPluginHostAccess | PptxPluginVi
     generation: () => runtime.generation(),
     version: () => state.version,
 
-    selectionChanged(selection) {
-      if (JSON.stringify(selection) === JSON.stringify(state.selection)) return;
+    selectionChanged(selection, caretHint) {
+      const selectionChanged = JSON.stringify(selection) !== JSON.stringify(state.selection);
+      if (!selectionChanged && sameCaret(caretHint, state.caretHint)) return;
+      state.caretHint = caretHint ? { ...caretHint } : undefined;
+      if (!selectionChanged) {
+        runtime.touch();
+        return;
+      }
       state.selection = selection;
       const generation = runtime.generation();
       if (generation) {

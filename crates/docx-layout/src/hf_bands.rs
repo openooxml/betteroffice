@@ -62,9 +62,9 @@ use serde::Deserialize;
 use crate::display_list::{
     BlockIn, BlockRef, FieldWidthEntry, FieldWidthMap, FloatingTablePositionIn, HfKind, HfParts,
     HfRegion, MeasureIn, MeasuredBlockIn, PageIn, ParagraphFragmentIn, Primitive, RenderCtx,
-    ShapeFonts, TableFragmentIn, WatermarkIn, capped_alt_text, emit_hf_shape,
-    emit_paragraph_fragment, emit_table_fragment, px, rotation_degrees, sanitized_href,
-    table_total_width,
+    ShapeFonts, TableFragmentIn, WatermarkIn, capped_alt_text, capped_relationship_id,
+    emit_hf_shape, emit_paragraph_fragment, emit_table_fragment, px, rotation_degrees,
+    sanitized_href, table_total_width,
 };
 use crate::display_list::{Crop, ImagePrimitive, PageHeaderFooterRefsIn};
 use crate::header_footer::{HeaderFooterKind, HeaderFooterType};
@@ -737,6 +737,7 @@ fn compose_region(
                     decorative: false,
                     crop: None::<Crop>,
                     alt_text: capped_alt_text(block.alt.as_deref()),
+                    relationship_id: capped_relationship_id(block.relationship_id.as_deref()),
                     attrs,
                 }));
                 cursor += measure.height;
