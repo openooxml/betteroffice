@@ -490,6 +490,11 @@ export function clipboardTablePayload(value: unknown): TablePayload | null {
   };
 }
 
+function requireAvailableTable(raw: unknown): void {
+  const map = record(raw);
+  if (map && isUnavailableTablePayload(map)) throw tableUnavailableError();
+}
+
 function rawRows(payload: { rows?: unknown }): Array<{ cells?: unknown; trPr?: unknown }> {
   if (!payload || !Array.isArray(payload.rows) || payload.rows.length === 0) {
     throw new Error('Table payload holds no rows');
@@ -520,6 +525,7 @@ function cellContent(reader: ClipboardTableReader, story: string, onUnsupported?
         ...(Object.keys(segment.attributes).length > 0 ? { attributes: { ...segment.attributes } } : {}),
       });
     } else if (segment.embedKind === 'table') {
+      requireAvailableTable(segment.payload);
       content.push({
         kind: 'table',
         table: fragmentFromPayload(reader, segment.payload, undefined, onUnsupported),
@@ -609,7 +615,6 @@ function fragmentFromPayload(
   rect?: ClipboardTableRect,
   onUnsupported?: () => void,
 ): DocxTableFragment {
-  if (isUnavailableTablePayload(payload)) throw tableUnavailableError();
   const rows = rawRows(payload);
   const tablePayload: TablePayload = { rows: rows as TablePayload['rows'] };
   const { anchors, columns } = tableAnchors(tablePayload);
@@ -716,6 +721,7 @@ export function readTableFragment(
 ): DocxTableFragment {
   const raw = reader.tablePayload(table.story, table.tableIndex);
   if (!raw) throw new Error(`Table ${table.tableIndex} was not found in story ${table.story}`);
+  requireAvailableTable(raw);
   const payload = clipboardTablePayload(raw);
   if (!payload) throw new Error(`Table ${table.tableIndex} in story ${table.story} holds no rows`);
   return fragmentFromPayload(reader, payload, rect);
@@ -733,7 +739,9 @@ export function readClipboardSlice(
 ): DocxClipboardSlice {
   if ('cells' in target) {
     const { anchor, head } = target.cells;
-    const payload = clipboardTablePayload(reader.tablePayload(anchor.story, anchor.tableIndex));
+    const raw = reader.tablePayload(anchor.story, anchor.tableIndex);
+    requireAvailableTable(raw);
+    const payload = clipboardTablePayload(raw);
     const range = {
       top: Math.min(anchor.row, head.row),
       bottom: Math.max(anchor.row, head.row),
@@ -798,6 +806,7 @@ export function readClipboardSlice(
       sawBoundary = true;
       push();
     } else if (segment.embedKind === 'table') {
+      requireAvailableTable(segment.payload);
       if (current.inlines.length > 0) push();
       current.tables.push(fragmentFromPayload(reader, segment.payload, undefined, () => { sawUnrepresentableEmbed = true; }));
       sawRichContent = true;
