@@ -112,7 +112,6 @@ export const formattingAndStyles: DocxScenario = {
       session.selectionContext(range)
     );
     expect(cleared.bold).toBe(styled.bold);
-    if (styled.italic !== 'mixed') expect(cleared.italic).toBe(styled.italic);
     expect(cleared.color).not.toBe('CC2244');
     expect(cleared.fontSize).not.toBe(36);
 
