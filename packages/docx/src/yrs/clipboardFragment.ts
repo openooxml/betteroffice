@@ -14,6 +14,7 @@ import {
   tablePlainText,
   type TablePayload,
 } from './storyPlainText';
+import { isUnavailableTablePayload, tableUnavailableError } from './tableUnavailable';
 
 /** @internal Version of the internal clipboard payload; a reader ignores other versions. */
 export const DOCX_CLIPBOARD_FRAGMENT_VERSION = 2;
@@ -600,6 +601,7 @@ function fragmentFromPayload(
   rect?: ClipboardTableRect,
   onUnsupported?: () => void,
 ): DocxTableFragment {
+  if (isUnavailableTablePayload(payload)) throw tableUnavailableError();
   const rows = rawRows(payload);
   const tablePayload: TablePayload = { rows: rows as TablePayload['rows'] };
   const { anchors, columns } = tableAnchors(tablePayload);

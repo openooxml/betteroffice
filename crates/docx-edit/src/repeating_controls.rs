@@ -225,7 +225,12 @@ impl EditingDoc {
                 }) {
                     return Err("tracked-revision-conflict".to_owned());
                 }
-                if let SegmentContent::OtherEmbed { payload, .. } = &segment.content {
+                if let SegmentContent::OtherEmbed { kind, payload } = &segment.content {
+                    if kind == "table"
+                        && crate::unavailable_tables::lacks_payload(|key| payload.contains_key(key))
+                    {
+                        return Err(crate::unavailable_tables::TABLE_UNAVAILABLE.to_owned());
+                    }
                     let mut children = Vec::new();
                     for value in payload.values() {
                         references(value, &mut children);

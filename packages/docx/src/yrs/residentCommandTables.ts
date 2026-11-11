@@ -7,6 +7,7 @@ import type {
   DocxWorkerCommandState,
 } from './residentCommandProtocol';
 import { readCellSelection, resolveLiveCell, rootOf } from './residentCommandTableSelection';
+import { isTableUnavailableRefusal, isUnavailableTablePayload } from './tableUnavailable';
 
 export type TableCommandKind =
   | 'insertTableRow' | 'insertTableColumn'
@@ -114,7 +115,9 @@ export function preflightTableCommand(
 
 function liveAnchors(engine: DocxWorkerCommandEngine, at: YrsCellLoc) {
   const payload = engine.tablePayload(at.story, at.tableIndex) as TablePayload | null;
-  return payload && Array.isArray(payload.rows) ? tableAnchors(payload).anchors : null;
+  return payload && !isUnavailableTablePayload(payload as unknown as Record<string, unknown>) && Array.isArray(payload.rows)
+    ? tableAnchors(payload).anchors
+    : null;
 }
 
 function coveringAnchor(anchors: readonly TableCellAnchor[], at: YrsCellLoc): TableCellAnchor | null {
@@ -176,8 +179,16 @@ function nearestCellStory(engine: DocxWorkerCommandEngine, at: YrsCellLoc): stri
 
 export function syncCellSelectionWithCaret(engine: DocxWorkerCommandEngine, story: string): void {
   const cell = resolveLiveCell(engine, story);
-  if (cell) engine.setCellSelection({ anchor: cell, head: cell });
-  else engine.clearCellSelection();
+  if (!cell) {
+    engine.clearCellSelection();
+    return;
+  }
+  try {
+    engine.setCellSelection({ anchor: cell, head: cell });
+  } catch (error) {
+    if (!isTableUnavailableRefusal(error)) throw error;
+    engine.clearCellSelection();
+  }
 }
 
 export interface TableCommandSink {

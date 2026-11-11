@@ -1,7 +1,8 @@
 import type { YrsCellLoc, YrsTableRange } from './index';
 import type { DocxCommandPayloads, DocxCommandSelection, DocxWorkerCommandEngine } from './residentCommandProtocol';
 import { tableAnchors, type TablePayload } from './storyPlainText';
-import { cellStart } from './residentCommandTableSelection';
+import { cellStart, readCellSelection } from './residentCommandTableSelection';
+import { isUnavailableTablePayload } from './yrsPositionProjection';
 
 export interface DocxCellNavigationPlan {
   selection: DocxCommandSelection;
@@ -27,14 +28,14 @@ export function resolveCellNavigation(
   const table = { story: story.slice(0, match.index), tableIndex: Number(match[1]) };
   if (!Number.isSafeInteger(table.tableIndex)) return null;
   const payload = engine.tablePayload(table.story, table.tableIndex) as TablePayload | null;
-  if (!payload || !Array.isArray(payload.rows)) return null;
+  if (!payload || isUnavailableTablePayload(payload) || !Array.isArray(payload.rows)) return null;
   const { anchors } = tableAnchors(payload);
   const cellStory = story.slice(0, match.index + match[0].length);
   const currentIndex = anchors.findIndex((cell) => cell.story === cellStory);
   if (currentIndex < 0) return null;
   const current = anchors[currentIndex]!;
   const at = { ...table, row: current.row, column: current.column };
-  const selected = engine.cellSelection();
+  const selected = readCellSelection(engine);
   const sameTable = selected?.anchor.story === table.story && selected.head.story === table.story &&
     selected.anchor.tableIndex === table.tableIndex && selected.head.tableIndex === table.tableIndex &&
     selected.head.row === current.row && selected.head.column === current.column;

@@ -2,7 +2,7 @@ import { isEngineTrap } from '../../../../shared/office-session/trap';
 import type { YrsCellLoc, YrsLoc, YrsTableRange } from './index';
 import type { DocxCommandSelection, DocxWorkerCommandEngine } from './residentCommandProtocol';
 import { tableAnchors, type TablePayload } from './storyPlainText';
-import { createYrsPositionProjection } from './yrsPositionProjection';
+import { createYrsPositionProjection, isUnavailableTablePayload } from './yrsPositionProjection';
 
 export type TableSelectionTarget = 'table' | 'row' | 'column';
 
@@ -97,7 +97,8 @@ export function resolveLiveCell(engine: DocxWorkerCommandEngine, story: string):
 }
 
 function validPayload(value: unknown): value is TablePayload {
-  return !!value && typeof value === 'object' && Array.isArray((value as TablePayload).rows);
+  return !!value && typeof value === 'object' && !isUnavailableTablePayload(value as Record<string, unknown>) &&
+    Array.isArray((value as TablePayload).rows);
 }
 
 function anchorsOf(engine: DocxWorkerCommandEngine, story: string, tableIndex: number) {

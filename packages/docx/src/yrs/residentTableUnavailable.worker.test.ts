@@ -241,3 +241,52 @@ test('the cached cell location drops a table that lost only its properties and f
     replica.session.dispose();
   }
 }, TIMEOUT);
+
+const cellRange = (row: number, column: number) => ({ anchor: at('body', row, column), head: at('body', row, column) });
+
+const LOST: Array<{ name: string; key: string; edit: (session: YrsSession, first: boolean) => void }> = [
+  { name: 'its properties', key: 'tblPr', edit: (session, first) =>
+    session.setTableProperties({ story: 'body', tableIndex: 0 }, first ? { width: 4000, widthType: 'dxa' } : { justification: 'center' }) },
+  { name: 'its grid', key: 'grid', edit: (session, first) => session.setColumnWidth(at('body', 0, first ? 0 : 1), first ? 2000 : 3000) },
+  { name: 'its rows', key: 'rows', edit: (session, first) => session.setCellShading(cellRange(0, first ? 0 : 1), first ? 'FF0000' : '00FF00') },
+];
+
+for (const [index, lost] of LOST.entries()) {
+  test(`Tab in the last cell of a table that lost ${lost.name} is refused or moves out cleanly and the session keeps working`, async () => {
+    const base = 9800 + index * 10;
+    const replica = await open(base + 1);
+    const first = await peer(replica, base + 2);
+    const second = await peer(replica, base + 3);
+    try {
+      const last = (replica.engine.tablePayload('body', 0)!.rows as Array<{ cells: Array<{ story: string }> }>)[0]!.cells[1]!.story;
+      const inLast = { story: last, paraId: replica.engine.paragraphs(last)[0]!.paraId, offset: 0 };
+      lost.edit(first, true);
+      sync(first, second);
+      lost.edit(second, false);
+      expect(first.undo()).toBe(true);
+      sync(first, second);
+      expect(second.undo()).toBe(true);
+      sync(first, second);
+      const payload = second.tablePayload('body', 0) ?? {};
+      expect(['tblPr', 'grid', 'rows'].filter((key) => !(key in payload))).toContain(lost.key);
+      await receive(replica, second);
+      const before = replica.engine.encodeState();
+
+      const outcome = await replica.session.submit('navigateCell', {
+        selection: { anchor: inLast, focus: inLast }, direction: 'forward', extend: false, createLastRow: true,
+      }).ack;
+      expect(['refused', 'noop', 'applied']).toContain(outcome.status);
+      expect(replica.engine.encodeState()).toEqual(before);
+      expect(replica.session.state.selection?.focus.story).not.toBe(last);
+
+      const bodyParaId = replica.engine.paragraphs('body')[0]!.paraId;
+      const body = { story: 'body', paraId: bodyParaId, offset: 0 };
+      expect((await replica.session.submit('insertText', { text: 'Z', selection: { anchor: body, focus: body } }).ack).status).toBe('applied');
+      expect(replica.engine.paragraphs('body')[0]!.text.startsWith('Z')).toBe(true);
+    } finally {
+      first.destroy();
+      second.destroy();
+      replica.session.dispose();
+    }
+  }, TIMEOUT);
+}

@@ -914,7 +914,6 @@ export function applyDocxCommand(
   environment?: DocxCommandHooksEnvironment
 ): DocxCommandApplyResult {
   const { inputTime, lastInputTime } = prepared.command;
-  const version = isTableCommandKind(prepared.command.kind) ? engine.proposalEngine.version() : null;
   try {
     if (inputTime === undefined) return applyPreparedDocxCommand(engine, state, prepared, context, environment);
     engine.setUndoInputTime([inputTime, lastInputTime ?? inputTime]);
@@ -924,7 +923,9 @@ export function applyDocxCommand(
       engine.setUndoInputTime(null);
     }
   } catch (error) {
-    if (version === null || !isTableUnavailableRefusal(error) || engine.proposalEngine.version() !== version) throw error;
+    // The engine refuses an operation on an unavailable table before it writes anything, and no
+    // command writes before its first table operation (TABLE-COMMANDS.md), so the refusal is clean.
+    if (!isTableUnavailableRefusal(error)) throw error;
     const corrected = state.selection ? readCommandSelection(engine, state) : null;
     return { status: 'refused', reason: 'table-unavailable', selection: corrected?.ok ? corrected.selection : null,
       editState: projectDocxEditState(engine, state, corrected) };
