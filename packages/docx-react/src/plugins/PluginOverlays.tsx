@@ -42,7 +42,7 @@ export function PluginOverlays({
       {activations.map((activation) => {
         const Overlay = activation.plugin.overlay;
         const geometry = heldGeometry
-          ? scopePluginGeometry(heldGeometry, activation.pluginId)
+          ? scopePluginGeometry(heldGeometry, activation.pluginId, undefined, host.flushSelection)
           : activation.context.geometry;
         return Overlay && geometry ? (
           <PluginRenderScope key={activation.key} host={host} activation={activation}>

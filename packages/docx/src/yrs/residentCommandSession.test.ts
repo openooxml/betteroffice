@@ -553,6 +553,47 @@ test('d0_frame_packing_uses_supplied_metadata_without_decoding_payload', () => {
   expect(new Uint8Array(built.value.payload.frame)).toEqual(new Uint8Array([1]));
 });
 
+test('selection cause crosses command acknowledgements, clears on a local selection and rejects an older publication', async () => {
+  const m = machine();
+  let selected: DocxCommandSelection | null = m.state.selection;
+  m.hooks.selection = () => selected;
+  m.hooks.apply = ({ command }) => {
+    if (command.kind !== 'insertText') throw new Error('unexpected test command');
+    const remote = command.payload.text === 'remote';
+    const point = { story: 'body', paraId: remote ? 'remote-paragraph' : 'local-paragraph', offset: 2 };
+    selected = command.payload.text === 'remove' ? null : { anchor: point, focus: point };
+    return { status: 'applied', ...(remote || command.payload.text === 'remove' ? { cause: 'remote' as const } : {}) };
+  };
+  const client = new FakeCommandClient(createHost(m.options));
+  const connection = await connect(client);
+  let receive!: (ack: DocxCommandAck) => void;
+  connection.client.onAck = listener => { receive = listener; return () => {}; };
+  const h = sessionOptions(connection);
+  const session = createSession(h.options);
+  const send = async (text: string) => {
+    const ticket = session.submit('insertText', { text }, { fence: true });
+    h.pump();
+    expect(await ticket.ack).toMatchObject({ status: 'applied' });
+    return client.replies.at(-1)!;
+  };
+  try {
+    const moved = await send('remote');
+    expect(moved).toMatchObject({ cause: 'remote', selection: { focus: { paraId: 'remote-paragraph' } } });
+    expect(session.state.selectionCause).toBe('remote');
+    const removed = await send('remove');
+    expect(removed).toMatchObject({ cause: 'remote', selection: null });
+    expect(session.state.selection).toBeNull();
+    expect(session.state.selectionCause).toBe('remote');
+    const local = await send('local');
+    expect(local).not.toHaveProperty('cause');
+    expect(session.state.selection?.focus.paraId).toBe('local-paragraph');
+    expect(session.state.selectionCause).toBeUndefined();
+    receive({ ...local, version: local.version - 1, selection: null, cause: 'remote', frame: undefined });
+    expect(session.state.selection?.focus.paraId).toBe('local-paragraph');
+    expect(session.state.selectionCause).toBeUndefined();
+  } finally { await session.dispose(); }
+}, TIMEOUT);
+
 test('d0_shared_state_comparison_tracks_sticky_bytes_and_editstate', async () => {
   const m = machine();
   m.state.selection.anchor.sticky = new Uint8Array([1, 2]);

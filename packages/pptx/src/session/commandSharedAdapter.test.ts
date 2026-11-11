@@ -1,8 +1,9 @@
 import { expect, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
+import { createWorkerEditSession } from '../../../../shared/office-session/commands/session';
 import { createSessionClient } from '../../../../shared/office-session/client';
-import { isCommandAck, isCommandEnvelope, type CommandEnvelope } from '../../../../shared/office-session/commands/types';
+import { isCommandAck, isCommandEnvelope, type CommandAck, type CommandEnvelope } from '../../../../shared/office-session/commands/types';
 import { isClientMessage, isHostMessage } from '../../../../shared/office-session/protocol';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
 import type { SessionTransport } from '../../../../shared/office-session/transport';
@@ -14,7 +15,7 @@ import { createPresentationCommandProjection } from './commandSharedAdapter';
 import { createPptxWorkerSession } from './commandSession';
 import type {
   PresentationCommandAck, PresentationCommandFence, PresentationCommandFrame, PresentationCommandIntent,
-  PresentationCommandOpenResult, PresentationCommandSelection,
+  PresentationCommandOpenResult, PresentationCommandSelection, PresentationCommandSelected, PresentationCommandEditState,
 } from './commandProtocol';
 import { createPresentationSessionHost } from './host';
 
@@ -288,4 +289,36 @@ test('rec_shared_fences_include_text_blocked_behind_256_replies', async () => {
     expect(fences).toEqual([257, 257, 257]);
     expect(completed).toBe(true);
   } finally { await client.dispose(); projection.dispose(); }
+});
+
+test('pptx selection at equal command coverage rejects older versions and accepts newer versions', async () => {
+  type Ack = CommandAck<PresentationCommandSelected | null, PresentationCommandEditState, PresentationCommandFrame>;
+  const initial: Ack = { session: 'presentation', incarnation: 0, epoch: 1,
+    throughSeq: 0, version: 0, outcomes: [], selection: null };
+  let receive!: (ack: Ack) => void;
+  const session = createWorkerEditSession<undefined, PresentationCommandIntent['payload'],
+    PresentationCommandSelected | null, PresentationCommandEditState, PresentationCommandFrame, never>({
+    source: undefined,
+    connection: { initial, client: {
+      call: { edit: async () => { throw new Error('Unexpected edit'); },
+        checkpoint: async () => { throw new Error('Unexpected checkpoint'); } },
+      failure: undefined,
+      onFailure: () => () => {},
+      onAck(listener) { receive = listener; return () => {}; },
+      dispose: async () => {},
+    } },
+    recovery: { reopen: async () => { throw new Error('Unexpected recovery'); } },
+    maxRecoveryAttempts: 0,
+    requestFullFrame: async () => initial,
+  });
+  const selection = (offset: number): PresentationCommandSelection => ({ slideId: 'slide', shapeId: 'box', storyId: 'story',
+    anchor: offset, focus: offset, affinity: 'downstream' });
+  try {
+    receive({ ...initial, version: 2, selection: selection(2) });
+    expect(session.state.selection).toEqual(selection(2));
+    receive({ ...initial, version: 1, selection: selection(1) });
+    expect(session.state.selection).toEqual(selection(2));
+    receive({ ...initial, version: 3, selection: selection(3) });
+    expect(session.state.selection).toEqual(selection(3));
+  } finally { await session.dispose(); }
 });

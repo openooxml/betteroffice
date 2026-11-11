@@ -70,6 +70,7 @@ import type {
 } from './edits';
 import type { DocxParagraphHeading } from './readTypes';
 import { editSessionUpdateEvents } from './updateEvents';
+import { recordYrsSelectionCause, withYrsSelectionCause } from './selectionChanges';
 import { createProposalRegistry, type DocxProposalSession } from './proposals';
 import type { DocxContentControlsResult } from './contentControls';
 import type {
@@ -331,6 +332,7 @@ export function wrapSession(
       while (!destroyed && pendingUpdates.length > 0) {
         const event = pendingUpdates.shift();
         if (!event) break;
+        recordYrsSelectionCause(facade, event.origin === 'remote' ? 'remote' : undefined);
         for (const [id, listener] of [...listeners]) {
           if (destroyed) return;
           if (listeners.get(id) !== listener) continue;
@@ -367,6 +369,7 @@ export function wrapSession(
       if (wasmCallDepth === 0) {
         hub.drain();
         flushUpdates();
+        if (!destroyed) recordYrsSelectionCause(facade);
       }
     }
   };
@@ -893,16 +896,16 @@ export function wrapSession(
     },
     applyUpdate: (update) => {
       markDirty('all');
-      return mutate(
+      return withYrsSelectionCause(facade, 'remote', () => mutate(
         () =>
           JSON.parse(
             session.apply_update_with_inference(update)
           ) as CollaborationTextInsertion | null
-      );
+      ));
     },
     applyUpdateChunks: (updates) => {
       markDirty('all');
-      mutate(() => session.apply_update_chunks([...updates]));
+      withYrsSelectionCause(facade, 'remote', () => mutate(() => session.apply_update_chunks([...updates])));
     },
     applyLocalUpdate: (update) => {
       ensureUndo();
@@ -948,10 +951,17 @@ export function wrapSession(
         anchor: { ...anchor },
         head: { ...head },
       };
+      recordYrsSelectionCause(facade, undefined, cachedSelection);
     },
     selection: () => {
       if (cachedSelection !== undefined) return cloneSelection(cachedSelection);
-      cachedSelection = JSON.parse(session.selection()) as YrsSelection | null;
+      try {
+        cachedSelection = JSON.parse(session.selection()) as YrsSelection | null;
+      } catch (error) {
+        const encoded = decodeEncodedSelection(session.encoded_selection());
+        if (!encoded || session.has_story(encoded.story)) throw error;
+        cachedSelection = null;
+      }
       return cloneSelection(cachedSelection);
     },
     encodeSelection: () => decodeEncodedSelection(session.encoded_selection()),
@@ -964,7 +974,11 @@ export function wrapSession(
         return null;
       }
     },
-    setCellSelection: (range) => session.set_cell_selection(JSON.stringify(range)),
+    setCellSelection: (range) => {
+      session.set_cell_selection(JSON.stringify(range));
+      cachedSelection = undefined;
+      recordYrsSelectionCause(facade);
+    },
     cellSelection: () => JSON.parse(session.cell_selection()) as YrsTableRange | null,
     beginUndoCapture: ensureUndo,
     addUndoBoundary: () => session.add_undo_boundary(),
@@ -1699,10 +1713,10 @@ export function wrapSession(
         destroy: () => { registry.destroy(); detachedProposals.delete(registry); },
       };
     },
-    mirrorWorkerDocument: (mirror) => {
+    mirrorWorkerDocument: (mirror) => withYrsSelectionCause(facade, 'remote', () => {
       workerDocumentVersion = mirror?.version ?? null;
       proposals.mirror(mirror);
-    },
+    }),
     workerDocumentMirrored: () => workerDocumentVersion !== null,
     onProposalChange: (listener) => {
       if (destroyed) throw new Error('yrs session is destroyed');

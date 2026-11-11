@@ -30,6 +30,7 @@ interface Capture extends DocxDisplaySelectionText {
 }
 
 export interface ViewerSelectionChange {
+  head: number | null;
   displayRange: { story: string; from: number; to: number; layoutId: string } | null;
   isMultiParagraph: boolean;
 }
