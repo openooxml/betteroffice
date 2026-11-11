@@ -70,15 +70,19 @@ export function describeHeapTable<T>(
     expect(failed).toBe(0);
   });
 
+  // Objects other tests left behind can be collected, and freed, between any two reads, so live
+  // bytes may fall at any time: growth is read from the peak window, and the drop on release only
+  // as a fall from the bytes held.
   test('live grows while engine state is held and drops when it is released', () => {
-    const before = figures(engine());
+    engine().reset_wasm_peak_bytes();
+    const start = engine().wasm_peak_bytes();
     const held = hold();
     const holding = figures(engine());
     release(held);
     const after = figures(engine());
-    expect(holding.live).toBeGreaterThan(before.live);
-    expect(after.live).toBeLessThan(holding.live);
+    expect(holding.peak).toBeGreaterThan(start);
     expect(holding.peak).toBeGreaterThanOrEqual(holding.live);
+    expect(after.live).toBeLessThan(holding.live);
     expect(after.peak).toBeGreaterThanOrEqual(holding.peak);
   });
 
@@ -88,7 +92,8 @@ export function describeHeapTable<T>(
     expect(raised.peak).toBeGreaterThan(raised.live);
     engine().reset_wasm_peak_bytes();
     const reset = figures(engine());
-    expect(reset.peak).toBe(reset.live);
+    expect(reset.peak).toBeGreaterThanOrEqual(reset.live);
+    expect(reset.peak).toBeLessThanOrEqual(raised.live);
     expect(reset.peak).toBeLessThan(raised.peak);
   });
 

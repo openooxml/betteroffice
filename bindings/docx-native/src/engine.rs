@@ -4010,3 +4010,68 @@ pub fn set_wasm_heap_limit(bytes: f64) {
 
 #[napi(catch_unwind, js_name = "install_panic_hook")]
 pub fn install_panic_hook() {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_limit_crossed_mid_call_fails_at_the_next_progress_tick_and_the_thread_recovers() {
+        let _limits = crate::heap::tests::limits();
+        std::thread::spawn(|| {
+            set_wasm_heap_limit((1u64 << 40) as f64);
+            let cap = crate::heap::live() + (1 << 20);
+            set_wasm_heap_limit(cap as f64);
+            assert_eq!(crate::heap::limit(), Some(cap));
+            assert!(crate::heap::begin_call(true));
+            ooxml_opc::progress::pulse();
+            docx_layout::progress::pulse();
+
+            let block = vec![1u8; 2 << 20];
+            assert!(crate::heap::over_limit());
+            assert_eq!(crate::heap::failed_bytes(), 2 << 20);
+            let tick = std::panic::catch_unwind(ooxml_opc::progress::pulse).unwrap_err();
+            assert_eq!(
+                tick.downcast_ref::<String>(),
+                Some(&format!(
+                    "{} ({} bytes over a {cap}-byte budget)",
+                    crate::heap::EXCEEDED,
+                    2 << 20
+                ))
+            );
+            assert!(std::panic::catch_unwind(docx_layout::progress::pulse).is_err());
+            assert!(!crate::heap::begin_call(false));
+
+            drop(block);
+            assert!(crate::heap::begin_call(true));
+            assert!(!crate::heap::over_limit());
+            ooxml_opc::progress::pulse();
+
+            set_wasm_heap_limit(f64::INFINITY);
+            assert_eq!(crate::heap::limit(), None);
+            let unlimited = vec![1u8; 4 << 20];
+            ooxml_opc::progress::pulse();
+            docx_layout::progress::pulse();
+            drop(unlimited);
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn a_limit_of_zero_is_a_limit() {
+        let _limits = crate::heap::tests::limits();
+        std::thread::spawn(|| {
+            set_wasm_heap_limit(0.0);
+            assert_eq!(crate::heap::limit(), Some(0));
+            assert!(crate::heap::begin_call(true));
+            let block = vec![1u8; 16];
+            assert!(crate::heap::over_limit());
+            drop(block);
+            set_wasm_heap_limit(f64::NAN);
+            assert_eq!(crate::heap::limit(), None);
+        })
+        .join()
+        .unwrap();
+    }
+}

@@ -277,14 +277,14 @@ unsafe impl GlobalAlloc for CountingAllocator {
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::MutexGuard;
 
     static LIMITS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Serialises every test that reads the counters or changes counting, limits or the epoch.
-    fn limits() -> MutexGuard<'static, ()> {
+    pub(crate) fn limits() -> MutexGuard<'static, ()> {
         LIMITS.lock().unwrap_or_else(|error| error.into_inner())
     }
 
