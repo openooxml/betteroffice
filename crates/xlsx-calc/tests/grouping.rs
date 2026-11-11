@@ -1092,6 +1092,24 @@ fn groupby_with_a_stacked_function_vector_keeps_the_saved_value() {
 }
 
 #[test]
+fn known_limit_an_error_handler_around_an_unsupported_grouping_shape_replaces_the_saved_value() {
+    let formula = r#"IFERROR(ROWS(_xlfn.GROUPBY({"a";"b";"a"},{1;2;3},_xlfn.VSTACK(_xleta.SUM,_xleta.MAX),0,0)),99)"#;
+    let mut sheet = Sheet::new("Data");
+    sheet.set_cell(
+        CellRef::new(0, 0),
+        Cell {
+            formula: Some(formula.into()),
+            value: n(4.0),
+            ..Cell::default()
+        },
+    );
+    let mut workbook = Workbook::default();
+    workbook.sheets.push(sheet);
+    rebuild_and_recalc_all(&mut workbook, None);
+    assert_eq!(workbook.value(SheetId(0), CellRef::new(0, 0)), n(99.0));
+}
+
+#[test]
 fn pivotby_charges_budget_for_cell_intersections() {
     let workbook = sales_workbook();
     assert_eq!(
