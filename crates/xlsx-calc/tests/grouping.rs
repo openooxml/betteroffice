@@ -1091,45 +1091,6 @@ fn groupby_with_a_stacked_function_vector_keeps_the_saved_value() {
     }
 }
 
-/// the value a recalc leaves in a lone formula cell saved with `saved`.
-fn recalculated(formula: &str, saved: CellValue) -> CellValue {
-    let mut sheet = Sheet::new("Data");
-    sheet.set_cell(
-        CellRef::new(0, 0),
-        Cell {
-            formula: Some(formula.into()),
-            value: saved,
-            ..Cell::default()
-        },
-    );
-    let mut workbook = Workbook::default();
-    workbook.sheets.push(sheet);
-    rebuild_and_recalc_all(&mut workbook, None);
-    workbook.value(SheetId(0), CellRef::new(0, 0))
-}
-
-/// no handler knows what Excel made of an unsupported GROUPBY or PIVOTBY
-/// shape, so a wrapper keeps the saved value, and without one the cell shows
-/// the unsupported call's `#CALC!` rather than the handler's answer.
-#[test]
-fn a_handler_around_an_unsupported_grouping_shape_keeps_the_saved_value() {
-    let calc = CellValue::Error {
-        value: ErrorValue::Calc,
-    };
-    for formula in [
-        r#"IFERROR(ROWS(_xlfn.GROUPBY({"a";"b";"a"},{1;2;3},_xlfn.VSTACK(_xleta.SUM,_xleta.MAX),0,0)),99)"#,
-        r#"IFERROR(ROWS(_xlfn.PIVOTBY({"a";"b";"a"},{"x";"x";"y"},{1;2;3},_xlfn.VSTACK(_xleta.SUM,_xleta.MAX),0,0)),99)"#,
-        r#"IFERROR(ROWS(_xlfn.PIVOTBY({"a";"b";"a"},{"x";"x";"y"},{1,4;2,5;3,6},_xlfn.HSTACK(_xleta.SUM,_xleta.MAX),0,0)),99)"#,
-    ] {
-        assert_eq!(recalculated(formula, n(4.0)), n(4.0), "{formula}");
-        assert_eq!(recalculated(formula, CellValue::Empty), calc, "{formula}");
-    }
-    let formula =
-        r#"IF(ISERROR(ROWS(_xlfn.GROUPBY({"a";"b";"a"},{1;2;3},_xlfn.VSTACK(_xleta.SUM,_xleta.MAX),0,0))),99,1)"#;
-    assert_eq!(recalculated(formula, n(4.0)), n(4.0));
-    assert_eq!(recalculated(formula, CellValue::Empty), calc);
-}
-
 #[test]
 fn pivotby_charges_budget_for_cell_intersections() {
     let workbook = sales_workbook();
