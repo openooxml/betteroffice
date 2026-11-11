@@ -63,3 +63,27 @@ test('startHeapCounting from the package entry starts counting in a fresh proces
   expect(report.after).toBe(true);
   expect(report.live).toBeGreaterThan(0);
 });
+
+test('a resident session counts the heap on native only while a heap limit is set', () => {
+  const script = [
+    `const edit = await import(${JSON.stringify(fileURLToPath(new URL('./edit.ts', import.meta.url)))});`,
+    `const engine = await import(${JSON.stringify(fileURLToPath(new URL('./engineEdit.ts', import.meta.url)))});`,
+    `const resident = await import(${JSON.stringify(fileURLToPath(new URL('../yrs/residentEngineSession.ts', import.meta.url)))});`,
+    `const { readFileSync } = await import('node:fs');`,
+    `await edit.preloadEditWasm(engine.engineKind === 'native' ? undefined : new Uint8Array(readFileSync(${JSON.stringify(fileURLToPath(new URL('./generated/edit/docx_edit_bg.wasm', import.meta.url)))})));`,
+    'const unlimited = await resident.createResidentEngineSession();',
+    'const byDefault = engine.wasm_heap_counted();',
+    'unlimited.destroy();',
+    'const limited = await resident.createResidentEngineSession(2 ** 30);',
+    'const whileLimited = engine.wasm_heap_counted();',
+    'limited.destroy();',
+    'edit.setEditWasmHeapLimit(undefined);',
+    'console.log(JSON.stringify({ kind: engine.engineKind, byDefault, whileLimited, cleared: engine.wasm_heap_counted() }));',
+  ].join('\n');
+  const result = spawnSync(process.execPath, ['--eval', script], { cwd: import.meta.dir, encoding: 'utf8', timeout: 120_000 });
+  expect(result.status).toBe(0);
+  const report = JSON.parse(result.stdout.trim().split('\n').at(-1) as string);
+  expect(report.kind).toBe(engine.engineKind);
+  const wasm = engine.engineKind === 'wasm';
+  expect(report).toMatchObject({ byDefault: wasm, whileLimited: true, cleared: wasm });
+});

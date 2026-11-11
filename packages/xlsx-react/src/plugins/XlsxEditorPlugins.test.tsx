@@ -3375,23 +3375,27 @@ for (const engine of ['XI', 'XP'] as const) describe(`selection matrix ${engine}
   });
 
   if (engine === 'XI') editorTest('T6: focus change neither cancels nor restarts a pending settle', async () => {
-    const h = await xlsxMatrix(engine);
+    const h = await xlsxMatrix(engine, fixture, true);
     try {
       const selectedAt = Date.now();
       await h.select(1, 1); await h.paint(); await h.quiet(200);
-      const focusedAt = Date.now();
       await act(async () => { const root = h.view.getByTestId('xlsx-scroll'); root.focus(); root.blur(); });
       expect(h.anchors).toEqual([]);
+      await h.quiet(149);
+      expect(h.anchors).toEqual([]);
+      await h.quiet(1);
+      await h.paint();
       await until(() => h.anchors.length > 0);
       expect(h.anchors).toHaveLength(1);
-      expect(h.settledAt[0]! - selectedAt).toBeGreaterThanOrEqual(350);
-      expect(h.settledAt[0]! - focusedAt).toBeLessThan(350);
+      expect(h.settledAt[0]! - selectedAt).toBe(350);
+      await h.quiet(700);
+      expect(h.anchors).toHaveLength(1);
       expect(h.events.some(event => event.type === 'focus-change')).toBe(true);
     } finally { h.dispose(); }
   });
 
   if (engine === 'XI') editorTest('T8: removing one of two plugins keeps the other pending settle; reattach does not replay', async () => {
-    const h = await xlsxMatrix(engine);
+    const h = await xlsxMatrix(engine, fixture, true);
     const events: XlsxPluginEvent[] = [];
     const other = defineXlsxPlugin({ id: 'other', createState: () => null, onEvent(_context, event) { events.push(event); } });
     try {
@@ -3399,6 +3403,8 @@ for (const engine of ['XI', 'XP'] as const) describe(`selection matrix ${engine}
       await h.select(1, 1); await h.paint(); await h.quiet(200);
       await act(async () => { h.rerender([other]); });
       await h.quiet(150);
+      await h.paint();
+      await until(() => events.some(event => event.type === 'selection-settle'));
       expect(h.anchors).toEqual([]);
       expect(events.filter(event => event.type === 'selection-settle')).toHaveLength(1);
       await act(async () => { h.rerender([h.plugin, other]); });
@@ -3409,7 +3415,7 @@ for (const engine of ['XI', 'XP'] as const) describe(`selection matrix ${engine}
   });
 
   if (engine === 'XI') editorTest('T23: continuous typing longer than the window settles once after the last key', async () => {
-    const h = await xlsxMatrix(engine);
+    const h = await xlsxMatrix(engine, fixture, true);
     try {
       await h.select(0); await h.paint(); await h.quiet(); h.reset();
       let lastKeyAt = 0;
@@ -3424,6 +3430,10 @@ for (const engine of ['XI', 'XP'] as const) describe(`selection matrix ${engine}
         expect(h.anchors).toEqual([]);
       }
       expect(h.anchors).toEqual([]);
+      await h.quiet(249);
+      expect(h.anchors).toEqual([]);
+      await h.quiet(1);
+      await h.paint();
       await until(() => h.anchors.length > 0);
       expect(h.anchors).toHaveLength(1);
       expect(h.settledAt[0]! - lastKeyAt).toBeGreaterThanOrEqual(350);

@@ -51,6 +51,7 @@ pub fn decode_font_face(
     dict: Option<Uint8Array>,
     max_output: Option<f64>,
 ) -> Result<DecodedFontFace> {
+    let _call = EngineCall::function(env);
     let decoded =
         betteroffice_fonts::decode_font_face_js(&bytes, &codec, dict.as_deref(), max_output)
             .map_err(|error| throw_error(&env, &error.to_string()))?;
@@ -62,6 +63,7 @@ pub fn decode_font_face(
 
 #[napi(catch_unwind, js_name = "font_preflight")]
 pub fn font_preflight(env: Env, bytes: Uint8Array) -> napi::Result<String> {
+    let _call = EngineCall::function(env);
     ooxml_font_preflight::docx_font_preflight(&bytes)
         .map(|result| result.to_json())
         .map_err(|error| throw_message(&env, error.to_string()))
@@ -121,15 +123,31 @@ fn throw_error(env: &Env, message: &str) -> Error {
 
 thread_local! {
     static CURRENT_OBJECT: Cell<*const Failure> = const { Cell::new(std::ptr::null()) };
+    static CALL_DEPTH: Cell<usize> = const { Cell::new(0) };
+    static REFUSED: Cell<bool> = const { Cell::new(false) };
 }
 
 const FAILED_OBJECT: &str = "This engine object failed in an earlier call and can only be freed";
 
 type Failure = RefCell<Option<String>>;
 
+/// Registers the object a method runs on. A failed object refuses first; otherwise a call the
+/// heap limit refused at entry fails here and fails the object with it.
 fn enter_object(failure: &Failure, env: Env) -> Result<()> {
+    let refused = REFUSED.replace(false);
     if let Some(message) = failure.borrow().as_deref() {
-        return Err(throw_error(&env, message));
+        let error = throw_error(&env, message);
+        if !refused {
+            crate::heap::forget_crossing();
+        }
+        return Err(error);
+    }
+    if refused {
+        let message = crate::heap::exceeded();
+        if let Ok(mut failure) = failure.try_borrow_mut() {
+            failure.get_or_insert_with(|| message.clone());
+        }
+        panic!("{message}");
     }
     CURRENT_OBJECT.set(failure);
     Ok(())
@@ -138,13 +156,39 @@ fn enter_object(failure: &Failure, env: Env) -> Result<()> {
 struct EngineCall {
     env: Env,
     previous_object: *const Failure,
+    previous_refused: bool,
+    refused: bool,
+    limited: bool,
 }
 
 impl EngineCall {
+    /// A method call; a refusal at entry waits for `enter_object`, so it can fail the object.
     fn new(env: Env) -> Self {
+        let refused = !crate::heap::begin_call(CALL_DEPTH.get() == 0);
+        Self::enter(env, true, refused)
+    }
+
+    /// A call with no engine object, refused at entry.
+    fn function(env: Env) -> Self {
+        if !crate::heap::begin_call(CALL_DEPTH.get() == 0) {
+            panic!("{}", crate::heap::exceeded());
+        }
+        Self::enter(env, true, false)
+    }
+
+    /// A call that only releases memory, which a thread past its limit may still make.
+    fn release(env: Env) -> Self {
+        Self::enter(env, false, false)
+    }
+
+    fn enter(env: Env, limited: bool, refused: bool) -> Self {
+        CALL_DEPTH.set(CALL_DEPTH.get() + 1);
         Self {
             env,
             previous_object: CURRENT_OBJECT.replace(std::ptr::null()),
+            previous_refused: REFUSED.replace(refused),
+            refused,
+            limited,
         }
     }
 }
@@ -152,17 +196,42 @@ impl EngineCall {
 impl Drop for EngineCall {
     fn drop(&mut self) {
         let object = CURRENT_OBJECT.replace(self.previous_object);
-        if std::thread::panicking() {
+        let pending = REFUSED.replace(self.previous_refused);
+        CALL_DEPTH.set(CALL_DEPTH.get().saturating_sub(1));
+        let unwinding = std::thread::panicking();
+        let over = self.limited
+            && if self.refused {
+                pending
+            } else {
+                crate::heap::over_limit()
+            };
+        if unwinding || over {
             // SAFETY: the object registered itself from a method that is still on the stack.
             if !object.is_null()
                 && let Ok(mut failure) = unsafe { &*object }.try_borrow_mut()
             {
-                failure.get_or_insert_with(|| FAILED_OBJECT.to_owned());
+                failure.get_or_insert_with(|| {
+                    if over || crate::heap::over_limit() {
+                        crate::heap::exceeded()
+                    } else {
+                        FAILED_OBJECT.to_owned()
+                    }
+                });
             }
             let mut exception = std::ptr::null_mut();
             // SAFETY: the env belongs to the call that is ending on this thread.
             unsafe { napi::sys::napi_get_and_clear_last_exception(self.env.raw(), &mut exception) };
         }
+        if over && !unwinding {
+            panic!("{}", crate::heap::exceeded());
+        }
+    }
+}
+
+/// The engine crates' progress checkpoint while the calling thread has a heap limit.
+fn limit_progress() {
+    if crate::heap::over_limit() {
+        panic!("{}", crate::heap::exceeded());
     }
 }
 
@@ -396,16 +465,17 @@ fn is_panic_exception(env: Env, exception: napi::sys::napi_value) -> bool {
 }
 
 /// The error an outer call fails with after an update observer made its object fail: the panic
-/// if the observer let it through, else the failed-object error.
+/// if the observer let it through, else the object's failure.
 fn trap_exception(
     env: Env,
     thrown: Option<napi::sys::napi_value>,
+    failure: &str,
 ) -> Option<napi::sys::napi_value> {
     if let Some(exception) = thrown.filter(|exception| is_panic_exception(env, *exception)) {
         return Some(exception);
     }
     let _ = take_pending_exception(env);
-    let _ = throw_error(&env, FAILED_OBJECT);
+    let _ = throw_error(&env, failure);
     take_pending_exception(env)
 }
 
@@ -672,8 +742,9 @@ impl EditSession {
                     .apply(Null, (bytes, u32::from(remote)).into())
             })();
             let thrown = take_pending_exception(env);
-            if self.failure.borrow().is_some() {
-                delivery.exception = trap_exception(env, thrown);
+            let failure = self.failure.borrow().clone();
+            if let Some(failure) = failure {
+                delivery.exception = trap_exception(env, thrown, &failure);
                 return;
             }
             next = self.next_update();
@@ -720,7 +791,7 @@ impl EditSession {
 impl EditSession {
     #[napi(catch_unwind, js_name = "free")]
     pub fn free(&self, env: Env) -> Result<()> {
-        let _call = EngineCall::new(env);
+        let _call = EngineCall::release(env);
         let mut core = self.core.try_borrow_mut().map_err(|_| borrow_error(env))?;
         self.clear_observer(env)?;
         drop(core.take());
@@ -3361,7 +3432,7 @@ impl RetainedLayoutMeta {
 impl RetainedLayoutMeta {
     #[napi(catch_unwind, js_name = "free")]
     pub fn free(&mut self, env: Env) {
-        let _call = EngineCall::new(env);
+        let _call = EngineCall::release(env);
         self.inner = None;
     }
 
@@ -3428,7 +3499,7 @@ impl RunInheritance {
 impl RunInheritance {
     #[napi(catch_unwind, js_name = "free")]
     pub fn free(&mut self, env: Env) {
-        let _call = EngineCall::new(env);
+        let _call = EngineCall::release(env);
         self.inner = None;
     }
 
@@ -3486,12 +3557,14 @@ impl RunInheritance {
 
 #[napi(catch_unwind, js_name = "export_docx_structured_json")]
 pub fn export_docx_structured_json(env: Env, bytes: Uint8Array, options: String) -> Result<String> {
+    let _call = EngineCall::function(env);
     docx_engine::export_docx_structured_json(&bytes, &options)
         .map_err(|error| map_error(env, error))
 }
 
 #[napi(catch_unwind, js_name = "export_docx_markdown_json")]
 pub fn export_docx_markdown_json(env: Env, bytes: Uint8Array, options: String) -> Result<String> {
+    let _call = EngineCall::function(env);
     docx_engine::export_docx_markdown_json(&bytes, &options).map_err(|error| map_error(env, error))
 }
 
@@ -3501,6 +3574,7 @@ pub fn list_docx_content_controls_json(
     bytes: Uint8Array,
     options: String,
 ) -> Result<String> {
+    let _call = EngineCall::function(env);
     docx_engine::list_docx_content_controls_json(&bytes, &options)
         .map_err(|error| map_error(env, error))
 }
@@ -3512,12 +3586,14 @@ pub fn find_docx_content_controls_json(
     query: String,
     options: String,
 ) -> Result<String> {
+    let _call = EngineCall::function(env);
     docx_engine::find_docx_content_controls_json(&bytes, &query, &options)
         .map_err(|error| map_error(env, error))
 }
 
 #[napi(catch_unwind, js_name = "render_docx_markdown_json")]
 pub fn render_docx_markdown_json(env: Env, content: String, options: String) -> Result<String> {
+    let _call = EngineCall::function(env);
     docx_engine::render_docx_markdown_json(&content, &options)
         .map_err(|error| map_error(env, error))
 }
@@ -3528,27 +3604,32 @@ pub fn render_docx_markdown_with_pages_json(
     content: String,
     options: String,
 ) -> Result<String> {
+    let _call = EngineCall::function(env);
     docx_engine::render_docx_markdown_with_pages_json(&content, &options)
         .map_err(|error| map_error(env, error))
 }
 
 #[napi(catch_unwind, js_name = "build_display_list_json")]
 pub fn build_display_list_json(env: Env, input: String) -> Result<String> {
+    let _call = EngineCall::function(env);
     docx_engine::build_display_list_json(&input).map_err(|error| map_error(env, error))
 }
 
 #[napi(catch_unwind, js_name = "layout_document_json")]
 pub fn layout_document_json(env: Env, input: String) -> Result<String> {
+    let _call = EngineCall::function(env);
     docx_engine::layout_document_json(&input).map_err(|error| map_error(env, error))
 }
 
 #[napi(catch_unwind, js_name = "measure_paragraph_json")]
 pub fn measure_paragraph_json(env: Env, input: String) -> Result<String> {
+    let _call = EngineCall::function(env);
     docx_engine::measure_paragraph_json(&input).map_err(|error| map_error(env, error))
 }
 
 #[napi(catch_unwind, js_name = "register_measure_font")]
 pub fn register_measure_font(env: Env, bytes: Uint8Array) -> Result<u32> {
+    let _call = EngineCall::function(env);
     docx_engine::register_measure_font(&bytes).map_err(|error| map_error(env, error))
 }
 
@@ -3558,22 +3639,26 @@ pub fn register_substitute_measure_font(
     base: u32,
     requested_family: String,
 ) -> Result<u32> {
+    let _call = EngineCall::function(env);
     docx_engine::register_substitute_measure_font(base, &requested_family)
         .map_err(|error| map_error(env, error))
 }
 
 #[napi(catch_unwind, js_name = "clear_measure_fonts")]
 pub fn clear_measure_fonts(env: Env) -> Result<()> {
+    let _call = EngineCall::function(env);
     docx_engine::clear_measure_fonts().map_err(|error| map_error(env, error))
 }
 
 #[napi(catch_unwind, js_name = "outline_glyph_json")]
 pub fn outline_glyph_json(env: Env, font_id: u32, glyph_id: u32) -> Result<String> {
+    let _call = EngineCall::function(env);
     docx_engine::outline_glyph_json(font_id, glyph_id).map_err(|error| map_error(env, error))
 }
 
 #[napi(catch_unwind, js_name = "open_display_list")]
 pub fn open_display_list(env: Env, display_list: String) -> Result<u32> {
+    let _call = EngineCall::function(env);
     docx_engine::open_display_list(&display_list).map_err(|error| map_error(env, error))
 }
 
@@ -3584,6 +3669,7 @@ pub fn close_display_list(handle: u32) {
 
 #[napi(catch_unwind, js_name = "update_display_list")]
 pub fn update_display_list(env: Env, handle: u32, update: String) -> Result<()> {
+    let _call = EngineCall::function(env);
     docx_engine::update_display_list(handle, &update).map_err(|error| map_error(env, error))
 }
 
@@ -3595,6 +3681,7 @@ pub fn hit_test_json(
     x: f64,
     y: f64,
 ) -> Result<String> {
+    let _call = EngineCall::function(env);
     docx_engine::hit_test_json(&display_list, page_index, x, y)
         .map_err(|error| map_error(env, error))
 }
@@ -3607,6 +3694,7 @@ pub fn hit_test_regions_json(
     x: f64,
     y: f64,
 ) -> Result<String> {
+    let _call = EngineCall::function(env);
     docx_engine::hit_test_regions_json(&display_list, page_index, x, y)
         .map_err(|error| map_error(env, error))
 }
@@ -3619,17 +3707,20 @@ pub fn hit_test_regions_by_handle(
     x: f64,
     y: f64,
 ) -> Result<String> {
+    let _call = EngineCall::function(env);
     docx_engine::hit_test_regions_by_handle(handle, page_index, x, y)
         .map_err(|error| map_error(env, error))
 }
 
 #[napi(catch_unwind, js_name = "range_rects_json")]
 pub fn range_rects_json(env: Env, display_list: String, from: f64, to: f64) -> Result<String> {
+    let _call = EngineCall::function(env);
     docx_engine::range_rects_json(&display_list, from, to).map_err(|error| map_error(env, error))
 }
 
 #[napi(catch_unwind, js_name = "range_rects_by_handle")]
 pub fn range_rects_by_handle(env: Env, handle: u32, from: f64, to: f64) -> Result<String> {
+    let _call = EngineCall::function(env);
     docx_engine::range_rects_by_handle(handle, from, to).map_err(|error| map_error(env, error))
 }
 
@@ -3642,6 +3733,7 @@ pub fn range_rects_on_pages_json(
     first_page: f64,
     last_page: f64,
 ) -> Result<String> {
+    let _call = EngineCall::function(env);
     docx_engine::range_rects_on_pages_json(&display_list, from, to, first_page, last_page)
         .map_err(|error| map_error(env, error))
 }
@@ -3655,6 +3747,7 @@ pub fn range_rects_on_pages_by_handle(
     first_page: f64,
     last_page: f64,
 ) -> Result<String> {
+    let _call = EngineCall::function(env);
     docx_engine::range_rects_on_pages_by_handle(handle, from, to, first_page, last_page)
         .map_err(|error| map_error(env, error))
 }
@@ -3668,6 +3761,7 @@ pub fn range_rects_region_json(
     from: f64,
     to: f64,
 ) -> Result<String> {
+    let _call = EngineCall::function(env);
     docx_engine::range_rects_region_json(&display_list, &region, &part_id, from, to)
         .map_err(|error| map_error(env, error))
 }
@@ -3681,6 +3775,7 @@ pub fn range_rects_region_by_handle(
     from: f64,
     to: f64,
 ) -> Result<String> {
+    let _call = EngineCall::function(env);
     docx_engine::range_rects_region_by_handle(handle, &region, &part_id, from, to)
         .map_err(|error| map_error(env, error))
 }
@@ -3693,6 +3788,7 @@ pub fn vertical_move_json(
     direction: String,
     goal_x: f64,
 ) -> Result<String> {
+    let _call = EngineCall::function(env);
     docx_engine::vertical_move_json(&display_list, position, &direction, goal_x)
         .map_err(|error| map_error(env, error))
 }
@@ -3705,72 +3801,86 @@ pub fn vertical_move_by_handle(
     direction: String,
     goal_x: f64,
 ) -> Result<String> {
+    let _call = EngineCall::function(env);
     docx_engine::vertical_move_by_handle(handle, position, &direction, goal_x)
         .map_err(|error| map_error(env, error))
 }
 
 #[napi(catch_unwind, js_name = "parse_docx_relationships")]
 pub fn parse_docx_relationships(env: Env, data: Uint8Array) -> Result<String> {
+    let _call = EngineCall::function(env);
     docx_engine::parse_docx_relationships(&data).map_err(|error| map_error(env, error))
 }
 
 #[napi(catch_unwind, js_name = "parse_docx_s2")]
 pub fn parse_docx_s2(env: Env, data: Uint8Array) -> Result<String> {
+    let _call = EngineCall::function(env);
     docx_engine::parse_docx_s2(&data).map_err(|error| map_error(env, error))
 }
 
 #[napi(catch_unwind, js_name = "parse_docx_s3")]
 pub fn parse_docx_s3(env: Env, data: Uint8Array) -> Result<String> {
+    let _call = EngineCall::function(env);
     docx_engine::parse_docx_s3(&data).map_err(|error| map_error(env, error))
 }
 
 #[napi(catch_unwind, js_name = "parse_docx_s4")]
 pub fn parse_docx_s4(env: Env, data: Uint8Array) -> Result<String> {
+    let _call = EngineCall::function(env);
     docx_engine::parse_docx_s4(&data).map_err(|error| map_error(env, error))
 }
 
 #[napi(catch_unwind, js_name = "parse_docx_s5")]
 pub fn parse_docx_s5(env: Env, data: Uint8Array) -> Result<String> {
+    let _call = EngineCall::function(env);
     docx_engine::parse_docx_s5(&data).map_err(|error| map_error(env, error))
 }
 
 #[napi(catch_unwind, js_name = "parse_docx_s6")]
 pub fn parse_docx_s6(env: Env, data: Uint8Array) -> Result<String> {
+    let _call = EngineCall::function(env);
     docx_engine::parse_docx_s6(&data).map_err(|error| map_error(env, error))
 }
 
 #[napi(catch_unwind, js_name = "parse_docx_s7")]
 pub fn parse_docx_s7(env: Env, data: Uint8Array) -> Result<String> {
+    let _call = EngineCall::function(env);
     docx_engine::parse_docx_s7(&data).map_err(|error| map_error(env, error))
 }
 
 #[napi(catch_unwind, js_name = "parse_docx_s8")]
 pub fn parse_docx_s8(env: Env, data: Uint8Array) -> Result<String> {
+    let _call = EngineCall::function(env);
     docx_engine::parse_docx_s8(&data).map_err(|error| map_error(env, error))
 }
 
 #[napi(catch_unwind, js_name = "parse_docx_s9")]
 pub fn parse_docx_s9(env: Env, data: Uint8Array, options_json: String) -> Result<String> {
+    let _call = EngineCall::function(env);
     docx_engine::parse_docx_s9(&data, &options_json).map_err(|error| map_error(env, error))
 }
 
 #[napi(catch_unwind, js_name = "parse_relationships_xml")]
 pub fn parse_relationships_xml(env: Env, xml: Uint8Array, part_path: String) -> Result<String> {
+    let _call = EngineCall::function(env);
     docx_engine::parse_relationships_xml(&xml, &part_path).map_err(|error| map_error(env, error))
 }
 
 #[napi(catch_unwind, js_name = "serialize_docx_s10")]
 pub fn serialize_docx_s10(env: Env, request_json: String) -> Result<String> {
+    let _call = EngineCall::function(env);
     docx_engine::serialize_docx_s10(&request_json).map_err(|error| map_error(env, error))
 }
 
 #[napi(catch_unwind, js_name = "serialize_docx_s11")]
 pub fn serialize_docx_s11(env: Env, request_json: String) -> Result<String> {
+    let _call = EngineCall::function(env);
     docx_engine::serialize_docx_s11(&request_json).map_err(|error| map_error(env, error))
 }
 
 #[napi(catch_unwind, js_name = "serialize_docx_s12")]
 pub fn serialize_docx_s12(env: Env, request_json: String) -> Result<String> {
+    let _call = EngineCall::function(env);
     docx_engine::serialize_docx_s12(&request_json).map_err(|error| map_error(env, error))
 }
 
@@ -3785,6 +3895,7 @@ pub fn write_docx_s13_wasm(
     request_json: String,
     original_docx: Uint8Array,
 ) -> Result<Uint8Array> {
+    let _call = EngineCall::function(env);
     docx_engine::write_docx_s13_wasm(&request_json, &original_docx)
         .map_err(|error| map_error(env, error))
         .and_then(|bytes| byte_result(env, bytes))
@@ -3796,6 +3907,7 @@ pub fn write_docx_s13_wasm_with_warnings(
     request_json: String,
     original_docx: Uint8Array,
 ) -> Result<Uint8Array> {
+    let _call = EngineCall::function(env);
     docx_engine::write_docx_s13_wasm_with_warnings(&request_json, &original_docx)
         .map_err(|error| map_error(env, error))
         .and_then(|bytes| byte_result(env, bytes))
@@ -3803,6 +3915,7 @@ pub fn write_docx_s13_wasm_with_warnings(
 
 #[napi(catch_unwind, js_name = "decodeTiffPng")]
 pub fn decode_tiff_png(env: Env, data: Uint8Array) -> Result<Uint8Array> {
+    let _call = EngineCall::function(env);
     docx_engine::decode_tiff_png(&data)
         .map_err(|error| map_error(env, error))
         .and_then(|bytes| byte_result(env, bytes))
@@ -3810,6 +3923,7 @@ pub fn decode_tiff_png(env: Env, data: Uint8Array) -> Result<Uint8Array> {
 
 #[napi(catch_unwind, js_name = "sanitizeOoxml")]
 pub fn sanitize_ooxml(env: Env, data: Uint8Array, expected_format: String) -> Result<Uint8Array> {
+    let _call = EngineCall::function(env);
     docx_engine::sanitize_ooxml(&data, &expected_format)
         .map_err(|error| map_error(env, error))
         .and_then(|bytes| byte_result(env, bytes))
@@ -3817,6 +3931,7 @@ pub fn sanitize_ooxml(env: Env, data: Uint8Array, expected_format: String) -> Re
 
 #[napi(catch_unwind, js_name = "unzip_docx", ts_return_type = "any")]
 pub fn unzip_docx<'env>(env: Env, data: Uint8Array) -> Result<Object<'env>> {
+    let _call = EngineCall::function(env);
     let parts = docx_engine::unzip_docx(&data).map_err(|error| map_error(env, error))?;
     let mut output = Object::new(&env)?;
     for (name, bytes) in parts {
@@ -3827,6 +3942,7 @@ pub fn unzip_docx<'env>(env: Env, data: Uint8Array) -> Result<Object<'env>> {
 
 #[napi(catch_unwind, js_name = "rezip_docx", ts_args_type = "entries: any")]
 pub fn rezip_docx(env: Env, entries: Unknown<'_>) -> Result<Uint8Array> {
+    let _call = EngineCall::function(env);
     if !matches!(entries.get_type()?, ValueType::Object | ValueType::Function) {
         return Err(map_error(
             env,
@@ -3860,8 +3976,8 @@ pub fn rezip_docx(env: Env, entries: Unknown<'_>) -> Result<Uint8Array> {
         .and_then(|bytes| byte_result(env, bytes))
 }
 
-/// Whether the counters below see every allocation of this thread's engine: false until
-/// `set_wasm_heap_counting(true)`.
+/// Whether the counters below see the allocations of this thread's engine: true from
+/// `set_wasm_heap_counting(true)` on, and while any thread has a heap limit.
 #[napi(catch_unwind, js_name = "wasm_heap_counted")]
 pub fn wasm_heap_counted() -> bool {
     crate::heap::enabled()
@@ -3890,7 +4006,8 @@ pub fn wasm_peak_bytes() -> f64 {
     crate::heap::peak() as f64
 }
 
-/// Size of the calling thread's last allocation that failed, or 0.
+/// Size of the calling thread's last allocation that failed, or 0. It keeps that size after the
+/// thread recovers, until a later failure replaces it.
 #[napi(catch_unwind, js_name = "wasm_failed_allocation_bytes")]
 pub fn wasm_failed_allocation_bytes() -> f64 {
     crate::heap::failed_bytes() as f64
@@ -3902,9 +4019,83 @@ pub fn reset_wasm_peak_bytes() {
     crate::heap::reset_peak();
 }
 
-/// Native no-op; native allocations are not limited.
+/// Caps the bytes the calling thread's engine may hold at once; a non-finite or negative value
+/// removes the cap. The engine call that crosses it fails at its next checkpoint (call entry or
+/// exit, or a progress tick) and its object then refuses every call but `free()`. While any thread
+/// has a cap, heap counting is on.
 #[napi(catch_unwind, js_name = "set_wasm_heap_limit")]
-pub fn set_wasm_heap_limit(_bytes: f64) {}
+pub fn set_wasm_heap_limit(bytes: f64) {
+    let limit = (bytes.is_finite() && bytes >= 0.0).then_some(bytes as usize);
+    crate::heap::set_limit(limit);
+    let hook = limit.map(|_| limit_progress as fn());
+    ooxml_opc::progress::set_hook(hook);
+    docx_layout::progress::set_hook(hook);
+}
 
 #[napi(catch_unwind, js_name = "install_panic_hook")]
 pub fn install_panic_hook() {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn heap_limit_crossed_mid_call_fails_at_the_next_progress_tick_and_the_thread_recovers() {
+        let _limits = crate::heap::tests::limits();
+        std::thread::spawn(|| {
+            set_wasm_heap_limit((1u64 << 40) as f64);
+            let cap = crate::heap::live() + (1 << 20);
+            set_wasm_heap_limit(cap as f64);
+            assert_eq!(crate::heap::limit(), Some(cap));
+            assert!(crate::heap::begin_call(true));
+            ooxml_opc::progress::pulse();
+            docx_layout::progress::pulse();
+
+            let block = vec![1u8; 2 << 20];
+            assert!(crate::heap::over_limit());
+            assert_eq!(crate::heap::failed_bytes(), 2 << 20);
+            let tick = std::panic::catch_unwind(ooxml_opc::progress::pulse).unwrap_err();
+            assert_eq!(
+                tick.downcast_ref::<String>(),
+                Some(&format!(
+                    "{} ({} bytes over a {cap}-byte budget)",
+                    crate::heap::EXCEEDED,
+                    2 << 20
+                ))
+            );
+            assert!(std::panic::catch_unwind(docx_layout::progress::pulse).is_err());
+            assert!(!crate::heap::begin_call(false));
+
+            drop(block);
+            assert!(crate::heap::begin_call(true));
+            assert!(!crate::heap::over_limit());
+            ooxml_opc::progress::pulse();
+
+            set_wasm_heap_limit(f64::INFINITY);
+            assert_eq!(crate::heap::limit(), None);
+            let unlimited = vec![1u8; 4 << 20];
+            ooxml_opc::progress::pulse();
+            docx_layout::progress::pulse();
+            drop(unlimited);
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn heap_limit_of_zero_is_a_limit() {
+        let _limits = crate::heap::tests::limits();
+        std::thread::spawn(|| {
+            set_wasm_heap_limit(0.0);
+            assert_eq!(crate::heap::limit(), Some(0));
+            assert!(crate::heap::begin_call(true));
+            let block = vec![1u8; 16];
+            assert!(crate::heap::over_limit());
+            drop(block);
+            set_wasm_heap_limit(f64::NAN);
+            assert_eq!(crate::heap::limit(), None);
+        })
+        .join()
+        .unwrap();
+    }
+}

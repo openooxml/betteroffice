@@ -385,7 +385,12 @@ export declare function serialize_docx_s12(requestJson: string): string
  */
 export declare function set_wasm_heap_counting(on: boolean): boolean
 
-/** Native no-op; native allocations are not limited. */
+/**
+ * Caps the bytes the calling thread's engine may hold at once; a non-finite or negative value
+ * removes the cap. The engine call that crosses it fails at its next checkpoint (call entry or
+ * exit, or a progress tick) and its object then refuses every call but `free()`. While any thread
+ * has a cap, heap counting is on.
+ */
 export declare function set_wasm_heap_limit(bytes: number): void
 
 export declare function unzip_docx(data: Uint8Array): any
@@ -396,12 +401,15 @@ export declare function vertical_move_by_handle(handle: number, position: number
 
 export declare function vertical_move_json(displayList: string, position: number, direction: string, goalX: number): string
 
-/** Size of the calling thread's last allocation that failed, or 0. */
+/**
+ * Size of the calling thread's last allocation that failed, or 0. It keeps that size after the
+ * thread recovers, until a later failure replaces it.
+ */
 export declare function wasm_failed_allocation_bytes(): number
 
 /**
- * Whether the counters below see every allocation of this thread's engine: false until
- * `set_wasm_heap_counting(true)`.
+ * Whether the counters below see the allocations of this thread's engine: true from
+ * `set_wasm_heap_counting(true)` on, and while any thread has a heap limit.
  */
 export declare function wasm_heap_counted(): boolean
 

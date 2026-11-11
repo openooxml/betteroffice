@@ -24,8 +24,8 @@ export type DocxMemoryPressureLevel = 'normal' | 'warning' | 'critical';
 /**
  * How much memory the editor may use. A native engine has no 4 GiB limit:
  * its heap is held only against the thresholds set here, and without them it
- * reports no pressure. It counts its heap only after `startHeapCounting()` from
- * `@betteroffice/docx/yrs`.
+ * reports no pressure. It counts its heap after `startHeapCounting()` from
+ * `@betteroffice/docx/yrs`, and in a worker given `workerLimitBytes`.
  */
 export interface DocxMemoryBudget {
   /** Pressure is `warning` from here. Default: 75% of the 4 GiB limit. */
@@ -35,7 +35,14 @@ export interface DocxMemoryBudget {
   /**
    * The most the resident worker's editing core may allocate at once, applied
    * when a worker starts. An allocation past it fails as if the memory were
-   * full. Default: no limit short of 4 GiB. A native engine does not enforce it yet.
+   * full. Default: no limit short of 4 GiB.
+   *
+   * On a native engine a limit switches heap counting on for that worker,
+   * which adds a measurable cost to every engine call; leaving it unset costs
+   * nothing. It counts the engine thread's allocations
+   * and is checked at engine-call entry and exit and at progress checkpoints,
+   * so one large allocation between checkpoints can pass it before the call
+   * fails with the same out-of-memory error as wasm.
    */
   workerLimitBytes?: number;
 }

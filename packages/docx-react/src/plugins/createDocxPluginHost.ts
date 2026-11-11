@@ -644,7 +644,10 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       selectionSettleKey = settleKey;
       state.selection = selection;
       if (publication?.ready === false) {
-        if (settleChanged) host.selectionUnsettled();
+        if (settleChanged) {
+          host.selectionUnsettled();
+          access.selectionPublished?.(settleKey);
+        }
         if (moved || resolvedMoved || stateChanged) { invalidateSettle(); runtime.touch(); }
       } else if (!selectionChanged && !emittedMoved) {
         if (moved || resolvedMoved || stateChanged) { invalidateSettle(); runtime.touch(); }

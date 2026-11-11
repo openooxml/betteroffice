@@ -290,6 +290,15 @@ export async function bundledFaceInstalled(face: BundledFontFace): Promise<boole
   }
 }
 
+/**
+ * Whether `error` is the rejection of a face whose optional pack is not installed, as opposed to an installed pack
+ * failing to serve it.
+ * @internal
+ */
+export function isMissingFontAddon(error: unknown): boolean {
+  return error instanceof MissingFontAddonError;
+}
+
 /** Loads font bytes into consumer-owned buffers with retryable failures. */
 export function loadBundledFontBytes(
   face: BundledFontFace,

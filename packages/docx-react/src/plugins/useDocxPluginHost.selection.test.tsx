@@ -11,7 +11,7 @@ import type { ViewerSelectionChange } from '../components/DocxEditor/internals/v
 import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
 import type { SelectionState } from '../components/DocxEditor/types';
 import { defineDocxPlugin } from './defineDocxPlugin';
-import type { DocxPluginContext, DocxPluginError, DocxPluginSelection } from './types';
+import type { DocxPluginContext, DocxPluginError, DocxPluginSelection, DocxPluginSnapshot } from './types';
 import { useDocxPluginHost } from './useDocxPluginHost';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -46,12 +46,14 @@ async function setup(viewerSelection: boolean, initialRange: { from: number; to:
   } as unknown as DisplayListQueries;
   stampSourceVersion(queries, session.version());
   stampRevisionPreviewKey(queries, '');
+  let shown = session;
   const editor = {
-    getYrsSession: () => session,
+    getYrsSession: () => shown,
     getSelectionRange: () => range,
     getLayout: () => null,
   } as unknown as PagedEditorRef;
   const events: DocxPluginSelection[] = [];
+  const loads: Array<{ snapshot: DocxPluginSnapshot; eventsBefore: number }> = [];
   const settledSelections: DocxPluginSelection[] = [];
   const propSelections: Array<SelectionState | null> = [];
   const subscribedSelections: Array<SelectionState | null> = [];
@@ -61,7 +63,8 @@ async function setup(viewerSelection: boolean, initialRange: { from: number; to:
   const plugin = defineDocxPlugin({
     id: 'test.selection',
     createState: () => null,
-    onEvent(_context, event) {
+    onEvent(context, event) {
+      if (event.type === 'load') loads.push({ snapshot: context.snapshot, eventsBefore: events.length });
       if (event.type === 'selection-change') events.push(event.selection);
       if (event.type === 'selection-settle') settledSelections.push(event.selection);
     },
@@ -72,7 +75,7 @@ async function setup(viewerSelection: boolean, initialRange: { from: number; to:
     plugins: [plugin], pagedEditorRef: { current: editor },
     writeModeRef: { current: 'viewing' as const }, mode: 'viewing' as const,
     readOnly: true, viewerSelection, commands: createDocxCommandController(),
-    session, loadGeneration: 0, queries, layoutError: null, zoom: 1,
+    session, loadGeneration: 0, queries, layoutError: null as Error | null, zoom: 1,
     canvasHostRef: { current: null }, overlayTarget: null,
     selectionChangeSubscribersRef: subscribers,
     i18n: undefined, onRenderedDomContextReady: undefined,
@@ -94,12 +97,264 @@ async function setup(viewerSelection: boolean, initialRange: { from: number; to:
     return yrsSelectionState(currentYrsToolbarSelection(session, createYrsInputPositionMap(currentStory,
       session.paragraphs(currentStory).map(paragraph => ({ paraId: paragraph.paraId, length: paragraph.text.length }))))!);
   };
-  return { result, rerender, unmount, options, errors, subscribers, formatting, events, settledSelections, propSelections, subscribedSelections, session,
+  return { result, rerender, unmount, options, errors, subscribers, formatting, events, loads, settledSelections, propSelections, subscribedSelections, session,
     selectRange,
     setDisplayRange: (next: typeof range) => { range = next; },
     setRange: (next: typeof range) => { range = next; if (next) selectRange(next); },
+    replaceSession: (next: YrsSession) => { shown = next; options.session = next; options.loadGeneration += 1; },
     shellReads: () => shellReads };
 }
+
+type View = Awaited<ReturnType<typeof setup>>;
+
+function queriesAt(version: string) {
+  const queries = {
+    displayList: { pages: [] },
+    sourceState: () => ({ status: 'ready' }),
+    pageCount: () => 0,
+  } as unknown as DisplayListQueries;
+  stampSourceVersion(queries, version);
+  stampRevisionPreviewKey(queries, '');
+  return queries;
+}
+
+const snapshotOf = (view: View) => view.result.current.host.activations[0]!.context.snapshot;
+
+async function relayout(view: View, version = view.session.version()) {
+  await act(async () => {
+    view.options.queries = queriesAt(version);
+    view.rerender();
+  });
+}
+
+async function remoteEdit(view: View, edit: (peer: YrsSession) => void, local?: () => void) {
+  const peer = await createYrsSession();
+  try {
+    peer.loadState(view.session.encodeState());
+    edit(peer);
+    await act(async () => {
+      view.session.applyUpdate(peer.encodeStateAsUpdate(view.session.encodeStateVector()));
+      local?.();
+      view.result.current.host.publishSelection();
+    });
+  } finally { peer.destroy(); }
+}
+
+async function bodyBesideOtherStory() {
+  let other = '';
+  const view = await setup(false, { from: 1, to: 3 }, 'body', session => {
+    other = session.loadStories([{ storyId: 'hf:other', paragraphs: [{ text: 'Other story' }] }])['hf:other']![0]!;
+  });
+  const before = snapshotOf(view);
+  expect(before.selection.displayRange).toEqual({ story: 'body', from: 1, to: 3, layoutId: before.layout!.id });
+  view.events.length = 0;
+  const editElsewhere = (text = 'remote ') => (peer: YrsSession) => peer.insertText({ story: 'hf:other', paraId: other, offset: 0 }, text);
+  return { view, before, editElsewhere };
+}
+
+test('a document change under an unchanged selection keeps its range until the next layout, then changes once', async () => {
+  const { view, before, editElsewhere } = await bodyBesideOtherStory();
+  await remoteEdit(view, editElsewhere());
+  const held = snapshotOf(view);
+  expect(held.version).toBe(view.session.version());
+  expect(held.version).not.toBe(before.version);
+  expect(held.layout).toBeNull();
+  expect(held.selection).toEqual(before.selection);
+  expect(view.events).toEqual([]);
+  await relayout(view);
+  const layout = snapshotOf(view).layout!;
+  expect(layout.id).not.toBe(before.layout!.id);
+  expect(view.events).toEqual([{ formatting: before.selection.formatting,
+    displayRange: { story: 'body', from: 1, to: 3, layoutId: layout.id } }]);
+  expect(snapshotOf(view).selection).toEqual(view.events[0]!);
+  await act(async () => view.result.current.host.publishSelection());
+  expect(view.events).toHaveLength(1);
+  expect(view.errors).toEqual([]);
+});
+
+for (const [name, insertAt, expected] of [
+  ['moved by the user', null, { from: 4, to: 6 }],
+  ['under text inserted before it', 0, { from: 8, to: 10 }],
+  ['under text inserted inside it', 2, { from: 1, to: 10 }],
+] as [string, number | null, { from: number; to: number }][]) {
+  test(`a selection ${name} while the layout is behind publishes no range until the next layout, then changes once`, async () => {
+    const { view, before, editElsewhere } = await bodyBesideOtherStory();
+    const paraId = view.session.selection()!.head.paraId;
+    await remoteEdit(view, insertAt === null ? editElsewhere()
+      : peer => peer.insertText({ story: 'body', paraId, offset: insertAt }, 'remote '),
+    insertAt === null ? () => view.selectRange(expected) : undefined);
+    expect(view.session.selection()).toMatchObject({ anchor: { story: 'body', paraId, offset: expected.from },
+      head: { story: 'body', paraId, offset: expected.to } });
+    const held = snapshotOf(view);
+    expect(held.layout).toBeNull();
+    expect(held.selection.displayRange).toBeNull();
+    expect(view.events).toEqual([]);
+    view.setDisplayRange(expected);
+    await relayout(view);
+    const layout = snapshotOf(view).layout!;
+    expect(layout.id).not.toBe(before.layout!.id);
+    expect(view.events).toEqual([{ formatting: view.formatting(), displayRange: { story: 'body', ...expected, layoutId: layout.id } }]);
+  });
+}
+
+test('a selection moved while the layout is behind settles once when the next layout maps it after its quiet window', async () => {
+  const clock = selectionClock();
+  try {
+    const { view, editElsewhere } = await bodyBesideOtherStory();
+    await act(async () => { await clock.tick(350); });
+    view.settledSelections.length = 0;
+    const moved = { from: 4, to: 6 };
+    await remoteEdit(view, editElsewhere(), () => view.selectRange(moved));
+    expect(snapshotOf(view).layout).toBeNull();
+    await act(async () => { await clock.tick(350); });
+    expect(view.settledSelections).toEqual([]);
+    expect(snapshotOf(view).selectionSettled).toBe(false);
+    view.setDisplayRange(moved);
+    await relayout(view);
+    expect(view.settledSelections).toEqual([{ formatting: view.formatting(),
+      displayRange: { story: 'body', ...moved, layoutId: snapshotOf(view).layout!.id } }]);
+    await act(async () => { await clock.tick(700); });
+    expect(view.settledSelections).toHaveLength(1);
+  } finally { cleanup(); clock.restore(); }
+});
+
+test('a selection change after a selection moved under a stale layout waits for its own quiet window', async () => {
+  const clock = selectionClock();
+  try {
+    const { view, editElsewhere } = await bodyBesideOtherStory();
+    await act(async () => { await clock.tick(350); });
+    view.settledSelections.length = 0;
+    await remoteEdit(view, editElsewhere(), () => view.selectRange({ from: 4, to: 6 }));
+    expect(snapshotOf(view).layout).toBeNull();
+    await act(async () => { await clock.tick(350); });
+    expect(view.settledSelections).toEqual([]);
+    const next = { from: 7, to: 9 };
+    await act(async () => {
+      view.setRange(next);
+      view.options.queries = queriesAt(view.session.version());
+      view.rerender();
+    });
+    expect(snapshotOf(view).selection.displayRange).toEqual({ story: 'body', ...next, layoutId: snapshotOf(view).layout!.id });
+    expect(view.settledSelections).toEqual([]);
+    await act(async () => { await clock.tick(349); });
+    expect(view.settledSelections).toEqual([]);
+    await act(async () => { await clock.tick(1); });
+    expect(view.settledSelections).toEqual([{ formatting: view.formatting(),
+      displayRange: { story: 'body', ...next, layoutId: snapshotOf(view).layout!.id } }]);
+    await act(async () => { await clock.tick(700); });
+    expect(view.settledSelections).toHaveLength(1);
+  } finally { cleanup(); clock.restore(); }
+});
+
+test('an unchanged selection the next layout cannot place ends its kept range with one empty change', async () => {
+  const { view, before, editElsewhere } = await bodyBesideOtherStory();
+  await remoteEdit(view, editElsewhere());
+  expect(snapshotOf(view).selection).toEqual(before.selection);
+  view.setDisplayRange(null);
+  await relayout(view);
+  expect(snapshotOf(view).layout).not.toBeNull();
+  expect(view.events).toEqual([{ formatting: before.selection.formatting, displayRange: null }]);
+  expect(snapshotOf(view).selection.displayRange).toBeNull();
+});
+
+test('a layout replaced again before the selection maps still ends the kept range with one change', async () => {
+  const { view, before, editElsewhere } = await bodyBesideOtherStory();
+  await remoteEdit(view, editElsewhere('one '));
+  await act(async () => {
+    view.options.queries = queriesAt('a superseded version');
+    view.rerender();
+  });
+  await remoteEdit(view, editElsewhere('two '));
+  expect(snapshotOf(view).layout).toBeNull();
+  expect(snapshotOf(view).selection).toEqual(before.selection);
+  expect(view.events).toEqual([]);
+  await relayout(view);
+  expect(view.events).toEqual([{ formatting: before.selection.formatting,
+    displayRange: { story: 'body', from: 1, to: 3, layoutId: snapshotOf(view).layout!.id } }]);
+});
+
+test('a layout replaced again that cannot place the selection ends the kept range with one empty change', async () => {
+  const { view, before, editElsewhere } = await bodyBesideOtherStory();
+  await remoteEdit(view, editElsewhere('one '));
+  await act(async () => {
+    view.options.queries = queriesAt('a superseded version');
+    view.rerender();
+  });
+  await remoteEdit(view, editElsewhere('two '));
+  expect(snapshotOf(view).layout).toBeNull();
+  expect(snapshotOf(view).selection).toEqual(before.selection);
+  expect(view.events).toEqual([]);
+  view.setDisplayRange(null);
+  await relayout(view);
+  expect(snapshotOf(view).layout).not.toBeNull();
+  expect(view.events).toEqual([{ formatting: before.selection.formatting, displayRange: null }]);
+  expect(snapshotOf(view).selection.displayRange).toBeNull();
+});
+
+test('a layout that fails while a selection keeps its range ends the range with one empty change', async () => {
+  const { view, before, editElsewhere } = await bodyBesideOtherStory();
+  const host = view.result.current.host.host;
+  const publish = host.selectionChanged;
+  const readiness: Array<boolean | undefined> = [];
+  host.selectionChanged = (selection, identity, publication) => {
+    readiness.push(publication?.ready);
+    return publish(selection, identity, publication);
+  };
+  await remoteEdit(view, editElsewhere());
+  expect(snapshotOf(view).layout).toBeNull();
+  expect(snapshotOf(view).selection).toEqual(before.selection);
+  expect(readiness.at(-1)).toBe(false);
+  expect(view.events).toEqual([]);
+  await act(async () => {
+    view.options.layoutError = new Error('layout failed');
+    view.rerender();
+  });
+  expect(snapshotOf(view).layout).toBeNull();
+  expect(view.events).toEqual([{ formatting: before.selection.formatting, displayRange: null }]);
+  expect(snapshotOf(view).selection.displayRange).toBeNull();
+  expect(readiness.at(-1)).toBe(true);
+  expect(view.errors).toEqual([]);
+});
+
+test('unmounting while a selection keeps its range publishes nothing more', async () => {
+  const { view, before, editElsewhere } = await bodyBesideOtherStory();
+  await remoteEdit(view, editElsewhere());
+  expect(snapshotOf(view).selection).toEqual(before.selection);
+  view.unmount();
+  await act(async () => {});
+  expect(view.events).toEqual([]);
+  expect(view.errors).toEqual([]);
+});
+
+test('a replaced document never carries the kept range across', async () => {
+  const { view, before, editElsewhere } = await bodyBesideOtherStory();
+  await remoteEdit(view, editElsewhere());
+  expect(snapshotOf(view).selection).toEqual(before.selection);
+  const next = await createYrsSession();
+  sessions.push(next);
+  next.loadState(view.session.encodeState());
+  const live = view.session.selection()!;
+  next.setSelection(live.anchor, live.head);
+  const loadsBefore = view.loads.length;
+  await act(async () => {
+    view.replaceSession(next);
+    view.rerender();
+  });
+  await waitFor(() => expect(view.loads).toHaveLength(loadsBefore + 1));
+  const loaded = view.loads.at(-1)!;
+  expect(loaded.snapshot.generation).not.toBe(before.generation);
+  expect(loaded.eventsBefore).toBe(0);
+  expect(loaded.snapshot.layout).toBeNull();
+  expect(loaded.snapshot.selection.displayRange).toBeNull();
+  await waitFor(() => expect(snapshotOf(view).generation).not.toBe(before.generation));
+  expect(snapshotOf(view).layout).toBeNull();
+  expect(snapshotOf(view).selection.displayRange).toBeNull();
+  expect(view.events).toEqual([]);
+  await relayout(view, next.version());
+  const mapped = { story: 'body', from: 1, to: 3, layoutId: snapshotOf(view).layout!.id };
+  expect(snapshotOf(view).selection.displayRange).toEqual(mapped);
+  expect(view.events.map(event => event.displayRange)).toEqual([mapped]);
+});
 
 test('a paragraph removed at flush time clears selection without blaming the plugin', async () => {
   const view = await setup(false, { from: 1, to: 3 }, 'body');
