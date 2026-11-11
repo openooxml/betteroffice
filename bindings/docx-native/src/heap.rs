@@ -256,4 +256,108 @@ mod tests {
         assert!(live() >= before + 4096);
         drop(block);
     }
+
+    #[test]
+    fn crossing_the_limit_flags_the_thread_and_keeps_the_allocation() {
+        set_limit(Some(1 << 40));
+        let limit = live() + 1024;
+        set_limit(Some(limit));
+        let layout = Layout::from_size_align(4096, 8).unwrap();
+        unsafe {
+            let pointer = CountingAllocator.alloc(layout);
+            assert!(!pointer.is_null());
+            assert!(over_limit());
+            assert_eq!(failed_bytes(), 4096);
+            CountingAllocator.dealloc(pointer, layout);
+        }
+        assert!(over_limit());
+        assert_eq!(
+            exceeded(),
+            format!("{EXCEEDED} (4096 bytes over a {limit}-byte budget)")
+        );
+        assert!(!begin_call(false));
+        assert!(begin_call(true));
+        assert!(!over_limit());
+        set_limit(None);
+        assert_eq!(limit(), None);
+    }
+
+    #[test]
+    fn an_outermost_call_still_over_the_limit_is_refused() {
+        set_limit(Some(1 << 40));
+        let block = vec![1u8; 4096];
+        set_limit(Some(live() - 1024));
+        let more = vec![1u8; 64];
+        assert!(over_limit());
+        assert!(!begin_call(true));
+        drop(block);
+        drop(more);
+        assert!(begin_call(true));
+        assert!(!over_limit());
+        set_limit(None);
+    }
+
+    #[test]
+    fn a_reallocation_past_the_limit_flags_the_thread_and_moves_the_block() {
+        set_limit(Some(1 << 40));
+        set_limit(Some(live() + 1024));
+        let layout = Layout::from_size_align(64, 8).unwrap();
+        unsafe {
+            let pointer = CountingAllocator.alloc(layout);
+            assert!(!over_limit());
+            let grown = CountingAllocator.realloc(pointer, layout, 8192);
+            assert!(!grown.is_null());
+            assert!(over_limit());
+            assert_eq!(failed_bytes(), 8192 - 64);
+            CountingAllocator.dealloc(grown, Layout::from_size_align(8192, 8).unwrap());
+        }
+        set_limit(None);
+    }
+
+    #[test]
+    fn clearing_the_limit_clears_the_flag() {
+        set_limit(Some(0));
+        let block = vec![1u8; 16];
+        assert!(over_limit());
+        set_limit(None);
+        assert!(!over_limit());
+        assert_eq!(limit(), None);
+        drop(block);
+    }
+
+    #[test]
+    fn without_a_limit_counting_never_flags_the_thread() {
+        enable();
+        assert_eq!(limit(), None);
+        let block = vec![1u8; 1 << 20];
+        assert!(!over_limit());
+        assert!(begin_call(true));
+        assert_eq!(limit(), None);
+        drop(block);
+    }
+
+    #[test]
+    fn a_limit_starts_counting_and_clearing_it_keeps_counting_a_host_asked_for() {
+        set_limit(Some(1 << 40));
+        assert!(enabled());
+        enable();
+        set_limit(None);
+        assert!(enabled());
+    }
+
+    #[test]
+    fn a_limit_belongs_to_the_thread_that_set_it() {
+        set_limit(Some(0));
+        let (other_limit, other_over) = std::thread::spawn(|| {
+            let block = vec![1u8; 4096];
+            let seen = (limit(), over_limit());
+            drop(block);
+            seen
+        })
+        .join()
+        .unwrap();
+        assert_eq!(other_limit, None);
+        assert!(!other_over);
+        set_limit(None);
+    }
 }

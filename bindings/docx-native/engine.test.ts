@@ -7,6 +7,12 @@ import initWasm, * as wasm from '../../packages/docx/src/wasm/generated/edit/doc
 import initPreflight, { font_preflight as wasmFontPreflight } from '../../packages/docx/src/wasm/generated/preflight/docx_preflight.js';
 
 import { openFailureKind } from '../../packages/docx-react/src/components/openFailure';
+import {
+  isEngineTrap,
+  NATIVE_ENGINE_OBJECT_FAILED,
+  NATIVE_MEMORY_BUDGET_EXCEEDED,
+  nativeBudgetFailure,
+} from '../../shared/office-session/trap';
 
 type Engine = typeof wasm;
 type Session = wasm.EditSession;
@@ -1245,12 +1251,16 @@ describe('docx native engine parity', () => {
     expect(native.set_wasm_heap_counting(true)).toBe(wasm.set_wasm_heap_counting(true));
     expect(native.wasm_heap_counted()).toBe(wasm.wasm_heap_counted());
     native.set_wasm_heap_limit(1);
+    let limited: unknown;
     try {
-      expect(native.unzip_docx(native.rezip_docx(entries))).toEqual(wasm.unzip_docx(wasm.rezip_docx(entries)));
-      expect(native.wasm_failed_allocation_bytes()).toBe(0);
+      limited = caughtValue(() => native.unzip_docx(native.rezip_docx(entries)));
     } finally {
       native.set_wasm_heap_limit(Infinity);
     }
+    expect(limited).toBeInstanceOf(Error);
+    expect(nativeBudgetFailure((limited as Error).message)).toMatchObject({ budgetBytes: 1 });
+    expect(native.wasm_failed_allocation_bytes()).toBeGreaterThan(0);
+    expect(native.unzip_docx(native.rezip_docx(entries))).toEqual(wasm.unzip_docx(wasm.rezip_docx(entries)));
     const held = new native.EditSession(17);
     try {
       expect(native.wasm_live_bytes()).toBeGreaterThan(0);
@@ -1261,6 +1271,63 @@ describe('docx native engine parity', () => {
       held.free();
     }
     expect(native.install_panic_hook()).toBeUndefined();
+  });
+
+  test('a call past the heap limit fails its object, which refuses later calls until freed', () => {
+    expect(native.set_wasm_heap_counting(true)).toBe(true);
+    const failing = new native.EditSession(18);
+    const limit = native.wasm_live_bytes() + 1024;
+    native.set_wasm_heap_limit(limit);
+    let budget: unknown;
+    try {
+      budget = caughtValue(() => failing.open_docx(fixture, true, 'opening'));
+    } finally {
+      native.set_wasm_heap_limit(Infinity);
+    }
+    try {
+      expect(budget).toBeInstanceOf(Error);
+      expect((budget as Error).message.startsWith(NATIVE_MEMORY_BUDGET_EXCEEDED)).toBe(true);
+      expect(nativeBudgetFailure((budget as Error).message)).toEqual({
+        bytes: expect.any(Number),
+        budgetBytes: limit,
+      });
+      expect(nativeBudgetFailure((budget as Error).message)!.bytes).toBeGreaterThan(0);
+      expect(isEngineTrap(budget)).toBe(true);
+      expect(native.wasm_failed_allocation_bytes()).toBeGreaterThan(0);
+
+      const refused = caughtValue(() => failing.version());
+      expect(refused).toBeInstanceOf(Error);
+      expect((refused as Error).message).toBe(NATIVE_ENGINE_OBJECT_FAILED);
+      expect(isEngineTrap(refused)).toBe(true);
+    } finally {
+      expect(() => failing.free()).not.toThrow();
+    }
+
+    const fresh = new native.EditSession(19);
+    try {
+      fresh.open_docx(fixture, true, 'opening');
+      expect(read(fresh).paragraphs.map(({ text }) => text)).toEqual(['Engine text']);
+    } finally {
+      fresh.free();
+    }
+  });
+
+  test('a limit set while the thread is past it fails the next call that allocates', () => {
+    const session = new native.EditSession(20);
+    try {
+      session.open_docx(fixture, true, 'opening');
+      native.set_wasm_heap_limit(0);
+      let budget: unknown;
+      try {
+        budget = caughtValue(() => session.version());
+      } finally {
+        native.set_wasm_heap_limit(Number.NaN);
+      }
+      expect(nativeBudgetFailure((budget as Error).message)).toMatchObject({ budgetBytes: 0 });
+      expect((caughtValue(() => session.version()) as Error).message).toBe(NATIVE_ENGINE_OBJECT_FAILED);
+    } finally {
+      session.free();
+    }
   });
 
   test('module measurement fonts share the free glyph API', () => {

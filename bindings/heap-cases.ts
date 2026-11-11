@@ -23,9 +23,10 @@ export interface HeapMemoryEntry {
 
 /**
  * What a limit does on each engine: wasm refuses the allocation past it; native
- * does not enforce it yet, so the allocation succeeds and nothing is recorded.
+ * fails the engine call that crossed it. Either way the call throws and the
+ * crossing allocation is recorded.
  */
-export const HEAP_LIMIT = { wasm: 'refuses', native: 'not enforced' } as const;
+export const HEAP_LIMIT = { wasm: 'refuses', native: 'refuses' } as const;
 
 function figures(engine: HeapEngine) {
   return {
@@ -119,12 +120,7 @@ export function describeHeapTable<T>(
     } finally {
       engine().set_wasm_heap_limit(Infinity);
     }
-    if (HEAP_LIMIT[engineKind] === 'refuses') {
-      expect(thrown).toBeDefined();
-      expect(engine().wasm_failed_allocation_bytes()).toBeGreaterThan(0);
-    } else {
-      expect(thrown).toBeUndefined();
-      expect(engine().wasm_failed_allocation_bytes()).toBe(0);
-    }
+    expect(thrown).toBeDefined();
+    expect(engine().wasm_failed_allocation_bytes()).toBeGreaterThan(0);
   });
 }
