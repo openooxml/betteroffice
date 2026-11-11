@@ -156,6 +156,7 @@ dependencies = [
  "betteroffice-fonts",
  "betteroffice-ooxml-font-preflight",
  "betteroffice-ooxml-text",
+ "betteroffice-opc",
  "getrandom 0.3.4",
  "mimalloc",
  "napi",

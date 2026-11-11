@@ -1,8 +1,15 @@
 import { beforeAll, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { SessionFailure } from '../../../../shared/office-session';
-import { EditSession, engineKind } from '../wasm/engineEdit';
-import { preloadEditWasm } from '../wasm/edit';
+import { NATIVE_MEMORY_BUDGET_EXCEEDED } from '../../../../shared/office-session/trap';
+import {
+  EditSession,
+  engineKind,
+  rezip_docx,
+  set_wasm_heap_counting,
+  wasm_failed_allocation_bytes,
+} from '../wasm/engineEdit';
+import { preloadEditWasm, setEditWasmHeapLimit } from '../wasm/edit';
 import { residentWorkerFactory } from './__fixtures__/residentWorker';
 import { DocxSourceWorkerClient } from './residentSourceWorkerClient';
 
@@ -14,7 +21,7 @@ beforeAll(async () => {
   startWorker = await residentWorkerFactory();
 }, 30_000);
 
-test('an engine panic fails the document session as a trap and refuses later calls', async () => {
+async function expectPanicToTrap(): Promise<void> {
   const worker = startWorker();
   const client = new DocxSourceWorkerClient(worker);
   try {
@@ -56,4 +63,19 @@ test('an engine panic fails the document session as a trap and refuses later cal
   } finally {
     client.destroy();
   }
+}
+
+test('an engine panic fails the document session as a trap and refuses later calls', expectPanicToTrap, 20_000);
+
+// A wasm module that runs out of memory is gone, so only a native thread can panic again after one.
+test.skipIf(engineKind !== 'native')('an engine panic after a call ran past the heap limit is still a trap', async () => {
+  expect(set_wasm_heap_counting(true)).toBe(true);
+  setEditWasmHeapLimit(0);
+  try {
+    expect(() => rezip_docx({ 'part.bin': new Uint8Array(1024) })).toThrow(NATIVE_MEMORY_BUDGET_EXCEEDED);
+  } finally {
+    setEditWasmHeapLimit(undefined);
+  }
+  expect(wasm_failed_allocation_bytes()).toBeGreaterThan(0);
+  await expectPanicToTrap();
 }, 20_000);

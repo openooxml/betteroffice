@@ -28,10 +28,11 @@ describe('formatText clear', () => {
       const saved = await yrs.saveYrsDocx(session, { updateModifiedDate: false });
       reopened.seedFromDocx(saved.bytes);
       const xml = await (await JSZip.loadAsync(saved.bytes)).file('word/document.xml')!.async('string');
-      for (const marker of ['Title', 'Strong run']) {
-        console.log(`toolbar clear ${marker}: live bold=${Boolean(textOf(live, marker).bold)} saved rPr=${savedRunProperties(xml, marker)} reopened bold=${Boolean(textOf(reopened.storySegments('body'), marker).bold)}`);
-      }
-      expect(xml).toContain('Title');
+      const after = reopened.storySegments('body');
+      expect(savedRunProperties(xml, 'Title')).toBeNull();
+      expect(savedRunProperties(xml, 'Strong run')).toBeNull();
+      expect([textOf(live, 'Title').bold, textOf(after, 'Title').bold].map(Boolean)).toEqual([true, true]);
+      expect([textOf(live, 'Strong run').bold, textOf(after, 'Strong run').bold].map(Boolean)).toEqual([false, false]);
     } finally {
       session.destroy();
       reopened.destroy();

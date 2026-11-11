@@ -1,3 +1,5 @@
+import { isEngineTrap } from '../../../../shared/office-session/trap';
+
 /** A sliced face's pack files, as `sliceSourceOf` from `@betteroffice/fonts/progressive` describes them. */
 export interface ProgressiveFontSource {
   ref: { format: number; index: string; indexSha256: string };
@@ -263,7 +265,7 @@ export class ResidentProgressiveFonts {
       state.complete = face.complete();
       return true;
     } catch (error) {
-      if (error instanceof WebAssembly.RuntimeError) throw error;
+      if (isEngineTrap(error)) throw error;
       this.refuse(owner, `the engine refused the outlines of a sliced face: ${error instanceof Error ? error.message : String(error)}`);
       return false;
     }

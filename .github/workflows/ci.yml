@@ -17,8 +17,8 @@ concurrency:
 jobs:
   # The router fills the account's free GitHub-hosted runners first; a job that does not fit, or every job when
   # the router cannot count, runs on a fresh self-hosted runner of the leanest class that fits. The router itself
-  # runs GitHub-hosted, so it never queues behind the self-hosted job cap, and does not count itself as busy. The
-  # two shortest (Security audit, Native gate) stay GitHub-hosted. Fork pull requests stay GitHub-hosted,
+  # runs GitHub-hosted, so it never queues behind the self-hosted job cap, and does not count itself as busy.
+  # Security audit, Native gate and Native panic hooks are never routed and stay GitHub-hosted. Fork pull requests stay GitHub-hosted,
   # BO_CI_RUNNER pins every job to one label, BO_CI_SPILL=off keeps them self-hosted, and
   # BO_CI_GH_LIMIT/BO_CI_GH_RESERVE size the GitHub share.
   route:
@@ -350,6 +350,12 @@ jobs:
             enabling_from_any_thread_turns_counting_on_everywhere_and_stays_on; do
             grep -q "^test heap::tests::$name \.\.\. ok$" "$log" || { echo "heap test did not run: $name"; exit 1; }
           done
+          log="${RUNNER_TEMP:-/tmp}/memory-tests.log"
+          cargo test --locked --manifest-path bindings/Cargo.toml -p betteroffice-xlsx-native --lib memory 2>&1 | tee "$log"
+          test "${PIPESTATUS[0]}" -eq 0
+          for name in a_call_past_its_budget_fails_its_checks_and_the_next_call_within_it_passes; do
+            grep -q "^test memory::tests::$name \.\.\. ok$" "$log" || { echo "memory test did not run: $name"; exit 1; }
+          done
           rm -rf bindings/target
 
       # Running a fuzz target needs nightly; checking that the package still builds does not.
@@ -492,7 +498,7 @@ jobs:
   native:
     name: Native gate
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -625,7 +631,7 @@ jobs:
 
       - name: Check native and wasm parity
         run: |
-          bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts bindings/pptx-native/engine.test.ts bindings/docx-native/parity.test.ts bindings/docx-native/engine.test.ts bindings/docx-native/png.test.ts bindings/pptx-native/png.test.ts
+          bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts bindings/pptx-native/engine.test.ts bindings/docx-native/parity.test.ts bindings/docx-native/engine.test.ts bindings/docx-native/png.test.ts bindings/docx-native/displayListParity.test.ts bindings/pptx-native/png.test.ts
           bun test bindings/raw-surface.test.ts
 
       - name: Check generated declarations

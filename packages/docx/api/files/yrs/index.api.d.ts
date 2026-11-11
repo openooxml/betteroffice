@@ -111,7 +111,13 @@ export interface YrsAuthor {
     /** ISO timestamp supplied by the host so all peers share one clock policy. */
     date: string;
 }
-/** One position: `(story, paraId, offset)` — offsets are UTF-16 units within the paragraph. */
+/**
+ * One position: `(story, paraId, offset)` — offsets count the paragraph's UTF-16 text units,
+ * inline embeds and the block embeds (table, block content control) that lead it, as
+ * {@link YrsSession.paragraphSpans} measures them. In a paragraph that follows one table,
+ * offset 0 is before the table and the text starts at offset 1; each further leading table or
+ * block content control adds one.
+ */
 export interface YrsLoc {
     story: string;
     paraId: string;
@@ -246,6 +252,10 @@ export declare function preparedDocxDigest(bytes: Uint8Array): string | undefine
 export interface YrsParagraph {
     /** Session key; not the paragraph's Word `w14:paraId`. */
     paraId: string;
+    /**
+     * The paragraph's text without its embeds (inline or block); use
+     * {@link YrsSession.paragraphSpans} for its length in offset units.
+     */
     text: string;
     /** pStyle / alignment plus any op-set extras. */
     properties: Record<string, unknown>;
@@ -400,7 +410,10 @@ export interface YrsParagraphSpan {
 /** Compact paragraph entry used to build the live input-position projection. */
 export interface YrsParagraphLength {
     paraId: string;
-    /** UTF-16 text and inline embed units before the paragraph's pilcrow. */
+    /**
+     * UTF-16 text units, inline embed units and one unit per block embed (table, block content
+     * control) that leads the paragraph, before its pilcrow.
+     */
     length: number;
 }
 /** Receipt of an op that minted a paragraph id. */
@@ -1275,7 +1288,7 @@ export interface YrsSession extends CollaborationReplica {
     paragraphs(story: string): YrsParagraph[];
     /** Literal search in document order. */
     searchText(query: string, options?: YrsTextSearchOptions): YrsTextMatch[];
-    /** Paragraph ids and inline-unit lengths, resolved in one Rust story traversal. */
+    /** Paragraph ids and lengths in {@link YrsLoc} offset units, resolved in one Rust story traversal. */
     paragraphSpans(story: string): YrsParagraphLength[];
     /** The raw formatted-segment view (the render bridge's input). */
     storySegments(story: string): YrsStorySegment[];

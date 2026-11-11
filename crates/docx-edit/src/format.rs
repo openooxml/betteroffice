@@ -1044,6 +1044,7 @@ struct StoryChunk {
     end: u32,
     text: bool,
     block: bool,
+    pilcrow: bool,
     attrs: Option<Box<Attrs>>,
 }
 
@@ -1058,6 +1059,7 @@ fn story_chunks<T: ReadTxn>(story: &TextRef, txn: &T) -> Vec<StoryChunk> {
             text: matches!(diff.insert, Out::Any(Any::String(_))),
             block: matches!(&diff.insert, Out::YMap(embed) if map_string(embed, txn, KIND_KEY)
                 .is_some_and(|kind| crate::segments::is_block_embed(&kind))),
+            pilcrow: matches!(&diff.insert, Out::YMap(embed) if crate::is_pilcrow(embed, txn)),
             attrs: diff.attributes.clone(),
         });
         offset = end;
@@ -1090,16 +1092,29 @@ fn clearing_attrs_in(chunks: &[StoryChunk], start: u32, end: u32) -> Attrs {
 
 /// [`changes_text`] over `chunks`.
 fn changes_text_in(chunks: &[StoryChunk], start: u32, end: u32, attrs: &Attrs) -> bool {
+    changes_units_in(chunks, start, end, attrs, true)
+}
+
+/// Whether setting `attrs` would change a unit in `start..end` that a pass writes: text only, or
+/// with `text_only` false every unit but block embeds. A paragraph mark holds no run formatting
+/// of its own, so one without a key counts as already holding what the pass writes for it.
+fn changes_units_in(
+    chunks: &[StoryChunk],
+    start: u32,
+    end: u32,
+    attrs: &Attrs,
+    text_only: bool,
+) -> bool {
     chunks_within(chunks, start, end)
-        .filter(|chunk| chunk.text)
+        .filter(|chunk| if text_only { chunk.text } else { !chunk.block })
         .any(|chunk| {
             let current = chunk.attrs.as_deref();
-            attrs.iter().any(|(key, value)| {
-                current
-                    .and_then(|current| current.get(key))
-                    .unwrap_or(&Any::Null)
-                    != value
-            })
+            attrs.iter().any(
+                |(key, value)| match current.and_then(|current| current.get(key)) {
+                    None if chunk.pilcrow => false,
+                    current => current.unwrap_or(&Any::Null) != value,
+                },
+            )
         })
 }
 
@@ -1122,9 +1137,17 @@ fn free_spans_in(chunks: &[StoryChunk], start: u32, end: u32, text_only: bool) -
     spans
 }
 
-/// The paragraphs of a cell or content-control story: the range each spans, its own paragraph
-/// mark included, and the paragraph's id.
-fn story_paragraphs<T: ReadTxn>(story: &TextRef, txn: &T) -> Vec<(u32, u32, Option<String>)> {
+/// A paragraph of a story: the range it spans, its own paragraph mark included, its id and its
+/// paragraph style.
+struct StoryParagraph {
+    start: u32,
+    end: u32,
+    key: Option<String>,
+    style: Option<String>,
+}
+
+/// The paragraphs of a story, in order.
+fn story_paragraphs<T: ReadTxn>(story: &TextRef, txn: &T) -> Vec<StoryParagraph> {
     let mut paragraphs = Vec::new();
     let mut start = 0;
     let mut offset = 0;
@@ -1133,15 +1156,84 @@ fn story_paragraphs<T: ReadTxn>(story: &TextRef, txn: &T) -> Vec<(u32, u32, Opti
         if let Out::YMap(embed) = &diff.insert
             && crate::is_pilcrow(embed, txn)
         {
-            paragraphs.push((start, end, map_string(embed, txn, crate::PARA_ID)));
+            paragraphs.push(StoryParagraph {
+                start,
+                end,
+                key: map_string(embed, txn, crate::PARA_ID),
+                style: map_string(embed, txn, "pStyle"),
+            });
             start = end;
         }
         offset = end;
     }
     if offset > start {
-        paragraphs.push((start, offset, None));
+        paragraphs.push(StoryParagraph {
+            start,
+            end: offset,
+            key: None,
+            style: None,
+        });
     }
     paragraphs
+}
+
+/// What a formatting pass writes over a range: the given attributes, or cleared character
+/// formatting. A clear with the document's source returns each run to what its paragraph style,
+/// and the table style around it, give; without a source it removes the attributes.
+#[derive(Clone, Copy)]
+enum RunDelta<'a> {
+    Set(&'a Attrs),
+    Clear(Option<&'a crate::seed::SourceMetadata>),
+}
+
+/// The run attributes the styles give an unformatted run of a paragraph styled `paragraph_style`
+/// in `story_id`.
+fn styled_run_base(
+    source: &crate::seed::SourceMetadata,
+    story_id: &str,
+    paragraph_style: Option<&str>,
+    run_style: Option<&Any>,
+) -> OpResult<BTreeMap<String, Any>> {
+    Ok(source
+        .seeded_run_attrs(story_id, paragraph_style, run_style)
+        .map_err(OpError::InvalidFormatValue)?
+        .into_iter()
+        .collect())
+}
+
+/// Every character-formatting attribute set back to `base`, removed where `base` has none. Only
+/// [`FORMATTING_ATTRS`] are written, so script direction and every other attribute a clear keeps
+/// stay as they are even where the styles give them a value.
+fn reset_to(base: &BTreeMap<String, Any>) -> Attrs {
+    FORMATTING_ATTRS
+        .iter()
+        .map(|key| {
+            (
+                Arc::from(*key),
+                base.get(*key).cloned().unwrap_or(Any::Null),
+            )
+        })
+        .collect()
+}
+
+/// The attributes `delta` writes over a paragraph styled `paragraph_style` in `story_id`;
+/// `remove` gives the attributes a clear without the document's source removes.
+fn paragraph_delta(
+    delta: RunDelta<'_>,
+    story_id: &str,
+    paragraph_style: Option<&str>,
+    remove: impl FnOnce() -> Attrs,
+) -> OpResult<Attrs> {
+    match delta {
+        RunDelta::Set(attrs) => Ok(attrs.clone()),
+        RunDelta::Clear(Some(source)) => Ok(reset_to(&styled_run_base(
+            source,
+            story_id,
+            paragraph_style,
+            None,
+        )?)),
+        RunDelta::Clear(None) => Ok(remove()),
+    }
 }
 
 /// Whether setting `attrs` would change any text in `start..end`.
@@ -1263,7 +1355,7 @@ impl EditingDoc {
             ctx,
             &story,
             &range,
-            Some(&attrs),
+            RunDelta::Set(&attrs),
             &mut keeper,
         )?;
         let loc_range =
@@ -1317,7 +1409,7 @@ impl EditingDoc {
             ctx,
             &story,
             &range,
-            Some(&attrs),
+            RunDelta::Set(&attrs),
             &mut keeper,
         )?;
         let loc_range =
@@ -1354,27 +1446,24 @@ impl EditingDoc {
                 ClearMarks::All => None,
                 ClearMarks::Keys(_) => chunk.attrs.get("runStyle").cloned(),
             };
-            let base: BTreeMap<String, Any> = match source {
-                Some(source) => source
-                    .seeded_run_attrs(story_id, paragraph_style, run_style.as_ref())
-                    .map_err(OpError::InvalidFormatValue)?
-                    .into_iter()
-                    .collect(),
+            let base = match source {
+                Some(source) => {
+                    styled_run_base(source, story_id, paragraph_style, run_style.as_ref())?
+                }
                 None => BTreeMap::new(),
             };
-            let keys: Vec<&str> = match clear {
-                ClearMarks::Keys(keys) => keys.clone(),
-                ClearMarks::All => FORMATTING_ATTRS
+            let attrs: Attrs = match clear {
+                ClearMarks::Keys(keys) => keys
                     .iter()
-                    .copied()
-                    .chain(base.keys().map(String::as_str))
-                    .filter(|key| !PROTECTED_ATTRS.contains(key))
+                    .map(|key| {
+                        (
+                            Arc::from(*key),
+                            base.get(*key).cloned().unwrap_or(Any::Null),
+                        )
+                    })
                     .collect(),
+                ClearMarks::All => reset_to(&base),
             };
-            let attrs: Attrs = keys
-                .into_iter()
-                .map(|key| (Arc::from(key), base.get(key).cloned().unwrap_or(Any::Null)))
-                .collect();
             match pieces.last_mut() {
                 Some((_, last_end, last)) if *last_end == from && *last == attrs => *last_end = to,
                 _ => pieces.push((from, to, attrs)),
@@ -1433,7 +1522,7 @@ impl EditingDoc {
                 ctx,
                 &story,
                 &piece,
-                Some(&attrs),
+                RunDelta::Set(&attrs),
                 &mut keeper,
             )? {
                 if !revision_ids.contains(&id) {
@@ -1525,7 +1614,9 @@ impl EditingDoc {
         })
     }
 
-    /// Clears formatting while retaining tracked-change stamps and hyperlinks.
+    /// Clears character formatting while retaining tracked-change stamps and hyperlinks: each run
+    /// returns to what its paragraph style, and the table style around it, give, and loses its
+    /// character style. Without the opened document's styles the formatting is removed.
     pub fn clear_formatting(&self, ctx: &EditCtx, range: StoryRange) -> OpResult<Receipt> {
         self.clear_formatting_keeping(ctx, range)
             .map(|(receipt, _)| receipt)
@@ -1551,9 +1642,16 @@ impl EditingDoc {
         if ctx.is_suggesting() && refuses_suggestion(&story, &txn, range.start, range.end) {
             return Err(OpError::SuggestedFormattingOverContainer);
         }
+        let source = self.source_metadata();
         let mut keeper = Keeper::new(self);
-        let revision_ids =
-            self.apply_run_format_through(&mut txn, ctx, &story, &range, None, &mut keeper)?;
+        let revision_ids = self.apply_run_format_through(
+            &mut txn,
+            ctx,
+            &story,
+            &range,
+            RunDelta::Clear(source.as_deref()),
+            &mut keeper,
+        )?;
         let loc_range =
             crate::op::loc_range_in_txn(&range.story, &story, &txn, range.start, range.end)?;
         let receipt = Receipt {
@@ -1568,40 +1666,46 @@ impl EditingDoc {
     /// text they hold, so a selection across a table formats its cells and not the table. A
     /// paragraph inside a block, or one of several the range spans, that saving rewritten would
     /// lose content of stays unchanged and is counted in `keeper`, as does a single paragraph
-    /// whose fields saving rewritten would flatten; `delta` of `None` clears formatting instead.
+    /// whose fields saving rewritten would flatten.
     fn apply_run_format_through(
         &self,
         txn: &mut TransactionMut<'_>,
         ctx: &EditCtx,
         story: &TextRef,
         range: &StoryRange,
-        delta: Option<&Attrs>,
+        delta: RunDelta<'_>,
         keeper: &mut Keeper<'_>,
     ) -> OpResult<Vec<String>> {
-        let attrs = match delta {
-            Some(delta) => delta.clone(),
-            None => clearing_attrs(story, txn, range.start, range.end),
-        };
+        self.prepare_table_styles(delta, &range.story);
         let (spans, children) = block_free_spans(story, txn, range.start, range.end, false);
         let paragraphs: Vec<_> = story_paragraphs(story, txn)
             .into_iter()
-            .filter(|(start, end, _)| *end > range.start && *start < range.end)
+            .filter(|paragraph| paragraph.end > range.start && paragraph.start < range.end)
             .collect();
         let mut revision_ids = Vec::new();
         if paragraphs.len() > 1 {
             let chunks = story_chunks(story, txn);
             let mut formatted = Vec::new();
-            for (start, end, key) in paragraphs {
-                let (from, to) = (start.max(range.start), end.min(range.end));
-                let attrs = match delta {
-                    Some(delta) => delta.clone(),
-                    None => clearing_attrs_in(&chunks, from, to),
-                };
-                if attrs.is_empty() {
+            for paragraph in paragraphs {
+                let (from, to) = (
+                    paragraph.start.max(range.start),
+                    paragraph.end.min(range.end),
+                );
+                let attrs =
+                    paragraph_delta(delta, &range.story, paragraph.style.as_deref(), || {
+                        clearing_attrs_in(&chunks, from, to)
+                    })?;
+                if attrs.is_empty()
+                    || (matches!(delta, RunDelta::Clear(_))
+                        && !changes_units_in(&chunks, from, to, &attrs, false))
+                {
                     continue;
                 }
                 if changes_text_in(&chunks, from, to, &attrs)
-                    && let Some(reason) = key.as_deref().and_then(|key| keeper.rewrite_loss(key))
+                    && let Some(reason) = paragraph
+                        .key
+                        .as_deref()
+                        .and_then(|key| keeper.rewrite_loss(key))
                 {
                     keeper.keep(reason);
                     continue;
@@ -1617,21 +1721,38 @@ impl EditingDoc {
                 &range.story,
                 formatted,
             )?);
-        } else if let Some(key) = paragraphs.first().and_then(|(_, _, key)| key.as_deref())
-            && changes_text(story, txn, range.start, range.end, &attrs)
-            && keeper.rewrite_loss(key) == Some(KeptReason::Field)
-        {
-            keeper.keep(KeptReason::Field);
         } else {
-            for (at, len) in spans {
-                let span = StoryRange::new(range.story.clone(), at, at + len);
-                revision_ids.extend(self.apply_run_format(
-                    txn,
-                    ctx,
-                    story,
-                    &span,
-                    attrs.clone(),
-                )?);
+            let paragraph = paragraphs.first();
+            let attrs = paragraph_delta(
+                delta,
+                &range.story,
+                paragraph.and_then(|paragraph| paragraph.style.as_deref()),
+                || clearing_attrs(story, txn, range.start, range.end),
+            )?;
+            let unchanged = matches!(delta, RunDelta::Clear(_))
+                && !changes_units_in(
+                    &story_chunks(story, txn),
+                    range.start,
+                    range.end,
+                    &attrs,
+                    false,
+                );
+            if let Some(key) = paragraph.and_then(|paragraph| paragraph.key.as_deref())
+                && changes_text(story, txn, range.start, range.end, &attrs)
+                && keeper.rewrite_loss(key) == Some(KeptReason::Field)
+            {
+                keeper.keep(KeptReason::Field);
+            } else if !unchanged {
+                for (at, len) in spans {
+                    let span = StoryRange::new(range.story.clone(), at, at + len);
+                    revision_ids.extend(self.apply_run_format(
+                        txn,
+                        ctx,
+                        story,
+                        &span,
+                        attrs.clone(),
+                    )?);
+                }
             }
         }
         for (child, _) in children {
@@ -1641,28 +1762,33 @@ impl EditingDoc {
         Ok(revision_ids)
     }
 
-    /// Formats or clears (`delta` of `None`) every paragraph of a cell or content-control story
-    /// and of the blocks nested in it, keeping unchanged each one that saving rewritten would
-    /// lose content of.
+    /// Formats or clears every paragraph of a cell or content-control story and of the blocks
+    /// nested in it, keeping unchanged each one that saving rewritten would lose content of.
     fn format_story_paragraphs(
         &self,
         txn: &mut TransactionMut<'_>,
         ctx: &EditCtx,
         child: &str,
-        delta: Option<&Attrs>,
+        delta: RunDelta<'_>,
         keeper: &mut Keeper<'_>,
     ) -> OpResult<Vec<String>> {
         let Some(text) = crate::story_text(txn, child) else {
             return Ok(Vec::new());
         };
+        self.prepare_table_styles(delta, child);
         let mut revision_ids = Vec::new();
         let chunks = story_chunks(&text, txn);
         let mut formatted = Vec::new();
-        for (start, end, key) in story_paragraphs(&text, txn) {
-            let attrs = match delta {
-                Some(delta) => delta.clone(),
-                None => clearing_attrs_in(&chunks, start, end),
-            };
+        for StoryParagraph {
+            start,
+            end,
+            key,
+            style,
+        } in story_paragraphs(&text, txn)
+        {
+            let attrs = paragraph_delta(delta, child, style.as_deref(), || {
+                clearing_attrs_in(&chunks, start, end)
+            })?;
             if attrs.is_empty() || !changes_text_in(&chunks, start, end, &attrs) {
                 continue;
             }
@@ -1680,6 +1806,16 @@ impl EditingDoc {
             revision_ids.extend(self.format_story_paragraphs(txn, ctx, &nested, delta, keeper)?);
         }
         Ok(revision_ids)
+    }
+
+    /// Loads the table style context of `story` when it is a table cell, before a clear computes
+    /// its runs.
+    fn prepare_table_styles(&self, delta: RunDelta<'_>, story: &str) {
+        if let RunDelta::Clear(Some(metadata)) = delta
+            && let Some(index) = self.source_index()
+        {
+            metadata.prepare_patch_table_styles(story, &index);
+        }
     }
 
     /// Applies each `(at, len, attrs)` of `spans`, in document order, in one walk of `story`: a

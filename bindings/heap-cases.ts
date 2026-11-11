@@ -23,9 +23,11 @@ export interface HeapMemoryEntry {
 
 /**
  * What a limit does on each engine: wasm refuses the allocation past it; native
- * does not enforce it yet, so the allocation succeeds and nothing is recorded.
+ * fails the engine call that crossed it. Either way the call throws and the
+ * crossing allocation is recorded. The table's limit is 0, so the outcome does
+ * not depend on live bytes that other objects free while the case runs.
  */
-export const HEAP_LIMIT = { wasm: 'refuses', native: 'not enforced' } as const;
+export const HEAP_LIMIT = { wasm: 'refuses', native: 'refuses' } as const;
 
 function figures(engine: HeapEngine) {
   return {
@@ -65,18 +67,23 @@ export function describeHeapTable<T>(
       expect(value).toBeGreaterThanOrEqual(0);
     }
     expect(peak).toBeGreaterThanOrEqual(live);
-    expect(failed).toBe(0);
+    release(hold());
+    expect(engine().wasm_failed_allocation_bytes()).toBe(failed);
   });
 
+  // Objects other tests left behind can be collected, and freed, between any two reads, so live
+  // bytes may fall at any time: growth is read from the peak window, and the drop on release only
+  // as a fall from the bytes held.
   test('live grows while engine state is held and drops when it is released', () => {
-    const before = figures(engine());
+    engine().reset_wasm_peak_bytes();
+    const start = engine().wasm_peak_bytes();
     const held = hold();
     const holding = figures(engine());
     release(held);
     const after = figures(engine());
-    expect(holding.live).toBeGreaterThan(before.live);
-    expect(after.live).toBeLessThan(holding.live);
+    expect(holding.peak).toBeGreaterThan(start);
     expect(holding.peak).toBeGreaterThanOrEqual(holding.live);
+    expect(after.live).toBeLessThan(holding.live);
     expect(after.peak).toBeGreaterThanOrEqual(holding.peak);
   });
 
@@ -86,7 +93,8 @@ export function describeHeapTable<T>(
     expect(raised.peak).toBeGreaterThan(raised.live);
     engine().reset_wasm_peak_bytes();
     const reset = figures(engine());
-    expect(reset.peak).toBe(reset.live);
+    expect(reset.peak).toBeGreaterThanOrEqual(reset.live);
+    expect(reset.peak).toBeLessThanOrEqual(raised.live);
     expect(reset.peak).toBeLessThan(raised.peak);
   });
 
@@ -109,8 +117,7 @@ export function describeHeapTable<T>(
   });
 
   test(`a heap limit on ${engineKind}: ${HEAP_LIMIT[engineKind]}`, () => {
-    const live = engine().wasm_live_bytes();
-    engine().set_wasm_heap_limit(live + 1024);
+    engine().set_wasm_heap_limit(0);
     let thrown: unknown;
     try {
       release(hold());
@@ -119,12 +126,7 @@ export function describeHeapTable<T>(
     } finally {
       engine().set_wasm_heap_limit(Infinity);
     }
-    if (HEAP_LIMIT[engineKind] === 'refuses') {
-      expect(thrown).toBeDefined();
-      expect(engine().wasm_failed_allocation_bytes()).toBeGreaterThan(0);
-    } else {
-      expect(thrown).toBeUndefined();
-      expect(engine().wasm_failed_allocation_bytes()).toBe(0);
-    }
+    expect(thrown).toBeDefined();
+    expect(engine().wasm_failed_allocation_bytes()).toBeGreaterThan(0);
   });
 }
