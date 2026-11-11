@@ -1021,9 +1021,7 @@ mod tests {
             styles,
             Some(&doc_defaults)
         ));
-        let normal: StyleMap = [style("Normal", "character", None)]
-            .into_iter()
-            .collect();
+        let normal: StyleMap = [style("Normal", "character", None)].into_iter().collect();
         assert!(!hidden_only(&row(""), Some(&normal)));
     }
 
