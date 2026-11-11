@@ -536,7 +536,7 @@ impl DocUndoManager {
                 let Ok(anchor) = crate::decode_anchor(value) else {
                     continue;
                 };
-                let Ok(story) = crate::story_ref(&txn, &anchor.story) else {
+                let Some(story) = crate::story_text(&txn, &anchor.story) else {
                     continue;
                 };
                 for sticky in [anchor.start, anchor.end] {

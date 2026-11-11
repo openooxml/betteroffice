@@ -1,6 +1,7 @@
 /// <reference lib="webworker" />
 
 import { isEngineTrap } from '../../../../shared/office-session/trap';
+import { isCellHasNoStoryRefusal } from './cellRefusal';
 import { resolveReservations, validReservationsPayload, type DocxResolvedReservations } from './reservations';
 import { readParsedToolbarMetadata, readResidentToolbarMetadata, type DocxToolbarMetadata } from './residentToolbarMetadata';
 import { readResidentRangeHighlights } from './residentRangeHighlights';
@@ -2860,7 +2861,9 @@ async function handle(request: ScheduledRequest): Promise<void> {
       id: request.id,
       ok: false,
       error: message,
-      residentUnavailable: message.includes('resident input state is not ready'),
+      // A write into a table cell with no story is refused before the engine changes anything.
+      residentUnavailable: message.includes('resident input state is not ready') ||
+        (pendingUpdates.length === 0 && isCellHasNoStoryRefusal(error)),
       // The edit committed here but never reached the host: this replica is
       // no longer the host's, so the host must replace it.
       ...(pendingUpdates.length > 0 ? { terminal: true } : {}),

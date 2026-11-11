@@ -4,11 +4,38 @@ use std::collections::HashMap;
 
 use yrs::branch::{Branch, BranchPtr};
 use yrs::updates::decoder::Decode;
-use yrs::{Assoc, IndexedSequence, Offset, ReadTxn, StickyIndex, TextRef, Transact};
+use yrs::{Assoc, IndexedSequence, Offset, Out, ReadTxn, StickyIndex, TextRef, Transact};
 
-use crate::{EditingDoc, story_ref};
+use crate::{EditError, EditingDoc, story_text};
 
 const POSITIONS_PER_STORY: usize = 32;
+
+fn branch_of(text: &TextRef) -> BranchPtr {
+    BranchPtr::from(<TextRef as AsRef<Branch>>::as_ref(text))
+}
+
+/// Whether `offset` is the embed of a live table that names `story` as a cell.
+fn at_naming_table<T: ReadTxn>(txn: &T, story: &str, offset: &Offset) -> bool {
+    crate::empty_cells::naming_table(txn, story, |parent, index| {
+        index == offset.index && branch_of(parent) == offset.branch
+    })
+    .is_some()
+}
+
+/// Whether `offset` lies in the text of a live story.
+fn in_live_story<T: ReadTxn>(txn: &T, offset: &Offset) -> bool {
+    let Some(stories) = txn.get_map(crate::STORIES) else {
+        return false;
+    };
+    for (_, value) in crate::live_stories(&stories, txn) {
+        if let Out::YText(text) = value
+            && branch_of(&text) == offset.branch
+        {
+            return true;
+        }
+    }
+    false
+}
 
 pub(crate) fn sticky_index<T: ReadTxn>(
     text: &TextRef,
@@ -60,7 +87,12 @@ impl EditingDoc {
             .yrs_doc()
             .try_transact()
             .map_err(|error| error.to_string())?;
-        let text = story_ref(&txn, story).map_err(|error| error.to_string())?;
+        let Some(text) = story_text(&txn, story) else {
+            return match crate::empty_cells::naming_table(&txn, story, |_, _| true) {
+                Some((parent, table)) => Ok(sticky_index(&parent, &txn, table, Assoc::After)),
+                None => Err(EditError::StoryNotFound(story.to_owned()).to_string()),
+            };
+        };
         let mut cache = self.sticky_positions.lock().unwrap();
         let cache = cache.story(story, self.committed_epoch());
         let key = (index, assoc);
@@ -75,6 +107,10 @@ impl EditingDoc {
         Ok(position)
     }
 
+    /// The offset of `position` in `story`. A position at the embed of a live table that names
+    /// `story` as a cell is offset 0 of that cell: the caret of a cell without its story sits
+    /// there, and so is a position into the cell's former text or one that no longer resolves.
+    /// A position in another live story is refused.
     pub(crate) fn cached_sticky_offset(
         &self,
         story: &str,
@@ -84,18 +120,30 @@ impl EditingDoc {
             .yrs_doc()
             .try_transact()
             .map_err(|error| error.to_string())?;
-        let text = story_ref(&txn, story).map_err(|error| error.to_string())?;
+        let Some(text) = story_text(&txn, story) else {
+            if !crate::empty_cells::named_by_live_table(&txn, story) {
+                return Err(EditError::StoryNotFound(story.to_owned()).to_string());
+            }
+            return match sticky_offset(position, &txn) {
+                Some(offset) if at_naming_table(&txn, story, &offset) => Ok(Some(0)),
+                Some(offset) if in_live_story(&txn, &offset) => {
+                    Err("selection sticky index belongs to another story".to_owned())
+                }
+                _ => Ok(Some(0)),
+            };
+        };
         let mut cache = self.sticky_positions.lock().unwrap();
         let cache = cache.story(story, self.committed_epoch());
         if let Some(index) = cache.offsets.get(position) {
             return Ok(*index);
         }
         let offset = sticky_offset(position, &txn);
-        let expected = BranchPtr::from(<TextRef as AsRef<Branch>>::as_ref(&text));
-        if offset
-            .as_ref()
-            .is_some_and(|offset| offset.branch != expected)
+        if let Some(offset) = offset.as_ref()
+            && offset.branch != branch_of(&text)
         {
+            if at_naming_table(&txn, story, offset) {
+                return Ok(Some(0));
+            }
             return Err("selection sticky index belongs to another story".to_owned());
         }
         let index = offset.map(|offset| offset.index);
@@ -151,7 +199,7 @@ mod tests {
     use yrs::updates::encoder::Encode;
     use yrs::{Any, ClientID, ID, Text};
 
-    use crate::{EditCtx, FormatPolicy, Position, RawOp, StoryRange};
+    use crate::{EditCtx, FormatPolicy, Position, RawOp, StoryRange, story_ref};
 
     fn resolve_uncached_sticky_position(
         doc: &EditingDoc,
