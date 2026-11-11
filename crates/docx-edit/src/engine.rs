@@ -22355,6 +22355,78 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
     }
 
     #[test]
+    fn revision_preview_keeps_note_reference_marks_on_their_ordinals() {
+        use super::lowering_fixture::{Package, para, run};
+
+        let body = format!(
+            "{}{}",
+            para(
+                "10000001",
+                &format!(
+                    r#"{}<w:ins w:id="1" w:author="A"><w:r><w:footnoteReference w:id="7"/></w:r></w:ins>"#,
+                    run("Before"),
+                ),
+            ),
+            para(
+                "10000002",
+                &format!(r#"{}<w:r><w:footnoteReference w:id="9"/></w:r>"#, run("Later")),
+            ),
+        );
+        let notes = format!(
+            r#"<w:footnotes {}><w:footnote w:id="7"><w:p><w:r><w:t>Seven</w:t></w:r></w:p></w:footnote><w:footnote w:id="9"><w:p><w:r><w:t>Nine</w:t></w:r></w:p></w:footnote></w:footnotes>"#,
+            lowering_fixture::NS
+        );
+        let bytes = Package::new(&body)
+            .part("footnotes.xml", "rIdNotes", "footnotes", "footnotes", &notes)
+            .bytes();
+        let marks = |engine: &EngineSession| {
+            let blocks =
+                serde_json::to_value(engine.render.borrow().stories["body"].blocks.as_ref())
+                    .unwrap();
+            blocks
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|block| block["runs"].as_array().cloned().unwrap_or_default())
+                .filter_map(|run| {
+                    Some((
+                        run.get("footnoteRefId")?.as_f64()? as i64,
+                        run["text"].as_str()?.to_owned(),
+                    ))
+                })
+                .collect::<Vec<_>>()
+        };
+        for enabled in [false, true] {
+            let (engine, request) = local_patch_laid_out(&bytes, 9631, enabled);
+            let mut request: serde_json::Value = serde_json::from_str(&request).unwrap();
+            local_patch_preview_warm_up(&engine, &mut request);
+            for decision in ["rejected", "accepted", "rejected", "accepted"] {
+                request["renderEnv"]["revisionPreview"] = json!({"1": decision});
+                let before = engine.stats();
+                engine
+                    .layout_document_with_regions_retained_json(&request.to_string())
+                    .unwrap();
+                assert_eq!(
+                    engine.stats().lower_preview_patches,
+                    before.lower_preview_patches,
+                    "{decision} enabled={enabled}",
+                );
+                let expected = if decision == "accepted" {
+                    vec![(7, "1".to_owned()), (9, "2".to_owned())]
+                } else {
+                    vec![(9, "1".to_owned())]
+                };
+                assert_eq!(marks(&engine), expected, "{decision} enabled={enabled}");
+                assert_local_patch_matches_cold(
+                    &engine,
+                    &request.to_string(),
+                    &format!("{decision} note reference preview enabled={enabled}"),
+                );
+            }
+        }
+    }
+
+    #[test]
     fn resident_section_suffix_positions_shift_once_per_edit() {
         use super::lowering_fixture::{Package, para, run};
 

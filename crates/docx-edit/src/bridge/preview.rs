@@ -1016,6 +1016,13 @@ pub(crate) fn replay(
                         ))
                     }) || docx_layout::sequence_fields::reads_sequence_fields(&replacement)
                 })
+            || current.get(record.blocks.clone()).is_some_and(|previous| {
+                previous.iter().any(|block| {
+                    !docx_layout::footnotes::collect_note_refs(std::slice::from_ref(block.as_ref()))
+                        .is_empty()
+                })
+            })
+            || !docx_layout::footnotes::collect_note_refs(&replacement).is_empty()
         {
             return None;
         }
