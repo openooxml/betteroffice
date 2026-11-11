@@ -1661,7 +1661,7 @@ fn eval_node_with(
     }
     // no handler knows what excel made of an unsupported shape, so with no
     // saved value to keep the cell shows the call's own `#CALC!`
-    if !answer && ctx.has_unsupported_shape() {
+    if ctx.has_unsupported_shape() {
         let calc = CellValue::Error {
             value: ErrorValue::Calc,
         };
