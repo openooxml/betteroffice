@@ -362,7 +362,7 @@ function main(): void {
   const mode = args.find((arg) => arg === "--write" || arg === "--check");
   const format = args.find((arg) => !arg.startsWith("--"));
   if (!mode || !format || !FORMATS[format]) {
-    console.error("usage: bun scripts/api-surface.ts --write xlsx | bun scripts/api-surface.ts --check xlsx");
+    console.error(`usage: bun scripts/api-surface.ts --write <format> | bun scripts/api-surface.ts --check <format>; formats: ${Object.keys(FORMATS).join(", ")}`);
     process.exit(2);
   }
   const config = FORMATS[format];
@@ -395,7 +395,6 @@ function main(): void {
       writeFileSync(tempPath, content);
       if (!existsSync(expectedPath)) {
         console.error(`missing API surface snapshot: ${relative(root, expectedPath)}`);
-        console.error("regenerate with: bun scripts/api-surface.ts --write xlsx");
         failed = true;
         continue;
       }
@@ -403,7 +402,6 @@ function main(): void {
       if (committed !== content) {
         console.error(`API surface changed: ${relative(root, expectedPath)}`);
         console.error(diffText(committed, content));
-        console.error("regenerate with: bun scripts/api-surface.ts --write xlsx");
         failed = true;
       }
     }
@@ -413,7 +411,10 @@ function main(): void {
         failed = true;
       }
     }
-    if (failed) process.exit(1);
+    if (failed) {
+      console.error(`if the change is intended, regenerate with: bun scripts/api-surface.ts --write ${config.native ?? format}`);
+      process.exit(1);
+    }
     console.log(`API surface ok for ${format}`);
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
