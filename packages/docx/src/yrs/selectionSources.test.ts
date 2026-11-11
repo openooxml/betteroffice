@@ -12,11 +12,11 @@ const SOURCES: Record<string, Record<string, { count: number; via: string }>> = 
     'residentCommandAnchors.ts': { count: 2, via: 'resolveCommandSelection hands it to readCommandSelection' },
     'residentCommandSelection.ts': { count: 1, via: 'handed to readCommandSelection' },
     'residentCommandHost.ts': { count: 1, via: 'carries the retained selection into the command context' },
-    'residentEngineWorker.ts': { count: 2, via: 'the prefix check only decides reuse; the vertical move focus is checked with laidOutStory' },
+    'residentEngineWorker.ts': { count: 2, via: 'the prefix check only decides reuse; the vertical move focus is checked with the engine read storyLaidOut' },
   },
   'engine.selection()': {
     'residentCommandActions.ts': { count: 3, via: 'undo/redo: table ancestry before the undo, and the selection after it, checked with laidOutStory; hooks: the initial confirmed selection, read through readCommandSelection on every command' },
-    'residentEngineWorker.ts': { count: 1, via: 'the vertical move focus, checked with laidOutStory' },
+    'residentEngineWorker.ts': { count: 1, via: 'the vertical move focus, checked with the engine read storyLaidOut' },
   },
   '.cellSelection()': {
     'residentCommandTableSelection.ts': { count: 1, via: 'readCellSelection: the engine refuses a cell selection on an unavailable table, read as none' },

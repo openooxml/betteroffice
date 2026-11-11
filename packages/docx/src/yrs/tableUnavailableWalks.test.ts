@@ -255,16 +255,19 @@ describe('a save over tables nested past the engine walk depth', () => {
       story = receipt.createdStoryIds[0]!;
     }
     for (const target of [a, b]) target.applyUpdate(builder.encodeState());
+    const outcome = (error: unknown) => (error as Error & { code?: string }).code ?? String((error as Error).message).slice(0, 60);
     expect(sessionUnavailableTablesFrom(a, ['body'])).toBeNull();
-    await saveYrsDocx(a, { updateModifiedDate: false });
+    expect(unavailableTablesByProjection(a, ['body'])).toEqual([]);
+    const healthy = await saveYrsDocx(a, { updateModifiedDate: false }).then(() => 'saved', outcome);
+    console.log(`DEEPSAVE healthy 260 ${healthy}`);
+    expect(healthy).not.toBe('table-unavailable');
 
     crossing(a, b, deepest);
-    let code: string | undefined;
-    try {
-      await saveYrsDocx(a, { updateModifiedDate: false });
-    } catch (error) {
-      code = (error as Error & { code?: string }).code;
-    }
-    expect(code).toBe('table-unavailable');
+    expect(sessionUnavailableTablesFrom(a, ['body'])).toBeNull();
+    expect(unavailableTablesByProjection(a, ['body'])).toContainEqual({ story: deepest, tableIndex: 0 });
+    const broken = await saveYrsDocx(a, { updateModifiedDate: false }).then(() => 'saved', outcome);
+    console.log(`DEEPSAVE unavailable 260 ${broken}`);
+    expect(broken).not.toBe('saved');
+    if (healthy === 'saved') expect(broken).toBe('table-unavailable');
   }, 60_000);
 });

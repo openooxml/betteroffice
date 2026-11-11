@@ -78,7 +78,8 @@ async function peer(replica: Opened, clientId: number): Promise<YrsSession> {
 
 async function receive(replica: Opened, from: YrsSession): Promise<void> {
   const update = from.encodeStateAsUpdate(replica.engine.encodeStateVector()).slice().buffer;
-  expect((await replica.session.submit('applyRemoteUpdate', { update }, merge).ack).status).toBe('applied');
+  const ack = await replica.session.submit('applyRemoteUpdate', { update }, merge).ack;
+  expect(ack.status, JSON.stringify({ status: ack.status, reason: 'reason' in ack ? ack.reason : undefined })).toBe('applied');
 }
 
 function send(replica: Opened, to: YrsSession): void {

@@ -40,6 +40,21 @@ thread_local! {
     static PAYLOAD_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// What one root's reachability walk found: the stories it reached, and whether it met an
+/// unavailable table on the way.
+pub(crate) struct RootReach {
+    reached: HashSet<String>,
+    met_unavailable: bool,
+}
+
+impl RootReach {
+    /// Whether the layout of this root shows a live story: hidden only when the walk met an
+    /// unavailable table and did not reach the story.
+    fn shows(&self, story: &str) -> bool {
+        !self.met_unavailable || self.reached.contains(story)
+    }
+}
+
 /// Whether a table payload already read as a map, where `has` tells whether it holds an entry,
 /// lacks any of its entries.
 pub(crate) fn lacks_payload(has: impl Fn(&str) -> bool) -> bool {
@@ -78,10 +93,11 @@ impl EditingDoc {
         self.unavailable_tables_from(&roots)
     }
 
-    /// Whether the outline walk from `root` lays `story` out: a live root always, any other live
-    /// story only when the walk reaches it through complete tables and block controls, so a cell
-    /// of an unavailable table, at any depth, is not laid out. Each root's set is kept until a
-    /// structural change, so typing never walks again. The walk has no depth limit.
+    /// Whether the layout of `root` shows the live `story`. A story is hidden only on positive
+    /// evidence: the walk from `root` met an unavailable table and did not reach the story (a cell
+    /// of that table, at any depth). Without an unavailable table in reach every live story counts
+    /// as shown, exactly as before. Each root's walk is kept until a structural change, so typing
+    /// never walks again. The walk has no depth limit.
     pub(crate) fn story_laid_out(&self, root: &str, story: &str) -> bool {
         if crate::story_ref(&self.yrs_doc().transact(), story).is_err() {
             return false;
@@ -90,26 +106,28 @@ impl EditingDoc {
             return true;
         }
         let structure = self.story_revisions.lock().unwrap().structure;
-        if let Some((at, stories)) = self.laid_out_stories.lock().unwrap().get(root)
+        if let Some((at, reach)) = self.laid_out_stories.lock().unwrap().get(root)
             && *at == structure
         {
-            return stories.contains(story);
+            return reach.shows(story);
         }
-        let stories = self.reachable_stories(root);
-        let laid_out = stories.contains(story);
+        let reach = self.reachable_stories(root);
+        let laid_out = reach.shows(story);
         self.laid_out_stories
             .lock()
             .unwrap()
-            .insert(root.to_owned(), (structure, std::sync::Arc::new(stories)));
+            .insert(root.to_owned(), (structure, std::sync::Arc::new(reach)));
         laid_out
     }
 
     /// Every live story reachable from `root` through the cells of complete tables and block
     /// controls' stories, at any depth: the stories the layout shows, named as the outline walk
-    /// names them. A malformed entry is skipped; an unavailable table leads nowhere.
-    fn reachable_stories(&self, root: &str) -> HashSet<String> {
+    /// names them, and whether the walk met an unavailable table. A malformed entry is skipped;
+    /// an unavailable table leads nowhere.
+    fn reachable_stories(&self, root: &str) -> RootReach {
         let txn = self.yrs_doc().transact();
         let mut reached = HashSet::new();
+        let mut met_unavailable = false;
         let mut queue = vec![root.to_owned()];
         while let Some(story_id) = queue.pop() {
             if reached.contains(&story_id) {
@@ -128,11 +146,11 @@ impl EditingDoc {
                     Some("table") => {
                         let index = table_index;
                         table_index += 1;
-                        let Some(TablePayload {
-                            rows: Out::Any(Any::Array(rows)),
-                            ..
-                        }) = table_payload(&map, &txn)
-                        else {
+                        let Some(payload) = table_payload(&map, &txn) else {
+                            met_unavailable = true;
+                            continue;
+                        };
+                        let Out::Any(Any::Array(rows)) = payload.rows else {
                             continue;
                         };
                         for (row_index, row) in rows.iter().enumerate() {
@@ -163,7 +181,10 @@ impl EditingDoc {
                 }
             }
         }
-        reached
+        RootReach {
+            reached,
+            met_unavailable,
+        }
     }
 
     /// The unavailable tables the geometry outline walk meets from `roots`, by story and ordinal,
@@ -356,6 +377,28 @@ mod tests {
             "a cell of the deepest table is hidden once that table lost its payload, past any walk limit"
         );
         assert!(doc.story_laid_out("body", &deepest));
+    }
+
+    #[test]
+    fn a_story_nothing_reaches_is_hidden_only_while_its_root_holds_an_unavailable_table() {
+        let doc = EditingDoc::new(84);
+        doc.create_story("body", "Hello", "Normal", "left")
+            .unwrap();
+        doc.insert_table(&ctx(), Position::new("body", 0), 1, 1)
+            .unwrap();
+        doc.create_story("body:left-behind", "Leftover", "Normal", "left")
+            .unwrap();
+        assert!(
+            doc.story_laid_out("body", "body:left-behind"),
+            "with no unavailable table in reach a live story counts as shown, as before"
+        );
+        strip(&doc, "body");
+        assert!(
+            !doc.story_laid_out("body", "body:left-behind"),
+            "once the root holds an unavailable table, a story nothing reaches counts as hidden"
+        );
+        assert!(doc.story_laid_out("body", "body"));
+        assert!(!doc.story_laid_out("body", "body:missing"));
     }
 
     #[test]

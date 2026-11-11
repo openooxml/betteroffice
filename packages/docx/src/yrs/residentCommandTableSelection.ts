@@ -22,8 +22,8 @@ export function readCellSelection(engine: Pick<DocxWorkerCommandEngine, 'cellSel
 
 type ProjectedCellTable = { story: string; tableIndex: number; cells: { story: string; row: number; column: number }[] };
 
-/** What a root's position projection lays out: its tables, and every story it places. */
-type ProjectedRoot = { tables: ProjectedCellTable[]; stories: ReadonlySet<string> };
+/** What a root's position projection lays out: its tables, every story it places, and whether it met an unavailable table. */
+type ProjectedRoot = { tables: ProjectedCellTable[]; stories: ReadonlySet<string>; metUnavailable: boolean };
 
 /** The tables and stories of `root` as the position projection lays them out: only what cell location reads. */
 function projectRoot(engine: DocxWorkerCommandEngine, root: string): ProjectedRoot | null {
@@ -36,6 +36,7 @@ function projectRoot(engine: DocxWorkerCommandEngine, root: string): ProjectedRo
       cells: table.cells.map((cell) => ({ story: cell.story, row: cell.row, column: cell.column })),
     })),
     stories: new Set(projection.storyIds()),
+    metUnavailable: projection.allTables().some((table) => table.unavailable),
   };
 }
 
@@ -130,16 +131,18 @@ function projectedRoot(engine: DocxWorkerCommandEngine, root: string): { key: st
 }
 
 /**
- * Whether the position projection of `story`'s root lays `story` out: a root always, any other
- * story only when the walk reaches it through complete tables and block controls. A cell of an
- * unavailable table, at any depth, is not laid out. The one test a selection passes before a
- * command uses it, wherever the selection comes from.
+ * Whether the layout of `story`'s root shows the live `story`: hidden only when the walk from the
+ * root met an unavailable table and did not reach the story (a cell of that table, at any depth);
+ * otherwise shown, as before. The engine answers when it can; otherwise the position projection.
  */
 export function laidOutStory(engine: Pick<DocxWorkerCommandEngine, 'geometryReader'>, story: string): boolean {
   const root = rootOf(story);
   if (story === root) return true;
   const reader = engine.geometryReader;
-  return reader.storyLaidOut ? reader.storyLaidOut(root, story) : projectRoot(engine as DocxWorkerCommandEngine, root)?.stories.has(story) ?? false;
+  if (reader.storyLaidOut) return reader.storyLaidOut(root, story);
+  if (!reader.hasStory(story)) return false;
+  const projected = projectRoot(engine as DocxWorkerCommandEngine, root);
+  return !projected?.metUnavailable || projected.stories.has(story);
 }
 
 /**

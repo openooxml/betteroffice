@@ -712,7 +712,7 @@ pub struct EditingDoc {
     scan_cache: identity::ScanCache,
     story_revisions: Arc<Mutex<StoryRevisions>>,
     /// Per root, the stories its outline walk lays out, at the structure revision it was read.
-    laid_out_stories: Mutex<HashMap<String, (u64, Arc<HashSet<String>>)>>,
+    laid_out_stories: Mutex<HashMap<String, (u64, Arc<unavailable_tables::RootReach>)>>,
     remote_deletions: remote_cleanup::RemoteDeletions,
     keeps_deleted: Arc<AtomicBool>,
     commit_hooks: Rc<RefCell<CommitHooks>>,
