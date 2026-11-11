@@ -188,17 +188,19 @@ test('an in-thread range anchor matches the painted word from open through settl
     const sample = async (label: string) => {
       type Answer = Awaited<ReturnType<typeof probe.geometry.readAnchorGeometries>>[number] | undefined;
       const deadline = performance.now() + 5_000;
+      let waitedFrames = 0;
       let result: Answer;
       for (;;) {
         [result] = await probe.geometry.readAnchorGeometries([target]);
         if (result?.ok || result?.failure.code !== 'layout-unavailable' || performance.now() > deadline) break;
+        waitedFrames += 1;
         await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
       }
       if (!result?.ok || !result.rects[0]) {
         throw new Error(`${label}: word has no painted box (${result && !result.ok ? result.failure.code : 'no rect'})`);
       }
       const { layoutId, version } = result as typeof result & { layoutId: string; version: string };
-      return { label, rect: result.rects[0], layoutId, version,
+      return { label, rect: result.rects[0], layoutId, version, waitedFrames,
         layoutEvents: probe.events.filter(event => event.type === 'layout-change').length };
     };
     const t0 = await sample('t0-open');
@@ -235,6 +237,8 @@ test('an in-thread range anchor matches the painted word from open through settl
   });
   const coordinates = ['x', 'y', 'width', 'height'] as const;
   const distance = (a: ProbeRect, b: ProbeRect) => Math.max(...coordinates.map(key => Math.abs(a[key] - b[key])));
+  console.log('ANCHOR-WAIT ' + JSON.stringify(word.reads.map(read => ({ label: read.label, waitedFrames: read.waitedFrames }))));
+  for (const read of word.reads) expect(read.waitedFrames, `${read.label} waited on a superseded context`).toBeLessThanOrEqual(6);
   expect(distance(word.reads[0]!.rect, painted), JSON.stringify(word.reads)).toBeLessThanOrEqual(1);
   expect(selected).toBe(word.text);
   for (const read of word.reads.slice(1)) {
