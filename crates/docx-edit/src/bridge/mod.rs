@@ -1172,36 +1172,44 @@ fn walk_story_chunks<T: ReadTxn>(
                         detail: "table embed interrupts paragraph content".to_owned(),
                     });
                 }
-                let previewed_out = env.revision_hidden(attributes);
-                let hidden = previewed_out
-                    || shared_map_string(table, txn, "blockId")
-                        .is_some_and(|id| hidden_field_blocks.contains(&id));
-                map.tables.push((pm_cursor, story_slot, table_ordinal));
-                table_ordinal += 1;
-                let mut unnumbered = previewed_out.then(|| list_state.clone());
-                let (lowered, node_size) = lower_table(
-                    table,
-                    txn,
-                    story_id,
-                    story_index,
-                    pm_cursor,
-                    env,
-                    active_stories,
-                    unnumbered.as_mut().unwrap_or(&mut *list_state),
-                    map,
-                    opaque_sequences,
-                    revealable,
-                    local,
-                )?;
-                let rows_shown = !lowered.rows.is_empty();
-                if rows_shown && !hidden {
-                    blocks.push(LayoutBlock::Table(lowered));
-                } else if rows_shown
-                    && !previewed_out
-                    && let Some(revealed) = revealable
-                {
-                    revealed.push(LayoutBlock::Table(lowered));
-                }
+                let payload = crate::unavailable_tables::table_payload(table, txn);
+                let node_size = if let Some(payload) = payload {
+                    let previewed_out = env.revision_hidden(attributes);
+                    let hidden = previewed_out
+                        || shared_map_string(table, txn, "blockId")
+                            .is_some_and(|id| hidden_field_blocks.contains(&id));
+                    map.tables.push((pm_cursor, story_slot, table_ordinal));
+                    table_ordinal += 1;
+                    let mut unnumbered = previewed_out.then(|| list_state.clone());
+                    let (lowered, node_size) = lower_table(
+                        &payload,
+                        txn,
+                        story_id,
+                        story_index,
+                        pm_cursor,
+                        env,
+                        active_stories,
+                        unnumbered.as_mut().unwrap_or(&mut *list_state),
+                        map,
+                        opaque_sequences,
+                        revealable,
+                        local,
+                    )?;
+                    let rows_shown = !lowered.rows.is_empty();
+                    if rows_shown && !hidden {
+                        blocks.push(LayoutBlock::Table(lowered));
+                    } else if rows_shown
+                        && !previewed_out
+                        && let Some(revealed) = revealable
+                    {
+                        revealed.push(LayoutBlock::Table(lowered));
+                    }
+                    node_size
+                } else {
+                    map.tables.push((pm_cursor, story_slot, table_ordinal));
+                    table_ordinal += 1;
+                    UNAVAILABLE_TABLE_NODE_SIZE
+                };
                 story_index += 1;
                 paragraph_start = story_index;
                 pm_cursor += node_size;
@@ -2185,9 +2193,13 @@ fn note_ref_label(id: f64) -> String {
     }
 }
 
+/// Display units of a table embed that lost its payload: an empty table node, so display
+/// positions after it match the editor projection, which counts it as a table without rows.
+const UNAVAILABLE_TABLE_NODE_SIZE: u64 = 2;
+
 #[allow(clippy::too_many_arguments)]
 fn lower_table<T: ReadTxn>(
-    table: &MapRef,
+    payload: &crate::unavailable_tables::TablePayload,
     txn: &T,
     parent_story: &str,
     story_index: u32,
@@ -2200,11 +2212,15 @@ fn lower_table<T: ReadTxn>(
     revealable: &mut Option<Vec<LayoutBlock>>,
     local: &mut local::LocalLowering,
 ) -> Result<(TableBlock, u64), BridgeError> {
-    let tbl_pr_value = shared_any(table, txn, "tblPr")
+    let plain = |value: &Out| match value {
+        Out::Any(value) => Some(value.clone()),
+        _ => None,
+    };
+    let tbl_pr_value = plain(&payload.tbl_pr)
         .ok_or_else(|| malformed_table(parent_story, story_index, "missing tblPr"))?;
     let tbl_pr = any_map(&tbl_pr_value)
         .ok_or_else(|| malformed_table(parent_story, story_index, "tblPr must be a map"))?;
-    let grid_value = shared_any(table, txn, "grid")
+    let grid_value = plain(&payload.grid)
         .ok_or_else(|| malformed_table(parent_story, story_index, "missing grid"))?;
     let grid = match &grid_value {
         Any::Array(values) => values,
@@ -2216,7 +2232,7 @@ fn lower_table<T: ReadTxn>(
             ));
         }
     };
-    let rows_value = shared_any(table, txn, "rows")
+    let rows_value = plain(&payload.rows)
         .ok_or_else(|| malformed_table(parent_story, story_index, "missing rows"))?;
     let row_values = match &rows_value {
         Any::Array(values) => values,

@@ -501,7 +501,7 @@ export type DocxEngineWorkerResponse = (
       commandError?: ReplyError;
       failureCode?: SessionFailureCode;
       /** @internal */
-      code?: 'save-unavailable' | 'cut-kept';
+      code?: 'save-unavailable' | 'cut-kept' | 'invalid-selection' | 'table-unavailable';
       residentUnavailable?: boolean;
       /** A wasm trap poisoned the worker; it refuses every later request. */
       terminal?: boolean;

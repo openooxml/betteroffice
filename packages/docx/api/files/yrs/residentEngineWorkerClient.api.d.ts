@@ -366,6 +366,14 @@ export declare class DocxWorkerSaveUnavailableError extends ResidentWorkerFailur
 /** A whole source failed to open and the worker still holds the source cut it was to replace. @internal */
 export declare class ResidentWorkerCutKeptError extends Error {
 }
+/** The worker refused a read of a selection it cannot answer, such as one across stories; the session stays usable. @internal */
+export declare class ResidentWorkerInvalidSelectionError extends Error {
+    readonly code: "invalid-selection";
+}
+/** The worker refused a read over a table a concurrent undo left without its properties, grid or rows; the session stays usable. @internal */
+export declare class ResidentWorkerTableUnavailableError extends Error {
+    readonly code: "table-unavailable";
+}
 /** The worker trapped because its wasm memory could not grow any further. */
 export declare class ResidentWorkerOutOfMemoryError extends ResidentWorkerUnavailableError {
     /** The worker's wasm memories when it trapped. */

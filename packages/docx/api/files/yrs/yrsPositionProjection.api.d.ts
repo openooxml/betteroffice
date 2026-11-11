@@ -37,6 +37,8 @@ export interface YrsProjectedTable extends YrsProjectedNode {
     widthsTwips: number[];
     rowCount: number;
     cells: YrsProjectedCell[];
+    /** The table lost its properties, grid or rows to a concurrent undo: no cells, no caret stop. */
+    unavailable?: true;
 }
 /** @internal */
 export interface YrsProjectedCell {
@@ -93,6 +95,8 @@ export declare class YrsPositionProjection {
     private inputPositionAt;
     private buildTable;
 }
+/** Whether a table embed's payload lacks its properties, grid or rows. @internal */
+export declare function isUnavailableTablePayload(payload: object): boolean;
 /** @internal */
 export declare function yrsLocToProjectedDisplayPosition(reader: Pick<YrsSession, 'hasStory' | 'paragraphSpans'>, projectionFor: (rootStory: string) => YrsLocProjection | null, loc: YrsLoc, activeRootStory?: string, inputMap?: (story: string) => YrsInputPositionMap | null): number | null;
 export {};

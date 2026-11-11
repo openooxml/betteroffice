@@ -115,6 +115,16 @@ impl From<EngineError> for JsValue {
                 );
                 value.into()
             }
+            EngineErrorKind::TableUnavailable => {
+                let value = js_sys::Error::new(&error.message);
+                value.set_name("TableUnavailableError");
+                let _ = js_sys::Reflect::set(
+                    &value,
+                    &JsValue::from_str("code"),
+                    &JsValue::from_str("table-unavailable"),
+                );
+                value.into()
+            }
             EngineErrorKind::CellHasNoStory => {
                 let value = js_sys::Error::new(&error.message);
                 value.set_name("CellHasNoStoryError");
@@ -2619,6 +2629,15 @@ impl EditSession {
     /// replicas.
     pub fn story_ids(&self) -> Vec<String> {
         self.core.story_ids()
+    }
+
+    /// `[{"story","tableIndex"}]` from a full walk of the roots in `roots_json`, or `null` when
+    /// a walk cannot finish.
+    /// @internal
+    pub fn unavailable_tables_from(&self, roots_json: &str) -> Result<String, JsValue> {
+        self.core
+            .unavailable_tables_from(roots_json)
+            .map_err(JsValue::from)
     }
 
     /// Story length in UTF-16 units, every embed (pilcrows included) counting

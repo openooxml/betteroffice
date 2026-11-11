@@ -129,6 +129,7 @@ mod sticky_positions;
 mod stories;
 pub mod structured;
 mod target;
+mod unavailable_tables;
 mod undo;
 mod update_chunks;
 
@@ -563,6 +564,8 @@ impl StoryRevisions {
                             key.as_ref(),
                             KIND_KEY
                                 | PARA_ID
+                                | "tblPr"
+                                | "grid"
                                 | "rows"
                                 | "cells"
                                 | "story"
@@ -584,10 +587,12 @@ impl StoryRevisions {
             }),
             yrs::types::Event::Map(event) => {
                 event.path().is_empty()
-                    || event
-                        .keys(txn)
-                        .keys()
-                        .any(|key| matches!(key.as_ref(), KIND_KEY | "rows" | "cells" | "story"))
+                    || event.keys(txn).keys().any(|key| {
+                        matches!(
+                            key.as_ref(),
+                            KIND_KEY | "tblPr" | "grid" | "rows" | "cells" | "story"
+                        )
+                    })
             }
             _ => true,
         }) {

@@ -7,6 +7,8 @@ import initWasm, * as wasm from '../../packages/docx/src/wasm/generated/edit/doc
 import initPreflight, { font_preflight as wasmFontPreflight } from '../../packages/docx/src/wasm/generated/preflight/docx_preflight.js';
 
 import { openFailureKind } from '../../packages/docx-react/src/components/openFailure';
+import { readClipboardSlice, readTableFragment, type ClipboardTableReader } from '../../packages/docx/src/yrs/clipboardFragment';
+import type { YrsStorySegment } from '../../packages/docx/src/yrs/index';
 
 type Engine = typeof wasm;
 type Session = wasm.EditSession;
@@ -2112,3 +2114,309 @@ test('a footnote document lays out natively from its forwarded parse model', () 
     session.free();
   }
 });
+
+test('native and wasm refuse table operations on a table that crossing undos emptied with the same coded error', () => {
+  const encoder = new TextEncoder();
+  const paragraph = (text: string) => `<w:p><w:r><w:t>${text}</w:t></w:r></w:p>`;
+  const cell = (text: string) => `<w:tc><w:tcPr><w:tcW w:w="2340" w:type="dxa"/></w:tcPr>${paragraph(text)}</w:tc>`;
+  const bytes = wasm.rezip_docx({
+    '[Content_Types].xml': encoder.encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'),
+    '_rels/.rels': encoder.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'),
+    'word/document.xml': encoder.encode(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${paragraph('Before')}<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="2340"/><w:gridCol w:w="2340"/></w:tblGrid><w:tr>${cell('A')}${cell('B')}</w:tr></w:tbl>${paragraph('After')}<w:sectPr/></w:body></w:document>`),
+  });
+  const at = (row: number, column: number) => JSON.stringify({ story: 'body', tableIndex: 0, row, column });
+  const a = new wasm.EditSession(61);
+  const b = new wasm.EditSession(62);
+  const expected = new wasm.EditSession(70);
+  const actual = new native.EditSession(70);
+  try {
+    a.open_docx(bytes, true, 'opening');
+    a.track_undo();
+    b.open_docx(bytes, false, 'opening');
+    b.apply_update(a.encode_state());
+    b.track_undo();
+    a.insert_row(at(0, 0), true);
+    b.apply_update(a.encode_state());
+    b.set_column_width(at(0, 0), 2000);
+    expect(a.undo()).toBe(true);
+    b.apply_update(a.encode_state());
+    a.apply_update(b.encode_state());
+    expect(b.undo()).toBe(true);
+    a.apply_update(b.encode_state());
+    const update = a.encode_state();
+    for (const session of [expected, actual]) {
+      session.open_docx(bytes, false, 'opening');
+      session.apply_update(update);
+    }
+    const payload = JSON.parse(expected.table_payload('body', 0)!) as Record<string, unknown>;
+    expect(['tblPr', 'grid', 'rows'].filter((key) => key in payload)).toEqual([]);
+    const body = JSON.stringify(['body']);
+    expect(JSON.parse(actual.unavailable_tables_from(body))).toEqual([{ story: 'body', tableIndex: 0 }]);
+    expect(actual.unavailable_tables_from(body)).toBe(expected.unavailable_tables_from(body));
+
+    const range = (anchor: string, head = anchor) => JSON.stringify({ anchor: JSON.parse(anchor), head: JSON.parse(head) });
+    const ops: Array<[string, (session: Session) => unknown]> = [
+      ['insert_row', (session) => session.insert_row(at(0, 0), true)],
+      ['insert_column', (session) => session.insert_column(at(0, 0), true)],
+      ['delete_row', (session) => session.delete_row(range(at(0, 0)))],
+      ['set_cell_shading', (session) => session.set_cell_shading(range(at(0, 0)), 'FF0000')],
+      ['set_column_width', (session) => session.set_column_width(at(0, 0), 3000)],
+      ['split_cell', (session) => session.split_cell(at(0, 0), 2, undefined)],
+      ['merge_cells', (session) => session.merge_cells(range(at(0, 0), at(0, 1)))],
+    ];
+    for (const [name, op] of ops) {
+      const before = { expected: expected.encode_state(), actual: actual.encode_state() };
+      const thrown = expectThrownParity(() => op(expected), () => op(actual as unknown as Session));
+      expect(thrown, name).toBeInstanceOf(Error);
+      expect((thrown as Error).name, name).toBe('TableUnavailableError');
+      expect((thrown as Error & { code?: string }).code, name).toBe('table-unavailable');
+      expect(expected.encode_state(), name).toEqual(before.expected);
+      expect(actual.encode_state(), name).toEqual(before.actual);
+    }
+
+    for (const session of [expected, actual as unknown as Session]) {
+      session.delete_table(JSON.stringify({ story: 'body', tableIndex: 0 }));
+      expect(session.unavailable_tables_from(body)).toBe('[]');
+    }
+    expect(actual.story_ids()).toEqual(expected.story_ids());
+  } finally {
+    actual.free();
+    expected.free();
+    b.free();
+    a.free();
+  }
+});
+
+test('native and wasm find a table crossing undos emptied in a header, a footnote and a cell content control alike', () => {
+  const encoder = new TextEncoder();
+  const office = 'application/vnd.openxmlformats-officedocument.wordprocessingml';
+  const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const ns = `xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="${rel}"`;
+  const paragraph = (text: string) => `<w:p><w:r><w:t>${text}</w:t></w:r></w:p>`;
+  const cell = (content: string) => `<w:tc><w:tcPr><w:tcW w:w="2340" w:type="dxa"/></w:tcPr>${content}</w:tc>`;
+  const table = (...cells: string[]) => `<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid>${cells.map(() => '<w:gridCol w:w="2340"/>').join('')}</w:tblGrid><w:tr>${cells.join('')}</w:tr></w:tbl>`;
+  const plain = (name: string) => table(cell(paragraph(`${name} one`)), cell(paragraph(`${name} two`)));
+  const control = `<w:sdt><w:sdtPr><w:alias w:val="Box"/></w:sdtPr><w:sdtContent>${plain('Control')}${paragraph('In control')}</w:sdtContent></w:sdt>`;
+  const bytes = wasm.rezip_docx({
+    '[Content_Types].xml': encoder.encode(`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="${office}.document.main+xml"/><Override PartName="/word/header1.xml" ContentType="${office}.header+xml"/><Override PartName="/word/footnotes.xml" ContentType="${office}.footnotes+xml"/></Types>`),
+    '_rels/.rels': encoder.encode(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/officeDocument" Target="word/document.xml"/></Relationships>`),
+    'word/_rels/document.xml.rels': encoder.encode(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="top" Type="${rel}/header" Target="header1.xml"/><Relationship Id="rIdF1" Type="${rel}/footnotes" Target="footnotes.xml"/></Relationships>`),
+    'word/header1.xml': encoder.encode(`<w:hdr ${ns}>${plain('Header')}${paragraph('Header text')}</w:hdr>`),
+    'word/footnotes.xml': encoder.encode(`<w:footnotes ${ns}><w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote><w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote><w:footnote w:id="1">${plain('Note')}${paragraph('Note text')}</w:footnote></w:footnotes>`),
+    'word/document.xml': encoder.encode(`<w:document ${ns}><w:body><w:p><w:r><w:t>Before</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r></w:p>${table(cell(`${control}${paragraph('In cell')}`), cell(paragraph('Body two')))}${paragraph('After')}<w:sectPr><w:headerReference w:type="default" r:id="top"/></w:sectPr></w:body></w:document>`),
+  });
+  const probe = new wasm.EditSession(60);
+  let stories: string[];
+  try {
+    probe.open_docx(bytes, true, 'opening');
+    stories = probe.story_ids().filter((story) => probe.table_payload(story, 0) !== undefined && probe.table_payload(story, 0) !== null);
+  } finally {
+    probe.free();
+  }
+  expect(stories).toContain('body');
+  expect(stories.some((story) => story.includes(':sdt'))).toBe(true);
+  expect(stories).toContain('hf:top');
+  expect(stories.some((story) => story.startsWith('fn:'))).toBe(true);
+  for (const story of stories) {
+    const at = JSON.stringify({ story, tableIndex: 0, row: 0, column: 0 });
+    const a = new wasm.EditSession(61);
+    const b = new wasm.EditSession(62);
+    const expected = new wasm.EditSession(70);
+    const actual = new native.EditSession(70);
+    try {
+      a.open_docx(bytes, true, 'opening');
+      a.track_undo();
+      b.open_docx(bytes, false, 'opening');
+      b.apply_update(a.encode_state());
+      b.track_undo();
+      a.insert_row(at, true);
+      b.apply_update(a.encode_state());
+      b.set_column_width(at, 2000);
+      expect(a.undo()).toBe(true);
+      b.apply_update(a.encode_state());
+      a.apply_update(b.encode_state());
+      expect(b.undo()).toBe(true);
+      a.apply_update(b.encode_state());
+      for (const session of [expected, actual]) {
+        session.open_docx(bytes, false, 'opening');
+        session.apply_update(a.encode_state());
+      }
+      const roots = JSON.stringify(['body', 'hf:top', ...expected.story_ids().filter((id) => /^fn:\d+$/.test(id))]);
+      expect(JSON.parse(expected.unavailable_tables_from(roots))).toContainEqual({ story, tableIndex: 0 });
+      expect(actual.unavailable_tables_from(roots)).toBe(expected.unavailable_tables_from(roots));
+    } finally {
+      actual.free();
+      expected.free();
+      b.free();
+      a.free();
+    }
+  }
+});
+
+type TablePayloadEdit = (payload: Record<string, unknown>) => Record<string, unknown>;
+
+const clipboardParagraph = (text: string) => `<w:p><w:r><w:t>${text}</w:t></w:r></w:p>`;
+const blockControl = (content: string) => `<w:sdt><w:sdtPr><w:alias w:val="Box"/></w:sdtPr><w:sdtContent>${content}</w:sdtContent></w:sdt>`;
+
+function clipboardBodyBytes(body: string): Uint8Array {
+  const encoder = new TextEncoder();
+  return wasm.rezip_docx({
+    '[Content_Types].xml': encoder.encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'),
+    '_rels/.rels': encoder.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'),
+    'word/document.xml': encoder.encode(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${clipboardParagraph('Before')}${body}${clipboardParagraph('After')}<w:sectPr/></w:body></w:document>`),
+  });
+}
+
+function clipboardTableXml(tblPr: string, firstCell = clipboardParagraph('A')): string {
+  const cell = (content: string) => `<w:tc><w:tcPr><w:tcW w:w="2340" w:type="dxa"/></w:tcPr>${content}</w:tc>`;
+  return `<w:tbl>${tblPr}<w:tblGrid><w:gridCol w:w="2340"/><w:gridCol w:w="2340"/></w:tblGrid><w:tr>${cell(firstCell)}${cell(clipboardParagraph('B'))}</w:tr><w:tr>${cell(clipboardParagraph('C'))}${cell(clipboardParagraph('D'))}</w:tr></w:tbl>`;
+}
+
+function clipboardTableBytes(tblPr: string): Uint8Array {
+  return clipboardBodyBytes(clipboardTableXml(tblPr));
+}
+
+function clipboardCopies(session: Session, edit: TablePayloadEdit = (payload) => payload, only?: string) {
+  const edits = (story: string) => only === undefined || story === only;
+  const reader: ClipboardTableReader = {
+    storySegments: (story) => (JSON.parse(session.story_segments(story)) as YrsStorySegment[]).map((segment) =>
+      edits(story) && segment.kind === 'embed' && segment.embedKind === 'table' ? { ...segment, payload: edit({ ...segment.payload }) } : segment),
+    tablePayload: (story, tableIndex) => {
+      const payload = session.table_payload(story, tableIndex);
+      if (payload === undefined) return null;
+      const parsed = JSON.parse(payload) as Record<string, unknown>;
+      return edits(story) ? edit(parsed) : parsed;
+    },
+  };
+  const cell = (row: number, column: number) => ({ story: 'body', tableIndex: 0, row, column });
+  return {
+    fragment: () => readTableFragment(reader, { story: 'body', tableIndex: 0 }),
+    cells: () => readClipboardSlice(reader, { cells: { anchor: cell(0, 0), head: cell(1, 1) } }),
+    story: () => readClipboardSlice(reader, { story: 'body', from: 0, to: session.story_len('body') }),
+  };
+}
+
+function withClipboardEngines(bytes: Uint8Array, run: (expected: Session, actual: Session) => void): void {
+  const expected = new wasm.EditSession(70);
+  const actual = new native.EditSession(70);
+  try {
+    expected.open_docx(bytes, true, 'opening');
+    actual.open_docx(bytes, true, 'opening');
+    run(expected, actual as unknown as Session);
+  } finally {
+    actual.free();
+    expected.free();
+  }
+}
+
+const CLIPBOARD_ROUTES = ['fragment', 'cells', 'story'] as const;
+
+for (const [label, tblPr] of [['null', null], ['an array', []]] as const) {
+  test(`native and wasm copy a table whose tblPr is ${label} as one whose tblPr is empty on every clipboard route`, () => {
+    withClipboardEngines(clipboardTableBytes('<w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>'), (expected, actual) => {
+      const odd: TablePayloadEdit = (payload) => ({ ...payload, tblPr });
+      const empty: TablePayloadEdit = (payload) => ({ ...payload, tblPr: {} });
+      for (const route of CLIPBOARD_ROUTES) {
+        const copied = clipboardCopies(expected, odd)[route]();
+        expect(copied, route).toEqual(clipboardCopies(expected, empty)[route]());
+        expect(clipboardCopies(actual, odd)[route](), route).toEqual(copied);
+      }
+      const slice = clipboardCopies(actual, odd).cells();
+      expect(slice.fragment?.paragraphs[0]?.tables?.[0]?.tblPr).toEqual({});
+      expect(clipboardCopies(actual, odd).fragment().tblPr).toEqual({});
+    });
+  });
+}
+
+for (const key of ['tblPr', 'grid', 'rows'] as const) {
+  test(`native and wasm refuse to copy a table without ${key} with the table-unavailable code on every clipboard route`, () => {
+    withClipboardEngines(clipboardTableBytes('<w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>'), (expected, actual) => {
+      const without: TablePayloadEdit = (payload) => {
+        const rest = { ...payload };
+        delete rest[key];
+        return rest;
+      };
+      for (const route of CLIPBOARD_ROUTES) {
+        const thrown = expectThrownParity(
+          () => clipboardCopies(expected, without)[route](),
+          () => clipboardCopies(actual, without)[route](),
+        );
+        expect(thrown, route).toBeInstanceOf(Error);
+        expect((thrown as Error & { code?: string }).code, route).toBe('table-unavailable');
+      }
+    });
+  });
+}
+
+test('native and wasm open a table without w:tblPr with its properties present and copy it on every clipboard route', () => {
+  withClipboardEngines(clipboardTableBytes(''), (expected, actual) => {
+    for (const session of [expected, actual]) {
+      const payload = JSON.parse(session.table_payload('body', 0)!) as Record<string, unknown>;
+      expect(Object.keys(payload)).toEqual(expect.arrayContaining(['tblPr', 'grid', 'rows']));
+      expect(payload.tblPr).toBeInstanceOf(Object);
+      expect(Array.isArray(payload.tblPr)).toBe(false);
+    }
+    for (const route of CLIPBOARD_ROUTES) {
+      const copied = clipboardCopies(expected)[route]();
+      expect(clipboardCopies(actual)[route](), route).toEqual(copied);
+    }
+    const fragment = clipboardCopies(actual).fragment();
+    expect(fragment.rows).toHaveLength(2);
+    const slice = clipboardCopies(actual).cells();
+    expect(slice.fragment?.paragraphs[0]?.tables?.[0]?.rows).toHaveLength(2);
+  });
+});
+
+const CONTROLLED_TABLE = clipboardTableXml('<w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>');
+const CONTROL_LAYOUTS: Array<{ name: string; body: string; routes: ReadonlyArray<(typeof CLIPBOARD_ROUTES)[number]> }> = [
+  { name: 'a block content control', body: blockControl(`${CONTROLLED_TABLE}${clipboardParagraph('In control')}`), routes: ['story'] },
+  { name: 'a block content control inside another', routes: ['story'],
+    body: blockControl(`${blockControl(`${CONTROLLED_TABLE}${clipboardParagraph('Inner control')}`)}${clipboardParagraph('Outer control')}`) },
+  { name: 'a block content control in a table cell', routes: CLIPBOARD_ROUTES,
+    body: clipboardTableXml('<w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>', `${blockControl(`${CONTROLLED_TABLE}${clipboardParagraph('In control')}`)}${clipboardParagraph('A')}`) },
+];
+
+function controlledTableStory(session: Session): string {
+  const stories = session.story_ids().filter((story) => story !== 'body' && session.table_payload(story, 0) !== undefined);
+  expect(stories).toHaveLength(1);
+  return stories[0]!;
+}
+
+for (const layout of CONTROL_LAYOUTS) {
+  for (const key of ['tblPr', 'grid', 'rows'] as const) {
+    test(`native and wasm refuse to copy a table without ${key} inside ${layout.name} with the table-unavailable code`, () => {
+      withClipboardEngines(clipboardBodyBytes(layout.body), (expected, actual) => {
+        const story = controlledTableStory(expected);
+        expect(controlledTableStory(actual)).toBe(story);
+        const without: TablePayloadEdit = (payload) => {
+          const rest = { ...payload };
+          delete rest[key];
+          return rest;
+        };
+        for (const route of layout.routes) {
+          expect(clipboardCopies(expected)[route](), route).toEqual(clipboardCopies(actual)[route]());
+          const thrown = expectThrownParity(
+            () => clipboardCopies(expected, without, story)[route](),
+            () => clipboardCopies(actual, without, story)[route](),
+          );
+          expect(thrown, route).toBeInstanceOf(Error);
+          expect((thrown as Error & { code?: string }).code, route).toBe('table-unavailable');
+        }
+      });
+    });
+  }
+
+  test(`native and wasm copy a table whose tblPr is null inside ${layout.name} as one whose tblPr is empty`, () => {
+    withClipboardEngines(clipboardBodyBytes(layout.body), (expected, actual) => {
+      const story = controlledTableStory(expected);
+      const odd: TablePayloadEdit = (payload) => ({ ...payload, tblPr: null });
+      const empty: TablePayloadEdit = (payload) => ({ ...payload, tblPr: {} });
+      for (const route of layout.routes) {
+        const copied = clipboardCopies(expected, odd, story)[route]();
+        expect(copied, route).toEqual(clipboardCopies(expected, empty, story)[route]());
+        expect(clipboardCopies(actual, odd, story)[route](), route).toEqual(copied);
+      }
+      expect(clipboardCopies(actual, odd, story).story().text).toContain('A\tB');
+    });
+  });
+}
