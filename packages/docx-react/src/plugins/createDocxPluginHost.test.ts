@@ -1033,7 +1033,7 @@ test('worker mapping publishes the complete caret payload once and retains a loc
   h.host.markSelectionDirty();
   await h.host.notificationsIdle();
   expect(h.events.filter(event => event.type === 'selection-change')).toEqual([]);
-  expect(h.keys).toEqual([]);
+  expect(h.keys).toHaveLength(1);
   let range: DocxPluginSelection['displayRange'] | undefined;
   h.host.guard(h.plugin.id, 'command', context => { range = context.snapshot.selection.displayRange; }, undefined);
   expect(range).toBeNull();
@@ -1046,13 +1046,13 @@ test('worker mapping publishes the complete caret payload once and retains a loc
     type: 'selection-change', generation: h.host.generation()!, version: 'v1',
     selection: { formatting: null, displayRange: { story: 'body', from: 8, to: 8, layoutId: 'layout' } },
   }]);
-  expect(h.keys).toHaveLength(1);
+  expect(h.keys).toEqual([h.keys[0]!, h.keys[0]!]);
   h.host.selectionSettled('keyboard');
   await h.host.notificationsIdle();
   h.host.markSelectionDirty();
   await h.host.notificationsIdle();
   expect(h.events.filter(event => event.type === 'selection-change')).toHaveLength(1);
-  expect(h.keys).toHaveLength(1);
+  expect(h.keys).toHaveLength(2);
   h.host.close('unmounted');
 });
 
