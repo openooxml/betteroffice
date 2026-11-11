@@ -67,7 +67,8 @@ export function describeHeapTable<T>(
       expect(value).toBeGreaterThanOrEqual(0);
     }
     expect(peak).toBeGreaterThanOrEqual(live);
-    expect(failed).toBe(0);
+    release(hold());
+    expect(engine().wasm_failed_allocation_bytes()).toBe(failed);
   });
 
   // Objects other tests left behind can be collected, and freed, between any two reads, so live

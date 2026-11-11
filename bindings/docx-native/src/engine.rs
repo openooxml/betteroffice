@@ -3983,7 +3983,8 @@ pub fn wasm_peak_bytes() -> f64 {
     crate::heap::peak() as f64
 }
 
-/// Size of the calling thread's last allocation that failed, or 0.
+/// Size of the calling thread's last allocation that failed, or 0. It keeps that size after the
+/// thread recovers, until a later failure replaces it.
 #[napi(catch_unwind, js_name = "wasm_failed_allocation_bytes")]
 pub fn wasm_failed_allocation_bytes() -> f64 {
     crate::heap::failed_bytes() as f64

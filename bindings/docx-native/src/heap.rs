@@ -454,6 +454,28 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_recovered_thread_keeps_its_failed_figure_and_fails_no_later_call_on_the_budget() {
+        let _limits = limits();
+        set_limit(Some(1 << 40));
+        let cap = live() + 1024;
+        set_limit(Some(cap));
+        let block = vec![1u8; 4096];
+        assert!(over_limit());
+        assert!(exceeded().starts_with(EXCEEDED));
+        drop(block);
+        assert!(begin_call(true));
+        assert!(!over_limit());
+        assert_eq!(failed_bytes(), 4096);
+        let ordinary = vec![1u8; 16];
+        assert!(!over_limit());
+        assert!(begin_call(true));
+        drop(ordinary);
+        set_limit(None);
+        assert!(!over_limit());
+        assert_eq!(failed_bytes(), 4096);
+    }
+
+    #[test]
     fn a_crossing_no_call_reported_fails_the_next_call() {
         let _limits = limits();
         set_limit(Some(1 << 40));

@@ -400,7 +400,10 @@ export declare function vertical_move_by_handle(handle: number, position: number
 
 export declare function vertical_move_json(displayList: string, position: number, direction: string, goalX: number): string
 
-/** Size of the calling thread's last allocation that failed, or 0. */
+/**
+ * Size of the calling thread's last allocation that failed, or 0. It keeps that size after the
+ * thread recovers, until a later failure replaces it.
+ */
 export declare function wasm_failed_allocation_bytes(): number
 
 /**

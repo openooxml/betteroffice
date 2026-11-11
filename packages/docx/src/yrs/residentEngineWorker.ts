@@ -1661,8 +1661,7 @@ function trapped(id: number, error: Error): void {
   trap = error;
   let memory: ReturnType<typeof wasmModuleMemories> = [];
   try { memory = wasmModuleMemories(); } catch {}
-  const counted = memory.find((module) => module.label === 'docx-edit')?.failedAllocationBytes ?? 0;
-  const failed = counted > 0 ? counted : nativeBudgetFailure(error.message)?.bytes ?? 0;
+  const failed = outOfMemoryBytes(error, memory);
   reply({
     id,
     ok: false,
@@ -3917,7 +3916,7 @@ async function replayOffscreen(
           return session!.outlineGlyphJson(fontId, glyphId);
         } catch (error) {
           // The raster paints on with browser text, so running out of memory is answered here.
-          if (isEngineTrap(error) && editFailedAllocationBytes() > 0) {
+          if (isEngineTrap(error) && outOfMemoryBytes(error as Error, wasmModuleMemories()) > 0) {
             trapped(handlingId, error as Error);
           }
           throw error;
@@ -4017,8 +4016,16 @@ function exactBuffer(bytes: Uint8Array): ArrayBuffer {
   return exactFrameBuffer(bytes);
 }
 
-function editFailedAllocationBytes(): number {
-  return wasmModuleMemories().find((module) => module.label === 'docx-edit')?.failedAllocationBytes ?? 0;
+/**
+ * The size of the allocation a trap ran out of memory on, or 0 for any other trap. A native call
+ * past its heap limit names the allocation in its own error, while the native failed-bytes
+ * counter outlives the call; a wasm module that trapped is dead, so its counter is this trap's.
+ */
+function outOfMemoryBytes(error: Error, memory: ReturnType<typeof wasmModuleMemories>): number {
+  const budget = nativeBudgetFailure(error.message);
+  if (budget) return budget.bytes;
+  const edit = memory.find((module) => module.label === 'docx-edit');
+  return edit && !edit.native ? edit.failedAllocationBytes ?? 0 : 0;
 }
 
 let pipeOutputTimer: ReturnType<typeof setTimeout> | null = null;
