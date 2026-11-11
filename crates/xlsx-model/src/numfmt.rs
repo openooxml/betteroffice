@@ -846,6 +846,7 @@ fn render_decimal_tokens(toks: &[Tok], mag: f64, apply_scaling: bool) -> Formatt
     };
 
     let (grouping, scale) = scan_commas(int_toks);
+    let scale = scale + scan_commas(frac_toks).1;
     let percent = toks.iter().filter(|t| matches!(t, Tok::Percent)).count() as i32;
 
     let mut v = mag;
@@ -1083,7 +1084,7 @@ fn render_fraction(sec: &Section, mag: f64, pattern: FractionPattern) -> Formatt
     out
 }
 
-/// classify integer-side commas: flanked by digits turns on thousands
+/// classify the commas on one side of the decimal point: flanked by digits turns on thousands
 /// grouping; trailing ones scale the value down by 1000 each.
 fn scan_commas(int_toks: &[Tok]) -> (bool, u32) {
     let digit_positions: Vec<usize> = int_toks
