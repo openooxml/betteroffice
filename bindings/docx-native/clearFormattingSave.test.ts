@@ -107,6 +107,37 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
     }
   });
 
+  test(`${engine}: in a cell of a bold table style the saved bold follows the table style`, async () => {
+    const cells = ['Unbold cell', 'Grid bold', 'Italic cell'];
+    const body = '<w:tbl><w:tblPr><w:tblStyle w:val="BoldGrid"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="2400" w:type="dxa"/></w:tcPr>' +
+      '<w:p w14:paraId="00000021"><w:r><w:rPr><w:b w:val="0"/><w:i/></w:rPr><w:t>Unbold cell</w:t></w:r></w:p>' +
+      '<w:p w14:paraId="00000022"><w:r><w:t>Grid bold</w:t></w:r></w:p>' +
+      '<w:p w14:paraId="00000023"><w:r><w:rPr><w:b w:val="0"/><w:i/></w:rPr><w:t>Italic cell</w:t></w:r></w:p>' +
+      '</w:tc></w:tr></w:tbl><w:p w14:paraId="00000024"><w:r><w:t>After</w:t></w:r></w:p>';
+    const session = await yrs.createYrsSession({ clientId: 98 });
+    try {
+      session.seedFromDocx(await fixture(body));
+      const cell = session.listStories().stories.find((entry) => entry.kind === 'tableCell')!.story;
+      session.clearFormatting(whole(session, '00000021', '00000021', cell));
+      session.formatRange(whole(session, '00000022', '00000022', cell), { bold: false });
+      session.formatRange(whole(session, '00000023', '00000023', cell), { bold: true });
+      const { xml, reopened } = await saveAndReopen(yrs, session);
+      try {
+        expect(cells.map((marker) => savedRunProperties(xml, marker))).toEqual([null, '<w:b w:val="0"/>', '<w:i/>']);
+        const reopenedCell = reopened.listStories().stories.find((entry) => entry.kind === 'tableCell')!.story;
+        const boldIn = (marker: string) => {
+          const segment = reopened.storySegments(reopenedCell).find((entry) => entry.kind === 'text' && entry.text.includes(marker));
+          return segment?.kind === 'text' ? Boolean(segment.attributes.bold) : undefined;
+        };
+        expect(cells.map(boldIn)).toEqual([true, false, true]);
+      } finally {
+        reopened.destroy();
+      }
+    } finally {
+      session.destroy();
+    }
+  });
+
   test(`${engine}: known limit: a direct value equal to the style stays after clear formatting`, async () => {
     const session = await yrs.createYrsSession({ clientId: 96 });
     try {
