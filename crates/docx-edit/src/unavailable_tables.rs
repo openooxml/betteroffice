@@ -40,8 +40,8 @@ thread_local! {
     static PAYLOAD_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// The structure revision, section revision and header/footer aliases a reach walk ran under.
-pub(crate) type ReachKey = (u64, u64, Option<String>);
+/// The structure revision a reach walk ran under.
+pub(crate) type ReachKey = u64;
 
 /// What the reachability walk from the document's roots found: the stories it reached, and
 /// whether it met an unavailable table on the way.
@@ -64,26 +64,47 @@ pub(crate) fn lacks_payload(has: impl Fn(&str) -> bool) -> bool {
     !PAYLOAD_KEYS.iter().all(|key| has(key))
 }
 
-/// Whether `story` is a footnote or endnote itself, `fn:<id>` or `en:<id>`, rather than a story
-/// below one (a cell `fn:1:t0:r0c0` reads as a note once the table naming it lost its rows).
-fn is_note_root(story: &str) -> bool {
-    story
-        .strip_prefix("fn:")
-        .or_else(|| story.strip_prefix("en:"))
-        .is_some_and(|id| !id.is_empty() && !id.contains(':'))
+/// Whether the engine minted `story` as a root, by the id it gave it: `body`, a header or footer
+/// `hf:<relationship id>` ([`crate::header_footer::story_id`]), or a note `fn:<id>` / `en:<id>`.
+/// Relationship and note ids pass through as written, so they may hold ':'; a story below a root
+/// is told apart by the segments a container mints for its children: a table's `t<n>` followed
+/// by a cell's `r<n>c<n>` (with an edit's `~<client>`), a block control's `sdt<n>`, or a repeated
+/// item's `repeat`. Laid out as before whatever references it, and never hidden.
+pub(crate) fn is_root(story: &str) -> bool {
+    if story == "body" {
+        return true;
+    }
+    let Some(id) = ["hf:", "fn:", "en:"]
+        .iter()
+        .find_map(|prefix| story.strip_prefix(prefix))
+    else {
+        return false;
+    };
+    !id.is_empty() && !names_a_contained_story(id)
 }
 
-/// Whether a story the story list reports as `kind` is a root: laid out as before whatever names
-/// it, and never hidden. Every other story exists because a container names it: a table cell, a
-/// block control's story, or one the list cannot place because the table that named it lost its
-/// rows (it reads as `Other`).
-pub(crate) fn is_root(kind: crate::stories::StoryInfoKind, story: &str) -> bool {
-    use crate::stories::StoryInfoKind;
-    match kind {
-        StoryInfoKind::Body | StoryInfoKind::Header | StoryInfoKind::Footer => true,
-        StoryInfoKind::Footnote | StoryInfoKind::Endnote => is_note_root(story),
-        StoryInfoKind::TableCell | StoryInfoKind::ContentControl | StoryInfoKind::Other => false,
-    }
+fn names_a_contained_story(id: &str) -> bool {
+    let digits = |text: &str| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
+    let cell = |segment: &str| {
+        let segment = match segment.split_once('~') {
+            Some((cell, client)) if digits(client) => cell,
+            Some(_) => return false,
+            None => segment,
+        };
+        segment
+            .strip_prefix('r')
+            .and_then(|rest| rest.split_once('c'))
+            .is_some_and(|(row, column)| digits(row) && digits(column))
+    };
+    let segments: Vec<&str> = id.split(':').collect();
+    let table_cell = segments
+        .windows(2)
+        .any(|pair| pair[0].strip_prefix('t').is_some_and(digits) && cell(pair[1]));
+    let control = segments
+        .iter()
+        .skip(1)
+        .any(|segment| *segment == "repeat" || segment.strip_prefix("sdt").is_some_and(digits));
+    table_cell || control
 }
 
 impl EditingDoc {
@@ -121,25 +142,25 @@ impl EditingDoc {
     }
 
     /// What the reach walk's answer depends on: the stories' structure (table payload keys,
-    /// cells, block controls' story references, story creation and removal), the section
-    /// properties that reference headers and footers, and the header and footer aliases.
+    /// cells, block controls' story references, story creation and removal). Roots do not depend
+    /// on section references, part metadata or aliases ([`is_root`]).
     pub(crate) fn reach_key(&self) -> ReachKey {
-        let (structure, sections) = {
-            let revisions = self.story_revisions.lock().unwrap();
-            (revisions.structure, revisions.sections)
-        };
-        (structure, sections, self.header_footer_aliases_raw())
+        self.story_revisions.lock().unwrap().structure
     }
 
-    /// The document's roots, by the story list's kinds ([`is_root`]): the body, the headers and
-    /// footers, and the notes.
+    /// The document's live roots, by the ids the engine gave them ([`is_root`]): the body, the
+    /// headers and footers, and the notes.
     fn document_roots(&self) -> Vec<String> {
-        self.list_stories()
-            .stories
-            .into_iter()
-            .filter(|info| is_root(info.kind, &info.story))
-            .map(|info| info.story)
-            .collect()
+        let txn = self.yrs_doc().transact();
+        let Some(stories) = txn.get_map(crate::STORIES) else {
+            return Vec::new();
+        };
+        let mut roots: Vec<String> = crate::live_stories(&stories, &txn)
+            .map(|(id, _)| id.to_owned())
+            .filter(|id| is_root(id))
+            .collect();
+        roots.sort();
+        roots
     }
 
     /// Every live story reachable from `roots` through the cells of complete tables and block
@@ -449,16 +470,25 @@ mod tests {
         let _every_kind_is_listed = |kind: StoryInfoKind| match kind {
             Body | TableCell | ContentControl | Header | Footer | Footnote | Endnote | Other => {}
         };
+        let header = crate::header_footer::story_id("rId1");
+        let odd_header = crate::header_footer::story_id("rId:odd");
+        let edit_cell = format!("{header}:t2:r0c1~81");
         let table = [
             (Body, "body", true),
-            (Header, "hf:rId1", true),
-            (Footer, "hf:rId2", true),
+            (Header, header.as_str(), true),
+            (Footer, odd_header.as_str(), true),
             (Footnote, "fn:1", true),
-            (Endnote, "en:2", true),
-            (Footnote, "fn:1:t0:r0c0", false),
+            (Footnote, "fn:a:b", true),
+            (Endnote, "en:-1", true),
             (TableCell, "body:t0:r0c0", false),
+            (TableCell, edit_cell.as_str(), false),
+            (TableCell, "fn:1:t0:r0c0:t1:r1c0", false),
+            (TableCell, "hf:rId:odd:t0:r0c0", false),
             (ContentControl, "body:sdt0", false),
+            (ContentControl, "hf:rId1:sdt3", false),
+            (ContentControl, "en:2:repeat:4", false),
             (Other, "host", false),
+            (Other, "hf:rId9", true),
         ];
         for kind in EVERY_KIND {
             assert!(
@@ -467,8 +497,140 @@ mod tests {
             );
         }
         for (kind, story, root) in table {
-            assert_eq!(super::is_root(kind, story), root, "{kind:?} {story}");
+            assert_eq!(super::is_root(story), root, "{kind:?} {story}");
         }
+    }
+
+    #[test]
+    fn every_root_a_document_seeds_or_a_host_or_peer_adds_is_recognised_and_stays_shown() {
+        use crate::stories::StoryInfoKind;
+        const W: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#;
+        const REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+        const MAIN: &str = "application/vnd.openxmlformats-officedocument.wordprocessingml";
+        let p = |text: &str| format!("<w:p><w:r><w:t>{text}</w:t></w:r></w:p>");
+        let band = |root: &str, text: &str| format!("<w:{root} {W}>{}</w:{root}>", p(text));
+        let headers = [
+            ("rIdA", "header1.xml", "hdr", "header"),
+            ("rId:B", "header2.xml", "hdr", "header"),
+            ("rIdC", "header3.xml", "hdr", "header"),
+            ("rIdD", "header4.xml", "hdr", "header"),
+            ("rIdF", "footer1.xml", "ftr", "footer"),
+        ];
+        let mut parts = vec![
+            (
+                "[Content_Types].xml".to_owned(),
+                format!(
+                    r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="{MAIN}.document.main+xml"/><Override PartName="/word/footnotes.xml" ContentType="{MAIN}.footnotes+xml"/><Override PartName="/word/endnotes.xml" ContentType="{MAIN}.endnotes+xml"/><Override PartName="/word/settings.xml" ContentType="{MAIN}.settings+xml"/>{}</Types>"#,
+                    headers
+                        .iter()
+                        .map(|(_, target, _, kind)| format!(
+                            r#"<Override PartName="/word/{target}" ContentType="{MAIN}.{kind}+xml"/>"#
+                        ))
+                        .collect::<String>()
+                ),
+            ),
+            (
+                "_rels/.rels".to_owned(),
+                format!(
+                    r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="r1" Type="{REL}/officeDocument" Target="word/document.xml"/></Relationships>"#
+                ),
+            ),
+            (
+                "word/_rels/document.xml.rels".to_owned(),
+                format!(
+                    r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdFn" Type="{REL}/footnotes" Target="footnotes.xml"/><Relationship Id="rIdEn" Type="{REL}/endnotes" Target="endnotes.xml"/><Relationship Id="rIdSet" Type="{REL}/settings" Target="settings.xml"/>{}</Relationships>"#,
+                    headers
+                        .iter()
+                        .map(|(id, target, _, kind)| format!(
+                            r#"<Relationship Id="{id}" Type="{REL}/{kind}" Target="{target}"/>"#
+                        ))
+                        .collect::<String>()
+                ),
+            ),
+            (
+                "word/settings.xml".to_owned(),
+                format!("<w:settings {W}><w:evenAndOddHeaders/></w:settings>"),
+            ),
+            (
+                "word/footnotes.xml".to_owned(),
+                format!(
+                    r#"<w:footnotes {W}><w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote><w:footnote w:id="1">{}</w:footnote></w:footnotes>"#,
+                    p("Foot")
+                ),
+            ),
+            (
+                "word/endnotes.xml".to_owned(),
+                format!(
+                    r#"<w:endnotes {W}><w:endnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:endnote><w:endnote w:id="2">{}</w:endnote></w:endnotes>"#,
+                    p("End")
+                ),
+            ),
+            (
+                "word/document.xml".to_owned(),
+                format!(
+                    r#"<w:document {W}><w:body>{}<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc>{}</w:tc></w:tr></w:tbl><w:p><w:pPr><w:sectPr><w:headerReference w:type="default" r:id="rIdA"/><w:headerReference w:type="first" r:id="rId:B"/><w:titlePg/></w:sectPr></w:pPr><w:r><w:t>One</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r></w:p><w:p><w:r><w:t>Two</w:t></w:r><w:r><w:endnoteReference w:id="2"/></w:r></w:p><w:sectPr><w:headerReference w:type="even" r:id="rIdC"/><w:headerReference w:type="default" r:id="rIdD"/><w:footerReference w:type="default" r:id="rIdF"/></w:sectPr></w:body></w:document>"#,
+                    p("Before"),
+                    p("Cell")
+                ),
+            ),
+        ];
+        for (_, target, root, _) in headers {
+            parts.push((format!("word/{target}"), band(root, target)));
+        }
+        let parts: Vec<(String, Vec<u8>)> = parts
+            .into_iter()
+            .map(|(path, xml)| (path, xml.into_bytes()))
+            .collect();
+        let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+        let doc = EditingDoc::new(87);
+        crate::seed::seed_from_docx(&doc, &bytes).unwrap();
+        let state = doc.encode_state_as_update_v1();
+        let peer = EditingDoc::new(88);
+        peer.apply_update_v1(&state).unwrap();
+        doc.set_part_metadata(&ctx(), r#"{"body":{},"headers":[["rIdHost"]]}"#, &[])
+            .unwrap();
+        peer.set_part_metadata(&ctx(), r#"{"body":{},"footers":[["rIdPeer"]]}"#, &[])
+            .unwrap();
+        exchange(&doc, &peer);
+
+        let mut minted = Vec::new();
+        for info in doc.list_stories().stories {
+            let root = matches!(
+                info.kind,
+                StoryInfoKind::Body
+                    | StoryInfoKind::Header
+                    | StoryInfoKind::Footer
+                    | StoryInfoKind::Footnote
+                    | StoryInfoKind::Endnote
+            );
+            if root || info.story.starts_with("hf:") {
+                assert!(super::is_root(&info.story), "{:?} {}", info.kind, info.story);
+                minted.push(info.story);
+            } else {
+                assert!(!super::is_root(&info.story), "{:?} {}", info.kind, info.story);
+            }
+        }
+        for expected in [
+            "body", "hf:rIdA", "hf:rId:B", "hf:rIdC", "hf:rIdD", "hf:rIdF", "hf:rIdHost",
+            "hf:rIdPeer", "fn:1", "en:2",
+        ] {
+            assert!(minted.iter().any(|story| story == expected), "{expected} in {minted:?}");
+        }
+
+        strip(&doc, "body");
+        assert_eq!(doc.unavailable_tables(), Some(vec![TableLocator::new("body", 0)]));
+        for story in &minted {
+            assert!(doc.story_laid_out(story), "{story} stays shown beside an unavailable table");
+        }
+        let key = doc.reach_key();
+        doc.set_part_metadata(
+            &ctx(),
+            r#"{"body":{"finalSectionProperties":{"headerReferences":[{"type":"default","relationshipId":"rIdHost"}]}},"headers":[["rIdHost"]]}"#,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(doc.reach_key(), key, "a reference changes no root");
+        assert!(doc.story_laid_out("hf:rIdHost"));
     }
 
     #[test]
@@ -507,15 +669,6 @@ mod tests {
             yrs::Map::insert(&control, &mut txn, "story", "elsewhere");
         }
         moved("pointing a block control at another story");
-        {
-            let mut txn = doc.yrs_doc().transact_mut();
-            let pilcrow = embed_map("body", "pilcrow", &txn);
-            yrs::Map::insert(&pilcrow, &mut txn, "sectPr", "{}");
-        }
-        moved("changing a section's properties");
-        let aliases = r#"[{"isHeader":true,"partPath":"word/header1.xml","relationshipIds":["rId7","rId9"]}]"#;
-        doc.set_header_footer_aliases(aliases).unwrap();
-        moved("setting header and footer aliases");
         doc.delete_story("host").unwrap();
         moved("deleting a story");
     }
@@ -635,10 +788,10 @@ mod tests {
 
     #[test]
     fn a_note_cell_whose_table_lost_its_rows_is_not_a_root() {
-        assert!(super::is_note_root("fn:1"));
-        assert!(super::is_note_root("en:-1"));
-        assert!(!super::is_note_root("fn:1:t0:r0c0"));
-        assert!(!super::is_note_root("fn:"));
+        assert!(super::is_root("fn:1"));
+        assert!(super::is_root("en:-1"));
+        assert!(!super::is_root("fn:1:t0:r0c0"));
+        assert!(!super::is_root("fn:"));
         let doc = EditingDoc::new(80);
         doc.create_story("body", "Hello", "Normal", "left")
             .unwrap();
