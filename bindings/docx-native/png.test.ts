@@ -123,8 +123,8 @@ test('native docx PNG draws a dotted tab leader, as on a contents page', () => {
       const list = pngDisplayList(session);
       const primitives = (JSON.parse(list) as DisplayList).pages[0]?.primitives ?? [];
       const leaders = primitives.filter((p) => p.kind === 'decoration' && (p as DecorationPrimitive).dotted).length;
-      const ink = pngPixels(pagePng(session, list, 0, 1)).filter((value, index) => index % 4 === 0 && value < 160).length;
-      return { leaders, ink };
+      const darkness = pngPixels(pagePng(session, list, 0, 1)).reduce((sum, value, index) => (index % 4 === 0 ? sum + 255 - value : sum), 0);
+      return { leaders, darkness };
     } finally {
       session.free();
     }
@@ -133,7 +133,7 @@ test('native docx PNG draws a dotted tab leader, as on a contents page', () => {
   const plain = page('none');
   expect(plain.leaders).toBe(0);
   expect(dotted.leaders).toBeGreaterThan(0);
-  expect(dotted.ink).toBeGreaterThan(plain.ink + 10);
+  expect(dotted.darkness - plain.darkness).toBeGreaterThan(20 * 255);
 });
 
 test('native docx PNG refuses invalid input, missing fonts and oversized surfaces', () => {
