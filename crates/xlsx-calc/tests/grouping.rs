@@ -1837,6 +1837,35 @@ fn stacks_give_their_first_error_before_a_function() {
     }
 }
 
+/// a function after a value, or a value after a function, ends the stack with
+/// #VALUE! before any later argument's error.
+#[test]
+fn stacks_mixing_values_and_functions_are_value_errors_in_order() {
+    let workbook = sales_workbook();
+    for formula in [
+        "HSTACK(1,LAMBDA(x,x),1/0)",
+        "VSTACK(1,LAMBDA(x,x),1/0)",
+        "HSTACK(LAMBDA(x,x),1/0)",
+        "VSTACK(LAMBDA(x,x),1/0)",
+        "HSTACK(,LAMBDA(x,x),1/0)",
+        "HSTACK({1,1/0},LAMBDA(x,x))",
+        "HSTACK({1,1/0},LAMBDA(x,x),1/0)",
+    ] {
+        assert_eq!(
+            values(formula, &workbook),
+            error(ErrorValue::Value),
+            "{formula}"
+        );
+    }
+    for formula in ["HSTACK(1,1/0,LAMBDA(x,x))", "HSTACK(1/0,LAMBDA(x,x))"] {
+        assert_eq!(
+            values(formula, &workbook),
+            error(ErrorValue::Div0),
+            "{formula}"
+        );
+    }
+}
+
 /// each group's copy of a text column is charged to the text budget, so 300
 /// cells of 32,767 characters copied once per group stop at the budget.
 #[test]

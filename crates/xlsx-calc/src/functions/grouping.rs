@@ -1352,6 +1352,27 @@ mod tests {
         }
     }
 
+    /// a stack that mixes a value and a function stops there with #VALUE!,
+    /// before the sequence a 100-cell budget would refuse.
+    #[test]
+    fn stacks_stop_where_values_and_functions_mix() {
+        let workbook = wide_text_row();
+        for formula in [
+            "HSTACK(1,LAMBDA(x,x),SEQUENCE(999))",
+            "VSTACK(LAMBDA(x,x),1,SEQUENCE(999))",
+        ] {
+            let (value, refused) = budgeted(&workbook, formula, EvaluationBudget::new(100));
+            assert_eq!(
+                value.into_scalar(),
+                CellValue::Error {
+                    value: ErrorValue::Value
+                },
+                "{formula}"
+            );
+            assert!(!refused, "{formula}");
+        }
+    }
+
     /// 2048 functions side by side leave room for 511 groups; 600 distinct
     /// keys are #NUM! before a single group is aggregated.
     #[test]
