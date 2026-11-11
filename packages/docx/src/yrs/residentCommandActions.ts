@@ -13,7 +13,7 @@ import {
 import { projectDocxEditState, withStoredMarks } from './residentCommandEditState';
 import { resolveDocxSelectionIntent, selectResidentPartPage } from './residentCommandSelection';
 import { applyCellNavigation, resolveCellNavigation } from './residentCommandCells';
-import { cellsForCaret, readCellSelection, resolveLiveCell, tableRangeFor } from './residentCommandTableSelection';
+import { cellsForCaret, readCellSelection, resolveLiveCell, rootOf, tableRangeFor } from './residentCommandTableSelection';
 import {
   applyTableCommand, isTableCommandKind, liveTableAncestors, nearTable,
   preflightTableCommand, syncCellSelectionWithCaret, type TableCommandIntent,
@@ -1130,8 +1130,12 @@ function applyPreparedDocxCommand(
     return result(applied.applied ? 'applied' : 'noop');
   }
   if (command.kind === 'undo' || command.kind === 'redo') {
-    const beforeHead = engine.selection()?.head ?? null;
+    const before = engine.selection();
+    const beforeHead = before?.head ?? null;
     const tables = beforeHead ? liveTableAncestors(engine, beforeHead.story) : [];
+    const laidOutCells = new Set([before?.anchor, before?.head]
+      .filter((at): at is YrsLoc => !!at && resolveLiveCell(engine, at.story) !== null)
+      .map((at) => at.story));
     const nearby = tables.map((table) => nearTable(engine, table)).filter((at): at is YrsLoc => !!at);
     engine.addUndoBoundary();
     const changed = command.kind === 'undo' ? engine.undo() : engine.redo();
@@ -1149,11 +1153,15 @@ function applyPreparedDocxCommand(
     const resolved = state.selection ? readCommandSelection(engine, state) : null;
     const story = state.selection?.focus.story;
     const native = !story || engine.geometryReader.hasStory(story) ? engine.selection() : null;
-    const selected = resolved?.ok ? resolved.selection : native && commandSelectionRange(engine, { anchor: native.anchor, focus: native.head })
+    const resolvedSelection = resolved?.ok ? resolved.selection : native && commandSelectionRange(engine, { anchor: native.anchor, focus: native.head })
       ? { anchor: native.anchor, focus: native.head } : null;
+    const hidden = resolvedSelection && [resolvedSelection.anchor, resolvedSelection.focus]
+      .some((at) => laidOutCells.has(at.story) && resolveLiveCell(engine, at.story) === null);
+    const selected = hidden ? null : resolvedSelection;
     const root = story && story !== 'body' && !story.startsWith('body:') ? story.split(':').slice(0, 2).join(':') : 'body';
     const fallbackStory = engine.geometryReader.hasStory(root) ? root : 'body';
-    const near = nearby.map((at) => pastLeadingBlocks(engine, at)).find((at) => !!at) ?? null;
+    const near = nearby.map((at) => pastLeadingBlocks(engine, at))
+      .find((at) => !!at && (at.story === rootOf(at.story) || resolveLiveCell(engine, at.story) !== null)) ?? null;
     const first = selected ? null : engine.geometryReader.paragraphSpans(fallbackStory)[0];
     const at = first ? { story: fallbackStory, paraId: first.paraId, offset: 0 } : null;
     const repaired = selected ?? (near ? { anchor: near, focus: near } : null) ?? (at ? { anchor: at, focus: at } : null);
