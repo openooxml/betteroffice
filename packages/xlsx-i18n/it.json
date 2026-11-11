@@ -114,6 +114,14 @@
     "zoomPercent": "Zoom in percentuale",
     "apply": "Applica",
     "cancel": "Annulla",
+    "freezeColumn": "Blocca colonna {column}",
+    "freezeColumns": "Blocca colonne {first}–{last}",
+    "freezeRow": "Blocca riga {row}",
+    "freezeRows": "Blocca righe {first}–{last}",
+    "unfreezePanes": "Sblocca riquadri",
+    "unhideColumns": "Scopri colonne",
+    "unhideRows": "Scopri righe",
+    "selectAll": "Seleziona tutto",
     "reasons": {
       "editorUnavailable": "L'editor non è pronto.",
       "documentLoading": "Apertura della cartella di lavoro in corso.",
@@ -158,7 +166,9 @@
       "lastSheet": "Una cartella di lavoro richiede almeno un foglio.",
       "sheetAtEdge": "Il foglio non può essere spostato oltre.",
       "sheetNameInvalid": "I nomi dei fogli richiedono da 1 a 31 caratteri, devono essere univoci e non possono contenere : \\ / ? * [ ].",
-      "clipboardDenied": "Il browser non ha consentito l’accesso agli appunti."
+      "clipboardDenied": "Il browser non ha consentito l’accesso agli appunti.",
+      "clipboardInsecure": "Gli appunti richiedono una pagina sicura (HTTPS).",
+      "clipboardWriteUnavailable": "Questo browser non consente di copiare negli appunti."
     },
     "cut": "Taglia",
     "copy": "Copia",
@@ -194,6 +204,8 @@
     "sheetTabsLabel": "Fogli",
     "clearExceedsLimit": "La cancellazione supera il limite di celle.",
     "cellMenuLabel": "Menu cella",
+    "columnHeaderMenuLabel": "Menu intestazione colonna",
+    "rowHeaderMenuLabel": "Menu intestazione riga",
     "sheetTabMenuLabel": "Menu della scheda del foglio",
     "renameSheetLabel": "Rinomina foglio",
     "sheetNamePrefix": "Foglio"

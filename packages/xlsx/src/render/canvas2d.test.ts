@@ -54,6 +54,148 @@ describe('Canvas2D double lines', () => {
   });
 });
 
+describe('Canvas2D hairline snapping', () => {
+  it('puts gridlines and the pane divider on the same CSS pixels as the DOM band', () => {
+    const strokes: number[][] = [];
+    let points: number[] = [];
+    const context = {
+      lineWidth: 0, strokeStyle: '', lineCap: '',
+      save() {}, restore() {}, setTransform() {}, clearRect() {}, rect() {}, clip() {}, setLineDash() {},
+      beginPath() { points = []; },
+      moveTo(x: number, y: number) { points.push(x, y); },
+      lineTo(x: number, y: number) { points.push(x, y); },
+      stroke() { strokes.push([this.lineWidth, ...points]); },
+    };
+    const frame = (zoom: number, dpr: number) => {
+      strokes.length = 0;
+      const dl = { width: 400, height: 400, commands: [
+        // a column gridline whose sheet boundary is fractional, and the 2px split
+        { op: 'line', x1: 222.004, y1: 0, x2: 222.004, y2: 400, width: 1, color: '#d4d4d4', hairline: true },
+        { op: 'line', x1: 147.004, y1: 0, x2: 147.004, y2: 400, width: 2, color: '#8a8a8a', hairline: true },
+      ] } as DisplayList;
+      paintDisplayList(context as unknown as CanvasRenderingContext2D, dl, dpr * zoom, { x: 0, y: 0 }, zoom);
+      return strokes.map(([width, x1, , x2]) => [x1, x2, width] as const);
+    };
+    // dpr 1: the hairline covers the CSS pixel ending at the boundary, the split
+    // straddles it, exactly like the band's 1px and 2px elements.
+    expect(frame(1, 1)).toEqual([[221.5, 221.5, 1], [147, 147, 2]]);
+    // dpr 2 at 150% zoom: one CSS pixel still (2 device px), snapped to the
+    // device column the band's box lands on.
+    expect(frame(1.5, 2).map(([x1, x2, width]) => [x1, x2, width].map((v) => +v.toFixed(4))))
+      .toEqual([[221.6667, 221.6667, 0.6667], [147.3333, 147.3333, 1.3333]]);
+  });
+});
+
+describe('Canvas2D translated origin', () => {
+  // The context is setTransform(dpr, 0, 0, dpr, origin.x, origin.y), so a recorded
+  // list-space argument m is painted at the device coordinate m * dpr + origin, and a
+  // recorded line width scales with it. `origin` is in backing-store pixels; `realDpr`
+  // (dpr / zoom) converts it to CSS pixels.
+  const recorder = () => {
+    const strokes: number[][] = [];
+    const clips: number[][] = [];
+    let points: number[] = [];
+    const context = {
+      lineWidth: 0, strokeStyle: '', lineCap: '', fillStyle: '', imageSmoothingEnabled: false,
+      save() {}, restore() {}, setTransform() {}, clearRect() {}, clip() {}, setLineDash() {},
+      fillRect() {}, beginPath() { points = []; },
+      rect(x: number, y: number, w: number, h: number) { clips.push([x, y, w, h]); },
+      moveTo(x: number, y: number) { points.push(x, y); },
+      lineTo(x: number, y: number) { points.push(x, y); },
+      stroke() { strokes.push([this.lineWidth, ...points]); },
+    };
+    return { context, strokes, clips };
+  };
+
+  const toDevice = (strokes: number[][], dpr: number, origin: { x: number; y: number }) =>
+    strokes.map(([width, ...points]) => [
+      +(width! * dpr).toFixed(4),
+      ...points.map((value, index) => +(value * dpr + (index % 2 === 0 ? origin.x : origin.y)).toFixed(4)),
+    ]);
+
+  it('lands hairlines on the CSS grid of the translated canvas on both axes', () => {
+    const { context, strokes } = recorder();
+    const dl = { width: 200, height: 200, commands: [
+      { op: 'line', x1: 20, y1: 0, x2: 20, y2: 200, width: 1, color: '#d4d4d4', hairline: true },
+      { op: 'line', x1: 0, y1: 20, x2: 200, y2: 20, width: 1, color: '#d4d4d4', hairline: true },
+      { op: 'line', x1: 60, y1: 0, x2: 60, y2: 200, width: 2, color: '#8a8a8a', hairline: true },
+    ] } as DisplayList;
+    paintDisplayList(context as unknown as CanvasRenderingContext2D, dl, 1, { x: 30, y: 30 });
+    // 1px odd covers [b-1, b]: b = 20 + 30 = 50 device, so the stroke centre is 49.5.
+    // 2px even straddles the grid line: b = 60 + 30 = 90 device, centre 90.
+    expect(toDevice(strokes, 1, { x: 30, y: 30 })).toEqual([
+      [1, 49.5, 30, 49.5, 230],
+      [1, 30, 49.5, 230, 49.5],
+      [2, 90, 30, 90, 230],
+    ]);
+  });
+
+  it('snaps to the absolute CSS grid at dpr 2 for zoom 1 and 1.5', () => {
+    const { context, strokes } = recorder();
+    const dl = { width: 200, height: 200, commands: [
+      { op: 'line', x1: 20, y1: 0, x2: 20, y2: 200, width: 1, color: '#d4d4d4', hairline: true },
+    ] } as DisplayList;
+    const origin = { x: 30, y: 20 };
+    const frame = (zoom: number) => {
+      strokes.length = 0;
+      paintDisplayList(context as unknown as CanvasRenderingContext2D, dl, 2 * zoom, origin, zoom);
+      return toDevice(strokes, 2 * zoom, origin);
+    };
+    // realDpr 2 -> origin is 15 CSS px across; 20 + 15 = 35, centre 34.5 CSS = 69 device.
+    expect(frame(1)).toEqual([[2, 69, 20, 69, 420]]);
+    // zoom 1.5: 20 * 1.5 + 15 = 45, centre 44.5 CSS = 89 device; 200 * 1.5 + 10 = 310 CSS.
+    expect(frame(1.5)).toEqual([[2, 89, 20, 89, 620]]);
+  });
+
+  it('keeps styled lines exact and clips in model space under a translated origin', () => {
+    const { context, strokes, clips } = recorder();
+    const clip = { x: 0, y: 0, w: 120, h: 60 };
+    const dl = { width: 200, height: 200, commands: [
+      { op: 'line', x1: 20, y1: 0, x2: 20, y2: 60, width: 1, color: '#000000', style: 'dashed', clip },
+    ] } as DisplayList;
+    paintDisplayList(context as unknown as CanvasRenderingContext2D, dl, 2, { x: 30, y: 20 });
+    // styled: floor(20 * 2 + 30) = 70 device, even 2px width -> exactly the unsnapped
+    // sheet coordinate lifted by the origin, never shifted twice.
+    expect(toDevice(strokes, 2, { x: 30, y: 20 })).toEqual([[2, 70, 20, 70, 140]]);
+    // the clip is a display-list rect: it stays in model space for the translated context
+    expect(clips).toEqual([[0, 0, 200, 200], [0, 0, 120, 60]]);
+  });
+
+  it('keeps a solid cell border exact while hairlines still snap at zoom 2', () => {
+    const { context, strokes } = recorder();
+    const origin = { x: 30, y: 20 };
+    const dl = { width: 200, height: 200, commands: [
+      // a real solid border: no dash style, no hairline
+      { op: 'line', x1: 20.3, y1: 0, x2: 20.3, y2: 200, width: 1, color: '#000000' },
+      // a gridline on the same boundary, marked by the renderer
+      { op: 'line', x1: 20.3, y1: 0, x2: 20.3, y2: 200, width: 1, color: '#d4d4d4', hairline: true },
+    ] } as DisplayList;
+    paintDisplayList(context as unknown as CanvasRenderingContext2D, dl, 4, origin, 2);
+    // solid: the list coordinate is untouched and the stroke keeps its sheet width
+    expect(strokes[0]).toEqual([1, 20.3, 0, 20.3, 200]);
+    // hairline: realDpr 2 -> 15 CSS px across; 20.3 * 2 + 15 = 55.6, centre
+    // 55.5 CSS = 111 device. One CSS pixel is 2 device px, i.e. 0.5 list px at
+    // zoom 2. y spans the full list, lifted by the origin.
+    expect(toDevice(strokes, 4, origin)).toEqual([
+      [4, 111.2, 20, 111.2, 820],
+      [2, 111, 20, 111, 820],
+    ]);
+  });
+
+  it('keeps the previous output when callers omit zoom', () => {
+    const dl = { width: 200, height: 200, commands: [
+      { op: 'line', x1: 20, y1: 0, x2: 20, y2: 200, width: 1, color: '#d4d4d4', hairline: true },
+    ] } as DisplayList;
+    const origin = { x: 30, y: 20 };
+    const omitted = recorder();
+    const explicit = recorder();
+    paintDisplayList(omitted.context as unknown as CanvasRenderingContext2D, dl, 2, origin);
+    paintDisplayList(explicit.context as unknown as CanvasRenderingContext2D, dl, 2, origin, 1);
+    expect(omitted.strokes).toEqual(explicit.strokes);
+    expect(toDevice(omitted.strokes, 2, origin)).toEqual([[2, 69, 20, 69, 420]]);
+  });
+});
+
 describe('Canvas2D pattern borders', () => {
   it('paints all six dash styles and a three-pixel double border', () => {
     const dashes: number[][] = [];

@@ -114,6 +114,14 @@
     "zoomPercent": "Yüzde cinsinden yakınlaştırma",
     "apply": "Uygula",
     "cancel": "İptal",
+    "freezeColumn": "Sütun {column} dondur",
+    "freezeColumns": "Sütunları dondur {first}–{last}",
+    "freezeRow": "Satır {row} dondur",
+    "freezeRows": "Satırları dondur {first}–{last}",
+    "unfreezePanes": "Bölmeleri dondurmayı kaldır",
+    "unhideColumns": "Sütunları göster",
+    "unhideRows": "Satırları göster",
+    "selectAll": "Tümünü seç",
     "reasons": {
       "editorUnavailable": "Düzenleyici hazır değil.",
       "documentLoading": "Çalışma kitabı hâlâ açılıyor.",
@@ -158,7 +166,9 @@
       "lastSheet": "Bir çalışma kitabında en az bir sayfa olmalıdır.",
       "sheetAtEdge": "Sayfa daha fazla taşınamaz.",
       "sheetNameInvalid": "Sayfa adları 1 ile 31 karakter arasında ve benzersiz olmalı, : \\ / ? * [ ] içeremez.",
-      "clipboardDenied": "Tarayıcı panoya erişime izin vermedi."
+      "clipboardDenied": "Tarayıcı panoya erişime izin vermedi.",
+      "clipboardInsecure": "Pano için güvenli (HTTPS) bir sayfa gerekir.",
+      "clipboardWriteUnavailable": "Bu tarayıcı panoya kopyalamaya izin vermiyor."
     },
     "cut": "Kes",
     "copy": "Kopyala",
@@ -194,6 +204,8 @@
     "sheetTabsLabel": "Sayfalar",
     "clearExceedsLimit": "Temizleme hücre sınırını aşıyor.",
     "cellMenuLabel": "Hücre menüsü",
+    "columnHeaderMenuLabel": "Sütun başlığı menüsü",
+    "rowHeaderMenuLabel": "Satır başlığı menüsü",
     "sheetTabMenuLabel": "Sayfa sekmesi menüsü",
     "renameSheetLabel": "Sayfayı yeniden adlandır",
     "sheetNamePrefix": "Çalışma Sayfası"

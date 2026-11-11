@@ -542,3 +542,55 @@ fn an_alternate_content_object_wholly_inside_deleted_rows_refuses() {
         ))
     );
 }
+
+fn move_cols(col: u32, count: u32, before: u32) -> Op {
+    Op::MoveCols {
+        sheet: SheetId(0),
+        col,
+        count,
+        before,
+    }
+}
+
+#[test]
+fn a_track_move_carries_a_column_anchored_picture_to_its_new_column() {
+    // anchored entirely in column A, which the move puts before E
+    let anchors = two_cell(None, (0, 0), (0, 0), 2);
+    let mut workbook = Workbook::open(&package(&anchors)).unwrap();
+    workbook
+        .apply_ops(vec![move_cols(0, 1, 4)], options())
+        .unwrap();
+    let saved = workbook.save().unwrap();
+    Workbook::open(&saved).unwrap();
+    assert_eq!(
+        drawing_xml(&saved),
+        source_drawing(&two_cell(None, (3, 0), (3, 0), 2))
+    );
+}
+
+#[test]
+fn a_move_after_a_source_shift_lands_the_picture_with_its_shifted_cell() {
+    let anchors = [
+        two_cell(None, (0, 0), (0, 0), 2),
+        two_cell(None, (1, 0), (1, 0), 3),
+    ]
+    .concat();
+    let mut workbook = Workbook::open(&package(&anchors)).unwrap();
+    workbook
+        .apply_ops(vec![insert_cols(1, 1), move_cols(0, 1, 4)], options())
+        .unwrap();
+    let saved = workbook.save().unwrap();
+    Workbook::open(&saved).unwrap();
+    // the insert at B pushed B's anchor right; the move then put A after D,
+    // so A's anchor lands on D and B's closes back up to C
+    assert_eq!(
+        drawing_xml(&saved),
+        source_drawing(
+            &[
+                two_cell(None, (3, 0), (3, 0), 2),
+                two_cell(None, (1, 0), (1, 0), 3),
+            ]
+            .concat()
+        )
+    );
+}

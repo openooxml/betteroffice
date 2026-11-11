@@ -114,6 +114,14 @@
     "zoomPercent": "Zoom in Prozent",
     "apply": "Übernehmen",
     "cancel": "Abbrechen",
+    "freezeColumn": "Spalte {column} fixieren",
+    "freezeColumns": "Spalten {first}–{last} fixieren",
+    "freezeRow": "Zeile {row} fixieren",
+    "freezeRows": "Zeilen {first}–{last} fixieren",
+    "unfreezePanes": "Fixierung aufheben",
+    "unhideColumns": "Spalten einblenden",
+    "unhideRows": "Zeilen einblenden",
+    "selectAll": "Alles auswählen",
     "reasons": {
       "editorUnavailable": "Der Editor ist nicht bereit.",
       "documentLoading": "Die Arbeitsmappe wird noch geöffnet.",
@@ -158,7 +166,9 @@
       "lastSheet": "Eine Arbeitsmappe braucht mindestens ein Blatt.",
       "sheetAtEdge": "Das Blatt kann nicht weiter verschoben werden.",
       "sheetNameInvalid": "Blattnamen brauchen 1 bis 31 Zeichen, müssen eindeutig sein und dürfen : \\ / ? * [ ] nicht enthalten.",
-      "clipboardDenied": "Der Browser hat den Zugriff auf die Zwischenablage nicht erlaubt."
+      "clipboardDenied": "Der Browser hat den Zugriff auf die Zwischenablage nicht erlaubt.",
+      "clipboardInsecure": "Die Zwischenablage benötigt eine sichere (HTTPS)-Seite.",
+      "clipboardWriteUnavailable": "Dieser Browser erlaubt das Kopieren in die Zwischenablage nicht."
     },
     "cut": "Ausschneiden",
     "copy": "Kopieren",
@@ -194,6 +204,8 @@
     "sheetTabsLabel": "Blätter",
     "clearExceedsLimit": "Das Löschen überschreitet das Zelllimit.",
     "cellMenuLabel": "Zellenmenü",
+    "columnHeaderMenuLabel": "Menü der Spaltenüberschrift",
+    "rowHeaderMenuLabel": "Menü der Zeilenüberschrift",
     "sheetTabMenuLabel": "Menü der Blattregisterkarte",
     "renameSheetLabel": "Blatt umbenennen",
     "sheetNamePrefix": "Arbeitsblatt"

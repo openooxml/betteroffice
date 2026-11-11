@@ -8,6 +8,9 @@ import { createTestWorkbookSession } from '../../../xlsx/src/session/testHelpers
 import { XlsxWorkerEditor } from './XlsxWorkerEditor';
 import { editableWorkbookSessionBackend } from './useEditableSessionWorkbook';
 import type { XlsxAsyncEditorApi } from './createAsyncEditorApi';
+import type { DisplayList } from '@betteroffice/xlsx';
+import { WorkerPresentationStore } from './WorkerPresentationStore';
+import { PeerlessSheetGrid } from './PeerlessWorkerSurface';
 import { MOUNTED } from '../__fixtures__/mounted';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -248,5 +251,40 @@ describe('peerless grid screen reader support', () => {
     fireEvent.keyDown(item, { key: 'F6' });
     expect(document.activeElement).toBe(item);
     menu.remove();
+  });
+});
+
+describe('peerless grid headers', () => {
+  const frame = (startCol: number): DisplayList => ({
+    width: 800, height: 600, commands: [],
+    grid: { startRow: 0, startCol, rowOffsets: [0, 20, 40], colOffsets: [0, 80, 160, 240] },
+  });
+  const painted = (startCol: number) => ({
+    source: 'worker' as const, version: 'v1', sequence: 1, coversThroughSeq: 1, mergedRanges: [],
+    geometry: undefined, displayList: frame(startCol),
+    request: { generation: 1, sheet: 0, navigation: 0, width: 800, height: 600, zoom: 1, dpr: 1,
+      viewport: { x: 0, y: 0, width: 800, height: 600 } },
+  });
+
+  it('advances the labels when the presentation store installs a scrolled frame', async () => {
+    const store = new WorkerPresentationStore();
+    const view = render(<PeerlessSheetGrid store={store} active={0}><div /></PeerlessSheetGrid>);
+    await act(async () => { store.setPainted(painted(0)); await Promise.resolve(); });
+    expect(view.getByTestId('xlsx-column-headers').querySelector(':scope > div')?.textContent).toBe('A');
+    await act(async () => { store.setPainted(painted(3)); await Promise.resolve(); });
+    expect(view.getByTestId('xlsx-column-headers').querySelector(':scope > div')?.textContent).toBe('D');
+  });
+
+  it('forwards headerHandlers to the bands it renders', async () => {
+    const store = new WorkerPresentationStore();
+    const presses: { axis: string; index: number }[] = [];
+    const view = render(<PeerlessSheetGrid store={store} active={0}
+      headerHandlers={{ onHeaderMouseDown: (axis, index) => presses.push({ axis, index }) }}>
+      <div />
+    </PeerlessSheetGrid>);
+    await act(async () => { store.setPainted(painted(0)); await Promise.resolve(); });
+    fireEvent.mouseDown(view.getByTestId('xlsx-column-headers').querySelector('[data-col="2"]')!);
+    fireEvent.mouseDown(view.getByTestId('xlsx-row-headers').querySelector('[data-row="1"]')!);
+    expect(presses).toEqual([{ axis: 'col', index: 2 }, { axis: 'row', index: 1 }]);
   });
 });

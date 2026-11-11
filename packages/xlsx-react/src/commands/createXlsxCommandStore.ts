@@ -38,7 +38,10 @@ import type {
   XlsxPluginCommandState,
 } from './types';
 
-/** Why work queued behind accepted input could not run. */
+/**
+ * Why work queued behind accepted input could not run, or why the page could not reach the
+ * clipboard on behalf of that work.
+ */
 export type XlsxCommandAdmissionCode = Extract<
   XlsxCommandFailureCode,
   | 'input-failed'
@@ -49,6 +52,8 @@ export type XlsxCommandAdmissionCode = Extract<
   | 'target-changed'
   | 'gesture-active'
   | 'editor-unavailable'
+  | 'clipboard-unavailable'
+  | 'clipboard-denied'
 >;
 
 const ADMISSION_MESSAGES: Record<XlsxCommandAdmissionCode, string> = {
@@ -60,6 +65,8 @@ const ADMISSION_MESSAGES: Record<XlsxCommandAdmissionCode, string> = {
   'target-changed': 'The selection changed',
   'gesture-active': 'Finish the chart drag first',
   'editor-unavailable': 'The editor is not ready',
+  'clipboard-unavailable': 'The clipboard is unavailable in this browser',
+  'clipboard-denied': 'The browser did not allow access to the clipboard',
 };
 
 /**

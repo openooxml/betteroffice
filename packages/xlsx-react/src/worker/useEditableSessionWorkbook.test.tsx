@@ -539,7 +539,7 @@ describe('editable session workbook', () => {
       zoom: 1, dpr: window.devicePixelRatio || 1, requestGeneration: 0 });
     expect(editor.opener.mock.calls[0][1]?.retainPeerHydration).toBeUndefined();
     expect(editor.opener.mock.calls[0][1]?.includeEditState).toBe(true);
-    expect(editor.paint).toHaveBeenCalledWith(expect.anything(), frame.displayList, frame.dpr);
+    expect(editor.paint).toHaveBeenCalledWith(expect.anything(), frame.displayList, frame.dpr, { x: 0, y: 0 }, 1);
     await editor.tick();
     expect(editor.frame).not.toHaveBeenCalled();
     expect(editor.sheetView).not.toHaveBeenCalled();

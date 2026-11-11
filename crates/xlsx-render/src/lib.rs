@@ -100,6 +100,8 @@ struct GhostFont {
 struct AxisTrack {
     index: u32,
     raw_start: f32,
+    /// full track size in sheet px, before the frozen pane or the viewport clips it
+    raw_size: f32,
     start: f32,
     end: f32,
     pinned: bool,
@@ -154,6 +156,7 @@ impl AxisLayout {
                 tracks.push(AxisTrack {
                     index,
                     raw_start: start,
+                    raw_size: edge(index + 1) - start,
                     start,
                     end: edge(index + 1),
                     pinned: true,
@@ -184,6 +187,7 @@ impl AxisLayout {
                 tracks.push(AxisTrack {
                     index,
                     raw_start,
+                    raw_size: raw_end - raw_start,
                     start: if frozen > 0 {
                         raw_start.max(frozen_extent)
                     } else {
@@ -233,6 +237,12 @@ impl AxisLayout {
         std::iter::once(first.start)
             .chain(self.tracks.iter().map(|track| track.end))
             .collect()
+    }
+
+    /// full track sizes, parallel to `offsets`: independent of scroll and of a
+    /// frozen pane clipping the track's leading edge.
+    fn sizes(&self) -> Vec<f32> {
+        self.tracks.iter().map(|track| track.raw_size).collect()
     }
 
     fn contains(&self, index: u32) -> bool {
@@ -452,6 +462,7 @@ fn emit_grid_segments(
                     color: color.clone(),
                     style: None,
                     rail: None,
+                    hairline: true,
                     clip: None,
                 });
             };
@@ -782,12 +793,18 @@ where
     let grid = GridMeta {
         start_row: rows.start(),
         start_col: cols.start(),
+        frozen_rows: (rows.frozen > 0).then_some(rows.frozen),
+        frozen_cols: (cols.frozen > 0).then_some(cols.frozen),
+        divider_x: cols.divider,
+        divider_y: rows.divider,
         hidden_row_spans: sheet_ref.hidden_row_spans(0..=MAX_ROWS - 1).collect(),
         hidden_col_spans: sheet_ref.hidden_col_spans(0..=MAX_COLS - 1).collect(),
         row_indices: rows.indices(),
         col_indices: cols.indices(),
         row_offsets: rows.offsets(),
         col_offsets: cols.offsets(),
+        row_sizes: rows.sizes(),
+        col_sizes: cols.sizes(),
     };
     let hyperlinks = sheet_ref
         .hyperlinks
@@ -935,6 +952,7 @@ where
                 style: None,
                 rail: None,
                 clip: None,
+                hairline: false,
             });
         }
     }
@@ -1248,6 +1266,7 @@ where
             color: pane_divider_color.clone(),
             style: None,
             rail: None,
+            hairline: true,
             clip: None,
         });
     }
@@ -1261,6 +1280,7 @@ where
             color: pane_divider_color.clone(),
             style: None,
             rail: None,
+            hairline: true,
             clip: None,
         });
     }
@@ -2415,6 +2435,7 @@ fn border_line(x1: f32, y1: f32, x2: f32, y2: f32, edge: &ResolvedBorderEdge) ->
         style: edge.style.clone(),
         rail: (edge.style.as_deref() == Some("double")).then_some(edge.width / 3.0),
         clip: None,
+        hairline: false,
     }
 }
 
@@ -3153,6 +3174,18 @@ mod tests {
 
         assert_eq!(dl.grid.start_col, 0);
         assert_eq!(dl.grid.start_row, 0);
+        assert_eq!(dl.grid.frozen_cols, Some(1));
+        assert_eq!(dl.grid.frozen_rows, Some(1));
+        // the divider sits on the trailing edge of the frozen track, in the
+        // same viewport pixels the canvas draws it in.
+        assert_eq!(dl.grid.divider_x, Some(dc));
+        assert_eq!(dl.grid.divider_y, Some(dr));
+        // the wasm boundary serializes these camelCase and only when present.
+        let wire = serde_json::to_value(&dl).unwrap();
+        assert_eq!(wire["grid"]["frozenRows"], serde_json::json!(1));
+        assert_eq!(wire["grid"]["frozenCols"], serde_json::json!(1));
+        assert_eq!(wire["grid"]["dividerX"], serde_json::json!(dc));
+        assert_eq!(wire["grid"]["dividerY"], serde_json::json!(dr));
         assert_eq!(dl.grid.col_indices.as_deref(), Some(&[0, 3, 4, 5][..]));
         assert_eq!(dl.grid.row_indices.as_deref(), Some(&[0, 4, 5, 6][..]));
         assert_eq!(
@@ -3208,6 +3241,130 @@ mod tests {
                 if *y1 == dr && *y2 == dr && *width == PANE_DIVIDER_WIDTH
                     && &**color == PANE_DIVIDER_COLOR
         )));
+    }
+
+    #[test]
+    fn gridlines_are_hairlines_and_track_sizes_ignore_the_frozen_clip() {
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.col_widths.insert(0, 30.0);
+        sheet.freeze_pane = Some(FreezePane::new(1, 1, CellRef::new(2, 2)));
+        let mut wb = Workbook::default();
+        let mut format = wb.styles.cell_format(None);
+        format.border.bottom = Some(BorderEdge {
+            style: BorderStyle::Thin,
+            color: Some(xlsx_model::Color::Rgb("#ff0000".into())),
+        });
+        let style = wb.styles.intern_cell_format(&format).unwrap();
+        sheet.set_cell(
+            CellRef::new(1, 1),
+            Cell {
+                value: CellValue::Text { value: "x".into() },
+                style,
+                ..Cell::default()
+            },
+        );
+        wb.sheets.push(sheet);
+
+        let dc = geometry::col_chars_to_px(geometry::DEFAULT_COL_WIDTH_CHARS);
+        let dr = geometry::row_pt_to_px(geometry::DEFAULT_ROW_HEIGHT_PT);
+        let frozen_w = geometry::col_chars_to_px(30.0);
+        let dl = build_display_list(
+            &wb,
+            SheetId(0),
+            &Viewport {
+                x: 20.0,
+                y: 5.0,
+                width: 400.0,
+                height: 300.0,
+            },
+        )
+        .unwrap();
+
+        // the frozen pane clips the body tracks' start in the offset arrays...
+        assert!((dl.grid.col_sizes[0] - frozen_w).abs() < 0.01);
+        assert!((dl.grid.col_sizes[1] - dc).abs() < 0.01);
+        assert!((dl.grid.row_sizes[0] - dr).abs() < 0.01);
+        assert!((dl.grid.row_sizes[1] - dr).abs() < 0.01);
+        assert!(dl.grid.col_offsets[2] - dl.grid.col_offsets[1] < dc - 1.0);
+        assert!(dl.grid.row_offsets[2] - dl.grid.row_offsets[1] < dr - 1.0);
+
+        // ...while the sizes report the full track extent.
+        assert_eq!(dl.grid.col_sizes.len(), dl.grid.col_offsets.len() - 1);
+        assert_eq!(dl.grid.row_sizes.len(), dl.grid.row_offsets.len() - 1);
+
+        let lines: Vec<_> = dl
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                DrawCmd::Line {
+                    color,
+                    hairline,
+                    width,
+                    ..
+                } => Some((&**color, *hairline, *width)),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            lines
+                .iter()
+                .any(|(color, hairline, _)| *hairline && *color == GRIDLINE_COLOR)
+        );
+        assert!(
+            lines.iter().any(|(color, hairline, width)| !*hairline
+                && *color == "#ff0000"
+                && (*width - 1.0).abs() < 0.001),
+            "{lines:?}"
+        );
+        assert!(lines.iter().any(|(color, hairline, width)| *hairline
+            && *color == PANE_DIVIDER_COLOR
+            && (*width - PANE_DIVIDER_WIDTH).abs() < 0.001));
+
+        // the wire keeps `hairline` only on the commands that need it, and
+        // serializes the new size arrays camelCase.
+        let wire = serde_json::to_value(&dl).unwrap();
+        assert!(wire["grid"]["colSizes"][1].as_f64().unwrap() > (dc - 1.0) as f64);
+        assert!(wire["grid"]["rowSizes"][1].as_f64().unwrap() > (dr - 1.0) as f64);
+        let wire_lines: Vec<_> = wire["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|command| command["op"] == "line")
+            .collect();
+        assert!(wire_lines.iter().any(|command| command["hairline"] == true));
+        assert!(
+            wire_lines
+                .iter()
+                .any(|command| command["color"] == "#ff0000" && command.get("hairline").is_none())
+        );
+    }
+
+    #[test]
+    fn unfrozen_frames_emit_no_freeze_metadata() {
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(CellRef::new(0, 0), text_cell("body"));
+        let mut wb = Workbook::default();
+        wb.sheets.push(sheet);
+        let dl = build_display_list(
+            &wb,
+            SheetId(0),
+            &Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: 400.0,
+                height: 200.0,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(dl.grid.frozen_rows, None);
+        assert_eq!(dl.grid.frozen_cols, None);
+        assert_eq!(dl.grid.divider_x, None);
+        assert_eq!(dl.grid.divider_y, None);
+        let wire = serde_json::to_value(&dl).unwrap();
+        for field in ["frozenRows", "frozenCols", "dividerX", "dividerY"] {
+            assert!(wire["grid"].get(field).is_none(), "{field} must be absent");
+        }
     }
 
     #[test]

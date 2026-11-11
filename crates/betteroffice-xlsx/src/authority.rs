@@ -3300,6 +3300,21 @@ impl WorkbookAuthority {
                     ) => {
                         row_heights.insert((key, *row));
                     }
+                    // the range names only its first track and its count, so
+                    // every track it can reach is a width or height the
+                    // incremental sync has to write
+                    (Op::SetColsVisibility { col, count, .. }, Some(key)) => {
+                        col_widths.extend(
+                            ((*col).min(MAX_COLS)..col.saturating_add(*count).min(MAX_COLS))
+                                .map(|col| (key.clone(), col)),
+                        );
+                    }
+                    (Op::SetRowsVisibility { row, count, .. }, Some(key)) => {
+                        row_heights.extend(
+                            ((*row).min(MAX_ROWS)..row.saturating_add(*count).min(MAX_ROWS))
+                                .map(|row| (key.clone(), row)),
+                        );
+                    }
                     (Op::SetFreezePane { .. }, Some(key)) => {
                         freeze_panes.insert(key);
                     }
@@ -3813,6 +3828,12 @@ pub(crate) fn is_structural_op(op: &Op) -> bool {
             | Op::DeleteRows { .. }
             | Op::InsertCols { .. }
             | Op::DeleteCols { .. }
+            // a move permutes rows or columns the way an insert or delete
+            // shifts them: it relocates cells without a per-cell op, so it is
+            // refused in a collaborative session and counted against the
+            // structure exactly as they are
+            | Op::MoveRows { .. }
+            | Op::MoveCols { .. }
             | Op::SetFreezePane { .. }
             | Op::SetHyperlinks { .. }
             | Op::SetHyperlink { .. }
@@ -4872,6 +4893,12 @@ fn requires_full_semantic_sync(op: &Op) -> bool {
             | Op::DeleteRows { .. }
             | Op::InsertCols { .. }
             | Op::DeleteCols { .. }
+            // the incremental path folds each op into the baseline features it
+            // names by track index; a move rewrites merges, hyperlinks,
+            // conditional formats and filters on tracks it never names, which
+            // only a whole-model write republishes
+            | Op::MoveRows { .. }
+            | Op::MoveCols { .. }
             | Op::SetHyperlinks { .. }
             | Op::RestoreColStyles { .. }
             | Op::RestoreRowStyles { .. }
@@ -4969,15 +4996,23 @@ fn targeted_sheet_keys(
 fn op_sheet(op: &Op) -> Option<SheetId> {
     match op {
         Op::SetCell { sheet, .. }
+        | Op::RestoreArrayFormula { sheet, .. }
+        | Op::ClipArrayFormula { sheet, .. }
         | Op::InsertRows { sheet, .. }
         | Op::DeleteRows { sheet, .. }
         | Op::InsertCols { sheet, .. }
         | Op::DeleteCols { sheet, .. }
+        // a move edits one sheet's tracks, so it resolves its target sheet the
+        // same way every other sheet-local op does
+        | Op::MoveRows { sheet, .. }
+        | Op::MoveCols { sheet, .. }
         | Op::SetColWidth { sheet, .. }
         | Op::SetColVisibility { sheet, .. }
+        | Op::SetColsVisibility { sheet, .. }
         | Op::RestoreColDimension { sheet, .. }
         | Op::SetRowHeight { sheet, .. }
         | Op::SetRowVisibility { sheet, .. }
+        | Op::SetRowsVisibility { sheet, .. }
         | Op::RestoreRowDimension { sheet, .. }
         | Op::SetFreezePane { sheet, .. }
         | Op::SetHyperlinks { sheet, .. }

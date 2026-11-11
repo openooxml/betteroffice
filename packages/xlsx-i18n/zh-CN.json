@@ -114,6 +114,14 @@
     "zoomPercent": "缩放百分比",
     "apply": "应用",
     "cancel": "取消",
+    "freezeColumn": "冻结 {column} 列",
+    "freezeColumns": "冻结 {first}–{last} 列",
+    "freezeRow": "冻结第 {row} 行",
+    "freezeRows": "冻结第 {first}–{last} 行",
+    "unfreezePanes": "取消冻结窗格",
+    "unhideColumns": "取消隐藏列",
+    "unhideRows": "取消隐藏行",
+    "selectAll": "全选",
     "reasons": {
       "editorUnavailable": "编辑器尚未就绪。",
       "documentLoading": "工作簿仍在打开。",
@@ -158,7 +166,9 @@
       "lastSheet": "工作簿至少需要一个工作表。",
       "sheetAtEdge": "无法再移动此工作表。",
       "sheetNameInvalid": "工作表名称需为 1 到 31 个字符，不能重复，且不能包含 : \\ / ? * [ ]。",
-      "clipboardDenied": "浏览器不允许访问剪贴板。"
+      "clipboardDenied": "浏览器不允许访问剪贴板。",
+      "clipboardInsecure": "剪贴板需要安全 (HTTPS) 页面。",
+      "clipboardWriteUnavailable": "此浏览器不允许复制到剪贴板。"
     },
     "cut": "剪切",
     "copy": "复制",
@@ -194,6 +204,8 @@
     "sheetTabsLabel": "工作表",
     "clearExceedsLimit": "清除操作超出单元格上限",
     "cellMenuLabel": "单元格菜单",
+    "columnHeaderMenuLabel": "列头菜单",
+    "rowHeaderMenuLabel": "行头菜单",
     "sheetTabMenuLabel": "工作表标签菜单",
     "renameSheetLabel": "重命名工作表",
     "sheetNamePrefix": "工作表"

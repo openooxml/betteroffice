@@ -114,6 +114,14 @@
     "zoomPercent": "백분율 단위 확대/축소",
     "apply": "적용",
     "cancel": "취소",
+    "freezeColumn": "{column}열 고정",
+    "freezeColumns": "{first}–{last}열 고정",
+    "freezeRow": "{row}행 고정",
+    "freezeRows": "{first}–{last}행 고정",
+    "unfreezePanes": "창 고정 해제",
+    "unhideColumns": "열 숨기기 취소",
+    "unhideRows": "행 숨기기 취소",
+    "selectAll": "모두 선택",
     "reasons": {
       "editorUnavailable": "편집기를 사용할 준비가 되지 않았습니다.",
       "documentLoading": "통합 문서가 아직 열리고 있습니다.",
@@ -158,7 +166,9 @@
       "lastSheet": "통합 문서에는 시트가 하나 이상 있어야 합니다.",
       "sheetAtEdge": "시트를 더 이상 이동할 수 없습니다.",
       "sheetNameInvalid": "시트 이름은 1~31자이고 고유해야 하며 : \\ / ? * [ ]를 포함할 수 없습니다.",
-      "clipboardDenied": "브라우저에서 클립보드 액세스를 허용하지 않았습니다."
+      "clipboardDenied": "브라우저에서 클립보드 액세스를 허용하지 않았습니다.",
+      "clipboardInsecure": "클립보드에는 보안(HTTPS) 페이지가 필요합니다.",
+      "clipboardWriteUnavailable": "이 브라우저에서는 클립보드로 복사할 수 없습니다."
     },
     "cut": "잘라내기",
     "copy": "복사",
@@ -194,6 +204,8 @@
     "sheetTabsLabel": "시트",
     "clearExceedsLimit": "지우기가 셀 제한을 초과합니다",
     "cellMenuLabel": "셀 메뉴",
+    "columnHeaderMenuLabel": "열 머리글 메뉴",
+    "rowHeaderMenuLabel": "행 머리글 메뉴",
     "sheetTabMenuLabel": "시트 탭 메뉴",
     "renameSheetLabel": "시트 이름 바꾸기",
     "sheetNamePrefix": "시트"

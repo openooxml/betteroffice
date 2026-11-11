@@ -114,6 +114,14 @@
     "zoomPercent": "Zoom dalam persen",
     "apply": "Terapkan",
     "cancel": "Batal",
+    "freezeColumn": "Bekukan kolom {column}",
+    "freezeColumns": "Bekukan kolom {first}–{last}",
+    "freezeRow": "Bekukan baris {row}",
+    "freezeRows": "Bekukan baris {first}–{last}",
+    "unfreezePanes": "Batalkan pembekuan panel",
+    "unhideColumns": "Perlihatkan kolom",
+    "unhideRows": "Perlihatkan baris",
+    "selectAll": "Pilih semua",
     "reasons": {
       "editorUnavailable": "Editor belum siap.",
       "documentLoading": "Buku kerja masih dibuka.",
@@ -158,7 +166,9 @@
       "lastSheet": "Buku kerja memerlukan setidaknya satu lembar.",
       "sheetAtEdge": "Lembar tidak dapat dipindahkan lebih jauh.",
       "sheetNameInvalid": "Nama lembar harus 1 hingga 31 karakter, unik, dan tidak boleh berisi : \\ / ? * [ ].",
-      "clipboardDenied": "Browser tidak mengizinkan akses ke papan klip."
+      "clipboardDenied": "Browser tidak mengizinkan akses ke papan klip.",
+      "clipboardInsecure": "Papan klip memerlukan halaman aman (HTTPS).",
+      "clipboardWriteUnavailable": "Browser ini tidak mengizinkan penyalinan ke papan klip."
     },
     "cut": "Potong",
     "copy": "Salin",
@@ -194,6 +204,8 @@
     "sheetTabsLabel": "Lembar",
     "clearExceedsLimit": "Penghapusan melebihi batas sel",
     "cellMenuLabel": "Menu sel",
+    "columnHeaderMenuLabel": "Menu kepala kolom",
+    "rowHeaderMenuLabel": "Menu kepala baris",
     "sheetTabMenuLabel": "Menu tab lembar",
     "renameSheetLabel": "Ganti nama lembar",
     "sheetNamePrefix": "Lembar"

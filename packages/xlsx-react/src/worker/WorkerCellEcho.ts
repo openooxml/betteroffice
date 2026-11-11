@@ -321,7 +321,9 @@ export class WorkerCellEcho {
       context.beginPath();
       for (const rect of damaged) context.rect(rect.x, rect.y, rect.w, rect.h);
       context.clip();
-      paintDisplayList(context, displayList, scale);
+      // the echo repaints a region of the authoritative frame, so gridlines must
+      // snap to the same CSS pixel columns: pass the frame's zoom, not 1.
+      paintDisplayList(context, displayList, scale, { x: 0, y: 0 }, this.frame.request.zoom);
     } finally { context.restore(); }
   }
 }

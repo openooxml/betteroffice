@@ -320,13 +320,47 @@ fn all_ops() -> Vec<Op> {
                 columns: vec!["Year".into()],
             }],
         },
+        Op::MoveCols {
+            sheet,
+            col: 2,
+            count: 3,
+            before: 6,
+        },
+        Op::MoveRows {
+            sheet,
+            row: 2,
+            count: 3,
+            before: 6,
+        },
+        Op::SetColsVisibility {
+            sheet,
+            col: 4,
+            count: 16_380,
+            hidden: false,
+        },
+        Op::SetRowsVisibility {
+            sheet,
+            row: 7,
+            count: 5,
+            hidden: true,
+        },
+        Op::RestoreArrayFormula {
+            sheet,
+            anchor: at,
+            spill: range,
+        },
+        Op::ClipArrayFormula {
+            sheet,
+            anchor: at,
+            spill: range,
+        },
     ]
 }
 
 #[test]
 fn every_op_has_a_fixed_tag_and_round_trips() {
     let ops = all_ops();
-    assert_eq!(ops.len(), 38);
+    assert_eq!(ops.len(), 44);
     for (tag, op) in ops.into_iter().enumerate() {
         assert_eq!(encoded(&op)[0], tag as u8);
         round_trip(op);

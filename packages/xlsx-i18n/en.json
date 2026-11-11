@@ -114,6 +114,14 @@
     "zoomPercent": "Zoom in percent",
     "apply": "Apply",
     "cancel": "Cancel",
+    "freezeColumn": "Freeze column {column}",
+    "freezeColumns": "Freeze columns {first}–{last}",
+    "freezeRow": "Freeze row {row}",
+    "freezeRows": "Freeze rows {first}–{last}",
+    "unfreezePanes": "Unfreeze panes",
+    "unhideColumns": "Unhide columns",
+    "unhideRows": "Unhide rows",
+    "selectAll": "Select all",
     "reasons": {
       "editorUnavailable": "The editor is not ready.",
       "documentLoading": "The workbook is still opening.",
@@ -158,7 +166,9 @@
       "lastSheet": "A workbook needs at least one sheet.",
       "sheetAtEdge": "The sheet cannot move any further.",
       "sheetNameInvalid": "Sheet names need 1 to 31 characters, must be unique and cannot contain : \\ / ? * [ ].",
-      "clipboardDenied": "The browser did not allow access to the clipboard."
+      "clipboardDenied": "The browser did not allow access to the clipboard.",
+      "clipboardInsecure": "The clipboard needs a secure (HTTPS) page.",
+      "clipboardWriteUnavailable": "This browser does not allow copying to the clipboard."
     },
     "cut": "Cut",
     "copy": "Copy",
@@ -194,6 +204,8 @@
     "sheetTabsLabel": "Sheets",
     "clearExceedsLimit": "Clear exceeds the cell limit",
     "cellMenuLabel": "Cell menu",
+    "columnHeaderMenuLabel": "Column header menu",
+    "rowHeaderMenuLabel": "Row header menu",
     "sheetTabMenuLabel": "Sheet tab menu",
     "renameSheetLabel": "Rename sheet",
     "sheetNamePrefix": "Sheet"

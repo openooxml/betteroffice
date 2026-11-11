@@ -114,6 +114,14 @@
     "zoomPercent": "גודל תצוגה באחוזים",
     "apply": "החל",
     "cancel": "ביטול",
+    "freezeColumn": "הקפאת העמודה {column}",
+    "freezeColumns": "הקפאת העמודות {first}–{last}",
+    "freezeRow": "הקפאת השורה {row}",
+    "freezeRows": "הקפאת השורות {first}–{last}",
+    "unfreezePanes": "ביטול הקפאת החלונות",
+    "unhideColumns": "הצגת העמודות",
+    "unhideRows": "הצגת השורות",
+    "selectAll": "בחר הכל",
     "reasons": {
       "editorUnavailable": "העורך אינו מוכן.",
       "documentLoading": "חוברת העבודה עדיין נפתחת.",
@@ -158,7 +166,9 @@
       "lastSheet": "חוברת עבודה צריכה לפחות גיליון אחד.",
       "sheetAtEdge": "לא ניתן להזיז את הגיליון יותר.",
       "sheetNameInvalid": "שם גיליון צריך להכיל 1 עד 31 תווים, להיות ייחודי ולא להכיל : \\ / ? * [ ].",
-      "clipboardDenied": "הדפדפן לא התיר גישה ללוח."
+      "clipboardDenied": "הדפדפן לא התיר גישה ללוח.",
+      "clipboardInsecure": "הלוח דורש דף מאובטח (HTTPS).",
+      "clipboardWriteUnavailable": "הדפדפן הזה לא מתיר העתקה ללוח."
     },
     "cut": "גזור",
     "copy": "העתק",
@@ -194,6 +204,8 @@
     "sheetTabsLabel": "גיליונות",
     "clearExceedsLimit": "הניקוי חורג ממגבלת התאים",
     "cellMenuLabel": "תפריט תא",
+    "columnHeaderMenuLabel": "תפריט כותרת עמודה",
+    "rowHeaderMenuLabel": "תפריט כותרת שורה",
     "sheetTabMenuLabel": "תפריט לשונית הגיליון",
     "renameSheetLabel": "שנה את שם הגיליון",
     "sheetNamePrefix": "גיליון"

@@ -114,6 +114,14 @@
     "zoomPercent": "Масштаб в процентах",
     "apply": "Применить",
     "cancel": "Отмена",
+    "freezeColumn": "Закрепить столбец {column}",
+    "freezeColumns": "Закрепить столбцы {first}–{last}",
+    "freezeRow": "Закрепить строку {row}",
+    "freezeRows": "Закрепить строки {first}–{last}",
+    "unfreezePanes": "Снять закрепление областей",
+    "unhideColumns": "Показать столбцы",
+    "unhideRows": "Показать строки",
+    "selectAll": "Выделить все",
     "reasons": {
       "editorUnavailable": "Редактор ещё не готов.",
       "documentLoading": "Книга ещё открывается.",
@@ -158,7 +166,9 @@
       "lastSheet": "В книге должен быть хотя бы один лист.",
       "sheetAtEdge": "Лист нельзя переместить дальше.",
       "sheetNameInvalid": "Имя листа должно содержать от 1 до 31 символа, быть уникальным и не содержать : \\ / ? * [ ].",
-      "clipboardDenied": "Браузер не разрешил доступ к буферу обмена."
+      "clipboardDenied": "Браузер не разрешил доступ к буферу обмена.",
+      "clipboardInsecure": "Для буфера обмена нужна защищённая страница (HTTPS).",
+      "clipboardWriteUnavailable": "Этот браузер не разрешает копирование в буфер обмена."
     },
     "cut": "Вырезать",
     "copy": "Копировать",
@@ -194,6 +204,8 @@
     "sheetTabsLabel": "Листы",
     "clearExceedsLimit": "Очистка превышает лимит ячеек.",
     "cellMenuLabel": "Меню ячейки",
+    "columnHeaderMenuLabel": "Меню заголовка столбца",
+    "rowHeaderMenuLabel": "Меню заголовка строки",
     "sheetTabMenuLabel": "Меню ярлыка листа",
     "renameSheetLabel": "Переименовать лист",
     "sheetNamePrefix": "Лист"

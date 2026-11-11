@@ -399,6 +399,7 @@ export interface WorkbookStructuralRefusalResult {
 export function structuralRefusalCause(message: string): WorkbookStructuralRefusalCause {
   if (/^(?:chart |anchor \d+ of )/.test(message) || message === 'range move cannot safely preserve charts') return 'chart';
   if (message === 'range move cannot safely preserve Excel tables') return 'table';
+  if (/^cannot move sheet \d+ tracks: table .+ covers the moved tracks$/.test(message)) return 'table';
   const part = /^(.+?) references cells this (?:edit would move|move would relocate), and it cannot be rewritten$/
     .exec(message)?.[1].toLowerCase().replace(/^\//, '');
   if (!part) return 'other';
@@ -448,7 +449,8 @@ export function classifyRefusal(error: unknown, method?: WorkbookReplayMethod): 
     /^anchor \d+ of .+ is held by two sheets that disagree on where it sits$/.test(error.message) ||
     /^chart .+ cannot change how it follows a grid edit$/.test(error.message) ||
     /^chart .+ cannot be resized: a one-cell extent is not written back$/.test(error.message) ||
-    /^chart .+ cannot change its anchor kind$/.test(error.message)
+    /^chart .+ cannot change its anchor kind$/.test(error.message) ||
+    /^cannot move sheet \d+ tracks: .+$/.test(error.message)
   )) return structuralRefusal(error.message);
   if (method === 'moveRange' && (
     /^range move cannot safely preserve .+$/.test(error.message) ||
