@@ -49,7 +49,13 @@ fn run() -> Result<()> {
         &engine.layout_document_with_regions_retained_json(&request.to_string())?,
     )?;
     let notes_converged = layout["notesConverged"].as_bool().unwrap_or(true);
-    engine.build_display_list_frame(&json!({"fontChains": fonts.ids}).to_string(), 0)?;
+    let mut extras = json!({"fontChains": fonts.ids});
+    if let Some(bands) = engine.retained_headers_footers_json()? {
+        let mut bands: Value = serde_json::from_str(&bands)?;
+        whole_numbers_as_integers(&mut bands);
+        extras["headersFooters"] = bands;
+    }
+    engine.build_display_list_frame(&extras.to_string(), 0)?;
     let images = ImageMap::new();
     let resources = RenderResources::new(&fonts.store, &fonts.chains, &images);
     let (rendered, pages, width, height) = engine
