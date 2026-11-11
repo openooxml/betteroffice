@@ -6,7 +6,7 @@ export function trackFocus(
   const window = document.defaultView!;
   let focused: boolean | null = null;
   let active = true;
-  let windowFocused = true;
+  let windowFocused = typeof document.hasFocus === 'function' ? document.hasFocus() : true;
   let queued = false;
   let observed: readonly Element[] = [];
   const observer = new MutationObserver(() => check());
@@ -19,6 +19,7 @@ export function trackFocus(
   };
   const inside = (target: EventTarget | null) =>
     target instanceof Node && target.isConnected &&
+    !(target instanceof Element ? target : target.parentElement)?.closest('[data-plugin-overlays]') &&
     roots().some((root) => root.isConnected && root.contains(target));
   const change = (next: boolean) => {
     if (!active) return;
