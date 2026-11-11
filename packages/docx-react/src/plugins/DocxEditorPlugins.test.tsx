@@ -546,18 +546,19 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
     const focus: boolean[] = [];
     let loads = 0;
     const plugin = defineDocxPlugin({ id: 'focus-surface', createState: () => null,
-      onEvent(_context, event) {
-        if (event.type === 'load') loads += 1;
+      onEvent(context, event) {
+        if (event.type === 'load' && ++loads === 1) focus.push(context.snapshot.focused);
         if (event.type === 'focus-change') focus.push(event.focused);
       } });
     return { focus, loaded: () => loads > 0, plugin };
   };
 
   if (experimentalWorkerOpen === undefined) test('turning read-only off in a viewer session replaces the focused input and blurs once', async () => {
-    const { focus, plugin } = focusRecorder();
+    const { focus, loaded, plugin } = focusRecorder();
     const { ref, view, rerender } = await mount({ plugins: [plugin], readOnly: true });
     const surface = view.container.querySelector('.paged-editor')!;
     const input = document.getElementById(surface.getAttribute('data-docx-input')!)!;
+    await until(loaded);
     await act(async () => { ref.current!.focus(); });
     expect(document.activeElement).toBe(input);
     await until(() => focus.includes(true));
