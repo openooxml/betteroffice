@@ -338,7 +338,7 @@ jobs:
 
       - name: Test the native DOCX heap counters
         if: steps.ws.outputs.present == 'true'
-        run: cargo test --locked --manifest-path bindings/Cargo.toml -p betteroffice-docx-native --lib heap::
+        run: cargo test --locked --manifest-path bindings/Cargo.toml -p betteroffice-docx-native --lib heap
 
       # Running a fuzz target needs nightly; checking that the package still builds does not.
       - name: Lint the standalone fuzz package
