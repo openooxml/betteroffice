@@ -85,15 +85,51 @@ export interface DocxEditSuggestion {
   date: string;
 }
 
-/** One new paragraph; without `styleId` it takes the anchor paragraph's style. */
-export interface DocxParagraphInput {
-  text: string;
-  styleId?: string;
+/**
+ * Character formatting for one inserted run, written over the formatting plain text gets at the
+ * same place; an absent key keeps that formatting. `false`, underline `'none'` and `'noStrike'`
+ * turn the mark off, also where a paragraph or character style turns it on. Removing a
+ * superscript, subscript or highlight while inserting is not available yet. An unknown key or
+ * unsupported value refuses the step.
+ */
+export interface DocxTextMarks {
+  bold?: boolean;
+  italic?: boolean;
+  /** `true` is `single`; otherwise a `w:u` value such as `double` or `wave`. */
+  underline?: boolean | string;
+  /** `true` is `sngStrike`. */
+  strike?: boolean | 'sngStrike' | 'dblStrike' | 'noStrike';
+  verticalAlign?: 'superscript' | 'subscript';
+  /** Six hex digits (`RRGGBB`) or a theme colour such as `accent1`. */
+  color?: string | { themeColor: string };
+  /** One of Word's 16 highlight colour names, such as `yellow` or `darkBlue`. */
+  highlight?: string;
+  /** 1 to 1638, in half-point steps. */
+  fontSizePt?: number;
+  fontFamily?: string;
 }
 
+/** A mark name of {@link DocxTextMarks}. */
+export type DocxTextMarkName = keyof DocxTextMarks;
+
+/** One run of inserted text. */
+export interface DocxTextRun {
+  /** Non-empty; no paragraph or line breaks. */
+  text: string;
+  marks?: DocxTextMarks;
+}
+
+/** Plain text, or a non-empty list of formatted runs: exactly one of the two. */
+export type DocxTextContent =
+  | { text: string; runs?: never }
+  | { runs: readonly DocxTextRun[]; text?: never };
+
+/** One new paragraph; without `styleId` it takes the anchor paragraph's style. */
+export type DocxParagraphInput = DocxTextContent & { styleId?: string };
+
 export type DocxEditOperation =
-  | { op: 'insertText'; target: DocxTextTarget; at: 'start' | 'end'; text: string }
-  | { op: 'replaceText'; target: DocxTextTarget; text: string }
+  | ({ op: 'insertText'; target: DocxTextTarget; at: 'start' | 'end' } & DocxTextContent)
+  | ({ op: 'replaceText'; target: DocxTextTarget } & DocxTextContent)
   | { op: 'deleteText'; target: DocxTextTarget }
   | {
       op: 'insertParagraphs';
@@ -105,6 +141,7 @@ export type DocxEditOperation =
   | { op: 'insertSectionBreakAfter'; target: DocxParagraphTarget; kind: SectionStartKind }
   | { op: 'setSectionProperties'; section: string; properties: SectionPropertyPatch }
   | { op: 'setParagraphStyle'; target: DocxParagraphTarget; styleId: string }
+  | DocxFormatTextOperation
   | Omit<DocxSetContentControlTextStep, 'expect'>;
 
 /**
@@ -119,6 +156,21 @@ export interface DocxSetContentControlTextStep {
   target: DocxContentControlSelector;
   text: string;
   expect?: DocxEditGuard;
+}
+
+/**
+ * Formats a non-empty range of one paragraph: `clear` first returns the named marks (or every
+ * character formatting mark for `'all'`) to what the paragraph style and the run's character
+ * style give, `'all'` also removing the character style; then `set` writes its marks. A paragraph
+ * whose rewrite would lose content refuses the step, or with `onUnsupported: 'skip'` stays as it
+ * is and is listed in the receipt's `skipped`.
+ */
+export interface DocxFormatTextOperation {
+  op: 'formatText';
+  target: DocxTextTarget;
+  set?: DocxTextMarks;
+  clear?: readonly DocxTextMarkName[] | 'all';
+  onUnsupported?: 'refuse' | 'skip';
 }
 
 export type DocxEditStep =
@@ -199,6 +251,14 @@ export interface DocxEditReceipt {
   removedParagraphs: DocxParagraphTarget[];
   revisionIds: string[];
   control?: DocxResolvedControl;
+  /** Paragraphs a `formatText` step with `onUnsupported: 'skip'` left as they are. */
+  skipped?: DocxSkippedParagraph[];
+}
+
+/** A paragraph a step left as it is, and why. */
+export interface DocxSkippedParagraph {
+  paraId: string;
+  reason: string;
 }
 
 /** What one step would do; it cannot be committed later. */

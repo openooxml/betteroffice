@@ -493,6 +493,44 @@ mod tests {
     }
 
     #[test]
+    fn typography_inherits_through_character_and_paragraph_styles() {
+        let definitions = parse(
+            r#"<w:styles><w:docDefaults><w:rPrDefault><w:rPr><w14:ligatures w14:val="standard"/><w14:cntxtAlts/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:rPr><w14:ligatures w14:val="contextual"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Child"><w:basedOn w:val="Normal"/></w:style><w:style w:type="character" w:styleId="Base"><w:rPr><w14:ligatures w14:val="all"/><w14:cntxtAlts w14:val="off"/></w:rPr></w:style><w:style w:type="character" w:styleId="Emphasis"><w:basedOn w:val="Base"/><w:rPr><w14:ligatures w14:val="invalid"/></w:rPr></w:style></w:styles>"#,
+        );
+        let defaults = definitions
+            .doc_defaults
+            .as_ref()
+            .unwrap()
+            .r_pr
+            .as_ref()
+            .unwrap();
+        assert_eq!(defaults.ligatures.as_deref(), Some("standard"));
+        assert_eq!(defaults.contextual_alternates, Some(true));
+        let child = definitions
+            .styles
+            .iter()
+            .find(|style| style.style_id == "Child")
+            .unwrap();
+        assert_eq!(
+            child.r_pr.as_ref().unwrap().ligatures.as_deref(),
+            Some("contextual")
+        );
+        let character = definitions
+            .styles
+            .iter()
+            .find(|style| style.style_id == "Emphasis")
+            .unwrap();
+        assert_eq!(
+            character.r_pr.as_ref().unwrap().ligatures.as_deref(),
+            Some("all")
+        );
+        assert_eq!(
+            character.r_pr.as_ref().unwrap().contextual_alternates,
+            Some(false)
+        );
+    }
+
+    #[test]
     fn cyclic_based_on_chains_terminate_and_merge_both_styles() {
         let definitions = parse(
             r#"<w:styles><w:style w:styleId="A"><w:basedOn w:val="B"/><w:pPr><w:jc w:val="left"/></w:pPr></w:style><w:style w:styleId="B"><w:basedOn w:val="A"/><w:pPr><w:spacing w:before="120"/></w:pPr></w:style></w:styles>"#,

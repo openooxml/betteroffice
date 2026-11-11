@@ -1,3 +1,4 @@
+import { usePluginGestures } from '../../../shared/plugin-host/usePluginGestures';
 import type { ResolvedFontProps } from './bundledFonts';
 import { ProposalSlideStrip } from './components/ProposalSlideStrip';
 import { installBrowserFonts, useFontWarning, useStableFonts as useStableFontFaces } from './fontFaces';
@@ -475,6 +476,7 @@ export function PptxEditorContent({
   initialZoomRef.current = initialZoom;
   const onErrorRef = useRef(onError);
   const rootRef = useRef<HTMLDivElement>(null);
+  usePluginGestures(rootRef);
   const stageRef = useRef<HTMLDivElement>(null);
   const canvasHostRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -807,7 +809,7 @@ export function PptxEditorContent({
         !Number.isInteger(target.start) ||
         !Number.isInteger(target.end) ||
         target.start < 0 ||
-        target.end < target.start
+        target.end < 0
       ) {
         return false;
       }
@@ -816,7 +818,7 @@ export function PptxEditorContent({
       if (!shape?.textStories.some((story) => story.id === target.storyId)) return false;
       try {
         const story = handle.story(target.storyId);
-        if (target.end > story.length) return false;
+        if (target.start > story.length || target.end > story.length) return false;
         if (!showSlide(target.slide - 1, false)) return false;
         setSelection({
           shapeId: target.shapeId,

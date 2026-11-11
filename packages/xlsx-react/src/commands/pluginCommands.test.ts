@@ -25,13 +25,15 @@ function setup(initial = {}) {
 
 function scope(granted: readonly string[], pluginId = 'acme') {
   const listeners = new Set<() => void>();
-  const state = { granted: new Set(granted), ended: null as XlsxCommandFailureCode | null };
+  const state = { granted: new Set(granted), gesture: false, write: true, ended: null as XlsxCommandFailureCode | null };
   const value: XlsxCommandScope = {
+    gesture: () => state.gesture,
     deny(id) {
       if (state.ended) return state.ended;
       if (isPluginCommandId(id)) {
         return id.startsWith(`plugin:${pluginId}/`) ? null : 'permission-denied';
       }
+      if (id === 'bold' && !state.write) return 'permission-denied';
       return state.granted.has(id) ? null : 'permission-denied';
     },
     subscribe(listener) {
@@ -69,7 +71,7 @@ function contributed(
 }
 
 describe('scoped command stores', () => {
-  test('refuse ungranted commands and mutating built-ins without a policy path', async () => {
+  test('refuse ungranted commands and built-in mutations outside a gesture', async () => {
     const { store, controller, harness } = setup();
     const plugin = scope(['zoom', 'bold']);
     const scoped = controller.scoped(plugin.value);
@@ -77,7 +79,7 @@ describe('scoped command stores', () => {
     expect(xlsxCommandController(scoped)?.store).toBe(scoped);
     expect(controller.ownsStore(scoped)).toBe(true);
     expect(scoped.getState('italic').disabledReason?.code).toBe('permission-denied');
-    expect(scoped.getState('bold').disabledReason?.code).toBe('unsupported-policy');
+    expect(scoped.getState('bold').enabled).toBe(true);
     expect(scoped.getState('bold')).toBe(scoped.getState('bold'));
     expect(store.getState('bold').enabled).toBe(true);
     expect(await scoped.execute('italic', null)).toMatchObject({
@@ -94,6 +96,47 @@ describe('scoped command stores', () => {
     harness.update({ readOnly: true });
     controller.refresh();
     expect(scoped.getState('bold').disabledReason?.code).toBe('read-only');
+  });
+
+  test('admit built-in mutations from a gesture with a write grant', async () => {
+    const { controller, harness } = setup();
+    const plugin = scope(['bold']);
+    const scoped = controller.scoped(plugin.value);
+    expect(scoped.getState('bold').enabled).toBe(true);
+    plugin.state.gesture = true;
+    const pending = scoped.execute('bold', null);
+    plugin.state.gesture = false;
+    expect(await pending).toEqual({ ok: true, status: 'executed' });
+    expect(harness.calls.map((call) => call.id)).toEqual(['bold']);
+    expect(await scoped.execute('bold', null)).toMatchObject({
+      ok: false, failure: { code: 'unsupported-policy' },
+    });
+    plugin.state.gesture = true;
+    plugin.state.write = false;
+    expect(await scoped.execute('bold', null)).toMatchObject({
+      ok: false, failure: { code: 'permission-denied' },
+    });
+    expect(harness.calls).toHaveLength(1);
+  });
+
+  test('retain gesture admission across the input queue and recheck the write grant', async () => {
+    const { controller, harness } = setup();
+    const plugin = scope(['bold']);
+    const scoped = controller.scoped(plugin.value);
+    let admit!: () => void;
+    harness.state.admission = () => new Promise<void>((resolve) => (admit = resolve));
+    plugin.state.gesture = true;
+    const pending = scoped.execute('bold', null);
+    plugin.state.gesture = false;
+    admit();
+    expect(await pending).toEqual({ ok: true, status: 'executed' });
+    plugin.state.gesture = true;
+    const revoked = scoped.execute('bold', null);
+    plugin.state.write = false;
+    plugin.state.gesture = false;
+    admit();
+    expect(await revoked).toMatchObject({ ok: false, failure: { code: 'permission-denied' } });
+    expect(harness.calls).toHaveLength(1);
   });
 
   test('check the grant again once the command is admitted', async () => {

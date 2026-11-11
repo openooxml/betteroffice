@@ -348,6 +348,8 @@ pub struct RunIn {
     /// Minimum font size in points at which pair kerning is enabled.
     #[serde(default)]
     pub kerning_min_pt: Option<f32>,
+    #[serde(default)]
+    pub word_features: Vec<crate::shape::ShapeFeature>,
     /// Shapes at 0.75 of the run's size, raised by 0.4em.
     #[serde(default)]
     pub superscript: bool,

@@ -1,3 +1,4 @@
+import { pluginActivationId } from '../../../../shared/plugin-host/gesture';
 import type { PresentationHandle } from '@betteroffice/pptx';
 import type { TranslationKey } from '@betteroffice/pptx-i18n';
 import {
@@ -498,6 +499,7 @@ export function createPptxPluginHost(access: PptxPluginHostAccess | PptxPluginVi
               mutatesDocument: command.mutatesDocument,
               shortcuts: Object.freeze(shortcuts),
             }),
+            activationId: pluginActivationId(entry.activation),
             state: () => commandState(entry.pluginId, command),
             execute: () => executeCommand(entry.pluginId, command),
           });

@@ -47,6 +47,22 @@ const editorEngines: Array<[string, false | undefined]> = [
   ['in-thread', false],
   ['default worker', undefined],
 ];
+const TEST_BUDGET_MS = 60_000;
+let running: Promise<unknown> | undefined;
+
+function budgeted(name: string, body: () => Promise<void>) {
+  test(name, () => (running = body()), TEST_BUDGET_MS);
+}
+
+async function previousTestSettled() {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    running?.catch(() => {}),
+    new Promise((resolve) => { timer = setTimeout(resolve, TEST_BUDGET_MS); }),
+  ]);
+  clearTimeout(timer);
+  running = undefined;
+}
 
 beforeAll(async () => {
   if (!window.document.fonts) {
@@ -67,6 +83,7 @@ beforeAll(async () => {
   console.warn = () => {};
 }, 30_000);
 afterEach(async () => {
+  await previousTestSettled();
   cleanup();
   takePreloadedResidentEngineWorker()?.destroy();
   await act(async () => {});
@@ -75,7 +92,7 @@ afterEach(async () => {
   for (const worker of workers.splice(0)) worker.terminate();
   resetEngineChoiceForTests();
   globalThis.Worker = originalWorker;
-});
+}, TEST_BUDGET_MS * 2);
 afterAll(async () => {
   console.error = quiet.error;
   console.warn = quiet.warn;
@@ -197,7 +214,7 @@ describe.each(editorEngines)('DocxEditor toolbar prop (%s engine)', (_engine, ex
     });
   };
 
-  test('replaces the default chrome and drives the editor through its commands', async () => {
+  budgeted('replaces the default chrome and drives the editor through its commands', async () => {
     const { ref, view } = await mount({ toolbar: COMPACT });
     const body = within(view.container);
     expect(body.queryByTestId('title-bar')).toBeNull();
@@ -217,7 +234,7 @@ describe.each(editorEngines)('DocxEditor toolbar prop (%s engine)', (_engine, ex
     expect(bold.getAttribute('aria-pressed')).toBe('false');
   });
 
-  test('the compact host toolbar keeps its order and each control acts on the editor', async () => {
+  budgeted('the compact host toolbar keeps its order and each control acts on the editor', async () => {
     let shares = 0;
     let live: CollaborationReplica | null = null;
     const { ref, view } = await mount({
@@ -301,7 +318,7 @@ describe.each(editorEngines)('DocxEditor toolbar prop (%s engine)', (_engine, ex
     expect(next.getAttribute('aria-disabled')).toBe('true');
   });
 
-  test('a pointer choice returns focus to the document; a keyboard choice does not', async () => {
+  budgeted('a pointer choice returns focus to the document; a keyboard choice does not', async () => {
     const { ref, view } = await mount({ toolbar: COMPACT });
     const style = within(view.container).getByLabelText('Select paragraph style');
     const input = within(document.body).getByLabelText('Document input');
@@ -331,7 +348,7 @@ describe.each(editorEngines)('DocxEditor toolbar prop (%s engine)', (_engine, ex
     expect(document.activeElement === input).toBe(true);
   });
 
-  test('keeps supplied chrome in read-only mode and applies the restriction', async () => {
+  budgeted('keeps supplied chrome in read-only mode and applies the restriction', async () => {
     const { view } = await mount({ toolbar: COMPACT, readOnly: true });
     const bold = within(view.container).getByRole('button', { name: 'Bold' });
     expect(bold.getAttribute('aria-disabled')).toBe('true');
@@ -339,7 +356,7 @@ describe.each(editorEngines)('DocxEditor toolbar prop (%s engine)', (_engine, ex
     expect(reason?.textContent).toBe('This document is read-only.');
   });
 
-  test('null hides the chrome, as does showToolbar={false}', async () => {
+  budgeted('null hides the chrome, as does showToolbar={false}', async () => {
     const hidden = await mount({ toolbar: null });
     expect(within(hidden.view.container).queryByRole('toolbar')).toBeNull();
     expect(hidden.ref.current?.commands.getState('bold').enabled).toBeDefined();
@@ -348,7 +365,7 @@ describe.each(editorEngines)('DocxEditor toolbar prop (%s engine)', (_engine, ex
     expect(within(off.view.container).queryByRole('toolbar')).toBeNull();
   });
 
-  test('omitting the prop keeps the default chrome', async () => {
+  budgeted('omitting the prop keeps the default chrome', async () => {
     const { view } = await mount();
     const body = within(view.container);
     expect(body.getByTestId('title-bar')).toBeDefined();
@@ -356,7 +373,7 @@ describe.each(editorEngines)('DocxEditor toolbar prop (%s engine)', (_engine, ex
     expect(body.getByRole('button', { name: 'Undo' })).toBeDefined();
   });
 
-  test('subscribed controls follow a remote update applied to the live session', async () => {
+  budgeted('subscribed controls follow a remote update applied to the live session', async () => {
     function ReviewNext() {
       const state = useDocxCommandState('reviewNext');
       return (
@@ -430,7 +447,7 @@ describe.each(editorEngines)('DocxEditor toolbar prop (%s engine)', (_engine, ex
     }
   });
 
-  test('an engine refusal fails the command and legacy calls still answer false', async () => {
+  budgeted('an engine refusal fails the command and legacy calls still answer false', async () => {
     const { ref } = await mount({ toolbar: COMPACT });
     await selectFirstWord(ref);
     const editor = ref.current!.getEditorRef()!;
@@ -465,7 +482,7 @@ describe.each(editorEngines)('DocxEditor toolbar prop (%s engine)', (_engine, ex
 const mount = (props: Partial<DocxEditorBaseProps> = {}) => mountEditor(props, false);
 
 describe('DocxEditor toolbar prop (in-thread engine)', () => {
-  test('a command right after scrollToParaId acts on the paragraph it moved to', async () => {
+  budgeted('a command right after scrollToParaId acts on the paragraph it moved to', async () => {
     const { ref } = await mount({ toolbar: COMPACT });
     const editor = ref.current!.getEditorRef()!;
     const session = editor.getYrsSession()!;
@@ -524,7 +541,7 @@ describe('DocxEditor toolbar prop (worker engine)', () => {
     return editor;
   }
 
-  test('a command right after scrollToParaId acts on the paragraph it moved to', async () => {
+  budgeted('a command right after scrollToParaId acts on the paragraph it moved to', async () => {
     const { ref } = await mountWorker({ toolbar: COMPACT });
     const editor = ref.current!.getEditorRef()!;
     const session = editor.getYrsSession()!;

@@ -629,6 +629,7 @@ fn replace_in(
         source: EditSource::Host,
         history: EditHistory::Separate,
         steps: vec![EditStep::new(EditOperation::ReplaceText {
+            runs: None,
             target: TextTarget::Paragraph(ParagraphTarget {
                 story: story.to_owned(),
                 para_id: para_id.to_owned(),
@@ -2320,6 +2321,7 @@ fn fragments_name_paragraphs_by_the_session_keys_batches_target() {
             (story, para_id, para_id)
         );
         steps.push(EditStep::new(EditOperation::ReplaceText {
+            runs: None,
             target: TextTarget::Range(range.clone()),
             text: format!("<{para_id}>"),
         }));

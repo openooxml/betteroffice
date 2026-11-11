@@ -59,6 +59,18 @@ fn default_echo_facts_do_not_repeat_default_fields() {
 }
 
 #[test]
+fn echo_facts_keep_the_kerning_gate_with_optional_features() {
+    for (threshold, expected) in [(None, false), (Some(8.0), true), (Some(14.0), false)] {
+        let mut input: serde_json::Value =
+            serde_json::from_str(&build_input("AV", 20.0, None, false, Some(&[0]))).unwrap();
+        input["measured"][0]["block"]["runs"][0]["kerningMinPt"] = serde_json::json!(threshold);
+        let facts = echo_facts_of(&input.to_string());
+        assert!(!facts.is_empty());
+        assert!(facts.iter().all(|facts| facts.kern == expected));
+    }
+}
+
+#[test]
 fn echo_facts_keep_resolved_indents_and_character_spacing() {
     let store = store_with_liberation();
     let mut input: serde_json::Value =
@@ -349,6 +361,64 @@ fn shaped_width(store: &FontStore, font: FontId, text: &str) -> f64 {
         .iter()
         .map(|glyph| f64::from(glyph.x_advance))
         .sum()
+}
+
+#[test]
+fn browser_text_primitives_carry_word_features() {
+    let mut store = FontStore::new();
+    let font = store
+        .register(include_bytes!("../../../packages/fonts/assets/Carlito-Regular.ttf").to_vec())
+        .unwrap();
+    let run = browser_text_run(
+        &store,
+        "Calibri",
+        font,
+        "fi ti",
+        serde_json::json!({"textShadow": true}),
+    );
+    assert_eq!(run.attrs.font_features, None);
+    let mut expected = kern_features(false);
+    expected.extend(ooxml_text::ligature_features(None, None));
+    assert_eq!(
+        docx_layout::display_list::docx_paint_features(None),
+        expected,
+    );
+    assert!(
+        serde_json::to_value(&run)
+            .unwrap()
+            .get("fontFeatures")
+            .is_none()
+    );
+    for (mut formatting, expected) in [
+        (
+            serde_json::json!({"ligatures": "standardContextual"}),
+            vec!["liga", "clig"],
+        ),
+        (serde_json::json!({"kerningMinPt": 8}), vec!["kern"]),
+        (
+            serde_json::json!({"contextualAlternates": true}),
+            vec!["calt"],
+        ),
+        (
+            serde_json::json!({"kerningMinPt": 8, "ligatures": "all", "contextualAlternates": true}),
+            vec!["kern", "liga", "clig", "hlig", "dlig", "calt"],
+        ),
+    ] {
+        formatting["textShadow"] = serde_json::json!(true);
+        let asking = browser_text_run(&store, "Calibri", font, "fi ti", formatting);
+        let encoded = serde_json::to_value(&asking).unwrap();
+        assert_eq!(encoded["fontFeatures"], serde_json::json!(expected));
+        let decoded: TextRunPrimitive = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.attrs.font_features, asking.attrs.font_features);
+    }
+    let mut decoded = run;
+    decoded.attrs.font_features = Some(Box::new(Vec::new()));
+    assert!(
+        serde_json::to_value(decoded)
+            .unwrap()
+            .get("fontFeatures")
+            .is_none()
+    );
 }
 
 #[test]
