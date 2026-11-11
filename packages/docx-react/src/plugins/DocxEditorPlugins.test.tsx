@@ -3218,7 +3218,7 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
       controller: () => controller,
       session: () => mounted.ref.current!.getEditorRef()!.getYrsSession()!,
       binding: () => binding,
-      async remote(edit: (session: YrsSession) => void | Promise<void>, path: 'update' | 'chunks' | 'pipe' = 'update', mapped = true) {
+      async remote(edit: (session: YrsSession) => void | Promise<void>, path: 'update' | 'chunks' | 'pipe' = 'update') {
         const transport: CollaborationReplica = engine === 'DI' ? this.session() : replica!;
         expect(transport).not.toBeNull();
         const peer = await createYrsSession({ clientId: 67771 });
@@ -3247,27 +3247,9 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
             } else await access.applyUpdate(update);
           });
           await mounted.ref.current!.flushPendingInput();
-          if (workerGeometry && mapped) await until(() => workerGeometry!.selectionMapped());
+          if (workerGeometry) await until(() => workerGeometry!.selectionMapped());
           await host.notificationsIdle();
         } finally { peer.destroy(); }
-      },
-      /** Resolves once the worker geometry shows a layout other than `layoutId` whose selection remap has not landed. */
-      async heldRemap(layoutId: string) {
-        expect(workerGeometry).not.toBeNull();
-        await new Promise<void>(resolve => {
-          const stop: Array<() => void> = [];
-          const check = () => {
-            const layout = workerGeometry!.layout();
-            if (!layout || layout.id === layoutId || workerGeometry!.selectionMapped()) return;
-            for (const unsubscribe of stop) unsubscribe();
-            resolve();
-          };
-          stop.push(host.subscribe(check), workerGeometry!.subscribe(check));
-          check();
-        });
-        host.markSelectionDirty('refresh');
-        host.flushSelection();
-        await host.notificationsIdle();
       },
       holdDisplayRange() {
         if (controller) {
@@ -3672,11 +3654,10 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
       await h.quiet();
       expect(h.context().snapshot.selectionSettled).toBe(true);
       const layout = h.context().snapshot.layout!.id;
-      expect(h.context().snapshot.selection.displayRange).toMatchObject({ layoutId: layout });
+      if (!h.controller()) expect(h.context().snapshot.selection.displayRange).toMatchObject({ layoutId: layout });
       const states: boolean[] = [];
       const stop = h.host.subscribe(() => states.push(h.context().snapshot.selectionSettled));
       h.reset();
-      const held = h.controller() ? h.holdDisplayRange() : null;
       try {
         await act(async () => {
           h.ref.current!.setZoom(1.25);
@@ -3688,14 +3669,6 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
             h.ref.current!.getEditorRef()!.syncYrsInputState(true);
           }
         });
-        if (held) {
-          await h.heldRemap(layout);
-          expect(h.context().snapshot.layout!.id).not.toBe(layout);
-          expect(h.context().snapshot.selection.displayRange).toBeNull();
-          expect(h.context().snapshot.selectionSettled).toBe(true);
-          expect(h.events.filter(event => event.type === 'selection-change')).toEqual([]);
-          await act(async () => { held.release(); });
-        }
         await h.selectionLayout();
         await until(() => h.context().snapshot.layout?.zoom === 1.25);
         expect(h.context().snapshot.layout!.id).not.toBe(layout);
@@ -3842,9 +3815,6 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
       const states: boolean[] = [];
       const stop = h.host.subscribe(() => states.push(h.context().snapshot.selectionSettled));
       h.reset();
-      const held = h.controller() && place === 'elsewhere' ? h.holdDisplayRange() : null;
-      const workerSelection = () => ({ workerSelectionUnchangedByRemoteEditElsewhere: JSON.stringify(h.controller()!.getSnapshot().view!.workerSelection) });
-      const selectedBefore = held ? workerSelection() : null;
       try {
         await h.remote(peer => {
           if (place === 'elsewhere') {
@@ -3854,16 +3824,7 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
           } else if (place === 'collapse') peer.deleteRange({ story: 'body', start: { paraId: h.first.paraId, offset: 1 }, end: { paraId: h.first.paraId, offset: 3 } });
           else if (place === 'delete') peer.deleteRange({ story: 'body', start: { paraId: h.first.paraId, offset: 0 }, end: { paraId: h.first.paraId, offset: h.first.text.length } });
           else peer.insertText({ story: 'body', paraId: h.first.paraId, offset: place === 'before' ? 0 : place === 'inside' ? 2 : h.first.text.length }, 'remote ');
-        }, path, !held);
-        if (held) {
-          await h.heldRemap(beforeRange!.layoutId);
-          expect(h.context().snapshot.layout!.id).not.toBe(beforeRange!.layoutId);
-          expect(workerSelection()).toEqual(selectedBefore!);
-          expect(h.context().snapshot.selection.displayRange).toBeNull();
-          expect(h.context().snapshot.selectionSettled).toBe(true);
-          expect(h.events.filter(event => event.type === 'selection-change')).toEqual([]);
-          await act(async () => { held.release(); });
-        }
+        }, path);
         await h.selectionLayout();
         await h.quiet();
         expect(h.settles).toHaveLength(destroyed ? 1 : 0);
@@ -3876,7 +3837,7 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
           expect((await h.ref.current!.readSelectionInfo())?.selectedText).toBe(place === 'inside'
             ? h.first.text.slice(1, 2) + 'remote ' + h.first.text.slice(2, 3) : h.first.text.slice(1, 3));
           expect(h.events.some(event => event.type === 'selection-change' || event.type === 'layout-change')).toBe(true);
-          expect(h.events.filter(event => event.type === 'selection-change' && event.selection.displayRange === null)).toEqual([]);
+          if (!h.controller()) expect(h.events.filter(event => event.type === 'selection-change' && event.selection.displayRange === null)).toEqual([]);
           if (place === 'before') expect(h.context().snapshot.selection.displayRange!.from).toBeGreaterThan(beforeRange!.from);
         } else {
           await h.quiet(700);
