@@ -491,7 +491,7 @@ fn justified_acceptance_keeps_a_word_split_across_runs_together() {
 
 #[test]
 fn natural_fit_keeps_the_exact_slack_comparison() {
-    let v = measure_aligned(SIX_WORDS_THEN_SHORT, "left", 195.741_180_419_921_875);
+    let v = measure_aligned(SIX_WORDS_THEN_SHORT, "left", f64::from(195.741_18_f32));
     assert_eq!(spans(&v), vec![(0, 0, 0, 25)]);
 }
 

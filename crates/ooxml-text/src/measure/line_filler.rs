@@ -640,7 +640,8 @@ impl Filler<'_> {
             }
 
             let moves_down = self.cur.width > 0.0
-                && ((t.letter_spacing < 0.0 && self.cur.width > self.cur.available + WRAP_SLACK_PX)
+                && ((t.letter_spacing < 0.0
+                    && self.cur.width > self.cur.available + WRAP_SLACK_PX)
                     || (fitting_width > 0.0 && !self.keeps_word(wrap_width, carried_room)));
             if moves_down {
                 self.start_new_line(ri, utf16_at(t, char_idx))?;
