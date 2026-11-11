@@ -194,7 +194,7 @@ describe('command store execution', () => {
     harness.binding.isViewer = () => true;
     const admit = mock(() => new Promise<never>(() => {}));
     harness.state.admission = admit;
-    const scope = { deny: () => 'permission-denied' as const, subscribe: () => () => {} };
+    const scope = { gesture: () => false, deny: () => 'permission-denied' as const, subscribe: () => () => {} };
     expect(await controller.scoped(scope).execute('bold', null)).toMatchObject({
       ok: false, failure: { code: 'permission-denied' },
     });

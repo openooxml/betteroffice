@@ -1,3 +1,4 @@
+import { pluginActivationId } from '../../../../shared/plugin-host/gesture';
 import type { WorkbookHandle } from '@betteroffice/xlsx';
 import type { TranslationKey } from '@betteroffice/xlsx-i18n';
 import {
@@ -673,6 +674,7 @@ export function createXlsxPluginHost(
               mutatesDocument: command.mutatesDocument,
               shortcuts: Object.freeze(shortcuts),
             }),
+            activationId: pluginActivationId(entry.activation),
             state: () => commandState(entry.pluginId, command),
             execute: () => executeCommand(entry.pluginId, command),
           });
@@ -757,7 +759,7 @@ export function createXlsxPluginHost(
         }
         const value = cached.value;
         if (value && value.version === state.version && value.items.length) {
-          next.push({ pluginId: entry.pluginId, key: entry.key, items: value.items });
+          next.push({ pluginId: entry.pluginId, key: entry.key, activationId: pluginActivationId(entry.activation), items: value.items });
         }
       }
       const same = next.length === decorationSets.length && next.every((set, index) =>

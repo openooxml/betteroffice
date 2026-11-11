@@ -511,7 +511,8 @@ export function useDocxCommandBinding(inputs: DocxCommandInputs): DocxCommandsHa
     const perform = <K extends DocxCommandId>(
       id: K,
       rawArgs: DocxCommandArgs[K],
-      env: DocxCommandEnvironment
+      env: DocxCommandEnvironment,
+      clipboardText?: Promise<string>
     ): DocxCommandResult | Promise<DocxCommandResult> => {
       const current = latest.current;
       const editor = bridge();
@@ -799,7 +800,7 @@ export function useDocxCommandBinding(inputs: DocxCommandInputs): DocxCommandsHa
           if (!paged) return executed(false);
           return (async () => {
             const fragmentRead = id === 'paste' ? readClipboardFragment() : Promise.resolve(null);
-            const textRead = navigator.clipboard.readText();
+            const textRead = clipboardText ?? navigator.clipboard.readText();
             fragmentRead.catch(() => {});
             textRead.catch(() => {});
             await paged.flushPendingInput().catch(() => {});

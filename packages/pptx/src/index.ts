@@ -209,3 +209,6 @@ export { openPresentationSession } from './session/client';
 export { createPptxWorkerEditorSession } from './session/editorSession';
 export { fontPackDiagnostics } from './fontPackDiagnostics';
 export type { FontPackDiagnostic } from './fontPackDiagnostics';
+
+export { fontPreflight, preloadPreflightWasm } from './wasm/preflight';
+export type { FontPreflight, FontPreflightFace } from './wasm/preflight';

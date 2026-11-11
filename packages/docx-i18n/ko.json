@@ -864,7 +864,7 @@
       "targetChanged": "이 작업이 열린 대상 내용이 적용되기 전에 변경되었습니다.",
       "commandFailed": "명령을 완료할 수 없습니다.",
       "permissionDenied": "호스트 애플리케이션이 이 추가 기능의 명령 사용을 허용하지 않았습니다.",
-      "unsupportedPolicy": "추가 기능은 아직 이 명령을 실행할 수 없습니다. 대신 편집 배치를 사용하세요.",
+      "unsupportedPolicy": "이 명령을 실행하려면 플러그인 자체 UI에서 사용자 동작이 필요합니다.",
       "pluginUnavailable": "추가 기능이 더 이상 활성화되어 있지 않습니다.",
       "aborted": "명령이 실행되기 전에 추가 기능 작업이 취소되었습니다."
     }

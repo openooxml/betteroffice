@@ -864,7 +864,7 @@
       "targetChanged": "Konten yang menjadi tujuan tindakan ini berubah sebelum dapat diterapkan.",
       "commandFailed": "Perintah tidak dapat diselesaikan.",
       "permissionDenied": "Aplikasi host tidak mengizinkan plugin ini menggunakan perintah ini.",
-      "unsupportedPolicy": "Plugin belum dapat menjalankan perintah ini. Gunakan batch edit sebagai gantinya.",
+      "unsupportedPolicy": "Perintah ini memerlukan tindakan pengguna di antarmuka plugin itu sendiri.",
       "pluginUnavailable": "Plugin tidak lagi aktif.",
       "aborted": "Tindakan plugin dibatalkan sebelum perintah dijalankan."
     }
