@@ -573,14 +573,17 @@ test('an unchanged worker selection on a new frame before the geometry update ke
   } finally { h.dispose(); }
 });
 
-/** Reads only the published snapshot, since `displaySelection()` itself asks for the mapping again. */
-const stillKept = (h: Awaited<ReturnType<typeof selectionRemap>>) => {
+/** A superseded remap publishes nothing and reads nothing more on its own. */
+const supersededQuietly = async (h: Awaited<ReturnType<typeof selectionRemap>>) => {
+  const reads = h.mapping.reads;
+  await h.flush();
+  expect(h.mapping.reads).toBe(reads);
   expect(h.geometry.selectionMapped()).toBe(false);
-  expect(h.snapshot().selection.displayRange).toEqual(h.first);
   expect(h.events).toEqual([]);
+  return reads;
 };
 
-const endsOnce = async (h: Awaited<ReturnType<typeof selectionRemap>>) => {
+const mappedOnce = async (h: Awaited<ReturnType<typeof selectionRemap>>) => {
   const displayRange = { ...h.first, layoutId: 's:0:2' };
   expect(h.geometry.selectionMapped()).toBe(true);
   expect(h.geometry.displaySelection()).toEqual(displayRange);
@@ -591,7 +594,7 @@ const endsOnce = async (h: Awaited<ReturnType<typeof selectionRemap>>) => {
   expect(h.events).toHaveLength(1);
 };
 
-test('a kept worker range whose remap is superseded after the version ack stays kept and is mapped on the next selection read', async () => {
+test('a remap superseded after the version ack shows null, as before, and the host\'s next selection read maps it with one change', async () => {
   const h = await selectionRemap();
   try {
     h.mapping.hold = true;
@@ -601,18 +604,26 @@ test('a kept worker range whose remap is superseded after the version ack stays 
     expect(h.layoutId()).toBe('s:0:2');
     const acked = h.ack(1);
     await h.flush();
-    stillKept(h);
+    expect(h.snapshot().selection.displayRange).toEqual(h.first);
+    expect(h.events).toEqual([]);
     h.release();
     await Promise.all([replaced, acked]);
-    await h.flush();
-    stillKept(h);
+    const reads = await supersededQuietly(h);
+    h.mapping.hold = true;
     h.host.markSelectionDirty('refresh');
     await h.flush();
-    await endsOnce(h);
+    expect(h.mapping.reads).toBe(reads + 1);
+    expect(h.geometry.displaySelection()).toBeNull();
+    expect(h.snapshot().selection.displayRange).toBeNull();
+    expect(h.events).toEqual([]);
+    h.release();
+    await h.flush();
+    expect(h.mapping.reads).toBe(reads + 1);
+    await mappedOnce(h);
   } finally { h.dispose(); }
 });
 
-test('a kept worker range whose remap is superseded before the version ack stays kept and is mapped once the ack lands', async () => {
+test('a remap superseded before the version ack shows null, as before, and the ack maps it with one change', async () => {
   const h = await selectionRemap();
   try {
     h.mapping.hold = true;
@@ -621,39 +632,36 @@ test('a kept worker range whose remap is superseded before the version ack stays
     await h.flush();
     h.release();
     await replaced;
-    await h.flush();
-    stillKept(h);
-    const reads = h.mapping.reads;
-    await h.flush();
-    expect(h.mapping.reads).toBe(reads);
-    await h.ack(1);
+    const reads = await supersededQuietly(h);
+    h.mapping.hold = true;
+    const acked = h.ack(1);
     await h.flush();
     expect(h.mapping.reads).toBe(reads + 1);
-    await endsOnce(h);
+    expect(h.geometry.displaySelection()).toBeNull();
+    expect(h.events).toEqual([]);
+    h.release();
+    await acked;
+    await h.flush();
+    expect(h.mapping.reads).toBe(reads + 1);
+    await mappedOnce(h);
   } finally { h.dispose(); }
 });
 
-test('a kept worker range whose remaps keep being superseded reads once per view update and never publishes an empty range', async () => {
+test('remaps that keep being superseded read once per view update and publish nothing until one maps', async () => {
   const h = await selectionRemap();
   try {
     h.mapping.supersede = Number.POSITIVE_INFINITY;
     await h.present();
-    await h.flush();
-    const reads = h.mapping.reads;
-    await h.flush();
-    expect(h.mapping.reads).toBe(reads);
-    stillKept(h);
+    const reads = await supersededQuietly(h);
     for (const version of [1, 2, 3]) {
       await h.ack(version);
-      await h.flush();
-      expect(h.mapping.reads).toBe(reads + version);
-      stillKept(h);
+      expect(await supersededQuietly(h)).toBe(reads + version);
     }
     h.mapping.supersede = 0;
     await h.ack(4);
     await h.flush();
     expect(h.mapping.reads).toBe(reads + 4);
-    await endsOnce(h);
+    await mappedOnce(h);
   } finally { h.dispose(); }
 });
 
