@@ -300,11 +300,11 @@ test('a replaced document never carries the kept range across', async () => {
   await waitFor(() => expect(snapshotOf(view).generation).not.toBe(before.generation));
   expect(snapshotOf(view).layout).toBeNull();
   expect(snapshotOf(view).selection.displayRange).toBeNull();
-  await waitFor(() => expect(view.events.map(event => event.displayRange)).toEqual([null]));
+  expect(view.events).toEqual([]);
   await relayout(view, next.version());
   const mapped = { story: 'body', from: 1, to: 3, layoutId: snapshotOf(view).layout!.id };
   expect(snapshotOf(view).selection.displayRange).toEqual(mapped);
-  expect(view.events.map(event => event.displayRange)).toEqual([null, mapped]);
+  expect(view.events.map(event => event.displayRange)).toEqual([mapped]);
 });
 
 test('a paragraph removed at flush time clears selection without blaming the plugin', async () => {
