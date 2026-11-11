@@ -5,6 +5,7 @@ import * as nativeYrs from '@betteroffice/docx-native/yrs';
 import { createEmptyDocx } from '../../packages/docx/src/docx/rezip/createEmpty';
 import { applyClipboardFragment } from '../../packages/docx/src/yrs/clipboardFragment';
 import { savedRunProperties } from '../../packages/docx/src/yrs/__fixtures__/textRuns';
+import type { DocxEditStep } from '../../packages/docx/src/yrs/edits';
 
 type Yrs = typeof wasmYrs;
 type Session = Awaited<ReturnType<Yrs['createYrsSession']>>;
@@ -18,7 +19,17 @@ const HEADING = '<w:pPr><w:pStyle w:val="Heading1"/></w:pPr>';
 const FORMATTED_BODY =
   `<w:p w14:paraId="00000001">${HEADING}<w:r><w:t>Title</w:t></w:r></w:p>` +
   `<w:p w14:paraId="00000002">${HEADING}<w:r><w:rPr><w:b w:val="0"/><w:i/><w:color w:val="C00000"/></w:rPr><w:t>Unbolded</w:t></w:r></w:p>` +
-  '<w:p w14:paraId="00000003"><w:r><w:rPr><w:b/></w:rPr><w:t>Bold words</w:t></w:r></w:p>';
+  '<w:p w14:paraId="00000003"><w:r><w:rPr><w:b/></w:rPr><w:t>Bold words</w:t></w:r></w:p>' +
+  `<w:p w14:paraId="00000004">${HEADING}<w:r><w:rPr><w:b/><w:i/></w:rPr><w:t>Directbold</w:t></w:r></w:p>`;
+
+const FORMATTED_IDS = ['00000001', '00000002', '00000003', '00000004'];
+
+const EDITED_BODY =
+  `<w:p w14:paraId="00000011">${HEADING}<w:r><w:t>Plain heading</w:t></w:r></w:p>` +
+  `<w:p w14:paraId="00000012">${HEADING}<w:r><w:rPr><w:b w:val="0"/><w:i/><w:color w:val="C00000"/><w:sz w:val="40"/></w:rPr><w:t>Styled heading</w:t></w:r></w:p>` +
+  '<w:p w14:paraId="00000013"><w:r><w:t>Plain body</w:t></w:r></w:p>' +
+  '<w:p w14:paraId="00000014"><w:r><w:rPr><w:b/><w:i/><w:u w:val="single"/></w:rPr><w:t>Styled body</w:t></w:r></w:p>' +
+  '<w:p w14:paraId="00000015"><w:r><w:t>End</w:t></w:r></w:p>';
 
 const UNFORMATTED_BODY =
   `<w:p w14:paraId="00000041">${HEADING}<w:r><w:t>Plain heading</w:t></w:r></w:p>` +
@@ -61,23 +72,88 @@ async function saveAndReopen(yrs: Yrs, session: Session) {
 
 for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown as Yrs]] as const) {
   test(`${engine}: clear formatting keeps heading runs heading-bold and saves no run properties`, async () => {
-    for (const oneRange of [false, true]) {
+    const clears: Record<string, (session: Session) => void> = {
+      perParagraph: (session) => {
+        for (const paraId of FORMATTED_IDS) session.clearFormatting(whole(session, paraId));
+      },
+      oneRange: (session) => session.clearFormatting(whole(session, FORMATTED_IDS[0]!, FORMATTED_IDS[3])),
+      hostClearAll: (session) => {
+        const steps = FORMATTED_IDS.map((paraId) => ({ op: 'formatText', target: { kind: 'paragraph', story: 'body', paraId }, clear: 'all' }) as DocxEditStep);
+        const result = session.applyEdits({ expectVersion: session.version(), steps });
+        expect(result.ok).toBe(true);
+      },
+    };
+    for (const [name, clear] of Object.entries(clears)) {
       const session = await yrs.createYrsSession({ clientId: 91 });
       try {
         session.seedFromDocx(await fixture());
-        if (oneRange) session.clearFormatting(whole(session, '00000001', '00000003'));
-        else for (const paraId of ['00000001', '00000002', '00000003']) session.clearFormatting(whole(session, paraId));
-        expect([bold(session, 'Title'), bold(session, 'Unbolded'), bold(session, 'Bold words')]).toEqual([true, true, false]);
+        clear(session);
+        const markers = ['Title', 'Unbolded', 'Bold words', 'Directbold'];
+        expect({ name, bold: markers.map((marker) => bold(session, marker)) }).toEqual({ name, bold: [true, true, false, true] });
         const { xml, reopened } = await saveAndReopen(yrs, session);
         try {
-          for (const marker of ['Title', 'Unbolded', 'Bold words']) expect(savedRunProperties(xml, marker)).toBeNull();
-          expect([bold(reopened, 'Title'), bold(reopened, 'Unbolded'), bold(reopened, 'Bold words')]).toEqual([true, true, false]);
+          expect(xml).not.toContain('<w:rPr></w:rPr>');
+          expect(xml).not.toContain('<w:rPr/>');
+          for (const marker of ['Title', 'Unbolded', 'Bold words']) {
+            expect({ name, marker, saved: savedRunProperties(xml, marker) }).toEqual({ name, marker, saved: null });
+          }
+          expect({ name, bold: markers.map((marker) => bold(reopened, marker)) }).toEqual({ name, bold: [true, true, false, true] });
         } finally {
           reopened.destroy();
         }
       } finally {
         session.destroy();
       }
+    }
+  });
+
+  test(`${engine}: known limit: a direct value equal to the style stays after clear formatting`, async () => {
+    const session = await yrs.createYrsSession({ clientId: 96 });
+    try {
+      session.seedFromDocx(await fixture());
+      session.clearFormatting(whole(session, '00000004'));
+      const { xml, reopened } = await saveAndReopen(yrs, session);
+      reopened.destroy();
+      expect(savedRunProperties(xml, 'Directbold')).toBe('<w:b/>');
+    } finally {
+      session.destroy();
+    }
+  });
+
+  test(`${engine}: an edit saves the same run properties whether or not its range holds the paragraph mark`, async () => {
+    const ids = ['00000011', '00000012', '00000013', '00000014', '00000015'];
+    const edits: [string, string, (session: Session, range: ReturnType<typeof whole>) => void][] = [
+      ['clear on a heading run', '00000012', (session, range) => session.clearFormatting(range)],
+      ['clear on a body run', '00000014', (session, range) => session.clearFormatting(range)],
+      ['bold on over a bold style', '00000012', (session, range) => session.formatRange(range, { bold: true })],
+      ['bold off over a bold style', '00000011', (session, range) => session.formatRange(range, { bold: false })],
+      ['bold on in a body paragraph', '00000013', (session, range) => session.formatRange(range, { bold: true })],
+      ['bold off in a body paragraph', '00000014', (session, range) => session.formatRange(range, { bold: false })],
+      ['italic on', '00000013', (session, range) => session.formatRange(range, { italic: true })],
+      ['italic off', '00000014', (session, range) => session.formatRange(range, { italic: false })],
+      ['italic off over a heading', '00000012', (session, range) => session.formatRange(range, { italic: false })],
+      ['size set to the style size', '00000012', (session, range) => session.formatRange(range, { fontSize: 16 })],
+      ['size set to another size', '00000011', (session, range) => session.formatRange(range, { fontSize: 11 })],
+      ['underline off', '00000014', (session, range) => session.formatRange(range, { underline: null })],
+    ];
+    for (const [name, paraId, edit] of edits) {
+      const saved: (string | null)[] = [];
+      for (const withMark of [false, true]) {
+        const session = await yrs.createYrsSession({ clientId: 97 });
+        try {
+          session.seedFromDocx(await fixture(EDITED_BODY));
+          const range = whole(session, paraId);
+          const next = ids[ids.indexOf(paraId) + 1]!;
+          edit(session, withMark ? { ...range, end: { paraId: next, offset: 0 } } : range);
+          const { xml, reopened } = await saveAndReopen(yrs, session);
+          reopened.destroy();
+          const marker = { '00000011': 'Plain heading', '00000012': 'Styled heading', '00000013': 'Plain body', '00000014': 'Styled body' }[paraId]!;
+          saved.push(savedRunProperties(xml, marker));
+        } finally {
+          session.destroy();
+        }
+      }
+      expect({ name, withMark: saved[1] }).toEqual({ name, withMark: saved[0] });
     }
   });
 

@@ -6,6 +6,8 @@ mod text;
 mod verify;
 
 #[cfg(test)]
+mod inherited_tests;
+#[cfg(test)]
 mod language_tests;
 #[cfg(test)]
 mod tests;
