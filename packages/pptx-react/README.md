@@ -142,7 +142,7 @@ returns `layout-unavailable`; use a range target to keep a position.
 Its `PptxAnchorGeometryResult` returns line rectangles, a focus-end anchor (a caret with
 empty `rects` when collapsed), and the slide's `pageRect` in overlay pixels, plus `version`
 and `layoutId`. Failures are `stale-version`, `missing-target`, or `layout-unavailable`.
-Checks run in order: layout first, then version, then target, so `layout-unavailable` overrides the other failures.
+A layout that is no longer presented answers `layout-unavailable` before anything else; then a range from another version answers `stale-version`; then a missing selection answers `missing-target`, and a target on another slide or a slide without displayed bounds answers `layout-unavailable`.
 Shape and slide selections return their bounds. `readAnchorGeometries(targets)` returns
 the same answers in order as a promise, without pending results. Both APIs are experimental.
 
