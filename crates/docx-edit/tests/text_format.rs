@@ -848,3 +848,22 @@ fn editor_clear_keeps_an_explicit_run_direction() {
     assert!(!active(&after, "rtl") && !active(&after, "italic"));
     assert_eq!(after.get("rtl"), before.get("rtl"));
 }
+
+#[test]
+fn clear_all_keeps_an_explicit_run_direction() {
+    let styles = format!(
+        r#"{STYLES}<w:style w:type="paragraph" w:styleId="RtlBody"><w:name w:val="Rtl Body"/><w:pPr><w:bidi/></w:pPr><w:rPr><w:rtl/></w:rPr></w:style>"#
+    );
+    let body = r#"<w:p w14:paraId="00000031"><w:pPr><w:pStyle w:val="RtlBody"/></w:pPr><w:r><w:rPr><w:rtl w:val="0"/><w:i/></w:rPr><w:t>Left words</w:t></w:r></w:p>"#;
+    let doc = EditingDoc::new(7115);
+    seed_from_docx(&doc, &package_with_styles(body, &styles)).unwrap();
+    let before = marks(&doc, "Left words");
+    apply(
+        &doc,
+        &UndoSession::new(),
+        json!([format(paragraph("00000031"), json!({"clear": "all"}))]),
+    );
+    let after = marks(&doc, "Left words");
+    assert!(!active(&after, "italic"));
+    assert_eq!(after.get("rtl"), before.get("rtl"));
+}
