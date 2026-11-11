@@ -210,8 +210,17 @@ export function resolveDefaultFontProvider(
 export async function resolveCompleteFontProvider(
   runtime: { decoder?: FontDecoder } = engineRuntime
 ): Promise<BundledFontProvider | undefined> {
-  if (hasConfiguredFontSource() || options.baseUrl !== undefined) return resolveDefaultFontProvider(runtime);
-  return (await import('@betteroffice/fonts')).createFontProvider(undefined, runtime);
+  return (await resolveCompleteFontSelection(runtime)).provider;
+}
+
+/** @internal {@link resolveCompleteFontProvider}, with whether the provider is the configured one. */
+export async function resolveCompleteFontSelection(
+  runtime: { decoder?: FontDecoder } = engineRuntime
+): Promise<{ provider: BundledFontProvider | undefined; configured: boolean }> {
+  if (hasConfiguredFontSource() || options.baseUrl !== undefined) {
+    return { provider: await resolveDefaultFontProvider(runtime), configured: true };
+  }
+  return { provider: (await import('@betteroffice/fonts')).createFontProvider(undefined, runtime), configured: false };
 }
 
 /** @internal State the lazily loaded backstop provider resolves against. */
