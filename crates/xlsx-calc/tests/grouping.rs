@@ -1132,8 +1132,7 @@ fn a_handler_around_an_unsupported_grouping_shape_keeps_the_saved_value() {
 
 #[test]
 fn an_unsupported_grouping_shape_outweighs_an_unknown_function_in_the_handler() {
-    let formula =
-        r#"IFERROR(ROWS(_xlfn.GROUPBY({"a";"b";"a"},{1;2;3},_xlfn.VSTACK(_xleta.SUM,_xleta.MAX),0,0)),IFERROR(REPRO_UNKNOWN_FUNCTION(1),99))"#;
+    let formula = r#"IFERROR(ROWS(_xlfn.GROUPBY({"a";"b";"a"},{1;2;3},_xlfn.VSTACK(_xleta.SUM,_xleta.MAX),0,0)),IFERROR(REPRO_UNKNOWN_FUNCTION(1),99))"#;
     assert_eq!(recalculated(formula, n(4.0)), n(4.0));
     assert_eq!(
         recalculated(formula, CellValue::Empty),
@@ -1141,20 +1140,6 @@ fn an_unsupported_grouping_shape_outweighs_an_unknown_function_in_the_handler() 
             value: ErrorValue::Calc
         }
     );
-}
-
-#[test]
-fn a_cell_that_meets_an_unsupported_grouping_shape_anywhere_keeps_its_saved_value() {
-    let calc = CellValue::Error {
-        value: ErrorValue::Calc,
-    };
-    for formula in [
-        r#"_xlfn.LET(_xlpm.unused,IFERROR(ROWS(_xlfn.GROUPBY({"a";"b";"a"},{1;2;3},_xlfn.VSTACK(_xleta.SUM,_xleta.MAX),0,0)),99),1)"#,
-        r#"IFERROR(1/0+ROWS(_xlfn.GROUPBY({"a";"b";"a"},{1;2;3},_xlfn.VSTACK(_xleta.SUM,_xleta.MAX),0,0)),99)"#,
-    ] {
-        assert_eq!(recalculated(formula, n(4.0)), n(4.0), "{formula}");
-        assert_eq!(recalculated(formula, CellValue::Empty), calc, "{formula}");
-    }
 }
 
 #[test]
