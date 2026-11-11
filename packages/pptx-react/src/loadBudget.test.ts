@@ -35,24 +35,53 @@ test('budgetedWaitFor fails naming its budget and keeps the waited error', async
   expect(seen).toEqual([40, 7]);
 });
 
-test('previousTestSettled fails naming the budget when the test before it never settles', async () => {
-  const { bodies, tests } = capturedTests(40);
-  tests.test('never settles', () => new Promise<void>(() => {}));
-  void bodies[0]();
-  await expect(tests.previousTestSettled()).rejects.toThrow('still running 40 ms after its 40 ms budget ran out');
+function gate() {
+  let fail!: (error: Error) => void;
+  const opened = new Promise<void>((_resolve, reject) => { fail = reject; });
+  return { opened, fail };
+}
+
+test('previousTestSettled fails naming the budget when the test before it never settles, and later tests fail until it does', async () => {
+  const { bodies, tests } = capturedTests(20);
+  const stuck = gate();
+  tests.test('never settles', () => stuck.opened);
+  tests.test('next', async () => {});
+  tests.test('after', async () => {});
+  void bodies[0]().catch(() => {});
+  await expect(tests.previousTestSettled()).rejects.toThrow('still running 20 ms after its 20 ms budget ran out');
+  expect(() => bodies[1]()).toThrow('"never settles" is still running after its teardown budget ran out');
+  stuck.fail(new Error('late failure'));
+  await pause(0);
+  expect(() => bodies[2]()).toThrow('"never settles" failed after its teardown budget ran out: Error: late failure');
 });
 
 test('previousTestSettled waits for late work and throws its late failure', async () => {
-  const { bodies, tests } = capturedTests(1_000);
-  let finished = false;
-  tests.test('late failure', async () => {
-    await pause(30);
-    finished = true;
-    throw new Error('late failure');
-  });
+  const { bodies, tests } = capturedTests(20);
+  const late = gate();
+  tests.test('late failure', () => late.opened);
   void bodies[0]().catch(() => {});
+  await pause(30);
+  const settled = tests.previousTestSettled();
+  late.fail(new Error('late failure'));
+  await expect(settled).rejects.toThrow('late failure');
+});
+
+test('previousTestSettled throws a late failure that settled before the teardown began', async () => {
+  const { bodies, tests } = capturedTests(20);
+  const late = gate();
+  tests.test('late failure', () => late.opened);
+  void bodies[0]().catch(() => {});
+  await pause(30);
+  late.fail(new Error('late failure'));
+  await pause(0);
   await expect(tests.previousTestSettled()).rejects.toThrow('late failure');
-  expect(finished).toBe(true);
+});
+
+test('previousTestSettled leaves a failure inside the budget to the test itself', async () => {
+  const { bodies, tests } = capturedTests(1_000);
+  tests.test('fails in time', async () => { throw new Error('in time'); });
+  await expect(bodies[0]()).rejects.toThrow('in time');
+  await tests.previousTestSettled();
 });
 
 test('previousTestSettled passes after a test that settled in time', async () => {

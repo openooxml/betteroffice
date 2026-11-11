@@ -1,6 +1,6 @@
 import { LEGACY_SYNC_API_PROP } from '../peerless/contracts';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, spyOn, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, spyOn } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { budgetedTests, EDITOR_TEARDOWN_BUDGET_MS } from '../../../../../../shared/office-session/testing/loadBudget';
 import { resolve } from 'node:path';
@@ -144,10 +144,10 @@ beforeAll(async () => {
   ))));
   startWorker = await residentWorkerFactory();
 }, 30_000);
-const budgeted = budgetedTests();
+const { test, previousTestSettled } = budgetedTests();
 afterEach(async () => {
   try {
-    await budgeted.previousTestSettled();
+    await previousTestSettled();
   } finally {
     teardown();
   }
@@ -8182,7 +8182,7 @@ test('font announcements in viewer sessions are not held', async () => {
   }
 });
 
-budgeted.test('held input and loading reads wait for the current worker layout after hydration', async () => {
+test('held input and loading reads wait for the current worker layout after hydration', async () => {
   const opened = await openingEditor(true, false, {
     holdFullLayout: true,
   });
@@ -8470,7 +8470,7 @@ test('readiness commits thirty seconds after hydration even with ongoing layout 
   }
 });
 
-budgeted.test('replacing a document discards its hydrated peer waiting for layout completion', async () => {
+test('replacing a document discards its hydrated peer waiting for layout completion', async () => {
   const opened = await openingEditor(true, false, {
     holdFullLayout: true,
   });

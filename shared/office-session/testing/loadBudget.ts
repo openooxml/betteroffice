@@ -14,48 +14,70 @@ export class BudgetExceededError extends Error {
   override name = 'BudgetExceededError';
 }
 
-type Run = { promise: Promise<void>; budgetMs: number; settled: boolean };
+type Outcome = { late: boolean; failed: boolean; error?: unknown };
+type Run = { name: string; promise: Promise<void>; budgetMs: number; outcome?: Outcome };
+type Body = (...args: any[]) => Promise<void> | void;
 type Register = {
   (name: string, body: () => Promise<void>, timeoutMs: number): void;
-  each<T>(cases: T[]): (name: string, body: (value: T) => Promise<void>, timeoutMs: number) => void;
+  each(cases: readonly unknown[]): (name: string, body: (...args: any[]) => Promise<void>, timeoutMs: number) => void;
 };
 
 /**
  * @internal Tests that run under one budget, and a teardown step that waits for the test it follows.
  * A test that runs out of budget keeps running; the teardown waits for it, so its late work cannot
- * land in the next test, and a late failure is thrown there instead of being dropped.
+ * land in the next test, and a late failure is thrown there instead of being dropped. A test the
+ * teardown gave up on fails every later test of this set until it settles.
  */
 export function budgetedTests(budgetMs: number = EDITOR_TEST_BUDGET_MS, register: Register = test as unknown as Register) {
   let current: Run | undefined;
-  const track = (body: () => Promise<void> | void, runBudgetMs: number) => {
-    const run: Run = { promise: Promise.resolve(body()), budgetMs: runBudgetMs, settled: false };
-    run.promise.then(() => { run.settled = true; }, () => { run.settled = true; });
+  let abandoned: Run | undefined;
+  const track = (name: string, start: () => Promise<void> | void, runBudgetMs: number) => {
+    if (abandoned) {
+      const earlier = abandoned;
+      if (!earlier.outcome) {
+        throw new BudgetExceededError(`"${earlier.name}" is still running after its teardown budget ran out`);
+      }
+      abandoned = undefined;
+      if (earlier.outcome.failed) {
+        const error = new BudgetExceededError(`"${earlier.name}" failed after its teardown budget ran out: ${String(earlier.outcome.error)}`);
+        throw Object.assign(error, { cause: earlier.outcome.error });
+      }
+    }
+    const startedAt = performance.now();
+    const run: Run = { name, promise: Promise.resolve(start()), budgetMs: runBudgetMs };
+    const settle = (failed: boolean, error?: unknown) => {
+      run.outcome = { late: performance.now() - startedAt >= runBudgetMs, failed, error };
+    };
+    run.promise.then(() => settle(false), (error: unknown) => settle(true, error));
     current = run;
     return run.promise;
   };
   const budgeted = (name: string, body: () => Promise<void> | void, timeoutMs: number = budgetMs) => {
-    register(name, () => track(body, timeoutMs), timeoutMs);
+    register(name, () => track(name, body, timeoutMs), timeoutMs);
   };
-  budgeted.each = <T>(cases: readonly T[]) =>
-    (name: string, body: (value: T) => Promise<void> | void, timeoutMs: number = budgetMs) => {
-      register.each(cases as T[])(name, (value: T) => track(() => body(value), timeoutMs), timeoutMs);
+  budgeted.each = (cases: readonly unknown[]) =>
+    (name: string, body: Body, timeoutMs: number = budgetMs) => {
+      register.each(cases)(name, (...args: unknown[]) => track(name, () => body(...args), timeoutMs), timeoutMs);
     };
   return {
     test: budgeted,
     async previousTestSettled() {
       const run = current;
       current = undefined;
-      if (!run || run.settled) return;
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const late = await Promise.race([
-        run.promise.then(() => ({ done: true as const }), (error: unknown) => ({ done: true as const, error })),
-        new Promise<{ done: false }>((resolve) => { timer = setTimeout(() => resolve({ done: false }), run.budgetMs); }),
-      ]);
-      clearTimeout(timer);
-      if (!late.done) {
-        throw new BudgetExceededError(`the test before this teardown was still running ${run.budgetMs} ms after its ${run.budgetMs} ms budget ran out`);
+      if (!run) return;
+      if (!run.outcome) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const settled = await Promise.race([
+          run.promise.then(() => true, () => true),
+          new Promise<false>((resolve) => { timer = setTimeout(() => resolve(false), run.budgetMs); }),
+        ]);
+        clearTimeout(timer);
+        if (!settled) {
+          abandoned = run;
+          throw new BudgetExceededError(`the test before this teardown was still running ${run.budgetMs} ms after its ${run.budgetMs} ms budget ran out`);
+        }
       }
-      if ('error' in late) throw late.error;
+      if (run.outcome?.late && run.outcome.failed) throw run.outcome.error;
     },
   };
 }
