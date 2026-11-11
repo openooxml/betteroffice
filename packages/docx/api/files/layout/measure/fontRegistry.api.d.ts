@@ -167,14 +167,12 @@ export declare class TextMeasureFontRegistry {
     private progressiveIds;
     private readonly progressive?;
     private readonly standInTail;
-    /**
-     * `progressive` opens sliced faces, which register from their skeleton and core.
-     * `standInTail` gives a stand-in family the last-resort tail even when its chain is not empty.
-     */
+    /** `progressive` opens sliced faces, which register from their skeleton and core. */
     constructor(sink: TextEngineFontSink, opts?: {
         bundled?: BundledFontProviderSource;
         baseLatin?: BundledFontProviderSource;
         progressive?: (slices: SliceLocation) => Promise<ProgressiveFontFace>;
+        /** Explicit stand-ins always append the last-resort face. */
         standInTail?: boolean;
     });
     /** The sliced faces registered from their skeleton and core, by font id. */
@@ -215,6 +213,7 @@ export declare class TextMeasureFontRegistry {
     clear(): void;
     private warnFailure;
     private resolveChain;
+    private warnStandIn;
     /**
      * An empty chain forces browser measurement. Distinguish absent, incomplete,
      * and broken providers so the one warning gives applicable remediation.
