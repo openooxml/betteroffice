@@ -235,7 +235,7 @@
       "gestureActive": "請先完成指標手勢。",
       "commandFailed": "命令失敗。",
       "permissionDenied": "主機應用程式尚未允許此外掛程式使用此命令。",
-      "unsupportedPolicy": "外掛程式尚無法執行此命令。請改用編輯批次。",
+      "unsupportedPolicy": "此命令需要使用者在該外掛程式自己的介面中進行操作。",
       "pluginUnavailable": "外掛程式已不再作用中。",
       "aborted": "外掛程式動作在命令執行前已取消。",
       "clipboardUnavailable": "無法存取剪貼簿或存取遭到拒絕。",

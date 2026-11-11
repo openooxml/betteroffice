@@ -723,13 +723,14 @@ export function ToolbarCommandButton<K extends DocxCommandId | DocxPluginCommand
   props: ToolbarCommandButtonProps<K>
 ) {
   const { id, children, label, className } = props;
+  const store = useDocxCommands();
   const args = (props as { args?: unknown }).args;
   const command = useDocxCommand(id as DocxCommandId, args as never);
   const prepareSave = useEditorChrome()?.prepareSave;
   if (isPluginCommandId(id) && command.descriptor === null) return null;
   const icon = isPluginCommandId(id) ? undefined : iconFor(id, args);
   const name = label ?? command.label;
-  return (
+  const button = (
     <ToolbarButton
       active={command.state.active}
       disabled={!command.state.enabled}
@@ -746,6 +747,11 @@ export function ToolbarCommandButton<K extends DocxCommandId | DocxPluginCommand
       {children ?? (icon ? <MaterialSymbol name={icon} size={ICON_SIZE} /> : name)}
     </ToolbarButton>
   );
+  return isPluginCommandId(id) ? (
+    <span data-plugin-activation={docxCommandController(store)?.pluginActivation(id)} style={{ display: 'contents' }}>
+      {button}
+    </span>
+  ) : button;
 }
 
 function styleOptionsFor(state: DocxCommandState<'paragraphStyle'>): StyleOption[] {

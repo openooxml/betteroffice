@@ -157,6 +157,7 @@ export function useWorkerContextMenu(options: {
     action: 'paste' | 'pasteAsPlainText',
     opened: PeerlessViewSnapshot,
     target: PeerlessViewSnapshot['workerSelection'] | undefined,
+    clipboardText?: Promise<string>,
   ) => {
     if (action === 'paste') {
       const fragment = await readClipboardFragment();
@@ -172,7 +173,7 @@ export function useWorkerContextMenu(options: {
         }
       }
     }
-    const text = await navigator.clipboard.readText();
+    const text = await (clipboardText ?? navigator.clipboard.readText());
     if (current !== options.binding()) throw new Error('Document was replaced');
     const latest = current.viewStore.getSnapshot();
     if (!sameContextTarget(action, opened, latest)) throw new Error('Context menu target changed');
@@ -188,13 +189,13 @@ export function useWorkerContextMenu(options: {
     current.commands.submit({ kind: 'navigate', payload: { unit: 'document-boundary', direction: 'forward', extend: true } }, { source: 'selection', fence: true });
   };
   /** Runs a clipboard or select-all command from a remapped shortcut. */
-  const input = async (id: 'cut' | 'copy' | 'paste' | 'pasteAsPlainText' | 'selectAll'): Promise<DocxCommandResult> => {
+  const input = async (id: 'cut' | 'copy' | 'paste' | 'pasteAsPlainText' | 'selectAll', clipboardText?: Promise<string>): Promise<DocxCommandResult> => {
     const current = options.binding();
     if (!current) return { ok: false, failure: { code: 'editor-unavailable', message: options.environment().translate('commands.reasons.commandFailed') } };
     try {
       if (id === 'copy' || id === 'cut') await options.clipboard(id === 'cut');
       else if (id === 'selectAll') selectAll(current);
-      else await pasteClipboard(current, id, structuredClone(current.viewStore.getSnapshot()), undefined);
+      else await pasteClipboard(current, id, structuredClone(current.viewStore.getSnapshot()), undefined, clipboardText);
       return { ok: true, status: 'executed' };
     } catch {
       return { ok: false, failure: { code: 'command-failed', message: options.environment().translate('commands.reasons.commandFailed') } };
