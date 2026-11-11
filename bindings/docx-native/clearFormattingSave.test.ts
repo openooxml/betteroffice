@@ -195,14 +195,14 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
       }
       return undefined;
     };
-    const cases: [string, (session: Session) => [string, boolean | null][]][] = [
+    const cases: [string, (session: Session) => [string, boolean | null | 'style'][]][] = [
       ['a row inserted above the header row, the old header cell untouched', (session) => {
         session.insertRow(at(0, 0), 'above');
         const fresh = session.listStories().stories.find((entry) => entry.kind === 'tableCell' && session.paragraphs(entry.story).some((paragraph) => paragraph.text === ''))!.story;
         const paraId = session.paragraphs(fresh)[0]!.paraId;
         session.insertText({ story: fresh, paraId, offset: 0 }, 'New head');
         session.formatRange(whole(session, paraId, paraId, fresh), { bold: false });
-        return [['Old head', null], ['New head', false]];
+        return [['Old head', null], ['New head', 'style']];
       }],
       ['the header row deleted', (session) => {
         session.deleteRow({ anchor: at(0, 0), head: at(0, 0) });
@@ -235,9 +235,9 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
         const { xml, reopened } = await saveAndReopen(yrs, session);
         try {
           for (const [marker, on] of expected) {
-            const saved = on === null ? null : on ? '<w:b/>' : '<w:b w:val="0"/>';
+            const saved = on === null || on === 'style' ? null : on ? '<w:b/>' : '<w:b w:val="0"/>';
             expect({ name, marker, saved: savedRunProperties(xml, marker) }).toEqual({ name, marker, saved });
-            expect({ name, marker, bold: boldIn(reopened, marker) }).toEqual({ name, marker, bold: on === true });
+            expect({ name, marker, bold: boldIn(reopened, marker) }).toEqual({ name, marker, bold: on === true || on === 'style' });
           }
         } finally {
           reopened.destroy();
