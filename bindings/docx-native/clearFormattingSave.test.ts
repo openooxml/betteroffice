@@ -239,10 +239,10 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
         format(session, '00000043', false);
         return [direct('Body one', false)];
       }],
-      ['a row inserted in the outer table of a nested one', (session) => {
+      ['a row inserted in the outer table of a nested one: the inner header cell keeps its own table style, so bold it already gives is not written and it reopens bold', (session) => {
         session.insertRow(at(0, 0), 'above');
         format(session, '00000046', true);
-        return [direct('Inner head', true)];
+        return [{ marker: 'Inner head', saved: null, reopens: true }];
       }],
     ];
     const actual: Record<string, unknown>[] = [];
@@ -438,7 +438,7 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
     });
   });
 
-  test(`${engine}: a peer bootstrapped from an update keeps the table styles' bold when clearing formatting over a selected block content control holding a nested table in a cell`, async () => {
+  test(`${engine}: a peer bootstrapped from an update keeps the table styles' bold when clearing formatting over the paragraphs of a block content control holding a nested table in a cell`, async () => {
     const control = blockControl(
       italic('00000091', 'Control own') + boldGridCell(italic('00000092', 'Nested cell')) + italic('00000093', 'Control tail'),
     );
