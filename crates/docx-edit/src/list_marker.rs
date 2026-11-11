@@ -632,11 +632,15 @@ mod tests {
     }
 
     #[test]
-    fn a_start_override_wins_over_both_level_starts() {
+    fn a_start_override_wins_over_both_level_starts_in_decimal() {
         assert_eq!(
             first_override_marker("decimal", Some(3), Some(5), Some(7)),
             "7."
         );
+    }
+
+    #[test]
+    fn a_start_override_wins_over_both_level_starts_in_letters() {
         assert_eq!(
             first_override_marker("upperLetter", Some(3), Some(5), Some(7)),
             "G."
@@ -644,11 +648,15 @@ mod tests {
     }
 
     #[test]
-    fn a_level_override_start_wins_over_the_abstract_start() {
+    fn a_level_override_start_wins_over_the_abstract_start_in_decimal() {
         assert_eq!(
             first_override_marker("decimal", Some(3), Some(5), None),
             "5."
         );
+    }
+
+    #[test]
+    fn a_level_override_start_wins_over_the_abstract_start_in_letters() {
         assert_eq!(
             first_override_marker("upperLetter", Some(3), Some(5), None),
             "E."
@@ -656,21 +664,34 @@ mod tests {
     }
 
     #[test]
-    fn a_level_override_without_a_start_keeps_the_abstract_start() {
-        for (abstract_start, expected) in [(2, "2."), (3, "3."), (4, "4.")] {
-            assert_eq!(
-                first_override_marker("decimal", Some(abstract_start), None, None),
-                expected,
-                "abstract start {abstract_start}"
-            );
-        }
-        for (abstract_start, expected) in [(1, "A."), (3, "C.")] {
-            assert_eq!(
-                first_override_marker("upperLetter", Some(abstract_start), None, None),
-                expected,
-                "abstract start {abstract_start}"
-            );
-        }
+    fn a_decimal_level_override_without_a_start_keeps_an_abstract_start_of_two() {
+        assert_eq!(first_override_marker("decimal", Some(2), None, None), "2.");
+    }
+
+    #[test]
+    fn a_decimal_level_override_without_a_start_keeps_an_abstract_start_of_three() {
+        assert_eq!(first_override_marker("decimal", Some(3), None, None), "3.");
+    }
+
+    #[test]
+    fn a_decimal_level_override_without_a_start_keeps_an_abstract_start_of_four() {
+        assert_eq!(first_override_marker("decimal", Some(4), None, None), "4.");
+    }
+
+    #[test]
+    fn a_letter_level_override_without_a_start_keeps_an_abstract_start_of_one() {
+        assert_eq!(
+            first_override_marker("upperLetter", Some(1), None, None),
+            "A."
+        );
+    }
+
+    #[test]
+    fn a_letter_level_override_without_a_start_keeps_an_abstract_start_of_three() {
+        assert_eq!(
+            first_override_marker("upperLetter", Some(3), None, None),
+            "C."
+        );
     }
 
     #[test]
