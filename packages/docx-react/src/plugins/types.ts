@@ -158,7 +158,11 @@ export interface DocxPluginLayout {
 export interface DocxPluginSelection {
   /** Formatting at the selection; its paragraph indices are not edit targets. */
   formatting: SelectionState | null;
-  /** Display positions in one layout; never an edit range. */
+  /**
+   * Display positions in the layout `layoutId` names; never an edit range. While a replaced layout is
+   * mapping an unchanged selection, `layoutId` may name the previous layout while `snapshot.layout`
+   * is the new layout or null.
+   */
   displayRange: { story: string; from: number; to: number; layoutId: string } | null;
 }
 
