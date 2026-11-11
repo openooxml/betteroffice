@@ -38,8 +38,8 @@ export interface DocxMemoryBudget {
    * full. Default: no limit short of 4 GiB.
    *
    * On a native engine a limit switches heap counting on for that worker,
-   * measured at key p50 +5.5 to +11.7%, open +7 to +10% and save +6 to +9%;
-   * leaving it unset costs nothing. It counts the engine thread's allocations
+   * which adds a measurable cost to every engine call; leaving it unset costs
+   * nothing. It counts the engine thread's allocations
    * and is checked at engine-call entry and exit and at progress checkpoints,
    * so one large allocation between checkpoints can pass it before the call
    * fails with the same out-of-memory error as wasm.

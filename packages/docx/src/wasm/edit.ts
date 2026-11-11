@@ -74,8 +74,7 @@ export function preloadEditWasmFrom(source: Promise<WebAssembly.Module | null>):
  * allocation past the cap fails as if the memory were full. Undefined removes it.
  *
  * On a native engine a cap switches heap counting on for this thread's engine,
- * measured at key p50 +5.5 to +11.7%, open +7 to +10% and save +6 to +9%; no cap
- * costs nothing. The cap is checked at engine-call entry and exit and at progress
+ * which adds a measurable cost to every engine call; no cap costs nothing. The cap is checked at engine-call entry and exit and at progress
  * checkpoints, so one large allocation between checkpoints can pass it before the
  * call fails.
  */
