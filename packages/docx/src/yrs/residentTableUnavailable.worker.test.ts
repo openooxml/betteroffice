@@ -315,3 +315,60 @@ for (const [index, lost] of LOST.entries()) {
     }
   }, TIMEOUT);
 }
+
+const INNER_LOST: Array<{ name: string; key: string; edit: (session: YrsSession, story: string, first: boolean) => void }> = [
+  { name: 'its properties', key: 'tblPr', edit: (session, story, first) =>
+    session.setTableProperties({ story, tableIndex: 0 }, first ? { width: 4000, widthType: 'dxa' } : { justification: 'center' }) },
+  { name: 'its grid', key: 'grid', edit: (session, story, first) => session.setColumnWidth(at(story, 0, first ? 0 : 1), first ? 2000 : 3000) },
+];
+
+for (const [index, lost] of INNER_LOST.entries()) {
+  test(`with the caret in a cell of an inner table that lost ${lost.name} but kept its rows, deleteTable removes it and saves, and every other table command refuses coded`, async () => {
+    const base = 9900 + index * 10;
+    const replica = await open(base + 1, true);
+    const first = await peer(replica, base + 2);
+    const second = await peer(replica, base + 3);
+    try {
+      const table = tableStory(replica);
+      const story = cellStory(replica);
+      const inCell = { story, paraId: replica.engine.paragraphs(story)[0]!.paraId, offset: 0 };
+      lost.edit(first, table, true);
+      sync(first, second);
+      lost.edit(second, table, false);
+      expect(first.undo()).toBe(true);
+      sync(first, second);
+      expect(second.undo()).toBe(true);
+      sync(first, second);
+      await receive(replica, second);
+      const payload = replica.engine.tablePayload(table, 0) ?? {};
+      expect(['tblPr', 'grid', 'rows'].filter((key) => !(key in payload))).toContain(lost.key);
+      expect(Array.isArray((payload as { rows?: unknown }).rows)).toBe(true);
+      expect(located(replica, story)).toBeNull();
+
+      const outerCells = (replica.engine.tablePayload('body', 0) as { rows: Array<{ cells: Array<{ story: string }> }> })
+        .rows[0]!.cells.map((entry) => entry.story);
+      const outerTexts = outerCells.map((entry) => cellTexts(replica, entry));
+      const selection = { anchor: inCell, focus: inCell };
+      const untouched = replica.engine.encodeState();
+      for (const [kind, extra] of CARET_TABLE_COMMANDS.filter(([kind]) => kind !== 'deleteTable')) {
+        const ack = await replica.session.submit(kind as 'deleteTable', { ...extra, selection } as never).ack;
+        expect([kind, ack.status, (ack as { reason?: string }).reason]).toEqual([kind, 'refused', 'table-unavailable']);
+        expect(replica.engine.encodeState()).toEqual(untouched);
+      }
+
+      const removed = await replica.session.submit('deleteTable', { selection } as never).ack;
+      expect([removed.status, (removed as { reason?: string }).reason]).toEqual(['applied', undefined]);
+      expect(replica.engine.tablePayload(table, 0)).toBeNull();
+      expect((replica.engine.tablePayload('body', 0) as { rows: Array<{ cells: Array<{ story: string }> }> })
+        .rows[0]!.cells.map((entry) => entry.story)).toEqual(outerCells);
+      expect(cellTexts(replica, outerCells[0]!)).toEqual(outerTexts[0]);
+      expect(cellTexts(replica, outerCells[1]!)).toEqual(['Outer two']);
+      const saved = await replica.client.save({ comments: [] });
+      expect(saved.bytes.byteLength).toBeGreaterThan(0);
+    } finally {
+      first.destroy();
+      second.destroy();
+      replica.session.dispose();
+    }
+  }, TIMEOUT);
+}
