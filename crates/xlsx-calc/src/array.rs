@@ -2072,6 +2072,7 @@ fn fallback(args: &[Expr], ctx: &EvalContext<'_>, caught: fn(&CellValue) -> bool
     // fallback pads the primary and that padding is caught in turn
     let checkpoint = ctx.unsupported_checkpoint();
     let called = ctx.uncomputable_checkpoint();
+    let shapes = ctx.unsupported_shape_checkpoint();
     let spent = ctx.budget_error_checkpoint();
     let other = evaluate_array(&args[1], ctx);
     // both sides answer elementwise, so a block shorter than its fallback
@@ -2084,6 +2085,7 @@ fn fallback(args: &[Expr], ctx: &EvalContext<'_>, caught: fn(&CellValue) -> bool
         // it spent getting there may discard the answer
         ctx.handle_unsupported_since(checkpoint);
         ctx.discard_uncomputable_since(called);
+        ctx.discard_unsupported_shapes_since(shapes);
         ctx.handle_budget_errors_since(spent);
         return value;
     }

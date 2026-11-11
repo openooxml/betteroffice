@@ -190,6 +190,9 @@ pub struct EvalContext<'a> {
     exhausted: Rc<Cell<bool>>,
     unhandled_budget_errors: Rc<Cell<u64>>,
     unsupported_functions: Rc<Cell<u64>>,
+    /// calls of an implemented function in a shape the engine does not
+    /// support; no handler answers for them.
+    unsupported_shapes: Rc<Cell<u64>>,
     /// names of the uncomputable and unknown functions this evaluation
     /// called, in call order; no handler answers for them.
     uncomputable: Rc<RefCell<Vec<String>>>,
@@ -269,6 +272,7 @@ impl<'a> EvalContext<'a> {
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
             unsupported_functions: Rc::new(Cell::new(0)),
+            unsupported_shapes: Rc::new(Cell::new(0)),
             uncomputable: Rc::new(RefCell::new(Vec::new())),
             other_workbook: Rc::new(Cell::new(false)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
@@ -316,6 +320,7 @@ impl<'a> EvalContext<'a> {
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
             unsupported_functions: Rc::new(Cell::new(0)),
+            unsupported_shapes: Rc::new(Cell::new(0)),
             uncomputable: Rc::new(RefCell::new(Vec::new())),
             other_workbook: Rc::new(Cell::new(false)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
@@ -356,6 +361,7 @@ impl<'a> EvalContext<'a> {
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
             unsupported_functions: Rc::new(Cell::new(0)),
+            unsupported_shapes: Rc::new(Cell::new(0)),
             uncomputable: Rc::new(RefCell::new(Vec::new())),
             other_workbook: Rc::new(Cell::new(false)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
@@ -387,6 +393,7 @@ impl<'a> EvalContext<'a> {
             exhausted: Rc::clone(&self.exhausted),
             unhandled_budget_errors: Rc::clone(&self.unhandled_budget_errors),
             unsupported_functions: Rc::clone(&self.unsupported_functions),
+            unsupported_shapes: Rc::clone(&self.unsupported_shapes),
             uncomputable: Rc::clone(&self.uncomputable),
             other_workbook: Rc::clone(&self.other_workbook),
             defined_name_stack: Rc::clone(&self.defined_name_stack),
@@ -410,6 +417,7 @@ impl<'a> EvalContext<'a> {
         let exhausted = self.exhausted.get();
         let errors = self.unhandled_budget_errors.get();
         let unsupported = self.unsupported_functions.get();
+        let shapes = self.unsupported_shapes.get();
         let uncomputable = self.uncomputable_checkpoint();
         let random = self.random_state.get();
         let names = self.defined_name_values.borrow().insertions.len();
@@ -428,6 +436,7 @@ impl<'a> EvalContext<'a> {
             self.exhausted.set(exhausted);
             self.unhandled_budget_errors.set(errors);
             self.unsupported_functions.set(unsupported);
+            self.unsupported_shapes.set(shapes);
             self.discard_uncomputable_since(uncomputable);
             self.random_state.set(random);
             self.defined_name_values.borrow_mut().restore(names);
@@ -563,7 +572,33 @@ impl<'a> EvalContext<'a> {
     /// evaluation's result, rather than being answered by a handler, or an
     /// uncomputable one was called at all.
     pub(crate) fn has_unhandled_unsupported_function(&self) -> bool {
-        self.unsupported_functions.get() != 0 || !self.uncomputable.borrow().is_empty()
+        self.unsupported_functions.get() != 0
+            || self.has_unsupported_shape()
+            || !self.uncomputable.borrow().is_empty()
+    }
+
+    /// notes a call in a shape the engine does not support. like an
+    /// uncomputable call it survives every handler, since what excel made of
+    /// the call is unknown; the cell it reaches shows `#CALC!` when it saved
+    /// no value to keep.
+    pub(crate) fn record_unsupported_shape(&self) {
+        self.unsupported_shapes
+            .set(self.unsupported_shapes.get().saturating_add(1));
+    }
+
+    pub(crate) fn has_unsupported_shape(&self) -> bool {
+        self.unsupported_shapes.get() != 0
+    }
+
+    pub(crate) fn unsupported_shape_checkpoint(&self) -> u64 {
+        self.unsupported_shapes.get()
+    }
+
+    /// forgets the unsupported shapes since `checkpoint`, for an evaluation
+    /// whose value never reaches the result.
+    pub(crate) fn discard_unsupported_shapes_since(&self, checkpoint: u64) {
+        self.unsupported_shapes
+            .set(self.unsupported_shapes.get().min(checkpoint));
     }
 
     /// notes a call the engine cannot compute, offline or at all. unlike
@@ -862,11 +897,12 @@ fn intersect(area: Area, ctx: &EvalContext<'_>) -> CellValue {
 /// a defined name identified by the sheet its lookup resolved against.
 type DefinedNameKey = (SheetId, String);
 
-/// each name's value, whether it reached an engine gap, and the uncomputable
-/// functions it called, per intersection mode.
+/// each name's value, whether it reached an engine gap, whether it made an
+/// unsupported-shape call, and the uncomputable functions it called, per
+/// intersection mode.
 #[derive(Default)]
 struct DefinedNameValues {
-    values: HashMap<(DefinedNameKey, bool), (CellValue, bool, Vec<String>)>,
+    values: HashMap<(DefinedNameKey, bool), (CellValue, bool, bool, Vec<String>)>,
     insertions: Vec<(DefinedNameKey, bool)>,
 }
 
@@ -898,9 +934,14 @@ fn evaluate_defined_name(scope: &Option<String>, name: &str, ctx: &EvalContext<'
         Err(error) => return err(error),
     };
     let memo = (key, ctx.intersects());
-    if let Some((cached, gap, uncomputable)) = ctx.defined_name_values.borrow().values.get(&memo) {
+    if let Some((cached, gap, shape, uncomputable)) =
+        ctx.defined_name_values.borrow().values.get(&memo)
+    {
         if *gap {
             ctx.record_unsupported_function();
+        }
+        if *shape {
+            ctx.record_unsupported_shape();
         }
         for name in uncomputable {
             ctx.record_uncomputable(name.clone());
@@ -913,9 +954,11 @@ fn evaluate_defined_name(scope: &Option<String>, name: &str, ctx: &EvalContext<'
         Err(error) => return err(error),
     };
     let checkpoint = ctx.unsupported_checkpoint();
+    let shapes = ctx.unsupported_shape_checkpoint();
     let called = ctx.uncomputable_checkpoint();
     let value = ctx.inside_defined_name(&binding, evaluate);
     let gap = ctx.unsupported_checkpoint() > checkpoint;
+    let shape = ctx.unsupported_shape_checkpoint() > shapes;
     let uncomputable = ctx
         .uncomputable
         .borrow()
@@ -927,7 +970,7 @@ fn evaluate_defined_name(scope: &Option<String>, name: &str, ctx: &EvalContext<'
     names.insertions.push(memo.clone());
     names
         .values
-        .insert(memo, (value.clone(), gap, uncomputable));
+        .insert(memo, (value.clone(), gap, shape, uncomputable));
     value
 }
 

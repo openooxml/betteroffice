@@ -1659,6 +1659,24 @@ fn eval_node_with(
             reach: None,
         };
     }
+    // no handler knows what excel made of an unsupported shape, so with no
+    // saved value to keep the cell shows the call's own `#CALC!`
+    if !answer && ctx.has_unsupported_shape() {
+        let calc = CellValue::Error {
+            value: ErrorValue::Calc,
+        };
+        let value = match authored {
+            Some(_) => charged_spill(&ctx, cell, authored, calc.into())
+                .map_or(NodeValue::Refused, NodeValue::Spill),
+            None => NodeValue::Scalar(calc),
+        };
+        return Evaluated {
+            value: Some(value),
+            limited: ctx.exhausted(),
+            gap,
+            reach: None,
+        };
+    }
     let reach = match &value {
         NodeValue::Spill(spill) if answer => Some(spill.range),
         _ => None,
