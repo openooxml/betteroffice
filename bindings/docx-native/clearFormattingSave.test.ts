@@ -229,7 +229,7 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
         format(session, '00000043', false);
         return [direct('Body one', false)];
       }],
-      ['a column deleted, the whole table rewritten: bold the table style already gives is not written and the first row reopens bold', (session) => {
+      ['a column deleted: bold the table style already gives is not written and the first row reopens bold', (session) => {
         session.deleteColumn({ anchor: at(0, 1), head: at(0, 1) });
         format(session, '00000041', true);
         return [{ marker: 'Old head', saved: null, reopens: true }];
@@ -331,6 +331,48 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
         const saved = reopened.storySegments(reopenedCell).find((entry) => entry.kind === 'text' && entry.text.includes('Peer cell'));
         expect(saved?.kind === 'text' && { bold: Boolean(saved.attributes.bold), italic: Boolean(saved.attributes.italic) })
           .toEqual({ bold: true, italic: false });
+      } finally {
+        reopened.destroy();
+      }
+    } finally {
+      peer.destroy();
+      host.destroy();
+    }
+  });
+
+  test(`${engine}: a peer bootstrapped from an update keeps the table style's bold when clearing formatting over a body range spanning the table`, async () => {
+    const cell = (paraId: string, text: string) =>
+      `<w:tc><w:tcPr><w:tcW w:w="2400" w:type="dxa"/></w:tcPr><w:p w14:paraId="${paraId}"><w:r><w:rPr><w:i/></w:rPr><w:t>${text}</w:t></w:r></w:p></w:tc>`;
+    const body = '<w:p w14:paraId="00000071"><w:r><w:rPr><w:b/></w:rPr><w:t>Before table</w:t></w:r></w:p>' +
+      '<w:tbl><w:tblPr><w:tblStyle w:val="BoldGrid"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/><w:gridCol w:w="2400"/></w:tblGrid>' +
+      `<w:tr>${cell('00000072', 'Peer left')}${cell('00000073', 'Peer right')}</w:tr>` +
+      '</w:tbl><w:p w14:paraId="00000074"><w:r><w:rPr><w:b/></w:rPr><w:t>After table</w:t></w:r></w:p>';
+    const markers = ['Before table', 'Peer left', 'Peer right', 'After table'];
+    const formattingOf = (session: Session, marker: string) => {
+      for (const { story } of session.listStories().stories) {
+        const segment = session.storySegments(story).find((entry) => entry.kind === 'text' && entry.text.includes(marker));
+        if (segment?.kind === 'text') return { bold: Boolean(segment.attributes.bold), italic: Boolean(segment.attributes.italic) };
+      }
+      return undefined;
+    };
+    const expected = [
+      { bold: false, italic: false },
+      { bold: true, italic: false },
+      { bold: true, italic: false },
+      { bold: false, italic: false },
+    ];
+    const bytes = await fixture(body);
+    const host = await yrs.createYrsSession({ clientId: 83 });
+    const peer = await yrs.createYrsSession({ clientId: 84 });
+    try {
+      const hostMetadata = host.seedFromDocx(bytes);
+      peer.bootstrapPeer(host.encodeState(), host.encodePeerMetadata(), bytes, hostMetadata);
+      peer.clearFormatting(whole(peer, '00000071', '00000074'));
+      expect(markers.map((marker) => formattingOf(peer, marker))).toEqual(expected);
+      const { xml, reopened } = await saveAndReopen(yrs, peer);
+      try {
+        expect(markers.map((marker) => savedRunProperties(xml, marker))).toEqual([null, null, null, null]);
+        expect(markers.map((marker) => formattingOf(reopened, marker))).toEqual(expected);
       } finally {
         reopened.destroy();
       }
