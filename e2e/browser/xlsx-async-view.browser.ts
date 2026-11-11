@@ -168,8 +168,8 @@ async function wheel(page: Page, dx: number, dy: number) {
 
 async function selectShowcaseChart(page: Page) {
   const box = (await canvas(page).boundingBox())!;
-  const left = [16, 10, 14, 14, 10, 12, 8.43]
-    .reduce((sum, width) => sum + Math.round((width * 7 + 5) / 7 * 256) / 256 * 7, 0);
+  const left = [16, 10, 14, 14, 10, 12]
+    .reduce((sum, width) => sum + Math.floor((256 * width + 18) / 256 * 7), 64);
   await page.mouse.click(box.x + left + 40, box.y + 80);
   await expect(page.getByTestId('xlsx-chart-selection')).toBeVisible();
   return (await page.getByTestId('xlsx-chart-selection').boundingBox())!;
