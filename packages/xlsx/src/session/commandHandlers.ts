@@ -320,11 +320,13 @@ function resolveReplayOp(handle: WorkbookHandle, state: WorkbookCommandState, co
       case 'applyFormat': op.args[0] = target.sheet; op.args[1] = target.range; break;
       case 'setActiveSheet': op.args[0] = target.sheet; break;
       case 'moveChart':
+      case 'moveChart':
+      case 'resizeChart':
       case 'moveRange':
       case 'fillRange': op.args[0] = target.sheet; break;
       default: throw new WorkbookCommandRefusal('invalid-command');
     }
-  } else if (['editCell', 'editCells', 'patchRangeStyle', 'setNumberFormat', 'applyFormat', 'setActiveSheet', 'moveChart', 'moveRange', 'fillRange'].includes(op.method)) numericSheet();
+  } else if (['editCell', 'editCells', 'patchRangeStyle', 'setNumberFormat', 'applyFormat', 'setActiveSheet', 'moveChart', 'resizeChart', 'moveRange', 'fillRange'].includes(op.method)) numericSheet();
   return op;
 }
 
@@ -381,6 +383,7 @@ function preflight(handle: WorkbookHandle, state: WorkbookCommandState, op: Work
       break;
     case 'setActiveSheet':
     case 'moveChart':
+    case 'resizeChart':
     case 'moveRange': sheetTarget(handle, op.args[0], { kind: 'a1', a1: 'A1' }); break;
     case 'fillRange': {
       const [sheet, source, destination] = op.args;
@@ -470,6 +473,10 @@ export function classifyRefusal(error: unknown, method?: WorkbookReplayMethod): 
     /^chart .+ cannot be resized: a one-cell extent is not written back$/.test(error.message) ||
     /^chart .+ cannot change its anchor kind$/.test(error.message)
   )) return structuralRefusal(error.message);
+  if (method === 'resizeChart' &&
+    /^(?:chart .+ is pinned to the sheet and cannot be resized|chart .+ cannot be resized: a one-cell extent is not written back|chart .+ cannot be resized to that size)$/.test(error.message)) {
+    return structuralRefusal(error.message);
+  }
   if (method === 'moveRange' && (
     /^range move cannot safely preserve .+$/.test(error.message) ||
     /^.+ contains worksheet features a cell move cannot safely preserve$/.test(error.message) ||
@@ -500,11 +507,12 @@ export function classifyRefusal(error: unknown, method?: WorkbookReplayMethod): 
     /^(?:chart reference exceeds the supported length|chart reference contains a character xml cannot carry|sheet name contains a character xml cannot carry, and the workbook references the sheet)$/.test(error.message) ||
     /^the (?:data validation|extension data validation|extension conditional format|sparkline|extension) formulas on sheet .+ cannot follow the sheet (?:rename|removal)$/.test(error.message)
   )) return new WorkbookCommandRefusal('invalid-step');
-  if ((method === 'applyOps' || method === 'moveChart') &&
+  if ((method === 'applyOps' || method === 'moveChart' || method === 'resizeChart') &&
     /^(?:anchor offset is out of range|anchor extent is not positive|anchor corners are inverted or coincident|anchor cell is outside the worksheet grid|anchor extends beyond the worksheet grid)$/.test(error.message)) {
     return new WorkbookCommandRefusal('invalid-step');
   }
   if ((method === 'applyOps' && /^bad ops: /.test(error.message)) ||
+    (method === 'resizeChart' && /^bad chart resize args: /.test(error.message)) ||
     (method === 'applyFormat' && /^bad format args: /.test(error.message)) ||
     (method === 'editCells' && /^bad edit args: /.test(error.message)) ||
     (method === 'moveRange' && /^bad (?:move range args|range|move destination): /.test(error.message)) ||
@@ -512,7 +520,7 @@ export function classifyRefusal(error: unknown, method?: WorkbookReplayMethod): 
     (method === 'applyEdits' && /^malformed request: /.test(error.message))) {
     return new WorkbookCommandRefusal('invalid-command');
   }
-  if ((method === 'applyOps' || method === 'moveChart' || method === 'moveRange' || method === 'fillRange') && (
+  if ((method === 'applyOps' || method === 'moveChart' || method === 'resizeChart' || method === 'moveRange' || method === 'fillRange') && (
     /^(?:sheet(?: index)?|row|column) \d+ (?:is )?out of range$/.test(error.message) ||
     /^cell row \d+, column \d+ is out of range$/.test(error.message) ||
     /^sheet \d+ is not an editable worksheet$/.test(error.message) ||

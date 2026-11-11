@@ -2,12 +2,12 @@
 use betteroffice_xlsx::RenderOptions;
 use betteroffice_xlsx::{
     AnchorCell, AnchorEditAs, AnchorExtent, CalculationOptions, Cell, CellInput, CellRange,
-    CellRef, CellState, CellValue, ChartAnchor, ChartRef, ChartRefKind, ColStyle,
+    CellRef, CellState, CellValue, ChartAnchor, ChartRef, ChartRefKind, ChartResize, ColStyle,
     DEFAULT_TEXT_SEARCH_LIMIT, DefinedName, DrawCmd, EditProfile, Error, ErrorValue, FreezePane,
     GridGeometry, Hyperlink, MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID,
     MAX_COLLABORATION_STATE_VECTOR_ENTRIES, MAX_ROWS, NumberFormatKind, NumberFormatMutation, Op,
     ProposalEditInput, ProposalRequest, Sheet, SheetChart, SheetId, StylePatch, Stylesheet,
-    UpdateOrigin, Viewport, Workbook, WorkbookModel,
+    UpdateOrigin, Viewport, Workbook, WorkbookModel, resolve_chart_anchor,
 };
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -10129,6 +10129,237 @@ fn a_moved_chart_survives_a_save_and_undoes_in_one_step() {
     assert_eq!(workbook.model().sheets[0].charts[0].anchor, before);
     workbook.redo(CalculationOptions::default()).unwrap();
     assert_eq!(workbook.model().sheets[0].charts[0].anchor, moved);
+}
+
+/// Resizing a two-cell chart is one undo step that survives a save and reopen:
+/// both corners reach the drawing part, the anchor resolves back to the dragged
+/// rect, and the way the anchor follows a grid edit is untouched.
+#[test]
+fn a_resized_chart_survives_a_save_and_undoes_in_one_step() {
+    let mut workbook = Workbook::open(&charted_fixture()).unwrap();
+    let before = workbook.model().sheets[0].charts[0].anchor;
+    let geometry = GridGeometry::new(&workbook.model().sheets[0], &workbook.model().styles);
+    let before_rect = resolve_chart_anchor(before, &geometry, 0, 0).unwrap().rect;
+
+    assert!(
+        workbook
+            .resize_chart(
+                SheetId(0),
+                "xl/drawings/drawing1.xml#0",
+                ChartResize {
+                    left: 0.0,
+                    top: 0.0,
+                    right: 96.0,
+                    bottom: 48.0,
+                },
+                CalculationOptions::default(),
+            )
+            .unwrap()
+            .applied
+    );
+    let resized = workbook.model().sheets[0].charts[0].anchor;
+    assert_ne!(resized, before);
+    assert_eq!(
+        resized.edit_as(),
+        AnchorEditAs::OneCell,
+        "a resize must not change how the anchor follows a grid edit"
+    );
+    let after_rect = resolve_chart_anchor(resized, &geometry, 0, 0).unwrap().rect;
+    assert_eq!(after_rect.x, before_rect.x, "the left edge did not move");
+    assert_eq!(after_rect.y, before_rect.y, "the top edge did not move");
+    assert!(
+        (after_rect.w - (before_rect.w + 96.0)).abs() < 0.5,
+        "{after_rect:?} after {before_rect:?}"
+    );
+    assert!(
+        (after_rect.h - (before_rect.h + 48.0)).abs() < 0.5,
+        "{after_rect:?} after {before_rect:?}"
+    );
+
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(reopened.model().sheets[0].charts[0].anchor, resized);
+
+    workbook.undo(CalculationOptions::default()).unwrap();
+    assert_eq!(workbook.model().sheets[0].charts[0].anchor, before);
+    let undone = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(undone.model().sheets[0].charts[0].anchor, before);
+    workbook.redo(CalculationOptions::default()).unwrap();
+    assert_eq!(workbook.model().sheets[0].charts[0].anchor, resized);
+}
+
+/// A resize is clamped to a pixel and to the grid rather than collapsing into
+/// an inverted anchor no save could write.
+#[test]
+fn a_resize_keeps_a_pixel_of_chart_on_the_sheet() {
+    let mut workbook = Workbook::open(&charted_fixture()).unwrap();
+    let before = workbook.model().sheets[0].charts[0].anchor;
+    let geometry = GridGeometry::new(&workbook.model().sheets[0], &workbook.model().styles);
+    let before_rect = resolve_chart_anchor(before, &geometry, 0, 0).unwrap().rect;
+
+    let frame = "xl/drawings/drawing1.xml#0";
+    workbook
+        .resize_chart(
+            SheetId(0),
+            frame,
+            ChartResize {
+                left: -10_000.0,
+                top: -10_000.0,
+                right: -(before_rect.w as f32) - 500.0,
+                bottom: -(before_rect.h as f32) - 500.0,
+            },
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let resized = workbook.model().sheets[0].charts[0].anchor;
+    let rect = resolve_chart_anchor(resized, &geometry, 0, 0).unwrap().rect;
+    assert_eq!(rect.x, 0.0, "the left edge stops at the sheet");
+    assert_eq!(rect.y, 0.0, "the top edge stops at the sheet");
+    assert!(rect.w >= 1.0, "{rect:?}");
+    assert!(rect.h >= 1.0, "{rect:?}");
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(reopened.model().sheets[0].charts[0].anchor, resized);
+
+    assert!(
+        !workbook
+            .resize_chart(
+                SheetId(0),
+                frame,
+                ChartResize::default(),
+                CalculationOptions::default(),
+            )
+            .unwrap()
+            .applied,
+        "a resize with no edge movement changes nothing"
+    );
+}
+
+/// A one-cell anchor keeps its size in `xdr:ext`, which a save never rewrites,
+/// and an absolute anchor carries its position in attributes; resizing either
+/// is refused before anything changes.
+#[test]
+fn resizing_refuses_a_one_cell_and_an_absolute_anchor() {
+    let one_cell = {
+        let mut parts = ooxml_opc::unzip_parts(&charted_fixture()).unwrap();
+        let drawing = String::from_utf8(CHART_DRAWING.to_vec())
+            .unwrap()
+            .replace(
+                r#"<xdr:twoCellAnchor editAs="oneCell">"#,
+                "<xdr:oneCellAnchor>",
+            )
+            .replace(
+                "<xdr:to><xdr:col>8</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>19</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>",
+                "",
+            )
+            .replace("</xdr:twoCellAnchor>", "</xdr:oneCellAnchor>")
+            .replace(
+                "<xdr:graphicFrame>",
+                r#"<xdr:ext cx="1905000" cy="1143000"/><xdr:graphicFrame>"#,
+            );
+        set_test_part(&mut parts, "xl/drawings/drawing1.xml", drawing.into_bytes());
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    };
+    let absolute = {
+        let mut parts = ooxml_opc::unzip_parts(&charted_fixture()).unwrap();
+        let drawing = String::from_utf8(CHART_DRAWING.to_vec())
+            .unwrap()
+            .replace(
+                r#"<xdr:twoCellAnchor editAs="oneCell"><xdr:from><xdr:col>2</xdr:col><xdr:colOff>12700</xdr:colOff><xdr:row>4</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>8</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>19</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>"#,
+                r#"<xdr:absoluteAnchor><xdr:pos x="95250" y="190500"/><xdr:ext cx="1905000" cy="1143000"/>"#,
+            )
+            .replace("</xdr:twoCellAnchor>", "</xdr:absoluteAnchor>");
+        set_test_part(&mut parts, "xl/drawings/drawing1.xml", drawing.into_bytes());
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    };
+
+    for (bytes, kind, reason) in [
+        (one_cell, "OneCell", "one-cell extent"),
+        (absolute, "Absolute", "pinned"),
+    ] {
+        let mut workbook = Workbook::open(&bytes).unwrap();
+        assert_eq!(
+            match workbook.model().sheets[0].charts[0].anchor {
+                ChartAnchor::OneCell { .. } => "OneCell",
+                ChartAnchor::Absolute { .. } => "Absolute",
+                ChartAnchor::TwoCell { .. } => "TwoCell",
+            },
+            kind
+        );
+        let before = workbook.model().sheets[0].charts[0].anchor;
+        let saved = workbook.save().unwrap();
+        let error = workbook
+            .resize_chart(
+                SheetId(0),
+                "xl/drawings/drawing1.xml#0",
+                ChartResize {
+                    left: 0.0,
+                    top: 0.0,
+                    right: 50.0,
+                    bottom: 50.0,
+                },
+                CalculationOptions::default(),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::InvalidOperation(message) if message.contains(reason)),
+            "{error:?}"
+        );
+        assert_eq!(workbook.model().sheets[0].charts[0].anchor, before);
+        assert_eq!(
+            workbook.save().unwrap(),
+            saved,
+            "a refused resize must leave the package alone"
+        );
+    }
+}
+
+/// One drawing anchor held by two sheets is one element in one part, so a
+/// resize repins every sheet holding it and undo takes them back together.
+#[test]
+fn a_resize_repins_every_sheet_sharing_the_drawing() {
+    let mut workbook = Workbook::open(&shared_drawing_fixture()).unwrap();
+    assert_eq!(
+        workbook.model().sheets[1].charts[0].drawing,
+        workbook.model().sheets[0].charts[0].drawing,
+        "the fixture must share one drawing"
+    );
+    let before = workbook.model().sheets[0].charts[0].anchor;
+
+    assert!(
+        workbook
+            .resize_chart(
+                SheetId(0),
+                "xl/drawings/drawing1.xml#0",
+                ChartResize {
+                    left: 0.0,
+                    top: 0.0,
+                    right: 48.0,
+                    bottom: 24.0,
+                },
+                CalculationOptions::default(),
+            )
+            .unwrap()
+            .applied
+    );
+    let resized = workbook.model().sheets[0].charts[0].anchor;
+    assert_ne!(resized, before);
+    assert_eq!(
+        workbook.model().sheets[1].charts[0].anchor,
+        resized,
+        "the sheet sharing the anchor must follow it"
+    );
+
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(reopened.model().sheets[0].charts[0].anchor, resized);
+    assert_eq!(reopened.model().sheets[1].charts[0].anchor, resized);
+
+    assert!(
+        workbook
+            .undo(CalculationOptions::default())
+            .unwrap()
+            .applied
+    );
+    assert_eq!(workbook.model().sheets[0].charts[0].anchor, before);
+    assert_eq!(workbook.model().sheets[1].charts[0].anchor, before);
 }
 
 /// One chart part can back two anchors on a sheet, so a part cannot name a

@@ -243,6 +243,107 @@ fn cell_position(cell: AnchorCell, geometry: &GridGeometry) -> Result<(f64, f64)
     ))
 }
 
+/// Pixel movement of a chart frame's four edges, for a resize gesture. Each
+/// value slides that edge in content pixels: a positive value moves the left
+/// or right edge right and the top or bottom edge down, a negative one back.
+/// The engine turns the resulting rect into the anchor a save can write.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ChartResize {
+    pub left: f32,
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
+}
+
+impl ChartResize {
+    fn is_finite(self) -> bool {
+        [self.left, self.top, self.right, self.bottom]
+            .into_iter()
+            .all(f32::is_finite)
+    }
+
+    fn is_empty(self) -> bool {
+        self.left == 0.0 && self.top == 0.0 && self.right == 0.0 && self.bottom == 0.0
+    }
+}
+
+/// The smallest frame a resize may leave. A corner landing on the other would
+/// read back as an inverted anchor, which no save can write.
+pub const MIN_CHART_EXTENT_PX: f32 = 1.0;
+
+/// The anchor `anchor` would carry after its edges move by `edges` viewport
+/// pixels, clamped to the grid and to a 1x1px minimum. `None` for anything but
+/// a two-cell anchor: a one-cell anchor's size lives in `xdr:ext`, which a save
+/// never rewrites, and an absolute anchor carries its position in attributes.
+pub fn resized_chart_anchor(
+    anchor: ChartAnchor,
+    geometry: &GridGeometry,
+    edges: ChartResize,
+) -> Option<ChartAnchor> {
+    let ChartAnchor::TwoCell { edit_as, .. } = anchor else {
+        return None;
+    };
+    if !edges.is_finite() {
+        return None;
+    }
+    if edges.is_empty() {
+        return Some(anchor);
+    }
+    let rect = resolve_chart_anchor(anchor, geometry, 0, 0).ok()?.rect;
+    let sheet_width = f64::from(geometry.col_x(MAX_COLS));
+    let sheet_height = f64::from(geometry.row_y(MAX_ROWS));
+    let (x1, x2) = clamp_resized_edges(
+        rect.x,
+        rect.x + rect.w,
+        sheet_width,
+        f64::from(edges.left),
+        f64::from(edges.right),
+    );
+    let (y1, y2) = clamp_resized_edges(
+        rect.y,
+        rect.y + rect.h,
+        sheet_height,
+        f64::from(edges.top),
+        f64::from(edges.bottom),
+    );
+    Some(ChartAnchor::TwoCell {
+        from: anchor_cell_at(x1, y1, geometry)?,
+        to: anchor_cell_at(x2, y2, geometry)?,
+        edit_as,
+    })
+}
+
+/// Applies one axis of a resize: both edges slide by their deltas, stay on the
+/// sheet, and keep at least [`MIN_CHART_EXTENT_PX`] between them. When a drag
+/// collapses the frame, the edge being dragged gives way first.
+fn clamp_resized_edges(
+    start: f64,
+    end: f64,
+    extent: f64,
+    start_delta: f64,
+    end_delta: f64,
+) -> (f64, f64) {
+    let min = f64::from(MIN_CHART_EXTENT_PX);
+    let mut start = (start + start_delta).clamp(0.0, extent);
+    let mut end = (end + end_delta).clamp(0.0, extent);
+    if end - start < min {
+        if start_delta != 0.0 && end_delta == 0.0 {
+            start = end - min;
+        } else {
+            end = start + min;
+        }
+        if end > extent {
+            end = extent;
+            start = (end - min).max(0.0);
+        }
+        if start < 0.0 {
+            start = 0.0;
+            end = min.min(extent);
+        }
+    }
+    (start, end)
+}
+
 /// The anchor `anchor` would carry after sliding `dx`/`dy` viewport pixels,
 /// clamped so it never leaves the grid. `None` for an absolute anchor, which
 /// is pinned to the sheet and whose position a save cannot rewrite.
@@ -381,6 +482,7 @@ fn visible_charts<'a>(
                 rect,
                 clip,
                 movable: !matches!(chart.anchor, ChartAnchor::Absolute { .. }),
+                resizable: matches!(chart.anchor, ChartAnchor::TwoCell { .. }),
             },
         });
     }

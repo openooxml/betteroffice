@@ -318,6 +318,13 @@ impl Document {
             .map_err(message)
     }
 
+    pub fn resize_chart_json(&mut self, args: &str) -> Result<String, EngineError> {
+        let now_serial = (self.host.now_serial)()?;
+        self.session
+            .resize_chart_json(args, now_serial)
+            .map_err(message)
+    }
+
     pub fn png_display_list_json(&self, viewport_json: &str) -> Result<String, EngineError> {
         self.session
             .png_display_list_json(viewport_json)
