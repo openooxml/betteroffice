@@ -16,7 +16,7 @@ impl Document {
                 page.page_index
             )));
         }
-        let images = self.image_bytes_by_rel_id();
+        let images = self.scoped_image_bytes();
         docx_pdf::export_pdf_with_fonts_and_images(&display_list, &fonts.store, &images)
             .map_err(|error| Error::Render(error.to_string()))
     }

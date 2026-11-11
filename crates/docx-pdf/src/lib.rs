@@ -8,21 +8,26 @@
 //! page borders. Links and tagged PDF are follow-up work.
 
 use std::collections::BTreeMap;
+use std::io::Write;
 
 use docx_layout::display_list::{
-    DecorationPrimitive, DisplayList, DisplayPage, GlyphRunPrimitive, ImagePrimitive,
-    LinePrimitive, PageBorderPrimitive, PageBorderZOrder, Primitive, RectPrimitive,
-    ShapePathCommand, ShapePrimitive, TextRunPrimitive,
+    DecorationPrimitive, DisplayList, DisplayPage, LinePrimitive, PageBorderPrimitive,
+    PageBorderZOrder, Primitive, RectPrimitive, ShapePathCommand, ShapePrimitive, TextRunPrimitive,
 };
+use flate2::Compression;
+use flate2::write::ZlibEncoder;
 use ooxml_text::FontStore;
 use pdf_writer::types::{CidFontType, FontFlags, SystemInfo};
-use pdf_writer::{Content, Finish, Name, Pdf, Rect, Ref, Str};
+use pdf_writer::{Content, Filter, Finish, Name, Pdf, Rect, Ref, Str};
 use serde_json::Number;
 
 use crate::font::{EmbeddedFont, FontError};
 
 mod font;
 mod image;
+mod link;
+mod text;
+mod units;
 
 /// PDF export failed.
 #[derive(Debug)]
@@ -64,10 +69,42 @@ const PX_TO_PT: f32 = 72.0 / 96.0;
 const FONT_NAME: Name<'static> = Name(b"F0");
 
 #[derive(Clone)]
-struct ImageRefs {
-    resource: String,
-    id: Ref,
-    smask: Option<Ref>,
+pub(crate) struct ImageRefs {
+    pub(crate) resource: String,
+    pub(crate) id: Ref,
+    pub(crate) smask: Option<Ref>,
+}
+
+#[derive(Clone, Copy)]
+enum ImagePart<'a> {
+    Body,
+    HeaderFooter(&'a str),
+    Notes(Option<&'a str>),
+}
+
+fn scoped_image_key(part: ImagePart<'_>, rel_id: &str) -> String {
+    match part {
+        ImagePart::Body => format!("\u{1f}{rel_id}"),
+        ImagePart::HeaderFooter(region_rel_id) => format!("hf:{region_rel_id}\u{1f}{rel_id}"),
+        ImagePart::Notes(kind) => {
+            let part = if kind == Some("endnote") {
+                "endnotes"
+            } else {
+                "footnotes"
+            };
+            format!("{part}\u{1f}{rel_id}")
+        }
+    }
+}
+
+fn image_refs<'a>(
+    images: &'a BTreeMap<String, ImageRefs>,
+    part: ImagePart<'_>,
+    rel_id: &str,
+) -> Option<&'a ImageRefs> {
+    images
+        .get(&scoped_image_key(part, rel_id))
+        .or_else(|| images.get(rel_id))
 }
 
 #[derive(Clone, Copy)]
@@ -98,8 +135,12 @@ pub fn export_pdf_with_fonts(
     export_pdf_inner(display_list, Some(store), &BTreeMap::new())
 }
 
-/// Export with embedded fonts and registered image bytes keyed by relationship
-/// id (or a `data:` URL in the primitive).
+/// Export with embedded fonts and registered image bytes.
+///
+/// Keys are the writer's scoped relationship keys (`"\u{1f}rId5"` for body,
+/// `"hf:<part>\u{1f}rId5"` for header/footer, `"footnotes\u{1f}rId5"` or
+/// `"endnotes\u{1f}rId5"` for notes). An unscoped `rel_id` and a `data:` URL
+/// in the primitive are accepted as fallbacks.
 pub fn export_pdf_with_fonts_and_images(
     display_list: &DisplayList,
     store: &FontStore,
@@ -121,37 +162,41 @@ fn export_pdf_inner(
     let catalog_id = Ref::new(1);
     let page_tree_id = Ref::new(2);
     let text_font_id = Ref::new(3);
-    let has_text = display_list.pages.iter().any(|page| {
-        page.primitives
-            .iter()
-            .chain(
-                page.header
-                    .iter()
-                    .flat_map(|region| region.primitives.iter())
-                    .chain(
-                        page.footer
-                            .iter()
-                            .flat_map(|region| region.primitives.iter()),
-                    )
-                    .chain(
-                        page.note_areas
-                            .iter()
-                            .flat_map(|region| region.primitives.iter())
-                            .chain(
-                                page.note_areas
-                                    .iter()
-                                    .flat_map(|region| region.separator_primitives.iter()),
-                            ),
-                    ),
-            )
-            .any(|primitive| matches!(primitive, Primitive::Text(_)))
-    });
+    let has_text = store.map_or(true, |store| store.font_count() == 0)
+        && display_list.pages.iter().any(|page| {
+            page.primitives
+                .iter()
+                .chain(
+                    page.header
+                        .iter()
+                        .flat_map(|region| region.primitives.iter())
+                        .chain(
+                            page.footer
+                                .iter()
+                                .flat_map(|region| region.primitives.iter()),
+                        )
+                        .chain(
+                            page.note_areas
+                                .iter()
+                                .flat_map(|region| region.primitives.iter())
+                                .chain(
+                                    page.note_areas
+                                        .iter()
+                                        .flat_map(|region| region.separator_primitives.iter()),
+                                ),
+                        ),
+                )
+                .any(|primitive| matches!(primitive, Primitive::Text(_)))
+        });
     pdf.catalog(catalog_id).pages(page_tree_id);
     if has_text {
         pdf.type1_font(text_font_id).base_font(Name(b"Helvetica"));
     }
 
-    let font_uses = font::collect(display_list);
+    let font_uses = match store {
+        Some(store) => font::collect_with_text(display_list, store),
+        None => font::collect(display_list),
+    };
     if store.is_none() && !font_uses.is_empty() {
         return Err(PdfError::Unsupported("glyph runs need embedded fonts"));
     }
@@ -187,52 +232,55 @@ fn export_pdf_inner(
     let mut image_objects = Vec::new();
     if store.is_some() {
         for page in &display_list.pages {
-            for primitive in page.primitives.iter().chain(
-                page.header
-                    .iter()
-                    .flat_map(|region| region.primitives.iter())
-                    .chain(
-                        page.footer
-                            .iter()
-                            .flat_map(|region| region.primitives.iter()),
-                    )
-                    .chain(
-                        page.note_areas
-                            .iter()
-                            .flat_map(|region| region.primitives.iter())
-                            .chain(
-                                page.note_areas
-                                    .iter()
-                                    .flat_map(|region| region.separator_primitives.iter()),
-                            ),
-                    ),
-            ) {
-                let Primitive::Image(image) = primitive else {
-                    continue;
-                };
-                if image_map.contains_key(&image.rel_id) {
-                    continue;
+            for primitive in &page.primitives {
+                collect_image(
+                    primitive,
+                    ImagePart::Body,
+                    images,
+                    &mut image_map,
+                    &mut image_objects,
+                    &mut next_id,
+                );
+            }
+            if let Some(header) = &page.header {
+                for primitive in &header.primitives {
+                    collect_image(
+                        primitive,
+                        ImagePart::HeaderFooter(&header.r_id),
+                        images,
+                        &mut image_map,
+                        &mut image_objects,
+                        &mut next_id,
+                    );
                 }
-                let Some(bytes) = image_bytes(images, &image.rel_id) else {
-                    return Err(PdfError::Image(format!(
-                        "no bytes registered for relationship {}",
-                        image.rel_id
-                    )));
-                };
-                let decoded =
-                    image::DecodedImage::from_bytes(bytes.as_ref()).map_err(PdfError::Image)?;
-                let smask = decoded.alpha.as_ref().map(|_| {
-                    let id = Ref::new(next_id + 1);
-                    id
-                });
-                let refs = ImageRefs {
-                    resource: format!("Im{}", image_map.len() + 1),
-                    id: Ref::new(next_id),
-                    smask,
-                };
-                next_id += if smask.is_some() { 2 } else { 1 };
-                image_map.insert(image.rel_id.clone(), refs.clone());
-                image_objects.push((refs, decoded));
+            }
+            if let Some(footer) = &page.footer {
+                for primitive in &footer.primitives {
+                    collect_image(
+                        primitive,
+                        ImagePart::HeaderFooter(&footer.r_id),
+                        images,
+                        &mut image_map,
+                        &mut image_objects,
+                        &mut next_id,
+                    );
+                }
+            }
+            for note in &page.note_areas {
+                for primitive in note
+                    .separator_primitives
+                    .iter()
+                    .chain(note.primitives.iter())
+                {
+                    collect_image(
+                        primitive,
+                        ImagePart::Notes(note.kind.as_deref()),
+                        images,
+                        &mut image_map,
+                        &mut image_objects,
+                        &mut next_id,
+                    );
+                }
             }
         }
     }
@@ -241,22 +289,58 @@ fn export_pdf_inner(
         write_image(&mut pdf, refs, decoded);
     }
 
+    let mut opacity_map: BTreeMap<u32, (String, Ref)> = BTreeMap::new();
+    for page in &display_list.pages {
+        for primitive in all_primitives(page) {
+            let Some(key) = primitive_opacity(primitive) else {
+                continue;
+            };
+            if opacity_map.contains_key(&key) {
+                continue;
+            }
+            let name = format!("GS{}", opacity_map.len() + 1);
+            let id = Ref::new(next_id);
+            next_id += 1;
+            let alpha = key as f32 / 1000.0;
+            pdf.ext_graphics(id)
+                .non_stroking_alpha(alpha)
+                .stroking_alpha(alpha);
+            opacity_map.insert(key, (name, id));
+        }
+    }
+
     let mut page_ids = Vec::with_capacity(display_list.pages.len());
     for page in &display_list.pages {
         let page_id = Ref::new(next_id);
         let content_id = Ref::new(next_id + 1);
         next_id += 2;
 
+        let links = link::collect_links(page);
+        let annotation_ids: Vec<Ref> = (0..links.len())
+            .map(|index| Ref::new(next_id + index as i32))
+            .collect();
+        next_id += links.len() as i32;
+
         let width = points(&page.width, "page width")?;
         let height = points(&page.height, "page height")?;
-        let content = page_content(page, width, height, &font_map, &image_map)?;
-
-        pdf.stream(content_id, &content);
+        let content = deflate(&page_content(
+            page,
+            width,
+            height,
+            &font_map,
+            &image_map,
+            store,
+            &opacity_map,
+        )?);
+        pdf.stream(content_id, &content).filter(Filter::FlateDecode);
         let mut writer = pdf.page(page_id);
         writer
             .parent(page_tree_id)
             .media_box(Rect::new(0.0, 0.0, width, height));
         writer.contents(content_id);
+        if !annotation_ids.is_empty() {
+            writer.annotations(annotation_ids.iter().copied());
+        }
         let mut resources = writer.resources();
         let mut fonts = resources.fonts();
         if has_text {
@@ -274,8 +358,18 @@ fn export_pdf_inner(
             }
             xobjects.finish();
         }
+        if !opacity_map.is_empty() {
+            let mut states = resources.ext_g_states();
+            for (name, id) in opacity_map.values() {
+                states.pair(Name(name.as_bytes()), *id);
+            }
+            states.finish();
+        }
         resources.finish();
         writer.finish();
+        for (id, annotation) in annotation_ids.iter().zip(&links) {
+            link::write_annotation(&mut pdf, *id, page_id, annotation);
+        }
         page_ids.push(page_id);
     }
 
@@ -283,6 +377,12 @@ fn export_pdf_inner(
         .kids(page_ids.iter().copied())
         .count(page_ids.len() as i32);
     Ok(pdf.finish())
+}
+
+fn deflate(data: &[u8]) -> Vec<u8> {
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(data).expect("in-memory deflate");
+    encoder.finish().expect("in-memory deflate")
 }
 
 fn write_font(pdf: &mut Pdf, font: &EmbeddedFont, refs: FontRefs) {
@@ -295,7 +395,12 @@ fn write_font(pdf: &mut Pdf, font: &EmbeddedFont, refs: FontRefs) {
 
     {
         let mut cid = pdf.cid_font(refs.cid);
-        cid.subtype(CidFontType::Type2)
+        let subtype = if font.is_cff {
+            CidFontType::Type0
+        } else {
+            CidFontType::Type2
+        };
+        cid.subtype(subtype)
             .base_font(base)
             .system_info(SystemInfo {
                 registry: Str(b"Adobe"),
@@ -303,8 +408,10 @@ fn write_font(pdf: &mut Pdf, font: &EmbeddedFont, refs: FontRefs) {
                 supplement: 0,
             })
             .font_descriptor(refs.descriptor)
-            .default_width(1000.0)
-            .cid_to_gid_map_predefined(Name(b"Identity"));
+            .default_width(1000.0);
+        if !font.is_cff {
+            cid.cid_to_gid_map_predefined(Name(b"Identity"));
+        }
         cid.widths().consecutive(0, font.widths.iter().copied());
     }
 
@@ -323,11 +430,21 @@ fn write_font(pdf: &mut Pdf, font: &EmbeddedFont, refs: FontRefs) {
             .ascent(font.ascent)
             .descent(font.descent)
             .cap_height(font.cap_height)
-            .stem_v(80.0)
-            .font_file2(refs.file);
+            .stem_v(80.0);
+        if font.is_cff {
+            descriptor.font_file3(refs.file);
+        } else {
+            descriptor.font_file2(refs.file);
+        }
     }
 
-    pdf.stream(refs.file, &font.subset);
+    let subset = deflate(&font.subset);
+    let mut stream = pdf.stream(refs.file, &subset);
+    stream.filter(Filter::FlateDecode);
+    if font.is_cff {
+        stream.pair(Name(b"Subtype"), Name(b"OpenType"));
+    }
+    drop(stream);
     pdf.cmap(refs.to_unicode, &font.tounicode);
 }
 
@@ -337,6 +454,8 @@ fn page_content(
     height: f32,
     fonts: &BTreeMap<u32, EmbeddedFont>,
     images: &BTreeMap<String, ImageRefs>,
+    store: Option<&FontStore>,
+    opacities: &BTreeMap<u32, (String, Ref)>,
 ) -> Result<Vec<u8>, PdfError> {
     let mut content = Content::new();
     if let Some(background) = page.background.as_deref() {
@@ -355,12 +474,39 @@ fn page_content(
         paint_page_border(&mut content, page, border)?;
     }
 
-    paint_primitives(&mut content, page, &page.primitives, fonts, images)?;
+    paint_primitives(
+        &mut content,
+        page,
+        &page.primitives,
+        fonts,
+        images,
+        store,
+        opacities,
+        ImagePart::Body,
+    )?;
     if let Some(header) = &page.header {
-        paint_primitives(&mut content, page, &header.primitives, fonts, images)?;
+        paint_primitives(
+            &mut content,
+            page,
+            &header.primitives,
+            fonts,
+            images,
+            store,
+            opacities,
+            ImagePart::HeaderFooter(&header.r_id),
+        )?;
     }
     if let Some(footer) = &page.footer {
-        paint_primitives(&mut content, page, &footer.primitives, fonts, images)?;
+        paint_primitives(
+            &mut content,
+            page,
+            &footer.primitives,
+            fonts,
+            images,
+            store,
+            opacities,
+            ImagePart::HeaderFooter(&footer.r_id),
+        )?;
     }
     for note in &page.note_areas {
         paint_primitives(
@@ -369,8 +515,20 @@ fn page_content(
             &note.separator_primitives,
             fonts,
             images,
+            store,
+            opacities,
+            ImagePart::Notes(note.kind.as_deref()),
         )?;
-        paint_primitives(&mut content, page, &note.primitives, fonts, images)?;
+        paint_primitives(
+            &mut content,
+            page,
+            &note.primitives,
+            fonts,
+            images,
+            store,
+            opacities,
+            ImagePart::Notes(note.kind.as_deref()),
+        )?;
     }
     for border in page
         .page_borders
@@ -383,22 +541,86 @@ fn page_content(
     Ok(content.finish().into_vec())
 }
 
+fn all_primitives(page: &DisplayPage) -> impl Iterator<Item = &Primitive> {
+    page.primitives.iter().chain(
+        page.header
+            .iter()
+            .flat_map(|region| region.primitives.iter())
+            .chain(
+                page.footer
+                    .iter()
+                    .flat_map(|region| region.primitives.iter()),
+            )
+            .chain(
+                page.note_areas
+                    .iter()
+                    .flat_map(|region| region.primitives.iter())
+                    .chain(
+                        page.note_areas
+                            .iter()
+                            .flat_map(|region| region.separator_primitives.iter()),
+                    ),
+            ),
+    )
+}
+
+fn primitive_opacity(primitive: &Primitive) -> Option<u32> {
+    let value = match primitive {
+        Primitive::Text(text) => text.opacity.as_ref(),
+        Primitive::GlyphRun(run) => run.opacity.as_ref(),
+        Primitive::Image(image) => {
+            return image::opacity_alpha(image)
+                .map(|alpha| (alpha * 1000.0).round() as u32)
+                .filter(|key| *key > 0 && *key < 1000);
+        }
+        _ => None,
+    }?;
+    let alpha = value.as_f64()?;
+    if !alpha.is_finite() || alpha >= 1.0 || alpha <= 0.0 {
+        return None;
+    }
+    Some((alpha * 1000.0).round() as u32)
+}
+
 fn paint_primitives(
     content: &mut Content,
     page: &DisplayPage,
     primitives: &[Primitive],
     fonts: &BTreeMap<u32, EmbeddedFont>,
     images: &BTreeMap<String, ImageRefs>,
+    store: Option<&FontStore>,
+    opacities: &BTreeMap<u32, (String, Ref)>,
+    part: ImagePart<'_>,
 ) -> Result<(), PdfError> {
     for primitive in primitives {
+        let opacity =
+            primitive_opacity(primitive).and_then(|key| opacities.get(&key).map(|(name, _)| name));
+        if let Some(name) = opacity {
+            content.save_state();
+            content.set_parameters(Name(name.as_bytes()));
+        }
         match primitive {
-            Primitive::Text(text) => paint_text(content, page, text)?,
+            Primitive::Text(text) => match store {
+                Some(store) => text::paint_text(content, page, text, fonts, store)?,
+                None => paint_text(content, page, text)?,
+            },
             Primitive::Rect(rect) => paint_rect(content, page, rect)?,
             Primitive::Line(line) => paint_line(content, page, line)?,
-            Primitive::GlyphRun(run) => paint_glyph_run(content, page, run, fonts)?,
-            Primitive::Image(image) => paint_image(content, page, image, images)?,
+            Primitive::GlyphRun(run) => match store {
+                Some(store) => text::paint_glyph_run_with_store(content, page, run, fonts, store)?,
+                None => text::paint_glyph_run(content, page, run, fonts)?,
+            },
+            Primitive::Image(image) => {
+                if let Some(refs) = image_refs(images, part, &image.rel_id) {
+                    let page_height = points(&page.height, "page height")?;
+                    image::paint_image(content, page_height, image, refs)?;
+                }
+            }
             Primitive::Shape(shape) => paint_shape(content, page, shape)?,
             Primitive::Decoration(deco) => paint_decoration(content, page, deco)?,
+        }
+        if opacity.is_some() {
+            content.restore_state();
         }
     }
     Ok(())
@@ -494,78 +716,75 @@ fn paint_text(
     Ok(())
 }
 
+fn collect_image(
+    primitive: &Primitive,
+    part: ImagePart<'_>,
+    images: &BTreeMap<String, Vec<u8>>,
+    image_map: &mut BTreeMap<String, ImageRefs>,
+    image_objects: &mut Vec<(ImageRefs, image::DecodedImage)>,
+    next_id: &mut i32,
+) {
+    let Primitive::Image(image) = primitive else {
+        return;
+    };
+    let key = scoped_image_key(part, &image.rel_id);
+    if image_map.contains_key(&key) {
+        return;
+    }
+    let Some(bytes) = image_bytes(images, part, &image.rel_id) else {
+        return;
+    };
+    let Some(decoded) = image::try_decode(bytes.as_ref()) else {
+        return;
+    };
+    let smask = decoded.alpha.as_ref().map(|_| Ref::new(*next_id + 1));
+    let refs = ImageRefs {
+        resource: format!("Im{}", image_map.len() + 1),
+        id: Ref::new(*next_id),
+        smask,
+    };
+    *next_id += if smask.is_some() { 2 } else { 1 };
+    image_map.insert(key, refs.clone());
+    image_objects.push((refs, decoded));
+}
+
 fn image_bytes<'a>(
     images: &'a BTreeMap<String, Vec<u8>>,
-    key: &str,
+    part: ImagePart<'_>,
+    rel_id: &str,
 ) -> Option<std::borrow::Cow<'a, [u8]>> {
-    if let Some(bytes) = images.get(key) {
+    if let Some(bytes) = images.get(&scoped_image_key(part, rel_id)) {
         return Some(std::borrow::Cow::Borrowed(bytes));
     }
-    image::data_url_bytes(key).map(std::borrow::Cow::Owned)
+    if let Some(bytes) = images.get(rel_id) {
+        return Some(std::borrow::Cow::Borrowed(bytes));
+    }
+    image::data_url_bytes(rel_id).map(std::borrow::Cow::Owned)
 }
 
 fn write_image(pdf: &mut Pdf, refs: &ImageRefs, image: &image::DecodedImage) {
+    let rgb = deflate(&image.rgb);
     {
-        let mut xobject = pdf.image_xobject(refs.id, &image.rgb);
+        let mut xobject = pdf.image_xobject(refs.id, &rgb);
         xobject
             .width(image.width)
             .height(image.height)
             .bits_per_component(8);
         xobject.color_space().device_rgb();
+        xobject.filter(Filter::FlateDecode);
         if let Some(smask) = refs.smask {
             xobject.s_mask(smask);
         }
     }
     if let (Some(smask), Some(alpha)) = (refs.smask, image.alpha.as_ref()) {
-        let mut mask = pdf.image_xobject(smask, alpha);
+        let alpha = deflate(alpha);
+        let mut mask = pdf.image_xobject(smask, &alpha);
         mask.width(image.width)
             .height(image.height)
             .bits_per_component(8);
         mask.color_space().device_gray();
+        mask.filter(Filter::FlateDecode);
     }
-}
-
-fn paint_image(
-    content: &mut Content,
-    page: &DisplayPage,
-    image: &ImagePrimitive,
-    images: &BTreeMap<String, ImageRefs>,
-) -> Result<(), PdfError> {
-    let Some(refs) = images.get(&image.rel_id) else {
-        return Err(PdfError::Image(format!(
-            "no decoded image for relationship {}",
-            image.rel_id
-        )));
-    };
-    let x = points(&image.x, "image x")?;
-    let y = points(&image.y, "image y")?;
-    let w = points(&image.w, "image width")?;
-    let h = points(&image.h, "image height")?;
-    if w <= 0.0 || h <= 0.0 {
-        return Ok(());
-    }
-    let page_height = points(&page.height, "page height")?;
-    let rotation = image
-        .rotation_deg
-        .as_ref()
-        .and_then(Number::as_f64)
-        .unwrap_or(0.0) as f32;
-    content.save_state();
-    if rotation.abs() > f32::EPSILON {
-        let cx = x + w / 2.0;
-        let cy = page_height - y - h / 2.0;
-        let (sin, cos) = (-rotation).to_radians().sin_cos();
-        let a = cos * w;
-        let b = sin * w;
-        let c = -sin * h;
-        let d = cos * h;
-        content.transform([a, b, c, d, cx - (a + c) / 2.0, cy - (b + d) / 2.0]);
-    } else {
-        content.transform([w, 0.0, 0.0, h, x, page_height - y - h]);
-    }
-    content.x_object(Name(refs.resource.as_bytes()));
-    content.restore_state();
-    Ok(())
 }
 
 fn paint_decoration(
@@ -724,54 +943,6 @@ fn paint_shape(
     Ok(())
 }
 
-fn paint_glyph_run(
-    content: &mut Content,
-    page: &DisplayPage,
-    run: &GlyphRunPrimitive,
-    fonts: &BTreeMap<u32, EmbeddedFont>,
-) -> Result<(), PdfError> {
-    if run.hidden || run.glyphs.is_empty() {
-        return Ok(());
-    }
-    let Some(font) = fonts.get(&run.font_id) else {
-        return Err(PdfError::Unsupported("glyph run font was not embedded"));
-    };
-    let rotation = run
-        .rotation_deg
-        .as_ref()
-        .and_then(Number::as_f64)
-        .unwrap_or(0.0);
-    if rotation.abs() > f64::EPSILON {
-        return Err(PdfError::Unsupported("rotated glyph runs"));
-    }
-    let size = (run.size * f64::from(PX_TO_PT)) as f32;
-    let color = parse_color(&run.color).unwrap_or([0.0, 0.0, 0.0]);
-    let page_height = points(&page.height, "page height")?;
-    let horizontal_scale = run
-        .horizontal_scale
-        .as_ref()
-        .and_then(Number::as_f64)
-        .unwrap_or(1.0) as f32;
-
-    content.begin_text();
-    content.set_font(Name(font.resource.as_bytes()), size);
-    content.set_fill_rgb(color[0], color[1], color[2]);
-    if (horizontal_scale - 1.0).abs() > f32::EPSILON {
-        content.set_horizontal_scaling(horizontal_scale * 100.0);
-    }
-    for glyph in &run.glyphs {
-        let Some(glyph_id) = font.glyph(glyph.id) else {
-            return Err(PdfError::Unsupported("glyph missing from subset"));
-        };
-        let x = f64_to_points(glyph.x, "glyph x")?;
-        let y = f64_to_points(glyph.y, "glyph y")?;
-        content.set_text_matrix([1.0, 0.0, 0.0, 1.0, x, page_height - y]);
-        content.show(Str(&glyph_id.to_be_bytes()));
-    }
-    content.end_text();
-    Ok(())
-}
-
 fn paint_rect(
     content: &mut Content,
     page: &DisplayPage,
@@ -821,14 +992,6 @@ fn paint_line(
 
 fn points(value: &Number, what: &'static str) -> Result<f32, PdfError> {
     let value = value.as_f64().ok_or(PdfError::InvalidNumber(what))?;
-    let value = (value * f64::from(PX_TO_PT)) as f32;
-    if !value.is_finite() {
-        return Err(PdfError::InvalidNumber(what));
-    }
-    Ok(value)
-}
-
-fn f64_to_points(value: f64, what: &'static str) -> Result<f32, PdfError> {
     let value = (value * f64::from(PX_TO_PT)) as f32;
     if !value.is_finite() {
         return Err(PdfError::InvalidNumber(what));
@@ -892,7 +1055,7 @@ fn channel(value: &str) -> Option<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use docx_layout::display_list::{DocAttrs, PlacedGlyph};
+    use docx_layout::display_list::{DocAttrs, GlyphRunPrimitive, ImagePrimitive, PlacedGlyph};
 
     fn text(x: f64, y: f64, value: &str) -> Primitive {
         Primitive::Text(TextRunPrimitive {
@@ -953,7 +1116,7 @@ mod tests {
                     w: Number::from(48),
                     h: Number::from(48),
                     rotation_deg: None,
-                    opacity: None,
+                    opacity: Some(Number::from_f64(0.5).unwrap()),
                     filter: None,
                     decorative: false,
                     crop: None,
@@ -983,6 +1146,8 @@ mod tests {
         assert!(pdf.contains("/SMask"));
         assert!(pdf.contains("/DeviceRGB"));
         assert!(pdf.contains("/DeviceGray"));
+        assert!(pdf.contains("/ExtGState"));
+        assert!(pdf.contains("/ca 0.5"));
     }
 
     #[test]
@@ -1074,6 +1239,25 @@ mod tests {
         assert!(pdf.contains("/BaseFont /AAAAAA+BO"));
     }
 
+    fn inflate_first_stream(pdf: &[u8]) -> String {
+        use std::io::Read;
+        let start = pdf
+            .windows(b"stream\n".len())
+            .position(|window| window == b"stream\n")
+            .expect("stream")
+            + b"stream\n".len();
+        let end = pdf[start..]
+            .windows(b"endstream".len())
+            .position(|window| window == b"endstream")
+            .expect("endstream")
+            + start;
+        let mut decoded = String::new();
+        flate2::read::ZlibDecoder::new(&pdf[start..end])
+            .read_to_string(&mut decoded)
+            .expect("inflate content");
+        decoded
+    }
+
     #[test]
     fn writes_a4_page_with_text() {
         let display_list = DisplayList {
@@ -1107,7 +1291,8 @@ mod tests {
         let pdf = String::from_utf8_lossy(&bytes);
         assert!(pdf.starts_with("%PDF-1."));
         assert!(pdf.contains("/MediaBox [0 0 612 792]"));
-        assert!(pdf.contains("Hello"));
+        let content = inflate_first_stream(&bytes);
+        assert!(content.contains("Hello"));
     }
 
     #[test]

@@ -187,6 +187,7 @@ dependencies = [
  "base64 0.22.1",
  "betteroffice-docx-layout",
  "betteroffice-ooxml-text",
+ "flate2",
  "image",
  "pdf-writer",
  "serde_json",

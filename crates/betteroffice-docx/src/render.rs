@@ -169,19 +169,14 @@ impl Document {
         Ok((display_list, fonts))
     }
 
-    /// Image bytes registered by relationship id, without the owning-part
-    /// scope prefix. PDF export has no per-part resolution step yet; a
-    /// relationship id reused across parts resolves to the last registration.
-    pub(crate) fn image_bytes_by_rel_id(&self) -> std::collections::BTreeMap<String, Vec<u8>> {
+    /// Image bytes registered by scoped relationship key. The key keeps the
+    /// owning part (`word/document.xml`, a header/footer part, or a notes part)
+    /// so a reused `rId5` never resolves to another part's media.
+    pub(crate) fn scoped_image_bytes(&self) -> std::collections::BTreeMap<String, Vec<u8>> {
         self.images
             .entries
             .iter()
-            .map(|(key, bytes)| {
-                let rel_id = key
-                    .rsplit_once('\u{1f}')
-                    .map_or(key.as_str(), |(_, rel)| rel);
-                (rel_id.to_owned(), bytes.clone())
-            })
+            .map(|(key, bytes)| (key.clone(), bytes.clone()))
             .collect()
     }
 
