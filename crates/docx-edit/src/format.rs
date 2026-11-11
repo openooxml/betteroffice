@@ -925,33 +925,6 @@ fn block_free_spans<T: ReadTxn>(
     (spans, children)
 }
 
-/// Whether `start..end` of `story_id` lies in a table cell, or covers one in the blocks it
-/// spans, nested ones too.
-fn touches_table_cell<T: ReadTxn>(
-    story_id: &str,
-    story: &TextRef,
-    txn: &T,
-    start: u32,
-    end: u32,
-) -> bool {
-    let in_cell = story_id
-        .match_indices(':')
-        .map(|(at, _)| &story_id[..at])
-        .chain([story_id])
-        .any(|prefix| crate::structured::source::cell_table(prefix).is_some());
-    if in_cell {
-        return true;
-    }
-    let (_, children) = block_free_spans(story, txn, start, end, false);
-    children.iter().any(|(child, _)| {
-        let Ok(text) = story_ref(txn, child) else {
-            return false;
-        };
-        let len = text.len(txn);
-        touches_table_cell(child, &text, txn, 0, len)
-    })
-}
-
 /// Tests whether every text unit carries a non-null attribute, in block embeds too; `saw_text`
 /// reports whether there was any.
 fn text_has<T: ReadTxn>(
@@ -1665,11 +1638,6 @@ impl EditingDoc {
             return Err(OpError::SuggestedFormattingOverContainer);
         }
         let source = self.source_metadata();
-        if let (Some(metadata), Some(index)) = (source.as_deref(), self.source_index())
-            && touches_table_cell(&range.story, &story, &txn, range.start, range.end)
-        {
-            metadata.prepare_all_patch_table_styles(&index);
-        }
         let mut keeper = Keeper::new(self);
         let revision_ids = self.apply_run_format_through(
             &mut txn,
@@ -1703,6 +1671,7 @@ impl EditingDoc {
         delta: RunDelta<'_>,
         keeper: &mut Keeper<'_>,
     ) -> OpResult<Vec<String>> {
+        self.prepare_table_styles(delta, &range.story);
         let (spans, children) = block_free_spans(story, txn, range.start, range.end, false);
         let paragraphs: Vec<_> = story_paragraphs(story, txn)
             .into_iter()
@@ -1801,6 +1770,7 @@ impl EditingDoc {
         let Ok(text) = story_ref(txn, child) else {
             return Ok(Vec::new());
         };
+        self.prepare_table_styles(delta, child);
         let mut revision_ids = Vec::new();
         let chunks = story_chunks(&text, txn);
         let mut formatted = Vec::new();
@@ -1831,6 +1801,16 @@ impl EditingDoc {
             revision_ids.extend(self.format_story_paragraphs(txn, ctx, &nested, delta, keeper)?);
         }
         Ok(revision_ids)
+    }
+
+    /// Loads the table style context of `story` when it is a table cell, before a clear computes
+    /// its runs.
+    fn prepare_table_styles(&self, delta: RunDelta<'_>, story: &str) {
+        if let RunDelta::Clear(Some(metadata)) = delta
+            && let Some(index) = self.source_index()
+        {
+            metadata.prepare_patch_table_styles(story, &index);
+        }
     }
 
     /// Applies each `(at, len, attrs)` of `spans`, in document order, in one walk of `story`: a
