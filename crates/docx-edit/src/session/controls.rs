@@ -1,7 +1,9 @@
 use serde_json::Value;
 use yrs::{Any, Assoc, Transact};
 
-use super::args::{edit_ctx, image_geometry_entries, loc_index, parse_payload, text_receipt_json};
+use super::args::{
+    edit_ctx, image_geometry_entries, loc_index, parse_payload, text_receipt_json, writable_story,
+};
 use super::{EditSessionCore, EngineError, EngineResult};
 use crate::batch::outcome_json;
 use crate::content_controls::{ContentControlQuery, ContentControlsOptions};
@@ -18,6 +20,7 @@ impl EditSessionCore {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> EngineResult<String> {
+        writable_story(self.engine.doc(), story)?;
         let index = loc_index(self.engine.doc(), story, para_id, offset)?;
         let Any::Map(payload) = Any::from_json(payload_json).map_err(EngineError::message)? else {
             return Err(EngineError::message("insert_image expects a JSON object"));
@@ -47,6 +50,8 @@ impl EditSessionCore {
         to_para_id: &str,
         to_offset: u32,
     ) -> EngineResult<String> {
+        writable_story(self.engine.doc(), story)?;
+        writable_story(self.engine.doc(), to_story)?;
         let index = loc_index(self.engine.doc(), story, para_id, offset)?;
         let to_index = loc_index(self.engine.doc(), to_story, to_para_id, to_offset)?;
         let ctx = EditCtx::local(String::new(), String::new());
@@ -153,6 +158,7 @@ impl EditSessionCore {
     }
 
     pub fn insert_page_break(&self, story: &str, para_id: &str, offset: u32) -> EngineResult<()> {
+        writable_story(self.engine.doc(), story)?;
         let index = loc_index(self.engine.doc(), story, para_id, offset)?;
         let ctx = EditCtx::local(String::new(), String::new());
         self.engine
@@ -169,6 +175,7 @@ impl EditSessionCore {
         offset: u32,
         break_type: &str,
     ) -> EngineResult<()> {
+        writable_story(self.engine.doc(), story)?;
         if !matches!(
             break_type,
             "nextPage" | "continuous" | "oddPage" | "evenPage"
@@ -198,6 +205,7 @@ impl EditSessionCore {
         offset: u32,
         watermark_json: &str,
     ) -> EngineResult<()> {
+        writable_story(self.engine.doc(), story)?;
         let index = loc_index(self.engine.doc(), story, para_id, offset)?;
         let value: Value = serde_json::from_str(watermark_json).map_err(EngineError::message)?;
         if !value.is_object() {
@@ -224,7 +232,7 @@ impl EditSessionCore {
         self.engine
             .doc()
             .set_paragraph_attr(para_id, key, value)
-            .map_err(EngineError::message)
+            .map_err(EngineError::from)
     }
 
     fn select_embed_story(&self, embed_id: &str) -> EngineResult<()> {

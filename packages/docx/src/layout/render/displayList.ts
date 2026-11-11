@@ -398,6 +398,8 @@ export interface DocAttrs {
 }
 
 export interface TextRunPrimitive extends DocAttrs {
+  /** Enabled optional switches; absence selects DOCX defaults. */
+  fontFeatures?: string[];
   kind: 'text';
   text: string;
   /** Canvas-only glyph stand-in text. */
@@ -477,6 +479,8 @@ export interface PositionedGlyph {
 
 /** Shaped glyph run with source text for accessibility. */
 export interface GlyphRunPrimitive extends DocAttrs {
+  /** Enabled optional switches for browser text fallback. */
+  fontFeatures?: string[];
   kind: 'glyphRun';
   fontId: number;
   size: number; // px

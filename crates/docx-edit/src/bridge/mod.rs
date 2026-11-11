@@ -443,6 +443,10 @@ pub fn yrs_doc_to_mapped_layout_blocks(
     story_id: &str,
     env: &RenderEnv,
 ) -> Result<(Vec<LayoutBlock>, LoweringMap), BridgeError> {
+    if crate::empty_cells::is_empty_cell(&doc.yrs_doc().transact(), story_id) {
+        let cell = crate::empty_cells::EmptyCell::new(story_id);
+        return yrs_doc_to_mapped_layout_blocks(cell.doc(), story_id, env);
+    }
     let mut local = local::LocalLowering::new(false);
     yrs_doc_to_mapped_layout_blocks_inner(doc, story_id, env, &mut None, &mut local, &mut None)
 }
@@ -2319,22 +2323,42 @@ fn lower_table<T: ReadTxn>(
                     format!("row {row_index} cell {cell_index} is missing story"),
                 )
             })?;
-            let (mut blocks, content_size) = lower_story(
-                txn,
-                &cell_story,
-                env,
-                cell_pm_start + 1,
-                active_stories,
-                list_state,
-                CellEdges {
-                    before: true,
-                    after: true,
-                },
-                map,
-                opaque_sequences,
-                revealable,
-                local,
-            )?;
+            let cell_edges = CellEdges {
+                before: true,
+                after: true,
+            };
+            let (mut blocks, content_size) = if crate::story_text(txn, &cell_story).is_some() {
+                lower_story(
+                    txn,
+                    &cell_story,
+                    env,
+                    cell_pm_start + 1,
+                    active_stories,
+                    list_state,
+                    cell_edges,
+                    map,
+                    opaque_sequences,
+                    revealable,
+                    local,
+                )?
+            } else {
+                local.block(true);
+                let cell = crate::empty_cells::EmptyCell::new(&cell_story);
+                let scratch = cell.doc().yrs_doc().transact();
+                lower_story(
+                    &scratch,
+                    &cell_story,
+                    env,
+                    cell_pm_start + 1,
+                    active_stories,
+                    list_state,
+                    cell_edges,
+                    map,
+                    opaque_sequences,
+                    revealable,
+                    local,
+                )?
+            };
 
             for block in &mut blocks {
                 if let LayoutBlock::Paragraph(paragraph) = block
@@ -5203,6 +5227,10 @@ fn lower_run_formatting(attributes: Option<&Attrs>, env: &RenderEnv) -> RunForma
     lower_font_size(attributes, &mut result);
     lower_language(attributes, &mut result);
     lower_character_spacing(attributes, &mut result);
+    if let Some(Any::Map(map)) = attribute(attributes, "typography") {
+        result.ligatures = map_string(map, "ligatures");
+        result.contextual_alternates = map_bool(map, "contextualAlternates");
+    }
 
     result.superscript = mark_bool(attributes, "superscript");
     result.subscript = mark_bool(attributes, "subscript");

@@ -1,10 +1,11 @@
-use super::args::parse_raw_ops;
+use super::args::{parse_raw_ops, writable_story};
 use super::{EditSessionCore, EngineError, EngineResult};
 use crate::EditCtx;
 use crate::engine::RelayoutTrigger;
 
 impl EditSessionCore {
     pub fn apply_raw_ops(&self, story: &str, ops_json: &str) -> EngineResult<()> {
+        writable_story(self.engine.doc(), story)?;
         let ops = parse_raw_ops(ops_json)?;
         let ctx = EditCtx::local(String::new(), String::new());
         self.engine

@@ -13,7 +13,7 @@ const NS: &str = concat!(
     r#"xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml""#
 );
 
-const STYLES: &str = r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:rPr><w:b/><w:sz w:val="32"/></w:rPr></w:style><w:style w:type="character" w:styleId="Strong"><w:name w:val="Strong"/><w:rPr><w:b/></w:rPr></w:style>"#;
+const STYLES: &str = r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:rPr><w:b/><w:sz w:val="32"/></w:rPr></w:style><w:style w:type="character" w:styleId="Strong"><w:name w:val="Strong"/><w:rPr><w:b/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Ligated"><w:name w:val="Ligated"/><w:rPr><w14:ligatures w14:val="standard"/></w:rPr></w:style>"#;
 
 fn package(body: &str) -> Vec<u8> {
     let content_types = r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>"#;
@@ -151,6 +151,47 @@ fn clear_returns_text_to_what_its_styles_give() {
     );
     let strong = marks(&doc, "Strong run");
     assert!(active(&strong, "bold") && active(&strong, "runStyle"));
+}
+
+#[test]
+fn clear_all_returns_a_ligature_request_to_what_the_styles_give() {
+    let body = concat!(
+        r#"<w:p w14:paraId="0000000B"><w:r><w:rPr><w:b/><w14:ligatures w14:val="standard"/></w:rPr><w:t>Direct office</w:t></w:r></w:p>"#,
+        r#"<w:p w14:paraId="0000000C"><w:pPr><w:pStyle w:val="Ligated"/></w:pPr><w:r><w:rPr><w14:ligatures w14:val="none"/></w:rPr><w:t>Styled office</w:t></w:r></w:p>"#,
+        r#"<w:p w14:paraId="0000000D"><w:pPr><w:pStyle w:val="Ligated"/></w:pPr><w:r><w:t>Reference office</w:t></w:r></w:p>"#,
+    );
+    let doc = EditingDoc::new(7102);
+    seed_from_docx(&doc, &package(body)).unwrap();
+    let reference = marks(&doc, "Reference office").get("typography").cloned();
+    assert!(active(&marks(&doc, "Direct office"), "typography"));
+    assert_ne!(
+        marks(&doc, "Styled office").get("typography").cloned(),
+        reference
+    );
+
+    let named = EditingDoc::new(7103);
+    seed_from_docx(&named, &package(body)).unwrap();
+    apply(
+        &named,
+        &UndoSession::new(),
+        json!([format(paragraph("0000000B"), json!({"clear": ["bold"]}))]),
+    );
+    let kept = marks(&named, "Direct office");
+    assert!(!active(&kept, "bold") && active(&kept, "typography"));
+
+    apply(
+        &doc,
+        &UndoSession::new(),
+        json!([
+            format(paragraph("0000000B"), json!({"clear": "all"})),
+            format(paragraph("0000000C"), json!({"clear": "all"})),
+        ]),
+    );
+    assert!(!active(&marks(&doc, "Direct office"), "typography"));
+    assert_eq!(
+        marks(&doc, "Styled office").get("typography").cloned(),
+        reference
+    );
 }
 
 #[test]

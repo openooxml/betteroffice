@@ -547,6 +547,28 @@ pub(crate) enum BatchStep<'a> {
     Rich(&'a RichReplacement),
 }
 
+impl<'a> BatchStep<'a> {
+    /// The story the step names, when it names one before resolving.
+    fn story(self) -> Option<&'a str> {
+        let step = match self {
+            Self::Edit(step) => step,
+            Self::Rich(rich) => return Some(rich.story.as_str()),
+        };
+        match &step.operation {
+            EditOperation::InsertText { target, .. }
+            | EditOperation::ReplaceText { target, .. }
+            | EditOperation::DeleteText { target }
+            | EditOperation::FormatText { target, .. } => Some(target.story()),
+            EditOperation::InsertParagraphs { target, .. }
+            | EditOperation::SetParagraphStyle { target, .. }
+            | EditOperation::InsertSectionBreakAfter { target, .. } => Some(target.story.as_str()),
+            EditOperation::DeleteParagraphs { story, .. } => Some(story.as_str()),
+            EditOperation::SetSectionProperties { .. }
+            | EditOperation::SetContentControlText { .. } => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
@@ -563,7 +585,8 @@ pub enum EditFailureCode {
     LimitExceeded,
 }
 
-/// Why a content-control step was refused, beside its failure code.
+/// Why a step was refused, beside its failure code: content-control reasons, and a target in a
+/// table cell that a live table names while its story is missing or removed.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum EditFailureReason {
@@ -584,6 +607,7 @@ pub enum EditFailureReason {
     UnsupportedStory,
     MultilineNotAllowed,
     InvalidText,
+    CellHasNoStory,
 }
 
 /// What a failure or preview refers to: a step's text target or a paragraph span.
@@ -668,6 +692,14 @@ pub(crate) fn failure(
         target: target.map(Box::new),
         message,
     }
+}
+
+/// The refusal of a step aimed at a table cell that a live table names while its story is missing
+/// or removed.
+pub(crate) fn cell_has_no_story(story: &str, target: Option<EditTarget>) -> EditFailure {
+    let message = EditError::CellHasNoStory(story.to_owned()).to_string();
+    let refused = failure(EditFailureCode::Unsupported, message, target);
+    refused.because(EditFailureReason::CellHasNoStory)
 }
 
 pub(crate) fn refusal(version: DocumentVersion, failure: EditFailure) -> EditRefusal {
@@ -3353,6 +3385,11 @@ impl EditingDoc {
         let mut planned_steps = Vec::with_capacity(steps.len());
         for (index, step) in steps.iter().enumerate() {
             let index = index as u32;
+            if let Some(story) = step.story()
+                && crate::empty_cells::is_empty_cell(&txn, story)
+            {
+                return Err(refusal(version, cell_has_no_story(story, None).at(index)));
+            }
             let planned = match step {
                 BatchStep::Edit(step) => plan_step(&mut views, source.as_deref(), index, step),
                 BatchStep::Rich(rich) => plan_rich(&mut views, source.as_deref(), index, rich)
