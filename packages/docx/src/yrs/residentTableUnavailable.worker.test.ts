@@ -372,3 +372,65 @@ for (const [index, lost] of INNER_LOST.entries()) {
     }
   }, TIMEOUT);
 }
+
+test('with the caret in a cell of an inner table that lost its properties and whose cell ids name no parent story, every table command refuses coded and the outer table is untouched', async () => {
+  const replica = await open(9951, true);
+  const host = await peer(replica, 9952);
+  const first = await peer(replica, 9953);
+  const second = await peer(replica, 9954);
+  try {
+    const table = tableStory(replica);
+    const foreign = ['foreign-cell-1', 'ghost:t0:r0c1'];
+    const minted = replica.engine.tablePayload(table, 0) as { rows: Array<{ cells: Array<{ story: string }> }> };
+    host.createStory(foreign[0]!, 'Foreign one');
+    host.createStory(foreign[1]!, 'Foreign two');
+    host.applyRawOps(table, [{ op: 'insertEmbed', index: 0, kind: 'table', payload: {
+      ...minted, rows: minted.rows.map((row) => ({ ...row, cells: row.cells.map((entry, column) => ({ ...entry, story: foreign[column]! })) })),
+    } }]);
+    sync(host, first);
+    sync(host, second);
+    await receive(replica, host);
+    expect(firstCell(replica, table)).toBe(foreign[0]!);
+
+    first.setTableProperties({ story: table, tableIndex: 0 }, { width: 4000, widthType: 'dxa' });
+    sync(first, second);
+    second.setTableProperties({ story: table, tableIndex: 0 }, { justification: 'center' });
+    expect(first.undo()).toBe(true);
+    sync(first, second);
+    expect(second.undo()).toBe(true);
+    sync(first, second);
+    await receive(replica, second);
+    const payload = (replica.engine.tablePayload(table, 0) ?? {}) as { rows?: Array<{ cells: Array<{ story: string }> }> };
+    expect('tblPr' in payload).toBe(false);
+    expect(payload.rows?.[0]?.cells.map((entry) => entry.story)).toEqual(foreign);
+    expect(foreign.map((story) => located(replica, story))).toEqual([null, null]);
+
+    const outer = () => JSON.stringify(replica.engine.tablePayload('body', 0));
+    const intact = outer();
+    const outerCells = (replica.engine.tablePayload('body', 0) as { rows: Array<{ cells: Array<{ story: string }> }> })
+      .rows[0]!.cells.map((entry) => entry.story);
+    const untouched = replica.engine.encodeState();
+    for (const story of foreign) {
+      const inCell = { story, paraId: replica.engine.paragraphs(story)[0]!.paraId, offset: 0 };
+      const selection = { anchor: inCell, focus: inCell };
+      for (const [kind, extra] of CARET_TABLE_COMMANDS) {
+        const ack = await replica.session.submit(kind as 'deleteTable', { ...extra, selection } as never).ack;
+        expect([story, kind, ack.status, (ack as { reason?: string }).reason]).toEqual([story, kind, 'refused', 'invalid-cell-target']);
+        expect(outer()).toBe(intact);
+        expect(replica.engine.encodeState()).toEqual(untouched);
+      }
+    }
+    expect(replica.engine.tablePayload(table, 0)).not.toBeNull();
+    expect(foreign.map((story) => cellTexts(replica, story))).toEqual([['Foreign one'], ['Foreign two']]);
+
+    const inOuter = { story: outerCells[1]!, paraId: replica.engine.paragraphs(outerCells[1]!)[0]!.paraId, offset: 0 };
+    const typed = await replica.session.submit('insertText', { text: 'Z', selection: { anchor: inOuter, focus: inOuter } }).ack;
+    expect(typed.status).toBe('applied');
+    expect(cellTexts(replica, outerCells[1]!)).toEqual(['ZOuter two']);
+  } finally {
+    host.destroy();
+    first.destroy();
+    second.destroy();
+    replica.session.dispose();
+  }
+}, TIMEOUT);
