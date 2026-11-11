@@ -156,9 +156,7 @@ mod tests {
     #[test]
     fn counters_belong_to_the_calling_thread() {
         let block = vec![1u8; 1 << 20];
-        let (other_live, other_peak) = std::thread::spawn(|| (live(), peak()))
-            .join()
-            .unwrap();
+        let (other_live, other_peak) = std::thread::spawn(|| (live(), peak())).join().unwrap();
         assert!(other_live < 1 << 20);
         assert!(other_peak < 1 << 20);
         assert!(live() >= 1 << 20);
