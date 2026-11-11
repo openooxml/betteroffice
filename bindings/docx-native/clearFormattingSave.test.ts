@@ -15,24 +15,35 @@ const OFFICE = 'application/vnd.openxmlformats-officedocument.wordprocessingml';
 const STYLES = '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:rPr><w:b/><w:sz w:val="32"/></w:rPr></w:style>';
 const HEADING = '<w:pPr><w:pStyle w:val="Heading1"/></w:pPr>';
 
-async function fixture(): Promise<Uint8Array> {
+const FORMATTED_BODY =
+  `<w:p w14:paraId="00000001">${HEADING}<w:r><w:t>Title</w:t></w:r></w:p>` +
+  `<w:p w14:paraId="00000002">${HEADING}<w:r><w:rPr><w:b w:val="0"/><w:i/><w:color w:val="C00000"/></w:rPr><w:t>Unbolded</w:t></w:r></w:p>` +
+  '<w:p w14:paraId="00000003"><w:r><w:rPr><w:b/></w:rPr><w:t>Bold words</w:t></w:r></w:p>';
+
+const UNFORMATTED_BODY =
+  `<w:p w14:paraId="00000041">${HEADING}<w:r><w:t>Plain heading</w:t></w:r></w:p>` +
+  '<w:p w14:paraId="00000042"><w:r><w:t>Plain one</w:t></w:r></w:p>' +
+  '<w:tbl><w:tblPr><w:tblStyle w:val="BoldGrid"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="2400" w:type="dxa"/></w:tcPr>' +
+  '<w:p w14:paraId="00000043"><w:r><w:t>Cell words</w:t></w:r></w:p>' +
+  '</w:tc></w:tr></w:tbl>' +
+  '<w:p w14:paraId="00000044"><w:r><w:t>After</w:t></w:r></w:p>';
+
+const BOLD_GRID = '<w:style w:type="table" w:styleId="BoldGrid"><w:name w:val="Bold Grid"/><w:rPr><w:b/></w:rPr></w:style>';
+
+async function fixture(body = FORMATTED_BODY): Promise<Uint8Array> {
   const zip = new JSZip();
   const date = new Date('2024-01-01T00:00:00Z');
   zip.file('[Content_Types].xml', `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="${OFFICE}.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="${OFFICE}.styles+xml"/></Types>`, { date });
   zip.file('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>', { date });
   zip.file('word/_rels/document.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>', { date });
-  zip.file('word/styles.xml', `<w:styles xmlns:w="${W}">${STYLES}</w:styles>`, { date });
-  zip.file('word/document.xml', `<w:document xmlns:w="${W}" xmlns:w14="${W14}"><w:body>` +
-    `<w:p w14:paraId="00000001">${HEADING}<w:r><w:t>Title</w:t></w:r></w:p>` +
-    `<w:p w14:paraId="00000002">${HEADING}<w:r><w:rPr><w:b w:val="0"/><w:i/><w:color w:val="C00000"/></w:rPr><w:t>Unbolded</w:t></w:r></w:p>` +
-    `<w:p w14:paraId="00000003"><w:r><w:rPr><w:b/></w:rPr><w:t>Bold words</w:t></w:r></w:p>` +
-    '<w:sectPr/></w:body></w:document>', { date });
+  zip.file('word/styles.xml', `<w:styles xmlns:w="${W}">${STYLES}${BOLD_GRID}</w:styles>`, { date });
+  zip.file('word/document.xml', `<w:document xmlns:w="${W}" xmlns:w14="${W14}"><w:body>${body}<w:sectPr/></w:body></w:document>`, { date });
   return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
 }
 
-const whole = (session: Session, from: string, to = from) => {
-  const length = session.paragraphs('body').find((entry) => entry.paraId === to)!.text.length;
-  return { story: 'body', start: { paraId: from, offset: 0 }, end: { paraId: to, offset: length } };
+const whole = (session: Session, from: string, to = from, story = 'body') => {
+  const length = session.paragraphs(story).find((entry) => entry.paraId === to)!.text.length;
+  return { story, start: { paraId: from, offset: 0 }, end: { paraId: to, offset: length } };
 };
 
 const bold = (session: Session, marker: string) => {
@@ -104,6 +115,38 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
       }
     } finally {
       session.destroy();
+    }
+  });
+
+  test(`${engine}: clearing unformatted text writes no update and adds no undo step`, async () => {
+    for (const suggesting of [undefined, { name: 'Ann', date: '2026-11-10T12:00:00Z' }]) {
+      const session = await yrs.createYrsSession({ clientId: 95 });
+      try {
+        session.seedFromDocx(await fixture(UNFORMATTED_BODY));
+        session.beginUndoCapture();
+        const cell = session.listStories().stories.find((entry) => entry.kind === 'tableCell')!.story;
+        const ranges = {
+          heading: whole(session, '00000041'),
+          paragraphs: whole(session, '00000041', '00000042'),
+          cell: whole(session, '00000043', '00000043', cell),
+          acrossTheTable: whole(session, '00000042', '00000044'),
+        };
+        for (const [name, range] of Object.entries(ranges)) {
+          const vector = session.encodeStateVector();
+          const update = session.encodeStateAsUpdate();
+          session.clearFormatting(range, suggesting);
+          expect({ name, vector: session.encodeStateVector() }).toEqual({ name, vector });
+          expect({ name, update: session.encodeStateAsUpdate() }).toEqual({ name, update });
+          expect({ name, canUndo: session.canUndo() }).toEqual({ name, canUndo: false });
+        }
+        const after = whole(session, '00000044');
+        session.formatRange(after, { italic: true });
+        const vector = session.encodeStateVector();
+        session.clearFormatting(after, suggesting);
+        expect(session.encodeStateVector()).not.toEqual(vector);
+      } finally {
+        session.destroy();
+      }
     }
   });
 }

@@ -1043,6 +1043,7 @@ struct StoryChunk {
     end: u32,
     text: bool,
     block: bool,
+    pilcrow: bool,
     attrs: Option<Box<Attrs>>,
 }
 
@@ -1057,6 +1058,7 @@ fn story_chunks<T: ReadTxn>(story: &TextRef, txn: &T) -> Vec<StoryChunk> {
             text: matches!(diff.insert, Out::Any(Any::String(_))),
             block: matches!(&diff.insert, Out::YMap(embed) if map_string(embed, txn, KIND_KEY)
                 .is_some_and(|kind| crate::segments::is_block_embed(&kind))),
+            pilcrow: matches!(&diff.insert, Out::YMap(embed) if crate::is_pilcrow(embed, txn)),
             attrs: diff.attributes.clone(),
         });
         offset = end;
@@ -1089,16 +1091,29 @@ fn clearing_attrs_in(chunks: &[StoryChunk], start: u32, end: u32) -> Attrs {
 
 /// [`changes_text`] over `chunks`.
 fn changes_text_in(chunks: &[StoryChunk], start: u32, end: u32, attrs: &Attrs) -> bool {
+    changes_units_in(chunks, start, end, attrs, true)
+}
+
+/// Whether setting `attrs` would change a unit in `start..end` that a pass writes: text only, or
+/// with `text_only` false every unit but block embeds. A paragraph mark holds no run formatting
+/// of its own, so one without a key counts as already holding what the pass writes for it.
+fn changes_units_in(
+    chunks: &[StoryChunk],
+    start: u32,
+    end: u32,
+    attrs: &Attrs,
+    text_only: bool,
+) -> bool {
     chunks_within(chunks, start, end)
-        .filter(|chunk| chunk.text)
+        .filter(|chunk| if text_only { chunk.text } else { !chunk.block })
         .any(|chunk| {
             let current = chunk.attrs.as_deref();
-            attrs.iter().any(|(key, value)| {
-                current
-                    .and_then(|current| current.get(key))
-                    .unwrap_or(&Any::Null)
-                    != value
-            })
+            attrs
+                .iter()
+                .any(|(key, value)| match current.and_then(|current| current.get(key)) {
+                    None if chunk.pilcrow => false,
+                    current => current.unwrap_or(&Any::Null) != value,
+                })
         })
 }
 
@@ -1663,7 +1678,10 @@ impl EditingDoc {
                 let attrs = paragraph_delta(delta, &range.story, paragraph.style.as_deref(), || {
                     clearing_attrs_in(&chunks, from, to)
                 })?;
-                if attrs.is_empty() {
+                if attrs.is_empty()
+                    || (matches!(delta, RunDelta::Clear(_))
+                        && !changes_units_in(&chunks, from, to, &attrs, false))
+                {
                     continue;
                 }
                 if changes_text_in(&chunks, from, to, &attrs)
@@ -1694,12 +1712,20 @@ impl EditingDoc {
                 paragraph.and_then(|paragraph| paragraph.style.as_deref()),
                 || clearing_attrs(story, txn, range.start, range.end),
             )?;
+            let unchanged = matches!(delta, RunDelta::Clear(_))
+                && !changes_units_in(
+                    &story_chunks(story, txn),
+                    range.start,
+                    range.end,
+                    &attrs,
+                    false,
+                );
             if let Some(key) = paragraph.and_then(|paragraph| paragraph.key.as_deref())
                 && changes_text(story, txn, range.start, range.end, &attrs)
                 && keeper.rewrite_loss(key) == Some(KeptReason::Field)
             {
                 keeper.keep(KeptReason::Field);
-            } else {
+            } else if !unchanged {
                 for (at, len) in spans {
                     let span = StoryRange::new(range.story.clone(), at, at + len);
                     revision_ids.extend(self.apply_run_format(

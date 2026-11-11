@@ -867,3 +867,81 @@ fn clear_all_keeps_an_explicit_run_direction() {
     assert!(!active(&after, "italic"));
     assert_eq!(after.get("rtl"), before.get("rtl"));
 }
+
+/// `00000041` plain, `00000042` a plain Heading1, `00000043` plain text around a line break,
+/// `00000044` a plain paragraph in a cell of the bold table style `BoldGrid`, `00000045` plain and
+/// `00000046` directly bold.
+fn open_unformatted() -> EditingDoc {
+    let styles = format!(
+        r#"{STYLES}<w:style w:type="table" w:styleId="BoldGrid"><w:name w:val="Bold Grid"/><w:rPr><w:b/></w:rPr></w:style>"#
+    );
+    let body = concat!(
+        r#"<w:p w14:paraId="00000041"><w:r><w:t>Plain one</w:t></w:r></w:p>"#,
+        r#"<w:p w14:paraId="00000042"><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Plain heading</w:t></w:r></w:p>"#,
+        r#"<w:p w14:paraId="00000043"><w:r><w:t>Line one</w:t></w:r><w:r><w:br/></w:r><w:r><w:t>line two</w:t></w:r></w:p>"#,
+        r#"<w:tbl><w:tblPr><w:tblStyle w:val="BoldGrid"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="2400" w:type="dxa"/></w:tcPr>"#,
+        r#"<w:p w14:paraId="00000044"><w:r><w:t>Cell words</w:t></w:r></w:p>"#,
+        r#"</w:tc></w:tr></w:tbl>"#,
+        r#"<w:p w14:paraId="00000045"><w:r><w:t>After</w:t></w:r></w:p>"#,
+        r#"<w:p w14:paraId="00000046"><w:r><w:rPr><w:b/></w:rPr><w:t>Bold tail</w:t></w:r></w:p>"#,
+    );
+    let doc = EditingDoc::new(7116);
+    seed_from_docx(&doc, &package_with_styles(body, &styles)).unwrap();
+    doc
+}
+
+fn unformatted_ranges(doc: &EditingDoc) -> Vec<(&'static str, StoryRange)> {
+    let cell = cell_story(doc);
+    vec![
+        (
+            "heading",
+            editor_range(doc, "body", ("00000042", 0), ("00000042", 13)),
+        ),
+        (
+            "paragraphs",
+            editor_range(doc, "body", ("00000041", 0), ("00000043", 8)),
+        ),
+        (
+            "cell",
+            editor_range(doc, &cell, ("00000044", 0), ("00000044", 10)),
+        ),
+        (
+            "across the table",
+            editor_range(doc, "body", ("00000043", 0), ("00000045", 5)),
+        ),
+    ]
+}
+
+#[test]
+fn editor_clear_of_unformatted_text_changes_nothing_and_adds_no_undo_step() {
+    let doc = open_unformatted();
+    let undo = UndoSession::new();
+    undo.track(&doc);
+    let ctx = EditCtx::local("", "");
+    for (case, range) in unformatted_ranges(&doc) {
+        let before = doc.encode_state_as_update_v1();
+        assert!(editor_clear(&doc, &ctx, range).is_empty(), "{case}");
+        assert_eq!(doc.encode_state_as_update_v1(), before, "{case}");
+        assert!(!undo.can_undo(), "{case}");
+    }
+    let before = doc.encode_state_vector_v1();
+    editor_clear(
+        &doc,
+        &ctx,
+        editor_range(&doc, "body", ("00000045", 0), ("00000046", 9)),
+    );
+    assert_ne!(doc.encode_state_vector_v1(), before);
+    assert!(!active(&marks(&doc, "Bold tail"), "bold"));
+    assert!(undo.can_undo());
+}
+
+#[test]
+fn a_suggested_editor_clear_of_unformatted_text_records_no_revision() {
+    let doc = open_unformatted();
+    let ctx = EditCtx::local("Ann", "2026-11-10T12:00:00Z").suggesting();
+    for (case, range) in unformatted_ranges(&doc) {
+        let before = doc.encode_state_as_update_v1();
+        assert!(editor_clear(&doc, &ctx, range).is_empty(), "{case}");
+        assert_eq!(doc.encode_state_as_update_v1(), before, "{case}");
+    }
+}
