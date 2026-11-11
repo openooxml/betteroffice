@@ -95,13 +95,16 @@ for (const arm of ['', '&peerless=0']) {
       const label = `${editor}-${entry.name.replace(/\s+/g, '-')}`;
       const started = Date.now();
       let shortcutAt = Number.POSITIVE_INFINITY;
-      const fonts: Array<{ ms: number; afterShortcut: boolean; path: string; status?: number }> = [];
+      const fonts: Array<{ ms: number; afterShortcut: boolean; path: string; status?: number; done?: boolean }> = [];
       page.context().on('request', (request) => {
         const path = new URL(request.url()).pathname;
         if (!/\.(?:ttf|otf|woff2?|zst)$/i.test(path)) return;
         const record: (typeof fonts)[number] = { ms: Date.now() - started, afterShortcut: Date.now() >= shortcutAt, path };
         fonts.push(record);
-        void request.response().then((response) => { record.status = response?.status(); }, () => { record.status = -1; });
+        void request.response().then(async (response) => {
+          record.status = response?.status();
+          record.done = response ? !(await response.finished()) : false;
+        }, () => { record.status = -1; });
       });
 
       await page.goto('/?format=docx' + arm);
@@ -127,8 +130,9 @@ for (const arm of ['', '&peerless=0']) {
       const button = page.getByTestId('formatting-bar').getByRole('button', { name: entry.button, exact: true });
       await expect.soft(button).toHaveAttribute('aria-pressed', 'true');
       const face = new RegExp(`/${entry.face}(?:[.-][\\w-]*)?\\.(?:ttf|otf|woff2?|zst)$`);
-      await expect.poll(() => fonts.some((font) => face.test(font.path)), { timeout: 15_000 })
-        .toBe(true).catch(() => undefined);
+      await expect.poll(() => fonts.some((font) => font.afterShortcut && face.test(font.path) && font.status === 200 && font.done), {
+        message: `${entry.face} fetched after the shortcut`, timeout: 30_000,
+      }).toBe(true);
       const after = await settled(page);
       const measured = measure(after.runs);
       await pageView.screenshot({ path: info.outputPath(`${label}-after.png`) });
@@ -144,7 +148,6 @@ for (const arm of ['', '&peerless=0']) {
       console.log(`RUNS ${label} after=${JSON.stringify(measured.runs)}`);
       console.log(`MARKS ${label} ${JSON.stringify(after.marks.map((mark) => ({ c: mark.className, x: +mark.left.toFixed(2), w: +mark.width.toFixed(2), y: +mark.top.toFixed(2), h: +mark.height.toFixed(2) })))}`);
 
-      expect.soft(fonts.some((font) => face.test(font.path)), `${entry.face} requested`).toBe(true);
       expect.soft(before.lineCount, 'line count before the shortcut').toBe(1);
       expect.soft(measured.lineCount, 'line count after the shortcut').toBe(before.lineCount);
       expect.soft(measured.text.replace(/\s+/g, ''), 'paragraph text after the shortcut').toBe(TEXT.replace(/\s+/g, ''));
