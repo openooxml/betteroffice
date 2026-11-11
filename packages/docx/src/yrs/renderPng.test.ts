@@ -1,7 +1,10 @@
 import { afterEach, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import * as bundled from '@betteroffice/fonts';
+import * as enginePng from '../wasm/enginePng';
 import { engineKind } from '../wasm/enginePng';
+import { resolveCompleteFontProvider } from '../layout/measure';
 import { preloadEditWasm } from '../wasm/edit';
 import { preloadOpcWasm } from '../wasm/opc';
 import { createYrsSession, type YrsSession } from './index';
@@ -72,6 +75,122 @@ const smartArtParts = (drawingRels = '<Relationships xmlns="http://schemas.openx
         ['word/diagrams/_rels/drawing1.xml.rels', toBytes(drawingRels)],
         ['word/media/image1.png', new Uint8Array(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYPj/HwADAgH/5ncLrgAAAABJRU5ErkJggg==', 'base64'))],
     ]);
+
+const scriptRun = (family: string, text: string, rtl = false) =>
+  `<w:p>${rtl ? '<w:pPr><w:bidi/></w:pPr>' : ''}<w:r><w:rPr><w:rFonts w:ascii="${family}" w:hAnsi="${family}" w:cs="${family}"/>${rtl ? '<w:rtl/>' : ''}</w:rPr><w:t>${text}</w:t></w:r></w:p>`;
+
+const scriptDocument = () => new Uint8Array(rezipPartsToArrayBuffer(new Map([
+  ['[Content_Types].xml', toBytes('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')],
+  ['_rels/.rels', toBytes('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>')],
+  ['word/document.xml', toBytes(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${[
+    scriptRun('Calibri', 'Total 2024'),
+    scriptRun('Arial', 'مرحبا بالعالم', true),
+    scriptRun('Calibri', 'שלום עולם', true),
+    scriptRun('Brand Sans', 'Brand text'),
+  ].join('')}<w:sectPr/></w:body></w:document>`)],
+]) as PartsMap));
+
+const arabicFiles = new Set(bundled.BUNDLED_FONTS.filter((face) => face.script === 'arabic').map((face) => face.file));
+
+function withCanonicalFontIds(value: unknown, ids = new Map<number, number>()): unknown {
+  if (Array.isArray(value)) return value.map((item) => withCanonicalFontIds(item, ids));
+  if (value === null || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.entries(value).map(([key, field]) => {
+    if (key !== 'fontId' || typeof field !== 'number') return [key, withCanonicalFontIds(field, ids)];
+    if (!ids.has(field)) ids.set(field, ids.size);
+    return [key, ids.get(field)];
+  }));
+}
+
+async function exportScriptDocument(options: Parameters<YrsSession['renderPng']>[1] = {}): Promise<Uint8Array> {
+  const session = await createYrsSession();
+  try {
+    session.openDocx(scriptDocument(), true);
+    return await session.renderPng({ page: 0 }, options);
+  } finally { session.destroy(); }
+}
+
+async function drawnPrimitives(options: Parameters<YrsSession['renderPng']>[1] = {}): Promise<unknown> {
+  const drawing = spyOn(enginePng, 'renderPng');
+  try {
+    await exportScriptDocument(options);
+    expect(drawing).toHaveBeenCalledTimes(1);
+    return withCanonicalFontIds(drawing.mock.calls[0]![0].page.primitives);
+  } finally { drawing.mockRestore(); }
+}
+
+const ENGINES = [{ kind: 'wasm' }, { kind: 'native' }] as const;
+
+for (const { kind } of ENGINES) {
+  describe.skipIf(engineKind !== kind)(`renderPng default fonts on the ${kind} engine`, () => {
+    test('without fontProvider, a face that cannot load rejects the export with font-unavailable', async () => {
+      stubBrowser();
+      const failing = spyOn(bundled, 'loadBundledFontBytes').mockImplementation(() => Promise.reject(new Error('offline')));
+      try {
+        await expect(exportScriptDocument()).rejects.toMatchObject({
+          name: 'PngExportError', code: 'font-unavailable', message: expect.stringMatching(/could not load: offline/),
+        });
+        expect(failing).toHaveBeenCalled();
+      } finally { failing.mockRestore(); }
+    });
+
+    test('without fontProvider, an installed script face that fails to load rejects the export naming it', async () => {
+      stubBrowser();
+      const original = bundled.loadBundledFontBytes;
+      const loading = spyOn(bundled, 'loadBundledFontBytes').mockImplementation((face, ...rest) =>
+        arabicFiles.has(face.file) ? Promise.reject(new Error('offline')) : original(face, ...rest));
+      try {
+        await expect(exportScriptDocument()).rejects.toMatchObject({
+          name: 'PngExportError', code: 'font-unavailable', message: expect.stringMatching(/Arabic.* could not load: offline/),
+        });
+        expect(loading.mock.calls.some(([face]) => arabicFiles.has(face.file))).toBe(true);
+      } finally { loading.mockRestore(); }
+    });
+
+    test('without fontProvider, a script face whose package is not installed is skipped and the export succeeds', async () => {
+      stubBrowser();
+      const installedOriginal = bundled.bundledFaceInstalled;
+      const installed = spyOn(bundled, 'bundledFaceInstalled')
+        .mockImplementation((face) => arabicFiles.has(face.file) ? Promise.resolve(false) : installedOriginal(face));
+      const original = bundled.loadBundledFontBytes;
+      const loading = spyOn(bundled, 'loadBundledFontBytes').mockImplementation((face, ...rest) =>
+        arabicFiles.has(face.file) ? Promise.reject(new Error('offline')) : original(face, ...rest));
+      try {
+        expect(await exportScriptDocument()).toBeInstanceOf(Uint8Array);
+        expect(installed).toHaveBeenCalled();
+        expect(loading.mock.calls.some(([face]) => arabicFiles.has(face.file))).toBe(false);
+      } finally { installed.mockRestore(); loading.mockRestore(); }
+    });
+
+    test('without fontProvider, faces load strictly from the bundled packages', async () => {
+      stubBrowser();
+      const loading = spyOn(bundled, 'loadBundledFontBytes');
+      try {
+        await exportScriptDocument();
+        expect(loading.mock.calls.length).toBeGreaterThan(0);
+        expect(loading.mock.calls.every((call) => call[2]?.strict === true)).toBe(true);
+      } finally { loading.mockRestore(); }
+    });
+
+    test('without fontProvider, script text draws the primitives the complete bundled provider draws', async () => {
+      stubBrowser();
+      const complete = await resolveCompleteFontProvider();
+      expect(complete).toBeDefined();
+      const pinned = await drawnPrimitives({ fontProvider: complete });
+      expect(await drawnPrimitives()).toEqual(pinned);
+    });
+
+    test('an explicit fontProvider keeps its own faces and never loads bundled bytes strictly', async () => {
+      stubBrowser();
+      const fontProvider = await resolveCompleteFontProvider();
+      const failing = spyOn(bundled, 'loadBundledFontBytes').mockImplementation(() => Promise.reject(new Error('offline')));
+      try {
+        expect(await exportScriptDocument({ fontProvider })).toBeInstanceOf(Uint8Array);
+        expect(failing).not.toHaveBeenCalled();
+      } finally { failing.mockRestore(); }
+    });
+  });
+}
 
 describe('YrsSession.renderPng', () => {
   test('draws an EMF picture that reaches the export as its media part', async () => {
