@@ -7,6 +7,7 @@ const BORDER: &str = r#"w:val="single" w:sz="24" w:space="0" w:color="000000""#;
 
 const HIDDEN: &str = "<w:trPr><w:hidden/></w:trPr>";
 const VANISH: &str = "<w:rPr><w:vanish/></w:rPr>";
+const HIDDEN_MARK: &str = "<w:pPr><w:rPr><w:vanish/></w:rPr></w:pPr>";
 
 fn row(text: &str, tr_pr: &str) -> String {
     row_with_run(&format!("<w:r><w:t>{text}</w:t></w:r>"), tr_pr)
@@ -17,21 +18,40 @@ fn hidden_row(text: &str) -> String {
 }
 
 fn row_with_run(run: &str, tr_pr: &str) -> String {
+    let mark = if tr_pr == HIDDEN { HIDDEN_MARK } else { "" };
     format!(
-        r#"<w:tr>{tr_pr}<w:tc><w:tcPr><w:tcW w:w="4680" w:type="dxa"/></w:tcPr><w:p>{run}</w:p></w:tc></w:tr>"#
+        r#"<w:tr>{tr_pr}<w:tc><w:tcPr><w:tcW w:w="4680" w:type="dxa"/></w:tcPr><w:p>{mark}{run}</w:p></w:tc></w:tr>"#
     )
 }
 
 fn package(rows: &[String]) -> Vec<u8> {
+    package_with(rows, 1, None)
+}
+
+fn package_with(rows: &[String], columns: usize, styles: Option<&str>) -> Vec<u8> {
     let rows = rows.concat();
+    let column = 4680 / columns;
+    let grid = format!(r#"<w:gridCol w:w="{column}"/>"#).repeat(columns);
     let body = format!(
-        r#"<w:p><w:r><w:t>Before</w:t></w:r></w:p><w:tbl><w:tblPr><w:tblW w:w="4680" w:type="dxa"/><w:tblBorders><w:top {BORDER}/><w:left {BORDER}/><w:bottom {BORDER}/><w:right {BORDER}/><w:insideH {BORDER}/><w:insideV {BORDER}/></w:tblBorders></w:tblPr><w:tblGrid><w:gridCol w:w="4680"/></w:tblGrid>{rows}</w:tbl><w:p><w:r><w:t>After</w:t></w:r></w:p>"#
+        r#"<w:p><w:r><w:t>Before</w:t></w:r></w:p><w:tbl><w:tblPr><w:tblW w:w="4680" w:type="dxa"/><w:tblBorders><w:top {BORDER}/><w:left {BORDER}/><w:bottom {BORDER}/><w:right {BORDER}/><w:insideH {BORDER}/><w:insideV {BORDER}/></w:tblBorders></w:tblPr><w:tblGrid>{grid}</w:tblGrid>{rows}</w:tbl><w:p><w:r><w:t>After</w:t></w:r></w:p>"#
     );
-    let parts = [
-        ("[Content_Types].xml", r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_owned()),
+    let (styles_type, styles_rel) = if styles.is_some() {
+        (
+            r#"<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>"#,
+            r#"<Relationship Id="styles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>"#,
+        )
+    } else {
+        ("", "")
+    };
+    let mut parts = vec![
+        ("[Content_Types].xml", format!(r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>{styles_type}</Types>"#)),
         ("_rels/.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="doc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_owned()),
         ("word/document.xml", format!(r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:body></w:document>"#)),
     ];
+    if let Some(styles) = styles {
+        parts.push(("word/_rels/document.xml.rels", format!(r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{styles_rel}</Relationships>"#)));
+        parts.push(("word/styles.xml", format!(r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">{styles}</w:styles>"#)));
+    }
     let parts: Vec<_> = parts
         .into_iter()
         .map(|(name, value)| (name.to_owned(), value.into_bytes()))
@@ -45,7 +65,11 @@ struct Rendered {
 }
 
 fn render(rows: &[String], show_hidden_text: bool) -> Rendered {
-    let bytes = package(rows);
+    render_package(&package(rows), show_hidden_text)
+}
+
+fn render_package(bytes: &[u8], show_hidden_text: bool) -> Rendered {
+    let bytes = bytes.to_vec();
     let package = docx_parse::parse_docx_s9_wire(&bytes, Default::default())
         .unwrap()
         .document
@@ -239,9 +263,13 @@ fn a_fully_hidden_table_takes_no_space_and_paints_nothing() {
 }
 
 fn merged(text: &str, merge: &str, tr_pr: &str) -> String {
-    let r_pr = if tr_pr == HIDDEN { VANISH } else { "" };
+    let (mark, r_pr) = if tr_pr == HIDDEN {
+        (HIDDEN_MARK, VANISH)
+    } else {
+        ("", "")
+    };
     format!(
-        r#"<w:tr>{tr_pr}<w:tc><w:tcPr><w:tcW w:w="2340" w:type="dxa"/><w:vMerge{merge}/></w:tcPr><w:p><w:r>{r_pr}<w:t>{text}</w:t></w:r></w:p></w:tc><w:tc><w:tcPr><w:tcW w:w="2340" w:type="dxa"/></w:tcPr><w:p><w:r>{r_pr}<w:t>Side{text}</w:t></w:r></w:p></w:tc></w:tr>"#
+        r#"<w:tr>{tr_pr}<w:tc><w:tcPr><w:tcW w:w="2340" w:type="dxa"/><w:vMerge{merge}/></w:tcPr><w:p>{mark}<w:r>{r_pr}<w:t>{text}</w:t></w:r></w:p></w:tc><w:tc><w:tcPr><w:tcW w:w="2340" w:type="dxa"/></w:tcPr><w:p>{mark}<w:r>{r_pr}<w:t>Side{text}</w:t></w:r></w:p></w:tc></w:tr>"#
     )
 }
 
@@ -385,7 +413,7 @@ fn a_hidden_row_starting_a_merge_into_a_visible_row_stays() {
 
 fn row_with_nested_table(tbl_pr: &str, tc_pr: &str) -> String {
     format!(
-        r#"<w:tr>{HIDDEN}<w:tc><w:tcPr><w:tcW w:w="4680" w:type="dxa"/></w:tcPr><w:p><w:r>{VANISH}<w:t>Hidden</w:t></w:r></w:p><w:tbl><w:tblPr><w:tblW w:w="2000" w:type="dxa"/>{tbl_pr}</w:tblPr><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/>{tc_pr}</w:tcPr><w:p/></w:tc></w:tr></w:tbl><w:p/></w:tc></w:tr>"#
+        r#"<w:tr>{HIDDEN}<w:tc><w:tcPr><w:tcW w:w="4680" w:type="dxa"/></w:tcPr><w:p>{HIDDEN_MARK}<w:r>{VANISH}<w:t>Hidden</w:t></w:r></w:p><w:tbl><w:tblPr><w:tblW w:w="2000" w:type="dxa"/>{tbl_pr}</w:tblPr><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/>{tc_pr}</w:tcPr><w:p/></w:tc></w:tr></w:tbl><w:p>{HIDDEN_MARK}</w:p></w:tc></w:tr>"#
     )
 }
 
@@ -409,4 +437,170 @@ fn a_hidden_row_keeps_a_nested_table() {
     );
     assert_eq!(count(rows_of(bordered)), 3);
     assert_eq!(count(rows_of(row_with_nested_table("", ""))), 3);
+}
+
+const EXACT_HEIGHT: &str = r#"<w:cantSplit/><w:trHeight w:val="300" w:hRule="exact"/>"#;
+const FIELD_CODE: &str = r#"<w:r><w:rPr><w:vanish/></w:rPr><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:rPr><w:vanish/></w:rPr><w:instrText xml:space="preserve"> TC "Entry" </w:instrText></w:r><w:r><w:rPr><w:vanish/></w:rPr><w:fldChar w:fldCharType="end"/></w:r>"#;
+
+fn wide_row(tr_pr: &str, paragraphs: &[String]) -> String {
+    let cells: String = paragraphs
+        .iter()
+        .map(|paragraph| {
+            format!(r#"<w:tc><w:tcPr><w:tcW w:w="936" w:type="dxa"/></w:tcPr>{paragraph}</w:tc>"#)
+        })
+        .collect();
+    format!("<w:tr>{tr_pr}{cells}</w:tr>")
+}
+
+fn text_row(text: &str) -> String {
+    wide_row(
+        "",
+        &vec![format!("<w:p><w:r><w:t>{text}</w:t></w:r></w:p>"); 5],
+    )
+}
+
+fn hidden_field_paragraph() -> String {
+    format!("<w:p>{HIDDEN_MARK}{FIELD_CODE}</w:p>")
+}
+
+fn render_wide(rows: &[String], styles: Option<&str>) -> Rendered {
+    render_package(&package_with(rows, 5, styles), false)
+}
+
+fn row_count(rendered: &Rendered) -> usize {
+    rendered.table.as_ref().unwrap()["block"]["rows"]
+        .as_array()
+        .unwrap()
+        .len()
+}
+
+fn total_height(rendered: &Rendered) -> f64 {
+    rendered.table.as_ref().unwrap()["measure"]["totalHeight"]
+        .as_f64()
+        .unwrap()
+}
+
+fn assert_same_layout(rendered: &Rendered, expected: &Rendered) {
+    assert_eq!(row_count(rendered), row_count(expected));
+    assert_eq!(total_height(rendered), total_height(expected));
+    assert_eq!(
+        last_text_y(&rendered.primitives),
+        last_text_y(&expected.primitives)
+    );
+}
+
+#[test]
+fn a_hidden_row_of_empty_paragraphs_with_visible_marks_keeps_its_height() {
+    let mut marks = vec!["<w:p/>".to_owned(); 5];
+    marks[2] = format!("<w:p>{HIDDEN_MARK}</w:p>");
+    let rows = |tr_pr: &str| {
+        [
+            wide_row(&format!("<w:trPr>{tr_pr}</w:trPr>"), &marks),
+            text_row("Alpha"),
+            text_row("Charlie"),
+        ]
+    };
+    let marked = render_wide(&rows(&format!("{EXACT_HEIGHT}<w:hidden/>")), None);
+    let plain = render_wide(&rows(EXACT_HEIGHT), None);
+    assert_eq!(row_count(&marked), 3);
+    assert_same_layout(&marked, &plain);
+    let without = render_wide(&[text_row("Alpha"), text_row("Charlie")], None);
+    assert!(total_height(&marked) > total_height(&without));
+}
+
+#[test]
+fn hidden_rows_whose_every_mark_and_run_is_hidden_are_removed() {
+    let hidden = |cells: usize| wide_row(HIDDEN, &vec![hidden_field_paragraph(); cells]);
+    let rendered = render_wide(
+        &[text_row("Alpha"), hidden(5), hidden(2), text_row("Charlie")],
+        None,
+    );
+    let without = render_wide(&[text_row("Alpha"), text_row("Charlie")], None);
+    assert_same_layout(&rendered, &without);
+    assert_eq!(cell_rows(&rendered.primitives), vec![0, 3]);
+}
+
+#[test]
+fn one_visible_mark_among_hidden_ones_keeps_the_row() {
+    let mut paragraphs = vec![hidden_field_paragraph(); 3];
+    paragraphs[1] = format!("<w:p><w:r>{VANISH}<w:t>Hidden</w:t></w:r></w:p>");
+    let rows = |tr_pr: &str| {
+        [
+            text_row("Alpha"),
+            wide_row(tr_pr, &paragraphs),
+            text_row("Charlie"),
+        ]
+    };
+    let marked = render_wide(&rows(HIDDEN), None);
+    assert_eq!(row_count(&marked), 3);
+    assert_same_layout(&marked, &render_wide(&rows(""), None));
+}
+
+#[test]
+fn a_paragraph_mark_hidden_by_style_counts_as_hidden() {
+    let styles = r#"<w:style w:type="paragraph" w:styleId="HiddenMark"><w:name w:val="Hidden Mark"/><w:rPr><w:vanish/></w:rPr></w:style><w:style w:type="character" w:styleId="HiddenChar"><w:name w:val="Hidden Char"/><w:rPr><w:vanish/></w:rPr></w:style>"#;
+    let paragraph = |p_pr: &str| {
+        format!("<w:p><w:pPr>{p_pr}</w:pPr><w:r>{VANISH}<w:t>Hidden</w:t></w:r></w:p>")
+    };
+    let by_style = [
+        paragraph(r#"<w:pStyle w:val="HiddenMark"/>"#),
+        paragraph(r#"<w:rPr><w:rStyle w:val="HiddenChar"/></w:rPr>"#),
+    ];
+    let shown_over_style = [paragraph(
+        r#"<w:pStyle w:val="HiddenMark"/><w:rPr><w:vanish w:val="0"/></w:rPr>"#,
+    )];
+    let rows = |paragraphs: &[String]| {
+        [
+            text_row("Alpha"),
+            wide_row(HIDDEN, paragraphs),
+            text_row("Charlie"),
+        ]
+    };
+    assert_eq!(row_count(&render_wide(&rows(&by_style), Some(styles))), 2);
+    assert_eq!(
+        row_count(&render_wide(&rows(&shown_over_style), Some(styles))),
+        3
+    );
+    assert_eq!(row_count(&render_wide(&rows(&by_style), None)), 3);
+}
+
+#[test]
+fn a_hidden_row_holding_a_nested_table_keeps_its_height() {
+    let nested = row_with_nested_table("", "");
+    let rows = |middle: String| render(&[row("Alpha", ""), middle, row("Charlie", "")], false);
+    let marked = rows(nested.clone());
+    assert_eq!(row_count(&marked), 3);
+    assert_same_layout(&marked, &rows(nested.replacen(HIDDEN, "", 1)));
+}
+
+#[test]
+fn a_hidden_header_row_follows_its_paragraph_marks() {
+    let header = "<w:trPr><w:tblHeader/><w:hidden/></w:trPr>";
+    let rows = |paragraph: String| {
+        [
+            wide_row(header, &vec![paragraph; 5]),
+            text_row("Alpha"),
+            text_row("Charlie"),
+        ]
+    };
+    let visible = render_wide(&rows("<w:p/>".to_owned()), None);
+    assert_eq!(row_count(&visible), 3);
+    assert_same_layout(
+        &visible,
+        &render_wide(
+            &[
+                wide_row(
+                    "<w:trPr><w:tblHeader/></w:trPr>",
+                    &vec!["<w:p/>".to_owned(); 5],
+                ),
+                text_row("Alpha"),
+                text_row("Charlie"),
+            ],
+            None,
+        ),
+    );
+    assert_eq!(
+        row_count(&render_wide(&rows(hidden_field_paragraph()), None)),
+        2
+    );
 }

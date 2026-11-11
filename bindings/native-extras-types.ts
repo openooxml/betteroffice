@@ -1,4 +1,5 @@
 import type { XlsxFontFace } from '../packages/xlsx/src/wasm/pngTarget';
+import type { PngUnavailablePicture } from '../shared/office-session/pngExportError';
 
 /** What a native binding has beyond the wasm engine it replaces: top-level functions and instance members per class. */
 export interface NativeExtras {
@@ -40,6 +41,7 @@ export interface DocxNativeExtras {
   members: {
     EditSession: {
       renderPngTarget(displayListJson: string, targetJson: string, optionsJson: string): Uint8Array;
+      renderPngTargetReport(displayListJson: string, targetJson: string, optionsJson: string): { png: Uint8Array; pictures: PngUnavailablePicture[] };
     };
   };
 }

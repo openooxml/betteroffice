@@ -1,6 +1,6 @@
 // @betteroffice/docx declaration layout/render/png.d.ts
 // Regenerate: bun scripts/api-surface.ts --write docx
-import { PngExportError } from '../../../../../shared/office-session/pngExportError';
+import { PngExportError, type PngDiagnostic } from '../../../../../shared/office-session/pngExportError';
 import type { BundledFontProvider } from '../measure';
 import type { DisplayPage } from './displayList';
 /** The rasterizer's largest PNG side and area, in pixels. */
@@ -22,11 +22,17 @@ export interface DocxPngOptions {
     fonts?: ReadonlyArray<DocxPngFontFace>;
     /** The provider the editor showing this document measures with, where it has one. */
     fontProvider?: BundledFontProvider;
+    /** Told, once per page, about pictures drawn as a placeholder because they could not be drawn. */
+    onDiagnostic?: (diagnostic: PngDiagnostic) => void;
+    /**
+     * Reject with `picture-unavailable` instead of drawing a placeholder when a
+     * picture cannot be drawn, for pipelines that must not ship one. Off by default.
+     */
+    strictPictures?: boolean;
 }
 /** Whether this runtime can paint and encode a PNG on a canvas: one with a 2d context, not only a document. */
 export declare function canvasPngAvailable(): boolean;
 export declare function canvasUnavailable(): PngExportError;
-export declare function pictureUnavailable(): PngExportError;
 export declare function fontUnavailable(detail: string): PngExportError;
 /** Checks a page export's scale and size the way every engine does, and returns the PNG size. */
 export declare function pagePngRequest(page: Pick<DisplayPage, 'width' | 'height'>, options: Pick<DocxPngOptions, 'scale'>): {
