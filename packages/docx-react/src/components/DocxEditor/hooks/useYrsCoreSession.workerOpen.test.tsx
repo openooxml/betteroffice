@@ -7506,6 +7506,7 @@ test('a ready click binds its position before an outstanding resident edit reply
   const xml = await zip.file('word/document.xml')!.async('string');
   zip.file('word/document.xml', xml.replace('First paragraph', 'abcdef'));
   const source = await zip.generateAsync({ type: 'uint8array' });
+  const errorLog = spyOn(console, 'error');
   const opened = await openingEditor(true, false, {
     source, residentInput: true,
     holdReply: (request) => request.type === 'applyInput' && request.text === 'X',
@@ -7520,7 +7521,12 @@ test('a ready click binds its position before an outstanding resident edit reply
     const request = await opened.received('applyInput');
     expect(request).toMatchObject({ text: 'X', selection: { head: { offset: 0 } } });
     expect(opened.replies.has(request.id)).toBe(true);
-    expect(opened.responses.get(request)).toMatchObject({ ok: true, frame: expect.any(ArrayBuffer) });
+    const heldReply = opened.responses.get(request);
+    const heldOk = heldReply?.ok;
+    const heldFrame = heldReply?.ok ? heldReply.frame : undefined;
+    expect(heldOk).toBe(true);
+    expect(heldFrame).toBeInstanceOf(ArrayBuffer);
+    expect((heldFrame as ArrayBuffer).byteLength).toBeGreaterThan(0);
     expect(full.paragraphs('body')[0].text).toBe('abcdef');
     expect(opened.harness.renderer.queries!.isReady()).toBe(true);
     opened.click(4);
@@ -7534,8 +7540,13 @@ test('a ready click binds its position before an outstanding resident edit reply
     expect(full.paragraphs('body')[0].text).toBe('XabcYdef');
     expect(opened.editor.current!.hasPendingInput()).toBe(false);
     expect(opened.harness.errors).toEqual([]);
+    const logged = errorLog.mock.calls.map((args) =>
+      args.map((arg) => arg instanceof Error ? arg.message : String(arg)).join(' '));
+    expect(logged.filter((line) => line.includes('Document worker unavailable'))).toEqual([]);
+    expect(logged.filter((line) => line.includes('undecodable FrameDelta'))).toEqual([]);
   } finally {
     opened.close();
+    errorLog.mockRestore();
   }
 });
 

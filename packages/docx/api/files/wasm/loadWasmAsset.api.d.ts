@@ -51,19 +51,39 @@ export interface WasmHeapStats {
     /** Size of the allocation the memory could not satisfy, or 0. */
     failedAllocationBytes: number;
 }
-/** One instantiated wasm module's memory in this thread; heap counters only for modules that keep them. */
+/**
+ * One instantiated engine module's memory in this thread; heap counters only for modules that
+ * keep them. A native engine that counts its heap is listed too, with no linear memory.
+ */
 export interface WasmModuleMemory extends Partial<WasmHeapStats> {
     label: string;
     /**
      * Size of its linear memory. It only grows, so it is also the module's
-     * high-water mark.
+     * high-water mark. A native engine has no linear memory: this is its peak
+     * heap bytes, its high-water mark, and `maximumBytes` is absent.
      */
     bufferBytes: number;
     maximumBytes?: number;
+    /** Listed by a native engine, which has no linear memory and no 4 GiB limit. */
+    native?: true;
 }
 /** The address space of a wasm32 memory: 4 GiB. */
 export declare const WASM32_MEMORY_LIMIT_BYTES: number;
-/** The memory of every wasm module instantiated in this thread, by label. */
+/**
+ * Starts counting the heap of every native engine in this process, so that
+ * {@link wasmModuleMemories} lists it. A native engine does not count by default:
+ * counting costs a little on every allocation. It starts at zero and stays on for
+ * the life of the process, for every thread and session in it: one caller starting
+ * it changes what every session in the process reports, and it cannot be stopped.
+ * Each thread's figures stay its own. Call it before opening documents: memory allocated
+ * earlier is subtracted when freed without having been counted (saturating at
+ * zero), so live and peak bytes can read low. Pressure events on a native engine
+ * also need a host memory budget. WebAssembly engines always count, each module
+ * instance its own heap, from the start, and cannot be stopped either. Returns
+ * whether every engine module that can count now does.
+ */
+export declare function startHeapCounting(): boolean;
+/** The memory of every engine module instantiated in this thread, by label. */
 export declare function wasmModuleMemories(): WasmModuleMemory[];
 export declare function createWasmModuleState(options: {
     label: string;
@@ -79,4 +99,6 @@ export declare function createWasmModuleState(options: {
     shareModule?: boolean;
     /** Reads the module's allocator counters, if it counts; called only once initialized. */
     heap?: () => WasmHeapStats | undefined;
+    /** Starts a native engine's heap counting; returns whether it counts. */
+    startHeapCounting?: () => boolean;
 }): WasmModuleState;

@@ -151,10 +151,11 @@ export function createPeerlessPluginGeometry(
   layout: XlsxPluginLayout, painted: PaintedGrid, canvas: Element, layer: HTMLElement,
   current: () => { version: string | null; painted: PaintedGrid | null },
   proposals?: () => ProposalGeometrySnapshot | null,
-  pointAt?: EditorPointQuery
+  pointAt?: EditorPointQuery,
+  selection?: () => XlsxPluginSelection
 ): XlsxPluginGeometry {
   return createPluginGeometry(layout, painted, canvas, layer, () => {
     const projection = current();
     return projection.version === layout.version && projection.painted === painted;
-  }, proposals, pointAt);
+  }, proposals, pointAt, selection);
 }
