@@ -1638,6 +1638,9 @@ impl EditingDoc {
             return Err(OpError::SuggestedFormattingOverContainer);
         }
         let source = self.source_metadata();
+        if let (Some(metadata), Some(index)) = (source.as_deref(), self.source_index()) {
+            metadata.prepare_all_patch_table_styles(&index);
+        }
         let mut keeper = Keeper::new(self);
         let revision_ids = self.apply_run_format_through(
             &mut txn,

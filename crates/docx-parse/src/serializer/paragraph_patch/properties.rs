@@ -248,11 +248,7 @@ pub(super) fn run_properties(
     let highlight_changed = deltas
         .iter()
         .any(|delta| delta.path.first().is_some_and(|key| key == "highlight"));
-    let hex = target
-        .get("highlight")
-        .and_then(|value| value.get("color").unwrap_or(value).as_str())
-        .is_some_and(|value| value.starts_with('#'));
-    if highlight_changed && !hex && !source.is_empty() {
+    if highlight_changed && !hex_highlight(target) && !source.is_empty() {
         let xml = property_xml(source)?;
         if let Some(at) = xml.child(0, "shd")?
             && xml.nodes[at]
@@ -574,19 +570,21 @@ fn flag(
     if value.is_some_and(|value| !value.is_boolean()) {
         return Err(conflict("expected boolean property"));
     }
-    let on = value == Some(&Value::Bool(true));
-    let inherited_on = inherited == Some(&Value::Bool(true));
+    let default = flag_default(child);
+    let on = value.and_then(Value::as_bool).unwrap_or(default);
+    let inherited_on = inherited.and_then(Value::as_bool).unwrap_or(default);
     let change = changes.children.entry(child).or_default();
     if current && on == inherited_on {
         change.remove = true;
-    } else if on {
-        change.attributes.insert("w:val", None);
-    } else if current || inherited_on || value == Some(&Value::Bool(false)) {
-        change.attributes.insert("w:val", Some("0".to_owned()));
     } else {
-        change.remove = true;
+        change.attributes.insert("w:val", (!on).then(|| "0".to_owned()));
     }
     Ok(())
+}
+
+/// The value an on/off property takes where neither the paragraph nor its styles set it.
+fn flag_default(child: &str) -> bool {
+    child == "widowControl"
 }
 
 /// Removes `child`, together with the attributes named in `attributes`, so the run takes the
@@ -627,6 +625,14 @@ fn without_empty_container(output: String) -> Result<String, Failure> {
     } else {
         Ok(output)
     }
+}
+
+/// Whether `attrs` give a highlight in hex, which is written as a shading fill.
+fn hex_highlight(attrs: &Attrs) -> bool {
+    attrs
+        .get("highlight")
+        .and_then(|value| value.get("color").unwrap_or(value).as_str())
+        .is_some_and(|value| value.starts_with('#'))
 }
 
 fn strike_flags(value: Option<&Value>) -> (bool, bool) {
@@ -702,7 +708,7 @@ fn run_leaf(
             );
             return Ok(());
         }
-        "highlight" if same_as_style(key) => {
+        "highlight" if !hex_highlight(target) && same_as_style(key) => {
             inherit_child(changes, "highlight", &["w:val"]);
             return Ok(());
         }
