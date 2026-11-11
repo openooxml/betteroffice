@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 
 use yrs::types::text::YChange;
-use yrs::{Any, Map, MapRef, Out, ReadTxn, Text};
+use yrs::{Any, Map, MapRef, Out, ReadTxn, Text, Transact};
 
 use crate::{EditingDoc, TableLocator};
 
