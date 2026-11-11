@@ -132,6 +132,16 @@ Failures carry `{ code, message }`: `unknown-proposal` for an unregistered id,
 context or unpainted layout. The result type also allows `stale-version`,
 `ambiguous-target` and `unsupported`.
 
+`selection-settle` reports the current selection after a minimum quiet window of
+350 ms; engines may wait up to 1.5 seconds longer for paint. Sources are `pointer`,
+`touch` and `keyboard`; programmatic changes use `keyboard`. `snapshot.selectionSettled`
+is false while the selection changes. These experimental signals are on for installed
+plugins. `geometry.getAnchorGeometry({ kind: "selection" })` anchors to the live
+selection. Superseded retained contexts or unpainted layouts return `layout-unavailable`
+before the missing-selection check. Charts and absent selections return `missing-target`;
+cells on another sheet or offscreen return `layout-unavailable`. `readAnchorGeometries`
+returns the same answers in a promise. In-cell editing anchors to the cell.
+
 Granted mutating built-in commands require `document: "write"`. A trusted `click`, `keydown`,
 or `pointerup` in the plugin's own UI, including its contributed toolbar buttons, admits
 that plugin's mutating calls until the event finishes dispatching, including the handler

@@ -31,6 +31,7 @@ import {
 } from './createPluginClients';
 import { definitionProblem, pluginDefinition } from './defineDocxPlugin';
 import { scopePluginGeometry } from './geometry';
+import { createDocxSelectionObserver, type DocxSelectionIdentity } from './selectionIdentity';
 import { observeProposals, proposalSnapshot, type DocxProposalSnapshot } from './proposalPreview';
 import type {
   DocxPlugin,
@@ -56,6 +57,14 @@ export type DocxPluginActivation = RuntimeActivation<Definition, Context>;
 /** The editor as the plugin host reaches it; members are read at call time. */
 export interface DocxPluginHostAccess extends DocxPluginEditorAccess {
   translate(key: TranslationKey): string;
+  selectionPublished?(key: string): void;
+  selectionCause?(): 'remote' | 'seed' | undefined;
+  readSelection?(cause: 'remote' | 'seed' | undefined): {
+    selection: DocxPluginSelection;
+    identity: string | DocxSelectionIdentity;
+    owner?: object;
+    ready?: boolean;
+  } | null;
   /** Geometry of the layout that shows the current version, or null. */
   geometry(): DocxPluginGeometry | null;
   /** Calls `listener` when geometry answers change within one layout, so plugin views read them again. */
@@ -75,7 +84,12 @@ export interface DocxPluginHost {
   generation(): string | null;
   version(): string;
   previewVersion(): number;
-  selectionChanged(selection: DocxPluginSelection): void;
+  selectionChanged(selection: DocxPluginSelection, identity?: string | DocxSelectionIdentity,
+    publication?: { owner: object; cause?: 'remote' | 'seed'; ready?: boolean }): string;
+  markSelectionDirty(cause?: 'remote' | 'seed' | 'refresh'): void;
+  flushSelection(): void;
+  selectionUnsettled(generation?: string | null): void;
+  selectionSettled(source: 'pointer' | 'touch' | 'keyboard', generation?: string | null): void;
   focusChanged(focused: boolean): void;
   localeChanged(locale: string): void;
   modeChanged(mode: EditorMode, readOnly: boolean): void;
@@ -153,6 +167,7 @@ function sameLayout(a: DocxPluginLayout | null, b: DocxPluginLayout | null): boo
 }
 
 export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHost {
+  let observeSelection = createDocxSelectionObserver();
   let reporter: ((error: DocxPluginError) => void) | undefined;
   let session: YrsSession | null = null;
   let workerProposalKey: string | null = null;
@@ -160,7 +175,42 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
   let detachProposals: (() => void) | null = null;
   let detachGeometry: (() => void) | null = null;
   let installed = false;
+  let installedDefinitions: readonly Definition[] = [];
+  let pendingSelection: { generation: string; cause: 'remote' | 'seed' | undefined } | null = null;
+  let deferredSelectionCause: { cause: 'remote' | 'seed' | undefined } | null = null;
+  let flushingSelection = false;
+  const cancelSelection = () => { pendingSelection = null; deferredSelectionCause = null; };
+  const flushSelection = (): void => {
+    const pending = pendingSelection;
+    if (!pending || flushingSelection) return;
+    pendingSelection = null;
+    if (!installed || runtime.generation() !== pending.generation) return;
+    flushingSelection = true;
+    try {
+      const cause = deferredSelectionCause ? deferredSelectionCause.cause : access.selectionCause?.() ?? pending.cause;
+      const next = access.readSelection?.(cause);
+      if (next) {
+        host.selectionChanged(next.selection, next.identity,
+          next.owner ? { owner: next.owner, cause, ready: next.ready } : undefined);
+        if (next.ready !== false) deferredSelectionCause = null;
+      }
+    } finally { flushingSelection = false; }
+  };
   let generations = 0;
+  let selectionIdentity = 'null';
+  let resolvedSelection = 'null';
+  let emittedSelection = EMPTY_SELECTION;
+  let emittedResolvedSelection = 'null';
+  let selectionSettleKey = 'null';
+  const selectionIdentities = new WeakMap<DocxPluginSnapshot, string>();
+  const resolvedSelectionKeys = new WeakMap<DocxPluginSnapshot, string>();
+  let settledSelection: string | null = null;
+  let settleEvent: Extract<DocxPluginEvent, { type: 'selection-settle' }> | null = null;
+  let settleDelivered = false;
+  const invalidateSettle = () => {
+    if (settleEvent && !settleDelivered) settledSelection = null;
+    settleEvent = null;
+  };
   let viewport: DocxPluginRect | null = null;
   let commandSignature: string | null = null;
   const state = {
@@ -170,6 +220,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
     readOnly: false,
     focused: false,
     locale: 'en',
+    selectionSettled: true,
     selection: EMPTY_SELECTION,
     layout: null as DocxPluginLayout | null,
     geometryLayout: null as DocxPluginLayout | null,
@@ -225,6 +276,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       scopedCommandStore(controller(), scopeFor(invocation))
     );
     const geometry = access.geometry();
+    const selection = selectionIdentities.get(invocation.snapshot);
     return {
       pluginId,
       snapshot: invocation.snapshot,
@@ -238,7 +290,8 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       edits: clients.edits,
       geometry:
         geometry && sameLayout(invocation.snapshot.layout, geometry.layout)
-          ? scopePluginGeometry(geometry, pluginId)
+          ? scopePluginGeometry(geometry, pluginId, () => !invocation.refusal() &&
+              selection === selectionIdentity, flushSelection, invocation.snapshot)
           : null,
       navigation: clients.navigation,
       setState: (next, atVersion) => invocation.setState(next, atVersion),
@@ -260,17 +313,24 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
     DocxPluginErrorPhase
   >({
     context: (invocation) => createContext(invocation),
-    snapshot: (pluginId, generation) => ({
-      generation,
-      version: state.version,
-      mode: state.mode,
-      readOnly: state.readOnly,
-      focused: state.focused,
-      locale: state.locale,
-      grant: runtime.grant(pluginId) as DocxPluginGrant,
-      selection: state.selection,
-      layout: state.layout,
-    }),
+    snapshot: (pluginId, generation) => {
+      flushSelection();
+      const snapshot: DocxPluginSnapshot = {
+        generation,
+        version: state.version,
+        mode: state.mode,
+        readOnly: state.readOnly,
+        focused: state.focused,
+        locale: state.locale,
+        grant: runtime.grant(pluginId) as DocxPluginGrant,
+        selection: state.selection,
+        selectionSettled: state.selectionSettled,
+        layout: state.layout,
+      };
+      selectionIdentities.set(snapshot, selectionIdentity);
+      resolvedSelectionKeys.set(snapshot, resolvedSelection);
+      return snapshot;
+    },
     currentVersion: () => runtime.generation() === null ? null : session ? readSessionVersion(session) : state.version,
     loadEvent: (snapshot, reason) => ({
       type: 'load',
@@ -283,6 +343,17 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       generation: snapshot.generation,
       grant: grant as DocxPluginGrant,
     }),
+    eventCurrent: (event, snapshot) => {
+      if (event.type !== 'selection-settle') return true;
+      const current = event === settleEvent && event.version === snapshot.version &&
+        settledSelection === resolvedSelectionKeys.get(snapshot) &&
+        JSON.stringify(event.selection) === JSON.stringify(snapshot.selection);
+      if (event === settleEvent) {
+        if (current) settleDelivered = true;
+        else invalidateSettle();
+      }
+      return current;
+    },
     validate: definitionProblem,
     report,
   });
@@ -291,7 +362,10 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
     if (!detachGeometry) detachGeometry = access.subscribeGeometry?.(() => { notifyViewport(); runtime.touch(); }) ?? null;
   };
 
-  const notify = (event: DocxPluginEvent): void => runtime.notify(event);
+  const notify = (event: DocxPluginEvent): void => {
+    if (event.type === 'selection-change' || event.type === 'document-change') invalidateSettle();
+    runtime.notify(event);
+  };
   const notifyViewport = (): void => {
     const generation = runtime.generation();
     const geometry = state.layout ? access.geometry() : null;
@@ -363,6 +437,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
   };
 
   const closeSession = (): void => {
+    cancelSelection();
     detachUpdates?.();
     detachUpdates = null;
     detachProposals?.();
@@ -370,8 +445,9 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
     session = null;
   };
 
-  const commandState = (pluginId: string, command: DocxPluginCommand<unknown>) =>
-    runtime.guard(
+  const commandState = (pluginId: string, command: DocxPluginCommand<unknown>) => {
+    flushSelection();
+    return runtime.guard(
       pluginId,
       'command-state',
       (context) => checkedState(command.getState ? command.getState(context) : ENABLED),
@@ -380,6 +456,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
         disabledReason: commandReason('plugin-unavailable', { translate: access.translate }),
       }
     );
+  };
 
   const executeCommand = async (
     pluginId: string,
@@ -393,7 +470,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
     return { ok: false, failure: commandReason(code, { translate: access.translate }) };
   };
 
-  return {
+  const host: DocxPluginHost = {
     setPlugins(plugins) {
       const definitions: Definition[] = [];
       for (const plugin of plugins ?? []) {
@@ -413,7 +490,10 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
           error: new TypeError('Plugins must be created with defineDocxPlugin'),
         });
       }
+      if (installedDefinitions.some(definition => !definitions.includes(definition))) cancelSelection();
+      installedDefinitions = definitions;
       installed = definitions.length > 0;
+      if (!installed) cancelSelection();
       observe();
       runtime.setPlugins(definitions);
     },
@@ -426,10 +506,19 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
 
     open(next) {
       closeSession();
+      observeSelection = createDocxSelectionObserver();
       session = next;
       state.version = readSessionVersion(next) ?? '';
       state.previewVersion = proposalSnapshot(next)?.previewVersion ?? 0;
       state.layout = null;
+      state.selectionSettled = true;
+      selectionIdentity = 'null';
+      resolvedSelection = 'null';
+      emittedSelection = EMPTY_SELECTION;
+      emittedResolvedSelection = 'null';
+      selectionSettleKey = 'null';
+      settledSelection = null;
+      settleEvent = null;
       state.selection = EMPTY_SELECTION;
       observe();
       observeGeometry();
@@ -449,10 +538,19 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
 
     openWorker(version) {
       closeSession();
+      observeSelection = createDocxSelectionObserver();
       workerProposalKey = null;
       state.version = version;
       state.previewVersion = 0;
       state.layout = null;
+      state.selectionSettled = true;
+      selectionIdentity = 'null';
+      resolvedSelection = 'null';
+      emittedSelection = EMPTY_SELECTION;
+      emittedResolvedSelection = 'null';
+      selectionSettleKey = 'null';
+      settledSelection = null;
+      settleEvent = null;
       state.selection = EMPTY_SELECTION;
       observeGeometry();
       viewport = null;
@@ -493,13 +591,91 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
     version: () => state.version,
     previewVersion: () => state.previewVersion,
 
-    selectionChanged(selection) {
-      if (JSON.stringify(selection) === JSON.stringify(state.selection)) return;
-      state.selection = selection;
+    markSelectionDirty(cause) {
       const generation = runtime.generation();
-      if (generation) {
-        notify({ type: 'selection-change', generation, version: state.version, selection });
+      if (!installed || !generation || !access.readSelection) return;
+      if (cause !== 'refresh') {
+        if (deferredSelectionCause) {
+          deferredSelectionCause.cause = deferredSelectionCause.cause === undefined || cause === undefined
+            ? undefined : deferredSelectionCause.cause === 'remote' || cause === 'remote' ? 'remote' : 'seed';
+        } else deferredSelectionCause = { cause };
       }
+      if (pendingSelection) {
+        pendingSelection.cause = deferredSelectionCause?.cause;
+        return;
+      }
+      const pending = { generation, cause: deferredSelectionCause?.cause };
+      pendingSelection = pending;
+      queueMicrotask(() => { if (pendingSelection === pending) flushSelection(); });
+    },
+
+    flushSelection,
+
+    selectionChanged(selection, identity = JSON.stringify(selection), publication) {
+      if (typeof identity !== 'string' && JSON.parse(identity.resolvedKey)?.[1] === false &&
+        (selection.formatting !== null || selection.displayRange !== null)) selection = EMPTY_SELECTION;
+      if (publication && typeof identity !== 'string') {
+        const cause = publication.cause === 'seed' && JSON.parse(identity.resolvedKey)?.[1] === false
+          ? undefined : publication.cause;
+        identity = observeSelection(publication.owner, identity, cause);
+      }
+      const sticky = typeof identity === 'string' ? identity : identity.stickyKey;
+      const moved = sticky !== selectionIdentity;
+      const resolved = typeof identity === 'string' ? identity : identity.resolvedKey;
+      const resolvedMoved = resolved !== resolvedSelection;
+      const settleKey = typeof identity === 'string' ? identity : identity.settleKey;
+      const settleChanged = settleKey !== selectionSettleKey;
+      const selectionChanged = JSON.stringify(selection) !== JSON.stringify(emittedSelection);
+      const emittedMoved = resolved !== emittedResolvedSelection;
+      const stateChanged = JSON.stringify(selection) !== JSON.stringify(state.selection);
+      if (settleKey === selectionSettleKey &&
+        resolved !== resolvedSelection && state.selectionSettled && settledSelection !== null && settleDelivered) {
+        settledSelection = resolved;
+      }
+      selectionIdentity = sticky;
+      resolvedSelection = resolved;
+      selectionSettleKey = settleKey;
+      state.selection = selection;
+      if (publication?.ready === false) {
+        if (settleChanged) host.selectionUnsettled();
+        if (moved || resolvedMoved || stateChanged) { invalidateSettle(); runtime.touch(); }
+      } else if (!selectionChanged && !emittedMoved) {
+        if (moved || resolvedMoved || stateChanged) { invalidateSettle(); runtime.touch(); }
+        if (!state.selectionSettled) access.selectionPublished?.(settleKey);
+      } else {
+        const generation = runtime.generation();
+        if (generation) {
+          emittedSelection = selection;
+          emittedResolvedSelection = resolved;
+          notify({ type: 'selection-change', generation, version: state.version, selection });
+          access.selectionPublished?.(settleKey);
+        }
+      }
+      return sticky;
+    },
+
+    selectionUnsettled(expected = runtime.generation()) {
+      if (!expected || runtime.generation() !== expected || !state.selectionSettled) return;
+      state.selectionSettled = false;
+      invalidateSettle();
+      runtime.touch();
+    },
+
+    selectionSettled(source, expected = runtime.generation()) {
+      flushSelection();
+      if (!expected || runtime.generation() !== expected) return;
+      const changed = !state.selectionSettled;
+      state.selectionSettled = true;
+      const key = resolvedSelection;
+      if (key === settledSelection) {
+        if (changed) runtime.touch();
+        return;
+      }
+      settledSelection = key;
+      settleDelivered = false;
+      settleEvent = { type: 'selection-settle', generation: expected, version: state.version,
+        selection: structuredClone(state.selection), source };
+      notify(settleEvent);
     },
 
     focusChanged(focused) {
@@ -560,8 +736,8 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       notifyLayout(generation);
     },
 
-    notificationsIdle: () => runtime.notificationsIdle(),
-    activations: () => runtime.activations(),
+    notificationsIdle: () => { flushSelection(); return runtime.notificationsIdle(); },
+    activations: () => { flushSelection(); return runtime.activations(); },
     subscribe: (listener) => runtime.subscribe(listener),
 
     commandStore(activation) {
@@ -640,7 +816,8 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       commands.setPluginCommands(bindings, toolbar);
     },
 
-    guard: (pluginId, phase, call, fallback) => runtime.guard(pluginId, phase, call, fallback),
+    guard: (pluginId, phase, call, fallback) => { flushSelection(); return runtime.guard(pluginId, phase, call, fallback); },
     fail: (pluginId, phase, error) => runtime.fail(pluginId, phase, error),
   };
+  return host;
 }

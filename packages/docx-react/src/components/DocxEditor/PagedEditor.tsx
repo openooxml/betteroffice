@@ -14,7 +14,7 @@
  * 4. Selection changes → compute rects → update overlay
  */
 
-import type { DocxClipboardFragment } from '@betteroffice/docx/yrs';
+import { withYrsSelectionCause, type DocxClipboardFragment } from '@betteroffice/docx/yrs';
 import React, { useEffect, useRef, useState, useCallback, useMemo, useId, forwardRef, memo } from 'react';
 import type { CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
@@ -1116,12 +1116,13 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         inWorker?: boolean
       ): boolean => {
         if (!yrsCore.session) return false;
-        const displaySelection = yrsInputRef.current?.displaySelection() ?? { anchor: 0, head: 0 };
-        if (docChanged) {
-          yrsCore.publishDirectInput(dirtyStory);
-        }
-        handleYrsStateChange(displaySelection, docChanged, false, false, origin, inWorker);
-        return true;
+        const publish = () => {
+          if (docChanged) yrsCore.publishDirectInput(dirtyStory);
+          const displaySelection = yrsInputRef.current?.displaySelection() ?? { anchor: 0, head: 0 };
+          handleYrsStateChange(displaySelection, docChanged, false, false, origin, inWorker);
+          return true;
+        };
+        return origin === 'remote' ? withYrsSelectionCause(yrsCore.session, 'remote', publish) : publish();
       },
       [handleYrsStateChange, yrsCore.publishDirectInput, yrsCore.session]
     );

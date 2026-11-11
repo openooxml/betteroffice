@@ -35,6 +35,7 @@ export interface WorkerPaintSourceOptions {
   requestFrame(request: WorkerPaintRequest): Promise<WorkbookFrame>;
   sentSequence(): number;
   publish(painted: WorkerPaintResult): void;
+  onInstalled?(painted: WorkerPaintResult): void;
   onError(error: unknown): void;
   isCurrent?(): boolean;
   scheduler?: WorkerPaintScheduler;
@@ -72,7 +73,9 @@ export class WorkerPaintSource {
   private failed = false;
   private raf: number | null = null;
   private revision = 0;
+  private paintedRevision = -1;
   private pending: PendingFrame | null = null;
+  private inFlight: WorkerPaintRequest | null = null;
   private running = false;
   private lastPaint: WorkerPaintResult | null = null;
 
@@ -81,6 +84,16 @@ export class WorkerPaintSource {
   }
 
   get painted(): WorkerPaintResult | null { return this.lastPaint; }
+
+  selectionPaintReady(sheet: number, activeSheet: number): () => boolean {
+    const revision = this.revision;
+    const previous = this.lastPaint;
+    const pending = this.current && !this.failed &&
+      (this.raf !== null && activeSheet === sheet ||
+        this.pending?.request.sheet === sheet || this.inFlight?.sheet === sheet);
+    return () => !pending || (this.lastPaint !== previous && this.lastPaint?.request.sheet === sheet &&
+      this.paintedRevision >= revision);
+  }
 
   schedule(): void {
     if (!this.current || this.failed) return;
@@ -144,6 +157,7 @@ export class WorkerPaintSource {
       ...paint, source, request, sequence, geometry: paint.displayList.grid,
     };
     const previous = this.lastPaint;
+    const revision = this.revision;
     this.lastPaint = painted;
     try {
       this.options.publish(painted);
@@ -151,6 +165,8 @@ export class WorkerPaintSource {
       if (this.lastPaint === painted) this.lastPaint = previous;
       throw error;
     }
+    this.paintedRevision = revision;
+    this.options.onInstalled?.(painted);
     return painted;
   }
 
@@ -166,6 +182,7 @@ export class WorkerPaintSource {
           continue;
         }
         const { request } = pending;
+        this.inFlight = request;
         let frame: WorkbookFrame;
         try {
           frame = await this.options.requestFrame(snapshot(request));
@@ -191,6 +208,6 @@ export class WorkerPaintSource {
           }, frame.sequence);
         } catch (error) { this.fail(error); }
       }
-    } finally { this.running = false; }
+    } finally { this.running = false; this.inFlight = null; }
   }
 }

@@ -171,6 +171,26 @@ once with the reason. Plugins are matched by `id` and `revision`, so new array
 identities and reordering keep their state; React StrictMode's double setup
 creates two distinct activations.
 
+**Selection settling (experimental).** `selection-settle` carries the current
+`generation`, `version`, `selection` and `source` (`pointer`, `touch` or `keyboard`)
+after a minimum quiet window of 350 ms without selection changes following
+pointer or touch release, keyboard navigation, or programmatic selection changes.
+Programmatic changes use the `keyboard` source. Engines may wait longer for input
+or layout. Repeated clicks settle once; unchanged selections do not emit again. `snapshot.selectionSettled`
+starts true, becomes false during a gesture or selection change, and returns true
+when it settles.
+
+`geometry.getAnchorGeometry({ kind: "selection" })` returns selection fragments
+and a focus-end anchor in overlay pixels. A caret has empty `rects` and a caret
+`anchor`. Superseded retained contexts, unpresented layouts and pending input return
+`layout-unavailable` before the no-selection check, which returns `missing-target`.
+Geometry is `pending` while selection mapping or the display range is read.
+`readAnchorGeometries` waits up to two seconds for selection targets, then answers
+`layout-unavailable`; a mixed call resolves when its slowest target does.
+Selection anchors are live-only; use a range target to keep a position.
+Header and footer selections use their story's geometry; stories without geometry support return `unsupported`.
+In the read-only viewer, header and footer selections return `unsupported`; body selections still return geometry.
+
 **Focus and locale.** `snapshot.focused` is true while focus is inside the
 editor's document surface; docked panels, toolbar controls, and host chrome are
 outside. `focus-change` carries `focused`. `snapshot.locale`
@@ -661,6 +681,25 @@ const review = defineXlsxPlugin<{ sheets: number }>({
   onPluginError={(error) => console.error(error.pluginId, error.phase, error.error)}
 />;
 ```
+
+**Selection settling (experimental).** `selection-settle` carries the current
+`generation`, `version`, `selection` and `source` (`pointer`, `touch` or `keyboard`)
+after a minimum quiet window of 350 ms without selection changes following
+pointer or touch release, keyboard navigation, or programmatic selection changes.
+Programmatic changes use the `keyboard` source. Engines may wait up to 1.5 seconds
+longer for paint. Repeated clicks settle once; unchanged selections do not emit again. `snapshot.selectionSettled`
+starts true, becomes false during a gesture or selection change, and returns true
+when it settles.
+
+`geometry.getAnchorGeometry({ kind: "selection" })` returns the selected cell
+range using `getRangeRect`, clipped to the visible grid. Superseded retained contexts
+or unpainted layouts return `layout-unavailable` before the missing-selection check.
+A selected chart or absent selection returns `missing-target`; a cell selection on
+another sheet or offscreen returns `layout-unavailable`. In-cell editing anchors to
+the cell, without exposing its text selection. Selection anchors are live-only;
+use `getRangeRect` to keep a cell range.
+`readAnchorGeometries(targets)` reads the same synchronous answers in
+order through a promise.
 
 **Lifecycle and grants** follow the DOCX editor: fresh state,
 `initialize` and one `load` event per workbook (repeated when a change the hook

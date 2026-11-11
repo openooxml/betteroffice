@@ -1,4 +1,4 @@
-import type { YrsSession } from '@betteroffice/docx/yrs';
+import { withYrsSelectionCause, type YrsSession } from '@betteroffice/docx/yrs';
 import { yieldToMainThread } from './yieldToMainThread';
 
 export type WorkerOpenFallbackReason = 'failure' | { syncAccess: string };
@@ -166,13 +166,13 @@ export function deferWorkerOpenReplica(
     finishing = true;
     try {
       try {
-        load(reason);
+        withYrsSelectionCause(session, 'remote', () => load(reason));
         if (!current()) return;
         if (handoff) replica.readyVersion = session.version();
       } catch (error) {
         if (!handoff) throw error;
         if (!current()) return;
-        fallback('failure');
+        withYrsSelectionCause(session, 'remote', () => fallback('failure'));
         handoff = false;
       }
       if (!current()) return;
@@ -195,7 +195,7 @@ export function deferWorkerOpenReplica(
     }
   };
   const loadRemaining = (): void => {
-    while (steps && nextStep < steps.length && current()) steps[nextStep++]!();
+    while (steps && nextStep < steps.length && current()) withYrsSelectionCause(session, 'remote', steps[nextStep++]!);
   };
   const hydrateInTasks = async (load: (() => void) | readonly (() => void)[]): Promise<void> => {
     if (!current()) return;
@@ -206,7 +206,7 @@ export function deferWorkerOpenReplica(
         if (!current()) return;
         finishing = true;
         try {
-          plan[nextStep++]!();
+          withYrsSelectionCause(session, 'remote', plan[nextStep++]!);
           if (current()) replica.hydratingVersion = session.version();
         } finally {
           finishing = false;
