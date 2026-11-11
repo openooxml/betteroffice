@@ -716,7 +716,7 @@ fn editor_clear_into_a_table_cell_keeps_what_the_table_style_gives() {
     editor_clear(
         &doc,
         &EditCtx::local("", ""),
-        editor_range(&doc, "body", ("00000011", 0), ("00000013", 0)),
+        editor_range(&doc, "body", ("00000011", 0), ("00000013", 2)),
     );
     let cleared = marks_in(&doc, &cell, "Cell");
     assert!(active(&cleared, "bold"));
