@@ -414,7 +414,7 @@ export type DocxCommandFrame = FrameEnvelope<DocxCommandFramePayload>;
 export type DocxCommandAck = CommandAck<DocxCommandSelection | null, DocxEditState, DocxCommandFramePayload> & {
   echoContext?: DocxCommandEchoContext;
 };
-export type DocxCommandApplyResult = ApplyResult<DocxCommandSelection | null, DocxEditState>;
+export type DocxCommandApplyResult = ApplyResult<DocxCommandSelection | null, DocxEditState> & { cause?: 'remote' };
 export type DocxCommandReply = DocxCommandAck | TransferResult<DocxCommandAck>;
 
 /** @internal */
@@ -539,7 +539,7 @@ export type DocxCommandHooksFactory = (
   environment?: DocxCommandHooksEnvironment
 ) => Pick<DocxCommandHooks, 'preflight' | 'apply' | 'selection' | 'editState' | 'recoveryState'> & {
   /** Runs after the collaboration wrap applies a remote merge at `context.currentVersion`. */
-  afterRemoteMerge?(context: DocxCommandApplyContext): void;
+  afterRemoteMerge?(context: DocxCommandApplyContext): { cause: 'remote' } | void;
 };
 
 export interface DocxCommandRegistry {

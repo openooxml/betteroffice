@@ -1709,6 +1709,16 @@ fn paint_picture_placeholder(
     }
 }
 
+/// What a picture is reported by: its source, or for one with none, its
+/// relationship id.
+fn picture_name(image: &ImagePrimitive) -> &str {
+    if image.rel_id.is_empty() {
+        image.relationship_id.as_deref().unwrap_or_default()
+    } else {
+        &image.rel_id
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn paint_image<'k>(
     pixmap: &mut Pixmap,
@@ -1729,9 +1739,10 @@ fn paint_image<'k>(
     let decoded = match image_source(&image.rel_id, scope, resources) {
         Some(source) => scratch.images.resolve(&image.rel_id, source),
         None => {
-            scratch
-                .images
-                .skip(&image.rel_id, PictureFailure::new(PictureReason::Missing));
+            scratch.images.skip(
+                picture_name(image),
+                PictureFailure::new(PictureReason::Missing),
+            );
             None
         }
     };
@@ -3973,6 +3984,52 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_picture_with_no_source_is_reported_by_its_relationship_id() {
+        let picture = |relationship_id: Option<&str>, x: u32| {
+            let mut image = json!({
+                "kind": "image",
+                "relId": "",
+                "x": x,
+                "y": 2,
+                "w": 12,
+                "h": 12
+            });
+            if let Some(id) = relationship_id {
+                image["relationshipId"] = json!(id);
+            }
+            image
+        };
+        let scene: DisplayList = serde_json::from_value(json!({
+            "pages": [{
+                "pageIndex": 0,
+                "width": 36,
+                "height": 20,
+                "primitives": [picture(Some("rIdLost"), 2), picture(None, 18)]
+            }]
+        }))
+        .expect("display list");
+        let rendered = render_pictures(&scene, &ImageMap::new(), &mut ImageCache::default(), 1.0);
+        let named: Vec<(&str, PictureReason)> = rendered
+            .skipped_pictures
+            .iter()
+            .map(|picture| (picture.id.as_str(), picture.reason))
+            .collect();
+        let expected = vec![
+            ("rIdLost", PictureReason::Missing),
+            ("", PictureReason::Missing),
+        ];
+        assert_eq!(
+            named, expected,
+            "only a picture with a relationship id is named"
+        );
+        assert_eq!(
+            picture_pixel(&rendered.bytes, 8, 8),
+            PLACEHOLDER_FILL,
+            "a named missing picture still draws its placeholder",
+        );
     }
 
     #[test]

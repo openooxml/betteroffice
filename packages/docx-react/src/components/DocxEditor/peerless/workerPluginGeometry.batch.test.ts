@@ -5,6 +5,7 @@ import type { ProposalGeometryTarget } from '@betteroffice/docx/yrs';
 import type { DocxGeometryTarget } from '../../../plugins/types';
 import { WorkerReadSupersededError } from './shellController';
 import { createWorkerPluginGeometry } from './workerPluginGeometry';
+import { selectionClock } from '../../../../../../e2e/browser/plugin-host/selection-clock';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -25,7 +26,7 @@ const unavailable = { ok: false, failure: { code: 'layout-unavailable', message:
 const readFailed = { ok: false, failure: { code: 'read-failed', message: 'The worker could not read the target geometry' } } as const;
 
 /** A two-page worker shell whose pages are built per `built`, its anchor reads held until `answer()`. */
-async function shell(built: [boolean, boolean] = [true, true]) {
+async function shell(built: [boolean, boolean] = [true, true], withSelection = false, story = 'body') {
   const container = document.createElement('div');
   const host = document.createElement('div');
   host.setAttribute('data-docx-pages-host', '');
@@ -41,32 +42,52 @@ async function shell(built: [boolean, boolean] = [true, true]) {
     pages: unbuilt.map((pending, pageIndex) => ({ page: { pageId: String(pageIndex), pageIndex }, transform: [1, 0, 0, 1, 0, 0],
       bounds: { x: 0, y: pageIndex * (PAGE.height + GAP), ...PAGE },
       displayPage: { width: PAGE.width, height: PAGE.height, positionSpan: [pageIndex * 100, pageIndex * 100 + 99], ...(pending ? { unbuilt: true } : {}) } })) });
-  let view = { identity, version: 0, throughSeq: 0, presentedThroughSeq: 0, workerSelection: null, anchors: null, editState: undefined,
+  let view = { identity, version: 0, throughSeq: 0, presentedThroughSeq: 0, workerSelection: withSelection ? { anchor: { story, paraId: 'selection', offset: 0 }, focus: { story, paraId: 'selection', offset: 5 } } : null, anchors: null, editState: undefined,
     geometry: frameOf(1, built.map(value => !value)) };
   const review = { version: 'v1', previewVersion: 0 };
   const reads: { targets: DocxGeometryTarget[]; resolve(): void; reject(error?: Error): void }[] = [];
   const answerOf = (asked: DocxGeometryTarget): ProposalGeometryTarget => {
-    const from = idOf(asked) === 'late' ? 150 : 10;
-    return { ok: true, ranges: [{ from, to: from + 5 }], paragraph: from } as ProposalGeometryTarget;
+    if (asked.kind === 'range' && ['fn:1', 'en:1'].includes(asked.range.story)) {
+      return { ok: false, failure: { code: 'unsupported', message: 'The target has no display position' } };
+    }
+    const base = idOf(asked) === 'late' ? 150 : 10;
+    const from = withSelection && asked.kind === 'range' ? base + asked.range.start.offset : base;
+    const to = withSelection && asked.kind === 'range'
+      ? (asked.range.end.paraId === 'late' ? 150 : 10) + asked.range.end.offset : from + 5;
+    if (to < from) return { ok: false, failure: { code: 'missing-target', message: 'The range is reversed' } };
+    return { ok: true, ranges: [{ from, to }], paragraph: from } as ProposalGeometryTarget;
   };
   const controller = { getSnapshot: () => ({ status: 'ready', view }), review: async () => review, describedReview: () => review,
-    readAt: (request: { targets: DocxGeometryTarget[] }) => new Promise((resolve, reject) => {
-      reads.push({ targets: request.targets, resolve: () => resolve(request.targets.map(answerOf)), reject: (error = new Error('worker gone')) => reject(error) });
-    }),
+    readAt: (request: { kind: string; targets: DocxGeometryTarget[]; selection?: NonNullable<typeof view.workerSelection> }) => {
+      if (request.kind === 'rawSelectionInfo') return Promise.resolve({ before: 'x'.repeat(request.selection!.anchor.offset) });
+      if (request.kind === 'commentSelectionRange') {
+        const { anchor, focus } = request.selection!;
+        const position = (point: typeof anchor) => (point.paraId === 'late' ? 150 : 10) + point.offset;
+        const [start, end] = position(anchor) <= position(focus) ? [anchor, focus] : [focus, anchor];
+        return Promise.resolve({ story: start.story, start: { paraId: start.paraId, offset: start.offset },
+          end: { paraId: end.paraId, offset: end.offset } });
+      }
+      return new Promise((resolve, reject) => {
+        reads.push({ targets: request.targets, resolve: () => resolve(request.targets.map(answerOf)), reject: (error = new Error('worker gone')) => reject(error) });
+      });
+    },
     ref: { getZoom: () => zoom } };
   restore.push(spyOn(display, 'loadRustDisplayListQueryEngine').mockResolvedValue({} as never));
   restore.push(spyOn(display, 'createDisplayListQueries').mockImplementation(((list: { pages: { unbuilt?: boolean }[] }) => ({
     displayList: list, pageCount: () => 2, pageSize: () => PAGE,
     pageBounds: (pageIndex: number) => pageIndex < 2 ? { pageIndex, x: 0, y: 0, ...PAGE } : null,
     rangeRects: (from: number, to: number) => { const pageIndex = Math.floor(from / 100); return list.pages[pageIndex]?.unbuilt ? [] : [{ pageIndex, x: from % 100, y: 10, width: to - from, height: 12 }]; },
+    caretRect: (position: number) => ({ pageIndex: Math.floor(position / 100), x: position % 100, y: 10, width: 0, height: 12 }),
     anchorRect: (position: number) => ({ pageIndex: Math.floor(position / 100), x: 0, y: 0, width: 0, height: 12 }),
     dispose() {},
   })) as never));
   let published = 0;
   const plugin = createWorkerPluginGeometry(controller as never, () => container, () => layer, () => { published += 1; });
-  await plugin.update();
+  const updating = plugin.update();
+  if (withSelection) { for (let turn = 0; turn < 20; turn++) await Promise.resolve(); }
+  else await updating;
   return {
-    plugin, reads,
+    plugin, reads, updating,
     get view() { return view; },
     set view(next) { view = next; },
     published: () => published,
@@ -304,4 +325,130 @@ test('isPageBuilt answers false once its layout is no longer shown', async () =>
   await s.rebuild([true, true]);
   expect(first.isPageBuilt(0)).toBe(false);
   expect(s.plugin.geometry()!.isPageBuilt(1)).toBe(true);
+});
+
+
+test('worker selection anchors wait for mapping, then answer the same selection and collapsed caret', async () => {
+  const s = await shell([true, true], true);
+  try {
+    const geometry = s.plugin.geometry()!;
+    expect(s.plugin.selectionMapped()).toBe(false);
+    expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: false, failure: { code: 'pending' } });
+    let finished = false;
+    const read = geometry.readAnchorGeometries([{ kind: 'selection' }]).then((answers) => { finished = true; return answers; });
+    await Promise.resolve();
+    expect(finished).toBe(false);
+    await s.answer();
+    await s.updating;
+    expect(await read).toMatchObject([{ ok: true, version: 'v1', layoutId: geometry.layout.id,
+      rects: [{ pageIndex: 0, x: 10, y: 10, width: 5, height: 12 }],
+      anchor: { pageIndex: 0, x: 15, y: 10, width: 0, height: 12 } }]);
+    expect(s.plugin.selectionMapped()).toBe(true);
+    expect(s.plugin.displaySelection()).toMatchObject({ from: 10, to: 15, layoutId: geometry.layout.id });
+    s.view = { ...s.view, version: 1, workerSelection: { ...s.view.workerSelection!, focus: { ...s.view.workerSelection!.focus, offset: 0 } } };
+    const updating = s.plugin.update();
+    expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: false, failure: { code: 'pending' } });
+    const collapsed = geometry.readAnchorGeometries([{ kind: 'selection' }]);
+    for (let turn = 0; turn < 10; turn++) await Promise.resolve();
+    await s.answer();
+    await updating;
+    expect(await collapsed).toMatchObject([{ ok: true, rects: [], anchor: { width: 0, height: 12 } }]);
+    s.view = { ...s.view, workerSelection: null };
+    expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: false, failure: { code: 'missing-target' } });
+  } finally { s.plugin.dispose(); }
+});
+
+for (const story of ['fn:1', 'en:1']) {
+  test(`worker ${story} selection is ready once unsupported mapping finishes`, async () => {
+    const s = await shell([true, true], true, story);
+    try {
+      expect(s.plugin.selectionMapped()).toBe(false);
+      const read = s.plugin.geometry()!.readAnchorGeometries([{ kind: 'selection' }]);
+      await s.answer();
+      await s.updating;
+      expect(await read).toMatchObject([{ ok: false, failure: { code: 'unsupported' } }]);
+      expect(s.plugin.displaySelection()).toBeNull();
+      expect(s.plugin.selectionMapped()).toBe(true);
+      expect(s.plugin.geometry()!.getAnchorGeometry({ kind: 'selection' }))
+        .toMatchObject({ ok: false, failure: { code: 'unsupported' } });
+    } finally { s.plugin.dispose(); }
+  });
+}
+
+test('worker selection reads refuse a selection superseded before the reply', async () => {
+  const s = await shell([true, true], true);
+  try {
+    const geometry = s.plugin.geometry()!;
+    const read = geometry.readAnchorGeometries([{ kind: 'selection' }]);
+    const first = s.reads.shift()!;
+    s.view = { ...s.view, version: 1, workerSelection: {
+      anchor: { story: 'body', paraId: 'selection', offset: 1 },
+      focus: { story: 'body', paraId: 'selection', offset: 6 },
+    } };
+    const updating = s.plugin.update();
+    for (let turn = 0; turn < 20; turn++) await Promise.resolve();
+    await s.answer();
+    await updating;
+    expect(geometry.getAnchorGeometry({ kind: 'selection' }))
+      .toMatchObject({ ok: true, version: 'v1', layoutId: geometry.layout.id,
+        anchor: { x: 16, y: 10, width: 0, height: 12 } });
+    first.resolve();
+    await s.updating;
+    expect(await read).toEqual([unavailable]);
+  } finally { s.plugin.dispose(); }
+});
+
+
+for (const acrossParagraphs of [false, true]) test(`backward worker selections normalize document order and keep the focus (${acrossParagraphs ? 'paragraphs' : 'one paragraph'})`, async () => {
+  const s = await shell([true, true], true);
+  try {
+    await s.answer();
+    await s.updating;
+    s.view = { ...s.view, workerSelection: {
+      anchor: { story: 'body', paraId: acrossParagraphs ? 'late' : 'selection', offset: 5 },
+      focus: { story: 'body', paraId: 'selection', offset: 1 },
+    } };
+    const updating = s.plugin.update();
+    for (let turn = 0; turn < 20; turn++) await Promise.resolve();
+    const targets = s.reads[0]!.targets;
+    expect(targets[0]).toMatchObject({ kind: 'range', range: {
+      start: { paraId: 'selection', offset: 1 },
+      end: { paraId: acrossParagraphs ? 'late' : 'selection', offset: 5 },
+    } });
+    expect(targets[1]).toMatchObject({ kind: 'range', range: {
+      start: { paraId: 'selection', offset: 1 }, end: { paraId: 'selection', offset: 1 },
+    } });
+    const read = s.plugin.geometry()!.readAnchorGeometries([{ kind: 'selection' }]);
+    await s.answer();
+    await updating;
+    expect(await read).toMatchObject([{ ok: true,
+      rects: [{ x: 11, y: 10, width: acrossParagraphs ? 144 : 4, height: 12 }],
+      anchor: { pageIndex: 0, x: 11, y: 10, width: 0, height: 12 },
+    }]);
+  } finally { s.plugin.dispose(); }
+});
+
+
+test('F: a held worker selection read expires with layout-unavailable', async () => {
+  const clock = selectionClock();
+  const s = await shell([true, true], true);
+  try {
+    const geometry = s.plugin.geometry()!;
+    expect(s.reads.length).toBeGreaterThan(0);
+    expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: false, failure: { code: 'pending' } });
+    clock.holdWaits();
+    let result: Awaited<ReturnType<typeof geometry.readAnchorGeometries>> | undefined;
+    const pending = geometry.readAnchorGeometries([{ kind: 'selection' }]).then(value => { result = value; });
+    for (let turn = 0; turn < 40; turn++) await Promise.resolve();
+    expect(result).toBeUndefined();
+    await clock.expire();
+    expect(result).toBeDefined();
+    expect(result).toMatchObject([{ ok: false, failure: { code: 'layout-unavailable' } }]);
+    expect(s.reads.length).toBeGreaterThan(0);
+    await pending;
+  } finally {
+    for (const read of s.reads.splice(0)) read.resolve();
+    s.plugin.dispose();
+    clock.restore();
+  }
 });

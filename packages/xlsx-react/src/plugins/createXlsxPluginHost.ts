@@ -86,7 +86,9 @@ export interface XlsxPluginHost {
   close(reason: 'document-replaced' | 'unmounted'): void;
   generation(): string | null;
   version(): string;
-  selectionChanged(selection: XlsxPluginSelection): void;
+  selectionChanged(selection: XlsxPluginSelection, identity?: string): string;
+  selectionUnsettled(generation?: string | null): void;
+  selectionSettled(source: 'pointer' | 'touch' | 'keyboard', generation?: string | null): void;
   focusChanged(focused: boolean): void;
   localeChanged(locale: string): void;
   modeChanged(readOnly: boolean): void;
@@ -216,12 +218,22 @@ export function createXlsxPluginHost(
   let detachUpdates: (() => void) | null = null;
   let installed = false;
   let generations = 0;
+  let selectionIdentity = 'null';
+  const selectionIdentities = new WeakMap<XlsxPluginSnapshot, string>();
+  let settledSelection: string | null = null;
+  let settleEvent: Extract<XlsxPluginEvent, { type: 'selection-settle' }> | null = null;
+  let settleDelivered = false;
+  const invalidateSettle = () => {
+    if (settleEvent && !settleDelivered) settledSelection = null;
+    settleEvent = null;
+  };
   let commandSignature: string | null = null;
   const state = {
     version: '',
     readOnly: false,
     focused: false,
     locale: 'en',
+    selectionSettled: true,
     selection: null as XlsxPluginSelection,
     layout: null as XlsxPluginLayout | null,
     proposals: JSON.stringify({ proposals: [], staleFor: {}, version: null }),
@@ -292,6 +304,8 @@ export function createXlsxPluginHost(
     );
     const geometry = access.geometry();
     const point = geometry?.getPositionAtPoint ?? null;
+    const selection = selectionIdentities.get(invocation.snapshot);
+    const selectionCurrent = () => selection === selectionIdentity;
     return {
       pluginId,
       snapshot: invocation.snapshot,
@@ -307,9 +321,18 @@ export function createXlsxPluginHost(
         layout: geometry.layout,
         getCellRect: (target) => invocation.refusal() ? null : geometry.getCellRect(target),
         getRangeRect: (target) => invocation.refusal() ? null : geometry.getRangeRect(target),
-        getAnchorGeometry: (target) => invocation.refusal()
+        getAnchorGeometry: (target) => invocation.refusal() || (target.kind === 'selection' && !selectionCurrent())
           ? { ok: false, failure: { code: 'layout-unavailable', message: 'The plugin context is no longer current' } }
           : geometry.getAnchorGeometry(target),
+        readAnchorGeometries: async (targets) => {
+          if (invocation.refusal()) return targets.map(() => ({ ok: false as const,
+            failure: { code: 'layout-unavailable' as const, message: 'The plugin context is no longer current' } }));
+          const answers = await geometry.readAnchorGeometries(targets);
+          return answers.map((answer, index) => invocation.refusal() ||
+            (targets[index]!.kind === 'selection' && !selectionCurrent())
+            ? { ok: false as const, failure: { code: 'layout-unavailable' as const,
+                message: 'The plugin context is no longer current' } } : answer);
+        },
         getPositionAtPoint: point && ((clientX, clientY) => invocation.refusal() ? null : point(clientX, clientY)),
       } : null,
       navigation: clients.navigation,
@@ -319,16 +342,21 @@ export function createXlsxPluginHost(
     };
   };
 
-  const snapshotOf = (pluginId: string, generation: string): XlsxPluginSnapshot => ({
-    generation,
-    version: state.version,
-    readOnly: state.readOnly,
-    focused: state.focused,
-    locale: state.locale,
-    grant: runtime.grant(pluginId) as XlsxPluginGrant,
-    selection: state.selection,
-    layout: state.layout,
-  });
+  const snapshotOf = (pluginId: string, generation: string): XlsxPluginSnapshot => {
+    const snapshot: XlsxPluginSnapshot = {
+      generation,
+      version: state.version,
+      readOnly: state.readOnly,
+      focused: state.focused,
+      locale: state.locale,
+      grant: runtime.grant(pluginId) as XlsxPluginGrant,
+      selection: state.selection,
+      selectionSettled: state.selectionSettled,
+      layout: state.layout,
+    };
+    selectionIdentities.set(snapshot, selectionIdentity);
+    return snapshot;
+  };
 
   const runtime: PluginRuntime<
     Definition,
@@ -357,11 +385,25 @@ export function createXlsxPluginHost(
       generation: snapshot.generation,
       grant: grant as XlsxPluginGrant,
     }),
+    eventCurrent: (event, snapshot) => {
+      if (event.type !== 'selection-settle') return true;
+      const current = event === settleEvent && event.version === snapshot.version &&
+        settledSelection === selectionIdentities.get(snapshot) &&
+        JSON.stringify(event.selection) === JSON.stringify(snapshot.selection);
+      if (event === settleEvent) {
+        if (current) settleDelivered = true;
+        else invalidateSettle();
+      }
+      return current;
+    },
     validate: definitionProblem,
     report,
   });
 
-  const notify = (event: XlsxPluginEvent): void => runtime.notify(event);
+  const notify = (event: XlsxPluginEvent): void => {
+    if (event.type === 'selection-change' || event.type === 'document-change') invalidateSettle();
+    runtime.notify(event);
+  };
 
   const documentChanged = (): void => {
     const generation = runtime.generation();
@@ -540,9 +582,14 @@ export function createXlsxPluginHost(
       handle = next;
       state.version = ('identity' in access ? access.version(next) : readVersion(next as WorkbookHandle)) ?? '';
       state.layout = null;
+      state.selectionSettled = true;
+      selectionIdentity = 'null';
+      settledSelection = null;
+      settleEvent = null;
       state.proposals = JSON.stringify({ proposals: [], staleFor: {}, version: null });
       state.previewVersion = 0;
       state.selection = 'identity' in access && access.selection ? access.selection(next) : null;
+      selectionIdentity = JSON.stringify(state.selection);
       if ('identity' in access && access.readOnly) state.readOnly = access.readOnly(next);
       observe();
       generations += 1;
@@ -569,13 +616,42 @@ export function createXlsxPluginHost(
         previewVersion: state.previewVersion });
     },
 
-    selectionChanged(selection) {
-      if (JSON.stringify(selection) === JSON.stringify(state.selection)) return;
+    selectionChanged(selection, identity = JSON.stringify(selection)) {
+      const moved = identity !== selectionIdentity;
+      selectionIdentity = identity;
+      if (JSON.stringify(selection) === JSON.stringify(state.selection)) {
+        if (moved) { invalidateSettle(); runtime.touch(); }
+        return identity;
+      }
       state.selection = selection;
       const generation = runtime.generation();
       if (generation) {
         notify({ type: 'selection-change', generation, version: state.version, selection });
       }
+      return identity;
+    },
+
+    selectionUnsettled(expected = runtime.generation()) {
+      if (!expected || runtime.generation() !== expected || !state.selectionSettled) return;
+      state.selectionSettled = false;
+      invalidateSettle();
+      runtime.touch();
+    },
+
+    selectionSettled(source, expected = runtime.generation()) {
+      if (!expected || runtime.generation() !== expected) return;
+      const changed = !state.selectionSettled;
+      state.selectionSettled = true;
+      const key = selectionIdentity;
+      if (key === settledSelection) {
+        if (changed) runtime.touch();
+        return;
+      }
+      settledSelection = key;
+      settleDelivered = false;
+      settleEvent = { type: 'selection-settle', generation: expected, version: state.version,
+        selection: structuredClone(state.selection), source };
+      notify(settleEvent);
     },
 
     focusChanged(focused) {

@@ -436,3 +436,109 @@ fn an_insert_that_only_moves_a_picture_is_kept_and_undone() {
         source_drawing(&anchors)
     );
 }
+
+/// An `mc:AlternateContent` wrapper whose Choice and Fallback hold the given markup.
+fn alternate(choice: &str, fallback: &str) -> String {
+    format!(
+        r#"<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:Choice xmlns:a14="http://schemas.microsoft.com/office/drawing/2010/main" Requires="a14">{choice}</mc:Choice><mc:Fallback>{fallback}</mc:Fallback></mc:AlternateContent>"#
+    )
+}
+
+#[test]
+fn both_branches_of_an_alternate_content_drawing_move_alike() {
+    let anchors = [
+        alternate(
+            &two_cell(Some("oneCell"), (1, 4), (3, 8), 2),
+            &two_cell(Some("oneCell"), (1, 4), (3, 8), 3),
+        ),
+        one_cell((5, 6), 4),
+    ]
+    .concat();
+    let expected = source_drawing(
+        &[
+            alternate(
+                &two_cell(Some("oneCell"), (1, 6), (3, 10), 2),
+                &two_cell(Some("oneCell"), (1, 6), (3, 10), 3),
+            ),
+            one_cell((5, 8), 4),
+        ]
+        .concat(),
+    );
+    assert_eq!(after(&anchors, insert_rows(2, 2)), expected);
+    let columns = source_drawing(
+        &[
+            alternate(
+                &two_cell(Some("oneCell"), (2, 4), (4, 8), 2),
+                &two_cell(Some("oneCell"), (2, 4), (4, 8), 3),
+            ),
+            one_cell((6, 6), 4),
+        ]
+        .concat(),
+    );
+    assert_eq!(after(&anchors, insert_cols(0, 1)), columns);
+}
+
+#[test]
+fn an_alternate_content_drawing_it_cannot_read_still_refuses_every_edit() {
+    let cases = [
+        (
+            "branches on different cells",
+            alternate(
+                &two_cell(None, (1, 4), (3, 8), 2),
+                &two_cell(None, (1, 5), (3, 8), 3),
+            ),
+        ),
+        (
+            "two anchors in one branch",
+            alternate(
+                &[
+                    two_cell(None, (1, 4), (3, 8), 2),
+                    two_cell(None, (1, 4), (3, 8), 3),
+                ]
+                .concat(),
+                &two_cell(None, (1, 4), (3, 8), 4),
+            ),
+        ),
+        (
+            "something besides an anchor",
+            alternate(
+                r#"<xdr:sp macro="" textlink=""><xdr:nvSpPr><xdr:cNvPr id="2" name="Loose"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr/></xdr:sp>"#,
+                &two_cell(None, (1, 4), (3, 8), 3),
+            ),
+        ),
+    ];
+    for (label, anchors) in cases {
+        let source = package(&anchors);
+        let mut workbook = Workbook::open(&source).unwrap();
+        let error = workbook
+            .apply_ops(vec![insert_rows(15, 1)], options())
+            .unwrap_err();
+        assert_eq!(error.to_string(), REFUSAL, "{label}");
+        assert_eq!(
+            drawing_xml(&workbook.save().unwrap()),
+            drawing_xml(&source),
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn an_alternate_content_object_wholly_inside_deleted_rows_refuses() {
+    let anchors = alternate(
+        &two_cell(None, (1, 4), (3, 6), 2),
+        &two_cell(None, (1, 4), (3, 6), 3),
+    );
+    let source = package(&anchors);
+    let mut workbook = Workbook::open(&source).unwrap();
+    let error = workbook
+        .apply_ops(vec![delete_rows(3, 5)], options())
+        .unwrap_err();
+    assert_eq!(error.to_string(), REFUSAL);
+    assert_eq!(
+        after(&anchors, delete_rows(0, 2)),
+        source_drawing(&alternate(
+            &two_cell(None, (1, 2), (3, 4), 2),
+            &two_cell(None, (1, 2), (3, 4), 3),
+        ))
+    );
+}

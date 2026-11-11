@@ -55,6 +55,8 @@ export { breakRefusedWhileSuggesting } from './sectionBreak';
 export * from './structuredExport';
 export * from './pagedExport';
 export * from './inputPositionMap';
+/** @internal */
+export { subscribeYrsSelection, withYrsSelectionCause, yrsSelectionCause } from './selectionChanges';
 export * from './storyPlainText';
 export { tableBoundaryDeleteTarget } from './tableBoundaryDelete';
 export { isCellHasNoStoryRefusal } from './cellRefusal';
@@ -74,7 +76,7 @@ export type { DocxSourceOpenRequest, DocxSourcePreviewOptions } from './resident
 export type { DocxFontFace, DocxFontEnvironment, DocxFontEnvironmentEvent, DocxFontEnvironmentSnapshot } from './residentFontEnvironment';
 export { preloadDocxEngine } from './preloadDocxEngine';
 export { residentCaretSnapshotForFrame, residentCaretDeviceRect, type ResidentCaretPaintStyle, } from './residentCaret';
-export { WASM32_MEMORY_LIMIT_BYTES, wasmModuleMemories, type WasmHeapStats, type WasmModuleMemory, } from '../wasm/loadWasmAsset';
+export { startHeapCounting, WASM32_MEMORY_LIMIT_BYTES, wasmModuleMemories, type WasmHeapStats, type WasmModuleMemory, } from '../wasm/loadWasmAsset';
 export { documentToYrs } from './documentToYrs';
 export { OPAQUE_SEED_BUDGET_BYTES, OpaqueSeedBudgetError, assertOpaqueSeedBudget, normalizeSeedError, } from './documentToYrs';
 export { ownProjectedParagraphs, yrsToDocument } from './yrsToDocument';

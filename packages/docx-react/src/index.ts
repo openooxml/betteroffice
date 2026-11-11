@@ -138,6 +138,7 @@ export type {
   DocxPluginEvent,
   DocxPluginFocusChangeEvent,
   DocxPluginLocaleChangeEvent,
+  DocxPluginSelectionSettleEvent,
   DocxPluginFailureCode,
   DocxPluginGeometry,
   DocxPluginGrant,

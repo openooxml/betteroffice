@@ -1651,6 +1651,7 @@ fn walk_story_chunks<T: ReadTxn>(
                 if shapes::inline_native_shape(&block) {
                     let image = ImageRun {
                         src: String::new(),
+                        relationship_id: None,
                         width: block.width,
                         height: block.height,
                         alt: block.description.clone().or_else(|| block.title.clone()),
@@ -2812,6 +2813,7 @@ fn lower_image_values(
             Some(Any::String(src)) => env.media.token(src).unwrap_or_else(|| src.to_string()),
             value => value_string(value).unwrap_or_default(),
         },
+        relationship_id: map_string(values, "rId").filter(|id| !id.is_empty()),
         width,
         height,
         alt: map_string(values, "alt"),
@@ -4298,6 +4300,7 @@ fn inline_drawing_run(drawing: DrawingMarker, show_hidden_text: bool) -> RawRun 
     };
     let image = ImageRun {
         src: String::new(),
+        relationship_id: None,
         width,
         height,
         alt,
