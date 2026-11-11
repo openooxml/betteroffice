@@ -496,7 +496,8 @@ impl StoryParser<'_, '_> {
             .as_mut()
             .filter(|value| value.hidden == Some(true))
         {
-            formatting.hidden_content_only = row_is_hidden_content_only(element).then_some(true);
+            formatting.hidden_content_only = row_is_hidden_content_only(element, self.styles, self.doc_defaults)
+                .then_some(true);
         }
         let mut row = TableRow {
             node_type: "tableRow".to_owned(),
