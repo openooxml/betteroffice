@@ -1926,6 +1926,60 @@ test('native and wasm read a paragraph split after a line break across columns a
   for (const engine of [native, wasm]) expect(run(engine, plain).json).not.toContain('separator');
 }, 60_000);
 
+test('native and wasm keep explicit breaks and tabs inside a run that asks for ligatures', () => {
+  const encoder = new TextEncoder();
+  const carlito = new Uint8Array(readFileSync(new URL('../../packages/fonts/assets/Carlito-Regular.ttf', import.meta.url)));
+  const ns = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"';
+  const t = (text: string) => `<w:t xml:space="preserve">${text}</w:t>`;
+  const paragraph = (ask: boolean, inner: string) =>
+    `<w:p><w:r><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:cs="Calibri"/>${ask ? '<w14:ligatures w14:val="standard"/>' : ''}</w:rPr>${inner}</w:r></w:p>`;
+  const inner = `${t('office fifty')}<w:br/>${t('affine fifty')}<w:tab/>${t('officer')}`;
+  const expected = 'office fifty\naffine fifty\tofficer';
+  type Primitive = { kind: string; text?: string; docStart?: number; fontFeatures?: string[]; separatorBefore?: string; separatorAfter?: string };
+  const run = (engine: Engine, ask: boolean) => {
+    const bytes = wasm.rezip_docx({
+      '[Content_Types].xml': encoder.encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'),
+      '_rels/.rels': encoder.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'),
+      'word/document.xml': encoder.encode(`<w:document ${ns}><w:body>${paragraph(ask, inner)}<w:sectPr/></w:body></w:document>`),
+    });
+    const session = new engine.EditSession(83);
+    try {
+      session.open_docx(bytes, true);
+      const font = session.register_measure_font(carlito);
+      const request = {
+        bodyStory: 'body',
+        regions: { sections: [{ sectionId: 'main', properties: {
+          pageWidth: 12240, pageHeight: 15840, marginTop: 1440, marginRight: 1440, marginBottom: 1440, marginLeft: 1440,
+        } }] },
+        measurement: { fontChains: { 'calibri|0|0': [font] } as Record<string, number[]>, defaults: { fontSize: 11, fontFamily: 'Calibri' }, authoritativeShaping: true },
+        renderEnv: { themeColors: {} },
+      };
+      const requirements = JSON.parse(session.layout_font_requirements_json(JSON.stringify(request))) as { key: string }[];
+      for (const requirement of requirements) request.measurement.fontChains[requirement.key] = [font];
+      const layout = session.layout_document_with_regions_json(JSON.stringify(request));
+      const list = JSON.parse(session.build_display_list_json(JSON.stringify({ ...JSON.parse(layout), fontChains: request.measurement.fontChains }))) as {
+        pages: { primitives: Primitive[] }[];
+      };
+      const texts = list.pages[0]!.primitives
+        .filter((primitive) => (primitive.kind === 'text' || primitive.kind === 'glyphRun') && primitive.docStart !== undefined)
+        .sort((a, b) => a.docStart! - b.docStart!);
+      const pages = JSON.parse(session.page_texts_json(Uint32Array.of(0))) as { paragraphs: { text: string }[] }[];
+      return {
+        built: texts.map((primitive) => `${primitive.separatorBefore ?? ''}${primitive.text ?? ''}${primitive.separatorAfter ?? ''}`).join(''),
+        text: pages[0]!.paragraphs[0]!.text,
+        liga: texts.some((primitive) => primitive.kind === 'glyphRun' && (primitive.fontFeatures ?? []).includes('liga')),
+      };
+    } finally {
+      session.free();
+    }
+  };
+  for (const ask of [true, false]) {
+    const built = run(native, ask);
+    expect(built).toEqual(run(wasm, ask));
+    expect({ ask, text: built.text, built: built.built, liga: built.liga }).toEqual({ ask, text: expected, built: expected, liga: ask });
+  }
+}, 30_000);
+
 test('a footnote document lays out natively from its forwarded parse model', () => {
   const encoder = new TextEncoder();
   const ns = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
