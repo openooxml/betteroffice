@@ -279,17 +279,19 @@ fn slice_column(
 
 /// one distinct combination of field values and the rows that carry it.
 struct GroupEntry {
-    key: Vec<CellValue>,
+    key: Rc<[CellValue]>,
     rows: Vec<usize>,
     vals: Vec<CellValue>,
 }
 
-/// a line of the row or column axis: a group or a total.
+/// a line of the row or column axis: a group or a total. a total shares
+/// the key of one group it covers and is labelled by its first `depth`
+/// fields.
 enum AxisItem {
     Group(GroupEntry),
     Total {
         depth: usize,
-        label_prefix: Vec<CellValue>,
+        key: Rc<[CellValue]>,
         rows: Vec<usize>,
         vals: Vec<CellValue>,
         grand_label: &'static str,
@@ -307,11 +309,7 @@ impl AxisItem {
     fn parent_prefix(&self) -> &[CellValue] {
         match self {
             Self::Group(group) => &group.key[..group.key.len().saturating_sub(1)],
-            Self::Total {
-                depth,
-                label_prefix,
-                ..
-            } => &label_prefix[..depth.saturating_sub(1)],
+            Self::Total { depth, key, .. } => &key[..depth.saturating_sub(1)],
         }
     }
 
@@ -320,12 +318,12 @@ impl AxisItem {
             Self::Group(group) => group.key[col].clone(),
             Self::Total {
                 depth,
-                label_prefix,
+                key,
                 grand_label,
                 ..
             } => {
                 if col < *depth {
-                    label_prefix[col].clone()
+                    key[col].clone()
                 } else if *depth == 0 && col == 0 {
                     text(ctx, (*grand_label).to_string())
                 } else {
@@ -427,6 +425,9 @@ fn collect_groups(
         match seen.entry(key) {
             Entry::Occupied(entry) => groups[*entry.get()].rows.push(row),
             Entry::Vacant(entry) => {
+                if !slice.iter().all(|value| ctx.keep_text(value)) {
+                    return Err(ErrorValue::Num);
+                }
                 entry.insert(groups.len());
                 groups.push(GroupEntry {
                     key: slice.iter().map(copied).collect(),
@@ -487,7 +488,7 @@ fn build_hierarchy(
         (groups.len() as u64).saturating_mul(cfg.field_cols as u64),
     )?;
     struct Bucket {
-        key_prefix: Vec<CellValue>,
+        key: Rc<[CellValue]>,
         rows: Vec<usize>,
         vals: Vec<CellValue>,
         children: Vec<GroupEntry>,
@@ -506,7 +507,7 @@ fn build_hierarchy(
             Entry::Vacant(entry) => {
                 entry.insert(buckets.len());
                 buckets.push(Bucket {
-                    key_prefix: group.key[..=depth].to_vec(),
+                    key: Rc::clone(&group.key),
                     rows: group.rows.clone(),
                     vals: Vec::new(),
                     children: vec![group],
@@ -528,7 +529,7 @@ fn build_hierarchy(
         step();
         for &(col, desc) in cfg.sort_specs {
             let ordering = if col <= depth {
-                order_values(&a.key_prefix[col], &b.key_prefix[col], desc)
+                order_values(&a.key[col], &b.key[col], desc)
             } else if col >= cfg.field_cols {
                 let vc = col - cfg.field_cols;
                 order_values(&a.vals[vc], &b.vals[vc], desc)
@@ -539,7 +540,7 @@ fn build_hierarchy(
                 return ordering;
             }
         }
-        order_values(&a.key_prefix[depth], &b.key_prefix[depth], false)
+        order_values(&a.key[depth], &b.key[depth], false)
     });
     let mut items = Vec::new();
     for bucket in buckets {
@@ -547,7 +548,7 @@ fn build_hierarchy(
         if show_subtotals {
             let subtotal = AxisItem::Total {
                 depth: depth + 1,
-                label_prefix: bucket.key_prefix,
+                key: bucket.key,
                 rows: bucket.rows,
                 vals: bucket.vals,
                 grand_label: "",
@@ -579,7 +580,7 @@ fn build_axis_items(
             Vec::new()
         };
         return Ok(vec![AxisItem::Group(GroupEntry {
-            key: Vec::new(),
+            key: Rc::from([]),
             rows: agg.kept_rows.to_vec(),
             vals,
         })]);
@@ -612,7 +613,7 @@ fn build_axis_items(
         };
         let grand = AxisItem::Total {
             depth: 0,
-            label_prefix: Vec::new(),
+            key: Rc::from([]),
             rows: agg.kept_rows.to_vec(),
             vals: grand_vals,
             grand_label: if cfg.total_depth.unsigned_abs() >= 2 {

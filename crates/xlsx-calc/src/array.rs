@@ -1646,14 +1646,19 @@ fn stack_arguments(
     if args.is_empty() {
         return Err(ErrorValue::Value);
     }
-    let values: Vec<Value> = args.iter().map(|arg| evaluate_array(arg, ctx)).collect();
+    let mut values = Vec::with_capacity(args.len());
+    for arg in args {
+        match evaluate_array(arg, ctx) {
+            Value::Scalar(CellValue::Error { value }) => return Err(value),
+            value => values.push(value),
+        }
+    }
     if values.iter().any(|v| matches!(v, Value::Lambda(_))) {
         return stack_lambdas(values, by_col, ctx).map(Stacked::Lambdas);
     }
     let mut blocks = Vec::with_capacity(values.len());
     for value in values {
         match value {
-            Value::Scalar(CellValue::Error { value }) => return Err(value),
             Value::Scalar(value) => blocks.push(Array::new(1, 1, vec![value])?),
             Value::Array(array) => blocks.push(array),
             Value::Lambda(_) => return Err(ErrorValue::Value),
