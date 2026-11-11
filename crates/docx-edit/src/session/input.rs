@@ -1,6 +1,8 @@
 use serde::Serialize;
 
-use super::args::{AdjacentStoryUnit, DeleteDirection, adjacent_story_unit, embed_at, index_loc};
+use super::args::{
+    AdjacentStoryUnit, DeleteDirection, adjacent_story_unit, embed_at, index_loc, writable_story,
+};
 use super::frames::validate_frame_epoch;
 use super::{EditSessionCore, EngineError, EngineResult};
 use crate::{EditCtx, MergeDirection, StoryRange};
@@ -27,6 +29,7 @@ impl EditSessionCore {
             .as_ref()
             .ok_or_else(|| EngineError::message("resident input requires a selection"))?;
         let story = selection.story.clone();
+        writable_story(self.engine.doc(), &story)?;
         let (anchor, head) = self
             .engine
             .doc()
@@ -277,6 +280,7 @@ impl EditSessionCore {
             .as_ref()
             .ok_or_else(|| EngineError::message("apply_input requires a resident selection"))?;
         let story = selection.story.clone();
+        writable_story(self.engine.doc(), &story)?;
         let (anchor, head) = self
             .engine
             .doc()
@@ -327,6 +331,7 @@ impl EditSessionCore {
             .as_ref()
             .ok_or_else(|| EngineError::message("apply_input requires a resident selection"))?;
         let story = selection.story.clone();
+        writable_story(self.engine.doc(), &story)?;
         let (anchor, head) = self
             .engine
             .doc()
