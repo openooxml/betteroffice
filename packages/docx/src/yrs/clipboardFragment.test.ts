@@ -733,7 +733,7 @@ for (const objectKind of ['chart', 'shape', 'image']) {
     for (const controlKind of [null, 'sdt', 'blockSdt']) {
       test(`picture copy rejects ${objectKind} in a table cell at depth ${depth} through ${controlKind ?? 'no control'}`, () => {
         const image = { src: 'data:image/png;base64,AA==' };
-        const table = (story: string) => ({ grid: [2000], rows: [{ cells: [{ story, tcPr: {} }] }] });
+        const table = (story: string) => ({ tblPr: {}, grid: [2000], rows: [{ cells: [{ story, tcPr: {} }] }] });
         const stories: Record<string, YrsStorySegment[]> = {};
         for (let level = 0; level < depth; level++) stories[`cell${level}`] = [embedSegment('table', table(`cell${level + 1}`))];
         const object = embedSegment(objectKind, image);
@@ -797,7 +797,9 @@ test('picture copy rejects content controls containing nested pictures and other
   for (const controlKind of ['sdt', 'blockSdt']) {
     for (const objectKind of ['image', 'chart', 'shape', 'table', 'unknown']) {
       for (const nested of [false, true]) {
-        const object = { kind: objectKind, payload: { src: 'data:image/png;base64,AA==' } };
+        const object = { kind: objectKind, payload: objectKind === 'table'
+          ? { tblPr: {}, grid: [2000], rows: [{ trPr: {}, cells: [{ story: 'tableCell', tcPr: {} }] }] }
+          : { src: 'data:image/png;base64,AA==' } };
         const content = [{ kind: 'text', text: 'kept' }, ...(nested ? [{ kind: 'sdt', payload: { content: [object] } }] : [object])];
         const payload = controlKind === 'sdt' ? { content } : { story: 'control' };
         const child = nested ? embedSegment('sdt', { content: [object] }) : embedSegment(objectKind, object.payload);

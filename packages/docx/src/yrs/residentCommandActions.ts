@@ -1,5 +1,6 @@
 import { isEngineTrap } from '../../../../shared/office-session/trap';
 import { applyCommandBatch, commandBatchRequest } from './residentCommandBatches';
+import { isTableUnavailableRefusal } from './tableUnavailable';
 import { isCellHasNoStoryRefusal } from './cellRefusal';
 import { createProposalRegistry } from './proposals';
 import { applyReviewCommand, grantedHostProposal, preflightReviewCommand, reviewCommandKeys, type ReviewCommand } from './residentReviewCommands';
@@ -924,10 +925,13 @@ export function applyDocxCommand(
       engine.setUndoInputTime(null);
     }
   } catch (error) {
-    // The engine refuses a write into a table cell that has no story before it mutates anything.
-    if (!isCellHasNoStoryRefusal(error) || engine.proposalEngine.version() !== version) throw error;
+    // The engine refuses an operation on an unavailable table, and a write into a table cell
+    // that has no story, before it writes anything; no command writes before its first table
+    // operation (TABLE-COMMANDS.md).
+    const unavailable = isTableUnavailableRefusal(error);
+    if (!unavailable && (!isCellHasNoStoryRefusal(error) || engine.proposalEngine.version() !== version)) throw error;
     const corrected = state.selection ? readCommandSelection(engine, state) : null;
-    return { status: 'refused', reason: 'unsupported', selection: corrected?.ok ? corrected.selection : null,
+    return { status: 'refused', reason: unavailable ? 'table-unavailable' : 'unsupported', selection: corrected?.ok ? corrected.selection : null,
       editState: projectDocxEditState(engine, state, corrected) };
   }
 }

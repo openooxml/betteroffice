@@ -93,6 +93,8 @@ export interface YrsProjectedTable extends YrsProjectedNode {
   widthsTwips: number[];
   rowCount: number;
   cells: YrsProjectedCell[];
+  /** The table lost its properties, grid or rows to a concurrent undo: no cells, no caret stop. */
+  unavailable?: true;
 }
 
 /** @internal */
@@ -214,6 +216,7 @@ export class YrsPositionProjection {
   tableAtPosition(position: number): YrsProjectedTable | null {
     let result: YrsProjectedTable | null = null;
     for (const table of this.tables) {
+      if (table.unavailable) continue;
       if (position < table.start || position > table.start + table.nodeSize) continue;
       if (!result || table.nodeSize < result.nodeSize) result = table;
     }
@@ -482,7 +485,8 @@ export class YrsPositionProjection {
     start: number,
     depth: number
   ): YrsProjectedTable {
-    const rows = Array.isArray(segment.payload.rows)
+    const unavailable = isUnavailableTablePayload(segment.payload);
+    const rows = !unavailable && Array.isArray(segment.payload.rows)
       ? (segment.payload.rows as Array<Record<string, unknown>>)
       : [];
     const occupied: boolean[][] = Array.from({ length: rows.length }, () => []);
@@ -541,8 +545,14 @@ export class YrsPositionProjection {
         : [],
       rowCount: rows.length,
       cells,
+      ...(unavailable ? { unavailable: true as const } : {}),
     };
   }
+}
+
+/** Whether a table embed's payload lacks its properties, grid or rows. @internal */
+export function isUnavailableTablePayload(payload: object): boolean {
+  return !('tblPr' in payload && 'grid' in payload && 'rows' in payload);
 }
 
 function asObject(value: unknown): Record<string, unknown> {

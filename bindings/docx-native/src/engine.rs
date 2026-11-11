@@ -385,6 +385,12 @@ fn map_error(env: Env, error: EngineError) -> Error {
                 exception.set_named_property("code", "suggested-formatting-over-container")?;
                 env.throw(exception)
             }
+            EngineErrorKind::TableUnavailable => {
+                let mut exception = env.create_error(Error::from_reason(error.message.clone()))?;
+                exception.set_named_property("name", "TableUnavailableError")?;
+                exception.set_named_property("code", "table-unavailable")?;
+                env.throw(exception)
+            }
             EngineErrorKind::CellHasNoStory => {
                 let mut exception = env.create_error(Error::from_reason(error.message.clone()))?;
                 exception.set_named_property("name", "CellHasNoStoryError")?;
@@ -3234,6 +3240,14 @@ impl EditSession {
     pub fn story_ids(&self, env: Env) -> Result<Vec<String>> {
         let _call = EngineCall::new(env);
         Ok(self.document(env)?.story_ids())
+    }
+
+    #[napi(catch_unwind, js_name = "unavailable_tables_from")]
+    pub fn unavailable_tables_from(&self, env: Env, roots_json: String) -> Result<String> {
+        let _call = EngineCall::new(env);
+        self.document(env)?
+            .unavailable_tables_from(&roots_json)
+            .map_err(|error| map_error(env, error))
     }
 
     #[napi(catch_unwind, js_name = "story_len")]

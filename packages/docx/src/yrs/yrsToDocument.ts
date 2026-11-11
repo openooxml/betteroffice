@@ -67,6 +67,7 @@ import type {
   SectionProperties,
 } from '../types/document';
 import type { YrsRunInheritance, YrsSession, YrsTableInheritance } from './index';
+import { isUnavailableTablePayload, markGated, refuseUnavailableTables, tableUnavailableError } from './tableUnavailable';
 
 type Attrs = Record<string, unknown>;
 
@@ -4194,6 +4195,7 @@ class SaveContext {
       }
 
       if (segment.embedKind === 'table') {
+        if (isUnavailableTablePayload(segment.payload)) throw tableUnavailableError();
         const payload = segment.payload as TablePayload;
         this.prepareTable(payload, storyId);
         const inputs = [segment.attributes, payload] as const;
@@ -4363,12 +4365,15 @@ function projectDocument(
   options: YrsToDocumentOptions,
   revisionIds?: RevisionIds
 ): Document {
+  const scanned = refuseUnavailableTables(session, base);
   const previous = projectedMedia;
   projectedMedia = (token) => session.mediaDataUrl?.(token) ?? null;
   let context: SaveContext | undefined;
   try {
     context = new SaveContext(session, base, options.commentIds, revisionIds);
-    return projectStories(context, session, base, options);
+    const projected = projectStories(context, session, base, options);
+    markGated(session, projected, scanned);
+    return projected;
   } finally {
     context?.dispose();
     projectedMedia = previous;

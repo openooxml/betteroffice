@@ -1,5 +1,6 @@
 import type { YrsLoc, YrsParagraphLength, YrsStorySegment } from './index';
 import { tableAnchors, type TablePayload } from './storyPlainText';
+import { isUnavailableTablePayload } from './yrsPositionProjection';
 
 interface TableDeleteReader {
   paragraphSpans(story: string): readonly YrsParagraphLength[];
@@ -26,7 +27,7 @@ export function tableBoundaryDeleteTarget(
     const width = segment.kind === 'text' ? segment.text.length : 1;
     if (segment.kind === 'embed' && segment.embedKind === 'table' &&
       (direction === 'backward' ? offset === start + width || offset === start : offset === start)) {
-      if (direction === 'forward' || !Array.isArray(segment.payload.rows)) return at;
+      if (direction === 'forward' || isUnavailableTablePayload(segment.payload) || !Array.isArray(segment.payload.rows)) return at;
       const cell = tableAnchors(segment.payload as unknown as TablePayload).anchors.at(-1);
       const paragraph = cell && reader.paragraphSpans(cell.story).at(-1);
       return cell && paragraph
