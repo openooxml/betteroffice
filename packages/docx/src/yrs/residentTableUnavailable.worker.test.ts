@@ -102,8 +102,9 @@ const located = (replica: Opened, story: string) =>
 for (const nested of [false, true]) {
   const where = nested ? 'a table inside a healthy outer table' : 'a body table';
   const base = nested ? 9700 : 9600;
+  const movedTo = nested ? 'the outer cell' : 'the body';
 
-  test(`after a remote crossing undo on ${where}, a caret left in its cell types into the cell, saves refuse coded, and the restored table shows the text`, async () => {
+  test(`after a remote crossing undo on ${where}, a caret in its cell moves to ${movedTo}, typing lands there, saves refuse coded, and the restored table keeps its cell text`, async () => {
     const replica = await open(base + 1, nested);
     const first = await peer(replica, base + 2);
     const second = await peer(replica, base + 3);
@@ -124,9 +125,13 @@ for (const nested of [false, true]) {
       await receive(replica, second);
       expect(Array.isArray(replica.engine.tablePayload(table, 0)?.rows)).toBe(false);
 
-      expect(replica.session.state.selection?.focus.story).toBe(story);
+      const caret = replica.session.state.selection?.focus;
+      expect(caret?.story).toBe(table);
+      const typedIn = () => replica.engine.paragraphs(table).find(({ paraId }) => paraId === caret!.paraId)?.text ?? '';
+      expect(typedIn()).not.toContain('Z');
       expect((await replica.session.submit('insertText', { text: 'Z' }).ack).status).toBe('applied');
-      expect(cellTexts(replica, story).join('')).toContain('Z');
+      expect(typedIn()).toContain('Z');
+      expect(cellTexts(replica, story)).toEqual(['First']);
       const unsaved = replica.engine.encodeState();
       await expect(replica.client.save({ comments: [] })).rejects.toThrow(tableUnavailableError().message);
       expect(replica.engine.encodeState()).toEqual(unsaved);
@@ -134,8 +139,10 @@ for (const nested of [false, true]) {
       send(replica, second);
       expect(second.redo()).toBe(true);
       await receive(replica, second);
+      expect(Array.isArray(replica.engine.tablePayload(table, 0)?.rows)).toBe(true);
       expect(located(replica, story)).toEqual(at(table, 0, 0));
-      expect(cellTexts(replica, story).join('')).toContain('Z');
+      expect(cellTexts(replica, story)).toEqual(['First']);
+      expect(typedIn()).toContain('Z');
       const body = { story: 'body', paraId: replica.engine.paragraphs('body').at(-1)!.paraId, offset: 0 };
       await replica.session.submit('select', { selection: { anchor: body, focus: body } }).ack;
       expect((await replica.session.submit('insertText', { text: 'Y' }).ack).status).toBe('applied');
