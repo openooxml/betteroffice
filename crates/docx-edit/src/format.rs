@@ -811,7 +811,7 @@ fn refuses_suggestion<T: ReadTxn>(story: &TextRef, txn: &T, start: u32, end: u32
     spans.into_iter().any(|(at, len)| {
         holds_suggestion_container(&crate::ops::snapshot_range(story, txn, at, at + len), txn)
     }) || children.iter().any(|(child, _)| {
-        story_ref(txn, child).is_ok_and(|text| {
+        crate::story_text(txn, child).is_some_and(|text| {
             let len = text.len(txn);
             len > 0 && refuses_suggestion(&text, txn, 0, len)
         })
@@ -949,7 +949,7 @@ fn text_has<T: ReadTxn>(
                 }
                 Out::YMap(embed) => {
                     for child in block_child_stories(embed, txn) {
-                        if let Ok(child) = story_ref(txn, &child)
+                        if let Some(child) = crate::story_text(txn, &child)
                             && !text_has(&child, txn, (0, child.len(txn)), key, saw_text)
                         {
                             return false;
@@ -1214,6 +1214,7 @@ impl EditingDoc {
         mut range: StoryRange,
         format: SimpleFormat,
     ) -> OpResult<(Receipt, KeptUnchanged)> {
+        self.refuse_cell_write(&range.story)?;
         let len = range_len(&range)?;
         if len == 0 {
             return Err(OpError::EmptyRange);
@@ -1296,6 +1297,7 @@ impl EditingDoc {
         mut range: StoryRange,
         delta: &InlineFormatDelta,
     ) -> OpResult<(Receipt, KeptUnchanged)> {
+        self.refuse_cell_write(&range.story)?;
         let len = range_len(&range)?;
         if len == 0 {
             return Err(OpError::EmptyRange);
@@ -1451,6 +1453,7 @@ impl EditingDoc {
         mut range: StoryRange,
         hyperlink: Option<Any>,
     ) -> OpResult<Receipt> {
+        self.refuse_cell_write(&range.story)?;
         let len = range_len(&range)?;
         if len == 0 {
             return Err(OpError::EmptyRange);
@@ -1535,6 +1538,7 @@ impl EditingDoc {
         ctx: &EditCtx,
         mut range: StoryRange,
     ) -> OpResult<(Receipt, KeptUnchanged)> {
+        self.refuse_cell_write(&range.story)?;
         let len = range_len(&range)?;
         if len == 0 {
             return Err(OpError::EmptyRange);
@@ -1648,7 +1652,7 @@ impl EditingDoc {
         delta: Option<&Attrs>,
         keeper: &mut Keeper<'_>,
     ) -> OpResult<Vec<String>> {
-        let Ok(text) = story_ref(txn, child) else {
+        let Some(text) = crate::story_text(txn, child) else {
             return Ok(Vec::new());
         };
         let mut revision_ids = Vec::new();
