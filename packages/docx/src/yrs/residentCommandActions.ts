@@ -1,6 +1,7 @@
 import { isEngineTrap } from '../../../../shared/office-session/trap';
 import { applyCommandBatch, commandBatchRequest } from './residentCommandBatches';
 import { isTableUnavailableRefusal } from './tableUnavailable';
+import { isCellHasNoStoryRefusal } from './cellRefusal';
 import { createProposalRegistry } from './proposals';
 import { applyReviewCommand, grantedHostProposal, preflightReviewCommand, reviewCommandKeys, type ReviewCommand } from './residentReviewCommands';
 import { planResidentListChanges } from './residentCommandLists';
@@ -927,6 +928,7 @@ export function applyDocxCommand(
   environment?: DocxCommandHooksEnvironment
 ): DocxCommandApplyResult {
   const { inputTime, lastInputTime } = prepared.command;
+  const version = engine.proposalEngine.version();
   try {
     if (inputTime === undefined) return applyPreparedDocxCommand(engine, state, prepared, context, environment);
     engine.setUndoInputTime([inputTime, lastInputTime ?? inputTime]);
@@ -936,11 +938,13 @@ export function applyDocxCommand(
       engine.setUndoInputTime(null);
     }
   } catch (error) {
-    // The engine refuses an operation on an unavailable table before it writes anything, and no
-    // command writes before its first table operation (TABLE-COMMANDS.md), so the refusal is clean.
-    if (!isTableUnavailableRefusal(error)) throw error;
+    // The engine refuses an operation on an unavailable table, and a write into a table cell
+    // that has no story, before it writes anything; no command writes before its first table
+    // operation (TABLE-COMMANDS.md).
+    const unavailable = isTableUnavailableRefusal(error);
+    if (!unavailable && (!isCellHasNoStoryRefusal(error) || engine.proposalEngine.version() !== version)) throw error;
     const corrected = state.selection ? readCommandSelection(engine, state) : null;
-    return { status: 'refused', reason: 'table-unavailable', selection: corrected?.ok ? corrected.selection : null,
+    return { status: 'refused', reason: unavailable ? 'table-unavailable' : 'unsupported', selection: corrected?.ok ? corrected.selection : null,
       editState: projectDocxEditState(engine, state, corrected) };
   }
 }

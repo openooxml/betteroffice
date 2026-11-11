@@ -165,6 +165,11 @@ fn build_story<T: ReadTxn>(
     }
     let story = match story_ref(txn, story_id) {
         Ok(story) => story,
+        Err(crate::EditError::CellHasNoStory(_)) => {
+            let cell = crate::empty_cells::EmptyCell::new(story_id);
+            let scratch = cell.doc().yrs_doc().transact();
+            return build_story(&scratch, outline, story_id, content_start, depth, scan);
+        }
         Err(_) if scan.active => return Ok(0),
         Err(_) => return Err(()),
     };
@@ -614,6 +619,14 @@ mod tests {
         let doc = EditingDoc::new(84001);
         story(
             &doc,
+            "a",
+            json!([
+                {"kind": "table", "tblPr": {}, "grid": [], "rows": []}, {"text": "😀"}, {"kind": "pilcrow", "paraId": "ap"}
+            ]),
+        );
+        story(&doc, "b", json!([{ "kind": "pilcrow", "paraId": "bp" }]));
+        story(
+            &doc,
             "body",
             json!([
                 {"kind": "table", "tblPr": {}, "grid": [], "rows": [
@@ -622,14 +635,6 @@ mod tests {
                 ]}, {"text": "Z"}, {"kind": "pilcrow", "paraId": "p"}
             ]),
         );
-        story(
-            &doc,
-            "a",
-            json!([
-                {"kind": "table", "tblPr": {}, "grid": [], "rows": []}, {"text": "😀"}, {"kind": "pilcrow", "paraId": "ap"}
-            ]),
-        );
-        story(&doc, "b", json!([{ "kind": "pilcrow", "paraId": "bp" }]));
         story(&doc, "body:t0:r1c0", json!([]));
         assert_eq!(
             outline(&doc),
