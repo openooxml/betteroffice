@@ -585,6 +585,92 @@ mod tests {
         );
     }
 
+    /// The first label of a list whose instance overrides level 0 with a whole `w:lvl`.
+    fn first_override_marker(
+        format: &str,
+        abstract_start: Option<u32>,
+        level_start: Option<u32>,
+        start_override: Option<u32>,
+    ) -> String {
+        let start = |value: Option<u32>| {
+            value.map_or_else(String::new, |value| {
+                format!(r#"<w:start w:val="{value}"/>"#)
+            })
+        };
+        let level = |value: Option<u32>, abstract_format: &str| {
+            format!(
+                r#"<w:lvl w:ilvl="0">{}<w:numFmt w:val="{abstract_format}"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/></w:lvl>"#,
+                start(value)
+            )
+        };
+        let start_override = start_override.map_or_else(String::new, |value| {
+            format!(r#"<w:startOverride w:val="{value}"/>"#)
+        });
+        let numbering = definitions(
+            &level(abstract_start, "decimal"),
+            &format!(
+                r#"<w:num w:numId="1"><w:abstractNumId w:val="4"/><w:lvlOverride w:ilvl="0">{start_override}{}</w:lvlOverride></w:num>"#,
+                level(level_start, format)
+            ),
+        );
+        let mut state = ListState::new(Some(numbering));
+        let mut values = paragraph(1.0, 0.0, "%1.");
+        values.insert(
+            "listLevelNumFmts".to_owned(),
+            Any::from_json(&format!(r#"["{format}"]"#)).unwrap(),
+        );
+        compute_list_marker(&values, &mut state).unwrap_or_default()
+    }
+
+    #[test]
+    fn a_start_override_wins_over_both_level_starts() {
+        assert_eq!(
+            first_override_marker("decimal", Some(3), Some(5), Some(7)),
+            "7."
+        );
+        assert_eq!(
+            first_override_marker("upperLetter", Some(3), Some(5), Some(7)),
+            "G."
+        );
+    }
+
+    #[test]
+    fn a_level_override_start_wins_over_the_abstract_start() {
+        assert_eq!(first_override_marker("decimal", Some(3), Some(5), None), "5.");
+        assert_eq!(
+            first_override_marker("upperLetter", Some(3), Some(5), None),
+            "E."
+        );
+    }
+
+    #[test]
+    fn a_level_override_without_a_start_keeps_the_abstract_start() {
+        for (abstract_start, expected) in [(2, "2."), (3, "3."), (4, "4.")] {
+            assert_eq!(
+                first_override_marker("decimal", Some(abstract_start), None, None),
+                expected,
+                "abstract start {abstract_start}"
+            );
+        }
+        for (abstract_start, expected) in [(1, "A."), (3, "C.")] {
+            assert_eq!(
+                first_override_marker("upperLetter", Some(abstract_start), None, None),
+                expected,
+                "abstract start {abstract_start}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_decimal_level_with_no_start_anywhere_counts_from_zero() {
+        assert_eq!(first_override_marker("decimal", None, None, None), "0.");
+    }
+
+    #[test]
+    fn letter_level_with_no_start_anywhere_has_an_empty_label_unverified() {
+        assert_eq!(first_override_marker("upperLetter", None, None, None), "");
+    }
+
     #[test]
     fn numbers_a_format_cannot_write_are_reported() {
         let level = r#"<w:lvl w:ilvl="0"><w:start w:val="2000000000"/><w:numFmt w:val="upperRoman"/><w:lvlText w:val="%1."/></w:lvl>"#;
