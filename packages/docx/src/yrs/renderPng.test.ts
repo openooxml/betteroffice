@@ -180,6 +180,33 @@ for (const { kind } of ENGINES) {
       expect(await drawnPrimitives()).toEqual(pinned);
     });
 
+    test('an export aborted while the shared layout loads its faces rejects at once, and another export of the document completes', async () => {
+      stubBrowser();
+      const original = bundled.loadBundledFontBytes;
+      let entered!: () => void;
+      const loadStarted = new Promise<void>((resolve) => { entered = resolve; });
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const loading = spyOn(bundled, 'loadBundledFontBytes').mockImplementation(async (face, ...rest) => {
+        entered();
+        await gate;
+        return original(face, ...rest);
+      });
+      const session = await createYrsSession();
+      try {
+        session.openDocx(scriptDocument(), true);
+        const controller = new AbortController();
+        const aborted = session.renderPng({ page: 0 }, { signal: controller.signal });
+        const other = session.renderPng({ page: 0 });
+        await loadStarted;
+        controller.abort(new Error('stopped'));
+        await expect(aborted).rejects.toThrow('stopped');
+        release();
+        expect(await other).toBeInstanceOf(Uint8Array);
+        expect(loading).toHaveBeenCalled();
+      } finally { release(); loading.mockRestore(); session.destroy(); }
+    });
+
     test('an explicit fontProvider keeps its own faces and never loads bundled bytes strictly', async () => {
       stubBrowser();
       const fontProvider = await resolveCompleteFontProvider();

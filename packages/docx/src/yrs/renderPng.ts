@@ -6,7 +6,7 @@ import { fontUnavailable, pngPage, pngScale, type DocxPngFontFace, type DocxPngO
 import { openPagedDisplay } from '../layout/render/rustDisplayList';
 import { extractEmbeddedFontFaces } from '../utils';
 import { renderPng as renderEnginePng } from '../wasm/enginePng';
-import { loadDocumentFaces } from '../wasm/enginePngFonts';
+import { loadDocumentFaces, untilAborted } from '../wasm/enginePngFonts';
 import { createYrsSession, type YrsSession } from './index';
 import { sessionMediaSources } from './sessionInternals';
 
@@ -104,7 +104,7 @@ export function createPngExporter(session: YrsSession) {
       if (idle !== undefined) clearTimeout(idle);
       idle = undefined;
       try {
-        const { copy, display, fontChains } = await entry.laidOut;
+        const { copy, display, fontChains } = await untilAborted(entry.laidOut, options.signal);
         assertAlive();
         const page = display.page(index);
         if (!page) throw new RangeError(`page index ${index} out of range for ${display.pageCount} page(s)`);

@@ -74,15 +74,21 @@ export async function loadDocumentFaces(requests: readonly DocumentFontRequest[]
     }
     await Promise.all([...families.values()].map(({ face, family }) => loadDocumentFace(face, family)));
   })();
-  if (!signal) return loading;
+  return untilAborted(loading, signal);
+}
+
+/** `work`'s result, or a rejection with the signal's reason as soon as it aborts; `work` itself runs on. */
+export async function untilAborted<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return work;
+  signal.throwIfAborted();
   let stop: (() => void) | undefined;
   const aborted = new Promise<never>((_, reject) => {
     stop = () => reject(signal.reason);
     signal.addEventListener('abort', stop, { once: true });
   });
-  loading.catch(() => {});
+  work.catch(() => {});
   try {
-    await Promise.race([loading, aborted]);
+    return await Promise.race([work, aborted]);
   } finally {
     signal.removeEventListener('abort', stop!);
   }
