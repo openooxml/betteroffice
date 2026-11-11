@@ -7,24 +7,42 @@ import { createYrsSession, type YrsSession } from './index';
 import { ENGINES, preloadEngines, restoreBrowser, runsDocument, scriptDocument, stubBrowser, type TextRun } from './renderPngTestSupport';
 
 const LATIN_ASSETS = new URL('../../../fonts-latin/assets/', import.meta.url);
-const GATED_ASSETS = new URL('https://gated-pack.test/');
 const withheld = new Set<string>();
-let gated = false;
+const asked = new Set<string>();
+let gatedAssets: URL | undefined;
+let gates = 0;
 
 mock.module('@betteroffice/fonts-latin', () => ({
   LATIN_FONT_ASSET_URLS: new Proxy({} as Record<string, () => URL>, {
-    get: (_, file) => typeof file !== 'string' || withheld.has(file)
-      ? undefined
-      : () => new URL(file, gated ? GATED_ASSETS : LATIN_ASSETS),
+    get(_, file) {
+      if (typeof file !== 'string' || !file.endsWith('.ttf.zst')) return undefined;
+      asked.add(file);
+      return withheld.has(file) ? undefined : () => new URL(file, gatedAssets ?? LATIN_ASSETS);
+    },
   }),
 }));
 
 const originalFetch = globalThis.fetch;
 
+/** Serves the Latin pack from an origin of its own, so no face this file decoded before is reused. */
+function gateLatinFetches(serve: (file: string) => Promise<Response>): void {
+  const assets = new URL(`https://pack-${++gates}.gated.test/`);
+  gatedAssets = assets;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    return url.origin === assets.origin ? serve(url.pathname.slice(1)) : originalFetch(input, init);
+  }) as typeof fetch;
+}
+
+const latinBytes = (file: string) => new Response(readFileSync(new URL(file, LATIN_ASSETS)));
+const arabicFace = () => fonts.resolveScriptFallbackFace('arabic', false, false, 'Arial')!;
+const latinAndArabic: TextRun[] = [{ family: 'Arial', text: 'Plain text' }, { family: 'Arial', text: 'مرحبا بالعالم', rtl: true }];
+
 beforeAll(preloadEngines);
 afterEach(() => {
   withheld.clear();
-  gated = false;
+  asked.clear();
+  gatedAssets = undefined;
   globalThis.fetch = originalFetch;
   restoreBrowser();
 });
@@ -94,14 +112,7 @@ for (const { kind } of ENGINES) {
       stubBrowser();
       const face = fonts.resolveMetricCompatFace('Arial', false, false)!;
       let failing = true;
-      gated = true;
-      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = new URL(input instanceof Request ? input.url : String(input));
-        if (url.origin !== GATED_ASSETS.origin) return originalFetch(input, init);
-        const file = url.pathname.slice(1);
-        if (failing && file === face.file) return new Response(null, { status: 503 });
-        return new Response(readFileSync(new URL(file, LATIN_ASSETS)));
-      }) as typeof fetch;
+      gateLatinFetches(async (file) => failing && file === face.file ? new Response(null, { status: 503 }) : latinBytes(file));
       const session = await createYrsSession();
       try {
         session.openDocx(runsDocument({ family: 'Arial', text: 'Plain text' }), true);
@@ -120,24 +131,28 @@ for (const { kind } of ENGINES) {
     test('an explicit fontProvider lays out without a face it cannot load, as before', async () => {
       stubBrowser();
       const fontProvider = await resolveCompleteFontProvider();
-      withheld.add(fonts.resolveMetricCompatFace('Arial', false, false)!.file);
-      expect(await exported([{ family: 'Arial', text: 'Plain text' }], { fontProvider })).toBeInstanceOf(Uint8Array);
+      const face = arabicFace();
+      withheld.add(face.file);
+      expect(await exported(latinAndArabic, { fontProvider })).toBeInstanceOf(Uint8Array);
+      expect([...asked]).toContain(face.file);
     });
 
     test('a configured source still loading when the configuration resets lays out without a face it cannot load', async () => {
       stubBrowser();
-      withheld.add(fonts.resolveMetricCompatFace('Arial', false, false)!.file);
+      const face = arabicFace();
+      withheld.add(face.file);
       let entered!: () => void;
       const loadStarted = new Promise<void>((resolve) => { entered = resolve; });
       let release!: () => void;
       const gate = new Promise<void>((resolve) => { release = resolve; });
       configureDefaultFonts({ load: async () => { entered(); await gate; return fonts; } });
       try {
-        const exporting = exported([{ family: 'Arial', text: 'Plain text' }]);
+        const exporting = exported(latinAndArabic);
         await loadStarted;
         configureDefaultFonts({});
         release();
         expect(await exporting).toBeInstanceOf(Uint8Array);
+        expect([...asked]).toContain(face.file);
       } finally { release(); configureDefaultFonts({}); }
     });
 
@@ -147,14 +162,11 @@ for (const { kind } of ENGINES) {
       const loadStarted = new Promise<void>((resolve) => { entered = resolve; });
       let release!: () => void;
       const gate = new Promise<void>((resolve) => { release = resolve; });
-      gated = true;
-      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = new URL(input instanceof Request ? input.url : String(input));
-        if (url.origin !== GATED_ASSETS.origin) return originalFetch(input, init);
+      gateLatinFetches(async (file) => {
         entered();
         await gate;
-        return new Response(readFileSync(new URL(url.pathname.slice(1), LATIN_ASSETS)));
-      }) as typeof fetch;
+        return latinBytes(file);
+      });
       const session = await createYrsSession();
       try {
         session.openDocx(scriptDocument(), true);

@@ -20,16 +20,29 @@ mock.module('@betteroffice/fonts-intl', () => ({
 beforeAll(preloadEngines);
 afterEach(restoreBrowser);
 
+async function exported(): Promise<unknown> {
+  const session = await createYrsSession();
+  try {
+    session.openDocx(scriptDocument(), true);
+    return await session.renderPng({ page: 0 }).catch((error: unknown) => error);
+  } finally { session.destroy(); }
+}
+
 for (const { kind } of ENGINES) {
   describe.skipIf(engineKind !== kind)(`renderPng without the optional font packs on the ${kind} engine`, () => {
-    test('faces whose pack is not installed are skipped and the export succeeds', async () => {
-      stubBrowser();
-      const session = await createYrsSession();
-      try {
-        session.openDocx(scriptDocument(), true);
-        expect(await session.renderPng({ page: 0 })).toBeInstanceOf(Uint8Array);
+    if (kind === 'wasm') {
+      test('faces whose pack is not installed are skipped and the export succeeds', async () => {
+        stubBrowser();
+        expect(await exported()).toBeInstanceOf(Uint8Array);
         expect(importLatin).toHaveBeenCalled();
-      } finally { session.destroy(); }
-    });
+      });
+    } else {
+      test('faces whose pack is not installed are skipped, and a family left without a face rejects the export naming it', async () => {
+        const error = await exported();
+        expect(importLatin).toHaveBeenCalled();
+        expect(error).toMatchObject({ name: 'PngExportError', code: 'font-unavailable' });
+        expect((error as Error).message).toContain('missing font chain for `calibri|0|0`');
+      });
+    }
   });
 }
