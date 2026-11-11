@@ -259,14 +259,12 @@ export class TextMeasureFontRegistry {
   private readonly progressive?: (slices: SliceLocation) => Promise<ProgressiveFontFace>;
   private readonly standInTail: boolean;
 
-  /**
-   * `progressive` opens sliced faces, which register from their skeleton and core.
-   * `standInTail` gives a stand-in family the last-resort tail even when its chain is not empty.
-   */
+  /** `progressive` opens sliced faces, which register from their skeleton and core. */
   constructor(sink: TextEngineFontSink, opts?: {
     bundled?: BundledFontProviderSource;
     baseLatin?: BundledFontProviderSource;
     progressive?: (slices: SliceLocation) => Promise<ProgressiveFontFace>;
+    /** Explicit stand-ins always append the last-resort face. */
     standInTail?: boolean;
   }) {
     this.sink = sink;
