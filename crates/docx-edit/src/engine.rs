@@ -21764,6 +21764,68 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
     }
 
     #[test]
+    fn known_limit_revision_preview_replay_shows_the_raw_note_id() {
+        use super::lowering_fixture::{Package, para, run};
+
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        let body = para(
+            "10000001",
+            &format!(
+                r#"{}<w:ins w:id="1" w:author="A"><w:r><w:t>x</w:t></w:r></w:ins><w:r><w:footnoteReference w:id="2"/></w:r>"#,
+                run("Before"),
+            ),
+        );
+        let notes = format!(
+            r#"<w:footnotes {}><w:footnote w:id="2"><w:p><w:r><w:t>Two</w:t></w:r></w:p></w:footnote></w:footnotes>"#,
+            lowering_fixture::NS
+        );
+        let bytes = Package::new(&body)
+            .part("footnotes.xml", "rIdNotes", "footnotes", "footnotes", &notes)
+            .bytes();
+        let marks = |engine: &EngineSession| {
+            let blocks =
+                serde_json::to_value(engine.render.borrow().stories["body"].blocks.as_ref())
+                    .unwrap();
+            blocks
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|block| block["runs"].as_array().cloned().unwrap_or_default())
+                .filter_map(|run| {
+                    Some((
+                        run.get("footnoteRefId")?.as_f64()? as i64,
+                        run["text"].as_str()?.to_owned(),
+                    ))
+                })
+                .collect::<Vec<_>>()
+        };
+        let engine = EngineSession::new(9677);
+        crate::seed_from_docx(engine.doc(), &bytes).unwrap();
+        engine.set_local_lowering(true);
+        let request = small_page_request(font);
+        engine
+            .layout_regions_for_trigger(&request, None, RelayoutTrigger::Bulk)
+            .unwrap();
+        assert!(engine.render.borrow().stories["body"].preview.is_some());
+        assert_eq!(marks(&engine), vec![(2, "1".to_owned())]);
+        let epoch = engine.doc_epoch();
+        let id = preview_fixture::ids(&engine).remove(0);
+        let env = engine.render.borrow().stories["body"]
+            .env
+            .clone()
+            .with_revision_preview(&id, RevisionPreview::Rejected);
+        let before = engine.stats();
+        assert!(engine.patch_preview_body(epoch, &env).is_some());
+        assert_eq!(
+            engine.stats().lower_preview_patches,
+            before.lower_preview_patches + 1,
+        );
+        assert_eq!(marks(&engine), vec![(2, "2".to_owned())]);
+    }
+
+    #[test]
     fn resident_float_local_lowering_failures_preserve_measurement_origin() {
         let fonts = docx_layout::MeasureFonts::default();
         let _scope = fonts.enter();
