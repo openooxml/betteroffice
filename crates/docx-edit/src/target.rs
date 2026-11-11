@@ -2158,6 +2158,7 @@ mod tests {
             source: EditSource::Host,
             history: EditHistory::Separate,
             steps: vec![EditStep::new(EditOperation::ReplaceText {
+                runs: None,
                 target: TextTarget::Paragraph(ParagraphTarget {
                     story: "body".to_owned(),
                     para_id,
