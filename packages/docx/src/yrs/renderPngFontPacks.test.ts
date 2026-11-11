@@ -90,6 +90,33 @@ for (const { kind } of ENGINES) {
       } finally { session.destroy(); }
     });
 
+    test('an export that rejected for a face that failed to fetch is followed by one of the same version that succeeds', async () => {
+      stubBrowser();
+      const face = fonts.resolveMetricCompatFace('Arial', false, false)!;
+      let failing = true;
+      gated = true;
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(input instanceof Request ? input.url : String(input));
+        if (url.origin !== GATED_ASSETS.origin) return originalFetch(input, init);
+        const file = url.pathname.slice(1);
+        if (failing && file === face.file) return new Response(null, { status: 503 });
+        return new Response(readFileSync(new URL(file, LATIN_ASSETS)));
+      }) as typeof fetch;
+      const session = await createYrsSession();
+      try {
+        session.openDocx(runsDocument({ family: 'Arial', text: 'Plain text' }), true);
+        const version = session.version();
+        const error = await rejection(session.renderPng({ page: 0 }));
+        expect(error).toMatchObject({ name: 'PngExportError', code: 'font-unavailable' });
+        expect(error.message).toContain(face.file);
+        failing = false;
+        expect(session.version()).toBe(version);
+        const bytes = await session.renderPng({ page: 0 });
+        expect(bytes).toBeInstanceOf(Uint8Array);
+        expect(bytes.byteLength).toBeGreaterThan(0);
+      } finally { session.destroy(); }
+    });
+
     test('an explicit fontProvider lays out without a face it cannot load, as before', async () => {
       stubBrowser();
       const fontProvider = await resolveCompleteFontProvider();
