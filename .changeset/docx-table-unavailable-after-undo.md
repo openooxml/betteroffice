@@ -1,9 +1,9 @@
 ---
-'@betteroffice/rust-crates': patch
-'@betteroffice/docx': patch
-'@betteroffice/docx-native': patch
+'@betteroffice/rust-crates': minor
+'@betteroffice/docx': minor
+'@betteroffice/docx-native': minor
 '@betteroffice/docx-react': patch
 '@betteroffice/agents': patch
 ---
 
-Fixes collaborative documents that stopped laying out after two collaborators undid edits to one table in crossing order. That table is now skipped; table edits and saves refuse with a coded error until it is restored by redo or deleted.
+A table that crossing undos left unlayoutable is now skipped instead of breaking layout; table commands and saves refuse with a coded error until redo restores it or it is deleted. Both engines add `unavailable_tables_from`.
