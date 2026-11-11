@@ -12,17 +12,16 @@ writes first.
 - `table-op`: reaches one; `mutates before` must be `no`.
 - `reads-payload`: reads a table payload in TS; an incomplete payload is rejected as shown.
 
-`target` says where the command's story comes from, and how a story the layout does not show (a
-cell of an unavailable table) is met:
+`target` says where the command's story comes from. No target is refused for lying in a cell of an
+unavailable table: a change made there is kept, shows again when the table is restored, and saves
+are refused until then.
 
-- `selection`: the command selection, through `readCommandSelection`, which moves a selection in
-  a hidden story beside the table that hides it.
-- `explicit-gated`: a range, story or handle in the payload, resolved and refused with the coded
-  `table-unavailable` when its story is hidden.
+- `selection`: the command selection, through `readCommandSelection`; a caret left in a cell of
+  an unavailable table stays there.
+- `explicit`: a range, story or handle in the payload, resolved in TS.
 - `explicit-root`: an explicit target that can only name a root story or a section.
 - `explicit-layout`: a layout hit, so laid out by construction.
-- `named-limit-pr2`: an explicit target that resolves only in Rust; it can still reach a hidden
-  cell, the change is kept and shows on restore, and saves refuse meanwhile.
+- `named-limit-pr2`: an explicit target that resolves only in Rust, by id or anchor.
 - `none`: no story target.
 
 | kind | reaches | engine call | mutates before | incomplete payload | target |
@@ -30,17 +29,17 @@ cell of an unavailable table) is met:
 | applyRemoteUpdate | none | engine.applyUpdate residentCollaboration.ts:114; afterRemoteMerge to repairCommandSelection Actions:1448 (setCellSelection :884 only on projection-live cells) | n/a | a merge can make a table unavailable; repair clears the cell selection (:841) and re-places the caret outside | none |
 | applyRemoteUpdateChunks | none | engine.applyUpdateChunks residentCollaboration.ts:113; same repair | n/a | as applyRemoteUpdate | none |
 | collabPipe | none | transport into the same merge path (residentCollaboration.ts:105) | n/a | as applyRemoteUpdate | none |
-| applyEdits | none | proposalEngine.applyEdits via residentCommandBatches.ts:12; batch steps are text/paragraph/section only (batch.rs) | n/a | DeleteText/DeleteParagraphs remove a table embed whole; no payload read | explicit-gated: story, paragraph, range and paragraphs targets checked per step in preflight; search and content-control targets resolve in Rust: named limit (PR 2) |
+| applyEdits | none | proposalEngine.applyEdits via residentCommandBatches.ts:12; batch steps are text/paragraph/section only (batch.rs) | n/a | DeleteText/DeleteParagraphs remove a table embed whole; no payload read | explicit: story, paragraph, range and paragraphs targets per step; search and content-control targets resolve in Rust |
 | setRenderEnvironment | none | none | n/a | none | none |
 | setFontEnvironment | none | none | n/a | none | none |
-| setContentControlValue | none | engine.setControlValue Actions:974 | n/a | a control inside an unavailable table does not resolve (stale-control) | explicit-gated: the resolved control's story (preflight) |
-| addRepeatingItem | none | engine.repeatControlAt Actions:976 (Rust repeat_control_at) | n/a | Rust repeat_control_at refuses with table-unavailable before writing when the item holds an incomplete table | explicit-gated: the resolved control's story (preflight) |
-| removeRepeatingItem | none | engine.repeatControlAt(remove) Actions:976 | n/a | removes the item and any table in it; works on unavailable tables | explicit-gated: the resolved control's story (preflight) |
+| setContentControlValue | none | engine.setControlValue Actions:974 | n/a | a control inside an unavailable table does not resolve (stale-control) | explicit: the resolved control's story |
+| addRepeatingItem | none | engine.repeatControlAt Actions:976 (Rust repeat_control_at) | n/a | Rust repeat_control_at refuses with table-unavailable before writing when the item holds an incomplete table | explicit: the resolved control's story |
+| removeRepeatingItem | none | engine.repeatControlAt(remove) Actions:976 | n/a | removes the item and any table in it; works on unavailable tables | explicit: the resolved control's story |
 | openPart | none | none | n/a | none | explicit-root: a header, footer or note part |
 | ensurePart | none | setPartDocument Actions:1006 (part metadata only) | n/a | none | explicit-root: a header, footer or note part |
 | removePart | none | setPartDocument Actions:1014 | n/a | none | explicit-root: a header, footer or note part |
-| setHyperlink | none | applyPropertyCommand residentPropertyCommands.ts:150-158 | n/a | none | explicit-gated: commandTargetRange (preflight and apply) |
-| setObjectProperties | none | setImageGeometryAt residentPropertyCommands.ts:174 (image only) | n/a | none | explicit-gated: the resolved image's story (propertyCommandTarget) |
+| setHyperlink | none | applyPropertyCommand residentPropertyCommands.ts:150-158 | n/a | none | explicit: the payload range |
+| setObjectProperties | none | setImageGeometryAt residentPropertyCommands.ts:174 (image only) | n/a | none | explicit: the resolved image's story (propertyCommandTarget) |
 | setSectionProperties | none | setPropertyDocument residentPropertyCommands.ts:183 | n/a | none | explicit-root: a section, not a story |
 | setNoteProperties | none | setPropertyDocument residentPropertyCommands.ts:183 | n/a | none | explicit-root: a section, not a story |
 | setWatermark | none | setPropertyDocument residentPropertyCommands.ts:190 | n/a | none | none |
@@ -66,15 +65,15 @@ cell of an unavailable table) is met:
 | pasteFragment | none | applyClipboardFragment (clipboardFragment.ts:839): deleteRange :857, insertTableFragment :869 (new table), insertText/insertImage | n/a | the pasted fragment needs tblPr, grid and rows; copying an incomplete table throws the coded refusal (fragmentFromPayload) | selection: resolveCommandSelection, readCommandSelection |
 | insertPageBreak | none | engine.insertPageBreak Actions:1345 | n/a | none | selection: resolveCommandSelection, readCommandSelection |
 | insertSectionBreak | none | engine.splitSection Actions:1350 | n/a | none | selection: resolveCommandSelection, readCommandSelection |
-| resizeObject | table-op | setColumnWidth Actions:1056; setRowHeight :1068; setColumnWidth :1084, :1085 and setTableProperties :1088 | no | the cell handle resolves through the projection (residentObjectGeometry.ts:141-163), so stale-object. If reached: missing rows leave stored undefined and setRowHeight throws (refused table-unavailable); missing grid refuses unsupported-object (:1077), not the coded reason; isUnavailableTablePayload is not used | explicit-gated: the resolved object's story and its table's story (preflight) |
-| moveObject | none | setImageGeometryAt Actions:1114 (image only, :685) | n/a | none | explicit-gated: the resolved object's story (preflight) |
-| moveEmbed | none | engine.moveEmbed Actions:1038 (image only, :644, :652) | n/a | none | explicit-gated: the resolved image's story (preflight); the drop is a layout hit |
-| replaceMatches | none | proposalEngine.applyEdits replaceText Actions:1122 | n/a | a target range removes a table embed whole | explicit-gated: every target story (preflight) |
-| undo | none | engine.undo then syncCellSelectionWithCaret, which turns a refusal into a cleared cell selection | n/a | a hidden caret moves next to the table | selection: resolveCommandSelection, readCommandSelection |
-| redo | none | engine.redo then syncCellSelectionWithCaret, which turns a refusal into a cleared cell selection | n/a | a hidden caret moves next to the table | selection: resolveCommandSelection, readCommandSelection |
-| addComment | none | addComment residentReviewCommands.ts:69 | n/a | none | explicit-gated: commandTargetRange per range |
+| resizeObject | table-op | setColumnWidth Actions:1056; setRowHeight :1068; setColumnWidth :1084, :1085 and setTableProperties :1088 | no | the cell handle resolves through the projection (residentObjectGeometry.ts:141-163), so stale-object. If reached: missing rows leave stored undefined and setRowHeight throws (refused table-unavailable); missing grid refuses unsupported-object (:1077), not the coded reason; isUnavailableTablePayload is not used | explicit: the resolved object's story and its table's story |
+| moveObject | none | setImageGeometryAt Actions:1114 (image only, :685) | n/a | none | explicit: the resolved object's story |
+| moveEmbed | none | engine.moveEmbed Actions:1038 (image only, :644, :652) | n/a | none | explicit: the resolved image's story; the drop is a layout hit |
+| replaceMatches | none | proposalEngine.applyEdits replaceText Actions:1122 | n/a | a target range removes a table embed whole | explicit: every target story |
+| undo | none | engine.undo then syncCellSelectionWithCaret, which turns a refusal into a cleared cell selection | n/a | a caret in a cell of a table the undo leaves unavailable stays in that cell | selection: resolveCommandSelection, readCommandSelection |
+| redo | none | engine.redo then syncCellSelectionWithCaret, which turns a refusal into a cleared cell selection | n/a | as undo | selection: resolveCommandSelection, readCommandSelection |
+| addComment | none | addComment residentReviewCommands.ts:69 | n/a | none | explicit: each payload range |
 | updateComment | none | updateComment ReviewCommands.ts:72 | n/a | none | explicit-root: comment metadata |
-| setCommentRanges | none | setCommentRanges ReviewCommands.ts:73 | n/a | none | explicit-gated: commandTargetRange per range |
+| setCommentRanges | none | setCommentRanges ReviewCommands.ts:73 | n/a | none | explicit: each payload range |
 | removeComment | none | applyRawOps ReviewCommands.ts:74 | n/a | none | named-limit-pr2: removal by id reaches anchors in any story |
 | acceptRevision | none | acceptChange ReviewCommands.ts:75 (Rust skips unavailable tables, ops/table.rs:1695); afterwards repairCommandSelection Actions:1182 | n/a | row revisions in an unavailable table are not listed (push_table_row_changes :1609), so preflight returns unknown-revision (ReviewCommands.ts:47); a revision id spanning text and such a table resolves partly, silently (RISK 4) | named-limit-pr2: settles by revision id in Rust |
 | rejectRevision | none | rejectChange ReviewCommands.ts:76 | n/a | as acceptRevision | named-limit-pr2: settles by revision id in Rust |

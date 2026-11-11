@@ -13,7 +13,7 @@ function commandKinds(): string[] {
   return [...body.matchAll(/^ {2}([a-zA-Z]+):/gm)].map((match) => match[1]!).sort();
 }
 
-const TARGETS = new Set(['selection', 'explicit-gated', 'explicit-root', 'explicit-layout', 'named-limit-pr2', 'none']);
+const TARGETS = new Set(['selection', 'explicit', 'explicit-root', 'explicit-layout', 'named-limit-pr2', 'none']);
 
 function rows(): Array<{ kind: string; reaches: string; mutatesBefore: string; target: string }> {
   return readFileSync(TABLE, 'utf8')
@@ -25,7 +25,7 @@ function rows(): Array<{ kind: string; reaches: string; mutatesBefore: string; t
     });
 }
 
-test('every command kind says where its target comes from and how a hidden story is met', () => {
+test('every command kind says where its target comes from', () => {
   for (const row of rows()) expect(TARGETS.has(row.target), `${row.kind}: target ${row.target || 'missing'}`).toBe(true);
 });
 
