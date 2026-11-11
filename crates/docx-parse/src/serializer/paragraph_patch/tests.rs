@@ -32,6 +32,7 @@ fn patch(seed: Vec<UnitV1>, result: Vec<UnitV1>) -> ParagraphPatchV1 {
         para_inherit: Attrs::new(),
         mark_inherit: Attrs::new(),
         result_sha256: result_sha256(&result, &Attrs::new()),
+        inheritance: Default::default(),
     }
 }
 

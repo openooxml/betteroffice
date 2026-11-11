@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use docx_parse::paragraph_identity::{
     ParagraphOccurrence, allocate_paragraph_id_where, format_paragraph_id, parse_paragraph_id,
 };
-use docx_parse::paragraph_patch::{LegacyParagraphV1, ParagraphPatchV1};
+use docx_parse::paragraph_patch::{InheritanceStateV1, LegacyParagraphV1, ParagraphPatchV1};
 use docx_parse::serializer::S13TablePatch;
 use ooxml_opc::PackageBytes;
 use yrs::branch::Branch;
@@ -3929,7 +3929,8 @@ impl EditingDoc {
             if seeded.is_empty() {
                 continue;
             }
-            if let Some(mut spliced) = spliced_part(&source, index, seeded, &live, &by_key) {
+            if let Some((mut spliced, stale)) = spliced_part(&source, index, seeded, &live, &by_key)
+            {
                 let same_stories = part_stories(seeded, part)
                     .keys()
                     .eq(part_stories(&live, part).keys());
@@ -3960,7 +3961,16 @@ impl EditingDoc {
                             now.segments.as_deref().expect("changed segments retained"),
                             context,
                         ) {
-                            Ok(patch) => spliced.paragraph_patches.push(patch),
+                            Ok(mut patch) => {
+                                if stale.iter().any(|cell| {
+                                    story
+                                        .strip_prefix(cell.as_str())
+                                        .is_some_and(|rest| rest.is_empty() || rest.starts_with(':'))
+                                }) {
+                                    patch.inheritance = InheritanceStateV1::Unknown;
+                                }
+                                spliced.paragraph_patches.push(patch);
+                            }
                             Err(legacy) => spliced.legacy_paragraphs.push(legacy),
                         }
                     }
@@ -4162,6 +4172,9 @@ struct RowSplices {
     inserted: HashMap<String, SpliceAnchor>,
     removed: HashSet<String>,
     tables: Vec<S13TablePatch>,
+    /// The cell stories of every table whose rows, cells or table properties changed: their
+    /// recorded style inheritance may no longer match the table.
+    stale: HashSet<String>,
 }
 
 fn simple_table_payload(
@@ -4269,6 +4282,13 @@ fn admit_row_splices(
         let new_rows = new_rows.as_array()?;
         let old_keys = old_rows.iter().map(cells).collect::<Option<Vec<_>>>()?;
         let new_keys = new_rows.iter().map(cells).collect::<Option<Vec<_>>>()?;
+        edits.stale.extend(
+            old_keys
+                .iter()
+                .chain(&new_keys)
+                .flatten()
+                .map(|story| (*story).to_owned()),
+        );
         let simple = patch_tables
             && old_keys == new_keys
             && simple_table_payload(&was[0]["payload"], before)
@@ -4420,7 +4440,7 @@ fn spliced_part(
     seeded: &HashMap<String, Arc<StoryState>>,
     live: &HashMap<String, Arc<StoryState>>,
     by_key: &HashMap<&str, &Pilcrow>,
-) -> Option<SplicedPart> {
+) -> Option<(SplicedPart, HashSet<String>)> {
     let part = &source.parts[index];
     if part.kind == SourceStoryKind::Comment || part.backed.values().any(|views| views.len() != 1) {
         return None;
@@ -4650,19 +4670,22 @@ fn spliced_part(
     changed.sort_unstable();
     removed.sort_unstable();
     crate::sort::sort_by_key(&mut inserted, &|anchor| anchor.position());
-    Some(SplicedPart {
-        part: part.path().to_owned(),
-        sha256: part.sha256.clone(),
-        paragraphs,
-        changed,
-        section_only,
-        inserted,
-        removed,
-        paragraph_patches: Vec::new(),
-        legacy_paragraphs: Vec::new(),
-        table_patches: rows.tables,
-        format_only: Vec::new(),
-    })
+    Some((
+        SplicedPart {
+            part: part.path().to_owned(),
+            sha256: part.sha256.clone(),
+            paragraphs,
+            changed,
+            section_only,
+            inserted,
+            removed,
+            paragraph_patches: Vec::new(),
+            legacy_paragraphs: Vec::new(),
+            table_patches: rows.tables,
+            format_only: Vec::new(),
+        },
+        rows.stale,
+    ))
 }
 
 fn last_block_paragraph(

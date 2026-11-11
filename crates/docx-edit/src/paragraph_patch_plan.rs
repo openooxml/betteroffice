@@ -1800,6 +1800,7 @@ fn plan_paragraph(
         para_inherit,
         mark_inherit,
         result_sha256: result_sha256(&units(&replay), &result_properties),
+        inheritance: Default::default(),
     })
 }
 

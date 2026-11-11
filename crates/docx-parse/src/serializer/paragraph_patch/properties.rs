@@ -187,6 +187,7 @@ pub(super) fn run_properties(
     deltas: &[AttrDeltaV1],
     inherit: &Attrs,
     target: &Attrs,
+    current: bool,
 ) -> Result<String, Failure> {
     if deltas.is_empty() {
         return Ok(source.to_owned());
@@ -230,7 +231,7 @@ pub(super) fn run_properties(
             return Err(unsupported(&delta.path));
         }
         expand(delta, &mut |path, after| {
-            run_leaf(path, after, inherit, target, &mut changes)
+            run_leaf(path, after, inherit, target, &mut changes, current)
         })?;
     }
     if changes.children.contains_key("color")
@@ -285,6 +286,7 @@ pub(super) fn paragraph_properties(
     inherit: &Attrs,
     target: &Attrs,
     seed_inherit: &Attrs,
+    current: bool,
 ) -> Result<String, Failure> {
     if deltas.is_empty() {
         return Ok(source.to_owned());
@@ -357,7 +359,7 @@ pub(super) fn paragraph_properties(
             return Err(unsupported(&delta.path));
         }
         expand(delta, &mut |path, after| {
-            paragraph_leaf(path, after, inherit, target, &mut changes)
+            paragraph_leaf(path, after, inherit, target, &mut changes, current)
         })?;
     }
     let output = write_container(source, "pPr", &changes)?;
@@ -567,18 +569,22 @@ fn flag(
     child: &'static str,
     value: Option<&Value>,
     inherited: Option<&Value>,
+    current: bool,
 ) -> Result<(), Failure> {
     if value.is_some_and(|value| !value.is_boolean()) {
         return Err(conflict("expected boolean property"));
     }
     let on = value == Some(&Value::Bool(true));
+    let inherited_on = inherited == Some(&Value::Bool(true));
     let change = changes.children.entry(child).or_default();
-    if on == (inherited == Some(&Value::Bool(true))) {
+    if current && on == inherited_on {
         change.remove = true;
     } else if on {
         change.attributes.insert("w:val", None);
-    } else {
+    } else if current || inherited_on || value == Some(&Value::Bool(false)) {
         change.attributes.insert("w:val", Some("0".to_owned()));
+    } else {
+        change.remove = true;
     }
     Ok(())
 }
@@ -639,6 +645,7 @@ fn run_leaf(
     inherit: &Attrs,
     target: &Attrs,
     changes: &mut Change,
+    current: bool,
 ) -> Result<(), Failure> {
     let key = path.first().map(String::as_str).unwrap_or_default();
     let flag_child = match key {
@@ -655,9 +662,12 @@ fn run_leaf(
         if path.len() != 1 {
             return Err(unsupported(path));
         }
-        return flag(changes, child, value, inherit.get(key));
+        return flag(changes, child, value, inherit.get(key), current);
     }
     let same_as_style = |key: &str| {
+        if !current {
+            return false;
+        }
         let normalized = |attrs: &Attrs| {
             let single: Attrs = attrs
                 .get(key)
@@ -703,7 +713,8 @@ fn run_leaf(
     for field in &path[1..] {
         inherited_leaf = inherited_leaf.and_then(|value| value.get(field));
     }
-    let from_style = present(value).is_some()
+    let from_style = current
+        && present(value).is_some()
         && matches!(key, "fontFamily" | "fontSize" | "characterSpacing")
         && same_value(present(value), present(inherited_leaf));
     if value.is_none()
@@ -796,15 +807,19 @@ fn run_leaf(
                 "strike",
                 Some(&Value::Bool(single)),
                 Some(&Value::Bool(inherited_single)),
+                current,
             )?;
             flag(
                 changes,
                 "dstrike",
                 Some(&Value::Bool(double)),
                 Some(&Value::Bool(inherited_double)),
+                current,
             )?;
         }
-        "doubleStrike" if path.len() == 1 => flag(changes, "dstrike", value, inherit.get(key))?,
+        "doubleStrike" if path.len() == 1 => {
+            flag(changes, "dstrike", value, inherit.get(key), current)?;
+        }
         "superscript" | "subscript" if path.len() == 1 => {
             if value.is_some_and(|value| !value.is_boolean()) {
                 return Err(unsupported(path));
@@ -826,7 +841,7 @@ fn run_leaf(
                 changes,
                 "vertAlign",
                 "w:val",
-                (value != inherited).then(|| value.to_owned()),
+                (!current || value != inherited).then(|| value.to_owned()),
             );
         }
         "highlight" if path.len() == 2 && path[1] == "color" => {
@@ -867,6 +882,7 @@ fn paragraph_leaf(
     inherit: &Attrs,
     target: &Attrs,
     changes: &mut Change,
+    current: bool,
 ) -> Result<(), Failure> {
     let key = path.first().map(String::as_str).unwrap_or_default();
     if path.len() == 1 {
@@ -879,7 +895,7 @@ fn paragraph_leaf(
             _ => None,
         };
         if let Some(child) = child {
-            return flag(changes, child, value, inherit.get(key));
+            return flag(changes, child, value, inherit.get(key), current);
         }
         if matches!(
             key,
