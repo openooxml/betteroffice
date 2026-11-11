@@ -608,6 +608,109 @@ test('a copy from a healthy inner table cell inside a retained outer cell range 
   }
 }, TIMEOUT);
 
+const tabForward = (replica: Opened, story: string) => {
+  const from = startOf(replica, story);
+  return replica.session.submit('navigateCell', {
+    selection: { anchor: from, focus: from }, direction: 'forward', extend: false, createLastRow: true,
+  }).ack;
+};
+const rowCount = (replica: Opened, story: string) => (replica.engine.tablePayload(story, 0) as { rows: unknown[] }).rows.length;
+
+test('Tab with row creation from a cell of an inner table that lost its properties, whose id extends the last outer cell, refuses coded and appends no outer row', async () => {
+  const replica = await open(9431, true);
+  const host = await peer(replica, 9432);
+  const first = await peer(replica, 9433);
+  const second = await peer(replica, 9434);
+  try {
+    const table = tableStory(replica);
+    const outerCells = outerCellsOf(replica);
+    const children = [`${outerCells[1]!}:child`, `${outerCells[1]!}:child-two`];
+    const minted = replica.engine.tablePayload(table, 0) as { rows: Array<{ cells: Array<{ story: string }> }> };
+    host.createStory(children[0]!, 'Child one');
+    host.createStory(children[1]!, 'Child two');
+    host.applyRawOps(table, [{ op: 'insertEmbed', index: 0, kind: 'table', payload: {
+      ...minted, rows: minted.rows.map((row) => ({ ...row, cells: row.cells.map((entry, column) => ({ ...entry, story: children[column]! })) })),
+    } }]);
+    sync(host, first);
+    sync(host, second);
+    await receive(replica, host);
+    expect(firstCell(replica, table)).toBe(children[0]!);
+
+    first.setTableProperties({ story: table, tableIndex: 0 }, { width: 4000, widthType: 'dxa' });
+    sync(first, second);
+    second.setTableProperties({ story: table, tableIndex: 0 }, { justification: 'center' });
+    expect(first.undo()).toBe(true);
+    sync(first, second);
+    expect(second.undo()).toBe(true);
+    sync(first, second);
+    await receive(replica, second);
+    const payload = (replica.engine.tablePayload(table, 0) ?? {}) as { rows?: Array<{ cells: Array<{ story: string }> }> };
+    expect('tblPr' in payload).toBe(false);
+    expect(payload.rows?.[0]?.cells.map((entry) => entry.story)).toEqual(children);
+    expect(children.map((story) => located(replica, story))).toEqual([null, null]);
+
+    const outer = JSON.stringify(replica.engine.tablePayload('body', 0));
+    const untouched = replica.engine.encodeState();
+    const ack = await tabForward(replica, children[1]!);
+    expect([ack.status, (ack as { reason?: string }).reason]).toEqual(['refused', 'invalid-cell-target']);
+    expect(JSON.stringify(replica.engine.tablePayload('body', 0))).toBe(outer);
+    expect(rowCount(replica, 'body')).toBe(1);
+    expect(replica.engine.encodeState()).toEqual(untouched);
+    expect(children.map((story) => cellTexts(replica, story))).toEqual([['Child one'], ['Child two']]);
+  } finally {
+    host.destroy();
+    first.destroy();
+    second.destroy();
+    replica.session.dispose();
+  }
+}, TIMEOUT);
+
+test('Tab with row creation from the last cell of a healthy inner table appends an inner row and leaves the outer table alone', async () => {
+  const replica = await open(9441, true);
+  try {
+    const table = tableStory(replica);
+    const last = (replica.engine.tablePayload(table, 0)!.rows as Array<{ cells: Array<{ story: string }> }>)[0]!.cells[1]!.story;
+    const outer = JSON.stringify(replica.engine.tablePayload('body', 0));
+    const ack = await tabForward(replica, last);
+    expect(ack.status).toBe('applied');
+    expect(rowCount(replica, table)).toBe(2);
+    expect(JSON.stringify(replica.engine.tablePayload('body', 0))).toBe(outer);
+    const added = (replica.engine.tablePayload(table, 0)!.rows as Array<{ cells: Array<{ story: string }> }>)[1]!.cells[0]!.story;
+    expect(replica.session.state.selection?.focus.story).toBe(added);
+  } finally {
+    replica.session.dispose();
+  }
+}, TIMEOUT);
+
+const blockControl = (content: string) => `<w:sdt><w:sdtPr><w:id w:val="9"/></w:sdtPr><w:sdtContent>${content}</w:sdtContent></w:sdt>`;
+const controlTable = table(cell('A'), `<w:tc><w:tcPr><w:tcW w:w="2340" w:type="dxa"/></w:tcPr>${blockControl(paragraph('B'))}</w:tc>`);
+
+test('Tab from a block control in the last cell moves back to the previous cell, and with row creation appends a row and enters it', async () => {
+  const replica = await open(9451, false, controlTable);
+  try {
+    const cells = () => (replica.engine.tablePayload('body', 0)!.rows as Array<{ cells: Array<{ story: string }> }>)
+      .map((row) => row.cells.map((entry) => entry.story));
+    const control = replica.engine.geometryReader.storyIds().find((id) => replica.engine.paragraphs(id)[0]?.text === 'B')!;
+    expect(control).toContain(':sdt');
+    expect(control.startsWith(`${cells()[0]![1]!}:`)).toBe(true);
+
+    const from = startOf(replica, control);
+    const back = await replica.session.submit('navigateCell', {
+      selection: { anchor: from, focus: from }, direction: 'backward', extend: false, createLastRow: false,
+    }).ack;
+    expect(back.status).toBe('noop');
+    expect(replica.session.state.selection?.focus.story).toBe(cells()[0]![0]!);
+
+    const ack = await tabForward(replica, control);
+    expect(ack.status).toBe('applied');
+    expect(rowCount(replica, 'body')).toBe(2);
+    expect(replica.session.state.selection?.focus.story).toBe(cells()[1]![0]!);
+    expect(replica.engine.paragraphs(control)[0]!.text).toBe('B');
+  } finally {
+    replica.session.dispose();
+  }
+}, TIMEOUT);
+
 const siblingTables = table(cell('A one'), cell('A two')) + paragraph('Between') + table(cell('B one'), cell('B two'));
 const siblingRange = (tableIndex: number, column: number) => {
   const loc = { story: 'body', tableIndex, row: 0, column };
