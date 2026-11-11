@@ -133,6 +133,7 @@ jobs:
           bun scripts/api-surface.ts --check pptx
           bun scripts/api-surface.ts --check xlsx-native
           bun scripts/api-surface.ts --check pptx-native
+          bun scripts/api-surface.ts --check docx
 
       # What `bun run test` builds; the tests themselves run in the package-tests shards.
       - name: Build the Wasm modules
