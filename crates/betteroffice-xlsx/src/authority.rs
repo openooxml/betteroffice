@@ -1057,7 +1057,9 @@ impl WorkbookAuthority {
         writer.var_usize(update.len());
         let mut tail = Writer::new();
         base.row_styles.write(&mut tail);
-        if base.auto_filters.iter().any(Option::is_some)
+        let gridless = base.formats.iter().any(|format| format.hide_gridlines);
+        let filtered = gridless || base.auto_filters.iter().any(Option::is_some);
+        if filtered
             || base
                 .conditional_formats
                 .iter()
@@ -1066,10 +1068,17 @@ impl WorkbookAuthority {
             let formats = serde_json::to_vec(&base.conditional_formats)
                 .map_err(|error| crate::snapshot::SnapshotError::new(error.to_string()))?;
             tail.bytes(&formats);
-            if base.auto_filters.iter().any(Option::is_some) {
+            if filtered {
                 let filters = serde_json::to_vec(&base.auto_filters)
                     .map_err(|error| crate::snapshot::SnapshotError::new(error.to_string()))?;
                 tail.bytes(&filters);
+            }
+            if gridless {
+                base.formats
+                    .iter()
+                    .map(|format| format.hide_gridlines)
+                    .collect::<Vec<_>>()
+                    .write(&mut tail);
             }
         }
         Ok([writer.into_bytes(), update, tail.into_bytes()])
@@ -1165,6 +1174,17 @@ impl WorkbookAuthority {
         if !reader.is_empty() {
             base.auto_filters = serde_json::from_str(reader.str()?)
                 .map_err(|error| SnapshotError::new(error.to_string()))?;
+        }
+        if !reader.is_empty() {
+            let gridless: Vec<bool> = Codec::read(&mut reader)?;
+            if gridless.len() != base.formats.len() {
+                return Err(SnapshotError::new(
+                    "Recovery gridlines sheet count mismatch",
+                ));
+            }
+            for (format, hidden) in base.formats.iter_mut().zip(gridless) {
+                format.hide_gridlines = hidden;
+            }
         }
         reader.finish()?;
         let doc = loop {
@@ -8152,6 +8172,7 @@ pub(crate) mod open_test_cases {
                 default_row_height_pt: Some(16.0),
                 custom_height: true,
                 zero_height: false,
+                hide_gridlines: false,
             };
             if col_styles {
                 sheet.col_styles.push(ColStyle {

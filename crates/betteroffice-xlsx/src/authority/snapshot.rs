@@ -1059,7 +1059,7 @@ struct_codec!(SheetFormat {
     default_row_height_pt,
     custom_height,
     zero_height
-});
+}; hide_gridlines = false);
 struct_codec!(ColStyle { first, last, xf });
 struct_codec!(HiddenDimensions {
     col_widths,
@@ -1612,6 +1612,9 @@ const XF_V2_TAG: usize = 17;
 /// Tags a chart section record whose charts carry edited part XML; a record
 /// tagged with the section itself predates it.
 const CHART_XML_TAG: usize = 27;
+/// Tags a format section record, laid out as one tagged with the section,
+/// whose sheet hides its gridlines.
+const GRIDLESS_FORMAT_TAG: usize = 28;
 const FILL_RECORD: usize = 18;
 const BORDER_RECORD: usize = 19;
 
@@ -1623,6 +1626,7 @@ fn base_section(tag: usize) -> usize {
         21 => ROW_STYLE_SECTION,
         XF_V2_TAG => XF_SECTION,
         CHART_XML_TAG => 7,
+        GRIDLESS_FORMAT_TAG => 4,
         FILL_RECORD => 11,
         BORDER_RECORD => 12,
         tag if tag <= RELEASED_BASE_SECTIONS => tag,
@@ -1827,6 +1831,7 @@ impl BaseCursor {
             && charts[self.index]
                 .iter()
                 .any(|chart| chart.raw_xml.is_some());
+        let gridless = self.section == 4 && formats[self.index].hide_gridlines;
         let mut w = Writer::new();
         w.u8(match self.section {
             0 => usize::from(manifest_tag(base)),
@@ -1838,6 +1843,7 @@ impl BaseCursor {
             12 => BORDER_RECORD,
             XF_SECTION if !released => XF_V2_TAG,
             7 if edited => CHART_XML_TAG,
+            4 if gridless => GRIDLESS_FORMAT_TAG,
             section => section,
         } as u8);
         let index = self.index;
@@ -2177,7 +2183,7 @@ impl BaseRecord {
             1 => r.value::<DefinedName>()?,
             2 => r.value::<(i64, Vec<String>)>()?,
             3 => r.value::<Option<FreezePane>>()?,
-            4 => r.value::<SheetFormat>()?,
+            4 | GRIDLESS_FORMAT_TAG => r.value::<SheetFormat>()?,
             5 => r.value::<Vec<ColStyle>>()?,
             6 => r.value::<Vec<Hyperlink>>()?,
             7 => r.value::<Vec<SheetChart>>()?,
@@ -2214,7 +2220,7 @@ impl BaseRecord {
             1 => DefinedName::decode_cost(),
             2 => <(i64, Vec<String>)>::decode_cost(),
             3 => <Option<FreezePane>>::decode_cost(),
-            4 => SheetFormat::decode_cost(),
+            4 | GRIDLESS_FORMAT_TAG => SheetFormat::decode_cost(),
             5 => <Vec<ColStyle>>::decode_cost(),
             6 => <Vec<Hyperlink>>::decode_cost(),
             7 => <Vec<SheetChart>>::decode_cost(),
@@ -2277,6 +2283,10 @@ impl BaseRecord {
             2 => Self::Fingerprints(r.value()?),
             3 => Self::FreezePane(r.value()?),
             4 => Self::Format(r.value()?),
+            GRIDLESS_FORMAT_TAG => Self::Format(SheetFormat {
+                hide_gridlines: true,
+                ..r.value()?
+            }),
             5 => Self::Columns(r.value()?),
             6 => Self::Hyperlinks(r.value()?),
             7 => Self::Charts(r.value()?),
@@ -2519,6 +2529,10 @@ impl BaseBuilder {
                 }
                 3 => base.freeze_panes.push(Codec::read(&mut r)?),
                 4 => base.formats.push(Codec::read(&mut r)?),
+                GRIDLESS_FORMAT_TAG => base.formats.push(SheetFormat {
+                    hide_gridlines: true,
+                    ..Codec::read(&mut r)?
+                }),
                 5 => base.col_styles.push(Codec::read(&mut r)?),
                 6 => base.hyperlinks.push(Codec::read(&mut r)?),
                 7 => base.charts.push(Codec::read(&mut r)?),
@@ -3835,11 +3849,13 @@ mod tests {
                 default_row_height_pt: Some(f64::from_bits(0x7ff8_0000_0000_0042)),
                 custom_height: true,
                 zero_height: false,
+                hide_gridlines: false,
             },
             SheetFormat {
                 default_row_height_pt: Some(-0.0),
                 custom_height: false,
                 zero_height: true,
+                hide_gridlines: true,
             },
             SheetFormat::default(),
         ];
@@ -4004,6 +4020,15 @@ mod tests {
         push_all(&mut encoder, &mut hydrator, budget);
         let restored = hydrator.finish().unwrap();
         assert_eq!(base_records(&a.base), base_records(&restored.base));
+        assert_eq!(
+            restored
+                .base
+                .formats
+                .iter()
+                .map(|format| format.hide_gridlines)
+                .collect::<Vec<_>>(),
+            [false, true, false]
+        );
         assert_eq!(restored.base.bootstrap_client_id, 17);
         assert_eq!(restored.base.fingerprint, "kept-verbatim");
         assert_eq!(restored.base.fingerprints, a.base.fingerprints);
@@ -4657,7 +4682,7 @@ mod tests {
             unknown
                 .iter_mut()
                 .find(|record| usize::from(record[0]) == tag)
-                .unwrap()[0] = 28;
+                .unwrap()[0] = GRIDLESS_FORMAT_TAG as u8 + 1;
             let mut whole = BaseBuilder::default();
             assert!(
                 unknown

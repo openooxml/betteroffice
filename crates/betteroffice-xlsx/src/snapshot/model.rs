@@ -56,6 +56,8 @@ const CONDITIONAL_FORMATS_V2: u8 = 33;
 /// A chart record that also carries the edited part XML it saves; a chart
 /// without any keeps the `CHART` layout.
 const CHART_XML: u8 = 34;
+/// A sheet record laid out as `HIDDEN_SHEET` whose sheet hides its gridlines.
+const GRIDLESS_SHEET: u8 = 35;
 
 const XF_V2: u8 = 21;
 const FILL_V2: u8 = 22;
@@ -64,7 +66,7 @@ const BORDER_V2: u8 = 23;
 fn run_tag(tag: u8) -> u8 {
     match tag {
         CONDITIONAL_HEADER | AUTO_FILTER_HEADER => HEADER,
-        STYLED_SHEET | HIDDEN_SHEET => SHEET,
+        STYLED_SHEET | HIDDEN_SHEET | GRIDLESS_SHEET => SHEET,
         CHART_XML => CHART,
         XF_V2 => XF,
         CONDITIONAL_FORMATS_V2 => CONDITIONAL_FORMATS,
@@ -459,6 +461,8 @@ impl MetadataCursor {
                 CHART_REF
             } else if self.sheet_phase == CHART && sheet.charts[self.index].raw_xml.is_some() {
                 CHART_XML
+            } else if self.sheet_phase == SHEET && sheet.format.hide_gridlines {
+                GRIDLESS_SHEET
             } else if self.sheet_phase == SHEET
                 && (!sheet.hidden_col_widths.is_empty() || !sheet.hidden_row_heights.is_empty())
             {
@@ -474,7 +478,8 @@ impl MetadataCursor {
                     w.option(sheet.freeze_pane.as_ref(), write_pane);
                     write_format(w, &sheet.format);
                     let counts = sheet_counts(sheet)?;
-                    let count = if !sheet.hidden_col_widths.is_empty()
+                    let count = if sheet.format.hide_gridlines
+                        || !sheet.hidden_col_widths.is_empty()
                         || !sheet.hidden_row_heights.is_empty()
                     {
                         11
@@ -1018,7 +1023,9 @@ impl ModelSnapshotBuilder {
             INDEXED => g.ensure(m, |m| Ok(&mut m.styles.indexed_colors), budget),
             TABLE => g.ensure(m, |m| Ok(&mut m.tables), budget),
             TABLE_COLUMN => g.ensure(m, |m| Ok(&mut m.tables.last_mut().unwrap().columns), budget),
-            SHEET | STYLED_SHEET | HIDDEN_SHEET => g.ensure(m, |m| Ok(&mut m.sheets), budget),
+            SHEET | STYLED_SHEET | HIDDEN_SHEET | GRIDLESS_SHEET => {
+                g.ensure(m, |m| Ok(&mut m.sheets), budget)
+            }
             HYPERLINK => g.ensure(
                 m,
                 |m| Ok(&mut m.sheets.last_mut().unwrap().hyperlinks),
@@ -1244,7 +1251,7 @@ impl ModelSnapshotBuilder {
                 .ok_or_else(|| SnapshotError::new("snapshot table column has no table"))?
                 .columns
                 .push(r.str()?.to_owned()),
-            SHEET | STYLED_SHEET | HIDDEN_SHEET => self.read_sheet(r, raw)?,
+            SHEET | STYLED_SHEET | HIDDEN_SHEET | GRIDLESS_SHEET => self.read_sheet(r, raw)?,
             CHART_XML => self.read_sheet_record(raw, r)?,
             _ => self.read_sheet_record(tag, r)?,
         }
@@ -1270,9 +1277,10 @@ impl ModelSnapshotBuilder {
         sheet.auto_filter = self.auto_filters.next().unwrap_or_default();
         sheet.freeze_pane = r.option(read_pane)?;
         sheet.format = read_format(r)?;
+        sheet.format.hide_gridlines = tag == GRIDLESS_SHEET;
         let mut counts = [0; 11];
         let count = match tag {
-            HIDDEN_SHEET => 11,
+            HIDDEN_SHEET | GRIDLESS_SHEET => 11,
             STYLED_SHEET => 9,
             _ => 8,
         };
@@ -1671,6 +1679,7 @@ fn write_format(w: &mut Writer, value: &SheetFormat) {
         default_row_height_pt,
         custom_height,
         zero_height,
+        hide_gridlines: _,
     } = value;
     w.option(*default_row_height_pt, Writer::f64);
     w.bool(*custom_height);
@@ -1682,6 +1691,7 @@ fn read_format(r: &mut Reader<'_>) -> SnapshotResult<SheetFormat> {
         default_row_height_pt: r.option(Reader::f64)?,
         custom_height: r.bool()?,
         zero_height: r.bool()?,
+        hide_gridlines: false,
     })
 }
 
@@ -3300,6 +3310,7 @@ mod tests {
             default_row_height_pt: Some(-0.0),
             custom_height: true,
             zero_height: true,
+            hide_gridlines: false,
         };
         sheet.col_styles = vec![
             ColStyle {
