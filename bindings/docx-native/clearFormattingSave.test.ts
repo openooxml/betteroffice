@@ -174,6 +174,107 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
     }
   });
 
+  test(`${engine}: after a table edit the cells of that table save explicit run values`, async () => {
+    const cell = (paraId: string, run: string) =>
+      `<w:tc><w:tcPr><w:tcW w:w="2400" w:type="dxa"/></w:tcPr><w:p w14:paraId="${paraId}">${run}</w:p></w:tc>`;
+    const nested = '<w:tbl><w:tblPr><w:tblStyle w:val="HeaderGrid"/><w:tblLook w:val="0020" w:firstRow="1" w:lastRow="0" w:firstColumn="0" w:lastColumn="0" w:noHBand="1" w:noVBand="1"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>' +
+      `<w:tr>${cell('00000046', '<w:r><w:t>Inner head</w:t></w:r>')}</w:tr></w:tbl><w:p w14:paraId="00000047"/>`;
+    const body = '<w:tbl><w:tblPr><w:tblStyle w:val="HeaderGrid"/><w:tblLook w:val="0020" w:firstRow="1" w:lastRow="0" w:firstColumn="0" w:lastColumn="0" w:noHBand="1" w:noVBand="1"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/><w:gridCol w:w="2400"/></w:tblGrid>' +
+      `<w:tr>${cell('00000041', '<w:r><w:t>Old head</w:t></w:r>')}${cell('00000042', '<w:r><w:t>Second head</w:t></w:r>')}</w:tr>` +
+      `<w:tr>${cell('00000043', '<w:r><w:rPr><w:b/></w:rPr><w:t>Body one</w:t></w:r>')}<w:tc><w:tcPr><w:tcW w:w="2400" w:type="dxa"/></w:tcPr>${nested}</w:tc></w:tr>` +
+      '</w:tbl><w:p w14:paraId="00000045"><w:r><w:t>After</w:t></w:r></w:p>';
+    const at = (row: number, column: number) => ({ story: 'body', tableIndex: 0, row, column });
+    const storyOf = (session: Session, paraId: string) =>
+      session.listStories().stories.find((entry) => entry.kind === 'tableCell' && session.paragraphs(entry.story).some((paragraph) => paragraph.paraId === paraId))!.story;
+    const format = (session: Session, paraId: string, value: boolean) =>
+      session.formatRange(whole(session, paraId, paraId, storyOf(session, paraId)), { bold: value });
+    const boldIn = (session: Session, marker: string) => {
+      for (const { story } of session.listStories().stories) {
+        const segment = session.storySegments(story).find((entry) => entry.kind === 'text' && entry.text.includes(marker));
+        if (segment?.kind === 'text') return Boolean(segment.attributes.bold);
+      }
+      return undefined;
+    };
+    const cases: [string, (session: Session) => [string, boolean][]][] = [
+      ['a row inserted above the header row', (session) => {
+        session.insertRow(at(0, 0), 'above');
+        const fresh = session.listStories().stories.find((entry) => entry.kind === 'tableCell' && session.paragraphs(entry.story).some((paragraph) => paragraph.text === ''))!.story;
+        const paraId = session.paragraphs(fresh)[0]!.paraId;
+        session.insertText({ story: fresh, paraId, offset: 0 }, 'New head');
+        session.formatRange(whole(session, paraId, paraId, fresh), { bold: false });
+        format(session, '00000041', true);
+        return [['Old head', true], ['New head', false]];
+      }],
+      ['the header row deleted', (session) => {
+        session.deleteRow({ anchor: at(0, 0), head: at(0, 0) });
+        format(session, '00000043', false);
+        return [['Body one', false]];
+      }],
+      ['a column deleted', (session) => {
+        session.deleteColumn({ anchor: at(0, 1), head: at(0, 1) });
+        format(session, '00000041', true);
+        return [['Old head', true]];
+      }],
+      ['cells merged down the first column', (session) => {
+        session.mergeCells({ anchor: at(0, 0), head: at(1, 0) });
+        format(session, '00000043', false);
+        return [['Body one', false]];
+      }],
+      ['a row inserted in the outer table of a nested one', (session) => {
+        session.insertRow(at(0, 0), 'above');
+        format(session, '00000046', true);
+        return [['Inner head', true]];
+      }],
+    ];
+    for (const [name, edit] of cases) {
+      const session = await yrs.createYrsSession({ clientId: 99 });
+      try {
+        session.seedFromDocx(await fixture(body));
+        const expected = edit(session);
+        const first = await saveAndReopen(yrs, session);
+        first.reopened.destroy();
+        const { xml, reopened } = await saveAndReopen(yrs, session);
+        try {
+          for (const [marker, on] of expected) {
+            expect({ name, marker, saved: savedRunProperties(xml, marker) }).toEqual({ name, marker, saved: on ? '<w:b/>' : '<w:b w:val="0"/>' });
+            expect({ name, marker, bold: boldIn(reopened, marker) }).toEqual({ name, marker, bold: on });
+          }
+        } finally {
+          reopened.destroy();
+        }
+      } finally {
+        session.destroy();
+      }
+    }
+  });
+
+  test(`${engine}: a cell edited after a save that inserted a row above the header saves explicit bold`, async () => {
+    const cell = (paraId: string, run: string) =>
+      `<w:tc><w:tcPr><w:tcW w:w="2400" w:type="dxa"/></w:tcPr><w:p w14:paraId="${paraId}">${run}</w:p></w:tc>`;
+    const body = '<w:tbl><w:tblPr><w:tblStyle w:val="HeaderGrid"/><w:tblLook w:val="0020" w:firstRow="1" w:lastRow="0" w:firstColumn="0" w:lastColumn="0" w:noHBand="1" w:noVBand="1"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid>' +
+      `<w:tr>${cell('00000051', '<w:r><w:t>Old head</w:t></w:r>')}</w:tr></w:tbl><w:p w14:paraId="00000052"><w:r><w:t>After</w:t></w:r></w:p>`;
+    const session = await yrs.createYrsSession({ clientId: 99 });
+    try {
+      session.seedFromDocx(await fixture(body));
+      session.insertRow({ story: 'body', tableIndex: 0, row: 0, column: 0 }, 'above');
+      (await saveAndReopen(yrs, session)).reopened.destroy();
+      const story = session.listStories().stories.find((entry) => entry.kind === 'tableCell' && session.paragraphs(entry.story).some((paragraph) => paragraph.paraId === '00000051'))!.story;
+      session.formatRange(whole(session, '00000051', '00000051', story), { bold: true });
+      const { xml, reopened } = await saveAndReopen(yrs, session);
+      try {
+        expect(savedRunProperties(xml, 'Old head')).toBe('<w:b/>');
+        const segment = reopened.listStories().stories
+          .flatMap((entry) => reopened.storySegments(entry.story))
+          .find((entry) => entry.kind === 'text' && entry.text.includes('Old head'));
+        expect(segment?.kind === 'text' && Boolean(segment.attributes.bold)).toBe(true);
+      } finally {
+        reopened.destroy();
+      }
+    } finally {
+      session.destroy();
+    }
+  });
+
   test(`${engine}: known limit: a direct value equal to the style stays after clear formatting`, async () => {
     const session = await yrs.createYrsSession({ clientId: 96 });
     try {

@@ -21,9 +21,49 @@ fn delta(path: &[&str], before: Option<Value>, after: Option<Value>) -> AttrDelt
 }
 
 fn written(source: &str, deltas: &[AttrDeltaV1], inherit: Value, target: Value) -> String {
+    written_in(source, deltas, inherit, target, true)
+}
+
+fn written_in(
+    source: &str,
+    deltas: &[AttrDeltaV1],
+    inherit: Value,
+    target: Value,
+    current: bool,
+) -> String {
     let result: Result<String, Failure> =
-        run_properties(source, deltas, &attrs(inherit), &attrs(target));
+        run_properties(source, deltas, &attrs(inherit), &attrs(target), current);
     result.unwrap_or_else(|error| panic!("{}", error.detail))
+}
+
+#[test]
+fn without_current_inheritance_a_changed_value_stays_explicit() {
+    let on = written_in(
+        r#"<w:rPr><w:b w:val="0"/></w:rPr>"#,
+        &[delta(&["bold"], Some(json!(false)), Some(json!(true)))],
+        heading(),
+        heading(),
+        false,
+    );
+    assert_eq!(on, "<w:rPr><w:b/></w:rPr>");
+    for inherit in [heading(), json!({})] {
+        let off = written_in(
+            "<w:rPr><w:b/></w:rPr>",
+            &[delta(&["bold"], Some(json!(true)), Some(json!(false)))],
+            inherit,
+            json!({"bold": false}),
+            false,
+        );
+        assert_eq!(off, r#"<w:rPr><w:b w:val="0"/></w:rPr>"#);
+    }
+    let sized = written_in(
+        r#"<w:rPr><w:sz w:val="40"/></w:rPr>"#,
+        &[delta(&["fontSize", "size"], Some(json!(40)), Some(json!(32)))],
+        heading(),
+        heading(),
+        false,
+    );
+    assert_eq!(sized, r#"<w:rPr><w:sz w:val="32"/></w:rPr>"#);
 }
 
 fn heading() -> Value {
