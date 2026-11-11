@@ -159,10 +159,11 @@ export interface DocxPluginSelection {
   /** Formatting at the selection; its paragraph indices are not edit targets. */
   formatting: SelectionState | null;
   /**
-   * Display positions in the layout `layoutId` names; never an edit range. Compare `layoutId` with
-   * `snapshot.layout?.id` before positioning anything by it. The range is kept across a frame
-   * replacement until the new layout maps it, and is then replaced or cleared by one selection change.
-   * A superseded or failed read shows null, as before.
+   * Display positions in the layout `layoutId` names; never an edit range. When the layout is replaced
+   * under an unchanged selection, the in-thread editor may keep the previous range, still carrying the
+   * previous layout's id, until the new layout maps it; the worker editor shows null in that window.
+   * Either way one selection change follows the remap. Compare `layoutId` with `snapshot.layout?.id`
+   * before positioning anything by it.
    */
   displayRange: { story: string; from: number; to: number; layoutId: string } | null;
 }
