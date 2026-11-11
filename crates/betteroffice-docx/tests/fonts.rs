@@ -363,10 +363,17 @@ fn paragraph_heights(document: &Document) -> f64 {
 #[cfg(feature = "fonts-latin")]
 #[test]
 fn layout_measures_with_the_document_no_leading() {
-    let leading = Document::open(&with_compat(&common::sample_docx(), "")).unwrap();
-    let no_leading =
+    let mut leading = Document::open(&with_compat(&common::sample_docx(), "")).unwrap();
+    let mut no_leading =
         Document::open(&with_compat(&common::sample_docx(), "<w:noLeading/>")).unwrap();
     assert!(no_leading.model().settings.compatibility_flags.no_leading);
+    for document in [&mut leading, &mut no_leading] {
+        for bold in [false, true] {
+            document
+                .register_font("Calibri", bold, false, APP_FONT)
+                .unwrap();
+        }
+    }
     let with_gap = paragraph_heights(&leading);
     let without_gap = paragraph_heights(&no_leading);
     assert!(without_gap > 0.0);
