@@ -1866,7 +1866,10 @@ pub fn parse_sdt_properties(
                 properties.repeating_section_item = Some(true);
                 properties.sdt_type = "repeatingSectionItem".to_owned();
             }
-            "dataBinding" => {
+            "dataBinding"
+                if properties.data_binding.is_none()
+                    || element.matches_name("w", "dataBinding") =>
+            {
                 properties.data_binding = Some(SdtDataBinding {
                     xpath: sdt_attribute(element, "xpath").map(str::to_owned),
                     store_item_id: sdt_attribute(element, "storeItemID").map(str::to_owned),

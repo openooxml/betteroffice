@@ -449,12 +449,18 @@ impl XmlElement {
         namespace_prefix(&self.name)
     }
 
+    /// Whether this element is `namespace:local`. An element under another
+    /// prefix still matches on its local name, as a document may bind the
+    /// namespace to any prefix, unless that prefix is itself one of the
+    /// standard prefixes and so names a different namespace.
     pub fn matches_name(&self, namespace: &str, local: &str) -> bool {
-        self.name
-            .strip_prefix(namespace)
-            .and_then(|rest| rest.strip_prefix(':'))
-            == Some(local)
-            || self.local_name() == local
+        self.local_name() == local
+            && self.namespace_prefix().is_none_or(|prefix| {
+                prefix == namespace
+                    || !STANDARD_NAMESPACES
+                        .iter()
+                        .any(|(standard, _)| *standard == prefix)
+            })
     }
 
     pub fn child(&self, namespace: &str, local: &str) -> Option<&XmlElement> {
