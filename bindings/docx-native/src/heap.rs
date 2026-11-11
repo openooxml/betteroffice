@@ -38,7 +38,7 @@ thread_local! {
     static LIMIT: Cell<usize> = const { Cell::new(NO_LIMIT) };
     static OVER: Cell<bool> = const { Cell::new(false) };
     static REPORTED: Cell<bool> = const { Cell::new(false) };
-    /// The counting epoch the thread's live and peak bytes belong to; 0 until it first adopts one.
+    /// The counting epoch the thread's live and peak bytes belong to.
     static LIVE_EPOCH: Cell<u64> = const { Cell::new(0) };
     static SHARE: LimitShare = const { LimitShare };
 }
@@ -74,18 +74,16 @@ fn switch_counting(counting: bool) {
 }
 
 /// Makes the calling thread's live and peak bytes belong to the current epoch. Bytes from an
-/// earlier epoch missed the frees made while counting was off, so they restart from zero; a thread
-/// that never adopted one keeps its bytes while counting has only ever run once. Called with
-/// [`SWITCH`] held.
-fn adopt_epoch() {
+/// earlier epoch missed the frees made while counting was off, so they restart from zero; bytes
+/// already counted in the current epoch are kept.
+fn reconcile() {
     let current = COUNT_EPOCH.load(Ordering::Relaxed);
-    let own = LIVE_EPOCH
-        .try_with(|epoch| epoch.replace(current))
-        .unwrap_or(current);
-    if own != current && !(own == 0 && current == 1) {
-        let _ = LIVE.try_with(|live| live.set(0));
-        let _ = PEAK.try_with(|peak| peak.set(0));
-    }
+    let _ = LIVE_EPOCH.try_with(|epoch| {
+        if epoch.replace(current) != current {
+            let _ = LIVE.try_with(|live| live.set(0));
+            let _ = PEAK.try_with(|peak| peak.set(0));
+        }
+    });
 }
 
 /// Whether counting is on.
@@ -94,9 +92,8 @@ pub(crate) fn enabled() -> bool {
 }
 
 /// Sets the calling thread's limit on live bytes; `None` removes it. Counting is on while any
-/// thread has a limit, and a thread that exits with one gives it up. A thread taking a limit
-/// adopts the current counting epoch first, so its bytes are the ones counted since counting last
-/// switched on.
+/// thread has a limit, and a thread that exits with one gives it up. A thread taking a limit holds
+/// the bytes counted since counting last switched on.
 pub(crate) fn set_limit(bytes: Option<usize>) {
     let limit = bytes.unwrap_or(NO_LIMIT);
     let has = limit != NO_LIMIT;
@@ -114,7 +111,7 @@ pub(crate) fn set_limit(bytes: Option<usize>) {
     }
     switch_counting(switch.0 || switch.1 > 0);
     if has && !had {
-        adopt_epoch();
+        reconcile();
     }
 }
 
@@ -166,6 +163,7 @@ pub(crate) fn exceeded() -> String {
 #[cold]
 #[inline(never)]
 fn grew(bytes: usize) {
+    reconcile();
     let _ = LIVE.try_with(|live| {
         let next = live.get().saturating_add(bytes);
         live.set(next);
@@ -182,6 +180,7 @@ fn grew(bytes: usize) {
 #[cold]
 #[inline(never)]
 fn shrank(bytes: usize) {
+    reconcile();
     let _ = LIVE.try_with(|live| live.set(live.get().saturating_sub(bytes)));
 }
 
@@ -215,11 +214,13 @@ fn resized(moved: *mut u8, old: usize, new: usize) {
 
 /// The calling thread's live bytes.
 pub(crate) fn live() -> usize {
+    reconcile();
     LIVE.try_with(Cell::get).unwrap_or(0)
 }
 
 /// The most bytes the calling thread held at once since it started or its last reset.
 pub(crate) fn peak() -> usize {
+    reconcile();
     PEAK.try_with(Cell::get).unwrap_or(0)
 }
 
@@ -469,35 +470,70 @@ mod tests {
     }
 
     #[test]
-    fn a_thread_taking_a_limit_after_counting_restarted_drops_its_stale_bytes() {
+    /// Starts a new counting epoch, as counting switching on from off does. Other tests may have
+    /// turned counting on for good, so the switch itself cannot always happen here.
+    fn restart_counting() {
+        let _switch = SWITCH.lock().unwrap_or_else(|error| error.into_inner());
+        COUNT_EPOCH.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Leaves the calling thread with bytes from an earlier epoch that missed their frees.
+    fn stale_bytes() {
+        set_limit(Some(1 << 40));
+        set_limit(None);
+        let _ = LIVE.try_with(|live| live.set(live.get() + (1 << 30)));
+    }
+
+    /// Keeps a block allocated in the current epoch, then takes a limit below it.
+    fn block_then_limit() -> (usize, bool) {
+        let block = vec![1u8; 1 << 16];
+        set_limit(Some(1 << 15));
+        let held = live();
+        let more = vec![1u8; 16];
+        let over = over_limit();
+        drop(more);
+        drop(block);
+        set_limit(None);
+        (held, over)
+    }
+
+    #[test]
+    fn bytes_kept_after_counting_restarts_count_toward_a_later_limit() {
+        let _limits = limits();
+        let (held, over) = std::thread::spawn(|| {
+            stale_bytes();
+            enable();
+            restart_counting();
+            block_then_limit()
+        })
+        .join()
+        .unwrap();
+        assert!(held >= 1 << 16);
+        assert!(held < 1 << 30);
+        assert!(over);
+    }
+
+    #[test]
+    fn bytes_kept_after_another_thread_restarts_counting_count_toward_a_later_limit() {
         use std::sync::mpsc::channel;
         let _limits = limits();
         let (stale_tx, stale_rx) = channel::<()>();
         let (restarted_tx, restarted_rx) = channel::<()>();
         let first = std::thread::spawn(move || {
-            set_limit(Some(1 << 40));
-            set_limit(None);
-            let _ = LIVE.try_with(|live| live.set(live.get() + (1 << 30)));
+            stale_bytes();
             stale_tx.send(()).unwrap();
             restarted_rx.recv().unwrap();
-            set_limit(Some(1 << 20));
-            let block = vec![1u8; 4096];
-            let seen = (live(), over_limit());
-            drop(block);
-            set_limit(None);
-            seen
+            block_then_limit()
         });
         stale_rx.recv().unwrap();
-        std::thread::spawn(|| {
-            let _switch = SWITCH.lock().unwrap_or_else(|error| error.into_inner());
-            COUNT_EPOCH.fetch_add(1, Ordering::Relaxed);
-        })
-        .join()
-        .unwrap();
+        set_limit(Some(1 << 40));
+        restart_counting();
         restarted_tx.send(()).unwrap();
-        let (live_after, over_after) = first.join().unwrap();
-        assert!(live_after < 1 << 20);
-        assert!(!over_after);
+        let (held, over) = first.join().unwrap();
+        set_limit(None);
+        assert!(held >= 1 << 16);
+        assert!(held < 1 << 30);
+        assert!(over);
     }
 
     #[test]
