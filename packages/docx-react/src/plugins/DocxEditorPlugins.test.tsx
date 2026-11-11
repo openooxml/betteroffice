@@ -579,8 +579,11 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
     };
     const { ref, view, rerender } = await mount({ plugins: [plugin], toolbar: <Fails armed={false} /> });
     await until(loaded);
+    const surface = view.container.querySelector('.paged-editor')!;
+    const input = document.getElementById(surface.getAttribute('data-docx-input')!);
     await act(async () => { ref.current!.focus(); });
     await until(() => focus.includes(true));
+    expect(document.activeElement === input || surface.contains(document.activeElement)).toBe(true);
     focus.length = 0;
     rerender({ plugins: [plugin], toolbar: <Fails armed /> });
     await until(() => focus.length > 0);
