@@ -1,7 +1,7 @@
 import { afterEach, beforeAll, describe, expect, mock, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import * as fonts from '@betteroffice/fonts';
-import { resolveCompleteFontProvider } from '../layout/measure';
+import { configureDefaultFonts, resolveCompleteFontProvider } from '../layout/measure';
 import { engineKind } from '../wasm/enginePng';
 import { createYrsSession, type YrsSession } from './index';
 import { ENGINES, preloadEngines, restoreBrowser, runsDocument, scriptDocument, stubBrowser, type TextRun } from './renderPngTestSupport';
@@ -122,6 +122,23 @@ for (const { kind } of ENGINES) {
       const fontProvider = await resolveCompleteFontProvider();
       withheld.add(fonts.resolveMetricCompatFace('Arial', false, false)!.file);
       expect(await exported([{ family: 'Arial', text: 'Plain text' }], { fontProvider })).toBeInstanceOf(Uint8Array);
+    });
+
+    test('a configured source still loading when the configuration resets lays out without a face it cannot load', async () => {
+      stubBrowser();
+      withheld.add(fonts.resolveMetricCompatFace('Arial', false, false)!.file);
+      let entered!: () => void;
+      const loadStarted = new Promise<void>((resolve) => { entered = resolve; });
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      configureDefaultFonts({ load: async () => { entered(); await gate; return fonts; } });
+      try {
+        const exporting = exported([{ family: 'Arial', text: 'Plain text' }]);
+        await loadStarted;
+        configureDefaultFonts({});
+        release();
+        expect(await exporting).toBeInstanceOf(Uint8Array);
+      } finally { release(); configureDefaultFonts({}); }
     });
 
     test('an export aborted while the shared layout loads its faces rejects at once, and another export of the document completes', async () => {

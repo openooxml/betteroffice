@@ -1,6 +1,6 @@
 import { buildResidentRegionLayoutRequest, computeLayout, documentRenderEnv } from '../editor/computeLayout';
-import { createRustMeasureSource, hasConfiguredFontSource, resolveCompleteFontProvider, type BundledFontProvider, type ResidentFontRequirement } from '../layout/measure';
-import { baseLatinFontState } from '../layout/measure/defaultFontProvider';
+import { createRustMeasureSource, type BundledFontProvider, type ResidentFontRequirement } from '../layout/measure';
+import { resolveCompleteFontSelection } from '../layout/measure/defaultFontProvider';
 import type { EmbeddedFaceInput } from '../layout/measure/fontRegistry';
 import { fontUnavailable, pngPage, pngScale, type DocxPngFontFace, type DocxPngOptions, type DocxPngTarget } from '../layout/render/png';
 import { openPagedDisplay } from '../layout/render/rustDisplayList';
@@ -59,10 +59,10 @@ export function createPngExporter(session: YrsSession) {
       copy.rebuildMediaSources();
       const document = copy.materializeDocx();
       if (!document) throw new Error('renderPng needs a session opened from DOCX bytes');
-      const complete = fontProvider ? undefined : await resolveCompleteFontProvider();
-      const recorded = complete && !hasConfiguredFontSource() && baseLatinFontState().baseUrl === undefined
-        ? await recordProviderFaceLoads(complete) : undefined;
-      const bundled = fontProvider ?? recorded?.provider ?? complete;
+      const complete = fontProvider ? undefined : await resolveCompleteFontSelection();
+      const recorded = complete?.provider && !complete.configured
+        ? await recordProviderFaceLoads(complete.provider) : undefined;
+      const bundled = fontProvider ?? recorded?.provider ?? complete?.provider;
       const rejectFailedLoads = async () => {
         if (!recorded) return;
         await recorded.settled();
