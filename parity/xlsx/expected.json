@@ -6859,5 +6859,128 @@
       "sha256": "4872ab2d2615cdeaa99c76e91d847d4890e713a7c2de81392f25c3a5a4a36372",
       "warnings": []
     }
+  },
+  {
+    "op": "open",
+    "result": null
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "applied": true,
+      "changed": [],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "applyOps",
+    "result": {
+      "applied": true,
+      "changed": [],
+      "limitedCells": []
+    }
+  },
+  {
+    "op": "readCells",
+    "result": {
+      "calculation": {
+        "cycleCells": [],
+        "limitedCells": [],
+        "truncated": false,
+        "unevaluatedCells": []
+      },
+      "ok": true,
+      "ranges": [
+        {
+          "cells": [
+            [
+              {
+                "a1": "A1",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "B1",
+                "displayText": "1",
+                "formula": null,
+                "value": {
+                  "kind": "number",
+                  "value": 1
+                }
+              },
+              {
+                "a1": "C1",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "D1",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "E1",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              },
+              {
+                "a1": "F1",
+                "displayText": "4",
+                "formula": null,
+                "value": {
+                  "kind": "number",
+                  "value": 4
+                }
+              },
+              {
+                "a1": "G1",
+                "displayText": "",
+                "formula": null,
+                "value": {
+                  "kind": "empty"
+                }
+              }
+            ]
+          ],
+          "target": {
+            "range": {
+              "a1": "A1:G1",
+              "kind": "a1"
+            },
+            "sheetId": "sheet:0"
+          }
+        }
+      ],
+      "sheets": [
+        {
+          "editable": true,
+          "headerFooter": null,
+          "name": "Sheet1",
+          "sheetId": "sheet:0",
+          "visibility": "visible"
+        }
+      ],
+      "version": "<version:27>"
+    }
+  },
+  {
+    "op": "save",
+    "result": {
+      "byteLength": 1585,
+      "sha256": "628d0b608d41a5156d079a84c7181819c7299e10fd192212a6fd5cbaaac533cc",
+      "warnings": []
+    }
   }
 ]

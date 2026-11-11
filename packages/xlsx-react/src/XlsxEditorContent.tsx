@@ -1,3 +1,4 @@
+import { usePluginGestures } from '../../../shared/plugin-host/usePluginGestures';
 import { commandReason } from './commands/evaluate';
 import {
   anchorSelection, clearedCells, copiedRange, mergeAnchorCell, selectionDataRequest, selectionHidden, selectionMerges,
@@ -451,6 +452,7 @@ export function XlsxEditorContent({
   const rafRef = useRef<number | null>(null);
   const [cellClipboard] = useState(() => new CellClipboard());
   const rootRef = useRef<HTMLDivElement>(null);
+  usePluginGestures(rootRef);
   const editorInputRef = useRef<HTMLInputElement>(null);
   const formulaInputRef = useRef<HTMLInputElement>(null);
   const draggingRef = useRef(false);

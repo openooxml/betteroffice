@@ -1,8 +1,14 @@
 import { engines } from '#agents-engines';
-import type { SectionPropertyPatch, SectionStartKind, DocxEditStep, DocxParagraphInput, DocxParagraphTarget, TableCellAnchor, TablePayload, YrsSession, YrsStorySegment } from '@betteroffice/docx/yrs';
+import type { SectionPropertyPatch, SectionStartKind, DocxEditStep, DocxParagraphTarget, TableCellAnchor, TablePayload, YrsSession, YrsStorySegment } from '@betteroffice/docx/yrs';
 import type { BlockContent, ParagraphContent, Run, TextFormatting, ParagraphFormatting } from '@betteroffice/docx/types/document';
 import { plainText } from './prototype';
 import { DocumentToolError, type TableCellPosition } from './types';
+
+/** A new paragraph of plain text. */
+export interface PlainParagraph {
+  text: string;
+  styleId?: string;
+}
 
 export interface TableCell {
   story: string;
@@ -374,7 +380,7 @@ function anchorRunFormat(draft: YrsSession, target: DocxParagraphTarget) {
   return { attrs, formatting, tableParagraph, tableRun, styles: source?.package.styles, markProperties: mark.properties };
 }
 
-function applyAnchorRunFormat(draft: YrsSession, created: readonly DocxParagraphTarget[], paragraphs: readonly DocxParagraphInput[], attrs: Record<string, unknown>, formatting: TextFormatting | undefined) {
+function applyAnchorRunFormat(draft: YrsSession, created: readonly DocxParagraphTarget[], paragraphs: readonly PlainParagraph[], attrs: Record<string, unknown>, formatting: TextFormatting | undefined) {
   created.forEach(({ story, paraId }, index) => {
     const { text } = paragraphs[index];
     if (!text) return;
@@ -385,7 +391,7 @@ function applyAnchorRunFormat(draft: YrsSession, created: readonly DocxParagraph
   });
 }
 
-function setInheritedRunFormat(draft: YrsSession, created: readonly DocxParagraphTarget[], paragraphs: readonly DocxParagraphInput[], inherited: readonly Record<string, unknown>[]) {
+function setInheritedRunFormat(draft: YrsSession, created: readonly DocxParagraphTarget[], paragraphs: readonly PlainParagraph[], inherited: readonly Record<string, unknown>[]) {
   created.forEach(({ story, paraId }, index) => {
     const { text } = paragraphs[index];
     if (!text) return;
@@ -455,14 +461,14 @@ function applyCopiedProperties(draft: YrsSession, story: string, created: readon
   });
 }
 
-export function insertParagraphsWithAnchorFormat(draft: YrsSession, target: DocxParagraphTarget, paragraphs: readonly DocxParagraphInput[]): DocxParagraphTarget[] {
+export function insertParagraphsWithAnchorFormat(draft: YrsSession, target: DocxParagraphTarget, paragraphs: readonly PlainParagraph[]): DocxParagraphTarget[] {
   const { attrs, formatting } = anchorRunFormat(draft, target);
   const created = hostEdit(draft, { op: 'insertParagraphs', target, at: 'end', paragraphs }).newParagraphs;
   if (attrs) applyAnchorRunFormat(draft, created, paragraphs, attrs, formatting);
   return created;
 }
 
-export function insertParagraphsBefore(draft: YrsSession, target: DocxParagraphTarget, paragraphs: readonly DocxParagraphInput[], runFormat?: 'style' | 'anchor'): DocxParagraphTarget[] {
+export function insertParagraphsBefore(draft: YrsSession, target: DocxParagraphTarget, paragraphs: readonly PlainParagraph[], runFormat?: 'style' | 'anchor'): DocxParagraphTarget[] {
   const anchor = anchorRunFormat(draft, target);
   const { markProperties } = anchor;
   const anchorStyle = typeof markProperties.pStyle === 'string' ? markProperties.pStyle : null;
@@ -486,7 +492,7 @@ export function insertParagraphsBefore(draft: YrsSession, target: DocxParagraphT
 }
 
 /** Inserts paragraphs after a list item with its list, level, style and paragraph formatting; text takes its last plain run's formatting. */
-export function continueList(draft: YrsSession, target: DocxParagraphTarget, paragraphs: readonly DocxParagraphInput[]): DocxParagraphTarget[] {
+export function continueList(draft: YrsSession, target: DocxParagraphTarget, paragraphs: readonly PlainParagraph[]): DocxParagraphTarget[] {
   const segments = draft.storySegments(target.story);
   const end = segments.findIndex(segment => segment.kind === 'pilcrow' && segment.paraId === target.paraId);
   const anchor = segments[end] as Pilcrow;

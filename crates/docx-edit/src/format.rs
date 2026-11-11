@@ -518,6 +518,262 @@ pub(crate) fn parse_inline_format_delta(
     })
 }
 
+const UNDERLINE_STYLES: &[&str] = &[
+    "single",
+    "words",
+    "double",
+    "thick",
+    "dotted",
+    "dottedHeavy",
+    "dash",
+    "dashedHeavy",
+    "dashLong",
+    "dashLongHeavy",
+    "dotDash",
+    "dashDotHeavy",
+    "dotDotDash",
+    "dashDotDotHeavy",
+    "wave",
+    "wavyHeavy",
+    "wavyDouble",
+];
+
+const HIGHLIGHT_NAMES: &[&str] = &[
+    "black",
+    "blue",
+    "cyan",
+    "green",
+    "magenta",
+    "red",
+    "yellow",
+    "white",
+    "darkBlue",
+    "darkCyan",
+    "darkGreen",
+    "darkMagenta",
+    "darkRed",
+    "darkYellow",
+    "darkGray",
+    "lightGray",
+];
+
+const THEME_COLORS: &[&str] = &[
+    "dark1",
+    "light1",
+    "dark2",
+    "light2",
+    "accent1",
+    "accent2",
+    "accent3",
+    "accent4",
+    "accent5",
+    "accent6",
+    "hyperlink",
+    "followedHyperlink",
+    "background1",
+    "text1",
+    "background2",
+    "text2",
+];
+
+/// Lowers a host edit run's `marks` to the attributes the formatting commands write, in key
+/// order; `Any::Null` removes a key. Refuses unknown marks and unsupported values.
+pub(crate) fn text_marks_overlay(
+    marks: &serde_json::Map<String, Value>,
+) -> Result<Vec<(String, Any)>, String> {
+    let flag = |key: &str, value: &Value| match value {
+        Value::Bool(true) => Ok(Patch::Set(true)),
+        Value::Bool(false) => Ok(Patch::Clear),
+        _ => Err(format!("mark {key:?} must be a boolean")),
+    };
+    let mut delta = InlineFormatDelta::default();
+    let mut vertical = None;
+    for (key, value) in marks {
+        match key.as_str() {
+            "bold" => delta.bold = flag(key, value)?,
+            "italic" => delta.italic = flag(key, value)?,
+            "underline" => {
+                delta.underline = match value {
+                    Value::Bool(true) => Patch::Set(UnderlinePatch::default()),
+                    Value::Bool(false) => Patch::Clear,
+                    Value::String(style) if style == "none" => Patch::Clear,
+                    Value::String(style) if UNDERLINE_STYLES.contains(&style.as_str()) => {
+                        Patch::Set(UnderlinePatch {
+                            style: Some(style.clone()),
+                            color: None,
+                        })
+                    }
+                    _ => {
+                        return Err(
+                            "mark \"underline\" must be a boolean or a Word underline style"
+                                .to_owned(),
+                        );
+                    }
+                }
+            }
+            "strike" => {
+                delta.strike = match value
+                    .as_bool()
+                    .map(|on| if on { "sngStrike" } else { "noStrike" })
+                    .or(value.as_str())
+                {
+                    Some("sngStrike") => Patch::Set(StrikePatch { double: false }),
+                    Some("dblStrike") => Patch::Set(StrikePatch { double: true }),
+                    Some("noStrike") => Patch::Clear,
+                    _ => {
+                        return Err("mark \"strike\" must be a boolean, \"sngStrike\", \"dblStrike\" or \"noStrike\"".to_owned());
+                    }
+                }
+            }
+            "verticalAlign" => {
+                vertical = match value.as_str() {
+                    Some(align @ ("superscript" | "subscript")) => Some(align),
+                    Some("baseline") => {
+                        return Err(
+                            "mark \"verticalAlign\" \"baseline\" is not supported yet".to_owned()
+                        );
+                    }
+                    _ => {
+                        return Err(
+                            "mark \"verticalAlign\" must be \"superscript\" or \"subscript\""
+                                .to_owned(),
+                        );
+                    }
+                }
+            }
+            "color" => {
+                delta.color = match value {
+                    Value::String(rgb)
+                        if rgb.len() == 6 && rgb.bytes().all(|byte| byte.is_ascii_hexdigit()) =>
+                    {
+                        Patch::Set(ColorPatch::Rgb(rgb.clone()))
+                    }
+                    Value::Object(object) if object.len() == 1 => match object.get("themeColor") {
+                        Some(Value::String(theme)) if THEME_COLORS.contains(&theme.as_str()) => {
+                            Patch::Set(ColorPatch::Theme(theme.clone()))
+                        }
+                        _ => return Err("mark \"color\" has an unknown theme colour".to_owned()),
+                    },
+                    _ => {
+                        return Err(
+                            "mark \"color\" must be six hex digits or {\"themeColor\"}".to_owned()
+                        );
+                    }
+                }
+            }
+            "highlight" => {
+                delta.highlight = match value.as_str() {
+                    Some("none") => {
+                        return Err("mark \"highlight\" \"none\" is not supported yet".to_owned());
+                    }
+                    Some(name) if HIGHLIGHT_NAMES.contains(&name) => Patch::Set(name.to_owned()),
+                    _ => {
+                        return Err(
+                            "mark \"highlight\" must be a Word highlight colour name".to_owned()
+                        );
+                    }
+                }
+            }
+            "fontSizePt" => {
+                delta.font_size = match value.as_f64() {
+                    Some(points)
+                        if (1.0..=1638.0).contains(&points) && (points * 2.0).fract() == 0.0 =>
+                    {
+                        Patch::Set(points)
+                    }
+                    _ => {
+                        return Err(
+                            "mark \"fontSizePt\" must be 1 to 1638 points in half-point steps"
+                                .to_owned(),
+                        );
+                    }
+                }
+            }
+            "fontFamily" => {
+                delta.font_family = match value.as_str() {
+                    Some(name)
+                        if !name.trim().is_empty()
+                            && name.chars().count() <= 255
+                            && !name.chars().any(char::is_control) =>
+                    {
+                        Patch::Set(FontFamilyPatch {
+                            ascii: name.to_owned(),
+                            h_ansi: Some(name.to_owned()),
+                        })
+                    }
+                    _ => return Err("mark \"fontFamily\" must be a font name".to_owned()),
+                }
+            }
+            other => return Err(format!("unknown mark {other:?}")),
+        }
+    }
+    let mut overlay: Vec<(String, Any)> = delta
+        .to_attrs()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value))
+        .collect();
+    if let Some(align) = vertical {
+        let on = |mark: &str| {
+            if align == mark {
+                Any::Bool(true)
+            } else {
+                Any::Null
+            }
+        };
+        overlay.push(("superscript".to_owned(), on("superscript")));
+        overlay.push(("subscript".to_owned(), on("subscript")));
+    }
+    overlay.sort_by(|(left, _), (right, _)| left.cmp(right));
+    Ok(overlay)
+}
+
+/// The run attributes a host mark name stands for.
+fn mark_attr_keys(mark: &str) -> Option<&'static [&'static str]> {
+    Some(match mark {
+        "bold" => &["bold"],
+        "italic" => &["italic"],
+        "underline" => &["underline"],
+        "strike" => &["strike", "doubleStrike"],
+        "verticalAlign" => &["superscript", "subscript", "vertAlign"],
+        "color" => &["textColor", "color"],
+        "highlight" => &["highlight"],
+        "fontSizePt" => &["fontSize", "fontSizeCs", "sz"],
+        "fontFamily" => &["fontFamily", "rFonts"],
+        _ => return None,
+    })
+}
+
+/// What a host `clear` returns to the styles: every character formatting attribute, or the
+/// attributes of the named marks.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ClearMarks {
+    All,
+    Keys(Vec<&'static str>),
+}
+
+/// Parses a host `clear`: `"all"` or a non-empty list of mark names, returned with the names.
+pub(crate) fn parse_clear_marks(value: &Value) -> Result<(ClearMarks, Vec<String>), String> {
+    match value {
+        Value::String(all) if all == "all" => Ok((ClearMarks::All, Vec::new())),
+        Value::Array(names) if !names.is_empty() => {
+            let mut keys = Vec::new();
+            let mut marks = Vec::new();
+            for name in names {
+                let name = name
+                    .as_str()
+                    .ok_or_else(|| "clear lists mark names".to_owned())?;
+                let attrs = mark_attr_keys(name)
+                    .ok_or_else(|| format!("unknown mark {name:?} in clear"))?;
+                keys.extend_from_slice(attrs);
+                marks.push(name.to_owned());
+            }
+            Ok((ClearMarks::Keys(keys), marks))
+        }
+        _ => Err("clear must be \"all\" or a non-empty list of mark names".to_owned()),
+    }
+}
+
 /// Formatting policy for [`EditingDoc::insert_text`].
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum FormatPolicy {
@@ -555,7 +811,7 @@ fn refuses_suggestion<T: ReadTxn>(story: &TextRef, txn: &T, start: u32, end: u32
     spans.into_iter().any(|(at, len)| {
         holds_suggestion_container(&crate::ops::snapshot_range(story, txn, at, at + len), txn)
     }) || children.iter().any(|(child, _)| {
-        story_ref(txn, child).is_ok_and(|text| {
+        crate::story_text(txn, child).is_some_and(|text| {
             let len = text.len(txn);
             len > 0 && refuses_suggestion(&text, txn, 0, len)
         })
@@ -590,6 +846,7 @@ pub(crate) const FORMATTING_ATTRS: &[&str] = &[
     "rFonts",
     "sz",
     "characterSpacing",
+    "typography",
     "allCaps",
     "smallCaps",
     "emboss",
@@ -692,7 +949,7 @@ fn text_has<T: ReadTxn>(
                 }
                 Out::YMap(embed) => {
                     for child in block_child_stories(embed, txn) {
-                        if let Ok(child) = story_ref(txn, &child)
+                        if let Some(child) = crate::story_text(txn, &child)
                             && !text_has(&child, txn, (0, child.len(txn)), key, saw_text)
                         {
                             return false;
@@ -957,6 +1214,7 @@ impl EditingDoc {
         mut range: StoryRange,
         format: SimpleFormat,
     ) -> OpResult<(Receipt, KeptUnchanged)> {
+        self.refuse_cell_write(&range.story)?;
         let len = range_len(&range)?;
         if len == 0 {
             return Err(OpError::EmptyRange);
@@ -1039,6 +1297,7 @@ impl EditingDoc {
         mut range: StoryRange,
         delta: &InlineFormatDelta,
     ) -> OpResult<(Receipt, KeptUnchanged)> {
+        self.refuse_cell_write(&range.story)?;
         let len = range_len(&range)?;
         if len == 0 {
             return Err(OpError::EmptyRange);
@@ -1071,6 +1330,120 @@ impl EditingDoc {
         Ok((receipt, keeper.kept))
     }
 
+    /// The attributes that return each run of `start..end` of `story_id` to what its styles give,
+    /// as seeding gives a run without direct formatting under `source`'s styles: the paragraph
+    /// style `paragraph_style` and, unless `clear` is [`ClearMarks::All`], the run's own character
+    /// style. Keys no style supplies are removed.
+    pub(crate) fn style_reset_pieces<T: ReadTxn>(
+        &self,
+        txn: &T,
+        story: &TextRef,
+        story_id: &str,
+        (start, end): (u32, u32),
+        clear: &ClearMarks,
+        paragraph_style: Option<&str>,
+        source: Option<&crate::seed::SourceMetadata>,
+    ) -> OpResult<Vec<(u32, u32, Attrs)>> {
+        let mut pieces = Vec::new();
+        for chunk in crate::ops::snapshot_range(story, txn, start, end) {
+            let (from, to) = (chunk.start.max(start), chunk.end().min(end));
+            if from >= to {
+                continue;
+            }
+            let run_style = match clear {
+                ClearMarks::All => None,
+                ClearMarks::Keys(_) => chunk.attrs.get("runStyle").cloned(),
+            };
+            let base: BTreeMap<String, Any> = match source {
+                Some(source) => source
+                    .seeded_run_attrs(story_id, paragraph_style, run_style.as_ref())
+                    .map_err(OpError::InvalidFormatValue)?
+                    .into_iter()
+                    .collect(),
+                None => BTreeMap::new(),
+            };
+            let keys: Vec<&str> = match clear {
+                ClearMarks::Keys(keys) => keys.clone(),
+                ClearMarks::All => FORMATTING_ATTRS
+                    .iter()
+                    .copied()
+                    .chain(base.keys().map(String::as_str))
+                    .filter(|key| !PROTECTED_ATTRS.contains(key))
+                    .collect(),
+            };
+            let attrs: Attrs = keys
+                .into_iter()
+                .map(|key| (Arc::from(key), base.get(key).cloned().unwrap_or(Any::Null)))
+                .collect();
+            match pieces.last_mut() {
+                Some((_, last_end, last)) if *last_end == from && *last == attrs => *last_end = to,
+                _ => pieces.push((from, to, attrs)),
+            }
+        }
+        Ok(pieces)
+    }
+
+    /// A host `formatText` over one non-empty range in one transaction: `clear` returns the
+    /// named marks to the styles, then `set` writes its attributes. Returns the revision ids and
+    /// the paragraphs kept unchanged because saving them rewritten would lose content.
+    pub(crate) fn format_for_batch(
+        &self,
+        ctx: &EditCtx,
+        mut range: StoryRange,
+        set: &[(String, Any)],
+        clear: Option<&ClearMarks>,
+        paragraph_style: Option<&str>,
+        source: Option<&crate::seed::SourceMetadata>,
+    ) -> OpResult<(Vec<String>, KeptUnchanged)> {
+        let len = range_len(&range)?;
+        if len == 0 {
+            return Err(OpError::EmptyRange);
+        }
+        let mut txn = self.transact_for(ctx);
+        let story = story_ref(&txn, &range.story)?;
+        crate::check_range(&story, &txn, range.start, len)?;
+        (range.start, range.end) =
+            crate::ops::code_point_range(&story, &txn, range.start, range.end);
+        if ctx.is_suggesting() && refuses_suggestion(&story, &txn, range.start, range.end) {
+            return Err(OpError::SuggestedFormattingOverContainer);
+        }
+        let set: Attrs = set
+            .iter()
+            .map(|(key, value)| (Arc::from(key.as_str()), value.clone()))
+            .collect();
+        let pieces = match clear {
+            Some(clear) => self.style_reset_pieces(
+                &txn,
+                &story,
+                &range.story,
+                (range.start, range.end),
+                clear,
+                paragraph_style,
+                source,
+            )?,
+            None => vec![(range.start, range.end, Attrs::new())],
+        };
+        let mut keeper = Keeper::new(self);
+        let mut revision_ids: Vec<String> = Vec::new();
+        for (start, end, mut attrs) in pieces {
+            attrs.extend(set.iter().map(|(key, value)| (key.clone(), value.clone())));
+            let piece = StoryRange::new(range.story.as_str(), start, end);
+            for id in self.apply_run_format_through(
+                &mut txn,
+                ctx,
+                &story,
+                &piece,
+                Some(&attrs),
+                &mut keeper,
+            )? {
+                if !revision_ids.contains(&id) {
+                    revision_ids.push(id);
+                }
+            }
+        }
+        Ok((revision_ids, keeper.kept))
+    }
+
     /// Sets or clears the protected hyperlink attribute over one non-empty
     /// range. Generic formatting deliberately cannot touch hyperlinks;
     /// hyperlink editing uses this explicit operation instead.
@@ -1080,6 +1453,7 @@ impl EditingDoc {
         mut range: StoryRange,
         hyperlink: Option<Any>,
     ) -> OpResult<Receipt> {
+        self.refuse_cell_write(&range.story)?;
         let len = range_len(&range)?;
         if len == 0 {
             return Err(OpError::EmptyRange);
@@ -1164,6 +1538,7 @@ impl EditingDoc {
         ctx: &EditCtx,
         mut range: StoryRange,
     ) -> OpResult<(Receipt, KeptUnchanged)> {
+        self.refuse_cell_write(&range.story)?;
         let len = range_len(&range)?;
         if len == 0 {
             return Err(OpError::EmptyRange);
@@ -1277,7 +1652,7 @@ impl EditingDoc {
         delta: Option<&Attrs>,
         keeper: &mut Keeper<'_>,
     ) -> OpResult<Vec<String>> {
-        let Ok(text) = story_ref(txn, child) else {
+        let Some(text) = crate::story_text(txn, child) else {
             return Ok(Vec::new());
         };
         let mut revision_ids = Vec::new();

@@ -2412,6 +2412,8 @@ pub(crate) fn slide_scope(
 }
 
 pub(crate) fn snapshot_doc(doc: &Doc, package: &PptxPackage) -> EditResult<DeckSnapshot> {
+    #[cfg(feature = "test-counters")]
+    crate::test_counters::bump(|work| work.live_snapshots += 1);
     let txn = doc.transact();
     let meta = required_map(&txn, META)?;
     let slides = required_map(&txn, SLIDES)?;
@@ -2800,6 +2802,8 @@ pub(crate) fn legacy_baseline_snapshot(package: &PptxPackage) -> EditResult<Deck
 }
 
 fn seeded_snapshot(package: &PptxPackage, color_map: bool) -> EditResult<DeckSnapshot> {
+    #[cfg(feature = "test-counters")]
+    crate::test_counters::bump(|work| work.seeded_snapshots += 1);
     let mut slide_id_by_part = HashMap::new();
     let mut slides = Vec::with_capacity(package.slides.len());
     for (slide_index, slide) in package.slides.iter().enumerate() {

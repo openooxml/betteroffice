@@ -376,6 +376,19 @@ pub struct DocAttrs {
     /// The marker is a visible bullet, whatever its stored character.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub list_marker_bullet: Option<bool>,
+    /// Text the paragraph reads before this run for explicit line breaks
+    /// (`"\n"`) and tabs (`"\t"`) that sit between it and the previous run and
+    /// that no primitive paints. Set on the first text primitive after them;
+    /// rare, so boxed to keep primitives compact.
+    #[allow(clippy::box_collection)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub separator_before: Option<Box<String>>,
+    /// As `separator_before`, for breaks and tabs that end the fragment's
+    /// lines with no text after them in the fragment. Set on its last text
+    /// primitive, so a paragraph continued in the next column still reads apart.
+    #[allow(clippy::box_collection)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub separator_after: Option<Box<String>>,
     /// Pending tracked-change paint for the synthetic numbering glyph.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub list_marker_revision: Option<RevisionKind>,
@@ -481,10 +494,59 @@ pub struct DocAttrs {
     /// from `RunFormatting.modernEffects`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modern_effects: Option<Box<Value>>,
+    /// Enabled switches relative to DOCX's optional typography defaults.
+    #[allow(clippy::box_collection)]
+    #[serde(default, skip_serializing_if = "font_features_empty")]
+    pub font_features: Option<Box<Vec<ooxml_text::ShapeFeature>>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub table: Option<Box<TableMetadata>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inline_shape_atom: Option<bool>,
+}
+
+#[allow(clippy::box_collection)]
+fn font_features_empty(features: &Option<Box<Vec<ooxml_text::ShapeFeature>>>) -> bool {
+    features.as_ref().is_none_or(|features| features.is_empty())
+}
+
+const DOCX_PAINT_SWITCHES: [[u8; 4]; 6] =
+    [*b"kern", *b"liga", *b"clig", *b"hlig", *b"dlig", *b"calt"];
+
+#[allow(clippy::box_collection)]
+fn primitive_features(
+    features: &[ooxml_text::ShapeFeature],
+) -> Option<Box<Vec<ooxml_text::ShapeFeature>>> {
+    let enabled: Vec<_> = DOCX_PAINT_SWITCHES
+        .into_iter()
+        .filter(|tag| {
+            let value = features.iter().rev().find(|feature| feature.tag == *tag);
+            match value {
+                Some(feature) => feature.value != 0,
+                None => tag == b"kern",
+            }
+        })
+        .map(|tag| ooxml_text::ShapeFeature { tag, value: 1 })
+        .collect();
+    (!enabled.is_empty()).then(|| Box::new(enabled))
+}
+
+/// Expands a primitive's enabled switches into DOCX shaping features.
+pub fn docx_paint_features(
+    listed: Option<&[ooxml_text::ShapeFeature]>,
+) -> Vec<ooxml_text::ShapeFeature> {
+    let listed = listed.unwrap_or_default();
+    DOCX_PAINT_SWITCHES
+        .into_iter()
+        .map(|tag| ooxml_text::ShapeFeature {
+            tag,
+            value: u32::from(
+                listed
+                    .iter()
+                    .any(|feature| feature.tag == tag && feature.value != 0),
+            ),
+        })
+        .filter(|feature| feature.value != 0 || !matches!(&feature.tag, b"hlig" | b"dlig"))
+        .collect()
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
@@ -1897,6 +1959,10 @@ struct RunFormattingIn {
     horizontal_scale: Option<f64>,
     #[serde(default)]
     kerning_min_pt: Option<f64>,
+    #[serde(default)]
+    ligatures: Option<String>,
+    #[serde(default)]
+    contextual_alternates: Option<bool>,
     #[serde(default)]
     imprint: Option<bool>,
     #[serde(default)]
@@ -3633,12 +3699,17 @@ fn effective_font_px_of(fmt: &RunFormattingIn) -> f64 {
 /// Paint-side twin of the measurement kerning gate: Word applies pair kerning
 /// only above a nonzero `w:kern` threshold, so an absent one shapes `kern=0`.
 fn kern_features_of(fmt: &RunFormattingIn, size_px: f64) -> Vec<ooxml_text::ShapeFeature> {
-    ooxml_text::kern_features(fmt.kerning_min_pt.is_some_and(|threshold| {
+    let mut features = ooxml_text::kern_features(fmt.kerning_min_pt.is_some_and(|threshold| {
         ooxml_text::kern_enabled(
             (size_px * 1.5).round() as u32,
             (threshold * 2.0).round() as u32,
         )
-    }))
+    }));
+    features.extend(ooxml_text::ligature_features(
+        fmt.ligatures.as_deref(),
+        fmt.contextual_alternates,
+    ));
+    features
 }
 
 fn fallback_scalar_count(text: &str, all_caps: Option<bool>) -> usize {
@@ -4989,7 +5060,7 @@ fn painted_text_width(
                 value: 1,
             });
         }
-        ooxml_text::shape::shape_with_properties(
+        ooxml_text::shape::shape_with_word_features(
             fonts.store,
             font,
             text,
@@ -5163,7 +5234,7 @@ fn text_canvas_clusters(
             language.east_asia.as_deref().or(language.latin.as_deref())
         }
     });
-    let glyphs = ooxml_text::shape::shape_with_properties(
+    let glyphs = ooxml_text::shape::shape_with_word_features(
         fonts.store,
         font,
         &text,
@@ -6857,6 +6928,17 @@ pub(crate) fn emit_paragraph_fragment(
 
         line_top += line.line_height;
     }
+    let shown_lines = measure
+        .lines
+        .get(frag.from_line..frag.to_line.min(total_lines))
+        .unwrap_or(&[]);
+    if let (Some(first), Some(last)) = (shown_lines.first(), shown_lines.last()) {
+        stamp_separators_before(
+            &block.runs,
+            first.head_run..=last.tail_run,
+            &mut prims[stamp_from..],
+        );
+    }
 
     // The tracked-change pilcrow marks the paragraph's end, so only the final
     // fragment gets it; earlier fragments get the margin bar alone.
@@ -7127,10 +7209,12 @@ fn authoritative_line_items<'a>(
 }
 
 /// Hands the line's measured glyphs to the text items of joining and Indic
-/// scripts, which reshaping cluster by cluster would break apart. Consecutive
-/// clusters of one glyph run become one item. Other text keeps its items and
-/// their reshape, as does text with no glyph run: a field, a dropped run, an
-/// older payload, or a format that paints through the browser.
+/// scripts, and of Latin, Greek or Cyrillic text that asks for optional
+/// ligatures or contextual alternates, which reshaping cluster by cluster would
+/// break apart. Consecutive clusters of one glyph run become one item. Other
+/// text keeps its items and their reshape, as does text with no glyph run: a
+/// field, a dropped run, an older payload, or a format that paints through the
+/// browser.
 fn attach_measured_glyphs<'a>(
     items: Vec<LinePaintItem<'a>>,
     block: &'a ParagraphBlockIn,
@@ -7141,8 +7225,19 @@ fn attach_measured_glyphs<'a>(
     let (Some(packed), Some(shape)) = (line.glyph_runs.as_deref(), ctx.shape) else {
         return items;
     };
-    let in_context =
-        |item: &LineTextItem<'_>| item.text.chars().any(ooxml_text::is_joining_or_indic);
+    let in_context = |item: &LineTextItem<'_>| {
+        let optional = item.fmt.contextual_alternates == Some(true)
+            || item
+                .fmt
+                .ligatures
+                .as_deref()
+                .is_some_and(|value| value != "none");
+        item.text.chars().any(ooxml_text::is_joining_or_indic)
+            || (optional
+                && ooxml_text::word_typography_mask(&item.text)
+                    .into_iter()
+                    .any(|enabled| enabled))
+    };
     if !items
         .iter()
         .any(|item| matches!(item, LinePaintItem::Text(item) if in_context(item)))
@@ -8603,6 +8698,8 @@ fn emit_text_segment(
     if !emitted_glyphs {
         let mut text_attrs = attrs.clone();
         text_attrs.modern_effects = fmt.modern_effects.clone().map(Box::new);
+        text_attrs.font_features =
+            primitive_features(&kern_features_of(fmt, effective_font_px_of(fmt)));
         text_attrs.canvas_clusters = text_canvas_clusters(
             shape,
             text,
@@ -8807,6 +8904,7 @@ fn glyph_run_primitive(
         None => css_font(fmt),
     });
     attrs.modern_effects = fmt.modern_effects.clone().map(Box::new);
+    attrs.font_features = primitive_features(&kern_features_of(fmt, size_px));
     GlyphRunPrimitive {
         font_id: font.to_u32(),
         size: round3(size_px),
@@ -9017,7 +9115,7 @@ fn try_emit_glyph_runs(
             segments[range_index].utf16_end,
         );
         let is_last = range_index + 1 == segment_count;
-        let glyphs = match ooxml_text::shape::shape_with_properties(
+        let glyphs = match ooxml_text::shape::shape_with_word_features(
             shape_fonts.store,
             font,
             &sub_text,
@@ -9104,7 +9202,9 @@ fn try_emit_glyph_runs(
         let echo = (!sub_text.chars().any(ooxml_text::is_joining_or_indic)).then(|| EchoRunFacts {
             x: 0.0,
             right: 0.0,
-            kern: features.is_empty(),
+            kern: !features
+                .iter()
+                .any(|feature| feature.tag == *b"kern" && feature.value == 0),
             kerning: fmt.kerning_min_pt.unwrap_or(0.0),
             primary_font: echo_font_route && chain.ids.first() == Some(&font),
             letter_spacing: fmt.letter_spacing.unwrap_or(0.0),
@@ -13319,6 +13419,72 @@ pub(crate) fn doc_attrs(p: &Primitive) -> Option<&DocAttrs> {
         Primitive::Shape(s) => Some(&s.attrs),
         Primitive::Decoration(d) => Some(&d.attrs),
         Primitive::Line(_) => None,
+    }
+}
+
+/// Stamps `separator_before` on the first painted text after each group of
+/// adjacent line breaks and tabs, which paint nothing and would otherwise read
+/// as no gap at all between the words around them, or on the last text when
+/// nothing follows them in the fragment. Only the breaks and tabs of `shown`
+/// (the runs of the fragment's lines) count, so a fragment never reads a
+/// separator that belongs to another one.
+fn stamp_separators_before(
+    runs: &[RunIn],
+    shown: std::ops::RangeInclusive<usize>,
+    prims: &mut [Primitive],
+) {
+    let mut groups: Vec<(i64, String)> = Vec::new();
+    let shown = *shown.start()..(*shown.end()).saturating_add(1).min(runs.len());
+    for run in runs.get(shown).unwrap_or(&[]) {
+        let (start, end, separator) = match run {
+            RunIn::LineBreak(run) => (run.pm_start, run.pm_start.map(|p| p + 1), '\n'),
+            RunIn::Tab(run) => (
+                run.pm_start,
+                run.pm_end.or(run.pm_start.map(|p| p + 1)),
+                '\t',
+            ),
+            _ => continue,
+        };
+        let (Some(start), Some(end)) = (start, end) else {
+            continue;
+        };
+        match groups.last_mut() {
+            Some((after, text)) if *after == start => {
+                text.push(separator);
+                *after = end;
+            }
+            _ => groups.push((end, separator.to_string())),
+        }
+    }
+    if groups.is_empty() {
+        return;
+    }
+    let mut texts: Vec<(i64, usize)> = prims
+        .iter()
+        .enumerate()
+        .filter_map(|(index, primitive)| match primitive {
+            Primitive::Text(text) => text.attrs.doc_start.map(|start| (start, index)),
+            Primitive::GlyphRun(run) => run.attrs.doc_start.map(|start| (start, index)),
+            _ => None,
+        })
+        .collect();
+    texts.sort_unstable();
+    for (after, separator) in groups {
+        let at = texts.partition_point(|&(start, _)| start < after);
+        let (index, before) = match texts.get(at) {
+            Some(&(_, index)) => (index, true),
+            None if at > 0 => (texts[at - 1].1, false),
+            None => continue,
+        };
+        if let Some(attrs) = doc_attrs_mut(&mut prims[index]) {
+            let slot = if before {
+                &mut attrs.separator_before
+            } else {
+                &mut attrs.separator_after
+            };
+            slot.get_or_insert_with(Default::default)
+                .push_str(&separator);
+        }
     }
 }
 

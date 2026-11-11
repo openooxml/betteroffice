@@ -235,7 +235,7 @@
       "gestureActive": "Hãy hoàn tất thao tác con trỏ trước.",
       "commandFailed": "Lệnh thất bại.",
       "permissionDenied": "Ứng dụng chủ chưa cho phép plugin này dùng lệnh này.",
-      "unsupportedPolicy": "Plugin chưa thể chạy lệnh này. Hãy dùng một đợt chỉnh sửa thay thế.",
+      "unsupportedPolicy": "Lệnh này yêu cầu thao tác của người dùng trong giao diện của chính plugin.",
       "pluginUnavailable": "Plugin không còn hoạt động.",
       "aborted": "Hành động của plugin đã bị hủy trước khi lệnh chạy.",
       "clipboardUnavailable": "Không thể truy cập bảng tạm hoặc quyền truy cập đã bị từ chối.",

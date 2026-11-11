@@ -1,3 +1,4 @@
+import { pluginActivationId } from '../../../../shared/plugin-host/gesture';
 import { Component, type ReactNode } from 'react';
 import { DocxCommandContext } from '../commands/DocxCommandProvider';
 import type { DocxPluginActivation, DocxPluginHost } from './createDocxPluginHost';
@@ -43,7 +44,9 @@ export function PluginRenderScope({
   return (
     <PluginContributionBoundary onError={(error) => host.fail(activation.pluginId, phase, error)}>
       <DocxCommandContext.Provider value={host.commandStore(activation)}>
-        {children}
+        <div data-plugin-activation={pluginActivationId(activation.activation)} style={{ display: 'contents' }}>
+          {children}
+        </div>
       </DocxCommandContext.Provider>
     </PluginContributionBoundary>
   );

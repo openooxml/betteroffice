@@ -27,5 +27,6 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 yrs = "0.27.3"
 
 [dev-dependencies]
+ooxml-font-preflight = { package = "betteroffice-ooxml-font-preflight", path = "../ooxml-font-preflight" }
 betteroffice-fonts.workspace = true
 ooxml-opc.workspace = true

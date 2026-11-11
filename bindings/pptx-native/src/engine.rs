@@ -13,6 +13,19 @@ use napi::{Env, Error, Result, Status};
 use napi_derive::napi;
 use pptx_engine::{Document, EngineError, ErrorKind, Host, Renderer};
 
+#[napi(catch_unwind, js_name = "font_preflight")]
+pub fn font_preflight(env: Env, bytes: Uint8Array, active_slide: u32) -> Result<String> {
+    ooxml_font_preflight::pptx_font_preflight(&bytes, active_slide as usize)
+        .map(|result| result.to_json())
+        .map_err(|error| {
+            let message = error.to_string();
+            match env.throw(&message) {
+                Ok(()) => Error::new(Status::PendingException, message),
+                Err(error) => error,
+            }
+        })
+}
+
 /// Internal, called by the package loader.
 #[napi(catch_unwind, js_name = "configureFontPacks")]
 pub fn configure_font_packs(

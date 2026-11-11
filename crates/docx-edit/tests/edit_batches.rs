@@ -408,6 +408,7 @@ fn step(operation: EditOperation) -> EditStep {
 
 fn replace(target: TextTarget, text: &str) -> EditStep {
     step(EditOperation::ReplaceText {
+        runs: None,
         target,
         text: text.to_owned(),
     })
@@ -415,6 +416,7 @@ fn replace(target: TextTarget, text: &str) -> EditStep {
 
 fn insert(target: TextTarget, at: TargetEdge, text: &str) -> EditStep {
     step(EditOperation::InsertText {
+        runs: None,
         target,
         at,
         text: text.to_owned(),
@@ -427,6 +429,7 @@ fn delete(target: TextTarget) -> EditStep {
 
 fn new_paragraph(text: &str, style: Option<&str>) -> ParagraphInput {
     ParagraphInput {
+        runs: None,
         text: text.to_owned(),
         style_id: style.map(str::to_owned),
     }
@@ -949,6 +952,7 @@ fn one_undo_step_between_typing_in_both_capture_modes() {
             vec![
                 replace(search("Delta", "00000004"), "Omega"),
                 step(EditOperation::ReplaceText {
+                    runs: None,
                     target: TextTarget::Paragraph(para("hf:rIdHeader", "0000E001")),
                     text: "New header".to_owned(),
                 }),
@@ -4014,4 +4018,34 @@ fn removing_the_end_of_a_paragraph_keeps_the_formatting_of_the_marks_after_it() 
     apply(&doc, &undo, vec![delete(at("00000003", 2, 3))]);
     assert_eq!(embed_formatting(&doc), before);
     assert_eq!(accepted(&doc), ["On", "", "Tw"]);
+}
+
+#[test]
+fn a_built_step_with_both_text_and_runs_is_invalid() {
+    let doc = basic();
+    let run = docx_edit::TextRun {
+        text: "x".to_owned(),
+        marks: None,
+    };
+    let both = step(EditOperation::InsertText {
+        target: TextTarget::Paragraph(body("00000001")),
+        at: TargetEdge::End,
+        text: "x".to_owned(),
+        runs: Some(vec![run.clone()]),
+    });
+    let mut paragraph = new_paragraph("x", None);
+    paragraph.runs = Some(vec![run]);
+    let before = doc.encode_state_as_update_v1();
+    for steps in [
+        vec![both],
+        vec![insert_paragraphs(
+            "00000001",
+            TargetEdge::End,
+            vec![paragraph],
+        )],
+    ] {
+        let refusal = refuse(&doc, &UndoSession::new(), steps);
+        assert_eq!(refusal.failure.code, EditFailureCode::InvalidStep);
+        assert_eq!(doc.encode_state_as_update_v1(), before);
+    }
 }

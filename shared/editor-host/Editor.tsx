@@ -56,6 +56,11 @@ export function legacyDocx() {
   return query.get("peerless") === "0";
 }
 
+function pageMirror(): "text" | undefined {
+  if (typeof location === "undefined") return undefined;
+  return new URLSearchParams(location.search).get("pageMirror") === "text" ? "text" : undefined;
+}
+
 function rulerUnit(): "inch" | "cm" {
   if (typeof location === "undefined") return "inch";
   return new URLSearchParams(location.search).get("rulerUnit") === "cm" ? "cm" : "inch";
@@ -497,6 +502,7 @@ export default function Editor({
         showToolbar
         showRuler
         rulerUnit={rulerUnit()}
+        pageMirror={pageMirror()}
         showZoomControl
         colorMode={colorMode()}
         onPrint={() => undefined}

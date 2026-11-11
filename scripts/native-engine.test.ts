@@ -2,6 +2,8 @@ import { expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
+import { engineKind as pptxPreflightEngine } from '../packages/pptx/src/wasm/enginePreflight';
+import { engineKind as xlsxPreflightEngine } from '../packages/xlsx/src/wasm/enginePreflight';
 import { engineKind as pptxEngine } from '../packages/pptx/src/wasm/engine';
 import { engineKind as xlsxEngine } from '../packages/xlsx/src/wasm/engine';
 import { engineKind as docxEditEngine } from '../packages/docx/src/wasm/engineEdit';
@@ -16,7 +18,7 @@ const expected =
 const root = resolve(import.meta.dir, '..');
 
 test('the engine modules match the engine this run links', () => {
-  for (const engine of [xlsxEngine, pptxEngine, docxEditEngine, docxParseEngine, docxQueryEngine, docxOpcEngine, docxPreflightEngine]) {
+  for (const engine of [pptxPreflightEngine, xlsxPreflightEngine, xlsxEngine, pptxEngine, docxEditEngine, docxParseEngine, docxQueryEngine, docxOpcEngine, docxPreflightEngine]) {
     expect(engine).toBe(expected);
   }
 });
@@ -37,7 +39,7 @@ test('the native preload relinks each engine and asset separately', () => {
       const path = resolve(root, asset);
       const source = `export * from ${JSON.stringify(resolve(root, native))};\n`;
       expect(NATIVE_ENGINE_FILTER.test(path)).toBe(true);
-      expect(nativeEngineSource(path)).toBe(Array.isArray(value) ? source : undefined);
+      expect(nativeEngineSource(path)).toBe(asset === `packages/${format}/src/wasm/asset.ts` ? undefined : source);
       expect(nativeBuildSource(format as keyof typeof NATIVE_ENGINES, path)).toBe(source);
       const otherFormat = format === 'docx' ? 'xlsx' : 'docx';
       expect(nativeBuildSource(otherFormat, path)).toBeUndefined();

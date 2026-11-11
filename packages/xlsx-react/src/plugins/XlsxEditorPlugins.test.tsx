@@ -1,3 +1,4 @@
+import { gestureFor, trackPluginGestures } from '../../../../shared/plugin-host/gesture';
 import { testScope } from './__fixtures__/testScope';
 import { hostProposalWorkbook } from '../__fixtures__/hostProposalWorkbook';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
@@ -23,6 +24,7 @@ import { useXlsxPluginHost } from './useXlsxPluginHost';
 import { isMacPlatform } from '../commands/descriptors';
 import { pluginDefinition } from './defineXlsxPlugin';
 import * as publicApi from '../index';
+import * as pluginHosts from './createXlsxPluginHost';
 import {
   EditorToolbar,
   ToolbarCommandButton,
@@ -1125,34 +1127,213 @@ describe('XlsxEditor plugins', () => {
     expect(input(api(), 2, 1)).toBe('100');
   });
 
-  editorTest('granted built-in mutations refuse without a policy path; granted views run', async () => {
-    function Probe() {
+  editorTest('proposal-change admits the owning plugin\'s handler, microtask and nested onEvent mutations only inside its window', async () => {
+    let host!: pluginHosts.XlsxPluginHost;
+    const createHost = pluginHosts.createXlsxPluginHost;
+    const capture = spyOn(pluginHosts, 'createXlsxPluginHost').mockImplementation((access) => {
+      host = createHost(access);
+      return host;
+    });
+    let dispatching: Event | undefined;
+    let activationId = '';
+    let armed = false;
+    let notification = 0;
+    const own: unknown[] = [];
+    const delivered: unknown[] = [];
+    const nested: unknown[] = [];
+    const gestures: boolean[] = [];
+    const plugin = defineXlsxPlugin({
+      id: 'event-gesture', createState: () => null,
+      panel: { title: 'Events', placement: 'left', render: ({ context }) => (
+        <button type="button" data-testid="event-gesture" onClick={(event) => {
+          event.stopPropagation();
+          armed = true;
+          host.proposalsChanged('gesture-proposals');
+          void context.commands.execute('bold', null).then((result) => own.push(result));
+          queueMicrotask(() => {
+            void context.commands.execute('bold', null).then((result) => own.push(result));
+          });
+        }}>Bold</button>
+      ) },
+      onEvent(context, event) {
+        if (armed && event.type === 'proposal-change') {
+          armed = false;
+          gestures.push(gestureFor(activationId));
+          void context.commands.execute('bold', null).then((result) => delivered.push(result));
+          host.localeChanged(`gesture-${++notification}`);
+        } else if (notification > 0 && event.type === 'locale-change') {
+          void context.commands.execute('bold', null).then((result) => nested.push(result));
+        }
+      },
+    });
+    let mounted!: Awaited<ReturnType<typeof mount>>;
+    try {
+      mounted = await mount({ plugins: [plugin],
+        pluginGrants: { 'event-gesture': { document: 'write', commands: ['bold'] } } });
+    } finally {
+      capture.mockRestore();
+    }
+    const { view } = mounted;
+    await settle();
+    const button = view.getByTestId('event-gesture');
+    const marker = button.closest<HTMLElement>('[data-plugin-activation]')!;
+    activationId = marker.dataset.pluginActivation!;
+    const release = trackPluginGestures(marker,
+      (event) => { dispatching = event; return true; }, () => dispatching);
+    try {
+      fireEvent.click(button);
+      Object.defineProperty(dispatching!, 'eventPhase', { value: Event.BUBBLING_PHASE });
+      await until(() => delivered.length === 1 && nested.length === 1 && own.length === 2);
+      expect(delivered[0]).toMatchObject({ ok: true, status: 'executed' });
+      expect(nested[0]).toMatchObject({ ok: true, status: 'executed' });
+      expect(own).toEqual([
+        expect.objectContaining({ ok: true, status: 'executed' }),
+        expect.objectContaining({ ok: true, status: 'executed' }),
+      ]);
+      expect(gestures).toEqual([true]);
+      dispatching = undefined;
+      armed = true;
+      host.proposalsChanged('outside-proposals');
+      await until(() => delivered.length === 2 && nested.length === 2);
+      expect(delivered[1]).toMatchObject({ ok: false, failure: { code: 'unsupported-policy' } });
+      expect(nested[1]).toMatchObject({ ok: false, failure: { code: 'unsupported-policy' } });
+      expect(gestures).toEqual([true, false]);
+    } finally {
+      release();
+    }
+  });
+
+  editorTest('the owning plugin\'s handler is admitted during dispatch but its later await and timer are refused', async () => {
+    let dispatching: Event | undefined;
+    let resume!: () => void;
+    const gate = new Promise<void>((resolve) => { resume = resolve; });
+    const results: unknown[] = [];
+    const timers: unknown[] = [];
+    const plugin = defineXlsxPlugin({
+      id: 'await-gesture', createState: () => null,
+      panel: { title: 'Await', placement: 'left', render: ({ context }) => (
+        <button type="button" data-testid="await-gesture" onClick={async () => {
+          setTimeout(() => {
+            void context.commands.execute('bold', null).then((result) => timers.push(result));
+          }, 0);
+          results.push(await context.commands.execute('bold', null));
+          await gate;
+          results.push(await context.commands.execute('bold', null));
+        }}>Bold</button>
+      ) },
+    });
+    const { view } = await mount({ plugins: [plugin],
+      pluginGrants: { 'await-gesture': { document: 'write', commands: ['bold'] } } });
+    await settle();
+    const button = view.getByTestId('await-gesture');
+    const release = trackPluginGestures(button.closest<HTMLElement>('[data-plugin-activation]')!,
+      (event) => { dispatching = event; return true; }, () => dispatching);
+    try {
+      fireEvent.click(button);
+      await until(() => results.length === 1);
+      resume();
+      await until(() => results.length === 2 && timers.length === 1);
+      expect(results[1]).toMatchObject({ ok: false, failure: { code: 'unsupported-policy' } });
+      expect(timers[0]).toMatchObject({ ok: false, failure: { code: 'unsupported-policy' } });
+      expect(results[0]).toMatchObject({ ok: true, status: 'executed' });
+    } finally {
+      resume();
+      release();
+    }
+  });
+
+  editorTest('granted built-in mutations need a gesture in their panel; granted views run', async () => {
+    let dispatching: Event | undefined;
+    const trusted = (event: Event) => { dispatching = event; return true; };
+    const currentEvent = () => dispatching;
+    const results: unknown[] = [];
+    const toolbarResults: unknown[] = [];
+    function Probe({ context }: { context: XlsxPluginContext<State> }) {
       const bold = useXlsxCommands().getState('bold');
       return (
-        <output data-testid="probe">{bold.enabled ? 'enabled' : bold.disabledReason.code}</output>
+        <div>
+          <output data-testid="probe">{bold.enabled ? 'enabled' : bold.disabledReason.code}</output>
+          <button type="button" data-testid="gesture-bold" onClick={() => {
+            void context.commands.execute('bold', null).then((result) => results.push(result));
+          }}>Bold</button>
+          <button type="button" data-testid="delayed-bold" onClick={() => {
+            setTimeout(() => {
+              void context.commands.execute('bold', null).then((result) => results.push(result));
+            }, 0);
+          }}>Delayed bold</button>
+        </div>
       );
     }
     const { plugin, contexts, log } = recorder('acme.review', {
       panel: { title: 'Review', placement: 'left', render: Probe },
+      commands: [{ id: 'format', label: 'Gesture bold', mutatesDocument: true, execute(context) {
+        const result = context.commands.execute('bold', null);
+        void result.then((value) => toolbarResults.push(value));
+        return result;
+      } }],
+      toolbar: ['format'],
     });
-    const { api, view } = await mount({
+    const { api, view, rerender } = await mount({
       plugins: [plugin],
       pluginGrants: { 'acme.review': { document: 'write', commands: ['bold', 'zoom'] } },
     });
     await until(() => log.includes('load:loaded'));
     await settle();
-    expect(within(view.container).getByTestId('probe').textContent).toBe('unsupported-policy');
+    expect(within(view.container).getByTestId('probe').textContent).toBe('enabled');
     const context = last(contexts);
     expect(await context.commands.execute('bold', null)).toMatchObject({
       ok: false,
       failure: { code: 'unsupported-policy' },
     });
+    const before = api().commands.getState('bold').active;
+    const button = within(view.container).getByTestId('gesture-bold');
+    const release = trackPluginGestures(button.closest<HTMLElement>('[data-plugin-activation]')!, trusted, currentEvent);
+    try {
+      fireEvent.click(button);
+      await until(() => results.length === 1);
+      expect(results[0]).toMatchObject({ ok: true, status: 'executed' });
+      expect(api().commands.getState('bold').active).toBe(!before);
+      fireEvent.click(within(view.container).getByTestId('delayed-bold'));
+      await until(() => results.length === 2);
+      expect(results[1]).toMatchObject({ ok: false, failure: { code: 'unsupported-policy' } });
+      expect(api().commands.getState('bold').active).toBe(!before);
+    } finally {
+      release();
+    }
+    const more = view.getByTestId('xlsx-toolbar-more');
+    act(() => more.focus());
+    fireEvent.keyDown(more, { key: 'ArrowDown' });
+    const overflow = view.getByRole('menu', { name: 'More toolbar items' });
+    const toolbarButton = within(overflow).queryByRole('menuitem', { name: /^Gesture bold/ })
+      ?? within(overflow).getByRole('menuitemcheckbox', { name: /^Gesture bold/ });
+    const releaseToolbar = trackPluginGestures(toolbarButton.closest<HTMLElement>('[data-plugin-activation]')!, trusted, currentEvent);
+    try {
+      fireEvent.click(toolbarButton);
+      await until(() => toolbarResults.length === 1);
+      expect(toolbarResults[0]).toMatchObject({ ok: true, status: 'executed' });
+      expect(api().commands.getState('bold').active).toBe(before);
+    } finally {
+      releaseToolbar();
+    }
     expect(await act(() => context.commands.execute('zoom', { scale: 2 }))).toEqual({
       ok: true,
       status: 'executed',
     });
     expect(api().commands.getState('zoom').value).toBe(2);
     expect(api().commands.getState('bold').enabled).toBe(true);
+    await act(async () => {
+      rerender({ plugins: [plugin], pluginGrants: { 'acme.review': { commands: ['bold'] } } });
+    });
+    await until(() => within(view.container).getByTestId('probe').textContent === 'permission-denied');
+    const ungrantedButton = within(view.container).getByTestId('gesture-bold');
+    const releaseUngrant = trackPluginGestures(ungrantedButton.closest<HTMLElement>('[data-plugin-activation]')!, trusted, currentEvent);
+    try {
+      fireEvent.click(ungrantedButton);
+      await until(() => results.length === 3);
+      expect(results[2]).toMatchObject({ ok: false, failure: { code: 'permission-denied' } });
+    } finally {
+      releaseUngrant();
+    }
   });
 
   editorTest('edit batches need their grant, wait for pending input and respect readOnly', async () => {

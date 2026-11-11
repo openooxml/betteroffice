@@ -27,7 +27,7 @@ const MODULES: WasmModule[] = [
     crate: 'ooxml-font-preflight',
     name: 'docx_preflight',
     generated: 'packages/docx/src/wasm/generated/preflight',
-    cargoArgs: ['--locked', '--features', 'wasm'],
+    cargoArgs: ['--locked', '--no-default-features', '--features', 'wasm,docx'],
   },
   {
     crate: 'docx-layout',

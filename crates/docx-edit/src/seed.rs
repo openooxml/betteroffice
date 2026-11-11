@@ -2180,6 +2180,21 @@ fn formatting_to_marks(formatting: Option<&Value>) -> Vec<Mark> {
             ]),
         ));
     }
+    if ["ligatures", "contextualAlternates"]
+        .iter()
+        .any(|key| formatting.contains_key(*key))
+    {
+        marks.push(mark(
+            "typography",
+            ordered_object([
+                ("ligatures", nullish(formatting.get("ligatures"))),
+                (
+                    "contextualAlternates",
+                    nullish(formatting.get("contextualAlternates")),
+                ),
+            ]),
+        ));
+    }
     if let Some(value) = string(formatting.get("emphasisMark")).filter(|value| *value != "none") {
         marks.push(mark(
             "emphasisMark",
@@ -2217,7 +2232,9 @@ pub(crate) fn mark_run_attrs(defaults: &Any) -> Vec<(String, Any)> {
 }
 
 /// Run attributes held as one field of a mark: (attribute, field, `defaultTextFormatting` key).
-const MARK_FIELDS: [(&str, &str, &str); 10] = [
+const MARK_FIELDS: [(&str, &str, &str); 12] = [
+    ("typography", "ligatures", "ligatures"),
+    ("typography", "contextualAlternates", "contextualAlternates"),
     ("fontSize", "size", "fontSize"),
     ("fontSize", "sizeCs", "fontSizeCs"),
     ("characterSpacing", "spacing", "spacing"),

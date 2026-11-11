@@ -10,7 +10,7 @@ import {
   displayPositionToYrsLoc,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
-import { DocxCommandAdmissionError } from '../../../commands/createDocxCommandStore';
+import { DocxCommandAdmissionError, docxCommandController } from '../../../commands/createDocxCommandStore';
 import type { DocxCommandResult } from '../../../commands/types';
 import type { PagedEditorRef } from '../PagedEditor';
 import { createYrsPositionProjection } from '../internals/yrsPositionProjection';
@@ -243,13 +243,19 @@ describe('editor command binding', () => {
     paged.flushPendingInput = () => pending;
     const pasted = mock((_text: string) => {});
     paged.pasteContent = pasted;
+    let insideGesture = true;
     const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
     Object.defineProperty(navigator, 'clipboard', {
       configurable: true,
-      value: { readText: async () => { land(); return 'RICH'; } },
+      value: { readText: async () => { expect(insideGesture).toBe(true); land(); return 'RICH'; } },
     });
     try {
-      const result = editor.store.execute('pasteAsPlainText', null);
+      const scoped = docxCommandController(editor.store)!.scoped({
+        gesture: () => insideGesture, deny: () => null, subscribe: () => () => {},
+      });
+      const result = scoped.execute('pasteAsPlainText', null);
+      expect(landed).toBe(true);
+      insideGesture = false;
       setTimeout(release, 0);
       expect(await result).toEqual({ ok: true, status: 'executed' });
       expect(pasted).toHaveBeenCalledTimes(1);
