@@ -1489,6 +1489,95 @@ mod tests {
     }
 
     #[test]
+    fn references_in_tables_and_text_boxes_mark_their_note_labels_in_document_order() {
+        let reference = |id: &str, pm: f64, note: i64| {
+            json!({
+                "kind": "paragraph",
+                "id": id,
+                "runs": [{"kind": "text", "text": note.to_string(), "pmStart": pm, "footnoteRefId": note}]
+            })
+        };
+        let mut blocks = vec![
+            block(reference("p1", 2.0, 7)),
+            block(json!({
+                "kind": "table",
+                "id": "t1",
+                "rows": [{
+                    "id": "r1",
+                    "cells": [{"id": "c1", "blocks": [reference("cp", 12.0, 3)]}]
+                }]
+            })),
+            block(json!({
+                "kind": "textBox",
+                "id": "tb",
+                "width": 100.0,
+                "content": [reference("tp", 22.0, 5)]
+            })),
+            block(reference("p2", 32.0, 9)),
+        ];
+        let table = Fragment::Table(TableFragment {
+            block_id: BlockId::Str("t1".to_owned()),
+            x: 96.0,
+            y: 120.0,
+            width: 624.0,
+            pm_start: Some(10.0),
+            pm_end: Some(20.0),
+            row_start: 0,
+            row_end: 1,
+            height: 20.0,
+            is_floating: None,
+            carried_from_prev: None,
+            carried_to_next: None,
+            header_row_count: None,
+            clip_top: None,
+            clip_bottom: None,
+            cell_clips: None,
+        });
+        let pages = vec![page(1, 0, vec![paragraph_fragment(0.0, 40.0), table])];
+
+        number_note_references(&mut blocks, &[]);
+        let presentations = build_note_presentations(
+            &collect_note_refs(&blocks),
+            &pages,
+            &DocumentRegions::default(),
+        );
+        let mut marks = Vec::new();
+        let mut push = |paragraph: &ParagraphBlock| {
+            for run in &paragraph.runs {
+                if let Run::Text(text) = run
+                    && let Some(id) = text.fmt.footnote_ref_id
+                {
+                    marks.push((id as i64, text.text.clone()));
+                }
+            }
+        };
+        for block in &blocks {
+            match block {
+                LayoutBlock::Paragraph(paragraph) => push(paragraph),
+                LayoutBlock::Table(table) => {
+                    for cell in table.rows.iter().flat_map(|row| &row.cells) {
+                        for block in &cell.blocks {
+                            if let LayoutBlock::Paragraph(paragraph) = block {
+                                push(paragraph);
+                            }
+                        }
+                    }
+                }
+                LayoutBlock::TextBox(text_box) => text_box.content.iter().for_each(&mut push),
+                _ => {}
+            }
+        }
+        let expected: Vec<(i64, String)> = [(7, "1"), (3, "2"), (5, "3"), (9, "4")]
+            .into_iter()
+            .map(|(id, label)| (id, label.to_owned()))
+            .collect();
+        assert_eq!(marks, expected);
+        for (id, label) in &marks {
+            assert_eq!(&presentations.get(id).unwrap().display_label, label, "{id}");
+        }
+    }
+
+    #[test]
     fn separator_widths_follow_page_geometry_while_columns_follow_the_caller() {
         let mut narrow = page(1, 0, Vec::new());
         narrow.size.w = 288.0;

@@ -26695,6 +26695,18 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         section_breaks: &[usize],
         regions: serde_json::Value,
     ) -> (Vec<(NoteKey, String)>, BTreeMap<NoteKey, String>) {
+        note_ordinal_layout_with_tables(client_id, paragraphs, section_breaks, &[], regions)
+    }
+
+    /// [`note_ordinal_layout`], with each paragraph in `table_paragraphs` placed alone in a
+    /// one-cell table.
+    fn note_ordinal_layout_with_tables(
+        client_id: u64,
+        paragraphs: &[&[(&str, f64)]],
+        section_breaks: &[usize],
+        table_paragraphs: &[usize],
+        regions: serde_json::Value,
+    ) -> (Vec<(NoteKey, String)>, BTreeMap<NoteKey, String>) {
         const FONT: &[u8] =
             include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
         docx_layout::clear_measure_fonts();
@@ -26708,34 +26720,73 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         let mut contents = Vec::new();
         let mut cursor = 0;
         for (paragraph, refs) in paragraphs.iter().enumerate() {
+            let in_table = table_paragraphs.contains(&paragraph);
+            let cell_story = format!("body:t{paragraph}:r0c0");
+            let mut cell_ops = vec![crate::RawOp::Delete { index: 0, len: 1 }];
+            let (target, mut at) = if in_table {
+                (&mut cell_ops, 0)
+            } else {
+                (&mut ops, cursor)
+            };
             for &(kind, id) in refs.iter() {
                 let (key, prefix) = if kind == "endnote" {
                     ("endnoteRefId", "en")
                 } else {
                     ("footnoteRefId", "fn")
                 };
-                ops.push(crate::RawOp::Insert {
-                    index: cursor,
+                target.push(crate::RawOp::Insert {
+                    index: at,
                     text: "ab".to_owned(),
                     attrs: Attrs::new(),
                 });
-                ops.push(crate::RawOp::InsertEmbed {
-                    index: cursor + 2,
+                target.push(crate::RawOp::InsertEmbed {
+                    index: at + 2,
                     kind: "noteRef".to_owned(),
                     payload: vec![(key.to_owned(), Any::Number(id))],
                     attrs: Attrs::new(),
                 });
-                cursor += 3;
+                at += 3;
                 engine
                     .doc()
                     .create_story(format!("{prefix}:{id}").as_str(), "Note", "Normal", "left")
                     .unwrap();
                 contents.push(json!({"id": id as i64, "noteKind": kind, "height": 0}));
             }
-            ops.push(crate::RawOp::InsertEmbed {
-                index: cursor,
+            target.push(crate::RawOp::InsertEmbed {
+                index: at,
                 kind: "pilcrow".to_owned(),
                 payload: vec![("paraId".to_owned(), Any::from(format!("note-p{paragraph}")))],
+                attrs: Attrs::new(),
+            });
+            at += 1;
+            if !in_table {
+                cursor = at;
+                continue;
+            }
+            engine
+                .doc()
+                .create_story(cell_story.as_str(), "", "Normal", "left")
+                .unwrap();
+            engine
+                .doc()
+                .apply_raw_ops(
+                    &cell_story,
+                    cell_ops,
+                    &crate::EditCtx::local("", "2026-07-18T00:00:00Z"),
+                )
+                .unwrap();
+            let rows = json!([{
+                "trPr": {"isHeader": false},
+                "cells": [{"tcPr": {"colspan": 1, "rowspan": 1}, "story": cell_story}]
+            }]);
+            ops.push(crate::RawOp::InsertEmbed {
+                index: cursor,
+                kind: "table".to_owned(),
+                payload: vec![
+                    ("tblPr".to_owned(), Any::from_json("{}").unwrap()),
+                    ("grid".to_owned(), Any::from_json("[]").unwrap()),
+                    ("rows".to_owned(), Any::from_json(&rows.to_string()).unwrap()),
+                ],
                 attrs: Attrs::new(),
             });
             cursor += 1;
@@ -26787,30 +26838,37 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             }
         }
         let pagination = engine.pagination.borrow();
-        let marks = pagination
-            .input
-            .as_ref()
-            .unwrap()
-            .measured
-            .iter()
-            .filter_map(|measured| match &measured.block {
-                LayoutBlock::Paragraph(paragraph) => Some(paragraph.runs.iter()),
-                _ => None,
-            })
-            .flatten()
-            .filter_map(|run| match run {
-                Run::Text(text) => {
+        let mut marks = Vec::new();
+        for measured in pagination.input.as_ref().unwrap().measured.iter() {
+            push_note_marks(&measured.block, &mut marks);
+        }
+        (marks, labels)
+    }
+
+    fn push_note_marks(block: &LayoutBlock, marks: &mut Vec<(NoteKey, String)>) {
+        match block {
+            LayoutBlock::Paragraph(paragraph) => {
+                for run in &paragraph.runs {
+                    let Run::Text(text) = run else {
+                        continue;
+                    };
                     let key = match (text.fmt.footnote_ref_id, text.fmt.endnote_ref_id) {
                         (Some(id), _) => ("footnote".to_owned(), id as i64),
                         (None, Some(id)) => ("endnote".to_owned(), id as i64),
-                        (None, None) => return None,
+                        (None, None) => continue,
                     };
-                    Some((key, text.text.clone()))
+                    marks.push((key, text.text.clone()));
                 }
-                _ => None,
-            })
-            .collect();
-        (marks, labels)
+            }
+            LayoutBlock::Table(table) => {
+                for cell in table.rows.iter().flat_map(|row| &row.cells) {
+                    for block in &cell.blocks {
+                        push_note_marks(block, marks);
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     fn assert_marks_follow_notes(
@@ -26901,6 +26959,22 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             ),
             &["1", "2", "1"],
         );
+    }
+
+    #[test]
+    fn a_note_reference_in_a_table_cell_marks_its_ordinal_in_document_order() {
+        for (client_id, kind) in [(7318, "footnote"), (7319, "endnote")] {
+            assert_marks_follow_notes(
+                note_ordinal_layout_with_tables(
+                    client_id,
+                    &[&[(kind, 7.0)], &[(kind, 3.0), (kind, 8.0)], &[(kind, 5.0)]],
+                    &[],
+                    &[1],
+                    note_ordinal_regions(json!({})),
+                ),
+                &["1", "2", "3", "4"],
+            );
+        }
     }
 
     fn paragraph_pagination_input(first_text: &str, shifted_suffix: bool) -> String {
