@@ -2539,6 +2539,8 @@ impl Workbook {
         }
         let mut preview = self.model.clone();
         let mut origins = self.preserved.origins.clone();
+        let mut axes = self.preserved.axes.clone();
+        let mut drawings_move = false;
         let mut names = self.sheet_names();
         let defined = DefinedFunctionNames::new(&preview.defined_names);
         let mut batch = xlsx_ops::InPlaceBatch::new(&mut preview);
@@ -2554,17 +2556,45 @@ impl Workbook {
                 self.ensure_worksheet_sheet_in(staged, &origins, sheet)?;
             }
             self.ensure_references_stay_valid(&names, op)?;
+            drawings_move |= self.ensure_drawings_follow(&origins, &axes, op)?;
             validate_op(staged, op)?;
             validate_insert_capacity(staged, op)?;
             batch.apply(op)?;
             match *op {
-                Op::AddSheet { index, .. } => origins.insert(index, None),
+                Op::AddSheet { index, .. } => {
+                    origins.insert(index, None);
+                    axes.insert(index.min(axes.len()), None);
+                }
                 Op::RemoveSheet { index } => {
                     origins.remove(index);
+                    if index < axes.len() {
+                        axes.remove(index);
+                    }
                 }
                 Op::MoveSheet { from, to } => {
                     let origin = origins.remove(from);
                     origins.insert(to, origin);
+                    if from < axes.len() {
+                        let moved = axes.remove(from);
+                        axes.insert(to.min(axes.len()), moved);
+                    }
+                }
+                Op::InsertRows { sheet, at, count }
+                | Op::DeleteRows { sheet, at, count }
+                | Op::InsertCols { sheet, at, count }
+                | Op::DeleteCols { sheet, at, count } => {
+                    if let Some(Some(sheet_axes)) = axes.get_mut(sheet.0 as usize) {
+                        let map = if matches!(op, Op::InsertRows { .. } | Op::DeleteRows { .. }) {
+                            &mut sheet_axes.rows
+                        } else {
+                            &mut sheet_axes.cols
+                        };
+                        if matches!(op, Op::InsertRows { .. } | Op::InsertCols { .. }) {
+                            map.insert(at, count);
+                        } else {
+                            map.delete(at, count);
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -2586,7 +2616,7 @@ impl Workbook {
         let proposals_changed = self
             .rebased_proposals(&ops)
             .is_some_and(|proposals| proposals != self.proposals.list());
-        if preview == self.model && !proposals_changed {
+        if preview == self.model && !proposals_changed && !drawings_move {
             return Ok(MutationResult::default());
         }
         mark(EditStage::Validated);
@@ -3584,6 +3614,56 @@ impl Workbook {
                 "{part} references cells this edit would move, and it cannot be rewritten"
             ))),
             None => Ok(()),
+        }
+    }
+
+    /// Refuses a row or column edit that would leave a picture or shape of the sheet's source
+    /// drawing where a save cannot place it, with the sheet's rows and columns where `axes` puts
+    /// them at this op of the batch, and says whether one moves. A drawing two current sheets
+    /// share, through a copied sheet, cannot move for one of them alone.
+    fn ensure_drawings_follow(
+        &self,
+        origins: &[Option<usize>],
+        axes: &[Option<xlsx_parse::SheetAxes>],
+        op: &Op,
+    ) -> Result<bool> {
+        let (sheet, rows, at, count, inserting) = match *op {
+            Op::InsertRows { sheet, at, count } => (sheet, true, at, count, true),
+            Op::DeleteRows { sheet, at, count } => (sheet, true, at, count, false),
+            Op::InsertCols { sheet, at, count } => (sheet, false, at, count, true),
+            Op::DeleteCols { sheet, at, count } => (sheet, false, at, count, false),
+            _ => return Ok(false),
+        };
+        let (Some(Some(origin)), Some(slot)) =
+            (origins.get(sheet.0 as usize), self.source_package.as_ref())
+        else {
+            return Ok(false);
+        };
+        let shift = xlsx_parse::GridShift {
+            rows,
+            at,
+            count,
+            inserting,
+        };
+        if !slot.sheet_may_hold_drawing(*origin) {
+            return Ok(false);
+        }
+        let package = slot.materialize()?;
+        let sheet_axes = axes.get(sheet.0 as usize).and_then(Option::as_ref);
+        let copied = origins
+            .iter()
+            .filter(|other| **other == Some(*origin))
+            .count()
+            > 1;
+        let refused = |part: &str| {
+            Error::InvalidOperation(format!(
+                "{part} references cells this edit would move, and it cannot be rewritten"
+            ))
+        };
+        match package.drawings_after_shift(*origin, sheet_axes, shift) {
+            Err(part) => Err(refused(part)),
+            Ok(true) if copied => Err(refused(package.drawing_part(*origin).unwrap_or_default())),
+            Ok(moves) => Ok(moves),
         }
     }
 
