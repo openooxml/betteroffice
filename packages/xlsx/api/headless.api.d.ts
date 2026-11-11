@@ -272,6 +272,8 @@ export interface TextCmd {
     bold?: boolean;
     italic?: boolean;
     underline?: boolean;
+    /** The kind of `underline` when it is not single. */
+    underlineStyle?: 'double' | 'singleAccounting' | 'doubleAccounting';
     strike?: boolean;
     highlight?: string;
     dashedUnderline?: boolean;

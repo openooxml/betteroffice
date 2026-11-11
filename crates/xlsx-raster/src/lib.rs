@@ -213,6 +213,7 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
                 bold,
                 italic,
                 underline,
+                underline_style,
                 strike,
                 highlight,
                 dashed_underline,
@@ -237,6 +238,7 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
                     bold: *bold,
                     italic: *italic,
                     underline: *underline,
+                    double_underline: double_underline(*underline_style),
                     strike: *strike,
                     highlight: highlight.as_deref().map(parse_color).transpose()?,
                     dashed_underline: *dashed_underline,
@@ -634,6 +636,11 @@ fn path_coord(value: f64) -> Result<f32, String> {
         .ok_or_else(|| "path contains a non-finite coordinate".to_string())
 }
 
+fn double_underline(style: Option<xlsx_render::RunUnderline>) -> bool {
+    use xlsx_render::RunUnderline::{Double, DoubleAccounting};
+    matches!(style, Some(Double | DoubleAccounting))
+}
+
 /// parse a `#rrggbb` string into a tiny-skia color.
 fn parse_color(s: &str) -> Result<Color, String> {
     let hex = s
@@ -967,6 +974,7 @@ mod tests {
                     bold: false,
                     italic: false,
                     underline: false,
+                    underline_style: None,
                     strike: false,
                     highlight: None,
                     dashed_underline: false,
@@ -1017,6 +1025,7 @@ mod tests {
                 bold: false,
                 italic: false,
                 underline: false,
+                underline_style: None,
                 strike: false,
                 highlight: None,
                 dashed_underline: false,
@@ -1079,6 +1088,7 @@ mod tests {
                 bold: false,
                 italic: false,
                 underline,
+                underline_style: None,
                 strike: underline,
                 highlight: None,
                 dashed_underline: false,
@@ -1297,6 +1307,40 @@ mod tests {
             bottom - top < 40,
             "combined cluster should occupy two lines, ink {top}..{bottom}"
         );
+    }
+
+    #[test]
+    fn underline_kinds_paint_one_or_two_lines() {
+        use xlsx_render::RunUnderline;
+
+        let cell = DlRect {
+            x: 0.0,
+            y: 0.0,
+            w: 160.0,
+            h: 80.0,
+        };
+        let bands = |underline: bool, style: Option<RunUnderline>| {
+            let mut dl = text_dl("    ", cell, false, None, underline);
+            let DrawCmd::Text {
+                font_size,
+                underline_style,
+                strike,
+                ..
+            } = &mut dl.commands[0]
+            else {
+                unreachable!()
+            };
+            *font_size = 40.0;
+            *underline_style = style;
+            *strike = false;
+            ink_row_bands(&dl).len()
+        };
+        assert_eq!(bands(false, None), 0);
+        assert_eq!(bands(false, Some(RunUnderline::Double)), 0);
+        assert_eq!(bands(true, None), 1);
+        assert_eq!(bands(true, Some(RunUnderline::SingleAccounting)), 1);
+        assert_eq!(bands(true, Some(RunUnderline::Double)), 2);
+        assert_eq!(bands(true, Some(RunUnderline::DoubleAccounting)), 2);
     }
 
     #[test]
