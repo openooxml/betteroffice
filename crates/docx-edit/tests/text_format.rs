@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use docx_edit::{
     EditApplication, EditCtx, EditFailureCode, EditRefusal, EditRequest, EditingDoc,
-    InlineFormatDelta, Patch, SegmentContent, StoryInfoKind, StoryRange, StorySegment, UndoSession,
+    InlineFormatDelta, Loc, LocRange, Patch, SegmentContent, StoryInfoKind, StoryRange, StorySegment, UndoSession,
     seed_from_docx,
 };
 use serde_json::{Value, json};
@@ -16,11 +16,15 @@ const NS: &str = concat!(
 const STYLES: &str = r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:rPr><w:b/><w:sz w:val="32"/></w:rPr></w:style><w:style w:type="character" w:styleId="Strong"><w:name w:val="Strong"/><w:rPr><w:b/></w:rPr></w:style>"#;
 
 fn package(body: &str) -> Vec<u8> {
+    package_with_styles(body, STYLES)
+}
+
+fn package_with_styles(body: &str, styles: &str) -> Vec<u8> {
     let content_types = r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>"#;
     let root_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;
     let document_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#;
     let document = format!(r#"<w:document {NS}><w:body>{body}<w:sectPr/></w:body></w:document>"#);
-    let styles = format!(r#"<w:styles {NS}>{STYLES}</w:styles>"#);
+    let styles = format!(r#"<w:styles {NS}>{styles}</w:styles>"#);
     ooxml_opc::rezip_parts(&[
         (
             "[Content_Types].xml".to_owned(),
@@ -579,4 +583,150 @@ fn peers_clearing_overlapping_ranges_converge() {
     right.apply_update_v1(&to_right).unwrap();
     left.apply_update_v1(&to_left).unwrap();
     assert_eq!(segments(&left, "body"), segments(&right, "body"));
+}
+
+fn editor_range(doc: &EditingDoc, story: &str, from: (&str, u32), to: (&str, u32)) -> StoryRange {
+    let loc = |(para, offset): (&str, u32)| Loc {
+        story: story.to_owned(),
+        para: para.to_owned(),
+        offset,
+    };
+    doc.locate_range(&LocRange {
+        start: loc(from),
+        end: loc(to),
+    })
+    .unwrap()
+}
+
+fn editor_clear(doc: &EditingDoc, ctx: &EditCtx, range: StoryRange) -> Vec<String> {
+    let (receipt, kept) = doc.clear_formatting_keeping(ctx, range).unwrap();
+    assert!(kept.is_empty(), "{kept:?}");
+    receipt.revision_ids
+}
+
+const HEADING_KEYS: [&str; 6] = [
+    "bold",
+    "fontSize",
+    "textColor",
+    "color",
+    "fontFamily",
+    "rFonts",
+];
+
+#[test]
+fn editor_clear_returns_heading_runs_to_the_heading_style() {
+    let doc = open();
+    let title = marks(&open(), "Title");
+    assert!(active(&title, "bold"));
+    let ctx = EditCtx::local("", "");
+    editor_clear(
+        &doc,
+        &ctx,
+        editor_range(&doc, "body", ("00000003", 0), ("00000003", 5)),
+    );
+    editor_clear(
+        &doc,
+        &ctx,
+        editor_range(&doc, "body", ("00000009", 0), ("00000009", 10)),
+    );
+    for marker in ["Title", "Styled off"] {
+        let cleared = marks(&doc, marker);
+        for key in HEADING_KEYS {
+            assert_eq!(cleared.get(key), title.get(key), "{marker} {key}");
+        }
+    }
+}
+
+#[test]
+fn editor_clear_across_a_body_and_a_heading_paragraph_resets_each_to_its_style() {
+    let doc = open();
+    editor_clear(
+        &doc,
+        &EditCtx::local("", ""),
+        editor_range(&doc, "body", ("00000002", 0), ("00000003", 5)),
+    );
+    assert!(!active(&marks(&doc, "Bold words"), "bold"));
+    let title = marks(&open(), "Title");
+    let cleared = marks(&doc, "Title");
+    for key in HEADING_KEYS {
+        assert_eq!(cleared.get(key), title.get(key), "{key}");
+    }
+}
+
+#[test]
+fn editor_clear_drops_the_character_style_and_keeps_the_link() {
+    let doc = open();
+    let link = marks(&doc, "Linked").get("hyperlink").cloned();
+    assert!(link.is_some());
+    let ctx = EditCtx::local("", "");
+    editor_clear(
+        &doc,
+        &ctx,
+        editor_range(&doc, "body", ("00000004", 0), ("00000004", 10)),
+    );
+    editor_clear(
+        &doc,
+        &ctx,
+        editor_range(&doc, "body", ("0000000A", 0), ("0000000A", 6)),
+    );
+    let strong = marks(&doc, "Strong run");
+    assert!(!active(&strong, "runStyle") && !active(&strong, "bold"));
+    let linked = marks(&doc, "Linked");
+    assert_eq!(linked.get("hyperlink").cloned(), link);
+    assert!(!active(&linked, "italic") && !active(&linked, "runStyle"));
+}
+
+#[test]
+fn editor_clear_into_a_table_cell_keeps_what_the_table_style_gives() {
+    let styles = format!(
+        r#"{STYLES}<w:style w:type="table" w:styleId="BoldGrid"><w:name w:val="Bold Grid"/><w:rPr><w:b/></w:rPr></w:style>"#
+    );
+    let body = concat!(
+        r#"<w:p w14:paraId="00000011"><w:r><w:rPr><w:i/></w:rPr><w:t>Intro</w:t></w:r></w:p>"#,
+        r#"<w:tbl><w:tblPr><w:tblStyle w:val="BoldGrid"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="2400" w:type="dxa"/></w:tcPr>"#,
+        r#"<w:p w14:paraId="00000012"><w:r><w:rPr><w:i/><w:color w:val="C00000"/></w:rPr><w:t>Cell</w:t></w:r></w:p>"#,
+        r#"</w:tc></w:tr></w:tbl>"#,
+        r#"<w:p w14:paraId="00000013"><w:r><w:t>After</w:t></w:r></w:p>"#,
+    );
+    let doc = EditingDoc::new(7111);
+    seed_from_docx(&doc, &package_with_styles(body, &styles)).unwrap();
+    let cell = cell_story(&doc);
+    assert!(active(&marks_in(&doc, &cell, "Cell"), "bold"));
+    editor_clear(
+        &doc,
+        &EditCtx::local("", ""),
+        editor_range(&doc, "body", ("00000011", 0), ("00000013", 0)),
+    );
+    let cleared = marks_in(&doc, &cell, "Cell");
+    assert!(active(&cleared, "bold"));
+    assert!(!active(&cleared, "italic") && !active(&cleared, "color"));
+    assert!(!active(&marks(&doc, "Intro"), "italic"));
+}
+
+#[test]
+fn a_suggested_editor_clear_records_the_style_values() {
+    let doc = open();
+    let revisions = editor_clear(
+        &doc,
+        &EditCtx::local("Ann", "2026-11-10T12:00:00Z").suggesting(),
+        editor_range(&doc, "body", ("00000009", 0), ("00000009", 10)),
+    );
+    assert_eq!(revisions.len(), 1);
+    let cleared = marks(&doc, "Styled off");
+    assert!(active(&cleared, "bold") && active(&cleared, "rPrChange"));
+    assert!(!active(&cleared, "color"));
+}
+
+#[test]
+fn a_replica_without_the_opened_styles_removes_the_formatting() {
+    let replica = EditingDoc::new(7112);
+    replica
+        .apply_update_v1(&open().encode_state_as_update_v1())
+        .unwrap();
+    editor_clear(
+        &replica,
+        &EditCtx::local("", ""),
+        editor_range(&replica, "body", ("00000003", 0), ("00000003", 5)),
+    );
+    assert!(!active(&marks(&replica, "Title"), "bold"));
 }

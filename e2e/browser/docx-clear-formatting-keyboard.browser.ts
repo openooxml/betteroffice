@@ -2,11 +2,19 @@ import { test, expect, type Page, type TestInfo } from 'playwright/test';
 import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
 
-async function open(page: Page, arm: string) {
+const SEED = '<w:p><w:r><w:t>Seed</w:t></w:r></w:p>';
+const HEADING_STYLES = '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:rPr><w:b/><w:sz w:val="32"/></w:rPr></w:style></w:styles>';
+
+async function open(page: Page, arm: string, body = SEED, styles?: string) {
   const zip = new JSZip();
-  zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
+  const stylesType = styles ? '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>' : '';
+  zip.file('[Content_Types].xml', `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>${stylesType}</Types>`);
   zip.file('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDoc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
-  zip.file('word/document.xml', '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Seed</w:t></w:r></w:p><w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:bottom="1440" w:left="1440" w:right="1440"/></w:sectPr></w:body></w:document>');
+  if (styles) {
+    zip.file('word/_rels/document.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>');
+    zip.file('word/styles.xml', styles);
+  }
+  zip.file('word/document.xml', `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:bottom="1440" w:left="1440" w:right="1440"/></w:sectPr></w:body></w:document>`);
   await page.goto('/?format=docx' + arm);
   await page.locator('input[type=file]').last().setInputFiles({
     name: 'clear-formatting.docx',
@@ -33,6 +41,8 @@ async function savedRuns(page: Page, info: TestInfo, name: string) {
     return Array.from(document.getElementsByTagNameNS(w, 'r')).map((run) => ({
       text: Array.from(run.getElementsByTagNameNS(w, 't')).map((node) => node.textContent ?? '').join(''),
       bold: run.getElementsByTagNameNS(w, 'b').length > 0,
+      properties: Array.from(run.getElementsByTagNameNS(w, 'rPr')).flatMap((properties) => Array.from(properties.children).map((child) => child.localName)),
+      paragraphStyle: run.parentElement?.getElementsByTagNameNS(w, 'pStyle')[0]?.getAttributeNS(w, 'val') ?? null,
     }));
   }, xml);
 }
@@ -61,5 +71,28 @@ for (const arm of ['&peerless=0', '']) {
     const after = await savedRuns(page, info, `${label}-cleared`);
     expect(after.map((run) => run.text).join('')).toBe(text);
     expect(after.every((run) => !run.bold)).toBe(true);
+  });
+
+  test(`docx toolbar clear formatting keeps a heading bold and removes its direct formatting (${label})`, async ({ page }, info) => {
+    const input = await open(
+      page,
+      arm,
+      '<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:rPr><w:i/><w:color w:val="C00000"/></w:rPr><w:t>Heading words</w:t></w:r></w:p>',
+      HEADING_STYLES,
+    );
+    const rail = page.getByTestId('formatting-bar');
+    const bold = rail.getByRole('button', { name: 'Bold', exact: true });
+    const italic = rail.getByRole('button', { name: 'Italic', exact: true });
+    await input.press('ControlOrMeta+A');
+    await expect(italic).toHaveAttribute('aria-pressed', 'true');
+    await rail.getByRole('button', { name: 'Clear formatting', exact: true }).click();
+    await expect(italic).toHaveAttribute('aria-pressed', 'false');
+    await expect(bold).toHaveAttribute('aria-pressed', 'true');
+    const runs = await savedRuns(page, info, `${label}-heading`);
+    expect(runs.map((run) => run.text).join('')).toBe('Heading words');
+    for (const run of runs.filter((entry) => entry.text)) {
+      expect(run.paragraphStyle).toBe('Heading1');
+      expect(run.properties).toEqual([]);
+    }
   });
 }
