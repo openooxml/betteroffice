@@ -41,6 +41,7 @@ impl Document {
             return;
         }
         fonts.cjk_fallbacks = true;
+        let mut seen = std::collections::HashSet::new();
         for script in ["Hani", "Hira", "Kana", "Hang"] {
             let scripts = [script.to_owned()];
             for face in self.font_manager.resolve(
@@ -50,6 +51,9 @@ impl Document {
                 &scripts,
                 LastResortOffice::Word,
             ) {
+                if !seen.insert((face.family.clone(), face.bold, face.italic)) {
+                    continue;
+                }
                 if let Ok(bytes) = face.load() {
                     let _ = fonts.store.register_slice(&bytes);
                 }
