@@ -515,7 +515,11 @@ mod tests {
             })
         );
         assert!(flagged["compat"]["compatibilityMode"].is_u64());
-        for package in [json!({}), json!({"settings": null}), json!({"settings": {}})] {
+        for package in [
+            json!({}),
+            json!({"settings": null}),
+            json!({"settings": {}}),
+        ] {
             assert_eq!(
                 measurement(&package)["compat"],
                 json!({"compatibilityMode": 12, "noLeading": false, "doNotExpandShiftReturn": false})
