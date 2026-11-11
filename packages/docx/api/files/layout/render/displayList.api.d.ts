@@ -573,6 +573,8 @@ export interface ImagePrimitive extends DocAttrs {
         left: number;
     };
     altText?: string;
+    /** The picture's relationship id (`r:embed`), which names it when `relId` resolves to nothing; at most 255 characters. */
+    relationshipId?: string;
     /** Ordered image effects. Undefined = use legacy `filter` only. */
     effects?: Array<{
         kind?: string;
