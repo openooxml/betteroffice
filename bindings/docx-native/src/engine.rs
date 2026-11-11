@@ -4016,7 +4016,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_limit_crossed_mid_call_fails_at_the_next_progress_tick_and_the_thread_recovers() {
+    fn heap_limit_crossed_mid_call_fails_at_the_next_progress_tick_and_the_thread_recovers() {
         let _limits = crate::heap::tests::limits();
         std::thread::spawn(|| {
             set_wasm_heap_limit((1u64 << 40) as f64);
@@ -4059,7 +4059,7 @@ mod tests {
     }
 
     #[test]
-    fn a_limit_of_zero_is_a_limit() {
+    fn heap_limit_of_zero_is_a_limit() {
         let _limits = crate::heap::tests::limits();
         std::thread::spawn(|| {
             set_wasm_heap_limit(0.0);
