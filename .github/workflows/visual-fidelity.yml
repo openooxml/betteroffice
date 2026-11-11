@@ -336,7 +336,6 @@ jobs:
           python -m pip install -r scripts/office-quality/requirements.txt
 
       - name: Install the Chromium system packages
-        timeout-minutes: 15
         run: |
           echo 'Acquire::Retries "1"; Acquire::http::Timeout "20"; Acquire::https::Timeout "20"; DPkg::Lock::Timeout "60";' | sudo tee /etc/apt/apt.conf.d/80-ci-retries >/dev/null
           for attempt in 1 2 3; do
