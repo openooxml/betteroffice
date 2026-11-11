@@ -186,8 +186,17 @@ test('an in-thread range anchor matches the painted word from open through settl
       range: { story: 'body', view: 'accepted', start: { paraId: paragraph.paraId, offset: match.index },
         end: { paraId: paragraph.paraId, offset: match.index + match[0].length } } };
     const sample = async (label: string) => {
-      const [result] = await probe.geometry.readAnchorGeometries([target]);
-      if (!result?.ok || !result.rects[0]) throw new Error(`${label}: word has no painted box`);
+      type Answer = Awaited<ReturnType<typeof probe.geometry.readAnchorGeometries>>[number] | undefined;
+      const deadline = performance.now() + 5_000;
+      let result: Answer;
+      for (;;) {
+        [result] = await probe.geometry.readAnchorGeometries([target]);
+        if (result?.ok || result?.failure.code !== 'layout-unavailable' || performance.now() > deadline) break;
+        await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+      }
+      if (!result?.ok || !result.rects[0]) {
+        throw new Error(`${label}: word has no painted box (${result && !result.ok ? result.failure.code : 'no rect'})`);
+      }
       const { layoutId, version } = result as typeof result & { layoutId: string; version: string };
       return { label, rect: result.rects[0], layoutId, version,
         layoutEvents: probe.events.filter(event => event.type === 'layout-change').length };
