@@ -414,7 +414,8 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
       root: () => latest.current.focusRoot?.() ?? null,
       restartOnTyping: false,
       isEditorTarget: (target) => {
-        if (target instanceof Node && latest.current.canvasHostRef.current?.contains(target)) return true;
+        if (target instanceof Element && latest.current.canvasHostRef.current?.contains(target) &&
+          target.closest('canvas[data-page-index]')) return true;
         const id = latest.current.focusRoot?.()?.getAttribute('data-docx-input');
         return !!id && target instanceof Element && target.id === id;
       },

@@ -3358,6 +3358,35 @@ test('the in-thread engine settles a canvas double click as pointer, then shift-
   } finally { h.dispose(); }
 });
 
+test('a click on canvas host chrome outside the page canvas keeps the keyboard settle source', async () => {
+  const bytes = await storyAnchorsDocx();
+  const h = await matrixEditor('DI', bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer, undefined, true);
+  const chrome = document.createElement('button');
+  try {
+    await h.selection('body', h.first.paraId, 1);
+    await h.selectionLayout();
+    await h.quiet();
+    h.reset();
+    const canvas = h.view.container.querySelector<HTMLCanvasElement>('canvas[data-page-index="0"]')!;
+    const canvasHost = canvas.closest('.canvas-pages')!;
+    expect(canvasHost).not.toBeNull();
+    canvasHost.appendChild(chrome);
+    await act(async () => { fireEvent.keyDown(h.input(), { key: 'ArrowLeft', shiftKey: true }); });
+    await h.selectionLayout();
+    const extended = h.context().snapshot.selection;
+    const point = { pointerId: 1, pointerType: 'mouse', button: 0, detail: 1 };
+    await act(async () => {
+      fireEvent.pointerDown(chrome, { ...point, buttons: 1 });
+      fireEvent.pointerUp(chrome, { ...point, buttons: 0 });
+      fireEvent.click(chrome, point);
+    });
+    await h.quiet(700);
+    expect(h.events.filter(event => event.type === 'selection-settle')).toMatchObject([
+      { source: 'keyboard', selection: extended },
+    ]);
+  } finally { chrome.remove(); h.dispose(); }
+});
+
 for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${engine}`, () => {
   for (const [location, story, paraId] of [
     ['body', 'body', '00000001'],
