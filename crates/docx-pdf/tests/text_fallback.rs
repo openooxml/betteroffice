@@ -6,7 +6,7 @@
 
 #![allow(dead_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use docx_layout::display_list::{
@@ -184,7 +184,7 @@ fn glyph_run(font_id: u32, text: &str, bytes: &[u8]) -> GlyphRunPrimitive {
 /// Build embedded fonts exactly as the exporter does.
 fn embed_all(
     store: &FontStore,
-    uses: &BTreeMap<u32, BTreeMap<u16, String>>,
+    uses: &BTreeMap<u32, BTreeMap<u16, BTreeSet<String>>>,
 ) -> BTreeMap<u32, font::EmbeddedFont> {
     let mut fonts = BTreeMap::new();
     for (index, (font_id, glyphs)) in uses.iter().enumerate() {
@@ -196,14 +196,14 @@ fn embed_all(
     fonts
 }
 
-fn assert_strings(glyphs: &BTreeMap<u16, String>) {
+fn assert_strings(glyphs: &BTreeMap<u16, BTreeSet<String>>) {
     assert!(!glyphs.is_empty());
-    for value in glyphs.values() {
-        assert!(!value.is_empty(), "empty ToUnicode source string");
+    for values in glyphs.values() {
+        assert!(!values.is_empty(), "empty ToUnicode source string");
     }
 }
 
-fn collect_for(store: &FontStore, value: &str) -> BTreeMap<u32, BTreeMap<u16, String>> {
+fn collect_for(store: &FontStore, value: &str) -> BTreeMap<u32, BTreeMap<u16, BTreeSet<String>>> {
     let display_list = DisplayList {
         contract_version: None,
         pages: vec![page(vec![Primitive::Text(text_run(value))])],
@@ -286,10 +286,11 @@ fn rotated_glyph_run_emits_rotated_text_matrix() {
     let roboto = store.register(bytes.clone()).expect("roboto");
     let mut run = glyph_run(roboto.to_u32(), "Hi", &bytes);
     run.rotation_deg = Number::from_f64(45.0);
-    let mut uses: BTreeMap<u16, String> = BTreeMap::new();
+    let mut uses: BTreeMap<u16, BTreeSet<String>> = BTreeMap::new();
     for glyph in &run.glyphs {
         uses.entry(glyph.id as u16)
-            .or_insert_with(|| "H".to_owned());
+            .or_default()
+            .insert("H".to_owned());
     }
     let fonts = embed_all(&store, &BTreeMap::from([(roboto.to_u32(), uses)]));
     let page = page(vec![Primitive::GlyphRun(run.clone())]);
@@ -401,4 +402,43 @@ fn public_export_accepts_fallback_text_and_rotated_runs() {
     assert!(pdf.contains("/FontFile2"));
     assert!(pdf.contains("/ToUnicode"));
     assert!(pdf.contains("/Identity-H"));
+}
+
+#[test]
+fn one_glyph_with_two_texts_gets_two_cids() {
+    let mut store = FontStore::default();
+    let bytes = font_bytes("Roboto-Regular.ttf");
+    let roboto = store.register(bytes).expect("roboto");
+    let face_bytes = font_bytes("Roboto-Regular.ttf");
+    let face = Face::parse(&face_bytes, 0).expect("face");
+    let gid = u16::from(face.glyph_index('A').expect("A").0);
+    let uses = BTreeMap::from([(gid, BTreeSet::from(["A".to_owned(), "B".to_owned()]))]);
+    let font =
+        font::EmbeddedFont::new("F1".to_owned(), &store, roboto.to_u32(), &uses).expect("embed");
+    let a = font.cid(u32::from(gid), "A").expect("A cid");
+    let b = font.cid(u32::from(gid), "B").expect("B cid");
+    assert_ne!(a, b, "one glyph cannot carry two ToUnicode meanings");
+    assert!(
+        font.cid_to_gid.is_some(),
+        "duplicate CIDs need a CIDToGIDMap"
+    );
+    let cmap = String::from_utf8_lossy(&font.tounicode);
+    assert!(cmap.contains("0041") && cmap.contains("0042"), "{cmap}");
+}
+
+#[test]
+fn cff_duplicate_texts_fall_back_to_one_cid() {
+    let path =
+        std::path::Path::new("/usr/share/fonts/adobe-source-han-sans/SourceHanSansCN-Normal.otf");
+    let Ok(bytes) = std::fs::read(path) else {
+        return;
+    };
+    let mut store = FontStore::default();
+    let id = store.register(bytes).expect("cff font");
+    let uses = BTreeMap::from([(1u16, BTreeSet::from(["A".to_owned(), "B".to_owned()]))]);
+    let font =
+        font::EmbeddedFont::new("F1".to_owned(), &store, id.to_u32(), &uses).expect("embed cff");
+    assert!(font.is_cff);
+    assert!(font.cid_to_gid.is_none(), "CFF has no CIDToGIDMap");
+    assert_eq!(font.cid(1, "A"), font.cid(1, "B"));
 }

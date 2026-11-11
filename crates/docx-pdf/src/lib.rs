@@ -114,6 +114,7 @@ struct FontRefs {
     descriptor: Ref,
     file: Ref,
     to_unicode: Ref,
+    cid_to_gid: Ref,
 }
 
 /// Export a display list as a plain, untagged PDF.
@@ -217,8 +218,9 @@ fn export_pdf_inner(
                 descriptor: Ref::new(next_id + 2),
                 file: Ref::new(next_id + 3),
                 to_unicode: Ref::new(next_id + 4),
+                cid_to_gid: Ref::new(next_id + 5),
             };
-            next_id += 5;
+            next_id += 6;
             font_objects.push((*font_id, refs));
             font_map.insert(*font_id, embedded);
         }
@@ -409,7 +411,9 @@ fn write_font(pdf: &mut Pdf, font: &EmbeddedFont, refs: FontRefs) {
             })
             .font_descriptor(refs.descriptor)
             .default_width(1000.0);
-        if !font.is_cff {
+        if let Some(_) = &font.cid_to_gid {
+            cid.cid_to_gid_map_stream(refs.cid_to_gid);
+        } else if !font.is_cff {
             cid.cid_to_gid_map_predefined(Name(b"Identity"));
         }
         cid.widths().consecutive(0, font.widths.iter().copied());
@@ -445,6 +449,15 @@ fn write_font(pdf: &mut Pdf, font: &EmbeddedFont, refs: FontRefs) {
         stream.pair(Name(b"Subtype"), Name(b"OpenType"));
     }
     drop(stream);
+    if let Some(map) = &font.cid_to_gid {
+        let mut bytes = Vec::with_capacity(map.len() * 2);
+        for gid in map {
+            bytes.extend_from_slice(&gid.to_be_bytes());
+        }
+        let bytes = deflate(&bytes);
+        let mut stream = pdf.stream(refs.cid_to_gid, &bytes);
+        stream.filter(Filter::FlateDecode);
+    }
     pdf.cmap(refs.to_unicode, &font.tounicode);
 }
 

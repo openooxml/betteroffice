@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 use docx_layout::display_list::{DisplayPage, GlyphRunPrimitive, PlacedGlyph, TextRunPrimitive};
 use ooxml_text::{FontId, FontStore};
-use pdf_writer::{Content, Name, Str};
+use pdf_writer::{Content, Name, Str, TextStr};
 use serde_json::Number;
 use ttf_parser::{Face, GlyphId};
 
@@ -96,7 +96,7 @@ impl<'a> FontFaces<'a> {
 pub(crate) fn collect_text_glyphs(
     store: &FontStore,
     text: &str,
-    out: &mut BTreeMap<u32, BTreeMap<u16, String>>,
+    out: &mut BTreeMap<u32, BTreeMap<u16, std::collections::BTreeSet<String>>>,
 ) {
     let faces = FontFaces::new(store);
     for ch in text.chars() {
@@ -104,11 +104,12 @@ pub(crate) fn collect_text_glyphs(
             continue;
         };
         let entry = out.entry(font_id).or_default();
-        if glyph == 0 {
-            entry.entry(0).or_insert_with(|| REPLACEMENT.to_string());
+        let text = if glyph == 0 {
+            REPLACEMENT.to_string()
         } else {
-            entry.entry(glyph).or_insert_with(|| ch.to_string());
-        }
+            ch.to_string()
+        };
+        entry.entry(glyph).or_default().insert(text);
     }
 }
 
@@ -122,7 +123,7 @@ pub(crate) fn collect_text_glyphs(
 pub(crate) fn collect_glyph_run_fallbacks(
     store: &FontStore,
     run: &GlyphRunPrimitive,
-    out: &mut BTreeMap<u32, BTreeMap<u16, String>>,
+    out: &mut BTreeMap<u32, BTreeMap<u16, std::collections::BTreeSet<String>>>,
 ) {
     if !run.glyphs.iter().any(|glyph| glyph.id == 0) {
         return;
@@ -146,19 +147,20 @@ pub(crate) fn collect_glyph_run_fallbacks(
             continue;
         };
         let entry = out.entry(font_id).or_default();
-        if glyph_id == 0 {
-            entry.entry(0).or_insert_with(|| REPLACEMENT.to_string());
+        let text = if glyph_id == 0 {
+            REPLACEMENT.to_string()
         } else {
-            entry.entry(glyph_id).or_insert_with(|| ch.to_string());
-        }
+            ch.to_string()
+        };
+        entry.entry(glyph_id).or_default().insert(text);
     }
 }
 
 /// A maximal run of consecutive scalars painted with the same font.
 struct Segment {
     font_id: u32,
-    /// `(glyph id, advance in PDF points)` in source order.
-    glyphs: Vec<(u16, f64)>,
+    /// `(glyph id, advance in PDF points, source text)` in source order.
+    glyphs: Vec<(u16, f64, String)>,
 }
 
 fn shape_text(faces: &FontFaces<'_>, text: &str, size_px: f64) -> Vec<Segment> {
@@ -170,11 +172,11 @@ fn shape_text(faces: &FontFaces<'_>, text: &str, size_px: f64) -> Vec<Segment> {
         let advance = faces.advance_px(font_id, glyph, size_px) * f64::from(PX_TO_PT);
         match segments.last_mut() {
             Some(segment) if segment.font_id == font_id => {
-                segment.glyphs.push((glyph, advance));
+                segment.glyphs.push((glyph, advance, ch.to_string()));
             }
             _ => segments.push(Segment {
                 font_id,
-                glyphs: vec![(glyph, advance)],
+                glyphs: vec![(glyph, advance, ch.to_string())],
             }),
         }
     }
@@ -205,8 +207,8 @@ fn optional_number(value: Option<&Number>, default: f64) -> f64 {
         .unwrap_or(default)
 }
 
-fn cid(font: &EmbeddedFont, glyph: u32) -> Option<u16> {
-    font.glyph(glyph).or_else(|| font.glyph(0))
+fn cid(font: &EmbeddedFont, glyph: u32, text: &str) -> Option<u16> {
+    font.cid(glyph, text).or_else(|| font.glyph(0))
 }
 
 /// Paint a fallback text run. Never rejects its content.
@@ -274,9 +276,9 @@ pub(crate) fn paint_text(
         };
         content.set_font(Name(font.resource.as_bytes()), size);
         if rtl {
-            for &(glyph, advance) in &segment.glyphs {
+            for (glyph, advance, text) in &segment.glyphs {
                 cursor -= advance;
-                let Some(glyph) = cid(font, u32::from(glyph)) else {
+                let Some(glyph) = cid(font, u32::from(*glyph), text) else {
                     continue;
                 };
                 content.set_text_matrix(text_matrix(
@@ -291,8 +293,8 @@ pub(crate) fn paint_text(
         } else {
             let start = cursor;
             let mut bytes = Vec::with_capacity(segment.glyphs.len() * 2);
-            for &(glyph, _) in &segment.glyphs {
-                let Some(glyph) = cid(font, u32::from(glyph)) else {
+            for (glyph, _, text) in &segment.glyphs {
+                let Some(glyph) = cid(font, u32::from(*glyph), text) else {
                     continue;
                 };
                 bytes.extend_from_slice(&glyph.to_be_bytes());
@@ -310,7 +312,7 @@ pub(crate) fn paint_text(
             cursor += segment
                 .glyphs
                 .iter()
-                .map(|(_, advance)| *advance)
+                .map(|(_, advance, _)| *advance)
                 .sum::<f64>();
             painted += 1;
         }
@@ -436,30 +438,33 @@ fn paint_glyph_run_impl(
 
     let has_missing_glyph = run.glyphs.iter().any(|glyph| glyph.id == 0);
     let faces = store.filter(|_| has_missing_glyph).map(FontFaces::new);
-    let fallback_starts = faces.as_ref().map(|_| crate::font::cluster_starts(run));
-    let target_for = |glyph: &PlacedGlyph| -> (u32, u32) {
+    let starts = crate::font::cluster_starts(run);
+    let target_for = |glyph: &PlacedGlyph| -> (u32, u32, String) {
+        let text = crate::font::cluster_source_text(run, &starts, glyph.cluster);
         if glyph.id == 0 {
-            if let (Some(faces), Some(starts)) = (faces.as_ref(), fallback_starts.as_ref()) {
-                if let Some(ch) = crate::font::cluster_source_text(run, starts, glyph.cluster)
+            if let Some(faces) = faces.as_ref() {
+                if let Some(ch) = crate::font::cluster_source_text(run, &starts, glyph.cluster)
                     .chars()
                     .next()
                 {
                     if let Some((font_id, glyph_id)) = faces.resolve(ch) {
                         if fonts.contains_key(&font_id) {
-                            return (font_id, u32::from(glyph_id));
+                            return (font_id, u32::from(glyph_id), ch.to_string());
                         }
                     }
                 }
             }
         }
-        (run.font_id, glyph.id)
+        (run.font_id, glyph.id, text)
     };
     let targets: Vec<Option<(u32, u16)>> = run
         .glyphs
         .iter()
         .map(|glyph| {
-            let (font_id, glyph_id) = target_for(glyph);
-            let glyph_id = fonts.get(&font_id).and_then(|font| cid(font, glyph_id))?;
+            let (font_id, glyph_id, text) = target_for(glyph);
+            let glyph_id = fonts
+                .get(&font_id)
+                .and_then(|font| cid(font, glyph_id, &text))?;
             Some((font_id, glyph_id))
         })
         .collect();
@@ -534,11 +539,32 @@ fn paint_glyph_run_impl(
         }
     }
 
+    let mut bases: BTreeMap<u32, (f64, usize)> = BTreeMap::new();
+    for (index, glyph) in run.glyphs.iter().enumerate() {
+        if bases
+            .get(&glyph.cluster)
+            .is_none_or(|(advance, _)| glyph.advance > *advance)
+        {
+            bases.insert(glyph.cluster, (glyph.advance, index));
+        }
+    }
     let mut current_font = None;
-    for (glyph, target) in run.glyphs.iter().zip(&targets) {
+    for (index, (glyph, target)) in run.glyphs.iter().zip(&targets).enumerate() {
         let Some((font_id, glyph_id)) = target else {
             continue;
         };
+        let is_base = bases
+            .get(&glyph.cluster)
+            .is_some_and(|(_, base)| *base == index);
+        // Dots and marks are part of the cluster's visual glyphs, not extra
+        // characters. An empty ActualText keeps them out of the text layer
+        // while the glyph still paints.
+        if !is_base {
+            content
+                .begin_marked_content_with_properties(Name(b"Span"))
+                .properties()
+                .actual_text(TextStr(""));
+        }
         let target_font = fonts.get(font_id).expect("target font is embedded");
         if current_font != Some(*font_id) {
             content.set_font(Name(target_font.resource.as_bytes()), size);
@@ -561,6 +587,9 @@ fn paint_glyph_run_impl(
         };
         content.set_text_matrix([a, b, c, d, x, y]);
         content.show(Str(&glyph_id.to_be_bytes()));
+        if !is_base {
+            content.end_marked_content();
+        }
     }
     content.end_text();
     Ok(())
@@ -572,6 +601,7 @@ mod tests {
     use docx_layout::display_list::{
         DisplayList, DocAttrs, GlyphRunPrimitive, PlacedGlyph, Primitive,
     };
+    use std::collections::BTreeSet;
 
     fn font_bytes(name: &str) -> Vec<u8> {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -786,7 +816,7 @@ mod tests {
         let uses = BTreeMap::from_iter(run.glyphs.iter().map(|glyph| {
             (
                 glyph.id as u16,
-                run.text.chars().next().unwrap().to_string(),
+                BTreeSet::from([run.text.chars().next().unwrap().to_string()]),
             )
         }));
         let font =
@@ -809,7 +839,7 @@ mod tests {
         let roboto = store
             .register(font_bytes("Roboto-Regular.ttf"))
             .expect("roboto");
-        let uses = BTreeMap::from([(0, "\u{FFFD}".to_owned())]);
+        let uses = BTreeMap::from([(0, BTreeSet::from(["\u{FFFD}".to_owned()]))]);
         let font =
             EmbeddedFont::new("F1".to_owned(), &store, roboto.to_u32(), &uses).expect("embed");
         let fonts = BTreeMap::from([(roboto.to_u32(), font)]);
@@ -919,6 +949,6 @@ mod tests {
         let uses = crate::font::collect(&display_list);
         let glyphs = uses.get(&roboto.to_u32()).expect("glyph run font");
         assert!(glyphs.contains_key(&0), "gid 0 was dropped: {glyphs:?}");
-        assert!(glyphs.values().all(|text| !text.is_empty()));
+        assert!(glyphs.values().all(|texts| !texts.is_empty()));
     }
 }

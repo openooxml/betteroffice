@@ -1,6 +1,6 @@
 //! Font planning and subsetting for PDF export.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use docx_layout::display_list::{GlyphRunPrimitive, Primitive};
 use ooxml_text::{FontId, FontStore};
@@ -35,6 +35,12 @@ pub struct EmbeddedFont {
     pub base_name: String,
     pub subset: Vec<u8>,
     pub remap: BTreeMap<u16, u16>,
+    /// CID for one `(glyph id, source text)` occurrence. A glyph shared by
+    /// several source characters (Arabic dots, `.notdef` emoji) gets one CID
+    /// per text so ToUnicode stays unambiguous.
+    pub cid_map: BTreeMap<(u16, String), u16>,
+    /// CID-to-subset-glyph map when duplicate CIDs exist.
+    pub cid_to_gid: Option<Vec<u16>>,
     pub widths: Vec<f32>,
     pub tounicode: Vec<u8>,
     pub bbox: [f32; 4],
@@ -93,7 +99,7 @@ fn table_checksum(data: &[u8]) -> u32 {
 /// failing the whole export. `uses` keys are remapped to compact glyph ids.
 fn synth_outline_less_font(
     face: &Face,
-    uses: &BTreeMap<u16, String>,
+    uses: &BTreeMap<u16, BTreeSet<String>>,
 ) -> Result<(Vec<u8>, BTreeMap<u16, u16>, Vec<f32>), FontError> {
     let mut remap = BTreeMap::new();
     let mut next_gid = 1u16;
@@ -281,7 +287,7 @@ impl EmbeddedFont {
         resource: String,
         store: &FontStore,
         id: u32,
-        uses: &BTreeMap<u16, String>,
+        uses: &BTreeMap<u16, BTreeSet<String>>,
     ) -> Result<Self, FontError> {
         let font_id = FontId::from_u32(id);
         let bytes = store
@@ -325,6 +331,50 @@ impl EmbeddedFont {
             Err(error) => return Err(FontError::Subset(error.to_string())),
         };
 
+        let is_cff = original.tables().cff.is_some();
+        let mut widths = widths;
+        let max_glyph = remap.values().copied().max().unwrap_or(0);
+        let mut next_cid = max_glyph.saturating_add(1);
+        let mut cid_map = BTreeMap::new();
+        // Identity for every subset glyph: non-base dot components still
+        // paint, so their CID must resolve to their own glyph. Duplicate CIDs
+        // are appended after this range and redirected by CIDToGIDMap.
+        let mut cid_to_gid: Vec<u16> = (0..=max_glyph).collect();
+        for (old, texts) in uses {
+            let Some(glyph) = remap.get(old).copied() else {
+                continue;
+            };
+            for (index, text) in texts.iter().enumerate() {
+                if text.is_empty() || (is_cff && index > 0) {
+                    continue;
+                }
+                let cid = if index == 0 || is_cff {
+                    glyph
+                } else {
+                    let cid = next_cid;
+                    next_cid = next_cid
+                        .checked_add(1)
+                        .ok_or_else(|| FontError::Subset("too many CIDs".into()))?;
+                    cid
+                };
+                cid_map.insert((*old, text.clone()), cid);
+                if usize::from(cid) >= widths.len() {
+                    widths.resize(usize::from(cid) + 1, widths[usize::from(glyph)]);
+                } else {
+                    widths[usize::from(cid)] = widths[usize::from(glyph)];
+                }
+                if usize::from(cid) >= cid_to_gid.len() {
+                    cid_to_gid.resize(usize::from(cid) + 1, 0);
+                }
+                cid_to_gid[usize::from(cid)] = glyph;
+            }
+        }
+        let cid_to_gid = cid_to_gid
+            .iter()
+            .enumerate()
+            .any(|(cid, gid)| u16::try_from(cid).ok() != Some(*gid))
+            .then_some(cid_to_gid);
+
         let mut cmap = UnicodeCmap::<u16>::new(
             Name(b"Custom"),
             SystemInfo {
@@ -333,10 +383,8 @@ impl EmbeddedFont {
                 supplement: 0,
             },
         );
-        for (old, text) in uses {
-            if let Some(new) = remap.get(old) {
-                cmap.pair_with_multiple(*new, text.chars());
-            }
+        for ((_, text), cid) in &cid_map {
+            cmap.pair_with_multiple(*cid, text.chars());
         }
         let tounicode = cmap.finish().into_vec();
 
@@ -363,6 +411,8 @@ impl EmbeddedFont {
             resource,
             base_name: format!("{}+BO{id}", subset_tag(id)),
             remap,
+            cid_map,
+            cid_to_gid,
             widths,
             tounicode,
             bbox,
@@ -374,13 +424,23 @@ impl EmbeddedFont {
                 .map(|value| f32::from(value) * scale)
                 .unwrap_or(700.0),
             flags: flags.bits(),
-            is_cff: original.tables().cff.is_some(),
+            is_cff,
             subset,
         })
     }
 
     pub fn glyph(&self, old: u32) -> Option<u16> {
         self.remap.get(&(old as u16)).copied()
+    }
+
+    /// CID for a glyph painted as `text`; falls back to the first CID of the
+    /// glyph when no duplicate was allocated (CFF, or text absent).
+    pub fn cid(&self, old: u32, text: &str) -> Option<u16> {
+        let old = old as u16;
+        self.cid_map
+            .get(&(old, text.to_owned()))
+            .copied()
+            .or_else(|| self.remap.get(&old).copied())
     }
 }
 
@@ -418,8 +478,8 @@ fn each_primitive(
 /// Collect every glyph a document paints, keyed by font id and original glyph id.
 pub fn collect(
     display_list: &docx_layout::display_list::DisplayList,
-) -> BTreeMap<u32, BTreeMap<u16, String>> {
-    let mut fonts: BTreeMap<u32, BTreeMap<u16, String>> = BTreeMap::new();
+) -> BTreeMap<u32, BTreeMap<u16, BTreeSet<String>>> {
+    let mut fonts: BTreeMap<u32, BTreeMap<u16, BTreeSet<String>>> = BTreeMap::new();
     each_primitive(display_list, |primitive| {
         if let Primitive::GlyphRun(run) = primitive {
             collect_run(&mut fonts, run);
@@ -437,8 +497,8 @@ pub fn collect(
 pub fn collect_with_text(
     display_list: &docx_layout::display_list::DisplayList,
     store: &FontStore,
-) -> BTreeMap<u32, BTreeMap<u16, String>> {
-    let mut fonts: BTreeMap<u32, BTreeMap<u16, String>> = BTreeMap::new();
+) -> BTreeMap<u32, BTreeMap<u16, BTreeSet<String>>> {
+    let mut fonts: BTreeMap<u32, BTreeMap<u16, BTreeSet<String>>> = BTreeMap::new();
     each_primitive(display_list, |primitive| match primitive {
         Primitive::Text(text) if !text.hidden && !text.text.is_empty() => {
             crate::text::collect_text_glyphs(store, &text.text, &mut fonts);
@@ -483,10 +543,35 @@ pub(crate) fn cluster_source_text(run: &GlyphRunPrimitive, starts: &[u32], clust
         .unwrap_or_default()
 }
 
-fn collect_run(fonts: &mut BTreeMap<u32, BTreeMap<u16, String>>, run: &GlyphRunPrimitive) {
+fn collect_run(
+    fonts: &mut BTreeMap<u32, BTreeMap<u16, BTreeSet<String>>>,
+    run: &GlyphRunPrimitive,
+) {
     let entry = fonts.entry(run.font_id).or_default();
     let starts = cluster_starts(run);
-    for glyph in &run.glyphs {
+    // A cluster can paint a base plus dot/mark components. Only the widest
+    // glyph carries the source text; shared dot glyphs get a zero-width space
+    // so extraction does not repeat the base letter.
+    let mut bases: BTreeMap<u32, (f64, usize)> = BTreeMap::new();
+    for (index, glyph) in run.glyphs.iter().enumerate() {
+        if bases
+            .get(&glyph.cluster)
+            .is_none_or(|(advance, _)| glyph.advance > *advance)
+        {
+            bases.insert(glyph.cluster, (glyph.advance, index));
+        }
+    }
+    for (index, glyph) in run.glyphs.iter().enumerate() {
+        let is_base = bases
+            .get(&glyph.cluster)
+            .is_some_and(|(_, base)| *base == index);
+        if !is_base {
+            entry
+                .entry(glyph.id as u16)
+                .or_default()
+                .insert("\u{200B}".to_owned());
+            continue;
+        }
         let text = cluster_source_text(run, &starts, glyph.cluster);
         // `.notdef` still belongs to the subset: a run of only missing glyphs
         // must embed a font the painter can address. Keep its ToUnicode entry
@@ -496,6 +581,8 @@ fn collect_run(fonts: &mut BTreeMap<u32, BTreeMap<u16, String>>, run: &GlyphRunP
         } else {
             text
         };
-        entry.entry(glyph.id as u16).or_insert(text);
+        if !text.is_empty() {
+            entry.entry(glyph.id as u16).or_default().insert(text);
+        }
     }
 }

@@ -12,6 +12,12 @@ Supported today:
   widths and per-glyph placement
 - per-character fallback across every registered face; Base-14 Helvetica only
   when the store has no fonts at all
+- one CID per `(glyph, source text)` for TrueType fonts, with a generated
+  `/CIDToGIDMap`, so an Arabic tooth/dot glyph shared by several letters still
+  maps to the right character; non-base dot glyphs are marked with empty
+  `/ActualText` and stay out of the text layer
+- CFF fonts cannot duplicate CIDs: a glyph shared by several source characters
+  keeps its first ToUnicode mapping (CJK subsets normally hit no duplicate)
 - headers, footers and note regions as separate paint layers
 - filled/stroked rectangles, lines, decorations and shape paths
 - images as RGB XObjects with optional alpha soft masks, crop, rotation and data URLs
