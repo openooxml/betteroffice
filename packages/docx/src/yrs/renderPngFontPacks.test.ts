@@ -96,13 +96,19 @@ for (const { kind } of ENGINES) {
 
     test('every export sharing a layout whose face failed rejects, and a later export lays out again', async () => {
       stubBrowser();
-      withheld.add(fonts.resolveMetricCompatFace('Arial', false, false)!.file);
+      const face = fonts.resolveMetricCompatFace('Arial', false, false)!;
+      withheld.add(face.file);
       const session = await createYrsSession();
       try {
         session.openDocx(runsDocument({ family: 'Arial', text: 'Plain text' }), true);
         const results = await Promise.allSettled([session.renderPng({ page: 0 }), session.renderPng({ page: 0 })]);
-        expect(results.map((result) => result.status === 'rejected' && (result.reason as { code?: string }).code))
-          .toEqual(['font-unavailable', 'font-unavailable']);
+        expect(results.map((result) => result.status)).toEqual(['rejected', 'rejected']);
+        for (const result of results) {
+          const error = (result as PromiseRejectedResult).reason as { message: string };
+          expect(error).toMatchObject({ name: 'PngExportError', code: 'font-unavailable' });
+          expect(error.message).toContain(`${face.family} for Arial could not load`);
+          expect(error.message).toContain(face.file);
+        }
         withheld.clear();
         expect(await session.renderPng({ page: 0 })).toBeInstanceOf(Uint8Array);
       } finally { session.destroy(); }
@@ -134,6 +140,15 @@ for (const { kind } of ENGINES) {
       const face = arabicFace();
       withheld.add(face.file);
       expect(await exported(latinAndArabic, { fontProvider })).toBeInstanceOf(Uint8Array);
+      expect([...asked]).toContain(face.file);
+    });
+
+    test('an explicit fontProvider exports Latin text when Arial\'s regular face cannot load, as before', async () => {
+      stubBrowser();
+      const fontProvider = await resolveCompleteFontProvider();
+      const face = fonts.resolveMetricCompatFace('Arial', false, false)!;
+      withheld.add(face.file);
+      expect(await exported([{ family: 'Arial', text: 'Plain text' }], { fontProvider })).toBeInstanceOf(Uint8Array);
       expect([...asked]).toContain(face.file);
     });
 
