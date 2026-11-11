@@ -603,8 +603,8 @@ fn paint_glyph_run_impl(
             current_font = Some(*font_id);
         }
         let (x, y) = if rotated {
-            let dx = glyph.x - pivot.x;
-            let dy = glyph.y - pivot.y;
+            let dx = glyph.x - pivot_x_px;
+            let dy = glyph.y - pivot_y_px;
             let rotated_x = dx * display_cos - dy * display_sin;
             let rotated_y = dx * display_sin + dy * display_cos;
             (
