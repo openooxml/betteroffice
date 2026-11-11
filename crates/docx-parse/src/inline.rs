@@ -3036,6 +3036,48 @@ mod tests {
     }
 
     #[test]
+    fn classic_and_w14_shadows_stay_apart() {
+        const MODERN: &str = r#"<w14:shadow w14:blurRad="38100" w14:dist="19050" w14:dir="2700000" w14:sx="100000" w14:sy="100000" w14:kx="0" w14:ky="0" w14:algn="tl"><w14:srgbClr w14:val="000000"><w14:alpha w14:val="60000"/></w14:srgbClr></w14:shadow>"#;
+        let formatting = |properties: &str| {
+            let run = root(&format!(r#"<w:r><w:rPr>{properties}</w:rPr><w:t>A</w:t></w:r>"#));
+            parse_run(&run, None, None, None).run.formatting.unwrap()
+        };
+        let modern_shadow = TextShadow {
+            color: Some("#000000".to_owned()),
+            blur_radius: Some(4.0),
+            distance: Some(2.0),
+            direction: Some(45.0),
+        };
+
+        let classic = formatting("<w:shadow/>");
+        assert_eq!(classic.shadow, Some(true));
+        assert_eq!(classic.modern_effects, None);
+
+        let modern = formatting(MODERN);
+        assert_eq!(modern.shadow, None);
+        assert_eq!(modern.modern_effects.unwrap().shadow, Some(modern_shadow.clone()));
+
+        let both = formatting(&format!("<w:shadow/>{MODERN}"));
+        assert_eq!(both.shadow, Some(true));
+        assert_eq!(both.modern_effects.unwrap().shadow, Some(modern_shadow));
+    }
+
+    #[test]
+    fn word_data_binding_wins_over_the_word_2013_binding() {
+        const WORD: &str = r#"<w:dataBinding w:xpath="/a" w:storeItemID="{1}"/>"#;
+        const WORD_2013: &str = r#"<w15:dataBinding w15:xpath="/b" w15:storeItemID="{2}"/>"#;
+        let binding = |properties: &str| {
+            let sdt = root(&format!(r#"<w:sdt><w:sdtPr>{properties}</w:sdtPr></w:sdt>"#));
+            parse_sdt_properties(sdt.child("w", "sdtPr"), None, None)
+                .data_binding
+                .and_then(|binding| binding.xpath)
+        };
+        assert_eq!(binding(&format!("{WORD}{WORD_2013}")).as_deref(), Some("/a"));
+        assert_eq!(binding(&format!("{WORD_2013}{WORD}")).as_deref(), Some("/a"));
+        assert_eq!(binding(WORD_2013).as_deref(), Some("/b"));
+    }
+
+    #[test]
     fn field_instruction_tokenizer_pins_loose_regex_quirks_and_stays_linear() {
         let parsed = parse_field_instruction(r#" DATE "created at" \@ "MMMM d" \* MERGEFORMAT"#);
         assert_eq!(parsed.field_type, "DATE");

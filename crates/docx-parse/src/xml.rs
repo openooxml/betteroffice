@@ -2350,6 +2350,25 @@ mod tests {
         assert!(root.to_xml().contains(" left &amp; right "));
     }
 
+    #[test]
+    fn standard_prefixes_name_their_own_namespace_and_aliases_fall_back_to_local_names() {
+        let doc = parse(concat!(
+            r#"<w:rPr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" "#,
+            r#"xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" "#,
+            r#"xmlns:wx="http://schemas.openxmlformats.org/wordprocessingml/2006/main" "#,
+            r#"xmlns:s="http://purl.oclc.org/ooxml/wordprocessingml/main">"#,
+            r#"<w14:shadow w14:blurRad="1"/><w:shadow/><wx:pict/><s:p/></w:rPr>"#
+        ))
+        .unwrap();
+        let root = doc.root().unwrap();
+        assert_eq!(root.child("w", "shadow").unwrap().name, "w:shadow");
+        assert_eq!(root.child("w14", "shadow").unwrap().name, "w14:shadow");
+        assert_eq!(root.children_named("w", "shadow").count(), 1);
+        assert_eq!(root.children_named("w14", "shadow").count(), 1);
+        assert_eq!(root.find_deep("w", "pict").unwrap().name, "wx:pict");
+        assert_eq!(root.find_deep("w", "p").unwrap().name, "s:p");
+    }
+
     fn escape_stray_ampersands_scalar(xml: &[u8]) -> std::borrow::Cow<'_, [u8]> {
         let mut output: Option<Vec<u8>> = None;
         let mut index = 0;
