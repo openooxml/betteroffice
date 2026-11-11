@@ -4,4 +4,4 @@
 '@betteroffice/rust-crates': patch
 ---
 
-Footnote and endnote reference marks in the body now show the same number as the note itself, following the document's number format, starting number and section restarts, instead of the note's internal id.
+Automatic footnote and endnote reference marks in the body now print the note's ordinal, in its number format and from its starting value, as the note area numbers it, instead of the note's internal id. They agree for per-document and per-section numbering with page-breaking sections.
