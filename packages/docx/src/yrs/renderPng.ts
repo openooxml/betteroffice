@@ -1,10 +1,12 @@
 import { buildResidentRegionLayoutRequest, computeLayout, documentRenderEnv } from '../editor/computeLayout';
-import { createRustMeasureSource, resolveCompleteFontProvider, type BundledFontProvider, type ResidentFontRequirement } from '../layout/measure';
+import { createRustMeasureSource, hasConfiguredFontSource, resolveCompleteFontProvider, type BundledFontProvider, type ResidentFontRequirement } from '../layout/measure';
+import { baseLatinFontState } from '../layout/measure/defaultFontProvider';
 import type { EmbeddedFaceInput } from '../layout/measure/fontRegistry';
 import { fontUnavailable, pngPage, pngScale, type DocxPngFontFace, type DocxPngOptions, type DocxPngTarget } from '../layout/render/png';
 import { openPagedDisplay } from '../layout/render/rustDisplayList';
 import { extractEmbeddedFontFaces } from '../utils';
-import { engineKind, renderPng as renderEnginePng } from '../wasm/enginePng';
+import { renderPng as renderEnginePng } from '../wasm/enginePng';
+import { loadDocumentFaces } from '../wasm/enginePngFonts';
 import { createYrsSession, type YrsSession } from './index';
 import { sessionMediaSources } from './sessionInternals';
 
@@ -57,13 +59,14 @@ export function createPngExporter(session: YrsSession) {
       copy.rebuildMediaSources();
       const document = copy.materializeDocx();
       if (!document) throw new Error('renderPng needs a session opened from DOCX bytes');
-      const bundled = fontProvider ?? (engineKind === 'native' ? await resolveCompleteFontProvider() : undefined);
-      const measure = createRustMeasureSource({ engine: copy, ...(bundled ? { bundled } : { standIns: true }) });
+      const bundled = fontProvider ?? await resolveCompleteFontProvider();
+      const measure = createRustMeasureSource({ engine: copy, ...(bundled ? { bundled } : {}) });
       measure.setCompat(document.package.settings?.compatibilityFlags);
       measure.setEmbeddedFaces(await extractEmbeddedFontFaces(document), appFaces(fonts));
       const renderEnv = documentRenderEnv(document);
       const request = buildResidentRegionLayoutRequest(document, 0, renderEnv);
       const requirements = JSON.parse(copy.layoutFontRequirementsJson(JSON.stringify(request))) as ResidentFontRequirement[];
+      if (!fontProvider && !hasConfiguredFontSource() && baseLatinFontState().baseUrl === undefined) await loadDocumentFaces(requirements);
       await measure.prepareFontRequirements(requirements);
       const measurement = measure.measurementConfigForRequirements(requirements);
       if (!measurement) throw fontUnavailable('The fonts this document lays out with could not be loaded. Install @betteroffice/fonts, or pass them in `fonts`.');
